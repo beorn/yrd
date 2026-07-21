@@ -46,10 +46,16 @@ const MERGE_JOB_ID = "00000000-0000-7000-8000-00000000cace"
 
 type WarnCall = Readonly<{ message: string; props: Record<string, unknown> }>
 
-function residentHarness(runResponses: readonly (() => Promise<readonly unknown[]>)[]) {
+type RecoverCall = Readonly<{ recoveryTime: string; reason?: string; runner?: string }>
+
+function residentHarness(
+  runResponses: readonly (() => Promise<readonly unknown[]>)[],
+  options: Readonly<{ recover?: (call: RecoverCall) => readonly unknown[]; now?: () => number }> = {},
+) {
   const signal = { aborted: false }
   const warnings: WarnCall[] = []
   const stderr: string[] = []
+  const recoverCalls: RecoverCall[] = []
   let runCalls = 0
   const app = {
     scope: { signal, sleep: async () => undefined },
@@ -61,11 +67,19 @@ function residentHarness(runResponses: readonly (() => Promise<readonly unknown[
         if (responder === undefined) throw new Error("no run responder configured")
         return responder()
       },
+      recover: async (call: RecoverCall) => {
+        recoverCalls.push(call)
+        return options.recover?.(call) ?? []
+      },
     },
   } as unknown as YrdCliApp
-  const io = { stdout: () => undefined, stderr: (text: string) => stderr.push(text) } as unknown as YrdCliIO
+  const io = {
+    stdout: () => undefined,
+    stderr: (text: string) => stderr.push(text),
+    ...(options.now === undefined ? {} : { now: options.now }),
+  } as unknown as YrdCliIO
   const gate = async (): Promise<void> => undefined
-  return { app, io, gate, signal, warnings, stderr, runCalls: () => runCalls }
+  return { app, io, gate, signal, warnings, stderr, recoverCalls, runCalls: () => runCalls }
 }
 
 describe("run cancel of an ACTIVE (merging) run never deadlocks the resident", () => {
@@ -97,6 +111,59 @@ describe("run cancel of an ACTIVE (merging) run never deadlocks the resident", (
       }),
     )
     // Resident output stays loggily-only — no bare 'yrd:' stderr duplicate.
+    expect(h.stderr.join("")).toBe("")
+  })
+})
+
+describe("resident follow loop sweeps lapsed leases per tick (D1b)", () => {
+  it("recovers expired leases unscoped each tick, throttled ~60s, logging loudly only when it settles", async () => {
+    // The startup reclaim was the ONLY automatic settle; a runner that dies AFTER
+    // it left ghosts stuck "running" forever. The follow loop now runs an unscoped
+    // (no runner) lease-expiry recovery sweep every ~60s of ticks, so any orphaned
+    // running Job whose lease lapsed is settled regardless of who left it.
+    let clock = Date.parse("2026-06-01T00:00:00.000Z")
+    // Tick 1: sweep settles a lapsed run. Tick 2: throttled out (only 15s later).
+    // Tick 3: >60s later, sweep runs again but nothing lapsed → no warn. Then abort.
+    const settleOnce = [{ id: "R9" }]
+    let sweepReturns = 0
+    const h = residentHarness(
+      [
+        () => Promise.resolve([]),
+        () => Promise.resolve([]),
+        () => {
+          h.signal.aborted = true
+          return Promise.resolve([])
+        },
+      ],
+      {
+        now: () => clock,
+        recover: () => (sweepReturns++ === 0 ? settleOnce : []),
+      },
+    )
+
+    // Advance the clock between cycles via the sleep hook the loop awaits each tick.
+    let tick = 0
+    ;(h.app.scope as unknown as { sleep: () => Promise<void> }).sleep = async () => {
+      tick += 1
+      clock += tick === 1 ? 15_000 : 60_001
+    }
+
+    await followQueueRuns(h.app, [], { interval: 15 }, h.io, h.gate)
+
+    // The sweep is unscoped (no runner arg) and time-based, not once-at-startup.
+    expect(h.recoverCalls.length).toBe(2)
+    expect(h.recoverCalls[0]).toMatchObject({ reason: expect.stringContaining("sweep") })
+    expect(h.recoverCalls.every((call) => call.runner === undefined)).toBe(true)
+    // Tick 1 (t0) and tick 3 (t≈75s) swept; tick 2 (t15s) was throttled out.
+    expect(h.recoverCalls.map((call) => call.recoveryTime)).toEqual([
+      "2026-06-01T00:00:00.000Z",
+      "2026-06-01T00:01:15.001Z",
+    ])
+    // Loud structured warn ONLY when it actually settled something (tick 1), naming ids.
+    const sweepWarnings = h.warnings.filter((warning) => warning.props.action === "resident-recovery-sweep")
+    expect(sweepWarnings).toHaveLength(1)
+    expect(sweepWarnings[0]?.props).toMatchObject({ runs: ["R9"], reason: expect.any(String) })
+    // Cheap no-op when nothing lapsed: no stderr, loggily-only.
     expect(h.stderr.join("")).toBe("")
   })
 })

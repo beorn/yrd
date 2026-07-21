@@ -193,6 +193,12 @@ function queueGitDir(cwd: string): string | undefined {
 
 const RESIDENT_RUNNER_HEARTBEAT_MS = 5_000
 
+/** How often the resident follow loop runs its unscoped lease-expiry recovery
+ * sweep (D1b). Startup reclaim is one-shot; this settles ghosts left by runners
+ * that die AFTER it. A constant, not config — the throttle is measured in wall
+ * time via `io.now`, so a busy tick cadence cannot starve or spam it. */
+const RESIDENT_RECOVERY_SWEEP_MS = 60_000
+
 function residentRunnerStatusPath(cwd: string): string | undefined {
   const gitDir = queueGitDir(cwd)
   return gitDir === undefined ? undefined : join(gitDir, "yrd", "resident-runner", "status.json")
@@ -3673,6 +3679,10 @@ export async function followQueueRuns(
   // any other exit — a signal-forced abort or a thrown fault — is unclean. This
   // feeds the exit marker close() writes (D1a) and the process exit code (D3).
   let cleanShutdown = false
+  // Wall-clock time of the last lease-expiry sweep (D1b). 0 forces a sweep on the
+  // first tick — it catches older-generation ghosts the one-shot startup reclaim
+  // (pid-scoped, last pid only) cannot.
+  let lastSweepAt = 0
   try {
     heartbeat?.check()
     if (heartbeat !== undefined && selectors.length === 0 && !jsonEnabled(options)) {
@@ -3686,6 +3696,33 @@ export async function followQueueRuns(
       // watching must stop the watch, never let a fresh cycle start expensive
       // Runs on a stale baseline.
       await gate()
+      // D1b — per-tick lease-expiry recovery sweep. The follow loop is the
+      // resident single writer, so this unscoped `recover` (NO runner arg) settles
+      // any orphaned running Job whose lease lapsed, regardless of the runner that
+      // left it or where a run's cursor sits — the automatic settle that startup
+      // reclaim only did once. Idempotent and cheap when nothing lapsed; throttled
+      // by wall time so the tick cadence cannot starve or spam it. Only the follow
+      // (selectorless, resident) loop sweeps; a targeted one-shot never enters here.
+      if (selectors.length === 0) {
+        const sweepNow = io.now?.() ?? Date.now()
+        if (sweepNow - lastSweepAt >= RESIDENT_RECOVERY_SWEEP_MS) {
+          lastSweepAt = sweepNow
+          const settled = await app.queue.recover({
+            recoveryTime: new Date(sweepNow).toISOString(),
+            reason: "resident lease-expiry sweep",
+          })
+          if (settled.length > 0) {
+            // Loud structured warn ONLY when it actually settled something —
+            // silence is the normal, cheap case. Loggily-only: the runner's stdout
+            // is a log stream, so never a bare 'yrd:' stderr echo.
+            app.log.warn?.("resident runner settled lapsed runs via lease-expiry sweep", {
+              action: "resident-recovery-sweep",
+              reason: "runner lease expired",
+              runs: settled.map((run) => run.id),
+            })
+          }
+        }
+      }
       // The optional default preserves the narrow followQueueRuns test/programmatic
       // seam. The installed CLI always supplies the recutter; a caller that does
       // not install one retains the historical drain-only behavior.
