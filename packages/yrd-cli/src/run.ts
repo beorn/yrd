@@ -25,7 +25,14 @@ import type { Contest } from "@yrd/contest"
 import { raiseFailure, type DeepReadonly, type JournalSnapshot } from "@yrd/core"
 import { isConcurrentSettlementConflict } from "@yrd/job"
 import type { Job } from "@yrd/job"
-import { isQueueRunningConflict, Queues, type PREligibility, type QueueRun, type QueueSummary } from "@yrd/queue"
+import {
+  isQueueRunningConflict,
+  Queues,
+  resolveSubmoduleOrigin,
+  type PREligibility,
+  type QueueRun,
+  type QueueSummary,
+} from "@yrd/queue"
 import { loadYrdConfig } from "./config.ts"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import {
@@ -75,8 +82,8 @@ import { resolveSubmitSelectors } from "./submit-selection.ts"
 import { diagnostic, printHuman, printResult, printResultWithWarnings } from "./output.tsx"
 import {
   createSubmoduleBranchResolver,
+  firstLine,
   readSubmoduleEntries,
-  resolveSubmoduleUrl,
   setSubmoduleBranch,
   submoduleTrackingWarnings,
   superprojectOrigin,
@@ -2255,7 +2262,9 @@ type InitRow = Readonly<{
 function initSourceLabel(row: InitRow): string {
   if (row.source === "remote") return "remote HEAD"
   if (row.source === "fallback") return "fallback → main"
-  return `unreachable: ${row.detail ?? "unknown"}`
+  // Reduce the Git diagnostic to a single row so multi-row ls-remote stderr
+  // cannot break the table row layout.
+  return `unreachable: ${firstLine(row.detail ?? "unknown")}`
 }
 
 function renderInitTable(rows: readonly InitRow[]): string {
@@ -2377,7 +2386,7 @@ async function resolveInitRow(
   }
   let target: string
   try {
-    target = resolveSubmoduleUrl(root, superOrigin, submodule.url)
+    target = resolveSubmoduleOrigin(root, superOrigin, submodule.url)
   } catch (cause) {
     return { ...base, source: "unreachable", action: "unreachable", detail: cause instanceof Error ? cause.message : String(cause) }
   }

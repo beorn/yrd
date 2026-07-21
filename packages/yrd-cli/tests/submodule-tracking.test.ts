@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
 import { createProcess } from "@yrd/process"
 import { createJournal } from "@yrd/persistence"
+import { resolveSubmoduleOrigin } from "@yrd/queue"
 import { createDefaultYrdApp, runYrd, type YrdCliApp, type YrdCliIO } from "@yrd/cli"
 import type { ResolvedYrdProjectConfig } from "../src/config.ts"
 import { printResultWithWarnings } from "../src/output.tsx"
@@ -17,7 +18,6 @@ import {
   formatSubmoduleTrackingWarning,
   parseGitmodules,
   readSubmoduleEntries,
-  resolveSubmoduleUrl,
   setSubmoduleBranch,
   submoduleTrackingWarnings,
   superprojectOrigin,
@@ -172,13 +172,13 @@ describe("unbranchedSubmodules + formatSubmoduleTrackingWarning", () => {
 
   it("formats one message, plural, paths sorted, with the init hint", () => {
     expect(formatSubmoduleTrackingWarning(unbranchedSubmodules(entries))).toBe(
-      "warn: 2 submodules not tracking a branch (rolls disabled): vendor/b, vendor/c — run 'yrd init' to set",
+      "warn: 2 submodules not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/b, vendor/c — run 'yrd init' to set",
     )
   })
 
   it("uses the singular noun for one", () => {
     expect(formatSubmoduleTrackingWarning([{ name: "vendor/x", path: "vendor/x" }])).toBe(
-      "warn: 1 submodule not tracking a branch (rolls disabled): vendor/x — run 'yrd init' to set",
+      "warn: 1 submodule not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/x — run 'yrd init' to set",
     )
   })
 
@@ -187,26 +187,41 @@ describe("unbranchedSubmodules + formatSubmoduleTrackingWarning", () => {
   })
 })
 
-describe("resolveSubmoduleUrl", () => {
+// yrd init resolves submodule URLs through @yrd/queue's shared resolver; these
+// assert the cases yrd-cli relies on (absolute passthrough, ./ and ../ relative
+// resolution against the superproject origin, and the loud no-origin failure).
+describe("resolveSubmoduleOrigin (shared @yrd/queue resolver)", () => {
   it("passes absolute https and scp URLs through unchanged", () => {
-    expect(resolveSubmoduleUrl("/repo", undefined, "https://example.com/x.git")).toBe("https://example.com/x.git")
-    expect(resolveSubmoduleUrl("/repo", undefined, "git@github.com:owner/x.git")).toBe("git@github.com:owner/x.git")
+    expect(resolveSubmoduleOrigin("/repo", undefined, "https://example.com/x.git")).toBe("https://example.com/x.git")
+    expect(resolveSubmoduleOrigin("/repo", undefined, "git@github.com:owner/x.git")).toBe("git@github.com:owner/x.git")
+  })
+
+  it("resolves ./ single-dot against an https superproject origin", () => {
+    expect(resolveSubmoduleOrigin("/repo", "https://github.com/owner/super.git", "./dep.git")).toBe(
+      "https://github.com/owner/super.git/dep.git",
+    )
+  })
+
+  it("resolves ./ single-dot against an scp superproject origin", () => {
+    expect(resolveSubmoduleOrigin("/repo", "git@github.com:owner/super.git", "./dep.git")).toBe(
+      "git@github.com:owner/super.git/dep.git",
+    )
   })
 
   it("resolves ../ against an https superproject origin", () => {
-    expect(resolveSubmoduleUrl("/repo", "https://github.com/owner/super.git", "../dep.git")).toBe(
+    expect(resolveSubmoduleOrigin("/repo", "https://github.com/owner/super.git", "../dep.git")).toBe(
       "https://github.com/owner/dep.git",
     )
   })
 
   it("resolves ../ against an scp superproject origin", () => {
-    expect(resolveSubmoduleUrl("/repo", "git@github.com:owner/super.git", "../dep.git")).toBe(
+    expect(resolveSubmoduleOrigin("/repo", "git@github.com:owner/super.git", "../dep.git")).toBe(
       "git@github.com:owner/dep.git",
     )
   })
 
   it("throws when a relative URL has no superproject origin", () => {
-    expect(() => resolveSubmoduleUrl("/repo", undefined, "../dep.git")).toThrow(/no superproject origin/u)
+    expect(() => resolveSubmoduleOrigin("/repo", undefined, "../dep.git")).toThrow(/no superproject origin/u)
   })
 })
 
@@ -219,7 +234,7 @@ describe("real Git helpers against a fixture", () => {
       { name: "vendor/bar", path: "vendor/bar", url: "https://example.com/bar.git", branch: "release" },
     ])
     expect(submoduleTrackingWarnings(root)).toEqual([
-      "warn: 1 submodule not tracking a branch (rolls disabled): vendor/foo — run 'yrd init' to set",
+      "warn: 1 submodule not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/foo — run 'yrd init' to set",
     ])
   })
 
@@ -263,7 +278,7 @@ describe("createSubmoduleBranchResolver (real ls-remote)", () => {
 })
 
 describe("printResultWithWarnings", () => {
-  const warning = "warn: 1 submodule not tracking a branch (rolls disabled): vendor/foo — run 'yrd init' to set"
+  const warning = "warn: 1 submodule not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/foo — run 'yrd init' to set"
 
   it("appends a warnings array in JSON mode without disturbing the value", async () => {
     const out = outputIO()
@@ -301,7 +316,7 @@ describe("queue list / dashboard warning surface", () => {
     const payload = JSON.parse(out.stdout()) as { command: string; warnings?: string[]; results: unknown[] }
     expect(payload.command).toBe("queue.list")
     expect(payload.warnings).toEqual([
-      "warn: 1 submodule not tracking a branch (rolls disabled): vendor/foo — run 'yrd init' to set",
+      "warn: 1 submodule not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/foo — run 'yrd init' to set",
     ])
   })
 
@@ -330,8 +345,36 @@ describe("queue list / dashboard warning surface", () => {
     const payload = JSON.parse(out.stdout()) as { command: string; warnings?: string[] }
     expect(payload.command).toBe("dashboard")
     expect(payload.warnings).toEqual([
-      "warn: 1 submodule not tracking a branch (rolls disabled): vendor/foo — run 'yrd init' to set",
+      "warn: 1 submodule not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/foo — run 'yrd init' to set",
     ])
+  })
+
+  it("degrades a corrupt .gitmodules to a warning without failing queue list (exit 0)", async () => {
+    const root = await superproject()
+    const app = await appFor(root)
+    // Unterminated section header -> git config exits 128 -> readSubmoduleEntries
+    // throws -> the advisory must degrade to a warning, never take down the list.
+    await writeFile(join(root, ".gitmodules"), '[submodule "x"\n\tpath = x\n')
+    const out = outputIO({ cwd: root })
+    expect(await runYrd(app, yrd("queue", "list", "--json"), out.io), out.stderr()).toBe(0)
+    const payload = JSON.parse(out.stdout()) as { warnings?: string[] }
+    expect(payload.warnings?.[0]).toContain("could not read .gitmodules")
+    // The degraded warning is a single row (no raw multi-row git diagnostic).
+    expect(payload.warnings).toHaveLength(1)
+    expect(payload.warnings![0]).not.toContain("\n")
+  })
+
+  it("does not emit the warning on the live --watch viewer", async () => {
+    const root = await superproject(TWO_SUBMODULES)
+    const app = await appFor(root)
+    // An aborted scope makes the resident viewer emit one bounded snapshot and
+    // exit. The warn is wired into listQueues/the dashboard, never watchQueue.
+    const controller = new AbortController()
+    controller.abort()
+    const out = outputIO({ cwd: root, scope: { signal: controller.signal, sleep: async () => {} } })
+    expect(await runYrd(app, yrd("queue", "list", "--watch", "--json"), out.io), out.stderr()).toBe(0)
+    expect(JSON.parse(out.stdout())).not.toHaveProperty("warnings")
+    expect(out.stderr()).not.toContain("warn:")
   })
 })
 

@@ -1,11 +1,10 @@
 import { execFileSync } from "node:child_process"
-import { isAbsolute, join, resolve } from "node:path"
-import { normalize as normalizePosix, join as joinPosix } from "node:path/posix"
+import { join } from "node:path"
 import { cleanGitEnvironment } from "./git-environment.ts"
 
 /**
  * Submodule tracking: `.gitmodules` `submodule.<name>.branch` is the switch
- * between a TRACKED submodule (upstream motion refreshes super PRs — a "roll")
+ * between a TRACKED submodule (upstream changes refresh the superproject's PRs)
  * and a PINNED one (the gitlink only moves when a PR moves it). This module
  * reads that state and helps `yrd init` set a branch for every submodule that
  * has not opted in. Config chooses WHICH ref counts as latest; it never chooses
@@ -61,9 +60,13 @@ function runGit(cwd: string, args: readonly string[]): GitCapture {
 }
 
 const SUBMODULE_KEY = /^submodule\.(.+)\.(path|url|branch)$/u
-const REMOTE_SCHEME = /^[a-z][a-z\d+.-]*:/iu
-const SCP_REMOTE = /^((?:[^/@:]+@)?[^/:]+:)(.+)$/u
 const SYMREF_HEAD = /^ref:\s+refs\/heads\/(\S+)\s+HEAD$/mu
+
+/** Reduce a multi-row Git diagnostic to its first row with inner whitespace
+ * collapsed, so it cannot break a warning message or a table row. */
+export function firstLine(detail: string): string {
+  return (detail.split(/\r?\n/u)[0] ?? "").replaceAll(/\s+/gu, " ").trim()
+}
 
 /**
  * Parse the NUL-delimited records emitted by
@@ -122,8 +125,8 @@ export function formatSubmoduleTrackingWarning(unbranched: readonly SubmoduleEnt
   const paths = [...unbranched].sort(comparePath).map((entry) => entry.path)
   const noun = unbranched.length === 1 ? "submodule" : "submodules"
   return (
-    `warn: ${unbranched.length} ${noun} not tracking a branch (rolls disabled): ` +
-    `${paths.join(", ")} — run 'yrd init' to set`
+    `warn: ${unbranched.length} ${noun} not tracking a branch ` +
+    `(pinned — upstream changes won't refresh PRs): ${paths.join(", ")} — run 'yrd init' to set`
   )
 }
 
@@ -157,11 +160,21 @@ export function readSubmoduleEntries(root: string): readonly SubmoduleEntry[] {
  * The advisory warning messages (zero or one) for the queue list/status
  * surfaces. Empty for a non-superproject directory or when every submodule
  * already tracks a branch — those surfaces then emit no extra output at all.
+ *
+ * A read failure is degraded to a loud warning here (not thrown): the advisory
+ * must never take down `queue list`/`yrd` with a nonzero exit. `readSubmoduleEntries`
+ * and `yrd init` still throw, because there the file IS the job.
  */
 export function submoduleTrackingWarnings(cwd: string): readonly string[] {
   const root = superprojectRoot(cwd)
   if (root === undefined) return []
-  const warning = formatSubmoduleTrackingWarning(unbranchedSubmodules(readSubmoduleEntries(root)))
+  let entries: readonly SubmoduleEntry[]
+  try {
+    entries = readSubmoduleEntries(root)
+  } catch (cause) {
+    return [`warn: could not read .gitmodules: ${firstLine(cause instanceof Error ? cause.message : String(cause))}`]
+  }
+  const warning = formatSubmoduleTrackingWarning(unbranchedSubmodules(entries))
   return warning === undefined ? [] : [warning]
 }
 
@@ -186,34 +199,6 @@ export function superprojectOrigin(root: string): string | undefined {
   if (result.code !== 0) return undefined
   const url = result.stdout.trim()
   return url === "" ? undefined : url
-}
-
-function canonicalRemote(root: string, value: string): string {
-  if (isAbsolute(value) || REMOTE_SCHEME.test(value) || SCP_REMOTE.test(value)) return value
-  return resolve(root, value)
-}
-
-/**
- * Resolve a submodule's declared URL to something `git ls-remote` can reach.
- * Relative URLs (`./x`, `../x`) resolve against the superproject origin exactly
- * as Git itself resolves them; everything else is returned canonicalized.
- */
-export function resolveSubmoduleUrl(root: string, superOrigin: string | undefined, url: string): string {
-  if (!url.startsWith("./") && !url.startsWith("../")) return canonicalRemote(root, url)
-  if (superOrigin === undefined) {
-    throw new Error(`yrd: relative submodule URL '${url}' has no superproject origin to resolve against`)
-  }
-  const base = canonicalRemote(root, superOrigin)
-  if (REMOTE_SCHEME.test(base)) {
-    const directory = new URL(base)
-    if (!directory.pathname.endsWith("/")) directory.pathname += "/"
-    return new URL(url, directory).toString()
-  }
-  const scp = SCP_REMOTE.exec(base)
-  if (scp?.[1] !== undefined && scp[2] !== undefined) {
-    return `${scp[1]}${normalizePosix(joinPosix(scp[2], url))}`
-  }
-  return resolve(base, url)
 }
 
 /**
