@@ -103,6 +103,23 @@ describe("resident runner — a busy queue never kills the watch loop (Defect 1)
       props: { action: "resident-busy-summary", base: "main", run: "R551", suppressed: 60 },
     })
   })
+
+  it("flushes a pending busy summary when the resident exits before a successful cycle", async () => {
+    const h = harness([
+      () => Promise.reject(new QueueRunningConflict("main", "R551")),
+      () => {
+        h.signal.aborted = true
+        return Promise.reject(new QueueRunningConflict("main", "R551"))
+      },
+    ])
+
+    await expect(followQueueRuns(h.app, [], { interval: 10 }, h.io, h.gate)).resolves.toBe(0)
+
+    expect(h.warnings).toHaveLength(2)
+    expect(h.warnings[1]).toMatchObject({
+      props: { action: "resident-busy-summary", base: "main", run: "R551", suppressed: 1 },
+    })
+  })
 })
 
 describe("resident runner — a PR withdrawn mid-compose never kills the watch loop (Defect 2)", () => {

@@ -2999,8 +2999,9 @@ type TimelineStepCell = Readonly<{ text: string; color?: string }>
 function timelineStepCell(row: QueueTimelineProjectedRow): TimelineStepCell {
   if (row.status === "running") return { text: row.step ?? "" }
   if (row.failure !== undefined) {
+    const slug = fitTimelineLabel(failureSlug(row.failure.code), TIMELINE_STATE_CAP)
     return {
-      text: errorCodeLabel(fitTimelineLabel(failureSlug(row.failure.code), TIMELINE_STATE_CAP)),
+      text: `err=${slug}`,
       color:
         row.status === "environment-refused" ? "$fg-warning" : row.status === "canceled" ? "$fg-muted" : "$fg-error",
     }

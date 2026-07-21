@@ -17,7 +17,7 @@ describe("human failure slugs", () => {
       "recut-certificate": "recut-cert",
       "recut-certificate-missing": "recut-cert-missing",
       "submodule-composition-conflict": "submodule-conflict",
-      "submodule-composition-unavailable": "submodule-unavailable",
+      "submodule-composition-unavailable": "submodule-unavail",
     })
   })
 

@@ -8,7 +8,7 @@ export const FAILURE_SLUGS = Object.freeze({
   "recut-certificate": "recut-cert",
   "recut-certificate-missing": "recut-cert-missing",
   "submodule-composition-conflict": "submodule-conflict",
-  "submodule-composition-unavailable": "submodule-unavailable",
+  "submodule-composition-unavailable": "submodule-unavail",
 } as const)
 
 const FAILURE_SLUG_LOOKUP: Readonly<Record<string, string>> = FAILURE_SLUGS

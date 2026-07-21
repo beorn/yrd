@@ -7,6 +7,7 @@ import { createRenderer } from "silvery/test"
 import { renderString } from "silvery"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { queueTimelineStories } from "../dev/queue-timeline-fixtures.ts"
+import { FAILURE_SLUGS } from "../src/failure-slug.ts"
 import {
   formatQueuePrId,
   QueueTimelineView,
@@ -574,6 +575,22 @@ describe("queue timeline 21106 contract", () => {
     expect(canceled).toContain("queue-canceled")
     const integrated = rows[rowIndex(rows, "pr#4.1")]
     expect(integrated).toContain("✓ done")
+  })
+
+  it("keeps every shared failure slug intact through the fixed-width queue projection", async () => {
+    const projection = queueTimelineStories["production-overview"].snapshot.projection
+    if (projection === undefined) throw new Error("production-overview is missing its projection")
+
+    for (const [code, slug] of Object.entries(FAILURE_SLUGS)) {
+      const withFailure = {
+        ...projection,
+        rows: projection.rows.map((row) =>
+          row.pr === "PR6" ? { ...row, failure: { code, message: `failure ${code}` } } : row,
+        ),
+      }
+      const rows = (await renderTimeline(withFailure, 160)).map((row) => row.trimEnd())
+      expect(rows[rowIndex(rows, "pr#6.1")], code).toContain(`err=${slug}`)
+    }
   })
 
   it("defaults the cursor to the first running row, else the newest finished row", () => {
