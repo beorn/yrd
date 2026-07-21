@@ -3639,14 +3639,19 @@ async function authoritativeQueueBase(git: Git, repo: string, branch: string): P
   const source = `refs/heads/${branch}`
   const target = `refs/remotes/origin/${branch}`
   for (let attempt = 1; attempt <= 3; attempt += 1) {
-    const fetched = await git.run(
-      repo,
-      ["fetch", "--no-recurse-submodules", "--quiet", "origin", `+${source}:${target}`],
-      true,
-    )
-    if (fetched.code === 0) return inspectQueueBase(git, repo, branch)
+    let detail: string
+    try {
+      const fetched = await git.run(
+        repo,
+        ["fetch", "--no-recurse-submodules", "--quiet", "origin", `+${source}:${target}`],
+        true,
+      )
+      if (fetched.code === 0) return inspectQueueBase(git, repo, branch)
+      detail = fetched.stderr || fetched.stdout || `could not refresh origin/${branch}`
+    } catch (cause) {
+      detail = messageOf(cause)
+    }
     if (attempt === 3) {
-      const detail = fetched.stderr || fetched.stdout || `could not refresh origin/${branch}`
       throw createQueueAuthorityRefusal(branch, attempt, detail)
     }
   }

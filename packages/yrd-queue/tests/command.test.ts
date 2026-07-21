@@ -38,6 +38,15 @@ import {
 
 const roots: string[] = []
 const runtime = { runner: "local", leaseMs: 60_000 }
+const gitFetchTimeout = {
+  exitCode: 124,
+  signal: "SIGTERM",
+  stdout: "",
+  stderr: "",
+  durationMs: 30_000,
+  timedOut: true,
+  verdict: "TIMED_OUT",
+} satisfies ProcessResult
 const authoredGitlinksEnv = { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITLINKS: "1" }
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 type Checked = AddStepResult<PRShape, "check", GitCheckResultEvidence>
@@ -2891,6 +2900,77 @@ describe("Queue command adapters", () => {
     expect(refreshArgv.every((argv) => argv.includes("--no-recurse-submodules"))).toBe(true)
     expect(run).toMatchObject({ status: "passed", prs: [{ id: "PR1", revision: 1, headSha: featureSha }] })
     expect(app.state().bays.prs.PR1).toMatchObject({ revision: 1, headSha: featureSha, status: "integrated" })
+  })
+
+  it("retries thrown authoritative refresh timeouts without rejecting the PR", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const remote = join(repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "issue/feature"])
+    await using process = createProcess()
+    let refreshAttempts = 0
+    let recovered = false
+    const flakyProcess: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "git" && request.argv.includes("fetch") && !recovered) {
+          refreshAttempts += 1
+          if (refreshAttempts < 3) return Promise.resolve(gitFetchTimeout)
+          recovered = true
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(flakyProcess, repo, ["test", "-f", "feature.txt"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(refreshAttempts).toBe(3)
+    expect(run).toMatchObject({ status: "passed", prs: [{ id: "PR1", revision: 1, headSha: featureSha }] })
+    expect(app.state().bays.prs.PR1).toMatchObject({ revision: 1, headSha: featureSha, status: "integrated" })
+  })
+
+  it("records exhausted thrown authority timeouts as environment refusal without rejecting the PR", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const remote = join(repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "issue/feature"])
+    await using process = createProcess()
+    let refreshAttempts = 0
+    const unavailableOrigin: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "git" && request.argv.includes("fetch")) {
+          refreshAttempts += 1
+          return Promise.resolve(gitFetchTimeout)
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(unavailableOrigin, repo, ["test", "-f", "feature.txt"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(refreshAttempts).toBe(3)
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "queue-environment-refused",
+        message: expect.stringContaining("after 3 attempts"),
+        evidence: { kind: "queue-authority-refusal", base: "main", remote: "origin", attempts: 3 },
+      },
+    })
+    expect(run.steps[0]?.job).toMatchObject({
+      status: "failed",
+      error: {
+        code: "queue-environment-refused",
+        evidence: { kind: "queue-authority-refusal", base: "main", remote: "origin", attempts: 3 },
+      },
+    })
+    expect(run.steps[0]?.job).not.toHaveProperty("output")
+    expect(app.state().bays.prs.PR1).toMatchObject({ revision: 1, headSha: featureSha, status: "submitted" })
   })
 
   it("records exhausted authority refresh as an environment refusal without rejecting the author", async () => {
