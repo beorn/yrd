@@ -102,6 +102,15 @@ describe("resolvePR live-preference + requireLivePR mutation guard", () => {
     await expect(app.bays.closePr({ pr: "PR1" })).rejects.toThrow(/only a live PR|run it through the queue/i)
     await expect(app.bays.closePr({ pr: "PR1" })).rejects.not.toThrow("no live PR for branch")
   })
+
+  it("folds case on an id-addressed terminal PR: 'pr1' addresses canonical PR1, same as resolveSelector", async () => {
+    await using app = await appWithIntegrated("topic/f", [{ pr: "PR1", headSha: HEAD_1, commit: BASE }])
+    // resolveSelector folds case ('pr1' → PR1); the guard's exact-id arm must
+    // fold identically, or a lowercase exact id is misclassified as a live-less
+    // BRANCH and refused with no-live-pr.
+    await expect(app.bays.closePr({ pr: "pr1" })).rejects.toThrow(/only a live PR|run it through the queue/i)
+    await expect(app.bays.closePr({ pr: "pr1" })).rejects.not.toThrow("no live PR for branch")
+  })
 })
 
 describe("requireLivePR coverage — every PR-selector mutation routes through the one guard", () => {

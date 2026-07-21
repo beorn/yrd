@@ -18,6 +18,7 @@ import {
   type CompositionV1,
   type Correlation,
   type PR,
+  type PRFreshnessTransition,
   type PRRegression,
   type PRRegressionSeverity,
 } from "@yrd/bay"
@@ -26,7 +27,14 @@ import { createFailure, failureFact, raiseFailure, type DeepReadonly, type Journ
 import { isConcurrentSettlementConflict } from "@yrd/job"
 import type { Job } from "@yrd/job"
 import { createProcess, type Process } from "@yrd/process"
-import { isQueueRunningConflict, Queues, type PREligibility, type QueueRun, type QueueSummary } from "@yrd/queue"
+import {
+  isQueueRunningConflict,
+  Queues,
+  resolveSubmoduleOrigin,
+  type PREligibility,
+  type QueueRun,
+  type QueueSummary,
+} from "@yrd/queue"
 import { createExclusive } from "@yrd/persistence"
 import { loadYrdConfig } from "./config.ts"
 import { cleanGitEnvironment } from "./git-environment.ts"
@@ -77,7 +85,18 @@ import {
 import { submittedPrPositions } from "./queue-position.ts"
 import { prunePrs, withdrawPrs } from "./pr-withdraw.ts"
 import { resolveSubmitSelectors } from "./submit-selection.ts"
-import { diagnostic, printHuman, printResult } from "./output.tsx"
+import { diagnostic, printHuman, printResult, printResultWithWarnings } from "./output.tsx"
+import {
+  createSubmoduleBranchResolver,
+  firstLine,
+  readSubmoduleEntries,
+  setSubmoduleBranch,
+  submoduleTrackingWarnings,
+  superprojectOrigin,
+  superprojectRoot,
+  unbranchedSubmodules,
+  type SubmoduleEntry,
+} from "./submodule-tracking.ts"
 import {
   BayStatusView,
   ContestStatusView,
@@ -1200,8 +1219,40 @@ async function recutPr(
   options: JsonOption & Readonly<{ revision?: number; queue?: boolean; force?: boolean }>,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
+  const outcome = await executeRecutPr(app, services, selector, options, io)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    outcome.output,
+    `${outcome.current.id} revision ${outcome.current.revision} ${outcome.unchanged ? "already matches" : "recut onto"} ${outcome.result.baseSha}`,
+  )
+  return outcome.admitted.some(
+    (run) =>
+      run.status === "failed" &&
+      run.prs.some((member) => member.id === outcome.current.id && member.revision === outcome.current.revision),
+  )
+    ? 1
+    : 0
+}
+
+type ExecuteRecutPrOptions = Readonly<{
+  revision?: number
+  queue?: boolean
+  force?: boolean
+  admit?: boolean
+  transition?: PRFreshnessTransition
+}>
+
+async function executeRecutPr(
+  app: YrdCliApp,
+  services: Pick<YrdCliServices, "recut">,
+  selector: string,
+  options: ExecuteRecutPrOptions,
+  io: YrdCliIO,
+) {
   const service = services.recut ?? configuration("pr.recut capability is not installed")
   const pr = requiredPr(app, selector)
+  const expectedCurrent = { revision: pr.revision, headSha: pr.headSha }
   if (pr.status === "integrated" || pr.status === "withdrawn" || pr.status === "canceled") {
     raiseFailure("refusal", "terminal-target", `yrd: PR '${pr.id}' is ${pr.status}; terminal PRs cannot be recut`)
   }
@@ -1265,6 +1316,8 @@ async function recutPr(
     patchId: result.patchId,
     reviewCarried: approval !== undefined,
     ...(result.composition === undefined ? {} : { composition: result.composition }),
+    expectedCurrent,
+    ...(options.transition === undefined ? {} : { transition: options.transition }),
   })
   const unchanged = recorded.events.length === 0
 
@@ -1284,7 +1337,9 @@ async function recutPr(
       raiseFailure("refusal", "recut-not-ready", `yrd: PR '${current.id}' is ${current.status}, not ready`)
     }
     if (!app.bays.checksRequested(current.id)) await app.bays.requestChecks({ pr: current.id })
-    admitted = await app.queue.admit({ prs: [current.id] }, runtimeOptions(io))
+    if (options.admit !== false) {
+      admitted = await app.queue.admit({ prs: [current.id] }, runtimeOptions(io))
+    }
     current = requiredPr(app, current.id)
   }
   const output = {
@@ -1299,19 +1354,7 @@ async function recutPr(
     lineage: prRevisionLineage(current).map((revision) => revision.revision),
     unchanged,
   }
-  await printResult(
-    io,
-    jsonEnabled(options),
-    output,
-    `${current.id} revision ${current.revision} ${unchanged ? "already matches" : "recut onto"} ${result.baseSha}`,
-  )
-  return admitted.some(
-    (run) =>
-      run.status === "failed" &&
-      run.prs.some((member) => member.id === current.id && member.revision === current.revision),
-  )
-    ? 1
-    : 0
+  return { admitted, current, output, result, unchanged }
 }
 
 async function reviewPr(
@@ -1534,6 +1577,7 @@ async function submitBays(
   selectors: readonly string[],
   options: {
     follow?: boolean
+    wait?: boolean
     draft?: boolean
     base?: string
     queue?: string
@@ -1554,6 +1598,10 @@ async function submitBays(
   const local = currentBay(state.bays, cwd)
   const inferred = resolveSubmitSelectors(selectors, local?.id ?? currentGitBranch(cwd, io))
   const prs: PR[] = []
+  // Advisory warnings for submissions that SUCCEED with a caveat (e.g. a dirty
+  // worktree — D3). Collected from the bay operation and rendered in the result
+  // envelope, matching the queue list/status `warnings` shape.
+  const warnings: string[] = []
   const base = oneBaseOfAliases(state, options.base, options.queue, "base", "queue")
   const composition = await readComposition(options.composition, io)
   if (composition !== undefined && inferred.length !== 1) {
@@ -1572,6 +1620,7 @@ async function submitBays(
       ...(composition === undefined ? {} : { composition }),
       resolveRevision: (ref) => optionalRevision(ref, io),
       run: runtimeOptions(io),
+      warnings,
     })
     if (reviewers.length > 0 && pr.status !== "integrated") {
       await app.bays.requestReview({
@@ -1589,13 +1638,40 @@ async function submitBays(
     await printResult(
       io,
       jsonEnabled(options),
-      { command, prs: prs.map(projectPRTaskStatus) },
+      { command, prs: prs.map(projectPRTaskStatus), ...(warnings.length > 0 ? { warnings } : {}) },
       createElement(PRResultView, { prs, runs: [] }),
     )
     return 0
   }
-  for (const pr of prs) await app.bays.requestChecks({ pr: pr.id })
-  const selected = prs.map((pr) => pr.id)
+  // Q1 — a same-head resubmit of a landed branch returns the frozen integrated
+  // PR ("already merged", exit 0). It is not checkable and must not be admitted;
+  // surface the informational note in the result envelope and drain only the
+  // live submissions.
+  for (const pr of prs) {
+    if (pr.status === "integrated") {
+      warnings.push(`already merged as PR '${pr.id}'${pr.integration === undefined ? "" : ` (${pr.integration.commit})`}`)
+    }
+  }
+  const checkable = prs.filter((pr) => pr.status === "pushed" || pr.status === "submitted")
+  for (const pr of checkable) await app.bays.requestChecks({ pr: pr.id })
+  const selected = checkable.map((pr) => pr.id)
+  if (selected.length === 0 || (options.wait !== true && options.follow !== true)) {
+    // D8 — submit is a ledger write, not a negotiation. The submission and its
+    // check request are now recorded; return success WITHOUT composing or
+    // draining. The runner loop admits and settles this PR on its next cycle,
+    // and any composition problem surfaces later as an in-queue `needs-author`
+    // state (yrd-queue PREligibility) — never as a submit-time door refusal.
+    // `--wait`/`--follow` opt back into the pre-decouple synchronous drain; with
+    // nothing checkable (e.g. an already-merged same-head resubmit) there is
+    // nothing to drain regardless.
+    await printResult(
+      io,
+      jsonEnabled(options),
+      { command, prs: prs.map(projectPRTaskStatus), ...(warnings.length > 0 ? { warnings } : {}) },
+      createElement(PRResultView, { prs, runs: [] }),
+    )
+    return 0
+  }
   const followed = (await app.queue.admit({ prs: selected }, runtimeOptions(io))).filter((run) =>
     run.prs.some((member) => prs.some((pr) => pr.id === member.id && pr.revision === member.revision)),
   )
@@ -1609,6 +1685,7 @@ async function submitBays(
       command,
       prs: currentPrs.map(projectPRTaskStatus),
       checks: checks.map(projectCheckTaskStatus),
+      ...(warnings.length > 0 ? { warnings } : {}),
     },
     createElement(PRResultView, {
       prs: currentPrs,
@@ -2344,7 +2421,7 @@ async function renderDashboard(
   const state = stateOf(app)
   const target = resolveQueueTargets(state, selectors, undefined, undefined)
   const { results } = await queueStatusSnapshots(app, state, target, io)
-  await printResult(
+  await printResultWithWarnings(
     io,
     jsonEnabled(options),
     { command: "dashboard", results: results.map(projectQueueStatusResultTaskStatus) },
@@ -2354,6 +2431,7 @@ async function renderDashboard(
       selected: target.selected,
       now: io.now?.() ?? Date.now(),
     }),
+    submoduleTrackingWarnings(io.cwd ?? process.cwd()),
   )
 }
 
@@ -2736,7 +2814,7 @@ async function listQueues(
   io: YrdCliIO,
 ): Promise<void> {
   const snapshot = await queueListSnapshot(app, filters, options, io)
-  await printResult(
+  await printResultWithWarnings(
     io,
     jsonEnabled(options),
     {
@@ -2745,6 +2823,7 @@ async function listQueues(
       results: snapshot.results.map(projectQueueStatusResultTaskStatus),
     },
     createElement(QueueTimelineView, { projection: snapshot.projection, columns: io.columns ?? 120 }),
+    submoduleTrackingWarnings(io.cwd ?? process.cwd()),
   )
 }
 
@@ -2796,6 +2875,167 @@ async function primeYrd(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
     "Use --json for lossless machine-readable output.",
   ].join("\n")
   await printResult(io, jsonEnabled(options), { command: "prime", ...briefing }, human)
+}
+
+type InitOptions = JsonOption & Readonly<{ dryRun?: boolean }>
+
+type InitAction = "set" | "would-set" | "unreachable"
+type InitSource = "remote" | "fallback" | "unreachable"
+
+type InitRow = Readonly<{
+  name: string
+  path: string
+  url?: string
+  branch?: string
+  source: InitSource
+  action: InitAction
+  note?: string
+  detail?: string
+}>
+
+function initSourceLabel(row: InitRow): string {
+  if (row.source === "remote") return "remote HEAD"
+  if (row.source === "fallback") return "fallback → main"
+  // Reduce the Git diagnostic to a single row so multi-row ls-remote stderr
+  // cannot break the table row layout.
+  return `unreachable: ${firstLine(row.detail ?? "unknown")}`
+}
+
+function renderInitTable(rows: readonly InitRow[]): string {
+  const header = ["SUBMODULE", "BRANCH", "SOURCE"] as const
+  const cells = rows.map((row) => [row.path, row.branch ?? "-", initSourceLabel(row)] as const)
+  const widths = header.map((label, column) =>
+    Math.max(label.length, ...cells.map((cell) => cell[column]!.length)),
+  )
+  const formatRow = (cell: readonly string[]): string =>
+    cell.map((text, column) => (column === cell.length - 1 ? text : text.padEnd(widths[column]!))).join("  ")
+  return [formatRow(header), ...cells.map(formatRow)].join("\n")
+}
+
+/**
+ * `yrd init` — set `submodule.<name>.branch` for every submodule that does not
+ * yet track a branch, turning it from PINNED into TRACKED so upstream motion
+ * rolls the superproject. The default branch is resolved from the submodule's
+ * upstream (`git ls-remote --symref … HEAD`); a reachable remote with no branch
+ * HEAD takes the documented `main` fallback; an unreachable remote is listed
+ * and left unset. Existing branch values are never overwritten. The edit is
+ * left uncommitted for the operator to review. `--dry-run` writes nothing.
+ */
+async function initSubmoduleTracking(options: InitOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
+  const dryRun = options.dryRun === true
+  const json = jsonEnabled(options)
+  const cwd = io.cwd ?? process.cwd()
+  const root = superprojectRoot(cwd)
+  if (root === undefined) {
+    raiseFailure("configuration", "not-a-worktree", `yrd: '${cwd}' is not inside a Git worktree`)
+  }
+  const entries = readSubmoduleEntries(root)
+  const unbranched = [...unbranchedSubmodules(entries)].toSorted((left, right) =>
+    left.path < right.path ? -1 : left.path > right.path ? 1 : 0,
+  )
+  const alreadyTracking = entries.length - unbranched.length
+
+  if (entries.length === 0) {
+    await printResult(
+      io,
+      json,
+      { command: "init", dryRun, root, results: [], alreadyTracking: 0 },
+      "yrd init: no submodules declared in .gitmodules",
+    )
+    return 0
+  }
+  if (unbranched.length === 0) {
+    await printResult(
+      io,
+      json,
+      { command: "init", dryRun, root, results: [], alreadyTracking },
+      `yrd init: all ${entries.length} submodule${entries.length === 1 ? "" : "s"} already track a branch`,
+    )
+    return 0
+  }
+
+  const superOrigin = superprojectOrigin(root)
+  const resolver = io.resolveSubmoduleDefaultBranch ?? createSubmoduleBranchResolver(root)
+  const rows: InitRow[] = []
+  for (const submodule of unbranched) {
+    rows.push(await resolveInitRow(root, superOrigin, resolver, submodule, dryRun))
+  }
+
+  const setCount = rows.filter((row) => row.action === "set").length
+  const failures = rows.filter((row) => row.action === "unreachable")
+  const table = renderInitTable(rows)
+  const notes = rows.filter((row) => row.note !== undefined).map((row) => `note: ${row.note}`)
+  const summary: string[] = []
+  if (dryRun) {
+    const wouldSet = rows.filter((row) => row.action === "would-set").length
+    summary.push(
+      `yrd init (dry run): would set branch= for ${wouldSet} submodule${wouldSet === 1 ? "" : "s"}` +
+        `${failures.length > 0 ? `, ${failures.length} unreachable` : ""}`,
+    )
+    summary.push("(dry run: .gitmodules not modified)")
+  } else {
+    summary.push(
+      `yrd init: set branch= for ${setCount} submodule${setCount === 1 ? "" : "s"}` +
+        `${failures.length > 0 ? `, ${failures.length} unreachable (left unset)` : ""}`,
+    )
+    if (setCount > 0) {
+      summary.push(
+        `Review and commit the .gitmodules change: git -C ${root} add .gitmodules && ` +
+          `git -C ${root} commit -m 'chore: track submodule branches'`,
+      )
+    }
+  }
+  if (alreadyTracking > 0) {
+    summary.push(`(${alreadyTracking} submodule${alreadyTracking === 1 ? "" : "s"} already tracking a branch, unchanged)`)
+  }
+
+  await printResult(
+    io,
+    json,
+    {
+      command: "init",
+      dryRun,
+      root,
+      alreadyTracking,
+      results: rows,
+      ...(failures.length === 0 ? {} : { failures: failures.map((row) => ({ name: row.name, detail: row.detail })) }),
+    },
+    [table, ...notes, ...summary].join("\n"),
+  )
+  // Loud but non-fatal when SOME remotes are unreachable; nonzero only when
+  // EVERY submodule that needed a branch failed to resolve.
+  return failures.length === unbranched.length ? 1 : 0
+}
+
+async function resolveInitRow(
+  root: string,
+  superOrigin: string | undefined,
+  resolver: NonNullable<YrdCliIO["resolveSubmoduleDefaultBranch"]>,
+  submodule: SubmoduleEntry,
+  dryRun: boolean,
+): Promise<InitRow> {
+  const base = { name: submodule.name, path: submodule.path, ...(submodule.url === undefined ? {} : { url: submodule.url }) }
+  if (submodule.url === undefined || submodule.url === "") {
+    return { ...base, source: "unreachable", action: "unreachable", detail: "no url declared in .gitmodules" }
+  }
+  let target: string
+  try {
+    target = resolveSubmoduleOrigin(root, superOrigin, submodule.url)
+  } catch (cause) {
+    return { ...base, source: "unreachable", action: "unreachable", detail: cause instanceof Error ? cause.message : String(cause) }
+  }
+  const resolution = await resolver(target)
+  if (resolution.status === "unreachable") {
+    return { ...base, source: "unreachable", action: "unreachable", detail: resolution.detail }
+  }
+  if (!dryRun) setSubmoduleBranch(root, submodule.name, resolution.branch)
+  return {
+    ...base,
+    branch: resolution.branch,
+    source: resolution.status === "fallback" ? "fallback" : "remote",
+    action: dryRun ? "would-set" : "set",
+    ...(resolution.status === "fallback" ? { note: resolution.note } : {}),
+  }
 }
 
 function resolveQueueTargets(
@@ -3190,12 +3430,196 @@ function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefine
   return undefined
 }
 
+type ResidentQueueFreshnessTransition =
+  | Readonly<{
+      status: "refreshed"
+      pr: string
+      revision: number
+      fromBase: string | undefined
+      toBase: string
+      headSha: string
+      patchId: string
+    }>
+  | Readonly<{
+      status: "refused"
+      pr: string
+      revision: number
+      fromBase: string | undefined
+      toBase: string
+      code: string
+      message: string
+    }>
+  | Readonly<{
+      status: "deferred"
+      pr: string
+      revision: number
+      fromBase: string | undefined
+      toBase: string
+      code: "recut-current-changed"
+      message: string
+    }>
+  | Readonly<{
+      status: "recovered"
+      pr: string
+      revision: number
+      runs: readonly string[]
+    }>
+
+/**
+ * Apply the admitted -> refreshed Queue transition before the resident takes
+ * its next run snapshot. The transition deliberately stays inside the existing
+ * serialized resident cycle: it reuses the installed recutter and journal
+ * rather than starting another writer or scheduler.
+ */
+export async function refreshAdmittedQueueRevisions(
+  app: YrdCliApp,
+  services: Pick<YrdCliServices, "recut">,
+  io: YrdCliIO,
+): Promise<readonly ResidentQueueFreshnessTransition[]> {
+  const snapshot = stateOf(app)
+  const outcomes: ResidentQueueFreshnessTransition[] = []
+  const interrupted = Object.values(snapshot.bays.prs).filter((pr) => pr.recut?.transition?.to === "refreshed")
+  const staleRunsByPr = new Map<string, QueueRun[]>()
+  const staleRunIds = new Set<string>()
+  for (const pr of interrupted) {
+    const claim = snapshot.queues.authority.claims[pr.id]
+    if (claim?.consumedBy === undefined || (claim.revision === pr.revision && claim.headSha === pr.headSha)) {
+      continue
+    }
+    const run = app.queue.get(claim.consumedBy)
+    if (run === undefined || Queues.terminal(run)) continue
+    staleRunsByPr.set(pr.id, [run])
+    staleRunIds.add(run.id)
+  }
+  for (const run of [...staleRunIds].toSorted((left, right) =>
+    left.localeCompare(right, undefined, { numeric: true }),
+  )) {
+    await app.queue.cancelRun({
+      run,
+      by: io.runner ?? "yrd-cli",
+      reason: "recover interrupted admitted-to-refreshed Queue transition",
+    })
+  }
+  for (const pr of interrupted) {
+    const runs = staleRunsByPr.get(pr.id)
+    if (runs === undefined) continue
+    const ids = runs.map(({ id }) => id)
+    outcomes.push({ status: "recovered", pr: pr.id, revision: pr.revision, runs: ids })
+    app.log.info?.("resident queue recovered an interrupted freshness transition", {
+      action: "queue-freshness-recovered",
+      pr: pr.id,
+      revision: pr.revision,
+      runs: ids,
+    })
+  }
+  const candidates = Object.values(snapshot.bays.prs)
+    .filter((pr) => pr.status === "submitted" && app.bays.checksRequested(pr.id))
+    .toSorted(
+      (left, right) =>
+        baseIdentity(left.base).localeCompare(baseIdentity(right.base)) ||
+        left.id.localeCompare(right.id, undefined, { numeric: true }),
+    )
+  if (candidates.length === 0) return outcomes
+
+  const groups = await queueTargetGroups(new Set(candidates.map((pr) => pr.base)), io)
+  for (const candidate of candidates) {
+    if (io.drainSignal?.aborted === true) break
+    const target = groups.find(
+      (group) => group.aliases.has(candidate.base) || group.aliases.has(baseIdentity(candidate.base)),
+    )
+    if (target?.headSha === undefined) {
+      raiseFailure(
+        "infrastructure",
+        "queue-base-unresolved",
+        `yrd: resident auto-recut could not resolve queue base '${candidate.base}' for PR '${candidate.id}'`,
+      )
+    }
+    if (candidate.baseSha === target.headSha) continue
+
+    try {
+      const recut = await executeRecutPr(
+        app,
+        services,
+        candidate.id,
+        {
+          queue: true,
+          force: true,
+          admit: false,
+          transition: { from: "admitted", to: "refreshed" },
+        },
+        io,
+      )
+      outcomes.push({
+        status: "refreshed",
+        pr: recut.current.id,
+        revision: recut.current.revision,
+        fromBase: candidate.baseSha,
+        toBase: recut.result.baseSha,
+        headSha: recut.current.headSha,
+        patchId: recut.result.patchId,
+      })
+      app.log.info?.("resident queue refreshed an admitted revision onto the current base", {
+        action: "queue-freshness-refreshed",
+        pr: recut.current.id,
+        revision: recut.current.revision,
+        fromBase: candidate.baseSha,
+        toBase: recut.result.baseSha,
+        patchId: recut.result.patchId,
+      })
+    } catch (error) {
+      const failure = failureFact(error)
+      if (failure?.kind !== "refusal") throw error
+      if (failure.code === "recut-current-changed") {
+        outcomes.push({
+          status: "deferred",
+          pr: candidate.id,
+          revision: candidate.revision,
+          fromBase: candidate.baseSha,
+          toBase: target.headSha,
+          code: "recut-current-changed",
+          message: failure.message,
+        })
+        app.log.info?.("resident queue deferred freshness after the current revision changed", {
+          action: "queue-freshness-deferred",
+          pr: candidate.id,
+          revision: candidate.revision,
+          fromBase: candidate.baseSha,
+          toBase: target.headSha,
+          code: failure.code,
+          reason: failure.message,
+        })
+        continue
+      }
+      outcomes.push({
+        status: "refused",
+        pr: candidate.id,
+        revision: candidate.revision,
+        fromBase: candidate.baseSha,
+        toBase: target.headSha,
+        code: failure.code,
+        message: failure.message,
+      })
+      app.log.warn?.("resident queue could not refresh an admitted revision", {
+        action: "queue-freshness-refused",
+        pr: candidate.id,
+        revision: candidate.revision,
+        fromBase: candidate.baseSha,
+        toBase: target.headSha,
+        code: failure.code,
+        reason: failure.message,
+      })
+    }
+  }
+  return outcomes
+}
+
 export async function followQueueRuns(
   app: YrdCliApp,
   selectors: readonly string[],
   options: { steps?: unknown; json?: boolean; interval?: number; watch?: boolean },
   io: YrdCliIO,
   gate: () => Promise<void>,
+  services: Pick<YrdCliServices, "recut"> = {},
 ): Promise<YrdCliExitCode> {
   if (options.watch === true) {
     // `--watch` is a DEPRECATED no-op alias of follow (the default). Reaching
@@ -3234,6 +3658,14 @@ export async function followQueueRuns(
       // watching must stop the watch, never let a fresh cycle start expensive
       // Runs on a stale baseline.
       await gate()
+      // The optional default preserves the narrow followQueueRuns test/programmatic
+      // seam. The installed CLI always supplies the recutter; a caller that does
+      // not install one retains the historical drain-only behavior.
+      const freshness = services.recut === undefined ? [] : await refreshAdmittedQueueRevisions(app, services, io)
+      // A mechanical recut may itself take long enough for installed Queue
+      // definitions to move. Re-prove the baseline before admitting its fresh
+      // revision; never start a Run under the pre-recut gate snapshot.
+      if (freshness.length > 0) await gate()
       let runs: readonly QueueRun[]
       try {
         runs = await runQueues(app, selectors, options, io)
@@ -3868,6 +4300,13 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (options) => primeYrd(installed(), options, io))
 
+  program
+    .command("init")
+    .description("track submodule branches: set submodule.<name>.branch for every submodule not yet tracking one")
+    .option("--dry-run", "print what would be set without writing .gitmodules")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => setExit(await initSubmoduleTracking(options, io)))
+
   const queue = program.command("queue").description("manage integration queues")
   queue.helpCommand(false)
   const listQueue = async (filters: string[], options: QueueListOptions): Promise<void> => {
@@ -3950,7 +4389,7 @@ function buildProgram(
     .action(async (selectors, options) => {
       const gate = () => requireFreshInstalledBaseline(installedServices())
       if (resolveQueueRunMode(selectors, options) === "follow") {
-        setExit(await followQueueRuns(installed(), selectors, options, io, gate))
+        setExit(await followQueueRuns(installed(), selectors, options, io, gate, installedServices()))
         return
       }
       await gate()
@@ -3991,7 +4430,9 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => setExit(await cancelQueueRun(installed(), selector, options, io)))
 
-  const pr = program.command("pr").description("manage pull requests")
+  const pr = program
+    .command("pr")
+    .description("manage pull requests (a branch selector targets the live delivery; address a terminal PR by its id)")
   pr.helpCommand(false)
   pr.command("list")
     .description("list pull requests")
@@ -4006,7 +4447,8 @@ function buildProgram(
     .command("submit [selector...]")
     .description("submit PR revisions and admit configured checks")
     .option("--draft", "register a pushed PR without requesting or admitting checks")
-    .option("--follow", "follow admitted checks to a terminal result")
+    .option("--wait", "block on the synchronous drain (pre-decouple behavior); default records and returns")
+    .option("--follow", "follow admitted checks to a terminal result (implies --wait)")
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
