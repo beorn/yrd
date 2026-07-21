@@ -6,7 +6,16 @@ export type SelectorCandidate<Value> = Readonly<{
   value: Value
 }>
 
-export type SelectorOptions = Readonly<{ kind: string }>
+export type SelectorOptions<Value = unknown> = Readonly<{
+  kind: string
+  /** Read-bias for a colliding folded selector: when several aliases resolve to
+   * the same input, a single candidate satisfying `prefer` wins (e.g. "the one
+   * live PR on this branch"). When none qualify, the first candidate is returned
+   * — callers pass their candidates most-relevant-first (e.g. most recent). More
+   * than one preferred candidate, or no preference at all, stays a loud
+   * ambiguity. Opt-in: without `prefer`, collisions refuse exactly as before. */
+  prefer?: (value: Value) => boolean
+}>
 
 type IndexedCandidate<Value> = Readonly<{
   canonical: string
@@ -45,7 +54,7 @@ function ambiguous<Value>(selector: string, matches: readonly IndexedCandidate<V
 export function resolveSelector<Value>(
   selector: string,
   candidates: Iterable<SelectorCandidate<Value>>,
-  options: SelectorOptions,
+  options: SelectorOptions<Value>,
 ): Value | undefined {
   const indexed = indexedCandidates(candidates)
   const canonical = indexed.find((candidate) => candidate.canonical === selector)
@@ -55,7 +64,11 @@ export function resolveSelector<Value>(
   const insensitive = indexed.filter((candidate) =>
     [...candidate.selectors].some((candidateSelector) => candidateSelector.toLowerCase() === folded),
   )
-  if (insensitive.length === 1) return insensitive[0]?.value
-  if (insensitive.length > 1) ambiguous(selector, insensitive, options.kind)
-  return undefined
+  if (insensitive.length <= 1) return insensitive[0]?.value
+  if (options.prefer !== undefined) {
+    const preferred = insensitive.filter((candidate) => options.prefer!(candidate.value))
+    if (preferred.length === 1) return preferred[0]?.value
+    if (preferred.length === 0) return insensitive[0]?.value
+  }
+  ambiguous(selector, insensitive, options.kind)
 }
