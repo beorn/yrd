@@ -17,6 +17,17 @@ export type SelectorOptions<Value = unknown> = Readonly<{
   prefer?: (value: Value) => boolean
 }>
 
+/** How a selector reached its resolved entity. `canonical` when the input
+ * folds to the entity's own canonical identity (an exact or case-folded id);
+ * `alias` when it matched only through a secondary handle (a branch, a name).
+ * Consumers that special-case id-addressing — a mutation guard that lets an
+ * id-named terminal through, a terminal-branch dispatch that reopens on a moving
+ * branch — read this instead of re-deriving the fold at each call site. */
+export type SelectorMatch<Value> = Readonly<{
+  value: Value
+  matchedBy: "canonical" | "alias"
+}>
+
 type IndexedCandidate<Value> = Readonly<{
   canonical: string
   selectors: ReadonlySet<string>
@@ -50,25 +61,48 @@ function ambiguous<Value>(selector: string, matches: readonly IndexedCandidate<V
   )
 }
 
-/** Resolve operator input without changing the selected entity's stored identity. */
-export function resolveSelector<Value>(
+function foldedWinner<Value>(
+  selector: string,
+  folded: string,
+  insensitive: readonly IndexedCandidate<Value>[],
+  options: SelectorOptions<Value>,
+): IndexedCandidate<Value> | undefined {
+  if (insensitive.length <= 1) return insensitive[0]
+  if (options.prefer !== undefined) {
+    const preferred = insensitive.filter((candidate) => options.prefer!(candidate.value))
+    if (preferred.length === 1) return preferred[0]
+    if (preferred.length === 0) return insensitive[0]
+  }
+  ambiguous(selector, insensitive, options.kind)
+}
+
+/** Resolve operator input, reporting HOW it matched, without changing the
+ * selected entity's stored identity. The single place case-folding lives:
+ * callers read {@link SelectorMatch.matchedBy} rather than re-deriving the fold. */
+export function resolveSelectorMatch<Value>(
   selector: string,
   candidates: Iterable<SelectorCandidate<Value>>,
   options: SelectorOptions<Value>,
-): Value | undefined {
+): SelectorMatch<Value> | undefined {
   const indexed = indexedCandidates(candidates)
   const canonical = indexed.find((candidate) => candidate.canonical === selector)
-  if (canonical !== undefined) return canonical.value
+  if (canonical !== undefined) return { value: canonical.value, matchedBy: "canonical" }
 
   const folded = selector.toLowerCase()
   const insensitive = indexed.filter((candidate) =>
     [...candidate.selectors].some((candidateSelector) => candidateSelector.toLowerCase() === folded),
   )
-  if (insensitive.length <= 1) return insensitive[0]?.value
-  if (options.prefer !== undefined) {
-    const preferred = insensitive.filter((candidate) => options.prefer!(candidate.value))
-    if (preferred.length === 1) return preferred[0]?.value
-    if (preferred.length === 0) return insensitive[0]?.value
-  }
-  ambiguous(selector, insensitive, options.kind)
+  const winner = foldedWinner(selector, folded, insensitive, options)
+  if (winner === undefined) return undefined
+  return { value: winner.value, matchedBy: winner.canonical.toLowerCase() === folded ? "canonical" : "alias" }
+}
+
+/** Resolve operator input to the selected entity, discarding the match
+ * provenance. The value-only convenience over {@link resolveSelectorMatch}. */
+export function resolveSelector<Value>(
+  selector: string,
+  candidates: Iterable<SelectorCandidate<Value>>,
+  options: SelectorOptions<Value>,
+): Value | undefined {
+  return resolveSelectorMatch(selector, candidates, options)?.value
 }

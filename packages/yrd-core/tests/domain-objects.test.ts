@@ -638,6 +638,36 @@ describe("entity selector resolution", () => {
     expect(Core.resolveSelector(selector, candidates, { kind: "PR" })?.id).toBe(expected)
   })
 
+  it.each([
+    ["PR13", "PR13", "canonical"],
+    ["pr13", "PR13", "canonical"],
+    ["TOPIC/ALPHA", "PR13", "alias"],
+    ["b14", "PR14", "alias"],
+    ["r4", "R4", "canonical"],
+  ])("reports how %s matched (matchedBy), not just the resolved entity", (selector, expected, matchedBy) => {
+    const match = Core.resolveSelectorMatch(selector, candidates, { kind: "PR" })
+    expect(match?.value.id).toBe(expected)
+    expect(match?.matchedBy).toBe(matchedBy)
+  })
+
+  it("reports no match for a selector that resolves nothing", () => {
+    expect(Core.resolveSelectorMatch("missing", candidates, { kind: "PR" })).toBeUndefined()
+  })
+
+  it("reports the folded winner's canonical vs alias when a read-biased preference breaks a collision", () => {
+    const colliding: readonly Core.SelectorCandidate<{ readonly id: string; readonly live: boolean }>[] = [
+      { canonical: "PR20", aliases: ["topic/z"], value: { id: "PR20", live: false } },
+      { canonical: "PR21", aliases: ["topic/z"], value: { id: "PR21", live: true } },
+    ]
+    // "topic/z" folds to an alias shared by both; the live-preference resolves
+    // PR21, matched through that alias — the guard downstream must see 'alias'.
+    const byAlias = Core.resolveSelectorMatch("Topic/Z", colliding, { kind: "PR", prefer: (pr) => pr.live })
+    expect(byAlias).toEqual({ value: { id: "PR21", live: true }, matchedBy: "alias" })
+    // Addressing PR20 by its exact canonical id still reports 'canonical'.
+    const byCanonical = Core.resolveSelectorMatch("pr20", colliding, { kind: "PR", prefer: (pr) => pr.live })
+    expect(byCanonical).toEqual({ value: { id: "PR20", live: false }, matchedBy: "canonical" })
+  })
+
   it("prefers an exact canonical identity and rejects an ambiguous folded selector", () => {
     const colliding: readonly Core.SelectorCandidate<{ readonly id: string }>[] = [
       { canonical: "PR13", aliases: ["topic/one"], value: { id: "PR13" } },

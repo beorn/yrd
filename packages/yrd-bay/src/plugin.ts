@@ -56,6 +56,7 @@ import {
   reviewState,
   resolveBay,
   resolvePR,
+  resolvePRMatch,
   type Bay,
   type BranchLifecycle,
   type BaysState,
@@ -688,7 +689,8 @@ export function createBays(
     const requestedComposition =
       options.composition === undefined ? undefined : CompositionV1Schema.parse(options.composition)
     let snapshot = state()
-    let pr = resolvePR(snapshot, selector)
+    const resolved = resolvePRMatch(snapshot, selector)
+    let pr = resolved?.value
     let bay = resolveBay(snapshot, selector) ?? (pr?.bay === undefined ? undefined : resolveBay(snapshot, pr.bay))
     // D2 — a branch whose PR reached a non-landed terminal status
     // (withdrawn/canceled) mints its next revision automatically down the
@@ -703,7 +705,10 @@ export function createBays(
     //    hand-made `<branch>-delivery-<nonce>` branch is needed;
     //  - addressed by its id, it stays idempotent.
     if (pr?.status === "integrated") {
-      if (selector.toLowerCase() !== pr.branch.toLowerCase()) return bindSubmission(pr, options)
+      // Addressed by its canonical id, an integrated PR is frozen evidence:
+      // idempotent. Addressed by a moving alias (its branch), a new head mints a
+      // fresh delivery. The canonical-vs-alias fold lives in resolveSelectorMatch.
+      if (resolved?.matchedBy === "canonical") return bindSubmission(pr, options)
       const landedHead = await options.resolveRevision(selector)
       if (landedHead === undefined) {
         raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${selector}'`)
