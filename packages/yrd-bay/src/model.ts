@@ -293,12 +293,18 @@ export type PRRevisionClock = Readonly<{
   terminal?: PRRevisionTerminal
 }>
 
+export const PRFreshnessTransitionSchema = z
+  .object({ from: z.literal("admitted"), to: z.literal("refreshed") })
+  .strict()
+export type PRFreshnessTransition = Readonly<z.infer<typeof PRFreshnessTransitionSchema>>
+
 export const PRRecutProofSchema = z
   .object({
     fromRevision: z.number().int().positive(),
     patchId: GitShaSchema,
     treeSha: GitShaSchema,
     reviewCarried: z.boolean(),
+    transition: PRFreshnessTransitionSchema.optional(),
   })
   .strict()
 export type PRRecutProof = Readonly<z.infer<typeof PRRecutProofSchema>>
@@ -726,6 +732,8 @@ export function requireLivePR(state: BaysState, selector: string): PR {
   if (pr === undefined) {
     raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
   }
-  if (isLivePR(pr.status) || selector === pr.id) return pr
+  // Exact-id addressing folds case the same way resolveSelector does: 'pr1'
+  // IS the canonical id PR1, not a live-less branch selector.
+  if (isLivePR(pr.status) || selector.toLowerCase() === pr.id.toLowerCase()) return pr
   raiseFailure("refusal", "no-live-pr", `yrd: no live PR for branch '${selector}'; use PR id`)
 }
