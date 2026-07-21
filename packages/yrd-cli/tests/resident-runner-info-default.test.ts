@@ -7,9 +7,12 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { createLogger } from "loggily"
+import { createLogger, type Event as LogEvent } from "loggily"
 
 import { createYrdHost, runYrdProcess } from "../src/host.ts"
+import { followQueueRuns } from "../src/run.ts"
+import { formatResidentLogLine } from "../src/runner-timeline.ts"
+import type { YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
 const YRD_BIN = join(import.meta.dirname, "../../../bin/yrd.ts")
@@ -25,7 +28,7 @@ async function git(repo: string, ...args: string[]): Promise<string> {
   return stdout.trim()
 }
 
-async function runnerRepo(): Promise<{ repo: string }> {
+async function runnerRepo(config = 'base: main\nbatch: 1\nsteps: [check]\ncheck: "true"\n'): Promise<{ repo: string }> {
   const root = await mkdtemp(join(tmpdir(), "yrd-resident-info-"))
   roots.push(root)
   const repoPath = join(root, "repo")
@@ -34,14 +37,14 @@ async function runnerRepo(): Promise<{ repo: string }> {
   await git(repo, "config", "user.name", "Yrd Test")
   await git(repo, "config", "user.email", "yrd@example.invalid")
   await writeFile(join(repo, "README.md"), "main\n")
-  await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 1\nsteps: [check]\ncheck: "true"\n')
+  await writeFile(join(repo, ".yrd.yml"), config)
   await git(repo, "add", "README.md", ".yrd.yml")
   await git(repo, "commit", "-qm", "main")
   return { repo }
 }
 
-async function queuedRunnerRepo(): Promise<{ repo: string }> {
-  const { repo } = await runnerRepo()
+async function queuedRunnerRepo(config?: string): Promise<{ repo: string }> {
+  const { repo } = await runnerRepo(config)
   await git(repo, "switch", "-qc", "issue/live-row", "main")
   await writeFile(join(repo, "live-row.txt"), "live row\n")
   await git(repo, "add", "live-row.txt")
@@ -67,6 +70,53 @@ afterEach(async () => {
 })
 
 describe("resident follow-runner lifecycle levels", () => {
+  it("narrates one admission while retaining repeated waiting-run settlement attempts", async () => {
+    const { repo } = await queuedRunnerRepo(`base: main
+batch: 1
+steps: [check, merge]
+check:
+  run: |
+    printf '%s\\n' '{"token":"remote-check"}'
+  runner: waiting
+`)
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    await using host = await createYrdHost({ cwd: repo, log })
+    const signal = { aborted: false }
+    let sleeps = 0
+    const io = {
+      stdout: () => undefined,
+      stderr: () => undefined,
+      runner: "test-resident",
+      scope: {
+        signal,
+        sleep: async () => {
+          sleeps += 1
+          if (sleeps === 2) signal.aborted = true
+        },
+      },
+    } as unknown as YrdCliIO
+
+    await expect(followQueueRuns(host.app, [], { interval: 1 }, io, async () => undefined)).resolves.toBe(0)
+
+    // Both settlement attempts remain structured evidence; only the first may
+    // be narrated as admission, or every resident interval repeats the row.
+    const runStarts = events.filter(
+      (event): event is Extract<LogEvent, { kind: "log" }> =>
+        event.kind === "log" &&
+        event.namespace === "yrd:queue:run" &&
+        event.props?.run === "R1" &&
+        event.props?.outcome === "started",
+    )
+    expect(runStarts).toHaveLength(2)
+    const admittedRows = runStarts
+      .map((event) => formatResidentLogLine(event, { color: false }))
+      .filter((line): line is string => line?.includes("[main#1] admitted") === true)
+    expect(admittedRows).toHaveLength(1)
+    expect(runStarts.map((event) => event.props?.continuation === true)).toEqual([false, true])
+    log.end()
+  }, 15_000)
+
   it("prints one undecorated human line per live step through the shipping queue-run process", async () => {
     const { repo } = await queuedRunnerRepo()
     const cli = Bun.spawn([process.execPath, YRD_BIN, "--repo", repo, "queue", "run", "--interval", "1"], {

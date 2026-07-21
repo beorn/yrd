@@ -94,6 +94,7 @@ type OutcomeProps = Readonly<{
   durationMs?: number
   diagnostic?: string
   completion?: boolean
+  continuation?: boolean
   error?: Readonly<{ code?: string; message?: string }>
   failure?: Readonly<{ code?: string; message?: string }>
   artifacts?: readonly unknown[]
@@ -283,7 +284,16 @@ function renderOutcomeRow(
 }
 
 function renderStartedRow(props: OutcomeProps, color: boolean, artifactRoot?: string): string | undefined {
-  if (props.outcome !== "started" || props.run === undefined || props.completion === true) return undefined
+  // A durable run can require several settlement attempts. Those attempts stay
+  // observable in JSONL, but only the first transition is an admission edge.
+  if (
+    props.outcome !== "started" ||
+    props.run === undefined ||
+    props.completion === true ||
+    props.continuation === true
+  ) {
+    return undefined
+  }
   const ref = paint(color, ANSI.bold)(runRef(props))
   const token = stepToken(props)
   const event = token === undefined ? "admitted" : "started"

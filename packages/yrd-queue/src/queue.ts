@@ -874,6 +874,7 @@ function createQueue<Shape extends PRShape>(
 
   const settle = async (id: QueueRunId, options: RunJobOptions): Promise<QueueRun> => {
     const observed = current(id)
+    const continuation = observed.steps.some((step) => step.job !== undefined && step.job.status !== "requested")
     const markSettledRoot = async (): Promise<QueueRun> => {
       const snapshot = runtime()
       const record = Queues.record(snapshot.queues, id)
@@ -926,6 +927,7 @@ function createQueue<Shape extends PRShape>(
           base: observed.base,
           prs: observed.prs.map(deliveryIdentity),
           steps: observed.steps.map((step) => step.name),
+          ...(continuation ? { continuation: true } : {}),
         },
         outcome: queueRunOutcome,
         resultAttributes: (result) => ({
