@@ -2384,13 +2384,19 @@ async function queuePauses(app: YrdCliApp, base: string | undefined, io: YrdCliI
 
 async function recoverQueue(
   app: YrdCliApp,
-  options: JsonOption & Readonly<{ reason?: string }>,
+  options: JsonOption & Readonly<{ reason?: string; runner?: string }>,
   io: YrdCliIO,
 ): Promise<void> {
   if (options.reason?.trim() === "") usage("--reason requires text")
+  if (options.runner?.trim() === "") usage("--runner requires a runner id")
+  // With `--runner` the operator asserts that runner is dead: recover force-settles
+  // its running Jobs regardless of lease expiry, so a fresh (unexpired) ghost from a
+  // known-dead runner clears immediately instead of waiting the lease out. Without
+  // it, recover settles only leases that have already lapsed.
   const runs = await app.queue.recover({
     recoveryTime: new Date(io.now?.() ?? Date.now()).toISOString(),
     ...(options.reason === undefined ? {} : { reason: options.reason }),
+    ...(options.runner === undefined ? {} : { runner: options.runner }),
   })
   await printResult(
     io,
@@ -4442,8 +4448,9 @@ function buildProgram(
     .action(async (base, options) => resumeQueue(installed(), base, options, io))
   queue
     .command("recover")
-    .description("recover expired runner leases")
+    .description("recover expired runner leases; --runner force-settles a known-dead runner's unexpired leases too")
     .option("--reason <text>", "record the recovery reason")
+    .option("--runner <id>", "force-settle this known-dead runner's leases now, even if unexpired")
     .option("--json", "emit stable JSON")
     .action(async (options) => recoverQueue(installed(), options, io))
   queue
