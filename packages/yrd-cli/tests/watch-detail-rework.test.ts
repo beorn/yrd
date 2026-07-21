@@ -1,10 +1,10 @@
 /**
  * 21106 W3 — DETAIL pane rework (user screenshot review, 2026-07-16).
  *
- * Pins the reshaped detail surface: the run-scoped identity title with
- * right-aligned colorized STATUS/OUTCOME; the linked ISSUE primitive; the
- * natural clock sentence plus COMMIT; separate JOB/RUNNER facts; and the
- * failure-only NEXT cue.
+ * Pins the reshaped detail surface: the PR-scoped identity title
+ * (`pr#<id>.<rev>`) with right-aligned colorized STATUS/OUTCOME; the linked
+ * ISSUE primitive; the natural clock sentence plus COMMIT; separate JOB/RUNNER
+ * facts; and the failure-only NEXT cue.
  */
 
 import { createElement } from "react"
@@ -90,27 +90,28 @@ describe("detail title row — run identity emphasis + right-aligned outcome", (
       createElement(Box, { width: 120 }, createElement(QueueDetailTitle, { row, data })),
     )
     try {
-      // Revision A makes the title run-scoped; PR and branch move into member
-      // blocks while the deduped run outcome stays on this line.
-      expect(app.text).toContain("RUN main#42")
-      expect(app.text).not.toContain("PR42.1")
+      // Revision A makes the title PR-scoped (pr#<id>.<rev>); the run identity
+      // and branch move into the run header / member block while the deduped run
+      // outcome stays right-aligned on this line.
+      expect(app.text).toContain("pr#42.1")
+      expect(app.text).not.toContain("RUN main#42")
       expect(app.text).not.toContain("topic/pr42")
       expect(app.text).toContain(`${data.glyph} passed, integrated`)
 
-      const titleRow = app.text.split("\n").findIndex((text) => text.includes("main#42"))
+      const titleRow = app.text.split("\n").findIndex((text) => text.includes("pr#42.1"))
       expect(titleRow).toBeGreaterThanOrEqual(0)
 
-      // Identity is emphasized like the QUEUE tab: warning-colored + bold.
-      const identityColumn = app.text.split("\n")[titleRow]?.indexOf("RUN main#42") ?? -1
+      // Identity is emphasized like the QUEUE tab: warning-colored.
+      const identityColumn = app.text.split("\n")[titleRow]?.indexOf("pr#42.1") ?? -1
       const identityCell = app.cell(identityColumn, titleRow)
-      expect(identityCell.bold).toBe(true)
       expect(identityCell.fg).not.toBeNull()
 
-      expect(glyphColumn(app, titleRow), "branch marker belongs in the member block, not the run title").toBe(-1)
+      expect(glyphColumn(app, titleRow), "branch marker belongs in the member block, not the title").toBe(-1)
 
-      // STATUS/OUTCOME is colorized, distinct from the identity emphasis.
+      // STATUS/OUTCOME is bold and colorized, distinct from the identity color.
       const outcomeColumn = app.text.split("\n")[titleRow]?.indexOf("integrated") ?? -1
       const outcomeCell = app.cell(outcomeColumn, titleRow)
+      expect(outcomeCell.bold).toBe(true)
       expect(outcomeCell.fg).not.toBeNull()
       expect(outcomeCell.fg).not.toEqual(identityCell.fg)
 

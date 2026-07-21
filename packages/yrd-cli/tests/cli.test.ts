@@ -834,6 +834,7 @@ describe("runYrd", () => {
     const merged = outputIO({ resolveRevision: async () => HEAD_SHA })
     expect(await runYrd(app, yrd("pr", "submit", "topic/landed", "--json"), merged.io), merged.stderr()).toBe(0)
     const mergedOut = JSON.parse(merged.stdout()) as Readonly<{ prs: readonly { id: string; status: string }[]; warnings?: readonly string[] }>
+
     expect(mergedOut).toMatchObject({ command: "pr.submit", prs: [{ id: "PR1", status: "integrated" }] })
     expect((mergedOut.warnings ?? []).join("\n")).toContain("already merged as PR 'PR1'")
     expect(await Array.fromAsync(app.events())).toEqual(before)
@@ -3992,7 +3993,7 @@ describe("runYrd", () => {
     expect(rendered).not.toContain("siblings none")
     // Item 2/3: the status pills row moved BELOW the list (was directly above
     // the header) and dropped its "FILTER" label — plain-word pills now.
-    const pillsRowIndex = rows.findIndex((row) => /pending.*running.*failed.*done/u.test(row))
+    const pillsRowIndex = rows.findIndex((row) => /todo.*running.*failed.*done/u.test(row))
     expect(pillsRowIndex, "pills row renders below the rows").toBeGreaterThan(rows.indexOf(second!))
     const flowIndex = rows.findIndex((row) => row.includes("╭─ FLOW "))
     expect(flowIndex).toBeGreaterThan(pillsRowIndex)
@@ -4457,12 +4458,12 @@ describe("runYrd", () => {
         ),
       )
       const rows = fixed.split("\n")
-      const filter = rows.find((row) => /pending.*running.*failed.*done/u.test(row))
+      const filter = rows.find((row) => /todo.*running.*failed.*done/u.test(row))
       // The pills share the row with the left-aligned coverage text ("retained
       // since …" / "... N more"), so assert the pill cluster is present rather
       // than owning the whole row (W1, 2026-07-16). Item 3: no "FILTER" label,
       // no [p] brackets — the since= dimension survives, pills are plain words.
-      expect.soft(filter).toContain("since=6:00:00 pending running failed done")
+      expect.soft(filter).toContain("since=6:00:00 todo running failed done")
       // The FLOW + TIME boxes read the SAME consolidated queueFlowMetrics
       // aggregate at every tier. The landed per-24h throughput fact stays in the
       // aggregate (projection.metrics.throughput) for --json consumers.
@@ -4598,7 +4599,7 @@ describe("runYrd", () => {
       const frame = stripOsc8Targets(frameHandle.text)
       expect(frame).toContain("pr#1.1")
       expect(frame).toContain("QUEUE main")
-      expect(frame).toContain("pending")
+      expect(frame).toContain("todo")
       expect(frame).not.toContain("position 1")
       expect(frame).toContain("AGE")
       expect(frame).toContain("WAIT")
@@ -4630,6 +4631,9 @@ describe("runYrd", () => {
           headSha: HEAD_SHA,
           revisions: [submittedRevision(1, HEAD_SHA, "2026-07-09T12:00:00.000Z")],
           submittedAt: "2026-07-09T12:00:00.000Z",
+          reviews: [],
+          comments: [],
+          checkRequests: [],
         },
         {
           id: "PR2",
@@ -4641,34 +4645,55 @@ describe("runYrd", () => {
           headSha: "2".repeat(40),
           revisions: [submittedRevision(1, "2".repeat(40), "2026-07-09T12:01:00.000Z")],
           submittedAt: "2026-07-09T12:01:00.000Z",
+          reviews: [],
+          comments: [],
+          checkRequests: [],
         },
       ],
       running: [],
       waiting: [],
       finished: [],
     } as unknown as QueueStatusResult
-    const handle = await run(
-      createElement(QueueWatchFrame, {
-        snapshot: { results: [result], now: Date.parse("2026-07-09T12:02:00.000Z") },
-      }),
-      { writable: { write: () => {} }, cols: 120, rows: 30 },
-    )
+    const now = Date.parse("2026-07-09T12:02:00.000Z")
+    // The PR-scoped detail reads projected rows (user directive 2026-07-21), so
+    // the watch snapshot carries the projection production always computes; the
+    // PR facts (reviews/comments/checkRequests) are present too. At the right
+    // tier the detail is docked open from mount, so it follows the cursor with
+    // no Enter.
+    const projection = queueTimelineProjection([result], {
+      now,
+      windowMs: 6 * 60 * 60_000,
+      statuses: ["pending", "running", "rejected", "integrated", "other"],
+      terms: [],
+      latest: false,
+      rowLimit: 20,
+      submissionTimes: queueTimelineAdmissionTimes([result]),
+    })
+    const handle = await run(createElement(QueueWatchFrame, { snapshot: { results: [result], now, projection } }), {
+      writable: { write: () => {} },
+      cols: 200,
+      rows: 50,
+    })
 
     try {
-      expect(handle.text).toContain("> 2m submitted pr#1.1")
-      expect(handle.text).toContain(`HEAD     ${HEAD_SHA}`)
+      // Default cursor is the first row (PR1); the detail follows it with no
+      // Enter, heading the pane with its PR-scoped title and its HEAD fact (the
+      // uppercase key padded to the fact column width).
+      expect(handle.text.split("\n")[0]).toContain("pr#1.1")
+      expect(handle.text).toContain(`HEAD      ${HEAD_SHA}`)
       expect(handle.text).not.toMatch(/\bPRS\b/giu)
 
       await handle.press("j")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("> 1m submitted pr#2.1")
-      expect(handle.text).toContain(`HEAD     ${"2".repeat(40)}`)
-      expect(handle.text).not.toContain(`HEAD     ${HEAD_SHA}`)
+      // The cursor moved to PR2 and the detail followed — still no Enter.
+      expect(handle.text.split("\n")[0]).toContain("pr#2.1")
+      expect(handle.text).toContain(`HEAD      ${"2".repeat(40)}`)
+      expect(handle.text).not.toContain(`HEAD      ${HEAD_SHA}`)
 
       await handle.press("Enter")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain(`HEAD     ${"2".repeat(40)}`)
-      expect(handle.text).not.toContain(`HEAD     ${HEAD_SHA}`)
+      expect(handle.text).toContain(`HEAD      ${"2".repeat(40)}`)
+      expect(handle.text).not.toContain(`HEAD      ${HEAD_SHA}`)
     } finally {
       handle.unmount()
     }
@@ -4804,29 +4829,29 @@ describe("runYrd", () => {
       // Right-docked: the DETAIL pane's identity title (item M — the selected
       // `PR.rev`) shares the top row with the QUEUE tab.
       expect(wide.text.split("\n")[0]).toMatch(/pr#\d+\.\d+/u)
-      expect(wide.text).toContain(`HEAD     ${HEAD_SHA}`)
+      expect(wide.text).toContain(`HEAD      ${HEAD_SHA}`)
       await wide.press("Escape")
       await wide.waitForLayoutStable()
-      expect(wide.text).not.toContain(`HEAD     ${HEAD_SHA}`)
+      expect(wide.text).not.toContain(`HEAD      ${HEAD_SHA}`)
       await wide.press("Enter")
       await wide.waitForLayoutStable()
-      expect(wide.text).toContain(`HEAD     ${HEAD_SHA}`)
+      expect(wide.text).toContain(`HEAD      ${HEAD_SHA}`)
 
       expect(below.text).toContain("─")
       // Below-docked: the detail identity title is not on the top row.
       expect(below.text.split("\n")[0]).not.toMatch(/PR\d+\.\d+/u)
-      expect(below.text).toContain(`HEAD     ${HEAD_SHA}`)
+      expect(below.text).toContain(`HEAD      ${HEAD_SHA}`)
 
       expect(compact.text).toContain("QUEUE main")
-      expect(compact.text).not.toContain(`HEAD     ${HEAD_SHA}`)
+      expect(compact.text).not.toContain(`HEAD      ${HEAD_SHA}`)
       await compact.press("Enter")
       await compact.waitForLayoutStable()
-      expect(compact.text).toContain(`HEAD     ${HEAD_SHA}`)
+      expect(compact.text).toContain(`HEAD      ${HEAD_SHA}`)
       expect(compact.text).not.toContain("QUEUE main")
       await compact.press("Escape")
       await compact.waitForLayoutStable()
       expect(compact.text).toContain("QUEUE main")
-      expect(compact.text).not.toContain(`HEAD     ${HEAD_SHA}`)
+      expect(compact.text).not.toContain(`HEAD      ${HEAD_SHA}`)
     } finally {
       wide.unmount()
       below.unmount()
@@ -5003,7 +5028,7 @@ describe("runYrd", () => {
     })
     expect(await runYrd(app, yrd("queue", "ls", "--latest"), status.io), status.stderr()).toBe(0)
     expect(status.stdout()).toContain("pr#1.1")
-    expect(status.stdout()).toContain("pending")
+    expect(status.stdout()).toContain("todo")
   })
 
   it("uses the queue timeline by default while --latest only changes row projection", async () => {
@@ -5025,7 +5050,7 @@ describe("runYrd", () => {
 
     expect(plain.stdout()).toContain("pr#1.1")
     expect(plain.stdout()).toContain("pr#2.1")
-    expect(plain.stdout()).toContain("pending")
+    expect(plain.stdout()).toContain("todo")
     expect(latest.stdout()).toContain("pr#1.1")
     expect(latest.stdout()).toContain("pr#2.1")
     // Non-default-only FILTER row (user respec 2026-07-15): `latest` renders

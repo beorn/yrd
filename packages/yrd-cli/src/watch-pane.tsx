@@ -24,6 +24,7 @@ import {
 import type { PR } from "@yrd/bay"
 import {
   QUEUE_TIMELINE_STATUS_BUCKETS,
+  QueueDetailRunHeader,
   QueueDetailRunPrBlocks,
   QueueDetailTitle,
   QueueShowView,
@@ -130,7 +131,7 @@ export type QueueWatchSnapshot = Readonly<{
   now: number
   projection?: QueueTimelineProjection
   outputs?: readonly QueueArtifactOutput[]
-  /** Revision-bound source deltas for the synthetic submit step. */
+  /** Revision-bound source deltas shown in the PR-scoped detail header. */
   diffs?: readonly QueuePrDiff[]
   /** Resolved project commands for the live step headers. */
   commands?: Readonly<Record<string, string>>
@@ -340,22 +341,67 @@ export function resolveStepTabSelection(
   return userSelectedStep !== null && names.includes(userSelectedStep) ? userSelectedStep : liveStep
 }
 
-/** Step output is static inside the single scroll owner shared by its tab. */
-function QueueInlineArtifactOutputRows({ outputs }: { outputs: readonly QueueArtifactOutput[] }) {
-  const lines = useMemo(() => queueArtifactOutputLines(outputs, true), [outputs])
-  if (lines.length === 0) return null
+/** The collapsed command block shows at most this many trailing output lines. */
+const COMMAND_OUTPUT_TAIL_LINES = 10
+
+function QueueArtifactOutputRow({ row }: { row: QueueArtifactOutputLine }) {
   return (
-    <Box flexDirection="column" minWidth={0}>
-      {lines.map((row) => (
-        <Box key={row.key} minWidth={0}>
-          {row.kind === "link" ? (
-            <Link href={row.href}>{row.text}</Link>
-          ) : (
-            <Text color="$fg-muted" bgConflict="ignore" wrap="wrap" minWidth={0}>
-              {row.text === "" ? " " : row.text}
-            </Text>
-          )}
+    <Box minWidth={0}>
+      {row.kind === "link" ? (
+        <Link href={row.href}>{row.text}</Link>
+      ) : (
+        <Text color="$fg-muted" bgConflict="ignore" wrap="wrap" minWidth={0}>
+          {row.text === "" ? " " : row.text}
+        </Text>
+      )}
+    </Box>
+  )
+}
+
+/**
+ * A Silver-Code-style command block (user directive 2026-07-21): the `$ cmd`
+ * header row stays visible while the output beneath it renders as a bounded
+ * tail window — the last {@link COMMAND_OUTPUT_TAIL_LINES} lines scrolling by
+ * live — and clicking the block toggles the full log. A step's command list
+ * is never buried by one command's output. Proof-link and truncation rows
+ * stay pinned above the window.
+ */
+function QueueCommandExecutionBlock({
+  command,
+  outputs,
+}: {
+  command?: string
+  outputs: readonly QueueArtifactOutput[]
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const toggle = () => setExpanded((current) => !current)
+  const lines = useMemo(() => queueArtifactOutputLines(outputs, true), [outputs])
+  const chrome = lines.filter((row) => row.kind !== "body")
+  const body = lines.filter((row) => row.kind === "body")
+  const visibleBody = expanded ? body : body.slice(-COMMAND_OUTPUT_TAIL_LINES)
+  const hidden = body.length - visibleBody.length
+  return (
+    <Box flexDirection="column" minWidth={0} userSelect="text" {...(expanded ? { onClick: toggle } : {})}>
+      <Box height={1} flexShrink={0} />
+      {command === undefined ? null : (
+        <Box backgroundColor="$bg-surface-subtle" paddingX={1} flexShrink={0} minWidth={0} onClick={toggle}>
+          <Text bold wrap="truncate">
+            $ {command}
+          </Text>
         </Box>
+      )}
+      {chrome.map((row) => (
+        <QueueArtifactOutputRow key={row.key} row={row} />
+      ))}
+      {hidden === 0 ? null : (
+        <Box minWidth={0} onClick={toggle}>
+          <Text color="$fg-muted" wrap="truncate">
+            … {hidden} earlier {hidden === 1 ? "line" : "lines"} — click to expand
+          </Text>
+        </Box>
+      )}
+      {visibleBody.map((row) => (
+        <QueueArtifactOutputRow key={row.key} row={row} />
       ))}
     </Box>
   )
@@ -483,38 +529,16 @@ function syntheticArtifactAttempt(attempt: string | undefined): number {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 1
 }
 
-function submitClock(data: QueueShowData, prs: readonly PR[]): string {
-  const submitted = data.prs.flatMap((member) => {
-    const pr = prs.find((candidate) => candidate.id === member.id)
-    const revision = pr?.revisions.find(
-      (candidate) => candidate.revision === member.revision && candidate.headSha === member.headSha,
-    )
-    const at = revision?.submittedAt ?? revision?.pushedAt
-    return at === undefined ? [] : [at]
-  })
-  const latest = submitted.toSorted().at(-1)
-  if (latest === undefined) return "time unavailable"
-  const date = new Date(latest)
-  if (Number.isNaN(date.getTime())) return "time unavailable"
-  return new Intl.DateTimeFormat("en-GB", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(date)
-}
-
 function QueueSubmitDiff({
-  data,
   diff,
   expanded,
   onToggle,
 }: {
-  data: QueueShowData
   diff: QueuePrDiff | undefined
   expanded: boolean
   onToggle(): void
 }) {
-  const focusId = `queue-submit-diff-${data.run}-${diff?.pr ?? "missing"}-${diff?.revision ?? "missing"}`
+  const focusId = `queue-submit-diff-${diff?.pr ?? "missing"}-${diff?.revision ?? "missing"}`
   const { activeId } = useFocusManager()
   const focused = activeId === focusId
   useInput(
@@ -574,45 +598,53 @@ function QueueSubmitDiff({
   )
 }
 
-function QueueSubmitPanel({
+/**
+ * The PR-scoped header leading the detail body (user directive 2026-07-21):
+ * the selected member's branch/subject/timeline/facts block plus its
+ * revision-bound source delta. The identity row lives in the pane title
+ * (QueueDetailTitle), so the block renders `titleAbove`.
+ */
+function QueueDetailPrSection({
   data,
   row,
   rows,
   prs,
   runDetails,
   diffs,
+  highlightPr,
 }: {
-  data: QueueShowData
+  data?: QueueShowData
   row?: QueueTimelineProjectedRow
   rows: readonly QueueTimelineProjectedRow[]
   prs: readonly PR[]
   runDetails: readonly QueueShowData[]
   diffs: readonly QueuePrDiff[]
+  highlightPr?: string
 }) {
-  const [expandedPr, setExpandedPr] = useState<string | null>(null)
+  const [diffExpanded, setDiffExpanded] = useState(false)
+  const member =
+    data === undefined
+      ? undefined
+      : (data.prs.find((candidate) => candidate.id === (highlightPr ?? row?.pr)) ?? data.prs[0])
+  const diffTarget = member ?? (row === undefined ? undefined : { id: row.pr, revision: row.revision })
+  const diff =
+    diffTarget === undefined
+      ? undefined
+      : diffs.find((candidate) => candidate.pr === diffTarget.id && candidate.revision === diffTarget.revision)
   return (
-    <Box flexDirection="column" minWidth={0} flexGrow={1}>
-      {data.prs.map((member) => {
-        const key = `${member.id}:${member.revision}`
-        const diff = diffs.find((candidate) => candidate.pr === member.id && candidate.revision === member.revision)
-        return (
-          <Box key={key} flexDirection="column" minWidth={0}>
-            <QueueDetailRunPrBlocks
-              data={{ ...data, prs: [member] }}
-              row={row}
-              rows={rows}
-              prs={prs}
-              runDetails={runDetails}
-            />
-            <QueueSubmitDiff
-              data={data}
-              diff={diff}
-              expanded={expandedPr === key}
-              onToggle={() => setExpandedPr((current) => (current === key ? null : key))}
-            />
-          </Box>
-        )
-      })}
+    <Box flexDirection="column" minWidth={0} flexShrink={0}>
+      <QueueDetailRunPrBlocks
+        titleAbove
+        {...(data === undefined || member === undefined ? {} : { data: { ...data, prs: [member] } })}
+        {...(row === undefined ? {} : { row })}
+        rows={rows}
+        prs={prs}
+        runDetails={runDetails}
+        {...(row?.position === undefined ? {} : { position: row.position })}
+      />
+      {data !== undefined || diff !== undefined ? (
+        <QueueSubmitDiff diff={diff} expanded={diffExpanded} onToggle={() => setDiffExpanded((current) => !current)} />
+      ) : null}
     </Box>
   )
 }
@@ -643,18 +675,21 @@ export function QueueWorkflowStepTabs({
   diffs?: readonly QueuePrDiff[]
 }) {
   const names = useMemo(() => (data === undefined ? [] : queueStepNames(data)), [data])
-  const tabNames = useMemo(() => (data === undefined ? [] : ["submit", ...names]), [data, names])
-  // Revision B makes submission the stable entry point. Runtime step progress
-  // still colors the real tabs; operator selection overrides the initial tab.
-  // The parent remounts on run change, resetting that override.
-  const liveStep = data === undefined ? undefined : "submit"
+  // The synthetic `0: submit` tab is gone (user directive 2026-07-21): the
+  // submission facts live in the PR header above, and the tabs follow the live
+  // step again — the running step, else the last step with activity, else the
+  // first. Operator selection overrides the initial tab; the parent remounts
+  // on run change, resetting that override.
+  const liveStep =
+    data === undefined
+      ? undefined
+      : (data.steps.findLast((step) => step.status === "running")?.step ??
+        data.steps.findLast((step) => step.status !== "requested" && step.status !== "waiting")?.step ??
+        names[0])
   const [userSelectedStep, setUserSelectedStep] = useState<string | null>(null)
-  const activeStep = resolveStepTabSelection(tabNames, liveStep, userSelectedStep)
+  const activeStep = resolveStepTabSelection(names, liveStep, userSelectedStep)
 
   const selectedPr = prs.find((pr) => pr.id === row?.pr) ?? prs[0]
-  const submitted = row?.timestamp === null ? undefined : row?.timestamp
-  const submitStatus =
-    data === undefined ? "" : `✓ ${submitClock(data, prs)} ${data.prs.length} PR${data.prs.length === 1 ? "" : "s"}`
 
   // Round 6 tabs are two-row, equally measured segments. Both active and
   // inactive states are filled, and no flex growth may stretch them past the
@@ -664,8 +699,7 @@ export function QueueWorkflowStepTabs({
       ? 0
       : Math.max(
           1,
-          ...tabNames.map((name) => {
-            if (name === "submit") return Math.max("0: submit".length, submitStatus.length)
+          ...names.map((name) => {
             const rep = data.steps.filter((row) => row.step === name).at(-1)
             const duration = rep?.duration === undefined || rep.duration === "-" ? "" : rep.duration
             const glyph = rep === undefined ? "" : timelineStatusGlyph(rep.status)
@@ -677,16 +711,6 @@ export function QueueWorkflowStepTabs({
         )
   const stepTabLabel = (name: string, selected: boolean) => {
     if (data === undefined) return name
-    if (name === "submit") {
-      return (
-        <Text color={selected ? "$fg-on-selected" : undefined}>
-          {"0: submit".padEnd(stepTabWidth)}
-          {"\n"}
-          <Text color={selected ? "$fg-on-selected" : "$fg-success"}>{submitStatus}</Text>
-          {" ".repeat(Math.max(0, stepTabWidth - submitStatus.length))}
-        </Text>
-      )
-    }
     const stepRows = data.steps.filter((row) => row.step === name)
     const rep = stepRows.at(-1)
     if (rep === undefined) return name
@@ -713,129 +737,107 @@ export function QueueWorkflowStepTabs({
     )
   }
   return (
-    // Detail order (item H, 2026-07-16): run-level facts at the TOP, then the
-    // step TABS row, then the selected step's content BELOW — the tab is the
-    // visual title of the step section, so step title + step contents read as
-    // one grouped unit.
+    // Detail order (user directive 2026-07-21, revising item H 2026-07-16):
+    // the PR-scoped header leads the body — the detail view is FOR a PR —
+    // then the run renders as its own region headed by the filled RUN row:
+    // run-level facts, the step TABS row, and the selected step's content
+    // BELOW — the tab is the visual title of the step section, so step title
+    // + step contents read as one grouped unit.
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-      {data === undefined ? (
+      <QueueDetailPrSection
+        {...(data === undefined ? {} : { data })}
+        {...(row === undefined ? {} : { row })}
+        rows={runRows}
+        prs={prs}
+        runDetails={runDetails}
+        diffs={diffs}
+        {...(highlightPr === undefined ? {} : { highlightPr })}
+      />
+      {data === undefined ? null : (
         <>
-          <QueueDetailRunPrBlocks row={row} rows={runRows} prs={prs} runDetails={runDetails} />
-          {row?.position === undefined ? null : <Text>{`${"POSITION".padEnd(9, " ")}${row.position}`}</Text>}
-          {submitted === undefined ? null : (
-            <Text>{`${"TIMELINE".padEnd(9, " ")}${submitted.slice(11, 19)} → pending`}</Text>
-          )}
-          {selectedPr === undefined ? null : (
-            <Text wrap="truncate" color="$fg-muted">{`${"HEAD".padEnd(9, " ")}${selectedPr.headSha}`}</Text>
-          )}
-        </>
-      ) : activeStep === undefined ? (
-        <>
+          <Box height={1} flexShrink={0} />
+          <QueueDetailRunHeader data={data} />
           <QueueShowView
             data={data}
             compact={compact}
             highlightPr={highlightPr}
             section="run"
             titleAbove
-            showMembers={false}
+            showMembers={data.prs.length > 1}
             showIntegration={false}
           />
-          <QueueSubmitPanel data={data} row={row} rows={runRows} prs={prs} runDetails={runDetails} diffs={diffs} />
-        </>
-      ) : (
-        <>
-          <QueueShowView
-            data={data}
-            compact={compact}
-            highlightPr={highlightPr}
-            section="run"
-            titleAbove
-            showMembers={false}
-            showIntegration={false}
-          />
-          <Tabs value={activeStep} onChange={setUserSelectedStep} isActive={active}>
-            <Box height={1} flexShrink={0} />
-            <TabList>
-              {tabNames.map((name) => (
-                <Box
-                  key={name}
-                  backgroundColor={activeStep === name ? "$bg-selected" : "$bg-surface-subtle"}
-                  paddingLeft={2}
-                  paddingY={1}
-                  width={stepTabWidth + 4}
-                  flexShrink={0}
-                >
-                  <Tab value={name}>{stepTabLabel(name, activeStep === name)}</Tab>
-                </Box>
-              ))}
-            </TabList>
-            <Box height={1} flexShrink={0} />
-            {tabNames.map((name) => {
-              if (name === "submit") {
+          {activeStep === undefined ? null : (
+            <Tabs value={activeStep} onChange={setUserSelectedStep} isActive={active}>
+              <Box height={1} flexShrink={0} />
+              <TabList>
+                {names.map((name) => (
+                  <Box
+                    key={name}
+                    backgroundColor={activeStep === name ? "$bg-selected" : "$bg-surface-subtle"}
+                    paddingLeft={2}
+                    paddingY={1}
+                    width={stepTabWidth + 4}
+                    flexShrink={0}
+                  >
+                    <Tab value={name}>{stepTabLabel(name, activeStep === name)}</Tab>
+                  </Box>
+                ))}
+              </TabList>
+              <Box height={1} flexShrink={0} />
+              {names.map((name) => {
+                const stepRows = data.steps.filter((row) => row.step === name)
+                const stepOutputs = outputs.filter((output) => output.step === name)
+                const stepData: QueueShowData = { ...data, steps: stepRows }
+                // The job input is durable proof of what this run actually executed;
+                // current config is only a preview for a step that has no job yet.
+                const executions = queueStepExecutions({ data, name, stepRows, stepOutputs, commands })
                 return (
                   <TabPanel key={name} value={name}>
-                    <QueueTabScrollArea>
-                      <QueueSubmitPanel
-                        data={data}
-                        row={row}
-                        rows={runRows}
-                        prs={prs}
-                        runDetails={runDetails}
-                        diffs={diffs}
+                    <QueueTabScrollArea followEnd>
+                      {/* Only the step-level facts here (item H); the run-level facts
+                      render once above the tabs. */}
+                      <QueueShowView
+                        data={stepData}
+                        compact={compact}
+                        highlightPr={highlightPr}
+                        section="steps"
+                        showLogArtifacts
+                        {...(selectedPr?.issue === undefined ? {} : { stepIssue: selectedPr.issue })}
                       />
+                      {name === "merge" && data.integration !== undefined ? (
+                        <>
+                          <Text wrap="truncate">COMMIT {data.integration.commit}</Text>
+                          <Text wrap="truncate">
+                            PARENTS {[data.integration.baseSha, ...data.prs.map((pr) => pr.headSha)].join(" ")}
+                          </Text>
+                        </>
+                      ) : null}
+                      {executions.map((execution, index) => (
+                        <QueueCommandExecutionBlock
+                          key={`${name}:execution:${index}`}
+                          {...(execution.command === undefined ? {} : { command: execution.command })}
+                          outputs={execution.outputs}
+                        />
+                      ))}
                     </QueueTabScrollArea>
                   </TabPanel>
                 )
-              }
-              const stepRows = data.steps.filter((row) => row.step === name)
-              const stepOutputs = outputs.filter((output) => output.step === name)
-              const stepData: QueueShowData = { ...data, steps: stepRows }
-              // The job input is durable proof of what this run actually executed;
-              // current config is only a preview for a step that has no job yet.
-              const executions = queueStepExecutions({ data, name, stepRows, stepOutputs, commands })
-              return (
-                <TabPanel key={name} value={name}>
-                  <QueueTabScrollArea followEnd>
-                    {/* Only the step-level facts here (item H); the run-level facts
-                    render once above the tabs. */}
-                    <QueueShowView
-                      data={stepData}
-                      compact={compact}
-                      highlightPr={highlightPr}
-                      section="steps"
-                      showLogArtifacts
-                      {...(selectedPr?.issue === undefined ? {} : { stepIssue: selectedPr.issue })}
-                    />
-                    {name === "merge" && data.integration !== undefined ? (
-                      <>
-                        <Text wrap="truncate">COMMIT {data.integration.commit}</Text>
-                        <Text wrap="truncate">
-                          PARENTS {[data.integration.baseSha, ...data.prs.map((pr) => pr.headSha)].join(" ")}
-                        </Text>
-                      </>
-                    ) : null}
-                    {executions.map((execution, index) => (
-                      <Box key={`${name}:execution:${index}`} flexDirection="column" minWidth={0}>
-                        <Box height={1} flexShrink={0} />
-                        {execution.command === undefined ? null : (
-                          <Box backgroundColor="$bg-surface-subtle" paddingX={1} flexShrink={0} minWidth={0}>
-                            <Text bold wrap="truncate">
-                              $ {execution.command}
-                            </Text>
-                          </Box>
-                        )}
-                        <QueueInlineArtifactOutputRows outputs={execution.outputs} />
-                      </Box>
-                    ))}
-                  </QueueTabScrollArea>
-                </TabPanel>
-              )
-            })}
-          </Tabs>
+              })}
+            </Tabs>
+          )}
         </>
       )}
     </Box>
   )
+}
+
+/** The selected PR's linked issue for the PR-scoped pane title. */
+function selectedDetailIssue(
+  prs: readonly PR[],
+  selectedPr: string | undefined,
+  fallbackPr: string | undefined,
+): string | undefined {
+  return prs.find((candidate) => candidate.id === (selectedPr ?? fallbackPr))?.issue
 }
 
 export function QueueWatchFrame({
@@ -995,8 +997,10 @@ export function QueueWatchFrame({
     }
     if (snapshot.projection === undefined) return
     // Direct status-filter toggles (user respec 2026-07-15). Pause/resume is
-    // removed: `p` toggles the pending bucket.
-    if (input === "p") toggleBucket("pending")
+    // removed. `t` toggles the todo (pending) bucket, matching the pill's
+    // bold-first-letter hint (pending displays as `todo`, user directive
+    // 2026-07-21).
+    if (input === "t") toggleBucket("pending")
     if (input === "r") toggleBucket("running")
     if (input === "f") toggleBucket("failed")
     if (input === "d") toggleBucket("done")
@@ -1066,6 +1070,9 @@ export function QueueWatchFrame({
     detailData?.prs.map((member) => member.id) ?? (detailPr === undefined ? [] : [detailPr]),
   )
   const detailFullPrs = allFullPrs.filter((candidate) => detailMemberIds.has(candidate.id))
+  // The pane title is PR-scoped (user directive 2026-07-21): it carries the
+  // selected PR's linked issue beside the pr#id identity.
+  const detailTitleIssue = selectedDetailIssue(allFullPrs, selectedRow?.pr, detailPr)
   const timelineColumns = queueTimelineColumns(columns, tier, detailOpen, splitRatio)
   const timelineRows = queueTimelineHeight(Math.max(0, viewportRows - 1), tier, detailOpen, splitRatio)
   const timeline =
@@ -1135,8 +1142,10 @@ export function QueueWatchFrame({
   // QUEUE and DETAIL are PANES, not boxes (user directive 2026-07-16, items
   // L/M) — no surrounding rounded border; the SplitPane divider separates them.
   // QUEUE is headed by its tab-style label (rendered inside `timeline`); DETAIL
-  // is headed by an emphasized run identity with STATUS/OUTCOME right-aligned,
-  // then exactly one blank row and the run-scoped body.
+  // is headed by the selected PR's identity + ISSUE with STATUS/OUTCOME
+  // right-aligned (user directive 2026-07-21 — the detail view is FOR a PR),
+  // with the branch row reading directly beneath it and the run demoted to its
+  // own filled-header region in the body.
   // One cell of horizontal padding keeps content off the
   // pane edge; the title sits flush at the top.
   const framedTimeline = (
@@ -1157,8 +1166,9 @@ export function QueueWatchFrame({
       <QueueDetailTitle
         {...(selectedProjectedRow === undefined ? {} : { row: selectedProjectedRow })}
         {...(detailData === undefined ? {} : { data: detailData })}
+        {...(detailTitleIssue === undefined ? {} : { issue: detailTitleIssue })}
+        live
       />
-      <Box height={1} flexShrink={0} />
       <Box flexGrow={1} minWidth={0} minHeight={0}>
         {detail}
       </Box>

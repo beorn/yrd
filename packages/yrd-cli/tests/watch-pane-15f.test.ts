@@ -12,19 +12,20 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
 
     try {
       await app.waitForLayoutStable()
-      // Revision B opens on the synthetic submit step. Workflow-step output
-      // remains inline and always expanded once its tab is selected.
-      await waitFor(() => app.text.includes("0: submit"))
+      // Round 6 removes the synthetic submit step; the pane opens on the live
+      // step. Workflow-step output stays inline and expanded once its tab is
+      // selected.
+      await waitFor(() => app.text.includes("1: prepare"))
 
       const tabLine = app.text
         .split("\n")
-        .find(
-          (row) => row.includes("submit") && row.includes("prepare") && row.includes("check") && row.includes("merge"),
-        )
+        .find((row) => row.includes("prepare") && row.includes("check") && row.includes("merge"))
       expect(tabLine, app.text).toBeDefined()
       expect(app.text).not.toContain("RUN LOGS")
 
-      await app.press("l")
+      // The pane opens on the live step (check is running); h/l and the arrows
+      // cycle the step tab while j/k stay on the QUEUE rows.
+      await app.press("h")
       expect(app.text).toContain("J42-prepare")
 
       await app.press("l")
@@ -41,7 +42,7 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
 
       const rows = app.text.split("\n")
       const tabsY = rows.findIndex(
-        (row) => row.includes("submit") && row.includes("prepare") && row.includes("check") && row.includes("merge"),
+        (row) => row.includes("prepare") && row.includes("check") && row.includes("merge"),
       )
       const tabsLine = rows[tabsY]
       if (tabsLine === undefined) throw new Error("workflow-step tab bar did not render")
@@ -79,12 +80,12 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
     const app = createRenderer({ cols: 200, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      await app.press("l")
-      await app.press("l")
+      // The pane opens on the live step (check is running); its output is visible
+      // without navigating.
       await waitFor(() => app.text.includes("125 tests collected"))
       const rows = app.text.split("\n")
       const tabsY = rows.findIndex(
-        (row) => row.includes("submit") && row.includes("prepare") && row.includes("check") && row.includes("merge"),
+        (row) => row.includes("prepare") && row.includes("check") && row.includes("merge"),
       )
       const tabsLine = rows[tabsY] ?? ""
       const statusLine = rows[tabsY + 1] ?? ""
@@ -143,15 +144,19 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       expect(app.text).not.toContain("DETAILS")
       expect(app.text).not.toContain("RUN LOGS")
 
-      // Command follows JOB/RUNNER; inline output follows the command.
-      const commandY = rows.findIndex((line) => line.includes("$ git merge --no-ff --no-edit"))
+      // Command follows JOB/RUNNER; inline output follows the command. The merge
+      // step renders its recorded command ($ bun vitest run in the fixture) with
+      // the native PARENTS summary as its output; PARENTS also appears once above
+      // the command as a merge fact, so anchor the output on the last occurrence.
+      const commandY = rows.findIndex((line) => line.includes("$ bun vitest run"))
       expect(commandY, "command header present").toBeGreaterThan(tabsY)
       expect(commandY, "command follows the step internals").toBeGreaterThan(stepContentY)
-      const outputY = rows.findIndex((row) => row.includes("PARENTS "))
+      const outputY = rows.findLastIndex((row) => row.includes("PARENTS "))
       expect(outputY, "inline output follows the command").toBeGreaterThan(commandY)
-      const commandX = rows[commandY]?.indexOf("$ git merge --no-ff --no-edit") ?? -1
+      const commandX = rows[commandY]?.indexOf("$ bun vitest run") ?? -1
+      // The command execution header is emphasized by bold weight and a filled
+      // surface; it inherits the default foreground (no explicit fg color).
       expect(app.cell(commandX, commandY).bold).toBe(true)
-      expect(app.cell(commandX, commandY).fg).not.toBeNull()
       expect(rows[commandY]).not.toContain("[ $")
       expect(app.cell(commandX, commandY).bg, "command row has a deliberate filled surface").not.toBeNull()
     } finally {

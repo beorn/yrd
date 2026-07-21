@@ -47,14 +47,16 @@ describe("synchronized activity pulse (items 12-13)", () => {
     const app = render(tree())
     try {
       await app.waitForLayoutStable()
-      expect(app.text).toContain("● [84042] resident runner")
-      const markerBefore = cellOf(app, "●", "resident runner").fg
+      // The runner row is now `$ <command> [pid]` — the pulsing `$` shell prompt
+      // leads, the command follows, the muted pid trails (user directive 2026-07-21).
+      expect(app.text).toContain("$ resident runner [84042]")
+      const markerBefore = cellOf(app, "$", "resident runner").fg
       const commandBefore = cellOf(app, "resident", "resident runner").fg
 
       await vi.advanceTimersByTimeAsync(900)
       app.rerender(tree())
 
-      expect(cellOf(app, "●", "resident runner").fg, "marker advances to the next pulse phase").not.toEqual(
+      expect(cellOf(app, "$", "resident runner").fg, "marker advances to the next pulse phase").not.toEqual(
         markerBefore,
       )
       expect(cellOf(app, "resident", "resident runner").fg, "command remains static across marker phases").toEqual(

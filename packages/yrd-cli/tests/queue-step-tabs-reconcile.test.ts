@@ -218,8 +218,8 @@ describe("queue step tabs same-run reconciliation (21106)", () => {
     expect(frame).not.toContain("stale-config")
   })
 
-  it("keeps submit selected when the live runtime step advances underneath the pane", async () => {
-    // First: check is running (auto-selected), integrate is still queued.
+  it("follows the live step as the runtime step advances underneath the pane", async () => {
+    // First: check is running (auto-selected as the live step), integrate is still queued.
     const first: readonly StepState[] = [
       { name: "check", status: "running" },
       { name: "integrate", status: "requested" },
@@ -230,10 +230,16 @@ describe("queue step tabs same-run reconciliation (21106)", () => {
       { name: "integrate", status: "running" },
     ]
 
-    expect(await renderOnce(first)).not.toContain("live check output")
+    // A fresh mount selects the running step and streams its output; the
+    // synthetic `0: submit` tab is gone in round 6.
+    const initial = await renderOnce(first)
+    expect(initial).not.toContain("0: submit")
+    expect(initial).toContain("live check output")
+
+    // A same-run advance moves the un-pinned selection to the newly running step.
     const advanced = await renderAdvance(first, second)
-    expect(advanced).toContain("0: submit")
-    expect(advanced).not.toContain("live integrate output")
+    expect(advanced).not.toContain("0: submit")
+    expect(advanced).toContain("live integrate output")
   })
 
   it("keeps a step's output expanded once that step completes in the same run", async () => {
@@ -249,14 +255,14 @@ describe("queue step tabs same-run reconciliation (21106)", () => {
     expect(advanced).toContain("live check output")
   })
 
-  it("selects submit on a fresh mount, mirroring a new-run remount", async () => {
+  it("selects the live step on a fresh mount, mirroring a new-run remount", async () => {
     const started: readonly StepState[] = [
       { name: "check", status: "passed" },
       { name: "integrate", status: "running" },
     ]
     const frame = await renderOnce(started)
-    expect(frame).toContain("0: submit")
-    expect(frame).not.toContain("live integrate output")
+    expect(frame).not.toContain("0: submit")
+    expect(frame).toContain("live integrate output")
   })
 })
 

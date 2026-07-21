@@ -61,7 +61,7 @@ describe("queue watch user round 6", () => {
     }
   })
 
-  it("renders the final v4 run header and complete reverse-chronological PR blocks", async () => {
+  it("renders the final v4 run header, the primary PR block, and reverse-chronological revisions", async () => {
     const commit = "b".repeat(40)
     const baseSha = "a".repeat(40)
     const leadHead1 = "7".repeat(40)
@@ -211,21 +211,25 @@ describe("queue watch user round 6", () => {
       await app.waitForLayoutStable()
 
       const rows = app.text.split("\n")
-      const titleY = rows.findIndex((row) => row.includes("RUN main#60"))
-      const detailX = rows[titleY]?.indexOf("RUN main#60") ?? -1
+      const titleY = rows.findIndex((row) => row.includes("pr#60.4"))
+      const detailX = rows[titleY]?.indexOf("pr#60.4") ?? -1
       expect(titleY).toBeGreaterThanOrEqual(0)
-      expect(rows[titleY + 1]?.slice(detailX).trim(), "exactly one blank row follows the identity title").toBe("")
-      expect(rows[titleY + 1]?.slice(detailX)).not.toMatch(/\d+(?:h|m|s)/u)
+      // The branch row sits directly under the PR-scoped identity title — the old
+      // spacer row after the title is gone, and no elapsed time leaks into it.
+      expect(rows[titleY + 1]?.slice(detailX)).toContain("topic/pr60")
+      expect(rows[titleY]?.slice(detailX)).not.toMatch(/\d+(?:h|m|s)/u)
+      expect(rows[titleY]).not.toContain("RUN main#60")
       expect(rows[titleY]).not.toContain("PR60")
       expect(rows[titleY]).not.toContain("PR61")
       expect(app.text).not.toMatch(/[▸•]\s+PRS\b/u)
       expect(app.text).not.toContain("TIMELINE")
       expect(app.text).not.toContain("LANDING")
       expect(app.text).not.toContain("ISSUE")
-      expect(app.text).toContain("0: submit")
-      expect(app.text).toContain("2 PRs")
+      expect(app.text).toContain("1: merge")
+      // Round 6 replaces the per-member PR blocks with the primary block plus a
+      // PRs summary row that lists every member PR.
+      expect(app.text).toMatch(/PRs\s+pr#60\.4.*pr#61\.1/u)
       expect(app.text).not.toContain(`Committed as ${commit} on main`)
-      expect(app.text).not.toContain(`COMMIT ${commit}`)
       expect(app.text).toMatch(
         /Started \d{2}:\d{2}:\d{2}, ended \d{2}:\d{2}:\d{2} \(total \d+:\d{2}, wait (?:0|\d+:\d{2})\)/u,
       )
@@ -235,24 +239,24 @@ describe("queue watch user round 6", () => {
       expect(app.text).toContain("pr#60.4 @yrd/core/21514-detail-pane")
       expect(app.text).toContain(`${BRANCH_GLYPH} topic/pr60`)
       expect(app.text).not.toContain(`${BRANCH_GLYPH} topic/pr60 - @yrd/core/21514-detail-pane`)
-      expect(app.text).toContain("- Lead title may wrap across the detail pane")
-      expect(app.text).toContain("  First description line")
-      expect(app.text).toContain("  Second description line may wrap")
-      expect(app.text).toContain("- note: visual confirmation required")
-      expect(app.text).toContain("- correlation: tribe:21514-round6-agent1")
-      expect(app.text).toContain("- requested reviewers: @chief")
-      expect(app.text).toMatch(/- \d{2}:\d{2} check requested/u)
+      // Subject has no "- " prefix; description lines have no 2-space indent.
+      expect(app.text).toContain("Lead title may wrap across the detail pane")
+      expect(app.text).toContain("First description line")
+      expect(app.text).toContain("Second description line may wrap")
+      // note / correlation / requested reviewers / check-requested render as
+      // uppercase KEY/value fact rows, not "- key: value" timeline lines.
+      expect(app.text).toMatch(/NOTE\s+visual confirmation required/u)
+      expect(app.text).toMatch(/CORRELATION\s+tribe:21514-round6-agent1/u)
+      expect(app.text).toMatch(/REQUESTED REVIEWERS\s+@chief/u)
+      expect(app.text).toMatch(/CHECK REQUESTED\s+\d{2}:\d{2}/u)
       expect(app.text).not.toMatch(/- check requested: \d{2}:\d{2}/u)
-      expect(app.text).toMatch(/- \d{2}:\d{2} r4 integrated \(age 11:00\)/u)
-      expect(app.text).toMatch(/- \d{2}:\d{2} r3 rejected \(err=visual-rejected — round-3 density was rejected\)/u)
-      expect(app.text).toMatch(/- \d{2}:\d{2} r2 rejected \(err=visual-rejected — round-2 hierarchy was rejected\)/u)
-      expect(app.text).toMatch(/- \d{2}:\d{2} r1 rejected \(err=mock-mismatch — round-1 detail layout was rejected\)/u)
-      expect(app.text).toMatch(/- \d{2}:\d{2} submitted by @ci/u)
-      expect(app.text).toContain("pr#61.1 @yrd/core/21525-queue-watch")
-      expect(app.text).toContain(`${BRANCH_GLYPH} topic/pr61`)
-      expect(app.text).toContain("- Partner subject")
+      // Timeline lines are bare (no leading "- "), strictly newest-first.
+      expect(app.text).toMatch(/\d{2}:\d{2} r4 integrated \(age 11:00\)/u)
+      expect(app.text).toMatch(/\d{2}:\d{2} r3 rejected \(err=visual-rejected — round-3 density was rejected\)/u)
+      expect(app.text).toMatch(/\d{2}:\d{2} r2 rejected \(err=visual-rejected — round-2 hierarchy was rejected\)/u)
+      expect(app.text).toMatch(/\d{2}:\d{2} r1 rejected \(err=mock-mismatch — round-1 detail layout was rejected\)/u)
+      expect(app.text).toMatch(/\d{2}:\d{2} submitted by @ci/u)
       expect(app.text).toContain("Diff +324 / -323 lines")
-      expect(app.text).toContain("diff unavailable (refs pruned)")
       expect(app.text).not.toContain("src/detail-pane.tsx")
       expect(app.text).not.toContain("click to expand")
 
@@ -266,7 +270,7 @@ describe("queue watch user round 6", () => {
 
       const prY = rows.findIndex((line) => line.slice(detailX).includes("pr#60.4"))
       const prX = rows[prY]?.indexOf("pr#60.4") ?? -1
-      const titleBlockY = rows.findIndex((line) => line.slice(detailX).includes("- Lead title may wrap"))
+      const titleBlockY = rows.findIndex((line) => line.slice(detailX).includes("Lead title may wrap"))
       const titleX = rows[titleBlockY]?.indexOf("Lead title") ?? -1
       const bodyY = rows.findIndex((line) => line.slice(detailX).includes("First description line"))
       const bodyX = rows[bodyY]?.indexOf("First description line") ?? -1
@@ -303,10 +307,15 @@ describe("queue watch user round 6", () => {
       await app.click(mergeTab[0], mergeTab[1])
       await app.waitForLayoutStable()
       expect(app.text).toContain(`COMMIT ${commit}`)
+      // The merge tab's step content (below the tab bar) carries the run-level
+      // COMMIT/PARENTS, never a repeated PR-id block — the pr#id now lives only in
+      // the persistent identity title above the tabs.
       const divider = app.text.split("\n")[0]?.indexOf("│") ?? -1
+      const stepRows = app.text.split("\n")
+      const mergeTabRow = stepRows.findIndex((line) => line.includes("1: merge"))
       expect(
-        app.text
-          .split("\n")
+        stepRows
+          .slice(mergeTabRow)
           .map((line) => line.slice(divider + 1))
           .join("\n"),
       ).not.toContain("pr#60.4")
@@ -369,7 +378,12 @@ describe("queue watch user round 6", () => {
     const app = createRenderer({ cols: 200, rows: 50 })(h(QueueWatchFrame, { snapshot: { ...snapshot, diffs } }))
     try {
       await app.waitForLayoutStable()
+      // The detail shows only the cursor PR's diff, so each member PR's
+      // unavailable reason is read from that PR's own row: git error on the first
+      // member, pruned refs on the second.
       expect(app.text).toContain("diff unavailable (git error)")
+      await app.press("j")
+      await app.waitForLayoutStable()
       expect(app.text).toContain("diff unavailable (refs pruned)")
     } finally {
       app.unmount()
@@ -383,15 +397,10 @@ describe("queue watch user round 6", () => {
       await app.waitForLayoutStable()
       const rows = app.text.split("\n")
       const tabsY = rows.findIndex(
-        (row) =>
-          row.includes("0: submit") &&
-          row.includes("1: prepare") &&
-          row.includes("2: check") &&
-          row.includes("3: merge"),
+        (row) => row.includes("1: prepare") && row.includes("2: check") && row.includes("3: merge"),
       )
       const tabRow = rows[tabsY] ?? ""
       const statusRow = rows[tabsY + 1] ?? ""
-      const submitX = tabRow.indexOf("0: submit")
       const prepareX = tabRow.indexOf("1: prepare")
       const checkX = tabRow.indexOf("2: check", prepareX)
       const mergeX = tabRow.indexOf("3: merge", checkX)
@@ -399,9 +408,12 @@ describe("queue watch user round 6", () => {
       const secondStride = mergeX - checkX
 
       expect(tabsY).toBeGreaterThanOrEqual(0)
+      // Round 6 drops the synthetic submit tab; the pane opens on the live step
+      // (check is running), so check is the default-selected tab and prepare is
+      // inactive. Both tabs are filled, with distinct surfaces.
       expect(app.cell(prepareX, tabsY).bg, "inactive tab has a background fill").not.toBeNull()
-      expect(app.cell(submitX, tabsY).bg, "default-selected submit tab has a background fill").not.toBeNull()
-      expect(app.cell(prepareX, tabsY).bg).not.toEqual(app.cell(submitX, tabsY).bg)
+      expect(app.cell(checkX, tabsY).bg, "default-selected check tab has a background fill").not.toBeNull()
+      expect(app.cell(prepareX, tabsY).bg).not.toEqual(app.cell(checkX, tabsY).bg)
       expect(Math.abs(firstStride - secondStride), "all tabs use the widest content width").toBeLessThanOrEqual(1)
       expect(firstStride, "tabs do not stretch across the whole detail pane").toBeLessThan(20)
       expect(statusRow).toMatch(/✓ passed\s+\d+(?:m(?:\d+s)?|s)/u)
@@ -414,10 +426,10 @@ describe("queue watch user round 6", () => {
       expect(app.cell(prepareX, tabsY + 2).bg, "one blank row below content inherits the tab fill").toEqual(
         app.cell(prepareX, tabsY).bg,
       )
-      expect(rows[tabsY - 2]?.slice(submitX - 2).trim(), "one unfilled blank row sits above the padded tab row").toBe(
+      expect(rows[tabsY - 2]?.slice(prepareX - 2).trim(), "one unfilled blank row sits above the padded tab row").toBe(
         "",
       )
-      expect(rows[tabsY + 3]?.slice(submitX - 2).trim(), "one unfilled blank row sits below the padded tab row").toBe(
+      expect(rows[tabsY + 3]?.slice(prepareX - 2).trim(), "one unfilled blank row sits below the padded tab row").toBe(
         "",
       )
       expect(rows[tabsY + 2]).not.toMatch(/◷\s+\d/u)
@@ -598,7 +610,7 @@ describe("queue watch user round 6", () => {
     }
   })
 
-  it("keeps the tail of a long expanded diff reachable inside the shared submit tab scroll", async () => {
+  it("renders the complete expanded diff inline, tail included, without a submit-tab scroll", async () => {
     const story = queueTimelineStories["production-overview"]
     const firstDiff = story.snapshot.diffs?.[0]
     if (firstDiff === undefined || "unavailable" in firstDiff) {
@@ -614,15 +626,18 @@ describe("queue watch user round 6", () => {
         },
       ],
     }
-    const app = createRenderer({ cols: 200, rows: 34 })(h(QueueWatchFrame, { snapshot }))
+    // Round 6 moves the diff out of the scrollable submit tab into the PR header
+    // section, where an expanded diff renders its full patch inline (no per-diff
+    // scroll). A viewport tall enough to hold the whole diff shows the complete
+    // patch, tail included; a collapsed diff shows only its summary.
+    const app = createRenderer({ cols: 200, rows: 130 })(h(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
+      expect(app.text).not.toContain(tail)
       const summary = pointOf(app.text, "Diff +")
       await app.click(summary[0], summary[1])
       await app.waitForLayoutStable()
-      expect(app.text).not.toContain(tail)
-      for (let index = 0; index < 40; index += 1) await app.wheel(150, 25, 3)
-      await app.waitForLayoutStable()
+      expect(app.text).toContain("+long diff row 1")
       expect(app.text).toContain(tail)
     } finally {
       app.unmount()
