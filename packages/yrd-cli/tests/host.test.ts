@@ -173,6 +173,43 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     }
   })
 
+  it("threads an explicit diagnostics comparator into the installed runtime step", async () => {
+    const { repo, featureSha } = await repository()
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["lint"],
+      requires: [],
+      definitions: {
+        lint: {
+          run: "printf 'src/shared.ts:1:1 - shared diagnostic\\n'; exit 17",
+          runner: "local",
+          comparison: "diagnostics",
+        },
+      },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["lint"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+    await using app = await createDefaultYrdApp({
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal: createMemoryJournal(),
+      process: runtimeProcess,
+      config,
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]
+    expect(run).toMatchObject({ status: "passed" })
+    const job = run?.steps[0]?.job
+    if (job?.status !== "passed") throw new Error("diagnostics-comparison step did not pass")
+    expect(GitCheckEvidenceSchema.parse(job.output).comparison).toMatchObject({
+      netNewDiagnostics: [],
+      resolvedDiagnostics: [],
+    })
+  })
+
   it("activates projection checkpoints for the complete built-in projector stack", async () => {
     const { repo, featureSha } = await repository()
     const stateDir = join(repo, ".git", "yrd")
@@ -2741,6 +2778,24 @@ describe("stepNoProgressMs — the no-output-progress bound that stalls a silent
     }
     const baseline = queueStepRevision(input)
     expect(queueStepRevision({ ...input, noProgressMs: 120_000 })).not.toBe(baseline)
+  })
+
+  it("binds the declared diagnostics comparator into the queue step revision identity", () => {
+    const toolchain = { bun: "1.3.0", node: "24.0.0", platform: "darwin", arch: "arm64" }
+    const input = {
+      repo: "/repo",
+      stateDir: "/repo/.git/yrd",
+      name: "lint",
+      config: { run: "bun run lint", runner: "local" as const },
+      timeoutMs: 60_000,
+      noProgressMs: 600_000,
+      toolchain,
+    }
+    const baseline = queueStepRevision(input)
+
+    expect(queueStepRevision({ ...input, config: { ...input.config, comparison: "diagnostics" as const } })).not.toBe(
+      baseline,
+    )
   })
 })
 
