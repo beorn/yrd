@@ -293,12 +293,18 @@ export type PRRevisionClock = Readonly<{
   terminal?: PRRevisionTerminal
 }>
 
+export const PRFreshnessTransitionSchema = z
+  .object({ from: z.literal("admitted"), to: z.literal("refreshed") })
+  .strict()
+export type PRFreshnessTransition = Readonly<z.infer<typeof PRFreshnessTransitionSchema>>
+
 export const PRRecutProofSchema = z
   .object({
     fromRevision: z.number().int().positive(),
     patchId: GitShaSchema,
     treeSha: GitShaSchema,
     reviewCarried: z.boolean(),
+    transition: PRFreshnessTransitionSchema.optional(),
   })
   .strict()
 export type PRRecutProof = Readonly<z.infer<typeof PRRecutProofSchema>>
