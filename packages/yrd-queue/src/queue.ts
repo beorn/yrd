@@ -3116,6 +3116,48 @@ function runnablePRs(
   })
 }
 
+/**
+ * Composition/authoring refusal codes: a failed check carrying one of these is
+ * not a check that ran and failed (tests, lint) but the queue refusing to
+ * compose the candidate from what the author submitted — the author must
+ * re-author (fix the composition, push a gitlink-free root, correct a source).
+ * The canonical producers are the `candidateFailure(...)` calls in
+ * `command.ts`. Deliberately excluded: `scratch-cleanup-failed` and
+ * `queue-environment-refused` (submodule reachability/composition) are
+ * transient infrastructure marked `retryable`, not the author's fault; and the
+ * recut-lineage codes (`recut-certificate`, `restack-*`) stay with the
+ * auto-recut slice that owns that path.
+ */
+const COMPOSITION_REFUSAL_CODES: ReadonlySet<string> = new Set([
+  "authored-gitlink",
+  "composition-invalid",
+  "wrapper-mismatch",
+  "gitlink-inspection",
+  "source-missing",
+  "source-lineage",
+  "source-publish",
+  "payload-certificate",
+  "payload-identity",
+  "payload-mismatch",
+  "payload-overlap",
+])
+
+/** The refusal receipt behind a `needs-author` verdict: the first failed check
+ * whose error is a composition/authoring refusal, or `undefined` when a failed
+ * check is an ordinary check failure. */
+function compositionRefusalReceipt(
+  state: DeepReadonly<RuntimeState>,
+  pr: DeepReadonly<PR>,
+  steps: readonly RuntimeStep[],
+): JobError | undefined {
+  for (const record of projectPRChecks(state, pr, steps)) {
+    if (record.status === "failed" && record.error !== undefined && COMPOSITION_REFUSAL_CODES.has(record.error.code)) {
+      return record.error
+    }
+  }
+  return undefined
+}
+
 function prEligibility(
   state: DeepReadonly<RuntimeState>,
   pr: DeepReadonly<PR>,
@@ -3152,6 +3194,23 @@ function prEligibility(
   if (!resumingIntegration) {
     if (pr.status === "pushed") {
       return result({ code: "draft", message: `PR '${pr.id}' is pushed, not ready` })
+    }
+    // A composition refusal is deterministic: the queue could not build the
+    // candidate from what the author submitted, so re-running the same payload
+    // cannot pass — whether the failed compose left the PR `submitted` or drove
+    // an automatic `rejected`. Project it as `needs-author` with the refusal
+    // receipt attached, ahead of the generic `rejected`/`checks-failed` verdicts.
+    // This is a derived projection over the failed check's recorded refusal
+    // evidence; it stores no new PRStatus (the bay status is untouched).
+    if (options.ignoreChecks !== true && (pr.status === "submitted" || pr.status === "rejected")) {
+      const receipt = compositionRefusalReceipt(state, pr, steps)
+      if (receipt !== undefined) {
+        return result({
+          code: "needs-author",
+          message: `PR '${pr.id}' cannot be composed as submitted: ${receipt.message}`,
+          receipt,
+        })
+      }
     }
     if (pr.status === "rejected") {
       return result({ code: "rejected", message: `PR '${pr.id}' is rejected; submit it again before queueing` })

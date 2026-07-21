@@ -307,6 +307,7 @@ export type PREligibilityReason = Readonly<{
     | "draft"
     | "checks-pending"
     | "checks-failed"
+    | "needs-author"
     | "review-required"
     | "review-rejected"
     | "queue-paused"
@@ -315,6 +316,11 @@ export type PREligibilityReason = Readonly<{
     | "rejected"
     | "terminal"
   message: string
+  /** The composition-refusal receipt that produced a `needs-author` verdict:
+   * the queue could not compose the candidate from what the author submitted,
+   * so the refusal is projected here (never as a stored status) for the author
+   * to act on. Absent for every other reason code. */
+  receipt?: JobError
 }>
 
 export type PREligibility = Readonly<{
