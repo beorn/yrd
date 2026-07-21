@@ -130,7 +130,7 @@ function gateImplicitResidentLogger(logger: ConditionalLogger): ConditionalLogge
 /** Create the one host-owned logger fan-out. The file sink is structured JSONL.
  * When a `human` formatter is supplied (the resident follow-runner), the stderr
  * sink renders each Event through it — a scannable timeline row, or `undefined`
- * to suppress that line from the human stream. Without it, the default console
+ * to suppress that row from the human stream. Without it, the default console
  * format is used.
  *
  * The implicit resident default is deliberately a branched policy: every
@@ -154,8 +154,8 @@ export function createYrdLogger(
       ? { write: stderr, objectMode: false }
       : {
           write: (event: Event) => {
-            const line = human(event)
-            if (line !== undefined) stderr(`${line}\n`)
+            const row = human(event)
+            if (row !== undefined) stderr(`${row}\n`)
           },
           objectMode: true,
         }

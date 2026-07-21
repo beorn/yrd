@@ -6,6 +6,13 @@ import {
   baseIdentity,
   checkRequest,
   checksRequested,
+  currentPRRev,
+  prBaseSha,
+  prComposition,
+  prCorrelation,
+  prDeliveryState,
+  prHead,
+  prRevisionNumber,
   resolveBase,
   resolvePR,
   reviewState,
@@ -34,7 +41,9 @@ import {
   createJobDef,
   Job,
   JobErrorSchema,
+  localRunner,
   type HasJobs,
+  type HasRunner,
   type JobDef,
   type JobDefs,
   type JobError,
@@ -43,12 +52,16 @@ import {
   type JobHandler,
   type JobResult,
   type JobsState,
+  type Jobs,
+  type Runner,
   type RunJobOptions,
 } from "@yrd/job"
 import { computed, type ReadSignal } from "@silvery/signals"
+import { diagnoseFlowPin, type FlowPin, type StepKind, type YrdConfig } from "@yrd/config"
 import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
 import {
+  CandidateSchema,
   IntegrationProofSchema,
   QueuePauseSchema,
   QueueRecordSchema,
@@ -57,6 +70,7 @@ import {
   PRSnapshotSchema,
   type AddStepResult,
   type BatchConfig,
+  type Candidate,
   type InstalledStep,
   type IntegratedShape,
   type IntegrationProof,
@@ -64,12 +78,14 @@ import {
   type QueueAuditResult,
   type QueueAuthorityState,
   type QueueAuthorityToken,
+  type QueueFailure,
   type QueuePause,
   type QueueRecord,
   type QueueRequirement,
-  type QueueRun,
-  type QueueRunAuthority,
-  type QueueRunId,
+  type Run,
+  type RunConclusion,
+  type RunAuthority,
+  type RunId,
   type QueueSummary,
   type QueueTerminalAssociation,
   type QueuesState,
@@ -84,9 +100,11 @@ import {
 import {
   activeQueueRootIds,
   childRunId,
+  indexQueueChild,
   indexQueueStart,
   latestExactRunId,
   latestPrefixRunId,
+  latestRootRunId,
   projectionLookupGet,
   projectionLookupSet,
   projectionLookupValues,
@@ -125,10 +143,11 @@ export function isQueueRunningConflict(error: unknown): error is QueueRunningCon
 
 const StepNameSchema = z.string().regex(/^[a-z][a-z0-9_-]*$/iu)
 const QueueRequirementSchema = z.enum(["review"])
-const QueueRunIdSchema = z.string().trim().min(1)
+const RunIdSchema = z.string().trim().min(1)
+const CandidateCreatedSchema = CandidateSchema.omit({ createdAt: true })
 const StepExecutionSchema = z
   .object({
-    run: QueueRunIdSchema,
+    run: RunIdSchema,
     step: StepNameSchema,
     index: z.number().int().nonnegative(),
     prs: z.array(PRSnapshotSchema).min(1),
@@ -136,6 +155,9 @@ const StepExecutionSchema = z
       .string()
       .regex(/^[0-9a-f]{40,64}$/iu)
       .optional(),
+    /** Immutable Candidate facts carried into every fresh Job request. Optional
+     * only while replaying pre-target-model Jobs. */
+    candidate: CandidateCreatedSchema.optional(),
     shape: JsonSchema,
   })
   .strict() as unknown as z.ZodType<StepExecution>
@@ -144,17 +166,41 @@ const QueueRunArgsSchema = z
   .object({
     prs: z.array(z.string().trim().min(1)).optional(),
     steps: z.array(StepNameSchema).optional(),
+    /** Exact queue tip resolved by the effectful Queue facade before dispatch. */
+    baseSha: GitShaSchema.optional(),
+    /** Immutable Candidate facts prepared by the effectful Queue facade. */
+    candidate: CandidateCreatedSchema.optional(),
   })
   .strict()
 export type QueueRunArgs = Readonly<z.infer<typeof QueueRunArgsSchema>>
 
-const AdmitArgsSchema = z.object({ pr: z.string().trim().min(1) }).strict()
+const AdmitArgsSchema = z
+  .object({
+    pr: z.string().trim().min(1),
+    /** Exact queue tip resolved by the effectful Queue facade before dispatch. */
+    baseSha: GitShaSchema.optional(),
+    /** Immutable Candidate facts prepared by the effectful Queue facade. */
+    candidate: CandidateCreatedSchema.optional(),
+  })
+  .strict()
 export type AdmitArgs = Readonly<z.infer<typeof AdmitArgsSchema>>
 export type AdmitSelection = Readonly<{ prs?: readonly string[] }>
 
-const AdvanceArgsSchema = z.object({ run: QueueRunIdSchema }).strict()
+const AdvanceArgsSchema = z.object({ run: RunIdSchema }).strict()
 const SettledArgsSchema = AdvanceArgsSchema
-const IsolateArgsSchema = AdvanceArgsSchema.extend({ part: z.union([z.literal(0), z.literal(1)]) }).strict()
+const IsolateArgsSchema = AdvanceArgsSchema.extend({
+  part: z.union([z.literal(0), z.literal(1)]),
+  candidate: CandidateCreatedSchema.optional(),
+}).strict()
+type IsolateArgs = Readonly<z.infer<typeof IsolateArgsSchema>>
+const BatchIsolatedSchema = z
+  .object({
+    parent: RunIdSchema,
+    run: RunIdSchema,
+    part: z.union([z.literal(0), z.literal(1)]),
+    prs: z.array(z.string().trim().min(1)).min(1),
+  })
+  .strict()
 export type PauseQueueArgs = Readonly<{ base: string; reason: string; allowedPRs: readonly string[] }>
 export type RecoverQueueOptions = Readonly<{ recoveryTime: string; reason?: string; runner?: string }>
 const PauseQueueArgsSchema = z
@@ -180,12 +226,18 @@ const QueueFailedPRSchema = z
     actor: z.string().trim().min(1).optional(),
   })
   .strict()
-const LegacyQueueFailedSchema = z.object({ run: QueueRunIdSchema, error: JobErrorSchema }).strict()
-const QueueFailedSchema = LegacyQueueFailedSchema.extend({ prs: z.array(QueueFailedPRSchema).min(1) }).strict()
+const LegacyQueueFailedSchema = z.object({ run: RunIdSchema, error: JobErrorSchema }).strict()
+const QueueFailedSchema = LegacyQueueFailedSchema.extend({
+  prs: z.array(QueueFailedPRSchema).min(1),
+  job: z
+    .object({ id: z.string().trim().min(1), attempt: z.number().int().positive() })
+    .strict()
+    .optional(),
+}).strict()
 const ReplayQueueFailedSchema = z.union([QueueFailedSchema, LegacyQueueFailedSchema])
 const CancelRunArgsSchema = z
   .object({
-    run: QueueRunIdSchema,
+    run: RunIdSchema,
     by: z.string().trim().min(1),
     reason: z.string().trim().min(1),
   })
@@ -213,7 +265,7 @@ const QueueRejectedTerminalFactSchema = z.object({
   pr: PRIdSchema,
   revision: z.number().int().positive(),
   headSha: GitShaSchema.optional(),
-  run: QueueRunIdSchema.optional(),
+  run: RunIdSchema.optional(),
 })
 const AssociateTerminalsArgsSchema = z
   .object({ associations: z.array(PRTerminalAssociationSchema) })
@@ -230,11 +282,12 @@ const AssociateTerminalsArgsSchema = z
 type AssociateTerminalsArgs = Readonly<z.infer<typeof AssociateTerminalsArgsSchema>>
 
 export type StepExecution<Shape extends PRShape = PRShape> = Readonly<{
-  run: QueueRunId
+  run: RunId
   step: string
   index: number
   prs: readonly PRSnapshot[]
   targetSha?: string
+  candidate?: Readonly<Omit<Candidate, "createdAt">>
   shape: Shape
 }>
 
@@ -247,8 +300,7 @@ export type StepDef<Input extends PRShape, Output extends PRShape> = Readonly<{
   name: string
   title: string
   revision: string
-  integrates: boolean
-  needsIntegration: boolean
+  kind: StepKind
   classification?: "base" | "carrier"
   job: JobDef<StepExecution, JsonValue>
   readonly [inputShape]?: Input
@@ -276,7 +328,7 @@ type FinalShape<Steps extends readonly AnyStepDef[], Shape extends PRShape = PRS
 export type StepOptions<Output extends JsonValue> = Readonly<{
   revision: string
   title?: string
-  needsIntegration?: boolean
+  kind?: Exclude<StepKind, "merge">
   classification?: "base" | "carrier"
   output?: z.ZodType<Output>
 }>
@@ -302,8 +354,7 @@ export function withStep<const Name extends string, Shape extends PRShape, Outpu
     name: stepName,
     title: job.title,
     revision: job.revision,
-    integrates: false,
-    needsIntegration: options.needsIntegration ?? false,
+    kind: options.kind ?? "check",
     ...(options.classification === undefined ? {} : { classification: options.classification }),
     job,
   }) as StepDef<Shape, AddStepResult<Shape, Name, Output>>
@@ -327,8 +378,7 @@ export function withMerge<Shape extends PRShape>(
     name: "merge",
     title: job.title,
     revision: job.revision,
-    integrates: true,
-    needsIntegration: false,
+    kind: "merge",
     job,
   }) as StepDef<Shape, Shape & IntegratedShape>
 }
@@ -339,7 +389,24 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
   defaultSteps?: readonly string[]
   requires?: readonly QueueRequirement[]
   resolveBaseSha?(base: string): string | Promise<string>
+  prepareCandidate?: CandidatePreparer
+  runner?: (jobs: Jobs) => Runner
+  /** Live base-authority flows used for drift warnings and resume refusal. */
+  flows?: YrdConfig
 }>
+
+export type CandidatePreparationInput = Readonly<{
+  id: string
+  queueId: string
+  baseSha: string
+  revs: Candidate["revs"]
+  prs: readonly PRSnapshot[]
+}>
+
+export type PreparedCandidate = Omit<Candidate, "createdAt" | "mergeability"> &
+  Readonly<{ mergeability: "mergeable" | "conflicting" }>
+
+export type CandidatePreparer = (input: CandidatePreparationInput) => PreparedCandidate | Promise<PreparedCandidate>
 
 type QueueState = Readonly<{ queues: QueuesState }>
 type QueueHostState = Readonly<{ bays: BaysState; jobs: JobsState }>
@@ -363,17 +430,18 @@ export type QueueCommands = Readonly<{
     run: CommandHandler<QueueRunArgs, RuntimeState>
     pause: CommandHandler<PauseQueueArgs, RuntimeState>
     resume: CommandHandler<Readonly<{ base: string }>, RuntimeState>
-    advance: CommandHandler<Readonly<{ run: QueueRunId }>, RuntimeState>
-    settled: CommandHandler<Readonly<{ run: QueueRunId }>, RuntimeState>
-    isolate: CommandHandler<Readonly<{ run: QueueRunId; part: 0 | 1 }>, RuntimeState>
+    advance: CommandHandler<Readonly<{ run: RunId }>, RuntimeState>
+    settled: CommandHandler<Readonly<{ run: RunId }>, RuntimeState>
+    isolate: CommandHandler<IsolateArgs, RuntimeState>
     cancelRun: CommandHandler<CancelRunArgs, RuntimeState>
     associateTerminals: CommandHandler<AssociateTerminalsArgs, RuntimeState>
   }>
 }>
 
 export type TerminalAssociationCandidate = Readonly<{
-  run: QueueRunId
-  status: QueueRun["status"]
+  run: RunId
+  status: Run["status"]
+  conclusion?: RunConclusion
   startedAt: string
   finishedAt?: string
   eligible: boolean
@@ -425,29 +493,29 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   readonly shape?: Shape
   state: ReadSignal<DeepReadonly<QueuesState>>
   steps(): readonly InstalledStep[]
-  admit(args: AdmitSelection, options?: RunJobOptions): Promise<readonly QueueRun[]>
+  admit(args: AdmitSelection, options?: RunJobOptions): Promise<readonly Run[]>
   pause(args: PauseQueueArgs): Promise<QueuePause>
   resume(base: string): Promise<void>
-  run(args: QueueRunArgs, options: QueueRunOptions): Promise<readonly QueueRun[]>
+  run(args: QueueRunArgs, options: QueueRunOptions): Promise<readonly Run[]>
   waiting(selector: string, step?: string): WaitingQueueStep
-  finish(selector: string, completion: FinishQueueArgs, options: RunJobOptions): Promise<QueueRun>
-  cancel(args: CancelQueueArgs): Promise<readonly QueueRun[]>
-  cancelRun(args: CancelRunArgs): Promise<QueueRun>
-  recover(options: RecoverQueueOptions): Promise<readonly QueueRun[]>
+  finish(selector: string, completion: FinishQueueArgs, options: RunJobOptions): Promise<Run>
+  cancel(args: CancelQueueArgs): Promise<readonly Run[]>
+  cancelRun(args: CancelRunArgs): Promise<Run>
+  recover(options: RecoverQueueOptions): Promise<readonly Run[]>
   audit(): QueueAuditResult
   eligibility(selector: string): PREligibility
   eligibilities(): readonly PREligibility[]
   checks(selectors?: readonly string[]): readonly PRCheckRecord[]
   terminalAssociationPlan(): TerminalAssociationPlan
   migrateTerminalAssociations(): Promise<TerminalAssociationPlan>
-  get(run: QueueRunId): QueueRun | undefined
+  get(run: RunId): Run | undefined
   status(base: string): QueueSummary
 }>
 
 export type QueueRunOptions = RunJobOptions & Readonly<{ continueAdmissions?: () => boolean }>
 
 export type WaitingQueueStep = Readonly<{
-  run: QueueRun
+  run: Run
   step: QueueStep & Readonly<{ job: Extract<Job, { status: "waiting" }> }>
 }>
 
@@ -467,7 +535,7 @@ export type QueuePlugin<Shape extends PRShape> = (<
   Features extends HasJobs & HasBays,
 >(
   definition: YrdDef<State, Commands, Features>,
-) => YrdDef<State & QueueState, Commands & QueueCommands, Features & HasQueue<Shape>>) &
+) => YrdDef<State & QueueState, Commands & QueueCommands, Features & HasQueue<Shape> & HasRunner>) &
   Readonly<{ jobDefs: JobDefs }>
 
 export function withQueue<const Steps extends readonly AnyStepDef[]>(
@@ -484,7 +552,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
     ...(options.requires === undefined ? {} : { requires: z.array(QueueRequirementSchema).parse(options.requires) }),
   })
   const jobDefs = Object.freeze(Object.fromEntries(steps.map((step) => [step.job.name, step.job])))
-  const commands = createQueueCommands(steps, byName)
+  const commands = createQueueCommands(steps, byName, options.flows, options.prepareCandidate !== undefined)
 
   const install = <State extends object, Commands extends CommandTree, Features extends HasJobs & HasBays>(
     definition: YrdDef<State, Commands, Features>,
@@ -493,33 +561,40 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
       initialState: { queues: initial },
       commands,
       events: {
+        "queue/candidate/created": CandidateCreatedSchema,
         "queue/run/started": z.object({ run: QueueStartSchema }).strict(),
         "queue/run/failed": QueueFailedSchema,
         "queue/run/canceled": CancelRunArgsSchema,
         "queue/run/settled": SettledArgsSchema,
         "queue/paused": PauseQueueArgsSchema,
         "queue/resumed": ResumeQueueArgsSchema,
-        "queue/batch/isolated": z
-          .object({
-            parent: QueueRunIdSchema,
-            run: QueueRunIdSchema,
-            part: z.union([z.literal(0), z.literal(1)]),
-            prs: z.array(z.string().trim().min(1)).min(1),
-          })
-          .strict(),
+        "queue/batch/isolated": BatchIsolatedSchema,
       },
       replayEvents: {
+        "queue/candidate/created": CandidateCreatedSchema,
         "queue/run/started": z.object({ run: ReplayQueueStartSchema }).strict(),
         "queue/run/failed": ReplayQueueFailedSchema,
         "queue/run/canceled": CancelRunArgsSchema,
         "queue/run/settled": SettledArgsSchema,
       },
-      projectionVersion: "queues-v2-index",
+      projectionVersion: "queues-v3-target-model",
       project: projectQueues,
       create(yrd) {
         yrd.jobs.requireDefinitions(jobDefs)
         assertLegacyQueueMigration(yrd.state() as unknown as DeepReadonly<RuntimeState>)
+        const configuredRunner = options.runner?.(yrd.jobs)
+        const runner =
+          configuredRunner ??
+          localRunner({
+            id: "local",
+            jobs: yrd.jobs,
+            leaseMs: 5 * 60_000,
+          })
+        if (Symbol.asyncDispose in runner) {
+          yrd.scope.use(runner as Runner & AsyncDisposable)
+        }
         return {
+          runner,
           queue: createQueue(
             computed(() => yrd.state().queues),
             () => yrd.state() as unknown as DeepReadonly<RuntimeState>,
@@ -532,7 +607,12 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               resume: (base) => yrd.dispatch(commands.queue.resume, { base }),
               advance: (run) => yrd.dispatch(commands.queue.advance, { run }),
               settled: (run) => yrd.dispatch(commands.queue.settled, { run }),
-              isolate: (run, part) => yrd.dispatch(commands.queue.isolate, { run, part }),
+              isolate: (run, part, candidate) =>
+                yrd.dispatch(commands.queue.isolate, {
+                  run,
+                  part,
+                  ...(candidate === undefined ? {} : { candidate }),
+                }),
               cancelRun: (args) => yrd.dispatch(commands.queue.cancelRun, args),
               associateTerminals: (args) => yrd.dispatch(commands.queue.associateTerminals, args),
               requestChecks: (pr, baseSha) =>
@@ -540,6 +620,9 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
             },
             steps,
             options.resolveBaseSha,
+            options.prepareCandidate,
+            configuredRunner,
+            options.flows,
             yrd.log.child("queue"),
           ),
         }
@@ -557,9 +640,9 @@ type QueueActions = Readonly<{
   run(args: QueueRunArgs): Promise<CommandResult>
   pause(args: PauseQueueArgs): Promise<CommandResult>
   resume(base: string): Promise<CommandResult>
-  advance(run: QueueRunId): Promise<CommandResult>
-  settled(run: QueueRunId): Promise<CommandResult>
-  isolate(run: QueueRunId, part: 0 | 1): Promise<CommandResult>
+  advance(run: RunId): Promise<CommandResult>
+  settled(run: RunId): Promise<CommandResult>
+  isolate(run: RunId, part: 0 | 1, candidate?: z.infer<typeof CandidateCreatedSchema>): Promise<CommandResult>
   cancelRun(args: CancelRunArgs): Promise<CommandResult>
   associateTerminals(args: AssociateTerminalsArgs): Promise<CommandResult>
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
@@ -606,10 +689,9 @@ function terminalAssociationPlan(state: DeepReadonly<RuntimeState>, appended = 0
           `yrd: legacy terminal '${terminal.event}' names missing PR '${terminal.pr}'`,
         )
       }
-      const revisions = pr.revisions.filter(
+      const revisions = pr.revs.filter(
         (revision) =>
-          revision.revision === terminal.revision &&
-          (terminal.headSha === undefined || revision.headSha === terminal.headSha),
+          revision.n === terminal.revision && (terminal.headSha === undefined || revision.head === terminal.headSha),
       )
       if (revisions.length === 0) {
         return refusedTerminalAssociation(
@@ -627,13 +709,13 @@ function terminalAssociationPlan(state: DeepReadonly<RuntimeState>, appended = 0
       }
       const revision = revisions[0]
       if (revision === undefined) throw new Error("yrd: terminal revision selection lost its only revision")
-      if (revision.terminal?.status !== "rejected" || revision.terminal.at !== terminal.at) {
+      if (revision.terminal?.kind !== "rejected" || revision.terminal.at !== terminal.at) {
         return refusedTerminalAssociation(
           terminal,
           "terminal-state-mismatch",
-          `yrd: legacy terminal '${terminal.event}' is not the projected rejection for ${terminal.pr} revision ${terminal.revision}@${revision.headSha}`,
+          `yrd: legacy terminal '${terminal.event}' is not the projected rejection for ${terminal.pr} revision ${terminal.revision}@${revision.head}`,
           [],
-          revision.headSha,
+          revision.head,
         )
       }
       const runs = Queues.values(state.queues)
@@ -642,7 +724,7 @@ function terminalAssociationPlan(state: DeepReadonly<RuntimeState>, appended = 0
             (candidate) =>
               candidate.id === terminal.pr &&
               candidate.revision === terminal.revision &&
-              candidate.headSha === revision.headSha,
+              candidate.headSha === revision.head,
           ),
         )
         .map((record) => materializeRun(record, state.jobs))
@@ -655,10 +737,11 @@ function terminalAssociationPlan(state: DeepReadonly<RuntimeState>, appended = 0
         (run): TerminalAssociationCandidate => ({
           run: run.id,
           status: run.status,
+          ...(run.conclusion === undefined ? {} : { conclusion: run.conclusion }),
           startedAt: run.startedAt,
           ...(run.finishedAt === undefined ? {} : { finishedAt: run.finishedAt }),
           eligible:
-            run.status === "failed" &&
+            Queues.failed(run) &&
             run.finishedAt !== undefined &&
             run.startedAt <= run.finishedAt &&
             run.finishedAt <= terminal.at,
@@ -667,7 +750,7 @@ function terminalAssociationPlan(state: DeepReadonly<RuntimeState>, appended = 0
       )
       const eligible = candidates.filter((candidate) => candidate.eligible)
       if (eligible.length === 0) {
-        const failed = candidates.filter(({ status }) => status === "failed")
+        const failed = candidates.filter(({ status, conclusion }) => status === "completed" && conclusion === "failure")
         const code =
           candidates.length === 0
             ? "terminal-run-missing"
@@ -685,18 +768,18 @@ function terminalAssociationPlan(state: DeepReadonly<RuntimeState>, appended = 0
         return refusedTerminalAssociation(
           terminal,
           code,
-          `yrd: legacy terminal '${terminal.event}' cannot prove one failed Queue run for ${terminal.pr} revision ${terminal.revision}@${revision.headSha}: ${detail}`,
+          `yrd: legacy terminal '${terminal.event}' cannot prove one failed Queue run for ${terminal.pr} revision ${terminal.revision}@${revision.head}: ${detail}`,
           candidates,
-          revision.headSha,
+          revision.head,
         )
       }
       if (eligible.length !== 1) {
         return refusedTerminalAssociation(
           terminal,
           "terminal-run-ambiguous",
-          `yrd: legacy terminal '${terminal.event}' has ${eligible.length} failed Queue runs for ${terminal.pr} revision ${terminal.revision}@${revision.headSha}: ${eligible.map(({ run }) => run).join(", ")}`,
+          `yrd: legacy terminal '${terminal.event}' has ${eligible.length} failed Queue runs for ${terminal.pr} revision ${terminal.revision}@${revision.head}: ${eligible.map(({ run }) => run).join(", ")}`,
           candidates,
-          revision.headSha,
+          revision.head,
         )
       }
       const selected = eligible[0]
@@ -704,14 +787,14 @@ function terminalAssociationPlan(state: DeepReadonly<RuntimeState>, appended = 0
       const association: QueueTerminalAssociation = {
         pr: terminal.pr,
         revision: terminal.revision,
-        headSha: revision.headSha,
+        headSha: revision.head,
         run: selected.run,
         provenance: "migration/21091",
         evidence: { terminalEvent: terminal.event, run: selected.run },
       }
       return {
         status: "ready",
-        terminal: { ...terminalIdentity(terminal, revision.headSha), headSha: revision.headSha },
+        terminal: { ...terminalIdentity(terminal, revision.head), headSha: revision.head },
         association,
         proof: { candidates },
       }
@@ -747,12 +830,82 @@ function createQueue<Shape extends PRShape>(
   actions: QueueActions,
   steps: readonly RuntimeStep[],
   resolveBaseSha: QueueOptions<readonly AnyStepDef[]>["resolveBaseSha"],
+  prepareCandidate: CandidatePreparer | undefined,
+  configuredRunner: Runner | undefined,
+  flows: YrdConfig | undefined,
   log: ConditionalLogger,
 ): Queue<Shape> {
-  const current = (id: QueueRunId): QueueRun => materializeRun(Queues.record(state(), id), runtime().jobs)
+  const current = (id: RunId): Run => materializeRun(Queues.record(state(), id), runtime().jobs)
 
-  const cleanupSettledRoots = async (): Promise<readonly QueueRunId[]> => {
-    const cleaned: QueueRunId[] = []
+  type CycleBaseResolver = (base: string) => Promise<string>
+  const createBaseResolutionCycle = (): CycleBaseResolver | undefined => {
+    if (resolveBaseSha === undefined) return undefined
+    const resolved = new Map<string, Promise<string>>()
+    return (selector) => {
+      const base = baseIdentity(selector)
+      let result = resolved.get(base)
+      if (result === undefined) {
+        result = Promise.resolve(resolveBaseSha(base))
+        resolved.set(base, result)
+      }
+      return result
+    }
+  }
+
+  const markSettledRoot = async (id: RunId): Promise<Run> => {
+    const snapshot = runtime()
+    const record = Queues.record(snapshot.queues, id)
+    const run = materializeRun(record, snapshot.jobs)
+    if (record.parent === undefined && !needsSettlement(snapshot, run)) await actions.settled(id)
+    return current(id)
+  }
+
+  const observeRunLifecycle = (observed: Run, operation: () => Run | Promise<Run>): Promise<Run> =>
+    observeYrdLifecycle(
+      log,
+      {
+        lifecycle: "run",
+        identity: { run: observed.id },
+        attributes: {
+          base: observed.base,
+          prs: observed.prs.map(deliveryIdentity),
+          steps: observed.steps.map((step) => step.name),
+        },
+        outcome: queueRunOutcome,
+        resultAttributes: (result) => ({
+          status: result.status,
+          // A run-owned failure (no step owns the ERROR) carries its JobError so
+          // the human row can render `err=<slug>`; harmless on a settled run.
+          ...(result.error === undefined ? {} : { error: result.error }),
+        }),
+      },
+      operation,
+    )
+
+  const reportFreshTerminal = async (run: Run): Promise<Run> => {
+    const reported = await observeRunLifecycle(run, () => current(run.id))
+    await markSettledRoot(run.id)
+    return reported
+  }
+
+  const warnFlowDrift = (pins: readonly (DeepReadonly<FlowPin> | undefined)[]): void => {
+    if (flows === undefined) return
+    for (const pin of pins) {
+      if (pin === undefined) continue
+      for (const diagnostic of diagnoseFlowPin(pin, flows)) {
+        if (diagnostic.severity !== "warning") continue
+        log.warn?.(diagnostic.message, {
+          code: diagnostic.code,
+          flow: pin.name,
+          expectedFingerprint: pin.fingerprint,
+          currentFingerprint: diagnostic.current?.fingerprint,
+        })
+      }
+    }
+  }
+
+  const cleanupSettledRoots = async (): Promise<readonly RunId[]> => {
+    const cleaned: RunId[] = []
     for (const id of activeQueueRootIds(runtime().queues.authority)) {
       const snapshot = runtime()
       const record = Queues.record(snapshot.queues, id)
@@ -828,17 +981,48 @@ function createQueue<Shape extends PRShape>(
     return { run: selected, step: step as WaitingQueueStep["step"] }
   }
 
-  const drive = async (id: QueueRunId, options: RunJobOptions): Promise<QueueRun> => {
+  const drive = async (id: RunId, options: RunJobOptions): Promise<Run> => {
     while (true) {
       const snapshot = runtime()
       const run = materializeRun(Queues.record(snapshot.queues, id), snapshot.jobs)
       if (Queues.terminal(run) && !needsAdvance(snapshot, run)) return run
       const active = run.steps[run.cursor]
-      if (active?.job?.status === "requested") {
+      if (active?.job?.status === "queued") {
         const guarded = await actions.advance(id)
         if (guarded.events.length > 0) continue
         try {
-          await jobs.run(active.job.id, options)
+          const candidate = snapshot.queues.candidates[run.candidateId]
+          if (candidate === undefined) {
+            throw new Error(`yrd: queue run '${run.id}' names missing Candidate '${run.candidateId}'`)
+          }
+          const needsCandidate = active.kind !== "merge" && !("integration" in run.shape)
+          const materializesCandidate = configuredRunner !== undefined && needsCandidate
+          const runner =
+            configuredRunner ??
+            localRunner({
+              id: options.runner,
+              jobs,
+              leaseMs: options.leaseMs,
+              ...(options.heartbeatMs === undefined ? {} : { heartbeatMs: options.heartbeatMs }),
+              ...(options.now === undefined ? {} : { now: options.now }),
+            })
+          const submitted = await runner.submit({
+            job: active.job.id,
+            context: materializesCandidate
+              ? { scope: "job", candidate: "rw", capabilities: ["git"] }
+              : { scope: "job", candidate: "none" },
+            ...(materializesCandidate && candidate.ref !== undefined ? { candidateRef: candidate.ref } : {}),
+          })
+          if (submitted.status === "completed" && submitted.conclusion === "cancelled") {
+            log.warn?.("queue step settlement lost to a peer transition; skipping the settled job", {
+              action: "canceled-skip",
+              run: id,
+              job: submitted.id,
+              status: submitted.status,
+              conclusion: submitted.conclusion,
+              reason: "Runner observed a terminal cancellation while submitting the queued Job",
+            })
+          }
         } catch (cause) {
           // merge-queue R43: a peer runtime can cancel (or otherwise settle)
           // the Job between this runtime's ownership check and its settlement
@@ -857,12 +1041,13 @@ function createQueue<Shape extends PRShape>(
             run: id,
             job: active.job.id,
             status: raced.status,
+            ...(raced.status === "completed" ? { conclusion: raced.conclusion } : {}),
             reason: cause instanceof Error ? cause.message : String(cause),
           })
         }
         continue
       }
-      if (active?.job?.status === "running" || active?.job?.status === "waiting") {
+      if (active?.job?.status === "in_progress" || active?.job?.status === "waiting") {
         const guarded = await actions.advance(id)
         if (guarded.events.length > 0) continue
         return run
@@ -872,28 +1057,28 @@ function createQueue<Shape extends PRShape>(
     }
   }
 
-  const settle = async (id: QueueRunId, options: RunJobOptions): Promise<QueueRun> => {
+  const settle = async (id: RunId, options: RunJobOptions): Promise<Run> => {
     const observed = current(id)
-    const markSettledRoot = async (): Promise<QueueRun> => {
-      const snapshot = runtime()
-      const record = Queues.record(snapshot.queues, id)
-      const run = materializeRun(record, snapshot.jobs)
-      if (record.parent === undefined && !needsSettlement(snapshot, run)) await actions.settled(id)
-      return current(id)
-    }
     // Stale re-report guard #1: a run with nothing left to settle has ALREADY
     // emitted its one run lifecycle at its real settlement. Return it untouched —
     // no drive, no re-emit.
-    if (!needsSettlement(runtime(), observed)) return markSettledRoot()
+    if (!needsSettlement(runtime(), observed)) return markSettledRoot(id)
 
-    const settleTree = async (): Promise<QueueRun> => {
+    const settleTree = async (): Promise<Run> => {
       const settled = await drive(id, options)
       if (!bisectable(settled)) return settled
       for (const part of [0, 1] as const) {
         let snapshot = runtime()
         let child = childQueue(snapshot.queues, snapshot.jobs, settled.id, part)
         if (child === undefined) {
-          await actions.isolate(settled.id, part)
+          const parentCandidate = snapshot.queues.candidates[settled.candidateId]
+          if (parentCandidate === undefined) {
+            throw new Error(`yrd: queue run '${settled.id}' names missing Candidate '${settled.candidateId}'`)
+          }
+          const pivot = Math.ceil(settled.prs.length / 2)
+          const prs = part === 0 ? settled.prs.slice(0, pivot) : settled.prs.slice(pivot)
+          const candidate = await candidateFactsForSnapshots(prs, parentCandidate.baseSha)
+          await actions.isolate(settled.id, part, candidate)
           snapshot = runtime()
           child = childQueue(snapshot.queues, snapshot.jobs, settled.id, part)
         }
@@ -914,68 +1099,135 @@ function createQueue<Shape extends PRShape>(
     // artifact). The child runs observe their own settlements.
     if (Queues.terminal(observed)) {
       await settleTree()
-      return markSettledRoot()
+      return markSettledRoot(id)
     }
 
-    const result = await observeYrdLifecycle(
-      log,
-      {
-        lifecycle: "run",
-        identity: { run: id },
-        attributes: {
-          base: observed.base,
-          prs: observed.prs.map(deliveryIdentity),
-          steps: observed.steps.map((step) => step.name),
-        },
-        outcome: queueRunOutcome,
-        resultAttributes: (result) => ({
-          status: result.status,
-          // A run-owned failure (no step owns the ERROR) carries its JobError so
-          // the human row can render `err=<slug>`; harmless on a settled run.
-          ...(result.error === undefined ? {} : { error: result.error }),
-        }),
-      },
-      settleTree,
-    )
-    await markSettledRoot()
+    const result = await observeRunLifecycle(observed, settleTree)
+    await markSettledRoot(id)
     return result
   }
 
-  const startedRun = (result: CommandResult): QueueRun | undefined => {
+  const startedRun = (result: CommandResult): Run | undefined => {
     const started = result.events.find((applied) => applied.name === "queue/run/started")
     if (started === undefined) return undefined
     return current(QueueStartSchema.parse((started.data as { run?: unknown }).run).id)
   }
 
-  const refreshCheckIdentities = async (prs: readonly DeepReadonly<PR>[]): Promise<void> => {
-    if (resolveBaseSha === undefined) return
-    const resolvedBaseShas = new Map<string, string>()
+  const refreshCheckIdentities = async (
+    prs: readonly DeepReadonly<PR>[],
+    resolveCycleBase: CycleBaseResolver | undefined,
+  ): Promise<void> => {
+    if (resolveCycleBase === undefined) return
     for (const pr of prs) {
       if (!checksRequested(pr)) continue
       const base = baseIdentity(pr.base)
-      let baseSha = resolvedBaseShas.get(base)
-      if (baseSha === undefined) {
-        baseSha = await resolveBaseSha(base)
-        resolvedBaseShas.set(base, baseSha)
-      }
+      const baseSha = await resolveCycleBase(base)
       if (checkRequest(pr)?.baseSha === baseSha) continue
       await actions.requestChecks(pr.id, baseSha)
     }
   }
 
-  const dispatchAdmissions = async (selectors: readonly string[]): Promise<QueueRun[]> => {
-    const admitted: QueueRun[] = []
+  const resolveCandidateBaseSha = async (
+    prs: readonly DeepReadonly<PR>[],
+    resolveCycleBase: CycleBaseResolver | undefined,
+  ): Promise<string> => {
+    const first = prs[0]
+    if (first === undefined) throw new Error("yrd: a Candidate requires at least one PR")
+    const base = baseIdentity(first.base)
+    if (prs.some((pr) => baseIdentity(pr.base) !== base)) {
+      throw new Error("yrd: one Candidate cannot span base branches")
+    }
+    if (resolveCycleBase !== undefined) return resolveCycleBase(base)
+    return requiredCandidateBaseSha(prs.map(Queues.snapshot))
+  }
+
+  const candidateFactsForSnapshots = async (
+    snapshots: readonly DeepReadonly<PRSnapshot>[],
+    baseSha: string,
+  ): Promise<z.infer<typeof CandidateCreatedSchema> | undefined> => {
+    const pinned = pinCandidateBaseSha(snapshots, baseSha)
+    const existing = candidateFor(runtime().queues, pinned, baseSha)
+    if (existing !== undefined && existing.mergeability !== "unknown") {
+      const { createdAt: _createdAt, ...facts } = existing
+      return CandidateCreatedSchema.parse(facts)
+    }
+    if (prepareCandidate === undefined) return undefined
+    const first = pinned[0]
+    if (first === undefined) throw new Error("yrd: a Candidate requires at least one PR")
+    const input: CandidatePreparationInput = {
+      id: Queues.nextCandidateId(runtime().queues),
+      queueId: queueIdentity(first),
+      baseSha,
+      revs: pinned.map((member) => ({ pr: member.id, n: member.revision, head: member.headSha })),
+      prs: pinned,
+    }
+    const prepared = CandidateCreatedSchema.parse(await prepareCandidate(input))
+    if (
+      prepared.id !== input.id ||
+      prepared.queueId !== input.queueId ||
+      prepared.baseSha !== input.baseSha ||
+      prepared.revs.length !== input.revs.length ||
+      prepared.revs.some((revision, index) => {
+        const expected = input.revs[index]
+        return (
+          expected === undefined ||
+          revision.pr !== expected.pr ||
+          revision.n !== expected.n ||
+          revision.head !== expected.head
+        )
+      })
+    ) {
+      throw new Error(`yrd: Candidate preparer changed immutable content identity for '${input.id}'`)
+    }
+    if (prepared.mergeability === "unknown") {
+      throw new Error(`yrd: Candidate preparer left mergeability unknown for '${input.id}'`)
+    }
+    if (prepared.mergeability === "mergeable") {
+      if (prepared.sha === undefined || prepared.ref === undefined) {
+        throw new Error(`yrd: mergeable Candidate '${input.id}' requires a synthetic SHA and ref`)
+      }
+      if (prepared.ref !== `refs/yrd/candidates/${input.id}`) {
+        throw new Error(`yrd: Candidate '${input.id}' must publish refs/yrd/candidates/${input.id}`)
+      }
+    }
+    return prepared
+  }
+
+  const candidateFacts = (
+    prs: readonly DeepReadonly<PR>[],
+    baseSha: string,
+  ): Promise<z.infer<typeof CandidateCreatedSchema> | undefined> =>
+    candidateFactsForSnapshots(prs.map(Queues.snapshot), baseSha)
+
+  const dispatchAdmissions = async (
+    selectors: readonly string[],
+    resolveCycleBase: CycleBaseResolver | undefined,
+  ): Promise<Run[]> => {
+    const admitted: Run[] = []
     for (const selector of selectors) {
-      const started = startedRun(await actions.admit({ pr: selector }))
-      if (started !== undefined) admitted.push(started)
+      const pr = resolvePR(runtime().bays, selector)
+      if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
+      warnFlowDrift([pr.flow])
+      const baseSha = await resolveCandidateBaseSha([pr], resolveCycleBase)
+      const candidate = await candidateFacts([pr], baseSha)
+      const started = startedRun(
+        await actions.admit({ pr: selector, baseSha, ...(candidate === undefined ? {} : { candidate }) }),
+      )
+      if (started !== undefined) {
+        admitted.push(Queues.terminal(started) ? await reportFreshTerminal(started) : started)
+      }
     }
     return admitted
   }
 
-  const drainAdmissions = async (selectors: readonly string[], options: QueueRunOptions): Promise<QueueRun[]> => {
+  const drainAdmissions = async (
+    selectors: readonly string[],
+    options: QueueRunOptions,
+    resolveCycleBase: CycleBaseResolver | undefined,
+  ): Promise<Run[]> => {
     const targets = new Set(selectors)
-    const outcomes = new Map<QueueRunId, QueueRun>()
-    const remember = (candidate: QueueRun): void => {
+    const outcomes = new Map<RunId, Run>()
+    const remember = (candidate: Run): void => {
       if (candidate.prs.some((pr) => targets.has(pr.id))) outcomes.set(candidate.id, candidate)
     }
 
@@ -985,18 +1237,20 @@ function createQueue<Shape extends PRShape>(
       const snapshot = runtime()
       const active = activeQueueRuns(snapshot.queues, snapshot.jobs).find(
         (candidate) =>
-          candidate.status === "running" && samePlan(candidate.steps, admissionSteps(snapshot.queues, steps)),
+          (candidate.status === "queued" || candidate.status === "in_progress") &&
+          samePlan(candidate.steps, admissionSteps(snapshot.queues, steps)),
       )
       if (active !== undefined) {
         const settled = await settle(active.id, options)
         remember(settled)
-        if (settled.status === "running") break
+        if (settled.status === "in_progress") break
         continue
       }
 
       const queued = admissionQueue(snapshot, steps)
       const admitted = await dispatchAdmissions(
         (options.continueAdmissions === undefined ? queued : queued.slice(0, 1)).map((pr) => pr.id),
+        resolveCycleBase,
       )
       if (admitted.length > 0) continue
 
@@ -1029,6 +1283,7 @@ function createQueue<Shape extends PRShape>(
           resultAttributes: (runs) => ({ runs: runs.map(runEvidence) }),
         },
         async () => {
+          const resolveCycleBase = createBaseResolutionCycle()
           await actions.refresh()
           await cleanupSettledRoots()
           let snapshot = runtime()
@@ -1040,13 +1295,15 @@ function createQueue<Shape extends PRShape>(
                   if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
                   return pr
                 })
-          await refreshCheckIdentities(selected)
+          await refreshCheckIdentities(selected, resolveCycleBase)
           snapshot = runtime()
           const selectors =
             args.prs === undefined || args.prs.length === 0
               ? admissionQueue(snapshot, steps).map((pr) => pr.id)
               : [...args.prs]
-          return runOptions === undefined ? dispatchAdmissions(selectors) : drainAdmissions(selectors, runOptions)
+          return runOptions === undefined
+            ? dispatchAdmissions(selectors, resolveCycleBase)
+            : drainAdmissions(selectors, runOptions, resolveCycleBase)
         },
       )
     },
@@ -1078,12 +1335,13 @@ function createQueue<Shape extends PRShape>(
         },
         async () => {
           const explicitStepAuthority = args.steps !== undefined
+          const resolveCycleBase = createBaseResolutionCycle()
           await actions.refresh()
           await cleanupSettledRoots()
           if (args.steps?.length === 0) return []
           let snapshot = runtime()
           const resumable = resumableQueueRoots(snapshot, args, steps)
-          const roots: QueueRunId[] = resumable.map((run) => run.id)
+          const roots: RunId[] = resumable.map((run) => run.id)
           for (const run of resumable) await settle(run.id, runOptions)
 
           snapshot = runtime()
@@ -1101,10 +1359,11 @@ function createQueue<Shape extends PRShape>(
           const requested = requestedPRs(snapshot.bays, args, consumed)
           const checked = explicitStepAuthority ? [] : requested.filter((pr) => checksRequested(pr))
           const before = new Map(checked.map((pr) => [pr.id, checkEligibility(snapshot, pr, steps).status]))
-          await refreshCheckIdentities(checked)
+          await refreshCheckIdentities(checked, resolveCycleBase)
           const admissions = await drainAdmissions(
             checked.map((pr) => pr.id),
             runOptions,
+            resolveCycleBase,
           )
           snapshot = runtime()
           const unsettled = checked.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "passed")
@@ -1121,19 +1380,32 @@ function createQueue<Shape extends PRShape>(
           )
           for (const candidate of partitionCandidates(prs, snapshot.queues.batchSize)) {
             if (runOptions.continueAdmissions?.() === false) break
+            warnFlowDrift(candidate.map((pr) => pr.flow))
+            const baseSha = await resolveCandidateBaseSha(candidate, resolveCycleBase)
+            const facts = await candidateFacts(candidate, baseSha)
             const started = await actions.run({
               prs: candidate.map((pr) => pr.id),
               ...(args.steps === undefined ? {} : { steps: args.steps }),
+              baseSha,
+              ...(facts === undefined ? {} : { candidate: facts }),
             })
             const startedEvent = started.events.find((applied) => applied.name === "queue/run/started")
-            // Re-evaluation inside the serialized command may prove that this
-            // candidate's complete plan is already satisfied by a cached run.
-            // That idempotent no-op must not starve later candidates in the
-            // same resident drain.
-            if (startedEvent === undefined) continue
+            // A submitted PR whose configured plan is entirely admission work can
+            // already be satisfied by a retained successful Run. The command is
+            // then an intentional idempotent no-op; keep draining later candidates
+            // instead of terminating a resident runner at the first cached PR.
+            if (
+              startedEvent === undefined &&
+              started.events.every((event) => event.name === "queue/candidate/created")
+            ) {
+              continue
+            }
+            if (startedEvent === undefined) throw new Error("yrd: queue run did not start a run")
             const id = QueueStartSchema.parse((startedEvent.data as { run?: unknown }).run).id
             roots.push(id)
-            await settle(id, runOptions)
+            const root = current(id)
+            if (Queues.terminal(root)) await reportFreshTerminal(root)
+            else await settle(id, runOptions)
           }
           const final = runtime()
           return roots.flatMap((root) => queueTree(final.queues, final.jobs, root))
@@ -1153,6 +1425,8 @@ function createQueue<Shape extends PRShape>(
         },
         async () => {
           const selected = waiting(selector, completion.step)
+          warnFlowDrift([selected.run.flow])
+          assertCurrentFlow(selected.run.flow, flows)
           if (selected.step.job.id !== completion.job) {
             raiseFailure(
               "refusal",
@@ -1172,15 +1446,19 @@ function createQueue<Shape extends PRShape>(
     },
     async cancel(args) {
       const selected = new Set(args.prs)
-      const affected: QueueRunId[] = []
+      const affected: RunId[] = []
       for (const candidate of activeQueueRuns(runtime().queues, runtime().jobs)) {
         if (!candidate.prs.some((pr) => selected.has(pr.id))) continue
         const active = candidate.steps[candidate.cursor]?.job
         const cancelable =
-          active?.status === "requested" || active?.status === "running" || active?.status === "waiting"
+          active?.status === "queued" || active?.status === "in_progress" || active?.status === "waiting"
         if (!cancelable && Queues.terminal(candidate)) continue
         if (cancelable) {
-          await jobs.cancel({ id: active.id, attempt: active.attempt, by: args.by, reason: args.reason })
+          if (configuredRunner === undefined) {
+            await jobs.cancel({ id: active.id, attempt: active.attempt, by: args.by, reason: args.reason })
+          } else {
+            await configuredRunner.cancel(active.id, { by: args.by, reason: args.reason })
+          }
         }
         await actions.advance(candidate.id)
         affected.push(candidate.id)
@@ -1211,9 +1489,13 @@ function createQueue<Shape extends PRShape>(
       // second scheduler, no daemon.
       await actions.cancelRun(args)
       const active = run.steps[run.cursor]?.job
-      const cancelable = active?.status === "requested" || active?.status === "running" || active?.status === "waiting"
+      const cancelable = active?.status === "queued" || active?.status === "in_progress" || active?.status === "waiting"
       if (cancelable) {
-        await jobs.cancel({ id: active.id, attempt: active.attempt, by: args.by, reason: args.reason })
+        if (configuredRunner === undefined) {
+          await jobs.cancel({ id: active.id, attempt: active.attempt, by: args.by, reason: args.reason })
+        } else {
+          await configuredRunner.cancel(active.id, { by: args.by, reason: args.reason })
+        }
       }
       return current(args.run)
     },
@@ -1236,13 +1518,19 @@ function createQueue<Shape extends PRShape>(
         },
         async () => {
           const recoveredJobs = new Set(
-            await jobs.recover({
-              now: recoverOptions.recoveryTime,
-              ...(recoverOptions.reason === undefined ? {} : { reason: recoverOptions.reason }),
-              ...(recoverOptions.runner === undefined ? {} : { runner: recoverOptions.runner }),
-            }),
+            await (configuredRunner === undefined
+              ? jobs.recover({
+                  now: recoverOptions.recoveryTime,
+                  ...(recoverOptions.reason === undefined ? {} : { reason: recoverOptions.reason }),
+                  ...(recoverOptions.runner === undefined ? {} : { runner: recoverOptions.runner }),
+                })
+              : configuredRunner.recover({
+                  now: recoverOptions.recoveryTime,
+                  ...(recoverOptions.reason === undefined ? {} : { reason: recoverOptions.reason }),
+                  ...(recoverOptions.runner === undefined ? {} : { runner: recoverOptions.runner }),
+                })),
           )
-          const affected = new Set<QueueRunId>()
+          const affected = new Set<RunId>()
           let snapshot = runtime()
           const recoveryRoots = new Set([...rootsBeforeRecovery, ...activeQueueRootIds(snapshot.queues.authority)])
           const candidates = [...recoveryRoots].flatMap((root) => queueTree(snapshot.queues, snapshot.jobs, root))
@@ -1250,9 +1538,7 @@ function createQueue<Shape extends PRShape>(
             const ownsRecoveredJob = candidate.steps.some(
               (step) => step.job !== undefined && recoveredJobs.has(step.job.id),
             )
-            const hasTerminalFailure = candidate.steps.some(
-              (step) => step.job?.status === "failed" || step.job?.status === "lost" || step.job?.status === "canceled",
-            )
+            const hasTerminalFailure = candidate.steps.some((step) => step.job !== undefined && jobFailed(step.job))
             if (hasTerminalFailure && needsAdvance(snapshot, candidate)) {
               const reconciled = await actions.advance(candidate.id)
               if (reconciled.events.length > 0) affected.add(candidate.id)
@@ -1382,7 +1668,9 @@ function nestedStepArtifacts(value: unknown): readonly StepArtifactReference[] {
 function stepResultObservation(result: JobResult): Readonly<Record<string, unknown>> {
   const artifacts = [
     ...(result.status === "waiting" ? directStepArtifacts(result) : directStepArtifacts(result.output)),
-    ...(result.status === "failed" ? nestedStepArtifacts(result.error.evidence) : []),
+    ...(result.status === "completed" && result.conclusion === "failure"
+      ? nestedStepArtifacts(result.error.evidence)
+      : []),
   ]
   if (artifacts.length === 0) return {}
   return {
@@ -1390,39 +1678,41 @@ function stepResultObservation(result: JobResult): Readonly<Record<string, unkno
   }
 }
 
-function runEvidence(run: DeepReadonly<QueueRun>): Record<string, unknown> {
+function runEvidence(run: DeepReadonly<Run>): Record<string, unknown> {
   return {
     run: run.id,
     base: run.base,
     status: run.status,
+    ...(run.conclusion === undefined ? {} : { conclusion: run.conclusion }),
     prs: run.prs.map(deliveryIdentity),
     steps: run.steps.map((step) => step.name),
   }
 }
 
-function queueRunOutcome(run: DeepReadonly<QueueRun>): YrdLifecycleOutcome {
-  if (run.status === "passed") return "succeeded"
-  if (run.status === "failed") {
+function queueRunOutcome(run: DeepReadonly<Run>): YrdLifecycleOutcome {
+  if (Queues.succeeded(run)) return "succeeded"
+  if (Queues.failed(run)) {
     // When a step Job failed, that step already owns the single ERROR
     // (yrd:jobs:<step>); the run settles at INFO so one failure is not re-raised
     // as a duplicate ERROR one level up. But a run that failed with NO step to
     // own it — a pinned/stale-base refusal rejected before the step's Job ran
     // (record.failure) — has no deeper ERROR. The run must own it, or the
     // failure is silent: fail loud with a run-scoped ERROR.
-    const stepOwned = run.steps.some(
-      (step) => step.job?.status === "failed" || step.job?.status === "lost" || step.job?.status === "canceled",
-    )
+    const stepOwned = run.steps.some((step) => step.job !== undefined && jobFailed(step.job))
     return stepOwned ? "settled" : "failed"
   }
+  if (Queues.terminal(run)) return "settled"
   return "progress"
 }
 
-function queueRunsOutcome(runs: readonly DeepReadonly<QueueRun>[]): YrdLifecycleOutcome {
-  if (runs.some((run) => run.status === "running" || run.status === "waiting")) return "progress"
+function queueRunsOutcome(runs: readonly DeepReadonly<Run>[]): YrdLifecycleOutcome {
+  if (runs.some((run) => run.status === "queued" || run.status === "in_progress" || run.status === "waiting")) {
+    return "progress"
+  }
   // As with a single run, a batch that finished with failures does not re-raise
   // ERROR: each failing run's deepest job already did. The compose settles at
   // INFO, and composeSettlementLabel names the per-run mix on the message.
-  if (runs.some((run) => run.status === "failed")) return "settled"
+  if (runs.some(Queues.failed)) return "settled"
   return "succeeded"
 }
 
@@ -1430,11 +1720,11 @@ function queueRunsOutcome(runs: readonly DeepReadonly<QueueRun>[]): YrdLifecycle
  * failed" never misrepresents a batch that also passed runs. Returns undefined
  * for a uniform or still-running batch (the plain outcome word reads fine
  * there); a mixed/all-failed terminal batch gets `settled: N failed, M passed`. */
-function composeSettlementLabel(runs: readonly DeepReadonly<QueueRun>[]): string | undefined {
+function composeSettlementLabel(runs: readonly DeepReadonly<Run>[]): string | undefined {
   if (runs.length === 0 || !runs.every(Queues.terminal)) return undefined
-  const failed = runs.filter((run) => run.status === "failed").length
+  const failed = runs.filter(Queues.failed).length
   if (failed === 0) return undefined
-  const passed = runs.filter((run) => run.status === "passed").length
+  const passed = runs.filter(Queues.succeeded).length
   const other = runs.length - failed - passed
   const parts = [`${failed} failed`]
   if (passed > 0) parts.push(`${passed} passed`)
@@ -1446,15 +1736,15 @@ function queueFailedEvent(
   state: DeepReadonly<RuntimeState>,
   run: DeepReadonly<Pick<QueueRecord, "id" | "prs">>,
   error: DeepReadonly<JobError>,
+  job?: DeepReadonly<Pick<Job, "id" | "attempt">>,
 ): EventDraft {
   return event("queue/run/failed", {
     run: run.id,
     error,
+    ...(job === undefined ? {} : { job: { id: job.id, attempt: job.attempt } }),
     prs: run.prs.map((pr) => {
       const current = state.bays.prs[pr.id]
-      const actor = current?.revisions.find(
-        (revision) => revision.revision === pr.revision && revision.headSha === pr.headSha,
-      )?.actor
+      const actor = current?.revs.find((revision) => revision.n === pr.revision && revision.head === pr.headSha)?.actor
       return {
         pr: pr.id,
         revision: pr.revision,
@@ -1465,19 +1755,31 @@ function queueFailedEvent(
   })
 }
 
-function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<string, RuntimeStep>): QueueCommands {
+function createQueueCommands(
+  steps: readonly RuntimeStep[],
+  byName: ReadonlyMap<string, RuntimeStep>,
+  flows?: YrdConfig,
+  requiresPreparedCandidate = false,
+): QueueCommands {
   const admit = command({
     title: "Admit PR checks",
     params: AdmitArgsSchema,
     apply(state: DeepReadonly<RuntimeState>, args: AdmitArgs) {
       const pr = resolvePR(state.bays, args.pr)
       if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${args.pr}'`)
-      if (pr.status !== "pushed" && pr.status !== "submitted") {
-        raiseFailure("refusal", "pr-not-admissible", `yrd: PR '${pr.id}' is ${pr.status}, not admissible`)
+      const delivery = prDeliveryState(pr)
+      if (delivery !== "pushed" && delivery !== "submitted") {
+        raiseFailure("refusal", "pr-not-admissible", `yrd: PR '${pr.id}' is ${delivery}, not admissible`)
       }
+      assertCurrentFlow(pr.flow, flows)
       const selected = admissionSteps(state.queues, steps)
       if (selected.length === 0) return { events: [] }
+      if (requiresPreparedCandidate && args.candidate === undefined) {
+        throw new Error("yrd: queue admission requires prepared Candidate facts")
+      }
       const snapshot = Queues.snapshot(pr)
+      const candidateBaseSha = args.baseSha ?? requiredCandidateBaseSha([snapshot])
+      const candidateSnapshots = pinCandidateBaseSha([snapshot], candidateBaseSha)
       const existing = checkFactRun(state, snapshot, selected)
       const status = existing === undefined ? undefined : checkRunStatus(existing, selected.length)
       if (status === "passed" || status === "checking") {
@@ -1498,11 +1800,14 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
         if (first !== undefined && first.id !== pr.id) return { events: [] }
       }
       return startRun(
+        state.queues,
         Queues.nextId(state.queues),
-        [snapshot],
+        candidateSnapshots,
+        candidateBaseSha,
+        args.candidate,
         selected,
         stepSelection(state.queues, steps, selected, "admission"),
-        prShape([snapshot]),
+        prShape(candidateSnapshots),
       )
     },
   })
@@ -1549,6 +1854,9 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
     apply(state: DeepReadonly<RuntimeState>, args: QueueRunArgs) {
       if (args.steps?.length === 0) return { events: [] }
       const selected = selectSteps(steps, args.steps ?? state.queues.defaultSteps)
+      if (requiresPreparedCandidate && args.candidate === undefined) {
+        throw new Error("yrd: queue run requires prepared Candidate facts")
+      }
       const selection = stepSelection(
         state.queues,
         steps,
@@ -1558,6 +1866,7 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
       const explicitStepAuthority = selection.authority === "explicit"
       const prs = runnablePRs(state, args, steps, new Set(), { explicitStepAuthority })
       if (prs.length === 0) return { events: [] }
+      for (const pr of prs) assertCurrentFlow(pr.flow, flows)
       const base = prs[0] === undefined ? undefined : baseIdentity(prs[0].base)
       if (base === undefined) throw new Error("yrd: a queue run requires at least one PR")
       if (prs.some((pr) => baseIdentity(pr.base) !== base)) {
@@ -1583,17 +1892,24 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
       const integrated = integratedPRShape(prs)
       validateSequence(selected, integrated !== undefined)
       const snapshots = prs.map(Queues.snapshot)
+      const candidateBaseSha = args.baseSha ?? requiredCandidateBaseSha(snapshots)
+      const candidateSnapshots = pinCandidateBaseSha(snapshots, candidateBaseSha)
       const reuse =
-        integrated === undefined && !explicitStepAuthority ? reusablePrefix(state, snapshots, selected) : undefined
+        integrated === undefined && !explicitStepAuthority
+          ? reusablePrefix(state, candidateSnapshots, selected)
+          : undefined
       const remaining = reuse === undefined ? selected : selected.slice(reuse.count)
       if (remaining.length === 0) return { events: [] }
-      requireQueueAuthority(state.queues.authority, snapshots, remaining)
+      requireQueueAuthority(state.queues.authority, candidateSnapshots, remaining, integrated !== undefined)
       const started = startRun(
+        state.queues,
         Queues.nextId(state.queues),
-        snapshots,
+        candidateSnapshots,
+        candidateBaseSha,
+        args.candidate,
         remaining,
         selection,
-        reuse?.shape ?? integrated ?? prShape(snapshots),
+        reuse?.shape ?? integrated ?? prShape(candidateSnapshots),
         integrated?.integration,
         {},
         reuse === undefined ? undefined : { run: reuse.run, results: reuse.shape.results },
@@ -1617,13 +1933,13 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
     title: "Advance queue run",
     params: AdvanceArgsSchema,
     apply: (state: DeepReadonly<RuntimeState>, args) =>
-      advanceQueue(state, Queues.record(state.queues, args.run), byName),
+      advanceQueue(state, Queues.record(state.queues, args.run), byName, flows),
   })
 
   const settled = command({
     title: "Release settled queue run projection",
     params: SettledArgsSchema,
-    apply(state: DeepReadonly<RuntimeState>, args: Readonly<{ run: QueueRunId }>) {
+    apply(state: DeepReadonly<RuntimeState>, args: Readonly<{ run: RunId }>) {
       const record = Queues.record(state.queues, args.run)
       if (record.parent !== undefined) return { events: [] }
       const run = materializeRun(record, state.jobs)
@@ -1647,17 +1963,26 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
       const pivot = Math.ceil(parent.prs.length / 2)
       const prs = args.part === 0 ? parent.prs.slice(0, pivot) : parent.prs.slice(pivot)
       if (prs.length === 0) throw new Error(`yrd: queue run '${parent.id}' has no isolation part ${args.part}`)
+      if (requiresPreparedCandidate && args.candidate === undefined) {
+        throw new Error("yrd: queue isolation requires prepared Candidate facts")
+      }
       const selected = parent.steps.map((planned) => requirePlannedStep(byName, planned))
+      const parentCandidate = state.queues.candidates[parent.candidateId]
+      if (parentCandidate === undefined) {
+        throw new Error(`yrd: queue run '${parent.id}' names missing Candidate '${parent.candidateId}'`)
+      }
       const started = startRun(
+        state.queues,
         Queues.nextId(state.queues),
         prs,
+        parentCandidate.baseSha,
+        args.candidate,
         selected,
         parent.stepSelection,
         prShape(prs),
         undefined,
         {
           parent: parent.id,
-          isolationPart: args.part,
         },
       )
       return {
@@ -1747,14 +2072,14 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
 }
 
 type QueueAuthorityKind = "submit" | "checks"
-type QueueAuthorityRelease = NonNullable<QueueRunAuthority["released"]>
+type QueueAuthorityRelease = NonNullable<RunAuthority["released"]>
 type QueueAuthorityGap = Readonly<{
   kind: QueueAuthorityKind
   pr: string
   revision: number
   headSha: string
   reason: "missing" | "consumed"
-  consumedBy?: QueueRunId
+  consumedBy?: RunId
 }>
 
 function queueAuthorityReleaseReason(
@@ -1768,9 +2093,10 @@ function authorityRequirement(
   authority: DeepReadonly<QueueAuthorityState>,
   pr: DeepReadonly<PRSnapshot>,
   steps: readonly DeepReadonly<InstalledStep>[],
+  alreadyIntegrated = false,
 ): QueueAuthorityKind | undefined {
-  if (steps.some((step) => step.integrates)) return "submit"
-  if (steps.some((step) => step.needsIntegration)) return undefined
+  if (steps.some((step) => step.kind === "merge")) return "submit"
+  if (alreadyIntegrated) return undefined
   if (availableAuthorityToken(authority.checks[pr.id], pr)) return "checks"
   if (availableAuthorityToken(authority.submits[pr.id], pr)) return "submit"
   return authority.statuses[pr.id] === "pushed" ? "checks" : "submit"
@@ -1794,7 +2120,7 @@ function availableAuthorityToken(
 function requireFreshCheckAuthority(
   authority: DeepReadonly<QueueAuthorityState>,
   pr: DeepReadonly<PRSnapshot>,
-  failedRun: QueueRunId,
+  failedRun: RunId,
 ): void {
   const token = authority.checks[pr.id]
   if (availableAuthorityToken(token, pr)) return
@@ -1809,10 +2135,11 @@ function queueAuthorityGaps(
   authority: DeepReadonly<QueueAuthorityState>,
   prs: readonly DeepReadonly<PRSnapshot>[],
   steps: readonly DeepReadonly<InstalledStep>[],
+  alreadyIntegrated = false,
 ): QueueAuthorityGap[] {
   const gaps: QueueAuthorityGap[] = []
   for (const pr of prs) {
-    const kind = authorityRequirement(authority, pr, steps)
+    const kind = authorityRequirement(authority, pr, steps, alreadyIntegrated)
     if (kind === undefined) continue
     const token = kind === "submit" ? authority.submits[pr.id] : authority.checks[pr.id]
     if (token === undefined || !sameAuthorityToken(token, pr)) {
@@ -1837,8 +2164,9 @@ function requireQueueAuthority(
   authority: DeepReadonly<QueueAuthorityState>,
   prs: readonly DeepReadonly<PRSnapshot>[],
   steps: readonly DeepReadonly<InstalledStep>[],
+  alreadyIntegrated = false,
 ): void {
-  const gap = queueAuthorityGaps(authority, prs, steps)[0]
+  const gap = queueAuthorityGaps(authority, prs, steps, alreadyIntegrated)[0]
   if (gap === undefined) return
   const detail =
     gap.reason === "consumed"
@@ -1871,12 +2199,12 @@ function projectRunAuthority(
     }
   }
 
-  const gaps = queueAuthorityGaps(authority, run.prs, run.steps)
+  const gaps = queueAuthorityGaps(authority, run.prs, run.steps, run.initialIntegration !== undefined)
   const submits: Record<string, QueueAuthorityToken> = { ...authority.submits }
   const checks: Record<string, QueueAuthorityToken> = { ...authority.checks }
   const claims: Record<string, QueueAuthorityToken> = { ...authority.claims }
   const explicitSettlement = run.settlement === "explicit"
-  const consumesSubmit = run.steps.some((step) => step.integrates)
+  const consumesSubmit = run.steps.some((step) => step.kind === "merge")
   for (const pr of run.prs) {
     const current = authority.current[pr.id]
     if (explicitSettlement && current !== undefined && sameAuthorityToken(current, pr)) {
@@ -1887,7 +2215,7 @@ function projectRunAuthority(
         consumedBy: run.id,
       }
     }
-    const kind = authorityRequirement(authority, pr, run.steps)
+    const kind = authorityRequirement(authority, pr, run.steps, run.initialIntegration !== undefined)
     if (kind === undefined) continue
     const token = kind === "submit" ? authority.submits[pr.id] : authority.checks[pr.id]
     if (token === undefined || !sameAuthorityToken(token, pr) || token.consumedBy !== undefined) continue
@@ -1913,8 +2241,8 @@ function projectRunAuthority(
   }
 }
 
-function resolveQueueAuthorityRoot(authority: DeepReadonly<QueueAuthorityState>, run: QueueRunId): QueueRunId {
-  const seen = new Set<QueueRunId>()
+function resolveQueueAuthorityRoot(authority: DeepReadonly<QueueAuthorityState>, run: RunId): RunId {
+  const seen = new Set<RunId>()
   let root = run
   while (true) {
     if (seen.has(root)) throw new Error(`yrd: queue authority ancestry for '${run}' is cyclic`)
@@ -1957,7 +2285,7 @@ function releaseRunAuthority(
   }
 }
 
-function settleRunClaim(authority: DeepReadonly<QueueAuthorityState>, run: QueueRunId): QueueAuthorityState {
+function settleRunClaim(authority: DeepReadonly<QueueAuthorityState>, run: RunId): QueueAuthorityState {
   const root = resolveQueueAuthorityRoot(authority, run)
   const claims: Record<string, QueueAuthorityToken> = { ...authority.claims }
   for (const [pr, token] of Object.entries(authority.claims)) {
@@ -2026,11 +2354,53 @@ function projectSettledQueueRun(state: DeepReadonly<QueueState>, applied: Event)
 /** The one production projection path for a started Queue run. */
 export function projectQueueStarted(queues: DeepReadonly<QueuesState>, record: DeepReadonly<QueueRecord>): QueuesState {
   if (Queues.get(queues, record.id) !== undefined) throw new Error(`yrd: duplicate queue run '${record.id}'`)
+  validateRunCandidateReceipt(queues, record)
   return {
     ...queues,
     records: Queues.set(queues.records, record),
     index: indexQueueStart(queues.index, record),
     authority: projectRunAuthority(queues.authority, record),
+  }
+}
+
+function validateRunCandidateReceipt(queues: DeepReadonly<QueuesState>, record: DeepReadonly<QueueRecord>): void {
+  const candidate = queues.candidates[record.candidateId]
+  if (candidate === undefined) {
+    throw new Error(`yrd: Queue run '${record.id}' names missing Candidate '${record.candidateId}'`)
+  }
+  const mismatch = (detail: string): never => {
+    throw new Error(`yrd: Queue run '${record.id}' ${detail} Candidate '${candidate.id}'`)
+  }
+  const first = record.prs[0]
+  if (first === undefined) {
+    throw new Error(`yrd: Queue run '${record.id}' has no PR receipt for Candidate '${candidate.id}'`)
+  }
+  if (record.queueId !== candidate.queueId) mismatch(`queue '${record.queueId}' does not match`)
+  if (queueIdentity(first) !== candidate.queueId) mismatch("snapshot queue does not match")
+  if (baseIdentity(record.base) !== baseIdentity(first.base)) mismatch("queue target does not match")
+  if (!sameFlow(record.flow, candidateFlow(record.prs))) mismatch("Flow receipt does not match")
+
+  const baseSha = (() => {
+    try {
+      return requiredCandidateBaseSha(record.prs)
+    } catch {
+      return mismatch("has an invalid base-SHA receipt for")
+    }
+  })()
+  if (baseSha !== candidate.baseSha) mismatch("base SHA does not match")
+  if (
+    candidate.revs.length !== record.prs.length ||
+    candidate.revs.some((revision, index) => {
+      const snapshot = record.prs[index]
+      return (
+        snapshot === undefined ||
+        revision.pr !== snapshot.id ||
+        revision.n !== snapshot.revision ||
+        revision.head !== snapshot.headSha
+      )
+    })
+  ) {
+    mismatch("ordered PR revisions do not match")
   }
 }
 
@@ -2185,15 +2555,64 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
       },
     }
   }
+  if (applied.name === "queue/batch/isolated") {
+    const isolated = BatchIsolatedSchema.parse(applied.data)
+    return {
+      queues: {
+        ...state.queues,
+        index: indexQueueChild(state.queues.index, isolated.parent, isolated.part, isolated.run),
+      },
+    }
+  }
+  if (applied.name === "queue/candidate/created") {
+    const candidate = CandidateSchema.parse({ ...CandidateCreatedSchema.parse(applied.data), createdAt: applied.ts })
+    const existing = state.queues.candidates[candidate.id]
+    if (existing !== undefined) {
+      throw new Error(`yrd: duplicate Candidate '${candidate.id}'`)
+    }
+    return {
+      queues: {
+        ...state.queues,
+        candidates: { ...state.queues.candidates, [candidate.id]: candidate },
+      },
+    }
+  }
   if (applied.name === "queue/run/started") {
     const started = ReplayQueueStartSchema.parse((applied.data as { run?: unknown }).run)
-    const record = ReplayQueueRecordSchema.parse({
+    if (Queues.get(state.queues, started.id) !== undefined) throw new Error(`yrd: duplicate queue run '${started.id}'`)
+    const candidateId = started.candidateId ?? Queues.nextCandidateId(state.queues)
+    const queueId = baseIdentity(started.queueId ?? started.base)
+    const legacyCandidate =
+      started.candidateId === undefined
+        ? CandidateSchema.parse({
+            id: candidateId,
+            queueId,
+            baseSha: requiredCandidateBaseSha(started.prs),
+            revs: started.prs.map((pr) => ({ pr: pr.id, n: pr.revision, head: pr.headSha })),
+            mergeability: "unknown",
+            createdAt: applied.ts,
+          })
+        : undefined
+    if (legacyCandidate === undefined && state.queues.candidates[candidateId] === undefined) {
+      throw new Error(`yrd: queue run '${started.id}' names missing Candidate '${candidateId}'`)
+    }
+    const replayed = ReplayQueueRecordSchema.parse({
       ...started,
+      queueId,
+      candidateId,
       base: baseIdentity(started.base),
       prs: started.prs.map((pr) => ({ ...pr, base: baseIdentity(pr.base) })),
       startedAt: applied.ts,
     })
-    return { queues: projectQueueStarted(state.queues, record) }
+    const record: QueueRecord = { ...replayed, queueId, candidateId }
+    const queues = {
+      ...state.queues,
+      candidates:
+        legacyCandidate === undefined
+          ? state.queues.candidates
+          : { ...state.queues.candidates, [legacyCandidate.id]: legacyCandidate },
+    }
+    return { queues: projectQueueStarted(queues, record) }
   }
   if (applied.name === "queue/run/settled") {
     return projectSettledQueueRun(state, applied)
@@ -2203,7 +2622,14 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     const record = Queues.get(state.queues, failed.run)
     if (record === undefined) throw new Error(`yrd: no queue run '${failed.run}'`)
     const releaseReason = queueAuthorityReleaseReason(failed.error)
-    const failedRecord = { ...record, failure: { at: applied.ts, error: failed.error } }
+    const failedRecord = {
+      ...record,
+      failure: {
+        at: applied.ts,
+        error: failed.error,
+        ...(!("job" in failed) || failed.job === undefined ? {} : { job: failed.job }),
+      },
+    }
     return {
       queues: {
         ...state.queues,
@@ -2265,8 +2691,7 @@ function descriptor(step: RuntimeStep | QueueStep): InstalledStep {
     name: step.name,
     title: step.title,
     revision: step.revision,
-    integrates: step.integrates,
-    needsIntegration: step.needsIntegration,
+    kind: step.kind,
     ...(step.classification === undefined ? {} : { classification: step.classification }),
   }
 }
@@ -2316,45 +2741,176 @@ function stepSelection(
 function validateSequence(steps: readonly RuntimeStep[], alreadyIntegrated: boolean): void {
   let integrated = alreadyIntegrated
   for (const step of steps) {
-    if (step.needsIntegration && !integrated) {
-      throw new Error(`yrd: queue step '${step.name}' requires integration output before it can run`)
-    }
-    if (!step.integrates) continue
+    if (step.kind !== "merge") continue
     if (integrated) throw new Error("yrd: merge step cannot run after the PR is already integrated")
     integrated = true
   }
 }
 
 function startRun(
-  id: QueueRunId,
+  queues: DeepReadonly<QueuesState>,
+  id: RunId,
   prs: readonly PRSnapshot[],
+  baseSha: string,
+  prepared: DeepReadonly<Omit<Candidate, "createdAt">> | undefined,
   selected: readonly RuntimeStep[],
   selection: StepSelection | undefined,
   shape: PRShape,
   integration?: IntegrationProof,
-  lineage: Readonly<{ parent?: QueueRunId; isolationPart?: 0 | 1 }> = {},
-  reuse?: Readonly<{ run: QueueRunId; results: Readonly<Record<string, JsonValue>> }>,
+  lineage: Readonly<{ parent?: RunId; isolationPart?: 0 | 1 }> = {},
+  reuse?: Readonly<{ run: RunId; results: Readonly<Record<string, JsonValue>> }>,
 ): Readonly<{ run: QueueStart; events: readonly EventDraft[] }> {
   const pr = prs[0]
   if (pr === undefined) throw new Error("yrd: a queue run requires at least one PR")
+  requiredCandidateBaseSha(prs)
+  const flow = candidateFlow(prs)
+  const queueId = queueIdentity(pr)
+  const selectedCandidate = candidateFor(queues, prs, baseSha)
+  const candidate =
+    selectedCandidate ??
+    CandidateCreatedSchema.parse({
+      ...(prepared ?? {
+        id: Queues.nextCandidateId(queues),
+        queueId,
+        baseSha,
+        revs: prs.map((member) => ({ pr: member.id, n: member.revision, head: member.headSha })),
+        mergeability: "unknown",
+      }),
+    })
+  if (candidate.queueId !== queueId || candidate.baseSha !== baseSha) {
+    throw new Error(`yrd: prepared Candidate '${candidate.id}' does not match queue '${queueId}' at ${baseSha}`)
+  }
+  if (
+    candidate.revs.length !== prs.length ||
+    candidate.revs.some((revision, index) => {
+      const snapshot = prs[index]
+      return (
+        snapshot === undefined ||
+        revision.pr !== snapshot.id ||
+        revision.n !== snapshot.revision ||
+        revision.head !== snapshot.headSha
+      )
+    })
+  ) {
+    throw new Error(`yrd: prepared Candidate '${candidate.id}' does not match its ordered PR revisions`)
+  }
+  const createdEvents = selectedCandidate === undefined ? [event("queue/candidate/created", candidate)] : []
   const run: QueueStart = {
     id,
     settlement: "explicit",
+    queueId: candidate.queueId,
+    candidateId: candidate.id,
     prs,
     base: baseIdentity(pr.base),
+    ...(flow === undefined ? {} : { flow }),
     steps: selected.map(descriptor),
     ...(selection === undefined ? {} : { stepSelection: selection }),
     ...(integration === undefined ? {} : { initialIntegration: integration }),
     ...(reuse === undefined ? {} : { initialResults: reuse.results, reusedFrom: reuse.run }),
     ...lineage,
   }
+  if (candidate.mergeability === "conflicting") {
+    return {
+      run,
+      events: [
+        ...createdEvents,
+        event("queue/run/started", { run }),
+        event("queue/run/failed", {
+          run: run.id,
+          prs: run.prs.map((pr) => ({ pr: pr.id, revision: pr.revision, headSha: pr.headSha })),
+          error: {
+            code: "candidate-conflicting",
+            message: `Candidate '${candidate.id}' conflicts before Job admission`,
+          },
+        }),
+      ],
+    }
+  }
   return {
     run,
     events: [
+      ...createdEvents,
       event("queue/run/started", { run }),
-      ...(selected[0] === undefined ? [] : [requestStep(selected[0], run, 0, shape)]),
+      ...(selected[0] === undefined ? [] : [requestStep(selected[0], run, candidate, 0, shape)]),
     ],
   }
+}
+
+function pinCandidateBaseSha(prs: readonly DeepReadonly<PRSnapshot>[], baseSha: string): readonly PRSnapshot[] {
+  return prs.map((pr) => PRSnapshotSchema.parse({ ...pr, baseSha }))
+}
+
+function requiredCandidateBaseSha(prs: readonly DeepReadonly<PRSnapshot>[]): string {
+  const baseSha = prs[0]?.baseSha
+  if (baseSha === undefined) {
+    throw new Error("yrd: a Candidate requires the exact queue base SHA")
+  }
+  if (prs.some((pr) => pr.baseSha !== baseSha)) {
+    throw new Error("yrd: one Candidate cannot span queue base SHAs")
+  }
+  return baseSha
+}
+
+function candidateContentKey(prs: readonly DeepReadonly<PRSnapshot>[], baseSha: string): string {
+  return JSON.stringify([
+    prs[0] === undefined ? "" : queueIdentity(prs[0]),
+    baseSha,
+    ...prs.map((pr) => [pr.headSha, pr.composition]),
+  ])
+}
+
+function sameFlow(left: DeepReadonly<PRSnapshot["flow"]>, right: DeepReadonly<PRSnapshot["flow"]>): boolean {
+  if (left === undefined || right === undefined) return left === right
+  return left.name === right.name && left.rev === right.rev && left.fingerprint === right.fingerprint
+}
+
+function candidateFlow(prs: readonly DeepReadonly<PRSnapshot>[]): DeepReadonly<PRSnapshot["flow"]> {
+  const flow = prs[0]?.flow
+  if (prs.some((pr) => !sameFlow(pr.flow, flow))) {
+    throw new Error("yrd: one Candidate cannot span Flow revisions")
+  }
+  return flow
+}
+
+function queueIdentity(pr: Pick<DeepReadonly<PRSnapshot>, "base" | "flow">): string {
+  const base = baseIdentity(pr.base)
+  return pr.flow === undefined ? base : `${pr.flow.name}/${base}`
+}
+
+function candidateFor(
+  queues: DeepReadonly<QueuesState>,
+  prs: readonly DeepReadonly<PRSnapshot>[],
+  baseSha: string,
+): DeepReadonly<Candidate> | undefined {
+  const first = prs[0]
+  if (first === undefined) return undefined
+  const key = candidateContentKey(prs, baseSha)
+  const records = Queues.values(queues)
+  const record = records.find((run) => {
+    const candidate = queues.candidates[run.candidateId]
+    return (
+      candidate !== undefined &&
+      candidate.mergeability !== "unknown" &&
+      candidateContentKey(run.prs, candidate.baseSha) === key
+    )
+  })
+  if (record !== undefined) return queues.candidates[record.candidateId]
+  return Object.values(queues.candidates).find(
+    (candidate) =>
+      candidate.mergeability !== "unknown" &&
+      candidate.queueId === queueIdentity(first) &&
+      candidate.baseSha === baseSha &&
+      candidate.revs.length === prs.length &&
+      candidate.revs.every((revision, index) => {
+        const snapshot = prs[index]
+        return (
+          snapshot !== undefined &&
+          revision.pr === snapshot.id &&
+          revision.n === snapshot.revision &&
+          revision.head === snapshot.headSha
+        )
+      }),
+  )
 }
 
 /**
@@ -2368,7 +2924,7 @@ function assertLegacyQueueMigration(state: DeepReadonly<RuntimeState>): void {
   const active = projectionLookupValues(state.queues.records)
     .filter((record) => record.parent === undefined && record.settlement === undefined)
     .map((record) => materializeRun(record, state.jobs))
-    .filter((run) => needsSettlement(state, run))
+    .filter((run) => !legacyRunHasTerminalRevisions(state, run) && needsSettlement(state, run))
     .map((run) => run.id)
     .toSorted((left, right) => left.localeCompare(right, undefined, { numeric: true }))
   if (active.length === 0) return
@@ -2377,16 +2933,51 @@ function assertLegacyQueueMigration(state: DeepReadonly<RuntimeState>): void {
   )
 }
 
-function requestStep(step: RuntimeStep, run: Pick<QueueStart, "id" | "prs">, index: number, shape: PRShape) {
-  return step.job.request({ run: run.id, step: step.name, index, prs: run.prs, shape }, { key: jobKey(run.id, index) })
+/** A v1 failed Run settled by writing PR revision terminals instead of the
+ * v3 queue/run/failed + explicit-settlement facts. Those terminals are replay
+ * evidence that the old writer quiesced the root; applying v3's fresh failure
+ * advancement rule to it would falsely classify completed history as live. */
+function legacyRunHasTerminalRevisions(state: DeepReadonly<RuntimeState>, run: DeepReadonly<Run>): boolean {
+  return (
+    Queues.terminal(run) &&
+    run.prs.every((snapshot) =>
+      state.bays.prs[snapshot.id]?.revs.some(
+        (revision) =>
+          revision.n === snapshot.revision && revision.head === snapshot.headSha && revision.terminal !== undefined,
+      ),
+    )
+  )
+}
+
+function requestStep(
+  step: RuntimeStep,
+  run: Pick<QueueStart, "id" | "prs">,
+  candidate: DeepReadonly<Candidate> | DeepReadonly<Omit<Candidate, "createdAt">>,
+  index: number,
+  shape: PRShape,
+) {
+  const { createdAt: _createdAt, ...candidateFacts } = candidate as DeepReadonly<Candidate>
+  return step.job.request(
+    {
+      run: run.id,
+      step: step.name,
+      index,
+      prs: run.prs,
+      candidate: CandidateCreatedSchema.parse(candidateFacts),
+      shape,
+    },
+    { key: jobKey(run.id, index) },
+  )
 }
 
 function advanceQueue(
   state: DeepReadonly<RuntimeState>,
   record: DeepReadonly<QueueRecord>,
   steps: ReadonlyMap<string, RuntimeStep>,
+  flows?: YrdConfig,
 ): Readonly<{ events: readonly EventDraft[] }> {
-  if (record.failure !== undefined) return { events: [] }
+  assertCurrentFlow(record.flow, flows)
+  if (activeQueueFailure(record, state.jobs) !== undefined) return { events: [] }
   // A run-canceled record is terminal: never emit pr/canceled or pr/rejected for
   // its members. Their status is untouched (still submitted), so a future drain
   // re-queues them — cancel is a re-queue, not a rejection.
@@ -2399,14 +2990,14 @@ function advanceQueue(
   const jobs = queueJobs(record, state.jobs)
   const index = jobs.length - 1
   const job = jobs[index]
-  if (job === undefined || job.status === "requested" || job.status === "running" || job.status === "waiting") {
+  if (job === undefined || job.status === "queued" || job.status === "in_progress" || job.status === "waiting") {
     return { events: [] }
   }
   const planned = record.steps[index]
   if (planned === undefined) throw new Error(`yrd: queue run '${record.id}' lost step ${index}`)
-  if (job.status !== "passed") {
+  if (!jobSucceeded(job)) {
     const before = shapeThrough(record, state.jobs, index)
-    if (job.status === "canceled") {
+    if (job.conclusion === "cancelled") {
       return {
         events: isIntegrated(before)
           ? []
@@ -2414,14 +3005,14 @@ function advanceQueue(
               const current = state.bays.prs[pr.id]
               if (
                 current === undefined ||
-                current.revision !== pr.revision ||
-                current.headSha !== pr.headSha ||
-                (current.status !== "pushed" && current.status !== "submitted")
+                prRevisionNumber(current) !== pr.revision ||
+                prHead(current) !== pr.headSha ||
+                (prDeliveryState(current) !== "pushed" && prDeliveryState(current) !== "submitted")
               ) {
                 return []
               }
-              const revision = current.revisions.find(
-                (candidate) => candidate.revision === pr.revision && candidate.headSha === pr.headSha,
+              const revision = current.revs.find(
+                (candidate) => candidate.n === pr.revision && candidate.head === pr.headSha,
               )
               return [
                 event("pr/canceled", {
@@ -2430,7 +3021,7 @@ function advanceQueue(
                   headSha: pr.headSha,
                   run: record.id,
                   ...(current.issue === undefined ? {} : { issueRef: current.issue }),
-                  ...(current.correlation === undefined ? {} : { correlation: current.correlation }),
+                  ...(prCorrelation(current) === undefined ? {} : { correlation: prCorrelation(current) }),
                   ...(revision?.actor === undefined ? {} : { actor: revision.actor }),
                   by: job.canceledBy,
                   reason: job.cancelReason,
@@ -2444,72 +3035,57 @@ function advanceQueue(
     if (queueAuthorityReleaseReason(failure) !== undefined) {
       return { events: [queueFailedEvent(state, record, failure)] }
     }
-    const pr = record.prs.length === 1 ? record.prs[0] : undefined
-    const current = pr === undefined ? undefined : state.bays.prs[pr.id]
-    const revision =
-      pr === undefined
-        ? undefined
-        : current?.revisions.find((candidate) => candidate.revision === pr.revision && candidate.headSha === pr.headSha)
-    const evidence =
-      (job.status === "failed" ? firstArtifact(job.error.evidence, "stderr") : undefined) ??
-      firstArtifact(checkEvidence(job), "stderr") ??
-      ("artifacts" in job ? firstArtifact({ artifacts: job.artifacts }, "stderr") : undefined)
-    return {
-      events:
-        !isIntegrated(before) && pr !== undefined && current?.status === "submitted"
-          ? [
-              event("pr/rejected", {
-                pr: pr.id,
-                revision: pr.revision,
-                headSha: pr.headSha,
-                run: record.id,
-                ...(current.issue === undefined ? {} : { issueRef: current.issue }),
-                ...(current.correlation === undefined ? {} : { correlation: current.correlation }),
-                ...(revision?.actor === undefined ? {} : { actor: revision.actor }),
-                step: planned.name,
-                ...(evidence === undefined ? {} : { evidence }),
-                detail: failure.message,
-              }),
-            ]
-          : [],
-    }
+    // A failed Run is historical evidence about this immutable Candidate, not a
+    // terminal mutation of the PR. Journal the Run failure (including typed Job
+    // evidence and exact PR revisions) while keeping the proposal open.
+    return { events: [queueFailedEvent(state, record, failure, job)] }
   }
 
   const shape = shapeThrough(record, state.jobs, index + 1)
   const events: EventDraft[] = []
-  if (planned.integrates) {
+  if (planned.kind === "merge") {
     if (!isIntegrated(shape)) throw new Error(`yrd: merge step '${planned.name}' produced no integration proof`)
     for (const current of samePayloadPRs(state.bays, record.prs)) {
       if (
-        current.status === "integrated" &&
+        current.merged &&
         current.integration?.commit === shape.integration.commit &&
         current.integration?.baseSha === shape.integration.baseSha
       ) {
         continue
       }
-      const revision = current.revisions.find(
-        (candidate) => candidate.revision === current.revision && candidate.headSha === current.headSha,
-      )
+      const revision = currentPRRev(current)
       events.push(
         event("pr/integrated", {
           pr: current.id,
-          revision: current.revision,
-          headSha: current.headSha,
+          revision: revision.n,
+          headSha: revision.head,
           run: record.id,
           ...(current.issue === undefined ? {} : { issueRef: current.issue }),
           commit: shape.integration.commit,
           landingSha: shape.integration.commit,
           baseSha: shape.integration.baseSha,
-          ...(current.correlation === undefined ? {} : { correlation: current.correlation }),
-          ...(revision?.actor === undefined ? {} : { actor: revision.actor }),
+          ...(revision.correlation === undefined ? {} : { correlation: revision.correlation }),
+          ...(revision.actor === undefined ? {} : { actor: revision.actor }),
         }),
       )
     }
   }
 
   const next = record.steps[index + 1]
-  if (next !== undefined) events.push(requestStep(requirePlannedStep(steps, next), record, index + 1, shape))
+  if (next !== undefined) {
+    const candidate = state.queues.candidates[record.candidateId]
+    if (candidate === undefined) {
+      throw new Error(`yrd: queue run '${record.id}' names missing Candidate '${record.candidateId}'`)
+    }
+    events.push(requestStep(requirePlannedStep(steps, next), record, candidate, index + 1, shape))
+  }
   return { events }
+}
+
+function assertCurrentFlow(flow: DeepReadonly<FlowPin> | undefined, config: YrdConfig | undefined): void {
+  if (flow === undefined || config === undefined) return
+  const refusal = diagnoseFlowPin(flow, config).find((diagnostic) => diagnostic.severity === "refusal")
+  if (refusal !== undefined) raiseFailure("refusal", refusal.code, refusal.message)
 }
 
 function samePayloadPRs(
@@ -2518,15 +3094,19 @@ function samePayloadPRs(
 ): readonly DeepReadonly<PR>[] {
   const payloads = new Set(snapshots.map(payloadIdentity))
   return Object.values(state.prs).filter(
-    (pr) => pr.status !== "withdrawn" && pr.status !== "canceled" && payloads.has(payloadIdentity(pr)),
+    (pr) =>
+      prDeliveryState(pr) !== "withdrawn" && prDeliveryState(pr) !== "canceled" && payloads.has(payloadIdentity(pr)),
   )
 }
 
-function payloadIdentity(pr: Pick<DeepReadonly<PR>, "base" | "headSha" | "composition">): string {
+function payloadIdentity(pr: DeepReadonly<PR> | DeepReadonly<PRSnapshot>): string {
+  if ("revs" in pr) {
+    return `${baseIdentity(pr.base)}\0${prHead(pr)}\0${JSON.stringify(prComposition(pr))}`
+  }
   return `${baseIdentity(pr.base)}\0${pr.headSha}\0${JSON.stringify(pr.composition)}`
 }
 
-function materializeRun(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<JobsState>): QueueRun {
+function materializeRun(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<JobsState>): Run {
   const jobList = queueJobs(record, jobs)
   const steps = record.steps.map(
     (step, index): QueueStep => ({
@@ -2535,31 +3115,51 @@ function materializeRun(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<Jo
     }),
   )
   const cursor = steps.findIndex((step) => step.job === undefined || !Job.terminal(step.job))
-  const failed = steps.find(
-    (step) => step.job?.status === "failed" || step.job?.status === "lost" || step.job?.status === "canceled",
-  )?.job
+  const failed = steps.find((step) => step.job !== undefined && jobFailed(step.job))?.job
   const waiting = steps.some((step) => step.job?.status === "waiting")
-  const passed = steps.every((step) => step.job?.status === "passed")
+  const passed = steps.every((step) => step.job !== undefined && jobSucceeded(step.job))
+  const started = steps.some((step) => step.job !== undefined && step.job.status !== "queued")
+  const projectedFailure = activeQueueFailure(record, jobs)
   const status =
     record.canceledAt !== undefined
-      ? "canceled"
-      : record.failure !== undefined
-        ? "failed"
+      ? "completed"
+      : projectedFailure !== undefined
+        ? "completed"
         : failed !== undefined
-          ? "failed"
+          ? "completed"
           : waiting
             ? "waiting"
             : passed
-              ? "passed"
-              : "running"
+              ? "completed"
+              : started
+                ? "in_progress"
+                : "queued"
+  const conclusion: RunConclusion | undefined =
+    record.canceledAt !== undefined
+      ? "cancelled"
+      : projectedFailure !== undefined
+        ? "failure"
+        : failed === undefined
+          ? passed
+            ? "success"
+            : undefined
+          : failed.status !== "completed"
+            ? "failure"
+            : failed.conclusion === "cancelled"
+              ? "cancelled"
+              : failed.conclusion === "timed_out"
+                ? "timed_out"
+                : failed.conclusion === "skipped"
+                  ? "skipped"
+                  : "failure"
   const last = steps.at(-1)?.job
   const finishedAt =
     record.canceledAt ??
-    record.failure?.at ??
-    (failed?.status === "failed" || failed?.status === "lost" || failed?.status === "canceled"
+    projectedFailure?.at ??
+    (failed?.status === "completed"
       ? failed.finishedAt
-      : status === "passed"
-        ? last?.status === "passed"
+      : status === "completed"
+        ? last?.status === "completed"
           ? last.finishedAt
           : record.startedAt
         : undefined)
@@ -2576,15 +3176,28 @@ function materializeRun(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<Jo
     cursor: cursor < 0 ? steps.length : cursor,
     ...(isIntegrated(shape) ? { integration: shape.integration } : {}),
     status,
+    ...(conclusion === undefined ? {} : { conclusion }),
+    jobs: jobList.map((job) => job.id),
     steps,
     shape,
     ...(finishedAt === undefined ? {} : { finishedAt }),
-    ...(record.failure === undefined
+    ...(projectedFailure === undefined
       ? failed === undefined
         ? {}
         : { error: jobFailure(failed) }
-      : { error: record.failure.error }),
+      : { error: projectedFailure.error }),
   }
+}
+
+function activeQueueFailure(
+  record: DeepReadonly<Pick<QueueRecord, "failure">>,
+  jobs: DeepReadonly<JobsState>,
+): DeepReadonly<QueueFailure> | undefined {
+  const failure = record.failure
+  if (failure?.job === undefined) return failure
+  const current = jobs.byId[failure.job.id]
+  if (current === undefined) return failure
+  return current.attempt > failure.job.attempt || !jobFailed(current) ? undefined : failure
 }
 
 function queueJobs(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<JobsState>): Job[] {
@@ -2614,7 +3227,7 @@ function queueJobs(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<JobsSta
   return result
 }
 
-function jobKey(run: QueueRunId, index: number): string {
+function jobKey(run: RunId, index: number): string {
   return `queue:${run}:${index}`
 }
 
@@ -2623,7 +3236,7 @@ function shapeThrough(
   jobs: DeepReadonly<JobsState>,
   limit = record.steps.length,
 ): PRShape {
-  const hasMerge = record.steps.some((step) => step.integrates)
+  const hasMerge = record.steps.some((step) => step.kind === "merge")
   let shape: PRShape | IntegratedShape = {
     results: { ...record.initialResults },
     ...(record.initialIntegration === undefined || hasMerge ? {} : { integration: record.initialIntegration }),
@@ -2632,15 +3245,16 @@ function shapeThrough(
   for (let index = 0; index < Math.min(limit, record.steps.length); index += 1) {
     const planned = record.steps[index]
     const job = jobList[index]
-    if (planned === undefined || job?.status !== "passed") break
-    shape = planned.integrates
-      ? { ...shape, integration: IntegrationProofSchema.parse(job.output) }
-      : { ...shape, results: { ...shape.results, [planned.name]: job.output } }
+    if (planned === undefined || job === undefined || !jobSucceeded(job)) break
+    shape =
+      planned.kind === "merge"
+        ? { ...shape, integration: IntegrationProofSchema.parse(job.output) }
+        : { ...shape, results: { ...shape.results, [planned.name]: job.output } }
   }
   return shape
 }
 
-function orderedQueues(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<JobsState>): QueueRun[] {
+function orderedQueues(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<JobsState>): Run[] {
   return Queues.values(queues)
     .map((record) => materializeRun(record, jobs))
     .toSorted((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }))
@@ -2650,28 +3264,31 @@ function runningQueue(
   queues: DeepReadonly<QueuesState>,
   jobs: DeepReadonly<JobsState>,
   base: string,
-  except?: QueueRunId,
-): QueueRun | undefined {
+  except?: RunId,
+): Run | undefined {
   const identity = baseIdentity(base)
   return activeQueueRuns(queues, jobs).find(
-    (run) => run.id !== except && baseIdentity(run.base) === identity && run.status === "running",
+    (run) =>
+      run.id !== except &&
+      baseIdentity(run.base) === identity &&
+      (run.status === "queued" || run.status === "in_progress"),
   )
 }
 
 function childQueue(
   queues: DeepReadonly<QueuesState>,
   jobs: DeepReadonly<JobsState>,
-  parent: QueueRunId,
+  parent: RunId,
   part: 0 | 1,
-): QueueRun | undefined {
+): Run | undefined {
   const id = childRunId(queues.index, parent, part)
   const record = id === undefined ? undefined : Queues.get(queues, id)
   return record === undefined ? undefined : materializeRun(record, jobs)
 }
 
-function queueTree(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<JobsState>, root: QueueRunId): QueueRun[] {
-  const result: QueueRun[] = []
-  const visit = (id: QueueRunId): void => {
+function queueTree(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<JobsState>, root: RunId): Run[] {
+  const result: Run[] = []
+  const visit = (id: RunId): void => {
     const record = Queues.get(queues, id)
     if (record === undefined) return
     result.push(materializeRun(record, jobs))
@@ -2684,7 +3301,7 @@ function queueTree(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<JobsSta
   return result
 }
 
-function activeQueueRuns(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<JobsState>): QueueRun[] {
+function activeQueueRuns(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<JobsState>): Run[] {
   return activeQueueRootIds(queues.authority).flatMap((root) => queueTree(queues, jobs, root))
 }
 
@@ -2693,7 +3310,7 @@ function queueSummary(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<Jobs
   const runs = orderedQueues(queues, jobs).filter((run) => baseIdentity(run.base) === identity)
   return {
     base: identity,
-    running: runs.filter((run) => run.status === "running"),
+    running: runs.filter((run) => run.status === "queued" || run.status === "in_progress"),
     waiting: runs.filter((run) => run.status === "waiting"),
     finished: runs.filter(Queues.terminal),
     ...(queues.pauses[identity] === undefined ? {} : { pause: queues.pauses[identity] }),
@@ -2732,7 +3349,7 @@ function auditQueues(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeS
         })
       }
     }
-    let run: QueueRun
+    let run: Run
     try {
       run = materializeRun(record, state.jobs)
     } catch (error) {
@@ -2771,8 +3388,7 @@ function requirePlannedStep(steps: ReadonlyMap<string, RuntimeStep>, planned: In
   if (current === undefined) throw new Error(`yrd: queue step '${planned.name}' is not installed`)
   if (
     current.revision !== planned.revision ||
-    current.integrates !== planned.integrates ||
-    current.needsIntegration !== planned.needsIntegration ||
+    current.kind !== planned.kind ||
     current.classification !== planned.classification
   ) {
     throw new Error(
@@ -2809,19 +3425,24 @@ function requestedPRs(
   const prs = (
     explicit ??
     Object.values(state.prs)
-      .filter((pr) => pr.status === "submitted")
+      .filter((pr) => prDeliveryState(pr) === "submitted")
       .toSorted((left, right) => {
-        if (left.submittedAt === undefined) throw new Error(`yrd: queued PR '${left.id}' has no submission time`)
-        if (right.submittedAt === undefined) throw new Error(`yrd: queued PR '${right.id}' has no submission time`)
+        const leftSubmittedAt = currentPRRev(left).submittedAt
+        const rightSubmittedAt = currentPRRev(right).submittedAt
+        if (leftSubmittedAt === undefined) throw new Error(`yrd: queued PR '${left.id}' has no submission time`)
+        if (rightSubmittedAt === undefined) {
+          throw new Error(`yrd: queued PR '${right.id}' has no submission time`)
+        }
         return (
-          left.submittedAt.localeCompare(right.submittedAt) ||
+          leftSubmittedAt.localeCompare(rightSubmittedAt) ||
           left.id.localeCompare(right.id, undefined, { numeric: true })
         )
       })
   ).filter((pr) => !excluded.has(pr.id))
   for (const pr of prs) {
-    if (pr.status !== "submitted" && pr.status !== "integrated") {
-      raiseFailure("refusal", "pr-not-ready", `yrd: PR '${pr.id}' is ${pr.status}, not ready for the queue`)
+    const delivery = prDeliveryState(pr)
+    if (delivery !== "submitted" && delivery !== "integrated") {
+      raiseFailure("refusal", "pr-not-ready", `yrd: PR '${pr.id}' is ${delivery}, not ready for the queue`)
     }
   }
   return prs
@@ -2831,13 +3452,21 @@ function resumableQueueRoots(
   state: DeepReadonly<RuntimeState>,
   args: QueueRunArgs,
   steps: readonly RuntimeStep[],
-): QueueRun[] {
+): Run[] {
   const explicit = explicitPRs(state.bays, args)
   const selected = explicit === undefined ? undefined : new Set(explicit.map((pr) => pr.id))
   const admissions = admissionSteps(state.queues, steps)
   const requested = args.steps === undefined ? undefined : selectSteps(steps, args.steps)
-  return pendingQueueRoots(state).filter(
+  const indexed = (explicit ?? []).flatMap((pr) => {
+    const id = latestRootRunId(state.queues.index, Queues.snapshot(pr))
+    const record = id === undefined ? undefined : Queues.get(state.queues, id)
+    return record === undefined ? [] : [materializeRun(record, state.jobs)]
+  })
+  const candidates = new Map<RunId, Run>(pendingQueueRoots(state).map((run) => [run.id, run]))
+  for (const run of indexed) candidates.set(run.id, run)
+  return [...candidates.values()].filter(
     (run) =>
+      needsSettlement(state, run) &&
       projectionLookupGet(state.queues.authority.runs, run.id)?.released === undefined &&
       !samePlan(run.steps, admissions) &&
       (requested === undefined ||
@@ -2847,7 +3476,7 @@ function resumableQueueRoots(
   )
 }
 
-function pendingQueueRoots(state: DeepReadonly<RuntimeState>): QueueRun[] {
+function pendingQueueRoots(state: DeepReadonly<RuntimeState>): Run[] {
   return activeQueueRootIds(state.queues.authority)
     .map((id) => Queues.get(state.queues, id))
     .filter((record): record is DeepReadonly<QueueRecord> => record !== undefined)
@@ -2855,7 +3484,7 @@ function pendingQueueRoots(state: DeepReadonly<RuntimeState>): QueueRun[] {
     .filter((run) => needsSettlement(state, run))
 }
 
-function needsSettlement(state: DeepReadonly<RuntimeState>, run: QueueRun): boolean {
+function needsSettlement(state: DeepReadonly<RuntimeState>, run: Run): boolean {
   if (!Queues.terminal(run) || needsAdvance(state, run)) return true
   if (!bisectable(run)) return false
   return ([0, 1] as const).some((part) => {
@@ -2866,7 +3495,7 @@ function needsSettlement(state: DeepReadonly<RuntimeState>, run: QueueRun): bool
 
 function admissionSteps(queues: DeepReadonly<QueuesState>, steps: readonly RuntimeStep[]): RuntimeStep[] {
   const selected = selectSteps(steps, queues.defaultSteps)
-  const boundary = selected.findIndex((step) => step.integrates || step.needsIntegration)
+  const boundary = selected.findIndex((step) => step.kind === "merge")
   return boundary < 0 ? selected : selected.slice(0, boundary)
 }
 
@@ -2879,8 +3508,7 @@ function samePlan(actual: readonly DeepReadonly<InstalledStep>[], expected: read
         candidate !== undefined &&
         step.name === candidate.name &&
         step.revision === candidate.revision &&
-        step.integrates === candidate.integrates &&
-        step.needsIntegration === candidate.needsIntegration &&
+        step.kind === candidate.kind &&
         step.classification === candidate.classification
       )
     })
@@ -2888,14 +3516,14 @@ function samePlan(actual: readonly DeepReadonly<InstalledStep>[], expected: read
 }
 
 function unstartedAdmission(
-  run: DeepReadonly<QueueRun>,
+  run: DeepReadonly<Run>,
   queues: DeepReadonly<QueuesState>,
   steps: readonly RuntimeStep[],
 ): boolean {
   return (
     run.stepSelection?.authority === "admission" &&
     samePlan(run.steps, admissionSteps(queues, steps)) &&
-    run.steps.every((step) => step.job === undefined || step.job.status === "requested")
+    run.steps.every((step) => step.job === undefined || step.job.status === "queued")
   )
 }
 
@@ -2903,7 +3531,7 @@ function admissionRun(
   state: DeepReadonly<RuntimeState>,
   snapshot: DeepReadonly<PRSnapshot>,
   selected: readonly RuntimeStep[],
-): QueueRun | undefined {
+): Run | undefined {
   const id = latestExactRunId(state.queues.index, snapshot, selected)
   const record = id === undefined ? undefined : Queues.get(state.queues, id)
   return record === undefined ? undefined : materializeRun(record, state.jobs)
@@ -2913,23 +3541,19 @@ function checkFactRun(
   state: DeepReadonly<RuntimeState>,
   snapshot: DeepReadonly<PRSnapshot>,
   selected: readonly RuntimeStep[],
-): QueueRun | undefined {
+): Run | undefined {
   const id = latestPrefixRunId(state.queues.index, snapshot, selected)
   const record = id === undefined ? undefined : Queues.get(state.queues, id)
   return record === undefined ? undefined : materializeRun(record, state.jobs)
 }
 
-function checkRunStatus(run: QueueRun, selectedCount: number): PREligibility["checks"]["status"] {
+function checkRunStatus(run: Run, selectedCount: number): PREligibility["checks"]["status"] {
   const selected = run.steps.slice(0, selectedCount)
-  if (selected.every((step) => step.job?.status === "passed")) return "passed"
-  if (
-    selected.some(
-      (step) => step.job?.status === "failed" || step.job?.status === "lost" || step.job?.status === "canceled",
-    )
-  ) {
+  if (selected.every((step) => step.job !== undefined && jobSucceeded(step.job))) return "passed"
+  if (selected.some((step) => step.job !== undefined && jobFailed(step.job))) {
     return "failed"
   }
-  return run.status === "failed" ? "failed" : "checking"
+  return Queues.failed(run) ? "failed" : "checking"
 }
 
 const AUTOMATIC_ADMISSION_RETRIES = 1
@@ -2944,7 +3568,7 @@ function automaticAdmissionAttemptsExhausted(
     (request) =>
       request.revision === snapshot.revision &&
       request.headSha === snapshot.headSha &&
-      (request.baseSha ?? pr.baseSha) === snapshot.baseSha,
+      (request.baseSha ?? prBaseSha(pr)) === snapshot.baseSha,
   ).length
   if (exactRequests === 0) return false
   const releasedFailures = releasedAdmissionFailures(state.queues.index, snapshot, selected)
@@ -2955,7 +3579,7 @@ function admissionQueue(state: DeepReadonly<RuntimeState>, steps: readonly Runti
   const selected = admissionSteps(state.queues, steps)
   if (selected.length === 0) return []
   return Object.values(state.bays.prs)
-    .filter((pr) => pr.status === "pushed" || pr.status === "submitted")
+    .filter((pr) => prDeliveryState(pr) === "pushed" || prDeliveryState(pr) === "submitted")
     .filter((pr) => checksRequested(pr))
     .filter((pr) => {
       const snapshot = Queues.snapshot(pr)
@@ -3023,33 +3647,40 @@ function firstArtifact(value: unknown, preferredName?: string): string | undefin
 }
 
 function checkEvidence(job: Job): Record<string, unknown> | undefined {
-  if (job.status === "passed" || job.status === "failed") return objectValue(job.output)
+  if (job.status === "completed" && job.conclusion === "success") return objectValue(job.output)
+  if (job.status === "completed" && job.conclusion === "failure") {
+    const output = objectValue(job.output)
+    if (output !== undefined) return output
+    const refusal = objectValue(job.error.evidence)
+    if (refusal === undefined) return undefined
+    const candidate = objectValue(refusal.candidateEvidence)
+    const parent = objectValue(refusal.parent)
+    return refusal.phase === "parent" ? (parent ?? candidate ?? refusal) : (candidate ?? parent ?? refusal)
+  }
   if (job.status === "waiting") return objectValue(job.checkpoint)
   return undefined
 }
 
-function checkError(job: Job | undefined, run: QueueRun): JobError | undefined {
-  if (job?.status === "failed") return job.error
-  if (job?.status === "lost") return { code: "job-lost", message: job.lostReason }
-  if (job?.status === "canceled") return jobFailure(job)
+function checkError(job: Job | undefined, run: Run): JobError | undefined {
+  if (job?.status === "completed" && job.conclusion !== "success") return jobFailure(job)
   return run.error
 }
 
-function checkStatus(job: Job | undefined, run: QueueRun): PRCheckRecord["status"] {
-  if (run.status === "failed" && (job === undefined || !Job.terminal(job))) return "failed"
-  if (job?.status === "passed") return "passed"
-  if (job?.status === "failed" || job?.status === "lost" || job?.status === "canceled") return "failed"
+function checkStatus(job: Job | undefined, run: Run): PRCheckRecord["status"] {
+  if (Queues.failed(run) && (job === undefined || !Job.terminal(job))) return "failed"
+  if (job !== undefined && jobSucceeded(job)) return "passed"
+  if (job !== undefined && jobFailed(job)) return "failed"
   return "checking"
 }
 
 function projectCheckStep(
   pr: DeepReadonly<PR>,
-  run: QueueRun,
+  run: Run,
   step: QueueStep,
   queuedAt: string | undefined,
 ): PRCheckRecord | undefined {
   const job = step.job
-  if (job === undefined && run.status !== "failed") return undefined
+  if (job === undefined && !Queues.failed(run)) return undefined
   const evidence = job === undefined ? undefined : checkEvidence(job)
   const error = checkError(job, run)
   const diagnostics =
@@ -3070,7 +3701,7 @@ function projectCheckStep(
       : [job.definition]
   return {
     pr: pr.id,
-    revision: pr.revision,
+    revision: prRevisionNumber(pr),
     run: run.id,
     step: step.name,
     status: checkStatus(job, run),
@@ -3094,7 +3725,7 @@ function projectPRChecks(
     return [
       {
         pr: pr.id,
-        revision: pr.revision,
+        revision: prRevisionNumber(pr),
         status: checks.status,
         ...(checks.position === undefined ? {} : { position: checks.position }),
         ...(checks.queuedAt === undefined ? {} : { queuedAt: checks.queuedAt }),
@@ -3103,7 +3734,7 @@ function projectPRChecks(
   }
   const hasStartedStep = run.steps.some((step) => step.job !== undefined)
   const records = run.steps
-    .filter((step) => !step.integrates && !step.needsIntegration)
+    .filter((step) => step.kind !== "merge")
     .flatMap((step, index) => {
       if (step.job === undefined && (hasStartedStep || index !== run.cursor)) return []
       const record = projectCheckStep(pr, run, step, checks.queuedAt)
@@ -3112,11 +3743,7 @@ function projectPRChecks(
   const evidenceStep =
     run.error?.evidence === undefined
       ? undefined
-      : run.steps.find(
-          (step) =>
-            (step.integrates || step.needsIntegration) &&
-            (step.job?.status === "failed" || step.job?.status === "lost"),
-        )
+      : run.steps.find((step) => step.kind !== "check" && step.job !== undefined && jobFailed(step.job))
   const evidenceRecord =
     evidenceStep === undefined ? undefined : projectCheckStep(pr, run, evidenceStep, checks.queuedAt)
   const projected = evidenceRecord === undefined ? records : [...records, evidenceRecord]
@@ -3124,7 +3751,7 @@ function projectPRChecks(
     ? [
         {
           pr: pr.id,
-          revision: pr.revision,
+          revision: prRevisionNumber(pr),
           run: run.id,
           status: checks.status,
           ...(checks.queuedAt === undefined ? {} : { queuedAt: checks.queuedAt }),
@@ -3138,14 +3765,14 @@ function reusablePrefix(
   state: DeepReadonly<RuntimeState>,
   snapshots: readonly DeepReadonly<PRSnapshot>[],
   selected: readonly RuntimeStep[],
-): Readonly<{ run: QueueRunId; count: number; shape: PRShape }> | undefined {
+): Readonly<{ run: RunId; count: number; shape: PRShape }> | undefined {
   const snapshot = snapshots.length === 1 ? snapshots[0] : undefined
   if (snapshot?.baseSha === undefined) return undefined
-  const boundary = selected.findIndex((step) => step.integrates || step.needsIntegration)
+  const boundary = selected.findIndex((step) => step.kind === "merge")
   const prefix = boundary < 0 ? selected : selected.slice(0, boundary)
   if (prefix.length === 0 || prefix.some((step) => step.classification === "base")) return undefined
   const cached = admissionRun(state, snapshot, prefix)
-  if (cached?.status !== "passed") return undefined
+  if (cached === undefined || !Queues.succeeded(cached)) return undefined
   const record = Queues.record(state.queues, cached.id)
   return { run: cached.id, count: prefix.length, shape: shapeThrough(record, state.jobs) }
 }
@@ -3219,9 +3846,10 @@ export const COMPOSITION_FAILURE_BUCKETS = {
 const NEEDS_AUTHOR_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKETS["needs-author"]
 
 function terminalJobError(job: DeepReadonly<Job> | undefined): JobError | undefined {
-  if (job?.status === "failed") return job.error
-  if (job?.status === "lost") return { code: "job-lost", message: job.lostReason }
-  if (job?.status === "canceled") return jobFailure(job)
+  if (job?.status !== "completed") return undefined
+  if (job.conclusion === "failure") return job.error
+  if (job.conclusion === "timed_out") return { code: "job-lost", message: job.lostReason }
+  if (job.conclusion === "cancelled") return jobFailure(job)
   return undefined
 }
 
@@ -3240,10 +3868,12 @@ function compositionRefusalReceipt(
   pr: DeepReadonly<PR>,
   steps: readonly RuntimeStep[],
 ): JobError | undefined {
-  const runIds = new Set<QueueRunId>()
+  const runIds = new Set<RunId>()
   const checkRun = checkEligibility(state, pr, steps).run
   if (checkRun !== undefined) runIds.add(checkRun)
-  if (pr.terminalRun !== undefined) runIds.add(pr.terminalRun as QueueRunId)
+  if (pr.terminalRun !== undefined) runIds.add(pr.terminalRun as RunId)
+  const latestRoot = latestRootRunId(state.queues.index, Queues.snapshot(pr))
+  if (latestRoot !== undefined) runIds.add(latestRoot)
   for (const runId of runIds) {
     const record = Queues.get(state.queues, runId)
     if (record === undefined) continue
@@ -3282,15 +3912,16 @@ function prEligibility(
     automaticAdmissionAttemptsExhausted(state, pr, Queues.snapshot(pr), admissionSteps(state.queues, steps))
   const result = (reason?: PREligibility["reason"]): PREligibility => ({
     pr: pr.id,
-    revision: pr.revision,
+    revision: prRevisionNumber(pr),
     runnable: reason === undefined,
     ...(reason === undefined ? {} : { reason }),
     review,
     checks,
   })
-  const resumingIntegration = options.resumeIntegrated === true && pr.status === "integrated"
+  const delivery = prDeliveryState(pr)
+  const resumingIntegration = options.resumeIntegrated === true && delivery === "integrated"
   if (!resumingIntegration) {
-    if (pr.status === "pushed") {
+    if (delivery === "pushed") {
       return result({ code: "draft", message: `PR '${pr.id}' is pushed, not ready` })
     }
     // A composition refusal is deterministic: the queue could not build the
@@ -3299,8 +3930,8 @@ function prEligibility(
     // an automatic `rejected`. Project it as `needs-author` with the refusal
     // receipt attached, ahead of the generic `rejected`/`checks-failed` verdicts.
     // This is a derived projection over the failed check's recorded refusal
-    // evidence; it stores no new PRStatus (the bay status is untouched).
-    if (options.ignoreChecks !== true && (pr.status === "submitted" || pr.status === "rejected")) {
+    // evidence; it stores no new PR state (the bay state is untouched).
+    if (options.ignoreChecks !== true && (delivery === "submitted" || delivery === "rejected")) {
       const receipt = compositionRefusalReceipt(state, pr, steps)
       if (receipt !== undefined) {
         return result({
@@ -3310,11 +3941,29 @@ function prEligibility(
         })
       }
     }
-    if (pr.status === "rejected") {
+    if (delivery === "rejected") {
       return result({ code: "rejected", message: `PR '${pr.id}' is rejected; submit it again before queueing` })
     }
-    if (pr.status !== "submitted") {
-      return result({ code: "terminal", message: `PR '${pr.id}' is ${pr.status}, not queueable` })
+    if (delivery !== "submitted") {
+      return result({ code: "terminal", message: `PR '${pr.id}' is ${delivery}, not queueable` })
+    }
+    const revision = currentPRRev(pr)
+    const conflictingCandidate = Object.values(state.queues.candidates)
+      .filter(
+        (candidate) =>
+          candidate.mergeability === "conflicting" &&
+          candidate.queueId === queueIdentity(pr) &&
+          candidate.revs.some(
+            (member) => member.pr === pr.id && member.n === revision.n && member.head === revision.head,
+          ),
+      )
+      .toSorted((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+      .at(-1)
+    if (conflictingCandidate !== undefined) {
+      return result({
+        code: "candidate-conflicting",
+        message: `PR '${pr.id}' revision ${revision.n} conflicts in Candidate '${conflictingCandidate.id}'`,
+      })
     }
     if (options.ignoreChecks !== true && checks.status === "queued") {
       const position = checks.position === undefined ? "" : ` at position ${checks.position}`
@@ -3341,12 +3990,12 @@ function prEligibility(
       if (reviewed.current?.decision === "reject") {
         return result({
           code: "review-rejected",
-          message: `PR '${pr.id}' was rejected by ${reviewed.current.actor} for revision ${pr.revision}`,
+          message: `PR '${pr.id}' was rejected by ${reviewed.current.actor} for revision ${prRevisionNumber(pr)}`,
         })
       }
       return result({
         code: "review-required",
-        message: `PR '${pr.id}' needs approval for revision ${pr.revision}`,
+        message: `PR '${pr.id}' needs approval for revision ${prRevisionNumber(pr)}`,
       })
     }
   }
@@ -3376,7 +4025,8 @@ function partitionCandidates(prs: readonly PR[], batchSize: number): PR[][] {
   const groups = new Map<string, PR[]>()
   for (const pr of prs) {
     const proof = pr.integration
-    const key = `${baseIdentity(pr.base)}\0${proof?.commit ?? ""}\0${proof?.baseSha ?? ""}`
+    const flow = pr.flow
+    const key = `${baseIdentity(pr.base)}\0${flow?.name ?? ""}\0${flow?.rev ?? ""}\0${flow?.fingerprint ?? ""}\0${proof?.commit ?? ""}\0${proof?.baseSha ?? ""}`
     const group = groups.get(key)
     if (group === undefined) groups.set(key, [pr])
     else group.push(pr)
@@ -3394,16 +4044,11 @@ function prShape(prs: readonly PRSnapshot[]): PRShape {
 }
 
 function integratedPRShape(prs: readonly PR[]): IntegratedShape | undefined {
-  if (prs.every((pr) => pr.status !== "integrated")) return undefined
+  if (prs.every((pr) => !pr.merged)) return undefined
   const proof = prs[0]?.integration
   if (
     proof === undefined ||
-    prs.some(
-      (pr) =>
-        pr.status !== "integrated" ||
-        pr.integration?.commit !== proof.commit ||
-        pr.integration?.baseSha !== proof.baseSha,
-    )
+    prs.some((pr) => !pr.merged || pr.integration?.commit !== proof.commit || pr.integration?.baseSha !== proof.baseSha)
   ) {
     throw new Error("yrd: every PR in a queue candidate must share one integration proof")
   }
@@ -3415,10 +4060,10 @@ function pinnedPRError(state: DeepReadonly<BaysState>, snapshots: readonly PRSna
     const current = state.prs[snapshot.id]
     if (
       current === undefined ||
-      current.revision !== snapshot.revision ||
-      current.headSha !== snapshot.headSha ||
+      prRevisionNumber(current) !== snapshot.revision ||
+      prHead(current) !== snapshot.headSha ||
       baseIdentity(current.base) !== baseIdentity(snapshot.base) ||
-      current.status === "withdrawn"
+      (current.state === "closed" && !current.merged)
     ) {
       return {
         code: "stale-pr",
@@ -3437,10 +4082,10 @@ function normalizeBatch(config: BatchConfig): number {
   return config <= 1 ? 1 : config
 }
 
-function bisectable(run: QueueRun): boolean {
-  const failed = run.steps.some((step) => step.job?.status === "failed" || step.job?.status === "lost")
+function bisectable(run: Run): boolean {
+  const failed = run.steps.some((step) => step.job !== undefined && jobFailed(step.job))
   return (
-    run.status === "failed" &&
+    Queues.failed(run) &&
     failed &&
     queueAuthorityReleaseReason(run.error) === undefined &&
     !isIntegrated(run.shape) &&
@@ -3448,29 +4093,35 @@ function bisectable(run: QueueRun): boolean {
   )
 }
 
-function needsAdvance(state: DeepReadonly<RuntimeState>, run: QueueRun): boolean {
-  if (Queues.record(state.queues, run.id).failure !== undefined) return false
+function needsAdvance(state: DeepReadonly<RuntimeState>, run: Run): boolean {
+  if (activeQueueFailure(Queues.record(state.queues, run.id), state.jobs) !== undefined) return false
   const index = run.steps.findLastIndex((step) => step.job !== undefined)
   const step = run.steps[index]
   if (step?.job === undefined || !Job.terminal(step.job)) return false
-  if (step.job.status === "passed") {
+  if (jobSucceeded(step.job)) {
     if (run.steps[index + 1]?.job === undefined && index + 1 < run.steps.length) return true
-    if (!step.integrates || run.integration === undefined) return false
+    if (step.kind !== "merge" || run.integration === undefined) return false
     return run.prs.some((pr) => {
       const current = state.bays.prs[pr.id]
       return (
-        current?.status !== "integrated" ||
+        current?.merged !== true ||
         current.integration?.commit !== run.integration?.commit ||
         current.integration?.baseSha !== run.integration?.baseSha
       )
     })
   }
+  if (!jobFailed(step.job)) return false
   if (queueAuthorityReleaseReason(jobFailure(step.job)) !== undefined) return true
-  if (run.prs.length !== 1 || isIntegrated(run.shape)) return false
-  const pr = run.prs[0]
-  if (pr === undefined) return false
-  const current = state.bays.prs[pr.id]
-  return current?.status === "submitted"
+  if (step.job.conclusion !== "cancelled") return true
+  return run.prs.some((member) => {
+    const current = state.bays.prs[member.id]
+    return (
+      current !== undefined &&
+      prRevisionNumber(current) === member.revision &&
+      prHead(current) === member.headSha &&
+      (prDeliveryState(current) === "pushed" || prDeliveryState(current) === "submitted")
+    )
+  })
 }
 
 function isIntegrated(shape: PRShape): shape is IntegratedShape {
@@ -3478,10 +4129,31 @@ function isIntegrated(shape: PRShape): shape is IntegratedShape {
 }
 
 function jobFailure(job: Job): JobError {
-  if (job.status === "failed") return job.error
-  if (job.status === "lost") return { code: "job-lost", message: job.lostReason }
-  if (job.status === "canceled") {
+  if (job.status === "completed" && job.conclusion === "failure") return job.error
+  if (job.status === "completed" && job.conclusion === "timed_out") {
+    return { code: "job-lost", message: job.lostReason }
+  }
+  if (job.status === "completed" && job.conclusion === "cancelled") {
     return { code: "run-canceled", message: `Queue run canceled by ${job.canceledBy}: ${job.cancelReason}` }
   }
-  throw new Error(`yrd: job '${job.id}' is ${job.status}, not failed`)
+  if (job.status === "completed" && job.conclusion === "skipped") {
+    return { code: "job-skipped", message: `Job '${job.id}' was skipped` }
+  }
+  throw new Error(
+    `yrd: job '${job.id}' is ${job.status}${job.status === "completed" ? `+${job.conclusion}` : ""}, not failed`,
+  )
+}
+
+type SuccessfulJob = Extract<Job, { status: "completed"; conclusion: "success" }>
+type UnsuccessfulJob = Extract<
+  Job,
+  { status: "completed"; conclusion: "failure" | "cancelled" | "skipped" | "timed_out" }
+>
+
+function jobSucceeded(job: Job): job is SuccessfulJob {
+  return job.status === "completed" && job.conclusion === "success"
+}
+
+function jobFailed(job: Job): job is UnsuccessfulJob {
+  return job.status === "completed" && job.conclusion !== "success"
 }

@@ -1,7 +1,7 @@
-import type { PR, PRStatus } from "@yrd/bay"
+import { currentPRRev, type PR } from "@yrd/bay"
 import type { JsonValue } from "@yrd/core"
 import type { Job } from "@yrd/job"
-import type { QueueRun } from "@yrd/queue"
+import type { Run } from "@yrd/queue"
 import {
   queueTimelineAdmissionTimes,
   queueTimelineProjection,
@@ -24,7 +24,7 @@ type FixturePrOptions = Readonly<{
   revision?: number
   headSha?: string
   actor?: string
-  revisions?: PR["revisions"]
+  revisions?: readonly FixtureRevision[]
   reviews?: PR["reviews"]
   comments?: PR["comments"]
   checkRequests?: PR["checkRequests"]
@@ -34,15 +34,62 @@ type FixturePrOptions = Readonly<{
   terminalRun?: string
   rejectedAt?: string
   integratedAt?: string
+  withdrawnAt?: string
+  withdrawReason?: string
   canceledAt?: string
   canceledBy?: string
   cancelReason?: string
   integration?: NonNullable<PR["integration"]>
 }>
 
+type FixtureDeliveryState = "pushed" | "submitted" | "rejected" | "integrated" | "withdrawn" | "canceled"
+type LegacyFixtureRevision = Readonly<{
+  revision: number
+  headSha: string
+  base: string
+  baseSha?: string
+  actor?: string
+  correlation?: PR["revs"][number]["correlation"]
+  composition?: PR["revs"][number]["composition"]
+  recut?: PR["revs"][number]["recut"]
+  pushedAt: string
+  submittedAt?: string
+  terminal?: Readonly<{
+    status: "rejected" | "integrated" | "withdrawn" | "canceled"
+    at: string
+    run?: string
+  }>
+}>
+type FixtureRevision = PR["revs"][number] | LegacyFixtureRevision
+
+function fixtureRevision(revision: FixtureRevision): PR["revs"][number] {
+  if ("n" in revision) return revision
+  return {
+    n: revision.revision,
+    head: revision.headSha,
+    base: revision.base,
+    ...(revision.baseSha === undefined ? {} : { baseSha: revision.baseSha }),
+    ...(revision.actor === undefined ? {} : { actor: revision.actor }),
+    ...(revision.correlation === undefined ? {} : { correlation: revision.correlation }),
+    ...(revision.composition === undefined ? {} : { composition: revision.composition }),
+    ...(revision.recut === undefined ? {} : { recut: revision.recut }),
+    pushedAt: revision.pushedAt,
+    ...(revision.submittedAt === undefined ? {} : { submittedAt: revision.submittedAt }),
+    ...(revision.terminal === undefined
+      ? {}
+      : {
+          terminal: {
+            kind: revision.terminal.status,
+            at: revision.terminal.at,
+            ...(revision.terminal.run === undefined ? {} : { run: revision.terminal.run }),
+          },
+        }),
+  }
+}
+
 export function fixturePr(
   id: string,
-  status: PRStatus,
+  status: FixtureDeliveryState,
   submittedAt: string,
   name = `Fixture ${id}`,
   options: FixturePrOptions = {},
@@ -50,6 +97,41 @@ export function fixturePr(
   const digit = id.replace(/\D/gu, "").at(-1) ?? "1"
   const revision = options.revision ?? 1
   const headSha = options.headSha ?? digit.repeat(40)
+  const terminalAt =
+    status === "rejected"
+      ? options.rejectedAt
+      : status === "integrated"
+        ? options.integratedAt
+        : status === "withdrawn"
+          ? options.withdrawnAt
+          : status === "canceled"
+            ? options.canceledAt
+            : undefined
+  const defaultTerminal =
+    status === "rejected" || status === "integrated" || status === "withdrawn" || status === "canceled"
+      ? {
+          terminal: {
+            kind: status,
+            at: terminalAt ?? submittedAt,
+            ...(options.terminalRun === undefined ? {} : { run: options.terminalRun }),
+          },
+        }
+      : {}
+  const revs = (
+    options.revisions ?? [
+      {
+        n: revision,
+        head: headSha,
+        base: "main",
+        baseSha: BASE_SHA,
+        pushedAt: submittedAt,
+        ...(status === "pushed" ? {} : { submittedAt }),
+        ...(options.actor === undefined ? {} : { actor: options.actor }),
+        ...defaultTerminal,
+      },
+    ]
+  ).map(fixtureRevision)
+  const retainedTerminalAt = currentPRRev({ id, revs }).terminal?.at
   return {
     id,
     name,
@@ -57,22 +139,10 @@ export function fixturePr(
     ...(options.note === undefined ? {} : { note: options.note }),
     branch: `topic/${id.toLocaleLowerCase()}`,
     base: "main",
-    status,
-    revision,
-    headSha,
-    baseSha: BASE_SHA,
-    revisions: options.revisions ?? [
-      {
-        revision,
-        headSha,
-        base: "main",
-        baseSha: BASE_SHA,
-        pushedAt: submittedAt,
-        submittedAt,
-        ...(options.actor === undefined ? {} : { actor: options.actor }),
-      },
-    ],
-    submittedAt,
+    state: status === "integrated" || status === "withdrawn" || status === "canceled" ? "closed" : "open",
+    merged: status === "integrated",
+    revs,
+    ...(status === "pushed" ? {} : { submittedAt }),
     reviews: options.reviews ?? [],
     comments: options.comments ?? [],
     checkRequests: options.checkRequests ?? [],
@@ -80,6 +150,10 @@ export function fixturePr(
     ...(options.terminalRun === undefined ? {} : { terminalRun: options.terminalRun }),
     ...(options.rejectedAt === undefined ? {} : { rejectedAt: options.rejectedAt }),
     ...(options.integratedAt === undefined ? {} : { integratedAt: options.integratedAt }),
+    ...(status !== "withdrawn"
+      ? {}
+      : { withdrawnAt: options.withdrawnAt ?? retainedTerminalAt ?? terminalAt ?? submittedAt }),
+    ...(options.withdrawReason === undefined ? {} : { withdrawReason: options.withdrawReason }),
     ...(options.canceledAt === undefined ? {} : { canceledAt: options.canceledAt }),
     ...(options.canceledBy === undefined ? {} : { canceledBy: options.canceledBy }),
     ...(options.cancelReason === undefined ? {} : { cancelReason: options.cancelReason }),
@@ -89,7 +163,7 @@ export function fixturePr(
 
 function terminalFixturePr(
   id: string,
-  status: Extract<PRStatus, "rejected" | "integrated" | "canceled">,
+  status: Extract<FixtureDeliveryState, "rejected" | "integrated" | "canceled">,
   submittedAt: string,
   terminalAt: string,
   run: string,
@@ -130,6 +204,7 @@ function terminalFixturePr(
 
 type FixtureJobOptions = Readonly<{
   attempt?: number
+  command?: readonly string[]
   requestedAt?: string
   changedAt?: string
   startedAt?: string
@@ -147,22 +222,25 @@ type FixtureJobOptions = Readonly<{
   cancelReason?: string
 }>
 
-export function fixtureJob(id: string, status: Job["status"], options: FixtureJobOptions = {}): Job {
+type FixtureJobStatus = "requested" | "running" | "waiting" | "passed" | "failed" | "lost" | "canceled"
+
+export function fixtureJob(id: string, status: FixtureJobStatus, options: FixtureJobOptions = {}): Job {
   const requestedAt = options.requestedAt ?? "2026-07-13T11:30:00.000Z"
   const base = {
     id,
     definition: "queue.step",
     revision: "fixture-v2",
-    input: { command: ["bun", "vitest", "run"] },
+    input: { command: options.command ?? ["bun", "vitest", "run"] },
     attempt: options.attempt ?? (status === "requested" ? 0 : 1),
     requestedAt,
     changedAt: options.changedAt ?? requestedAt,
   } as const
-  if (status === "requested") return { ...base, status }
+  if (status === "requested") return { ...base, status: "queued" }
   if (status === "canceled") {
     return {
       ...base,
-      status,
+      status: "completed",
+      conclusion: "cancelled",
       finishedAt: options.finishedAt ?? "2026-07-13T11:45:00.000Z",
       canceledBy: options.canceledBy ?? "operator@example.test",
       cancelReason: options.cancelReason ?? "superseded by a newer revision",
@@ -177,7 +255,7 @@ export function fixtureJob(id: string, status: Job["status"], options: FixtureJo
     return {
       ...base,
       ...execution,
-      status,
+      status: "in_progress",
       leaseExpiresAt: options.leaseExpiresAt ?? "2026-07-13T12:05:00.000Z",
     }
   }
@@ -197,7 +275,8 @@ export function fixtureJob(id: string, status: Job["status"], options: FixtureJo
     return {
       ...base,
       ...execution,
-      status,
+      status: "completed",
+      conclusion: "timed_out",
       finishedAt: options.finishedAt ?? "2026-07-13T11:45:00.000Z",
       lostReason: options.detail ?? "runner lease expired",
     }
@@ -213,10 +292,11 @@ export function fixtureJob(id: string, status: Job["status"], options: FixtureJo
     ...(options.checkpoint === undefined ? {} : { checkpoint: options.checkpoint }),
   } as const
   return status === "passed"
-    ? { ...finished, status, output: options.output ?? {} }
+    ? { ...finished, status: "completed", conclusion: "success", output: options.output ?? {} }
     : {
         ...finished,
-        status,
+        status: "completed",
+        conclusion: "failure",
         error: options.error ?? { code: "check-failed", message: "focused verification failed" },
         ...(options.output === undefined ? {} : { output: options.output }),
       }
@@ -228,17 +308,15 @@ export function fixtureStep(
   options: Readonly<{
     title?: string
     revision?: string
-    integrates?: boolean
-    needsIntegration?: boolean
+    kind?: "check" | "action" | "merge"
     classification?: "base" | "carrier"
   }> = {},
-): QueueRun["steps"][number] {
+): Run["steps"][number] {
   return {
     name,
     title: options.title ?? `${name} production gate`,
     revision: options.revision ?? "step-v2",
-    integrates: options.integrates ?? false,
-    needsIntegration: options.needsIntegration ?? false,
+    kind: options.kind ?? "check",
     ...(options.classification === undefined ? {} : { classification: options.classification }),
     job,
   }
@@ -247,23 +325,29 @@ export function fixtureStep(
 export function fixtureRun(
   id: string,
   prs: readonly PR[],
-  status: QueueRun["status"],
+  status: FixtureRunStatus,
   startedAt: string,
   options: Readonly<{
     finishedAt?: string
     error?: Readonly<{ code: string; message: string }>
-    steps?: QueueRun["steps"]
+    steps?: Run["steps"]
     cursor?: number
     results?: Readonly<Record<string, JsonValue>>
     memberRevisions?: Readonly<Record<string, number>>
   }> = {},
-): QueueRun {
+): Run {
   const integration = status === "passed" ? { commit: INTEGRATED_SHA, baseSha: BASE_SHA } : undefined
+  const runStatus: Run["status"] = status === "running" ? "in_progress" : status === "waiting" ? "waiting" : "completed"
+  const conclusion: Run["conclusion"] | undefined =
+    status === "passed" ? "success" : status === "failed" ? "failure" : undefined
+  const steps = options.steps ?? []
   return {
     id,
+    queueId: "main",
+    candidateId: `C${id.replace(/\D/gu, "") || "1"}`,
     prs: prs.map((pr) => {
-      const revision = options.memberRevisions?.[pr.id] ?? pr.revision
-      const clock = pr.revisions.find((candidate) => candidate.revision === revision)
+      const revision = options.memberRevisions?.[pr.id] ?? currentPRRev(pr).n
+      const clock = pr.revs.find((candidate) => candidate.n === revision)
       if (clock === undefined) throw new Error(`fixture PR '${pr.id}' is missing revision ${revision}`)
       return {
         id: pr.id,
@@ -271,35 +355,39 @@ export function fixtureRun(
         branch: pr.branch,
         base: pr.base,
         revision,
-        headSha: clock.headSha,
+        headSha: clock.head,
         baseSha: clock.baseSha,
       }
     }),
     base: "main",
-    steps: options.steps ?? [],
+    jobs: steps.flatMap((step) => (step.job === undefined ? [] : [step.job.id])),
+    steps,
     startedAt,
     cursor: options.cursor ?? 0,
     ...(integration === undefined ? {} : { integration }),
     shape:
       integration === undefined ? { results: options.results ?? {} } : { results: options.results ?? {}, integration },
-    status,
+    status: runStatus,
+    ...(conclusion === undefined ? {} : { conclusion }),
     ...(options.finishedAt === undefined ? {} : { finishedAt: options.finishedAt }),
     ...(options.error === undefined ? {} : { error: options.error }),
   }
 }
 
+type FixtureRunStatus = "running" | "waiting" | "passed" | "failed"
+
 export function fixtureResult(
   prs: readonly PR[],
-  runs: readonly QueueRun[],
+  runs: readonly Run[],
   pause?: QueueStatusResult["pause"],
 ): QueueStatusResult {
   return {
     base: "main",
     headSha: BASE_SHA,
     prs: [...prs],
-    running: runs.filter((run) => run.status === "running"),
+    running: runs.filter((run) => run.status === "queued" || run.status === "in_progress"),
     waiting: runs.filter((run) => run.status === "waiting"),
-    finished: runs.filter((run) => run.status === "passed" || run.status === "failed"),
+    finished: runs.filter((run) => run.status === "completed"),
     ...(pause === undefined ? {} : { pause }),
   }
 }
@@ -531,8 +619,7 @@ const batchSteps = [
     { classification: "carrier" },
   ),
   fixtureStep("merge", fixtureJob("J42-merge", "requested", { requestedAt: "2026-07-13T11:43:00.000Z" }), {
-    integrates: true,
-    needsIntegration: true,
+    kind: "merge",
   }),
 ]
 const integratedSteps = [
@@ -552,13 +639,14 @@ const integratedSteps = [
   fixtureStep(
     "merge",
     fixtureJob("J4-merge", "passed", {
+      command: ["git", "merge", "--no-ff", "--no-edit", "4".repeat(40)],
       requestedAt: "2026-07-13T10:47:00.000Z",
       startedAt: "2026-07-13T10:48:00.000Z",
       changedAt: "2026-07-13T10:55:00.000Z",
       finishedAt: "2026-07-13T10:55:00.000Z",
       output: { commit: INTEGRATED_SHA, baseSha: BASE_SHA },
     }),
-    { integrates: true, needsIntegration: true },
+    { kind: "merge" },
   ),
 ]
 const rejectedSteps = [

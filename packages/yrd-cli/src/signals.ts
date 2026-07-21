@@ -88,7 +88,7 @@ export type RoutableSignal =
   | WithdrawnSignal
   | CanceledSignal
 
-/** Signals that settle a PR revision line and therefore close its open request balls. */
+/** Signals that settle a PR revision chain and therefore close its open request balls. */
 export type TerminalSignal = IntegratedSignal | WithdrawnSignal | CanceledSignal
 
 export type SignalDelivery = Readonly<{
@@ -444,7 +444,7 @@ function isTerminalSignal(signal: RoutableSignal): signal is TerminalSignal {
   return signal.kind === "pr/integrated" || signal.kind === "pr/withdrawn" || signal.kind === "pr/canceled"
 }
 
-/** The PR revision lines a terminal signal settles: the whole integrated batch, or the single
+/** The PR revision chains a terminal signal settles: the whole integrated batch, or the single
  * withdrawn/canceled PR. */
 function terminalPRs(signal: TerminalSignal): readonly SignalPR[] {
   if (signal.kind === "pr/integrated") return signal.prs
@@ -466,7 +466,7 @@ function closuresFor(signal: TerminalSignal, routes: SignalRoutes): readonly Sig
         const recipients =
           target === "submitter" ? (pr.actor === undefined ? [] : [pr.actor]) : target === "broadcast" ? [] : [target]
         for (const recipient of recipients) {
-          // A terminal event settles the whole revision line, so close every prior revision's
+          // A terminal event settles the whole revision chain, so close every prior revision's
           // request id — not just the terminal revision's. Otherwise a rev-1 rejection ball outlives
           // a rev-2 integration/withdrawal. adapter.close is a required no-op on a missing/closed id.
           for (let revision = 1; revision <= pr.revision; revision += 1) {

@@ -16,7 +16,13 @@ import type {
 } from "./model.ts"
 import { IntegrationProofSchema, QueueSubmoduleResolutionEvidenceSchema, SourceRewriteSchema } from "./model.ts"
 import type { CandidatePool } from "./candidate-pool.ts"
-import type { StepExecution, StepRunner } from "./queue.ts"
+import type {
+  CandidatePreparationInput,
+  CandidatePreparer,
+  PreparedCandidate,
+  StepExecution,
+  StepRunner,
+} from "./queue.ts"
 import { resolveRelativeSubmoduleOrigin } from "./submodule-origin.ts"
 import { executeQueueSubmoduleComposition } from "./submodule-composition-git.ts"
 import {
@@ -372,7 +378,7 @@ function configuredCommand<Shape extends PRShape>(
         evidence,
       )
     }
-    if (!waiting) return { status: "passed", output: evidence }
+    if (!waiting) return { status: "completed", conclusion: "success", output: evidence }
     try {
       const launch = parseJobLaunch(result.stdout)
       return {
@@ -517,9 +523,10 @@ function compareCommandEvidence(
 }
 
 function comparableCommandEvidence(outcome: JobResult<CommandEvidence>, purpose: string): CommandEvidence | undefined {
-  if (outcome.status === "passed") return outcome.output
+  if (outcome.status === "completed" && outcome.conclusion === "success") return outcome.output
   if (
-    outcome.status === "failed" &&
+    outcome.status === "completed" &&
+    outcome.conclusion === "failure" &&
     outcome.error.code === `${purpose}-failed` &&
     outcome.output?.diagnostics !== undefined &&
     outcome.output.diagnostics.length > 0 &&
@@ -535,7 +542,7 @@ function comparisonOutcomeError(
   purpose: string,
   phase: "parent" | "candidate",
 ): JobError {
-  if (outcome.status === "failed") return outcome.error
+  if (outcome.status === "completed" && outcome.conclusion === "failure") return outcome.error
   return {
     code: `${purpose}-${phase}-evidence-unavailable`,
     message: `${purpose} ${phase} command returned ${outcome.status} instead of comparable evidence`,
@@ -905,7 +912,7 @@ export type GitQueueTarget = Readonly<{
 
 export type PRRecutInput = PRSnapshot &
   Readonly<{
-    /** Same-issue source integrations already present on the authoritative root line, newest first. */
+    /** Same-issue source integrations already present on the authoritative root history, newest first. */
     currentCompositions?: readonly NonNullable<PRSnapshot["composition"]>[]
     current?: Readonly<{
       revision: number
@@ -1014,7 +1021,8 @@ async function recutPR(git: Git, repo: string, input: PRRecutInput): Promise<PRR
     }
     const patchId = compositionPatchId(rewrites)
     return {
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: {
         headSha: target.sha,
         baseSha: target.sha,
@@ -1026,8 +1034,11 @@ async function recutPR(git: Git, repo: string, input: PRRecutInput): Promise<PRR
       },
     }
   })
-  if (outcome.status === "passed") return outcome.output
-  const message = outcome.status === "failed" ? outcome.error.message : (outcome.detail ?? outcome.token)
+  if (outcome.status === "completed" && outcome.conclusion === "success") return outcome.output
+  const message =
+    outcome.status === "completed" && outcome.conclusion === "failure"
+      ? outcome.error.message
+      : (outcome.detail ?? outcome.token)
   throw createFailure({ kind: "infrastructure", code: "recut-scratch-failed", message: `yrd: ${message}` })
 }
 
@@ -1129,7 +1140,8 @@ async function assertCurrentRecutCertificate(
         throw currentCompositionFailure("wrapper paths do not match the current composition")
       }
       return {
-        status: "passed",
+        status: "completed",
+        conclusion: "success",
         output: {
           treeSha: tree.stdout,
           patchId: compositionPatchId(receipts),
@@ -1137,8 +1149,11 @@ async function assertCurrentRecutCertificate(
       }
     },
   )
-  if (outcome.status !== "passed") {
-    const message = outcome.status === "failed" ? outcome.error.message : (outcome.detail ?? outcome.token)
+  if (outcome.status !== "completed" || outcome.conclusion !== "success") {
+    const message =
+      outcome.status === "completed" && outcome.conclusion === "failure"
+        ? outcome.error.message
+        : (outcome.detail ?? outcome.token)
     throw createFailure({ kind: "infrastructure", code: "recut-scratch-failed", message: `yrd: ${message}` })
   }
   if (outcome.output.treeSha !== certifiedTreeSha || outcome.output.patchId !== certifiedPatchId) {
@@ -1503,7 +1518,8 @@ async function recutDirectPR(
       }
     }
     return {
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: {
         headSha,
         baseSha: target.sha,
@@ -1513,8 +1529,11 @@ async function recutDirectPR(
       },
     }
   })
-  if (outcome.status === "passed") return outcome.output
-  const message = outcome.status === "failed" ? outcome.error.message : (outcome.detail ?? outcome.token)
+  if (outcome.status === "completed" && outcome.conclusion === "success") return outcome.output
+  const message =
+    outcome.status === "completed" && outcome.conclusion === "failure"
+      ? outcome.error.message
+      : (outcome.detail ?? outcome.token)
   throw createFailure({ kind: "infrastructure", code: "recut-scratch-failed", message: `yrd: ${message}` })
 }
 
@@ -1614,7 +1633,9 @@ async function withScratch<Output extends JsonValue>(
 
   if (operationFailure !== undefined) throw operationFailure
   if (outcome === undefined) throw new Error("scratch worktree produced no result")
-  if (outcome.status === "failed" || cleanupFailure === undefined) return outcome
+  if ((outcome.status === "completed" && outcome.conclusion === "failure") || cleanupFailure === undefined) {
+    return outcome
+  }
   return failed("scratch-cleanup-failed", cleanupFailure)
 }
 
@@ -1705,6 +1726,143 @@ async function prepareCandidate(
   }
 }
 
+async function mergeTreeCandidate(
+  git: Git,
+  repo: string,
+  input: CandidatePreparationInput,
+): Promise<"mergeable" | "conflicting"> {
+  let current = input.baseSha
+  for (const revision of input.revs) {
+    const merged = await git.run(repo, ["merge-tree", "--write-tree", current, revision.head], true)
+    if (merged.code !== 0) return "conflicting"
+    const tree = merged.stdout.split(/\r?\n/u)[0]
+    if (tree === undefined || !/^[0-9a-f]{40,64}$/iu.test(tree)) {
+      throw new Error(`yrd: git merge-tree returned no tree for Candidate '${input.id}'`)
+    }
+    const committed = await git.run(repo, [
+      "-c",
+      "user.name=Yrd",
+      "-c",
+      "user.email=yrd@localhost",
+      "commit-tree",
+      tree,
+      "-p",
+      current,
+      "-p",
+      revision.head,
+      "-m",
+      `yrd mergeability probe ${input.id}`,
+    ])
+    current = committed.stdout
+  }
+  return "mergeable"
+}
+
+export type GitCandidatePreparerOptions = Readonly<{
+  inject: Readonly<{ process: Pick<Process, "run"> }>
+  repo: string
+  checkoutParent?: string
+  artifactRoot?: string
+  env?: NodeJS.ProcessEnv
+  candidatePool?: CandidatePool
+}>
+
+/** Construct and publish the ONE immutable Candidate before Runner admission.
+ * `git merge-tree` classifies ordinary conflicts without a checkout; the
+ * existing certificate-bearing composition path is then reused only to
+ * materialize the synthetic commit and source-rewrite evidence. */
+export function gitCandidatePreparer(options: GitCandidatePreparerOptions): CandidatePreparer {
+  const repo = resolve(options.repo)
+  const git = createGit(options.inject.process, options.env)
+  return async (input): Promise<PreparedCandidate> => {
+    const mergeability = await mergeTreeCandidate(git, repo, input)
+    const needsDomainComposition = input.prs.some((pr) => pr.composition !== undefined || pr.recut !== undefined)
+    if (mergeability === "conflicting" && !needsDomainComposition) {
+      return {
+        id: input.id,
+        queueId: input.queueId,
+        baseSha: input.baseSha,
+        revs: input.revs,
+        mergeability: "conflicting",
+      }
+    }
+    const execution: StepExecution = {
+      run: input.id,
+      step: "candidate",
+      index: 0,
+      prs: input.prs,
+      shape: { results: {} },
+    }
+    const materialize = async (path: string, scratchRoot: string): Promise<PreparedCandidate> => {
+      const candidate = await prepareCandidate(
+        git,
+        repo,
+        path,
+        execution,
+        1,
+        resolve(options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")),
+        (options.env ?? globalThis.process.env).YRD_ALLOW_AUTHORED_GITLINKS === "1",
+      )
+      if (candidate.status === "failed") {
+        throw createFailure({
+          kind: "refusal",
+          code: candidate.error.code,
+          message: candidate.error.message,
+        })
+      }
+      await proveCandidateSubmoduleReachability(
+        git,
+        repo,
+        path,
+        candidate.output.sha,
+        join(scratchRoot, "submodule-proof"),
+      )
+      const ref = `refs/yrd/candidates/${input.id}`
+      const pinned = await git.run(
+        repo,
+        ["update-ref", "--create-reflog", ref, candidate.output.sha, "0".repeat(candidate.output.sha.length)],
+        true,
+      )
+      if (pinned.code !== 0 && (await git.optionalCommit(repo, ref)) !== candidate.output.sha) {
+        throw createFailure({
+          kind: "infrastructure",
+          code: "candidate-ref-refused",
+          message: `yrd: Candidate ref '${ref}' is already occupied by different evidence`,
+        })
+      }
+      return {
+        id: input.id,
+        queueId: input.queueId,
+        baseSha: input.baseSha,
+        revs: input.revs,
+        sha: candidate.output.sha,
+        ref,
+        ...(candidate.output.sourceRewrites.length === 0 ? {} : { sourceRewrites: candidate.output.sourceRewrites }),
+        ...(candidate.output.submoduleResolutions.length === 0
+          ? {}
+          : { submoduleResolutions: candidate.output.submoduleResolutions }),
+        mergeability: "mergeable",
+      }
+    }
+    if (options.candidatePool !== undefined) {
+      return options.candidatePool.withCandidate(input.baseSha, materialize)
+    }
+    const outcome = await withScratch<PreparedCandidate>(
+      git,
+      repo,
+      input.baseSha,
+      options.checkoutParent ?? tmpdir(),
+      async (path, scratchRoot) => ({
+        status: "completed",
+        conclusion: "success",
+        output: await materialize(path, scratchRoot),
+      }),
+    )
+    if (outcome.status === "completed" && outcome.conclusion === "success") return outcome.output
+    throw new Error("yrd: Candidate scratch construction did not complete")
+  }
+}
+
 type RecutBaseMovement = CandidateFailure | Readonly<{ status: "moved"; moved: boolean; baseSha: string; head: string }>
 
 /**
@@ -1743,7 +1901,7 @@ async function recutBaseMovement(git: Git, repo: string, pr: StepExecution["prs"
  * performs the three-way merge whose merge base is the reviewed base — this IS the
  * mechanical rebase of the reviewed revision onto the advanced base. On a clean merge we
  * hash the diff HEAD..<recomposed tree>, mirroring how the fast path hashes baseSha..headSha.
- * A merge conflict (the base move touched the reviewed lines) or an unresolvable tree yields
+ * A merge conflict (the base move touched the reviewed rows) or an unresolvable tree yields
  * `undefined`, which the caller treats as genuine drift requiring a human recut.
  */
 async function rederiveRecutPatchId(git: Git, repo: string, headSha: string): Promise<string | undefined> {
@@ -2417,7 +2575,7 @@ async function changedPayloadIdentity(
 /**
  * Certify every ordered non-gitlink patch after removing paths whose final pin
  * was independently ancestry-certified. Intermediate gitlink slots are not a
- * delivery fact: a branch may merge two sibling submodule lines and land their
+ * delivery fact: a branch may merge two sibling submodule histories and land their
  * common descendant, as PR928 did. The caller has already proved exact final
  * pins plus aggregate payload identity, so this sequence owns only the ordered
  * ordinary patches. Merge wrapper commits are skipped; any tree effect unique
@@ -2507,8 +2665,8 @@ async function absorbedAuthoredGitlinks(
     const count = Number((await git.run(sourceRepo, ["rev-list", "--count", `${oldPin}..${sourcePin}`])).stdout)
     if (!Number.isSafeInteger(count) || count < 1) continue
     const cherry = await git.run(sourceRepo, ["cherry", currentPin, sourcePin, oldPin], true)
-    const lines = cherry.stdout.split(/\r?\n/u).filter((line) => line !== "")
-    if (cherry.code === 0 && lines.length === count && lines.every((line) => /^- [0-9a-f]{40,64}$/iu.test(line))) {
+    const rows = cherry.stdout.split(/\r?\n/u).filter((row) => row !== "")
+    if (cherry.code === 0 && rows.length === count && rows.every((row) => /^- [0-9a-f]{40,64}$/iu.test(row))) {
       absorbed.push(path)
     }
   }
@@ -2663,8 +2821,8 @@ function samePaths(left: readonly string[], right: readonly string[]): boolean {
 }
 
 function isEqualRangeDiff(output: string): boolean {
-  const lines = output.split(/\r?\n/u).filter((line) => line.trim() !== "")
-  return lines.length > 0 && lines.every((line) => /^\d+:\s+[0-9a-f]+ = \d+:\s+[0-9a-f]+(?:\s|$)/iu.test(line))
+  const rows = output.split(/\r?\n/u).filter((row) => row.trim() !== "")
+  return rows.length > 0 && rows.every((row) => /^\d+:\s+[0-9a-f]+ = \d+:\s+[0-9a-f]+(?:\s|$)/iu.test(row))
 }
 
 function intersection(left: readonly string[], right: readonly string[]): string[] {
@@ -3033,7 +3191,7 @@ function definitiveProbeFailure(result: GitResult, pattern: RegExp): boolean {
 function definitiveCandidateMetadataFailure(result: GitResult): boolean {
   if (!probeSettled(result)) return false
   const detail = `${result.stderr}\n${result.stdout}`.trim()
-  return /\.gitmodules.*does not exist|bad config line|invalid config|invalid key/iu.test(detail)
+  return /\.gitmodules.*does not exist|bad config (?:l)ine|invalid config|invalid key/iu.test(detail)
 }
 
 function throwFetchProbeFailure(context: SubmoduleProbeContext, result: GitResult): never {
@@ -3178,7 +3336,7 @@ async function withPinnedCandidate<Output extends JsonValue>(
     candidatePool?: CandidatePool
   }>,
   onFailure: (failure: PreparedCandidateFailure) => JobResult<Output>,
-  use: (path: string, candidate: PinnedCandidate) => Promise<JobResult<Output>>,
+  runWithCandidate: (path: string, candidate: PinnedCandidate) => Promise<JobResult<Output>>,
 ): Promise<JobResult<Output>> {
   const target = await authoritativeQueueBase(git, repo, primaryPR(input).base)
   // Warm pool when the host opts in; otherwise the exact cold scratch path.
@@ -3215,7 +3373,7 @@ async function withPinnedCandidate<Output extends JsonValue>(
     if (pinned.status === "refused") {
       return { status: "waiting", token: pinned.token, detail: pinned.detail }
     }
-    return use(
+    return runWithCandidate(
       path,
       PinnedCandidateSchema.parse({
         baseSha: target.sha,
@@ -3230,13 +3388,74 @@ async function withPinnedCandidate<Output extends JsonValue>(
   })
 }
 
+async function withStepCandidate<Output extends JsonValue>(
+  git: Git,
+  repo: string,
+  input: StepExecution,
+  context: JobContext,
+  options: Readonly<{
+    checkoutParent?: string
+    artifactRoot?: string
+    allowAuthoredGitlinks?: boolean
+    candidatePool?: CandidatePool
+  }>,
+  onFailure: (failure: PreparedCandidateFailure) => JobResult<Output>,
+  runWithCandidate: (path: string, candidate: PinnedCandidate) => Promise<JobResult<Output>>,
+): Promise<JobResult<Output>> {
+  const runtime = context.context
+  if (runtime === undefined) {
+    // Compatibility for direct StepRunner consumers and replay-era tests. The
+    // configured Queue always supplies a Runner Context and never enters this
+    // reconstruction path.
+    return withPinnedCandidate(git, repo, input, context, options, onFailure, runWithCandidate)
+  }
+  if (runtime.request.candidate === "none") {
+    if (runtime.cwd === undefined && runtime.candidateRef === undefined) {
+      return withPinnedCandidate(git, repo, input, context, options, onFailure, runWithCandidate)
+    }
+    throw new Error(`yrd: check Job '${context.id}' requires a Candidate Context`)
+  }
+  if (runtime.cwd === undefined || runtime.candidateRef === undefined) {
+    throw new Error(`yrd: Candidate Context '${runtime.id}' is missing its materialized worktree identity`)
+  }
+  const candidate = input.candidate
+  if (candidate === undefined) {
+    throw new Error(`yrd: check Job '${context.id}' is missing immutable Candidate facts`)
+  }
+  if (candidate.mergeability !== "mergeable" || candidate.sha === undefined || candidate.ref === undefined) {
+    throw new Error(`yrd: check Job '${context.id}' requires a constructed mergeable Candidate`)
+  }
+  if (candidate.ref !== runtime.candidateRef) {
+    throw new Error(
+      `yrd: Candidate Context '${runtime.id}' materialized '${runtime.candidateRef}', expected '${candidate.ref}'`,
+    )
+  }
+  if (input.prs.some((pr) => pr.baseSha !== undefined && pr.baseSha !== candidate.baseSha)) {
+    throw new Error(`yrd: check Job '${context.id}' Candidate base does not match its PR revisions`)
+  }
+  const head = await git.commit(runtime.cwd, "HEAD")
+  if (head !== candidate.sha) {
+    throw new Error(`yrd: Candidate Context '${runtime.id}' materialized ${head}, expected ${candidate.sha}`)
+  }
+  return runWithCandidate(
+    runtime.cwd,
+    PinnedCandidateSchema.parse({
+      baseSha: candidate.baseSha,
+      candidateSha: candidate.sha,
+      candidateRef: candidate.ref,
+      ...(candidate.sourceRewrites === undefined ? {} : { sourceRewrites: candidate.sourceRewrites }),
+      ...(candidate.submoduleResolutions === undefined ? {} : { submoduleResolutions: candidate.submoduleResolutions }),
+    }),
+  )
+}
+
 export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitCheckResultEvidence> {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
   return async (input, context): Promise<JobResult<GitCheckResultEvidence>> => {
     try {
       const purpose = options.purpose ?? "check"
-      return await withPinnedCandidate(
+      return await withStepCandidate(
         git,
         repo,
         input,
@@ -3247,7 +3466,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
           artifactRoot: options.artifactRoot,
           allowAuthoredGitlinks: (options.env ?? globalThis.process.env).YRD_ALLOW_AUTHORED_GITLINKS === "1",
         },
-        (failure) => failure,
+        (failure) => failed(failure.error.code, failure.error.message, failure.output),
         async (path, candidate): Promise<JobResult<GitCheckResultEvidence>> => {
           const artifactRoot = options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")
           const configured = (
@@ -3289,9 +3508,10 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
               { ...input, targetSha: candidate.candidateSha },
               context,
             )
-            if (outcome.status === "passed") {
+            if (outcome.status === "completed" && outcome.conclusion === "success") {
               return {
-                status: "passed",
+                status: "completed",
+                conclusion: "success",
                 output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...candidateMetadata }),
               }
             }
@@ -3305,7 +3525,8 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
               }
             }
             return {
-              status: "failed",
+              status: "completed",
+              conclusion: "failure",
               error: outcome.error,
               ...(outcome.output === undefined
                 ? {}
@@ -3338,13 +3559,14 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             )
           }
 
-          if (outcome.status === "passed") {
+          if (outcome.status === "completed" && outcome.conclusion === "success") {
             return {
-              status: "passed",
+              status: "completed",
+              conclusion: "success",
               output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...candidateMetadata }),
             }
           }
-          if (outcome.status !== "failed") {
+          if (outcome.status !== "completed" || outcome.conclusion !== "failure") {
             const error = comparisonOutcomeError(outcome, purpose, "candidate")
             const refusal = GitCheckComparisonRefusalEvidenceSchema.parse({
               ...candidate,
@@ -3361,7 +3583,8 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
           }
 
           const candidateFailure: JobResult<GitCheckResultEvidence> = {
-            status: "failed",
+            status: "completed",
+            conclusion: "failure",
             error: outcome.error,
             ...(outcome.output === undefined
               ? {}
@@ -3415,7 +3638,11 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             // An ordinary nonzero parent exit genuinely ran and cannot become
             // an infrastructure alias just because its diagnostics are opaque.
             // Named incomplete outcomes (timeout/stall) remain retryable below.
-            if (parentOutcome.status === "failed" && parentOutcome.error.code === `${purpose}-failed`) {
+            if (
+              parentOutcome.status === "completed" &&
+              parentOutcome.conclusion === "failure" &&
+              parentOutcome.error.code === `${purpose}-failed`
+            ) {
               return candidateFailure
             }
             const error = comparisonOutcomeError(parentOutcome, purpose, "parent")
@@ -3424,7 +3651,9 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
               kind: "check-comparison-refusal",
               phase: "parent",
               error,
-              ...(parentOutcome.status === "failed" && parentOutcome.output !== undefined
+              ...(parentOutcome.status === "completed" &&
+              parentOutcome.conclusion === "failure" &&
+              parentOutcome.output !== undefined
                 ? { parent: parentOutcome.output }
                 : {}),
               candidateEvidence,
@@ -3444,9 +3673,9 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             comparison,
           })
           if (comparison.netNewDiagnostics.length === 0) {
-            return { status: "passed", output: evidence }
+            return { status: "completed", conclusion: "success", output: evidence }
           }
-          return { status: "failed", error: outcome.error, output: evidence }
+          return { status: "completed", conclusion: "failure", error: outcome.error, output: evidence }
         },
       )
     } catch (cause) {
@@ -3566,10 +3795,19 @@ async function validatePinnedCandidate(
 }
 
 type MergeCandidateResult =
-  | Readonly<{ status: "passed"; base: GitQueueTarget; checked: PinnedCandidate }>
-  | Readonly<{ status: "failed"; error: Readonly<{ code: string; message: string }> }>
+  | Readonly<{
+      status: "completed"
+      conclusion: "success"
+      base: GitQueueTarget
+      checked: PinnedCandidate
+    }>
+  | Readonly<{
+      status: "completed"
+      conclusion: "failure"
+      error: Readonly<{ code: string; message: string }>
+    }>
   | Readonly<{ status: "waiting"; token: string; detail?: string }>
-type FailedJobResult = Extract<JobResult<never>, { status: "failed" }>
+type FailedJobResult = Extract<JobResult<never>, { status: "completed"; conclusion: "failure" }>
 
 async function mergeCandidate(
   git: Git,
@@ -3591,22 +3829,27 @@ async function mergeCandidate(
             allowAuthoredGitlinks: options.allowAuthoredGitlinks,
           },
           (failure) => failedWithEvidence(failure.error.code, failure.error.message, failure.output),
-          (_path, candidate) => Promise.resolve({ status: "passed" as const, output: candidate }),
+          (_path, candidate) =>
+            Promise.resolve({ status: "completed" as const, conclusion: "success" as const, output: candidate }),
         )
       : undefined
-  if (prepared?.status === "failed") return prepared
+  if (prepared?.status === "completed" && prepared.conclusion === "failure") return prepared
   if (prepared?.status === "waiting") return prepared
-  const checked = prior ?? prepared?.output
+  const checked =
+    prior ?? (prepared?.status === "completed" && prepared.conclusion === "success" ? prepared.output : undefined)
   if (checked === undefined) throw new Error("yrd: merge candidate preparation produced no candidate")
   const base = await authoritativeQueueBase(git, repo, primaryPR(input).base)
   const validated = await validatePinnedCandidate(git, repo, input, base.sha, checked)
-  return "error" in validated ? { status: "failed", error: validated.error } : { status: "passed", base, checked }
+  return "error" in validated
+    ? { status: "completed", conclusion: "failure", error: validated.error }
+    : { status: "completed", conclusion: "success", base, checked }
 }
 
 function mergeAuthorityCancellation(context: Pick<JobContext, "signal">): FailedJobResult | undefined {
   if (!context.signal.aborted) return undefined
   return {
-    status: "failed",
+    status: "completed",
+    conclusion: "failure",
     error: {
       code: "merge-canceled",
       message: "merge execution authority was canceled or superseded before landing",
@@ -3838,7 +4081,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
       const candidate = await mergeCandidate(git, repo, input, context, {
         allowAuthoredGitlinks: (options.env ?? globalThis.process.env).YRD_ALLOW_AUTHORED_GITLINKS === "1",
       })
-      if (candidate.status !== "passed") return candidate
+      if (candidate.status !== "completed" || candidate.conclusion !== "success") return candidate
       const { base, checked } = candidate
       const baseSha = base.sha
       const remote = base.remote
@@ -3873,7 +4116,8 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
               return failed("merge-push-failed", pushed.stderr || pushed.stdout || `could not update '${branch}'`)
             }
             return {
-              status: "passed",
+              status: "completed",
+              conclusion: "success",
               output: integrationProof(checked.candidateSha, checked),
             }
           },
@@ -3888,7 +4132,8 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
             return failed("invalid-candidate", sourceRefError)
           }
           return {
-            status: "passed",
+            status: "completed",
+            conclusion: "success",
             output: integrationProof(landing.sha, checked),
           }
         }
@@ -3898,7 +4143,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
             `queue '${branch}' moved from '${baseSha}' to '${landing.sha}' before the candidate could land`,
           )
         }
-        if (attempted.status === "failed") return attempted
+        if (attempted.status === "completed" && attempted.conclusion === "failure") return attempted
         if (attempted.status === "waiting") throw new Error("native merge cannot wait")
         return failed("merge-verification-failed", `landed '${branch}' does not contain '${missing}'`)
       }
@@ -3946,7 +4191,8 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
         if (moved.code !== 0) return failed("stale-base", moved.stderr || "base branch moved")
       }
       return {
-        status: "passed",
+        status: "completed",
+        conclusion: "success",
         output: integrationProof(checked.candidateSha, checked),
       }
     } catch (cause) {
@@ -3972,7 +4218,7 @@ export function configuredMergeStep<Shape extends PRShape>(
         artifactRoot: options.artifactRoot,
         allowAuthoredGitlinks: (options.env ?? globalThis.process.env).YRD_ALLOW_AUTHORED_GITLINKS === "1",
       })
-      if (candidate.status !== "passed") return candidate
+      if (candidate.status !== "completed" || candidate.conclusion !== "success") return candidate
       const command = configuredCommandStep<Shape>({
         inject: options.inject,
         command: options.command,
@@ -4003,7 +4249,7 @@ export function configuredMergeStep<Shape extends PRShape>(
         if (refusal !== undefined) {
           return failedWithEvidence(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
         }
-        return outcome.status === "failed"
+        return outcome.status === "completed" && outcome.conclusion === "failure"
           ? failed(outcome.error.code, outcome.error.message)
           : failed("merge-verification-failed", messageOf(cause))
       }
@@ -4016,11 +4262,14 @@ export function configuredMergeStep<Shape extends PRShape>(
           return failed("invalid-candidate", sourceRefError)
         }
         return {
-          status: "passed",
+          status: "completed",
+          conclusion: "success",
           output: integrationProof(landing.sha, candidate.checked),
         }
       }
-      if (outcome.status === "failed") return failed(outcome.error.code, outcome.error.message)
+      if (outcome.status === "completed" && outcome.conclusion === "failure") {
+        return failed(outcome.error.code, outcome.error.message)
+      }
       if (outcome.status === "waiting") {
         return failed("merge-command-waited", "merge commands cannot leave a waiting external effect")
       }
@@ -4074,11 +4323,16 @@ function failed<Output extends JsonValue = JsonValue>(
   message: string,
   output?: Output,
 ): JobResult<Output> {
-  return { status: "failed", error: { code, message }, ...(output === undefined ? {} : { output }) }
+  return {
+    status: "completed",
+    conclusion: "failure",
+    error: { code, message },
+    ...(output === undefined ? {} : { output }),
+  }
 }
 
 function failedWithEvidence(code: string, message: string, evidence: JsonValue): JobResult<never> {
-  return { status: "failed", error: { code, message, evidence } }
+  return { status: "completed", conclusion: "failure", error: { code, message, evidence } }
 }
 
 function messageOf(cause: unknown): string {

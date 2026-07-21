@@ -51,9 +51,9 @@ async function submodules(git: SubmoduleGit, repo: string): Promise<Submodule[] 
   if (configured.code !== 0) return configured
   return configured.stdout
     .split(/\r?\n/u)
-    .filter((line) => line !== "")
-    .map((line): Submodule | undefined => {
-      const match = /^(submodule\.(.+)\.path)\s+(.+)$/u.exec(line)
+    .filter((row) => row !== "")
+    .map((row): Submodule | undefined => {
+      const match = /^(submodule\.(.+)\.path)\s+(.+)$/u.exec(row)
       return match?.[2] === undefined || match[3] === undefined ? undefined : { name: match[2], path: match[3] }
     })
     .filter((submodule): submodule is Submodule => submodule !== undefined)

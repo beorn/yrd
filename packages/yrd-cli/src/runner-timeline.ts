@@ -6,7 +6,7 @@ import { artifactHref, artifactLabel, artifactLocation } from "./artifact-refere
 
 /**
  * Pure watch-timeline grammar shared by the interactive queue view and the
- * resident follow-runner's human log lines. Its INFO/ERROR rows read one event
+ * resident follow-runner's human log rows. Its INFO/ERROR rows read one event
  * per row — a scannable `[<base>#<run> <index>:<step>] done|failed <duration>`
  * summary with a canonical @silvery/ansi hyperlink to the full artifact.
  * Keeping these helpers here (not in the queue view .tsx) means the headless
@@ -303,7 +303,7 @@ function jsonTail(props: Record<string, unknown>, color: boolean): string {
 }
 
 /**
- * Format one resident-runner log Event as a human line, or `undefined` to
+ * Format one resident-runner log Event as a human row, or `undefined` to
  * suppress it from the human stream (it still reaches the JSONL file sink).
  *
  * - `yrd:jobs:<step>` completions → the scannable step row under the run scope.
@@ -321,7 +321,7 @@ export function formatResidentLogLine(event: Event, options: ResidentLogFormatOp
   const level = event.level
   const props = (event.props ?? {}) as OutcomeProps & Record<string, unknown>
 
-  // Low-level journal bookkeeping is noise on the human line — JSONL sink only.
+  // Low-level journal bookkeeping is noise on the human row — JSONL sink only.
   // Its warn/error escalations still surface below as notices.
   if (namespace.startsWith("yrd:journal:") && (level === "info" || level === "debug")) return undefined
 

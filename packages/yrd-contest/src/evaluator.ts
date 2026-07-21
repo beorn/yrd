@@ -340,7 +340,7 @@ export function createHeldOutCommandEvaluator(options: HeldOutCommandEvaluatorOp
           } else {
             const evidence = await writeEvidence(artifacts.value, id, input, context, checkout, evaluated.value)
             operation = evidence.ok
-              ? { status: "passed", output: evidence.value }
+              ? { status: "completed", conclusion: "success", output: evidence.value }
               : failed(evidence.error.code, evidence.error.message)
           }
         }
@@ -363,7 +363,7 @@ export function createHeldOutCommandEvaluator(options: HeldOutCommandEvaluatorOp
           }
         }
       }
-      if (operation.status === "failed") return operation
+      if (operation.status === "completed" && operation.conclusion === "failure") return operation
       if (cleanupFailure !== undefined) {
         if (operation.status === "waiting") {
           const detail = [operation.detail, `Local checkout cleanup failed: ${cleanupFailure.message}`]

@@ -36,14 +36,16 @@ function workspace(): BayWorkspace {
   return {
     revision: "test-workspace-v1",
     provision: (input) => ({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE },
     }),
     refresh: (input) => ({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE, dirty: false },
     }),
-    deprovision: () => ({ status: "passed", output: {} }),
+    deprovision: () => ({ status: "completed", conclusion: "success", output: {} }),
   }
 }
 
@@ -51,7 +53,7 @@ async function createQueueApp(check?: StepRunner<PRShape, CheckResult>) {
   const checkStep = withStep(
     "check",
     (input: StepExecution, context): JobResult<CheckResult> | Promise<JobResult<CheckResult>> =>
-      check?.(input, context) ?? { status: "passed", output: { checked: true } },
+      check?.(input, context) ?? { status: "completed", conclusion: "success", output: { checked: true } },
     { revision: "check-v1", output: CheckResultSchema },
   )
   const queue = withQueue({ steps: [checkStep] as const, batch: false, defaultSteps: ["check"] })
@@ -70,10 +72,14 @@ type CheckedShape = AddStepResult<PRShape, "check", CheckResult>
 async function createIntegratingApp(
   merge: (input: StepExecution<CheckedShape>) => JobResult<{ commit: string; baseSha: string }>,
 ) {
-  const checkStep = withStep("check", (): JobResult<CheckResult> => ({ status: "passed", output: { checked: true } }), {
-    revision: "check-v1",
-    output: CheckResultSchema,
-  })
+  const checkStep = withStep(
+    "check",
+    (): JobResult<CheckResult> => ({ status: "completed", conclusion: "success", output: { checked: true } }),
+    {
+      revision: "check-v1",
+      output: CheckResultSchema,
+    },
+  )
   const mergeStep = withMerge(merge, { revision: "merge-v1" })
   const queue = withQueue({ steps: [checkStep, mergeStep] as const, batch: false, defaultSteps: ["check", "merge"] })
   const bayJobs = createBayJobDefs(workspace())
@@ -96,12 +102,13 @@ async function submitWithChecks(app: Pick<QueueApp, "bays" | "state">, branch: s
 describe("needs-author eligibility (derived composition-refusal projection)", () => {
   it("projects a composition refusal that reached the runner as needs-author with its receipt", async () => {
     await using app = await createQueueApp(() => ({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: { code: "composition-invalid", message: "PR 'PR1' composition head contains root changes" },
     }))
     const pr = await submitWithChecks(app, "topic/authored-root")
 
-    await expect(app.queue.run({}, runtime)).resolves.toMatchObject([{ status: "failed" }])
+    await expect(app.queue.run({}, runtime)).resolves.toMatchObject([{ status: "completed", conclusion: "failure" }])
 
     const eligibility = app.queue.eligibility(pr)
     expect(eligibility.runnable).toBe(false)
@@ -118,7 +125,8 @@ describe("needs-author eligibility (derived composition-refusal projection)", ()
     // run.error fallback only fires with zero other records, so a composition
     // refusal on the merge step alongside a passed check record was invisible.
     await using app = await createIntegratingApp(() => ({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: { code: "wrapper-mismatch", message: "PR 'PR1' generated wrapper paths differ" },
     }))
     const pr = await submitWithChecks(app, "topic/merge-refusal")
@@ -131,20 +139,21 @@ describe("needs-author eligibility (derived composition-refusal projection)", ()
   })
 
   it("keeps an ordinary check failure (tests/lint) off the needs-author path", async () => {
-    // An ordinary red check drives the normal automatic rejection; that is a
-    // `rejected` verdict ("submit it again"), never `needs-author` — which is
-    // reserved for a composition the queue could not build.
+    // An ordinary red check keeps the fresh PR open with a `checks-failed`
+    // verdict, never `needs-author` — which is reserved for a composition the
+    // queue could not build.
     await using app = await createQueueApp(() => ({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: { code: "check-failed", message: "unit tests failed" },
     }))
     const pr = await submitWithChecks(app, "topic/red-tests")
 
-    await expect(app.queue.run({}, runtime)).resolves.toMatchObject([{ status: "failed" }])
+    await expect(app.queue.run({}, runtime)).resolves.toMatchObject([{ status: "completed", conclusion: "failure" }])
 
     const eligibility = app.queue.eligibility(pr)
     expect(eligibility.runnable).toBe(false)
-    expect(eligibility.reason?.code).toBe("rejected")
+    expect(eligibility.reason?.code).toBe("checks-failed")
     expect(eligibility.reason?.receipt).toBeUndefined()
   })
 

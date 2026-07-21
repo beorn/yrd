@@ -1,12 +1,13 @@
 import type { BayCommands, BaysState, HasBays } from "@yrd/bay"
 import type { ContestCommands, ContestsState, HasContests } from "@yrd/contest"
 import type { Yrd } from "@yrd/core"
-import type { HasJobs, JobCommands, JobsState } from "@yrd/job"
+import type { HasJobs, HasRunner, JobCommands, JobsState } from "@yrd/job"
 import type { GitPRRecutter, HasQueue, QueueAuditResult, QueueCommands, QueuesState } from "@yrd/queue"
 import type { HasIssues } from "@yrd/issue"
 import type { OrphanJournalImportResult } from "@yrd/persistence"
 import type { Scope } from "@silvery/scope"
 import type { SubmoduleBranchResolver } from "./submodule-tracking.ts"
+import type { YrdConfig } from "@yrd/config"
 
 export type YrdCliExitCode = 0 | 1 | 2 | 3
 
@@ -33,12 +34,20 @@ export type YrdCliState = Readonly<{
 
 export type YrdCliCommands = JobCommands & BayCommands & QueueCommands & ContestCommands
 
-export type YrdCliApp = Yrd<YrdCliState, YrdCliCommands> & HasJobs & HasBays & HasQueue & HasIssues & HasContests
+export type YrdCliApp = Yrd<YrdCliState, YrdCliCommands> &
+  HasJobs &
+  HasRunner &
+  HasBays &
+  HasQueue &
+  HasIssues &
+  HasContests
 
 export type YrdCliServices = Readonly<{
   queue?: YrdCliQueueAdministration
   recut?: GitPRRecutter
   journal?: YrdCliJournalAdministration
+  /** Live base-authority flow config for deterministic doctor diagnostics. */
+  config?: YrdConfig
 }>
 
 /** Read-only Git facts `pr prune` proves its superseded verdicts with. The

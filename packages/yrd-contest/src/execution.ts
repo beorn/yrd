@@ -19,7 +19,7 @@ export function errorMessage(error: unknown): string {
 }
 
 export function failed<Output extends JsonValue>(code: string, cause: unknown): JobResult<Output> {
-  return { status: "failed", error: { code, message: errorMessage(cause) } }
+  return { status: "completed", conclusion: "failure", error: { code, message: errorMessage(cause) } }
 }
 
 export const accepted = <Value>(value: Value): Checked<Value> => ({ ok: true, value })

@@ -26,7 +26,8 @@ import {
   type ContestRunnerDef,
 } from "@yrd/contest"
 import { createYrd, createYrdDef, failureFact, pipe, raiseFailure, type Journal } from "@yrd/core"
-import { withJobs } from "@yrd/job"
+import { defineConfig, selectFlow } from "@yrd/config"
+import { localRunner, withJobs } from "@yrd/job"
 import {
   configuredCommandStep,
   configuredMergeStep,
@@ -34,10 +35,12 @@ import {
   createCandidatePool,
   createCandidatePoolGit,
   createGitPRRecutter,
+  gitCandidatePreparer,
   gitCheckStep,
   gitMergeStep,
   inspectGitQueueTarget,
   resolveGitQueueTarget,
+  worktreeContexts,
   withQueue,
   withMerge,
   withStep,
@@ -103,6 +106,8 @@ export type DefaultYrdAppOptions = Readonly<{
   log?: ConditionalLogger
   /** Opt-in warm candidate-worktree pool shared across check steps (R40). */
   candidatePool?: CandidatePool
+  /** Runtime Runner identity recorded on fresh Jobs. */
+  runnerId?: string
 }>
 
 function validateConfig(config: ResolvedYrdProjectConfig): void {
@@ -233,7 +238,7 @@ function candidateStep(
   name: string,
   config: YrdStepConfig,
   revision: string,
-  candidatePool: CandidatePool | undefined,
+  kind: "check" | "action",
 ): RuntimeStep {
   return eraseStep(
     withStep(
@@ -243,7 +248,6 @@ function candidateStep(
         repo,
         command: shellCommand(stepCommand(name, config)),
         checkoutParent,
-        ...(candidatePool === undefined ? {} : { candidatePool }),
         artifactRoot: join(stateDir, "artifacts"),
         purpose: name,
         runner: config.runner,
@@ -259,6 +263,7 @@ function candidateStep(
       }),
       {
         revision,
+        kind,
         classification: config.classification ?? "carrier",
       },
     ),
@@ -279,13 +284,14 @@ function configuredStepDescriptors(
   mergeCommand: readonly string[] | undefined,
 ): readonly InstalledStep[] {
   const toolchain = hostToolchainFingerprint()
-  let integrated = false
-  return config.steps.map((name) => {
+  const mergeIndex = config.steps.indexOf("merge")
+  return config.steps.map((name, index) => {
     const stepConfig = config.definitions[name] ?? { runner: "local" as const }
+    const kind =
+      stepConfig.kind ?? (name === "merge" ? "merge" : mergeIndex >= 0 && index > mergeIndex ? "action" : "check")
     const timeoutMs = stepTimeoutMs(stepConfig)
     const noProgressMs = stepNoProgressMs(stepConfig)
-    if (name === "merge") {
-      integrated = true
+    if (kind === "merge") {
       return {
         name,
         title: "merge",
@@ -299,11 +305,10 @@ function configuredStepDescriptors(
           toolchain,
           resolvedCommand: mergeCommand,
         }),
-        integrates: true,
-        needsIntegration: false,
+        kind,
       }
     }
-    if (!integrated) {
+    if (kind === "check") {
       return {
         name,
         title: name,
@@ -317,8 +322,7 @@ function configuredStepDescriptors(
           toolchain,
           checkoutParent: fixed.baysRoot,
         }),
-        integrates: false,
-        needsIntegration: false,
+        kind,
         classification: stepConfig.classification ?? "carrier",
       }
     }
@@ -334,16 +338,19 @@ function configuredStepDescriptors(
         noProgressMs,
         toolchain,
       }),
-      integrates: false,
-      needsIntegration: true,
+      kind,
     }
   })
 }
 
 /** Re-derive the current config's step descriptors from disk. Fails loud on an
  * invalid config so the environment audit never certifies a broken selection. */
-async function reloadConfiguredStepDescriptors(repository: YrdRepository): Promise<readonly InstalledStep[]> {
-  const loaded = await loadYrdConfig({ repo: repository.repo, defaultBase: repository.defaultBase })
+async function reloadConfiguredStepDescriptors(
+  repository: YrdRepository,
+  process: Pick<Process, "run">,
+  configPath?: string,
+): Promise<readonly InstalledStep[]> {
+  const loaded = await loadRepositoryConfig(repository, process, configPath)
   validateConfig(loaded.config)
   const mergeCommand =
     loaded.config.definitions.merge?.run === undefined ? undefined : shellCommand(loaded.config.definitions.merge.run)
@@ -388,14 +395,12 @@ function configuredQueueSteps(
     options.config,
     mergeCommand,
   )
-  let integrated = false
   return options.config.steps.map((name, index) => {
     const config = options.config.definitions[name] ?? { runner: "local" as const }
     const descriptor = descriptors[index]
     if (descriptor === undefined) throw new Error(`yrd: missing derived descriptor for queue step '${name}'`)
     const revision = descriptor.revision
-    if (name === "merge") {
-      integrated = true
+    if (descriptor.kind === "merge") {
       return eraseStep(
         withMerge(
           mergeCommand === undefined
@@ -416,7 +421,7 @@ function configuredQueueSteps(
         ),
       )
     }
-    if (!integrated) {
+    if (descriptor.kind === "check") {
       return candidateStep(
         options.process,
         options.repo,
@@ -425,13 +430,13 @@ function configuredQueueSteps(
         name,
         config,
         revision,
-        options.candidatePool,
+        descriptor.kind,
       )
     }
     return eraseStep(
       withStep(name, integratedRunner(options.process, options.repo, options.stateDir, name, config), {
         revision,
-        needsIntegration: true,
+        kind: "action",
       }),
     )
   })
@@ -451,6 +456,52 @@ async function resolveCommit(process: Pick<Process, "run">, repo: string, ref: s
     if (result.exitCode === 0) return result.stdout.trim().toLowerCase()
   }
   return undefined
+}
+
+async function readConfigFromBase(
+  process: Pick<Process, "run">,
+  repository: YrdRepository,
+  base: string,
+  path: string,
+): Promise<string | undefined> {
+  const sha = await resolveCommit(process, repository.repo, base)
+  if (sha === undefined) {
+    raiseFailure("configuration", "config-base-missing", `yrd: config base '${base}' does not resolve to a commit`)
+  }
+  const object = `${sha}:${path}`
+  const exists = await process.run({
+    argv: ["git", "-C", repository.repo, "cat-file", "-e", object],
+    cwd: repository.repo,
+    env: cleanGitEnvironment(globalThis.process.env),
+  })
+  if (exists.exitCode !== 0) return undefined
+  const shown = await process.run({
+    argv: ["git", "-C", repository.repo, "show", object],
+    cwd: repository.repo,
+    env: cleanGitEnvironment(globalThis.process.env),
+  })
+  if (shown.exitCode !== 0) {
+    raiseFailure(
+      "infrastructure",
+      "config-read-failed",
+      shown.stderr.trim() || `yrd: failed to read config '${path}' from base '${base}'`,
+    )
+  }
+  return shown.stdout
+}
+
+function loadRepositoryConfig(
+  repository: YrdRepository,
+  process: Pick<Process, "run">,
+  configPath?: string,
+): ReturnType<typeof loadYrdConfig> {
+  return loadYrdConfig({
+    repo: repository.repo,
+    defaultBase: repository.defaultBase,
+    ...(configPath === undefined ? {} : { configPath }),
+    cacheDir: join(repository.stateDir, "config-cache"),
+    readAuthority: (base, path) => readConfigFromBase(process, repository, base, path),
+  })
 }
 
 async function resolveCommitMeta(
@@ -564,6 +615,7 @@ function defaultContestAdapters(options: DefaultYrdAppOptions): {
 /** Compose the built-in workflow from immutable plugins and injected resources. */
 export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promise<YrdCliApp> {
   validateConfig(options.config)
+  const flowConfig = options.config.flows === undefined ? undefined : defineConfig(...options.config.flows)
   const mergeCommand =
     options.config.definitions.merge?.run === undefined ? undefined : shellCommand(options.config.definitions.merge.run)
   const workspace =
@@ -580,6 +632,7 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
     batch: options.config.batch,
     defaultSteps: options.config.steps,
     requires: options.config.requires,
+    ...(flowConfig === undefined ? {} : { flows: flowConfig }),
     resolveBaseSha: async (base) =>
       (
         await resolveGitQueueTarget({
@@ -588,6 +641,32 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
           branch: baseIdentity(base),
         })
       ).sha,
+    prepareCandidate: gitCandidatePreparer({
+      inject: { process: options.process },
+      repo: options.repo,
+      checkoutParent: options.baysRoot,
+      artifactRoot: join(options.stateDir, "artifacts"),
+      ...(options.candidatePool === undefined ? {} : { candidatePool: options.candidatePool }),
+    }),
+    runner: (jobs) => {
+      const contexts = worktreeContexts({
+        repo: options.repo,
+        parent: options.baysRoot,
+        size: 2,
+        submodules: "isolated",
+        git: createCandidatePoolGit(options.process),
+        ...(options.candidatePool === undefined ? {} : { pool: options.candidatePool }),
+        ...(options.log === undefined ? {} : { log: options.log }),
+      })
+      const runner = localRunner({
+        id: options.runnerId ?? "yrd-local",
+        jobs,
+        leaseMs: 60_000,
+        maxInFlight: contexts.maxInFlight,
+        contexts,
+      })
+      return Object.freeze({ ...runner, [Symbol.asyncDispose]: () => contexts.close() })
+    },
   })
   const contestAdapters = defaultContestAdapters(options)
   const contests = withContests({
@@ -610,6 +689,9 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
         })
         return { base: target.base, baseSha: target.sha }
       },
+      ...(flowConfig === undefined
+        ? {}
+        : { selectFlow: (submission: Parameters<typeof selectFlow>[1]) => selectFlow(flowConfig, submission).pin }),
     }),
   )
   return createYrd(contests(queue(base)), {
@@ -867,6 +949,7 @@ function bindProcessShutdown(shutdown: () => Promise<void>, drain?: (signal: Shu
 
 export type YrdHostOptions = Readonly<{
   cwd?: string
+  configPath?: string
   env?: NodeJS.ProcessEnv
   log?: ConditionalLogger
   signalAdapter?: SignalDeliveryAdapter
@@ -878,7 +961,8 @@ export async function createYrdHost(options: YrdHostOptions = {}): Promise<YrdHo
 
 function createViewerWorkspace(): BayWorkspace {
   const refuse = () => ({
-    status: "failed" as const,
+    status: "completed" as const,
+    conclusion: "failure" as const,
     error: { code: "viewer-read-only", message: "yrd: viewer runtime cannot mutate bay workspaces" },
   })
   return Object.freeze({
@@ -941,7 +1025,7 @@ async function createYrdRuntimeHost(
     const repository = await discoverYrdRepository({ cwd: options.cwd, env, process })
     if (resident !== undefined) residentLease = await acquireResidentRunner(repository.stateDir, resident, log)
     using _setupSpan = log.span?.("setup", { phase: "pre-worktree", repo: repository.repo })
-    const loaded = await loadYrdConfig({ repo: repository.repo, defaultBase: repository.defaultBase })
+    const loaded = await loadRepositoryConfig(repository, process, options.configPath)
     const receiver =
       mode === "active"
         ? await createGitPushReceiver({
@@ -1003,6 +1087,7 @@ async function createYrdRuntimeHost(
       scope,
       log,
       candidatePool,
+      runnerId: resident?.id ?? `yrd-cli:${globalThis.process.pid}`,
     })
     signals?.start()
     const runtimeApp = app
@@ -1024,11 +1109,12 @@ async function createYrdRuntimeHost(
     }
     if (mode === "active") await drain()
     const services = Object.freeze({
+      ...(loaded.config.flows === undefined ? {} : { config: defineConfig(...loaded.config.flows) }),
       queue: queueAdministration(
         process,
         repository,
         loaded.config.base,
-        () => reloadConfiguredStepDescriptors(repository),
+        () => reloadConfiguredStepDescriptors(repository, process, options.configPath),
         // The RUNTIME leg must come from the live runtime object — the steps
         // this process actually installed — never re-derived from config.
         () => runtimeApp.queue.steps(),
@@ -1073,7 +1159,7 @@ async function runReceiverHook(mode: "pre-receive" | "post-receive", env: NodeJS
   try {
     const receiver = await loadGitPushReceiver(resolve(globalThis.process.cwd(), gitDir), runtimeProcess)
     const repository = await discoverYrdRepository({ cwd: receiver.mainRepo, env, process: runtimeProcess })
-    const loaded = await loadYrdConfig({ repo: repository.repo, defaultBase: repository.defaultBase })
+    const loaded = await loadRepositoryConfig(repository, runtimeProcess)
     app = await createDefaultYrdApp({
       repo: repository.repo,
       stateDir: repository.stateDir,
@@ -1218,7 +1304,12 @@ export async function runYrdProcess(
         log = createYrdLogger(observability, (text) => io.stderr(text), human)
         const runtimeLog = resident === undefined ? log : residentRunnerLog(log, resident)
         const activeHost = await createYrdRuntimeHost(
-          { cwd: context.repo, env, log: runtimeLog },
+          {
+            cwd: context.repo,
+            env,
+            log: runtimeLog,
+            ...(context.configPath === undefined ? {} : { configPath: context.configPath }),
+          },
           resident,
           options.viewer ? "viewer" : "active",
         )

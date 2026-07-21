@@ -35,7 +35,7 @@ async function tempDir(prefix: string): Promise<string> {
 }
 
 function step(name: string, revision: string, overrides: Partial<InstalledStep> = {}): InstalledStep {
-  return { name, title: name, revision, integrates: false, needsIntegration: false, ...overrides }
+  return { name, title: name, revision, kind: "check", ...overrides }
 }
 
 function baseline(steps: readonly InstalledStep[], base = "main"): InstalledBaseline {
@@ -49,7 +49,7 @@ function baseline(steps: readonly InstalledStep[], base = "main"): InstalledBase
 
 describe("installed baseline drift", () => {
   it("reports no drift when the current steps match the installed baseline", () => {
-    const steps = [step("check", "check-v1"), step("merge", "merge-v1", { integrates: true })]
+    const steps = [step("check", "check-v1"), step("merge", "merge-v1", { kind: "merge" })]
     expect(installedBaselineDrift(baseline(steps), steps)).toBeUndefined()
   })
 
@@ -69,19 +69,19 @@ describe("installed baseline drift", () => {
   })
 
   it("flags an integration-contract change even when the revision is unchanged", () => {
-    const installed = [step("merge", "merge-v1", { integrates: true, needsIntegration: false })]
-    const current = [step("merge", "merge-v1", { integrates: false, needsIntegration: true })]
+    const installed = [step("merge", "merge-v1", { kind: "merge" })]
+    const current = [step("merge", "merge-v1", { kind: "action" })]
     expect(installedBaselineDrift(baseline(installed), current)?.message).toContain(
       "step 'merge' integration contract changed",
     )
   })
 
   it("names the runtime leg with the restart remedy when the running process diverges from the baseline (merge-queue R41b)", () => {
-    const installed = [step("check", "v2"), step("merge", "v2", { integrates: true })]
+    const installed = [step("check", "v2"), step("merge", "v2", { kind: "merge" })]
     expect(runtimeBaselineDrift(baseline(installed), installed)).toBeUndefined()
     const finding = runtimeBaselineDrift(baseline(installed), [
       step("check", "v1"),
-      step("merge", "v2", { integrates: true }),
+      step("merge", "v2", { kind: "merge" }),
     ])
     expect(finding).toMatchObject({ code: "runtime-drift" })
     expect(finding?.message).toContain("resident runtime diverges from the installed baseline")
@@ -90,8 +90,8 @@ describe("installed baseline drift", () => {
   })
 
   it("reports drift when the same steps are reordered (revisions exclude order)", () => {
-    const installed = [step("check", "check-v1"), step("merge", "merge-v1", { integrates: true })]
-    const current = [step("merge", "merge-v1", { integrates: true }), step("check", "check-v1")]
+    const installed = [step("check", "check-v1"), step("merge", "merge-v1", { kind: "merge" })]
+    const current = [step("merge", "merge-v1", { kind: "merge" }), step("check", "check-v1")]
     const finding = installedBaselineDrift(baseline(installed), current)
     expect(finding).toMatchObject({ code: "config-drift" })
     expect(finding?.message).toContain("step order changed: installed check→merge, current merge→check")
@@ -281,6 +281,8 @@ describe("host installed baseline", () => {
     }
 
     await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "false"\nmerge: {}\n')
+    await git(repo, "add", ".yrd.yml")
+    await git(repo, "commit", "-qm", "change queue config")
     const drifted = await createYrdHost({ cwd: repo })
     try {
       const result = await drifted.services.queue?.auditEnvironment?.()
@@ -315,6 +317,8 @@ describe("host installed baseline", () => {
         join(repo, ".yrd.yml"),
         'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "false"\nmerge: {}\n',
       )
+      await git(repo, "add", ".yrd.yml")
+      await git(repo, "commit", "-qm", "change queue config")
       const diskLeg = await resident.services.queue?.auditEnvironment?.()
       expect(diskLeg?.findings).toMatchObject([{ code: "config-drift" }])
       expect(diskLeg?.findings[0]?.message).toContain(installedBaselineRemedy("main"))
@@ -361,6 +365,8 @@ describe("host installed baseline", () => {
     // to block `queue deinit` (its own prescribed remedy) via a throwing inspect.
     await git(repo, "branch", "-D", "stale/base")
     await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "false"\nmerge: {}\n')
+    await git(repo, "add", ".yrd.yml")
+    await git(repo, "commit", "-qm", "change queue config")
 
     const after = await createYrdHost({ cwd: repo })
     try {

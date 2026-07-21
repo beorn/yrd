@@ -580,7 +580,8 @@ export function createAgContestRunner(options: AgContestRunnerOptions): ContestR
       if (!pinned.ok) return failureWithManifest(captured.value, pinned.error, agResult)
       const gitArtifact: ContestArtifact = { kind: "git-commit", uri: `git:${verified.value}` }
       return {
-        status: "passed",
+        status: "completed",
+        conclusion: "success",
         output: {
           pin: {
             commit: verified.value,

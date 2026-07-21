@@ -21,7 +21,7 @@ import {
   useWindowSize,
   type ListViewHandle,
 } from "silvery"
-import type { PR } from "@yrd/bay"
+import { prHead, prRevisionNumber, type PR } from "@yrd/bay"
 import {
   QUEUE_TIMELINE_STATUS_BUCKETS,
   QueueDetailRunPrBlocks,
@@ -153,7 +153,8 @@ function selectedQueueWatchFocus(
   prs: readonly PR[],
 ): QueueWatchFocus | undefined {
   if (row === undefined) return undefined
-  const revision = projectedRow?.revision ?? prs.find((candidate) => candidate.id === row.pr)?.revision
+  const pr = prs.find((candidate) => candidate.id === row.pr)
+  const revision = projectedRow?.revision ?? (pr === undefined ? undefined : prRevisionNumber(pr))
   if (revision === undefined) return undefined
   return { pr: row.pr, revision, ...(row.run === undefined ? {} : { run: row.run }) }
 }
@@ -227,7 +228,7 @@ function queueArtifactOutputLines(
             },
           ]
         : textLines.map((text, index) => ({
-            key: `${outputKey}:line:${index}`,
+            key: `${outputKey}:row:${index}`,
             text,
             kind: "body" as const,
           }))),
@@ -238,36 +239,36 @@ function queueArtifactOutputLines(
 function QueueArtifactOutputList({ outputs, inline }: { outputs: readonly QueueArtifactOutput[]; inline: boolean }) {
   const listRef = useRef<ListViewHandle | null>(null)
   const [atEnd, setAtEnd] = useState(true)
-  const [unseenLines, setUnseenLines] = useState(0)
-  const lines = useMemo(() => queueArtifactOutputLines(outputs, inline), [inline, outputs])
-  const previousLineCount = useRef(lines.length)
+  const [unseenRows, setUnseenRows] = useState(0)
+  const rows = useMemo(() => queueArtifactOutputLines(outputs, inline), [inline, outputs])
+  const previousRowCount = useRef(rows.length)
 
   useEffect(() => {
-    const addedLines = Math.max(0, lines.length - previousLineCount.current)
-    previousLineCount.current = lines.length
-    if (atEnd) setUnseenLines(0)
-    else if (addedLines > 0) setUnseenLines((count) => count + addedLines)
-  }, [atEnd, lines.length])
+    const addedRows = Math.max(0, rows.length - previousRowCount.current)
+    previousRowCount.current = rows.length
+    if (atEnd) setUnseenRows(0)
+    else if (addedRows > 0) setUnseenRows((count) => count + addedRows)
+  }, [atEnd, rows.length])
 
   // Reassert the tail after new output is committed. ListView's follow
   // authority observes the prior viewport during the same render; without
   // this post-commit scroll, an End-resumed pane can miss the next append.
   useEffect(() => {
     if (atEnd) listRef.current?.scrollToBottom()
-  }, [atEnd, lines.length])
+  }, [atEnd, rows.length])
 
   useInput((_input, key) => {
     if (!key.end) return
     listRef.current?.scrollToBottom()
     setAtEnd(true)
-    setUnseenLines(0)
+    setUnseenRows(0)
   })
 
-  if (lines.length === 0) return null
+  if (rows.length === 0) return null
   const followStatus = atEnd
     ? "FOLLOWING END"
     : `FOLLOW PAUSED${
-        unseenLines === 0 ? "" : ` | ${unseenLines} new ${unseenLines === 1 ? "line" : "lines"}`
+        unseenRows === 0 ? "" : ` | ${unseenRows} new ${unseenRows === 1 ? "row" : "rows"}`
       } | End resumes`
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} marginTop={inline ? 0 : 1}>
@@ -278,12 +279,12 @@ function QueueArtifactOutputList({ outputs, inline }: { outputs: readonly QueueA
       )}
       <ListView
         ref={listRef}
-        items={lines}
-        getKey={(line) => line.key}
+        items={rows}
+        getKey={(row) => row.key}
         follow="end"
         onAtBottomChange={(nextAtEnd) => {
           setAtEnd(nextAtEnd)
-          if (nextAtEnd) setUnseenLines(0)
+          if (nextAtEnd) setUnseenRows(0)
         }}
         scrollbarVisibility="always"
         renderItem={(row) => (
@@ -342,11 +343,11 @@ export function resolveStepTabSelection(
 
 /** Step output is static inside the single scroll owner shared by its tab. */
 function QueueInlineArtifactOutputRows({ outputs }: { outputs: readonly QueueArtifactOutput[] }) {
-  const lines = useMemo(() => queueArtifactOutputLines(outputs, true), [outputs])
-  if (lines.length === 0) return null
+  const rows = useMemo(() => queueArtifactOutputLines(outputs, true), [outputs])
+  if (rows.length === 0) return null
   return (
     <Box flexDirection="column" minWidth={0}>
-      {lines.map((row) => (
+      {rows.map((row) => (
         <Box key={row.key} minWidth={0}>
           {row.kind === "link" ? (
             <Link href={row.href}>{row.text}</Link>
@@ -486,9 +487,7 @@ function syntheticArtifactAttempt(attempt: string | undefined): number {
 function submitClock(data: QueueShowData, prs: readonly PR[]): string {
   const submitted = data.prs.flatMap((member) => {
     const pr = prs.find((candidate) => candidate.id === member.id)
-    const revision = pr?.revisions.find(
-      (candidate) => candidate.revision === member.revision && candidate.headSha === member.headSha,
-    )
+    const revision = pr?.revs.find((candidate) => candidate.n === member.revision && candidate.head === member.headSha)
     const at = revision?.submittedAt ?? revision?.pushedAt
     return at === undefined ? [] : [at]
   })
@@ -512,7 +511,7 @@ function QueueSubmitDiff({
   data: QueueShowData
   diff: QueuePrDiff | undefined
   expanded: boolean
-  onToggle(): void
+  onToggle: () => void
 }) {
   const focusId = `queue-submit-diff-${data.run}-${diff?.pr ?? "missing"}-${diff?.revision ?? "missing"}`
   const { activeId } = useFocusManager()
@@ -537,7 +536,7 @@ function QueueSubmitDiff({
       </Box>
     )
   }
-  const summary = `Diff +${diff.additions} / -${diff.deletions} lines`
+  const summary = `Diff +${diff.additions} / -${diff.deletions} changes`
   return (
     <Box flexDirection="column" minWidth={0} userSelect="text" {...(expanded ? { onClick: onToggle } : {})}>
       <Box height={1} flexShrink={0} />
@@ -562,9 +561,9 @@ function QueueSubmitDiff({
               - {file}
             </Text>
           ))}
-          {diff.patch.split("\n").map((line, index) => (
+          {diff.patch.split("\n").map((patchRow, index) => (
             <Text key={`patch:${index}`} color="$fg-muted" bgConflict="ignore" wrap="wrap">
-              {line === "" ? " " : line}
+              {patchRow === "" ? " " : patchRow}
             </Text>
           ))}
         </>
@@ -726,7 +725,7 @@ export function QueueWorkflowStepTabs({
             <Text>{`${"TIMELINE".padEnd(9, " ")}${submitted.slice(11, 19)} → pending`}</Text>
           )}
           {selectedPr === undefined ? null : (
-            <Text wrap="truncate" color="$fg-muted">{`${"HEAD".padEnd(9, " ")}${selectedPr.headSha}`}</Text>
+            <Text wrap="truncate" color="$fg-muted">{`${"HEAD".padEnd(9, " ")}${prHead(selectedPr)}`}</Text>
           )}
         </>
       ) : activeStep === undefined ? (
@@ -819,7 +818,7 @@ export function QueueWorkflowStepTabs({
                         <Box height={1} flexShrink={0} />
                         {execution.command === undefined ? null : (
                           <Box backgroundColor="$bg-surface-subtle" paddingX={1} flexShrink={0} minWidth={0}>
-                            <Text bold wrap="truncate">
+                            <Text bold color="$fg" wrap="truncate">
                               $ {execution.command}
                             </Text>
                           </Box>
@@ -1135,8 +1134,8 @@ export function QueueWatchFrame({
   // QUEUE and DETAIL are PANES, not boxes (user directive 2026-07-16, items
   // L/M) — no surrounding rounded border; the SplitPane divider separates them.
   // QUEUE is headed by its tab-style label (rendered inside `timeline`); DETAIL
-  // is headed by an emphasized run identity with STATUS/OUTCOME right-aligned,
-  // then exactly one blank row and the run-scoped body.
+  // is headed by an emphasized Candidate + Run identity with STATUS/OUTCOME
+  // right-aligned, then exactly one blank row and the run-scoped body.
   // One cell of horizontal padding keeps content off the
   // pane edge; the title sits flush at the top.
   const framedTimeline = (

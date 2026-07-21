@@ -79,7 +79,7 @@ describe("run cancel of an ACTIVE (merging) run never deadlocks the resident", (
     const h = residentHarness([
       // Cycle 1: the peer canceled this run's active merge between the resident's
       // snapshot and its settlement — the conflict that must NOT kill the loop.
-      () => Promise.reject(new JobStateConflict(MERGE_JOB_ID, "canceled", "running or waiting")),
+      () => Promise.reject(new JobStateConflict(MERGE_JOB_ID, "completed", "in_progress or waiting")),
       // Cycle 2: the resident keeps draining what remains, then the watch stops.
       () => {
         h.signal.aborted = true
@@ -93,7 +93,7 @@ describe("run cancel of an ACTIVE (merging) run never deadlocks the resident", (
     expect(h.runCalls()).toBe(2)
     expect(h.warnings).toContainEqual(
       expect.objectContaining({
-        props: expect.objectContaining({ action: "resident-cancel-skip", job: MERGE_JOB_ID, status: "canceled" }),
+        props: expect.objectContaining({ action: "resident-cancel-skip", job: MERGE_JOB_ID, status: "completed" }),
       }),
     )
     // Resident output stays loggily-only — no bare 'yrd:' stderr duplicate.

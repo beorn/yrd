@@ -14,6 +14,7 @@ import type { JobResult } from "@yrd/job"
 import {
   createCandidatePool,
   createCandidatePoolGit,
+  worktreeContexts,
   type CandidatePool,
   type CandidatePoolGit,
 } from "../src/candidate-pool.ts"
@@ -160,7 +161,7 @@ function deferred<T = void>(): Readonly<{
   return { promise, resolve, reject }
 }
 
-const passed: JobResult<{ ok: true }> = { status: "passed", output: { ok: true } }
+const passed: JobResult<{ ok: true }> = { status: "completed", conclusion: "success", output: { ok: true } }
 
 describe("warm candidate pool", () => {
   it("bounds and names a blackholed Git process", async () => {
@@ -184,6 +185,49 @@ describe("warm candidate pool", () => {
       "git fetch origin timed out after 30000ms",
     )
     expect(request).toMatchObject({ timeoutMs: 30_000 })
+  })
+
+  it("materializes Runner worktreeContexts with isolated candidate identity and bounded admission", async () => {
+    const { repo, baseSha, baysRoot } = await repository()
+    const process = createProcess({ cwd: repo })
+    const contexts = worktreeContexts({
+      repo,
+      parent: baysRoot,
+      size: 1,
+      submodules: "isolated",
+      git: createCandidatePoolGit(process),
+    })
+    disposers.push(async () => {
+      await contexts.close()
+      await process.close()
+    })
+
+    const paths: string[] = []
+    for (let index = 0; index < 2; index += 1) {
+      await contexts.withContext(
+        {
+          context: { scope: "job", candidate: "rw", capabilities: ["git"] },
+          candidateRef: baseSha,
+        },
+        async (context) => {
+          expect(context).toMatchObject({
+            request: { scope: "job", candidate: "rw", capabilities: ["git"] },
+            candidateRef: baseSha,
+          })
+          expect(context.id).toMatch(/^worktree-context:/u)
+          expect(context.cwd).not.toBe(repo)
+          expect(await git(context.cwd!, ["rev-parse", "HEAD"])).toBe(baseSha)
+          paths.push(context.cwd!)
+        },
+      )
+    }
+
+    expect(contexts.maxInFlight).toBe(1)
+    expect(new Set(paths).size).toBe(1)
+    expect(contexts.stats()).toEqual({ hits: 1, misses: 1, evictions: 0 })
+    await expect(
+      contexts.withContext({ context: { scope: "job", candidate: "ro" } }, async () => undefined),
+    ).rejects.toThrow("candidateRef")
   })
 
   it("reuses one warm worktree across candidate cycles and resets dirt between runs", async () => {
