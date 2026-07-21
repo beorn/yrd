@@ -139,21 +139,31 @@ export function superprojectRoot(cwd: string): string | undefined {
   return root === "" ? undefined : root
 }
 
+type GitmodulesRead =
+  | Readonly<{ ok: true; entries: readonly SubmoduleEntry[] }>
+  | Readonly<{ ok: false; detail: string }>
+
+/** Read `<root>/.gitmodules`, distinguishing the empty case (no submodules, or
+ * no file — Git config exit 1) from a genuine read failure (a malformed file —
+ * exit 128). The Git diagnostic is collapsed to one row for both consumers. */
+function readGitmodules(root: string): GitmodulesRead {
+  const result = runGit(root, ["config", "--null", "--file", join(root, ".gitmodules"), "--get-regexp", "^submodule\\."])
+  if (result.code === 1) return { ok: true, entries: [] }
+  if (result.code !== 0) {
+    return { ok: false, detail: firstLine(result.stderr.trim() || result.stdout.trim() || `git config exited ${result.code}`) }
+  }
+  return { ok: true, entries: parseGitmodules(result.stdout) }
+}
+
 /**
  * Read every submodule declared in `<root>/.gitmodules`. Returns an empty list
  * when the file declares no submodules; a malformed file fails loud with the
  * Git diagnostic rather than silently reading as empty.
  */
 export function readSubmoduleEntries(root: string): readonly SubmoduleEntry[] {
-  const result = runGit(root, ["config", "--null", "--file", join(root, ".gitmodules"), "--get-regexp", "^submodule\\."])
-  // `git config --get-regexp` exits 1 when the file has no matching keys (no
-  // submodules, or no .gitmodules at all): that is the expected empty case.
-  if (result.code === 1) return []
-  if (result.code !== 0) {
-    const detail = result.stderr.trim() || result.stdout.trim() || `git config exited ${result.code}`
-    throw new Error(`yrd: could not read ${join(root, ".gitmodules")}: ${detail}`)
-  }
-  return parseGitmodules(result.stdout)
+  const read = readGitmodules(root)
+  if (!read.ok) throw new Error(`yrd: could not read ${join(root, ".gitmodules")}: ${read.detail}`)
+  return read.entries
 }
 
 /**
@@ -161,20 +171,17 @@ export function readSubmoduleEntries(root: string): readonly SubmoduleEntry[] {
  * surfaces. Empty for a non-superproject directory or when every submodule
  * already tracks a branch — those surfaces then emit no extra output at all.
  *
- * A read failure is degraded to a loud warning here (not thrown): the advisory
- * must never take down `queue list`/`yrd` with a nonzero exit. `readSubmoduleEntries`
- * and `yrd init` still throw, because there the file IS the job.
+ * A read failure degrades to a loud warning here rather than throwing: the
+ * advisory must never take down `queue list`/`yrd` with a nonzero exit.
+ * `readSubmoduleEntries` and `yrd init` still throw, because there the file IS
+ * the job.
  */
 export function submoduleTrackingWarnings(cwd: string): readonly string[] {
   const root = superprojectRoot(cwd)
   if (root === undefined) return []
-  let entries: readonly SubmoduleEntry[]
-  try {
-    entries = readSubmoduleEntries(root)
-  } catch (cause) {
-    return [`warn: could not read .gitmodules: ${firstLine(cause instanceof Error ? cause.message : String(cause))}`]
-  }
-  const warning = formatSubmoduleTrackingWarning(unbranchedSubmodules(entries))
+  const read = readGitmodules(root)
+  if (!read.ok) return [`warn: could not read .gitmodules: ${read.detail}`]
+  const warning = formatSubmoduleTrackingWarning(unbranchedSubmodules(read.entries))
   return warning === undefined ? [] : [warning]
 }
 
