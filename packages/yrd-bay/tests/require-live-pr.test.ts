@@ -5,9 +5,6 @@
  * @level l2
  * @consumer @yrd/bay
  */
-import { readFileSync } from "node:fs"
-import { fileURLToPath } from "node:url"
-import { dirname, join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { Command, createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs } from "@yrd/job"
@@ -111,23 +108,17 @@ describe("resolvePR live-preference + requireLivePR mutation guard", () => {
     await expect(app.bays.closePr({ pr: "pr1" })).rejects.toThrow(/only a live PR|run it through the queue/i)
     await expect(app.bays.closePr({ pr: "pr1" })).rejects.not.toThrow("no live PR for branch")
   })
-})
 
-describe("requireLivePR coverage — every PR-selector mutation routes through the one guard", () => {
-  const pluginSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "plugin.ts"), "utf8")
-  const count = (pattern: RegExp) => pluginSource.match(pattern)?.length ?? 0
-
-  // The former grep-count assertion (routed === 9, raw === 0) is retired: the
-  // `LivePR` brand on requireLivePR's return, annotated at every mutating
-  // reducer's resolved PR, makes tsc reject a raw-resolve swap. Type checking,
-  // not source-grep, is the routing enforcement now.
-
-  it("keeps submit as the ONE documented exemption (it owns terminal-branch semantics via D2/Q1)", () => {
-    // submit resolves its selector through submitSelectionOperation's D2/Q1
-    // reopen/mint logic, not requireLivePR — the sole mutating-resolve site that
-    // uses a different local binding. If this drops to 0, submit stopped
-    // resolving by selector; if it climbs, a new verb copied submit's pattern
-    // instead of routing through requireLivePR.
-    expect(count(/required\(resolvePR\(current, args\.pr\)/g)).toBe(1)
+  it("routes submit through the same live guard: a live-less branch selector refuses no-live-pr", async () => {
+    await using app = await appWithIntegrated("topic/g", [{ pr: "PR1", headSha: HEAD_1, commit: BASE }])
+    // topic/g's only PR is integrated. Submitting BY BRANCH now routes through
+    // requireLivePR like every other mutating verb — submit no longer owns a
+    // resolve exemption — so a live-less branch selector gets the shared typed
+    // no-live-pr guidance, not a generic 'not pushed'. An id-addressed integrated
+    // PR still passes the guard (matchedBy canonical) to submit's own state check.
+    await expect(app.bays.submit({ pr: "topic/g" })).rejects.toMatchObject({
+      failure: { kind: "refusal", code: "no-live-pr" },
+    })
+    await expect(app.bays.submit({ pr: "PR1" })).rejects.toThrow(/is integrated, not pushed/i)
   })
 })

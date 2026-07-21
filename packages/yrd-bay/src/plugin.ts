@@ -1233,7 +1233,13 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
 function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase: string, defaultActor: string) {
   const current = state.bays
   if ("pr" in args) {
-    const pr = required(resolvePR(current, args.pr), "PR", args.pr)
+    // Submit-by-id routes through the same live guard as the other 9 mutating
+    // verbs (no resolve exemption): an id-addressed terminal PR passes through
+    // (matchedBy canonical) to the state check below; a live-less branch
+    // selector refuses no-live-pr here. The D2/Q1 terminal-branch reopen/mint
+    // semantics live entirely in the {branch} path and submitSelectionOperation,
+    // never this {pr} path, so no pre-guard resolution is needed here.
+    const pr: LivePR = requireLivePR(current, args.pr)
     if (args.correlation !== undefined) return bindPRCorrelation(pr, args.correlation)
     if (pr.status !== "pushed") throw new Error(`yrd: PR '${pr.id}' is ${pr.status}, not pushed`)
     return {
