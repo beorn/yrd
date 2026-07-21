@@ -106,6 +106,8 @@
         "@yrd/core": "workspace:*",
         "canonicalize": "^3.0.0",
         "loggily": "^0.10.2",
+      },
+      "devDependencies": {
         "zod": "^4.4.3",
       },
     },

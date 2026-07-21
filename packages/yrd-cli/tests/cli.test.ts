@@ -822,7 +822,7 @@ describe("runYrd", () => {
     expect(JSON.parse(dashboard.stdout())).toMatchObject({ command: "dashboard" })
   })
 
-  it("fails terminal branch reuse with delivery-nonce recovery and admits the fresh identity", async () => {
+  it("Q1: resubmitting a landed branch reports already-merged for the same head and mints a fresh delivery for a new head", async () => {
     const app = await createApp()
     await app.bays.submit({ branch: "topic/landed", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
     await app.bays.requestChecks({ pr: "PR1" })
@@ -830,25 +830,53 @@ describe("runYrd", () => {
     expect(app.bays.pr("PR1")).toMatchObject({ branch: "topic/landed", status: "integrated" })
     const before = await Array.fromAsync(app.events())
 
-    const refused = outputIO({ resolveRevision: async () => "2".repeat(40) })
-    expect(await runYrd(app, yrd("pr", "submit", "topic/landed", "--json"), refused.io)).toBe(1)
-    expect(refused.stdout()).toBe("")
-    expect(refused.stderr()).toContain("terminal PR 'PR1' (integrated)")
-    expect(refused.stderr()).toContain("topic/landed-delivery-<nonce>")
-    expect(refused.stderr()).toContain("then run yrd pr submit <fresh-branch>")
+    // Same landed head → informational "already merged", exit 0, no new PR, no event.
+    const merged = outputIO({ resolveRevision: async () => HEAD_SHA })
+    expect(await runYrd(app, yrd("pr", "submit", "topic/landed", "--json"), merged.io), merged.stderr()).toBe(0)
+    const mergedOut = JSON.parse(merged.stdout()) as Readonly<{ prs: readonly { id: string; status: string }[]; warnings?: readonly string[] }>
+    expect(mergedOut).toMatchObject({ command: "pr.submit", prs: [{ id: "PR1", status: "integrated" }] })
+    expect((mergedOut.warnings ?? []).join("\n")).toContain("already merged as PR 'PR1'")
     expect(await Array.fromAsync(app.events())).toEqual(before)
 
-    const fresh = outputIO({
-      resolveRevision: async (ref) => (ref === "topic/landed-delivery-r2" ? "2".repeat(40) : undefined),
-    })
-    expect(
-      await runYrd(app, yrd("pr", "submit", "topic/landed-delivery-r2", "--draft", "--json"), fresh.io),
-      fresh.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(fresh.stdout())).toMatchObject({
+    // New head → mints a fresh delivery PR (revision 1), exit 0, no hand-made delivery branch.
+    const minted = outputIO({ resolveRevision: async () => "2".repeat(40) })
+    expect(await runYrd(app, yrd("pr", "submit", "topic/landed", "--json"), minted.io), minted.stderr()).toBe(0)
+    expect(JSON.parse(minted.stdout())).toMatchObject({
       command: "pr.submit",
-      prs: [{ id: "PR2", branch: "topic/landed-delivery-r2", status: "pushed" }],
+      prs: [{ id: "PR2", branch: "topic/landed", status: "submitted" }],
     })
+  })
+
+  it("D8: a plain submit records without draining; a later run drains; --wait opts into the synchronous drain", async () => {
+    const checkRuns: string[] = []
+    const app = await createApp({ checkRuns })
+
+    // Default submit is a ledger write: record `submitted` + request checks and
+    // return 0, WITHOUT composing or draining. No check runs at submit time.
+    const ledger = outputIO({ resolveRevision: async () => HEAD_SHA })
+    expect(
+      await runYrd(app, yrd("pr", "submit", "topic/ledger", "--base", "main", "--json"), ledger.io),
+      ledger.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(ledger.stdout())).toMatchObject({
+      command: "pr.submit",
+      prs: [{ branch: "topic/ledger", status: "submitted" }],
+    })
+    expect(checkRuns).toEqual([])
+
+    // The submission is admission-eligible; a later queue run picks it up and
+    // settles the check that submit deliberately did not run.
+    await app.queue.run({}, { runner: "test", leaseMs: 60_000 })
+    expect(checkRuns).toEqual(["check"])
+
+    // --wait opts back into the pre-decouple synchronous drain: the check runs
+    // inline during submit.
+    const drained = outputIO({ resolveRevision: async () => "2".repeat(40) })
+    expect(
+      await runYrd(app, yrd("pr", "submit", "topic/wait", "--base", "main", "--wait", "--json"), drained.io),
+      drained.stderr(),
+    ).toBe(0)
+    expect(checkRuns).toEqual(["check", "check"])
   })
 
   it.each([

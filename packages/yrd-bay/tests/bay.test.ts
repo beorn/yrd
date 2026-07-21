@@ -225,7 +225,7 @@ describe("withBays", () => {
     expect(stable).toMatchObject({ status: "submitted", revision: 2, headSha: HEAD_2 })
   })
 
-  it("rejects a landed branch identity and accepts a fresh delivery-nonce branch", async () => {
+  it("mints a fresh delivery PR for a new head on a landed branch (Q1), no delivery-nonce branch", async () => {
     const nextId = ids()
     const seededCommand = { id: nextId(), op: "fixture.integrated-branch" }
     const at = "2026-01-01T00:00:00.000Z"
@@ -285,24 +285,20 @@ describe("withBays", () => {
       resolveRevision: async () => HEAD_2,
       run: runtime,
     }
-    const before = await Array.fromAsync(app.events())
-    const reused = app.bays.submitSelection("topic/landed", submitOptions)
-
-    await expect(reused).rejects.toMatchObject({
-      failure: { kind: "refusal", code: "terminal-branch-identity" },
-    })
-    await expect(reused).rejects.toThrow(
-      "push the reviewed tip to a fresh delivery branch such as 'topic/landed-delivery-<nonce>'",
-    )
-    expect(await Array.fromAsync(app.events())).toEqual(before)
-
-    const delivered = await app.bays.submitSelection("topic/landed-delivery-r2", submitOptions)
-    expect(delivered).toMatchObject({
+    // Q1: resubmitting the landed branch with a NEW head mints a fresh delivery
+    // PR (revision 1) automatically — no hand-made `-delivery-<nonce>` branch,
+    // no refusal. The integrated PR1 stays frozen.
+    const minted = await app.bays.submitSelection("topic/landed", submitOptions)
+    expect(minted).toMatchObject({
       id: "PR2",
-      branch: "topic/landed-delivery-r2",
+      branch: "topic/landed",
       headSha: HEAD_2,
+      revision: 1,
       status: "submitted",
     })
+    expect(app.bays.pr("PR1")).toMatchObject({ status: "integrated", headSha: HEAD_1 })
+    // The branch selector now resolves to the live delivery, not the frozen PR.
+    expect(app.bays.pr("topic/landed")).toMatchObject({ id: "PR2", status: "submitted" })
   })
 
   it("refuses a terminal receipt that does not transition the current PR revision", async () => {
@@ -1525,10 +1521,8 @@ describe("withBays", () => {
     })
     expect(branchPR).toMatchObject({ branch: "release/fix", status: "submitted", headSha: HEAD_1, base: "release/2.0" })
     expect(resolved).toEqual(["release/fix"])
-
-    workspace.dirty = true
-    await finishJob(app, await app.bays.open({ name: "dirty-submit" }))
-    await expect(app.bays.submitSelection("B2", { resolveRevision, run: runtime })).rejects.toThrow("uncommitted work")
+    // Dirty-worktree submit is a D3 door disposition covered by its own test in
+    // "submit ledger-write door dispositions" (warn + committed-head submit).
     await app.close()
   })
 
@@ -1660,5 +1654,96 @@ describe("withBays", () => {
       title: "feat: recut carries metadata",
       description: "Recut must not drop the authored title or description.",
     })
+  })
+})
+
+describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
+  const directOptions = (tip: string | undefined = HEAD_2) => ({
+    base: "main",
+    resolveRevision: async () => tip,
+    run: runtime,
+  })
+
+  it("D2: reopens a withdrawn branch's PR as the next revision, no terminal-branch refusal", async () => {
+    await using app = (await createHarness()).app
+    const submitted = await app.bays.submitSelection("topic/redeliver", directOptions(HEAD_1))
+    expect(submitted).toMatchObject({ id: "PR1", branch: "topic/redeliver", status: "submitted", revision: 1 })
+
+    await app.bays.closePr({ pr: "PR1", reason: "pulled back" })
+    expect(app.bays.pr("PR1")).toMatchObject({ status: "withdrawn" })
+
+    // Resubmitting the SAME branch mints the next revision in place — same PR
+    // identity, no hand-made `-delivery-<nonce>` branch, no refusal.
+    const reopened = await app.bays.submitSelection("topic/redeliver", directOptions(HEAD_2))
+    expect(reopened).toMatchObject({
+      id: "PR1",
+      branch: "topic/redeliver",
+      status: "submitted",
+      revision: 2,
+      headSha: HEAD_2,
+    })
+    // Branch → PR stays 1:1 (unambiguous) and history is preserved with the
+    // withdrawn marker cleared by the reopen.
+    expect(Object.keys(app.bays.state().prs)).toEqual(["PR1"])
+    expect(app.bays.pr("topic/redeliver")).toMatchObject({ id: "PR1", revision: 2 })
+    expect(reopened.revisions).toMatchObject([
+      { revision: 1, headSha: HEAD_1 },
+      { revision: 2, headSha: HEAD_2 },
+    ])
+    expect(reopened.withdrawnAt).toBeUndefined()
+  })
+
+  it("Q1: resubmitting a landed branch at the SAME head is an 'already merged' no-op, not a refusal or a new revision", async () => {
+    const nextId = ids()
+    const at = "2026-01-01T00:00:00.000Z"
+    const seededCommand = { id: nextId(), op: "fixture.integrated" }
+    const journal = createMemoryJournal([
+      {
+        command: seededCommand,
+        cause: { id: nextId(), commandId: seededCommand.id, op: seededCommand.op, commandHash: Command.hash(seededCommand) },
+        events: [
+          { id: nextId(), name: "pr/pushed", ts: at, data: { pr: "PR1", branch: "topic/landed", base: "main", headSha: HEAD_1, baseSha: BASE, revision: 1 } },
+          { id: nextId(), name: "pr/submitted", ts: at, data: { pr: "PR1", revision: 1, headSha: HEAD_1 } },
+          { id: nextId(), name: "pr/integrated", ts: at, data: { pr: "PR1", revision: 1, headSha: HEAD_1, run: "R1", commit: BASE, landingSha: BASE, baseSha: BASE } },
+        ],
+      },
+    ])
+    const jobs = createBayJobDefs(createWorkspaceHarness().adapter)
+    const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
+    await using app = await createYrd(definition, { inject: { journal, clock: () => at, id: nextId } })
+
+    const before = await Array.fromAsync(app.events())
+    // Same landed head → returns the frozen integrated PR (with its merge SHA),
+    // no throw, no new PR, no new revision, no journal event.
+    const already = await app.bays.submitSelection("topic/landed", directOptions(HEAD_1))
+    expect(already).toMatchObject({ id: "PR1", status: "integrated", headSha: HEAD_1, integration: { commit: BASE } })
+    expect(Object.keys(app.bays.state().prs)).toEqual(["PR1"])
+    expect(await Array.fromAsync(app.events())).toEqual(before)
+  })
+
+  it("D3: a dirty worktree submit warns in the result envelope AND the log, and records the committed head", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const { app, workspace } = await createHarness(log)
+    await finishJob(app, await app.bays.open({ name: "dirty" }))
+    workspace.dirty = true
+
+    const warnings: string[] = []
+    const pr = await app.bays.submitSelection("B1", { resolveRevision: async () => undefined, run: runtime, warnings })
+    // Submitted the committed head (HEAD_2 from refresh), never refused.
+    expect(pr).toMatchObject({ bay: "B1", status: "submitted", headSha: HEAD_2 })
+    // Loud by construction: the caveat rides the result envelope (warnings array)…
+    expect(warnings).toContainEqual(expect.stringContaining("has uncommitted work; submitting the committed head only"))
+    // …AND the structured log stream.
+    expect(events.some((event) => event.kind === "log" && event.props?.action === "submit-dirty-worktree")).toBe(true)
+    await app.close()
+    log.end()
+  })
+
+  it("D5: still refuses loudly when the submitted branch resolves to no Git commit", async () => {
+    await using app = (await createHarness()).app
+    await expect(
+      app.bays.submitSelection("topic/ghost", { base: "main", resolveRevision: async () => undefined, run: runtime }),
+    ).rejects.toMatchObject({ failure: { kind: "refusal", code: "git-commit-missing" } })
   })
 })

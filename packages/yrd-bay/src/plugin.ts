@@ -49,6 +49,7 @@ import {
   isLivePR,
   needsReview,
   prForBay,
+  requireLivePR,
   PrCheckabilityConflict,
   projectBranchLifecycles,
   reviewState,
@@ -154,6 +155,12 @@ export type SubmitSelectionOptions = Readonly<{
   composition?: CompositionV1
   resolveRevision(ref: string): Promise<string | undefined>
   run: RunJobOptions
+  /** Caller-owned advisory-warning sink for a submission that SUCCEEDS with a
+   * caveat (same `readonly string[]` shape the queue list/status envelope uses).
+   * The operation appends; the caller renders them in its result envelope. A
+   * dirty-worktree submit (D3) pushes one here AND logs it — by-construction
+   * loud, not by convention. */
+  warnings?: string[]
 }>
 
 const CloseBayArgsSchema = z.object({ bay: TextSchema, withdraw: z.boolean().optional() }).strict()
@@ -678,16 +685,27 @@ export function createBays(
     let snapshot = state()
     let pr = resolvePR(snapshot, selector)
     let bay = resolveBay(snapshot, selector) ?? (pr?.bay === undefined ? undefined : resolveBay(snapshot, pr.bay))
-    if (pr !== undefined && !isLivePR(pr.status) && selector.toLowerCase() === pr.branch.toLowerCase()) {
-      raiseFailure(
-        "refusal",
-        "terminal-branch-identity",
-        `yrd: branch '${pr.branch}' already belongs to terminal PR '${pr.id}' (${pr.status}); ` +
-          `push the reviewed tip to a fresh delivery branch such as '${pr.branch}-delivery-<nonce>', ` +
-          "then run yrd pr submit <fresh-branch>",
-      )
+    // D2 — a branch whose PR reached a non-landed terminal status
+    // (withdrawn/canceled) mints its next revision automatically down the
+    // direct-branch resubmit path below (the reopen preserves the PR identity,
+    // so branch→PR stays 1:1). The author no longer hand-makes a delivery branch.
+    //
+    // Q1 — an integrated branch identity is FROZEN evidence, never reopened:
+    //  - addressed by its branch, resubmitting the SAME landed head is an
+    //    informational "already merged" no-op (returns the integrated PR, exit
+    //    0 — delivered work is not a dark queue), while a NEW head mints a fresh
+    //    delivery PR (revision 1) via the direct-branch path below, so no
+    //    hand-made `<branch>-delivery-<nonce>` branch is needed;
+    //  - addressed by its id, it stays idempotent.
+    if (pr?.status === "integrated") {
+      if (selector.toLowerCase() !== pr.branch.toLowerCase()) return bindSubmission(pr, options)
+      const landedHead = await options.resolveRevision(selector)
+      if (landedHead === undefined) {
+        raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${selector}'`)
+      }
+      if (landedHead === pr.headSha) return bindSubmission(pr, options)
+      // A new head on a landed branch mints a fresh delivery identity below.
     }
-    if (pr?.status === "integrated") return bindSubmission(pr, options)
 
     if (bay?.status === "active") {
       const refreshed = await actions.refresh({ bay: bay.id })
@@ -698,11 +716,14 @@ export function createBays(
         raiseFailure("infrastructure", "bay-state-invalid", `yrd: bay '${selector}' disappeared after refresh`)
       }
       if (bay.dirty === true) {
-        raiseFailure(
-          "refusal",
-          "bay-dirty",
-          `yrd: bay '${bay.id}' has uncommitted work; commit or discard it before submit`,
-        )
+        // D3 — a dirty worktree no longer refuses the submit. Submit is a ledger
+        // write: it records the committed HEAD (resolved just below) and warns
+        // loudly that the uncommitted worktree changes are NOT part of this
+        // submission. The warning rides the result envelope (options.warnings)
+        // AND the log stream — loud by construction, never a silent fallback.
+        const warning = `yrd: bay '${bay.id}' has uncommitted work; submitting the committed head only`
+        options.warnings?.push(warning)
+        log?.warn?.(warning, { action: "submit-dirty-worktree", bay: bay.id })
       }
       if (bay.headSha === undefined) {
         raiseFailure("refusal", "bay-head-missing", `yrd: bay '${bay.id}' has no committed head to submit`)
@@ -759,7 +780,11 @@ export function createBays(
       }
     }
 
-    if (pr !== undefined) pr = await bindIssue(pr, options.issue)
+    // Only a live PR binds an issue in place. A terminal PR resolved here is a
+    // withdrawn/canceled branch about to be reopened by the direct-branch
+    // resubmit below (D2); its issue rides along when that mint records the
+    // fresh revision, so binding here (which refuses on a terminal PR) is skipped.
+    if (pr !== undefined && isLivePR(pr.status)) pr = await bindIssue(pr, options.issue)
     if (pr?.status === "submitted") return bindCorrelation(pr, options.correlation)
     if (pr?.status === "pushed") {
       pr = await bindCorrelation(pr, options.correlation)
@@ -1211,7 +1236,17 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
     throw new Error(`yrd: branch '${args.branch}' already has live PR '${existing.id}'`)
   }
   refuseDuplicatePayload(current, args.headSha, base, args.composition, existing?.id)
-  const resubmitted = existing?.status === "rejected" ? existing : undefined
+  // D2 — reopen the existing PR identity (next revision) for a non-landed
+  // terminal branch, not just a rejected one. `rejected` already reopened;
+  // `withdrawn`/`canceled` now do too, so resubmitting the branch mints the
+  // next revision in place instead of demanding a hand-made delivery branch.
+  // The pr/pushed projection clears the terminal markers on reopen. `pushed`/
+  // `submitted` are already refused above, and `integrated` is intercepted by
+  // the terminal-branch guard before this path (its redelivery is parked).
+  const resubmitted =
+    existing?.status === "rejected" || existing?.status === "withdrawn" || existing?.status === "canceled"
+      ? existing
+      : undefined
   const id = resubmitted?.id ?? nextId("PR", current.prs)
   const revision = (resubmitted?.revision ?? 0) + 1
   const issue = attachedIssue(resubmitted, args.issue)
@@ -1392,13 +1427,13 @@ function associateRejectedTerminalRun(
 }
 
 function readyPr(state: DeepReadonly<BayState>, args: PrReadyArgs, defaultActor: string) {
-  const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
+  const pr = requireLivePR(state.bays, args.pr)
   if (pr.status === "submitted") return { events: [] }
   return submitWork(state, args, "main", defaultActor)
 }
 
 function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs) {
-  const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
+  const pr = requireLivePR(state.bays, args.pr)
   if (pr.status === "integrated" || pr.status === "withdrawn" || pr.status === "canceled") {
     raiseFailure("refusal", "terminal-target", `yrd: PR '${pr.id}' is ${pr.status}; terminal PRs cannot be recut`)
   }
@@ -1452,7 +1487,7 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs) {
 }
 
 function requestPrReview(state: DeepReadonly<BayState>, args: PrRequestReviewArgs, defaultActor: string) {
-  const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
+  const pr = requireLivePR(state.bays, args.pr)
   if (pr.status !== "pushed" && pr.status !== "submitted") {
     raiseFailure(
       "refusal",
@@ -1473,7 +1508,7 @@ function requestPrReview(state: DeepReadonly<BayState>, args: PrRequestReviewArg
 }
 
 function reviewPr(state: DeepReadonly<BayState>, args: PrReviewArgs) {
-  const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
+  const pr = requireLivePR(state.bays, args.pr)
   const fact = PRReviewFactSchema.parse({
     pr: pr.id,
     revision: pr.revision,
@@ -1487,7 +1522,7 @@ function reviewPr(state: DeepReadonly<BayState>, args: PrReviewArgs) {
 }
 
 function commentPr(state: DeepReadonly<BayState>, args: PrCommentArgs) {
-  const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
+  const pr = requireLivePR(state.bays, args.pr)
   const fact = PRCommentFactSchema.parse({
     pr: pr.id,
     revision: pr.revision,
@@ -1500,7 +1535,7 @@ function commentPr(state: DeepReadonly<BayState>, args: PrCommentArgs) {
 }
 
 function requestPrChecks(state: DeepReadonly<BayState>, args: PrRequestChecksArgs) {
-  const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
+  const pr = requireLivePR(state.bays, args.pr)
   if (pr.status !== "pushed" && pr.status !== "submitted" && pr.status !== "rejected") {
     throw new PrCheckabilityConflict(pr.id, pr.status)
   }
@@ -1518,7 +1553,7 @@ function requestPrChecks(state: DeepReadonly<BayState>, args: PrRequestChecksArg
 }
 
 function recordPrRegression(state: DeepReadonly<BayState>, args: PrRegressionArgs) {
-  const original = required(resolvePR(state.bays, args.pr), "PR", args.pr)
+  const original = requireLivePR(state.bays, args.pr)
   const repair = resolvePR(state.bays, args.repairPr)
   if (repair === undefined) throw new Error(`yrd: no repair PR '${args.repairPr}'`)
   if (original.id === repair.id) throw new Error("yrd: an escaped regression requires a different repair PR")
@@ -1685,7 +1720,7 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
 }
 
 function closePr(state: DeepReadonly<BayState>, args: PrCloseArgs) {
-  const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
+  const pr = requireLivePR(state.bays, args.pr)
   if (!isLivePR(pr.status)) {
     throw new Error(`yrd: PR '${pr.id}' is ${pr.status}; only a live PR can be closed`)
   }
@@ -1701,7 +1736,7 @@ function closePr(state: DeepReadonly<BayState>, args: PrCloseArgs) {
 }
 
 function editPr(state: DeepReadonly<BayState>, args: PrEditArgs) {
-  const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
+  const pr = requireLivePR(state.bays, args.pr)
   const issueChanged = args.issue !== undefined && args.issue !== pr.issue
   if (args.issue !== undefined && pr.issue !== undefined && issueChanged) {
     raiseFailure(

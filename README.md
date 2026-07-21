@@ -1,11 +1,42 @@
-# yrd (shipyard) — agentic software delivery
+<!-- README-as-spec: this document describes the intended shipped state as present fact. Open gaps are acceptance work in TODO.md. -->
 
-**yrd** takes work from issue to merged, built for agent fleets and the humans
-steering them: work happens in **bays** (isolated Git workspaces), becomes a
-**PR** (branch@head with numbered revisions), and enters a per-base **queue**
-that verifies and merges serially—one run at a time, every decision journaled.
-It is sovereign by construction: the queue, journal, evidence, and decisions
-live in your repository on your machine, with no forge or network dependency.
+# Yrd
+
+**Sovereign software delivery for agent teams.**
+
+**Agents are fast!** Unleash 100 on one machine. What could go wrong?
+
+- **GitHub feels like the DMV.** Agents wait in line for remote CI you don't control.
+- **Your machine melts.** Unmanaged local test runs max every core.
+- **Git throws up its hands.** Many agents, one repo: lock fights, racing merges, half-landed features.
+- **So much software.** Repos grow big and plentiful, and you'll want to vendor more. You need a [**superproject**](#superprojects), a repo of repos.
+- **You suddenly need AR (Agent Relations).** New agents and models ship every month; someone has to hire, staff, review, and fire them.
+
+Yrd runs the whole delivery loop on your machine, where the agents are: PRs, CI, merge queue, review. GitHub becomes optional: code storage (how we use it), human review, or gone. Extracted from a working superproject where an agent fleet ships daily, supervised by one human.
+
+## The yard
+
+The **yard** — hence the name — is the **queue runner** that builds and integrates every change: a [Bors-style](https://bors.tech) merge queue, running on your own machine.
+
+- Work flows from tracker issues — issues in, proven merges out — so any agentic system can drive Yrd. Trackers, forges, and judges are pluggable — bring your own.
+- **Contests** pitch agents/models against each other on real issues, and automatically pick the winner. That's AR — your own code becomes the benchmark.
+- Every merge is proven — tested in a clean worktree, on the exact commit that ships, with a permanent receipt. Under load, merges batch optimistically and a red batch **bisects** to the culprit. Merges span repos, too — see [Superprojects](#superprojects).
+- Agents drive everything from a scriptable CLI; humans get a live TUI. Checks are your own commands, not a workflow DSL — Yrd encodes no process, so who reviews, and when, stays yours.
+
+## Superprojects
+
+A Git superproject is built on plain Git submodules — which in theory lets you treat a set of repos as one big virtual monorepo. In practice the tooling was missing. Yrd ships it — `git super` takes all the pain out:
+
+- **Super PRs** group one feature's branches across repos.
+- **Super worktrees** check out the whole product, every submodule at its exact commit.
+- **Super CI** tests the exact commit that would ship.
+- **Super merges** run children first, the superproject pointer last. It never points at half a feature.
+
+A submodule with `branch = <name>` in `.gitmodules` is **tracked**: as the upstream branch advances, Yrd refreshes the tracked super PR with the new pin — proposing, never merging. Merges only happen through the queue.
+
+`git super` is the standalone face of the same core — plumbing without the resident queue; the guarantees come from the yard.
+
+**Assemble → test → merge → roll** — the queue is the only merger.
 
 ## The model — five objects, one pipeline
 
