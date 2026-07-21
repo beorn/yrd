@@ -168,6 +168,41 @@ describe("resident follow loop sweeps lapsed leases per tick (D1b)", () => {
   })
 })
 
+describe("resident runner exit-code contract (D3)", () => {
+  const drainSignalOn = (io: unknown) => {
+    ;(io as { drainSignal: { aborted: boolean } }).drainSignal = { aborted: true }
+  }
+
+  it("exits 0 when an operator drain finishes with the queue drained", async () => {
+    // The clean operator stop: Ctrl-C #1 requested a drain, the last in-flight run
+    // reached a terminal state, no hard abort. hab restart=on-failure must NOT
+    // restart it — the stop was intentional.
+    const h = residentHarness([() => Promise.resolve([{ id: "R1", status: "passed" }])])
+    drainSignalOn(h.io)
+    await expect(followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).resolves.toBe(0)
+  })
+
+  it("exits non-zero when a hard signal cuts an unfinished drain short with work in flight", async () => {
+    // Ctrl-C #1 requested a drain; Ctrl-C #2 (hard scope abort) forces the stop while
+    // a run is still in flight (non-terminal). That is "exiting with in-flight work
+    // due to a signal" — hab restart=on-failure must see non-zero so it resumes
+    // draining, unlike the drain-finished case above. A killed runner exiting 0 with
+    // work left was the whole reason ghosts stayed stuck.
+    const h = residentHarness([
+      () => Promise.resolve([{ id: "R1", status: "waiting" }]),
+      // Would complete the drain (exit 0) if the loop ever reached a second cycle —
+      // it must not, because the hard abort returns first.
+      () => Promise.resolve([{ id: "R1", status: "passed" }]),
+    ])
+    drainSignalOn(h.io)
+    h.signal.aborted = true
+    await expect(followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).resolves.toBe(3)
+    expect(h.runCalls()).toBe(1)
+    // Loggily-only; the interrupt is not echoed to stderr.
+    expect(h.stderr.join("")).toBe("")
+  })
+})
+
 describe("watch x-to-cancel confirmation banner (render)", () => {
   it("renders a VISIBLE standalone confirm when armed and dismisses it on another key", async () => {
     // The keybindings footer was removed (W3 detail rework), so the cancel

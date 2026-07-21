@@ -199,6 +199,12 @@ const RESIDENT_RUNNER_HEARTBEAT_MS = 5_000
  * time via `io.now`, so a busy tick cadence cannot starve or spam it. */
 const RESIDENT_RECOVERY_SWEEP_MS = 60_000
 
+/** Exit code when a hard signal cuts an unfinished drain short, leaving in-flight
+ * work (D3). An operator-requested stop that FINISHES (drain complete) exits 0; a
+ * signal-forced interruption exits non-zero so hab `restart=on-failure` resumes
+ * draining instead of leaving the queue's live work stranded. */
+const RESIDENT_INTERRUPTED_EXIT: YrdCliExitCode = 3
+
 function residentRunnerStatusPath(cwd: string): string | undefined {
   const gitDir = queueGitDir(cwd)
   return gitDir === undefined ? undefined : join(gitDir, "yrd", "resident-runner", "status.json")
@@ -3784,6 +3790,12 @@ export async function followQueueRuns(
           cleanShutdown = true
           return runs.at(-1)?.status === "failed" ? 1 : 0
         }
+        // The drain has NOT finished (a run is still in flight), yet a hard signal
+        // is forcing the stop now. That is "exiting with in-flight work due to a
+        // signal": stay unclean and exit non-zero so hab restart=on-failure resumes
+        // draining. A single drain signal (no scope abort) still loops below and
+        // finishes the drain cleanly.
+        if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
         await scope.sleep(interval)
         continue
       }
