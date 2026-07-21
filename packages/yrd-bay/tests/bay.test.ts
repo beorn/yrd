@@ -1721,20 +1721,21 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     expect(await Array.fromAsync(app.events())).toEqual(before)
   })
 
-  it("D3: a dirty worktree submit warns loudly and records the committed head", async () => {
+  it("D3: a dirty worktree submit warns in the result envelope AND the log, and records the committed head", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     const { app, workspace } = await createHarness(log)
     await finishJob(app, await app.bays.open({ name: "dirty" }))
     workspace.dirty = true
 
-    const pr = await app.bays.submitSelection("B1", { resolveRevision: async () => undefined, run: runtime })
+    const warnings: string[] = []
+    const pr = await app.bays.submitSelection("B1", { resolveRevision: async () => undefined, run: runtime, warnings })
     // Submitted the committed head (HEAD_2 from refresh), never refused.
     expect(pr).toMatchObject({ bay: "B1", status: "submitted", headSha: HEAD_2 })
-    // The dropped worktree changes are surfaced loudly, not silently.
-    expect(
-      events.some((event) => event.kind === "log" && event.props?.action === "submit-dirty-worktree"),
-    ).toBe(true)
+    // Loud by construction: the caveat rides the result envelope (warnings array)…
+    expect(warnings).toContainEqual(expect.stringContaining("has uncommitted work; submitting the committed head only"))
+    // …AND the structured log stream.
+    expect(events.some((event) => event.kind === "log" && event.props?.action === "submit-dirty-worktree")).toBe(true)
     await app.close()
     log.end()
   })

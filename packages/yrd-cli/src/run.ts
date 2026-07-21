@@ -1540,6 +1540,10 @@ async function submitBays(
   const local = currentBay(state.bays, cwd)
   const inferred = resolveSubmitSelectors(selectors, local?.id ?? currentGitBranch(cwd, io))
   const prs: PR[] = []
+  // Advisory warnings for submissions that SUCCEED with a caveat (e.g. a dirty
+  // worktree — D3). Collected from the bay operation and rendered in the result
+  // envelope, matching the queue list/status `warnings` shape.
+  const warnings: string[] = []
   const base = oneBaseOfAliases(state, options.base, options.queue, "base", "queue")
   const composition = await readComposition(options.composition, io)
   if (composition !== undefined && inferred.length !== 1) {
@@ -1558,6 +1562,7 @@ async function submitBays(
       ...(composition === undefined ? {} : { composition }),
       resolveRevision: (ref) => optionalRevision(ref, io),
       run: runtimeOptions(io),
+      warnings,
     })
     if (reviewers.length > 0 && pr.status !== "integrated") {
       await app.bays.requestReview({
@@ -1575,24 +1580,36 @@ async function submitBays(
     await printResult(
       io,
       jsonEnabled(options),
-      { command, prs: prs.map(projectPRTaskStatus) },
+      { command, prs: prs.map(projectPRTaskStatus), ...(warnings.length > 0 ? { warnings } : {}) },
       createElement(PRResultView, { prs, runs: [] }),
     )
     return 0
   }
-  for (const pr of prs) await app.bays.requestChecks({ pr: pr.id })
-  const selected = prs.map((pr) => pr.id)
-  if (options.wait !== true && options.follow !== true) {
+  // Q1 — a same-head resubmit of a landed branch returns the frozen integrated
+  // PR ("already merged", exit 0). It is not checkable and must not be admitted;
+  // surface the informational note in the result envelope and drain only the
+  // live submissions.
+  for (const pr of prs) {
+    if (pr.status === "integrated") {
+      warnings.push(`already merged as PR '${pr.id}'${pr.integration === undefined ? "" : ` (${pr.integration.commit})`}`)
+    }
+  }
+  const checkable = prs.filter((pr) => pr.status === "pushed" || pr.status === "submitted")
+  for (const pr of checkable) await app.bays.requestChecks({ pr: pr.id })
+  const selected = checkable.map((pr) => pr.id)
+  if (selected.length === 0 || (options.wait !== true && options.follow !== true)) {
     // D8 — submit is a ledger write, not a negotiation. The submission and its
     // check request are now recorded; return success WITHOUT composing or
     // draining. The runner loop admits and settles this PR on its next cycle,
     // and any composition problem surfaces later as an in-queue `needs-author`
     // state (yrd-queue PREligibility) — never as a submit-time door refusal.
-    // `--wait`/`--follow` opt back into the pre-decouple synchronous drain.
+    // `--wait`/`--follow` opt back into the pre-decouple synchronous drain; with
+    // nothing checkable (e.g. an already-merged same-head resubmit) there is
+    // nothing to drain regardless.
     await printResult(
       io,
       jsonEnabled(options),
-      { command, prs: prs.map(projectPRTaskStatus) },
+      { command, prs: prs.map(projectPRTaskStatus), ...(warnings.length > 0 ? { warnings } : {}) },
       createElement(PRResultView, { prs, runs: [] }),
     )
     return 0
@@ -1610,6 +1627,7 @@ async function submitBays(
       command,
       prs: currentPrs.map(projectPRTaskStatus),
       checks: checks.map(projectCheckTaskStatus),
+      ...(warnings.length > 0 ? { warnings } : {}),
     },
     createElement(PRResultView, {
       prs: currentPrs,
@@ -4076,7 +4094,9 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => setExit(await cancelQueueRun(installed(), selector, options, io)))
 
-  const pr = program.command("pr").description("manage pull requests")
+  const pr = program
+    .command("pr")
+    .description("manage pull requests (a branch selector targets the live delivery; address a terminal PR by its id)")
   pr.helpCommand(false)
   pr.command("list")
     .description("list pull requests")

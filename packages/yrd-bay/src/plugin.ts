@@ -155,6 +155,12 @@ export type SubmitSelectionOptions = Readonly<{
   composition?: CompositionV1
   resolveRevision(ref: string): Promise<string | undefined>
   run: RunJobOptions
+  /** Caller-owned advisory-warning sink for a submission that SUCCEEDS with a
+   * caveat (same `readonly string[]` shape the queue list/status envelope uses).
+   * The operation appends; the caller renders them in its result envelope. A
+   * dirty-worktree submit (D3) pushes one here AND logs it — by-construction
+   * loud, not by convention. */
+  warnings?: string[]
 }>
 
 const CloseBayArgsSchema = z.object({ bay: TextSchema, withdraw: z.boolean().optional() }).strict()
@@ -713,11 +719,11 @@ export function createBays(
         // D3 — a dirty worktree no longer refuses the submit. Submit is a ledger
         // write: it records the committed HEAD (resolved just below) and warns
         // loudly that the uncommitted worktree changes are NOT part of this
-        // submission. This is a warn, never a silent fallback.
-        log?.warn?.(`yrd: bay '${bay.id}' has uncommitted work; submitting the committed head only`, {
-          action: "submit-dirty-worktree",
-          bay: bay.id,
-        })
+        // submission. The warning rides the result envelope (options.warnings)
+        // AND the log stream — loud by construction, never a silent fallback.
+        const warning = `yrd: bay '${bay.id}' has uncommitted work; submitting the committed head only`
+        options.warnings?.push(warning)
+        log?.warn?.(warning, { action: "submit-dirty-worktree", bay: bay.id })
       }
       if (bay.headSha === undefined) {
         raiseFailure("refusal", "bay-head-missing", `yrd: bay '${bay.id}' has no committed head to submit`)
