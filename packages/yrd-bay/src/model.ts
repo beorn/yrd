@@ -732,6 +732,8 @@ export function requireLivePR(state: BaysState, selector: string): PR {
   if (pr === undefined) {
     raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
   }
-  if (isLivePR(pr.status) || selector === pr.id) return pr
+  // Exact-id addressing folds case the same way resolveSelector does: 'pr1'
+  // IS the canonical id PR1, not a live-less branch selector.
+  if (isLivePR(pr.status) || selector.toLowerCase() === pr.id.toLowerCase()) return pr
   raiseFailure("refusal", "no-live-pr", `yrd: no live PR for branch '${selector}'; use PR id`)
 }
