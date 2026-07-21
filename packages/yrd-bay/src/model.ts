@@ -1,5 +1,5 @@
 import * as z from "zod"
-import { resolveSelector } from "@yrd/core"
+import { raiseFailure, resolveSelector } from "@yrd/core"
 
 export const BayIdSchema = z.string().trim().min(1)
 export const PRIdSchema = z.string().trim().min(1)
@@ -687,20 +687,45 @@ export function resolveBay(state: BaysState, selector: string): Bay | undefined 
 }
 
 export function resolvePR(state: BaysState, selector: string): PR | undefined {
+  // A branch selector means "the live delivery of this branch": when a branch
+  // has both a terminal PR and a live one, the live PR wins. Candidates are
+  // ordered most-recent-first (highest id) so the read-biased fallback resolves
+  // the most recent terminal when a branch has ONLY terminal PRs. An exact
+  // canonical id always addresses that specific PR, terminal or not, ahead of
+  // this preference. Mutating verbs enforce the live requirement themselves via
+  // requireLivePR — this primitive stays verb-agnostic and read-biased.
   return resolveSelector(
     selector,
-    Object.values(state.prs).map((pr) => {
-      const bay = pr.bay === undefined ? undefined : state.byId[pr.bay]
-      return {
-        canonical: pr.id,
-        aliases: [
-          pr.branch,
-          ...(pr.name === undefined ? [] : [pr.name]),
-          ...(bay === undefined ? [] : [bay.id, bay.name, bay.branch]),
-        ],
-        value: pr,
-      }
-    }),
-    { kind: "PR" },
+    Object.values(state.prs)
+      .toSorted((left, right) => right.id.localeCompare(left.id, undefined, { numeric: true }))
+      .map((pr) => {
+        const bay = pr.bay === undefined ? undefined : state.byId[pr.bay]
+        return {
+          canonical: pr.id,
+          aliases: [
+            pr.branch,
+            ...(pr.name === undefined ? [] : [pr.name]),
+            ...(bay === undefined ? [] : [bay.id, bay.name, bay.branch]),
+          ],
+          value: pr,
+        }
+      }),
+    { kind: "PR", prefer: (pr) => isLivePR(pr.status) },
   )
+}
+
+/** Resolve a PR for a MUTATING verb: a branch/name selector must name the live
+ * delivery of that branch. Returns the live PR; a terminal PR is returned only
+ * when the operator addressed it by its exact canonical id (the verb's own
+ * state guard then decides what a terminal target permits). A branch/alias
+ * selector whose PRs are all terminal refuses loudly here at the mutation
+ * boundary — resolvePR stays verb-agnostic and read-biased, so this is the one
+ * shared guard every mutating verb routes through instead of hand-rolling it. */
+export function requireLivePR(state: BaysState, selector: string): PR {
+  const pr = resolvePR(state, selector)
+  if (pr === undefined) {
+    raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
+  }
+  if (isLivePR(pr.status) || selector === pr.id) return pr
+  raiseFailure("refusal", "no-live-pr", `yrd: no live PR for branch '${selector}'; use PR id`)
 }

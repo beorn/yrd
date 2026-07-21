@@ -225,7 +225,7 @@ describe("withBays", () => {
     expect(stable).toMatchObject({ status: "submitted", revision: 2, headSha: HEAD_2 })
   })
 
-  it("rejects a landed branch identity and accepts a fresh delivery-nonce branch", async () => {
+  it("mints a fresh delivery PR for a new head on a landed branch (Q1), no delivery-nonce branch", async () => {
     const nextId = ids()
     const seededCommand = { id: nextId(), op: "fixture.integrated-branch" }
     const at = "2026-01-01T00:00:00.000Z"
@@ -285,24 +285,20 @@ describe("withBays", () => {
       resolveRevision: async () => HEAD_2,
       run: runtime,
     }
-    const before = await Array.fromAsync(app.events())
-    const reused = app.bays.submitSelection("topic/landed", submitOptions)
-
-    await expect(reused).rejects.toMatchObject({
-      failure: { kind: "refusal", code: "terminal-branch-identity" },
-    })
-    await expect(reused).rejects.toThrow(
-      "push the reviewed tip to a fresh delivery branch such as 'topic/landed-delivery-<nonce>'",
-    )
-    expect(await Array.fromAsync(app.events())).toEqual(before)
-
-    const delivered = await app.bays.submitSelection("topic/landed-delivery-r2", submitOptions)
-    expect(delivered).toMatchObject({
+    // Q1: resubmitting the landed branch with a NEW head mints a fresh delivery
+    // PR (revision 1) automatically — no hand-made `-delivery-<nonce>` branch,
+    // no refusal. The integrated PR1 stays frozen.
+    const minted = await app.bays.submitSelection("topic/landed", submitOptions)
+    expect(minted).toMatchObject({
       id: "PR2",
-      branch: "topic/landed-delivery-r2",
+      branch: "topic/landed",
       headSha: HEAD_2,
+      revision: 1,
       status: "submitted",
     })
+    expect(app.bays.pr("PR1")).toMatchObject({ status: "integrated", headSha: HEAD_1 })
+    // The branch selector now resolves to the live delivery, not the frozen PR.
+    expect(app.bays.pr("topic/landed")).toMatchObject({ id: "PR2", status: "submitted" })
   })
 
   it("refuses a terminal receipt that does not transition the current PR revision", async () => {
@@ -1697,7 +1693,7 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     expect(reopened.withdrawnAt).toBeUndefined()
   })
 
-  it("D2: an integrated branch identity stays a loud refusal (redelivery parked)", async () => {
+  it("Q1: resubmitting a landed branch at the SAME head is an 'already merged' no-op, not a refusal or a new revision", async () => {
     const nextId = ids()
     const at = "2026-01-01T00:00:00.000Z"
     const seededCommand = { id: nextId(), op: "fixture.integrated" }
@@ -1716,9 +1712,13 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
     await using app = await createYrd(definition, { inject: { journal, clock: () => at, id: nextId } })
 
-    await expect(app.bays.submitSelection("topic/landed", directOptions(HEAD_2))).rejects.toMatchObject({
-      failure: { kind: "refusal", code: "terminal-branch-identity" },
-    })
+    const before = await Array.fromAsync(app.events())
+    // Same landed head → returns the frozen integrated PR (with its merge SHA),
+    // no throw, no new PR, no new revision, no journal event.
+    const already = await app.bays.submitSelection("topic/landed", directOptions(HEAD_1))
+    expect(already).toMatchObject({ id: "PR1", status: "integrated", headSha: HEAD_1, integration: { commit: BASE } })
+    expect(Object.keys(app.bays.state().prs)).toEqual(["PR1"])
+    expect(await Array.fromAsync(app.events())).toEqual(before)
   })
 
   it("D3: a dirty worktree submit warns loudly and records the committed head", async () => {
