@@ -197,7 +197,7 @@ export type QueueRunAuthority = Readonly<{
   missingSubmits: readonly string[]
   missingChecks: readonly string[]
   released?: Readonly<{
-    reason: "queue-environment-refused" | "job-lost" | "run-canceled"
+    reason: "queue-environment-refused" | "job-lost" | "run-canceled" | "stale-base" | "stale-check"
     ref: string
   }>
 }>
