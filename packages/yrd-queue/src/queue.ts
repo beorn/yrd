@@ -2578,8 +2578,7 @@ function legacyRootTargets(state: DeepReadonly<RuntimeState>): readonly LegacyRo
       return {
         run: run.id,
         jobs,
-        leased: (now) =>
-          jobs.some((job) => job.status === "running" && Date.parse(job.leaseExpiresAt) > now),
+        leased: (now) => jobs.some((job) => job.status === "running" && Date.parse(job.leaseExpiresAt) > now),
       }
     })
     .toSorted((left, right) => left.run.localeCompare(right.run, undefined, { numeric: true }))

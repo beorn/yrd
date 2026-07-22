@@ -831,12 +831,12 @@ the current revision must approve. Comments never gate, and omitting
 `notify` routes an enumerated journal transition without turning delivery into
 a Queue step. Its Tribe intake policy is explicit:
 
-| Signal            | Message type | Delivery | Pending ball        | Deadline   |
-| ----------------- | ------------ | -------- | ------------------- | ---------- |
-| `pr/rejected`     | notify       | pull     | none                | —          |
-| `pr/needs-review` | request      | push     | exact recipient/id  | 10 minutes |
-| `pr/integrated`   | notify       | pull     | none                | —          |
-| `run/failed`      | notify       | pull     | none                | —          |
+| Signal            | Message type | Delivery | Pending ball       | Deadline   |
+| ----------------- | ------------ | -------- | ------------------ | ---------- |
+| `pr/rejected`     | notify       | pull     | none               | —          |
+| `pr/needs-review` | request      | push     | exact recipient/id | 10 minutes |
+| `pr/integrated`   | notify       | pull     | none               | —          |
+| `run/failed`      | notify       | pull     | none               | —          |
 
 `pr/needs-review` is projected from a committed submission only when
 `requires: [review]`. Rejection and Run failure are outcome evidence, so even a
