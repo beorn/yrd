@@ -1730,6 +1730,80 @@ notify:
     expect(await readFile(oldBayJournal, "utf8")).toBe("old bay journal remains opaque\n")
   })
 
+  it("quiesces an expired pre-settlement root before active host bring-up completes", async () => {
+    const { repo, featureSha } = await repository()
+    await commitYrdConfig(repo, 'base: main\nbatch: 1\nsteps: [check]\ncheck: "true"\n')
+    const stateDir = join(repo, ".git", "yrd")
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check"],
+      requires: [],
+      definitions: { check: { run: "true", runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    const inner = testJournal(stateDir)
+    let refuseFinish = true
+    const legacyJournal: typeof inner = {
+      read: (after, before) => inner.read(after, before),
+      append: (value, cursor) => {
+        const frame = structuredClone(value) as {
+          events?: {
+            name?: string
+            data?: { leaseExpiresAt?: string; run?: Record<string, unknown>; type?: string }
+          }[]
+        }
+        for (const event of frame.events ?? []) {
+          if (event.name === "queue/run/started" && event.data?.run !== undefined) {
+            delete event.data.run.settlement
+          }
+          if (event.name === "job/transitioned" && event.data?.type === "start") {
+            event.data.leaseExpiresAt = "2026-01-01T00:01:00.000Z"
+          }
+        }
+        if (
+          refuseFinish &&
+          frame.events?.some((event) => event.name === "job/transitioned" && event.data?.type === "finish")
+        ) {
+          refuseFinish = false
+          throw new Error("yrd: job finish refused (host legacy fixture)")
+        }
+        return inner.append(frame, cursor)
+      },
+    }
+
+    await using runtimeProcess = createProcess({ cwd: repo })
+    {
+      await using legacy = await createDefaultYrdApp({
+        repo,
+        stateDir,
+        baysRoot: join(repo, ".bays"),
+        journal: legacyJournal,
+        process: runtimeProcess,
+        config,
+      })
+      await legacy.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+      await expect(
+        legacy.queue.run(
+          { prs: ["PR1"] },
+          { runner: "legacy", leaseMs: 60_000, now: () => Date.parse("2026-01-01T00:00:00.000Z") },
+        ),
+      ).rejects.toThrow("host legacy fixture")
+    }
+
+    await using host = await createYrdHost({ cwd: repo })
+    expect(host.app.queue.get("R1")).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "legacy-quiesced" },
+      steps: [
+        expect.objectContaining({
+          job: expect.objectContaining({ status: "completed", conclusion: "cancelled" }),
+        }),
+      ],
+    })
+  })
+
   it("disposes its owned runtime exactly once across close and await using", async () => {
     const { repo } = await repository()
     let releases = 0
