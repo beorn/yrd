@@ -1,7 +1,12 @@
+base: main
+batch: 1
+
 steps:
-  verify: bun install --frozen-lockfile --ignore-scripts && bun run test
+  check:
+    run: bun install --frozen-lockfile --ignore-scripts && bun run check
+  merge: {}
 
 contest:
   concurrency: 2
   timeoutMs: 1800000
-  evaluators: [verify]
+  evaluators: [check]
