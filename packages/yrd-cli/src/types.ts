@@ -66,6 +66,12 @@ export type YrdCliIO = {
   columns?: number
   rows?: number
   cwd?: string
+  /** Probe whether a resident runner holds the drain lease in `cwd`. When it
+   * reports true, `pr recut --queue` dispatches its admission enqueue-only for
+   * the resident to settle instead of driving it in-process (R1664/R1668: two
+   * drivers on one queue lose runs). The process host wires the real lease
+   * probe; when absent (bare embedders, tests) the embedded drive is kept. */
+  residentLeaseHeld?(cwd: string): Promise<boolean>
   /** Process-host-owned step artifact root used by the live read-only output projection. */
   artifactRoot?: string
   runner?: string
