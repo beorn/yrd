@@ -230,14 +230,14 @@ describe("detail run facts — natural timing sentence + landing, no RUN/BASE du
   })
 })
 
-describe("detail run facts — RETRY only above one, NEXT only on failure (items f/g)", () => {
-  it("hides RETRY at one attempt and shows it above one", () => {
+describe("detail run facts — ×N retry mark only above one, NEXT only on failure (items f/g)", () => {
+  it("hides the retry mark at one attempt and shows it above one", () => {
     const base = integratedRun()
     const once = createRenderer({ cols: 120, rows: 20 })(
       createElement(QueueShowView, { data: { ...base, retries: 1 }, compact: true, section: "run", titleAbove: true }),
     )
     try {
-      expect(once.text).not.toContain("RETRY")
+      expect(once.text).not.toMatch(/×\d/)
     } finally {
       once.unmount()
     }
@@ -245,7 +245,7 @@ describe("detail run facts — RETRY only above one, NEXT only on failure (items
       createElement(QueueShowView, { data: { ...base, retries: 3 }, compact: true, section: "run", titleAbove: true }),
     )
     try {
-      expect(retried.text).toContain("RETRY 3")
+      expect(retried.text).toContain("pr#42.1×3")
     } finally {
       retried.unmount()
     }

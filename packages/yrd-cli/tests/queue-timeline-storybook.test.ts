@@ -82,11 +82,6 @@ describe("queue timeline storybook", () => {
       // tabs are the real workflow steps, numbered from 1.
       expect(frame).toContain("2: check")
       expect(frame).toContain("pr#42.1")
-      // The detail is PR-scoped now (user directive 2026-07-21): the diff block
-      // is for the SELECTED member (PR42) only, so the available-diff summary
-      // renders here. The refs-pruned/unavailable branch is covered by the
-      // selected-rejected story, not this batch's non-selected member.
-      expect(frame).toContain("Diff +324 / -323 lines")
       expect(frame).toContain("╭─ RUNNER ")
       expect(frame).toContain("╭─ FLOW ")
       expect(frame).toContain("╭─ TIME ")
@@ -108,6 +103,18 @@ describe("queue timeline storybook", () => {
       expect(lines[commandRowIndex]).not.toContain("[ $")
       expect(lines[commandRowIndex]).not.toContain("COMMAND")
       expect(frame).toContain("125 tests collected")
+
+      // The PR/submission overview is restored as tab 0 (user directive
+      // 2026-07-21), ahead of the real step tabs; the diff lives there, not on
+      // the default running-step tab. Navigate left from `check` (tab 2) past
+      // `prepare` (tab 1) to reach the PR tab (tab 0).
+      await act(async () => {
+        await handle.press("h")
+        await handle.press("h")
+        await handle.waitForLayoutStable()
+      })
+      const prFrame = term.screen.getText()
+      expect(prFrame).toContain("Diff +324 / -323 lines")
     } finally {
       handle.unmount()
     }
@@ -455,13 +462,27 @@ describe("queue timeline storybook", () => {
           expect(topRow, name).toContain("pr#4.1")
           expect(topRow, "detail identity is a flush-top title, not a DETAIL tab").not.toContain("DETAIL")
           expect(findGlyphColumn(term, "│", 0), name).toBeGreaterThan(0)
+          // This run has no running step, so the detail opens on the restored
+          // PR tab (user directive 2026-07-21); move to the first step tab to
+          // reach the RUN header.
+          await act(async () => {
+            await handle.press("l")
+            await handle.waitForLayoutStable()
+          })
           expect(term.screen.getText(), name).toContain("RUN main#4")
         } else if (divider === "horizontal") {
           // Below-docked: the detail renders under the list, so the identity
           // title is not on the top row (which holds only the QUEUE tab).
-          await waitFor(() => term.screen.getText().includes("RUN main#4"))
           const topRow = term.screen.getText().split("\n")[0] ?? ""
           expect(topRow, name).not.toContain("RUN main#4")
+          // This run has no running step, so the detail opens on the restored
+          // PR tab (user directive 2026-07-21); move to the first step tab to
+          // reach the RUN header.
+          await act(async () => {
+            await handle.press("l")
+            await handle.waitForLayoutStable()
+          })
+          await waitFor(() => term.screen.getText().includes("RUN main#4"))
           expect(term.screen.getText(), name).toContain("RUN main#4")
         } else {
           expect(term.screen.getText(), name).not.toContain("RUN main#4")
@@ -510,7 +531,10 @@ describe("queue timeline storybook", () => {
       await term.mouse.up(draggedDivider, 1)
 
       await handle.press("j")
-      await waitFor(() => term.screen.getText().includes("RUN main#7"))
+      // R7 is canceled (no running step), so its detail opens on the restored
+      // PR tab (user directive 2026-07-21) rather than a `RUN main#7` step
+      // tab; the PR identity title is the stable readiness marker instead.
+      await waitFor(() => term.screen.getText().includes("pr#7.1"))
       expect(findGlyphColumn(term, "│", 0)).toBe(draggedDivider)
     } finally {
       handle.unmount()
@@ -533,6 +557,11 @@ describe("queue timeline storybook", () => {
           await handle.press("Enter")
           await handle.waitForLayoutStable()
         }
+        // This run has no running step, so the detail opens on the restored
+        // PR tab (user directive 2026-07-21); move to the first step tab to
+        // reach the RUN header.
+        await handle.press("l")
+        await handle.waitForLayoutStable()
         expect(handle.text, name).toContain("RUN")
       } finally {
         handle.unmount()
@@ -584,8 +613,8 @@ describe("queue timeline storybook", () => {
     const outputFrame = renderLive(createElement(QueueWatchFrame, { snapshot: live.snapshot }))
     try {
       await outputFrame.waitForLayoutStable()
-      await outputFrame.press("l")
-      await outputFrame.waitForLayoutStable()
+      // The run's only step is running, so the detail already opens on that
+      // step tab (user directive 2026-07-21) — no navigation needed.
       expect(outputFrame.text).toContain("checking one")
       const nextOutputFrame = renderLive(createElement(QueueWatchFrame, { snapshot: live.nextSnapshot }))
       await nextOutputFrame.waitForLayoutStable()
@@ -632,8 +661,9 @@ describe("queue timeline storybook", () => {
     const handle = render(createElement(QueueWatchFrame, { snapshot: snapshotWithLines(80) }))
     try {
       await handle.waitForLayoutStable()
-      await handle.press("l")
-      await handle.waitForLayoutStable()
+      // main#3's only step ("check") is running, so the detail opens
+      // directly on that step tab (user directive 2026-07-21) — no
+      // navigation needed to reach the RUN header / step output.
       expect(handle.text).toContain("RUN main#3")
       expect(handle.text).toContain("detail-row-080")
       expect(handle.text).not.toContain("detail-row-001")
@@ -687,6 +717,11 @@ describe("queue timeline storybook", () => {
       rows: viewport.rows,
     })
     try {
+      // This run has no running step, so the detail opens on the restored
+      // PR tab (user directive 2026-07-21); move to the first step tab to
+      // reach the RUN header.
+      await handle.press("l")
+      await handle.waitForLayoutStable()
       expect(handle.text).toContain("RUN main#4")
       // The FILTER row's TogglePills are the toggles (the footer hint row was
       // removed, item h); the `[f]ailed` pill drives the assertions below.
@@ -712,7 +747,10 @@ describe("queue timeline storybook", () => {
       expect(handle.text).toContain("pr#4.1")
 
       // Revision B keeps the integration proof in the merge-step body rather
-      // than repeating it above the synthetic submit tab.
+      // than repeating it above the synthetic submit tab. The `d` toggle
+      // above remounts the row's detail (row leaves and rejoins the visible
+      // list), which resets tab selection back to the default PR tab, so
+      // both step moves are needed again here.
       await handle.press("l")
       await handle.press("l")
       await handle.waitForLayoutStable()

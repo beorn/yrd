@@ -55,21 +55,26 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       await app.click(checkX, tabsY)
       await waitFor(() => app.text.includes("125 tests collected"))
 
-      // j/k move the QUEUE cursor (not the tabs); the detail follows the cursor.
+      // j/k move the QUEUE cursor (not the tabs); the detail follows the
+      // cursor. run#7 has no running step, so its detail opens on the PR tab
+      // (no RUN header there) — anchor on the title row instead, which names
+      // the selected PR regardless of which tab is active.
+      const titleRow = () => app.text.split("\n")[0] ?? ""
+
       await app.press("j")
       await app.press("j")
-      await waitFor(() => app.text.includes("RUN main#7"))
+      await waitFor(() => titleRow().includes("pr#7.1"))
 
       await app.press("k")
       await app.press("k")
-      await waitFor(() => app.text.includes("RUN main#42"))
+      await waitFor(() => titleRow().includes("pr#42.1"))
 
       await app.press("ArrowDown")
       await app.press("ArrowDown")
-      await waitFor(() => app.text.includes("RUN main#7"))
+      await waitFor(() => titleRow().includes("pr#7.1"))
       await app.press("ArrowUp")
       await app.press("ArrowUp")
-      await waitFor(() => app.text.includes("RUN main#42"))
+      await waitFor(() => titleRow().includes("pr#42.1"))
     } finally {
       app.unmount()
     }
@@ -132,14 +137,18 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       await app.waitForLayoutStable()
       await waitFor(() => app.text.includes("JOB"))
       const rows = app.text.split("\n")
-      // Run timing is above the tabs; selected step internals begin with JOB.
+      // Enter,l,l lands two tabs right of the default (PR tab 0), i.e. on a
+      // real step tab (merge) — run context only renders for step tabs, not
+      // the PR tab. Run timing is below the tabs; selected step internals
+      // begin with JOB.
       const runFactsY = rows.findIndex((l) => l.includes("Started "))
       const tabsY = rows.findIndex((l) => l.includes("check") && l.includes("merge"))
       const stepContentY = rows.findIndex((l) => l.includes("JOB"))
-      // H: run-level facts sit ABOVE the step tabs, which sit ABOVE the step content.
-      expect(runFactsY, "run facts present").toBeGreaterThanOrEqual(0)
-      expect(tabsY, "step tabs below run facts").toBeGreaterThan(runFactsY)
-      expect(stepContentY, "step content below the tabs").toBeGreaterThan(tabsY)
+      // H revised: the step tabs are the visual title of their section, so
+      // they render ABOVE the run-level facts, which sit above the step content.
+      expect(tabsY, "step tabs present").toBeGreaterThanOrEqual(0)
+      expect(runFactsY, "run facts below the step tabs").toBeGreaterThan(tabsY)
+      expect(stepContentY, "step content below the run facts").toBeGreaterThan(runFactsY)
       expect(app.text).toContain("RUNNER")
       expect(app.text).not.toContain("DETAILS")
       expect(app.text).not.toContain("RUN LOGS")

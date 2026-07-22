@@ -656,19 +656,31 @@ describe("queue timeline 21106 contract", () => {
 
       // Default cursor is the batch lead PR42. The detail is PR-scoped now
       // (user directive 2026-07-21, supersedes Round-6 Revision A's per-member
-      // run-as-unit blocks): `pr#42.1` heads the pane, PR42's own submit
-      // timeline shows, and the run identity `RUN main#42` moved into the RUN
-      // region header. The batch membership surfaces there as a `PRs` members
-      // row listing both pr#42.1 and pr#43.1 — the partner PR no longer gets its
-      // own block or its own submit-timeline line.
+      // run-as-unit blocks): `pr#42.1` heads the pane, and the run identity
+      // `RUN main#42` moved into the RUN region header, which sits above the
+      // step tabs (the pane opens on the running `check` step, per the
+      // running-step-wins default). The batch membership surfaces there as a
+      // `PRs` members row listing both pr#42.1 and pr#43.1 — the partner PR
+      // no longer gets its own block or its own submit-timeline line.
       expect(detailTitleRow(handle.text)).toContain("pr#42.1")
       expect(handle.text, "the run identity moved into the RUN region header").toContain("RUN main#42")
-      expect(handle.text).toContain("16:54 submitted by @agent/3")
       expect(handle.text, "the RUN region lists every batch member").toMatch(/PRs\b.*pr#42\.1.*pr#43\.1/u)
+      expect(handle.text).not.toMatch(/(?:^|\s)(?:▸|•)\s+PRS\b/gmu)
+
+      // PR42's own submit timeline lives on the PR tab (tab 0), which is not
+      // the default when a step is running. Move left past the running
+      // `check` tab and the `prepare` tab to land on the PR tab and read its
+      // submit facts.
+      await handle.press("h")
+      await handle.waitForLayoutStable()
+      await handle.press("h")
+      await handle.waitForLayoutStable()
+      expect(handle.text).toContain("16:54 submitted by @agent/3")
       expect(handle.text, "the partner PR's own submit timeline is not shown").not.toContain(
         "16:56 submitted by @agent/5",
       )
-      expect(handle.text).not.toMatch(/(?:^|\s)(?:▸|•)\s+PRS\b/gmu)
+      // The run-region PRs list only heads step tabs, not the PR tab.
+      expect(handle.text, "the PR tab does not repeat the RUN region").not.toContain("RUN main#42")
     } finally {
       handle.unmount()
     }
