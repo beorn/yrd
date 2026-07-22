@@ -1156,6 +1156,39 @@ function createQueue<Shape extends PRShape>(
             checked.map((pr) => pr.id),
             runOptions,
           )
+          const implicitQueue = args.prs === undefined || args.prs.length === 0
+          const drainMerges = async (): Promise<void> => {
+            const current = runtime()
+            const prs = runnablePRs(current, args, steps, consumed, { explicitStepAuthority }).filter(
+              (pr) => !activeBases.has(baseIdentity(pr.base)),
+            )
+            for (const candidate of partitionCandidates(prs, current.queues.batchSize)) {
+              if (runOptions.continueAdmissions?.() === false) break
+              const started = await actions.run({
+                prs: candidate.map((pr) => pr.id),
+                ...(args.steps === undefined ? {} : { steps: args.steps }),
+              })
+              const startedEvent = started.events.find((applied) => applied.name === "queue/run/started")
+              // Re-evaluation inside the serialized command may prove that this
+              // candidate's complete plan is already satisfied by a cached run.
+              // That idempotent no-op must not starve later candidates in the
+              // same resident drain.
+              if (startedEvent === undefined) continue
+              const id = QueueStartSchema.parse((startedEvent.data as { run?: unknown }).run).id
+              roots.push(id)
+              await settle(id, runOptions)
+            }
+          }
+          // The implicit (resident-drain) queue merges already-passed PRs
+          // BEFORE the unsettled-window return below: under continuous
+          // admissions the check window may never settle, and gating the merge
+          // phase on a settled window starves every passed candidate forever
+          // (the 2026-07-22 merge-phase livelock). runnablePRs silently filters
+          // the implicit queue to check-passed PRs, so a pending PR can never
+          // leak into a merge candidate. The explicit path keeps merge after
+          // the window check: there runnablePRs raises for not-ready PRs, and
+          // "checks still running" must stay a receipt, not a refusal.
+          if (implicitQueue) await drainMerges()
           snapshot = runtime()
           const unsettled = checked.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "passed")
           if (unsettled.length > 0) {
@@ -1163,28 +1196,13 @@ function createQueue<Shape extends PRShape>(
               (pr) => before.get(pr.id) !== "failed" && checkEligibility(snapshot, pr, steps).status === "failed",
             )
             if (newlyFailed || unsettled.some((pr) => checkEligibility(snapshot, pr, steps).status !== "failed")) {
-              return admissions
+              // Merge/resumable runs settled in this drain stay visible in the
+              // receipts even when the check window is still unsettled.
+              const final = runtime()
+              return [...admissions, ...roots.flatMap((root) => queueTree(final.queues, final.jobs, root))]
             }
           }
-          const prs = runnablePRs(snapshot, args, steps, consumed, { explicitStepAuthority }).filter(
-            (pr) => !activeBases.has(baseIdentity(pr.base)),
-          )
-          for (const candidate of partitionCandidates(prs, snapshot.queues.batchSize)) {
-            if (runOptions.continueAdmissions?.() === false) break
-            const started = await actions.run({
-              prs: candidate.map((pr) => pr.id),
-              ...(args.steps === undefined ? {} : { steps: args.steps }),
-            })
-            const startedEvent = started.events.find((applied) => applied.name === "queue/run/started")
-            // Re-evaluation inside the serialized command may prove that this
-            // candidate's complete plan is already satisfied by a cached run.
-            // That idempotent no-op must not starve later candidates in the
-            // same resident drain.
-            if (startedEvent === undefined) continue
-            const id = QueueStartSchema.parse((startedEvent.data as { run?: unknown }).run).id
-            roots.push(id)
-            await settle(id, runOptions)
-          }
+          if (!implicitQueue) await drainMerges()
           const final = runtime()
           return roots.flatMap((root) => queueTree(final.queues, final.jobs, root))
         },
