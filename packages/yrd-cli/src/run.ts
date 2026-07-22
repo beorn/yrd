@@ -1685,7 +1685,9 @@ async function submitBays(
   // live submissions.
   for (const pr of prs) {
     if (pr.status === "integrated") {
-      warnings.push(`already merged as PR '${pr.id}'${pr.integration === undefined ? "" : ` (${pr.integration.commit})`}`)
+      warnings.push(
+        `already merged as PR '${pr.id}'${pr.integration === undefined ? "" : ` (${pr.integration.commit})`}`,
+      )
     }
   }
   const checkable = prs.filter((pr) => pr.status === "pushed" || pr.status === "submitted")
@@ -2301,6 +2303,24 @@ function queueRunIsFollow(action: Readonly<{ opts(): unknown; args: readonly str
   const opts = action.opts() as Readonly<{ once?: boolean }>
   if (opts.once === true) return false
   return action.args.length === 0
+}
+
+const READ_ONLY_COMMANDS: Readonly<Record<string, readonly string[]>> = {
+  bay: ["_list", "path", "log"],
+  queue: ["_list", "list", "audit"],
+  pr: ["list", "view", "runs", "diff", "status", "checks"],
+  issue: ["_list", "view"],
+  contest: ["_list", "view"],
+}
+
+/** Read-only invocations never settle PR state or route submitter receipts. */
+function isReadOnlyInvocation(
+  action: Readonly<{ name(): string; parent?: Readonly<{ name(): string }> | null }>,
+): boolean {
+  if (action.name() === "_dashboard") return true
+  const parent = action.parent?.name()
+  if (parent === undefined) return false
+  return READ_ONLY_COMMANDS[parent]?.includes(action.name()) === true
 }
 
 async function runQueues(
@@ -2946,9 +2966,7 @@ function initSourceLabel(row: InitRow): string {
 function renderInitTable(rows: readonly InitRow[]): string {
   const header = ["SUBMODULE", "BRANCH", "SOURCE"] as const
   const cells = rows.map((row) => [row.path, row.branch ?? "-", initSourceLabel(row)] as const)
-  const widths = header.map((label, column) =>
-    Math.max(label.length, ...cells.map((cell) => cell[column]!.length)),
-  )
+  const widths = header.map((label, column) => Math.max(label.length, ...cells.map((cell) => cell[column]!.length)))
   const formatRow = (cell: readonly string[]): string =>
     cell.map((text, column) => (column === cell.length - 1 ? text : text.padEnd(widths[column]!))).join("  ")
   return [formatRow(header), ...cells.map(formatRow)].join("\n")
@@ -3028,7 +3046,9 @@ async function initSubmoduleTracking(options: InitOptions, io: YrdCliIO): Promis
     }
   }
   if (alreadyTracking > 0) {
-    summary.push(`(${alreadyTracking} submodule${alreadyTracking === 1 ? "" : "s"} already tracking a branch, unchanged)`)
+    summary.push(
+      `(${alreadyTracking} submodule${alreadyTracking === 1 ? "" : "s"} already tracking a branch, unchanged)`,
+    )
   }
 
   await printResult(
@@ -3056,7 +3076,11 @@ async function resolveInitRow(
   submodule: SubmoduleEntry,
   dryRun: boolean,
 ): Promise<InitRow> {
-  const base = { name: submodule.name, path: submodule.path, ...(submodule.url === undefined ? {} : { url: submodule.url }) }
+  const base = {
+    name: submodule.name,
+    path: submodule.path,
+    ...(submodule.url === undefined ? {} : { url: submodule.url }),
+  }
   if (submodule.url === undefined || submodule.url === "") {
     return { ...base, source: "unreachable", action: "unreachable", detail: "no url declared in .gitmodules" }
   }
@@ -3064,7 +3088,12 @@ async function resolveInitRow(
   try {
     target = resolveSubmoduleOrigin(root, superOrigin, submodule.url)
   } catch (cause) {
-    return { ...base, source: "unreachable", action: "unreachable", detail: cause instanceof Error ? cause.message : String(cause) }
+    return {
+      ...base,
+      source: "unreachable",
+      action: "unreachable",
+      detail: cause instanceof Error ? cause.message : String(cause),
+    }
   }
   const resolution = await resolver(target)
   if (resolution.status === "unreachable") {
@@ -4305,18 +4334,14 @@ function buildProgram(
       // `queue run` resident detection now derives from the run MODE (Tip B):
       // follow is the default, `--once` opts out, and the deprecated `--watch`
       // alias still selects follow (queueRunIsFollow mirrors resolveQueueRunMode
-      // at the pre-action boundary). `queue list --watch` is a DIFFERENT command
-      // — the live VIEWER — whose `--watch` is untouched by the run-mode cutover,
-      // so its detection stays on the parsed `.watch` flag. The static `pr list`
-      // projection is also a viewer: listing must never drain receiver receipts
-      // or settle notifications. bootstrap.load requires both flags
+      // at the pre-action boundary). Read-only commands are viewers regardless
+      // of whether they are static or resident: reads must never drain receiver
+      // receipts or settle notifications. bootstrap.load requires both flags
       // (RuntimeBootstrap.load type).
       const resident = action.name() === "run" && action.parent?.name() === "queue" && queueRunIsFollow(action)
-      const viewer =
-        (action.name() === "list" &&
-          action.parent?.name() === "queue" &&
-          (action.opts() as Readonly<{ watch?: boolean }>).watch === true) ||
-        (action.name() === "list" && action.parent?.name() === "pr")
+      // Viewer reads never drain receiver receipts, settle notifications, or
+      // require an active submitter identity.
+      const viewer = isReadOnlyInvocation(action)
       const loaded = await bootstrap.load(selected, { resident, viewer })
       runtimeApp = loaded.app
       runtimeServices = loaded.services

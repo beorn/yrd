@@ -141,7 +141,7 @@ describe("resident runner observability", () => {
 })
 
 describe("Yrd lifecycle records", () => {
-  it("owns the only lifecycle-to-level authority table", () => {
+  it("defines default lifecycle levels before the delivery-step start promotion", () => {
     expect(YRD_LIFECYCLE_LEVELS).toEqual({
       started: "debug",
       progress: "trace",
@@ -154,6 +154,27 @@ describe("Yrd lifecycle records", () => {
       recovered: "warn",
       failed: "error",
     })
+  })
+
+  it("promotes delivery-step starts to INFO while other lifecycle starts stay DEBUG", async () => {
+    const events: Event[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: Event) => events.push(event) }])
+
+    await observeYrdLifecycle(
+      log,
+      { lifecycle: "check", identity: { run: "R1", step: "check" }, now: () => 1 },
+      async () => "ok",
+    )
+    await observeYrdLifecycle(log, { lifecycle: "run", identity: { run: "R1" }, now: () => 1 }, async () => "ok")
+
+    const starts = events.filter(
+      (event): event is Extract<Event, { kind: "log" }> => event.kind === "log" && event.props?.outcome === "started",
+    )
+    expect(starts.map(({ namespace, level }) => ({ namespace, level }))).toEqual([
+      { namespace: "yrd:check", level: "info" },
+      { namespace: "yrd:run", level: "debug" },
+    ])
+    log.end()
   })
 
   it("classifies an aggregate settlement as INFO and applies a mixed-outcome label to the message", async () => {
@@ -268,7 +289,7 @@ describe("Yrd lifecycle records", () => {
     expect(events.find((event) => event.kind === "log" && event.message === "check started")).toMatchObject({
       kind: "log",
       namespace: "yrd:check",
-      level: "debug",
+      level: "info",
       props: {
         lifecycle: "check",
         outcome: "started",

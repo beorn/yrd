@@ -1317,6 +1317,7 @@ function deliveryIdentity(pr: DeepReadonly<PRSnapshot>): YrdDeliveryIdentity {
     // Carried so the resident runner's timeline rows can name the branch — the
     // watch-pane grammar (`R604 PR411.2  branch (merge ✓)`) needs it.
     branch: pr.branch,
+    ...(pr.issue === undefined ? {} : { issue: pr.issue }),
     ...(pr.correlation === undefined ? {} : { correlation: pr.correlation }),
   }
 }

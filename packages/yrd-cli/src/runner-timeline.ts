@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs"
-import { basename, join } from "node:path"
+import { dirname, join } from "node:path"
 import { hyperlink } from "@silvery/ansi"
 import type { Event } from "loggily"
 import { artifactHref, artifactLabel, artifactLocation } from "./artifact-reference.ts"
@@ -7,9 +7,9 @@ import { failureSlug } from "./failure-slug.ts"
 
 /**
  * Pure watch-timeline grammar shared by the interactive queue view and the
- * resident follow-runner's human log lines. Its INFO/ERROR rows read one event
- * per row — a scannable `[<base>#<run> <index>:<step>] done|failed <duration>`
- * summary with a canonical @silvery/ansi hyperlink to the full artifact.
+ * resident follow-runner's human narration. Lifecycle rows read one state
+ * transition per row — `[<base>#<run>/<index>-<step>] starting|finished` —
+ * with the bracketed identity itself linking to the owned artifact directory.
  * Keeping these helpers here (not in the queue view .tsx) means the headless
  * logger never imports React or the Silvery reconciler.
  *
@@ -44,21 +44,28 @@ export function formatDuration(milliseconds: number): string {
   return `${Math.floor(ms / 86_400_000)}d`
 }
 
-/** Displayed scope for the step/run timeline rows. The events originate at
- * `yrd:jobs:<step>` (per-step Jobs) and `yrd:queue:run` (run-owned failures);
- * the human stream presents them under ONE static run scope so the numbered
- * `<index>:<step>` prefix carries the per-step distinction WITHOUT polluting the
- * namespace taxonomy with unbounded per-run child scopes (user ruling
- * 2026-07-16). The JSONL sink keeps each event's real namespace. */
-const RUN_SCOPE = "yrd:queue:run"
+/** Lifecycle durations preserve subordinate units because a named completion
+ * row is durable operator evidence, not a compact watch-table cell. */
+function formatLifecycleDuration(milliseconds: number): string {
+  const ms = Math.max(0, milliseconds)
+  if (ms < 60_000) return formatDuration(ms)
+  const totalSeconds = Math.floor(ms / 1_000)
+  const days = Math.floor(totalSeconds / 86_400)
+  const hours = Math.floor((totalSeconds % 86_400) / 3_600)
+  const minutes = Math.floor((totalSeconds % 3_600) / 60)
+  const seconds = totalSeconds % 60
+  return [
+    days > 0 ? `${days}d` : "",
+    hours > 0 ? `${hours}h` : "",
+    minutes > 0 ? `${minutes}m` : "",
+    seconds > 0 ? `${seconds}s` : "",
+  ].join("")
+}
 
-/**
- * Where the `<index>:<step>` token sits on a step row. `"bracket"` (Option A,
- * the default) keeps it inside the identity bracket — `[main#324 2:merge]` —
- * which scans best; `"trailing"` (Option B) lifts it to a `step=` field after
- * the verb — `[main#324] failed step=2:merge`. Switching layouts is this one
- * constant; both share the same pure {@link renderOutcomeRow}. */
-const STEP_LAYOUT: "bracket" | "trailing" = "bracket"
+/** Canonical structured scope for run lifecycle events. Human lifecycle rows
+ * omit the repeated scope prefix; their bracketed run/step identity carries the
+ * distinction while JSONL keeps each event's complete namespace. */
+const RUN_SCOPE = "yrd:queue:run"
 
 /** Session-constant identity bound ONCE at the resident logger scope
  * (runner/host/pane). Elided from every row's JSON tail so a constant never
@@ -82,7 +89,7 @@ const paint =
   (text) =>
     color ? `${code}${text}${ANSI.reset}` : text
 
-type PRProps = Readonly<{ pr?: string; revision?: number; branch?: string }>
+type PRProps = Readonly<{ pr?: string; revision?: number; branch?: string; issue?: string }>
 type OutcomeProps = Readonly<{
   run?: string
   base?: string
@@ -114,13 +121,12 @@ function artifactLink(location: Readonly<{ path: string } | { url: string }>, la
 function recordedArtifact(
   artifacts: readonly unknown[] | undefined,
   event: "done" | "failed",
-): Readonly<{ location: Readonly<{ path: string } | { url: string }>; label: string }> | undefined {
+): Readonly<{ location: Readonly<{ path: string } | { url: string }>; name: string }> | undefined {
   const recorded = (artifacts ?? []).flatMap((artifact) => {
     const location = artifactLocation(artifact)
     if (location === undefined) return []
     const name = artifactLabel(artifact, location)
-    const label = "path" in location ? basename(location.path) || name : name
-    return [{ location, label, name }]
+    return [{ location, name }]
   })
   if (recorded.length === 0) return undefined
   const preferredNames = event === "failed" ? ["stderr", "output", "stdout"] : ["output", "stdout", "stderr"]
@@ -144,20 +150,20 @@ export function residentArtifactHome(event: Event, artifactRoot: string): string
   return artifactHome((event.props ?? {}) as OutcomeProps, artifactRoot)
 }
 
-function artifactPointer(
+function artifactTarget(
   props: OutcomeProps,
   artifactRoot: string | undefined,
   event: "admitted" | "started" | "done" | "failed",
-): string {
-  if (event === "done" || event === "failed") {
-    const artifact = recordedArtifact(props.artifacts, event)
-    if (artifact !== undefined) return ` log=${artifactLink(artifact.location, artifact.label)}`
+): Readonly<{ path: string } | { url: string }> | undefined {
+  if (artifactRoot !== undefined) {
+    const home = artifactHome(props, artifactRoot)
+    if (home !== undefined && existsSync(home)) return { path: home }
   }
-  if (artifactRoot === undefined) return ""
-  const home = artifactHome(props, artifactRoot)
-  if (home === undefined || !existsSync(home)) return ""
-  const label = props.step === undefined ? "artifacts" : "logs"
-  return ` log=${artifactLink({ path: home }, label)}`
+  if (event !== "done" && event !== "failed") return undefined
+  const artifact = recordedArtifact(props.artifacts, event)
+  if (artifact === undefined) return undefined
+  if ("path" in artifact.location && props.step !== undefined) return { path: dirname(artifact.location.path) }
+  return artifact.location
 }
 
 /** The system-local wall-clock cell shared by queue watch and runner logs. */
@@ -198,27 +204,50 @@ function runRef(props: OutcomeProps): string {
   return props.base === undefined ? run : `${props.base}#${number}`
 }
 
-/** `<index>:<step>` in execution order (1-based), suffixed `#<attempt>` on a
- * retry (attempt > 1), e.g. `1:check` or `2:merge#2`. `undefined` for a
+/** `<index>-<step>` in artifact-directory order (zero-based), suffixed
+ * `#<attempt>` on a retry, e.g. `0-check` or `1-merge#2`. `undefined` for a
  * run-owned row that no single step owns. */
 function stepToken(props: OutcomeProps): string | undefined {
   if (props.step === undefined) return undefined
-  const numbered = typeof props.index === "number" ? `${props.index + 1}:${props.step}` : props.step
+  const numbered = typeof props.index === "number" ? `${props.index}-${props.step}` : props.step
   return props.attempt !== undefined && props.attempt > 1 ? `${numbered}#${props.attempt}` : numbered
 }
 
-/** Dimmed batch identity so multi-PR runs stay identifiable — especially on a
- * failure. One PR shows `PR.rev branch`; a batch lists refs (capped `+N`). */
-function prTail(props: OutcomeProps, color: boolean): string {
+function prRef(pr: PRProps): string | undefined {
+  if (pr.pr === undefined) return undefined
+  const number = /^PR\d+$/iu.test(pr.pr) ? pr.pr.slice(2) : pr.pr
+  return `pr#${number}.${pr.revision ?? 1}`
+}
+
+function admissionTail(props: OutcomeProps, color: boolean): string {
   const prs = props.prs
   if (prs === undefined || prs.length === 0) return ""
-  const refs = prs.filter((pr) => pr.pr !== undefined).map((pr) => `${pr.pr}.${pr.revision ?? 1}`)
-  if (refs.length === 0) return ""
-  const CAP = 4
-  const shown = refs.slice(0, CAP).join(" ")
-  const overflow = refs.length > CAP ? ` +${refs.length - CAP}` : ""
-  const branch = refs.length === 1 && prs[0]?.branch !== undefined ? ` ${prs[0].branch}` : ""
-  return ` ${paint(color, ANSI.dim)(`· ${shown}${branch}${overflow}`)}`
+  const facts = prs.flatMap((pr) => {
+    const ref = prRef(pr)
+    if (ref === undefined) return []
+    const issue = pr.issue === undefined ? "" : ` issue=${pr.issue}`
+    return [`${ref}${issue}`]
+  })
+  return facts.length === 0 ? "" : ` ${paint(color, ANSI.dim)(facts.join(" "))}`
+}
+
+function composedPRTail(props: OutcomeProps, color: boolean): string {
+  const refs = (props.prs ?? []).flatMap((pr) => {
+    const ref = prRef(pr)
+    return ref === undefined ? [] : [ref]
+  })
+  return refs.length < 2 ? "" : ` ${paint(color, ANSI.dim)(`prs=${refs.join(",")}`)}`
+}
+
+function timelineTag(
+  props: OutcomeProps,
+  color: boolean,
+  target?: Readonly<{ path: string } | { url: string }>,
+): string {
+  const ref = paint(color, ANSI.bold)(runRef(props))
+  const token = stepToken(props)
+  const label = token === undefined ? `[${ref}]` : `[${ref}/${token}]`
+  return target === undefined ? label : artifactLink(target, label)
 }
 
 /** The canonical failure slug for `err=<slug>`: the JobError code a failed step
@@ -236,12 +265,12 @@ function failureCause(props: OutcomeProps): string | undefined {
   return oneLine.length <= limit ? oneLine : `${oneLine.slice(0, limit - 1)}…`
 }
 
-/** `done` (INFO/success) or `failed` (ERROR/failure), or `undefined` when the
+/** `finished` (INFO/success) or `failed` (ERROR/failure), or `undefined` when the
  * event is not a terminal step/run OUTCOME (e.g. a duration-invalid diagnostic,
  * which carries its own `diagnostic` field and must NOT masquerade as a row). */
-function outcomeVerb(props: OutcomeProps, level: string): "done" | "failed" | undefined {
+function outcomeVerb(props: OutcomeProps, level: string): "finished" | "failed" | undefined {
   if (props.diagnostic !== undefined) return undefined
-  if (props.outcome === "succeeded" || props.status === "passed") return "done"
+  if (props.outcome === "succeeded" || props.status === "passed") return "finished"
   if (
     props.outcome === "failed" ||
     props.outcome === "settled" ||
@@ -250,14 +279,13 @@ function outcomeVerb(props: OutcomeProps, level: string): "done" | "failed" | un
     return "failed"
   }
   if (level === "error") return "failed"
-  if (level === "info") return "done"
+  if (level === "info") return "finished"
   return undefined
 }
 
-/** Render one step/run outcome as the scannable grammar, Option A or B. Bolds
- * the run ref, greens `done` / reds `failed`, dims the duration; appends
- * `err=<slug>` on a failure and the dimmed PR tail. `undefined` when the event
- * is not a terminal outcome (the caller then renders a plain notice). */
+/** Render one terminal state transition. The bracket tag owns the artifact
+ * link; success is green, failure is red, and duration is an explicit field.
+ * `undefined` lets the caller render non-lifecycle events as plain notices. */
 function renderOutcomeRow(
   props: OutcomeProps,
   level: string,
@@ -266,21 +294,17 @@ function renderOutcomeRow(
 ): string | undefined {
   const verb = outcomeVerb(props, level)
   if (verb === undefined) return undefined
-  const ref = paint(color, ANSI.bold)(runRef(props))
-  const token = stepToken(props)
-  const verbCell = paint(color, verb === "done" ? ANSI.green : ANSI.red)(verb)
+  const tag = timelineTag(props, color, artifactTarget(props, artifactRoot, verb === "finished" ? "done" : verb))
+  const verbCell = paint(color, verb === "finished" ? ANSI.green : ANSI.red)(verb)
+  const prsCell = composedPRTail(props, color)
   const durationCell =
-    props.durationMs === undefined ? "" : ` ${paint(color, ANSI.dim)(formatDuration(props.durationMs))}`
+    props.durationMs === undefined
+      ? ""
+      : ` ${paint(color, ANSI.dim)(`duration=${formatLifecycleDuration(props.durationMs)}`)}`
   const errCell = verb === "failed" && errSlug(props) !== undefined ? ` err=${errSlug(props)}` : ""
   const cause = verb === "failed" ? failureCause(props) : undefined
   const causeCell = cause === undefined ? "" : ` cause=${JSON.stringify(cause)}`
-  const head =
-    STEP_LAYOUT === "bracket" && token !== undefined
-      ? `[${ref} ${token}] ${verbCell}`
-      : STEP_LAYOUT === "trailing" && token !== undefined
-        ? `[${ref}] ${verbCell} step=${token}`
-        : `[${ref}] ${verbCell}`
-  return `${head}${durationCell}${errCell}${causeCell}${artifactPointer(props, artifactRoot, verb)}${prTail(props, color)}`
+  return `${tag} ${verbCell}${prsCell}${durationCell}${errCell}${causeCell}`
 }
 
 function renderStartedRow(props: OutcomeProps, color: boolean, artifactRoot?: string): string | undefined {
@@ -294,12 +318,14 @@ function renderStartedRow(props: OutcomeProps, color: boolean, artifactRoot?: st
   ) {
     return undefined
   }
-  const ref = paint(color, ANSI.bold)(runRef(props))
   const token = stepToken(props)
   const event = token === undefined ? "admitted" : "started"
-  const verb = paint(color, ANSI.blue)(event)
-  const head = token === undefined ? `[${ref}] ${verb}` : `[${ref} ${token}] ${verb}`
-  return `${head}${artifactPointer(props, artifactRoot, event)}${prTail(props, color)}`
+  const tag = timelineTag(props, color, artifactTarget(props, artifactRoot, event))
+  const label = token === undefined ? "admitted" : "starting"
+  const verb = paint(color, ANSI.blue)(label)
+  return token === undefined
+    ? `${tag} ${verb}${admissionTail(props, color)}`
+    : `${tag} ${verb}${composedPRTail(props, color)}`
 }
 
 /** Generic INFO/WARN/ERROR notice fields as a dimmed JSON tail, minus the
@@ -318,7 +344,7 @@ function jsonTail(props: Record<string, unknown>, color: boolean): string {
  * Format one resident-runner log Event as a human line, or `undefined` to
  * suppress it from the human stream (it still reaches the JSONL file sink).
  *
- * - `yrd:jobs:<step>` completions → the scannable step row under the run scope.
+ * - `yrd:jobs:<step>` transitions → bracket-first step narration.
  * - `yrd:queue:run` / `yrd:queue:compose` INFO/DEBUG settlements → suppressed
  *   (redundant roll-ups of step rows), a run-owned ERROR/WARN still surfaces.
  * - `yrd:journal:*` INFO/DEBUG chatter → suppressed.
@@ -339,7 +365,7 @@ export function formatResidentLogLine(event: Event, options: ResidentLogFormatOp
 
   if (namespace.startsWith("yrd:jobs:") || namespace === RUN_SCOPE) {
     const started = renderStartedRow(props, color, options.artifactRoot)
-    if (started !== undefined) return `${prefix(event.time, level, RUN_SCOPE, color)} ${started}`
+    if (started !== undefined) return started
   }
 
   // DEBUG is enabled so lifecycle starts exist, not to dump every Git/process/
@@ -354,11 +380,11 @@ export function formatResidentLogLine(event: Event, options: ResidentLogFormatOp
     return undefined
   }
 
-  // Step completions and run-owned failures render as the one-row-per-step
-  // grammar, presented under the single run scope.
+  // Step completions and run-owned failures render as bracket-first lifecycle
+  // narration without repeating their structured namespace.
   if (namespace.startsWith("yrd:jobs:") || namespace === RUN_SCOPE) {
     const row = renderOutcomeRow(props, level, color, options.artifactRoot)
-    if (row !== undefined) return `${prefix(event.time, level, RUN_SCOPE, color)} ${row}`
+    if (row !== undefined) return row
   }
 
   // Everything else: runner start/lease, graceful drain, compose refusals,
