@@ -62,7 +62,7 @@ describe("queue timeline 21106 contract", () => {
   it("renders separately bordered FLOW and TIME boxes after the list", async () => {
     const rows = (await renderTimeline(contractProjection(), 120)).map((row) => row.trimEnd())
     const frame = rows.join("\n")
-    const pillsLine = rows.findIndex((row) => /pending.*running.*failed.*done/u.test(row))
+    const pillsLine = rows.findIndex((row) => /todo.*running.*failed.*done/u.test(row))
     const statsLine = rowIndex(rows, "╭─ FLOW ")
 
     expect(statsLine).toBeGreaterThan(pillsLine)
@@ -74,16 +74,18 @@ describe("queue timeline 21106 contract", () => {
     }
   })
 
-  it("renders resident health in RUNNER and reserves STATUS for queue pause", async () => {
+  it("renders resident health in RUNNER with the queue-pause STATUS line folded inside it", async () => {
     const normal = (await renderTimeline(contractProjection(), 120)).join("\n")
     expect(normal).toContain("╭─ RUNNER ")
     expect(normal).not.toContain("╭─ STATUS ")
     expect(normal).toContain("[84042]")
 
+    // The separate STATUS box is gone (user directive 2026-07-21): a paused
+    // queue's HOLD THE LINE line now renders INSIDE the one RUNNER box.
     const paused = queueTimelineStories.paused.snapshot.projection
     if (paused === undefined) throw new Error("paused story is missing its projection")
     const exceptional = (await renderTimeline(paused, 120)).join("\n")
-    expect(exceptional.match(/╭─ STATUS /gu)).toHaveLength(1)
+    expect(exceptional).not.toContain("╭─ STATUS ")
     expect(exceptional.match(/╭─ RUNNER /gu)).toHaveLength(1)
     expect(exceptional).toContain("HOLD THE LINE")
     expect(exceptional).toContain("NO RUNNER")
@@ -174,7 +176,7 @@ describe("queue timeline 21106 contract", () => {
     // Item 2 (deliberate contract change): the pills row moved from ABOVE the
     // header to BELOW the list — new order updated → header → rows → pills →
     // the FLOW/TIME boxes.
-    const pillsLine = rows.findIndex((row) => /pending.*running.*failed.*done/u.test(row))
+    const pillsLine = rows.findIndex((row) => /todo.*running.*failed.*done/u.test(row))
     const statsBoxLine = rowIndex(rows, "╭─ FLOW ")
 
     expect(queueLine).toBeLessThan(updatedLine)
@@ -225,7 +227,7 @@ describe("queue timeline 21106 contract", () => {
     // (item R); run duration is a bare dimmed time — no `◷` glyph (item S). The
     // branch glyph (U+E0A0) is matched as one non-space char.
     expect(pending?.trim()).toMatch(
-      /^16:40:00 ○ pend\s+-\s+pr#1\.1 for @yrd\/core\/21120-pr-state-notifications\s+@cto\s+50:00$/u,
+      /^16:40:00 ○ todo\s+-\s+pr#1\.1 for @yrd\/core\/21120-pr-state-notifications\s+@cto\s+50:00$/u,
     )
     expect(lead?.trim()).toMatch(
       /^17:10:00 ● run\s+main#42 pr#42\.1 for @hab\/super\/21135-herdr-keybindings\s+@agent\/3 36:00 20:00$/u,
@@ -286,7 +288,7 @@ describe("queue timeline 21106 contract", () => {
     const rejected = rows[rowIndex(rows, "pr#5.1")]
     const integrated = rows[rowIndex(rows, "pr#4.1")]
 
-    expect(pending).toContain("○ pend")
+    expect(pending).toContain("○ todo")
     expect(running).toContain("● run")
     expect(rejected).toContain("× fail")
     expect(integrated).toContain("✓ done")
@@ -453,7 +455,7 @@ describe("queue timeline 21106 contract", () => {
     // Left-anchored surfaces start at column 0; only right-aligned facts
     // (the updated clock, the bucket checkboxes) carry leading padding. Box
     // borders anchor at column 0 with their rounded corner glyph.
-    for (const anchor of ["QUEUE", "16:40:00 ○ pend", "╭─ FLOW"]) {
+    for (const anchor of ["QUEUE", "16:40:00 ○ todo", "╭─ FLOW"]) {
       expect(wide[rowIndex(wide, anchor)]?.startsWith(anchor.slice(0, 1)), anchor).toBe(true)
     }
     expect(wide[rowIndex(wide, "TIME")]?.indexOf("TIME")).toBe(0)
@@ -485,9 +487,10 @@ describe("queue timeline 21106 contract", () => {
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      await app.press("l")
-      await app.press("l")
-      await app.waitForLayoutStable()
+      // The detail defaults to the live `check` step (user directive 2026-07-21:
+      // tab selection follows the running step, and the synthetic `0: submit`
+      // tab is gone), so R42's recorded check output — the sentinel — is visible
+      // without navigating tabs.
       const rows = app.text.split("\n")
       const divider = rows[0]?.indexOf("│") ?? -1
       expect(divider).toBeGreaterThan(0)
@@ -510,32 +513,42 @@ describe("queue timeline 21106 contract", () => {
     for (const width of [120, 200]) {
       const rows = await renderTimeline(contractProjection(), width)
       const headerLine = rowIndex(rows, "TIME")
-      const pillsLine = rows.findIndex((row) => /pending.*running.*failed.*done/u.test(row))
+      const pillsLine = rows.findIndex((row) => /todo.*running.*failed.*done/u.test(row))
       // Item 2: the pills row renders BELOW the list, not above the header.
       expect(pillsLine, `width ${width}`).toBeGreaterThan(headerLine)
       const filter = rows[pillsLine]
       if (filter === undefined) throw new Error("expected the pills row")
-      // Item 3: no "FILTER" label, no [p] brackets; the `since=` dimension
-      // survives and the pills are plain words. Right-aligned to the cap.
+      // Item 3: no "FILTER" label, no [t] brackets; the `since=` dimension
+      // survives and the pills are plain words (pending reads `todo`, user
+      // directive 2026-07-21). Right-aligned to the cap.
       expect(filter).not.toContain("FILTER")
-      expect(filter).not.toMatch(/\[[prfd]\]/u)
-      expect(filter.trim()).toContain("since=6:00:00 pending running failed done")
+      expect(filter).not.toMatch(/\[[trfd]\]/u)
+      expect(filter.trim()).toContain("since=6:00:00 todo running failed done")
       expect(filter.trimEnd().length, `width ${width}`).toBe(Math.min(width, 160))
     }
   })
 
-  it("renders paused queues as a foreground-only STATUS box between metadata and filter", async () => {
+  it("folds the paused STATUS line inside the one RUNNER box with foreground-only styling", async () => {
     const projection = queueTimelineStories.paused.snapshot.projection
     if (projection === undefined) throw new Error("paused story is missing its projection")
     const rows = await renderTimeline(projection, 120)
     const statusLine = rowIndex(rows, "HOLD THE LINE")
-    // Title-in-border chrome: the STATUS name sits on the border row above.
-    expect(rows[statusLine - 1]).toContain("STATUS")
+    // The pause STATUS line now lives INSIDE the one RUNNER box (user directive
+    // 2026-07-21): STATUS, the reason, and the allow-list ride the same row, and
+    // there is no separate `╭─ STATUS` border box.
+    expect(rows.join("\n")).not.toContain("╭─ STATUS ")
+    expect(rows[statusLine]).toContain("STATUS")
     expect(rows[statusLine]).toContain("operator freeze")
     expect(rows[statusLine]).toContain("allowed PR2")
+    // The RUNNER box frames it: `╭─ RUNNER ` opens above and `╰` closes below.
+    const runnerTop = rowIndex(rows, "╭─ RUNNER ")
+    expect(runnerTop).toBeLessThan(statusLine)
+    const runnerBottom = rows.findIndex((row, index) => index > statusLine && row.includes("╰"))
+    expect(runnerBottom, "the RUNNER box closes below the pause line").toBeGreaterThan(statusLine)
+    // It still renders between the metadata clock and the pills row.
     expect(rowIndex(rows, "updated 17:30:00")).toBeLessThan(statusLine)
-    const pillsAt = rows.findIndex((row) => /pending.*running.*failed.*done/u.test(row))
-    expect(statusLine, "the STATUS box sits above the pills row").toBeLessThan(pillsAt)
+    const pillsAt = rows.findIndex((row) => /todo.*running.*failed.*done/u.test(row))
+    expect(statusLine, "the RUNNER box sits above the pills row").toBeLessThan(pillsAt)
 
     const render = createRenderer({ cols: 120, rows: 45 })
     const styled = render(createElement(QueueTimelineView, { projection, columns: 120 }))
@@ -615,18 +628,20 @@ describe("queue timeline 21106 contract", () => {
     const handle = render(createElement(QueueWatchFrame, { snapshot: story.snapshot }))
     try {
       await handle.waitForLayoutStable()
-      // No running rows: the newest finished run R12 is the default.
-      expect(detailTitleRow(handle.text)).toContain("RUN main#12")
+      // No running rows: the newest finished run R12 is the default. The detail
+      // title is PR-scoped now (user directive 2026-07-21): `pr#12.1` heads the
+      // pane, not `RUN main#12` (which moved into the RUN region header below).
+      expect(detailTitleRow(handle.text)).toContain("pr#12.1")
 
       // A manual move is sticky: the arriving newer run R13 must not steal
       // the cursor.
       await handle.press("j")
       await handle.waitForLayoutStable()
-      expect(detailTitleRow(handle.text)).toContain("RUN main#11")
+      expect(detailTitleRow(handle.text)).toContain("pr#11.1")
       handle.rerender(createElement(QueueWatchFrame, { snapshot: story.nextSnapshot }))
       await handle.waitForLayoutStable()
-      expect(detailTitleRow(handle.text)).toContain("RUN main#11")
-      expect(detailTitleRow(handle.text)).not.toContain("RUN main#13")
+      expect(detailTitleRow(handle.text)).toContain("pr#11.1")
+      expect(detailTitleRow(handle.text)).not.toContain("pr#13.1")
     } finally {
       handle.unmount()
     }
@@ -636,13 +651,13 @@ describe("queue timeline 21106 contract", () => {
     const reopened = fresh(createElement(QueueWatchFrame, { snapshot: story.nextSnapshot }))
     try {
       await reopened.waitForLayoutStable()
-      expect(detailTitleRow(reopened.text)).toContain("RUN main#13")
+      expect(detailTitleRow(reopened.text)).toContain("pr#13.1")
     } finally {
       reopened.unmount()
     }
   })
 
-  it("drops the footer and scopes batched-run detail to every immutable run member", async () => {
+  it("drops the footer and scopes batched-run detail to the selected PR while listing its run members", async () => {
     const story = queueTimelineStories["contract-overview"]
     const render = createRenderer({ cols: 200, rows: 50 })
     const handle = render(createElement(QueueWatchFrame, { snapshot: story.snapshot }))
@@ -657,14 +672,33 @@ describe("queue timeline 21106 contract", () => {
       const statistics = rows.findIndex((row) => row.includes("╭─ FLOW "))
       expect(statistics).toBeGreaterThan(0)
 
-      // Default cursor is the batch lead, while Revision A makes the detail
-      // run-scoped and gives each immutable member its own block.
-      expect(detailTitleRow(handle.text)).toContain("RUN main#42")
-      expect(handle.text).toContain("pr#42.1")
-      expect(handle.text).toContain("16:54 submitted by @agent/3")
-      expect(handle.text).toContain("pr#43.1")
-      expect(handle.text).toContain("16:56 submitted by @agent/5")
+      // Default cursor is the batch lead PR42. The detail is PR-scoped now
+      // (user directive 2026-07-21, supersedes Round-6 Revision A's per-member
+      // run-as-unit blocks): `pr#42.1` heads the pane, and the run identity
+      // `RUN main#42` moved into the RUN region header, which sits above the
+      // step tabs (the pane opens on the running `check` step, per the
+      // running-step-wins default). The batch membership surfaces there as a
+      // `PRs` members row listing both pr#42.1 and pr#43.1 — the partner PR
+      // no longer gets its own block or its own submit-timeline line.
+      expect(detailTitleRow(handle.text)).toContain("pr#42.1")
+      expect(handle.text, "the run identity moved into the RUN region header").toContain("RUN main#42")
+      expect(handle.text, "the RUN region lists every batch member").toMatch(/PRs\b.*pr#42\.1.*pr#43\.1/u)
       expect(handle.text).not.toMatch(/(?:^|\s)(?:▸|•)\s+PRS\b/gmu)
+
+      // PR42's own submit timeline lives on the PR tab (tab 0), which is not
+      // the default when a step is running. Move left past the running
+      // `check` tab and the `prepare` tab to land on the PR tab and read its
+      // submit facts.
+      await handle.press("h")
+      await handle.waitForLayoutStable()
+      await handle.press("h")
+      await handle.waitForLayoutStable()
+      expect(handle.text).toContain("16:54 submitted by @agent/3")
+      expect(handle.text, "the partner PR's own submit timeline is not shown").not.toContain(
+        "16:56 submitted by @agent/5",
+      )
+      // The run-region PRs list only heads step tabs, not the PR tab.
+      expect(handle.text, "the PR tab does not repeat the RUN region").not.toContain("RUN main#42")
     } finally {
       handle.unmount()
     }

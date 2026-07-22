@@ -90,14 +90,39 @@ function prIdValue(pr: string): string {
   return pr.replace(/^pr(?:[-#])?/iu, "")
 }
 
-export function formatQueuePrId(pr: string, revision: number | string): string {
-  return formatNounId("pr", prIdValue(pr), revision)
+/**
+ * Retry — the SAME submission re-run N times by the queue (base moved, transient
+ * fail) — rides the PR identity as `×N`, distinct from the `.N` submission mark.
+ * A single run (first try) is bare. Mirrors the timeline's storm `×N`
+ * vocabulary; each retry is its own run id (see runOutputQueueageIndex).
+ *
+ * Note (submission/draft model, @yrd/core/21679): `.N` is the submission number
+ * and is shown from `.1` — a bare `pr#324` is reserved to mean DRAFT (zero
+ * submissions) once the draft state lands. Do NOT omit `.1`.
+ */
+function retrySuffix(times: number | undefined): string {
+  return times !== undefined && times > 1 ? `×${times}` : ""
+}
+
+export function formatQueuePrId(pr: string, revision: number | string, times?: number): string {
+  return `${formatNounId("pr", prIdValue(pr), revision)}${retrySuffix(times)}`
 }
 
 type QueueNounIdProps = Omit<React.ComponentProps<typeof NounId>, "noun" | "value" | "revision">
 
-function QueuePrId({ pr, revision, ...props }: { pr: string; revision: number | string } & QueueNounIdProps) {
-  return <NounId noun="pr" value={prIdValue(pr)} revision={revision} {...props} />
+function QueuePrId({
+  pr,
+  revision,
+  times,
+  ...props
+}: { pr: string; revision: number | string; times?: number } & QueueNounIdProps) {
+  const suffix = retrySuffix(times)
+  return (
+    <>
+      <NounId noun="pr" value={prIdValue(pr)} revision={revision} {...props} />
+      {suffix === "" ? null : <Text {...props}>{suffix}</Text>}
+    </>
+  )
 }
 
 function runIdValue(run: string): string {
@@ -3047,13 +3072,25 @@ function timelineBranchLabel(branch: string): string {
 }
 
 /**
- * The DETAIL pane's flush-top target identity. Round-6 Revision A makes a run
- * the unit of detail: the left side is `CANDIDATE C# RUN main#N`, while immutable
- * member PRs and their branches live in body blocks below. Pending rows use
- * their PR revision as the same template's no-run identity. STATUS + OUTCOME
- * stays right-aligned; timing belongs exclusively in the body.
+ * The DETAIL pane's flush-top identity. The detail view is FOR a PR (user
+ * directive 2026-07-21, supersedes Round-6 Revision A's run-as-unit title):
+ * the left side is `pr#id.rev` plus its linked ISSUE, for run rows and
+ * pending rows alike; the run identity lives in the QueueDetailRunHeader
+ * region below. STATUS + OUTCOME stays right-aligned; timing belongs
+ * exclusively in the body.
  */
-export function QueueDetailTitle({ row, data }: { row?: QueueTimelineProjectedRow; data?: QueueShowData }) {
+export function QueueDetailTitle({
+  row,
+  data,
+  issue,
+  live = false,
+}: {
+  row?: QueueTimelineProjectedRow
+  data?: QueueShowData
+  issue?: string
+  /** True in the live watch: a running status pulses (user directive 2026-07-21). */
+  live?: boolean
+}) {
   if (row === undefined) {
     return (
       <Text bold color="$fg-warning" wrap="truncate">
@@ -3070,20 +3107,52 @@ export function QueueDetailTitle({ row, data }: { row?: QueueTimelineProjectedRo
     )
   }
   const outcome = detailStatusOutcome(row, data)
+  const presentIssue = presentFact(issue)
+  const running = data === undefined ? row.status === "running" : data.status === "running"
   return (
     <Box flexDirection="row" width="100%" justifyContent="space-between" minWidth={0} flexShrink={0}>
-      <Text color="$fg-warning" wrap="truncate" minWidth={0}>
-        {row.run === undefined ? (
+      <Box flexDirection="row" minWidth={0} overflow="hidden">
+        <QueuePrId pr={row.pr} revision={row.revision} color="$fg-warning" flexShrink={0} />
+        {presentIssue === undefined ? null : (
           <>
-            <QueuePrId pr={row.pr} revision={row.revision} />
-            {row.candidateId === undefined ? null : <Text bold>{` → CANDIDATE ${row.candidateId}`}</Text>}
-          </>
-        ) : (
-          <>
-            <Text bold>{`CANDIDATE ${row.candidateId} RUN `}</Text>
-            <RunId base={row.base} run={row.run} />
+            <Text flexShrink={0}> </Text>
+            <IssueValue issue={presentIssue} flex />
           </>
         )}
+      </Box>
+      {outcome === undefined ? null : live && running ? (
+        <Pulse synchronized colors={["$fg-info", "$fg-muted"]} intervalMs={AG_PULSE_INTERVAL_MS} bold flexShrink={0}>
+          {outcome.text}
+        </Pulse>
+      ) : (
+        <Text bold color={outcome.color} flexShrink={0}>
+          {outcome.text}
+        </Text>
+      )}
+    </Box>
+  )
+}
+
+/**
+ * The RUN region header (user directive 2026-07-21): a filled full-width row
+ * that opens the run section of the PR detail — run identity left, colorized
+ * STATUS/OUTCOME right — so the run reads as its own region below the
+ * PR-scoped header.
+ */
+export function QueueDetailRunHeader({ data }: { data: QueueShowData }) {
+  const outcome = runStatusOutcome(data)
+  return (
+    <Box
+      flexDirection="row"
+      width="100%"
+      justifyContent="space-between"
+      minWidth={0}
+      flexShrink={0}
+      backgroundColor="$bg-surface-subtle"
+      paddingX={1}
+    >
+      <Text bold wrap="truncate" minWidth={0}>
+        RUN <RunId base={data.base} run={data.run} />
       </Text>
       {outcome === undefined ? null : (
         <Text bold color={outcome.color} flexShrink={0}>
@@ -3098,24 +3167,26 @@ export function QueueDetailTitle({ row, data }: { row?: QueueTimelineProjectedRo
  * The run's STATUS + OUTCOME as one colorized label (`passed, integrated`),
  * deduped when the two words match, or undefined when neither is present.
  */
-function detailStatusOutcome(
-  row: QueueTimelineProjectedRow,
-  data?: QueueShowData,
-): Readonly<{ text: string; color: string }> {
-  if (data === undefined) {
-    return { text: `${row.glyph} ${row.status}`, color: timelineStatusColor(row) }
-  }
+function runStatusOutcome(data: QueueShowData): Readonly<{ text: string; color: string }> | undefined {
   const status = presentFact(data.status)
   const outcome = presentFact(data.outcome)
-  if (status === undefined && outcome === undefined) {
-    return { text: `${row.glyph} ${row.status}`, color: timelineStatusColor(row) }
-  }
+  if (status === undefined && outcome === undefined) return undefined
   const text =
     status !== undefined && outcome !== undefined && status !== outcome
       ? `${status}, ${outcome}`
       : (outcome ?? status ?? "")
-  const marker = presentFact(row.glyph)
+  const marker = presentFact(data.glyph)
   return { text: marker === undefined ? text : `${marker} ${text}`, color: taskStatusColor(data.taskStatus) }
+}
+
+/** The title-row variant: falls back to the row's own glyph + status. */
+function detailStatusOutcome(
+  row: QueueTimelineProjectedRow,
+  data?: QueueShowData,
+): Readonly<{ text: string; color: string }> {
+  const run = data === undefined ? undefined : runStatusOutcome(data)
+  const word = row.status === "pending" ? "todo" : row.status
+  return run ?? { text: `${row.glyph} ${word}`, color: timelineStatusColor(row) }
 }
 
 // Preserve the leading semantic unit instead of clipping an arbitrary suffix.
@@ -3139,14 +3210,15 @@ type TimelineStatusCell = Readonly<{ word: string; color: string }>
 
 // 15e is later than 15c/15d: STATUS remains a fixed column between TIME
 // and the RUN cell, while 15d supplies its semantic foreground colors.
-// Vocabulary (user respec 2026-07-15): rejected renders `fail`, integrated
-// renders `done` — the display buckets are pending/running/failed/done.
+// Vocabulary (user respec 2026-07-15; pending renders `todo` per user
+// directive 2026-07-21): rejected renders `fail`, integrated renders `done`
+// — the display buckets are todo/running/failed/done.
 function timelineStatusCell(row: QueueTimelineProjectedRow): TimelineStatusCell {
   const word =
     row.status === "running"
       ? "run"
       : row.status === "pending"
-        ? "pend"
+        ? "todo"
         : row.status === "integrated"
           ? "done"
           : row.status === "environment-refused"
@@ -3565,6 +3637,7 @@ function runnerTiming(projection: QueueTimelineProjection): Readonly<{ ageMs: nu
  */
 export function TitledBox({
   title,
+  titleRight,
   borderColor,
   padding,
   fill = false,
@@ -3573,6 +3646,10 @@ export function TitledBox({
   children,
 }: Readonly<{
   title: string
+  /** Right-aligned label punched into the top edge — `╭─ TITLE ──── LABEL ─╮`
+   *  (user directive 2026-07-21: the RUNNER box carries its uptime/downtime
+   *  timer here). Inherits the effective border color like the left title. */
+  titleRight?: string
   borderColor?: string
   padding?: number
   fill?: boolean
@@ -3629,6 +3706,11 @@ export function TitledBox({
           borderRight={false}
           borderBottom={false}
         />
+        {titleRight === undefined ? null : (
+          <Text color={border} flexShrink={0}>
+            {` ${titleRight} ─`}
+          </Text>
+        )}
         <Text color={border} flexShrink={0}>
           {"╮"}
         </Text>
@@ -3650,11 +3732,18 @@ export function TitledBox({
   )
 }
 
-/** Zero-padded H:MM uptime clock (user format: `uptime 03:45`). */
-function uptimeClock(milliseconds: number): string {
-  const minutes = Math.max(0, Math.floor(milliseconds / 60_000))
-  const hours = Math.floor(minutes / 60)
-  return `${String(hours).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`
+/**
+ * Adaptive runner clock (user directive 2026-07-21): `ss`, `m:ss`, or
+ * `h:mm:ss` depending on magnitude — the RUNNER box always shows a timer.
+ */
+function runnerClock(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000))
+  const seconds = totalSeconds % 60
+  const minutes = Math.floor(totalSeconds / 60) % 60
+  const hours = Math.floor(totalSeconds / 3600)
+  if (hours > 0) return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+  if (minutes > 0) return `${minutes}:${String(seconds).padStart(2, "0")}`
+  return `${seconds}s`
 }
 
 /** Newest terminal (completed-group) row timestamp — when the queue last drained anything. */
@@ -3688,7 +3777,9 @@ export function queueHealthMarker(projection: QueueTimelineProjection): QueueHea
   return { kind: "idle", color: "$fg-muted", pulse: ["$fg-muted", "$bg-surface-default"] }
 }
 
-const QUEUE_HEALTH_GLYPH = "●"
+// The runner health marker is the shell prompt itself (user directive
+// 2026-07-21): a pulsing `$` leads the runner command instead of a disc.
+const QUEUE_HEALTH_GLYPH = "$"
 
 function RunnerActivity({
   marker,
@@ -3714,63 +3805,78 @@ function RunnerActivity({
   )
 }
 
-/** Resident runner status is always visible in its own RUNNER frame. */
+/**
+ * Resident runner status is always visible in its own RUNNER frame. The
+ * queue-pause STATUS line lives INSIDE this frame (user directive 2026-07-21,
+ * supersedes the separate STATUS box), the uptime/downtime timer rides the
+ * top border right-aligned opposite the RUNNER title, and the health marker
+ * is a pulsing `$` shell prompt. Border severity: down/stale red, paused
+ * warning, healthy default.
+ */
 function TimelineRunnerBox({ projection, live = false }: { projection: QueueTimelineProjection; live?: boolean }) {
   const runner = projection.runner
   const timing = runnerTiming(projection)
   const runnerStale = timing !== null && timing.ageMs > RUNNER_STALE_MS
   const marker = queueHealthMarker(projection)
-  if (runner === null) {
-    const drained = timelineLastDrainedMs(projection)
-    const now = Date.parse(projection.now)
-    return (
-      <TitledBox title="RUNNER" borderColor="$fg-error">
-        <Box height={1} flexDirection="row" gap={1} minWidth={0}>
-          <RunnerActivity marker={marker} live={live} flexShrink={0}>
-            {QUEUE_HEALTH_GLYPH}
-          </RunnerActivity>
+  const pause = projection.pause
+  const now = Date.parse(projection.now)
+  const drained = timelineLastDrainedMs(projection)
+  const downMs =
+    runner === null
+      ? drained === null
+        ? null
+        : Math.max(0, now - drained)
+      : runnerStale
+        ? (timing?.ageMs ?? null)
+        : null
+  const timer =
+    marker.kind === "down"
+      ? downMs === null
+        ? undefined
+        : `downtime ${runnerClock(downMs)}`
+      : `uptime ${runnerClock(timing?.uptimeMs ?? 0)}`
+  const borderColor = marker.kind === "down" ? "$fg-error" : pause !== undefined ? "$fg-warning" : undefined
+  return (
+    <TitledBox
+      title="RUNNER"
+      {...(timer === undefined ? {} : { titleRight: timer })}
+      {...(borderColor === undefined ? {} : { borderColor })}
+    >
+      <Box height={1} flexDirection="row" gap={1} minWidth={0}>
+        <RunnerActivity marker={marker} live={live} bold flexShrink={0}>
+          {QUEUE_HEALTH_GLYPH}
+        </RunnerActivity>
+        {runner === null ? (
           <Text color="$fg-error" bold wrap="truncate" minWidth={0}>
             {drained === null
               ? "NO RUNNER - no drained run in window"
               : `NO RUNNER - queue last drained ${mediaDuration(now - drained)} ago`}
           </Text>
-        </Box>
-      </TitledBox>
-    )
-  }
-  return (
-    <TitledBox title="RUNNER" borderColor={runnerStale ? "$fg-error" : undefined}>
-      <Box height={1} flexDirection="row" gap={1} minWidth={0}>
-        <RunnerActivity marker={marker} live={live} flexShrink={0}>
-          {QUEUE_HEALTH_GLYPH}
-        </RunnerActivity>
-        <Text color={marker.color} wrap="truncate" minWidth={0}>
-          [{runner.pid}] {runner.command ?? "resident runner"}
-        </Text>
-        <Box flexGrow={1} flexBasis={0} minWidth={0} />
-        <Text color="$fg-muted" flexShrink={0}>
-          uptime {uptimeClock(timing?.uptimeMs ?? 0)}
-        </Text>
+        ) : (
+          <Text color={marker.color} wrap="truncate" minWidth={0}>
+            {runner.command ?? "resident runner"} <Text color="$fg-muted">[{runner.pid}]</Text>
+          </Text>
+        )}
       </Box>
       {runnerStale && timing !== null ? (
         <Text color="$fg-error" bold wrap="truncate">
           RUNNER STALE — last tick {mediaDuration(timing.ageMs)} ago
         </Text>
       ) : null}
-    </TitledBox>
-  )
-}
-
-/** STATUS owns the queue pause exception; RUNNER owns runner health. */
-function TimelineStatusBox({ projection }: { projection: QueueTimelineProjection }) {
-  const pause = projection.pause
-  if (pause === undefined) return null
-  const allowed = pause.allowedPRs.length === 0 ? "none" : pause.allowedPRs.join(",")
-  return (
-    <TitledBox title="STATUS" borderColor="$fg-warning">
-      <Text color="$fg-warning" wrap="truncate">
-        HOLD THE LINE — {pause.reason} · allowed {allowed}
-      </Text>
+      {pause === undefined ? null : (
+        <>
+          <Box height={1} flexShrink={0} />
+          <Box height={1} flexDirection="row" gap={1} minWidth={0}>
+            <Text color="$fg-warning" flexShrink={0}>
+              ×
+            </Text>
+            <Text color="$fg-warning" wrap="truncate" minWidth={0}>
+              <Text bold>STATUS</Text> HOLD THE LINE — {pause.reason} · allowed{" "}
+              {pause.allowedPRs.length === 0 ? "none" : pause.allowedPRs.join(",")}
+            </Text>
+          </Box>
+        </>
+      )}
     </TitledBox>
   )
 }
@@ -3986,10 +4092,11 @@ function TimelineFilterLine({
     .filter(Boolean)
     .join(" ")
   // The four status buckets are TogglePills labelled by their plain word with a
-  // BOLD first letter (item 3) — `pending`/`running`/`failed`/`done`, the bold
-  // `p`/`r`/`f`/`d` doubling as the hotkey hint (no `[p]` brackets). The whole
+  // BOLD first letter (item 3) — `todo`/`running`/`failed`/`done` (pending
+  // displays as `todo` per user directive 2026-07-21), the bold
+  // `t`/`r`/`f`/`d` doubling as the hotkey hint (no `[t]` brackets). The whole
   // cluster sits very dim and lifts together on hover (silvery TogglePillGroup);
-  // clicking a pill toggles its bucket, mirroring the p/r/f/d keys.
+  // clicking a pill toggles its bucket, mirroring the t/r/f/d keys.
   return (
     <TogglePillGroup
       {...(dimensions === "" ? {} : { label: dimensions })}
@@ -4000,7 +4107,7 @@ function TimelineFilterLine({
       {QUEUE_TIMELINE_STATUS_BUCKETS.map((bucket) => (
         <TogglePill
           key={bucket}
-          label={bucket}
+          label={bucket === "pending" ? "todo" : bucket}
           boldFirstLetter
           active={buckets.has(bucket)}
           onToggle={() => onToggleBucket?.(bucket)}
@@ -4107,7 +4214,10 @@ function ProjectedQueueTimeline({
                 </Text>
               </Box>
             )}
-            <QueueUpdatedClock now={projection.now} />
+            {/* The `updated HH:MM:SS` clock is gone from the live pane (user
+                directive 2026-07-21): the RUNNER box's always-on border timer
+                is the watch view's temporal-trust cue. One-shot prints below
+                keep the clock — a static snapshot has no ticking timer. */}
           </Box>
         ) : (
           <>
@@ -4118,7 +4228,6 @@ function ProjectedQueueTimeline({
           </>
         )}
         <TimelineRunnerBox projection={projection} live={nav} />
-        <TimelineStatusBox projection={projection} />
         {/* No blank row above the table header (item 5): the header sits flush
             under the boxes above it. The pills + coverage row moved BELOW the
             list (item 2), rendered after the rows block. */}
@@ -4969,30 +5078,40 @@ function runFailureReason(data: QueueShowData | undefined): string | undefined {
 }
 
 function prLineageLines(pr: PR, memberRevision: number, runDetails: readonly QueueShowData[]): readonly string[] {
-  const clocks = prRevisionClocks(pr)
+  const terminal = prRevisionClocks(pr)
     .filter((clock) => clock.revision <= memberRevision)
-    .toSorted((left, right) => {
-      const leftAt = left.terminal?.at ?? left.submittedAt ?? left.pushedAt
-      const rightAt = right.terminal?.at ?? right.submittedAt ?? right.pushedAt
-      return rightAt.localeCompare(leftAt)
+    .flatMap((clock) => {
+      if (clock.terminal === undefined) return []
+      const submittedAt = clock.submittedAt ?? clock.pushedAt
+      const ageMs = elapsedMs(submittedAt, clock.terminal.at, `PR '${pr.id}' revision ${clock.revision} terminal age`)
+      const reason =
+        clock.terminal.kind === "rejected"
+          ? (runFailureReason(runDetails.find((detail) => detail.run === clock.terminal?.run)) ?? "reason not recorded")
+          : undefined
+      const suffix = reason !== undefined ? ` (${reason})` : ageMs === undefined ? "" : ` (age ${mediaDuration(ageMs)})`
+      return [
+        {
+          at: clock.terminal.at,
+          line: `${queueLogClock(clock.terminal.at, true, false)} r${clock.revision} ${clock.terminal.kind}${suffix}`,
+        },
+      ]
     })
-  const terminal = clocks.flatMap((clock) => {
-    if (clock.terminal === undefined) return []
-    const submittedAt = clock.submittedAt ?? clock.pushedAt
-    const ageMs = elapsedMs(submittedAt, clock.terminal.at, `PR '${pr.id}' revision ${clock.revision} terminal age`)
-    const reason =
-      clock.terminal.kind === "rejected"
-        ? (runFailureReason(runDetails.find((detail) => detail.run === clock.terminal?.run)) ?? "reason not recorded")
-        : undefined
-    const suffix = reason !== undefined ? ` (${reason})` : ageMs === undefined ? "" : ` (age ${mediaDuration(ageMs)})`
-    return [`${queueLogClock(clock.terminal.at, true, false)} r${clock.revision} ${clock.terminal.kind}${suffix}`]
-  })
   const submitted = pr.revs.find((candidate) => candidate.n === memberRevision)
-  if (submitted === undefined) return terminal
-  return [
-    ...terminal,
-    `${queueLogClock(submitted.submittedAt ?? submitted.pushedAt, true, false)} submitted by ${submitted.actor ?? "-"}`,
-  ]
+  const submittedAt = submitted?.submittedAt ?? submitted?.pushedAt
+  const entries =
+    submitted === undefined || submittedAt === undefined
+      ? terminal
+      : [
+          ...terminal,
+          {
+            at: submittedAt,
+            line: `${queueLogClock(submittedAt, true, false)} submitted by ${submitted.actor ?? "-"}`,
+          },
+        ]
+  // The detail timeline reads strictly newest-first (user directive
+  // 2026-07-21): the selected revision's submit sorts among earlier
+  // revisions' terminals instead of always trailing them.
+  return entries.toSorted((left, right) => right.at.localeCompare(left.at)).map((entry) => entry.line)
 }
 
 function prDetailFacts(pr: PR, revision: number): readonly Readonly<{ key: string; value: string }>[] {
@@ -5031,19 +5150,32 @@ function prDetailFacts(pr: PR, revision: number): readonly Readonly<{ key: strin
   return facts
 }
 
-/** Round-6 Revision A v4's immutable, run-scoped member blocks. */
+/**
+ * The PR-scoped detail header (user directive 2026-07-21, supersedes Round-6
+ * Revision A v4's run-scoped member blocks): the detail view is FOR a PR, so
+ * this block leads the pane body — branch under the identity title, then the
+ * bold subject, then the newest-first timeline, then the aligned KEY/value
+ * facts. `titleAbove` drops the identity row when the pane title (see
+ * QueueDetailTitle) already owns it.
+ */
 export function QueueDetailRunPrBlocks({
   data,
   row,
   rows,
   prs,
   runDetails = [],
+  titleAbove = false,
+  position,
 }: {
   data?: QueueShowData
   row?: QueueTimelineProjectedRow
   rows: readonly QueueTimelineProjectedRow[]
   prs: readonly PR[]
   runDetails?: readonly QueueShowData[]
+  /** True when QueueDetailTitle renders the pr#id + ISSUE identity above. */
+  titleAbove?: boolean
+  /** Queue position for pending rows, rendered as one more KEY/value fact. */
+  position?: number
 }) {
   const members =
     data?.prs ??
@@ -5052,7 +5184,7 @@ export function QueueDetailRunPrBlocks({
       : [{ id: row.pr, revision: row.revision, headSha: row.headSha, branch: row.branch, base: row.base }])
   if (members.length === 0) return null
   return (
-    <Box flexDirection="column" minWidth={0} flexShrink={0} marginTop={data === undefined ? 0 : 1} color="$fg">
+    <Box flexDirection="column" minWidth={0} flexShrink={0} color="$fg">
       {members.map((member, index) => {
         const memberRow = rows.find(
           (candidate) =>
@@ -5071,7 +5203,11 @@ export function QueueDetailRunPrBlocks({
               ? []
               : [`${queueLogClock(memberRow.timestamp, true, false)} submitted by ${memberRow.submitter ?? "-"}`]
             : prLineageLines(pr, member.revision, runDetails)
-        const facts = pr === undefined ? [] : prDetailFacts(pr, member.revision)
+        const facts = [
+          ...(position === undefined ? [] : [{ key: "position", value: String(position) }]),
+          ...(pr === undefined ? [] : prDetailFacts(pr, member.revision)),
+        ]
+        const factKeyWidth = Math.max(0, ...facts.map((fact) => fact.key.length)) + 2
         return (
           <Box
             key={`${member.id}:${member.revision}:${member.headSha}`}
@@ -5079,15 +5215,17 @@ export function QueueDetailRunPrBlocks({
             marginTop={index === 0 ? 0 : 1}
             minWidth={0}
           >
-            <Box flexDirection="row" minWidth={0} overflow="hidden">
-              <QueuePrId pr={member.id} revision={member.revision} color="$fg-warning" wrap="truncate" />
-              {issue === undefined ? null : (
-                <>
-                  <Text> </Text>
-                  <IssueValue issue={issue} />
-                </>
-              )}
-            </Box>
+            {titleAbove ? null : (
+              <Box flexDirection="row" minWidth={0} overflow="hidden">
+                <QueuePrId pr={member.id} revision={member.revision} color="$fg-warning" wrap="truncate" />
+                {issue === undefined ? null : (
+                  <>
+                    <Text> </Text>
+                    <IssueValue issue={issue} />
+                  </>
+                )}
+              </Box>
+            )}
             <Box flexDirection="row" minWidth={0}>
               <Text internal_dim>{TIMELINE_BRANCH_ICON}</Text>
               <Text wrap="wrap" minWidth={0}>
@@ -5095,27 +5233,45 @@ export function QueueDetailRunPrBlocks({
               </Text>
             </Box>
             {subject === undefined ? null : (
-              <Text bold wrap="wrap" bgConflict="ignore">
-                - {subject}
-              </Text>
+              <>
+                <Box height={1} flexShrink={0} />
+                <Text bold wrap="wrap" bgConflict="ignore">
+                  {subject}
+                </Text>
+              </>
             )}
             {description === undefined
               ? null
-              : description.split("\n").map((row, rowIndex) => (
-                  <Text key={`description:${rowIndex}`} wrap="wrap" bgConflict="ignore">
-                    {row === "" ? " " : `  ${row}`}
+              : description.split("\n").map((line, lineIndex) => (
+                  <Text key={`description:${lineIndex}`} wrap="wrap" bgConflict="ignore">
+                    {line === "" ? " " : line}
                   </Text>
                 ))}
-            {facts.map((fact, factIndex) => (
-              <Text key={`${fact.key}:${factIndex}`} wrap="wrap" bgConflict="ignore">
-                {fact.key === "check requested" ? `- ${fact.value} check requested` : `- ${fact.key}: ${fact.value}`}
-              </Text>
-            ))}
-            {lineage.map((entry, entryIndex) => (
-              <Text key={`lineage:${entryIndex}`} wrap="wrap">
-                - {entry}
-              </Text>
-            ))}
+            {lineage.length === 0 ? null : (
+              <>
+                <Box height={1} flexShrink={0} />
+                {lineage.map((line, lineIndex) => (
+                  <Text key={`lineage:${lineIndex}`} wrap="wrap">
+                    {line}
+                  </Text>
+                ))}
+              </>
+            )}
+            {facts.length === 0 ? null : (
+              <>
+                <Box height={1} flexShrink={0} />
+                {facts.map((fact, factIndex) => (
+                  <Box key={`${fact.key}:${factIndex}`} flexDirection="row" minWidth={0}>
+                    <Text color="$fg-muted" flexShrink={0}>
+                      {fact.key.toUpperCase().padEnd(factKeyWidth)}
+                    </Text>
+                    <Text wrap="truncate" minWidth={0} bgConflict="ignore">
+                      {fact.value}
+                    </Text>
+                  </Box>
+                ))}
+              </>
+            )}
           </Box>
         )
       })}
@@ -5324,7 +5480,11 @@ function CompactQueueShowView({
               <QueueShowMembersValue data={data} highlightPr={highlightPr} />
             </Text>
           ) : null}
-          {data.retries > 1 ? <Text wrap="truncate">RETRY {data.retries}</Text> : null}
+          {data.retries > 1 && data.prs[0] !== undefined ? (
+            <Text wrap="truncate">
+              <QueuePrId pr={data.prs[0].id} revision={data.prs[0].revision} times={data.retries} />
+            </Text>
+          ) : null}
           {timing === undefined ? null : <Text wrap="truncate">{timing}</Text>}
           {showIntegration ? <QueueIntegrationFacts data={data} /> : null}
           {parent === undefined && isolation === undefined ? null : (
@@ -5492,7 +5652,6 @@ export function QueueShowView({
           { header: "TOTAL", key: "totalDuration", minWidth: 7, align: "right" },
           { header: "ACTIVE", key: "activeDuration", minWidth: 7, align: "right" },
           { header: "WAIT", key: "waitDuration", minWidth: 7, align: "right" },
-          { header: "RETRY", key: "retries", minWidth: 6, align: "right" },
           {
             header: "PARENT",
             key: "parent",

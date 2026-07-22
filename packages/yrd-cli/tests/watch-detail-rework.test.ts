@@ -1,10 +1,10 @@
 /**
  * 21106 W3 — DETAIL pane rework (user screenshot review, 2026-07-16).
  *
- * Pins the reshaped detail surface: the Candidate + Run identity title with
- * right-aligned colorized STATUS/OUTCOME; the linked ISSUE primitive; the
- * natural clock sentence plus COMMIT; separate JOB/RUNNER facts; and the
- * failure-only NEXT cue.
+ * Pins the reshaped detail surface: the PR-scoped identity title
+ * (`pr#<id>.<rev>`) with right-aligned colorized STATUS/OUTCOME; the linked
+ * ISSUE primitive; the natural clock sentence plus COMMIT; separate JOB/RUNNER
+ * facts; and the failure-only NEXT cue.
  */
 
 import { createElement } from "react"
@@ -93,33 +93,35 @@ describe("detail title row — target identity emphasis + right-aligned outcome"
       createElement(Box, { width: 120 }, createElement(QueueDetailTitle, { row })),
     )
     try {
-      // Candidate + Run form the execution identity; PR and branch move into
-      // member blocks while the deduped run outcome stays on this line.
-      expect(app.text).toContain(`CANDIDATE ${data.candidateId} RUN main#42`)
-      expect(app.text).not.toContain("PR42.1")
+      // Revision A makes the title PR-scoped (pr#<id>.<rev>); the run identity
+      // and branch move into the run header / member block while the deduped run
+      // outcome stays right-aligned on this line.
+      expect(app.text).toContain("pr#42.1")
+      expect(app.text).not.toContain("RUN main#42")
       expect(app.text).not.toContain("topic/pr42")
       expect(app.text).toContain(`${data.glyph} completed, integrated`)
 
-      const titleRow = app.text.split("\n").findIndex((text) => text.includes("main#42"))
+      const titleRow = app.text.split("\n").findIndex((text) => text.includes("pr#42.1"))
       expect(titleRow).toBeGreaterThanOrEqual(0)
 
-      // Identity is emphasized like the QUEUE tab: warning-colored + bold.
-      const identityColumn = app.text.split("\n")[titleRow]?.indexOf("RUN main#42") ?? -1
+      // Identity is emphasized like the QUEUE tab: warning-colored.
+      const identityColumn = app.text.split("\n")[titleRow]?.indexOf("pr#42.1") ?? -1
       const identityCell = app.cell(identityColumn, titleRow)
-      expect(identityCell.bold).toBe(true)
       expect(identityCell.fg).not.toBeNull()
 
-      expect(glyphColumn(app, titleRow), "branch marker belongs in the member block, not the run title").toBe(-1)
+      expect(glyphColumn(app, titleRow), "branch marker belongs in the member block, not the title").toBe(-1)
 
-      // STATUS/OUTCOME is colorized, distinct from the identity emphasis.
+      // STATUS/OUTCOME is bold and colorized, distinct from the identity color.
       const outcomeColumn = app.text.split("\n")[titleRow]?.indexOf("integrated") ?? -1
       const outcomeCell = app.cell(outcomeColumn, titleRow)
+      expect(outcomeCell.bold).toBe(true)
       expect(outcomeCell.fg).not.toBeNull()
       expect(outcomeCell.fg).not.toEqual(identityCell.fg)
 
       expect(app.text).not.toContain("15m00s")
-      expect(projectedOnly.text).toContain(`CANDIDATE ${data.candidateId} RUN main#42`)
-      expect(projectedOnly.text).not.toContain("CANDIDATE undefined")
+      expect(projectedOnly.text).toContain("pr#42.1")
+      expect(projectedOnly.text).not.toContain("CANDIDATE")
+      expect(projectedOnly.text).not.toContain("RUN main#42")
     } finally {
       app.unmount()
       projectedOnly.unmount()
@@ -235,14 +237,14 @@ describe("detail run facts — natural timing sentence + landing, no RUN/BASE du
   })
 })
 
-describe("detail run facts — RETRY only above one, NEXT only on failure (items f/g)", () => {
-  it("hides RETRY at one attempt and shows it above one", () => {
+describe("detail run facts — ×N retry mark only above one, NEXT only on failure (items f/g)", () => {
+  it("hides the retry mark at one attempt and shows it above one", () => {
     const base = integratedRun()
     const once = createRenderer({ cols: 120, rows: 20 })(
       createElement(QueueShowView, { data: { ...base, retries: 1 }, compact: true, section: "run", titleAbove: true }),
     )
     try {
-      expect(once.text).not.toContain("RETRY")
+      expect(once.text).not.toMatch(/×\d/)
     } finally {
       once.unmount()
     }
@@ -250,7 +252,7 @@ describe("detail run facts — RETRY only above one, NEXT only on failure (items
       createElement(QueueShowView, { data: { ...base, retries: 3 }, compact: true, section: "run", titleAbove: true }),
     )
     try {
-      expect(retried.text).toContain("RETRY 3")
+      expect(retried.text).toContain("pr#42.1×3")
     } finally {
       retried.unmount()
     }

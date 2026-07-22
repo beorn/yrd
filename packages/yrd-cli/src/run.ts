@@ -2642,7 +2642,7 @@ function queuePrDiffResult(pr: PR, revision: number, numstat: string, patch: str
   return { pr: pr.id, revision, additions, deletions, files, patch }
 }
 
-/** Resolve a revision-bound PR delta for the synthetic `0: submit` step. */
+/** Resolve a revision-bound PR delta for the watch detail's PR overview. */
 export function queuePrDiff(cwd: string, pr: PR, revision = prRevisionNumber(pr)): QueuePrDiff {
   const source = queuePrDiffSource(pr, revision)
   if (source === undefined) return { pr: pr.id, revision, unavailable: "refs-pruned" }

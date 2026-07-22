@@ -17,7 +17,8 @@ import {
 // rows → pills → stats), the "FILTER" label and the [p] brackets are
 // gone (pills are plain words, hotkey hint carried by a bold first letter — the
 // bold weight is verified by silvery's TogglePill unit test), and the blank row
-// above the table header is removed.
+// above the table header is removed. The pending bucket's pill now reads `todo`
+// and its hotkey moved to `t` (user directive 2026-07-21).
 //
 // NOTE (deliberate contract change): the earlier "pills row directly ABOVE the
 // list" layout-order call is overruled — the row now renders below the list.
@@ -64,7 +65,7 @@ describe("queue timeline FILTER pills row (items 2/3/5)", () => {
       await app.waitForLayoutStable()
       const headerY = rowIndex(app.text, /\bTIME\b/u)
       const firstRowY = rowIndex(app.text, /pr#0\.\d/u)
-      const pillsY = rowIndex(app.text, /pending.*running.*failed.*done/u)
+      const pillsY = rowIndex(app.text, /todo.*running.*failed.*done/u)
       const flowY = rowIndex(app.text, /╭─ FLOW /u)
 
       expect(app.text).toContain("╭─ RUNNER ")
@@ -97,8 +98,8 @@ describe("queue timeline FILTER pills row (items 2/3/5)", () => {
     try {
       await app.waitForLayoutStable()
       expect(app.text, "the FILTER label text is gone").not.toContain("FILTER")
-      expect(app.text, "no [p]/[r]/[f]/[d] brackets").not.toMatch(/\[[prfd]\]/u)
-      for (const word of ["pending", "running", "failed", "done"]) {
+      expect(app.text, "no [t]/[r]/[f]/[d] brackets").not.toMatch(/\[[trfd]\]/u)
+      for (const word of ["todo", "running", "failed", "done"]) {
         expect(app.text, `the ${word} pill renders as a plain word`).toContain(word)
       }
     } finally {

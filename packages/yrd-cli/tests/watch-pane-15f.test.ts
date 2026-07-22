@@ -12,19 +12,20 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
 
     try {
       await app.waitForLayoutStable()
-      // Revision B opens on the synthetic submit step. Workflow-step output
-      // remains inline and always expanded once its tab is selected.
-      await waitFor(() => app.text.includes("0: submit"))
+      // Round 6 removes the synthetic submit step; the pane opens on the live
+      // step. Workflow-step output stays inline and expanded once its tab is
+      // selected.
+      await waitFor(() => app.text.includes("1: prepare"))
 
       const tabLine = app.text
         .split("\n")
-        .find(
-          (row) => row.includes("submit") && row.includes("prepare") && row.includes("check") && row.includes("merge"),
-        )
+        .find((row) => row.includes("prepare") && row.includes("check") && row.includes("merge"))
       expect(tabLine, app.text).toBeDefined()
       expect(app.text).not.toContain("RUN LOGS")
 
-      await app.press("l")
+      // The pane opens on the live step (check is running); h/l and the arrows
+      // cycle the step tab while j/k stay on the QUEUE rows.
+      await app.press("h")
       expect(app.text).toContain("J42-prepare")
 
       await app.press("l")
@@ -40,9 +41,7 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       await waitFor(() => !app.text.includes("125 tests collected"))
 
       const rows = app.text.split("\n")
-      const tabsY = rows.findIndex(
-        (row) => row.includes("submit") && row.includes("prepare") && row.includes("check") && row.includes("merge"),
-      )
+      const tabsY = rows.findIndex((row) => row.includes("prepare") && row.includes("check") && row.includes("merge"))
       const tabsLine = rows[tabsY]
       if (tabsLine === undefined) throw new Error("workflow-step tab bar did not render")
       // The tab bar sits below the run facts, so it can share a text row with a
@@ -54,21 +53,26 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       await app.click(checkX, tabsY)
       await waitFor(() => app.text.includes("125 tests collected"))
 
-      // j/k move the QUEUE cursor (not the tabs); the detail follows the cursor.
+      // j/k move the QUEUE cursor (not the tabs); the detail follows the
+      // cursor. run#7 has no running step, so its detail opens on the PR tab
+      // (no RUN header there) — anchor on the title row instead, which names
+      // the selected PR regardless of which tab is active.
+      const titleRow = () => app.text.split("\n")[0] ?? ""
+
       await app.press("j")
       await app.press("j")
-      await waitFor(() => app.text.includes("RUN main#7"))
+      await waitFor(() => titleRow().includes("pr#7.1"))
 
       await app.press("k")
       await app.press("k")
-      await waitFor(() => app.text.includes("RUN main#42"))
+      await waitFor(() => titleRow().includes("pr#42.1"))
 
       await app.press("ArrowDown")
       await app.press("ArrowDown")
-      await waitFor(() => app.text.includes("RUN main#7"))
+      await waitFor(() => titleRow().includes("pr#7.1"))
       await app.press("ArrowUp")
       await app.press("ArrowUp")
-      await waitFor(() => app.text.includes("RUN main#42"))
+      await waitFor(() => titleRow().includes("pr#42.1"))
     } finally {
       app.unmount()
     }
@@ -79,13 +83,11 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
     const app = createRenderer({ cols: 200, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      await app.press("l")
-      await app.press("l")
+      // The pane opens on the live step (check is running); its output is visible
+      // without navigating.
       await waitFor(() => app.text.includes("125 tests collected"))
       const rows = app.text.split("\n")
-      const tabsY = rows.findIndex(
-        (row) => row.includes("submit") && row.includes("prepare") && row.includes("check") && row.includes("merge"),
-      )
+      const tabsY = rows.findIndex((row) => row.includes("prepare") && row.includes("check") && row.includes("merge"))
       const tabsLine = rows[tabsY] ?? ""
       const statusLine = rows[tabsY + 1] ?? ""
       expect(statusLine).toMatch(/✓ passed\s+\d+(?:m(?:\d+s)?|s)/u)
@@ -131,27 +133,36 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       await app.waitForLayoutStable()
       await waitFor(() => app.text.includes("JOB"))
       const rows = app.text.split("\n")
-      // Run timing is above the tabs; selected step internals begin with JOB.
+      // Enter,l,l lands two tabs right of the default (PR tab 0), i.e. on a
+      // real step tab (merge) — run context only renders for step tabs, not
+      // the PR tab. Run timing is below the tabs; selected step internals
+      // begin with JOB.
       const runFactsY = rows.findIndex((l) => l.includes("Started "))
       const tabsY = rows.findIndex((l) => l.includes("check") && l.includes("merge"))
       const stepContentY = rows.findIndex((l) => l.includes("JOB"))
-      // H: run-level facts sit ABOVE the step tabs, which sit ABOVE the step content.
-      expect(runFactsY, "run facts present").toBeGreaterThanOrEqual(0)
-      expect(tabsY, "step tabs below run facts").toBeGreaterThan(runFactsY)
-      expect(stepContentY, "step content below the tabs").toBeGreaterThan(tabsY)
+      // H revised: the step tabs are the visual title of their section, so
+      // they render ABOVE the run-level facts, which sit above the step content.
+      expect(tabsY, "step tabs present").toBeGreaterThanOrEqual(0)
+      expect(runFactsY, "run facts below the step tabs").toBeGreaterThan(tabsY)
+      expect(stepContentY, "step content below the run facts").toBeGreaterThan(runFactsY)
       expect(app.text).toContain("RUNNER")
       expect(app.text).not.toContain("DETAILS")
       expect(app.text).not.toContain("RUN LOGS")
 
-      // Command follows JOB/RUNNER; inline output follows the command.
-      const commandY = rows.findIndex((line) => line.includes("$ git merge --no-ff --no-edit"))
+      // Command follows JOB/RUNNER; inline output follows the command. The target
+      // model records the merge command itself, with the native PARENTS summary
+      // as its output; PARENTS also appears once above
+      // the command as a merge fact, so anchor the output on the last occurrence.
+      const commandLabel = "$ git merge --no-ff --no-edit"
+      const commandY = rows.findIndex((line) => line.includes(commandLabel))
       expect(commandY, "command header present").toBeGreaterThan(tabsY)
       expect(commandY, "command follows the step internals").toBeGreaterThan(stepContentY)
-      const outputY = rows.findIndex((row, index) => index > commandY && row.includes("PARENTS "))
+      const outputY = rows.findLastIndex((row) => row.includes("PARENTS "))
       expect(outputY, "inline output follows the command").toBeGreaterThan(commandY)
-      const commandX = rows[commandY]?.indexOf("$ git merge --no-ff --no-edit") ?? -1
+      const commandX = rows[commandY]?.indexOf(commandLabel) ?? -1
+      // The command execution header is emphasized by bold weight and a filled
+      // surface; it inherits the default foreground (no explicit fg color).
       expect(app.cell(commandX, commandY).bold).toBe(true)
-      expect(app.cell(commandX, commandY).fg).not.toBeNull()
       expect(rows[commandY]).not.toContain("[ $")
       expect(app.cell(commandX, commandY).bg, "command row has a deliberate filled surface").not.toBeNull()
     } finally {

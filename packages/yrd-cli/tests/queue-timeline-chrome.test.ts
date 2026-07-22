@@ -4,9 +4,11 @@
  * Covers the user-settled chrome respec (2026-07-15 live-pane review wave):
  * shared header/row column geometry (fixed TIME/STATUS/RUN + flex PR +
  * right-anchored STEP/BY/AGE/RUN cells), split RUN and PR header labels,
- * muted run ids, exceptional STATUS title-in-border chrome,
- * bottom-aligned FLOW/TIME, pane frames with padding, selection color forcing,
- * the failed/done status vocabulary, and the non-default-only FILTER row.
+ * muted run ids, the RUNNER box (its top border carries a uptime/downtime
+ * timer and the queue-pause STATUS line folds inside it — the separate STATUS
+ * box is gone, user directive 2026-07-21), bottom-aligned FLOW/TIME, pane
+ * frames with padding, selection color forcing, the todo/failed/done status
+ * vocabulary, and the non-default-only FILTER row.
  */
 
 import { createElement } from "react"
@@ -33,9 +35,10 @@ function rowAt(text: string, index: number): string {
 }
 
 /** The status-pills row (no more "FILTER" label; the four plain-word pills share
- *  one row with any non-default dimensions). */
+ *  one row with any non-default dimensions). The pending bucket's pill reads
+ *  `todo` (user directive 2026-07-21). */
 function pillsRow(text: string): string {
-  const found = text.split("\n").find((row) => /pending.*running.*failed.*done/u.test(row))
+  const found = text.split("\n").find((row) => /todo.*running.*failed.*done/u.test(row))
   if (found === undefined) throw new Error("no pills row")
   return found
 }
@@ -166,15 +169,16 @@ describe("queue timeline chrome 21106", () => {
       expect(iconFg, "branch glyph is dimmer than the branch name").not.toEqual(branchFg)
 
       // Item 9: a not-yet-started run shows a muted "-" in the RUN cell — no
-      // colored "pending" word there. The pending STATUS word keeps its info color.
-      const pendingRowY = rowIndexOf(text, " pend ")
-      const pendingRow = rowAt(text, pendingRowY)
-      expect(pendingRow, "run-less row shows no colored pending run id").not.toContain("pending")
-      const pendStatusX = pendingRow.indexOf("pend")
-      expect(pendStatusX, "pending status word present").toBeGreaterThan(0)
+      // colored pending word there. The pending STATUS cell reads `todo` (user
+      // directive 2026-07-21) and keeps its info color.
+      const todoRowY = rowIndexOf(text, " todo ")
+      const todoRow = rowAt(text, todoRowY)
+      expect(todoRow, "run-less row shows no colored pending run id").not.toContain("pending")
+      const todoStatusX = todoRow.indexOf("todo")
+      expect(todoStatusX, "todo status word present").toBeGreaterThan(0)
       expect(
-        app.cell(pendStatusX, pendingRowY).fg,
-        "pending status word keeps its own (info) color, distinct from muted TIME",
+        app.cell(todoStatusX, todoRowY).fg,
+        "todo status word keeps its own (info) color, distinct from muted TIME",
       ).not.toEqual(timeFg)
     } finally {
       app.unmount()
@@ -216,7 +220,9 @@ describe("queue timeline chrome 21106", () => {
       expect(app.text).toContain("╭─ RUNNER ")
       expect(app.text).not.toContain("╭─ STATUS ")
       expect(app.text).toContain("[342]")
-      expect(app.text).toContain("uptime 03:45")
+      // The RUNNER border timer uses the adaptive clock (H:MM:SS above an hour):
+      // 3h45m of uptime renders `uptime 3:45:00` (user directive 2026-07-21).
+      expect(app.text).toContain("uptime 3:45:00")
     } finally {
       app.unmount()
     }
@@ -271,7 +277,7 @@ describe("queue timeline chrome 21106", () => {
       await app.waitForLayoutStable()
       const filterLine = pillsRow(app.text)
       expect(filterLine, "unbounded window shows no since=").not.toContain("since=")
-      expect(filterLine).toContain("pending")
+      expect(filterLine).toContain("todo")
     } finally {
       app.unmount()
     }
@@ -288,11 +294,11 @@ describe("queue timeline chrome 21106", () => {
       // survives as a dim prefix and the pills are plain words (no brackets).
       expect(app.text, "FILTER label is deleted").not.toContain("FILTER")
       expect(filterLine).toContain("since=6:00:00")
-      expect(filterLine).toContain("pending")
+      expect(filterLine).toContain("todo")
       expect(filterLine).toContain("running")
       expect(filterLine).toContain("failed")
       expect(filterLine).toContain("done")
-      expect(filterLine, "no bracketed hotkey hints").not.toMatch(/\[[prfd]\]/u)
+      expect(filterLine, "no bracketed hotkey hints").not.toMatch(/\[[trfd]\]/u)
       expect(filterLine).not.toContain("terms=")
       expect(filterLine).not.toContain("latest=")
       expect(filterLine).not.toContain("status=")
@@ -309,7 +315,7 @@ describe("queue timeline chrome 21106", () => {
       const filterLine = pillsRow(app2.text)
       expect(filterLine).toContain("terms=typecheck")
       // Pills always render their label (bucket on/off is colour, not glyph).
-      expect(filterLine).toContain("pending")
+      expect(filterLine).toContain("todo")
       expect(filterLine).toContain("failed")
       expect(filterLine).toContain("done")
     } finally {
@@ -350,10 +356,11 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
-  it("heads the QUEUE pane with one clean tab carrying the updated clock (items L + C)", async () => {
-    // The QUEUE pane is headed by its tab-style label (item L); the `updated`
-    // clock rides that same tab row (item C — flush with the QUEUE tab), and
-    // sibling branch names do not wrap through the table header.
+  it("heads the live QUEUE pane with one clean tab and moves the temporal cue to the RUNNER border (items L + C)", async () => {
+    // The QUEUE pane is headed by its tab-style label (item L). The `updated`
+    // clock is GONE from the live pane header (user directive 2026-07-21): the
+    // RUNNER box's always-on border timer is the watch view's temporal-trust
+    // cue now. Sibling branch names still do not wrap through the table header.
     const snapshot = queueTimelineStories["production-overview"].snapshot
     const app = createRenderer({ cols: 160, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
     try {
@@ -361,7 +368,14 @@ describe("queue timeline chrome 21106", () => {
       await waitFor(() => app.text.includes("╭─ FLOW "))
       const queueLine = rowAt(app.text, rowIndexOf(app.text, "QUEUE main"))
       expect(queueLine, "QUEUE tab row omits sibling branch noise").not.toContain("release/")
-      expect(queueLine, "updated rides the QUEUE tab row").toMatch(/updated \d{2}:\d{2}:\d{2}/u)
+      // The `updated HH:MM:SS` clock is absent from the live pane header.
+      expect(app.text, "the live pane drops the updated clock").not.toMatch(/updated \d{2}:\d{2}:\d{2}/u)
+      // The temporal cue rides the RUNNER box's top border as uptime/downtime.
+      const runnerBorderY = rowIndexOf(app.text, "╭─ RUNNER ")
+      expect(runnerBorderY, "RUNNER box renders").toBeGreaterThanOrEqual(0)
+      expect(rowAt(app.text, runnerBorderY), "RUNNER border carries the uptime/downtime timer").toMatch(
+        /(?:uptime|downtime) \d/u,
+      )
       // No rounded box border around the QUEUE pane.
       expect(app.text).not.toContain("╭─ QUEUE")
     } finally {

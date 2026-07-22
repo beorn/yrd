@@ -59,10 +59,10 @@ describe("QueueWatchFrame fill-timeline cursor", () => {
       expect(app.text, "fill suppresses the pre-slice residue").not.toContain("... 1 more")
 
       // The mandated default cursor is the first RUNNING row. The detail title
-      // and JOB body resolve that same run without PR-list or log-accordion chrome.
-      expect(app.text.split("\n")[0], "detail resolves the running run").toContain("RUN main#RR")
-      await app.press("l")
-      await app.waitForLayoutStable()
+      // is PR-scoped now (user directive 2026-07-21), so the running run's PR
+      // identity heads the pane; the JOB body resolves the same run below,
+      // without PR-list or log-accordion chrome.
+      expect(app.text.split("\n")[0], "detail resolves the running run").toContain("pr#R.1")
       expect(app.text, "detail resolves the running run's job").toContain("JOB yrd#JRR-check")
       expect(app.text).not.toContain("RUN LOGS")
       expect(app.text).not.toMatch(/(?:^|\s)(?:▸|•)\s+PRS\b/gmu)

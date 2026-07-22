@@ -569,8 +569,28 @@ async function readBatches(
   })
 }
 
+/**
+ * How long SQLite waits for a held lock before returning SQLITE_BUSY.
+ *
+ * SQLite's default is 0 — a reader that arrives while a writer holds the lock
+ * fails INSTANTLY with "database is locked" rather than waiting. That default is
+ * wrong for this journal: `wal_autocheckpoint` is 0, so checkpoints are explicit,
+ * and `wal_checkpoint(TRUNCATE)` takes an EXCLUSIVE lock on the whole database.
+ * A long-lived reader such as `yrd watch` running beside an active queue runner
+ * therefore hits a lock window regularly, and with no timeout it crashes instead
+ * of waiting the few milliseconds the writer needs.
+ */
+const BUSY_TIMEOUT_MS = 5000
+
+/** Wait on contention instead of failing instantly (see BUSY_TIMEOUT_MS). */
+function applyBusyTimeout(database: Database): void {
+  database.run(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`)
+}
+
 function openReadOnly(path: string): Database {
-  return new Database(path, { readonly: true, strict: true })
+  const database = new Database(path, { readonly: true, strict: true })
+  applyBusyTimeout(database)
+  return database
 }
 
 async function withMutableDatabase<Result>(
@@ -595,6 +615,7 @@ function openMutable(runtime: Context): Database {
   try {
     const observed = sqliteVersion(database)
     assertSafeWalVersion(runtime.sqliteVersion ?? observed)
+    applyBusyTimeout(database)
     database.run("PRAGMA synchronous = FULL")
     database.run("PRAGMA wal_autocheckpoint = 0")
     database.fileControl(constants.SQLITE_FCNTL_PERSIST_WAL, 1)
@@ -640,6 +661,7 @@ async function publishCandidate(runtime: Context, legacy: LegacySource | null): 
   let retirement: Readonly<{ legacy: LegacySource; backup: string }> | undefined
   try {
     using database = new Database(candidate, { create: true, readwrite: true, strict: true })
+    applyBusyTimeout(database)
     database.run("PRAGMA journal_mode = DELETE")
     database.run("PRAGMA synchronous = FULL")
     createSchema(database, head, fingerprint)

@@ -61,9 +61,9 @@ describe("yrd watch enables terminal mouse tracking", () => {
       { ...WATCH_LIVE_RENDER_OPTIONS, signal: controller.signal },
     )
     try {
-      await waitFor(() => term.screen.getText().includes("0: submit"))
-      await handle.press("l")
-      await handle.press("l")
+      // The pane opens on the live step (check is running), so its output streams
+      // without navigating; the synthetic `0: submit` tab is gone in round 6.
+      await waitFor(() => term.screen.getText().includes("1: prepare"))
       await handle.waitForLayoutStable()
       await waitFor(() => term.screen.getText().includes("125 tests collected"))
       const rows = term.screen.getText().split("\n")
