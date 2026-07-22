@@ -11,7 +11,7 @@
         "@silvery/signals": "^0.23.0",
         "loggily": "^0.10.2",
         "react": "^19.2.0",
-        "silvery": "^0.23.0",
+        "silvery": "^0.23.1",
         "zod": "^4.4.3",
       },
       "devDependencies": {
@@ -50,7 +50,7 @@
         "@yrd/queue": "workspace:*",
         "loggily": "^0.10.2",
         "react": "^19.2.0",
-        "silvery": "^0.23.0",
+        "silvery": "^0.23.1",
         "zod": "^4.4.3",
       },
       "devDependencies": {
@@ -427,7 +427,7 @@
 
     "siginfo": ["siginfo@2.0.0", "", {}, "sha512-ybx0WO1/8bSBLEWXZvEd7gMW3Sn3JFlW3TvX1nREbDLRNQNaeNN8WK0meBwPdAaOI7TtRRRJn/Es1zhrrCHu7g=="],
 
-    "silvery": ["silvery@0.23.0", "", { "dependencies": { "@chenglou/pretext": "^0.0.8", "@silvery/color": "0.23.0", "@silvery/commander": "0.23.0", "@termless/core": "^0.8.1", "css-select": "^7.0.0", "css-what": "^8.0.0", "flexily": "0.7.3", "loggily": "^0.10.2", "react-reconciler": "^0.33.0", "slice-ansi": "^8.0.0", "string-width": "^8.2.2" }, "peerDependencies": { "@termless/ghostty": "^0.8.2", "@termless/ghostty-native": "^0.8.1", "@termless/test": "^0.8.1", "@termless/xtermjs": "^0.8.1", "playwright": ">=1.40.0", "react": "^18.0.0 || ^19.0.0" }, "optionalPeers": ["@termless/ghostty", "@termless/ghostty-native", "@termless/test", "@termless/xtermjs", "playwright"] }, "sha512-ONsSdm+mzap7eM8SzRJ80Wbkg4hdi5VIYxErj26+18yksXmrltneOMdYEzQTjRMQ4EM76/td759Q8Rd6MIrVwQ=="],
+    "silvery": ["silvery@0.23.1", "", { "dependencies": { "@chenglou/pretext": "^0.0.8", "@silvery/color": "0.23.0", "@silvery/commander": "0.23.0", "@termless/core": "^0.8.1", "css-select": "^7.0.0", "css-what": "^8.0.0", "flexily": "0.7.3", "loggily": "^0.10.2", "react-reconciler": "^0.33.0", "slice-ansi": "^8.0.0", "string-width": "^8.2.2" }, "peerDependencies": { "@termless/ghostty": "^0.8.2", "@termless/ghostty-native": "^0.8.1", "@termless/test": "^0.8.1", "@termless/xtermjs": "^0.8.1", "playwright": ">=1.40.0", "react": "^18.0.0 || ^19.0.0" }, "optionalPeers": ["@termless/ghostty", "@termless/ghostty-native", "@termless/test", "@termless/xtermjs", "playwright"] }, "sha512-9GaoNTrwzey58UmZbLQdO6Tmn+Xmln0xdFQF7jadGb+c67jSdMW46piSOEXw/9fe+qwxKluCngqSyuuCG/MGhw=="],
 
     "slice-ansi": ["slice-ansi@8.0.0", "", { "dependencies": { "ansi-styles": "^6.2.3", "is-fullwidth-code-point": "^5.1.0" } }, "sha512-stxByr12oeeOyY2BlviTNQlYV5xOj47GirPr4yA1hE9JCtxfQN0+tVbkxwCtYDQWhEKWFHsEK48ORg5jrouCAg=="],
 

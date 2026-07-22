@@ -4,8 +4,8 @@
 
 import { createElement } from "react"
 import { createRenderer } from "silvery/test"
-import type { AgNode } from "@silvery/ag/types"
-import { findContainBoundary, resolveUserSelect } from "@silvery/ag-term/mouse-events"
+import type { AgNode } from "silvery"
+import { findContainBoundary, resolveUserSelect } from "silvery/term"
 import { describe, expect, it } from "vitest"
 import {
   fixtureJob,
