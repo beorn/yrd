@@ -204,6 +204,54 @@ function markLegacyQueueTerminal(
     : (retention as JobsState["retention"])
 }
 
+function terminalizeUnstartedLegacyQueueFailure(state: DeepReadonly<JobsState>, run: string, at: string): JobsState {
+  const root = state.retention.queueRoots[run] ?? run
+  if (state.retention.legacyQueueRoots[root] !== true) return state as JobsState
+
+  let byId: Record<string, Job> | undefined
+  for (const [id, job] of Object.entries(state.byId)) {
+    if (queueJobRun(job.key) !== run || job.status !== "requested") continue
+    byId ??= { ...state.byId } as Record<string, Job>
+    // Old Queue writers could journal the terminal failure without the matching
+    // Job cancellation. Derive that missing terminal projection from immutable
+    // failure authority; a started Job is deliberately never touched here.
+    byId[id] = Job.apply(
+      job,
+      {
+        type: "cancel",
+        id,
+        attempt: job.attempt,
+        by: "yrd/queue",
+        reason: `Legacy Queue run '${run}' failed before the Job started`,
+      },
+      at,
+    )
+  }
+  if (byId === undefined) return state as JobsState
+
+  return {
+    ...state,
+    byId,
+    retention: markLegacyQueueTerminal(state.retention, byId, root),
+  }
+}
+
+function projectQueueFailure(state: DeepReadonly<JobsState>, applied: Event): JobsState {
+  const failed = applied.data as Readonly<{ run?: unknown; error?: Readonly<{ code?: unknown }> }>
+  if (typeof failed.run !== "string") return state as JobsState
+
+  const projected = terminalizeUnstartedLegacyQueueFailure(state, failed.run, applied.ts)
+  const root = projected.retention.queueRoots[failed.run] ?? failed.run
+  // Migration can meet a Queue root whose old terminal Jobs already aged out.
+  // Its explicit quiesce failure is fresh terminal authority, so mint the
+  // jobs-side order before Queue and Job projections co-compact.
+  const retention =
+    failed.error?.code === "legacy-quiesced"
+      ? markQueueTerminal(rememberQueueRoot(projected.retention, failed.run, root), root)
+      : markLegacyQueueTerminal(projected.retention, projected.byId, root)
+  return retention === projected.retention ? projected : { ...projected, retention }
+}
+
 function reopenRetention(
   retention: DeepReadonly<JobsState["retention"]>,
   job: DeepReadonly<Job>,
@@ -1035,7 +1083,7 @@ export function withJobs(options: JobsOptions = {}) {
         "job/transitioned": JobTransitionSchema,
         "job/restored": RestoreJobSchema,
       },
-      projectionVersion: "jobs-v6-detached-archive-retention",
+      projectionVersion: "jobs-v7-legacy-failure-retention",
       project: projectJobs,
       compact: (state) => ({ jobs: compactJobsState(state.jobs) }),
       create(yrd) {
@@ -1117,9 +1165,7 @@ function projectJobs(state: DeepReadonly<{ jobs: JobsState }>, applied: Event): 
     }
   }
   if (applied.name === "queue/run/failed") {
-    const run = (applied.data as Readonly<{ run?: unknown }>).run
-    if (typeof run !== "string") return state as { jobs: JobsState }
-    return state as { jobs: JobsState }
+    return { jobs: projectQueueFailure(state.jobs, applied) }
   }
   if (applied.name === "job/requested") {
     const request = applied.data as JobRequest

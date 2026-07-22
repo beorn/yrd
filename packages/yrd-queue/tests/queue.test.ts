@@ -316,6 +316,59 @@ function legacyQueueHistoryFrames(count: number): readonly JournalFrame[] {
   })
 }
 
+function legacyFailedBeforeStartHistoryFrames(count: number): readonly JournalFrame[] {
+  const nextId = ids(1_000_000)
+  return queueHistoryFrames(count).map((frame) => {
+    const legacy = structuredClone(frame)
+    const started = legacy.events.find(({ name }) => name === "queue/run/started")
+    const requested = legacy.events.find(({ name }) => name === "job/requested")
+    if (started === undefined || requested === undefined) {
+      throw new Error("expected Queue start and Job request fixtures")
+    }
+    const data = started.data as { run?: { id?: unknown; settlement?: unknown } }
+    if (data.run === undefined || typeof data.run.id !== "string") {
+      throw new Error("expected Queue run fixture")
+    }
+    delete data.run.settlement
+    return parseJournalFrame({
+      ...legacy,
+      events: [
+        started,
+        requested,
+        {
+          id: nextId(),
+          name: "queue/run/failed",
+          ts: started.ts,
+          data: {
+            run: data.run.id,
+            error: { code: "stale-pr", message: "PR changed before the requested Job started" },
+          },
+        },
+      ],
+    })
+  })
+}
+
+function legacyQuiesceAfterJobEvictionHistoryFrames(count: number): readonly JournalFrame[] {
+  return legacyQueueHistoryFrames(count).map((frame, index) => {
+    if (index !== 0) return frame
+    const recoverable = structuredClone(frame)
+    const finish = recoverable.events.find((event) => {
+      const data = event.data as { type?: unknown }
+      return event.name === "job/transitioned" && data.type === "finish"
+    })
+    if (finish === undefined) {
+      throw new Error("expected terminal Job fixture")
+    }
+    const transition = finish.data as { result?: unknown }
+    transition.result = {
+      status: "failed",
+      error: { code: "queue-environment-refused", message: "runner unavailable during legacy delivery" },
+    }
+    return parseJournalFrame(recoverable)
+  })
+}
+
 function workspace(): BayWorkspace {
   return {
     revision: "test-workspace-v1",
@@ -579,6 +632,52 @@ describe("Queue", () => {
       terminalQueueRoots: 512,
     })
     expect(app.queue.get("R1")).toMatchObject({ id: "R1", status: "passed" })
+  }, 15_000)
+
+  it("co-evicts failed legacy Queue roots and their never-started Jobs", async () => {
+    await using app = await createQueueApp(
+      { defaultSteps: ["check"] },
+      indexedJournal(legacyFailedBeforeStartHistoryFrames(513)),
+      undefined,
+      undefined,
+      createLogger("test", [{ level: "error" }, { write() {} }]),
+    )
+
+    expect(Queues.get(app.state().queues, "R1")).toBeUndefined()
+    expect(app.state().jobs.byKey["queue:R1:0"]).toBeUndefined()
+    expect(Queues.get(app.state().queues, "R2")).toBeDefined()
+    expect(app.state().jobs.byKey["queue:R2:0"]).toBeDefined()
+    expect(app.queue.retentionDiagnostics()).toMatchObject({ retainedRuns: 512, terminalTrees: 512 })
+    expect(app.jobs.retentionDiagnostics()).toMatchObject({
+      retainedJobs: 512,
+      liveJobs: 0,
+      queueJobs: 512,
+      terminalQueueRoots: 512,
+    })
+  }, 15_000)
+
+  it("quiesces a legacy root after its terminal Jobs aged out", async () => {
+    await using app = await createQueueApp(
+      { defaultSteps: ["check"] },
+      indexedJournal(legacyQuiesceAfterJobEvictionHistoryFrames(513)),
+      undefined,
+      ids(2_000_000),
+      createLogger("test", [{ level: "error" }, { write() {} }]),
+    )
+
+    expect(Queues.get(app.state().queues, "R1")).toBeDefined()
+    expect(app.state().jobs.byKey["queue:R1:0"]).toBeUndefined()
+    expect(app.state().jobs.retention.queueTerminalOrder.R1).toBeUndefined()
+
+    await expect(
+      app.queue.quiesceLegacyRoots({ now: "2026-01-01T01:00:00.000Z", by: "yrd/migration" }),
+    ).resolves.toEqual({
+      provenance: "migration/21012-legacy-quiesce",
+      reason: "legacy-quiesced",
+      quiesced: [{ run: "R1", jobs: [] }],
+    })
+    expect(app.queue.get("R1")).toMatchObject({ status: "failed", error: { code: "legacy-quiesced" } })
+    expect(app.state().jobs.retention.queueTerminalOrder.R1).toBeDefined()
   }, 15_000)
 
   it("resolves PR, Run, and base selectors while preserving canonical records", async () => {
@@ -2970,6 +3069,62 @@ describe("Queue", () => {
     expect(app.queue.checks([pr.id])).toMatchObject([
       { pr: pr.id, revision: 1, run: "R1", step: "check", status: "failed", error: { code: "stale-pr" } },
     ])
+  })
+
+  it("replays a legacy pinned-run failure before its requested Job starts", async () => {
+    const inner = createMemoryJournal()
+    const journal: typeof inner = {
+      read: (after, before) => inner.read(after, before),
+      append: (value, cursor) => {
+        const frame = structuredClone(value) as {
+          events?: { name?: string; data?: { run?: { settlement?: unknown } } }[]
+        }
+        for (const event of frame.events ?? []) {
+          if (event.name === "queue/run/started" && event.data?.run !== undefined) {
+            delete event.data.run.settlement
+          }
+        }
+        if (frame.events !== undefined) {
+          frame.events = frame.events.filter(({ name }) => name !== "queue/run/settled")
+        }
+        return inner.append(frame, cursor)
+      },
+    }
+    const id = ids()
+
+    {
+      await using app = await createQueueApp({}, journal, undefined, id)
+      const pr = await submitBranch(app, "issue/legacy-stale-before-job")
+      await app.bays.requestChecks({ pr: pr.id })
+      expect(await app.queue.admit({ prs: [pr.id] })).toHaveLength(1)
+      await app.bays.closePr({ pr: pr.id })
+      expect(await app.queue.admit({ prs: [pr.id] }, runtime)).toMatchObject([
+        { id: "R1", status: "failed", error: { code: "stale-pr" } },
+      ])
+    }
+
+    const frames: JournalFrame[] = []
+    for await (const batch of journal.read()) {
+      frames.push(...batch.values.map((value) => parseJournalFrame(value)))
+    }
+    const lifecycle = frames
+      .flatMap((frame) => frame.events)
+      .filter(({ name }) => ["queue/run/started", "job/requested", "pr/withdrawn", "queue/run/failed"].includes(name))
+      .map(({ name }) => name)
+    expect(lifecycle).toEqual(["queue/run/started", "job/requested", "pr/withdrawn", "queue/run/failed"])
+
+    await using replayed = await createQueueApp({}, indexedJournal(frames), undefined, id)
+    expect(replayed.queue.get("R1")).toMatchObject({
+      id: "R1",
+      status: "failed",
+      error: { code: "stale-pr" },
+    })
+    expect(replayed.queue.get("R1")?.steps[0]?.job).toMatchObject({
+      status: "canceled",
+      canceledBy: "yrd/queue",
+      cancelReason: "Legacy Queue run 'R1' failed before the Job started",
+    })
+    expect(replayed.state().jobs.retention.queueTerminalOrder.R1).toBeDefined()
   })
 
   it("keeps admission globally FIFO even when a later PR is selected explicitly", async () => {
