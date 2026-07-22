@@ -75,14 +75,39 @@ function prIdValue(pr: string): string {
   return pr.replace(/^pr(?:[-#])?/iu, "")
 }
 
-export function formatQueuePrId(pr: string, revision: number | string): string {
-  return formatNounId("pr", prIdValue(pr), revision)
+/**
+ * Retry — the SAME submission re-run N times by the queue (base moved, transient
+ * fail) — rides the PR identity as `×N`, distinct from the `.N` submission mark.
+ * A single run (first try) is bare. Mirrors the timeline's storm `×N`
+ * vocabulary; each retry is its own run id (see runOutputQueueageIndex).
+ *
+ * Note (submission/draft model, @yrd/core/21679): `.N` is the submission number
+ * and is shown from `.1` — a bare `pr#324` is reserved to mean DRAFT (zero
+ * submissions) once the draft state lands. Do NOT omit `.1`.
+ */
+function retrySuffix(times: number | undefined): string {
+  return times !== undefined && times > 1 ? `×${times}` : ""
+}
+
+export function formatQueuePrId(pr: string, revision: number | string, times?: number): string {
+  return `${formatNounId("pr", prIdValue(pr), revision)}${retrySuffix(times)}`
 }
 
 type QueueNounIdProps = Omit<React.ComponentProps<typeof NounId>, "noun" | "value" | "revision">
 
-function QueuePrId({ pr, revision, ...props }: { pr: string; revision: number | string } & QueueNounIdProps) {
-  return <NounId noun="pr" value={prIdValue(pr)} revision={revision} {...props} />
+function QueuePrId({
+  pr,
+  revision,
+  times,
+  ...props
+}: { pr: string; revision: number | string; times?: number } & QueueNounIdProps) {
+  const suffix = retrySuffix(times)
+  return (
+    <>
+      <NounId noun="pr" value={prIdValue(pr)} revision={revision} {...props} />
+      {suffix === "" ? null : <Text {...props}>{suffix}</Text>}
+    </>
+  )
 }
 
 function runIdValue(run: string): string {
@@ -5251,7 +5276,11 @@ function CompactQueueShowView({
               <QueueShowMembersValue data={data} highlightPr={highlightPr} />
             </Text>
           ) : null}
-          {data.retries > 1 ? <Text wrap="truncate">RETRY {data.retries}</Text> : null}
+          {data.retries > 1 && data.prs[0] !== undefined ? (
+            <Text wrap="truncate">
+              <QueuePrId pr={data.prs[0].id} revision={data.prs[0].revision} times={data.retries} />
+            </Text>
+          ) : null}
           {timing === undefined ? null : <Text wrap="truncate">{timing}</Text>}
           {showIntegration ? <QueueIntegrationFacts data={data} /> : null}
           {parent === undefined && isolation === undefined ? null : (
@@ -5418,7 +5447,6 @@ export function QueueShowView({
           { header: "TOTAL", key: "totalDuration", minWidth: 7, align: "right" },
           { header: "ACTIVE", key: "activeDuration", minWidth: 7, align: "right" },
           { header: "WAIT", key: "waitDuration", minWidth: 7, align: "right" },
-          { header: "RETRY", key: "retries", minWidth: 6, align: "right" },
           {
             header: "PARENT",
             key: "parent",
