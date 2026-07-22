@@ -53,7 +53,7 @@ issue -> bay -> pr -> queue -> merged
 - **pr** — the submitted change: a branch@head with numbered revisions. Review
   happens upstream; a yrd PR is the queue's unit.
 - **queue** — one per base branch. It verifies and merges PRs serially and can
-  pause intake without killing active work.
+  pause new runs, including retries, without killing active work.
 - **contest** — several implementations of one issue, evaluated against the
   same pin; the selected winner promotes to a PR.
 
