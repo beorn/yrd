@@ -2893,6 +2893,58 @@ describe("Queue", () => {
     expect(checks).toBe(3)
   })
 
+  it("lets an admitted check settle but suppresses every retry once the queue is paused", async () => {
+    const journal = createMemoryJournal()
+    const id = ids()
+    const checkStarted = Promise.withResolvers<void>()
+    const finishCheck = Promise.withResolvers<void>()
+    let checks = 0
+    const options = {
+      resolveBaseSha: () => BASE,
+      check: async () => {
+        checks++
+        if (checks === 1) {
+          checkStarted.resolve()
+          await finishCheck.promise
+        }
+        return {
+          status: "failed" as const,
+          error: {
+            code: "queue-environment-refused",
+            message: "inherited-red check environment is unavailable",
+          },
+        }
+      },
+    } satisfies Parameters<typeof queuePlugin>[0]
+    await using runner = await createQueueApp(options, journal, undefined, id)
+    const pr = await submitBranch(runner, "issue/pause-admitted-retry")
+    await runner.bays.requestChecks({ pr: pr.id, baseSha: BASE })
+    await using operator = await createQueueApp(options, journal, undefined, id)
+
+    let drainTurns = 0
+    const draining = runner.queue.run({ prs: [pr.id] }, { ...runtime, continueAdmissions: () => ++drainTurns <= 6 })
+    await checkStarted.promise
+    await operator.queue.pause({ base: "main", reason: "operator freeze", allowedPRs: [] })
+    finishCheck.resolve()
+
+    expect((await draining).map(({ id: run }) => run)).toEqual(["R1"])
+    expect(checks).toBe(1)
+    expect(Queues.ids(runner.state().queues)).toEqual(["R1"])
+    expect(runner.queue.eligibility(pr.id)).toMatchObject({
+      runnable: false,
+      reason: { code: "queue-paused" },
+      checks: { status: "failed", run: "R1" },
+    })
+    expect((await runner.dispatch(runner.commands.queue.admit, { pr: pr.id })).events).toEqual([])
+    expect((await runner.queue.admit({ prs: [pr.id] }, runtime)).map(({ id: run }) => run)).toEqual(["R1"])
+    expect(Queues.ids(runner.state().queues)).toEqual(["R1"])
+
+    await operator.queue.resume("main")
+    await runner.refresh()
+    expect(await runner.queue.admit({ prs: [pr.id] }, runtime)).toMatchObject([{ id: "R2", status: "failed" }])
+    expect(checks).toBe(2)
+  })
+
   it("does not let an unrelated waiting admission monopolize Queue capacity", async () => {
     await using app = await createQueueApp({
       check: (input) =>
