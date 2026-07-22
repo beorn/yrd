@@ -15,7 +15,11 @@ base: main
 batch: 4
 steps: [check, review, merge, deploy]
 requires: [review]
+lanes:
+  pm:
+    steps: [pm-check, merge, deploy]
 check: { run: bun run check, classification: base }
+pm-check: bun run pm-check
 review: { run: bun run review, runner: waiting }
 merge: { run: git merge --no-ff "$YRD_TARGET" }
 deploy: bun run deploy
@@ -32,8 +36,15 @@ notify:
       batch: 4,
       steps: ["check", "review", "merge", "deploy"],
       requires: ["review"],
+      lanes: {
+        pm: {
+          concurrency: 2,
+          steps: ["pm-check", "merge", "deploy"],
+        },
+      },
       definitions: {
         check: { run: "bun run check", runner: "local", classification: "base" },
+        "pm-check": { run: "bun run pm-check", runner: "local" },
         review: { run: "bun run review", runner: "waiting" },
         merge: { run: 'git merge --no-ff "$YRD_TARGET"', runner: "local" },
         deploy: { run: "bun run deploy", runner: "local" },
@@ -81,6 +92,16 @@ notify:
     [{ steps: ["check", "check"] }, "steps contains duplicate steps"],
     [{ requires: ["approval"] }, "requires"],
     [{ requires: ["review", "review"] }, "requires contains duplicate requirements"],
+    [
+      {
+        lanes: {
+          pm: { concurrency: 0, steps: ["check"] },
+        },
+      },
+      "lanes.pm.concurrency",
+    ],
+    [{ lanes: { pm: { concurrency: 2, steps: [] } } }, "lanes.pm.steps"],
+    [{ lanes: { pm: { steps: ["check"], paths: { exact: ["README.md"] } } } }, "lanes.pm.paths"],
     [{ check: { run: "bun run check", classification: "branch" } }, "check.classification"],
     [{ check: { runner: "remote" } }, "check.runner must be local or waiting"],
     [{ contest: { concurrency: 0 } }, "contest.concurrency must be an integer >= 1"],

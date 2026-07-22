@@ -811,6 +811,30 @@ notify:
 Names before `merge` run against the pinned Candidate. Names after `merge` run
 against the integrated commit. The TypeScript API enforces this statically; the
 YAML adapter validates the same ordering while composing plugins.
+
+Repositories with a cheaper documentation gate may add a derived PM lane:
+
+```yaml
+steps: [check, merge, deploy]
+lanes:
+  pm:
+    concurrency: 2
+    steps: [pm-check, merge, deploy]
+
+pm-check: bun run lint:docs
+```
+
+The embedding host supplies the immutable `queueLanePolicy`; lane-enabled
+configuration is refused when that code-owned policy is absent. The candidate
+never selects its lane. Yrd diffs the pinned base and head, stores the derived
+lane and exact admission steps on the Queue record, and uses PM only when every
+changed path matches the injected policy as a regular file. Mixed carriers,
+configuration, executables, symlinks, gitlinks, malformed evidence, and unknown
+evidence stay on SW or fail closed. PM admission capacity defaults to two while
+SW remains one; ready items retain queue order, and both lanes converge on the
+same serialized merge authority. A passed SW admission may cross only base
+advances proven by passed PM integrations.
+
 Object-form steps may declare `classification: base` when their evidence is
 about the resolved base rather than the submitted carrier; all other steps
 default to `carrier`. The classification is part of the installed-step cache
