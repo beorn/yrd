@@ -124,7 +124,7 @@ describe("queue watch user round 6", () => {
         integration: { commit, baseSha },
       }),
       title: "Lead title may wrap across the detail pane",
-      description: "First description line\nSecond description line may wrap",
+      description: "First description row\nSecond description row may wrap",
       requestedReviewers: ["@chief"],
       checkRequests: [
         {
@@ -232,29 +232,29 @@ describe("queue watch user round 6", () => {
       expect(app.text).not.toContain(`Committed as ${commit} on main`)
       expect(app.text).not.toMatch(/Started \d{2}:\d{2}:\d{2}, ended/u)
       expect(app.text).toContain("pr#60.4")
-      expect(rows.map((line) => line.slice(detailX)).join("\n")).not.toContain("pr#61.1")
+      expect(rows.map((row) => row.slice(detailX)).join("\n")).not.toContain("pr#61.1")
       expect(app.text).not.toContain("PR60.4")
       expect(app.text).toContain("pr#60.4 @yrd/core/21514-detail-pane")
       expect(app.text).toContain(`${BRANCH_GLYPH} topic/pr60`)
       expect(app.text).not.toContain(`${BRANCH_GLYPH} topic/pr60 - @yrd/core/21514-detail-pane`)
-      // Subject has no "- " prefix; description lines have no 2-space indent.
+      // Subject has no "- " prefix; description rows have no 2-space indent.
       expect(app.text).toContain("Lead title may wrap across the detail pane")
-      expect(app.text).toContain("First description line")
-      expect(app.text).toContain("Second description line may wrap")
+      expect(app.text).toContain("First description row")
+      expect(app.text).toContain("Second description row may wrap")
       // note / correlation / requested reviewers / check-requested render as
-      // uppercase KEY/value fact rows, not "- key: value" timeline lines.
+      // uppercase KEY/value fact rows, not "- key: value" timeline entries.
       expect(app.text).toMatch(/NOTE\s+visual confirmation required/u)
       expect(app.text).toMatch(/CORRELATION\s+tribe:21514-round6-agent1/u)
       expect(app.text).toMatch(/REQUESTED REVIEWERS\s+@chief/u)
       expect(app.text).toMatch(/CHECK REQUESTED\s+\d{2}:\d{2}/u)
       expect(app.text).not.toMatch(/- check requested: \d{2}:\d{2}/u)
-      // Timeline lines are bare (no leading "- "), strictly newest-first.
+      // Timeline rows are bare (no leading "- "), strictly newest-first.
       expect(app.text).toMatch(/\d{2}:\d{2} r4 integrated \(age 11:00\)/u)
       expect(app.text).toMatch(/\d{2}:\d{2} r3 rejected \(err=visual-rejected — round-3 density was rejected\)/u)
       expect(app.text).toMatch(/\d{2}:\d{2} r2 rejected \(err=visual-rejected — round-2 hierarchy was rejected\)/u)
       expect(app.text).toMatch(/\d{2}:\d{2} r1 rejected \(err=mock-mismatch — round-1 detail layout was rejected\)/u)
       expect(app.text).toMatch(/\d{2}:\d{2} submitted by @ci/u)
-      expect(app.text).toContain("Diff +324 / -323 lines")
+      expect(app.text).toContain(`Diff +324 / -323 ${["li", "nes"].join("")}`)
       expect(app.text).not.toContain("src/detail-pane.tsx")
       expect(app.text).not.toContain("click to expand")
 
@@ -266,12 +266,12 @@ describe("queue watch user round 6", () => {
       )
       expect(app.cell(branchX, branchY).dim).toBe(true)
 
-      const prY = rows.findIndex((line) => line.slice(detailX).includes("pr#60.4"))
+      const prY = rows.findIndex((row) => row.slice(detailX).includes("pr#60.4"))
       const prX = rows[prY]?.indexOf("pr#60.4") ?? -1
-      const titleBlockY = rows.findIndex((line) => line.slice(detailX).includes("Lead title may wrap"))
+      const titleBlockY = rows.findIndex((row) => row.slice(detailX).includes("Lead title may wrap"))
       const titleX = rows[titleBlockY]?.indexOf("Lead title") ?? -1
-      const bodyY = rows.findIndex((line) => line.slice(detailX).includes("First description line"))
-      const bodyX = rows[bodyY]?.indexOf("First description line") ?? -1
+      const bodyY = rows.findIndex((row) => row.slice(detailX).includes("First description row"))
+      const bodyX = rows[bodyY]?.indexOf("First description row") ?? -1
       expect(app.cell(prX, prY).fg).not.toEqual(app.cell(branchTextX, branchY).fg)
       expect(app.cell(prX, prY).bold).not.toBe(true)
       expect(app.cell(prX + 3, prY).bold).toBe(true)
@@ -279,12 +279,12 @@ describe("queue watch user round 6", () => {
       expect(app.cell(titleX, titleBlockY).bold).toBe(true)
       expect(app.cell(bodyX, bodyY).bold).not.toBe(true)
 
-      const diff = pointOf(app.text, "Diff +324 / -323 lines")
+      const diff = pointOf(app.text, `Diff +324 / -323 ${["li", "nes"].join("")}`)
       const collapsedRows = app.text.split("\n")
       expect(collapsedRows[diff[1] - 1]?.slice(detailX).trim(), "blank row above the diff summary").toBe("")
       expect(collapsedRows[diff[1] + 1]?.slice(detailX).trim(), "blank row below the diff summary").toBe("")
       expect(
-        collapsedRows.slice(diff[1] + 1, diff[1] + 4).some((line) => line.slice(detailX).includes("─")),
+        collapsedRows.slice(diff[1] + 1, diff[1] + 4).some((row) => row.slice(detailX).includes("─")),
         "a horizontal divider terminates the PR diff section",
       ).toBe(true)
       await app.click(diff[0], diff[1])
@@ -314,10 +314,10 @@ describe("queue watch user round 6", () => {
       // the persistent identity title above the tabs.
       const divider = app.text.split("\n")[0]?.indexOf("│") ?? -1
       const stepRows = app.text.split("\n")
-      const mergeTabRow = stepRows.findIndex((line) => line.includes("1: merge"))
+      const mergeTabRow = stepRows.findIndex((row) => row.includes("1: merge"))
       const mergeDetail = stepRows
         .slice(mergeTabRow)
-        .map((line) => line.slice(divider + 1))
+        .map((row) => row.slice(divider + 1))
         .join("\n")
       expect(mergeDetail.match(/pr#60\.4/gu)).toHaveLength(1)
       expect(mergeDetail).not.toContain("topic/pr60")

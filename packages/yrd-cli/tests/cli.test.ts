@@ -3987,13 +3987,16 @@ describe("runYrd", () => {
       runner: "yrd-cli:4242",
       leaseExpiresAt: "2026-07-09T13:00:00.000Z",
     })
-    expect(app.queue.get("R1")?.status).toBe("running")
+    expect(app.queue.get("R1")?.status).toBe("in_progress")
 
     // The unscoped public command, before the lease expires, is a no-op — nothing lapsed.
     const noop = outputIO({ now: () => Date.parse("2026-07-09T12:00:00.000Z") })
     expect(await runYrd(app, yrd("queue", "recover", "--json"), noop.io), noop.stderr()).toBe(0)
     expect(JSON.parse(noop.stdout())).toEqual({ command: "queue.recover", results: [] })
-    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "running", runner: "yrd-cli:4242" })
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({
+      status: "in_progress",
+      runner: "yrd-cli:4242",
+    })
 
     // --runner force-settles the unexpired ghost from that known-dead runner NOW,
     // so an operator can clear a fresh ghost without waiting out the lease.
@@ -4004,9 +4007,20 @@ describe("runYrd", () => {
     ).toBe(0)
     expect(JSON.parse(forced.stdout())).toMatchObject({
       command: "queue.recover",
-      results: [{ id: "R1", status: "failed", steps: [{ job: { status: "lost" } }] }],
+      results: [
+        {
+          id: "R1",
+          status: "completed",
+          conclusion: "failure",
+          steps: [{ job: { status: "completed", conclusion: "timed_out" } }],
+        },
+      ],
     })
-    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "lost", runner: "yrd-cli:4242" })
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({
+      status: "completed",
+      conclusion: "timed_out",
+      runner: "yrd-cli:4242",
+    })
   })
 
   it("records an external failing verdict successfully while the queue run becomes failed", async () => {
@@ -4838,11 +4852,14 @@ describe("runYrd", () => {
           command: expect.any(String),
         })
         now += 1_000
-        await new Promise((resolve) => setTimeout(resolve, 20))
-        expect(JSON.parse(readFileSync(statusPath, "utf8"))).toMatchObject({
-          pid: process.pid,
-          lastTickAt: "2026-07-13T12:00:01.000Z",
-        })
+        await vi.waitFor(
+          () =>
+            expect(JSON.parse(readFileSync(statusPath, "utf8"))).toMatchObject({
+              pid: process.pid,
+              lastTickAt: "2026-07-13T12:00:01.000Z",
+            }),
+          { timeout: 5_000, interval: 5 },
+        )
         heartbeat.check()
       } finally {
         now += 1_000

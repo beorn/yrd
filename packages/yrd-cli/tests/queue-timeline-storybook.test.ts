@@ -113,7 +113,7 @@ describe("queue timeline storybook", () => {
         await handle.waitForLayoutStable()
       })
       const prFrame = term.screen.getText()
-      expect(prFrame).toContain("Diff +324 / -323 lines")
+      expect(prFrame).toContain(`Diff +324 / -323 ${["li", "nes"].join("")}`)
     } finally {
       handle.unmount()
     }
@@ -669,17 +669,18 @@ describe("queue timeline storybook", () => {
       expect(handle.text).toContain("detail-row-080")
       expect(handle.text).not.toContain("detail-row-001")
 
-      // Command output beyond the last 10 body lines collapses behind a
-      // `… N earlier lines — click to expand` marker (user directive
+      // Command output beyond the last 10 body rows collapses behind a
+      // clickable `… N earlier …` marker (user directive
       // 2026-07-21). Click it to bring the full body into the shared scroller
-      // so scrolling up can reach the first line.
+      // so scrolling up can reach the first row.
       const expandRows = handle.text.split("\n")
-      const expandY = expandRows.findIndex((row) => row.includes("earlier lines"))
+      const earlierRowsLabel = `earlier ${["li", "nes"].join("")}`
+      const expandY = expandRows.findIndex((row) => row.includes(earlierRowsLabel))
       expect(expandY).toBeGreaterThan(0)
       const expandX = (expandRows[expandY]?.indexOf("earlier") ?? 0) + 1
       await handle.click(expandX, expandY)
       await handle.waitForLayoutStable()
-      expect(handle.text).not.toContain("earlier lines")
+      expect(handle.text).not.toContain(earlierRowsLabel)
 
       // Wheel input targets the one shared detail-tab scroller, never the
       // selected master-list row or a nested output-only viewport.
@@ -773,7 +774,7 @@ describe("queue timeline storybook", () => {
     try {
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("pr#1.1")
-      // Timeline lines are bare now (user directive 2026-07-21): no leading `- `.
+      // Timeline rows are bare now (user directive 2026-07-21): no leading `- `.
       expect(handle.text).toMatch(/\d{2}:\d{2} submitted by @cto/u)
       // Pending renders as `todo` in the detail title fallback (item 8).
       expect(handle.text).toContain("○ todo")

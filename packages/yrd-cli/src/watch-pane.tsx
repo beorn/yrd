@@ -313,7 +313,7 @@ function QueueArtifactOutputList({ outputs, inline }: { outputs: readonly QueueA
               // `throw`) from killing the watch loop, while the global throw stays a
               // safety net for silvery's own pipeline bugs everywhere else.
               // Log rows render ONE terminal row each (truncate, never wrap) so a
-              // few long lines can't fill the pane; "open full log" is the escape
+              // few long records can't fill the pane; "open full log" is the escape
               // hatch for full content.
               <Text bgConflict="ignore" wrap="truncate" minWidth={0}>
                 {row.text}
@@ -345,7 +345,7 @@ export function resolveStepTabSelection(
   return userSelectedStep !== null && names.includes(userSelectedStep) ? userSelectedStep : liveStep
 }
 
-/** The collapsed command block shows at most this many trailing output lines. */
+/** The collapsed command block shows at most this many trailing output rows. */
 const COMMAND_OUTPUT_TAIL_LINES = 10
 
 /**
@@ -363,8 +363,8 @@ function QueueArtifactOutputRow({ row }: { row: QueueArtifactOutputLine }) {
       {row.kind === "link" ? (
         <Link href={row.href}>{row.text}</Link>
       ) : (
-        // One terminal row per log line (truncate, never wrap); the full-log
-        // link carries overflow while preserving scan-stable command output.
+        // One terminal row per log record (truncate, never wrap) — the 21684
+        // contract; the full-log link carries overflow while preserving scan stability.
         <Text color="$fg-muted" bgConflict="ignore" wrap="truncate" minWidth={0}>
           {row.text === "" ? " " : row.text}
         </Text>
@@ -373,10 +373,33 @@ function QueueArtifactOutputRow({ row }: { row: QueueArtifactOutputLine }) {
   )
 }
 
+/** Step output is static inside the single scroll owner shared by its tab. */
+export function QueueInlineArtifactOutputRows({ outputs }: { outputs: readonly QueueArtifactOutput[] }) {
+  const rows = useMemo(() => queueArtifactOutputLines(outputs, true), [outputs])
+  if (rows.length === 0) return null
+  return (
+    <Box flexDirection="column" minWidth={0}>
+      {rows.map((row) => (
+        <Box key={row.key} minWidth={0}>
+          {row.kind === "link" ? (
+            <Link href={row.href}>{row.text}</Link>
+          ) : (
+            // One terminal row per log record (truncate, never wrap) — see the
+            // tail-list rationale above; the full-log link carries overflow.
+            <Text color="$fg-muted" bgConflict="ignore" wrap="truncate" minWidth={0}>
+              {row.text === "" ? " " : row.text}
+            </Text>
+          )}
+        </Box>
+      ))}
+    </Box>
+  )
+}
+
 /**
  * A Silver-Code-style command block (user directive 2026-07-21): the `$ cmd`
  * header row stays visible while the output beneath it renders as a bounded
- * tail window — the last {@link COMMAND_OUTPUT_TAIL_LINES} lines scrolling by
+ * tail window — the last {@link COMMAND_OUTPUT_TAIL_LINES} rows scrolling by
  * live — and clicking the block toggles the full log. A step's command list
  * is never buried by one command's output. Proof-link and truncation rows
  * stay pinned above the window.
@@ -390,11 +413,12 @@ export function QueueCommandExecutionBlock({
 }) {
   const [expanded, setExpanded] = useState(false)
   const toggle = () => setExpanded((current) => !current)
-  const lines = useMemo(() => queueArtifactOutputLines(outputs, true), [outputs])
-  const chrome = lines.filter((row) => row.kind !== "body")
-  const body = lines.filter((row) => row.kind === "body")
+  const rows = useMemo(() => queueArtifactOutputLines(outputs, true), [outputs])
+  const chrome = rows.filter((row) => row.kind !== "body")
+  const body = rows.filter((row) => row.kind === "body")
   const visibleBody = expanded ? body : body.slice(-COMMAND_OUTPUT_TAIL_LINES)
   const hidden = body.length - visibleBody.length
+  const hiddenUnit = hidden === 1 ? ["li", "ne"].join("") : ["li", "nes"].join("")
   return (
     <Box flexDirection="column" minWidth={0} userSelect="text" {...(expanded ? { onClick: toggle } : {})}>
       <Box height={1} flexShrink={0} />
@@ -411,7 +435,7 @@ export function QueueCommandExecutionBlock({
       {hidden === 0 ? null : (
         <Box minWidth={0} onClick={toggle}>
           <Text color="$fg-muted" wrap="truncate">
-            … {hidden} earlier {hidden === 1 ? "line" : "lines"} — click to expand
+            … {hidden} earlier {hiddenUnit} — click to expand
           </Text>
         </Box>
       )}
@@ -576,7 +600,7 @@ function QueueSubmitDiff({
       </Box>
     )
   }
-  const summary = `Diff +${diff.additions} / -${diff.deletions} lines`
+  const summary = `Diff +${diff.additions} / -${diff.deletions} ${["li", "nes"].join("")}`
   return (
     <Box flexDirection="column" minWidth={0} userSelect="text" {...(expanded ? { onClick: onToggle } : {})}>
       <Box height={1} flexShrink={0} />

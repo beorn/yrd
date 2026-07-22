@@ -20,8 +20,8 @@ async function waitForLines(path: string, count: number): Promise<string[]> {
   const deadline = Date.now() + 5_000
   while (Date.now() < deadline) {
     try {
-      const lines = readFileSync(path, "utf8").trim().split("\n").filter(Boolean)
-      if (lines.length >= count) return lines
+      const records = readFileSync(path, "utf8").trim().split("\n").filter(Boolean)
+      if (records.length >= count) return records
     } catch {
       // The supervised process has not created its evidence file yet.
     }
@@ -147,14 +147,14 @@ describe("yrd watch hot reload", () => {
       })
 
       const first = await waitForLines(evidence, 1)
-      expect(first.map((line) => JSON.parse(line))).toEqual([expect.objectContaining({ identity: "before" })])
+      expect(first.map((entry) => JSON.parse(entry))).toEqual([expect.objectContaining({ identity: "before" })])
 
       writeFileSync(identity, 'export const identity = "after"\n')
       const reloaded = await waitForLines(evidence, 2)
       await Bun.sleep(250)
       const settled = readFileSync(evidence, "utf8").trim().split("\n").filter(Boolean)
       expect(settled).toHaveLength(2)
-      expect(reloaded.map((line) => JSON.parse(line))).toEqual([
+      expect(reloaded.map((entry) => JSON.parse(entry))).toEqual([
         expect.objectContaining({ identity: "before" }),
         expect.objectContaining({ identity: "after" }),
       ])
