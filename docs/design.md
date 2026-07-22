@@ -259,11 +259,11 @@ concluded success`. Reviews participate as asynchronous required checks
   exact/prefix/retry metadata, record history, and run-authority history share
   one JSON-compatible persistent SHA-256 radix lookup; an immutable update
   copies only its bounded digest path rather than the complete history map.
-  New Queue starts explicitly declare settlement ownership. A pre-settlement
-  journal may migrate only after every legacy root is terminal; an unfinished
-  legacy root refuses startup until the prior writer is quiesced, rather than
-  guessing whether the historical start still owns work. Git stores remain
-  named by content (`prs.git`; candidate refs under
+  New Queue starts explicitly declare settlement ownership. The startup
+  migration refuses live-leased pre-settlement roots, auto-quiesces only
+  unleased roots with a receipt, and admits terminal legacy roots to bounded
+  retention. It never guesses whether a historical start still owns work. Git
+  stores remain named by content (`prs.git`; candidate refs under
   `refs/yrd/candidates/`).
 - Event names are namespaced by owning plugin (`pr/…`, `queue/…`, `job/…`).
 

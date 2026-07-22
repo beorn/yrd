@@ -189,6 +189,21 @@ function touchLegacyQueueRoot(retention: DeepReadonly<JobsState["retention"]>, r
   }
 }
 
+function markLegacyQueueTerminal(
+  retention: DeepReadonly<JobsState["retention"]>,
+  jobs: Readonly<Record<string, DeepReadonly<Job>>>,
+  root: string,
+): JobsState["retention"] {
+  if (retention.legacyQueueRoots[root] !== true) return retention as JobsState["retention"]
+  const members = Object.values(jobs).filter((job) => {
+    const run = queueJobRun(job.key)
+    return run !== undefined && (retention.queueRoots[run] ?? run) === root
+  })
+  return members.length > 0 && members.every(Job.terminal)
+    ? touchLegacyQueueRoot(retention, root)
+    : (retention as JobsState["retention"])
+}
+
 function reopenRetention(
   retention: DeepReadonly<JobsState["retention"]>,
   job: DeepReadonly<Job>,
@@ -660,8 +675,9 @@ export function createJobs(options: CreateJobsOptions): Jobs {
       for (const applied of frame.events) projection = projectJobs(projection, applied)
     }
     const job = projection.jobs.byId[jobId]
-    if (job === undefined)
+    if (job === undefined) {
       throw new Error(`yrd: archived Job '${jobId}' did not project from its immutable event slice`)
+    }
     return job
   }
 
@@ -1070,15 +1086,17 @@ function projectJobs(state: DeepReadonly<{ jobs: JobsState }>, applied: Event): 
   if (applied.name === "queue/run/started") {
     const run = (applied.data as Readonly<{ run?: unknown }>).run
     if (typeof run !== "object" || run === null) return state as { jobs: JobsState }
-    const record = run as Readonly<{ id?: unknown; parent?: unknown; settlement?: unknown }>
+    const record = run as Readonly<{ id?: unknown; parent?: unknown; settlement?: unknown; steps?: unknown }>
     if (typeof record.id !== "string" || record.settlement === "explicit") return state as { jobs: JobsState }
     const parent = typeof record.parent === "string" ? record.parent : undefined
     const root = parent === undefined ? record.id : (state.jobs.retention.queueRoots[parent] ?? parent)
     const remembered = rememberQueueRoot(state.jobs.retention, record.id, root)
+    const legacy = rememberLegacyQueueRoot(remembered, root)
     return {
       jobs: {
         ...state.jobs,
-        retention: touchLegacyQueueRoot(rememberLegacyQueueRoot(remembered, root), root),
+        retention:
+          Array.isArray(record.steps) && record.steps.length === 0 ? touchLegacyQueueRoot(legacy, root) : legacy,
       },
     }
   }
@@ -1101,9 +1119,7 @@ function projectJobs(state: DeepReadonly<{ jobs: JobsState }>, applied: Event): 
   if (applied.name === "queue/run/failed") {
     const run = (applied.data as Readonly<{ run?: unknown }>).run
     if (typeof run !== "string") return state as { jobs: JobsState }
-    const root = state.jobs.retention.queueRoots[run] ?? run
-    const retention = touchLegacyQueueRoot(state.jobs.retention, root)
-    return retention === state.jobs.retention ? (state as { jobs: JobsState }) : { jobs: { ...state.jobs, retention } }
+    return state as { jobs: JobsState }
   }
   if (applied.name === "job/requested") {
     const request = applied.data as JobRequest
@@ -1147,6 +1163,7 @@ function projectJobs(state: DeepReadonly<{ jobs: JobsState }>, applied: Event): 
   const change = applied.data as JobTransition
   const current = state.jobs.byId[change.id]
   const projected = Job.apply(current, change, applied.ts)
+  const byId = { ...state.jobs.byId, [change.id]: projected }
   let retention = change.type === "retry" ? reopenRetention(state.jobs.retention, projected) : state.jobs.retention
   if (Job.terminal(projected) && (current === undefined || !Job.terminal(current))) {
     const run = queueJobRun(projected.key)
@@ -1155,17 +1172,14 @@ function projectJobs(state: DeepReadonly<{ jobs: JobsState }>, applied: Event): 
     } else {
       retention = rememberQueueRoot(retention, run)
       const root = retention.queueRoots[run] ?? run
-      retention = touchLegacyQueueRoot(retention, root)
+      retention = markLegacyQueueTerminal(retention, byId, root)
     }
   }
   return {
     ...state,
     jobs: {
       ...state.jobs,
-      byId: {
-        ...state.jobs.byId,
-        [change.id]: projected,
-      },
+      byId,
       retention,
     },
   }

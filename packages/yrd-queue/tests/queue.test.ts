@@ -808,6 +808,9 @@ describe("Queue", () => {
     await seedLegacyStuckRoot(journal, id, "issue/legacy-leased-root")
 
     await using replayed = await createQueueApp({}, journal, undefined, id)
+    expect(replayed.state().jobs.retention.legacyQueueRoots.R1).toBe(true)
+    expect(replayed.state().jobs.retention.queueRoots.R1).toBe("R1")
+    expect(replayed.state().jobs.retention.queueTerminalOrder.R1).toBeUndefined()
     // Lease expires at 00:01:00; migrate at 00:00:30 while it is still live.
     await expect(
       replayed.queue.quiesceLegacyRoots({ now: "2026-01-01T00:00:30.000Z", by: "yrd/migration" }),

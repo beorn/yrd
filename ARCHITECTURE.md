@@ -186,12 +186,13 @@ window without resurrecting that Queue tree.
 A cold replay from initial state validates the complete unpruned projection
 before one compaction pass. A tail replay validates the current live projection
 after every complete incoming batch, before that batch is compacted. The cold
-boundary is also the migration gate for pre-settlement Queue journals:
-unfinished legacy roots fail before checkpoint publication, while quiesced
-roots receive journal-derived terminal order and enter the same Queue/Job
-retention window. Atomic appends validate and compact only after the whole
-Frame projects. `historySnapshot()` independently replays and validates the
-complete authority without compacting it.
+boundary also preserves pre-settlement Queue journals for the explicit startup
+migration: live-leased legacy roots remain uncompacted and are refused, while
+unleased roots are auto-quiesced with a receipt. Only terminal legacy roots
+receive journal-derived order and enter the same Queue/Job retention window.
+Atomic appends validate and compact only after the whole Frame projects.
+`historySnapshot()` independently replays and validates the complete authority
+without compacting it.
 
 Current event schemas remain strict for every append. A plugin may additionally
 declare a replay-only schema for an older payload; Core tries it only while

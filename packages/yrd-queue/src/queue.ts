@@ -549,7 +549,6 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
       },
       projectionVersion: "queues-v5-legacy-root-retention",
       project: projectQueues,
-      validate: (state) => assertLegacyQueueMigration(state as unknown as DeepReadonly<RuntimeState>),
       compact: (state, complete) => {
         const runtime = complete as unknown as DeepReadonly<RuntimeState>
         return { queues: compactQueueProjection(state.queues, runtime.jobs, runtime.bays) }
@@ -2178,6 +2177,7 @@ function compactQueueProjection(
   jobs: DeepReadonly<JobsState>,
   bays: DeepReadonly<BaysState>,
 ): QueuesState {
+  const runtime = { queues, jobs, bays }
   const terminalOrder = { ...queues.retention.terminalOrder }
   for (const root of Object.keys(terminalOrder)) {
     const order = jobs.retention.queueTerminalOrder[root]
@@ -2185,6 +2185,7 @@ function compactQueueProjection(
   }
   for (const record of Queues.values(queues)) {
     if (record.parent !== undefined || record.settlement !== undefined) continue
+    if (needsSettlement(runtime, materializeRun(record, jobs))) continue
     const order = jobs.retention.queueTerminalOrder[record.id]
     if (order === undefined) {
       throw new Error(`yrd: quiesced legacy Queue root '${record.id}' has no terminal journal order`)
