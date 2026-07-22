@@ -259,9 +259,10 @@ describe("queue timeline storybook", () => {
       await handle.press("n")
       await waitFor(() => term.screen.getText().includes("anchored-new · next"))
 
-      // The next snapshot must update the existing frame. Remounting loses the
-      // anchor/follow state and makes this named visual story falsely show no new rows.
-      expect(term.screen.getText()).toContain("↓ 1 new run — G jumps")
+      // The next snapshot updates the existing frame and keeps physical row 0
+      // live without requiring a catch-up affordance or remount.
+      expect(term.screen.getText()).toContain("pr#13.1")
+      expect(term.screen.getText()).not.toMatch(/new runs?|G jumps/u)
     } finally {
       handle.unmount()
     }
@@ -634,7 +635,8 @@ describe("queue timeline storybook", () => {
       expect(anchoredFrame.text).not.toContain("1 new")
       const nextAnchoredFrame = renderAnchored(createElement(QueueWatchFrame, { snapshot: anchored.nextSnapshot }))
       await nextAnchoredFrame.waitForLayoutStable()
-      expect(nextAnchoredFrame.text).toContain("1 new")
+      expect(nextAnchoredFrame.text).toContain("pr#13.1")
+      expect(nextAnchoredFrame.text).not.toMatch(/new runs?|G jumps/u)
     } finally {
       anchoredFrame.unmount()
     }
