@@ -301,6 +301,7 @@ export type QueuesState = Readonly<{
   index: QueueProjectionIndex
   authority: QueueAuthorityState
   terminalAssociations: QueueTerminalAssociations
+  retention: Readonly<{ terminalOrder: Readonly<Record<QueueRunId, number>> }>
 }>
 
 export type PREligibilityReason = Readonly<{
@@ -497,6 +498,7 @@ export const Queues = Object.freeze({
       },
       authority: { statuses: {}, current: {}, submits: {}, checks: {}, claims: {}, runs: {} },
       terminalAssociations: { pending: {}, applied: {} },
+      retention: { terminalOrder: {} },
     }
   },
 

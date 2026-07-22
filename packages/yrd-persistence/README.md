@@ -27,8 +27,11 @@ schema contains:
 
 - `journal_events`, the cursor-ordered append tail with SHA-256 bound to the
   exact stored JSON bytes;
-- one `journal_snapshot` row with an exact cursor-addressable prefix and an
-  independently checked Core projection checkpoint;
+- `journal_history`, immutable row-addressable frames covered by a checkpoint;
+- journal-owned command/cause/event and Job/Job-key/Queue lookup facts derived
+  in the same frame transaction and checked against decoded history;
+- one `journal_snapshot` row binding the history boundary to an independently
+  checked, bounded Core projection checkpoint;
 - `journal_orphans`, detached audit frames that never enter Core replay; and
 - schema, head-cursor, migration-completion, and source-fingerprint metadata.
 
@@ -58,17 +61,26 @@ writer remains alive. The first threshold coalesces a background save after
 until the save catches up. Close drains in-flight work and performs a final
 save.
 
-Snapshot publication is one SQL transaction: extend the cursor-addressable
-prefix, bind the Core checkpoint to the same cursor, then delete covered rows
-from `journal_events`. `read(after, before)` joins the exact prefix and remaining
-tail, so old notification cursors and legacy byte boundaries remain valid after
-SQL deletion. A stale runtime cannot lower the snapshot cursor.
+Snapshot publication is one SQL transaction: insert covered tail rows into
+`journal_history`, bind the Core checkpoint to the same cursor, then delete the
+covered rows from `journal_events`. `read(after, before)` joins row history and
+the remaining tail, so old notification cursors and legacy byte boundaries
+remain valid after SQL deletion. A stale runtime cannot lower the snapshot
+cursor. After commit, persistence attempts `incremental_vacuum(256)`; failure is
+reported as deferred while the acknowledged checkpoint stays readable.
 
 Mutable journals expose checkpoint `load` and `save`; read-only journals expose
 `load` only. Read-only access leaves DB, WAL, schema, and rows unchanged.
 SQLite may create or update the volatile `-shm` coordination file while a live
 WAL database is open; immutable media therefore requires a closed/checkpointed
 database or a separately proven immutable-open path.
+
+Fresh databases enable incremental auto-vacuum before schema creation. A
+schema-v1 database migrates under the writer lock by validating and rowifying
+its old prefix, deriving and equality-checking every lookup fact, committing a
+maintenance-pending schema-v2 authority, and then running one full `VACUUM`.
+The completion marker is written only afterward. Reopen resumes any interrupted
+maintenance phase idempotently; read-only access refuses incomplete migration.
 
 ## Legacy migration and recovery
 

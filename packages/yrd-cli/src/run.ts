@@ -966,6 +966,19 @@ export function mergedQueueRuns(
   return { running: merge("running"), waiting: merge("waiting"), finished: merge("finished") }
 }
 
+function historicalQueueRuns(
+  runs: readonly QueueRun[],
+  bases: ReadonlySet<string>,
+): Pick<QueueSummary, "running" | "waiting" | "finished"> {
+  const identities = new Set([...bases].map(baseIdentity))
+  const scoped = runs.filter((run) => identities.has(baseIdentity(run.base))).toSorted(byQueueRunChronology)
+  return {
+    running: scoped.filter((run) => run.status === "running"),
+    waiting: scoped.filter((run) => run.status === "waiting"),
+    finished: scoped.filter((run) => run.status !== "running" && run.status !== "waiting"),
+  }
+}
+
 function selectedBays(state: BaysState, selectors: readonly string[], cwd: string, action: string): Bay[] {
   if (selectors.length > 0) {
     return unique(
@@ -3205,11 +3218,19 @@ async function logRuns(
 ): Promise<void> {
   const state = stateOf(app)
   const target = queueLogTargets(state, selectors, options.base, options.pr)
+  const history = options.all === true ? await app.queue.history() : undefined
+  if (history !== undefined && selectors.length === 0 && options.base === undefined && options.pr === undefined) {
+    for (const run of history) target.bases.add(run.base)
+  }
   const summaries: QueueStatusResult[] = []
   for (const group of await queueTargetGroups(target.bases, io)) {
-    const canonical = app.queue.status(group.base)
-    const aliases = [...group.aliases].filter((base) => base !== group.base).map((base) => app.queue.status(base))
-    const merged = mergedQueueRuns(canonical, aliases)
+    const merged =
+      history === undefined
+        ? mergedQueueRuns(
+            app.queue.status(group.base),
+            [...group.aliases].filter((base) => base !== group.base).map((base) => app.queue.status(base)),
+          )
+        : historicalQueueRuns(history, group.aliases)
     const inScope = (run: QueueRun) =>
       target.selected.size === 0 || run.prs.some((member) => target.selected.has(member.id))
     const runs = {

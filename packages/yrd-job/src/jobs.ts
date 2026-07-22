@@ -10,6 +10,8 @@ import {
   type YrdDef,
   JsonSchema,
   observeYrdLifecycle,
+  parseJournalFrame,
+  type JournalHistory,
 } from "@yrd/core"
 import type { Scope } from "@silvery/scope"
 import { computed, type ReadSignal } from "@silvery/signals"
@@ -21,54 +23,76 @@ import {
   JobWaitingSchema,
   jobTerminalResultSchema,
   type JobDef,
-  type JobError,
   type JobRequest,
   type JobResult,
   type JobWaiting,
 } from "./job.ts"
 
-type JobBase = Readonly<{
-  id: string
-  definition: string
-  revision: string
-  input: JsonValue
-  key?: string
-  attempt: number
-  requestedAt: string
-  changedAt: string
-}>
+const IdSchema = z.string().trim().min(1)
+const AttemptSchema = z.number().int().positive()
+const TimestampSchema = z.iso.datetime({ precision: 3 })
+const JobBaseSchema = z
+  .object({
+    id: IdSchema,
+    definition: IdSchema,
+    revision: IdSchema,
+    input: JsonSchema,
+    key: IdSchema.optional(),
+    attempt: z.number().int().nonnegative(),
+    requestedAt: TimestampSchema,
+    changedAt: TimestampSchema,
+  })
+  .strict()
+const JobExecutionSchema = z.object({ startedAt: TimestampSchema, runner: IdSchema }).strict()
+const JobEvidenceSchema = z
+  .object({
+    token: IdSchema.optional(),
+    url: z.string().min(1).optional(),
+    detail: z.string().optional(),
+    artifacts: z.array(JsonSchema).optional(),
+    checkpoint: JsonSchema.optional(),
+  })
+  .strict()
+const ExecutingJobBaseSchema = JobBaseSchema.extend(JobExecutionSchema.shape)
+const EvidencedJobBaseSchema = ExecutingJobBaseSchema.extend(JobEvidenceSchema.shape)
+const JobSchema = z.union([
+  JobBaseSchema.extend({ status: z.literal("requested") }).strict(),
+  ExecutingJobBaseSchema.extend({ status: z.literal("running"), leaseExpiresAt: TimestampSchema }).strict(),
+  EvidencedJobBaseSchema.extend({ status: z.literal("waiting"), token: IdSchema }).strict(),
+  EvidencedJobBaseSchema.extend({
+    status: z.literal("passed"),
+    finishedAt: TimestampSchema,
+    output: JsonSchema,
+  }).strict(),
+  EvidencedJobBaseSchema.extend({
+    status: z.literal("failed"),
+    finishedAt: TimestampSchema,
+    error: JobErrorSchema,
+    output: JsonSchema.optional(),
+  }).strict(),
+  ExecutingJobBaseSchema.extend({
+    status: z.literal("lost"),
+    finishedAt: TimestampSchema,
+    lostReason: z.string().min(1),
+  }).strict(),
+  JobBaseSchema.extend({
+    status: z.literal("canceled"),
+    finishedAt: TimestampSchema,
+    canceledBy: IdSchema,
+    cancelReason: z.string().min(1),
+  }).strict(),
+  EvidencedJobBaseSchema.extend({
+    status: z.literal("canceled"),
+    finishedAt: TimestampSchema,
+    canceledBy: IdSchema,
+    cancelReason: z.string().min(1),
+  }).strict(),
+])
 
-type JobExecution = Readonly<{
-  startedAt: string
-  runner: string
-}>
-
-type JobEvidence = Readonly<{
-  token?: string
-  url?: string
-  detail?: string
-  artifacts?: readonly JsonValue[]
-  checkpoint?: JsonValue
-}>
-
-type JobCancellation = Readonly<{
-  status: "canceled"
-  finishedAt: string
-  canceledBy: string
-  cancelReason: string
-}>
-
-export type Job =
-  | (JobBase & { status: "requested" })
-  | (JobBase & JobExecution & { status: "running"; leaseExpiresAt: string })
-  | (JobBase & JobExecution & JobEvidence & { status: "waiting"; token: string })
-  | (JobBase & JobExecution & JobEvidence & { status: "passed"; finishedAt: string; output: JsonValue })
-  | (JobBase &
-      JobExecution &
-      JobEvidence & { status: "failed"; finishedAt: string; error: JobError; output?: JsonValue })
-  | (JobBase & JobExecution & { status: "lost"; finishedAt: string; lostReason: string })
-  | (JobBase & JobCancellation)
-  | (JobBase & JobExecution & JobEvidence & JobCancellation)
+export type Job = DeepReadonly<z.infer<typeof JobSchema>>
+type JobBase = DeepReadonly<z.infer<typeof JobBaseSchema>>
+type JobExecution = DeepReadonly<z.infer<typeof JobExecutionSchema>>
+type JobEvidence = DeepReadonly<z.infer<typeof JobEvidenceSchema>>
 
 function jobResultAttributes(definition: JobDef, result: Job, observed?: JobResult): Readonly<Record<string, unknown>> {
   const projected = observed === undefined ? undefined : definition.observeResult?.(observed)
@@ -85,11 +109,270 @@ function jobResultAttributes(definition: JobDef, result: Job, observed?: JobResu
 export type JobsState = Readonly<{
   byId: Readonly<Record<string, Job>>
   byKey: Readonly<Record<string, string>>
+  retention: Readonly<{
+    next: number
+    standaloneTerminalOrder: Readonly<Record<string, number>>
+    queueRoots: Readonly<Record<string, string>>
+    queueTerminalOrder: Readonly<Record<string, number>>
+    legacyQueueRoots: Readonly<Record<string, true>>
+    detachedQueueJobs: Readonly<Record<string, true>>
+  }>
 }>
 
-const IdSchema = z.string().trim().min(1)
-const AttemptSchema = z.number().int().positive()
-const TimestampSchema = z.iso.datetime({ precision: 3 })
+const TERMINAL_QUEUE_RUN_WINDOW = 512
+const TERMINAL_STANDALONE_JOB_WINDOW = 512
+const QUEUE_JOB_KEY = /^queue:(.+):\d+$/u
+
+function emptyJobsState(): JobsState {
+  return {
+    byId: {},
+    byKey: {},
+    retention: {
+      next: 1,
+      standaloneTerminalOrder: {},
+      queueRoots: {},
+      queueTerminalOrder: {},
+      legacyQueueRoots: {},
+      detachedQueueJobs: {},
+    },
+  }
+}
+
+function queueJobRun(key: string | undefined): string | undefined {
+  return key === undefined ? undefined : QUEUE_JOB_KEY.exec(key)?.[1]
+}
+
+function rememberQueueRoot(
+  retention: DeepReadonly<JobsState["retention"]>,
+  run: string,
+  root = run,
+): JobsState["retention"] {
+  if (retention.queueRoots[run] === root) return retention as JobsState["retention"]
+  return { ...retention, queueRoots: { ...retention.queueRoots, [run]: root } }
+}
+
+function markStandaloneTerminal(retention: DeepReadonly<JobsState["retention"]>, job: string): JobsState["retention"] {
+  if (retention.standaloneTerminalOrder[job] !== undefined) return retention as JobsState["retention"]
+  return {
+    ...retention,
+    next: retention.next + 1,
+    standaloneTerminalOrder: { ...retention.standaloneTerminalOrder, [job]: retention.next },
+  }
+}
+
+function markQueueTerminal(retention: DeepReadonly<JobsState["retention"]>, root: string): JobsState["retention"] {
+  if (retention.queueTerminalOrder[root] !== undefined) return retention as JobsState["retention"]
+  return {
+    ...retention,
+    next: retention.next + 1,
+    queueTerminalOrder: { ...retention.queueTerminalOrder, [root]: retention.next },
+  }
+}
+
+function rememberLegacyQueueRoot(
+  retention: DeepReadonly<JobsState["retention"]>,
+  root: string,
+): JobsState["retention"] {
+  if (retention.legacyQueueRoots[root] === true) return retention as JobsState["retention"]
+  return {
+    ...retention,
+    legacyQueueRoots: { ...retention.legacyQueueRoots, [root]: true },
+  }
+}
+
+function touchLegacyQueueRoot(retention: DeepReadonly<JobsState["retention"]>, root: string): JobsState["retention"] {
+  if (retention.legacyQueueRoots[root] !== true) return retention as JobsState["retention"]
+  return {
+    ...retention,
+    next: retention.next + 1,
+    queueTerminalOrder: { ...retention.queueTerminalOrder, [root]: retention.next },
+  }
+}
+
+function markLegacyQueueTerminal(
+  retention: DeepReadonly<JobsState["retention"]>,
+  jobs: Readonly<Record<string, DeepReadonly<Job>>>,
+  root: string,
+): JobsState["retention"] {
+  if (retention.legacyQueueRoots[root] !== true) return retention as JobsState["retention"]
+  const members = Object.values(jobs).filter((job) => {
+    const run = queueJobRun(job.key)
+    return run !== undefined && (retention.queueRoots[run] ?? run) === root
+  })
+  return members.length > 0 && members.every(Job.terminal)
+    ? touchLegacyQueueRoot(retention, root)
+    : (retention as JobsState["retention"])
+}
+
+function terminalizeUnstartedLegacyQueueFailure(state: DeepReadonly<JobsState>, run: string, at: string): JobsState {
+  const root = state.retention.queueRoots[run] ?? run
+  if (state.retention.legacyQueueRoots[root] !== true) return state as JobsState
+
+  let byId: Record<string, Job> | undefined
+  for (const [id, job] of Object.entries(state.byId)) {
+    if (queueJobRun(job.key) !== run || job.status !== "requested") continue
+    byId ??= { ...state.byId } as Record<string, Job>
+    // Old Queue writers could journal the terminal failure without the matching
+    // Job cancellation. Derive that missing terminal projection from immutable
+    // failure authority; a started Job is deliberately never touched here.
+    byId[id] = Job.apply(
+      job,
+      {
+        type: "cancel",
+        id,
+        attempt: job.attempt,
+        by: "yrd/queue",
+        reason: `Legacy Queue run '${run}' failed before the Job started`,
+      },
+      at,
+    )
+  }
+  if (byId === undefined) return state as JobsState
+
+  return {
+    ...state,
+    byId,
+    retention: markLegacyQueueTerminal(state.retention, byId, root),
+  }
+}
+
+function projectQueueFailure(state: DeepReadonly<JobsState>, applied: Event): JobsState {
+  const failed = applied.data as Readonly<{ run?: unknown; error?: Readonly<{ code?: unknown }> }>
+  if (typeof failed.run !== "string") return state as JobsState
+
+  const projected = terminalizeUnstartedLegacyQueueFailure(state, failed.run, applied.ts)
+  const root = projected.retention.queueRoots[failed.run] ?? failed.run
+  // Migration can meet a Queue root whose old terminal Jobs already aged out.
+  // Its explicit quiesce failure is fresh terminal authority, so mint the
+  // jobs-side order before Queue and Job projections co-compact.
+  const retention =
+    failed.error?.code === "legacy-quiesced"
+      ? markQueueTerminal(rememberQueueRoot(projected.retention, failed.run, root), root)
+      : markLegacyQueueTerminal(projected.retention, projected.byId, root)
+  return retention === projected.retention ? projected : { ...projected, retention }
+}
+
+function reopenRetention(
+  retention: DeepReadonly<JobsState["retention"]>,
+  job: DeepReadonly<Job>,
+  restoredAs?: "detached-queue",
+): JobsState["retention"] {
+  const detached = restoredAs === "detached-queue" || retention.detachedQueueJobs[job.id] === true
+  if (detached) {
+    const standaloneTerminalOrder = { ...retention.standaloneTerminalOrder }
+    delete standaloneTerminalOrder[job.id]
+    return {
+      ...retention,
+      standaloneTerminalOrder,
+      detachedQueueJobs: { ...retention.detachedQueueJobs, [job.id]: true },
+    }
+  }
+  const run = queueJobRun(job.key)
+  if (run !== undefined) {
+    const root = retention.queueRoots[run] ?? run
+    if (retention.queueTerminalOrder[root] === undefined) return rememberQueueRoot(retention, run, root)
+    const queueTerminalOrder = { ...retention.queueTerminalOrder }
+    delete queueTerminalOrder[root]
+    return { ...rememberQueueRoot(retention, run, root), queueTerminalOrder }
+  }
+  if (retention.standaloneTerminalOrder[job.id] === undefined) return retention as JobsState["retention"]
+  const standaloneTerminalOrder = { ...retention.standaloneTerminalOrder }
+  delete standaloneTerminalOrder[job.id]
+  return { ...retention, standaloneTerminalOrder }
+}
+
+/** @internal Pure live-projection compactor; immutable Journal history remains authoritative. */
+export function compactJobsState(state: DeepReadonly<JobsState>): JobsState {
+  if (
+    Object.keys(state.retention.standaloneTerminalOrder).length <= TERMINAL_STANDALONE_JOB_WINDOW &&
+    Object.keys(state.retention.queueTerminalOrder).length <= TERMINAL_QUEUE_RUN_WINDOW
+  ) {
+    return state as JobsState
+  }
+  const standalone: Job[] = []
+  const queueGroups = new Map<string, Job[]>()
+  for (const job of Object.values(state.byId)) {
+    const run = job.key === undefined ? undefined : QUEUE_JOB_KEY.exec(job.key)?.[1]
+    if (run === undefined || state.retention.detachedQueueJobs[job.id] === true) standalone.push(job as Job)
+    else {
+      const root = state.retention.queueRoots[run] ?? run
+      queueGroups.set(root, [...(queueGroups.get(root) ?? []), job as Job])
+    }
+  }
+
+  const keep = new Set<string>()
+  const standaloneTerminal: Array<Readonly<{ job: Job; order: number }>> = []
+  for (const job of standalone) {
+    const order = state.retention.standaloneTerminalOrder[job.id]
+    if (!Job.terminal(job) || order === undefined) keep.add(job.id)
+    else standaloneTerminal.push({ job, order })
+  }
+  standaloneTerminal
+    .toSorted((left, right) => right.order - left.order || right.job.id.localeCompare(left.job.id))
+    .slice(0, TERMINAL_STANDALONE_JOB_WINDOW)
+    .forEach(({ job }) => keep.add(job.id))
+
+  const terminalGroups: Array<Readonly<{ root: string; jobs: readonly Job[]; order: number }>> = []
+  const roots = new Set([...queueGroups.keys(), ...Object.keys(state.retention.queueTerminalOrder)])
+  for (const root of roots) {
+    const jobs = queueGroups.get(root) ?? []
+    const order = state.retention.queueTerminalOrder[root]
+    if (!jobs.every(Job.terminal) || order === undefined) {
+      for (const job of jobs) keep.add(job.id)
+      continue
+    }
+    terminalGroups.push({ root, jobs, order })
+  }
+  const retainedTerminalRoots = new Set(
+    terminalGroups
+      .toSorted((left, right) => right.order - left.order || right.root.localeCompare(left.root))
+      .slice(0, TERMINAL_QUEUE_RUN_WINDOW)
+      .map(({ root }) => root),
+  )
+  terminalGroups
+    .filter(({ root }) => retainedTerminalRoots.has(root))
+    .slice(0, TERMINAL_QUEUE_RUN_WINDOW)
+    .forEach(({ jobs }) => jobs.forEach((job) => keep.add(job.id)))
+
+  const byId = Object.fromEntries(Object.entries(state.byId).filter(([id]) => keep.has(id))) as Record<string, Job>
+  const byKey = Object.fromEntries(Object.entries(state.byKey).filter(([, id]) => keep.has(id)))
+  const standaloneTerminalOrder = Object.fromEntries(
+    Object.entries(state.retention.standaloneTerminalOrder).filter(([id]) => keep.has(id)),
+  )
+  const queueTerminalOrder = Object.fromEntries(
+    Object.entries(state.retention.queueTerminalOrder).filter(([root]) => retainedTerminalRoots.has(root)),
+  )
+  const queueRoots = Object.fromEntries(
+    Object.entries(state.retention.queueRoots).filter(([, root]) => {
+      const order = state.retention.queueTerminalOrder[root]
+      return order === undefined || retainedTerminalRoots.has(root)
+    }),
+  )
+  const legacyQueueRoots = Object.fromEntries(
+    Object.entries(state.retention.legacyQueueRoots).filter(([root]) => {
+      const order = state.retention.queueTerminalOrder[root]
+      return order === undefined || retainedTerminalRoots.has(root)
+    }),
+  ) as Record<string, true>
+  const detachedQueueJobs = Object.fromEntries(
+    Object.entries(state.retention.detachedQueueJobs).filter(([id]) => keep.has(id)),
+  ) as Record<string, true>
+  return {
+    byId,
+    byKey,
+    retention: {
+      ...state.retention,
+      standaloneTerminalOrder,
+      queueRoots,
+      queueTerminalOrder,
+      legacyQueueRoots,
+      detachedQueueJobs,
+    },
+  }
+}
+
+const RestoreJobSchema = z.object({ job: JobSchema, retention: z.literal("detached-queue").optional() }).strict()
+type RestoreJob = Readonly<z.infer<typeof RestoreJobSchema>>
 
 const TerminalResultSchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("passed"), output: JsonSchema }).strict(),
@@ -340,7 +623,15 @@ export type Jobs = Readonly<{
   state: ReadSignal<DeepReadonly<JobsState>>
   definition(name: string): JobDef
   requireDefinitions(definitions: JobDefs): void
+  retentionDiagnostics(): Readonly<{
+    retainedJobs: number
+    liveJobs: number
+    standaloneTerminalJobs: number
+    queueJobs: number
+    terminalQueueRoots: number
+  }>
   get(id: string): DeepReadonly<Job> | undefined
+  getByKey(key: string): DeepReadonly<Job> | undefined
   run(id: string, options: RunJobOptions): Promise<Job>
   runMany(ids: readonly string[], options: RunManyJobOptions): Promise<readonly Job[]>
   finish(id: string, completion: JobCompletion): Promise<Job>
@@ -356,6 +647,8 @@ export type CreateJobsOptions = Readonly<{
   definitions: JobDefs
   state: ReadSignal<DeepReadonly<JobsState>>
   transition(change: JobTransition): Promise<CommandResult>
+  restore(job: Job, retention?: "detached-queue"): Promise<CommandResult>
+  history?: JournalHistory<unknown>
   scope: JobScope
   log: ConditionalLogger
 }>
@@ -393,6 +686,48 @@ export function createJobs(options: CreateJobsOptions): Jobs {
   const state = options.state
   const commit = options.transition
   const activeScopes = new Map<string, Readonly<{ attempt: number; scope: JobScope }>>()
+
+  const archivedJobId = (key: string, entries: readonly Readonly<{ value: unknown }>[]): string => {
+    let jobId: string | undefined
+    const bind = (candidate: string): void => {
+      if (jobId !== undefined && jobId !== candidate) {
+        throw new Error(`yrd: archived job key '${key}' resolves to multiple Jobs`)
+      }
+      jobId = candidate
+    }
+    for (const entry of entries) {
+      const frame = parseJournalFrame(entry.value)
+      for (const applied of frame.events) {
+        if (applied.name === "job/requested") {
+          const request = JobRequestSchema.parse(applied.data)
+          if (request.key === key) bind(applied.id)
+        } else if (applied.name === "job/restored") {
+          const restored = RestoreJobSchema.parse(applied.data)
+          if (restored.job.key === key) bind(restored.job.id)
+        }
+      }
+    }
+    if (jobId === undefined) throw new Error(`yrd: journal job-key index names '${key}' without a matching Job`)
+    return jobId
+  }
+
+  const archived = (kind: "job" | "job-key", id: string): Job | undefined => {
+    const seed = options.history?.entity(kind, id)
+    if (seed === undefined || seed.length === 0) return undefined
+    const jobId = kind === "job" ? id : archivedJobId(id, seed)
+    const entries = kind === "job" ? seed : (options.history?.entity("job", jobId) ?? [])
+    if (entries.length === 0) throw new Error(`yrd: archived Job '${jobId}' has no immutable event slice`)
+    let projection: { jobs: JobsState } = { jobs: emptyJobsState() }
+    for (const entry of entries) {
+      const frame = parseJournalFrame(entry.value)
+      for (const applied of frame.events) projection = projectJobs(projection, applied)
+    }
+    const job = projection.jobs.byId[jobId]
+    if (job === undefined) {
+      throw new Error(`yrd: archived Job '${jobId}' did not project from its immutable event slice`)
+    }
+    return job
+  }
 
   const definition = (name: string): JobDef => {
     const found = definitions.get(name)
@@ -532,8 +867,27 @@ export function createJobs(options: CreateJobsOptions): Jobs {
       }
     },
 
+    retentionDiagnostics() {
+      const snapshot = state()
+      const values = Object.values(snapshot.byId)
+      const standalone = (job: DeepReadonly<Job>) =>
+        queueJobRun(job.key) === undefined || snapshot.retention.detachedQueueJobs[job.id] === true
+      return {
+        retainedJobs: values.length,
+        liveJobs: values.filter((job) => !Job.terminal(job)).length,
+        standaloneTerminalJobs: values.filter((job) => standalone(job) && Job.terminal(job)).length,
+        queueJobs: values.filter((job) => !standalone(job)).length,
+        terminalQueueRoots: Object.keys(snapshot.retention.queueTerminalOrder).length,
+      }
+    },
+
     get(id) {
-      return state().byId[id]
+      return state().byId[id] ?? archived("job", id)
+    },
+
+    getByKey(key) {
+      const id = state().byKey[key]
+      return id === undefined ? archived("job-key", key) : state().byId[id]
     },
 
     run,
@@ -610,6 +964,14 @@ export function createJobs(options: CreateJobsOptions): Jobs {
     },
 
     async retry(id) {
+      const live = state().byId[id]
+      if (live === undefined) {
+        const historical = archived("job", id)
+        if (historical === undefined) throw new Error(`yrd: no job '${id}'`)
+        requireStatus(historical, "lost or failed", "lost", "failed")
+        await options.restore(historical, queueJobRun(historical.key) === undefined ? undefined : "detached-queue")
+        return current(id)
+      }
       await commit({ type: "retry", id })
       return current(id)
     },
@@ -678,6 +1040,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
 export type JobCommands = Readonly<{
   job: Readonly<{
     transition: CommandHandler<JobTransition, object>
+    restore: CommandHandler<RestoreJob, { jobs: JobsState }>
   }>
 }>
 
@@ -696,25 +1059,45 @@ export function withJobs(options: JobsOptions = {}) {
       events: [event("job/transitioned", change)],
     }),
   })
+  const restore = command({
+    title: "Restore archived job for retry",
+    params: RestoreJobSchema,
+    apply(state: DeepReadonly<{ jobs: JobsState }>, args: RestoreJob) {
+      if (state.jobs.byId[args.job.id] !== undefined) return { events: [] }
+      if (args.job.key !== undefined && state.jobs.byKey[args.job.key] !== undefined) {
+        throw new Error(`yrd: job key '${args.job.key}' is already in use`)
+      }
+      requireStatus(args.job, "lost or failed", "lost", "failed")
+      return { events: [event("job/restored", args)] }
+    },
+  })
 
   return <State extends object, Commands extends CommandTree, Features extends object>(
     definition: YrdDef<State, Commands, Features>,
   ) =>
     definition.extend({
-      initialState: { jobs: { byId: {}, byKey: {} } satisfies JobsState },
-      commands: { job: { transition } },
+      initialState: { jobs: emptyJobsState() },
+      commands: { job: { transition, restore } },
       events: {
         "job/requested": JobRequestSchema,
         "job/transitioned": JobTransitionSchema,
+        "job/restored": RestoreJobSchema,
       },
-      projectionVersion: "jobs-v1",
+      projectionVersion: "jobs-v7-legacy-failure-retention",
       project: projectJobs,
+      compact: (state) => ({ jobs: compactJobsState(state.jobs) }),
       create(yrd) {
         return {
           jobs: createJobs({
             definitions,
             state: computed(() => yrd.state().jobs),
             transition: (change) => yrd.dispatch(transition, change),
+            restore: (job, retention) =>
+              yrd.dispatch(restore, {
+                job: JobSchema.parse(job),
+                ...(retention === undefined ? {} : { retention }),
+              }),
+            ...(yrd.history === undefined ? {} : { history: yrd.history }),
             scope: yrd.scope,
             log: yrd.log.child("jobs"),
           }),
@@ -740,30 +1123,110 @@ function mergeJobDefs(input: JobsOptions["definitions"]): JobDefs {
 }
 
 function projectJobs(state: DeepReadonly<{ jobs: JobsState }>, applied: Event): { jobs: JobsState } {
+  if (applied.name === "queue/batch/isolated") {
+    const data = applied.data as Readonly<{ parent?: unknown; run?: unknown }>
+    if (typeof data.parent !== "string" || typeof data.run !== "string") return state as { jobs: JobsState }
+    const root = state.jobs.retention.queueRoots[data.parent] ?? data.parent
+    return {
+      jobs: { ...state.jobs, retention: rememberQueueRoot(state.jobs.retention, data.run, root) },
+    }
+  }
+  if (applied.name === "queue/run/started") {
+    const run = (applied.data as Readonly<{ run?: unknown }>).run
+    if (typeof run !== "object" || run === null) return state as { jobs: JobsState }
+    const record = run as Readonly<{ id?: unknown; parent?: unknown; settlement?: unknown; steps?: unknown }>
+    if (typeof record.id !== "string" || record.settlement === "explicit") return state as { jobs: JobsState }
+    const parent = typeof record.parent === "string" ? record.parent : undefined
+    const root = parent === undefined ? record.id : (state.jobs.retention.queueRoots[parent] ?? parent)
+    const remembered = rememberQueueRoot(state.jobs.retention, record.id, root)
+    const legacy = rememberLegacyQueueRoot(remembered, root)
+    return {
+      jobs: {
+        ...state.jobs,
+        retention:
+          Array.isArray(record.steps) && record.steps.length === 0 ? touchLegacyQueueRoot(legacy, root) : legacy,
+      },
+    }
+  }
+  if (applied.name === "queue/run/settled" || applied.name === "queue/run/canceled") {
+    const run = (applied.data as Readonly<{ run?: unknown }>).run
+    if (typeof run !== "string") return state as { jobs: JobsState }
+    const root = state.jobs.retention.queueRoots[run] ?? run
+    if (applied.name === "queue/run/canceled" && root !== run) return state as { jobs: JobsState }
+    const remembered = rememberQueueRoot(state.jobs.retention, run, root)
+    return {
+      jobs: {
+        ...state.jobs,
+        retention:
+          remembered.legacyQueueRoots[root] === true
+            ? touchLegacyQueueRoot(remembered, root)
+            : markQueueTerminal(remembered, root),
+      },
+    }
+  }
+  if (applied.name === "queue/run/failed") {
+    return { jobs: projectQueueFailure(state.jobs, applied) }
+  }
   if (applied.name === "job/requested") {
     const request = applied.data as JobRequest
     if (state.jobs.byId[applied.id] !== undefined) throw new Error(`yrd: duplicate job '${applied.id}'`)
     if (request.key !== undefined && state.jobs.byKey[request.key] !== undefined) {
       throw new Error(`yrd: job key '${request.key}' is already in use`)
     }
+    const requested = Job.requested(applied.id, applied.ts, request)
+    const run = queueJobRun(request.key)
+    const retention = run === undefined ? state.jobs.retention : rememberQueueRoot(state.jobs.retention, run)
     return {
       ...state,
       jobs: {
-        byId: { ...state.jobs.byId, [applied.id]: Job.requested(applied.id, applied.ts, request) },
+        byId: { ...state.jobs.byId, [applied.id]: requested },
         byKey: request.key === undefined ? state.jobs.byKey : { ...state.jobs.byKey, [request.key]: applied.id },
+        retention,
+      },
+    }
+  }
+  if (applied.name === "job/restored") {
+    const restoredFact = RestoreJobSchema.parse(applied.data)
+    const archived = restoredFact.job
+    const current = state.jobs.byId[archived.id]
+    if (current !== undefined && JSON.stringify(JobSchema.parse(current)) !== JSON.stringify(archived)) {
+      throw new Error(`yrd: restored job '${archived.id}' does not match projected journal history`)
+    }
+    const keyed = archived.key === undefined ? undefined : state.jobs.byKey[archived.key]
+    if (keyed !== undefined && keyed !== archived.id) {
+      throw new Error(`yrd: job key '${archived.key}' is already in use`)
+    }
+    const restored = Job.apply(current ?? archived, { type: "retry", id: archived.id }, applied.ts)
+    return {
+      jobs: {
+        byId: { ...state.jobs.byId, [archived.id]: restored },
+        byKey: archived.key === undefined ? state.jobs.byKey : { ...state.jobs.byKey, [archived.key]: archived.id },
+        retention: reopenRetention(state.jobs.retention, archived, restoredFact.retention),
       },
     }
   }
   if (applied.name !== "job/transitioned") return state
   const change = applied.data as JobTransition
+  const current = state.jobs.byId[change.id]
+  const projected = Job.apply(current, change, applied.ts)
+  const byId = { ...state.jobs.byId, [change.id]: projected }
+  let retention = change.type === "retry" ? reopenRetention(state.jobs.retention, projected) : state.jobs.retention
+  if (Job.terminal(projected) && (current === undefined || !Job.terminal(current))) {
+    const run = queueJobRun(projected.key)
+    if (run === undefined || retention.detachedQueueJobs[projected.id] === true) {
+      retention = markStandaloneTerminal(retention, projected.id)
+    } else {
+      retention = rememberQueueRoot(retention, run)
+      const root = retention.queueRoots[run] ?? run
+      retention = markLegacyQueueTerminal(retention, byId, root)
+    }
+  }
   return {
     ...state,
     jobs: {
       ...state.jobs,
-      byId: {
-        ...state.jobs.byId,
-        [change.id]: Job.apply(state.jobs.byId[change.id], change, applied.ts),
-      },
+      byId,
+      retention,
     },
   }
 }

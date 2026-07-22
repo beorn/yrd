@@ -6,7 +6,17 @@
 import { describe, expect, expectTypeOf, it, vi } from "vitest"
 import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
 import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
-import { Command, createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
+import {
+  Command,
+  createMemoryJournal,
+  createYrd,
+  createYrdDef,
+  parseJournalFrame,
+  pipe,
+  type Journal,
+  type JournalEntityKind,
+  type JournalFrame,
+} from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
 import {
@@ -40,6 +50,7 @@ import {
   recordReleasedAdmissionFailure,
   releasedAdmissionFailures,
 } from "../src/projection-index.ts"
+import { compactQueuesState } from "../src/retention.ts"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -130,6 +141,232 @@ type DeployedShape = AddStepResult<MergedShape, "deploy", DeployResult>
 function ids(initial = 0): () => string {
   let value = initial
   return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
+}
+
+function indexedJournal(initial: readonly JournalFrame[] = []): Journal<unknown> {
+  const values = initial.map((frame) => parseJournalFrame(structuredClone(frame)))
+  const entityIds = (frame: JournalFrame, kind: JournalEntityKind): readonly string[] => {
+    const ids = new Set<string>()
+    for (const applied of frame.events) {
+      const data = applied.data as Readonly<Record<string, unknown>>
+      if (applied.name === "job/requested") {
+        if (kind === "job") ids.add(applied.id)
+        if (kind === "job-key" && typeof data.key === "string") ids.add(data.key)
+      }
+      if (applied.name === "job/transitioned" && kind === "job" && typeof data.id === "string") ids.add(data.id)
+      if (applied.name === "job/restored" && typeof data.job === "object" && data.job !== null) {
+        const job = data.job as Readonly<{ id?: unknown; key?: unknown }>
+        if (kind === "job" && typeof job.id === "string") ids.add(job.id)
+        if (kind === "job-key" && typeof job.key === "string") ids.add(job.key)
+      }
+      if (kind === "queue") {
+        if (typeof data.run === "string") ids.add(data.run)
+        else if (typeof data.run === "object" && data.run !== null) {
+          const run = data.run as Readonly<{ id?: unknown }>
+          if (typeof run.id === "string") ids.add(run.id)
+        }
+        if (applied.name === "queue/batch/isolated" && typeof data.parent === "string") ids.add(data.parent)
+      }
+    }
+    return [...ids]
+  }
+  return {
+    async *read(after = 0, before = values.length) {
+      const end = Math.min(before, values.length)
+      if (after < end) yield { cursor: end, values: structuredClone(values.slice(after, end)) }
+    },
+    append(value, expectedCursor) {
+      if (expectedCursor !== values.length) return Promise.resolve({ appended: false as const, cursor: values.length })
+      values.push(parseJournalFrame(structuredClone(value)))
+      return Promise.resolve({ appended: true as const, cursor: values.length })
+    },
+    history: {
+      command(query) {
+        return structuredClone(
+          values.find(
+            (frame) =>
+              (query.id !== undefined && frame.command.id === query.id) ||
+              (query.key !== undefined && frame.cause.key === query.key),
+          ),
+        )
+      },
+      hasIdentity(kind, id) {
+        return values.some((frame) =>
+          kind === "cause" ? frame.cause.id === id : frame.events.some((applied) => applied.id === id),
+        )
+      },
+      entity(kind, id) {
+        return values.flatMap((value, index) =>
+          entityIds(value, kind).includes(id) ? [{ cursor: index + 1, value: structuredClone(value) }] : [],
+        )
+      },
+      diagnostics() {
+        return {
+          pageCount: 0,
+          freelistCount: 0,
+          autoVacuum: "incremental" as const,
+          historyFrames: 0,
+          tailFrames: values.length,
+          archiveFallbacks: 0,
+        }
+      },
+    },
+  }
+}
+
+function queueHistoryFrames(count: number, failedRun?: number): readonly JournalFrame[] {
+  const nextId = ids()
+  return Array.from({ length: count }, (_, index) => {
+    const number = index + 1
+    const run = `R${number}`
+    const pr = `PR${number}`
+    const branch = `history/${number}`
+    const headSha = number.toString(16).padStart(40, "0")
+    const at = new Date(Date.UTC(2026, 0, 1, 0, 0, number)).toISOString()
+    const command = { id: nextId(), op: "queue.fixture", args: { run } }
+    const job = nextId()
+    return parseJournalFrame({
+      command,
+      cause: {
+        id: nextId(),
+        commandId: command.id,
+        op: command.op,
+        commandHash: Command.hash(command),
+      },
+      events: [
+        {
+          id: nextId(),
+          name: "queue/run/started",
+          ts: at,
+          data: {
+            run: {
+              id: run,
+              settlement: "explicit",
+              prs: [{ id: pr, branch, base: "main", revision: 1, headSha }],
+              base: "main",
+              steps: [
+                {
+                  name: "check",
+                  title: "Check",
+                  revision: "check-v1",
+                  integrates: false,
+                  needsIntegration: false,
+                },
+              ],
+              initialResults: {},
+            },
+          },
+        },
+        {
+          id: job,
+          name: "job/requested",
+          ts: at,
+          data: {
+            definition: "queue.step.check",
+            revision: "check-v1",
+            input: {
+              run,
+              step: "check",
+              index: 0,
+              prs: [{ id: pr, branch, base: "main", revision: 1, headSha }],
+              shape: { results: {} },
+            },
+            key: `queue:${run}:0`,
+          },
+        },
+        {
+          id: nextId(),
+          name: "job/transitioned",
+          ts: at,
+          data: { type: "start", id: job, attempt: 1, runner: "fixture", leaseExpiresAt: at },
+        },
+        {
+          id: nextId(),
+          name: "job/transitioned",
+          ts: at,
+          data: {
+            type: "finish",
+            id: job,
+            attempt: 1,
+            runner: "fixture",
+            result:
+              number === failedRun
+                ? { status: "failed", error: { code: "fixture", message: "expected archived failure" } }
+                : { status: "passed", output: { checked: true } },
+          },
+        },
+        { id: nextId(), name: "queue/run/settled", ts: at, data: { run } },
+      ],
+    })
+  })
+}
+
+function legacyQueueHistoryFrames(count: number): readonly JournalFrame[] {
+  return queueHistoryFrames(count).map((frame) => {
+    const legacy = structuredClone(frame)
+    for (const applied of legacy.events) {
+      if (applied.name !== "queue/run/started") continue
+      const data = applied.data as { run?: { settlement?: unknown } }
+      if (data.run !== undefined) delete data.run.settlement
+    }
+    return parseJournalFrame({
+      ...legacy,
+      events: legacy.events.filter(({ name }) => name !== "queue/run/settled"),
+    })
+  })
+}
+
+function legacyFailedBeforeStartHistoryFrames(count: number): readonly JournalFrame[] {
+  const nextId = ids(1_000_000)
+  return queueHistoryFrames(count).map((frame) => {
+    const legacy = structuredClone(frame)
+    const started = legacy.events.find(({ name }) => name === "queue/run/started")
+    const requested = legacy.events.find(({ name }) => name === "job/requested")
+    if (started === undefined || requested === undefined) {
+      throw new Error("expected Queue start and Job request fixtures")
+    }
+    const data = started.data as { run?: { id?: unknown; settlement?: unknown } }
+    if (data.run === undefined || typeof data.run.id !== "string") {
+      throw new Error("expected Queue run fixture")
+    }
+    delete data.run.settlement
+    return parseJournalFrame({
+      ...legacy,
+      events: [
+        started,
+        requested,
+        {
+          id: nextId(),
+          name: "queue/run/failed",
+          ts: started.ts,
+          data: {
+            run: data.run.id,
+            error: { code: "stale-pr", message: "PR changed before the requested Job started" },
+          },
+        },
+      ],
+    })
+  })
+}
+
+function legacyQuiesceAfterJobEvictionHistoryFrames(count: number): readonly JournalFrame[] {
+  return legacyQueueHistoryFrames(count).map((frame, index) => {
+    if (index !== 0) return frame
+    const recoverable = structuredClone(frame)
+    const finish = recoverable.events.find((event) => {
+      const data = event.data as { type?: unknown }
+      return event.name === "job/transitioned" && data.type === "finish"
+    })
+    if (finish === undefined) {
+      throw new Error("expected terminal Job fixture")
+    }
+    const transition = finish.data as { result?: unknown }
+    transition.result = {
+      status: "failed",
+      error: { code: "queue-environment-refused", message: "runner unavailable during legacy delivery" },
+    }
+    return parseJournalFrame(recoverable)
+  })
 }
 
 function workspace(): BayWorkspace {
@@ -223,6 +460,226 @@ async function submitBranch(app: Awaited<ReturnType<typeof createQueueApp>>, bra
 }
 
 describe("Queue", () => {
+  it("retains every live Queue aggregate and only the latest 512 terminal aggregates", () => {
+    let queues = Queues.empty({ batchSize: 1 })
+    const terminalOrder: Record<string, number> = {}
+    const record = (id: string): QueueRecord => ({
+      id,
+      settlement: "explicit",
+      prs: [{ id: `PR-${id}`, branch: `task/${id}`, base: "main", revision: 1, headSha: HEAD }],
+      base: "main",
+      steps: [
+        {
+          name: "check",
+          title: "Check",
+          revision: "check-v1",
+          integrates: false,
+          needsIntegration: false,
+        },
+      ],
+      initialResults: {},
+      stepSelection: { authority: "admission", steps: ["check"] },
+      startedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, Number(id.slice(1)))).toISOString(),
+      failure: {
+        at: new Date(Date.UTC(2026, 0, 1, 0, 0, Number(id.slice(1)))).toISOString(),
+        error: { code: "fixture", message: "terminal fixture" },
+      },
+    })
+    for (let index = 0; index < 513; index += 1) {
+      const value = record(`R${index + 1}`)
+      const started = indexQueueStart(queues.index, value)
+      queues = {
+        ...queues,
+        records: Queues.set(queues.records, value),
+        index: recordReleasedAdmissionFailure(started, value),
+      }
+      terminalOrder[value.id] = index + 1
+    }
+    const live = { ...record("R514"), failure: undefined }
+    queues = { ...queues, records: Queues.set(queues.records, live), index: indexQueueStart(queues.index, live) }
+
+    const compacted = compactQueuesState({ ...queues, retention: { terminalOrder } })
+    expect(Queues.get(compacted, "R1")).toBeUndefined()
+    expect(Queues.get(compacted, "R2")).toBeDefined()
+    expect(Queues.get(compacted, "R513")).toBeDefined()
+    expect(Queues.get(compacted, "R514")).toBeDefined()
+    expect(Queues.values(compacted)).toHaveLength(513)
+    expect(compacted.index.nextRunNumber).toBe(515)
+
+    const protectedCompaction = compactQueuesState({ ...queues, retention: { terminalOrder } }, new Set(["R1"]))
+    const protectedRun = Queues.get(protectedCompaction, "R1")
+    if (protectedRun?.prs[0] === undefined) throw new Error("expected protected R1 admission evidence")
+    expect(releasedAdmissionFailures(protectedCompaction.index, protectedRun.prs[0], protectedRun.steps)).toBe(1)
+    expect(Queues.values(protectedCompaction)).toHaveLength(514)
+
+    let trees = Queues.empty({ batchSize: 1 })
+    const root = record("R1")
+    const child = { ...record("R2"), parent: root.id, isolationPart: 0 as const }
+    for (const value of [root, child]) {
+      trees = { ...trees, records: Queues.set(trees.records, value), index: indexQueueStart(trees.index, value) }
+    }
+    const rootOrder: Record<string, number> = { R1: 1 }
+    for (let index = 0; index < 512; index += 1) {
+      const value = record(`R${index + 3}`)
+      trees = { ...trees, records: Queues.set(trees.records, value), index: indexQueueStart(trees.index, value) }
+      rootOrder[value.id] = index + 2
+    }
+    const liveRoot = { ...record("R515"), failure: undefined }
+    const liveChild = { ...record("R516"), failure: undefined, parent: liveRoot.id, isolationPart: 0 as const }
+    for (const value of [liveRoot, liveChild]) {
+      trees = { ...trees, records: Queues.set(trees.records, value), index: indexQueueStart(trees.index, value) }
+    }
+
+    const compactedTrees = compactQueuesState({ ...trees, retention: { terminalOrder: rootOrder } })
+    expect(Queues.get(compactedTrees, "R1")).toBeUndefined()
+    expect(Queues.get(compactedTrees, "R2")).toBeUndefined()
+    expect(Queues.get(compactedTrees, "R515")).toBeDefined()
+    expect(Queues.get(compactedTrees, "R516")).toBeDefined()
+    expect(Queues.values(compactedTrees)).toHaveLength(514)
+  })
+
+  it("materializes an evicted Queue run and complete history without repopulating live state", async () => {
+    await using app = await createQueueApp(
+      { defaultSteps: ["check"] },
+      indexedJournal(queueHistoryFrames(513)),
+      undefined,
+      undefined,
+      createLogger("test", [{ level: "error" }, { write() {} }]),
+    )
+
+    expect(Queues.get(app.state().queues, "R1")).toBeUndefined()
+    expect(app.state().jobs.byKey["queue:R1:0"]).toBeUndefined()
+    expect(app.queue.retentionDiagnostics()).toEqual({
+      retainedRuns: 512,
+      unsettledTrees: 0,
+      terminalTrees: 512,
+      archiveAvailable: true,
+    })
+    expect(app.jobs.retentionDiagnostics()).toEqual({
+      retainedJobs: 512,
+      liveJobs: 0,
+      standaloneTerminalJobs: 0,
+      queueJobs: 512,
+      terminalQueueRoots: 512,
+    })
+    expect(app.queue.get("R1")).toMatchObject({
+      id: "R1",
+      status: "passed",
+      steps: [{ job: { status: "passed" } }],
+    })
+    expect(Queues.get(app.state().queues, "R1")).toBeUndefined()
+    expect(app.state().jobs.byKey["queue:R1:0"]).toBeUndefined()
+    const history = await app.queue.history()
+    expect(history).toHaveLength(513)
+    expect(history[0]).toMatchObject({ id: "R1", status: "passed" })
+    expect(history.at(-1)).toMatchObject({ id: "R513", status: "passed" })
+    expect(Queues.get(app.state().queues, "R1")).toBeUndefined()
+  }, 15_000)
+
+  it("bounds a retried archived Queue Job separately and replays the same detached classification", async () => {
+    const journal = indexedJournal(queueHistoryFrames(513, 1))
+    const log = createLogger("test", [{ level: "error" }, { write() {} }])
+    const app = await createQueueApp({ defaultSteps: ["check"] }, journal, undefined, ids(100_000), log)
+    const archived = app.queue.get("R1")
+    const job = archived?.steps[0]?.job
+    if (job?.status !== "failed") throw new Error("expected archived failed Queue Job")
+
+    await app.jobs.retry(job.id)
+    await app.jobs.run(job.id, { runner: "retry", leaseMs: 60_000 })
+    expect(Queues.get(app.state().queues, "R1")).toBeUndefined()
+    expect(app.jobs.retentionDiagnostics()).toEqual({
+      retainedJobs: 513,
+      liveJobs: 0,
+      standaloneTerminalJobs: 1,
+      queueJobs: 512,
+      terminalQueueRoots: 512,
+    })
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ id: job.id, status: "passed", attempt: 2 })
+    await app.close()
+
+    await using replayed = await createQueueApp({ defaultSteps: ["check"] }, journal, undefined, ids(200_000), log)
+    expect(Queues.get(replayed.state().queues, "R1")).toBeUndefined()
+    expect(replayed.jobs.retentionDiagnostics()).toEqual({
+      retainedJobs: 513,
+      liveJobs: 0,
+      standaloneTerminalJobs: 1,
+      queueJobs: 512,
+      terminalQueueRoots: 512,
+    })
+    expect(replayed.queue.get("R1")?.steps[0]?.job).toMatchObject({ id: job.id, status: "passed", attempt: 2 })
+  }, 15_000)
+
+  it("bounds quiesced pre-settlement Queue history after validating the complete replay", async () => {
+    await using app = await createQueueApp(
+      { defaultSteps: ["check"] },
+      indexedJournal(legacyQueueHistoryFrames(513)),
+      undefined,
+      undefined,
+      createLogger("test", [{ level: "error" }, { write() {} }]),
+    )
+
+    expect(Queues.get(app.state().queues, "R1")).toBeUndefined()
+    expect(app.state().jobs.byKey["queue:R1:0"]).toBeUndefined()
+    expect(app.queue.retentionDiagnostics()).toMatchObject({
+      retainedRuns: 512,
+      unsettledTrees: 0,
+      terminalTrees: 512,
+    })
+    expect(app.jobs.retentionDiagnostics()).toMatchObject({
+      retainedJobs: 512,
+      liveJobs: 0,
+      queueJobs: 512,
+      terminalQueueRoots: 512,
+    })
+    expect(app.queue.get("R1")).toMatchObject({ id: "R1", status: "passed" })
+  }, 15_000)
+
+  it("co-evicts failed legacy Queue roots and their never-started Jobs", async () => {
+    await using app = await createQueueApp(
+      { defaultSteps: ["check"] },
+      indexedJournal(legacyFailedBeforeStartHistoryFrames(513)),
+      undefined,
+      undefined,
+      createLogger("test", [{ level: "error" }, { write() {} }]),
+    )
+
+    expect(Queues.get(app.state().queues, "R1")).toBeUndefined()
+    expect(app.state().jobs.byKey["queue:R1:0"]).toBeUndefined()
+    expect(Queues.get(app.state().queues, "R2")).toBeDefined()
+    expect(app.state().jobs.byKey["queue:R2:0"]).toBeDefined()
+    expect(app.queue.retentionDiagnostics()).toMatchObject({ retainedRuns: 512, terminalTrees: 512 })
+    expect(app.jobs.retentionDiagnostics()).toMatchObject({
+      retainedJobs: 512,
+      liveJobs: 0,
+      queueJobs: 512,
+      terminalQueueRoots: 512,
+    })
+  }, 15_000)
+
+  it("quiesces a legacy root after its terminal Jobs aged out", async () => {
+    await using app = await createQueueApp(
+      { defaultSteps: ["check"] },
+      indexedJournal(legacyQuiesceAfterJobEvictionHistoryFrames(513)),
+      undefined,
+      ids(2_000_000),
+      createLogger("test", [{ level: "error" }, { write() {} }]),
+    )
+
+    expect(Queues.get(app.state().queues, "R1")).toBeDefined()
+    expect(app.state().jobs.byKey["queue:R1:0"]).toBeUndefined()
+    expect(app.state().jobs.retention.queueTerminalOrder.R1).toBeUndefined()
+
+    await expect(
+      app.queue.quiesceLegacyRoots({ now: "2026-01-01T01:00:00.000Z", by: "yrd/migration" }),
+    ).resolves.toEqual({
+      provenance: "migration/21012-legacy-quiesce",
+      reason: "legacy-quiesced",
+      quiesced: [{ run: "R1", jobs: [] }],
+    })
+    expect(app.queue.get("R1")).toMatchObject({ status: "failed", error: { code: "legacy-quiesced" } })
+    expect(app.state().jobs.retention.queueTerminalOrder.R1).toBeDefined()
+  }, 15_000)
+
   it("resolves PR, Run, and base selectors while preserving canonical records", async () => {
     await using app = await createQueueApp()
     await submitBranch(app, "Topic/Selectors")
@@ -365,9 +822,15 @@ describe("Queue", () => {
     expect(await Array.fromAsync(replayed.events())).toEqual(before)
   })
 
-  it("refuses to migrate an unfinished pre-settlement Queue root", async () => {
+  // A legacy (pre-settlement) journal whose single writer died mid-step: the first
+  // job `finish` is refused, leaving the run's cursor job stuck `running` under a
+  // lease. Strips the v2 settlement marker off every started run so the root
+  // replays as a v1 root. The lease clock is pinned so expiry is deterministic.
+  const LEASE_AT = Date.parse("2026-01-01T00:00:00.000Z")
+  const leasedRuntime = { runner: "local", leaseMs: 60_000, now: () => LEASE_AT } // lease expires at 00:01:00
+  function legacyStuckJournal() {
     const inner = createMemoryJournal()
-    let refuseFinish = true
+    let refuse = true
     const journal: typeof inner = {
       read: (after, before) => inner.read(after, before),
       append: (value, cursor) => {
@@ -380,26 +843,105 @@ describe("Queue", () => {
           }
         }
         if (
-          refuseFinish &&
+          refuse &&
           frame.events?.some((event) => event.name === "job/transitioned" && event.data?.type === "finish")
         ) {
-          refuseFinish = false
-          throw new Error("yrd: job finish refused (legacy active fixture)")
+          refuse = false
+          throw new Error("yrd: job finish refused (legacy fixture)")
         }
         return inner.append(frame, cursor)
       },
     }
+    return journal
+  }
+
+  async function seedLegacyStuckRoot(journal: ReturnType<typeof legacyStuckJournal>, id: () => string, branch: string) {
+    await using app = await createQueueApp({}, journal, undefined, id)
+    const pr = await submitBranch(app, branch)
+    await expect(app.queue.run({ prs: [pr.id], steps: ["check"] }, leasedRuntime)).rejects.toThrow("job finish refused")
+  }
+
+  it("auto-quiesces an unleased pre-settlement legacy root and receipts it", async () => {
+    // The writer's lease (00:01:00) is long expired by migration time (00:05:00):
+    // the root is abandoned, so the migration settles it itself — no verb, no
+    // waiting on a writer that will never return.
+    const journal = legacyStuckJournal()
     const id = ids()
+    await seedLegacyStuckRoot(journal, id, "issue/legacy-unleased-root")
+
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    await using replayed = await createQueueApp({}, journal, undefined, id, log)
+
+    // Cold replay/migration completes: construction no longer refuses the unleased root.
+    const stuck = replayed.queue.get("R1")
+    expect(stuck?.status).toBe("running")
+    const cursorJob = stuck?.steps[stuck.cursor]?.job
+    expect(cursorJob?.status).toBe("running")
+
+    const receipt = await replayed.queue.quiesceLegacyRoots({ now: "2026-01-01T00:05:00.000Z", by: "yrd/migration" })
+    expect(receipt.reason).toBe("legacy-quiesced")
+    expect(receipt.quiesced).toEqual([{ run: "R1", jobs: [cursorJob?.id] }])
+
+    const settled = replayed.queue.get("R1")
+    expect(settled).toMatchObject({ status: "failed" })
+    expect(settled?.error?.code).toBe("legacy-quiesced")
+    expect(settled?.steps[0]?.job?.status).toBe("canceled")
+
+    const receipts = events.filter(
+      (event): event is Extract<LogEvent, { kind: "log" }> =>
+        event.kind === "log" && event.level === "warn" && event.namespace === "yrd:queue",
+    )
+    expect(receipts).toHaveLength(1)
+    expect(receipts[0]?.message).toContain("R1")
+    expect(receipts[0]?.props).toMatchObject({ reason: "legacy-quiesced", runs: ["R1"] })
+    log.end()
+  })
+
+  it("refuses to quiesce a live-leased pre-settlement legacy root", async () => {
+    // The old writer started the step and still holds an unexpired lease: a
+    // genuinely-active previous writer must be protected, not settled out from
+    // under it. The refusal names WHICH root is leased.
+    const journal = legacyStuckJournal()
+    const id = ids()
+    await seedLegacyStuckRoot(journal, id, "issue/legacy-leased-root")
+
+    await using replayed = await createQueueApp({}, journal, undefined, id)
+    expect(replayed.state().jobs.retention.legacyQueueRoots.R1).toBe(true)
+    expect(replayed.state().jobs.retention.queueRoots.R1).toBe("R1")
+    expect(replayed.state().jobs.retention.queueTerminalOrder.R1).toBeUndefined()
+    // Lease expires at 00:01:00; migrate at 00:00:30 while it is still live.
+    await expect(
+      replayed.queue.quiesceLegacyRoots({ now: "2026-01-01T00:00:30.000Z", by: "yrd/migration" }),
+    ).rejects.toThrow(/live-leased legacy roots[^]*R1[^]*auto-quiesced/)
+    expect(replayed.queue.get("R1")?.status).not.toBe("failed")
+  })
+
+  it("quiesces legacy roots idempotently across replays", async () => {
+    const journal = legacyStuckJournal()
+    const id = ids()
+    await seedLegacyStuckRoot(journal, id, "issue/legacy-idempotent-root")
 
     {
-      await using app = await createQueueApp({}, journal, undefined, id)
-      const pr = await submitBranch(app, "issue/legacy-active-root")
-      await expect(app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)).rejects.toThrow("legacy active fixture")
+      await using first = await createQueueApp({}, journal, undefined, id)
+      const receipt = await first.queue.quiesceLegacyRoots({ now: "2026-01-01T00:05:00.000Z", by: "yrd/migration" })
+      expect(receipt.quiesced.map((entry) => entry.run)).toEqual(["R1"])
     }
 
-    await expect(createQueueApp({}, journal, undefined, id)).rejects.toThrow(
-      "Queue projection migration requires quiesced legacy roots; finish with the previous writer: R1",
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    await using second = await createQueueApp({}, journal, undefined, id, log)
+    // The first pass appended the terminal settlement, so the replay meets R1 already terminal.
+    expect(second.queue.get("R1")).toMatchObject({ status: "failed" })
+    const before = await Array.fromAsync(second.events())
+    const receipt = await second.queue.quiesceLegacyRoots({ now: "2026-01-01T00:06:00.000Z", by: "yrd/migration" })
+    expect(receipt.quiesced).toEqual([])
+    expect(await Array.fromAsync(second.events())).toEqual(before)
+    const receipts = events.filter(
+      (event) => event.kind === "log" && event.level === "warn" && event.namespace === "yrd:queue",
     )
+    expect(receipts).toEqual([])
+    log.end()
   })
 
   it.each([10, 10_000, 100_000])(
@@ -2527,6 +3069,62 @@ describe("Queue", () => {
     expect(app.queue.checks([pr.id])).toMatchObject([
       { pr: pr.id, revision: 1, run: "R1", step: "check", status: "failed", error: { code: "stale-pr" } },
     ])
+  })
+
+  it("replays a legacy pinned-run failure before its requested Job starts", async () => {
+    const inner = createMemoryJournal()
+    const journal: typeof inner = {
+      read: (after, before) => inner.read(after, before),
+      append: (value, cursor) => {
+        const frame = structuredClone(value) as {
+          events?: { name?: string; data?: { run?: { settlement?: unknown } } }[]
+        }
+        for (const event of frame.events ?? []) {
+          if (event.name === "queue/run/started" && event.data?.run !== undefined) {
+            delete event.data.run.settlement
+          }
+        }
+        if (frame.events !== undefined) {
+          frame.events = frame.events.filter(({ name }) => name !== "queue/run/settled")
+        }
+        return inner.append(frame, cursor)
+      },
+    }
+    const id = ids()
+
+    {
+      await using app = await createQueueApp({}, journal, undefined, id)
+      const pr = await submitBranch(app, "issue/legacy-stale-before-job")
+      await app.bays.requestChecks({ pr: pr.id })
+      expect(await app.queue.admit({ prs: [pr.id] })).toHaveLength(1)
+      await app.bays.closePr({ pr: pr.id })
+      expect(await app.queue.admit({ prs: [pr.id] }, runtime)).toMatchObject([
+        { id: "R1", status: "failed", error: { code: "stale-pr" } },
+      ])
+    }
+
+    const frames: JournalFrame[] = []
+    for await (const batch of journal.read()) {
+      frames.push(...batch.values.map((value) => parseJournalFrame(value)))
+    }
+    const lifecycle = frames
+      .flatMap((frame) => frame.events)
+      .filter(({ name }) => ["queue/run/started", "job/requested", "pr/withdrawn", "queue/run/failed"].includes(name))
+      .map(({ name }) => name)
+    expect(lifecycle).toEqual(["queue/run/started", "job/requested", "pr/withdrawn", "queue/run/failed"])
+
+    await using replayed = await createQueueApp({}, indexedJournal(frames), undefined, id)
+    expect(replayed.queue.get("R1")).toMatchObject({
+      id: "R1",
+      status: "failed",
+      error: { code: "stale-pr" },
+    })
+    expect(replayed.queue.get("R1")?.steps[0]?.job).toMatchObject({
+      status: "canceled",
+      canceledBy: "yrd/queue",
+      cancelReason: "Legacy Queue run 'R1' failed before the Job started",
+    })
+    expect(replayed.state().jobs.retention.queueTerminalOrder.R1).toBeDefined()
   })
 
   it("keeps admission globally FIFO even when a later PR is selected explicitly", async () => {

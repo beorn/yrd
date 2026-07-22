@@ -82,6 +82,22 @@ wall-clock bound rather than misclassified as an inter-output stall.
 heartbeat has not changed it. `retry()` returns a failed or lost Job to
 `requested`; the same Job id is retained.
 
+With a history-capable Journal, the live projection keeps every nonterminal
+Job, every Job belonging to the latest 512 terminal Queue roots, and the latest
+512 standalone terminal Jobs. `get(id)` and `getByKey(key)` resolve an evicted
+Job exactly from immutable frame slices without warming the live projection.
+Key lookup derives and consistency-checks only the key→Job-id binding from its
+key slice, then replays the complete Job slice; it never projects a partial
+lifecycle that might contain a restore without its intervening transitions.
+Retrying an archived failed or lost Job appends `job/restored`, promotes that
+same id to `requested`, and then follows the ordinary lifecycle. Complete replay
+accepts that restore only when its embedded terminal Job exactly matches the
+already-projected Job. An explicitly retried Job from an already-evicted Queue
+is tagged as detached in that restore fact; while live it remains retained, and
+its later terminal state consumes the standalone 512-Job window instead of
+resurrecting or displacing a Queue tree. Queue roots and their ordinary Jobs
+co-evict; custom Journals without history disable this compactor.
+
 A definition parks externally owned work by returning:
 
 ```ts

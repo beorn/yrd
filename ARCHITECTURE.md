@@ -19,8 +19,8 @@ function per implementation detail.
 | Object     | Created by                                   | Responsibility                                                                             | Main surface                                                                                                                              |
 | ---------- | -------------------------------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `YrdDef`   | `createYrdDef()`                             | Immutable composition of state, commands, event schemas, projectors, and feature factories | `extend()`                                                                                                                                |
-| `Yrd`      | `createYrd()`                                | Command validation, idempotency, event projection, reactive state, and feature access      | `state`, `refresh()`, `journalSnapshot()`, `dispatch()`, `events()`, `close()`                                                            |
-| `Journal`  | `createMemoryJournal()` or `createJournal()` | Ordered durable frames with optimistic cursor concurrency                                  | `read()`, `append()`                                                                                                                      |
+| `Yrd`      | `createYrd()`                                | Command validation, idempotency, event projection, reactive state, and feature access      | `state`, `refresh()`, `journalSnapshot()`, `historySnapshot()`, `retentionDiagnostics()`, `dispatch()`, `events()`, `close()`              |
+| `Journal`  | `createMemoryJournal()` or `createJournal()` | Ordered durable frames with optimistic cursor concurrency and optional immutable history   | `read()`, `append()`, optional `checkpoint`/`history`                                                                                      |
 | `Process`  | `createProcess()`                            | Scope-owned argv execution with bounded evidence and termination escalation                | `run()`, `close()`                                                                                                                        |
 | `Jobs`     | `withJobs()`                                 | Durable execution, leases, waiting work, retries, and recovery                             | `state`, `definition()`, `requireDefinitions()`, `get()`, `run()`, `runMany()`, `finish()`, `retry()`, `recover()`, `requested()`         |
 | `Issues`   | `withIssues()`                               | Resolve issue references through configured sources                                        | `sources`, `ref()`, `resolve()`                                                                                                           |
@@ -142,15 +142,21 @@ adapter takes its OS lock only for repair, comparison, append, and data sync.
 There is no writer-lease API and no hidden async execution context.
 
 The repository format is one strict `journal.sqlite` authority in WAL mode.
-`journal_events` holds the append tail; a singleton snapshot holds an exact
-cursor-addressable compacted prefix plus Core's projection checkpoint. Snapshot
-publication and delete-below-snapshot happen in one SQL transaction, so every
-previously committed opaque cursor remains replayable. Every stored frame and
-snapshot payload is checksummed and decoded through the production frame
-schema; corruption fails loud.
+`journal_events` holds the bounded append tail, `journal_history` holds covered
+frames as immutable cursor-addressable rows, and the singleton snapshot binds
+Core's bounded projection checkpoint. Snapshot publication moves and deletes
+covered tail rows in one SQL transaction, so every previously committed opaque
+cursor remains replayable without copying full history into the checkpoint.
+Journal-owned command, identity, Job, Job-key, and Queue facts are derived in
+the frame transaction and checked against decoded authority. Every stored frame
+and checkpoint payload is checksummed; corruption or index disagreement fails
+loud.
 
-Mutable connections use `synchronous=FULL`, are bounded by the POSIX writer
-lock, and are explicitly checkpointed and closed. Startup refuses WAL unless
+Mutable connections use `synchronous=FULL` and incremental auto-vacuum, are
+bounded by the POSIX writer lock, and are explicitly checkpointed and closed.
+Schema-v1 conversion commits row history and lookup facts before an idempotent
+full `VACUUM`; a crash leaves a resumable maintenance-pending state, never a
+second authority. Startup refuses WAL unless
 `sqlite_version()` reports a fixed runtime (`>=3.51.3`, or an official fixed
 `3.50.7` / `3.44.6` backport). Read-only journals expose checkpoint load but no
 save capability and do not create or migrate logical authority.
@@ -159,8 +165,34 @@ save capability and do not create or migrate logical authority.
 runtime has observed. `await yrd.refresh()` incrementally catches up with Frames
 another process appended, then publishes the newer snapshot through that same
 signal. `await yrd.journalSnapshot()` returns that projected state and its
-cursor/timestamp as one frozen cut for external journal consumers. Commands
-refresh before deciding and publish after append.
+cursor/timestamp as one frozen cut for external journal consumers.
+`historySnapshot()` and `events()` deliberately replay journal authority for
+lossless callers. Commands refresh before deciding and publish after append.
+
+Core's private receipt cache retains the latest 4,096 frames. Job and Queue
+compactors run only when the Journal supplies immutable history: all
+nonterminal work remains live, along with the latest 512 terminal Queue roots
+and their complete trees/Jobs plus 512 standalone terminal Jobs. A failed
+admission root that still determines a live PR's retry budget remains as live
+decision evidence beyond that terminal window. Archive reads do not repopulate
+live projection state; retrying an archived failed or lost Job appends an
+explicit restore of the same Job id before it runs again. A complete replay
+accepts that restore only when its embedded terminal Job exactly matches the
+already-projected history. The restore fact also records when a Queue-owned Job
+came from an already-evicted tree, so live and cold replay both retain it as a
+detached nonterminal and bound its later terminal state in the standalone Job
+window without resurrecting that Queue tree.
+
+A cold replay from initial state validates the complete unpruned projection
+before one compaction pass. A tail replay validates the current live projection
+after every complete incoming batch, before that batch is compacted. The cold
+boundary also preserves pre-settlement Queue journals for the explicit startup
+migration: live-leased legacy roots remain uncompacted and are refused, while
+unleased roots are auto-quiesced with a receipt. Only terminal legacy roots
+receive journal-derived order and enter the same Queue/Job retention window.
+Atomic appends validate and compact only after the whole Frame projects.
+`historySnapshot()` independently replays and validates the complete authority
+without compacting it.
 
 Current event schemas remain strict for every append. A plugin may additionally
 declare a replay-only schema for an older payload; Core tries it only while
@@ -185,9 +217,11 @@ projection.
 
 Core coalesces a projection checkpoint every 256 projected frames and enforces
 a 512-frame high-water before accepting more mutable work. Persistence
-atomically moves covered tail rows into the exact snapshot prefix and deletes
-them from `journal_events`; this bounds cold tail replay without creating a
-second authority or a bespoke compactor.
+atomically moves covered tail rows into `journal_history`, binds the checkpoint,
+and deletes them from `journal_events`; this bounds cold tail replay without
+creating a second authority. After commit it attempts at most 256 pages of
+incremental vacuum. Failure defers physical reclamation but never rolls back or
+misreports the committed checkpoint.
 
 ## Layers
 
@@ -200,8 +234,10 @@ CLI / Git command projection
   -> Filesystem persistence adapter
 ```
 
-Dependencies point down. Core has no knowledge of Jobs, Git, bays, queues,
-contests, the filesystem, or the CLI. Persistence implements Core's Journal
+Dependencies point down. Core has no Job, Git, bay, Queue, contest, filesystem,
+or CLI projection behavior. Its Journal contract names only the authorized
+immutable lookup vocabulary; persistence derives those lookup facts from
+frames but never projects domain status. Persistence implements Core's Journal
 interface. Domain packages depend on Core and on the lower domain objects they
 actually use.
 
