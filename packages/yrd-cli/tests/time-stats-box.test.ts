@@ -2,7 +2,7 @@
 // @level l1
 // @consumer yrd queue watch statistics surface
 
-import { createRenderer } from "@silvery/test"
+import { createRenderer } from "silvery/test"
 import { createElement as h } from "react"
 import { Box } from "silvery"
 import { describe, expect, it } from "vitest"
