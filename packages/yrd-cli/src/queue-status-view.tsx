@@ -27,6 +27,7 @@ import {
   Text,
   TogglePill,
   TogglePillGroup,
+  type ListViewHandle,
   type TableColumn,
   type TextProps,
   useWindowSize,
@@ -3996,8 +3997,7 @@ function ProjectedQueueTimeline({
   visibleBuckets,
   expandedStorms,
   onToggleBucket,
-  freshRows = 0,
-  onJumpToNewest,
+  listRef,
 }: {
   projection: QueueTimelineProjection
   nav: boolean
@@ -4012,8 +4012,7 @@ function ProjectedQueueTimeline({
   visibleBuckets?: ReadonlySet<QueueTimelineStatusBucket>
   expandedStorms?: ReadonlySet<string>
   onToggleBucket?: (bucket: QueueTimelineStatusBucket) => void
-  freshRows?: number
-  onJumpToNewest?: () => void
+  listRef?: React.Ref<ListViewHandle>
 }) {
   // Fold the complete visible set before applying the one-shot row cap. A
   // retry storm must cost one display line everywhere, not `limit` lines plus
@@ -4043,21 +4042,10 @@ function ProjectedQueueTimeline({
           // Pane chrome (item L, 2026-07-16): the QUEUE pane is headed by its
           // tab-style label (no surrounding box); the `updated` clock rides the
           // right of that same tab row (item C — flush with the QUEUE tab),
-          // and the anchored-freshness `N new` cue sits between them.
+          // with the remaining row reserved for future pane-local chrome.
           <Box height={1} flexDirection="row" gap={1} minWidth={0}>
             <QueueTabsLine base={projection.base} />
             <Box flexGrow={1} flexBasis={0} minWidth={0} />
-            {freshRows === 0 ? null : (
-              // The anchored-freshness cue is a click-to-jump affordance (item
-              // 4-new): `↓ N new` jumps the cursor to the newest row and clears
-              // the count. Pointer-only — the count reflects rows that arrived
-              // above a pinned cursor; clicking resumes follow at the newest.
-              <Box flexShrink={0} onClick={onJumpToNewest}>
-                <Text color="$fg-warning">
-                  ↓ {freshRows} new {freshRows === 1 ? "run" : "runs"} — G jumps
-                </Text>
-              </Box>
-            )}
             {/* The `updated HH:MM:SS` clock is gone from the live pane (user
                 directive 2026-07-21): the RUNNER box's always-on border timer
                 is the watch view's temporal-trust cue. One-shot prints below
@@ -4085,6 +4073,7 @@ function ProjectedQueueTimeline({
           <Box flexDirection="column" minWidth={0} flexShrink={1} minHeight={0} flexGrow={fillHeight ? 1 : undefined}>
             <TimelineHeader layout={layout} />
             <ListView
+              ref={listRef}
               items={rows}
               nav={nav}
               cursorKey={cursorKey}
@@ -4190,8 +4179,7 @@ export function QueueTimelineView({
   visibleBuckets,
   expandedStorms,
   onToggleBucket,
-  freshRows,
-  onJumpToNewest,
+  listRef,
 }: {
   projection?: QueueTimelineProjection
   results?: readonly QueueStatusResult[]
@@ -4209,8 +4197,7 @@ export function QueueTimelineView({
   visibleBuckets?: ReadonlySet<QueueTimelineStatusBucket>
   expandedStorms?: ReadonlySet<string>
   onToggleBucket?: (bucket: QueueTimelineStatusBucket) => void
-  freshRows?: number
-  onJumpToNewest?: () => void
+  listRef?: React.Ref<ListViewHandle>
 }) {
   if (projection !== undefined) {
     // 15e: the list is left-flush — no gutter, no centering; the surface
@@ -4230,8 +4217,7 @@ export function QueueTimelineView({
         visibleBuckets={visibleBuckets}
         expandedStorms={expandedStorms}
         onToggleBucket={onToggleBucket}
-        freshRows={freshRows}
-        {...(onJumpToNewest === undefined ? {} : { onJumpToNewest })}
+        listRef={listRef}
       />
     )
   }
@@ -4248,6 +4234,7 @@ export function QueueTimelineView({
         <Text color="$fg-muted">No matching queue rows.</Text>
       ) : (
         <ListView
+          ref={listRef}
           items={rows}
           nav={nav}
           cursorKey={cursorKey}

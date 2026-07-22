@@ -719,9 +719,7 @@ export function QueueWorkflowStepTabs({
   // that override.
   const tabNames = useMemo(() => (data === undefined ? [] : [PR_TAB_ID, ...names]), [data, names])
   const liveStep =
-    data === undefined
-      ? undefined
-      : (data.steps.findLast((step) => step.status === "running")?.step ?? PR_TAB_ID)
+    data === undefined ? undefined : (data.steps.findLast((step) => step.status === "running")?.step ?? PR_TAB_ID)
   const [userSelectedStep, setUserSelectedStep] = useState<string | null>(null)
   const activeStep = resolveStepTabSelection(tabNames, liveStep, userSelectedStep)
 
@@ -898,6 +896,214 @@ function selectedDetailIssue(
   return prs.find((candidate) => candidate.id === (selectedPr ?? fallbackPr))?.issue
 }
 
+type QueueWatchCursorMode = "follow-newest" | "auto-follow-run" | "fixed-row"
+
+type QueueWatchCursorRow = Readonly<{
+  key: string
+  pr: string
+  revision: number
+  status: string
+  run?: string
+}>
+
+type QueueWatchCursorState = Readonly<{
+  mode: QueueWatchCursorMode
+  rowKey?: string
+  notice?: string
+}>
+
+function queueWatchCursorLabel(row: QueueWatchCursorRow): string {
+  return `pr#${row.pr.replace(/^pr(?:[-#])?/iu, "")}.${row.revision}`
+}
+
+function queueWatchCursorMode(row: QueueWatchCursorRow, index: number): QueueWatchCursorMode {
+  if (row.status === "running") return "auto-follow-run"
+  return index === 0 ? "follow-newest" : "fixed-row"
+}
+
+function nearestPriorCursorNeighbor(
+  missingKey: string,
+  previousRows: readonly QueueWatchCursorRow[],
+  rows: readonly QueueWatchCursorRow[],
+): QueueWatchCursorRow | undefined {
+  const previousIndex = previousRows.findIndex((row) => row.key === missingKey)
+  if (previousIndex < 0) return undefined
+  const currentByKey = new Map(rows.map((row) => [row.key, row]))
+  for (let distance = 1; distance < previousRows.length; distance += 1) {
+    // Prefer the visually preceding row on an equal-distance tie. This makes
+    // a disappearing middle row move one line up, never to unrelated row 0.
+    const before = previousRows[previousIndex - distance]
+    if (before !== undefined) {
+      const retained = currentByKey.get(before.key)
+      if (retained !== undefined) return retained
+    }
+    const after = previousRows[previousIndex + distance]
+    if (after !== undefined) {
+      const retained = currentByKey.get(after.key)
+      if (retained !== undefined) return retained
+    }
+  }
+  return undefined
+}
+
+/** Pure cursor reconciliation: row identity and operator intent are state;
+ * projection indices are only a rendering coordinate. */
+function reconcileQueueWatchCursor(
+  state: QueueWatchCursorState,
+  previousRows: readonly QueueWatchCursorRow[],
+  rows: readonly QueueWatchCursorRow[],
+  runningRunOrder: ReadonlyMap<string, number>,
+  defaultCursorKey: string | undefined,
+): QueueWatchCursorState {
+  if (rows.length === 0) return state
+  if (state.mode === "follow-newest") {
+    return { mode: state.mode, rowKey: defaultCursorKey ?? rows[0]?.key }
+  }
+
+  const current = rows.find((row) => row.key === state.rowKey)
+  if (state.mode === "auto-follow-run") {
+    // Parking on a running PR follows that exact work until it settles. Only
+    // then choose the next live run, ordered by durable run-start time.
+    if (current?.status === "running") return { ...state, notice: undefined }
+    const running = rows
+      .map((row, index) => ({ row, index }))
+      .filter(({ row }) => row.status === "running")
+      .sort(
+        (left, right) =>
+          (runningRunOrder.get(left.row.run ?? "") ?? Number.MAX_SAFE_INTEGER) -
+            (runningRunOrder.get(right.row.run ?? "") ?? Number.MAX_SAFE_INTEGER) || left.index - right.index,
+      )[0]?.row
+    if (running !== undefined) return { mode: state.mode, rowKey: running.key }
+    if (current !== undefined) return { ...state, notice: undefined }
+  } else if (current !== undefined) {
+    return state
+  }
+
+  const neighbor =
+    (state.rowKey === undefined ? undefined : nearestPriorCursorNeighbor(state.rowKey, previousRows, rows)) ?? rows[0]
+  if (neighbor === undefined) return state
+  const missing = previousRows.find((row) => row.key === state.rowKey)
+  return {
+    ...state,
+    rowKey: neighbor.key,
+    ...(missing === undefined
+      ? { notice: `selection moved: unavailable row → ${queueWatchCursorLabel(neighbor)}` }
+      : {
+          notice: `selection moved: ${queueWatchCursorLabel(missing)} is no longer visible → ${queueWatchCursorLabel(neighbor)}`,
+        }),
+  }
+}
+
+function sameQueueWatchCursorState(left: QueueWatchCursorState, right: QueueWatchCursorState): boolean {
+  return left.mode === right.mode && left.rowKey === right.rowKey && left.notice === right.notice
+}
+
+function initialQueueWatchCursorState(
+  rows: readonly QueueWatchCursorRow[],
+  requestedPr: string | undefined,
+  defaultCursorKey: string | undefined,
+): QueueWatchCursorState {
+  if (rows.length === 0) {
+    return { mode: requestedPr === undefined ? "follow-newest" : "fixed-row" }
+  }
+  const requestedIndex =
+    requestedPr === undefined
+      ? rows.findIndex((row) => row.key === defaultCursorKey)
+      : rows.findIndex((row) => row.pr === requestedPr)
+  const row = rows[Math.max(0, requestedIndex)]
+  if (row === undefined) throw new Error("yrd: non-empty queue has no initial cursor row")
+  if (row.status === "running") return { mode: "auto-follow-run", rowKey: row.key }
+  return { mode: requestedPr === undefined ? "follow-newest" : "fixed-row", rowKey: row.key }
+}
+
+function queueRunningRunOrder(results: readonly QueueStatusResult[]): ReadonlyMap<string, number> {
+  return new Map(
+    results
+      .flatMap((result) => result.running)
+      .sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id))
+      .map((run, index) => [run.id, index] as const),
+  )
+}
+
+function queueWatchCursorRows(
+  snapshot: QueueWatchSnapshot,
+  projectedRows: readonly QueueTimelineProjectedRow[] | undefined,
+): readonly QueueWatchCursorRow[] {
+  if (snapshot.projection === undefined) {
+    return queueTimelineRows(snapshot.results, snapshot.now, false).map((row) => ({
+      key: row.key,
+      pr: row.pr,
+      revision: row.revision,
+      status: row.status,
+      ...(row.run === undefined ? {} : { run: row.run }),
+    }))
+  }
+  return (projectedRows ?? []).map((row) => ({
+    key: row.id,
+    pr: row.pr,
+    revision: row.revision,
+    status: row.status,
+    ...(row.run === undefined ? {} : { run: row.run }),
+  }))
+}
+
+function useQueueWatchCursor({
+  rows,
+  results,
+  requestedPr,
+  defaultCursorKey,
+}: {
+  rows: readonly QueueWatchCursorRow[]
+  results: readonly QueueStatusResult[]
+  requestedPr: string | undefined
+  defaultCursorKey: string | undefined
+}) {
+  const [state, setState] = useState<QueueWatchCursorState>(() =>
+    initialQueueWatchCursorState(rows, requestedPr, defaultCursorKey),
+  )
+  const previousRows = useRef<readonly QueueWatchCursorRow[]>(rows)
+  const listRef = useRef<ListViewHandle | null>(null)
+  const runningRunOrder = useMemo(() => queueRunningRunOrder(results), [results])
+  const resolved = reconcileQueueWatchCursor(state, previousRows.current, rows, runningRunOrder, defaultCursorKey)
+  const resolvedIndex = rows.findIndex((row) => row.key === resolved.rowKey)
+  if (rows.length > 0 && resolvedIndex < 0) {
+    throw new Error(`yrd: reconciled queue cursor '${resolved.rowKey ?? "<unset>"}' is not visible`)
+  }
+
+  useEffect(() => {
+    previousRows.current = rows
+    if (!sameQueueWatchCursorState(state, resolved)) setState(resolved)
+  }, [resolved, rows, state])
+
+  // The viewport is live data, not a cursor anchor. A changed newest identity
+  // scrolls the list to row 0 while the selection remains on its row key.
+  const newestRowKey = rows[0]?.key
+  useEffect(() => {
+    listRef.current?.scrollToTop()
+  }, [newestRowKey])
+
+  const selectRow = useCallback(
+    (index: number): void => {
+      const row = rows[index]
+      if (row === undefined) return
+      setState({ mode: queueWatchCursorMode(row, index), rowKey: row.key })
+    },
+    [rows],
+  )
+  const followRunning = useCallback((): void => {
+    listRef.current?.scrollToTop()
+    setState((current) => ({ mode: "auto-follow-run", rowKey: current.rowKey }))
+  }, [])
+
+  return {
+    cursor: Math.max(0, resolvedIndex),
+    listRef,
+    resolved,
+    selectRow,
+    followRunning,
+  } as const
+}
+
 export function QueueWatchFrame({
   snapshot,
   pr,
@@ -960,68 +1166,24 @@ export function QueueWatchFrame({
       return retained.size === current.size ? current : retained
     })
   }, [visibleStormKeys])
-  const rows = useMemo(
-    () =>
-      snapshot.projection === undefined
-        ? queueTimelineRows(snapshot.results, snapshot.now, false).map((row) => ({
-            key: row.key,
-            pr: row.pr,
-            ...(row.run === undefined ? {} : { run: row.run }),
-          }))
-        : (projectedRows ?? []).map((row) => ({
-            key: row.id,
-            pr: row.pr,
-            ...(row.run === undefined ? {} : { run: row.run }),
-          })),
-    [projectedRows, snapshot],
-  )
-  // Default cursor: first RUNNING row, else the newest FINISHED row. A manual
-  // cursor move is sticky — default-follow stops until the pinned row leaves
-  // the window or the view is reopened.
+  const rows = useMemo(() => queueWatchCursorRows(snapshot, projectedRows), [projectedRows, snapshot])
+  // Keep the established live default (first running, else newest finished)
+  // while the viewport itself always begins at physical row 0.
   const defaultCursorKey =
     snapshot.projection === undefined
       ? rows[0]?.key
       : queueTimelineVisibleDefaultCursorId(snapshot.projection, visibleBuckets, true)
-  const [manualCursor, setManualCursor] = useState(false)
-  const [cursorRowKey, setCursorRowKey] = useState<string | undefined>(() => defaultCursorKey)
-  const [selectedPr, setSelectedPr] = useState<string | undefined>(
-    () => pr ?? rows.find((row) => row.key === defaultCursorKey)?.pr ?? rows[0]?.pr,
-  )
+  const cursorController = useQueueWatchCursor({
+    rows,
+    results: snapshot.results,
+    requestedPr: pr,
+    defaultCursorKey,
+  })
+  const { cursor, listRef: timelineListRef, resolved: resolvedCursorState, selectRow } = cursorController
   const [detailOpen, setDetailOpen] = useState(() => snapshot.projection === undefined || tier !== "full")
   const [splitRatio, setSplitRatio] = useState(DEFAULT_SPLIT_RATIO)
-  const [newRows, setNewRows] = useState(0)
   const [cancelArmed, setCancelArmed] = useState(false)
   const previousTier = useRef(tier)
-  const previousRowKeys = useRef<readonly string[]>(rows.map((row) => row.key))
-  const cursor = Math.max(
-    0,
-    rows.findIndex((row) => row.key === cursorRowKey),
-  )
-
-  useEffect(() => {
-    if (rows.length === 0) {
-      setCursorRowKey(undefined)
-      setSelectedPr(pr)
-      return
-    }
-    const pinned = manualCursor ? rows.find((row) => row.key === cursorRowKey) : undefined
-    if (pinned === undefined && manualCursor) setManualCursor(false)
-    const selected =
-      pinned ?? rows.find((row) => row.key === (manualCursor ? cursorRowKey : defaultCursorKey)) ?? rows[0]
-    if (selected === undefined) return
-    if (selected.key !== cursorRowKey) setCursorRowKey(selected.key)
-    if (selected.pr !== selectedPr) setSelectedPr(selected.pr)
-  }, [cursorRowKey, defaultCursorKey, manualCursor, pr, rows, selectedPr])
-
-  useEffect(() => {
-    const previous = new Set(previousRowKeys.current)
-    const selectedIndex = rows.findIndex((row) => row.key === cursorRowKey)
-    if (selectedIndex > 0) {
-      const addedBeforeCursor = rows.slice(0, selectedIndex).filter((row) => !previous.has(row.key)).length
-      if (addedBeforeCursor > 0) setNewRows((count) => count + addedBeforeCursor)
-    }
-    previousRowKeys.current = rows.map((row) => row.key)
-  }, [cursorRowKey, rows])
 
   useEffect(() => {
     if (previousTier.current === tier) return
@@ -1053,6 +1215,12 @@ export function QueueWatchFrame({
       setDetailOpen(true)
       return
     }
+    if (input === "g") {
+      // `g` returns to the live-running subscription. It scrolls the viewport
+      // independently and never assigns whichever row happens to be at index 0.
+      cursorController.followRunning()
+      return
+    }
     if (snapshot.projection === undefined) return
     // Direct status-filter toggles (user respec 2026-07-15). Pause/resume is
     // removed. `t` toggles the todo (pending) bucket, matching the pill's
@@ -1063,15 +1231,6 @@ export function QueueWatchFrame({
     if (input === "f") toggleBucket("failed")
     if (input === "d") toggleBucket("done")
   })
-
-  const selectRow = (index: number): void => {
-    const row = rows[index]
-    if (row === undefined) return
-    setManualCursor(true)
-    setCursorRowKey(row.key)
-    setSelectedPr(row.pr)
-    setNewRows(0)
-  }
 
   const activateRow = (index: number): void => {
     selectRow(index)
@@ -1085,22 +1244,8 @@ export function QueueWatchFrame({
     })
   }
 
-  // Jump-to-newest (item 4-new): the `↓ N new` cue resumes default-follow at
-  // the newest row (first running, else newest finished) and clears the count.
-  // It reuses the exact `defaultCursorKey` the un-pinned pane already follows,
-  // so clicking the cue lands where the cursor would sit without a manual pin.
-  const jumpToNewest = (): void => {
-    const targetKey = defaultCursorKey ?? rows[0]?.key
-    if (targetKey === undefined) return
-    const target = rows.find((row) => row.key === targetKey)
-    setManualCursor(false)
-    setCursorRowKey(targetKey)
-    setSelectedPr(target?.pr ?? pr)
-    setNewRows(0)
-  }
-
   const selectedRow = rows[cursor]
-  const detailPr = pr ?? selectedPr
+  const detailPr = pr ?? selectedRow?.pr
   const detailData =
     selectedRow?.run === undefined
       ? undefined
@@ -1143,6 +1288,7 @@ export function QueueWatchFrame({
         cursorKey={cursor}
         onCursor={selectRow}
         onSelect={activateRow}
+        listRef={timelineListRef}
       />
     ) : (
       <QueueTimelineView
@@ -1158,8 +1304,7 @@ export function QueueWatchFrame({
         visibleBuckets={visibleBuckets}
         expandedStorms={expandedStorms}
         onToggleBucket={toggleBucket}
-        freshRows={newRows}
-        onJumpToNewest={jumpToNewest}
+        listRef={timelineListRef}
       />
     )
   const selectedDetail =
@@ -1263,7 +1408,13 @@ export function QueueWatchFrame({
             Cancel run {selectedRow.run}? Its PRs re-queue, not rejected. y/Enter to confirm, any other key to abort.
           </Text>
         </Box>
-      ) : null}
+      ) : resolvedCursorState.notice === undefined ? null : (
+        <Box height={1} flexShrink={0}>
+          <Text color="$fg-warning" wrap="truncate">
+            ⚠ {resolvedCursorState.notice}
+          </Text>
+        </Box>
+      )}
     </Box>
   )
 }
