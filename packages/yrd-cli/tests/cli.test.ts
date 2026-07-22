@@ -2408,8 +2408,19 @@ describe("runYrd", () => {
     expect(JSON.parse(ordinary.stdout())).not.toHaveProperty("results")
     expect(JSON.parse(ordinary.stdout())).not.toHaveProperty("attempts")
 
+    const current = app.queue.get("R1")
+    if (current === undefined) throw new Error("expected R1")
+    const archived: QueueRun = {
+      ...current,
+      id: "R0",
+      base: "retired",
+      prs: current.prs.map((pr) => ({ ...pr, base: "retired" })),
+    }
+    const history = vi.fn(() => Promise.resolve([archived, current]))
+    const historicalApp = { ...app, queue: { ...app.queue, history } }
     const lossless = outputIO()
-    expect(await runYrd(app, yrd("log", "--all", "--json"), lossless.io), lossless.stderr()).toBe(0)
+    expect(await runYrd(historicalApp, yrd("log", "--all", "--json"), lossless.io), lossless.stderr()).toBe(0)
+    expect(history).toHaveBeenCalledOnce()
     expect(JSON.parse(lossless.stdout())).toMatchObject({
       command: "log",
       results: [
@@ -2425,6 +2436,7 @@ describe("runYrd", () => {
             },
           ],
         },
+        { base: "retired", finished: [{ id: "R0" }] },
       ],
       attempts: [
         expect.objectContaining({
@@ -2598,7 +2610,7 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("bay", "open", "one"), open.io), open.stderr()).toBe(0)
 
     const submit = outputIO({ cwd: "/repo/.bays/B1" })
-    expect(await runYrd(app, yrd("pr", "submit"), submit.io), submit.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("pr", "submit", "--wait"), submit.io), submit.stderr()).toBe(0)
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted" })
     expect(app.queue.get("R1")).toMatchObject({ id: "R1", status: "passed", steps: [{ name: "check" }] })
     expect(checkRuns).toEqual(["check"])
@@ -2635,7 +2647,9 @@ describe("runYrd", () => {
     ])
 
     const submit = outputIO({ resolveRevision: () => Promise.resolve(MERGED_SHA) })
-    expect(await runYrd(app, yrd("pr", "submit", "topic/direct", "--json"), submit.io), submit.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("pr", "submit", "topic/direct", "--wait", "--json"), submit.io), submit.stderr()).toBe(
+      0,
+    )
 
     expect(checkedRevisions).toEqual(["PR1@2"])
     expect(app.queue.get("R1")).toMatchObject({
@@ -2988,7 +3002,7 @@ describe("runYrd", () => {
     })
   })
 
-  it("refreshes an active bay before submit and refuses uncommitted work", async () => {
+  it("refreshes an active bay before submit and records the committed head for dirty work", async () => {
     const refreshedHead = "2".repeat(40)
     const clean = await createApp({ refreshedHead })
     const open = outputIO()
@@ -3003,11 +3017,9 @@ describe("runYrd", () => {
 
     const dirty = await createApp({ dirtyBay: true })
     expect(await runYrd(dirty, yrd("bay", "open", "dirty"), outputIO().io)).toBe(0)
-    const refused = outputIO({ cwd: "/repo/.bays/B1" })
-    expect(await runYrd(dirty, yrd("bay", "submit"), refused.io)).toBe(1)
-    expect(refused.stdout()).toBe("")
-    expect(refused.stderr()).toContain("uncommitted work")
-    expect(Object.keys(dirty.state().bays.prs)).toEqual([])
+    const warned = outputIO({ cwd: "/repo/.bays/B1" })
+    expect(await runYrd(dirty, yrd("bay", "submit"), warned.io), warned.stderr()).toBe(0)
+    expect(dirty.state().bays.prs.PR1).toMatchObject({ bay: "B1", headSha: HEAD_SHA, status: "submitted" })
   })
 
   it("submits and revises an existing source branch through the injected Git revision boundary", async () => {
@@ -3396,7 +3408,9 @@ describe("runYrd", () => {
     const checkRuns: string[] = []
     const app = await createApp({ checkRuns })
     const submit = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
-    expect(await runYrd(app, yrd("pr", "submit", "topic/plain", "--json"), submit.io), submit.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("pr", "submit", "topic/plain", "--wait", "--json"), submit.io), submit.stderr()).toBe(
+      0,
+    )
     expect(checkRuns).toEqual(["check"])
     expect(app.queue.get("R1")).toMatchObject({ status: "passed", steps: [{ name: "check" }] })
 
@@ -3414,7 +3428,7 @@ describe("runYrd", () => {
     const resolveRevision = (ref: string) => Promise.resolve(ref.endsWith("first") ? HEAD_SHA : MERGED_SHA)
 
     const first = outputIO({ resolveRevision })
-    expect(await runYrd(app, yrd("pr", "submit", "topic/first", "--json"), first.io), first.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("pr", "submit", "topic/first", "--wait", "--json"), first.io), first.stderr()).toBe(0)
     expect(app.queue.get("R1")).toMatchObject({ status: "passed", prs: [{ id: "PR1" }] })
 
     const second = outputIO({ resolveRevision })
@@ -9377,13 +9391,21 @@ describe("journal version skew fail-loud", () => {
       .get()
     if (snapshot === null) throw new Error("expected SQLite journal snapshot")
     const prefix = JSON.parse(snapshot.prefix_json) as Array<{ cursor: number; value: StoredJournalRow }>
+    const history = database
+      .query<{ cursor: number; value_json: string }, []>(
+        "SELECT cursor, value_json FROM journal_history ORDER BY cursor",
+      )
+      .all()
+      .map(({ cursor, value_json }) => ({ cursor, row: JSON.parse(value_json) as StoredJournalRow }))
     const tail = database
       .query<{ cursor: number; value_json: string }, []>(
         "SELECT cursor, value_json FROM journal_events ORDER BY cursor",
       )
       .all()
       .map(({ cursor, value_json }) => ({ cursor, row: JSON.parse(value_json) as StoredJournalRow }))
-    return [...prefix.map(({ cursor, value }) => ({ cursor, row: value })), ...tail]
+    return [...prefix.map(({ cursor, value }) => ({ cursor, row: value })), ...history, ...tail].sort(
+      (left, right) => left.cursor - right.cursor,
+    )
   }
 
   async function seededJournalDir(): Promise<string> {
@@ -9412,6 +9434,7 @@ describe("journal version skew fail-loud", () => {
            WHERE singleton = 1`,
         )
         .run(emptyPrefix, createHash("sha256").update(canonicalJson([])).digest("hex"))
+      database.exec("DELETE FROM journal_history")
       database.exec("DELETE FROM journal_events")
       const insert = database.query("INSERT INTO journal_events(cursor, value_json, sha256) VALUES (?, ?, ?)")
       for (const { cursor, row } of rows) {

@@ -9,7 +9,13 @@ import type {
   QueueRunId,
 } from "./model.ts"
 import { projectionLookupGet, projectionLookupSet } from "./projection-lookup.ts"
-export { projectionLookupGet, projectionLookupSet, projectionLookupValues } from "./projection-lookup.ts"
+export {
+  projectionLookupEntries,
+  projectionLookupFromEntries,
+  projectionLookupGet,
+  projectionLookupSet,
+  projectionLookupValues,
+} from "./projection-lookup.ts"
 
 export function emptyQueueProjectionIndex(): QueueProjectionIndex {
   return {
