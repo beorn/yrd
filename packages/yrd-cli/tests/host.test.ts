@@ -821,6 +821,66 @@ notify:
     expect(await git(repo, "for-each-ref", "--format=%(refname)%09%(objectname)")).toBe(refsBefore)
   })
 
+  it("runs read-only commands without a Tribe identity when a submitter route is configured", async () => {
+    const { repo, featureSha } = await repository()
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      `base: main
+steps: [check, merge]
+check: { run: "true" }
+merge: {}
+notify:
+  pr/rejected: [submitter]
+`,
+    )
+    // Seed one PR (PR1) through an active host that HAS a Tribe identity.
+    await using seeded = await createYrdHost({ cwd: repo, env: { ...process.env, TRIBE_NAME: "@agent/6" } })
+    await seeded.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await seeded.close()
+
+    const stateDir = join(repo, ".git", "yrd")
+    const stateBefore = await byteManifest(stateDir)
+    const cursorPath = join(stateDir, "notifications", "cursor-v1.json")
+    const cursorExistedBefore = await Bun.file(cursorPath).exists()
+    const tribeName = process.env.TRIBE_NAME
+    delete process.env.TRIBE_NAME
+    try {
+      // Read-only surfaces never record or route a submitter. They must not
+      // require TRIBE_NAME merely because a notification route names one.
+      const reads: readonly (readonly string[])[] = [
+        ["pr", "view", "PR1", "--json"],
+        ["pr", "runs", "PR1", "--json"],
+        ["pr", "diff", "PR1", "--json"],
+        ["pr", "status", "--json"],
+        ["pr", "checks", "PR1", "--json"],
+        ["queue", "list", "--json"],
+        ["queue", "audit", "--json"],
+      ]
+      for (const argv of reads) {
+        let stderr = ""
+        const exit = await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, ...argv], {
+          cwd: repo,
+          stdout: () => undefined,
+          stderr: (text) => {
+            stderr += text
+          },
+        })
+        expect(stderr, `${argv.join(" ")} stderr`).not.toContain("signal-submitter-missing")
+        expect(stderr, `${argv.join(" ")} stderr`).not.toContain("set TRIBE_NAME")
+        // Read surfaces may use exit 1 to report an unhealthy/not-ready
+        // projection; the identity-bootstrap defect exited as configuration 2.
+        expect([0, 1], `${argv.join(" ")} exit`).toContain(exit)
+      }
+    } finally {
+      if (tribeName === undefined) delete process.env.TRIBE_NAME
+      else process.env.TRIBE_NAME = tribeName
+    }
+
+    // Viewer reads preserve every Yrd state byte and never advance the receiver.
+    expect(await byteManifest(stateDir)).toEqual(stateBefore)
+    expect(await Bun.file(cursorPath).exists()).toBe(cursorExistedBefore)
+  })
+
   it("preserves every Yrd state byte while listing a populated PR journal", async () => {
     const { repo, featureSha } = await repository()
     await commitYrdConfig(
@@ -2165,11 +2225,15 @@ notify:
       const narration = await stderr
       const failedLog = join(artifactRoot, "R1", "0-check", "attempt-1", "stderr.log")
       const passedLog = join(artifactRoot, "R2", "0-check", "attempt-1", "stdout.log")
+      const failedAttempt = join(artifactRoot, "R1", "0-check", "attempt-1")
+      const passedAttempt = join(artifactRoot, "R2", "0-check", "attempt-1")
       expect(narration).toContain(pathToFileURL(join(artifactRoot, "R1")).href)
       expect(narration).toContain(pathToFileURL(join(artifactRoot, "R2")).href)
-      expect(narration).toContain(pathToFileURL(failedLog).href)
-      expect(narration).toContain(pathToFileURL(passedLog).href)
+      expect(narration).toContain(pathToFileURL(failedAttempt).href)
+      expect(narration).toContain(pathToFileURL(passedAttempt).href)
       expect(narration).toContain(pathToFileURL(nativeMergeArtifacts).href)
+      expect(narration).not.toContain(pathToFileURL(failedLog).href)
+      expect(narration).not.toContain(pathToFileURL(passedLog).href)
       expect(narration).not.toContain(failedOutput)
       expect(narration).not.toContain(passedOutput)
       expect(await readFile(failedLog, "utf8")).toContain(failedOutput)

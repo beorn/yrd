@@ -68,6 +68,10 @@ type RunLifecycleStatus =
   | "integrated"
   | "rejected"
   | "environment-refused"
+  | "stale"
+  | "lost"
+  | "legacy"
+  | "refused"
   | "retired"
   | "canceled"
 
@@ -83,6 +87,10 @@ export function runTaskStatusOf(
       return "wip"
     case "rejected":
     case "environment-refused":
+    case "stale":
+    case "lost":
+    case "legacy":
+    case "refused":
       return "blocked"
     case "completed":
       if (run.conclusion === "success") return "done"

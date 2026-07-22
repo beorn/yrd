@@ -27,6 +27,17 @@ function gitlinkConflict(
   }
 }
 
+function plainFileConflict(path: string): QueueTreeConflict {
+  return {
+    path,
+    stages: [
+      { stage: 1, mode: "100644", oid: oid("4") },
+      { stage: 2, mode: "100644", oid: oid("5") },
+      { stage: 3, mode: "100644", oid: oid("6") },
+    ],
+  }
+}
+
 describe("queue-native submodule composition planner", () => {
   it("plans deterministic two-parent compositions in path order", () => {
     const conflicts = [
@@ -104,10 +115,43 @@ describe("queue-native submodule composition planner", () => {
       status: "refused",
       code: "candidate-conflict",
       paths: ["README.md"],
-      message:
-        "queue-native composition requires one complete three-stage gitlink per path and an origin for divergent pins: " +
-        "README.md; resolve these conflicts or supply the missing submodule origin, then retry",
+      message: "content conflict in README.md; the PR must be rebased or merged against the current base, then retry",
     })
+  })
+
+  it("names plain-file content conflicts as content conflicts, not submodule pins", () => {
+    const planned = planQueueSubmoduleComposition([
+      plainFileConflict(".agents/skills/tent/scripts/yrd-cutover.test.ts"),
+      plainFileConflict(".claude/skills/tent/scripts/yrd-cutover.test.ts"),
+    ])
+
+    expect(planned).toEqual({
+      status: "refused",
+      code: "candidate-conflict",
+      paths: [".agents/skills/tent/scripts/yrd-cutover.test.ts", ".claude/skills/tent/scripts/yrd-cutover.test.ts"],
+      message:
+        "content conflict in .agents/skills/tent/scripts/yrd-cutover.test.ts, .claude/skills/tent/scripts/yrd-cutover.test.ts; " +
+        "the PR must be rebased or merged against the current base, then retry",
+    })
+    if (planned.status !== "refused") throw new Error("expected a refusal")
+    expect(planned.message).not.toMatch(/gitlink|submodule/u)
+  })
+
+  it("splits a mixed refusal into content and submodule clauses", () => {
+    const planned = planQueueSubmoduleComposition([
+      plainFileConflict("README.md"),
+      { ...gitlinkConflict("vendor/no-origin", oid("1"), oid("2"), oid("3")), origin: undefined },
+    ])
+
+    expect(planned).toMatchObject({
+      status: "refused",
+      code: "candidate-conflict",
+      paths: ["README.md", "vendor/no-origin"],
+    })
+    if (planned.status !== "refused") throw new Error("expected a refusal")
+    expect(planned.message).toContain("content conflict in README.md")
+    expect(planned.message).toContain("one complete three-stage gitlink per path")
+    expect(planned.message).toContain("vendor/no-origin")
   })
 
   it("refuses duplicate conflict facts for the same path", () => {

@@ -284,7 +284,15 @@ export type QueueTimelineProjectionOptions = Readonly<{
   runner?: QueueTimelineRunner | null
 }>
 
-export type QueueTerminalOutcome = "integrated" | "rejected" | "environment-refused" | "canceled"
+export type QueueTerminalOutcome =
+  | "integrated"
+  | "rejected"
+  | "environment-refused"
+  | "stale"
+  | "lost"
+  | "legacy"
+  | "refused"
+  | "canceled"
 
 export type QueueTerminalFact = Readonly<{
   run: string
@@ -318,6 +326,10 @@ export type QueueFlowMetrics = Readonly<{
     integrated: number
     rejected: number
     environmentRefused: number
+    stale: number
+    lost: number
+    legacy: number
+    refused: number
     canceled: number
   }>
   decisionRejection: Readonly<{
@@ -335,7 +347,7 @@ export type QueueFlowMetrics = Readonly<{
   activeRun: Readonly<{
     allTerminal: DurationDistribution
     integratedOnly: DurationDistribution
-    // Active duration of the failed Runs (rejected + env-refused + canceled).
+    // Active duration of every non-integrated terminal Run.
     // Drives the FLOW / TIME / FAILED section; the complement of integratedOnly.
     failedOnly: DurationDistribution
   }>
@@ -797,6 +809,10 @@ export function queueFlowMetrics(
   let integrated = 0
   let rejected = 0
   let environmentRefused = 0
+  let stale = 0
+  let lost = 0
+  let legacy = 0
+  let refused = 0
   let canceled = 0
 
   for (const fact of facts) {
@@ -808,7 +824,15 @@ export function queueFlowMetrics(
     if (fact.outcome === "integrated") integrated += 1
     else if (fact.outcome === "rejected") rejected += 1
     else if (fact.outcome === "environment-refused") environmentRefused += 1
-    else canceled += 1
+    else if (fact.outcome === "stale") stale += 1
+    else if (fact.outcome === "lost") lost += 1
+    else if (fact.outcome === "legacy") legacy += 1
+    else if (fact.outcome === "refused") refused += 1
+    else if (fact.outcome === "canceled") canceled += 1
+    else {
+      const outcome: never = fact.outcome
+      throw new TypeError(`yrd: unknown terminal FLOW outcome '${String(outcome)}'`)
+    }
 
     if (fact.activeMs !== null) {
       const activeMs = finiteNonnegative(fact.activeMs, `Run '${fact.run}' active duration`)
@@ -825,7 +849,7 @@ export function queueFlowMetrics(
   return {
     windowMs,
     terminalAttempts: seenRuns.size,
-    outcomes: { integrated, rejected, environmentRefused, canceled },
+    outcomes: { integrated, rejected, environmentRefused, stale, lost, legacy, refused, canceled },
     decisionRejection: {
       rejected,
       decisions,
@@ -1119,9 +1143,14 @@ function queueLogClock(timestamp: string, compact: boolean, includeDate: boolean
 
 function queueLogLevel(outcome: string): "DEBUG" | "ERROR" | "INFO" | "WARN" {
   if (["integrated", "submitted"].includes(outcome)) return "INFO"
-  if (["rejected", "paused", "resumed"].includes(outcome)) return "WARN"
+  if (["rejected", "paused", "resumed", "environment-refused", "stale", "legacy", "refused"].includes(outcome)) {
+    return "WARN"
+  }
   if (["failed", "lost"].includes(outcome)) return "ERROR"
-  return "DEBUG"
+  if (["passed", "canceled", "retired"].includes(outcome)) return "DEBUG"
+  // An unclassified failure code is deliberately loud instead of silently
+  // inheriting a neutral level. Its raw code remains the rendered outcome.
+  return "ERROR"
 }
 
 function runDurations(
@@ -1296,12 +1325,12 @@ function stepOutput(step: QueueStep): string {
   return "-"
 }
 
-function queueOutcome(run: Run): "passed" | "integrated" | "rejected" | "canceled" | "running" | "waiting" {
+function queueOutcome(run: Run): string {
   if (run.status === "completed" && run.conclusion === "success") {
     return queueIntegration(run) === undefined ? "passed" : "integrated"
   }
   if (run.status === "completed" && run.conclusion === "cancelled") return "canceled"
-  if (run.status === "completed") return "rejected"
+  if (run.status === "completed") return terminalProjection(run).display
   // "canceled" is a distinct terminal outcome — a canceled run is NOT rejected;
   // its PRs re-queue. "running"/"waiting" fall through unchanged.
   return run.status === "waiting" ? "waiting" : "running"
@@ -1337,7 +1366,7 @@ function queueShowRetries(finished: readonly Run[], run: Run): number {
 function queueState(pr: PR, run: Run | undefined): string {
   if (run?.status === "queued" || run?.status === "in_progress") return "checking"
   if (run?.status === "waiting") return "waiting"
-  if (run?.status === "completed") return terminalOutcome(run)
+  if (run?.status === "completed") return terminalProjection(run).display
   return prDeliveryState(pr)
 }
 
@@ -1550,7 +1579,11 @@ function projectFailure(fact: FailureLike, evidence?: HumanFailureProjection["ev
   }
 }
 
-const ENVIRONMENT_REFUSAL_CODES = new Set(["queue-environment-refused", "stale-pr", "stale-check", "job-lost"])
+const STALE_CODES = new Set(["stale-pr", "stale-check", "stale-base"])
+// `check-failed` is the queue's generic decision wrapper, not a specific
+// failure taxonomy. Preserve its established `rejected` display; every
+// unrecognized/specific code remains lossless at the display boundary below.
+const GENERIC_REJECTION_CODES = new Set(["check-failed"])
 const CANCELED_CODES = new Set([
   "canceled",
   "cancelled",
@@ -1576,13 +1609,40 @@ const TIMELINE_STATUS_ORDER: readonly QueueTimelineStatusFilter[] = [
  */
 export const QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS = 100 * 365 * 24 * 60 * 60 * 1_000
 
-function terminalOutcome(run: Run): QueueTerminalOutcome {
-  if (run.status === "completed" && run.conclusion === "success") return "integrated"
-  if (run.status === "completed" && run.conclusion === "cancelled") return "canceled"
+type QueueTerminalProjection = Readonly<{ outcome: QueueTerminalOutcome; display: string }>
+
+/**
+ * Project one terminal Run once. `outcome` is the compact lifecycle/metrics
+ * class; `display` is the log/show value and deliberately preserves an
+ * unrecognized raw failure code. Timeline rows keep the raw code in their
+ * failure fact / STEP cell without bloating the fixed STATUS column.
+ */
+function terminalProjection(run: Run): QueueTerminalProjection {
+  if (run.status !== "completed") {
+    throw new TypeError(`yrd: nonterminal Run '${run.id}' cannot be projected as a terminal outcome`)
+  }
+  if (run.conclusion === "success") return { outcome: "integrated", display: "integrated" }
+  if (run.conclusion === "cancelled") return { outcome: "canceled", display: "canceled" }
   const failure = failureFact(run, relevantStep(run))
-  if (failure !== undefined && CANCELED_CODES.has(failure.code)) return "canceled"
-  if (failure !== undefined && ENVIRONMENT_REFUSAL_CODES.has(failure.code)) return "environment-refused"
-  return "rejected"
+  if (failure === undefined) return { outcome: "rejected", display: "rejected" }
+  if (GENERIC_REJECTION_CODES.has(failure.code)) return { outcome: "rejected", display: "rejected" }
+  if (CANCELED_CODES.has(failure.code)) return { outcome: "canceled", display: "canceled" }
+  if (failure.code === "job-lost") return { outcome: "lost", display: "lost" }
+  if (STALE_CODES.has(failure.code)) return { outcome: "stale", display: "stale" }
+  if (failure.code === "queue-environment-refused") {
+    return { outcome: "environment-refused", display: "environment-refused" }
+  }
+  if (failure.code === "legacy-quiesced") return { outcome: "legacy", display: "legacy" }
+  if (failure.code === "legacy-root-leased") return { outcome: "refused", display: "refused" }
+  return { outcome: "rejected", display: failure.code }
+}
+
+/** Reject a nonterminal status at the terminal-fact boundary. */
+function terminalOutcome(status: QueueTimelineStatus): QueueTerminalOutcome {
+  if (status === "pending" || status === "running") {
+    throw new TypeError(`yrd: nonterminal status '${status}' cannot become a terminal FLOW fact`)
+  }
+  return status
 }
 
 function timelineStatusFilter(status: QueueTimelineStatus): QueueTimelineStatusFilter {
@@ -1677,7 +1737,8 @@ function timelineRunMemberRows(
   attempts: readonly QueueAttempt[],
 ): QueueTimelineProjectedRow[] {
   const running = run.status === "queued" || run.status === "in_progress" || run.status === "waiting"
-  const status: QueueTimelineStatus = running ? "running" : terminalOutcome(run)
+  const terminal = running ? null : terminalProjection(run)
+  const status: QueueTimelineStatus = terminal === null ? "running" : terminal.outcome
   const timestamp = running ? toIso(run.startedAt) : run.finishedAt === undefined ? null : toIso(run.finishedAt)
   const timestampMs = parsedTimelineTimestamp(timestamp ?? undefined, `Run '${run.id}' timeline`)
   const elapsedRunMs = running
@@ -1926,7 +1987,7 @@ function foldTerminalFacts(rows: readonly QueueTimelineProjectedRow[]): QueueTer
       byRun.set(key, {
         run: row.run,
         terminalAtMs: row.timestampMs,
-        outcome: row.status as QueueTerminalOutcome,
+        outcome: terminalOutcome(row.status),
         activeMs: row.totalMs,
         queueWaitMs: waits,
       })
@@ -3209,11 +3270,24 @@ function timelineStatusColor(row: QueueTimelineProjectedRow): string {
   if (row.status === "running" || row.status === "pending") return "$fg-info"
   if (row.status === "integrated") return "$fg-success"
   if (row.status === "canceled") return "$fg-muted"
-  if (row.status === "environment-refused") return "$fg-warning"
+  if (["environment-refused", "stale", "legacy", "refused"].includes(row.status)) return "$fg-warning"
   return "$fg-error"
 }
 
 type TimelineStatusCell = Readonly<{ word: string; color: string }>
+
+const TIMELINE_STATUS_WORDS = {
+  pending: "todo",
+  running: "run",
+  integrated: "done",
+  rejected: "fail",
+  "environment-refused": "env",
+  stale: "stale",
+  lost: "lost",
+  legacy: "legacy",
+  refused: "refused",
+  canceled: "can",
+} as const satisfies Readonly<Record<QueueTimelineStatus, string>>
 
 // 15e is later than 15c/15d: STATUS remains a fixed column between TIME
 // and the RUN cell, while 15d supplies its semantic foreground colors.
@@ -3221,18 +3295,7 @@ type TimelineStatusCell = Readonly<{ word: string; color: string }>
 // directive 2026-07-21): rejected renders `fail`, integrated renders `done`
 // — the display buckets are todo/running/failed/done.
 function timelineStatusCell(row: QueueTimelineProjectedRow): TimelineStatusCell {
-  const word =
-    row.status === "running"
-      ? "run"
-      : row.status === "pending"
-        ? "todo"
-        : row.status === "integrated"
-          ? "done"
-          : row.status === "environment-refused"
-            ? "env"
-            : row.status === "canceled"
-              ? "can"
-              : "fail"
+  const word = TIMELINE_STATUS_WORDS[row.status]
   return { word, color: timelineStatusColor(row) }
 }
 
@@ -3247,8 +3310,11 @@ function timelineStepCell(row: QueueTimelineProjectedRow): TimelineStepCell {
     const slug = fitTimelineLabel(failureSlug(row.failure.code), TIMELINE_STATE_CAP)
     return {
       text: `err=${slug}`,
-      color:
-        row.status === "environment-refused" ? "$fg-warning" : row.status === "canceled" ? "$fg-muted" : "$fg-error",
+      color: ["environment-refused", "stale", "legacy", "refused"].includes(row.status)
+        ? "$fg-warning"
+        : row.status === "canceled"
+          ? "$fg-muted"
+          : "$fg-error",
     }
   }
   return { text: "" }
@@ -3904,7 +3970,7 @@ export const QUEUE_TIMELINE_STATUS_BUCKETS: readonly QueueTimelineStatusBucket[]
   "done",
 ]
 
-/** Bucket a row status: terminal failures (rejected/env-refused/canceled) are `failed`, integrated is `done`. */
+/** Bucket a row status: every non-integrated terminal outcome is `failed`; integrated is `done`. */
 export function queueTimelineStatusBucket(status: QueueTimelineStatus): QueueTimelineStatusBucket {
   if (status === "pending" || status === "running") return status
   return status === "integrated" ? "done" : "failed"
@@ -4498,10 +4564,7 @@ export function queueLogRows(
         const submittedAt = queueLogSubmissionTime(revisionClocks, run, pr)
         const ageMs = elapsedMs(submittedAt, finishedAt, `PR '${pr.id}' submitted-to-terminal age`)
         const showLocation = prStatus?.get(pr.id) === "withdrawn" ? undefined : location
-        const taskStatus =
-          outcome === "passed"
-            ? runTaskStatusOf({ status: "completed", conclusion: "success" })
-            : runTaskStatusOf({ status: outcome })
+        const taskStatus = runTaskStatusOf(run)
         rows.push({
           run: run.id,
           base: run.base,
@@ -4871,9 +4934,13 @@ function queueShowNextAction(data: QueueShowData): string {
   const actionable = data.failure ?? data.steps.findLast((step) => step.failure !== undefined)?.failure
   if (actionable !== undefined) return actionable.resolution.join("; then ")
   const errorCode = data.steps.find((step) => step.errorCode !== "-")?.errorCode
-  if (["queue-environment-refused", "stale-pr", "stale-check", "job-lost"].includes(errorCode ?? "")) {
+  if (errorCode === "queue-environment-refused") {
     return "repair the queue environment, then rerun the PR"
   }
+  if (["stale-pr", "stale-check", "stale-base"].includes(errorCode ?? "")) {
+    return "refresh the current PR revision against queue authority, then rerun it"
+  }
+  if (errorCode === "job-lost") return "recover the lost run, then rerun the PR"
   if (["canceled", "cancelled", "queue-canceled", "queue-cancelled"].includes(errorCode ?? "")) {
     return "inspect the newer PR revision; resubmit only if delivery is still required"
   }

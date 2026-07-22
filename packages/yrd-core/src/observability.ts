@@ -1,6 +1,8 @@
 import type { ConditionalLogger, LogLevel } from "loggily"
 import { failureFact } from "./failure.ts"
 
+/** Default severity by lifecycle outcome. Delivery-step starts are the one
+ * explicit identity-aware promotion; see observeYrdLifecycle. */
 export const YRD_LIFECYCLE_LEVELS = Object.freeze({
   started: "debug",
   progress: "trace",
@@ -29,6 +31,7 @@ export type YrdDeliveryIdentity = Readonly<{
   revision?: number
   headSha?: string
   branch?: string
+  issue?: string
   run?: string
   step?: string
   job?: string
@@ -73,7 +76,11 @@ export async function observeYrdLifecycle<Result>(
     lifecycle: options.lifecycle,
   }
   const span = log.span?.(undefined, () => spanProps)
-  emitLifecycle(log, options.lifecycle, "started", "started", { ...spanProps, outcome: "started" })
+  // Delivery-step starts are operator milestones: surface them at INFO even
+  // though routine lifecycle starts remain DEBUG. This keeps configured step
+  // names generic while making batch execution visible without enabling DEBUG.
+  const startLevel = options.identity?.run !== undefined && options.identity.step !== undefined ? "info" : undefined
+  emitLifecycle(log, options.lifecycle, "started", "started", { ...spanProps, outcome: "started" }, startLevel)
 
   const finish = (outcome: YrdLifecycleOutcome, error?: unknown, result?: Result): void => {
     const finishedAt = now()
@@ -120,10 +127,12 @@ function emitLifecycle(
   outcome: YrdLifecycleOutcome,
   descriptor: string,
   props: Record<string, unknown>,
+  levelOverride?: Exclude<LogLevel, "silent">,
 ): void {
   const message = `${lifecycle} ${descriptor}`
   const level =
-    outcome === "succeeded" && DEBUG_SUCCESS_LIFECYCLES.has(lifecycle) ? "debug" : YRD_LIFECYCLE_LEVELS[outcome]
+    levelOverride ??
+    (outcome === "succeeded" && DEBUG_SUCCESS_LIFECYCLES.has(lifecycle) ? "debug" : YRD_LIFECYCLE_LEVELS[outcome])
   switch (level) {
     case "trace":
       log.trace?.(message, props)

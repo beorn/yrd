@@ -283,7 +283,7 @@ export async function residentRunnerStatus(cwd: string): Promise<QueueTimelineRu
  * the pre-marker "NO RUNNER"/absent semantics. Reclaim, by contrast, consumes the
  * raw marker (it needs the dead pid), so it must NOT go through this filter. */
 function activeResidentRunner(runner: QueueTimelineRunner | null): QueueTimelineRunner | null {
-  return runner !== null && runner.exitedAt !== undefined ? null : runner
+  return runner?.exitedAt !== undefined ? null : runner
 }
 
 type RunnerGitDistance = Readonly<{
@@ -981,6 +981,19 @@ export function mergedQueueRuns(
       ...canonical[key],
     ]).toSorted(byQueueRunChronology)
   return { running: merge("running"), waiting: merge("waiting"), finished: merge("finished") }
+}
+
+function historicalQueueRuns(
+  runs: readonly Run[],
+  bases: ReadonlySet<string>,
+): Pick<QueueSummary, "running" | "waiting" | "finished"> {
+  const identities = new Set([...bases].map(baseIdentity))
+  const scoped = runs.filter((run) => identities.has(baseIdentity(run.base))).toSorted(byQueueRunChronology)
+  return {
+    running: scoped.filter((run) => run.status === "queued" || run.status === "in_progress"),
+    waiting: scoped.filter((run) => run.status === "waiting"),
+    finished: scoped.filter((run) => run.status === "completed"),
+  }
 }
 
 function selectedBays(state: BaysState, selectors: readonly string[], cwd: string, action: string): Bay[] {
@@ -2334,6 +2347,24 @@ function queueRunIsFollow(action: Readonly<{ opts(): unknown; args: readonly str
   return action.args.length === 0
 }
 
+const READ_ONLY_COMMANDS: Readonly<Record<string, readonly string[]>> = {
+  bay: ["_list", "path", "log"],
+  queue: ["_list", "list", "audit"],
+  pr: ["list", "view", "runs", "diff", "status", "checks"],
+  issue: ["_list", "view"],
+  contest: ["_list", "view"],
+}
+
+/** Read-only invocations never settle PR state or route submitter receipts. */
+function isReadOnlyInvocation(
+  action: Readonly<{ name(): string; parent?: Readonly<{ name(): string }> | null }>,
+): boolean {
+  if (action.name() === "_dashboard") return true
+  const parent = action.parent?.name()
+  if (parent === undefined) return false
+  return READ_ONLY_COMMANDS[parent]?.includes(action.name()) === true
+}
+
 async function runQueues(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -3228,11 +3259,19 @@ async function logRuns(
 ): Promise<void> {
   const state = stateOf(app)
   const target = queueLogTargets(state, selectors, options.base, options.pr)
+  const history = options.all === true ? await app.queue.history() : undefined
+  if (history !== undefined && selectors.length === 0 && options.base === undefined && options.pr === undefined) {
+    for (const run of history) target.bases.add(run.base)
+  }
   const summaries: QueueStatusResult[] = []
   for (const group of await queueTargetGroups(target.bases, io)) {
-    const canonical = app.queue.status(group.base)
-    const aliases = [...group.aliases].filter((base) => base !== group.base).map((base) => app.queue.status(base))
-    const merged = mergedQueueRuns(canonical, aliases)
+    const merged =
+      history === undefined
+        ? mergedQueueRuns(
+            app.queue.status(group.base),
+            [...group.aliases].filter((base) => base !== group.base).map((base) => app.queue.status(base)),
+          )
+        : historicalQueueRuns(history, group.aliases)
     const inScope = (run: Run) => target.selected.size === 0 || run.prs.some((member) => target.selected.has(member.id))
     const runs = {
       running: merged.running.filter(inScope),
@@ -4411,18 +4450,14 @@ function buildProgram(
       // `queue run` resident detection now derives from the run MODE (Tip B):
       // follow is the default, `--once` opts out, and the deprecated `--watch`
       // alias still selects follow (queueRunIsFollow mirrors resolveQueueRunMode
-      // at the pre-action boundary). `queue list --watch` is a DIFFERENT command
-      // — the live VIEWER — whose `--watch` is untouched by the run-mode cutover,
-      // so its detection stays on the parsed `.watch` flag. The static `pr list`
-      // projection is also a viewer: listing must never drain receiver receipts
-      // or settle notifications. bootstrap.load requires both flags
+      // at the pre-action boundary). Read-only commands are viewers regardless
+      // of whether they are static or resident: reads must never drain receiver
+      // receipts or settle notifications. bootstrap.load requires both flags
       // (RuntimeBootstrap.load type).
       const resident = action.name() === "run" && action.parent?.name() === "queue" && queueRunIsFollow(action)
-      const viewer =
-        (action.name() === "list" &&
-          action.parent?.name() === "queue" &&
-          (action.opts() as Readonly<{ watch?: boolean }>).watch === true) ||
-        (action.name() === "list" && action.parent?.name() === "pr")
+      // Viewer reads never drain receiver receipts, settle notifications, or
+      // require an active submitter identity.
+      const viewer = isReadOnlyInvocation(action)
       const loaded = await bootstrap.load(selected, { resident, viewer })
       runtimeApp = loaded.app
       runtimeServices = loaded.services

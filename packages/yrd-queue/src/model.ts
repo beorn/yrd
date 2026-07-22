@@ -58,6 +58,7 @@ export const PRSnapshotSchema = z
     name: z.string().trim().min(1).optional(),
     branch: GitRefSchema,
     base: GitRefSchema,
+    issue: z.string().trim().min(1).optional(),
     revision: z.number().int().positive(),
     headSha: GitShaSchema,
     baseSha: GitShaSchema.optional(),
@@ -378,6 +379,7 @@ export type QueuesState = Readonly<{
   index: QueueProjectionIndex
   authority: QueueAuthorityState
   terminalAssociations: QueueTerminalAssociations
+  retention: Readonly<{ terminalOrder: Readonly<Record<RunId, number>> }>
 }>
 
 export type PREligibilityReason = Readonly<{
@@ -656,6 +658,7 @@ export const Queues = Object.freeze({
       },
       authority: { statuses: {}, current: {}, submits: {}, checks: {}, claims: {}, runs: {} },
       terminalAssociations: { pending: {}, applied: {} },
+      retention: { terminalOrder: {} },
     }
   },
 
@@ -714,6 +717,7 @@ export const Queues = Object.freeze({
       ...(pr.name === undefined ? {} : { name: pr.name }),
       branch: pr.branch,
       base: baseIdentity(pr.base),
+      ...(pr.issue === undefined ? {} : { issue: pr.issue }),
       revision: prRevisionNumber(pr),
       headSha: prHead(pr),
       ...(baseSha === undefined ? {} : { baseSha }),

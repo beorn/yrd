@@ -12,8 +12,12 @@ import {
   createYrd,
   createYrdDef,
   pipe,
+  parseJournalFrame,
   type CommandTree,
   type Event,
+  type Journal,
+  type JournalEntityKind,
+  type JournalFrame,
   type YrdDef,
 } from "@yrd/core"
 import {
@@ -25,6 +29,7 @@ import {
   localRunner,
   withJobs,
   type ContextReq,
+  type Job as JobRecord,
   type JobContext,
   type JobDef,
   type JobHandler,
@@ -32,6 +37,7 @@ import {
   type RunnerContexts,
   type JobTransition,
 } from "@yrd/job"
+import { compactJobsState } from "../src/jobs.ts"
 
 type Delivery = {
   message: string
@@ -122,7 +128,7 @@ function withSender(job: JobDef<Delivery, Receipt>) {
 async function jobsApp(
   job: JobDef<Delivery, Receipt>,
   options: {
-    journal?: ReturnType<typeof createMemoryJournal>
+    journal?: Journal<unknown>
     clock?: () => string
     id?: () => string
     log?: ReturnType<typeof createLogger>
@@ -142,6 +148,71 @@ async function jobsApp(
 
 async function recorded(app: { events(): AsyncIterable<unknown> }): Promise<Event[]> {
   return (await Array.fromAsync(app.events())) as Event[]
+}
+
+function indexedJournal(): Journal<unknown> {
+  const values: JournalFrame[] = []
+  const entityIds = (frame: JournalFrame, kind: JournalEntityKind): readonly string[] => {
+    const ids = new Set<string>()
+    for (const applied of frame.events) {
+      const data = applied.data as Readonly<Record<string, unknown>>
+      if (applied.name === "job/requested") {
+        if (kind === "job") ids.add(applied.id)
+        if (kind === "job-key" && typeof data.key === "string") ids.add(data.key)
+      }
+      if (applied.name === "job/transitioned" && kind === "job" && typeof data.id === "string") ids.add(data.id)
+      if (applied.name === "job/restored" && typeof data.job === "object" && data.job !== null) {
+        const job = data.job as Readonly<{ id?: unknown; key?: unknown }>
+        if (kind === "job" && typeof job.id === "string") ids.add(job.id)
+        if (kind === "job-key" && typeof job.key === "string") ids.add(job.key)
+      }
+    }
+    return [...ids]
+  }
+  return {
+    async *read(after = 0, before = values.length) {
+      const end = Math.min(before, values.length)
+      if (after < end) yield { cursor: end, values: structuredClone(values.slice(after, end)) }
+    },
+    append(value, expectedCursor) {
+      if (expectedCursor !== values.length) {
+        return Promise.resolve({ appended: false as const, cursor: values.length })
+      }
+      values.push(parseJournalFrame(structuredClone(value)))
+      return Promise.resolve({ appended: true as const, cursor: values.length })
+    },
+    history: {
+      command(query) {
+        return structuredClone(
+          values.find(
+            (frame) =>
+              (query.id !== undefined && frame.command.id === query.id) ||
+              (query.key !== undefined && frame.cause.key === query.key),
+          ),
+        )
+      },
+      hasIdentity(kind, id) {
+        return values.some((frame) =>
+          kind === "cause" ? frame.cause.id === id : frame.events.some((applied) => applied.id === id),
+        )
+      },
+      entity(kind, id) {
+        return values.flatMap((value, index) =>
+          entityIds(value, kind).includes(id) ? [{ cursor: index + 1, value: structuredClone(value) }] : [],
+        )
+      },
+      diagnostics() {
+        return {
+          pageCount: 0,
+          freelistCount: 0,
+          autoVacuum: "incremental" as const,
+          historyFrames: 0,
+          tailFrames: values.length,
+          archiveFallbacks: 0,
+        }
+      },
+    },
+  }
 }
 
 describe("JobDef", () => {
@@ -214,6 +285,204 @@ describe("Jobs", () => {
     expect(isTerminalJobStatus("completed")).toBe(true)
   })
 
+  it("retains all live Jobs, the latest 512 standalone terminals, and 512 complete Queue-owned groups", () => {
+    const byId: Record<string, JobRecord> = {}
+    const byKey: Record<string, string> = {}
+    const standaloneTerminalOrder: Record<string, number> = {}
+    const queueRoots: Record<string, string> = {}
+    const queueTerminalOrder: Record<string, number> = {}
+    const terminal = (id: string, changedAt: string, key?: string): JobRecord => ({
+      id,
+      definition: "message.deliver",
+      revision: "transport-v1",
+      input: { message: id },
+      ...(key === undefined ? {} : { key }),
+      attempt: 0,
+      requestedAt: changedAt,
+      changedAt,
+      status: "completed",
+      conclusion: "cancelled",
+      finishedAt: changedAt,
+      canceledBy: "test",
+      cancelReason: "retention fixture",
+    })
+    for (let index = 0; index < 513; index += 1) {
+      const changedAt = new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString()
+      const standalone = `standalone-${index}`
+      byId[standalone] = terminal(standalone, changedAt)
+      standaloneTerminalOrder[standalone] = 513 - index
+      queueRoots[`R${index}`] = `R${index}`
+      queueTerminalOrder[`R${index}`] = 513 - index
+      for (let step = 0; step < 2; step += 1) {
+        const id = `queue-${index}-${step}`
+        const key = `queue:R${index}:${step}`
+        byId[id] = terminal(id, changedAt, key)
+        byKey[key] = id
+      }
+    }
+    byId.live = {
+      id: "live",
+      definition: "message.deliver",
+      revision: "transport-v1",
+      input: { message: "live" },
+      attempt: 0,
+      requestedAt: "2025-01-01T00:00:00.000Z",
+      changedAt: "2025-01-01T00:00:00.000Z",
+      status: "queued",
+    }
+
+    const compacted = compactJobsState({
+      byId,
+      byKey,
+      retention: {
+        next: 514,
+        standaloneTerminalOrder,
+        queueRoots,
+        queueTerminalOrder,
+        legacyQueueRoots: {},
+        detachedQueueJobs: {},
+      },
+    })
+    expect(compacted.byId.live).toBeDefined()
+    expect(compacted.byId["standalone-0"]).toBeDefined()
+    expect(compacted.byId["standalone-512"]).toBeUndefined()
+    expect(compacted.byId["queue-0-0"]).toBeDefined()
+    expect(compacted.byId["queue-512-0"]).toBeUndefined()
+    expect(Object.keys(compacted.byId)).toHaveLength(512 + 512 * 2 + 1)
+    expect(compacted.byKey["queue:R512:0"]).toBeUndefined()
+  })
+
+  it("bounds terminal Queue retention metadata for roots that requested no Jobs", () => {
+    const queueTerminalOrder = Object.fromEntries(
+      Array.from({ length: 513 }, (_, index) => [`R${index + 1}`, index + 1]),
+    )
+    const legacyQueueRoots = Object.fromEntries(
+      Array.from({ length: 513 }, (_, index) => [`R${index + 1}`, true as const]),
+    )
+
+    const compacted = compactJobsState({
+      byId: {},
+      byKey: {},
+      retention: {
+        next: 514,
+        standaloneTerminalOrder: {},
+        queueRoots: {},
+        queueTerminalOrder,
+        legacyQueueRoots,
+        detachedQueueJobs: {},
+      },
+    })
+
+    expect(compacted.retention.queueTerminalOrder.R1).toBeUndefined()
+    expect(compacted.retention.legacyQueueRoots.R1).toBeUndefined()
+    expect(Object.keys(compacted.retention.queueTerminalOrder)).toHaveLength(512)
+    expect(Object.keys(compacted.retention.legacyQueueRoots)).toHaveLength(512)
+  })
+
+  it("bounds terminal Jobs promoted from evicted Queue history in the standalone window", () => {
+    const byId: Record<string, JobRecord> = {}
+    const byKey: Record<string, string> = {}
+    const standaloneTerminalOrder: Record<string, number> = {}
+    const detachedQueueJobs: Record<string, true> = {}
+    for (let index = 0; index < 513; index += 1) {
+      const id = `detached-${index + 1}`
+      const key = `queue:R${index + 1}:0`
+      const changedAt = new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString()
+      byId[id] = {
+        id,
+        definition: "message.deliver",
+        revision: "transport-v1",
+        input: { message: id },
+        key,
+        attempt: 2,
+        requestedAt: changedAt,
+        changedAt,
+        status: "completed",
+        conclusion: "cancelled",
+        finishedAt: changedAt,
+        canceledBy: "test",
+        cancelReason: "detached retention fixture",
+      }
+      byKey[key] = id
+      standaloneTerminalOrder[id] = index + 1
+      detachedQueueJobs[id] = true
+    }
+
+    const compacted = compactJobsState({
+      byId,
+      byKey,
+      retention: {
+        next: 514,
+        standaloneTerminalOrder,
+        queueRoots: {},
+        queueTerminalOrder: {},
+        legacyQueueRoots: {},
+        detachedQueueJobs,
+      },
+    })
+
+    expect(compacted.byId["detached-1"]).toBeUndefined()
+    expect(compacted.byId["detached-2"]).toBeDefined()
+    expect(compacted.byKey["queue:R1:0"]).toBeUndefined()
+    expect(Object.keys(compacted.byId)).toHaveLength(512)
+    expect(Object.keys(compacted.retention.detachedQueueJobs)).toHaveLength(512)
+  })
+
+  it("resolves an evicted Job exactly from history and promotes the same id only when retrying", async () => {
+    const journal = indexedJournal()
+    const failedDelivery = delivery(async () => ({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "fixture", message: "expected failure" },
+    }))
+    const app = await jobsApp(failedDelivery, {
+      journal,
+      log: createLogger("test", [{ level: "trace" }, { write() {} }]),
+    })
+    let oldest = ""
+    for (let index = 0; index < 513; index += 1) {
+      const requested = await app.dispatch(app.commands.sender.send, {
+        message: `job-${index}`,
+        key: `delivery:${index}`,
+      })
+      const id = app.jobs.requested(requested)[0]!
+      if (index === 0) oldest = id
+      await app.jobs.run(id, { runner: "worker", leaseMs: 60_000 })
+    }
+
+    expect(app.state().jobs.byId[oldest]).toBeUndefined()
+    expect(app.jobs.get(oldest)).toMatchObject({
+      id: oldest,
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "fixture" },
+    })
+    expect(app.state().jobs.byId[oldest]).toBeUndefined()
+    await expect(app.jobs.retry(oldest)).resolves.toMatchObject({ id: oldest, status: "queued" })
+    expect(app.state().jobs.byId[oldest]).toMatchObject({ id: oldest, status: "queued" })
+    await app.close()
+
+    await using replayed = await jobsApp(failedDelivery, {
+      journal,
+      log: createLogger("test", [{ level: "error" }, { write() {} }]),
+    })
+    expect(replayed.state().jobs.byId[oldest]).toMatchObject({ id: oldest, status: "queued" })
+    await replayed.jobs.run(oldest, { runner: "worker", leaseMs: 60_000 })
+    for (let index = 513; index < 1_025; index += 1) {
+      const requested = await replayed.dispatch(replayed.commands.sender.send, {
+        message: `job-${index}`,
+        key: `delivery:${index}`,
+      })
+      await replayed.jobs.run(replayed.jobs.requested(requested)[0]!, { runner: "worker", leaseMs: 60_000 })
+    }
+    expect(replayed.state().jobs.byId[oldest]).toBeUndefined()
+    expect(replayed.jobs.getByKey("delivery:0")).toMatchObject({
+      id: oldest,
+      status: "completed",
+      conclusion: "failure",
+      attempt: 2,
+    })
+  }, 15_000)
   it("keeps generic Job input opaque when no lifecycle projection is declared", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])

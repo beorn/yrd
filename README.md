@@ -53,7 +53,7 @@ issue -> bay -> pr -> queue -> merged
 - **pr** — the submitted change: a branch@head with numbered revisions. Review
   happens upstream; a yrd PR is the queue's unit.
 - **queue** — one per base branch. It verifies and merges PRs serially and can
-  pause intake without killing active work.
+  pause new runs, including retries, without killing active work.
 - **contest** — several implementations of one issue, evaluated against the
   same pin; the selected winner promotes to a PR.
 
@@ -539,7 +539,7 @@ yrd queue deinit [base] [--json]
 | `list` / `ls` / bare | Optional OR filters, base, status, window, latest | One base's pending/running/completed timeline; sibling queues stay named in the header                                |
 | `list --check`       | Repository                                        | Typed resident lease/heartbeat/baseline health plus installed-base Git distance                                       |
 | `run`                | Zero or more eligible PRs                         | Sole drain imperative; resident follow-runner by default (was `--watch`), a single pass with `--once` or PR selectors |
-| `pause`              | Optional base; reason and allowlist to mutate     | Bare reads current pauses; with a reason, pauses new intake while active work settles                                 |
+| `pause`              | Optional base; reason and allowlist to mutate     | Bare reads current pauses; with a reason, pauses new runs (including retries) while active work settles               |
 | `resume`             | Optional base                                     | Removes the queue pause                                                                                               |
 | `recover`            | Optional reason                                   | Marks only work with expired runner leases lost; a no-op appends nothing                                              |
 | `finish`             | One waiting PR/step plus job/runner/attempt/token | Records external-runner evidence and resumes that exact durable run                                                   |
@@ -798,8 +798,18 @@ becomes state, CLI selection, events, and status evidence through the same
 definition. Merge is not hardcoded pipeline policy; `withMerge()` is the typed
 transition that supplies integration proof.
 
+The synchronous Queue status projection is intentionally bounded to all live
+trees plus the latest 512 terminal roots. Failed admission evidence remains
+live while it still governs a current PR's retry budget. A root and every
+isolation child otherwise co-retain and co-evict with their Queue-owned Jobs.
+Exact selectors and `queue.history()` materialize older runs from journal-owned
+entity slices; `yrd log --all` uses that lossless path, while default status
+remains bounded. Bare `log --all` discovers bases from that history too, so a
+fully retired base is not hidden merely because no live Bay or Queue names it.
+
 For existing repositories, the `.yrd.yml` legacy adapter turns arbitrary
-shell-backed names into the same plugins:
+shell-backed names into the same
+plugins:
 
 ```yaml
 base: main
@@ -986,7 +996,7 @@ Yrd stores local authority under the primary worktree's common Git directory:
 
 ```text
 .git/yrd/
-  journal.sqlite     event journal + exact snapshot authority (WAL)
+  journal.sqlite     immutable row history + bounded projection checkpoint (WAL)
   writer.lock        short cross-process transaction lock
   journal-v4-pre-sqlite-*/
                      preserved migration recovery evidence
@@ -1001,16 +1011,40 @@ Yrd stores local authority under the primary worktree's common Git directory:
 
 `journal.sqlite` is the source of truth. Each command appends one checksummed
 transaction containing the Command, its cause, domain events, optional result
-value, and Job requests. Startup restores the validated Core snapshot and folds
-only its bounded SQL tail into Bay, PR, Queue, Job, and Contest state. Snapshot
-publication retains an exact cursor-addressable prefix before deleting covered
-tail rows, so lagging notification and bridge cursors remain valid. There is no
-second mutable database or read-model authority to reconcile.
+value, and Job requests. `journal_events` is the bounded append tail;
+`journal_history` keeps every covered frame as immutable, cursor-addressable
+rows. Startup restores the validated Core checkpoint and folds only the tail
+into Bay, PR, Queue, Job, and Contest state. Snapshot publication moves covered
+rows into history and binds the bounded checkpoint in one transaction, so old
+notification and bridge cursors remain valid without duplicating the full
+prefix inside the checkpoint. There is no second mutable database or read-model
+authority to reconcile.
 
-The Journal uses WAL with `synchronous=FULL`, an external POSIX writer lock,
-explicitly closed connections, and a runtime `sqlite_version()` safety gate.
-Read-only commands never initialize or migrate authority. SQLite's volatile
-`-shm` coordination file is not logical authority.
+Command, cause, event, Job, Job-key, and Queue lookup facts are derived from
+the same frames in the same transaction and are equality-checked when read.
+Core keeps only the latest 4,096 receipt frames warm. Live projections retain
+all nonterminal work, the latest 512 terminal Queue trees with every Job they
+reference, any older failed admission evidence still governing a live PR, and
+the latest 512 standalone terminal Jobs. Exact old retries,
+`Jobs.get()`/retry, Queue selectors, `events()`, and `yrd log --all` resolve from
+immutable history without repopulating those live windows. A custom Journal
+without the history capability keeps the unbounded compatibility projection;
+it never silently evicts data it cannot recover.
+
+Retrying a Queue-owned Job whose tree has already evicted records that detached
+classification in `job/restored`. The promoted nonterminal remains live, and
+its terminal result uses the standalone Job window rather than resurrecting or
+displacing a retained Queue tree; cold replay reaches the same classification.
+
+The Journal uses WAL with `synchronous=FULL`, incremental auto-vacuum, an
+external POSIX writer lock, explicitly closed connections, and a runtime
+`sqlite_version()` safety gate. Schema-v1 databases rowify their prefix and
+build the immutable indexes transactionally, then resume an idempotent full
+`VACUUM` before declaring migration complete. Later checkpoints reclaim at
+most 256 freelist pages; a maintenance failure is reported as deferred after
+the checkpoint remains committed. Read-only commands never initialize or
+migrate authority. SQLite's volatile `-shm` coordination file is not logical
+authority.
 
 New terminal PR facts are revision/head-bound. Queue terminals also name their
 exact Run; integration facts expose `landingSha`, which must equal the

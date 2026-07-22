@@ -70,10 +70,10 @@ function formatDuration(covered: boolean, ms: number | null): string {
   return ms === null ? "none" : timelineMetric(ms)
 }
 
-/** Failed Runs in a window = rejected + env-refused + canceled. */
+/** Failed Runs in a window = every non-integrated terminal outcome. */
 function failsOf(stats: QueueTimeWindowStats): number {
-  const { rejected, environmentRefused, canceled } = stats.metrics.outcomes
-  return rejected + environmentRefused + canceled
+  const { rejected, environmentRefused, stale, lost, legacy, refused, canceled } = stats.metrics.outcomes
+  return rejected + environmentRefused + stale + lost + legacy + refused + canceled
 }
 
 function flowRows(stats: readonly QueueTimeWindowStats[], windowKeys: readonly string[]): readonly BoxRow[] {
@@ -91,6 +91,26 @@ function flowRows(stats: readonly QueueTimeWindowStats[], windowKeys: readonly s
       label: "env",
       indent: true,
       cells: stats.map((s) => formatShareOfFails(s.covered, s.metrics.outcomes.environmentRefused, failsOf(s))),
+    },
+    {
+      label: "stale",
+      indent: true,
+      cells: stats.map((s) => formatShareOfFails(s.covered, s.metrics.outcomes.stale, failsOf(s))),
+    },
+    {
+      label: "lost",
+      indent: true,
+      cells: stats.map((s) => formatShareOfFails(s.covered, s.metrics.outcomes.lost, failsOf(s))),
+    },
+    {
+      label: "legacy",
+      indent: true,
+      cells: stats.map((s) => formatShareOfFails(s.covered, s.metrics.outcomes.legacy, failsOf(s))),
+    },
+    {
+      label: "refused",
+      indent: true,
+      cells: stats.map((s) => formatShareOfFails(s.covered, s.metrics.outcomes.refused, failsOf(s))),
     },
     {
       label: "canceled",

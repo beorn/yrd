@@ -47,6 +47,7 @@ type GitlinkStages = Readonly<{ baseSha: string; currentSha: string; incomingSha
  * runner and which parent identities it must preserve.
  */
 export function planQueueSubmoduleComposition(conflicts: readonly QueueTreeConflict[]): QueueSubmoduleCompositionPlan {
+  const conflictsByPath = new Map(conflicts.map((conflict) => [conflict.path, conflict] as const))
   const duplicatePaths = duplicateConflictPaths(conflicts)
   const invalidPaths = new Set(duplicatePaths)
   const parsed = new Map<string, GitlinkStages>()
@@ -61,7 +62,7 @@ export function planQueueSubmoduleComposition(conflicts: readonly QueueTreeConfl
     if (directPin(stages) === undefined && !validOrigin(conflict.origin)) invalidPaths.add(conflict.path)
   }
 
-  if (invalidPaths.size > 0) return refusal([...invalidPaths])
+  if (invalidPaths.size > 0) return refusal([...invalidPaths], conflictsByPath)
 
   const resolutions: QueueSubmoduleResolution[] = []
   for (const conflict of conflicts.toSorted(compareConflictPaths)) {
@@ -132,16 +133,37 @@ function compareConflictPaths(left: QueueTreeConflict, right: QueueTreeConflict)
   return left.path < right.path ? -1 : left.path > right.path ? 1 : 0
 }
 
-function refusal(paths: readonly string[]): QueueSubmoduleCompositionPlan {
+function hasGitlinkStage(conflict: QueueTreeConflict | undefined): boolean {
+  return conflict?.stages.some((stage) => stage.mode === GITLINK_MODE) === true
+}
+
+function refusal(
+  paths: readonly string[],
+  conflicts: ReadonlyMap<string, QueueTreeConflict>,
+): QueueSubmoduleCompositionPlan {
   const sorted = [...new Set(paths)].toSorted()
+  const contentPaths = sorted.filter((path) => !hasGitlinkStage(conflicts.get(path)))
+  const gitlinkPaths = sorted.filter((path) => hasGitlinkStage(conflicts.get(path)))
+  const clauses: string[] = []
+  if (contentPaths.length > 0) {
+    clauses.push(
+      "content conflict in " +
+        contentPaths.join(", ") +
+        "; the PR must be rebased or merged against the current base, then retry",
+    )
+  }
+  if (gitlinkPaths.length > 0) {
+    clauses.push(
+      "queue-native composition requires one complete three-stage gitlink per path and an origin for divergent pins: " +
+        gitlinkPaths.join(", ") +
+        "; resolve these conflicts or supply the missing submodule origin, then retry",
+    )
+  }
   return {
     status: "refused",
     code: "candidate-conflict",
     paths: sorted,
-    message:
-      "queue-native composition requires one complete three-stage gitlink per path and an origin for divergent pins: " +
-      sorted.join(", ") +
-      "; resolve these conflicts or supply the missing submodule origin, then retry",
+    message: clauses.join("; "),
   }
 }
 

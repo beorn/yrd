@@ -109,6 +109,16 @@ mixing projections from two journal cuts.
 All state is rebuildable from the Journal. There is no mutable projection
 database.
 
+Persistence-backed runtimes expose `historySnapshot()` for an intentionally
+complete replay, `events()` over all committed frames, and
+`retentionDiagnostics()` for warm receipt and journal page counts. Core keeps
+the latest 4,096 receipt frames in its private projection cache; an exact retry
+outside that window resolves the original checksummed frame through the
+Journal, compares canonical intent, and returns the committed result without
+appending. Cause and event identities remain global through the same history
+index. Journals without that optional capability retain the compatibility
+behavior and do not enable plugin compaction.
+
 An extension may declare `replayEvents` alongside its current `events`. Core
 uses those schemas only to read committed historical payloads that predate a
 strengthened contract. Dispatch always validates against the current event
@@ -129,9 +139,30 @@ type Journal<Value> = {
     value: Value,
     expectedCursor: number,
   ): Promise<{ appended: true; cursor: number } | { appended: false; cursor: number }>
+  history?: {
+    command(query: { id?: string; key?: string }): Value | undefined
+    hasIdentity(kind: "cause" | "event", id: string): boolean
+    entity(kind: "job" | "job-key" | "queue", id: string): readonly { cursor: number; value: Value }[]
+    diagnostics(): JournalHistoryDiagnostics
+  }
 }
 ```
 
 Append is optimistic compare-and-append. On conflict, Core catches up and reruns
 the pure command decision. `createMemoryJournal()` is the focused-test adapter;
 filesystem durability belongs to `@yrd/persistence`.
+
+History is still Journal authority, not a projection database. Its facts must
+be derived transactionally from frames and fail loud if a lookup disagrees with
+the checksummed frame. Plugins may register a pure private `compact` projection
+only because absence of `history` disables compaction for that runtime.
+
+After a cold replay from initial state, every registered `validate` hook sees
+the complete, unpruned projection before Core runs compaction once. Tail replay
+validates the current live state after the whole incoming batch, before that
+batch is compacted. `historySnapshot()` separately replays and validates all
+authority without compaction. A compactor may mutate only its plugin's owned
+state slice; its second argument is the complete read-only projection for that
+pass, allowing dependent aggregates to preserve cross-slice references. An
+append validates and compacts once after all events in its atomic Frame, never
+between sibling events.

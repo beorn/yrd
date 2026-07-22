@@ -9,9 +9,10 @@ import { dirname, join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import type { Event } from "loggily"
+import { stripAnsi } from "silvery"
 import { formatResidentLogLine } from "../src/runner-timeline.ts"
 
-// A fixed event time so the loggily lead-in `HH:MM:SS` is deterministic.
+// A fixed event time so generic notice prefixes remain deterministic.
 const AT = Date.parse("2026-07-16T18:40:23.000Z")
 
 // The session-constant identity the resident binds ONCE at its logger scope.
@@ -37,6 +38,10 @@ function grammar(row: string | undefined): string {
   return at < 0 ? (row ?? "") : (row ?? "").slice(0, at)
 }
 
+function visible(row: string | undefined): string {
+  return stripAnsi(grammar(row))
+}
+
 describe("resident runner step-row grammar", () => {
   const stepPassed = log("yrd:jobs:check", "info", "check succeeded", {
     ...RUNNER_SCOPE,
@@ -49,30 +54,30 @@ describe("resident runner step-row grammar", () => {
     status: "passed",
     outcome: "succeeded",
     durationMs: 34_000,
-    prs: [{ pr: "PR411", revision: 2, branch: "topic/six" }],
+    prs: [{ pr: "PR411", revision: 2, branch: "topic/six", issue: "@yrd/core/21096-cli-ux/21706-runner-log-tag-link" }],
   })
 
-  it("reports a passing step as ONE INFO row: time, level, run scope, [base#run index:step] done duration", () => {
+  it("reports a passing step once with the linked-tag grammar and named duration", () => {
     const plain = formatResidentLogLine(stepPassed, { color: false })
-    expect(grammar(plain)).toBe("18:40:23 INFO yrd:queue:run [main#324 1:check] done 34s · PR411.2 topic/six")
-    // Exactly one row.
+    expect(visible(plain)).toBe("[main#324/0-check] finished duration=34s")
     expect(plain?.split("\n").filter(Boolean)).toHaveLength(1)
   })
 
-  it("renders the same system-local clock as queue watch", () => {
+  it("keeps lifecycle narration stable across local time zones", () => {
     process.env.TZ = "Asia/Kolkata"
     try {
       const plain = formatResidentLogLine(stepPassed, { color: false })
-      expect(grammar(plain)).toBe("00:10:23 INFO yrd:queue:run [main#324 1:check] done 34s · PR411.2 topic/six")
+      expect(visible(plain)).toBe("[main#324/0-check] finished duration=34s")
     } finally {
       process.env.TZ = "UTC"
     }
   })
 
-  it("presents the step under the single run scope, never a per-run child namespace", () => {
+  it("uses bracketed run identity without exposing an internal namespace", () => {
     const plain = formatResidentLogLine(stepPassed, { color: false })
-    expect(plain).toContain("yrd:queue:run")
+    expect(plain).toContain("main#324/0-check")
     expect(plain).not.toContain("yrd:jobs:check ")
+    expect(plain).not.toContain("yrd:queue:run ")
   })
 
   it("keeps the full structured record in JSONL instead of the human narration row", () => {
@@ -95,7 +100,14 @@ describe("resident runner step-row grammar", () => {
       run: "R324",
       base: "main",
       outcome: "started",
-      prs: [{ pr: "PR411", revision: 2, branch: "topic/six" }],
+      prs: [
+        {
+          pr: "PR411",
+          revision: 2,
+          branch: "topic/six",
+          issue: "@yrd/core/21096-cli-ux/21706-runner-log-tag-link",
+        },
+      ],
     })
     const stepStarted = log("yrd:jobs:check", "debug", "check started", {
       ...RUNNER_SCOPE,
@@ -106,17 +118,28 @@ describe("resident runner step-row grammar", () => {
       index: 0,
       attempt: 1,
       outcome: "started",
-      prs: [{ pr: "PR411", revision: 2, branch: "topic/six" }],
+      prs: [
+        {
+          pr: "PR411",
+          revision: 2,
+          branch: "topic/six",
+          issue: "@yrd/core/21096-cli-ux/21706-runner-log-tag-link",
+        },
+      ],
     })
 
     try {
       const runRow = formatResidentLogLine(runStarted, { color: false, artifactRoot })
-      expect(grammar(runRow)).toContain("[main#324] admitted")
-      expect(runRow).toContain(`\x1b]8;;${pathToFileURL(runDir).href}`)
+      expect(visible(runRow)).toBe(
+        "[main#324] admitted pr#411.2 issue=@yrd/core/21096-cli-ux/21706-runner-log-tag-link",
+      )
+      expect(runRow).toContain(`\x1b]8;;${pathToFileURL(runDir).href}\x1b\\[main#324]`)
+      expect(runRow).not.toContain("log=")
 
       const stepRow = formatResidentLogLine(stepStarted, { color: false, artifactRoot })
-      expect(grammar(stepRow)).toContain("[main#324 1:check] started")
-      expect(stepRow).toContain(`\x1b]8;;${pathToFileURL(stepDir).href}`)
+      expect(visible(stepRow)).toBe("[main#324/0-check] starting")
+      expect(stepRow).toContain(`\x1b]8;;${pathToFileURL(stepDir).href}\x1b\\[main#324/0-check]`)
+      expect(stepRow).not.toContain("log=")
     } finally {
       rmSync(artifactRoot, { recursive: true, force: true })
     }
@@ -137,13 +160,24 @@ describe("resident runner step-row grammar", () => {
     expect(formatResidentLogLine(completionStarted, { color: false })).toBeUndefined()
   })
 
-  it("colorizes a passing step: dim time, blue INFO, cyan scope, bold run ref, GREEN done, dim duration", () => {
+  it("does not re-admit a continuing run on a later resident poll", () => {
+    const continuation = log("yrd:queue:run", "debug", "run started", {
+      ...RUNNER_SCOPE,
+      lifecycle: "run",
+      run: "R324",
+      base: "main",
+      outcome: "started",
+      continuation: true,
+      prs: [{ pr: "PR411", revision: 2, issue: "@yrd/core/21096-cli-ux/21706-runner-log-tag-link" }],
+    })
+    expect(formatResidentLogLine(continuation, { color: false })).toBeUndefined()
+  })
+
+  it("colorizes a passing step: bold tag, green finished, dim named duration", () => {
     const colored = formatResidentLogLine(stepPassed, { color: true })
-    expect(colored).toContain("\x1b[34mINFO") // blue level
-    expect(colored).toContain("\x1b[36myrd:queue:run") // cyan scope
     expect(colored).toContain("\x1b[1mmain#324") // bold run ref
-    expect(colored).toContain("\x1b[32mdone") // green verb
-    expect(colored).toContain("\x1b[2m34s") // dim duration
+    expect(colored).toContain("\x1b[32mfinished") // green verb
+    expect(colored).toContain("\x1b[2mduration=34s") // dim duration
   })
 
   const stepFailed = log("yrd:jobs:merge", "error", "merge failed", {
@@ -158,16 +192,15 @@ describe("resident runner step-row grammar", () => {
     outcome: "failed",
     durationMs: 3_400,
     error: { code: "merge-conflict", message: "refused to merge unrelated histories" },
-    prs: [{ pr: "PR411", revision: 2, branch: "topic/six" }],
+    prs: [{ pr: "PR411", revision: 2, branch: "topic/six", issue: "@yrd/core/21096-cli-ux/21706-runner-log-tag-link" }],
   })
 
   it("reports a failing step as ONE ERROR row with the canonical err slug", () => {
     const plain = formatResidentLogLine(stepFailed, { color: false })
     expect(grammar(plain)).toBe(
-      '18:40:23 ERROR yrd:queue:run [main#324 2:merge] failed 3.4s err=merge-conflict cause="refused to merge unrelated histories" · PR411.2 topic/six',
+      '[main#324/1-merge] failed duration=3.4s err=merge-conflict cause="refused to merge unrelated histories"',
     )
     const colored = formatResidentLogLine(stepFailed, { color: true })
-    expect(colored).toContain("\x1b[31mERROR") // red level
     expect(colored).toContain("\x1b[31mfailed") // red verb
   })
 
@@ -182,9 +215,10 @@ describe("resident runner step-row grammar", () => {
     })
     try {
       const plain = formatResidentLogLine(withArtifact, { color: false, artifactRoot })
-      expect(grammar(plain)).toContain("log=")
-      expect(grammar(plain)).toContain("recorded-stderr.log")
-      expect(plain).toContain(`\x1b]8;;${pathToFileURL(stderr).href}`)
+      expect(visible(plain)).toContain("[main#324/1-merge] failed")
+      expect(plain).toContain(`\x1b]8;;${pathToFileURL(dirname(stderr)).href}\x1b\\[main#324/1-merge]`)
+      expect(plain).not.toContain("log=")
+      expect(visible(plain)).not.toContain("recorded-stderr.log")
     } finally {
       rmSync(artifactRoot, { recursive: true, force: true })
     }
@@ -196,9 +230,9 @@ describe("resident runner step-row grammar", () => {
     mkdirSync(attemptDir, { recursive: true })
     try {
       const plain = formatResidentLogLine(stepFailed, { color: false, artifactRoot })
-      expect(grammar(plain)).toContain("log=")
-      expect(grammar(plain)).toContain("logs")
-      expect(plain).toContain(`\x1b]8;;${pathToFileURL(attemptDir).href}`)
+      expect(visible(plain)).toContain("[main#324/1-merge] failed")
+      expect(plain).toContain(`\x1b]8;;${pathToFileURL(attemptDir).href}\x1b\\[main#324/1-merge]`)
+      expect(plain).not.toContain("log=")
       expect(plain).not.toContain(pathToFileURL(join(attemptDir, "stderr.log")).href)
     } finally {
       rmSync(artifactRoot, { recursive: true, force: true })
@@ -209,7 +243,7 @@ describe("resident runner step-row grammar", () => {
     const artifactRoot = mkdtempSync(join(tmpdir(), "yrd-runner-missing-"))
     try {
       const plain = formatResidentLogLine(stepFailed, { color: false, artifactRoot })
-      expect(grammar(plain)).not.toContain("log=")
+      expect(plain).not.toContain("log=")
       expect(plain).not.toContain("\x1b]8;;")
     } finally {
       rmSync(artifactRoot, { recursive: true, force: true })
@@ -223,7 +257,8 @@ describe("resident runner step-row grammar", () => {
       artifacts: [{ kind: "stderr", uri }],
     })
     const plain = formatResidentLogLine(withArtifact, { color: false })
-    expect(grammar(plain)).toContain("stderr")
+    expect(visible(plain)).toContain("[main#324/1-merge] failed")
+    expect(visible(plain)).not.toContain("stderr")
     expect(plain).toContain(`\x1b]8;;${uri}`)
     expect(plain).not.toContain("file://")
   })
@@ -260,7 +295,7 @@ describe("resident runner step-row grammar", () => {
       ...stepFailed.props,
       attempt: 2,
     } as Record<string, unknown>)
-    expect(grammar(formatResidentLogLine(retry, { color: false }))).toContain("[main#324 2:merge#2] failed")
+    expect(visible(formatResidentLogLine(retry, { color: false }))).toContain("[main#324/1-merge#2] failed")
   })
 
   it("uses the shared short slug vocabulary in resident log rows", () => {
@@ -272,7 +307,7 @@ describe("resident runner step-row grammar", () => {
     expect(grammar(formatResidentLogLine(recutFailure, { color: false }))).toContain("err=recut-cert-missing")
   })
 
-  it("keeps a batched run identifiable on failure by listing every PR ref", () => {
+  it("carries the composed PR list on batched step start and finish rows", () => {
     const batch = log("yrd:jobs:merge", "error", "merge failed", {
       ...RUNNER_SCOPE,
       run: "R330",
@@ -281,7 +316,7 @@ describe("resident runner step-row grammar", () => {
       index: 1,
       status: "failed",
       outcome: "failed",
-      durationMs: 5_000,
+      durationMs: 222_000,
       error: { code: "batch-conflict" },
       prs: [
         { pr: "PR411", revision: 2 },
@@ -289,9 +324,20 @@ describe("resident runner step-row grammar", () => {
         { pr: "PR413", revision: 3 },
       ],
     })
-    const plain = grammar(formatResidentLogLine(batch, { color: false }))
-    expect(plain).toContain("[main#330 2:merge] failed 5.0s err=batch-conflict")
-    expect(plain).toContain("PR411.2 PR412.1 PR413.3")
+    const started = log("yrd:jobs:merge", "info", "merge started", {
+      ...batch.props,
+      status: "running",
+      outcome: "started",
+      durationMs: undefined,
+      error: undefined,
+    } as Record<string, unknown>)
+
+    expect(visible(formatResidentLogLine(started, { color: false }))).toBe(
+      "[main#330/1-merge] starting prs=pr#411.2,pr#412.1,pr#413.3",
+    )
+    expect(visible(formatResidentLogLine(batch, { color: false }))).toBe(
+      "[main#330/1-merge] failed prs=pr#411.2,pr#412.1,pr#413.3 duration=3m42s err=batch-conflict",
+    )
   })
 
   it("surfaces a run-owned failure (no step owns it) as a run-scoped ERROR row — never silent", () => {
@@ -311,9 +357,7 @@ describe("resident runner step-row grammar", () => {
       prs: [{ pr: "PR9", revision: 1, branch: "issue/stale" }],
     })
     const plain = grammar(formatResidentLogLine(runOwned, { color: false }))
-    expect(plain).toBe(
-      '18:40:23 ERROR yrd:queue:run [main#7] failed 120ms err=stale-pr cause="pinned base moved" · PR9.1 issue/stale',
-    )
+    expect(plain).toBe('[main#7] failed duration=120ms err=stale-pr cause="pinned base moved"')
   })
 })
 
@@ -405,7 +449,7 @@ describe("resident runner notices", () => {
 
   it("does NOT mistake a duration-invalid diagnostic for a second step row", () => {
     // The backwards-clock diagnostic shares outcome:"succeeded" but carries a
-    // `diagnostic` field; it must render as its own notice, never a done row.
+    // `diagnostic` field; it must render as its own notice, never a lifecycle row.
     const diag = log("yrd:jobs:check", "error", "check duration invalid", {
       ...RUNNER_SCOPE,
       run: "R9",
@@ -418,7 +462,7 @@ describe("resident runner notices", () => {
     })
     const plain = formatResidentLogLine(diag, { color: false })
     expect(plain).toContain("check duration invalid")
-    expect(plain).not.toContain("done")
+    expect(plain).not.toContain("finished")
     expect(plain).not.toContain("failed")
   })
 

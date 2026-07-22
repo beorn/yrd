@@ -25,6 +25,7 @@ import {
   event,
   JsonSchema,
   observeYrdLifecycle,
+  parseJournalFrame,
   raiseFailure,
   type CommandHandler,
   type CommandResult,
@@ -33,6 +34,7 @@ import {
   type Event,
   type EventDraft,
   type JsonValue,
+  type JournalHistory,
   type YrdDef,
   type YrdDeliveryIdentity,
   type YrdLifecycleOutcome,
@@ -108,9 +110,11 @@ import {
   projectionLookupGet,
   projectionLookupSet,
   projectionLookupValues,
+  queueLookupKey,
   recordReleasedAdmissionFailure,
   releasedAdmissionFailures,
 } from "./projection-index.ts"
+import { compactQueuesState, queueRetentionRoot } from "./retention.ts"
 
 /**
  * A queue command refused to compose because a peer's Queue run already holds
@@ -518,6 +522,13 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   migrateTerminalAssociations(): Promise<TerminalAssociationPlan>
   quiesceLegacyRoots(options: QuiesceLegacyRootsOptions): Promise<QuiesceLegacyRootsReceipt>
   get(run: RunId): Run | undefined
+  retentionDiagnostics(): Readonly<{
+    retainedRuns: number
+    unsettledTrees: number
+    terminalTrees: number
+    archiveAvailable: boolean
+  }>
+  history(): Promise<readonly Run[]>
   status(base: string): QueueSummary
 }>
 
@@ -599,8 +610,12 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/run/canceled": CancelRunArgsSchema,
         "queue/run/settled": SettledArgsSchema,
       },
-      projectionVersion: "queues-v3-target-model",
+      projectionVersion: "queues-v6-target-model-retention",
       project: projectQueues,
+      compact: (state, complete) => {
+        const runtime = complete as unknown as DeepReadonly<RuntimeState>
+        return { queues: compactQueueProjection(state.queues, runtime.jobs, runtime.bays) }
+      },
       create(yrd) {
         yrd.jobs.requireDefinitions(jobDefs)
         const configuredRunner = options.runner?.(yrd.jobs)
@@ -646,6 +661,8 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
             configuredRunner,
             options.flows,
             yrd.log.child("queue"),
+            yrd.history,
+            async () => (await yrd.historySnapshot()).state as unknown as DeepReadonly<RuntimeState>,
           ),
         }
       },
@@ -857,6 +874,8 @@ function createQueue<Shape extends PRShape>(
   configuredRunner: Runner | undefined,
   flows: YrdConfig | undefined,
   log: ConditionalLogger,
+  history: JournalHistory<unknown> | undefined,
+  historicalState: () => Promise<DeepReadonly<RuntimeState>>,
 ): Queue<Shape> {
   const current = (id: RunId): Run => materializeRun(Queues.record(state(), id), runtime().jobs)
 
@@ -930,6 +949,12 @@ function createQueue<Shape extends PRShape>(
         })
       }
     }
+  }
+
+  const archived = (id: RunId): Run | undefined => {
+    if (history === undefined) return undefined
+    const canonical = /^r\d+$/iu.test(id.trim()) ? id.trim().toUpperCase() : id
+    return materializeArchivedRun(history, jobs, state(), canonical)
   }
 
   const cleanupSettledRoots = async (): Promise<readonly RunId[]> => {
@@ -1653,9 +1678,24 @@ function createQueue<Shape extends PRShape>(
       }
       return { provenance: "migration/21012-legacy-quiesce", reason: "legacy-quiesced", quiesced }
     },
+    retentionDiagnostics() {
+      const snapshot = state()
+      const roots = new Set(Queues.values(snapshot).map((record) => queueRetentionRoot(snapshot, record.id)))
+      const terminalTrees = [...roots].filter((root) => snapshot.retention.terminalOrder[root] !== undefined).length
+      return {
+        retainedRuns: Queues.values(snapshot).length,
+        unsettledTrees: roots.size - terminalTrees,
+        terminalTrees,
+        archiveAvailable: history !== undefined,
+      }
+    },
     get(id) {
       const record = Queues.resolve(state(), id)
-      return record === undefined ? undefined : materializeRun(record, runtime().jobs)
+      return record === undefined ? archived(id) : materializeRun(record, runtime().jobs)
+    },
+    async history() {
+      const snapshot = await historicalState()
+      return orderedQueues(snapshot.queues, snapshot.jobs)
     },
     status: (base) => queueSummary(state(), runtime().jobs, queueBase(runtime(), base)),
   }) as Queue<Shape>
@@ -1669,6 +1709,7 @@ function deliveryIdentity(pr: DeepReadonly<PRSnapshot>): YrdDeliveryIdentity {
     // Carried so the resident runner's timeline rows can name the branch — the
     // watch-pane grammar (`R604 PR411.2  branch (merge ✓)`) needs it.
     branch: pr.branch,
+    ...(pr.issue === undefined ? {} : { issue: pr.issue }),
     ...(pr.correlation === undefined ? {} : { correlation: pr.correlation }),
   }
 }
@@ -1839,6 +1880,10 @@ function createQueueCommands(
       if (delivery !== "pushed" && delivery !== "submitted") {
         raiseFailure("refusal", "pr-not-admissible", `yrd: PR '${pr.id}' is ${delivery}, not admissible`)
       }
+      // A pause lets the currently active Job settle, but every admission
+      // retry is a fresh Run. Guard the command itself so a selector chosen
+      // before a concurrent pause cannot mint that retry afterward.
+      if (blockingQueuePause(state, pr) !== undefined) return { events: [] }
       assertCurrentFlow(pr.flow, flows)
       const selected = admissionSteps(state.queues, steps)
       if (selected.length === 0) return { events: [] }
@@ -2445,11 +2490,65 @@ function projectSettledQueueRun(state: DeepReadonly<QueueState>, applied: Event)
   if (record === undefined) throw new Error(`yrd: no queue run '${settled.run}'`)
   if (record.parent !== undefined) throw new Error(`yrd: settled queue run '${settled.run}' is not a root`)
   return {
-    queues: {
-      ...state.queues,
-      authority: settleRunClaim(state.queues.authority, record.id),
-    },
+    queues: markQueueTerminalRoot(
+      {
+        ...state.queues,
+        authority: settleRunClaim(state.queues.authority, record.id),
+      },
+      record.id,
+    ),
   }
+}
+
+function markQueueTerminalRoot(queues: DeepReadonly<QueuesState>, root: RunId): QueuesState {
+  if (queues.retention.terminalOrder[root] !== undefined) return queues as QueuesState
+  const next = Math.max(0, ...Object.values(queues.retention.terminalOrder)) + 1
+  return {
+    ...queues,
+    retention: { terminalOrder: { ...queues.retention.terminalOrder, [root]: next } },
+  }
+}
+
+function compactQueueProjection(
+  queues: DeepReadonly<QueuesState>,
+  jobs: DeepReadonly<JobsState>,
+  bays: DeepReadonly<BaysState>,
+): QueuesState {
+  const runtime = { queues, jobs, bays }
+  const terminalOrder = { ...queues.retention.terminalOrder }
+  for (const root of Object.keys(terminalOrder)) {
+    const order = jobs.retention.queueTerminalOrder[root]
+    if (order !== undefined) terminalOrder[root] = order
+  }
+  for (const record of Queues.values(queues)) {
+    if (record.parent !== undefined || record.settlement !== undefined) continue
+    if (needsSettlement(runtime, materializeRun(record, jobs))) continue
+    const order = jobs.retention.queueTerminalOrder[record.id]
+    if (order === undefined) {
+      throw new Error(`yrd: quiesced legacy Queue root '${record.id}' has no terminal journal order`)
+    }
+    terminalOrder[record.id] = order
+  }
+  return compactQueuesState({ ...queues, retention: { terminalOrder } }, queueDecisionRoots(queues, bays))
+}
+
+function queueDecisionRoots(queues: DeepReadonly<QueuesState>, bays: DeepReadonly<BaysState>): ReadonlySet<RunId> {
+  const roots = new Set<RunId>()
+  for (const record of Queues.values(queues)) {
+    // A failed record carries its own terminal fact after Queue-owned Jobs
+    // co-evict. Keep it only while that exact plan still governs admission.
+    if (record.failure === undefined || record.stepSelection?.authority !== "admission" || record.prs.length !== 1) {
+      continue
+    }
+    const snapshot = record.prs[0]
+    if (snapshot === undefined) continue
+    const pr = bays.prs[snapshot.id]
+    const delivery = pr === undefined ? undefined : prDeliveryState(pr)
+    if (pr === undefined || (delivery !== "pushed" && delivery !== "submitted") || !checksRequested(pr)) continue
+    if (queueLookupKey(Queues.snapshot(pr), record.steps) !== queueLookupKey(snapshot, record.steps)) continue
+    roots.add(queueRetentionRoot(queues, record.id))
+  }
+  return roots
 }
 
 /** The one production projection path for a started Queue run. */
@@ -2763,17 +2862,16 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
       canceledBy: canceled.by,
       cancelReason: canceled.reason,
     }
-    return {
-      queues: {
-        ...state.queues,
-        authority: releaseRunAuthority(state.queues.authority, record, {
-          reason: "run-canceled",
-          ref: applied.id,
-        }),
-        records: Queues.set(state.queues.records, canceledRecord),
-        index: recordReleasedAdmissionFailure(state.queues.index, canceledRecord),
-      },
+    const queues = {
+      ...state.queues,
+      authority: releaseRunAuthority(state.queues.authority, record, {
+        reason: "run-canceled",
+        ref: applied.id,
+      }),
+      records: Queues.set(state.queues.records, canceledRecord),
+      index: recordReleasedAdmissionFailure(state.queues.index, canceledRecord),
     }
+    return { queues: record.parent === undefined ? markQueueTerminalRoot(queues, record.id) : queues }
   }
   return state
 }
@@ -3218,6 +3316,96 @@ function payloadIdentity(pr: DeepReadonly<PR> | DeepReadonly<PRSnapshot>): strin
     return `${baseIdentity(pr.base)}\0${prHead(pr)}\0${JSON.stringify(prComposition(pr))}`
   }
   return `${baseIdentity(pr.base)}\0${pr.headSha}\0${JSON.stringify(pr.composition)}`
+}
+
+function queueLifecycleRun(applied: Event): RunId | undefined {
+  if (applied.name === "queue/run/started") {
+    return ReplayQueueStartSchema.parse((applied.data as { run?: unknown }).run).id
+  }
+  if (applied.name === "queue/run/failed") return ReplayQueueFailedSchema.parse(applied.data).run
+  if (applied.name === "queue/run/canceled") return CancelRunArgsSchema.parse(applied.data).run
+  if (applied.name === "queue/run/settled") return SettledArgsSchema.parse(applied.data).run
+  return undefined
+}
+
+function materializeArchivedRun(
+  history: JournalHistory<unknown>,
+  jobs: HasJobs["jobs"],
+  live: DeepReadonly<QueuesState>,
+  id: RunId,
+): Run | undefined {
+  const entries = new Map<number, unknown>()
+  const runs = new Set<RunId>()
+  const visiting = new Set<RunId>()
+  const visit = (runId: RunId): boolean => {
+    if (runs.has(runId)) return true
+    if (visiting.has(runId)) throw new Error(`yrd: archived queue ancestry for '${id}' is cyclic`)
+    visiting.add(runId)
+    const slice = history.entity("queue", runId)
+    if (slice.length === 0) {
+      visiting.delete(runId)
+      return false
+    }
+    let parent: RunId | undefined
+    for (const entry of slice) {
+      entries.set(entry.cursor, entry.value)
+      const frame = parseJournalFrame(entry.value)
+      for (const applied of frame.events) {
+        if (applied.name !== "queue/run/started") continue
+        const started = ReplayQueueStartSchema.parse((applied.data as { run?: unknown }).run)
+        if (started.id === runId) parent = started.parent
+      }
+    }
+    if (parent !== undefined && !visit(parent)) {
+      throw new Error(`yrd: archived queue run '${runId}' references missing parent '${parent}'`)
+    }
+    visiting.delete(runId)
+    runs.add(runId)
+    return true
+  }
+  if (!visit(id)) return undefined
+
+  let projection: QueueState = {
+    queues: Queues.empty({
+      batchSize: live.batchSize,
+      ...(live.defaultSteps === undefined ? {} : { defaultSteps: live.defaultSteps }),
+      requires: live.requires,
+    }),
+  }
+  for (const [, value] of [...entries].toSorted(([left], [right]) => left - right)) {
+    const frame = parseJournalFrame(value)
+    for (const applied of frame.events) {
+      const runId = queueLifecycleRun(applied)
+      if (runId !== undefined && runs.has(runId)) projection = projectQueues(projection, applied)
+    }
+  }
+  const record = Queues.get(projection.queues, id)
+  if (record === undefined) {
+    throw new Error(`yrd: journal queue index names '${id}' without a queue/run/started event`)
+  }
+
+  const byId: Record<string, Job> = {}
+  const byKey: Record<string, string> = {}
+  for (const [index] of record.steps.entries()) {
+    const key = jobKey(record.id, index)
+    const job = jobs.getByKey(key)
+    if (job === undefined) continue
+    if (job.key !== key) throw new Error(`yrd: archived queue job '${job.id}' does not match key '${key}'`)
+    byId[job.id] = job
+    byKey[key] = job.id
+  }
+  return materializeRun(record, {
+    byId,
+    byKey,
+    retention: {
+      next: 1,
+      standaloneTerminalOrder: {},
+      queueRoots: {},
+      queueTerminalOrder: {},
+      legacyQueueRoots: {},
+      detachedQueueJobs: {},
+    },
+  })
 }
 
 function materializeRun(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<JobsState>): Run {
@@ -3694,6 +3882,7 @@ function admissionQueue(state: DeepReadonly<RuntimeState>, steps: readonly Runti
   if (selected.length === 0) return []
   return Object.values(state.bays.prs)
     .filter((pr) => prDeliveryState(pr) === "pushed" || prDeliveryState(pr) === "submitted")
+    .filter((pr) => blockingQueuePause(state, pr) === undefined)
     .filter((pr) => checksRequested(pr))
     .filter((pr) => {
       const snapshot = Queues.snapshot(pr)
@@ -3710,6 +3899,14 @@ function admissionQueue(state: DeepReadonly<RuntimeState>, steps: readonly Runti
       const rightAt = checkQueueTime(right)
       return leftAt.localeCompare(rightAt) || left.id.localeCompare(right.id, undefined, { numeric: true })
     })
+}
+
+function blockingQueuePause(
+  state: DeepReadonly<RuntimeState>,
+  pr: DeepReadonly<PR>,
+): DeepReadonly<QueuePause> | undefined {
+  const pause = state.queues.pauses[baseIdentity(pr.base)]
+  return pause === undefined || pause.allowedPRs.includes(pr.id) ? undefined : pause
 }
 
 function checkQueueTime(pr: DeepReadonly<PR>): string {
@@ -4114,8 +4311,8 @@ function prEligibility(
     }
   }
   const base = baseIdentity(pr.base)
-  const pause = state.queues.pauses[base]
-  if (pause !== undefined && !pause.allowedPRs.includes(pr.id)) {
+  const pause = blockingQueuePause(state, pr)
+  if (pause !== undefined) {
     return result({
       code: "queue-paused",
       message: `queue '${base}' is paused: ${pause.reason}; PR '${pr.id}' is not in the allowed set`,

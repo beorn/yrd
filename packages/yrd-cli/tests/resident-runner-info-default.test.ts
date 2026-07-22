@@ -8,6 +8,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { createLogger, type Event as LogEvent } from "loggily"
+import { stripAnsi } from "silvery"
 
 import { createYrdHost, runYrdProcess } from "../src/host.ts"
 import { followQueueRuns } from "../src/run.ts"
@@ -52,7 +53,12 @@ async function queuedRunnerRepo(config?: string): Promise<{ repo: string }> {
   const headSha = await git(repo, "rev-parse", "HEAD")
   await git(repo, "switch", "-q", "main")
   await using submitter = await createYrdHost({ cwd: repo, log: createLogger("test", [{ level: "silent" }]) })
-  await submitter.app.bays.submit({ branch: "issue/live-row", headSha, base: "main" })
+  await submitter.app.bays.submit({
+    branch: "issue/live-row",
+    headSha,
+    base: "main",
+    issue: "@yrd/core/21096-cli-ux/21706-runner-log-tag-link",
+  })
   return { repo }
 }
 
@@ -113,11 +119,14 @@ check:
       .map((event) => formatResidentLogLine(event, { color: false }))
       .filter((line): line is string => line?.includes("[main#1] admitted") === true)
     expect(admittedRows).toHaveLength(1)
+    expect(stripAnsi(admittedRows[0]!)).toContain(
+      "[main#1] admitted pr#1.1 issue=@yrd/core/21096-cli-ux/21706-runner-log-tag-link",
+    )
     expect(runStarts.map((event) => event.props?.continuation === true)).toEqual([false, true])
     log.end()
   }, 15_000)
 
-  it("prints one undecorated human line per live step through the shipping queue-run process", async () => {
+  it("prints each live step transition once at explicit INFO through the shipping process", async () => {
     const { repo } = await queuedRunnerRepo()
     const cli = Bun.spawn([process.execPath, YRD_BIN, "--repo", repo, "queue", "run", "--interval", "1"], {
       cwd: repo,
@@ -137,10 +146,14 @@ check:
       }
     })()
     try {
-      await vi.waitFor(() => expect(stderrText).toMatch(/\bINFO yrd:queue:run \[main#\d+ 1:check\] done\b/u), {
-        timeout: 20_000,
-        interval: 200,
-      })
+      await vi.waitFor(
+        () => {
+          const visible = stripAnsi(stderrText)
+          expect(visible).toMatch(/\[main#\d+\/0-check\] starting/u)
+          expect(visible).toMatch(/\[main#\d+\/0-check\] finished duration=/u)
+        },
+        { timeout: 20_000, interval: 200 },
+      )
       cli.kill("SIGTERM")
       expect(await cli.exited, stderrText).toBe(0)
     } finally {
@@ -150,9 +163,12 @@ check:
       await stderrStream
     }
 
-    const stepRows = stderrText.split("\n").filter((row) => row.includes(" 1:check] "))
-    expect(stepRows).toHaveLength(1)
-    expect(stepRows[0]).not.toMatch(/TITLE|[◆◇●○✓✗×]/u)
+    const rows = stripAnsi(stderrText).split("\n")
+    const startingRows = rows.filter((row) => row.includes("/0-check] starting"))
+    const finishedRows = rows.filter((row) => row.includes("/0-check] finished "))
+    expect(startingRows).toHaveLength(1)
+    expect(finishedRows).toHaveLength(1)
+    for (const row of [...startingRows, ...finishedRows]) expect(row).not.toMatch(/TITLE|[◆◇●○✓✗×]/u)
   }, 30_000)
 
   it("keeps routine compose successes at DEBUG with timing", async () => {

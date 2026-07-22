@@ -30,8 +30,26 @@ function windowByKey(stats: ReturnType<typeof queueTimeStats>, key: string) {
 }
 
 /** Failed Runs = the non-integrated terminal outcomes, per the FLOW box. */
-function failsOf(outcomes: Readonly<{ rejected: number; environmentRefused: number; canceled: number }>): number {
-  return outcomes.rejected + outcomes.environmentRefused + outcomes.canceled
+function failsOf(
+  outcomes: Readonly<{
+    rejected: number
+    environmentRefused: number
+    stale: number
+    lost: number
+    legacy: number
+    refused: number
+    canceled: number
+  }>,
+): number {
+  return (
+    outcomes.rejected +
+    outcomes.environmentRefused +
+    outcomes.stale +
+    outcomes.lost +
+    outcomes.legacy +
+    outcomes.refused +
+    outcomes.canceled
+  )
 }
 
 describe("queueTimeStats windows", () => {
@@ -88,22 +106,38 @@ describe("queueTimeStats windows", () => {
     expect(windowByKey(queueTimeStats(facts, NOW, NOW - 30 * DAY), "HR").metrics.terminalAttempts).toBe(2)
   })
 
-  it("partitions failures into decision / env / canceled that sum to the fail count", () => {
+  it("partitions every named failure class so the classes sum to the fail count", () => {
     const facts: QueueTerminalFact[] = [
       fact({ run: "r1", terminalAtMs: NOW - MINUTE, outcome: "rejected" }),
       fact({ run: "r2", terminalAtMs: NOW - MINUTE, outcome: "rejected" }),
       fact({ run: "e1", terminalAtMs: NOW - MINUTE, outcome: "environment-refused" }),
+      fact({ run: "s1", terminalAtMs: NOW - MINUTE, outcome: "stale" }),
+      fact({ run: "l1", terminalAtMs: NOW - MINUTE, outcome: "lost" }),
+      fact({ run: "q1", terminalAtMs: NOW - MINUTE, outcome: "legacy" }),
+      fact({ run: "f1", terminalAtMs: NOW - MINUTE, outcome: "refused" }),
       fact({ run: "c1", terminalAtMs: NOW - MINUTE, outcome: "canceled" }),
       fact({ run: "i1", terminalAtMs: NOW - MINUTE, outcome: "integrated" }),
     ]
     const hr = windowByKey(queueTimeStats(facts, NOW, NOW - 30 * DAY), "HR").metrics
-    expect(hr.terminalAttempts).toBe(5)
+    expect(hr.terminalAttempts).toBe(9)
     expect(hr.outcomes.integrated).toBe(1)
-    expect(failsOf(hr.outcomes)).toBe(4)
+    expect(failsOf(hr.outcomes)).toBe(8)
     expect(hr.outcomes.rejected).toBe(2)
     expect(hr.outcomes.environmentRefused).toBe(1)
+    expect(hr.outcomes.stale).toBe(1)
+    expect(hr.outcomes.lost).toBe(1)
+    expect(hr.outcomes.legacy).toBe(1)
+    expect(hr.outcomes.refused).toBe(1)
     expect(hr.outcomes.canceled).toBe(1)
-    expect(hr.outcomes.rejected + hr.outcomes.environmentRefused + hr.outcomes.canceled).toBe(failsOf(hr.outcomes))
+    expect(
+      hr.outcomes.rejected +
+        hr.outcomes.environmentRefused +
+        hr.outcomes.stale +
+        hr.outcomes.lost +
+        hr.outcomes.legacy +
+        hr.outcomes.refused +
+        hr.outcomes.canceled,
+    ).toBe(failsOf(hr.outcomes))
   })
 
   it("splits active-duration distributions into integrated vs failed", () => {

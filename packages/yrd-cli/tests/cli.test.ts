@@ -1086,15 +1086,39 @@ describe("runYrd", () => {
     ).toEqual(["todo", "wip", "blocked", "done", "dropped", "dropped"])
     expect(
       [
+        { status: "pending" as const },
         { status: "queued" as const },
         { status: "in_progress" as const },
         { status: "waiting" as const },
         { status: "completed" as const, conclusion: "failure" as const },
         { status: "completed" as const, conclusion: "success" as const },
+        { status: "rejected" as const },
+        { status: "environment-refused" as const },
+        { status: "stale" as const },
+        { status: "lost" as const },
+        { status: "legacy" as const },
+        { status: "refused" as const },
+        { status: "integrated" as const },
         { status: "retired" as const },
         { status: "canceled" as const },
       ].map(runTaskStatusOf),
-    ).toEqual(["todo", "wip", "wip", "blocked", "done", "dropped", "dropped"])
+    ).toEqual([
+      "todo",
+      "todo",
+      "wip",
+      "wip",
+      "blocked",
+      "done",
+      "blocked",
+      "blocked",
+      "blocked",
+      "blocked",
+      "blocked",
+      "blocked",
+      "done",
+      "dropped",
+      "dropped",
+    ])
     expect(
       [
         fakeJob({ id: "job-queued", status: "requested" }),
@@ -2474,8 +2498,19 @@ describe("runYrd", () => {
     expect(JSON.parse(ordinary.stdout())).not.toHaveProperty("results")
     expect(JSON.parse(ordinary.stdout())).not.toHaveProperty("attempts")
 
+    const current = app.queue.get("R1")
+    if (current === undefined) throw new Error("expected R1")
+    const archived: Run = {
+      ...current,
+      id: "R0",
+      base: "retired",
+      prs: current.prs.map((pr) => ({ ...pr, base: "retired" })),
+    }
+    const history = vi.fn(() => Promise.resolve([archived, current]))
+    const historicalApp = { ...app, queue: { ...app.queue, history } }
     const lossless = outputIO()
-    expect(await runYrd(app, yrd("log", "--all", "--json"), lossless.io), lossless.stderr()).toBe(0)
+    expect(await runYrd(historicalApp, yrd("log", "--all", "--json"), lossless.io), lossless.stderr()).toBe(0)
+    expect(history).toHaveBeenCalledOnce()
     expect(JSON.parse(lossless.stdout())).toMatchObject({
       command: "log",
       results: [
@@ -2491,6 +2526,7 @@ describe("runYrd", () => {
             },
           ],
         },
+        { base: "retired", finished: [{ id: "R0" }] },
       ],
       attempts: [
         expect.objectContaining({
@@ -4266,7 +4302,16 @@ describe("runYrd", () => {
     expect(queueFlowMetrics(facts, { now, windowMs: 6 * 60 * minute })).toEqual({
       windowMs: 6 * 60 * minute,
       terminalAttempts: 4,
-      outcomes: { integrated: 2, rejected: 1, environmentRefused: 1, canceled: 0 },
+      outcomes: {
+        integrated: 2,
+        rejected: 1,
+        environmentRefused: 1,
+        stale: 0,
+        lost: 0,
+        legacy: 0,
+        refused: 0,
+        canceled: 0,
+      },
       decisionRejection: { rejected: 1, decisions: 3, rate: 1 / 3 },
       throughput: { landed: 2, per24h: 8 },
       oldestOpenMs: null,
@@ -4308,7 +4353,16 @@ describe("runYrd", () => {
     expect(queueFlowMetrics([], { now, windowMs: 6 * 60 * minute, oldestOpenMs: 42 * minute })).toEqual({
       windowMs: 6 * 60 * minute,
       terminalAttempts: 0,
-      outcomes: { integrated: 0, rejected: 0, environmentRefused: 0, canceled: 0 },
+      outcomes: {
+        integrated: 0,
+        rejected: 0,
+        environmentRefused: 0,
+        stale: 0,
+        lost: 0,
+        legacy: 0,
+        refused: 0,
+        canceled: 0,
+      },
       decisionRejection: { rejected: 0, decisions: 0, rate: null },
       throughput: { landed: 0, per24h: 0 },
       oldestOpenMs: 42 * minute,
@@ -4885,6 +4939,126 @@ describe("runYrd", () => {
     }
   })
 
+  it("projects release, legacy, and unknown failure codes as truthful outcomes", async () => {
+    const now = Date.parse("2026-07-13T12:00:00.000Z")
+    const cases = [
+      {
+        run: "R101",
+        pr: "PR101",
+        code: "queue-environment-refused",
+        status: "environment-refused",
+        display: "environment-refused",
+      },
+      { run: "R102", pr: "PR102", code: "stale-pr", status: "stale", display: "stale" },
+      { run: "R103", pr: "PR103", code: "stale-check", status: "stale", display: "stale" },
+      { run: "R104", pr: "PR104", code: "job-lost", status: "lost", display: "lost" },
+      { run: "R105", pr: "PR105", code: "stale-base", status: "stale", display: "stale" },
+      { run: "R106", pr: "PR106", code: "legacy-quiesced", status: "legacy", display: "legacy" },
+      { run: "R107", pr: "PR107", code: "legacy-root-leased", status: "refused", display: "refused" },
+      { run: "R108", pr: "PR108", code: "check-failed", status: "rejected", display: "rejected" },
+      {
+        run: "R109",
+        pr: "PR109",
+        code: "novel-failure-code",
+        status: "rejected",
+        display: "novel-failure-code",
+      },
+    ].map((entry, index) => ({ ...entry, headSha: String(index + 1).repeat(40) }))
+    const submittedAt = "2026-07-13T11:00:00.000Z"
+    // Released runs leave their PR submitted for the next queue pass; a true
+    // decision rejection owns the PR's terminal revision clock.
+    const prs: PR[] = cases.map((entry) => {
+      const rejected = ["check-failed", "novel-failure-code"].includes(entry.code)
+      return {
+        id: entry.pr,
+        branch: `topic/${entry.pr}`,
+        base: "main",
+        state: "open",
+        merged: false,
+        submittedAt,
+        ...(rejected ? { rejectedAt: "2026-07-13T11:45:00.000Z" } : {}),
+        revs: [
+          submittedRevision(
+            1,
+            entry.headSha,
+            submittedAt,
+            rejected ? { kind: "rejected", at: "2026-07-13T11:45:00.000Z", run: entry.run } : undefined,
+          ),
+        ],
+        reviews: [],
+        comments: [],
+        checkRequests: [],
+      }
+    })
+    const finished = cases.map((entry) =>
+      fakeRun({
+        id: entry.run,
+        status: "failed",
+        pr: { id: entry.pr, revision: 1, headSha: entry.headSha, baseSha: BASE_SHA },
+        startedAt: "2026-07-13T11:15:00.000Z",
+        finishedAt: "2026-07-13T11:45:00.000Z",
+        steps: [],
+        error: { code: entry.code, message: `${entry.code} specimen` },
+      }),
+    )
+    const result: QueueStatusResult = { base: "main", prs, running: [], waiting: [], finished }
+    const projection = queueTimelineProjection([result], {
+      now,
+      windowMs: 60 * 60_000,
+      statuses: ["pending", "running", "rejected", "integrated", "other"],
+      terms: [],
+      latest: false,
+      rowLimit: 20,
+      submissionTimes: new Map(prs.map((pr) => [queueRevisionKey(currentPRSnapshot(pr)), pr.submittedAt ?? null])),
+    })
+
+    expect(
+      Object.fromEntries(
+        projection.rows
+          .filter((row) => row.group === "completed")
+          .map((row) => [row.run, { status: row.status, glyph: row.glyph }]),
+      ),
+    ).toEqual(Object.fromEntries(cases.map((entry) => [entry.run, { status: entry.status, glyph: "×" }])))
+    expect(projection.metrics.outcomes).toEqual({
+      integrated: 0,
+      rejected: 2,
+      environmentRefused: 1,
+      stale: 3,
+      lost: 1,
+      legacy: 1,
+      refused: 1,
+      canceled: 0,
+    })
+    expect(
+      Object.fromEntries(queueLogRows([result], new Set(), undefined).map((row) => [row.run, row.outcome])),
+    ).toEqual(Object.fromEntries(cases.map((entry) => [entry.run, entry.display])))
+    expect(Object.fromEntries(finished.map((run) => [run.id, queueShowData(run).outcome]))).toEqual(
+      Object.fromEntries(cases.map((entry) => [entry.run, entry.display])),
+    )
+    const rejectedOnly = queueTimelineProjection([result], {
+      now,
+      windowMs: 60 * 60_000,
+      statuses: ["rejected"],
+      terms: [],
+      latest: false,
+      rowLimit: 20,
+      submissionTimes: new Map(prs.map((pr) => [queueRevisionKey(currentPRSnapshot(pr)), pr.submittedAt ?? null])),
+    })
+    expect(rejectedOnly.rows.filter((row) => row.group === "completed").map((row) => row.run)).toEqual(["R108", "R109"])
+    const rendered = await renderString(
+      createElement(QueueTimelineView, {
+        projection: { ...projection, display: { limit: 20, shown: projection.rows.length, hidden: 0 } },
+        columns: 200,
+      }),
+      { width: 200, height: 60, plain: true },
+    )
+    const unknownRow = rendered
+      .split("\n")
+      .find((row) => row.includes("pr#109.1") && row.includes("err=novel-failure-code"))
+    expect(unknownRow).toContain("× fail")
+    expect(unknownRow).toContain("err=novel-failure-code")
+  })
+
   it("builds one filtered one-revision timeline and deduplicated FLOW/TIME projection", async () => {
     const minute = 60_000
     const now = Date.parse("2026-07-13T12:00:00.000Z")
@@ -5073,7 +5247,16 @@ describe("runYrd", () => {
       metrics: {
         ...projection.metrics,
         terminalAttempts: 44,
-        outcomes: { integrated: 39, rejected: 5, environmentRefused: 0, canceled: 0 },
+        outcomes: {
+          integrated: 39,
+          rejected: 5,
+          environmentRefused: 0,
+          stale: 0,
+          lost: 0,
+          legacy: 0,
+          refused: 0,
+          canceled: 0,
+        },
         decisionRejection: { rejected: 5, decisions: 44, rate: 5 / 44 },
       },
     }
@@ -9481,13 +9664,21 @@ describe("journal version skew fail-loud", () => {
       .get()
     if (snapshot === null) throw new Error("expected SQLite journal snapshot")
     const prefix = JSON.parse(snapshot.prefix_json) as Array<{ cursor: number; value: StoredJournalRow }>
+    const history = database
+      .query<{ cursor: number; value_json: string }, []>(
+        "SELECT cursor, value_json FROM journal_history ORDER BY cursor",
+      )
+      .all()
+      .map(({ cursor, value_json }) => ({ cursor, row: JSON.parse(value_json) as StoredJournalRow }))
     const tail = database
       .query<{ cursor: number; value_json: string }, []>(
         "SELECT cursor, value_json FROM journal_events ORDER BY cursor",
       )
       .all()
       .map(({ cursor, value_json }) => ({ cursor, row: JSON.parse(value_json) as StoredJournalRow }))
-    return [...prefix.map(({ cursor, value }) => ({ cursor, row: value })), ...tail]
+    return [...prefix.map(({ cursor, value }) => ({ cursor, row: value })), ...history, ...tail].sort(
+      (left, right) => left.cursor - right.cursor,
+    )
   }
 
   async function seededJournalDir(): Promise<string> {
@@ -9516,6 +9707,7 @@ describe("journal version skew fail-loud", () => {
            WHERE singleton = 1`,
         )
         .run(emptyPrefix, createHash("sha256").update(canonicalJson([])).digest("hex"))
+      database.exec("DELETE FROM journal_history")
       database.exec("DELETE FROM journal_events")
       const insert = database.query("INSERT INTO journal_events(cursor, value_json, sha256) VALUES (?, ?, ?)")
       for (const { cursor, row } of rows) {

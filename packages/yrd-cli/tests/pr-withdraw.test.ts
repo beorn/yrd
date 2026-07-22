@@ -234,12 +234,12 @@ describe("pr withdraw", () => {
       ],
     })
 
-    // The queue timeline renders a withdrawn PR distinctly: its Queue run row
-    // is terminal, and a run-less withdrawn PR gets the dedicated retired row.
+    // The queue timeline preserves the Run's truthful stale-pr outcome, while
+    // a run-less withdrawn PR gets the dedicated retired row.
     const log = outputIO()
     expect(await runYrd(app, yrd("log", "--pr", "PR1", "--json"), log.io), log.stderr()).toBe(0)
     expect((JSON.parse(log.stdout()) as { rows: Record<string, unknown>[] }).rows).toEqual(
-      expect.arrayContaining([expect.objectContaining({ pr: "PR1", run: "R1", outcome: "rejected" })]),
+      expect.arrayContaining([expect.objectContaining({ pr: "PR1", run: "R1", outcome: "stale" })]),
     )
     await app.bays.submit({ branch: "topic/stale-norun", headSha: HEAD2_SHA, base: "main", baseSha: BASE_SHA })
     expect(await runYrd(app, yrd("pr", "withdraw", "PR2", "--reason", "never queued"), outputIO().io)).toBe(0)
