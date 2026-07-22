@@ -13,6 +13,7 @@ import {
   errorMessage,
   executionEnvironment,
   failed,
+  GIT_CLEANUP_TIMEOUT_MS,
   jsonArtifact,
   rejected,
   runProcess,
@@ -346,11 +347,12 @@ export function createHeldOutCommandEvaluator(options: HeldOutCommandEvaluatorOp
         }
       } finally {
         if (worktreeAdded) {
-          const removed = await git.run(bayPath, ["worktree", "remove", "--force", checkout])
+          const removed = await git.run(bayPath, ["worktree", "remove", "--force", checkout], GIT_CLEANUP_TIMEOUT_MS)
           const removeFailure = git.failure(
             removed,
             "pin-checkout-cleanup-failed",
             "Could not remove evaluator checkout",
+            GIT_CLEANUP_TIMEOUT_MS,
           )
           if (removeFailure === undefined) worktreeRemoved = true
           else cleanupFailure = removeFailure

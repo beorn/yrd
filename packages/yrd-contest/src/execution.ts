@@ -13,6 +13,11 @@ export type ArtifactFile = Readonly<{ kind: string; file: string; content: strin
 
 export const FULL_SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u
 const GIT_TIMEOUT_MS = 30_000
+/** R1680: cleanup Git operations (worktree remove) are correctness-critical,
+ * not latency-critical. Under host load a loaded removal can exceed the
+ * interactive window, and a timeout there converts finished check work into a
+ * failure — cleanup calls run under this generous budget instead. */
+export const GIT_CLEANUP_TIMEOUT_MS = 120_000
 
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -42,19 +47,24 @@ export function runProcess(
 }
 
 export function createGit(process: Pick<Process, "run">, env: NodeJS.ProcessEnv, signal?: AbortSignal) {
-  const run = (cwd: string, args: readonly string[]) =>
-    runProcess(process, { argv: ["git", ...args], cwd, env, signal, timeoutMs: GIT_TIMEOUT_MS }, "git-spawn-failed")
-  const output = (result: ProcessResult) => {
+  const run = (cwd: string, args: readonly string[], timeoutMs = GIT_TIMEOUT_MS) =>
+    runProcess(process, { argv: ["git", ...args], cwd, env, signal, timeoutMs }, "git-spawn-failed")
+  const output = (result: ProcessResult, timeoutMs = GIT_TIMEOUT_MS) => {
     const detail = result.stderr.trim() || result.stdout.trim()
     if (result.timedOut) {
-      return `Git timed out after ${GIT_TIMEOUT_MS}ms${detail === "" ? "" : `: ${detail}`}`
+      return `Git timed out after ${timeoutMs}ms${detail === "" ? "" : `: ${detail}`}`
     }
     return detail || `Process exited ${result.exitCode}`
   }
-  const failure = (result: Checked<ProcessResult>, code: string, action: string): Failure | undefined => {
+  const failure = (
+    result: Checked<ProcessResult>,
+    code: string,
+    action: string,
+    timeoutMs = GIT_TIMEOUT_MS,
+  ): Failure | undefined => {
     if (!result.ok) return { code, message: `${action}: ${result.error.message}` }
-    if (result.value.timedOut) return { code, message: `${action}: Git timed out after ${GIT_TIMEOUT_MS}ms` }
-    return result.value.exitCode === 0 ? undefined : { code, message: `${action}: ${output(result.value)}` }
+    if (result.value.timedOut) return { code, message: `${action}: Git timed out after ${timeoutMs}ms` }
+    return result.value.exitCode === 0 ? undefined : { code, message: `${action}: ${output(result.value, timeoutMs)}` }
   }
   const text = async (cwd: string, args: readonly string[], code: string, action: string): Promise<Checked<string>> => {
     const result = await run(cwd, args)
