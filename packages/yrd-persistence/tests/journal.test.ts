@@ -772,8 +772,17 @@ describe("SQLite Journal", () => {
 
     const dir = await directory()
     const unsafe = testJournal(dir, { sqliteVersion: "3.51.0" })
-    await expect(unsafe.append(frame("unsafe"), 0)).rejects.toThrow("SQLite 3.51.0 is unsafe for WAL")
+    await expect(unsafe.append(frame("unsafe"), 0)).rejects.toThrow(
+      "SQLite 3.51.0 is unsafe for WAL; set YRD_SQLITE_LIB",
+    )
     expect(await missing(join(dir, SQLITE))).toBe(true)
+  })
+
+  it("exercises the shipping SQLite runtime through the WAL safety gate", async () => {
+    const dir = await directory()
+    const journal = createJournal({ dir })
+
+    await expect(journal.append(frame("shipping-runtime"), 0)).resolves.toMatchObject({ appended: true, cursor: 1 })
   })
 
   it("resolves a custom SQLite library for unsafe bundled runtimes", () => {

@@ -1496,7 +1496,9 @@ export function assertSafeWalVersion(version: string): void {
     (major === 3 && minor === 50 && patch >= 7) ||
     (major === 3 && minor === 44 && patch >= 6)
   if (!fixed) {
-    throw new Error(`yrd: SQLite ${version} is unsafe for WAL; use >=3.51.3 or a fixed 3.50.7/3.44.6 backport`)
+    throw new Error(
+      `yrd: SQLite ${version} is unsafe for WAL; set YRD_SQLITE_LIB=/path/to/libsqlite3 (>=3.51.3 or a fixed 3.50.7/3.44.6 backport)`,
+    )
   }
 }
 
