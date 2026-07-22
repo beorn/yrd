@@ -8,8 +8,9 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { Command, createMemoryJournal } from "@yrd/core"
-import { createJournal } from "@yrd/persistence"
+import { createExclusive, createJournal } from "@yrd/persistence"
 import type { Process, ProcessRequest } from "@yrd/process"
+import { createLogger } from "loggily"
 import {
   createSignalObserver,
   createTribeSignalAdapter,
@@ -136,6 +137,178 @@ function recordingProcess(requests: ProcessRequest[]): Pick<Process, "run"> {
 }
 
 describe("PR signal observer", () => {
+  it("does not hold the notifications writer.lock across delivery (D4)", async () => {
+    // The incident: a one-shot's drain held .git/yrd/notifications/writer.lock across
+    // every `tribe` delivery subprocess (up to 5s each), so a run cancel starved the
+    // resident for minutes. Delivery must happen OUTSIDE the lock — the lock guards
+    // only the cursor read/write.
+    const dir = await stateDir()
+    const journal = createMemoryJournal<unknown>()
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const observer = createSignalObserver({
+      journal,
+      stateDir: dir,
+      routes: { "pr/rejected": ["submitter"] },
+      adapter: {
+        async send() {
+          entered.resolve()
+          await release.promise
+        },
+      },
+    })
+    observer.start()
+    await observer.journal.append(rejectedFrame(), 0)
+    await entered.promise // delivery is in flight
+
+    // While delivery blocks, a contender MUST be able to take the writer.lock — the
+    // drainer is not holding it across the delivery wait.
+    const contender = createExclusive(join(dir, "notifications"), { timeoutMs: 300 })
+    await expect(contender.run(async () => "acquired")).resolves.toBe("acquired")
+
+    release.resolve()
+    await observer.close()
+  })
+
+  it("bounds a budgeted one-shot's delivery and defers loudly instead of holding on (D4)", async () => {
+    // A one-shot CLI must never starve the resident: given a delivery budget, it
+    // delivers what it can, then defers loudly and returns in bounded time — the
+    // resident's observer finishes the rest. It does NOT hold on / spin for minutes.
+    const dir = await stateDir()
+    const frames = Array.from({ length: 6 }, (_, index) =>
+      rejectedFrame(`00000000-0000-7000-8000-00000000010${index}`),
+    )
+    const journal = createMemoryJournal<unknown>(frames)
+    const logs: unknown[] = []
+    const log = createLogger("test", [{ level: "trace" }, { write: (value: unknown) => logs.push(value) }])
+    const deliveries: SignalDelivery[] = []
+    const observer = createSignalObserver({
+      journal,
+      stateDir: dir,
+      routes: { "pr/rejected": ["submitter"] },
+      // Each delivery is slow relative to the budget, so it cannot finish all six.
+      adapter: {
+        send: async (delivery) => {
+          deliveries.push(delivery)
+          await Bun.sleep(40)
+        },
+      },
+      deliveryBudgetMs: 70,
+      log,
+    })
+    observer.start()
+    const started = Date.now()
+    await observer.close()
+    const elapsed = Date.now() - started
+
+    // Bounded: it stopped before delivering all six, and returned promptly (not minutes).
+    expect(deliveries.length).toBeGreaterThan(0)
+    expect(deliveries.length).toBeLessThan(frames.length)
+    expect(elapsed).toBeLessThan(2_000)
+    // Loud, structured deferral naming the reason — the resident will finish it.
+    expect(logs.some((record) => JSON.stringify(record).includes("delivery budget spent"))).toBe(true)
+  })
+
+  it("bounds a canceled ghost's closure delivery and terminates promptly (D4 regression)", async () => {
+    // The incident: `run cancel` of a ghost run held the writer.lock for minutes,
+    // closing opened balls one slow `tribe pending --close` at a time. With delivery
+    // unlocked and a one-shot budget, the cancel closes what it quickly can, defers
+    // loudly, and RETURNS in bounded time instead of spinning.
+    const frame = rejectedFrame("00000000-0000-7000-8000-000000000420")
+    const event = frame.events[0]!
+    const journal = createMemoryJournal<unknown>([
+      {
+        ...frame,
+        events: [
+          {
+            ...event,
+            id: "00000000-0000-7000-8000-000000000420",
+            name: "pr/canceled",
+            // A high revision synthesizes many prior-revision balls to close.
+            data: {
+              pr: "PR7",
+              revision: 12,
+              headSha: "a".repeat(40),
+              run: "R9",
+              actor: "@agent/7",
+              by: "@chief",
+              reason: "superseded by requeue",
+            },
+          },
+        ],
+      },
+    ])
+    const logs: unknown[] = []
+    const log = createLogger("test", [{ level: "trace" }, { write: (value: unknown) => logs.push(value) }])
+    const closures: SignalClosure[] = []
+    const observer = createSignalObserver({
+      journal,
+      stateDir: await stateDir(),
+      routes: { "pr/rejected": ["submitter"], "pr/needs-review": ["ci", "@cto"] },
+      adapter: {
+        send() {},
+        close: async (closure) => {
+          closures.push(closure)
+          await Bun.sleep(30)
+        },
+      },
+      deliveryBudgetMs: 90,
+      log,
+    })
+
+    observer.start()
+    const started = Date.now()
+    await observer.close()
+    const elapsed = Date.now() - started
+
+    // Terminated in bounded time, closed some but not all balls, and deferred loudly.
+    expect(closures.length).toBeGreaterThan(0)
+    expect(elapsed).toBeLessThan(2_000)
+    expect(logs.some((record) => JSON.stringify(record).includes("delivery budget spent"))).toBe(true)
+  })
+
+  it("defers with backoff when a contender holds the writer.lock, never spinning (D4)", async () => {
+    // A second writer holding .git/yrd/notifications/writer.lock makes the drainer
+    // defer loudly (fail-fast, no hot loop). Once the contender releases, a fresh wake
+    // drains and delivers — nothing is lost.
+    const dir = await stateDir()
+    const journal = createMemoryJournal<unknown>()
+    const logs: unknown[] = []
+    const log = createLogger("test", [{ level: "trace" }, { write: (value: unknown) => logs.push(value) }])
+    const deliveries: SignalDelivery[] = []
+    const observer = createSignalObserver({
+      journal,
+      stateDir: dir,
+      routes: { "pr/rejected": ["submitter"] },
+      adapter: recordingAdapter(deliveries),
+      log,
+    })
+
+    const acquired = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const contender = createExclusive(join(dir, "notifications"), { timeoutMs: 0 })
+    const holding = contender.run(async () => {
+      acquired.resolve()
+      await release.promise
+    })
+    await acquired.promise
+
+    observer.start()
+    await observer.journal.append(rejectedFrame(), 0)
+    // The drainer can't take the snapshot lock → it defers, does not spin or throw.
+    await vi.waitFor(() => expect(logs.some((r) => JSON.stringify(r).includes("deferred"))).toBe(true), {
+      timeout: 2_000,
+    })
+    expect(deliveries).toEqual([]) // nothing delivered while the lock is contended
+
+    release.resolve()
+    await holding
+    // With the lock free, a fresh wake delivers the pending rejection.
+    await observer.journal.append(submittedFrame("00000000-0000-7000-8000-0000000001aa", "@agent/7", 4), 1)
+    await vi.waitFor(() => expect(deliveries.length).toBeGreaterThan(0), { timeout: 2_000 })
+    await observer.close()
+  })
+
   it("returns the journal append before a dead adapter settles, so delivery cannot gate the Run", async () => {
     const journal = createMemoryJournal<unknown>()
     const entered = Promise.withResolvers<void>()

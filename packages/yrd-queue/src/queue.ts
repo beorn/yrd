@@ -874,6 +874,7 @@ function createQueue<Shape extends PRShape>(
 
   const settle = async (id: QueueRunId, options: RunJobOptions): Promise<QueueRun> => {
     const observed = current(id)
+    const continuation = observed.steps.some((step) => step.job !== undefined && step.job.status !== "requested")
     const markSettledRoot = async (): Promise<QueueRun> => {
       const snapshot = runtime()
       const record = Queues.record(snapshot.queues, id)
@@ -926,6 +927,7 @@ function createQueue<Shape extends PRShape>(
           base: observed.base,
           prs: observed.prs.map(deliveryIdentity),
           steps: observed.steps.map((step) => step.name),
+          ...(continuation ? { continuation: true } : {}),
         },
         outcome: queueRunOutcome,
         resultAttributes: (result) => ({
@@ -1760,7 +1762,18 @@ type QueueAuthorityGap = Readonly<{
 function queueAuthorityReleaseReason(
   error: DeepReadonly<JobError> | undefined,
 ): QueueAuthorityRelease["reason"] | undefined {
-  if (error?.code === "queue-environment-refused" || error?.code === "job-lost") return error.code
+  // A base race (the base branch or checked candidate ref moved out from under a
+  // pinned Run) is environmental, not a PR-content fault: release the Run's queue
+  // authority so the still-submitted PR re-admits against the fresh base, instead
+  // of terminally rejecting a PR that would merge cleanly once the base settles.
+  if (
+    error?.code === "queue-environment-refused" ||
+    error?.code === "job-lost" ||
+    error?.code === "stale-base" ||
+    error?.code === "stale-check"
+  ) {
+    return error.code
+  }
   return undefined
 }
 

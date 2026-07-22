@@ -56,6 +56,7 @@ import {
   type ActionableFailure,
   type FailureLike,
 } from "./actionable-error.ts"
+import { failureSlug } from "./failure-slug.ts"
 import {
   checkTaskStatusOf,
   jobAttemptTaskStatusOf,
@@ -199,6 +200,13 @@ export type QueueTimelineRunner = Readonly<{
   lastTickAt: string
   /** The resident runner's launch command; absent for status records written before it was captured. */
   command?: string
+  /** ISO time the resident wrote its exit marker on shutdown. The status file is
+   * NEVER deleted on close — it is left with this marker so a successor can still
+   * reclaim this pid's leases (idempotently). Absent while the runner is live. */
+  exitedAt?: string
+  /** With `exitedAt`: true = clean operator/drain stop, false = signal-forced or
+   * crash exit. Absent while the runner is live. */
+  clean?: boolean
 }>
 
 export type QueueTimelineProjection = Readonly<{
@@ -3073,8 +3081,9 @@ type TimelineStepCell = Readonly<{ text: string; color?: string }>
 function timelineStepCell(row: QueueTimelineProjectedRow): TimelineStepCell {
   if (row.status === "running") return { text: row.step ?? "" }
   if (row.failure !== undefined) {
+    const slug = fitTimelineLabel(failureSlug(row.failure.code), TIMELINE_STATE_CAP)
     return {
-      text: errorCodeLabel(fitTimelineLabel(row.failure.code, TIMELINE_STATE_CAP)),
+      text: `err=${slug}`,
       color:
         row.status === "environment-refused" ? "$fg-warning" : row.status === "canceled" ? "$fg-muted" : "$fg-error",
     }

@@ -1257,6 +1257,88 @@ describe("withBays", () => {
     })
   })
 
+  it("atomically records admitted-to-refreshed recuts without overwriting a newer authored revision", async () => {
+    await using app = (await createHarness()).app
+    const nextBase = "b".repeat(40)
+    const treeSha = "c".repeat(40)
+    const patchId = "d".repeat(40)
+
+    await app.bays.submit({ branch: "issue/queue-refresh", headSha: HEAD_1, baseSha: BASE, draft: true })
+    await app.bays.ready({ pr: "PR1" })
+    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE })
+    const refresh = {
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: HEAD_2,
+      baseSha: nextBase,
+      treeSha,
+      patchId,
+      reviewCarried: false,
+      expectedCurrent: { revision: 1, headSha: HEAD_1 },
+      transition: { from: "admitted", to: "refreshed" },
+    } as unknown as Parameters<typeof app.bays.recut>[0]
+
+    const recorded = await app.bays.recut(refresh)
+    expect(recorded.events).toContainEqual(
+      expect.objectContaining({
+        name: "pr/recut",
+        data: expect.objectContaining({ transition: { from: "admitted", to: "refreshed" } }),
+      }),
+    )
+    expect(app.bays.pr("PR1")?.recut).toMatchObject({
+      fromRevision: 1,
+      patchId,
+      transition: { from: "admitted", to: "refreshed" },
+    })
+    expect(app.bays.pr("PR1")).toMatchObject({ status: "submitted", revision: 2, headSha: HEAD_2 })
+    expect(app.bays.checksRequested("PR1")).toBe(true)
+    expect(recorded.events.map(({ name }) => name)).toEqual(["pr/recut", "pr/submitted", "pr/checks-requested"])
+    // A crash-retry of the exact result is idempotent even though its expected
+    // predecessor is no longer current.
+    expect((await app.bays.recut(refresh)).events).toEqual([])
+    await expect(
+      app.bays.recut({
+        ...refresh,
+        fromRevision: 2,
+        headSha: "6".repeat(40),
+        expectedCurrent: { revision: 2, headSha: HEAD_2 },
+        patchId: "e".repeat(40),
+      }),
+    ).rejects.toMatchObject({ failure: { kind: "refusal", code: "recut-patch-drift" } })
+    expect(app.bays.pr("PR1")?.revisions).toHaveLength(2)
+
+    await app.bays.submit({ branch: "issue/queue-refresh-race", headSha: "3".repeat(40), baseSha: BASE, draft: true })
+    await app.bays.ready({ pr: "PR2" })
+    await app.bays.requestChecks({ pr: "PR2", baseSha: BASE })
+    await app.bays.intake({
+      branch: "issue/queue-refresh-race",
+      headSha: "4".repeat(40),
+      base: "main",
+      baseSha: nextBase,
+    })
+    const staleRefresh = {
+      pr: "PR2",
+      fromRevision: 1,
+      headSha: "5".repeat(40),
+      baseSha: nextBase,
+      treeSha,
+      patchId,
+      reviewCarried: false,
+      expectedCurrent: { revision: 1, headSha: "3".repeat(40) },
+      transition: { from: "admitted", to: "refreshed" },
+    } as unknown as Parameters<typeof app.bays.recut>[0]
+
+    await expect(app.bays.recut(staleRefresh)).rejects.toMatchObject({
+      failure: { kind: "refusal", code: "recut-current-changed" },
+    })
+    expect(app.bays.pr("PR2")).toMatchObject({
+      status: "pushed",
+      revision: 2,
+      headSha: "4".repeat(40),
+      revisions: [{ revision: 1 }, { revision: 2 }],
+    })
+  })
+
   it("retires the current recut proof when a new authored head starts another revision", async () => {
     await using app = (await createHarness()).app
     const treeSha = "c".repeat(40)

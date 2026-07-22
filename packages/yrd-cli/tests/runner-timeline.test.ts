@@ -263,6 +263,15 @@ describe("resident runner step-row grammar", () => {
     expect(grammar(formatResidentLogLine(retry, { color: false }))).toContain("[main#324 2:merge#2] failed")
   })
 
+  it("uses the shared short slug vocabulary in resident log rows", () => {
+    const recutFailure = log("yrd:jobs:merge", "error", "merge failed", {
+      ...stepFailed.props,
+      error: { code: "recut-certificate-missing", message: "certificate absent" },
+    } as Record<string, unknown>)
+
+    expect(grammar(formatResidentLogLine(recutFailure, { color: false }))).toContain("err=recut-cert-missing")
+  })
+
   it("keeps a batched run identifiable on failure by listing every PR ref", () => {
     const batch = log("yrd:jobs:merge", "error", "merge failed", {
       ...RUNNER_SCOPE,

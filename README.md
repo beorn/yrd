@@ -399,6 +399,15 @@ still receives a successor revision with the derived patch/tree certificate.
 detail, and watch output retain the recut lineage and cumulative source-ready
 age while reporting the successor revision's queue wait separately.
 
+The resident Queue owns freshness after admission. Before each run snapshot it
+compares every admitted revision's immutable base with the authoritative base;
+when the base advanced, it records an `admitted -> refreshed` recut on the same
+PR with the same patch-id lineage and a fresh certificate. The append carries
+an expected-current revision/head guard, so an authored revision that arrives
+while Git proof is running wins and the stale automatic result is deferred.
+Patch drift and gitlink pins that require authored composition remain loud,
+typed refusals; an independent PR can still refresh in the same cycle.
+
 For a human-authored root carrier, use the machine-owned path rather than
 attaching a composition manifest:
 
@@ -515,7 +524,7 @@ yrd queue run [selector...] [--steps [step...]] [--follow | --once] [--interval 
 yrd queue pause [base] [--json]
 yrd queue pause [base] --reason <text> [--allow [pr...]] [--json]
 yrd queue resume [base] [--json]
-yrd queue recover [--reason <text>] [--json]
+yrd queue recover [--reason <text>] [--runner <id>] [--json]
 yrd queue finish <selector> [--step <name>] --job <id> --runner <runner>
   --attempt <number> --token <token> (--ok | --fail) [evidence options]
 yrd queue audit [--json]
@@ -558,12 +567,25 @@ rejected work with `yrd pr runs <PR>`, fix its source branch, then run `yrd pr
 submit <branch>` again. That appends a fresh revision and records submit and
 check authority for its exact head; check admission consumes the check fact,
 and an integrating Queue run consumes the submit fact. Queue commands cannot
-mint or refresh either authority.
+mint authored authority. The resident freshness transition is the one
+mechanical carry-forward: its certified successor atomically retains the
+admitted revision's submit and check authority on the same PR.
 
 To stop a resident `queue run` (its follow-by-default form), send `SIGINT` (Ctrl-C) or `SIGTERM`.
 The first signal stops new admission, lets the active run finish, and exits with
 that run's result; an idle runner exits cleanly. Send either signal again to
 force the existing hard shutdown and job-tree reap.
+
+The resident exit code is a supervisor contract, so `hab restart=on-failure` is
+meaningful. An operator-requested stop that DRAINS — the first signal, the active
+run reaches a terminal state, the queue is drained — exits `0` (or `1` if that run
+failed): the stop was intentional, do not restart. But when a hard signal cuts an
+UNFINISHED drain short with a run still in flight, the resident exits non-zero so a
+supervisor resumes draining instead of leaving live work stranded. (That non-zero
+code is `3`, shared with a self-refused infrastructure exit — a supervisor treats
+both the same under `restart=on-failure`.) A runner killed by an uncatchable signal
+is covered separately: it leaves its heartbeat behind, and its successor reclaims
+the leases (see below).
 
 A resident acquires one OS-held lease in the repository's common Yrd state
 before receiver intake or Queue admission. A second resident exits with the
@@ -571,6 +593,21 @@ typed `resident-runner-active` refusal and identifies the active
 `yrd-cli:<pid>` runner. Job events retain that runner id; trace logs add
 host and available Herdr/cmux pane provenance. Normal exit and graceful
 shutdown release the lease, while the OS releases it if the owner dies.
+
+A resident never deletes its heartbeat status on exit — it overwrites it with an
+exit marker. The successor reads that marker and reclaims the departed pid's
+leases (a no-op after a clean exit, since those leases are already released), so a
+runner that dies with work in flight cannot strand it. Each tick the resident also
+runs an unscoped lease-expiry recovery sweep, settling any orphaned running Job
+whose lease has lapsed regardless of which runner left it, so ghosts do not
+accumulate between restarts.
+
+Notification delivery (the configured `notify` routes) holds the notifications
+writer lock ONLY to read and advance its cursor — the actual sends run fully
+unlocked, so a one-shot command can never pin the lock (or a journal read) across a
+slow delivery and starve the resident's dispatch. A one-shot delivers within a
+bounded budget, then defers the rest loudly for the resident to finish; the resident
+is the primary, unbounded drainer.
 
 An explicit non-empty selection is durable Run authority, not a filter applied
 after configured admission. Yrd neither starts nor reuses omitted configured
@@ -585,6 +622,9 @@ lifetime—submission to terminal outcome—while `TOUCHED` is the latest state 
 step event and `RUN` is execution duration. `yrd pr runs <PR>` is the canonical
 drill into attempts, proofs, logs, and artifacts. `yrd queue recover` is the
 public repair path for expired runner leases; it never retries or executes work.
+Pass `--runner <id>` when a runner is known dead to force-settle its leases now,
+even ones that have not yet expired — clearing a fresh ghost without waiting the
+lease out.
 
 ### Issues and Contests
 

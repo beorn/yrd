@@ -301,7 +301,7 @@ function QueueArtifactOutputList({ outputs, inline }: { outputs: readonly QueueA
             ) : row.kind === "muted" ? (
               <Text color="$fg-muted">{row.text}</Text>
             ) : inline ? (
-              <Text color="$fg-muted" bgConflict="ignore" wrap="wrap" minWidth={0}>
+              <Text color="$fg-muted" bgConflict="ignore" wrap="truncate" minWidth={0}>
                 {row.text}
               </Text>
             ) : (
@@ -311,7 +311,10 @@ function QueueArtifactOutputList({ outputs, inline }: { outputs: readonly QueueA
               // those colors and stops silvery's background-conflict guard (default
               // `throw`) from killing the watch loop, while the global throw stays a
               // safety net for silvery's own pipeline bugs everywhere else.
-              <Text bgConflict="ignore" wrap="wrap" minWidth={0}>
+              // Log rows render ONE terminal row each (truncate, never wrap) so a
+              // few long lines can't fill the pane; "open full log" is the escape
+              // hatch for full content.
+              <Text bgConflict="ignore" wrap="truncate" minWidth={0}>
                 {row.text}
               </Text>
             )}
@@ -359,10 +362,35 @@ function QueueArtifactOutputRow({ row }: { row: QueueArtifactOutputLine }) {
       {row.kind === "link" ? (
         <Link href={row.href}>{row.text}</Link>
       ) : (
-        <Text color="$fg-muted" bgConflict="ignore" wrap="wrap" minWidth={0}>
+        // One terminal row per log line (truncate, never wrap) — the 21684
+        // truncation contract; the full-log link carries overflow.
+        <Text color="$fg-muted" bgConflict="ignore" wrap="truncate" minWidth={0}>
           {row.text === "" ? " " : row.text}
         </Text>
       )}
+    </Box>
+  )
+}
+
+/** Step output is static inside the single scroll owner shared by its tab. */
+export function QueueInlineArtifactOutputRows({ outputs }: { outputs: readonly QueueArtifactOutput[] }) {
+  const lines = useMemo(() => queueArtifactOutputLines(outputs, true), [outputs])
+  if (lines.length === 0) return null
+  return (
+    <Box flexDirection="column" minWidth={0}>
+      {lines.map((row) => (
+        <Box key={row.key} minWidth={0}>
+          {row.kind === "link" ? (
+            <Link href={row.href}>{row.text}</Link>
+          ) : (
+            // One terminal row per log line (truncate, never wrap) — see the
+            // tail-list rationale above; the full-log link carries overflow.
+            <Text color="$fg-muted" bgConflict="ignore" wrap="truncate" minWidth={0}>
+              {row.text === "" ? " " : row.text}
+            </Text>
+          )}
+        </Box>
+      ))}
     </Box>
   )
 }

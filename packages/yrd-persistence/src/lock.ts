@@ -55,10 +55,14 @@ async function acquire(dir: string, options: ExclusiveOptions): Promise<WriterLo
   const timeoutMs = Math.max(0, options.timeoutMs ?? 30_000)
   const pollMs = Math.max(1, options.pollIntervalMs ?? 10)
   const deadline = Date.now() + timeoutMs
+  // Contenders back off with jitter, never in lockstep — a fixed poll interval has
+  // every waiter wake at the same instant and thunder the lock. Full jitter over
+  // [0, pollMs] de-synchronizes them and keeps a busy contender off the CPU.
+  const backoff = (): Promise<void> => Bun.sleep(1 + Math.floor(Math.random() * pollMs))
 
   while (held.has(path)) {
     if (Date.now() >= deadline) throw busy(path)
-    await Bun.sleep(pollMs)
+    await backoff()
   }
 
   const fd = openSync(path, "a+")
@@ -66,7 +70,7 @@ async function acquire(dir: string, options: ExclusiveOptions): Promise<WriterLo
   try {
     while (!(locked = flock(fd, LOCK_EX | LOCK_NB) === 0)) {
       if (Date.now() >= deadline) throw busy(path)
-      await Bun.sleep(pollMs)
+      await backoff()
     }
     held.add(path)
     const body = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })

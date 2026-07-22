@@ -36,6 +36,7 @@ import {
   GitRefSchema,
   GitShaSchema,
   PRIdSchema,
+  PRFreshnessTransitionSchema,
   PRRejectedFactSchema,
   PRTerminalAssociationSchema,
   ProvisionBayInputSchema,
@@ -55,6 +56,7 @@ import {
   reviewState,
   resolveBay,
   resolvePR,
+  resolvePRMatch,
   type Bay,
   type BranchLifecycle,
   type BaysState,
@@ -62,6 +64,7 @@ import {
   type Correlation,
   type DeprovisionBayInput,
   type DeprovisionedBay,
+  type LivePR,
   type PR,
   type PRComment,
   type PRRegression,
@@ -186,6 +189,7 @@ export type PrEditArgs = z.infer<typeof PrEditArgsSchema>
 
 const PrReadyArgsSchema = z.object({ pr: TextSchema }).strict()
 export type PrReadyArgs = z.infer<typeof PrReadyArgsSchema>
+const PrRecutExpectedCurrentSchema = z.object({ revision: RevisionSchema, headSha: GitShaSchema }).strict()
 const PrRecutArgsSchema = z
   .object({
     pr: TextSchema,
@@ -196,6 +200,8 @@ const PrRecutArgsSchema = z
     patchId: GitShaSchema,
     reviewCarried: z.boolean(),
     composition: CompositionV1Schema.optional(),
+    expectedCurrent: PrRecutExpectedCurrentSchema.optional(),
+    transition: PRFreshnessTransitionSchema.optional(),
   })
   .strict()
 export type PrRecutArgs = z.infer<typeof PrRecutArgsSchema>
@@ -285,6 +291,7 @@ const PRRecutFactSchema = z
     predecessor: PRRecutLineageSchema,
     successor: PRRecutLineageSchema.extend({ baseSha: GitShaSchema }).strict(),
     composition: CompositionV1Schema.optional(),
+    transition: PRFreshnessTransitionSchema.optional(),
   })
   .strict()
 const PRPushedSchema = LegacyPRPushedSchema.extend({ actor: TextSchema }).strict()
@@ -683,7 +690,8 @@ export function createBays(
     const requestedComposition =
       options.composition === undefined ? undefined : CompositionV1Schema.parse(options.composition)
     let snapshot = state()
-    let pr = resolvePR(snapshot, selector)
+    const resolved = resolvePRMatch(snapshot, selector)
+    let pr = resolved?.value
     let bay = resolveBay(snapshot, selector) ?? (pr?.bay === undefined ? undefined : resolveBay(snapshot, pr.bay))
     // D2 — a branch whose PR reached a non-landed terminal status
     // (withdrawn/canceled) mints its next revision automatically down the
@@ -698,7 +706,10 @@ export function createBays(
     //    hand-made `<branch>-delivery-<nonce>` branch is needed;
     //  - addressed by its id, it stays idempotent.
     if (pr?.status === "integrated") {
-      if (selector.toLowerCase() !== pr.branch.toLowerCase()) return bindSubmission(pr, options)
+      // Addressed by its canonical id, an integrated PR is frozen evidence:
+      // idempotent. Addressed by a moving alias (its branch), a new head mints a
+      // fresh delivery. The canonical-vs-alias fold lives in resolveSelectorMatch.
+      if (resolved?.matchedBy === "canonical") return bindSubmission(pr, options)
       const landedHead = await options.resolveRevision(selector)
       if (landedHead === undefined) {
         raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${selector}'`)
@@ -942,7 +953,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/integrated": z.union([PRIntegratedSchema, LegacyPRIntegratedSchema]),
         "pr/canceled": z.union([PRCanceledSchema, LegacyPRCanceledSchema]),
       },
-      projectionVersion: "bays-v3",
+      projectionVersion: "bays-v4-freshness",
       project: projectBays,
       create(yrd) {
         yrd.jobs.requireDefinitions(options.jobs)
@@ -1048,7 +1059,7 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultActor: 
         title: "Record a mechanically equivalent PR recut",
         visibility: "public",
         params: PrRecutArgsSchema,
-        apply: (state: BayState, args: PrRecutArgs) => recutPr(state, args),
+        apply: (state: BayState, args: PrRecutArgs) => recutPr(state, args, defaultActor),
       }),
       ready: command({
         title: "Mark a PR ready",
@@ -1222,7 +1233,13 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
 function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase: string, defaultActor: string) {
   const current = state.bays
   if ("pr" in args) {
-    const pr = required(resolvePR(current, args.pr), "PR", args.pr)
+    // Submit-by-id routes through the same live guard as the other 9 mutating
+    // verbs (no resolve exemption): an id-addressed terminal PR passes through
+    // (matchedBy canonical) to the state check below; a live-less branch
+    // selector refuses no-live-pr here. The D2/Q1 terminal-branch reopen/mint
+    // semantics live entirely in the {branch} path and submitSelectionOperation,
+    // never this {pr} path, so no pre-guard resolution is needed here.
+    const pr: LivePR = requireLivePR(current, args.pr)
     if (args.correlation !== undefined) return bindPRCorrelation(pr, args.correlation)
     if (pr.status !== "pushed") throw new Error(`yrd: PR '${pr.id}' is ${pr.status}, not pushed`)
     return {
@@ -1427,13 +1444,13 @@ function associateRejectedTerminalRun(
 }
 
 function readyPr(state: DeepReadonly<BayState>, args: PrReadyArgs, defaultActor: string) {
-  const pr = requireLivePR(state.bays, args.pr)
+  const pr: LivePR = requireLivePR(state.bays, args.pr)
   if (pr.status === "submitted") return { events: [] }
   return submitWork(state, args, "main", defaultActor)
 }
 
-function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs) {
-  const pr = requireLivePR(state.bays, args.pr)
+function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultActor: string) {
+  const pr: LivePR = requireLivePR(state.bays, args.pr)
   if (pr.status === "integrated" || pr.status === "withdrawn" || pr.status === "canceled") {
     raiseFailure("refusal", "terminal-target", `yrd: PR '${pr.id}' is ${pr.status}; terminal PRs cannot be recut`)
   }
@@ -1448,8 +1465,45 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs) {
     pr.recut.patchId === args.patchId &&
     pr.recut.treeSha === args.treeSha &&
     pr.recut.reviewCarried === args.reviewCarried &&
+    pr.recut.transition?.from === args.transition?.from &&
+    pr.recut.transition?.to === args.transition?.to &&
     sameComposition(pr.composition, args.composition)
   if (unchanged) return { events: [] }
+
+  if (
+    args.expectedCurrent !== undefined &&
+    (pr.revision !== args.expectedCurrent.revision || pr.headSha !== args.expectedCurrent.headSha)
+  ) {
+    raiseFailure(
+      "refusal",
+      "recut-current-changed",
+      `yrd: PR '${pr.id}' current revision changed from ${args.expectedCurrent.revision}@${args.expectedCurrent.headSha} ` +
+        `to ${pr.revision}@${pr.headSha} while the recut was computed`,
+    )
+  }
+  if (args.transition !== undefined) {
+    if (args.expectedCurrent === undefined) {
+      raiseFailure(
+        "refusal",
+        "recut-transition-current-required",
+        `yrd: PR '${pr.id}' Queue freshness transition requires an expected current revision`,
+      )
+    }
+    if (pr.status !== "submitted" || !checksRequested(pr) || args.fromRevision !== pr.revision) {
+      raiseFailure(
+        "refusal",
+        "recut-transition-not-admitted",
+        `yrd: PR '${pr.id}' revision ${pr.revision} is not the admitted revision selected for refresh`,
+      )
+    }
+    if (predecessor.recut !== undefined && predecessor.recut.patchId !== args.patchId) {
+      raiseFailure(
+        "refusal",
+        "recut-patch-drift",
+        `yrd: PR '${pr.id}' automatic refresh changed patch identity from ${predecessor.recut.patchId} to ${args.patchId}`,
+      )
+    }
+  }
 
   const approved = pr.reviews.findLast(
     (review) =>
@@ -1465,6 +1519,7 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs) {
     )
   }
   const successor = { revision: pr.revision + 1, headSha: args.headSha, baseSha: args.baseSha }
+  const successorActor = predecessor.actor ?? defaultActor
   return {
     events: [
       event("pr/recut", {
@@ -1481,13 +1536,31 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs) {
         },
         successor,
         ...(args.composition === undefined ? {} : { composition: args.composition }),
+        ...(args.transition === undefined ? {} : { transition: args.transition }),
       }),
+      ...(args.transition === undefined
+        ? []
+        : [
+            event("pr/submitted", {
+              pr: pr.id,
+              revision: successor.revision,
+              headSha: successor.headSha,
+              actor: successorActor,
+              ...(predecessor.correlation === undefined ? {} : { correlation: predecessor.correlation }),
+            }),
+            event("pr/checks-requested", {
+              pr: pr.id,
+              revision: successor.revision,
+              headSha: successor.headSha,
+              baseSha: successor.baseSha,
+            }),
+          ]),
     ],
   }
 }
 
 function requestPrReview(state: DeepReadonly<BayState>, args: PrRequestReviewArgs, defaultActor: string) {
-  const pr = requireLivePR(state.bays, args.pr)
+  const pr: LivePR = requireLivePR(state.bays, args.pr)
   if (pr.status !== "pushed" && pr.status !== "submitted") {
     raiseFailure(
       "refusal",
@@ -1508,7 +1581,7 @@ function requestPrReview(state: DeepReadonly<BayState>, args: PrRequestReviewArg
 }
 
 function reviewPr(state: DeepReadonly<BayState>, args: PrReviewArgs) {
-  const pr = requireLivePR(state.bays, args.pr)
+  const pr: LivePR = requireLivePR(state.bays, args.pr)
   const fact = PRReviewFactSchema.parse({
     pr: pr.id,
     revision: pr.revision,
@@ -1522,7 +1595,7 @@ function reviewPr(state: DeepReadonly<BayState>, args: PrReviewArgs) {
 }
 
 function commentPr(state: DeepReadonly<BayState>, args: PrCommentArgs) {
-  const pr = requireLivePR(state.bays, args.pr)
+  const pr: LivePR = requireLivePR(state.bays, args.pr)
   const fact = PRCommentFactSchema.parse({
     pr: pr.id,
     revision: pr.revision,
@@ -1535,7 +1608,7 @@ function commentPr(state: DeepReadonly<BayState>, args: PrCommentArgs) {
 }
 
 function requestPrChecks(state: DeepReadonly<BayState>, args: PrRequestChecksArgs) {
-  const pr = requireLivePR(state.bays, args.pr)
+  const pr: LivePR = requireLivePR(state.bays, args.pr)
   if (pr.status !== "pushed" && pr.status !== "submitted" && pr.status !== "rejected") {
     throw new PrCheckabilityConflict(pr.id, pr.status)
   }
@@ -1553,7 +1626,7 @@ function requestPrChecks(state: DeepReadonly<BayState>, args: PrRequestChecksArg
 }
 
 function recordPrRegression(state: DeepReadonly<BayState>, args: PrRegressionArgs) {
-  const original = requireLivePR(state.bays, args.pr)
+  const original: LivePR = requireLivePR(state.bays, args.pr)
   const repair = resolvePR(state.bays, args.repairPr)
   if (repair === undefined) throw new Error(`yrd: no repair PR '${args.repairPr}'`)
   if (original.id === repair.id) throw new Error("yrd: an escaped regression requires a different repair PR")
@@ -1720,7 +1793,7 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
 }
 
 function closePr(state: DeepReadonly<BayState>, args: PrCloseArgs) {
-  const pr = requireLivePR(state.bays, args.pr)
+  const pr: LivePR = requireLivePR(state.bays, args.pr)
   if (!isLivePR(pr.status)) {
     throw new Error(`yrd: PR '${pr.id}' is ${pr.status}; only a live PR can be closed`)
   }
@@ -1736,7 +1809,7 @@ function closePr(state: DeepReadonly<BayState>, args: PrCloseArgs) {
 }
 
 function editPr(state: DeepReadonly<BayState>, args: PrEditArgs) {
-  const pr = requireLivePR(state.bays, args.pr)
+  const pr: LivePR = requireLivePR(state.bays, args.pr)
   const issueChanged = args.issue !== undefined && args.issue !== pr.issue
   if (args.issue !== undefined && pr.issue !== undefined && issueChanged) {
     raiseFailure(
@@ -1927,6 +2000,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         patchId: recut.patchId,
         treeSha: recut.treeSha,
         reviewCarried: recut.reviewCarried,
+        ...(recut.transition === undefined ? {} : { transition: recut.transition }),
       }
       const correlation = predecessor.correlation
       const revision: PRRevision = {
