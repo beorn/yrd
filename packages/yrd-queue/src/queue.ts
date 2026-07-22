@@ -1162,7 +1162,17 @@ function createQueue<Shape extends PRShape>(
             const newlyFailed = unsettled.some(
               (pr) => before.get(pr.id) !== "failed" && checkEligibility(snapshot, pr, steps).status === "failed",
             )
-            if (newlyFailed || unsettled.some((pr) => checkEligibility(snapshot, pr, steps).status !== "failed")) {
+            // Pause the merge phase ONLY when a check newly failed this tick,
+            // so requeue/recut policy sees the failure before the next batch
+            // composes. An in-flight (running/queued) check must NEVER gate the
+            // merge phase: under continuous submissions the resident sees an
+            // unsettled check on every tick, and gating on it starves merges
+            // indefinitely (2026-07-22 merge-starvation livelock — checks
+            // completed in 48s-2m14s all day while zero merge steps ran).
+            // Liveness beats check-freshness here: landing a runnable PR can
+            // stale an in-flight sibling check, which the stale/recut path
+            // already classifies and (with auto-recut) requeues.
+            if (newlyFailed) {
               return admissions
             }
           }
@@ -1686,7 +1696,16 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
         unstartedAdmission(active, state.queues, steps)
           ? active
           : undefined
-      if (active !== undefined && superseded === undefined) {
+      // A check-only admission (no integrating steps) never moves the base, so
+      // it must not gate the START of an integrating run — gating here was the
+      // deepest layer of the 2026-07-22 merge-starvation livelock. Integrating
+      // runs still conflict with each other, a new non-integrating run still
+      // waits for whatever is active, and same-PR overlap stays impossible via
+      // the claims layer (a PR inside a started admission is not runnable).
+      const plansIntegration = (plan: readonly { integrates: boolean; needsIntegration: boolean }[]): boolean =>
+        plan.some((step) => step.integrates || step.needsIntegration)
+      const checkOnlyActive = active !== undefined && !plansIntegration(active.steps) && plansIntegration(selected)
+      if (active !== undefined && !checkOnlyActive && superseded === undefined) {
         throw new QueueRunningConflict(base, active.id)
       }
       const integrated = integratedPRShape(prs)
