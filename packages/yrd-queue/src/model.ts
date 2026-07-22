@@ -13,6 +13,7 @@ import {
 import { JsonSchema, resolveSelector, type JsonValue } from "@yrd/core"
 import { JobErrorSchema, type Job, type JobError } from "@yrd/job"
 import * as z from "zod"
+import type { QueueLane } from "./change-lane.ts"
 import {
   projectionLookupGet,
   projectionLookupSet,
@@ -246,6 +247,8 @@ export type QueueRecord = Readonly<{
   settlement?: "explicit"
   prs: readonly PRSnapshot[]
   base: string
+  /** Derived from immutable revision diff facts when lane routing is enabled. */
+  lane?: QueueLane
   steps: readonly InstalledStep[]
   stepSelection?: StepSelection
   initialIntegration?: IntegrationProof
@@ -433,6 +436,7 @@ const queueRecordShape = {
   id: z.string().trim().min(1),
   prs: z.array(PRSnapshotSchema).min(1),
   base: GitRefSchema,
+  lane: z.enum(["pm", "sw"]).optional(),
   steps: z.array(InstalledStepSchema).min(1),
   initialIntegration: IntegrationProofSchema.optional(),
   initialResults: z.record(z.string(), JsonSchema).optional(),
