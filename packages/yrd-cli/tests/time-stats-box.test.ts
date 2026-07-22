@@ -95,7 +95,18 @@ describe("TimeStatsBox", () => {
     expect(app.text).toContain("TIME")
     for (const header of ["HR", "DAY", "WK", "MON"]) expect(app.text).toContain(header)
     // FLOW rows.
-    for (const label of ["RUNS", "INTEGRATED", "FAILS", "decision", "env", "canceled"]) {
+    for (const label of [
+      "RUNS",
+      "INTEGRATED",
+      "FAILS",
+      "decision",
+      "env",
+      "stale",
+      "lost",
+      "legacy",
+      "refused",
+      "canceled",
+    ]) {
       expect(app.text).toContain(label)
     }
     // TIME stacked sections + metric rows.

@@ -29,7 +29,9 @@ export const TIMELINE_BRANCH_ICON = ""
 export function timelineStatusGlyph(status: string): string {
   if (["checking", "running", "waiting"].includes(status)) return "●"
   if (["integrated", "passed"].includes(status)) return "✓"
-  if (["rejected", "failed", "lost", "environment-refused"].includes(status)) return "×"
+  if (["rejected", "failed", "lost", "stale", "legacy", "refused", "environment-refused"].includes(status)) {
+    return "×"
+  }
   if (["withdrawn", "retired", "canceled"].includes(status)) return "−"
   return "○"
 }
@@ -274,7 +276,9 @@ function outcomeVerb(props: OutcomeProps, level: string): "finished" | "failed" 
   if (
     props.outcome === "failed" ||
     props.outcome === "settled" ||
-    ["failed", "lost", "canceled", "rejected", "environment-refused"].includes(props.status ?? "")
+    ["failed", "lost", "stale", "legacy", "refused", "canceled", "rejected", "environment-refused"].includes(
+      props.status ?? "",
+    )
   ) {
     return "failed"
   }

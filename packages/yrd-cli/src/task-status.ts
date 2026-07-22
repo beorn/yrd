@@ -64,6 +64,10 @@ type RunLifecycleStatus =
   | "integrated"
   | "rejected"
   | "environment-refused"
+  | "stale"
+  | "lost"
+  | "legacy"
+  | "refused"
   | "retired"
   | "canceled"
 
@@ -78,6 +82,10 @@ export function runTaskStatusOf(run: Readonly<{ status: RunLifecycleStatus }>): 
     case "failed":
     case "rejected":
     case "environment-refused":
+    case "stale":
+    case "lost":
+    case "legacy":
+    case "refused":
       return "blocked"
     case "passed":
     case "integrated":
