@@ -203,6 +203,18 @@ function queueGitDir(cwd: string): string | undefined {
 
 const RESIDENT_RUNNER_HEARTBEAT_MS = 5_000
 
+/** How often the resident follow loop runs its unscoped lease-expiry recovery
+ * sweep (D1b). Startup reclaim is one-shot; this settles ghosts left by runners
+ * that die AFTER it. A constant, not config — the throttle is measured in wall
+ * time via `io.now`, so a busy tick cadence cannot starve or spam it. */
+const RESIDENT_RECOVERY_SWEEP_MS = 60_000
+
+/** Exit code when a hard signal cuts an unfinished drain short, leaving in-flight
+ * work (D3). An operator-requested stop that FINISHES (drain complete) exits 0; a
+ * signal-forced interruption exits non-zero so hab `restart=on-failure` resumes
+ * draining instead of leaving the queue's live work stranded. */
+const RESIDENT_INTERRUPTED_EXIT: YrdCliExitCode = 3
+
 function residentRunnerStatusPath(cwd: string): string | undefined {
   const gitDir = queueGitDir(cwd)
   return gitDir === undefined ? undefined : join(gitDir, "yrd", "resident-runner", "status.json")
@@ -241,11 +253,16 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
   if (record.command !== undefined && typeof record.command !== "string") {
     raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner command is invalid")
   }
+  if (record.clean !== undefined && typeof record.clean !== "boolean") {
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner clean flag is invalid")
+  }
   return {
     pid: record.pid as number,
     startedAt,
     lastTickAt,
     ...(record.command === undefined ? {} : { command: record.command as string }),
+    ...(record.exitedAt === undefined ? {} : { exitedAt: residentRunnerTimestamp(record.exitedAt, "exitedAt") }),
+    ...(record.clean === undefined ? {} : { clean: record.clean }),
   }
 }
 
@@ -258,6 +275,15 @@ export async function residentRunnerStatus(cwd: string): Promise<QueueTimelineRu
     if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null
     throw cause
   }
+}
+
+/** The status file is no longer deleted on close (D1a) — a departed runner leaves
+ * an exit marker so a successor can reclaim its pid. For DISPLAY (health + timeline)
+ * an exited runner is not draining, so it reads as "no active runner", preserving
+ * the pre-marker "NO RUNNER"/absent semantics. Reclaim, by contrast, consumes the
+ * raw marker (it needs the dead pid), so it must NOT go through this filter. */
+function activeResidentRunner(runner: QueueTimelineRunner | null): QueueTimelineRunner | null {
+  return runner !== null && runner.exitedAt !== undefined ? null : runner
 }
 
 type RunnerGitDistance = Readonly<{
@@ -366,7 +392,7 @@ async function queueRunnerHealth(
         "yrd: queue.audit capability is not installed; runner health cannot prove baseline freshness",
       )
     }
-    const runner = await residentRunnerStatus(cwd)
+    const runner = activeResidentRunner(await residentRunnerStatus(cwd))
     git = await runnerGitHealth(cwd)
     const auditResult = await audit()
     const now = io.now?.() ?? Date.now()
@@ -523,7 +549,9 @@ async function reclaimDeadResidentRunner(app: YrdCliApp, io: YrdCliIO): Promise<
 
 type ResidentRunnerHeartbeat = Readonly<{
   check(): void
-  close(): Promise<void>
+  /** Stop the heartbeat and leave an exit marker in status.json (never delete it).
+   * `clean` = true for an operator/drain stop, false for a signal-forced/crash exit. */
+  close(clean: boolean): Promise<void>
 }>
 
 function heartbeatDelay(intervalMs: number, signal: AbortSignal): Promise<boolean> {
@@ -571,9 +599,9 @@ export async function startResidentRunnerHeartbeat(
   const startedAt = nowIso()
   // The dedicated RUNNER box renders this verbatim: `[pid] <command>`.
   const command = [basename(process.argv[0] ?? "bun"), ...process.argv.slice(1)].join(" ")
-  const write = async (): Promise<void> => {
+  const writeStatus = async (exit?: Readonly<{ exitedAt: string; clean: boolean }>): Promise<void> => {
     await mkdir(directory, { recursive: true })
-    const status: QueueTimelineRunner = { pid: process.pid, startedAt, lastTickAt: nowIso(), command }
+    const status: QueueTimelineRunner = { pid: process.pid, startedAt, lastTickAt: nowIso(), command, ...exit }
     try {
       await writeFile(temporary, `${JSON.stringify(status)}\n`, "utf8")
       await rename(temporary, path)
@@ -581,6 +609,7 @@ export async function startResidentRunnerHeartbeat(
       await rm(temporary, { force: true })
     }
   }
+  const write = () => writeStatus()
 
   await write()
   const stop = new AbortController()
@@ -595,12 +624,19 @@ export async function startResidentRunnerHeartbeat(
     check() {
       if (failure !== undefined) throw failure
     },
-    close: () =>
+    close: (clean: boolean) =>
       (closePromise ??= (async () => {
         stop.abort()
         await loop
+        // NEVER delete status.json on close. Overwrite it atomically with an exit
+        // marker instead: a successor resident reads this (not null) and reclaims
+        // this pid's leases via planResidentRunnerReclaim, clean or not — the
+        // deletion used to strand ghosts because the null-status path skipped
+        // reclaim. queue.recover is idempotent, so reclaiming a clean exit is a
+        // no-op. `clean` records whether this was an operator/drain stop (true) or
+        // a signal-forced/crash exit (false).
         try {
-          await rm(path, { force: true })
+          await writeStatus({ exitedAt: nowIso(), clean })
         } finally {
           await rm(temporary, { force: true })
         }
@@ -2385,13 +2421,19 @@ async function queuePauses(app: YrdCliApp, base: string | undefined, io: YrdCliI
 
 async function recoverQueue(
   app: YrdCliApp,
-  options: JsonOption & Readonly<{ reason?: string }>,
+  options: JsonOption & Readonly<{ reason?: string; runner?: string }>,
   io: YrdCliIO,
 ): Promise<void> {
   if (options.reason?.trim() === "") usage("--reason requires text")
+  if (options.runner?.trim() === "") usage("--runner requires a runner id")
+  // With `--runner` the operator asserts that runner is dead: recover force-settles
+  // its running Jobs regardless of lease expiry, so a fresh (unexpired) ghost from a
+  // known-dead runner clears immediately instead of waiting the lease out. Without
+  // it, recover settles only leases that have already lapsed.
   const runs = await app.queue.recover({
     recoveryTime: new Date(io.now?.() ?? Date.now()).toISOString(),
     ...(options.reason === undefined ? {} : { reason: options.reason }),
+    ...(options.runner === undefined ? {} : { runner: options.runner }),
   })
   await printResult(
     io,
@@ -2759,7 +2801,7 @@ export async function queueListSnapshot(
   const { results } = await queueStatusSnapshots(app, state, target, io)
   const now = io.now?.() ?? Date.now()
   const base = results[0]?.base ?? baseIdentity(requestedBase)
-  const runner = await residentRunnerStatus(io.cwd ?? process.cwd())
+  const runner = activeResidentRunner(await residentRunnerStatus(io.cwd ?? process.cwd()))
   const projection = queueTimelineProjection(results, {
     now,
     windowMs: queueTimelineWindow(options.since),
@@ -3742,6 +3784,37 @@ export async function refreshAdmittedQueueRevisions(
   return outcomes
 }
 
+/**
+ * D1b — the resident's per-tick unscoped lease-expiry recovery sweep. `recover`
+ * with NO runner arg settles any orphaned running Job whose lease has lapsed,
+ * regardless of the runner that left it or where a run's cursor sits — the
+ * automatic settle that one-shot startup reclaim (pid-scoped, last pid only) can
+ * never do. Throttled by wall time (`io.now`) so a busy tick cadence cannot starve
+ * or spam it; returns the timestamp to carry as the next `lastSweepAt`. Idempotent
+ * and cheap when nothing lapsed. Logs a loud structured warn ONLY when it actually
+ * settles something — loggily-only, since the runner's stdout is a log stream.
+ */
+export async function residentRecoverySweep(
+  app: Pick<YrdCliApp, "queue" | "log">,
+  io: Pick<YrdCliIO, "now">,
+  lastSweepAt: number,
+): Promise<number> {
+  const sweepNow = io.now?.() ?? Date.now()
+  if (sweepNow - lastSweepAt < RESIDENT_RECOVERY_SWEEP_MS) return lastSweepAt
+  const settled = await app.queue.recover({
+    recoveryTime: new Date(sweepNow).toISOString(),
+    reason: "resident lease-expiry sweep",
+  })
+  if (settled.length > 0) {
+    app.log.warn?.("resident runner settled lapsed runs via lease-expiry sweep", {
+      action: "resident-recovery-sweep",
+      reason: "runner lease expired",
+      runs: settled.map((run) => run.id),
+    })
+  }
+  return sweepNow
+}
+
 export async function followQueueRuns(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -3775,6 +3848,14 @@ export async function followQueueRuns(
   // that prior resident is not concurrently running as a resident.
   if (resident) await reclaimDeadResidentRunner(app, io)
   const heartbeat = resident ? await startResidentRunnerHeartbeat(io) : undefined
+  // A clean shutdown is an operator drain that finished (no in-flight work left);
+  // any other exit — a signal-forced abort or a thrown fault — is unclean. This
+  // feeds the exit marker close() writes (D1a) and the process exit code (D3).
+  let cleanShutdown = false
+  // Wall-clock time of the last lease-expiry sweep (D1b). 0 forces a sweep on the
+  // first tick — it catches older-generation ghosts the one-shot startup reclaim
+  // (pid-scoped, last pid only) cannot.
+  let lastSweepAt = 0
   try {
     heartbeat?.check()
     if (heartbeat !== undefined && selectors.length === 0 && !jsonEnabled(options)) {
@@ -3788,6 +3869,11 @@ export async function followQueueRuns(
       // watching must stop the watch, never let a fresh cycle start expensive
       // Runs on a stale baseline.
       await gate()
+      // D1b — per-tick lease-expiry recovery sweep. ONLY the resident runs it: it
+      // holds the exclusive lease, so its unscoped `recover` write is single-writer
+      // safe. (A one-shot or a bare programmatic followQueueRuns caller — no runner
+      // identity — never sweeps.)
+      if (resident) lastSweepAt = await residentRecoverySweep(app, io, lastSweepAt)
       // The optional default preserves the narrow followQueueRuns test/programmatic
       // seam. The installed CLI always supplies the recutter; a caller that does
       // not install one retains the historical drain-only behavior.
@@ -3839,8 +3925,18 @@ export async function followQueueRuns(
       }
       const exit: YrdCliExitCode = runs.some(Queues.failed) ? 1 : 0
       if (drainRequested()) {
-        const lastRun = runs.at(-1)
-        if (runs.every(Queues.terminal)) return lastRun !== undefined && Queues.failed(lastRun) ? 1 : 0
+        if (runs.every(Queues.terminal)) {
+          // Operator drain finished with no in-flight work left — the one clean stop.
+          cleanShutdown = true
+          const lastRun = runs.at(-1)
+          return lastRun !== undefined && Queues.failed(lastRun) ? 1 : 0
+        }
+        // The drain has NOT finished (a run is still in flight), yet a hard signal
+        // is forcing the stop now. That is "exiting with in-flight work due to a
+        // signal": stay unclean and exit non-zero so hab restart=on-failure resumes
+        // draining. A single drain signal (no scope abort) still loops below and
+        // finishes the drain cleanly.
+        if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
         await scope.sleep(interval)
         continue
       }
@@ -3851,7 +3947,7 @@ export async function followQueueRuns(
     }
   } finally {
     recoveryReporter.flush()
-    await heartbeat?.close()
+    await heartbeat?.close(cleanShutdown)
   }
 }
 
@@ -4534,8 +4630,9 @@ function buildProgram(
     .action(async (base, options) => resumeQueue(installed(), base, options, io))
   queue
     .command("recover")
-    .description("recover expired runner leases")
+    .description("recover expired runner leases; --runner force-settles a known-dead runner's unexpired leases too")
     .option("--reason <text>", "record the recovery reason")
+    .option("--runner <id>", "force-settle this known-dead runner's leases now, even if unexpired")
     .option("--json", "emit stable JSON")
     .action(async (options) => recoverQueue(installed(), options, io))
   queue

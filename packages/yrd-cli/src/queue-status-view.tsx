@@ -223,6 +223,13 @@ export type QueueTimelineRunner = Readonly<{
   lastTickAt: string
   /** The resident runner's launch command; absent for status records written before it was captured. */
   command?: string
+  /** ISO time the resident wrote its exit marker on shutdown. The status file is
+   * NEVER deleted on close — it is left with this marker so a successor can still
+   * reclaim this pid's leases (idempotently). Absent while the runner is live. */
+  exitedAt?: string
+  /** With `exitedAt`: true = clean operator/drain stop, false = signal-forced or
+   * crash exit. Absent while the runner is live. */
+  clean?: boolean
 }>
 
 export type QueueTimelineProjection = Readonly<{
@@ -3108,7 +3115,7 @@ export function QueueDetailTitle({
   }
   const outcome = detailStatusOutcome(row, data)
   const presentIssue = presentFact(issue)
-  const running = data === undefined ? row.status === "running" : data.status === "running"
+  const running = data === undefined ? row.status === "running" : data.status === "in_progress"
   return (
     <Box flexDirection="row" width="100%" justifyContent="space-between" minWidth={0} flexShrink={0}>
       <Box flexDirection="row" minWidth={0} overflow="hidden">

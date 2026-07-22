@@ -2091,7 +2091,18 @@ type QueueAuthorityGap = Readonly<{
 function queueAuthorityReleaseReason(
   error: DeepReadonly<JobError> | undefined,
 ): QueueAuthorityRelease["reason"] | undefined {
-  if (error?.code === "queue-environment-refused" || error?.code === "job-lost") return error.code
+  // A base race (the base branch or checked candidate ref moved out from under a
+  // pinned Run) is environmental, not a PR-content fault: release the Run's queue
+  // authority so the still-submitted PR re-admits against the fresh base, instead
+  // of terminally rejecting a PR that would merge cleanly once the base settles.
+  if (
+    error?.code === "queue-environment-refused" ||
+    error?.code === "job-lost" ||
+    error?.code === "stale-base" ||
+    error?.code === "stale-check"
+  ) {
+    return error.code
+  }
   return undefined
 }
 

@@ -3971,6 +3971,44 @@ describe("runYrd", () => {
     expect(events.map(({ name }) => name)).not.toContain("pr/rejected")
   })
 
+  it("force-recovers an unexpired ghost from a named dead runner via queue recover --runner (D2)", async () => {
+    const app = await createApp({ waitingCheck: true })
+    await openAndSubmit(app)
+    await app.bays.requestChecks({ pr: "PR1" })
+    expect((await app.queue.admit({ prs: ["PR1"] }))[0]?.id).toBe("R1")
+    const check = app.queue.get("R1")?.steps[0]?.job
+    if (check === undefined) throw new Error("expected requested check")
+    // A known resident started this check with a FUTURE lease, then died — a fresh
+    // (unexpired) ghost the lease-expiry sweep cannot yet settle.
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: check.id,
+      attempt: 1,
+      runner: "yrd-cli:4242",
+      leaseExpiresAt: "2026-07-09T13:00:00.000Z",
+    })
+    expect(app.queue.get("R1")?.status).toBe("running")
+
+    // The unscoped public command, before the lease expires, is a no-op — nothing lapsed.
+    const noop = outputIO({ now: () => Date.parse("2026-07-09T12:00:00.000Z") })
+    expect(await runYrd(app, yrd("queue", "recover", "--json"), noop.io), noop.stderr()).toBe(0)
+    expect(JSON.parse(noop.stdout())).toEqual({ command: "queue.recover", results: [] })
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "running", runner: "yrd-cli:4242" })
+
+    // --runner force-settles the unexpired ghost from that known-dead runner NOW,
+    // so an operator can clear a fresh ghost without waiting out the lease.
+    const forced = outputIO({ now: () => Date.parse("2026-07-09T12:00:05.000Z") })
+    expect(
+      await runYrd(app, yrd("queue", "recover", "--runner", "yrd-cli:4242", "--json"), forced.io),
+      forced.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(forced.stdout())).toMatchObject({
+      command: "queue.recover",
+      results: [{ id: "R1", status: "failed", steps: [{ job: { status: "lost" } }] }],
+    })
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "lost", runner: "yrd-cli:4242" })
+  })
+
   it("records an external failing verdict successfully while the queue run becomes failed", async () => {
     const temp = mkdtempSync(join(tmpdir(), "yrd-external-verdict-"))
     const artifact = join(temp, "private-tests.log")
@@ -4781,7 +4819,7 @@ describe("runYrd", () => {
     }
   })
 
-  it("writes atomic resident runner heartbeats and removes them on close", async () => {
+  it("writes atomic resident runner heartbeats and leaves a reclaimable exit marker on close", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-heartbeat-"))
     execFileSync("git", ["init", "-q", repo])
     const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
@@ -4807,9 +4845,24 @@ describe("runYrd", () => {
         })
         heartbeat.check()
       } finally {
-        await heartbeat.close()
+        now += 1_000
+        await heartbeat.close(true)
       }
-      expect(existsSync(statusPath)).toBe(false)
+      // The status file is NEVER deleted on close: it carries an exit marker so a
+      // successor's pid-scoped reclaim keeps working after a clean exit (kills the
+      // null-status path that stranded ghosts). queue.recover is idempotent, so
+      // reclaiming after a clean exit is a no-op.
+      expect(existsSync(statusPath)).toBe(true)
+      const marker = JSON.parse(readFileSync(statusPath, "utf8"))
+      expect(marker).toMatchObject({ pid: process.pid, exitedAt: "2026-07-13T12:00:02.000Z", clean: true })
+      // The successor reads the marker (not null) and, seeing a different dead pid,
+      // reclaims — exactly what a deleted status file used to silently skip.
+      const prior = await runInternals.residentRunnerStatus(repo)
+      expect(prior).toMatchObject({ pid: process.pid, exitedAt: "2026-07-13T12:00:02.000Z", clean: true })
+      expect(runInternals.planResidentRunnerReclaim(prior, process.pid + 1, () => false)).toEqual({
+        reclaim: true,
+        runner: `yrd-cli:${process.pid}`,
+      })
     } finally {
       rmSync(repo, { recursive: true, force: true })
     }

@@ -195,6 +195,11 @@ function eraseStep<Input extends PRShape, Output extends PRShape>(step: StepDef<
  */
 export const DEFAULT_STEP_TIMEOUT_MS = 15 * 60_000
 const GIT_TIMEOUT_MS = 30_000
+/** Bounded notification-delivery budget for a one-shot (non-resident) process, so a
+ * command like `run cancel` delivers what it quickly can, then defers the rest to the
+ * resident and exits — it can never hold the notifications lifecycle open for minutes
+ * and starve the resident's dispatch. (D4) */
+const ONE_SHOT_DELIVERY_BUDGET_MS = 3_000
 
 function assertGitDidNotTimeOut(result: Pick<ProcessResult, "timedOut">, args: readonly string[]): void {
   if (result.timedOut) throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
@@ -1064,6 +1069,11 @@ async function createYrdRuntimeHost(
           reviewRequired: loaded.config.requires.includes("review"),
           adapter: options.signalAdapter ?? createTribeSignalAdapter(process),
           log,
+          // The resident is the primary drainer and delivers unbounded; every other
+          // (one-shot) process gets a bounded delivery budget so it can never hold the
+          // notifications lifecycle open and starve the resident — it defers loudly
+          // and exits promptly, leaving the rest for the resident. (D4)
+          ...(resident === undefined ? { deliveryBudgetMs: ONE_SHOT_DELIVERY_BUDGET_MS } : {}),
         })
       }
     }

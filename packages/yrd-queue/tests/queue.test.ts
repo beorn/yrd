@@ -2111,6 +2111,112 @@ describe("Queue", () => {
     expect(checkCalls).toBe(0)
   })
 
+  it("settles a killed resident runner's expired-lease ghost via the unscoped lease-expiry sweep (D1b)", async () => {
+    // The follow loop's per-tick sweep calls recover with NO runner: it settles a
+    // running Job purely because its lease lapsed, no matter who left it. This is
+    // the killed-runner ghost the one-shot startup reclaim could not settle.
+    let checkCalls = 0
+    await using app = await createQueueApp({
+      check: () => {
+        checkCalls += 1
+        return { status: "completed", conclusion: "success", output: { checked: true } }
+      },
+    })
+    const pr = await submitBranch(app, "issue/killed-resident-ghost")
+    await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["check", "merge"] })
+    const job = app.queue.get("R1")?.steps[0]?.job
+    if (job === undefined) throw new Error("expected requested check")
+    // A resident started this check, then was killed; its lease already lapsed.
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: job.id,
+      attempt: 1,
+      runner: "yrd-cli:31337",
+      leaseExpiresAt: "2026-01-01T00:00:01.000Z",
+    })
+
+    // Unscoped sweep (the per-tick D1b call): settles the orphan to a typed
+    // terminal state — job `lost`, run `failed` — without executing the step.
+    await expect(
+      app.queue.recover({ recoveryTime: "2026-01-01T00:01:00.000Z", reason: "resident lease-expiry sweep" }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        id: "R1",
+        status: "completed",
+        conclusion: "failure",
+        steps: [
+          expect.objectContaining({ job: expect.objectContaining({ status: "completed", conclusion: "timed_out" }) }),
+          expect.anything(),
+        ],
+      }),
+    ])
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({
+      status: "completed",
+      conclusion: "timed_out",
+      runner: "yrd-cli:31337",
+    })
+    expect(checkCalls).toBe(0)
+
+    // Idempotent + cheap: a second sweep with nothing lapsed is a no-op.
+    const settled = await Array.fromAsync(app.events())
+    await expect(app.queue.recover({ recoveryTime: "2026-01-01T00:02:00.000Z" })).resolves.toEqual([])
+    expect(await Array.fromAsync(app.events())).toEqual(settled)
+  })
+
+  it("sweeps an orphaned running Job regardless of run/cursor, unlike cursor-only cancelRun (D1b)", async () => {
+    // cancelRun (queue.ts cancelRun) is scoped to ONE named run and only its cursor
+    // Job. The lease-expiry sweep is unscoped: it settles every orphaned running Job
+    // across ALL base queues by lease alone, with no run/cursor target. Two runs on
+    // DIFFERENT bases (the serial queue allows one active run per base) each hold a
+    // killed-runner ghost; cancelRun clears only the run it names, the sweep clears
+    // the untargeted one wherever its cursor sits.
+    let checkCalls = 0
+    await using app = await createQueueApp({
+      check: () => {
+        checkCalls += 1
+        return { status: "completed", conclusion: "success", output: { checked: true } }
+      },
+    })
+    const onMain = await submitBranch(app, "issue/ghost-untargeted")
+    const onRelease = await submitBranch(app, "issue/ghost-canceled", "release/2.0")
+    await app.dispatch(app.commands.queue.run, { prs: [onMain.id], steps: ["check", "merge"] })
+    await app.dispatch(app.commands.queue.run, { prs: [onRelease.id], steps: ["check", "merge"] })
+    const startGhost = async (run: string, runner: string) => {
+      const job = app.queue.get(run)?.steps[0]?.job
+      if (job === undefined) throw new Error(`expected requested check for ${run}`)
+      await app.dispatch(app.commands.job.transition, {
+        type: "start",
+        id: job.id,
+        attempt: 1,
+        runner,
+        leaseExpiresAt: "2026-01-01T00:00:01.000Z",
+      })
+    }
+    await startGhost("R1", "yrd-cli:100")
+    await startGhost("R2", "yrd-cli:200")
+
+    // Operator cancel is cursor/run-scoped: it settles ONLY R2's cursor Job.
+    await app.queue.cancelRun({ run: "R2", by: "operator", reason: "operator canceled" })
+    expect(app.queue.get("R2")).toMatchObject({ status: "completed", conclusion: "cancelled" })
+    // R1's ghost is left running — cancelRun never looked outside the run it was given.
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "in_progress", runner: "yrd-cli:100" })
+
+    // The unscoped sweep settles the untargeted R1 ghost by lease expiry alone.
+    await expect(app.queue.recover({ recoveryTime: "2026-01-01T00:01:00.000Z" })).resolves.toEqual([
+      expect.objectContaining({
+        id: "R1",
+        status: "completed",
+        conclusion: "failure",
+        steps: [
+          expect.objectContaining({ job: expect.objectContaining({ status: "completed", conclusion: "timed_out" }) }),
+          expect.anything(),
+        ],
+      }),
+    ])
+    expect(app.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "failure" })
+    expect(checkCalls).toBe(0)
+  })
+
   it("releases a replayed lost job before an explicit same-revision retry", async () => {
     const journal = createMemoryJournal()
     const id = ids()
@@ -3231,7 +3337,233 @@ describe("Queue", () => {
     expect(mergeCalls).toBe(2)
   })
 
-  it("audits a failed revision retry without fresh submit ancestry and keeps authorized controls clean", async () => {
+  it("re-queues a base-raced (stale-base) run instead of rejecting its submitted PR", async () => {
+    const journal = createMemoryJournal()
+    const id = ids()
+    let mergeCalls = 0
+    const options = {
+      merge: () => {
+        mergeCalls++
+        return mergeCalls === 1
+          ? {
+              status: "completed" as const,
+              conclusion: "failure" as const,
+              error: { code: "stale-base", message: "base branch moved after the checked candidate" },
+            }
+          : {
+              status: "completed" as const,
+              conclusion: "success" as const,
+              output: { commit: MERGED, baseSha: BASE },
+            }
+      },
+    }
+
+    await using app = await createQueueApp(options, journal, undefined, id)
+    const pr = await submitBranch(app, "issue/base-raced")
+
+    expect(await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)).toMatchObject([
+      {
+        id: "R1",
+        status: "completed",
+        conclusion: "failure",
+        error: { code: "stale-base" },
+        prs: [{ id: pr.id, revision: pr.revision, headSha: pr.headSha }],
+      },
+    ])
+    // A base race is environmental, not a PR-content fault: the PR must stay
+    // submitted (re-admissible), NOT be terminally rejected like merge-conflict.
+    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
+      delivery: "submitted",
+      revision: pr.revision,
+      headSha: pr.headSha,
+    })
+
+    const events = await Array.fromAsync(app.events())
+    const failed = events.find(
+      (applied) => applied.name === "queue/run/failed" && (applied.data as Readonly<{ run?: unknown }>).run === "R1",
+    )
+    if (failed === undefined) throw new Error("expected the base race to append queue/run/failed")
+    const authority = Queues.authorityRun(app.state().queues.authority, "R1")
+    expect(authority?.released).toEqual({ reason: "stale-base", ref: failed.id })
+    expect(events.map(({ name }) => name)).not.toContain("pr/rejected")
+
+    // The unchanged revision re-admits and lands once the base settles.
+    const retried = await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)
+    expect(retried.map(({ id: run }) => run)).toEqual(["R2"])
+    expect(retried).toMatchObject([
+      {
+        id: "R2",
+        status: "completed",
+        conclusion: "success",
+        prs: [{ id: pr.id, revision: 1, headSha: pr.headSha }],
+      },
+    ])
+    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({ delivery: "integrated", revision: 1 })
+    expect(Queues.ids(app.state().queues)).toEqual(["R1", "R2"])
+    expect(mergeCalls).toBe(2)
+  })
+
+  it("re-queues a stale-check run instead of rejecting its submitted PR", async () => {
+    const journal = createMemoryJournal()
+    const id = ids()
+    let mergeCalls = 0
+    const options = {
+      merge: () => {
+        mergeCalls++
+        return mergeCalls === 1
+          ? {
+              status: "completed" as const,
+              conclusion: "failure" as const,
+              error: { code: "stale-check", message: "checked candidate ref moved" },
+            }
+          : {
+              status: "completed" as const,
+              conclusion: "success" as const,
+              output: { commit: MERGED, baseSha: BASE },
+            }
+      },
+    }
+
+    await using app = await createQueueApp(options, journal, undefined, id)
+    const pr = await submitBranch(app, "issue/stale-check-raced")
+
+    expect(await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)).toMatchObject([
+      {
+        id: "R1",
+        status: "completed",
+        conclusion: "failure",
+        error: { code: "stale-check" },
+        prs: [{ id: pr.id, revision: pr.revision }],
+      },
+    ])
+    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
+      delivery: "submitted",
+      revision: pr.revision,
+      headSha: pr.headSha,
+    })
+
+    const events = await Array.fromAsync(app.events())
+    const failed = events.find(
+      (applied) => applied.name === "queue/run/failed" && (applied.data as Readonly<{ run?: unknown }>).run === "R1",
+    )
+    if (failed === undefined) throw new Error("expected the stale check to append queue/run/failed")
+    const authority = Queues.authorityRun(app.state().queues.authority, "R1")
+    expect(authority?.released).toEqual({ reason: "stale-check", ref: failed.id })
+    expect(events.map(({ name }) => name)).not.toContain("pr/rejected")
+
+    const retried = await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)
+    expect(retried.map(({ id: run }) => run)).toEqual(["R2"])
+    expect(retried).toMatchObject([
+      { id: "R2", status: "completed", conclusion: "success", prs: [{ id: pr.id, revision: 1 }] },
+    ])
+    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({ delivery: "integrated", revision: 1 })
+    expect(mergeCalls).toBe(2)
+  })
+
+  it("does not bisect a base-raced batch and re-queues every member instead of rejecting", async () => {
+    let mergeCalls = 0
+    await using app = await createQueueApp({
+      batch: 2,
+      merge: () => {
+        mergeCalls++
+        return {
+          status: "completed",
+          conclusion: "failure",
+          error: { code: "stale-base", message: "base branch moved under the batch" },
+        }
+      },
+    })
+    const first = await submitBranch(app, "issue/batch-race-a")
+    const second = await submitBranch(app, "issue/batch-race-b")
+
+    const runs = await app.queue.run({ prs: [first.id, second.id], steps: ["merge"] }, runtime)
+
+    // bisectable(): a release-reason failure is NOT bisected — the whole batch
+    // re-queues rather than isolating members to find a non-existent "bad" PR.
+    expect(runs.map((run) => [run.prs.map((pr) => pr.id), run.status, run.conclusion])).toEqual([
+      [["PR1", "PR2"], "completed", "failure"],
+    ])
+    expect(Queues.ids(app.state().queues)).toEqual(["R1"])
+    expect(mergeCalls).toBe(1)
+
+    // needsAdvance(): the batch advances to release authority for every member.
+    expect(deliveryOf(app.state().bays.prs[first.id])).toBe("submitted")
+    expect(deliveryOf(app.state().bays.prs[second.id])).toBe("submitted")
+    const events = await Array.fromAsync(app.events())
+    const failed = events.find(
+      (applied) => applied.name === "queue/run/failed" && (applied.data as Readonly<{ run?: unknown }>).run === "R1",
+    )
+    if (failed === undefined) throw new Error("expected the batch race to append queue/run/failed")
+    expect(Queues.authorityRun(app.state().queues.authority, "R1")?.released).toEqual({
+      reason: "stale-base",
+      ref: failed.id,
+    })
+    expect(events.map(({ name }) => name)).not.toContain("pr/rejected")
+    expect(events.map(({ name }) => name)).not.toContain("queue/batch/isolated")
+  })
+
+  it("re-admits a base race against an advancing base and lands once it settles", async () => {
+    // A finite base race: the base advances under a finite competitor queue, so
+    // merge is stale for the first attempts and lands once the base stabilizes.
+    let merges = 0
+    const settleOnAttempt = 3
+    await using app = await createQueueApp({
+      merge: () => {
+        merges++
+        return merges < settleOnAttempt
+          ? {
+              status: "completed",
+              conclusion: "failure",
+              error: { code: "stale-base", message: `base moved (attempt ${merges})` },
+            }
+          : { status: "completed", conclusion: "success", output: { commit: MERGED, baseSha: BASE } }
+      },
+    })
+    const pr = await submitBranch(app, "issue/advancing-base")
+
+    let ticks = 0
+    while (deliveryOf(app.state().bays.prs[pr.id]) === "submitted" && ticks < 10) {
+      ticks++
+      await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)
+    }
+
+    expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("integrated")
+    expect(merges).toBe(settleOnAttempt)
+    expect(ticks).toBe(settleOnAttempt)
+    expect((await Array.fromAsync(app.events())).map(({ name }) => name)).not.toContain("pr/rejected")
+  })
+
+  it("keeps re-queuing a permanently racing base instead of terminally rejecting it", async () => {
+    // A base that never settles must never terminally reject a mergeable PR. The
+    // merge-path re-queue count exceeds AUTOMATIC_ADMISSION_RETRIES (1): that
+    // admission-retry bound governs the CHECK path (see "bounds environment-refused
+    // admission retries"), NOT the merge-side base race, which is bounded instead
+    // by the base eventually settling.
+    let merges = 0
+    await using app = await createQueueApp({
+      merge: () => {
+        merges++
+        return {
+          status: "completed",
+          conclusion: "failure",
+          error: { code: "stale-base", message: "base never settles" },
+        }
+      },
+    })
+    const pr = await submitBranch(app, "issue/permanent-race")
+
+    const TICKS = 5
+    for (let tick = 0; tick < TICKS; tick++) {
+      if (deliveryOf(app.state().bays.prs[pr.id]) !== "submitted") break
+      await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)
+    }
+
+    expect(merges).toBe(TICKS)
+    expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("submitted")
+    expect((await Array.fromAsync(app.events())).map(({ name }) => name)).not.toContain("pr/rejected")
+  })
+
+  it("audits a rejected revision retry without fresh submit ancestry and keeps authorized controls clean", async () => {
     const journal = createMemoryJournal<unknown>()
     const original = await createQueueApp(
       {

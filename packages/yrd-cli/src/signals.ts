@@ -125,92 +125,126 @@ export function createSignalObserver(
     reviewRequired?: boolean
     adapter: SignalDeliveryAdapter
     log?: ConditionalLogger
+    /** Bounded per-drain delivery budget in ms. A one-shot CLI passes this so it can
+     * never starve the resident: if delivery does not finish within the budget it
+     * defers loudly (the resident's observer completes it) instead of holding on.
+     * The resident itself passes nothing — it is the primary drainer. */
+    deliveryBudgetMs?: number
   }>,
 ): SignalObserver {
   const dir = join(options.stateDir, "notifications")
   const cursorPath = join(dir, "cursor-v1.json")
   const log = options.log?.child("signals") ?? createLogger("yrd:signals", [{ level: "warn" }])
-  const exclusive = createExclusive(dir, { timeoutMs: 0 }, { log })
+  // The snapshot lock fail-fasts (timeoutMs:0): only one drainer plans a batch at a
+  // time, and a contender defers immediately rather than blocking. The write lock
+  // takes a short, jittered-backoff hold to persist cursor progress BETWEEN
+  // deliveries. Crucially, NEITHER is ever held across an `adapter.send`/`close` —
+  // those `tribe` subprocesses (up to 5s each) run fully unlocked, so a one-shot can
+  // no longer pin the writer.lock (or the journal read) and starve the resident.
+  const snapshotLock = createExclusive(dir, { timeoutMs: 0 }, { log })
+  const writeLock = createExclusive(dir, { timeoutMs: 2_000 }, { log })
   let requested = false
   let closed = false
   let worker: Promise<void> | undefined
 
-  const drain = async (): Promise<void> => {
-    await exclusive.run(async () => {
-      let state = await readAndMigrateCursor(cursorPath)
+  const drain = async (deadline?: number): Promise<void> => {
+    // Phase 1 — under the snapshot lock ONLY, read the cursor and materialize the
+    // pending journal frames into memory, then release. The slow delivery below never
+    // runs under a lock, and the journal read never stays open across it (a pinned
+    // reader defers the WAL checkpoint and stalled the resident's dispatch).
+    const snapshot = await snapshotLock.run(async () => {
+      const state = await readAndMigrateCursor(cursorPath)
+      const batches: { values: readonly unknown[]; cursor: number }[] = []
       for await (const batch of options.journal.read(state.cursor)) {
-        const completed = new Set<string>()
-        for (const value of batch.values) {
-          const frame = parseJournalFrame(value)
-          for (const signal of signalsOf(frame.events, options.reviewRequired === true)) {
-            // Withdrawn/canceled are terminal-only: they close open balls but are never delivered as
-            // messages, so they carry no delivery route of their own.
-            const targets: readonly SignalRouteTarget[] =
-              signal.kind === "pr/withdrawn" || signal.kind === "pr/canceled" ? [] : (options.routes[signal.kind] ?? [])
-            const recipients = new Set(targets.flatMap((target) => resolveRecipients(signal, target)))
-            if (targets.includes("submitter") && ![...recipients].some((recipient) => recipient !== "*")) {
-              log.warn?.("PR signal has no recorded submitter; delivery skipped", {
-                event: signal.id,
-                kind: signal.kind,
-                ...(signal.kind === "run/failed" ? { run: signal.run } : "pr" in signal ? { pr: signal.pr } : {}),
-              })
-            }
-            for (const recipient of recipients) {
-              if (state.sent[signal.id]?.includes(recipient) === true) continue
-              await options.adapter.send({ recipient, event: signal })
-              state = addSent(state, signal.id, recipient)
-              // Record the request ball we just opened so a later terminal signal can close this
-              // exact id + recipient, even if the actor or routes drift before then.
-              state = recordOpened(state, signal, recipient)
-              await writeCursor(cursorPath, state)
-            }
-            if (isTerminalSignal(signal) && options.adapter.close !== undefined) {
-              const settledPRs = new Set(terminalPRs(signal).map((pr) => pr.pr))
-              const ledgerSettled = new Set<string>()
-              // Authoritative: close the EXACT balls the opened-ledger recorded for these PRs — every
-              // revision, both kinds — using the recipient captured at open time. Drift-immune.
-              for (const ball of openedBallsFor(state, settledPRs)) {
-                const key = `close:${ball.recipient}:${ball.requestId}`
-                if (state.sent[signal.id]?.includes(key) !== true) {
-                  await options.adapter.close({
-                    recipient: ball.recipient,
-                    request: ball.requestId,
-                    pr: ball.pr,
-                    revision: ball.revision,
-                    kind: ball.kind,
-                  })
-                  state = addSent(state, signal.id, key)
-                }
-                state = forgetOpened(state, ball.requestId, ball.recipient)
-                ledgerSettled.add(coverageKey(ball.pr, ball.revision, ball.kind))
-                await writeCursor(cursorPath, state)
-              }
-              // Secondary legacy drain: best-effort close of PRE-ledger balls (the backlog opened
-              // before this ledger existed) via ids synthesized from current routes. Skips anything
-              // the ledger already settled; a synthesized id that was never opened is a no-op close.
-              for (const closure of closuresFor(signal, options.routes)) {
-                if (ledgerSettled.has(coverageKey(closure.pr, closure.revision, closure.kind))) continue
-                const key = `close:${closure.recipient}:${closure.request}`
-                if (state.sent[signal.id]?.includes(key) === true) continue
-                await options.adapter.close(closure)
-                state = addSent(state, signal.id, key)
-                await writeCursor(cursorPath, state)
-              }
-            }
-            completed.add(signal.id)
-          }
-        }
-        state = advance(state, batch.cursor, completed)
-        await writeCursor(cursorPath, state)
+        batches.push({ values: batch.values, cursor: batch.cursor })
       }
+      return { state, batches }
     })
+    let state = snapshot.state
+    // Persist a single cursor mutation under a SHORT, independent write-lock hold.
+    const persist = async (next: CursorState): Promise<void> => {
+      state = next
+      await writeLock.run(() => writeCursor(cursorPath, state))
+    }
+    // Budget guard: a one-shot stops delivering and defers loudly once its bounded
+    // budget is spent, leaving the not-yet-advanced cursor for the resident to finish.
+    const overBudget = (): boolean => deadline !== undefined && Date.now() >= deadline
+
+    for (const batch of snapshot.batches) {
+      const completed = new Set<string>()
+      for (const value of batch.values) {
+        const frame = parseJournalFrame(value)
+        for (const signal of signalsOf(frame.events, options.reviewRequired === true)) {
+          // Withdrawn/canceled are terminal-only: they close open balls but are never delivered as
+          // messages, so they carry no delivery route of their own.
+          const targets: readonly SignalRouteTarget[] =
+            signal.kind === "pr/withdrawn" || signal.kind === "pr/canceled" ? [] : (options.routes[signal.kind] ?? [])
+          const recipients = new Set(targets.flatMap((target) => resolveRecipients(signal, target)))
+          if (targets.includes("submitter") && ![...recipients].some((recipient) => recipient !== "*")) {
+            log.warn?.("PR signal has no recorded submitter; delivery skipped", {
+              event: signal.id,
+              kind: signal.kind,
+              ...(signal.kind === "run/failed" ? { run: signal.run } : "pr" in signal ? { pr: signal.pr } : {}),
+            })
+          }
+          for (const recipient of recipients) {
+            if (state.sent[signal.id]?.includes(recipient) === true) continue
+            if (overBudget()) return deferDelivery(log, cursorPath, deadline)
+            await options.adapter.send({ recipient, event: signal }) // UNLOCKED
+            state = addSent(state, signal.id, recipient)
+            // Record the request ball we just opened so a later terminal signal can close this
+            // exact id + recipient, even if the actor or routes drift before then.
+            state = recordOpened(state, signal, recipient)
+            await persist(state)
+          }
+          if (isTerminalSignal(signal) && options.adapter.close !== undefined) {
+            const settledPRs = new Set(terminalPRs(signal).map((pr) => pr.pr))
+            const ledgerSettled = new Set<string>()
+            // Authoritative: close the EXACT balls the opened-ledger recorded for these PRs — every
+            // revision, both kinds — using the recipient captured at open time. Drift-immune.
+            for (const ball of openedBallsFor(state, settledPRs)) {
+              const key = `close:${ball.recipient}:${ball.requestId}`
+              if (state.sent[signal.id]?.includes(key) !== true) {
+                if (overBudget()) return deferDelivery(log, cursorPath, deadline)
+                await options.adapter.close({
+                  recipient: ball.recipient,
+                  request: ball.requestId,
+                  pr: ball.pr,
+                  revision: ball.revision,
+                  kind: ball.kind,
+                }) // UNLOCKED
+                state = addSent(state, signal.id, key)
+              }
+              state = forgetOpened(state, ball.requestId, ball.recipient)
+              ledgerSettled.add(coverageKey(ball.pr, ball.revision, ball.kind))
+              await persist(state)
+            }
+            // Secondary legacy drain: best-effort close of PRE-ledger balls (the backlog opened
+            // before this ledger existed) via ids synthesized from current routes. Skips anything
+            // the ledger already settled; a synthesized id that was never opened is a no-op close.
+            for (const closure of closuresFor(signal, options.routes)) {
+              if (ledgerSettled.has(coverageKey(closure.pr, closure.revision, closure.kind))) continue
+              const key = `close:${closure.recipient}:${closure.request}`
+              if (state.sent[signal.id]?.includes(key) === true) continue
+              if (overBudget()) return deferDelivery(log, cursorPath, deadline)
+              await options.adapter.close(closure) // UNLOCKED
+              state = addSent(state, signal.id, key)
+              await persist(state)
+            }
+          }
+          completed.add(signal.id)
+        }
+      }
+      state = advance(state, batch.cursor, completed)
+      await persist(state)
+    }
   }
 
   const run = async (): Promise<void> => {
     while (requested && !closed) {
       requested = false
       try {
-        await drain()
+        await drain(options.deliveryBudgetMs === undefined ? undefined : Date.now() + options.deliveryBudgetMs)
       } catch (error) {
         log.warn?.("PR signal delivery deferred", { error: errorDetail(error), cursor: cursorPath })
         requested = false
@@ -333,6 +367,17 @@ type CursorState = z.infer<typeof CursorStateSchema>
 
 function errorDetail(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** A budget-bounded drainer (a one-shot CLI) stops delivering and defers loudly once
+ * its budget is spent, leaving the un-advanced cursor for the resident's observer to
+ * finish. This is the "never starve the resident, defer instead of spinning" contract:
+ * the one-shot exits promptly and the delivery is not lost. */
+function deferDelivery(log: ConditionalLogger, cursorPath: string, deadline: number | undefined): void {
+  log.warn?.("PR signal delivery deferred — delivery budget spent; a resident runner will complete it", {
+    cursor: cursorPath,
+    ...(deadline === undefined ? {} : { deadline: new Date(deadline).toISOString() }),
+  })
 }
 
 function signalsOf(events: readonly Event[], reviewRequired: boolean): readonly RoutableSignal[] {

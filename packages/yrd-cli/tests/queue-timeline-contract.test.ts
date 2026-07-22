@@ -501,8 +501,12 @@ describe("queue timeline 21106 contract", () => {
         expect(row.slice(0, divider)).not.toContain("JSON_EDGE_SENTINEL")
         expect(Array.from(row).length).toBeLessThanOrEqual(200)
       }
+      // Log rows render ONE terminal row each (21684 truncation contract) — the
+      // long payload occupies exactly its own row, clipped at the pane edge; the
+      // full-log link carries overflow. The load-bearing assertions stay: the
+      // sentinel and payload never bleed left of the divider.
       const payloadRows = rows.filter((row) => row.includes("¤"))
-      expect(payloadRows.length, app.text).toBeGreaterThan(1)
+      expect(payloadRows.length, app.text).toBe(1)
       for (const row of rows) expect(row.slice(0, divider)).not.toContain("¤")
     } finally {
       app.unmount()
