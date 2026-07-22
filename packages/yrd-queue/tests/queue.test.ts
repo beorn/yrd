@@ -365,9 +365,15 @@ describe("Queue", () => {
     expect(await Array.fromAsync(replayed.events())).toEqual(before)
   })
 
-  it("refuses to migrate an unfinished pre-settlement Queue root", async () => {
+  // A legacy (pre-settlement) journal whose single writer died mid-step: the first
+  // job `finish` is refused, leaving the run's cursor job stuck `running` under a
+  // lease. Strips the v2 settlement marker off every started run so the root
+  // replays as a v1 root. The lease clock is pinned so expiry is deterministic.
+  const LEASE_AT = Date.parse("2026-01-01T00:00:00.000Z")
+  const leasedRuntime = { runner: "local", leaseMs: 60_000, now: () => LEASE_AT } // lease expires at 00:01:00
+  function legacyStuckJournal() {
     const inner = createMemoryJournal()
-    let refuseFinish = true
+    let refuse = true
     const journal: typeof inner = {
       read: (after, before) => inner.read(after, before),
       append: (value, cursor) => {
@@ -380,26 +386,102 @@ describe("Queue", () => {
           }
         }
         if (
-          refuseFinish &&
+          refuse &&
           frame.events?.some((event) => event.name === "job/transitioned" && event.data?.type === "finish")
         ) {
-          refuseFinish = false
-          throw new Error("yrd: job finish refused (legacy active fixture)")
+          refuse = false
+          throw new Error("yrd: job finish refused (legacy fixture)")
         }
         return inner.append(frame, cursor)
       },
     }
+    return journal
+  }
+
+  async function seedLegacyStuckRoot(journal: ReturnType<typeof legacyStuckJournal>, id: () => string, branch: string) {
+    await using app = await createQueueApp({}, journal, undefined, id)
+    const pr = await submitBranch(app, branch)
+    await expect(app.queue.run({ prs: [pr.id], steps: ["check"] }, leasedRuntime)).rejects.toThrow("job finish refused")
+  }
+
+  it("auto-quiesces an unleased pre-settlement legacy root and receipts it", async () => {
+    // The writer's lease (00:01:00) is long expired by migration time (00:05:00):
+    // the root is abandoned, so the migration settles it itself — no verb, no
+    // waiting on a writer that will never return.
+    const journal = legacyStuckJournal()
     const id = ids()
+    await seedLegacyStuckRoot(journal, id, "issue/legacy-unleased-root")
+
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    await using replayed = await createQueueApp({}, journal, undefined, id, log)
+
+    // Cold replay/migration completes: construction no longer refuses the unleased root.
+    const stuck = replayed.queue.get("R1")
+    expect(stuck?.status).toBe("running")
+    const cursorJob = stuck?.steps[stuck.cursor]?.job
+    expect(cursorJob?.status).toBe("running")
+
+    const receipt = await replayed.queue.quiesceLegacyRoots({ now: "2026-01-01T00:05:00.000Z", by: "yrd/migration" })
+    expect(receipt.reason).toBe("legacy-quiesced")
+    expect(receipt.quiesced).toEqual([{ run: "R1", jobs: [cursorJob?.id] }])
+
+    const settled = replayed.queue.get("R1")
+    expect(settled).toMatchObject({ status: "failed" })
+    expect(settled?.error?.code).toBe("legacy-quiesced")
+    expect(settled?.steps[0]?.job?.status).toBe("canceled")
+
+    const receipts = events.filter(
+      (event): event is Extract<LogEvent, { kind: "log" }> =>
+        event.kind === "log" && event.level === "warn" && event.namespace === "yrd:queue",
+    )
+    expect(receipts).toHaveLength(1)
+    expect(receipts[0]?.message).toContain("R1")
+    expect(receipts[0]?.props).toMatchObject({ reason: "legacy-quiesced", runs: ["R1"] })
+    log.end()
+  })
+
+  it("refuses to quiesce a live-leased pre-settlement legacy root", async () => {
+    // The old writer started the step and still holds an unexpired lease: a
+    // genuinely-active previous writer must be protected, not settled out from
+    // under it. The refusal names WHICH root is leased.
+    const journal = legacyStuckJournal()
+    const id = ids()
+    await seedLegacyStuckRoot(journal, id, "issue/legacy-leased-root")
+
+    await using replayed = await createQueueApp({}, journal, undefined, id)
+    // Lease expires at 00:01:00; migrate at 00:00:30 while it is still live.
+    await expect(
+      replayed.queue.quiesceLegacyRoots({ now: "2026-01-01T00:00:30.000Z", by: "yrd/migration" }),
+    ).rejects.toThrow(/live-leased legacy roots[^]*R1[^]*auto-quiesced/)
+    expect(replayed.queue.get("R1")?.status).not.toBe("failed")
+  })
+
+  it("quiesces legacy roots idempotently across replays", async () => {
+    const journal = legacyStuckJournal()
+    const id = ids()
+    await seedLegacyStuckRoot(journal, id, "issue/legacy-idempotent-root")
 
     {
-      await using app = await createQueueApp({}, journal, undefined, id)
-      const pr = await submitBranch(app, "issue/legacy-active-root")
-      await expect(app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)).rejects.toThrow("legacy active fixture")
+      await using first = await createQueueApp({}, journal, undefined, id)
+      const receipt = await first.queue.quiesceLegacyRoots({ now: "2026-01-01T00:05:00.000Z", by: "yrd/migration" })
+      expect(receipt.quiesced.map((entry) => entry.run)).toEqual(["R1"])
     }
 
-    await expect(createQueueApp({}, journal, undefined, id)).rejects.toThrow(
-      "Queue projection migration requires quiesced legacy roots; finish with the previous writer: R1",
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    await using second = await createQueueApp({}, journal, undefined, id, log)
+    // The first pass appended the terminal settlement, so the replay meets R1 already terminal.
+    expect(second.queue.get("R1")).toMatchObject({ status: "failed" })
+    const before = await Array.fromAsync(second.events())
+    const receipt = await second.queue.quiesceLegacyRoots({ now: "2026-01-01T00:06:00.000Z", by: "yrd/migration" })
+    expect(receipt.quiesced).toEqual([])
+    expect(await Array.fromAsync(second.events())).toEqual(before)
+    const receipts = events.filter(
+      (event) => event.kind === "log" && event.level === "warn" && event.namespace === "yrd:queue",
     )
+    expect(receipts).toEqual([])
+    log.end()
   })
 
   it.each([10, 10_000, 100_000])(

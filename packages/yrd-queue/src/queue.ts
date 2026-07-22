@@ -191,6 +191,13 @@ const CancelRunArgsSchema = z
   })
   .strict()
 export type CancelRunArgs = Readonly<z.infer<typeof CancelRunArgsSchema>>
+const QuiesceLegacyRunArgsSchema = z
+  .object({
+    run: QueueRunIdSchema,
+    reason: z.string().trim().min(1),
+  })
+  .strict()
+export type QuiesceLegacyRunArgs = Readonly<z.infer<typeof QuiesceLegacyRunArgsSchema>>
 const QueueAuthorityTokenFactSchema = z.object({
   pr: PRIdSchema,
   revision: z.number().int().positive(),
@@ -367,6 +374,7 @@ export type QueueCommands = Readonly<{
     settled: CommandHandler<Readonly<{ run: QueueRunId }>, RuntimeState>
     isolate: CommandHandler<Readonly<{ run: QueueRunId; part: 0 | 1 }>, RuntimeState>
     cancelRun: CommandHandler<CancelRunArgs, RuntimeState>
+    quiesceLegacyRun: CommandHandler<QuiesceLegacyRunArgs, RuntimeState>
     associateTerminals: CommandHandler<AssociateTerminalsArgs, RuntimeState>
   }>
 }>
@@ -440,8 +448,22 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   checks(selectors?: readonly string[]): readonly PRCheckRecord[]
   terminalAssociationPlan(): TerminalAssociationPlan
   migrateTerminalAssociations(): Promise<TerminalAssociationPlan>
+  quiesceLegacyRoots(options: QuiesceLegacyRootsOptions): Promise<QuiesceLegacyRootsReceipt>
   get(run: QueueRunId): QueueRun | undefined
   status(base: string): QueueSummary
+}>
+
+export type QuiesceLegacyRootsOptions = Readonly<{
+  /** ISO timestamp used to decide whether a legacy root's writer lease is still live. */
+  now: string
+  /** Migration identity recorded on each settled job cancellation. */
+  by: string
+}>
+
+export type QuiesceLegacyRootsReceipt = Readonly<{
+  provenance: "migration/21012-legacy-quiesce"
+  reason: "legacy-quiesced"
+  quiesced: readonly Readonly<{ run: QueueRunId; jobs: readonly string[] }>[]
 }>
 
 export type QueueRunOptions = RunJobOptions & Readonly<{ continueAdmissions?: () => boolean }>
@@ -518,7 +540,6 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
       project: projectQueues,
       create(yrd) {
         yrd.jobs.requireDefinitions(jobDefs)
-        assertLegacyQueueMigration(yrd.state() as unknown as DeepReadonly<RuntimeState>)
         return {
           queue: createQueue(
             computed(() => yrd.state().queues),
@@ -534,6 +555,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               settled: (run) => yrd.dispatch(commands.queue.settled, { run }),
               isolate: (run, part) => yrd.dispatch(commands.queue.isolate, { run, part }),
               cancelRun: (args) => yrd.dispatch(commands.queue.cancelRun, args),
+              quiesceLegacyRun: (args) => yrd.dispatch(commands.queue.quiesceLegacyRun, args),
               associateTerminals: (args) => yrd.dispatch(commands.queue.associateTerminals, args),
               requestChecks: (pr, baseSha) =>
                 yrd.bays.requestChecks({ pr, ...(baseSha === undefined ? {} : { baseSha }) }),
@@ -561,6 +583,7 @@ type QueueActions = Readonly<{
   settled(run: QueueRunId): Promise<CommandResult>
   isolate(run: QueueRunId, part: 0 | 1): Promise<CommandResult>
   cancelRun(args: CancelRunArgs): Promise<CommandResult>
+  quiesceLegacyRun(args: QuiesceLegacyRunArgs): Promise<CommandResult>
   associateTerminals(args: AssociateTerminalsArgs): Promise<CommandResult>
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
 }>
@@ -1301,6 +1324,45 @@ function createQueue<Shape extends PRShape>(
       const appended = result.events.filter(({ name }) => name === "pr/terminal-associated").length
       return { ...plan, summary: { ...plan.summary, appended } }
     },
+    async quiesceLegacyRoots(options) {
+      await actions.refresh()
+      const now = Date.parse(options.now)
+      if (Number.isNaN(now)) throw new Error(`yrd: quiesceLegacyRoots requires an ISO 'now'; got '${options.now}'`)
+      const targets = legacyRootTargets(runtime())
+      const leased = targets.filter((target) => target.leased(now)).map((target) => target.run)
+      if (leased.length > 0) {
+        // A genuinely-active previous writer is protected: name the leased roots so
+        // the operator learns which are held, and that unleased ones auto-quiesce.
+        raiseFailure(
+          "refusal",
+          "legacy-root-leased",
+          `yrd: Queue projection migration is blocked by live-leased legacy roots; a previous writer still holds ${leased.join(
+            ", ",
+          )} — unleased legacy roots would have been auto-quiesced`,
+        )
+      }
+      const quiesced: { run: QueueRunId; jobs: string[] }[] = []
+      for (const target of targets) {
+        // Settle the run terminal first (record.failure stops re-advance), then
+        // cancel each still-live job so the run AND its jobs all reach terminal.
+        await actions.quiesceLegacyRun({ run: target.run, reason: "legacy-quiesced" })
+        for (const job of target.jobs) {
+          await jobs.cancel({ id: job.id, attempt: job.attempt, by: options.by, reason: "legacy-quiesced" })
+        }
+        quiesced.push({ run: target.run, jobs: target.jobs.map((job) => job.id) })
+      }
+      if (quiesced.length > 0) {
+        // ONE loud structured receipt naming every settled root and job.
+        log.warn?.(`legacy pre-settlement queue roots quiesced: ${quiesced.map((entry) => entry.run).join(", ")}`, {
+          action: "legacy-quiesce",
+          reason: "legacy-quiesced",
+          by: options.by,
+          runs: quiesced.map((entry) => entry.run),
+          jobs: quiesced.flatMap((entry) => entry.jobs),
+        })
+      }
+      return { provenance: "migration/21012-legacy-quiesce", reason: "legacy-quiesced", quiesced }
+    },
     get(id) {
       const record = Queues.resolve(state(), id)
       return record === undefined ? undefined : materializeRun(record, runtime().jobs)
@@ -1745,7 +1807,29 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
     },
   })
 
-  return { queue: { admit, run, pause, resume, advance, settled, isolate, cancelRun, associateTerminals } }
+  const quiesceLegacyRun = command({
+    title: "Quiesce a pre-settlement legacy queue run",
+    params: QuiesceLegacyRunArgsSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: QuiesceLegacyRunArgs) {
+      const record = Queues.resolve(state.queues, args.run)
+      if (record === undefined) {
+        raiseFailure("refusal", "run-not-found", `yrd: no queue run '${args.run}'`)
+      }
+      const run = materializeRun(record, state.jobs)
+      if (Queues.terminal(run)) {
+        // Idempotent: a replay that already folded the settlement meets a terminal
+        // root and re-quiescing it is a no-op, never a duplicate failure event.
+        return { events: [] }
+      }
+      // Fail (not cancel) so record.failure fixes the run terminal: a canceled run
+      // whose PR is still submitted re-queues (needsAdvance), which is not settled.
+      return { events: [queueFailedEvent(state, record, { code: "legacy-quiesced", message: args.reason })] }
+    },
+  })
+
+  return {
+    queue: { admit, run, pause, resume, advance, settled, isolate, cancelRun, quiesceLegacyRun, associateTerminals },
+  }
 }
 
 type QueueAuthorityKind = "submit" | "checks"
@@ -2371,23 +2455,37 @@ function startRun(
 }
 
 /**
- * Queue v2 adds explicit live-root claims. Historical v1 runs have no marker,
- * so replay must not manufacture a claim for every terminal run. A genuinely
- * unfinished v1 root cannot be migrated losslessly without mirroring Jobs
- * terminality into Queue state; fail loud and require the old writer to quiesce
- * it before cutover instead.
+ * A pre-settlement (v1) Queue root that replay left non-terminal. Queue v2 adds
+ * explicit live-root claims; historical v1 runs carry no settlement marker, so a
+ * genuinely unfinished v1 root cannot be migrated losslessly by projection alone.
+ * The migration ({@link Queue.quiesceLegacyRoots}) settles the abandoned ones and
+ * refuses only while a previous writer still holds a live lease.
  */
-function assertLegacyQueueMigration(state: DeepReadonly<RuntimeState>): void {
-  const active = projectionLookupValues(state.queues.records)
+type LegacyRootTarget = Readonly<{
+  run: QueueRunId
+  /** Non-terminal jobs the migration must cancel so the run and its jobs are all terminal. */
+  jobs: readonly DeepReadonly<Job>[]
+  /** True when a still-unexpired writer lease is held at `now` (ms since epoch). */
+  leased(now: number): boolean
+}>
+
+function legacyRootTargets(state: DeepReadonly<RuntimeState>): readonly LegacyRootTarget[] {
+  return projectionLookupValues(state.queues.records)
     .filter((record) => record.parent === undefined && record.settlement === undefined)
     .map((record) => materializeRun(record, state.jobs))
     .filter((run) => needsSettlement(state, run))
-    .map((run) => run.id)
-    .toSorted((left, right) => left.localeCompare(right, undefined, { numeric: true }))
-  if (active.length === 0) return
-  throw new Error(
-    `yrd: Queue projection migration requires quiesced legacy roots; finish with the previous writer: ${active.join(", ")}`,
-  )
+    .map((run): LegacyRootTarget => {
+      const jobs = run.steps
+        .map((step) => step.job)
+        .filter((job): job is DeepReadonly<Job> => job !== undefined && !Job.terminal(job))
+      return {
+        run: run.id,
+        jobs,
+        leased: (now) =>
+          jobs.some((job) => job.status === "running" && Date.parse(job.leaseExpiresAt) > now),
+      }
+    })
+    .toSorted((left, right) => left.run.localeCompare(right.run, undefined, { numeric: true }))
 }
 
 function requestStep(step: RuntimeStep, run: Pick<QueueStart, "id" | "prs">, index: number, shape: PRShape) {
