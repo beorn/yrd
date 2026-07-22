@@ -163,7 +163,13 @@ describe("held-out command evaluator", () => {
       YRD_ISSUE_ID: "@yrd/core/21012; $(touch /tmp/yrd-evaluator-injection)",
     })
     expect(
-      fake.requests.filter((request) => request.argv[0] === "git").every((request) => request.timeoutMs === 30_000),
+      fake.requests
+        .filter((request) => request.argv[0] === "git")
+        .every((request) =>
+          request.argv.slice(1, 3).join(" ") === "worktree remove"
+            ? request.timeoutMs === 120_000
+            : request.timeoutMs === 30_000,
+        ),
     ).toBe(true)
     expect(await artifactText(result, "stdout")).toBe("27 checks passed\n")
     expect(await artifactText(result, "stderr")).toBe("")
@@ -262,6 +268,20 @@ describe("held-out command evaluator", () => {
       process: { exitCode: 17, durationMs: 450 },
       result: { verdict: "failed" },
     })
+  })
+
+  it("runs checkout cleanup under the generous cleanup timeout, not the interactive one", async () => {
+    const { evaluator, fake } = await fixture({ command: processResult(0, "ok\n") })
+
+    const result = await evaluator.evaluate(input(), context)
+
+    // R1680: under host load `git worktree remove` can exceed the ordinary
+    // 30s interactive window; cleanup is correctness-critical, not
+    // latency-critical, and a timeout here converts finished check work into
+    // a failure. The removal must run under the dedicated cleanup budget.
+    expect(result.status).toBe("passed")
+    const removal = fake.requests.find((request) => request.argv.slice(0, 3).join(" ") === "git worktree remove")
+    expect(removal?.timeoutMs).toBe(120_000)
   })
 
   it("writes produced stdout and stderr before reporting cleanup failure", async () => {

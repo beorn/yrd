@@ -777,6 +777,9 @@ type GitResult = Readonly<{
 type Git = ReturnType<typeof createGit>
 const CERTIFICATE_DIFF_OPTIONS = ["--no-ext-diff", "--no-textconv", "--ignore-submodules=none", "--no-renames"] as const
 const GIT_TIMEOUT_MS = 30_000
+/** R1680: worktree-remove cleanup is correctness-critical, not latency-critical;
+ * under host load it can exceed the interactive window and must not fail work. */
+const GIT_CLEANUP_TIMEOUT_MS = 120_000
 
 function concatenateBytes(chunks: readonly Uint8Array[]): Uint8Array {
   const output = new Uint8Array(chunks.reduce((length, chunk) => length + chunk.byteLength, 0))
@@ -801,12 +804,13 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
     trim: boolean,
     stdoutChunks?: Uint8Array[],
     preserveProcessFailure = false,
+    timeoutMs = GIT_TIMEOUT_MS,
   ): Promise<GitResult> => {
     const result = await process.run({
       argv: ["git", "-C", repo, ...args],
       cwd: repo,
       env,
-      timeoutMs: GIT_TIMEOUT_MS,
+      timeoutMs,
       ...(stdoutChunks === undefined
         ? {}
         : {
@@ -828,15 +832,15 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
       ...(result.sweepFailure === undefined ? {} : { sweepFailure: result.sweepFailure }),
     }
     if (completed.timedOut && !preserveProcessFailure) {
-      throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
+      throw new Error(`yrd: git ${args.join(" ")} timed out after ${timeoutMs}ms`)
     }
     if (!allowFailure && completed.code !== 0) {
       throw new Error(completed.stderr || completed.stdout || `git ${args.join(" ")} failed`)
     }
     return completed
   }
-  const run = (repo: string, args: readonly string[], allowFailure = false): Promise<GitResult> =>
-    execute(repo, args, allowFailure, true)
+  const run = (repo: string, args: readonly string[], allowFailure = false, timeoutMs?: number): Promise<GitResult> =>
+    execute(repo, args, allowFailure, true, undefined, false, timeoutMs)
   const raw = (repo: string, args: readonly string[], allowFailure = false): Promise<GitResult> =>
     execute(repo, args, allowFailure, false)
   const probe = (repo: string, args: readonly string[]): Promise<GitResult> =>
@@ -1597,7 +1601,7 @@ async function withScratch<Output extends JsonValue>(
   let removed = !added
   if (added) {
     try {
-      const cleanup = await git.run(repo, ["worktree", "remove", "--force", path], true)
+      const cleanup = await git.run(repo, ["worktree", "remove", "--force", path], true, GIT_CLEANUP_TIMEOUT_MS)
       if (cleanup.code === 0) removed = true
       else cleanupFailure = cleanup.stderr || cleanup.stdout || "could not remove scratch worktree"
     } catch (cause) {
@@ -2174,7 +2178,7 @@ async function rebaseSource(
 
   let cleanupFailure: string | undefined
   if (added) {
-    const removed = await git.run(sourceRepo, ["worktree", "remove", "--force", path], true)
+    const removed = await git.run(sourceRepo, ["worktree", "remove", "--force", path], true, GIT_CLEANUP_TIMEOUT_MS)
     if (removed.code !== 0) cleanupFailure = removed.stderr || removed.stdout || "could not remove source worktree"
   }
   try {
