@@ -71,7 +71,7 @@ import { createYrdLogger, residentObservability, resolveYrdObservability } from 
 import { formatResidentLogLine, residentArtifactHome } from "./runner-timeline.ts"
 import { diagnostic } from "./output.tsx"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
-import { runYrdHelp, runYrdProcessRuntime } from "./run.ts"
+import { residentRunnerLeaseHeld, runYrdHelp, runYrdProcessRuntime } from "./run.ts"
 import { queueStepRevision, type ToolchainFingerprint } from "./host-revision.ts"
 import {
   createSignalObserver,
@@ -1150,6 +1150,7 @@ function defaultIO(): YrdCliIO {
     columns: process.stdout.columns,
     rows: process.stdout.rows,
     cwd: process.cwd(),
+    residentLeaseHeld: (cwd) => residentRunnerLeaseHeld(cwd),
   }
   if (!interactive) return io
   return withLiveRenderer(io, async (element, options) => {

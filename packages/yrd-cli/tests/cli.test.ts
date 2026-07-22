@@ -1280,6 +1280,40 @@ describe("runYrd", () => {
     expect(checkedRevisions).toEqual(["PR1@2"])
   })
 
+  it("enqueues a recut admission without driving when a resident holds the drain lease", async () => {
+    const checkedRevisions: string[] = []
+    const app = await createApp({ waitingCheck: true, checkedRevisions })
+    const services = {
+      recut: {
+        recut() {
+          return Promise.resolve({
+            headSha: "4".repeat(40),
+            baseSha: "b".repeat(40),
+            treeSha: "c".repeat(40),
+            patchId: "d".repeat(40),
+            unchanged: false,
+          })
+        },
+      },
+    } as unknown as YrdCliServices
+    const submitted = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+    expect(
+      await runYrd(app, yrd("pr", "submit", "topic/resident-carrier", "--draft", "--json"), submitted.io),
+      submitted.stderr(),
+    ).toBe(0)
+
+    // R1664/R1668: with a live resident runner holding the drain lease, the
+    // recut's embedded driver raced the resident — two drivers on one queue,
+    // and the raced runs were lost. The recut must dispatch its admission
+    // enqueue-only and leave settlement to the resident.
+    const recut = outputIO({ residentLeaseHeld: () => Promise.resolve(true) })
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), recut.io, services)).toBe(0)
+    expect(checkedRevisions).toEqual([])
+    expect(app.queue.get("R1")).toMatchObject({ prs: [{ id: "PR1", revision: 2 }] })
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "requested" })
+    expect(app.bays.checksRequested("PR1")).toBe(true)
+  })
+
   it("forwards a same-issue integrated source composition when recutting an authored carrier", async () => {
     const issue = "@ag/super/21075-role-rotation/21142-authored-root-flow"
     const rewrite: SourceRewrite = {

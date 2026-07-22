@@ -309,7 +309,16 @@ type RunnerHealthPayload = Readonly<{
   facts: RunnerHealthFacts
 }>
 
-async function residentRunnerLeaseHeld(cwd: string): Promise<boolean> {
+/** Whether a resident runner currently holds the drain lease for the repo the
+ * CLI is operating on. Answered through the host-wired `io.residentLeaseHeld`
+ * probe; an io without the probe (bare embedders, tests) keeps the historical
+ * embedded drive. */
+async function residentHoldsDrainLease(io: YrdCliIO): Promise<boolean> {
+  if (io.residentLeaseHeld === undefined || io.cwd === undefined) return false
+  return io.residentLeaseHeld(io.cwd)
+}
+
+export async function residentRunnerLeaseHeld(cwd: string): Promise<boolean> {
   const gitDir = queueGitDir(cwd)
   if (gitDir === undefined) {
     raiseFailure("infrastructure", "runner-health-unavailable", `yrd: '${cwd}' is not a Git queue repository`)
@@ -1374,7 +1383,13 @@ async function executeRecutPr(
     }
     if (!app.bays.checksRequested(current.id)) await app.bays.requestChecks({ pr: current.id })
     if (options.admit !== false) {
-      admitted = await app.queue.admit({ prs: [current.id] }, runtimeOptions(io))
+      // R1664/R1668: while a resident runner holds the drain lease, driving the
+      // admission in-process makes this command a second driver on the same
+      // queue and the raced runs are lost. Dispatch enqueue-only for the
+      // resident to settle; keep the embedded drive for repos with no resident.
+      admitted = (await residentHoldsDrainLease(io))
+        ? await app.queue.admit({ prs: [current.id] })
+        : await app.queue.admit({ prs: [current.id] }, runtimeOptions(io))
     }
     current = requiredPr(app, current.id)
   }
