@@ -18,10 +18,40 @@ export type JournalCheckpointStore = Readonly<{
   save?(checkpoint: JournalCheckpoint): Promise<boolean>
 }>
 
+export type JournalHistoryEntry<Value> = Readonly<{
+  cursor: Cursor
+  value: Value
+}>
+
+export type JournalIdentityKind = "cause" | "event"
+export type JournalEntityKind = "job" | "job-key" | "queue"
+
+export type JournalHistoryDiagnostics = Readonly<{
+  pageCount: number
+  freelistCount: number
+  autoVacuum: "none" | "full" | "incremental"
+  historyFrames: number
+  tailFrames: number
+  archiveFallbacks: number
+}>
+
+/**
+ * Immutable, journal-owned lookup facts. Implementations derive these facts in
+ * the same transaction as their frame and must fail loud when they disagree
+ * with journal authority. Absence explicitly disables live-state eviction.
+ */
+export type JournalHistory<Value> = Readonly<{
+  command(query: Readonly<{ id?: string; key?: string }>): Value | undefined
+  hasIdentity(kind: JournalIdentityKind, id: string): boolean
+  entity(kind: JournalEntityKind, id: string): readonly JournalHistoryEntry<Value>[]
+  diagnostics(): JournalHistoryDiagnostics
+}>
+
 export type Journal<Value> = Readonly<{
   read(after?: Cursor, before?: Cursor): AsyncIterable<JournalBatch<Value>>
   append(value: Value, expectedCursor: Cursor): Promise<JournalAppend>
   checkpoint?: JournalCheckpointStore
+  history?: JournalHistory<Value>
 }>
 
 export function createMemoryJournal<Value>(initial: readonly Value[] = []): Journal<Value> {

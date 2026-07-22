@@ -46,15 +46,30 @@ export function projectionLookupSet<Value>(
 }
 
 export function projectionLookupValues<Value>(lookup: Readonly<QueueProjectionLookup<Value>>): readonly Value[] {
-  const values: Value[] = []
+  return projectionLookupEntries(lookup).map(({ value }) => value)
+}
+
+export function projectionLookupEntries<Value>(
+  lookup: Readonly<QueueProjectionLookup<Value>>,
+): readonly QueueProjectionLookupEntry<Value>[] {
+  const entries: QueueProjectionLookupEntry<Value>[] = []
   const pending = lookup.root === undefined ? [] : [lookup.root]
   while (pending.length > 0) {
     const node = pending.pop()
     if (node === undefined) continue
-    for (const entry of node.entries ?? []) values.push(entry.value)
+    for (const entry of node.entries ?? []) entries.push(entry)
     for (const child of Object.values(node.children)) pending.push(child)
   }
-  return values
+  return entries
+}
+
+export function projectionLookupFromEntries<Value>(
+  entries: readonly Readonly<QueueProjectionLookupEntry<Value>>[],
+): QueueProjectionLookup<Value> {
+  return entries.reduce<QueueProjectionLookup<Value>>(
+    (lookup, { key, value }) => projectionLookupSet(lookup, key, value),
+    {},
+  )
 }
 
 function lookupDigest(key: string): string {

@@ -10,12 +10,15 @@ import { join } from "node:path"
 import { Database } from "bun:sqlite"
 import {
   command,
+  createMemoryJournal,
   createYrd,
   createYrdDef,
   event,
+  parseJournalFrame,
   type CommandTree,
   type Journal,
   type JournalCheckpoint,
+  type JournalFrame,
   type YrdDef,
 } from "@yrd/core"
 import { createJournal as createSqliteJournal } from "@yrd/persistence"
@@ -127,7 +130,218 @@ function withoutCheckpoint<Value>(journal: Journal<Value>): Journal<Value> {
   return { read: journal.read, append: journal.append }
 }
 
+function indexedCheckpointJournal(): Readonly<{
+  journal: Journal<unknown>
+  checkpoint(): JournalCheckpoint | undefined
+}> {
+  const values: JournalFrame[] = []
+  let stored: JournalCheckpoint | undefined
+  const journal: Journal<unknown> = {
+    async *read(after = 0, before = values.length) {
+      const end = Math.min(before, values.length)
+      if (after < end) yield { cursor: end, values: structuredClone(values.slice(after, end)) }
+    },
+    append(value, expectedCursor) {
+      if (expectedCursor !== values.length) return Promise.resolve({ appended: false as const, cursor: values.length })
+      values.push(parseJournalFrame(structuredClone(value)))
+      return Promise.resolve({ appended: true as const, cursor: values.length })
+    },
+    checkpoint: {
+      load(identity) {
+        return Promise.resolve(stored?.identity === identity ? structuredClone(stored) : undefined)
+      },
+      save(checkpoint) {
+        stored = structuredClone(checkpoint)
+        return Promise.resolve(true)
+      },
+    },
+    history: {
+      command(query) {
+        return structuredClone(
+          values.find(
+            (frame) =>
+              (query.id !== undefined && frame.command.id === query.id) ||
+              (query.key !== undefined && frame.cause.key === query.key),
+          ),
+        )
+      },
+      hasIdentity(kind, id) {
+        return values.some((frame) =>
+          kind === "cause" ? frame.cause.id === id : frame.events.some((applied) => applied.id === id),
+        )
+      },
+      entity: () => [],
+      diagnostics: () => ({
+        pageCount: 0,
+        freelistCount: 0,
+        autoVacuum: "incremental",
+        historyFrames: 0,
+        tailFrames: values.length,
+        archiveFallbacks: 0,
+      }),
+    },
+  }
+  return { journal, checkpoint: () => (stored === undefined ? undefined : structuredClone(stored)) }
+}
+
 describe("persistent Core projection checkpoint", () => {
+  it("disables contribution eviction when a custom Journal has no history capability", async () => {
+    const add = command({
+      title: "Add retained item",
+      visibility: "public",
+      params: z.object({ value: z.number().int() }),
+      apply: (_state: { items: number[] }, args: { value: number }) => ({
+        events: [event("items/added", args)],
+      }),
+    })
+    const definition = createYrdDef().extend({
+      initialState: { items: [] as number[] },
+      commands: { items: { add } },
+      events: { "items/added": z.object({ value: z.number().int() }) },
+      projectionVersion: "custom-journal-retention-v1",
+      project(state: { items: number[] }, applied: { data: unknown }) {
+        return { items: [...state.items, (applied.data as { value: number }).value] }
+      },
+      compact(state: { items: number[] }) {
+        return { items: state.items.slice(-1) }
+      },
+    })
+    await using app = await createYrd(definition, { inject: { journal: createMemoryJournal(), id: ids() } })
+    for (const value of [1, 2, 3]) await app.dispatch({ op: "items.add", args: { value } })
+
+    expect(app.state().items).toEqual([1, 2, 3])
+    expect(app.retentionDiagnostics()).toMatchObject({ receiptFrames: 3 })
+    expect(app.retentionDiagnostics()).not.toHaveProperty("journal")
+  })
+
+  it("compacts a history-backed projection once after each atomic frame", async () => {
+    let compactions = 0
+    const addPair = command({
+      title: "Add an atomic item pair",
+      visibility: "public",
+      params: z.object({ first: z.number().int(), second: z.number().int() }),
+      apply: (_state: { items: number[] }, args: { first: number; second: number }) => ({
+        events: [event("items/added", { value: args.first }), event("items/added", { value: args.second })],
+      }),
+    })
+    const definition = createYrdDef().extend({
+      initialState: { items: [] as number[] },
+      commands: { items: { addPair } },
+      events: { "items/added": z.object({ value: z.number().int() }) },
+      projectionVersion: "atomic-frame-compaction-v1",
+      project(state: { items: number[] }, applied: { data: unknown }) {
+        return { items: [...state.items, (applied.data as { value: number }).value] }
+      },
+      compact(state: { items: number[] }) {
+        compactions += 1
+        return { items: state.items.slice(-1) }
+      },
+    })
+    const indexed = indexedCheckpointJournal()
+    await using app = await createYrd(definition, { inject: { journal: indexed.journal, id: ids() } })
+
+    await app.dispatch({ op: "items.addPair", args: { first: 1, second: 2 } })
+
+    expect(app.state().items).toEqual([2])
+    expect(compactions).toBe(1)
+  })
+
+  it("validates the complete cold replay before one projection compaction", async () => {
+    const add = command({
+      title: "Add a retained item",
+      visibility: "public",
+      params: z.object({ value: z.number().int() }),
+      apply: (_state: { items: number[] }, args: { value: number }) => ({
+        events: [event("items/added", args)],
+      }),
+    })
+    const definition = (version: string, observe?: (items: readonly number[]) => void) =>
+      createYrdDef().extend({
+        initialState: { items: [] as number[] },
+        commands: { items: { add } },
+        events: { "items/added": z.object({ value: z.number().int() }) },
+        projectionVersion: version,
+        project(state: { items: number[] }, applied: { data: unknown }) {
+          return { items: [...state.items, (applied.data as { value: number }).value] }
+        },
+        validate(state: { items: number[] }) {
+          observe?.(state.items)
+        },
+        compact(state: { items: number[] }) {
+          return { items: state.items.slice(-1) }
+        },
+      })
+    const indexed = indexedCheckpointJournal()
+    const writer = await createYrd(definition("cold-replay-writer-v1"), {
+      inject: { journal: indexed.journal, id: ids() },
+    })
+    await writer.dispatch({ op: "items.add", args: { value: 1 } })
+    await writer.dispatch({ op: "items.add", args: { value: 2 } })
+    await writer.close()
+
+    const validations: number[][] = []
+    await using reader = await createYrd(
+      definition("cold-replay-reader-v1", (items) => validations.push([...items])),
+      { inject: { journal: indexed.journal, id: ids() } },
+    )
+
+    expect(validations).toEqual([[1, 2]])
+    expect(reader.state().items).toEqual([2])
+    await expect(reader.historySnapshot()).resolves.toMatchObject({ state: { items: [1, 2] } })
+    expect(validations).toEqual([
+      [1, 2],
+      [1, 2],
+    ])
+  })
+
+  it("bounds the warm receipt cache while exact old retries and complete events stay journal-backed", async () => {
+    const definition = counterDefinition()
+    const indexed = indexedCheckpointJournal()
+    const writer = await createYrd(definition, { inject: { journal: indexed.journal, id: ids() } })
+    const first = await writer.dispatch({ op: "counter.add", args: { by: 1 } }, { key: "oldest-retry" })
+    for (let index = 1; index < 4_097; index += 1) {
+      await writer.dispatch({ op: "counter.add", args: { by: 1 } })
+    }
+    await writer.close()
+
+    const checkpoint = indexed.checkpoint()
+    expect(checkpoint).toMatchObject({ cursor: 4_097, value: { v: 1 } })
+    if (checkpoint === undefined) throw new Error("expected the warm checkpoint")
+    expect((checkpoint.value as { receipts: unknown[] }).receipts).toHaveLength(4_096)
+
+    await using reader = await createYrd(definition, { inject: { journal: indexed.journal, id: ids() } })
+    const before = await Array.fromAsync(reader.events())
+    expect(before).toHaveLength(4_097)
+    await expect(
+      reader.dispatch({ id: first.command.id, op: "counter.add", args: { by: 1 } }, { key: "oldest-retry" }),
+    ).resolves.toEqual(first)
+    await expect(
+      reader.dispatch({ id: first.command.id, op: "counter.add", args: { by: 2 } }, { key: "oldest-retry" }),
+    ).rejects.toThrow(/different command/iu)
+    await expect(Array.fromAsync(reader.events())).resolves.toHaveLength(4_097)
+    const oldest = parseJournalFrame(indexed.journal.history?.command({ id: first.command.id }))
+    await reader.close()
+
+    const causeIds = [oldest.cause.id, "00000000-0000-7000-8000-00000000f001"]
+    const causeReader = await createYrd(definition, {
+      inject: { journal: indexed.journal, id: () => causeIds.shift() ?? "00000000-0000-7000-8000-00000000f002" },
+    })
+    await expect(
+      causeReader.dispatch({ id: "00000000-0000-7000-8000-00000000f003", op: "counter.add", args: { by: 1 } }),
+    ).rejects.toThrow(/cause id.*already in use/iu)
+    await causeReader.close()
+
+    const eventIds = ["00000000-0000-7000-8000-00000000f004", oldest.events[0]!.id]
+    const eventReader = await createYrd(definition, {
+      inject: { journal: indexed.journal, id: () => eventIds.shift() ?? "00000000-0000-7000-8000-00000000f005" },
+    })
+    await expect(
+      eventReader.dispatch({ id: "00000000-0000-7000-8000-00000000f006", op: "counter.add", args: { by: 1 } }),
+    ).rejects.toThrow(/event id.*already in use/iu)
+    await expect(Array.fromAsync(eventReader.events())).resolves.toHaveLength(4_097)
+    await eventReader.close()
+  })
+
   it("restores checkpoint state at cursor zero during runtime activation", async () => {
     const readAfter: number[] = []
     let saves = 0
@@ -505,7 +719,7 @@ describe("persistent Core projection checkpoint", () => {
     })
   })
 
-  it("restores a warm checkpoint and bounded tail without materializing the historical SQL prefix", async () => {
+  it("restores a warm checkpoint and bounded tail without materializing row history", async () => {
     const dir = await stateDir()
     const definition = counterDefinition()
     const id = ids()
@@ -518,10 +732,9 @@ describe("persistent Core projection checkpoint", () => {
     await tail.dispatch({ op: "counter.add", args: { by: 3 } })
     await tail.close()
 
-    const originalCheckpoint = storedCheckpointBytes(dir)
     {
       using database = new Database(join(dir, "journal.sqlite"), { readwrite: true, strict: true })
-      database.query("UPDATE journal_snapshot SET prefix_json = prefix_json || ' '").run()
+      database.query("UPDATE journal_history SET value_json = value_json || ' ' WHERE cursor = 1").run()
     }
     const events: LogEvent[] = []
     const log = createLogger("test", [
@@ -531,10 +744,10 @@ describe("persistent Core projection checkpoint", () => {
 
     const warm = await createYrd(definition, { inject: { journal: createJournal({ dir, inject: { log } }), log } })
     expect(warm.state().counter.value).toBe(5)
-    await expect(Array.fromAsync(createJournal({ dir }).read())).rejects.toThrow("snapshot prefix checksum mismatch")
+    await expect(Array.fromAsync(createJournal({ dir }).read())).rejects.toThrow("journal event checksum mismatch")
     await warm.close()
-    expect(storedCheckpointBytes(dir)).toBe(originalCheckpoint)
-    expect(events.some((entry) => entry.props?.reason === "checkpoint-write-failed")).toBe(true)
+    expect(storedCheckpoint(dir)?.cursor).toBe(2)
+    expect(events.some((entry) => entry.props?.reason === "checkpoint-write-failed")).toBe(false)
     expect(events.find((entry) => entry.kind === "span" && entry.namespace === "test:core:replay")).toMatchObject({
       props: { fromCursor: firstCheckpoint?.cursor },
     })
@@ -542,7 +755,7 @@ describe("persistent Core projection checkpoint", () => {
     const unchanged = await createYrd(definition, { inject: { journal: createJournal({ dir }), id } })
     expect(unchanged.state().counter.value).toBe(5)
     await unchanged.close()
-    expect(storedCheckpointBytes(dir)).toBe(originalCheckpoint)
+    expect(storedCheckpoint(dir)?.cursor).toBe(2)
   })
 
   it("disables projection checkpoints when reducer semantics are not explicitly versioned", async () => {

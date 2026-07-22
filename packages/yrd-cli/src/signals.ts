@@ -239,8 +239,12 @@ export function createSignalObserver(
     // (host.ts uses signals.journal when signals are active), and dropping it
     // silently made the whole estate checkpoint-less — no writer ever flushed,
     // so every process paid the full cold fold (2026-07-20, 25s pr list).
-    // Snapshot compaction keeps the full prefix, so observer reads stay whole.
+    // Checkpoint state stays bounded while Journal.read() preserves complete
+    // row history, so observer reads remain lossless.
     ...(options.journal.checkpoint === undefined ? {} : { checkpoint: options.journal.checkpoint }),
+    // Immutable history/index capability must follow the same wrapper. Its
+    // absence explicitly disables Core/Job/Queue live-window eviction.
+    ...(options.journal.history === undefined ? {} : { history: options.journal.history }),
   })
 
   return Object.freeze({

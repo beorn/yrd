@@ -31,7 +31,7 @@ import {
 import { asFailure, raiseFailure } from "./failure.ts"
 import { parseJournalFrame, type JournalFrame } from "./frame.ts"
 import { cloneFrozen, freeze, type DeepReadonly } from "./immutable.ts"
-import type { Cursor, Journal, JournalCheckpoint } from "./journal.ts"
+import type { Cursor, Journal, JournalCheckpoint, JournalHistory, JournalHistoryDiagnostics } from "./journal.ts"
 
 export type { DeepReadonly } from "./immutable.ts"
 
@@ -77,6 +77,7 @@ const projectionVersions = Symbol("yrd.projectionVersions")
 const PROJECTION_CHECKPOINT_VERSION = 1
 const PROJECTION_CHECKPOINT_REFRESH_FRAMES = 256
 const PROJECTION_CHECKPOINT_HIGH_WATER_FRAMES = 512
+const RECEIPT_CACHE_FRAMES = 4_096
 const UUID_V7_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u
 const ProjectionCheckpointSchema = z
@@ -112,6 +113,14 @@ export type Yrd<State extends object, Commands extends CommandTree> = Readonly<{
   log: ConditionalLogger
   refresh(): Promise<DeepReadonly<State>>
   journalSnapshot(): Promise<JournalSnapshot<State>>
+  historySnapshot(): Promise<JournalSnapshot<State>>
+  history?: JournalHistory<unknown>
+  retentionDiagnostics(): Readonly<{
+    receiptFrames: number
+    causeIds: number
+    eventIds: number
+    journal?: JournalHistoryDiagnostics
+  }>
   dispatch: Dispatch
   events(): AsyncIterable<Event>
   close(): Promise<void>
@@ -132,6 +141,8 @@ type Contribution<
   replayEvents?: EventSchemas
   projectionVersion?: string
   project?(state: DeepReadonly<AddedState>, event: Event, cause: Cause): AddedState
+  validate?(state: DeepReadonly<State & AddedState>): void
+  compact?(state: DeepReadonly<AddedState>, complete: DeepReadonly<State & AddedState>): AddedState
   create?(yrd: Yrd<State & AddedState, Commands & AddedCommands> & Features): AddedFeatures
 }>
 
@@ -145,6 +156,8 @@ export type YrdDef<
   events: EventSchemas
   replayEvents: EventSchemas
   project: Project<State>
+  validate(state: DeepReadonly<State>): void
+  compact(state: DeepReadonly<State>): State
   readonly [projectionVersions]: readonly (string | undefined)[]
   create(yrd: Yrd<State, Commands>): Features
   extend<
@@ -198,6 +211,8 @@ export function createYrdDef(): YrdDef {
     events: {},
     replayEvents: {},
     project: (state) => state,
+    validate: () => {},
+    compact: (state) => state,
     [projectionVersions]: [],
     create: () => ({}),
   })
@@ -216,6 +231,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
   }>,
 ): Promise<Yrd<State, Commands> & Features> {
   const journal = options.inject.journal
+  const history = journal.history
   const clock = options.inject.clock ?? (() => new Date().toISOString())
   const id = options.inject.id ?? uuidv7
   const log = options.inject.log ?? createLogger("yrd")
@@ -291,6 +307,10 @@ export async function createYrd<State extends object, Commands extends CommandTr
       }
       next = { ...next, cursor: batch.cursor }
     }
+    definition.validate(next.state)
+    if (history !== undefined && frames > 0) {
+      next = { ...next, state: freeze(definition.compact(next.state)) as DeepReadonly<State> }
+    }
     if (span) Object.assign(span.spanData, { frames, events, fromCursor: base.cursor, toCursor: next.cursor })
     return next
   }
@@ -319,12 +339,18 @@ export async function createYrd<State extends object, Commands extends CommandTr
           ? currentSchema.parse(applied.data)
           : (definition.replayEvents[applied.name] ?? currentSchema).parse(applied.data)
       const validated = freeze(EventSchema.parse({ ...applied, data })) as Event
-      nextState = freeze(definition.project(nextState, validated, frame.cause)) as DeepReadonly<State>
+      const projected = definition.project(nextState, validated, frame.cause)
+      nextState = freeze(projected) as DeepReadonly<State>
+    }
+    if (source === "append") definition.validate(nextState)
+    if (history !== undefined && source === "append" && frame.events.length > 0) {
+      nextState = freeze(definition.compact(nextState)) as DeepReadonly<State>
     }
     const receiptsById = new Map(base.receiptsById)
     receiptsById.set(frame.command.id, frame)
     const receiptsByKey = new Map(base.receiptsByKey)
     if (frame.cause.key !== undefined) receiptsByKey.set(frame.cause.key, frame)
+    if (history !== undefined) trimReceiptCache(receiptsById, receiptsByKey, causeIds, eventIds)
     const at = frame.events.at(-1)?.ts ?? base.at
     return {
       ...base,
@@ -335,6 +361,25 @@ export async function createYrd<State extends object, Commands extends CommandTr
       causeIds,
       eventIds,
       ...(at === undefined ? {} : { at }),
+    }
+  }
+
+  const trimReceiptCache = (
+    receiptsById: Map<string, JournalFrame>,
+    receiptsByKey: Map<string, JournalFrame>,
+    causeIds: Set<string>,
+    eventIds: Set<string>,
+  ): void => {
+    while (receiptsById.size > RECEIPT_CACHE_FRAMES) {
+      const oldest = receiptsById.entries().next().value as readonly [string, JournalFrame] | undefined
+      if (oldest === undefined) break
+      const [commandId, frame] = oldest
+      receiptsById.delete(commandId)
+      if (frame.cause.key !== undefined && receiptsByKey.get(frame.cause.key)?.command.id === commandId) {
+        receiptsByKey.delete(frame.cause.key)
+      }
+      causeIds.delete(frame.cause.id)
+      for (const applied of frame.events) eventIds.delete(applied.id)
     }
   }
 
@@ -382,6 +427,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
     if (!setsEqual(causeIds, expectedCauseIds)) throw new Error("checkpoint cause registry does not match receipts")
     if (!setsEqual(eventIds, expectedEventIds)) throw new Error("checkpoint event registry does not match receipts")
     if (parsed.at !== expectedAt) throw new Error("checkpoint event-order timestamp does not match receipts")
+    if (history !== undefined) trimReceiptCache(receiptsById, receiptsByKey, causeIds, eventIds)
     const registriesValidatedAt = performance.now()
     coreLog.debug?.("projection checkpoint restored", {
       envelopeMs: envelopeParsedAt - restoreStarted,
@@ -556,6 +602,41 @@ export async function createYrd<State extends object, Commands extends CommandTr
     }) as JournalSnapshot<State>
   }
 
+  const historySnapshot = async (): Promise<JournalSnapshot<State>> => {
+    assertOpen()
+    if (history === undefined) return journalSnapshot()
+    let historical = cloneFrozen(definition.initialState) as DeepReadonly<State>
+    let cursor = 0
+    let at: string | undefined
+    for await (const batch of journal.read()) {
+      for (const value of batch.values) {
+        const frame = parseJournalFrame(value)
+        for (const applied of frame.events) {
+          const currentSchema = definition.events[applied.name]
+          if (currentSchema === undefined) throw new Error(`yrd: no event definition for '${applied.name}'`)
+          const current = currentSchema.safeParse(applied.data)
+          const data = current.success
+            ? current.data
+            : (definition.replayEvents[applied.name] ?? currentSchema).parse(applied.data)
+          const validated = freeze(EventSchema.parse({ ...applied, data })) as Event
+          historical = freeze(definition.project(historical, validated, frame.cause)) as DeepReadonly<State>
+          at = validated.ts
+        }
+      }
+      cursor = batch.cursor
+    }
+    definition.validate(historical)
+    return freeze({
+      state: historical,
+      asOf: { cursor, ...(at === undefined ? {} : { at }) },
+    }) as JournalSnapshot<State>
+  }
+
+  const archivedCommand = (query: Readonly<{ id?: string; key?: string }>): JournalFrame | undefined => {
+    const value = history?.command(query)
+    return value === undefined ? undefined : parseJournalFrame(value)
+  }
+
   const dispatchCommand = async (
     input: CommandInput,
     trace: DispatchOptions | undefined,
@@ -591,9 +672,12 @@ export async function createYrd<State extends object, Commands extends CommandTr
     while (!closing && !scope.signal.aborted) {
       const current = await fold(projection)
       publish(current)
-      const byId = current.receiptsById.get(canonical.id)
-      const byKey = trace?.key === undefined ? undefined : current.receiptsByKey.get(trace.key)
-      if (byId !== undefined && byKey !== undefined && byId !== byKey) {
+      const byId = current.receiptsById.get(canonical.id) ?? archivedCommand({ id: canonical.id })
+      const byKey =
+        trace?.key === undefined
+          ? undefined
+          : (current.receiptsByKey.get(trace.key) ?? archivedCommand({ key: trace.key }))
+      if (byId !== undefined && byKey !== undefined && byId.cause.id !== byKey.cause.id) {
         raiseFailure(
           "refusal",
           "command-key-conflict",
@@ -637,6 +721,14 @@ export async function createYrd<State extends object, Commands extends CommandTr
       })
       const value = result.value === undefined ? undefined : JsonSchema.parse(result.value)
       const frame = parseJournalFrame({ cause, command: canonical, events, ...(value === undefined ? {} : { value }) })
+      if (history?.hasIdentity("cause", frame.cause.id) === true) {
+        raiseFailure("refusal", "cause-id-conflict", `yrd: cause id '${frame.cause.id}' is already in use`)
+      }
+      for (const applied of frame.events) {
+        if (history?.hasIdentity("event", applied.id) === true) {
+          raiseFailure("refusal", "event-id-conflict", `yrd: event id '${applied.id}' is already in use`)
+        }
+      }
       const candidate = projectFrame(current, frame, "append")
       const appended = await journal.append(frame, current.cursor)
       if (!appended.appended) continue
@@ -691,10 +783,20 @@ export async function createYrd<State extends object, Commands extends CommandTr
     log,
     refresh: () => track(refresh),
     journalSnapshot: () => track(journalSnapshot),
+    historySnapshot: () => track(historySnapshot),
+    ...(history === undefined ? {} : { history }),
+    retentionDiagnostics: () => ({
+      receiptFrames: projection.receiptsById.size,
+      causeIds: projection.causeIds.size,
+      eventIds: projection.eventIds.size,
+      ...(history === undefined ? {} : { journal: history.diagnostics() }),
+    }),
     dispatch,
     async *events() {
       await refresh()
-      for (const frame of projection.receiptsById.values()) yield* frame.events
+      for await (const batch of journal.read()) {
+        for (const value of batch.values) yield* parseJournalFrame(value).events
+      }
     },
     close,
     [Symbol.asyncDispose]: close,
@@ -730,11 +832,15 @@ function buildDef<State extends object, Commands extends CommandTree, Features e
   events: EventSchemas
   replayEvents: EventSchemas
   project: Project<State>
+  validate(state: DeepReadonly<State>): void
+  compact(state: DeepReadonly<State>, complete: DeepReadonly<State>): State
   readonly [projectionVersions]: readonly (string | undefined)[]
   create(yrd: Yrd<State, Commands>): Features
 }): YrdDef<State, Commands, Features> {
   const definition: YrdDef<State, Commands, Features> = {
     ...values,
+    validate: (state) => values.validate(state),
+    compact: (state) => values.compact(state, state),
     extend<
       AddedState extends object = Empty,
       AddedCommands extends CommandTree = Empty,
@@ -771,6 +877,20 @@ function buildDef<State extends object, Commands extends CommandTree, Features e
           if (contribution.project === undefined) return projected as State & AddedState
           const ownedState = selectFields(projected, owned) as DeepReadonly<AddedState>
           const patch = contribution.project(ownedState, applied, cause)
+          assertOwnedFields(patch, owned)
+          return { ...projected, ...patch }
+        },
+        validate(state) {
+          values.validate(state as unknown as DeepReadonly<State>)
+          contribution.validate?.(state)
+        },
+        compact(state, complete) {
+          const previousState = selectFields(state, previousFields) as DeepReadonly<State>
+          const previous = values.compact(previousState, complete as unknown as DeepReadonly<State>)
+          const projected = { ...state, ...previous } as State & AddedState
+          if (contribution.compact === undefined) return projected
+          const ownedState = selectFields(projected, owned) as DeepReadonly<AddedState>
+          const patch = contribution.compact(ownedState, complete)
           assertOwnedFields(patch, owned)
           return { ...projected, ...patch }
         },

@@ -146,6 +146,50 @@ async function accepted(journal: Journal<unknown>, value: ReturnType<typeof fram
   return result.cursor
 }
 
+async function downgradeFixtureToSchemaV1(
+  dir: string,
+  values: readonly ReturnType<typeof frame>[],
+): Promise<readonly number[]> {
+  if (values.length < 2) throw new Error("schema-v1 fixture requires a prefix and tail")
+  const journal = testJournal(dir)
+  const cursors: number[] = []
+  let cursor = 0
+  for (const value of values) {
+    cursor = await accepted(journal, value, cursor)
+    cursors.push(cursor)
+  }
+  const prefixCursor = cursors[0]
+  if (prefixCursor === undefined) throw new Error("schema-v1 fixture lost its prefix cursor")
+  await journal.checkpoint?.save?.({ identity: "schema-v1-fixture", cursor: prefixCursor, value: { fixture: true } })
+
+  using database = new Database(join(dir, SQLITE), { readwrite: true, strict: true })
+  const row = database
+    .query<{ value_json: string }, [number]>("SELECT value_json FROM journal_history WHERE cursor = ?")
+    .get(prefixCursor)
+  if (row === null) throw new Error("schema-v1 fixture lost its compacted prefix frame")
+  const prefixJson = JSON.stringify([{ cursor: prefixCursor, value: JSON.parse(row.value_json) }])
+  database
+    .query(
+      `UPDATE journal_snapshot
+       SET prefix_json = ?, prefix_sha256 = ?, prefix_last_cursor = ?
+       WHERE singleton = 1`,
+    )
+    .run(prefixJson, exactDigest(prefixJson), prefixCursor)
+  database.run(`
+    DROP INDEX journal_entities_cursor;
+    DROP TABLE journal_entities;
+    DROP TABLE journal_event_ids;
+    DROP TABLE journal_commands;
+    DROP TABLE journal_history;
+  `)
+  database.query("UPDATE journal_metadata SET value = '1' WHERE key = 'schema_version'").run()
+  database.query("DELETE FROM journal_metadata WHERE key IN ('facts_head', 'maintenance_pending')").run()
+  database.run("PRAGMA user_version = 1")
+  database.run("PRAGMA auto_vacuum = NONE")
+  database.run("VACUUM")
+  return cursors
+}
+
 async function missing(path: string): Promise<boolean> {
   try {
     await stat(path)
@@ -260,6 +304,7 @@ describe("SQLite Journal", () => {
 
     using database = new Database(join(dir, SQLITE), { readonly: true, strict: true })
     expect(database.query("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" })
+    expect(database.query("PRAGMA auto_vacuum").get()).toEqual({ auto_vacuum: 2 })
     expect(
       database
         .query<{ name: string }, []>(
@@ -267,7 +312,16 @@ describe("SQLite Journal", () => {
         )
         .all()
         .map(({ name }) => name),
-    ).toEqual(["journal_events", "journal_metadata", "journal_orphans", "journal_snapshot"])
+    ).toEqual([
+      "journal_commands",
+      "journal_entities",
+      "journal_event_ids",
+      "journal_events",
+      "journal_history",
+      "journal_metadata",
+      "journal_orphans",
+      "journal_snapshot",
+    ])
     expect(
       database
         .query<{ cursor: number; value_json: string; sha256: string }, []>(
@@ -286,6 +340,294 @@ describe("SQLite Journal", () => {
         sha256: exactDigest(JSON.stringify(frame("sqlite-second"))),
       },
     ])
+  })
+
+  it("exposes journal-owned exact identity and command lookups without a second mutable projection", async () => {
+    const dir = await directory()
+    const journal = testJournal(dir)
+    const value = frame("history-lookup")
+    await accepted(journal, value, 0)
+    const history = (
+      journal as Journal<unknown> & {
+        history?: {
+          command(query: Readonly<{ id?: string; key?: string }>): unknown
+          hasIdentity(kind: "cause" | "event", id: string): boolean
+          diagnostics(): Readonly<{
+            autoVacuum: "incremental"
+            historyFrames: number
+            tailFrames: number
+          }>
+        }
+      }
+    ).history
+
+    expect(history).toBeDefined()
+    expect(history?.command({ id: value.command.id })).toEqual(value)
+    expect(history?.hasIdentity("cause", value.cause.id)).toBe(true)
+    expect(history?.hasIdentity("event", value.events[0]!.id)).toBe(true)
+    expect(history?.diagnostics()).toMatchObject({
+      autoVacuum: "incremental",
+      historyFrames: 0,
+      tailFrames: 1,
+    })
+
+    {
+      using database = new Database(join(dir, SQLITE), { readwrite: true, strict: true })
+      database.query("UPDATE journal_commands SET command_hash = ? WHERE cursor = 1").run("0".repeat(64))
+    }
+    expect(() => history?.command({ id: value.command.id })).toThrow("command lookup facts disagree")
+  })
+
+  it("pins one SQLite snapshot while history lookups race a committed append", async () => {
+    const dir = await directory()
+    const journal = testJournal(dir)
+    const first = frame("history-snapshot-first")
+    await accepted(journal, first, 0)
+    const second = frame("history-snapshot-second")
+    const valueJson = JSON.stringify(second)
+    const original = Database.prototype.query
+    let injected = false
+    const query = vi.spyOn(Database.prototype, "query").mockImplementation(function (this: Database, sql: string) {
+      if (!injected && sql.includes("SELECT MAX(cursor) AS cursor FROM journal_events")) {
+        injected = true
+        using writer = new Database(join(dir, SQLITE), { readwrite: true, strict: true })
+        writer.run("BEGIN IMMEDIATE")
+        try {
+          writer
+            .query("INSERT INTO journal_events(cursor, value_json, sha256) VALUES (?, ?, ?)")
+            .run(2, valueJson, exactDigest(valueJson))
+          writer
+            .query(
+              `INSERT INTO journal_commands(cursor, command_id, command_key, command_hash, cause_id)
+               VALUES (?, ?, ?, ?, ?)`,
+            )
+            .run(2, second.command.id, null, second.cause.commandHash, second.cause.id)
+          writer
+            .query("INSERT INTO journal_event_ids(event_id, cursor, event_index) VALUES (?, ?, ?)")
+            .run(second.events[0]!.id, 2, 0)
+          writer.query("UPDATE journal_metadata SET value = '2' WHERE key IN ('head_cursor', 'facts_head')").run()
+          writer.run("COMMIT")
+        } catch (error) {
+          writer.run("ROLLBACK")
+          throw error
+        }
+      }
+      return Reflect.apply(original, this, [sql])
+    } as typeof Database.prototype.query)
+    try {
+      expect(journal.history?.command({ id: first.command.id })).toEqual(first)
+    } finally {
+      query.mockRestore()
+    }
+    expect(injected).toBe(true)
+    await expect(Array.fromAsync(journal.read())).resolves.toEqual([{ cursor: 2, values: [first, second] }])
+  })
+
+  it("closes diagnostics cleanly on a fragmented journal with a large freelist", async () => {
+    const dir = await directory()
+    const journal = testJournal(dir)
+    const cursor = await accepted(journal, frame("fragmented-diagnostics"), 0)
+    await journal.checkpoint?.save?.({ identity: "fragmented-v1", cursor, value: { state: 1 } })
+
+    {
+      using database = new Database(join(dir, SQLITE), { readwrite: true, strict: true })
+      database.run("CREATE TABLE diagnostic_bloat(value BLOB NOT NULL) STRICT")
+      database.run("BEGIN")
+      const insert = database.prepare("INSERT INTO diagnostic_bloat(value) VALUES (zeroblob(4096))")
+      try {
+        for (let index = 0; index < 2_048; index += 1) insert.run()
+      } finally {
+        insert.finalize()
+      }
+      database.run("COMMIT")
+      database.run("DROP TABLE diagnostic_bloat")
+      expect(
+        database.query<{ freelist_count: number }, []>("PRAGMA freelist_count").get()?.freelist_count,
+      ).toBeGreaterThan(1_000)
+    }
+
+    expect(() => journal.history?.diagnostics()).not.toThrow()
+    expect(journal.history?.diagnostics()).toMatchObject({
+      autoVacuum: "incremental",
+      historyFrames: 1,
+      tailFrames: 0,
+    })
+  })
+
+  it("indexes entity-shaped frames exactly and refuses a corrupt all-history index", async () => {
+    const dir = await directory()
+    const journal = testJournal(dir)
+    const source = frame("queue-entity-lookup")
+    const value = {
+      ...source,
+      events: [
+        EventSchema.parse({
+          ...source.events[0],
+          name: "queue/run/settled",
+          data: { run: "R1" },
+        }),
+      ],
+    }
+    const cursor = await accepted(journal, value, 0)
+    const lowerSource = frame("queue-entity-lowercase")
+    const lowerValue = {
+      ...lowerSource,
+      events: [
+        EventSchema.parse({
+          ...lowerSource.events[0],
+          name: "queue/run/settled",
+          data: { run: "r1" },
+        }),
+      ],
+    }
+    await accepted(journal, lowerValue, cursor)
+
+    expect(journal.history?.entity("queue", "R1")).toEqual([{ cursor, value }])
+    expect(journal.history?.entity("queue", "r1")).toEqual([{ cursor: 2, value: lowerValue }])
+
+    {
+      using database = new Database(join(dir, SQLITE), { readwrite: true, strict: true })
+      database.query("UPDATE journal_entities SET id = 'R2' WHERE kind = 'queue' AND id = 'R1'").run()
+    }
+    expect(() => journal.history?.entity("queue", "R2")).toThrow("entity lookup facts disagree")
+    expect(() => journal.history?.diagnostics()).toThrow("entity lookup index does not equal")
+  })
+
+  it("migrates schema v1 prefix and tail into row history with identical cursor suffixes and facts", async () => {
+    const dir = await directory()
+    const values = [frame("schema-v1-prefix"), frame("schema-v1-tail")]
+    await downgradeFixtureToSchemaV1(dir, values)
+    {
+      using legacy = new Database(join(dir, SQLITE), { readonly: true, strict: true })
+      expect(legacy.query("PRAGMA user_version").get()).toEqual({ user_version: 1 })
+      expect(legacy.query("PRAGMA auto_vacuum").get()).toEqual({ auto_vacuum: 0 })
+    }
+
+    const phases: string[] = []
+    const journal = testJournal(dir, {
+      phase(name) {
+        phases.push(name)
+      },
+    })
+    await expect(Array.fromAsync(journal.read())).resolves.toEqual([
+      { cursor: 1, values: [values[0]] },
+      { cursor: 2, values: [values[1]] },
+    ])
+    await expect(Array.fromAsync(journal.read(0, 1))).resolves.toEqual([{ cursor: 1, values: [values[0]] }])
+    await expect(Array.fromAsync(journal.read(1, 2))).resolves.toEqual([{ cursor: 2, values: [values[1]] }])
+    expect(phases).toEqual(
+      expect.arrayContaining([
+        "schema-v2-prepared",
+        "schema-v2-committed",
+        "schema-v2-maintenance-started",
+        "schema-v2-maintenance-complete",
+      ]),
+    )
+    expect(journal.history?.command({ id: values[0]!.command.id })).toEqual(values[0])
+    expect(journal.history?.command({ id: values[1]!.command.id })).toEqual(values[1])
+
+    using migrated = new Database(join(dir, SQLITE), { readonly: true, strict: true })
+    expect(migrated.query("PRAGMA user_version").get()).toEqual({ user_version: 2 })
+    expect(migrated.query("PRAGMA auto_vacuum").get()).toEqual({ auto_vacuum: 2 })
+    expect(
+      migrated
+        .query<{ key: string; value: string }, []>(
+          "SELECT key, value FROM journal_metadata WHERE key IN ('facts_head', 'maintenance_pending') ORDER BY key",
+        )
+        .all(),
+    ).toEqual([
+      { key: "facts_head", value: "2" },
+      { key: "maintenance_pending", value: "0" },
+    ])
+    expect(
+      migrated
+        .query<{ cursor: number; value_json: string; sha256: string }, []>(
+          `SELECT cursor, value_json, sha256 FROM journal_history
+           UNION ALL
+           SELECT cursor, value_json, sha256 FROM journal_events
+           ORDER BY cursor`,
+        )
+        .all()
+        .map((row) => ({ ...row, valid: exactDigest(row.value_json) === row.sha256 })),
+    ).toEqual([
+      { cursor: 1, value_json: JSON.stringify(values[0]), sha256: exactDigest(JSON.stringify(values[0])), valid: true },
+      { cursor: 2, value_json: JSON.stringify(values[1]), sha256: exactDigest(JSON.stringify(values[1])), valid: true },
+    ])
+  })
+
+  it.each([
+    ["schema-v2-committed", "1"],
+    ["schema-v2-maintenance-started", "1"],
+    ["schema-v2-maintenance-complete", "0"],
+  ] as const)("resumes schema v1 migration idempotently after %s interruption", async (phase, pending) => {
+    const dir = await directory()
+    const values = [frame(`${phase}-prefix`), frame(`${phase}-tail`)]
+    await downgradeFixtureToSchemaV1(dir, values)
+    let interrupted = false
+    const journal = testJournal(dir, {
+      phase(name) {
+        if (name !== phase || interrupted) return
+        interrupted = true
+        throw new Error(`injected ${phase} interruption`)
+      },
+    })
+    await expect(Array.fromAsync(journal.read())).rejects.toThrow(`injected ${phase} interruption`)
+    {
+      using database = new Database(join(dir, SQLITE), { readonly: true, strict: true })
+      expect(database.query("PRAGMA user_version").get()).toEqual({ user_version: 2 })
+      expect(
+        database
+          .query<{ value: string }, []>("SELECT value FROM journal_metadata WHERE key = 'maintenance_pending'")
+          .get(),
+      ).toEqual({ value: pending })
+    }
+    await expect(Array.fromAsync(testJournal(dir).read())).resolves.toEqual([
+      { cursor: 1, values: [values[0]] },
+      { cursor: 2, values: [values[1]] },
+    ])
+    using completed = new Database(join(dir, SQLITE), { readonly: true, strict: true })
+    expect(completed.query("PRAGMA auto_vacuum").get()).toEqual({ auto_vacuum: 2 })
+    expect(
+      completed
+        .query<{ value: string }, []>("SELECT value FROM journal_metadata WHERE key = 'maintenance_pending'")
+        .get(),
+    ).toEqual({ value: "0" })
+  })
+
+  it("leaves migrated authority maintenance-pending when the schema v1 full VACUUM fails", async () => {
+    const dir = await directory()
+    const values = [frame("full-vacuum-prefix"), frame("full-vacuum-tail")]
+    await downgradeFixtureToSchemaV1(dir, values)
+    const original = Database.prototype.run
+    const vacuum = vi.spyOn(Database.prototype, "run").mockImplementation(function (
+      this: Database,
+      sql: string,
+      ...bindings: unknown[]
+    ) {
+      if (sql.trim().toUpperCase() === "VACUUM") throw new Error("injected full vacuum failure")
+      return Reflect.apply(original, this, [sql, ...bindings])
+    } as typeof Database.prototype.run)
+    try {
+      await expect(Array.fromAsync(testJournal(dir).read())).rejects.toThrow("injected full vacuum failure")
+    } finally {
+      vacuum.mockRestore()
+    }
+    {
+      using pending = new Database(join(dir, SQLITE), { readonly: true, strict: true })
+      expect(pending.query("PRAGMA user_version").get()).toEqual({ user_version: 2 })
+      expect(
+        pending
+          .query<{ value: string }, []>("SELECT value FROM journal_metadata WHERE key = 'maintenance_pending'")
+          .get(),
+      ).toEqual({ value: "1" })
+    }
+
+    await expect(Array.fromAsync(testJournal(dir).read())).resolves.toEqual([
+      { cursor: 1, values: [values[0]] },
+      { cursor: 2, values: [values[1]] },
+    ])
+    using completed = new Database(join(dir, SQLITE), { readonly: true, strict: true })
+    expect(completed.query("PRAGMA auto_vacuum").get()).toEqual({ auto_vacuum: 2 })
   })
 
   it("uses compare-and-append across independent runtimes without losing the loser", async () => {
@@ -549,11 +891,56 @@ describe("SQLite Journal", () => {
     expect(database.query<{ cursor: number }, []>("SELECT cursor FROM journal_events ORDER BY cursor").all()).toEqual([
       { cursor: second },
     ])
+    expect(database.query<{ cursor: number }, []>("SELECT cursor FROM journal_history ORDER BY cursor").all()).toEqual([
+      { cursor: first },
+    ])
     expect(
       database.query<{ cursor: number }, []>("SELECT cursor FROM journal_snapshot WHERE singleton=1").get(),
     ).toEqual({
       cursor: first,
     })
+  })
+
+  it("defers incremental vacuum failure after committing a readable checkpoint", async () => {
+    const dir = await directory()
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const journal = testJournal(dir, { log })
+    const first = await accepted(journal, frame("vacuum-prefix"), 0)
+    const second = await accepted(journal, frame("vacuum-tail"), first)
+    const checkpoint: JournalCheckpoint = { identity: "vacuum-v1", cursor: first, value: { state: 1 } }
+    const original = Database.prototype.run
+    const vacuum = vi.spyOn(Database.prototype, "run").mockImplementation(function (
+      this: Database,
+      sql: string,
+      ...bindings: unknown[]
+    ) {
+      if (sql.includes("incremental_vacuum")) throw new Error("injected incremental vacuum failure")
+      return Reflect.apply(original, this, [sql, ...bindings])
+    } as typeof Database.prototype.run)
+    try {
+      await expect(journal.checkpoint?.save?.(checkpoint)).resolves.toBe(true)
+    } finally {
+      vacuum.mockRestore()
+    }
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "log",
+        namespace: "yrd:journal",
+        level: "warn",
+        props: expect.objectContaining({
+          action: "deferred",
+          reason: "incremental-vacuum-failed",
+          error: "injected incremental vacuum failure",
+        }),
+      }),
+    )
+    await expect(journal.checkpoint?.load(checkpoint.identity)).resolves.toEqual(checkpoint)
+    await expect(Array.fromAsync(journal.read())).resolves.toEqual([
+      { cursor: first, values: [frame("vacuum-prefix")] },
+      { cursor: second, values: [frame("vacuum-tail")] },
+    ])
   })
 
   it("binds a projection checkpoint checksum to its exact stored JSON bytes", async () => {
@@ -569,7 +956,7 @@ describe("SQLite Journal", () => {
     await expect(journal.checkpoint?.load(checkpoint.identity)).resolves.toBeUndefined()
   })
 
-  it("defers exact prefix validation off checkpoint, append, and bounded-tail hot paths", async () => {
+  it("fails loud if deprecated prefix bytes try to become a second history authority", async () => {
     const dir = await directory()
     const journal = testJournal(dir)
     const cursor = await accepted(journal, frame("prefix-bytes"), 0)
@@ -581,11 +968,10 @@ describe("SQLite Journal", () => {
       database.query("UPDATE journal_snapshot SET prefix_json = prefix_json || ' '").run()
     }
 
-    await expect(journal.checkpoint?.load?.("projection-v1")).resolves.toEqual(checkpoint)
-    const tail = await accepted(journal, frame("tail-after-corrupt-prefix"), cursor)
-    await expect(Array.fromAsync(journal.read(cursor))).resolves.toEqual([
-      { cursor: tail, values: [frame("tail-after-corrupt-prefix")] },
-    ])
+    await expect(journal.checkpoint?.load?.("projection-v1")).rejects.toThrow("snapshot prefix checksum mismatch")
+    await expect(journal.append(frame("tail-after-corrupt-prefix"), cursor)).rejects.toThrow(
+      "snapshot prefix checksum mismatch",
+    )
     await expect(Array.fromAsync(journal.read())).rejects.toThrow("snapshot prefix checksum mismatch")
   })
 

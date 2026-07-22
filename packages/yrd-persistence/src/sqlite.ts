@@ -4,7 +4,18 @@ import { copyFile, mkdir, open, readFile, readdir, rename, rm, stat, writeFile }
 import { basename, join } from "node:path"
 import { gunzipSync } from "node:zlib"
 import { constants, Database } from "bun:sqlite"
-import { observeYrdLifecycle, parseJournalFrame, type Journal, type JournalCheckpoint } from "@yrd/core"
+import {
+  observeYrdLifecycle,
+  parseJournalFrame,
+  type Journal,
+  type JournalCheckpoint,
+  type JournalEntityKind,
+  type JournalHistory,
+  type JournalHistoryDiagnostics,
+  type JournalHistoryEntry,
+  type JournalIdentityKind,
+  type JournalFrame,
+} from "@yrd/core"
 import canonicalize from "canonicalize"
 import { createLogger, type ConditionalLogger } from "loggily"
 import { createExclusive, type Exclusive, type ExclusiveOptions } from "./lock.ts"
@@ -54,7 +65,7 @@ const LEGACY_RECOVERY_FILE = "events-v4.recovery.json"
 const LEGACY_V3_FILE = "events-v3.jsonl"
 const LEGACY_CUTOVER = `{"v":4,"cutover":"${LEGACY_MANIFEST_FILE}"}\n`
 const SQLITE_CUTOVER_VERSION = 1
-const SCHEMA_VERSION = 1
+const SCHEMA_VERSION = 2
 const LEGACY_PRIVATE_PATH = /^events-v4\.[a-zA-Z0-9._-]+$/u
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
@@ -153,9 +164,6 @@ type PreparedCheckpoint = Readonly<{
   snapshotCursor: number
   snapshotPrefixSha256: string
   snapshotPrefixLastCursor: number
-  prefixJson: string
-  prefixSha256: string
-  prefixLastCursor: number
   checkpointJson: string
   checkpointSha256: string
   compactedEvents: number
@@ -248,6 +256,7 @@ export function createReadOnlyJournal(options: JournalOptions): Journal<unknown>
 
 function createJournalWithMode(options: JournalOptions, mode: JournalMode): Journal<unknown> {
   const runtime = context(options)
+  let archiveFallbacks = 0
   const checkpoint = {
     load: (identity: string) => loadCheckpoint(runtime, mode, identity),
     ...(mode === "mutable" ? { save: (value: JournalCheckpoint) => saveCheckpoint(runtime, value) } : {}),
@@ -290,7 +299,9 @@ function createJournalWithMode(options: JournalOptions, mode: JournalMode): Jour
               database
                 .query("INSERT INTO journal_events(cursor, value_json, sha256) VALUES (?, ?, ?)")
                 .run(cursor, valueJson, digestText(valueJson))
+              insertFrameFacts(database, cursor, frame)
               writeMetadata(database, "head_cursor", String(cursor))
+              writeMetadata(database, "facts_head", String(cursor))
               database.run("COMMIT")
             } catch (error) {
               rollback(database)
@@ -302,6 +313,23 @@ function createJournalWithMode(options: JournalOptions, mode: JournalMode): Jour
     },
   }
   Object.defineProperty(journal, "checkpoint", { value: checkpoint, enumerable: false })
+  const history: JournalHistory<unknown> = Object.freeze({
+    command(query) {
+      archiveFallbacks += 1
+      return lookupCommand(runtime, query)
+    },
+    hasIdentity(kind, id) {
+      return lookupIdentity(runtime, kind, id)
+    },
+    entity(kind, id) {
+      archiveFallbacks += 1
+      return lookupEntity(runtime, kind, id)
+    },
+    diagnostics() {
+      return historyDiagnostics(runtime, archiveFallbacks)
+    },
+  })
+  Object.defineProperty(journal, "history", { value: history, enumerable: false })
   return journal
 }
 
@@ -389,6 +417,14 @@ async function saveCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): 
       }
       database.run("BEGIN IMMEDIATE")
       try {
+        database
+          .query(
+            `INSERT INTO journal_history(cursor, value_json, sha256)
+           SELECT cursor, value_json, sha256 FROM journal_events WHERE cursor <= ?
+           ON CONFLICT(cursor) DO NOTHING`,
+          )
+          .run(checkpoint.cursor)
+        const emptyPrefix = "[]"
         const updated = database
           .query(
             `UPDATE journal_snapshot
@@ -398,9 +434,9 @@ async function saveCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): 
           )
           .run(
             checkpoint.cursor,
-            prepared.prefixJson,
-            prepared.prefixSha256,
-            prepared.prefixLastCursor,
+            emptyPrefix,
+            digestText(emptyPrefix),
+            0,
             checkpoint.identity,
             prepared.checkpointJson,
             prepared.checkpointSha256,
@@ -429,6 +465,7 @@ async function saveCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): 
         cursor: checkpoint.cursor,
         compactedEvents: prepared.compactedEvents,
       })
+      incrementalVacuum(runtime, database)
       return true
     })
   } catch (error) {
@@ -460,11 +497,12 @@ function prepareCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): Pre
     }
     if (checkpoint.cursor !== snapshot.cursor) {
       const committed = database
-        .query<{ committed: number }, [number, number]>(
+        .query<{ committed: number }, [number, number, number]>(
           `SELECT EXISTS(SELECT 1 FROM journal_events WHERE cursor = ?)
+                OR EXISTS(SELECT 1 FROM journal_history WHERE cursor = ?)
                 OR EXISTS(SELECT 1 FROM journal_orphans WHERE cursor = ?) AS committed`,
         )
-        .get(checkpoint.cursor, checkpoint.cursor)
+        .get(checkpoint.cursor, checkpoint.cursor, checkpoint.cursor)
       if (committed?.committed !== 1) {
         database.run("COMMIT")
         runtime.log.warn?.("journal projection checkpoint refused: no committed row at cursor", {
@@ -475,27 +513,21 @@ function prepareCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): Pre
         return null
       }
     }
-    const prefix = readVerifiedPrefix(database, snapshot)
-    const covered = database
-      .query<StoredEvent, [number, number]>(
-        "SELECT cursor, value_json, sha256 FROM journal_events WHERE cursor > ? AND cursor <= ? ORDER BY cursor",
-      )
-      .all(snapshot.cursor, checkpoint.cursor)
-      .map(decodeStoredEvent)
+    const covered =
+      database
+        .query<{ count: number }, [number, number]>(
+          "SELECT COUNT(*) AS count FROM journal_events WHERE cursor > ? AND cursor <= ?",
+        )
+        .get(snapshot.cursor, checkpoint.cursor)?.count ?? 0
     database.run("COMMIT")
-    const prefixJson = JSON.stringify([...prefix, ...covered])
-    const prefixLastCursor = covered.at(-1)?.cursor ?? snapshot.prefix_last_cursor
     const checkpointJson = JSON.stringify(checkpoint)
     return {
       snapshotCursor: snapshot.cursor,
       snapshotPrefixSha256: snapshot.prefix_sha256,
       snapshotPrefixLastCursor: snapshot.prefix_last_cursor,
-      prefixJson,
-      prefixSha256: sha256(Buffer.from(prefixJson)),
-      prefixLastCursor,
       checkpointJson,
       checkpointSha256: sha256(Buffer.from(checkpointJson)),
-      compactedEvents: covered.length,
+      compactedEvents: covered,
     }
   } catch (error) {
     rollback(database)
@@ -529,9 +561,13 @@ async function readBatches(
     let served = after
     if (after < snapshot.cursor) {
       const coveredEnd = Math.min(end, snapshot.cursor)
-      const entries = readVerifiedPrefix(database, snapshot).filter(
-        (entry) => entry.cursor > after && entry.cursor <= coveredEnd,
-      )
+      const entries = database
+        .query<StoredEvent, [number, number]>(
+          `SELECT cursor, value_json, sha256 FROM journal_history
+           WHERE cursor > ? AND cursor <= ? ORDER BY cursor`,
+        )
+        .all(after, coveredEnd)
+        .map(decodeStoredEvent)
       const markers = database
         .query<StoredMarker, [number, number]>(
           "SELECT cursor FROM journal_orphans WHERE cursor > ? AND cursor <= ? ORDER BY cursor",
@@ -611,6 +647,15 @@ function openMutable(runtime: Context): Database {
 async function ensureDatabase(runtime: Context): Promise<void> {
   assertMutablePlatform(runtime)
   if (await exists(runtime.path)) {
+    let userVersion: number | undefined
+    let maintenancePending = false
+    {
+      using database = openReadOnly(runtime.path)
+      userVersion = database.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version
+      maintenancePending = userVersion === SCHEMA_VERSION && readMetadata(database, "maintenance_pending") === "1"
+    }
+    if (userVersion === 1) await migrateSchemaV1(runtime)
+    else if (userVersion === SCHEMA_VERSION && maintenancePending) await finishSchemaMaintenance(runtime)
     using database = openReadOnly(runtime.path)
     assertComplete(database, runtime.path)
     await finalizeExistingSqliteCutover(runtime, database)
@@ -622,6 +667,86 @@ async function ensureDatabase(runtime: Context): Promise<void> {
   if (await recoverInterruptedSqliteCutover(runtime)) return
   const legacy = await readLegacySource(runtime)
   await publishCandidate(runtime, legacy)
+}
+
+async function migrateSchemaV1(runtime: Context): Promise<void> {
+  using database = new Database(runtime.path, { create: false, readwrite: true, strict: true })
+  assertSafeWalVersion(runtime.sqliteVersion ?? sqliteVersion(database))
+  const version = database.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version
+  if (version !== 1) throw new Error(`yrd: journal v1 migration expected schema 1, observed ${version ?? "missing"}`)
+  const snapshot = readSnapshotHeader(database)
+  const prefix = readVerifiedPrefix(database, snapshot)
+  const tail = database
+    .query<StoredEvent, []>("SELECT cursor, value_json, sha256 FROM journal_events ORDER BY cursor")
+    .all()
+  await runtime.phase("schema-v2-prepared", { historyFrames: prefix.length, tailFrames: tail.length })
+  database.run("BEGIN IMMEDIATE")
+  try {
+    database.run(`
+      CREATE TABLE journal_history (
+        cursor INTEGER PRIMARY KEY NOT NULL CHECK (cursor > 0),
+        value_json TEXT NOT NULL CHECK (json_valid(value_json)),
+        sha256 TEXT NOT NULL CHECK (length(sha256) = 64)
+      ) STRICT;
+      CREATE TABLE journal_commands (
+        cursor INTEGER PRIMARY KEY NOT NULL CHECK (cursor > 0),
+        command_id TEXT UNIQUE NOT NULL,
+        command_key TEXT UNIQUE,
+        command_hash TEXT NOT NULL CHECK (length(command_hash) = 64),
+        cause_id TEXT UNIQUE NOT NULL
+      ) STRICT;
+      CREATE TABLE journal_event_ids (
+        event_id TEXT PRIMARY KEY NOT NULL,
+        cursor INTEGER NOT NULL CHECK (cursor > 0),
+        event_index INTEGER NOT NULL CHECK (event_index >= 0),
+        UNIQUE(cursor, event_index)
+      ) STRICT;
+      CREATE TABLE journal_entities (
+        kind TEXT NOT NULL CHECK (kind IN ('job', 'job-key', 'queue')),
+        id TEXT NOT NULL,
+        cursor INTEGER NOT NULL CHECK (cursor > 0),
+        PRIMARY KEY(kind, id, cursor)
+      ) STRICT;
+      CREATE INDEX journal_entities_cursor ON journal_entities(cursor);
+    `)
+    const insertHistory = database.query("INSERT INTO journal_history(cursor, value_json, sha256) VALUES (?, ?, ?)")
+    for (const entry of prefix) {
+      const valueJson = JSON.stringify(entry.value)
+      insertHistory.run(entry.cursor, valueJson, digestText(valueJson))
+      insertFrameFacts(database, entry.cursor, parseJournalFrame(entry.value))
+    }
+    for (const row of tail) insertFrameFacts(database, row.cursor, decodeStoredEvent(row).value as JournalFrame)
+    const emptyPrefix = "[]"
+    database
+      .query(
+        `UPDATE journal_snapshot
+         SET prefix_json = ?, prefix_sha256 = ?, prefix_last_cursor = 0
+         WHERE singleton = 1`,
+      )
+      .run(emptyPrefix, digestText(emptyPrefix))
+    writeMetadata(database, "schema_version", String(SCHEMA_VERSION))
+    writeMetadata(database, "maintenance_pending", "1")
+    writeMetadata(database, "facts_head", readMetadata(database, "head_cursor"))
+    database.run(`PRAGMA user_version = ${SCHEMA_VERSION}`)
+    assertJournalFacts(database)
+    database.run("COMMIT")
+  } catch (error) {
+    rollback(database)
+    throw error
+  }
+  await runtime.phase("schema-v2-committed", { path: runtime.path })
+  database.close()
+  await finishSchemaMaintenance(runtime)
+}
+
+async function finishSchemaMaintenance(runtime: Context): Promise<void> {
+  await runtime.phase("schema-v2-maintenance-started", { path: runtime.path })
+  using database = new Database(runtime.path, { create: false, readwrite: true, strict: true })
+  database.run("PRAGMA synchronous = FULL")
+  database.run("PRAGMA auto_vacuum = INCREMENTAL")
+  database.run("VACUUM")
+  writeMetadata(database, "maintenance_pending", "0")
+  await runtime.phase("schema-v2-maintenance-complete", { path: runtime.path })
 }
 
 function assertMutablePlatform(runtime: Context): void {
@@ -642,6 +767,7 @@ async function publishCandidate(runtime: Context, legacy: LegacySource | null): 
     using database = new Database(candidate, { create: true, readwrite: true, strict: true })
     database.run("PRAGMA journal_mode = DELETE")
     database.run("PRAGMA synchronous = FULL")
+    database.run("PRAGMA auto_vacuum = INCREMENTAL")
     createSchema(database, head, fingerprint)
     database.run("BEGIN IMMEDIATE")
     try {
@@ -653,6 +779,7 @@ async function publishCandidate(runtime: Context, legacy: LegacySource | null): 
         if (row.kind === "live") {
           const valueJson = JSON.stringify(row.value)
           insertEvent.run(row.cursor, valueJson, digestText(valueJson))
+          insertFrameFacts(database, row.cursor, parseJournalFrame(row.value))
           continue
         }
         const recordJson = JSON.stringify(row.value)
@@ -664,7 +791,9 @@ async function publishCandidate(runtime: Context, legacy: LegacySource | null): 
           row.value.provenance["source-sha256"] ?? "legacy-v4",
         )
       }
+      assertJournalFacts(database)
       writeMetadata(database, "migration_complete", "1")
+      writeMetadata(database, "facts_head", String(head))
       database.run("COMMIT")
     } catch (error) {
       rollback(database)
@@ -740,6 +869,31 @@ function createSchema(database: Database, head: number, fingerprint: string): vo
       value_json TEXT NOT NULL CHECK (json_valid(value_json)),
       sha256 TEXT NOT NULL CHECK (length(sha256) = 64)
     ) STRICT;
+    CREATE TABLE journal_history (
+      cursor INTEGER PRIMARY KEY NOT NULL CHECK (cursor > 0),
+      value_json TEXT NOT NULL CHECK (json_valid(value_json)),
+      sha256 TEXT NOT NULL CHECK (length(sha256) = 64)
+    ) STRICT;
+    CREATE TABLE journal_commands (
+      cursor INTEGER PRIMARY KEY NOT NULL CHECK (cursor > 0),
+      command_id TEXT UNIQUE NOT NULL,
+      command_key TEXT UNIQUE,
+      command_hash TEXT NOT NULL CHECK (length(command_hash) = 64),
+      cause_id TEXT UNIQUE NOT NULL
+    ) STRICT;
+    CREATE TABLE journal_event_ids (
+      event_id TEXT PRIMARY KEY NOT NULL,
+      cursor INTEGER NOT NULL CHECK (cursor > 0),
+      event_index INTEGER NOT NULL CHECK (event_index >= 0),
+      UNIQUE(cursor, event_index)
+    ) STRICT;
+    CREATE TABLE journal_entities (
+      kind TEXT NOT NULL CHECK (kind IN ('job', 'job-key', 'queue')),
+      id TEXT NOT NULL,
+      cursor INTEGER NOT NULL CHECK (cursor > 0),
+      PRIMARY KEY(kind, id, cursor)
+    ) STRICT;
+    CREATE INDEX journal_entities_cursor ON journal_entities(cursor);
     CREATE TABLE journal_snapshot (
       singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
       cursor INTEGER NOT NULL CHECK (cursor >= 0),
@@ -773,8 +927,10 @@ function createSchema(database: Database, head: number, fingerprint: string): vo
     .run(emptyJson, sha256(Buffer.from(emptyJson)))
   writeMetadata(database, "schema_version", String(SCHEMA_VERSION))
   writeMetadata(database, "head_cursor", String(head))
+  writeMetadata(database, "facts_head", String(head))
   writeMetadata(database, "source_fingerprint", fingerprint)
   writeMetadata(database, "migration_complete", "0")
+  writeMetadata(database, "maintenance_pending", "0")
 }
 
 function assertComplete(database: Database, path: string): Readonly<{ head: number; snapshot: SnapshotHeader }> {
@@ -785,12 +941,17 @@ function assertComplete(database: Database, path: string): Readonly<{ head: numb
   if (readMetadata(database, "migration_complete") !== "1") {
     throw new Error(`yrd: incomplete SQLite journal migration at ${path}`)
   }
+  if (readMetadata(database, "maintenance_pending") !== "0") {
+    throw new Error(`yrd: incomplete SQLite journal maintenance at ${path}`)
+  }
+  const autoVacuum = database.query<{ auto_vacuum: number }, []>("PRAGMA auto_vacuum").get()?.auto_vacuum
+  if (autoVacuum !== 2) throw new Error(`yrd: SQLite journal incremental auto-vacuum is not active at ${path}`)
   const head = readHead(database)
   const snapshot = readSnapshotHeader(database)
   assertCursor(snapshot.cursor)
   assertCursor(snapshot.prefix_last_cursor)
-  if (snapshot.prefix_last_cursor > snapshot.cursor) {
-    throw new Error("yrd: SQLite journal snapshot prefix boundary is invalid")
+  if (snapshot.prefix_last_cursor !== 0 || readVerifiedPrefix(database, snapshot).length !== 0) {
+    throw new Error("yrd: SQLite journal v2 snapshot must not duplicate row history in prefix_json")
   }
   if (snapshot.checkpoint_json_present !== 0 && snapshot.checkpoint_json_present !== 1) {
     throw new Error("yrd: SQLite journal checkpoint presence is invalid")
@@ -811,24 +972,37 @@ function assertComplete(database: Database, path: string): Readonly<{ head: numb
       `yrd: SQLite journal event cursor ${hiddenEvent.cursor} is hidden at or below snapshot ${snapshot.cursor}`,
     )
   }
+  const futureHistory = database
+    .query<{ cursor: number }, [number]>("SELECT cursor FROM journal_history WHERE cursor > ? ORDER BY cursor LIMIT 1")
+    .get(snapshot.cursor)
+  if (futureHistory !== null) {
+    throw new Error(`yrd: SQLite journal history cursor ${futureHistory.cursor} is above snapshot ${snapshot.cursor}`)
+  }
   const tableOverlap = database
     .query<{ cursor: number }, []>(
-      `SELECT orphan.cursor FROM journal_orphans orphan
-       WHERE EXISTS(SELECT 1 FROM journal_events event WHERE event.cursor = orphan.cursor)
+      `SELECT cursor FROM (
+         SELECT event.cursor FROM journal_events event
+          WHERE EXISTS(SELECT 1 FROM journal_history history WHERE history.cursor = event.cursor)
+         UNION ALL
+         SELECT orphan.cursor FROM journal_orphans orphan
+          WHERE EXISTS(SELECT 1 FROM journal_events event WHERE event.cursor = orphan.cursor)
+             OR EXISTS(SELECT 1 FROM journal_history history WHERE history.cursor = orphan.cursor)
+       )
        LIMIT 1`,
     )
     .get()
   if (tableOverlap !== null) {
     throw new Error(`yrd: SQLite journal cursor ${tableOverlap.cursor} overlaps live and orphan tables`)
   }
-  const snapshotOrphan =
+  const snapshotBoundary =
     snapshot.cursor > 0 &&
     database
-      .query<{ committed: number }, [number]>(
-        "SELECT EXISTS(SELECT 1 FROM journal_orphans WHERE cursor = ?) AS committed",
+      .query<{ committed: number }, [number, number]>(
+        `SELECT EXISTS(SELECT 1 FROM journal_history WHERE cursor = ?)
+             OR EXISTS(SELECT 1 FROM journal_orphans WHERE cursor = ?) AS committed`,
       )
-      .get(snapshot.cursor)?.committed === 1
-  if (snapshot.cursor > 0 && snapshot.prefix_last_cursor !== snapshot.cursor && !snapshotOrphan) {
+      .get(snapshot.cursor, snapshot.cursor)?.committed === 1
+  if (snapshot.cursor > 0 && !snapshotBoundary) {
     throw new Error(`yrd: SQLite journal snapshot cursor ${snapshot.cursor} has no committed boundary`)
   }
   const eventMax =
@@ -836,11 +1010,17 @@ function assertComplete(database: Database, path: string): Readonly<{ head: numb
   const orphanMax =
     database.query<{ cursor: number | null }, []>("SELECT MAX(cursor) AS cursor FROM journal_orphans").get()?.cursor ??
     0
-  const committedHead = Math.max(snapshot.cursor, eventMax, orphanMax)
+  const historyMax =
+    database.query<{ cursor: number | null }, []>("SELECT MAX(cursor) AS cursor FROM journal_history").get()?.cursor ??
+    0
+  const committedHead = Math.max(snapshot.cursor, eventMax, historyMax, orphanMax)
   if (snapshot.cursor > head || head !== committedHead) {
     throw new Error(
       `yrd: SQLite journal head/cursor binding is invalid at ${path} (head=${head}, snapshot=${snapshot.cursor}, events=${eventMax}, orphans=${orphanMax})`,
     )
+  }
+  if (readMetadata(database, "facts_head") !== String(head)) {
+    throw new Error(`yrd: SQLite journal lookup facts are not bound to head ${head}`)
   }
   return { head, snapshot }
 }
@@ -951,6 +1131,259 @@ function decodeStoredEvent(row: StoredEvent): PrefixEntry {
     throw new Error(`yrd: SQLite journal event checksum mismatch at cursor ${row.cursor}`)
   }
   return { cursor: row.cursor, value: parseJournalFrame(JSON.parse(row.value_json)) }
+}
+
+function insertFrameFacts(database: Database, cursor: number, frame: JournalFrame): void {
+  database
+    .query(
+      `INSERT INTO journal_commands(cursor, command_id, command_key, command_hash, cause_id)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+    .run(cursor, frame.command.id, frame.cause.key ?? null, frame.cause.commandHash, frame.cause.id)
+  const insertEvent = database.query("INSERT INTO journal_event_ids(event_id, cursor, event_index) VALUES (?, ?, ?)")
+  for (const [index, applied] of frame.events.entries()) insertEvent.run(applied.id, cursor, index)
+  const insertEntity = database.query("INSERT OR IGNORE INTO journal_entities(kind, id, cursor) VALUES (?, ?, ?)")
+  for (const [kind, id] of frameEntities(frame)) insertEntity.run(kind, id, cursor)
+}
+
+function frameEntities(frame: JournalFrame): readonly Readonly<[JournalEntityKind, string]>[] {
+  const facts = new Set<string>()
+  const add = (kind: JournalEntityKind, id: unknown): void => {
+    if (typeof id === "string" && id !== "") facts.add(`${kind}\0${id}`)
+  }
+  for (const applied of frame.events) {
+    const data =
+      typeof applied.data === "object" && applied.data !== null && !Array.isArray(applied.data)
+        ? (applied.data as Readonly<Record<string, unknown>>)
+        : undefined
+    if (applied.name === "job/requested") {
+      add("job", applied.id)
+      add("job-key", data?.key)
+    } else if (applied.name === "job/transitioned") {
+      add("job", data?.id)
+    } else if (applied.name === "job/restored") {
+      const job =
+        typeof data?.job === "object" && data.job !== null && !Array.isArray(data.job)
+          ? (data.job as Readonly<Record<string, unknown>>)
+          : undefined
+      add("job", job?.id)
+      add("job-key", job?.key)
+    }
+
+    const run = data?.run
+    if (typeof run === "string") add("queue", run)
+    else if (typeof run === "object" && run !== null && !Array.isArray(run)) {
+      add("queue", (run as Readonly<Record<string, unknown>>).id)
+    }
+    if (applied.name === "queue/batch/isolated") add("queue", data?.parent)
+  }
+  return [...facts].map((fact) => {
+    const separator = fact.indexOf("\0")
+    return [fact.slice(0, separator) as JournalEntityKind, fact.slice(separator + 1)] as const
+  })
+}
+
+function storedFrameAt(database: Database, cursor: number): JournalFrame {
+  const row = database
+    .query<StoredEvent, [number, number]>(
+      `SELECT cursor, value_json, sha256 FROM journal_history WHERE cursor = ?
+       UNION ALL
+       SELECT cursor, value_json, sha256 FROM journal_events WHERE cursor = ?`,
+    )
+    .get(cursor, cursor)
+  if (row === null) throw new Error(`yrd: journal lookup cursor ${cursor} has no immutable frame`)
+  return decodeStoredEvent(row).value as JournalFrame
+}
+
+function lookupCommand(runtime: Context, query: Readonly<{ id?: string; key?: string }>): JournalFrame | undefined {
+  if (query.id === undefined && query.key === undefined) {
+    throw new TypeError("yrd: journal command lookup requires id or key")
+  }
+  if (!existsSync(runtime.path)) return undefined
+  using database = openReadOnly(runtime.path)
+  return readTransaction(database, () => {
+    assertComplete(database, runtime.path)
+    const rows = database
+      .query<
+        { cursor: number; command_id: string; command_key: string | null; command_hash: string; cause_id: string },
+        [string | null, string | null, string | null, string | null]
+      >(
+        `SELECT cursor, command_id, command_key, command_hash, cause_id
+         FROM journal_commands
+         WHERE (? IS NOT NULL AND command_id = ?) OR (? IS NOT NULL AND command_key = ?)
+         ORDER BY cursor`,
+      )
+      .all(query.id ?? null, query.id ?? null, query.key ?? null, query.key ?? null)
+    if (rows.length === 0) return undefined
+    if (rows.length !== 1) throw new Error("yrd: journal command id and key resolve to different immutable frames")
+    const row = rows[0]
+    if (row === undefined) return undefined
+    const frame = storedFrameAt(database, row.cursor)
+    if (
+      frame.command.id !== row.command_id ||
+      frame.cause.key !== (row.command_key ?? undefined) ||
+      frame.cause.commandHash !== row.command_hash ||
+      frame.cause.id !== row.cause_id
+    ) {
+      throw new Error(`yrd: journal command lookup facts disagree at cursor ${row.cursor}`)
+    }
+    return frame
+  })
+}
+
+function lookupIdentity(runtime: Context, kind: JournalIdentityKind, id: string): boolean {
+  if (!existsSync(runtime.path)) return false
+  using database = openReadOnly(runtime.path)
+  return readTransaction(database, () => {
+    assertComplete(database, runtime.path)
+    const cursor =
+      kind === "cause"
+        ? database.query<{ cursor: number }, [string]>("SELECT cursor FROM journal_commands WHERE cause_id = ?").get(id)
+            ?.cursor
+        : database
+            .query<{ cursor: number }, [string]>("SELECT cursor FROM journal_event_ids WHERE event_id = ?")
+            .get(id)?.cursor
+    if (cursor === undefined) return false
+    const frame = storedFrameAt(database, cursor)
+    const matches = kind === "cause" ? frame.cause.id === id : frame.events.some((applied) => applied.id === id)
+    if (!matches) throw new Error(`yrd: journal ${kind} lookup facts disagree at cursor ${cursor}`)
+    return true
+  })
+}
+
+function lookupEntity(
+  runtime: Context,
+  kind: JournalEntityKind,
+  id: string,
+): readonly JournalHistoryEntry<JournalFrame>[] {
+  if (!existsSync(runtime.path)) return []
+  using database = openReadOnly(runtime.path)
+  return readTransaction(database, () => {
+    assertComplete(database, runtime.path)
+    return database
+      .query<{ cursor: number }, [JournalEntityKind, string]>(
+        "SELECT cursor FROM journal_entities WHERE kind = ? AND id = ? ORDER BY cursor",
+      )
+      .all(kind, id)
+      .map(({ cursor }) => {
+        const value = storedFrameAt(database, cursor)
+        if (
+          !frameEntities(value).some(([candidateKind, candidateId]) => candidateKind === kind && candidateId === id)
+        ) {
+          throw new Error(`yrd: journal entity lookup facts disagree at cursor ${cursor}`)
+        }
+        return { cursor, value }
+      })
+  })
+}
+
+function historyDiagnostics(runtime: Context, archiveFallbacks: number): JournalHistoryDiagnostics {
+  if (!existsSync(runtime.path)) {
+    return {
+      pageCount: 0,
+      freelistCount: 0,
+      autoVacuum: "incremental",
+      historyFrames: 0,
+      tailFrames: 0,
+      archiveFallbacks,
+    }
+  }
+  using database = openReadOnly(runtime.path)
+  return readTransaction(database, () => {
+    assertComplete(database, runtime.path)
+    assertJournalFacts(database)
+    const scalar = (sql: string, field: string): number => {
+      // Bun caches Database.query() statements. Large freelists can leave a
+      // cached PRAGMA statement busy at connection disposal, so diagnostics
+      // prepares and finalizes these one-shot scalar reads explicitly.
+      const statement = database.prepare<Record<string, number>, []>(sql)
+      try {
+        return statement.get()?.[field] ?? 0
+      } finally {
+        statement.finalize()
+      }
+    }
+    const pageCount = scalar("PRAGMA page_count", "page_count")
+    const freelistCount = scalar("PRAGMA freelist_count", "freelist_count")
+    const autoVacuumValue = scalar("PRAGMA auto_vacuum", "auto_vacuum")
+    const autoVacuum = autoVacuumValue === 2 ? "incremental" : autoVacuumValue === 1 ? "full" : "none"
+    const historyFrames = scalar("SELECT COUNT(*) AS count FROM journal_history", "count")
+    const tailFrames = scalar("SELECT COUNT(*) AS count FROM journal_events", "count")
+    return { pageCount, freelistCount, autoVacuum, historyFrames, tailFrames, archiveFallbacks }
+  })
+}
+
+function assertJournalFacts(database: Database): void {
+  const frames = database
+    .query<StoredEvent, []>(
+      `SELECT cursor, value_json, sha256 FROM journal_history
+       UNION ALL
+       SELECT cursor, value_json, sha256 FROM journal_events
+       ORDER BY cursor`,
+    )
+    .all()
+  const commands = database
+    .query<
+      { cursor: number; command_id: string; command_key: string | null; command_hash: string; cause_id: string },
+      []
+    >("SELECT cursor, command_id, command_key, command_hash, cause_id FROM journal_commands ORDER BY cursor")
+    .all()
+  const events = database
+    .query<{ event_id: string; cursor: number; event_index: number }, []>(
+      "SELECT event_id, cursor, event_index FROM journal_event_ids ORDER BY cursor, event_index",
+    )
+    .all()
+  const entities = database
+    .query<{ kind: JournalEntityKind; id: string; cursor: number }, []>(
+      "SELECT kind, id, cursor FROM journal_entities ORDER BY kind, id, cursor",
+    )
+    .all()
+  const expectedCommands: typeof commands = []
+  const expectedEvents: typeof events = []
+  const expectedEntities: typeof entities = []
+  for (const row of frames) {
+    const frame = decodeStoredEvent(row).value as JournalFrame
+    expectedCommands.push({
+      cursor: row.cursor,
+      command_id: frame.command.id,
+      command_key: frame.cause.key ?? null,
+      command_hash: frame.cause.commandHash,
+      cause_id: frame.cause.id,
+    })
+    for (const [event_index, applied] of frame.events.entries()) {
+      expectedEvents.push({ event_id: applied.id, cursor: row.cursor, event_index })
+    }
+    for (const [kind, id] of frameEntities(frame)) expectedEntities.push({ kind, id, cursor: row.cursor })
+  }
+  expectedEntities.sort(
+    (left, right) =>
+      Buffer.compare(Buffer.from(left.kind), Buffer.from(right.kind)) ||
+      Buffer.compare(Buffer.from(left.id), Buffer.from(right.id)) ||
+      left.cursor - right.cursor,
+  )
+  if (JSON.stringify(commands) !== JSON.stringify(expectedCommands)) {
+    throw new Error("yrd: journal command lookup index does not equal immutable frame facts")
+  }
+  if (JSON.stringify(events) !== JSON.stringify(expectedEvents)) {
+    throw new Error("yrd: journal event lookup index does not equal immutable frame facts")
+  }
+  if (JSON.stringify(entities) !== JSON.stringify(expectedEntities)) {
+    throw new Error("yrd: journal entity lookup index does not equal immutable frame facts")
+  }
+}
+
+function incrementalVacuum(runtime: Context, database: Database): void {
+  try {
+    database.run("PRAGMA incremental_vacuum(256)")
+  } catch (error) {
+    runtime.log.warn?.("journal incremental vacuum deferred after a committed checkpoint", {
+      action: "deferred",
+      reason: "incremental-vacuum-failed",
+      path: runtime.path,
+      pages: 256,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
 }
 
 function readTransaction<Result>(database: Database, operation: () => Result): Result {
@@ -1773,6 +2206,7 @@ export async function importOrphanJournal(
         insert.run(record.provenance["origin-row"], cursor, recordJson, digestText(recordJson), sourceSha256)
       }
       writeMetadata(database, "head_cursor", String(cursor))
+      writeMetadata(database, "facts_head", String(cursor))
       database.run("COMMIT")
       return { status: "imported" as const, cursor, records: records.length, sourceSha256 }
     } catch (error) {
@@ -1783,9 +2217,12 @@ export async function importOrphanJournal(
 }
 
 function allLiveFrames(database: Database): readonly unknown[] {
-  const snapshot = readSnapshotHeader(database)
   return [
-    ...readVerifiedPrefix(database, snapshot).map((entry) => entry.value),
+    ...database
+      .query<StoredEvent, []>("SELECT cursor, value_json, sha256 FROM journal_history ORDER BY cursor")
+      .all()
+      .map(decodeStoredEvent)
+      .map((entry) => entry.value),
     ...database
       .query<StoredEvent, []>("SELECT cursor, value_json, sha256 FROM journal_events ORDER BY cursor")
       .all()
