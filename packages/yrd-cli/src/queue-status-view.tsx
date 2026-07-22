@@ -528,6 +528,7 @@ export type HumanPRProjection = Row &
     taskStatus: TaskStatus
     glyph: StatusGlyph
     runId?: string
+    lane?: QueueRun["lane"]
     submittedAt?: string
     sourceReadyAt?: string
     revisionLineage: readonly number[]
@@ -2180,6 +2181,7 @@ function projectPR(
     state: stateLabel,
     ...taskStatusFields(taskStatus),
     ...(run === undefined ? {} : { runId: run.id }),
+    ...(run?.lane === undefined ? {} : { lane: run.lane }),
     ...(submittedAt === undefined ? {} : { submittedAt }),
     ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
     revisionLineage,
@@ -2275,6 +2277,7 @@ export function QueueRunsView({ runs }: { runs: readonly QueueRun[] }) {
     return {
       run: run.id,
       prs: run.prs.map((pr) => pr.id).join(","),
+      lane: run.lane ?? "-",
       state: run.status,
       ...taskStatusFields(taskStatus),
       steps: boundedQueue(queueRunSteps(run)),
@@ -2286,6 +2289,7 @@ export function QueueRunsView({ runs }: { runs: readonly QueueRun[] }) {
       columns={[
         { header: "RUN", key: "run" },
         { header: "PRS", key: "prs" },
+        { header: "LANE", key: "lane" },
         {
           header: "STATE",
           key: "state",
@@ -2729,9 +2733,14 @@ function ActiveQueue({ active }: { active: WatchActiveRow }) {
     <Box height={1}>
       <Text wrap="truncate">
         <Text bold>ACTIVE RUN </Text>
-        <QueueRunId base={active.base} run={active.run} /> <QueuePrId pr={active.pr} revision={active.revision} />{" "}
-        {active.subject} <TaskStatusGlyph taskStatus={active.taskStatus} glyph={active.glyph} /> {active.steps}{" "}
-        {active.elapsed}
+        <QueueRunId base={active.base} run={active.run} />{" "}
+        {active.lane === undefined ? null : (
+          <>
+            <Text bold>LANE</Text> {active.lane}{" "}
+          </>
+        )}
+        <QueuePrId pr={active.pr} revision={active.revision} /> {active.subject}{" "}
+        <TaskStatusGlyph taskStatus={active.taskStatus} glyph={active.glyph} /> {active.steps} {active.elapsed}
       </Text>
     </Box>
   )
@@ -2750,6 +2759,11 @@ function ProjectedPRQueue({ row, position }: { row: HumanPRProjection; position?
             <QueuePrId pr={row.pr} revision={row.revision} />
           </Link>
         )}{" "}
+        {row.lane === undefined ? null : (
+          <>
+            <Text bold>LANE</Text> {row.lane}{" "}
+          </>
+        )}
         {row.subject} <StatusValue value={row.state} href={row.log} /> age={row.age}
       </Text>
     </Box>
@@ -2886,6 +2900,7 @@ export function QueueStatusView({
 export type WatchQueueRow = Readonly<{
   pos: number
   pr: string
+  lane?: QueueRun["lane"]
   subject: string
   glyph: StatusGlyph
   taskStatus: TaskStatus
@@ -2901,6 +2916,7 @@ export function watchQueueRows(result: QueueStatusResult, now: number): WatchQue
   return humanQueueProjection(result, now).queue.map((row) => ({
     pos: row.position,
     pr: row.pr,
+    ...(row.lane === undefined ? {} : { lane: row.lane }),
     subject: row.subject,
     glyph: row.glyph,
     taskStatus: row.taskStatus,
@@ -2916,6 +2932,7 @@ export function watchQueueRows(result: QueueStatusResult, now: number): WatchQue
 export type WatchActiveRow = Readonly<{
   base: string
   run: string
+  lane?: QueueRun["lane"]
   pr: string
   revision: number
   subject: string
@@ -2945,6 +2962,7 @@ export function activeWatchRow(
   return {
     base: run.base,
     run: run.id,
+    ...(run.lane === undefined ? {} : { lane: run.lane }),
     pr: member.id,
     revision: member.revision,
     subject: boundedQueue(pr?.title ?? pr?.name ?? member.id, 80),

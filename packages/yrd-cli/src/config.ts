@@ -8,6 +8,12 @@ const StepNameSchema = TextSchema.regex(/^[a-z][a-z0-9_-]*$/iu)
 const StepNamesSchema = z.array(StepNameSchema).superRefine((names, context) => {
   if (new Set(names).size !== names.length) context.addIssue({ code: "custom", message: "contains duplicate steps" })
 })
+const LaneStepNamesSchema = z
+  .array(StepNameSchema)
+  .min(1)
+  .superRefine((names, context) => {
+    if (new Set(names).size !== names.length) context.addIssue({ code: "custom", message: "contains duplicate steps" })
+  })
 const RequirementsSchema = z.array(z.enum(["review"])).superRefine((requirements, context) => {
   if (new Set(requirements).size !== requirements.length) {
     context.addIssue({ code: "custom", message: "contains duplicate requirements" })
@@ -96,12 +102,24 @@ const ContestSchema = z
   .strict()
   .default({})
 
+const QueueLanesSchema = z
+  .object({
+    pm: z
+      .object({
+        steps: LaneStepNamesSchema,
+        concurrency: z.number().int().min(1).default(2),
+      })
+      .strict(),
+  })
+  .strict()
+
 const ProjectSchema = z
   .object({
     base: TextSchema.optional(),
     batch: z.union([z.literal(false), z.number().int().min(0)]).optional(),
     steps: StepNamesSchema.optional(),
     requires: RequirementsSchema.optional(),
+    lanes: QueueLanesSchema.optional(),
     contest: ContestSchema,
     notify: NotifySchema.optional(),
   })
@@ -113,6 +131,7 @@ export type YrdProjectConfig = Readonly<{
   batch?: false | number
   steps?: readonly string[]
   requires?: readonly "review"[]
+  lanes?: Readonly<z.infer<typeof QueueLanesSchema>>
   definitions: Readonly<Record<string, YrdStepConfig>>
   contest: Readonly<z.infer<typeof ContestSchema>>
   notify?: SignalRoutes
@@ -123,6 +142,7 @@ export type ResolvedYrdProjectConfig = Readonly<{
   batch: false | number
   steps: readonly string[]
   requires: readonly "review"[]
+  lanes?: Readonly<z.infer<typeof QueueLanesSchema>>
   definitions: Readonly<Record<string, YrdStepConfig>>
   contest: Readonly<{ concurrency: number; timeoutMs: number; evaluators: readonly string[] }>
   notify?: SignalRoutes
@@ -139,12 +159,13 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
   }
   const parsed = ProjectSchema.safeParse(value ?? {})
   if (parsed.success) {
-    const { base, batch, steps, requires, contest, notify, ...definitions } = parsed.data
+    const { base, batch, steps, requires, lanes, contest, notify, ...definitions } = parsed.data
     return {
       ...(base === undefined ? {} : { base }),
       ...(batch === undefined ? {} : { batch }),
       ...(steps === undefined ? {} : { steps }),
       ...(requires === undefined ? {} : { requires }),
+      ...(lanes === undefined ? {} : { lanes }),
       definitions,
       contest,
       ...(notify === undefined ? {} : { notify }),
@@ -160,7 +181,7 @@ function configError(issue: z.core.$ZodIssue): Error {
   if (
     issue.code === "invalid_type" &&
     issue.path.length === 1 &&
-    !["base", "batch", "steps", "requires", "contest", "notify"].includes(path)
+    !["base", "batch", "steps", "requires", "lanes", "contest", "notify"].includes(path)
   ) {
     return new Error(`yrd: config ${path} is not supported`)
   }
@@ -172,6 +193,7 @@ function configError(issue: z.core.$ZodIssue): Error {
     ["batch", "must be an integer >= 0"],
     ["contest.concurrency", "must be an integer >= 1"],
     ["contest.timeoutMs", "must be an integer >= 1"],
+    ["lanes.pm.concurrency", "must be an integer >= 1"],
   ])
   const message =
     known.get(path) ??
@@ -221,6 +243,7 @@ export async function loadYrdConfig(options: {
       batch: parsed.batch ?? 1,
       steps: parsed.steps ?? defaultSteps,
       requires: parsed.requires ?? [],
+      ...(parsed.lanes === undefined ? {} : { lanes: parsed.lanes }),
       definitions,
       contest: {
         concurrency: parsed.contest.concurrency ?? 2,

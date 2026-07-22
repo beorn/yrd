@@ -43,8 +43,11 @@ import {
   withStep,
   type CandidatePool,
   type CommandEvidence,
+  type GitDiffEntry,
   type InstalledStep,
   type IntegratedShape,
+  type PmPathPolicy,
+  type PRSnapshot,
   type PRShape,
   type QueueAuditResult,
   type StepDef,
@@ -101,12 +104,80 @@ export type DefaultYrdAppOptions = Readonly<{
   defaultActor?: string
   scope?: Scope
   log?: ConditionalLogger
+  /** Resident, code-owned PM carrier boundary supplied by the embedding host. */
+  queueLanePolicy?: PmPathPolicy
   /** Opt-in warm candidate-worktree pool shared across check steps (R40). */
   candidatePool?: CandidatePool
 }>
 
+function configuredQueuePlans(config: ResolvedYrdProjectConfig): readonly (readonly string[])[] {
+  return config.lanes === undefined ? [config.steps] : [config.steps, config.lanes.pm.steps]
+}
+
+/** Stable topological union of every configured lane plan. Runtime steps are
+ * installed once, while each QueueRecord freezes the selected lane subset. */
+function configuredStepNames(config: ResolvedYrdProjectConfig): readonly string[] {
+  const plans = configuredQueuePlans(config)
+  const order = [...new Set(plans.flat())]
+  const edges = new Map(order.map((name) => [name, new Set<string>()]))
+  const indegree = new Map(order.map((name) => [name, 0]))
+  for (const plan of plans) {
+    for (let index = 1; index < plan.length; index += 1) {
+      const before = plan[index - 1]
+      const after = plan[index]
+      if (before === undefined || after === undefined || edges.get(before)?.has(after)) continue
+      edges.get(before)?.add(after)
+      indegree.set(after, (indegree.get(after) ?? 0) + 1)
+    }
+  }
+  const ready = order.filter((name) => indegree.get(name) === 0)
+  const result: string[] = []
+  while (ready.length > 0) {
+    const name = ready.shift()
+    if (name === undefined) break
+    result.push(name)
+    for (const after of edges.get(name) ?? []) {
+      const remaining = (indegree.get(after) ?? 0) - 1
+      indegree.set(after, remaining)
+      if (remaining === 0) {
+        ready.push(after)
+        ready.sort((left, right) => order.indexOf(left) - order.indexOf(right))
+      }
+    }
+  }
+  if (result.length !== order.length) {
+    raiseFailure(
+      "configuration",
+      "queue-lane-step-order",
+      "yrd: queue lane step orders conflict; every shared step must have one consistent order",
+    )
+  }
+  return result
+}
+
+function configuredStepPhase(config: ResolvedYrdProjectConfig, name: string): "candidate" | "merge" | "integrated" {
+  if (name === "merge") return "merge"
+  const phases = new Set<"candidate" | "integrated">()
+  for (const plan of configuredQueuePlans(config)) {
+    const index = plan.indexOf(name)
+    if (index < 0) continue
+    const merge = plan.indexOf("merge")
+    phases.add(merge >= 0 && index > merge ? "integrated" : "candidate")
+  }
+  if (phases.size !== 1) {
+    raiseFailure(
+      "configuration",
+      "queue-lane-step-phase",
+      `yrd: queue step '${name}' cannot be pre-merge in one lane and post-merge in another`,
+    )
+  }
+  const [phase] = phases
+  if (phase === undefined) throw new Error(`yrd: queue step '${name}' is not selected by any lane`)
+  return phase
+}
+
 function validateConfig(config: ResolvedYrdProjectConfig): void {
-  for (const name of config.steps) {
+  for (const name of configuredStepNames(config)) {
     if (name !== "merge" && config.definitions[name]?.run === undefined) {
       raiseFailure(
         "configuration",
@@ -118,15 +189,17 @@ function validateConfig(config: ResolvedYrdProjectConfig): void {
   if (config.definitions.merge?.runner === "waiting") {
     raiseFailure("configuration", "merge-runner-invalid", "yrd: merge cannot use a waiting runner")
   }
-  const mergeIndex = config.steps.indexOf("merge")
-  if (mergeIndex >= 0 && config.definitions.merge?.run === undefined) {
-    for (const name of config.steps.slice(mergeIndex + 1)) {
-      if (RawGitPushPattern.test(config.definitions[name]?.run ?? "")) {
-        raiseFailure(
-          "configuration",
-          "native-merge-post-push",
-          `yrd: post-merge step '${name}' cannot push Git refs after the native merge step`,
-        )
+  for (const plan of configuredQueuePlans(config)) {
+    const mergeIndex = plan.indexOf("merge")
+    if (mergeIndex >= 0 && config.definitions.merge?.run === undefined) {
+      for (const name of plan.slice(mergeIndex + 1)) {
+        if (RawGitPushPattern.test(config.definitions[name]?.run ?? "")) {
+          raiseFailure(
+            "configuration",
+            "native-merge-post-push",
+            `yrd: post-merge step '${name}' cannot push Git refs after the native merge step`,
+          )
+        }
       }
     }
   }
@@ -284,13 +357,12 @@ function configuredStepDescriptors(
   mergeCommand: readonly string[] | undefined,
 ): readonly InstalledStep[] {
   const toolchain = hostToolchainFingerprint()
-  let integrated = false
-  return config.steps.map((name) => {
+  return configuredStepNames(config).map((name) => {
     const stepConfig = config.definitions[name] ?? { runner: "local" as const }
     const timeoutMs = stepTimeoutMs(stepConfig)
     const noProgressMs = stepNoProgressMs(stepConfig)
-    if (name === "merge") {
-      integrated = true
+    const phase = configuredStepPhase(config, name)
+    if (phase === "merge") {
       return {
         name,
         title: "merge",
@@ -308,7 +380,7 @@ function configuredStepDescriptors(
         needsIntegration: false,
       }
     }
-    if (!integrated) {
+    if (phase === "candidate") {
       return {
         name,
         title: name,
@@ -393,14 +465,13 @@ function configuredQueueSteps(
     options.config,
     mergeCommand,
   )
-  let integrated = false
-  return options.config.steps.map((name, index) => {
+  const names = configuredStepNames(options.config)
+  return names.map((name, index) => {
     const config = options.config.definitions[name] ?? { runner: "local" as const }
     const descriptor = descriptors[index]
     if (descriptor === undefined) throw new Error(`yrd: missing derived descriptor for queue step '${name}'`)
     const revision = descriptor.revision
-    if (name === "merge") {
-      integrated = true
+    if (descriptor.integrates) {
       return eraseStep(
         withMerge(
           mergeCommand === undefined
@@ -421,7 +492,7 @@ function configuredQueueSteps(
         ),
       )
     }
-    if (!integrated) {
+    if (!descriptor.needsIntegration) {
       return candidateStep(
         options.process,
         options.repo,
@@ -440,6 +511,65 @@ function configuredQueueSteps(
       }),
     )
   })
+}
+
+const RawDiffHeaderPattern = /^:([0-7]{6}) ([0-7]{6}) [0-9a-f]{40,64} [0-9a-f]{40,64} ([A-Z])\d*$/u
+
+function parseQueueDiff(raw: string): readonly GitDiffEntry[] {
+  if (raw === "") return []
+  if (!raw.endsWith("\0")) throw new Error("yrd: Git queue diff is missing its NUL terminator")
+  const fields = raw.slice(0, -1).split("\0")
+  const entries: GitDiffEntry[] = []
+  for (let index = 0; index < fields.length; ) {
+    const header = fields[index++]
+    const match = header === undefined ? undefined : RawDiffHeaderPattern.exec(header)
+    const oldMode = match?.[1]
+    const newMode = match?.[2]
+    const status = match?.[3]
+    if (
+      oldMode === undefined ||
+      newMode === undefined ||
+      status === undefined ||
+      !["A", "D", "M", "R", "T"].includes(status)
+    ) {
+      throw new Error(`yrd: unsupported Git queue diff header ${JSON.stringify(header)}`)
+    }
+    if (status === "R") {
+      const oldPath = fields[index++]
+      const path = fields[index++]
+      if (oldPath === undefined || path === undefined) throw new Error("yrd: truncated Git rename evidence")
+      entries.push({ status, oldPath, path, oldMode, newMode })
+      continue
+    }
+    const path = fields[index++]
+    if (path === undefined) throw new Error(`yrd: truncated Git '${status}' evidence`)
+    entries.push({ status: status as Exclude<GitDiffEntry["status"], "R">, path, oldMode, newMode })
+  }
+  return entries
+}
+
+async function resolveQueueChanges(
+  process: Pick<Process, "run">,
+  repo: string,
+  pr: Readonly<PRSnapshot>,
+): Promise<readonly GitDiffEntry[]> {
+  if (pr.baseSha === undefined) {
+    throw new Error(`yrd: PR '${pr.id}' has no immutable base SHA for queue lane classification`)
+  }
+  const args = ["diff", "--raw", "--no-abbrev", "-z", "--find-renames", `${pr.baseSha}...${pr.headSha}`, "--"]
+  const result = await process.run({
+    argv: ["git", "-C", repo, ...args],
+    cwd: repo,
+    env: cleanGitEnvironment(globalThis.process.env),
+    timeoutMs: GIT_TIMEOUT_MS,
+  })
+  assertGitDidNotTimeOut(result, args)
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `yrd: could not derive Git queue diff for PR '${pr.id}': ${result.stderr.trim() || result.stdout.trim() || `git exited ${result.exitCode}`}`,
+    )
+  }
+  return parseQueueDiff(result.stdout)
 }
 
 async function resolveCommit(process: Pick<Process, "run">, repo: string, ref: string): Promise<string | undefined> {
@@ -580,10 +710,31 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
       ...(options.receiverPath === undefined ? {} : { intakeRemote: options.receiverPath }),
     }))
   const bayJobs = createBayJobDefs(workspace)
+  const queueSteps = configuredQueueSteps(options, mergeCommand)
+  const queueLaneOptions =
+    options.config.lanes === undefined
+      ? {}
+      : {
+          lanes: {
+            pm: {
+              steps: options.config.lanes.pm.steps,
+              concurrency: options.config.lanes.pm.concurrency,
+              paths:
+                options.queueLanePolicy ??
+                raiseFailure(
+                  "configuration",
+                  "queue-lane-policy-missing",
+                  "yrd: lanes.pm requires a code-owned queueLanePolicy from the embedding host",
+                ),
+            },
+          },
+          resolveChanges: (pr: Readonly<PRSnapshot>) => resolveQueueChanges(options.process, options.repo, pr),
+        }
   const queue = withQueue({
-    steps: configuredQueueSteps(options, mergeCommand),
+    steps: queueSteps,
     batch: options.config.batch,
     defaultSteps: options.config.steps,
+    ...queueLaneOptions,
     requires: options.config.requires,
     resolveBaseSha: async (base) =>
       (
@@ -875,6 +1026,9 @@ export type YrdHostOptions = Readonly<{
   env?: NodeJS.ProcessEnv
   log?: ConditionalLogger
   signalAdapter?: SignalDeliveryAdapter
+  queueLanePolicy?: PmPathPolicy
+  /** Worktree-anchored composition entry re-invoked by managed receiver hooks. */
+  receiverHookEntry?: string
 }>
 
 export async function createYrdHost(options: YrdHostOptions = {}): Promise<YrdHost> {
@@ -953,6 +1107,7 @@ async function createYrdRuntimeHost(
             mainRepo: repository.repo,
             stateDir: repository.stateDir,
             process,
+            ...(options.receiverHookEntry === undefined ? {} : { hookEntry: options.receiverHookEntry }),
           })
         : await createViewerReceiver(repository, process)
     const journal =
@@ -1013,6 +1168,7 @@ async function createYrdRuntimeHost(
       scope,
       log,
       candidatePool,
+      ...(options.queueLanePolicy === undefined ? {} : { queueLanePolicy: options.queueLanePolicy }),
     })
     if (mode === "active") {
       // Cutover migration: a pre-settlement (v1) journal can leave non-terminal
@@ -1079,7 +1235,11 @@ async function createYrdRuntimeHost(
   }
 }
 
-async function runReceiverHook(mode: "pre-receive" | "post-receive", env: NodeJS.ProcessEnv): Promise<void> {
+async function runReceiverHook(
+  mode: "pre-receive" | "post-receive",
+  env: NodeJS.ProcessEnv,
+  queueLanePolicy?: PmPathPolicy,
+): Promise<void> {
   const gitDir = env.GIT_DIR
   if (gitDir === undefined || gitDir === "") throw new Error("yrd: receiver hook requires GIT_DIR")
   const scope = createScope("yrd-receiver-hook")
@@ -1101,6 +1261,7 @@ async function runReceiverHook(mode: "pre-receive" | "post-receive", env: NodeJS
       config: loaded.config,
       scope,
       log,
+      ...(queueLanePolicy === undefined ? {} : { queueLanePolicy }),
     })
     const runtimeApp = app
     await runReceiverHookFromEnvironment(mode, {
@@ -1169,6 +1330,7 @@ function defaultIO(): YrdCliIO {
 export async function runYrdProcess(
   argv: readonly string[] = process.argv,
   io: YrdCliIO = defaultIO(),
+  injection: Pick<YrdHostOptions, "queueLanePolicy" | "receiverHookEntry"> = {},
 ): Promise<YrdCliExitCode> {
   const env = process.env
   const invocation = resolveInvocation(argv)
@@ -1179,7 +1341,7 @@ export async function runYrdProcess(
       return 2
     }
     try {
-      await runReceiverHook(mode, env)
+      await runReceiverHook(mode, env, injection.queueLanePolicy)
       return 0
     } catch (error) {
       await diagnostic(io, invocation.name, error)
@@ -1235,7 +1397,7 @@ export async function runYrdProcess(
         log = createYrdLogger(observability, (text) => io.stderr(text), human)
         const runtimeLog = resident === undefined ? log : residentRunnerLog(log, resident)
         const activeHost = await createYrdRuntimeHost(
-          { cwd: context.repo, env, log: runtimeLog },
+          { cwd: context.repo, env, log: runtimeLog, ...injection },
           resident,
           options.viewer ? "viewer" : "active",
         )
