@@ -38,10 +38,19 @@ describe("queue submit diff projection", () => {
     git(cwd, "add", "detail.txt", "watch.txt")
     git(cwd, "commit", "-qm", "candidate")
     const headSha = git(cwd, "rev-parse", "HEAD")
-    const pr = {
-      ...fixturePr("PR8", "submitted", "2026-07-19T01:00:00.000Z", "Diff", { headSha }),
-      baseSha,
-    }
+    const pr = fixturePr("PR8", "submitted", "2026-07-19T01:00:00.000Z", "Diff", {
+      headSha,
+      revisions: [
+        {
+          n: 1,
+          head: headSha,
+          base: "main",
+          baseSha,
+          pushedAt: "2026-07-19T01:00:00.000Z",
+          submittedAt: "2026-07-19T01:00:00.000Z",
+        },
+      ],
+    })
 
     expect(queuePrDiff(cwd, pr)).toMatchObject({
       pr: "PR8",
@@ -51,7 +60,9 @@ describe("queue submit diff projection", () => {
       files: ["detail.txt", "watch.txt"],
       patch: expect.stringContaining("+second"),
     })
-    expect(queuePrDiff(cwd, { ...pr, headSha: "f".repeat(40) })).toEqual({
+    expect(
+      queuePrDiff(cwd, { ...pr, revs: pr.revs.map((revision) => ({ ...revision, head: "f".repeat(40) })) }),
+    ).toEqual({
       pr: "PR8",
       revision: 1,
       unavailable: "refs-pruned",

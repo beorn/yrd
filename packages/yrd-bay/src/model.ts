@@ -1,5 +1,6 @@
 import * as z from "zod"
 import { raiseFailure, resolveSelector } from "@yrd/core"
+import type { FlowPin } from "@yrd/config"
 
 export const BayIdSchema = z.string().trim().min(1)
 export const PRIdSchema = z.string().trim().min(1)
@@ -237,15 +238,20 @@ export type BranchLifecycle =
       }
     >
 
-export type PRStatus = "pushed" | "submitted" | "rejected" | "integrated" | "withdrawn" | "canceled"
+/** W2-facing delivery label derived from canonical PR/PRRev facts. Never stored. */
+export type PRDeliveryState = "pushed" | "submitted" | "rejected" | "integrated" | "withdrawn" | "canceled"
 
-const NON_CHECKABLE_PR_STATUSES: ReadonlySet<PRStatus> = new Set<PRStatus>(["integrated", "withdrawn", "canceled"])
+const NON_CHECKABLE_PR_STATES: ReadonlySet<PRDeliveryState> = new Set<PRDeliveryState>([
+  "integrated",
+  "withdrawn",
+  "canceled",
+])
 
 /** A PR can only accept new check requests while pushed/submitted/rejected; once
  * it reaches a terminal status (integrated/withdrawn/canceled) it is no longer
  * checkable. */
-export function isNonCheckablePRStatus(status: PRStatus): boolean {
-  return NON_CHECKABLE_PR_STATUSES.has(status)
+export function isNonCheckablePRState(state: PRDeliveryState): boolean {
+  return NON_CHECKABLE_PR_STATES.has(state)
 }
 
 /**
@@ -259,9 +265,9 @@ export function isNonCheckablePRStatus(status: PRStatus): boolean {
  */
 export class PrCheckabilityConflict extends Error {
   readonly prId: string
-  readonly status: PRStatus
+  readonly status: PRDeliveryState
 
-  constructor(prId: string, status: PRStatus) {
+  constructor(prId: string, status: PRDeliveryState) {
     super(`yrd: PR '${prId}' is ${status}, not checkable`)
     this.name = "PrCheckabilityConflict"
     this.prId = prId
@@ -278,19 +284,19 @@ export class PrCheckabilityConflict extends Error {
  * the remaining runnable ones.
  */
 export function isConcurrentCheckabilityConflict(error: unknown): error is PrCheckabilityConflict {
-  return error instanceof PrCheckabilityConflict && isNonCheckablePRStatus(error.status)
+  return error instanceof PrCheckabilityConflict && isNonCheckablePRState(error.status)
 }
 
-export type PRRevisionTerminal = Readonly<{
-  status: Extract<PRStatus, "rejected" | "integrated" | "withdrawn" | "canceled">
+export type PRRevTerminal = Readonly<{
+  kind: Extract<PRDeliveryState, "rejected" | "integrated" | "withdrawn" | "canceled">
   at: string
   run?: string
 }>
 
-export type PRRevisionClock = Readonly<{
+export type PRRevClock = Readonly<{
   pushedAt: string
   submittedAt?: string
-  terminal?: PRRevisionTerminal
+  terminal?: PRRevTerminal
 }>
 
 export const PRFreshnessTransitionSchema = z
@@ -309,9 +315,9 @@ export const PRRecutProofSchema = z
   .strict()
 export type PRRecutProof = Readonly<z.infer<typeof PRRecutProofSchema>>
 
-export type PRRevision = Readonly<{
-  revision: number
-  headSha: string
+export type PRRev = Readonly<{
+  n: number
+  head: string
   base: string
   baseSha?: string
   /** Missing only while replaying journals written before submitter identity was recorded. */
@@ -320,7 +326,7 @@ export type PRRevision = Readonly<{
   composition?: CompositionV1
   recut?: PRRecutProof
 }> &
-  PRRevisionClock
+  PRRevClock
 
 export type PRReviewDecision = "approve" | "reject"
 
@@ -392,14 +398,10 @@ export type PR = Readonly<{
   description?: string
   branch: string
   base: string
-  status: PRStatus
-  revision: number
-  headSha: string
-  baseSha?: string
-  correlation?: Correlation
-  composition?: CompositionV1
-  recut?: PRRecutProof
-  revisions: readonly PRRevision[]
+  state: "open" | "closed"
+  merged: boolean
+  flow?: FlowPin
+  revs: readonly PRRev[]
   reviews: readonly PRReview[]
   comments: readonly PRComment[]
   checkRequests: readonly PRCheckRequest[]
@@ -422,12 +424,38 @@ export type PR = Readonly<{
   detail?: string
 }>
 
+export function currentPRRev(pr: Pick<PR, "id" | "revs">): PRRev {
+  const revision = pr.revs.at(-1)
+  if (revision === undefined) throw new Error(`yrd: PR '${pr.id}' has no revision`)
+  return revision
+}
+
+export const prRevisionNumber = (pr: PR): number => currentPRRev(pr).n
+export const prHead = (pr: PR): string => currentPRRev(pr).head
+export const prBaseSha = (pr: PR): string | undefined => currentPRRev(pr).baseSha
+export const prCorrelation = (pr: PR): Correlation | undefined => currentPRRev(pr).correlation
+export const prComposition = (pr: PR): CompositionV1 | undefined => currentPRRev(pr).composition
+export const prRecut = (pr: PR): PRRecutProof | undefined => currentPRRev(pr).recut
+
+/** Historical W2/S7 label projected from the GitHub-shaped PR plus latest revision facts. */
+export function prDeliveryState(pr: PR): PRDeliveryState {
+  if (pr.state === "closed") {
+    if (pr.merged) return "integrated"
+    if (pr.canceledAt !== undefined) return "canceled"
+    return "withdrawn"
+  }
+  const revision = currentPRRev(pr)
+  if (revision.terminal?.kind === "rejected") return "rejected"
+  return revision.submittedAt === undefined ? "pushed" : "submitted"
+}
+
 export function reviewState(pr: PR): PRReviewState {
-  const current = pr.reviews.findLast((review) => review.revision === pr.revision && review.headSha === pr.headSha)
+  const revision = currentPRRev(pr)
+  const current = pr.reviews.findLast((review) => review.revision === revision.n && review.headSha === revision.head)
   return {
     approved: current?.decision === "approve",
     ...(current === undefined ? {} : { current }),
-    stale: pr.reviews.filter((review) => review.revision !== pr.revision || review.headSha !== pr.headSha),
+    stale: pr.reviews.filter((review) => review.revision !== revision.n || review.headSha !== revision.head),
   }
 }
 
@@ -437,12 +465,13 @@ export function reviewState(pr: PR): PRReviewState {
  * Verdicts are revision-bound while requests are not, so a recut without a
  * carried review naturally reopens this projection. */
 export function needsReview(pr: PR, reviewer?: string): boolean {
-  if (pr.status !== "submitted") return false
+  if (prDeliveryState(pr) !== "submitted") return false
+  const revision = currentPRRev(pr)
   const requested = pr.requestedReviewers ?? []
   if (requested.length === 0) return false
   const hasCurrentVerdict = (actor: string) =>
     pr.reviews.some(
-      (review) => review.revision === pr.revision && review.headSha === pr.headSha && review.actor === actor,
+      (review) => review.revision === revision.n && review.headSha === revision.head && review.actor === actor,
     )
   if (reviewer !== undefined) return requested.includes(reviewer) && !hasCurrentVerdict(reviewer)
   return !requested.some(hasCurrentVerdict)
@@ -451,25 +480,23 @@ export function needsReview(pr: PR, reviewer?: string): boolean {
 /** Mechanically certified revision ancestry for one logical PR payload.
  * Ordinary authored revisions start a new lineage; recuts retain the source
  * revision through their persisted `fromRevision` proof. */
-export function prRevisionLineage(pr: PR, revision = pr.revision): readonly PRRevision[] {
-  const byRevision = new Map(pr.revisions.map((candidate) => [candidate.revision, candidate]))
+export function prRevisionLineage(pr: PR, revision = currentPRRev(pr).n): readonly PRRev[] {
+  const byRevision = new Map(pr.revs.map((candidate) => [candidate.n, candidate]))
   let current = byRevision.get(revision)
-  if (current === undefined || (revision === pr.revision && current.headSha !== pr.headSha)) {
+  if (current === undefined) {
     throw new Error(`yrd: PR '${pr.id}' has no retained revision ${revision}`)
   }
-  const lineage: PRRevision[] = []
+  const lineage: PRRev[] = []
   const seen = new Set<number>()
   while (current !== undefined) {
-    if (seen.has(current.revision)) throw new Error(`yrd: PR '${pr.id}' has cyclic recut lineage`)
-    seen.add(current.revision)
+    if (seen.has(current.n)) throw new Error(`yrd: PR '${pr.id}' has cyclic recut lineage`)
+    seen.add(current.n)
     lineage.unshift(current)
     const predecessor = current.recut?.fromRevision
     if (predecessor === undefined) break
     current = byRevision.get(predecessor)
     if (current === undefined) {
-      throw new Error(
-        `yrd: PR '${pr.id}' recut revision ${lineage[0]?.revision ?? revision} lost predecessor ${predecessor}`,
-      )
+      throw new Error(`yrd: PR '${pr.id}' recut revision ${lineage[0]?.n ?? revision} lost predecessor ${predecessor}`)
     }
   }
   return lineage
@@ -477,7 +504,7 @@ export function prRevisionLineage(pr: PR, revision = pr.revision): readonly PRRe
 
 /** First submitted clock for a mechanically identical payload, falling back
  * to its first immutable source-ready (`pushed`) clock before admission. */
-export function prSourceReadyAt(pr: PR, revision = pr.revision): string {
+export function prSourceReadyAt(pr: PR, revision = currentPRRev(pr).n): string {
   const source = prRevisionLineage(pr, revision)[0]
   if (source === undefined) throw new Error(`yrd: PR '${pr.id}' has no source-ready revision`)
   return source.submittedAt ?? source.pushedAt
@@ -488,7 +515,8 @@ export function checksRequested(pr: PR): boolean {
 }
 
 export function checkRequest(pr: PR): PRCheckRequest | undefined {
-  return pr.checkRequests.findLast((request) => request.revision === pr.revision && request.headSha === pr.headSha)
+  const revision = currentPRRev(pr)
+  return pr.checkRequests.findLast((request) => request.revision === revision.n && request.headSha === revision.head)
 }
 
 export type BaysState = Readonly<{
@@ -575,7 +603,7 @@ export function emptyBaysState(): BaysState {
   return { byId: {}, prs: {}, receipts: {} }
 }
 
-/** Projects the current lifecycle of every Bay-registered task branch from the
+/** Projects the current lifecycle of every Bay-registered work branch from the
  * same journal-backed aggregate used by the Bay and PR APIs. */
 export function projectBranchLifecycles(state: BaysState): readonly BranchLifecycle[] {
   return Object.values(state.byId)
@@ -589,10 +617,11 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
         openedAt: bay.openedAt,
       }
       const pr = prForBay(state, bay.id)
+      const current = pr === undefined ? undefined : currentPRRev(pr)
       if (
         bay.headSha !== undefined &&
-        pr?.headSha === bay.headSha &&
-        pr.status === "integrated" &&
+        current?.head === bay.headSha &&
+        pr?.merged === true &&
         pr.integratedAt !== undefined &&
         pr.integration !== undefined
       ) {
@@ -602,7 +631,7 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
           headSha: bay.headSha,
           landed: {
             pr: pr.id,
-            revision: pr.revision,
+            revision: current.n,
             at: pr.integratedAt,
             commit: pr.integration.commit,
           },
@@ -620,22 +649,13 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
           },
         }
       }
-      const revision =
-        bay.headSha === undefined || pr?.headSha !== bay.headSha
-          ? undefined
-          : pr.revisions.find((candidate) => candidate.revision === pr.revision && candidate.headSha === bay.headSha)
-      if (
-        bay.headSha !== undefined &&
-        pr !== undefined &&
-        revision?.submittedAt !== undefined &&
-        pr.status !== "withdrawn" &&
-        pr.status !== "canceled"
-      ) {
+      const revision = bay.headSha === undefined || current?.head !== bay.headSha ? undefined : current
+      if (bay.headSha !== undefined && pr !== undefined && revision?.submittedAt !== undefined && pr.state === "open") {
         return {
           ...base,
           status: "submitted",
           headSha: bay.headSha,
-          submitted: { pr: pr.id, revision: pr.revision, at: revision.submittedAt },
+          submitted: { pr: pr.id, revision: revision.n, at: revision.submittedAt },
         }
       }
       if (bay.status === "closed") {
@@ -653,8 +673,7 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
         bay.headSha !== undefined &&
         bay.handoff?.headSha === bay.headSha &&
         (pr === undefined ||
-          (pr.headSha === bay.headSha &&
-            (pr.status === "pushed" || pr.status === "withdrawn" || pr.status === "canceled")))
+          (current?.head === bay.headSha && ["pushed", "withdrawn", "canceled"].includes(prDeliveryState(pr))))
       ) {
         return {
           ...base,
@@ -672,8 +691,8 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
     .toSorted((left, right) => left.openedAt.localeCompare(right.openedAt) || left.bay.localeCompare(right.bay))
 }
 
-export function isLivePR(status: PRStatus): boolean {
-  return status === "pushed" || status === "submitted" || status === "rejected"
+export function isLivePR(pr: PR): boolean {
+  return pr.state === "open"
 }
 
 export function prForBay(state: BaysState, bay: BayId): PR | undefined {
@@ -716,7 +735,7 @@ export function resolvePR(state: BaysState, selector: string): PR | undefined {
           value: pr,
         }
       }),
-    { kind: "PR", prefer: (pr) => isLivePR(pr.status) },
+    { kind: "PR", prefer: isLivePR },
   )
 }
 
@@ -734,6 +753,6 @@ export function requireLivePR(state: BaysState, selector: string): PR {
   }
   // Exact-id addressing folds case the same way resolveSelector does: 'pr1'
   // IS the canonical id PR1, not a live-less branch selector.
-  if (isLivePR(pr.status) || selector.toLowerCase() === pr.id.toLowerCase()) return pr
+  if (isLivePR(pr) || selector.toLowerCase() === pr.id.toLowerCase()) return pr
   raiseFailure("refusal", "no-live-pr", `yrd: no live PR for branch '${selector}'; use PR id`)
 }

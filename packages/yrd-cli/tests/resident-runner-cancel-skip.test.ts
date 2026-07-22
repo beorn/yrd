@@ -54,7 +54,7 @@ describe("resident runner — a concurrently-canceled Job never kills the watch 
     const h = harness([
       // Cycle 1: a peer canceled the Job between this runner's snapshot and its
       // settlement commit — the throw that used to escape the loop.
-      () => Promise.reject(new JobStateConflict(JOB_ID, "canceled", "running or waiting")),
+      () => Promise.reject(new JobStateConflict(JOB_ID, "completed", "in_progress or waiting")),
       // Cycle 2: the runner keeps going and drains normally, then the watch stops.
       () => {
         h.signal.aborted = true
@@ -70,7 +70,7 @@ describe("resident runner — a concurrently-canceled Job never kills the watch 
     // watch mode output is loggily-only: no bare 'yrd: ' stderr duplicate.
     expect(h.warnings).toContainEqual(
       expect.objectContaining({
-        props: expect.objectContaining({ action: "resident-cancel-skip", job: JOB_ID, status: "canceled" }),
+        props: expect.objectContaining({ action: "resident-cancel-skip", job: JOB_ID, status: "completed" }),
       }),
     )
     expect(h.stderr.join("")).toBe("")
@@ -79,9 +79,9 @@ describe("resident runner — a concurrently-canceled Job never kills the watch 
   it("still dies on a conflict against a still-LIVE Job — narrow catch, no blanket swallow", async () => {
     // A conflict whose Job is NOT terminal signals a real invalid transition
     // (single-writer bug), not a losable race. It must propagate (fail-loud).
-    const h = harness([() => Promise.reject(new JobStateConflict(JOB_ID, "running", "requested"))])
+    const h = harness([() => Promise.reject(new JobStateConflict(JOB_ID, "in_progress", "queued"))])
     await expect(followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).rejects.toThrow(
-      `yrd: job '${JOB_ID}' is running, not requested`,
+      `yrd: job '${JOB_ID}' is in_progress, not queued`,
     )
     expect(h.runCalls()).toBe(1)
     expect(h.warnings).toEqual([])
@@ -96,9 +96,9 @@ describe("resident runner — a concurrently-canceled Job never kills the watch 
   it("does NOT swallow a settlement race for a one-shot targeted run — it has no next interval", async () => {
     // Recovery-by-skip is only for the looping resident watch. A targeted
     // `queue run PR1` propagates the race so the caller sees the outcome.
-    const h = harness([() => Promise.reject(new JobStateConflict(JOB_ID, "canceled", "running or waiting"))])
+    const h = harness([() => Promise.reject(new JobStateConflict(JOB_ID, "completed", "in_progress or waiting"))])
     await expect(followQueueRuns(h.app, ["PR1"], { interval: 1 }, h.io, h.gate)).rejects.toThrow(
-      `yrd: job '${JOB_ID}' is canceled, not running or waiting`,
+      `yrd: job '${JOB_ID}' is completed, not in_progress or waiting`,
     )
     expect(h.warnings).toEqual([])
   })

@@ -40,14 +40,16 @@ function workspace() {
   return {
     revision: "selector-workspace-v1",
     provision: (input: { bay: string }) => ({
-      status: "passed" as const,
+      status: "completed" as const,
+      conclusion: "success" as const,
       output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD_SHA, baseSha: BASE_SHA },
     }),
     refresh: (input: { bay: string; path?: string }) => ({
-      status: "passed" as const,
+      status: "completed" as const,
+      conclusion: "success" as const,
       output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD_SHA, baseSha: BASE_SHA, dirty: false },
     }),
-    deprovision: () => ({ status: "passed" as const, output: {} }),
+    deprovision: () => ({ status: "completed" as const, conclusion: "success" as const, output: {} }),
   }
 }
 
@@ -59,7 +61,8 @@ function contestAdapters() {
     revision: "ag-runner-v1",
     async run(input): Promise<JobResult<AttemptRunOutput>> {
       return {
-        status: "passed",
+        status: "completed",
+        conclusion: "success",
         output: {
           pin: {
             commit: "c".repeat(40),
@@ -81,7 +84,7 @@ function contestAdapters() {
     revision: "held-out-v1",
     authority: "held-out",
     async evaluate() {
-      return { status: "passed", output: { verdict: "passed", artifacts: [] } }
+      return { status: "completed", conclusion: "success", output: { verdict: "passed", artifacts: [] } }
     },
   }
   const git: ContestGit = { revision: "git-v1", resolveCommit: () => BASE_SHA }
@@ -92,14 +95,16 @@ async function createCliApp(overrides: { check?: () => JobResult<JsonValue> } = 
   const bayJobs = createBayJobDefs(workspace())
   const check = withStep(
     "check",
-    overrides.check ?? ((): JobResult<JsonValue> => ({ status: "passed", output: { checked: true } })),
+    overrides.check ??
+      ((): JobResult<JsonValue> => ({ status: "completed", conclusion: "success", output: { checked: true } })),
     { revision: "check-v1", output: JsonSchema, classification: "carrier" },
   )
   const merge = withMerge(
     async (
       _input: StepExecution<PRShape>,
     ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => ({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { commit: MERGED_SHA, baseSha: MERGED_SHA },
     }),
     { revision: "merge-v1" },
@@ -290,13 +295,17 @@ describe("case-insensitive CLI selector surfaces", () => {
     expect(JSON.parse(output.stdout())).toMatchObject({ pr: "PR1" })
   })
 
-  it("retries a rejected PR through folded selectors without renaming it", async () => {
+  it("retries a checks-failed PR through folded selectors without renaming it", async () => {
     let attempts = 0
     const app = await createCliApp({
       check: (): JobResult<JsonValue> =>
         ++attempts === 1
-          ? { status: "failed", error: { code: "check-failed", message: "first attempt fails" } }
-          : { status: "passed", output: { checked: true } },
+          ? {
+              status: "completed",
+              conclusion: "failure",
+              error: { code: "check-failed", message: "first attempt fails" },
+            }
+          : { status: "completed", conclusion: "success", output: { checked: true } },
     })
     await submitOnePR(app)
 
@@ -304,14 +313,14 @@ describe("case-insensitive CLI selector surfaces", () => {
     expect(await runYrd(app, yrd("queue", "run", "pr1", "--json"), rejected.io)).toBe(1)
     expect(JSON.parse(rejected.stdout())).toMatchObject({
       command: "queue.run",
-      results: [{ status: "failed", prs: [{ id: "PR1" }] }],
+      results: [{ status: "completed", conclusion: "failure", prs: [{ id: "PR1" }] }],
     })
 
     // A direct re-run refuses, but the refusal proves the folded selector
     // resolved to the canonical identity on the retry path.
     const refused = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "pr1", "--json"), refused.io)).not.toBe(0)
-    expect(refused.stderr()).toContain("PR 'PR1' is rejected")
+    expect(refused.stderr()).toContain("PR 'PR1' checks failed in R1")
 
     // The sanctioned retry: recut the folded selector back into the queue.
     const requeued = outputIO()
@@ -322,7 +331,7 @@ describe("case-insensitive CLI selector surfaces", () => {
     expect(JSON.parse(requeued.stdout())).toMatchObject({ pr: "PR1" })
 
     // The retried run passes and still names the canonical PR; the exit code
-    // reflects the historical rejected run that the projection also returns.
+    // reflects the historical failed run that the projection also returns.
     const retried = outputIO()
     await runYrd(app, yrd("queue", "run", "pr1", "--json"), retried.io)
     const parsed = JSON.parse(retried.stdout()) as {
@@ -332,7 +341,11 @@ describe("case-insensitive CLI selector surfaces", () => {
     expect(parsed.command).toBe("queue.run")
     expect(parsed.results).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ status: "passed", prs: [expect.objectContaining({ id: "PR1" })] }),
+        expect.objectContaining({
+          status: "completed",
+          conclusion: "success",
+          prs: [expect.objectContaining({ id: "PR1" })],
+        }),
       ]),
     )
   })

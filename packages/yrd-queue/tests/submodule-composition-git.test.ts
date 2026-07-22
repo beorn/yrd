@@ -1,7 +1,7 @@
 /**
  * @failure Queue-native composition can publish an unreachable or unreviewed synthetic pin, or reject retryable store failures as content conflicts.
  * @level l1
- * @consumer @yrd/queue submodule composition executor
+ * @consumer @yrd/queue submodule composition runner
  */
 
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
@@ -120,7 +120,7 @@ function afterInitialRemoteRead(
   }
 }
 
-describe("queue-native submodule composition Git executor", () => {
+describe("queue-native submodule composition Git runner", () => {
   it("publishes one deterministic two-parent commit and surfaces the composed Markdown", async () => {
     const repo = await repository()
     const plan = compositionPlan(repo)

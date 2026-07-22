@@ -115,6 +115,7 @@ describe("queue timeline 21106 contract", () => {
       "main:run:R5:PR5:1",
       "main:run:R4:PR4:1",
     ])
+    expect(projection.rows.map((row) => row.candidateId)).toEqual([undefined, "C42", "C42", "C5", "C4"])
 
     const minute = 60_000
     // Batched members repeat the Run facts (step, total) while AGE and queue

@@ -411,10 +411,10 @@ describe("queue timeline chrome 21106", () => {
       await app.waitForLayoutStable()
       await waitFor(() => app.text.includes("╭─ FLOW "))
       const text = app.text
-      // QUEUE is a tab-headed pane; DETAIL is headed by the selected run's
-      // identity title (`RUN main#42`), not the word "DETAIL" — neither is boxed.
+      // QUEUE is a tab-headed pane; DETAIL is headed by the selected target's
+      // identity title (`CANDIDATE C42 RUN main#42`), not "DETAIL" — neither is boxed.
       expect(rowIndexOf(text, "QUEUE main"), "QUEUE pane tab").toBeGreaterThanOrEqual(0)
-      expect(text, "DETAIL pane shows the run identity title, not a DETAIL box").toContain("RUN main#42")
+      expect(text, "DETAIL pane shows the target identity title, not a DETAIL box").toContain("RUN main#42")
       expect(text).not.toContain("╭─ DETAIL")
       expect(text).not.toContain("╭─ QUEUE")
       // Padded content: the TIME header sits inside the pane's horizontal padding.

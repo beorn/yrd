@@ -9,6 +9,7 @@
   "dependencies": {
     "@silvery/signals": "^0.21.0",
     "@yrd/core": "workspace:*",
+    "@yrd/config": "workspace:*",
     "@yrd/job": "workspace:*",
     "@yrd/persistence": "workspace:*",
     "@yrd/process": "workspace:*",

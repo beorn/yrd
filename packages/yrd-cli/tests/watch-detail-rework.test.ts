@@ -1,7 +1,7 @@
 /**
  * 21106 W3 — DETAIL pane rework (user screenshot review, 2026-07-16).
  *
- * Pins the reshaped detail surface: the run-scoped identity title with
+ * Pins the reshaped detail surface: the Candidate + Run identity title with
  * right-aligned colorized STATUS/OUTCOME; the linked ISSUE primitive; the
  * natural clock sentence plus COMMIT; separate JOB/RUNNER facts; and the
  * failure-only NEXT cue.
@@ -75,7 +75,7 @@ function glyphColumn(app: ReturnType<ReturnType<typeof createRenderer>>, row: nu
   return -1
 }
 
-describe("detail title row — run identity emphasis + right-aligned outcome", () => {
+describe("detail title row — target identity emphasis + right-aligned outcome", () => {
   it("emphasizes the identity, right-aligns STATUS/OUTCOME, and omits corner time", () => {
     const pr = fixturePr("PR42", "submitted", "2026-07-13T10:30:00.000Z", "Land it")
     const run = fixtureRun("R42", [pr], "passed", "2026-07-13T10:40:00.000Z", {
@@ -89,13 +89,16 @@ describe("detail title row — run identity emphasis + right-aligned outcome", (
     const app = createRenderer({ cols: 120, rows: 6 })(
       createElement(Box, { width: 120 }, createElement(QueueDetailTitle, { row, data })),
     )
+    const projectedOnly = createRenderer({ cols: 120, rows: 6 })(
+      createElement(Box, { width: 120 }, createElement(QueueDetailTitle, { row })),
+    )
     try {
-      // Revision A makes the title run-scoped; PR and branch move into member
-      // blocks while the deduped run outcome stays on this line.
-      expect(app.text).toContain("RUN main#42")
+      // Candidate + Run form the execution identity; PR and branch move into
+      // member blocks while the deduped run outcome stays on this line.
+      expect(app.text).toContain(`CANDIDATE ${data.candidateId} RUN main#42`)
       expect(app.text).not.toContain("PR42.1")
       expect(app.text).not.toContain("topic/pr42")
-      expect(app.text).toContain(`${data.glyph} passed, integrated`)
+      expect(app.text).toContain(`${data.glyph} completed, integrated`)
 
       const titleRow = app.text.split("\n").findIndex((text) => text.includes("main#42"))
       expect(titleRow).toBeGreaterThanOrEqual(0)
@@ -115,8 +118,11 @@ describe("detail title row — run identity emphasis + right-aligned outcome", (
       expect(outcomeCell.fg).not.toEqual(identityCell.fg)
 
       expect(app.text).not.toContain("15m00s")
+      expect(projectedOnly.text).toContain(`CANDIDATE ${data.candidateId} RUN main#42`)
+      expect(projectedOnly.text).not.toContain("CANDIDATE undefined")
     } finally {
       app.unmount()
+      projectedOnly.unmount()
     }
   })
 

@@ -61,7 +61,7 @@ describe("watch detail completeness — run-level integration proof detail (item
       createElement(QueueShowView, { data: integratedRunData(), compact: true, section: "run" }),
     )
     try {
-      expect(app.text).toContain("RUN main#4 STATUS passed OUTCOME integrated")
+      expect(app.text).toContain("RUN main#4 STATUS completed OUTCOME integrated")
       expect(app.text).toContain(`Committed as ${"b".repeat(40)} on main`)
       expect(app.text).toContain("- integration proof: REWRITES 1")
       expect(app.text).not.toMatch(NO_RAW_ISO)

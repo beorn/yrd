@@ -58,7 +58,7 @@ function findGlyphColumn(term: ReturnType<typeof createTermless>, glyph: string,
 }
 
 describe("queue timeline storybook", () => {
-  it("renders the recovered queue IA without legacy task or disclosure chrome", async () => {
+  it("renders the recovered queue IA without legacy work or disclosure chrome", async () => {
     using term = createTermless({ cols: 200, rows: 50 })
     const handle = await run(
       createElement(QueueWatchFrame, { snapshot: queueTimelineStories["production-overview"].snapshot }),
@@ -78,7 +78,7 @@ describe("queue timeline storybook", () => {
       expect(frame).toContain("pr#42.1 @hab/super/21135-herdr-keybindings")
       expect(frame).toContain("0: submit")
       expect(frame).toContain("pr#42.1")
-      expect(frame).toContain("Diff +324 / -323 lines")
+      expect(frame).toContain("Diff +324 / -323 changes")
       expect(frame).toContain("diff unavailable (refs pruned)")
       expect(frame).toContain("╭─ RUNNER ")
       expect(frame).toContain("╭─ FLOW ")
@@ -90,18 +90,18 @@ describe("queue timeline storybook", () => {
         await handle.waitForLayoutStable()
       })
       frame = term.screen.getText()
-      const lines = frame.split("\n")
-      const prepareRowIndex = lines.findIndex((line) => line.includes("1: prepare"))
+      const rows = frame.split("\n")
+      const prepareRowIndex = rows.findIndex((row) => row.includes("1: prepare"))
       expect(prepareRowIndex).toBeGreaterThan(0)
-      expect(lines[prepareRowIndex]).not.toMatch(/(?:^|\s)(?:passed|running|pending|failed)(?:\s|$)/u)
-      expect(lines.slice(prepareRowIndex + 1, prepareRowIndex + 3).join("\n")).toMatch(
+      expect(rows[prepareRowIndex]).not.toMatch(/(?:^|\s)(?:passed|running|pending|failed)(?:\s|$)/u)
+      expect(rows.slice(prepareRowIndex + 1, prepareRowIndex + 3).join("\n")).toMatch(
         /(?:✓|●|○|×|−)\s+(?:passed|running|pending|failed|skipped)/u,
       )
 
-      const commandRowIndex = lines.findIndex((row) => row.includes(" $ bun vitest run"))
+      const commandRowIndex = rows.findIndex((row) => row.includes(" $ bun vitest run"))
       expect(commandRowIndex).toBeGreaterThan(0)
-      expect(lines[commandRowIndex]).not.toContain("[ $")
-      expect(lines[commandRowIndex]).not.toContain("COMMAND")
+      expect(rows[commandRowIndex]).not.toContain("[ $")
+      expect(rows[commandRowIndex]).not.toContain("COMMAND")
       expect(frame).toContain("125 tests collected")
     } finally {
       handle.unmount()
@@ -268,10 +268,10 @@ describe("queue timeline storybook", () => {
     const batch = overviewResult.running.find((run) => run.id === "R42")
     if (batch === undefined) throw new Error("production-overview is missing batch run R42")
     expect(batch.prs.map((pr) => pr.id)).toEqual(["PR42", "PR43"])
-    expect(batch.steps.map((step) => step.job?.status)).toEqual(["passed", "running", "requested"])
+    expect(batch.steps.map((step) => step.job?.status)).toEqual(["completed", "in_progress", "queued"])
     expect(batch.steps[1]?.job).toMatchObject({
       id: "J42-check",
-      status: "running",
+      status: "in_progress",
       attempt: 2,
       runner: "runner-herdr-07",
       changedAt: "2026-07-13T11:58:30.000Z",
@@ -285,7 +285,8 @@ describe("queue timeline storybook", () => {
     const integrated = overviewResult.finished.find((run) => run.id === "R4")
     expect(integrated?.integration).toEqual({ commit: "b".repeat(40), baseSha: "a".repeat(40) })
     expect(integrated?.steps[0]?.job).toMatchObject({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       checkpoint: { tests: 125, failures: 0 },
       artifacts: [
         {
@@ -297,7 +298,8 @@ describe("queue timeline storybook", () => {
     expect(overviewResult.finished.find((run) => run.id === "R5")?.error?.code).toBe("typecheck-failed")
     expect(overviewResult.finished.find((run) => run.id === "R6")?.error?.code).toBe("queue-environment-refused")
     expect(overviewResult.finished.find((run) => run.id === "R7")?.steps[0]?.job).toMatchObject({
-      status: "canceled",
+      status: "completed",
+      conclusion: "cancelled",
       canceledBy: "operator@example.test",
     })
 
@@ -311,7 +313,7 @@ describe("queue timeline storybook", () => {
     })
 
     const lineage = queueTimelineStories["latest-vs-all-lineage"]
-    expect(lineage.snapshot.results[0]?.prs[0]?.revisions.map((revision) => revision.revision)).toEqual([1, 2])
+    expect(lineage.snapshot.results[0]?.prs[0]?.revs.map((revision) => revision.n)).toEqual([1, 2])
     expect(
       lineage.snapshot.results[0]?.finished.map((run) => ({
         run: run.id,
@@ -319,8 +321,8 @@ describe("queue timeline storybook", () => {
         status: run.status,
       })),
     ).toEqual([
-      { run: "R8", revision: 1, status: "failed" },
-      { run: "R9", revision: 2, status: "passed" },
+      { run: "R8", revision: 1, status: "completed" },
+      { run: "R9", revision: 2, status: "completed" },
     ])
 
     const rejected = queueTimelineStories["selected-rejected"].snapshot.projection.details[0]
@@ -437,8 +439,8 @@ describe("queue timeline storybook", () => {
         expect(term.screen.getText(), name).toContain("QUEUE main")
 
         if (divider === "vertical") {
-          // Right-docked: the DETAIL pane's run identity title shares the top
-          // row with the QUEUE tab, and the
+          // Right-docked: the DETAIL pane's target identity title shares the
+          // top row with the QUEUE tab, and the
           // split divider is the lone vertical glyph on that row.
           await waitFor(() => findGlyphColumn(term, "│", 0) >= 0)
           const topRow = term.screen.getText().split("\n")[0] ?? ""
@@ -463,7 +465,7 @@ describe("queue timeline storybook", () => {
           })
           // Run identity + STATUS/OUTCOME live in the title row now (item a).
           expect(term.screen.getText(), name).toContain("RUN main#4")
-          expect(term.screen.getText(), name).toContain("passed, integrated")
+          expect(term.screen.getText(), name).toContain("completed, integrated")
           expect(term.screen.getText(), name).toContain(`COMMIT ${"b".repeat(40)}`)
           expect(term.screen.getText(), name).not.toContain("QUEUE main")
         }

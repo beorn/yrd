@@ -115,6 +115,7 @@ describe("queue watch user round 6", () => {
             pushedAt: "2026-07-13T10:30:00.000Z",
             submittedAt: "2026-07-13T10:30:00.000Z",
             actor: "@ci",
+            correlation: { namespace: "tribe", id: "21514-round6-agent1" },
             terminal: { status: "integrated" as const, at: "2026-07-13T10:41:00.000Z", run: "R60" },
           },
         ],
@@ -124,7 +125,6 @@ describe("queue watch user round 6", () => {
       }),
       title: "Lead title may wrap across the detail pane",
       description: "First description line\nSecond description line may wrap",
-      correlation: { namespace: "tribe", id: "21514-round6-agent1" },
       requestedReviewers: ["@chief"],
       checkRequests: [
         {
@@ -161,7 +161,7 @@ describe("queue watch user round 6", () => {
         runner: "runner-herdr-09",
         output: { commit, baseSha },
       }),
-      { integrates: true },
+      { kind: "merge" },
     )
     const rejectedRuns = [
       fixtureRun("R57", [lead], "failed", "2026-07-12T22:14:00.000Z", {
@@ -211,8 +211,8 @@ describe("queue watch user round 6", () => {
       await app.waitForLayoutStable()
 
       const rows = app.text.split("\n")
-      const titleY = rows.findIndex((row) => row.includes("RUN main#60"))
-      const detailX = rows[titleY]?.indexOf("RUN main#60") ?? -1
+      const titleY = rows.findIndex((row) => row.includes("CANDIDATE C60 RUN main#60"))
+      const detailX = rows[titleY]?.indexOf("CANDIDATE C60 RUN main#60") ?? -1
       expect(titleY).toBeGreaterThanOrEqual(0)
       expect(rows[titleY + 1]?.slice(detailX).trim(), "exactly one blank row follows the identity title").toBe("")
       expect(rows[titleY + 1]?.slice(detailX)).not.toMatch(/\d+(?:h|m|s)/u)
@@ -251,7 +251,7 @@ describe("queue watch user round 6", () => {
       expect(app.text).toContain("pr#61.1 @yrd/core/21525-queue-watch")
       expect(app.text).toContain(`${BRANCH_GLYPH} topic/pr61`)
       expect(app.text).toContain("- Partner subject")
-      expect(app.text).toContain("Diff +324 / -323 lines")
+      expect(app.text).toContain("Diff +324 / -323 changes")
       expect(app.text).toContain("diff unavailable (refs pruned)")
       expect(app.text).not.toContain("src/detail-pane.tsx")
       expect(app.text).not.toContain("click to expand")
@@ -277,7 +277,7 @@ describe("queue watch user round 6", () => {
       expect(app.cell(titleX, titleBlockY).bold).toBe(true)
       expect(app.cell(bodyX, bodyY).bold).not.toBe(true)
 
-      const diff = pointOf(app.text, "Diff +324 / -323 lines")
+      const diff = pointOf(app.text, "Diff +324 / -323 changes")
       const collapsedRows = app.text.split("\n")
       expect(collapsedRows[diff[1] - 1]?.slice(detailX).trim(), "blank row above the diff summary").toBe("")
       expect(collapsedRows[diff[1] + 1]?.slice(detailX).trim(), "blank row below the diff summary").toBe("")
@@ -654,7 +654,7 @@ describe("queue watch user round 6", () => {
         runner: "runner-herdr-09",
         output: { commit: "b".repeat(40), baseSha: "a".repeat(40) },
       }),
-      { integrates: true },
+      { kind: "merge" },
     )
     const run = fixtureRun("R60", [pr], "passed", "2026-07-13T10:40:00.000Z", {
       finishedAt: "2026-07-13T10:41:00.000Z",

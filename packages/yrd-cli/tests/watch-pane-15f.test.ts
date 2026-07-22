@@ -147,7 +147,7 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       const commandY = rows.findIndex((line) => line.includes("$ git merge --no-ff --no-edit"))
       expect(commandY, "command header present").toBeGreaterThan(tabsY)
       expect(commandY, "command follows the step internals").toBeGreaterThan(stepContentY)
-      const outputY = rows.findIndex((row) => row.includes("PARENTS "))
+      const outputY = rows.findIndex((row, index) => index > commandY && row.includes("PARENTS "))
       expect(outputY, "inline output follows the command").toBeGreaterThan(commandY)
       const commandX = rows[commandY]?.indexOf("$ git merge --no-ff --no-edit") ?? -1
       expect(app.cell(commandX, commandY).bold).toBe(true)

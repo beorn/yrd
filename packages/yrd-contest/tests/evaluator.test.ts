@@ -121,7 +121,9 @@ async function artifactText(
   result: Awaited<ReturnType<ReturnType<typeof createHeldOutCommandEvaluator>["evaluate"]>>,
   kind: string,
 ): Promise<string> {
-  if (result.status !== "passed") throw new Error(`expected passed evaluator job, got ${result.status}`)
+  if (result.status !== "completed" || result.conclusion !== "success") {
+    throw new Error(`expected passed evaluator job, got ${result.status}`)
+  }
   const artifact = result.output.artifacts.find((candidate) => candidate.kind === kind)
   if (artifact === undefined) throw new Error(`missing ${kind} artifact`)
   return await readFile(fileURLToPath(artifact.uri), "utf8")
@@ -138,7 +140,7 @@ describe("held-out command evaluator", () => {
 
     const result = await evaluator.evaluate(input(), context)
 
-    expect(result).toMatchObject({ status: "passed", output: { verdict: "passed" } })
+    expect(result).toMatchObject({ status: "completed", conclusion: "success", output: { verdict: "passed" } })
     expect(resolvedBays).toEqual(["contest-C1-A1"])
     const refCheck = fake.requests.find(
       (request) => request.argv[0] === "git" && request.argv.includes("refs/yrd/attempts/C1/A1^{commit}"),
@@ -181,7 +183,7 @@ describe("held-out command evaluator", () => {
     const checkoutParent = join(await temporaryRoot("yrd-evaluator-checkouts-"), "nested")
     const { evaluator, fake } = await fixture({}, { checkoutParent })
 
-    expect(await evaluator.evaluate(input(), context)).toMatchObject({ status: "passed" })
+    expect(await evaluator.evaluate(input(), context)).toMatchObject({ status: "completed", conclusion: "success" })
     const materialize = fake.requests.find((request) => request.argv.slice(0, 3).join(" ") === "git worktree add")
     expect(materialize?.argv.at(-2)).toMatch(new RegExp(`^${await realpath(checkoutParent)}/yrd-evaluator-`))
   })
@@ -208,7 +210,8 @@ describe("held-out command evaluator", () => {
     const { evaluator, fake } = await fixture({}, { checkoutParent })
 
     expect(await evaluator.evaluate(input(), context)).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: { code: "pin-checkout-create-failed" },
     })
     expect(fake.requests.some((request) => request.argv[0] !== "git")).toBe(false)
@@ -230,7 +233,8 @@ describe("held-out command evaluator", () => {
     const result = await evaluator.evaluate(input(), context)
 
     expect(result).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: {
         code: "pin-checkout-invalid",
         message: expect.stringContaining("Git timed out after 30000ms"),
@@ -250,7 +254,8 @@ describe("held-out command evaluator", () => {
     const result = await evaluator.evaluate(input(), context)
 
     expect(result).toMatchObject({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: {
         verdict: "failed",
         summary: "held-out-tests exited 17",
@@ -272,7 +277,11 @@ describe("held-out command evaluator", () => {
 
     const result = await evaluator.evaluate(input(), context)
 
-    expect(result).toMatchObject({ status: "failed", error: { code: "pin-checkout-cleanup-failed" } })
+    expect(result).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "pin-checkout-cleanup-failed" },
+    })
     const stdout = await Array.fromAsync(new Bun.Glob("**/stdout.log").scan({ cwd: artifactRoot, absolute: true }))
     const stderr = await Array.fromAsync(new Bun.Glob("**/stderr.log").scan({ cwd: artifactRoot, absolute: true }))
     expect(stdout).toHaveLength(1)
@@ -312,7 +321,7 @@ describe("held-out command evaluator", () => {
 
     const result = await evaluator.evaluate(input(), context)
 
-    expect(result).toMatchObject({ status: "failed", error: { code } })
+    expect(result).toMatchObject({ status: "completed", conclusion: "failure", error: { code } })
     expect(fake.requests.some((request) => request.argv[0] !== "git")).toBe(false)
   })
 
@@ -327,7 +336,8 @@ describe("held-out command evaluator", () => {
     )
 
     expect(await evaluator.evaluate(input(), context)).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: { code: "evaluator-environment-invalid", message: "secret provider unavailable" },
     })
   })

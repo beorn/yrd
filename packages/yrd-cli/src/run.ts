@@ -7,6 +7,13 @@ import {
   CompositionV1Schema,
   CorrelationSchema,
   baseIdentity,
+  currentPRRev,
+  prBaseSha,
+  prComposition,
+  prCorrelation,
+  prDeliveryState,
+  prHead,
+  prRevisionNumber,
   prRevisionLineage,
   prSourceReadyAt,
   isConcurrentCheckabilityConflict,
@@ -19,6 +26,7 @@ import {
   type Correlation,
   type PR,
   type PRFreshnessTransition,
+  type PRDeliveryState,
   type PRRegression,
   type PRRegressionSeverity,
 } from "@yrd/bay"
@@ -32,11 +40,12 @@ import {
   Queues,
   resolveSubmoduleOrigin,
   type PREligibility,
-  type QueueRun,
   type QueueSummary,
+  type Run,
 } from "@yrd/queue"
 import { createExclusive } from "@yrd/persistence"
 import { loadYrdConfig } from "./config.ts"
+import { diagnoseYrdFlows } from "./config-doctor.ts"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import { actionableFailure, formatActionableFailure } from "./actionable-error.ts"
 import {
@@ -66,6 +75,7 @@ import {
   PRResultView,
   queueLogAttempts,
   queueLogRows,
+  latestRunForCurrentRevision,
   prListRows,
   prDetailData,
   queueRevisionKey,
@@ -108,7 +118,7 @@ import {
   checkTaskStatusOf,
   issueTaskStatusOf,
   jobAttemptTaskStatusOf,
-  prTaskStatusOf,
+  prDeliveryTaskStatusOf,
   projectPRTaskStatus,
   projectQueueRunTaskStatus,
   taskStatusFields,
@@ -176,7 +186,7 @@ export async function runQueueGit(
 
 async function gitAsync(cwd: string, args: readonly string[]): Promise<string> {
   await using process = createProcess()
-  return runQueueGit(process, cwd, args)
+  return await runQueueGit(process, cwd, args)
 }
 
 function queueGitDir(cwd: string): string | undefined {
@@ -289,7 +299,7 @@ async function residentRunnerLeaseHeld(cwd: string): Promise<boolean> {
     raiseFailure("infrastructure", "runner-health-unavailable", `yrd: '${cwd}' is not a Git queue repository`)
   }
   try {
-    await createExclusive(join(gitDir, "yrd", "resident-runner"), { timeoutMs: 0 }).run(async () => undefined)
+    await createExclusive(join(gitDir, "yrd", "resident-runner"), { timeoutMs: 0 }).run(() => Promise.resolve())
     return false
   } catch (error) {
     if (failureFact(error)?.code === "exclusive-busy") return true
@@ -721,7 +731,7 @@ type TrackerDeliveryIdentity = Readonly<{
   pr: string
   revision: number
   headSha: string
-  status: PR["status"]
+  status: PRDeliveryState
   at: string
   runs: readonly string[]
   correlation?: Correlation
@@ -741,13 +751,12 @@ type TrackerBridge = Readonly<{
 
 function trackerDelivery(pr: DeepReadonly<PR>, state: DeepReadonly<YrdCliState>): TrackerDelivery | undefined {
   if (pr.issue === undefined) return undefined
-  const revision = pr.revisions.findLast(
-    (candidate) => candidate.revision === pr.revision && candidate.headSha === pr.headSha,
-  )
+  const revision = currentPRRev(pr)
   const runs = Queues.values(state.queues)
     .filter((run) =>
       run.prs.some(
-        (candidate) => candidate.id === pr.id && candidate.revision === pr.revision && candidate.headSha === pr.headSha,
+        (candidate) =>
+          candidate.id === pr.id && candidate.revision === revision.n && candidate.headSha === revision.head,
       ),
     )
     .toSorted((left, right) => {
@@ -758,16 +767,18 @@ function trackerDelivery(pr: DeepReadonly<PR>, state: DeepReadonly<YrdCliState>)
   const identity = {
     issueRef: pr.issue,
     pr: pr.id,
-    revision: pr.revision,
-    headSha: pr.headSha,
+    revision: revision.n,
+    headSha: revision.head,
     runs,
-    ...(pr.correlation === undefined ? {} : { correlation: pr.correlation }),
+    ...(revision.correlation === undefined ? {} : { correlation: revision.correlation }),
   }
-  switch (pr.status) {
+  switch (prDeliveryState(pr)) {
     case "pushed":
-      return revision === undefined ? undefined : { ...identity, status: "pushed", at: revision.pushedAt }
+      return { ...identity, status: "pushed", at: revision.pushedAt }
     case "submitted":
-      return pr.submittedAt === undefined ? undefined : { ...identity, status: "submitted", at: pr.submittedAt }
+      return revision.submittedAt === undefined
+        ? undefined
+        : { ...identity, status: "submitted", at: revision.submittedAt }
     case "rejected":
       if (pr.rejectedAt === undefined) return undefined
       if (pr.terminalRun === undefined) {
@@ -810,7 +821,7 @@ function trackerBridge(
 
 function issueDeliveryRows(bridge: TrackerBridge): IssueDeliveryRow[] {
   return bridge.deliveries.map((delivery) => {
-    const taskStatus = prTaskStatusOf(delivery)
+    const taskStatus = prDeliveryTaskStatusOf(delivery.status)
     return {
       pr: delivery.pr,
       revision: delivery.revision,
@@ -872,23 +883,29 @@ function selectedBase(state: YrdCliState, selector: string): string {
   return resolveBase(knownBases(state), selector) ?? baseIdentity(selector)
 }
 
-async function runJobs(app: YrdCliApp, ids: readonly string[], io: YrdCliIO): Promise<Job[]> {
-  return [...(await app.jobs.runMany(ids, runtimeOptions(io)))]
+async function runJobs(app: YrdCliApp, ids: readonly string[], _io: YrdCliIO): Promise<Job[]> {
+  return Promise.all(ids.map((job) => app.runner.submit({ job })))
 }
 
 function assertJobsPassed(runs: readonly Job[], action: string): void {
-  const unresolved = runs.find((run) => run.status !== "passed")
+  const unresolved = runs.find((run) => run.status !== "completed" || run.conclusion !== "success")
   if (unresolved === undefined) return
   const failure =
-    unresolved.status === "failed"
+    unresolved.status === "completed" && unresolved.conclusion === "failure"
       ? unresolved.error
-      : unresolved.status === "lost"
+      : unresolved.status === "completed" && unresolved.conclusion === "timed_out"
         ? { code: "job-lost", message: unresolved.lostReason }
         : {
-            code: `job-${unresolved.status}`,
-            message: ("detail" in unresolved ? unresolved.detail : undefined) ?? unresolved.status,
+            code: `job-${unresolved.status === "completed" ? unresolved.conclusion : unresolved.status}`,
+            message:
+              ("detail" in unresolved ? unresolved.detail : undefined) ??
+              (unresolved.status === "completed" ? unresolved.conclusion : unresolved.status),
           }
-  raiseFailure("refusal", failure.code, `${action} ${unresolved.status}: ${failure.message}`)
+  raiseFailure(
+    "refusal",
+    failure.code,
+    `${action} ${unresolved.status}${unresolved.status === "completed" ? `+${unresolved.conclusion}` : ""}: ${failure.message}`,
+  )
 }
 
 function within(parent: string, child: string): boolean {
@@ -912,7 +929,7 @@ function unique<Value extends { id: string }>(values: readonly Value[]): Value[]
   return [...new Map(values.map((value) => [value.id, value])).values()]
 }
 
-function byQueueRunChronology(left: QueueRun, right: QueueRun): number {
+function byQueueRunChronology(left: Run, right: Run): number {
   const started = left.startedAt.localeCompare(right.startedAt)
   return started === 0 ? left.id.localeCompare(right.id, undefined, { numeric: true }) : started
 }
@@ -922,7 +939,7 @@ export function mergedQueueRuns(
   aliases: readonly QueueSummary[],
 ): Pick<QueueSummary, "running" | "waiting" | "finished"> {
   const canonicalIds = new Set([...canonical.running, ...canonical.waiting, ...canonical.finished].map((run) => run.id))
-  const merge = (key: "running" | "waiting" | "finished"): QueueRun[] =>
+  const merge = (key: "running" | "waiting" | "finished"): Run[] =>
     unique([
       ...aliases.flatMap((summary) => summary[key]).filter((run) => !canonicalIds.has(run.id)),
       ...canonical[key],
@@ -1017,6 +1034,10 @@ function projectQueueStatusResultTaskStatus(result: QueueStatusResult) {
   return {
     ...projectQueueSummaryTaskStatus(result),
     prs: result.prs.map(projectPRTaskStatus),
+    ...(result.candidates === undefined ? {} : { candidates: result.candidates }),
+    ...(result.eligibilities === undefined
+      ? {}
+      : { eligibilities: result.eligibilities.map(projectEligibilityTaskStatus) }),
   }
 }
 
@@ -1140,9 +1161,10 @@ async function closeBays(
   const bays = selectedBays(stateOf(app).bays, selectors, io.cwd ?? process.cwd(), "close")
   const closed: Bay[] = []
   for (const bay of bays) {
-    const withdrawing = app.bays
-      .prs()
-      .find((pr) => pr.bay === bay.id && (pr.status === "pushed" || pr.status === "submitted"))
+    const withdrawing = app.bays.prs().find((pr) => {
+      const delivery = prDeliveryState(pr)
+      return pr.bay === bay.id && (delivery === "pushed" || delivery === "submitted")
+    })
     const result = await app.bays.close({
       bay: bay.id,
       ...(options.withdraw === true ? { withdraw: true } : {}),
@@ -1206,7 +1228,7 @@ async function readyPr(app: YrdCliApp, selector: string, options: JsonOption, io
   )
   return admitted.some(
     (run) =>
-      run.status === "failed" && run.prs.some((member) => member.id === pr.id && member.revision === pr.revision),
+      Queues.failed(run) && run.prs.some((member) => member.id === pr.id && member.revision === prRevisionNumber(pr)),
   )
     ? 1
     : 0
@@ -1220,16 +1242,16 @@ async function recutPr(
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
   const outcome = await executeRecutPr(app, services, selector, options, io)
+  const revision = prRevisionNumber(outcome.current)
   await printResult(
     io,
     jsonEnabled(options),
     outcome.output,
-    `${outcome.current.id} revision ${outcome.current.revision} ${outcome.unchanged ? "already matches" : "recut onto"} ${outcome.result.baseSha}`,
+    `${outcome.current.id} revision ${revision} ${outcome.unchanged ? "already matches" : "recut onto"} ${outcome.result.baseSha}`,
   )
   return outcome.admitted.some(
     (run) =>
-      run.status === "failed" &&
-      run.prs.some((member) => member.id === outcome.current.id && member.revision === outcome.current.revision),
+      Queues.failed(run) && run.prs.some((member) => member.id === outcome.current.id && member.revision === revision),
   )
     ? 1
     : 0
@@ -1252,9 +1274,11 @@ async function executeRecutPr(
 ) {
   const service = services.recut ?? configuration("pr.recut capability is not installed")
   const pr = requiredPr(app, selector)
-  const expectedCurrent = { revision: pr.revision, headSha: pr.headSha }
-  if (pr.status === "integrated" || pr.status === "withdrawn" || pr.status === "canceled") {
-    raiseFailure("refusal", "terminal-target", `yrd: PR '${pr.id}' is ${pr.status}; terminal PRs cannot be recut`)
+  const delivery = prDeliveryState(pr)
+  const currentRevision = currentPRRev(pr)
+  const expectedCurrent = { revision: currentRevision.n, headSha: currentRevision.head }
+  if (delivery === "integrated" || delivery === "withdrawn" || delivery === "canceled") {
+    raiseFailure("refusal", "terminal-target", `yrd: PR '${pr.id}' is ${delivery}; terminal PRs cannot be recut`)
   }
   // Refuse to silently discard a green check: if the PR's current head already
   // holds a passing check for its current revision, recutting supersedes that
@@ -1264,21 +1288,20 @@ async function executeRecutPr(
     raiseFailure(
       "refusal",
       "recut-would-discard-green",
-      `yrd: PR '${pr.id}' revision ${pr.revision} already holds a passing check; recut would discard it. ` +
+      `yrd: PR '${pr.id}' revision ${currentRevision.n} already holds a passing check; recut would discard it. ` +
         "Re-run with --force to override.",
     )
   }
   if (options.revision !== undefined && (!Number.isInteger(options.revision) || options.revision < 1)) {
     usage("--revision must be a positive integer")
   }
-  const fromRevision = options.revision ?? pr.revision
-  const source = pr.revisions.find((revision) => revision.revision === fromRevision)
+  const fromRevision = options.revision ?? currentRevision.n
+  const source = pr.revs.find((revision) => revision.n === fromRevision)
   if (source === undefined) {
     raiseFailure("refusal", "revision-missing", `yrd: PR '${pr.id}' has no revision ${fromRevision}`)
   }
   const approval = pr.reviews.findLast(
-    (review) =>
-      review.revision === source.revision && review.headSha === source.headSha && review.decision === "approve",
+    (review) => review.revision === source.n && review.headSha === source.head && review.decision === "approve",
   )
   const currentCompositions = source.composition === undefined ? sameIssueIntegratedCompositions(app, pr) : undefined
   const result = await service.recut({
@@ -1287,29 +1310,29 @@ async function executeRecutPr(
     ...(pr.name === undefined ? {} : { name: pr.name }),
     branch: pr.branch,
     base: pr.base,
-    revision: source.revision,
-    headSha: source.headSha,
+    revision: source.n,
+    headSha: source.head,
     ...(source.baseSha === undefined ? {} : { baseSha: source.baseSha }),
     ...(source.correlation === undefined ? {} : { correlation: source.correlation }),
     ...(source.composition === undefined ? {} : { composition: source.composition }),
     ...(currentCompositions === undefined ? {} : { currentCompositions }),
-    ...(pr.recut === undefined
+    ...(currentRevision.recut === undefined
       ? {}
       : {
           current: {
-            revision: pr.revision,
-            headSha: pr.headSha,
-            ...(pr.baseSha === undefined ? {} : { baseSha: pr.baseSha }),
-            treeSha: pr.recut.treeSha,
-            patchId: pr.recut.patchId,
-            fromRevision: pr.recut.fromRevision,
-            ...(pr.composition === undefined ? {} : { composition: pr.composition }),
+            revision: currentRevision.n,
+            headSha: currentRevision.head,
+            ...(currentRevision.baseSha === undefined ? {} : { baseSha: currentRevision.baseSha }),
+            treeSha: currentRevision.recut.treeSha,
+            patchId: currentRevision.recut.patchId,
+            fromRevision: currentRevision.recut.fromRevision,
+            ...(currentRevision.composition === undefined ? {} : { composition: currentRevision.composition }),
           },
         }),
   })
   const recorded = await app.bays.recut({
     pr: pr.id,
-    fromRevision: source.revision,
+    fromRevision: source.n,
     headSha: result.headSha,
     baseSha: result.baseSha,
     treeSha: result.treeSha,
@@ -1322,19 +1345,20 @@ async function executeRecutPr(
   const unchanged = recorded.events.length === 0
 
   let current = requiredPr(app, pr.id)
-  let admitted: readonly QueueRun[] = []
+  let admitted: readonly Run[] = []
   if (options.queue === true) {
     if (!unchanged) {
       await app.queue.cancel({
         prs: [current.id],
         by: io.runner ?? "operator",
-        reason: `PR recut superseded revision ${source.revision}`,
+        reason: `PR recut superseded revision ${source.n}`,
       })
     }
-    if (current.status === "pushed") await app.bays.ready({ pr: current.id })
+    if (prDeliveryState(current) === "pushed") await app.bays.ready({ pr: current.id })
     current = requiredPr(app, current.id)
-    if (current.status !== "submitted") {
-      raiseFailure("refusal", "recut-not-ready", `yrd: PR '${current.id}' is ${current.status}, not ready`)
+    const currentDelivery = prDeliveryState(current)
+    if (currentDelivery !== "submitted") {
+      raiseFailure("refusal", "recut-not-ready", `yrd: PR '${current.id}' is ${currentDelivery}, not ready`)
     }
     if (!app.bays.checksRequested(current.id)) await app.bays.requestChecks({ pr: current.id })
     if (options.admit !== false) {
@@ -1344,14 +1368,14 @@ async function executeRecutPr(
   }
   const output = {
     pr: current.id,
-    revision: current.revision,
+    revision: prRevisionNumber(current),
     baseSha: result.baseSha,
     treeSha: result.treeSha,
     patchId: result.patchId,
     reviewCarried: approval !== undefined,
-    ...(current.correlation === undefined ? {} : { correlation: current.correlation }),
+    ...(prCorrelation(current) === undefined ? {} : { correlation: prCorrelation(current) }),
     sourceReadyAt: prSourceReadyAt(current),
-    lineage: prRevisionLineage(current).map((revision) => revision.revision),
+    lineage: prRevisionLineage(current).map((revision) => revision.n),
     unchanged,
   }
   return { admitted, current, output, result, unchanged }
@@ -1387,7 +1411,7 @@ async function reviewPr(
       review,
       eligibility: projectEligibilityTaskStatus(app.queue.eligibility(pr.id)),
     },
-    `${pr.id} revision ${pr.revision} ${review.decision} by ${review.actor}`,
+    `${pr.id} revision ${prRevisionNumber(pr)} ${review.decision} by ${review.actor}`,
   )
 }
 
@@ -1446,7 +1470,7 @@ async function commentPr(
     io,
     jsonEnabled(options),
     { command: "pr.comment", pr: prFact(pr), comment },
-    `${pr.id} revision ${pr.revision} commented by ${comment.actor}`,
+    `${pr.id} revision ${prRevisionNumber(pr)} commented by ${comment.actor}`,
   )
 }
 
@@ -1577,7 +1601,6 @@ async function submitBays(
   selectors: readonly string[],
   options: {
     follow?: boolean
-    wait?: boolean
     draft?: boolean
     base?: string
     queue?: string
@@ -1622,7 +1645,7 @@ async function submitBays(
       run: runtimeOptions(io),
       warnings,
     })
-    if (reviewers.length > 0 && pr.status !== "integrated") {
+    if (reviewers.length > 0 && prDeliveryState(pr) !== "integrated") {
       await app.bays.requestReview({
         pr: pr.id,
         reviewers: [...reviewers],
@@ -1648,22 +1671,26 @@ async function submitBays(
   // surface the informational note in the result envelope and drain only the
   // live submissions.
   for (const pr of prs) {
-    if (pr.status === "integrated") {
-      warnings.push(`already merged as PR '${pr.id}'${pr.integration === undefined ? "" : ` (${pr.integration.commit})`}`)
+    if (prDeliveryState(pr) === "integrated") {
+      warnings.push(
+        `already merged as PR '${pr.id}'${pr.integration === undefined ? "" : ` (${pr.integration.commit})`}`,
+      )
     }
   }
-  const checkable = prs.filter((pr) => pr.status === "pushed" || pr.status === "submitted")
+  const checkable = prs.filter((pr) => {
+    const delivery = prDeliveryState(pr)
+    return delivery === "pushed" || delivery === "submitted"
+  })
   for (const pr of checkable) await app.bays.requestChecks({ pr: pr.id })
   const selected = checkable.map((pr) => pr.id)
-  if (selected.length === 0 || (options.wait !== true && options.follow !== true)) {
+  if (selected.length === 0 || options.follow !== true) {
     // D8 — submit is a ledger write, not a negotiation. The submission and its
     // check request are now recorded; return success WITHOUT composing or
     // draining. The runner loop admits and settles this PR on its next cycle,
     // and any composition problem surfaces later as an in-queue `needs-author`
     // state (yrd-queue PREligibility) — never as a submit-time door refusal.
-    // `--wait`/`--follow` opt back into the pre-decouple synchronous drain; with
-    // nothing checkable (e.g. an already-merged same-head resubmit) there is
-    // nothing to drain regardless.
+    // `--follow` opts back into the synchronous drain; with nothing checkable
+    // (e.g. an already-merged same-head resubmit) there is nothing to drain.
     await printResult(
       io,
       jsonEnabled(options),
@@ -1673,7 +1700,7 @@ async function submitBays(
     return 0
   }
   const followed = (await app.queue.admit({ prs: selected }, runtimeOptions(io))).filter((run) =>
-    run.prs.some((member) => prs.some((pr) => pr.id === member.id && pr.revision === member.revision)),
+    run.prs.some((member) => prs.some((pr) => pr.id === member.id && prRevisionNumber(pr) === member.revision)),
   )
   let checks: readonly PRCheckViewRecord[] = prCheckRecords(app, selected)
   if (options.follow === true && !checksTerminal(checks)) checks = await followCheckRecords(app, selected, checks, io)
@@ -1694,7 +1721,7 @@ async function submitBays(
       now: io.now?.() ?? Date.now(),
     }),
   )
-  return checks.some((check) => check.status === "failed") || followed.some((run) => run.status === "failed") ? 1 : 0
+  return checks.some((check) => check.status === "failed") || followed.some(Queues.failed) ? 1 : 0
 }
 
 async function readComposition(path: string | undefined, io: YrdCliIO): Promise<CompositionV1 | undefined> {
@@ -1725,10 +1752,11 @@ type PRLandingOutcome =
       at: string
       run?: string
     }>
-  | Readonly<{ outcome: "not-landed"; status: Exclude<PR["status"], "integrated"> }>
+  | Readonly<{ outcome: "not-landed"; status: Exclude<PRDeliveryState, "integrated"> }>
 
 function prLandingOutcome(pr: DeepReadonly<PR>): PRLandingOutcome {
-  if (pr.status !== "integrated") return { outcome: "not-landed", status: pr.status }
+  const delivery = prDeliveryState(pr)
+  if (delivery !== "integrated") return { outcome: "not-landed", status: delivery }
   if (pr.integration === undefined || pr.integratedAt === undefined) {
     refusal(`integrated PR '${pr.id}' is missing canonical landing proof`)
   }
@@ -1742,14 +1770,14 @@ function prLandingOutcome(pr: DeepReadonly<PR>): PRLandingOutcome {
   }
 }
 
-function allQueueRuns(app: YrdCliApp): QueueRun[] {
+function allQueueRuns(app: YrdCliApp): Run[] {
   return Queues.ids(stateOf(app).queues)
     .map((id) => app.queue.get(id))
-    .filter((run): run is QueueRun => run !== undefined)
+    .filter((run): run is Run => run !== undefined)
     .toSorted(byQueueRunChronology)
 }
 
-function prQueueRuns(app: YrdCliApp, pr: PR): QueueRun[] {
+function prQueueRuns(app: YrdCliApp, pr: PR): Run[] {
   return allQueueRuns(app).filter((run) => run.prs.some((member) => member.id === pr.id))
 }
 
@@ -1759,13 +1787,14 @@ function sameIssueIntegratedCompositions(app: YrdCliApp, pr: PR): readonly Compo
     app.bays
       .prs()
       .filter(
-        (candidate) => candidate.id !== pr.id && candidate.issue === pr.issue && candidate.status === "integrated",
+        (candidate) =>
+          candidate.id !== pr.id && candidate.issue === pr.issue && prDeliveryState(candidate) === "integrated",
       )
       .map((candidate) => candidate.id),
   )
   const compositions = allQueueRuns(app)
     .filter(
-      (run) => run.status === "passed" && run.prs.length > 0 && run.prs.every((member) => integrated.has(member.id)),
+      (run) => Queues.succeeded(run) && run.prs.length > 0 && run.prs.every((member) => integrated.has(member.id)),
     )
     .toReversed()
     .flatMap((run) => {
@@ -1797,7 +1826,7 @@ async function listBays(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
   )
 }
 
-async function pathBay(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): Promise<void> {
+function pathBay(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): void {
   const bay = resolveBay(stateOf(app).bays, selector)
   if (bay === undefined) refusal(`no bay '${selector}'; run 'yrd bay' to list available Bays`)
   if (bay.status !== "active") {
@@ -1830,7 +1859,7 @@ async function listPrs(
   const matching = app.bays
     .prs()
     .filter((pr) => base === undefined || baseIdentity(pr.base) === base)
-    .filter((pr) => options.state === undefined || pr.status === options.state)
+    .filter((pr) => options.state === undefined || prDeliveryState(pr) === options.state)
     .filter((pr) => options.issue === undefined || pr.issue === options.issue)
     .toSorted((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }))
   const json = jsonEnabled(options)
@@ -1846,7 +1875,7 @@ async function listPrs(
         ? options.reviewer !== undefined
           ? needsReview
           : needsReview ||
-            ((pr.status === "pushed" || pr.status === "submitted") &&
+            ((prDeliveryState(pr) === "pushed" || prDeliveryState(pr) === "submitted") &&
               eligibility.review.required &&
               !eligibility.review.approved)
         : true,
@@ -1884,7 +1913,7 @@ async function viewPr(
   const state = stateOf(app)
   const target = resolveQueueTargets(state, [pr.id], undefined, pr.id)
   const { results } = await queueStatusSnapshots(app, state, target, io)
-  const positions = pr.status === "submitted" ? await queuedPrPositions(state, pr.base, io) : undefined
+  const positions = prDeliveryState(pr) === "submitted" ? await queuedPrPositions(state, pr.base, io) : undefined
   const position = positions?.get(pr.id)
   const runs = prQueueRuns(app, pr)
   const attempts = await queueLogAttempts(app.events())
@@ -1953,14 +1982,14 @@ async function diffPr(
 ): Promise<void> {
   const pr = requiredPr(app, selector)
   const cwd = io.cwd ?? process.cwd()
-  const base = pr.baseSha ?? pr.base
+  const base = prBaseSha(pr) ?? pr.base
   let diff: string
   try {
-    diff = gitSync(cwd, ["diff", ...(options.stat === true ? ["--stat"] : []), `${base}...${pr.headSha}`, "--"])
+    diff = gitSync(cwd, ["diff", ...(options.stat === true ? ["--stat"] : []), `${base}...${prHead(pr)}`, "--"])
   } catch (error) {
     refusal(`cannot diff PR '${pr.id}': ${error instanceof Error ? error.message : String(error)}`)
   }
-  const composition = pr.composition
+  const composition = prComposition(pr)
   const rendered =
     composition === undefined
       ? diff
@@ -1981,7 +2010,7 @@ async function diffPr(
       command: "pr.diff",
       pr: pr.id,
       base,
-      head: pr.headSha,
+      head: prHead(pr),
       ...(composition === undefined ? {} : { composition }),
       diff,
     },
@@ -2032,7 +2061,7 @@ function currentPr(app: YrdCliApp, io: YrdCliIO): PR {
 }
 
 async function queuedPrPosition(state: YrdCliState, pr: PR, io: YrdCliIO): Promise<number | undefined> {
-  if (pr.status !== "submitted") return undefined
+  if (prDeliveryState(pr) !== "submitted") return undefined
   return (await queuedPrPositions(state, pr.base, io)).get(pr.id)
 }
 
@@ -2137,13 +2166,14 @@ function prFact(pr: DeepReadonly<PR>): Readonly<{
   headSha: string
   baseSha?: string
 }> {
+  const revision = currentPRRev(pr)
   return {
     id: pr.id,
     branch: pr.branch,
     base: pr.base,
-    revision: pr.revision,
-    headSha: pr.headSha,
-    ...(pr.baseSha === undefined ? {} : { baseSha: pr.baseSha }),
+    revision: revision.n,
+    headSha: revision.head,
+    ...(revision.baseSha === undefined ? {} : { baseSha: revision.baseSha }),
   }
 }
 
@@ -2187,7 +2217,8 @@ function issueRows(app: YrdCliApp, state: DeepReadonly<YrdCliState>, selected?: 
         prs: prs.map((pr) => pr.id).join(",") || "-",
         contests: joinedContests.map((contest) => contest.id).join(",") || "-",
         outcome:
-          [...prs.map((pr) => pr.status), ...joinedContests.map((contest) => contest.status)].join(",") || "in-flight",
+          [...prs.map((pr) => prDeliveryState(pr)), ...joinedContests.map((contest) => contest.status)].join(",") ||
+          "in-flight",
       }
     })
 }
@@ -2272,7 +2303,7 @@ async function runQueues(
   selectors: readonly string[],
   options: { steps?: unknown },
   io: YrdCliIO,
-): Promise<readonly QueueRun[]> {
+): Promise<readonly Run[]> {
   const steps = csv(options.steps)
   return app.queue.run(
     {
@@ -2451,14 +2482,20 @@ async function queueStatusSnapshots(
     const canonical = app.queue.status(group.base)
     const aliases = [...group.aliases].filter((base) => base !== group.base).map((base) => app.queue.status(base))
     const runs = mergedQueueRuns(canonical, aliases)
+    const prs = Object.values(state.bays.prs).filter(
+      (pr) => group.aliases.has(pr.base) && (target.selected.size === 0 || target.selected.has(pr.id)),
+    )
+    const prIds = new Set(prs.map((pr) => pr.id))
     results.push({
       base: group.base,
       ...runs,
       ...(canonical.pause === undefined ? {} : { pause: canonical.pause }),
       ...(group.headSha === undefined ? {} : { headSha: group.headSha }),
-      prs: Object.values(state.bays.prs).filter(
-        (pr) => group.aliases.has(pr.base) && (target.selected.size === 0 || target.selected.has(pr.id)),
+      prs,
+      candidates: Object.values(state.queues.candidates).filter((candidate) =>
+        candidate.revs.some((revision) => prIds.has(revision.pr)),
       ),
+      eligibilities: prs.map((pr) => app.queue.eligibility(pr.id)),
     })
   }
   return { results }
@@ -2566,7 +2603,7 @@ export async function queueArtifactOutputs(
         const artifacts = [
           ...directArtifacts(job),
           ...("output" in job ? directArtifacts(job.output) : []),
-          ...(job.status === "failed" ? nestedArtifacts(job.error.evidence) : []),
+          ...(job.status === "completed" && job.conclusion === "failure" ? nestedArtifacts(job.error.evidence) : []),
         ]
         for (const artifactPath of localArtifactPaths(artifacts)) {
           await append(run.id, step.name, attempt, artifactPath)
@@ -2578,12 +2615,12 @@ export async function queueArtifactOutputs(
 }
 
 function queuePrDiffSource(pr: PR, revision: number): Readonly<{ base: string; headSha: string }> | undefined {
-  const revisionRecord = pr.revisions.find((candidate) => candidate.revision === revision)
-  const isCurrent = revision === pr.revision
-  const headSha = isCurrent ? pr.headSha : revisionRecord?.headSha
+  const revisionRecord = pr.revs.find((candidate) => candidate.n === revision)
+  const isCurrent = revision === prRevisionNumber(pr)
+  const headSha = isCurrent ? prHead(pr) : revisionRecord?.head
   if (headSha === undefined) return undefined
   const base = isCurrent
-    ? (pr.baseSha ?? revisionRecord?.baseSha ?? pr.base)
+    ? (prBaseSha(pr) ?? revisionRecord?.baseSha ?? pr.base)
     : (revisionRecord?.baseSha ?? revisionRecord?.base)
   return base === undefined ? undefined : { base, headSha }
 }
@@ -2606,7 +2643,7 @@ function queuePrDiffResult(pr: PR, revision: number, numstat: string, patch: str
 }
 
 /** Resolve a revision-bound PR delta for the synthetic `0: submit` step. */
-export function queuePrDiff(cwd: string, pr: PR, revision = pr.revision): QueuePrDiff {
+export function queuePrDiff(cwd: string, pr: PR, revision = prRevisionNumber(pr)): QueuePrDiff {
   const source = queuePrDiffSource(pr, revision)
   if (source === undefined) return { pr: pr.id, revision, unavailable: "refs-pruned" }
   // Missing objects are the one recoverable absence state. Validate the
@@ -2905,10 +2942,12 @@ function renderInitTable(rows: readonly InitRow[]): string {
   const header = ["SUBMODULE", "BRANCH", "SOURCE"] as const
   const cells = rows.map((row) => [row.path, row.branch ?? "-", initSourceLabel(row)] as const)
   const widths = header.map((label, column) =>
-    Math.max(label.length, ...cells.map((cell) => cell[column]!.length)),
+    Math.max(label.length, ...cells.map((cell) => cell[column]?.length ?? 0)),
   )
   const formatRow = (cell: readonly string[]): string =>
-    cell.map((text, column) => (column === cell.length - 1 ? text : text.padEnd(widths[column]!))).join("  ")
+    cell
+      .map((text, column) => (column === cell.length - 1 ? text : text.padEnd(widths[column] ?? text.length)))
+      .join("  ")
   return [formatRow(header), ...cells.map(formatRow)].join("\n")
 }
 
@@ -2986,7 +3025,9 @@ async function initSubmoduleTracking(options: InitOptions, io: YrdCliIO): Promis
     }
   }
   if (alreadyTracking > 0) {
-    summary.push(`(${alreadyTracking} submodule${alreadyTracking === 1 ? "" : "s"} already tracking a branch, unchanged)`)
+    summary.push(
+      `(${alreadyTracking} submodule${alreadyTracking === 1 ? "" : "s"} already tracking a branch, unchanged)`,
+    )
   }
 
   await printResult(
@@ -3014,7 +3055,11 @@ async function resolveInitRow(
   submodule: SubmoduleEntry,
   dryRun: boolean,
 ): Promise<InitRow> {
-  const base = { name: submodule.name, path: submodule.path, ...(submodule.url === undefined ? {} : { url: submodule.url }) }
+  const base = {
+    name: submodule.name,
+    path: submodule.path,
+    ...(submodule.url === undefined ? {} : { url: submodule.url }),
+  }
   if (submodule.url === undefined || submodule.url === "") {
     return { ...base, source: "unreachable", action: "unreachable", detail: "no url declared in .gitmodules" }
   }
@@ -3022,7 +3067,12 @@ async function resolveInitRow(
   try {
     target = resolveSubmoduleOrigin(root, superOrigin, submodule.url)
   } catch (cause) {
-    return { ...base, source: "unreachable", action: "unreachable", detail: cause instanceof Error ? cause.message : String(cause) }
+    return {
+      ...base,
+      source: "unreachable",
+      action: "unreachable",
+      detail: cause instanceof Error ? cause.message : String(cause),
+    }
   }
   const resolution = await resolver(target)
   if (resolution.status === "unreachable") {
@@ -3101,9 +3151,11 @@ type QueueLogFilterRow = Readonly<{
 function queueLogSinceMs(value: string): number {
   const match = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/u.exec(value.trim())
   if (match === null) usage("--since must be a duration such as 30m, 6h, or 1d")
-  const amount = Number(match[1])
-  const unitsMs: Readonly<Record<string, number>> = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }
-  const durationMs = amount * (unitsMs[match[2] ?? ""] ?? Number.NaN)
+  const amount = Number(match[1] ?? "")
+  const unit = match[2] ?? ""
+  const unitMs = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[unit as "ms" | "s" | "m" | "h" | "d"]
+  if (unitMs === undefined) usage("--since must use ms, s, m, h, or d")
+  const durationMs = amount * unitMs
   if (!Number.isFinite(durationMs) || durationMs < 0) usage("--since must be a finite non-negative duration")
   return durationMs
 }
@@ -3139,8 +3191,7 @@ async function logRuns(
     const canonical = app.queue.status(group.base)
     const aliases = [...group.aliases].filter((base) => base !== group.base).map((base) => app.queue.status(base))
     const merged = mergedQueueRuns(canonical, aliases)
-    const inScope = (run: QueueRun) =>
-      target.selected.size === 0 || run.prs.some((member) => target.selected.has(member.id))
+    const inScope = (run: Run) => target.selected.size === 0 || run.prs.some((member) => target.selected.has(member.id))
     const runs = {
       running: merged.running.filter(inScope),
       waiting: merged.waiting.filter(inScope),
@@ -3155,8 +3206,8 @@ async function logRuns(
       ),
     })
   }
-  const prStatusById = new Map<string, PR["status"]>(
-    summaries.flatMap((result) => result.prs.map((pr) => [pr.id, pr.status])),
+  const prStatusById = new Map<string, PRDeliveryState>(
+    summaries.flatMap((result) => result.prs.map((pr) => [pr.id, prDeliveryState(pr)])),
   )
   const revisionSubjects = new Map<string, string>()
   const cwd = io.cwd ?? process.cwd()
@@ -3253,6 +3304,30 @@ async function queueAudit(
       : result.findings.map((finding) => formatActionableFailure(finding)).join("\n\n"),
   )
   return result.findings.length === 0 ? 0 : 1
+}
+
+async function configDoctor(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  options: JsonOption,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
+  const config = services.config
+  if (config === undefined) configuration("config doctor capability is not installed")
+  await app.refresh()
+  const state = stateOf(app)
+  const findings = diagnoseYrdFlows({ prs: Object.values(state.bays.prs), runs: Queues.values(state.queues) }, config)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "doctor", findings },
+    findings.length === 0
+      ? "yrd doctor clean"
+      : findings
+          .map((finding) => `${finding.severity.toUpperCase()} ${finding.code} ${finding.owner}: ${finding.message}`)
+          .join("\n"),
+  )
+  return findings.length === 0 ? 0 : 1
 }
 
 async function journalImportOrphan(
@@ -3377,9 +3452,10 @@ async function finishQueue(
       token,
       result:
         options.ok === true
-          ? { status: "passed", output: evidence }
+          ? { status: "completed", conclusion: "success", output: evidence }
           : {
-              status: "failed",
+              status: "completed",
+              conclusion: "failure",
               error: {
                 code: `${waiting.step.name}-failed`,
                 message: options.detail ?? `${waiting.step.name} failed externally`,
@@ -3525,12 +3601,15 @@ export async function refreshAdmittedQueueRevisions(
 ): Promise<readonly ResidentQueueFreshnessTransition[]> {
   const snapshot = stateOf(app)
   const outcomes: ResidentQueueFreshnessTransition[] = []
-  const interrupted = Object.values(snapshot.bays.prs).filter((pr) => pr.recut?.transition?.to === "refreshed")
-  const staleRunsByPr = new Map<string, QueueRun[]>()
+  const interrupted = Object.values(snapshot.bays.prs).filter(
+    (pr) => currentPRRev(pr).recut?.transition?.to === "refreshed",
+  )
+  const staleRunsByPr = new Map<string, Run[]>()
   const staleRunIds = new Set<string>()
   for (const pr of interrupted) {
     const claim = snapshot.queues.authority.claims[pr.id]
-    if (claim?.consumedBy === undefined || (claim.revision === pr.revision && claim.headSha === pr.headSha)) {
+    const revision = currentPRRev(pr)
+    if (claim?.consumedBy === undefined || (claim.revision === revision.n && claim.headSha === revision.head)) {
       continue
     }
     const run = app.queue.get(claim.consumedBy)
@@ -3551,16 +3630,17 @@ export async function refreshAdmittedQueueRevisions(
     const runs = staleRunsByPr.get(pr.id)
     if (runs === undefined) continue
     const ids = runs.map(({ id }) => id)
-    outcomes.push({ status: "recovered", pr: pr.id, revision: pr.revision, runs: ids })
+    const revision = prRevisionNumber(pr)
+    outcomes.push({ status: "recovered", pr: pr.id, revision, runs: ids })
     app.log.info?.("resident queue recovered an interrupted freshness transition", {
       action: "queue-freshness-recovered",
       pr: pr.id,
-      revision: pr.revision,
+      revision,
       runs: ids,
     })
   }
   const candidates = Object.values(snapshot.bays.prs)
-    .filter((pr) => pr.status === "submitted" && app.bays.checksRequested(pr.id))
+    .filter((pr) => prDeliveryState(pr) === "submitted" && app.bays.checksRequested(pr.id))
     .toSorted(
       (left, right) =>
         baseIdentity(left.base).localeCompare(baseIdentity(right.base)) ||
@@ -3570,6 +3650,7 @@ export async function refreshAdmittedQueueRevisions(
 
   const groups = await queueTargetGroups(new Set(candidates.map((pr) => pr.base)), io)
   for (const candidate of candidates) {
+    const candidateRevision = currentPRRev(candidate)
     if (io.drainSignal?.aborted === true) break
     const target = groups.find(
       (group) => group.aliases.has(candidate.base) || group.aliases.has(baseIdentity(candidate.base)),
@@ -3581,7 +3662,7 @@ export async function refreshAdmittedQueueRevisions(
         `yrd: resident auto-recut could not resolve queue base '${candidate.base}' for PR '${candidate.id}'`,
       )
     }
-    if (candidate.baseSha === target.headSha) continue
+    if (candidateRevision.baseSha === target.headSha) continue
 
     try {
       const recut = await executeRecutPr(
@@ -3596,20 +3677,21 @@ export async function refreshAdmittedQueueRevisions(
         },
         io,
       )
+      const refreshedRevision = currentPRRev(recut.current)
       outcomes.push({
         status: "refreshed",
         pr: recut.current.id,
-        revision: recut.current.revision,
-        fromBase: candidate.baseSha,
+        revision: refreshedRevision.n,
+        fromBase: candidateRevision.baseSha,
         toBase: recut.result.baseSha,
-        headSha: recut.current.headSha,
+        headSha: refreshedRevision.head,
         patchId: recut.result.patchId,
       })
       app.log.info?.("resident queue refreshed an admitted revision onto the current base", {
         action: "queue-freshness-refreshed",
         pr: recut.current.id,
-        revision: recut.current.revision,
-        fromBase: candidate.baseSha,
+        revision: refreshedRevision.n,
+        fromBase: candidateRevision.baseSha,
         toBase: recut.result.baseSha,
         patchId: recut.result.patchId,
       })
@@ -3620,8 +3702,8 @@ export async function refreshAdmittedQueueRevisions(
         outcomes.push({
           status: "deferred",
           pr: candidate.id,
-          revision: candidate.revision,
-          fromBase: candidate.baseSha,
+          revision: candidateRevision.n,
+          fromBase: candidateRevision.baseSha,
           toBase: target.headSha,
           code: "recut-current-changed",
           message: failure.message,
@@ -3629,8 +3711,8 @@ export async function refreshAdmittedQueueRevisions(
         app.log.info?.("resident queue deferred freshness after the current revision changed", {
           action: "queue-freshness-deferred",
           pr: candidate.id,
-          revision: candidate.revision,
-          fromBase: candidate.baseSha,
+          revision: candidateRevision.n,
+          fromBase: candidateRevision.baseSha,
           toBase: target.headSha,
           code: failure.code,
           reason: failure.message,
@@ -3640,8 +3722,8 @@ export async function refreshAdmittedQueueRevisions(
       outcomes.push({
         status: "refused",
         pr: candidate.id,
-        revision: candidate.revision,
-        fromBase: candidate.baseSha,
+        revision: candidateRevision.n,
+        fromBase: candidateRevision.baseSha,
         toBase: target.headSha,
         code: failure.code,
         message: failure.message,
@@ -3649,8 +3731,8 @@ export async function refreshAdmittedQueueRevisions(
       app.log.warn?.("resident queue could not refresh an admitted revision", {
         action: "queue-freshness-refused",
         pr: candidate.id,
-        revision: candidate.revision,
-        fromBase: candidate.baseSha,
+        revision: candidateRevision.n,
+        fromBase: candidateRevision.baseSha,
         toBase: target.headSha,
         code: failure.code,
         reason: failure.message,
@@ -3714,7 +3796,7 @@ export async function followQueueRuns(
       // definitions to move. Re-prove the baseline before admitting its fresh
       // revision; never start a Run under the pre-recut gate snapshot.
       if (freshness.length > 0) await gate()
-      let runs: readonly QueueRun[]
+      let runs: readonly Run[]
       try {
         runs = await runQueues(app, selectors, options, io)
       } catch (error) {
@@ -3755,9 +3837,10 @@ export async function followQueueRuns(
           io.stdout(stableJson({ command: "queue.run", mode: "follow", run: projectQueueRunTaskStatus(run) }))
         }
       }
-      const exit: YrdCliExitCode = runs.some((run) => run.status === "failed") ? 1 : 0
+      const exit: YrdCliExitCode = runs.some(Queues.failed) ? 1 : 0
       if (drainRequested()) {
-        if (runs.every(Queues.terminal)) return runs.at(-1)?.status === "failed" ? 1 : 0
+        const lastRun = runs.at(-1)
+        if (runs.every(Queues.terminal)) return lastRun !== undefined && Queues.failed(lastRun) ? 1 : 0
         await scope.sleep(interval)
         continue
       }
@@ -3970,7 +4053,8 @@ async function finishContest(
     result:
       errorCode === undefined
         ? {
-            status: "passed",
+            status: "completed",
+            conclusion: "success",
             output: {
               verdict: options.ok === true ? "passed" : "failed",
               ...(options.detail === undefined ? {} : { summary: options.detail }),
@@ -3978,7 +4062,8 @@ async function finishContest(
             },
           }
         : {
-            status: "failed",
+            status: "completed",
+            conclusion: "failure",
             error: {
               code: errorCode,
               message: options.detail?.trim() || `remote evaluator failed (${errorCode})`,
@@ -4067,12 +4152,13 @@ async function refusePrMerge(
   }
 
   const position = await queuedPrPosition(stateOf(app), pr, io)
-  const detail = prMergeRefusalDetail(pr, position)
+  const detail = prMergeRefusalDetail(pr, position, latestRunForCurrentRevision(pr, app.queue.status(pr.base)))
   const message = `the queue is the only merger; ${detail.message}`
   const guidance = {
     command: "pr.merge",
     pr: pr.id,
-    status: pr.status,
+    status: prDeliveryState(pr),
+    ...(detail.run === undefined ? {} : { run: detail.run, outcome: detail.outcome }),
     ...(position === undefined ? {} : { position }),
     next: detail.next,
     guidance: detail.guidance,
@@ -4088,8 +4174,27 @@ async function refusePrMerge(
 function prMergeRefusalDetail(
   pr: PR,
   position: number | undefined,
-): Readonly<{ next: string; guidance: Readonly<Record<string, string>>; message: string }> {
-  if (pr.status === "submitted") {
+  latestRun: Run | undefined,
+): Readonly<{
+  next: string
+  guidance: Readonly<Record<string, string>>
+  message: string
+  run?: string
+  outcome?: "rejected"
+}> {
+  const delivery = prDeliveryState(pr)
+  if (latestRun?.status === "completed" && latestRun.conclusion === "failure") {
+    const inspect = `yrd pr runs ${pr.id}`
+    const resubmit = "fix the branch and run yrd pr submit again"
+    return {
+      next: inspect,
+      guidance: { inspect, resubmit },
+      message: `PR '${pr.id}' latest Run '${latestRun.id}' was rejected; see: ${inspect}; then ${resubmit}`,
+      run: latestRun.id,
+      outcome: "rejected",
+    }
+  }
+  if (delivery === "submitted") {
     const watch = `yrd watch --pr ${pr.id}`
     return {
       next: watch,
@@ -4097,7 +4202,7 @@ function prMergeRefusalDetail(
       message: `PR '${pr.id}' is queued${position === undefined ? "" : ` at position ${position}`}; watch: ${watch}`,
     }
   }
-  if (pr.status === "rejected") {
+  if (delivery === "rejected") {
     const inspect = `yrd pr runs ${pr.id}`
     const resubmit = "fix the branch and run yrd pr submit again"
     return {
@@ -4106,12 +4211,12 @@ function prMergeRefusalDetail(
       message: `PR '${pr.id}' was rejected; see: ${inspect}; then ${resubmit}`,
     }
   }
-  if (pr.status === "pushed") {
+  if (delivery === "pushed") {
     const submit = `yrd pr submit ${pr.branch}`
     return { next: submit, guidance: { submit }, message: `PR '${pr.id}' is not queued; submit it: ${submit}` }
   }
   const view = `yrd pr view ${pr.id}`
-  return { next: view, guidance: { view }, message: `PR '${pr.id}' is ${pr.status}; see: ${view}` }
+  return { next: view, guidance: { view }, message: `PR '${pr.id}' is ${delivery}; see: ${view}` }
 }
 
 function maxExit(left: YrdCliExitCode, right: YrdCliExitCode): YrdCliExitCode {
@@ -4201,6 +4306,7 @@ function buildProgram(
       if (runtimeApp !== undefined) return
       const globals = action.optsWithGlobals() as Readonly<{
         repo?: string
+        config?: string
         verbose?: number
         quiet?: number
         logLevel?: string
@@ -4249,6 +4355,11 @@ function buildProgram(
       .option("--base <branch>", "scope the dashboard to one base")
       .option("--json", "emit stable JSON")
       .action(async (options) => dashboard(installed(), options, io))
+    program
+      .command("doctor")
+      .description("diagnose base-authority Flow revision and structural drift")
+      .option("--json", "emit stable JSON")
+      .action(async (options) => setExit(await configDoctor(installed(), installedServices(), options, io)))
   }
 
   const bay = projection === "bay" ? program : program.command("bay").description("manage isolated Git work bays")
@@ -4272,7 +4383,7 @@ function buildProgram(
     .command("path <selector>")
     .description("print an active bay workspace path")
     .option("--json", "emit stable JSON")
-    .action(async (selector, options) => pathBay(installed(), selector, options, io))
+    .action((selector, options) => pathBay(installed(), selector, options, io))
   bay
     .command("refresh [selector...]")
     .description("refresh work bays")
@@ -4450,7 +4561,7 @@ function buildProgram(
         { command: "queue.run", results: runs.map(projectQueueRunTaskStatus) },
         createElement(QueueRunsView, { runs }),
       )
-      setExit(runs.some((run) => run.status === "failed") ? 1 : 0)
+      setExit(runs.some(Queues.failed) ? 1 : 0)
     })
   queue
     .command("finish <selector>")
@@ -4497,8 +4608,7 @@ function buildProgram(
     .command("submit [selector...]")
     .description("submit PR revisions and admit configured checks")
     .option("--draft", "register a pushed PR without requesting or admitting checks")
-    .option("--wait", "block on the synchronous drain (pre-decouple behavior); default records and returns")
-    .option("--follow", "follow admitted checks to a terminal result (implies --wait)")
+    .option("--follow", "synchronously drain and follow admitted checks; default records and returns")
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
@@ -4704,10 +4814,9 @@ function buildProgram(
     .action(async (contestId, options) => setExit(await promoteContest(installed(), contestId, options, io)))
 
   const order = new Map(
-    ["pr", "bay", "issue", "contest", "queue", "journal", "migrate", "log", "watch", "prime"].map((command, index) => [
-      command,
-      index,
-    ]),
+    ["pr", "bay", "issue", "contest", "queue", "doctor", "journal", "migrate", "log", "watch", "prime"].map(
+      (command, index) => [command, index],
+    ),
   )
   const orderedCommands = program.commands as unknown as CliCommand[]
   orderedCommands.sort((left, right) => (order.get(left.name()) ?? 99) - (order.get(right.name()) ?? 99))
@@ -4749,9 +4858,7 @@ async function executeYrd(
       return checkQueueRunner(
         {
           queue: {
-            auditEnvironment: async () => {
-              throw error
-            },
+            auditEnvironment: () => Promise.reject(error),
           },
         },
         { json: args.includes("--json") },

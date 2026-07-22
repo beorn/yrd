@@ -1,7 +1,6 @@
 import { appendFile, mkdir, mkdtemp, realpath, rm } from "node:fs/promises"
 import { isAbsolute, join, relative, sep } from "node:path"
-import type { JsonValue } from "@yrd/core"
-import type { JobResult } from "@yrd/job"
+import type { RunnerContextRequest, RunnerContexts, RuntimeContext } from "@yrd/job"
 import type { Process } from "@yrd/process"
 import type { ConditionalLogger } from "loggily"
 import { materializeSubmodules } from "@yrd/bay"
@@ -46,13 +45,10 @@ export type CandidatePoolOptions = Readonly<{
 export type CandidateAcquisition = Readonly<{ hits: number; misses: number; evictions: number }>
 
 export type CandidatePool = Readonly<{
-  /** Acquire a clean worktree pinned to `ref`, run `use` against it, then return
-   * the worktree to the pool. `use` receives the worktree path and a per-run
+  /** Acquire a clean worktree pinned to `ref`, run `runCandidate` against it, then return
+   * the worktree to the pool. `runCandidate` receives the worktree path and a per-run
    * ephemeral scratch directory (removed on release). */
-  withCandidate<Output extends JsonValue>(
-    ref: string,
-    use: (path: string, scratch: string) => Promise<JobResult<Output>>,
-  ): Promise<JobResult<Output>>
+  withCandidate<Output>(ref: string, runCandidate: (path: string, scratch: string) => Promise<Output>): Promise<Output>
   /** Cumulative acquisition counters, for measurement and assertions. */
   stats(): CandidateAcquisition
   /** Remove every warm worktree. Idempotent; also runs on async disposal. */
@@ -121,7 +117,9 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
   const idleWaiters: Array<() => void> = []
   function whenIdle(): Promise<void> {
     if (active === 0) return Promise.resolve()
-    return new Promise<void>((resolve) => idleWaiters.push(resolve))
+    return new Promise<void>((resolve) => {
+      idleWaiters.push(resolve)
+    })
   }
   function releaseHold(): void {
     active -= 1
@@ -160,7 +158,9 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
       active += 1
       return entry
     }
-    return new Promise<PoolEntry>((resolve, reject) => waiters.push({ resolve, reject }))
+    return new Promise<PoolEntry>((resolve, reject) => {
+      waiters.push({ resolve, reject })
+    })
   }
 
   function returnEntry(entry: PoolEntry): void {
@@ -388,10 +388,10 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
   }
 
   return Object.freeze({
-    async withCandidate<Output extends JsonValue>(
+    async withCandidate<Output>(
       ref: string,
-      use: (path: string, scratch: string) => Promise<JobResult<Output>>,
-    ): Promise<JobResult<Output>> {
+      runCandidate: (path: string, scratch: string) => Promise<Output>,
+    ): Promise<Output> {
       if (closing || closed) throw closedError()
       const entry = await takeEntry()
       try {
@@ -409,10 +409,12 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
         const scratch = await mkdtemp(join(root, "run-"))
         try {
           using checkSpan = log?.span?.("check", { repo, ref })
-          const result = await use(path, scratch)
-          if (checkSpan !== undefined) {
+          const result = await runCandidate(path, scratch)
+          if (checkSpan !== undefined && typeof result === "object" && result !== null && "status" in result) {
+            const status = String(result.status)
+            const conclusion = "conclusion" in result ? String(result.conclusion) : undefined
             Object.assign(checkSpan.spanData, {
-              outcome: result.status === "passed" ? "succeeded" : result.status,
+              outcome: status === "completed" ? (conclusion === "success" ? "succeeded" : "failed") : status,
             })
           }
           return result
@@ -428,6 +430,76 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
     stats(): CandidateAcquisition {
       return { hits, misses, evictions }
     },
+    close,
+    [Symbol.asyncDispose]: close,
+  })
+}
+
+export type WorktreeContextsOptions = Omit<CandidatePoolOptions, "capacity"> &
+  Readonly<{
+    size: number
+    submodules: "isolated"
+    /** Reuse the host's Candidate pool when one already owns the worktrees. */
+    pool?: CandidatePool
+  }>
+
+export type WorktreeContexts = RunnerContexts &
+  Readonly<{
+    stats(): CandidateAcquisition
+    close(): Promise<void>
+    [Symbol.asyncDispose](): Promise<void>
+  }>
+
+/** Candidate-aware Context provider for the local Runner. Each lease owns one
+ * independently materialized worktree; the underlying pool proves it clean on
+ * every handoff and initializes submodules into that worktree's own mutable
+ * Git directories. */
+export function worktreeContexts(options: WorktreeContextsOptions): WorktreeContexts {
+  if (!Number.isInteger(options.size) || options.size < 1) {
+    throw new RangeError("yrd: worktree context size must be a positive integer")
+  }
+  const ownsPool = options.pool === undefined
+  const pool =
+    options.pool ??
+    createCandidatePool({
+      repo: options.repo,
+      parent: options.parent,
+      capacity: options.size,
+      git: options.git,
+      ...(options.log === undefined ? {} : { log: options.log }),
+    })
+  let sequence = 0
+  let closed = false
+  const close = async (): Promise<void> => {
+    if (closed) return
+    closed = true
+    if (ownsPool) await pool.close()
+  }
+
+  const withContext = async <Output>(
+    request: RunnerContextRequest,
+    runInContext: (context: RuntimeContext) => Promise<Output>,
+  ): Promise<Output> => {
+    sequence += 1
+    const id = `worktree-context:${sequence}`
+    if (request.context.candidate === "none") {
+      if (request.candidateRef !== undefined) {
+        throw new Error("yrd: a candidateRef requires a ro or rw candidate Context")
+      }
+      return runInContext({ id, request: request.context, cwd: options.repo })
+    }
+    if (request.candidateRef === undefined) {
+      throw new Error(`yrd: ${request.context.candidate} candidate Context requires candidateRef`)
+    }
+    return pool.withCandidate(request.candidateRef, (cwd) =>
+      runInContext({ id, request: request.context, candidateRef: request.candidateRef, cwd }),
+    )
+  }
+
+  return Object.freeze({
+    maxInFlight: options.size,
+    withContext,
+    stats: pool.stats,
     close,
     [Symbol.asyncDispose]: close,
   })

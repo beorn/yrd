@@ -44,7 +44,7 @@ type GitlinkStages = Readonly<{ baseSha: string; currentSha: string; incomingSha
  * Turn root-merge conflict facts into deterministic queue-owned resolution
  * intent. Git execution stays at the command adapter boundary; this planner
  * only decides whether the entire conflict set is safe to hand to that
- * executor and which parent identities it must preserve.
+ * runner and which parent identities it must preserve.
  */
 export function planQueueSubmoduleComposition(conflicts: readonly QueueTreeConflict[]): QueueSubmoduleCompositionPlan {
   const duplicatePaths = duplicateConflictPaths(conflicts)

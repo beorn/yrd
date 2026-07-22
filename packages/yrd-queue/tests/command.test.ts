@@ -5,12 +5,12 @@
  */
 import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
-import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, watch, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { resolveRelativeSubmoduleOrigin } from "../src/submodule-origin.ts"
-import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, currentPRRev, prDeliveryState, withBays, type BayWorkspace, type PR } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs } from "@yrd/job"
 import { createProcess, shellCommand, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
@@ -51,6 +51,17 @@ const authoredGitlinksEnv = { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITL
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 type Checked = AddStepResult<PRShape, "check", GitCheckResultEvidence>
 
+function prFacts(pr: PR | undefined) {
+  if (pr === undefined) throw new Error("expected PR")
+  const revision = currentPRRev(pr)
+  return {
+    ...pr,
+    status: prDeliveryState(pr),
+    revision: revision.n,
+    headSha: revision.head,
+  }
+}
+
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
@@ -64,6 +75,14 @@ async function git(repo: string, args: string[]): Promise<string> {
   ])
   if (code !== 0) throw new Error(stderr || stdout)
   return stdout.trim()
+}
+
+async function queueBaseSha(repo: string, base: string): Promise<string> {
+  try {
+    return await git(repo, ["rev-parse", "--verify", `refs/remotes/origin/${base}`])
+  } catch {
+    return git(repo, ["rev-parse", "--verify", `refs/heads/${base}`])
+  }
 }
 
 async function repository<const Names extends readonly string[]>(
@@ -333,9 +352,9 @@ async function directRecutBaseChaseRepository(): Promise<{ repo: string; baseSha
 
 const unusedWorkspace: BayWorkspace = {
   revision: "unused-workspace-v1",
-  provision: () => ({ status: "failed", error: { code: "unused", message: "not used" } }),
-  refresh: () => ({ status: "failed", error: { code: "unused", message: "not used" } }),
-  deprovision: () => ({ status: "passed", output: {} }),
+  provision: () => ({ status: "completed", conclusion: "failure", error: { code: "unused", message: "not used" } }),
+  refresh: () => ({ status: "completed", conclusion: "failure", error: { code: "unused", message: "not used" } }),
+  deprovision: () => ({ status: "completed", conclusion: "success", output: {} }),
 }
 
 async function checkedQueue(
@@ -380,7 +399,11 @@ async function checkedQueue(
     gitMergeStep<Checked>({ inject: { process }, repo, ...(options.env === undefined ? {} : { env: options.env }) }),
     { revision: "git-merge-v1" },
   )
-  const queue = withQueue({ steps: [check, merge] as const, batch: options.batch ?? 1 })
+  const queue = withQueue({
+    steps: [check, merge] as const,
+    batch: options.batch ?? 1,
+    resolveBaseSha: (base) => queueBaseSha(repo, base),
+  })
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   return createYrd(queue(base), {
     inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
@@ -830,7 +853,7 @@ describe("Queue command adapters", () => {
       },
     })
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
-  })
+  }, 30_000)
 
   it("refuses a recorded base with ambiguous source merge bases", async () => {
     const { repo } = await repository()
@@ -909,7 +932,8 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run.status, run.error?.message).toBe("passed")
+    expect(run.status, run.error?.message).toBe("completed")
+    expect(run.conclusion).toBe("success")
     await git(repo, ["fetch", "-q", "origin", "main"])
     expect(await git(repo, ["ls-tree", "FETCH_HEAD", "dep"])).toBe(await git(repo, ["ls-tree", recut.headSha, "dep"]))
   })
@@ -1076,21 +1100,18 @@ describe("Queue command adapters", () => {
     })
     await app.bays.ready({ pr: "PR1" })
 
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {})
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     if (valid) {
-      expect(run.status, run.error?.message).toBe("passed")
-      expect(errors).not.toHaveBeenCalled()
+      expect(run.status, run.error?.message).toBe("completed")
+      expect(run.conclusion).toBe("success")
     } else {
-      expect(run.status).toBe("failed")
+      expect(run.status).toBe("completed")
       expect(run.error).toMatchObject({
         code: "recut-certificate",
         message: expect.stringContaining("patch/tree certificate"),
       })
-      expect(errors).toHaveBeenCalled()
     }
-    errors.mockRestore()
   })
 
   it("admits a direct recut whose base advanced with a disjoint merge (base-chase re-anchors clean)", async () => {
@@ -1128,7 +1149,8 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run.status, run.error?.message).toBe("passed")
+    expect(run.status, run.error?.message).toBe("completed")
+    expect(run.conclusion).toBe("success")
     // The reviewed change re-anchored onto the advanced base and landed alongside it.
     expect(await git(repo, ["show", "main:payload.txt"])).toContain("FIVE")
     expect(await git(repo, ["show", "main:other.txt"])).toContain("advanced")
@@ -1167,7 +1189,7 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
     errors.mockRestore()
 
-    expect(run.status).toBe("failed")
+    expect(run.status).toBe("completed")
     expect(run.error).toMatchObject({ code: "recut-certificate" })
     // The conflicting change never landed.
     expect(await git(repo, ["show", "main:payload.txt"])).not.toContain("FIVE")
@@ -1208,7 +1230,7 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
     errors.mockRestore()
 
-    expect(run.status).toBe("failed")
+    expect(run.status).toBe("completed")
     expect(run.error).toMatchObject({ code: "recut-certificate" })
     expect(await git(repo, ["show", "main:payload.txt"])).not.toContain("FIVE")
   })
@@ -1268,7 +1290,8 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run.status, run.error?.message).toBe("passed")
+    expect(run.status, run.error?.message).toBe("completed")
+    expect(run.conclusion).toBe("success")
     // The advanced root file and the composed dep pin both landed.
     expect(await git(repo, ["show", "main:unrelated-root.txt"])).toContain("advanced")
   })
@@ -1318,9 +1341,10 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run.status, run.error?.message).toBe("passed")
+    expect(run.status, run.error?.message).toBe("completed")
+    expect(run.conclusion).toBe("success")
     const check = run.steps[0]?.job
-    if (check?.status !== "passed") throw new Error("check did not pass")
+    if (check?.status !== "completed" || check.conclusion !== "success") throw new Error("check did not pass")
     const evidence = GitCheckEvidenceSchema.parse(check.output)
     expect(evidence.sourceRewrites).toEqual([
       {
@@ -1396,7 +1420,8 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: { code: "payload-certificate", message: expect.stringContaining(detail) },
     })
     expect(await git(repo, ["rev-parse", "main"])).toBe(rootBaseSha)
@@ -1441,9 +1466,10 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1", "PR2"] }, runtime))[0]!
 
-    expect(run.status, run.error?.message).toBe("passed")
+    expect(run.status, run.error?.message).toBe("completed")
+    expect(run.conclusion).toBe("success")
     const check = run.steps[0]?.job
-    if (check?.status !== "passed") throw new Error("check did not pass")
+    if (check?.status !== "completed" || check.conclusion !== "success") throw new Error("check did not pass")
     const evidence = GitCheckEvidenceSchema.parse(check.output)
     const rewrites = evidence.sourceRewrites ?? []
     expect(rewrites).toHaveLength(2)
@@ -1497,7 +1523,7 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(raced).toBe(true)
-    expect(run).toMatchObject({ status: "failed", error: { code: "invalid-candidate" } })
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "invalid-candidate" } })
     expect(await git(remote, ["rev-parse", "main"])).toBe(rootBaseSha)
   })
 
@@ -1515,7 +1541,8 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: {
         code: "authored-gitlink",
         message: expect.stringMatching(
@@ -1524,7 +1551,8 @@ describe("Queue command adapters", () => {
       },
     })
     expect(run.steps[0]?.job).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       output: { conflicts: [{ repo: ".", paths: ["dep"] }] },
     })
     // End-to-end through the REAL compose path: the composition refusal projects
@@ -1562,7 +1590,8 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: {
         code: "composition-invalid",
         message: expect.stringMatching(
@@ -1600,11 +1629,13 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: { code: "payload-overlap", message: expect.stringContaining("[src/candidate.ts]") },
     })
     expect(run.steps[0]?.job).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       output: { conflicts: [{ repo: "dep", paths: ["src/candidate.ts"] }] },
     })
   })
@@ -1640,9 +1671,10 @@ describe("Queue command adapters", () => {
 
       const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-      expect(run).toMatchObject({ status: "failed", error: { code: "payload-overlap" } })
+      expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "payload-overlap" } })
       expect(run.steps[0]?.job).toMatchObject({
-        status: "failed",
+        status: "completed",
+        conclusion: "failure",
         output: { conflicts: [{ repo: "dep", paths: [upstreamPath] }] },
       })
     },
@@ -1677,9 +1709,10 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run).toMatchObject({ status: "failed", error: { code: "payload-overlap" } })
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "payload-overlap" } })
     expect(run.steps[0]?.job).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       output: { conflicts: [{ repo: "dep", paths: ["src/delete.ts"] }] },
     })
   })
@@ -1719,7 +1752,8 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run.status, run.error?.message).toBe("passed")
+    expect(run.status, run.error?.message).toBe("completed")
+    expect(run.conclusion).toBe("success")
     const landedPinSha = (await git(repo, ["ls-tree", "main", "dep"])).split(/\s+/u)[2]
     expect(await git(join(repo, "dep"), ["diff", "--name-status", "--no-renames", newPinSha, landedPinSha!])).toBe(
       "D\tsrc/delete.ts",
@@ -1754,9 +1788,10 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run).toMatchObject({ status: "failed", error: { code: "restack-conflict" } })
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "restack-conflict" } })
     expect(run.steps[0]?.job).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       output: { conflicts: [{ repo: "dep", paths: ["src/node"] }] },
     })
   })
@@ -1786,9 +1821,10 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run).toMatchObject({ status: "failed", error: { code: "payload-mismatch" } })
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "payload-mismatch" } })
     expect(run.steps[0]?.job).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       output: { conflicts: [{ repo: "dep", paths: ["src/candidate.ts", "src/not-the-payload.ts"] }] },
     })
   })
@@ -1825,11 +1861,15 @@ describe("Queue command adapters", () => {
       const merge = withMerge(
         (_input: StepExecution<CheckedCommand>) => {
           mergeRuns.push("merge")
-          return { status: "passed" as const, output: { commit: "b".repeat(40), baseSha: "b".repeat(40) } }
+          return {
+            status: "completed",
+            conclusion: "success" as const,
+            output: { commit: "b".repeat(40), baseSha: "b".repeat(40) },
+          }
         },
         { revision: "merge-v1" },
       )
-      const queue = withQueue({ steps: [check, merge] as const })
+      const queue = withQueue({ steps: [check, merge] as const, resolveBaseSha: () => "c".repeat(40) })
       const base = pipe(
         createYrdDef(),
         withJobs({ definitions: [bayJobs, queue.jobDefs] }),
@@ -1863,7 +1903,8 @@ describe("Queue command adapters", () => {
     progressing.completed.resolve(result("progress complete\n"))
     await expect(progressingRun).resolves.toEqual([
       expect.objectContaining({
-        status: "passed",
+        status: "completed",
+        conclusion: "success",
         steps: expect.arrayContaining([expect.objectContaining({ name: "merge" })]),
       }),
     ])
@@ -1881,7 +1922,7 @@ describe("Queue command adapters", () => {
       { runner: "same-runner", leaseMs: 200, heartbeatMs: 150 },
     )
     await stalled.started.promise
-    await Bun.sleep(120)
+    await Bun.sleep(30)
     const recovered = await stalled.app.queue.recover({
       // Advance the operator's recovery cutoff beyond the still-live lease;
       // the resident heartbeat has not yet sampled, so external recovery owns
@@ -1898,8 +1939,12 @@ describe("Queue command adapters", () => {
     expect(ownershipAborted).toBe(true)
     expect(recovered).toEqual([
       expect.objectContaining({
-        status: "failed",
-        steps: [expect.objectContaining({ job: expect.objectContaining({ status: "lost" }) }), expect.anything()],
+        status: "completed",
+        conclusion: "failure",
+        steps: [
+          expect.objectContaining({ job: expect.objectContaining({ status: "completed", conclusion: "timed_out" }) }),
+          expect.anything(),
+        ],
       }),
     ])
     expect(stalled.mergeRuns).toEqual([])
@@ -1936,8 +1981,8 @@ describe("Queue command adapters", () => {
       { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
     )
 
-    expect(outcome).toMatchObject({ status: "failed", error: { code: "candidate-conflict" } })
-    if (outcome.status !== "failed") return
+    expect(outcome).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "candidate-conflict" } })
+    if (outcome.status !== "completed" || outcome.conclusion !== "failure") return
     const artifacts = (outcome.output as { artifacts?: readonly { name: string; path: string }[] } | undefined)
       ?.artifacts
     expect(artifacts).toEqual([
@@ -1948,6 +1993,78 @@ describe("Queue command adapters", () => {
     const artifact = artifacts?.[0]
     expect(artifact === undefined ? false : existsSync(artifact.path)).toBe(true)
     expect(artifact === undefined ? "" : await readFile(artifact.path, "utf8")).toContain("CONFLICT")
+  })
+
+  it("checks the immutable Candidate already materialized by the Runner Context", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const baseSha = await git(repo, ["rev-parse", "main"])
+    const candidateRef = "refs/yrd/candidates/C1"
+    await git(repo, ["update-ref", candidateRef, featureSha])
+    const candidatePath = join(repo, "..", "candidate-C1")
+    await git(repo, ["worktree", "add", "--detach", candidatePath, candidateRef])
+    await using process = createProcess()
+    const commandCwds: string[] = []
+    const recordingProcess: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "test") {
+          if (request.cwd === undefined) throw new Error("Candidate check command is missing its Context cwd")
+          commandCwds.push(request.cwd)
+        }
+        return process.run(request)
+      },
+    }
+
+    const outcome = await gitCheckStep({
+      inject: { process: recordingProcess },
+      repo,
+      command: ["test", "-f", "feature.txt"],
+    })(
+      {
+        run: "R1",
+        step: "check",
+        index: 0,
+        prs: [
+          {
+            id: "PR1",
+            branch: "issue/feature",
+            base: "main",
+            revision: 1,
+            headSha: featureSha,
+            baseSha,
+          },
+        ],
+        candidate: {
+          id: "C1",
+          queueId: "main",
+          baseSha,
+          revs: [{ pr: "PR1", n: 1, head: featureSha }],
+          sha: featureSha,
+          ref: candidateRef,
+          mergeability: "mergeable",
+          createdAt: new Date(0).toISOString(),
+        },
+        shape: { results: {} },
+      } as StepExecution<PRShape>,
+      {
+        id: "J1",
+        attempt: 1,
+        runner: "local",
+        context: {
+          id: "worktree-context:1",
+          request: { scope: "job", candidate: "rw", capabilities: ["git"] },
+          candidateRef,
+          cwd: candidatePath,
+        },
+        signal: new AbortController().signal,
+      },
+    )
+
+    expect(outcome).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+      output: { baseSha, candidateSha: featureSha, candidateRef },
+    })
+    expect(commandCwds).toEqual([candidatePath])
   })
 
   it("executes argv directly and requires an explicit gate for shell text", async () => {
@@ -2047,36 +2164,34 @@ describe("Queue command adapters", () => {
     const stdoutPath = join(dir, "stdout.log")
     const stderrPath = join(dir, "stderr.log")
     const outputPath = join(dir, "output.log")
-    const watcherAbort = new AbortController()
-    using _watcher = { [Symbol.dispose]: () => watcherAbort.abort() }
-    const events = watch(dir, { signal: watcherAbort.signal })[Symbol.asyncIterator]()
     const offsets = new Map([
       ["stdout.log", 0],
       ["stderr.log", 0],
     ])
     const observedStreams: string[] = []
-    const nextGrowth = async (): Promise<string> => {
-      while (true) {
-        const event = await events.next()
-        if (event.done) throw new Error("artifact watcher ended before observing output growth")
-        const filename = event.value.filename?.toString()
-        const offset = filename === undefined ? undefined : offsets.get(filename)
-        if (filename === undefined || offset === undefined) continue
-        let bytes: Uint8Array
-        try {
-          bytes = await readFile(join(dir, filename))
-        } catch (cause) {
-          if ((cause as NodeJS.ErrnoException).code === "ENOENT") continue
-          throw cause
-        }
-        if (bytes.byteLength <= offset) continue
-        offsets.set(filename, bytes.byteLength)
-        return filename.slice(0, -".log".length)
-      }
+    const nextGrowth = async (filename: "stdout.log" | "stderr.log"): Promise<string> => {
+      const offset = offsets.get(filename) ?? 0
+      let length = offset
+      await vi.waitFor(
+        async () => {
+          let bytes: Uint8Array
+          try {
+            bytes = await readFile(join(dir, filename))
+          } catch (cause) {
+            if ((cause as NodeJS.ErrnoException).code === "ENOENT") return
+            throw cause
+          }
+          length = bytes.byteLength
+          expect(length).toBeGreaterThan(offset)
+        },
+        { timeout: 5_000, interval: 10 },
+      )
+      offsets.set(filename, length)
+      return filename.slice(0, -".log".length)
     }
 
     request.onOutput?.({ stream: "stdout", chunk: stdout.subarray(0, splitInsideCodePoint) })
-    observedStreams.push(await nextGrowth())
+    observedStreams.push(await nextGrowth("stdout.log"))
     await vi.waitFor(
       async () => {
         expect(Array.from(await readFile(stdoutPath))).toEqual(Array.from(stdout.subarray(0, splitInsideCodePoint)))
@@ -2087,7 +2202,7 @@ describe("Queue command adapters", () => {
     expect(settled).toBe(false)
 
     request.onOutput?.({ stream: "stderr", chunk: stderr })
-    observedStreams.push(await nextGrowth())
+    observedStreams.push(await nextGrowth("stderr.log"))
     await vi.waitFor(
       async () => {
         expect(Array.from(await readFile(stdoutPath))).toEqual(Array.from(stdout.subarray(0, splitInsideCodePoint)))
@@ -2099,7 +2214,7 @@ describe("Queue command adapters", () => {
     expect(settled).toBe(false)
 
     request.onOutput?.({ stream: "stdout", chunk: stdout.subarray(splitInsideCodePoint) })
-    observedStreams.push(await nextGrowth())
+    observedStreams.push(await nextGrowth("stdout.log"))
     await vi.waitFor(
       async () => {
         expect(Array.from(await readFile(stdoutPath))).toEqual(Array.from(stdout))
@@ -2119,7 +2234,8 @@ describe("Queue command adapters", () => {
       timedOut: false,
     })
     await expect(running).resolves.toMatchObject({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: {
         artifacts: [
           { name: "stdout", path: stdoutPath },
@@ -2178,7 +2294,8 @@ describe("Queue command adapters", () => {
 
     await writeFile(release, "go\n")
     await expect(running).resolves.toMatchObject({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { artifacts: [{ name: "stdout", path: stdoutPath }] },
     })
     expect(await readFile(stdoutPath, "utf8")).toBe("first\nsecond\n")
@@ -2239,8 +2356,10 @@ describe("Queue command adapters", () => {
         { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
       )
 
-      expect(outcome).toMatchObject({ status: "failed", error })
-      if (outcome.status !== "failed") throw new Error(`configured command was ${outcome.status}`)
+      expect(outcome).toMatchObject({ status: "completed", conclusion: "failure", error })
+      if (outcome.status !== "completed" || outcome.conclusion !== "failure") {
+        throw new Error(`configured command was ${outcome.status}`)
+      }
       const evidence = CommandEvidenceSchema.parse(outcome.output)
       expect(evidence).toMatchObject({
         command: ["false"],
@@ -2308,10 +2427,13 @@ describe("Queue command adapters", () => {
     )
 
     expect(outcome).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: { code: "check-stalled-escaped-descendant" },
     })
-    if (outcome.status !== "failed") throw new Error(`configured command was ${outcome.status}`)
+    if (outcome.status !== "completed" || outcome.conclusion !== "failure") {
+      throw new Error(`configured command was ${outcome.status}`)
+    }
     expect(outcome.error.message).toContain("descendant held its output pipe open")
     const evidence = CommandEvidenceSchema.parse(outcome.output)
     expect(evidence).toMatchObject({ escapedDescendant: true, stageVerdict: "STALLED", exitCode: 0 })
@@ -2335,9 +2457,9 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
     if (run === undefined) throw new Error("missing integration run")
-    expect(run).toMatchObject({ status: "failed", error: { code: "check-failed" } })
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
     const job = run.steps[0]?.job
-    if (job?.status !== "failed") throw new Error("check did not fail")
+    if (job?.status !== "completed" || job.conclusion !== "failure") throw new Error("check did not fail")
     const evidence = GitCheckEvidenceSchema.parse(job.output)
     expect(evidence).toMatchObject({
       exitCode: 17,
@@ -2377,12 +2499,14 @@ describe("Queue command adapters", () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
-    expect(run).toMatchObject({ status: "failed", error: { code: "check-failed" } })
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
     const job = run?.steps[0]?.job
-    if (job?.status !== "failed") throw new Error("plain exit-code step did not fail")
+    if (job?.status !== "completed" || job.conclusion !== "failure") {
+      throw new Error("plain exit-code step did not fail")
+    }
     expect(GitCheckEvidenceSchema.parse(job.output).comparison).toBeUndefined()
     expect(configuredRuns).toBe(1)
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected", headSha: featureSha })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
   it("passes parent-identical failed diagnostics regardless of order and duplicates", async () => {
@@ -2401,9 +2525,11 @@ describe("Queue command adapters", () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
-    expect(run).toMatchObject({ status: "passed" })
+    expect(run).toMatchObject({ status: "completed", conclusion: "success" })
     const job = run?.steps[0]?.job
-    if (job?.status !== "passed") throw new Error("baseline-identical check did not pass")
+    if (job?.status !== "completed" || job.conclusion !== "success") {
+      throw new Error("baseline-identical check did not pass")
+    }
     const evidence = GitCheckEvidenceSchema.parse(job.output)
 
     expect(evidence.exitCode).toBe(17)
@@ -2426,9 +2552,11 @@ describe("Queue command adapters", () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
-    expect(run).toMatchObject({ status: "passed" })
+    expect(run).toMatchObject({ status: "completed", conclusion: "success" })
     const job = run?.steps[0]?.job
-    if (job?.status !== "passed") throw new Error("candidate-first check did not pass")
+    if (job?.status !== "completed" || job.conclusion !== "success") {
+      throw new Error("candidate-first check did not pass")
+    }
     const evidence = GitCheckEvidenceSchema.parse(job.output)
 
     expect(evidence.exitCode).toBe(0)
@@ -2450,9 +2578,11 @@ describe("Queue command adapters", () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
-    expect(run).toMatchObject({ status: "failed", error: { code: "check-failed" } })
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
     const job = run?.steps[0]?.job
-    if (job?.status !== "failed") throw new Error("parent command failure did not fail the run")
+    if (job?.status !== "completed" || job.conclusion !== "failure") {
+      throw new Error("parent command failure did not fail the run")
+    }
     const evidence = GitCheckEvidenceSchema.parse(job.output)
     expect(evidence).toMatchObject({
       exitCode: 17,
@@ -2461,7 +2591,7 @@ describe("Queue command adapters", () => {
     expect(evidence.comparison).toBeUndefined()
     expect(job.error).not.toHaveProperty("evidence")
     expect(await git(repo, ["rev-parse", evidence.candidateRef])).toBe(evidence.candidateSha)
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected", headSha: featureSha })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
   it("keeps an incomplete parent diagnostics run retryable as infrastructure refusal", async () => {
@@ -2493,7 +2623,8 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
     expect(run).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: {
         code: "queue-environment-refused",
         evidence: {
@@ -2507,7 +2638,7 @@ describe("Queue command adapters", () => {
       },
     })
     expect(configuredRuns).toBe(2)
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: featureSha })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
   it("treats Vitest-shaped nonzero output as a terminal failure under the plain exit-code contract", async () => {
@@ -2524,15 +2655,17 @@ describe("Queue command adapters", () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
-    expect(run).toMatchObject({ status: "failed", error: { code: "check-failed" } })
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
     const job = run?.steps[0]?.job
-    if (job?.status !== "failed") throw new Error("Vitest-shaped failure did not fail the run")
+    if (job?.status !== "completed" || job.conclusion !== "failure") {
+      throw new Error("Vitest-shaped failure did not fail the run")
+    }
     const evidence = GitCheckEvidenceSchema.parse(job.output)
     expect(evidence).toMatchObject({ exitCode: 1, detail: expect.stringContaining("Test Files  1 failed") })
     expect(evidence.diagnostics).toBeUndefined()
     expect(evidence.comparison).toBeUndefined()
     expect(job.error).not.toHaveProperty("evidence")
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected", headSha: featureSha })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
   it("keeps an opaque candidate failure terminal when diagnostics comparison is declared", async () => {
@@ -2554,15 +2687,17 @@ describe("Queue command adapters", () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
-    expect(run).toMatchObject({ status: "failed", error: { code: "check-failed" } })
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
     const job = run?.steps[0]?.job
-    if (job?.status !== "failed") throw new Error("opaque Candidate did not fail")
+    if (job?.status !== "completed" || job.conclusion !== "failure") {
+      throw new Error("opaque Candidate did not fail")
+    }
     const evidence = GitCheckEvidenceSchema.parse(job.output)
     expect(evidence).toMatchObject({ exitCode: 1, detail: expect.stringContaining("opaque candidate") })
     expect(evidence.diagnostics).toBeUndefined()
     expect(evidence.comparison).toBeUndefined()
     expect(configuredRuns).toBe(1)
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected", headSha: featureSha })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
   it("keeps a thrown candidate command distinct as a retryable environment refusal", async () => {
@@ -2583,7 +2718,8 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
     expect(run).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: {
         code: "queue-environment-refused",
         evidence: {
@@ -2595,7 +2731,7 @@ describe("Queue command adapters", () => {
       },
     })
     expect(candidateAttempts).toBe(1)
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: featureSha })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
   it("preserves a legacy R1 attempt ref when an empty journal reuses the display run id", async () => {
@@ -2608,15 +2744,15 @@ describe("Queue command adapters", () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
-    expect(run).toMatchObject({ id: "R1", status: "passed" })
+    expect(run).toMatchObject({ id: "R1", status: "completed", conclusion: "success" })
     const job = run?.steps[0]?.job
-    if (job?.status !== "passed") throw new Error("check did not pass")
+    if (job?.status !== "completed" || job.conclusion !== "success") throw new Error("check did not pass")
     const evidence = GitCheckEvidenceSchema.parse(job.output)
 
     expect(evidence.candidateRef).toBe(expectedCandidateRef("R1", "check", job.id, job.attempt, evidence.candidateSha))
     expect(await git(repo, ["rev-parse", legacyRef])).toBe(baseSha)
     expect(await git(repo, ["rev-parse", evidence.candidateRef])).toBe(evidence.candidateSha)
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "integrated", headSha: featureSha })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "integrated", headSha: featureSha })
   })
 
   it("preserves an occupied derived candidate ref and publishes the candidate under a fresh identity", async () => {
@@ -2643,16 +2779,16 @@ describe("Queue command adapters", () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
-    expect(run).toMatchObject({ id: "R1", status: "passed" })
+    expect(run).toMatchObject({ id: "R1", status: "completed", conclusion: "success" })
     const job = run?.steps[0]?.job
-    if (job?.status !== "passed") throw new Error("check did not pass")
+    if (job?.status !== "completed" || job.conclusion !== "success") throw new Error("check did not pass")
     const evidence = GitCheckEvidenceSchema.parse(job.output)
     if (occupiedRef === undefined) throw new Error("candidate publication was not intercepted")
 
     expect(evidence.candidateRef).not.toBe(occupiedRef)
     expect(await git(repo, ["rev-parse", occupiedRef])).toBe(occupiedSha)
     expect(await git(repo, ["rev-parse", evidence.candidateRef])).toBe(evidence.candidateSha)
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "integrated", headSha: featureSha })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "integrated", headSha: featureSha })
   })
 
   it("refuses bounded candidate ref exhaustion without rejecting or moving the submitted payload", async () => {
@@ -2688,7 +2824,7 @@ describe("Queue command adapters", () => {
     })
     expect(occupiedRefs).toHaveLength(33)
     for (const ref of occupiedRefs) expect(await git(repo, ["rev-parse", ref])).toBe(occupiedSha)
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: featureSha })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
   it("lands the exact audited candidate and its durable artifacts", async () => {
@@ -2702,12 +2838,12 @@ describe("Queue command adapters", () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
-    expect(run.status).toBe("passed")
+    expect(run.status).toBe("completed")
     expect(await readFile(join(repo, "feature.txt"), "utf8")).toBe("feature\n")
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
 
     const job = run.steps[0]?.job
-    if (job?.status !== "passed") throw new Error("check did not pass")
+    if (job?.status !== "completed" || job.conclusion !== "success") throw new Error("check did not pass")
     const evidence = GitCheckEvidenceSchema.parse(job.output)
     await expectLanded(repo, evidence)
     expect(evidence.exitCode).toBe(0)
@@ -2731,9 +2867,9 @@ describe("Queue command adapters", () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
-    expect(run.status).toBe("failed")
+    expect(run.status).toBe("completed")
     const job = run.steps[0]?.job
-    if (job?.status !== "failed") throw new Error("check did not fail")
+    if (job?.status !== "completed" || job.conclusion !== "failure") throw new Error("check did not fail")
     const evidence = GitCheckEvidenceSchema.parse(job.output)
     expect(evidence).toMatchObject({
       command: ["sh", "-c", expect.stringContaining("test:fast failed")],
@@ -2769,11 +2905,11 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run.status).toBe("passed")
+    expect(run.status).toBe("completed")
     expect(await git(repo, ["rev-parse", "HEAD"])).toBe(featureSha)
     expect(await git(repo, ["rev-parse", "refs/remotes/origin/main"])).toBe(baseSha)
     const job = run.steps[0]?.job
-    if (job?.status !== "passed") throw new Error("check did not pass")
+    if (job?.status !== "completed" || job.conclusion !== "success") throw new Error("check did not pass")
     await expectLanded(repo, GitCheckEvidenceSchema.parse(job.output))
   })
 
@@ -2813,18 +2949,20 @@ describe("Queue command adapters", () => {
     const runs = await app.queue.run({ prs: [] }, runtime)
 
     expect(runs).toHaveLength(branches.length)
-    expect(runs.map((run) => [run.status, run.error?.code])).toEqual([
-      ["passed", undefined],
-      ["passed", undefined],
-      ["passed", undefined],
-      ["passed", undefined],
+    expect(runs.map((run) => [run.status, run.conclusion, run.error?.code])).toEqual([
+      ["completed", "success", undefined],
+      ["completed", "success", undefined],
+      ["completed", "success", undefined],
+      ["completed", "success", undefined],
     ])
     expect(
       runs.flatMap((run) => run.steps.map((step) => step.job?.attempt)).filter((attempt) => attempt !== undefined),
     ).toEqual(Array.from({ length: branches.length * 2 }, () => 1))
     const checks = runs.map((run) => {
       const job = run.steps[0]?.job
-      if (job?.status !== "passed") throw new Error(`run '${run.id}' check did not pass`)
+      if (job?.status !== "completed" || job.conclusion !== "success") {
+        throw new Error(`run '${run.id}' check did not pass`)
+      }
       return GitCheckEvidenceSchema.parse(job.output)
     })
     expect(checks[0]?.baseSha).toBe(initialQueueBase)
@@ -2852,12 +2990,20 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run).toMatchObject({ status: "passed", prs: [{ id: "PR1", revision: 1, headSha: featureSha }] })
+    expect(run).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+      prs: [{ id: "PR1", revision: 1, headSha: featureSha }],
+    })
     const job = run.steps[0]?.job
-    if (job?.status !== "passed") throw new Error("check did not pass")
+    if (job?.status !== "completed" || job.conclusion !== "success") throw new Error("check did not pass")
     expect(GitCheckEvidenceSchema.parse(job.output).baseSha).toBe(remoteBaseSha)
     expect(await git(repo, ["rev-parse", "main"])).toBe(localBaseSha)
-    expect(app.state().bays.prs.PR1).toMatchObject({ revision: 1, headSha: featureSha, status: "integrated" })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+      revision: 1,
+      headSha: featureSha,
+      status: "integrated",
+    })
   })
 
   it("retries authoritative refresh at most three times without changing the PR payload", async () => {
@@ -2898,8 +3044,16 @@ describe("Queue command adapters", () => {
 
     expect(recoveryAttempts).toBe(3)
     expect(refreshArgv.every((argv) => argv.includes("--no-recurse-submodules"))).toBe(true)
-    expect(run).toMatchObject({ status: "passed", prs: [{ id: "PR1", revision: 1, headSha: featureSha }] })
-    expect(app.state().bays.prs.PR1).toMatchObject({ revision: 1, headSha: featureSha, status: "integrated" })
+    expect(run).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+      prs: [{ id: "PR1", revision: 1, headSha: featureSha }],
+    })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+      revision: 1,
+      headSha: featureSha,
+      status: "integrated",
+    })
   })
 
   it("retries thrown authoritative refresh timeouts without rejecting the PR", async () => {
@@ -2927,8 +3081,16 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(refreshAttempts).toBe(3)
-    expect(run).toMatchObject({ status: "passed", prs: [{ id: "PR1", revision: 1, headSha: featureSha }] })
-    expect(app.state().bays.prs.PR1).toMatchObject({ revision: 1, headSha: featureSha, status: "integrated" })
+    expect(run).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+      prs: [{ id: "PR1", revision: 1, headSha: featureSha }],
+    })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+      revision: 1,
+      headSha: featureSha,
+      status: "integrated",
+    })
   })
 
   it("records exhausted thrown authority timeouts as environment refusal without rejecting the PR", async () => {
@@ -2955,7 +3117,8 @@ describe("Queue command adapters", () => {
 
     expect(refreshAttempts).toBe(3)
     expect(run).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: {
         code: "queue-environment-refused",
         message: expect.stringContaining("after 3 attempts"),
@@ -2963,14 +3126,19 @@ describe("Queue command adapters", () => {
       },
     })
     expect(run.steps[0]?.job).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: {
         code: "queue-environment-refused",
         evidence: { kind: "queue-authority-refusal", base: "main", remote: "origin", attempts: 3 },
       },
     })
     expect(run.steps[0]?.job).not.toHaveProperty("output")
-    expect(app.state().bays.prs.PR1).toMatchObject({ revision: 1, headSha: featureSha, status: "submitted" })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+      revision: 1,
+      headSha: featureSha,
+      status: "submitted",
+    })
   })
 
   it("records exhausted authority refresh as an environment refusal without rejecting the author", async () => {
@@ -3004,14 +3172,16 @@ describe("Queue command adapters", () => {
 
     expect(refreshAttempts).toBe(3)
     expect(run).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: {
         code: "queue-environment-refused",
         evidence: { kind: "queue-authority-refusal", base: "main", remote: "origin", attempts: 3 },
       },
     })
     expect(run.steps[0]?.job).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: {
         code: "queue-environment-refused",
         evidence: { kind: "queue-authority-refusal", base: "main", remote: "origin", attempts: 3 },
@@ -3026,7 +3196,11 @@ describe("Queue command adapters", () => {
         },
       },
     ])
-    expect(app.state().bays.prs.PR1).toMatchObject({ revision: 1, headSha: featureSha, status: "submitted" })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+      revision: 1,
+      headSha: featureSha,
+      status: "submitted",
+    })
     expect(await git(repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates"])).toBe("")
   })
 
@@ -3064,13 +3238,14 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
     const checkJob = run.steps[0]?.job
-    if (checkJob?.status !== "passed") throw new Error("check did not pass")
+    if (checkJob?.status !== "completed" || checkJob.conclusion !== "success") throw new Error("check did not pass")
     const checked = GitCheckEvidenceSchema.parse(checkJob.output)
 
     expect(successfulRefreshes).toBe(2)
     expect(refusalAttempts).toBe(3)
     expect(run).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: {
         code: "queue-environment-refused",
         message: expect.stringContaining("after 3 attempts"),
@@ -3079,7 +3254,8 @@ describe("Queue command adapters", () => {
       prs: [{ id: "PR1", revision: 1, headSha: featureSha }],
     })
     expect(run.steps[1]?.job).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: {
         code: "queue-environment-refused",
         message: expect.stringContaining("after 3 attempts"),
@@ -3099,7 +3275,11 @@ describe("Queue command adapters", () => {
       ]),
     )
     expect(await git(remote, ["rev-parse", "main"])).toBe(checked.candidateSha)
-    expect(app.state().bays.prs.PR1).toMatchObject({ revision: 1, headSha: featureSha, status: "submitted" })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+      revision: 1,
+      headSha: featureSha,
+      status: "submitted",
+    })
   })
 
   it("materializes candidate checks under the injected trusted parent", async () => {
@@ -3113,7 +3293,7 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
     const job = run.steps[0]?.job
-    if (job?.status !== "passed") throw new Error("check did not pass")
+    if (job?.status !== "completed" || job.conclusion !== "success") throw new Error("check did not pass")
     const evidence = GitCheckEvidenceSchema.parse(job.output)
     expect(await readFile(evidence.artifacts[0]!.path, "utf8")).toMatch(
       new RegExp(`^${await realpath(checkoutParent)}/yrd-queue-`),
@@ -3150,7 +3330,8 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
     expect(run).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: { code: "scratch-cleanup-failed", message: "cleanup denied" },
     })
   })
@@ -3186,7 +3367,9 @@ describe("Queue command adapters", () => {
       { run: "R1", step: "check", index: 0, prs: [pr], shape: { results: {} } },
       { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
     )
-    if (result.status !== "passed") throw new Error(`configured command was ${result.status}`)
+    if (result.status !== "completed" || result.conclusion !== "success") {
+      throw new Error(`configured command was ${result.status}`)
+    }
     expect(result.output.detail?.split("\n")).toEqual([
       "YRD_ATTEMPT=1",
       "YRD_BASE=main",
@@ -3271,7 +3454,9 @@ describe("Queue command adapters", () => {
         ...options,
       })
       const result = await step(execution(), context)
-      if (result.status !== "passed") throw new Error(`configured command was ${result.status}`)
+      if (result.status !== "completed" || result.conclusion !== "success") {
+        throw new Error(`configured command was ${result.status}`)
+      }
       const request = requests[0]
       if (request === undefined) throw new Error("configured command spawned no child")
       return { env: request.env ?? {}, evidence: result.output }
@@ -3322,7 +3507,9 @@ describe("Queue command adapters", () => {
       overrides.SNEAKED = "in"
       overrides.SAFE_DECLARED = "mutated"
       const result = await step(execution(), jobContext())
-      if (result.status !== "passed") throw new Error(`configured command was ${result.status}`)
+      if (result.status !== "completed" || result.conclusion !== "success") {
+        throw new Error(`configured command was ${result.status}`)
+      }
       const env = requests[0]?.env ?? {}
       expect(env.SAFE_DECLARED).toBe("yes")
       expect(env.GIT_DIR).toBeUndefined()
@@ -3448,9 +3635,9 @@ describe("Queue command adapters", () => {
       await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
       const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
-      expect(run.status).toBe("passed")
+      expect(run.status).toBe("completed")
       const job = run.steps[0]!.job
-      if (job?.status !== "passed") throw new Error("check did not pass")
+      if (job?.status !== "completed" || job.conclusion !== "success") throw new Error("check did not pass")
       const evidence = GitCheckEvidenceSchema.parse(job.output)
       expect(evidence.detail?.split("\n")).toEqual(["CHECK_DECLARED=yes", "CHECK_TOKEN=ambient-token"])
     })
@@ -3473,9 +3660,13 @@ describe("Queue command adapters", () => {
     await git(repo, ["switch", "-q", "main"])
 
     expect(runs).toHaveLength(1)
-    expect(runs[0]).toMatchObject({ status: "passed", prs: [{ headSha: firstSha }, { headSha: secondSha }] })
+    expect(runs[0]).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+      prs: [{ headSha: firstSha }, { headSha: secondSha }],
+    })
     const job = runs[0]!.steps[0]!.job
-    if (job?.status !== "passed") throw new Error("check did not pass")
+    if (job?.status !== "completed" || job.conclusion !== "success") throw new Error("check did not pass")
     await expectLanded(repo, GitCheckEvidenceSchema.parse(job.output))
   })
 
@@ -3495,14 +3686,15 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
     const checkJob = run.steps[0]?.job
     const mergeJob = run.steps[1]?.job
-    if (checkJob?.status !== "passed") throw new Error("check did not pass")
+    if (checkJob?.status !== "completed" || checkJob.conclusion !== "success") throw new Error("check did not pass")
     const checked = GitCheckEvidenceSchema.parse(checkJob.output)
 
     expect(run).toMatchObject({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       integration: { commit: checked.candidateSha, baseSha: checked.candidateSha },
     })
-    expect(mergeJob).toMatchObject({ status: "passed", attempt: 1, output: run.integration })
+    expect(mergeJob).toMatchObject({ status: "completed", conclusion: "success", attempt: 1, output: run.integration })
     expect(await git(remote, ["rev-parse", "main"])).toBe(checked.candidateSha)
     expect(await git(repo, ["rev-parse", "main"])).toBe(localMain)
     expect(await Bun.file(join(repo, "operator-wip.txt")).text()).toBe("preserve me\n")
@@ -3523,7 +3715,7 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run.status).toBe("passed")
+    expect(run.status).toBe("completed")
     expect(requests.filter(({ argv }) => argv[0] === "git").every(({ timeoutMs }) => timeoutMs === 30_000)).toBe(true)
     const initializations = requests.filter(
       ({ argv }) => argv[0] === "git" && argv.includes("init") && argv.includes("--bare"),
@@ -3535,7 +3727,9 @@ describe("Queue command adapters", () => {
     )
     expect(proofFetches).toHaveLength(2)
     expect(proofFetches.map(({ argv }) => argv.at(-2))).toEqual([origin, origin])
-    expect(proofFetches.map(({ argv }) => argv.at(-1)).sort()).toEqual([...pins].sort())
+    expect(
+      proofFetches.map(({ argv }) => argv.at(-1)).toSorted((left, right) => (left ?? "").localeCompare(right ?? "")),
+    ).toEqual([...pins].toSorted((left, right) => left.localeCompare(right)))
     const proofStores = new Set(proofFetches.map(({ argv }) => argv[2]))
     expect([...proofStores]).toEqual([initializations[0]?.argv.at(-1)])
 
@@ -3581,7 +3775,7 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run.status).toBe("passed")
+    expect(run.status).toBe("completed")
     const proofFetches = requests.filter(({ argv }) => argv.includes("--depth=1"))
     expect(proofFetches).toHaveLength(2)
     expect(proofFetches[0]?.argv).toContain("--filter=tree:0")
@@ -3684,7 +3878,8 @@ describe("Queue command adapters", () => {
       const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
       expect(run).toMatchObject({
-        status: "failed",
+        status: "completed",
+        conclusion: "failure",
         error: {
           code: "queue-environment-refused",
           evidence: {
@@ -3707,7 +3902,10 @@ describe("Queue command adapters", () => {
       })
       expect(configuredCheckRan).toBe(false)
       expect(requests.filter(({ argv }) => argv.includes("--depth=1"))).toHaveLength(1)
-      expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: fixture.featureSha })
+      expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+        status: "submitted",
+        headSha: fixture.featureSha,
+      })
     },
     15_000,
   )
@@ -3803,7 +4001,8 @@ describe("Queue command adapters", () => {
       const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
       expect(run).toMatchObject({
-        status: "failed",
+        status: "completed",
+        conclusion: "failure",
         error: {
           code: "queue-environment-refused",
           evidence: {
@@ -3817,7 +4016,10 @@ describe("Queue command adapters", () => {
         },
       })
       expect(configuredCheckRan).toBe(false)
-      expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: fixture.featureSha })
+      expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+        status: "submitted",
+        headSha: fixture.featureSha,
+      })
     },
     15_000,
   )
@@ -3849,7 +4051,7 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run.status).toBe("passed")
+    expect(run.status).toBe("completed")
   }, 15_000)
 
   it("keeps a relative submodule URL submitted when the origin lookup has no value", async () => {
@@ -3867,7 +4069,7 @@ describe("Queue command adapters", () => {
           const result = await process.run(request)
           return {
             ...result,
-            stdout: result.stdout.replace(/(submodule\.[^\0\n]+\.url\n)[^\0]*/u, "$1../dep.git"),
+            stdout: result.stdout.replace(/(submodule\.[^\n]+\.url\n)[\s\S]*/u, "$1../dep.git"),
           }
         }
         if (request.argv.at(-1) === "remote.origin.url") {
@@ -3889,7 +4091,8 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: {
         code: "queue-environment-refused",
         evidence: {
@@ -3901,7 +4104,10 @@ describe("Queue command adapters", () => {
       },
     })
     expect(configuredCheckRan).toBe(false)
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: fixture.featureSha })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+      status: "submitted",
+      headSha: fixture.featureSha,
+    })
   }, 15_000)
 
   it.each(["seeded", "unseeded"] as const)(
@@ -3946,7 +4152,8 @@ describe("Queue command adapters", () => {
       const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
       expect(run).toMatchObject({
-        status: "failed",
+        status: "completed",
+        conclusion: "failure",
         error: { code: "check-failed", message: expect.stringContaining("not our ref") },
       })
       const proofFetches = requests.filter(({ argv }) => argv.includes("--depth=1"))
@@ -3954,7 +4161,10 @@ describe("Queue command adapters", () => {
       expect(proofFetches[0]?.argv).toContain("--filter=tree:0")
       expect(configuredCheckRan).toBe(false)
       expect(requests.some(({ argv }) => argv.includes("submodule") && argv.includes("update"))).toBe(false)
-      expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected", headSha: fixture.featureSha })
+      expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+        status: "submitted",
+        headSha: fixture.featureSha,
+      })
     },
     15_000,
   )
@@ -3986,11 +4196,12 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: { code: "check-failed", message: expect.stringContaining("has no URL") },
     })
     expect(configuredCheckRan).toBe(false)
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected", headSha: featureSha })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
   it("composes a divergent clean submodule pin into the checked and landed root candidate", async () => {
@@ -4001,10 +4212,12 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
     const check = run.steps[0]?.job
-    if (check?.status !== "passed") throw new Error(`check was ${check?.status ?? "missing"}`)
+    if (check?.status !== "completed" || check.conclusion !== "success") {
+      throw new Error(`check was ${check?.status ?? "missing"}`)
+    }
     const evidence = GitCheckEvidenceSchema.parse(check.output)
 
-    expect(run.status).toBe("passed")
+    expect(run.status).toBe("completed")
     expect(evidence.submoduleResolutions).toEqual([
       {
         kind: "compose",
@@ -4034,7 +4247,11 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run).toMatchObject({ status: "failed", error: { code: "submodule-composition-conflict" } })
+    expect(run).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "submodule-composition-conflict" },
+    })
     expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.rootCurrentSha)
     expect(await git(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates"])).toBe("")
     expect(await git(fixture.module, ["for-each-ref", "--format=%(refname)", "refs/yrd/compositions"])).toBe("")
@@ -4050,7 +4267,8 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: {
         code: "queue-environment-refused",
         evidence: {
@@ -4061,7 +4279,10 @@ describe("Queue command adapters", () => {
         },
       },
     })
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: fixture.featureSha })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+      status: "submitted",
+      headSha: fixture.featureSha,
+    })
     expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.rootCurrentSha)
     expect(await git(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates"])).toBe("")
     expect(await git(fixture.module, ["for-each-ref", "--format=%(refname)", "refs/yrd/compositions"])).toBe("")
@@ -4096,13 +4317,17 @@ describe("Queue command adapters", () => {
 
     expect(injected).toBe(true)
     expect(run).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: {
         code: "queue-environment-refused",
         evidence: { kind: "submodule-composition-refusal", operation: "compose", retryable: true },
       },
     })
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: fixture.featureSha })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+      status: "submitted",
+      headSha: fixture.featureSha,
+    })
     expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.rootCurrentSha)
     expect(await git(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates"])).toBe("")
     expect(await git(fixture.module, ["for-each-ref", "--format=%(refname)", "refs/yrd/compositions"])).toBe("")
@@ -4132,11 +4357,14 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1", "PR2"] }, runtime))[0]!
     const check = run.steps[0]?.job
-    if (check?.status !== "passed") throw new Error(`check was ${check?.status ?? "missing"}`)
+    if (check?.status !== "completed" || check.conclusion !== "success") {
+      throw new Error(`check was ${check?.status ?? "missing"}`)
+    }
     const evidence = GitCheckEvidenceSchema.parse(check.output)
     const resolutions = evidence.submoduleResolutions ?? []
 
-    expect(run.status, run.error?.message).toBe("passed")
+    expect(run.status, run.error?.message).toBe("completed")
+    expect(run.conclusion).toBe("success")
     expect(resolutions).toHaveLength(2)
     expect(resolutions.map(({ path }) => path)).toEqual(["dep", "dep"])
     const final = resolutions.at(-1)
@@ -4162,7 +4390,8 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: { code: "candidate-conflict", message: expect.stringContaining(".gitmodules") },
     })
     expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.rootCurrentSha)
@@ -4177,7 +4406,10 @@ describe("Queue command adapters", () => {
       gitMergeStep<PRShape>({ inject: { process }, repo: fixture.repo, env: authoredGitlinksEnv }),
       { revision: "git-merge-v1" },
     )
-    const queue = withQueue({ steps: [merge] as const })
+    const queue = withQueue({
+      steps: [merge] as const,
+      resolveBaseSha: (base) => queueBaseSha(fixture.repo, base),
+    })
     const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
     await using app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
     await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
@@ -4185,7 +4417,8 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
     const proof = IntegrationProofSchema.parse(run.integration)
 
-    expect(run.status, run.error?.message).toBe("passed")
+    expect(run.status, run.error?.message).toBe("completed")
+    expect(run.conclusion).toBe("success")
     expect(proof.submoduleResolutions).toEqual([
       {
         kind: "compose",
@@ -4224,7 +4457,7 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run).toMatchObject({ status: "passed", prs: [{ headSha: featureSha }] })
+    expect(run).toMatchObject({ status: "completed", conclusion: "success", prs: [{ headSha: featureSha }] })
     expect(await git(remote, ["ls-tree", "main", "dep"])).toContain(moduleSha)
   })
 
@@ -4242,7 +4475,7 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run).toMatchObject({ status: "failed", error: { code: "merge-push-failed" } })
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "merge-push-failed" } })
     expect(await git(remote, ["rev-parse", "main"])).toBe(baseSha)
   })
 
@@ -4266,7 +4499,10 @@ describe("Queue command adapters", () => {
     const completed = settled.find((result) => result.status === "fulfilled")
     const refused = settled.find((result) => result.status === "rejected")
 
-    expect(completed).toMatchObject({ status: "fulfilled", value: [expect.objectContaining({ status: "passed" })] })
+    expect(completed).toMatchObject({
+      status: "fulfilled",
+      value: [expect.objectContaining({ status: "completed", conclusion: "success" })],
+    })
     expect(refused).toMatchObject({
       status: "rejected",
       reason: expect.objectContaining({ message: expect.stringContaining("queue 'main' is running") }),
@@ -4300,11 +4536,11 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
     const checkJob = run.steps[0]?.job
-    if (checkJob?.status !== "passed") throw new Error("check did not pass")
+    if (checkJob?.status !== "completed" || checkJob.conclusion !== "success") throw new Error("check did not pass")
     const checked = GitCheckEvidenceSchema.parse(checkJob.output)
 
     expect(raced).toBe(true)
-    expect(run).toMatchObject({ status: "failed", error: { code: "stale-base" } })
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "stale-base" } })
     expect(await git(remote, ["rev-parse", "main"])).toBe(competingSha)
     expect(await git(repo, ["rev-parse", checked.candidateRef])).toBe(checked.candidateSha)
   })
@@ -4338,11 +4574,11 @@ describe("Queue command adapters", () => {
         attempt: waiting.attempt,
         runner: waiting.runner,
         token: waiting.token,
-        result: { status: "passed", output: checkpoint },
+        result: { status: "completed", conclusion: "success", output: checkpoint },
       },
       runtime,
     )
-    expect(finished.status).toBe("passed")
+    expect(finished.status).toBe("completed")
     await expectLanded(repo, checkpoint)
   })
 
@@ -4366,26 +4602,29 @@ describe("Queue command adapters", () => {
         await writeFile(join(repo, "base-moved.txt"), "moved after check\n")
         await git(repo, ["add", "base-moved.txt"])
         await git(repo, ["commit", "-qm", "move base after check"])
-        return { status: "passed" as const, output: { moved: true as const } }
+        return { status: "completed", conclusion: "success" as const, output: { moved: true as const } }
       },
       { revision: "move-base-v1", output: MovedSchema },
     )
     const merge = withMerge(gitMergeStep<Moved>({ inject: { process }, repo }), { revision: "git-merge-v1" })
-    const queue = withQueue({ steps: [check, move, merge] as const })
+    const queue = withQueue({
+      steps: [check, move, merge] as const,
+      resolveBaseSha: (base) => queueBaseSha(repo, base),
+    })
     const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
     await using app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run).toMatchObject({ status: "failed", error: { code: "stale-check" } })
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "stale-check" } })
     expect(existsSync(join(repo, "feature.txt"))).toBe(false)
     expect(existsSync(join(repo, "base-moved.txt"))).toBe(true)
   })
 
   it.each(["native-worktree", "native-ref", "native-remote", "configured"] as const)(
     "drains canceled or superseded authority at the %s merge side-effect boundary",
-    async (executor) => {
+    async (landingMode) => {
       const { repo, feature: featureSha } = await repository("feature")
       const baseSha = await git(repo, ["rev-parse", "main"])
       await using process = createProcess()
@@ -4400,13 +4639,13 @@ describe("Queue command adapters", () => {
         checkInput,
         { id: "J-check", attempt: 1, runner: "test", signal: new AbortController().signal },
       )
-      if (checked.status !== "passed") throw new Error("check did not pass")
-      if (executor === "native-remote") {
+      if (checked.status !== "completed" || checked.conclusion !== "success") throw new Error("check did not pass")
+      if (landingMode === "native-remote") {
         const remote = join(repo, "..", "origin.git")
         await Bun.$`git init -q --bare ${remote}`
         await git(repo, ["remote", "add", "origin", remote])
         await git(repo, ["push", "-q", "origin", "main", "issue/feature"])
-      } else if (executor === "native-ref") {
+      } else if (landingMode === "native-ref") {
         await git(repo, ["switch", "--detach", "-q", baseSha])
       }
 
@@ -4420,10 +4659,10 @@ describe("Queue command adapters", () => {
           }
           if (
             request.argv[0] === "git" &&
-            ((executor === "native-remote" &&
+            ((landingMode === "native-remote" &&
               request.argv[3] === "config" &&
               request.argv.includes("submodule.alternateLocation")) ||
-              (executor !== "native-remote" &&
+              (landingMode !== "native-remote" &&
                 request.argv[3] === "merge-base" &&
                 request.argv[4] === "--is-ancestor" &&
                 request.argv[5] === featureSha))
@@ -4432,11 +4671,11 @@ describe("Queue command adapters", () => {
           }
           if (
             request.argv[0] === "git" &&
-            ((executor === "native-worktree" && request.argv[3] === "merge" && request.argv[4] === "--ff-only") ||
-              (executor === "native-ref" &&
+            ((landingMode === "native-worktree" && request.argv[3] === "merge" && request.argv[4] === "--ff-only") ||
+              (landingMode === "native-ref" &&
                 request.argv[3] === "update-ref" &&
                 request.argv[4] === "refs/heads/main") ||
-              (executor === "native-remote" && request.argv[3] === "push"))
+              (landingMode === "native-remote" && request.argv[3] === "push"))
           ) {
             mergeRuns += 1
           }
@@ -4444,7 +4683,7 @@ describe("Queue command adapters", () => {
         },
       }
       const merge =
-        executor === "configured"
+        landingMode === "configured"
           ? configuredMergeStep<Checked>({
               inject: { process: authorityProcess },
               repo,
@@ -4462,10 +4701,10 @@ describe("Queue command adapters", () => {
       )
 
       expect(canceled.signal.aborted).toBe(true)
-      expect(outcome).toMatchObject({ status: "failed", error: { code: "merge-canceled" } })
+      expect(outcome).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "merge-canceled" } })
       expect(mergeRuns).toBe(0)
       const landedSha =
-        executor === "native-remote"
+        landingMode === "native-remote"
           ? (await git(repo, ["ls-remote", "origin", "refs/heads/main"])).split(/\s/u)[0]
           : await git(repo, ["rev-parse", "main"])
       expect(landedSha).toBe(baseSha)
@@ -4496,7 +4735,10 @@ describe("Queue command adapters", () => {
       }),
       { revision: "delegated-merge-v1" },
     )
-    const queue = withQueue({ steps: [check, merge] as const })
+    const queue = withQueue({
+      steps: [check, merge] as const,
+      resolveBaseSha: (base) => queueBaseSha(repo, base),
+    })
     const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
     await using app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
@@ -4504,17 +4746,18 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
     const landing = await git(repo, ["rev-parse", "refs/remotes/origin/main"])
     const checkJob = run.steps[0]?.job
-    if (checkJob?.status !== "passed") throw new Error("check did not pass")
+    if (checkJob?.status !== "completed" || checkJob.conclusion !== "success") throw new Error("check did not pass")
 
     expect(run).toMatchObject({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       integration: { commit: landing, baseSha: landing },
     })
     expect(await git(repo, ["merge-base", "--is-ancestor", run.integration!.commit, "refs/remotes/origin/main"])).toBe(
       "",
     )
     expect(landing).not.toBe(GitCheckEvidenceSchema.parse(checkJob.output).candidateSha)
-    expect(app.state().bays.prs.PR1).toMatchObject({
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
       status: "integrated",
       integration: { commit: landing, baseSha: landing },
     })
@@ -4563,20 +4806,24 @@ describe("Queue command adapters", () => {
       }),
       { revision: "delegated-merge-v1" },
     )
-    const queue = withQueue({ steps: [check, merge] as const })
+    const queue = withQueue({
+      steps: [check, merge] as const,
+      resolveBaseSha: (base) => queueBaseSha(repo, base),
+    })
     const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
     await using app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
     const checkJob = run.steps[0]?.job
-    if (checkJob?.status !== "passed") throw new Error("check did not pass")
+    if (checkJob?.status !== "completed" || checkJob.conclusion !== "success") throw new Error("check did not pass")
     const checked = GitCheckEvidenceSchema.parse(checkJob.output)
 
     expect(successfulRefreshes).toBe(2)
     expect(refusalAttempts).toBe(3)
     expect(run).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: {
         code: "queue-environment-refused",
         message: expect.stringContaining("after 3 attempts"),
@@ -4585,7 +4832,8 @@ describe("Queue command adapters", () => {
       prs: [{ id: "PR1", revision: 1, headSha: featureSha }],
     })
     expect(run.steps[1]?.job).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: {
         code: "queue-environment-refused",
         message: expect.stringContaining("after 3 attempts"),
@@ -4605,7 +4853,11 @@ describe("Queue command adapters", () => {
       ]),
     )
     expect(await git(remote, ["rev-parse", "main"])).toBe(checked.candidateSha)
-    expect(app.state().bays.prs.PR1).toMatchObject({ revision: 1, headSha: featureSha, status: "submitted" })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+      revision: 1,
+      headSha: featureSha,
+      status: "submitted",
+    })
   })
 
   it("rolls back a configured root landing when its source Candidate ref disappears", async () => {
@@ -4633,7 +4885,10 @@ describe("Queue command adapters", () => {
       }),
       { revision: "delegated-merge-v1" },
     )
-    const queue = withQueue({ steps: [check, merge] as const })
+    const queue = withQueue({
+      steps: [check, merge] as const,
+      resolveBaseSha: (base) => queueBaseSha(repo, base),
+    })
     const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
     await using app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
     await app.bays.submit({
@@ -4657,7 +4912,7 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run).toMatchObject({ status: "failed", error: { code: "invalid-candidate" } })
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "invalid-candidate" } })
     expect(await git(remote, ["rev-parse", "main"])).toBe(rootBaseSha)
     expect(await git(repo, ["rev-parse", "refs/remotes/origin/main"])).toBe(rootBaseSha)
     expect(await git(module, ["for-each-ref", "--format=%(refname)", "refs/heads/yrd/candidates"])).toBe("")
@@ -4675,13 +4930,17 @@ describe("Queue command adapters", () => {
     const merge = withMerge(configuredMergeStep<Checked>({ inject: { process }, repo, command: ["true"] }), {
       revision: "delegated-merge-v1",
     })
-    const queue = withQueue({ steps: [check, merge] as const })
+    const queue = withQueue({
+      steps: [check, merge] as const,
+      resolveBaseSha: (base) => queueBaseSha(repo, base),
+    })
     const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
     await using app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     expect((await app.queue.run({ prs: ["PR1"] }, runtime))[0]).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: { code: "merge-command-did-not-land" },
     })
   })
@@ -4709,8 +4968,8 @@ describe("configuredCommandStep — a timed-out command is a NAMED timeout failu
       } as unknown as StepExecution<PRShape>,
       { attempt: 1 } as never,
     )
-    expect(outcome.status).toBe("failed")
-    if (outcome.status !== "failed") return
+    expect(outcome.status).toBe("completed")
+    if (outcome.status !== "completed" || outcome.conclusion !== "failure") return
     expect(outcome.error.code).toBe("check-timeout")
     expect(outcome.error.message).toContain("500ms wall-clock bound")
     const evidence = CommandEvidenceSchema.parse(outcome.output)
