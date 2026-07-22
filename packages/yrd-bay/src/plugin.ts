@@ -56,6 +56,7 @@ import {
   reviewState,
   resolveBay,
   resolvePR,
+  resolvePRMatch,
   type Bay,
   type BranchLifecycle,
   type BaysState,
@@ -63,6 +64,7 @@ import {
   type Correlation,
   type DeprovisionBayInput,
   type DeprovisionedBay,
+  type LivePR,
   type PR,
   type PRComment,
   type PRRegression,
@@ -688,7 +690,8 @@ export function createBays(
     const requestedComposition =
       options.composition === undefined ? undefined : CompositionV1Schema.parse(options.composition)
     let snapshot = state()
-    let pr = resolvePR(snapshot, selector)
+    const resolved = resolvePRMatch(snapshot, selector)
+    let pr = resolved?.value
     let bay = resolveBay(snapshot, selector) ?? (pr?.bay === undefined ? undefined : resolveBay(snapshot, pr.bay))
     // D2 — a branch whose PR reached a non-landed terminal status
     // (withdrawn/canceled) mints its next revision automatically down the
@@ -703,7 +706,10 @@ export function createBays(
     //    hand-made `<branch>-delivery-<nonce>` branch is needed;
     //  - addressed by its id, it stays idempotent.
     if (pr?.status === "integrated") {
-      if (selector.toLowerCase() !== pr.branch.toLowerCase()) return bindSubmission(pr, options)
+      // Addressed by its canonical id, an integrated PR is frozen evidence:
+      // idempotent. Addressed by a moving alias (its branch), a new head mints a
+      // fresh delivery. The canonical-vs-alias fold lives in resolveSelectorMatch.
+      if (resolved?.matchedBy === "canonical") return bindSubmission(pr, options)
       const landedHead = await options.resolveRevision(selector)
       if (landedHead === undefined) {
         raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${selector}'`)
@@ -1227,7 +1233,13 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
 function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase: string, defaultActor: string) {
   const current = state.bays
   if ("pr" in args) {
-    const pr = required(resolvePR(current, args.pr), "PR", args.pr)
+    // Submit-by-id routes through the same live guard as the other 9 mutating
+    // verbs (no resolve exemption): an id-addressed terminal PR passes through
+    // (matchedBy canonical) to the state check below; a live-less branch
+    // selector refuses no-live-pr here. The D2/Q1 terminal-branch reopen/mint
+    // semantics live entirely in the {branch} path and submitSelectionOperation,
+    // never this {pr} path, so no pre-guard resolution is needed here.
+    const pr: LivePR = requireLivePR(current, args.pr)
     if (args.correlation !== undefined) return bindPRCorrelation(pr, args.correlation)
     if (pr.status !== "pushed") throw new Error(`yrd: PR '${pr.id}' is ${pr.status}, not pushed`)
     return {
@@ -1432,13 +1444,13 @@ function associateRejectedTerminalRun(
 }
 
 function readyPr(state: DeepReadonly<BayState>, args: PrReadyArgs, defaultActor: string) {
-  const pr = requireLivePR(state.bays, args.pr)
+  const pr: LivePR = requireLivePR(state.bays, args.pr)
   if (pr.status === "submitted") return { events: [] }
   return submitWork(state, args, "main", defaultActor)
 }
 
 function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultActor: string) {
-  const pr = requireLivePR(state.bays, args.pr)
+  const pr: LivePR = requireLivePR(state.bays, args.pr)
   if (pr.status === "integrated" || pr.status === "withdrawn" || pr.status === "canceled") {
     raiseFailure("refusal", "terminal-target", `yrd: PR '${pr.id}' is ${pr.status}; terminal PRs cannot be recut`)
   }
@@ -1548,7 +1560,7 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultActor:
 }
 
 function requestPrReview(state: DeepReadonly<BayState>, args: PrRequestReviewArgs, defaultActor: string) {
-  const pr = requireLivePR(state.bays, args.pr)
+  const pr: LivePR = requireLivePR(state.bays, args.pr)
   if (pr.status !== "pushed" && pr.status !== "submitted") {
     raiseFailure(
       "refusal",
@@ -1569,7 +1581,7 @@ function requestPrReview(state: DeepReadonly<BayState>, args: PrRequestReviewArg
 }
 
 function reviewPr(state: DeepReadonly<BayState>, args: PrReviewArgs) {
-  const pr = requireLivePR(state.bays, args.pr)
+  const pr: LivePR = requireLivePR(state.bays, args.pr)
   const fact = PRReviewFactSchema.parse({
     pr: pr.id,
     revision: pr.revision,
@@ -1583,7 +1595,7 @@ function reviewPr(state: DeepReadonly<BayState>, args: PrReviewArgs) {
 }
 
 function commentPr(state: DeepReadonly<BayState>, args: PrCommentArgs) {
-  const pr = requireLivePR(state.bays, args.pr)
+  const pr: LivePR = requireLivePR(state.bays, args.pr)
   const fact = PRCommentFactSchema.parse({
     pr: pr.id,
     revision: pr.revision,
@@ -1596,7 +1608,7 @@ function commentPr(state: DeepReadonly<BayState>, args: PrCommentArgs) {
 }
 
 function requestPrChecks(state: DeepReadonly<BayState>, args: PrRequestChecksArgs) {
-  const pr = requireLivePR(state.bays, args.pr)
+  const pr: LivePR = requireLivePR(state.bays, args.pr)
   if (pr.status !== "pushed" && pr.status !== "submitted" && pr.status !== "rejected") {
     throw new PrCheckabilityConflict(pr.id, pr.status)
   }
@@ -1614,7 +1626,7 @@ function requestPrChecks(state: DeepReadonly<BayState>, args: PrRequestChecksArg
 }
 
 function recordPrRegression(state: DeepReadonly<BayState>, args: PrRegressionArgs) {
-  const original = requireLivePR(state.bays, args.pr)
+  const original: LivePR = requireLivePR(state.bays, args.pr)
   const repair = resolvePR(state.bays, args.repairPr)
   if (repair === undefined) throw new Error(`yrd: no repair PR '${args.repairPr}'`)
   if (original.id === repair.id) throw new Error("yrd: an escaped regression requires a different repair PR")
@@ -1781,7 +1793,7 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
 }
 
 function closePr(state: DeepReadonly<BayState>, args: PrCloseArgs) {
-  const pr = requireLivePR(state.bays, args.pr)
+  const pr: LivePR = requireLivePR(state.bays, args.pr)
   if (!isLivePR(pr.status)) {
     throw new Error(`yrd: PR '${pr.id}' is ${pr.status}; only a live PR can be closed`)
   }
@@ -1797,7 +1809,7 @@ function closePr(state: DeepReadonly<BayState>, args: PrCloseArgs) {
 }
 
 function editPr(state: DeepReadonly<BayState>, args: PrEditArgs) {
-  const pr = requireLivePR(state.bays, args.pr)
+  const pr: LivePR = requireLivePR(state.bays, args.pr)
   const issueChanged = args.issue !== undefined && args.issue !== pr.issue
   if (args.issue !== undefined && pr.issue !== undefined && issueChanged) {
     raiseFailure(

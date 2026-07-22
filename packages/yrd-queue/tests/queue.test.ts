@@ -1582,6 +1582,100 @@ describe("Queue", () => {
     expect(checkCalls).toBe(0)
   })
 
+  it("settles a killed resident runner's expired-lease ghost via the unscoped lease-expiry sweep (D1b)", async () => {
+    // The follow loop's per-tick sweep calls recover with NO runner: it settles a
+    // running Job purely because its lease lapsed, no matter who left it. This is
+    // the killed-runner ghost the one-shot startup reclaim could not settle.
+    let checkCalls = 0
+    await using app = await createQueueApp({
+      check: () => {
+        checkCalls += 1
+        return { status: "passed", output: { checked: true } }
+      },
+    })
+    const pr = await submitBranch(app, "issue/killed-resident-ghost")
+    await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["check", "merge"] })
+    const job = app.queue.get("R1")?.steps[0]?.job
+    if (job === undefined) throw new Error("expected requested check")
+    // A resident started this check, then was killed; its lease already lapsed.
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: job.id,
+      attempt: 1,
+      runner: "yrd-cli:31337",
+      leaseExpiresAt: "2026-01-01T00:00:01.000Z",
+    })
+
+    // Unscoped sweep (the per-tick D1b call): settles the orphan to a typed
+    // terminal state — job `lost`, run `failed` — without executing the step.
+    await expect(
+      app.queue.recover({ recoveryTime: "2026-01-01T00:01:00.000Z", reason: "resident lease-expiry sweep" }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        id: "R1",
+        status: "failed",
+        steps: [expect.objectContaining({ job: expect.objectContaining({ status: "lost" }) }), expect.anything()],
+      }),
+    ])
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "lost", runner: "yrd-cli:31337" })
+    expect(checkCalls).toBe(0)
+
+    // Idempotent + cheap: a second sweep with nothing lapsed is a no-op.
+    const settled = await Array.fromAsync(app.events())
+    await expect(app.queue.recover({ recoveryTime: "2026-01-01T00:02:00.000Z" })).resolves.toEqual([])
+    expect(await Array.fromAsync(app.events())).toEqual(settled)
+  })
+
+  it("sweeps an orphaned running Job regardless of run/cursor, unlike cursor-only cancelRun (D1b)", async () => {
+    // cancelRun (queue.ts cancelRun) is scoped to ONE named run and only its cursor
+    // Job. The lease-expiry sweep is unscoped: it settles every orphaned running Job
+    // across ALL base queues by lease alone, with no run/cursor target. Two runs on
+    // DIFFERENT bases (the serial queue allows one active run per base) each hold a
+    // killed-runner ghost; cancelRun clears only the run it names, the sweep clears
+    // the untargeted one wherever its cursor sits.
+    let checkCalls = 0
+    await using app = await createQueueApp({
+      check: () => {
+        checkCalls += 1
+        return { status: "passed", output: { checked: true } }
+      },
+    })
+    const onMain = await submitBranch(app, "issue/ghost-untargeted")
+    const onRelease = await submitBranch(app, "issue/ghost-canceled", "release/2.0")
+    await app.dispatch(app.commands.queue.run, { prs: [onMain.id], steps: ["check", "merge"] })
+    await app.dispatch(app.commands.queue.run, { prs: [onRelease.id], steps: ["check", "merge"] })
+    const startGhost = async (run: string, runner: string) => {
+      const job = app.queue.get(run)?.steps[0]?.job
+      if (job === undefined) throw new Error(`expected requested check for ${run}`)
+      await app.dispatch(app.commands.job.transition, {
+        type: "start",
+        id: job.id,
+        attempt: 1,
+        runner,
+        leaseExpiresAt: "2026-01-01T00:00:01.000Z",
+      })
+    }
+    await startGhost("R1", "yrd-cli:100")
+    await startGhost("R2", "yrd-cli:200")
+
+    // Operator cancel is cursor/run-scoped: it settles ONLY R2's cursor Job.
+    await app.queue.cancelRun({ run: "R2", by: "operator", reason: "operator canceled" })
+    expect(app.queue.get("R2")?.status).toBe("canceled")
+    // R1's ghost is left running — cancelRun never looked outside the run it was given.
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "running", runner: "yrd-cli:100" })
+
+    // The unscoped sweep settles the untargeted R1 ghost by lease expiry alone.
+    await expect(app.queue.recover({ recoveryTime: "2026-01-01T00:01:00.000Z" })).resolves.toEqual([
+      expect.objectContaining({
+        id: "R1",
+        status: "failed",
+        steps: [expect.objectContaining({ job: expect.objectContaining({ status: "lost" }) }), expect.anything()],
+      }),
+    ])
+    expect(app.queue.get("R1")?.status).toBe("failed")
+    expect(checkCalls).toBe(0)
+  })
+
   it("releases a replayed lost job before an explicit same-revision retry", async () => {
     const journal = createMemoryJournal()
     const id = ids()
