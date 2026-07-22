@@ -1172,7 +1172,17 @@ function createQueue<Shape extends PRShape>(
             // Liveness beats check-freshness here: landing a runnable PR can
             // stale an in-flight sibling check, which the stale/recut path
             // already classifies and (with auto-recut) requeues.
-            if (newlyFailed) {
+            // Explicit-selector runs keep the receipts contract: while a named
+            // PR's check is still in flight the drain returns the admission
+            // receipts, because falling through would let runnablePRs raise
+            // pr-not-ready for the explicitly named pending PR ("checks still
+            // running" is a receipt, never a refusal). Only the implicit
+            // resident drain takes the full liveness narrowing.
+            const implicitRun = args.prs === undefined || args.prs.length === 0
+            if (
+              newlyFailed ||
+              (!implicitRun && unsettled.some((pr) => checkEligibility(snapshot, pr, steps).status !== "failed"))
+            ) {
               return admissions
             }
           }

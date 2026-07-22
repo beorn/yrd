@@ -3010,6 +3010,51 @@ describe("Queue", () => {
     expect(app.queue.eligibility(healthy.id)).toMatchObject({ checks: { status: "passed" } })
   })
 
+  it("runs the merge phase for already-passed PRs while another PR's check window is unsettled", async () => {
+    let mergeCalls = 0
+    await using app = await createQueueApp({
+      check: (input) =>
+        input.prs[0]?.id === "PR2"
+          ? { status: "waiting", token: "busy-window" }
+          : { status: "passed", output: { checked: true } },
+      merge: () => {
+        mergeCalls += 1
+        return { status: "passed", output: { commit: MERGED, baseSha: BASE } }
+      },
+    })
+    const ready = await submitBranch(app, "issue/ready-to-merge")
+    const busy = await submitBranch(app, "issue/perpetually-checking")
+    await app.bays.requestChecks({ pr: ready.id })
+    await app.bays.requestChecks({ pr: busy.id })
+
+    // The resident drain shape: implicit queue, no explicit selectors. The busy
+    // PR's check never settles inside this drain — under continuous submissions
+    // that window is NEVER empty, so a drain that returns before
+    // partitionCandidates whenever anything is unsettled starves merges forever.
+    const runs = await app.queue.run({ prs: [] }, runtime)
+
+    expect(mergeCalls).toBe(1)
+    expect(app.state().bays.prs[ready.id]).toMatchObject({ status: "integrated" })
+    expect(app.queue.eligibility(busy.id)).toMatchObject({ checks: { status: "checking" } })
+    // The drain's receipts must surface the merge run, not just the admissions.
+    expect(
+      runs.some((run) => run.status === "passed" && run.prs.some((pr) => pr.id === ready.id)),
+    ).toBe(true)
+  })
+
+  it("explicit run over a waiting check returns admission receipts instead of refusing", async () => {
+    await using app = await createQueueApp({
+      check: () => ({ status: "waiting", token: "remote-check" }),
+    })
+    const pr = await submitBranch(app, "issue/explicit-waiting")
+    await app.bays.requestChecks({ pr: pr.id })
+    // "Checks still running" stays a receipt, never a refusal: without the
+    // explicit-path gate the drain falls through to runnablePRs, which raises
+    // pr-not-ready for the explicitly named pending PR.
+    const runs = await app.queue.run({ prs: [pr.id] }, runtime)
+    expect(runs.some((run) => run.prs.some((member) => member.id === pr.id))).toBe(true)
+  })
+
   it("does not supersede another PR's unstarted admission for an explicit merge", async () => {
     let checkCalls = 0
     let mergeCalls = 0
