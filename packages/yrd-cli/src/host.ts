@@ -1099,6 +1099,13 @@ async function createYrdRuntimeHost(
       candidatePool,
       runnerId: resident?.id ?? `yrd-cli:${globalThis.process.pid}`,
     })
+    if (mode === "active") {
+      // Cutover migration: a pre-settlement (v1) journal can leave non-terminal
+      // legacy roots that the v2 projection cannot settle on its own. Settle the
+      // abandoned ones (loud receipt) and refuse only while a previous writer still
+      // holds a live lease — before any command reads or advances the queue.
+      await app.queue.quiesceLegacyRoots({ now: new Date().toISOString(), by: "yrd/migration" })
+    }
     signals?.start()
     const runtimeApp = app
     const resolveTarget = receiverTarget(runtimeApp)
