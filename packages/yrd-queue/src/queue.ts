@@ -51,6 +51,13 @@ import { computed, type ReadSignal } from "@silvery/signals"
 import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
 import {
+  classifyQueueLane,
+  validatePmPathPolicy,
+  type GitDiffEntry,
+  type PmPathPolicy,
+  type QueueLane,
+} from "./change-lane.ts"
+import {
   IntegrationProofSchema,
   QueuePauseSchema,
   QueueRecordSchema,
@@ -152,7 +159,21 @@ const QueueRunArgsSchema = z
   .strict()
 export type QueueRunArgs = Readonly<z.infer<typeof QueueRunArgsSchema>>
 
-const AdmitArgsSchema = z.object({ pr: z.string().trim().min(1) }).strict()
+const GitDiffEntrySchema = z
+  .object({
+    status: z.enum(["A", "D", "M", "R", "T"]),
+    path: z.string().min(1),
+    oldPath: z.string().min(1).optional(),
+    oldMode: z.string().min(1),
+    newMode: z.string().min(1),
+  })
+  .strict()
+const QueueLaneEvidenceSchema = z
+  .object({ snapshot: PRSnapshotSchema, changes: z.array(GitDiffEntrySchema).min(1) })
+  .strict()
+const AdmitArgsSchema = z
+  .object({ pr: z.string().trim().min(1), evidence: QueueLaneEvidenceSchema.optional() })
+  .strict()
 export type AdmitArgs = Readonly<z.infer<typeof AdmitArgsSchema>>
 export type AdmitSelection = Readonly<{ prs?: readonly string[] }>
 
@@ -348,8 +369,22 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
   steps: Steps
   batch?: BatchConfig
   defaultSteps?: readonly string[]
+  lanes?: Readonly<{
+    pm: Readonly<{ steps: readonly string[]; concurrency?: number; paths: PmPathPolicy }>
+  }>
+  resolveChanges?(snapshot: DeepReadonly<PRSnapshot>): readonly GitDiffEntry[] | Promise<readonly GitDiffEntry[]>
   requires?: readonly QueueRequirement[]
   resolveBaseSha?(base: string): string | Promise<string>
+}>
+
+type QueueLanePlan = Readonly<{
+  steps: readonly RuntimeStep[]
+  concurrency: number
+}>
+
+type QueueLanePolicy = Readonly<{
+  pm: QueueLanePlan & Readonly<{ paths: PmPathPolicy }>
+  sw: QueueLanePlan
 }>
 
 type QueueState = Readonly<{ queues: QueuesState }>
@@ -511,13 +546,41 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
   const batchSize = normalizeBatch(options.batch ?? 1)
   const defaults = options.defaultSteps === undefined ? undefined : selectSteps(steps, options.defaultSteps)
   validateSequence(defaults ?? steps, false)
+  const lanePolicy: QueueLanePolicy | undefined =
+    options.lanes === undefined
+      ? undefined
+      : (() => {
+          if (options.resolveChanges === undefined) {
+            throw new Error("yrd: queue lane routing requires resolveChanges")
+          }
+          const concurrency = options.lanes.pm.concurrency ?? 2
+          if (!Number.isInteger(concurrency) || concurrency < 1) {
+            throw new Error("yrd: pm lane concurrency must be a positive integer")
+          }
+          validatePmPathPolicy(options.lanes.pm.paths)
+          const pmSteps = selectSteps(steps, options.lanes.pm.steps)
+          validateSequence(pmSteps, false)
+          const swSteps = defaults ?? steps
+          for (const [lane, selected] of [
+            ["pm", pmSteps],
+            ["sw", swSteps],
+          ] as const) {
+            if (admissionPrefix(selected).length === 0) {
+              throw new Error(`yrd: queue lane '${lane}' requires at least one pre-integration admission step`)
+            }
+          }
+          return {
+            pm: { steps: pmSteps, concurrency, paths: options.lanes.pm.paths },
+            sw: { steps: swSteps, concurrency: 1 },
+          }
+        })()
   const initial = Queues.empty({
     batchSize,
     ...(defaults === undefined ? {} : { defaultSteps: defaults.map((step) => step.name) }),
     ...(options.requires === undefined ? {} : { requires: z.array(QueueRequirementSchema).parse(options.requires) }),
   })
   const jobDefs = Object.freeze(Object.fromEntries(steps.map((step) => [step.job.name, step.job])))
-  const commands = createQueueCommands(steps, byName)
+  const commands = createQueueCommands(steps, byName, lanePolicy)
 
   const install = <State extends object, Commands extends CommandTree, Features extends HasJobs & HasBays>(
     definition: YrdDef<State, Commands, Features>,
@@ -576,6 +639,8 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
                 yrd.bays.requestChecks({ pr, ...(baseSha === undefined ? {} : { baseSha }) }),
             },
             steps,
+            lanePolicy,
+            options.resolveChanges,
             options.resolveBaseSha,
             yrd.log.child("queue"),
             yrd.history,
@@ -786,6 +851,8 @@ function createQueue<Shape extends PRShape>(
   jobs: HasJobs["jobs"],
   actions: QueueActions,
   steps: readonly RuntimeStep[],
+  lanePolicy: QueueLanePolicy | undefined,
+  resolveChanges: QueueOptions<readonly AnyStepDef[]>["resolveChanges"],
   resolveBaseSha: QueueOptions<readonly AnyStepDef[]>["resolveBaseSha"],
   log: ConditionalLogger,
   history: JournalHistory<unknown> | undefined,
@@ -1016,8 +1083,33 @@ function createQueue<Shape extends PRShape>(
   const dispatchAdmissions = async (selectors: readonly string[]): Promise<QueueRun[]> => {
     const admitted: QueueRun[] = []
     for (const selector of selectors) {
-      const started = startedRun(await actions.admit({ pr: selector }))
-      if (started !== undefined) admitted.push(started)
+      if (lanePolicy === undefined) {
+        const started = startedRun(await actions.admit({ pr: selector }))
+        if (started !== undefined) admitted.push(started)
+        continue
+      }
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const pr = resolvePR(runtime().bays, selector)
+        if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
+        const snapshot = Queues.snapshot(pr)
+        const changes = await resolveChanges?.(snapshot)
+        if (changes === undefined) {
+          raiseFailure("refusal", "queue-lane-evidence-missing", `yrd: PR '${pr.id}' has no diff evidence resolver`)
+        }
+        const current = resolvePR(runtime().bays, pr.id)
+        if (current === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${pr.id}'`)
+        if (!sameBaseFact(snapshot, Queues.snapshot(current))) {
+          if (attempt === 0) continue
+          raiseFailure(
+            "refusal",
+            "queue-lane-evidence-churn",
+            `yrd: PR '${pr.id}' changed while deriving queue lane evidence twice`,
+          )
+        }
+        const started = startedRun(await actions.admit({ pr: pr.id, evidence: { snapshot, changes: [...changes] } }))
+        if (started !== undefined) admitted.push(started)
+        break
+      }
     }
     return admitted
   }
@@ -1035,7 +1127,7 @@ function createQueue<Shape extends PRShape>(
       const snapshot = runtime()
       const active = activeQueueRuns(snapshot.queues, snapshot.jobs).find(
         (candidate) =>
-          candidate.status === "running" && samePlan(candidate.steps, admissionSteps(snapshot.queues, steps)),
+          candidate.status === "running" && isAdmissionRun(candidate) && candidate.prs.some((pr) => targets.has(pr.id)),
       )
       if (active !== undefined) {
         const settled = await settle(active.id, options)
@@ -1044,7 +1136,7 @@ function createQueue<Shape extends PRShape>(
         continue
       }
 
-      const queued = admissionQueue(snapshot, steps)
+      const queued = admissionQueue(snapshot, steps, lanePolicy)
       const admitted = await dispatchAdmissions(
         (options.continueAdmissions === undefined ? queued : queued.slice(0, 1)).map((pr) => pr.id),
       )
@@ -1053,7 +1145,7 @@ function createQueue<Shape extends PRShape>(
       for (const selector of targets) {
         const pr = resolvePR(snapshot.bays, selector)
         if (pr === undefined) continue
-        const runId = checkEligibility(snapshot, pr, steps).run
+        const runId = checkEligibility(snapshot, pr, steps, lanePolicy).run
         if (runId !== undefined) {
           const candidate = materializeRun(Queues.record(snapshot.queues, runId), snapshot.jobs)
           remember(candidate)
@@ -1084,7 +1176,7 @@ function createQueue<Shape extends PRShape>(
           let snapshot = runtime()
           const selected =
             args.prs === undefined || args.prs.length === 0
-              ? admissionQueue(snapshot, steps)
+              ? admissionQueue(snapshot, steps, lanePolicy)
               : args.prs.map((selector) => {
                   const pr = resolvePR(snapshot.bays, selector)
                   if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
@@ -1094,7 +1186,7 @@ function createQueue<Shape extends PRShape>(
           snapshot = runtime()
           const selectors =
             args.prs === undefined || args.prs.length === 0
-              ? admissionQueue(snapshot, steps).map((pr) => pr.id)
+              ? admissionQueue(snapshot, steps, lanePolicy).map((pr) => pr.id)
               : [...args.prs]
           return runOptions === undefined ? dispatchAdmissions(selectors) : drainAdmissions(selectors, runOptions)
         },
@@ -1150,17 +1242,27 @@ function createQueue<Shape extends PRShape>(
           )
           const requested = requestedPRs(snapshot.bays, args, consumed)
           const checked = explicitStepAuthority ? [] : requested.filter((pr) => checksRequested(pr))
-          const before = new Map(checked.map((pr) => [pr.id, checkEligibility(snapshot, pr, steps).status]))
+          const before = new Map(checked.map((pr) => [pr.id, checkEligibility(snapshot, pr, steps, lanePolicy).status]))
           await refreshCheckIdentities(checked)
           const admissions = await drainAdmissions(
             checked.map((pr) => pr.id),
             runOptions,
           )
           snapshot = runtime()
-          const unsettled = checked.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "passed")
-          if (unsettled.length > 0) {
+          const currentRequested = requested.map((pr) => {
+            const current = resolvePR(snapshot.bays, pr.id)
+            if (current === undefined) throw new Error(`yrd: requested PR '${pr.id}' disappeared during admission`)
+            return current
+          })
+          const currentChecked = explicitStepAuthority ? [] : currentRequested.filter((pr) => checksRequested(pr))
+          const unsettled = currentChecked.filter(
+            (pr) => checkEligibility(snapshot, pr, steps, lanePolicy).status !== "passed",
+          )
+          const explicitPRSelection = args.prs !== undefined && args.prs.length > 0
+          if (explicitPRSelection && unsettled.length > 0) {
             const newlyFailed = unsettled.some(
-              (pr) => before.get(pr.id) !== "failed" && checkEligibility(snapshot, pr, steps).status === "failed",
+              (pr) =>
+                before.get(pr.id) !== "failed" && checkEligibility(snapshot, pr, steps, lanePolicy).status === "failed",
             )
             // Pause the merge phase ONLY when a check newly failed this tick,
             // so requeue/recut policy sees the failure before the next batch
@@ -1176,10 +1278,11 @@ function createQueue<Shape extends PRShape>(
               return admissions
             }
           }
-          const prs = runnablePRs(snapshot, args, steps, consumed, { explicitStepAuthority }).filter(
-            (pr) => !activeBases.has(baseIdentity(pr.base)),
-          )
-          for (const candidate of partitionCandidates(prs, snapshot.queues.batchSize)) {
+          const prs = runnablePRs(snapshot, args, steps, consumed, {
+            explicitStepAuthority,
+            lanePolicy,
+          }).filter((pr) => !activeBases.has(baseIdentity(pr.base)))
+          for (const candidate of partitionCandidates(prs, snapshot.queues.batchSize, snapshot, steps, lanePolicy)) {
             if (runOptions.continueAdmissions?.() === false) break
             const started = await actions.run({
               prs: candidate.map((pr) => pr.id),
@@ -1331,11 +1434,11 @@ function createQueue<Shape extends PRShape>(
       const snapshot = runtime()
       const pr = resolvePR(snapshot.bays, selector)
       if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
-      return prEligibility(snapshot, pr, steps)
+      return prEligibility(snapshot, pr, steps, { lanePolicy })
     },
     eligibilities() {
       const snapshot = runtime()
-      return Object.values(snapshot.bays.prs).map((pr) => prEligibility(snapshot, pr, steps))
+      return Object.values(snapshot.bays.prs).map((pr) => prEligibility(snapshot, pr, steps, { lanePolicy }))
     },
     checks(selectors) {
       const snapshot = runtime()
@@ -1347,7 +1450,7 @@ function createQueue<Shape extends PRShape>(
               if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
               return pr
             })
-      return prs.flatMap((pr) => projectPRChecks(snapshot, pr, steps))
+      return prs.flatMap((pr) => projectPRChecks(snapshot, pr, steps, lanePolicy))
     },
     terminalAssociationPlan: () => terminalAssociationPlan(runtime()),
     async migrateTerminalAssociations() {
@@ -1508,6 +1611,7 @@ function stepResultObservation(result: JobResult): Readonly<Record<string, unkno
 function runEvidence(run: DeepReadonly<QueueRun>): Record<string, unknown> {
   return {
     run: run.id,
+    ...(run.lane === undefined ? {} : { lane: run.lane }),
     base: run.base,
     status: run.status,
     prs: run.prs.map(deliveryIdentity),
@@ -1580,7 +1684,11 @@ function queueFailedEvent(
   })
 }
 
-function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<string, RuntimeStep>): QueueCommands {
+function createQueueCommands(
+  steps: readonly RuntimeStep[],
+  byName: ReadonlyMap<string, RuntimeStep>,
+  lanePolicy: QueueLanePolicy | undefined,
+): QueueCommands {
   const admit = command({
     title: "Admit PR checks",
     params: AdmitArgsSchema,
@@ -1594,10 +1702,40 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
       // retry is a fresh Queue run. Guard the command itself so a selector
       // chosen before a concurrent pause cannot mint that retry afterward.
       if (blockingQueuePause(state, pr) !== undefined) return { events: [] }
-      const selected = admissionSteps(state.queues, steps)
+      const lane =
+        lanePolicy === undefined
+          ? undefined
+          : (() => {
+              const evidence =
+                args.evidence ??
+                raiseFailure("refusal", "queue-lane-evidence-missing", `yrd: PR '${pr.id}' has no diff evidence`)
+              const snapshot = Queues.snapshot(pr)
+              if (!sameBaseFact(evidence.snapshot, snapshot)) {
+                raiseFailure(
+                  "refusal",
+                  "queue-lane-evidence-stale",
+                  `yrd: PR '${pr.id}' changed after its queue lane evidence was derived`,
+                )
+              }
+              return classifyQueueLane(evidence.changes, lanePolicy.pm.paths)
+            })()
+      const selected = admissionSteps(state.queues, steps, lanePolicy, lane)
       if (selected.length === 0) return { events: [] }
       const snapshot = Queues.snapshot(pr)
-      const existing = checkFactRun(state, snapshot, selected)
+      const laneReceipt = lanePolicy === undefined ? undefined : admissionReceiptRun(state, snapshot, true)
+      if (laneReceipt?.lane !== undefined && laneReceipt.lane !== lane) {
+        raiseFailure(
+          "refusal",
+          "queue-lane-drift",
+          `yrd: PR '${pr.id}' was admitted to lane '${laneReceipt.lane}', but current diff evidence derives '${lane}'`,
+        )
+      }
+      const existing =
+        lanePolicy === undefined
+          ? checkFactRun(state, snapshot, selected)
+          : laneReceipt !== undefined && samePlan(laneReceipt.steps, selected)
+            ? laneReceipt
+            : undefined
       const status = existing === undefined ? undefined : checkRunStatus(existing, selected.length)
       if (status === "passed" || status === "checking") {
         return { events: [] }
@@ -1611,8 +1749,16 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
       } else {
         requireQueueAuthority(state.queues.authority, [snapshot], selected)
       }
-      if (runningQueue(state.queues, state.jobs, pr.base) !== undefined) return { events: [] }
-      if (checksRequested(pr)) {
+      if (lanePolicy === undefined) {
+        if (runningQueue(state.queues, state.jobs, pr.base) !== undefined) return { events: [] }
+      } else {
+        if (runningIntegratingQueue(state.queues, state.jobs, pr.base) !== undefined) return { events: [] }
+        if (lane === undefined) throw new Error("yrd: lane routing did not derive a lane")
+        if (activeAdmissionRuns(state.queues, state.jobs, pr.base, lane).length >= lanePolicy[lane].concurrency) {
+          return { events: [] }
+        }
+      }
+      if (lanePolicy === undefined && checksRequested(pr)) {
         const first = admissionQueue(state, steps)[0]
         if (first !== undefined && first.id !== pr.id) return { events: [] }
       }
@@ -1622,6 +1768,8 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
         selected,
         stepSelection(state.queues, steps, selected, "admission"),
         prShape([snapshot]),
+        undefined,
+        lane === undefined ? {} : { lane },
       )
     },
   })
@@ -1667,16 +1815,43 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
     params: QueueRunArgsSchema,
     apply(state: DeepReadonly<RuntimeState>, args: QueueRunArgs) {
       if (args.steps?.length === 0) return { events: [] }
-      const selected = selectSteps(steps, args.steps ?? state.queues.defaultSteps)
+      const explicitStepAuthority = args.steps !== undefined
+      const prs = runnablePRs(state, args, steps, new Set(), { explicitStepAuthority, lanePolicy })
+      if (prs.length === 0) return { events: [] }
+      const lane =
+        lanePolicy === undefined || explicitStepAuthority
+          ? undefined
+          : (() => {
+              const lanes = new Set(
+                prs.map((pr) => {
+                  const receipt = configuredAdmissionReceipt(state, Queues.snapshot(pr), steps, lanePolicy)
+                  if (receipt?.lane === undefined) {
+                    raiseFailure(
+                      "refusal",
+                      "queue-lane-receipt-missing",
+                      `yrd: PR '${pr.id}' has no current lane admission receipt`,
+                    )
+                  }
+                  return receipt.lane
+                }),
+              )
+              if (lanes.size !== 1) {
+                raiseFailure("refusal", "queue-lane-mixed", "yrd: one queue candidate cannot span PM and SW lanes")
+              }
+              const [derived] = lanes
+              if (derived === undefined) throw new Error("yrd: a lane queue candidate requires at least one PR")
+              return derived
+            })()
+      const selected =
+        args.steps === undefined
+          ? configuredLaneSteps(state.queues, steps, lanePolicy, lane ?? "sw")
+          : selectSteps(steps, args.steps)
       const selection = stepSelection(
         state.queues,
         steps,
         selected,
         args.steps === undefined ? "configured" : "explicit",
       )
-      const explicitStepAuthority = selection.authority === "explicit"
-      const prs = runnablePRs(state, args, steps, new Set(), { explicitStepAuthority })
-      if (prs.length === 0) return { events: [] }
       const base = prs[0] === undefined ? undefined : baseIdentity(prs[0].base)
       if (base === undefined) throw new Error("yrd: a queue run requires at least one PR")
       if (prs.some((pr) => baseIdentity(pr.base) !== base)) {
@@ -1687,13 +1862,16 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
           `yrd: queue candidate has ${prs.length} PRs; configured batch size is ${state.queues.batchSize}`,
         )
       }
-      const active = runningQueue(state.queues, state.jobs, base)
+      const active =
+        lanePolicy === undefined
+          ? runningQueue(state.queues, state.jobs, base)
+          : runningIntegratingQueue(state.queues, state.jobs, base)
       const selectedPRs = new Set(prs.map((pr) => pr.id))
-      const superseded =
+      const supersededActive =
         active !== undefined &&
         explicitStepAuthority &&
         active.prs.every((pr) => selectedPRs.has(pr.id)) &&
-        unstartedAdmission(active, state.queues, steps)
+        unstartedAdmission(active)
           ? active
           : undefined
       // A check-only admission (no integrating steps) never moves the base, so
@@ -1704,15 +1882,32 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
       // the claims layer (a PR inside a started admission is not runnable).
       const plansIntegration = (plan: readonly { integrates: boolean; needsIntegration: boolean }[]): boolean =>
         plan.some((step) => step.integrates || step.needsIntegration)
-      const checkOnlyActive = active !== undefined && !plansIntegration(active.steps) && plansIntegration(selected)
-      if (active !== undefined && !checkOnlyActive && superseded === undefined) {
+      const checkOnlyActive =
+        lanePolicy === undefined &&
+        active !== undefined &&
+        !plansIntegration(active.steps) &&
+        plansIntegration(selected)
+      if (active !== undefined && !checkOnlyActive && supersededActive === undefined) {
         throw new QueueRunningConflict(base, active.id)
       }
+      const superseded =
+        supersededActive === undefined
+          ? lanePolicy === undefined || !explicitStepAuthority
+            ? []
+            : activeQueueRuns(state.queues, state.jobs).filter(
+                (run) =>
+                  baseIdentity(run.base) === base &&
+                  run.prs.every((pr) => selectedPRs.has(pr.id)) &&
+                  unstartedAdmission(run),
+              )
+          : [supersededActive]
       const integrated = integratedPRShape(prs)
       validateSequence(selected, integrated !== undefined)
       const snapshots = prs.map(Queues.snapshot)
       const reuse =
-        integrated === undefined && !explicitStepAuthority ? reusablePrefix(state, snapshots, selected) : undefined
+        integrated === undefined && !explicitStepAuthority
+          ? reusablePrefix(state, snapshots, selected, lanePolicy)
+          : undefined
       const remaining = reuse === undefined ? selected : selected.slice(reuse.count)
       if (remaining.length === 0) return { events: [] }
       requireQueueAuthority(state.queues.authority, snapshots, remaining)
@@ -1723,18 +1918,20 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
         selection,
         reuse?.shape ?? integrated ?? prShape(snapshots),
         integrated?.integration,
-        {},
+        lane === undefined ? {} : { lane },
         reuse === undefined ? undefined : { run: reuse.run, results: reuse.shape.results },
       )
-      return superseded === undefined
+      return superseded.length === 0
         ? started
         : {
             run: started.run,
             events: [
-              queueFailedEvent(state, superseded, {
-                code: "step-selection-superseded",
-                message: `explicit steps '${selection.steps.join(",")}' superseded unstarted configured checks`,
-              }),
+              ...superseded.map((run) =>
+                queueFailedEvent(state, run, {
+                  code: "step-selection-superseded",
+                  message: `explicit steps '${selection.steps.join(",")}' superseded unstarted configured checks`,
+                }),
+              ),
               ...started.events,
             ],
           }
@@ -1786,6 +1983,7 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
         {
           parent: parent.id,
           isolationPart: args.part,
+          ...(parent.lane === undefined ? {} : { lane: parent.lane }),
         },
       )
       return {
@@ -2545,7 +2743,7 @@ function startRun(
   selection: StepSelection | undefined,
   shape: PRShape,
   integration?: IntegrationProof,
-  lineage: Readonly<{ parent?: QueueRunId; isolationPart?: 0 | 1 }> = {},
+  lineage: Readonly<{ parent?: QueueRunId; isolationPart?: 0 | 1; lane?: QueueLane }> = {},
   reuse?: Readonly<{ run: QueueRunId; results: Readonly<Record<string, JsonValue>> }>,
 ): Readonly<{ run: QueueStart; events: readonly EventDraft[] }> {
   const pr = prs[0]
@@ -2974,6 +3172,39 @@ function runningQueue(
   )
 }
 
+function isAdmissionRun(run: DeepReadonly<Pick<QueueRun, "stepSelection">>): boolean {
+  return run.stepSelection?.authority === "admission"
+}
+
+/** Concurrent admission-only roots, one integrating root. */
+function runningIntegratingQueue(
+  queues: DeepReadonly<QueuesState>,
+  jobs: DeepReadonly<JobsState>,
+  base: string,
+  except?: QueueRunId,
+): QueueRun | undefined {
+  const identity = baseIdentity(base)
+  return activeQueueRuns(queues, jobs).find(
+    (run) => run.id !== except && baseIdentity(run.base) === identity && !Queues.terminal(run) && !isAdmissionRun(run),
+  )
+}
+
+function activeAdmissionRuns(
+  queues: DeepReadonly<QueuesState>,
+  jobs: DeepReadonly<JobsState>,
+  base: string,
+  lane: QueueLane,
+): QueueRun[] {
+  const identity = baseIdentity(base)
+  return activeQueueRuns(queues, jobs).filter(
+    (run) =>
+      baseIdentity(run.base) === identity &&
+      !Queues.terminal(run) &&
+      isAdmissionRun(run) &&
+      (run.lane ?? "sw") === lane,
+  )
+}
+
 function childQueue(
   queues: DeepReadonly<QueuesState>,
   jobs: DeepReadonly<JobsState>,
@@ -3150,12 +3381,11 @@ function resumableQueueRoots(
 ): QueueRun[] {
   const explicit = explicitPRs(state.bays, args)
   const selected = explicit === undefined ? undefined : new Set(explicit.map((pr) => pr.id))
-  const admissions = admissionSteps(state.queues, steps)
   const requested = args.steps === undefined ? undefined : selectSteps(steps, args.steps)
   return pendingQueueRoots(state).filter(
     (run) =>
       projectionLookupGet(state.queues.authority.runs, run.id)?.released === undefined &&
-      !samePlan(run.steps, admissions) &&
+      !isAdmissionRun(run) &&
       (requested === undefined ||
         (samePlan(run.steps, requested) &&
           (run.stepSelection === undefined || run.stepSelection.authority === "explicit"))) &&
@@ -3180,8 +3410,26 @@ function needsSettlement(state: DeepReadonly<RuntimeState>, run: QueueRun): bool
   })
 }
 
-function admissionSteps(queues: DeepReadonly<QueuesState>, steps: readonly RuntimeStep[]): RuntimeStep[] {
-  const selected = selectSteps(steps, queues.defaultSteps)
+function configuredLaneSteps(
+  queues: DeepReadonly<QueuesState>,
+  steps: readonly RuntimeStep[],
+  lanePolicy?: QueueLanePolicy,
+  lane: QueueLane = "sw",
+): readonly RuntimeStep[] {
+  return lanePolicy?.[lane].steps ?? selectSteps(steps, queues.defaultSteps)
+}
+
+function admissionSteps(
+  queues: DeepReadonly<QueuesState>,
+  steps: readonly RuntimeStep[],
+  lanePolicy?: QueueLanePolicy,
+  lane: QueueLane = "sw",
+): RuntimeStep[] {
+  const selected = configuredLaneSteps(queues, steps, lanePolicy, lane)
+  return [...admissionPrefix(selected)]
+}
+
+function admissionPrefix(selected: readonly RuntimeStep[]): readonly RuntimeStep[] {
   const boundary = selected.findIndex((step) => step.integrates || step.needsIntegration)
   return boundary < 0 ? selected : selected.slice(0, boundary)
 }
@@ -3203,14 +3451,9 @@ function samePlan(actual: readonly DeepReadonly<InstalledStep>[], expected: read
   )
 }
 
-function unstartedAdmission(
-  run: DeepReadonly<QueueRun>,
-  queues: DeepReadonly<QueuesState>,
-  steps: readonly RuntimeStep[],
-): boolean {
+function unstartedAdmission(run: DeepReadonly<QueueRun>): boolean {
   return (
     run.stepSelection?.authority === "admission" &&
-    samePlan(run.steps, admissionSteps(queues, steps)) &&
     run.steps.every((step) => step.job === undefined || step.job.status === "requested")
   )
 }
@@ -3248,13 +3491,102 @@ function checkRunStatus(run: QueueRun, selectedCount: number): PREligibility["ch
   return run.status === "failed" ? "failed" : "checking"
 }
 
+function samePRRevision(left: DeepReadonly<PRSnapshot>, right: DeepReadonly<PRSnapshot>): boolean {
+  return (
+    left.id === right.id &&
+    left.revision === right.revision &&
+    left.headSha === right.headSha &&
+    baseIdentity(left.base) === baseIdentity(right.base)
+  )
+}
+
+function sameBaseFact(left: DeepReadonly<PRSnapshot>, right: DeepReadonly<PRSnapshot>): boolean {
+  return samePRRevision(left, right) && left.baseSha === right.baseSha
+}
+
+/** A passed PM integration is the only base movement that preserves an SW
+ * admission proof. The journaled run supplies both ends of every edge: its
+ * pinned PR base and its terminal integration proof. */
+function pmAdvancePreserves(state: DeepReadonly<RuntimeState>, base: string, fromSha: string, toSha: string): boolean {
+  if (fromSha === toSha) return true
+  const edges = new Map<string, Set<string>>()
+  for (const record of Queues.values(state.queues)) {
+    if (record.lane !== "pm" || isAdmissionRun(record) || !record.steps.some((step) => step.integrates)) continue
+    if (record.prs.some((pr) => baseIdentity(pr.base) !== baseIdentity(base))) continue
+    const run = materializeRun(record, state.jobs)
+    if (run.status !== "passed" || run.integration === undefined) continue
+    for (const pr of record.prs) {
+      if (pr.baseSha === undefined) continue
+      const destinations = edges.get(pr.baseSha) ?? new Set<string>()
+      destinations.add(run.integration.baseSha)
+      edges.set(pr.baseSha, destinations)
+    }
+  }
+  const visited = new Set([fromSha])
+  const pending = [fromSha]
+  while (pending.length > 0) {
+    const current = pending.shift()
+    if (current === undefined) break
+    for (const next of edges.get(current) ?? []) {
+      if (next === toSha) return true
+      if (visited.has(next)) continue
+      visited.add(next)
+      pending.push(next)
+    }
+  }
+  return false
+}
+
+/** Latest admission receipt for this immutable PR revision. Exact-base facts
+ * win. A passed SW receipt may cross only a journal-proven chain of passed PM
+ * integrations; no other base drift is reusable. */
+function admissionReceiptRun(
+  state: DeepReadonly<RuntimeState>,
+  snapshot: DeepReadonly<PRSnapshot>,
+  preservePmAdvances: boolean,
+): QueueRun | undefined {
+  const candidates = Queues.values(state.queues)
+    .filter(
+      (record) =>
+        record.parent === undefined &&
+        isAdmissionRun(record) &&
+        record.prs.length === 1 &&
+        record.prs.some((candidate) => samePRRevision(candidate, snapshot)),
+    )
+    .toReversed()
+  const exact = candidates.find((record) => record.prs.some((candidate) => sameBaseFact(candidate, snapshot)))
+  if (exact !== undefined) return materializeRun(exact, state.jobs)
+  if (!preservePmAdvances || snapshot.baseSha === undefined) return undefined
+  for (const record of candidates) {
+    const prior = record.prs.find((candidate) => samePRRevision(candidate, snapshot))
+    if (record.lane !== "sw" || prior?.baseSha === undefined) continue
+    const run = materializeRun(record, state.jobs)
+    if (run.status === "passed" && pmAdvancePreserves(state, snapshot.base, prior.baseSha, snapshot.baseSha)) {
+      return run
+    }
+  }
+  return undefined
+}
+
+function configuredAdmissionReceipt(
+  state: DeepReadonly<RuntimeState>,
+  snapshot: DeepReadonly<PRSnapshot>,
+  steps: readonly RuntimeStep[],
+  lanePolicy: QueueLanePolicy,
+): QueueRun | undefined {
+  const run = admissionReceiptRun(state, snapshot, true)
+  if (run?.lane === undefined) return undefined
+  const expected = admissionSteps(state.queues, steps, lanePolicy, run.lane)
+  return samePlan(run.steps, expected) ? run : undefined
+}
+
 const AUTOMATIC_ADMISSION_RETRIES = 1
 
 function automaticAdmissionAttemptsExhausted(
   state: DeepReadonly<RuntimeState>,
   pr: DeepReadonly<PR>,
   snapshot: DeepReadonly<PRSnapshot>,
-  selected: readonly RuntimeStep[],
+  selected: readonly InstalledStep[],
 ): boolean {
   const exactRequests = pr.checkRequests.filter(
     (request) =>
@@ -3267,21 +3599,28 @@ function automaticAdmissionAttemptsExhausted(
   return releasedFailures >= exactRequests + AUTOMATIC_ADMISSION_RETRIES
 }
 
-function admissionQueue(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): PR[] {
-  const selected = admissionSteps(state.queues, steps)
-  if (selected.length === 0) return []
+function admissionQueue(
+  state: DeepReadonly<RuntimeState>,
+  steps: readonly RuntimeStep[],
+  lanePolicy?: QueueLanePolicy,
+): PR[] {
+  const selected = lanePolicy === undefined ? admissionSteps(state.queues, steps) : undefined
+  if (selected?.length === 0) return []
   return Object.values(state.bays.prs)
     .filter((pr) => pr.status === "pushed" || pr.status === "submitted")
     .filter((pr) => blockingQueuePause(state, pr) === undefined)
     .filter((pr) => checksRequested(pr))
     .filter((pr) => {
       const snapshot = Queues.snapshot(pr)
-      const run = admissionRun(state, snapshot, selected)
+      const run =
+        lanePolicy === undefined
+          ? admissionRun(state, snapshot, selected ?? [])
+          : configuredAdmissionReceipt(state, snapshot, steps, lanePolicy)
       if (run === undefined) return true
       return (
-        checkRunStatus(run, selected.length) === "failed" &&
+        checkRunStatus(run, run.steps.length) === "failed" &&
         availableAuthorityToken(state.queues.authority.checks[pr.id], snapshot) &&
-        !automaticAdmissionAttemptsExhausted(state, pr, snapshot, selected)
+        !automaticAdmissionAttemptsExhausted(state, pr, snapshot, run.steps)
       )
     })
     .toSorted((left, right) => {
@@ -3309,15 +3648,19 @@ function checkEligibility(
   state: DeepReadonly<RuntimeState>,
   pr: DeepReadonly<PR>,
   steps: readonly RuntimeStep[],
+  lanePolicy?: QueueLanePolicy,
 ): PREligibility["checks"] {
   const request = checkRequest(pr)
   const timing = request === undefined ? {} : { queuedAt: request.at }
-  const selected = admissionSteps(state.queues, steps)
-  if (selected.length === 0) return { status: "passed", ...timing }
-  const run = checkFactRun(state, Queues.snapshot(pr), selected)
-  if (run !== undefined) return { status: checkRunStatus(run, selected.length), ...timing, run: run.id }
+  const selected = lanePolicy === undefined ? admissionSteps(state.queues, steps) : undefined
+  if (selected?.length === 0) return { status: "passed", ...timing }
+  const run =
+    lanePolicy === undefined
+      ? checkFactRun(state, Queues.snapshot(pr), selected ?? [])
+      : configuredAdmissionReceipt(state, Queues.snapshot(pr), steps, lanePolicy)
+  if (run !== undefined) return { status: checkRunStatus(run, run.steps.length), ...timing, run: run.id }
   if (request === undefined) return { status: "not-requested" }
-  const queued = admissionQueue(state, steps)
+  const queued = admissionQueue(state, steps, lanePolicy)
   const position = queued.findIndex((candidate) => candidate.id === pr.id)
   return { status: "queued", ...timing, ...(position < 0 ? {} : { position: position + 1 }) }
 }
@@ -3412,8 +3755,9 @@ function projectPRChecks(
   state: DeepReadonly<RuntimeState>,
   pr: DeepReadonly<PR>,
   steps: readonly RuntimeStep[],
+  lanePolicy?: QueueLanePolicy,
 ): PRCheckRecord[] {
-  const checks = checkEligibility(state, pr, steps)
+  const checks = checkEligibility(state, pr, steps, lanePolicy)
   const run = checks.run === undefined ? undefined : materializeRun(Queues.record(state.queues, checks.run), state.jobs)
   if (run === undefined) {
     return [
@@ -3463,14 +3807,18 @@ function reusablePrefix(
   state: DeepReadonly<RuntimeState>,
   snapshots: readonly DeepReadonly<PRSnapshot>[],
   selected: readonly RuntimeStep[],
+  lanePolicy?: QueueLanePolicy,
 ): Readonly<{ run: QueueRunId; count: number; shape: PRShape }> | undefined {
   const snapshot = snapshots.length === 1 ? snapshots[0] : undefined
   if (snapshot?.baseSha === undefined) return undefined
   const boundary = selected.findIndex((step) => step.integrates || step.needsIntegration)
   const prefix = boundary < 0 ? selected : selected.slice(0, boundary)
   if (prefix.length === 0 || prefix.some((step) => step.classification === "base")) return undefined
-  const cached = admissionRun(state, snapshot, prefix)
-  if (cached?.status !== "passed") return undefined
+  const cached =
+    lanePolicy === undefined
+      ? admissionRun(state, snapshot, prefix)
+      : configuredAdmissionReceipt(state, snapshot, selected, lanePolicy)
+  if (cached?.status !== "passed" || !samePlan(cached.steps, prefix)) return undefined
   const record = Queues.record(state.queues, cached.id)
   return { run: cached.id, count: prefix.length, shape: shapeThrough(record, state.jobs) }
 }
@@ -3480,14 +3828,14 @@ function runnablePRs(
   args: QueueRunArgs,
   steps: readonly RuntimeStep[],
   excluded: ReadonlySet<string> = new Set(),
-  options: Readonly<{ explicitStepAuthority?: boolean }> = {},
+  options: Readonly<{ explicitStepAuthority?: boolean; lanePolicy?: QueueLanePolicy }> = {},
 ): PR[] {
   const requested = requestedPRs(state.bays, args, excluded)
   const implicitQueue = args.prs === undefined || args.prs.length === 0
   const ignoredClaims = new Set(
     options.explicitStepAuthority === true
       ? activeQueueRuns(state.queues, state.jobs)
-          .filter((run) => unstartedAdmission(run, state.queues, steps))
+          .filter(unstartedAdmission)
           .map((run) => run.id)
       : [],
   )
@@ -3496,6 +3844,7 @@ function runnablePRs(
       resumeIntegrated: true,
       ignoreChecks: options.explicitStepAuthority,
       ignoredClaims,
+      lanePolicy: options.lanePolicy,
     })
     if (eligibility.runnable) return true
     if (implicitQueue || (eligibility.reason?.code === "claimed" && options.explicitStepAuthority !== true)) {
@@ -3564,9 +3913,10 @@ function compositionRefusalReceipt(
   state: DeepReadonly<RuntimeState>,
   pr: DeepReadonly<PR>,
   steps: readonly RuntimeStep[],
+  lanePolicy?: QueueLanePolicy,
 ): JobError | undefined {
   const runIds = new Set<QueueRunId>()
-  const checkRun = checkEligibility(state, pr, steps).run
+  const checkRun = checkEligibility(state, pr, steps, lanePolicy).run
   if (checkRun !== undefined) runIds.add(checkRun)
   if (pr.terminalRun !== undefined) runIds.add(pr.terminalRun as QueueRunId)
   for (const runId of runIds) {
@@ -3589,6 +3939,7 @@ function prEligibility(
     resumeIntegrated?: boolean
     ignoreChecks?: boolean
     ignoredClaims?: ReadonlySet<string>
+    lanePolicy?: QueueLanePolicy
   }> = {},
 ): PREligibility {
   const reviewed = reviewState(pr)
@@ -3601,10 +3952,19 @@ function prEligibility(
     ...(reviewed.current?.actor === undefined ? {} : { actor: reviewed.current.actor }),
     ...(reviewed.current?.ref === undefined ? {} : { ref: reviewed.current.ref }),
   }
-  const checks = checkEligibility(state, pr, steps)
+  const checks = checkEligibility(state, pr, steps, options.lanePolicy)
+  const admission =
+    options.lanePolicy === undefined
+      ? undefined
+      : configuredAdmissionReceipt(state, Queues.snapshot(pr), steps, options.lanePolicy)
   const exhaustedAutomaticAdmissions =
     checks.status === "failed" &&
-    automaticAdmissionAttemptsExhausted(state, pr, Queues.snapshot(pr), admissionSteps(state.queues, steps))
+    automaticAdmissionAttemptsExhausted(
+      state,
+      pr,
+      Queues.snapshot(pr),
+      admission?.steps ?? admissionSteps(state.queues, steps),
+    )
   const result = (reason?: PREligibility["reason"]): PREligibility => ({
     pr: pr.id,
     revision: pr.revision,
@@ -3626,7 +3986,7 @@ function prEligibility(
     // This is a derived projection over the failed check's recorded refusal
     // evidence; it stores no new PRStatus (the bay status is untouched).
     if (options.ignoreChecks !== true && (pr.status === "submitted" || pr.status === "rejected")) {
-      const receipt = compositionRefusalReceipt(state, pr, steps)
+      const receipt = compositionRefusalReceipt(state, pr, steps, options.lanePolicy)
       if (receipt !== undefined) {
         return result({
           code: "needs-author",
@@ -3697,13 +4057,51 @@ function prEligibility(
     : result()
 }
 
-function partitionCandidates(prs: readonly PR[], batchSize: number): PR[][] {
+function partitionCandidates(
+  prs: readonly PR[],
+  batchSize: number,
+  state?: DeepReadonly<RuntimeState>,
+  steps?: readonly RuntimeStep[],
+  lanePolicy?: QueueLanePolicy,
+): PR[][] {
+  const keyOf = (pr: PR): string => {
+    const proof = pr.integration
+    const lane =
+      lanePolicy === undefined
+        ? ""
+        : (() => {
+            if (state === undefined || steps === undefined) throw new Error("yrd: lane partition requires queue state")
+            const receipt = configuredAdmissionReceipt(state, Queues.snapshot(pr), steps, lanePolicy)
+            if (receipt?.lane === undefined) {
+              throw new Error(`yrd: PR '${pr.id}' has no lane receipt during candidate partition`)
+            }
+            return receipt.lane
+          })()
+    return `${baseIdentity(pr.base)}\0${proof?.commit ?? ""}\0${proof?.baseSha ?? ""}\0${lane}`
+  }
+
+  if (lanePolicy !== undefined) {
+    const candidates: PR[][] = []
+    let key: string | undefined
+    let candidate: PR[] = []
+    for (const pr of prs) {
+      const nextKey = keyOf(pr)
+      if (candidate.length > 0 && (nextKey !== key || candidate.length >= batchSize)) {
+        candidates.push(candidate)
+        candidate = []
+      }
+      key = nextKey
+      candidate.push(pr)
+    }
+    if (candidate.length > 0) candidates.push(candidate)
+    return candidates
+  }
+
   const groups = new Map<string, PR[]>()
   for (const pr of prs) {
-    const proof = pr.integration
-    const key = `${baseIdentity(pr.base)}\0${proof?.commit ?? ""}\0${proof?.baseSha ?? ""}`
-    const group = groups.get(key)
-    if (group === undefined) groups.set(key, [pr])
+    const groupKey = keyOf(pr)
+    const group = groups.get(groupKey)
+    if (group === undefined) groups.set(groupKey, [pr])
     else group.push(pr)
   }
   const candidates: PR[][] = []
