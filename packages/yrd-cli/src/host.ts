@@ -64,6 +64,7 @@ import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import type { ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
 import { cleanGitEnvironment } from "./git-environment.ts"
+import { withGitIndexLockRetry } from "./git-index-lock-retry.ts"
 import { loadYrdConfig, SignalRecipientSchema, type ResolvedYrdProjectConfig, type YrdStepConfig } from "./config.ts"
 import { classifyFailure, resolveInvocation } from "./invocation.ts"
 import { withLiveRenderer } from "./live-renderer.ts"
@@ -937,7 +938,7 @@ async function createYrdRuntimeHost(
       globalThis.process.stderr.write(text),
     )
   const env = cleanGitEnvironment(options.env ?? globalThis.process.env)
-  const process = createProcess({ cwd: options.cwd, env, inject: { scope, log } })
+  const process = withGitIndexLockRetry(createProcess({ cwd: options.cwd, env, inject: { scope, log } }))
   let app: YrdCliApp | undefined
   let residentLease: ResidentRunnerLease | undefined
   let signals: SignalObserver | undefined
@@ -1085,7 +1086,9 @@ async function runReceiverHook(mode: "pre-receive" | "post-receive", env: NodeJS
   const scope = createScope("yrd-receiver-hook")
   const rootLog = createYrdLogger(resolveYrdObservability({}, env), (text) => globalThis.process.stderr.write(text))
   const log = rootLog.child({ host: "receiver-hook", mode })
-  const runtimeProcess = createProcess({ cwd: globalThis.process.cwd(), env, inject: { scope, log } })
+  const runtimeProcess = withGitIndexLockRetry(
+    createProcess({ cwd: globalThis.process.cwd(), env, inject: { scope, log } }),
+  )
   let app: YrdCliApp | undefined
   try {
     const receiver = await loadGitPushReceiver(resolve(globalThis.process.cwd(), gitDir), runtimeProcess)
