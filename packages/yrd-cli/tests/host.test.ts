@@ -365,6 +365,51 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     await changedLineTimeout.close()
   })
 
+  it("installs the PM lane and derives its admission from immutable Git diff facts", async () => {
+    const { repo } = await repository()
+    const baseSha = await git(repo, "rev-parse", "main")
+    await git(repo, "switch", "-qc", "issue/docs")
+    await writeFile(join(repo, "README.md"), "main\ndocumentation\n")
+    await git(repo, "add", "README.md")
+    await git(repo, "commit", "-qm", "document queue lanes")
+    const docsSha = await git(repo, "rev-parse", "HEAD")
+    await git(repo, "switch", "-q", "main")
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["sw-check", "merge"],
+      requires: [],
+      lanes: {
+        pm: {
+          concurrency: 2,
+          steps: ["pm-check", "merge"],
+        },
+      },
+      definitions: {
+        "sw-check": { run: "true", runner: "local" },
+        "pm-check": { run: "true", runner: "local" },
+        merge: { runner: "local" },
+      },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["sw-check"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+    await using app = await createDefaultYrdApp({
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal: createMemoryJournal(),
+      process: runtimeProcess,
+      config,
+      queueLanePolicy: { exact: ["README.md"], prefixes: ["docs/"], extensions: [".md"] },
+    })
+    await app.bays.submit({ branch: "issue/docs", headSha: docsSha, base: "main", baseSha })
+    await app.bays.requestChecks({ pr: "PR1", baseSha })
+
+    expect(await app.queue.admit({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })).toMatchObject([
+      { lane: "pm", status: "passed", steps: [{ name: "pm-check" }] },
+    ])
+  })
+
   it("normalizes remote aliases of the configured queue and refuses duplicate payload admission", async () => {
     const { repo, featureSha } = await repository()
     const baseSha = await git(repo, "rev-parse", "main")

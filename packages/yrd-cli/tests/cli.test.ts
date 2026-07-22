@@ -5933,6 +5933,62 @@ describe("runYrd", () => {
     expect(watchFrame).not.toContain("not-selected")
   })
 
+  it("shows the classified lane in queue run and watch output", async () => {
+    const run = {
+      id: "R1",
+      lane: "pm",
+      base: "main",
+      status: "running",
+      startedAt: "2026-07-09T12:09:00.000Z",
+      prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA }],
+      steps: [{ name: "pm-check", job: { status: "running" } }],
+    } as unknown as QueueRun
+    const result = {
+      base: "main",
+      prs: [
+        {
+          id: "PR1",
+          name: "Documentation-only change",
+          branch: "docs/update",
+          base: "main",
+          status: "submitted",
+          revision: 1,
+          headSha: HEAD_SHA,
+          revisions: [submittedRevision(1, HEAD_SHA, "2026-07-09T12:00:00.000Z")],
+          submittedAt: "2026-07-09T12:00:00.000Z",
+        },
+      ],
+      running: [run],
+      waiting: [],
+      finished: [],
+    } as unknown as QueueStatusResult
+    const admitted = {
+      ...result,
+      running: [],
+      finished: [
+        {
+          ...run,
+          status: "passed",
+          finishedAt: "2026-07-09T12:09:30.000Z",
+          steps: [{ name: "pm-check", job: { status: "passed" } }],
+        },
+      ],
+    } as unknown as QueueStatusResult
+
+    const queueFrame = await renderString(createElement(QueueRunsView, { runs: [run] }), {
+      width: 120,
+      plain: true,
+    })
+    const watchFrame = await renderString(
+      createElement(QueueWatchView, { results: [admitted], now: Date.parse("2026-07-09T12:10:00.000Z") }),
+      { width: 120, plain: true },
+    )
+
+    expect(queueFrame).toMatch(/LANE\s+STATE/)
+    expect(queueFrame).toMatch(/R1\s+PR1\s+pm\s+.*running/)
+    expect(watchFrame).toContain("LANE pm")
+  })
+
   it("orders queue timeline rows status-major and collapses to the latest row per PR", () => {
     const result = {
       base: "main",
