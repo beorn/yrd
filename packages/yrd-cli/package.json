@@ -7,9 +7,9 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@silvery/ansi": "^0.21.0",
-    "@silvery/commander": "^0.21.0",
-    "@silvery/scope": "^0.21.0",
+    "@silvery/ansi": "^0.23.0",
+    "@silvery/commander": "^0.23.0",
+    "@silvery/scope": "^0.23.0",
     "@yrd/bay": "workspace:*",
     "@yrd/contest": "workspace:*",
     "@yrd/core": "workspace:*",
@@ -20,7 +20,13 @@
     "@yrd/queue": "workspace:*",
     "loggily": "^0.10.2",
     "react": "^19.2.0",
-    "silvery": "^0.21.1",
+    "silvery": "^0.23.0",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@termless/ghostty": "^0.8.2",
+    "@termless/ghostty-native": "^0.8.1",
+    "@termless/test": "^0.8.1",
+    "@termless/xtermjs": "^0.8.1"
   }
 }
