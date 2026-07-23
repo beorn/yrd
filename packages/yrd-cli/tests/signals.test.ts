@@ -175,9 +175,7 @@ describe("PR signal observer", () => {
     // delivers what it can, then defers loudly and returns in bounded time — the
     // resident's observer finishes the rest. It does NOT hold on / spin for minutes.
     const dir = await stateDir()
-    const frames = Array.from({ length: 6 }, (_, index) =>
-      rejectedFrame(`00000000-0000-7000-8000-00000000010${index}`),
-    )
+    const frames = Array.from({ length: 6 }, (_, index) => rejectedFrame(`00000000-0000-7000-8000-00000000010${index}`))
     const journal = createMemoryJournal<unknown>(frames)
     const logs: unknown[] = []
     const log = createLogger("test", [{ level: "trace" }, { write: (value: unknown) => logs.push(value) }])
@@ -953,6 +951,43 @@ describe("PR signal observer", () => {
     }
   })
 
+  it("keeps a needs-review signal addressed to its sender out of the ball tracker", async () => {
+    const which = vi.spyOn(Bun, "which").mockReturnValue("/usr/local/bin/tribe")
+    const requests: ProcessRequest[] = []
+    try {
+      const adapter = createTribeSignalAdapter(recordingProcess(requests), "@cto")
+      await adapter.send({
+        recipient: "@cto",
+        event: {
+          id: "00000000-0000-7000-8000-000000000023",
+          kind: "pr/needs-review",
+          at: "2026-07-14T10:00:00.000Z",
+          pr: "PR7",
+          revision: 3,
+          headSha: "a".repeat(40),
+          actor: "@agent/7",
+        },
+      })
+
+      expect(requests.map(({ argv }) => argv)).toEqual([
+        [
+          "/usr/local/bin/tribe",
+          "send",
+          "@cto",
+          expect.stringContaining("needs review for PR7 revision 3"),
+          "--type",
+          "notify",
+          "--summary",
+          "PR7 needs review",
+          "--delivery",
+          "pull",
+        ],
+      ])
+    } finally {
+      which.mockRestore()
+    }
+  })
+
   it("uses ambient notify for integration and closes terminal request ids without a wakeup message", async () => {
     const which = vi.spyOn(Bun, "which").mockReturnValue("/usr/local/bin/tribe")
     const requests: ProcessRequest[] = []
@@ -1034,6 +1069,55 @@ describe("PR signal observer", () => {
       journal: createMemoryJournal<unknown>([rejected, integrated]),
       stateDir: dir,
       routes: { "pr/integrated": ["broadcast"] },
+      adapter: recordingAdapter([], closures),
+    })
+    settler.start()
+    await settler.close()
+
+    expect(closures).toEqual([])
+  })
+
+  it("does not record a sender-addressed review notification as an opened request ball", async () => {
+    const dir = await stateDir()
+    const review = submittedFrame("00000000-0000-7000-8000-000000000048", "@agent/7", 1)
+    const terminal = rejectedFrame("00000000-0000-7000-8000-000000000049")
+    const terminalEvent = terminal.events[0]!
+    const integrated = {
+      ...terminal,
+      events: [
+        {
+          ...terminalEvent,
+          name: "pr/integrated",
+          data: {
+            pr: "PR7",
+            revision: 1,
+            headSha: "a".repeat(40),
+            actor: "@agent/7",
+            run: "R9",
+            landingSha: "b".repeat(40),
+          },
+        },
+      ],
+    }
+
+    const opener = createSignalObserver({
+      journal: createMemoryJournal<unknown>([review]),
+      stateDir: dir,
+      routes: { "pr/needs-review": ["@ci"] },
+      sender: "@ci",
+      reviewRequired: true,
+      adapter: recordingAdapter([], []),
+    })
+    opener.start()
+    await opener.close()
+
+    const closures: SignalClosure[] = []
+    const settler = createSignalObserver({
+      journal: createMemoryJournal<unknown>([review, integrated]),
+      stateDir: dir,
+      routes: { "pr/integrated": ["broadcast"] },
+      sender: "@ci",
+      reviewRequired: true,
       adapter: recordingAdapter([], closures),
     })
     settler.start()
