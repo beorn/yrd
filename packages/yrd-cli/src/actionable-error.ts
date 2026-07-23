@@ -42,11 +42,10 @@ function prId(message: string): string | undefined {
 }
 
 function authoredGitlinkFailure(failure: FailureLike, cause: string): ActionableFailure {
-  const pr = prId(failure.message) ?? "<PR>"
   return Object.freeze({
     code: failure.code,
     cause,
-    resolution: Object.freeze(["yrd pr submit <branch> --draft", `yrd pr recut ${pr} --queue --force`]),
+    resolution: Object.freeze(["yrd pr submit <branch>"]),
     reference: "README.md#pr-eligibility-and-checks",
   })
 }
@@ -72,8 +71,7 @@ function recutGitlinkFailure(failure: FailureLike, cause: string): ActionableFai
       `git -C ${path} merge ${basePin}`,
       `git -C ${path} push -u origin HEAD`,
       `git add ${path} && git commit -m "fix(yrd): compose ${path} pins"`,
-      "yrd pr submit <branch> --draft",
-      `yrd pr recut ${pr} --queue --force`,
+      "yrd pr submit <branch>",
     ]),
     reference: "README.md#resolving-divergent-gitlink-pins",
   })
@@ -81,7 +79,9 @@ function recutGitlinkFailure(failure: FailureLike, cause: string): ActionableFai
 
 export function actionableFailure(failure: FailureLike): ActionableFailure {
   const cause = oneLineCause(failure.message)
-  if (failure.code === "authored-gitlink") return authoredGitlinkFailure(failure, cause)
+  if (failure.code === "authored-gitlink" || failure.code === "submission-certificate") {
+    return authoredGitlinkFailure(failure, cause)
+  }
   if (failure.code === "recut-gitlink-conflict") {
     const projected = recutGitlinkFailure(failure, cause)
     if (projected !== undefined) return projected

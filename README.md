@@ -176,8 +176,8 @@ $ yrd pr checks PR2 --follow
 
 `--draft` is the existing `pushed` state, not a second flag or status. It only
 registers the immutable revision: no check request, admission, or Queue work is
-started until `pr ready` (ordinary reviewed work) or `pr recut --queue`
-(authored-root carriers). Review and comment facts pin the current revision and
+started until `pr ready` (ordinary reviewed work) or an explicit/legacy draft
+is repaired with `pr recut --queue --force`. Review and comment facts pin the current revision and
 head SHA; a new head makes old verdicts visibly stale. Reviewer assignment and
 richer policy belong to the calling coordination system.
 
@@ -412,13 +412,15 @@ For a human-authored root carrier, use the machine-owned path rather than
 attaching a composition manifest:
 
 ```bash
-yrd pr submit <branch> --draft
-yrd pr recut <PR> --queue --force
+yrd pr submit <branch>
 ```
 
-`--force` is explicit because an authored-root rejection can leave a passing
-check attached to the current revision; recut replaces that revision with the
-machine-certified successor.
+Submit detects authored gitlinks before journaling, mechanically certifies the
+carrier against the authoritative base, and records the certified result plus
+its authored-source proof as revision one. Repeating the same branch/source is
+idempotent even when certification produced a different commit. `--draft`
+remains an explicit way to record an uncertified draft; a legacy or explicit
+draft can still be repaired with `yrd pr recut <PR> --queue --force`.
 
 The Queue is the only scheduler. Its journaled passed Run is also the cache:
 integration reuses matching carrier-classified pre-merge work only when
@@ -462,17 +464,17 @@ land. The Queue receipt retains that immutable ref, patch ID, `rangeDiff: "="`,
 and the old/new base and tip SHAs; ref loss during a remote landing fails closed
 and rolls the root branch back.
 
-Human-authored gitlink commits are refused by default. The normal path is the
-draft-to-recut workflow above; `YRD_ALLOW_AUTHORED_GITLINKS=1` is break-glass
-only for a legacy carrier and does not weaken Candidate pinning or exact
-landing.
+Uncertified human-authored gitlink commits are refused by default. The normal
+path is the certified one-step submit above; `YRD_ALLOW_AUTHORED_GITLINKS=1` is
+break-glass only for a legacy carrier and does not weaken Candidate pinning or
+exact landing.
 
 #### Resolving Divergent Gitlink Pins
 
 `err=recut-gitlink-conflict` names the authoritative root and pin plus the
 replayed authored root and pin. When neither submodule pin contains the other,
 publish a real composition commit in that submodule, update the carrier to pin
-it, and recut the same PR:
+it, and submit the updated carrier:
 
 ```bash
 git -C <submodule> fetch --all --prune
@@ -481,8 +483,7 @@ git -C <submodule> merge <authoritative-pin>
 # Resolve any content conflicts and commit before continuing.
 git -C <submodule> push -u origin HEAD
 git add <submodule> && git commit -m "fix(yrd): compose <submodule> pins"
-yrd pr submit <branch> --draft
-yrd pr recut <PR> --queue --force
+yrd pr submit <branch>
 ```
 
 The composition commit must be published before the root carrier is submitted;

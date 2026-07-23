@@ -1235,9 +1235,11 @@ describe("runYrd", () => {
 
     expect(await runYrd(app, yrd("pr", "submit", "--help"), submitHelp.io), submitHelp.stderr()).toBe(0)
     expect(submitHelp.stdout()).toContain("Authored root carrier")
+    expect(submitHelp.stdout()).toContain("$ yrd pr submit <branch>")
+    expect(submitHelp.stdout()).toMatch(/certify[\s\S]*revision one/u)
     expect(submitHelp.stdout()).toContain("$ yrd pr submit <branch> --draft")
     expect(submitHelp.stdout()).toContain("$ yrd pr recut <PR> --queue")
-    expect(submitHelp.stdout()).toMatch(/no\s+composition\s+manifest or manual recut/u)
+    expect(submitHelp.stdout()).toMatch(/legacy or explicit draft/u)
 
     expect(await runYrd(app, yrd("pr", "recut", "--help"), help.io), help.stderr()).toBe(0)
     expect(help.stdout()).toContain("Usage: yrd pr recut [options] <selector>")
@@ -1245,27 +1247,31 @@ describe("runYrd", () => {
     expect(help.stdout()).toContain("--queue")
     expect(help.stdout()).toContain("--json")
     expect(help.stdout()).toContain("Authored root carrier")
+    expect(help.stdout()).toContain("$ yrd pr submit <branch>")
     expect(help.stdout()).toContain("$ yrd pr submit <branch> --draft")
     expect(help.stdout()).toContain("$ yrd pr recut <PR> --queue")
-    expect(help.stdout()).toMatch(/no\s+composition\s+manifest or manual recut/u)
+    expect(help.stdout()).toMatch(/legacy or explicit draft/u)
   })
 
-  it("draft-registers an authored carrier and queues a recut revision on the same PR", async () => {
+  it("certifies an authored carrier as revision one and replays the same source idempotently", async () => {
     const checkedRevisions: string[] = []
     const app = await createApp({ waitingCheck: true, checkedRevisions })
     const nextHead = "2".repeat(40)
     const nextBase = "b".repeat(40)
     const treeSha = "c".repeat(40)
     const patchId = "d".repeat(40)
+    const authorshipProof = {
+      kind: "authored-source-proof-v1",
+      source: { headSha: HEAD_SHA, baseSha: BASE_SHA },
+      certificate: { baseSha: nextBase, treeSha, patchId },
+    } as const
     const services = {
       recut: {
-        recut() {
+        prepareSubmission() {
           return Promise.resolve({
             headSha: nextHead,
             baseSha: nextBase,
-            treeSha,
-            patchId,
-            unchanged: false,
+            authorshipProof,
           })
         },
       },
@@ -1273,46 +1279,46 @@ describe("runYrd", () => {
     const submitted = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
 
     expect(
-      await runYrd(app, yrd("pr", "submit", "topic/root-carrier", "--draft", "--json"), submitted.io),
+      await runYrd(app, yrd("pr", "submit", "topic/root-carrier", "--wait", "--json"), submitted.io, services),
       submitted.stderr(),
     ).toBe(0)
     expect(JSON.parse(submitted.stdout())).toMatchObject({
       command: "pr.submit",
-      prs: [{ id: "PR1", branch: "topic/root-carrier", status: "pushed", revision: 1 }],
-    })
-    expect(app.bays.checksRequested("PR1")).toBe(false)
-    expect(Queues.ids(app.state().queues)).toEqual([])
-    expect(checkedRevisions).toEqual([])
-
-    const recut = outputIO()
-    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), recut.io, services)).toBe(0)
-    expect(JSON.parse(recut.stdout())).toMatchObject({
-      pr: "PR1",
-      revision: 2,
-      baseSha: nextBase,
-      treeSha,
-      patchId,
-      lineage: [1, 2],
-      unchanged: false,
+      prs: [{ id: "PR1", branch: "topic/root-carrier", status: "submitted", revision: 1 }],
     })
     expect(app.bays.pr("PR1")).toMatchObject({
       id: "PR1",
       branch: "topic/root-carrier",
       status: "submitted",
-      revision: 2,
+      revision: 1,
       headSha: nextHead,
-      revisions: [
-        { revision: 1, headSha: HEAD_SHA },
-        { revision: 2, headSha: nextHead },
-      ],
+      baseSha: nextBase,
+      authorshipProof,
+      revisions: [{ revision: 1, headSha: nextHead, baseSha: nextBase, authorshipProof }],
     })
     expect(app.queue.get("R1")).toMatchObject({
       status: "waiting",
-      prs: [{ id: "PR1", revision: 2, headSha: nextHead }],
+      prs: [{ id: "PR1", revision: 1, headSha: nextHead, baseSha: nextBase, authorshipProof }],
     })
     expect(Queues.ids(app.state().queues)).toEqual(["R1"])
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
-    expect(checkedRevisions).toEqual(["PR1@2"])
+    expect(checkedRevisions).toEqual(["PR1@1"])
+
+    const beforeReplay = await Array.fromAsync(app.events())
+    expect(beforeReplay.filter(({ name }) => name === "pr/pushed")).toHaveLength(1)
+    expect(beforeReplay.filter(({ name }) => name === "pr/submission-authorship-proved")).toHaveLength(1)
+    expect(beforeReplay.filter(({ name }) => name === "pr/submitted")).toHaveLength(1)
+
+    const replay = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+    expect(
+      await runYrd(app, yrd("pr", "submit", "topic/root-carrier", "--json"), replay.io, services),
+      replay.stderr(),
+    ).toBe(0)
+    expect(app.bays.pr("PR1")).toMatchObject({ revision: 1, headSha: nextHead, authorshipProof })
+    const afterReplay = await Array.fromAsync(app.events())
+    expect(afterReplay.filter(({ name }) => name === "pr/pushed")).toHaveLength(1)
+    expect(afterReplay.filter(({ name }) => name === "pr/submission-authorship-proved")).toHaveLength(1)
+    expect(afterReplay.filter(({ name }) => name === "pr/submitted")).toHaveLength(1)
   })
 
   it("forwards a same-issue integrated source composition when recutting an authored carrier", async () => {

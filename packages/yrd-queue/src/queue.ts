@@ -547,7 +547,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/run/canceled": CancelRunArgsSchema,
         "queue/run/settled": SettledArgsSchema,
       },
-      projectionVersion: "queues-v5-legacy-root-retention",
+      projectionVersion: "queues-v6-submission-authorship",
       project: projectQueues,
       compact: (state, complete) => {
         const runtime = complete as unknown as DeepReadonly<RuntimeState>
@@ -3531,6 +3531,7 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     "wrapper-mismatch",
     "source-missing",
     "source-lineage",
+    "submission-certificate",
     "payload-certificate",
     "payload-identity",
     "payload-mismatch",

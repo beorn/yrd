@@ -273,7 +273,7 @@ export async function residentRunnerStatus(cwd: string): Promise<QueueTimelineRu
  * the pre-marker "NO RUNNER"/absent semantics. Reclaim, by contrast, consumes the
  * raw marker (it needs the dead pid), so it must NOT go through this filter. */
 function activeResidentRunner(runner: QueueTimelineRunner | null): QueueTimelineRunner | null {
-  return runner !== null && runner.exitedAt !== undefined ? null : runner
+  return runner?.exitedAt !== undefined ? null : runner
 }
 
 type RunnerGitDistance = Readonly<{
@@ -1623,6 +1623,7 @@ async function resolveSubmitMetadata(
 
 async function submitBays(
   app: YrdCliApp,
+  services: YrdCliServices,
   selectors: readonly string[],
   options: {
     follow?: boolean
@@ -1656,6 +1657,9 @@ async function submitBays(
   if (composition !== undefined && inferred.length !== 1) {
     usage("--composition requires exactly one bay or branch selector")
   }
+  const prepareSubmission = services.recut?.prepareSubmission
+  const prepareAuthoredSubmission =
+    command === "pr.submit" && options.draft !== true && composition === undefined ? prepareSubmission : undefined
   const reviewers = options.reviewer ?? []
   for (const selector of inferred) {
     const metadata = await resolveSubmitMetadata(app, selector, options, io)
@@ -1667,6 +1671,9 @@ async function submitBays(
       ...(options.draft === true ? { draft: true } : {}),
       ...(correlation === undefined ? {} : { correlation }),
       ...(composition === undefined ? {} : { composition }),
+      ...(prepareAuthoredSubmission === undefined
+        ? {}
+        : { prepareSubmission: (source) => prepareAuthoredSubmission(source) }),
       resolveRevision: (ref) => optionalRevision(ref, io),
       run: runtimeOptions(io),
       warnings,
@@ -4311,10 +4318,14 @@ function addAuthoredCarrierWorkflow<
   ArgumentRecord extends Record<string, unknown>,
 >(command: CliCommand<Options, Arguments, ArgumentRecord>, name: string): void {
   command.addHelpSection("Authored root carrier:", [
-    [`$ ${name} pr submit <branch> --draft`, "record the immutable authored carrier as a draft PR"],
+    [
+      `$ ${name} pr submit <branch>`,
+      "detect and mechanically certify an authored carrier before recording revision one",
+    ],
+    [`$ ${name} pr submit <branch> --draft`, "explicitly record an uncertified draft without queue admission"],
     [
       `$ ${name} pr recut <PR> --queue --force`,
-      "recut and queue a new revision on that same PR; no composition manifest or manual recut",
+      "repair a legacy or explicit draft on that same PR; no composition manifest is needed",
     ],
   ])
 }
@@ -4447,7 +4458,9 @@ function buildProgram(
     .option("--correlation <namespace:id>", "bind an opaque correlation to the submitted revision")
     .option("--composition <path>", "immutable version-1 source composition JSON")
     .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "bay.submit")))
+    .action(async (selectors, options) =>
+      setExit(await submitBays(installed(), installedServices(), selectors, options, io, "bay.submit")),
+    )
   bay
     .command("close [selector...]")
     .description("close work bays")
@@ -4656,7 +4669,9 @@ function buildProgram(
       [] as readonly string[],
     )
     .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "pr.submit")))
+    .action(async (selectors, options) =>
+      setExit(await submitBays(installed(), installedServices(), selectors, options, io, "pr.submit")),
+    )
   addAuthoredCarrierWorkflow(submit, name)
   pr.command("view <selector>")
     .description("show a PR and its runs")

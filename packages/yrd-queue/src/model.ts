@@ -5,6 +5,7 @@ import {
   GitShaSchema,
   PRIdSchema,
   PRRecutProofSchema,
+  PRSubmissionAuthorshipProofSchema,
   type PRTerminalAssociation,
   baseIdentity,
   checkRequest,
@@ -49,6 +50,7 @@ export const PRSnapshotSchema = z
     correlation: CorrelationSchema.optional(),
     composition: CompositionV1Schema.optional(),
     recut: PRSnapshotRecutProofSchema.optional(),
+    authorshipProof: PRSubmissionAuthorshipProofSchema.optional(),
   })
   .strict()
 export type PRSnapshot = Readonly<z.infer<typeof PRSnapshotSchema>>
@@ -556,6 +558,7 @@ export const Queues = Object.freeze({
       ...(pr.recut === undefined
         ? {}
         : { recut: { ...pr.recut, ...(pr.baseSha === undefined ? {} : { baseSha: pr.baseSha }) } }),
+      ...(pr.authorshipProof === undefined ? {} : { authorshipProof: pr.authorshipProof }),
     })
   },
 
