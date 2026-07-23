@@ -225,6 +225,50 @@ describe("withBays", () => {
     expect(stable).toMatchObject({ status: "submitted", revision: 2, headSha: HEAD_2 })
   })
 
+  it("records a prepared authorship proof on revision one and reuses its authored source identity", async () => {
+    const harness = createWorkspaceHarness()
+    const jobs = createBayJobDefs(harness.adapter)
+    const definition = pipe(
+      createYrdDef(),
+      withJobs({ definitions: jobs }),
+      withBays({ jobs, defaultBase: "main", resolveBase: (base) => ({ base, baseSha: BASE }) }),
+    )
+    await using app = await createYrd(definition, {
+      inject: { journal: createMemoryJournal(), clock: () => "2026-01-01T00:00:00.000Z", id: ids() },
+    })
+    const treeSha = "c".repeat(40)
+    const patchId = "d".repeat(40)
+    const authorshipProof = {
+      kind: "authored-source-proof-v1",
+      source: { headSha: HEAD_1, baseSha: BASE },
+      certificate: { baseSha: BASE, treeSha, patchId },
+    } as const
+    const options = {
+      base: "main",
+      resolveRevision: async () => HEAD_1,
+      prepareSubmission: async () => ({ headSha: HEAD_2, baseSha: BASE, authorshipProof }),
+      run: runtime,
+    }
+
+    const submitted = await app.bays.submitSelection("topic/authored", options)
+    expect(submitted).toMatchObject({
+      id: "PR1",
+      revision: 1,
+      headSha: HEAD_2,
+      authorshipProof,
+      revisions: [{ revision: 1, headSha: HEAD_2, authorshipProof }],
+    })
+    const firstEvents = await Array.fromAsync(app.events())
+    expect(firstEvents.map(({ name }) => name)).toEqual([
+      "pr/pushed",
+      "pr/submission-authorship-proved",
+      "pr/submitted",
+    ])
+
+    expect(await app.bays.submitSelection("topic/authored", options)).toMatchObject({ revision: 1, authorshipProof })
+    expect(await Array.fromAsync(app.events())).toEqual(firstEvents)
+  })
+
   it("mints a fresh delivery PR for a new head on a landed branch (Q1), no delivery-nonce branch", async () => {
     const nextId = ids()
     const seededCommand = { id: nextId(), op: "fixture.integrated-branch" }
@@ -1782,11 +1826,26 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     const journal = createMemoryJournal([
       {
         command: seededCommand,
-        cause: { id: nextId(), commandId: seededCommand.id, op: seededCommand.op, commandHash: Command.hash(seededCommand) },
+        cause: {
+          id: nextId(),
+          commandId: seededCommand.id,
+          op: seededCommand.op,
+          commandHash: Command.hash(seededCommand),
+        },
         events: [
-          { id: nextId(), name: "pr/pushed", ts: at, data: { pr: "PR1", branch: "topic/landed", base: "main", headSha: HEAD_1, baseSha: BASE, revision: 1 } },
+          {
+            id: nextId(),
+            name: "pr/pushed",
+            ts: at,
+            data: { pr: "PR1", branch: "topic/landed", base: "main", headSha: HEAD_1, baseSha: BASE, revision: 1 },
+          },
           { id: nextId(), name: "pr/submitted", ts: at, data: { pr: "PR1", revision: 1, headSha: HEAD_1 } },
-          { id: nextId(), name: "pr/integrated", ts: at, data: { pr: "PR1", revision: 1, headSha: HEAD_1, run: "R1", commit: BASE, landingSha: BASE, baseSha: BASE } },
+          {
+            id: nextId(),
+            name: "pr/integrated",
+            ts: at,
+            data: { pr: "PR1", revision: 1, headSha: HEAD_1, run: "R1", commit: BASE, landingSha: BASE, baseSha: BASE },
+          },
         ],
       },
     ])

@@ -309,6 +309,22 @@ export const PRRecutProofSchema = z
   .strict()
 export type PRRecutProof = Readonly<z.infer<typeof PRRecutProofSchema>>
 
+/**
+ * Append-only proof that one submitted revision was mechanically derived from
+ * an authored source carrier before the revision entered the journal. The
+ * source identity makes repeat submits idempotent even when certification
+ * produces a different commit; the certificate remains independently
+ * replayable after the authoritative base advances.
+ */
+export const PRSubmissionAuthorshipProofSchema = z
+  .object({
+    kind: z.literal("authored-source-proof-v1"),
+    source: z.object({ headSha: GitShaSchema, baseSha: GitShaSchema }).strict(),
+    certificate: z.object({ baseSha: GitShaSchema, treeSha: GitShaSchema, patchId: GitShaSchema }).strict(),
+  })
+  .strict()
+export type PRSubmissionAuthorshipProof = Readonly<z.infer<typeof PRSubmissionAuthorshipProofSchema>>
+
 export type PRRevision = Readonly<{
   revision: number
   headSha: string
@@ -319,6 +335,7 @@ export type PRRevision = Readonly<{
   correlation?: Correlation
   composition?: CompositionV1
   recut?: PRRecutProof
+  authorshipProof?: PRSubmissionAuthorshipProof
 }> &
   PRRevisionClock
 
@@ -399,6 +416,7 @@ export type PR = Readonly<{
   correlation?: Correlation
   composition?: CompositionV1
   recut?: PRRecutProof
+  authorshipProof?: PRSubmissionAuthorshipProof
   revisions: readonly PRRevision[]
   reviews: readonly PRReview[]
   comments: readonly PRComment[]

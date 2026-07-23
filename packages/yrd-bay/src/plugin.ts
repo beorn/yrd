@@ -37,6 +37,7 @@ import {
   GitShaSchema,
   PRIdSchema,
   PRFreshnessTransitionSchema,
+  PRSubmissionAuthorshipProofSchema,
   PRRejectedFactSchema,
   PRTerminalAssociationSchema,
   ProvisionBayInputSchema,
@@ -73,6 +74,7 @@ import {
   type PRReviewState,
   type PRRevision,
   type PRRevisionClock,
+  type PRSubmissionAuthorshipProof,
   type ProvisionBayInput,
   type ProvisionedBay,
   type RefreshBayInput,
@@ -117,6 +119,7 @@ const IntakePRArgsSchema = z
     baseSha: GitShaSchema.optional(),
     actor: TextSchema.optional(),
     composition: CompositionV1Schema.optional(),
+    authorshipProof: PRSubmissionAuthorshipProofSchema.optional(),
     receipt: z
       .string()
       .regex(/^[0-9a-f]{64}$/u)
@@ -142,11 +145,26 @@ const SubmitArgsSchema = z.union([
       actor: TextSchema.optional(),
       correlation: CorrelationSchema.optional(),
       composition: CompositionV1Schema.optional(),
+      authorshipProof: PRSubmissionAuthorshipProofSchema.optional(),
       reviewers: z.array(TextSchema).optional(),
     })
     .strict(),
 ])
 export type SubmitArgs = z.infer<typeof SubmitArgsSchema>
+
+export type SubmissionSource = Readonly<{
+  branch: string
+  headSha: string
+  base: string
+  baseSha?: string
+  composition?: CompositionV1
+}>
+
+export type PreparedSubmission = Readonly<{
+  headSha: string
+  baseSha?: string
+  authorshipProof?: PRSubmissionAuthorshipProof
+}>
 
 export type SubmitSelectionOptions = Readonly<{
   base?: string
@@ -156,6 +174,10 @@ export type SubmitSelectionOptions = Readonly<{
   draft?: boolean
   correlation?: Correlation
   composition?: CompositionV1
+  /** Optional environment-owned certification seam. Callers omit it for
+   * drafts and manually composed submissions; Bay owns the immutable journal
+   * transition once preparation succeeds. */
+  prepareSubmission?(source: SubmissionSource): Promise<PreparedSubmission>
   resolveRevision(ref: string): Promise<string | undefined>
   run: RunJobOptions
   /** Caller-owned advisory-warning sink for a submission that SUCCEEDS with a
@@ -292,6 +314,15 @@ const PRRecutFactSchema = z
     successor: PRRecutLineageSchema.extend({ baseSha: GitShaSchema }).strict(),
     composition: CompositionV1Schema.optional(),
     transition: PRFreshnessTransitionSchema.optional(),
+  })
+  .strict()
+const PRSubmissionAuthorshipProvedSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: RevisionSchema,
+    headSha: GitShaSchema,
+    baseSha: GitShaSchema,
+    authorshipProof: PRSubmissionAuthorshipProofSchema,
   })
   .strict()
 const PRPushedSchema = LegacyPRPushedSchema.extend({ actor: TextSchema }).strict()
@@ -568,6 +599,26 @@ export function createBays(
     }
     return { ...resolved, ...(baseSha === undefined ? {} : { baseSha }) }
   }
+  const prepareSubmission = async (
+    source: SubmissionSource,
+    prepare: SubmitSelectionOptions["prepareSubmission"],
+  ): Promise<PreparedSubmission> =>
+    prepare === undefined
+      ? { headSha: source.headSha, ...(source.baseSha === undefined ? {} : { baseSha: source.baseSha }) }
+      : validatePreparedSubmission(source, await prepare(source))
+  const prepareRevision = async (
+    pr: DeepReadonly<PR> | undefined,
+    source: SubmissionSource,
+    prepare: SubmitSelectionOptions["prepareSubmission"],
+  ): Promise<PreparedSubmission | undefined> => {
+    const needsPreparation =
+      pr === undefined ||
+      !sameSubmissionSource(pr, source) ||
+      (prepare !== undefined && pr.authorshipProof === undefined)
+    if (!needsPreparation) return undefined
+    const prepared = await prepareSubmission(source, prepare)
+    return pr !== undefined && samePreparedRevision(pr, source, prepared) ? undefined : prepared
+  }
 
   const open = async (args: OpenBayArgs): Promise<CommandResult> => {
     const resolved = await target(args.base, args.baseSha)
@@ -714,7 +765,7 @@ export function createBays(
       if (landedHead === undefined) {
         raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${selector}'`)
       }
-      if (landedHead === pr.headSha) return bindSubmission(pr, options)
+      if (landedHead === (pr.authorshipProof?.source.headSha ?? pr.headSha)) return bindSubmission(pr, options)
       // A new head on a landed branch mints a fresh delivery identity below.
     }
 
@@ -741,13 +792,22 @@ export function createBays(
       }
       pr = prForBay(snapshot, bay.id)
       const composition = requestedComposition ?? pr?.composition
-      if (pr === undefined || pr.headSha !== bay.headSha || !sameComposition(composition, pr.composition)) {
+      const source: SubmissionSource = {
+        branch: bay.branch,
+        headSha: bay.headSha,
+        base: bay.base,
+        ...(bay.baseSha === undefined ? {} : { baseSha: bay.baseSha }),
+        ...(composition === undefined ? {} : { composition }),
+      }
+      const prepared = await prepareRevision(pr, source, options.prepareSubmission)
+      if (prepared !== undefined) {
         await intake({
           bay: bay.id,
-          headSha: bay.headSha,
-          ...(bay.baseSha === undefined ? {} : { baseSha: bay.baseSha }),
+          headSha: prepared.headSha,
+          ...(prepared.baseSha === undefined ? {} : { baseSha: prepared.baseSha }),
           ...(options.issue === undefined ? {} : { issue: options.issue }),
           ...(composition === undefined ? {} : { composition }),
+          ...(prepared.authorshipProof === undefined ? {} : { authorshipProof: prepared.authorshipProof }),
         })
         pr = prForBay(state(), bay.id)
       }
@@ -766,18 +826,22 @@ export function createBays(
       if (headSha !== undefined) {
         const resolved = await target(options.base ?? pr.base, undefined)
         const composition = requestedComposition ?? pr.composition
-        if (
-          headSha !== pr.headSha ||
-          resolved.base !== pr.base ||
-          resolved.baseSha !== pr.baseSha ||
-          !sameComposition(composition, pr.composition)
-        ) {
+        const source: SubmissionSource = {
+          branch: pr.branch,
+          headSha,
+          ...resolved,
+          ...(composition === undefined ? {} : { composition }),
+        }
+        const prepared = await prepareRevision(pr, source, options.prepareSubmission)
+        if (prepared !== undefined) {
           await intake({
             branch: pr.branch,
-            headSha,
+            headSha: prepared.headSha,
             ...resolved,
+            ...(prepared.baseSha === undefined ? {} : { baseSha: prepared.baseSha }),
             ...(options.issue === undefined ? {} : { issue: options.issue }),
             ...(composition === undefined ? {} : { composition }),
+            ...(prepared.authorshipProof === undefined ? {} : { authorshipProof: prepared.authorshipProof }),
           })
           pr = resolvePR(state(), pr.id)
           if (pr === undefined) {
@@ -814,14 +878,34 @@ export function createBays(
         raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${selector}'`)
       }
       const resolved = await target(options.base, undefined)
-      const live = Object.values(snapshot.prs).find(
+      const source: SubmissionSource = {
+        branch: selector,
+        headSha,
+        ...resolved,
+        ...(requestedComposition === undefined ? {} : { composition: requestedComposition }),
+      }
+      let live = Object.values(snapshot.prs).find(
         (candidate) =>
           (candidate.status === "pushed" || candidate.status === "submitted") &&
-          candidate.headSha === headSha &&
-          candidate.base === resolved.base &&
-          sameComposition(candidate.composition, requestedComposition),
+          sameSubmissionSource(candidate, source),
       )
       if (live !== undefined) {
+        const prepared = await prepareRevision(live, { ...source, branch: live.branch }, options.prepareSubmission)
+        if (prepared !== undefined) {
+          await intake({
+            branch: live.branch,
+            headSha: prepared.headSha,
+            ...resolved,
+            ...(prepared.baseSha === undefined ? {} : { baseSha: prepared.baseSha }),
+            ...(live.issue === undefined ? {} : { issue: live.issue }),
+            ...(requestedComposition === undefined ? {} : { composition: requestedComposition }),
+            ...(prepared.authorshipProof === undefined ? {} : { authorshipProof: prepared.authorshipProof }),
+          })
+          live = resolvePR(state(), live.id)
+          if (live === undefined) {
+            raiseFailure("infrastructure", "pr-state-invalid", "yrd: live payload disappeared after preparation")
+          }
+        }
         const correlated = await bindSubmission(live, options)
         if (correlated.status === "submitted") return correlated
         if (options.draft === true) return correlated
@@ -832,14 +916,17 @@ export function createBays(
         }
         return submitted
       }
+      const prepared = await prepareSubmission(source, options.prepareSubmission)
       await actions.submit({
         branch: selector,
-        headSha,
+        headSha: prepared.headSha,
         ...resolved,
+        ...(prepared.baseSha === undefined ? {} : { baseSha: prepared.baseSha }),
         ...(options.issue === undefined ? {} : { issue: options.issue }),
         ...(options.draft === true ? { draft: true } : {}),
         ...(options.correlation === undefined ? {} : { correlation: options.correlation }),
         ...(requestedComposition === undefined ? {} : { composition: requestedComposition }),
+        ...(prepared.authorshipProof === undefined ? {} : { authorshipProof: prepared.authorshipProof }),
       })
       const submitted = resolvePR(state(), selector)
       if (submitted === undefined) {
@@ -930,6 +1017,7 @@ export function withBays(options: WithBaysOptions) {
         "bay/closing": BayClosingSchema,
         "bay/handoff-certified": BayHandoffCertifiedSchema,
         "pr/pushed": PRPushedSchema,
+        "pr/submission-authorship-proved": PRSubmissionAuthorshipProvedSchema,
         "pr/recut": PRRecutFactSchema,
         "pr/submitted": PRRevisionSchema,
         "pr/correlation-bound": PRCorrelationBoundSchema,
@@ -953,7 +1041,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/integrated": z.union([PRIntegratedSchema, LegacyPRIntegratedSchema]),
         "pr/canceled": z.union([PRCanceledSchema, LegacyPRCanceledSchema]),
       },
-      projectionVersion: "bays-v4-freshness",
+      projectionVersion: "bays-v5-submission-authorship",
       project: projectBays,
       create(yrd) {
         yrd.jobs.requireDefinitions(options.jobs)
@@ -1182,6 +1270,26 @@ function certifyBayHandoff(state: DeepReadonly<BayState>, args: CertifyHandoffAr
   }
 }
 
+function submissionAuthorshipEvent(
+  pr: string,
+  revision: number,
+  headSha: string,
+  baseSha: string | undefined,
+  authorshipProof: PRSubmissionAuthorshipProof | undefined,
+) {
+  if (authorshipProof === undefined) return undefined
+  if (baseSha === undefined || authorshipProof.certificate.baseSha !== baseSha) {
+    throw new Error(`yrd: PR '${pr}' authored-source proof does not certify its submitted base`)
+  }
+  return event("pr/submission-authorship-proved", {
+    pr,
+    revision,
+    headSha,
+    baseSha,
+    authorshipProof,
+  })
+}
+
 function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase: string, defaultActor: string) {
   const current = state.bays
   const bay = args.bay === undefined ? undefined : required(resolveBay(current, args.bay), "bay", args.bay)
@@ -1210,6 +1318,8 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
   const id = existing?.id ?? nextId("PR", current.prs)
   const issue = attachedIssue(existing, args.issue, bay?.issue)
   const actor = args.actor ?? bay?.actor ?? defaultActor
+  const revision = (existing?.revision ?? 0) + 1
+  const proof = submissionAuthorshipEvent(id, revision, args.headSha, args.baseSha, args.authorshipProof)
   return {
     events: [
       event("pr/pushed", {
@@ -1223,9 +1333,10 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
         ...(args.baseSha === undefined ? {} : { baseSha: args.baseSha }),
         ...(args.composition === undefined ? {} : { composition: args.composition }),
         ...(args.receipt === undefined ? {} : { receipt: args.receipt }),
-        revision: (existing?.revision ?? 0) + 1,
+        revision,
         actor,
       }),
+      ...(proof === undefined ? [] : [proof]),
     ],
   }
 }
@@ -1268,6 +1379,7 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
   const revision = (resubmitted?.revision ?? 0) + 1
   const issue = attachedIssue(resubmitted, args.issue)
   const actor = args.actor ?? defaultActor
+  const proof = submissionAuthorshipEvent(id, revision, args.headSha, args.baseSha, args.authorshipProof)
   const pushed = {
     pr: id,
     ...(args.name === undefined ? {} : { name: args.name }),
@@ -1284,6 +1396,7 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
   return {
     events: [
       event("pr/pushed", pushed),
+      ...(proof === undefined ? [] : [proof]),
       ...(args.draft === true
         ? []
         : [
@@ -1946,6 +2059,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               correlation: pushed.correlation,
               ...(pushed.composition === undefined ? { composition: undefined } : { composition: pushed.composition }),
               recut: undefined,
+              authorshipProof: undefined,
               revisions: [...existing.revisions, record],
               terminalRun: undefined,
               submittedAt: undefined,
@@ -1978,6 +2092,28 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               },
             },
       )
+    }
+    case "pr/submission-authorship-proved": {
+      const proved = PRSubmissionAuthorshipProvedSchema.parse(data)
+      const pr = current.prs[proved.pr]
+      if (
+        pr === undefined ||
+        pr.revision !== proved.revision ||
+        pr.headSha !== proved.headSha ||
+        pr.baseSha !== proved.baseSha ||
+        proved.authorshipProof.certificate.baseSha !== proved.baseSha
+      ) {
+        throw new Error(`yrd: authored-source proof does not match PR '${proved.pr}' current revision`)
+      }
+      const revisions = pr.revisions.map((revision) =>
+        revision.revision === proved.revision && revision.headSha === proved.headSha
+          ? { ...revision, authorshipProof: proved.authorshipProof }
+          : revision,
+      )
+      if (!revisions.some((revision) => revision.authorshipProof === proved.authorshipProof)) {
+        throw new Error(`yrd: PR '${proved.pr}' has no revision for its authored-source proof`)
+      }
+      return patchPR(pr, { authorshipProof: proved.authorshipProof, revisions })
     }
     case "pr/recut": {
       const recut = PRRecutFactSchema.parse(data)
@@ -2042,6 +2178,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         ...(correlation === undefined ? { correlation: undefined } : { correlation: { ...correlation } }),
         ...(recut.composition === undefined ? { composition: undefined } : { composition: recut.composition }),
         recut: proof,
+        authorshipProof: undefined,
         revisions: [...pr.revisions, revision],
         reviews: carriedReview === undefined ? pr.reviews : [...pr.reviews, carriedReview],
         terminalRun: undefined,
@@ -2362,6 +2499,57 @@ function required<Value>(value: Value | undefined, kind: "bay" | "PR", selector:
 
 function sameComposition(left: CompositionV1 | undefined, right: CompositionV1 | undefined): boolean {
   return JSON.stringify(left) === JSON.stringify(right)
+}
+
+function sameAuthorshipProof(
+  left: DeepReadonly<PRSubmissionAuthorshipProof> | undefined,
+  right: DeepReadonly<PRSubmissionAuthorshipProof> | undefined,
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+function sameSubmissionSource(pr: DeepReadonly<PR>, source: SubmissionSource): boolean {
+  const identity = pr.authorshipProof?.source ?? { headSha: pr.headSha, baseSha: pr.baseSha }
+  return (
+    identity.headSha === source.headSha &&
+    (source.baseSha === undefined || identity.baseSha === source.baseSha) &&
+    baseIdentity(pr.base) === baseIdentity(source.base) &&
+    sameComposition(pr.composition, source.composition)
+  )
+}
+
+function samePreparedRevision(pr: DeepReadonly<PR>, source: SubmissionSource, prepared: PreparedSubmission): boolean {
+  return (
+    pr.headSha === prepared.headSha &&
+    pr.baseSha === prepared.baseSha &&
+    baseIdentity(pr.base) === baseIdentity(source.base) &&
+    sameComposition(pr.composition, source.composition) &&
+    sameAuthorshipProof(pr.authorshipProof, prepared.authorshipProof)
+  )
+}
+
+function validatePreparedSubmission(source: SubmissionSource, prepared: PreparedSubmission): PreparedSubmission {
+  const headSha = GitShaSchema.parse(prepared.headSha)
+  const baseSha = prepared.baseSha === undefined ? undefined : GitShaSchema.parse(prepared.baseSha)
+  const authorshipProof =
+    prepared.authorshipProof === undefined
+      ? undefined
+      : PRSubmissionAuthorshipProofSchema.parse(prepared.authorshipProof)
+  if (authorshipProof === undefined) {
+    if (headSha !== source.headSha || baseSha !== source.baseSha) {
+      throw new Error("yrd: submission preparation changed an uncertified source")
+    }
+    return { headSha, ...(baseSha === undefined ? {} : { baseSha }) }
+  }
+  if (
+    source.baseSha === undefined ||
+    authorshipProof.source.headSha !== source.headSha ||
+    authorshipProof.source.baseSha !== source.baseSha ||
+    authorshipProof.certificate.baseSha !== baseSha
+  ) {
+    throw new Error("yrd: authored-source proof does not match its submission source and certified base")
+  }
+  return { headSha, baseSha, authorshipProof }
 }
 
 function nextId(prefix: string, records: Readonly<Record<string, unknown>>): string {

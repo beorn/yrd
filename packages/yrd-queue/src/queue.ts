@@ -547,7 +547,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/run/canceled": CancelRunArgsSchema,
         "queue/run/settled": SettledArgsSchema,
       },
-      projectionVersion: "queues-v5-legacy-root-retention",
+      projectionVersion: "queues-v6-submission-authorship",
       project: projectQueues,
       compact: (state, complete) => {
         const runtime = complete as unknown as DeepReadonly<RuntimeState>
@@ -2574,8 +2574,7 @@ function legacyRootTargets(state: DeepReadonly<RuntimeState>): readonly LegacyRo
       return {
         run: run.id,
         jobs,
-        leased: (now) =>
-          jobs.some((job) => job.status === "running" && Date.parse(job.leaseExpiresAt) > now),
+        leased: (now) => jobs.some((job) => job.status === "running" && Date.parse(job.leaseExpiresAt) > now),
       }
     })
     .toSorted((left, right) => left.run.localeCompare(right.run, undefined, { numeric: true }))
@@ -3500,6 +3499,7 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     "wrapper-mismatch",
     "source-missing",
     "source-lineage",
+    "submission-certificate",
     "payload-certificate",
     "payload-identity",
     "payload-mismatch",

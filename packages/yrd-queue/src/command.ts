@@ -24,7 +24,12 @@ import {
   type QueueConflictStage,
   type QueueTreeConflict,
 } from "./submodule-composition.ts"
-import { materializeSubmodules } from "@yrd/bay"
+import {
+  materializeSubmodules,
+  type PreparedSubmission,
+  type PRSubmissionAuthorshipProof,
+  type SubmissionSource,
+} from "@yrd/bay"
 
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 
@@ -928,7 +933,10 @@ export type PRRecutResult = Readonly<{
   sourceRewrites?: readonly SourceRewrite[]
 }>
 
-export type GitPRRecutter = Readonly<{ recut(input: PRRecutInput): Promise<PRRecutResult> }>
+export type GitPRRecutter = Readonly<{
+  recut(input: PRRecutInput): Promise<PRRecutResult>
+  prepareSubmission?(input: SubmissionSource): Promise<PreparedSubmission>
+}>
 
 /**
  * Base-independent composite patch identity for a composition's source rewrites.
@@ -956,7 +964,48 @@ export function createGitPRRecutter(options: {
 }): GitPRRecutter {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
-  return Object.freeze({ recut: (input: PRRecutInput) => recutPR(git, repo, input) })
+  return Object.freeze({
+    recut: (input: PRRecutInput) => recutPR(git, repo, input),
+    prepareSubmission: (input: SubmissionSource) => prepareSubmission(git, repo, input),
+  })
+}
+
+async function prepareSubmission(git: Git, repo: string, input: SubmissionSource): Promise<PreparedSubmission> {
+  if (input.composition !== undefined) {
+    return { headSha: input.headSha, ...(input.baseSha === undefined ? {} : { baseSha: input.baseSha }) }
+  }
+  if (input.baseSha === undefined) {
+    throw createFailure({
+      kind: "refusal",
+      code: "submission-base-missing",
+      message: `yrd: branch '${input.branch}' has no immutable base SHA for authored-source certification`,
+    })
+  }
+  const inspected = await authoredGitlinkPaths(git, repo, input.baseSha, input.headSha)
+  if (inspected.status === "failed") {
+    throw createFailure({ kind: "refusal", code: inspected.error.code, message: inspected.error.message })
+  }
+  if (inspected.output.length === 0) return { headSha: input.headSha, baseSha: input.baseSha }
+
+  const target = await authoritativeQueueBase(git, repo, input.base)
+  const certified = await recutDirectPR(git, repo, target, {
+    id: input.branch,
+    branch: input.branch,
+    base: input.base,
+    revision: 1,
+    headSha: input.headSha,
+    baseSha: input.baseSha,
+  })
+  const authorshipProof: PRSubmissionAuthorshipProof = {
+    kind: "authored-source-proof-v1",
+    source: { headSha: input.headSha, baseSha: input.baseSha },
+    certificate: {
+      baseSha: certified.baseSha,
+      treeSha: certified.treeSha,
+      patchId: certified.patchId,
+    },
+  }
+  return { headSha: certified.headSha, baseSha: certified.baseSha, authorshipProof }
 }
 
 async function recutPR(git: Git, repo: string, input: PRRecutInput): Promise<PRRecutResult> {
@@ -1654,11 +1703,14 @@ async function prepareCandidate(
       sourceRewrites.push(...composed.output)
       continue
     }
-    if (pr.recut !== undefined) {
+    if (pr.authorshipProof !== undefined) {
+      const certified = await verifySubmissionAuthorshipCertificate(git, path, pr)
+      if (certified !== undefined) return certified
+    } else if (pr.recut !== undefined) {
       const certified = await verifyRecutCertificate(git, path, pr)
       if (certified !== undefined) return certified
     } else if (!allowAuthoredGitlinks) {
-      const inspected = await authoredGitlinkPaths(git, path, pr.headSha)
+      const inspected = await authoredGitlinkPaths(git, path, "HEAD", pr.headSha)
       if (inspected.status === "failed") return inspected
       const gitlinks = inspected.output
       if (gitlinks.length > 0) {
@@ -1706,6 +1758,47 @@ async function prepareCandidate(
 }
 
 type RecutBaseMovement = CandidateFailure | Readonly<{ status: "moved"; moved: boolean; baseSha: string; head: string }>
+
+async function verifySubmissionAuthorshipCertificate(
+  git: Git,
+  repo: string,
+  pr: StepExecution["prs"][number],
+): Promise<CandidateFailure | undefined> {
+  const proof = pr.authorshipProof
+  if (proof === undefined) return undefined
+  const treeSha = (await git.run(repo, ["rev-parse", `${pr.headSha}^{tree}`], true)).stdout
+  if (treeSha !== proof.certificate.treeSha) {
+    return candidateFailure(
+      "submission-certificate",
+      `PR '${pr.id}' submission tree certificate does not match revision ${pr.revision}`,
+    )
+  }
+  const candidateBase = await git.commit(repo, "HEAD")
+  const certifiedBase = proof.certificate.baseSha
+  if (candidateBase !== certifiedBase && !(await isAncestor(git, repo, certifiedBase, candidateBase))) {
+    return candidateFailure(
+      "submission-certificate",
+      `PR '${pr.id}' certified submission base '${certifiedBase}' is not an ancestor of the authoritative candidate base`,
+    )
+  }
+  const patchId =
+    candidateBase === certifiedBase
+      ? await git.stablePatchId(repo, certifiedBase, pr.headSha)
+      : await rederiveRecutPatchId(git, repo, pr.headSha)
+  if (patchId === undefined) {
+    return candidateFailure(
+      "submission-certificate",
+      `PR '${pr.id}' certified submission could not be mechanically re-anchored for revision ${pr.revision}`,
+    )
+  }
+  if (patchId !== proof.certificate.patchId) {
+    return candidateFailure(
+      "submission-certificate",
+      `PR '${pr.id}' submission patch certificate does not match revision ${pr.revision}`,
+    )
+  }
+  return undefined
+}
 
 /**
  * Classify how the authoritative candidate base relates to the reviewed recut base
@@ -1856,7 +1949,11 @@ function candidateFailure(
 }
 
 function authoredRootWorkflow(pr: string): string {
-  return `authored root carriers use 'yrd pr submit <branch> --draft', then 'yrd pr recut ${pr} --queue --force' on that same PR; no composition manifest or manual recut is needed`
+  return (
+    "authored root carriers use 'yrd pr submit <branch>' for certified revision one; " +
+    `this legacy or explicit draft needs 'yrd pr recut ${pr} --queue --force' on that same PR; ` +
+    "no composition manifest is needed"
+  )
 }
 
 function withAuthoredRootWorkflow(failure: CandidateFailure, pr: string): CandidateFailure {
@@ -2685,20 +2782,23 @@ function sourceCandidateRef(newTipSha: string): string {
 async function authoredGitlinkPaths(
   git: Git,
   repo: string,
+  baseSha: string,
   headSha: string,
 ): Promise<Readonly<{ status: "passed"; output: readonly string[] }> | CandidateFailure> {
-  const base = await git.run(repo, ["merge-base", "HEAD", headSha], true)
-  if (base.code !== 0 || base.stdout === "") {
+  const sourceBase = (await isAncestor(git, repo, baseSha, headSha))
+    ? baseSha
+    : await uniqueMergeBase(git, repo, baseSha, headSha)
+  if (sourceBase === undefined) {
     return candidateFailure(
       "gitlink-inspection",
-      `could not inspect authored gitlinks for '${headSha}': ${base.stderr || base.stdout || "no merge base"}`,
+      `could not inspect authored gitlinks for '${headSha}': '${baseSha}' has no unique source merge base`,
     )
   }
-  const paths = await changedPaths(git, repo, base.stdout, headSha)
+  const paths = await changedPaths(git, repo, sourceBase, headSha)
   const gitlinks: string[] = []
   for (const path of paths) {
     if (
-      (await readGitlink(git, repo, base.stdout, path)) !== undefined ||
+      (await readGitlink(git, repo, sourceBase, path)) !== undefined ||
       (await readGitlink(git, repo, headSha, path)) !== undefined
     ) {
       gitlinks.push(path)

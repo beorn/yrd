@@ -687,7 +687,7 @@ describe("Queue command adapters", () => {
       doctrineText([
         "Validate admitted work.",
         "Execute the generated `current_command` verbatim.",
-        "For authored roots, draft then recut the same PR.",
+        "For authored roots, submit once for certified revision one.",
         "Receipt marker: �(",
         "Keep it flowing.",
       ]),
@@ -761,7 +761,7 @@ describe("Queue command adapters", () => {
     expect(await git(repo, ["diff", "--name-only", currentBase, result.headSha])).toBe("doctrine.md")
     const recutDoctrine = await git(repo, ["show", `${result.headSha}:doctrine.md`])
     expect(recutDoctrine).toContain("generated `current_command` verbatim")
-    expect(recutDoctrine).toContain("For authored roots, draft then recut the same PR")
+    expect(recutDoctrine).toContain("For authored roots, submit once for certified revision one")
     expect(await git(repo, ["ls-tree", result.headSha, "dep"])).toContain(currentPin)
 
     await git(repo, ["switch", "-qc", "issue/root-multi", sourceBase])
@@ -773,7 +773,7 @@ describe("Queue command adapters", () => {
       doctrineText([
         "Validate admitted work.",
         "Execute the generated `current_command` verbatim.",
-        "For authored roots, draft then recut the same PR.",
+        "For authored roots, submit once for certified revision one.",
         "Receipt marker: �(",
         "Keep it flowing.",
       ]),
@@ -1501,6 +1501,108 @@ describe("Queue command adapters", () => {
     expect(await git(remote, ["rev-parse", "main"])).toBe(rootBaseSha)
   })
 
+  it("certifies an authored root carrier before revision one and admits that exact proof", async () => {
+    const { repo, baseSha, featureSha, moduleSha } = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "base",
+    })
+    await writeFile(join(repo, "upstream.txt"), "advanced\n")
+    await git(repo, ["add", "upstream.txt"])
+    await git(repo, ["commit", "-qm", "advance authority"])
+    await git(repo, ["push", "-q", "origin", "main"])
+    const currentBaseSha = await git(repo, ["rev-parse", "main"])
+    await using process = createProcess()
+    const recutter = createGitPRRecutter({ inject: { process }, repo })
+    if (recutter.prepareSubmission === undefined) throw new Error("submission preparation is not installed")
+    const prepared = await recutter.prepareSubmission({
+      branch: "issue/feature",
+      headSha: featureSha,
+      base: "main",
+      baseSha,
+    })
+
+    expect(prepared).toMatchObject({
+      headSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      baseSha: currentBaseSha,
+      authorshipProof: {
+        kind: "authored-source-proof-v1",
+        source: { headSha: featureSha, baseSha },
+        certificate: {
+          baseSha: currentBaseSha,
+          treeSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+          patchId: expect.stringMatching(/^[0-9a-f]{40}$/u),
+        },
+      },
+    })
+    if (prepared.authorshipProof === undefined) throw new Error("authored carrier was not certified")
+    expect(prepared.headSha).not.toBe(featureSha)
+    expect(await git(repo, ["rev-parse", `${prepared.headSha}^`])).toBe(currentBaseSha)
+    await writeFile(join(repo, ".git", "hooks", "pre-push"), "#!/bin/sh\nexit 0\n")
+
+    await using app = await checkedQueue(process, repo, ["true"])
+    await app.bays.submit({
+      branch: "issue/feature",
+      headSha: prepared.headSha,
+      base: "main",
+      baseSha: prepared.baseSha,
+      authorshipProof: prepared.authorshipProof,
+    })
+    await writeFile(join(repo, "post-submit.txt"), "advanced after certification\n")
+    await git(repo, ["add", "post-submit.txt"])
+    await git(repo, ["commit", "-qm", "advance after certification"])
+    await git(repo, ["push", "-q", "origin", "main"])
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run.status, run.error?.message).toBe("passed")
+    expect(run.prs).toEqual([
+      expect.objectContaining({ id: "PR1", revision: 1, authorshipProof: prepared.authorshipProof }),
+    ])
+    await git(repo, ["fetch", "-q", "origin", "main"])
+    expect(await git(repo, ["ls-tree", "FETCH_HEAD", "dep"])).toContain(moduleSha)
+    expect(await git(repo, ["show", "FETCH_HEAD:post-submit.txt"])).toContain("advanced after certification")
+  })
+
+  it("rejects a forged revision-one authorship certificate", async () => {
+    const { repo, baseSha, featureSha } = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "base",
+    })
+    await using process = createProcess()
+    const recutter = createGitPRRecutter({ inject: { process }, repo })
+    if (recutter.prepareSubmission === undefined) throw new Error("submission preparation is not installed")
+    const prepared = await recutter.prepareSubmission({
+      branch: "issue/feature",
+      headSha: featureSha,
+      base: "main",
+      baseSha,
+    })
+    if (prepared.authorshipProof === undefined) throw new Error("authored carrier was not certified")
+    const forged = {
+      ...prepared.authorshipProof,
+      certificate: { ...prepared.authorshipProof.certificate, treeSha: "f".repeat(40) },
+    }
+
+    await using app = await checkedQueue(process, repo, ["true"])
+    await app.bays.submit({
+      branch: "issue/feature",
+      headSha: prepared.headSha,
+      base: "main",
+      baseSha: prepared.baseSha,
+      authorshipProof: forged,
+    })
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {})
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    errors.mockRestore()
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: { code: "submission-certificate", message: expect.stringContaining("tree certificate") },
+    })
+    expect(await git(repo, ["rev-parse", "main"])).toBe(baseSha)
+  })
+
   it("rejects an uncertified authored gitlink wrapper with same-PR recut guidance", async () => {
     const { repo, baseSha, featureSha } = await hookedSubmoduleRepository({
       baseVersion: "base",
@@ -1519,7 +1621,7 @@ describe("Queue command adapters", () => {
       error: {
         code: "authored-gitlink",
         message: expect.stringMatching(
-          /yrd pr submit <branch> --draft.*yrd pr recut PR1 --queue --force.*same PR.*no composition manifest or manual recut/iu,
+          /yrd pr submit <branch>.*certified revision one.*legacy or explicit draft.*yrd pr recut PR1 --queue --force.*same PR.*no composition manifest/iu,
         ),
       },
     })
@@ -1566,7 +1668,7 @@ describe("Queue command adapters", () => {
       error: {
         code: "composition-invalid",
         message: expect.stringMatching(
-          /yrd pr submit <branch> --draft.*yrd pr recut PR1 --queue.*same PR.*no composition manifest or manual recut/iu,
+          /yrd pr submit <branch>.*certified revision one.*legacy or explicit draft.*yrd pr recut PR1 --queue.*same PR.*no composition manifest/iu,
         ),
       },
     })
