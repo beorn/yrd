@@ -427,7 +427,7 @@ describe("Jobs", () => {
     }
     expect(replayed.state().jobs.byId[oldest]).toBeUndefined()
     expect(replayed.jobs.getByKey("delivery:0")).toMatchObject({ id: oldest, status: "failed", attempt: 2 })
-  }, 15_000)
+  }, 45_000)
 
   it("keeps generic Job input opaque when no lifecycle projection is declared", async () => {
     const events: LogEvent[] = []

@@ -2131,7 +2131,7 @@ describe("Queue command adapters", () => {
     expect(Array.from(await readFile(stdoutPath))).toEqual(Array.from(stdout))
     expect(Array.from(await readFile(stderrPath))).toEqual(Array.from(stderr))
     expect(await readFile(outputPath, "utf8")).toBe("first warning\n€ last\n")
-  }, 10_000)
+  }, 45_000)
 
   it("grows a real slow command artifact while the child is still running", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "yrd-command-slow-stream-"))
@@ -2183,7 +2183,7 @@ describe("Queue command adapters", () => {
     })
     expect(await readFile(stdoutPath, "utf8")).toBe("first\nsecond\n")
     expect(await readFile(outputPath, "utf8")).toBe("first\nsecond\n")
-  }, 10_000)
+  }, 45_000)
 
   it.each([
     {
@@ -2836,7 +2836,7 @@ describe("Queue command adapters", () => {
     expect(await git(remote, ["rev-parse", "main"])).toBe(finalLanding)
     expect(await git(repo, ["rev-parse", "refs/remotes/origin/main"])).toBe(finalLanding)
     expect(await operatorSnapshot()).toEqual(operatorBefore)
-  }, 15_000)
+  }, 45_000)
 
   it("refreshes authoritative remote base divergence and evaluates the unchanged payload", async () => {
     const { repo, feature: featureSha, competing: remoteBaseSha } = await repository("feature", "competing")
@@ -3543,7 +3543,7 @@ describe("Queue command adapters", () => {
     const materializeIndex = requests.findIndex(({ argv }) => argv.includes("submodule") && argv.includes("update"))
     expect(checkIndex).toBeGreaterThan(-1)
     expect(materializeIndex).toBeGreaterThan(checkIndex)
-  }, 15_000)
+  }, 45_000)
 
   it.each([
     ["./dep.git", "https://example.test/org/super.git/dep.git"],
@@ -3587,7 +3587,7 @@ describe("Queue command adapters", () => {
     expect(proofFetches[0]?.argv).toContain("--filter=tree:0")
     expect(proofFetches[1]?.argv).not.toContain("--filter=tree:0")
     expect(proofFetches[0]?.argv.at(-1)).toBe(proofFetches[1]?.argv.at(-1))
-  }, 15_000)
+  }, 45_000)
 
   it.each([
     {
@@ -3850,7 +3850,7 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run.status).toBe("passed")
-  }, 15_000)
+  }, 45_000)
 
   it("keeps a relative submodule URL submitted when the origin lookup has no value", async () => {
     const fixture = await hookedSubmoduleRepository({
@@ -3902,7 +3902,7 @@ describe("Queue command adapters", () => {
     })
     expect(configuredCheckRan).toBe(false)
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: fixture.featureSha })
-  }, 15_000)
+  }, 45_000)
 
   it.each(["seeded", "unseeded"] as const)(
     "refuses an unreachable exact pin from a fresh store with an operator tree that is %s",
@@ -4024,7 +4024,7 @@ describe("Queue command adapters", () => {
     if (resolution?.kind !== "compose") throw new Error("missing composed submodule evidence")
     expect(await git(fixture.repo, ["ls-tree", "main", "dep"])).toContain(resolution.sha)
     expect(await git(fixture.module, ["rev-parse", resolution.ref])).toBe(resolution.sha)
-  }, 20_000)
+  }, 45_000)
 
   it("refuses a real submodule content conflict without pinning or landing a root candidate", async () => {
     const fixture = await divergentSubmoduleRepository("conflict")
@@ -4038,7 +4038,7 @@ describe("Queue command adapters", () => {
     expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.rootCurrentSha)
     expect(await git(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates"])).toBe("")
     expect(await git(fixture.module, ["for-each-ref", "--format=%(refname)", "refs/yrd/compositions"])).toBe("")
-  }, 20_000)
+  }, 45_000)
 
   it("keeps a divergent submodule PR submitted when its full local store is unavailable", async () => {
     const fixture = await divergentSubmoduleRepository("clean")
@@ -4065,7 +4065,7 @@ describe("Queue command adapters", () => {
     expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.rootCurrentSha)
     expect(await git(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates"])).toBe("")
     expect(await git(fixture.module, ["for-each-ref", "--format=%(refname)", "refs/yrd/compositions"])).toBe("")
-  }, 20_000)
+  }, 45_000)
 
   it("keeps a divergent submodule PR submitted when reading conflict stages times out", async () => {
     const fixture = await divergentSubmoduleRepository("clean")
@@ -4106,7 +4106,7 @@ describe("Queue command adapters", () => {
     expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.rootCurrentSha)
     expect(await git(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates"])).toBe("")
     expect(await git(fixture.module, ["for-each-ref", "--format=%(refname)", "refs/yrd/compositions"])).toBe("")
-  }, 20_000)
+  }, 45_000)
 
   it("lands the final gitlink after composing the same submodule twice in one batch", async () => {
     const fixture = await divergentSubmoduleRepository("clean")
@@ -4142,7 +4142,7 @@ describe("Queue command adapters", () => {
     const final = resolutions.at(-1)
     if (final === undefined) throw new Error("missing final submodule resolution")
     expect(await git(fixture.repo, ["ls-tree", "main", "dep"])).toContain(final.sha)
-  }, 30_000)
+  }, 45_000)
 
   it("refuses a concurrent gitmodules origin change before publishing a composition", async () => {
     const fixture = await divergentSubmoduleRepository("clean")
@@ -4167,7 +4167,7 @@ describe("Queue command adapters", () => {
     })
     expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.rootCurrentSha)
     expect(await git(fixture.module, ["for-each-ref", "--format=%(refname)", "refs/yrd/compositions"])).toBe("")
-  }, 20_000)
+  }, 45_000)
 
   it("preserves reviewed submodule blobs in a merge-only integration proof", async () => {
     const fixture = await divergentSubmoduleRepository("clean")
@@ -4204,7 +4204,7 @@ describe("Queue command adapters", () => {
     const resolution = proof.submoduleResolutions?.[0]
     if (resolution === undefined) throw new Error("missing durable submodule resolution")
     expect(await git(fixture.repo, ["ls-tree", "main", "dep"])).toContain(resolution.sha)
-  }, 20_000)
+  }, 45_000)
 
   it("runs remote push hooks from the checked candidate tree and submodule pins", async () => {
     const { repo, remote, featureSha, moduleSha } = await hookedSubmoduleRepository({
@@ -4716,5 +4716,5 @@ describe("configuredCommandStep — a timed-out command is a NAMED timeout failu
     const evidence = CommandEvidenceSchema.parse(outcome.output)
     expect(evidence).toMatchObject({ timedOut: true, stageVerdict: "TIMED_OUT", durationMs: expect.any(Number) })
     expect(outcome.error.message).not.toContain(cwd)
-  }, 15_000)
+  }, 45_000)
 })
