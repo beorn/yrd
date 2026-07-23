@@ -271,4 +271,56 @@ describe("queue timeline non-integrated rows", () => {
     expect(submitted.oldestOpenMs).toBe(NOW - Date.parse(REGISTERED_AT))
     expect(submitted.metrics.terminalAttempts).toBe(0)
   })
+
+  it("resurfaces a rejected PR as `rev` immediately, alongside its retained failed run row (21707)", () => {
+    // Rejection is a submission fact, not a PR resting state: no re-push has
+    // happened yet, but the PR re-enters the editable band carrying its blocker.
+    const projection = project([rejectedPr()], [rejectedRun()])
+    const revRow = projection.rows.find((row) => row.pr === "PR5" && row.status === "rev")
+
+    expect(revRow, "rejected PR must resurface as rev while its failed run is retained").toBeDefined()
+    expect(revRow?.group).toBe("draft")
+    expect(revRow?.detail).toBe("rev · typecheck-failed")
+    // The failed run row stays as immutable history — resurfacing never eats it.
+    expect(projection.metrics.terminalAttempts).toBe(1)
+  })
+
+  it("keeps an ancient rejected PR hidden once its failed run aged out of retention", () => {
+    // The pre-cutover backlog of hundreds of stale rejected PRs must not flood
+    // the editable band: no retained run, no resurfaced row.
+    const projection = project([rejectedPr()], [])
+    expect(projection.rows.find((row) => row.pr === "PR5")).toBeUndefined()
+  })
 })
+
+/** A rejected PR that has NOT been re-pushed: bay status `rejected`, latest
+ * revision's terminal run R9. Resurfaces as `rev` only while R9 is retained. */
+function rejectedPr(): PR {
+  const headSha = "4".repeat(40)
+  return {
+    id: "PR5",
+    name: "Rejected change",
+    branch: "topic/pr5",
+    base: "main",
+    status: "rejected",
+    rejectedAt: "2026-07-13T09:00:00.000Z",
+    revision: 1,
+    headSha,
+    baseSha: BASE_SHA,
+    revisions: [
+      {
+        revision: 1,
+        headSha,
+        base: "main",
+        baseSha: BASE_SHA,
+        pushedAt: "2026-07-13T08:00:00.000Z",
+        submittedAt: "2026-07-13T08:05:00.000Z",
+        actor: "carol@example.test",
+        terminal: { status: "rejected", at: "2026-07-13T09:00:00.000Z", run: "R9" },
+      },
+    ],
+    reviews: [],
+    comments: [],
+    checkRequests: [],
+  }
+}
