@@ -493,6 +493,22 @@ yrd pr recut <PR> --queue --force
 The composition commit must be published before the root carrier is submitted;
 otherwise the Queue cannot prove the gitlink object is remotely reachable.
 
+Before checks or landing, the Queue also reconstructs a changed candidate pin
+that names a two-parent composition merge. An exact Git-generated merge tree is
+machine-witnessed. A conflicted resolution or a manually altered clean tree
+fails with `submodule-merge-review-required` and prints an exact trailer:
+
+```text
+Yrd-Composition-Review: sha256:<content-addressed-review>
+```
+
+Materialize each named path and verify that both parents' feature markers
+survive before amending the merge commit with that trailer. Its digest covers
+the ordered parents, result tree, and every conflict-stage/result blob, so any
+subsequent resolution change invalidates the review and stops the candidate
+again. The trailer is an explicit audit receipt, not a conflict-resolution
+strategy or an authored-gitlink bypass.
+
 #### Manning an Ordinary Bay
 
 Yrd attributes an ordinary Bay to an actor but does not assign, launch, lease,
