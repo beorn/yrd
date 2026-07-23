@@ -18,6 +18,7 @@ import {
   formatNounId,
   Link,
   ListView,
+  MarkdownView,
   NounId,
   Pulse,
   Tab,
@@ -1409,17 +1410,15 @@ function IssueValue({ issue, flex = false }: { issue: string; flex?: boolean }) 
   )
 }
 
-/** A PR description spanning rows; blank rows are preserved as paragraph breaks. */
+/**
+ * A PR description rendered as Markdown. Authored hard-wraps reflow to the pane
+ * width (a commit body wrapped at 72 columns no longer shows mangled mid-word
+ * breaks in a narrow detail pane), and bold / lists / inline code / headings
+ * render styled instead of raw. Shared by the watch detail pane and `pr view`
+ * via PRDetailView / QueueDetailPrFacts. See silvery's MarkdownView.
+ */
 function DescriptionBlock({ description }: { description: string }) {
-  return (
-    <Box flexDirection="column" minWidth={0}>
-      {description.split("\n").map((row, index) => (
-        <Text key={index} wrap="truncate" bgConflict="ignore">
-          {row === "" ? " " : row}
-        </Text>
-      ))}
-    </Box>
-  )
+  return <MarkdownView source={description} minWidth={0} />
 }
 
 function LocationLinks({ entries }: { entries: readonly QueueLogLocationEntry[] }) {
@@ -5210,13 +5209,7 @@ export function QueueDetailRunPrBlocks({
                 </Text>
               </>
             )}
-            {description === undefined
-              ? null
-              : description.split("\n").map((line, lineIndex) => (
-                  <Text key={`description:${lineIndex}`} wrap="wrap" bgConflict="ignore">
-                    {line === "" ? " " : line}
-                  </Text>
-                ))}
+            {description === undefined ? null : <DescriptionBlock description={description} />}
             {lineage.length === 0 ? null : (
               <>
                 <Box height={1} flexShrink={0} />

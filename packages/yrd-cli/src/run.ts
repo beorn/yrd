@@ -1555,16 +1555,34 @@ async function optionalCommitMeta(
   return io.resolveCommitMeta?.(ref, cwd)
 }
 
+/** True when a commit body already ends with an `Issue: <ref>` trailer for the
+ * SAME issue. Commit bodies written with the GitHub "closing keyword in the
+ * body" convention often carry the trailer themselves, so composeDescription
+ * must not append a second copy (which rendered the issue twice). Matches the
+ * last non-empty line, lenient on the `Issue:` label's case/spacing but exact
+ * on the reference. */
+function bodyEndsWithIssue(body: string, issue: string): boolean {
+  const lastLine = body.slice(body.lastIndexOf("\n") + 1).trim()
+  const match = /^issue:\s*(.+)$/iu.exec(lastLine)
+  return match !== null && match[1]?.trim() === issue
+}
+
 /** The head commit body plus a trailing issue reference — mirrors GitHub's
  * "closing keyword in the body" convention while yrd keeps the issue as a
  * first-class field too. Returns undefined only when neither a body nor an
  * issue exists. */
-function composeDescription(body: string | undefined, issue: string | undefined): string | undefined {
+export function composeDescription(body: string | undefined, issue: string | undefined): string | undefined {
   const parts: string[] = []
   const trimmedBody = body?.trim()
   if (trimmedBody !== undefined && trimmedBody !== "") parts.push(trimmedBody)
   const trimmedIssue = issue?.trim()
-  if (trimmedIssue !== undefined && trimmedIssue !== "") parts.push(`Issue: ${trimmedIssue}`)
+  if (
+    trimmedIssue !== undefined &&
+    trimmedIssue !== "" &&
+    (trimmedBody === undefined || !bodyEndsWithIssue(trimmedBody, trimmedIssue))
+  ) {
+    parts.push(`Issue: ${trimmedIssue}`)
+  }
   return parts.length === 0 ? undefined : parts.join("\n\n")
 }
 
