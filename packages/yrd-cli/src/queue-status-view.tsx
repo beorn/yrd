@@ -136,10 +136,14 @@ export type QueueTimelineRow = Readonly<{
 }>
 
 export type QueueTimelineStatusFilter = "pending" | "running" | "rejected" | "integrated" | "other"
-// `draft` is a display-only status for a registered-but-unsubmitted PR (bay
-// status `pushed`, eligibility reason `draft`). It never enters queue mechanics
-// (composition, admission, terminal facts, FLOW stats) — see `timelineDraftRows`.
-export type QueueTimelineStatus = "draft" | "pending" | "running" | QueueTerminalOutcome
+// `draft`, `revising`, and `submitted` are display-only statuses for the
+// non-integrated PRs that are not (yet) run members — a registered-but-unsubmitted
+// PR (bay status `pushed`; `revising` when it carries failed-submission history)
+// and a submitted PR awaiting its run. They never enter queue mechanics
+// (composition, admission, terminal facts, FLOW stats) — see
+// `timelineNonIntegratedRows`. (`pending` is retained as the shared pre-run
+// group/filter/bucket name; `submitted` is the status it now renders.)
+export type QueueTimelineStatus = "draft" | "revising" | "submitted" | "pending" | "running" | QueueTerminalOutcome
 export type QueueTimelineGroup = "draft" | "pending" | "running" | "completed"
 
 export type QueueTimelineRevisionLineage = Readonly<{
@@ -1542,16 +1546,23 @@ function terminalProjection(run: QueueRun): QueueTerminalProjection {
 
 /** Reject a nonterminal status at the terminal-fact boundary. */
 function terminalOutcome(status: QueueTimelineStatus): QueueTerminalOutcome {
-  if (status === "draft" || status === "pending" || status === "running") {
+  if (
+    status === "draft" ||
+    status === "revising" ||
+    status === "submitted" ||
+    status === "pending" ||
+    status === "running"
+  ) {
     throw new TypeError(`yrd: nonterminal status '${status}' cannot become a terminal FLOW fact`)
   }
   return status
 }
 
 function timelineStatusFilter(status: QueueTimelineStatus): QueueTimelineStatusFilter {
-  // A draft filters with `pending`/`todo`: it surfaces under the default view and
-  // the todo bucket, without minting a fifth CLI status filter.
-  if (status === "draft") return "pending"
+  // Every pre-run status (draft/revising/submitted) filters with `pending`/`todo`:
+  // they surface under the default view and the todo bucket, without minting new
+  // CLI status filters.
+  if (status === "draft" || status === "revising" || status === "submitted") return "pending"
   if (status === "pending" || status === "running" || status === "rejected" || status === "integrated") {
     return status
   }
@@ -1724,59 +1735,50 @@ function timelineRunMemberRows(
   })
 }
 
-/**
- * Pre-queue draft rows: one row per registered-but-unsubmitted PR (bay status
- * `pushed`, the exact set the eligibility engine flags with reason `draft`).
- * These are display-only — they carry no run and hold no queue position, and
- * their `draft` group is excluded from every terminal FLOW fact and the
- * `oldestOpenMs` DRAIN gauge, so surfacing a draft never distorts queue
- * mechanics. AGE and the TIME cell anchor on the current revision's
- * registration (`pushedAt`); BY is that revision's author.
- */
-function timelineDraftRows(
-  result: QueueStatusResult,
-  nowIso: string,
-  state: BaysState | undefined,
-): QueueTimelineProjectedRow[] {
-  return result.prs.flatMap((pr) => {
-    if (pr.status !== "pushed") return []
-    const registeredAt = pr.revisions.find(
-      (candidate) => candidate.revision === pr.revision && candidate.headSha === pr.headSha,
-    )?.pushedAt
-    const bayPath = pr.bay === undefined ? undefined : state?.byId[pr.bay]?.path
-    const revisionLineage = [timelineRevisionLineage(pr)]
-    const submitter = revisionSubmitter(pr)
-    const issue = presentFact(pr.issue)
-    return [
-      {
-        id: `${pr.base}:draft:${pr.id}:${pr.revision}:${pr.headSha}`,
-        base: pr.base,
-        group: "draft" as const,
-        status: "draft" as const,
-        glyph: statusGlyph("draft"),
-        timestamp: registeredAt ?? null,
-        timestampMs: parsedTimelineTimestamp(registeredAt, `PR '${pr.id}' draft registration`),
-        pr: pr.id,
-        revision: pr.revision,
-        headSha: pr.headSha,
-        branch: pr.branch,
-        ...(issue === undefined ? {} : { issue }),
-        subject: boundedQueue(bayPath ?? pr.title ?? pr.name ?? pr.branch, 80),
-        ...(submitter === undefined ? {} : { submitter }),
-        detail: withTimelineLineage("draft", revisionLineage),
-        ...(registeredAt === undefined ? {} : { sourceReadyAt: registeredAt }),
-        revisionLineage,
-        ageMs: timelineAge(registeredAt, nowIso, `PR '${pr.id}' draft age`),
-        totalMs: null,
-        activeMs: null,
-        waitMs: null,
-        queueWaitMs: null,
-      },
-    ]
-  })
+/** The most recent failed submission (a `rejected` terminal) a PR's revision
+ * history records, or undefined when it has never failed a submission. This is
+ * the derived signal — never a stored status — that turns a `draft` into a
+ * `revising` row. `canceled`/`withdrawn` terminals are supersessions, not
+ * failures, so they do not count. */
+function lastFailedSubmission(pr: PR): PR["revisions"][number] | undefined {
+  return pr.revisions.filter((revision) => revision.terminal?.status === "rejected").at(-1)
 }
 
-function timelinePendingRows(
+/**
+ * Map a non-integrated PR to its display-only pre-run timeline status, or
+ * undefined when the PR is terminal by intent (integrated/withdrawn/canceled) or
+ * is surfaced through a run row instead (a `rejected` PR keeps its terminal run
+ * row until the author re-pushes it). `revising` is a `draft` (bay status
+ * `pushed`) that carries failed-submission history — the user's "a failed
+ * submission returns the PR to an editable state" — and stores no new PRStatus.
+ */
+function preRunTimelineStatus(pr: PR): "draft" | "revising" | "submitted" | undefined {
+  if (pr.status === "submitted") return "submitted"
+  if (pr.status === "pushed") return lastFailedSubmission(pr) === undefined ? "draft" : "revising"
+  return undefined
+}
+
+/** `revising · <slug>` annotated with the code of the most recent failed
+ * submission when that run is still retained; bare `revising` otherwise. */
+function revisingDetail(pr: PR, runs: readonly QueueRun[]): string {
+  const runId = lastFailedSubmission(pr)?.terminal?.run
+  const run = runId === undefined ? undefined : runs.find((candidate) => candidate.id === runId)
+  const code = run === undefined ? undefined : failureFact(run, relevantStep(run))?.code
+  return code === undefined ? "revising" : `revising · ${failureSlug(code)}`
+}
+
+/**
+ * One row per non-integrated PR that is not currently a run member, each carrying
+ * a derived, display-only status (`preRunTimelineStatus`): `draft`/`revising` for
+ * a registered-but-unsubmitted PR (bay status `pushed`) and `submitted` for one
+ * awaiting its run. These never distort queue mechanics — the `draft` group
+ * (draft + revising) is excluded from every terminal FLOW fact and the
+ * `oldestOpenMs` DRAIN gauge, while `submitted` keeps the pending group's
+ * queue-wait accounting it always had. `draft`/`revising` anchor AGE and the TIME
+ * cell on the current revision's registration (`pushedAt`); `submitted` keeps its
+ * submission clock. BY is the current revision's author throughout.
+ */
+function timelineNonIntegratedRows(
   result: QueueStatusResult,
   nowIso: string,
   submissionTimes: ReadonlyMap<string, string | null>,
@@ -1786,42 +1788,82 @@ function timelinePendingRows(
     [...result.running, ...result.waiting].flatMap((run) => run.prs.map((member) => queueRevisionKey(member))),
   )
   const positions = submittedPrPositions(result.prs)
-  return result.prs.flatMap((pr) => {
-    if (pr.status !== "submitted" || activeRevisions.has(queueRevisionKey(pr))) return []
-    const timestamp = submissionTimes.get(queueRevisionKey(pr)) ?? pr.submittedAt ?? null
-    const timestampMs = parsedTimelineTimestamp(timestamp ?? undefined, `PR '${pr.id}' submission`)
-    const position = positions.get(pr.id)
+  const runs = [...result.running, ...result.waiting, ...result.finished]
+  return result.prs.flatMap((pr): QueueTimelineProjectedRow[] => {
+    const status = preRunTimelineStatus(pr)
+    if (status === undefined) return []
+    // A submitted revision that is actively running/waiting is shown by its run row.
+    if (status === "submitted" && activeRevisions.has(queueRevisionKey(pr))) return []
+
     const bayPath = pr.bay === undefined ? undefined : state?.byId[pr.bay]?.path
     const revisionLineage = [timelineRevisionLineage(pr)]
-    const sourceReadyAt = revisionLineage[0]?.sourceReadyAt ?? timestamp ?? undefined
-    const detail = withTimelineLineage(position === undefined ? "queued" : `position ${position}`, revisionLineage)
     const submitter = revisionSubmitter(pr)
     const issue = presentFact(pr.issue)
+    const subject = boundedQueue(bayPath ?? pr.title ?? pr.name ?? pr.branch, 80)
+
+    if (status === "submitted") {
+      const timestamp = submissionTimes.get(queueRevisionKey(pr)) ?? pr.submittedAt ?? null
+      const position = positions.get(pr.id)
+      const sourceReadyAt = revisionLineage[0]?.sourceReadyAt ?? timestamp ?? undefined
+      const detail = withTimelineLineage(position === undefined ? "submitted" : `position ${position}`, revisionLineage)
+      return [
+        {
+          id: `${pr.base}:pr:${pr.id}:${pr.revision}:${pr.headSha}`,
+          base: pr.base,
+          group: "pending" as const,
+          status,
+          glyph: statusGlyph(status),
+          timestamp,
+          timestampMs: parsedTimelineTimestamp(timestamp ?? undefined, `PR '${pr.id}' submission`),
+          pr: pr.id,
+          revision: pr.revision,
+          headSha: pr.headSha,
+          branch: pr.branch,
+          ...(issue === undefined ? {} : { issue }),
+          subject,
+          ...(submitter === undefined ? {} : { submitter }),
+          detail,
+          ...(position === undefined ? {} : { position }),
+          ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
+          revisionLineage,
+          ageMs: timelineAge(sourceReadyAt, nowIso, `PR '${pr.id}' source-ready age`),
+          totalMs: null,
+          activeMs: null,
+          waitMs: timelineAge(timestamp ?? undefined, nowIso, `PR '${pr.id}' queue wait`),
+          queueWaitMs: timelineAge(timestamp ?? undefined, nowIso, `PR '${pr.id}' queue wait`),
+        },
+      ]
+    }
+
+    // draft | revising — pushed, pre-queue WIP anchored on registration (pushedAt).
+    const registeredAt = pr.revisions.find(
+      (candidate) => candidate.revision === pr.revision && candidate.headSha === pr.headSha,
+    )?.pushedAt
+    const detail = status === "revising" ? revisingDetail(pr, runs) : "draft"
     return [
       {
-        id: `${pr.base}:pr:${pr.id}:${pr.revision}:${pr.headSha}`,
+        id: `${pr.base}:draft:${pr.id}:${pr.revision}:${pr.headSha}`,
         base: pr.base,
-        group: "pending" as const,
-        status: "pending" as const,
-        glyph: statusGlyph("pending"),
-        timestamp,
-        timestampMs,
+        group: "draft" as const,
+        status,
+        glyph: statusGlyph(status),
+        timestamp: registeredAt ?? null,
+        timestampMs: parsedTimelineTimestamp(registeredAt, `PR '${pr.id}' ${status} registration`),
         pr: pr.id,
         revision: pr.revision,
         headSha: pr.headSha,
         branch: pr.branch,
         ...(issue === undefined ? {} : { issue }),
-        subject: boundedQueue(bayPath ?? pr.title ?? pr.name ?? pr.branch, 80),
+        subject,
         ...(submitter === undefined ? {} : { submitter }),
-        detail,
-        ...(position === undefined ? {} : { position }),
-        ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
+        detail: withTimelineLineage(detail, revisionLineage),
+        ...(registeredAt === undefined ? {} : { sourceReadyAt: registeredAt }),
         revisionLineage,
-        ageMs: timelineAge(sourceReadyAt, nowIso, `PR '${pr.id}' source-ready age`),
+        ageMs: timelineAge(registeredAt, nowIso, `PR '${pr.id}' ${status} age`),
         totalMs: null,
         activeMs: null,
-        waitMs: timelineAge(timestamp ?? undefined, nowIso, `PR '${pr.id}' queue wait`),
-        queueWaitMs: timelineAge(timestamp ?? undefined, nowIso, `PR '${pr.id}' queue wait`),
+        waitMs: null,
+        queueWaitMs: null,
       },
     ]
   })
@@ -1965,8 +2007,7 @@ export function queueTimelineProjection(
   const selectedStatuses = new Set(statuses)
   const terms = [...new Set(options.terms.map((term) => term.trim().toLocaleLowerCase()).filter(Boolean))]
   const rawRows = results.flatMap((result) => [
-    ...timelineDraftRows(result, nowIso, options.state),
-    ...timelinePendingRows(result, nowIso, options.submissionTimes, options.state),
+    ...timelineNonIntegratedRows(result, nowIso, options.submissionTimes, options.state),
     ...[...result.running, ...result.waiting, ...result.finished].flatMap((run) =>
       timelineRunMemberRows(result, run, nowIso, options.submissionTimes, options.state, options.attempts ?? []),
     ),
@@ -3164,9 +3205,12 @@ function fitTimelineLabel(label: string, max: number): string {
 // success is GREEN semantic, pending is blue, failures keep semantic reds.
 function timelineStatusColor(row: QueueTimelineProjectedRow): string {
   // A draft is pre-queue WIP, not a live or failing item: dim it like `canceled`
-  // so it reads as tentative next to the blue `todo`/`run` pulse.
+  // so it reads as tentative next to the blue `submitted`/`run` pulse.
   if (row.status === "draft") return "$fg-muted"
-  if (row.status === "running" || row.status === "pending") return "$fg-info"
+  // A revising row failed a prior submission and awaits author edits: warn-toned,
+  // matching the "editable after failure" model without reading as a hard failure.
+  if (row.status === "revising") return "$fg-warning"
+  if (row.status === "running" || row.status === "pending" || row.status === "submitted") return "$fg-info"
   if (row.status === "integrated") return "$fg-success"
   if (row.status === "canceled") return "$fg-muted"
   if (["environment-refused", "stale", "legacy", "refused"].includes(row.status)) return "$fg-warning"
@@ -3177,6 +3221,8 @@ type TimelineStatusCell = Readonly<{ word: string; color: string }>
 
 const TIMELINE_STATUS_WORDS = {
   draft: "draft",
+  revising: "revising",
+  submitted: "submitted",
   pending: "todo",
   running: "run",
   integrated: "done",
@@ -3191,9 +3237,11 @@ const TIMELINE_STATUS_WORDS = {
 
 // 15e is later than 15c/15d: STATUS remains a fixed column between TIME
 // and the RUN cell, while 15d supplies its semantic foreground colors.
-// Vocabulary (user respec 2026-07-15; pending renders `todo` per user
-// directive 2026-07-21): rejected renders `fail`, integrated renders `done`
-// — the display buckets are todo/running/failed/done.
+// Vocabulary (user respec 2026-07-15; rejected renders `fail`, integrated
+// renders `done`). The pre-run PRs now carry their own fine STATUS words —
+// `draft`/`revising`/`submitted` — so a non-integrated PR is always visible with
+// an explicit label (user directive 2026-07-22, generalizing the 2026-07-21
+// pending→`todo` rule); the coarse filter pills stay todo/running/failed/done.
 function timelineStatusCell(row: QueueTimelineProjectedRow): TimelineStatusCell {
   const word = TIMELINE_STATUS_WORDS[row.status]
   return { word, color: timelineStatusColor(row) }
@@ -3872,9 +3920,10 @@ export const QUEUE_TIMELINE_STATUS_BUCKETS: readonly QueueTimelineStatusBucket[]
 
 /** Bucket a row status: every non-integrated terminal outcome is `failed`; integrated is `done`. */
 export function queueTimelineStatusBucket(status: QueueTimelineStatus): QueueTimelineStatusBucket {
-  // A draft buckets with `todo` (the pending pill), so the default view shows it
-  // and the `t` toggle owns it — no fifth operator pill. See `timelineStatusFilter`.
-  if (status === "draft") return "pending"
+  // Every pre-run status (draft/revising/submitted) buckets with `todo` (the
+  // pending pill), so the default view shows them and the `t` toggle owns them —
+  // no new operator pill. See `timelineStatusFilter`.
+  if (status === "draft" || status === "revising" || status === "submitted") return "pending"
   if (status === "pending" || status === "running") return status
   return status === "integrated" ? "done" : "failed"
 }

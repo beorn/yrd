@@ -1,4 +1,4 @@
-// @failure Draft PRs (pushed, never submitted) vanish from the watch/queue-status timeline, breaking the WIP census
+// @failure Non-integrated PRs (draft/revising/submitted) vanish from the watch/status timeline, breaking the WIP census
 // @level l2
 // @consumer @yrd/cli
 
@@ -17,13 +17,13 @@ import {
 
 const BASE_SHA = "a".repeat(40)
 const NOW = Date.parse("2026-07-13T12:00:00.000Z")
-// The draft's registration and the queued PR's submission share one instant, so
-// their relative order is decided purely by group precedence (draft above todo)
+// Every pre-run PR shares one registration/submission instant, so row order is
+// decided purely by group precedence (the draft group above the pending group)
 // and never by the timeline's local-calendar-day grouping — keeping the ordering
 // assertion timezone-independent.
 const REGISTERED_AT = "2026-07-13T10:00:00.000Z"
 
-/** A registered-but-unsubmitted PR: bay status `pushed`, no `submittedAt`. */
+/** A registered-but-unsubmitted PR: bay status `pushed`, no failure history. */
 function draftPr(): PR {
   const headSha = "7".repeat(40)
   return {
@@ -44,12 +44,45 @@ function draftPr(): PR {
   }
 }
 
-/** A queued PR: bay status `submitted`, waiting for a run. */
-function queuedPr(): PR {
+/** A re-pushed PR whose prior submission was rejected: bay status `pushed` with a
+ * failed submission in its revision history → derived status `revising`. */
+function revisingPr(): PR {
+  const headSha = "5".repeat(40)
+  const priorHeadSha = "4".repeat(40)
+  return {
+    id: "PR5",
+    name: "Revising change",
+    branch: "topic/pr5",
+    base: "main",
+    status: "pushed",
+    revision: 2,
+    headSha,
+    baseSha: BASE_SHA,
+    revisions: [
+      {
+        revision: 1,
+        headSha: priorHeadSha,
+        base: "main",
+        baseSha: BASE_SHA,
+        pushedAt: "2026-07-13T08:00:00.000Z",
+        submittedAt: "2026-07-13T08:05:00.000Z",
+        actor: "carol@example.test",
+        terminal: { status: "rejected", at: "2026-07-13T09:00:00.000Z", run: "R9" },
+      },
+      { revision: 2, headSha, base: "main", baseSha: BASE_SHA, pushedAt: REGISTERED_AT, actor: "carol@example.test" },
+    ],
+    reviews: [],
+    comments: [],
+    checkRequests: [],
+  }
+}
+
+/** A submitted PR awaiting its run: bay status `submitted`. */
+function submittedPr(): PR {
   const headSha = "3".repeat(40)
   return {
     id: "PR3",
-    name: "Queued change",
+    name: "Submitted change",
     branch: "topic/pr3",
     base: "main",
     status: "submitted",
@@ -93,17 +126,15 @@ function project(prs: readonly PR[]) {
   return queueTimelineProjection(results, options)
 }
 
-describe("queue timeline draft rows", () => {
-  it("surfaces a draft PR as a distinct `draft` row above the queued todo, leaving the queued row unchanged", () => {
-    const projection = project([draftPr(), queuedPr()])
+describe("queue timeline non-integrated rows", () => {
+  it("labels a clean pushed PR as `draft`, above the submitted rows, with a hollow glyph", () => {
+    const projection = project([draftPr(), submittedPr()])
     const draftRow = projection.rows.find((row) => row.pr === "PR7")
-    const queuedRow = projection.rows.find((row) => row.pr === "PR3")
 
-    // The draft is present with the display-only draft status/group and its own hollow glyph.
-    expect(draftRow).toBeDefined()
     expect(draftRow?.status).toBe("draft")
     expect(draftRow?.group).toBe("draft")
     expect(draftRow?.glyph).toBe("◌")
+    expect(draftRow?.detail).toBe("draft")
     // A draft is pre-queue WIP: no run id and no queue position.
     expect(draftRow?.run).toBeUndefined()
     expect(draftRow?.position).toBeUndefined()
@@ -111,46 +142,74 @@ describe("queue timeline draft rows", () => {
     expect(draftRow?.submitter).toBe("alice@example.test")
     expect(draftRow?.ageMs).toBe(NOW - Date.parse(REGISTERED_AT))
     expect(draftRow?.queueWaitMs).toBeNull()
-    expect(draftRow?.totalMs).toBeNull()
 
-    // The queued PR keeps its existing pending/todo projection untouched.
-    expect(queuedRow?.status).toBe("pending")
-    expect(queuedRow?.group).toBe("pending")
-    expect(queuedRow?.glyph).toBe("○")
-    expect(queuedRow?.submitter).toBe("bob@example.test")
-
-    // The draft group sorts above the queued todo row.
+    // Draft (group "draft") sorts above the submitted todo row (group "pending").
     const draftIndex = projection.rows.findIndex((row) => row.pr === "PR7")
-    const queuedIndex = projection.rows.findIndex((row) => row.pr === "PR3")
+    const submittedIndex = projection.rows.findIndex((row) => row.pr === "PR3")
     expect(draftIndex).toBeGreaterThanOrEqual(0)
-    expect(draftIndex).toBeLessThan(queuedIndex)
+    expect(draftIndex).toBeLessThan(submittedIndex)
   })
 
-  it("shows drafts under the default view and the todo bucket, and hides them when todo is toggled off", () => {
-    const projection = project([draftPr(), queuedPr()])
-    const draftVisible = (buckets?: ReadonlySet<QueueTimelineStatusBucket>) =>
-      queueTimelineVisibleRows(projection, buckets, true).some((row) => row.pr === "PR7")
+  it("labels a re-pushed PR with failed-submission history as `revising` (warn/hollow, editable)", () => {
+    const projection = project([revisingPr()])
+    const revisingRow = projection.rows.find((row) => row.pr === "PR5")
 
-    // A draft buckets with `todo` — no fifth operator pill.
-    expect(queueTimelineStatusBucket("draft")).toBe("pending")
-    // The default watch view (no bucket filter) surfaces the draft.
-    expect(draftVisible(undefined)).toBe(true)
-    // The `todo` pill alone keeps it; toggling `todo` off (leaving the other
-    // three buckets) hides it, exactly as it does the queued todo row.
-    expect(draftVisible(new Set<QueueTimelineStatusBucket>(["pending"]))).toBe(true)
-    expect(draftVisible(new Set<QueueTimelineStatusBucket>(["running", "failed", "done"]))).toBe(false)
+    expect(revisingRow?.status).toBe("revising")
+    expect(revisingRow?.group).toBe("draft")
+    expect(revisingRow?.glyph).toBe("◌")
+    // No retained run for the prior rejection here, so the detail degrades to the
+    // bare `revising` label (it grows a `· <slug>` annotation when the run survives).
+    expect(revisingRow?.detail).toBe("revising")
+    expect(revisingRow?.run).toBeUndefined()
+    expect(revisingRow?.position).toBeUndefined()
+    // AGE anchors on the CURRENT (re-pushed) revision's registration.
+    expect(revisingRow?.submitter).toBe("carol@example.test")
+    expect(revisingRow?.ageMs).toBe(NOW - Date.parse(REGISTERED_AT))
   })
 
-  it("keeps drafts display-only: they never become open-queue or terminal FLOW facts", () => {
-    const projection = project([draftPr()])
-    // Exactly one row, and it is the draft.
-    expect(projection.rows).toHaveLength(1)
-    expect(projection.rows[0]?.status).toBe("draft")
-    // A draft is not open-queue work, so the DRAIN gauge stays null...
-    expect(projection.oldestOpenMs).toBeNull()
-    // ...and it contributes no terminal attempts or outcome counts to the FLOW stats.
-    expect(projection.metrics.terminalAttempts).toBe(0)
-    expect(projection.metrics.outcomes.integrated).toBe(0)
-    expect(projection.metrics.throughput.landed).toBe(0)
+  it("labels a submitted-but-unqueued PR as `submitted`, keeping its queue position and wait", () => {
+    const projection = project([submittedPr()])
+    const submittedRow = projection.rows.find((row) => row.pr === "PR3")
+
+    expect(submittedRow?.status).toBe("submitted")
+    expect(submittedRow?.group).toBe("pending")
+    expect(submittedRow?.glyph).toBe("○")
+    expect(submittedRow?.submitter).toBe("bob@example.test")
+    // A submitted PR keeps the queue position and non-null queue wait it always had.
+    expect(submittedRow?.position).toBe(1)
+    expect(submittedRow?.detail).toBe("position 1")
+    expect(submittedRow?.queueWaitMs).toBe(NOW - Date.parse(REGISTERED_AT))
+  })
+
+  it("shows every pre-run status under the default view and the todo bucket, hidden when todo is off", () => {
+    const projection = project([draftPr(), revisingPr(), submittedPr()])
+    const visiblePrs = (buckets?: ReadonlySet<QueueTimelineStatusBucket>) =>
+      new Set(queueTimelineVisibleRows(projection, buckets, true).map((row) => row.pr))
+
+    // Every pre-run status buckets with `todo` — no new operator pill.
+    for (const status of ["draft", "revising", "submitted"] as const) {
+      expect(queueTimelineStatusBucket(status)).toBe("pending")
+    }
+    // The default view (no bucket filter) surfaces all three.
+    expect(visiblePrs(undefined)).toEqual(new Set(["PR7", "PR5", "PR3"]))
+    // The `todo` pill alone keeps them; toggling `todo` off (the other three
+    // buckets) hides all three.
+    expect(visiblePrs(new Set<QueueTimelineStatusBucket>(["pending"]))).toEqual(new Set(["PR7", "PR5", "PR3"]))
+    expect(visiblePrs(new Set<QueueTimelineStatusBucket>(["running", "failed", "done"])).size).toBe(0)
+  })
+
+  it("keeps pre-run rows display-only: they never become terminal FLOW facts", () => {
+    // Draft + revising are pure WIP: no open-queue age, no terminal facts.
+    const wip = project([draftPr(), revisingPr()])
+    expect(wip.oldestOpenMs).toBeNull()
+    expect(wip.metrics.terminalAttempts).toBe(0)
+    expect(wip.metrics.outcomes.integrated).toBe(0)
+    expect(wip.metrics.throughput.landed).toBe(0)
+
+    // A submitted PR is open-queue work (it drives the DRAIN gauge) but still
+    // contributes no terminal FLOW fact.
+    const submitted = project([submittedPr()])
+    expect(submitted.oldestOpenMs).toBe(NOW - Date.parse(REGISTERED_AT))
+    expect(submitted.metrics.terminalAttempts).toBe(0)
   })
 })
