@@ -40,6 +40,16 @@ function pointOf(text: string, needle: string): readonly [number, number] {
   return [rows[y]?.indexOf(needle) ?? -1, y]
 }
 
+async function selectPrTab(app: ReturnType<ReturnType<typeof createRenderer>>): Promise<void> {
+  const rows = app.text.split("\n")
+  const y = rows.findIndex((row) => row.includes("PR") && /\d+: \w/u.test(row))
+  if (y < 0) throw new Error("missing PR tab in rendered frame")
+  const divider = rows[y]?.indexOf("│") ?? -1
+  const x = rows[y]?.indexOf("PR", divider + 1) ?? -1
+  await app.click(x, y)
+  await app.waitForLayoutStable()
+}
+
 describe("queue watch user round 6", () => {
   it("removes METRIC titles and moves TIME's INTEGRATED heading onto the window row", () => {
     const projection = queueTimelineStories["production-overview"].snapshot.projection
@@ -243,7 +253,12 @@ describe("queue watch user round 6", () => {
           files: ["src/detail-pane.tsx", "src/watch-pane.tsx"],
           patch: "diff --git a/src/detail-pane.tsx b/src/detail-pane.tsx\n-old detail\n+new detail",
         },
-        { pr: "PR61", revision: 1, unavailable: "refs-pruned" as const },
+        {
+          pr: "PR61",
+          revision: 1,
+          unavailable: "refs-pruned" as const,
+          reason: `head object not fetched locally: ${"d".repeat(40)}; fetch it and retry`,
+        },
       ],
     }
     const app = createRenderer({ cols: 200, rows: 70 })(h(QueueWatchFrame, { snapshot }))
@@ -513,18 +528,27 @@ describe("queue watch user round 6", () => {
   it("distinguishes pruned refs from other Git failures", async () => {
     const snapshot = queueTimelineStories["production-overview"].snapshot
     const diffs = snapshot.diffs?.map((diff, index) =>
-      index === 0 ? { pr: diff.pr, revision: diff.revision, unavailable: "git-error" as const } : diff,
+      index === 0
+        ? {
+            pr: diff.pr,
+            revision: diff.revision,
+            unavailable: "git-error" as const,
+            reason: "git diff failed: index is locked",
+          }
+        : diff,
     )
     const app = createRenderer({ cols: 200, rows: 50 })(h(QueueWatchFrame, { snapshot: { ...snapshot, diffs } }))
     try {
       await app.waitForLayoutStable()
+      await selectPrTab(app)
       // The detail shows only the cursor PR's diff, so each member PR's
       // unavailable reason is read from that PR's own row: git error on the first
       // member, pruned refs on the second.
-      expect(app.text).toContain("diff unavailable (git error)")
+      expect(app.text).toContain("diff unavailable — git diff failed: index is locked")
       await app.press("j")
       await app.waitForLayoutStable()
-      expect(app.text).toContain("diff unavailable (refs pruned)")
+      await selectPrTab(app)
+      expect(app.text).toContain(`diff unavailable — head object not fetched locally: ${"d".repeat(40)}`)
     } finally {
       app.unmount()
     }
@@ -771,6 +795,7 @@ describe("queue watch user round 6", () => {
     const app = createRenderer({ cols: 200, rows: 130 })(h(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
+      await selectPrTab(app)
       expect(app.text).not.toContain(tail)
       const summary = pointOf(app.text, "Diff +")
       await app.click(summary[0], summary[1])

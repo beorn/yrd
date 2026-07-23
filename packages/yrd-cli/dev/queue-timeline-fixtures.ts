@@ -952,7 +952,12 @@ export const queueTimelineStories: Readonly<Record<QueueTimelineStoryName, Queue
             "+synthetic submit step",
           ].join("\n"),
         },
-        { pr: "PR43", revision: 1, unavailable: "refs-pruned" },
+        {
+          pr: "PR43",
+          revision: 1,
+          unavailable: "refs-pruned",
+          reason: `head object not fetched locally: ${"d".repeat(40)}; fetch it and retry`,
+        },
       ],
     },
     widths: [80, 140],

@@ -176,7 +176,9 @@ export async function runQueueGit(
 
 async function gitAsync(cwd: string, args: readonly string[]): Promise<string> {
   await using process = createProcess()
-  return runQueueGit(process, cwd, args)
+  // `await` is load-bearing: returning the promise would dispose the process
+  // before its Git child settles, turning every focused diff into git-error.
+  return await runQueueGit(process, cwd, args)
 }
 
 function queueGitDir(cwd: string): string | undefined {
@@ -2693,6 +2695,39 @@ function queuePrDiffSource(pr: PR, revision: number): Readonly<{ base: string; h
   return base === undefined ? undefined : { base, headSha }
 }
 
+function queuePrDiffUnavailable(
+  pr: PR,
+  revision: number,
+  unavailable: "refs-pruned" | "git-error",
+  reason: string,
+): QueuePrDiff {
+  return { pr: pr.id, revision, unavailable, reason }
+}
+
+function queuePrDiffMissingSource(pr: PR, revision: number): QueuePrDiff {
+  return queuePrDiffUnavailable(
+    pr,
+    revision,
+    "refs-pruned",
+    "revision metadata no longer retains its base/head object IDs",
+  )
+}
+
+function queuePrDiffMissingObject(pr: PR, revision: number, kind: "base" | "head", object: string): QueuePrDiff {
+  return queuePrDiffUnavailable(
+    pr,
+    revision,
+    "refs-pruned",
+    `${kind} object not fetched locally: ${object}; fetch it and retry`,
+  )
+}
+
+function queuePrDiffErrorReason(error: unknown): string {
+  if (error instanceof Error && error.message.trim() !== "") return error.message.trim()
+  const detail = String(error).trim()
+  return detail === "" ? "unknown Git failure" : detail
+}
+
 function queuePrDiffResult(pr: PR, revision: number, numstat: string, patch: string): QueuePrDiff {
   const rows = numstat.split("\0").filter((row) => row !== "")
   let additions = 0
@@ -2713,17 +2748,21 @@ function queuePrDiffResult(pr: PR, revision: number, numstat: string, patch: str
 /** Resolve a revision-bound PR delta for the watch detail's PR header. */
 export function queuePrDiff(cwd: string, pr: PR, revision = pr.revision): QueuePrDiff {
   const source = queuePrDiffSource(pr, revision)
-  if (source === undefined) return { pr: pr.id, revision, unavailable: "refs-pruned" }
+  if (source === undefined) return queuePrDiffMissingSource(pr, revision)
   // Missing objects are the one recoverable absence state. Validate the
   // repository outside this catch so environment/corruption failures never
   // masquerade as ordinary ref pruning.
   gitSync(cwd, ["rev-parse", "--git-dir"])
-  try {
-    gitSync(cwd, ["cat-file", "-e", `${source.base}^{commit}`])
-    gitSync(cwd, ["cat-file", "-e", `${source.headSha}^{commit}`])
-  } catch (error) {
-    if (isGitTimeoutError(error)) throw error
-    return { pr: pr.id, revision, unavailable: "refs-pruned" }
+  for (const [kind, object] of [
+    ["base", source.base],
+    ["head", source.headSha],
+  ] as const) {
+    try {
+      gitSync(cwd, ["cat-file", "-e", `${object}^{commit}`])
+    } catch (error) {
+      if (isGitTimeoutError(error)) throw error
+      return queuePrDiffMissingObject(pr, revision, kind, object)
+    }
   }
   const range = `${source.base}...${source.headSha}`
   const numstat = gitSync(cwd, ["diff", "--numstat", "--no-renames", "-z", range, "--"])
@@ -2741,14 +2780,18 @@ export function queuePrDiff(cwd: string, pr: PR, revision = pr.revision): QueueP
 
 async function queuePrDiffAsync(cwd: string, pr: PR, revision: number, runGit: QueueGitRunner): Promise<QueuePrDiff> {
   const source = queuePrDiffSource(pr, revision)
-  if (source === undefined) return { pr: pr.id, revision, unavailable: "refs-pruned" }
+  if (source === undefined) return queuePrDiffMissingSource(pr, revision)
   await runGit(cwd, ["rev-parse", "--git-dir"])
-  try {
-    await runGit(cwd, ["cat-file", "-e", `${source.base}^{commit}`])
-    await runGit(cwd, ["cat-file", "-e", `${source.headSha}^{commit}`])
-  } catch (error) {
-    if (isGitTimeoutError(error)) throw error
-    return { pr: pr.id, revision, unavailable: "refs-pruned" }
+  for (const [kind, object] of [
+    ["base", source.base],
+    ["head", source.headSha],
+  ] as const) {
+    try {
+      await runGit(cwd, ["cat-file", "-e", `${object}^{commit}`])
+    } catch (error) {
+      if (isGitTimeoutError(error)) throw error
+      return queuePrDiffMissingObject(pr, revision, kind, object)
+    }
   }
   const range = `${source.base}...${source.headSha}`
   const [numstat, patch] = await Promise.all([
@@ -2776,7 +2819,7 @@ export function createQueuePrDiffResolver(
   return {
     async resolve(cwd, pr, revision, now = Date.now()) {
       const source = queuePrDiffSource(pr, revision)
-      if (source === undefined) return { pr: pr.id, revision, unavailable: "refs-pruned" }
+      if (source === undefined) return queuePrDiffMissingSource(pr, revision)
       const key = `${cwd}\0${pr.id}\0${String(revision)}\0${source.base}\0${source.headSha}`
       const cached = resolved.get(key)
       const retry = retryAt.get(key)
@@ -2787,7 +2830,7 @@ export function createQueuePrDiffResolver(
       const pending = queuePrDiffAsync(cwd, pr, revision, runGit)
         .catch((error): QueuePrDiff => {
           if (isGitTimeoutError(error)) throw error
-          return { pr: pr.id, revision, unavailable: "git-error" }
+          return queuePrDiffUnavailable(pr, revision, "git-error", queuePrDiffErrorReason(error))
         })
         .then((diff) => {
           if (!("unavailable" in diff) || diff.unavailable === "refs-pruned") {
@@ -2884,7 +2927,7 @@ export async function queueListSnapshot(
             diff = queuePrDiff(io.cwd ?? process.cwd(), pr, revision)
           } catch (error) {
             if (isGitTimeoutError(error)) throw error
-            diff = { pr: pr.id, revision, unavailable: "git-error" }
+            diff = queuePrDiffUnavailable(pr, revision, "git-error", queuePrDiffErrorReason(error))
           }
           return diff
         })

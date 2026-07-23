@@ -5267,7 +5267,14 @@ describe("runYrd", () => {
     expect(props.intervalMs).toBe(1_000)
     expect(props.initial.diffs, "initial paint must not synchronously probe every visible PR").toBeUndefined()
     await expect(props.load({ pr: "PR1", revision: 1 })).resolves.toMatchObject({
-      diffs: [{ pr: "PR1", revision: 1, unavailable: "git-error" }],
+      diffs: [
+        {
+          pr: "PR1",
+          revision: 1,
+          unavailable: "git-error",
+          reason: expect.stringContaining("posix_spawn 'git'"),
+        },
+      ],
     })
     // Exercise the live runtime so useWindowSize sees the mounted 200×50
     // viewport; renderString's first synchronous frame intentionally reports
@@ -10204,6 +10211,30 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     expect(calls).toHaveLength(5)
     await resolver.resolve("/repo", pr, 1, 60_000)
     expect(calls).toHaveLength(5)
+  })
+
+  it("preserves the specific Git failure behind an unavailable focused diff", async () => {
+    const resolver = runInternals.createQueuePrDiffResolver({
+      runGit: async (_cwd, args) => {
+        if (args[0] === "diff") throw new Error("git diff failed: index is locked")
+        return ""
+      },
+    })
+    const pr = {
+      id: "PR1",
+      revision: 1,
+      base: "main",
+      baseSha: BASE_SHA,
+      headSha: HEAD_SHA,
+      revisions: [submittedRevision(1, HEAD_SHA, "2026-07-09T12:00:00.000Z")],
+    } as unknown as PR
+
+    await expect(resolver.resolve("/repo", pr, 1, 1_000)).resolves.toEqual({
+      pr: "PR1",
+      revision: 1,
+      unavailable: "git-error",
+      reason: "git diff failed: index is locked",
+    })
   })
 
   it("negative-caches a missing focused diff until its retry window expires", async () => {

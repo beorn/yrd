@@ -87,6 +87,7 @@ export type QueuePrDiff =
       pr: string
       revision: number
       unavailable: "refs-pruned" | "git-error"
+      reason: string
     }>
 
 export function queueDetailTier(columns: number, rows: number): QueueDetailTier {
@@ -627,11 +628,7 @@ function QueueSubmitDiff({
     return (
       <Box flexDirection="column" minWidth={0}>
         <Box height={1} flexShrink={0} />
-        <Text color="$fg-muted">
-          {diff === undefined || diff.unavailable === "refs-pruned"
-            ? "diff unavailable (refs pruned)"
-            : "diff unavailable (git error)"}
-        </Text>
+        <Text color="$fg-muted">{diff === undefined ? "diff loading…" : `diff unavailable — ${diff.reason}`}</Text>
         <Box height={1} flexShrink={0} />
         <Divider />
       </Box>
