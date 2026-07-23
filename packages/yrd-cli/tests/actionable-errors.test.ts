@@ -1,8 +1,8 @@
 /**
- * 21565 — every human-facing Yrd failure carries a stable code, a cause, and
- * resolution steps. Deep gitlink failures additionally point at the durable
- * operator documentation. Historical Queue records are enriched at read time,
- * so this contract does not require a journal migration.
+ * 21565 — persisted/watch projections carry a stable code, cause, and
+ * resolution steps. Ordinary command stderr is concise, while deep failures
+ * keep concrete remedies and durable operator references. Historical Queue
+ * records are enriched at read time, so this contract needs no journal migration.
  */
 
 import { createElement } from "react"
@@ -10,7 +10,12 @@ import { createFailure } from "@yrd/core"
 import { renderString } from "silvery"
 import { describe, expect, it } from "vitest"
 import { fixtureJob, fixturePr, fixtureRun, fixtureStep } from "../dev/queue-timeline-fixtures.ts"
-import { actionableFailure, formatActionableFailure, type ActionableFailure } from "../src/actionable-error.ts"
+import {
+  actionableFailure,
+  formatActionableFailure,
+  formatHumanFailure,
+  type ActionableFailure,
+} from "../src/actionable-error.ts"
 import { diagnostic } from "../src/output.tsx"
 import { QueueShowView, queueShowData } from "../src/queue-status-view.tsx"
 
@@ -75,7 +80,7 @@ describe("actionable failure projection", () => {
 })
 
 describe("actionable failure output", () => {
-  it("renders typed command failures with code, cause, and resolution", async () => {
+  it("renders typed command failures as a sentence plus concrete resolution", async () => {
     let stderr = ""
     await diagnostic(
       {
@@ -84,7 +89,6 @@ describe("actionable failure output", () => {
           stderr += text
         },
       },
-      "yrd",
       createFailure({
         kind: "refusal",
         code: "authored-gitlink",
@@ -92,11 +96,60 @@ describe("actionable failure output", () => {
       }),
     )
 
-    expect(stderr).toContain("yrd: err=authored-gitlink")
-    expect(stderr).toContain("cause: PR 'PR42' changes generated-only gitlinks [vendor/yrd]")
-    expect(stderr).toContain("resolve: yrd pr create <branch>")
-    expect(stderr).toContain("resolve: yrd pr recut PR42 --queue --force")
-    expect(stderr).toContain("reference: README.md#pr-eligibility-and-checks")
+    expect(stderr).toBe(
+      [
+        "error: PR 'PR42' changes generated-only gitlinks [vendor/yrd]",
+        "resolve: yrd pr create <branch>",
+        "resolve: yrd pr recut PR42 --queue --force",
+        "reference: README.md#pr-eligibility-and-checks",
+        "",
+      ].join("\n"),
+    )
+  })
+
+  it("omits content-free resolution from ordinary human failures", async () => {
+    let stderr = ""
+    await diagnostic(
+      {
+        stdout() {},
+        stderr(text) {
+          stderr += text
+        },
+      },
+      createFailure({ kind: "refusal", code: "pr-missing", message: "yrd: no PR 'PR404'" }),
+    )
+
+    expect(stderr).toBe("error: no PR 'PR404'\n")
+  })
+
+  it("keeps only executable remedies in the human projection", () => {
+    expect(
+      formatHumanFailure({
+        code: "journal-version-skew",
+        cause: "the journal contains newer fields",
+        resolution: [
+          "Run yrd from the checkout this repository pins.",
+          "Update this checkout, then retry the same Yrd command.",
+          "yrd pr view PR1",
+        ],
+      }),
+    ).toBe("error: the journal contains newer fields\nresolve: yrd pr view PR1")
+  })
+
+  it("keeps wide-character diagnostics on one physical line", async () => {
+    let stderr = ""
+    await diagnostic(
+      {
+        columns: 1,
+        stdout() {},
+        stderr(text) {
+          stderr += text
+        },
+      },
+      new Error("错误"),
+    )
+
+    expect(stderr).toBe("error: 错误\n")
   })
 
   it("keeps the full actionable text in compact watch detail and pr view/runs data", async () => {
