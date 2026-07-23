@@ -1012,6 +1012,67 @@ notify:
     expect(stderr).toBe("")
   })
 
+  it("keeps runtime bootstrap failures structured when JSON is requested", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yrd-json-bootstrap-failure-"))
+    roots.push(root)
+    let stdout = ""
+    let stderr = ""
+
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", root, "pr", "list", "--json"], {
+        cwd: root,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+    ).toBe(3)
+    expect(stdout).toBe("")
+    expect(JSON.parse(stderr)).toEqual({
+      failure: {
+        kind: "infrastructure",
+        code: "unexpected",
+        message: `yrd: '${root}' is not inside a Git worktree`,
+        cause: `'${root}' is not inside a Git worktree`,
+        resolution: ["Correct the cause above, then retry the same Yrd command."],
+      },
+    })
+  })
+
+  it("renders invalid receiver-hook modes concisely in human and JSON projections", async () => {
+    let humanStderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "receiver-hook", "invalid"], {
+        stdout() {},
+        stderr(text) {
+          humanStderr += text
+        },
+      }),
+    ).toBe(2)
+    expect(humanStderr).toBe("error: receiver-hook requires pre-receive or post-receive\n")
+
+    let jsonStderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "receiver-hook", "invalid", "--json"], {
+        stdout() {},
+        stderr(text) {
+          jsonStderr += text
+        },
+      }),
+    ).toBe(2)
+    expect(JSON.parse(jsonStderr)).toEqual({
+      failure: {
+        kind: "usage",
+        code: "invalid-arguments",
+        message: "yrd: receiver-hook requires pre-receive or post-receive",
+        cause: "receiver-hook requires pre-receive or post-receive",
+        resolution: ["Correct the cause above, then retry the same Yrd command."],
+      },
+    })
+  })
+
   it("prints namespace help without initializing a repository host", async () => {
     const root = await mkdtemp(join(tmpdir(), "yrd-queue-help-"))
     roots.push(root)

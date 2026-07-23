@@ -25,7 +25,7 @@ import {
   type ContestGit,
   type ContestRunnerDef,
 } from "@yrd/contest"
-import { createYrd, createYrdDef, failureFact, pipe, raiseFailure, type Journal } from "@yrd/core"
+import { createFailure, createYrd, createYrdDef, failureFact, pipe, raiseFailure, type Journal } from "@yrd/core"
 import { withJobs } from "@yrd/job"
 import {
   configuredCommandStep,
@@ -78,7 +78,7 @@ import { createYrdLogger, residentObservability, resolveYrdObservability } from 
 import { formatResidentLogLine, residentArtifactHome } from "./runner-timeline.ts"
 import { diagnostic } from "./output.tsx"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
-import { runYrdHelp, runYrdProcessRuntime } from "./run.ts"
+import { runYrdHelp, runYrdProcessRuntime, yrdJsonOutputRequested } from "./run.ts"
 import { queueStepRevision, type ToolchainFingerprint } from "./host-revision.ts"
 import {
   createSignalObserver,
@@ -1190,16 +1190,25 @@ export async function runYrdProcess(
   const env = process.env
   const invocation = resolveInvocation(argv)
   if (invocation.projection === "root" && invocation.args[0] === "receiver-hook") {
+    const json = yrdJsonOutputRequested(argv)
     const mode = invocation.args[1]
     if (mode !== "pre-receive" && mode !== "post-receive") {
-      await diagnostic(io, invocation.name, new Error("receiver-hook requires pre-receive or post-receive"))
+      await diagnostic(
+        io,
+        createFailure({
+          kind: "usage",
+          code: "invalid-arguments",
+          message: "yrd: receiver-hook requires pre-receive or post-receive",
+        }),
+        { json },
+      )
       return 2
     }
     try {
       await runReceiverHook(mode, env)
       return 0
     } catch (error) {
-      await diagnostic(io, invocation.name, error)
+      await diagnostic(io, error, { json })
       return classifyFailure(error).exitCode
     }
   }
@@ -1295,7 +1304,7 @@ export async function runYrdProcess(
       },
     })
   } catch (error) {
-    await diagnostic(io, invocation.name, error)
+    await diagnostic(io, error, { json: yrdJsonOutputRequested(argv) })
     return classifyFailure(error).exitCode
   } finally {
     try {

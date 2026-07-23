@@ -8395,26 +8395,99 @@ describe("runYrd", () => {
     expect(probe.max("evaluator")).toBe(2)
   })
 
+  it("prints a suggested unknown subcommand as exactly one human line", async () => {
+    const app = await createApp()
+    const typo = outputIO({ columns: 20 })
+
+    expect(await runYrd(app, yrd("pr", "crate"), typo.io)).toBe(2)
+    expect(typo.stdout()).toBe("")
+    expect(typo.stderr()).toBe("error: unknown command 'crate' (Did you mean 'create'?)\n")
+  })
+
+  it("offers scoped help for an unsuggested subcommand and retains the structured JSON error", async () => {
+    const app = await createApp()
+    const unsuggested = outputIO()
+
+    expect(await runYrd(app, yrd("pr", "xyzzy"), unsuggested.io)).toBe(2)
+    expect(unsuggested.stderr()).toBe("error: unknown command 'xyzzy' (Run 'yrd pr --help' for available commands.)\n")
+
+    const repoScoped = outputIO()
+    expect(await runInternals.runYrdHelp(yrd("--repo", "/tmp/project", "pr", "xyzzy"), repoScoped.io)).toBe(2)
+    expect(repoScoped.stderr()).toBe("error: unknown command 'xyzzy' (Run 'yrd pr --help' for available commands.)\n")
+
+    for (const operand of ["foo.bar", "foo,bar"]) {
+      const punctuated = outputIO()
+      expect(await runYrd(app, yrd("bay", operand), punctuated.io)).toBe(2)
+      expect(punctuated.stderr()).toBe(
+        `error: unknown command '${operand}' (Run 'yrd bay --help' for available commands.)\n`,
+      )
+    }
+
+    const json = outputIO()
+    expect(await runYrd(app, yrd("pr", "crate", "--json"), json.io)).toBe(2)
+    expect(json.stdout()).toBe("")
+    expect(JSON.parse(json.stderr())).toEqual({
+      failure: {
+        kind: "usage",
+        code: "invalid-arguments",
+        message: "error: unknown command 'crate'\n(Did you mean create?)",
+        cause: "unknown command 'crate' (Did you mean create?)",
+        resolution: ["Correct the cause above, then retry the same Yrd command."],
+      },
+    })
+  })
+
+  it("retains a concrete command remedy on a real command failure", async () => {
+    const app = await createApp()
+    const output = outputIO({ currentBranch: () => "topic/unsubmitted" })
+
+    expect(await runYrd(app, yrd("pr", "status"), output.io)).toBe(1)
+    expect(output.stdout()).toBe("")
+    expect(output.stderr()).toBe("error: the current bay or branch has no PR\nresolve: yrd pr submit\n")
+  })
+
+  it("lets Commander, not raw argv scanning, own JSON output mode", async () => {
+    const app = await createApp()
+    const optionValue = outputIO()
+
+    expect(await runYrd(app, yrd("pr", "edit", "PR404", "--title", "--json"), optionValue.io)).toBe(1)
+    expect(optionValue.stdout()).toBe("")
+    expect(optionValue.stderr()).toBe("error: no PR 'PR404'\n")
+
+    const afterTerminator = outputIO()
+    expect(await runYrd(app, yrd("pr", "crate", "--", "--json"), afterTerminator.io)).toBe(2)
+    expect(afterTerminator.stderr()).toMatch(/^error: /u)
+    expect(() => JSON.parse(afterTerminator.stderr())).toThrow()
+  })
+
   it("uses the documented exit taxonomy and keeps diagnostics off stdout", async () => {
     const app = await createApp()
 
     const usage = outputIO()
     expect(await runYrd(app, yrd("bay", "adopt", "old-branch"), usage.io)).toBe(2)
     expect(usage.stdout()).toBe("")
-    expect(usage.stderr()).toContain("too many arguments")
-    expect(usage.stderr()).toContain("err=invalid-arguments")
-    expect(usage.stderr()).toContain("resolve:")
+    expect(usage.stderr()).toBe("error: unknown command 'adopt' (Run 'yrd bay --help' for available commands.)\n")
 
     const refusal = outputIO()
     expect(await runYrd(app, yrd("bay", "close", "missing"), refusal.io)).toBe(1)
     expect(refusal.stdout()).toBe("")
-    expect(refusal.stderr()).toContain("no bay 'missing'")
-    expect(refusal.stderr()).toContain("err=request-refused")
-    expect(refusal.stderr()).toContain("cause:")
+    expect(refusal.stderr()).toBe("error: no bay 'missing'\n")
 
     const missingPR = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "PR404"), missingPR.io)).toBe(1)
-    expect(missingPR.stderr()).toContain("no PR 'PR404'")
+    expect(missingPR.stderr()).toBe("error: no PR 'PR404'\n")
+
+    const missingPRJson = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "PR404", "--json"), missingPRJson.io)).toBe(1)
+    expect(JSON.parse(missingPRJson.stderr())).toEqual({
+      failure: {
+        kind: "refusal",
+        code: "pr-not-found",
+        message: "yrd: no PR 'PR404'",
+        cause: "no PR 'PR404'",
+        resolution: ["Correct the cause above, then retry the same Yrd command."],
+      },
+    })
 
     const missingWaitingRun = outputIO()
     expect(
@@ -8437,17 +8510,17 @@ describe("runYrd", () => {
         missingWaitingRun.io,
       ),
     ).toBe(1)
-    expect(missingWaitingRun.stderr()).toContain("no queue run or PR 'PR404'")
+    expect(missingWaitingRun.stderr()).toBe("error: no queue run or PR 'PR404'\n")
 
     const unsupported = outputIO()
     expect(await runYrd(app, yrd("queue", "init"), unsupported.io)).toBe(2)
-    expect(unsupported.stderr()).toContain("queue.init capability is not installed")
+    expect(unsupported.stderr()).toBe("error: queue.init capability is not installed\n")
 
     const missingIssueSource = outputIO()
     expect(
       await runYrd(app, yrd("contest", "open", "github:42", "--agents", "ag codex/claude"), missingIssueSource.io),
     ).toBe(2)
-    expect(missingIssueSource.stderr()).toContain("no issue source 'github' is registered")
+    expect(missingIssueSource.stderr()).toBe("error: no issue source 'github' is registered\n")
 
     const infrastructure = outputIO({
       resolveRevision: async () => {
@@ -8456,9 +8529,7 @@ describe("runYrd", () => {
     })
     expect(await runYrd(app, yrd(), infrastructure.io)).toBe(3)
     expect(infrastructure.stdout()).toBe("")
-    expect(infrastructure.stderr()).toContain("corrupt event log")
-    expect(infrastructure.stderr()).toContain("err=unexpected")
-    expect(infrastructure.stderr()).toContain("resolve:")
+    expect(infrastructure.stderr()).toBe("error: corrupt event log at row 4\n")
   })
 
   it("projects installed queue administration and cancels an idle watch deterministically", async () => {
@@ -9561,14 +9632,15 @@ describe("typed issue landing bridge", () => {
     expect(await runYrd(exhaustingApp, yrd("pr", "runs", "PR1", "--json"), exhausted.io)).toBe(1)
     expect({ snapshots, advances }).toEqual({ snapshots: 6, advances: 3 })
     expect(exhausted.stdout()).toBe("")
-    expect(exhausted.stderr()).toBe(
-      [
-        "yrd: err=request-refused",
-        "cause: journal changed while reading PR 'PR1' runs; retry with 'yrd pr runs PR1 --json'",
-        "resolve: yrd pr runs PR1 --json",
-        "",
-      ].join("\n"),
-    )
+    expect(JSON.parse(exhausted.stderr())).toEqual({
+      failure: {
+        kind: "refusal",
+        code: "request-refused",
+        message: "journal changed while reading PR 'PR1' runs; retry with 'yrd pr runs PR1 --json'",
+        cause: "journal changed while reading PR 'PR1' runs",
+        resolution: ["yrd pr runs PR1 --json"],
+      },
+    })
   })
 })
 
@@ -9722,9 +9794,18 @@ describe("journal version skew fail-loud", () => {
       expect(stderr).toContain("forwardCompatProbe")
       expect(stderr).toContain("landingReceipt")
       expect(stderr).toContain(`${YRD_VERSION}+`)
-      expect(stderr).toContain("-v")
+      expect(stderr).not.toContain("resolve:")
+      expect(stderr).not.toContain("-v")
       expect(stderr).not.toContain("unrecognized_keys")
       expect(stderr).not.toContain("invalid_union")
+
+      const json = outputIO()
+      expect(await runInternals.runYrdProcessRuntime(yrd("pr", "list", "--json"), json.io, journalBootstrap(dir))).toBe(
+        3,
+      )
+      expect(JSON.parse(json.stderr()).failure.resolution).toContain(
+        "Re-run with -v to include the raw validation detail.",
+      )
     })
   })
 
