@@ -4,6 +4,7 @@
  * @consumer @yrd/queue admission lanes
  */
 import { describe, expect, it } from "vitest"
+import { createLogger } from "loggily"
 import { createBayJobDefs, withBays, type BayWorkspace, type PR } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
@@ -96,7 +97,9 @@ async function createLaneApp(fixture: LaneFixture) {
   })
   const bayJobs = createBayJobDefs(workspace())
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
-  return createYrd(queue(base), { inject: { journal: createMemoryJournal(), id: ids() } })
+  return createYrd(queue(base), {
+    inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]), id: ids() },
+  })
 }
 
 async function submit(app: Awaited<ReturnType<typeof createLaneApp>>, branch: string): Promise<PR> {
@@ -194,7 +197,7 @@ describe("Queue pm/sw lanes", () => {
     ).toThrow(/lane 'pm'.*admission step/iu)
   })
 
-  it("lets an explicit operator plan supersede an unstarted lane admission", async () => {
+  it("refuses explicit step plans when the host derives queue lanes", async () => {
     await using app = await createLaneApp({ changes: () => [regular("docs/operator.md")] })
     const pr = await submit(app, "operator-override")
     const snapshot = Queues.snapshot(pr)
@@ -208,13 +211,32 @@ describe("Queue pm/sw lanes", () => {
       steps: [{ name: "pm-check", job: { status: "requested" } }],
     })
 
-    expect(await app.queue.run({ prs: [pr.id], steps: ["pm-check", "merge"] }, runtime)).toMatchObject([
-      { id: "R2", status: "passed", steps: [{ name: "pm-check" }, { name: "merge" }] },
-    ])
+    await expect(app.queue.run({ prs: [pr.id], steps: ["pm-check", "merge"] }, runtime)).rejects.toThrow(
+      /lane steps are derived from diff evidence/iu,
+    )
+    await expect(app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["pm-check", "merge"] })).rejects.toThrow(
+      /lane steps are derived from diff evidence/iu,
+    )
     expect(app.queue.get("R1")).toMatchObject({
-      status: "failed",
-      error: { code: "step-selection-superseded" },
+      lane: "pm",
+      status: "running",
+      stepSelection: { authority: "admission" },
     })
+  })
+
+  it("admits only explicitly selected carriers", async () => {
+    await using app = await createLaneApp({
+      changes: (pr) => [regular(`docs/${pr.branch}.md`)],
+      pmCheck: () => ({ status: "waiting", token: "remote-pm-check" }),
+    })
+    const unrelated = await submit(app, "unrelated-first")
+    const selected = await submit(app, "selected-second")
+
+    await app.queue.admit({ prs: [selected.branch] }, runtime)
+
+    expect(app.queue.eligibility(unrelated.id).checks).toMatchObject({ status: "queued" })
+    expect(app.queue.eligibility(unrelated.id).checks).not.toHaveProperty("run")
+    expect(app.queue.eligibility(selected.id).checks).toMatchObject({ status: "checking", run: "R1" })
   })
 
   it("lands PM while an SW check is running, then preserves that SW proof across the PM base advance", async () => {

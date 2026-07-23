@@ -1115,7 +1115,12 @@ function createQueue<Shape extends PRShape>(
   }
 
   const drainAdmissions = async (selectors: readonly string[], options: QueueRunOptions): Promise<QueueRun[]> => {
-    const targets = new Set(selectors)
+    const targets = new Set(
+      selectors.map((selector) => {
+        const pr = resolvePR(runtime().bays, selector)
+        return pr?.id ?? selector
+      }),
+    )
     const outcomes = new Map<QueueRunId, QueueRun>()
     const remember = (candidate: QueueRun): void => {
       if (candidate.prs.some((pr) => targets.has(pr.id))) outcomes.set(candidate.id, candidate)
@@ -1136,7 +1141,7 @@ function createQueue<Shape extends PRShape>(
         continue
       }
 
-      const queued = admissionQueue(snapshot, steps, lanePolicy)
+      const queued = admissionQueue(snapshot, steps, lanePolicy).filter((pr) => targets.has(pr.id))
       const admitted = await dispatchAdmissions(
         (options.continueAdmissions === undefined ? queued : queued.slice(0, 1)).map((pr) => pr.id),
       )
@@ -1219,6 +1224,7 @@ function createQueue<Shape extends PRShape>(
           resultAttributes: (runs) => ({ runs: runs.map(runEvidence) }),
         },
         async () => {
+          requireDerivedLaneSteps(lanePolicy, args)
           const explicitStepAuthority = args.steps !== undefined
           await actions.refresh()
           await cleanupSettledRoots()
@@ -1814,6 +1820,7 @@ function createQueueCommands(
     visibility: "public",
     params: QueueRunArgsSchema,
     apply(state: DeepReadonly<RuntimeState>, args: QueueRunArgs) {
+      requireDerivedLaneSteps(lanePolicy, args)
       if (args.steps?.length === 0) return { events: [] }
       const explicitStepAuthority = args.steps !== undefined
       const prs = runnablePRs(state, args, steps, new Set(), { explicitStepAuthority, lanePolicy })
@@ -3417,6 +3424,16 @@ function configuredLaneSteps(
   lane: QueueLane = "sw",
 ): readonly RuntimeStep[] {
   return lanePolicy?.[lane].steps ?? selectSteps(steps, queues.defaultSteps)
+}
+
+function requireDerivedLaneSteps(lanePolicy: QueueLanePolicy | undefined, args: QueueRunArgs): void {
+  if (lanePolicy !== undefined && args.steps !== undefined) {
+    raiseFailure(
+      "refusal",
+      "queue-lane-steps-derived",
+      "yrd: queue lane steps are derived from diff evidence; omit explicit steps",
+    )
+  }
 }
 
 function admissionSteps(
