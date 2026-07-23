@@ -7,7 +7,7 @@
  * muted run ids, the RUNNER box (its top border carries a uptime/downtime
  * timer and the queue-pause STATUS line folds inside it — the separate STATUS
  * box is gone, user directive 2026-07-21), bottom-aligned FLOW/TIME, pane
- * frames with padding, selection color forcing, the todo/failed/done status
+ * frames with padding, selection color forcing, the open/failed/done status
  * vocabulary, and the non-default-only FILTER row.
  */
 
@@ -36,9 +36,9 @@ function rowAt(text: string, index: number): string {
 
 /** The status-pills row (no more "FILTER" label; the four plain-word pills share
  *  one row with any non-default dimensions). The pending bucket's pill reads
- *  `todo` (user directive 2026-07-21). */
+ *  `open` (user respec 2026-07-23). */
 function pillsRow(text: string): string {
-  const found = text.split("\n").find((row) => /todo.*running.*failed.*done/u.test(row))
+  const found = text.split("\n").find((row) => /open.*running.*done.*failed.*all/u.test(row))
   if (found === undefined) throw new Error("no pills row")
   return found
 }
@@ -277,7 +277,7 @@ describe("queue timeline chrome 21106", () => {
       await app.waitForLayoutStable()
       const filterLine = pillsRow(app.text)
       expect(filterLine, "unbounded window shows no since=").not.toContain("since=")
-      expect(filterLine).toContain("todo")
+      expect(filterLine).toContain("open")
     } finally {
       app.unmount()
     }
@@ -294,7 +294,7 @@ describe("queue timeline chrome 21106", () => {
       // survives as a dim prefix and the pills are plain words (no brackets).
       expect(app.text, "FILTER label is deleted").not.toContain("FILTER")
       expect(filterLine).toContain("since=6:00:00")
-      expect(filterLine).toContain("todo")
+      expect(filterLine).toContain("open")
       expect(filterLine).toContain("running")
       expect(filterLine).toContain("failed")
       expect(filterLine).toContain("done")
@@ -315,7 +315,7 @@ describe("queue timeline chrome 21106", () => {
       const filterLine = pillsRow(app2.text)
       expect(filterLine).toContain("terms=typecheck")
       // Pills always render their label (bucket on/off is colour, not glyph).
-      expect(filterLine).toContain("todo")
+      expect(filterLine).toContain("open")
       expect(filterLine).toContain("failed")
       expect(filterLine).toContain("done")
     } finally {
