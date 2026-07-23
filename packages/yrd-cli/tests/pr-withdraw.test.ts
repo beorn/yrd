@@ -624,6 +624,34 @@ describe("pr recut --preflight", () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it("derives patch evidence for carrier diffs above the runtime default buffer", () => {
+    const dir = mkdtempSync(join(tmpdir(), "yrd-recut-preflight-large-"))
+    const git = (...args: string[]) =>
+      execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim()
+    try {
+      git("init", "-b", "main")
+      git("config", "user.name", "Yrd Test")
+      git("config", "user.email", "yrd@example.test")
+      writeFileSync(join(dir, "base.txt"), "base\n")
+      git("add", "base.txt")
+      git("commit", "-m", "base")
+      const sourceBaseSha = git("rev-parse", "HEAD")
+
+      writeFileSync(join(dir, "large.txt"), `${"x".repeat(1_500_000)}\n`)
+      git("add", "large.txt")
+      git("commit", "-m", "large carrier")
+      const headSha = git("rev-parse", "HEAD")
+
+      const facts = createPruneGitFacts(dir)
+      expect(facts.patchMatch?.(sourceBaseSha, headSha, headSha)).toMatchObject({
+        patchId: expect.stringMatching(/^[0-9a-f]{40}$/u),
+        targetSha: headSha,
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe("pr prune", () => {

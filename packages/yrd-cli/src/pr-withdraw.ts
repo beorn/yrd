@@ -13,6 +13,7 @@ type JsonOption = Readonly<{ json?: boolean }>
 
 const DEFAULT_WITHDRAW_REASON = "PR withdrawn"
 const GIT_TIMEOUT_MS = 30_000
+const GIT_OUTPUT_MAX_BYTES = 64 * 1024 * 1024
 
 function jsonEnabled(options: JsonOption): boolean {
   return options.json === true
@@ -399,6 +400,7 @@ export function createPruneGitFacts(cwd: string): PruneGitFacts {
           encoding: "utf8",
           env: cleanGitEnvironment(process.env),
           ...(input === undefined ? {} : { input }),
+          maxBuffer: GIT_OUTPUT_MAX_BYTES,
           stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
           timeout: GIT_TIMEOUT_MS,
         }),
