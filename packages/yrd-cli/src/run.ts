@@ -865,12 +865,14 @@ function issueDeliveryRows(bridge: TrackerBridge): IssueDeliveryRow[] {
   })
 }
 
+type RuntimePosture = "active" | "viewer" | "one-shot-queue-run" | "resident-queue-run"
+
 type RuntimeBootstrap = Readonly<{
   ambientCwd: string
   env: NodeJS.ProcessEnv
   load(
     context: YrdContext,
-    options: Readonly<{ resident: boolean; viewer: boolean }>,
+    posture: RuntimePosture,
   ): Promise<
     Readonly<{
       app: YrdCliApp
@@ -2338,9 +2340,9 @@ function resolveQueueRunMode(
 /**
  * True when a `queue run` invocation is resident follow mode, mirroring
  * {@link resolveQueueRunMode} at the pre-action boundary where only the parsed
- * Commander action is available. The runner identity (`yrd-cli:` prefix, the
- * exclusive resident lease) is granted only to the follow-runner, so the two
- * decisions must agree.
+ * Commander action is available. Both modes receive a PID-scoped runner
+ * identity; only follow mode receives the exclusive resident lease, so the two
+ * posture decisions must agree.
  */
 function queueRunIsFollow(action: Readonly<{ opts(): unknown; args: readonly string[] }>): boolean {
   const opts = action.opts() as Readonly<{ once?: boolean }>
@@ -2364,6 +2366,19 @@ function isReadOnlyInvocation(
   const parent = action.parent?.name()
   if (parent === undefined) return false
   return READ_ONLY_COMMANDS[parent]?.includes(action.name()) === true
+}
+
+function runtimePosture(
+  action: Readonly<{
+    name(): string
+    parent?: Readonly<{ name(): string }> | null
+    opts(): unknown
+    args: readonly string[]
+  }>,
+): RuntimePosture {
+  if (isReadOnlyInvocation(action)) return "viewer"
+  if (action.name() !== "run" || action.parent?.name() !== "queue") return "active"
+  return queueRunIsFollow(action) ? "resident-queue-run" : "one-shot-queue-run"
 }
 
 async function runQueues(
@@ -4419,13 +4434,8 @@ function buildProgram(
       // alias still selects follow (queueRunIsFollow mirrors resolveQueueRunMode
       // at the pre-action boundary). Read-only commands are viewers regardless
       // of whether they are static or resident: reads must never drain receiver
-      // receipts or settle notifications. bootstrap.load requires both flags
-      // (RuntimeBootstrap.load type).
-      const resident = action.name() === "run" && action.parent?.name() === "queue" && queueRunIsFollow(action)
-      // Viewer reads never drain receiver receipts, settle notifications, or
-      // require an active submitter identity.
-      const viewer = isReadOnlyInvocation(action)
-      const loaded = await bootstrap.load(selected, { resident, viewer })
+      // receipts, settle notifications, or require an active submitter identity.
+      const loaded = await bootstrap.load(selected, runtimePosture(action))
       runtimeApp = loaded.app
       runtimeServices = loaded.services
       Object.assign(io, loaded.io)

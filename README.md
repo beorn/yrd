@@ -581,6 +581,12 @@ The first signal stops new admission, lets the active run finish, and exits with
 that run's result; an idle runner exits cleanly. Send either signal again to
 force the existing hard shutdown and job-tree reap.
 
+A selector or `--once` run is a foreground one-shot, not a resident drain. On
+`SIGINT` or `SIGTERM`, Yrd first settles that process's PID-scoped active Job as
+`job-lost`, then reaps its process tree and preserves the native signal exit
+status (`130` or `143`). No other one-shot runner is touched, and a subsequent
+`yrd queue recover` is a no-op for the interrupted Run.
+
 The resident exit code is a supervisor contract, so `hab restart=on-failure` is
 meaningful. An operator-requested stop that DRAINS — the first signal, the active
 run reaches a terminal state, the queue is drained — exits `0` (or `1` if that run
