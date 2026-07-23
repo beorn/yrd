@@ -6,7 +6,8 @@
 import { describe, expect, it } from "vitest"
 import type { Process, ProcessRequest, ProcessResult } from "@yrd/process"
 import * as gitIndexLockRetry from "../src/git-index-lock-retry.ts"
-import { runWithGitIndexLockRetry, withGitIndexLockRetry } from "../src/git-index-lock-retry.ts"
+
+const { runWithGitIndexLockRetry, withGitIndexLockRetry } = gitIndexLockRetry
 
 function result(exitCode: number, stderr = ""): ProcessResult {
   return { exitCode, signal: null, stdout: "", stderr, durationMs: 1, timedOut: false }
@@ -32,7 +33,7 @@ const gitRequest = {
 } satisfies ProcessRequest
 
 describe("runWithGitIndexLockRetry", () => {
-  it("keeps the retry schedule private to the CLI composition root", () => {
+  it("keeps the default retry schedule module-private", () => {
     expect(gitIndexLockRetry).not.toHaveProperty("DEFAULT_GIT_INDEX_LOCK_RETRY_DELAYS_MS")
   })
 
