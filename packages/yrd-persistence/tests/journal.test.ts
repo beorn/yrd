@@ -260,8 +260,13 @@ async function fileHash(path: string): Promise<string> {
 }
 
 async function hardExitMigration(dir: string, phase: string): Promise<Readonly<{ code: number; stderr: string }>> {
+  // The eval subprocess resolves modules from its own cwd, which has no
+  // top-level @yrd/* under isolated (pnpm-style) linking. Point it at the
+  // package entry directly so the migration replay resolves the real
+  // createJournal without depending on a hoisted node_modules layout.
+  const persistenceEntry = join(import.meta.dirname, "..", "src", "index.ts")
   const source = `
-    import { createJournal } from "@yrd/persistence"
+    import { createJournal } from ${JSON.stringify(persistenceEntry)}
     const journal = createJournal({
       dir: ${JSON.stringify(dir)},
       inject: {
