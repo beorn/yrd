@@ -2522,6 +2522,27 @@ describe("runYrd", () => {
     expect(rows(all.stdout())).toHaveLength(3)
   })
 
+  it("resolves commit subjects only for rows surviving a bounded log projection", async () => {
+    const app = await createApp()
+    for (let index = 1; index <= 3; index += 1) {
+      await app.bays.submit({
+        branch: `topic/log-subject-${index}`,
+        headSha: String(index).repeat(40),
+        base: "main",
+      })
+      await app.queue.run({ prs: [`PR${index}`] }, { runner: "test", leaseMs: 60_000 })
+    }
+
+    const resolveCommitMeta = vi.fn(async (ref: string) => ({ subject: `subject-${ref.slice(0, 1)}` }))
+    const limited = outputIO({ resolveCommitMeta })
+    expect(await runYrd(app, yrd("log", "--limit", "2", "--json"), limited.io), limited.stderr()).toBe(0)
+
+    expect(resolveCommitMeta.mock.calls.map(([ref]) => ref)).toEqual(["2".repeat(40), "3".repeat(40)])
+    expect(
+      (JSON.parse(limited.stdout()) as { rows: readonly { subject: string }[] }).rows.map((row) => row.subject),
+    ).toEqual(["subject-2", "subject-3"])
+  })
+
   it("keeps lossless log results and attempts inside base and PR scopes", async () => {
     const app = await createApp()
     await app.bays.submit({ branch: "topic/main-one", headSha: "1".repeat(40), base: "main" })

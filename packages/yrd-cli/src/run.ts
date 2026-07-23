@@ -63,12 +63,12 @@ import {
   QueueStatusView,
   type PRCheckViewRecord,
   type QueueLogCoverage,
+  type QueueLogRow,
   PRResultView,
   queueLogAttempts,
   queueLogRows,
   prListRows,
   prDetailData,
-  queueRevisionKey,
   queueRunRevisionClocks,
   queueTimelineAdmissionTimes,
   queueTimelineProjection,
@@ -3228,6 +3228,34 @@ function filterQueueLogRows<T extends QueueLogFilterRow>(
   return filtered.slice(-limit)
 }
 
+const LOG_SUBJECT_RESOLVE_CONCURRENCY = 8
+
+async function resolveQueueLogSubjects(
+  rows: readonly QueueLogRow[],
+  io: YrdCliIO,
+): Promise<ReadonlyMap<string, string>> {
+  const headShas = [...new Set(rows.map((row) => row.headSha).filter((headSha) => headSha !== "-"))]
+  const subjects = new Map<string, string>()
+  const cwd = io.cwd ?? process.cwd()
+
+  for (let offset = 0; offset < headShas.length; offset += LOG_SUBJECT_RESOLVE_CONCURRENCY) {
+    const resolved = await Promise.all(
+      headShas.slice(offset, offset + LOG_SUBJECT_RESOLVE_CONCURRENCY).map(async (headSha) => {
+        const subject =
+          io.resolveCommitMeta === undefined
+            ? commitSubject(cwd, headSha)
+            : (await io.resolveCommitMeta(headSha, cwd))?.subject
+        return [headSha, subject] as const
+      }),
+    )
+    for (const [headSha, subject] of resolved) {
+      if (subject !== undefined) subjects.set(headSha, subject)
+    }
+  }
+
+  return subjects
+}
+
 async function logRuns(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -3268,14 +3296,6 @@ async function logRuns(
   const prStatusById = new Map<string, PR["status"]>(
     summaries.flatMap((result) => result.prs.map((pr) => [pr.id, pr.status])),
   )
-  const revisionSubjects = new Map<string, string>()
-  const cwd = io.cwd ?? process.cwd()
-  for (const pr of summaries.flatMap((result) => result.finished.flatMap((run) => run.prs))) {
-    const key = queueRevisionKey(pr)
-    if (revisionSubjects.has(key)) continue
-    const subject = commitSubject(cwd, pr.headSha)
-    if (subject !== undefined) revisionSubjects.set(key, subject)
-  }
   const runIds = new Set(
     summaries.flatMap((summary) => [...summary.running, ...summary.waiting, ...summary.finished].map((run) => run.id)),
   )
@@ -3290,10 +3310,15 @@ async function logRuns(
     target.prFilter,
     prStatusById,
     attempts,
-    revisionSubjects,
+    new Map(),
     revisionClocks,
   )
-  const rows = filterQueueLogRows(projectedRows, options, io.now?.() ?? Date.now())
+  const filteredRows = filterQueueLogRows(projectedRows, options, io.now?.() ?? Date.now())
+  const revisionSubjects = await resolveQueueLogSubjects(filteredRows, io)
+  const rows = filteredRows.map((row) => {
+    const subject = revisionSubjects.get(row.headSha)
+    return subject === undefined ? row : { ...row, subject }
+  })
   const coverage = await queueLegacyCoverage(io.cwd ?? process.cwd(), await firstEventTimestamp(app))
   await printResult(
     io,
