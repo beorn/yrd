@@ -3941,32 +3941,38 @@ function TimelineRunnerBox({ projection, live = false }: { projection: QueueTime
 // oldestOpenMs, landed 36effce43e) across HR/DAY/WK/MON via `time-stats.ts`.
 
 /** The four operator-facing status buckets (user respec 2026-07-15). */
-export type QueueTimelineStatusBucket = "pending" | "running" | "failed" | "done"
+export type QueueTimelineStatusBucket = "open" | "running" | "done" | "failed"
 
 export const QUEUE_TIMELINE_STATUS_BUCKETS: readonly QueueTimelineStatusBucket[] = [
-  "pending",
+  "open",
   "running",
-  "failed",
   "done",
+  "failed",
 ]
 
-/** Bucket a row status: every non-integrated terminal outcome is `failed`; integrated is `done`. */
+/** Bucket a row status onto the operator courts (user respec 2026-07-23):
+ * `open` = the agents' court (draft/rev — editable, next action is the author);
+ * `running` = the queue's court (ready/queued/running — next action is the
+ * runner); every non-integrated terminal outcome is `failed`; integrated is
+ * `done`. */
 export function queueTimelineStatusBucket(status: QueueTimelineStatus): QueueTimelineStatusBucket {
-  // Every pre-run status (draft/rev/ready) buckets with `todo` (the
-  // pending pill), so the default view shows them and the `t` toggle owns them —
-  // no new operator pill. See `timelineStatusFilter`.
-  if (status === "draft" || status === "rev" || status === "ready") return "pending"
-  if (status === "pending" || status === "running") return status
+  if (status === "draft" || status === "rev") return "open"
+  if (status === "ready" || status === "pending" || status === "running") return "running"
   return status === "integrated" ? "done" : "failed"
 }
 
-/** Project CLI-level status filters onto the four display buckets. */
+/** Project CLI-level status filters onto the four display buckets. CLI
+ * `pending` keeps its pre-court meaning (pre-run + queued work) and maps to
+ * BOTH `open` and `running` so neither court silently vanishes. */
 export function queueTimelineFilterBuckets(
   statuses: readonly QueueTimelineStatusFilter[],
 ): ReadonlySet<QueueTimelineStatusBucket> {
   const buckets = new Set<QueueTimelineStatusBucket>()
   for (const status of statuses) {
-    if (status === "pending" || status === "running") buckets.add(status)
+    if (status === "pending") {
+      buckets.add("open")
+      buckets.add("running")
+    } else if (status === "running") buckets.add("running")
     else if (status === "integrated") buckets.add("done")
     else buckets.add("failed")
   }
@@ -4122,18 +4128,21 @@ export function queueTimelineDateHeaderAt(
 /**
  * The FILTER row (user respec 2026-07-15): only non-default dimensions render
  * — `since=` always has a value, `terms=` only when terms were passed, `latest`
- * only when on; no `none`/`no`/`all` placeholders. The four status buckets
- * render as checkbox-style indicators that are clickable (pointer toggles) and
- * key-toggled by p/r/f/d in the live watch.
+ * only when on; no `none`/`no`/`all` placeholders. The status buckets render as
+ * pills: a pointer click or lowercase o/r/d/f SELECTS ONLY that bucket, `all`
+ * (a / click) restores every bucket, and capital O/R/D/F toggles one bucket's
+ * membership (power path, unadvertised) — user respec 2026-07-23.
  */
 function TimelineFilterLine({
   projection,
   buckets,
-  onToggleBucket,
+  onSelectBucket,
+  onShowAll,
 }: {
   projection: QueueTimelineProjection
   buckets: ReadonlySet<QueueTimelineStatusBucket>
-  onToggleBucket?: (bucket: QueueTimelineStatusBucket) => void
+  onSelectBucket?: (bucket: QueueTimelineStatusBucket) => void
+  onShowAll?: () => void
 }) {
   const filters = projection.filters
   // The "FILTER" label text is deleted (item 3): the pills stand alone. The
@@ -4148,12 +4157,13 @@ function TimelineFilterLine({
   ]
     .filter(Boolean)
     .join(" ")
-  // The four status buckets are TogglePills labelled by their plain word with a
-  // BOLD first letter (item 3) — `todo`/`running`/`failed`/`done` (pending
-  // displays as `todo` per user directive 2026-07-21), the bold
-  // `t`/`r`/`f`/`d` doubling as the hotkey hint (no `[t]` brackets). The whole
-  // cluster sits very dim and lifts together on hover (silvery TogglePillGroup);
-  // clicking a pill toggles its bucket, mirroring the t/r/f/d keys.
+  // The status buckets are TogglePills labelled by their plain word with a
+  // BOLD first letter — `open`/`running`/`done`/`failed` plus `all` (user
+  // respec 2026-07-23), the bold o/r/d/f/a doubling as the hotkey hint (no
+  // `[o]` brackets). Click or lowercase key = select ONLY that bucket; `all` =
+  // every bucket; capital letters toggle membership (unadvertised). The whole
+  // cluster sits very dim and lifts together on hover (silvery TogglePillGroup).
+  const allActive = QUEUE_TIMELINE_STATUS_BUCKETS.every((bucket) => buckets.has(bucket))
   return (
     <TogglePillGroup
       {...(dimensions === "" ? {} : { label: dimensions })}
@@ -4164,12 +4174,13 @@ function TimelineFilterLine({
       {QUEUE_TIMELINE_STATUS_BUCKETS.map((bucket) => (
         <TogglePill
           key={bucket}
-          label={bucket === "pending" ? "todo" : bucket}
+          label={bucket}
           boldFirstLetter
           active={buckets.has(bucket)}
-          onToggle={() => onToggleBucket?.(bucket)}
+          onToggle={() => onSelectBucket?.(bucket)}
         />
       ))}
+      <TogglePill label="all" boldFirstLetter active={allActive} onToggle={() => onShowAll?.()} />
     </TogglePillGroup>
   )
 }
@@ -4208,7 +4219,8 @@ function ProjectedQueueTimeline({
   availableRows,
   visibleBuckets,
   expandedStorms,
-  onToggleBucket,
+  onSelectBucket,
+  onShowAll,
   listRef,
 }: {
   projection: QueueTimelineProjection
@@ -4223,7 +4235,8 @@ function ProjectedQueueTimeline({
   availableRows?: number
   visibleBuckets?: ReadonlySet<QueueTimelineStatusBucket>
   expandedStorms?: ReadonlySet<string>
-  onToggleBucket?: (bucket: QueueTimelineStatusBucket) => void
+  onSelectBucket?: (bucket: QueueTimelineStatusBucket) => void
+  onShowAll?: () => void
   listRef?: React.Ref<ListViewHandle>
 }) {
   // Fold the complete visible set before applying the one-shot row cap. A
@@ -4356,7 +4369,7 @@ function ProjectedQueueTimeline({
               </Text>
             )}
           </Box>
-          <TimelineFilterLine projection={projection} buckets={buckets} onToggleBucket={onToggleBucket} />
+          <TimelineFilterLine projection={projection} buckets={buckets} onSelectBucket={onSelectBucket} onShowAll={onShowAll} />
         </Box>
         {!fillHeight ||
         (availableRows ?? viewportRows) === 0 ||
@@ -4389,7 +4402,8 @@ export function QueueTimelineView({
   availableRows,
   visibleBuckets,
   expandedStorms,
-  onToggleBucket,
+  onSelectBucket,
+  onShowAll,
   listRef,
 }: {
   projection?: QueueTimelineProjection
@@ -4407,7 +4421,8 @@ export function QueueTimelineView({
   availableRows?: number
   visibleBuckets?: ReadonlySet<QueueTimelineStatusBucket>
   expandedStorms?: ReadonlySet<string>
-  onToggleBucket?: (bucket: QueueTimelineStatusBucket) => void
+  onSelectBucket?: (bucket: QueueTimelineStatusBucket) => void
+  onShowAll?: () => void
   listRef?: React.Ref<ListViewHandle>
 }) {
   if (projection !== undefined) {
@@ -4427,7 +4442,8 @@ export function QueueTimelineView({
         availableRows={availableRows}
         visibleBuckets={visibleBuckets}
         expandedStorms={expandedStorms}
-        onToggleBucket={onToggleBucket}
+        onSelectBucket={onSelectBucket}
+        onShowAll={onShowAll}
         listRef={listRef}
       />
     )
