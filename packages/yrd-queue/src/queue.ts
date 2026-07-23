@@ -1421,15 +1421,35 @@ function createQueue<Shape extends PRShape>(
           )
           snapshot = runtime()
           const unsettled = checked.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "passed")
+          const pending = unsettled.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "failed")
+          const pendingIds = new Set(pending.map((pr) => pr.id))
+          const pendingAdmissionRoots = admissions
+            .filter((run) => run.prs.some((pr) => pendingIds.has(pr.id)))
+            .map((run) => run.id)
           if (unsettled.length > 0) {
             const newlyFailed = unsettled.some(
               (pr) => before.get(pr.id) !== "failed" && checkEligibility(snapshot, pr, steps).status === "failed",
             )
-            if (newlyFailed || unsettled.some((pr) => checkEligibility(snapshot, pr, steps).status !== "failed")) {
+            // Pause the merge phase ONLY when a check newly failed this tick,
+            // so requeue/recut policy sees the failure before the next batch
+            // composes. An in-flight (running/queued) check must NEVER gate the
+            // merge phase: under continuous submissions the resident sees an
+            // unsettled check on every tick, and gating on it starves merges
+            // indefinitely (2026-07-22 merge-starvation livelock — checks
+            // completed in 48s-2m14s all day while zero merge steps ran).
+            // Liveness beats check-freshness here: landing a runnable PR can
+            // stale an in-flight sibling check, which the stale/recut path
+            // already classifies and (with auto-recut) requeues.
+            if (newlyFailed) {
               return admissions
             }
           }
-          const prs = runnablePRs(snapshot, args, steps, consumed, { explicitStepAuthority }).filter(
+          // The admission phase owns these still-checking PRs for this tick.
+          // Exclude them from merge selection without aborting the whole phase,
+          // so unrelated ready PRs can integrate while targeted one-PR drains
+          // return their admission receipt instead of a checks-running refusal.
+          const unavailable = new Set([...consumed, ...pendingIds])
+          const prs = runnablePRs(snapshot, args, steps, unavailable, { explicitStepAuthority }).filter(
             (pr) => !activeBases.has(baseIdentity(pr.base)),
           )
           for (const candidate of partitionCandidates(prs, snapshot.queues.batchSize)) {
@@ -1462,7 +1482,9 @@ function createQueue<Shape extends PRShape>(
             else await settle(id, runOptions)
           }
           const final = runtime()
-          return roots.flatMap((root) => queueTree(final.queues, final.jobs, root))
+          return [...new Set([...roots, ...pendingAdmissionRoots])].flatMap((root) =>
+            queueTree(final.queues, final.jobs, root),
+          )
         },
       )
     },
@@ -2012,7 +2034,16 @@ function createQueueCommands(
         unstartedAdmission(active, state.queues, steps)
           ? active
           : undefined
-      if (active !== undefined && superseded === undefined) {
+      // A check-only admission (no integrating steps) never moves the base, so
+      // it must not gate the START of an integrating run — gating here was the
+      // deepest layer of the 2026-07-22 merge-starvation livelock. Integrating
+      // runs still conflict with each other, a new non-integrating run still
+      // waits for whatever is active, and same-PR overlap stays impossible via
+      // the claims layer (a PR inside a started admission is not runnable).
+      const plansIntegration = (plan: readonly { kind: StepKind }[]): boolean =>
+        plan.some((step) => step.kind !== "check")
+      const checkOnlyActive = active !== undefined && !plansIntegration(active.steps) && plansIntegration(selected)
+      if (active !== undefined && !checkOnlyActive && superseded === undefined) {
         throw new QueueRunningConflict(base, active.id)
       }
       const integrated = integratedPRShape(prs)
