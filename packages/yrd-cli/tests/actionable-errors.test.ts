@@ -20,7 +20,7 @@ const BASE_PIN = "c".repeat(40)
 const AUTHORED_PIN = "d".repeat(40)
 
 describe("actionable failure projection", () => {
-  it("turns authored-gitlink into the exact draft-to-recut drill", () => {
+  it("turns authored-gitlink into the exact create-to-recut drill", () => {
     expect(
       actionableFailure({
         code: "authored-gitlink",
@@ -29,7 +29,7 @@ describe("actionable failure projection", () => {
     ).toEqual({
       code: "authored-gitlink",
       cause: "PR 'PR42' changes generated-only gitlinks [vendor/yrd]",
-      resolution: ["yrd pr submit <branch> --draft", "yrd pr recut PR42 --queue --force"],
+      resolution: ["yrd pr create <branch>", "yrd pr recut PR42 --queue --force"],
       reference: "README.md#pr-eligibility-and-checks",
     } satisfies ActionableFailure)
   })
@@ -54,7 +54,7 @@ describe("actionable failure projection", () => {
       `git -C vendor/yrd merge ${BASE_PIN}`,
       "git -C vendor/yrd push -u origin HEAD",
       'git add vendor/yrd && git commit -m "fix(yrd): compose vendor/yrd pins"',
-      "yrd pr submit <branch> --draft",
+      "yrd pr create <branch>",
       "yrd pr recut PR77 --queue --force",
     ])
     expect(failure.reference).toBe("README.md#resolving-divergent-gitlink-pins")
@@ -94,7 +94,7 @@ describe("actionable failure output", () => {
 
     expect(stderr).toContain("yrd: err=authored-gitlink")
     expect(stderr).toContain("cause: PR 'PR42' changes generated-only gitlinks [vendor/yrd]")
-    expect(stderr).toContain("resolve: yrd pr submit <branch> --draft")
+    expect(stderr).toContain("resolve: yrd pr create <branch>")
     expect(stderr).toContain("resolve: yrd pr recut PR42 --queue --force")
     expect(stderr).toContain("reference: README.md#pr-eligibility-and-checks")
   })
@@ -120,7 +120,7 @@ describe("actionable failure output", () => {
     expect(data.failure).toMatchObject({
       code: "authored-gitlink",
       cause: "PR 'PR42' changes generated-only gitlinks [vendor/yrd]",
-      resolution: ["yrd pr submit <branch> --draft", "yrd pr recut PR42 --queue --force"],
+      resolution: ["yrd pr create <branch>", "yrd pr recut PR42 --queue --force"],
     })
     expect(data.steps[0]?.failure).toEqual(data.failure)
 
