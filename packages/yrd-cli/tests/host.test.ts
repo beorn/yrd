@@ -2212,97 +2212,106 @@ notify:
     }
   })
 
-  it("reaps an active configured child before SIGINT releases its runner lease", async () => {
-    const { repo, featureSha } = await repository()
-    const baseSha = await git(repo, "rev-parse", "main")
-    const childPidPath = join(repo, "active-check.pid")
-    const grandchildPidPath = join(repo, "active-check-grandchild.pid")
-    const progressPath = join(repo, "active-check.progress")
-    const finishedPath = join(repo, "active-check.finished")
-    const scratchPath = join(repo, "active-check.scratch")
-    const command = [
-      `printf '%s\\n' "$$" > ${JSON.stringify(childPidPath)}`,
-      `pwd > ${JSON.stringify(scratchPath)}`,
-      `sh -c 'trap "" TERM; while :; do sleep 1; done' & printf '%s\\n' "$!" > ${JSON.stringify(grandchildPidPath)}`,
-      "i=0",
-      `while [ "$i" -lt 200 ]; do printf '%s\\n' "$i" >> ${JSON.stringify(progressPath)}; i=$((i + 1)); sleep 0.05; done`,
-      `touch ${JSON.stringify(finishedPath)}`,
-    ].join("; ")
-    await writeFile(
-      join(repo, ".yrd.yml"),
-      `steps: [check, merge]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 30000\n`,
-    )
+  it.each([
+    ["selector", "SIGINT" as const, 130, ["PR1"] as const],
+    ["--once", "SIGTERM" as const, 143, ["--once"] as const],
+  ])(
+    "%s one-shot settles and reaps its active run on %s",
+    async (_mode, signal, exitCode, args) => {
+      const { repo, featureSha } = await repository()
+      const baseSha = await git(repo, "rev-parse", "main")
+      const childPidPath = join(repo, "active-check.pid")
+      const grandchildPidPath = join(repo, "active-check-grandchild.pid")
+      const progressPath = join(repo, "active-check.progress")
+      const finishedPath = join(repo, "active-check.finished")
+      const scratchPath = join(repo, "active-check.scratch")
+      const command = [
+        `printf '%s\\n' "$$" > ${JSON.stringify(childPidPath)}`,
+        `pwd > ${JSON.stringify(scratchPath)}`,
+        `sh -c 'trap "" TERM; while :; do sleep 1; done' & printf '%s\\n' "$!" > ${JSON.stringify(grandchildPidPath)}`,
+        "i=0",
+        `while [ "$i" -lt 200 ]; do printf '%s\\n' "$i" >> ${JSON.stringify(progressPath)}; i=$((i + 1)); sleep 0.05; done`,
+        `touch ${JSON.stringify(finishedPath)}`,
+      ].join("; ")
+      await writeFile(
+        join(repo, ".yrd.yml"),
+        `steps: [check, merge]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 30000\n`,
+      )
 
-    await using submitter = await createYrdHost({ cwd: repo })
-    await submitter.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-    await submitter.close()
+      await using submitter = await createYrdHost({ cwd: repo })
+      await submitter.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+      await submitter.close()
 
-    const cli = Bun.spawn(
-      [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "queue", "run", "PR1", "--json"],
-      { cwd: repo, stdout: "pipe", stderr: "pipe" },
-    )
-    const cliStdout = new Response(cli.stdout).text()
-    const cliStderr = new Response(cli.stderr).text()
-    let childPid: number | undefined
-    let grandchildPid: number | undefined
-    let cleanupError: unknown
-    try {
-      await vi.waitFor(async () => expect(await Bun.file(childPidPath).exists()).toBe(true), { timeout: 5_000 })
-      childPid = Number.parseInt((await readFile(childPidPath, "utf8")).trim(), 10)
-      expect(Number.isSafeInteger(childPid)).toBe(true)
-      await vi.waitFor(async () => expect(await Bun.file(grandchildPidPath).exists()).toBe(true), { timeout: 5_000 })
-      grandchildPid = Number.parseInt((await readFile(grandchildPidPath, "utf8")).trim(), 10)
-      expect(Number.isSafeInteger(grandchildPid)).toBe(true)
-      await vi.waitFor(async () => expect((await readFile(progressPath, "utf8")).trim()).not.toBe(""), {
-        timeout: 5_000,
-      })
+      const cli = Bun.spawn(
+        [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "queue", "run", ...args, "--json"],
+        { cwd: repo, stdout: "pipe", stderr: "pipe" },
+      )
+      const cliStdout = new Response(cli.stdout).text()
+      const cliStderr = new Response(cli.stderr).text()
+      let childPid: number | undefined
+      let grandchildPid: number | undefined
+      let cleanupError: unknown
+      try {
+        await vi.waitFor(async () => expect(await Bun.file(childPidPath).exists()).toBe(true), { timeout: 5_000 })
+        childPid = Number.parseInt((await readFile(childPidPath, "utf8")).trim(), 10)
+        expect(Number.isSafeInteger(childPid)).toBe(true)
+        await vi.waitFor(async () => expect(await Bun.file(grandchildPidPath).exists()).toBe(true), { timeout: 5_000 })
+        grandchildPid = Number.parseInt((await readFile(grandchildPidPath, "utf8")).trim(), 10)
+        expect(Number.isSafeInteger(grandchildPid)).toBe(true)
+        await vi.waitFor(async () => expect((await readFile(progressPath, "utf8")).trim()).not.toBe(""), {
+          timeout: 5_000,
+        })
 
-      cli.kill("SIGINT")
-      await expect(cli.exited).resolves.toBe(130)
-      await vi.waitFor(() => expect(processExists(childPid!)).toBe(false), { timeout: 5_000 })
-      await vi.waitFor(() => expect(processExists(grandchildPid!)).toBe(false), { timeout: 5_000 })
+        cli.kill(signal)
+        await expect(cli.exited).resolves.toBe(exitCode)
+        await vi.waitFor(() => expect(processExists(childPid!)).toBe(false), { timeout: 5_000 })
+        await vi.waitFor(() => expect(processExists(grandchildPid!)).toBe(false), { timeout: 5_000 })
 
-      await using recovery = await createYrdHost({ cwd: repo })
-      const recovered = await recovery.app.queue.recover({
-        recoveryTime: "2100-01-01T00:00:00.000Z",
-      })
-      expect(recovered).toEqual([
-        expect.objectContaining({
+        await using recovery = await createYrdHost({ cwd: repo })
+        const settled = recovery.app.queue.get("R1")
+        expect(settled).toMatchObject({
           status: "failed",
-          error: expect.objectContaining({ code: "job-lost" }),
-          steps: expect.arrayContaining([expect.objectContaining({ job: expect.objectContaining({ attempt: 1 }) })]),
-        }),
-      ])
-      expect(
-        recovered.flatMap((run) => run.steps.flatMap((step) => (step.job === undefined ? [] : [step.job.attempt]))),
-      ).toEqual([1])
-      expect(await git(repo, "rev-parse", "main")).toBe(baseSha)
-      expect(await Bun.file(finishedPath).exists()).toBe(false)
-      const scratch = (await readFile(scratchPath, "utf8")).trim()
-      expect(
-        existsSync(scratch),
-        [await cliStdout, await cliStderr, await git(repo, "worktree", "list", "--porcelain")].join("\n"),
-      ).toBe(false)
-    } finally {
-      if (childPid !== undefined && processExists(childPid)) {
-        try {
-          process.kill(-childPid, "SIGKILL")
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ESRCH") cleanupError ??= error
+          error: expect.objectContaining({ code: "job-lost", message: expect.stringContaining(signal) }),
+          steps: expect.arrayContaining([
+            expect.objectContaining({
+              job: expect.objectContaining({ attempt: 1, runner: `yrd-cli:${cli.pid}` }),
+            }),
+          ]),
+        })
+        const redundantRecovery = await recovery.app.queue.recover({
+          recoveryTime: "2100-01-01T00:00:00.000Z",
+        })
+        expect(redundantRecovery).toEqual([])
+        expect(settled?.steps.flatMap((step) => (step.job === undefined ? [] : [step.job.attempt]))).toEqual([1])
+        expect(await git(repo, "rev-parse", "main")).toBe(baseSha)
+        expect(await Bun.file(finishedPath).exists()).toBe(false)
+        const scratch = (await readFile(scratchPath, "utf8")).trim()
+        expect(
+          existsSync(scratch),
+          [await cliStdout, await cliStderr, await git(repo, "worktree", "list", "--porcelain")].join("\n"),
+        ).toBe(false)
+      } finally {
+        if (childPid !== undefined && processExists(childPid)) {
+          try {
+            process.kill(-childPid, "SIGKILL")
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ESRCH") cleanupError ??= error
+          }
         }
-      }
-      if (grandchildPid !== undefined && processExists(grandchildPid)) {
-        try {
-          process.kill(grandchildPid, "SIGKILL")
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ESRCH") cleanupError ??= error
+        if (grandchildPid !== undefined && processExists(grandchildPid)) {
+          try {
+            process.kill(grandchildPid, "SIGKILL")
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ESRCH") cleanupError ??= error
+          }
         }
+        cli.kill("SIGKILL")
+        await cli.exited
       }
-      cli.kill("SIGKILL")
-      await cli.exited
-    }
-    if (cleanupError !== undefined) throw cleanupError
-  }, 30_000)
+      if (cleanupError !== undefined) throw cleanupError
+    },
+    30_000,
+  )
 
   it("submits the current linked-worktree branch when no bay selector is given", async () => {
     const { repo, featureSha } = await repository()

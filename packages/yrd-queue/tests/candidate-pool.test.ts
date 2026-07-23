@@ -181,9 +181,17 @@ describe("warm candidate pool", () => {
     })
 
     await expect(git.run("/blackholed-repository", ["fetch", "origin"])).rejects.toThrow(
-      "git fetch origin timed out after 30000ms",
+      "git fetch origin timed out after 120000ms",
     )
-    expect(request).toMatchObject({ timeoutMs: 30_000 })
+    expect(request).toMatchObject({ timeoutMs: 120_000 })
+
+    // allowFailure callers are best-effort cleanup (`worktree remove`,
+    // `rebase --abort`): a timeout must come back as a FAILED RESULT their
+    // existing nonzero-code handling absorbs — a throw here escaped every
+    // refusal path and killed the resident runner (2026-07-23).
+    const timedOut = await git.run("/blackholed-repository", ["worktree", "remove", "--force", "/gone"], true)
+    expect(timedOut.code).not.toBe(0)
+    expect(timedOut.stderr).toContain("timed out after 120000ms")
   })
 
   it("reuses one warm worktree across candidate cycles and resets dirt between runs", async () => {
@@ -241,6 +249,48 @@ describe("warm candidate pool", () => {
     expect(sawResidue).toBe(false)
     expect(secondPath).not.toBe("")
 
+    expect(pool.stats()).toEqual({ hits: 0, misses: 2, evictions: 1 })
+    expect(spans(events, "acquire").map((span) => span.props?.outcome)).toEqual(["miss", "residue-evicted"])
+  })
+
+  it("self-heals a worktree destroyed mid-removal instead of wedging every acquire", async () => {
+    // Production incident 2026-07-23: a `git worktree remove` killed at its
+    // timeout left the warm worktree half-deleted (`.git` gone, directory and
+    // worktree-admin entry retained). `git worktree remove --force` then refuses
+    // with "validation failed … '.git' does not exist" FOREVER, so the retry-safe
+    // eviction contract could never complete and every admission failed in ~5s.
+    const { repo, baseSha, baysRoot } = await repository()
+    const { log, events } = capturingLog()
+    const pool = makePool(repo, baysRoot, 1, log)
+
+    let firstPath = ""
+    expect(
+      await pool.withCandidate(baseSha, async (path) => {
+        firstPath = path
+        return passed
+      }),
+    ).toEqual(passed)
+
+    // Simulate the timeout-kill damage: the linked worktree's `.git` pointer is
+    // gone but the directory and the repository's worktree-admin entry remain.
+    await rm(join(firstPath, ".git"), { force: true })
+
+    let secondPath = ""
+    expect(
+      await pool.withCandidate(baseSha, async (path) => {
+        secondPath = path
+        const dirty = await git(path, ["status", "--porcelain", "--untracked-files=all"])
+        expect(dirty).toBe("")
+        return passed
+      }),
+    ).toEqual(passed)
+    expect(secondPath).not.toBe("")
+    expect(secondPath).not.toBe(firstPath)
+
+    // The destroyed worktree's admin entry is gone — not orphaned residue that
+    // blocks a later `worktree add`/`remove` — and the eviction was counted.
+    const admin = await git(repo, ["worktree", "list", "--porcelain"])
+    expect(admin).not.toContain(firstPath)
     expect(pool.stats()).toEqual({ hits: 0, misses: 2, evictions: 1 })
     expect(spans(events, "acquire").map((span) => span.props?.outcome)).toEqual(["miss", "residue-evicted"])
   })
