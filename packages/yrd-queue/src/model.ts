@@ -206,6 +206,8 @@ export type QueueRunAuthority = Readonly<{
       | "stale-check"
       | "stale-steps"
       | "stale-plan"
+      | "source-publish"
+      | "scratch-cleanup-failed"
     ref: string
   }>
 }>
@@ -226,7 +228,9 @@ export type QueueTerminalAssociations = Readonly<{
 }>
 
 export type QueueAuthorityState = Readonly<{
-  statuses: Readonly<Record<string, "pushed" | "submitted" | "rejected" | "withdrawn" | "integrated" | "canceled">>
+  statuses: Readonly<
+    Record<string, "pushed" | "submitted" | "needs-author" | "rejected" | "withdrawn" | "integrated" | "canceled">
+  >
   current: Readonly<Record<string, QueueAuthorityToken>>
   submits: Readonly<Record<string, QueueAuthorityToken>>
   checks: Readonly<Record<string, QueueAuthorityToken>>
@@ -325,10 +329,9 @@ export type PREligibilityReason = Readonly<{
     | "rejected"
     | "terminal"
   message: string
-  /** The composition-refusal receipt that produced a `needs-author` verdict:
-   * the queue could not compose the candidate from what the author submitted,
-   * so the refusal is projected here (never as a stored status) for the author
-   * to act on. Absent for every other reason code. */
+  /** The attributed failure receipt carried by native `pr/needs-author` (or
+   * recovered from a legacy rejected journal) for the author to act on. Absent
+   * for every other reason code. */
   receipt?: JobError
 }>
 

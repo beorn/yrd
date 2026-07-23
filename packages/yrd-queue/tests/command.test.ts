@@ -1539,9 +1539,12 @@ describe("Queue command adapters", () => {
       status: "failed",
       output: { conflicts: [{ repo: ".", paths: ["dep"] }] },
     })
-    // End-to-end through the REAL compose path: the composition refusal projects
-    // as a derived needs-author eligibility with the refusal receipt attached,
-    // not a plain rejected — so the author is told to re-author, not re-submit.
+    // End-to-end through the REAL compose path: the composition refusal commits
+    // native needs-author with its typed receipt, never a terminal rejection.
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "needs-author" })
+    const eventNames = (await Array.fromAsync(app.events())).map(({ name }) => name)
+    expect(eventNames).toContain("pr/needs-author")
+    expect(eventNames).not.toContain("pr/rejected")
     const eligibility = app.queue.eligibility("PR1")
     expect(eligibility.reason?.code).toBe("needs-author")
     expect(eligibility.reason?.receipt).toMatchObject({ code: "authored-gitlink" })
@@ -2410,6 +2413,28 @@ describe("Queue command adapters", () => {
       },
     })
     expect(evidence.candidateSha).toHaveLength(40)
+    expect(app.queue.eligibility("PR1")).toMatchObject({
+      runnable: false,
+      reason: {
+        code: "needs-author",
+        receipt: {
+          code: "check-failed",
+          evidence: {
+            kind: "candidate-attributed-check-failure",
+            baseSha,
+            candidateSha: evidence.candidateSha,
+            failures: [{ file: "src/feature.ts", [sourceRowKey]: 2, column: 1, message: "net-new" }],
+          },
+        },
+      },
+    })
+    expect(app.state().bays.prs.PR1).toMatchObject({
+      status: "needs-author",
+      needsAuthor: { receipt: { code: "check-failed" } },
+    })
+    const eventNames = (await Array.fromAsync(app.events())).map(({ name }) => name)
+    expect(eventNames).toContain("pr/needs-author")
+    expect(eventNames).not.toContain("pr/rejected")
     const artifacts = new Map(evidence.artifacts.map((artifact) => [artifact.name, artifact.path]))
     const stdoutArtifact = artifacts.get("stdout")
     const stderrArtifact = artifacts.get("stderr")
@@ -3043,6 +3068,13 @@ describe("Queue command adapters", () => {
     })
     expect(evidence.detail).toContain("[yrd-base-health]")
     expect(evidence.artifacts.every((artifact) => existsSync(artifact.path))).toBe(true)
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected" })
+    const eligibility = app.queue.eligibility("PR1")
+    expect(eligibility).toMatchObject({ reason: { code: "rejected" } })
+    expect(eligibility.reason).not.toHaveProperty("receipt")
+    const eventNames = (await Array.fromAsync(app.events())).map(({ name }) => name)
+    expect(eventNames).toContain("pr/rejected")
+    expect(eventNames).not.toContain("pr/needs-author")
   })
 
   it("lands from origin when the base has no local branch without moving detached HEAD", async () => {
@@ -3441,6 +3473,10 @@ describe("Queue command adapters", () => {
       status: "failed",
       error: { code: "scratch-cleanup-failed", message: "cleanup denied" },
     })
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted" })
+    const eventNames = (await Array.fromAsync(app.events())).map(({ name }) => name)
+    expect(eventNames).not.toContain("pr/rejected")
+    expect(eventNames).not.toContain("pr/needs-author")
   })
 
   it("passes exact YRD_* variables while scrubbing ambient YRD_* and GIT_* values", async () => {
@@ -3813,7 +3849,13 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run.status).toBe("passed")
-    expect(requests.filter(({ argv }) => argv[0] === "git").every(({ timeoutMs }) => timeoutMs === 30_000)).toBe(true)
+    expect(
+      requests
+        .filter(({ argv }) => argv[0] === "git")
+        .every(({ argv, timeoutMs }) =>
+          argv.slice(3, 5).join(" ") === "worktree remove" ? timeoutMs === 120_000 : timeoutMs === 30_000,
+        ),
+    ).toBe(true)
     const initializations = requests.filter(
       ({ argv }) => argv[0] === "git" && argv.includes("init") && argv.includes("--bare"),
     )
