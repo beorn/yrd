@@ -89,8 +89,10 @@ knows the failure kind. `usage`, `configuration`, `refusal`, and
 condition and `message` remains presentation text. Untyped exceptions are not
 silently inferred from their wording by downstream callers.
 
-Human adapters project that immutable fact as `err=<code>`, a one-line cause,
-and resolution steps (plus a reference for deep cases). The projection stays
+Persisted and watch adapters project that immutable fact as `err=<code>`, a
+one-line cause, and resolution steps (plus a reference for deep cases).
+Ordinary CLI stderr leads with one `error:` sentence and retains only concrete
+remedies; JSON retains the full structured projection. All projections stay
 outside `FailureFact`, so historical journal rows gain better guidance without
 a schema migration.
 

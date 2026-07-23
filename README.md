@@ -474,10 +474,10 @@ landing.
 
 #### Resolving Divergent Gitlink Pins
 
-`err=recut-gitlink-conflict` names the authoritative root and pin plus the
-replayed authored root and pin. When neither submodule pin contains the other,
-publish a real composition commit in that submodule, update the carrier to pin
-it, and recut the same PR:
+The stable `recut-gitlink-conflict` code (visible in JSON and persisted views)
+names the authoritative root and pin plus the replayed authored root and pin.
+When neither submodule pin contains the other, publish a real composition
+commit in that submodule, update the carrier to pin it, and recut the same PR:
 
 ```bash
 git -C <submodule> fetch --all --prune
@@ -733,6 +733,12 @@ Expected failures carry one serializable `{ kind, code, message }` fact. The
 CLI projects its exit code from `kind`; changing diagnostic wording cannot
 silently change automation behavior. An untyped exception is treated as an
 infrastructure failure and fails loud with exit `3`.
+
+Human diagnostics lead with one complete `error:` sentence. They add
+`resolve:` lines only for concrete next commands; generic “fix and retry”
+advice is omitted. With `--json`, a diagnostic is one JSON object on stderr:
+its `failure` retains `{ kind, code, message }` and adds the actionable
+`cause`, `resolution`, and optional `reference`.
 
 ## Queues and Steps
 

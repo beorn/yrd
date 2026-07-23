@@ -4294,16 +4294,22 @@ function maxExit(left: YrdCliExitCode, right: YrdCliExitCode): YrdCliExitCode {
   return Math.max(left, right) as YrdCliExitCode
 }
 
-function configureOutput(command: CliCommand, io: YrdCliIO): void {
+type CommanderOutput = { errorCommand?: CliCommand }
+
+function configureOutput(command: CliCommand, io: YrdCliIO, output: CommanderOutput): void {
   command.configureOutput({
     writeOut: (text) => io.stdout(text),
-    writeErr: (text) => io.stderr(text),
+    // Parse failures are rendered once from the caught CommanderError. This
+    // keeps suggestions, JSON diagnostics, and domain failures on one path.
+    writeErr: () => {
+      output.errorCommand = command
+    },
     getOutHasColors: () => io.color === true,
     getErrHasColors: () => io.color === true,
     getOutHelpWidth: () => io.columns ?? 80,
     getErrHelpWidth: () => io.columns ?? 80,
   })
-  for (const child of command.commands) configureOutput(child as unknown as CliCommand, io)
+  for (const child of command.commands) configureOutput(child as unknown as CliCommand, io, output)
 }
 
 function addExamples(program: CliCommand, name: string, projection: "root" | "bay"): void {
@@ -4357,6 +4363,7 @@ function buildProgram(
   projection: "root" | "bay",
   io: YrdCliIO,
   setExit: (code: YrdCliExitCode) => void,
+  commanderOutput: CommanderOutput,
   bootstrap?: RuntimeBootstrap,
 ): CliCommand {
   let runtimeApp = app
@@ -4365,7 +4372,6 @@ function buildProgram(
   const installedServices = (): YrdCliServices => runtimeServices
   const program = new CliCommand(name)
     .description(projection === "bay" ? "manage isolated Git work bays" : "yrd (shipyard) — agentic software delivery")
-    .showHelpAfterError()
     .showSuggestionAfterError()
   program.helpCommand(false)
   program.exitOverride()
@@ -4489,7 +4495,7 @@ function buildProgram(
 
   if (projection === "bay") {
     addExamples(program, name, projection)
-    configureOutput(program, io)
+    configureOutput(program, io, commanderOutput)
     return program
   }
 
@@ -4909,15 +4915,101 @@ function buildProgram(
   const orderedCommands = program.commands as unknown as CliCommand[]
   orderedCommands.sort((left, right) => (order.get(left.name()) ?? 99) - (order.get(right.name()) ?? 99))
   addExamples(program, name, projection)
-  configureOutput(program, io)
+  configureOutput(program, io, commanderOutput)
   return program
 }
 
-function commanderErrorMessage(args: readonly string[], projection: "root" | "bay", error: CommanderError): string {
+function commanderErrorMessage(command: CliCommand | undefined, error: CommanderError): string {
   const removedDraftSubmit =
-    args.includes("--draft") &&
-    (projection === "bay" ? args[0] === "submit" : (args[0] === "pr" || args[0] === "bay") && args[1] === "submit")
+    command?.name() === "submit" &&
+    error.code === "commander.unknownOption" &&
+    error.message.includes("unknown option '--draft'")
   return removedDraftSubmit ? `${error.message}; draft PRs are created with 'yrd pr create'` : error.message
+}
+
+function commandPath(command: CliCommand | undefined, fallback: string): string {
+  if (command === undefined) return fallback
+  const names: string[] = []
+  for (
+    let cursor: CliCommand | null | undefined = command;
+    cursor !== null && cursor !== undefined;
+    cursor = cursor.parent as CliCommand | null | undefined
+  ) {
+    if (!cursor.name().startsWith("_")) names.unshift(cursor.name())
+  }
+  return names.join(" ")
+}
+
+function conciseCommanderCause(error: CommanderError, helpCommand: string): string {
+  const line = error.message
+    .replace(/\s+/gu, " ")
+    .trim()
+    .replace(/^error:\s*/u, "")
+    .replace(/\(Did you mean ([\w-]+)\?\)/u, "(Did you mean '$1'?)")
+  const hiddenDefault = /^too many arguments for '_[^']+'.*got (\d+): (.+)$/u.exec(line)
+  const hiddenDefaultOperands = hiddenDefault?.[2]?.replace(/\.$/u, "")
+  const hiddenDefaultOperand =
+    hiddenDefault === null
+      ? undefined
+      : hiddenDefault[1] === "1"
+        ? hiddenDefaultOperands
+        : hiddenDefaultOperands?.split(", ", 1)[0]
+  if (hiddenDefaultOperand !== undefined) {
+    return `unknown command '${hiddenDefaultOperand}' (Run '${helpCommand} --help' for available commands.)`
+  }
+  if (error.code !== "commander.unknownCommand" || line.includes("(Did you mean ")) return line
+  return `${line} (Run '${helpCommand} --help' for available commands.)`
+}
+
+function commandOption(command: CliCommand, token: string) {
+  const separator = token.indexOf("=")
+  const flag = separator === -1 ? token : token.slice(0, separator)
+  for (
+    let cursor: CliCommand | null | undefined = command;
+    cursor !== null && cursor !== undefined;
+    cursor = cursor.parent as CliCommand | null | undefined
+  ) {
+    const option = cursor.options.find((candidate) => candidate.short === flag || candidate.long === flag)
+    if (option !== undefined) return option
+  }
+  return undefined
+}
+
+function childCommand(command: CliCommand, token: string): CliCommand | undefined {
+  return command.commands
+    .map((candidate) => candidate as unknown as CliCommand)
+    .find((candidate) => candidate.name() === token || candidate.aliases().includes(token))
+}
+
+/** Derive output mode from the same Commander option tree that parses the
+ * invocation. A token consumed as a required option value is not a JSON flag. */
+function jsonOutputRequested(program: CliCommand, args: readonly string[]): boolean {
+  let command = program
+  let consumesValue = false
+  for (const token of args) {
+    if (consumesValue) {
+      consumesValue = false
+      continue
+    }
+    if (token === "--") break
+    if (token === "--json") return true
+    if (token.startsWith("-")) {
+      const option = commandOption(command, token)
+      consumesValue = option?.required === true && !token.includes("=")
+      continue
+    }
+    command = childCommand(command, token) ?? command
+  }
+  return false
+}
+
+/** Cold-path fallback for host failures outside the normal command catcher.
+ * It still uses the canonical Commander definition rather than reparsing argv. */
+export function yrdJsonOutputRequested(argv: readonly string[]): boolean {
+  const invocation = resolveInvocation(argv)
+  const io: YrdCliIO = { stdout() {}, stderr() {} }
+  const program = buildProgram(undefined, {}, invocation.name, invocation.projection, io, () => undefined, {})
+  return jsonOutputRequested(program, canonicalizeYrdCommandAliases(invocation.args, invocation.projection))
 }
 
 /** Run the one Yrd command surface. git-bay projects its canonical bay subtree;
@@ -4939,7 +5031,17 @@ async function executeYrd(
     exit = maxExit(exit, code)
   }
   const runtimeIO: YrdCliIO = { ...io }
-  const program = buildProgram(app, services, invocation.name, invocation.projection, runtimeIO, setExit, bootstrap)
+  const commanderOutput: CommanderOutput = {}
+  const program = buildProgram(
+    app,
+    services,
+    invocation.name,
+    invocation.projection,
+    runtimeIO,
+    setExit,
+    commanderOutput,
+    bootstrap,
+  )
   const canonicalArgs = canonicalizeYrdCommandAliases(invocation.args, invocation.projection)
   const args =
     invocation.projection === "root" && canonicalArgs.length === 1 && canonicalArgs[0] === "pr"
@@ -4958,29 +5060,36 @@ async function executeYrd(
             },
           },
         },
-        { json: args.includes("--json") },
+        { json: jsonOutputRequested(program, args) },
         runtimeIO,
       )
     }
     if (error instanceof CommanderError) {
       if (error.exitCode === 0 || error.code === "commander.helpDisplayed") return 0
+      const message = commanderErrorMessage(commanderOutput.errorCommand, error)
       await diagnostic(
         runtimeIO,
-        invocation.name,
         createFailure(
           {
             kind: "usage",
             code: "invalid-arguments",
-            message: commanderErrorMessage(args, invocation.projection, error),
+            message,
           },
           error,
         ),
+        {
+          json: jsonOutputRequested(program, args),
+          humanCause: conciseCommanderCause(error, commandPath(commanderOutput.errorCommand, invocation.name)),
+        },
       )
       return 2
     }
     const { exitCode } = classifyFailure(error)
     const globals = program.opts() as Readonly<{ verbose?: number }>
-    await diagnostic(runtimeIO, invocation.name, error, { verbose: (globals.verbose ?? 0) > 0 })
+    await diagnostic(runtimeIO, error, {
+      json: jsonOutputRequested(program, args),
+      verbose: (globals.verbose ?? 0) > 0,
+    })
     return exitCode
   }
 }
