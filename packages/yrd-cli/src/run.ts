@@ -2360,7 +2360,7 @@ const READ_ONLY_COMMANDS: Readonly<Record<string, readonly string[]>> = {
 function isReadOnlyInvocation(
   action: Readonly<{ name(): string; parent?: Readonly<{ name(): string }> | null }>,
 ): boolean {
-  if (action.name() === "_dashboard") return true
+  if (action.name() === "_dashboard" || action.name() === "log") return true
   const parent = action.parent?.name()
   if (parent === undefined) return false
   return READ_ONLY_COMMANDS[parent]?.includes(action.name()) === true
