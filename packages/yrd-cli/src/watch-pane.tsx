@@ -5,6 +5,7 @@ import {
   Divider,
   Link,
   ListView,
+  ModalDialog,
   ScrollArea,
   SplitPane,
   Tab,
@@ -719,9 +720,7 @@ export function QueueWorkflowStepTabs({
   // that override.
   const tabNames = useMemo(() => (data === undefined ? [] : [PR_TAB_ID, ...names]), [data, names])
   const liveStep =
-    data === undefined
-      ? undefined
-      : (data.steps.findLast((step) => step.status === "running")?.step ?? PR_TAB_ID)
+    data === undefined ? undefined : (data.steps.findLast((step) => step.status === "running")?.step ?? PR_TAB_ID)
   const [userSelectedStep, setUserSelectedStep] = useState<string | null>(null)
   const activeStep = resolveStepTabSelection(tabNames, liveStep, userSelectedStep)
 
@@ -898,6 +897,321 @@ function selectedDetailIssue(
   return prs.find((candidate) => candidate.id === (selectedPr ?? fallbackPr))?.issue
 }
 
+type QueueWatchCursorMode = "follow-newest" | "auto-follow-run" | "fixed-row"
+
+type QueueWatchCursorRow = Readonly<{
+  key: string
+  pr: string
+  revision: number
+  status: string
+  run?: string
+}>
+
+type QueueWatchCursorState = Readonly<{
+  mode: QueueWatchCursorMode
+  rowKey?: string
+  notice?: string
+}>
+
+type QueueWatchCursorOp =
+  | Readonly<{ type: "select-row"; index: number; fixed: boolean }>
+  | Readonly<{ type: "cycle-action-top" }>
+  | Readonly<{ type: "jump-bottom" }>
+
+function queueWatchCursorLabel(row: QueueWatchCursorRow): string {
+  return `pr#${row.pr.replace(/^pr(?:[-#])?/iu, "")}.${row.revision}`
+}
+
+function queueWatchManualCursorMode(row: QueueWatchCursorRow, index: number): QueueWatchCursorMode {
+  if (row.status === "running") return "auto-follow-run"
+  return index === 0 ? "follow-newest" : "fixed-row"
+}
+
+function nearestPriorCursorNeighbor(
+  missingKey: string,
+  previousRows: readonly QueueWatchCursorRow[],
+  rows: readonly QueueWatchCursorRow[],
+): QueueWatchCursorRow | undefined {
+  const previousIndex = previousRows.findIndex((row) => row.key === missingKey)
+  if (previousIndex < 0) return undefined
+  const currentByKey = new Map(rows.map((row) => [row.key, row]))
+  for (let distance = 1; distance < previousRows.length; distance += 1) {
+    // Prefer the visually preceding row on an equal-distance tie. This makes
+    // a disappearing middle row move one line up, never to unrelated row 0.
+    const before = previousRows[previousIndex - distance]
+    if (before !== undefined) {
+      const retained = currentByKey.get(before.key)
+      if (retained !== undefined) return retained
+    }
+    const after = previousRows[previousIndex + distance]
+    if (after !== undefined) {
+      const retained = currentByKey.get(after.key)
+      if (retained !== undefined) return retained
+    }
+  }
+  return undefined
+}
+
+function firstRunningCursorRow(
+  rows: readonly QueueWatchCursorRow[],
+  runningRunOrder: ReadonlyMap<string, number>,
+): QueueWatchCursorRow | undefined {
+  const orderOf = (row: QueueWatchCursorRow): number => {
+    if (row.run === undefined) throw new Error(`yrd: running queue row '${row.key}' has no run identity`)
+    const order = runningRunOrder.get(row.run)
+    if (order === undefined) {
+      throw new Error(`yrd: running queue row '${row.key}' references inactive run '${row.run}'`)
+    }
+    return order
+  }
+  return rows
+    .map((row, index) => ({ row, index }))
+    .filter(({ row }) => row.status === "running")
+    .sort((left, right) => orderOf(left.row) - orderOf(right.row) || left.index - right.index)[0]?.row
+}
+
+function queueWatchActionRow(
+  rows: readonly QueueWatchCursorRow[],
+  runningRunOrder: ReadonlyMap<string, number>,
+): QueueWatchCursorRow | undefined {
+  return firstRunningCursorRow(rows, runningRunOrder) ?? rows.find((row) => row.status === "submitted")
+}
+
+/** Pure cursor reconciliation: row identity and operator intent are state;
+ * projection indices are only a rendering coordinate. */
+function reconcileQueueWatchCursor(
+  state: QueueWatchCursorState,
+  previousRows: readonly QueueWatchCursorRow[],
+  rows: readonly QueueWatchCursorRow[],
+  runningRunOrder: ReadonlyMap<string, number>,
+): QueueWatchCursorState {
+  if (rows.length === 0) return state
+  if (state.mode === "follow-newest") {
+    const newest = rows[0]
+    if (newest === undefined) return state
+    return {
+      mode: newest.status === "running" ? "auto-follow-run" : "follow-newest",
+      rowKey: newest.key,
+    }
+  }
+
+  const current = rows.find((row) => row.key === state.rowKey)
+  if (state.mode === "auto-follow-run") {
+    // Parking on a running PR follows that exact work until it settles. Only
+    // then choose the next live run, ordered by durable run-start time.
+    if (current?.status === "running") return { ...state, notice: undefined }
+    const running = firstRunningCursorRow(rows, runningRunOrder)
+    if (running !== undefined) return { mode: state.mode, rowKey: running.key }
+    if (current !== undefined) return { ...state, notice: undefined }
+  } else if (current !== undefined) {
+    return state
+  }
+
+  const neighbor =
+    (state.rowKey === undefined ? undefined : nearestPriorCursorNeighbor(state.rowKey, previousRows, rows)) ?? rows[0]
+  if (neighbor === undefined) return state
+  const missing = previousRows.find((row) => row.key === state.rowKey)
+  return {
+    ...state,
+    rowKey: neighbor.key,
+    ...(missing === undefined
+      ? { notice: `selection moved: unavailable row → ${queueWatchCursorLabel(neighbor)}` }
+      : {
+          notice: `selection moved: ${queueWatchCursorLabel(missing)} is no longer visible → ${queueWatchCursorLabel(neighbor)}`,
+        }),
+  }
+}
+
+function applyQueueWatchCursorOp(
+  state: QueueWatchCursorState,
+  op: QueueWatchCursorOp,
+  rows: readonly QueueWatchCursorRow[],
+  runningRunOrder: ReadonlyMap<string, number>,
+): QueueWatchCursorState {
+  const current = reconcileQueueWatchCursor(state, rows, rows, runningRunOrder)
+  if (op.type === "select-row") {
+    const row = rows[op.index]
+    if (row === undefined) return current
+    return {
+      mode: op.fixed ? "fixed-row" : queueWatchManualCursorMode(row, op.index),
+      rowKey: row.key,
+    }
+  }
+  if (op.type === "jump-bottom") {
+    const row = rows.at(-1)
+    return row === undefined ? current : { mode: "fixed-row", rowKey: row.key }
+  }
+
+  const top = rows[0]
+  const actionRow = queueWatchActionRow(rows, runningRunOrder)
+  const target = actionRow === undefined || current.rowKey === actionRow.key ? top : actionRow
+  if (target === undefined) return current
+  return {
+    mode: target === actionRow && target.status === "running" ? "auto-follow-run" : "fixed-row",
+    rowKey: target.key,
+  }
+}
+
+function sameQueueWatchCursorState(left: QueueWatchCursorState, right: QueueWatchCursorState): boolean {
+  return left.mode === right.mode && left.rowKey === right.rowKey && left.notice === right.notice
+}
+
+function initialQueueWatchCursorState(
+  rows: readonly QueueWatchCursorRow[],
+  requestedPr: string | undefined,
+  defaultCursorKey: string | undefined,
+): QueueWatchCursorState {
+  if (rows.length === 0) {
+    return { mode: requestedPr === undefined ? "follow-newest" : "fixed-row" }
+  }
+  if (requestedPr !== undefined) {
+    const requested = rows.find((row) => row.pr === requestedPr)
+    return requested === undefined
+      ? { mode: "fixed-row" }
+      : { mode: queueWatchManualCursorMode(requested, rows.indexOf(requested)), rowKey: requested.key }
+  }
+  const liveDefault = rows.find((row) => row.key === defaultCursorKey)
+  const row = liveDefault?.status === "running" ? liveDefault : rows[0]
+  if (row === undefined) throw new Error("yrd: non-empty queue has no initial cursor row")
+  return {
+    mode: row.status === "running" ? "auto-follow-run" : "follow-newest",
+    rowKey: row.key,
+  }
+}
+
+function queueRunningRunOrder(results: readonly QueueStatusResult[]): ReadonlyMap<string, number> {
+  return new Map(
+    results
+      .flatMap((result) => result.running)
+      .sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id))
+      .map((run, index) => [run.id, index] as const),
+  )
+}
+
+function queueWatchCursorRows(
+  snapshot: QueueWatchSnapshot,
+  projectedRows: readonly QueueTimelineProjectedRow[] | undefined,
+): readonly QueueWatchCursorRow[] {
+  if (snapshot.projection === undefined) {
+    return queueTimelineRows(snapshot.results, snapshot.now, false).map((row) => ({
+      key: row.key,
+      pr: row.pr,
+      revision: row.revision,
+      status: row.status,
+      ...(row.run === undefined ? {} : { run: row.run }),
+    }))
+  }
+  return (projectedRows ?? []).map((row) => ({
+    key: row.id,
+    pr: row.pr,
+    revision: row.revision,
+    status: row.status,
+    ...(row.run === undefined ? {} : { run: row.run }),
+  }))
+}
+
+function useQueueWatchCursor({
+  rows,
+  results,
+  requestedPr,
+  defaultCursorKey,
+}: {
+  rows: readonly QueueWatchCursorRow[]
+  results: readonly QueueStatusResult[]
+  requestedPr: string | undefined
+  defaultCursorKey: string | undefined
+}) {
+  const [state, setState] = useState<QueueWatchCursorState>(() =>
+    initialQueueWatchCursorState(rows, requestedPr, defaultCursorKey),
+  )
+  const previousRows = useRef<readonly QueueWatchCursorRow[]>(rows)
+  const listRef = useRef<ListViewHandle | null>(null)
+  const forcedFixedRowKey = useRef<string | undefined>(undefined)
+  const runningRunOrder = useMemo(() => queueRunningRunOrder(results), [results])
+  const resolved = reconcileQueueWatchCursor(state, previousRows.current, rows, runningRunOrder)
+  const resolvedIndex = rows.findIndex((row) => row.key === resolved.rowKey)
+  if (rows.length > 0 && resolvedIndex < 0) {
+    throw new Error(`yrd: reconciled queue cursor '${resolved.rowKey ?? "<unset>"}' is not visible`)
+  }
+
+  useEffect(() => {
+    previousRows.current = rows
+    forcedFixedRowKey.current = undefined
+    if (!sameQueueWatchCursorState(state, resolved)) setState(resolved)
+  }, [resolved, rows, state])
+
+  // The viewport is live data, not a cursor anchor. A changed newest identity
+  // scrolls the list to row 0 while the selection remains on its row key.
+  const newestRowKey = rows[0]?.key
+  useEffect(() => {
+    listRef.current?.scrollToTop()
+  }, [newestRowKey])
+
+  const selectRow = useCallback(
+    (index: number): void => {
+      const row = rows[index]
+      if (row === undefined) return
+      const forcedFixed = forcedFixedRowKey.current === row.key
+      forcedFixedRowKey.current = undefined
+      setState((current) =>
+        applyQueueWatchCursorOp(current, { type: "select-row", index, fixed: forcedFixed }, rows, runningRunOrder),
+      )
+    },
+    [rows, runningRunOrder],
+  )
+  const cycleActionAndTop = useCallback((): void => {
+    setState((current) => applyQueueWatchCursorOp(current, { type: "cycle-action-top" }, rows, runningRunOrder))
+  }, [rows, runningRunOrder])
+  const jumpToBottom = useCallback((): void => {
+    const target = rows.at(-1)
+    if (target === undefined) return
+    // ListView owns the physical G/End navigation and notifies onCursor in the
+    // same input batch. Mark that callback as an explicit jump so it cannot
+    // reinterpret a running bottom row as auto-follow.
+    forcedFixedRowKey.current = target.key
+    listRef.current?.scrollToBottom()
+    setState((current) => applyQueueWatchCursorOp(current, { type: "jump-bottom" }, rows, runningRunOrder))
+  }, [rows, runningRunOrder])
+
+  return {
+    cursor: Math.max(0, resolvedIndex),
+    listRef,
+    resolved,
+    selectRow,
+    cycleActionAndTop,
+    jumpToBottom,
+  } as const
+}
+
+const QUEUE_WATCH_HELP: ReadonlyArray<readonly [key: string, action: string]> = [
+  ["g", "action position ↔ absolute top"],
+  ["G", "absolute bottom"],
+  ["j / k · ↑ / ↓", "move the cursor"],
+  ["Enter / Esc", "open / close detail"],
+  ["?", "close this help"],
+]
+
+function QueueWatchHelp({ onClose }: { onClose: () => void }) {
+  return (
+    <Box position="absolute" alignSelf="center" marginTop={1} flexDirection="column">
+      <ModalDialog title="Watch keys" width={64} footer="Esc closes" onClose={onClose}>
+        <Box flexDirection="column" paddingX={1}>
+          {QUEUE_WATCH_HELP.map(([key, action]) => (
+            <Box key={key} flexDirection="row">
+              <Box width={18} flexShrink={0}>
+                <Text bold>{key}</Text>
+              </Box>
+              <Text color="$fg-muted" wrap="truncate">
+                {action}
+              </Text>
+            </Box>
+          ))}
+        </Box>
+      </ModalDialog>
+    </Box>
+  )
+}
+
 export function QueueWatchFrame({
   snapshot,
   pr,
@@ -960,68 +1274,26 @@ export function QueueWatchFrame({
       return retained.size === current.size ? current : retained
     })
   }, [visibleStormKeys])
-  const rows = useMemo(
-    () =>
-      snapshot.projection === undefined
-        ? queueTimelineRows(snapshot.results, snapshot.now, false).map((row) => ({
-            key: row.key,
-            pr: row.pr,
-            ...(row.run === undefined ? {} : { run: row.run }),
-          }))
-        : (projectedRows ?? []).map((row) => ({
-            key: row.id,
-            pr: row.pr,
-            ...(row.run === undefined ? {} : { run: row.run }),
-          })),
-    [projectedRows, snapshot],
-  )
-  // Default cursor: first RUNNING row, else the newest FINISHED row. A manual
-  // cursor move is sticky — default-follow stops until the pinned row leaves
-  // the window or the view is reopened.
+  const rows = useMemo(() => queueWatchCursorRows(snapshot, projectedRows), [projectedRows, snapshot])
+  // Preserve the queue's active-work detail default while the viewport itself
+  // always begins at physical row 0. Selection and scroll position are
+  // deliberately independent contracts.
   const defaultCursorKey =
     snapshot.projection === undefined
       ? rows[0]?.key
       : queueTimelineVisibleDefaultCursorId(snapshot.projection, visibleBuckets, true)
-  const [manualCursor, setManualCursor] = useState(false)
-  const [cursorRowKey, setCursorRowKey] = useState<string | undefined>(() => defaultCursorKey)
-  const [selectedPr, setSelectedPr] = useState<string | undefined>(
-    () => pr ?? rows.find((row) => row.key === defaultCursorKey)?.pr ?? rows[0]?.pr,
-  )
+  const cursorController = useQueueWatchCursor({
+    rows,
+    results: snapshot.results,
+    requestedPr: pr,
+    defaultCursorKey,
+  })
+  const { cursor, listRef: timelineListRef, resolved: resolvedCursorState, selectRow } = cursorController
   const [detailOpen, setDetailOpen] = useState(() => snapshot.projection === undefined || tier !== "full")
+  const [helpOpen, setHelpOpen] = useState(false)
   const [splitRatio, setSplitRatio] = useState(DEFAULT_SPLIT_RATIO)
-  const [newRows, setNewRows] = useState(0)
   const [cancelArmed, setCancelArmed] = useState(false)
   const previousTier = useRef(tier)
-  const previousRowKeys = useRef<readonly string[]>(rows.map((row) => row.key))
-  const cursor = Math.max(
-    0,
-    rows.findIndex((row) => row.key === cursorRowKey),
-  )
-
-  useEffect(() => {
-    if (rows.length === 0) {
-      setCursorRowKey(undefined)
-      setSelectedPr(pr)
-      return
-    }
-    const pinned = manualCursor ? rows.find((row) => row.key === cursorRowKey) : undefined
-    if (pinned === undefined && manualCursor) setManualCursor(false)
-    const selected =
-      pinned ?? rows.find((row) => row.key === (manualCursor ? cursorRowKey : defaultCursorKey)) ?? rows[0]
-    if (selected === undefined) return
-    if (selected.key !== cursorRowKey) setCursorRowKey(selected.key)
-    if (selected.pr !== selectedPr) setSelectedPr(selected.pr)
-  }, [cursorRowKey, defaultCursorKey, manualCursor, pr, rows, selectedPr])
-
-  useEffect(() => {
-    const previous = new Set(previousRowKeys.current)
-    const selectedIndex = rows.findIndex((row) => row.key === cursorRowKey)
-    if (selectedIndex > 0) {
-      const addedBeforeCursor = rows.slice(0, selectedIndex).filter((row) => !previous.has(row.key)).length
-      if (addedBeforeCursor > 0) setNewRows((count) => count + addedBeforeCursor)
-    }
-    previousRowKeys.current = rows.map((row) => row.key)
-  }, [cursorRowKey, rows])
 
   useEffect(() => {
     if (previousTier.current === tier) return
@@ -1030,14 +1302,23 @@ export function QueueWatchFrame({
   }, [tier])
 
   useInput((input, key) => {
+    const character = key.text ?? input
+    if (character === "?") {
+      setHelpOpen((open) => !open)
+      return
+    }
+    if (helpOpen) {
+      if (key.escape) setHelpOpen(false)
+      return
+    }
     // Cancel affordance for the SELECTED run: `x` arms a confirmation, then
     // `y`/Enter confirms and any other key (incl. a second `x`, Escape) dismisses.
     // Wired to the SAME path as the `run cancel <R>` CLI (onCancelRun). Intercepted
     // before the detail/filter keys so the armed prompt captures its confirming
     // keypress rather than opening the detail pane.
-    if (onCancelRun !== undefined && (cancelArmed || input === "x")) {
+    if (onCancelRun !== undefined && (cancelArmed || character === "x")) {
       const decision = reduceRunCancelKey(
-        { char: input, escape: key.escape === true, return: key.return === true },
+        { char: character, escape: key.escape === true, return: key.return === true },
         cancelArmed,
         rows[cursor]?.run,
       )
@@ -1053,25 +1334,24 @@ export function QueueWatchFrame({
       setDetailOpen(true)
       return
     }
+    if (character === "g") {
+      cursorController.cycleActionAndTop()
+      return
+    }
+    if (character === "G") {
+      cursorController.jumpToBottom()
+      return
+    }
     if (snapshot.projection === undefined) return
     // Direct status-filter toggles (user respec 2026-07-15). Pause/resume is
     // removed. `t` toggles the todo (pending) bucket, matching the pill's
-    // bold-first-letter hint (pending displays as `todo`, user directive
-    // 2026-07-21).
-    if (input === "t") toggleBucket("pending")
-    if (input === "r") toggleBucket("running")
-    if (input === "f") toggleBucket("failed")
-    if (input === "d") toggleBucket("done")
+    // bold-first-letter hint; individual queued rows use the truthful
+    // `submitted` status introduced by the current projection contract.
+    if (character === "t") toggleBucket("pending")
+    if (character === "r") toggleBucket("running")
+    if (character === "f") toggleBucket("failed")
+    if (character === "d") toggleBucket("done")
   })
-
-  const selectRow = (index: number): void => {
-    const row = rows[index]
-    if (row === undefined) return
-    setManualCursor(true)
-    setCursorRowKey(row.key)
-    setSelectedPr(row.pr)
-    setNewRows(0)
-  }
 
   const activateRow = (index: number): void => {
     selectRow(index)
@@ -1085,22 +1365,8 @@ export function QueueWatchFrame({
     })
   }
 
-  // Jump-to-newest (item 4-new): the `↓ N new` cue resumes default-follow at
-  // the newest row (first running, else newest finished) and clears the count.
-  // It reuses the exact `defaultCursorKey` the un-pinned pane already follows,
-  // so clicking the cue lands where the cursor would sit without a manual pin.
-  const jumpToNewest = (): void => {
-    const targetKey = defaultCursorKey ?? rows[0]?.key
-    if (targetKey === undefined) return
-    const target = rows.find((row) => row.key === targetKey)
-    setManualCursor(false)
-    setCursorRowKey(targetKey)
-    setSelectedPr(target?.pr ?? pr)
-    setNewRows(0)
-  }
-
   const selectedRow = rows[cursor]
-  const detailPr = pr ?? selectedPr
+  const detailPr = pr ?? selectedRow?.pr
   const detailData =
     selectedRow?.run === undefined
       ? undefined
@@ -1139,16 +1405,17 @@ export function QueueWatchFrame({
         results={snapshot.results}
         now={snapshot.now}
         columns={timelineColumns}
-        nav
+        nav={!helpOpen}
         cursorKey={cursor}
         onCursor={selectRow}
         onSelect={activateRow}
+        listRef={timelineListRef}
       />
     ) : (
       <QueueTimelineView
         projection={snapshot.projection}
         columns={timelineColumns}
-        nav
+        nav={!helpOpen}
         cursorKey={cursor}
         onCursor={selectRow}
         onSelect={activateRow}
@@ -1158,8 +1425,7 @@ export function QueueWatchFrame({
         visibleBuckets={visibleBuckets}
         expandedStorms={expandedStorms}
         onToggleBucket={toggleBucket}
-        freshRows={newRows}
-        onJumpToNewest={jumpToNewest}
+        listRef={timelineListRef}
       />
     )
   const selectedDetail =
@@ -1188,9 +1454,10 @@ export function QueueWatchFrame({
     )
   if (snapshot.projection === undefined) {
     return (
-      <Box flexDirection="column">
+      <Box position="relative" flexDirection="column">
         {timeline}
         {detailPr === undefined ? null : <Box marginTop={1}>{selectedDetail}</Box>}
+        {helpOpen ? <QueueWatchHelp onClose={() => setHelpOpen(false)} /> : null}
       </Box>
     )
   }
@@ -1233,7 +1500,15 @@ export function QueueWatchFrame({
     </Box>
   )
   return (
-    <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0} userSelect="text">
+    <Box
+      position="relative"
+      flexDirection="column"
+      width="100%"
+      height="100%"
+      minWidth={0}
+      minHeight={0}
+      userSelect="text"
+    >
       <Box flexGrow={1} minWidth={0} minHeight={0}>
         {tier === "full" ? (
           <Box flexGrow={1} minWidth={0} minHeight={0}>
@@ -1253,17 +1528,23 @@ export function QueueWatchFrame({
           />
         )}
       </Box>
-      {/* The keybinding footer was removed (user directive 2026-07-15). Only
-          the run-cancel confirmation banner (#59) still occupies a bottom row,
-          and only while a cancel is armed — otherwise nothing renders here. `x`
-          arms the affordance (handled in the input reducer above). */}
+      {/* The keybinding footer was removed (user directive 2026-07-15). Bottom
+          chrome is reserved for explicit state changes: run cancellation and
+          a loud cursor recovery when the selected row disappears. */}
       {cancelArmed && selectedRow?.run !== undefined ? (
         <Box height={1} flexShrink={0}>
           <Text color="$fg-warning" bold>
             Cancel run {selectedRow.run}? Its PRs re-queue, not rejected. y/Enter to confirm, any other key to abort.
           </Text>
         </Box>
-      ) : null}
+      ) : resolvedCursorState.notice === undefined ? null : (
+        <Box height={1} flexShrink={0}>
+          <Text color="$fg-warning" wrap="truncate">
+            ⚠ {resolvedCursorState.notice}
+          </Text>
+        </Box>
+      )}
+      {helpOpen ? <QueueWatchHelp onClose={() => setHelpOpen(false)} /> : null}
     </Box>
   )
 }

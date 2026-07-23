@@ -96,6 +96,17 @@ const ContestSchema = z
   .strict()
   .default({})
 
+/** Admission refusal boundary for path roots that belong elsewhere (e.g. pm
+ * state split into a sibling repo). Entries are plain path prefixes: "@" covers
+ * every top-level sigil root, "hub/" that tree. `reason` is appended to the
+ * refusal so the pointer to the right home comes from the repo's own config. */
+const RefuseSchema = z
+  .object({
+    paths: z.array(TextSchema).min(1).readonly(),
+    reason: TextSchema.optional(),
+  })
+  .strict()
+
 const ProjectSchema = z
   .object({
     base: TextSchema.optional(),
@@ -104,10 +115,12 @@ const ProjectSchema = z
     requires: RequirementsSchema.optional(),
     contest: ContestSchema,
     notify: NotifySchema.optional(),
+    refuse: RefuseSchema.optional(),
   })
   .catchall(StepSchema)
 
 export type YrdStepConfig = Readonly<z.infer<typeof StepObjectSchema>>
+export type YrdRefuseConfig = Readonly<z.infer<typeof RefuseSchema>>
 export type YrdProjectConfig = Readonly<{
   base?: string
   batch?: false | number
@@ -116,6 +129,7 @@ export type YrdProjectConfig = Readonly<{
   definitions: Readonly<Record<string, YrdStepConfig>>
   contest: Readonly<z.infer<typeof ContestSchema>>
   notify?: SignalRoutes
+  refuse?: YrdRefuseConfig
 }>
 
 export type ResolvedYrdProjectConfig = Readonly<{
@@ -126,6 +140,7 @@ export type ResolvedYrdProjectConfig = Readonly<{
   definitions: Readonly<Record<string, YrdStepConfig>>
   contest: Readonly<{ concurrency: number; timeoutMs: number; evaluators: readonly string[] }>
   notify?: SignalRoutes
+  refuse?: YrdRefuseConfig
 }>
 
 export function parseYrdConfig(value: unknown): YrdProjectConfig {
@@ -139,7 +154,7 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
   }
   const parsed = ProjectSchema.safeParse(value ?? {})
   if (parsed.success) {
-    const { base, batch, steps, requires, contest, notify, ...definitions } = parsed.data
+    const { base, batch, steps, requires, contest, notify, refuse, ...definitions } = parsed.data
     return {
       ...(base === undefined ? {} : { base }),
       ...(batch === undefined ? {} : { batch }),
@@ -148,6 +163,7 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
       definitions,
       contest,
       ...(notify === undefined ? {} : { notify }),
+      ...(refuse === undefined ? {} : { refuse }),
     }
   }
   const issue = parsed.error.issues[0]
@@ -160,7 +176,7 @@ function configError(issue: z.core.$ZodIssue): Error {
   if (
     issue.code === "invalid_type" &&
     issue.path.length === 1 &&
-    !["base", "batch", "steps", "requires", "contest", "notify"].includes(path)
+    !["base", "batch", "steps", "requires", "contest", "notify", "refuse"].includes(path)
   ) {
     return new Error(`yrd: config ${path} is not supported`)
   }
@@ -228,6 +244,7 @@ export async function loadYrdConfig(options: {
         evaluators: parsed.contest.evaluators ?? ["check"],
       },
       notify: parsed.notify ?? {},
+      ...(parsed.refuse === undefined ? {} : { refuse: parsed.refuse }),
     },
   }
 }

@@ -351,6 +351,7 @@ async function checkedQueue(
     env?: NodeJS.ProcessEnv
     environmentOverrides?: Readonly<Record<string, string>>
     environmentPassthrough?: readonly string[]
+    refuse?: Readonly<{ paths: readonly string[]; reason?: string }>
   }> = {},
 ) {
   const bayJobs = createBayJobDefs(unusedWorkspace)
@@ -369,6 +370,7 @@ async function checkedQueue(
       ...(options.environmentPassthrough === undefined
         ? {}
         : { environmentPassthrough: options.environmentPassthrough }),
+      ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
     }),
     {
       revision: `check:${JSON.stringify(command)}:${options.waiting === true}`,
@@ -377,7 +379,12 @@ async function checkedQueue(
     },
   )
   const merge = withMerge(
-    gitMergeStep<Checked>({ inject: { process }, repo, ...(options.env === undefined ? {} : { env: options.env }) }),
+    gitMergeStep<Checked>({
+      inject: { process },
+      repo,
+      ...(options.env === undefined ? {} : { env: options.env }),
+      ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
+    }),
     { revision: "git-merge-v1" },
   )
   const queue = withQueue({ steps: [check, merge] as const, batch: options.batch ?? 1 })
@@ -1533,6 +1540,53 @@ describe("Queue command adapters", () => {
     const eligibility = app.queue.eligibility("PR1")
     expect(eligibility.reason?.code).toBe("needs-author")
     expect(eligibility.reason?.receipt).toMatchObject({ code: "authored-gitlink" })
+  })
+
+  it("refuses a payload touching configured refuse paths and names them with the configured reason", async () => {
+    const { repo } = await repository()
+    const baseSha = await git(repo, ["rev-parse", "main"])
+    await git(repo, ["switch", "-qc", "issue/pm-state"])
+    await mkdir(join(repo, "@km"), { recursive: true })
+    await mkdir(join(repo, "hub"), { recursive: true })
+    await writeFile(join(repo, "@km", "note.md"), "state\n")
+    await writeFile(join(repo, "hub", "plan.md"), "plan\n")
+    await writeFile(join(repo, "code.ts"), "export {}\n")
+    await git(repo, ["add", "."])
+    await git(repo, ["commit", "-qm", "pm state + code"])
+    const headSha = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "main"])
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, ["true"], {
+      refuse: { paths: ["@", "hub/"], reason: "pm state lives in the sibling state repo — commit it there directly" },
+    })
+    await app.bays.submit({ branch: "issue/pm-state", headSha, base: "main", baseSha })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "refused-path",
+        message: expect.stringMatching(/@km\/note\.md.*hub\/plan\.md.*sibling state repo/u),
+      },
+    })
+    expect(run.steps[0]?.job).toMatchObject({
+      status: "failed",
+      output: { conflicts: [{ repo: ".", paths: ["@km/note.md", "hub/plan.md"] }] },
+    })
+    expect(await git(repo, ["rev-parse", "main"])).toBe(baseSha)
+  })
+
+  it("passes a payload outside the armed refuse boundary", async () => {
+    const { repo, candidate } = await repository("candidate")
+    const baseSha = await git(repo, ["rev-parse", "main"])
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, ["true"], { refuse: { paths: ["@", "hub/"] } })
+    await app.bays.submit({ branch: "issue/candidate", headSha: candidate, base: "main", baseSha })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({ status: "passed" })
   })
 
   it("redirects an invalid manual composition to the authored-root draft and recut flow", async () => {
