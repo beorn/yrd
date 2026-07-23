@@ -1684,6 +1684,8 @@ async function applyPrSelectionVerb(
       }
     }
     const metadata = await resolveSubmitMetadata(app, selector, options, io)
+    // Internal compatibility seam: `draft` means emit `pr/pushed` without
+    // `pr/submitted`; it is deliberately not part of either submit CLI.
     let pr = await app.bays.submitSelection(selector, {
       ...(base === undefined ? {} : { base }),
       ...(options.issue === undefined ? {} : { issue: options.issue }),
