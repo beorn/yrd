@@ -89,12 +89,12 @@ export async function withdrawPrs(
 export type PrunePrsOptions = JsonOption & Readonly<{ dryRun?: boolean }>
 
 type PruneChecks = Readonly<{
-  headPresent: boolean
+  headPresent?: boolean
   ancestorOfBase?: boolean
   mergeTree?: "identical" | "divergent" | "conflicts" | "skipped"
 }>
 
-type PruneVerdict = "withdraw" | "would-withdraw" | "keep"
+type PruneVerdict = "withdraw" | "would-withdraw" | "keep" | "error"
 
 type PruneRow = Readonly<{
   pr: string
@@ -102,15 +102,44 @@ type PruneRow = Readonly<{
   revision: number
   headSha: string
   base: string
-  baseSha: string
+  baseSha?: string
   checks: PruneChecks
   verdict: PruneVerdict
   reason?: string
+  error?: string
   detail: string
 }>
 
 function pruneLine(row: PruneRow): string {
-  return `[${row.verdict}] ${row.pr} ${row.branch} r${row.revision}: head ${short(row.headSha)} vs ${row.base}@${short(row.baseSha)} — ${row.detail}`
+  const base = row.baseSha === undefined ? row.base : `${row.base}@${short(row.baseSha)}`
+  return `[${row.verdict}] ${row.pr} ${row.branch} r${row.revision}: head ${short(row.headSha)} vs ${base} — ${row.detail}`
+}
+
+function pruneFailureMessage(pr: string, action: "judged" | "withdrawn", error: unknown): string {
+  const cause = error instanceof Error && error.message.trim() !== "" ? error.message : String(error)
+  return `PR '${pr}' could not be ${action}: ${cause}`
+}
+
+function pruneError(pr: PR, baseSha: string | undefined, error: unknown, checks: PruneChecks = {}): PruneRow {
+  const message = pruneFailureMessage(pr.id, "judged", error)
+  return {
+    pr: pr.id,
+    branch: pr.branch,
+    revision: pr.revision,
+    headSha: pr.headSha,
+    base: pr.base,
+    ...(baseSha === undefined ? {} : { baseSha }),
+    checks,
+    verdict: "error",
+    error: message,
+    detail: message,
+  }
+}
+
+function replaceWithPruneError(row: PruneRow, error: unknown): PruneRow {
+  const { verdict: _verdict, reason: _reason, error: _error, detail: _detail, ...identity } = row
+  const message = pruneFailureMessage(row.pr, "withdrawn", error)
+  return { ...identity, verdict: "error", error: message, detail: message }
 }
 
 /** Prove one PR's superseded verdict against its resolved base tip. Every
@@ -173,33 +202,43 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
 
   const rows: PruneRow[] = []
   for (const pr of live) {
-    const baseSha = (await git.resolveCommit(`origin/${pr.base}`)) ?? (await git.resolveCommit(pr.base))
-    if (baseSha === undefined) {
-      raiseFailure(
-        "configuration",
-        "prune-base-missing",
-        `yrd: PR '${pr.id}' targets base '${pr.base}' but neither 'origin/${pr.base}' nor '${pr.base}' resolves to a commit here`,
-      )
+    let baseSha: string | undefined
+    try {
+      baseSha = (await git.resolveCommit(`origin/${pr.base}`)) ?? (await git.resolveCommit(pr.base))
+      if (baseSha === undefined) {
+        throw new Error(
+          `target base '${pr.base}' did not resolve: neither 'origin/${pr.base}' nor '${pr.base}' is a commit here`,
+        )
+      }
+      rows.push(await pruneVerdict(pr, baseSha, git, dryRun))
+    } catch (error) {
+      rows.push(pruneError(pr, baseSha, error))
     }
-    rows.push(await pruneVerdict(pr, baseSha, git, dryRun))
   }
 
   const withdrawn: PR[] = []
   if (!dryRun) {
-    for (const row of rows) {
+    for (const [index, row] of rows.entries()) {
       if (row.verdict !== "withdraw") continue
-      withdrawn.push(await withdrawOne(app, row.pr, row.reason, io))
+      try {
+        withdrawn.push(await withdrawOne(app, row.pr, row.reason, io))
+      } catch (error) {
+        rows[index] = replaceWithPruneError(row, error)
+      }
     }
   }
 
   const kept = rows.filter((row) => row.verdict === "keep").length
-  const superseded = rows.length - kept
+  const wouldWithdraw = rows.filter((row) => row.verdict === "would-withdraw").length
+  const errors = rows.filter((row) => row.verdict === "error").length
   const summary =
     rows.length === 0
       ? "pr prune: no live PRs to check"
       : `pr prune: checked ${rows.length} live PR${rows.length === 1 ? "" : "s"} — ${
-          dryRun ? `${superseded} would be withdrawn` : `${superseded} withdrawn`
-        }, ${kept} kept${dryRun ? " (dry run: no events emitted)" : ""}`
+          dryRun ? `${wouldWithdraw} would be withdrawn` : `${withdrawn.length} withdrawn`
+        }, ${kept} kept${errors === 0 ? "" : `, ${errors} error${errors === 1 ? "" : "s"}`}${
+          dryRun ? " (dry run: no events emitted)" : ""
+        }`
   await printResult(
     io,
     jsonEnabled(options),
@@ -207,6 +246,7 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
       command: "pr.prune",
       dryRun,
       checked: rows.map(({ detail: _detail, ...row }) => row),
+      summary: { checked: rows.length, withdrawn: withdrawn.length, wouldWithdraw, kept, errors },
       withdrawn: withdrawn.map(projectPRTaskStatus),
     },
     [...rows.map(pruneLine), summary].join("\n"),
@@ -214,12 +254,30 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
 }
 
 type GitCapture = Readonly<{ code: number; stdout: string }>
+type GitFailure = Readonly<{ code?: unknown; status?: unknown; stdout?: unknown; stderr?: unknown }>
+type AcceptedGitFailure = GitFailure & Readonly<{ status: number }>
 
 /** Real Git plumbing for `pr prune`, mirroring the Queue's merge step: quiet
  * rev-parse for commit facts, merge-base --is-ancestor for reachability, and
  * merge-tree --write-tree for content identity. Only the exit codes each
  * plumbing command documents are tolerated; anything else fails loud. */
 export function createPruneGitFacts(cwd: string): PruneGitFacts {
+  const acceptedFailure = (
+    args: readonly string[],
+    allowedExits: readonly number[],
+    error: unknown,
+  ): AcceptedGitFailure => {
+    const failed = error as GitFailure
+    if (failed.code === "ETIMEDOUT") {
+      throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`, { cause: error })
+    }
+    if (typeof failed.status === "number" && allowedExits.includes(failed.status)) {
+      return { ...failed, status: failed.status }
+    }
+    const stderr = typeof failed.stderr === "string" ? failed.stderr.trim() : ""
+    const cause = stderr !== "" ? stderr : error instanceof Error ? error.message.trim() : ""
+    throw new Error(`yrd: git ${args.join(" ")} failed in '${cwd}'${cause === "" ? "" : `: ${cause}`}`)
+  }
   const git = (args: readonly string[], allowedExits: readonly number[]): GitCapture => {
     try {
       return {
@@ -232,15 +290,21 @@ export function createPruneGitFacts(cwd: string): PruneGitFacts {
         }),
       }
     } catch (error) {
-      const failed = error as Readonly<{ code?: unknown; status?: unknown; stdout?: unknown; stderr?: unknown }>
-      if (failed.code === "ETIMEDOUT") {
-        throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`, { cause: error })
-      }
-      if (typeof failed.status === "number" && allowedExits.includes(failed.status)) {
-        return { code: failed.status, stdout: typeof failed.stdout === "string" ? failed.stdout : "" }
-      }
-      const detail = typeof failed.stderr === "string" && failed.stderr.trim() !== "" ? `: ${failed.stderr.trim()}` : ""
-      throw new Error(`yrd: git ${args.join(" ")} failed in '${cwd}'${detail}`)
+      const failed = acceptedFailure(args, allowedExits, error)
+      return { code: failed.status, stdout: typeof failed.stdout === "string" ? failed.stdout : "" }
+    }
+  }
+  const gitExit = (args: readonly string[], allowedExits: readonly number[]): number => {
+    try {
+      execFileSync("git", ["-C", cwd, ...args], {
+        encoding: "utf8",
+        env: cleanGitEnvironment(process.env),
+        stdio: ["ignore", "ignore", "pipe"],
+        timeout: GIT_TIMEOUT_MS,
+      })
+      return 0
+    } catch (error) {
+      return acceptedFailure(args, allowedExits, error).status
     }
   }
   return Object.freeze({
@@ -253,8 +317,12 @@ export function createPruneGitFacts(cwd: string): PruneGitFacts {
       return git(["merge-base", "--is-ancestor", ancestor, descendant], [1]).code === 0
     },
     mergeTree(baseSha: string, headSha: string): string | undefined {
-      const result = git(["merge-tree", "--write-tree", baseSha, headSha], [1])
-      if (result.code !== 0) return undefined
+      const args = ["merge-tree", "--write-tree", baseSha, headSha] as const
+      // `--quiet` can report success for a real conflict when a sibling
+      // directory entry also merges cleanly. Run the normal command and
+      // discard stdout so conflict bodies never enter this process.
+      if (gitExit(args, [1]) !== 0) return undefined
+      const result = git(args, [])
       const tree = result.stdout.trim().split("\n", 1)[0]?.trim()
       if (tree === undefined || tree === "") {
         throw new Error(`yrd: git merge-tree of ${short(baseSha)} + ${short(headSha)} returned no tree OID`)
