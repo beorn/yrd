@@ -3650,6 +3650,8 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     "authored-gitlink",
     "composition-invalid",
     "gitlink-inspection",
+    "refused-path",
+    "refused-path-inspection",
     "wrapper-mismatch",
     "source-missing",
     "source-lineage",
