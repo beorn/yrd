@@ -2831,6 +2831,49 @@ describe("Queue", () => {
     expect(checks).toBe(1)
   })
 
+  it("integrates a checks-passed PR while another admission's check is still in flight", async () => {
+    await using app = await createQueueApp({
+      check: () => ({ status: "passed", output: { checked: true } }),
+    })
+    // PR A becomes merge-ready: checks requested, admitted, drained to passed.
+    const ready = await submitBranch(app, "issue/merge-ready")
+    await app.bays.requestChecks({ pr: ready.id })
+    await expect(app.queue.admit({ prs: [ready.id] }, runtime)).resolves.toMatchObject([{ status: "passed" }])
+    expect(app.queue.eligibility(ready.id)).toMatchObject({ runnable: true })
+
+    // PR B's admission run is claimed by a FOREIGN runner holding a live
+    // lease: a genuinely in-flight check this drain cannot settle. Under
+    // continuous submissions the resident sees one of these on every tick,
+    // so an in-flight check must never gate the merge phase (2026-07-22
+    // merge-starvation incidents: three independent reproductions).
+    const inflight = await submitBranch(app, "issue/check-in-flight")
+    await app.bays.requestChecks({ pr: inflight.id })
+    const admission = (await app.queue.admit({ prs: [inflight.id] }))[0]
+    if (admission === undefined) throw new Error("expected admission run for the in-flight PR")
+    const job = app.queue.get(admission.id)?.steps[0]?.job
+    if (job === undefined) throw new Error("expected requested in-flight check Job")
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: job.id,
+      attempt: 1,
+      runner: "busy-foreign-runner",
+      leaseExpiresAt: "2026-01-01T00:05:00.000Z",
+    })
+
+    // Resident drain tick: the merge phase must run for the checks-passed PR
+    // in this same tick, not wait for the foreign-held check to settle.
+    const runs = await app.queue.run({}, runtime)
+    expect(runs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "passed",
+          reusedFrom: "R1",
+          prs: [expect.objectContaining({ id: ready.id })],
+        }),
+      ]),
+    )
+  })
+
   it("bounds environment-refused admission retries and parks unchanged check authority", async () => {
     const journal = createMemoryJournal()
     const id = ids()
@@ -2988,13 +3031,16 @@ describe("Queue", () => {
     ])
     expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "requested" })
 
-    await expect(app.queue.run({ prs: [second.id], steps: ["merge"] }, runtime)).rejects.toThrow(
-      "queue 'main' is running 'R1'",
-    )
+    // The check-only admission does not gate the integrating run (2026-07-22
+    // merge-starvation fix) — but it must survive UNTOUCHED: proceeding must
+    // never supersede or release another PR's admission.
+    await expect(app.queue.run({ prs: [second.id], steps: ["merge"] }, runtime)).resolves.toMatchObject([
+      { status: "passed", prs: [{ id: second.id }] },
+    ])
     expect(checkCalls).toBe(0)
-    expect(mergeCalls).toBe(0)
+    expect(mergeCalls).toBe(1)
     expect(app.queue.get("R1")).toMatchObject({ status: "running", prs: [{ id: first.id }] })
-    expect(app.state().bays.prs[second.id]).toMatchObject({ status: "submitted" })
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "requested" })
   })
 
   it("keys admission reuse by the freshly resolved base SHA", async () => {
