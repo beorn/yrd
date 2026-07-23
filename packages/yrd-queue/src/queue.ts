@@ -16,6 +16,7 @@ import {
 import {
   command,
   event,
+  failureFact,
   JsonSchema,
   observeYrdLifecycle,
   parseJournalFrame,
@@ -152,7 +153,12 @@ const QueueRunArgsSchema = z
   .strict()
 export type QueueRunArgs = Readonly<z.infer<typeof QueueRunArgsSchema>>
 
-const AdmitArgsSchema = z.object({ pr: z.string().trim().min(1) }).strict()
+const AdmitArgsSchema = z
+  .object({
+    pr: z.string().trim().min(1),
+    selection: z.literal("explicit").optional(),
+  })
+  .strict()
 export type AdmitArgs = Readonly<z.infer<typeof AdmitArgsSchema>>
 export type AdmitSelection = Readonly<{ prs?: readonly string[] }>
 
@@ -1013,16 +1019,25 @@ function createQueue<Shape extends PRShape>(
     }
   }
 
-  const dispatchAdmissions = async (selectors: readonly string[]): Promise<QueueRun[]> => {
+  const dispatchAdmissions = async (
+    selectors: readonly string[],
+    selection?: AdmitArgs["selection"],
+  ): Promise<QueueRun[]> => {
     const admitted: QueueRun[] = []
     for (const selector of selectors) {
-      const started = startedRun(await actions.admit({ pr: selector }))
+      const started = startedRun(
+        await actions.admit({ pr: selector, ...(selection === undefined ? {} : { selection }) }),
+      )
       if (started !== undefined) admitted.push(started)
     }
     return admitted
   }
 
-  const drainAdmissions = async (selectors: readonly string[], options: QueueRunOptions): Promise<QueueRun[]> => {
+  const drainAdmissions = async (
+    selectors: readonly string[],
+    options: QueueRunOptions,
+    selection?: AdmitArgs["selection"],
+  ): Promise<QueueRun[]> => {
     const targets = new Set(selectors)
     const outcomes = new Map<QueueRunId, QueueRun>()
     const remember = (candidate: QueueRun): void => {
@@ -1035,7 +1050,9 @@ function createQueue<Shape extends PRShape>(
       const snapshot = runtime()
       const active = activeQueueRuns(snapshot.queues, snapshot.jobs).find(
         (candidate) =>
-          candidate.status === "running" && samePlan(candidate.steps, admissionSteps(snapshot.queues, steps)),
+          (selection !== "explicit" || candidate.prs.some((pr) => targets.has(pr.id))) &&
+          candidate.status === "running" &&
+          samePlan(candidate.steps, admissionSteps(snapshot.queues, steps)),
       )
       if (active !== undefined) {
         const settled = await settle(active.id, options)
@@ -1044,9 +1061,10 @@ function createQueue<Shape extends PRShape>(
         continue
       }
 
-      const queued = admissionQueue(snapshot, steps)
+      const queued = admissionQueue(snapshot, steps, selection === "explicit" ? targets : undefined)
       const admitted = await dispatchAdmissions(
         (options.continueAdmissions === undefined ? queued : queued.slice(0, 1)).map((pr) => pr.id),
+        selection,
       )
       if (admitted.length > 0) continue
 
@@ -1079,13 +1097,15 @@ function createQueue<Shape extends PRShape>(
           resultAttributes: (runs) => ({ runs: runs.map(runEvidence) }),
         },
         async () => {
+          const requestedSelectors = args.prs?.length ? args.prs : undefined
+          const selection: AdmitArgs["selection"] = requestedSelectors === undefined ? undefined : "explicit"
           await actions.refresh()
           await cleanupSettledRoots()
           let snapshot = runtime()
           const selected =
-            args.prs === undefined || args.prs.length === 0
+            requestedSelectors === undefined
               ? admissionQueue(snapshot, steps)
-              : args.prs.map((selector) => {
+              : requestedSelectors.map((selector) => {
                   const pr = resolvePR(snapshot.bays, selector)
                   if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
                   return pr
@@ -1093,10 +1113,12 @@ function createQueue<Shape extends PRShape>(
           await refreshCheckIdentities(selected)
           snapshot = runtime()
           const selectors =
-            args.prs === undefined || args.prs.length === 0
+            requestedSelectors === undefined
               ? admissionQueue(snapshot, steps).map((pr) => pr.id)
-              : [...args.prs]
-          return runOptions === undefined ? dispatchAdmissions(selectors) : drainAdmissions(selectors, runOptions)
+              : selected.map((pr) => pr.id)
+          return runOptions === undefined
+            ? dispatchAdmissions(selectors)
+            : drainAdmissions(selectors, runOptions, selection)
         },
       )
     },
@@ -1127,14 +1149,39 @@ function createQueue<Shape extends PRShape>(
           resultAttributes: (runs) => ({ runs: runs.map(runEvidence) }),
         },
         async () => {
+          const selection = args.prs !== undefined && args.prs.length > 0 ? "explicit" : undefined
           const explicitStepAuthority = args.steps !== undefined
+          // A selectorless compose is a multi-candidate drain (the long-lived
+          // resident's default path, and any bare `queue run`): one candidate lost
+          // to a typed refusal — a peer already running its base, a candidate that
+          // reached a terminal status mid-compose, a step catalog that moved out
+          // from under a stuck run — must not abort the whole compose nor kill the
+          // resident. Skip it LOUD (a structured warn naming the run + refusal) and
+          // keep composing the rest. A targeted one-shot run (explicit selectors)
+          // has no other candidate to fall through to, so it stays fail-loud, and a
+          // non-refusal (a real bug) always propagates.
+          const selectorless = args.prs === undefined || args.prs.length === 0
+          const settleCandidate = async (candidateId: QueueRunId): Promise<void> => {
+            try {
+              await settle(candidateId, runOptions)
+            } catch (error) {
+              const fact = failureFact(error)
+              if (!selectorless || fact?.kind !== "refusal") throw error
+              log.warn?.("queue compose skipped a candidate lost to a losable refusal", {
+                action: "compose-candidate-skip",
+                run: candidateId,
+                code: fact.code,
+                reason: error instanceof Error ? error.message : String(error),
+              })
+            }
+          }
           await actions.refresh()
           await cleanupSettledRoots()
           if (args.steps?.length === 0) return []
           let snapshot = runtime()
           const resumable = resumableQueueRoots(snapshot, args, steps)
           const roots: QueueRunId[] = resumable.map((run) => run.id)
-          for (const run of resumable) await settle(run.id, runOptions)
+          for (const run of resumable) await settleCandidate(run.id)
 
           snapshot = runtime()
           const activeBases = new Set(
@@ -1155,6 +1202,7 @@ function createQueue<Shape extends PRShape>(
           const admissions = await drainAdmissions(
             checked.map((pr) => pr.id),
             runOptions,
+            selection,
           )
           snapshot = runtime()
           const unsettled = checked.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "passed")
@@ -1172,7 +1220,14 @@ function createQueue<Shape extends PRShape>(
             // Liveness beats check-freshness here: landing a runnable PR can
             // stale an in-flight sibling check, which the stale/recut path
             // already classifies and (with auto-recut) requeues.
-            if (newlyFailed) {
+            // An explicit PR selection is different: if that PR's check is
+            // still queued or running, there is no other requested merge work
+            // to preserve and composing it now would violate the selection.
+            if (
+              newlyFailed ||
+              (selection === "explicit" &&
+                unsettled.some((pr) => checkEligibility(snapshot, pr, steps).status !== "failed"))
+            ) {
               return admissions
             }
           }
@@ -1193,7 +1248,7 @@ function createQueue<Shape extends PRShape>(
             if (startedEvent === undefined) continue
             const id = QueueStartSchema.parse((startedEvent.data as { run?: unknown }).run).id
             roots.push(id)
-            await settle(id, runOptions)
+            await settleCandidate(id)
           }
           const final = runtime()
           return roots.flatMap((root) => queueTree(final.queues, final.jobs, root))
@@ -1319,6 +1374,31 @@ function createQueue<Shape extends PRShape>(
               snapshot = runtime()
             }
             if (ownsRecoveredJob) affected.add(candidate.id)
+          }
+          // Orphan hygiene: cancel every requested Job whose parent run is
+          // terminal or absent, so a state upgrade or a settled/canceled run that
+          // never terminalized its pending Job cannot strand it forever (the class
+          // that fed the selectorless-compose poison). Loud structured receipt
+          // naming every settled Job + run; a terminal-run orphan's record is
+          // re-materialized into the return, an absent-run orphan has no record to
+          // return so the receipt is its report.
+          const settledOrphans = orphanedRequestedQueueJobs(runtime())
+          for (const orphan of settledOrphans) {
+            await jobs.cancel({
+              id: orphan.job.id,
+              attempt: orphan.job.attempt,
+              by: recoverOptions.runner ?? "yrd/recover",
+              reason: `orphaned requested job (${orphan.reason})`,
+            })
+            if (orphan.reason === "run-terminal") affected.add(orphan.run)
+          }
+          if (settledOrphans.length > 0) {
+            log.warn?.("queue recover settled orphaned requested jobs whose parent run is terminal or absent", {
+              action: "recover-orphan-settle",
+              reason: "orphaned-requested-job",
+              jobs: settledOrphans.map((orphan) => orphan.job.id),
+              runs: [...new Set(settledOrphans.map((orphan) => orphan.run))],
+            })
           }
           for (const id of await cleanupSettledRoots()) affected.add(id)
           const final = runtime()
@@ -1612,7 +1692,7 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
         requireQueueAuthority(state.queues.authority, [snapshot], selected)
       }
       if (runningQueue(state.queues, state.jobs, pr.base) !== undefined) return { events: [] }
-      if (checksRequested(pr)) {
+      if (args.selection !== "explicit" && checksRequested(pr)) {
         const first = admissionQueue(state, steps)[0]
         if (first !== undefined && first.id !== pr.id) return { events: [] }
       }
@@ -1914,11 +1994,15 @@ function queueAuthorityReleaseReason(
   // pinned Run) is environmental, not a PR-content fault: release the Run's queue
   // authority so the still-submitted PR re-admits against the fresh base, instead
   // of terminally rejecting a PR that would merge cleanly once the base settles.
+  // `stale-steps` is the same shape one level up: a pending run's not-yet-started
+  // step revision drifted out from under it when the installed config moved; the
+  // PR is blameless and re-admits fresh under the installed plan.
   if (
     error?.code === "queue-environment-refused" ||
     error?.code === "job-lost" ||
     error?.code === "stale-base" ||
-    error?.code === "stale-check"
+    error?.code === "stale-check" ||
+    error?.code === "stale-steps"
   ) {
     return error.code
   }
@@ -2734,7 +2818,21 @@ function advanceQueue(
   }
 
   const next = record.steps[index + 1]
-  if (next !== undefined) events.push(requestStep(requirePlannedStep(steps, next), record, index + 1, shape))
+  if (next !== undefined) {
+    // The next step has NOT started (no Job requested for it yet). If its
+    // installed revision drifted out from under this pending run, do not throw a
+    // bare `command-refused` that aborts the whole selectorless compose and kills
+    // the resident — release the run's authority as a typed `stale-steps`
+    // failure so the still-submitted PR re-admits fresh under the installed plan
+    // (mirroring stale-base/stale-check). A run that has ALREADY integrated keeps
+    // frozen semantics: an integrated PR is terminal, never retroactively
+    // re-planned, so the drift there stays a loud throw.
+    const drift = plannedStepDrift(steps, next)
+    if (drift !== undefined && !isIntegrated(shape)) {
+      return { events: [queueFailedEvent(state, record, { code: "stale-steps", message: `yrd: ${drift}` })] }
+    }
+    events.push(requestStep(requirePlannedStep(steps, next), record, index + 1, shape))
+  }
   return { events }
 }
 
@@ -3016,6 +3114,40 @@ function queueSummary(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<Jobs
   }
 }
 
+const QUEUE_JOB_KEY_PATTERN = /^queue:(.+):\d+$/u
+
+type OrphanedRequestedJob = Readonly<{
+  job: DeepReadonly<JobsState>["byId"][string]
+  run: QueueRunId
+  reason: "run-absent" | "run-terminal"
+}>
+
+/**
+ * Requested queue Jobs whose parent run is terminal or absent — a strand a state
+ * upgrade, or a settled/canceled run that never terminalized its pending Job,
+ * left behind. A NON-terminal run's requested current-step Job is normal
+ * in-flight work and is never an orphan. This walks {@link JobsState} directly:
+ * {@link auditQueues}'s record walk skips terminal runs, so this class is exactly
+ * the audit blind spot that let "queue audit clean" print over poison.
+ */
+function orphanedRequestedQueueJobs(state: DeepReadonly<RuntimeState>): readonly OrphanedRequestedJob[] {
+  const orphans: OrphanedRequestedJob[] = []
+  for (const job of Object.values(state.jobs.byId)) {
+    if (job.status !== "requested" || job.key === undefined) continue
+    const run = QUEUE_JOB_KEY_PATTERN.exec(job.key)?.[1]
+    if (run === undefined) continue
+    const record = Queues.get(state.queues, run)
+    if (record === undefined) {
+      orphans.push({ job, run, reason: "run-absent" })
+      continue
+    }
+    if (Queues.terminal(materializeRun(record, state.jobs))) {
+      orphans.push({ job, run, reason: "run-terminal" })
+    }
+  }
+  return orphans
+}
+
 function auditQueues(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): QueueAuditResult {
   const findings: QueueAuditFinding[] = []
   const installed = new Map(steps.map((step) => [step.name, step]))
@@ -3079,22 +3211,42 @@ function auditQueues(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeS
       }
     }
   }
+  // The record walk above `continue`s past terminal runs and never inspects Jobs
+  // whose run record is gone — so a requested Job stranded under a terminal or
+  // absent run was invisible ("queue audit clean" printed over it). Surface it.
+  for (const orphan of orphanedRequestedQueueJobs(state)) {
+    findings.push({
+      code: "orphaned-requested-job",
+      message: `requested job '${orphan.job.id}' (${orphan.job.key}) is stranded: its parent queue run '${orphan.run}' is ${orphan.reason === "run-absent" ? "absent" : "terminal"}`,
+      run: orphan.run,
+    })
+  }
   return { findings }
 }
 
-function requirePlannedStep(steps: ReadonlyMap<string, RuntimeStep>, planned: InstalledStep): RuntimeStep {
+/** Classify a planned step against the installed catalog: `undefined` when it
+ * still matches, else a human-readable drift reason. The single source of truth
+ * for both the fail-loud {@link requirePlannedStep} (isolate path) and the typed
+ * stale-steps release (advance path). */
+function plannedStepDrift(steps: ReadonlyMap<string, RuntimeStep>, planned: InstalledStep): string | undefined {
   const current = steps.get(planned.name)
-  if (current === undefined) throw new Error(`yrd: queue step '${planned.name}' is not installed`)
+  if (current === undefined) return `queue step '${planned.name}' is not installed`
   if (
     current.revision !== planned.revision ||
     current.integrates !== planned.integrates ||
     current.needsIntegration !== planned.needsIntegration ||
     current.classification !== planned.classification
   ) {
-    throw new Error(
-      `yrd: queue step '${planned.name}' revision '${planned.revision}' does not match installed revision '${current.revision}'`,
-    )
+    return `queue step '${planned.name}' revision '${planned.revision}' does not match installed revision '${current.revision}'`
   }
+  return undefined
+}
+
+function requirePlannedStep(steps: ReadonlyMap<string, RuntimeStep>, planned: InstalledStep): RuntimeStep {
+  const drift = plannedStepDrift(steps, planned)
+  if (drift !== undefined) throw new Error(`yrd: ${drift}`)
+  const current = steps.get(planned.name)
+  if (current === undefined) throw new Error(`yrd: queue step '${planned.name}' is not installed`)
   return current
 }
 
@@ -3267,10 +3419,15 @@ function automaticAdmissionAttemptsExhausted(
   return releasedFailures >= exactRequests + AUTOMATIC_ADMISSION_RETRIES
 }
 
-function admissionQueue(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): PR[] {
+function admissionQueue(
+  state: DeepReadonly<RuntimeState>,
+  steps: readonly RuntimeStep[],
+  targets?: ReadonlySet<string>,
+): PR[] {
   const selected = admissionSteps(state.queues, steps)
   if (selected.length === 0) return []
   return Object.values(state.bays.prs)
+    .filter((pr) => targets === undefined || targets.has(pr.id))
     .filter((pr) => pr.status === "pushed" || pr.status === "submitted")
     .filter((pr) => blockingQueuePause(state, pr) === undefined)
     .filter((pr) => checksRequested(pr))
@@ -3528,6 +3685,8 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     "authored-gitlink",
     "composition-invalid",
     "gitlink-inspection",
+    "refused-path",
+    "refused-path-inspection",
     "wrapper-mismatch",
     "source-missing",
     "source-lineage",
