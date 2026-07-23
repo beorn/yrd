@@ -4,6 +4,7 @@ export * from "./repository.ts"
 export * from "./signals.ts"
 export * from "./submodule-tracking.ts"
 export { runYrd } from "./run.ts"
+export type { RecutPreflightResult, RecutPreflightVerdict } from "./pr-withdraw.ts"
 export type {
   PruneGitFacts,
   QueueAuditFinding,

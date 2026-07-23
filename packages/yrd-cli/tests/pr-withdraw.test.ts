@@ -10,7 +10,8 @@
  * selector-surfaces.test.ts; Git facts for `pr prune` are injected through
  * YrdCliIO.pruneGit so every verdict is deterministic.
  */
-import { mkdtempSync, rmSync } from "node:fs"
+import { execFileSync } from "node:child_process"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -18,7 +19,7 @@ import { createBayJobDefs, withBays } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type Journal, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { createJournal } from "@yrd/persistence"
-import { runYrd, type PruneGitFacts, type YrdCliIO } from "@yrd/cli"
+import { runYrd, type PruneGitFacts, type RecutPreflightResult, type YrdCliIO } from "@yrd/cli"
 import { withMerge, withQueue, withStep, type PRShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
 import { withIssues } from "@yrd/issue"
 import {
@@ -28,14 +29,20 @@ import {
   type ContestGit,
   type ContestRunnerDef,
 } from "@yrd/contest"
+import { createPruneGitFacts } from "../src/pr-withdraw.ts"
 
 const HEAD_SHA = "1".repeat(40)
 const HEAD2_SHA = "2".repeat(40)
 const HEAD3_SHA = "3".repeat(40)
 const BASE_SHA = "a".repeat(40)
+const TARGET_BASE_SHA = "d".repeat(40)
 const MERGED_SHA = "b".repeat(40)
 const BASE_TREE = "e".repeat(40)
 const OTHER_TREE = "f".repeat(40)
+const PR380_PATCH_ID = "cce1b8d2e6b8167b77aa50e0f880b74d3fa8871d"
+const PR380_LANDING_SHA = "868194792c4b2c1b07bd5a67c37ad3e21fd35ce1"
+const PR473_LANDING_SHA = "b47e240a6c3091b4687de96296d39c0a610df200"
+const PR476_PATCH_ID = "172a29302878f4f7fd0dcfad917ddbf434e78d04"
 
 function ids(initial = 0): () => string {
   let value = initial
@@ -180,6 +187,42 @@ function pruneGit(overrides: Partial<PruneGitFacts> = {}): PruneGitFacts {
   }
 }
 
+type RecutPreflightGitFacts = PruneGitFacts &
+  Readonly<{
+    pinDistance(
+      sourceBaseSha: string,
+      targetBaseSha: string,
+    ):
+      | Readonly<{ sourceOnly: number; targetOnly: number }>
+      | Promise<Readonly<{ sourceOnly: number; targetOnly: number }>>
+    patchMatch(
+      sourceBaseSha: string,
+      headSha: string,
+      targetBaseSha: string,
+    ): Readonly<{ patchId?: string; targetSha?: string }> | Promise<Readonly<{ patchId?: string; targetSha?: string }>>
+  }>
+
+function recutPreflightGit(overrides: Partial<RecutPreflightGitFacts> = {}): RecutPreflightGitFacts {
+  return {
+    ...pruneGit({
+      resolveCommit: (ref) =>
+        ref === "origin/main"
+          ? TARGET_BASE_SHA
+          : ref === BASE_SHA || ref === HEAD_SHA || ref === HEAD2_SHA
+            ? ref
+            : undefined,
+      mergeTree: () => BASE_TREE,
+      treeOf: (sha) => {
+        if (sha !== TARGET_BASE_SHA) throw new Error(`treeOf must only inspect the target tip, got ${sha}`)
+        return BASE_TREE
+      },
+    }),
+    pinDistance: () => ({ sourceOnly: 0, targetOnly: 3 }),
+    patchMatch: () => ({ patchId: "c".repeat(40), targetSha: MERGED_SHA }),
+    ...overrides,
+  }
+}
+
 describe("pr withdraw", () => {
   it("withdraws a live PR, records the reason, and terminalizes its Queue work", async () => {
     const app = await createCliApp()
@@ -191,7 +234,8 @@ describe("pr withdraw", () => {
       await runYrd(app, yrd("pr", "withdraw", "PR1", "--reason", "superseded by rework", "--json"), output.io),
       output.stderr(),
     ).toBe(0)
-    expect(JSON.parse(output.stdout())).toMatchObject({
+    const result = JSON.parse(output.stdout()) as RecutPreflightResult
+    expect(result).toMatchObject({
       command: "pr.withdraw",
       reason: "superseded by rework",
       prs: [
@@ -287,6 +331,295 @@ describe("pr withdraw journal replay", () => {
       } finally {
         await second.close()
       }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("pr recut --preflight", () => {
+  it("replays PR380 as SUBSUMED-WITHDRAW without recutting or emitting events", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({
+      branch: "specimen/PR380",
+      headSha: HEAD_SHA,
+      base: "main",
+      baseSha: BASE_SHA,
+    })
+    const before = (await Array.fromAsync(app.events())).length
+    const output = outputIO({
+      pruneGit: () =>
+        recutPreflightGit({
+          patchMatch: () => ({ patchId: PR380_PATCH_ID, targetSha: PR380_LANDING_SHA }),
+        }),
+    })
+
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--json"), output.io), output.stderr()).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "pr.recut.preflight",
+      pr: "PR1",
+      revision: 1,
+      verdict: "SUBSUMED-WITHDRAW",
+      evidence: {
+        headSha: HEAD_SHA,
+        sourceBaseSha: BASE_SHA,
+        targetBaseSha: TARGET_BASE_SHA,
+        pinDistance: { sourceOnly: 0, targetOnly: 3 },
+        patchId: PR380_PATCH_ID,
+        patchMatchTarget: PR380_LANDING_SHA,
+        tree: "identical",
+      },
+    })
+    expect((await Array.fromAsync(app.events())).length).toBe(before)
+    expect(app.state().bays.prs.PR1).toMatchObject({ revision: 1, headSha: HEAD_SHA })
+  })
+
+  it.each([
+    {
+      specimen: "PR473",
+      verdict: "SUBSUMED-WITHDRAW",
+      mergeTree: BASE_TREE,
+      patchId: "c".repeat(40),
+      patchTarget: PR473_LANDING_SHA,
+      targetOnly: 2,
+    },
+    {
+      specimen: "PR476",
+      verdict: "RECUT",
+      mergeTree: OTHER_TREE,
+      patchId: PR476_PATCH_ID,
+      patchTarget: undefined,
+      targetOnly: 4,
+    },
+  ] as const)(
+    "replays $specimen in one preflight invocation as $verdict",
+    async ({ specimen, verdict, mergeTree, patchId, patchTarget, targetOnly }) => {
+      const app = await createCliApp()
+      await app.bays.submit({
+        branch: `specimen/${specimen}`,
+        headSha: HEAD_SHA,
+        base: "main",
+        baseSha: BASE_SHA,
+      })
+      const before = (await Array.fromAsync(app.events())).length
+      const output = outputIO({
+        pruneGit: () =>
+          recutPreflightGit({
+            mergeTree: () => mergeTree,
+            pinDistance: () => ({ sourceOnly: 0, targetOnly }),
+            patchMatch: () => ({
+              patchId,
+              ...(patchTarget === undefined ? {} : { targetSha: patchTarget }),
+            }),
+          }),
+      })
+
+      expect(await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--json"), output.io), output.stderr()).toBe(0)
+      expect(JSON.parse(output.stdout())).toMatchObject({
+        verdict,
+        evidence: {
+          pinDistance: { sourceOnly: 0, targetOnly },
+          patchId,
+          patchMatchTarget: patchTarget ?? null,
+          tree: mergeTree === BASE_TREE ? "identical" : "divergent",
+        },
+      })
+      expect((await Array.fromAsync(app.events())).length).toBe(before)
+    },
+  )
+
+  it("treats a patch-id match as evidence, not withdrawal authority", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "collision/whitespace", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    const output = outputIO({
+      pruneGit: () =>
+        recutPreflightGit({
+          mergeTree: () => OTHER_TREE,
+          patchMatch: () => ({ patchId: "c".repeat(40), targetSha: MERGED_SHA }),
+        }),
+    })
+
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--json"), output.io), output.stderr()).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      verdict: "RECUT",
+      evidence: { patchMatchTarget: MERGED_SHA, tree: "divergent" },
+    })
+  })
+
+  it("reports FRESH-NOOP from the selected revision's exact base pin", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({
+      branch: "topic/fresh",
+      headSha: HEAD_SHA,
+      base: "main",
+      baseSha: BASE_SHA,
+      draft: true,
+    })
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: HEAD2_SHA,
+      baseSha: BASE_SHA,
+      treeSha: "7".repeat(40),
+      patchId: "8".repeat(40),
+      reviewCarried: false,
+    })
+    const output = outputIO({
+      pruneGit: () =>
+        recutPreflightGit({
+          resolveCommit: (ref) =>
+            ref === "origin/main" || ref === BASE_SHA ? BASE_SHA : ref === HEAD2_SHA ? HEAD2_SHA : undefined,
+          mergeTree: () => OTHER_TREE,
+          treeOf: (sha) => {
+            if (sha !== BASE_SHA) throw new Error(`treeOf must only inspect the target tip, got ${sha}`)
+            return BASE_TREE
+          },
+          pinDistance: () => ({ sourceOnly: 0, targetOnly: 0 }),
+          patchMatch: () => ({ patchId: "c".repeat(40) }),
+        }),
+    })
+
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--json"), output.io), output.stderr()).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      revision: 2,
+      verdict: "FRESH-NOOP",
+      evidence: {
+        headSha: HEAD2_SHA,
+        sourceBaseSha: BASE_SHA,
+        targetBaseSha: BASE_SHA,
+        pinDistance: { sourceOnly: 0, targetOnly: 0 },
+        certified: true,
+      },
+    })
+  })
+
+  it("reports RECUT-FORCE when recut would discard the current green check", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/green", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    if (!app.bays.checksRequested("PR1")) await app.bays.requestChecks({ pr: "PR1" })
+    await app.queue.admit({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
+    expect(app.queue.eligibility("PR1").checks.status).toBe("passed")
+    const before = (await Array.fromAsync(app.events())).length
+    const output = outputIO({
+      pruneGit: () =>
+        recutPreflightGit({
+          mergeTree: () => OTHER_TREE,
+          patchMatch: () => ({ patchId: "c".repeat(40) }),
+        }),
+    })
+
+    expect(
+      await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--queue", "--json"), output.io),
+      output.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      verdict: "RECUT-FORCE",
+      evidence: { passingCheck: true, requestedQueue: true },
+      next: "yrd pr recut PR1 --queue --force",
+    })
+    expect((await Array.fromAsync(app.events())).length).toBe(before)
+  })
+
+  it("uses --revision evidence and refuses composed or diverged sources rather than guessing", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/revisions", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.intake({ branch: "topic/revisions", headSha: HEAD2_SHA, base: "main", baseSha: BASE_SHA })
+    const selected = outputIO({
+      pruneGit: () =>
+        recutPreflightGit({
+          mergeTree: () => OTHER_TREE,
+          patchMatch: (_base, head) => ({ patchId: head === HEAD_SHA ? "1".repeat(40) : "2".repeat(40) }),
+        }),
+    })
+    expect(
+      await runYrd(app, yrd("pr", "recut", "PR1", "--revision", "1", "--preflight", "--json"), selected.io),
+      selected.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(selected.stdout())).toMatchObject({
+      revision: 1,
+      verdict: "RECUT",
+      evidence: { headSha: HEAD_SHA, patchId: "1".repeat(40) },
+      next: "yrd pr recut PR1 --revision 1",
+    })
+
+    const diverged = outputIO({
+      pruneGit: () =>
+        recutPreflightGit({
+          mergeTree: () => OTHER_TREE,
+          pinDistance: () => ({ sourceOnly: 1, targetOnly: 2 }),
+        }),
+    })
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--json"), diverged.io)).toBe(1)
+    expect(diverged.stderr()).toContain("base aaaaaaaaaaaa diverged from target dddddddddddd")
+
+    const composedApp = await createCliApp()
+    await composedApp.bays.submit({
+      branch: "topic/composed",
+      headSha: HEAD_SHA,
+      base: "main",
+      baseSha: BASE_SHA,
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "vendor/example",
+            branch: "topic/source",
+            baseSha: "4".repeat(40),
+            tipSha: "5".repeat(40),
+            payload: ["src/change.ts"],
+          },
+        ],
+      },
+    })
+    const composed = outputIO({ pruneGit: () => recutPreflightGit() })
+    expect(await runYrd(composedApp, yrd("pr", "recut", "PR1", "--preflight", "--json"), composed.io)).toBe(1)
+    expect(composed.stderr()).toContain("has composed source payloads")
+  })
+
+  it("prints explicit pin-distance and patch-match evidence in human output", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/human", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    const output = outputIO({ pruneGit: () => recutPreflightGit(), columns: 160 })
+
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--preflight"), output.io), output.stderr()).toBe(0)
+    expect(output.stdout()).toContain("SUBSUMED-WITHDRAW PR1 r1")
+    expect(output.stdout()).toContain("pin-distance: source-only=0, target-only=3")
+    expect(output.stdout()).toContain(`patch-id-match-target: ${MERGED_SHA.slice(0, 12)}`)
+    expect(output.stdout()).toContain("tree-proof: ancestor=no, merge-tree=identical")
+  })
+
+  it("derives pin distance and a matching landing commit with real Git plumbing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "yrd-recut-preflight-"))
+    const git = (...args: string[]) =>
+      execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim()
+    try {
+      git("init", "-b", "main")
+      git("config", "user.name", "Yrd Test")
+      git("config", "user.email", "yrd@example.test")
+      writeFileSync(join(dir, "base.txt"), "base\n")
+      git("add", "base.txt")
+      git("commit", "-m", "base")
+      const sourceBaseSha = git("rev-parse", "HEAD")
+
+      git("switch", "-c", "candidate")
+      writeFileSync(join(dir, "payload.txt"), "same payload\n")
+      git("add", "payload.txt")
+      git("commit", "-m", "candidate")
+      const headSha = git("rev-parse", "HEAD")
+
+      git("switch", "main")
+      writeFileSync(join(dir, "payload.txt"), "same payload\n")
+      git("add", "payload.txt")
+      git("commit", "-m", "landed elsewhere")
+      const targetBaseSha = git("rev-parse", "HEAD")
+
+      const facts = createPruneGitFacts(dir)
+      expect(facts.pinDistance?.(sourceBaseSha, targetBaseSha)).toEqual({ sourceOnly: 0, targetOnly: 1 })
+      expect(facts.patchMatch?.(sourceBaseSha, headSha, targetBaseSha)).toMatchObject({
+        patchId: expect.stringMatching(/^[0-9a-f]{40}$/u),
+        targetSha: targetBaseSha,
+      })
+      expect(facts.mergeTree(targetBaseSha, headSha)).toBe(facts.treeOf(targetBaseSha))
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

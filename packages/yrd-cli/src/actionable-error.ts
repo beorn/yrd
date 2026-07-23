@@ -46,7 +46,7 @@ function authoredGitlinkFailure(failure: FailureLike, cause: string): Actionable
   return Object.freeze({
     code: failure.code,
     cause,
-    resolution: Object.freeze(["yrd pr submit <branch> --draft", `yrd pr recut ${pr} --queue --force`]),
+    resolution: Object.freeze(["yrd pr submit <branch> --draft", `yrd pr recut ${pr} --preflight --queue`]),
     reference: "README.md#pr-eligibility-and-checks",
   })
 }
@@ -73,7 +73,7 @@ function recutGitlinkFailure(failure: FailureLike, cause: string): ActionableFai
       `git -C ${path} push -u origin HEAD`,
       `git add ${path} && git commit -m "fix(yrd): compose ${path} pins"`,
       "yrd pr submit <branch> --draft",
-      `yrd pr recut ${pr} --queue --force`,
+      `yrd pr recut ${pr} --preflight --queue`,
     ]),
     reference: "README.md#resolving-divergent-gitlink-pins",
   })

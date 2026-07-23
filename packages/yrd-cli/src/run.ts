@@ -83,7 +83,7 @@ import {
   type QueueStatusResult,
 } from "./queue-status-view.tsx"
 import { submittedPrPositions } from "./queue-position.ts"
-import { prunePrs, withdrawPrs } from "./pr-withdraw.ts"
+import { preflightRecut, prunePrs, withdrawPrs } from "./pr-withdraw.ts"
 import { resolveSubmitSelectors } from "./submit-selection.ts"
 import { diagnostic, printHuman, printResult, printResultWithWarnings } from "./output.tsx"
 import {
@@ -1265,9 +1265,13 @@ async function recutPr(
   app: YrdCliApp,
   services: YrdCliServices,
   selector: string,
-  options: JsonOption & Readonly<{ revision?: number; queue?: boolean; force?: boolean }>,
+  options: JsonOption & Readonly<{ revision?: number; queue?: boolean; force?: boolean; preflight?: boolean }>,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
+  if (options.preflight === true) {
+    await preflightRecut(app, selector, options, io)
+    return 0
+  }
   const outcome = await executeRecutPr(app, services, selector, options, io)
   await printResult(
     io,
@@ -4331,8 +4335,8 @@ function addAuthoredCarrierWorkflow<
   command.addHelpSection("Authored root carrier:", [
     [`$ ${name} pr submit <branch> --draft`, "record the immutable authored carrier as a draft PR"],
     [
-      `$ ${name} pr recut <PR> --queue --force`,
-      "recut and queue a new revision on that same PR; no composition manifest or manual recut",
+      `$ ${name} pr recut <PR> --preflight --queue`,
+      "classify from pinned evidence, then run the exact next command; no composition manifest or manual triage",
     ],
   ])
 }
@@ -4710,6 +4714,7 @@ function buildProgram(
     .command("recut <selector>")
     .description("mechanically recut an immutable PR revision onto authoritative current base")
     .option("--revision <number>", "select an older immutable PR revision", int)
+    .option("--preflight", "classify recut, withdrawal, force, or no-op without mutating")
     .option("--queue", "ready the fresh revision and admit its configured checks")
     .option("--force", "recut even when the current revision already holds a passing check")
     .option("--json", "emit stable JSON")
