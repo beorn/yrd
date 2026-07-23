@@ -133,7 +133,7 @@ async function executeComposition(
         path: resolution.path,
         message:
           `submodule '${resolution.path}' has real content conflicts: ${gitDetail(merged)}; ` +
-          "resolve them in the source submodule and resubmit",
+          "fix the source submodule and push; the same PR resumes automatically",
       }
     }
     if (merged.exitCode !== 0) throw new Error(gitDetail(merged))

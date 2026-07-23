@@ -2,6 +2,7 @@ import {
   GitRefSchema,
   GitShaSchema,
   PRIdSchema,
+  PRNeedsAuthorFactSchema,
   PRTerminalAssociationSchema,
   baseIdentity,
   checkRequest,
@@ -51,6 +52,7 @@ import {
 import { computed, type ReadSignal } from "@silvery/signals"
 import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
+import { CandidateFailureReceiptEvidenceSchema, candidateFailureReceiptEvidence } from "./check-attribution.ts"
 import {
   IntegrationProofSchema,
   QueuePauseSchema,
@@ -360,7 +362,8 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
 
 type QueueState = Readonly<{ queues: QueuesState }>
 type QueueHostState = Readonly<{ bays: BaysState; jobs: JobsState }>
-type RuntimeState = QueueHostState & QueueState
+export type QueueRuntimeState = QueueHostState & QueueState
+type RuntimeState = QueueRuntimeState
 type QueueStart = Omit<QueueRecord, "startedAt" | "failure">
 
 function queueBase(state: DeepReadonly<RuntimeState>, selector: string): string {
@@ -454,8 +457,8 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   cancelRun(args: CancelRunArgs): Promise<QueueRun>
   recover(options: RecoverQueueOptions): Promise<readonly QueueRun[]>
   audit(): QueueAuditResult
-  eligibility(selector: string): PREligibility
-  eligibilities(): readonly PREligibility[]
+  eligibility(selector: string, snapshot?: DeepReadonly<QueueRuntimeState>): PREligibility
+  eligibilities(snapshot?: DeepReadonly<QueueRuntimeState>): readonly PREligibility[]
   checks(selectors?: readonly string[]): readonly PRCheckRecord[]
   terminalAssociationPlan(): TerminalAssociationPlan
   migrateTerminalAssociations(): Promise<TerminalAssociationPlan>
@@ -554,7 +557,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/run/canceled": CancelRunArgsSchema,
         "queue/run/settled": SettledArgsSchema,
       },
-      projectionVersion: "queues-v5-legacy-root-retention",
+      projectionVersion: "queues-v6-needs-author",
       project: projectQueues,
       compact: (state, complete) => {
         const runtime = complete as unknown as DeepReadonly<RuntimeState>
@@ -1441,14 +1444,14 @@ function createQueue<Shape extends PRShape>(
       )
     },
     audit: () => auditQueues(runtime(), steps),
-    eligibility(selector) {
-      const snapshot = runtime()
+    eligibility(selector, projected) {
+      const snapshot = projected ?? runtime()
       const pr = resolvePR(snapshot.bays, selector)
       if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
       return prEligibility(snapshot, pr, steps)
     },
-    eligibilities() {
-      const snapshot = runtime()
+    eligibilities(projected) {
+      const snapshot = projected ?? runtime()
       return Object.values(snapshot.bays.prs).map((pr) => prEligibility(snapshot, pr, steps))
     },
     checks(selectors) {
@@ -2089,7 +2092,8 @@ function queueAuthorityReleaseReason(
     error?.code === "stale-base" ||
     error?.code === "stale-check" ||
     error?.code === "stale-steps" ||
-    error?.code === "stale-plan"
+    error?.code === "stale-plan" ||
+    isInfraRetryCompositionFailure(error?.code)
   ) {
     return error.code
   }
@@ -2401,7 +2405,13 @@ function queueDecisionRoots(queues: DeepReadonly<QueuesState>, bays: DeepReadonl
     const snapshot = record.prs[0]
     if (snapshot === undefined) continue
     const pr = bays.prs[snapshot.id]
-    if (pr === undefined || (pr.status !== "pushed" && pr.status !== "submitted") || !checksRequested(pr)) continue
+    if (
+      pr === undefined ||
+      (pr.status !== "pushed" && pr.status !== "submitted" && pr.status !== "needs-author") ||
+      !checksRequested(pr)
+    ) {
+      continue
+    }
     if (queueLookupKey(Queues.snapshot(pr), record.steps) !== queueLookupKey(snapshot, record.steps)) continue
     roots.add(queueRetentionRoot(queues, record.id))
   }
@@ -2460,6 +2470,24 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
           ...state.queues.authority,
           current: { ...state.queues.authority.current, [token.pr]: token },
           checks: { ...state.queues.authority.checks, [token.pr]: token },
+        },
+      },
+    }
+  }
+  if (applied.name === "pr/needs-author") {
+    const needsAuthor = PRNeedsAuthorFactSchema.parse(applied.data)
+    if (!currentAuthorityMatches(state.queues.authority, needsAuthor)) return state
+    if (state.queues.authority.statuses[needsAuthor.pr] !== "submitted") {
+      throw new Error(
+        `yrd: queue authority for PR '${needsAuthor.pr}' is ${state.queues.authority.statuses[needsAuthor.pr] ?? "missing"}; '${applied.name}' requires submitted`,
+      )
+    }
+    return {
+      queues: {
+        ...state.queues,
+        authority: {
+          ...state.queues.authority,
+          statuses: { ...state.queues.authority.statuses, [needsAuthor.pr]: "needs-author" },
         },
       },
     }
@@ -2784,7 +2812,8 @@ function advanceQueue(
   steps: ReadonlyMap<string, RuntimeStep>,
 ): Readonly<{ events: readonly EventDraft[] }> {
   if (record.failure !== undefined) return { events: [] }
-  // A run-canceled record is terminal: never emit pr/canceled or pr/rejected for
+  // A run-canceled record is terminal: never emit pr/canceled, pr/rejected, or
+  // pr/needs-author for
   // its members. Their status is untouched (still submitted), so a future drain
   // re-queues them — cancel is a re-queue, not a rejection.
   if (record.canceledAt !== undefined) return { events: [] }
@@ -2807,33 +2836,13 @@ function advanceQueue(
       return {
         events: isIntegrated(before)
           ? []
-          : record.prs.flatMap((pr) => {
-              const current = state.bays.prs[pr.id]
-              if (
-                current === undefined ||
-                current.revision !== pr.revision ||
-                current.headSha !== pr.headSha ||
-                (current.status !== "pushed" && current.status !== "submitted")
-              ) {
-                return []
-              }
-              const revision = current.revisions.find(
-                (candidate) => candidate.revision === pr.revision && candidate.headSha === pr.headSha,
-              )
-              return [
-                event("pr/canceled", {
-                  pr: pr.id,
-                  revision: pr.revision,
-                  headSha: pr.headSha,
-                  run: record.id,
-                  ...(current.issue === undefined ? {} : { issueRef: current.issue }),
-                  ...(current.correlation === undefined ? {} : { correlation: current.correlation }),
-                  ...(revision?.actor === undefined ? {} : { actor: revision.actor }),
-                  by: job.canceledBy,
-                  reason: job.cancelReason,
-                }),
-              ]
-            }),
+          : [
+              event("queue/run/canceled", {
+                run: record.id,
+                by: job.canceledBy,
+                reason: job.cancelReason,
+              }),
+            ],
       }
     }
 
@@ -2851,24 +2860,26 @@ function advanceQueue(
       (job.status === "failed" ? firstArtifact(job.error.evidence, "stderr") : undefined) ??
       firstArtifact(checkEvidence(job), "stderr") ??
       ("artifacts" in job ? firstArtifact({ artifacts: job.artifacts }, "stderr") : undefined)
+    const authorReceipt = needsAuthorJobReceipt(job)
+    if (isIntegrated(before) || pr === undefined || current?.status !== "submitted") return { events: [] }
+    const refusal = {
+      pr: pr.id,
+      revision: pr.revision,
+      headSha: pr.headSha,
+      run: record.id,
+      ...(current?.issue === undefined ? {} : { issueRef: current.issue }),
+      ...(current?.correlation === undefined ? {} : { correlation: current.correlation }),
+      ...(revision?.actor === undefined ? {} : { actor: revision.actor }),
+      step: planned.name,
+      ...(evidence === undefined ? {} : { evidence }),
+      detail: failure.message,
+    }
     return {
-      events:
-        !isIntegrated(before) && pr !== undefined && current?.status === "submitted"
-          ? [
-              event("pr/rejected", {
-                pr: pr.id,
-                revision: pr.revision,
-                headSha: pr.headSha,
-                run: record.id,
-                ...(current.issue === undefined ? {} : { issueRef: current.issue }),
-                ...(current.correlation === undefined ? {} : { correlation: current.correlation }),
-                ...(revision?.actor === undefined ? {} : { actor: revision.actor }),
-                step: planned.name,
-                ...(evidence === undefined ? {} : { evidence }),
-                detail: failure.message,
-              }),
-            ]
-          : [],
+      events: [
+        authorReceipt === undefined
+          ? event("pr/rejected", refusal)
+          : event("pr/needs-author", { ...refusal, receipt: authorReceipt }),
+      ],
     }
   }
 
@@ -3376,7 +3387,10 @@ function requirePlannedStep(steps: ReadonlyMap<string, RuntimeStep>, planned: In
  * or `undefined` when every step still matches. Isolation re-plans every parent
  * step ({@link requirePlannedStep} over `parent.steps`), so a drift on ANY of them
  * makes the batch permanently un-isolable — the trigger for a stale-plan retirement. */
-function recordedPlanDrift(steps: readonly InstalledStep[], byName: ReadonlyMap<string, RuntimeStep>): string | undefined {
+function recordedPlanDrift(
+  steps: readonly InstalledStep[],
+  byName: ReadonlyMap<string, RuntimeStep>,
+): string | undefined {
   for (const planned of steps) {
     const drift = plannedStepDrift(byName, planned)
     if (drift !== undefined) return drift
@@ -3836,6 +3850,12 @@ export const COMPOSITION_FAILURE_BUCKETS = {
 
 const NEEDS_AUTHOR_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKETS["needs-author"]
 
+type InfraRetryCompositionFailure = "source-publish" | "scratch-cleanup-failed"
+
+function isInfraRetryCompositionFailure(code: string | undefined): code is InfraRetryCompositionFailure {
+  return code !== undefined && COMPOSITION_FAILURE_BUCKETS["infra-retry"].has(code)
+}
+
 function terminalJobError(job: DeepReadonly<Job> | undefined): JobError | undefined {
   if (job?.status === "failed") return job.error
   if (job?.status === "lost") return { code: "job-lost", message: job.lostReason }
@@ -3843,17 +3863,44 @@ function terminalJobError(job: DeepReadonly<Job> | undefined): JobError | undefi
   return undefined
 }
 
-/** The refusal receipt behind a `needs-author` verdict, or `undefined` when a
- * failed check is an ordinary check failure. Scans EVERY step's terminal job
- * error plus the run-level error across BOTH the PR's admission/check run and
- * the run that terminalized it — INCLUDING the integrating/needsIntegration
- * steps that projectPRChecks filters out. A composition refusal produced during
- * integration lands on a SEPARATE integration run (the check run passed), and
- * on the integrating step of it, which projectPRChecks hides (candidateFailure
- * carries no evidence, so its zero-other-records run.error fallback never fires
- * when a passed check record is present); it still means the author must
- * re-author. */
-function compositionRefusalReceipt(
+function needsAuthorJobReceipt(job: DeepReadonly<Job> | undefined): JobError | undefined {
+  const error = terminalJobError(job)
+  if (error === undefined) return undefined
+  if (NEEDS_AUTHOR_CODES.has(error.code)) return error
+  if (job?.status !== "failed") return undefined
+  const evidence = candidateFailureReceiptEvidence(job.output)
+  return evidence === undefined ? undefined : JobErrorSchema.parse({ ...error, evidence })
+}
+
+/** Recover the immutable author-attribution receipt from an exact Queue run.
+ * This remains valid after the PR advances to a later revision, unlike a
+ * lookup through current PR eligibility. */
+export function authorAttributionReceipt(
+  run: DeepReadonly<QueueRun> | undefined,
+  identity?: Readonly<{ pr: string; revision: number; headSha: string }>,
+): JobError | undefined {
+  if (run === undefined) return undefined
+  if (
+    identity !== undefined &&
+    !run.prs.some(
+      (member) =>
+        member.id === identity.pr && member.revision === identity.revision && member.headSha === identity.headSha,
+    )
+  ) {
+    return undefined
+  }
+  for (const step of run.steps) {
+    const receipt = needsAuthorJobReceipt(step.job)
+    if (receipt !== undefined) return receipt
+  }
+  return run.error !== undefined && NEEDS_AUTHOR_CODES.has(run.error.code) ? run.error : undefined
+}
+
+/** Recover the attributed receipt for a legacy rejected journal. Scans EVERY
+ * step across both the admission/check run and terminal integration run,
+ * including integrating steps hidden from ordinary check projections. Native
+ * needs-author reads the receipt directly from the PR fact. */
+function needsAuthorReceipt(
   state: DeepReadonly<RuntimeState>,
   pr: DeepReadonly<PR>,
   steps: readonly RuntimeStep[],
@@ -3866,12 +3913,22 @@ function compositionRefusalReceipt(
     const record = Queues.get(state.queues, runId)
     if (record === undefined) continue
     const run = materializeRun(record, state.jobs)
-    const errors: (JobError | undefined)[] = [...run.steps.map((step) => terminalJobError(step.job)), run.error]
-    for (const error of errors) {
-      if (error !== undefined && NEEDS_AUTHOR_CODES.has(error.code)) return error
-    }
+    const receipt = authorAttributionReceipt(run)
+    if (receipt !== undefined) return receipt
   }
   return undefined
+}
+
+function needsAuthorMessage(pr: DeepReadonly<PR>, receipt: JobError): string {
+  const attributed = CandidateFailureReceiptEvidenceSchema.safeParse(receipt.evidence)
+  if (!attributed.success) return `PR '${pr.id}' cannot be composed as submitted: ${receipt.message}`
+  const failures = attributed.data.failures
+    .map(
+      (failure) =>
+        `${failure.file}:${failure.line}${failure.column === undefined ? "" : `:${failure.column}`} ${failure.message}`,
+    )
+    .join("; ")
+  return `PR '${pr.id}' introduced ${attributed.data.failures.length} check failure(s): ${failures}`
 }
 
 function prEligibility(
@@ -3911,25 +3968,35 @@ function prEligibility(
     if (pr.status === "pushed") {
       return result({ code: "draft", message: `PR '${pr.id}' is pushed, not ready` })
     }
-    // A composition refusal is deterministic: the queue could not build the
-    // candidate from what the author submitted, so re-running the same payload
-    // cannot pass — whether the failed compose left the PR `submitted` or drove
-    // an automatic `rejected`. Project it as `needs-author` with the refusal
-    // receipt attached, ahead of the generic `rejected`/`checks-failed` verdicts.
-    // This is a derived projection over the failed check's recorded refusal
-    // evidence; it stores no new PRStatus (the bay status is untouched).
-    if (options.ignoreChecks !== true && (pr.status === "submitted" || pr.status === "rejected")) {
-      const receipt = compositionRefusalReceipt(state, pr, steps)
+    if (pr.status === "needs-author") {
+      const receipt = pr.needsAuthor?.receipt
+      if (receipt === undefined) {
+        throw new Error(`yrd: PR '${pr.id}' is needs-author without an attribution receipt`)
+      }
+      return result({
+        code: "needs-author",
+        message: needsAuthorMessage(pr, receipt),
+        receipt,
+      })
+    }
+    // Compatibility for journals written before native pr/needs-author: recover
+    // an author-attributable receipt only for legacy rejected PRs. Never scan
+    // every submitted PR's history during ordinary queue projection.
+    if (options.ignoreChecks !== true && pr.status === "rejected") {
+      const receipt = needsAuthorReceipt(state, pr, steps)
       if (receipt !== undefined) {
         return result({
           code: "needs-author",
-          message: `PR '${pr.id}' cannot be composed as submitted: ${receipt.message}`,
+          message: needsAuthorMessage(pr, receipt),
           receipt,
         })
       }
     }
     if (pr.status === "rejected") {
-      return result({ code: "rejected", message: `PR '${pr.id}' is rejected; submit it again before queueing` })
+      return result({
+        code: "rejected",
+        message: `PR '${pr.id}' is rejected; fix the branch and push, and the same PR will resume automatically`,
+      })
     }
     if (pr.status !== "submitted") {
       return result({ code: "terminal", message: `PR '${pr.id}' is ${pr.status}, not queueable` })

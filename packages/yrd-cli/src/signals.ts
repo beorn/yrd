@@ -1,8 +1,16 @@
 import { randomUUID } from "node:crypto"
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
-import { PRCanceledSchema, PRRejectedFactSchema, PRWithdrawnSchema, type PRRejectedFact } from "@yrd/bay"
+import {
+  PRCanceledSchema,
+  PRNeedsAuthorFactSchema,
+  PRRejectedFactSchema,
+  PRWithdrawnSchema,
+  type PRNeedsAuthorFact,
+  type PRRejectedFact,
+} from "@yrd/bay"
 import { parseJournalFrame, raiseFailure, type Event, type Journal } from "@yrd/core"
+import type { JobError } from "@yrd/job"
 import { createExclusive } from "@yrd/persistence"
 import type { Process } from "@yrd/process"
 import { createLogger, type ConditionalLogger } from "loggily"
@@ -40,6 +48,13 @@ export type RejectedSignal = Readonly<{
   at: string
 }> &
   PRRejectedFact
+
+export type NeedsAuthorSignal = Readonly<{
+  id: string
+  kind: "pr/needs-author"
+  at: string
+}> &
+  PRNeedsAuthorFact
 
 export type NeedsReviewSignal = Readonly<{
   id: string
@@ -81,6 +96,7 @@ export type RunFailedSignal = Readonly<{
 }>
 
 export type RoutableSignal =
+  | NeedsAuthorSignal
   | RejectedSignal
   | NeedsReviewSignal
   | IntegratedSignal
@@ -180,7 +196,11 @@ export function createSignalObserver(
           // Withdrawn/canceled are terminal-only: they close open balls but are never delivered as
           // messages, so they carry no delivery route of their own.
           const targets: readonly SignalRouteTarget[] =
-            signal.kind === "pr/withdrawn" || signal.kind === "pr/canceled" ? [] : (options.routes[signal.kind] ?? [])
+            signal.kind === "pr/withdrawn" || signal.kind === "pr/canceled"
+              ? []
+              : signal.kind === "pr/needs-author"
+                ? (options.routes["pr/needs-author"] ?? options.routes["pr/rejected"] ?? [])
+                : (options.routes[signal.kind] ?? [])
           const recipients = new Set(targets.flatMap((target) => resolveRecipients(signal, target)))
           if (targets.includes("submitter") && ![...recipients].some((recipient) => recipient !== "*")) {
             log.warn?.("PR signal has no recorded submitter; delivery skipped", {
@@ -294,7 +314,11 @@ export function createSignalObserver(
   })
 }
 
-export function createTribeSignalAdapter(process: Pick<Process, "run">, sender?: string): SignalDeliveryAdapter {
+export function createTribeSignalAdapter(
+  process: Pick<Process, "run">,
+  sender?: string,
+  attributedReceipt?: (event: RejectedSignal) => JobError | undefined,
+): SignalDeliveryAdapter {
   const executable = Bun.which("tribe")
   if (executable === null) {
     raiseFailure(
@@ -315,16 +339,22 @@ export function createTribeSignalAdapter(process: Pick<Process, "run">, sender?:
     async send(delivery) {
       const request = trackedRequestId(delivery.event, delivery.recipient, sender)
       const tracked = request !== undefined
+      const receipt =
+        delivery.event.kind === "pr/needs-author"
+          ? delivery.event.receipt
+          : delivery.event.kind === "pr/rejected"
+            ? attributedReceipt?.(delivery.event)
+            : undefined
       await execute(
         [
           executable,
           "send",
           delivery.recipient,
-          deliveryText(delivery),
+          deliveryText(delivery, receipt),
           "--type",
           tracked ? "request" : "notify",
           "--summary",
-          deliverySummary(delivery),
+          deliverySummary(delivery, receipt),
           "--delivery",
           tracked ? "push" : "pull",
           ...(request === undefined ? [] : ["--request", request]),
@@ -421,6 +451,10 @@ function signalsOf(events: readonly Event[], reviewRequired: boolean): readonly 
 }
 
 function directSignalOf(event: Event, reviewRequired: boolean): RoutableSignal | undefined {
+  if (event.name === "pr/needs-author") {
+    const data = PRNeedsAuthorFactSchema.parse(event.data)
+    return Object.freeze({ id: event.id, kind: "pr/needs-author", at: event.ts, ...data })
+  }
   if (event.name === "pr/rejected") {
     if (typeof event.data !== "object" || event.data === null || Array.isArray(event.data) || !("step" in event.data)) {
       return undefined
@@ -624,19 +658,39 @@ function forgetOpened(state: CursorState, requestId: string, recipient: string):
   return { ...state, opened }
 }
 
-function deliveryText(delivery: SignalDelivery): string {
+function deliveryText(delivery: SignalDelivery, attributedReceipt?: JobError): string {
   const { event } = delivery
+  if (event.kind === "pr/needs-author") {
+    const receipt = attributedReceipt ?? event.receipt
+    return [
+      `Yrd needs author changes for ${event.pr} revision ${event.revision} at step ${event.step}.`,
+      `run=${event.run}`,
+      `head=${event.headSha}`,
+      `attributed=${receipt.code}: ${receipt.message}`,
+      `reason=${event.detail ?? receipt.message}`,
+      "next=fix the branch and push; the same PR resumes automatically",
+      `event=${event.id}`,
+    ].join("\n")
+  }
   if (event.kind === "pr/rejected") {
-    const failure = actionableFailure({
-      code: "pr-rejected",
-      message: event.detail ?? `PR ${event.pr} revision ${event.revision} was rejected at step ${event.step}`,
-    })
+    if (attributedReceipt !== undefined) {
+      return [
+        `Yrd needs author changes for ${event.pr} revision ${event.revision} at step ${event.step}.`,
+        `run=${event.run}`,
+        `head=${event.headSha}`,
+        `attributed=${attributedReceipt.code}: ${attributedReceipt.message}`,
+        `reason=${event.detail ?? attributedReceipt.message}`,
+        "next=fix the branch and push; the same PR resumes automatically",
+        `event=${event.id}`,
+      ].join("\n")
+    }
     return [
       `Yrd rejected ${event.pr} revision ${event.revision} at step ${event.step}.`,
       `run=${event.run}`,
       `head=${event.headSha}`,
       ...(event.evidence === undefined ? [] : [`evidence=${event.evidence}`]),
-      formatActionableFailure(failure),
+      `detail=${event.detail ?? `PR ${event.pr} revision ${event.revision} was rejected at step ${event.step}`}`,
+      "next=fix the branch and push; the same PR resumes automatically",
       `event=${event.id}`,
     ].join("\n")
   }
@@ -656,8 +710,12 @@ function deliveryText(delivery: SignalDelivery): string {
   throw new Error(`yrd: ${event.kind} is a terminal closure signal and is never delivered as a message`)
 }
 
-function deliverySummary(delivery: SignalDelivery): string {
+function deliverySummary(delivery: SignalDelivery, attributedReceipt?: JobError): string {
   const { event } = delivery
+  if (event.kind === "pr/needs-author") return `${event.pr} needs author changes at ${event.step}`
+  if (event.kind === "pr/rejected" && attributedReceipt !== undefined) {
+    return `${event.pr} needs author changes at ${event.step}`
+  }
   if (event.kind === "pr/rejected") return `${event.pr} rejected at ${event.step}`
   if (event.kind === "pr/needs-review") return `${event.pr} needs review`
   if (event.kind === "pr/integrated") return `${event.prs.map(({ pr }) => pr).join(", ")} integrated`

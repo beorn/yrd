@@ -1,6 +1,8 @@
 import { pathToFileURL } from "node:url"
 import type { Bay, PR, PRRegression } from "@yrd/bay"
 import type { Contest, ContestEvaluationRun } from "@yrd/contest"
+import type { JobError } from "@yrd/job"
+import type { PREligibility } from "@yrd/queue"
 import { Box, Link, Table, Text, type TableColumn } from "silvery"
 import {
   actionableFailure,
@@ -31,7 +33,7 @@ export { formatDuration }
 export function statusVariant(status: string): "default" | "accent" | "error" | "warning" | "success" | "info" {
   if (["active", "closed", "integrated", "passed", "passing", "promoted"].includes(status)) return "success"
   if (["rejected", "failed", "lost", "promotion-failed"].includes(status)) return "error"
-  if (status === "waiting") return "warning"
+  if (status === "waiting" || status === "needs-author") return "warning"
   if (["checking", "running", "evaluating", "promoting"].includes(status)) return "info"
   if (["submitted", "ready", "selected", "queued"].includes(status)) return "accent"
   return "default"
@@ -206,11 +208,22 @@ export function BayStatusView({ bays }: { bays: readonly Bay[] }) {
   return <Table data={bays} columns={columns} />
 }
 
-export function PRStatusView({ prs }: { prs: readonly PR[] }) {
-  const rows = prs.map((pr) => ({
-    ...projectPRTaskStatus(pr),
-    head: pr.headSha.slice(0, 12),
-  }))
+export function PRStatusView({
+  prs,
+  eligibilities = [],
+}: {
+  prs: readonly PR[]
+  eligibilities?: readonly PREligibility[]
+}) {
+  const rows = prs.map((pr) => {
+    const projected = projectPRTaskStatus(pr)
+    const eligibility = eligibilities.find((candidate) => candidate.pr === pr.id)
+    return {
+      ...projected,
+      status: eligibility?.reason?.code === "needs-author" ? "needs-author" : projected.status,
+      head: pr.headSha.slice(0, 12),
+    }
+  })
   return (
     <Table
       data={rows}
@@ -219,7 +232,7 @@ export function PRStatusView({ prs }: { prs: readonly PR[] }) {
         {
           header: "STATUS",
           key: "status",
-          minWidth: 13,
+          minWidth: 15,
           render: (pr) => <TaskStatusValue taskStatus={pr.taskStatus} glyph={pr.glyph} value={pr.status} compact />,
         },
         { header: "BRANCH", key: "branch", grow: true },
@@ -246,10 +259,11 @@ export type IssueDeliveryRow = Readonly<{
   pr: string
   revision: number
   headSha: string
-  status: PR["status"]
+  status: PR["status"] | "needs-author"
   runs: readonly string[]
   landingSha?: string
   bounce?: Readonly<{ run: string; detail?: string }>
+  attributedReceipt?: JobError
   regressions?: readonly PRRegression[]
 }> &
   TaskStatusFields
@@ -318,6 +332,11 @@ function IssueDeliveryView({ delivery }: { delivery: IssueDeliveryRow }) {
         <Text wrap="wrap" color="$fg-error">
           BOUNCE {delivery.bounce.run}
           {delivery.bounce.detail === undefined ? "" : ` ${delivery.bounce.detail}`}
+        </Text>
+      )}
+      {delivery.attributedReceipt === undefined ? null : (
+        <Text wrap="wrap" color="$fg-warning">
+          <Text bold>ATTRIBUTED</Text> {delivery.attributedReceipt.code} — {delivery.attributedReceipt.message}
         </Text>
       )}
       {delivery.regressions?.map((regression) => (

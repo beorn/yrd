@@ -1,5 +1,6 @@
 import * as z from "zod"
 import { raiseFailure, resolveSelector, resolveSelectorMatch, type SelectorMatch } from "@yrd/core"
+import { JobErrorSchema, type JobError } from "@yrd/job"
 
 export const BayIdSchema = z.string().trim().min(1)
 export const PRIdSchema = z.string().trim().min(1)
@@ -49,6 +50,14 @@ export const PRRejectedFactSchema = z
   })
   .strict()
 export type PRRejectedFact = Readonly<z.infer<typeof PRRejectedFactSchema>>
+
+/** Author-owned refusal fact. Unlike `pr/rejected`, this keeps the PR in the
+ * submitted queue lifecycle and carries the exact typed receipt needed to fix
+ * the branch in place. */
+export const PRNeedsAuthorFactSchema = PRRejectedFactSchema.extend({
+  receipt: JobErrorSchema,
+}).strict()
+export type PRNeedsAuthorFact = Readonly<z.infer<typeof PRNeedsAuthorFactSchema>>
 
 export const GitPayloadPathSchema = z
   .string()
@@ -237,13 +246,13 @@ export type BranchLifecycle =
       }
     >
 
-export type PRStatus = "pushed" | "submitted" | "rejected" | "integrated" | "withdrawn" | "canceled"
+export type PRStatus = "pushed" | "submitted" | "needs-author" | "rejected" | "integrated" | "withdrawn" | "canceled"
 
 const NON_CHECKABLE_PR_STATUSES: ReadonlySet<PRStatus> = new Set<PRStatus>(["integrated", "withdrawn", "canceled"])
 
-/** A PR can only accept new check requests while pushed/submitted/rejected; once
- * it reaches a terminal status (integrated/withdrawn/canceled) it is no longer
- * checkable. */
+/** A PR can only accept new check requests while pushed/submitted/needs-author/
+ * rejected; once it reaches a terminal status (integrated/withdrawn/canceled)
+ * it is no longer checkable. */
 export function isNonCheckablePRStatus(status: PRStatus): boolean {
   return NON_CHECKABLE_PR_STATUSES.has(status)
 }
@@ -409,6 +418,16 @@ export type PR = Readonly<{
    * identical in meaning to the empty set. */
   requestedReviewers?: readonly string[]
   regressions?: readonly PRRegression[]
+  /** Exact author-owned refusal for the current revision. The PR remains
+   * submitted/in-queue; a changed push clears this fact and resumes the same PR. */
+  needsAuthor?: Readonly<{
+    at: string
+    run: string
+    step: string
+    receipt: JobError
+    evidence?: string
+    detail?: string
+  }>
   terminalRun?: string
   submittedAt?: string
   rejectedAt?: string
@@ -673,7 +692,7 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
 }
 
 export function isLivePR(status: PRStatus): boolean {
-  return status === "pushed" || status === "submitted" || status === "rejected"
+  return status === "pushed" || status === "submitted" || status === "needs-author" || status === "rejected"
 }
 
 export function prForBay(state: BaysState, bay: BayId): PR | undefined {

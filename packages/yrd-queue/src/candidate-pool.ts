@@ -29,7 +29,12 @@ import { materializeSubmodules } from "@yrd/bay"
  * form an import cycle with). `command.ts` passes its own `git`; the host builds
  * one via {@link createCandidatePoolGit}. */
 export type CandidatePoolGit = Readonly<{
-  run(repo: string, args: readonly string[], allowFailure?: boolean): Promise<CandidatePoolGitResult>
+  run(
+    repo: string,
+    args: readonly string[],
+    allowFailure?: boolean,
+    timeoutMs?: number,
+  ): Promise<CandidatePoolGitResult>
 }>
 
 export type CandidatePoolGitResult = Readonly<{ code: number; stdout: string; stderr: string }>
@@ -66,6 +71,11 @@ const DEFAULT_CAPACITY = 2
 // checkout size; 30s was calibrated for an idle host and produced kill-mid-mutation
 // corruption (half-removed worktrees) under real fleet load (2026-07-23 incident).
 const GIT_TIMEOUT_MS = 120_000
+/** R1680: worktree-remove cleanup is correctness-critical, not latency-critical;
+ * under host load it can exceed the interactive window and must not fail work.
+ * Now equal to GIT_TIMEOUT_MS, but kept as a named constant so the cleanup call
+ * sites (worktree remove) stay self-documenting and independently tunable. */
+const GIT_CLEANUP_TIMEOUT_MS = 120_000
 
 type PoolEntry = {
   busy: boolean
@@ -88,22 +98,23 @@ export function createCandidatePoolGit(
   ) as Record<string, string>
   env.KM_NO_AUTO_SUBMODULE_UPDATE = "1"
   return Object.freeze({
-    async run(repo, args, allowFailure = false): Promise<CandidatePoolGitResult> {
+    async run(repo, args, allowFailure = false, timeoutMs = GIT_TIMEOUT_MS): Promise<CandidatePoolGitResult> {
       const result = await process.run({
         argv: ["git", "-C", repo, ...args],
         cwd: repo,
         env,
-        timeoutMs: GIT_TIMEOUT_MS,
+        timeoutMs,
       })
       if (result.timedOut) {
         // A timed-out subprocess was killed mid-operation. For allowFailure
         // callers (best-effort cleanup like `worktree remove`, `rebase --abort`)
         // that is a FAILED RESULT they already handle — throwing here instead
         // escaped past every refusal path and killed the resident (2026-07-23).
-        const message = `yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`
+        const message = `yrd: git ${args.join(" ")} timed out after ${timeoutMs}ms`
         if (!allowFailure) throw new Error(message)
         return { code: result.exitCode === 0 ? 124 : result.exitCode, stdout: result.stdout.trim(), stderr: message }
       }
+
       const completed = { code: result.exitCode, stdout: result.stdout.trim(), stderr: result.stderr.trim() }
       if (!allowFailure && completed.code !== 0) {
         throw new Error(completed.stderr || completed.stdout || `git ${args.join(" ")} failed`)
@@ -191,7 +202,7 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
    * it never claims success while leaving Git worktree-admin residue behind. */
   async function removeWorktree(entry: PoolEntry): Promise<void> {
     if (entry.path !== undefined) {
-      const removed = await git.run(repo, ["worktree", "remove", "--force", entry.path], true)
+      const removed = await git.run(repo, ["worktree", "remove", "--force", entry.path], true, GIT_CLEANUP_TIMEOUT_MS)
       if (removed.code !== 0) {
         // A worktree DESTROYED mid-removal (its `.git` pointer gone — e.g. a
         // prior removal killed at its timeout) can never satisfy `worktree
@@ -327,7 +338,7 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
       await materialize(path, ref)
     } catch (cause) {
       if (added) {
-        const removed = await git.run(repo, ["worktree", "remove", "--force", path], true)
+        const removed = await git.run(repo, ["worktree", "remove", "--force", path], true, GIT_CLEANUP_TIMEOUT_MS)
         if (removed.code !== 0) {
           // The worktree was created but neither materialized nor removed. RETAIN
           // the entry so a later close()/evict retries the removal (retry-safe,

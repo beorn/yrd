@@ -22,6 +22,7 @@ merge: { run: git merge --no-ff "$YRD_TARGET" }
 deploy: bun run deploy
 contest: { concurrency: 2, timeoutMs: 1800000, evaluators: [check] }
 notify:
+  pr/needs-author: [submitter]
   pr/rejected: [submitter, "@ci"]
   pr/needs-review: ["@cto"]
   pr/integrated: [broadcast]
@@ -41,6 +42,7 @@ notify:
       },
       contest: { concurrency: 2, timeoutMs: 1_800_000, evaluators: ["check"] },
       notify: {
+        "pr/needs-author": ["submitter"],
         "pr/rejected": ["submitter", "@ci"],
         "pr/needs-review": ["@cto"],
         "pr/integrated": ["broadcast"],
@@ -102,6 +104,7 @@ refuse:
     [{ contest: { concurrency: 0 } }, "contest.concurrency must be an integer >= 1"],
     [{ notify: { "pr/typo": ["submitter"] } }, "notify.pr/typo"],
     [{ notify: { "pr/rejected": ["reviewer"] } }, "notify.pr/rejected"],
+    [{ notify: { "pr/needs-author": ["reviewer"] } }, "notify.pr/needs-author"],
     [{ notify: { "pr/rejected": ["submitter", "submitter"] } }, "duplicate notification targets"],
     [{ notify: { "pr/needs-review": ["broadcast"] } }, "notify.pr/needs-review"],
     [{ notify: { "pr/integrated": ["submitter"] } }, "notify.pr/integrated"],

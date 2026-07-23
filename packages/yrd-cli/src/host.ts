@@ -31,6 +31,7 @@ import {
   configuredCommandStep,
   configuredMergeStep,
   configuredWaitingCommandStep,
+  authorAttributionReceipt,
   createCandidatePool,
   createCandidatePoolGit,
   createGitPRRecutter,
@@ -79,7 +80,7 @@ import { createYrdLogger, residentObservability, resolveYrdObservability } from 
 import { formatResidentLogLine, residentArtifactHome } from "./runner-timeline.ts"
 import { diagnostic } from "./output.tsx"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
-import { runYrdHelp, runYrdProcessRuntime, yrdJsonOutputRequested } from "./run.ts"
+import { residentRunnerLeaseHeld, runYrdHelp, runYrdProcessRuntime, yrdJsonOutputRequested } from "./run.ts"
 import { queueStepRevision, type ToolchainFingerprint } from "./host-revision.ts"
 import {
   createSignalObserver,
@@ -1040,7 +1041,15 @@ async function createYrdRuntimeHost(
           routes,
           sender: defaultActor,
           reviewRequired: loaded.config.requires.includes("review"),
-          adapter: options.signalAdapter ?? createTribeSignalAdapter(process, defaultActor),
+          adapter:
+            options.signalAdapter ??
+            createTribeSignalAdapter(process, defaultActor, (event) => {
+              return authorAttributionReceipt(app?.queue.get(event.run), {
+                pr: event.pr,
+                revision: event.revision,
+                headSha: event.headSha,
+              })
+            }),
           log,
           // The resident is the primary drainer and delivers unbounded; every other
           // (one-shot) process gets a bounded delivery budget so it can never hold the
@@ -1216,6 +1225,7 @@ function defaultIO(): YrdCliIO {
     columns: process.stdout.columns,
     rows: process.stdout.rows,
     cwd: process.cwd(),
+    residentLeaseHeld: (cwd) => residentRunnerLeaseHeld(cwd),
   }
   if (!interactive) return io
   return withLiveRenderer(io, async (element, options) => {

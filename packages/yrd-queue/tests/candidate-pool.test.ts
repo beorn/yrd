@@ -8,7 +8,7 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } fro
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { createProcess, type ProcessRequest, type ProcessResult } from "@yrd/process"
+import { createProcess, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createLogger, type Event as LogEvent } from "loggily"
 import type { JobResult } from "@yrd/job"
 import {
@@ -109,9 +109,9 @@ type GitFault = (args: readonly string[]) => boolean
  * stand-in for a clean/foreach/remove that fails on a real repository. */
 function faultingGit(base: CandidatePoolGit, fault: { current: GitFault }): CandidatePoolGit {
   return {
-    run: async (repo, args, allowFailure) => {
+    run: async (repo, args, allowFailure, timeoutMs) => {
       if (fault.current(args)) return { code: 1, stdout: "", stderr: `injected fault: ${args.join(" ")}` }
-      return base.run(repo, args, allowFailure)
+      return base.run(repo, args, allowFailure, timeoutMs)
     },
   }
 }
@@ -122,9 +122,16 @@ function makeFaultingPool(
   capacity: number,
   log: CapturingLog["log"],
   fault: { current: GitFault },
+  requests?: ProcessRequest[],
 ): CandidatePool {
   const process = createProcess({ cwd: repo })
-  const git = faultingGit(createCandidatePoolGit(process), fault)
+  const traced: Pick<Process, "run"> = {
+    run(request) {
+      requests?.push(request)
+      return process.run(request)
+    },
+  }
+  const git = faultingGit(createCandidatePoolGit(traced), fault)
   const pool = createCandidatePool({ repo, parent: baysRoot, capacity, git, log })
   disposers.push(async () => {
     await pool.close()
@@ -496,7 +503,8 @@ describe("warm candidate pool", () => {
     const { repo, baseSha, baysRoot } = await repository()
     const { log } = capturingLog()
     const fault: { current: GitFault } = { current: () => false }
-    const pool = makeFaultingPool(repo, baysRoot, 1, log, fault)
+    const requests: ProcessRequest[] = []
+    const pool = makeFaultingPool(repo, baysRoot, 1, log, fault, requests)
 
     let warmPath = ""
     await pool.withCandidate(baseSha, async (path) => {
@@ -521,6 +529,8 @@ describe("warm candidate pool", () => {
     fault.current = () => false
     await pool.close()
     expect(existsSync(warmPath)).toBe(false)
+    const removal = requests.find(({ argv }) => argv.slice(3, 5).join(" ") === "worktree remove")
+    expect(removal?.timeoutMs).toBe(120_000)
     const worktrees = await git(repo, ["worktree", "list", "--porcelain"])
     expect(worktrees).not.toContain(warmPath)
 

@@ -37,6 +37,7 @@ import {
   GitShaSchema,
   PRIdSchema,
   PRFreshnessTransitionSchema,
+  PRNeedsAuthorFactSchema,
   PRRejectedFactSchema,
   PRTerminalAssociationSchema,
   ProvisionBayInputSchema,
@@ -599,14 +600,23 @@ export function createBays(
       },
       async () => {
         const bay = args.bay === undefined ? undefined : resolveBay(state(), args.bay)
-        const resolved = await target(args.base ?? bay?.base, args.baseSha ?? bay?.baseSha)
+        const recorded = selectedPR()
+        const resolved = await target(
+          args.base ?? bay?.base ?? recorded?.base,
+          args.baseSha ?? bay?.baseSha ?? recorded?.baseSha,
+        )
         return actions.intake({ ...args, ...resolved })
       },
     )
   }
   const submitOperation = async (args: SubmitArgs): Promise<CommandResult> => {
     if ("pr" in args) return actions.submit(args)
-    const resolved = await target(args.base, args.baseSha)
+    const recorded = resolvePR(state(), args.branch)
+    const resumesSubmission = recorded?.status === "needs-author" || recorded?.status === "rejected"
+    const resolved = await target(
+      args.base ?? (resumesSubmission ? recorded.base : undefined),
+      args.baseSha ?? (resumesSubmission ? recorded.baseSha : undefined),
+    )
     return actions.submit({ ...args, ...resolved })
   }
   const submit = (args: SubmitArgs): Promise<CommandResult> => {
@@ -766,9 +776,9 @@ export function createBays(
     // the recorded revision's head: a pushed (e.g. draft) or submitted PR whose branch has since
     // moved would otherwise re-register the stale head. Only an active bay reads its head from
     // the workspace (handled above), so this covers the direct-branch case.
-    if ((pr?.status === "submitted" || pr?.status === "pushed") && bay === undefined) {
+    if ((pr?.status === "submitted" || pr?.status === "pushed" || pr?.status === "needs-author") && bay === undefined) {
       const headSha = await options.resolveRevision(pr.branch)
-      if (headSha === undefined && pr.status === "submitted") {
+      if (headSha === undefined && (pr.status === "submitted" || pr.status === "needs-author")) {
         // A submitted PR whose branch no longer resolves cannot be re-submitted from a tip.
         raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${pr.branch}'`)
       }
@@ -805,7 +815,9 @@ export function createBays(
     // resubmit below (D2); its issue rides along when that mint records the
     // fresh revision, so binding here (which refuses on a terminal PR) is skipped.
     if (pr !== undefined && isLivePR(pr.status)) pr = await bindIssue(pr, options.issue)
-    if (pr?.status === "submitted") return bindCorrelation(pr, options.correlation)
+    if (pr?.status === "submitted" || pr?.status === "needs-author") {
+      return bindCorrelation(pr, options.correlation)
+    }
     if (pr?.status === "pushed") {
       pr = await bindCorrelation(pr, options.correlation)
       if (options.draft === true) return pr
@@ -943,6 +955,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/submitted": PRRevisionSchema,
         "pr/correlation-bound": PRCorrelationBoundSchema,
         "pr/withdrawn": PRWithdrawnSchema,
+        "pr/needs-author": PRNeedsAuthorFactSchema,
         "pr/rejected": PRRejectedFactSchema,
         "pr/terminal-associated": PRTerminalAssociationSchema,
         "pr/integrated": PRIntegratedSchema,
@@ -958,11 +971,12 @@ export function withBays(options: WithBaysOptions) {
         "pr/pushed": LegacyPRPushedSchema,
         "pr/submitted": LegacyPRRevisionSchema,
         "pr/withdrawn": z.union([PRWithdrawnSchema, LegacyPRWithdrawnSchema]),
+        "pr/needs-author": PRNeedsAuthorFactSchema,
         "pr/rejected": PRReplayRejectedSchema,
         "pr/integrated": z.union([PRIntegratedSchema, LegacyPRIntegratedSchema]),
         "pr/canceled": z.union([PRCanceledSchema, LegacyPRCanceledSchema]),
       },
-      projectionVersion: "bays-v4-freshness",
+      projectionVersion: "bays-v5-needs-author",
       project: projectBays,
       create(yrd) {
         yrd.jobs.requireDefinitions(options.jobs)
@@ -1197,7 +1211,11 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
   if (bay !== undefined && bay.status !== "active") throw new Error(`yrd: bay '${bay.id}' is ${bay.status}, not active`)
   const branch = args.branch ?? bay?.branch
   if (branch === undefined) throw new Error("yrd: bay.intake: 'bay' or 'branch' is required")
-  const base = baseIdentity(args.base ?? bay?.base ?? defaultBase)
+  const existing = bay === undefined ? resolvePR(current, branch) : prForBay(current, bay.id)
+  // An omitted receiver base belongs to the recorded PR before the process
+  // default. Otherwise replaying an unchanged needs-author PR against a
+  // non-default base silently looks like a new authored revision.
+  const base = baseIdentity(args.base ?? bay?.base ?? existing?.base ?? defaultBase)
   if (args.receipt !== undefined) {
     const received = current.receipts[args.receipt]
     if (received !== undefined) {
@@ -1211,30 +1229,61 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
       return { events: [] }
     }
   }
-  const existing = bay === undefined ? resolvePR(current, branch) : prForBay(current, bay.id)
-  refuseDuplicatePayload(current, args.headSha, base, args.composition, existing?.id)
   if (existing?.status === "integrated" || existing?.status === "withdrawn" || existing?.status === "canceled") {
     throw new Error(`yrd: PR '${existing.id}' is ${existing.status}; start a new bay`)
   }
-  const id = existing?.id ?? nextId("PR", current.prs)
   const issue = attachedIssue(existing, args.issue, bay?.issue)
+  const name = args.name ?? bay?.name ?? existing?.name
+  // Omitted receiver fields inherit the recorded payload for idempotence, while
+  // an explicit base/composition delta remains an authored recut and may resume
+  // the PR. Display-name drift alone never mints a content revision.
+  const replayBaseSha = args.baseSha ?? existing?.baseSha
+  const replayComposition = args.composition ?? existing?.composition
+  refuseDuplicatePayload(current, args.headSha, base, replayComposition, existing?.id)
+  if (
+    (existing?.status === "needs-author" || existing?.status === "rejected") &&
+    existing.headSha === args.headSha &&
+    baseIdentity(existing.base) === base &&
+    existing.baseSha === replayBaseSha &&
+    sameComposition(existing.composition, replayComposition) &&
+    existing.issue === issue
+  ) {
+    return { events: [] }
+  }
+  const id = existing?.id ?? nextId("PR", current.prs)
   const actor = args.actor ?? bay?.actor ?? defaultActor
+  const revision = (existing?.revision ?? 0) + 1
+  const pushed = {
+    pr: id,
+    ...(bay === undefined ? {} : { bay: bay.id }),
+    ...(name === undefined ? {} : { name }),
+    ...(issue === undefined ? {} : { issue }),
+    branch,
+    base,
+    headSha: args.headSha,
+    ...(replayBaseSha === undefined ? {} : { baseSha: replayBaseSha }),
+    ...(replayComposition === undefined ? {} : { composition: replayComposition }),
+    ...(args.receipt === undefined ? {} : { receipt: args.receipt }),
+    revision,
+    actor,
+  }
   return {
     events: [
-      event("pr/pushed", {
-        pr: id,
-        ...(bay === undefined ? {} : { bay: bay.id }),
-        ...((args.name ?? bay?.name) ? { name: args.name ?? bay?.name } : {}),
-        ...(issue === undefined ? {} : { issue }),
-        branch,
-        base,
-        headSha: args.headSha,
-        ...(args.baseSha === undefined ? {} : { baseSha: args.baseSha }),
-        ...(args.composition === undefined ? {} : { composition: args.composition }),
-        ...(args.receipt === undefined ? {} : { receipt: args.receipt }),
-        revision: (existing?.revision ?? 0) + 1,
-        actor,
-      }),
+      event("pr/pushed", pushed),
+      // A needs-author/rejected revision was already submitted once. Its next receiver
+      // push is an in-place author fix, not a new draft that requires another
+      // submit ceremony: keep the PR identity, resume it, and request checks.
+      ...(existing?.status === "needs-author" || existing?.status === "rejected"
+        ? [
+            event("pr/submitted", { pr: id, revision, headSha: args.headSha, actor }),
+            event("pr/checks-requested", {
+              pr: id,
+              revision,
+              headSha: args.headSha,
+              ...(replayBaseSha === undefined ? {} : { baseSha: replayBaseSha }),
+            }),
+          ]
+        : []),
     ],
   }
 }
@@ -1256,12 +1305,24 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
     }
   }
 
-  const base = baseIdentity(args.base ?? defaultBase)
   const existing = resolvePR(current, args.branch)
+  const resumesSubmission = existing?.status === "needs-author" || existing?.status === "rejected"
+  const base = baseIdentity(args.base ?? (resumesSubmission ? existing.base : defaultBase))
   if (existing?.status === "pushed" || existing?.status === "submitted") {
     throw new Error(`yrd: branch '${args.branch}' already has live PR '${existing.id}'`)
   }
-  refuseDuplicatePayload(current, args.headSha, base, args.composition, existing?.id)
+  const baseSha = args.baseSha ?? (resumesSubmission ? existing.baseSha : undefined)
+  const composition = args.composition ?? (resumesSubmission ? existing.composition : undefined)
+  if (
+    resumesSubmission &&
+    existing.headSha === args.headSha &&
+    baseIdentity(existing.base) === base &&
+    existing.baseSha === baseSha &&
+    sameComposition(existing.composition, composition)
+  ) {
+    return { events: [] }
+  }
+  refuseDuplicatePayload(current, args.headSha, base, composition, existing?.id)
   // D2 — reopen the existing PR identity (next revision) for a non-landed
   // terminal branch, not just a rejected one. `rejected` already reopened;
   // `withdrawn`/`canceled` now do too, so resubmitting the branch mints the
@@ -1270,7 +1331,10 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
   // `submitted` are already refused above, and `integrated` is intercepted by
   // the terminal-branch guard before this path (its redelivery is parked).
   const resubmitted =
-    existing?.status === "rejected" || existing?.status === "withdrawn" || existing?.status === "canceled"
+    existing?.status === "needs-author" ||
+    existing?.status === "rejected" ||
+    existing?.status === "withdrawn" ||
+    existing?.status === "canceled"
       ? existing
       : undefined
   const id = resubmitted?.id ?? nextId("PR", current.prs)
@@ -1284,9 +1348,9 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
     branch: args.branch,
     base,
     headSha: args.headSha,
-    ...(args.baseSha === undefined ? {} : { baseSha: args.baseSha }),
+    ...(baseSha === undefined ? {} : { baseSha }),
     ...(args.correlation === undefined ? {} : { correlation: args.correlation }),
-    ...(args.composition === undefined ? {} : { composition: args.composition }),
+    ...(composition === undefined ? {} : { composition }),
     revision,
     actor,
   }
@@ -1328,11 +1392,11 @@ function bindPRCorrelation(pr: DeepReadonly<PR>, correlation: Correlation) {
       `yrd: PR '${pr.id}' is already bound to correlation '${correlationLabel(pr.correlation)}'`,
     )
   }
-  if (pr.status !== "pushed" && pr.status !== "submitted") {
+  if (pr.status !== "pushed" && pr.status !== "submitted" && pr.status !== "needs-author") {
     raiseFailure(
       "refusal",
       "correlation-too-late",
-      `yrd: PR '${pr.id}' is ${pr.status}; correlation can only be bound while pushed or submitted`,
+      `yrd: PR '${pr.id}' is ${pr.status}; correlation can only be bound while pushed, submitted, or needs-author`,
     )
   }
   return {
@@ -1618,7 +1682,7 @@ function commentPr(state: DeepReadonly<BayState>, args: PrCommentArgs) {
 
 function requestPrChecks(state: DeepReadonly<BayState>, args: PrRequestChecksArgs) {
   const pr: LivePR = requireLivePR(state.bays, args.pr)
-  if (pr.status !== "pushed" && pr.status !== "submitted" && pr.status !== "rejected") {
+  if (pr.status !== "pushed" && pr.status !== "submitted" && pr.status !== "needs-author" && pr.status !== "rejected") {
     throw new PrCheckabilityConflict(pr.id, pr.status)
   }
   const baseSha = args.baseSha ?? pr.baseSha
@@ -1956,6 +2020,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               ...(pushed.composition === undefined ? { composition: undefined } : { composition: pushed.composition }),
               recut: undefined,
               revisions: [...existing.revisions, record],
+              needsAuthor: undefined,
               terminalRun: undefined,
               submittedAt: undefined,
               rejectedAt: undefined,
@@ -2053,6 +2118,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         recut: proof,
         revisions: [...pr.revisions, revision],
         reviews: carriedReview === undefined ? pr.reviews : [...pr.reviews, carriedReview],
+        needsAuthor: undefined,
         terminalRun: undefined,
         submittedAt: undefined,
         rejectedAt: undefined,
@@ -2093,6 +2159,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       return patchPR(pr, {
         status: "submitted",
         submittedAt: applied.ts,
+        needsAuthor: undefined,
         rejectedAt: undefined,
         integratedAt: undefined,
         integration: undefined,
@@ -2112,7 +2179,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       if (pr.revision !== changed.revision || pr.headSha !== changed.headSha) {
         throw new Error(`yrd: stale correlation bind for PR '${pr.id}'`)
       }
-      if (pr.status !== "pushed" && pr.status !== "submitted") {
+      if (pr.status !== "pushed" && pr.status !== "submitted" && pr.status !== "needs-author") {
         throw new Error(`yrd: PR '${pr.id}' is ${pr.status}; correlation cannot be bound`)
       }
       if (pr.correlation !== undefined && !correlationsEqual(pr.correlation, changed.correlation)) {
@@ -2128,9 +2195,33 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       assertTerminalApplies(pr, changed, applied.name)
       return patchPR(pr, {
         status: "withdrawn",
+        needsAuthor: undefined,
         withdrawnAt: applied.ts,
         ...(parsed.success && parsed.data.reason !== undefined ? { withdrawReason: parsed.data.reason } : {}),
         revisions: patchRevisionClock(pr, { terminal: { status: "withdrawn", at: applied.ts } }),
+      })
+    }
+    case "pr/needs-author": {
+      const changed = PRNeedsAuthorFactSchema.parse(data)
+      const pr = current.prs[changed.pr]
+      if (pr === undefined) throw new Error(`yrd: '${applied.name}' names missing PR '${changed.pr}'`)
+      assertTerminalApplies(pr, changed, applied.name)
+      if (pr.status !== "submitted") {
+        throw new Error(`yrd: PR '${pr.id}' is ${pr.status}; '${applied.name}' requires a submitted revision`)
+      }
+      return patchPR(pr, {
+        status: "needs-author",
+        needsAuthor: {
+          at: applied.ts,
+          run: changed.run,
+          step: changed.step,
+          receipt: changed.receipt,
+          ...(changed.evidence === undefined ? {} : { evidence: changed.evidence }),
+          ...(changed.detail === undefined ? {} : { detail: changed.detail }),
+        },
+        terminalRun: undefined,
+        rejectedAt: undefined,
+        detail: changed.detail,
       })
     }
     case "pr/rejected": {
@@ -2141,6 +2232,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       const rejected: PR = {
         ...pr,
         status: "rejected",
+        needsAuthor: undefined,
         rejectedAt: applied.ts,
         terminalRun: undefined,
         revisions: patchRevisionClock(pr, {
@@ -2165,6 +2257,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       const run = parsed.success ? parsed.data.run : undefined
       return patchPR(pr, {
         status: "integrated",
+        needsAuthor: undefined,
         integratedAt: applied.ts,
         terminalRun: run,
         integration: { commit: changed.commit, baseSha: changed.baseSha },
@@ -2182,6 +2275,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       assertTerminalApplies(pr, changed, applied.name)
       return patchPR(pr, {
         status: "canceled",
+        needsAuthor: undefined,
         canceledAt: applied.ts,
         canceledBy: changed.by,
         cancelReason: changed.reason,

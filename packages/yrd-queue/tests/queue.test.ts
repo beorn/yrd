@@ -2333,7 +2333,7 @@ describe("Queue", () => {
     await expect(running).resolves.toMatchObject([{ status: "failed" }])
   })
 
-  it("cancels a correlated PR when its active Queue Job is canceled", async () => {
+  it("cancels the run and re-queues its correlated PR when the active Job is canceled", async () => {
     const correlation = { namespace: "tribe-request", id: "request-20925" } as const
     const journal = createMemoryJournal()
     const id = ids()
@@ -2363,34 +2363,23 @@ describe("Queue", () => {
 
     expect(advanced.events.map(({ name, data }) => ({ name, data }))).toEqual([
       {
-        name: "pr/canceled",
+        name: "queue/run/canceled",
         data: {
-          pr: pr.id,
-          revision: pr.revision,
-          headSha: pr.headSha,
           run: "R1",
-          correlation,
-          actor: "operator",
           by: "@chief",
           reason: "authorization revoked",
         },
       },
     ])
     expect(app.state().bays.prs[pr.id]).toMatchObject({
-      status: "canceled",
+      status: "submitted",
       revision: pr.revision,
       headSha: pr.headSha,
       correlation,
-      revisions: [
-        {
-          revision: pr.revision,
-          headSha: pr.headSha,
-          terminal: { status: "canceled", at: "2026-01-01T00:00:00.000Z" },
-        },
-      ],
+      revisions: [{ revision: pr.revision, headSha: pr.headSha }],
     })
     expect(app.queue.get("R1")).toMatchObject({
-      status: "failed",
+      status: "canceled",
       error: { code: "run-canceled" },
       prs: [{ id: pr.id, revision: pr.revision, headSha: pr.headSha, correlation }],
       steps: [
@@ -2405,17 +2394,21 @@ describe("Queue", () => {
     })
     const eventNames = (await Array.fromAsync(app.events())).map(({ name }) => name)
     expect(eventNames).not.toContain("pr/rejected")
+    expect(eventNames).not.toContain("pr/canceled")
     expect(app.queue.get("R1")?.error?.code).not.toBe("job-lost")
 
     await using replayed = await createQueueApp({}, journal, undefined, id)
     expect(replayed.queue.get("R1")).toMatchObject({
-      status: "failed",
+      status: "canceled",
       prs: [{ id: pr.id, revision: pr.revision, headSha: pr.headSha, correlation }],
     })
     expect(replayed.state().bays.prs[pr.id]).toMatchObject({
-      status: "canceled",
-      revisions: [{ terminal: { status: "canceled", at: "2026-01-01T00:00:00.000Z" } }],
+      status: "submitted",
+      revisions: [{ revision: pr.revision, headSha: pr.headSha }],
     })
+    await expect(replayed.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)).resolves.toMatchObject([
+      { id: "R2", status: "passed", prs: [{ id: pr.id, revision: pr.revision, headSha: pr.headSha, correlation }] },
+    ])
   })
 
   it("keys a selected step suffix by run order rather than installed order", async () => {

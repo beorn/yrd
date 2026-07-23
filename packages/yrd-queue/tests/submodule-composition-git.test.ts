@@ -220,6 +220,7 @@ describe("queue-native submodule composition Git executor", () => {
       status: "refused",
       code: "submodule-composition-conflict",
       path: "vendor/dependency",
+      message: expect.stringContaining("fix the source submodule and push; the same PR resumes automatically"),
     })
     const ref = plan.resolutions[0]?.kind === "compose" ? plan.resolutions[0].ref : "missing"
     expect((await git(repo.origin, ["show-ref", "--verify", "--quiet", ref], true)).code).toBe(1)

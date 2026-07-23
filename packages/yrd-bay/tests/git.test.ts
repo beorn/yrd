@@ -252,13 +252,16 @@ describe("createGitWorkspace", () => {
     const { root, repo } = await repository()
     await using actual = createProcess()
     let interruptRemoval = true
+    const removalTimeouts: (number | undefined)[] = []
     const process: Pick<Process, "run"> = {
       run(request) {
         const args = request.argv.slice(3)
         if (interruptRemoval && args[0] === "worktree" && args[1] === "remove") {
+          removalTimeouts.push(request.timeoutMs)
           interruptRemoval = false
           return Promise.resolve(processResult(1, "simulated removal interruption"))
         }
+        if (args[0] === "worktree" && args[1] === "remove") removalTimeouts.push(request.timeoutMs)
         return actual.run(request)
       },
     }
@@ -278,6 +281,7 @@ describe("createGitWorkspace", () => {
     expect(app.bays.get("B1")?.status).toBe("closed")
     expect(existsSync(bay.path)).toBe(false)
     expect((await git(repo, ["rev-parse", "refs/yrd/closed/B1"])).stdout).toBe(bay.headSha)
+    expect(removalTimeouts).toEqual([120_000, 120_000])
   })
 
   it("resumes close after removal succeeds but Job completion is interrupted", async () => {
