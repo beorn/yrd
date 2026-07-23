@@ -2,7 +2,7 @@ import { basename } from "node:path"
 import type { Process, ProcessRequest, ProcessResult } from "@yrd/process"
 
 /** A 1.55s bounded window covers ordinary concurrent Git writers without hiding a stuck lock. */
-export const DEFAULT_GIT_INDEX_LOCK_RETRY_DELAYS_MS = Object.freeze([50, 100, 200, 400, 800] as const)
+const DEFAULT_GIT_INDEX_LOCK_RETRY_DELAYS_MS = Object.freeze([50, 100, 200, 400, 800] as const)
 
 type RetryOptions = Readonly<{
   delaysMs?: readonly number[]
