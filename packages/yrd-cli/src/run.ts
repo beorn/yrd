@@ -63,12 +63,12 @@ import {
   QueueStatusView,
   type PRCheckViewRecord,
   type QueueLogCoverage,
+  type QueueLogRow,
   PRResultView,
   queueLogAttempts,
   queueLogRows,
   prListRows,
   prDetailData,
-  queueRevisionKey,
   queueRunRevisionClocks,
   queueTimelineAdmissionTimes,
   queueTimelineProjection,
@@ -1643,13 +1643,12 @@ async function resolveSubmitMetadata(
   }
 }
 
-async function submitBays(
+async function applyPrSelectionVerb(
   app: YrdCliApp,
   selectors: readonly string[],
   options: {
     follow?: boolean
     wait?: boolean
-    draft?: boolean
     base?: string
     queue?: string
     issue?: string
@@ -1661,8 +1660,9 @@ async function submitBays(
     json?: boolean
   },
   io: YrdCliIO,
-  command: "bay.submit" | "pr.submit",
+  command: "bay.submit" | "pr.create" | "pr.submit",
 ): Promise<YrdCliExitCode> {
+  const createOnly = command === "pr.create"
   const correlation = parseCorrelation(options.correlation)
   const state = stateOf(app)
   const cwd = io.cwd ?? process.cwd()
@@ -1680,19 +1680,31 @@ async function submitBays(
   }
   const reviewers = options.reviewer ?? []
   for (const selector of inferred) {
+    if (createOnly) {
+      const bay = app.bays.get(selector)
+      const existing = app.bays.pr(bay?.branch ?? selector)
+      if (existing !== undefined && existing.status !== "pushed") {
+        refusal(`PR '${existing.id}' is already ${existing.status}; create is only for a draft PR`)
+      }
+    }
     const metadata = await resolveSubmitMetadata(app, selector, options, io)
+    // Internal compatibility seam: `draft` means emit `pr/pushed` without
+    // `pr/submitted`; it is deliberately not part of either submit CLI.
     let pr = await app.bays.submitSelection(selector, {
       ...(base === undefined ? {} : { base }),
       ...(options.issue === undefined ? {} : { issue: options.issue }),
       ...(metadata.title === undefined ? {} : { title: metadata.title }),
       ...(metadata.description === undefined ? {} : { description: metadata.description }),
-      ...(options.draft === true ? { draft: true } : {}),
+      ...(createOnly ? { draft: true } : {}),
       ...(correlation === undefined ? {} : { correlation }),
       ...(composition === undefined ? {} : { composition }),
       resolveRevision: (ref) => optionalRevision(ref, io),
       run: runtimeOptions(io),
       warnings,
     })
+    if (createOnly && pr.status !== "pushed") {
+      refusal(`PR '${pr.id}' is already ${pr.status}; create is only for a draft PR`)
+    }
     if (reviewers.length > 0 && pr.status !== "integrated") {
       await app.bays.requestReview({
         pr: pr.id,
@@ -1705,7 +1717,7 @@ async function submitBays(
     }
     prs.push(pr)
   }
-  if (command === "bay.submit" || options.draft === true) {
+  if (command === "bay.submit" || createOnly) {
     await printResult(
       io,
       jsonEnabled(options),
@@ -3232,6 +3244,34 @@ function filterQueueLogRows<T extends QueueLogFilterRow>(
   return filtered.slice(-limit)
 }
 
+const LOG_SUBJECT_RESOLVE_CONCURRENCY = 8
+
+async function resolveQueueLogSubjects(
+  rows: readonly QueueLogRow[],
+  io: YrdCliIO,
+): Promise<ReadonlyMap<string, string>> {
+  const headShas = [...new Set(rows.map((row) => row.headSha).filter((headSha) => headSha !== "-"))]
+  const subjects = new Map<string, string>()
+  const cwd = io.cwd ?? process.cwd()
+
+  for (let offset = 0; offset < headShas.length; offset += LOG_SUBJECT_RESOLVE_CONCURRENCY) {
+    const resolved = await Promise.all(
+      headShas.slice(offset, offset + LOG_SUBJECT_RESOLVE_CONCURRENCY).map(async (headSha) => {
+        const subject =
+          io.resolveCommitMeta === undefined
+            ? commitSubject(cwd, headSha)
+            : (await io.resolveCommitMeta(headSha, cwd))?.subject
+        return [headSha, subject] as const
+      }),
+    )
+    for (const [headSha, subject] of resolved) {
+      if (subject !== undefined) subjects.set(headSha, subject)
+    }
+  }
+
+  return subjects
+}
+
 async function logRuns(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -3272,14 +3312,6 @@ async function logRuns(
   const prStatusById = new Map<string, PR["status"]>(
     summaries.flatMap((result) => result.prs.map((pr) => [pr.id, pr.status])),
   )
-  const revisionSubjects = new Map<string, string>()
-  const cwd = io.cwd ?? process.cwd()
-  for (const pr of summaries.flatMap((result) => result.finished.flatMap((run) => run.prs))) {
-    const key = queueRevisionKey(pr)
-    if (revisionSubjects.has(key)) continue
-    const subject = commitSubject(cwd, pr.headSha)
-    if (subject !== undefined) revisionSubjects.set(key, subject)
-  }
   const runIds = new Set(
     summaries.flatMap((summary) => [...summary.running, ...summary.waiting, ...summary.finished].map((run) => run.id)),
   )
@@ -3294,10 +3326,15 @@ async function logRuns(
     target.prFilter,
     prStatusById,
     attempts,
-    revisionSubjects,
+    new Map(),
     revisionClocks,
   )
-  const rows = filterQueueLogRows(projectedRows, options, io.now?.() ?? Date.now())
+  const filteredRows = filterQueueLogRows(projectedRows, options, io.now?.() ?? Date.now())
+  const revisionSubjects = await resolveQueueLogSubjects(filteredRows, io)
+  const rows = filteredRows.map((row) => {
+    const subject = revisionSubjects.get(row.headSha)
+    return subject === undefined ? row : { ...row, subject }
+  })
   const coverage = await queueLegacyCoverage(io.cwd ?? process.cwd(), await firstEventTimestamp(app))
   await printResult(
     io,
@@ -4286,16 +4323,22 @@ function maxExit(left: YrdCliExitCode, right: YrdCliExitCode): YrdCliExitCode {
   return Math.max(left, right) as YrdCliExitCode
 }
 
-function configureOutput(command: CliCommand, io: YrdCliIO): void {
+type CommanderOutput = { errorCommand?: CliCommand }
+
+function configureOutput(command: CliCommand, io: YrdCliIO, output: CommanderOutput): void {
   command.configureOutput({
     writeOut: (text) => io.stdout(text),
-    writeErr: (text) => io.stderr(text),
+    // Parse failures are rendered once from the caught CommanderError. This
+    // keeps suggestions, JSON diagnostics, and domain failures on one path.
+    writeErr: () => {
+      output.errorCommand = command
+    },
     getOutHasColors: () => io.color === true,
     getErrHasColors: () => io.color === true,
     getOutHelpWidth: () => io.columns ?? 80,
     getErrHelpWidth: () => io.columns ?? 80,
   })
-  for (const child of command.commands) configureOutput(child as unknown as CliCommand, io)
+  for (const child of command.commands) configureOutput(child as unknown as CliCommand, io, output)
 }
 
 function addExamples(program: CliCommand, name: string, projection: "root" | "bay"): void {
@@ -4307,6 +4350,7 @@ function addExamples(program: CliCommand, name: string, projection: "root" | "ba
   if (projection === "root") {
     examples.push(
       [`$ ${name} pr list`, "inspect active PRs"],
+      [`$ ${name} pr create topic/fix`, "create a draft before submission"],
       [`$ ${name} queue run --steps check,merge`, "run selected steps"],
       [`$ ${name} watch --pr PR7`, "monitor PR and queue health"],
       [`$ ${name} contest open km:T1 -a codex/claude`, "compare implementations"],
@@ -4333,7 +4377,7 @@ function addAuthoredCarrierWorkflow<
   ArgumentRecord extends Record<string, unknown>,
 >(command: CliCommand<Options, Arguments, ArgumentRecord>, name: string): void {
   command.addHelpSection("Authored root carrier:", [
-    [`$ ${name} pr submit <branch> --draft`, "record the immutable authored carrier as a draft PR"],
+    [`$ ${name} pr create <branch>`, "record the immutable authored carrier as a draft PR"],
     [
       `$ ${name} pr recut <PR> --preflight --queue`,
       "classify from pinned evidence, then run the exact next command; no composition manifest or manual triage",
@@ -4348,6 +4392,7 @@ function buildProgram(
   projection: "root" | "bay",
   io: YrdCliIO,
   setExit: (code: YrdCliExitCode) => void,
+  commanderOutput: CommanderOutput,
   bootstrap?: RuntimeBootstrap,
 ): CliCommand {
   let runtimeApp = app
@@ -4356,7 +4401,6 @@ function buildProgram(
   const installedServices = (): YrdCliServices => runtimeServices
   const program = new CliCommand(name)
     .description(projection === "bay" ? "manage isolated Git work bays" : "yrd (shipyard) — agentic software delivery")
-    .showHelpAfterError()
     .showSuggestionAfterError()
   program.helpCommand(false)
   program.exitOverride()
@@ -4395,12 +4439,12 @@ function buildProgram(
   if (projection === "root") {
     program.addHelpSection(
       "Model:",
-      "Pick an issue -> work it in a bay -> submit as a PR -> PRs queue per base ->\na run verifies and merges each one -> integrated, or rejected with the log.",
+      "Pick an issue -> work it in a bay -> create a draft -> submit it -> PRs queue per base ->\na run verifies and merges each one -> integrated, or rejected with the log.",
     )
     program.addHelpSection("Objects:", [
       ["issue", "tracker-owned intent; yrd exposes a read-only delivery lens"],
       ["bay", "isolated Git workspace; also standalone as git-bay"],
-      ["pr", "submitted branch@head revision; the queue's unit"],
+      ["pr", "persistent branch delivery; draft until submitted; the queue's unit"],
       ["contest", "competing implementations; winner promotes to a PR"],
       ["queue", "one per base; verifies and merges PRs serially"],
     ])
@@ -4460,7 +4504,6 @@ function buildProgram(
   bay
     .command("submit [selector...]")
     .description("submit bays or branches")
-    .option("--draft", "register a pushed PR without requesting or admitting checks")
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
@@ -4469,7 +4512,9 @@ function buildProgram(
     .option("--correlation <namespace:id>", "bind an opaque correlation to the submitted revision")
     .option("--composition <path>", "immutable version-1 source composition JSON")
     .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "bay.submit")))
+    .action(async (selectors, options) =>
+      setExit(await applyPrSelectionVerb(installed(), selectors, options, io, "bay.submit")),
+    )
   bay
     .command("close [selector...]")
     .description("close work bays")
@@ -4479,7 +4524,7 @@ function buildProgram(
 
   if (projection === "bay") {
     addExamples(program, name, projection)
-    configureOutput(program, io)
+    configureOutput(program, io, commanderOutput)
     return program
   }
 
@@ -4658,10 +4703,31 @@ function buildProgram(
     .option("--reviewer <actor>", "scope --needs-review to one requested reviewer")
     .option("--json", "emit stable JSON")
     .action(async (options) => listPrs(installed(), options, io))
-  const submit = pr
-    .command("submit [selector...]")
+  const create = pr
+    .command("create [selector]")
+    .description("create a draft PR without requesting or admitting checks")
+    .option("--base <branch>", "base branch for a direct branch create")
+    .option("--queue <branch>", "alias for --base")
+    .option("--issue <ref>", "link a tracker-neutral issue reference")
+    .option("--title <text>", "PR subject (defaults to the head commit subject)")
+    .option("--description <text>", "PR description body (defaults to the head commit body)")
+    .option("--correlation <namespace:id>", "bind an opaque correlation to the draft revision")
+    .option("--composition <path>", "queue-generated source composition JSON; not for authored root carriers")
+    .option(
+      "--reviewer <actor>",
+      "request a review from <actor> right after create (repeatable)",
+      (value: string, previous: readonly string[]) => [...previous, value],
+      [] as readonly string[],
+    )
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) =>
+      setExit(
+        await applyPrSelectionVerb(installed(), selector === undefined ? [] : [selector], options, io, "pr.create"),
+      ),
+    )
+  addAuthoredCarrierWorkflow(create, name)
+  pr.command("submit [selector...]")
     .description("submit PR revisions and admit configured checks")
-    .option("--draft", "register a pushed PR without requesting or admitting checks")
     .option("--wait", "block on the synchronous drain (pre-decouple behavior); default records and returns")
     .option("--follow", "follow admitted checks to a terminal result (implies --wait)")
     .option("--base <branch>", "base branch for a direct branch submit")
@@ -4678,8 +4744,9 @@ function buildProgram(
       [] as readonly string[],
     )
     .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "pr.submit")))
-  addAuthoredCarrierWorkflow(submit, name)
+    .action(async (selectors, options) =>
+      setExit(await applyPrSelectionVerb(installed(), selectors, options, io, "pr.submit")),
+    )
   pr.command("view <selector>")
     .description("show a PR and its runs")
     .option("--json", "emit stable JSON")
@@ -4878,8 +4945,101 @@ function buildProgram(
   const orderedCommands = program.commands as unknown as CliCommand[]
   orderedCommands.sort((left, right) => (order.get(left.name()) ?? 99) - (order.get(right.name()) ?? 99))
   addExamples(program, name, projection)
-  configureOutput(program, io)
+  configureOutput(program, io, commanderOutput)
   return program
+}
+
+function commanderErrorMessage(command: CliCommand | undefined, error: CommanderError): string {
+  const removedDraftSubmit =
+    command?.name() === "submit" &&
+    error.code === "commander.unknownOption" &&
+    error.message.includes("unknown option '--draft'")
+  return removedDraftSubmit ? `${error.message}; draft PRs are created with 'yrd pr create'` : error.message
+}
+
+function commandPath(command: CliCommand | undefined, fallback: string): string {
+  if (command === undefined) return fallback
+  const names: string[] = []
+  for (
+    let cursor: CliCommand | null | undefined = command;
+    cursor !== null && cursor !== undefined;
+    cursor = cursor.parent as CliCommand | null | undefined
+  ) {
+    if (!cursor.name().startsWith("_")) names.unshift(cursor.name())
+  }
+  return names.join(" ")
+}
+
+function conciseCommanderCause(error: CommanderError, helpCommand: string): string {
+  const line = error.message
+    .replace(/\s+/gu, " ")
+    .trim()
+    .replace(/^error:\s*/u, "")
+    .replace(/\(Did you mean ([\w-]+)\?\)/u, "(Did you mean '$1'?)")
+  const hiddenDefault = /^too many arguments for '_[^']+'.*got (\d+): (.+)$/u.exec(line)
+  const hiddenDefaultOperands = hiddenDefault?.[2]?.replace(/\.$/u, "")
+  const hiddenDefaultOperand =
+    hiddenDefault === null
+      ? undefined
+      : hiddenDefault[1] === "1"
+        ? hiddenDefaultOperands
+        : hiddenDefaultOperands?.split(", ", 1)[0]
+  if (hiddenDefaultOperand !== undefined) {
+    return `unknown command '${hiddenDefaultOperand}' (Run '${helpCommand} --help' for available commands.)`
+  }
+  if (error.code !== "commander.unknownCommand" || line.includes("(Did you mean ")) return line
+  return `${line} (Run '${helpCommand} --help' for available commands.)`
+}
+
+function commandOption(command: CliCommand, token: string) {
+  const separator = token.indexOf("=")
+  const flag = separator === -1 ? token : token.slice(0, separator)
+  for (
+    let cursor: CliCommand | null | undefined = command;
+    cursor !== null && cursor !== undefined;
+    cursor = cursor.parent as CliCommand | null | undefined
+  ) {
+    const option = cursor.options.find((candidate) => candidate.short === flag || candidate.long === flag)
+    if (option !== undefined) return option
+  }
+  return undefined
+}
+
+function childCommand(command: CliCommand, token: string): CliCommand | undefined {
+  return command.commands
+    .map((candidate) => candidate as unknown as CliCommand)
+    .find((candidate) => candidate.name() === token || candidate.aliases().includes(token))
+}
+
+/** Derive output mode from the same Commander option tree that parses the
+ * invocation. A token consumed as a required option value is not a JSON flag. */
+function jsonOutputRequested(program: CliCommand, args: readonly string[]): boolean {
+  let command = program
+  let consumesValue = false
+  for (const token of args) {
+    if (consumesValue) {
+      consumesValue = false
+      continue
+    }
+    if (token === "--") break
+    if (token === "--json") return true
+    if (token.startsWith("-")) {
+      const option = commandOption(command, token)
+      consumesValue = option?.required === true && !token.includes("=")
+      continue
+    }
+    command = childCommand(command, token) ?? command
+  }
+  return false
+}
+
+/** Cold-path fallback for host failures outside the normal command catcher.
+ * It still uses the canonical Commander definition rather than reparsing argv. */
+export function yrdJsonOutputRequested(argv: readonly string[]): boolean {
+  const invocation = resolveInvocation(argv)
+  const io: YrdCliIO = { stdout() {}, stderr() {} }
+  const program = buildProgram(undefined, {}, invocation.name, invocation.projection, io, () => undefined, {})
+  return jsonOutputRequested(program, canonicalizeYrdCommandAliases(invocation.args, invocation.projection))
 }
 
 /** Run the one Yrd command surface. git-bay projects its canonical bay subtree;
@@ -4901,7 +5061,17 @@ async function executeYrd(
     exit = maxExit(exit, code)
   }
   const runtimeIO: YrdCliIO = { ...io }
-  const program = buildProgram(app, services, invocation.name, invocation.projection, runtimeIO, setExit, bootstrap)
+  const commanderOutput: CommanderOutput = {}
+  const program = buildProgram(
+    app,
+    services,
+    invocation.name,
+    invocation.projection,
+    runtimeIO,
+    setExit,
+    commanderOutput,
+    bootstrap,
+  )
   const canonicalArgs = canonicalizeYrdCommandAliases(invocation.args, invocation.projection)
   const args =
     invocation.projection === "root" && canonicalArgs.length === 1 && canonicalArgs[0] === "pr"
@@ -4920,22 +5090,36 @@ async function executeYrd(
             },
           },
         },
-        { json: args.includes("--json") },
+        { json: jsonOutputRequested(program, args) },
         runtimeIO,
       )
     }
     if (error instanceof CommanderError) {
       if (error.exitCode === 0 || error.code === "commander.helpDisplayed") return 0
+      const message = commanderErrorMessage(commanderOutput.errorCommand, error)
       await diagnostic(
         runtimeIO,
-        invocation.name,
-        createFailure({ kind: "usage", code: "invalid-arguments", message: error.message }, error),
+        createFailure(
+          {
+            kind: "usage",
+            code: "invalid-arguments",
+            message,
+          },
+          error,
+        ),
+        {
+          json: jsonOutputRequested(program, args),
+          humanCause: conciseCommanderCause(error, commandPath(commanderOutput.errorCommand, invocation.name)),
+        },
       )
       return 2
     }
     const { exitCode } = classifyFailure(error)
     const globals = program.opts() as Readonly<{ verbose?: number }>
-    await diagnostic(runtimeIO, invocation.name, error, { verbose: (globals.verbose ?? 0) > 0 })
+    await diagnostic(runtimeIO, error, {
+      json: jsonOutputRequested(program, args),
+      verbose: (globals.verbose ?? 0) > 0,
+    })
     return exitCode
   }
 }

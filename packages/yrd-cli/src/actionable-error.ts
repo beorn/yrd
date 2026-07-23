@@ -16,10 +16,13 @@ const GENERIC_RESOLUTION = "Correct the cause above, then retry the same Yrd com
 
 function oneLineCause(message: string): string {
   const normalized = message
-    .replace(/^yrd:\s*/iu, "")
+    .replace(/^(?:(?:yrd|error):\s*)+/iu, "")
     .replace(/\s+/gu, " ")
     .trim()
-  const [withoutRemedy = normalized] = normalized.split(/\s+(?=Run\s+['"`]yrd\s)/u, 1)
+  const withoutRemedy = normalized.replace(
+    /\s*[;,.]?\s*(?:(?:then\s+)?run|retry(?:\s+it)?\s+with|submit(?:\s+it)?\s+with|draft\s+PRs\s+are\s+created\s+with)\s+['"`]yrd\s+[^'"`]+['"`].*$/iu,
+    "",
+  )
   const [cause = withoutRemedy] = withoutRemedy.split(/\s+hint:\s*/iu, 1)
   return cause.replace(/[.;:\s]+$/u, "") || "Yrd could not complete the request"
 }
@@ -46,7 +49,7 @@ function authoredGitlinkFailure(failure: FailureLike, cause: string): Actionable
   return Object.freeze({
     code: failure.code,
     cause,
-    resolution: Object.freeze(["yrd pr submit <branch> --draft", `yrd pr recut ${pr} --preflight --queue`]),
+    resolution: Object.freeze(["yrd pr create <branch>", `yrd pr recut ${pr} --preflight --queue`]),
     reference: "README.md#pr-eligibility-and-checks",
   })
 }
@@ -72,7 +75,7 @@ function recutGitlinkFailure(failure: FailureLike, cause: string): ActionableFai
       `git -C ${path} merge ${basePin}`,
       `git -C ${path} push -u origin HEAD`,
       `git add ${path} && git commit -m "fix(yrd): compose ${path} pins"`,
-      "yrd pr submit <branch> --draft",
+      "yrd pr create <branch>",
       `yrd pr recut ${pr} --preflight --queue`,
     ]),
     reference: "README.md#resolving-divergent-gitlink-pins",
@@ -107,6 +110,17 @@ export function formatActionableFailure(failure: ActionableFailure, prefix = "")
     `${prefix}${errorCodeLabel(failure.code)}`,
     `cause: ${failure.cause}`,
     ...failure.resolution.map((step) => `resolve: ${step}`),
+    ...(failure.reference === undefined ? [] : [`reference: ${failure.reference}`]),
+  ].join("\n")
+}
+
+/** Concise human projection. The structured code/cause/resolution envelope is
+ * retained for JSON and persisted views; an ordinary CLI error leads with the
+ * complete sentence and only keeps remedies that add information. */
+export function formatHumanFailure(failure: ActionableFailure): string {
+  return [
+    `error: ${failure.cause}`,
+    ...failure.resolution.filter((step) => /^(?:git|yrd)\s/u.test(step)).map((step) => `resolve: ${step}`),
     ...(failure.reference === undefined ? [] : [`reference: ${failure.reference}`]),
   ].join("\n")
 }

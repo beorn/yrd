@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { asFailure, createFailure } from "@yrd/core"
+import { DIAGNOSTICS_COMPARISON_READY, GateModeSchema, type GateMode } from "@yrd/queue"
 import * as z from "zod"
 
 const TextSchema = z.string().trim().min(1)
@@ -48,6 +49,13 @@ const StepObjectSchema = z
     /** Explicit parent-versus-candidate comparison for diagnostics-shaped
      * lint/typecheck output. Absent means the command's exit code is final. */
     comparison: z.literal("diagnostics").optional(),
+    /** Report id that must be present before a compound diagnostics comparison
+     * may run, proving every earlier structured child completed. */
+    comparisonReady: z.literal(DIAGNOSTICS_COMPARISON_READY).optional(),
+    /** Admission posture. Delta accepts only a structured, auditable residual
+     * already present at the exact base; strict requires an absolutely green
+     * candidate and never invokes a base comparator. */
+    mode: GateModeSchema.optional(),
     environment: TextSchema.optional(),
     /** Declared child values applied over the deterministic base allowlist (merge-queue R42). */
     env: z.record(EnvironmentNameSchema, z.string()).optional(),
@@ -69,6 +77,13 @@ const StepObjectSchema = z
   })
   .strict()
   .superRefine((step, context) => {
+    if (step.comparisonReady !== undefined && step.comparison === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["comparisonReady"],
+        message: "requires comparison: diagnostics",
+      })
+    }
     if (step.comparison === undefined) return
     if (step.run === undefined) {
       context.addIssue({
@@ -120,6 +135,7 @@ const ProjectSchema = z
   .catchall(StepSchema)
 
 export type YrdStepConfig = Readonly<z.infer<typeof StepObjectSchema>>
+export type YrdGateMode = GateMode
 export type YrdRefuseConfig = Readonly<z.infer<typeof RefuseSchema>>
 export type YrdProjectConfig = Readonly<{
   base?: string
@@ -193,10 +209,19 @@ function configError(issue: z.core.$ZodIssue): Error {
     known.get(path) ??
     (path.endsWith(".runner")
       ? "must be local or waiting"
-      : path.endsWith(".classification")
-        ? "must be base or carrier"
-        : issue.message)
+      : path.endsWith(".mode")
+        ? "must be delta or strict"
+        : path.endsWith(".classification")
+          ? "must be base or carrier"
+          : issue.message)
   return new Error(`yrd: config${path === "" ? "" : ` ${path}`} ${message}`)
+}
+
+/** Effective admission posture. Delta is deliberately the temporary default
+ * while inherited debt is being burned down; callers bind this value into
+ * step identity so an explicit strict flip invalidates stale installations. */
+export function stepGateMode(config: YrdStepConfig): YrdGateMode {
+  return config.mode ?? "delta"
 }
 
 async function defaultRead(path: string): Promise<string | undefined> {

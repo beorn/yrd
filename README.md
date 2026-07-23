@@ -168,18 +168,20 @@ For a review-gated repository, the PR-native flow admits checks before the
 revision is queueable:
 
 ```console
-$ yrd pr submit issue/another-fix --draft --correlation tribe-request:review-42
+$ yrd pr create issue/another-fix --correlation tribe-request:review-42
 $ yrd pr review PR2 --approve --by @cto --ref verdict-42
 $ yrd pr ready PR2
 $ yrd pr checks PR2 --follow
 ```
 
-`--draft` is the existing `pushed` state, not a second flag or status. It only
-registers the immutable revision: no check request, admission, or Queue work is
-started until `pr ready` (ordinary reviewed work) or `pr recut --queue`
-(authored-root carriers). Review and comment facts pin the current revision and
-head SHA; a new head makes old verdicts visibly stale. Reviewer assignment and
-richer policy belong to the calling coordination system.
+`pr create` records the existing `pushed` state: no submission, check request,
+admission, or Queue work is started until `pr ready` (ordinary reviewed work)
+or `pr recut --queue` (authored-root carriers). Yrd is local-only and never
+pushes a Git branch; callers that require remote reachability push first, then
+create the draft from that exact resolvable commit. Review and comment facts pin
+the current revision and head SHA; a new head makes old verdicts visibly stale.
+Reviewer assignment and richer policy belong to the calling coordination
+system.
 
 During development in this repository:
 
@@ -255,7 +257,7 @@ The top-level surface is deliberately small:
 
 ```text
 yrd                         dashboard across queues, PRs, and recent outcomes
-yrd pr                      list PRs; submit, view, runs, diff, checkout,
+yrd pr                      list PRs; create, submit, view, runs, diff, checkout,
                             status, edit, checks, regression, close, and merge teaching
 yrd bay                     list bays; open, path, refresh, submit, and close
 yrd issue                   read-only issue list and joined delivery view
@@ -274,7 +276,7 @@ yrd bay open <name> [--from <branch>] [--base <branch>]
   [--issue <ref>] [--actor <id>] [--json]
 yrd bay path <selector> [--json]
 yrd bay refresh [selector...] [--json]
-yrd bay submit [selector...] [--draft] [--base <branch>]
+yrd bay submit [selector...] [--base <branch>]
   [--correlation <namespace:id>] [--composition <path>] [--json]
 yrd bay close [selector...] [--withdraw] [--json]
 ```
@@ -284,13 +286,13 @@ The same commands are available through the standalone `git bay` projection.
 submission core as `pr submit`; `bay submit` remains a handoff, while new
 callers use the PR-native check-admission surface below.
 
-| Command   | Input                                                 | Output and state                                                                                   |
-| --------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `open`    | New bay name; optional source, base, issue, and actor | Prints the worktree path; creates and provisions a named bay                                       |
-| `path`    | One Bay ID, name, or branch selector                  | Prints the exact absolute path of one active Bay; read-only and never refreshes it                 |
-| `refresh` | Zero or more bays                                     | Refreshes Git head, base, dirty, path, and workspace status                                        |
-| `submit`  | Bays, PRs, or source branches; optional `--draft`     | Creates or advances PRs to `submitted`, or only `pushed` with `--draft`; never executes Queue work |
-| `close`   | Zero or more bays                                     | Deprovisions clean terminal bays; `--withdraw` explicitly cancels a live PR                        |
+| Command   | Input                                                 | Output and state                                                                   |
+| --------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `open`    | New bay name; optional source, base, issue, and actor | Prints the worktree path; creates and provisions a named bay                       |
+| `path`    | One Bay ID, name, or branch selector                  | Prints the exact absolute path of one active Bay; read-only and never refreshes it |
+| `refresh` | Zero or more bays                                     | Refreshes Git head, base, dirty, path, and workspace status                        |
+| `submit`  | Bays, PRs, or source branches                         | Creates or advances PRs to `submitted`; never executes Queue work                  |
+| `close`   | Zero or more bays                                     | Deprovisions clean terminal bays; `--withdraw` explicitly cancels a live PR        |
 
 Submodule repositories are ready when `bay open` returns. Yrd recursively
 materializes the recorded gitlinks while keeping each Bay's refs, config, and
@@ -359,7 +361,10 @@ existing PR.
 ### PR Eligibility and Checks
 
 ```text
-yrd pr submit [selector...] [--draft] [--follow] [--base <branch>]
+yrd pr create [selector] [--base <branch>] [--issue <ref>]
+  [--title <text>] [--description <text>]
+  [--correlation <namespace:id>] [--json]
+yrd pr submit [selector...] [--follow] [--base <branch>]
   [--issue <ref>] [--title <text>] [--description <text>]
   [--correlation <namespace:id>] [--json]
 yrd pr list [--base <branch>] [--state <state>] [--issue <ref>]
@@ -380,14 +385,14 @@ An unfiltered human `pr list` shows the 20 most recent PRs in numeric id order.
 Any explicit list filter keeps the complete matching set, and JSON stays
 lossless.
 
-Plain `pr submit` appends the revision, records a check request, schedules the
-configured pre-merge Queue steps, and returns. `--draft` instead registers only
-the pushed revision and returns without requesting checks or admitting a Run.
-`pr ready` requests and admits configured checks for an ordinary draft.
-`--follow` stays attached to the same journaled Run. `pr checks` renders the
-same typed evidence in human or newline-delimited JSON output, including
-command argv, concise diagnostics, base-versus-carrier classification, and
-artifact paths.
+`pr create` registers only the pushed revision and returns without submitting
+it, requesting checks, or admitting a Run. Plain `pr submit` appends the
+revision, records a check request, schedules the configured pre-merge Queue
+steps, and returns. `pr ready` submits an existing draft and requests and
+admits its configured checks. `--follow` stays attached to the same journaled
+Run. `pr checks` renders the same typed evidence in human or newline-delimited
+JSON output, including command argv, concise diagnostics,
+base-versus-carrier classification, and artifact paths.
 
 `pr recut` fetches the authoritative base internally and records a mechanically
 equivalent, certificate-bearing successor on the same PR. `--revision` selects
@@ -423,7 +428,7 @@ For a human-authored root carrier, use the machine-owned path rather than
 attaching a composition manifest:
 
 ```bash
-yrd pr submit <branch> --draft
+yrd pr create <branch>
 yrd pr recut <PR> --preflight --queue
 # Run the exact `next:` command printed by preflight.
 ```
@@ -476,16 +481,16 @@ and the old/new base and tip SHAs; ref loss during a remote landing fails closed
 and rolls the root branch back.
 
 Human-authored gitlink commits are refused by default. The normal path is the
-draft-to-recut workflow above; `YRD_ALLOW_AUTHORED_GITLINKS=1` is break-glass
+create-to-recut workflow above; `YRD_ALLOW_AUTHORED_GITLINKS=1` is break-glass
 only for a legacy carrier and does not weaken Candidate pinning or exact
 landing.
 
 #### Resolving Divergent Gitlink Pins
 
-`err=recut-gitlink-conflict` names the authoritative root and pin plus the
-replayed authored root and pin. When neither submodule pin contains the other,
-publish a real composition commit in that submodule, update the carrier to pin
-it, and recut the same PR:
+The stable `recut-gitlink-conflict` code (visible in JSON and persisted views)
+names the authoritative root and pin plus the replayed authored root and pin.
+When neither submodule pin contains the other, publish a real composition
+commit in that submodule, update the carrier to pin it, and recut the same PR:
 
 ```bash
 git -C <submodule> fetch --all --prune
@@ -494,7 +499,7 @@ git -C <submodule> merge <authoritative-pin>
 # Resolve any content conflicts and commit before continuing.
 git -C <submodule> push -u origin HEAD
 git add <submodule> && git commit -m "fix(yrd): compose <submodule> pins"
-yrd pr submit <branch> --draft
+yrd pr create <branch>
 yrd pr recut <PR> --preflight --queue
 # Run the exact `next:` command printed by preflight.
 ```
@@ -743,6 +748,12 @@ CLI projects its exit code from `kind`; changing diagnostic wording cannot
 silently change automation behavior. An untyped exception is treated as an
 infrastructure failure and fails loud with exit `3`.
 
+Human diagnostics lead with one complete `error:` sentence. They add
+`resolve:` lines only for concrete next commands; generic “fix and retry”
+advice is omitted. With `--json`, a diagnostic is one JSON object on stderr:
+its `failure` retains `{ kind, code, message }` and adds the actionable
+`cause`, `resolution`, and optional `reference`.
+
 ## Queues and Steps
 
 Steps are immutable definitions and typed state transitions, not a
@@ -836,6 +847,26 @@ otherwise opaque output stays on the plain exit-code contract; absence of
 parseable diagnostics never aliases a real command failure to an environment
 refusal. The comparison declaration is part of the installed-step cache
 identity.
+Object-form steps also accept `mode: delta | strict` (default `delta`).
+`strict` requires an absolutely green Candidate and never runs the parent
+comparator. `delta` may admit inherited diagnostics only through an explicitly
+declared `comparison: diagnostics`, or through structured child trailers of
+the form `YRD-GATE-REPORT <json>`. Opaque output, truncated diagnostics, and a
+nonzero structured-child exit remain terminal.
+
+A compound command that runs structured children before a diagnostics-only
+tool must emit a zero-residual `diagnostics-comparison-ready` report after every
+structured child passes and declare
+`comparisonReady: diagnostics-comparison-ready` in its step config. Only that
+marker permits Yrd to compare a final nonzero diagnostics exit against the
+parent; a missing marker is terminal even when the command emitted no report.
+
+Every admitted check records a self-contained v1 gate certificate: mode, exact
+base and Candidate SHAs, comparator id/version, and each residual set's content
+hash plus count. The run/PR view projects this as `delta residual:N` or
+`strict residual:0`, so carried red stays visible even when admission is green.
+Mode is bound into installed-step identity; flipping a release step to `strict`
+cannot reuse a delta installation.
 `requires: [review]` is the only built-in review policy: the latest verdict for
 the current revision must approve. Comments never gate, and omitting
 `requires` leaves reviews informational.

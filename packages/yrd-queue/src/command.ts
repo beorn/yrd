@@ -41,6 +41,62 @@ export const CommandDiagnosticSchema = z
   .strict()
 export type CommandDiagnostic = Readonly<z.infer<typeof CommandDiagnosticSchema>>
 
+export const GateModeSchema = z.enum(["delta", "strict"])
+export type GateMode = z.infer<typeof GateModeSchema>
+
+export const GateReportSchema = z
+  .object({
+    version: z.literal(1),
+    comparator: z
+      .object({
+        id: z.string().regex(/^[a-z][a-z0-9-]*$/u),
+        version: z.literal(1),
+      })
+      .strict(),
+    residual: z
+      .object({
+        count: z.number().int().nonnegative(),
+        hash: z.string().regex(/^[0-9a-f]{64}$/u),
+      })
+      .strict(),
+  })
+  .strict()
+export type GateReport = Readonly<z.infer<typeof GateReportSchema>>
+
+export const GateCertificateSchema = z
+  .object({
+    version: z.literal(1),
+    mode: GateModeSchema,
+    baseSha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
+    candidateSha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
+    reports: z.array(GateReportSchema).min(1),
+  })
+  .strict()
+export type GateCertificate = Readonly<z.infer<typeof GateCertificateSchema>>
+
+export const GATE_REPORT_TRAILER = "YRD-GATE-REPORT "
+export const DIAGNOSTICS_COMPARISON_READY = "diagnostics-comparison-ready"
+
+/** Create the content-addressed, multiplicity-preserving residual report a
+ * structured child emits for the host's admission certificate. */
+export function createGateReport(comparatorId: string, identities: readonly string[]): GateReport {
+  const ordered = [...identities].sort()
+  return GateReportSchema.parse({
+    version: 1,
+    comparator: { id: comparatorId, version: 1 },
+    residual: {
+      count: ordered.length,
+      hash: createHash("sha256").update(JSON.stringify(ordered)).digest("hex"),
+    },
+  })
+}
+
+/** Emit exactly one machine-readable trailer while keeping a tool's ordinary
+ * human diagnostics unconstrained. */
+export function emitGateReport(report: GateReport): void {
+  console.log(`${GATE_REPORT_TRAILER}${JSON.stringify(GateReportSchema.parse(report))}`)
+}
+
 export const CommandEvidenceSchema = z
   .object({
     command: z.array(z.string().min(1)).min(1),
@@ -57,6 +113,8 @@ export const CommandEvidenceSchema = z
       .optional(),
     artifacts: z.array(StepArtifactSchema),
     classification: z.enum(["base", "carrier"]).optional(),
+    mode: GateModeSchema.optional(),
+    gateReports: z.array(GateReportSchema).min(1).optional(),
     detail: z.string().optional(),
     diagnostics: z.array(CommandDiagnosticSchema).optional(),
     diagnosticsTruncated: z.literal(true).optional(),
@@ -90,6 +148,7 @@ export const GitCheckEvidenceSchema = CommandEvidenceSchema.extend({
   sourceRewrites: z.array(SourceRewriteSchema).optional(),
   submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),
   comparison: GitCheckComparisonEvidenceSchema.optional(),
+  certificate: GateCertificateSchema.optional(),
 }).strict()
 export type GitCheckEvidence = Readonly<z.infer<typeof GitCheckEvidenceSchema>>
 
@@ -219,6 +278,7 @@ export type ConfiguredCommandOptions<Shape extends PRShape> = ProcessDependency 
     timeoutMs?: number
     noProgressTimeoutMs?: number
     classification?: "base" | "carrier"
+    mode?: GateMode
     variables?: (input: StepExecution<Shape>) => Readonly<Record<string, string | undefined>>
   }>
 
@@ -249,6 +309,7 @@ function configuredCommand<Shape extends PRShape>(
   options: ConfiguredCommandOptions<Shape>,
   waiting: boolean,
 ): StepRunner<Shape, CommandEvidence> {
+  const mode = options.mode ?? "delta"
   const argv = validateCommand(options.command, options.purpose)
   const declaration = validateEnvironmentDeclaration(
     options.purpose,
@@ -259,6 +320,8 @@ function configuredCommand<Shape extends PRShape>(
     .update(options.purpose)
     .update("\0")
     .update(JSON.stringify(argv))
+    .update("\0")
+    .update(mode)
     .digest("hex")
   return async (input, context): Promise<JobResult<CommandEvidence>> => {
     context.observeProgress?.()
@@ -268,6 +331,7 @@ function configuredCommand<Shape extends PRShape>(
     const variables = {
       YRD_BASE: primary.base,
       YRD_BASE_SHA: primary.baseSha,
+      YRD_GATE_MODE: mode,
       YRD_JOB: context.id,
       YRD_ATTEMPT: String(context.attempt),
       YRD_RUNNER: context.runner,
@@ -312,6 +376,7 @@ function configuredCommand<Shape extends PRShape>(
     const message = [result.stdout.trimEnd(), result.stderr.trimEnd()].filter((part) => part !== "").join("\n")
     const detail = commandDetail(message)
     const diagnostics = commandDiagnostics(message)
+    const gateReports = commandGateReports(message)
     const progress = result as typeof result & ProgressResult
     const evidence = CommandEvidenceSchema.parse({
       command: argv,
@@ -321,6 +386,8 @@ function configuredCommand<Shape extends PRShape>(
       environmentHash: environmentHash(env),
       artifacts,
       classification: options.classification ?? "carrier",
+      mode,
+      ...(gateReports.values.length === 0 ? {} : { gateReports: gateReports.values }),
       ...(detail === "" ? {} : { detail }),
       ...(diagnostics.values.length === 0 ? {} : { diagnostics: diagnostics.values }),
       ...(diagnostics.truncated ? { diagnosticsTruncated: true as const } : {}),
@@ -364,6 +431,9 @@ function configuredCommand<Shape extends PRShape>(
         evidence,
       )
     }
+    if (gateReports.error !== undefined) {
+      return failed(`${options.purpose}-gate-report-invalid`, gateReports.error, evidence)
+    }
     if (result.exitCode !== 0) {
       const action = waiting ? "launcher" : "command"
       return failed(
@@ -395,6 +465,21 @@ function commandDetail(output: string): string {
   const marker = "\n… output truncated …\n"
   const headLength = 500
   return `${output.slice(0, headLength)}${marker}${output.slice(-(limit - headLength - marker.length))}`
+}
+
+function commandGateReports(output: string): Readonly<{ values: readonly GateReport[]; error?: string }> {
+  const reports: GateReport[] = []
+  for (const row of output.split(/\r?\n/u)) {
+    const text = row.trim()
+    if (!text.startsWith(GATE_REPORT_TRAILER)) continue
+    const payload = text.slice(GATE_REPORT_TRAILER.length)
+    try {
+      reports.push(GateReportSchema.parse(JSON.parse(payload)))
+    } catch {
+      return { values: reports, error: "configured command emitted a malformed YRD-GATE-REPORT trailer" }
+    }
+  }
+  return { values: reports }
 }
 
 function commandDiagnostics(output: string): Readonly<{
@@ -1870,7 +1955,7 @@ function candidateFailure(
 }
 
 function authoredRootWorkflow(pr: string): string {
-  return `authored root carriers use 'yrd pr submit <branch> --draft', then 'yrd pr recut ${pr} --preflight --queue' and run its exact next command on that same PR; no composition manifest or manual triage is needed`
+  return `authored root carriers use 'yrd pr create <branch>', then 'yrd pr recut ${pr} --preflight --queue' and run its exact next command on that same PR; no composition manifest or manual triage is needed`
 }
 
 function withAuthoredRootWorkflow(failure: CandidateFailure, pr: string): CandidateFailure {
@@ -3161,6 +3246,12 @@ export type GitCheckOptions = ProcessDependency &
     /** Opt into parent-versus-candidate comparison for diagnostics-shaped
      * lint/typecheck output. Ordinary commands use their exit code directly. */
     comparison?: "diagnostics"
+    /** Delta admits only certified inherited residuals; strict requires the
+     * candidate to be absolutely green and never evaluates the parent. */
+    mode?: GateMode
+    /** Structured report id that must prove a compound command reached its
+     * diagnostics-only comparison phase. */
+    comparisonReady?: string
     environment?: string
     env?: NodeJS.ProcessEnv
     environmentOverrides?: Readonly<Record<string, string>>
@@ -3203,6 +3294,60 @@ function candidateRef(input: Pick<StepExecution, "run" | "step">, job: string, a
 }
 
 type PreparedCandidateFailure = Extract<Awaited<ReturnType<typeof prepareCandidate>>, { status: "failed" }>
+
+function gateCertificate(
+  candidate: Pick<PinnedCandidate, "baseSha" | "candidateSha">,
+  mode: GateMode,
+  reports: readonly GateReport[],
+): GateCertificate {
+  return GateCertificateSchema.parse({
+    version: 1,
+    mode,
+    baseSha: candidate.baseSha,
+    candidateSha: candidate.candidateSha,
+    reports,
+  })
+}
+
+type PassedCommandResult = Extract<JobResult<CommandEvidence>, { status: "passed" }>
+
+function certifyPassingCommand(
+  outcome: PassedCommandResult,
+  candidate: PinnedCandidate,
+  mode: GateMode,
+  classification: "base" | "carrier",
+  purpose: string,
+  comparisonReady?: string,
+): JobResult<GitCheckResultEvidence> {
+  const reports = outcome.output.gateReports ?? [createGateReport("exit-code", [])]
+  const evidence = GitCheckEvidenceSchema.parse({
+    ...outcome.output,
+    ...candidate,
+    mode,
+    classification,
+  })
+  if (comparisonReady !== undefined && !reports.some((report) => report.comparator.id === comparisonReady)) {
+    return failed(
+      `${purpose}-comparison-not-ready`,
+      `${purpose} did not emit required gate report '${comparisonReady}'`,
+      evidence,
+    )
+  }
+  if (mode === "strict" && reports.some((report) => report.residual.count !== 0)) {
+    return failed(
+      `${purpose}-strict-residual`,
+      `${purpose} strict mode received a non-empty structured residual from a green candidate`,
+      evidence,
+    )
+  }
+  return {
+    status: "passed",
+    output: GitCheckEvidenceSchema.parse({
+      ...evidence,
+      certificate: gateCertificate(candidate, mode, reports),
+    }),
+  }
+}
 
 async function withPinnedCandidate<Output extends JsonValue>(
   git: Git,
@@ -3273,6 +3418,7 @@ async function withPinnedCandidate<Output extends JsonValue>(
 export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitCheckResultEvidence> {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
+  const mode = options.mode ?? "delta"
   return async (input, context): Promise<JobResult<GitCheckResultEvidence>> => {
     try {
       const purpose = options.purpose ?? "check"
@@ -3312,6 +3458,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
             ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
             classification: parentTree ? "base" : (options.classification ?? "carrier"),
+            mode,
             variables: () => ({
               YRD_BASE_SHA: candidate.baseSha,
               YRD_CANDIDATE_SHA: targetSha,
@@ -3320,9 +3467,11 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             }),
           })
           const candidateConfig = configured(path, candidate.candidateSha, artifactRoot, false)
+          const classification = options.classification ?? ("carrier" as const)
           const candidateMetadata = {
             ...candidate,
-            classification: options.classification ?? ("carrier" as const),
+            mode,
+            classification,
           }
 
           if (options.runner === "waiting") {
@@ -3331,10 +3480,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
               context,
             )
             if (outcome.status === "passed") {
-              return {
-                status: "passed",
-                output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...candidateMetadata }),
-              }
+              return certifyPassingCommand(outcome, candidate, mode, classification, purpose, options.comparisonReady)
             }
             if (outcome.status === "waiting") {
               return {
@@ -3380,10 +3526,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
           }
 
           if (outcome.status === "passed") {
-            return {
-              status: "passed",
-              output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...candidateMetadata }),
-            }
+            return certifyPassingCommand(outcome, candidate, mode, classification, purpose, options.comparisonReady)
           }
           if (outcome.status !== "failed") {
             const error = comparisonOutcomeError(outcome, purpose, "candidate")
@@ -3408,7 +3551,19 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
               ? {}
               : { output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...candidateMetadata }) }),
           }
+          if (mode === "strict") return candidateFailure
           if (options.comparison !== "diagnostics") return candidateFailure
+          // A structured child failure is terminal. A compound command may
+          // continue past successful structured children and compare a final
+          // diagnostics-only failure, but it must prove every earlier child
+          // reached green by emitting the readiness report last.
+          const comparisonReady =
+            options.comparisonReady === undefined
+              ? outcome.output?.gateReports === undefined
+              : outcome.output?.gateReports?.some((report) => report.comparator.id === options.comparisonReady) === true
+          if (!comparisonReady) {
+            return candidateFailure
+          }
 
           const candidateEvidence = comparableCommandEvidence(outcome, purpose)
           // A command that returned a nonzero exit genuinely ran. Missing or
@@ -3483,6 +3638,13 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             ...candidateEvidence,
             ...candidateMetadata,
             comparison,
+            certificate: gateCertificate(candidate, mode, [
+              ...(candidateEvidence.gateReports ?? []),
+              createGateReport(
+                "diagnostics",
+                uniqueComparisonDiagnostics(candidateEvidence, path).map(diagnosticIdentity),
+              ),
+            ]),
           })
           if (comparison.netNewDiagnostics.length === 0) {
             return { status: "passed", output: evidence }

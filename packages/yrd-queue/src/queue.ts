@@ -153,7 +153,12 @@ const QueueRunArgsSchema = z
   .strict()
 export type QueueRunArgs = Readonly<z.infer<typeof QueueRunArgsSchema>>
 
-const AdmitArgsSchema = z.object({ pr: z.string().trim().min(1) }).strict()
+const AdmitArgsSchema = z
+  .object({
+    pr: z.string().trim().min(1),
+    selection: z.literal("explicit").optional(),
+  })
+  .strict()
 export type AdmitArgs = Readonly<z.infer<typeof AdmitArgsSchema>>
 export type AdmitSelection = Readonly<{ prs?: readonly string[] }>
 
@@ -378,6 +383,7 @@ export type QueueCommands = Readonly<{
     advance: CommandHandler<Readonly<{ run: QueueRunId }>, RuntimeState>
     settled: CommandHandler<Readonly<{ run: QueueRunId }>, RuntimeState>
     isolate: CommandHandler<Readonly<{ run: QueueRunId; part: 0 | 1 }>, RuntimeState>
+    retireStalePlan: CommandHandler<Readonly<{ run: QueueRunId }>, RuntimeState>
     cancelRun: CommandHandler<CancelRunArgs, RuntimeState>
     quiesceLegacyRun: CommandHandler<QuiesceLegacyRunArgs, RuntimeState>
     associateTerminals: CommandHandler<AssociateTerminalsArgs, RuntimeState>
@@ -570,6 +576,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               advance: (run) => yrd.dispatch(commands.queue.advance, { run }),
               settled: (run) => yrd.dispatch(commands.queue.settled, { run }),
               isolate: (run, part) => yrd.dispatch(commands.queue.isolate, { run, part }),
+              retireStalePlan: (run) => yrd.dispatch(commands.queue.retireStalePlan, { run }),
               cancelRun: (args) => yrd.dispatch(commands.queue.cancelRun, args),
               quiesceLegacyRun: (args) => yrd.dispatch(commands.queue.quiesceLegacyRun, args),
               associateTerminals: (args) => yrd.dispatch(commands.queue.associateTerminals, args),
@@ -600,6 +607,7 @@ type QueueActions = Readonly<{
   advance(run: QueueRunId): Promise<CommandResult>
   settled(run: QueueRunId): Promise<CommandResult>
   isolate(run: QueueRunId, part: 0 | 1): Promise<CommandResult>
+  retireStalePlan(run: QueueRunId): Promise<CommandResult>
   cancelRun(args: CancelRunArgs): Promise<CommandResult>
   quiesceLegacyRun(args: QuiesceLegacyRunArgs): Promise<CommandResult>
   associateTerminals(args: AssociateTerminalsArgs): Promise<CommandResult>
@@ -792,6 +800,7 @@ function createQueue<Shape extends PRShape>(
   history: JournalHistory<unknown> | undefined,
   historicalState: () => Promise<DeepReadonly<RuntimeState>>,
 ): Queue<Shape> {
+  const byName = new Map(steps.map((step) => [step.name, step] as const))
   const current = (id: QueueRunId): QueueRun => materializeRun(Queues.record(state(), id), runtime().jobs)
 
   const archived = (id: QueueRunId): QueueRun | undefined => {
@@ -1014,16 +1023,25 @@ function createQueue<Shape extends PRShape>(
     }
   }
 
-  const dispatchAdmissions = async (selectors: readonly string[]): Promise<QueueRun[]> => {
+  const dispatchAdmissions = async (
+    selectors: readonly string[],
+    selection?: AdmitArgs["selection"],
+  ): Promise<QueueRun[]> => {
     const admitted: QueueRun[] = []
     for (const selector of selectors) {
-      const started = startedRun(await actions.admit({ pr: selector }))
+      const started = startedRun(
+        await actions.admit({ pr: selector, ...(selection === undefined ? {} : { selection }) }),
+      )
       if (started !== undefined) admitted.push(started)
     }
     return admitted
   }
 
-  const drainAdmissions = async (selectors: readonly string[], options: QueueRunOptions): Promise<QueueRun[]> => {
+  const drainAdmissions = async (
+    selectors: readonly string[],
+    options: QueueRunOptions,
+    selection?: AdmitArgs["selection"],
+  ): Promise<QueueRun[]> => {
     const targets = new Set(selectors)
     const outcomes = new Map<QueueRunId, QueueRun>()
     const remember = (candidate: QueueRun): void => {
@@ -1036,7 +1054,9 @@ function createQueue<Shape extends PRShape>(
       const snapshot = runtime()
       const active = activeQueueRuns(snapshot.queues, snapshot.jobs).find(
         (candidate) =>
-          candidate.status === "running" && samePlan(candidate.steps, admissionSteps(snapshot.queues, steps)),
+          (selection !== "explicit" || candidate.prs.some((pr) => targets.has(pr.id))) &&
+          candidate.status === "running" &&
+          samePlan(candidate.steps, admissionSteps(snapshot.queues, steps)),
       )
       if (active !== undefined) {
         const settled = await settle(active.id, options)
@@ -1045,9 +1065,10 @@ function createQueue<Shape extends PRShape>(
         continue
       }
 
-      const queued = admissionQueue(snapshot, steps)
+      const queued = admissionQueue(snapshot, steps, selection === "explicit" ? targets : undefined)
       const admitted = await dispatchAdmissions(
         (options.continueAdmissions === undefined ? queued : queued.slice(0, 1)).map((pr) => pr.id),
+        selection,
       )
       if (admitted.length > 0) continue
 
@@ -1080,13 +1101,15 @@ function createQueue<Shape extends PRShape>(
           resultAttributes: (runs) => ({ runs: runs.map(runEvidence) }),
         },
         async () => {
+          const requestedSelectors = args.prs?.length ? args.prs : undefined
+          const selection: AdmitArgs["selection"] = requestedSelectors === undefined ? undefined : "explicit"
           await actions.refresh()
           await cleanupSettledRoots()
           let snapshot = runtime()
           const selected =
-            args.prs === undefined || args.prs.length === 0
+            requestedSelectors === undefined
               ? admissionQueue(snapshot, steps)
-              : args.prs.map((selector) => {
+              : requestedSelectors.map((selector) => {
                   const pr = resolvePR(snapshot.bays, selector)
                   if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
                   return pr
@@ -1094,10 +1117,12 @@ function createQueue<Shape extends PRShape>(
           await refreshCheckIdentities(selected)
           snapshot = runtime()
           const selectors =
-            args.prs === undefined || args.prs.length === 0
+            requestedSelectors === undefined
               ? admissionQueue(snapshot, steps).map((pr) => pr.id)
-              : [...args.prs]
-          return runOptions === undefined ? dispatchAdmissions(selectors) : drainAdmissions(selectors, runOptions)
+              : selected.map((pr) => pr.id)
+          return runOptions === undefined
+            ? dispatchAdmissions(selectors)
+            : drainAdmissions(selectors, runOptions, selection)
         },
       )
     },
@@ -1128,6 +1153,7 @@ function createQueue<Shape extends PRShape>(
           resultAttributes: (runs) => ({ runs: runs.map(runEvidence) }),
         },
         async () => {
+          const selection = args.prs !== undefined && args.prs.length > 0 ? "explicit" : undefined
           const explicitStepAuthority = args.steps !== undefined
           // A selectorless compose is a multi-candidate drain (the long-lived
           // resident's default path, and any bare `queue run`): one candidate lost
@@ -1145,6 +1171,21 @@ function createQueue<Shape extends PRShape>(
             } catch (error) {
               const fact = failureFact(error)
               if (!selectorless || fact?.kind !== "refusal") throw error
+              // A `stale-plan` refusal means this candidate is a FAILED batch whose
+              // recorded plan drifted — it can NEVER isolate, so a bare skip would
+              // re-refuse it every cycle forever. Retire it once (typed stale-plan
+              // release) so it stops being reconciled, then continue. Every other
+              // refusal is a transient race — skip it loud and re-try next cycle.
+              if (fact.code === "stale-plan") {
+                await actions.retireStalePlan(candidateId)
+                log.warn?.("queue compose retired an un-isolable stale-plan batch", {
+                  action: "compose-stale-plan-retire",
+                  run: candidateId,
+                  code: fact.code,
+                  reason: error instanceof Error ? error.message : String(error),
+                })
+                return
+              }
               log.warn?.("queue compose skipped a candidate lost to a losable refusal", {
                 action: "compose-candidate-skip",
                 run: candidateId,
@@ -1180,6 +1221,7 @@ function createQueue<Shape extends PRShape>(
           const admissions = await drainAdmissions(
             checked.map((pr) => pr.id),
             runOptions,
+            selection,
           )
           snapshot = runtime()
           const unsettled = checked.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "passed")
@@ -1197,7 +1239,14 @@ function createQueue<Shape extends PRShape>(
             // Liveness beats check-freshness here: landing a runnable PR can
             // stale an in-flight sibling check, which the stale/recut path
             // already classifies and (with auto-recut) requeues.
-            if (newlyFailed) {
+            // An explicit PR selection is different: if that PR's check is
+            // still queued or running, there is no other requested merge work
+            // to preserve and composing it now would violate the selection.
+            if (
+              newlyFailed ||
+              (selection === "explicit" &&
+                unsettled.some((pr) => checkEligibility(snapshot, pr, steps).status !== "failed"))
+            ) {
               return admissions
             }
           }
@@ -1368,6 +1417,21 @@ function createQueue<Shape extends PRShape>(
               reason: "orphaned-requested-job",
               jobs: settledOrphans.map((orphan) => orphan.job.id),
               runs: [...new Set(settledOrphans.map((orphan) => orphan.run))],
+            })
+          }
+          // Retire every FAILED batch whose recorded plan drifted so it can never
+          // isolate — otherwise it re-refuses isolation every compose cycle forever
+          // (the isolate-path zombie). Typed stale-plan release; loud receipt.
+          const retiredBatches = unisolableStalePlanBatches(runtime(), byName)
+          for (const batch of retiredBatches) {
+            await actions.retireStalePlan(batch.run)
+            affected.add(batch.run)
+          }
+          if (retiredBatches.length > 0) {
+            log.warn?.("queue recover retired un-isolable stale-plan batches", {
+              action: "recover-stale-plan-retire",
+              reason: "stale-plan",
+              runs: retiredBatches.map((batch) => batch.run),
             })
           }
           for (const id of await cleanupSettledRoots()) affected.add(id)
@@ -1662,7 +1726,7 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
         requireQueueAuthority(state.queues.authority, [snapshot], selected)
       }
       if (runningQueue(state.queues, state.jobs, pr.base) !== undefined) return { events: [] }
-      if (checksRequested(pr)) {
+      if (args.selection !== "explicit" && checksRequested(pr)) {
         const first = admissionQueue(state, steps)[0]
         if (first !== undefined && first.id !== pr.id) return { events: [] }
       }
@@ -1822,6 +1886,14 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
       const active = runningQueue(state.queues, state.jobs, parent.base)
       if (active !== undefined) throw new QueueRunningConflict(parent.base, active.id)
 
+      // A batch can only bisect if its recorded plan still matches the installed
+      // catalog. If the plan drifted, isolation is impossible under any config —
+      // raise a TYPED stale-plan refusal (not the bare requirePlannedStep throw)
+      // so the compose layer can retire it once instead of re-refusing forever.
+      const drift = recordedPlanDrift(parent.steps, byName)
+      if (drift !== undefined) {
+        raiseFailure("refusal", "stale-plan", `yrd: queue run '${parent.id}' cannot isolate: ${drift}`)
+      }
       const pivot = Math.ceil(parent.prs.length / 2)
       const prs = args.part === 0 ? parent.prs.slice(0, pivot) : parent.prs.slice(pivot)
       if (prs.length === 0) throw new Error(`yrd: queue run '${parent.id}' has no isolation part ${args.part}`)
@@ -1848,6 +1920,34 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
           }),
           ...started.events,
         ],
+      }
+    },
+  })
+
+  const retireStalePlan = command({
+    title: "Retire an un-isolable stale-plan batch",
+    visibility: "public",
+    params: AdvanceArgsSchema,
+    apply(state: DeepReadonly<RuntimeState>, args) {
+      const record = Queues.resolve(state.queues, args.run)
+      if (record === undefined) raiseFailure("refusal", "run-not-found", `yrd: no queue run '${args.run}'`)
+      const run = materializeRun(record, state.jobs)
+      // Idempotent: a batch already retired carries a release-reason error, which
+      // flips `bisectable` false — re-dispatch (replay, a second recover) is a
+      // clean no-op, never a duplicate failed event.
+      if (!bisectable(run)) return { events: [] }
+      const drift = recordedPlanDrift(run.steps, byName)
+      // Guard the typed release: only a genuinely-drifted plan retires. A current
+      // plan is still isolable, so refuse rather than silently retiring a live batch.
+      if (drift === undefined) {
+        raiseFailure(
+          "refusal",
+          "run-plan-current",
+          `yrd: queue run '${args.run}' plan matches the installed catalog; nothing to retire`,
+        )
+      }
+      return {
+        events: [queueFailedEvent(state, record, { code: "stale-plan", message: `yrd: cannot isolate: ${drift}` })],
       }
     },
   })
@@ -1942,7 +2042,19 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
   })
 
   return {
-    queue: { admit, run, pause, resume, advance, settled, isolate, cancelRun, quiesceLegacyRun, associateTerminals },
+    queue: {
+      admit,
+      run,
+      pause,
+      resume,
+      advance,
+      settled,
+      isolate,
+      retireStalePlan,
+      cancelRun,
+      quiesceLegacyRun,
+      associateTerminals,
+    },
   }
 }
 
@@ -1966,13 +2078,18 @@ function queueAuthorityReleaseReason(
   // of terminally rejecting a PR that would merge cleanly once the base settles.
   // `stale-steps` is the same shape one level up: a pending run's not-yet-started
   // step revision drifted out from under it when the installed config moved; the
-  // PR is blameless and re-admits fresh under the installed plan.
+  // PR is blameless and re-admits fresh under the installed plan. `stale-plan` is
+  // the isolate-path sibling: a FAILED bisectable batch whose recorded plan
+  // drifted can never be bisected under the installed catalog — retiring it
+  // releases authority so it stops being reconciled forever (its terminal member
+  // PRs simply re-admit if still submitted).
   if (
     error?.code === "queue-environment-refused" ||
     error?.code === "job-lost" ||
     error?.code === "stale-base" ||
     error?.code === "stale-check" ||
-    error?.code === "stale-steps"
+    error?.code === "stale-steps" ||
+    error?.code === "stale-plan"
   ) {
     return error.code
   }
@@ -3118,6 +3235,31 @@ function orphanedRequestedQueueJobs(state: DeepReadonly<RuntimeState>): readonly
   return orphans
 }
 
+type UnisolableStalePlanBatch = Readonly<{ run: QueueRunId; drift: string }>
+
+/**
+ * FAILED bisectable batches whose recorded plan drifted from the installed
+ * catalog. Isolation re-plans every parent step, so such a batch can never
+ * bisect — {@link needsSettlement} keeps it alive and every compose cycle re-tries
+ * (and re-refuses) isolation forever. This is the isolate-path sibling of the
+ * advance-path stale-steps drift. Already-retired batches carry a release reason,
+ * which flips {@link bisectable} false, so they self-exclude here — the detection
+ * clears once retired (audit stops lying).
+ */
+function unisolableStalePlanBatches(
+  state: DeepReadonly<RuntimeState>,
+  byName: ReadonlyMap<string, RuntimeStep>,
+): readonly UnisolableStalePlanBatch[] {
+  const batches: UnisolableStalePlanBatch[] = []
+  for (const record of Queues.values(state.queues)) {
+    const run = materializeRun(record, state.jobs)
+    if (!bisectable(run)) continue
+    const drift = recordedPlanDrift(run.steps, byName)
+    if (drift !== undefined) batches.push({ run: record.id, drift })
+  }
+  return batches
+}
+
 function auditQueues(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): QueueAuditResult {
   const findings: QueueAuditFinding[] = []
   const installed = new Map(steps.map((step) => [step.name, step]))
@@ -3191,6 +3333,16 @@ function auditQueues(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeS
       run: orphan.run,
     })
   }
+  // A FAILED batch is terminal, so the record walk above skipped its step drift.
+  // An un-isolable stale-plan batch would otherwise re-refuse isolation every
+  // cycle unseen — surface it so "audit clean" stops lying about a live zombie.
+  for (const batch of unisolableStalePlanBatches(state, installed)) {
+    findings.push({
+      code: "unisolable-stale-plan",
+      message: `failed batch '${batch.run}' can never isolate under the installed catalog: ${batch.drift}`,
+      run: batch.run,
+    })
+  }
   return { findings }
 }
 
@@ -3218,6 +3370,18 @@ function requirePlannedStep(steps: ReadonlyMap<string, RuntimeStep>, planned: In
   const current = steps.get(planned.name)
   if (current === undefined) throw new Error(`yrd: queue step '${planned.name}' is not installed`)
   return current
+}
+
+/** First drift across a run's ENTIRE recorded plan against the installed catalog,
+ * or `undefined` when every step still matches. Isolation re-plans every parent
+ * step ({@link requirePlannedStep} over `parent.steps`), so a drift on ANY of them
+ * makes the batch permanently un-isolable — the trigger for a stale-plan retirement. */
+function recordedPlanDrift(steps: readonly InstalledStep[], byName: ReadonlyMap<string, RuntimeStep>): string | undefined {
+  for (const planned of steps) {
+    const drift = plannedStepDrift(byName, planned)
+    if (drift !== undefined) return drift
+  }
+  return undefined
 }
 
 function explicitPRs(state: DeepReadonly<BaysState>, args: QueueRunArgs): PR[] | undefined {
@@ -3389,10 +3553,15 @@ function automaticAdmissionAttemptsExhausted(
   return releasedFailures >= exactRequests + AUTOMATIC_ADMISSION_RETRIES
 }
 
-function admissionQueue(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): PR[] {
+function admissionQueue(
+  state: DeepReadonly<RuntimeState>,
+  steps: readonly RuntimeStep[],
+  targets?: ReadonlySet<string>,
+): PR[] {
   const selected = admissionSteps(state.queues, steps)
   if (selected.length === 0) return []
   return Object.values(state.bays.prs)
+    .filter((pr) => targets === undefined || targets.has(pr.id))
     .filter((pr) => pr.status === "pushed" || pr.status === "submitted")
     .filter((pr) => blockingQueuePause(state, pr) === undefined)
     .filter((pr) => checksRequested(pr))

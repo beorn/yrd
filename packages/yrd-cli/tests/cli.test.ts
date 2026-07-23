@@ -659,19 +659,42 @@ describe("runYrd", () => {
   })
 
   it.each([
+    { name: "yrd pr", argv: yrd("pr", "submit", "topic/draft", "--draft", "--json") },
     { name: "yrd bay", argv: yrd("bay", "submit", "topic/draft", "--draft", "--json") },
     { name: "git bay", argv: gitBay("submit", "topic/draft", "--draft", "--json") },
-  ])("draft-registers a pushed PR through $name without admission", async ({ argv }) => {
+  ])("rejects the deleted --draft flag through $name and teaches pr create", async ({ argv }) => {
     const app = await createApp()
     const output = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
 
-    expect(await runYrd(app, argv, output.io), output.stderr()).toBe(0)
-    expect(JSON.parse(output.stdout())).toMatchObject({
-      command: "bay.submit",
-      prs: [{ id: "PR1", branch: "topic/draft", status: "pushed", revision: 1 }],
+    expect(await runYrd(app, argv, output.io)).toBe(2)
+    expect(output.stderr()).toContain("unknown option '--draft'")
+    expect(output.stderr()).toContain("yrd pr create")
+    expect(app.bays.prs()).toEqual([])
+  })
+
+  it("derives the deleted --draft remedy from the failing command instead of raw argv", async () => {
+    const app = await createApp()
+    const prefixed = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+
+    expect(
+      await runInternals.runYrdHelp(
+        yrd("--repo", "/tmp", "pr", "submit", "topic/draft", "--draft", "--json"),
+        prefixed.io,
+      ),
+    ).toBe(2)
+    expect(JSON.parse(prefixed.stderr())).toMatchObject({
+      failure: {
+        cause: "unknown option '--draft'",
+        resolution: ["yrd pr create"],
+      },
     })
-    expect(app.bays.checksRequested("PR1")).toBe(false)
-    expect(Queues.ids(app.state().queues)).toEqual([])
+
+    const optionValue = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+    expect(await runYrd(app, yrd("pr", "submit", "topic/draft", "--title", "--draft", "--bogus"), optionValue.io)).toBe(
+      2,
+    )
+    expect(optionValue.stderr()).toContain("unknown option '--bogus'")
+    expect(optionValue.stderr()).not.toContain("yrd pr create")
   })
 
   it("uses concise layered help with examples on the root and queue surfaces", async () => {
@@ -1230,14 +1253,20 @@ describe("runYrd", () => {
 
   it("exposes the canonical same-PR recut command", async () => {
     const app = await createApp()
+    const createHelp = outputIO({ columns: 100 })
     const submitHelp = outputIO({ columns: 100 })
     const help = outputIO({ columns: 100 })
 
+    expect(await runYrd(app, yrd("pr", "create", "--help"), createHelp.io), createHelp.stderr()).toBe(0)
+    expect(createHelp.stdout()).toContain("Usage: yrd pr create [options] [selector]")
+    expect(createHelp.stdout()).toContain("--issue <ref>")
+    expect(createHelp.stdout()).toContain("Authored root carrier")
+    expect(createHelp.stdout()).toContain("$ yrd pr create <branch>")
+    expect(createHelp.stdout()).not.toContain("--draft")
+
     expect(await runYrd(app, yrd("pr", "submit", "--help"), submitHelp.io), submitHelp.stderr()).toBe(0)
-    expect(submitHelp.stdout()).toContain("Authored root carrier")
-    expect(submitHelp.stdout()).toContain("$ yrd pr submit <branch> --draft")
-    expect(submitHelp.stdout()).toContain("$ yrd pr recut <PR> --preflight --queue")
-    expect(submitHelp.stdout()).toMatch(/no\s+composition\s+manifest or manual triage/u)
+    expect(submitHelp.stdout()).not.toContain("--draft")
+    expect(submitHelp.stdout()).not.toContain("Authored root carrier")
 
     expect(await runYrd(app, yrd("pr", "recut", "--help"), help.io), help.stderr()).toBe(0)
     expect(help.stdout()).toContain("Usage: yrd pr recut [options] <selector>")
@@ -1246,12 +1275,12 @@ describe("runYrd", () => {
     expect(help.stdout()).toContain("--queue")
     expect(help.stdout()).toContain("--json")
     expect(help.stdout()).toContain("Authored root carrier")
-    expect(help.stdout()).toContain("$ yrd pr submit <branch> --draft")
+    expect(help.stdout()).toContain("$ yrd pr create <branch>")
     expect(help.stdout()).toContain("$ yrd pr recut <PR> --preflight --queue")
     expect(help.stdout()).toMatch(/no\s+composition\s+manifest or manual triage/u)
   })
 
-  it("draft-registers an authored carrier and queues a recut revision on the same PR", async () => {
+  it("creates an authored carrier draft and queues a recut revision on the same PR", async () => {
     const checkedRevisions: string[] = []
     const app = await createApp({ waitingCheck: true, checkedRevisions })
     const nextHead = "2".repeat(40)
@@ -1274,11 +1303,11 @@ describe("runYrd", () => {
     const submitted = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
 
     expect(
-      await runYrd(app, yrd("pr", "submit", "topic/root-carrier", "--draft", "--json"), submitted.io),
+      await runYrd(app, yrd("pr", "create", "topic/root-carrier", "--json"), submitted.io),
       submitted.stderr(),
     ).toBe(0)
     expect(JSON.parse(submitted.stdout())).toMatchObject({
-      command: "pr.submit",
+      command: "pr.create",
       prs: [{ id: "PR1", branch: "topic/root-carrier", status: "pushed", revision: 1 }],
     })
     expect(app.bays.checksRequested("PR1")).toBe(false)
@@ -1439,10 +1468,7 @@ describe("runYrd", () => {
     } as unknown as YrdCliServices
     const submitted = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
 
-    expect(
-      await runYrd(app, yrd("pr", "submit", "topic/pin-only", "--draft", "--json"), submitted.io),
-      submitted.stderr(),
-    ).toBe(0)
+    expect(await runYrd(app, yrd("pr", "create", "topic/pin-only", "--json"), submitted.io), submitted.stderr()).toBe(0)
     expect(app.bays.checksRequested("PR1")).toBe(false)
     expect(Queues.ids(app.state().queues)).toEqual([])
     expect(checkedRevisions).toEqual([])
@@ -2523,6 +2549,43 @@ describe("runYrd", () => {
     expect(rows(all.stdout())).toHaveLength(3)
   })
 
+  it("bounds commit subject resolution to the surviving rows and eight concurrent lookups", async () => {
+    const app = await createApp()
+    const refs = Array.from({ length: 9 }, (_, index) => String(index + 1).repeat(40))
+    for (const [index, headSha] of refs.entries()) {
+      await app.bays.submit({
+        branch: `topic/log-subject-${index + 1}`,
+        headSha,
+        base: "main",
+      })
+      await app.queue.run({ prs: [`PR${index + 1}`] }, { runner: "test", leaseMs: 60_000 })
+    }
+
+    let active = 0
+    let peak = 0
+    const resolveCommitMeta = vi.fn(async (ref: string) => {
+      active += 1
+      peak = Math.max(peak, active)
+      await Promise.resolve()
+      active -= 1
+      return { subject: `subject-${ref.slice(0, 1)}` }
+    })
+    const limited = outputIO({ resolveCommitMeta })
+    expect(await runYrd(app, yrd("log", "--limit", "2", "--json"), limited.io), limited.stderr()).toBe(0)
+
+    expect(resolveCommitMeta.mock.calls.map(([ref]) => ref)).toEqual(refs.slice(-2))
+    expect(
+      (JSON.parse(limited.stdout()) as { rows: readonly { subject: string }[] }).rows.map((row) => row.subject),
+    ).toEqual(["subject-8", "subject-9"])
+
+    resolveCommitMeta.mockClear()
+    peak = 0
+    const all = outputIO({ resolveCommitMeta })
+    expect(await runYrd(app, yrd("log", "--all", "--json"), all.io), all.stderr()).toBe(0)
+    expect(resolveCommitMeta.mock.calls.map(([ref]) => ref)).toEqual(refs)
+    expect(peak).toBe(8)
+  })
+
   it("keeps lossless log results and attempts inside base and PR scopes", async () => {
     const app = await createApp()
     await app.bays.submit({ branch: "topic/main-one", headSha: "1".repeat(40), base: "main" })
@@ -3101,19 +3164,17 @@ describe("runYrd", () => {
     expect(human.stdout()).toContain("release/2.0")
   })
 
-  it("drives draft, review, ready, needs-review, and cached checks through the PR surface", async () => {
+  it("drives create, review, ready, needs-review, and cached checks through the PR surface", async () => {
     const checkRuns: string[] = []
     const app = await createApp({ requires: ["review"], checkRuns })
     const resolveRevision = () => Promise.resolve(HEAD_SHA)
+    const beforeCreate = await Array.fromAsync(app.events()).then((events) => events.length)
 
     const submit = outputIO({ resolveRevision })
-    expect(
-      await runYrd(app, yrd("pr", "submit", "topic/review-me", "--draft", "--json"), submit.io),
-      submit.stderr(),
-    ).toBe(0)
+    expect(await runYrd(app, yrd("pr", "create", "topic/review-me", "--json"), submit.io), submit.stderr()).toBe(0)
     const submitted = JSON.parse(submit.stdout()) as { prs: Record<string, unknown>[] }
     expect(submitted).toMatchObject({
-      command: "pr.submit",
+      command: "pr.create",
       prs: [{ id: "PR1", branch: "topic/review-me", revision: 1, headSha: HEAD_SHA }],
     })
     expect(submitted).not.toHaveProperty("checks")
@@ -3122,6 +3183,11 @@ describe("runYrd", () => {
     expect(app.bays.checksRequested("PR1")).toBe(false)
     expect(Queues.ids(app.state().queues)).toEqual([])
     expect(checkRuns).toEqual([])
+    const createEvents = (await Array.fromAsync(app.events())).slice(beforeCreate).map(({ name }) => name)
+    expect(createEvents).toContain("pr/pushed")
+    expect(createEvents).not.toContain("pr/submitted")
+    expect(createEvents).not.toContain("pr/checks-requested")
+    expect(createEvents.some((name) => name.startsWith("queue/run/"))).toBe(false)
 
     const inbox = outputIO()
     expect(await runYrd(app, yrd("pr", "list", "--needs-review", "--json"), inbox.io), inbox.stderr()).toBe(0)
@@ -3265,6 +3331,25 @@ describe("runYrd", () => {
     expect(JSON.parse(terminalInbox.stdout())).toMatchObject({ command: "pr.list", prs: [] })
   })
 
+  it("keeps plain submit submission-only and requests checks", async () => {
+    const app = await createApp()
+    const output = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+
+    expect(await runYrd(app, yrd("pr", "submit", "topic/ready-on-arrival", "--json"), output.io), output.stderr()).toBe(
+      0,
+    )
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "pr.submit",
+      prs: [{ branch: "topic/ready-on-arrival", status: "submitted" }],
+    })
+    expect(app.bays.checksRequested("topic/ready-on-arrival")).toBe(true)
+
+    const create = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+    expect(await runYrd(app, yrd("pr", "create", "topic/ready-on-arrival", "--title", "mutated"), create.io)).toBe(1)
+    expect(create.stderr()).toContain("create is only for a draft PR")
+    expect(app.bays.pr("topic/ready-on-arrival")?.title).toBeUndefined()
+  })
+
   it("drives reviewer requests through submit, request-review, and the reviewer-scoped inbox", async () => {
     const app = await createApp()
     const resolveRevision = () => Promise.resolve(HEAD_SHA)
@@ -3273,7 +3358,7 @@ describe("runYrd", () => {
     expect(
       await runYrd(
         app,
-        yrd("pr", "submit", "topic/request-me", "--draft", "--reviewer", "@cto", "--reviewer", "@agent/5", "--json"),
+        yrd("pr", "create", "topic/request-me", "--reviewer", "@cto", "--reviewer", "@agent/5", "--json"),
         submit.io,
       ),
       submit.stderr(),
@@ -8373,26 +8458,99 @@ describe("runYrd", () => {
     expect(probe.max("evaluator")).toBe(2)
   })
 
+  it("prints a suggested unknown subcommand as exactly one human line", async () => {
+    const app = await createApp()
+    const typo = outputIO({ columns: 20 })
+
+    expect(await runYrd(app, yrd("pr", "crate"), typo.io)).toBe(2)
+    expect(typo.stdout()).toBe("")
+    expect(typo.stderr()).toBe("error: unknown command 'crate' (Did you mean 'create'?)\n")
+  })
+
+  it("offers scoped help for an unsuggested subcommand and retains the structured JSON error", async () => {
+    const app = await createApp()
+    const unsuggested = outputIO()
+
+    expect(await runYrd(app, yrd("pr", "xyzzy"), unsuggested.io)).toBe(2)
+    expect(unsuggested.stderr()).toBe("error: unknown command 'xyzzy' (Run 'yrd pr --help' for available commands.)\n")
+
+    const repoScoped = outputIO()
+    expect(await runInternals.runYrdHelp(yrd("--repo", "/tmp/project", "pr", "xyzzy"), repoScoped.io)).toBe(2)
+    expect(repoScoped.stderr()).toBe("error: unknown command 'xyzzy' (Run 'yrd pr --help' for available commands.)\n")
+
+    for (const operand of ["foo.bar", "foo,bar"]) {
+      const punctuated = outputIO()
+      expect(await runYrd(app, yrd("bay", operand), punctuated.io)).toBe(2)
+      expect(punctuated.stderr()).toBe(
+        `error: unknown command '${operand}' (Run 'yrd bay --help' for available commands.)\n`,
+      )
+    }
+
+    const json = outputIO()
+    expect(await runYrd(app, yrd("pr", "crate", "--json"), json.io)).toBe(2)
+    expect(json.stdout()).toBe("")
+    expect(JSON.parse(json.stderr())).toEqual({
+      failure: {
+        kind: "usage",
+        code: "invalid-arguments",
+        message: "error: unknown command 'crate'\n(Did you mean create?)",
+        cause: "unknown command 'crate' (Did you mean create?)",
+        resolution: ["Correct the cause above, then retry the same Yrd command."],
+      },
+    })
+  })
+
+  it("retains a concrete command remedy on a real command failure", async () => {
+    const app = await createApp()
+    const output = outputIO({ currentBranch: () => "topic/unsubmitted" })
+
+    expect(await runYrd(app, yrd("pr", "status"), output.io)).toBe(1)
+    expect(output.stdout()).toBe("")
+    expect(output.stderr()).toBe("error: the current bay or branch has no PR\nresolve: yrd pr submit\n")
+  })
+
+  it("lets Commander, not raw argv scanning, own JSON output mode", async () => {
+    const app = await createApp()
+    const optionValue = outputIO()
+
+    expect(await runYrd(app, yrd("pr", "edit", "PR404", "--title", "--json"), optionValue.io)).toBe(1)
+    expect(optionValue.stdout()).toBe("")
+    expect(optionValue.stderr()).toBe("error: no PR 'PR404'\n")
+
+    const afterTerminator = outputIO()
+    expect(await runYrd(app, yrd("pr", "crate", "--", "--json"), afterTerminator.io)).toBe(2)
+    expect(afterTerminator.stderr()).toMatch(/^error: /u)
+    expect(() => JSON.parse(afterTerminator.stderr())).toThrow()
+  })
+
   it("uses the documented exit taxonomy and keeps diagnostics off stdout", async () => {
     const app = await createApp()
 
     const usage = outputIO()
     expect(await runYrd(app, yrd("bay", "adopt", "old-branch"), usage.io)).toBe(2)
     expect(usage.stdout()).toBe("")
-    expect(usage.stderr()).toContain("too many arguments")
-    expect(usage.stderr()).toContain("err=invalid-arguments")
-    expect(usage.stderr()).toContain("resolve:")
+    expect(usage.stderr()).toBe("error: unknown command 'adopt' (Run 'yrd bay --help' for available commands.)\n")
 
     const refusal = outputIO()
     expect(await runYrd(app, yrd("bay", "close", "missing"), refusal.io)).toBe(1)
     expect(refusal.stdout()).toBe("")
-    expect(refusal.stderr()).toContain("no bay 'missing'")
-    expect(refusal.stderr()).toContain("err=request-refused")
-    expect(refusal.stderr()).toContain("cause:")
+    expect(refusal.stderr()).toBe("error: no bay 'missing'\n")
 
     const missingPR = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "PR404"), missingPR.io)).toBe(1)
-    expect(missingPR.stderr()).toContain("no PR 'PR404'")
+    expect(missingPR.stderr()).toBe("error: no PR 'PR404'\n")
+
+    const missingPRJson = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "PR404", "--json"), missingPRJson.io)).toBe(1)
+    expect(JSON.parse(missingPRJson.stderr())).toEqual({
+      failure: {
+        kind: "refusal",
+        code: "pr-not-found",
+        message: "yrd: no PR 'PR404'",
+        cause: "no PR 'PR404'",
+        resolution: ["Correct the cause above, then retry the same Yrd command."],
+      },
+    })
 
     const missingWaitingRun = outputIO()
     expect(
@@ -8415,17 +8573,17 @@ describe("runYrd", () => {
         missingWaitingRun.io,
       ),
     ).toBe(1)
-    expect(missingWaitingRun.stderr()).toContain("no queue run or PR 'PR404'")
+    expect(missingWaitingRun.stderr()).toBe("error: no queue run or PR 'PR404'\n")
 
     const unsupported = outputIO()
     expect(await runYrd(app, yrd("queue", "init"), unsupported.io)).toBe(2)
-    expect(unsupported.stderr()).toContain("queue.init capability is not installed")
+    expect(unsupported.stderr()).toBe("error: queue.init capability is not installed\n")
 
     const missingIssueSource = outputIO()
     expect(
       await runYrd(app, yrd("contest", "open", "github:42", "--agents", "ag codex/claude"), missingIssueSource.io),
     ).toBe(2)
-    expect(missingIssueSource.stderr()).toContain("no issue source 'github' is registered")
+    expect(missingIssueSource.stderr()).toBe("error: no issue source 'github' is registered\n")
 
     const infrastructure = outputIO({
       resolveRevision: async () => {
@@ -8434,9 +8592,7 @@ describe("runYrd", () => {
     })
     expect(await runYrd(app, yrd(), infrastructure.io)).toBe(3)
     expect(infrastructure.stdout()).toBe("")
-    expect(infrastructure.stderr()).toContain("corrupt event log")
-    expect(infrastructure.stderr()).toContain("err=unexpected")
-    expect(infrastructure.stderr()).toContain("resolve:")
+    expect(infrastructure.stderr()).toBe("error: corrupt event log at row 4\n")
   })
 
   it("projects installed queue administration and cancels an idle watch deterministically", async () => {
@@ -9539,14 +9695,15 @@ describe("typed issue landing bridge", () => {
     expect(await runYrd(exhaustingApp, yrd("pr", "runs", "PR1", "--json"), exhausted.io)).toBe(1)
     expect({ snapshots, advances }).toEqual({ snapshots: 6, advances: 3 })
     expect(exhausted.stdout()).toBe("")
-    expect(exhausted.stderr()).toBe(
-      [
-        "yrd: err=request-refused",
-        "cause: journal changed while reading PR 'PR1' runs; retry with 'yrd pr runs PR1 --json'",
-        "resolve: yrd pr runs PR1 --json",
-        "",
-      ].join("\n"),
-    )
+    expect(JSON.parse(exhausted.stderr())).toEqual({
+      failure: {
+        kind: "refusal",
+        code: "request-refused",
+        message: "journal changed while reading PR 'PR1' runs; retry with 'yrd pr runs PR1 --json'",
+        cause: "journal changed while reading PR 'PR1' runs",
+        resolution: ["yrd pr runs PR1 --json"],
+      },
+    })
   })
 })
 
@@ -9700,9 +9857,20 @@ describe("journal version skew fail-loud", () => {
       expect(stderr).toContain("forwardCompatProbe")
       expect(stderr).toContain("landingReceipt")
       expect(stderr).toContain(`${YRD_VERSION}+`)
-      expect(stderr).toContain("-v")
+      expect(stderr).not.toContain("resolve:")
+      expect(stderr).not.toContain("-v")
       expect(stderr).not.toContain("unrecognized_keys")
       expect(stderr).not.toContain("invalid_union")
+
+      const json = outputIO()
+      expect(await runInternals.runYrdProcessRuntime(yrd("pr", "list", "--json"), json.io, journalBootstrap(dir))).toBe(
+        3,
+      )
+      expect(JSON.parse(json.stderr())).toMatchObject({
+        failure: {
+          resolution: expect.arrayContaining(["Re-run with -v to include the raw validation detail."]),
+        },
+      })
     })
   })
 

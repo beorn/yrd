@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import type { YrdStepConfig } from "./config.ts"
+import { stepGateMode, type YrdStepConfig } from "./config.ts"
 
 export type ToolchainFingerprint = Readonly<{
   bun: string
@@ -45,6 +45,8 @@ export function queueStepRevision(input: QueueStepRevisionInput): string {
         environmentPassthrough: input.config.environmentPassthrough,
         classification: input.config.classification ?? "carrier",
         comparison: input.config.comparison,
+        comparisonReady: input.config.comparisonReady,
+        mode: stepGateMode(input.config),
         timeoutMs: input.timeoutMs,
         noProgressMs: input.noProgressMs,
         toolchain: input.toolchain,

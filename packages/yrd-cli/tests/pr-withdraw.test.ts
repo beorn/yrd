@@ -280,12 +280,12 @@ describe("pr withdraw", () => {
 
     const unknown = outputIO()
     expect(await runYrd(app, yrd("pr", "withdraw", "nope"), unknown.io)).toBe(1)
-    expect(unknown.stderr()).toContain("no PR 'nope'")
+    expect(unknown.stderr()).toBe("error: no PR 'nope'\n")
 
     expect(await runYrd(app, yrd("pr", "withdraw", "PR2"), outputIO().io)).toBe(0)
     const terminal = outputIO()
     expect(await runYrd(app, yrd("pr", "withdraw", "PR2"), terminal.io)).toBe(1)
-    expect(terminal.stderr()).toContain("PR 'PR2' is withdrawn; a terminal PR cannot be withdrawn")
+    expect(terminal.stderr()).toBe("error: PR 'PR2' is withdrawn; a terminal PR cannot be withdrawn\n")
 
     // A mixed batch refuses whole before the first event: PR1 stays live.
     const mixed = outputIO()

@@ -12,7 +12,7 @@ import { pathToFileURL } from "node:url"
 import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { createFailure, createMemoryJournal } from "@yrd/core"
-import { GitCheckEvidenceSchema, IntegrationProofSchema, Queues } from "@yrd/queue"
+import { DIAGNOSTICS_COMPARISON_READY, GitCheckEvidenceSchema, IntegrationProofSchema, Queues } from "@yrd/queue"
 import { createExclusive, createJournal } from "@yrd/persistence"
 import { createProcess, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createLogger, type ConditionalLogger } from "loggily"
@@ -207,6 +207,56 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(GitCheckEvidenceSchema.parse(job.output).comparison).toMatchObject({
       netNewDiagnostics: [],
       resolvedDiagnostics: [],
+    })
+  })
+
+  it("threads strict mode into the shipping child environment and typed evidence", async () => {
+    const { repo, featureSha } = await repository()
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check"],
+      requires: [],
+      definitions: {
+        check: {
+          run: 'test "$YRD_GATE_MODE" = strict',
+          runner: "local",
+          mode: "strict",
+        },
+      },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+    await using app = await createDefaultYrdApp({
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal: createMemoryJournal(),
+      process: runtimeProcess,
+      config,
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]
+    expect(run).toMatchObject({ status: "passed" })
+    const job = run?.steps[0]?.job
+    if (job?.status !== "passed") throw new Error("strict-mode step did not pass")
+    const evidence = GitCheckEvidenceSchema.parse(job.output)
+    expect(evidence).toMatchObject({
+      mode: "strict",
+      certificate: {
+        version: 1,
+        mode: "strict",
+        baseSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+        candidateSha: evidence.candidateSha,
+        reports: [
+          {
+            version: 1,
+            comparator: { id: "exit-code", version: 1 },
+            residual: { count: 0, hash: expect.stringMatching(/^[0-9a-f]{64}$/u) },
+          },
+        ],
+      },
     })
   })
 
@@ -1010,6 +1060,67 @@ notify:
     expect(stdout).toContain("--repo <path>")
     expect(stdout).not.toContain("--cwd")
     expect(stderr).toBe("")
+  })
+
+  it("keeps runtime bootstrap failures structured when JSON is requested", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yrd-json-bootstrap-failure-"))
+    roots.push(root)
+    let stdout = ""
+    let stderr = ""
+
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", root, "pr", "list", "--json"], {
+        cwd: root,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+    ).toBe(3)
+    expect(stdout).toBe("")
+    expect(JSON.parse(stderr)).toEqual({
+      failure: {
+        kind: "infrastructure",
+        code: "unexpected",
+        message: `yrd: '${root}' is not inside a Git worktree`,
+        cause: `'${root}' is not inside a Git worktree`,
+        resolution: ["Correct the cause above, then retry the same Yrd command."],
+      },
+    })
+  })
+
+  it("renders invalid receiver-hook modes concisely in human and JSON projections", async () => {
+    let humanStderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "receiver-hook", "invalid"], {
+        stdout() {},
+        stderr(text) {
+          humanStderr += text
+        },
+      }),
+    ).toBe(2)
+    expect(humanStderr).toBe("error: receiver-hook requires pre-receive or post-receive\n")
+
+    let jsonStderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "receiver-hook", "invalid", "--json"], {
+        stdout() {},
+        stderr(text) {
+          jsonStderr += text
+        },
+      }),
+    ).toBe(2)
+    expect(JSON.parse(jsonStderr)).toEqual({
+      failure: {
+        kind: "usage",
+        code: "invalid-arguments",
+        message: "yrd: receiver-hook requires pre-receive or post-receive",
+        cause: "receiver-hook requires pre-receive or post-receive",
+        resolution: ["Correct the cause above, then retry the same Yrd command."],
+      },
+    })
   })
 
   it("prints namespace help without initializing a repository host", async () => {
@@ -2900,6 +3011,33 @@ describe("stepNoProgressMs — the no-output-progress bound that stalls a silent
     expect(queueStepRevision({ ...input, config: { ...input.config, comparison: "diagnostics" as const } })).not.toBe(
       baseline,
     )
+  })
+
+  it("binds the effective gate mode into the queue step revision identity", () => {
+    const toolchain = { bun: "1.3.0", node: "24.0.0", platform: "darwin", arch: "arm64" }
+    const input = {
+      repo: "/repo",
+      stateDir: "/repo/.git/yrd",
+      name: "check",
+      config: { run: "bun run check", runner: "local" as const },
+      timeoutMs: 60_000,
+      noProgressMs: 600_000,
+      toolchain,
+    }
+    const delta = queueStepRevision(input)
+
+    expect(queueStepRevision({ ...input, config: { ...input.config, mode: "delta" as const } })).toBe(delta)
+    expect(queueStepRevision({ ...input, config: { ...input.config, mode: "strict" as const } })).not.toBe(delta)
+    expect(
+      queueStepRevision({
+        ...input,
+        config: {
+          ...input.config,
+          comparison: "diagnostics" as const,
+          comparisonReady: DIAGNOSTICS_COMPARISON_READY,
+        },
+      }),
+    ).not.toBe(delta)
   })
 })
 

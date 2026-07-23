@@ -4,7 +4,8 @@
  * @consumer @yrd/cli configuration
  */
 import { describe, expect, it } from "vitest"
-import { loadYrdConfig, parseYrdConfig } from "../src/config.ts"
+import { DIAGNOSTICS_COMPARISON_READY } from "@yrd/queue"
+import { loadYrdConfig, parseYrdConfig, stepGateMode } from "../src/config.ts"
 
 describe("Yrd config", () => {
   it("parses the flat queue policy and top-level step definitions", () => {
@@ -193,4 +194,44 @@ check: { run: bun run check, comparison: output }
       expect(() => parseYrdConfig({ lint: step })).toThrow()
     },
   )
+})
+
+describe("Yrd config — strict and delta gate modes", () => {
+  it("defaults to delta and accepts either explicit mode", () => {
+    const parsed = parseYrdConfig({
+      inherited: { run: "bun run inherited" },
+      release: { run: "bun run release", mode: "strict" },
+      carrier: { run: "bun run carrier", mode: "delta" },
+    })
+
+    expect(stepGateMode(parsed.definitions.inherited!)).toBe("delta")
+    expect(stepGateMode(parsed.definitions.release!)).toBe("strict")
+    expect(stepGateMode(parsed.definitions.carrier!)).toBe("delta")
+  })
+
+  it("rejects an unknown gate mode", () => {
+    expect(() => parseYrdConfig({ check: { run: "bun run check", mode: "legacy" } })).toThrow(
+      /check\.mode.*delta or strict/u,
+    )
+  })
+
+  it("requires diagnostics comparison when a structured readiness report is declared", () => {
+    expect(() =>
+      parseYrdConfig({
+        check: { run: "bun run check", comparisonReady: DIAGNOSTICS_COMPARISON_READY },
+      }),
+    ).toThrow(/comparisonReady.*requires comparison: diagnostics/u)
+    expect(
+      parseYrdConfig({
+        check: {
+          run: "bun run check",
+          comparison: "diagnostics",
+          comparisonReady: DIAGNOSTICS_COMPARISON_READY,
+        },
+      }).definitions.check,
+    ).toMatchObject({
+      comparison: "diagnostics",
+      comparisonReady: DIAGNOSTICS_COMPARISON_READY,
+    })
+  })
 })

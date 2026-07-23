@@ -12,7 +12,15 @@ import {
 } from "@yrd/bay"
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
-import type { IntegrationProof, PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
+import {
+  GateCertificateSchema,
+  type IntegrationProof,
+  type PRCheckRecord,
+  type PREligibility,
+  type QueueRun,
+  type QueueStep,
+  type QueueSummary,
+} from "@yrd/queue"
 import {
   Box,
   formatNounId,
@@ -576,10 +584,16 @@ type QueueShowRow = Readonly<{
   output: string
   artifacts: string
   evidence: string | Record<string, unknown>
+  gate?: GateEvidence
   checkpoint: string
   landing: string
   location?: QueueLogLocation
   locations: readonly QueueLogLocationEntry[]
+}>
+
+type GateEvidence = Readonly<{
+  mode: "delta" | "strict"
+  residualCount: number
 }>
 
 export type QueueShowData = Readonly<{
@@ -1363,7 +1377,22 @@ function stepCheckpointText(step: QueueStep): string {
   return value.length === 0 ? safeText(checkpoint) : value.join(" ")
 }
 
-function stepEvidence(step: QueueStep): string | Record<string, unknown> {
+function gateEvidenceFromOutput(output: unknown): GateEvidence | undefined {
+  if (!isObjectValue(output)) return undefined
+  const parsed = GateCertificateSchema.safeParse(output.certificate)
+  if (!parsed.success) return undefined
+  const certificate = parsed.data
+  return {
+    mode: certificate.mode,
+    residualCount: certificate.reports.reduce((total, report) => total + report.residual.count, 0),
+  }
+}
+
+function gateEvidenceLabel(gate: GateEvidence): string {
+  return `${gate.mode} residual:${gate.residualCount}`
+}
+
+function stepEvidence(step: QueueStep, gate: GateEvidence | undefined): string | Record<string, unknown> {
   const job = step.job
   if (job === undefined) return "-"
   const evidence: Record<string, unknown> = {}
@@ -1373,6 +1402,7 @@ function stepEvidence(step: QueueStep): string | Record<string, unknown> {
   if ("detail" in job && typeof job.detail === "string" && job.detail !== "") evidence.detail = job.detail
   if ("artifacts" in job && Array.isArray(job.artifacts) && job.artifacts.length > 0) evidence.artifacts = job.artifacts
   if ("checkpoint" in job && job.checkpoint !== undefined) evidence.checkpoint = job.checkpoint
+  if (gate !== undefined) evidence.gate = gateEvidenceLabel(gate)
   return Object.keys(evidence).length === 0 ? "-" : evidence
 }
 
@@ -1740,15 +1770,23 @@ function lastFailedSubmission(pr: PR): PR["revisions"][number] | undefined {
 
 /**
  * Map a non-integrated PR to its display-only pre-run timeline status, or
- * undefined when the PR is terminal by intent (integrated/withdrawn/canceled) or
- * is surfaced through a run row instead (a `rejected` PR keeps its terminal run
- * row until the author re-pushes it). `rev` is a `draft` (bay status
- * `pushed`) that carries failed-submission history — the user's "a failed
- * submission returns the PR to an editable state" — and stores no new PRStatus.
+ * undefined when the PR is terminal by intent (integrated/withdrawn/canceled).
+ * `rev` is a `draft` (bay status `pushed`) that carries failed-submission
+ * history — the user's "a failed submission returns the PR to an editable
+ * state" — and stores no new PRStatus. A `rejected` PR resurfaces as `rev`
+ * IMMEDIATELY (21707: rejection is a submission fact, not a PR resting state):
+ * the failed run row stays as history while the PR re-enters the editable band
+ * carrying its blocker. Scope-limited to PRs whose failed run the result still
+ * retains, so the pre-cutover backlog of ancient rejected PRs cannot flood the
+ * band; once the run ages out of retention, the corpse stays hidden.
  */
-function preRunTimelineStatus(pr: PR): "draft" | "rev" | "ready" | undefined {
+function preRunTimelineStatus(pr: PR, runs: readonly QueueRun[]): "draft" | "rev" | "ready" | undefined {
   if (pr.status === "submitted") return "ready"
   if (pr.status === "pushed") return lastFailedSubmission(pr) === undefined ? "draft" : "rev"
+  if (pr.status === "rejected") {
+    const runId = lastFailedSubmission(pr)?.terminal?.run
+    if (runId !== undefined && runs.some((run) => run.id === runId)) return "rev"
+  }
   return undefined
 }
 
@@ -1784,7 +1822,7 @@ function timelineNonIntegratedRows(
   const positions = submittedPrPositions(result.prs)
   const runs = [...result.running, ...result.waiting, ...result.finished]
   return result.prs.flatMap((pr): QueueTimelineProjectedRow[] => {
-    const status = preRunTimelineStatus(pr)
+    const status = preRunTimelineStatus(pr, runs)
     if (status === undefined) return []
     // A submitted revision that is actively running/waiting is shown by its run row.
     if (status === "ready" && activeRevisions.has(queueRevisionKey(pr))) return []
@@ -3903,32 +3941,38 @@ function TimelineRunnerBox({ projection, live = false }: { projection: QueueTime
 // oldestOpenMs, landed 36effce43e) across HR/DAY/WK/MON via `time-stats.ts`.
 
 /** The four operator-facing status buckets (user respec 2026-07-15). */
-export type QueueTimelineStatusBucket = "pending" | "running" | "failed" | "done"
+export type QueueTimelineStatusBucket = "open" | "running" | "done" | "failed"
 
 export const QUEUE_TIMELINE_STATUS_BUCKETS: readonly QueueTimelineStatusBucket[] = [
-  "pending",
+  "open",
   "running",
-  "failed",
   "done",
+  "failed",
 ]
 
-/** Bucket a row status: every non-integrated terminal outcome is `failed`; integrated is `done`. */
+/** Bucket a row status onto the operator courts (user respec 2026-07-23):
+ * `open` = the agents' court (draft/rev — editable, next action is the author);
+ * `running` = the queue's court (ready/queued/running — next action is the
+ * runner); every non-integrated terminal outcome is `failed`; integrated is
+ * `done`. */
 export function queueTimelineStatusBucket(status: QueueTimelineStatus): QueueTimelineStatusBucket {
-  // Every pre-run status (draft/rev/ready) buckets with `todo` (the
-  // pending pill), so the default view shows them and the `t` toggle owns them —
-  // no new operator pill. See `timelineStatusFilter`.
-  if (status === "draft" || status === "rev" || status === "ready") return "pending"
-  if (status === "pending" || status === "running") return status
+  if (status === "draft" || status === "rev") return "open"
+  if (status === "ready" || status === "pending" || status === "running") return "running"
   return status === "integrated" ? "done" : "failed"
 }
 
-/** Project CLI-level status filters onto the four display buckets. */
+/** Project CLI-level status filters onto the four display buckets. CLI
+ * `pending` keeps its pre-court meaning (pre-run + queued work) and maps to
+ * BOTH `open` and `running` so neither court silently vanishes. */
 export function queueTimelineFilterBuckets(
   statuses: readonly QueueTimelineStatusFilter[],
 ): ReadonlySet<QueueTimelineStatusBucket> {
   const buckets = new Set<QueueTimelineStatusBucket>()
   for (const status of statuses) {
-    if (status === "pending" || status === "running") buckets.add(status)
+    if (status === "pending") {
+      buckets.add("open")
+      buckets.add("running")
+    } else if (status === "running") buckets.add("running")
     else if (status === "integrated") buckets.add("done")
     else buckets.add("failed")
   }
@@ -4084,18 +4128,21 @@ export function queueTimelineDateHeaderAt(
 /**
  * The FILTER row (user respec 2026-07-15): only non-default dimensions render
  * — `since=` always has a value, `terms=` only when terms were passed, `latest`
- * only when on; no `none`/`no`/`all` placeholders. The four status buckets
- * render as checkbox-style indicators that are clickable (pointer toggles) and
- * key-toggled by p/r/f/d in the live watch.
+ * only when on; no `none`/`no`/`all` placeholders. The status buckets render as
+ * pills: a pointer click or lowercase o/r/d/f SELECTS ONLY that bucket, `all`
+ * (a / click) restores every bucket, and capital O/R/D/F toggles one bucket's
+ * membership (power path, unadvertised) — user respec 2026-07-23.
  */
 function TimelineFilterLine({
   projection,
   buckets,
-  onToggleBucket,
+  onSelectBucket,
+  onShowAll,
 }: {
   projection: QueueTimelineProjection
   buckets: ReadonlySet<QueueTimelineStatusBucket>
-  onToggleBucket?: (bucket: QueueTimelineStatusBucket) => void
+  onSelectBucket?: (bucket: QueueTimelineStatusBucket) => void
+  onShowAll?: () => void
 }) {
   const filters = projection.filters
   // The "FILTER" label text is deleted (item 3): the pills stand alone. The
@@ -4110,12 +4157,13 @@ function TimelineFilterLine({
   ]
     .filter(Boolean)
     .join(" ")
-  // The four status buckets are TogglePills labelled by their plain word with a
-  // BOLD first letter (item 3) — `todo`/`running`/`failed`/`done` (pending
-  // displays as `todo` per user directive 2026-07-21), the bold
-  // `t`/`r`/`f`/`d` doubling as the hotkey hint (no `[t]` brackets). The whole
-  // cluster sits very dim and lifts together on hover (silvery TogglePillGroup);
-  // clicking a pill toggles its bucket, mirroring the t/r/f/d keys.
+  // The status buckets are TogglePills labelled by their plain word with a
+  // BOLD first letter — `open`/`running`/`done`/`failed` plus `all` (user
+  // respec 2026-07-23), the bold o/r/d/f/a doubling as the hotkey hint (no
+  // `[o]` brackets). Click or lowercase key = select ONLY that bucket; `all` =
+  // every bucket; capital letters toggle membership (unadvertised). The whole
+  // cluster sits very dim and lifts together on hover (silvery TogglePillGroup).
+  const allActive = QUEUE_TIMELINE_STATUS_BUCKETS.every((bucket) => buckets.has(bucket))
   return (
     <TogglePillGroup
       {...(dimensions === "" ? {} : { label: dimensions })}
@@ -4126,12 +4174,13 @@ function TimelineFilterLine({
       {QUEUE_TIMELINE_STATUS_BUCKETS.map((bucket) => (
         <TogglePill
           key={bucket}
-          label={bucket === "pending" ? "todo" : bucket}
+          label={bucket}
           boldFirstLetter
           active={buckets.has(bucket)}
-          onToggle={() => onToggleBucket?.(bucket)}
+          onToggle={() => onSelectBucket?.(bucket)}
         />
       ))}
+      <TogglePill label="all" boldFirstLetter active={allActive} onToggle={() => onShowAll?.()} />
     </TogglePillGroup>
   )
 }
@@ -4170,7 +4219,8 @@ function ProjectedQueueTimeline({
   availableRows,
   visibleBuckets,
   expandedStorms,
-  onToggleBucket,
+  onSelectBucket,
+  onShowAll,
   listRef,
 }: {
   projection: QueueTimelineProjection
@@ -4185,7 +4235,8 @@ function ProjectedQueueTimeline({
   availableRows?: number
   visibleBuckets?: ReadonlySet<QueueTimelineStatusBucket>
   expandedStorms?: ReadonlySet<string>
-  onToggleBucket?: (bucket: QueueTimelineStatusBucket) => void
+  onSelectBucket?: (bucket: QueueTimelineStatusBucket) => void
+  onShowAll?: () => void
   listRef?: React.Ref<ListViewHandle>
 }) {
   // Fold the complete visible set before applying the one-shot row cap. A
@@ -4318,7 +4369,7 @@ function ProjectedQueueTimeline({
               </Text>
             )}
           </Box>
-          <TimelineFilterLine projection={projection} buckets={buckets} onToggleBucket={onToggleBucket} />
+          <TimelineFilterLine projection={projection} buckets={buckets} onSelectBucket={onSelectBucket} onShowAll={onShowAll} />
         </Box>
         {!fillHeight ||
         (availableRows ?? viewportRows) === 0 ||
@@ -4351,7 +4402,8 @@ export function QueueTimelineView({
   availableRows,
   visibleBuckets,
   expandedStorms,
-  onToggleBucket,
+  onSelectBucket,
+  onShowAll,
   listRef,
 }: {
   projection?: QueueTimelineProjection
@@ -4369,7 +4421,8 @@ export function QueueTimelineView({
   availableRows?: number
   visibleBuckets?: ReadonlySet<QueueTimelineStatusBucket>
   expandedStorms?: ReadonlySet<string>
-  onToggleBucket?: (bucket: QueueTimelineStatusBucket) => void
+  onSelectBucket?: (bucket: QueueTimelineStatusBucket) => void
+  onShowAll?: () => void
   listRef?: React.Ref<ListViewHandle>
 }) {
   if (projection !== undefined) {
@@ -4389,7 +4442,8 @@ export function QueueTimelineView({
         availableRows={availableRows}
         visibleBuckets={visibleBuckets}
         expandedStorms={expandedStorms}
-        onToggleBucket={onToggleBucket}
+        onSelectBucket={onSelectBucket}
+        onShowAll={onShowAll}
         listRef={listRef}
       />
     )
@@ -4622,6 +4676,7 @@ function queueShowStepRow(run: QueueRun, step: QueueStep): QueueShowRow {
   const command = stepCommand(step)
   const taskStatus = stepTaskStatusOf(step)
   const stepFailure = failureFact(undefined, step)
+  const gate = step.job !== undefined && "output" in step.job ? gateEvidenceFromOutput(step.job.output) : undefined
   const stepDurationMs =
     step.job === undefined || !("startedAt" in step.job) || !("finishedAt" in step.job)
       ? undefined
@@ -4652,7 +4707,8 @@ function queueShowStepRow(run: QueueRun, step: QueueStep): QueueShowRow {
     detail: stepDetail(step),
     output: stepOutput(step),
     artifacts: stepArtifactsText(step),
-    evidence: stepEvidence(step),
+    evidence: stepEvidence(step, gate),
+    ...(gate === undefined ? {} : { gate }),
     checkpoint: stepCheckpointText(step),
     landing: queueLanding(run),
     locations,
@@ -4674,6 +4730,7 @@ function queueShowAttemptRow(run: QueueRun, attempt: QueueAttempt): QueueShowRow
   }
 
   const output = attempt.result.status === "lost" ? undefined : attempt.result.output
+  const gate = gateEvidenceFromOutput(output)
   const locations = attemptLocations(attempt)
   const firstLocation = locations[0]?.location
   const artifacts = attemptArtifacts(attempt)
@@ -4710,7 +4767,15 @@ function queueShowAttemptRow(run: QueueRun, attempt: QueueAttempt): QueueShowRow
         ? "-"
         : safeText(attempt.result.output ?? (attempt.result.status === "failed" ? attempt.result.error : undefined)),
     artifacts: artifacts.length === 0 ? "-" : artifactLabel(artifacts[0]),
-    evidence: isObjectValue(output) ? output : "-",
+    evidence:
+      gate === undefined
+        ? isObjectValue(output)
+          ? output
+          : "-"
+        : isObjectValue(output)
+          ? { ...output, gate: gateEvidenceLabel(gate) }
+          : { gate: gateEvidenceLabel(gate) },
+    ...(gate === undefined ? {} : { gate }),
     checkpoint: "-",
     landing: queueLanding(run),
     locations,
@@ -4893,6 +4958,20 @@ function presentFact(value: string | undefined): string | undefined {
   if (value === undefined) return undefined
   const trimmed = value.trim()
   return trimmed === "" || trimmed === "-" ? undefined : trimmed
+}
+
+function queueGateSummary(data: QueueShowData): string | undefined {
+  const gates = data.steps.flatMap((step) => (step.gate === undefined ? [] : [step.gate]))
+  const [first] = gates
+  if (first === undefined) return undefined
+  const modes = new Set(gates.map(({ mode }) => mode))
+  if (modes.size === 1) {
+    return gateEvidenceLabel({
+      mode: first.mode,
+      residualCount: gates.reduce((total, { residualCount }) => total + residualCount, 0),
+    })
+  }
+  return gates.map(gateEvidenceLabel).join(", ")
 }
 
 /** Dedupe `X@X` landings (commit == landing sha) to one SHA. */
@@ -5423,6 +5502,7 @@ function CompactQueueShowView({
   const parent = presentFact(data.parent)
   const isolation = data.isolationPart === "-" ? undefined : data.isolationPart
   const timing = queueRunTimingRow(data)
+  const gate = queueGateSummary(data)
   const latestStep = data.steps.at(-1)
   return (
     // minWidth={0} lets the long truncate-Text facts shrink to the (narrow)
@@ -5449,6 +5529,7 @@ function CompactQueueShowView({
             </Text>
           ) : null}
           {timing === undefined ? null : <Text wrap="truncate">{timing}</Text>}
+          {gate === undefined ? null : <Text wrap="truncate">GATE {gate}</Text>}
           {showIntegration ? <QueueIntegrationFacts data={data} /> : null}
           {parent === undefined && isolation === undefined ? null : (
             <Text wrap="truncate" color="$fg-muted">

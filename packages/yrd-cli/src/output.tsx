@@ -1,15 +1,16 @@
 import type { ReactNode } from "react"
+import { displayLength } from "@silvery/ansi"
 import { Text, renderString } from "silvery"
-import { actionableFailure, formatActionableFailure, type ActionableFailure } from "./actionable-error.ts"
+import { actionableFailure, formatHumanFailure, type ActionableFailure } from "./actionable-error.ts"
 import { classifyFailure, stableJson, unrecognizedKeyFailure } from "./invocation.ts"
 import type { YrdCliIO } from "./types.ts"
 import { formatYrdRuntimeVersion } from "./version.ts"
 
 export type HumanOutput = ReactNode
 
-async function rendered(io: YrdCliIO, output: HumanOutput): Promise<string> {
+async function rendered(io: YrdCliIO, output: HumanOutput, width = Math.min(io.columns ?? 120, 120)): Promise<string> {
   const text = await renderString(typeof output === "string" ? <Text>{output}</Text> : <>{output}</>, {
-    width: Math.min(io.columns ?? 120, 120),
+    width,
     height: 10_000,
     plain: io.color !== true,
   })
@@ -48,20 +49,21 @@ export async function printResultWithWarnings(
   for (const warning of warnings) io.stderr(warning.endsWith("\n") ? warning : `${warning}\n`)
 }
 
-export type DiagnosticOptions = Readonly<{ verbose?: boolean }>
+export type DiagnosticOptions = Readonly<{
+  verbose?: boolean
+  json?: boolean
+  /** Commander owns parse wording; this replaces only its human projection. */
+  humanCause?: string
+}>
 
-export async function diagnostic(
-  io: YrdCliIO,
-  program: string,
-  error: unknown,
-  options: DiagnosticOptions = {},
-): Promise<void> {
+export async function diagnostic(io: YrdCliIO, error: unknown, options: DiagnosticOptions = {}): Promise<void> {
   const message = error instanceof Error ? error.message : String(error)
   const detail = message.replace(/^yrd:\s*/u, "")
   const skew = unrecognizedKeyFailure(error)
+  const verdict = classifyFailure(error)
   const failure: ActionableFailure =
     skew === undefined
-      ? actionableFailure(classifyFailure(error).failure)
+      ? actionableFailure(verdict.failure)
       : {
           code: "journal-version-skew",
           cause:
@@ -73,7 +75,14 @@ export async function diagnostic(
             ...(options.verbose === true ? [] : ["Re-run with -v to include the raw validation detail."]),
           ],
         }
-  const renderedFailure = formatActionableFailure(failure, `${program}: `)
+  if (options.json === true) {
+    io.stderr(stableJson({ failure: { ...verdict.failure, ...failure } }))
+    return
+  }
+  const humanFailure = options.humanCause === undefined ? failure : { ...failure, cause: options.humanCause }
+  const renderedFailure = formatHumanFailure(humanFailure)
   const verboseDetail = skew !== undefined && options.verbose === true ? `\ndetail: ${detail}` : ""
-  io.stderr(await rendered(io, <Text color="$fg-error">{`${renderedFailure}${verboseDetail}`}</Text>))
+  const diagnostic = `${renderedFailure}${verboseDetail}`
+  const width = Math.max(1, ...diagnostic.split("\n").map(displayLength))
+  io.stderr(await rendered(io, <Text color="$fg-error">{diagnostic}</Text>, width))
 }
