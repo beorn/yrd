@@ -78,7 +78,7 @@ describe("synchronized activity pulse (items 12-13)", () => {
       await app.waitForLayoutStable()
       expect(app.text).toContain("╭─ RUNNER ")
       expect(app.text).not.toContain("╭─ STATUS ")
-      const glyph = cellOf(app, "●", "pr#R.1")
+      const glyph = cellOf(app, "◉", "pr#R.1")
       const word = cellOf(app, "run", "pr#R.1")
       expect(word.fg, "running marker and word share the activity phase").toEqual(glyph.fg)
     } finally {
@@ -97,7 +97,7 @@ describe("synchronized activity pulse (items 12-13)", () => {
       const runY = rows.findIndex((row) => /^\s*\d{2}:\d{2}:\d{2}.*\brun\b/u.test(row))
       expect(runY, "selected running row renders").toBeGreaterThan(0)
       const runRow = rows[runY]!
-      const glyphX = runRow.indexOf("●")
+      const glyphX = runRow.indexOf("◉")
       const wordX = runRow.indexOf("run")
       const timeX = runRow.search(/\d{2}:\d{2}:\d{2}/u)
       const selectionFg = app.cell(timeX, runY).fg

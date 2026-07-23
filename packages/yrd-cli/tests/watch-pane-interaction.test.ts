@@ -81,7 +81,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
       expect(rowY).toBeGreaterThan(0)
       expect(rowX).toBeGreaterThan(0)
       await app.click(rowX, rowY)
-      await waitFor(() => detailTitleRow(app.text).includes("pr#4.1 "))
+      await waitFor(() => detailTitleRow(app.text).includes("pr#4.1"))
       expect(detailTitleRow(app.text)).not.toContain("pr#42.1")
     } finally {
       app.unmount()
@@ -105,12 +105,12 @@ describe("QueueWatchFrame 21106 interaction", () => {
       await term.mouse.move(row4X, row4Y)
       await handle.waitForLayoutStable()
       expect(detailTitleRow(term.screen.getText()), "hover must not switch the detail selection").toContain("pr#42.1")
-      expect(detailTitleRow(term.screen.getText())).not.toContain("pr#4.1 ")
+      expect(detailTitleRow(term.screen.getText())).not.toContain("pr#4.1")
 
       // Click pr#4.1's row — NOW the detail follows the click to PR4.
       await term.mouse.down(row4X, row4Y)
       await term.mouse.up(row4X, row4Y)
-      await waitFor(() => detailTitleRow(term.screen.getText()).includes("pr#4.1 "))
+      await waitFor(() => detailTitleRow(term.screen.getText()).includes("pr#4.1"))
       expect(detailTitleRow(term.screen.getText())).not.toContain("pr#42.1")
     } finally {
       handle.unmount()

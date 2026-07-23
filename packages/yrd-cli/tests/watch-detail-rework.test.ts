@@ -246,11 +246,17 @@ describe("watch detail composite header + status notice", () => {
       await app.waitForLayoutStable()
       const rows = app.text.split("\n")
       const runY = rows.findIndex((line) => line.includes("RUN main#9"))
-      const timingY = rows.findIndex((line) => line.includes("Started "))
+      const timingY = rows.findIndex(
+        (line) => line.includes("Admitted ") && line.includes("started ") && line.includes("completed "),
+      )
+      const metricsY = rows.findIndex(
+        (line) => line.includes("Age ") && line.includes("runtime ") && line.includes("wait "),
+      )
       const tabsY = rows.findIndex((line) => line.includes("1: check"))
       expect(runY, "run identity leads the composite header").toBeGreaterThanOrEqual(0)
       expect(timingY, "run timing is inside the composite header").toBeGreaterThan(runY)
-      expect(tabsY, "step tabs follow the composite header").toBeGreaterThan(timingY)
+      expect(metricsY, "run age/runtime/wait metrics are inside the composite header").toBeGreaterThan(timingY)
+      expect(tabsY, "step tabs follow the composite header").toBeGreaterThan(metricsY)
 
       const noticeY = rows.findIndex((line) => line.includes("failed, rejected"))
       expect(noticeY, "the status notice headline is present").toBeGreaterThanOrEqual(0)
@@ -263,13 +269,168 @@ describe("watch detail composite header + status notice", () => {
         app.cell(rows[noticeY]?.indexOf("failed") ?? -1, noticeY).fg,
       )
       expect(app.text).toContain("err=check-failed")
-      expect(app.text).toContain("not retried automatically")
-      expect(app.text).toContain("author must fix the branch and resubmit")
+      expect(app.text).toContain("not retried")
+      expect(app.text).toContain("automatically")
+      expect(app.text).toContain("author must fix")
+      expect(app.text).toContain("branch and resubmit")
       expect(app.text).not.toMatch(/^(?:ERROR|CAUSE|RESOLVE|LOST|NEXT)\b/mu)
       const titleY = rows.findIndex((line) => line.includes("pr#9.1"))
       const detailX = rows[titleY]?.indexOf("pr#9.1") ?? -1
       const detailText = rows.map((line) => line.slice(detailX)).join("\n")
       expect(detailText.match(/@yrd\/core\/21096-cli-ux\/21751-watch-detail-status-dry/gu)).toHaveLength(1)
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("states the live step's elapsed time and historical p50 without inventing a current-run duration", async () => {
+    const terminalPr = (id: string, run: string, submittedAt: string, finishedAt: string) => {
+      const headSha = id.at(-1)?.repeat(40) ?? "1".repeat(40)
+      return fixturePr(id, "integrated", submittedAt, `Historical ${id}`, {
+        headSha,
+        terminalRun: run,
+        integratedAt: finishedAt,
+        integration: { commit: "b".repeat(40), baseSha: "a".repeat(40) },
+        revisions: [
+          {
+            revision: 1,
+            headSha,
+            base: "main",
+            baseSha: "a".repeat(40),
+            pushedAt: submittedAt,
+            submittedAt,
+            terminal: { status: "integrated", at: finishedAt, run },
+          },
+        ],
+      })
+    }
+    const twoMinutePr = terminalPr("PR1", "R1", "2026-07-13T10:59:00.000Z", "2026-07-13T11:02:00.000Z")
+    const fourMinutePr = terminalPr("PR2", "R2", "2026-07-13T11:09:00.000Z", "2026-07-13T11:14:00.000Z")
+    const livePr = fixturePr("PR3", "submitted", "2026-07-13T11:39:00.000Z", "Live check")
+    const twoMinuteRun = fixtureRun("R1", [twoMinutePr], "passed", "2026-07-13T11:00:00.000Z", {
+      finishedAt: "2026-07-13T11:02:00.000Z",
+      steps: [
+        fixtureStep(
+          "check",
+          fixtureJob("J1-check", "passed", {
+            startedAt: "2026-07-13T11:00:00.000Z",
+            finishedAt: "2026-07-13T11:02:00.000Z",
+          }),
+        ),
+      ],
+    })
+    const fourMinuteRun = fixtureRun("R2", [fourMinutePr], "passed", "2026-07-13T11:10:00.000Z", {
+      finishedAt: "2026-07-13T11:14:00.000Z",
+      steps: [
+        fixtureStep(
+          "check",
+          fixtureJob("J2-check", "passed", {
+            startedAt: "2026-07-13T11:10:00.000Z",
+            finishedAt: "2026-07-13T11:14:00.000Z",
+          }),
+        ),
+      ],
+    })
+    const liveRun = fixtureRun("R3", [livePr], "running", "2026-07-13T11:40:00.000Z", {
+      steps: [
+        fixtureStep(
+          "check",
+          fixtureJob("J3-check", "running", {
+            startedAt: "2026-07-13T11:40:00.000Z",
+          }),
+        ),
+      ],
+    })
+    const app = createRenderer({ cols: 180, rows: 50 })(
+      createElement(QueueWatchFrame, {
+        snapshot: fixtureSnapshot(
+          fixtureResult([twoMinutePr, fourMinutePr, livePr], [twoMinuteRun, fourMinuteRun, liveRun]),
+        ),
+      }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      expect(app.text).toContain("Step check is running (20:00 elapsed; step p50 3:00).")
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("names a lost job as an observed lease timeout with elapsed time and truthful ownership", async () => {
+    const headSha = "8".repeat(40)
+    const pr = fixturePr("PR8", "rejected", "2026-07-13T11:25:00.000Z", "Recover timed-out check", {
+      headSha,
+      terminalRun: "R8",
+      rejectedAt: "2026-07-13T11:45:00.000Z",
+      revisions: [
+        {
+          revision: 1,
+          headSha,
+          base: "main",
+          baseSha: "a".repeat(40),
+          pushedAt: "2026-07-13T11:25:00.000Z",
+          submittedAt: "2026-07-13T11:25:00.000Z",
+          terminal: {
+            status: "rejected",
+            at: "2026-07-13T11:45:00.000Z",
+            run: "R8",
+          },
+        },
+      ],
+    })
+    const run = fixtureRun("R8", [pr], "failed", "2026-07-13T11:31:00.000Z", {
+      finishedAt: "2026-07-13T11:45:00.000Z",
+      error: { code: "job-lost", message: "runner lease expired" },
+      steps: [
+        fixtureStep(
+          "check",
+          fixtureJob("J8-check", "lost", {
+            startedAt: "2026-07-13T11:31:00.000Z",
+            finishedAt: "2026-07-13T11:45:00.000Z",
+            detail: "runner lease expired",
+          }),
+        ),
+      ],
+    })
+    const app = createRenderer({ cols: 180, rows: 50 })(
+      createElement(QueueWatchFrame, { snapshot: fixtureSnapshot(fixtureResult([pr], [run])) }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      expect(app.text).toContain("failed, timeout")
+      expect(app.text).toContain("job lease expired after 14:00")
+      expect(app.text).toContain("does not distinguish a killed process,")
+      expect(app.text).toContain("crash, or hang")
+      expect(app.text).toContain("candidate is innocent")
+      expect(app.text).toContain("automatically requeued")
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("calls an unsubmitted revision registered rather than manufacturing a submission event", async () => {
+    const headSha = "7".repeat(40)
+    const pr = fixturePr("PR7", "pushed", "2026-07-13T11:25:00.000Z", "Draft watch detail", {
+      headSha,
+      actor: "@agent/8",
+      revisions: [
+        {
+          revision: 1,
+          headSha,
+          base: "main",
+          baseSha: "a".repeat(40),
+          pushedAt: "2026-07-13T11:25:00.000Z",
+          actor: "@agent/8",
+        },
+      ],
+    })
+    const app = createRenderer({ cols: 180, rows: 50 })(
+      createElement(QueueWatchFrame, { snapshot: fixtureSnapshot(fixtureResult([pr], [])) }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      expect(app.text).toContain("r1 registered by @agent/8")
+      expect(app.text).not.toContain("r1 submitted by @agent/8")
     } finally {
       app.unmount()
     }
@@ -427,7 +588,27 @@ describe("detail step facts — final JOB yrd# grammar without duplication", () 
   })
 
   it("labels subprocess detail as MESSAGE so it cannot collide with DETAILS", async () => {
-    const pr = fixturePr("PR11", "submitted", "2026-07-13T10:30:00.000Z", "Explain a long failure")
+    const headSha = "1".repeat(40)
+    const pr = fixturePr("PR11", "rejected", "2026-07-13T10:30:00.000Z", "Explain a long failure", {
+      headSha,
+      terminalRun: "R11",
+      rejectedAt: "2026-07-13T10:42:00.000Z",
+      revisions: [
+        {
+          revision: 1,
+          headSha,
+          base: "main",
+          baseSha: "a".repeat(40),
+          pushedAt: "2026-07-13T10:30:00.000Z",
+          submittedAt: "2026-07-13T10:30:00.000Z",
+          terminal: {
+            status: "rejected",
+            at: "2026-07-13T10:42:00.000Z",
+            run: "R11",
+          },
+        },
+      ],
+    })
     const run = fixtureRun("R11", [pr], "failed", "2026-07-13T10:40:00.000Z", {
       finishedAt: "2026-07-13T10:42:00.000Z",
       steps: [
@@ -445,7 +626,6 @@ describe("detail step facts — final JOB yrd# grammar without duplication", () 
     try {
       await app.waitForLayoutStable()
       await app.press("Enter")
-      await app.press("l")
       await app.waitForLayoutStable()
       expect(app.text).toContain("MESSAGE")
       expect(app.text).not.toMatch(/^DETAIL\s/mu)

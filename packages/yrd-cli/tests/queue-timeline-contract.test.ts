@@ -136,7 +136,7 @@ describe("queue timeline 21106 contract", () => {
       27 * minute,
       25 * minute,
     ])
-    expect(projection.rows.map((row) => row.glyph)).toEqual(["○", "●", "●", "×", "✓"])
+    expect(projection.rows.map((row) => row.glyph)).toEqual(["○", "◉", "◉", "×", "✓"])
     // BY: the submitting actor of each exact PR revision, lossless in JSON.
     expect(projection.rows.map((row) => row.submitter)).toEqual([
       "@cto",
@@ -229,7 +229,7 @@ describe("queue timeline 21106 contract", () => {
       /^16:40:00 ○ ready\s+-\s+pr#1\.1 @yrd\/core\/21120-pr-state-notifications\s+@cto\s+50:00$/u,
     )
     expect(lead?.trim()).toMatch(
-      /^17:10:00 ● run\s+main#42 pr#42\.1 @hab\/super\/21135-herdr-keybindings\s+@agent\/3 36:00 20:00$/u,
+      /^17:10:00 ◉ run\s+main#42 pr#42\.1 @hab\/super\/21135-herdr-keybindings\s+@agent\/3 36:00 20:00$/u,
     )
     expect(partner?.trim()).toMatch(/^-\s+-\s+-\s+pr#43\.1 @si\/ui\/21119-split-pane\s+@agent\/5 34:00\s+-$/u)
     expect(rejected?.trim()).toMatch(
@@ -288,7 +288,7 @@ describe("queue timeline 21106 contract", () => {
     const integrated = rows[rowIndex(rows, "pr#4.1")]
 
     expect(pending).toContain("○ ready")
-    expect(running).toContain("● run")
+    expect(running).toContain("◉ run")
     expect(rejected).toContain("× fail")
     expect(integrated).toContain("✓ done")
     for (const row of [pending, running, rejected, integrated]) expect(row).not.toContain("task/")
@@ -386,7 +386,7 @@ describe("queue timeline 21106 contract", () => {
     for (const row of rows) expect(Array.from(row).length).toBeLessThanOrEqual(80)
     const lead = rows[rowIndex(rows, "pr#42.1")]
     expect(lead).toContain("main#42")
-    expect(lead).toContain("@hab/super/21135-herdr-keybind…")
+    expect(lead).toContain("@hab/super/21135-herdr-keybindings")
     expect(lead).not.toContain(" for ")
     expect(lead).not.toContain("2:check")
     expect(lead).toContain("36:00")
@@ -394,7 +394,7 @@ describe("queue timeline 21106 contract", () => {
     expect(lead).not.toContain("◷")
     // The BY column is the first casualty on narrow tiers — dropped before
     // any identity, clock, or measurement column.
-    expect(lead?.trimStart().startsWith("17:10:00 ● run")).toBe(true)
+    expect(lead?.trimStart().startsWith("17:10:00 ◉ run")).toBe(true)
     expect(lead).not.toContain("@agent/3")
     expect(rows.some((row) => row.includes("BY"))).toBe(false)
     const rejected = rows[rowIndex(rows, "pr#5.1")]
@@ -418,7 +418,7 @@ describe("queue timeline 21106 contract", () => {
       }
       // Item 9: a not-yet-started run shows a muted "-", not a blue "pending"
       // run id — the blue (info) reference is now the running km task glyph.
-      const runningMarker = cell("●", "pr#42.1").fg
+      const runningMarker = cell("◉", "pr#42.1").fg
       const successMarker = cell("✓", "pr#4.1").fg
       const successText = cell("done", "pr#4.1").fg
       const failureText = cell("typecheck-failed", "pr#5.1").fg
@@ -697,12 +697,13 @@ describe("queue timeline 21106 contract", () => {
       await handle.waitForLayoutStable()
       await handle.press("h")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("16:54 submitted by @agent/3")
+      expect(handle.text).toContain("16:54 r1 submitted by @agent/3")
       expect(handle.text, "the partner PR's own submit timeline is not shown").not.toContain(
-        "16:56 submitted by @agent/5",
+        "16:56 r1 submitted by @agent/5",
       )
-      // The run-region PRs list only heads step tabs, not the PR tab.
-      expect(handle.text, "the PR tab does not repeat the RUN region").not.toContain("RUN main#42")
+      // The composite RUN region remains above the tab strip while the PR tab
+      // is active; only its PRs membership row is not repeated inside the tab.
+      expect(handle.text, "the run context persists above the PR tab").toContain("RUN main#42")
     } finally {
       handle.unmount()
     }
@@ -822,7 +823,7 @@ describe("queue timeline 21106 contract", () => {
       expect(cursorRow).toBeGreaterThan(0)
       expect(siblingRow).toBe(cursorRow + 1)
       const cursorText = frame[cursorRow] ?? ""
-      for (const anchor of ["●", "pr#42.1", "@hab/super/21135-herdr-keybindings"]) {
+      for (const anchor of ["◉", "pr#42.1", "@hab/super/21135-herdr-keybindings"]) {
         const column = cursorText.indexOf(anchor)
         expect(column, anchor).toBeGreaterThanOrEqual(0)
         expect(handle.cell(column, cursorRow).bg, `selection bg under ${anchor}`).not.toBeNull()

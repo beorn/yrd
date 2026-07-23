@@ -4,6 +4,13 @@ import { hyperlink } from "@silvery/ansi"
 import type { Event } from "loggily"
 import { artifactHref, artifactLabel, artifactLocation } from "./artifact-reference.ts"
 import { failureSlug } from "./failure-slug.ts"
+import {
+  failureAutomation,
+  failureStatusClass,
+  statusPresentation,
+  statusPresentationState,
+  type StatusPresentationColor,
+} from "./status-presentation.ts"
 
 /**
  * Pure watch-timeline grammar shared by the interactive queue view and the
@@ -14,9 +21,8 @@ import { failureSlug } from "./failure-slug.ts"
  * logger never imports React or the Silvery reconciler.
  *
  * The resident stream reports EACH step exactly once — success at INFO, failure
- * at ERROR. The enclosing run/compose settlements are redundant roll-ups of what
- * a step row already carried, so they are dropped from the human stream (they
- * stay, full-fidelity, in the JSONL file sink). A run that failed with no step
+ * at ERROR — plus one terminal run receipt with its status class and automatic
+ * next action. Compose roll-ups stay JSONL-only. A run that failed with no step
  * to own the ERROR (a pinned/stale-base refusal rejected before the step's Job
  * ran) escalates to a run-scoped ERROR row, so no failure is ever silent.
  */
@@ -27,17 +33,7 @@ export const TIMELINE_BRANCH_ICON = ""
 
 /** Distinct queue lifecycle markers from the settled km/ag watch vocabulary. */
 export function timelineStatusGlyph(status: string): string {
-  if (["checking", "running", "waiting"].includes(status)) return "●"
-  if (["integrated", "passed"].includes(status)) return "✓"
-  if (["rejected", "failed", "lost", "stale", "legacy", "refused", "environment-refused"].includes(status)) {
-    return "×"
-  }
-  if (["withdrawn", "retired", "canceled"].includes(status)) return "−"
-  // Pre-run WIP (draft = clean, rev = a draft with failed-submission history)
-  // gets a hollow dotted marker, distinct from the solid `○` a `ready` row
-  // carries. Color separates draft (muted) from rev (warn).
-  if (status === "draft" || status === "rev") return "◌"
-  return "○"
+  return statusPresentation(status).glyph
 }
 
 /** Coarse human duration (largest unit): the watch timeline's formatDuration. */
@@ -336,6 +332,35 @@ function renderStartedRow(props: OutcomeProps, color: boolean, artifactRoot?: st
     : `${tag} ${verb}${composedPRTail(props, color)}`
 }
 
+function ansiForStatus(color: StatusPresentationColor): string {
+  if (color === "$fg-success") return ANSI.green
+  if (color === "$fg-warning") return ANSI.yellow
+  if (color === "$fg-error") return ANSI.red
+  if (color === "$fg-info") return ANSI.blue
+  return ANSI.dim
+}
+
+function settlementPRTail(props: OutcomeProps): string {
+  const refs = (props.prs ?? []).flatMap((pr) => (pr.pr === undefined ? [] : [`${pr.pr}.${pr.revision ?? 1}`]))
+  if (refs.length === 0) return ""
+  return refs.length === 1 ? ` pr=${refs[0]}` : ` prs=${refs.join(",")}`
+}
+
+/** A terminal run settlement is the one intentional run-level roll-up: it
+ * carries the same observable class and automation policy as StatusNotice. */
+function renderSettlementRow(props: OutcomeProps, color: boolean): string | undefined {
+  if (props.outcome !== "settled" || props.run === undefined) return undefined
+  const code = props.error?.code ?? props.failure?.code
+  const statusClass = code === undefined ? statusPresentationState(props.status ?? "failed") : failureStatusClass(code)
+  const presentation = statusPresentation(statusClass)
+  const verb = paint(color, ansiForStatus(presentation.color))("settled")
+  const next =
+    statusClass === "stale" || statusClass === "env" || statusClass === "timeout"
+      ? failureAutomation(statusClass)
+      : "none"
+  return `${timelineTag(props, color)} ${verb} status=${props.status ?? "failed"} class=${statusClass} next=${next}${settlementPRTail(props)}`
+}
+
 /** Generic INFO/WARN/ERROR notice fields as a dimmed JSON tail, minus the
  * session-constant scope identity. Lifecycle narration rows deliberately do
  * not call this: their full structured records live only in JSONL. */
@@ -353,8 +378,8 @@ function jsonTail(props: Record<string, unknown>, color: boolean): string {
  * suppress it from the human stream (it still reaches the JSONL file sink).
  *
  * - `yrd:jobs:<step>` transitions → bracket-first step narration.
- * - `yrd:queue:run` / `yrd:queue:compose` INFO/DEBUG settlements → suppressed
- *   (redundant roll-ups of step rows), a run-owned ERROR/WARN still surfaces.
+ * - `yrd:queue:run` settlement → one final class/next receipt; compose INFO and
+ *   other redundant run roll-ups remain suppressed.
  * - `yrd:journal:*` INFO/DEBUG chatter → suppressed.
  * - unrelated DEBUG/TRACE bookkeeping → JSONL only; it never floods narration.
  * - every other INFO/WARN/ERROR event → a loggily-style notice (prefix +
@@ -380,6 +405,11 @@ export function formatResidentLogLine(event: Event, options: ResidentLogFormatOp
   // projection bookkeeping event into the skippable human lane. Full fidelity
   // remains in JSONL. TRACE is likewise never human narration.
   if ((level === "debug" || level === "trace") && options.includeDebug !== true) return undefined
+
+  if (namespace === RUN_SCOPE && level === "info") {
+    const settlement = renderSettlementRow(props, color)
+    if (settlement !== undefined) return settlement
+  }
 
   // The per-run / per-cycle roll-ups a step row already reported. A genuine
   // non-step failure escalates to ERROR (queueRunOutcome) or WARN (a refusal)

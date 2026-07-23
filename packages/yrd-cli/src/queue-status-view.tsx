@@ -55,7 +55,6 @@ import {
   PRStatusView,
   statusVariant,
   StatusValue,
-  taskStatusColor,
   TaskStatusGlyph,
   TaskStatusValue,
 } from "./status-view.tsx"
@@ -67,6 +66,13 @@ import {
   type FailureLike,
 } from "./actionable-error.ts"
 import { failureSlug } from "./failure-slug.ts"
+import {
+  failureAutomation,
+  failureStatusClass,
+  statusPresentation,
+  type StatusPresentationColor,
+  type StatusPresentationState,
+} from "./status-presentation.ts"
 import {
   checkTaskStatusOf,
   jobAttemptTaskStatusOf,
@@ -1564,7 +1570,7 @@ function terminalProjection(run: QueueRun): QueueTerminalProjection {
   if (failure === undefined) return { outcome: "rejected", display: "rejected" }
   if (GENERIC_REJECTION_CODES.has(failure.code)) return { outcome: "rejected", display: "rejected" }
   if (CANCELED_CODES.has(failure.code)) return { outcome: "canceled", display: "canceled" }
-  if (failure.code === "job-lost") return { outcome: "lost", display: "lost" }
+  if (failure.code === "job-lost") return { outcome: "lost", display: "timeout" }
   if (STALE_CODES.has(failure.code)) return { outcome: "stale", display: "stale" }
   if (failure.code === "queue-environment-refused") {
     return { outcome: "environment-refused", display: "environment-refused" }
@@ -3112,15 +3118,12 @@ function timelineBranchLabel(branch: string): string {
  * The DETAIL pane's flush-top identity. The detail view is FOR a PR (user
  * directive 2026-07-21, supersedes Round-6 Revision A's run-as-unit title):
  * the left side is `pr#id.rev` plus its linked ISSUE, for run rows and
- * pending rows alike; the run identity lives in the QueueDetailRunHeader
- * region below. STATUS + OUTCOME stays right-aligned; timing belongs
- * exclusively in the body.
+ * pending rows alike. Run identity/timing and status live in the composite
+ * header below, so this row never carries a competing corner status.
  */
 export function QueueDetailTitle({
   row,
-  data,
   issue,
-  live = false,
 }: {
   row?: QueueTimelineProjectedRow
   data?: QueueShowData
@@ -3135,87 +3138,325 @@ export function QueueDetailTitle({
       </Text>
     )
   }
-  const outcome = detailStatusOutcome(row, data)
   const presentIssue = presentFact(issue)
-  const running = data === undefined ? row.status === "running" : data.status === "running"
   return (
-    <Box flexDirection="row" width="100%" justifyContent="space-between" minWidth={0} flexShrink={0}>
-      <Box flexDirection="row" minWidth={0} overflow="hidden">
-        <QueuePrId pr={row.pr} revision={row.revision} color="$fg-warning" flexShrink={0} />
-        {presentIssue === undefined ? null : (
-          <>
-            <Text flexShrink={0}> </Text>
-            <IssueValue issue={presentIssue} flex />
-          </>
-        )}
-      </Box>
-      {outcome === undefined ? null : live && running ? (
-        <Pulse synchronized colors={["$fg-info", "$fg-muted"]} intervalMs={AG_PULSE_INTERVAL_MS} bold flexShrink={0}>
-          {outcome.text}
-        </Pulse>
-      ) : (
-        <Text bold color={outcome.color} flexShrink={0}>
-          {outcome.text}
-        </Text>
+    <Box flexDirection="row" width="100%" minWidth={0} overflow="hidden" flexShrink={0}>
+      <QueuePrId pr={row.pr} revision={row.revision} color="$fg-warning" flexShrink={0} />
+      {presentIssue === undefined ? null : (
+        <>
+          <Text flexShrink={0}> </Text>
+          <IssueValue issue={presentIssue} flex />
+        </>
       )}
     </Box>
   )
 }
 
 /**
- * The RUN region header (user directive 2026-07-21): a filled full-width row
- * that opens the run section of the PR detail — run identity left, colorized
- * STATUS/OUTCOME right — so the run reads as its own region below the
- * PR-scoped header.
+ * The RUN region's identity + timing block. It stays above the tab strip for
+ * every active tab, so the operator never has to leave the failing output to
+ * recover which run and clocks they are looking at.
  */
-export function QueueDetailRunHeader({ data }: { data: QueueShowData }) {
-  const outcome = runStatusOutcome(data)
+function queueDetailRunTimingRows(data: QueueShowData, row: QueueTimelineProjectedRow | undefined): readonly string[] {
+  const startedAt = presentFact(data.started)
+  const finishedAt = presentFact(data.finished)
+  const queueWaitMs = row?.queueWaitMs ?? null
+  const startedMs = startedAt === undefined ? Number.NaN : Date.parse(startedAt)
+  const admittedAt =
+    queueWaitMs === null || !Number.isFinite(startedMs) ? undefined : new Date(startedMs - queueWaitMs).toISOString()
+  const clocks = [
+    ...(admittedAt === undefined ? [] : [`Admitted ${queueLogClock(admittedAt, false, false)}`]),
+    ...(startedAt === undefined
+      ? []
+      : [`${admittedAt === undefined ? "Started" : "started"} ${queueLogClock(startedAt, false, false)}`]),
+    ...(finishedAt === undefined ? [] : [`completed ${queueLogClock(finishedAt, false, false)}`]),
+  ]
+  const runtimeMs = row?.totalMs ?? data.totalDurationMs
+  const metrics = [
+    ...(row?.ageMs === null || row?.ageMs === undefined ? [] : [`Age ${mediaDuration(row.ageMs)}`]),
+    ...(runtimeMs === null || runtimeMs === undefined ? [] : [`runtime ${mediaDuration(runtimeMs)}`]),
+    ...(queueWaitMs === null ? [] : [`wait ${mediaDuration(queueWaitMs)}`]),
+  ]
+  return [...(clocks.length === 0 ? [] : [clocks.join(", ")]), ...(metrics.length === 0 ? [] : [metrics.join(", ")])]
+}
+
+export function QueueDetailRunHeader({ data, row }: { data: QueueShowData; row?: QueueTimelineProjectedRow }) {
+  const timingRows = queueDetailRunTimingRows(data, row)
+  return (
+    <Box flexDirection="column" width="100%" minWidth={0} flexShrink={0}>
+      <Box
+        flexDirection="row"
+        width="100%"
+        minWidth={0}
+        flexShrink={0}
+        backgroundColor="$bg-surface-subtle"
+        paddingX={1}
+      >
+        <Text bold wrap="truncate" minWidth={0}>
+          RUN <QueueRunId base={data.base} run={data.run} />
+        </Text>
+      </Box>
+      {timingRows.map((timing) => (
+        <Text key={timing} wrap="truncate">
+          {timing}
+        </Text>
+      ))}
+    </Box>
+  )
+}
+
+export type StatusNoticeState = StatusPresentationState
+
+export type StatusNotice = Readonly<{
+  state: StatusNoticeState
+  glyph: string
+  color: StatusPresentationColor
+  headline: string
+  explanation: string
+  auto: Readonly<{
+    kind: "requeue" | "recut" | "retry" | "none"
+    when: string
+  }>
+  actor?: "author" | "ci" | "queue"
+}>
+
+function statusNoticeFailure(
+  row: QueueTimelineProjectedRow | undefined,
+  data: QueueShowData | undefined,
+): HumanFailureProjection | undefined {
+  return (
+    data?.failure ??
+    data?.steps.findLast((step) => step.failure !== undefined)?.failure ??
+    (row?.failure === undefined ? undefined : projectFailure(row.failure))
+  )
+}
+
+function noticeState(
+  row: QueueTimelineProjectedRow | undefined,
+  data: QueueShowData | undefined,
+  failure: HumanFailureProjection | undefined,
+): StatusNoticeState | undefined {
+  if (data?.status === "running" || data?.status === "waiting") return "running"
+  if (data?.status === "passed") return data.integration === undefined ? "done" : "integrated"
+  if (data?.status === "failed") return failure === undefined ? "failed" : failureStatusClass(failure.code)
+  if (data?.status === "canceled" || data?.status === "cancelled") return "canceled"
+  if (row === undefined) return undefined
+  if (row.status === "draft") return "draft"
+  if (row.status === "rev") return "needs-author"
+  if (row.status === "ready" || row.status === "pending") return "queued"
+  if (row.status === "running") return "running"
+  if (row.status === "integrated") return "integrated"
+  if (row.status === "environment-refused") return "env"
+  if (row.status === "stale") return "stale"
+  if (row.status === "lost") return "timeout"
+  if (row.status === "canceled") return "canceled"
+  if (row.status === "rejected" && failure !== undefined) return failureStatusClass(failure.code)
+  return "rejected"
+}
+
+function noticeHeadline(
+  state: StatusNoticeState,
+  row: QueueTimelineProjectedRow | undefined,
+  data: QueueShowData | undefined,
+): string {
+  if (data?.status === "failed") {
+    if (state === "failed" && (data.outcome === "rejected" || row?.status === "rejected")) {
+      return "failed, rejected"
+    }
+    return state === "failed" ? "failed" : `failed, ${state}`
+  }
+  if (data?.status === "passed" && state === "integrated") return "passed, integrated"
+  if (state === "needs-author") return "needs author"
+  return state
+}
+
+function noticeArtifact(data: QueueShowData | undefined): string | undefined {
+  const entry = data?.steps.findLast((step) => step.failure !== undefined || step.errorCode !== "-")?.locations[0]
+  if (entry === undefined) return undefined
+  return entry.display ?? ("path" in entry.location ? entry.location.path : entry.location.url)
+}
+
+function noticeAutomation(state: StatusNoticeState): StatusNotice["auto"] {
+  if (state === "queued") return { kind: "retry", when: "when queue capacity is available" }
+  if (state === "stale") return { kind: "recut", when: "on the next queue pass" }
+  if (state === "env" || state === "timeout") return { kind: "requeue", when: "on the next queue pass" }
+  return { kind: "none", when: "no automatic action is scheduled" }
+}
+
+function runningStepName(
+  row: QueueTimelineProjectedRow | undefined,
+  data: QueueShowData | undefined,
+): string | undefined {
+  return (
+    data?.steps.findLast((candidate) => candidate.status === "running" || candidate.status === "waiting")?.step ??
+    row?.step?.replace(/^\d+:/u, "")
+  )
+}
+
+function historicalStepP50Ms(
+  step: string | undefined,
+  currentRun: string | undefined,
+  runDetails: readonly QueueShowData[],
+): number | null {
+  if (step === undefined) return null
+  const durations = runDetails
+    .filter((detail) => detail.run !== currentRun)
+    .flatMap((detail) =>
+      detail.steps.flatMap((candidate) =>
+        candidate.step === step &&
+        candidate.durationMs !== undefined &&
+        !["requested", "running", "waiting"].includes(candidate.status)
+          ? [candidate.durationMs]
+          : [],
+      ),
+    )
+    .toSorted((left, right) => left - right)
+  return arithmeticMedian(durations)
+}
+
+function noticeExplanation(
+  state: StatusNoticeState,
+  row: QueueTimelineProjectedRow | undefined,
+  data: QueueShowData | undefined,
+  failure: HumanFailureProjection | undefined,
+  stepP50Ms: number | null,
+): string {
+  const failureSummary = failure?.summary
+  if (state === "queued") {
+    const position = row?.position === undefined ? "" : ` at position ${row.position}`
+    return `Queued${position}; starts automatically when queue capacity is available.`
+  }
+  if (state === "running") {
+    const step = runningStepName(row, data)
+    const elapsedMs = row?.totalMs ?? data?.totalDurationMs
+    const timing = [
+      ...(elapsedMs === undefined || elapsedMs === null ? [] : [`${mediaDuration(elapsedMs)} elapsed`]),
+      stepP50Ms === null ? "step p50 unavailable" : `step p50 ${mediaDuration(stepP50Ms)}`,
+    ]
+    return `${step === undefined ? "Run" : `Step ${step}`} is running (${timing.join("; ")}).`
+  }
+  if (state === "integrated") {
+    const landing = presentFact(data?.landing)
+    const completed = presentFact(data?.finished)
+    return `Integrated${landing === undefined ? "" : ` as ${queueLandingLabel(landing)}`}${
+      completed === undefined ? "" : ` at ${detailClock(completed)}`
+    }.`
+  }
+  if (state === "done") return "Run completed; no automatic action remains."
+  if (state === "env") {
+    return `${failureSummary === undefined ? "" : `${failureSummary}. `}Infrastructure fault; the candidate is innocent. Automatically requeued on the next queue pass.`
+  }
+  if (state === "stale") {
+    return `${failureSummary === undefined ? "" : `${failureSummary}. `}The base advanced after this revision was admitted. Automatically recut and requeued on the next queue pass.`
+  }
+  if (state === "timeout") {
+    const elapsedMs = row?.totalMs ?? data?.totalDurationMs
+    const elapsed = elapsedMs === undefined || elapsedMs === null ? "" : ` after ${mediaDuration(elapsedMs)}`
+    return `${failureSummary === undefined ? "" : `${failureSummary}. `}The job lease expired${elapsed}: the runner stopped renewing it. The journal does not distinguish a killed process, crash, or hang. The candidate is innocent and is automatically requeued on the next queue pass.`
+  }
+  if (state === "canceled") {
+    return `${failureSummary === undefined ? "" : `${failureSummary}. `}The run was canceled; no further steps will run.`
+  }
+  if (state === "needs-author") {
+    return `${failureSummary === undefined ? "" : `${failureSummary}. `}The author must repair the submitted source and resubmit; this is not retried automatically.`
+  }
+  if (state === "draft") return "Registered, not queued. The author must submit this revision when it is ready."
+  if (state === "rejected") {
+    return `${failureSummary === undefined ? "The submission was rejected." : `${failureSummary}.`} The author must fix the branch and resubmit; this is not retried automatically.`
+  }
+  const artifact = noticeArtifact(data)
+  return `${failureSummary === undefined ? "The run failed." : `${failureSummary}.`} This failure is not retried automatically; the author must fix the branch and resubmit.${
+    artifact === undefined ? " Remedies are in the linked stderr/output log." : ` Remedies are in ${artifact}.`
+  }`
+}
+
+/** Pure status notice projection derived from the already-materialized
+ * queue/PR facts. It stores no journal state and never invents automation. */
+export function queueStatusNotice(
+  row: QueueTimelineProjectedRow | undefined,
+  data: QueueShowData | undefined,
+  context: Readonly<{ stepP50Ms?: number | null }> = {},
+): StatusNotice | undefined {
+  const failure = statusNoticeFailure(row, data)
+  const state = noticeState(row, data, failure)
+  if (state === undefined) return undefined
+  const presentation = statusPresentation(state)
+  const automation = failure === undefined ? undefined : failureAutomation(failureStatusClass(failure.code))
+  const auto =
+    automation === "auto-recut"
+      ? ({ kind: "recut", when: "on the next queue pass" } as const)
+      : automation === "auto-requeue"
+        ? ({ kind: "requeue", when: "on the next queue pass" } as const)
+        : noticeAutomation(state)
+  const actor =
+    state === "queued" || state === "running" || state === "env" || state === "stale" || state === "timeout"
+      ? "queue"
+      : state === "failed" || state === "rejected" || state === "needs-author" || state === "draft"
+        ? "author"
+        : undefined
+  return {
+    state,
+    ...presentation,
+    headline: noticeHeadline(state, row, data),
+    explanation: noticeExplanation(state, row, data, failure, context.stepP50Ms ?? null),
+    auto,
+    ...(actor === undefined ? {} : { actor }),
+  }
+}
+
+export function QueueStatusNotice({
+  row,
+  data,
+  runDetails = [],
+  live = false,
+}: {
+  row?: QueueTimelineProjectedRow
+  data?: QueueShowData
+  runDetails?: readonly QueueShowData[]
+  live?: boolean
+}) {
+  const stepP50Ms = historicalStepP50Ms(runningStepName(row, data), data?.run, runDetails)
+  const notice = queueStatusNotice(row, data, { stepP50Ms })
+  if (notice === undefined) return null
   return (
     <Box
-      flexDirection="row"
+      flexDirection="column"
       width="100%"
-      justifyContent="space-between"
       minWidth={0}
       flexShrink={0}
-      backgroundColor="$bg-surface-subtle"
+      borderStyle="round"
+      borderColor={notice.color}
+      color={notice.color}
       paddingX={1}
     >
-      <Text bold wrap="truncate" minWidth={0}>
-        RUN <QueueRunId base={data.base} run={data.run} />
-      </Text>
-      {outcome === undefined ? null : (
-        <Text bold color={outcome.color} flexShrink={0}>
-          {outcome.text}
+      <Box flexDirection="row" minWidth={0}>
+        {live && notice.state === "running" ? (
+          <Pulse
+            synchronized
+            colors={[notice.color, "$fg-muted"]}
+            intervalMs={AG_PULSE_INTERVAL_MS}
+            bold
+            flexShrink={0}
+          >
+            {notice.glyph}
+          </Pulse>
+        ) : (
+          <Text bold color={notice.color} flexShrink={0}>
+            {notice.glyph}
+          </Text>
+        )}
+        <Text bold color={notice.color} wrap="wrap" minWidth={0}>
+          {" "}
+          {notice.headline}
         </Text>
-      )}
+      </Box>
+      <Box paddingLeft={2} minWidth={0}>
+        <Text color={notice.color} wrap="wrap" minWidth={0}>
+          {notice.explanation}
+        </Text>
+      </Box>
     </Box>
   )
-}
-
-/**
- * The run's STATUS + OUTCOME as one colorized label (`passed, integrated`),
- * deduped when the two words match, or undefined when neither is present.
- */
-function runStatusOutcome(data: QueueShowData): Readonly<{ text: string; color: string }> | undefined {
-  const status = presentFact(data.status)
-  const outcome = presentFact(data.outcome)
-  if (status === undefined && outcome === undefined) return undefined
-  const text =
-    status !== undefined && outcome !== undefined && status !== outcome
-      ? `${status}, ${outcome}`
-      : (outcome ?? status ?? "")
-  const marker = presentFact(data.glyph)
-  return { text: marker === undefined ? text : `${marker} ${text}`, color: taskStatusColor(data.taskStatus) }
-}
-
-/** The title-row variant: falls back to the row's own glyph + status. */
-function detailStatusOutcome(
-  row: QueueTimelineProjectedRow,
-  data?: QueueShowData,
-): Readonly<{ text: string; color: string }> {
-  const run = data === undefined ? undefined : runStatusOutcome(data)
-  const word = row.status === "pending" ? "queued" : row.status
-  return run ?? { text: `${row.glyph} ${word}`, color: timelineStatusColor(row) }
 }
 
 // Preserve the leading semantic unit instead of clipping an arbitrary suffix.
@@ -3228,17 +3469,7 @@ function fitTimelineLabel(label: string, max: number): string {
 // Marker + state colors (15d screenshot re-rule): running pulses blue,
 // success is GREEN semantic, pending is blue, failures keep semantic reds.
 function timelineStatusColor(row: QueueTimelineProjectedRow): string {
-  // A draft is pre-queue WIP, not a live or failing item: dim it like `canceled`
-  // so it reads as tentative next to the blue `ready`/`run` pulse.
-  if (row.status === "draft") return "$fg-muted"
-  // A rev row failed a prior submission and awaits author edits: warn-toned,
-  // matching the "editable after failure" model without reading as a hard failure.
-  if (row.status === "rev") return "$fg-warning"
-  if (row.status === "running" || row.status === "pending" || row.status === "ready") return "$fg-info"
-  if (row.status === "integrated") return "$fg-success"
-  if (row.status === "canceled") return "$fg-muted"
-  if (["environment-refused", "stale", "legacy", "refused"].includes(row.status)) return "$fg-warning"
-  return "$fg-error"
+  return statusPresentation(row.status).color
 }
 
 type TimelineStatusCell = Readonly<{ word: string; color: string }>
@@ -3253,7 +3484,7 @@ const TIMELINE_STATUS_WORDS = {
   rejected: "fail",
   "environment-refused": "env",
   stale: "stale",
-  lost: "lost",
+  lost: "timeout",
   legacy: "legacy",
   refused: "refused",
   canceled: "can",
@@ -3613,9 +3844,6 @@ function TimelineProjectedRow({
             </Box>
           ) : (
             <Box paddingLeft={1} minWidth={0} overflow="hidden" flexDirection="row">
-              <Text color={forcedFg} flexShrink={0}>
-                for{" "}
-              </Text>
               <IssueValue issue={row.issue} flex />
             </Box>
           )}
@@ -4883,6 +5111,8 @@ export function QueueLogView({
   )
 }
 
+/** One-shot/tabular detail keeps its explicit NEXT row. The live compact watch
+ * delegates this ownership to the single StatusNotice instead. */
 function queueShowNextAction(data: QueueShowData): string {
   if (data.outcome === "integrated") return "none — landing proof is recorded"
   if (data.status === "running" || data.status === "waiting") return "follow live output or wait for the current step"
@@ -4895,7 +5125,7 @@ function queueShowNextAction(data: QueueShowData): string {
   if (["stale-pr", "stale-check", "stale-base"].includes(errorCode ?? "")) {
     return "refresh the current PR revision against queue authority, then rerun it"
   }
-  if (errorCode === "job-lost") return "recover the lost run, then rerun the PR"
+  if (errorCode === "job-lost") return "recover the timed-out run, then rerun the PR"
   if (["canceled", "cancelled", "queue-canceled", "queue-cancelled"].includes(errorCode ?? "")) {
     return "inspect the newer PR revision; resubmit only if delivery is still required"
   }
@@ -5086,56 +5316,182 @@ export function QueueDetailSinglePrHeader({ pr }: { pr: PR }) {
   )
 }
 
-function runFailureReason(data: QueueShowData | undefined): string | undefined {
-  if (data?.failure !== undefined) return data.failure.summary
-  const failed = data?.steps.findLast(
-    (step) =>
-      presentFact(step.errorCode) !== undefined ||
-      presentFact(step.error) !== undefined ||
-      presentFact(step.lost) !== undefined ||
-      presentFact(step.detail) !== undefined,
-  )
-  if (failed === undefined) return undefined
-  const code = presentFact(failed.errorCode)
-  const message = presentFact(failed.error) ?? presentFact(failed.lost) ?? presentFact(failed.detail)
-  if (code === undefined) return message
-  return actionableFailureSummary(actionableFailure({ code, message: message ?? "failed" }))
+type PrActivityEntry = Readonly<{
+  at: string
+  rank: number
+  text: string
+  status?: StatusNoticeState
+  statusLabel?: string
+  detail?: string
+}>
+
+function runActivityState(data: QueueShowData): StatusNoticeState {
+  if (data.status === "running" || data.status === "waiting") return "running"
+  if (data.status === "passed") return data.integration === undefined ? "done" : "integrated"
+  if (data.failure !== undefined) return failureStatusClass(data.failure.code)
+  return data.status === "canceled" ? "canceled" : "failed"
 }
 
-function prLineageLines(pr: PR, memberRevision: number, runDetails: readonly QueueShowData[]): readonly string[] {
-  const terminal = prRevisionClocks(pr)
-    .filter((clock) => clock.revision <= memberRevision)
-    .flatMap((clock) => {
-      if (clock.terminal === undefined) return []
-      const submittedAt = clock.submittedAt ?? clock.pushedAt
-      const ageMs = elapsedMs(submittedAt, clock.terminal.at, `PR '${pr.id}' revision ${clock.revision} terminal age`)
-      const reason =
-        clock.terminal.status === "rejected"
-          ? (runFailureReason(runDetails.find((detail) => detail.run === clock.terminal?.run)) ?? "reason not recorded")
-          : undefined
-      const suffix = reason !== undefined ? ` (${reason})` : ageMs === undefined ? "" : ` (age ${mediaDuration(ageMs)})`
-      return [
-        {
-          at: clock.terminal.at,
-          line: `${queueLogClock(clock.terminal.at, true, false)} r${clock.revision} ${clock.terminal.status}${suffix}`,
-        },
-      ]
+function prActivityEntries(
+  pr: PR,
+  memberRevision: number,
+  runDetails: readonly QueueShowData[],
+  currentRow: QueueTimelineProjectedRow | undefined,
+): readonly PrActivityEntry[] {
+  const entries: PrActivityEntry[] = []
+  const revisions = pr.revisions.filter((revision) => revision.revision <= memberRevision)
+  for (const revision of revisions) {
+    const submitted = revision.submittedAt !== undefined
+    const activityAt = revision.submittedAt ?? revision.pushedAt
+    if (revision.recut !== undefined) {
+      entries.push({
+        at: revision.pushedAt,
+        rank: 10,
+        text: `r${revision.revision} recut of r${revision.recut.fromRevision}${
+          revision.baseSha === undefined ? "" : ` onto ${revision.baseSha.slice(0, 8)}`
+        }`,
+      })
+    }
+    entries.push({
+      at: activityAt,
+      rank: 20,
+      text: `r${revision.revision} ${submitted ? "submitted" : "registered"} by ${revision.actor ?? "-"}`,
     })
-  const submitted = pr.revisions.find((candidate) => candidate.revision === memberRevision)
-  const entries =
-    submitted === undefined
-      ? terminal
-      : [
-          ...terminal,
-          {
-            at: submitted.submittedAt ?? submitted.pushedAt,
-            line: `${queueLogClock(submitted.submittedAt ?? submitted.pushedAt, true, false)} submitted by ${submitted.actor ?? "-"}`,
-          },
-        ]
-  // The detail timeline reads strictly newest-first (user directive
-  // 2026-07-21): the selected revision's submit sorts among earlier
-  // revisions' terminals instead of always trailing them.
-  return entries.toSorted((left, right) => right.at.localeCompare(left.at)).map((entry) => entry.line)
+  }
+  for (const request of pr.checkRequests.filter((request) => request.revision <= memberRevision)) {
+    const currentQueued =
+      currentRow?.pr === pr.id &&
+      currentRow.revision === request.revision &&
+      (currentRow.status === "ready" || currentRow.status === "pending")
+    entries.push({
+      at: request.at,
+      rank: 30,
+      text: `r${request.revision} check requested`,
+      ...(currentQueued
+        ? {
+            status: "queued" as const,
+            statusLabel: `queued${currentRow.position === undefined ? "" : ` position ${currentRow.position}`}`,
+          }
+        : {}),
+    })
+  }
+  for (const review of pr.reviews.filter((review) => review.revision <= memberRevision)) {
+    entries.push({
+      at: review.at,
+      rank: 40,
+      text: `r${review.revision} review ${review.decision} by ${review.actor}`,
+      ...(presentFact(review.note) === undefined ? {} : { detail: presentFact(review.note) }),
+    })
+  }
+  for (const comment of pr.comments.filter((comment) => comment.revision <= memberRevision)) {
+    entries.push({
+      at: comment.at,
+      rank: 50,
+      text: `r${comment.revision} comment by ${comment.actor}`,
+      ...(presentFact(comment.note) === undefined ? {} : { detail: presentFact(comment.note) }),
+    })
+  }
+
+  const representedRuns = new Set<string>()
+  for (const data of runDetails) {
+    const member = data.prs.find((candidate) => candidate.id === pr.id && candidate.revision <= memberRevision)
+    if (member === undefined) continue
+    const at = presentFact(data.finished) ?? presentFact(data.started)
+    if (at === undefined) continue
+    representedRuns.add(`${member.revision}:${data.run}`)
+    const state = runActivityState(data)
+    entries.push({
+      at,
+      rank: 60,
+      text: `r${member.revision} run ${formatNounId(data.base, runIdValue(data.run))}`,
+      status: state,
+      statusLabel: state === "failed" ? data.outcome : state,
+      ...(data.failure === undefined ? {} : { detail: data.failure.summary }),
+    })
+  }
+
+  // Old retained PRs can outlive their Run records. Preserve those terminal
+  // clocks as honest activity without manufacturing details the journal lacks.
+  for (const revision of revisions) {
+    const terminal = revision.terminal
+    if (terminal === undefined || representedRuns.has(`${revision.revision}:${terminal.run}`)) continue
+    const state =
+      terminal.status === "integrated" ? "integrated" : terminal.status === "canceled" ? "canceled" : "rejected"
+    entries.push({
+      at: terminal.at,
+      rank: 60,
+      text: `r${revision.revision} run ${terminal.run}`,
+      status: state,
+      statusLabel: terminal.status,
+    })
+  }
+
+  return entries.toSorted(
+    (left, right) => left.at.localeCompare(right.at) || left.rank - right.rank || left.text.localeCompare(right.text),
+  )
+}
+
+function QueuePrActivity({ entries }: { entries: readonly PrActivityEntry[] }) {
+  if (entries.length === 0) return null
+  return (
+    <Box flexDirection="column" minWidth={0}>
+      {entries.map((entry, index) => {
+        const presentation = entry.status === undefined ? undefined : statusPresentation(entry.status)
+        return (
+          <Box key={`${entry.at}:${entry.rank}:${index}`} flexDirection="row" minWidth={0}>
+            <Text color="$fg-muted" flexShrink={0}>
+              {queueLogClock(entry.at, true, false)}{" "}
+            </Text>
+            <Text wrap="wrap" minWidth={0} bgConflict="ignore">
+              {entry.text}
+              {presentation === undefined ? null : (
+                <Text color={presentation.color}>
+                  {" "}
+                  {presentation.glyph} {entry.statusLabel ?? entry.status}
+                </Text>
+              )}
+              {entry.detail === undefined ? "" : ` — ${entry.detail}`}
+            </Text>
+          </Box>
+        )
+      })}
+    </Box>
+  )
+}
+
+function descriptionWithoutDuplicatedIssue(
+  description: string | undefined,
+  issue: string | undefined,
+): string | undefined {
+  if (description === undefined || issue === undefined) return description
+  const duplicate = `issue: ${issue}`.toLocaleLowerCase()
+  return presentFact(
+    description
+      .split("\n")
+      .filter((line) => line.trim().toLocaleLowerCase() !== duplicate)
+      .join("\n"),
+  )
+}
+
+function prAgeLabel(
+  pr: PR | undefined,
+  revision: number,
+  row: QueueTimelineProjectedRow | undefined,
+): string | undefined {
+  if (row?.ageMs === null || row?.ageMs === undefined) return undefined
+  const count = pr?.revisions.filter((candidate) => candidate.revision <= revision).length ?? 1
+  const countLabel = `${count} ${count === 1 ? "revision" : "revisions"}`
+  const total = `${mediaDuration(row.ageMs)} total`
+  if (row.queueWaitMs === null) return `${countLabel} · ${total}`
+  const currentLabel =
+    row.group === "pending"
+      ? "queued"
+      : row.group === "draft"
+        ? "registered"
+        : row.group === "running"
+          ? "waited"
+          : "waited"
+  return `${countLabel} · ${total} · r${revision} ${currentLabel} ${mediaDuration(row.queueWaitMs)}`
 }
 
 function prDetailFacts(pr: PR, revision: number): readonly Readonly<{ key: string; value: string }>[] {
@@ -5150,22 +5506,9 @@ function prDetailFacts(pr: PR, revision: number): readonly Readonly<{ key: strin
     ...(correlation === undefined ? [] : [{ key: "correlation", value: `${correlation.namespace}:${correlation.id}` }]),
     { key: "head", value: retained?.headSha ?? pr.headSha },
     { key: "base", value: retained?.base ?? pr.base },
-    ...(retained?.recut === undefined ? [] : [{ key: "recut", value: boundedQueue(safeText(retained.recut), 160) }]),
     ...(retained?.composition === undefined
       ? []
       : [{ key: "composition", value: boundedQueue(safeText(retained.composition), 160) }]),
-    ...pr.reviews.map((review) => ({
-      key: "review",
-      value: `${review.decision} by ${review.actor} at ${queueLogClock(review.at, true, false)}${presentFact(review.note) === undefined ? "" : ` — ${presentFact(review.note)}`}`,
-    })),
-    ...pr.comments.map((comment) => ({
-      key: "comment",
-      value: `${comment.actor} at ${queueLogClock(comment.at, true, false)} — ${comment.note}`,
-    })),
-    ...pr.checkRequests.map((request) => ({
-      key: "check requested",
-      value: queueLogClock(request.at, true, false),
-    })),
     ...(requestedReviewers.length === 0 ? [] : [{ key: "requested reviewers", value: requestedReviewers.join(", ") }]),
     ...((pr.regressions?.length ?? 0) === 0
       ? []
@@ -5178,7 +5521,7 @@ function prDetailFacts(pr: PR, revision: number): readonly Readonly<{ key: strin
  * The PR-scoped detail header (user directive 2026-07-21, supersedes Round-6
  * Revision A v4's run-scoped member blocks): the detail view is FOR a PR, so
  * this block leads the pane body — branch under the identity title, then the
- * bold subject, then the newest-first timeline, then the aligned KEY/value
+ * bold subject, then the chronological activity timeline, then the aligned KEY/value
  * facts. `titleAbove` drops the identity row when the pane title (see
  * QueueDetailTitle) already owns it.
  */
@@ -5219,16 +5562,24 @@ export function QueueDetailRunPrBlocks({
         const pr = prs.find((candidate) => candidate.id === member.id)
         const subject =
           presentFact(pr?.title) ?? presentFact(member.name) ?? presentFact(pr?.name) ?? memberRow?.subject
-        const description = presentFact(pr?.description)
         const issue = presentFact(pr?.issue)
-        const lineage =
+        const description = descriptionWithoutDuplicatedIssue(presentFact(pr?.description), issue)
+        const activity =
           pr === undefined
             ? memberRow?.timestamp === null || memberRow?.timestamp === undefined
               ? []
-              : [`${queueLogClock(memberRow.timestamp, true, false)} submitted by ${memberRow.submitter ?? "-"}`]
-            : prLineageLines(pr, member.revision, runDetails)
+              : [
+                  {
+                    at: memberRow.timestamp,
+                    rank: 20,
+                    text: `r${member.revision} submitted by ${memberRow.submitter ?? "-"}`,
+                  },
+                ]
+            : prActivityEntries(pr, member.revision, runDetails, memberRow ?? row)
+        const age = prAgeLabel(pr, member.revision, memberRow ?? row)
         const facts = [
           ...(position === undefined ? [] : [{ key: "position", value: String(position) }]),
+          ...(age === undefined ? [] : [{ key: "age", value: age }]),
           ...(pr === undefined ? [] : prDetailFacts(pr, member.revision)),
         ]
         const factKeyWidth = Math.max(0, ...facts.map((fact) => fact.key.length)) + 2
@@ -5265,14 +5616,10 @@ export function QueueDetailRunPrBlocks({
               </>
             )}
             {description === undefined ? null : <DescriptionBlock description={description} />}
-            {lineage.length === 0 ? null : (
+            {activity.length === 0 ? null : (
               <>
                 <Box height={1} flexShrink={0} />
-                {lineage.map((line, lineIndex) => (
-                  <Text key={`lineage:${lineIndex}`} wrap="wrap">
-                    {line}
-                  </Text>
-                ))}
+                <QueuePrActivity entries={activity} />
               </>
             )}
             {facts.length === 0 ? null : (
@@ -5397,15 +5744,6 @@ function queueRunTimingRow(data: QueueShowData): string | undefined {
 }
 
 /**
- * NEXT guidance is a failure-only cue (item g, 2026-07-16): suppressed for
- * integrated, passed, running, and waiting runs so the pane never shows the
- * empty `NEXT none`.
- */
-function queueShowNeedsNext(data: QueueShowData): boolean {
-  return data.status === "failed" || data.outcome === "rejected"
-}
-
-/**
  * Round-6's final keyed grammar is `JOB yrd#<job-id>`. Runner and revision are
  * intentionally absent from the default body; failures still carry their
  * runner/revision evidence in the durable log projections.
@@ -5450,6 +5788,8 @@ function CompactQueueShowView({
   showMembers = true,
   showLogArtifacts = true,
   showIntegration = true,
+  showTiming = true,
+  showFailureDetails = true,
   stepIssue,
 }: {
   data: QueueShowData
@@ -5470,6 +5810,10 @@ function CompactQueueShowView({
   showLogArtifacts?: boolean
   /** False when a workflow tab owns landing facts (Round-6 Revision B). */
   showIntegration?: boolean
+  /** False when QueueDetailRunHeader owns the composite timing row. */
+  showTiming?: boolean
+  /** False when the surrounding StatusNotice owns failure cause/remedy text. */
+  showFailureDetails?: boolean
   /** Selected PR issue shown beside the step's JOB identity. */
   stepIssue?: string
 }) {
@@ -5504,7 +5848,7 @@ function CompactQueueShowView({
               <QueuePrId pr={data.prs[0].id} revision={data.prs[0].revision} times={data.retries} />
             </Text>
           ) : null}
-          {timing === undefined ? null : <Text wrap="truncate">{timing}</Text>}
+          {!showTiming || timing === undefined ? null : <Text wrap="truncate">{timing}</Text>}
           {gate === undefined ? null : <Text wrap="truncate">GATE {gate}</Text>}
           {showIntegration ? <QueueIntegrationFacts data={data} /> : null}
           {parent === undefined && isolation === undefined ? null : (
@@ -5545,9 +5889,9 @@ function CompactQueueShowView({
                 minWidth={0}
                 overflow="hidden"
               >
-                {row.failure !== undefined ? (
+                {showFailureDetails && row.failure !== undefined ? (
                   <ActionableFailureView failure={row.failure} />
-                ) : error === undefined ? null : (
+                ) : !showFailureDetails || error === undefined ? null : (
                   <Text wrap="wrap" color="$fg-error" bgConflict="ignore">
                     ERROR {errorCodeLabel(error)}
                   </Text>
@@ -5570,7 +5914,7 @@ function CompactQueueShowView({
                     </Text>
                   </Box>
                 )}
-                {lost === undefined ? null : (
+                {!showFailureDetails || lost === undefined ? null : (
                   <Text wrap="truncate" color="$fg-warning" bgConflict="ignore">
                     {"LOST".padEnd(9, " ")}
                     {lost}
@@ -5595,7 +5939,6 @@ function CompactQueueShowView({
           })}
         </>
       ) : null}
-      {runFacts && queueShowNeedsNext(data) ? <Text wrap="wrap">NEXT {queueShowNextAction(data)}</Text> : null}
     </Box>
   )
 }
@@ -5610,6 +5953,8 @@ export function QueueShowView({
   showMembers = true,
   showLogArtifacts = true,
   showIntegration = true,
+  showTiming = true,
+  showFailureDetails = true,
   stepIssue,
 }: {
   data: QueueShowData
@@ -5628,6 +5973,10 @@ export function QueueShowView({
   showLogArtifacts?: boolean
   /** Compact-only: keep landing facts out of the run header when a merge tab owns them. */
   showIntegration?: boolean
+  /** Compact-only: timing is already rendered by the composite run header. */
+  showTiming?: boolean
+  /** Compact-only: a surrounding StatusNotice owns the failure explanation. */
+  showFailureDetails?: boolean
   /** Compact-only: selected PR issue rendered with the step JOB identity. */
   stepIssue?: string
 }) {
@@ -5641,6 +5990,8 @@ export function QueueShowView({
         showMembers={showMembers}
         showLogArtifacts={showLogArtifacts}
         showIntegration={showIntegration}
+        showTiming={showTiming}
+        showFailureDetails={showFailureDetails}
         {...(stepIssue === undefined ? {} : { stepIssue })}
         {...(historyRevision === undefined ? {} : { historyRevision })}
       />

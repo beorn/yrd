@@ -4792,7 +4792,7 @@ describe("runYrd", () => {
       },
       { run: "R102", pr: "PR102", code: "stale-pr", status: "stale", display: "stale" },
       { run: "R103", pr: "PR103", code: "stale-check", status: "stale", display: "stale" },
-      { run: "R104", pr: "PR104", code: "job-lost", status: "lost", display: "lost" },
+      { run: "R104", pr: "PR104", code: "job-lost", status: "lost", display: "timeout" },
       { run: "R105", pr: "PR105", code: "stale-base", status: "stale", display: "stale" },
       { run: "R106", pr: "PR106", code: "legacy-quiesced", status: "legacy", display: "legacy" },
       { run: "R107", pr: "PR107", code: "legacy-root-leased", status: "refused", display: "refused" },
@@ -5189,7 +5189,7 @@ describe("runYrd", () => {
       // never a colored STATUS background band.
       for (const [glyph, anchor] of [
         ["○", "pr#6.1"],
-        ["●", "pr#5.1"],
+        ["◉", "pr#5.1"],
         ["−", "pr#7.1"],
         ["×", "pr#3.1"],
         // PR2 is the adjacent continuation member of PR1's Run, so its
@@ -5282,8 +5282,8 @@ describe("runYrd", () => {
       const frame = stripOsc8Targets(frameHandle.text)
       expect(frame).toContain("pr#1.1")
       expect(frame).toContain("QUEUE main")
-      expect(frame.split("\n").find((row) => row.includes("pr#1.1"))).toContain("ready")
-      expect(frame).not.toContain("position 1")
+      expect(frame.split("\n").find((row) => row.includes("pr#1.1") && row.includes("ready"))).toContain("ready")
+      expect(frame).toContain("Queued at position 1; starts automatically when queue capacity is available.")
       expect(frame).toContain("AGE")
       expect(frame).toContain("WAIT")
       expect(frame).toContain("NO RUNNER - no drained run in window")

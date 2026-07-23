@@ -31,9 +31,9 @@ function processingProjection(): QueueTimelineProjection {
 }
 
 /** The screen point of the leading `glyph` marker on the first row matching
- * `rowNeedle`. The queue rows still carry the `●` activity disc; the RUNNER box
+ * `rowNeedle`. The queue rows carry the `◉` activity disc; the RUNNER box
  * health marker is now the `$` shell prompt (user directive 2026-07-21). */
-function markerPointOnRow(text: string, rowNeedle: string, glyph = "●"): readonly [number, number] {
+function markerPointOnRow(text: string, rowNeedle: string, glyph = "◉"): readonly [number, number] {
   const rows = text.split("\n")
   const y = rows.findIndex((row) => row.includes(rowNeedle))
   if (y < 0) throw new Error(`no row containing '${rowNeedle}'`)
@@ -67,7 +67,7 @@ describe("queue liveness status render (item 4)", () => {
       await app.waitForLayoutStable()
       expect(app.text).not.toContain("╭─ STATUS ")
       expect(app.text).toContain("╭─ RUNNER ")
-      // The runner health marker is now the `$` shell prompt, not the `●` disc.
+      // The runner health marker is now the `$` shell prompt, not the `◉` disc.
       const markerAt = markerPointOnRow(app.text, "NO RUNNER", "$")
       const bannerX = app.text.split("\n")[markerAt[1]]!.indexOf("NO RUNNER")
       expect(markerAt[0], "marker precedes the NO RUNNER banner").toBeLessThan(bannerX)

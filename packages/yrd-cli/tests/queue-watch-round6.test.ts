@@ -61,7 +61,7 @@ describe("queue watch user round 6", () => {
     }
   })
 
-  it("renders the final v4 run header, the primary PR block, and reverse-chronological revisions", async () => {
+  it("renders the final v4 run header, the primary PR block, and chronological activity", async () => {
     const commit = "b".repeat(40)
     const baseSha = "a".repeat(40)
     const leadHead1 = "7".repeat(40)
@@ -160,7 +160,7 @@ describe("queue watch user round 6", () => {
           revision: 4,
           headSha: leadHead,
           actor: "@chief",
-          decision: "approve",
+          decision: "approve" as const,
           at: "2026-07-13T10:36:00.000Z",
           note: "The final hierarchy is clear.",
         },
@@ -278,9 +278,8 @@ describe("queue watch user round 6", () => {
       // PRs summary row that lists every member PR.
       expect(app.text).toMatch(/PRs\s+pr#60\.4.*pr#61\.1/u)
       expect(app.text).not.toContain(`Committed as ${commit} on main`)
-      expect(app.text).toMatch(
-        /Started \d{2}:\d{2}:\d{2}, ended \d{2}:\d{2}:\d{2} \(total \d+:\d{2}, wait (?:0|\d+:\d{2})\)/u,
-      )
+      expect(app.text).toMatch(/Admitted \d{2}:\d{2}:\d{2}, started \d{2}:\d{2}:\d{2}, completed \d{2}:\d{2}:\d{2}/u)
+      expect(app.text).toMatch(/Age \d+(?::\d{2}){1,2}, runtime \d+(?::\d{2}){1,2}, wait (?:0|\d+(?::\d{2}){1,2})/u)
       expect(app.text).toContain("pr#60.4")
       expect(app.text).toContain("pr#61.1")
       expect(app.text).not.toContain("PR60.4")
@@ -303,15 +302,15 @@ describe("queue watch user round 6", () => {
         "r1 submitted by @ci",
         "r1 check requested",
         "r1 run main#57",
-        "r2 recut of r1",
+        `r2 recut of r1 onto ${baseSha.slice(0, 8)}`,
         "r2 submitted by @ci",
         "r2 check requested",
         "r2 run main#58",
-        "r3 recut of r2",
+        `r3 recut of r2 onto ${baseSha.slice(0, 8)}`,
         "r3 submitted by @ci",
         "r3 check requested",
         "r3 run main#59",
-        "r4 recut of r3",
+        `r4 recut of r3 onto ${baseSha.slice(0, 8)}`,
         "r4 submitted by @ci",
         "r4 check requested",
         "r4 review approve by @chief",
@@ -592,10 +591,7 @@ describe("queue watch user round 6", () => {
       await app.click(checkTab[0], checkTab[1])
       await app.waitForLayoutStable()
       const rows = app.text.split("\n")
-      const jobY = rows.findIndex(
-        (row) =>
-          row.includes("JOB") && row.includes("yrd#J42-check") && row.includes("@hab/super/21135-herdr-keybindings"),
-      )
+      const jobY = rows.findIndex((row) => row.includes("JOB") && row.includes("yrd#J42-check"))
       const commandY = rows.findIndex((row) => row.includes("$ bun vitest run"))
       const outputY = rows.findIndex((row) => row.includes("125 tests collected"))
 
@@ -615,10 +611,11 @@ describe("queue watch user round 6", () => {
       const outputX = rows[outputY]?.indexOf("125 tests collected") ?? -1
       const jobIdX = rows[jobY]?.indexOf("J42-check") ?? -1
       const jobLabelX = rows[jobY]?.indexOf("JOB") ?? -1
-      const issueX = rows[jobY]?.indexOf("@hab/super/21135-herdr-keybindings") ?? -1
       expect(app.cell(jobLabelX, jobY).bold).toBe(true)
       expect(app.cell(jobIdX, jobY).bold).toBe(true)
-      expect(app.cell(issueX, jobY).bold).toBe(true)
+      expect(rows[jobY], "the pane-header issue is not repeated beside JOB").not.toContain(
+        "@hab/super/21135-herdr-keybindings",
+      )
       expect(app.cell(commandX, commandY).bold).toBe(true)
       expect(app.cell(outputX, outputY).fg, "inline output is greyed against the command").not.toEqual(
         app.cell(commandX, commandY).fg,

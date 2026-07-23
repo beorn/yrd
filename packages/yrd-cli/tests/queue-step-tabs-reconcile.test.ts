@@ -168,7 +168,7 @@ describe("queue step tabs same-run reconciliation (21106)", () => {
         error: { code: "check-failed", message: "focused tests failed" },
       }),
     )
-    const successor = fixtureStep("integrate")
+    const successor = fixtureStep("integrate", fixtureJob("J101-integrate", "requested"))
     const run = fixtureRun("R101", [STEP_PR], "failed", "2026-07-13T11:40:00.000Z", {
       finishedAt: "2026-07-13T11:42:00.000Z",
       error: { code: "check-failed", message: "focused tests failed" },
@@ -197,7 +197,7 @@ describe("queue step tabs same-run reconciliation (21106)", () => {
 
     expect(frame).toContain("the failing assertion is immediately visible")
     expect(frame).toMatch(/1: check\s+2: integrate/u)
-    expect(frame).toMatch(/× failed\s+− canceled/u)
+    expect(frame).toMatch(/× failed(?:\s+\d+\w*)?\s+− canceled/u)
     expect(frame).not.toMatch(/2: integrate[\s\S]*○ (?:queued|requested)/u)
   })
 

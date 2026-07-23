@@ -45,7 +45,7 @@ function visible(row: string | undefined): string {
 describe("shared status presentation vocabulary", () => {
   it.each([
     ["queued", "○"],
-    ["running", "●"],
+    ["running", "◉"],
     ["done", "✓"],
     ["integrated", "✓"],
     ["failed", "×"],
@@ -381,6 +381,20 @@ describe("resident runner step-row grammar", () => {
 })
 
 describe("resident runner settlement summary", () => {
+  it("prints a successful run as done with no automatic follow-up", () => {
+    const runSettled = log("yrd:queue:run", "info", "run settled", {
+      ...RUNNER_SCOPE,
+      run: "R323",
+      base: "main",
+      status: "passed",
+      outcome: "settled",
+      prs: [{ pr: "PR410", revision: 1 }],
+    })
+    expect(visible(formatResidentLogLine(runSettled, { color: false }))).toBe(
+      "[main#323] settled status=passed class=done next=none pr=PR410.1",
+    )
+  })
+
   it("prints the run's final stale class and truthful automatic next action", () => {
     const runSettled = log("yrd:queue:run", "info", "run settled", {
       ...RUNNER_SCOPE,
