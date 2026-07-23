@@ -18,6 +18,7 @@ import {
   formatNounId,
   Link,
   ListView,
+  MarkdownView,
   NounId,
   Pulse,
   Tab,
@@ -137,14 +138,14 @@ export type QueueTimelineRow = Readonly<{
 }>
 
 export type QueueTimelineStatusFilter = "pending" | "running" | "rejected" | "integrated" | "other"
-// `draft`, `revising`, and `submitted` are display-only statuses for the
+// `draft`, `rev`, and `ready` are display-only statuses for the
 // non-integrated PRs that are not (yet) run members — a registered-but-unsubmitted
-// PR (bay status `pushed`; `revising` when it carries failed-submission history)
+// PR (bay status `pushed`; `rev` when it carries failed-submission history)
 // and a submitted PR awaiting its run. They never enter queue mechanics
 // (composition, admission, terminal facts, FLOW stats) — see
 // `timelineNonIntegratedRows`. (`pending` is retained as the shared pre-run
-// group/filter/bucket name; `submitted` is the status it now renders.)
-export type QueueTimelineStatus = "draft" | "revising" | "submitted" | "pending" | "running" | QueueTerminalOutcome
+// group/filter/bucket name; `ready` is the status it now renders.)
+export type QueueTimelineStatus = "draft" | "rev" | "ready" | "pending" | "running" | QueueTerminalOutcome
 export type QueueTimelineGroup = "draft" | "pending" | "running" | "completed"
 
 export type QueueTimelineRevisionLineage = Readonly<{
@@ -848,7 +849,7 @@ export function queueTimelineRows(
       ...(row.run === undefined ? {} : { run: row.run }),
       ...(row.position === undefined ? {} : { position: row.position }),
       base: row.base,
-      status: row.status === "pending" ? "submitted" : row.status,
+      status: row.status === "pending" ? "ready" : row.status,
       subject: row.subject,
       detail: row.detail,
       clock: age(row.timestamp ?? undefined, now, "queue timeline row"),
@@ -1409,17 +1410,15 @@ function IssueValue({ issue, flex = false }: { issue: string; flex?: boolean }) 
   )
 }
 
-/** A PR description spanning rows; blank rows are preserved as paragraph breaks. */
+/**
+ * A PR description rendered as Markdown. Authored hard-wraps reflow to the pane
+ * width (a commit body wrapped at 72 columns no longer shows mangled mid-word
+ * breaks in a narrow detail pane), and bold / lists / inline code / headings
+ * render styled instead of raw. Shared by the watch detail pane and `pr view`
+ * via PRDetailView / QueueDetailPrFacts. See silvery's MarkdownView.
+ */
 function DescriptionBlock({ description }: { description: string }) {
-  return (
-    <Box flexDirection="column" minWidth={0}>
-      {description.split("\n").map((row, index) => (
-        <Text key={index} wrap="truncate" bgConflict="ignore">
-          {row === "" ? " " : row}
-        </Text>
-      ))}
-    </Box>
-  )
+  return <MarkdownView source={description} minWidth={0} />
 }
 
 function LocationLinks({ entries }: { entries: readonly QueueLogLocationEntry[] }) {
@@ -1547,23 +1546,17 @@ function terminalProjection(run: QueueRun): QueueTerminalProjection {
 
 /** Reject a nonterminal status at the terminal-fact boundary. */
 function terminalOutcome(status: QueueTimelineStatus): QueueTerminalOutcome {
-  if (
-    status === "draft" ||
-    status === "revising" ||
-    status === "submitted" ||
-    status === "pending" ||
-    status === "running"
-  ) {
+  if (status === "draft" || status === "rev" || status === "ready" || status === "pending" || status === "running") {
     throw new TypeError(`yrd: nonterminal status '${status}' cannot become a terminal FLOW fact`)
   }
   return status
 }
 
 function timelineStatusFilter(status: QueueTimelineStatus): QueueTimelineStatusFilter {
-  // Every pre-run status (draft/revising/submitted) filters with `pending`/`todo`:
+  // Every pre-run status (draft/rev/ready) filters with `pending`/`todo`:
   // they surface under the default view and the todo bucket, without minting new
   // CLI status filters.
-  if (status === "draft" || status === "revising" || status === "submitted") return "pending"
+  if (status === "draft" || status === "rev" || status === "ready") return "pending"
   if (status === "pending" || status === "running" || status === "rejected" || status === "integrated") {
     return status
   }
@@ -1739,7 +1732,7 @@ function timelineRunMemberRows(
 /** The most recent failed submission (a `rejected` terminal) a PR's revision
  * history records, or undefined when it has never failed a submission. This is
  * the derived signal — never a stored status — that turns a `draft` into a
- * `revising` row. `canceled`/`withdrawn` terminals are supersessions, not
+ * `rev` row. `canceled`/`withdrawn` terminals are supersessions, not
  * failures, so they do not count. */
 function lastFailedSubmission(pr: PR): PR["revisions"][number] | undefined {
   return pr.revisions.filter((revision) => revision.terminal?.status === "rejected").at(-1)
@@ -1749,34 +1742,34 @@ function lastFailedSubmission(pr: PR): PR["revisions"][number] | undefined {
  * Map a non-integrated PR to its display-only pre-run timeline status, or
  * undefined when the PR is terminal by intent (integrated/withdrawn/canceled) or
  * is surfaced through a run row instead (a `rejected` PR keeps its terminal run
- * row until the author re-pushes it). `revising` is a `draft` (bay status
+ * row until the author re-pushes it). `rev` is a `draft` (bay status
  * `pushed`) that carries failed-submission history — the user's "a failed
  * submission returns the PR to an editable state" — and stores no new PRStatus.
  */
-function preRunTimelineStatus(pr: PR): "draft" | "revising" | "submitted" | undefined {
-  if (pr.status === "submitted") return "submitted"
-  if (pr.status === "pushed") return lastFailedSubmission(pr) === undefined ? "draft" : "revising"
+function preRunTimelineStatus(pr: PR): "draft" | "rev" | "ready" | undefined {
+  if (pr.status === "submitted") return "ready"
+  if (pr.status === "pushed") return lastFailedSubmission(pr) === undefined ? "draft" : "rev"
   return undefined
 }
 
-/** `revising · <slug>` annotated with the code of the most recent failed
- * submission when that run is still retained; bare `revising` otherwise. */
-function revisingDetail(pr: PR, runs: readonly QueueRun[]): string {
+/** `rev · <slug>` annotated with the code of the most recent failed
+ * submission when that run is still retained; bare `rev` otherwise. */
+function revisionDetail(pr: PR, runs: readonly QueueRun[]): string {
   const runId = lastFailedSubmission(pr)?.terminal?.run
   const run = runId === undefined ? undefined : runs.find((candidate) => candidate.id === runId)
   const code = run === undefined ? undefined : failureFact(run, relevantStep(run))?.code
-  return code === undefined ? "revising" : `revising · ${failureSlug(code)}`
+  return code === undefined ? "rev" : `rev · ${failureSlug(code)}`
 }
 
 /**
  * One row per non-integrated PR that is not currently a run member, each carrying
- * a derived, display-only status (`preRunTimelineStatus`): `draft`/`revising` for
- * a registered-but-unsubmitted PR (bay status `pushed`) and `submitted` for one
+ * a derived, display-only status (`preRunTimelineStatus`): `draft`/`rev` for
+ * a registered-but-unsubmitted PR (bay status `pushed`) and `ready` for one
  * awaiting its run. These never distort queue mechanics — the `draft` group
- * (draft + revising) is excluded from every terminal FLOW fact and the
- * `oldestOpenMs` DRAIN gauge, while `submitted` keeps the pending group's
- * queue-wait accounting it always had. `draft`/`revising` anchor AGE and the TIME
- * cell on the current revision's registration (`pushedAt`); `submitted` keeps its
+ * (draft + rev) is excluded from every terminal FLOW fact and the
+ * `oldestOpenMs` DRAIN gauge, while `ready` keeps the pending group's
+ * queue-wait accounting it always had. `draft`/`rev` anchor AGE and the TIME
+ * cell on the current revision's registration (`pushedAt`); `ready` keeps its
  * submission clock. BY is the current revision's author throughout.
  */
 function timelineNonIntegratedRows(
@@ -1794,7 +1787,7 @@ function timelineNonIntegratedRows(
     const status = preRunTimelineStatus(pr)
     if (status === undefined) return []
     // A submitted revision that is actively running/waiting is shown by its run row.
-    if (status === "submitted" && activeRevisions.has(queueRevisionKey(pr))) return []
+    if (status === "ready" && activeRevisions.has(queueRevisionKey(pr))) return []
 
     const bayPath = pr.bay === undefined ? undefined : state?.byId[pr.bay]?.path
     const revisionLineage = [timelineRevisionLineage(pr)]
@@ -1802,11 +1795,11 @@ function timelineNonIntegratedRows(
     const issue = presentFact(pr.issue)
     const subject = boundedQueue(bayPath ?? pr.title ?? pr.name ?? pr.branch, 80)
 
-    if (status === "submitted") {
+    if (status === "ready") {
       const timestamp = submissionTimes.get(queueRevisionKey(pr)) ?? pr.submittedAt ?? null
       const position = positions.get(pr.id)
       const sourceReadyAt = revisionLineage[0]?.sourceReadyAt ?? timestamp ?? undefined
-      const detail = withTimelineLineage(position === undefined ? "submitted" : `position ${position}`, revisionLineage)
+      const detail = withTimelineLineage(position === undefined ? "ready" : `position ${position}`, revisionLineage)
       return [
         {
           id: `${pr.base}:pr:${pr.id}:${pr.revision}:${pr.headSha}`,
@@ -1836,11 +1829,11 @@ function timelineNonIntegratedRows(
       ]
     }
 
-    // draft | revising — pushed, pre-queue WIP anchored on registration (pushedAt).
+    // draft | rev — pushed, pre-queue WIP anchored on registration (pushedAt).
     const registeredAt = pr.revisions.find(
       (candidate) => candidate.revision === pr.revision && candidate.headSha === pr.headSha,
     )?.pushedAt
-    const detail = status === "revising" ? revisingDetail(pr, runs) : "draft"
+    const detail = status === "rev" ? revisionDetail(pr, runs) : "draft"
     return [
       {
         id: `${pr.base}:draft:${pr.id}:${pr.revision}:${pr.headSha}`,
@@ -3206,12 +3199,12 @@ function fitTimelineLabel(label: string, max: number): string {
 // success is GREEN semantic, pending is blue, failures keep semantic reds.
 function timelineStatusColor(row: QueueTimelineProjectedRow): string {
   // A draft is pre-queue WIP, not a live or failing item: dim it like `canceled`
-  // so it reads as tentative next to the blue `submitted`/`run` pulse.
+  // so it reads as tentative next to the blue `ready`/`run` pulse.
   if (row.status === "draft") return "$fg-muted"
-  // A revising row failed a prior submission and awaits author edits: warn-toned,
+  // A rev row failed a prior submission and awaits author edits: warn-toned,
   // matching the "editable after failure" model without reading as a hard failure.
-  if (row.status === "revising") return "$fg-warning"
-  if (row.status === "running" || row.status === "pending" || row.status === "submitted") return "$fg-info"
+  if (row.status === "rev") return "$fg-warning"
+  if (row.status === "running" || row.status === "pending" || row.status === "ready") return "$fg-info"
   if (row.status === "integrated") return "$fg-success"
   if (row.status === "canceled") return "$fg-muted"
   if (["environment-refused", "stale", "legacy", "refused"].includes(row.status)) return "$fg-warning"
@@ -3222,9 +3215,9 @@ type TimelineStatusCell = Readonly<{ word: string; color: string }>
 
 const TIMELINE_STATUS_WORDS = {
   draft: "draft",
-  revising: "revising",
-  submitted: "submitted",
-  pending: "queued",
+  rev: "rev",
+  ready: "ready",
+  pending: "todo",
   running: "run",
   integrated: "done",
   rejected: "fail",
@@ -3240,11 +3233,9 @@ const TIMELINE_STATUS_WORDS = {
 // and the RUN cell, while 15d supplies its semantic foreground colors.
 // Vocabulary (user respec 2026-07-15; rejected renders `fail`, integrated
 // renders `done`). The pre-run PRs now carry their own fine STATUS words —
-// `draft`/`revising`/`submitted` — so a non-integrated PR is always visible with
-// an explicit label (user directive 2026-07-22). Pending renders `queued`
-// (todo→queued, @cto naming ruling 2026-07-23: "ready" is taken by `km bd
-// ready`); the coarse filter pills stay todo/running/failed/done until the
-// `t` hotkey question is ruled (a `q` hotkey collides with quit muscle memory).
+// `draft`/`rev`/`ready` — so a non-integrated PR is always visible with
+// an explicit label (user directive 2026-07-22, generalizing the 2026-07-21
+// pending→`todo` rule); the coarse filter pills stay todo/running/failed/done.
 function timelineStatusCell(row: QueueTimelineProjectedRow): TimelineStatusCell {
   const word = TIMELINE_STATUS_WORDS[row.status]
   return { word, color: timelineStatusColor(row) }
@@ -3923,10 +3914,10 @@ export const QUEUE_TIMELINE_STATUS_BUCKETS: readonly QueueTimelineStatusBucket[]
 
 /** Bucket a row status: every non-integrated terminal outcome is `failed`; integrated is `done`. */
 export function queueTimelineStatusBucket(status: QueueTimelineStatus): QueueTimelineStatusBucket {
-  // Every pre-run status (draft/revising/submitted) buckets with `todo` (the
+  // Every pre-run status (draft/rev/ready) buckets with `todo` (the
   // pending pill), so the default view shows them and the `t` toggle owns them —
   // no new operator pill. See `timelineStatusFilter`.
-  if (status === "draft" || status === "revising" || status === "submitted") return "pending"
+  if (status === "draft" || status === "rev" || status === "ready") return "pending"
   if (status === "pending" || status === "running") return status
   return status === "integrated" ? "done" : "failed"
 }
@@ -5218,13 +5209,7 @@ export function QueueDetailRunPrBlocks({
                 </Text>
               </>
             )}
-            {description === undefined
-              ? null
-              : description.split("\n").map((line, lineIndex) => (
-                  <Text key={`description:${lineIndex}`} wrap="wrap" bgConflict="ignore">
-                    {line === "" ? " " : line}
-                  </Text>
-                ))}
+            {description === undefined ? null : <DescriptionBlock description={description} />}
             {lineage.length === 0 ? null : (
               <>
                 <Box height={1} flexShrink={0} />

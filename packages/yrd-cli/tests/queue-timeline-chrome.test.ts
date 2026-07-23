@@ -169,16 +169,16 @@ describe("queue timeline chrome 21106", () => {
       expect(iconFg, "branch glyph is dimmer than the branch name").not.toEqual(branchFg)
 
       // Item 9: a not-yet-started run shows a muted "-" in the RUN cell — no
-      // colored pending word there. The pending STATUS cell reads `queued`
-      // (todo→queued, @cto naming ruling 2026-07-23) and keeps its info color.
-      const queuedRowY = rowIndexOf(text, " queued ")
-      const queuedRow = rowAt(text, queuedRowY)
-      expect(queuedRow, "run-less row shows no colored pending run id").not.toContain("pending")
-      const queuedStatusX = queuedRow.indexOf("queued")
-      expect(queuedStatusX, "queued status word present").toBeGreaterThan(0)
+      // colored pending word there. The submitted PR's display-only STATUS cell
+      // reads `ready` and keeps its info color.
+      const readyRowY = rowIndexOf(text, " ready ")
+      const readyRow = rowAt(text, readyRowY)
+      expect(readyRow, "run-less row shows no colored pending run id").not.toContain("pending")
+      const readyStatusX = readyRow.indexOf("ready")
+      expect(readyStatusX, "ready status word present").toBeGreaterThan(0)
       expect(
-        app.cell(queuedStatusX, queuedRowY).fg,
-        "queued status word keeps its own (info) color, distinct from muted TIME",
+        app.cell(readyStatusX, readyRowY).fg,
+        "ready status word keeps its own (info) color, distinct from muted TIME",
       ).not.toEqual(timeFg)
     } finally {
       app.unmount()
