@@ -682,9 +682,11 @@ describe("runYrd", () => {
         prefixed.io,
       ),
     ).toBe(2)
-    expect(JSON.parse(prefixed.stderr()).failure).toMatchObject({
-      cause: "unknown option '--draft'",
-      resolution: ["yrd pr create"],
+    expect(JSON.parse(prefixed.stderr())).toMatchObject({
+      failure: {
+        cause: "unknown option '--draft'",
+        resolution: ["yrd pr create"],
+      },
     })
 
     const optionValue = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
