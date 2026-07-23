@@ -826,8 +826,10 @@ pm-check: bun run lint:docs
 
 The embedding host supplies the immutable `queueLanePolicy`; lane-enabled
 configuration is refused when that code-owned policy is absent. The candidate
-never selects its lane. Yrd diffs the pinned base and head, stores the derived
-lane and exact admission steps on the Queue record, and uses PM only when every
+never selects its lane; lane-enabled hosts reject `--steps` so an explicit plan
+cannot bypass derived classification. Yrd diffs the pinned base and head,
+stores the derived lane and exact admission steps on the Queue record, and uses
+PM only when every
 changed path matches the injected policy as a regular file. Mixed carriers,
 configuration, executables, symlinks, gitlinks, malformed evidence, and unknown
 evidence stay on SW or fail closed. PM admission capacity defaults to two while
