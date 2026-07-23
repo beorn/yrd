@@ -21,9 +21,7 @@ const yrdRoot = resolve(import.meta.dirname, "../../..")
 const installedYrd = resolve(yrdRoot, "../../tools/installed/yrd")
 
 async function waitFor<T>(read: () => T, accept: (value: T) => boolean, detail: string): Promise<T> {
-  // 30s (was 10s): pid write, bounded exit, and process-group teardown all run
-  // real subprocesses that starve under the shared box's load (see vitest.config.ts).
-  const deadline = Date.now() + 30_000
+  const deadline = Date.now() + 10_000
   let value = read()
   while (!accept(value)) {
     if (Date.now() >= deadline) throw new Error(`timed out waiting for ${detail}`)
@@ -134,7 +132,7 @@ describe("yrd watch hot reload (installed)", () => {
         try {
           // The 2026-07-15 footer respec removed the LIVE indicator; the
           // exact keybinding footer is the stable liveness sentinel.
-          await running.terminal.waitFor("q quit", 30_000)
+          await running.terminal.waitFor("q quit", 10_000)
           expect(running.terminal.alive).toBe(true)
           const members = processGroupMembers(running.pid)
           expect(members).toContain(running.pid)
@@ -150,7 +148,7 @@ describe("yrd watch hot reload (installed)", () => {
     } finally {
       for (const root of roots) rmSync(root, { recursive: true, force: true })
     }
-  }, 120_000)
+  }, 30_000)
 
   it("terminates Bun's watch loop when the production QueueWatch command finishes", async () => {
     const child = Bun.spawn([process.execPath, join(yrdRoot, "bin/yrd.ts"), "watch"], {
