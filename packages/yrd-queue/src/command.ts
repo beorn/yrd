@@ -25,6 +25,11 @@ import {
   type QueueTreeConflict,
 } from "./submodule-composition.ts"
 import { materializeSubmodules } from "@yrd/bay"
+import {
+  witnessQueueSubmoduleMerge,
+  type QueueSubmoduleMergeReviewConflict,
+  type QueueSubmoduleMergeWitness,
+} from "./submodule-merge-witness.ts"
 
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 
@@ -211,6 +216,8 @@ const SubmoduleReachabilityRefusalEvidenceSchema = z
       "filtered-fetch",
       "fallback-fetch",
       "verify",
+      "witness-fetch",
+      "witness",
     ]),
     repository: z.string().min(1),
     origin: z.string().min(1).optional(),
@@ -242,6 +249,45 @@ const SubmoduleCompositionRefusalEvidenceSchema = z
   })
   .strict()
 type SubmoduleCompositionRefusalEvidence = Readonly<z.infer<typeof SubmoduleCompositionRefusalEvidenceSchema>>
+
+const SubmoduleMergeReviewRequiredEvidenceSchema = z
+  .object({
+    kind: z.literal("submodule-merge-review-required"),
+    repository: z.string().min(1),
+    path: z.string().min(1),
+    origin: z.string().min(1),
+    mergeSha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
+    parents: z.array(z.string().regex(/^[0-9a-f]{40,64}$/iu)).length(2),
+    tree: z.string().regex(/^[0-9a-f]{40,64}$/iu),
+    conflicts: z.array(
+      z
+        .object({
+          path: z.string().min(1),
+          reason: z.enum(["content-conflict", "noncanonical-tree"]),
+          resolution: z.enum(["first-parent", "second-parent", "combined", "manual"]),
+          baseOid: z
+            .string()
+            .regex(/^[0-9a-f]{40,64}$/iu)
+            .optional(),
+          firstParentOid: z
+            .string()
+            .regex(/^[0-9a-f]{40,64}$/iu)
+            .optional(),
+          secondParentOid: z
+            .string()
+            .regex(/^[0-9a-f]{40,64}$/iu)
+            .optional(),
+          resultOid: z
+            .string()
+            .regex(/^[0-9a-f]{40,64}$/iu)
+            .optional(),
+        })
+        .strict(),
+    ),
+    requiredTrailer: z.string().regex(/^Yrd-Composition-Review: sha256:[0-9a-f]{64}$/u),
+  })
+  .strict()
+type SubmoduleMergeReviewRequiredEvidence = Readonly<z.infer<typeof SubmoduleMergeReviewRequiredEvidenceSchema>>
 
 export const GitCheckResultEvidenceSchema = z.union([
   GitCheckEvidenceSchema,
@@ -3115,6 +3161,8 @@ type SubmoduleProbeContext = Readonly<{
     | "filtered-fetch"
     | "fallback-fetch"
     | "verify"
+    | "witness-fetch"
+    | "witness"
   repository: string
   origin?: string
   sha?: string
@@ -3167,20 +3215,99 @@ function throwFetchProbeFailure(context: SubmoduleProbeContext, result: GitResul
   throw createSubmoduleReachabilityRefusal(context, result)
 }
 
+type CandidateSubmoduleWitnessTarget = Readonly<{
+  paths: readonly string[]
+  baseShas: ReadonlySet<string>
+  inspectTip: boolean
+}>
+
+async function fetchSubmoduleWitnessHistory(
+  git: Git,
+  store: string,
+  origin: string,
+  sha: string,
+  paths: readonly string[],
+): Promise<void> {
+  const witnessContext = { operation: "witness", repository: store, origin, sha, paths } as const
+  const shallow = await runSubmoduleProbe(git, store, ["rev-parse", "--is-shallow-repository"], witnessContext)
+  if (shallow.code !== 0 || (shallow.stdout !== "true" && shallow.stdout !== "false")) {
+    throw createSubmoduleReachabilityRefusal(witnessContext, shallow)
+  }
+  const depth = shallow.stdout === "true" ? ["--unshallow"] : []
+  const fetchContext = { operation: "witness-fetch", repository: store, origin, sha, paths } as const
+  const fetched = await runSubmoduleProbe(
+    git,
+    store,
+    ["-c", "protocol.version=2", "fetch", ...depth, origin, sha],
+    fetchContext,
+  )
+  if (fetched.code !== 0) throwFetchProbeFailure(fetchContext, fetched)
+}
+
+async function witnessCandidateSubmoduleMerge(
+  git: Git,
+  repo: string,
+  store: string,
+  origin: string,
+  sha: string,
+  target: CandidateSubmoduleWitnessTarget,
+): Promise<void> {
+  const changed = target.inspectTip || [...target.baseShas].some((baseSha) => baseSha !== sha)
+  if (!changed) return
+
+  const context = { operation: "witness", repository: store, origin, sha, paths: target.paths } as const
+  const commit = await runSubmoduleProbe(git, store, ["cat-file", "commit", sha], context, true)
+  if (commit.code !== 0) throw createSubmoduleReachabilityRefusal(context, commit)
+  const headerEnd = commit.stdout.indexOf("\n\n")
+  if (headerEnd < 0) {
+    throw createSubmoduleReachabilityRefusal(
+      context,
+      undefined,
+      `candidate pin '${sha}' has no commit-message boundary`,
+    )
+  }
+  if ([...commit.stdout.slice(0, headerEnd).matchAll(/^parent [0-9a-f]{40,64}$/gmu)].length !== 2) return
+
+  await fetchSubmoduleWitnessHistory(git, store, origin, sha, target.paths)
+  let witness: QueueSubmoduleMergeWitness
+  try {
+    witness = await witnessQueueSubmoduleMerge(git, store, sha)
+  } catch (cause) {
+    throw createSubmoduleReachabilityRefusal(context, undefined, messageOf(cause))
+  }
+  if (witness.status === "review-required") {
+    const submodulePath = target.paths[0]
+    if (submodulePath === undefined) throw new Error("submodule witness target has no paths")
+    throw createSubmoduleMergeReviewRequired(repo, submodulePath, origin, witness)
+  }
+}
+
 async function proveCandidateSubmoduleReachability(
   git: Git,
   repo: string,
   path: string,
+  baseSha: string,
   candidateSha: string,
   proofParent: string,
 ): Promise<void> {
   const pins = await candidateSubmodulePins(git, repo, path, candidateSha)
   if (pins.length === 0) return
+  const basePins = new Map((await candidateSubmodulePins(git, repo, path, baseSha)).map((pin) => [pin.path, pin]))
 
-  const groups = new Map<string, Map<string, string[]>>()
+  const groups = new Map<string, Map<string, { paths: string[]; baseShas: Set<string>; inspectTip: boolean }>>()
   for (const pin of pins) {
-    const shas = groups.get(pin.origin) ?? new Map<string, string[]>()
-    shas.set(pin.sha, [...(shas.get(pin.sha) ?? []), pin.path])
+    const shas =
+      groups.get(pin.origin) ?? new Map<string, { paths: string[]; baseShas: Set<string>; inspectTip: boolean }>()
+    const target: { paths: string[]; baseShas: Set<string>; inspectTip: boolean } = shas.get(pin.sha) ?? {
+      paths: [],
+      baseShas: new Set<string>(),
+      inspectTip: false,
+    }
+    target.paths.push(pin.path)
+    const basePin = basePins.get(pin.path)
+    if (basePin?.origin === pin.origin) target.baseShas.add(basePin.sha)
+    else target.inspectTip = true
+    shas.set(pin.sha, target)
     groups.set(pin.origin, shas)
   }
   await mkdir(proofParent, { recursive: true })
@@ -3199,7 +3326,13 @@ async function proveCandidateSubmoduleReachability(
     if (initialized.code !== 0) {
       throw createSubmoduleReachabilityRefusal(initializedContext, initialized)
     }
-    for (const [sha, paths] of [...shas].sort(([left], [right]) => left.localeCompare(right))) {
+    for (const [sha, mutableTarget] of [...shas].sort(([left], [right]) => left.localeCompare(right))) {
+      const target: CandidateSubmoduleWitnessTarget = {
+        paths: mutableTarget.paths.toSorted(),
+        baseShas: mutableTarget.baseShas,
+        inspectTip: mutableTarget.inspectTip,
+      }
+      const paths = target.paths
       const filteredContext = { operation: "filtered-fetch", repository: store, origin, sha, paths } as const
       const filtered = await runSubmoduleProbe(
         git,
@@ -3228,6 +3361,7 @@ async function proveCandidateSubmoduleReachability(
       if (fetched.code !== 0) {
         throw createSubmoduleReachabilityRefusal(verifyContext, fetched)
       }
+      await witnessCandidateSubmoduleMerge(git, repo, store, origin, sha, target)
     }
   }
 }
@@ -3388,6 +3522,7 @@ async function withPinnedCandidate<Output extends JsonValue>(
       git,
       repo,
       path,
+      target.sha,
       candidate.output.sha,
       join(scratchRoot, "submodule-proof"),
     )
@@ -3653,8 +3788,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
         },
       )
     } catch (cause) {
-      const refusal =
-        queueAuthorityRefusal(cause) ?? submoduleReachabilityRefusal(cause) ?? submoduleCompositionRefusal(cause)
+      const refusal = queueCommandRefusal(cause)
       if (refusal !== undefined) {
         return failedWithEvidence(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
       }
@@ -3852,7 +3986,7 @@ async function authoritativeQueueBase(git: Git, repo: string, branch: string): P
         ["fetch", "--no-recurse-submodules", "--quiet", "origin", `+${source}:${target}`],
         true,
       )
-      if (fetched.code === 0) return inspectQueueBase(git, repo, branch)
+      if (fetched.code === 0) return await inspectQueueBase(git, repo, branch)
       detail = fetched.stderr || fetched.stdout || `could not refresh origin/${branch}`
     } catch (cause) {
       detail = messageOf(cause)
@@ -3946,6 +4080,38 @@ function createSubmoduleCompositionRefusal(
   )
 }
 
+type SubmoduleMergeReviewFailure = YrdFailure & Readonly<{ evidence: SubmoduleMergeReviewRequiredEvidence }>
+
+function createSubmoduleMergeReviewRequired(
+  repository: string,
+  path: string,
+  origin: string,
+  witness: Extract<QueueSubmoduleMergeWitness, { status: "review-required" }>,
+): SubmoduleMergeReviewFailure {
+  const evidence = SubmoduleMergeReviewRequiredEvidenceSchema.parse({
+    kind: "submodule-merge-review-required",
+    repository,
+    path,
+    origin,
+    mergeSha: witness.mergeSha,
+    parents: witness.parents,
+    tree: witness.tree,
+    conflicts: witness.conflicts satisfies readonly QueueSubmoduleMergeReviewConflict[],
+    requiredTrailer: witness.requiredTrailer,
+  })
+  const names = witness.conflicts.map((conflict) => conflict.path).join(", ") || "its composed tree"
+  return Object.assign(
+    createFailure({
+      kind: "refusal",
+      code: "submodule-merge-review-required",
+      message:
+        `yrd: submodule '${path}' merge '${witness.mergeSha}' requires explicit review for ${names}; ` +
+        `materialize both parents' feature markers, then amend the merge with '${witness.requiredTrailer}'`,
+    }),
+    { evidence },
+  )
+}
+
 function queueAuthorityRefusal(cause: unknown): QueueAuthorityRefusalEvidence | undefined {
   if (failureFact(cause)?.code !== "queue-environment-refused" || !(cause instanceof Error) || !("evidence" in cause)) {
     return undefined
@@ -3968,6 +4134,34 @@ function submoduleCompositionRefusal(cause: unknown): SubmoduleCompositionRefusa
   }
   const parsed = SubmoduleCompositionRefusalEvidenceSchema.safeParse(cause.evidence)
   return parsed.success ? parsed.data : undefined
+}
+
+function submoduleMergeReviewRequired(cause: unknown): SubmoduleMergeReviewRequiredEvidence | undefined {
+  if (
+    failureFact(cause)?.code !== "submodule-merge-review-required" ||
+    !(cause instanceof Error) ||
+    !("evidence" in cause)
+  ) {
+    return undefined
+  }
+  const parsed = SubmoduleMergeReviewRequiredEvidenceSchema.safeParse(cause.evidence)
+  return parsed.success ? parsed.data : undefined
+}
+
+function queueCommandRefusal(
+  cause: unknown,
+):
+  | QueueAuthorityRefusalEvidence
+  | SubmoduleReachabilityRefusalEvidence
+  | SubmoduleCompositionRefusalEvidence
+  | SubmoduleMergeReviewRequiredEvidence
+  | undefined {
+  return (
+    queueAuthorityRefusal(cause) ??
+    submoduleReachabilityRefusal(cause) ??
+    submoduleCompositionRefusal(cause) ??
+    submoduleMergeReviewRequired(cause)
+  )
 }
 
 export async function resolveGitQueueTarget(options: {
@@ -4162,8 +4356,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
         output: integrationProof(checked.candidateSha, checked),
       }
     } catch (cause) {
-      const refusal =
-        queueAuthorityRefusal(cause) ?? submoduleReachabilityRefusal(cause) ?? submoduleCompositionRefusal(cause)
+      const refusal = queueCommandRefusal(cause)
       if (refusal !== undefined) {
         return failedWithEvidence(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
       }
@@ -4242,8 +4435,7 @@ export function configuredMergeStep<Shape extends PRShape>(
         `merge command exited successfully but '${branch}' does not contain '${missing}'`,
       )
     } catch (cause) {
-      const refusal =
-        queueAuthorityRefusal(cause) ?? submoduleReachabilityRefusal(cause) ?? submoduleCompositionRefusal(cause)
+      const refusal = queueCommandRefusal(cause)
       if (refusal !== undefined) {
         return failedWithEvidence(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
       }

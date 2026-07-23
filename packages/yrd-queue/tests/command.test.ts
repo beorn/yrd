@@ -194,6 +194,85 @@ async function divergentSubmoduleRepository(kind: "clean" | "conflict"): Promise
   return { repo, module, moduleBaseSha: baseSha, rootBaseSha, rootCurrentSha, featureSha }
 }
 
+async function droppedFeatureMergeSubmoduleRepository(kind: "conflict" | "clean" = "conflict"): Promise<{
+  repo: string
+  module: string
+  rootBaseSha: string
+  featureSha: string
+  currentSha: string
+  incomingSha: string
+  currentTree: string
+}> {
+  const { repo } = await repository()
+  const module = join(repo, "..", "dropped-feature-module")
+  await Bun.$`git init -q -b main ${module}`
+  await git(module, ["config", "user.name", "Yrd Test"])
+  await git(module, ["config", "user.email", "yrd@example.invalid"])
+  await writeFile(
+    join(module, "feature.ts"),
+    kind === "conflict" ? 'export const feature = "base"\n' : "top\nmiddle\nbottom\n",
+  )
+  await git(module, ["add", "feature.ts"])
+  await git(module, ["commit", "-qm", "base"])
+  const moduleBaseSha = await git(module, ["rev-parse", "HEAD"])
+
+  await git(repo, ["config", "protocol.file.allow", "always"])
+  await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "dep"])
+  await git(repo, ["commit", "-qam", "add dependency"])
+  const rootBaseSha = await git(repo, ["rev-parse", "HEAD"])
+
+  await git(module, ["switch", "-qc", "current"])
+  await writeFile(
+    join(module, "feature.ts"),
+    kind === "conflict" ? "export const currentFeature = true\n" : "top-current\nmiddle\nbottom\n",
+  )
+  await git(module, ["commit", "-qam", "current feature"])
+  const currentSha = await git(module, ["rev-parse", "HEAD"])
+  const currentTree = await git(module, ["show", "-s", "--format=%T", currentSha])
+
+  await git(module, ["switch", "-qc", "incoming", moduleBaseSha])
+  await writeFile(
+    join(module, "feature.ts"),
+    kind === "conflict" ? "export const incomingFeature = true\n" : "top\nmiddle\nbottom-incoming\n",
+  )
+  await git(module, ["commit", "-qam", "incoming feature"])
+  const incomingSha = await git(module, ["rev-parse", "HEAD"])
+
+  const droppedMergeSha = await git(module, [
+    "commit-tree",
+    currentTree,
+    "-p",
+    currentSha,
+    "-p",
+    incomingSha,
+    "-m",
+    `bad composition drops incoming feature\n\nparent ${moduleBaseSha}`,
+  ])
+  await git(module, ["update-ref", "refs/heads/dropped-feature-merge", droppedMergeSha])
+
+  await git(repo, ["switch", "-qc", "issue/feature"])
+  await git(join(repo, "dep"), ["fetch", "-q", "origin", "dropped-feature-merge"])
+  await git(join(repo, "dep"), ["checkout", "-q", droppedMergeSha])
+  await git(repo, ["add", "dep"])
+  await git(repo, ["commit", "-qm", "advance dependency to composed feature"])
+  const featureSha = await git(repo, ["rev-parse", "HEAD"])
+  await git(repo, ["switch", "-q", "main"])
+  await git(repo, ["-c", "protocol.file.allow=always", "submodule", "update", "-q"])
+  return { repo, module, rootBaseSha, featureSha, currentSha, incomingSha, currentTree }
+}
+
+async function amendFeatureSubmodulePin(repo: string, ref: string, sha: string, message: string): Promise<string> {
+  await git(repo, ["switch", "-q", "issue/feature"])
+  await git(join(repo, "dep"), ["fetch", "-q", "origin", ref])
+  await git(join(repo, "dep"), ["checkout", "-q", sha])
+  await git(repo, ["add", "dep"])
+  await git(repo, ["commit", "--amend", "-qm", message])
+  const head = await git(repo, ["rev-parse", "HEAD"])
+  await git(repo, ["switch", "-q", "main"])
+  await git(repo, ["-c", "protocol.file.allow=always", "submodule", "update", "-q"])
+  return head
+}
+
 async function restackSubmoduleRepository(
   options: Readonly<{
     sourcePath?: string
@@ -4281,6 +4360,231 @@ describe("Queue command adapters", () => {
     expect(configuredCheckRan).toBe(false)
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected", headSha: featureSha })
   })
+
+  it("flags a conflicted submodule merge that drops one parent's feature before checking or landing", async () => {
+    const fixture = await droppedFeatureMergeSubmoduleRepository()
+    await using process = createProcess()
+    let configuredCheckRan = false
+    const traced: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "true") configuredCheckRan = true
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(traced, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "submodule-merge-review-required",
+        evidence: {
+          kind: "submodule-merge-review-required",
+          path: "dep",
+          conflicts: [
+            {
+              path: "feature.ts",
+              resolution: "first-parent",
+            },
+          ],
+          requiredTrailer: expect.stringMatching(/^Yrd-Composition-Review: sha256:[0-9a-f]{64}$/u),
+        },
+      },
+    })
+    expect(configuredCheckRan).toBe(false)
+    expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.rootBaseSha)
+  }, 20_000)
+
+  it("flags a clean submodule merge whose authored tree silently drops one parent", async () => {
+    const fixture = await droppedFeatureMergeSubmoduleRepository("clean")
+    await using process = createProcess()
+    let configuredCheckRan = false
+    const requests: ProcessRequest[] = []
+    const traced: Pick<Process, "run"> = {
+      run(request) {
+        requests.push(request)
+        if (request.argv[0] === "true") configuredCheckRan = true
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(traced, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(
+      requests.some(
+        (request) => request.cwd?.includes("submodule-proof") === true && request.argv.includes("merge-tree"),
+      ),
+    ).toBe(true)
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "submodule-merge-review-required",
+        evidence: {
+          conflicts: [
+            {
+              path: "feature.ts",
+              reason: "noncanonical-tree",
+              resolution: "manual",
+            },
+          ],
+        },
+      },
+    })
+    expect(configuredCheckRan).toBe(false)
+    expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.rootBaseSha)
+  }, 20_000)
+
+  it("keeps a submodule merge candidate submitted when its witness history cannot be fetched", async () => {
+    const fixture = await droppedFeatureMergeSubmoduleRepository()
+    await using process = createProcess()
+    let configuredCheckRan = false
+    const unavailable: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "true") configuredCheckRan = true
+        if (request.argv.includes("--unshallow")) {
+          return Promise.resolve({
+            exitCode: 128,
+            signal: null,
+            stdout: "",
+            stderr: "fatal: witness history unavailable",
+            durationMs: 1,
+            timedOut: false,
+          })
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(unavailable, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "queue-environment-refused",
+        evidence: {
+          kind: "submodule-reachability-refusal",
+          operation: "witness-fetch",
+          retryable: true,
+        },
+      },
+    })
+    expect(configuredCheckRan).toBe(false)
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: fixture.featureSha })
+    expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.rootBaseSha)
+  }, 20_000)
+
+  it("accepts an exact content-addressed review of a conflicted submodule merge", async () => {
+    const fixture = await droppedFeatureMergeSubmoduleRepository()
+    let droppedTreeTrailer = ""
+    {
+      await using firstProcess = createProcess()
+      await using firstApp = await checkedQueue(firstProcess, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+      await firstApp.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+      const firstRun = (await firstApp.queue.run({ prs: ["PR1"] }, runtime))[0]!
+      const evidence = firstRun.error?.evidence
+      if (
+        typeof evidence !== "object" ||
+        evidence === null ||
+        !("requiredTrailer" in evidence) ||
+        typeof evidence.requiredTrailer !== "string"
+      ) {
+        throw new Error("missing merge review trailer")
+      }
+      droppedTreeTrailer = evidence.requiredTrailer
+    }
+
+    await writeFile(
+      join(fixture.module, "feature.ts"),
+      "export const currentFeature = true\nexport const incomingFeature = true\n",
+    )
+    await git(fixture.module, ["add", "feature.ts"])
+    const combinedTree = await git(fixture.module, ["write-tree"])
+    const staleReviewedMergeSha = await git(fixture.module, [
+      "commit-tree",
+      combinedTree,
+      "-p",
+      fixture.currentSha,
+      "-p",
+      fixture.incomingSha,
+      "-m",
+      `reviewed composition with stale receipt\n\n${droppedTreeTrailer}`,
+    ])
+    await git(fixture.module, ["update-ref", "refs/heads/stale-reviewed-feature-merge", staleReviewedMergeSha])
+    const staleReviewedFeatureSha = await amendFeatureSubmodulePin(
+      fixture.repo,
+      "stale-reviewed-feature-merge",
+      staleReviewedMergeSha,
+      "advance dependency to composition with stale review",
+    )
+
+    let combinedTreeTrailer = ""
+    {
+      await using staleProcess = createProcess()
+      await using staleApp = await checkedQueue(staleProcess, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+      await staleApp.bays.submit({ branch: "issue/feature", headSha: staleReviewedFeatureSha, base: "main" })
+      const staleRun = (await staleApp.queue.run({ prs: ["PR1"] }, runtime))[0]!
+      const evidence = staleRun.error?.evidence
+
+      expect(staleRun).toMatchObject({
+        status: "failed",
+        error: {
+          code: "submodule-merge-review-required",
+          evidence: {
+            conflicts: [{ path: "feature.ts", resolution: "combined" }],
+          },
+        },
+      })
+      if (
+        typeof evidence !== "object" ||
+        evidence === null ||
+        !("requiredTrailer" in evidence) ||
+        typeof evidence.requiredTrailer !== "string"
+      ) {
+        throw new Error("missing amended merge review trailer")
+      }
+      combinedTreeTrailer = evidence.requiredTrailer
+      expect(combinedTreeTrailer).not.toBe(droppedTreeTrailer)
+      expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.rootBaseSha)
+    }
+
+    const reviewedMergeSha = await git(fixture.module, [
+      "commit-tree",
+      combinedTree,
+      "-p",
+      fixture.currentSha,
+      "-p",
+      fixture.incomingSha,
+      "-m",
+      `reviewed composition\n\n${combinedTreeTrailer}`,
+    ])
+    await git(fixture.module, ["update-ref", "refs/heads/reviewed-feature-merge", reviewedMergeSha])
+    const reviewedFeatureSha = await amendFeatureSubmodulePin(
+      fixture.repo,
+      "reviewed-feature-merge",
+      reviewedMergeSha,
+      "advance dependency to reviewed composition",
+    )
+
+    {
+      await using process = createProcess()
+      await using app = await checkedQueue(process, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+      await app.bays.submit({ branch: "issue/feature", headSha: reviewedFeatureSha, base: "main" })
+
+      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+      expect(run.status, run.error?.message).toBe("passed")
+    }
+    expect(await git(fixture.repo, ["ls-tree", "main", "dep"])).toContain(reviewedMergeSha)
+    expect(await git(fixture.module, ["show", `${reviewedMergeSha}:feature.ts`])).toBe(
+      "export const currentFeature = true\nexport const incomingFeature = true",
+    )
+  }, 30_000)
 
   it("composes a divergent clean submodule pin into the checked and landed root candidate", async () => {
     const fixture = await divergentSubmoduleRepository("clean")
