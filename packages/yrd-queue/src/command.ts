@@ -1626,6 +1626,7 @@ async function prepareCandidate(
   attempt: number,
   artifactRoot: string,
   allowAuthoredGitlinks: boolean,
+  refuse?: RefusePathsPolicy,
 ): Promise<
   | Readonly<{
       status: "passed"
@@ -1640,6 +1641,19 @@ async function prepareCandidate(
   const sourceRewrites: SourceRewrite[] = []
   const submoduleResolutions: QueueSubmoduleResolutionEvidence[] = []
   for (const pr of input.prs) {
+    if (refuse !== undefined && refuse.paths.length > 0) {
+      const inspected = await refusedPayloadPaths(git, path, pr.headSha, refuse.paths)
+      if (inspected.status === "failed") return inspected
+      if (inspected.output.length > 0) {
+        const shown = inspected.output.slice(0, 8).join(", ") + (inspected.output.length > 8 ? ", …" : "")
+        return candidateFailure(
+          "refused-path",
+          `PR '${pr.id}' touches refused path(s) [${shown}]${refuse.reason === undefined ? "" : `; ${refuse.reason}`}`,
+          ".",
+          inspected.output,
+        )
+      }
+    }
     if (pr.composition !== undefined) {
       let baseMoved = false
       if (pr.recut !== undefined) {
@@ -2707,6 +2721,29 @@ async function authoredGitlinkPaths(
   return { status: "passed", output: gitlinks }
 }
 
+/** Refusal boundary for split-out path roots (e.g. pm state moved to a sibling
+ * repo): a payload path is refused when it starts with any configured entry.
+ * Entries are plain prefixes — "@" covers every top-level sigil root, "hub/"
+ * covers that tree. Policy comes from project config; absent config disables. */
+export type RefusePathsPolicy = Readonly<{ paths: readonly string[]; reason?: string }>
+
+async function refusedPayloadPaths(
+  git: Git,
+  repo: string,
+  headSha: string,
+  refused: readonly string[],
+): Promise<Readonly<{ status: "passed"; output: readonly string[] }> | CandidateFailure> {
+  const base = await git.run(repo, ["merge-base", "HEAD", headSha], true)
+  if (base.code !== 0 || base.stdout === "") {
+    return candidateFailure(
+      "refused-path-inspection",
+      `could not inspect payload paths for '${headSha}': ${base.stderr || base.stdout || "no merge base"}`,
+    )
+  }
+  const paths = await changedPaths(git, repo, base.stdout, headSha)
+  return { status: "passed", output: paths.filter((path) => refused.some((entry) => path.startsWith(entry))) }
+}
+
 type CandidateSubmodulePin = Readonly<{ path: string; sha: string; origin: string }>
 type MutableSubmoduleConfig = { path?: string; url?: string }
 
@@ -3130,6 +3167,7 @@ export type GitCheckOptions = ProcessDependency &
     environmentPassthrough?: readonly string[]
     timeoutMs?: number
     noProgressTimeoutMs?: number
+    refuse?: RefusePathsPolicy
   }>
 
 type CandidatePin =
@@ -3176,6 +3214,7 @@ async function withPinnedCandidate<Output extends JsonValue>(
     artifactRoot?: string
     allowAuthoredGitlinks?: boolean
     candidatePool?: CandidatePool
+    refuse?: RefusePathsPolicy
   }>,
   onFailure: (failure: PreparedCandidateFailure) => JobResult<Output>,
   use: (path: string, candidate: PinnedCandidate) => Promise<JobResult<Output>>,
@@ -3197,6 +3236,7 @@ async function withPinnedCandidate<Output extends JsonValue>(
       context.attempt,
       resolve(options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")),
       options.allowAuthoredGitlinks === true,
+      options.refuse,
     )
     if (candidate.status === "failed") return onFailure(candidate)
     await proveCandidateSubmoduleReachability(
@@ -3246,6 +3286,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
           ...(options.candidatePool === undefined ? {} : { candidatePool: options.candidatePool }),
           artifactRoot: options.artifactRoot,
           allowAuthoredGitlinks: (options.env ?? globalThis.process.env).YRD_ALLOW_AUTHORED_GITLINKS === "1",
+          ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
         },
         (failure) => failure,
         async (path, candidate): Promise<JobResult<GitCheckResultEvidence>> => {
@@ -3476,7 +3517,8 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
   }
 }
 
-export type GitMergeOptions = ProcessDependency & Readonly<{ repo: string; env?: NodeJS.ProcessEnv }>
+export type GitMergeOptions = ProcessDependency &
+  Readonly<{ repo: string; env?: NodeJS.ProcessEnv; refuse?: RefusePathsPolicy }>
 
 export type ConfiguredMergeOptions = ProcessDependency &
   Readonly<{
@@ -3488,6 +3530,7 @@ export type ConfiguredMergeOptions = ProcessDependency &
     environmentOverrides?: Readonly<Record<string, string>>
     environmentPassthrough?: readonly string[]
     timeoutMs?: number
+    refuse?: RefusePathsPolicy
   }>
 
 function checkedCandidate(shape: PRShape): GitCheckEvidence | undefined {
@@ -3576,7 +3619,7 @@ async function mergeCandidate(
   repo: string,
   input: StepExecution,
   context: Readonly<{ id: string; attempt: number }>,
-  options: Readonly<{ artifactRoot?: string; allowAuthoredGitlinks?: boolean }>,
+  options: Readonly<{ artifactRoot?: string; allowAuthoredGitlinks?: boolean; refuse?: RefusePathsPolicy }>,
 ): Promise<MergeCandidateResult> {
   const prior = checkedCandidate(input.shape)
   const prepared =
@@ -3589,6 +3632,7 @@ async function mergeCandidate(
           {
             artifactRoot: options.artifactRoot,
             allowAuthoredGitlinks: options.allowAuthoredGitlinks,
+            ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
           },
           (failure) => failedWithEvidence(failure.error.code, failure.error.message, failure.output),
           (_path, candidate) => Promise.resolve({ status: "passed" as const, output: candidate }),
@@ -3842,6 +3886,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
       const branch = primaryPR(input).base
       const candidate = await mergeCandidate(git, repo, input, context, {
         allowAuthoredGitlinks: (options.env ?? globalThis.process.env).YRD_ALLOW_AUTHORED_GITLINKS === "1",
+        ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
       })
       if (candidate.status !== "passed") return candidate
       const { base, checked } = candidate
@@ -3976,6 +4021,7 @@ export function configuredMergeStep<Shape extends PRShape>(
       const candidate = await mergeCandidate(git, repo, input, context, {
         artifactRoot: options.artifactRoot,
         allowAuthoredGitlinks: (options.env ?? globalThis.process.env).YRD_ALLOW_AUTHORED_GITLINKS === "1",
+        ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
       })
       if (candidate.status !== "passed") return candidate
       const command = configuredCommandStep<Shape>({

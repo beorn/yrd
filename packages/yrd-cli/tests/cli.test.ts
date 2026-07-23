@@ -5234,7 +5234,7 @@ describe("runYrd", () => {
       const frame = stripOsc8Targets(frameHandle.text)
       expect(frame).toContain("pr#1.1")
       expect(frame).toContain("QUEUE main")
-      expect(frame).toContain("todo")
+      expect(frame).toContain("queued")
       expect(frame).not.toContain("position 1")
       expect(frame).toContain("AGE")
       expect(frame).toContain("WAIT")
@@ -5663,7 +5663,7 @@ describe("runYrd", () => {
     })
     expect(await runYrd(app, yrd("queue", "ls", "--latest"), status.io), status.stderr()).toBe(0)
     expect(status.stdout()).toContain("pr#1.1")
-    expect(status.stdout()).toContain("todo")
+    expect(status.stdout()).toContain("submitted")
   })
 
   it("uses the queue timeline by default while --latest only changes row projection", async () => {
@@ -5685,7 +5685,7 @@ describe("runYrd", () => {
 
     expect(plain.stdout()).toContain("pr#1.1")
     expect(plain.stdout()).toContain("pr#2.1")
-    expect(plain.stdout()).toContain("todo")
+    expect(plain.stdout()).toContain("submitted")
     expect(latest.stdout()).toContain("pr#1.1")
     expect(latest.stdout()).toContain("pr#2.1")
     // Non-default-only FILTER row (user respec 2026-07-15): `latest` renders

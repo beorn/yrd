@@ -65,7 +65,13 @@ import type { ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import { withGitIndexLockRetry } from "./git-index-lock-retry.ts"
-import { loadYrdConfig, SignalRecipientSchema, type ResolvedYrdProjectConfig, type YrdStepConfig } from "./config.ts"
+import {
+  loadYrdConfig,
+  SignalRecipientSchema,
+  type ResolvedYrdProjectConfig,
+  type YrdRefuseConfig,
+  type YrdStepConfig,
+} from "./config.ts"
 import { classifyFailure, resolveInvocation } from "./invocation.ts"
 import { withLiveRenderer } from "./live-renderer.ts"
 import { createYrdLogger, residentObservability, resolveYrdObservability } from "./observability.ts"
@@ -240,6 +246,7 @@ function candidateStep(
   config: YrdStepConfig,
   revision: string,
   candidatePool: CandidatePool | undefined,
+  refuse: YrdRefuseConfig | undefined,
 ): RuntimeStep {
   return eraseStep(
     withStep(
@@ -262,6 +269,7 @@ function candidateStep(
         ...(config.environmentPassthrough === undefined
           ? {}
           : { environmentPassthrough: config.environmentPassthrough }),
+        ...(refuse === undefined ? {} : { refuse }),
       }),
       {
         revision,
@@ -405,7 +413,11 @@ function configuredQueueSteps(
       return eraseStep(
         withMerge(
           mergeCommand === undefined
-            ? gitMergeStep({ inject: { process: options.process }, repo: options.repo })
+            ? gitMergeStep({
+                inject: { process: options.process },
+                repo: options.repo,
+                ...(options.config.refuse === undefined ? {} : { refuse: options.config.refuse }),
+              })
             : configuredMergeStep({
                 inject: { process: options.process },
                 repo: options.repo,
@@ -417,6 +429,7 @@ function configuredQueueSteps(
                 ...(config.environmentPassthrough === undefined
                   ? {}
                   : { environmentPassthrough: config.environmentPassthrough }),
+                ...(options.config.refuse === undefined ? {} : { refuse: options.config.refuse }),
               }),
           { revision },
         ),
@@ -432,6 +445,7 @@ function configuredQueueSteps(
         config,
         revision,
         options.candidatePool,
+        options.config.refuse,
       )
     }
     return eraseStep(
