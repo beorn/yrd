@@ -2831,6 +2831,62 @@ describe("Queue", () => {
     expect(checks).toBe(1)
   })
 
+  it("does not drive an unrelated active admission for an explicit selection", async () => {
+    const checkedPRs: string[] = []
+    await using app = await createQueueApp({
+      check: (input) => {
+        const pr = input.prs[0]
+        if (pr === undefined) throw new Error("expected one PR per admission check")
+        checkedPRs.push(pr.id)
+        return { status: "passed", output: { checked: true } }
+      },
+    })
+    const active = await submitBranch(app, "issue/unrelated-active-check")
+    const selected = await submitBranch(app, "issue/explicitly-selected-check")
+    for (const pr of [active, selected]) await app.bays.requestChecks({ pr: pr.id })
+
+    expect(await app.queue.admit({ prs: [active.id] })).toMatchObject([
+      { id: "R1", status: "running", prs: [{ id: active.id }] },
+    ])
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "requested" })
+
+    await app.queue.run({ prs: [selected.id] }, runtime)
+
+    expect(checkedPRs).toEqual([])
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "requested" })
+    expect(app.queue.eligibility(selected.id)).toMatchObject({
+      runnable: false,
+      reason: { code: "checks-pending" },
+      checks: { status: "queued" },
+    })
+  })
+
+  it("limits an explicit admission drain to the selected PR instead of older queued checks", async () => {
+    const checkedPRs: string[] = []
+    await using app = await createQueueApp({
+      check: (input) => {
+        const pr = input.prs[0]
+        if (pr === undefined) throw new Error("expected one PR per admission check")
+        checkedPRs.push(pr.id)
+        return { status: "passed", output: { checked: true } }
+      },
+    })
+    const queued = await submitBranch(app, "issue/unrelated-queued-check")
+    const selected = await submitBranch(app, "issue/explicitly-selected-check")
+    for (const pr of [queued, selected]) await app.bays.requestChecks({ pr: pr.id })
+
+    await app.queue.run({ prs: [selected.id] }, runtime)
+
+    expect(checkedPRs).toEqual([selected.id])
+    expect(app.queue.eligibility(selected.id)).toMatchObject({ checks: { status: "passed" } })
+    expect(app.queue.eligibility(queued.id)).toMatchObject({
+      runnable: false,
+      reason: { code: "checks-pending" },
+      checks: { status: "queued" },
+    })
+    expect(Queues.values(app.state().queues).flatMap((run) => run.prs.map((pr) => pr.id))).not.toContain(queued.id)
+  })
+
   it("integrates a checks-passed PR while another admission's check is still in flight", async () => {
     await using app = await createQueueApp({
       check: () => ({ status: "passed", output: { checked: true } }),
@@ -3227,12 +3283,16 @@ describe("Queue", () => {
 
   it("keeps admission globally FIFO even when a later PR is selected explicitly", async () => {
     const checked: string[] = []
-    await using app = await createQueueApp({
-      check: (input) => {
-        checked.push(input.prs[0]!.id)
-        return { status: "passed", output: { checked: true } }
+    const journal = createMemoryJournal()
+    await using app = await createQueueApp(
+      {
+        check: (input) => {
+          checked.push(input.prs[0]!.id)
+          return { status: "passed", output: { checked: true } }
+        },
       },
-    })
+      journal,
+    )
     const first = await submitBranch(app, "issue/first-check")
     const second = await submitBranch(app, "issue/second-check")
     await app.bays.requestChecks({ pr: first.id })
@@ -3245,6 +3305,17 @@ describe("Queue", () => {
       { status: "passed", prs: [{ id: second.id }] },
     ])
     expect(checked).toEqual([first.id, second.id])
+
+    const admissionArgs: unknown[] = []
+    for await (const batch of journal.read()) {
+      admissionArgs.push(
+        ...batch.values
+          .map((value) => parseJournalFrame(value))
+          .filter(({ command }) => command.op === "queue.admit")
+          .map(({ command }) => command.args),
+      )
+    }
+    expect(admissionArgs).toEqual([{ pr: second.id }, { pr: first.id }, { pr: second.id }, { pr: second.id }])
   })
 
   it("orders admission age and position from the check request fact, not the earlier push", async () => {
