@@ -34,7 +34,7 @@ describe("actionable failure projection", () => {
     ).toEqual({
       code: "authored-gitlink",
       cause: "PR 'PR42' changes generated-only gitlinks [vendor/yrd]",
-      resolution: ["yrd pr create <branch>", "yrd pr recut PR42 --queue --force"],
+      resolution: ["yrd pr create <branch>", "yrd pr recut PR42 --preflight --queue"],
       reference: "README.md#pr-eligibility-and-checks",
     } satisfies ActionableFailure)
   })
@@ -60,7 +60,7 @@ describe("actionable failure projection", () => {
       "git -C vendor/yrd push -u origin HEAD",
       'git add vendor/yrd && git commit -m "fix(yrd): compose vendor/yrd pins"',
       "yrd pr create <branch>",
-      "yrd pr recut PR77 --queue --force",
+      "yrd pr recut PR77 --preflight --queue",
     ])
     expect(failure.reference).toBe("README.md#resolving-divergent-gitlink-pins")
   })
@@ -100,7 +100,7 @@ describe("actionable failure output", () => {
       [
         "error: PR 'PR42' changes generated-only gitlinks [vendor/yrd]",
         "resolve: yrd pr create <branch>",
-        "resolve: yrd pr recut PR42 --queue --force",
+        "resolve: yrd pr recut PR42 --preflight --queue",
         "reference: README.md#pr-eligibility-and-checks",
         "",
       ].join("\n"),
@@ -173,7 +173,7 @@ describe("actionable failure output", () => {
     expect(data.failure).toMatchObject({
       code: "authored-gitlink",
       cause: "PR 'PR42' changes generated-only gitlinks [vendor/yrd]",
-      resolution: ["yrd pr create <branch>", "yrd pr recut PR42 --queue --force"],
+      resolution: ["yrd pr create <branch>", "yrd pr recut PR42 --preflight --queue"],
     })
     expect(data.steps[0]?.failure).toEqual(data.failure)
 
@@ -187,7 +187,7 @@ describe("actionable failure output", () => {
       expect(output).toContain("CAUSE")
       expect(output).toContain("PR 'PR42' changes generated-only gitlinks [vendor/yrd]")
       expect(output).toContain("RESOLVE")
-      expect(output).toContain("yrd pr recut PR42 --queue --force")
+      expect(output).toContain("yrd pr recut PR42 --preflight --queue")
       expect(output).toContain("REFERENCE README.md#pr-eligibility-and-checks")
       if (!compact) {
         expect(output.split("\n").find((row) => row.trimStart().startsWith("merge"))).toContain("err=authored-gitlink")

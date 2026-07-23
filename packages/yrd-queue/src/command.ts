@@ -1955,7 +1955,7 @@ function candidateFailure(
 }
 
 function authoredRootWorkflow(pr: string): string {
-  return `authored root carriers use 'yrd pr create <branch>', then 'yrd pr recut ${pr} --queue --force' on that same PR; no composition manifest or manual recut is needed`
+  return `authored root carriers use 'yrd pr create <branch>', then 'yrd pr recut ${pr} --preflight --queue' and run its exact next command on that same PR; no composition manifest or manual triage is needed`
 }
 
 function withAuthoredRootWorkflow(failure: CandidateFailure, pr: string): CandidateFailure {

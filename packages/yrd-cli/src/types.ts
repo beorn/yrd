@@ -51,6 +51,22 @@ export type PruneGitFacts = Readonly<{
   /** Tree OID of a conflict-free merge of base and head, or undefined when the merge conflicts. */
   mergeTree(baseSha: string, headSha: string): string | undefined | Promise<string | undefined>
   treeOf(sha: string): string | Promise<string>
+  /** Selected source-base distance from the pinned authoritative target. The
+   * source-only side must be zero before recut can be classified safely. */
+  pinDistance?(
+    sourceBaseSha: string,
+    targetBaseSha: string,
+  ):
+    | Readonly<{ sourceOnly: number; targetOnly: number }>
+    | Promise<Readonly<{ sourceOnly: number; targetOnly: number }>>
+  /** Stable patch identity and an equivalent target-side commit when one can
+   * be attributed. Patch identity is evidence only; exact tree proof remains
+   * the authority for a subsumed verdict. */
+  patchMatch?(
+    sourceBaseSha: string,
+    headSha: string,
+    targetBaseSha: string,
+  ): Readonly<{ patchId?: string; targetSha?: string }> | Promise<Readonly<{ patchId?: string; targetSha?: string }>>
 }>
 
 export type YrdCliIO = {
@@ -77,7 +93,8 @@ export type YrdCliIO = {
   /** Head commit subject + body used to default a submitted PR's title/description. */
   resolveCommitMeta?(ref: string, cwd: string): Promise<Readonly<{ subject: string; body?: string }> | undefined>
   currentBranch?(cwd: string): string | undefined
-  /** Git facts for `pr prune`; defaults to real Git plumbing in `cwd`. */
+  /** Git facts for `pr prune` and `pr recut --preflight`; defaults to real Git
+   * plumbing in `cwd`. */
   pruneGit?(cwd: string): PruneGitFacts
   /** Resolve a submodule's upstream default branch for `yrd init`; defaults to
    * `git ls-remote --symref`. Tests inject a resolver to avoid the network. */

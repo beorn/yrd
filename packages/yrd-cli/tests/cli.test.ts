@@ -1271,12 +1271,13 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("pr", "recut", "--help"), help.io), help.stderr()).toBe(0)
     expect(help.stdout()).toContain("Usage: yrd pr recut [options] <selector>")
     expect(help.stdout()).toContain("--revision <number>")
+    expect(help.stdout()).toContain("--preflight")
     expect(help.stdout()).toContain("--queue")
     expect(help.stdout()).toContain("--json")
     expect(help.stdout()).toContain("Authored root carrier")
     expect(help.stdout()).toContain("$ yrd pr create <branch>")
-    expect(help.stdout()).toContain("$ yrd pr recut <PR> --queue")
-    expect(help.stdout()).toMatch(/no\s+composition\s+manifest or manual recut/u)
+    expect(help.stdout()).toContain("$ yrd pr recut <PR> --preflight --queue")
+    expect(help.stdout()).toMatch(/no\s+composition\s+manifest or manual triage/u)
   })
 
   it("creates an authored carrier draft and queues a recut revision on the same PR", async () => {

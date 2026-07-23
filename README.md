@@ -371,7 +371,8 @@ yrd pr list [--base <branch>] [--state <state>] [--issue <ref>]
   [--needs-review [--reviewer <actor>]] [--json]
 yrd pr edit <selector> [--issue <ref>] [--note <text>]
   [--title <text>] [--description <text>] [--json]
-yrd pr recut <selector> [--revision <number>] [--queue] [--json]
+yrd pr recut <selector> [--revision <number>] [--preflight] [--queue]
+  [--force] [--json]
 yrd pr ready <selector> [--json]
 yrd pr review <selector> (--approve | --reject)
   [--by <actor>] [--ref <id>] [--note <text>] [--json]
@@ -404,6 +405,16 @@ still receives a successor revision with the derived patch/tree certificate.
 detail, and watch output retain the recut lineage and cumulative source-ready
 age while reporting the successor revision's queue wait separately.
 
+`pr recut --preflight` is the non-mutating decision surface. It pins the
+authoritative target once and emits exactly one of `SUBSUMED-WITHDRAW`,
+`RECUT`, `RECUT-FORCE`, or `FRESH-NOOP`, followed by the exact next command.
+Its evidence names source/target pin distance, exact ancestry or merge-result
+tree proof, and any stable patch-id landing match. Tree equality—not patch-id
+alone—authorizes withdrawal because stable patch IDs intentionally ignore
+whitespace. Missing objects, diverged bases, and composed source payloads fail
+closed instead of producing a guessed verdict. Pass `--queue` to include queue
+admission in the recommended next command.
+
 The resident Queue owns freshness after admission. Before each run snapshot it
 compares every admitted revision's immutable base with the authoritative base;
 when the base advanced, it records an `admitted -> refreshed` recut on the same
@@ -418,12 +429,14 @@ attaching a composition manifest:
 
 ```bash
 yrd pr create <branch>
-yrd pr recut <PR> --queue --force
+yrd pr recut <PR> --preflight --queue
+# Run the exact `next:` command printed by preflight.
 ```
 
-`--force` is explicit because an authored-root rejection can leave a passing
-check attached to the current revision; recut replaces that revision with the
-machine-certified successor.
+The preflight returns `RECUT-FORCE` when an authored-root rejection left a
+passing check attached to the current revision, making the required override
+explicit before recut replaces that revision with the machine-certified
+successor.
 
 The Queue is the only scheduler. Its journaled passed Run is also the cache:
 integration reuses matching carrier-classified pre-merge work only when
@@ -487,7 +500,8 @@ git -C <submodule> merge <authoritative-pin>
 git -C <submodule> push -u origin HEAD
 git add <submodule> && git commit -m "fix(yrd): compose <submodule> pins"
 yrd pr create <branch>
-yrd pr recut <PR> --queue --force
+yrd pr recut <PR> --preflight --queue
+# Run the exact `next:` command printed by preflight.
 ```
 
 The composition commit must be published before the root carrier is submitted;
