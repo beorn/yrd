@@ -837,6 +837,7 @@ async function closeRuntime(
 }
 
 type ShutdownSignal = "SIGINT" | "SIGTERM"
+const ONE_SHOT_RECOVERY_CUTOFF = "1970-01-01T00:00:00.000Z"
 
 /** Announce a graceful drain as ONE structured loggily record — never a bare
  * wrapped stderr paragraph, since the resident runner's stderr IS its log
@@ -852,9 +853,45 @@ export function reportGracefulShutdown(log: ConditionalLogger, signal: ShutdownS
   })
 }
 
+async function settleOneShotQueueRun(
+  host: YrdHost,
+  runner: string,
+  signal: ShutdownSignal,
+  log: ConditionalLogger,
+): Promise<void> {
+  try {
+    // A runner-scoped recovery also sweeps every unrelated lease older than its
+    // cutoff. Epoch keeps this signal path exact: only this PID-scoped one-shot
+    // runner is declared dead.
+    const runs = await host.app.queue.recover({
+      recoveryTime: ONE_SHOT_RECOVERY_CUTOFF,
+      runner,
+      reason: `one-shot queue runner interrupted by ${signal}`,
+    })
+    if (runs.length > 0) {
+      log.warn?.("one-shot queue run interrupted — settled before exit", {
+        signal,
+        runner,
+        runs: runs.map((run) => run.id),
+        outcome: "job-lost",
+      })
+    }
+  } catch (error) {
+    log.error?.("one-shot queue run interrupted — settlement failed before exit", {
+      signal,
+      runner,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    throw error
+  }
+}
+
 /** Own process signals at the run-to-exit CLI boundary, then restore native
  * signal exit semantics only after the host has drained its resources. */
-function bindProcessShutdown(shutdown: () => Promise<void>, drain?: (signal: ShutdownSignal) => void): () => void {
+function bindProcessShutdown(
+  shutdown: (signal: ShutdownSignal) => Promise<void>,
+  drain?: (signal: ShutdownSignal) => void,
+): () => void {
   let draining = false
   let hardSignal: ShutdownSignal | undefined
   const remove = (): void => {
@@ -880,7 +917,7 @@ function bindProcessShutdown(shutdown: () => Promise<void>, drain?: (signal: Shu
     // Closing the host aborts a live renderer, but the renderer owns terminal
     // restoration in its surrounding `using` block. Let the command boundary
     // unwind that block before `finish()` restores native signal exit status.
-    void shutdown().catch(() => undefined)
+    void shutdown(signal).catch(() => undefined)
   }
   const onSigint = () => onSignal("SIGINT")
   const onSigterm = () => onSignal("SIGTERM")
@@ -1230,15 +1267,28 @@ export async function runYrdProcess(
 
   let log: ConditionalLogger | undefined
   let host: YrdHost | undefined
+  let oneShotRunner: string | undefined
+  let shutdownLog: ConditionalLogger | undefined
   let closePromise: Promise<void> | undefined
-  const closeHost = () => (closePromise ??= host?.close() ?? Promise.resolve())
+  const closeHost = (signal?: ShutdownSignal) =>
+    (closePromise ??= (async () => {
+      try {
+        if (signal !== undefined && host !== undefined && oneShotRunner !== undefined && shutdownLog !== undefined) {
+          await settleOneShotQueueRun(host, oneShotRunner, signal, shutdownLog)
+        }
+      } finally {
+        await host?.close()
+      }
+    })())
   let removeShutdownSignals: () => void = () => undefined
   try {
     return await runYrdProcessRuntime(argv, io, {
       ambientCwd: io.cwd ?? globalThis.process.cwd(),
       env,
-      async load(context, options) {
-        const resident = options.resident ? residentRunnerIdentity(env) : undefined
+      async load(context, posture) {
+        const runner =
+          posture === "resident-queue-run" || posture === "one-shot-queue-run" ? residentRunnerIdentity(env) : undefined
+        const resident = posture === "resident-queue-run" ? runner : undefined
         // The resident follow-runner logs at DEBUG-by-default (see
         // residentObservability) so run/step starts and successful completions
         // reach its concise human formatter; one-shot commands keep WARN.
@@ -1268,12 +1318,14 @@ export async function runYrdProcess(
         const activeHost = await createYrdRuntimeHost(
           { cwd: context.repo, env, log: runtimeLog },
           resident,
-          options.viewer ? "viewer" : "active",
+          posture === "viewer" ? "viewer" : "active",
         )
         residentArtifacts.root = join(activeHost.repository.stateDir, "artifacts")
         host = activeHost
         const runnerLog = runtimeLog.child("runner")
-        const drain = options.resident ? new AbortController() : undefined
+        oneShotRunner = posture === "one-shot-queue-run" ? runner?.id : undefined
+        shutdownLog = runnerLog
+        const drain = posture === "resident-queue-run" ? new AbortController() : undefined
         removeShutdownSignals = bindProcessShutdown(
           closeHost,
           drain === undefined
@@ -1289,7 +1341,7 @@ export async function runYrdProcess(
           io: {
             cwd: activeHost.repository.worktree,
             artifactRoot: join(activeHost.repository.stateDir, "artifacts"),
-            ...(resident === undefined ? {} : { runner: resident.id }),
+            ...(runner === undefined ? {} : { runner: runner.id }),
             concurrency: io.concurrency ?? activeHost.config.contest.concurrency,
             resolveRevision: (ref, cwd) =>
               io.resolveRevision === undefined
