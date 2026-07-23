@@ -3191,7 +3191,7 @@ function detailStatusOutcome(
   data?: QueueShowData,
 ): Readonly<{ text: string; color: string }> {
   const run = data === undefined ? undefined : runStatusOutcome(data)
-  const word = row.status === "pending" ? "todo" : row.status
+  const word = row.status === "pending" ? "queued" : row.status
   return run ?? { text: `${row.glyph} ${word}`, color: timelineStatusColor(row) }
 }
 
@@ -3224,7 +3224,7 @@ const TIMELINE_STATUS_WORDS = {
   draft: "draft",
   revising: "revising",
   submitted: "submitted",
-  pending: "todo",
+  pending: "queued",
   running: "run",
   integrated: "done",
   rejected: "fail",
@@ -3241,8 +3241,10 @@ const TIMELINE_STATUS_WORDS = {
 // Vocabulary (user respec 2026-07-15; rejected renders `fail`, integrated
 // renders `done`). The pre-run PRs now carry their own fine STATUS words —
 // `draft`/`revising`/`submitted` — so a non-integrated PR is always visible with
-// an explicit label (user directive 2026-07-22, generalizing the 2026-07-21
-// pending→`todo` rule); the coarse filter pills stay todo/running/failed/done.
+// an explicit label (user directive 2026-07-22). Pending renders `queued`
+// (todo→queued, @cto naming ruling 2026-07-23: "ready" is taken by `km bd
+// ready`); the coarse filter pills stay todo/running/failed/done until the
+// `t` hotkey question is ruled (a `q` hotkey collides with quit muscle memory).
 function timelineStatusCell(row: QueueTimelineProjectedRow): TimelineStatusCell {
   const word = TIMELINE_STATUS_WORDS[row.status]
   return { word, color: timelineStatusColor(row) }

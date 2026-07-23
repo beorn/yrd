@@ -55,6 +55,21 @@ notify:
     )
   })
 
+  it("parses the refuse boundary and rejects malformed shapes loudly", () => {
+    expect(
+      parseYrdConfig(
+        Bun.YAML.parse(`
+refuse:
+  paths: ["@", "hub/"]
+  reason: pm state lives in the sibling state repo
+`),
+      ).refuse,
+    ).toEqual({ paths: ["@", "hub/"], reason: "pm state lives in the sibling state repo" })
+    expect(parseYrdConfig({}).refuse).toBeUndefined()
+    expect(() => parseYrdConfig({ refuse: { paths: [] } })).toThrow()
+    expect(() => parseYrdConfig({ refuse: { paths: ["@"], pointer: "x" } })).toThrow()
+  })
+
   it("loads one file and fills useful defaults", async () => {
     const loaded = await loadYrdConfig({
       repo: "/repo",
