@@ -12,7 +12,15 @@ import {
 } from "@yrd/bay"
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
-import type { IntegrationProof, PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
+import {
+  GateCertificateSchema,
+  type IntegrationProof,
+  type PRCheckRecord,
+  type PREligibility,
+  type QueueRun,
+  type QueueStep,
+  type QueueSummary,
+} from "@yrd/queue"
 import {
   Box,
   formatNounId,
@@ -576,10 +584,16 @@ type QueueShowRow = Readonly<{
   output: string
   artifacts: string
   evidence: string | Record<string, unknown>
+  gate?: GateEvidence
   checkpoint: string
   landing: string
   location?: QueueLogLocation
   locations: readonly QueueLogLocationEntry[]
+}>
+
+type GateEvidence = Readonly<{
+  mode: "delta" | "strict"
+  residualCount: number
 }>
 
 export type QueueShowData = Readonly<{
@@ -1363,7 +1377,22 @@ function stepCheckpointText(step: QueueStep): string {
   return value.length === 0 ? safeText(checkpoint) : value.join(" ")
 }
 
-function stepEvidence(step: QueueStep): string | Record<string, unknown> {
+function gateEvidenceFromOutput(output: unknown): GateEvidence | undefined {
+  if (!isObjectValue(output)) return undefined
+  const parsed = GateCertificateSchema.safeParse(output.certificate)
+  if (!parsed.success) return undefined
+  const certificate = parsed.data
+  return {
+    mode: certificate.mode,
+    residualCount: certificate.reports.reduce((total, report) => total + report.residual.count, 0),
+  }
+}
+
+function gateEvidenceLabel(gate: GateEvidence): string {
+  return `${gate.mode} residual:${gate.residualCount}`
+}
+
+function stepEvidence(step: QueueStep, gate: GateEvidence | undefined): string | Record<string, unknown> {
   const job = step.job
   if (job === undefined) return "-"
   const evidence: Record<string, unknown> = {}
@@ -1373,6 +1402,7 @@ function stepEvidence(step: QueueStep): string | Record<string, unknown> {
   if ("detail" in job && typeof job.detail === "string" && job.detail !== "") evidence.detail = job.detail
   if ("artifacts" in job && Array.isArray(job.artifacts) && job.artifacts.length > 0) evidence.artifacts = job.artifacts
   if ("checkpoint" in job && job.checkpoint !== undefined) evidence.checkpoint = job.checkpoint
+  if (gate !== undefined) evidence.gate = gateEvidenceLabel(gate)
   return Object.keys(evidence).length === 0 ? "-" : evidence
 }
 
@@ -4622,6 +4652,7 @@ function queueShowStepRow(run: QueueRun, step: QueueStep): QueueShowRow {
   const command = stepCommand(step)
   const taskStatus = stepTaskStatusOf(step)
   const stepFailure = failureFact(undefined, step)
+  const gate = step.job !== undefined && "output" in step.job ? gateEvidenceFromOutput(step.job.output) : undefined
   const stepDurationMs =
     step.job === undefined || !("startedAt" in step.job) || !("finishedAt" in step.job)
       ? undefined
@@ -4652,7 +4683,8 @@ function queueShowStepRow(run: QueueRun, step: QueueStep): QueueShowRow {
     detail: stepDetail(step),
     output: stepOutput(step),
     artifacts: stepArtifactsText(step),
-    evidence: stepEvidence(step),
+    evidence: stepEvidence(step, gate),
+    ...(gate === undefined ? {} : { gate }),
     checkpoint: stepCheckpointText(step),
     landing: queueLanding(run),
     locations,
@@ -4674,6 +4706,7 @@ function queueShowAttemptRow(run: QueueRun, attempt: QueueAttempt): QueueShowRow
   }
 
   const output = attempt.result.status === "lost" ? undefined : attempt.result.output
+  const gate = gateEvidenceFromOutput(output)
   const locations = attemptLocations(attempt)
   const firstLocation = locations[0]?.location
   const artifacts = attemptArtifacts(attempt)
@@ -4710,7 +4743,15 @@ function queueShowAttemptRow(run: QueueRun, attempt: QueueAttempt): QueueShowRow
         ? "-"
         : safeText(attempt.result.output ?? (attempt.result.status === "failed" ? attempt.result.error : undefined)),
     artifacts: artifacts.length === 0 ? "-" : artifactLabel(artifacts[0]),
-    evidence: isObjectValue(output) ? output : "-",
+    evidence:
+      gate === undefined
+        ? isObjectValue(output)
+          ? output
+          : "-"
+        : isObjectValue(output)
+          ? { ...output, gate: gateEvidenceLabel(gate) }
+          : { gate: gateEvidenceLabel(gate) },
+    ...(gate === undefined ? {} : { gate }),
     checkpoint: "-",
     landing: queueLanding(run),
     locations,
@@ -4893,6 +4934,20 @@ function presentFact(value: string | undefined): string | undefined {
   if (value === undefined) return undefined
   const trimmed = value.trim()
   return trimmed === "" || trimmed === "-" ? undefined : trimmed
+}
+
+function queueGateSummary(data: QueueShowData): string | undefined {
+  const gates = data.steps.flatMap((step) => (step.gate === undefined ? [] : [step.gate]))
+  const [first] = gates
+  if (first === undefined) return undefined
+  const modes = new Set(gates.map(({ mode }) => mode))
+  if (modes.size === 1) {
+    return gateEvidenceLabel({
+      mode: first.mode,
+      residualCount: gates.reduce((total, { residualCount }) => total + residualCount, 0),
+    })
+  }
+  return gates.map(gateEvidenceLabel).join(", ")
 }
 
 /** Dedupe `X@X` landings (commit == landing sha) to one SHA. */
@@ -5423,6 +5478,7 @@ function CompactQueueShowView({
   const parent = presentFact(data.parent)
   const isolation = data.isolationPart === "-" ? undefined : data.isolationPart
   const timing = queueRunTimingRow(data)
+  const gate = queueGateSummary(data)
   const latestStep = data.steps.at(-1)
   return (
     // minWidth={0} lets the long truncate-Text facts shrink to the (narrow)
@@ -5449,6 +5505,7 @@ function CompactQueueShowView({
             </Text>
           ) : null}
           {timing === undefined ? null : <Text wrap="truncate">{timing}</Text>}
+          {gate === undefined ? null : <Text wrap="truncate">GATE {gate}</Text>}
           {showIntegration ? <QueueIntegrationFacts data={data} /> : null}
           {parent === undefined && isolation === undefined ? null : (
             <Text wrap="truncate" color="$fg-muted">

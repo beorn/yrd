@@ -18,6 +18,7 @@ import { createLogger } from "loggily"
 import * as z from "zod"
 import {
   CommandEvidenceSchema,
+  DIAGNOSTICS_COMPARISON_READY,
   GitCheckEvidenceSchema,
   GitCheckResultEvidenceSchema,
   IntegrationProofSchema,
@@ -348,6 +349,8 @@ async function checkedQueue(
     checkoutParent?: string
     classification?: "base" | "carrier"
     comparison?: "diagnostics"
+    comparisonReady?: string
+    mode?: "delta" | "strict"
     env?: NodeJS.ProcessEnv
     environmentOverrides?: Readonly<Record<string, string>>
     environmentPassthrough?: readonly string[]
@@ -363,6 +366,8 @@ async function checkedQueue(
       command,
       ...(options.classification === undefined ? {} : { classification: options.classification }),
       ...(options.comparison === undefined ? {} : { comparison: options.comparison }),
+      ...(options.comparisonReady === undefined ? {} : { comparisonReady: options.comparisonReady }),
+      ...(options.mode === undefined ? {} : { mode: options.mode }),
       ...(options.waiting ? { runner: "waiting" as const } : {}),
       ...(options.checkoutParent === undefined ? {} : { checkoutParent: options.checkoutParent }),
       ...(options.env === undefined ? {} : { env: options.env }),
@@ -2441,6 +2446,7 @@ describe("Queue command adapters", () => {
 
   it("passes parent-identical failed diagnostics regardless of order and duplicates", async () => {
     const { repo, feature: featureSha } = await repository("feature")
+    const baseSha = await git(repo, ["rev-parse", "main"])
     await using process = createProcess()
     await using app = await checkedQueue(
       process,
@@ -2466,6 +2472,234 @@ describe("Queue command adapters", () => {
       netNewDiagnostics: [],
       resolvedDiagnostics: [],
     })
+    expect(evidence.certificate).toMatchObject({
+      version: 1,
+      mode: "delta",
+      baseSha,
+      candidateSha: evidence.candidateSha,
+      reports: [
+        {
+          version: 1,
+          comparator: { id: "diagnostics", version: 1 },
+          residual: { count: 2, hash: expect.stringMatching(/^[0-9a-f]{64}$/u) },
+        },
+      ],
+    })
+  })
+
+  it("aggregates structured child residual reports into one auditable delta certificate", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const baseSha = await git(repo, ["rev-parse", "main"])
+    await using process = createProcess()
+    const firstHash = "a".repeat(64)
+    const secondHash = "b".repeat(64)
+    const report = (id: string, count: number, hash: string) =>
+      `YRD-GATE-REPORT ${JSON.stringify({
+        version: 1,
+        comparator: { id, version: 1 },
+        residual: { count, hash },
+      })}`
+    await using app = await checkedQueue(
+      process,
+      repo,
+      shellCommand(
+        `printf '%s\\n' '${report("bead-hygiene", 3, firstHash)}' '${report("affected-tests", 2, secondHash)}'`,
+      ),
+    )
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ status: "passed" })
+    const job = run?.steps[0]?.job
+    if (job?.status !== "passed") throw new Error("structured child reports did not pass")
+    const evidence = GitCheckEvidenceSchema.parse(job.output)
+    expect(evidence.certificate).toEqual({
+      version: 1,
+      mode: "delta",
+      baseSha,
+      candidateSha: evidence.candidateSha,
+      reports: [
+        {
+          version: 1,
+          comparator: { id: "bead-hygiene", version: 1 },
+          residual: { count: 3, hash: firstHash },
+        },
+        {
+          version: 1,
+          comparator: { id: "affected-tests", version: 1 },
+          residual: { count: 2, hash: secondHash },
+        },
+      ],
+    })
+  })
+
+  it("keeps a structured child failure terminal instead of reinterpreting it as generic diagnostics", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    let configuredRuns = 0
+    const observed: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "sh") configuredRuns += 1
+        return process.run(request)
+      },
+    }
+    const report = `YRD-GATE-REPORT ${JSON.stringify({
+      version: 1,
+      comparator: { id: "affected-tests", version: 1 },
+      residual: { count: 1, hash: "a".repeat(64) },
+    })}`
+    await using app = await checkedQueue(
+      observed,
+      repo,
+      shellCommand(`printf '%s\\n' '${report}' 'src/shared.ts:1:1 - child-owned failure'; exit 17`),
+      {
+        comparison: "diagnostics",
+        comparisonReady: DIAGNOSTICS_COMPARISON_READY,
+        mode: "delta",
+      },
+    )
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ status: "failed", error: { code: "check-failed" } })
+    expect(configuredRuns).toBe(1)
+  })
+
+  it("compares final diagnostics only after structured children certify readiness", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    const report = (id: string, count: number, hash: string) =>
+      `YRD-GATE-REPORT ${JSON.stringify({
+        version: 1,
+        comparator: { id, version: 1 },
+        residual: { count, hash },
+      })}`
+    await using app = await checkedQueue(
+      process,
+      repo,
+      shellCommand(
+        `printf '%s\\n' '${report("bead-hygiene", 3, "a".repeat(64))}' ` +
+          `'${report("affected-tests", 2, "b".repeat(64))}' ` +
+          `'${report(DIAGNOSTICS_COMPARISON_READY, 0, "c".repeat(64))}' ` +
+          "'src/shared.ts:1:1 - inherited'; exit 17",
+      ),
+      {
+        comparison: "diagnostics",
+        comparisonReady: DIAGNOSTICS_COMPARISON_READY,
+        mode: "delta",
+      },
+    )
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ status: "passed" })
+    const job = run?.steps[0]?.job
+    if (job?.status !== "passed") throw new Error("certified compound diagnostics did not pass")
+    const evidence = GitCheckEvidenceSchema.parse(job.output)
+    expect(evidence.certificate?.reports.map(({ comparator, residual }) => [comparator.id, residual.count])).toEqual([
+      ["bead-hygiene", 3],
+      ["affected-tests", 2],
+      [DIAGNOSTICS_COMPARISON_READY, 0],
+      ["diagnostics", 1],
+    ])
+  })
+
+  it("refuses diagnostics comparison when the declared readiness report is missing", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    let configuredRuns = 0
+    const observed: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "sh") configuredRuns += 1
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(
+      observed,
+      repo,
+      shellCommand("printf 'src/shared.ts:1:1 - inherited\\n'; exit 17"),
+      {
+        comparison: "diagnostics",
+        comparisonReady: DIAGNOSTICS_COMPARISON_READY,
+        mode: "delta",
+      },
+    )
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ status: "failed", error: { code: "check-failed" } })
+    expect(configuredRuns).toBe(1)
+  })
+
+  it("refuses a green compound command that omits its declared readiness report", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, shellCommand("true"), {
+      comparison: "diagnostics",
+      comparisonReady: DIAGNOSTICS_COMPARISON_READY,
+      mode: "delta",
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ status: "failed", error: { code: "check-comparison-not-ready" } })
+  })
+
+  it("fails closed when a child emits a malformed structured report", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, shellCommand("printf '%s\\n' 'YRD-GATE-REPORT {not-json}'"), {
+      mode: "delta",
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ status: "failed", error: { code: "check-gate-report-invalid" } })
+  })
+
+  it("refuses a green strict command that reports a non-empty residual", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    const report = `YRD-GATE-REPORT ${JSON.stringify({
+      version: 1,
+      comparator: { id: "bead-hygiene", version: 1 },
+      residual: { count: 1, hash: "a".repeat(64) },
+    })}`
+    await using app = await checkedQueue(process, repo, shellCommand(`printf '%s\\n' '${report}'`), {
+      mode: "strict",
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ status: "failed", error: { code: "check-strict-residual" } })
+  })
+
+  it("strict mode keeps an inherited diagnostics failure terminal and skips the parent run", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    let configuredRuns = 0
+    const observed: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "sh") configuredRuns += 1
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(
+      observed,
+      repo,
+      shellCommand("printf 'src/shared.ts:1:1 - inherited\\n'; exit 17"),
+      { comparison: "diagnostics", mode: "strict" },
+    )
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ status: "failed", error: { code: "check-failed" } })
+    const job = run?.steps[0]?.job
+    if (job?.status !== "failed") throw new Error("strict inherited failure did not fail")
+    const evidence = GitCheckEvidenceSchema.parse(job.output)
+    expect(evidence.mode).toBe("strict")
+    expect(evidence.comparison).toBeUndefined()
+    expect(configuredRuns).toBe(1)
   })
 
   it("passes a candidate without requiring its failing parent gate to pass", async () => {
@@ -3246,6 +3480,7 @@ describe("Queue command adapters", () => {
       "YRD_BASE=main",
       `YRD_BASE_SHA=${baseSha}`,
       "YRD_CUSTOM=custom",
+      "YRD_GATE_MODE=delta",
       "YRD_JOB=J1",
       "YRD_PR=PR1",
       'YRD_PRS=["PR1"]',

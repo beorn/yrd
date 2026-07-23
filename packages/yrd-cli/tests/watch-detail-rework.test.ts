@@ -68,6 +68,38 @@ function failedRun(): QueueShowData {
   return queueShowData(run, [run])
 }
 
+function deltaRun(): QueueShowData {
+  const baseSha = "a".repeat(40)
+  const candidateSha = "b".repeat(40)
+  const pr = fixturePr("PR71", "submitted", "2026-07-13T10:30:00.000Z", "Carry inherited red")
+  const run = fixtureRun("R71", [pr], "passed", "2026-07-13T10:40:00.000Z", {
+    finishedAt: "2026-07-13T10:42:00.000Z",
+    steps: [
+      fixtureStep(
+        "check",
+        fixtureJob("J71-check", "passed", {
+          output: {
+            certificate: {
+              version: 1,
+              mode: "delta",
+              baseSha,
+              candidateSha,
+              reports: [
+                {
+                  version: 1,
+                  comparator: { id: "affected-tests", version: 1 },
+                  residual: { count: 3, hash: "c".repeat(64) },
+                },
+              ],
+            },
+          },
+        }),
+      ),
+    ],
+  })
+  return queueShowData(run, [run])
+}
+
 function glyphColumn(app: ReturnType<ReturnType<typeof createRenderer>>, row: number): number {
   for (let column = 0; column < app.width; column += 1) {
     if (app.cell(column, row).char === BRANCH_GLYPH) return column
@@ -147,6 +179,23 @@ describe("detail title row — run identity emphasis + right-aligned outcome", (
     const app = createRenderer({ cols: 60, rows: 4 })(createElement(QueueDetailTitle, {}))
     try {
       expect(app.text).toContain("No queue row selected.")
+    } finally {
+      app.unmount()
+    }
+  })
+})
+
+describe("delta admission visibility", () => {
+  it("surfaces the carried-red count in the run proof line", () => {
+    const data = deltaRun()
+    expect(data.steps[0]?.gate).toEqual({ mode: "delta", residualCount: 3 })
+    expect(data.steps[0]?.evidence).toMatchObject({ gate: "delta residual:3" })
+
+    const app = createRenderer({ cols: 120, rows: 12 })(
+      createElement(Box, { width: 120 }, createElement(QueueShowView, { data, compact: true })),
+    )
+    try {
+      expect(app.text).toContain("delta residual:3")
     } finally {
       app.unmount()
     }

@@ -822,6 +822,26 @@ otherwise opaque output stays on the plain exit-code contract; absence of
 parseable diagnostics never aliases a real command failure to an environment
 refusal. The comparison declaration is part of the installed-step cache
 identity.
+Object-form steps also accept `mode: delta | strict` (default `delta`).
+`strict` requires an absolutely green Candidate and never runs the parent
+comparator. `delta` may admit inherited diagnostics only through an explicitly
+declared `comparison: diagnostics`, or through structured child trailers of
+the form `YRD-GATE-REPORT <json>`. Opaque output, truncated diagnostics, and a
+nonzero structured-child exit remain terminal.
+
+A compound command that runs structured children before a diagnostics-only
+tool must emit a zero-residual `diagnostics-comparison-ready` report after every
+structured child passes and declare
+`comparisonReady: diagnostics-comparison-ready` in its step config. Only that
+marker permits Yrd to compare a final nonzero diagnostics exit against the
+parent; a missing marker is terminal even when the command emitted no report.
+
+Every admitted check records a self-contained v1 gate certificate: mode, exact
+base and Candidate SHAs, comparator id/version, and each residual set's content
+hash plus count. The run/PR view projects this as `delta residual:N` or
+`strict residual:0`, so carried red stays visible even when admission is green.
+Mode is bound into installed-step identity; flipping a release step to `strict`
+cannot reuse a delta installation.
 `requires: [review]` is the only built-in review policy: the latest verdict for
 the current revision must approve. Comments never gate, and omitting
 `requires` leaves reviews informational.

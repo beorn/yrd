@@ -12,7 +12,7 @@ import { pathToFileURL } from "node:url"
 import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { createFailure, createMemoryJournal } from "@yrd/core"
-import { GitCheckEvidenceSchema, IntegrationProofSchema, Queues } from "@yrd/queue"
+import { DIAGNOSTICS_COMPARISON_READY, GitCheckEvidenceSchema, IntegrationProofSchema, Queues } from "@yrd/queue"
 import { createExclusive, createJournal } from "@yrd/persistence"
 import { createProcess, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createLogger, type ConditionalLogger } from "loggily"
@@ -207,6 +207,56 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(GitCheckEvidenceSchema.parse(job.output).comparison).toMatchObject({
       netNewDiagnostics: [],
       resolvedDiagnostics: [],
+    })
+  })
+
+  it("threads strict mode into the shipping child environment and typed evidence", async () => {
+    const { repo, featureSha } = await repository()
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check"],
+      requires: [],
+      definitions: {
+        check: {
+          run: 'test "$YRD_GATE_MODE" = strict',
+          runner: "local",
+          mode: "strict",
+        },
+      },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+    await using app = await createDefaultYrdApp({
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal: createMemoryJournal(),
+      process: runtimeProcess,
+      config,
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]
+    expect(run).toMatchObject({ status: "passed" })
+    const job = run?.steps[0]?.job
+    if (job?.status !== "passed") throw new Error("strict-mode step did not pass")
+    const evidence = GitCheckEvidenceSchema.parse(job.output)
+    expect(evidence).toMatchObject({
+      mode: "strict",
+      certificate: {
+        version: 1,
+        mode: "strict",
+        baseSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+        candidateSha: evidence.candidateSha,
+        reports: [
+          {
+            version: 1,
+            comparator: { id: "exit-code", version: 1 },
+            residual: { count: 0, hash: expect.stringMatching(/^[0-9a-f]{64}$/u) },
+          },
+        ],
+      },
     })
   })
 
@@ -2900,6 +2950,33 @@ describe("stepNoProgressMs — the no-output-progress bound that stalls a silent
     expect(queueStepRevision({ ...input, config: { ...input.config, comparison: "diagnostics" as const } })).not.toBe(
       baseline,
     )
+  })
+
+  it("binds the effective gate mode into the queue step revision identity", () => {
+    const toolchain = { bun: "1.3.0", node: "24.0.0", platform: "darwin", arch: "arm64" }
+    const input = {
+      repo: "/repo",
+      stateDir: "/repo/.git/yrd",
+      name: "check",
+      config: { run: "bun run check", runner: "local" as const },
+      timeoutMs: 60_000,
+      noProgressMs: 600_000,
+      toolchain,
+    }
+    const delta = queueStepRevision(input)
+
+    expect(queueStepRevision({ ...input, config: { ...input.config, mode: "delta" as const } })).toBe(delta)
+    expect(queueStepRevision({ ...input, config: { ...input.config, mode: "strict" as const } })).not.toBe(delta)
+    expect(
+      queueStepRevision({
+        ...input,
+        config: {
+          ...input.config,
+          comparison: "diagnostics" as const,
+          comparisonReady: DIAGNOSTICS_COMPARISON_READY,
+        },
+      }),
+    ).not.toBe(delta)
   })
 })
 
