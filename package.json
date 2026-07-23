@@ -36,6 +36,7 @@
     "check:hh": "bun run typecheck:hh && bun run test"
   },
   "dependencies": {
+    "@silvery/ansi": "^0.23.0",
     "@silvery/command": "^0.23.0",
     "@silvery/commander": "^0.23.0",
     "@silvery/scope": "^0.23.0",
