@@ -11,7 +11,7 @@
  * YrdCliIO.pruneGit so every verdict is deterministic.
  */
 import { execFileSync } from "node:child_process"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -43,6 +43,7 @@ const PR380_PATCH_ID = "cce1b8d2e6b8167b77aa50e0f880b74d3fa8871d"
 const PR380_LANDING_SHA = "868194792c4b2c1b07bd5a67c37ad3e21fd35ce1"
 const PR473_LANDING_SHA = "b47e240a6c3091b4687de96296d39c0a610df200"
 const PR476_PATCH_ID = "172a29302878f4f7fd0dcfad917ddbf434e78d04"
+const OVERSIZED_MERGE_TREE_BYTES = 1024 * 1024
 
 function ids(initial = 0): () => string {
   let value = initial
@@ -161,6 +162,35 @@ function outputIO(overrides: Partial<YrdCliIO> = {}) {
 
 function yrd(...args: string[]): string[] {
   return ["/usr/bin/bun", "/repo/bin/yrd.ts", ...args]
+}
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync("git", ["-C", cwd, ...args], {
+    encoding: "utf8",
+    maxBuffer: 8 * OVERSIZED_MERGE_TREE_BYTES,
+  }).trim()
+}
+
+function gitResult(cwd: string, ...args: string[]): Readonly<{ code: number; stdout: string }> {
+  try {
+    return {
+      code: 0,
+      stdout: execFileSync("git", ["-C", cwd, ...args], {
+        encoding: "utf8",
+        maxBuffer: 8 * OVERSIZED_MERGE_TREE_BYTES,
+      }),
+    }
+  } catch (error) {
+    const failed = error as Readonly<{ status?: unknown; stdout?: unknown }>
+    if (typeof failed.status !== "number") throw error
+    const stdout =
+      typeof failed.stdout === "string"
+        ? failed.stdout
+        : failed.stdout instanceof Uint8Array
+          ? Buffer.from(failed.stdout).toString("utf8")
+          : ""
+    return { code: failed.status, stdout }
+  }
 }
 
 async function journaledEvents(app: CliApp, name: string): Promise<Record<string, unknown>[]> {
@@ -655,6 +685,162 @@ describe("pr recut --preflight", () => {
 })
 
 describe("pr prune", () => {
+  it("does not trust --quiet when a sibling directory entry masks a content conflict", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "yrd-prune-quiet-false-negative-"))
+    try {
+      git(dir, "init", "-q", "-b", "main")
+      git(dir, "config", "user.name", "Yrd Test")
+      git(dir, "config", "user.email", "yrd@example.invalid")
+      writeFileSync(join(dir, "control.md"), "one\nbase\nthree\n")
+      mkdirSync(join(dir, "control"))
+      writeFileSync(join(dir, "control", "existing.md"), "existing\n")
+      git(dir, "add", ".")
+      git(dir, "commit", "-qm", "base")
+
+      git(dir, "switch", "-q", "-c", "topic/quiet-false-negative")
+      writeFileSync(join(dir, "control.md"), "one\ntopic\nthree\n")
+      writeFileSync(join(dir, "control", "same.md"), "same on both sides\n")
+      git(dir, "add", ".")
+      git(dir, "commit", "-qm", "topic")
+      const headSha = git(dir, "rev-parse", "HEAD")
+
+      git(dir, "switch", "-q", "main")
+      writeFileSync(join(dir, "control.md"), "one\nmain\nthree\n")
+      writeFileSync(join(dir, "control", "same.md"), "same on both sides\n")
+      git(dir, "add", ".")
+      git(dir, "commit", "-qm", "main")
+      const baseSha = git(dir, "rev-parse", "HEAD")
+      git(dir, "update-ref", "refs/remotes/origin/main", baseSha)
+
+      const quiet = gitResult(dir, "merge-tree", "--write-tree", "--quiet", baseSha, headSha)
+      const normal = gitResult(dir, "merge-tree", "--write-tree", baseSha, headSha)
+      expect({ quiet: quiet.code, normal: normal.code }).toEqual({ quiet: 0, normal: 1 })
+
+      const app = await createCliApp()
+      await app.bays.submit({ branch: "topic/quiet-false-negative", headSha, base: "main", baseSha: BASE_SHA })
+      const output = outputIO({ cwd: dir })
+      expect(await runYrd(app, yrd("pr", "prune", "--dry-run", "--json"), output.io), output.stderr()).toBe(0)
+      expect(JSON.parse(output.stdout())).toMatchObject({
+        checked: [
+          {
+            pr: "PR1",
+            checks: { headPresent: true, ancestorOfBase: false, mergeTree: "conflicts" },
+            verdict: "keep",
+          },
+        ],
+        summary: { checked: 1, withdrawn: 0, wouldWithdraw: 0, kept: 1, errors: 0 },
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("completes when one real merge-tree conflict report exceeds one MiB", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "yrd-prune-large-merge-tree-"))
+    try {
+      git(dir, "init", "-q", "-b", "main")
+      git(dir, "config", "user.name", "Yrd Test")
+      git(dir, "config", "user.email", "yrd@example.invalid")
+      const paths = Array.from(
+        { length: 900 },
+        (_, index) => `conflict-${index.toString().padStart(4, "0")}-${"x".repeat(220)}.txt`,
+      )
+      for (const path of paths) writeFileSync(join(dir, path), "base\n")
+      git(dir, "add", ".")
+      git(dir, "commit", "-qm", "base")
+      git(dir, "switch", "-q", "-c", "topic/oversized")
+      for (const path of paths) writeFileSync(join(dir, path), "topic\n")
+      git(dir, "commit", "-qam", "topic")
+      const headSha = git(dir, "rev-parse", "HEAD")
+      git(dir, "switch", "-q", "main")
+      for (const path of paths) writeFileSync(join(dir, path), "main\n")
+      git(dir, "commit", "-qam", "main")
+      const baseSha = git(dir, "rev-parse", "HEAD")
+      git(dir, "update-ref", "refs/remotes/origin/main", baseSha)
+
+      let rawConflictBytes = 0
+      try {
+        git(dir, "merge-tree", "--write-tree", baseSha, headSha)
+        throw new Error("expected merge-tree to report conflicts")
+      } catch (error) {
+        const failed = error as Readonly<{ status?: unknown; stdout?: unknown }>
+        expect(failed.status).toBe(1)
+        const stdout =
+          typeof failed.stdout === "string"
+            ? failed.stdout
+            : failed.stdout instanceof Uint8Array
+              ? Buffer.from(failed.stdout).toString("utf8")
+              : ""
+        rawConflictBytes = Buffer.byteLength(stdout)
+      }
+      expect(rawConflictBytes).toBeGreaterThan(OVERSIZED_MERGE_TREE_BYTES)
+
+      const app = await createCliApp()
+      await app.bays.submit({ branch: "topic/oversized", headSha, base: "main", baseSha: BASE_SHA })
+      const output = outputIO({ cwd: dir })
+      expect(await runYrd(app, yrd("pr", "prune", "--dry-run", "--json"), output.io), output.stderr()).toBe(0)
+      expect(JSON.parse(output.stdout())).toMatchObject({
+        command: "pr.prune",
+        checked: [
+          {
+            pr: "PR1",
+            checks: { headPresent: true, ancestorOfBase: false, mergeTree: "conflicts" },
+            verdict: "keep",
+          },
+        ],
+        summary: { checked: 1, withdrawn: 0, wouldWithdraw: 0, kept: 1, errors: 0 },
+        withdrawn: [],
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("records one PR error and continues judging every later PR", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.submit({ branch: "topic/broken", headSha: HEAD2_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.submit({ branch: "topic/three", headSha: HEAD3_SHA, base: "main", baseSha: BASE_SHA })
+
+    const judged: string[] = []
+    const facts = pruneGit({
+      resolveCommit: (ref) =>
+        ref === "origin/main" ? BASE_SHA : ref === HEAD_SHA || ref === HEAD2_SHA || ref === HEAD3_SHA ? ref : undefined,
+      isAncestor: (ancestor) => {
+        judged.push(ancestor)
+        if (ancestor === HEAD2_SHA) throw new Error("simulated merge-base transport failure")
+        return ancestor === HEAD3_SHA
+      },
+      mergeTree: (_baseSha, headSha) => {
+        if (headSha !== HEAD_SHA) throw new Error(`mergeTree must not inspect ${headSha}`)
+        return OTHER_TREE
+      },
+    })
+    const output = outputIO({ pruneGit: () => facts })
+    expect(await runYrd(app, yrd("pr", "prune", "--dry-run", "--json"), output.io), output.stderr()).toBe(0)
+    expect(judged).toEqual([HEAD_SHA, HEAD2_SHA, HEAD3_SHA])
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      checked: [
+        { pr: "PR1", verdict: "keep" },
+        {
+          pr: "PR2",
+          verdict: "error",
+          error: "PR 'PR2' could not be judged: simulated merge-base transport failure",
+        },
+        { pr: "PR3", verdict: "would-withdraw" },
+      ],
+      summary: { checked: 3, withdrawn: 0, wouldWithdraw: 1, kept: 1, errors: 1 },
+      withdrawn: [],
+    })
+
+    const human = outputIO({ pruneGit: () => facts, columns: 400 })
+    expect(await runYrd(app, yrd("pr", "prune", "--dry-run"), human.io), human.stderr()).toBe(0)
+    const humanText = human.stdout().replace(/\s+/g, " ")
+    expect(humanText).toContain("[error] PR2 topic/broken r1")
+    expect(humanText).toContain("PR 'PR2' could not be judged: simulated merge-base transport failure")
+    expect(humanText).toContain("checked 3 live PRs — 1 would be withdrawn, 1 kept, 1 error")
+  })
+
   it("withdraws a PR whose head is already an ancestor of the base tip", async () => {
     const app = await createCliApp()
     await app.bays.submit({ branch: "topic/landed", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
