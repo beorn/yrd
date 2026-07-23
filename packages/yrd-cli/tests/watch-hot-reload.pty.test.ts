@@ -21,7 +21,9 @@ const yrdRoot = resolve(import.meta.dirname, "../../..")
 const installedYrd = resolve(yrdRoot, "../../tools/installed/yrd")
 
 async function waitFor<T>(read: () => T, accept: (value: T) => boolean, detail: string): Promise<T> {
-  const deadline = Date.now() + 10_000
+  // 30s (was 10s): pid write, bounded exit, and process-group teardown all run
+  // real subprocesses that starve under the shared box's load (see vitest.config.ts).
+  const deadline = Date.now() + 30_000
   let value = read()
   while (!accept(value)) {
     if (Date.now() >= deadline) throw new Error(`timed out waiting for ${detail}`)
@@ -132,7 +134,7 @@ describe("yrd watch hot reload (installed)", () => {
         try {
           // The 2026-07-15 footer respec removed the LIVE indicator; the
           // exact keybinding footer is the stable liveness sentinel.
-          await running.terminal.waitFor("q quit", 10_000)
+          await running.terminal.waitFor("q quit", 30_000)
           expect(running.terminal.alive).toBe(true)
           const members = processGroupMembers(running.pid)
           expect(members).toContain(running.pid)
@@ -148,7 +150,7 @@ describe("yrd watch hot reload (installed)", () => {
     } finally {
       for (const root of roots) rmSync(root, { recursive: true, force: true })
     }
-  }, 30_000)
+  }, 120_000)
 
   it("terminates Bun's watch loop when the production QueueWatch command finishes", async () => {
     const child = Bun.spawn([process.execPath, join(yrdRoot, "bin/yrd.ts"), "watch"], {
@@ -157,11 +159,14 @@ describe("yrd watch hot reload (installed)", () => {
       stderr: "ignore",
     })
     try {
-      const outcome = await Promise.race([child.exited, Bun.sleep(1_500).then(() => "timeout" as const)])
+      // 15s (was 1.5s): the assertion is "the watch loop exits rather than
+      // hanging forever" — cold Bun start + teardown under the shared box's load
+      // needs headroom, but any prompt exit still resolves well inside this window.
+      const outcome = await Promise.race([child.exited, Bun.sleep(15_000).then(() => "timeout" as const)])
       expect(outcome).not.toBe("timeout")
     } finally {
       child.kill("SIGKILL")
       await child.exited
     }
-  }, 5_000)
+  }, 30_000)
 })
