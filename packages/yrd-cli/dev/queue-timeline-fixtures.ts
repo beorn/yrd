@@ -1004,7 +1004,7 @@ export const queueTimelineStories: Readonly<Record<QueueTimelineStoryName, Queue
   "selected-pending": {
     snapshot: fixtureSnapshot(fixtureResult([pendingOne], [])),
     widths: [100],
-    selectedStatus: "pending",
+    selectedStatus: "submitted",
   },
   "selected-running": {
     snapshot: fixtureSnapshot(fixtureResult([runningPr], [runningRun])),

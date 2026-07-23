@@ -259,9 +259,10 @@ describe("queue timeline storybook", () => {
       await handle.press("n")
       await waitFor(() => term.screen.getText().includes("anchored-new · next"))
 
-      // The next snapshot must update the existing frame. Remounting loses the
-      // anchor/follow state and makes this named visual story falsely show no new rows.
-      expect(term.screen.getText()).toContain("↓ 1 new run — G jumps")
+      // The next snapshot updates the existing frame and keeps physical row 0
+      // live without requiring a catch-up affordance or remount.
+      expect(term.screen.getText()).toContain("pr#13.1")
+      expect(term.screen.getText()).not.toMatch(/new runs?|G jumps/u)
     } finally {
       handle.unmount()
     }
@@ -634,7 +635,8 @@ describe("queue timeline storybook", () => {
       expect(anchoredFrame.text).not.toContain("1 new")
       const nextAnchoredFrame = renderAnchored(createElement(QueueWatchFrame, { snapshot: anchored.nextSnapshot }))
       await nextAnchoredFrame.waitForLayoutStable()
-      expect(nextAnchoredFrame.text).toContain("1 new")
+      expect(nextAnchoredFrame.text).toContain("pr#13.1")
+      expect(nextAnchoredFrame.text).not.toMatch(/new runs?|G jumps/u)
     } finally {
       anchoredFrame.unmount()
     }
@@ -774,8 +776,9 @@ describe("queue timeline storybook", () => {
       expect(handle.text).toContain("pr#1.1")
       // Timeline lines are bare now (user directive 2026-07-21): no leading `- `.
       expect(handle.text).toMatch(/\d{2}:\d{2} submitted by @cto/u)
-      // Pending renders as `todo` in the detail title fallback (item 8).
-      expect(handle.text).toContain("○ todo")
+      // A submitted, not-yet-run PR uses the truthful pre-run status introduced
+      // by the current queue projection contract.
+      expect(handle.text).toContain("○ submitted")
       expect(handle.text).toContain("Prepare release notes")
       expect(handle.text).toContain("pr#1.1 @yrd/core/21120-pr-state-notifications")
       expect(handle.text).toContain("topic/pr1")
@@ -798,7 +801,7 @@ describe("queue timeline storybook", () => {
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("pr#2.1")
       expect(handle.text).toMatch(/\d{2}:\d{2} submitted by -/u)
-      expect(handle.text).toContain("○ todo")
+      expect(handle.text).toContain("○ submitted")
       expect(handle.text).not.toContain("submitted by @cto")
     } finally {
       handle.unmount()
