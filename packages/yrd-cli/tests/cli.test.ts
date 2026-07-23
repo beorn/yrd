@@ -1442,10 +1442,7 @@ describe("runYrd", () => {
     } as unknown as YrdCliServices
     const submitted = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
 
-    expect(
-      await runYrd(app, yrd("pr", "create", "topic/pin-only", "--json"), submitted.io),
-      submitted.stderr(),
-    ).toBe(0)
+    expect(await runYrd(app, yrd("pr", "create", "topic/pin-only", "--json"), submitted.io), submitted.stderr()).toBe(0)
     expect(app.bays.checksRequested("PR1")).toBe(false)
     expect(Queues.ids(app.state().queues)).toEqual([])
     expect(checkedRevisions).toEqual([])
@@ -3108,12 +3105,10 @@ describe("runYrd", () => {
     const checkRuns: string[] = []
     const app = await createApp({ requires: ["review"], checkRuns })
     const resolveRevision = () => Promise.resolve(HEAD_SHA)
+    const beforeCreate = await Array.fromAsync(app.events()).then((events) => events.length)
 
     const submit = outputIO({ resolveRevision })
-    expect(
-      await runYrd(app, yrd("pr", "create", "topic/review-me", "--json"), submit.io),
-      submit.stderr(),
-    ).toBe(0)
+    expect(await runYrd(app, yrd("pr", "create", "topic/review-me", "--json"), submit.io), submit.stderr()).toBe(0)
     const submitted = JSON.parse(submit.stdout()) as { prs: Record<string, unknown>[] }
     expect(submitted).toMatchObject({
       command: "pr.create",
@@ -3125,17 +3120,11 @@ describe("runYrd", () => {
     expect(app.bays.checksRequested("PR1")).toBe(false)
     expect(Queues.ids(app.state().queues)).toEqual([])
     expect(checkRuns).toEqual([])
-
-    const oneShot = outputIO({ resolveRevision })
-    expect(
-      await runYrd(app, yrd("pr", "submit", "topic/ready-on-arrival", "--json"), oneShot.io),
-      oneShot.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(oneShot.stdout())).toMatchObject({
-      command: "pr.submit",
-      prs: [{ branch: "topic/ready-on-arrival", status: "submitted" }],
-    })
-    expect(app.bays.checksRequested("topic/ready-on-arrival")).toBe(true)
+    const createEvents = (await Array.fromAsync(app.events())).slice(beforeCreate).map(({ name }) => name)
+    expect(createEvents).toContain("pr/pushed")
+    expect(createEvents).not.toContain("pr/submitted")
+    expect(createEvents).not.toContain("pr/checks-requested")
+    expect(createEvents.some((name) => name.startsWith("queue/run/"))).toBe(false)
 
     const inbox = outputIO()
     expect(await runYrd(app, yrd("pr", "list", "--needs-review", "--json"), inbox.io), inbox.stderr()).toBe(0)
@@ -3277,6 +3266,25 @@ describe("runYrd", () => {
     const terminalInbox = outputIO()
     expect(await runYrd(app, yrd("pr", "list", "--needs-review", "--json"), terminalInbox.io)).toBe(0)
     expect(JSON.parse(terminalInbox.stdout())).toMatchObject({ command: "pr.list", prs: [] })
+  })
+
+  it("keeps plain submit submission-only and requests checks", async () => {
+    const app = await createApp()
+    const output = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+
+    expect(await runYrd(app, yrd("pr", "submit", "topic/ready-on-arrival", "--json"), output.io), output.stderr()).toBe(
+      0,
+    )
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "pr.submit",
+      prs: [{ branch: "topic/ready-on-arrival", status: "submitted" }],
+    })
+    expect(app.bays.checksRequested("topic/ready-on-arrival")).toBe(true)
+
+    const create = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+    expect(await runYrd(app, yrd("pr", "create", "topic/ready-on-arrival", "--title", "mutated"), create.io)).toBe(1)
+    expect(create.stderr()).toContain("create is only for a draft PR")
+    expect(app.bays.pr("topic/ready-on-arrival")?.title).toBeUndefined()
   })
 
   it("drives reviewer requests through submit, request-review, and the reviewer-scoped inbox", async () => {
