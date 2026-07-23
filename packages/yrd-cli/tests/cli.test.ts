@@ -659,19 +659,17 @@ describe("runYrd", () => {
   })
 
   it.each([
+    { name: "yrd pr", argv: yrd("pr", "submit", "topic/draft", "--draft", "--json") },
     { name: "yrd bay", argv: yrd("bay", "submit", "topic/draft", "--draft", "--json") },
     { name: "git bay", argv: gitBay("submit", "topic/draft", "--draft", "--json") },
-  ])("draft-registers a pushed PR through $name without admission", async ({ argv }) => {
+  ])("rejects the deleted --draft flag through $name and teaches pr create", async ({ argv }) => {
     const app = await createApp()
     const output = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
 
-    expect(await runYrd(app, argv, output.io), output.stderr()).toBe(0)
-    expect(JSON.parse(output.stdout())).toMatchObject({
-      command: "bay.submit",
-      prs: [{ id: "PR1", branch: "topic/draft", status: "pushed", revision: 1 }],
-    })
-    expect(app.bays.checksRequested("PR1")).toBe(false)
-    expect(Queues.ids(app.state().queues)).toEqual([])
+    expect(await runYrd(app, argv, output.io)).toBe(2)
+    expect(output.stderr()).toContain("unknown option '--draft'")
+    expect(output.stderr()).toContain("yrd pr create")
+    expect(app.bays.prs()).toEqual([])
   })
 
   it("uses concise layered help with examples on the root and queue surfaces", async () => {
@@ -1230,14 +1228,20 @@ describe("runYrd", () => {
 
   it("exposes the canonical same-PR recut command", async () => {
     const app = await createApp()
+    const createHelp = outputIO({ columns: 100 })
     const submitHelp = outputIO({ columns: 100 })
     const help = outputIO({ columns: 100 })
 
+    expect(await runYrd(app, yrd("pr", "create", "--help"), createHelp.io), createHelp.stderr()).toBe(0)
+    expect(createHelp.stdout()).toContain("Usage: yrd pr create [options] [selector]")
+    expect(createHelp.stdout()).toContain("--issue <ref>")
+    expect(createHelp.stdout()).toContain("Authored root carrier")
+    expect(createHelp.stdout()).toContain("$ yrd pr create <branch>")
+    expect(createHelp.stdout()).not.toContain("--draft")
+
     expect(await runYrd(app, yrd("pr", "submit", "--help"), submitHelp.io), submitHelp.stderr()).toBe(0)
-    expect(submitHelp.stdout()).toContain("Authored root carrier")
-    expect(submitHelp.stdout()).toContain("$ yrd pr submit <branch> --draft")
-    expect(submitHelp.stdout()).toContain("$ yrd pr recut <PR> --queue")
-    expect(submitHelp.stdout()).toMatch(/no\s+composition\s+manifest or manual recut/u)
+    expect(submitHelp.stdout()).not.toContain("--draft")
+    expect(submitHelp.stdout()).not.toContain("Authored root carrier")
 
     expect(await runYrd(app, yrd("pr", "recut", "--help"), help.io), help.stderr()).toBe(0)
     expect(help.stdout()).toContain("Usage: yrd pr recut [options] <selector>")
@@ -1245,12 +1249,12 @@ describe("runYrd", () => {
     expect(help.stdout()).toContain("--queue")
     expect(help.stdout()).toContain("--json")
     expect(help.stdout()).toContain("Authored root carrier")
-    expect(help.stdout()).toContain("$ yrd pr submit <branch> --draft")
+    expect(help.stdout()).toContain("$ yrd pr create <branch>")
     expect(help.stdout()).toContain("$ yrd pr recut <PR> --queue")
     expect(help.stdout()).toMatch(/no\s+composition\s+manifest or manual recut/u)
   })
 
-  it("draft-registers an authored carrier and queues a recut revision on the same PR", async () => {
+  it("creates an authored carrier draft and queues a recut revision on the same PR", async () => {
     const checkedRevisions: string[] = []
     const app = await createApp({ waitingCheck: true, checkedRevisions })
     const nextHead = "2".repeat(40)
@@ -1273,11 +1277,11 @@ describe("runYrd", () => {
     const submitted = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
 
     expect(
-      await runYrd(app, yrd("pr", "submit", "topic/root-carrier", "--draft", "--json"), submitted.io),
+      await runYrd(app, yrd("pr", "create", "topic/root-carrier", "--json"), submitted.io),
       submitted.stderr(),
     ).toBe(0)
     expect(JSON.parse(submitted.stdout())).toMatchObject({
-      command: "pr.submit",
+      command: "pr.create",
       prs: [{ id: "PR1", branch: "topic/root-carrier", status: "pushed", revision: 1 }],
     })
     expect(app.bays.checksRequested("PR1")).toBe(false)
@@ -1438,10 +1442,7 @@ describe("runYrd", () => {
     } as unknown as YrdCliServices
     const submitted = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
 
-    expect(
-      await runYrd(app, yrd("pr", "submit", "topic/pin-only", "--draft", "--json"), submitted.io),
-      submitted.stderr(),
-    ).toBe(0)
+    expect(await runYrd(app, yrd("pr", "create", "topic/pin-only", "--json"), submitted.io), submitted.stderr()).toBe(0)
     expect(app.bays.checksRequested("PR1")).toBe(false)
     expect(Queues.ids(app.state().queues)).toEqual([])
     expect(checkedRevisions).toEqual([])
@@ -3100,19 +3101,17 @@ describe("runYrd", () => {
     expect(human.stdout()).toContain("release/2.0")
   })
 
-  it("drives draft, review, ready, needs-review, and cached checks through the PR surface", async () => {
+  it("drives create, review, ready, needs-review, and cached checks through the PR surface", async () => {
     const checkRuns: string[] = []
     const app = await createApp({ requires: ["review"], checkRuns })
     const resolveRevision = () => Promise.resolve(HEAD_SHA)
+    const beforeCreate = await Array.fromAsync(app.events()).then((events) => events.length)
 
     const submit = outputIO({ resolveRevision })
-    expect(
-      await runYrd(app, yrd("pr", "submit", "topic/review-me", "--draft", "--json"), submit.io),
-      submit.stderr(),
-    ).toBe(0)
+    expect(await runYrd(app, yrd("pr", "create", "topic/review-me", "--json"), submit.io), submit.stderr()).toBe(0)
     const submitted = JSON.parse(submit.stdout()) as { prs: Record<string, unknown>[] }
     expect(submitted).toMatchObject({
-      command: "pr.submit",
+      command: "pr.create",
       prs: [{ id: "PR1", branch: "topic/review-me", revision: 1, headSha: HEAD_SHA }],
     })
     expect(submitted).not.toHaveProperty("checks")
@@ -3121,6 +3120,11 @@ describe("runYrd", () => {
     expect(app.bays.checksRequested("PR1")).toBe(false)
     expect(Queues.ids(app.state().queues)).toEqual([])
     expect(checkRuns).toEqual([])
+    const createEvents = (await Array.fromAsync(app.events())).slice(beforeCreate).map(({ name }) => name)
+    expect(createEvents).toContain("pr/pushed")
+    expect(createEvents).not.toContain("pr/submitted")
+    expect(createEvents).not.toContain("pr/checks-requested")
+    expect(createEvents.some((name) => name.startsWith("queue/run/"))).toBe(false)
 
     const inbox = outputIO()
     expect(await runYrd(app, yrd("pr", "list", "--needs-review", "--json"), inbox.io), inbox.stderr()).toBe(0)
@@ -3264,6 +3268,25 @@ describe("runYrd", () => {
     expect(JSON.parse(terminalInbox.stdout())).toMatchObject({ command: "pr.list", prs: [] })
   })
 
+  it("keeps plain submit submission-only and requests checks", async () => {
+    const app = await createApp()
+    const output = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+
+    expect(await runYrd(app, yrd("pr", "submit", "topic/ready-on-arrival", "--json"), output.io), output.stderr()).toBe(
+      0,
+    )
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "pr.submit",
+      prs: [{ branch: "topic/ready-on-arrival", status: "submitted" }],
+    })
+    expect(app.bays.checksRequested("topic/ready-on-arrival")).toBe(true)
+
+    const create = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+    expect(await runYrd(app, yrd("pr", "create", "topic/ready-on-arrival", "--title", "mutated"), create.io)).toBe(1)
+    expect(create.stderr()).toContain("create is only for a draft PR")
+    expect(app.bays.pr("topic/ready-on-arrival")?.title).toBeUndefined()
+  })
+
   it("drives reviewer requests through submit, request-review, and the reviewer-scoped inbox", async () => {
     const app = await createApp()
     const resolveRevision = () => Promise.resolve(HEAD_SHA)
@@ -3272,7 +3295,7 @@ describe("runYrd", () => {
     expect(
       await runYrd(
         app,
-        yrd("pr", "submit", "topic/request-me", "--draft", "--reviewer", "@cto", "--reviewer", "@agent/5", "--json"),
+        yrd("pr", "create", "topic/request-me", "--reviewer", "@cto", "--reviewer", "@agent/5", "--json"),
         submit.io,
       ),
       submit.stderr(),

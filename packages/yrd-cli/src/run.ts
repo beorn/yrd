@@ -1639,13 +1639,12 @@ async function resolveSubmitMetadata(
   }
 }
 
-async function submitBays(
+async function applyPrSelectionVerb(
   app: YrdCliApp,
   selectors: readonly string[],
   options: {
     follow?: boolean
     wait?: boolean
-    draft?: boolean
     base?: string
     queue?: string
     issue?: string
@@ -1657,8 +1656,9 @@ async function submitBays(
     json?: boolean
   },
   io: YrdCliIO,
-  command: "bay.submit" | "pr.submit",
+  command: "bay.submit" | "pr.create" | "pr.submit",
 ): Promise<YrdCliExitCode> {
+  const createOnly = command === "pr.create"
   const correlation = parseCorrelation(options.correlation)
   const state = stateOf(app)
   const cwd = io.cwd ?? process.cwd()
@@ -1676,19 +1676,31 @@ async function submitBays(
   }
   const reviewers = options.reviewer ?? []
   for (const selector of inferred) {
+    if (createOnly) {
+      const bay = app.bays.get(selector)
+      const existing = app.bays.pr(bay?.branch ?? selector)
+      if (existing !== undefined && existing.status !== "pushed") {
+        refusal(`PR '${existing.id}' is already ${existing.status}; create is only for a draft PR`)
+      }
+    }
     const metadata = await resolveSubmitMetadata(app, selector, options, io)
+    // Internal compatibility seam: `draft` means emit `pr/pushed` without
+    // `pr/submitted`; it is deliberately not part of either submit CLI.
     let pr = await app.bays.submitSelection(selector, {
       ...(base === undefined ? {} : { base }),
       ...(options.issue === undefined ? {} : { issue: options.issue }),
       ...(metadata.title === undefined ? {} : { title: metadata.title }),
       ...(metadata.description === undefined ? {} : { description: metadata.description }),
-      ...(options.draft === true ? { draft: true } : {}),
+      ...(createOnly ? { draft: true } : {}),
       ...(correlation === undefined ? {} : { correlation }),
       ...(composition === undefined ? {} : { composition }),
       resolveRevision: (ref) => optionalRevision(ref, io),
       run: runtimeOptions(io),
       warnings,
     })
+    if (createOnly && pr.status !== "pushed") {
+      refusal(`PR '${pr.id}' is already ${pr.status}; create is only for a draft PR`)
+    }
     if (reviewers.length > 0 && pr.status !== "integrated") {
       await app.bays.requestReview({
         pr: pr.id,
@@ -1701,7 +1713,7 @@ async function submitBays(
     }
     prs.push(pr)
   }
-  if (command === "bay.submit" || options.draft === true) {
+  if (command === "bay.submit" || createOnly) {
     await printResult(
       io,
       jsonEnabled(options),
@@ -4303,6 +4315,7 @@ function addExamples(program: CliCommand, name: string, projection: "root" | "ba
   if (projection === "root") {
     examples.push(
       [`$ ${name} pr list`, "inspect active PRs"],
+      [`$ ${name} pr create topic/fix`, "create a draft before submission"],
       [`$ ${name} queue run --steps check,merge`, "run selected steps"],
       [`$ ${name} watch --pr PR7`, "monitor PR and queue health"],
       [`$ ${name} contest open km:T1 -a codex/claude`, "compare implementations"],
@@ -4329,7 +4342,7 @@ function addAuthoredCarrierWorkflow<
   ArgumentRecord extends Record<string, unknown>,
 >(command: CliCommand<Options, Arguments, ArgumentRecord>, name: string): void {
   command.addHelpSection("Authored root carrier:", [
-    [`$ ${name} pr submit <branch> --draft`, "record the immutable authored carrier as a draft PR"],
+    [`$ ${name} pr create <branch>`, "record the immutable authored carrier as a draft PR"],
     [
       `$ ${name} pr recut <PR> --queue --force`,
       "recut and queue a new revision on that same PR; no composition manifest or manual recut",
@@ -4391,12 +4404,12 @@ function buildProgram(
   if (projection === "root") {
     program.addHelpSection(
       "Model:",
-      "Pick an issue -> work it in a bay -> submit as a PR -> PRs queue per base ->\na run verifies and merges each one -> integrated, or rejected with the log.",
+      "Pick an issue -> work it in a bay -> create a draft -> submit it -> PRs queue per base ->\na run verifies and merges each one -> integrated, or rejected with the log.",
     )
     program.addHelpSection("Objects:", [
       ["issue", "tracker-owned intent; yrd exposes a read-only delivery lens"],
       ["bay", "isolated Git workspace; also standalone as git-bay"],
-      ["pr", "submitted branch@head revision; the queue's unit"],
+      ["pr", "persistent branch delivery; draft until submitted; the queue's unit"],
       ["contest", "competing implementations; winner promotes to a PR"],
       ["queue", "one per base; verifies and merges PRs serially"],
     ])
@@ -4456,7 +4469,6 @@ function buildProgram(
   bay
     .command("submit [selector...]")
     .description("submit bays or branches")
-    .option("--draft", "register a pushed PR without requesting or admitting checks")
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
@@ -4465,7 +4477,9 @@ function buildProgram(
     .option("--correlation <namespace:id>", "bind an opaque correlation to the submitted revision")
     .option("--composition <path>", "immutable version-1 source composition JSON")
     .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "bay.submit")))
+    .action(async (selectors, options) =>
+      setExit(await applyPrSelectionVerb(installed(), selectors, options, io, "bay.submit")),
+    )
   bay
     .command("close [selector...]")
     .description("close work bays")
@@ -4654,10 +4668,31 @@ function buildProgram(
     .option("--reviewer <actor>", "scope --needs-review to one requested reviewer")
     .option("--json", "emit stable JSON")
     .action(async (options) => listPrs(installed(), options, io))
-  const submit = pr
-    .command("submit [selector...]")
+  const create = pr
+    .command("create [selector]")
+    .description("create a draft PR without requesting or admitting checks")
+    .option("--base <branch>", "base branch for a direct branch create")
+    .option("--queue <branch>", "alias for --base")
+    .option("--issue <ref>", "link a tracker-neutral issue reference")
+    .option("--title <text>", "PR subject (defaults to the head commit subject)")
+    .option("--description <text>", "PR description body (defaults to the head commit body)")
+    .option("--correlation <namespace:id>", "bind an opaque correlation to the draft revision")
+    .option("--composition <path>", "queue-generated source composition JSON; not for authored root carriers")
+    .option(
+      "--reviewer <actor>",
+      "request a review from <actor> right after create (repeatable)",
+      (value: string, previous: readonly string[]) => [...previous, value],
+      [] as readonly string[],
+    )
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) =>
+      setExit(
+        await applyPrSelectionVerb(installed(), selector === undefined ? [] : [selector], options, io, "pr.create"),
+      ),
+    )
+  addAuthoredCarrierWorkflow(create, name)
+  pr.command("submit [selector...]")
     .description("submit PR revisions and admit configured checks")
-    .option("--draft", "register a pushed PR without requesting or admitting checks")
     .option("--wait", "block on the synchronous drain (pre-decouple behavior); default records and returns")
     .option("--follow", "follow admitted checks to a terminal result (implies --wait)")
     .option("--base <branch>", "base branch for a direct branch submit")
@@ -4674,8 +4709,9 @@ function buildProgram(
       [] as readonly string[],
     )
     .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "pr.submit")))
-  addAuthoredCarrierWorkflow(submit, name)
+    .action(async (selectors, options) =>
+      setExit(await applyPrSelectionVerb(installed(), selectors, options, io, "pr.submit")),
+    )
   pr.command("view <selector>")
     .description("show a PR and its runs")
     .option("--json", "emit stable JSON")
@@ -4877,6 +4913,13 @@ function buildProgram(
   return program
 }
 
+function commanderErrorMessage(args: readonly string[], projection: "root" | "bay", error: CommanderError): string {
+  const removedDraftSubmit =
+    args.includes("--draft") &&
+    (projection === "bay" ? args[0] === "submit" : (args[0] === "pr" || args[0] === "bay") && args[1] === "submit")
+  return removedDraftSubmit ? `${error.message}; draft PRs are created with 'yrd pr create'` : error.message
+}
+
 /** Run the one Yrd command surface. git-bay projects its canonical bay subtree;
  * every mutation still resolves through the composed app's command registry. */
 async function executeYrd(
@@ -4924,7 +4967,14 @@ async function executeYrd(
       await diagnostic(
         runtimeIO,
         invocation.name,
-        createFailure({ kind: "usage", code: "invalid-arguments", message: error.message }, error),
+        createFailure(
+          {
+            kind: "usage",
+            code: "invalid-arguments",
+            message: commanderErrorMessage(args, invocation.projection, error),
+          },
+          error,
+        ),
       )
       return 2
     }
