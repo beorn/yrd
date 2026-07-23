@@ -1272,6 +1272,7 @@ describe("runYrd", () => {
     expect(help.stdout()).toContain("Usage: yrd pr recut [options] <selector>")
     expect(help.stdout()).toContain("--revision <number>")
     expect(help.stdout()).toContain("--preflight")
+    expect(help.stdout()).toMatch(/without\s+changing PR or Queue state/u)
     expect(help.stdout()).toContain("--queue")
     expect(help.stdout()).toContain("--json")
     expect(help.stdout()).toContain("Authored root carrier")

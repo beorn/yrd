@@ -176,12 +176,12 @@ $ yrd pr checks PR2 --follow
 
 `pr create` records the existing `pushed` state: no submission, check request,
 admission, or Queue work is started until `pr ready` (ordinary reviewed work)
-or `pr recut --queue` (authored-root carriers). Yrd is local-only and never
-pushes a Git branch; callers that require remote reachability push first, then
-create the draft from that exact resolvable commit. Review and comment facts pin
-the current revision and head SHA; a new head makes old verdicts visibly stale.
-Reviewer assignment and richer policy belong to the calling coordination
-system.
+or the exact command returned by `pr recut --preflight --queue`
+(authored-root carriers). Yrd is local-only and never pushes a Git branch;
+callers that require remote reachability push first, then create the draft from
+that exact resolvable commit. Review and comment facts pin the current revision
+and head SHA; a new head makes old verdicts visibly stale. Reviewer assignment
+and richer policy belong to the calling coordination system.
 
 During development in this repository:
 
@@ -405,15 +405,16 @@ still receives a successor revision with the derived patch/tree certificate.
 detail, and watch output retain the recut lineage and cumulative source-ready
 age while reporting the successor revision's queue wait separately.
 
-`pr recut --preflight` is the non-mutating decision surface. It pins the
-authoritative target once and emits exactly one of `SUBSUMED-WITHDRAW`,
-`RECUT`, `RECUT-FORCE`, or `FRESH-NOOP`, followed by the exact next command.
-Its evidence names source/target pin distance, exact ancestry or merge-result
-tree proof, and any stable patch-id landing match. Tree equality—not patch-id
-alone—authorizes withdrawal because stable patch IDs intentionally ignore
-whitespace. Missing objects, diverged bases, and composed source payloads fail
-closed instead of producing a guessed verdict. Pass `--queue` to include queue
-admission in the recommended next command.
+`pr recut --preflight` is the decision surface that does not change PR or Queue
+state. It refreshes and pins remote authority once, then emits exactly one of
+`SUBSUMED-WITHDRAW`, `RECUT`, `RECUT-FORCE`, or `FRESH-NOOP`, followed by the
+exact next command. Its evidence names source/target pin distance, exact
+ancestry or merge-result tree proof, and any stable patch-id landing match.
+Tree equality—not patch-id alone—authorizes withdrawal because stable patch IDs
+intentionally ignore whitespace. Missing objects, diverged bases, composed
+source payloads, and a subsumed historical revision whose current successor is
+unproven fail closed instead of producing a guessed or destructive verdict.
+Pass `--queue` to include queue admission in the recommended next command.
 
 The resident Queue owns freshness after admission. Before each run snapshot it
 compares every admitted revision's immutable base with the authoritative base;

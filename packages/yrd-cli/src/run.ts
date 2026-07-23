@@ -1269,6 +1269,9 @@ async function recutPr(
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
   if (options.preflight === true) {
+    if (options.force === true) {
+      usage("--force cannot be combined with --preflight; run preflight first, then execute its exact next command")
+    }
     await preflightRecut(app, selector, options, io)
     return 0
   }
@@ -4756,7 +4759,7 @@ function buildProgram(
     .command("recut <selector>")
     .description("mechanically recut an immutable PR revision onto authoritative current base")
     .option("--revision <number>", "select an older immutable PR revision", int)
-    .option("--preflight", "classify recut, withdrawal, force, or no-op without mutating")
+    .option("--preflight", "classify recut, withdrawal, force, or no-op without changing PR or Queue state")
     .option("--queue", "ready the fresh revision and admit its configured checks")
     .option("--force", "recut even when the current revision already holds a passing check")
     .option("--json", "emit stable JSON")

@@ -1299,10 +1299,16 @@ export async function runYrdProcess(
               io.resolveCommitMeta === undefined
                 ? resolveCommitMeta(activeHost.process, cwd, ref)
                 : io.resolveCommitMeta(ref, cwd),
-            resolveQueueTarget: (ref, cwd) =>
+            resolveQueueTarget: (ref, cwd, resolveOptions) =>
               io.resolveQueueTarget === undefined
-                ? resolveQueueTarget(activeHost.process, activeHost.repository.repo, activeHost.config.base, ref)
-                : io.resolveQueueTarget(ref, cwd),
+                ? resolveQueueTarget(
+                    activeHost.process,
+                    activeHost.repository.repo,
+                    activeHost.config.base,
+                    ref,
+                    resolveOptions,
+                  )
+                : io.resolveQueueTarget(ref, cwd, resolveOptions),
             ...(drain === undefined ? {} : { drainSignal: drain.signal }),
           },
         }

@@ -41,7 +41,6 @@ const BASE_TREE = "e".repeat(40)
 const OTHER_TREE = "f".repeat(40)
 const PR380_PATCH_ID = "cce1b8d2e6b8167b77aa50e0f880b74d3fa8871d"
 const PR380_LANDING_SHA = "868194792c4b2c1b07bd5a67c37ad3e21fd35ce1"
-const PR473_LANDING_SHA = "b47e240a6c3091b4687de96296d39c0a610df200"
 const PR476_PATCH_ID = "172a29302878f4f7fd0dcfad917ddbf434e78d04"
 
 function ids(initial = 0): () => string {
@@ -108,7 +107,12 @@ function contestAdapters() {
   return { runner, evaluator, git }
 }
 
-async function createCliApp(options: { journal?: Journal<unknown> } = {}) {
+async function createCliApp(
+  options: {
+    journal?: Journal<unknown>
+    resolveBase?: (base: string) => Readonly<{ base: string; baseSha: string }>
+  } = {},
+) {
   const bayJobs = createBayJobDefs(workspace())
   const check = withStep("check", (): JobResult<JsonValue> => ({ status: "passed", output: { checked: true } }), {
     revision: "check-v1",
@@ -131,7 +135,11 @@ async function createCliApp(options: { journal?: Journal<unknown> } = {}) {
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
-    withBays({ jobs: bayJobs, defaultBase: "main", resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }) }),
+    withBays({
+      jobs: bayJobs,
+      defaultBase: "main",
+      resolveBase: options.resolveBase ?? ((ref) => ({ base: ref, baseSha: BASE_SHA })),
+    }),
   )
   return createYrd(contests(queue(base)), {
     inject: { journal: options.journal ?? createMemoryJournal(), clock: () => "2026-07-15T12:00:00.000Z", id: ids() },
@@ -189,6 +197,7 @@ function pruneGit(overrides: Partial<PruneGitFacts> = {}): PruneGitFacts {
 
 type RecutPreflightGitFacts = PruneGitFacts &
   Readonly<{
+    sourceBase(recordedBaseSha: string, headSha: string): string | undefined | Promise<string | undefined>
     pinDistance(
       sourceBaseSha: string,
       targetBaseSha: string,
@@ -217,6 +226,7 @@ function recutPreflightGit(overrides: Partial<RecutPreflightGitFacts> = {}): Rec
         return BASE_TREE
       },
     }),
+    sourceBase: (recordedBaseSha) => recordedBaseSha,
     pinDistance: () => ({ sourceOnly: 0, targetOnly: 3 }),
     patchMatch: () => ({ patchId: "c".repeat(40), targetSha: MERGED_SHA }),
     ...overrides,
@@ -377,23 +387,25 @@ describe("pr recut --preflight", () => {
   it.each([
     {
       specimen: "PR473",
-      verdict: "SUBSUMED-WITHDRAW",
-      mergeTree: BASE_TREE,
+      verdict: "RECUT",
+      mergeTree: undefined,
       patchId: "c".repeat(40),
-      patchTarget: PR473_LANDING_SHA,
+      patchTarget: undefined,
       targetOnly: 2,
+      passingCheck: false,
     },
     {
       specimen: "PR476",
-      verdict: "RECUT",
+      verdict: "RECUT-FORCE",
       mergeTree: OTHER_TREE,
       patchId: PR476_PATCH_ID,
       patchTarget: undefined,
       targetOnly: 4,
+      passingCheck: true,
     },
   ] as const)(
     "replays $specimen in one preflight invocation as $verdict",
-    async ({ specimen, verdict, mergeTree, patchId, patchTarget, targetOnly }) => {
+    async ({ specimen, verdict, mergeTree, patchId, patchTarget, targetOnly, passingCheck }) => {
       const app = await createCliApp()
       await app.bays.submit({
         branch: `specimen/${specimen}`,
@@ -401,6 +413,10 @@ describe("pr recut --preflight", () => {
         base: "main",
         baseSha: BASE_SHA,
       })
+      if (passingCheck) {
+        if (!app.bays.checksRequested("PR1")) await app.bays.requestChecks({ pr: "PR1" })
+        await app.queue.admit({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
+      }
       const before = (await Array.fromAsync(app.events())).length
       const output = outputIO({
         pruneGit: () =>
@@ -421,12 +437,25 @@ describe("pr recut --preflight", () => {
           pinDistance: { sourceOnly: 0, targetOnly },
           patchId,
           patchMatchTarget: patchTarget ?? null,
-          tree: mergeTree === BASE_TREE ? "identical" : "divergent",
+          tree: mergeTree === undefined ? "conflicts" : "divergent",
+          passingCheck,
         },
       })
       expect((await Array.fromAsync(app.events())).length).toBe(before)
     },
   )
+
+  it("refuses an ignored --force instead of pretending preflight used it", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/force", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    const output = outputIO({ pruneGit: () => recutPreflightGit() })
+
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--force"), output.io)).toBe(2)
+    expect(output.stderr()).toContain(
+      "--force cannot be combined with --preflight; run preflight first, then execute its exact next command",
+    )
+    expect(output.stdout()).toBe("")
+  })
 
   it("treats a patch-id match as evidence, not withdrawal authority", async () => {
     const app = await createCliApp()
@@ -576,6 +605,26 @@ describe("pr recut --preflight", () => {
     expect(composed.stderr()).toContain("has composed source payloads")
   })
 
+  it("refuses to recommend withdrawing a whole PR when only a historical revision is subsumed", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/revisions", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.intake({ branch: "topic/revisions", headSha: HEAD2_SHA, base: "main", baseSha: BASE_SHA })
+    const before = (await Array.fromAsync(app.events())).length
+    const output = outputIO({
+      pruneGit: () =>
+        recutPreflightGit({
+          mergeTree: () => BASE_TREE,
+        }),
+    })
+
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--revision", "1", "--preflight", "--json"), output.io)).toBe(1)
+    expect(output.stderr()).toContain(
+      "revision 1 is subsumed, but current revision 2 is unproven; refusing to recommend withdrawing the whole PR",
+    )
+    expect(output.stdout()).toBe("")
+    expect((await Array.fromAsync(app.events())).length).toBe(before)
+  })
+
   it("prints explicit pin-distance and patch-match evidence in human output", async () => {
     const app = await createCliApp()
     await app.bays.submit({ branch: "topic/human", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
@@ -586,6 +635,29 @@ describe("pr recut --preflight", () => {
     expect(output.stdout()).toContain("pin-distance: source-only=0, target-only=3")
     expect(output.stdout()).toContain(`patch-id-match-target: ${MERGED_SHA.slice(0, 12)}`)
     expect(output.stdout()).toContain("tree-proof: ancestor=no, merge-tree=identical")
+  })
+
+  it("refreshes and pins one authoritative target before classifying", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/authority", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    const resolutions: unknown[] = []
+    const output = outputIO({
+      resolveQueueTarget: async (
+        ref,
+        cwd,
+        options?: Readonly<{ refreshAuthority?: boolean }>,
+      ): Promise<Readonly<{ base: string; sha: string }>> => {
+        resolutions.push([ref, cwd, options])
+        return { base: "main", sha: TARGET_BASE_SHA }
+      },
+      pruneGit: () => recutPreflightGit(),
+    })
+
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--json"), output.io), output.stderr()).toBe(0)
+    expect(resolutions).toEqual([["main", "/repo", { refreshAuthority: true }]])
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      evidence: { targetBase: "main", targetBaseSha: TARGET_BASE_SHA },
+    })
   })
 
   it("derives pin distance and a matching landing commit with real Git plumbing", () => {
@@ -620,6 +692,161 @@ describe("pr recut --preflight", () => {
         targetSha: targetBaseSha,
       })
       expect(facts.mergeTree(targetBaseSha, headSha)).toBe(facts.treeOf(targetBaseSha))
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps patch attribution bounded when target history exceeds the Git capture buffer", () => {
+    const dir = mkdtempSync(join(tmpdir(), "yrd-recut-preflight-bounded-patch-"))
+    const git = (...args: string[]) =>
+      execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim()
+    try {
+      git("init", "-b", "main")
+      git("config", "user.name", "Yrd Test")
+      git("config", "user.email", "yrd@example.test")
+      writeFileSync(join(dir, "base.txt"), "base\n")
+      git("add", "base.txt")
+      git("commit", "-m", "base")
+      const sourceBaseSha = git("rev-parse", "HEAD")
+
+      git("switch", "-c", "candidate")
+      writeFileSync(join(dir, "payload.txt"), "same payload\n")
+      git("add", "payload.txt")
+      git("commit", "-m", "candidate")
+      const headSha = git("rev-parse", "HEAD")
+
+      git("switch", "main")
+      for (const index of Array.from({ length: 20 }, (_, index) => index)) {
+        const name = `large-${index.toString().padStart(2, "0")}.txt`
+        const fill = String.fromCharCode("a".charCodeAt(0) + index)
+        writeFileSync(join(dir, name), `${fill.repeat(900_000)}\n`)
+        git("add", name)
+        git("commit", "-m", `add ${name}`)
+      }
+      writeFileSync(join(dir, "payload.txt"), "same payload\n")
+      git("add", "payload.txt")
+      git("commit", "-m", "landed elsewhere")
+      const landingSha = git("rev-parse", "HEAD")
+      const targetBaseSha = landingSha
+
+      expect(createPruneGitFacts(dir).patchMatch?.(sourceBaseSha, headSha, targetBaseSha)).toMatchObject({
+        patchId: expect.stringMatching(/^[0-9a-f]{40}$/u),
+        targetSha: landingSha,
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("derives patch attribution from the unique source merge base when the recorded base is already current", () => {
+    const dir = mkdtempSync(join(tmpdir(), "yrd-recut-preflight-source-base-"))
+    const git = (...args: string[]) =>
+      execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim()
+    try {
+      git("init", "-b", "main")
+      git("config", "user.name", "Yrd Test")
+      git("config", "user.email", "yrd@example.test")
+      writeFileSync(join(dir, "base.txt"), "base\n")
+      git("add", "base.txt")
+      git("commit", "-m", "base")
+      const sourceBaseSha = git("rev-parse", "HEAD")
+
+      git("switch", "-c", "candidate")
+      writeFileSync(join(dir, "payload.txt"), "same payload\n")
+      git("add", "payload.txt")
+      git("commit", "-m", "candidate")
+      const headSha = git("rev-parse", "HEAD")
+
+      git("switch", "main")
+      writeFileSync(join(dir, "payload.txt"), "same payload\n")
+      git("add", "payload.txt")
+      git("commit", "-m", "landed elsewhere")
+      const landingSha = git("rev-parse", "HEAD")
+      writeFileSync(join(dir, "authority.txt"), "new authority\n")
+      git("add", "authority.txt")
+      git("commit", "-m", "advance authority")
+      const recordedCurrentBaseSha = git("rev-parse", "HEAD")
+
+      const facts = createPruneGitFacts(dir)
+      expect(facts.sourceBase?.(recordedCurrentBaseSha, headSha)).toBe(sourceBaseSha)
+      expect(facts.pinDistance?.(recordedCurrentBaseSha, recordedCurrentBaseSha)).toEqual({
+        sourceOnly: 0,
+        targetOnly: 0,
+      })
+      expect(facts.patchMatch?.(sourceBaseSha, headSha, recordedCurrentBaseSha)).toMatchObject({
+        patchId: expect.stringMatching(/^[0-9a-f]{40}$/u),
+        targetSha: landingSha,
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("classifies a carrier whose authored gitlink pin is an ancestor of the landed pin as SUBSUMED-WITHDRAW", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "yrd-recut-preflight-gitlink-"))
+    const root = join(dir, "root")
+    const module = join(dir, "module")
+    const git = (repo: string, ...args: string[]) =>
+      execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim()
+    try {
+      execFileSync("git", ["init", "-b", "main", module], { stdio: "ignore" })
+      git(module, "config", "user.name", "Yrd Test")
+      git(module, "config", "user.email", "yrd@example.test")
+      writeFileSync(join(module, "module.txt"), "base\n")
+      git(module, "add", "module.txt")
+      git(module, "commit", "-m", "module base")
+      const oldPin = git(module, "rev-parse", "HEAD")
+
+      execFileSync("git", ["init", "-b", "main", root], { stdio: "ignore" })
+      git(root, "config", "user.name", "Yrd Test")
+      git(root, "config", "user.email", "yrd@example.test")
+      git(root, "-c", "protocol.file.allow=always", "submodule", "add", module, "dep")
+      git(root, "commit", "-m", "root base")
+      const sourceBaseSha = git(root, "rev-parse", "HEAD")
+
+      writeFileSync(join(module, "module.txt"), "authored\n")
+      git(module, "commit", "-am", "authored source")
+      const authoredPin = git(module, "rev-parse", "HEAD")
+      writeFileSync(join(module, "settled.txt"), "landed successor\n")
+      git(module, "add", "settled.txt")
+      git(module, "commit", "-m", "landed successor")
+      const landedPin = git(module, "rev-parse", "HEAD")
+
+      git(root, "switch", "-c", "carrier")
+      git(join(root, "dep"), "fetch", "origin")
+      git(join(root, "dep"), "checkout", authoredPin)
+      git(root, "add", "dep")
+      git(root, "commit", "-m", "authored carrier")
+      const headSha = git(root, "rev-parse", "HEAD")
+
+      git(root, "switch", "main")
+      git(join(root, "dep"), "checkout", landedPin)
+      git(root, "add", "dep")
+      git(root, "commit", "-m", "landed stronger pin")
+      const targetBaseSha = git(root, "rev-parse", "HEAD")
+      expect(git(module, "merge-base", "--is-ancestor", oldPin, authoredPin)).toBe("")
+      expect(git(module, "merge-base", "--is-ancestor", authoredPin, landedPin)).toBe("")
+
+      const app = await createCliApp({
+        resolveBase: (base) => ({ base, baseSha: sourceBaseSha }),
+      })
+      await app.bays.submit({
+        branch: "specimen/moved-pin",
+        headSha,
+        base: "main",
+        baseSha: sourceBaseSha,
+      })
+      const output = outputIO({ cwd: root })
+      expect(await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--json"), output.io), output.stderr()).toBe(0)
+      expect(JSON.parse(output.stdout())).toMatchObject({
+        verdict: "SUBSUMED-WITHDRAW",
+        evidence: {
+          targetBaseSha,
+          pinDistance: { sourceOnly: 0, targetOnly: 1 },
+          tree: "identical",
+        },
+      })
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

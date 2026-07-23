@@ -13,6 +13,7 @@ type JsonOption = Readonly<{ json?: boolean }>
 
 const DEFAULT_WITHDRAW_REASON = "PR withdrawn"
 const GIT_TIMEOUT_MS = 30_000
+const GIT_CAPTURE_MAX_BYTES = 16 * 1024 * 1024
 
 function jsonEnabled(options: JsonOption): boolean {
   return options.json === true
@@ -118,6 +119,7 @@ export type RecutPreflightResult = Readonly<{
   verdict: RecutPreflightVerdict
   evidence: Readonly<{
     headSha: string
+    recordedBaseSha: string
     sourceBaseSha: string
     targetBase: string
     targetBaseSha: string
@@ -192,7 +194,8 @@ async function pruneVerdict(pr: PR, baseSha: string, git: PruneGitFacts, dryRun:
 export type RecutPreflightOptions = JsonOption & Readonly<{ revision?: number; queue?: boolean }>
 
 /** Classify one immutable PR revision against one resolved target without
- * creating refs, appending journal events, or calling the recutter. Exact
+ * creating candidate refs, appending journal events, or calling the recutter.
+ * The host may fetch remote authority before pinning that target. Exact
  * ancestry/tree equivalence authorizes withdrawal; patch-id is attribution
  * evidence only because stable patch IDs intentionally ignore whitespace. */
 export async function preflightRecut(
@@ -227,7 +230,10 @@ export async function preflightRecut(
 
   const cwd = io.cwd ?? process.cwd()
   const git = io.pruneGit === undefined ? createPruneGitFacts(cwd) : io.pruneGit(cwd)
-  const targetBaseSha = (await git.resolveCommit(`origin/${pr.base}`)) ?? (await git.resolveCommit(pr.base))
+  const resolvedTarget = await io.resolveQueueTarget?.(pr.base, cwd, { refreshAuthority: true })
+  const targetBase = resolvedTarget?.base ?? pr.base
+  const targetBaseSha =
+    resolvedTarget?.sha ?? (await git.resolveCommit(`origin/${pr.base}`)) ?? (await git.resolveCommit(pr.base))
   if (targetBaseSha === undefined) {
     raiseFailure(
       "configuration",
@@ -260,17 +266,49 @@ export async function preflightRecut(
       "recut-preflight-git-facts",
       "yrd: installed PR Git facts do not provide patch-match evidence",
     )
-  const distance = await pinDistance(source.baseSha, targetBaseSha)
-  if (distance.sourceOnly !== 0) {
+  const resolveSourceBase =
+    git.sourceBase ??
+    raiseFailure(
+      "configuration",
+      "recut-preflight-git-facts",
+      "yrd: installed PR Git facts do not provide source-base evidence",
+    )
+  const recordedDistance = await pinDistance(source.baseSha, targetBaseSha)
+  if (recordedDistance.sourceOnly !== 0) {
     raiseFailure(
       "refusal",
       "recut-preflight-base-diverged",
       `yrd: PR '${pr.id}' revision ${source.revision} base ${short(source.baseSha)} diverged from target ${short(targetBaseSha)} ` +
+        `(source-only=${recordedDistance.sourceOnly}, target-only=${recordedDistance.targetOnly})`,
+    )
+  }
+  const sourceBaseSha = await resolveSourceBase(source.baseSha, source.headSha)
+  if (sourceBaseSha === undefined) {
+    raiseFailure(
+      "refusal",
+      "recut-preflight-lineage",
+      `yrd: PR '${pr.id}' recorded base '${source.baseSha}' does not prove one source merge base for revision ${source.revision}`,
+    )
+  }
+  const distance = sourceBaseSha === source.baseSha ? recordedDistance : await pinDistance(sourceBaseSha, targetBaseSha)
+  if (distance.sourceOnly !== 0) {
+    raiseFailure(
+      "refusal",
+      "recut-preflight-base-diverged",
+      `yrd: PR '${pr.id}' revision ${source.revision} source base ${short(sourceBaseSha)} diverged from target ${short(targetBaseSha)} ` +
         `(source-only=${distance.sourceOnly}, target-only=${distance.targetOnly})`,
     )
   }
-  const patch = await patchMatch(source.baseSha, source.headSha, targetBaseSha)
+  const patch = await patchMatch(sourceBaseSha, source.headSha, targetBaseSha)
   const subsumed = checks.ancestorOfBase === true || checks.mergeTree === "identical"
+  if (subsumed && source.revision !== pr.revision) {
+    raiseFailure(
+      "refusal",
+      "recut-preflight-historical-withdraw",
+      `yrd: PR '${pr.id}' revision ${source.revision} is subsumed, but current revision ${pr.revision} is unproven; ` +
+        "refusing to recommend withdrawing the whole PR",
+    )
+  }
   const requiresForce = app.queue.eligibility(pr.id).checks.status === "passed"
   const certifiedCurrentBase = distance.targetOnly === 0 && source.recut !== undefined
   const verdict: RecutPreflightVerdict = subsumed
@@ -295,8 +333,9 @@ export async function preflightRecut(
             : `yrd pr view ${pr.id}`
   const evidence: RecutPreflightResult["evidence"] = {
     headSha: source.headSha,
-    sourceBaseSha: source.baseSha,
-    targetBase: pr.base,
+    recordedBaseSha: source.baseSha,
+    sourceBaseSha,
+    targetBase,
     targetBaseSha,
     pinDistance: distance,
     patchId: patch.patchId ?? null,
@@ -321,7 +360,7 @@ export async function preflightRecut(
     result,
     [
       `${verdict} ${pr.id} r${source.revision}`,
-      `pin-distance: source-only=${distance.sourceOnly}, target-only=${distance.targetOnly} (${short(source.baseSha)}..${short(targetBaseSha)})`,
+      `pin-distance: source-only=${distance.sourceOnly}, target-only=${distance.targetOnly} (${short(sourceBaseSha)}..${short(targetBaseSha)})`,
       `patch-id-match-target: ${patch.targetSha === undefined ? "none" : short(patch.targetSha)} (patch-id=${patch.patchId ?? "none"})`,
       `tree-proof: ancestor=${checks.ancestorOfBase === true ? "yes" : "no"}, merge-tree=${checks.mergeTree}`,
       `next: ${next}`,
@@ -398,6 +437,7 @@ export function createPruneGitFacts(cwd: string): PruneGitFacts {
         stdout: execFileSync("git", ["-C", cwd, ...args], {
           encoding: "utf8",
           env: cleanGitEnvironment(process.env),
+          maxBuffer: GIT_CAPTURE_MAX_BYTES,
           ...(input === undefined ? {} : { input }),
           stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
           timeout: GIT_TIMEOUT_MS,
@@ -438,6 +478,15 @@ export function createPruneGitFacts(cwd: string): PruneGitFacts {
       if (tree === "") throw new Error(`yrd: git rev-parse ${short(sha)}^{tree} returned no tree OID`)
       return tree
     },
+    sourceBase(recordedBaseSha: string, headSha: string) {
+      const result = git(["merge-base", "--all", recordedBaseSha, headSha], [1])
+      if (result.code !== 0) return undefined
+      const candidates = result.stdout
+        .trim()
+        .split(/\r?\n/u)
+        .filter((candidate) => candidate !== "")
+      return candidates.length === 1 ? candidates[0] : undefined
+    },
     pinDistance(sourceBaseSha: string, targetBaseSha: string) {
       const raw = git(["rev-list", "--left-right", "--count", `${sourceBaseSha}...${targetBaseSha}`], []).stdout.trim()
       const [sourceOnlyRaw, targetOnlyRaw, ...extra] = raw.split(/\s+/u)
@@ -458,20 +507,20 @@ export function createPruneGitFacts(cwd: string): PruneGitFacts {
     },
     patchMatch(sourceBaseSha: string, headSha: string, targetBaseSha: string) {
       const diff = git(["diff", "--no-ext-diff", "--binary", sourceBaseSha, headSha], []).stdout
-      const patchLine = git(["patch-id", "--stable"], [], diff).stdout.trim().split("\n", 1)[0]?.trim()
-      const patchId = patchLine?.split(/\s+/u, 1)[0]
+      const stablePatchId = (patch: string) =>
+        git(["patch-id", "--stable"], [], patch).stdout.trim().split("\n", 1)[0]?.trim().split(/\s+/u, 1)[0]
+      const patchId = stablePatchId(diff)
       if (patchId === undefined || patchId === "") return {}
 
-      const targetLog = git(
-        ["log", "--no-merges", "--format=%H", "--patch", `${sourceBaseSha}..${targetBaseSha}`],
-        [],
-      ).stdout
-      const targetSha = git(["patch-id", "--stable"], [], targetLog)
+      const targetShas = git(["rev-list", "--no-merges", `${sourceBaseSha}..${targetBaseSha}`], [])
         .stdout.trim()
-        .split("\n")
-        .map((line) => line.trim().split(/\s+/u))
-        .find(([candidate]) => candidate === patchId)?.[1]
-      return { patchId, ...(targetSha === undefined || targetSha === "" ? {} : { targetSha }) }
+        .split(/\r?\n/u)
+        .filter((sha) => sha !== "")
+      const targetSha = targetShas.find((sha) => {
+        const targetDiff = git(["show", "--format=", "--no-ext-diff", "--binary", sha], []).stdout
+        return stablePatchId(targetDiff) === patchId
+      })
+      return { patchId, ...(targetSha === undefined ? {} : { targetSha }) }
     },
   })
 }

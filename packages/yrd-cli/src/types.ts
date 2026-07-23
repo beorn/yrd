@@ -51,6 +51,10 @@ export type PruneGitFacts = Readonly<{
   /** Tree OID of a conflict-free merge of base and head, or undefined when the merge conflicts. */
   mergeTree(baseSha: string, headSha: string): string | undefined | Promise<string | undefined>
   treeOf(sha: string): string | Promise<string>
+  /** Derive the one source merge base recut will use when submission recorded
+   * authority newer than the source branch. Undefined means lineage is
+   * missing or ambiguous and preflight must refuse. */
+  sourceBase?(recordedBaseSha: string, headSha: string): string | undefined | Promise<string | undefined>
   /** Selected source-base distance from the pinned authoritative target. The
    * source-only side must be zero before recut can be classified safely. */
   pinDistance?(
@@ -89,7 +93,11 @@ export type YrdCliIO = {
   concurrency?: number
   now?: () => number
   resolveRevision?(ref: string, cwd: string): Promise<string | undefined>
-  resolveQueueTarget?(ref: string, cwd: string): Promise<Readonly<{ base: string; sha: string }>>
+  resolveQueueTarget?(
+    ref: string,
+    cwd: string,
+    options?: Readonly<{ refreshAuthority?: boolean }>,
+  ): Promise<Readonly<{ base: string; sha: string }>>
   /** Head commit subject + body used to default a submitted PR's title/description. */
   resolveCommitMeta?(ref: string, cwd: string): Promise<Readonly<{ subject: string; body?: string }> | undefined>
   currentBranch?(cwd: string): string | undefined

@@ -1809,6 +1809,62 @@ notify:
     expect(await journalEnvelope(repo)).toEqual(before)
   })
 
+  it("refreshes remote authority before a recut preflight verdict", async () => {
+    const { repo, featureSha } = await repository()
+    const remote = join(repo, "..", "origin.git")
+    const updater = join(repo, "..", "updater")
+    await git(repo, "init", "-q", "--bare", remote)
+    await git(repo, "remote", "add", "origin", remote)
+    await git(repo, "push", "-q", "-u", "origin", "main", "issue/feature")
+    const sourceBaseSha = await git(repo, "rev-parse", "origin/main")
+
+    {
+      await using host = await createYrdHost({ cwd: repo })
+      await host.app.bays.submit({
+        branch: "issue/feature",
+        headSha: featureSha,
+        base: "main",
+        baseSha: sourceBaseSha,
+      })
+    }
+
+    await git(repo, "clone", "-q", "-b", "main", remote, updater)
+    await git(updater, "config", "user.name", "Yrd Test")
+    await git(updater, "config", "user.email", "yrd@example.invalid")
+    await writeFile(join(updater, "authority.txt"), "remote authority moved\n")
+    await git(updater, "add", "authority.txt")
+    await git(updater, "commit", "-qm", "advance remote authority")
+    await git(updater, "push", "-q", "origin", "main")
+    const targetBaseSha = await git(updater, "rev-parse", "HEAD")
+    expect(await git(repo, "rev-parse", "origin/main")).toBe(sourceBaseSha)
+
+    let stdout = ""
+    let stderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "recut", "PR1", "--preflight", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+      stderr,
+    ).toBe(0)
+    expect(JSON.parse(stdout)).toMatchObject({
+      command: "pr.recut.preflight",
+      verdict: "RECUT",
+      evidence: {
+        sourceBaseSha,
+        targetBaseSha,
+        pinDistance: { sourceOnly: 0, targetOnly: 1 },
+      },
+    })
+    expect(await git(repo, "rev-parse", "origin/main")).toBe(targetBaseSha)
+    expect(stderr).toBe("")
+  })
+
   it("starts a fresh current journal without reading or rewriting legacy journal files", async () => {
     const { repo } = await repository()
     const oldYrdJournal = join(repo, ".git", "yrd", "events.jsonl")
