@@ -19,11 +19,14 @@ export default defineConfig({
     // files); those out-run vitest's 10s default hookTimeout under the same load.
     hookTimeout: 45_000,
     poolOptions: {
-      // Cap concurrent worker processes well below the 18-core count: the box is
-      // already oversubscribed by the wider agent fleet, so piling 18 forks on
-      // top starves every git subprocess and multiplies the timeouts. A modest
-      // cap gives each fork enough CPU to finish inside the budget above.
-      forks: { minForks: 1, maxForks: 8 },
+      // Cap concurrent worker processes far below the 18-core count: the box is
+      // already oversubscribed by the wider agent fleet (load avg 21-26), so
+      // piling forks on top starves every git subprocess AND, under a spike, can
+      // make fork() itself fail ("Failed to start forks worker" — the OS refusing
+      // to spawn under pid/memory pressure). A low cap shrinks this run's process
+      // footprint so each fork gets real CPU and worker spawns stay reliable.
+      // Trade-off is longer wall time, which is fine for a green-signal run.
+      forks: { minForks: 1, maxForks: 4 },
     },
     server: {
       deps: {
