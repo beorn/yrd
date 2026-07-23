@@ -29,7 +29,7 @@ function isRetryableIndexLockContention(result: ProcessResult): boolean {
 
 function withExhaustionGuidance(result: ProcessResult, attempts: number): ProcessResult {
   const guidance =
-    `Yrd retried Git index-lock contention ${attempts} times and the lock still exists. ` +
+    `Yrd tried the Git operation ${attempts} times and the index lock still exists. ` +
     `Wait for the active Git writer, then retry. Inspect ownership and age before treating it as orphaned. ` +
     `Never delete a live lock.`
   return { ...result, stderr: `${result.stderr.trimEnd()}\n${guidance}\n` }

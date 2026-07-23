@@ -79,7 +79,7 @@ describe("runWithGitIndexLockRetry", () => {
     })
 
     expect(process.requests).toHaveLength(3)
-    expect(completed.stderr).toContain("Yrd retried Git index-lock contention 3 times")
+    expect(completed.stderr).toContain("Yrd tried the Git operation 3 times")
     expect(completed.stderr).toMatch(/wait for the active Git writer/iu)
     expect(completed.stderr).toContain("Never delete a live lock")
   })
