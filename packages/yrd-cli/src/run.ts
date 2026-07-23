@@ -1683,7 +1683,7 @@ async function applyPrSelectionVerb(
     if (createOnly) {
       const bay = app.bays.get(selector)
       const existing = app.bays.pr(bay?.branch ?? selector)
-      if (existing !== undefined && existing.status !== "pushed") {
+      if (existing !== undefined && existing.status !== "pushed" && existing.status !== "rejected") {
         refusal(`PR '${existing.id}' is already ${existing.status}; create is only for a draft PR`)
       }
     }

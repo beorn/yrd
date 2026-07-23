@@ -3350,6 +3350,28 @@ describe("runYrd", () => {
     expect(app.bays.pr("topic/ready-on-arrival")?.title).toBeUndefined()
   })
 
+  it("reopens a rejected branch as a draft revision through pr create", async () => {
+    const app = await createApp({ failingCheck: true })
+    const first = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+    expect(await runYrd(app, yrd("pr", "submit", "topic/retry", "--follow", "--json"), first.io)).toBe(1)
+    expect(app.bays.pr("PR1")).toMatchObject({ status: "rejected", revision: 1, headSha: HEAD_SHA })
+
+    const create = outputIO({ resolveRevision: () => Promise.resolve(MERGED_SHA) })
+    expect(await runYrd(app, yrd("pr", "create", "topic/retry", "--json"), create.io), create.stderr()).toBe(0)
+    expect(JSON.parse(create.stdout())).toMatchObject({
+      command: "pr.create",
+      prs: [{ id: "PR1", status: "pushed", revision: 2, headSha: MERGED_SHA }],
+    })
+    expect(app.bays.pr("PR1")).toMatchObject({
+      id: "PR1",
+      status: "pushed",
+      revision: 2,
+      headSha: MERGED_SHA,
+    })
+    expect(app.bays.checksRequested("PR1")).toBe(false)
+    expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
+  })
+
   it("drives reviewer requests through submit, request-review, and the reviewer-scoped inbox", async () => {
     const app = await createApp()
     const resolveRevision = () => Promise.resolve(HEAD_SHA)
