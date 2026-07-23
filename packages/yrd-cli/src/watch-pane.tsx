@@ -1234,6 +1234,12 @@ export function QueueWatchFrame({
       : queueTimelineFilterBuckets(snapshot.projection.filters.statuses),
   )
   const [expandedStorms, setExpandedStorms] = useState<ReadonlySet<string>>(() => new Set())
+  const selectOnlyBucket = (bucket: QueueTimelineStatusBucket): void => {
+    setVisibleBuckets(new Set([bucket]))
+  }
+  const showAllBuckets = (): void => {
+    setVisibleBuckets(new Set(QUEUE_TIMELINE_STATUS_BUCKETS))
+  }
   const toggleBucket = (bucket: QueueTimelineStatusBucket): void => {
     setVisibleBuckets((current) => {
       const next = new Set(current)
@@ -1343,14 +1349,19 @@ export function QueueWatchFrame({
       return
     }
     if (snapshot.projection === undefined) return
-    // Direct status-filter toggles (user respec 2026-07-15). Pause/resume is
-    // removed. `t` toggles the todo (pending) bucket, matching the pill's
-    // bold-first-letter hint; individual queued rows use the truthful
-    // `submitted` status introduced by the current projection contract.
-    if (character === "t") toggleBucket("pending")
-    if (character === "r") toggleBucket("running")
-    if (character === "f") toggleBucket("failed")
-    if (character === "d") toggleBucket("done")
+    // Status-filter keys (user respec 2026-07-23). Lowercase o/r/d/f selects
+    // ONLY that bucket (the advertised default), `a` restores all buckets, and
+    // capital O/R/D/F toggles one bucket's membership (power path,
+    // unadvertised). Pause/resume remains removed.
+    if (character === "o") selectOnlyBucket("open")
+    if (character === "r") selectOnlyBucket("running")
+    if (character === "d") selectOnlyBucket("done")
+    if (character === "f") selectOnlyBucket("failed")
+    if (character === "a") showAllBuckets()
+    if (character === "O") toggleBucket("open")
+    if (character === "R") toggleBucket("running")
+    if (character === "D") toggleBucket("done")
+    if (character === "F") toggleBucket("failed")
   })
 
   const activateRow = (index: number): void => {
@@ -1424,7 +1435,8 @@ export function QueueWatchFrame({
         availableRows={timelineRows}
         visibleBuckets={visibleBuckets}
         expandedStorms={expandedStorms}
-        onToggleBucket={toggleBucket}
+        onSelectBucket={selectOnlyBucket}
+        onShowAll={showAllBuckets}
         listRef={timelineListRef}
       />
     )

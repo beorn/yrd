@@ -62,7 +62,7 @@ describe("queue timeline 21106 contract", () => {
   it("renders separately bordered FLOW and TIME boxes after the list", async () => {
     const rows = (await renderTimeline(contractProjection(), 120)).map((row) => row.trimEnd())
     const frame = rows.join("\n")
-    const pillsLine = rows.findIndex((row) => /todo.*running.*failed.*done/u.test(row))
+    const pillsLine = rows.findIndex((row) => /open.*running.*done.*failed.*all/u.test(row))
     const statsLine = rowIndex(rows, "╭─ FLOW ")
 
     expect(statsLine).toBeGreaterThan(pillsLine)
@@ -175,7 +175,7 @@ describe("queue timeline 21106 contract", () => {
     // Item 2 (deliberate contract change): the pills row moved from ABOVE the
     // header to BELOW the list — new order updated → header → rows → pills →
     // the FLOW/TIME boxes.
-    const pillsLine = rows.findIndex((row) => /todo.*running.*failed.*done/u.test(row))
+    const pillsLine = rows.findIndex((row) => /open.*running.*done.*failed.*all/u.test(row))
     const statsBoxLine = rowIndex(rows, "╭─ FLOW ")
 
     expect(queueLine).toBeLessThan(updatedLine)
@@ -516,17 +516,17 @@ describe("queue timeline 21106 contract", () => {
     for (const width of [120, 200]) {
       const rows = await renderTimeline(contractProjection(), width)
       const headerLine = rowIndex(rows, "TIME")
-      const pillsLine = rows.findIndex((row) => /todo.*running.*failed.*done/u.test(row))
+      const pillsLine = rows.findIndex((row) => /open.*running.*done.*failed.*all/u.test(row))
       // Item 2: the pills row renders BELOW the list, not above the header.
       expect(pillsLine, `width ${width}`).toBeGreaterThan(headerLine)
       const filter = rows[pillsLine]
       if (filter === undefined) throw new Error("expected the pills row")
       // Item 3: no "FILTER" label, no [t] brackets; the `since=` dimension
-      // survives and the pills are plain words (pending reads `todo`, user
+      // survives and the pills are plain words (pending reads `open`, user
       // directive 2026-07-21). Right-aligned to the cap.
       expect(filter).not.toContain("FILTER")
       expect(filter).not.toMatch(/\[[trfd]\]/u)
-      expect(filter.trim()).toContain("since=6:00:00 todo running failed done")
+      expect(filter.trim()).toContain("since=6:00:00 open running done failed all")
       expect(filter.trimEnd().length, `width ${width}`).toBe(Math.min(width, 160))
     }
   })
@@ -550,7 +550,7 @@ describe("queue timeline 21106 contract", () => {
     expect(runnerBottom, "the RUNNER box closes below the pause line").toBeGreaterThan(statusLine)
     // It still renders between the metadata clock and the pills row.
     expect(rowIndex(rows, "updated 17:30:00")).toBeLessThan(statusLine)
-    const pillsAt = rows.findIndex((row) => /todo.*running.*failed.*done/u.test(row))
+    const pillsAt = rows.findIndex((row) => /open.*running.*done.*failed.*all/u.test(row))
     expect(statusLine, "the RUNNER box sits above the pills row").toBeLessThan(pillsAt)
 
     const render = createRenderer({ cols: 120, rows: 45 })

@@ -240,21 +240,22 @@ describe("queue timeline non-integrated rows", () => {
     expect(readyRow?.queueWaitMs).toBe(NOW - Date.parse(REGISTERED_AT))
   })
 
-  it("shows every pre-run status under the default view and the todo bucket, hidden when todo is off", () => {
+  it("buckets pre-run statuses onto the courts: draft/rev under open, ready under running (user respec 2026-07-23)", () => {
     const projection = project([draftPr(), revisionPr(), submittedPr()])
     const visiblePrs = (buckets?: ReadonlySet<QueueTimelineStatusBucket>) =>
       new Set(queueTimelineVisibleRows(projection, buckets, true).map((row) => row.pr))
 
-    // Every pre-run status buckets with `todo` — no new operator pill.
-    for (const status of ["draft", "rev", "ready"] as const) {
-      expect(queueTimelineStatusBucket(status)).toBe("pending")
+    // open = agents' court (editable); running = queue's court (ready onward).
+    for (const status of ["draft", "rev"] as const) {
+      expect(queueTimelineStatusBucket(status)).toBe("open")
     }
+    expect(queueTimelineStatusBucket("ready")).toBe("running")
     // The default view (no bucket filter) surfaces all three.
     expect(visiblePrs(undefined)).toEqual(new Set(["PR7", "PR5", "PR3"]))
-    // The `todo` pill alone keeps them; toggling `todo` off (the other three
-    // buckets) hides all three.
-    expect(visiblePrs(new Set<QueueTimelineStatusBucket>(["pending"]))).toEqual(new Set(["PR7", "PR5", "PR3"]))
-    expect(visiblePrs(new Set<QueueTimelineStatusBucket>(["running", "failed", "done"])).size).toBe(0)
+    // The open pill alone keeps draft+rev; running alone keeps the ready PR.
+    expect(visiblePrs(new Set<QueueTimelineStatusBucket>(["open"]))).toEqual(new Set(["PR7", "PR5"]))
+    expect(visiblePrs(new Set<QueueTimelineStatusBucket>(["running"]))).toEqual(new Set(["PR3"]))
+    expect(visiblePrs(new Set<QueueTimelineStatusBucket>(["failed", "done"])).size).toBe(0)
   })
 
   it("keeps pre-run rows display-only: they never become terminal FLOW facts", () => {
