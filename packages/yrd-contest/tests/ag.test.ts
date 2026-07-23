@@ -177,7 +177,7 @@ describe("createAgContestRunner", () => {
     expect(agentRequests[0]?.cwd).toBe(await realpath(repo))
     expect(agentRequests[0]?.argv.slice(0, -1)).toEqual(
       argv(
-        "bun /opt/ag/cli.ts codex --no-tribe --account bench --tier frontier --model gpt-5.6-sol --model-reasoning-effort xhigh exec --json --ephemeral --",
+        "bun /opt/ag/cli.ts codex --no-tribe --account bench --model-tier frontier --model gpt-5.6-sol --model-reasoning-effort xhigh exec --json --ephemeral --",
       ),
     )
     const prompt = agentRequests[0]?.argv.at(-1) ?? ""
@@ -237,7 +237,11 @@ describe("createAgContestRunner", () => {
       inject: injected(process),
       artifactRoot: join(root, "artifacts"),
     })
-    const baseInput = contestInput(bay, { provider: "claude", account: "bench", effort: "max" })
+    const configured = contestInput(bay, { provider: "claude", account: "bench", tier: "apex" })
+    const baseInput: ContestRunnerInput = {
+      ...configured,
+      competitor: { ...configured.competitor, model: "claude" },
+    }
     const input: ContestRunnerInput = {
       ...baseInput,
       issue: { ...baseInput.issue, description: `Do the work; $(touch ${marker}) is literal acceptance text.` },
@@ -246,7 +250,7 @@ describe("createAgContestRunner", () => {
     const output = passed(await runner.run(input, job()))
 
     expect(launch?.argv.slice(0, -1)).toEqual(
-      argv("ag claude --no-tribe --account bench --model gpt-5.6-sol --yolo --effort max -p --output-format json --"),
+      argv("ag claude --no-tribe --account bench --model-tier apex --yolo -p --output-format json --"),
     )
     expect(launch?.argv.at(-1)).toContain(`$(touch ${marker})`)
     expect(await Bun.file(marker).exists()).toBe(false)
@@ -258,6 +262,44 @@ describe("createAgContestRunner", () => {
       reasoning: null,
     })
     expect(output.cost).toEqual({ kind: "reported", usd: 0.42, source: "ag:claude:transcript" })
+  })
+
+  it.each([
+    ["declared config", undefined],
+    [
+      "injected launch policy",
+      () => ({
+        provider: "claude",
+        effort: "max",
+        args: ["-p", "--output-format", "json"],
+      }),
+    ],
+  ])("refuses raw Claude effort from %s before starting the agent", async (_label, resolveLaunch) => {
+    const { root, bay } = await repository()
+    let agentStarts = 0
+    const runner = createAgContestRunner({
+      revision: "ag-runner-v1",
+      artifactRoot: join(root, "artifacts"),
+      ...(resolveLaunch === undefined ? {} : { resolveLaunch }),
+      inject: injected((request) => {
+        if (request.argv[0] === "git") return systemProcess.run(request)
+        agentStarts++
+        return Promise.resolve(result(17, "", "must not start"))
+      }),
+    })
+    const configured = contestInput(bay, { provider: "claude", effort: "max" })
+    const input: ContestRunnerInput = {
+      ...configured,
+      competitor: { ...configured.competitor, model: "claude" },
+    }
+
+    const run = await runner.run(input, job())
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: { code: "ag-config-invalid", message: expect.stringMatching(/Claude.*effort.*model-tier/is) },
+    })
+    expect(agentStarts).toBe(0)
   })
 
   it("returns typed failures, preserves process artifacts, and refuses to pin a run without a new commit", async () => {

@@ -156,7 +156,7 @@ async function startContest(app: Awaited<ReturnType<typeof createApp>>): Promise
     issue,
     competitors: [
       { model: "codex", harness: "ag", config: { effort: "max" } },
-      { model: "claude", harness: "ag", config: { effort: "max" } },
+      { model: "claude", harness: "ag", config: { tier: "apex" } },
     ],
     evaluators: ["held-out", "review"],
     base: base.base,

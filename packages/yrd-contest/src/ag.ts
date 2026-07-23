@@ -31,7 +31,9 @@ import {
 export type AgContestLaunch = Readonly<{
   provider: string
   account?: string
+  /** Provider-neutral Ag model tier (apex, frontier, or economy). */
   tier?: string
+  /** Codex-only reasoning effort. Claude callers select a model tier instead. */
   effort?: string
   instructions?: string
   yolo?: boolean
@@ -161,15 +163,24 @@ function modelArg(input: ContestRunnerInput, provider: string): readonly string[
   return input.competitor.model === provider ? [] : ["--model", input.competitor.model]
 }
 
+function validateLaunch(launch: AgContestLaunch): void {
+  if (launch.provider.trim() === "" || launch.args.some((arg) => arg === "" || arg === "--")) {
+    throw new Error("yrd: Ag launch must have a provider and must leave the '--' prompt boundary to Yrd")
+  }
+  if (launch.effort !== undefined && launch.provider !== "codex") {
+    throw new Error(
+      `yrd: Ag ${launch.provider} launch cannot declare raw effort; use tier to emit Ag's --model-tier intent`,
+    )
+  }
+}
+
 function launchArgv(command: readonly string[], input: ContestRunnerInput, launch: AgContestLaunch): readonly string[] {
   const argv = [...command, launch.provider, "--no-tribe"]
   if (launch.account !== undefined) argv.push("--account", launch.account)
-  if (launch.tier !== undefined) argv.push("--tier", launch.tier)
+  if (launch.tier !== undefined) argv.push("--model-tier", launch.tier)
   argv.push(...modelArg(input, launch.provider))
   if (launch.yolo === true) argv.push("--yolo")
-  if (launch.effort !== undefined) {
-    argv.push(launch.provider === "codex" ? "--model-reasoning-effort" : "--effort", launch.effort)
-  }
+  if (launch.effort !== undefined) argv.push("--model-reasoning-effort", launch.effort)
   argv.push(...launch.args, "--", issuePrompt(input, launch.instructions))
   return argv
 }
@@ -512,9 +523,7 @@ export function createAgContestRunner(options: AgContestRunnerOptions): ContestR
       const configured = await attempt("ag-config-invalid", () => {
         const command = validateCommand(options.command ?? ["ag"])
         const launch = (options.resolveLaunch ?? defaultLaunch)(input)
-        if (launch.provider.trim() === "" || launch.args.some((arg) => arg === "" || arg === "--")) {
-          throw new Error("yrd: Ag launch must have a provider and must leave the '--' prompt boundary to Yrd")
-        }
+        validateLaunch(launch)
         return { command, launch }
       })
       if (!configured.ok) return failed(configured.error.code, configured.error.message)
