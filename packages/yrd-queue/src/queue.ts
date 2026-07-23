@@ -1,6 +1,7 @@
 import {
   GitRefSchema,
   GitShaSchema,
+  PRAlreadyLandedSchema,
   PRIdSchema,
   PRTerminalAssociationSchema,
   baseIdentity,
@@ -2537,6 +2538,16 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
       },
     }
   }
+  if (applied.name === "pr/already-landed") {
+    const alreadyLanded = PRAlreadyLandedSchema.parse(applied.data)
+    if (!terminalAuthorityMatches(state.queues.authority, alreadyLanded, applied.name, true)) return state
+    return {
+      queues: {
+        ...state.queues,
+        authority: invalidatePRAuthority(state.queues.authority, alreadyLanded.pr, "already-landed"),
+      },
+    }
+  }
   if (applied.name === "pr/withdrawn" || applied.name === "pr/canceled") {
     const closed = QueueAuthorityPRFactSchema.parse(applied.data)
     if (closed.revision !== undefined && closed.headSha !== undefined) {
@@ -2877,6 +2888,38 @@ function advanceQueue(
   if (planned.integrates) {
     if (!isIntegrated(shape)) throw new Error(`yrd: merge step '${planned.name}' produced no integration proof`)
     for (const current of samePayloadPRs(state.bays, record.prs)) {
+      const alreadyLanded = shape.integration.alreadyLanded
+      if (alreadyLanded !== undefined) {
+        if (
+          current.status === "already-landed" &&
+          current.integration?.commit === shape.integration.commit &&
+          current.integration?.baseSha === shape.integration.baseSha &&
+          current.alreadyLanded?.candidateSha === alreadyLanded.candidateSha &&
+          current.alreadyLanded.candidateTreeSha === alreadyLanded.candidateTreeSha &&
+          current.alreadyLanded.baseTreeSha === alreadyLanded.baseTreeSha
+        ) {
+          continue
+        }
+        const revision = current.revisions.find(
+          (candidate) => candidate.revision === current.revision && candidate.headSha === current.headSha,
+        )
+        events.push(
+          event("pr/already-landed", {
+            pr: current.id,
+            revision: current.revision,
+            headSha: current.headSha,
+            run: record.id,
+            ...(current.issue === undefined ? {} : { issueRef: current.issue }),
+            baseSha: shape.integration.baseSha,
+            candidateSha: alreadyLanded.candidateSha,
+            candidateTreeSha: alreadyLanded.candidateTreeSha,
+            baseTreeSha: alreadyLanded.baseTreeSha,
+            ...(current.correlation === undefined ? {} : { correlation: current.correlation }),
+            ...(revision?.actor === undefined ? {} : { actor: revision.actor }),
+          }),
+        )
+        continue
+      }
       if (
         current.status === "integrated" &&
         current.integration?.commit === shape.integration.commit &&
@@ -3422,7 +3465,7 @@ function requestedPRs(
       })
   ).filter((pr) => !excluded.has(pr.id))
   for (const pr of prs) {
-    if (pr.status !== "submitted" && pr.status !== "integrated") {
+    if (pr.status !== "submitted" && pr.status !== "integrated" && pr.status !== "already-landed") {
       raiseFailure("refusal", "pr-not-ready", `yrd: PR '${pr.id}' is ${pr.status}, not ready for the queue`)
     }
   }
@@ -3906,7 +3949,8 @@ function prEligibility(
     review,
     checks,
   })
-  const resumingIntegration = options.resumeIntegrated === true && pr.status === "integrated"
+  const resumingIntegration =
+    options.resumeIntegrated === true && (pr.status === "integrated" || pr.status === "already-landed")
   if (!resumingIntegration) {
     if (pr.status === "pushed") {
       return result({ code: "draft", message: `PR '${pr.id}' is pushed, not ready` })
@@ -4012,20 +4056,39 @@ function prShape(prs: readonly PRSnapshot[]): PRShape {
 }
 
 function integratedPRShape(prs: readonly PR[]): IntegratedShape | undefined {
-  if (prs.every((pr) => pr.status !== "integrated")) return undefined
+  if (prs.every((pr) => pr.status !== "integrated" && pr.status !== "already-landed")) return undefined
   const proof = prs[0]?.integration
+  const alreadyLanded = prs[0]?.alreadyLanded
   if (
     proof === undefined ||
     prs.some(
       (pr) =>
-        pr.status !== "integrated" ||
+        (pr.status !== "integrated" && pr.status !== "already-landed") ||
         pr.integration?.commit !== proof.commit ||
-        pr.integration?.baseSha !== proof.baseSha,
+        pr.integration?.baseSha !== proof.baseSha ||
+        (alreadyLanded === undefined) !== (pr.alreadyLanded === undefined) ||
+        (alreadyLanded !== undefined &&
+          (pr.alreadyLanded?.candidateSha !== alreadyLanded.candidateSha ||
+            pr.alreadyLanded.candidateTreeSha !== alreadyLanded.candidateTreeSha ||
+            pr.alreadyLanded.baseTreeSha !== alreadyLanded.baseTreeSha)),
     )
   ) {
     throw new Error("yrd: every PR in a queue candidate must share one integration proof")
   }
-  return { ...prShape(prs.map(Queues.snapshot)), integration: proof }
+  return {
+    ...prShape(prs.map(Queues.snapshot)),
+    integration:
+      alreadyLanded === undefined
+        ? proof
+        : {
+            ...proof,
+            alreadyLanded: {
+              candidateSha: alreadyLanded.candidateSha,
+              candidateTreeSha: alreadyLanded.candidateTreeSha,
+              baseTreeSha: alreadyLanded.baseTreeSha,
+            },
+          },
+  }
 }
 
 function pinnedPRError(state: DeepReadonly<BaysState>, snapshots: readonly PRSnapshot[]): JobError | undefined {
@@ -4076,10 +4139,15 @@ function needsAdvance(state: DeepReadonly<RuntimeState>, run: QueueRun): boolean
     if (!step.integrates || run.integration === undefined) return false
     return run.prs.some((pr) => {
       const current = state.bays.prs[pr.id]
+      const alreadyLanded = run.integration?.alreadyLanded
       return (
-        current?.status !== "integrated" ||
+        current?.status !== (alreadyLanded === undefined ? "integrated" : "already-landed") ||
         current.integration?.commit !== run.integration?.commit ||
-        current.integration?.baseSha !== run.integration?.baseSha
+        current.integration?.baseSha !== run.integration?.baseSha ||
+        (alreadyLanded !== undefined &&
+          (current.alreadyLanded?.candidateSha !== alreadyLanded.candidateSha ||
+            current.alreadyLanded.candidateTreeSha !== alreadyLanded.candidateTreeSha ||
+            current.alreadyLanded.baseTreeSha !== alreadyLanded.baseTreeSha))
       )
     })
   }

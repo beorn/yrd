@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto"
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
-import { PRCanceledSchema, PRRejectedFactSchema, PRWithdrawnSchema, type PRRejectedFact } from "@yrd/bay"
+import {
+  PRAlreadyLandedSchema,
+  PRCanceledSchema,
+  PRRejectedFactSchema,
+  PRWithdrawnSchema,
+  type PRRejectedFact,
+} from "@yrd/bay"
 import { parseJournalFrame, raiseFailure, type Event, type Journal } from "@yrd/core"
 import { createExclusive } from "@yrd/persistence"
 import type { Process } from "@yrd/process"
@@ -71,6 +77,21 @@ export type IntegratedSignal = Readonly<{
   prs: readonly SignalPR[]
 }>
 
+export type AlreadyLandedSignal = Readonly<{
+  id: string
+  kind: "pr/already-landed"
+  at: string
+  pr: string
+  revision: number
+  headSha: string
+  actor?: string
+  run: string
+  baseSha: string
+  candidateSha: string
+  candidateTreeSha: string
+  baseTreeSha: string
+}>
+
 export type RunFailedSignal = Readonly<{
   id: string
   kind: "run/failed"
@@ -84,12 +105,13 @@ export type RoutableSignal =
   | RejectedSignal
   | NeedsReviewSignal
   | IntegratedSignal
+  | AlreadyLandedSignal
   | RunFailedSignal
   | WithdrawnSignal
   | CanceledSignal
 
 /** Signals that settle a PR revision line and therefore close its open request balls. */
-export type TerminalSignal = IntegratedSignal | WithdrawnSignal | CanceledSignal
+export type TerminalSignal = IntegratedSignal | AlreadyLandedSignal | WithdrawnSignal | CanceledSignal
 
 export type SignalDelivery = Readonly<{
   recipient: string
@@ -453,6 +475,11 @@ function directSignalOf(event: Event, reviewRequired: boolean): RoutableSignal |
       prs: parsed.data.prs,
     })
   }
+  if (event.name === "pr/already-landed") {
+    const parsed = PRAlreadyLandedSchema.safeParse(event.data)
+    if (!parsed.success) return undefined
+    return Object.freeze({ id: event.id, kind: "pr/already-landed", at: event.ts, ...parsed.data })
+  }
   if (event.name === "pr/withdrawn") {
     const parsed = PRWithdrawnSchema.safeParse(event.data)
     if (!parsed.success) return undefined
@@ -492,7 +519,12 @@ function resolveRecipients(signal: RoutableSignal, target: SignalRouteTarget): r
 }
 
 function isTerminalSignal(signal: RoutableSignal): signal is TerminalSignal {
-  return signal.kind === "pr/integrated" || signal.kind === "pr/withdrawn" || signal.kind === "pr/canceled"
+  return (
+    signal.kind === "pr/integrated" ||
+    signal.kind === "pr/already-landed" ||
+    signal.kind === "pr/withdrawn" ||
+    signal.kind === "pr/canceled"
+  )
 }
 
 /** The PR revision lines a terminal signal settles: the whole integrated batch, or the single
@@ -646,6 +678,15 @@ function deliveryText(delivery: SignalDelivery): string {
   if (event.kind === "pr/integrated") {
     return `Yrd integrated ${event.prs.map(({ pr }) => pr).join(", ")} at ${event.landingSha}. run=${event.run} event=${event.id}`
   }
+  if (event.kind === "pr/already-landed") {
+    return [
+      `Yrd found ${event.pr} already landed at ${event.baseSha}; no merge commit was created.`,
+      `run=${event.run}`,
+      `candidate=${event.candidateSha}`,
+      `tree=${event.candidateTreeSha}`,
+      `event=${event.id}`,
+    ].join("\n")
+  }
   if (event.kind === "run/failed") {
     return [
       `Yrd failed ${event.prs.map(({ pr }) => pr).join(", ")}. run=${event.run}`,
@@ -661,6 +702,7 @@ function deliverySummary(delivery: SignalDelivery): string {
   if (event.kind === "pr/rejected") return `${event.pr} rejected at ${event.step}`
   if (event.kind === "pr/needs-review") return `${event.pr} needs review`
   if (event.kind === "pr/integrated") return `${event.prs.map(({ pr }) => pr).join(", ")} integrated`
+  if (event.kind === "pr/already-landed") return `${event.pr} already landed`
   if (event.kind === "run/failed") return `${event.run} failed`
   throw new Error(`yrd: ${event.kind} is a terminal closure signal and has no delivery summary`)
 }

@@ -7,6 +7,7 @@ import { JobErrorSchema, parseJobLaunch, type JobContext, type JobError, type Jo
 import type { Process, ProcessResult } from "@yrd/process"
 import * as z from "zod"
 import type {
+  AlreadyLandedEvidence,
   IntegratedShape,
   IntegrationProof,
   PRShape,
@@ -3809,6 +3810,19 @@ async function mergeCandidate(
   return "error" in validated ? { status: "failed", error: validated.error } : { status: "passed", base, checked }
 }
 
+async function alreadyLandedEvidence(
+  git: Git,
+  repo: string,
+  baseSha: string,
+  checked: PinnedCandidate,
+): Promise<AlreadyLandedEvidence | undefined> {
+  const candidateTreeSha = (await git.run(repo, ["rev-parse", `${checked.candidateSha}^{tree}`])).stdout
+  const baseTreeSha = (await git.run(repo, ["rev-parse", `${baseSha}^{tree}`])).stdout
+  return candidateTreeSha === baseTreeSha
+    ? { candidateSha: checked.candidateSha, candidateTreeSha, baseTreeSha }
+    : undefined
+}
+
 function mergeAuthorityCancellation(context: Pick<JobContext, "signal">): FailedJobResult | undefined {
   if (!context.signal.aborted) return undefined
   return {
@@ -4053,6 +4067,12 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
       if (candidate.status !== "passed") return candidate
       const { base, checked } = candidate
       const baseSha = base.sha
+      const alreadyLanded = await alreadyLandedEvidence(git, repo, baseSha, checked)
+      if (alreadyLanded !== undefined) {
+        const cancellation = mergeAuthorityCancellation(context)
+        if (cancellation !== undefined) return cancellation
+        return { status: "passed", output: integrationProof(baseSha, checked, alreadyLanded) }
+      }
       const remote = base.remote
       if (remote !== undefined) {
         const branchRef = `refs/heads/${branch}`
@@ -4186,6 +4206,15 @@ export function configuredMergeStep<Shape extends PRShape>(
         ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
       })
       if (candidate.status !== "passed") return candidate
+      const alreadyLanded = await alreadyLandedEvidence(git, repo, candidate.base.sha, candidate.checked)
+      if (alreadyLanded !== undefined) {
+        const cancellation = mergeAuthorityCancellation(context)
+        if (cancellation !== undefined) return cancellation
+        return {
+          status: "passed",
+          output: integrationProof(candidate.base.sha, candidate.checked, alreadyLanded),
+        }
+      }
       const command = configuredCommandStep<Shape>({
         inject: options.inject,
         command: options.command,
@@ -4273,10 +4302,15 @@ function primaryPR(input: StepExecution): StepExecution["prs"][number] {
   return primary
 }
 
-function integrationProof(commit: string, checked: PinnedCandidate): IntegrationProof {
+function integrationProof(
+  commit: string,
+  checked: PinnedCandidate,
+  alreadyLanded?: AlreadyLandedEvidence,
+): IntegrationProof {
   return IntegrationProofSchema.parse({
     commit,
     baseSha: commit,
+    ...(alreadyLanded === undefined ? {} : { alreadyLanded }),
     ...(checked.sourceRewrites === undefined ? {} : { sourceRewrites: checked.sourceRewrites }),
     ...(checked.submoduleResolutions === undefined ? {} : { submoduleResolutions: checked.submoduleResolutions }),
   })

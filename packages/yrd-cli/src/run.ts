@@ -768,6 +768,14 @@ type TrackerDelivery =
   | (TrackerDeliveryIdentity & Readonly<{ status: "rejected"; bounce: Readonly<{ run: string; detail?: string }> }>)
   | (TrackerDeliveryIdentity &
       Readonly<{ status: "integrated"; landingSha: string; regressions?: readonly PRRegression[] }>)
+  | (TrackerDeliveryIdentity &
+      Readonly<{
+        status: "already-landed"
+        baseSha: string
+        candidateSha: string
+        candidateTreeSha: string
+        baseTreeSha: string
+      }>)
 
 type TrackerBridge = Readonly<{
   version: 1
@@ -826,6 +834,21 @@ function trackerDelivery(pr: DeepReadonly<PR>, state: DeepReadonly<YrdCliState>)
         ...(pr.regressions === undefined || pr.regressions.length === 0 ? {} : { regressions: pr.regressions }),
       }
     }
+    case "already-landed": {
+      const landing = prLandingOutcome(pr)
+      if (landing.outcome !== "already-landed") {
+        refusal(`already-landed PR '${pr.id}' has no canonical equivalence proof`)
+      }
+      return {
+        ...identity,
+        status: "already-landed",
+        at: landing.at,
+        baseSha: landing.baseSha,
+        candidateSha: landing.candidateSha,
+        candidateTreeSha: landing.candidateTreeSha,
+        baseTreeSha: landing.baseTreeSha,
+      }
+    }
     case "withdrawn":
       return pr.withdrawnAt === undefined ? undefined : { ...identity, status: "withdrawn", at: pr.withdrawnAt }
     case "canceled":
@@ -858,6 +881,14 @@ function issueDeliveryRows(bridge: TrackerBridge): IssueDeliveryRow[] {
         ? {
             landingSha: delivery.landingSha,
             ...(delivery.regressions === undefined ? {} : { regressions: delivery.regressions }),
+          }
+        : {}),
+      ...(delivery.status === "already-landed"
+        ? {
+            baseSha: delivery.baseSha,
+            candidateSha: delivery.candidateSha,
+            candidateTreeSha: delivery.candidateTreeSha,
+            baseTreeSha: delivery.baseTreeSha,
           }
         : {}),
       ...(delivery.status === "rejected" ? { bounce: delivery.bounce } : {}),
@@ -1302,7 +1333,12 @@ async function executeRecutPr(
   const service = services.recut ?? configuration("pr.recut capability is not installed")
   const pr = requiredPr(app, selector)
   const expectedCurrent = { revision: pr.revision, headSha: pr.headSha }
-  if (pr.status === "integrated" || pr.status === "withdrawn" || pr.status === "canceled") {
+  if (
+    pr.status === "integrated" ||
+    pr.status === "already-landed" ||
+    pr.status === "withdrawn" ||
+    pr.status === "canceled"
+  ) {
     raiseFailure("refusal", "terminal-target", `yrd: PR '${pr.id}' is ${pr.status}; terminal PRs cannot be recut`)
   }
   // Refuse to silently discard a green check: if the PR's current head already
@@ -1701,7 +1737,7 @@ async function applyPrSelectionVerb(
     if (createOnly && pr.status !== "pushed") {
       refusal(`PR '${pr.id}' is already ${pr.status}; create is only for a draft PR`)
     }
-    if (reviewers.length > 0 && pr.status !== "integrated") {
+    if (reviewers.length > 0 && pr.status !== "integrated" && pr.status !== "already-landed") {
       await app.bays.requestReview({
         pr: pr.id,
         reviewers: [...reviewers],
@@ -1722,14 +1758,18 @@ async function applyPrSelectionVerb(
     )
     return 0
   }
-  // Q1 — a same-head resubmit of a landed branch returns the frozen integrated
-  // PR ("already merged", exit 0). It is not checkable and must not be admitted;
+  // Q1 — a same-head resubmit of a landed branch returns the frozen landed PR
+  // (integrated or equivalence-proven already-landed, exit 0). It is not checkable and must not be admitted;
   // surface the informational note in the result envelope and drain only the
   // live submissions.
   for (const pr of prs) {
     if (pr.status === "integrated") {
       warnings.push(
         `already merged as PR '${pr.id}'${pr.integration === undefined ? "" : ` (${pr.integration.commit})`}`,
+      )
+    } else if (pr.status === "already-landed") {
+      warnings.push(
+        `already landed as PR '${pr.id}'${pr.integration === undefined ? "" : ` (${pr.integration.baseSha})`}`,
       )
     }
   }
@@ -1806,9 +1846,39 @@ type PRLandingOutcome =
       at: string
       run?: string
     }>
-  | Readonly<{ outcome: "not-landed"; status: Exclude<PR["status"], "integrated"> }>
+  | Readonly<{
+      outcome: "already-landed"
+      status: "already-landed"
+      baseSha: string
+      candidateSha: string
+      candidateTreeSha: string
+      baseTreeSha: string
+      at: string
+      run: string
+    }>
+  | Readonly<{ outcome: "not-landed"; status: Exclude<PR["status"], "integrated" | "already-landed"> }>
 
 function prLandingOutcome(pr: DeepReadonly<PR>): PRLandingOutcome {
+  if (pr.status === "already-landed") {
+    if (
+      pr.integration === undefined ||
+      pr.alreadyLanded === undefined ||
+      pr.alreadyLandedAt === undefined ||
+      pr.terminalRun === undefined
+    ) {
+      refusal(`already-landed PR '${pr.id}' is missing canonical equivalence proof`)
+    }
+    return {
+      outcome: "already-landed",
+      status: "already-landed",
+      baseSha: pr.integration.baseSha,
+      candidateSha: pr.alreadyLanded.candidateSha,
+      candidateTreeSha: pr.alreadyLanded.candidateTreeSha,
+      baseTreeSha: pr.alreadyLanded.baseTreeSha,
+      at: pr.alreadyLandedAt,
+      run: pr.terminalRun,
+    }
+  }
   if (pr.status !== "integrated") return { outcome: "not-landed", status: pr.status }
   if (pr.integration === undefined || pr.integratedAt === undefined) {
     refusal(`integrated PR '${pr.id}' is missing canonical landing proof`)
@@ -1840,7 +1910,10 @@ function sameIssueIntegratedCompositions(app: YrdCliApp, pr: PR): readonly Compo
     app.bays
       .prs()
       .filter(
-        (candidate) => candidate.id !== pr.id && candidate.issue === pr.issue && candidate.status === "integrated",
+        (candidate) =>
+          candidate.id !== pr.id &&
+          candidate.issue === pr.issue &&
+          (candidate.status === "integrated" || candidate.status === "already-landed"),
       )
       .map((candidate) => candidate.id),
   )

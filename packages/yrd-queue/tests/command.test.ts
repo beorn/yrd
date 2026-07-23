@@ -3002,6 +3002,44 @@ describe("Queue command adapters", () => {
     expect(await readFile(evidence.artifacts[0]!.path, "utf8")).toBe("checked\n")
   })
 
+  it("closes an already-landed payload without minting a no-op merge commit", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await writeFile(join(repo, "base-only.txt"), "base-only\n")
+    await git(repo, ["add", "base-only.txt"])
+    await git(repo, ["commit", "-qm", "advance base before duplicate patch"])
+    await git(repo, ["cherry-pick", featureSha])
+    const equivalentBaseSha = await git(repo, ["rev-parse", "main"])
+    const equivalentTreeSha = await git(repo, ["rev-parse", "main^{tree}"])
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "passed",
+      integration: {
+        commit: equivalentBaseSha,
+        baseSha: equivalentBaseSha,
+        alreadyLanded: {
+          candidateSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+          candidateTreeSha: equivalentTreeSha,
+          baseTreeSha: equivalentTreeSha,
+        },
+      },
+    })
+    expect(app.state().bays.prs.PR1).toMatchObject({
+      status: "already-landed",
+      integration: { commit: equivalentBaseSha, baseSha: equivalentBaseSha },
+      alreadyLanded: {
+        candidateSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+        candidateTreeSha: equivalentTreeSha,
+        baseTreeSha: equivalentTreeSha,
+      },
+    })
+    expect(await git(repo, ["rev-parse", "main"])).toBe(equivalentBaseSha)
+  })
+
   it("retains configured-command evidence when the Git check wrapper fails", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()

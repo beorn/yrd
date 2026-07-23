@@ -342,6 +342,19 @@ const PRIntegratedSchema = PRQueueTerminalIdentitySchema.extend({
     message: "landingSha must equal the integration proof commit",
     path: ["landingSha"],
   })
+export const PRAlreadyLandedSchema = PRQueueTerminalIdentitySchema.extend({
+  baseSha: GitShaSchema,
+  candidateSha: GitShaSchema,
+  candidateTreeSha: GitShaSchema,
+  baseTreeSha: GitShaSchema,
+  /** Missing only when a current terminal event closes a pre-actor legacy revision. */
+  actor: TextSchema.optional(),
+})
+  .strict()
+  .refine(({ candidateTreeSha, baseTreeSha }) => candidateTreeSha === baseTreeSha, {
+    message: "candidateTreeSha must equal baseTreeSha",
+    path: ["candidateTreeSha"],
+  })
 const LegacyPRIntegratedSchema = z
   .object({
     pr: PRIdSchema,
@@ -698,14 +711,14 @@ export function createBays(
     // direct-branch resubmit path below (the reopen preserves the PR identity,
     // so branch→PR stays 1:1). The author no longer hand-makes a delivery branch.
     //
-    // Q1 — an integrated branch identity is FROZEN evidence, never reopened:
+    // Q1 — an integrated/already-landed branch identity is FROZEN evidence, never reopened:
     //  - addressed by its branch, resubmitting the SAME landed head is an
     //    informational "already merged" no-op (returns the integrated PR, exit
     //    0 — delivered work is not a dark queue), while a NEW head mints a fresh
     //    delivery PR (revision 1) via the direct-branch path below, so no
     //    hand-made `<branch>-delivery-<nonce>` branch is needed;
     //  - addressed by its id, it stays idempotent.
-    if (pr?.status === "integrated") {
+    if (pr?.status === "integrated" || pr?.status === "already-landed") {
       // Addressed by its canonical id, an integrated PR is frozen evidence:
       // idempotent. Addressed by a moving alias (its branch), a new head mints a
       // fresh delivery. The canonical-vs-alias fold lives in resolveSelectorMatch.
@@ -937,6 +950,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/rejected": PRRejectedFactSchema,
         "pr/terminal-associated": PRTerminalAssociationSchema,
         "pr/integrated": PRIntegratedSchema,
+        "pr/already-landed": PRAlreadyLandedSchema,
         "pr/canceled": PRCanceledSchema,
         "pr/regression-recorded": PRRegressionSchema,
         "pr/edited": PrEditArgsSchema,
@@ -951,9 +965,10 @@ export function withBays(options: WithBaysOptions) {
         "pr/withdrawn": z.union([PRWithdrawnSchema, LegacyPRWithdrawnSchema]),
         "pr/rejected": PRReplayRejectedSchema,
         "pr/integrated": z.union([PRIntegratedSchema, LegacyPRIntegratedSchema]),
+        "pr/already-landed": PRAlreadyLandedSchema,
         "pr/canceled": z.union([PRCanceledSchema, LegacyPRCanceledSchema]),
       },
-      projectionVersion: "bays-v4-freshness",
+      projectionVersion: "bays-v5-already-landed",
       project: projectBays,
       create(yrd) {
         yrd.jobs.requireDefinitions(options.jobs)
@@ -1204,7 +1219,12 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
   }
   const existing = bay === undefined ? resolvePR(current, branch) : prForBay(current, bay.id)
   refuseDuplicatePayload(current, args.headSha, base, args.composition, existing?.id)
-  if (existing?.status === "integrated" || existing?.status === "withdrawn" || existing?.status === "canceled") {
+  if (
+    existing?.status === "integrated" ||
+    existing?.status === "already-landed" ||
+    existing?.status === "withdrawn" ||
+    existing?.status === "canceled"
+  ) {
     throw new Error(`yrd: PR '${existing.id}' is ${existing.status}; start a new bay`)
   }
   const id = existing?.id ?? nextId("PR", current.prs)
@@ -1258,7 +1278,7 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
   // `withdrawn`/`canceled` now do too, so resubmitting the branch mints the
   // next revision in place instead of demanding a hand-made delivery branch.
   // The pr/pushed projection clears the terminal markers on reopen. `pushed`/
-  // `submitted` are already refused above, and `integrated` is intercepted by
+  // `submitted` are already refused above, and `integrated`/`already-landed` are intercepted by
   // the terminal-branch guard before this path (its redelivery is parked).
   const resubmitted =
     existing?.status === "rejected" || existing?.status === "withdrawn" || existing?.status === "canceled"
@@ -1451,7 +1471,12 @@ function readyPr(state: DeepReadonly<BayState>, args: PrReadyArgs, defaultActor:
 
 function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultActor: string) {
   const pr: LivePR = requireLivePR(state.bays, args.pr)
-  if (pr.status === "integrated" || pr.status === "withdrawn" || pr.status === "canceled") {
+  if (
+    pr.status === "integrated" ||
+    pr.status === "already-landed" ||
+    pr.status === "withdrawn" ||
+    pr.status === "canceled"
+  ) {
     raiseFailure("refusal", "terminal-target", `yrd: PR '${pr.id}' is ${pr.status}; terminal PRs cannot be recut`)
   }
   const predecessor = pr.revisions.find((revision) => revision.revision === args.fromRevision)
@@ -1952,6 +1977,8 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               rejectedAt: undefined,
               integratedAt: undefined,
               integration: undefined,
+              alreadyLandedAt: undefined,
+              alreadyLanded: undefined,
               withdrawnAt: undefined,
               withdrawReason: undefined,
               canceledAt: undefined,
@@ -2049,6 +2076,8 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         rejectedAt: undefined,
         integratedAt: undefined,
         integration: undefined,
+        alreadyLandedAt: undefined,
+        alreadyLanded: undefined,
         withdrawnAt: undefined,
         withdrawReason: undefined,
         canceledAt: undefined,
@@ -2087,6 +2116,8 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         rejectedAt: undefined,
         integratedAt: undefined,
         integration: undefined,
+        alreadyLandedAt: undefined,
+        alreadyLanded: undefined,
         withdrawnAt: undefined,
         withdrawReason: undefined,
         canceledAt: undefined,
@@ -2157,10 +2188,34 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       return patchPR(pr, {
         status: "integrated",
         integratedAt: applied.ts,
+        alreadyLandedAt: undefined,
+        alreadyLanded: undefined,
         terminalRun: run,
         integration: { commit: changed.commit, baseSha: changed.baseSha },
         revisions: patchRevisionClock(pr, {
           terminal: { status: "integrated", at: applied.ts, ...(run === undefined ? {} : { run }) },
+        }),
+      })
+    }
+    case "pr/already-landed": {
+      const changed = PRAlreadyLandedSchema.parse(data)
+      const pr = current.prs[changed.pr]
+      if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing PR '${changed.pr}'`)
+      assertTerminalApplies(pr, changed, applied.name)
+      return patchPR(pr, {
+        status: "already-landed",
+        integratedAt: undefined,
+        alreadyLandedAt: applied.ts,
+        terminalRun: changed.run,
+        integration: { commit: changed.baseSha, baseSha: changed.baseSha },
+        alreadyLanded: {
+          baseSha: changed.baseSha,
+          candidateSha: changed.candidateSha,
+          candidateTreeSha: changed.candidateTreeSha,
+          baseTreeSha: changed.baseTreeSha,
+        },
+        revisions: patchRevisionClock(pr, {
+          terminal: { status: "already-landed", at: applied.ts, run: changed.run },
         }),
       })
     }

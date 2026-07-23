@@ -1032,6 +1032,74 @@ describe("PR signal observer", () => {
     }
   })
 
+  it("notifies the submitter and closes request balls when the payload is already landed", async () => {
+    const frame = rejectedFrame("00000000-0000-7000-8000-000000000031")
+    const terminalEvent = frame.events[0]!
+    const baseSha = "b".repeat(40)
+    const candidateSha = "c".repeat(40)
+    const treeSha = "d".repeat(40)
+    const journal = createMemoryJournal<unknown>([
+      {
+        ...frame,
+        events: [
+          {
+            ...terminalEvent,
+            name: "pr/already-landed",
+            data: {
+              pr: "PR7",
+              revision: 3,
+              headSha: "a".repeat(40),
+              actor: "@agent/7",
+              run: "R9",
+              baseSha,
+              candidateSha,
+              candidateTreeSha: treeSha,
+              baseTreeSha: treeSha,
+            },
+          },
+        ],
+      },
+    ])
+    const deliveries: SignalDelivery[] = []
+    const closures: SignalClosure[] = []
+    const observer = createSignalObserver({
+      journal,
+      stateDir: await stateDir(),
+      routes: {
+        "pr/rejected": ["submitter"],
+        "pr/needs-review": ["@cto"],
+        "pr/already-landed": ["submitter"],
+      },
+      adapter: recordingAdapter(deliveries, closures),
+    })
+
+    observer.start()
+    await observer.close()
+
+    expect(deliveries).toEqual([
+      {
+        recipient: "@agent/7",
+        event: expect.objectContaining({
+          kind: "pr/already-landed",
+          pr: "PR7",
+          run: "R9",
+          baseSha,
+          candidateSha,
+          candidateTreeSha: treeSha,
+          baseTreeSha: treeSha,
+        }),
+      },
+    ])
+    expect(closures.map(({ recipient, request }) => `${recipient} ${request}`)).toEqual([
+      "@agent/7 yrd:pr/rejected:PR7:1:@agent/7",
+      "@agent/7 yrd:pr/rejected:PR7:2:@agent/7",
+      "@agent/7 yrd:pr/rejected:PR7:3:@agent/7",
+      "@cto yrd:pr/needs-review:PR7:1:@cto",
+      "@cto yrd:pr/needs-review:PR7:2:@cto",
+      "@cto yrd:pr/needs-review:PR7:3:@cto",
+    ])
+  })
+
   it("does not record an evidence-only rejection as an opened request ball", async () => {
     const dir = await stateDir()
     const rejected = rejectedFrame("00000000-0000-7000-8000-000000000045")

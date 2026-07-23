@@ -237,12 +237,24 @@ export type BranchLifecycle =
       }
     >
 
-export type PRStatus = "pushed" | "submitted" | "rejected" | "integrated" | "withdrawn" | "canceled"
+export type PRStatus =
+  | "pushed"
+  | "submitted"
+  | "rejected"
+  | "integrated"
+  | "already-landed"
+  | "withdrawn"
+  | "canceled"
 
-const NON_CHECKABLE_PR_STATUSES: ReadonlySet<PRStatus> = new Set<PRStatus>(["integrated", "withdrawn", "canceled"])
+const NON_CHECKABLE_PR_STATUSES: ReadonlySet<PRStatus> = new Set<PRStatus>([
+  "integrated",
+  "already-landed",
+  "withdrawn",
+  "canceled",
+])
 
 /** A PR can only accept new check requests while pushed/submitted/rejected; once
- * it reaches a terminal status (integrated/withdrawn/canceled) it is no longer
+ * it reaches a terminal status (integrated/already-landed/withdrawn/canceled) it is no longer
  * checkable. */
 export function isNonCheckablePRStatus(status: PRStatus): boolean {
   return NON_CHECKABLE_PR_STATUSES.has(status)
@@ -252,7 +264,7 @@ export function isNonCheckablePRStatus(status: PRStatus): boolean {
  * A check request was refused because the PR's current status does not permit
  * it. Always thrown, never returned, so a genuine caller error still fails
  * loud. The carried `prId`/`status` let a resident, multi-tenant runner tell a
- * losable concurrent-terminal race (a peer withdrew/canceled/integrated the PR
+ * losable concurrent-terminal race (a peer withdrew/canceled/integrated/already-landed the PR
  * between the runner's compose snapshot and its check request — see
  * isConcurrentCheckabilityConflict) apart from a real caller error, without
  * matching on the message text.
@@ -271,7 +283,7 @@ export class PrCheckabilityConflict extends Error {
 
 /**
  * True when an error is a PrCheckabilityConflict whose PR had already reached a
- * terminal status — i.e. a concurrent writer withdrew/canceled/integrated the
+ * terminal status — i.e. a concurrent writer withdrew/canceled/integrated/already-landed the
  * PR between a runtime's compose snapshot and its check request. This is a
  * normal, losable race for a long-lived resident runner: skip this cycle and
  * continue; the next cycle re-snapshots without the departed PR and composes
@@ -282,7 +294,7 @@ export function isConcurrentCheckabilityConflict(error: unknown): error is PrChe
 }
 
 export type PRRevisionTerminal = Readonly<{
-  status: Extract<PRStatus, "rejected" | "integrated" | "withdrawn" | "canceled">
+  status: Extract<PRStatus, "rejected" | "integrated" | "already-landed" | "withdrawn" | "canceled">
   at: string
   run?: string
 }>
@@ -357,6 +369,13 @@ export type PRCheckRequest = Readonly<{
   at: string
 }>
 
+export type PRAlreadyLandedEvidence = Readonly<{
+  baseSha: string
+  candidateSha: string
+  candidateTreeSha: string
+  baseTreeSha: string
+}>
+
 export type PRRegressionSeverity = "low" | "medium" | "high" | "critical"
 
 /** One completed escaped-regression outcome. Implementation and review
@@ -414,6 +433,8 @@ export type PR = Readonly<{
   rejectedAt?: string
   integratedAt?: string
   integration?: Readonly<{ commit: string; baseSha: string }>
+  alreadyLandedAt?: string
+  alreadyLanded?: PRAlreadyLandedEvidence
   withdrawnAt?: string
   withdrawReason?: string
   canceledAt?: string
@@ -589,11 +610,17 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
         openedAt: bay.openedAt,
       }
       const pr = prForBay(state, bay.id)
+      const landedAt =
+        pr?.status === "integrated"
+          ? pr.integratedAt
+          : pr?.status === "already-landed"
+            ? pr.alreadyLandedAt
+            : undefined
       if (
         bay.headSha !== undefined &&
         pr?.headSha === bay.headSha &&
-        pr.status === "integrated" &&
-        pr.integratedAt !== undefined &&
+        (pr.status === "integrated" || pr.status === "already-landed") &&
+        landedAt !== undefined &&
         pr.integration !== undefined
       ) {
         return {
@@ -603,7 +630,7 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
           landed: {
             pr: pr.id,
             revision: pr.revision,
-            at: pr.integratedAt,
+            at: landedAt,
             commit: pr.integration.commit,
           },
         }
@@ -628,6 +655,7 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
         bay.headSha !== undefined &&
         pr !== undefined &&
         revision?.submittedAt !== undefined &&
+        pr.status !== "already-landed" &&
         pr.status !== "withdrawn" &&
         pr.status !== "canceled"
       ) {

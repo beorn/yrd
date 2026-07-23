@@ -50,6 +50,7 @@ export function prTaskStatusOf(pr: Pick<PR, "status">): TaskStatus {
     case "rejected":
       return "blocked"
     case "integrated":
+    case "already-landed":
       return "done"
     case "withdrawn":
     case "canceled":

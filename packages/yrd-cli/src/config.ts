@@ -31,11 +31,12 @@ const NotifySchema = z
     "pr/rejected": DirectNotifyTargetsSchema.optional(),
     "pr/needs-review": DirectNotifyTargetsSchema.optional(),
     "pr/integrated": z.tuple([z.literal("broadcast")]).optional(),
+    "pr/already-landed": DirectNotifyTargetsSchema.optional(),
     "run/failed": DirectNotifyTargetsSchema.optional(),
   })
   .strict()
 export type SignalRouteTarget = z.infer<typeof NotifyTargetSchema>
-export type SignalKind = "pr/rejected" | "pr/needs-review" | "pr/integrated" | "run/failed"
+export type SignalKind = "pr/rejected" | "pr/needs-review" | "pr/integrated" | "pr/already-landed" | "run/failed"
 export type SignalRoutes = Readonly<Partial<Record<SignalKind, readonly SignalRouteTarget[]>>>
 const EnvironmentNameSchema = TextSchema.regex(/^[A-Za-z_][A-Za-z0-9_]*$/u).refine(
   (name) => !name.startsWith("YRD_") && !name.startsWith("GIT_"),
