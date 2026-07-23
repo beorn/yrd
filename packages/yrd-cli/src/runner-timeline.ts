@@ -33,6 +33,9 @@ export function timelineStatusGlyph(status: string): string {
     return "×"
   }
   if (["withdrawn", "retired", "canceled"].includes(status)) return "−"
+  // A draft (pushed, never submitted) is pre-queue WIP: a hollow dotted marker
+  // distinguishes it from the solid `○` a queued `todo` carries.
+  if (status === "draft") return "◌"
   return "○"
 }
 

@@ -136,8 +136,11 @@ export type QueueTimelineRow = Readonly<{
 }>
 
 export type QueueTimelineStatusFilter = "pending" | "running" | "rejected" | "integrated" | "other"
-export type QueueTimelineStatus = "pending" | "running" | QueueTerminalOutcome
-export type QueueTimelineGroup = "pending" | "running" | "completed"
+// `draft` is a display-only status for a registered-but-unsubmitted PR (bay
+// status `pushed`, eligibility reason `draft`). It never enters queue mechanics
+// (composition, admission, terminal facts, FLOW stats) — see `timelineDraftRows`.
+export type QueueTimelineStatus = "draft" | "pending" | "running" | QueueTerminalOutcome
+export type QueueTimelineGroup = "draft" | "pending" | "running" | "completed"
 
 export type QueueTimelineRevisionLineage = Readonly<{
   pr: string
@@ -1539,13 +1542,16 @@ function terminalProjection(run: QueueRun): QueueTerminalProjection {
 
 /** Reject a nonterminal status at the terminal-fact boundary. */
 function terminalOutcome(status: QueueTimelineStatus): QueueTerminalOutcome {
-  if (status === "pending" || status === "running") {
+  if (status === "draft" || status === "pending" || status === "running") {
     throw new TypeError(`yrd: nonterminal status '${status}' cannot become a terminal FLOW fact`)
   }
   return status
 }
 
 function timelineStatusFilter(status: QueueTimelineStatus): QueueTimelineStatusFilter {
+  // A draft filters with `pending`/`todo`: it surfaces under the default view and
+  // the todo bucket, without minting a fifth CLI status filter.
+  if (status === "draft") return "pending"
   if (status === "pending" || status === "running" || status === "rejected" || status === "integrated") {
     return status
   }
@@ -1718,6 +1724,58 @@ function timelineRunMemberRows(
   })
 }
 
+/**
+ * Pre-queue draft rows: one row per registered-but-unsubmitted PR (bay status
+ * `pushed`, the exact set the eligibility engine flags with reason `draft`).
+ * These are display-only — they carry no run and hold no queue position, and
+ * their `draft` group is excluded from every terminal FLOW fact and the
+ * `oldestOpenMs` DRAIN gauge, so surfacing a draft never distorts queue
+ * mechanics. AGE and the TIME cell anchor on the current revision's
+ * registration (`pushedAt`); BY is that revision's author.
+ */
+function timelineDraftRows(
+  result: QueueStatusResult,
+  nowIso: string,
+  state: BaysState | undefined,
+): QueueTimelineProjectedRow[] {
+  return result.prs.flatMap((pr) => {
+    if (pr.status !== "pushed") return []
+    const registeredAt = pr.revisions.find(
+      (candidate) => candidate.revision === pr.revision && candidate.headSha === pr.headSha,
+    )?.pushedAt
+    const bayPath = pr.bay === undefined ? undefined : state?.byId[pr.bay]?.path
+    const revisionLineage = [timelineRevisionLineage(pr)]
+    const submitter = revisionSubmitter(pr)
+    const issue = presentFact(pr.issue)
+    return [
+      {
+        id: `${pr.base}:draft:${pr.id}:${pr.revision}:${pr.headSha}`,
+        base: pr.base,
+        group: "draft" as const,
+        status: "draft" as const,
+        glyph: statusGlyph("draft"),
+        timestamp: registeredAt ?? null,
+        timestampMs: parsedTimelineTimestamp(registeredAt, `PR '${pr.id}' draft registration`),
+        pr: pr.id,
+        revision: pr.revision,
+        headSha: pr.headSha,
+        branch: pr.branch,
+        ...(issue === undefined ? {} : { issue }),
+        subject: boundedQueue(bayPath ?? pr.title ?? pr.name ?? pr.branch, 80),
+        ...(submitter === undefined ? {} : { submitter }),
+        detail: withTimelineLineage("draft", revisionLineage),
+        ...(registeredAt === undefined ? {} : { sourceReadyAt: registeredAt }),
+        revisionLineage,
+        ageMs: timelineAge(registeredAt, nowIso, `PR '${pr.id}' draft age`),
+        totalMs: null,
+        activeMs: null,
+        waitMs: null,
+        queueWaitMs: null,
+      },
+    ]
+  })
+}
+
 function timelinePendingRows(
   result: QueueStatusResult,
   nowIso: string,
@@ -1779,7 +1837,7 @@ function timelineSort(left: QueueTimelineProjectedRow, right: QueueTimelineProje
     const rightDay = timelineLocalCalendarDay(right.timestamp)
     if (leftDay !== rightDay) return rightDay.localeCompare(leftDay)
   }
-  const groupOrder: Record<QueueTimelineGroup, number> = { pending: 0, running: 1, completed: 2 }
+  const groupOrder: Record<QueueTimelineGroup, number> = { draft: 0, pending: 1, running: 2, completed: 3 }
   const group = groupOrder[left.group] - groupOrder[right.group]
   if (group !== 0) return group
   if (left.group === "pending" && right.group === "pending") {
@@ -1907,6 +1965,7 @@ export function queueTimelineProjection(
   const selectedStatuses = new Set(statuses)
   const terms = [...new Set(options.terms.map((term) => term.trim().toLocaleLowerCase()).filter(Boolean))]
   const rawRows = results.flatMap((result) => [
+    ...timelineDraftRows(result, nowIso, options.state),
     ...timelinePendingRows(result, nowIso, options.submissionTimes, options.state),
     ...[...result.running, ...result.waiting, ...result.finished].flatMap((run) =>
       timelineRunMemberRows(result, run, nowIso, options.submissionTimes, options.state, options.attempts ?? []),
@@ -3104,6 +3163,9 @@ function fitTimelineLabel(label: string, max: number): string {
 // Marker + state colors (15d screenshot re-rule): running pulses blue,
 // success is GREEN semantic, pending is blue, failures keep semantic reds.
 function timelineStatusColor(row: QueueTimelineProjectedRow): string {
+  // A draft is pre-queue WIP, not a live or failing item: dim it like `canceled`
+  // so it reads as tentative next to the blue `todo`/`run` pulse.
+  if (row.status === "draft") return "$fg-muted"
   if (row.status === "running" || row.status === "pending") return "$fg-info"
   if (row.status === "integrated") return "$fg-success"
   if (row.status === "canceled") return "$fg-muted"
@@ -3114,6 +3176,7 @@ function timelineStatusColor(row: QueueTimelineProjectedRow): string {
 type TimelineStatusCell = Readonly<{ word: string; color: string }>
 
 const TIMELINE_STATUS_WORDS = {
+  draft: "draft",
   pending: "todo",
   running: "run",
   integrated: "done",
@@ -3809,6 +3872,9 @@ export const QUEUE_TIMELINE_STATUS_BUCKETS: readonly QueueTimelineStatusBucket[]
 
 /** Bucket a row status: every non-integrated terminal outcome is `failed`; integrated is `done`. */
 export function queueTimelineStatusBucket(status: QueueTimelineStatus): QueueTimelineStatusBucket {
+  // A draft buckets with `todo` (the pending pill), so the default view shows it
+  // and the `t` toggle owns it — no fifth operator pill. See `timelineStatusFilter`.
+  if (status === "draft") return "pending"
   if (status === "pending" || status === "running") return status
   return status === "integrated" ? "done" : "failed"
 }
