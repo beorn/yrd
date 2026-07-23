@@ -861,7 +861,10 @@ type GitResult = Readonly<{
 }>
 type Git = ReturnType<typeof createGit>
 const CERTIFICATE_DIFF_OPTIONS = ["--no-ext-diff", "--no-textconv", "--ignore-submodules=none", "--no-renames"] as const
-const GIT_TIMEOUT_MS = 30_000
+// Queue git operations (recut rebases, worktree admin, merges) lock the shared
+// repository and scale with checkout size; 30s calibrated for an idle host was
+// killing subprocesses mid-mutation under real fleet load (2026-07-23 incident).
+const GIT_TIMEOUT_MS = 120_000
 
 function concatenateBytes(chunks: readonly Uint8Array[]): Uint8Array {
   const output = new Uint8Array(chunks.reduce((length, chunk) => length + chunk.byteLength, 0))
@@ -913,7 +916,13 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
       ...(result.sweepFailure === undefined ? {} : { sweepFailure: result.sweepFailure }),
     }
     if (completed.timedOut && !preserveProcessFailure) {
-      throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
+      // allowFailure callers are best-effort cleanup (`rebase --abort`,
+      // `worktree remove`): a timeout must surface as a failed RESULT their
+      // nonzero-code handling absorbs. Throwing here escaped past the recut
+      // refusal paths and killed the resident runner (2026-07-23 incident).
+      const message = `yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`
+      if (!allowFailure) throw new Error(message)
+      return { ...completed, code: completed.code === 0 ? 124 : completed.code, stderr: message }
     }
     if (!allowFailure && completed.code !== 0) {
       throw new Error(completed.stderr || completed.stdout || `git ${args.join(" ")} failed`)

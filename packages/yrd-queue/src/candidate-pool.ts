@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs"
 import { appendFile, mkdir, mkdtemp, realpath, rm } from "node:fs/promises"
 import { isAbsolute, join, relative, sep } from "node:path"
 import type { JsonValue } from "@yrd/core"
@@ -61,7 +62,10 @@ export type CandidatePool = Readonly<{
 }>
 
 const DEFAULT_CAPACITY = 2
-const GIT_TIMEOUT_MS = 30_000
+// Worktree add/remove/reset/materialize lock the shared repository and grow with
+// checkout size; 30s was calibrated for an idle host and produced kill-mid-mutation
+// corruption (half-removed worktrees) under real fleet load (2026-07-23 incident).
+const GIT_TIMEOUT_MS = 120_000
 
 type PoolEntry = {
   busy: boolean
@@ -91,7 +95,15 @@ export function createCandidatePoolGit(
         env,
         timeoutMs: GIT_TIMEOUT_MS,
       })
-      if (result.timedOut) throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
+      if (result.timedOut) {
+        // A timed-out subprocess was killed mid-operation. For allowFailure
+        // callers (best-effort cleanup like `worktree remove`, `rebase --abort`)
+        // that is a FAILED RESULT they already handle — throwing here instead
+        // escaped past every refusal path and killed the resident (2026-07-23).
+        const message = `yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`
+        if (!allowFailure) throw new Error(message)
+        return { code: result.exitCode === 0 ? 124 : result.exitCode, stdout: result.stdout.trim(), stderr: message }
+      }
       const completed = { code: result.exitCode, stdout: result.stdout.trim(), stderr: result.stderr.trim() }
       if (!allowFailure && completed.code !== 0) {
         throw new Error(completed.stderr || completed.stdout || `git ${args.join(" ")} failed`)
@@ -181,7 +193,23 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
     if (entry.path !== undefined) {
       const removed = await git.run(repo, ["worktree", "remove", "--force", entry.path], true)
       if (removed.code !== 0) {
-        throw new Error(removed.stderr || removed.stdout || `yrd: could not remove candidate worktree '${entry.path}'`)
+        // A worktree DESTROYED mid-removal (its `.git` pointer gone — e.g. a
+        // prior removal killed at its timeout) can never satisfy `worktree
+        // remove` again: Git refuses with "validation failed … does not exist",
+        // so the retry contract would wedge every subsequent acquire (2026-07-23
+        // incident: every admission failed ~5s for four runs). Such a corpse is
+        // not a removable worktree; drop its admin entry via prune and fall
+        // through to root cleanup. A still-valid worktree keeps the loud throw.
+        if (existsSync(join(entry.path, ".git"))) {
+          throw new Error(
+            removed.stderr || removed.stdout || `yrd: could not remove candidate worktree '${entry.path}'`,
+          )
+        }
+        await git.run(repo, ["worktree", "prune", "--expire=now"], true)
+        const admin = await git.run(repo, ["worktree", "list", "--porcelain"], true)
+        if (admin.code === 0 && admin.stdout.includes(entry.path)) {
+          throw new Error(`yrd: destroyed candidate worktree '${entry.path}' survived a worktree prune`)
+        }
       }
       // The Git admin removal succeeded; the root directory is the remaining
       // cleanup obligation. Keep entry.root populated until the rm SUCCEEDS —
@@ -331,7 +359,11 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
   async function acquire(entry: PoolEntry, ref: string): Promise<AcquireOutcome> {
     return serializeGit(async () => {
       if (entry.path !== undefined) {
-        if (await resetEntry(entry, ref)) {
+        // A destroyed worktree (no `.git` pointer) must never reach resetEntry:
+        // `git -C <path>` would walk UP past the dead tree and run the reset
+        // against whatever repository contains the pool parent. Validate first;
+        // a corpse goes straight to eviction.
+        if (existsSync(join(entry.path, ".git")) && (await resetEntry(entry, ref))) {
           hits += 1
           return "hit"
         }

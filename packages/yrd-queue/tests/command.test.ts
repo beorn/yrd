@@ -3813,7 +3813,7 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run.status).toBe("passed")
-    expect(requests.filter(({ argv }) => argv[0] === "git").every(({ timeoutMs }) => timeoutMs === 30_000)).toBe(true)
+    expect(requests.filter(({ argv }) => argv[0] === "git").every(({ timeoutMs }) => timeoutMs === 120_000)).toBe(true)
     const initializations = requests.filter(
       ({ argv }) => argv[0] === "git" && argv.includes("init") && argv.includes("--bare"),
     )
