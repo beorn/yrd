@@ -1914,11 +1914,15 @@ function queueAuthorityReleaseReason(
   // pinned Run) is environmental, not a PR-content fault: release the Run's queue
   // authority so the still-submitted PR re-admits against the fresh base, instead
   // of terminally rejecting a PR that would merge cleanly once the base settles.
+  // `stale-steps` is the same shape one level up: a pending run's not-yet-started
+  // step revision drifted out from under it when the installed config moved; the
+  // PR is blameless and re-admits fresh under the installed plan.
   if (
     error?.code === "queue-environment-refused" ||
     error?.code === "job-lost" ||
     error?.code === "stale-base" ||
-    error?.code === "stale-check"
+    error?.code === "stale-check" ||
+    error?.code === "stale-steps"
   ) {
     return error.code
   }
@@ -2734,7 +2738,21 @@ function advanceQueue(
   }
 
   const next = record.steps[index + 1]
-  if (next !== undefined) events.push(requestStep(requirePlannedStep(steps, next), record, index + 1, shape))
+  if (next !== undefined) {
+    // The next step has NOT started (no Job requested for it yet). If its
+    // installed revision drifted out from under this pending run, do not throw a
+    // bare `command-refused` that aborts the whole selectorless compose and kills
+    // the resident — release the run's authority as a typed `stale-steps`
+    // failure so the still-submitted PR re-admits fresh under the installed plan
+    // (mirroring stale-base/stale-check). A run that has ALREADY integrated keeps
+    // frozen semantics: an integrated PR is terminal, never retroactively
+    // re-planned, so the drift there stays a loud throw.
+    const drift = plannedStepDrift(steps, next)
+    if (drift !== undefined && !isIntegrated(shape)) {
+      return { events: [queueFailedEvent(state, record, { code: "stale-steps", message: `yrd: ${drift}` })] }
+    }
+    events.push(requestStep(requirePlannedStep(steps, next), record, index + 1, shape))
+  }
   return { events }
 }
 
@@ -3082,19 +3100,29 @@ function auditQueues(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeS
   return { findings }
 }
 
-function requirePlannedStep(steps: ReadonlyMap<string, RuntimeStep>, planned: InstalledStep): RuntimeStep {
+/** Classify a planned step against the installed catalog: `undefined` when it
+ * still matches, else a human-readable drift reason. The single source of truth
+ * for both the fail-loud {@link requirePlannedStep} (isolate path) and the typed
+ * stale-steps release (advance path). */
+function plannedStepDrift(steps: ReadonlyMap<string, RuntimeStep>, planned: InstalledStep): string | undefined {
   const current = steps.get(planned.name)
-  if (current === undefined) throw new Error(`yrd: queue step '${planned.name}' is not installed`)
+  if (current === undefined) return `queue step '${planned.name}' is not installed`
   if (
     current.revision !== planned.revision ||
     current.integrates !== planned.integrates ||
     current.needsIntegration !== planned.needsIntegration ||
     current.classification !== planned.classification
   ) {
-    throw new Error(
-      `yrd: queue step '${planned.name}' revision '${planned.revision}' does not match installed revision '${current.revision}'`,
-    )
+    return `queue step '${planned.name}' revision '${planned.revision}' does not match installed revision '${current.revision}'`
   }
+  return undefined
+}
+
+function requirePlannedStep(steps: ReadonlyMap<string, RuntimeStep>, planned: InstalledStep): RuntimeStep {
+  const drift = plannedStepDrift(steps, planned)
+  if (drift !== undefined) throw new Error(`yrd: ${drift}`)
+  const current = steps.get(planned.name)
+  if (current === undefined) throw new Error(`yrd: queue step '${planned.name}' is not installed`)
   return current
 }
 
