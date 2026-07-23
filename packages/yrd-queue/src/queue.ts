@@ -153,7 +153,12 @@ const QueueRunArgsSchema = z
   .strict()
 export type QueueRunArgs = Readonly<z.infer<typeof QueueRunArgsSchema>>
 
-const AdmitArgsSchema = z.object({ pr: z.string().trim().min(1) }).strict()
+const AdmitArgsSchema = z
+  .object({
+    pr: z.string().trim().min(1),
+    selection: z.literal("explicit").optional(),
+  })
+  .strict()
 export type AdmitArgs = Readonly<z.infer<typeof AdmitArgsSchema>>
 export type AdmitSelection = Readonly<{ prs?: readonly string[] }>
 
@@ -1014,16 +1019,25 @@ function createQueue<Shape extends PRShape>(
     }
   }
 
-  const dispatchAdmissions = async (selectors: readonly string[]): Promise<QueueRun[]> => {
+  const dispatchAdmissions = async (
+    selectors: readonly string[],
+    selection?: AdmitArgs["selection"],
+  ): Promise<QueueRun[]> => {
     const admitted: QueueRun[] = []
     for (const selector of selectors) {
-      const started = startedRun(await actions.admit({ pr: selector }))
+      const started = startedRun(
+        await actions.admit({ pr: selector, ...(selection === undefined ? {} : { selection }) }),
+      )
       if (started !== undefined) admitted.push(started)
     }
     return admitted
   }
 
-  const drainAdmissions = async (selectors: readonly string[], options: QueueRunOptions): Promise<QueueRun[]> => {
+  const drainAdmissions = async (
+    selectors: readonly string[],
+    options: QueueRunOptions,
+    selection?: AdmitArgs["selection"],
+  ): Promise<QueueRun[]> => {
     const targets = new Set(selectors)
     const outcomes = new Map<QueueRunId, QueueRun>()
     const remember = (candidate: QueueRun): void => {
@@ -1036,7 +1050,9 @@ function createQueue<Shape extends PRShape>(
       const snapshot = runtime()
       const active = activeQueueRuns(snapshot.queues, snapshot.jobs).find(
         (candidate) =>
-          candidate.status === "running" && samePlan(candidate.steps, admissionSteps(snapshot.queues, steps)),
+          (selection !== "explicit" || candidate.prs.some((pr) => targets.has(pr.id))) &&
+          candidate.status === "running" &&
+          samePlan(candidate.steps, admissionSteps(snapshot.queues, steps)),
       )
       if (active !== undefined) {
         const settled = await settle(active.id, options)
@@ -1045,9 +1061,10 @@ function createQueue<Shape extends PRShape>(
         continue
       }
 
-      const queued = admissionQueue(snapshot, steps)
+      const queued = admissionQueue(snapshot, steps, selection === "explicit" ? targets : undefined)
       const admitted = await dispatchAdmissions(
         (options.continueAdmissions === undefined ? queued : queued.slice(0, 1)).map((pr) => pr.id),
+        selection,
       )
       if (admitted.length > 0) continue
 
@@ -1080,13 +1097,15 @@ function createQueue<Shape extends PRShape>(
           resultAttributes: (runs) => ({ runs: runs.map(runEvidence) }),
         },
         async () => {
+          const requestedSelectors = args.prs?.length ? args.prs : undefined
+          const selection: AdmitArgs["selection"] = requestedSelectors === undefined ? undefined : "explicit"
           await actions.refresh()
           await cleanupSettledRoots()
           let snapshot = runtime()
           const selected =
-            args.prs === undefined || args.prs.length === 0
+            requestedSelectors === undefined
               ? admissionQueue(snapshot, steps)
-              : args.prs.map((selector) => {
+              : requestedSelectors.map((selector) => {
                   const pr = resolvePR(snapshot.bays, selector)
                   if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
                   return pr
@@ -1094,10 +1113,12 @@ function createQueue<Shape extends PRShape>(
           await refreshCheckIdentities(selected)
           snapshot = runtime()
           const selectors =
-            args.prs === undefined || args.prs.length === 0
+            requestedSelectors === undefined
               ? admissionQueue(snapshot, steps).map((pr) => pr.id)
-              : [...args.prs]
-          return runOptions === undefined ? dispatchAdmissions(selectors) : drainAdmissions(selectors, runOptions)
+              : selected.map((pr) => pr.id)
+          return runOptions === undefined
+            ? dispatchAdmissions(selectors)
+            : drainAdmissions(selectors, runOptions, selection)
         },
       )
     },
@@ -1128,6 +1149,7 @@ function createQueue<Shape extends PRShape>(
           resultAttributes: (runs) => ({ runs: runs.map(runEvidence) }),
         },
         async () => {
+          const selection = args.prs !== undefined && args.prs.length > 0 ? "explicit" : undefined
           const explicitStepAuthority = args.steps !== undefined
           // A selectorless compose is a multi-candidate drain (the long-lived
           // resident's default path, and any bare `queue run`): one candidate lost
@@ -1180,6 +1202,7 @@ function createQueue<Shape extends PRShape>(
           const admissions = await drainAdmissions(
             checked.map((pr) => pr.id),
             runOptions,
+            selection,
           )
           snapshot = runtime()
           const unsettled = checked.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "passed")
@@ -1197,7 +1220,14 @@ function createQueue<Shape extends PRShape>(
             // Liveness beats check-freshness here: landing a runnable PR can
             // stale an in-flight sibling check, which the stale/recut path
             // already classifies and (with auto-recut) requeues.
-            if (newlyFailed) {
+            // An explicit PR selection is different: if that PR's check is
+            // still queued or running, there is no other requested merge work
+            // to preserve and composing it now would violate the selection.
+            if (
+              newlyFailed ||
+              (selection === "explicit" &&
+                unsettled.some((pr) => checkEligibility(snapshot, pr, steps).status !== "failed"))
+            ) {
               return admissions
             }
           }
@@ -1662,7 +1692,7 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
         requireQueueAuthority(state.queues.authority, [snapshot], selected)
       }
       if (runningQueue(state.queues, state.jobs, pr.base) !== undefined) return { events: [] }
-      if (checksRequested(pr)) {
+      if (args.selection !== "explicit" && checksRequested(pr)) {
         const first = admissionQueue(state, steps)[0]
         if (first !== undefined && first.id !== pr.id) return { events: [] }
       }
@@ -3389,10 +3419,15 @@ function automaticAdmissionAttemptsExhausted(
   return releasedFailures >= exactRequests + AUTOMATIC_ADMISSION_RETRIES
 }
 
-function admissionQueue(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): PR[] {
+function admissionQueue(
+  state: DeepReadonly<RuntimeState>,
+  steps: readonly RuntimeStep[],
+  targets?: ReadonlySet<string>,
+): PR[] {
   const selected = admissionSteps(state.queues, steps)
   if (selected.length === 0) return []
   return Object.values(state.bays.prs)
+    .filter((pr) => targets === undefined || targets.has(pr.id))
     .filter((pr) => pr.status === "pushed" || pr.status === "submitted")
     .filter((pr) => blockingQueuePause(state, pr) === undefined)
     .filter((pr) => checksRequested(pr))
