@@ -151,7 +151,7 @@ describe("stale-plan retirement — an un-isolable drifted batch is retired, not
     // A direct isolate dispatch is fail-loud: it raises the TYPED stale-plan
     // refusal (not a silent skip, not an auto-retire) so an operator poking the
     // batch sees exactly why it cannot bisect.
-    await expect(replayed.dispatch(replayed.commands.queue.isolate, { run: "R1", part: 0 })).rejects.toThrow(
+    await expect(replayed.dispatch(replayed.commands.queue.isolate, { run: "R1", part: 0 } as const)).rejects.toThrow(
       "cannot isolate",
     )
     // The failed attempt did NOT retire it — still bisectable and flagged; only an
