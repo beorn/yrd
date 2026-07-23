@@ -286,13 +286,13 @@ The same commands are available through the standalone `git bay` projection.
 submission core as `pr submit`; `bay submit` remains a handoff, while new
 callers use the PR-native check-admission surface below.
 
-| Command   | Input                                                 | Output and state                                                                                   |
-| --------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `open`    | New bay name; optional source, base, issue, and actor | Prints the worktree path; creates and provisions a named bay                                       |
-| `path`    | One Bay ID, name, or branch selector                  | Prints the exact absolute path of one active Bay; read-only and never refreshes it                 |
-| `refresh` | Zero or more bays                                     | Refreshes Git head, base, dirty, path, and workspace status                                        |
-| `submit`  | Bays, PRs, or source branches                        | Creates or advances PRs to `submitted`; never executes Queue work                                  |
-| `close`   | Zero or more bays                                     | Deprovisions clean terminal bays; `--withdraw` explicitly cancels a live PR                        |
+| Command   | Input                                                 | Output and state                                                                   |
+| --------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `open`    | New bay name; optional source, base, issue, and actor | Prints the worktree path; creates and provisions a named bay                       |
+| `path`    | One Bay ID, name, or branch selector                  | Prints the exact absolute path of one active Bay; read-only and never refreshes it |
+| `refresh` | Zero or more bays                                     | Refreshes Git head, base, dirty, path, and workspace status                        |
+| `submit`  | Bays, PRs, or source branches                         | Creates or advances PRs to `submitted`; never executes Queue work                  |
+| `close`   | Zero or more bays                                     | Deprovisions clean terminal bays; `--withdraw` explicitly cancels a live PR        |
 
 Submodule repositories are ready when `bay open` returns. Yrd recursively
 materializes the recorded gitlinks while keeping each Bay's refs, config, and
