@@ -4919,10 +4919,11 @@ function buildProgram(
   return program
 }
 
-function commanderErrorMessage(args: readonly string[], projection: "root" | "bay", error: CommanderError): string {
+function commanderErrorMessage(command: CliCommand | undefined, error: CommanderError): string {
   const removedDraftSubmit =
-    args.includes("--draft") &&
-    (projection === "bay" ? args[0] === "submit" : (args[0] === "pr" || args[0] === "bay") && args[1] === "submit")
+    command?.name() === "submit" &&
+    error.code === "commander.unknownOption" &&
+    error.message.includes("unknown option '--draft'")
   return removedDraftSubmit ? `${error.message}; draft PRs are created with 'yrd pr create'` : error.message
 }
 
@@ -5065,7 +5066,7 @@ async function executeYrd(
     }
     if (error instanceof CommanderError) {
       if (error.exitCode === 0 || error.code === "commander.helpDisplayed") return 0
-      const message = commanderErrorMessage(args, invocation.projection, error)
+      const message = commanderErrorMessage(commanderOutput.errorCommand, error)
       await diagnostic(
         runtimeIO,
         createFailure(

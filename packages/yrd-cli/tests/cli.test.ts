@@ -672,6 +672,29 @@ describe("runYrd", () => {
     expect(app.bays.prs()).toEqual([])
   })
 
+  it("derives the deleted --draft remedy from the failing command instead of raw argv", async () => {
+    const app = await createApp()
+    const prefixed = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+
+    expect(
+      await runInternals.runYrdHelp(
+        yrd("--repo", "/tmp", "pr", "submit", "topic/draft", "--draft", "--json"),
+        prefixed.io,
+      ),
+    ).toBe(2)
+    expect(JSON.parse(prefixed.stderr()).failure).toMatchObject({
+      cause: "unknown option '--draft'",
+      resolution: ["yrd pr create"],
+    })
+
+    const optionValue = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+    expect(await runYrd(app, yrd("pr", "submit", "topic/draft", "--title", "--draft", "--bogus"), optionValue.io)).toBe(
+      2,
+    )
+    expect(optionValue.stderr()).toContain("unknown option '--bogus'")
+    expect(optionValue.stderr()).not.toContain("yrd pr create")
+  })
+
   it("uses concise layered help with examples on the root and queue surfaces", async () => {
     const app = await createApp()
     const root = outputIO({ columns: 100 })
