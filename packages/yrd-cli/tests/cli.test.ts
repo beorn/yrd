@@ -9828,9 +9828,11 @@ describe("journal version skew fail-loud", () => {
       expect(await runInternals.runYrdProcessRuntime(yrd("pr", "list", "--json"), json.io, journalBootstrap(dir))).toBe(
         3,
       )
-      expect(JSON.parse(json.stderr()).failure.resolution).toContain(
-        "Re-run with -v to include the raw validation detail.",
-      )
+      expect(JSON.parse(json.stderr())).toMatchObject({
+        failure: {
+          resolution: expect.arrayContaining(["Re-run with -v to include the raw validation detail."]),
+        },
+      })
     })
   })
 
