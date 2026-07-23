@@ -1782,15 +1782,23 @@ function lastFailedSubmission(pr: PR): PR["revisions"][number] | undefined {
 
 /**
  * Map a non-integrated PR to its display-only pre-run timeline status, or
- * undefined when the PR is terminal by intent (integrated/withdrawn/canceled) or
- * is surfaced through a run row instead (a `rejected` PR keeps its terminal run
- * row until the author re-pushes it). `rev` is a `draft` (bay status
- * `pushed`) that carries failed-submission history — the user's "a failed
- * submission returns the PR to an editable state" — and stores no new PRStatus.
+ * undefined when the PR is terminal by intent (integrated/withdrawn/canceled).
+ * `rev` is a `draft` (bay status `pushed`) that carries failed-submission
+ * history — the user's "a failed submission returns the PR to an editable
+ * state" — and stores no new PRStatus. A `rejected` PR resurfaces as `rev`
+ * IMMEDIATELY (21707: rejection is a submission fact, not a PR resting state):
+ * the failed run row stays as history while the PR re-enters the editable band
+ * carrying its blocker. Scope-limited to PRs whose failed run the result still
+ * retains, so the pre-cutover backlog of ancient rejected PRs cannot flood the
+ * band; once the run ages out of retention, the corpse stays hidden.
  */
-function preRunTimelineStatus(pr: PR): "draft" | "rev" | "ready" | undefined {
+function preRunTimelineStatus(pr: PR, runs: readonly QueueRun[]): "draft" | "rev" | "ready" | undefined {
   if (pr.status === "submitted") return "ready"
   if (pr.status === "pushed") return lastFailedSubmission(pr) === undefined ? "draft" : "rev"
+  if (pr.status === "rejected") {
+    const runId = lastFailedSubmission(pr)?.terminal?.run
+    if (runId !== undefined && runs.some((run) => run.id === runId)) return "rev"
+  }
   return undefined
 }
 
@@ -1826,7 +1834,7 @@ function timelineNonIntegratedRows(
   const positions = submittedPrPositions(result.prs)
   const runs = [...result.running, ...result.waiting, ...result.finished]
   return result.prs.flatMap((pr): QueueTimelineProjectedRow[] => {
-    const status = preRunTimelineStatus(pr)
+    const status = preRunTimelineStatus(pr, runs)
     if (status === undefined) return []
     // A submitted revision that is actively running/waiting is shown by its run row.
     if (status === "ready" && activeRevisions.has(queueRevisionKey(pr))) return []

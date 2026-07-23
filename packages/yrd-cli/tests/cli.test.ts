@@ -2684,6 +2684,43 @@ describe("runYrd", () => {
     expect(rows(all.stdout())).toHaveLength(3)
   })
 
+  it("bounds commit subject resolution to the surviving rows and eight concurrent lookups", async () => {
+    const app = await createApp()
+    const refs = Array.from({ length: 9 }, (_, index) => String(index + 1).repeat(40))
+    for (const [index, headSha] of refs.entries()) {
+      await app.bays.submit({
+        branch: `topic/log-subject-${index + 1}`,
+        headSha,
+        base: "main",
+      })
+      await app.queue.run({ prs: [`PR${index + 1}`] }, { runner: "test", leaseMs: 60_000 })
+    }
+
+    let active = 0
+    let peak = 0
+    const resolveCommitMeta = vi.fn(async (ref: string) => {
+      active += 1
+      peak = Math.max(peak, active)
+      await Promise.resolve()
+      active -= 1
+      return { subject: `subject-${ref.slice(0, 1)}` }
+    })
+    const limited = outputIO({ resolveCommitMeta })
+    expect(await runYrd(app, yrd("log", "--limit", "2", "--json"), limited.io), limited.stderr()).toBe(0)
+
+    expect(resolveCommitMeta.mock.calls.map(([ref]) => ref)).toEqual(refs.slice(-2))
+    expect(
+      (JSON.parse(limited.stdout()) as { rows: readonly { subject: string }[] }).rows.map((row) => row.subject),
+    ).toEqual(["subject-8", "subject-9"])
+
+    resolveCommitMeta.mockClear()
+    peak = 0
+    const all = outputIO({ resolveCommitMeta })
+    expect(await runYrd(app, yrd("log", "--all", "--json"), all.io), all.stderr()).toBe(0)
+    expect(resolveCommitMeta.mock.calls.map(([ref]) => ref)).toEqual(refs)
+    expect(peak).toBe(8)
+  })
+
   it("keeps lossless log results and attempts inside base and PR scopes", async () => {
     const app = await createApp()
     await app.bays.submit({ branch: "topic/main-one", headSha: "1".repeat(40), base: "main" })
@@ -5194,6 +5231,7 @@ describe("runYrd", () => {
       base: "main",
       revision: 1,
       headSha: String(index + 1).repeat(40),
+      revisions: [],
     })) as unknown as PR[]
     const result: QueueStatusResult = {
       base: "main",
