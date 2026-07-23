@@ -47,6 +47,7 @@ export function prTaskStatusOf(pr: Pick<PR, "status">): TaskStatus {
       return "todo"
     case "submitted":
       return "wip"
+    case "needs-author":
     case "rejected":
       return "blocked"
     case "integrated":

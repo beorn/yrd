@@ -14,6 +14,7 @@ import { createLogger } from "loggily"
 import {
   createSignalObserver,
   createTribeSignalAdapter,
+  type NeedsAuthorSignal,
   type RejectedSignal,
   type SignalDelivery,
   type SignalDeliveryAdapter,
@@ -79,6 +80,24 @@ function submittedFrame(eventId: string, actor: string, revision: number) {
         ...event,
         name: "pr/submitted",
         data: { pr: "PR7", revision, headSha: "a".repeat(40), actor },
+      },
+    ],
+  }
+}
+
+function needsAuthorFrame(eventId = "00000000-0000-7000-8000-00000000000a") {
+  const frame = rejectedFrame(eventId)
+  const event = frame.events[0]!
+  return {
+    ...frame,
+    events: [
+      {
+        ...event,
+        name: "pr/needs-author",
+        data: {
+          ...event.data,
+          receipt: { code: "composition-invalid", message: "submitted composition cannot be built" },
+        },
       },
     ],
   }
@@ -380,6 +399,55 @@ describe("PR signal observer", () => {
           step: "check",
           evidence: "/repo/.git/yrd/artifacts/R9/check/stderr.log",
         }),
+      },
+    ])
+  })
+
+  it("routes native needs-author through its canonical route and carries the typed receipt", async () => {
+    const deliveries: SignalDelivery[] = []
+    const observer = createSignalObserver({
+      journal: createMemoryJournal<unknown>([needsAuthorFrame()]),
+      stateDir: await stateDir(),
+      routes: { "pr/needs-author": ["submitter"], "pr/rejected": ["@legacy"] },
+      adapter: recordingAdapter(deliveries),
+    })
+
+    observer.start()
+    await observer.close()
+
+    expect(deliveries).toEqual([
+      {
+        recipient: "@agent/7",
+        event: expect.objectContaining({
+          kind: "pr/needs-author",
+          pr: "PR7",
+          revision: 3,
+          run: "R9",
+          receipt: {
+            code: "composition-invalid",
+            message: "submitted composition cannot be built",
+          },
+        }),
+      },
+    ])
+  })
+
+  it("falls native needs-author back to the legacy rejected route when no canonical route is configured", async () => {
+    const deliveries: SignalDelivery[] = []
+    const observer = createSignalObserver({
+      journal: createMemoryJournal<unknown>([needsAuthorFrame()]),
+      stateDir: await stateDir(),
+      routes: { "pr/rejected": ["@legacy"] },
+      adapter: recordingAdapter(deliveries),
+    })
+
+    observer.start()
+    await observer.close()
+
+    expect(deliveries).toEqual([
+      {
+        recipient: "@legacy",
+        event: expect.objectContaining({ kind: "pr/needs-author", pr: "PR7" }),
       },
     ])
   })
@@ -869,6 +937,62 @@ describe("PR signal observer", () => {
           timeoutMs: 5_000,
         }),
       ])
+      expect(requests[0]?.argv.join("\n")).toContain("next=fix the branch and push; the same PR resumes automatically")
+      expect(requests[0]?.argv.join("\n")).not.toContain("retry the same Yrd command")
+    } finally {
+      which.mockRestore()
+    }
+  })
+
+  it("delivers an attributed rejection as needs-author with fix-push guidance", async () => {
+    const which = vi.spyOn(Bun, "which").mockReturnValue("/usr/local/bin/tribe")
+    const requests: ProcessRequest[] = []
+    const receipt = { code: "composition-invalid", message: "submitted composition cannot be built" }
+    try {
+      const adapter = createTribeSignalAdapter(recordingProcess(requests), undefined, () => receipt)
+      const raw = rejectedFrame().events[0]!
+      await adapter.send({
+        recipient: "@agent/7",
+        event: {
+          id: raw.id,
+          kind: "pr/rejected",
+          at: raw.ts,
+          ...(raw.data as Omit<RejectedSignal, "id" | "kind" | "at">),
+        },
+      })
+
+      const argv = requests[0]?.argv ?? []
+      expect(argv).toContain("PR7 needs author changes at check")
+      expect(argv.join("\n")).toContain("attributed=composition-invalid: submitted composition cannot be built")
+      expect(argv.join("\n")).toContain("fix the branch and push; the same PR resumes automatically")
+      expect(argv.join("\n")).not.toContain("retry the same Yrd command")
+    } finally {
+      which.mockRestore()
+    }
+  })
+
+  it("delivers native needs-author directly from its typed receipt", async () => {
+    const which = vi.spyOn(Bun, "which").mockReturnValue("/usr/local/bin/tribe")
+    const requests: ProcessRequest[] = []
+    try {
+      const adapter = createTribeSignalAdapter(recordingProcess(requests))
+      const raw = needsAuthorFrame().events[0]!
+      await adapter.send({
+        recipient: "@agent/7",
+        event: {
+          id: raw.id,
+          kind: "pr/needs-author",
+          at: raw.ts,
+          ...(raw.data as Omit<NeedsAuthorSignal, "id" | "kind" | "at">),
+        },
+      })
+
+      const argv = requests[0]?.argv ?? []
+      expect(argv).toContain("PR7 needs author changes at check")
+      expect(argv.join("\n")).toContain("attributed=composition-invalid: submitted composition cannot be built")
+      expect(argv.join("\n")).toContain("fix the branch and push; the same PR resumes automatically")
+      expect(argv).toContain("notify")
+      expect(argv).toContain("pull")
     } finally {
       which.mockRestore()
     }

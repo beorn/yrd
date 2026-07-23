@@ -25,7 +25,7 @@ import {
 import type { Contest } from "@yrd/contest"
 import { createFailure, failureFact, raiseFailure, type DeepReadonly, type JournalSnapshot } from "@yrd/core"
 import { isConcurrentSettlementConflict } from "@yrd/job"
-import type { Job } from "@yrd/job"
+import type { Job, JobError } from "@yrd/job"
 import { createProcess, type Process } from "@yrd/process"
 import {
   isQueueRunningConflict,
@@ -68,6 +68,7 @@ import {
   queueLogRows,
   prListRows,
   prDetailData,
+  projectedPrStatus,
   queueRevisionKey,
   queueRunRevisionClocks,
   queueTimelineAdmissionTimes,
@@ -309,7 +310,24 @@ type RunnerHealthPayload = Readonly<{
   facts: RunnerHealthFacts
 }>
 
-async function residentRunnerLeaseHeld(cwd: string): Promise<boolean> {
+/** Whether the host-wired resident owns this invocation's drain lease. Bare
+ * embedders without the optional probe retain the historical embedded drive. */
+async function residentHoldsDrainLease(io: YrdCliIO): Promise<boolean> {
+  if (io.residentLeaseHeld === undefined || io.cwd === undefined) return false
+  return io.residentLeaseHeld(io.cwd)
+}
+
+/** Ready and recut enqueue behind a live resident instead of starting a
+ * competing embedded driver (R1664/R1668). */
+async function admitWithResidentPolicy(
+  app: Pick<YrdCliApp, "queue">,
+  prs: readonly string[],
+  io: YrdCliIO,
+): Promise<readonly QueueRun[]> {
+  return (await residentHoldsDrainLease(io)) ? app.queue.admit({ prs }) : app.queue.admit({ prs }, runtimeOptions(io))
+}
+
+export async function residentRunnerLeaseHeld(cwd: string): Promise<boolean> {
   const gitDir = queueGitDir(cwd)
   if (gitDir === undefined) {
     raiseFailure("infrastructure", "runner-health-unavailable", `yrd: '${cwd}' is not a Git queue repository`)
@@ -757,26 +775,46 @@ type TrackerDeliveryIdentity = Readonly<{
   pr: string
   revision: number
   headSha: string
-  status: PR["status"]
   at: string
   runs: readonly string[]
   correlation?: Correlation
 }>
 
-type TrackerDelivery =
+type TrackerBounce = Readonly<{ run: string; detail?: string }>
+
+type TrackerDeliveryV1 =
   | (TrackerDeliveryIdentity & Readonly<{ status: "pushed" | "submitted" | "withdrawn" | "canceled" }>)
-  | (TrackerDeliveryIdentity & Readonly<{ status: "rejected"; bounce: Readonly<{ run: string; detail?: string }> }>)
+  | (TrackerDeliveryIdentity & Readonly<{ status: "rejected"; bounce: TrackerBounce }>)
   | (TrackerDeliveryIdentity &
       Readonly<{ status: "integrated"; landingSha: string; regressions?: readonly PRRegression[] }>)
 
-type TrackerBridge = Readonly<{
+type TrackerDeliveryV2 =
+  | TrackerDeliveryV1
+  | (TrackerDeliveryIdentity & Readonly<{ status: "needs-author"; bounce: TrackerBounce; attributedReceipt: JobError }>)
+
+type TrackerBridgeV1 = Readonly<{
   version: 1
   asOf: JournalSnapshot<YrdCliState>["asOf"]
-  deliveries: readonly TrackerDelivery[]
+  deliveries: readonly TrackerDeliveryV1[]
 }>
 
-function trackerDelivery(pr: DeepReadonly<PR>, state: DeepReadonly<YrdCliState>): TrackerDelivery | undefined {
+type TrackerBridgeV2 = Readonly<{
+  version: 2
+  asOf: JournalSnapshot<YrdCliState>["asOf"]
+  deliveries: readonly TrackerDeliveryV2[]
+}>
+
+function trackerDeliveryV2(
+  pr: DeepReadonly<PR>,
+  state: DeepReadonly<YrdCliState>,
+  eligibility: PREligibility,
+): TrackerDeliveryV2 | undefined {
   if (pr.issue === undefined) return undefined
+  if (eligibility.pr !== pr.id || eligibility.revision !== pr.revision) {
+    refusal(
+      `trackerBridge v2 eligibility for '${eligibility.pr}' revision ${eligibility.revision} does not match PR '${pr.id}' revision ${pr.revision}`,
+    )
+  }
   const revision = pr.revisions.findLast(
     (candidate) => candidate.revision === pr.revision && candidate.headSha === pr.headSha,
   )
@@ -804,16 +842,48 @@ function trackerDelivery(pr: DeepReadonly<PR>, state: DeepReadonly<YrdCliState>)
       return revision === undefined ? undefined : { ...identity, status: "pushed", at: revision.pushedAt }
     case "submitted":
       return pr.submittedAt === undefined ? undefined : { ...identity, status: "submitted", at: pr.submittedAt }
+    case "needs-author": {
+      const attributed = pr.needsAuthor
+      if (attributed === undefined) {
+        refusal(`trackerBridge v2 cannot project needs-author PR '${pr.id}' without its native attribution fact`)
+      }
+      if (eligibility.reason?.code !== "needs-author" || eligibility.reason.receipt === undefined) {
+        refusal(`trackerBridge v2 cannot project needs-author PR '${pr.id}' without exact eligibility`)
+      }
+      return {
+        ...identity,
+        status: "needs-author",
+        at: attributed.at,
+        bounce: {
+          run: attributed.run,
+          ...(attributed.detail === undefined ? {} : { detail: attributed.detail }),
+        },
+        attributedReceipt: attributed.receipt,
+      }
+    }
     case "rejected":
       if (pr.rejectedAt === undefined) return undefined
       if (pr.terminalRun === undefined) {
         refusal(`trackerBridge v1 cannot project rejected PR '${pr.id}' without a typed Queue bounce run`)
       }
+      const bounce = { run: pr.terminalRun, ...(pr.detail === undefined ? {} : { detail: pr.detail }) }
+      if (eligibility.reason?.code === "needs-author") {
+        if (eligibility.reason.receipt === undefined) {
+          refusal(`trackerBridge v2 cannot project needs-author PR '${pr.id}' without an attributed receipt`)
+        }
+        return {
+          ...identity,
+          status: "needs-author",
+          at: pr.rejectedAt,
+          bounce,
+          attributedReceipt: eligibility.reason.receipt,
+        }
+      }
       return {
         ...identity,
         status: "rejected",
         at: pr.rejectedAt,
-        bounce: { run: pr.terminalRun, ...(pr.detail === undefined ? {} : { detail: pr.detail }) },
+        bounce,
       }
     case "integrated": {
       const landing = prLandingOutcome(pr)
@@ -833,20 +903,70 @@ function trackerDelivery(pr: DeepReadonly<PR>, state: DeepReadonly<YrdCliState>)
   }
 }
 
-function trackerBridge(
-  snapshot: JournalSnapshot<YrdCliState>,
-  include: (delivery: TrackerDelivery) => boolean,
-): TrackerBridge {
-  const deliveries = Object.values(snapshot.state.bays.prs)
-    .map((pr) => trackerDelivery(pr, snapshot.state))
-    .filter((delivery): delivery is TrackerDelivery => delivery !== undefined && include(delivery))
-    .toSorted((left, right) => left.pr.localeCompare(right.pr, undefined, { numeric: true }))
-  return { version: 1, asOf: snapshot.asOf, deliveries }
+const TRACKER_V1_STATUS_MAP = {
+  pushed: "pushed",
+  submitted: "submitted",
+  "needs-author": "rejected",
+  rejected: "rejected",
+  integrated: "integrated",
+  withdrawn: "withdrawn",
+  canceled: "canceled",
+} as const satisfies Record<TrackerDeliveryV2["status"], TrackerDeliveryV1["status"]>
+
+function trackerDeliveryV1(delivery: TrackerDeliveryV2): TrackerDeliveryV1 {
+  const identity = {
+    issueRef: delivery.issueRef,
+    pr: delivery.pr,
+    revision: delivery.revision,
+    headSha: delivery.headSha,
+    at: delivery.at,
+    runs: delivery.runs,
+    ...(delivery.correlation === undefined ? {} : { correlation: delivery.correlation }),
+  }
+  const status = TRACKER_V1_STATUS_MAP[delivery.status]
+  if (status === "rejected") {
+    if (delivery.status !== "rejected" && delivery.status !== "needs-author") {
+      throw new TypeError(`trackerBridge v1 status mapping for '${delivery.status}' lost its bounce`)
+    }
+    return { ...identity, status, bounce: delivery.bounce }
+  }
+  if (status === "integrated") {
+    if (delivery.status !== "integrated") {
+      throw new TypeError(`trackerBridge v1 status mapping for '${delivery.status}' lost its landing`)
+    }
+    return {
+      ...identity,
+      status,
+      landingSha: delivery.landingSha,
+      ...(delivery.regressions === undefined ? {} : { regressions: delivery.regressions }),
+    }
+  }
+  return { ...identity, status }
 }
 
-function issueDeliveryRows(bridge: TrackerBridge): IssueDeliveryRow[] {
+function trackerBridges(
+  app: YrdCliApp,
+  snapshot: JournalSnapshot<YrdCliState>,
+  include: (delivery: TrackerDeliveryV2) => boolean,
+): Readonly<{ trackerBridge: TrackerBridgeV1; trackerBridgeV2: TrackerBridgeV2 }> {
+  const deliveries = Object.values(snapshot.state.bays.prs)
+    .map((pr) => trackerDeliveryV2(pr, snapshot.state, app.queue.eligibility(pr.id, snapshot.state)))
+    .filter((delivery): delivery is TrackerDeliveryV2 => delivery !== undefined && include(delivery))
+    .toSorted((left, right) => left.pr.localeCompare(right.pr, undefined, { numeric: true }))
+  const trackerBridgeV2 = { version: 2 as const, asOf: snapshot.asOf, deliveries }
+  return {
+    trackerBridge: {
+      version: 1,
+      asOf: snapshot.asOf,
+      deliveries: trackerBridgeV2.deliveries.map(trackerDeliveryV1),
+    },
+    trackerBridgeV2,
+  }
+}
+
+function issueDeliveryRows(bridge: TrackerBridgeV2): IssueDeliveryRow[] {
   return bridge.deliveries.map((delivery) => {
-    const taskStatus = prTaskStatusOf(delivery)
+    const taskStatus = prTaskStatusOf({ status: delivery.status })
     return {
       pr: delivery.pr,
       revision: delivery.revision,
@@ -861,6 +981,9 @@ function issueDeliveryRows(bridge: TrackerBridge): IssueDeliveryRow[] {
           }
         : {}),
       ...(delivery.status === "rejected" ? { bounce: delivery.bounce } : {}),
+      ...(delivery.status === "needs-author"
+        ? { bounce: delivery.bounce, attributedReceipt: delivery.attributedReceipt }
+        : {}),
     }
   })
 }
@@ -1063,9 +1186,18 @@ function projectQueueSummaryTaskStatus(summary: QueueSummary) {
 }
 
 function projectQueueStatusResultTaskStatus(result: QueueStatusResult) {
+  const { eligibilities, ...visible } = result
   return {
-    ...projectQueueSummaryTaskStatus(result),
-    prs: result.prs.map(projectPRTaskStatus),
+    ...projectQueueSummaryTaskStatus(visible),
+    prs: result.prs.map((pr) => {
+      const eligibility = eligibilities?.[pr.id]
+      return eligibility === undefined
+        ? projectPRTaskStatus(pr)
+        : {
+            ...projectPrTaskStatusWithEligibility(pr, eligibility),
+            eligibility: projectEligibilityTaskStatus(eligibility),
+          }
+    }),
   }
 }
 
@@ -1074,6 +1206,12 @@ function projectEligibilityTaskStatus(eligibility: PREligibility) {
     ...eligibility,
     checks: { ...eligibility.checks, ...taskStatusFields(checkTaskStatusOf(eligibility.checks)) },
   }
+}
+
+function projectPrTaskStatusWithEligibility(pr: PR, eligibility: PREligibility) {
+  const projected = projectPRTaskStatus(pr)
+  const status = projectedPrStatus(pr, eligibility)
+  return status === pr.status ? projected : { ...projected, nativeStatus: pr.status, status }
 }
 
 function projectCheckTaskStatus(check: PRCheckViewRecord) {
@@ -1244,14 +1382,19 @@ async function readyPr(app: YrdCliApp, selector: string, options: JsonOption, io
   let pr = app.bays.pr(selector)
   if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after ready`)
   if (!app.bays.checksRequested(pr.id)) await app.bays.requestChecks({ pr: pr.id })
-  const admitted = await app.queue.admit({ prs: [pr.id] }, runtimeOptions(io))
+  const admitted = await admitWithResidentPolicy(app, [pr.id], io)
   pr = app.bays.pr(pr.id)
   if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after check admission`)
+  const eligibility = app.queue.eligibility(pr.id)
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "pr.ready", pr: prFact(pr), eligibility: projectEligibilityTaskStatus(app.queue.eligibility(pr.id)) },
-    createElement(PRResultView, { prs: [pr], runs: [] }),
+    {
+      command: "pr.ready",
+      pr: projectPrTaskStatusWithEligibility(pr, eligibility),
+      eligibility: projectEligibilityTaskStatus(eligibility),
+    },
+    createElement(PRResultView, { prs: [pr], runs: [], eligibilities: [eligibility] }),
   )
   return admitted.some(
     (run) =>
@@ -1269,11 +1412,22 @@ async function recutPr(
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
   const outcome = await executeRecutPr(app, services, selector, options, io)
+  const eligibility = app.queue.eligibility(outcome.current.id)
+  const projected = projectPrTaskStatusWithEligibility(outcome.current, eligibility)
   await printResult(
     io,
     jsonEnabled(options),
-    outcome.output,
-    `${outcome.current.id} revision ${outcome.current.revision} ${outcome.unchanged ? "already matches" : "recut onto"} ${outcome.result.baseSha}`,
+    {
+      ...outcome.output,
+      status: projected.status,
+      ...("nativeStatus" in projected ? { nativeStatus: projected.nativeStatus } : {}),
+      eligibility: projectEligibilityTaskStatus(eligibility),
+    },
+    [
+      `${outcome.current.id} revision ${outcome.current.revision} ${outcome.unchanged ? "already matches" : "recut onto"} ${outcome.result.baseSha}`,
+      `status ${projected.status}`,
+      ...(eligibility.reason?.code === "needs-author" ? [eligibility.reason.message] : []),
+    ].join("\n"),
   )
   return outcome.admitted.some(
     (run) =>
@@ -1387,7 +1541,7 @@ async function executeRecutPr(
     }
     if (!app.bays.checksRequested(current.id)) await app.bays.requestChecks({ pr: current.id })
     if (options.admit !== false) {
-      admitted = await app.queue.admit({ prs: [current.id] }, runtimeOptions(io))
+      admitted = await admitWithResidentPolicy(app, [current.id], io)
     }
     current = requiredPr(app, current.id)
   }
@@ -1759,12 +1913,19 @@ async function applyPrSelectionVerb(
   let checks: readonly PRCheckViewRecord[] = prCheckRecords(app, selected)
   if (options.follow === true && !checksTerminal(checks)) checks = await followCheckRecords(app, selected, checks, io)
   const currentPrs = selected.map((selector) => requiredPr(app, selector))
+  const eligibilities = currentPrs.map((pr) => app.queue.eligibility(pr.id))
   await printResult(
     io,
     jsonEnabled(options),
     {
       command,
-      prs: currentPrs.map(projectPRTaskStatus),
+      prs: currentPrs.map((pr, index) => {
+        const eligibility = eligibilities[index]!
+        return {
+          ...projectPrTaskStatusWithEligibility(pr, eligibility),
+          eligibility: projectEligibilityTaskStatus(eligibility),
+        }
+      }),
       checks: checks.map(projectCheckTaskStatus),
       ...(warnings.length > 0 ? { warnings } : {}),
     },
@@ -1772,6 +1933,7 @@ async function applyPrSelectionVerb(
       prs: currentPrs,
       runs: followed,
       checks,
+      eligibilities,
       now: io.now?.() ?? Date.now(),
     }),
   )
@@ -1911,10 +2073,12 @@ async function listPrs(
   const matching = app.bays
     .prs()
     .filter((pr) => base === undefined || baseIdentity(pr.base) === base)
-    .filter((pr) => options.state === undefined || pr.status === options.state)
     .filter((pr) => options.issue === undefined || pr.issue === options.issue)
     .toSorted((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }))
   const json = jsonEnabled(options)
+  // Preserve the bounded human default before deriving eligibility. A state
+  // filter must inspect every candidate because `needs-author` is projected
+  // from eligibility; an unfiltered human list only needs its final 20 rows.
   const listed = explicitlyFiltered || json ? matching : matching.slice(-PR_LIST_DEFAULT_WINDOW_SIZE)
   const rows = listed
     .map((pr) => ({
@@ -1922,6 +2086,16 @@ async function listPrs(
       eligibility: app.queue.eligibility(pr.id),
       needsReview: app.bays.needsReview(pr.id, options.reviewer),
     }))
+    .filter(
+      ({ pr, eligibility }) =>
+        options.state === undefined ||
+        projectedPrStatus(pr, eligibility) === options.state ||
+        pr.status === options.state ||
+        // v1 clients used `rejected` as the only author-fix bucket. Keep that
+        // filter as a read-compatible superset while every returned row tells
+        // the truth with native `status: needs-author`.
+        (options.state === "rejected" && pr.status === "needs-author"),
+    )
     .filter(({ pr, eligibility, needsReview }) =>
       options.needsReview === true
         ? options.reviewer !== undefined
@@ -1940,7 +2114,7 @@ async function listPrs(
     {
       command: "pr.list",
       prs: rows.map(({ pr, eligibility, needsReview }) => ({
-        ...projectPRTaskStatus(pr),
+        ...projectPrTaskStatusWithEligibility(pr, eligibility),
         eligibility: projectEligibilityTaskStatus(eligibility),
         requestedReviewers: pr.requestedReviewers ?? [],
         needsReview,
@@ -1970,12 +2144,14 @@ async function viewPr(
   const runs = prQueueRuns(app, pr)
   const attempts = await queueLogAttempts(app.events())
   const detail = prDetailData(pr, runs, attempts)
+  const eligibility = app.queue.eligibility(pr.id)
   await printResult(
     io,
     jsonEnabled(options),
     {
       command,
-      pr: projectPRTaskStatus(pr),
+      pr: projectPrTaskStatusWithEligibility(pr, eligibility),
+      eligibility: projectEligibilityTaskStatus(eligibility),
       landing: prLandingOutcome(pr),
       ...(position === undefined ? {} : { position }),
       results: results.map(projectQueueStatusResultTaskStatus),
@@ -1983,6 +2159,7 @@ async function viewPr(
     },
     createElement(PRDetailView, {
       pr,
+      eligibility,
       runs,
       attempts,
       now: io.now?.() ?? Date.now(),
@@ -2004,8 +2181,10 @@ async function viewPrRuns(app: YrdCliApp, selector: string, options: JsonOption,
     const attempts = await queueLogAttempts(app.events())
     const confirmed = await app.journalSnapshot()
     if (confirmed.asOf.cursor !== snapshot.asOf.cursor) continue
+    const eligibility = app.queue.eligibility(pr.id, snapshot.state)
     const data = {
       pr,
+      eligibility,
       runs: runs.map((run) => queueShowData(run, runs, attempts, runRevisionClock(pr, run))),
     }
     await printResult(
@@ -2013,9 +2192,10 @@ async function viewPrRuns(app: YrdCliApp, selector: string, options: JsonOption,
       jsonEnabled(options),
       {
         command: "pr.runs",
-        pr: projectPRTaskStatus(pr),
+        pr: projectPrTaskStatusWithEligibility(pr, eligibility),
+        eligibility: projectEligibilityTaskStatus(eligibility),
         runs: data.runs,
-        trackerBridge: trackerBridge(snapshot, ({ pr: id }) => id === pr.id),
+        ...trackerBridges(app, snapshot, ({ pr: id }) => id === pr.id),
       },
       createElement(PRRunsView, { data }),
     )
@@ -2261,14 +2441,14 @@ function issueRows(app: YrdCliApp, state: DeepReadonly<YrdCliState>, selected?: 
         (contest) => `${contest.issue.ref.source}:${contest.issue.ref.id}` === issue,
       )
       const taskStatus = issueTaskStatusOf({ prs, contests: joinedContests })
+      const prStatuses = prs.map((pr) => projectedPrStatus(pr, app.queue.eligibility(pr.id, state)))
       return {
         issue,
         ...taskStatusFields(taskStatus),
         bays: bays.map((bay) => bay.id).join(",") || "-",
         prs: prs.map((pr) => pr.id).join(",") || "-",
         contests: joinedContests.map((contest) => contest.id).join(",") || "-",
-        outcome:
-          [...prs.map((pr) => pr.status), ...joinedContests.map((contest) => contest.status)].join(",") || "in-flight",
+        outcome: [...prStatuses, ...joinedContests.map((contest) => contest.status)].join(",") || "in-flight",
       }
     })
 }
@@ -2277,7 +2457,7 @@ async function listIssues(app: YrdCliApp, options: JsonOption, io: YrdCliIO, sel
   for (let read = 0; read < 3; read += 1) {
     const snapshot = await app.journalSnapshot()
     const issues = issueRows(app, snapshot.state, selected)
-    const bridge = trackerBridge(snapshot, ({ issueRef }) => selected === undefined || issueRef === selected)
+    const bridges = trackerBridges(app, snapshot, ({ issueRef }) => selected === undefined || issueRef === selected)
     const confirmed = await app.journalSnapshot()
     if (confirmed.asOf.cursor !== snapshot.asOf.cursor) continue
     await printResult(
@@ -2286,11 +2466,11 @@ async function listIssues(app: YrdCliApp, options: JsonOption, io: YrdCliIO, sel
       {
         command: selected === undefined ? "issue.list" : "issue.view",
         issues,
-        trackerBridge: bridge,
+        ...bridges,
       },
       createElement(IssueLensView, {
         rows: issues,
-        ...(selected === undefined ? {} : { deliveries: issueDeliveryRows(bridge) }),
+        ...(selected === undefined ? {} : { deliveries: issueDeliveryRows(bridges.trackerBridgeV2) }),
       }),
     )
     return
@@ -2556,14 +2736,16 @@ async function queueStatusSnapshots(
     const canonical = app.queue.status(group.base)
     const aliases = [...group.aliases].filter((base) => base !== group.base).map((base) => app.queue.status(base))
     const runs = mergedQueueRuns(canonical, aliases)
+    const prs = Object.values(state.bays.prs).filter(
+      (pr) => group.aliases.has(pr.base) && (target.selected.size === 0 || target.selected.has(pr.id)),
+    )
     results.push({
       base: group.base,
       ...runs,
       ...(canonical.pause === undefined ? {} : { pause: canonical.pause }),
       ...(group.headSha === undefined ? {} : { headSha: group.headSha }),
-      prs: Object.values(state.bays.prs).filter(
-        (pr) => group.aliases.has(pr.base) && (target.selected.size === 0 || target.selected.has(pr.id)),
-      ),
+      prs,
+      eligibilities: Object.fromEntries(prs.map((pr) => [pr.id, app.queue.eligibility(pr.id)])),
     })
   }
   return { results }
@@ -2950,8 +3132,13 @@ async function primeYrd(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
   )
   const queue = pr === undefined ? undefined : app.queue.status(pr.base)
   const briefing = {
-    model: "issue -> bay -> pr -> queue -> integrated or rejected",
-    loop: ["yrd pr submit", "yrd pr status", "yrd pr runs <PR>", "fix the branch and run yrd pr submit again"],
+    model: "issue -> bay -> pr -> queue -> integrated or parked for author",
+    loop: [
+      "yrd pr submit",
+      "yrd pr status",
+      "yrd pr runs <PR>",
+      "fix the branch and push; the same PR resumes automatically",
+    ],
     live: {
       bay: bay?.id,
       pr: pr?.id,
@@ -4243,12 +4430,14 @@ async function refusePrMerge(
   }
 
   const position = await queuedPrPosition(stateOf(app), pr, io)
-  const detail = prMergeRefusalDetail(pr, position)
+  const eligibility = app.queue.eligibility(pr.id)
+  const projectedStatus = eligibility.reason?.code === "needs-author" ? "needs-author" : pr.status
+  const detail = prMergeRefusalDetail(pr, position, projectedStatus)
   const message = `the queue is the only merger; ${detail.message}`
   const guidance = {
     command: "pr.merge",
     pr: pr.id,
-    status: pr.status,
+    status: projectedStatus,
     ...(position === undefined ? {} : { position }),
     next: detail.next,
     guidance: detail.guidance,
@@ -4264,8 +4453,9 @@ async function refusePrMerge(
 function prMergeRefusalDetail(
   pr: PR,
   position: number | undefined,
+  projectedStatus: PR["status"] | "needs-author",
 ): Readonly<{ next: string; guidance: Readonly<Record<string, string>>; message: string }> {
-  if (pr.status === "submitted") {
+  if (projectedStatus === "submitted") {
     const watch = `yrd watch --pr ${pr.id}`
     return {
       next: watch,
@@ -4273,16 +4463,16 @@ function prMergeRefusalDetail(
       message: `PR '${pr.id}' is queued${position === undefined ? "" : ` at position ${position}`}; watch: ${watch}`,
     }
   }
-  if (pr.status === "rejected") {
+  if (projectedStatus === "rejected" || projectedStatus === "needs-author") {
     const inspect = `yrd pr runs ${pr.id}`
-    const resubmit = "fix the branch and run yrd pr submit again"
+    const fixPush = "fix the branch and push; the same PR resumes automatically"
     return {
       next: inspect,
-      guidance: { inspect, resubmit },
-      message: `PR '${pr.id}' was rejected; see: ${inspect}; then ${resubmit}`,
+      guidance: { inspect, fixPush },
+      message: `PR '${pr.id}' ${projectedStatus === "needs-author" ? "needs author changes" : "was rejected"}; see: ${inspect}; then ${fixPush}`,
     }
   }
-  if (pr.status === "pushed") {
+  if (projectedStatus === "pushed") {
     const submit = `yrd pr submit ${pr.branch}`
     return { next: submit, guidance: { submit }, message: `PR '${pr.id}' is not queued; submit it: ${submit}` }
   }
@@ -4410,7 +4600,7 @@ function buildProgram(
   if (projection === "root") {
     program.addHelpSection(
       "Model:",
-      "Pick an issue -> work it in a bay -> create a draft -> submit it -> PRs queue per base ->\na run verifies and merges each one -> integrated, or rejected with the log.",
+      "Pick an issue -> work it in a bay -> create a draft -> submit it ->\nPRs queue per base -> a run verifies and merges each one -> integrated,\nor parked for the author with a typed receipt.",
     )
     program.addHelpSection("Objects:", [
       ["issue", "tracker-owned intent; yrd exposes a read-only delivery lens"],
@@ -4668,7 +4858,7 @@ function buildProgram(
   pr.command("list")
     .description("list pull requests")
     .option("--base <branch>", "scope PRs to one base")
-    .option("--state <state>", "scope PRs to one native state")
+    .option("--state <state>", "scope PRs to one native or projected state")
     .option("--issue <ref>", "scope PRs to one issue reference")
     .option("--needs-review", "show revisions needing approval")
     .option("--reviewer <actor>", "scope --needs-review to one requested reviewer")

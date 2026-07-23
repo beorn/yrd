@@ -129,7 +129,13 @@ function QueueRunId({ base, run, ...props }: { base: string; run: string } & Que
   return <NounId noun={base} value={runIdValue(run)} {...props} />
 }
 
-export type QueueStatusResult = QueueSummary & { headSha?: string; prs: PR[] }
+export type QueueStatusResult = QueueSummary & {
+  headSha?: string
+  prs: PR[]
+  /** Current eligibility keyed by PR id. Optional for retained/test snapshots
+   * written before eligibility became part of the view projection. */
+  eligibilities?: Readonly<Record<string, PREligibility>>
+}
 
 export type QueueTimelineRow = Readonly<{
   key: string
@@ -551,6 +557,7 @@ export type HumanQueueProjection = Readonly<{
   activeCount: number
   integrated: number
   rejected: number
+  needsAuthor: number
   pause?: QueueSummary["pause"]
   active?: WatchActiveRow
   oldestOpen: string
@@ -638,6 +645,7 @@ export type PRRunRevisionClock =
 
 export type PRRunsData = Readonly<{
   pr: PR
+  eligibility?: PREligibility
   runs: readonly QueueShowData[]
 }>
 
@@ -679,7 +687,7 @@ function latest(...timestamps: (string | undefined)[]): string | undefined {
 function latestRun(pr: PR, summary: QueueSummary): QueueRun | undefined {
   const current = queueRevisionKey({ id: pr.id, revision: pr.revision, headSha: pr.headSha })
   const currentSubmission =
-    pr.status === "submitted"
+    pr.status === "submitted" || pr.status === "needs-author"
       ? (pr.revisions.find((revision) => revision.revision === pr.revision && revision.headSha === pr.headSha)
           ?.submittedAt ?? pr.submittedAt)
       : undefined
@@ -1292,10 +1300,14 @@ function queueShowRetries(finished: readonly QueueRun[], run: QueueRun): number 
   return runOutputQueueageIndex(finished, run, first.revision, first.id)
 }
 
-function queueState(pr: PR, run: QueueRun | undefined): string {
+export function projectedPrStatus(pr: PR, eligibility?: PREligibility): PR["status"] | "needs-author" {
+  return eligibility?.reason?.code === "needs-author" ? "needs-author" : pr.status
+}
+
+function queueState(pr: PR, run: QueueRun | undefined, eligibility?: PREligibility): string {
   if (run?.status === "running") return "checking"
   if (run?.status === "waiting") return "waiting"
-  return pr.status
+  return projectedPrStatus(pr, eligibility)
 }
 
 function stepError(step: QueueStep): string {
@@ -2133,6 +2145,7 @@ function projectPR(
   pr: PR,
   now: number,
   runOverride?: QueueRun,
+  eligibility?: PREligibility,
 ): HumanPRProjection {
   const run = runOverride ?? latestRun(pr, result)
   const step = relevantStep(run)
@@ -2175,7 +2188,7 @@ function projectPR(
   const runDuration = runDurationMs === undefined ? "-" : formatDuration(runDurationMs)
   const artifacts = stepArtifacts(step)
   const artifact = artifactHref(artifacts[0])
-  const stateLabel = queueState(pr, run)
+  const stateLabel = queueState(pr, run, eligibility)
   const taskStatus = prTaskStatusOf(pr)
   const fact = failureFact(run, step)
   const evidence = failureEvidence(step)
@@ -2183,13 +2196,15 @@ function projectPR(
     revision?.terminal?.at ??
     runOverride?.finishedAt ??
     (isCurrentRevision
-      ? pr.status === "rejected"
-        ? pr.rejectedAt
-        : pr.status === "integrated"
-          ? pr.integratedAt
-          : pr.status === "withdrawn"
-            ? pr.withdrawnAt
-            : undefined
+      ? pr.status === "needs-author"
+        ? pr.needsAuthor?.at
+        : pr.status === "rejected"
+          ? pr.rejectedAt
+          : pr.status === "integrated"
+            ? pr.integratedAt
+            : pr.status === "withdrawn"
+              ? pr.withdrawnAt
+              : undefined
       : undefined)
   const parsedTerminalAt = terminalAt === undefined ? Number.NaN : Date.parse(terminalAt)
   const ageAt = Number.isFinite(parsedTerminalAt) ? parsedTerminalAt : now
@@ -2225,7 +2240,7 @@ function projectPR(
 }
 
 function projectedPRRows(state: BaysState | undefined, result: QueueStatusResult, now: number): HumanPRProjection[] {
-  return result.prs.map((pr) => projectPR(state, result, pr, now))
+  return result.prs.map((pr) => projectPR(state, result, pr, now, undefined, result.eligibilities?.[pr.id]))
 }
 
 function byTouchedNewest(left: HumanPRProjection, right: HumanPRProjection): number {
@@ -2258,9 +2273,14 @@ export function humanQueueProjection(
     run.prs.flatMap((member) => {
       const pr = result.prs.find((candidate) => candidate.id === member.id)
       if (pr === undefined) return []
-      if (selected.size === 0 && (pr.status !== "rejected" || run.status !== "failed")) return []
+      if (
+        selected.size === 0 &&
+        ((pr.status !== "rejected" && pr.status !== "needs-author") || run.status !== "failed")
+      ) {
+        return []
+      }
       if (selected.size > 0 && (!selected.has(pr.id) || pr.status === "submitted")) return []
-      return [projectPR(options.state, result, pr, now, run)]
+      return [projectPR(options.state, result, pr, now, run, result.eligibilities?.[pr.id])]
     }),
   )
   const represented = new Set(historical.map((row) => row.pr))
@@ -2269,7 +2289,7 @@ export function humanQueueProjection(
     ...rows.filter((row) => {
       if (represented.has(row.pr)) return false
       return selected.size === 0
-        ? row.nativeStatus === "rejected"
+        ? row.nativeStatus === "rejected" || row.nativeStatus === "needs-author"
         : selected.has(row.pr) && row.nativeStatus !== "submitted"
     }),
   ]
@@ -2282,7 +2302,8 @@ export function humanQueueProjection(
     open: queueRows.length,
     activeCount: queueRows.filter((row) => ["checking", "waiting"].includes(row.state)).length,
     integrated: rows.filter((row) => row.nativeStatus === "integrated").length,
-    rejected: rows.filter((row) => row.nativeStatus === "rejected").length,
+    rejected: rows.filter((row) => row.nativeStatus === "rejected" && row.state !== "needs-author").length,
+    needsAuthor: rows.filter((row) => row.state === "needs-author").length,
     ...(result.pause === undefined ? {} : { pause: result.pause }),
     ...(active === undefined ? {} : { active }),
     oldestOpen: queueRows[0]?.age ?? "-",
@@ -2394,11 +2415,12 @@ export function prListRows(
     if (!eligibility.runnable && eligibility.reason === undefined) {
       throw new Error(`yrd: PR '${pr.id}' revision ${pr.revision} is ineligible without a typed blocking reason`)
     }
-    const projected = projectPR(undefined, summary, pr, now)
+    const projected = projectPR(undefined, summary, pr, now, undefined, eligibility)
+    const state = projectedPrStatus(pr, eligibility)
     return {
       pr: projected.pr,
-      state: projected.state,
-      stateLabel: `${projected.glyph} ${projected.state}`,
+      state,
+      stateLabel: `${projected.glyph} ${state}`,
       glyph: projected.glyph,
       revision: pr.revision,
       lineage: projected.revisionLineage.join("→"),
@@ -2542,16 +2564,18 @@ export function PRResultView({
   prs,
   runs,
   checks,
+  eligibilities,
   now,
 }: {
   prs: readonly PR[]
   runs: readonly QueueRun[]
   checks?: readonly PRCheckViewRecord[]
+  eligibilities?: readonly PREligibility[]
   now?: number
 }) {
   return (
     <Box flexDirection="column">
-      <PRStatusView prs={prs} />
+      <PRStatusView prs={prs} eligibilities={eligibilities} />
       {checks === undefined && runs.length > 0 && (
         <Box marginTop={1}>
           <QueueRunsView runs={runs} />
@@ -2620,12 +2644,14 @@ function diagnosticBlocker(
 
 export function PRDetailView({
   pr,
+  eligibility,
   runs,
   attempts = [],
   now,
   position,
 }: {
   pr: PR
+  eligibility?: PREligibility
   runs: readonly QueueRun[]
   attempts?: readonly QueueAttempt[]
   now: number
@@ -2642,7 +2668,8 @@ export function PRDetailView({
   // any run against it would sort newer and be selected here instead.
   const supersededRunRevision =
     run !== undefined && runMember !== undefined && runMember.revision !== pr.revision ? runMember.revision : undefined
-  const currentStateWord = pr.status === "submitted" ? "pending" : pr.status
+  const projectedStatus = projectedPrStatus(pr, eligibility)
+  const currentStateWord = projectedStatus === "submitted" ? "pending" : projectedStatus
   const activeStep = relevantStep(run)
   const blocker = diagnosticBlocker(pr, run, activeStep, now)
   const landing = pr.integration ?? (run === undefined ? undefined : queueIntegration(run))
@@ -2655,10 +2682,15 @@ export function PRDetailView({
   return (
     <Box flexDirection="column">
       <Text>
-        <QueuePrId pr={pr.id} revision={pr.revision} /> <Text bold>STATUS</Text> <StatusValue value={pr.status} />{" "}
+        <QueuePrId pr={pr.id} revision={pr.revision} /> <Text bold>STATUS</Text> <StatusValue value={projectedStatus} />{" "}
         <TaskStatusGlyph taskStatus={projectionFields.taskStatus} glyph={projectionFields.glyph} />
         {position === undefined ? null : ` POSITION ${position}`}
       </Text>
+      {eligibility?.reason?.code === "needs-author" ? (
+        <Text wrap="wrap">
+          <Text bold>NEEDS AUTHOR</Text> {eligibility.reason.message}
+        </Text>
+      ) : null}
       {pr.title === undefined ? null : (
         <Text wrap="truncate" bgConflict="ignore">
           <Text bold>TITLE</Text> {pr.title}
@@ -2697,6 +2729,9 @@ export function PRDetailView({
           compact
           highlightPr={pr.id}
           {...(supersededRunRevision === undefined ? {} : { historyRevision: supersededRunRevision })}
+          {...(supersededRunRevision === undefined && eligibility?.reason?.code === "needs-author"
+            ? { nextAction: "fix the branch and push; the same PR resumes automatically" }
+            : {})}
         />
       )}
       {blocker === undefined ? null : (
@@ -2732,7 +2767,14 @@ function SummaryQueue({ projection }: { projection: HumanQueueProjection }) {
       <Text wrap="truncate">
         <Text bold>QUEUE</Text> {projection.target} <Text bold>OPEN</Text> {projection.open} <Text bold>ACTIVE</Text>{" "}
         {projection.activeCount} <Text bold>INTEGRATED</Text> {projection.integrated} <Text bold>REJECTED</Text>{" "}
-        {projection.rejected} <Text bold>DRAIN</Text> {projection.oldestOpen}
+        {projection.rejected}
+        {projection.needsAuthor === 0 ? null : (
+          <>
+            {" "}
+            <Text bold>NEEDS-AUTHOR</Text> {projection.needsAuthor}
+          </>
+        )}{" "}
+        <Text bold>DRAIN</Text> {projection.oldestOpen}
       </Text>
     </Box>
   )
@@ -2847,7 +2889,9 @@ function ProjectionRows({
         <>
           <Box height={1}>
             <Text bold>
-              {projection.recent.some((row) => row.nativeStatus === "rejected") ? "Recent failures" : "Recent results"}
+              {projection.recent.some((row) => row.nativeStatus === "rejected" || row.nativeStatus === "needs-author")
+                ? "Recent failures"
+                : "Recent results"}
             </Text>
           </Box>
           {projection.recent.map((row, index) => (
@@ -2860,7 +2904,7 @@ function ProjectionRows({
       )}
       {projection.queue.length === 0 && projection.recent.length === 0 ? (
         <Box height={1}>
-          <Text color="$fg-muted">No runnable or recent rejected PRs.</Text>
+          <Text color="$fg-muted">No runnable or recent failed PRs.</Text>
         </Box>
       ) : null}
     </Box>
@@ -2990,8 +3034,15 @@ export function QueueWatchView({
   pr?: string
 }) {
   if (pr !== undefined) {
-    const selectedPr = results.flatMap((result) => result.prs).find((candidate) => candidate.id === pr)
-    if (selectedPr === undefined) return <Text color="$fg-muted">No PR '{pr}' recorded.</Text>
+    const selected = results
+      .flatMap((result) =>
+        result.prs.map((candidate) => ({
+          pr: candidate,
+          eligibility: result.eligibilities?.[candidate.id],
+        })),
+      )
+      .find(({ pr: candidate }) => candidate.id === pr)
+    if (selected === undefined) return <Text color="$fg-muted">No PR '{pr}' recorded.</Text>
     const runs = [
       ...new Map(
         results
@@ -2999,7 +3050,7 @@ export function QueueWatchView({
           .map((run) => [run.id, run] as const),
       ).values(),
     ]
-    return <PRDetailView pr={selectedPr} runs={runs} now={now} />
+    return <PRDetailView pr={selected.pr} eligibility={selected.eligibility} runs={runs} now={now} />
   }
 
   return (
@@ -4886,9 +4937,15 @@ export function QueueLogView({
 function queueShowNextAction(data: QueueShowData): string {
   if (data.outcome === "integrated") return "none — landing proof is recorded"
   if (data.status === "running" || data.status === "waiting") return "follow live output or wait for the current step"
+  if (data.status === "canceled" || data.outcome === "canceled" || data.failure?.code === "run-canceled") {
+    return "no resubmission — the PR remains submitted and re-queues automatically"
+  }
+  const errorCode = data.steps.find((step) => step.errorCode !== "-")?.errorCode
+  if (errorCode === "check-failed") {
+    return "fix the branch and push; the same PR resumes automatically"
+  }
   const actionable = data.failure ?? data.steps.findLast((step) => step.failure !== undefined)?.failure
   if (actionable !== undefined) return actionable.resolution.join("; then ")
-  const errorCode = data.steps.find((step) => step.errorCode !== "-")?.errorCode
   if (errorCode === "queue-environment-refused") {
     return "repair the queue environment, then rerun the PR"
   }
@@ -4899,7 +4956,14 @@ function queueShowNextAction(data: QueueShowData): string {
   if (["canceled", "cancelled", "queue-canceled", "queue-cancelled"].includes(errorCode ?? "")) {
     return "inspect the newer PR revision; resubmit only if delivery is still required"
   }
-  return "fix the branch, then run yrd pr submit again"
+  return "fix the branch and push; the same PR resumes automatically"
+}
+
+function queueShowFailureAction(
+  failure: HumanFailureProjection,
+  nextAction: string | undefined,
+): HumanFailureProjection {
+  return nextAction === undefined ? failure : { ...failure, resolution: [nextAction] }
 }
 
 function QueueShowMembersValue({ data, highlightPr }: { data: QueueShowData; highlightPr?: string }) {
@@ -5451,6 +5515,7 @@ function CompactQueueShowView({
   showLogArtifacts = true,
   showIntegration = true,
   stepIssue,
+  nextAction,
 }: {
   data: QueueShowData
   highlightPr?: string
@@ -5472,6 +5537,9 @@ function CompactQueueShowView({
   showIntegration?: boolean
   /** Selected PR issue shown beside the step's JOB identity. */
   stepIssue?: string
+  /** Caller-owned current-PR guidance, used when a run's generic failure
+   * resolution would hide a native needs-author fix-push action. */
+  nextAction?: string
 }) {
   const runFacts = section !== "steps"
   const stepFacts = section !== "run"
@@ -5520,6 +5588,7 @@ function CompactQueueShowView({
         <>
           {latestStep === undefined ? null : <QueueStepInternals row={latestStep} issue={stepIssue} />}
           {data.steps.map((row) => {
+            const failure = row.failure === undefined ? undefined : queueShowFailureAction(row.failure, nextAction)
             const error = presentFact(row.errorCode)
             const detail = presentFact(row.detail)
             const lost = presentFact(row.lost)
@@ -5545,8 +5614,8 @@ function CompactQueueShowView({
                 minWidth={0}
                 overflow="hidden"
               >
-                {row.failure !== undefined ? (
-                  <ActionableFailureView failure={row.failure} />
+                {failure !== undefined ? (
+                  <ActionableFailureView failure={failure} />
                 ) : error === undefined ? null : (
                   <Text wrap="wrap" color="$fg-error" bgConflict="ignore">
                     ERROR {errorCodeLabel(error)}
@@ -5595,7 +5664,9 @@ function CompactQueueShowView({
           })}
         </>
       ) : null}
-      {runFacts && queueShowNeedsNext(data) ? <Text wrap="wrap">NEXT {queueShowNextAction(data)}</Text> : null}
+      {runFacts && queueShowNeedsNext(data) ? (
+        <Text wrap="wrap">NEXT {nextAction ?? queueShowNextAction(data)}</Text>
+      ) : null}
     </Box>
   )
 }
@@ -5611,6 +5682,7 @@ export function QueueShowView({
   showLogArtifacts = true,
   showIntegration = true,
   stepIssue,
+  nextAction,
 }: {
   data: QueueShowData
   compact?: boolean
@@ -5630,6 +5702,7 @@ export function QueueShowView({
   showIntegration?: boolean
   /** Compact-only: selected PR issue rendered with the step JOB identity. */
   stepIssue?: string
+  nextAction?: string
 }) {
   if (compact) {
     return (
@@ -5641,6 +5714,7 @@ export function QueueShowView({
         showMembers={showMembers}
         showLogArtifacts={showLogArtifacts}
         showIntegration={showIntegration}
+        {...(nextAction === undefined ? {} : { nextAction })}
         {...(stepIssue === undefined ? {} : { stepIssue })}
         {...(historyRevision === undefined ? {} : { historyRevision })}
       />
@@ -5773,14 +5847,19 @@ export function QueueShowView({
           {data.steps.flatMap((step, index) =>
             step.failure === undefined
               ? []
-              : [<ActionableFailureView key={`${step.step}:${index}`} failure={step.failure} />],
+              : [
+                  <ActionableFailureView
+                    key={`${step.step}:${index}`}
+                    failure={queueShowFailureAction(step.failure, nextAction)}
+                  />,
+                ],
           )}
         </Box>
       ) : null}
       <Box marginTop={1}>
         <QueueProofView data={data} />
       </Box>
-      <Text wrap="wrap">NEXT {queueShowNextAction(data)}</Text>
+      <Text wrap="wrap">NEXT {nextAction ?? queueShowNextAction(data)}</Text>
     </Box>
   )
 }
@@ -5821,8 +5900,23 @@ function RunAdmissionClockView({ run }: { run: QueueShowData }) {
 export function PRRunsView({ data }: { data: PRRunsData }) {
   const clocks = prRevisionClocks(data.pr)
   if (clocks.length === 0) return <Text color="$fg-muted">No revision history recorded.</Text>
+  const projectedStatus = projectedPrStatus(data.pr, data.eligibility)
+  const needsAuthor = data.eligibility?.reason?.code === "needs-author" ? data.eligibility.reason : undefined
   return (
     <Box flexDirection="column">
+      <Text wrap="wrap">
+        <QueuePrId pr={data.pr.id} revision={data.pr.revision} /> STATUS <StatusValue value={projectedStatus} />
+      </Text>
+      {needsAuthor === undefined ? null : (
+        <>
+          <Text wrap="wrap">NEEDS AUTHOR {needsAuthor.message}</Text>
+          {needsAuthor.receipt === undefined ? null : (
+            <Text wrap="wrap">
+              ATTRIBUTED {needsAuthor.receipt.code}: {needsAuthor.receipt.message}
+            </Text>
+          )}
+        </>
+      )}
       {clocks.map((clock, revisionIndex) => {
         const checkRequests = revisionCheckRequests(data.pr, clock).map((request) => request.at)
         const runs = data.runs.filter(
@@ -5844,7 +5938,14 @@ export function PRRunsView({ data }: { data: PRRunsData }) {
               runs.map((run, runIndex) => (
                 <Box key={run.run} flexDirection="column" marginTop={runIndex === 0 ? 0 : 1}>
                   <RunAdmissionClockView run={run} />
-                  <QueueShowView data={run} />
+                  <QueueShowView
+                    data={run}
+                    {...(needsAuthor !== undefined &&
+                    clock.revision === data.pr.revision &&
+                    clock.headSha === data.pr.headSha
+                      ? { nextAction: "fix the branch and push; the same PR resumes automatically" }
+                      : {})}
+                  />
                 </Box>
               ))
             )}

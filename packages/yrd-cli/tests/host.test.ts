@@ -1771,16 +1771,19 @@ notify:
     expect(await Bun.file(join(repo, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(false)
   })
 
-  it("teaches exact inspect-and-resubmit guidance for a rejected direct-branch PR without appending", async () => {
+  it("teaches exact inspect-and-fix-push guidance for a rejected direct-branch PR without appending", async () => {
     const { repo } = await repository()
     await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "false"\nmerge: {}\n')
     await git(repo, "switch", "-q", "issue/feature")
     expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "--base", "main", "--json"], {
-        cwd: repo,
-        stdout: () => undefined,
-        stderr: () => undefined,
-      }),
+      await runYrdProcess(
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "--base", "main", "--wait", "--json"],
+        {
+          cwd: repo,
+          stdout: () => undefined,
+          stderr: () => undefined,
+        },
+      ),
     ).toBe(1)
 
     const before = await journalEnvelope(repo)
@@ -1795,7 +1798,7 @@ notify:
       }),
     ).toBe(1)
     const rejected = JSON.parse(refusal) as Readonly<{
-      guidance: Readonly<{ inspect: string; resubmit: string }>
+      guidance: Readonly<{ inspect: string; fixPush: string }>
     }>
     expect(rejected).toMatchObject({
       command: "pr.merge",
@@ -1804,7 +1807,7 @@ notify:
     })
     expect(rejected.guidance).toEqual({
       inspect: "yrd pr runs PR1",
-      resubmit: "fix the branch and run yrd pr submit again",
+      fixPush: "fix the branch and push; the same PR resumes automatically",
     })
     expect(await journalEnvelope(repo)).toEqual(before)
   })

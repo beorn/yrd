@@ -66,6 +66,10 @@ export type YrdCliIO = {
   columns?: number
   rows?: number
   cwd?: string
+  /** Probe whether a resident runner holds the drain lease in `cwd`. When it
+   * reports true, `pr recut --queue` dispatches admission enqueue-only for the
+   * resident to settle instead of becoming a second driver. */
+  residentLeaseHeld?(cwd: string): Promise<boolean>
   /** Process-host-owned step artifact root used by the live read-only output projection. */
   artifactRoot?: string
   runner?: string

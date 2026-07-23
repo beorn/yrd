@@ -97,7 +97,8 @@ That replaces ambiguous `wip-preserved-*` branches with inspectable state:
 | ahead branch              | pushed or submitted PR                |
 | branch needing repair     | `bay open --from <branch>`            |
 | external CI still running | waiting queue step with URL and token |
-| failed integration        | rejected PR with evidence             |
+| author-owned failure      | needs-author PR with typed receipt    |
+| unattributed rejection    | rejected PR with evidence             |
 | completed work            | integrated PR and closable bay        |
 
 Yrd does not invent commits or silently discard work. It prevents ambiguous WIP
@@ -234,16 +235,17 @@ Every public verb accepts `--json` and returns an invoked-command discriminator
 such as `pr.submit`, `pr.status`, or `queue.run`. Human output uses Silvery
 tables, semantic status color, and OSC 8 links for paths, logs, and artifacts.
 
-Delivery objects keep their domain-native `status` (or attempt `outcome`) and
-also expose one stable projection in human and JSON output. The additive JSON
-fields are `taskStatus` and `glyph`; changing a future native status vocabulary
-does not change this five-state contract:
+Delivery objects expose one canonical `status` (or attempt `outcome`) in human
+and JSON output. When a compatibility-era stored status cannot express that
+state, JSON also names it as `nativeStatus`; consumers act on canonical
+`status`. The additive cross-domain fields are `taskStatus` and `glyph`;
+changing the domain vocabulary does not change this five-state contract:
 
 | `taskStatus` | Glyph | PR                    | Run                 | Job attempt            | Step    |
 | ------------ | ----- | --------------------- | ------------------- | ---------------------- | ------- |
 | `todo`       | `[ ]` | pushed                | queued              | requested              | pending |
 | `wip`        | `[/]` | submitted             | running or waiting  | started                | running |
-| `blocked`    | `[!]` | rejected              | failed              | failed or lost         | failed  |
+| `blocked`    | `[!]` | needs-author/rejected | failed              | failed or lost         | failed  |
 | `done`       | `[x]` | integrated            | passed              | passed                 | passed  |
 | `dropped`    | `[-]` | withdrawn or canceled | retired or canceled | superseded or canceled | skipped |
 
@@ -351,12 +353,13 @@ Both submission surfaces accept `--correlation <namespace:id>`. The namespace
 and opaque id bind to the exact PR revision and remain on its terminal facts;
 rebinding a live PR to a different correlation is refused.
 
-A branch name is one delivery identity. Once its PR is integrated, withdrawn,
-or canceled, submitting that branch again fails with
-`terminal-branch-identity` before changing any PR metadata. Push the reviewed
-tip under a fresh identity such as `<old-branch>-delivery-<nonce>`, then submit
-that fresh branch. Rejected revisions remain live and are resubmitted on their
-existing PR.
+A branch name is a moving delivery selector, while a PR id is immutable
+evidence. Submitting an integrated PR by id is idempotent; submitting its branch
+at the landed head is an already-merged no-op, and a newer head on that same
+branch mints a fresh PR. A withdrawn or canceled branch reopens its existing PR
+at the next revision. `needs-author` and legacy rejected revisions remain live:
+fix the branch and push, and the same PR resumes automatically as its next
+revision.
 
 ### PR Eligibility and Checks
 
@@ -568,13 +571,14 @@ and ahead/behind distance from each installed base SHA.
 
 `--steps` narrows a run. Omitted means the configured default sequence. An
 explicit empty `--steps` runs no steps. Re-entry is PR-owner-authorized: inspect
-rejected work with `yrd pr runs <PR>`, fix its source branch, then run `yrd pr
-submit <branch>` again. That appends a fresh revision and records submit and
-check authority for its exact head; check admission consumes the check fact,
-and an integrating Queue run consumes the submit fact. Queue commands cannot
-mint authored authority. The resident freshness transition is the one
-mechanical carry-forward: its certified successor atomically retains the
-admitted revision's submit and check authority on the same PR.
+`needs-author` work with `yrd pr runs <PR>`, fix its source branch, and push.
+The receiver appends a fresh revision on the same PR and records submit and
+check authority for its exact head automatically—there is no second submit
+ceremony. Check admission consumes the check fact, and an integrating Queue run
+consumes the submit fact. Queue commands cannot mint authored authority. The
+resident freshness transition is the one mechanical carry-forward: its
+certified successor atomically retains the admitted revision's submit and check
+authority on the same PR.
 
 To stop a resident `queue run` (its follow-by-default form), send `SIGINT` (Ctrl-C) or `SIGTERM`.
 The first signal stops new admission, lets the active run finish, and exits with
@@ -660,16 +664,20 @@ metrics remain missing; Yrd does not guess cost.
 
 The issue surface is read-only and joins delivery facts to tracker references;
 issue creation and editing remain in the tracker. `yrd issue --json` and `yrd
-pr runs --json` include the same versioned `trackerBridge` projection. Each
-delivery carries the exact opaque `issueRef`, PR revision/head, native status,
-terminal Queue run, and one journal `asOf` cursor; integrated deliveries alone
-carry `landingSha`. Rejected deliveries carry their typed bounce run. Canceled
-and withdrawn are distinct terminal outcomes.
+pr runs --json` include the same compatibility-safe pair: the deprecated
+`trackerBridge` v1 envelope and the canonical `trackerBridgeV2` envelope. Each
+delivery carries the exact opaque `issueRef`, PR revision/head, projected
+status, Queue runs, and one journal `asOf` cursor; integrated deliveries alone
+carry `landingSha`. V2 projects an author-attributable red as `needs-author`
+with its `attributedReceipt` and typed bounce. V1 keeps its original status
+value set and explicitly degrades that state to `rejected` plus the same bounce;
+consumers should migrate to `trackerBridgeV2`. Canceled and withdrawn remain
+distinct terminal outcomes.
 
 The human `yrd issue view <issue>` surface projects those same typed facts: it
-prints exact PR revision/head, Queue runs, native status, landing or bounce, and
-the original/repair provenance of every recorded regression. Bare `yrd issue`
-keeps the compact multi-issue table.
+prints exact PR revision/head, Queue runs, canonical projected status, landing
+or bounce, and the original/repair provenance of every recorded regression.
+Bare `yrd issue` keeps the compact multi-issue table.
 
 `yrd migrate terminal-associations` is the explicit compatibility cutover for
 legacy rejected-PR events that predate the typed Queue run field. Its default
@@ -689,9 +697,10 @@ SHAs. Consumers may derive flow metrics from this join; Yrd does not add a
 telemetry store or interpret opaque provenance.
 
 The bridge contract is the journal plus JSON data, not a tracker plugin
-registry. Independent consumers checkpoint `trackerBridge.asOf.cursor` and
-write projections into their own tracker. References such as `@km/...`,
-`gh:1234`, and `JIRA-123` stay opaque to Yrd.
+registry. Independent consumers checkpoint `trackerBridgeV2.asOf.cursor` (or
+the identical v1 cursor during migration) and write projections into their own
+tracker. References such as `@km/...`, `gh:1234`, and `JIRA-123` stay opaque to
+Yrd.
 
 `contest eval` resumes
 missing competitor and evaluator work. It never
@@ -813,6 +822,7 @@ contest:
   evaluators: [check, sec-check]
 
 notify:
+  pr/needs-author: [submitter]
   pr/rejected: [submitter]
   pr/needs-review: ["@cto"]
   pr/integrated: [broadcast]
@@ -864,21 +874,24 @@ a Queue step. Its Tribe intake policy is explicit:
 
 | Signal            | Message type | Delivery | Pending ball       | Deadline   |
 | ----------------- | ------------ | -------- | ------------------ | ---------- |
+| `pr/needs-author` | notify       | pull     | none               | —          |
 | `pr/rejected`     | notify       | pull     | none               | —          |
 | `pr/needs-review` | request      | push     | exact recipient/id | 10 minutes |
 | `pr/integrated`   | notify       | pull     | none               | —          |
 | `run/failed`      | notify       | pull     | none               | —          |
 
 `pr/needs-review` is projected from a committed submission only when
-`requires: [review]`. Rejection and Run failure are outcome evidence, so even a
-route that outlives its seat cannot own a semantic response obligation.
+`requires: [review]`. `pr/needs-author` carries the exact PR revision, failed
+step, Run, and typed attribution receipt; if its canonical route is absent, Yrd
+falls back to the configured `pr/rejected` route for v1 configuration
+compatibility. Generic rejection and Run failure remain outcome evidence, so
+even a route that outlives its seat cannot own a semantic response obligation.
 `submitter` resolves to the actor recorded on the exact PR revision, while an
-explicit `@name` routes to that Tribe member. Rejection carries the PR,
-revision, failed step, Run, and evidence path; Run failure names every affected
-PR. `pr/integrated: [broadcast]` aggregates all PRs sharing one landing fact
-into one pull notification and wakes nobody. Terminal PR signals close the
-exact review requests recorded in the durable opened ledger, plus deterministic
-rejection ids retained for pre-policy legacy cleanup.
+explicit `@name` routes to that Tribe member. `pr/integrated: [broadcast]`
+aggregates all PRs sharing one landing fact into one pull notification and wakes
+nobody. Terminal PR signals close the exact review requests recorded in the
+durable opened ledger, plus deterministic rejection ids retained for pre-policy
+legacy cleanup.
 
 Signal delivery starts only after the journal append commits and never blocks
 the Run. A cursor under `.git/yrd/notifications/` records journal progress and
@@ -969,10 +982,12 @@ They do not require a second queue or a second queue.
 
 Each check pins its candidate to the then-current base. Several PRs may wait on
 remote work concurrently, but only one candidate can move a base branch first.
-If another candidate then reaches merge, Yrd rejects its stale proof instead of
-landing untested work. The PR owner inspects the rejected run, fixes the source
-branch if needed, and submits that branch again; the new revision gets fresh
-submit and check authority and is rebuilt and rechecked against the new base.
+If another candidate then reaches merge, Yrd refuses the stale proof instead of
+landing untested work and refreshes that same PR onto the authoritative base.
+The refreshed revision keeps the PR identity and gets fresh certified check
+authority automatically. If the refresh exposes an author-attributable
+conflict, the PR parks as `needs-author`; the owner inspects the receipt, fixes
+the branch, and pushes.
 
 ### Batching
 

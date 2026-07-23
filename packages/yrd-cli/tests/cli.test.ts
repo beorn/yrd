@@ -831,7 +831,7 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("prime", "--json"), prime.io), prime.stderr()).toBe(0)
     const briefing = JSON.parse(prime.stdout()) as Readonly<{ loop: readonly string[] }>
     expect(briefing).toMatchObject({ command: "prime", live: { pr: "PR1", base: "main" } })
-    expect(briefing.loop).toContain("fix the branch and run yrd pr submit again")
+    expect(briefing.loop).toContain("fix the branch and push; the same PR resumes automatically")
     expect(briefing.loop.join("\n")).not.toMatch(/\bretry\b/u)
 
     const checkout = outputIO()
@@ -906,6 +906,84 @@ describe("runYrd", () => {
       drained.stderr(),
     ).toBe(0)
     expect(checkRuns).toEqual(["check", "check"])
+  })
+
+  it("projects needs-author from the synchronous submit --wait result in JSON and human output", async () => {
+    const failure = "submitted composition cannot be built"
+    const app = await createApp({ checkFailure: { code: "composition-invalid", message: failure } })
+
+    const json = outputIO({ resolveRevision: async () => HEAD_SHA })
+    expect(await runYrd(app, yrd("pr", "submit", "topic/wait-json", "--wait", "--json"), json.io), json.stderr()).toBe(
+      1,
+    )
+    const submitProjection = JSON.parse(json.stdout())
+    expect(submitProjection).toMatchObject({
+      command: "pr.submit",
+      prs: [
+        {
+          id: "PR1",
+          status: "needs-author",
+          eligibility: {
+            reason: {
+              code: "needs-author",
+              receipt: { code: "composition-invalid", message: failure },
+            },
+          },
+        },
+      ],
+    })
+    expect(submitProjection.prs[0]).not.toHaveProperty("nativeStatus")
+
+    const human = outputIO({ resolveRevision: async () => MERGED_SHA })
+    expect(await runYrd(app, yrd("pr", "submit", "topic/wait-human", "--wait"), human.io), human.stderr()).toBe(1)
+    expect(human.stdout()).toContain("needs-author")
+    expect(human.stdout()).not.toMatch(/\brejected\b/u)
+  })
+
+  it("projects needs-author from ready and queued recut results", async () => {
+    const failure = "submitted composition cannot be built"
+    const app = await createApp({ checkFailure: { code: "composition-invalid", message: failure } })
+    await app.bays.submit({
+      branch: "topic/ready-author-fix",
+      headSha: HEAD_SHA,
+      base: "main",
+      baseSha: BASE_SHA,
+      draft: true,
+    })
+
+    const ready = outputIO()
+    expect(await runYrd(app, yrd("pr", "ready", "PR1", "--json"), ready.io), ready.stderr()).toBe(1)
+    expect(JSON.parse(ready.stdout())).toMatchObject({
+      command: "pr.ready",
+      pr: { id: "PR1", status: "needs-author" },
+      eligibility: { reason: { code: "needs-author", receipt: { code: "composition-invalid" } } },
+    })
+
+    const fixedHead = "4".repeat(40)
+    const fixedBase = "5".repeat(40)
+    const services = {
+      recut: {
+        recut: () =>
+          Promise.resolve({
+            headSha: fixedHead,
+            baseSha: fixedBase,
+            treeSha: "6".repeat(40),
+            patchId: "7".repeat(40),
+            unchanged: false,
+          }),
+      },
+    } as unknown as YrdCliServices
+    const recut = outputIO()
+    expect(
+      await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--force", "--json"), recut.io, services),
+      recut.stderr(),
+    ).toBe(1)
+    expect(JSON.parse(recut.stdout())).toMatchObject({
+      pr: "PR1",
+      revision: 2,
+      status: "needs-author",
+      eligibility: { reason: { code: "needs-author", receipt: { code: "composition-invalid" } } },
+    })
   })
 
   it.each([
@@ -1178,6 +1256,9 @@ describe("runYrd", () => {
     expect(JSON.parse(refusal.stderr())).toMatchObject({ command: "pr.merge", pr: "PR6", position: 6 })
   })
 
+  // Deliberately crosses both 8-bit wrap boundaries (256 and 512) through the
+  // real journal/projection path; this is a scale correctness test, not a 5s
+  // latency contract, and needs headroom on loaded CI hosts.
   it("windows only the unfiltered human PR list and never wraps revision counts", async () => {
     const app = await createApp()
     for (const index of Array.from({ length: 520 }, (_, offset) => offset + 1)) {
@@ -1210,7 +1291,7 @@ describe("runYrd", () => {
     const filtered = outputIO({ columns: 120 })
     expect(await runYrd(app, yrd("pr", "list", "--base", "main"), filtered.io), filtered.stderr()).toBe(0)
     expect(stripAnsi(filtered.stdout()).split("\n").filter(Boolean)).toHaveLength(521)
-  })
+  }, 15_000)
 
   it("executes bare projections with their canonical JSON discriminators", async () => {
     const app = await createApp()
@@ -1342,6 +1423,61 @@ describe("runYrd", () => {
     expect(Queues.ids(app.state().queues)).toEqual(["R1"])
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
     expect(checkedRevisions).toEqual(["PR1@2"])
+  })
+
+  it("enqueues a recut admission without driving when a resident holds the drain lease", async () => {
+    const checkedRevisions: string[] = []
+    const app = await createApp({ waitingCheck: true, checkedRevisions })
+    const services = {
+      recut: {
+        recut() {
+          return Promise.resolve({
+            headSha: "4".repeat(40),
+            baseSha: "b".repeat(40),
+            treeSha: "c".repeat(40),
+            patchId: "d".repeat(40),
+            unchanged: false,
+          })
+        },
+      },
+    } as unknown as YrdCliServices
+    const created = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+    expect(
+      await runYrd(app, yrd("pr", "create", "topic/resident-carrier", "--json"), created.io),
+      created.stderr(),
+    ).toBe(0)
+
+    // R1664/R1668: with a live resident runner holding the drain lease, the
+    // recut's embedded driver raced the resident — two drivers on one queue,
+    // and the raced runs were lost. Recut must enqueue and leave settlement to
+    // the resident.
+    const recut = outputIO({ residentLeaseHeld: () => Promise.resolve(true) })
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), recut.io, services)).toBe(0)
+    expect(checkedRevisions).toEqual([])
+    expect(app.queue.get("R1")).toMatchObject({ prs: [{ id: "PR1", revision: 2 }] })
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "requested" })
+    expect(app.bays.checksRequested("PR1")).toBe(true)
+  })
+
+  it("enqueues a ready admission without driving when a resident holds the drain lease", async () => {
+    const checkedRevisions: string[] = []
+    const app = await createApp({ waitingCheck: true, checkedRevisions })
+    await app.bays.submit({
+      branch: "topic/resident-ready",
+      headSha: HEAD_SHA,
+      base: "main",
+      draft: true,
+    })
+
+    // R1664/R1668: ready is another admit-shaped verb. It must share recut's
+    // resident-aware policy so it cannot start the same raced second driver.
+    const ready = outputIO({ residentLeaseHeld: () => Promise.resolve(true) })
+    expect(await runYrd(app, yrd("pr", "ready", "PR1", "--json"), ready.io), ready.stderr()).toBe(0)
+
+    expect(checkedRevisions).toEqual([])
+    expect(app.queue.get("R1")).toMatchObject({ prs: [{ id: "PR1", revision: 1 }] })
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "requested" })
+    expect(app.bays.checksRequested("PR1")).toBe(true)
   })
 
   it("forwards a same-issue integrated source composition when recutting an authored carrier", async () => {
@@ -2641,7 +2777,7 @@ describe("runYrd", () => {
     })
   })
 
-  it("teaches inspect-and-resubmit when pr merge is invoked for rejected work", async () => {
+  it("teaches inspect-and-fix-push when pr merge is invoked for rejected work", async () => {
     const app = await createApp({ failingCheck: true })
     await openAndSubmit(app)
     await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
@@ -2649,7 +2785,7 @@ describe("runYrd", () => {
     const output = outputIO()
     expect(await runYrd(app, yrd("pr", "merge", "PR1", "--json"), output.io)).toBe(1)
     const refusal = JSON.parse(output.stderr()) as Readonly<{
-      guidance: Readonly<{ inspect: string; resubmit: string }>
+      guidance: Readonly<{ inspect: string; fixPush: string }>
     }>
     expect(refusal).toMatchObject({
       command: "pr.merge",
@@ -2658,9 +2794,98 @@ describe("runYrd", () => {
     })
     expect(refusal.guidance).toEqual({
       inspect: "yrd pr runs PR1",
-      resubmit: "fix the branch and run yrd pr submit again",
+      fixPush: "fix the branch and push; the same PR resumes automatically",
     })
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
+  })
+
+  it("projects an author-attributable rejection as needs-author in pr merge guidance", async () => {
+    const app = await createApp({
+      checkFailure: { code: "composition-invalid", message: "submitted composition cannot be built" },
+    })
+    await openAndSubmit(app)
+    await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+
+    const output = outputIO()
+    expect(await runYrd(app, yrd("pr", "merge", "PR1", "--json"), output.io)).toBe(1)
+    expect(JSON.parse(output.stderr())).toMatchObject({
+      command: "pr.merge",
+      status: "needs-author",
+      next: "yrd pr runs PR1",
+      guidance: {
+        inspect: "yrd pr runs PR1",
+        fixPush: "fix the branch and push; the same PR resumes automatically",
+      },
+    })
+
+    const status = outputIO({ cwd: "/repo/.bays/B1" })
+    expect(await runYrd(app, yrd("pr", "status", "--json"), status.io), status.stderr()).toBe(0)
+    const statusProjection = JSON.parse(status.stdout())
+    expect(statusProjection).toMatchObject({
+      command: "pr.status",
+      pr: { id: "PR1", status: "needs-author" },
+      eligibility: {
+        reason: {
+          code: "needs-author",
+          receipt: { code: "composition-invalid" },
+        },
+      },
+    })
+    expect(statusProjection.pr).not.toHaveProperty("nativeStatus")
+
+    const humanStatus = outputIO({ cwd: "/repo/.bays/B1" })
+    expect(await runYrd(app, yrd("pr", "status"), humanStatus.io), humanStatus.stderr()).toBe(0)
+    expect(humanStatus.stdout()).toContain("needs-author")
+    expect(humanStatus.stdout()).toContain("submitted composition cannot be built")
+    expect(humanStatus.stdout()).toContain("NEXT fix the branch and push; the same PR resumes automatically")
+    expect(humanStatus.stdout()).not.toContain("retry the same Yrd command")
+
+    const list = outputIO()
+    expect(await runYrd(app, yrd("pr", "list", "--state", "needs-author", "--json"), list.io), list.stderr()).toBe(0)
+    expect(JSON.parse(list.stdout())).toMatchObject({
+      command: "pr.list",
+      prs: [
+        {
+          id: "PR1",
+          status: "needs-author",
+          eligibility: { reason: { code: "needs-author" } },
+        },
+      ],
+    })
+
+    const legacyRejectedFilter = outputIO()
+    expect(
+      await runYrd(app, yrd("pr", "list", "--state", "rejected", "--json"), legacyRejectedFilter.io),
+      legacyRejectedFilter.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(legacyRejectedFilter.stdout())).toMatchObject({
+      command: "pr.list",
+      prs: [{ id: "PR1", status: "needs-author" }],
+    })
+
+    const controller = new AbortController()
+    controller.abort()
+    const watch = outputIO({ scope: { signal: controller.signal, sleep: async () => {} } })
+    expect(await runYrd(app, yrd("watch", "--pr", "PR1", "--json"), watch.io), watch.stderr()).toBe(0)
+    expect(JSON.parse(watch.stdout())).toMatchObject({
+      command: "queue.list",
+      results: [
+        {
+          prs: [
+            {
+              id: "PR1",
+              status: "needs-author",
+              eligibility: {
+                reason: {
+                  code: "needs-author",
+                  receipt: { code: "composition-invalid", message: "submitted composition cannot be built" },
+                },
+              },
+            },
+          ],
+        },
+      ],
+    })
   })
 
   it("runs submission checks while leaving integration to queue run", async () => {
@@ -3465,8 +3690,6 @@ describe("runYrd", () => {
       base: rejected.base,
       ...(rejected.baseSha === undefined ? {} : { baseSha: rejected.baseSha }),
     })
-    await app.bays.submit({ pr: "PR1" })
-    await app.bays.requestChecks({ pr: "PR1" })
     const reauthorized = (await app.queue.admit({ prs: ["PR1"] }))[0]
     if (reauthorized === undefined) throw new Error("expected a fresh-revision check run")
     await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
@@ -3824,9 +4047,7 @@ describe("runYrd", () => {
       base: rejected.base,
       ...(rejected.baseSha === undefined ? {} : { baseSha: rejected.baseSha }),
     })
-    await app.bays.submit({ pr: "PR1" })
     await app.dispatch(app.commands.queue.advance, { run: "R1" })
-    await app.bays.requestChecks({ pr: "PR1" })
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", revision: 2, headSha: MERGED_SHA })
     expect((await app.queue.admit({ prs: ["PR1"] }))[0]?.id).toBe("R2")
 
@@ -6302,7 +6523,7 @@ describe("runYrd", () => {
 
     const expected = [
       "QUEUE main@333333333333 OPEN 0 ACTIVE 0 INTEGRATED 0 REJECTED 0 DRAIN -",
-      "No runnable or recent rejected PRs.",
+      "No runnable or recent failed PRs.",
     ].join("\n")
     for (const columns of [80, 120]) {
       const rendered = await renderStatus(columns)
@@ -8930,12 +9151,23 @@ describe("correlation projections", () => {
         prs: readonly Readonly<Record<string, unknown>>[]
       }>
 
-      expect.soft(pr.status).toBe(terminal)
+      expect.soft(pr.status).toBe(terminal === "canceled" ? "submitted" : terminal)
+      if (terminal === "canceled") expect.soft(run.status).toBe("canceled")
       expect.soft(persisted.prs).toEqual([expect.objectContaining({ correlation: PROJECTION_CORRELATION })])
       expect.soft(queueShowData(run).prs).toEqual([expect.objectContaining({ correlation: PROJECTION_CORRELATION })])
       expect
         .soft(await projectedLogRows(app, pr.id))
         .toEqual([expect.objectContaining({ pr: pr.id, correlation: PROJECTION_CORRELATION })])
+      if (terminal === "canceled") {
+        const human = await renderString(createElement(QueueShowView, { data: queueShowData(run) }), {
+          width: 120,
+          height: 40,
+          plain: true,
+        })
+        expect.soft(human).toContain("NEXT")
+        expect.soft(human).toContain("the PR remains submitted and re-queues automatically")
+        expect.soft(human).not.toContain("retry the same Yrd command")
+      }
     }
 
     const withdrawn = await createApp()
@@ -9068,6 +9300,19 @@ function trackerBridge(output: string): Readonly<{
   return bridge as ReturnType<typeof trackerBridge>
 }
 
+function trackerBridgeV2(output: string): Readonly<{
+  version: number
+  asOf: Readonly<{ cursor: number; at?: string }>
+  deliveries: readonly Readonly<Record<string, unknown>>[]
+}> {
+  const parsed = JSON.parse(output) as Readonly<Record<string, unknown>>
+  const bridge = parsed.trackerBridgeV2
+  if (typeof bridge !== "object" || bridge === null || !("deliveries" in bridge)) {
+    throw new Error("expected a trackerBridgeV2 JSON envelope")
+  }
+  return bridge as ReturnType<typeof trackerBridgeV2>
+}
+
 function legacyRejectedJournal(runIds: readonly string[] = ["R1"], terminalAt = "2026-07-09T12:00:30.000Z") {
   const nextId = ids(9_000)
   const command = { id: nextId(), op: "fixture.legacy-rejected-run" }
@@ -9187,8 +9432,9 @@ function legacyRejectedJournal(runIds: readonly string[] = ["R1"], terminalAt = 
 }
 
 describe("typed issue landing bridge", () => {
-  it("projects every native PR state in JSON and human views from one exact journal cursor", async () => {
+  it("projects authored PR states and keeps run cancellation non-terminal in every view", async () => {
     for (const status of ["pushed", "submitted", "rejected", "integrated", "withdrawn", "canceled"] as const) {
+      const projectedStatus = status === "canceled" ? "submitted" : status
       const issueRef = `@km/all/21091-${status}`
       const app = await createApp({ failingCheck: status === "rejected" })
       try {
@@ -9231,7 +9477,7 @@ describe("typed issue landing bridge", () => {
               pr: "PR1",
               revision: 1,
               headSha: HEAD_SHA,
-              status,
+              status: projectedStatus,
               at: "2026-07-09T12:00:00.000Z",
               runs: status === "rejected" || status === "integrated" || status === "canceled" ? ["R1"] : [],
             },
@@ -9248,7 +9494,7 @@ describe("typed issue landing bridge", () => {
         expect(await runYrd(app, yrd("issue", "view", issueRef), human.io), human.stderr()).toBe(0)
         expect(human.stdout()).toContain(issueRef)
         expect(human.stdout()).toContain("DELIVERIES")
-        expect(human.stdout()).toContain(`PR1 rev1 ${status}`)
+        expect(human.stdout()).toContain(`PR1 rev1 ${projectedStatus}`)
         expect(human.stdout()).toContain(`HEAD ${HEAD_SHA}`)
         if (status === "integrated") expect(human.stdout()).toContain(MERGED_SHA)
         if (status === "rejected") expect(human.stdout()).toContain("BOUNCE R1 check failed")
@@ -9256,6 +9502,118 @@ describe("typed issue landing bridge", () => {
         await app.close()
       }
     }
+  })
+
+  it("adds needs-author with its attributed receipt in trackerBridge v2 and degrades it explicitly in v1", async () => {
+    const issueRef = "@yrd/core/21634-submit-and-stay"
+    const failure = "submitted composition cannot be built"
+    await using app = await createApp({
+      checkFailure: { code: "composition-invalid", message: failure },
+    })
+    await app.bays.submit({
+      branch: "topic/needs-author-bridge",
+      headSha: HEAD_SHA,
+      base: "main",
+      issue: issueRef,
+    })
+    await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
+
+    const output = outputIO()
+    expect(await runYrd(app, yrd("issue", "view", issueRef, "--json"), output.io), output.stderr()).toBe(0)
+    const v1 = trackerBridge(output.stdout())
+    const v2 = trackerBridgeV2(output.stdout())
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "issue.view",
+      issues: [{ issue: issueRef, outcome: "needs-author" }],
+    })
+
+    expect(v2).toMatchObject({
+      version: 2,
+      asOf: v1.asOf,
+      deliveries: [
+        {
+          issueRef,
+          pr: "PR1",
+          revision: 1,
+          headSha: HEAD_SHA,
+          status: "needs-author",
+          runs: ["R1"],
+          bounce: { run: "R1", detail: failure },
+          attributedReceipt: { code: "composition-invalid", message: failure },
+        },
+      ],
+    })
+    expect(v1).toMatchObject({
+      version: 1,
+      asOf: v2.asOf,
+      deliveries: [
+        {
+          issueRef,
+          pr: "PR1",
+          revision: 1,
+          headSha: HEAD_SHA,
+          status: "rejected",
+          runs: ["R1"],
+          bounce: { run: "R1", detail: failure },
+        },
+      ],
+    })
+    expect(v1.deliveries[0]).not.toHaveProperty("attributedReceipt")
+
+    let snapshotEligibilityReads = 0
+    const snapshotQueue = {
+      ...app.queue,
+      eligibility(selector: string, snapshot?: unknown) {
+        if (snapshot === undefined) throw new Error("live eligibility read during journal snapshot projection")
+        snapshotEligibilityReads += 1
+        const read = app.queue.eligibility as (selected: string, state?: unknown) => PREligibility
+        return read(selector, snapshot)
+      },
+    }
+    const snapshotApp = { ...app, queue: snapshotQueue } as typeof app
+    const concurrent = outputIO()
+    expect(
+      await runYrd(snapshotApp, yrd("issue", "view", issueRef, "--json"), concurrent.io),
+      concurrent.stderr(),
+    ).toBe(0)
+    expect(trackerBridgeV2(concurrent.stdout())).toEqual(v2)
+    expect(snapshotEligibilityReads).toBeGreaterThan(0)
+
+    const runs = outputIO()
+    expect(await runYrd(app, yrd("pr", "runs", "PR1", "--json"), runs.io), runs.stderr()).toBe(0)
+    expect(trackerBridgeV2(runs.stdout())).toEqual(v2)
+    const runsProjection = JSON.parse(runs.stdout())
+    expect(runsProjection).toMatchObject({
+      command: "pr.runs",
+      pr: { id: "PR1", status: "needs-author" },
+      eligibility: {
+        reason: {
+          code: "needs-author",
+          receipt: { code: "composition-invalid", message: failure },
+        },
+      },
+    })
+    expect(runsProjection.pr).not.toHaveProperty("nativeStatus")
+
+    const human = outputIO()
+    expect(await runYrd(app, yrd("issue", "view", issueRef), human.io), human.stderr()).toBe(0)
+    expect(human.stdout()).toContain("PR1 rev1 needs-author")
+    expect(human.stdout()).toContain("OUTCOME needs-author")
+    expect(human.stdout()).toContain("ATTRIBUTED composition-invalid")
+    expect(human.stdout()).toContain(failure)
+
+    const humanRuns = outputIO()
+    expect(await runYrd(app, yrd("pr", "runs", "PR1"), humanRuns.io), humanRuns.stderr()).toBe(0)
+    expect(humanRuns.stdout()).toContain("STATUS needs-author")
+    expect(humanRuns.stdout()).toContain("ATTRIBUTED composition-invalid")
+    expect(humanRuns.stdout()).toContain("NEXT fix the branch and push; the same PR resumes automatically")
+
+    const dashboard = outputIO({
+      columns: 120,
+      resolveQueueTarget: async () => ({ base: "main", sha: BASE_SHA }),
+    })
+    expect(await runYrd(app, yrd(), dashboard.io), dashboard.stderr()).toBe(0)
+    expect(dashboard.stdout()).toContain("REJECTED 0 NEEDS-AUTHOR 1")
   })
 
   it("carries a literal --issue through pr submit --follow and the same shipping-config failure in pr checks", async () => {
