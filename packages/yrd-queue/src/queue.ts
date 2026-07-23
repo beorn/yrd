@@ -1657,7 +1657,20 @@ function createQueue<Shape extends PRShape>(
         )
       }
       const quiesced: { run: RunId; jobs: string[] }[] = []
-      for (const target of targets) {
+      for (const planned of targets) {
+        // Every settlement append can compact the live projection. Re-resolve
+        // the planned root from refreshed authority instead of dispatching a
+        // stale target that replay or compaction has already retired.
+        await actions.refresh()
+        const target = legacyRootTarget(runtime(), planned.run)
+        if (target === undefined) continue
+        if (target.leased(now)) {
+          raiseFailure(
+            "refusal",
+            "legacy-root-leased",
+            `yrd: Queue projection migration is blocked by live-leased legacy roots; a previous writer still holds ${target.run} — unleased legacy roots would have been auto-quiesced`,
+          )
+        }
         // Settle the run terminal first (record.failure stops re-advance), then
         // cancel each still-live job so the run AND its jobs all reach terminal.
         await actions.quiesceLegacyRun({ run: target.run, reason: "legacy-quiesced" })
@@ -2525,7 +2538,15 @@ function compactQueueProjection(
     if (needsSettlement(runtime, materializeRun(record, jobs))) continue
     const order = jobs.retention.queueTerminalOrder[record.id]
     if (order === undefined) {
-      throw new Error(`yrd: quiesced legacy Queue root '${record.id}' has no terminal journal order`)
+      // A pre-settlement root can carry its own durable failure/cancellation
+      // without a terminal Job receipt (or after that receipt aged out). Rank
+      // that explicit Queue authority before every receipt-ordered root so it
+      // compacts first; never invent an order for an unexplained success.
+      if (record.failure === undefined && record.canceledAt === undefined) {
+        throw new Error(`yrd: quiesced legacy Queue root '${record.id}' has no terminal journal order`)
+      }
+      terminalOrder[record.id] = 0
+      continue
     }
     terminalOrder[record.id] = order
   }
@@ -2782,17 +2803,25 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     if (Queues.get(state.queues, started.id) !== undefined) throw new Error(`yrd: duplicate queue run '${started.id}'`)
     const candidateId = started.candidateId ?? Queues.nextCandidateId(state.queues)
     const queueId = baseIdentity(started.queueId ?? started.base)
+    // Pre-Candidate batch Runs carried each PR's last check base independently,
+    // so one immutable Run could contain several base SHAs. Target-model replay
+    // gives that synthetic Candidate the first ordered receipt as its stable
+    // compatibility anchor and pins the projected snapshots to the same SHA.
+    // Fresh Runs always carry candidateId and retain strict common-base checks.
+    const legacyBaseSha =
+      started.candidateId === undefined ? requiredCandidateBaseSha(started.prs.slice(0, 1)) : undefined
+    const candidatePrs = legacyBaseSha === undefined ? started.prs : pinCandidateBaseSha(started.prs, legacyBaseSha)
     const legacyCandidate =
-      started.candidateId === undefined
-        ? CandidateSchema.parse({
+      legacyBaseSha === undefined
+        ? undefined
+        : CandidateSchema.parse({
             id: candidateId,
             queueId,
-            baseSha: requiredCandidateBaseSha(started.prs),
-            revs: started.prs.map((pr) => ({ pr: pr.id, n: pr.revision, head: pr.headSha })),
+            baseSha: legacyBaseSha,
+            revs: candidatePrs.map((pr) => ({ pr: pr.id, n: pr.revision, head: pr.headSha })),
             mergeability: "unknown",
             createdAt: applied.ts,
           })
-        : undefined
     if (legacyCandidate === undefined && state.queues.candidates[candidateId] === undefined) {
       throw new Error(`yrd: queue run '${started.id}' names missing Candidate '${candidateId}'`)
     }
@@ -2801,7 +2830,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
       queueId,
       candidateId,
       base: baseIdentity(started.base),
-      prs: started.prs.map((pr) => ({ ...pr, base: baseIdentity(pr.base) })),
+      prs: candidatePrs.map((pr) => ({ ...pr, base: baseIdentity(pr.base) })),
       startedAt: applied.ts,
     })
     const record: QueueRecord = { ...replayed, queueId, candidateId }
@@ -3129,20 +3158,33 @@ type LegacyRootTarget = Readonly<{
 
 function legacyRootTargets(state: DeepReadonly<RuntimeState>): readonly LegacyRootTarget[] {
   return projectionLookupValues(state.queues.records)
-    .filter((record) => record.parent === undefined && record.settlement === undefined)
-    .map((record) => materializeRun(record, state.jobs))
-    .filter((run) => !legacyRunHasTerminalRevisions(state, run) && needsSettlement(state, run))
-    .map((run): LegacyRootTarget => {
-      const jobs = run.steps
-        .map((step) => step.job)
-        .filter((job): job is DeepReadonly<Job> => job !== undefined && !Job.terminal(job))
-      return {
-        run: run.id,
-        jobs,
-        leased: (now) => jobs.some((job) => job.status === "in_progress" && Date.parse(job.leaseExpiresAt) > now),
-      }
+    .flatMap((record) => {
+      const target = legacyRootTargetForRecord(state, record)
+      return target === undefined ? [] : [target]
     })
     .toSorted((left, right) => left.run.localeCompare(right.run, undefined, { numeric: true }))
+}
+
+function legacyRootTarget(state: DeepReadonly<RuntimeState>, run: RunId): LegacyRootTarget | undefined {
+  const record = Queues.get(state.queues, run)
+  return record === undefined ? undefined : legacyRootTargetForRecord(state, record)
+}
+
+function legacyRootTargetForRecord(
+  state: DeepReadonly<RuntimeState>,
+  record: DeepReadonly<QueueRecord>,
+): LegacyRootTarget | undefined {
+  if (record.parent !== undefined || record.settlement !== undefined) return undefined
+  const run = materializeRun(record, state.jobs)
+  if (legacyRunHasTerminalRevisions(state, run) || !needsSettlement(state, run)) return undefined
+  const jobs = run.steps
+    .map((step) => step.job)
+    .filter((job): job is DeepReadonly<Job> => job !== undefined && !Job.terminal(job))
+  return {
+    run: run.id,
+    jobs,
+    leased: (now) => jobs.some((job) => job.status === "in_progress" && Date.parse(job.leaseExpiresAt) > now),
+  }
 }
 
 /** A v1 failed Run settled by writing PR revision terminals instead of the

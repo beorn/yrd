@@ -885,6 +885,60 @@ describe("Queue", () => {
     })
   })
 
+  it("replays legacy batch Runs whose PR receipts recorded different base SHAs", async () => {
+    const nextId = ids(900)
+    const command = { id: nextId(), op: "queue.run", args: { prs: ["PR1", "PR2"] } }
+    const journal = createMemoryJournal([
+      {
+        cause: {
+          id: nextId(),
+          commandId: command.id,
+          op: command.op,
+          commandHash: Command.hash(command),
+        },
+        command,
+        events: [
+          {
+            id: nextId(),
+            name: "queue/run/started",
+            ts: "2026-01-01T00:00:00.000Z",
+            data: {
+              run: {
+                id: "R1",
+                prs: [
+                  { id: "PR1", branch: "topic/one", base: "main", revision: 1, headSha: HEAD, baseSha: BASE },
+                  {
+                    id: "PR2",
+                    branch: "topic/two",
+                    base: "main",
+                    revision: 1,
+                    headSha: MERGED,
+                    baseSha: UPDATED,
+                  },
+                ],
+                base: "main",
+                steps: [{ name: "check", title: "Check", revision: "check-v1", kind: "check" }],
+              },
+            },
+          },
+        ],
+      },
+    ])
+
+    await using app = await createQueueApp({}, journal)
+
+    expect(app.state().queues.candidates.C1).toMatchObject({
+      id: "C1",
+      baseSha: BASE,
+      mergeability: "unknown",
+      revs: [
+        { pr: "PR1", n: 1, head: HEAD },
+        { pr: "PR2", n: 1, head: MERGED },
+      ],
+    })
+    expect(Queues.get(app.state().queues, "R1")?.prs.map((pr) => pr.baseSha)).toEqual([BASE, BASE])
+  })
+
   it("retains every live Queue aggregate and only the latest 512 terminal aggregates", () => {
     let queues = Queues.empty({ batchSize: 1 })
     const terminalOrder: Record<string, number> = {}
@@ -1095,6 +1149,32 @@ describe("Queue", () => {
     })
   }, 15_000)
 
+  it("gives a terminal legacy Queue fact without a Job order the oldest replay order", async () => {
+    const fixture = legacyFailedBeforeStartHistoryFrames(1)[0]
+    if (fixture === undefined) throw new Error("expected legacy Queue fixture")
+    const terminalWithoutJob = parseJournalFrame({
+      ...fixture,
+      events: fixture.events.filter(({ name }) => name !== "job/requested"),
+    })
+
+    await using app = await createQueueApp(
+      { defaultSteps: ["check"] },
+      indexedJournal([terminalWithoutJob]),
+      undefined,
+      undefined,
+      createLogger("test", [{ level: "error" }, { write() {} }]),
+    )
+
+    expect(app.queue.get("R1")).toMatchObject({
+      id: "R1",
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "stale-pr" },
+    })
+    expect(app.state().queues.retention.terminalOrder.R1).toBe(0)
+    expect(app.state().jobs.retention.queueTerminalOrder.R1).toBeUndefined()
+  })
+
   it("quiesces a legacy root after its terminal Jobs aged out", async () => {
     await using app = await createQueueApp(
       { defaultSteps: ["check"] },
@@ -1121,6 +1201,63 @@ describe("Queue", () => {
       error: { code: "legacy-quiesced" },
     })
     expect(app.state().jobs.retention.queueTerminalOrder.R1).toBeDefined()
+  }, 15_000)
+
+  it("skips a planned legacy root that compaction evicts while quiescence is in progress", async () => {
+    const history = queueHistoryFrames(514)
+    const first = history[0]
+    const second = history[1]
+    const concurrentTerminal = history[513]
+    if (first === undefined || second === undefined || concurrentTerminal === undefined) {
+      throw new Error("expected legacy Queue compaction fixtures")
+    }
+    const legacyTarget = (frame: JournalFrame, retainTerminalOrder: boolean): JournalFrame => {
+      const legacy = structuredClone(frame)
+      for (const applied of legacy.events) {
+        if (applied.name !== "queue/run/started") continue
+        const data = applied.data as { run?: { settlement?: unknown } }
+        if (data.run !== undefined) delete data.run.settlement
+      }
+      return parseJournalFrame({
+        ...legacy,
+        events: legacy.events.filter((applied) => {
+          const data = applied.data as { type?: unknown }
+          if (applied.name === "job/transitioned" && data.type === "finish") return false
+          return retainTerminalOrder || applied.name !== "queue/run/settled"
+        }),
+      })
+    }
+    const inner = indexedJournal([legacyTarget(first, false), legacyTarget(second, true), ...history.slice(2, 513)])
+    let injected = false
+    const journal: Journal<unknown> = {
+      ...inner,
+      async append(value, expectedCursor) {
+        const appended = await inner.append(value, expectedCursor)
+        const frame = parseJournalFrame(value)
+        if (appended.appended && !injected && frame.events.some(({ name }) => name === "queue/run/failed")) {
+          injected = true
+          const concurrent = await inner.append(concurrentTerminal, appended.cursor)
+          if (!concurrent.appended) throw new Error("expected concurrent terminal Queue fixture to append")
+        }
+        return appended
+      },
+    }
+
+    await using app = await createQueueApp(
+      { defaultSteps: ["check"] },
+      journal,
+      undefined,
+      ids(3_000_000),
+      createLogger("test", [{ level: "error" }, { write() {} }]),
+    )
+
+    expect(app.queue.get("R1")).toMatchObject({ status: "in_progress" })
+    expect(app.queue.get("R2")).toMatchObject({ status: "in_progress" })
+    await expect(
+      app.queue.quiesceLegacyRoots({ now: "2026-01-01T01:00:00.000Z", by: "yrd/migration" }),
+    ).resolves.toMatchObject({ quiesced: [{ run: "R1" }] })
+    expect(injected).toBe(true)
+    expect(Queues.get(app.state().queues, "R2")).toBeUndefined()
   }, 15_000)
 
   it("resolves PR, Run, and base selectors while preserving canonical records", async () => {

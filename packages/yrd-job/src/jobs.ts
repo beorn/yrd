@@ -103,6 +103,53 @@ const JobSchema = z.union([
     cancelReason: z.string().min(1),
   }).strict(),
 ])
+const LegacyJobSchema = z.union([
+  JobBaseSchema.extend({ status: z.literal("requested") })
+    .strict()
+    .transform((job) => ({ ...job, status: "queued" as const })),
+  ExecutingJobBaseSchema.extend({ status: z.literal("running"), leaseExpiresAt: TimestampSchema })
+    .strict()
+    .transform((job) => ({ ...job, status: "in_progress" as const })),
+  EvidencedJobBaseSchema.extend({
+    status: z.literal("passed"),
+    finishedAt: TimestampSchema,
+    output: JsonSchema,
+  })
+    .strict()
+    .transform((job) => ({ ...job, status: "completed" as const, conclusion: "success" as const })),
+  EvidencedJobBaseSchema.extend({
+    status: z.literal("failed"),
+    finishedAt: TimestampSchema,
+    error: JobErrorSchema,
+    output: JsonSchema.optional(),
+  })
+    .strict()
+    .transform((job) => ({ ...job, status: "completed" as const, conclusion: "failure" as const })),
+  ExecutingJobBaseSchema.extend({
+    status: z.literal("lost"),
+    finishedAt: TimestampSchema,
+    lostReason: z.string().min(1),
+  })
+    .strict()
+    .transform((job) => ({ ...job, status: "completed" as const, conclusion: "timed_out" as const })),
+  JobBaseSchema.extend({
+    status: z.literal("canceled"),
+    finishedAt: TimestampSchema,
+    canceledBy: IdSchema,
+    cancelReason: z.string().min(1),
+  })
+    .strict()
+    .transform((job) => ({ ...job, status: "completed" as const, conclusion: "cancelled" as const })),
+  EvidencedJobBaseSchema.extend({
+    status: z.literal("canceled"),
+    finishedAt: TimestampSchema,
+    canceledBy: IdSchema,
+    cancelReason: z.string().min(1),
+  })
+    .strict()
+    .transform((job) => ({ ...job, status: "completed" as const, conclusion: "cancelled" as const })),
+])
+const ReplayJobSchema = z.union([JobSchema, LegacyJobSchema])
 
 type JobBase = Readonly<z.infer<typeof JobBaseSchema>>
 
@@ -428,9 +475,30 @@ export function compactJobsState(state: DeepReadonly<JobsState>): JobsState {
 }
 
 const RestoreJobSchema = z.object({ job: JobSchema, retention: z.literal("detached-queue").optional() }).strict()
+const ReplayRestoreJobSchema = z
+  .object({ job: ReplayJobSchema, retention: z.literal("detached-queue").optional() })
+  .strict()
 type RestoreJob = Readonly<z.infer<typeof RestoreJobSchema>>
 
 const TerminalResultSchema = jobTerminalResultSchema(JsonSchema)
+const LegacyTerminalResultSchema = z.union([
+  z
+    .object({ status: z.literal("passed"), output: JsonSchema })
+    .strict()
+    .transform((result) => ({
+      ...result,
+      status: "completed" as const,
+      conclusion: "success" as const,
+    })),
+  z
+    .object({ status: z.literal("failed"), error: JobErrorSchema, output: JsonSchema.optional() })
+    .strict()
+    .transform((result) => ({
+      ...result,
+      status: "completed" as const,
+      conclusion: "failure" as const,
+    })),
+])
 
 const CancelJobInputSchema = z
   .object({
@@ -441,6 +509,16 @@ const CancelJobInputSchema = z
   })
   .strict()
 export type CancelJobInput = Readonly<z.infer<typeof CancelJobInputSchema>>
+
+const FinishJobTransitionBaseSchema = z
+  .object({
+    type: z.literal("finish"),
+    id: IdSchema,
+    attempt: AttemptSchema,
+    runner: IdSchema,
+    token: IdSchema.optional(),
+  })
+  .strict()
 
 export const JobTransitionSchema = z.discriminatedUnion("type", [
   z
@@ -470,16 +548,7 @@ export const JobTransitionSchema = z.discriminatedUnion("type", [
       runner: IdSchema,
     })
     .strict(),
-  z
-    .object({
-      type: z.literal("finish"),
-      id: IdSchema,
-      attempt: AttemptSchema,
-      runner: IdSchema,
-      token: IdSchema.optional(),
-      result: TerminalResultSchema,
-    })
-    .strict(),
+  FinishJobTransitionBaseSchema.extend({ result: TerminalResultSchema }).strict(),
   z
     .object({
       type: z.literal("lose"),
@@ -492,6 +561,10 @@ export const JobTransitionSchema = z.discriminatedUnion("type", [
     .strict(),
   CancelJobInputSchema.extend({ type: z.literal("cancel") }).strict(),
   z.object({ type: z.literal("retry"), id: IdSchema }).strict(),
+])
+const ReplayJobTransitionSchema = z.union([
+  JobTransitionSchema,
+  FinishJobTransitionBaseSchema.extend({ result: LegacyTerminalResultSchema }).strict(),
 ])
 export type JobTransition = z.infer<typeof JobTransitionSchema>
 
@@ -756,7 +829,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
           const request = JobRequestSchema.parse(applied.data)
           if (request.key === key) bind(applied.id)
         } else if (applied.name === "job/restored") {
-          const restored = RestoreJobSchema.parse(applied.data)
+          const restored = ReplayRestoreJobSchema.parse(applied.data)
           if (restored.job.key === key) bind(restored.job.id)
         }
       }
@@ -1143,6 +1216,10 @@ export function withJobs(options: JobsOptions = {}) {
         "job/transitioned": JobTransitionSchema,
         "job/restored": RestoreJobSchema,
       },
+      replayEvents: {
+        "job/transitioned": ReplayJobTransitionSchema,
+        "job/restored": ReplayRestoreJobSchema,
+      },
       projectionVersion: "jobs-v8-target-model-retention",
       project: projectJobs,
       compact: (state) => ({ jobs: compactJobsState(state.jobs) }),
@@ -1246,7 +1323,7 @@ function projectJobs(state: DeepReadonly<{ jobs: JobsState }>, applied: Event): 
     }
   }
   if (applied.name === "job/restored") {
-    const restoredFact = RestoreJobSchema.parse(applied.data)
+    const restoredFact = ReplayRestoreJobSchema.parse(applied.data)
     const archived = restoredFact.job
     const current = state.jobs.byId[archived.id]
     if (current !== undefined && JSON.stringify(JobSchema.parse(current)) !== JSON.stringify(archived)) {
@@ -1266,7 +1343,7 @@ function projectJobs(state: DeepReadonly<{ jobs: JobsState }>, applied: Event): 
     }
   }
   if (applied.name !== "job/transitioned") return state
-  const change = applied.data as JobTransition
+  const change = ReplayJobTransitionSchema.parse(applied.data)
   const current = state.jobs.byId[change.id]
   const projected = Job.apply(current, change, applied.ts)
   const byId = { ...state.jobs.byId, [change.id]: projected }

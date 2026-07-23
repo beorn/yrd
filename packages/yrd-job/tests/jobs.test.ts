@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest"
 import { createLogger, type Event as LogEvent } from "loggily"
 import * as z from "zod"
 import {
+  Command,
   command,
   createMemoryJournal,
   createYrd,
@@ -283,6 +284,100 @@ describe("Jobs", () => {
     expect(completed).toMatchObject({ status: "completed", conclusion: "success" })
     expect(Job.terminal(completed)).toBe(true)
     expect(isTerminalJobStatus("completed")).toBe(true)
+  })
+
+  it("replays pre-target-model terminal Jobs into GitHub status and conclusion", async () => {
+    const completionCommand = { id: testId(100), op: "legacy.complete" }
+    const restoredJobId = testId(104)
+    const restoreCommand = { id: testId(105), op: "legacy.restore" }
+    const journal = createMemoryJournal([
+      {
+        cause: {
+          id: testId(101),
+          commandId: completionCommand.id,
+          op: completionCommand.op,
+          commandHash: Command.hash(completionCommand),
+        },
+        command: completionCommand,
+        events: [
+          {
+            id: JOB_ID,
+            name: "job/requested",
+            ts: "2026-01-01T00:00:00.000Z",
+            data: {
+              definition: "message.deliver",
+              revision: "transport-v1",
+              input: { message: "legacy completion" },
+            },
+          },
+          {
+            id: testId(102),
+            name: "job/transitioned",
+            ts: "2026-01-01T00:00:01.000Z",
+            data: {
+              type: "start",
+              id: JOB_ID,
+              attempt: 1,
+              runner: "legacy-runner",
+              leaseExpiresAt: "2026-01-01T00:01:01.000Z",
+            },
+          },
+          {
+            id: testId(103),
+            name: "job/transitioned",
+            ts: "2026-01-01T00:00:02.000Z",
+            data: {
+              type: "finish",
+              id: JOB_ID,
+              attempt: 1,
+              runner: "legacy-runner",
+              result: { status: "passed", output: { receipt: "legacy-ok" } },
+            },
+          },
+        ],
+      },
+      {
+        cause: {
+          id: testId(106),
+          commandId: restoreCommand.id,
+          op: restoreCommand.op,
+          commandHash: Command.hash(restoreCommand),
+        },
+        command: restoreCommand,
+        events: [
+          {
+            id: testId(107),
+            name: "job/restored",
+            ts: "2026-01-01T00:00:03.000Z",
+            data: {
+              job: {
+                id: restoredJobId,
+                definition: "message.deliver",
+                revision: "transport-v1",
+                input: { message: "legacy failure" },
+                attempt: 1,
+                requestedAt: "2026-01-01T00:00:00.000Z",
+                changedAt: "2026-01-01T00:00:02.000Z",
+                startedAt: "2026-01-01T00:00:01.000Z",
+                runner: "legacy-runner",
+                status: "failed",
+                finishedAt: "2026-01-01T00:00:02.000Z",
+                error: { code: "legacy-failure", message: "legacy failure" },
+              },
+            },
+          },
+        ],
+      },
+    ])
+
+    await using app = await jobsApp(delivery(), { journal })
+
+    expect(app.jobs.get(JOB_ID)).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+      output: { receipt: "legacy-ok" },
+    })
+    expect(app.jobs.get(restoredJobId)).toMatchObject({ status: "queued", attempt: 1 })
   })
 
   it("retains all live Jobs, the latest 512 standalone terminals, and 512 complete Queue-owned groups", () => {
