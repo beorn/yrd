@@ -2,9 +2,8 @@
  * 21106 W3 — DETAIL pane rework (user screenshot review, 2026-07-16).
  *
  * Pins the reshaped detail surface: the PR-scoped identity title
- * (`pr#<id>.<rev>`) with right-aligned colorized STATUS/OUTCOME; the linked
- * ISSUE primitive; the natural clock sentence plus COMMIT; separate JOB/RUNNER
- * facts; and the failure-only NEXT cue.
+ * (`pr#<id>.<rev>`), the linked ISSUE primitive, one composite run header,
+ * one truthful status notice, and separate JOB/RUNNER facts.
  */
 
 import { createElement } from "react"
@@ -107,8 +106,8 @@ function glyphColumn(app: ReturnType<ReturnType<typeof createRenderer>>, row: nu
   return -1
 }
 
-describe("detail title row — run identity emphasis + right-aligned outcome", () => {
-  it("emphasizes the identity, right-aligns STATUS/OUTCOME, and omits corner time", () => {
+describe("detail title row — PR identity only", () => {
+  it("emphasizes the identity and leaves status to the notice below", () => {
     const pr = fixturePr("PR42", "submitted", "2026-07-13T10:30:00.000Z", "Land it")
     const run = fixtureRun("R42", [pr], "passed", "2026-07-13T10:40:00.000Z", {
       finishedAt: "2026-07-13T10:55:00.000Z",
@@ -122,13 +121,13 @@ describe("detail title row — run identity emphasis + right-aligned outcome", (
       createElement(Box, { width: 120 }, createElement(QueueDetailTitle, { row, data })),
     )
     try {
-      // Revision A makes the title PR-scoped (pr#<id>.<rev>); the run identity
-      // and branch move into the run header / member block while the deduped run
-      // outcome stays right-aligned on this line.
+      // The title is PR-scoped. Run identity, timing, and status belong to the
+      // composite header + notice below it.
       expect(app.text).toContain("pr#42.1")
       expect(app.text).not.toContain("RUN main#42")
       expect(app.text).not.toContain("topic/pr42")
-      expect(app.text).toContain(`${data.glyph} passed, integrated`)
+      expect(app.text).not.toContain("passed")
+      expect(app.text).not.toContain("integrated")
 
       const titleRow = app.text.split("\n").findIndex((text) => text.includes("pr#42.1"))
       expect(titleRow).toBeGreaterThanOrEqual(0)
@@ -139,13 +138,6 @@ describe("detail title row — run identity emphasis + right-aligned outcome", (
       expect(identityCell.fg).not.toBeNull()
 
       expect(glyphColumn(app, titleRow), "branch marker belongs in the member block, not the title").toBe(-1)
-
-      // STATUS/OUTCOME is bold and colorized, distinct from the identity color.
-      const outcomeColumn = app.text.split("\n")[titleRow]?.indexOf("integrated") ?? -1
-      const outcomeCell = app.cell(outcomeColumn, titleRow)
-      expect(outcomeCell.bold).toBe(true)
-      expect(outcomeCell.fg).not.toBeNull()
-      expect(outcomeCell.fg).not.toEqual(identityCell.fg)
 
       expect(app.text).not.toContain("15m00s")
     } finally {
@@ -196,6 +188,88 @@ describe("delta admission visibility", () => {
     )
     try {
       expect(app.text).toContain("delta residual:3")
+    } finally {
+      app.unmount()
+    }
+  })
+})
+
+describe("watch detail composite header + status notice", () => {
+  it("puts run identity/timing above tabs and replaces flat failure chrome with one outlined notice", async () => {
+    const headSha = "9".repeat(40)
+    const pr = {
+      ...fixturePr("PR9", "rejected", "2026-07-13T10:30:00.000Z", "Repair the check", {
+        actor: "@agent/8",
+        headSha,
+        issue: "@yrd/core/21096-cli-ux/21751-watch-detail-status-dry",
+        revisions: [
+          {
+            revision: 1,
+            headSha,
+            base: "main",
+            baseSha: "a".repeat(40),
+            pushedAt: "2026-07-13T10:30:00.000Z",
+            submittedAt: "2026-07-13T10:30:00.000Z",
+            actor: "@agent/8",
+            terminal: {
+              status: "rejected",
+              at: "2026-07-13T10:42:00.000Z",
+              run: "R9",
+            },
+          },
+        ],
+        terminalRun: "R9",
+        rejectedAt: "2026-07-13T10:42:00.000Z",
+      }),
+      description:
+        "A concise explanation of the change.\n\nIssue: @yrd/core/21096-cli-ux/21751-watch-detail-status-dry",
+    }
+    const run = fixtureRun("R9", [pr], "failed", "2026-07-13T10:40:00.000Z", {
+      finishedAt: "2026-07-13T10:42:00.000Z",
+      error: { code: "check-failed", message: "check command exited 1" },
+      steps: [
+        fixtureStep(
+          "check",
+          fixtureJob("J9-check", "failed", {
+            requestedAt: "2026-07-13T10:39:00.000Z",
+            startedAt: "2026-07-13T10:40:00.000Z",
+            finishedAt: "2026-07-13T10:42:00.000Z",
+            error: { code: "check-failed", message: "check command exited 1" },
+          }),
+        ),
+      ],
+    })
+    const app = createRenderer({ cols: 180, rows: 50 })(
+      createElement(QueueWatchFrame, { snapshot: fixtureSnapshot(fixtureResult([pr], [run])) }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      const rows = app.text.split("\n")
+      const runY = rows.findIndex((line) => line.includes("RUN main#9"))
+      const timingY = rows.findIndex((line) => line.includes("Started "))
+      const tabsY = rows.findIndex((line) => line.includes("1: check"))
+      expect(runY, "run identity leads the composite header").toBeGreaterThanOrEqual(0)
+      expect(timingY, "run timing is inside the composite header").toBeGreaterThan(runY)
+      expect(tabsY, "step tabs follow the composite header").toBeGreaterThan(timingY)
+
+      const noticeY = rows.findIndex((line) => line.includes("failed, rejected"))
+      expect(noticeY, "the status notice headline is present").toBeGreaterThanOrEqual(0)
+      expect(rows[noticeY]).toContain("×")
+      expect(app.cell(rows[noticeY]?.indexOf("failed") ?? -1, noticeY).bold).toBe(true)
+      const topBorderY = rows.findLastIndex((line, index) => index < noticeY && line.includes("╭"))
+      const borderX = rows[topBorderY]?.indexOf("╭") ?? -1
+      expect(topBorderY, "notice has an outline").toBeGreaterThanOrEqual(0)
+      expect(app.cell(borderX, topBorderY).fg, "border and headline use the same status tone").toEqual(
+        app.cell(rows[noticeY]?.indexOf("failed") ?? -1, noticeY).fg,
+      )
+      expect(app.text).toContain("err=check-failed")
+      expect(app.text).toContain("not retried automatically")
+      expect(app.text).toContain("author must fix the branch and resubmit")
+      expect(app.text).not.toMatch(/^(?:ERROR|CAUSE|RESOLVE|LOST|NEXT)\b/mu)
+      const titleY = rows.findIndex((line) => line.includes("pr#9.1"))
+      const detailX = rows[titleY]?.indexOf("pr#9.1") ?? -1
+      const detailText = rows.map((line) => line.slice(detailX)).join("\n")
+      expect(detailText.match(/@yrd\/core\/21096-cli-ux\/21751-watch-detail-status-dry/gu)).toHaveLength(1)
     } finally {
       app.unmount()
     }
@@ -279,7 +353,7 @@ describe("detail run facts — natural timing sentence + landing, no RUN/BASE du
   })
 })
 
-describe("detail run facts — ×N retry mark only above one, NEXT only on failure (items f/g)", () => {
+describe("detail run facts — ×N retry mark and no parallel NEXT block", () => {
   it("hides the retry mark at one attempt and shows it above one", () => {
     const base = integratedRun()
     const once = createRenderer({ cols: 120, rows: 20 })(
@@ -300,7 +374,7 @@ describe("detail run facts — ×N retry mark only above one, NEXT only on failu
     }
   })
 
-  it("suppresses NEXT for a healthy run and shows it on failure", () => {
+  it("leaves next-action ownership to the status notice", () => {
     const clean = createRenderer({ cols: 120, rows: 20 })(
       createElement(QueueShowView, { data: integratedRun(), compact: true, section: "run", titleAbove: true }),
     )
@@ -313,7 +387,7 @@ describe("detail run facts — ×N retry mark only above one, NEXT only on failu
       createElement(QueueShowView, { data: failedRun(), compact: true, section: "run", titleAbove: true }),
     )
     try {
-      expect(failed.text).toContain("NEXT")
+      expect(failed.text).not.toContain("NEXT")
     } finally {
       failed.unmount()
     }

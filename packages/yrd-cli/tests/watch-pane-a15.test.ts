@@ -26,13 +26,14 @@ function outputFrame(lineCount: number) {
 }
 
 describe("QueueArtifactOutputView A15 tail following", () => {
-  it("makes the full output file an OSC8 link", async () => {
+  it("shows the real output path as an OSC8-linked file row", async () => {
     const output = artifactOutput(1)
     const frame = await renderString(
       createElement(Box, { width: 80, height: 12 }, createElement(QueueArtifactOutputView, { outputs: [output] })),
       { width: 80, height: 12, plain: false },
     )
-    expect(frame).toContain("open full log")
+    expect(frame).toContain(`(f) ${output.path}`)
+    expect(frame).not.toContain("open full log")
     expect(frame).toContain(pathToFileURL(output.path).href)
   })
 
@@ -49,7 +50,7 @@ describe("QueueArtifactOutputView A15 tail following", () => {
       { width: 80, height: 12, plain: false },
     )
     expect(frame).toContain("No output recorded.")
-    expect(frame).not.toContain("open full log")
+    expect(frame).not.toContain("(f)")
     expect(frame).not.toContain("\u001b]8;;")
   })
 

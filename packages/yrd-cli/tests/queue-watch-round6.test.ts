@@ -92,6 +92,12 @@ describe("queue watch user round 6", () => {
             headSha: leadHead2,
             base: "main",
             baseSha,
+            recut: {
+              fromRevision: 1,
+              patchId: "2".repeat(40),
+              treeSha: "3".repeat(40),
+              reviewCarried: false,
+            },
             pushedAt: "2026-07-12T22:19:00.000Z",
             submittedAt: "2026-07-12T22:19:00.000Z",
             actor: "@ci",
@@ -102,6 +108,12 @@ describe("queue watch user round 6", () => {
             headSha: leadHead3,
             base: "main",
             baseSha,
+            recut: {
+              fromRevision: 2,
+              patchId: "4".repeat(40),
+              treeSha: "5".repeat(40),
+              reviewCarried: false,
+            },
             pushedAt: "2026-07-12T22:29:00.000Z",
             submittedAt: "2026-07-12T22:29:00.000Z",
             actor: "@ci",
@@ -112,6 +124,12 @@ describe("queue watch user round 6", () => {
             headSha: leadHead,
             base: "main",
             baseSha,
+            recut: {
+              fromRevision: 3,
+              patchId: "6".repeat(40),
+              treeSha: "7".repeat(40),
+              reviewCarried: false,
+            },
             pushedAt: "2026-07-13T10:30:00.000Z",
             submittedAt: "2026-07-13T10:30:00.000Z",
             actor: "@ci",
@@ -123,15 +141,37 @@ describe("queue watch user round 6", () => {
         integration: { commit, baseSha },
       }),
       title: "Lead title may wrap across the detail pane",
-      description: "First description line\nSecond description line may wrap",
+      description: "First description line\nSecond description line may wrap\n\nIssue: @yrd/core/21514-detail-pane",
       correlation: { namespace: "tribe", id: "21514-round6-agent1" },
       requestedReviewers: ["@chief"],
       checkRequests: [
+        { revision: 1, headSha: leadHead1, baseSha, at: "2026-07-12T22:14:30.000Z" },
+        { revision: 2, headSha: leadHead2, baseSha, at: "2026-07-12T22:19:30.000Z" },
+        { revision: 3, headSha: leadHead3, baseSha, at: "2026-07-12T22:29:30.000Z" },
         {
           revision: 4,
           headSha: leadHead,
           baseSha,
           at: "2026-07-13T10:35:00.000Z",
+        },
+      ],
+      reviews: [
+        {
+          revision: 4,
+          headSha: leadHead,
+          actor: "@chief",
+          decision: "approve",
+          at: "2026-07-13T10:36:00.000Z",
+          note: "The final hierarchy is clear.",
+        },
+      ],
+      comments: [
+        {
+          revision: 4,
+          headSha: leadHead,
+          actor: "@agent/8",
+          at: "2026-07-13T10:37:00.000Z",
+          note: "Focused evidence is attached.",
         },
       ],
     }
@@ -206,17 +246,25 @@ describe("queue watch user round 6", () => {
         { pr: "PR61", revision: 1, unavailable: "refs-pruned" as const },
       ],
     }
-    const app = createRenderer({ cols: 200, rows: 50 })(h(QueueWatchFrame, { snapshot }))
+    const app = createRenderer({ cols: 200, rows: 70 })(h(QueueWatchFrame, { snapshot }))
     try {
+      await app.waitForLayoutStable()
+
+      const initialRows = app.text.split("\n")
+      const tabsY = initialRows.findIndex((row) => row.includes("PR") && row.includes("1: merge"))
+      const prTabX = initialRows[tabsY]?.indexOf("PR") ?? -1
+      expect(tabsY, "detail tab bar renders").toBeGreaterThanOrEqual(0)
+      await app.click(prTabX, tabsY)
       await app.waitForLayoutStable()
 
       const rows = app.text.split("\n")
       const titleY = rows.findIndex((row) => row.includes("pr#60.4"))
       const detailX = rows[titleY]?.indexOf("pr#60.4") ?? -1
       expect(titleY).toBeGreaterThanOrEqual(0)
-      // The branch row sits directly under the PR-scoped identity title — the old
-      // spacer row after the title is gone, and no elapsed time leaks into it.
-      expect(rows[titleY + 1]?.slice(detailX)).toContain("topic/pr60")
+      const runY = rows.findIndex((row) => row.slice(detailX).includes("RUN main#60"))
+      const tabY = rows.findIndex((row) => row.slice(detailX).includes("1: merge"))
+      expect(runY, "the composite run header follows the PR identity").toBeGreaterThan(titleY)
+      expect(tabY, "the step tabs follow the composite run header").toBeGreaterThan(runY)
       expect(rows[titleY]?.slice(detailX)).not.toMatch(/\d+(?:h|m|s)/u)
       expect(rows[titleY]).not.toContain("RUN main#60")
       expect(rows[titleY]).not.toContain("PR60")
@@ -243,19 +291,49 @@ describe("queue watch user round 6", () => {
       expect(app.text).toContain("Lead title may wrap across the detail pane")
       expect(app.text).toContain("First description line")
       expect(app.text).toContain("Second description line may wrap")
-      // note / correlation / requested reviewers / check-requested render as
-      // uppercase KEY/value fact rows, not "- key: value" timeline lines.
+      // Scalar properties stay keyed; event-shaped facts move into the shared
+      // chronological activity stream.
       expect(app.text).toMatch(/NOTE\s+visual confirmation required/u)
       expect(app.text).toMatch(/CORRELATION\s+tribe:21514-round6-agent1/u)
       expect(app.text).toMatch(/REQUESTED REVIEWERS\s+@chief/u)
-      expect(app.text).toMatch(/CHECK REQUESTED\s+\d{2}:\d{2}/u)
-      expect(app.text).not.toMatch(/- check requested: \d{2}:\d{2}/u)
-      // Timeline lines are bare (no leading "- "), strictly newest-first.
-      expect(app.text).toMatch(/\d{2}:\d{2} r4 integrated \(age 11:00\)/u)
-      expect(app.text).toMatch(/\d{2}:\d{2} r3 rejected \(err=visual-rejected — round-3 density was rejected\)/u)
-      expect(app.text).toMatch(/\d{2}:\d{2} r2 rejected \(err=visual-rejected — round-2 hierarchy was rejected\)/u)
-      expect(app.text).toMatch(/\d{2}:\d{2} r1 rejected \(err=mock-mismatch — round-1 detail layout was rejected\)/u)
-      expect(app.text).toMatch(/\d{2}:\d{2} submitted by @ci/u)
+      expect(app.text).not.toContain("CHECK REQUESTED")
+      expect(app.text).not.toMatch(/^RECUT\s/mu)
+
+      const activity = [
+        "r1 submitted by @ci",
+        "r1 check requested",
+        "r1 run main#57",
+        "r2 recut of r1",
+        "r2 submitted by @ci",
+        "r2 check requested",
+        "r2 run main#58",
+        "r3 recut of r2",
+        "r3 submitted by @ci",
+        "r3 check requested",
+        "r3 run main#59",
+        "r4 recut of r3",
+        "r4 submitted by @ci",
+        "r4 check requested",
+        "r4 review approve by @chief",
+        "r4 comment by @agent/8",
+        "r4 run main#60",
+      ]
+      for (const event of activity) expect(app.text, `activity includes ${event}`).toContain(event)
+      for (let index = 1; index < activity.length; index += 1) {
+        expect(
+          app.text.indexOf(activity[index]!),
+          `${activity[index - 1]} precedes ${activity[index]}`,
+        ).toBeGreaterThan(app.text.indexOf(activity[index - 1]!))
+      }
+
+      const activityY = rows.findIndex((row) => row.includes("r1 submitted by @ci"))
+      const activityClockX = rows[activityY]?.search(/\d{2}:\d{2}/u) ?? -1
+      const activityTextX = rows[activityY]?.indexOf("r1 submitted") ?? -1
+      expect(app.cell(activityClockX, activityY).fg, "activity time is muted").not.toEqual(
+        app.cell(activityTextX, activityY).fg,
+      )
+      const detailText = rows.map((row) => row.slice(detailX)).join("\n")
+      expect(detailText.match(/@yrd\/core\/21514-detail-pane/gu)).toHaveLength(1)
       expect(app.text).toContain("Diff +324 / -323 lines")
       expect(app.text).not.toContain("src/detail-pane.tsx")
       expect(app.text).not.toContain("click to expand")
@@ -319,6 +397,69 @@ describe("queue watch user round 6", () => {
           .map((line) => line.slice(divider + 1))
           .join("\n"),
       ).not.toContain("pr#60.4")
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("labels both total lineage age and the current revision's queue age", async () => {
+    const head1 = "1".repeat(40)
+    const head2 = "2".repeat(40)
+    const head3 = "3".repeat(40)
+    const pr = fixturePr("PR63", "submitted", "2026-07-13T11:52:00.000Z", "Long-suffering queue item", {
+      revision: 3,
+      headSha: head3,
+      actor: "@agent/8",
+      revisions: [
+        {
+          revision: 1,
+          headSha: head1,
+          base: "main",
+          baseSha: "a".repeat(40),
+          pushedAt: "2026-07-13T11:03:00.000Z",
+          submittedAt: "2026-07-13T11:03:00.000Z",
+          actor: "@agent/8",
+          terminal: { status: "rejected", at: "2026-07-13T11:08:00.000Z", run: "R61" },
+        },
+        {
+          revision: 2,
+          headSha: head2,
+          base: "main",
+          baseSha: "a".repeat(40),
+          recut: {
+            fromRevision: 1,
+            patchId: "4".repeat(40),
+            treeSha: "5".repeat(40),
+            reviewCarried: false,
+          },
+          pushedAt: "2026-07-13T11:20:00.000Z",
+          submittedAt: "2026-07-13T11:20:00.000Z",
+          actor: "@agent/8",
+          terminal: { status: "rejected", at: "2026-07-13T11:25:00.000Z", run: "R62" },
+        },
+        {
+          revision: 3,
+          headSha: head3,
+          base: "main",
+          baseSha: "a".repeat(40),
+          recut: {
+            fromRevision: 2,
+            patchId: "6".repeat(40),
+            treeSha: "7".repeat(40),
+            reviewCarried: false,
+          },
+          pushedAt: "2026-07-13T11:52:00.000Z",
+          submittedAt: "2026-07-13T11:52:00.000Z",
+          actor: "@agent/8",
+        },
+      ],
+    })
+    const app = createRenderer({ cols: 150, rows: 45 })(
+      h(QueueWatchFrame, { snapshot: fixtureSnapshot(fixtureResult([pr], [])) }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      expect(app.text).toMatch(/AGE\s+3 revisions · 57:00 total · r3 queued 8:00/u)
     } finally {
       app.unmount()
     }
