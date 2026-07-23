@@ -270,7 +270,11 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
     async deprovision(input: DeprovisionBayInput): Promise<JobResult<DeprovisionedBay>> {
       try {
         if (input.path === undefined || !existsSync(input.path)) {
-          if (input.headSha === undefined) throw new Error("workspace is absent and the Bay has no recorded head")
+          // Provision can fail before either a workspace path or head is
+          // recorded. Closing that lifecycle is an idempotent no-op: there is
+          // no authored head to preserve and therefore no archive proof to
+          // invent.
+          if (input.headSha === undefined) return { status: "passed", output: {} }
           return {
             status: "passed",
             output: {

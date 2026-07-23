@@ -1746,6 +1746,26 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     run: runtime,
   })
 
+  it("routes a closed Bay branch through direct draft creation", async () => {
+    await using app = (await createHarness()).app
+    await finishJob(app, await app.bays.open({ name: "retired" }))
+    const branch = app.bays.get("B1")?.branch
+    if (branch === undefined) throw new Error("expected opened Bay branch")
+    await finishJob(app, await app.bays.close({ bay: "B1" }))
+    expect(app.bays.get("B1")?.status).toBe("closed")
+
+    const drafted = await app.bays.submitSelection(branch, { ...directOptions(HEAD_2), draft: true })
+
+    expect(drafted).toMatchObject({
+      id: "PR1",
+      branch,
+      status: "pushed",
+      revision: 1,
+      headSha: HEAD_2,
+    })
+    expect(drafted.bay).toBeUndefined()
+  })
+
   it("D2: reopens a withdrawn branch's PR as the next revision, no terminal-branch refusal", async () => {
     await using app = (await createHarness()).app
     const submitted = await app.bays.submitSelection("topic/redeliver", directOptions(HEAD_1))

@@ -106,6 +106,20 @@ describe("createGitWorkspace", () => {
     expect(request).toMatchObject({ timeoutMs: 30_000 })
   })
 
+  it("closes a never-materialized Bay without inventing archive proof", async () => {
+    const { root, repo } = await repository()
+    await using process = createProcess()
+    const adapter = await workspace(process, { repo, baysRoot: join(root, "bays") })
+
+    await expect(
+      adapter.deprovision(
+        { bay: "B1", branch: "issue/unmaterialized" },
+        { id: "deprovision-B1", attempt: 1, runner: "test", signal: new AbortController().signal },
+      ),
+    ).resolves.toEqual({ status: "passed", output: {} })
+    expect((await git(repo, ["rev-parse", "--verify", "refs/yrd/closed/B1"], true)).code).toBe(128)
+  })
+
   it("keeps the repository clean with the default in-repository bays root", async () => {
     const { repo } = await repository()
     await using process = createProcess()

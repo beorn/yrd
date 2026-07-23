@@ -692,7 +692,16 @@ export function createBays(
     let snapshot = state()
     const resolved = resolvePRMatch(snapshot, selector)
     let pr = resolved?.value
-    let bay = resolveBay(snapshot, selector) ?? (pr?.bay === undefined ? undefined : resolveBay(snapshot, pr.bay))
+    const selectedBay = resolveBay(snapshot, selector)
+    // A closed Bay is archive evidence, not permanent ownership of its branch
+    // alias. Addressing that branch again must use the direct-branch delivery
+    // path; canonical Bay id/name selectors still resolve the closed Bay and
+    // receive the ordinary not-active refusal.
+    const closedBranchAlias =
+      selectedBay?.status === "closed" && selectedBay.branch.toLowerCase() === selector.toLowerCase()
+    let bay = closedBranchAlias
+      ? undefined
+      : (selectedBay ?? (pr?.bay === undefined ? undefined : resolveBay(snapshot, pr.bay)))
     // D2 — a branch whose PR reached a non-landed terminal status
     // (withdrawn/canceled) mints its next revision automatically down the
     // direct-branch resubmit path below (the reopen preserves the PR identity,
