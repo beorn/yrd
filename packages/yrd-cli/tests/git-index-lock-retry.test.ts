@@ -5,6 +5,7 @@
  */
 import { describe, expect, it } from "vitest"
 import type { Process, ProcessRequest, ProcessResult } from "@yrd/process"
+import * as gitIndexLockRetry from "../src/git-index-lock-retry.ts"
 import { runWithGitIndexLockRetry, withGitIndexLockRetry } from "../src/git-index-lock-retry.ts"
 
 function result(exitCode: number, stderr = ""): ProcessResult {
@@ -31,6 +32,10 @@ const gitRequest = {
 } satisfies ProcessRequest
 
 describe("runWithGitIndexLockRetry", () => {
+  it("keeps the retry schedule private to the CLI composition root", () => {
+    expect(gitIndexLockRetry).not.toHaveProperty("DEFAULT_GIT_INDEX_LOCK_RETRY_DELAYS_MS")
+  })
+
   it("retries exact index-lock contention with bounded backoff, then returns success", async () => {
     const process = runner([
       result(128, "fatal: Unable to create '/repo/.git/index.lock': File exists."),
@@ -79,7 +84,7 @@ describe("runWithGitIndexLockRetry", () => {
     })
 
     expect(process.requests).toHaveLength(3)
-    expect(completed.stderr).toContain("Yrd retried Git index-lock contention 3 times")
+    expect(completed.stderr).toContain("Yrd tried the Git operation 3 times")
     expect(completed.stderr).toMatch(/wait for the active Git writer/iu)
     expect(completed.stderr).toContain("Never delete a live lock")
   })

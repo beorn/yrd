@@ -2,7 +2,7 @@ import { basename } from "node:path"
 import type { Process, ProcessRequest, ProcessResult } from "@yrd/process"
 
 /** A 1.55s bounded window covers ordinary concurrent Git writers without hiding a stuck lock. */
-export const DEFAULT_GIT_INDEX_LOCK_RETRY_DELAYS_MS = Object.freeze([50, 100, 200, 400, 800] as const)
+const DEFAULT_GIT_INDEX_LOCK_RETRY_DELAYS_MS = Object.freeze([50, 100, 200, 400, 800] as const)
 
 type RetryOptions = Readonly<{
   delaysMs?: readonly number[]
@@ -29,7 +29,7 @@ function isRetryableIndexLockContention(result: ProcessResult): boolean {
 
 function withExhaustionGuidance(result: ProcessResult, attempts: number): ProcessResult {
   const guidance =
-    `Yrd retried Git index-lock contention ${attempts} times and the lock still exists. ` +
+    `Yrd tried the Git operation ${attempts} times and the index lock still exists. ` +
     `Wait for the active Git writer, then retry. Inspect ownership and age before treating it as orphaned. ` +
     `Never delete a live lock.`
   return { ...result, stderr: `${result.stderr.trimEnd()}\n${guidance}\n` }
