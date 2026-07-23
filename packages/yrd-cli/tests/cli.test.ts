@@ -4328,7 +4328,7 @@ describe("runYrd", () => {
     expect(projection.rows[0]).toMatchObject({
       pr: "PR1",
       revision: 2,
-      status: "pending",
+      status: "ready",
       timestamp: currentSubmittedAt,
       sourceReadyAt: firstSubmittedAt,
       revisionLineage: [{ pr: "PR1", revisions: [1, 2], sourceReadyAt: firstSubmittedAt }],
@@ -4962,8 +4962,8 @@ describe("runYrd", () => {
     expect(projection.metrics.oldestOpenMs).toBe(80 * minute)
     expect(projection.metrics.throughput).toEqual({ landed: 1, per24h: 4 })
     expect(projection.rows.map((row) => [row.group, row.status, row.run ?? row.pr, row.pr])).toEqual([
-      ["pending", "pending", "PR4", "PR4"],
-      ["pending", "pending", "PR6", "PR6"],
+      ["pending", "ready", "PR4", "PR4"],
+      ["pending", "ready", "PR6", "PR6"],
       ["running", "running", "R4", "PR5"],
       ["completed", "canceled", "R6", "PR7"],
       ["completed", "environment-refused", "R3", "PR4"],
@@ -5234,7 +5234,7 @@ describe("runYrd", () => {
       const frame = stripOsc8Targets(frameHandle.text)
       expect(frame).toContain("pr#1.1")
       expect(frame).toContain("QUEUE main")
-      expect(frame).toContain("todo")
+      expect(frame.split("\n").find((row) => row.includes("pr#1.1"))).toContain("ready")
       expect(frame).not.toContain("position 1")
       expect(frame).toContain("AGE")
       expect(frame).toContain("WAIT")
@@ -5404,7 +5404,7 @@ describe("runYrd", () => {
       await firstFocusStarted
       await handle.press("j")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("> 1m submitted pr#2.2")
+      expect(handle.text).toContain("> 1m ready pr#2.2")
       // The focused PR1 load is still pending, but keyboard input has already
       // moved the cursor. Releasing it must coalesce one PR2 refresh rather than
       // overlap or commit stale PR1 detail.
@@ -5662,8 +5662,12 @@ describe("runYrd", () => {
       resolveQueueTarget: async () => ({ base: "main", sha: BASE_SHA }),
     })
     expect(await runYrd(app, yrd("queue", "ls", "--latest"), status.io), status.stderr()).toBe(0)
-    expect(status.stdout()).toContain("pr#1.1")
-    expect(status.stdout()).toContain("todo")
+    expect(
+      status
+        .stdout()
+        .split("\n")
+        .find((row) => row.includes("pr#1.1")),
+    ).toContain("ready")
   })
 
   it("uses the queue timeline by default while --latest only changes row projection", async () => {
@@ -5683,9 +5687,18 @@ describe("runYrd", () => {
     })
     expect(await runYrd(app, yrd("queue", "ls", "--latest"), latest.io), latest.stderr()).toBe(0)
 
-    expect(plain.stdout()).toContain("pr#1.1")
-    expect(plain.stdout()).toContain("pr#2.1")
-    expect(plain.stdout()).toContain("todo")
+    expect(
+      plain
+        .stdout()
+        .split("\n")
+        .find((row) => row.includes("pr#1.1")),
+    ).toContain("ready")
+    expect(
+      plain
+        .stdout()
+        .split("\n")
+        .find((row) => row.includes("pr#2.1")),
+    ).toContain("ready")
     expect(latest.stdout()).toContain("pr#1.1")
     expect(latest.stdout()).toContain("pr#2.1")
     // Non-default-only FILTER row (user respec 2026-07-15): `latest` renders
@@ -6072,7 +6085,7 @@ describe("runYrd", () => {
     } as unknown as QueueStatusResult
 
     expect(queueTimelineRows([result], Date.parse("2026-07-09T12:20:00.000Z"), true)).toMatchObject([
-      { pr: "PR1", status: "submitted", clock: "5m", detail: "position 1" },
+      { pr: "PR1", status: "ready", clock: "5m", detail: "position 1" },
     ])
   })
 

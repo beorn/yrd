@@ -104,7 +104,7 @@ describe("queue timeline 21106 contract", () => {
   it("projects one selectable row per exact PR revision with composite cursor identity", () => {
     const projection = contractProjection()
     expect(projection.rows.map((row) => [row.group, row.status, row.run ?? row.pr, row.pr, row.revision])).toEqual([
-      ["pending", "pending", "PR1", "PR1", 1],
+      ["pending", "ready", "PR1", "PR1", 1],
       ["running", "running", "R42", "PR42", 1],
       ["running", "running", "R42", "PR43", 1],
       ["completed", "rejected", "R5", "PR5", 1],
@@ -226,7 +226,7 @@ describe("queue timeline 21106 contract", () => {
     // (item R); run duration is a bare dimmed time — no `◷` glyph (item S). The
     // branch glyph (U+E0A0) is matched as one non-space char.
     expect(pending?.trim()).toMatch(
-      /^16:40:00 ○ todo\s+-\s+pr#1\.1 for @yrd\/core\/21120-pr-state-notifications\s+@cto\s+50:00$/u,
+      /^16:40:00 ○ ready\s+-\s+pr#1\.1 for @yrd\/core\/21120-pr-state-notifications\s+@cto\s+50:00$/u,
     )
     expect(lead?.trim()).toMatch(
       /^17:10:00 ● run\s+main#42 pr#42\.1 for @hab\/super\/21135-herdr-keybindings\s+@agent\/3 36:00 20:00$/u,
@@ -287,7 +287,7 @@ describe("queue timeline 21106 contract", () => {
     const rejected = rows[rowIndex(rows, "pr#5.1")]
     const integrated = rows[rowIndex(rows, "pr#4.1")]
 
-    expect(pending).toContain("○ todo")
+    expect(pending).toContain("○ ready")
     expect(running).toContain("● run")
     expect(rejected).toContain("× fail")
     expect(integrated).toContain("✓ done")
@@ -386,7 +386,7 @@ describe("queue timeline 21106 contract", () => {
     for (const row of rows) expect(Array.from(row).length).toBeLessThanOrEqual(80)
     const lead = rows[rowIndex(rows, "pr#42.1")]
     expect(lead).toContain("main#42")
-    expect(lead).toContain("for @hab/super/21135-herdr-keybindi…")
+    expect(lead).toContain("for @hab/super/21135-herdr-keybind…")
     expect(lead).not.toContain("2:check")
     expect(lead).toContain("36:00")
     expect(lead).toContain("20:00")
@@ -454,7 +454,7 @@ describe("queue timeline 21106 contract", () => {
     // Left-anchored surfaces start at column 0; only right-aligned facts
     // (the updated clock, the bucket checkboxes) carry leading padding. Box
     // borders anchor at column 0 with their rounded corner glyph.
-    for (const anchor of ["QUEUE", "16:40:00 ○ todo", "╭─ FLOW"]) {
+    for (const anchor of ["QUEUE", "16:40:00 ○ ready", "╭─ FLOW"]) {
       expect(wide[rowIndex(wide, anchor)]?.startsWith(anchor.slice(0, 1)), anchor).toBe(true)
     }
     expect(wide[rowIndex(wide, "TIME")]?.indexOf("TIME")).toBe(0)

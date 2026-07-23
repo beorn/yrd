@@ -774,8 +774,8 @@ describe("queue timeline storybook", () => {
       expect(handle.text).toContain("pr#1.1")
       // Timeline lines are bare now (user directive 2026-07-21): no leading `- `.
       expect(handle.text).toMatch(/\d{2}:\d{2} submitted by @cto/u)
-      // Pending renders as `todo` in the detail title fallback (item 8).
-      expect(handle.text).toContain("○ todo")
+      // A submitted PR renders with the display-only `ready` status.
+      expect(handle.text).toContain("○ ready")
       expect(handle.text).toContain("Prepare release notes")
       expect(handle.text).toContain("pr#1.1 @yrd/core/21120-pr-state-notifications")
       expect(handle.text).toContain("topic/pr1")
@@ -798,7 +798,7 @@ describe("queue timeline storybook", () => {
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("pr#2.1")
       expect(handle.text).toMatch(/\d{2}:\d{2} submitted by -/u)
-      expect(handle.text).toContain("○ todo")
+      expect(handle.text).toContain("○ ready")
       expect(handle.text).not.toContain("submitted by @cto")
     } finally {
       handle.unmount()

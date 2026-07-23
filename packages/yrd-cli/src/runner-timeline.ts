@@ -33,10 +33,10 @@ export function timelineStatusGlyph(status: string): string {
     return "×"
   }
   if (["withdrawn", "retired", "canceled"].includes(status)) return "−"
-  // Pre-run WIP (draft = clean, revising = a draft with failed-submission history)
-  // gets a hollow dotted marker, distinct from the solid `○` a `submitted` row
-  // carries. Color separates draft (muted) from revising (warn).
-  if (status === "draft" || status === "revising") return "◌"
+  // Pre-run WIP (draft = clean, rev = a draft with failed-submission history)
+  // gets a hollow dotted marker, distinct from the solid `○` a `ready` row
+  // carries. Color separates draft (muted) from rev (warn).
+  if (status === "draft" || status === "rev") return "◌"
   return "○"
 }
 
