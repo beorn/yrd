@@ -86,7 +86,7 @@ import {
 } from "../src/queue-status-view.tsx"
 import { withLiveRenderer } from "../src/live-renderer.ts"
 import * as runInternals from "../src/run.ts"
-import { queueTimeStats } from "../src/time-stats.ts"
+import { queueStats } from "../src/time-stats.ts"
 import { YRD_VERSION } from "../src/version.ts"
 import { writeInstalledBaseline } from "../src/installed-baseline.ts"
 import {
@@ -4122,8 +4122,10 @@ describe("runYrd", () => {
       run,
       outcome,
       terminalAtMs,
+      failureClass: outcome === "integrated" ? null : "other",
       activeMs: activeMinutes * minute,
       queueWaitMs: waitMinutes.map((value) => value * minute),
+      members: [],
     })
     const facts = [
       fact("R1", "integrated", 10, [5, 15], now - 6 * 60 * minute),
@@ -4269,7 +4271,7 @@ describe("runYrd", () => {
     expect(widened.metrics.oldestOpenMs).toBe(60 * minute)
   })
 
-  it("keeps time-stats facts on the full horizon so WK/MON never inherit the 24h metrics window", () => {
+  it("keeps calendar-stat facts on the full horizon instead of inheriting the 24h metrics window", () => {
     const minute = 60_000
     const hour = 60 * minute
     const now = Date.parse("2026-07-13T12:00:00.000Z")
@@ -4305,14 +4307,80 @@ describe("runYrd", () => {
     // The 24h metrics window counts only the recent landing.
     expect(projection.metrics.terminalAttempts).toBe(1)
     // timeStatsFacts span the FULL retained horizon — both landings — so the
-    // TimeStatsBox windows read their own spans off it, never the 24h default.
+    // calendar panel never inherits the 24h aggregate window.
     expect(projection.timeStatsFacts.map((f) => f.run).toSorted()).toEqual(["R1", "R2"])
-    const windows = queueTimeStats(projection.timeStatsFacts, now, projection.earliestEventMs)
-    const attempts = (key: string) => windows.find((w) => w.key === key)!.metrics.terminalAttempts
-    expect(attempts("HR")).toBe(0) // last hour: neither
-    expect(attempts("DAY")).toBe(1) // 24h: the recent landing only
-    expect(attempts("WK")).toBe(2) // 7d: both, including the landing the 24h window drops
-    expect(attempts("MON")).toBe(2) // 30d: both
+    const buckets = queueStats(projection.timeStatsFacts, now, projection.earliestEventMs, 0)
+    const attempts = (label: string) => buckets.find((bucket) => bucket.label === label)!.runs.all
+    expect(attempts("TODAY")).toBe(1)
+    expect(attempts("YESTERDAY")).toBe(0)
+    expect(attempts("THIS WEEK")).toBe(1)
+    expect(attempts("THIS MONTH")).toBe(2)
+  })
+
+  it("keeps failed-attempt retries on the Run that owned them", () => {
+    const minute = 60_000
+    const now = Date.parse("2026-07-13T12:00:00.000Z")
+    const pr = {
+      id: "PR1",
+      branch: "topic/retried",
+      base: "main",
+      status: "integrated",
+      revision: 1,
+      headSha: "1".repeat(40),
+      submittedAt: "2026-07-13T09:00:00.000Z",
+    } as unknown as PR
+    const landed = (id: string, finishedAt: string) =>
+      fakeRun({
+        id,
+        status: "passed",
+        pr: { id: pr.id, revision: 1, headSha: pr.headSha, baseSha: BASE_SHA },
+        startedAt: new Date(Date.parse(finishedAt) - 10 * minute).toISOString(),
+        finishedAt,
+        steps: [],
+        integration: { commit: MERGED_SHA, baseSha: BASE_SHA },
+      })
+    const older = landed("R-old", "2026-07-13T10:00:00.000Z")
+    const newer = landed("R-new", "2026-07-13T11:00:00.000Z")
+    const result: QueueStatusResult = {
+      base: "main",
+      prs: [pr],
+      running: [],
+      waiting: [],
+      finished: [newer, older],
+    }
+    const failedAttempt: QueueAttempt = {
+      job: "J-new-check-1",
+      run: "R-new",
+      step: "check",
+      index: 0,
+      attempt: 1,
+      runner: "runner-1",
+      outcome: "failed",
+      requestedAt: "2026-07-13T10:51:00.000Z",
+      startedAt: "2026-07-13T10:52:00.000Z",
+      finishedAt: "2026-07-13T10:53:00.000Z",
+      durationMs: minute,
+      revision: "check-v1",
+      result: {
+        status: "failed",
+        error: { code: "check-failed", message: "retry the newer run" },
+      },
+    }
+    const projection = queueTimelineProjection([result], {
+      now,
+      windowMs: 6 * 60 * minute,
+      statuses: ["pending", "running", "rejected", "integrated", "other"],
+      terms: [],
+      latest: false,
+      rowLimit: 20,
+      submissionTimes: queueTimelineAdmissionTimes([result]),
+      attempts: [failedAttempt],
+    })
+
+    expect(Object.fromEntries(projection.timeStatsFacts.map((fact) => [fact.run, fact.members[0]?.retries]))).toEqual({
+      "R-new": 1,
+      "R-old": 0,
+    })
   })
 
   it("keeps one recut PR card with cumulative source-ready age and revision lineage", async () => {
@@ -4423,6 +4491,77 @@ describe("runYrd", () => {
         detail: "running · rev1→rev2",
       },
     ])
+
+    const finishedAt = "2026-07-13T12:00:00.000Z"
+    const integratedPr: PR = {
+      ...pr,
+      status: "integrated",
+      integratedAt: finishedAt,
+      revisions: pr.revisions.map((revision) =>
+        revision.revision === 2
+          ? { ...revision, terminal: { status: "integrated", at: finishedAt, run: "R2" } }
+          : revision,
+      ),
+    }
+    const integratedRun = fakeRun({
+      id: "R2",
+      status: "passed",
+      pr: {
+        id: integratedPr.id,
+        revision: integratedPr.revision,
+        headSha: integratedPr.headSha,
+        baseSha: integratedPr.baseSha,
+      },
+      startedAt: "2026-07-13T11:57:00.000Z",
+      finishedAt,
+      steps: [],
+      integration: { commit: MERGED_SHA, baseSha: integratedPr.baseSha! },
+    })
+    const retryAttempt: QueueAttempt = {
+      job: "J-R2-check-1",
+      run: "R2",
+      step: "check",
+      index: 0,
+      attempt: 1,
+      runner: "runner-1",
+      outcome: "failed",
+      requestedAt: "2026-07-13T11:57:00.000Z",
+      startedAt: "2026-07-13T11:57:01.000Z",
+      finishedAt: "2026-07-13T11:58:01.000Z",
+      durationMs: minute,
+      revision: "check-v1",
+      result: {
+        status: "failed",
+        error: { code: "check-failed", message: "retry once" },
+      },
+    }
+    const settledProjection = queueTimelineProjection([{ ...result, prs: [integratedPr], finished: [integratedRun] }], {
+      now,
+      windowMs: 6 * 60 * minute,
+      statuses: ["pending", "running", "rejected", "integrated", "other"],
+      terms: [],
+      latest: false,
+      rowLimit: 20,
+      submissionTimes: queueTimelineAdmissionTimes([{ ...result, prs: [integratedPr], finished: [integratedRun] }]),
+      attempts: [retryAttempt],
+    })
+    expect(settledProjection.timeStatsFacts).toMatchObject([
+      {
+        run: "R2",
+        outcome: "integrated",
+        members: [
+          {
+            pr: "PR1",
+            totalMs: 121 * minute,
+            totalApproximate: false,
+            codingMs: null,
+            queueWaitMs: 2 * minute,
+            jobRunMs: minute,
+            retries: 2,
+          },
+        ],
+      },
+    ])
   })
 
   it("renders every batched PR revision as its own settled queue row", async () => {
@@ -4499,7 +4638,7 @@ describe("runYrd", () => {
     expect(projection.metrics).toMatchObject({ terminalAttempts: 1, outcomes: { integrated: 1 } })
 
     const rendered = stripOsc8Targets(
-      // Height fits the FLOW + TIME boxes; a standalone QueueTimelineView
+      // Height fits the STATS panel; a standalone QueueTimelineView
       // has no fillHeight list-scroll, so a box tuned to the old short grid would
       // clip the FILTER/header rows. Production (QueueWatchFrame) scrolls the list.
       await renderString(createElement(QueueTimelineView, { projection, columns: 140 }), {
@@ -4531,8 +4670,8 @@ describe("runYrd", () => {
     // the header) and dropped its "FILTER" label — plain-word pills now.
     const pillsRowIndex = rows.findIndex((row) => /todo.*running.*failed.*done/u.test(row))
     expect(pillsRowIndex, "pills row renders below the rows").toBeGreaterThan(rows.indexOf(second!))
-    const flowIndex = rows.findIndex((row) => row.includes("╭─ FLOW "))
-    expect(flowIndex).toBeGreaterThan(pillsRowIndex)
+    const statsIndex = rows.findIndex((row) => row.includes("╭─ STATS "))
+    expect(statsIndex).toBeGreaterThan(pillsRowIndex)
   })
 
   it("projects fresh, stale, and absent resident runner heartbeats", async () => {
@@ -4903,7 +5042,7 @@ describe("runYrd", () => {
     expect(unknownRow).toContain("err=novel-failure-code")
   })
 
-  it("builds one filtered one-revision timeline and deduplicated FLOW/TIME projection", async () => {
+  it("builds one filtered one-revision timeline and deduplicated STATS projection", async () => {
     const minute = 60_000
     const now = Date.parse("2026-07-13T12:00:00.000Z")
     const member = (id: string, revision: number, headSha: string) => ({
@@ -4988,6 +5127,24 @@ describe("runYrd", () => {
       },
     }
     const submissionTimes = new Map(prs.map((pr) => [queueRevisionKey(pr), pr.submittedAt!]))
+    const failedAttempt: QueueAttempt = {
+      job: "J-R1-check-1",
+      run: "R1",
+      step: "check",
+      index: 0,
+      attempt: 1,
+      runner: "runner-1",
+      outcome: "failed",
+      requestedAt: "2026-07-13T10:01:00.000Z",
+      startedAt: "2026-07-13T10:02:00.000Z",
+      finishedAt: "2026-07-13T10:03:00.000Z",
+      durationMs: minute,
+      revision: "check-v1",
+      result: {
+        status: "failed",
+        error: { code: "check-failed", message: "first attempt failed" },
+      },
+    }
 
     const projection = queueTimelineProjection([result], {
       now,
@@ -4999,6 +5156,7 @@ describe("runYrd", () => {
       submissionTimes,
       retainedSinceMs: Date.parse("2026-07-13T07:00:00.000Z"),
       siblingBases: ["release"],
+      attempts: [failedAttempt],
     })
 
     expect(projection.base).toBe("main")
@@ -5050,24 +5208,24 @@ describe("runYrd", () => {
         pr: "PR1",
         ageMs: 15 * minute,
         totalMs: 10 * minute,
-        activeMs: 0,
-        waitMs: 10 * minute,
+        activeMs: minute,
+        waitMs: 9 * minute,
         queueWaitMs: 5 * minute,
       },
       {
         pr: "PR2",
         ageMs: 25 * minute,
         totalMs: 10 * minute,
-        activeMs: 0,
-        waitMs: 10 * minute,
+        activeMs: minute,
+        waitMs: 9 * minute,
         queueWaitMs: 15 * minute,
       },
     ])
     expect(
       (JSON.parse(JSON.stringify(projection.rows)) as typeof projection.rows).filter((row) => row.run === "R1"),
     ).toMatchObject([
-      { pr: "PR1", ageMs: 15 * minute, totalMs: 10 * minute, activeMs: 0, waitMs: 10 * minute },
-      { pr: "PR2", ageMs: 25 * minute, totalMs: 10 * minute, activeMs: 0, waitMs: 10 * minute },
+      { pr: "PR1", ageMs: 15 * minute, totalMs: 10 * minute, activeMs: minute, waitMs: 9 * minute },
+      { pr: "PR2", ageMs: 25 * minute, totalMs: 10 * minute, activeMs: minute, waitMs: 9 * minute },
     ])
     expect(projection.display).toEqual({ limit: 4, shown: 4, hidden: 4 })
     expect(projection.coverage).toEqual({
@@ -5084,6 +5242,33 @@ describe("runYrd", () => {
         integratedOnly: { n: 1, minMs: 10 * minute, avgMs: 10 * minute },
       },
       queueWait: { n: 5, avgMs: 1_044_000, p50Ms: 15 * minute, p90Ms: 35 * minute },
+    })
+    expect(projection.timeStatsFacts.find((fact) => fact.run === "R1")).toMatchObject({
+      outcome: "integrated",
+      failureClass: null,
+      members: [
+        {
+          pr: "PR1",
+          totalMs: 15 * minute,
+          totalApproximate: true,
+          codingMs: null,
+          queueWaitMs: 5 * minute,
+          jobRunMs: minute,
+          retries: 1,
+        },
+        {
+          pr: "PR2",
+          totalMs: 25 * minute,
+          totalApproximate: true,
+          codingMs: null,
+          queueWaitMs: 15 * minute,
+          jobRunMs: minute,
+          retries: 1,
+        },
+      ],
+    })
+    expect(projection.timeStatsFacts.find((fact) => fact.run === "R3")).toMatchObject({
+      failureClass: "env",
     })
     const constrainedProjection = {
       ...projection,
@@ -5132,7 +5317,7 @@ describe("runYrd", () => {
             },
             columns: width,
           }),
-          // Height fits the FLOW + TIME boxes. The standalone
+          // Height fits the STATS panel. The standalone
           // QueueTimelineView has no fillHeight list-scroll, so a box tuned to the
           // old short statistics surface would clip the header at a narrow tier.
           // Production (QueueWatchFrame) keeps the header via
@@ -5147,10 +5332,9 @@ describe("runYrd", () => {
       // than owning the whole row (W1, 2026-07-16). Item 3: no "FILTER" label,
       // no [p] brackets — the since= dimension survives, pills are plain words.
       expect.soft(filter).toContain("since=6:00:00 todo running failed done")
-      // The FLOW + TIME boxes read the SAME consolidated queueFlowMetrics
-      // aggregate at every tier. The landed per-24h throughput fact stays in the
-      // aggregate (projection.metrics.throughput) for --json consumers.
-      expect.soft(rows.some((row) => row.includes("╭─ FLOW "))).toBe(true)
+      // The panel reads the SAME retained terminal facts at every tier. The
+      // landed per-24h throughput fact stays in projection.metrics for JSON.
+      expect.soft(rows.some((row) => row.includes("╭─ STATS "))).toBe(true)
       expect.soft(fixed).toContain("RUNS")
       expect(Math.max(...rows.map((row) => Array.from(row).length))).toBeLessThanOrEqual(width)
       const header = rows.find((row) => row.includes("TIME") && row.includes("PR"))
@@ -7252,8 +7436,8 @@ describe("runYrd", () => {
 
     const laterQueue = outputIO({ columns: 120, now: () => Date.parse("2026-07-09T12:21:00.000Z") })
     expect(await runYrd(app, yrd("queue"), laterQueue.io), laterQueue.stderr()).toBe(0)
-    // The old ROWS "oldest=" cell has no place in the windowed FLOW surface.
-    expect(laterQueue.stdout()).toContain("FLOW")
+    // The old ROWS "oldest=" cell has no place in the calendar STATS surface.
+    expect(laterQueue.stdout()).toContain("STATS")
 
     const laterHuman = outputIO({ columns: 120 })
     expect(await runYrd(app, yrd("log", "--pr", "PR1"), laterHuman.io), laterHuman.stderr()).toBe(0)
@@ -10276,6 +10460,24 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     } finally {
       await app.close()
       rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
+  it("feeds retained journal attempts into queue statistics facts", async () => {
+    const app = await createApp({ failingCheck: true })
+    try {
+      await openAndSubmit(app)
+      await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+
+      const snapshot = await runInternals.queueListSnapshot(app, [], {}, outputIO().io)
+      expect(snapshot.projection.timeStatsFacts).toMatchObject([
+        {
+          run: "R1",
+          members: [{ pr: "PR1", retries: 1 }],
+        },
+      ])
+    } finally {
+      await app.close()
     }
   })
 

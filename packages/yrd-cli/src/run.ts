@@ -2871,6 +2871,7 @@ export async function queueListSnapshot(
   const now = io.now?.() ?? Date.now()
   const base = results[0]?.base ?? baseIdentity(requestedBase)
   const runner = activeResidentRunner(await residentRunnerStatus(io.cwd ?? process.cwd()))
+  const attempts = await queueLogAttempts(app.events())
   const projection = queueTimelineProjection(results, {
     now,
     windowMs: queueTimelineWindow(options.since),
@@ -2880,6 +2881,7 @@ export async function queueListSnapshot(
     latest: options.latest === true,
     rowLimit: queueTimelineRowLimit(io),
     submissionTimes: queueTimelineAdmissionTimes(results),
+    attempts,
     siblingBases: queueBases(state),
     base,
     state: state.bays,
@@ -2899,9 +2901,7 @@ export async function queueListSnapshot(
   const outputRunIds = new Set(
     outputResults.flatMap((result) => [...result.running, ...result.waiting, ...result.finished].map((run) => run.id)),
   )
-  const outputAttempts = includeOutputs
-    ? (await queueLogAttempts(app.events())).filter((attempt) => outputRunIds.has(attempt.run))
-    : []
+  const outputAttempts = includeOutputs ? attempts.filter((attempt) => outputRunIds.has(attempt.run)) : []
   const outputs =
     includeOutputs && io.artifactRoot !== undefined
       ? await queueArtifactOutputs(outputResults, io.artifactRoot, outputAttempts)

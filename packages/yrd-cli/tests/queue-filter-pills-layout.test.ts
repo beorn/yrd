@@ -66,14 +66,14 @@ describe("queue timeline FILTER pills row (items 2/3/5)", () => {
       const headerY = rowIndex(app.text, /\bTIME\b/u)
       const firstRowY = rowIndex(app.text, /pr#0\.\d/u)
       const pillsY = rowIndex(app.text, /todo.*running.*failed.*done/u)
-      const flowY = rowIndex(app.text, /╭─ FLOW /u)
+      const statsY = rowIndex(app.text, /╭─ STATS /u)
 
       expect(app.text).toContain("╭─ RUNNER ")
       expect(app.text).not.toContain("╭─ STATUS ")
       expect(headerY, "table header renders").toBeGreaterThanOrEqual(0)
       expect(firstRowY, "rows render below the header").toBeGreaterThan(headerY)
       expect(pillsY, "pills render below the rows").toBeGreaterThan(firstRowY)
-      expect(flowY, "flow metrics render below the pills").toBeGreaterThan(pillsY)
+      expect(statsY, "statistics render below the pills").toBeGreaterThan(pillsY)
 
       // Item 5: no blank row directly above the table header.
       const textRows = app.text.split("\n")

@@ -83,8 +83,7 @@ describe("queue timeline storybook", () => {
       expect(frame).toContain("2: check")
       expect(frame).toContain("pr#42.1")
       expect(frame).toContain("╭─ RUNNER ")
-      expect(frame).toContain("╭─ FLOW ")
-      expect(frame).toContain("╭─ TIME ")
+      expect(frame).toContain("╭─ STATS ")
 
       // Tabs follow the live step (item 4): `check` is selected by default, so
       // the two-row tab strip and the running check step's command output stream
@@ -215,11 +214,10 @@ describe("queue timeline storybook", () => {
       const queue = term.screen.getText()
       expect(queue).toContain("pr#42.1")
       expect(queue).toContain("pr#43.1")
-      // The grouped round-5 metrics are secondary to the queue itself. At the
-      // 24-row compact tier, omit the whole pair instead of collapsing the
+      // The calendar metrics are secondary to the queue itself. At the
+      // 24-row compact tier, omit the panel instead of collapsing the
       // ListView to zero rows or clipping a partially truthful metric group.
-      expect(queue).not.toContain("╭─ FLOW ")
-      expect(queue).not.toContain("╭─ TIME ")
+      expect(queue).not.toContain("╭─ STATS ")
       // The bottom keybindings footer was removed entirely (item h).
       expect(queue).not.toContain("q quit")
 
@@ -411,7 +409,7 @@ describe("queue timeline storybook", () => {
     const projection = queueTimelineStories["production-overview"].snapshot.projection
     const header = (frame: string) =>
       frame.split("\n").find((row) => row.includes("TIME") && row.includes("RUN") && row.includes("PR"))
-    // Height fits the FLOW/TIME boxes; the standalone
+    // Height fits the STATS panel; the standalone
     // QueueTimelineView has no fillHeight list-scroll, so a fixed box tuned to the
     // old short metrics box would clip the header. Production (QueueWatchFrame) keeps
     // the header at any height via the scrolling list.

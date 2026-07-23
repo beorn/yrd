@@ -59,17 +59,32 @@ describe("queue timeline 21106 contract", () => {
     else process.env.TZ = priorTZ
   })
 
-  it("renders separately bordered FLOW and TIME boxes after the list", async () => {
+  it("renders one calendar STATS panel after the list", async () => {
     const rows = (await renderTimeline(contractProjection(), 120)).map((row) => row.trimEnd())
     const frame = rows.join("\n")
     const pillsLine = rows.findIndex((row) => /todo.*running.*failed.*done/u.test(row))
-    const statsLine = rowIndex(rows, "╭─ FLOW ")
+    const statsLine = rowIndex(rows, "╭─ STATS ")
 
     expect(statsLine).toBeGreaterThan(pillsLine)
     expect(rows[statsLine]?.length).toBe(120)
-    expect(frame).not.toContain("╭─ STATS ")
-    expect(frame).toContain("╭─ TIME ")
-    for (const cell of ["RUNS", "INTEGRATED", "FAILS", "FAILED", "WAIT", "avg", "p90", "HR", "DAY", "WK", "MON"]) {
+    expect(frame).not.toContain("╭─ FLOW ")
+    expect(frame).not.toContain("╭─ TIME ")
+    for (const cell of [
+      "RUNS",
+      "ALL",
+      "INTEGRATED",
+      "FAILS",
+      "AVG TIME",
+      "TOTAL",
+      "CODING",
+      "QUEUE WAIT",
+      "JOB RUN",
+      "RETRIES",
+      "TODAY",
+      "YESTERDAY",
+      "THIS WEEK",
+      "THIS MONTH",
+    ]) {
       expect(frame).toContain(cell)
     }
   })
@@ -160,7 +175,7 @@ describe("queue timeline 21106 contract", () => {
       "Land the durable patch",
     ])
 
-    // Detail and FLOW metrics stay per-Run even though the list denormalizes.
+    // Detail and flow metrics stay per-Run even though the list denormalizes.
     expect(projection.details.map((detail) => detail.run)).toEqual(["R42", "R5", "R4"])
     expect(projection.metrics.terminalAttempts).toBe(2)
     expect(projection.metrics.queueWait.n).toBe(2)
@@ -174,9 +189,9 @@ describe("queue timeline 21106 contract", () => {
     const lastRowLine = rowIndex(rows, "pr#4.1")
     // Item 2 (deliberate contract change): the pills row moved from ABOVE the
     // header to BELOW the list — new order updated → header → rows → pills →
-    // the FLOW/TIME boxes.
+    // the STATS panel.
     const pillsLine = rows.findIndex((row) => /todo.*running.*failed.*done/u.test(row))
-    const statsBoxLine = rowIndex(rows, "╭─ FLOW ")
+    const statsBoxLine = rowIndex(rows, "╭─ STATS ")
 
     expect(queueLine).toBeLessThan(updatedLine)
     expect(updatedLine).toBeLessThan(headerLine)
@@ -203,13 +218,25 @@ describe("queue timeline 21106 contract", () => {
     expect(rows.join("\n")).not.toContain("NO RUNNER")
     expect(rows.join("\n")).not.toContain("RUNNER STALE")
     expect(rows.join("\n")).not.toContain("oldest open")
-    // Separately framed FLOW and TIME share the rolling windows.
+    // One STATS frame carries the fixed calendar columns and metric hierarchy.
     const statisticsText = rows.slice(statsBoxLine).join("\n")
-    expect(statisticsText).toContain("╭─ TIME ")
-    for (const cell of ["RUNS", "INTEGRATED", "FAILS", "FAILED", "WAIT", "avg", "p90"]) {
+    for (const cell of [
+      "RUNS",
+      "ALL",
+      "INTEGRATED",
+      "FAILS",
+      "AVG TIME",
+      "TOTAL",
+      "CODING",
+      "QUEUE WAIT",
+      "JOB RUN",
+      "RETRIES",
+    ]) {
       expect(statisticsText).toContain(cell)
     }
-    for (const window of ["HR", "DAY", "WK", "MON"]) expect(statisticsText).toContain(window)
+    for (const window of ["TODAY", "YESTERDAY", "THIS WEEK", "THIS MONTH"]) {
+      expect(statisticsText).toContain(window)
+    }
   })
 
   it("renders the user-settled row contract at 160 columns", async () => {
@@ -446,24 +473,24 @@ describe("queue timeline 21106 contract", () => {
 
   it("renders the list left-flush with the 160-cell cap and no dead gutter", async () => {
     const wide = await renderTimeline(contractProjection(), 200)
-    // The FLOW + TIME row fills the full capped width with no dead gutter.
-    const wideBorder = wide[rowIndex(wide, "╭─ FLOW ")]
+    // The STATS row fills the full capped width with no dead gutter.
+    const wideBorder = wide[rowIndex(wide, "╭─ STATS ")]
     if (wideBorder === undefined) throw new Error("expected the statistics border row")
-    expect(wideBorder.startsWith("╭─ FLOW ")).toBe(true)
+    expect(wideBorder.startsWith("╭─ STATS ")).toBe(true)
     expect(wideBorder.trimEnd().length).toBe(160)
     for (const row of wide) expect(Array.from(row.trimEnd()).length).toBeLessThanOrEqual(160)
     // Left-anchored surfaces start at column 0; only right-aligned facts
     // (the updated clock, the bucket checkboxes) carry leading padding. Box
     // borders anchor at column 0 with their rounded corner glyph.
-    for (const anchor of ["QUEUE", "16:40:00 ○ ready", "╭─ FLOW"]) {
+    for (const anchor of ["QUEUE", "16:40:00 ○ ready", "╭─ STATS"]) {
       expect(wide[rowIndex(wide, anchor)]?.startsWith(anchor.slice(0, 1)), anchor).toBe(true)
     }
     expect(wide[rowIndex(wide, "TIME")]?.indexOf("TIME")).toBe(0)
 
     const narrow = await renderTimeline(contractProjection(), 100)
-    const narrowBorder = narrow[rowIndex(narrow, "╭─ FLOW ")]
+    const narrowBorder = narrow[rowIndex(narrow, "╭─ STATS ")]
     if (narrowBorder === undefined) throw new Error("expected the statistics border row")
-    expect(narrowBorder.startsWith("╭─ FLOW ")).toBe(true)
+    expect(narrowBorder.startsWith("╭─ STATS ")).toBe(true)
     expect(narrowBorder.trimEnd().length).toBe(100)
   })
 
@@ -671,9 +698,9 @@ describe("queue timeline 21106 contract", () => {
       // The bottom keybindings footer row was removed entirely (item h).
       expect(handle.text).not.toContain("q quit")
       expect(handle.text).not.toContain("⇧-drag")
-      // The FLOW/TIME boxes still render in the pane's bottom band below
+      // The STATS panel still renders in the pane's bottom band below
       // the list rows.
-      const statistics = rows.findIndex((row) => row.includes("╭─ FLOW "))
+      const statistics = rows.findIndex((row) => row.includes("╭─ STATS "))
       expect(statistics).toBeGreaterThan(0)
 
       // Default cursor is the batch lead PR42. The detail is PR-scoped now

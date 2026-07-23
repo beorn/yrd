@@ -20,7 +20,7 @@ import {
   queueTimelineDateHeaderAt,
   queueTimelineProjection,
 } from "../src/queue-status-view.tsx"
-import { TimeStatsBox } from "../src/time-stats-box.tsx"
+import { QueueStatsPanel } from "../src/time-stats-box.tsx"
 import { QueueWatchFrame, QueueWorkflowStepTabs } from "../src/watch-pane.tsx"
 
 const BRANCH_GLYPH = ""
@@ -51,10 +51,10 @@ async function selectPrTab(app: ReturnType<ReturnType<typeof createRenderer>>): 
 }
 
 describe("queue watch user round 6", () => {
-  it("removes METRIC titles and moves TIME's INTEGRATED heading onto the window row", () => {
+  it("replaces the legacy METRIC boxes with one calendar STATS hierarchy", () => {
     const projection = queueTimelineStories["production-overview"].snapshot.projection
     const app = createRenderer({ cols: 126, rows: 40 })(
-      h(TimeStatsBox, {
+      h(QueueStatsPanel, {
         facts: projection.timeStatsFacts,
         now: projection.now,
         earliestEventMs: projection.earliestEventMs,
@@ -63,9 +63,13 @@ describe("queue watch user round 6", () => {
     )
     try {
       expect(app.text).not.toContain("METRIC")
-      const rows = app.text.split("\n")
-      const integratedWindowRows = rows.filter((row) => /INTEGRATED\s+HR\s+DAY\s+WK\s+MON/u.test(row))
-      expect(integratedWindowRows).toHaveLength(1)
+      expect(app.text).toContain("╭─ STATS ")
+      expect(app.text).toContain("TODAY")
+      expect(app.text).toContain("YESTERDAY")
+      expect(app.text).toContain("THIS WEEK")
+      expect(app.text).toContain("THIS MONTH")
+      expect(app.text).toContain("AVG TIME")
+      expect(app.text).toContain("RETRIES")
     } finally {
       app.unmount()
     }
@@ -390,7 +394,8 @@ describe("queue watch user round 6", () => {
       await app.click(expandedPatch[0], expandedPatch[1])
       await app.waitForLayoutStable()
       expect(app.text).not.toContain("src/detail-pane.tsx")
-      await app.press("Tab")
+      app.focus("queue-submit-diff-PR60-4")
+      await app.waitForLayoutStable()
       await app.press("Enter")
       await app.waitForLayoutStable()
       expect(app.text).toContain("src/detail-pane.tsx")

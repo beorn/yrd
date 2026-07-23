@@ -22,6 +22,17 @@ export type StatusPresentation = Readonly<{
 }>
 
 export type FailureStatusClass = "failed" | "env" | "stale" | "timeout" | "canceled" | "needs-author"
+export type FailureBreakdownClass = "check-failed" | "env" | "stale" | "timeout" | "config-drift" | "canceled" | "other"
+
+export const FAILURE_BREAKDOWN_CLASSES: readonly FailureBreakdownClass[] = [
+  "check-failed",
+  "env",
+  "stale",
+  "timeout",
+  "config-drift",
+  "canceled",
+  "other",
+]
 
 const STATUS_PRESENTATIONS = {
   queued: { glyph: "○", color: "$fg-info" },
@@ -95,6 +106,28 @@ export function failureStatusClass(code: string): FailureStatusClass {
   if (CANCELED_FAILURE_CODES.has(code)) return "canceled"
   if (NEEDS_AUTHOR_FAILURE_CODES.has(code)) return "needs-author"
   return "failed"
+}
+
+/** The statistics breakdown is a projection of the same durable failure
+ * classifier used by StatusNotice. Raw codes only distinguish the two
+ * operator-requested classes that are intentionally more specific than the
+ * notice vocabulary; every other code inherits the shared class. */
+export function failureBreakdownClass(code: string): FailureBreakdownClass {
+  const normalized = code.trim().toLocaleLowerCase()
+  if (normalized === "check-failed") return "check-failed"
+  if (normalized === "config-drift") return "config-drift"
+  const status = failureStatusClass(normalized)
+  if (status === "env" || status === "stale" || status === "timeout" || status === "canceled") return status
+  const terminalStatus = statusPresentationState(normalized)
+  if (
+    terminalStatus === "env" ||
+    terminalStatus === "stale" ||
+    terminalStatus === "timeout" ||
+    terminalStatus === "canceled"
+  ) {
+    return terminalStatus
+  }
+  return "other"
 }
 
 export type StatusAutomation = "auto-requeue" | "auto-recut" | "none"
