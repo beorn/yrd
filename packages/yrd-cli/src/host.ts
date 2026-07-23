@@ -1001,8 +1001,9 @@ async function createYrdRuntimeHost(
           journal,
           stateDir: repository.stateDir,
           routes,
+          sender: defaultActor,
           reviewRequired: loaded.config.requires.includes("review"),
-          adapter: options.signalAdapter ?? createTribeSignalAdapter(process),
+          adapter: options.signalAdapter ?? createTribeSignalAdapter(process, defaultActor),
           log,
           // The resident is the primary drainer and delivers unbounded; every other
           // (one-shot) process gets a bounded delivery budget so it can never hold the

@@ -122,6 +122,8 @@ export function createSignalObserver(
     journal: Journal<unknown>
     stateDir: string
     routes: SignalRoutes
+    /** Tribe identity sending deliveries; a message addressed back to this identity is informational, not a ball. */
+    sender?: string
     reviewRequired?: boolean
     adapter: SignalDeliveryAdapter
     log?: ConditionalLogger
@@ -194,7 +196,7 @@ export function createSignalObserver(
             state = addSent(state, signal.id, recipient)
             // Record the request ball we just opened so a later terminal signal can close this
             // exact id + recipient, even if the actor or routes drift before then.
-            state = recordOpened(state, signal, recipient)
+            state = recordOpened(state, signal, recipient, options.sender)
             await persist(state)
           }
           if (isTerminalSignal(signal) && options.adapter.close !== undefined) {
@@ -292,7 +294,7 @@ export function createSignalObserver(
   })
 }
 
-export function createTribeSignalAdapter(process: Pick<Process, "run">): SignalDeliveryAdapter {
+export function createTribeSignalAdapter(process: Pick<Process, "run">, sender?: string): SignalDeliveryAdapter {
   const executable = Bun.which("tribe")
   if (executable === null) {
     raiseFailure(
@@ -311,7 +313,7 @@ export function createTribeSignalAdapter(process: Pick<Process, "run">): SignalD
   }
   return Object.freeze({
     async send(delivery) {
-      const request = trackedRequestId(delivery.event, delivery.recipient)
+      const request = trackedRequestId(delivery.event, delivery.recipient, sender)
       const tracked = request !== undefined
       await execute(
         [
@@ -529,8 +531,8 @@ function closuresFor(signal: TerminalSignal, routes: SignalRoutes): readonly Sig
   return [...closures.values()]
 }
 
-function trackedRequestId(signal: RoutableSignal, recipient: string): string | undefined {
-  if (signal.kind !== "pr/needs-review") return undefined
+function trackedRequestId(signal: RoutableSignal, recipient: string, sender?: string): string | undefined {
+  if (signal.kind !== "pr/needs-review" || sender === recipient) return undefined
   return requestIdForPR(signal.kind, signal.pr, signal.revision, recipient)
 }
 
@@ -603,9 +605,9 @@ function coverageKey(pr: string, revision: number, kind: "pr/rejected" | "pr/nee
   return `${pr}:${revision}:${kind}`
 }
 
-function recordOpened(state: CursorState, signal: RoutableSignal, recipient: string): CursorState {
+function recordOpened(state: CursorState, signal: RoutableSignal, recipient: string, sender?: string): CursorState {
   if (signal.kind !== "pr/needs-review") return state
-  const requestId = trackedRequestId(signal, recipient)
+  const requestId = trackedRequestId(signal, recipient, sender)
   if (requestId === undefined) return state
   if (state.opened.some((ball) => ball.requestId === requestId && ball.recipient === recipient)) return state
   const ball: OpenedBall = { pr: signal.pr, revision: signal.revision, kind: signal.kind, recipient, requestId }
