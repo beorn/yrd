@@ -5,8 +5,7 @@ import type { Event } from "loggily"
 import { artifactHref, artifactLabel, artifactLocation } from "./artifact-reference.ts"
 import { failureSlug } from "./failure-slug.ts"
 import {
-  failureAutomation,
-  failureStatusClass,
+  failureDisposition,
   statusPresentation,
   statusPresentationState,
   type StatusPresentationColor,
@@ -352,13 +351,11 @@ function settlementPRTail(props: OutcomeProps): string {
 function renderSettlementRow(props: OutcomeProps, color: boolean): string | undefined {
   if (props.outcome !== "settled" || props.run === undefined) return undefined
   const code = props.error?.code ?? props.failure?.code
-  const statusClass = code === undefined ? statusPresentationState(props.status ?? "failed") : failureStatusClass(code)
+  const disposition = code === undefined ? undefined : failureDisposition(code)
+  const statusClass = disposition?.state ?? statusPresentationState(props.status ?? "failed")
   const presentation = statusPresentation(statusClass)
   const verb = paint(color, ansiForStatus(presentation.color))("settled")
-  const next =
-    statusClass === "stale" || statusClass === "env" || statusClass === "timeout"
-      ? failureAutomation(statusClass)
-      : "none"
+  const next = disposition?.automation ?? "none"
   return `${timelineTag(props, color)} ${verb} status=${props.status ?? "failed"} class=${statusClass} next=${next}${settlementPRTail(props)}`
 }
 

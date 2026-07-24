@@ -168,7 +168,7 @@ check:
     const finishedRows = rows.filter((row) => row.includes("/0-check] finished "))
     expect(startingRows).toHaveLength(1)
     expect(finishedRows).toHaveLength(1)
-    for (const row of [...startingRows, ...finishedRows]) expect(row).not.toMatch(/TITLE|[◆◇●○✓✗×]/u)
+    for (const row of [...startingRows, ...finishedRows]) expect(row).not.toMatch(/TITLE|[◆◇◉○✓✗×]/u)
   }, 30_000)
 
   it("keeps routine compose successes at DEBUG with timing", async () => {

@@ -45,7 +45,7 @@ function visible(row: string | undefined): string {
 describe("shared status presentation vocabulary", () => {
   it.each([
     ["queued", "○"],
-    ["running", "●"],
+    ["running", "◉"],
     ["done", "✓"],
     ["integrated", "✓"],
     ["failed", "×"],
@@ -414,6 +414,27 @@ describe("resident runner settlement summary", () => {
     })
     expect(visible(formatResidentLogLine(runSettled, { color: false }))).toBe(
       "[main#325] settled status=failed class=timeout next=auto-requeue pr=PR412.3",
+    )
+  })
+
+  it.each([
+    ["stale-pr", "stale", "none"],
+    ["stale-check", "stale", "auto-requeue"],
+    ["stale-steps", "stale", "auto-requeue"],
+    ["stale-plan", "stale", "auto-requeue"],
+    ["source-publish", "env", "auto-requeue"],
+  ] as const)("shares the %s disposition with the watch notice", (code, statusClass, next) => {
+    const runSettled = log("yrd:queue:run", "info", "run settled", {
+      ...RUNNER_SCOPE,
+      run: "R326",
+      base: "main",
+      status: "failed",
+      outcome: "settled",
+      error: { code, message: `${code} fixture` },
+      prs: [{ pr: "PR413", revision: 4 }],
+    })
+    expect(visible(formatResidentLogLine(runSettled, { color: false }))).toBe(
+      `[main#326] settled status=failed class=${statusClass} next=${next} pr=PR413.4`,
     )
   })
 

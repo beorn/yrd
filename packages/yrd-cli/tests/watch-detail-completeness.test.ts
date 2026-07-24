@@ -12,8 +12,15 @@ import { createElement } from "react"
 import type { SourceRewrite } from "@yrd/queue"
 import { createRenderer } from "silvery/test"
 import { describe, expect, it } from "vitest"
-import { fixtureJob, fixturePr, fixtureRun, fixtureStep } from "../dev/queue-timeline-fixtures.ts"
-import { QueueDetailPrFacts, QueueShowView, queueShowData, type QueueShowData } from "../src/queue-status-view.tsx"
+import {
+  fixtureJob,
+  fixturePr,
+  fixtureResult,
+  fixtureRun,
+  fixtureSnapshot,
+  fixtureStep,
+} from "../dev/queue-timeline-fixtures.ts"
+import { QueueDetailRunPrBlocks, QueueShowView, queueShowData, type QueueShowData } from "../src/queue-status-view.tsx"
 
 const NO_RAW_ISO = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/u
 
@@ -138,8 +145,8 @@ describe("watch detail completeness — step artifacts + checkpoint (item J)", (
   })
 })
 
-describe("watch detail completeness — PR-level facts (item J)", () => {
-  it("renders the subject, reviews, comments, check requests, and revision history with a local clock", () => {
+describe("watch detail completeness — primary PR activity projection", () => {
+  it("renders subject, linked issue, reviews, comments, check requests, and revisions with local clocks", () => {
     const head = "9".repeat(40)
     const pr = fixturePr("PR9", "submitted", "2026-07-13T11:10:00.000Z", "Wire the queue detail surface", {
       headSha: head,
@@ -167,26 +174,33 @@ describe("watch detail completeness — PR-level facts (item J)", () => {
       ],
       checkRequests: [{ revision: 1, headSha: head, baseSha: "a".repeat(40), at: "2026-07-13T11:16:00.000Z" }],
     })
-    const app = createRenderer({ cols: 140, rows: 30 })(createElement(QueueDetailPrFacts, { prs: [pr] }))
+    const snapshot = fixtureSnapshot(fixtureResult([pr], []))
+    const row = snapshot.projection.rows.find((candidate) => candidate.pr === pr.id)
+    if (row === undefined) throw new Error("missing pending PR fixture row")
+    const app = createRenderer({ cols: 140, rows: 30 })(
+      createElement(QueueDetailRunPrBlocks, {
+        row,
+        rows: snapshot.projection.rows,
+        prs: [pr],
+        runDetails: [],
+      }),
+    )
     try {
-      expect(app.text).toContain("pr#9.1 Wire the queue detail surface")
-      expect(app.text).toContain("ISSUE @yrd/core/21106-queue-timeline")
-      expect(app.text).toContain("NOTE Keep the selected detail visible during review.")
-      expect(app.text).toContain("REVIEW approve reviewer@example.test")
+      expect(app.text).toContain("pr#9.1 @yrd/core/21106-queue-timeline")
+      expect(app.text).toContain("Wire the queue detail surface")
+      expect(app.text).toContain("@yrd/core/21106-queue-timeline")
+      expect(app.text).toContain("NOTE")
+      expect(app.text).toContain("Keep the selected detail visible during review.")
+      expect(app.text).toContain("r1 review approve by reviewer@example.test")
       expect(app.text).toContain("Field completeness matches the accepted contract.")
-      expect(app.text).toContain("COMMENT author@example.test")
-      expect(app.text).toContain("CHECK REQUESTED")
-      expect(app.text).toContain("REV 1 open")
+      expect(app.text).toContain("r1 comment by author@example.test")
+      expect(app.text).toContain("r1 check requested")
+      expect(app.text).toContain("r1 submitted")
       expect(app.text).not.toMatch(NO_RAW_ISO)
-    } finally {
-      app.unmount()
-    }
-  })
-
-  it("renders nothing when there are no PRs", () => {
-    const app = createRenderer({ cols: 80, rows: 6 })(createElement(QueueDetailPrFacts, { prs: [] }))
-    try {
-      expect(app.text.trim()).toBe("")
+      const rows = app.text.split("\n")
+      const issueY = rows.findIndex((line) => line.includes("@yrd/core/21106-queue-timeline"))
+      const issueX = rows[issueY]?.indexOf("@yrd/core/21106-queue-timeline") ?? -1
+      expect(app.cell(issueX, issueY).hyperlink).toBe("km:@yrd/core/21106-queue-timeline")
     } finally {
       app.unmount()
     }

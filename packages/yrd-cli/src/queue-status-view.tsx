@@ -59,9 +59,11 @@ import {
   TaskStatusValue,
 } from "./status-view.tsx"
 import {
-  failureAutomation,
+  failureDisposition,
   failureStatusClass,
   statusPresentation,
+  statusPresentationState,
+  type FailureDisposition,
   type StatusPresentationColor,
   type StatusPresentationState,
 } from "./status-presentation.ts"
@@ -1463,7 +1465,7 @@ function IssueValue({ issue, flex = false }: { issue: string; flex?: boolean }) 
  * width (a commit body wrapped at 72 columns no longer shows mangled mid-word
  * breaks in a narrow detail pane), and bold / lists / inline code / headings
  * render styled instead of raw. Shared by the watch detail pane and `pr view`
- * via PRDetailView / QueueDetailPrFacts. See silvery's MarkdownView.
+ * via QueueDetailRunPrBlocks / PRDetailView. See silvery's MarkdownView.
  */
 function DescriptionBlock({ description }: { description: string }) {
   return <MarkdownView source={description} minWidth={0} />
@@ -3180,16 +3182,7 @@ function timelineBranchLabel(branch: string): string {
  * pending rows alike. Run identity/timing and status live in the composite
  * header below, so this row never carries a competing corner status.
  */
-export function QueueDetailTitle({
-  row,
-  issue,
-}: {
-  row?: QueueTimelineProjectedRow
-  data?: QueueShowData
-  issue?: string
-  /** True in the live watch: a running status pulses (user directive 2026-07-21). */
-  live?: boolean
-}) {
+export function QueueDetailTitle({ row, issue }: { row?: QueueTimelineProjectedRow; issue?: string }) {
   if (row === undefined) {
     return (
       <Text bold color="$fg-warning" wrap="truncate">
@@ -3291,24 +3284,16 @@ function statusNoticeFailure(
 function noticeState(
   row: QueueTimelineProjectedRow | undefined,
   data: QueueShowData | undefined,
-  failure: HumanFailureProjection | undefined,
+  failureState: FailureDisposition["state"] | undefined,
 ): StatusNoticeState | undefined {
-  if (data?.status === "running" || data?.status === "waiting") return "running"
-  if (data?.status === "passed") return data.integration === undefined ? "done" : "integrated"
-  if (data?.status === "failed") return failure === undefined ? "failed" : failureStatusClass(failure.code)
-  if (data?.status === "canceled" || data?.status === "cancelled") return "canceled"
+  if (data !== undefined) {
+    if (data.status === "passed") return data.integration === undefined ? "done" : "integrated"
+    if (data.status === "failed") return failureState ?? "failed"
+    return statusPresentationState(data.status)
+  }
   if (row === undefined) return undefined
-  if (row.status === "draft") return "draft"
-  if (row.status === "rev") return "needs-author"
-  if (row.status === "ready" || row.status === "pending") return "queued"
-  if (row.status === "running") return "running"
-  if (row.status === "integrated") return "integrated"
-  if (row.status === "environment-refused") return "env"
-  if (row.status === "stale") return "stale"
-  if (row.status === "lost") return "timeout"
-  if (row.status === "canceled") return "canceled"
-  if (row.status === "rejected" && failure !== undefined) return failureStatusClass(failure.code)
-  return "rejected"
+  if (row.status === "rejected" && failureState !== undefined) return failureState
+  return statusPresentationState(row.status)
 }
 
 function noticeHeadline(
@@ -3335,7 +3320,6 @@ function noticeArtifact(data: QueueShowData | undefined): string | undefined {
 
 function noticeAutomation(state: StatusNoticeState): StatusNotice["auto"] {
   if (state === "queued") return { kind: "retry", when: "when queue capacity is available" }
-  if (state === "stale") return { kind: "recut", when: "on the next queue pass" }
   if (state === "env" || state === "timeout") return { kind: "requeue", when: "on the next queue pass" }
   return { kind: "none", when: "no automatic action is scheduled" }
 }
@@ -3404,7 +3388,23 @@ function noticeExplanation(
     return `${failureSummary === undefined ? "" : `${failureSummary}. `}Infrastructure fault; the candidate is innocent. Automatically requeued on the next queue pass.`
   }
   if (state === "stale") {
-    return `${failureSummary === undefined ? "" : `${failureSummary}. `}The base advanced after this revision was admitted. Automatically recut and requeued on the next queue pass.`
+    const prefix = failureSummary === undefined ? "" : `${failureSummary}. `
+    if (failure?.code === "stale-base") {
+      return `${prefix}The base advanced after this revision was admitted. Automatically recut and requeued on the next queue pass.`
+    }
+    if (failure?.code === "stale-check") {
+      return `${prefix}The checked candidate changed after admission. Automatically requeued for a fresh check on the next queue pass.`
+    }
+    if (failure?.code === "stale-steps") {
+      return `${prefix}The installed step configuration changed after this run was admitted. Automatically requeued under the installed steps on the next queue pass.`
+    }
+    if (failure?.code === "stale-plan") {
+      return `${prefix}The recorded run plan changed after this batch was admitted. Automatically requeued under the installed plan on the next queue pass.`
+    }
+    if (failure?.code === "stale-pr") {
+      return `${prefix}The PR revision changed after this run was pinned. This historical run will not retry; follow the current revision's queue state.`
+    }
+    return `${prefix}This run is stale, but the journal does not name an automatic recovery. Follow the current PR revision's queue state.`
   }
   if (state === "timeout") {
     const elapsedMs = row?.totalMs ?? data?.totalDurationMs
@@ -3435,10 +3435,11 @@ export function queueStatusNotice(
   context: Readonly<{ stepP50Ms?: number | null }> = {},
 ): StatusNotice | undefined {
   const failure = statusNoticeFailure(row, data)
-  const state = noticeState(row, data, failure)
+  const disposition = failure === undefined ? undefined : failureDisposition(failure.code)
+  const state = noticeState(row, data, disposition?.state)
   if (state === undefined) return undefined
   const presentation = statusPresentation(state)
-  const automation = failure === undefined ? undefined : failureAutomation(failureStatusClass(failure.code))
+  const automation = disposition?.automation
   const auto =
     automation === "auto-recut"
       ? ({ kind: "recut", when: "on the next queue pass" } as const)
@@ -3446,11 +3447,12 @@ export function queueStatusNotice(
         ? ({ kind: "requeue", when: "on the next queue pass" } as const)
         : noticeAutomation(state)
   const actor =
-    state === "queued" || state === "running" || state === "env" || state === "stale" || state === "timeout"
+    disposition?.actor ??
+    (state === "queued" || state === "running" || state === "env" || state === "timeout"
       ? "queue"
       : state === "failed" || state === "rejected" || state === "needs-author" || state === "draft"
         ? "author"
-        : undefined
+        : undefined)
   return {
     state,
     ...presentation,
@@ -5073,7 +5075,8 @@ function queueShowRows(run: QueueRun, attempts: readonly QueueAttempt[]): readon
       return stepAttempts.map((attempt) => queueShowAttemptRow(run, attempt))
     }
     const row = queueShowStepRow(run, step)
-    const canceled = terminalStepIndex >= 0 && index > terminalStepIndex && step.job === undefined
+    const canceled =
+      terminalStepIndex >= 0 && index > terminalStepIndex && (step.job === undefined || step.job.status === "requested")
     return canceled ? [{ ...row, status: "canceled", ...taskStatusFields("dropped") }] : [row]
   })
   const unplanned = attempts
@@ -5373,52 +5376,6 @@ export function QueueIntegrationFacts({ data }: { data: QueueShowData }) {
   )
 }
 
-function prReviewLine(review: PR["reviews"][number]): string {
-  const note = presentFact(review.note)
-  return `REVIEW ${review.decision} ${review.actor} ${detailClock(review.at)}${note === undefined ? "" : ` — ${note}`}`
-}
-
-function prCommentLine(comment: PR["comments"][number]): string {
-  const note = presentFact(comment.note)
-  return `COMMENT ${comment.actor} ${detailClock(comment.at)}${note === undefined ? "" : ` — ${note}`}`
-}
-
-/**
- * The selected PR's unlabelled title + linked ISSUE, surfaced directly under
- * the DETAIL identity row
- * so they read without expanding the PRS disclosure (item b, 2026-07-16). The
- * fuller DESCRIPTION / review history stays in the disclosure. Empty fields
- * omit (pre-r5 PRs carry neither — no placeholders). In a batch, the selected
- * member still owns this header while the disclosure carries every member.
- */
-export function QueueDetailSinglePrHeader({ pr }: { pr: PR }) {
-  // PR `name` is the durable subject for older/pending records that predate
-  // the optional richer `title` field. One template must not make pending rows
-  // lose their subject merely because no Run exists yet.
-  const title = presentFact(pr.title) ?? presentFact(pr.name)
-  const issue = presentFact(pr.issue)
-  if (title === undefined && issue === undefined) return null
-  return (
-    <Box flexDirection="column" minWidth={0}>
-      {title === undefined ? null : (
-        <>
-          <Box height={1} flexShrink={0} />
-          <Text bold wrap="truncate" bgConflict="ignore">
-            {title}
-          </Text>
-          <Box height={1} flexShrink={0} />
-        </>
-      )}
-      {issue === undefined ? null : (
-        <Text wrap="truncate">
-          {"ISSUE".padEnd(9, " ")}
-          <IssueValue issue={issue} />
-        </Text>
-      )}
-    </Box>
-  )
-}
-
 type PrActivityEntry = Readonly<{
   at: string
   rank: number
@@ -5437,12 +5394,11 @@ function runActivityState(data: QueueShowData): StatusNoticeState {
 
 function prActivityEntries(
   pr: PR,
-  memberRevision: number,
   runDetails: readonly QueueShowData[],
   currentRow: QueueTimelineProjectedRow | undefined,
 ): readonly PrActivityEntry[] {
   const entries: PrActivityEntry[] = []
-  const revisions = pr.revisions.filter((revision) => revision.revision <= memberRevision)
+  const revisions = pr.revisions
   for (const revision of revisions) {
     const submitted = revision.submittedAt !== undefined
     const activityAt = revision.submittedAt ?? revision.pushedAt
@@ -5461,7 +5417,7 @@ function prActivityEntries(
       text: `r${revision.revision} ${submitted ? "submitted" : "registered"} by ${revision.actor ?? "-"}`,
     })
   }
-  for (const request of pr.checkRequests.filter((request) => request.revision <= memberRevision)) {
+  for (const request of pr.checkRequests) {
     const currentQueued =
       currentRow?.pr === pr.id &&
       currentRow.revision === request.revision &&
@@ -5478,7 +5434,7 @@ function prActivityEntries(
         : {}),
     })
   }
-  for (const review of pr.reviews.filter((review) => review.revision <= memberRevision)) {
+  for (const review of pr.reviews) {
     entries.push({
       at: review.at,
       rank: 40,
@@ -5486,7 +5442,7 @@ function prActivityEntries(
       ...(presentFact(review.note) === undefined ? {} : { detail: presentFact(review.note) }),
     })
   }
-  for (const comment of pr.comments.filter((comment) => comment.revision <= memberRevision)) {
+  for (const comment of pr.comments) {
     entries.push({
       at: comment.at,
       rank: 50,
@@ -5497,7 +5453,7 @@ function prActivityEntries(
 
   const representedRuns = new Set<string>()
   for (const data of runDetails) {
-    const member = data.prs.find((candidate) => candidate.id === pr.id && candidate.revision <= memberRevision)
+    const member = data.prs.find((candidate) => candidate.id === pr.id)
     if (member === undefined) continue
     const at = presentFact(data.finished) ?? presentFact(data.started)
     if (at === undefined) continue
@@ -5678,7 +5634,7 @@ export function QueueDetailRunPrBlocks({
                     text: `r${member.revision} submitted by ${memberRow.submitter ?? "-"}`,
                   },
                 ]
-            : prActivityEntries(pr, member.revision, runDetails, memberRow ?? row)
+            : prActivityEntries(pr, runDetails, memberRow ?? row)
         const age = prAgeLabel(pr, member.revision, memberRow ?? row)
         const facts = [
           ...(position === undefined ? [] : [{ key: "position", value: String(position) }]),
@@ -5740,77 +5696,6 @@ export function QueueDetailRunPrBlocks({
                 ))}
               </>
             )}
-          </Box>
-        )
-      })}
-    </Box>
-  )
-}
-
-// PR-level facts (item J, 2026-07-16): the batched members' subject, review /
-// comment / check-request activity, and revision history — none of which live
-// on the run's `PRSnapshot`, so they are threaded from the full status PRs.
-// Timestamps use the local detail clock; only present facts render; every row
-// carrying an author-authored string sets `bgConflict="ignore"`.
-export function QueueDetailPrFacts({ prs }: { prs: readonly PR[] }) {
-  if (prs.length === 0) return null
-  return (
-    <Box flexDirection="column" minWidth={0}>
-      {prs.map((pr, index) => {
-        const name = presentFact(pr.name)
-        const title = presentFact(pr.title)
-        const issue = presentFact(pr.issue)
-        const note = presentFact(pr.note)
-        const description = presentFact(pr.description)
-        const clocks = prRevisionClocks(pr)
-        return (
-          <Box key={pr.id} flexDirection="column" minWidth={0} marginTop={index === 0 ? 0 : 1}>
-            <Text wrap="truncate" bgConflict="ignore">
-              <QueuePrId pr={pr.id} revision={pr.revision} />
-              {name === undefined ? "" : ` ${name}`}
-            </Text>
-            {title === undefined ? null : (
-              <Text wrap="truncate" bgConflict="ignore">
-                TITLE {title}
-              </Text>
-            )}
-            {issue === undefined ? null : (
-              <Text wrap="truncate">
-                ISSUE <IssueValue issue={issue} />
-              </Text>
-            )}
-            {note === undefined ? null : (
-              <Text wrap="truncate" bgConflict="ignore">
-                NOTE {note}
-              </Text>
-            )}
-            {description === undefined ? null : (
-              <Box flexDirection="column" minWidth={0}>
-                <Text bold>DESCRIPTION</Text>
-                <DescriptionBlock description={description} />
-              </Box>
-            )}
-            {pr.reviews.map((review, reviewIndex) => (
-              <Text key={`review:${reviewIndex}`} wrap="truncate" bgConflict="ignore">
-                {prReviewLine(review)}
-              </Text>
-            ))}
-            {pr.comments.map((comment, commentIndex) => (
-              <Text key={`comment:${commentIndex}`} wrap="truncate" bgConflict="ignore">
-                {prCommentLine(comment)}
-              </Text>
-            ))}
-            {pr.checkRequests.map((request, requestIndex) => (
-              <Text key={`check:${requestIndex}`} wrap="truncate">
-                CHECK REQUESTED {detailClock(request.at)}
-              </Text>
-            ))}
-            {clocks.map((clock, clockIndex) => (
-              <Text key={`rev:${clockIndex}`} wrap="truncate">
-                REV {clock.revision} {clock.terminal?.status ?? "open"}{" "}
-                {detailClock(clock.terminal?.at ?? clock.submittedAt ?? clock.pushedAt)}
-              </Text>
-            ))}
           </Box>
         )
       })}

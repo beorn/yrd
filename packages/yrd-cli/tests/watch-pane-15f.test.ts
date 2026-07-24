@@ -98,7 +98,7 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       const doneGlyph = app.cell(prepareX - 3, tabsY + 1)
       const runningGlyph = app.cell(checkX - 3, tabsY + 1)
       expect(statusLine).toContain("✓ passed")
-      expect(statusLine).toContain("● running")
+      expect(statusLine).toContain("◉ running")
       expect(doneGlyph.fg, "done and running glyphs retain distinct semantic colors").not.toEqual(runningGlyph.fg)
 
       // Round 6: active and inactive tabs both have distinct filled surfaces.

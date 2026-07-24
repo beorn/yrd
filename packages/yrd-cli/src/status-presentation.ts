@@ -17,15 +17,21 @@ export type StatusPresentationState =
 export type StatusPresentationColor = "$fg-info" | "$fg-success" | "$fg-warning" | "$fg-error" | "$fg-muted"
 
 export type StatusPresentation = Readonly<{
-  glyph: "○" | "●" | "✓" | "×" | "−" | "◌"
+  glyph: "○" | "◉" | "✓" | "×" | "−" | "◌"
   color: StatusPresentationColor
 }>
 
 export type FailureStatusClass = "failed" | "env" | "stale" | "timeout" | "canceled" | "needs-author"
+export type StatusAutomation = "auto-requeue" | "auto-recut" | "none"
+export type FailureDisposition = Readonly<{
+  state: FailureStatusClass
+  automation: StatusAutomation
+  actor: "author" | "queue"
+}>
 
 const STATUS_PRESENTATIONS = {
   queued: { glyph: "○", color: "$fg-info" },
-  running: { glyph: "●", color: "$fg-info" },
+  running: { glyph: "◉", color: "$fg-info" },
   done: { glyph: "✓", color: "$fg-success" },
   integrated: { glyph: "✓", color: "$fg-success" },
   failed: { glyph: "×", color: "$fg-error" },
@@ -80,7 +86,7 @@ export function statusPresentation(status: string): StatusPresentation {
   return STATUS_PRESENTATIONS[statusPresentationState(status)]
 }
 
-const STALE_FAILURE_CODES = new Set(["stale-pr", "stale-check", "stale-base", "stale-steps", "stale-plan"])
+const AUTO_REQUEUE_STALE_FAILURE_CODES = new Set(["stale-check", "stale-steps", "stale-plan"])
 const CANCELED_FAILURE_CODES = new Set([
   "canceled",
   "cancelled",
@@ -90,24 +96,40 @@ const CANCELED_FAILURE_CODES = new Set([
   "run-cancelled",
 ])
 const NEEDS_AUTHOR_FAILURE_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKETS["needs-author"]
+const INFRA_RETRY_FAILURE_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKETS["infra-retry"]
+
+/**
+ * One code-aware decision for every status consumer. Classification alone is
+ * insufficient: stale-base is mechanically recut, stale-check/config drift is
+ * requeued unchanged, and stale-pr is an obsolete historical run with no retry
+ * of its own. Keep those journal-observable distinctions intact.
+ */
+export function failureDisposition(code: string): FailureDisposition {
+  if (code === "stale-base") return { state: "stale", automation: "auto-recut", actor: "queue" }
+  if (AUTO_REQUEUE_STALE_FAILURE_CODES.has(code)) {
+    return { state: "stale", automation: "auto-requeue", actor: "queue" }
+  }
+  if (code === "stale-pr") return { state: "stale", automation: "none", actor: "queue" }
+  if (
+    code === "queue-environment-refused" ||
+    code === "environment-refused" ||
+    code === "orphaned-run" ||
+    INFRA_RETRY_FAILURE_CODES.has(code)
+  ) {
+    return { state: "env", automation: "auto-requeue", actor: "queue" }
+  }
+  if (code === "job-lost" || code === "lease-timeout" || code === "job-lease-expired") {
+    return { state: "timeout", automation: "auto-requeue", actor: "queue" }
+  }
+  if (CANCELED_FAILURE_CODES.has(code)) return { state: "canceled", automation: "none", actor: "queue" }
+  if (NEEDS_AUTHOR_FAILURE_CODES.has(code)) {
+    return { state: "needs-author", automation: "none", actor: "author" }
+  }
+  return { state: "failed", automation: "none", actor: "author" }
+}
 
 /** Display classification for a durable queue failure. The observable is
  * named, never an uncorroborated cause: `job-lost` is a lease timeout. */
 export function failureStatusClass(code: string): FailureStatusClass {
-  if (STALE_FAILURE_CODES.has(code)) return "stale"
-  if (code === "queue-environment-refused") return "env"
-  if (code === "job-lost" || code === "lease-timeout") return "timeout"
-  if (CANCELED_FAILURE_CODES.has(code)) return "canceled"
-  if (NEEDS_AUTHOR_FAILURE_CODES.has(code)) return "needs-author"
-  return "failed"
-}
-
-export type StatusAutomation = "auto-requeue" | "auto-recut" | "none"
-
-/** Truthful automatic policy implemented by queue-authority release and the
- * resident pass. Ordinary decision and authoring failures never claim retry. */
-export function failureAutomation(state: FailureStatusClass): StatusAutomation {
-  if (state === "stale") return "auto-recut"
-  if (state === "env" || state === "timeout") return "auto-requeue"
-  return "none"
+  return failureDisposition(code).state
 }

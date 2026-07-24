@@ -59,7 +59,6 @@ import {
   QueueRunsView,
   PRListView,
   PRDetailView,
-  QueueDetailPrFacts,
   QueueTimelineView,
   QueueWatchView,
   activeWatchRow,
@@ -5472,7 +5471,7 @@ describe("runYrd", () => {
       // never a colored STATUS background band.
       for (const [glyph, anchor] of [
         ["○", "pr#6.1"],
-        ["●", "pr#5.1"],
+        ["◉", "pr#5.1"],
         ["−", "pr#7.1"],
         ["×", "pr#3.1"],
         // PR2 is the adjacent continuation member of PR1's Run, so its
@@ -10472,29 +10471,6 @@ describe("PR metadata — title, description, and issue link", () => {
     expect(visible).toContain("DESCRIPTION")
     expect(visible).toContain("First row of the description.")
     expect(rendered).toContain("]8;;https://example.test/issues/9")
-  })
-
-  it("renders title, issue hyperlink, and description per member in the batched PRS facts", async () => {
-    const rendered = await renderString(createElement(QueueDetailPrFacts, { prs: [metadataPr()] }), {
-      width: 120,
-      height: 40,
-    })
-    const visible = stripOsc8Targets(rendered)
-    expect(visible).toContain("TITLE feat(detail): pr metadata")
-    expect(visible).toContain("ISSUE")
-    expect(visible).toContain("DESCRIPTION")
-    expect(rendered).toContain("]8;;https://example.test/issues/9")
-  })
-
-  it("renders a path-form issue reference as a km-style internal link", async () => {
-    const rendered = await renderString(
-      createElement(QueueDetailPrFacts, {
-        prs: [metadataPr({ issue: "@km/all/21091-plain", description: undefined })],
-      }),
-      { width: 120, height: 20 },
-    )
-    expect(rendered).toContain("@km/all/21091-plain")
-    expect(rendered).toContain("]8;;km:@km/all/21091-plain")
   })
 })
 

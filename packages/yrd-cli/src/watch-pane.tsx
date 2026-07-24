@@ -1504,10 +1504,9 @@ export function QueueWatchFrame({
   // QUEUE and DETAIL are PANES, not boxes (user directive 2026-07-16, items
   // L/M) — no surrounding rounded border; the SplitPane divider separates them.
   // QUEUE is headed by its tab-style label (rendered inside `timeline`); DETAIL
-  // is headed by the selected PR's identity + ISSUE with STATUS/OUTCOME
-  // right-aligned (user directive 2026-07-21 — the detail view is FOR a PR),
-  // with the branch row reading directly beneath it and the run demoted to its
-  // own filled-header region in the body.
+  // is headed by the selected PR's identity + ISSUE (the detail view is FOR a
+  // PR), with the branch row directly beneath it and run identity/status owned
+  // by the composite header and outlined notice in the body.
   // One cell of horizontal padding keeps content off the
   // pane edge; the title sits flush at the top.
   const framedTimeline = (
@@ -1527,9 +1526,7 @@ export function QueueWatchFrame({
     <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0} paddingX={1} userSelect="contain">
       <QueueDetailTitle
         {...(selectedProjectedRow === undefined ? {} : { row: selectedProjectedRow })}
-        {...(detailData === undefined ? {} : { data: detailData })}
         {...(detailTitleIssue === undefined ? {} : { issue: detailTitleIssue })}
-        live
       />
       <Box flexGrow={1} minWidth={0} minHeight={0}>
         {detail}

@@ -95,7 +95,7 @@ describe("queue timeline storybook", () => {
       expect(prepareRowIndex).toBeGreaterThan(0)
       expect(lines[prepareRowIndex]).not.toMatch(/(?:^|\s)(?:passed|running|pending|failed)(?:\s|$)/u)
       expect(lines.slice(prepareRowIndex + 1, prepareRowIndex + 3).join("\n")).toMatch(
-        /(?:✓|●|○|×|−)\s+(?:passed|running|pending|failed|skipped)/u,
+        /(?:✓|◉|○|×|−)\s+(?:passed|running|pending|failed|skipped)/u,
       )
 
       const commandRowIndex = lines.findIndex((row) => row.includes(" $ bun vitest run"))

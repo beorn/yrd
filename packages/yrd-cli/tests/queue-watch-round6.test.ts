@@ -15,6 +15,7 @@ import {
   queueTimelineStories,
 } from "../dev/queue-timeline-fixtures.ts"
 import {
+  QueueDetailRunPrBlocks,
   queueShowData,
   queueTimelineAdmissionTimes,
   queueTimelineDateHeaderAt,
@@ -71,7 +72,7 @@ describe("queue watch user round 6", () => {
     }
   })
 
-  it("renders the final v4 run header, the primary PR block, and reverse-chronological revisions", async () => {
+  it("renders the final v4 run header, primary PR block, and full chronological activity", async () => {
     const commit = "b".repeat(40)
     const baseSha = "a".repeat(40)
     const leadHead1 = "7".repeat(40)
@@ -255,6 +256,38 @@ describe("queue watch user round 6", () => {
         },
         { pr: "PR61", revision: 1, unavailable: "refs-pruned" as const },
       ],
+    }
+    const activityProjection = queueTimelineProjection([fixtureResult([lead, partner], [...rejectedRuns, run])], {
+      now: snapshot.now,
+      windowMs: 24 * 60 * 60_000,
+      statuses: snapshot.projection.filters.statuses,
+      terms: [],
+      latest: false,
+      rowLimit: 100,
+      submissionTimes: queueTimelineAdmissionTimes([fixtureResult([lead, partner], [...rejectedRuns, run])]),
+    })
+    const olderRun = rejectedRuns[1]
+    if (olderRun === undefined) throw new Error("missing older activity fixture")
+    const olderRow = activityProjection.rows.find((candidate) => candidate.run === olderRun.id)
+    if (olderRow === undefined) throw new Error("missing older activity row")
+    const allRuns = [...rejectedRuns, run]
+    const olderActivity = createRenderer({ cols: 120, rows: 40 })(
+      h(QueueDetailRunPrBlocks, {
+        data: queueShowData(olderRun, allRuns),
+        row: olderRow,
+        rows: activityProjection.rows,
+        prs: [lead],
+        runDetails: allRuns.map((candidate) => queueShowData(candidate, allRuns)),
+        titleAbove: true,
+      }),
+    )
+    try {
+      expect(olderActivity.text).toContain("r2 run main#58")
+      expect(olderActivity.text, "an older-run selection still shows the PR's later activity").toContain(
+        "r4 run main#60",
+      )
+    } finally {
+      olderActivity.unmount()
     }
     const app = createRenderer({ cols: 200, rows: 70 })(h(QueueWatchFrame, { snapshot }))
     try {

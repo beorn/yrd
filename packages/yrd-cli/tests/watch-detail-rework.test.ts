@@ -19,9 +19,9 @@ import {
   fixtureStep,
 } from "../dev/queue-timeline-fixtures.ts"
 import {
-  QueueDetailSinglePrHeader,
   QueueDetailTitle,
   QueueShowView,
+  queueStatusNotice,
   queueShowData,
   type QueueShowData,
 } from "../src/queue-status-view.tsx"
@@ -65,6 +65,22 @@ function failedRun(): QueueShowData {
     ],
   })
   return queueShowData(run, [run])
+}
+
+function failureData(code: string, message: string): QueueShowData {
+  const data = failedRun()
+  if (data.failure === undefined) throw new Error("failed-run fixture is missing its projected failure")
+  const failure = {
+    ...data.failure,
+    code,
+    message,
+    summary: `err=${code}: ${message}`,
+  }
+  return {
+    ...data,
+    failure,
+    steps: data.steps.map((step, index) => (index === 0 ? { ...step, failure } : step)),
+  }
 }
 
 function deltaRun(): QueueShowData {
@@ -118,7 +134,7 @@ describe("detail title row — PR identity only", () => {
     if (row === undefined || data === undefined) throw new Error("fixture is missing the R42 projection")
 
     const app = createRenderer({ cols: 120, rows: 6 })(
-      createElement(Box, { width: 120 }, createElement(QueueDetailTitle, { row, data })),
+      createElement(Box, { width: 120 }, createElement(QueueDetailTitle, { row })),
     )
     try {
       // The title is PR-scoped. Run identity, timing, and status belong to the
@@ -158,7 +174,7 @@ describe("detail title row — PR identity only", () => {
     expect(row.totalMs).toBe(20 * 60_000)
 
     const app = createRenderer({ cols: 120, rows: 4 })(
-      createElement(Box, { width: 120 }, createElement(QueueDetailTitle, { row, data })),
+      createElement(Box, { width: 120 }, createElement(QueueDetailTitle, { row })),
     )
     try {
       expect(app.text).not.toContain("20m00s")
@@ -277,6 +293,76 @@ describe("watch detail composite header + status notice", () => {
       app.unmount()
     }
   })
+
+  it.each([
+    [
+      "source-publish",
+      "source ref publication failed",
+      "env",
+      "requeue",
+      "Infrastructure fault; the candidate is innocent",
+      "Automatically requeued",
+      "base advanced",
+    ],
+    [
+      "stale-base",
+      "queue base advanced",
+      "stale",
+      "recut",
+      "The base advanced after this revision was admitted",
+      "Automatically recut and requeued",
+      "installed step configuration",
+    ],
+    [
+      "stale-check",
+      "checked candidate ref moved",
+      "stale",
+      "requeue",
+      "The checked candidate changed after admission",
+      "Automatically requeued",
+      "Automatically recut",
+    ],
+    [
+      "stale-steps",
+      "installed steps changed",
+      "stale",
+      "requeue",
+      "The installed step configuration changed",
+      "Automatically requeued",
+      "base advanced",
+    ],
+    [
+      "stale-plan",
+      "recorded plan drifted",
+      "stale",
+      "requeue",
+      "The recorded run plan changed",
+      "Automatically requeued",
+      "base advanced",
+    ],
+    [
+      "stale-pr",
+      "PR changed after the run was pinned",
+      "stale",
+      "none",
+      "The PR revision changed after this run was pinned",
+      "This historical run will not retry",
+      "Automatically recut",
+    ],
+  ] as const)(
+    "renders truthful %s ownership and next-action copy",
+    (code, message, state, automaticKind, explanation, next, absent) => {
+      const notice = queueStatusNotice(undefined, failureData(code, message))
+      expect(notice).toMatchObject({
+        state,
+        auto: { kind: automaticKind },
+        actor: "queue",
+      })
+      expect(notice?.explanation).toContain(explanation)
+      expect(notice?.explanation).toContain(next)
+      expect(notice?.explanation).not.toContain(absent)
+    },
+  )
 })
 
 describe("detail run facts — natural timing sentence + landing, no RUN/BASE duplication", () => {
@@ -456,49 +542,6 @@ describe("detail step facts — final JOB yrd# grammar without duplication", () 
       const messageLine = app.text.split("\n").find((line) => line.includes("MESSAGE"))
       expect(messageLine, "the MESSAGE row is visible at the narrow full-detail tier").toBeDefined()
       expect(messageLine?.trimEnd(), "MESSAGE ends with an ellipsis instead of clipping mid-word").toMatch(/…$/u)
-    } finally {
-      app.unmount()
-    }
-  })
-})
-
-describe("detail single-PR header — unlabelled bold title + linked ISSUE", () => {
-  it("surrounds the bare bold title with whitespace and renders ISSUE as a hyperlink", () => {
-    const pr = {
-      ...fixturePr("PR5", "submitted", "2026-07-13T10:30:00.000Z", "PR5", {
-        issue: "@yrd/core/21106-queue-timeline",
-      }),
-      title: "Wire the detail surface",
-    }
-    const app = createRenderer({ cols: 120, rows: 6 })(createElement(QueueDetailSinglePrHeader, { pr }))
-    try {
-      expect(app.text).toContain("Wire the detail surface")
-      expect(app.text).not.toContain("TITLE ")
-      expect(app.text).toContain("ISSUE    @yrd/core/21106-queue-timeline")
-
-      const rows = app.text.split("\n")
-      const titleRow = rows.findIndex((row) => row.includes("Wire the detail surface"))
-      const issueRow = rows.findIndex((row) => row.includes("ISSUE    @yrd/core/21106-queue-timeline"))
-      expect(titleRow).toBeGreaterThan(0)
-      expect(rows[titleRow - 1]?.trim()).toBe("")
-      expect(rows[titleRow + 1]?.trim()).toBe("")
-      expect(issueRow).toBe(titleRow + 2)
-
-      const titleColumn = rows[titleRow]?.indexOf("Wire") ?? -1
-      expect(app.cell(titleColumn, titleRow).bold).toBe(true)
-      const issueColumn = rows[issueRow]?.indexOf("@yrd") ?? -1
-      expect(app.cell(issueColumn, issueRow).hyperlink).toBeDefined()
-    } finally {
-      app.unmount()
-    }
-  })
-
-  it("renders nothing when the PR carries neither subject nor issue", () => {
-    const pr = fixturePr("PR6", "submitted", "2026-07-13T10:30:00.000Z", "Fixture PR6")
-    const bare = { ...pr, name: "", title: undefined, issue: undefined }
-    const app = createRenderer({ cols: 80, rows: 4 })(createElement(QueueDetailSinglePrHeader, { pr: bare }))
-    try {
-      expect(app.text.trim()).toBe("")
     } finally {
       app.unmount()
     }
