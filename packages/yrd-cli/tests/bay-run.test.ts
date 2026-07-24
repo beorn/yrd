@@ -3,22 +3,167 @@
  * @level l3
  * @consumer @yrd/cli bay run
  */
-import { access, chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest"
 import { runYrdProcess } from "../src/host.ts"
 import type { YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
 const CLAIM = "@km/test/s2-fixture"
 const BRANCH = "task/s2-fixture"
+let originalPath: string | undefined
+let issueToolRoot: string | undefined
+
+beforeAll(async () => {
+  originalPath = process.env.PATH
+  issueToolRoot = await mkdtemp(join(tmpdir(), "yrd-bay-run-tools-"))
+  await writeFile(
+    join(issueToolRoot, "km"),
+    `#!/bin/sh
+printf '%s\n' '{"node":{"title":"Fixture issue","name":"fixture","version":1}}'
+`,
+  )
+  await chmod(join(issueToolRoot, "km"), 0o755)
+  process.env.PATH = `${issueToolRoot}:${originalPath ?? ""}`
+})
+
+afterAll(async () => {
+  restoreEnv("PATH", originalPath)
+  if (issueToolRoot !== undefined) await rm(issueToolRoot, { recursive: true, force: true })
+})
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 
 describe("yrd bay run", { timeout: 30_000 }, () => {
+  it("resolves a sigil issue to one name and registers its derived persona in a fresh TTY", async () => {
+    const { repo } = await repository()
+    await configureNotify(repo)
+    const fake = await fakeTribe(repo)
+    const habName = process.env.HAB_NAME
+    const habWire = process.env.HAB_WIRE
+    const tribeName = process.env.TRIBE_NAME
+    const tribeSessionName = process.env.TRIBE_SESSION_NAME
+    const path = process.env.PATH
+    const testLog = process.env.TRIBE_TEST_LOG
+    delete process.env.HAB_NAME
+    delete process.env.HAB_WIRE
+    delete process.env.TRIBE_NAME
+    delete process.env.TRIBE_SESSION_NAME
+    process.env.PATH = `${fake.bin}:${path ?? ""}`
+    process.env.TRIBE_TEST_LOG = fake.log
+    try {
+      const run = output(repo)
+      run.io.interactive = true
+      expect(await yrd(repo, run.io, "bay", "run", "@km/test/blabla1", "--", "true"), run.stderr()).toBe(0)
+
+      expect(run.stdout()).toContain("bay blabla1 → new task/blabla1, linked @km/test/blabla1")
+      expect(await readFile(fake.log, "utf8")).toContain("join @dev/blabla1 --delivery pull --json")
+      const prs = output(repo)
+      expect(await yrd(repo, prs.io, "pr", "list", "--issue", "@km/test/blabla1", "--json"), prs.stderr()).toBe(0)
+      expect(JSON.parse(prs.stdout())).toMatchObject({
+        prs: [{ branch: "task/blabla1", revisions: [expect.objectContaining({ actor: "@dev/blabla1" })] }],
+      })
+    } finally {
+      restoreEnv("HAB_NAME", habName)
+      restoreEnv("HAB_WIRE", habWire)
+      restoreEnv("TRIBE_NAME", tribeName)
+      restoreEnv("TRIBE_SESSION_NAME", tribeSessionName)
+      restoreEnv("PATH", path)
+      restoreEnv("TRIBE_TEST_LOG", testLog)
+    }
+  })
+
+  it("keeps mailbox registration supplementary in a TTY but fail-loud in a pipe", async () => {
+    const interactiveFixture = await repository()
+    await configureNotify(interactiveFixture.repo)
+    const fake = await fakeTribe(interactiveFixture.repo, false)
+    const habName = process.env.HAB_NAME
+    const tribeName = process.env.TRIBE_NAME
+    const path = process.env.PATH
+    const testLog = process.env.TRIBE_TEST_LOG
+    delete process.env.HAB_NAME
+    delete process.env.TRIBE_NAME
+    process.env.PATH = `${fake.bin}:${path ?? ""}`
+    process.env.TRIBE_TEST_LOG = fake.log
+    try {
+      const tty = output(interactiveFixture.repo)
+      tty.io.interactive = true
+      expect(await yrd(interactiveFixture.repo, tty.io, "bay", "run", "friendly", "--", "true"), tty.stderr()).toBe(0)
+      expect(tty.stdout()).toContain("bay friendly → new task/friendly, no issue linked")
+      expect(tty.stderr()).not.toContain("Tribe signal")
+
+      const pipedFixture = await repository()
+      await configureNotify(pipedFixture.repo)
+      const piped = output(pipedFixture.repo)
+      expect(await yrd(pipedFixture.repo, piped.io, "bay", "run", "piped", "--", "true")).not.toBe(0)
+      expect(piped.stderr()).toContain("mailbox registration")
+    } finally {
+      restoreEnv("HAB_NAME", habName)
+      restoreEnv("TRIBE_NAME", tribeName)
+      restoreEnv("PATH", path)
+      restoreEnv("TRIBE_TEST_LOG", testLog)
+    }
+  })
+
+  it("captures would-be Tribe traffic in a valued file wire without invoking the live adapter", async () => {
+    const { repo } = await repository()
+    await configureNotify(repo, "false")
+    const fake = await fakeTribe(repo)
+    const wireLog = join(repo, "..", "wire.jsonl")
+    const decoyWire = join(repo, "..", "decoy-wire.jsonl")
+    const habName = process.env.HAB_NAME
+    const habWire = process.env.HAB_WIRE
+    const tribeName = process.env.TRIBE_NAME
+    const path = process.env.PATH
+    const testLog = process.env.TRIBE_TEST_LOG
+    delete process.env.HAB_NAME
+    process.env.HAB_WIRE = `file:${decoyWire}`
+    delete process.env.TRIBE_NAME
+    process.env.PATH = `${fake.bin}:${path ?? ""}`
+    process.env.TRIBE_TEST_LOG = fake.log
+    try {
+      const draft = output(repo)
+      expect(
+        await yrd(
+          repo,
+          draft.io,
+          "--name",
+          "s2-fixture",
+          "--wire",
+          `file:${wireLog}`,
+          "bay",
+          "run",
+          "s2-fixture",
+          "--",
+          "true",
+        ),
+        draft.stderr(),
+      ).toBe(0)
+
+      const wire = output(repo)
+      expect(
+        await yrd(repo, wire.io, "--name", "s2-fixture", "--wire", `file:${wireLog}`, "pr", "ready", BRANCH),
+        wire.stderr(),
+      ).toBe(1)
+      const traffic = await readFile(wireLog, "utf8")
+      expect(traffic).toContain('"wire":"tribe.send"')
+      expect(traffic).toContain('"to":"@dev/s2-fixture"')
+      expect(traffic).toContain("Yrd rejected")
+      expect(await Bun.file(fake.log).exists()).toBe(false)
+      expect(await Bun.file(decoyWire).exists()).toBe(false)
+    } finally {
+      restoreEnv("HAB_NAME", habName)
+      restoreEnv("HAB_WIRE", habWire)
+      restoreEnv("TRIBE_NAME", tribeName)
+      restoreEnv("PATH", path)
+      restoreEnv("TRIBE_TEST_LOG", testLog)
+    }
+  })
+
   it("creates a branch-backed draft, runs exact argv, and closes the clean Bay synchronously", async () => {
     const { repo } = await repository()
     const run = output(repo)
@@ -487,6 +632,47 @@ async function repository(): Promise<{ repo: string }> {
   await git(repo, "commit", "-qm", "main")
   await git(repo, "push", "-q", "-u", "origin", "main")
   return { repo }
+}
+
+async function configureNotify(repo: string, check = "true"): Promise<void> {
+  await writeFile(
+    join(repo, ".yrd.yml"),
+    `base: main
+batch: 1
+steps: [check, merge]
+check: ${JSON.stringify(check)}
+merge: {}
+notify:
+  pr/rejected: [submitter]
+`,
+  )
+  await git(repo, "add", ".yrd.yml")
+  await git(repo, "commit", "-qm", "configure notifications")
+  await git(repo, "push", "-q", "origin", "main")
+}
+
+async function fakeTribe(repo: string, succeeds = true): Promise<{ bin: string; log: string }> {
+  const bin = join(repo, "..", "bin")
+  const log = join(repo, "..", "tribe.log")
+  const executable = join(bin, "tribe")
+  await mkdir(bin, { recursive: true })
+  await writeFile(
+    executable,
+    `#!/bin/sh
+printf '%s\\n' "$*" >> "$TRIBE_TEST_LOG"
+${succeeds ? "" : "exit 1"}
+if [ "$1" = join ]; then
+  printf '{"joined":true,"name":"%s"}\\n' "$2"
+fi
+`,
+  )
+  await chmod(executable, 0o755)
+  return { bin, log }
+}
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name]
+  else process.env[name] = value
 }
 
 function output(cwd: string): {

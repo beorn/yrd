@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto"
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { writeSync } from "node:fs"
+import { appendFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import {
   PRCanceledSchema,
@@ -17,6 +18,7 @@ import { createLogger, type ConditionalLogger } from "loggily"
 import * as z from "zod"
 import { actionableFailure, formatActionableFailure } from "./actionable-error.ts"
 import type { SignalRouteTarget, SignalRoutes } from "./config.ts"
+import { stableJson } from "./invocation.ts"
 
 const TextSchema = z.string().trim().min(1)
 const RevisionSchema = z.number().int().positive()
@@ -318,15 +320,8 @@ export function createTribeSignalAdapter(
   process: Pick<Process, "run">,
   sender?: string,
   attributedReceipt?: (event: RejectedSignal) => JobError | undefined,
+  executable = tribeExecutable(),
 ): SignalDeliveryAdapter {
-  const executable = Bun.which("tribe")
-  if (executable === null) {
-    raiseFailure(
-      "configuration",
-      "signal-adapter-missing",
-      "yrd: notify routes require the 'tribe' executable, but no live Tribe adapter is available",
-    )
-  }
   const execute = async (argv: readonly string[], action: string): Promise<void> => {
     const result = await process.run({ argv, timeoutMs: 5_000 })
     if (result.exitCode !== 0 || result.timedOut) {
@@ -370,6 +365,103 @@ export function createTribeSignalAdapter(
       )
     },
   })
+}
+
+export async function registerTribeSignalRecipient(
+  process: Pick<Process, "run">,
+  recipient: string,
+  executable = tribeExecutable(),
+): Promise<void> {
+  const result = await process.run({
+    argv: [executable, "join", recipient, "--delivery", "pull", "--json"],
+    timeoutMs: 5_000,
+  })
+  if (result.exitCode !== 0 || result.timedOut) {
+    throw new Error(
+      `yrd: Tribe signal mailbox registration failed for '${recipient}' (${
+        result.timedOut ? "timed out" : `exit ${result.exitCode}`
+      }): ${result.stderr.trim() || result.stdout.trim()}`,
+    )
+  }
+}
+
+/** Capture the same messages the live Tribe adapter would send, without
+ * contacting the daemon. `-` writes ordinary stdout, `file:` appends JSONL,
+ * and `fd:` writes the inherited descriptor (the mdspec fixture seam). */
+export function createWireSignalAdapter(
+  destination: string,
+  stdout: (text: string) => void,
+  sender?: string,
+  attributedReceipt?: (event: RejectedSignal) => JobError | undefined,
+): SignalDeliveryAdapter {
+  const write = wireWriter(destination, stdout)
+  return Object.freeze({
+    async send(delivery) {
+      const request = trackedRequestId(delivery.event, delivery.recipient, sender)
+      const tracked = request !== undefined
+      const receipt =
+        delivery.event.kind === "pr/needs-author"
+          ? delivery.event.receipt
+          : delivery.event.kind === "pr/rejected"
+            ? attributedReceipt?.(delivery.event)
+            : undefined
+      await write(
+        stableJson({
+          wire: "tribe.send",
+          to: delivery.recipient,
+          message: deliveryText(delivery, receipt),
+          type: tracked ? "request" : "notify",
+          summary: deliverySummary(delivery, receipt),
+          delivery: tracked ? "push" : "pull",
+          ...(request === undefined ? {} : { request, expiresInMs: REVIEW_BALL_TTL_MS }),
+        }),
+      )
+    },
+    async close(closure) {
+      await write(
+        stableJson({
+          wire: "tribe.pending.close",
+          owner: closure.recipient,
+          request: closure.request,
+        }),
+      )
+    },
+  })
+}
+
+function tribeExecutable(): string {
+  const executable = Bun.which("tribe")
+  if (executable !== null) return executable
+  raiseFailure(
+    "configuration",
+    "signal-adapter-missing",
+    "yrd: notify routes require the 'tribe' executable, but no live Tribe adapter is available",
+  )
+}
+
+function wireWriter(destination: string, stdout: (text: string) => void): (text: string) => void | Promise<void> {
+  if (destination === "-") return stdout
+  if (destination.startsWith("file:")) {
+    const path = destination.slice("file:".length)
+    if (path === "") {
+      raiseFailure("configuration", "signal-wire-invalid", "yrd: file wire destination requires a path")
+    }
+    return (text) => appendFile(path, text)
+  }
+  if (destination.startsWith("fd:")) {
+    const fd = Number(destination.slice("fd:".length))
+    if (!Number.isSafeInteger(fd) || fd < 0) {
+      raiseFailure("configuration", "signal-wire-invalid", "yrd: fd wire destination requires a non-negative integer")
+    }
+    return (text) => {
+      writeSync(fd, text)
+    }
+  }
+  raiseFailure(
+    "configuration",
+    "signal-wire-capture-invalid",
+    `yrd: '${destination}' is a live socket, not a capture sink`,
+  )
 }
 
 const OpenedBallSchema = z

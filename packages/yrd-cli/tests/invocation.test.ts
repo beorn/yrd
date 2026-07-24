@@ -60,20 +60,39 @@ describe("resolveYrdContext", () => {
   it.each([
     {
       name: "CLI selector over environment",
-      options: { repo: "../cli-repo" },
-      env: { YRD_REPO: "../env-repo" },
+      options: { repo: "../cli-repo", name: "cli-work", wire: "file:/tmp/cli-wire.jsonl" },
+      env: {
+        YRD_REPO: "../env-repo",
+        HAB_NAME: "env-work",
+        HAB_WIRE: "file:/tmp/env-wire.jsonl",
+        TRIBE_NAME: "@agent/7",
+      },
       context: {
         repo: resolve(ambient, "../cli-repo"),
         observability: { level: "warn", spans: false, explicitLevel: false },
+        persona: { name: "cli-work", mailbox: "@dev/cli-work", registration: "ensure" },
+        wire: "file:/tmp/cli-wire.jsonl",
       },
     },
     {
       name: "environment selector over ambient discovery",
       options: {},
-      env: { YRD_REPO: "../env-repo" },
+      env: { YRD_REPO: "../env-repo", HAB_NAME: "env-work", HAB_WIRE: "fd:3" },
       context: {
         repo: resolve(ambient, "../env-repo"),
         observability: { level: "warn", spans: false, explicitLevel: false },
+        persona: { name: "env-work", mailbox: "@dev/env-work", registration: "ensure" },
+        wire: "fd:3",
+      },
+    },
+    {
+      name: "transitional Tribe identity when Hab has no name",
+      options: {},
+      env: { TRIBE_NAME: "@agent/7" },
+      context: {
+        repo: resolve(ambient),
+        observability: { level: "warn", spans: false, explicitLevel: false },
+        persona: { name: "7", mailbox: "@agent/7", registration: "existing" },
       },
     },
     {
