@@ -24,25 +24,54 @@ function ids(): () => string {
 function workspaceAdapter(): BayWorkspace {
   return {
     revision: "test-workspace-v1",
-    provision: (input) => ({ status: "passed", output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD_1, baseSha: BASE } }),
-    refresh: (input) => ({ status: "passed", output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD_1, baseSha: BASE, dirty: false } }),
+    provision: (input) => ({
+      status: "passed",
+      output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD_1, baseSha: BASE },
+    }),
+    refresh: (input) => ({
+      status: "passed",
+      output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD_1, baseSha: BASE, dirty: false },
+    }),
+    checkpoint: () => ({ status: "passed", output: { headSha: HEAD_1, pushed: true, wip: false } }),
     deprovision: () => ({ status: "passed", output: {} }),
   }
 }
 
 /** Seed a journal with one integrated PR per entry (all on the given branch, so
  * the branch collides), then boot an app on it. */
-async function appWithIntegrated(branch: string, seeds: ReadonlyArray<{ pr: string; headSha: string; commit: string }>) {
+async function appWithIntegrated(
+  branch: string,
+  seeds: ReadonlyArray<{ pr: string; headSha: string; commit: string }>,
+) {
   const nextId = ids()
   const at = "2026-01-01T00:00:00.000Z"
   const seededCommand = { id: nextId(), op: "fixture.seed" }
   const events = seeds.flatMap(({ pr, headSha, commit }) => [
-    { id: nextId(), name: "pr/pushed", ts: at, data: { pr, branch, base: "main", headSha, baseSha: BASE, revision: 1 } },
+    {
+      id: nextId(),
+      name: "pr/pushed",
+      ts: at,
+      data: { pr, branch, base: "main", headSha, baseSha: BASE, revision: 1 },
+    },
     { id: nextId(), name: "pr/submitted", ts: at, data: { pr, revision: 1, headSha } },
-    { id: nextId(), name: "pr/integrated", ts: at, data: { pr, revision: 1, headSha, run: `R-${pr}`, commit, landingSha: commit, baseSha: BASE } },
+    {
+      id: nextId(),
+      name: "pr/integrated",
+      ts: at,
+      data: { pr, revision: 1, headSha, run: `R-${pr}`, commit, landingSha: commit, baseSha: BASE },
+    },
   ])
   const journal = createMemoryJournal([
-    { command: seededCommand, cause: { id: nextId(), commandId: seededCommand.id, op: seededCommand.op, commandHash: Command.hash(seededCommand) }, events },
+    {
+      command: seededCommand,
+      cause: {
+        id: nextId(),
+        commandId: seededCommand.id,
+        op: seededCommand.op,
+        commandHash: Command.hash(seededCommand),
+      },
+      events,
+    },
   ])
   const jobs = createBayJobDefs(workspaceAdapter())
   const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))

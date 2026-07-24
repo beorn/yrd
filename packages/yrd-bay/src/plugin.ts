@@ -29,6 +29,8 @@ import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
 import {
   BayIdSchema,
+  CheckpointBayInputSchema,
+  CheckpointedBaySchema,
   CompositionV1Schema,
   CorrelationSchema,
   DeprovisionBayInputSchema,
@@ -61,6 +63,8 @@ import {
   type Bay,
   type BranchLifecycle,
   type BaysState,
+  type CheckpointBayInput,
+  type CheckpointedBay,
   type CompositionV1,
   type Correlation,
   type DeprovisionBayInput,
@@ -88,6 +92,7 @@ const OpenBayArgsSchema = z
     name: TextSchema,
     issue: TextSchema.optional(),
     actor: TextSchema.optional(),
+    branch: GitRefSchema.optional(),
     from: GitRefSchema.optional(),
     base: GitRefSchema.optional(),
     baseSha: GitShaSchema.optional(),
@@ -97,6 +102,25 @@ export type OpenBayArgs = z.infer<typeof OpenBayArgsSchema>
 
 const RefreshBayArgsSchema = z.object({ bay: TextSchema }).strict()
 export type RefreshBayArgs = z.infer<typeof RefreshBayArgsSchema>
+
+const CheckpointBayArgsSchema = z.object({ bay: TextSchema, claim: TextSchema }).strict()
+export type CheckpointBayArgs = z.infer<typeof CheckpointBayArgsSchema>
+
+const OrphanBayArgsSchema = z
+  .object({
+    bay: TextSchema,
+    reason: TextSchema,
+    exitCode: z.number().int().optional(),
+    signal: TextSchema.optional(),
+    timedOut: z.boolean().optional(),
+    stalled: z.boolean().optional(),
+    sweepFailure: TextSchema.optional(),
+    escapedDescendant: z.boolean().optional(),
+  })
+  .strict()
+export type OrphanBayArgs = z.infer<typeof OrphanBayArgsSchema>
+
+const BayOrphanedSchema = OrphanBayArgsSchema.extend({ bay: BayIdSchema }).strict()
 
 const CertifyHandoffArgsSchema = z
   .object({ bay: TextSchema, branch: GitRefSchema, headSha: GitShaSchema, evidence: TextSchema })
@@ -417,6 +441,10 @@ export type BayWorkspace = Readonly<{
     context: JobContext,
   ): JobResult<ProvisionedBay> | Promise<JobResult<ProvisionedBay>>
   refresh(input: RefreshBayInput, context: JobContext): JobResult<RefreshedBay> | Promise<JobResult<RefreshedBay>>
+  checkpoint(
+    input: CheckpointBayInput,
+    context: JobContext,
+  ): JobResult<CheckpointedBay> | Promise<JobResult<CheckpointedBay>>
   deprovision(
     input: DeprovisionBayInput,
     context: JobContext,
@@ -426,6 +454,7 @@ export type BayWorkspace = Readonly<{
 export type BayJobDefs = Readonly<{
   "bay.provision": JobDef<ProvisionBayInput, ProvisionedBay>
   "bay.refresh": JobDef<RefreshBayInput, RefreshedBay>
+  "bay.checkpoint": JobDef<CheckpointBayInput, CheckpointedBay>
   "bay.deprovision": JobDef<DeprovisionBayInput, DeprovisionedBay>
 }>
 
@@ -447,6 +476,14 @@ export function createBayJobDefs(workspace: BayWorkspace): BayJobDefs {
       output: RefreshedBaySchema,
       execute: (input, context) => workspace.refresh(input, context),
     }),
+    "bay.checkpoint": createJobDef({
+      name: "bay.checkpoint",
+      title: "Checkpoint and push bay workspace",
+      revision: workspace.revision,
+      input: CheckpointBayInputSchema,
+      output: CheckpointedBaySchema,
+      execute: (input, context) => workspace.checkpoint(input, context),
+    }),
     "bay.deprovision": createJobDef({
       name: "bay.deprovision",
       title: "Deprovision bay workspace",
@@ -464,6 +501,8 @@ export type BayCommands = Readonly<{
   bay: Readonly<{
     open: CommandHandler<OpenBayArgs, BayState>
     refresh: CommandHandler<RefreshBayArgs, BayState>
+    checkpoint: CommandHandler<CheckpointBayArgs, BayState>
+    orphan: CommandHandler<OrphanBayArgs, BayState>
     certifyHandoff: CommandHandler<CertifyHandoffArgs, BayState>
     intake: CommandHandler<IntakePRArgs, BayState>
     submit: CommandHandler<SubmitArgs, BayState>
@@ -494,6 +533,8 @@ export type Bays = Readonly<{
   checksRequested(selector: string): boolean
   open(args: OpenBayArgs): Promise<CommandResult>
   refresh(args: RefreshBayArgs): Promise<CommandResult>
+  checkpoint(args: CheckpointBayArgs): Promise<CommandResult>
+  orphan(args: OrphanBayArgs): Promise<CommandResult>
   certifyHandoff(args: CertifyHandoffArgs): Promise<CommandResult>
   intake(args: IntakePRArgs): Promise<CommandResult>
   submit(args: SubmitArgs): Promise<CommandResult>
@@ -516,6 +557,8 @@ type BayActions = Pick<
   Bays,
   | "open"
   | "refresh"
+  | "checkpoint"
+  | "orphan"
   | "certifyHandoff"
   | "intake"
   | "submit"
@@ -912,6 +955,8 @@ export function createBays(
     submitSelection,
     open,
     refresh: actions.refresh,
+    checkpoint: actions.checkpoint,
+    orphan: actions.orphan,
     certifyHandoff: actions.certifyHandoff,
     intake,
     submit,
@@ -949,6 +994,7 @@ export function withBays(options: WithBaysOptions) {
       events: {
         "bay/opened": BayOpenedSchema,
         "bay/closing": BayClosingSchema,
+        "bay/orphaned": BayOrphanedSchema,
         "bay/handoff-certified": BayHandoffCertifiedSchema,
         "pr/pushed": PRPushedSchema,
         "pr/recut": PRRecutFactSchema,
@@ -976,7 +1022,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/integrated": z.union([PRIntegratedSchema, LegacyPRIntegratedSchema]),
         "pr/canceled": z.union([PRCanceledSchema, LegacyPRCanceledSchema]),
       },
-      projectionVersion: "bays-v5-needs-author",
+      projectionVersion: "bays-v6-orphan",
       project: projectBays,
       create(yrd) {
         yrd.jobs.requireDefinitions(options.jobs)
@@ -988,6 +1034,8 @@ export function withBays(options: WithBaysOptions) {
             {
               open: (args) => yrd.dispatch(commands.bay.open, args),
               refresh: (args) => yrd.dispatch(commands.bay.refresh, args),
+              checkpoint: (args) => yrd.dispatch(commands.bay.checkpoint, args),
+              orphan: (args) => yrd.dispatch(commands.bay.orphan, args),
               certifyHandoff: (args) => yrd.dispatch(commands.bay.certifyHandoff, args),
               intake: (args) => yrd.dispatch(commands.bay.intake, args),
               submit: (args) => yrd.dispatch(commands.bay.submit, args),
@@ -1040,6 +1088,16 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultActor: 
         visibility: "public",
         params: RefreshBayArgsSchema,
         apply: (state: BayState, args: RefreshBayArgs) => refreshBay(state, args, jobs["bay.refresh"]),
+      }),
+      checkpoint: command({
+        title: "Checkpoint bay",
+        params: CheckpointBayArgsSchema,
+        apply: (state: BayState, args: CheckpointBayArgs) => checkpointBay(state, args, jobs["bay.checkpoint"]),
+      }),
+      orphan: command({
+        title: "Record an orphaned bay",
+        params: OrphanBayArgsSchema,
+        apply: (state: BayState, args: OrphanBayArgs) => orphanBay(state, args),
       }),
       certifyHandoff: command({
         title: "Certify a materialized Bay handoff",
@@ -1134,7 +1192,7 @@ function openBay(
   }
   const id = nextId("B", current.byId)
   const base = baseIdentity(args.base ?? defaultBase)
-  const branch = args.from ?? defaultBayBranch(args.name)
+  const branch = args.branch ?? args.from ?? defaultBayBranch(args.name)
   if (Object.values(current.byId).some((bay) => bay.status !== "closed" && bay.branch === branch)) {
     throw new Error(`yrd: branch '${branch}' is already open in another bay`)
   }
@@ -1173,6 +1231,38 @@ function refreshBay(state: DeepReadonly<BayState>, args: RefreshBayArgs, refresh
         ...(bay.path === undefined ? {} : { path: bay.path }),
         branch: bay.branch,
         base: bay.base,
+      }),
+    ],
+  }
+}
+
+function checkpointBay(
+  state: DeepReadonly<BayState>,
+  args: CheckpointBayArgs,
+  checkpoint: BayJobDefs["bay.checkpoint"],
+) {
+  const bay = required(resolveBay(state.bays, args.bay), "bay", args.bay)
+  if (bay.status !== "active") throw new Error(`yrd: bay '${bay.id}' is ${bay.status}, not active`)
+  return {
+    events: [
+      checkpoint.request({
+        bay: bay.id,
+        ...(bay.path === undefined ? {} : { path: bay.path }),
+        branch: bay.branch,
+        claim: args.claim,
+      }),
+    ],
+  }
+}
+
+function orphanBay(state: DeepReadonly<BayState>, args: OrphanBayArgs) {
+  const bay = required(resolveBay(state.bays, args.bay), "bay", args.bay)
+  if (bay.status !== "active") throw new Error(`yrd: bay '${bay.id}' is ${bay.status}, not active`)
+  return {
+    events: [
+      event("bay/orphaned", {
+        ...args,
+        bay: bay.id,
       }),
     ],
   }
@@ -1846,12 +1936,12 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
   }
   if (bay.status === "closed") throw new Error(`yrd: bay '${bay.id}' is already closed`)
   const pr = prForBay(current, bay.id)
-  if (pr !== undefined && isLivePR(pr.status) && args.withdraw !== true) {
+  if (pr !== undefined && pr.status !== "pushed" && isLivePR(pr.status) && args.withdraw !== true) {
     throw new Error(`yrd: PR '${pr.id}' is ${pr.status}; run it through the queue or withdraw it before closing`)
   }
   return {
     events: [
-      ...(pr !== undefined && isLivePR(pr.status)
+      ...(args.withdraw === true && pr !== undefined && isLivePR(pr.status)
         ? [event("pr/withdrawn", { pr: pr.id, ...terminalIdentity(pr) })]
         : []),
       event("bay/closing", { bay: bay.id }),
@@ -1954,6 +2044,19 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
     case "bay/closing": {
       const bay = current.byId[data.bay as string]
       return bay === undefined ? state : patchBay(bay, { status: "closing", failure: undefined })
+    }
+    case "bay/orphaned": {
+      const orphaned = BayOrphanedSchema.parse(data)
+      const bay = current.byId[orphaned.bay]
+      if (bay === undefined) return state
+      const { bay: _bay, ...orphan } = orphaned
+      return patchBay(bay, {
+        orphan: {
+          ...orphan,
+          recordedAt: applied.ts,
+          eventId: applied.id,
+        },
+      })
     }
     case "bay/handoff-certified": {
       const certified = BayHandoffCertifiedSchema.parse(data)
@@ -2437,6 +2540,18 @@ function projectBayJob(state: DeepReadonly<BayState>, applied: Event, change: Jo
       jobDef: undefined,
     })
   }
+  if (bay.jobDef === "bay.checkpoint") {
+    const output = CheckpointedBaySchema.parse(change.result.output)
+    return save({
+      status: "active",
+      headSha: output.headSha,
+      dirty: false,
+      refreshedAt: applied.ts,
+      failure: undefined,
+      jobId: undefined,
+      jobDef: undefined,
+    })
+  }
   const output = DeprovisionedBaySchema.parse(change.result.output)
   return save({
     status: "closed",
@@ -2475,5 +2590,5 @@ function nextId(prefix: string, records: Readonly<Record<string, unknown>>): str
 }
 
 function isBayJob(name: string): name is keyof BayJobDefs {
-  return name === "bay.provision" || name === "bay.refresh" || name === "bay.deprovision"
+  return name === "bay.provision" || name === "bay.refresh" || name === "bay.checkpoint" || name === "bay.deprovision"
 }

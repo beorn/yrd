@@ -160,6 +160,18 @@ export type BayFailure = Readonly<{
   message: string
 }>
 
+export type BayOrphan = Readonly<{
+  reason: string
+  exitCode?: number
+  signal?: string
+  timedOut?: boolean
+  stalled?: boolean
+  sweepFailure?: string
+  escapedDescendant?: boolean
+  recordedAt: string
+  eventId: string
+}>
+
 export type BayStatus = "opening" | "active" | "closing" | "closed" | "failed"
 
 export type BayHandoff = Readonly<{
@@ -195,6 +207,7 @@ export type Bay = Readonly<{
   jobDef?: string
   closedAt?: string
   failure?: BayFailure
+  orphan?: BayOrphan
   handoff?: BayHandoff
   archive?: BayArchive
 }>
@@ -568,6 +581,25 @@ export const RefreshedBaySchema = z
   })
   .strict()
 export type RefreshedBay = z.infer<typeof RefreshedBaySchema>
+
+export const CheckpointBayInputSchema = z
+  .object({
+    bay: BayIdSchema,
+    path: z.string().min(1).optional(),
+    branch: GitRefSchema,
+    claim: z.string().trim().min(1),
+  })
+  .strict()
+export type CheckpointBayInput = z.infer<typeof CheckpointBayInputSchema>
+
+export const CheckpointedBaySchema = z
+  .object({
+    headSha: GitShaSchema,
+    pushed: z.literal(true),
+    wip: z.boolean(),
+  })
+  .strict()
+export type CheckpointedBay = z.infer<typeof CheckpointedBaySchema>
 
 export const DeprovisionBayInputSchema = z
   .object({

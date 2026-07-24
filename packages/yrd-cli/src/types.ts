@@ -5,6 +5,7 @@ import type { HasJobs, JobCommands, JobsState } from "@yrd/job"
 import type { GitPRRecutter, HasQueue, QueueAuditResult, QueueCommands, QueuesState } from "@yrd/queue"
 import type { HasIssues } from "@yrd/issue"
 import type { OrphanJournalImportResult } from "@yrd/persistence"
+import type { Process } from "@yrd/process"
 import type { Scope } from "@silvery/scope"
 import type { SubmoduleBranchResolver } from "./submodule-tracking.ts"
 
@@ -39,6 +40,7 @@ export type YrdCliServices = Readonly<{
   queue?: YrdCliQueueAdministration
   recut?: GitPRRecutter
   journal?: YrdCliJournalAdministration
+  process?: Pick<Process, "run">
 }>
 
 /** Read-only Git facts `pr prune` proves its superseded verdicts with. The

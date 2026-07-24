@@ -23,16 +23,24 @@ function ids(initial = 0): () => string {
 function workspace(): BayWorkspace {
   return {
     revision: "test-workspace-v1",
-    provision: (input) => ({ status: "passed", output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE } }),
+    provision: (input) => ({
+      status: "passed",
+      output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE },
+    }),
     refresh: (input) => ({
       status: "passed",
       output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE, dirty: false },
     }),
+    checkpoint: () => ({ status: "passed", output: { headSha: HEAD, pushed: true, wip: false } }),
     deprovision: () => ({ status: "passed", output: {} }),
   }
 }
 
-async function createApp(journal = createMemoryJournal(), id: () => string = ids(), log?: ReturnType<typeof createLogger>) {
+async function createApp(
+  journal = createMemoryJournal(),
+  id: () => string = ids(),
+  log?: ReturnType<typeof createLogger>,
+) {
   const bayJobs = createBayJobDefs(workspace())
   const first = withStep(
     "first",

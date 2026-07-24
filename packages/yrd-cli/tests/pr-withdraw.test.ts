@@ -68,6 +68,10 @@ function workspace() {
       status: "passed" as const,
       output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD_SHA, baseSha: BASE_SHA, dirty: false },
     }),
+    checkpoint: () => ({
+      status: "passed" as const,
+      output: { headSha: HEAD_SHA, pushed: true as const, wip: false },
+    }),
     deprovision: () => ({ status: "passed" as const, output: {} }),
   }
 }

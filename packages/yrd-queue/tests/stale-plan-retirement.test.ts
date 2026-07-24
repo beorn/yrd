@@ -24,11 +24,15 @@ function ids(initial = 0): () => string {
 function workspace(): BayWorkspace {
   return {
     revision: "test-workspace-v1",
-    provision: (input) => ({ status: "passed", output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE } }),
+    provision: (input) => ({
+      status: "passed",
+      output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE },
+    }),
     refresh: (input) => ({
       status: "passed",
       output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE, dirty: false },
     }),
+    checkpoint: () => ({ status: "passed", output: { headSha: HEAD, pushed: true, wip: false } }),
     deprovision: () => ({ status: "passed", output: {} }),
   }
 }
@@ -47,7 +51,12 @@ function checkBatchPlugin(checkRevision: string) {
   return withQueue({ steps: [check] as const, batch: 2, defaultSteps: ["check"] })
 }
 
-async function createApp(checkRevision: string, journal: Journal<unknown> = createMemoryJournal(), id: () => string = ids(), log?: ReturnType<typeof createLogger>) {
+async function createApp(
+  checkRevision: string,
+  journal: Journal<unknown> = createMemoryJournal(),
+  id: () => string = ids(),
+  log?: ReturnType<typeof createLogger>,
+) {
   const bayJobs = createBayJobDefs(workspace())
   const queue = checkBatchPlugin(checkRevision)
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
@@ -131,7 +140,10 @@ describe("stale-plan retirement — an un-isolable drifted batch is retired, not
 
     await replayed.queue.recover({ recoveryTime: "2026-01-01T00:05:00.000Z", reason: "stale-plan hygiene test" })
 
-    expect(replayed.queue.get("R1")).toMatchObject({ status: "failed", error: expect.objectContaining({ code: "stale-plan" }) })
+    expect(replayed.queue.get("R1")).toMatchObject({
+      status: "failed",
+      error: expect.objectContaining({ code: "stale-plan" }),
+    })
     expect(replayed.queue.audit().findings.some((f) => f.code === "unisolable-stale-plan")).toBe(false)
 
     const receipt = events.find(
@@ -161,7 +173,10 @@ describe("stale-plan retirement — an un-isolable drifted batch is retired, not
 
     // retireStalePlan is idempotent and definitive: it settles once, then no-ops.
     await replayed.dispatch(replayed.commands.queue.retireStalePlan, { run: "R1" })
-    expect(replayed.queue.get("R1")).toMatchObject({ status: "failed", error: expect.objectContaining({ code: "stale-plan" }) })
+    expect(replayed.queue.get("R1")).toMatchObject({
+      status: "failed",
+      error: expect.objectContaining({ code: "stale-plan" }),
+    })
     expect(replayed.queue.audit().findings.some((f) => f.code === "unisolable-stale-plan")).toBe(false)
     const again = await replayed.dispatch(replayed.commands.queue.retireStalePlan, { run: "R1" })
     expect(again.events).toEqual([])

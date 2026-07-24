@@ -25,11 +25,15 @@ function ids(initial = 0): () => string {
 function workspace(): BayWorkspace {
   return {
     revision: "test-workspace-v1",
-    provision: (input) => ({ status: "passed", output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE } }),
+    provision: (input) => ({
+      status: "passed",
+      output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE },
+    }),
     refresh: (input) => ({
       status: "passed",
       output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE, dirty: false },
     }),
+    checkpoint: () => ({ status: "passed", output: { headSha: HEAD, pushed: true, wip: false } }),
     deprovision: () => ({ status: "passed", output: {} }),
   }
 }
@@ -40,12 +44,18 @@ function workspace(): BayWorkspace {
  * (not fatal) in a selectorless compose. */
 function mergeDeployPlugin(deployRevision: string) {
   const merge = withMerge(
-    (): JobResult<{ commit: string; baseSha: string }> => ({ status: "passed", output: { commit: MERGED, baseSha: BASE } }),
+    (): JobResult<{ commit: string; baseSha: string }> => ({
+      status: "passed",
+      output: { commit: MERGED, baseSha: BASE },
+    }),
     { revision: "merge-v1" },
   )
   const deploy = withStep(
     "deploy",
-    (_input: StepExecution): JobResult<{ environment: string }> => ({ status: "passed", output: { environment: "staging" } }),
+    (_input: StepExecution): JobResult<{ environment: string }> => ({
+      status: "passed",
+      output: { environment: "staging" },
+    }),
     { revision: deployRevision, needsIntegration: true, output: DeployResultSchema },
   )
   return withQueue({ steps: [merge, deploy] as const, batch: false, defaultSteps: ["merge", "deploy"] })

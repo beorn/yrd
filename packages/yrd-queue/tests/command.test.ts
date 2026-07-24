@@ -336,6 +336,7 @@ const unusedWorkspace: BayWorkspace = {
   revision: "unused-workspace-v1",
   provision: () => ({ status: "failed", error: { code: "unused", message: "not used" } }),
   refresh: () => ({ status: "failed", error: { code: "unused", message: "not used" } }),
+  checkpoint: () => ({ status: "failed", error: { code: "unused", message: "not used" } }),
   deprovision: () => ({ status: "passed", output: {} }),
 }
 

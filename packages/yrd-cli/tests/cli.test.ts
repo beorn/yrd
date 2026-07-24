@@ -206,6 +206,12 @@ function workspace(
         },
       }
     },
+    checkpoint() {
+      return {
+        status: "passed",
+        output: { headSha: options.refreshedHead ?? HEAD_SHA, pushed: true, wip: options.dirty ?? false },
+      }
+    },
     deprovision() {
       return { status: "passed", output: {} }
     },

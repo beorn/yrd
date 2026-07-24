@@ -41,6 +41,9 @@ function workspace(): BayWorkspace {
         output: { path: `/repo/.bays/${input.bay}`, headSha: BASE_SHA, baseSha: BASE_SHA, dirty: false },
       }
     },
+    checkpoint() {
+      return { status: "passed", output: { headSha: BASE_SHA, pushed: true, wip: false } }
+    },
     deprovision() {
       return { status: "passed", output: {} }
     },

@@ -3,7 +3,7 @@
  * @level l2
  * @consumer @yrd/bay
  */
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
   Command,
   command,
@@ -66,6 +66,10 @@ function createWorkspaceHarness() {
         status: "passed",
         output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD_2, baseSha: BASE, dirty: workspace.dirty },
       }
+    },
+    checkpoint(input) {
+      workspace.calls.push(`checkpoint:${input.bay}`)
+      return { status: "passed", output: { headSha: HEAD_2, pushed: true, wip: workspace.dirty } }
     },
     deprovision(input): JobResult<DeprovisionedBay> {
       workspace.calls.push(`deprovision:${input.bay}`)
@@ -653,6 +657,8 @@ describe("withBays", () => {
   })
 
   it("runs a pinned bay through refresh, PR revisions, withdrawal, and close", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
     const { app, workspace } = await createHarness()
 
     const opened = await app.bays.open({ name: "fix-release", baseSha: BASE })
@@ -709,33 +715,42 @@ describe("withBays", () => {
       ],
     })
 
-    await expect(app.bays.close({ bay: "B1" })).rejects.toThrow(
-      "run it through the queue or withdraw it before closing",
-    )
     workspace.dirty = true
-    const refused = await app.bays.close({ bay: "B1", withdraw: true })
+    const refused = await app.bays.close({ bay: "B1" })
     await finishJob(app, refused)
     expect(app.bays.state()).toMatchObject({
       prs: {
         PR1: {
-          status: "withdrawn",
-          revisions: [
-            { revision: 1, submittedAt: "2026-01-01T00:00:00.000Z" },
-            {
-              revision: 2,
-              terminal: { status: "withdrawn", at: "2026-01-01T00:00:00.000Z" },
-            },
-          ],
+          status: "pushed",
+          revisions: [{ revision: 1, submittedAt: "2026-01-01T00:00:00.000Z" }, { revision: 2 }],
         },
       },
       byId: { B1: { status: "active", failure: { code: "dirty-worktree" } } },
+    })
+
+    const withdrawn = await app.bays.close({ bay: "B1", withdraw: true })
+    await finishJob(app, withdrawn)
+    expect(app.bays.pr("PR1")).toMatchObject({
+      status: "withdrawn",
+      revisions: [
+        { revision: 1, submittedAt: "2026-01-01T00:00:00.000Z" },
+        { revision: 2, terminal: { status: "withdrawn", at: "2026-01-01T00:00:00.000Z" } },
+      ],
     })
 
     workspace.dirty = false
     const closed = await app.bays.close({ bay: "B1" })
     await finishJob(app, closed)
     expect(app.bays.state().byId.B1?.status).toBe("closed")
-    expect(workspace.calls).toEqual([`provision:B1:${BASE}`, "refresh:B1", "deprovision:B1", "deprovision:B1"])
+    expect(workspace.calls).toEqual([
+      `provision:B1:${BASE}`,
+      "refresh:B1",
+      "deprovision:B1",
+      "deprovision:B1",
+      "deprovision:B1",
+    ])
+    expect(warning).toHaveBeenCalled()
+    expect(error).toHaveBeenCalledTimes(2)
     await app.close()
   })
 
@@ -1802,11 +1817,26 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     const journal = createMemoryJournal([
       {
         command: seededCommand,
-        cause: { id: nextId(), commandId: seededCommand.id, op: seededCommand.op, commandHash: Command.hash(seededCommand) },
+        cause: {
+          id: nextId(),
+          commandId: seededCommand.id,
+          op: seededCommand.op,
+          commandHash: Command.hash(seededCommand),
+        },
         events: [
-          { id: nextId(), name: "pr/pushed", ts: at, data: { pr: "PR1", branch: "topic/landed", base: "main", headSha: HEAD_1, baseSha: BASE, revision: 1 } },
+          {
+            id: nextId(),
+            name: "pr/pushed",
+            ts: at,
+            data: { pr: "PR1", branch: "topic/landed", base: "main", headSha: HEAD_1, baseSha: BASE, revision: 1 },
+          },
           { id: nextId(), name: "pr/submitted", ts: at, data: { pr: "PR1", revision: 1, headSha: HEAD_1 } },
-          { id: nextId(), name: "pr/integrated", ts: at, data: { pr: "PR1", revision: 1, headSha: HEAD_1, run: "R1", commit: BASE, landingSha: BASE, baseSha: BASE } },
+          {
+            id: nextId(),
+            name: "pr/integrated",
+            ts: at,
+            data: { pr: "PR1", revision: 1, headSha: HEAD_1, run: "R1", commit: BASE, landingSha: BASE, baseSha: BASE },
+          },
         ],
       },
     ])

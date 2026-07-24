@@ -947,6 +947,7 @@ function createViewerWorkspace(): BayWorkspace {
     revision: "yrd-viewer-read-only-v1",
     provision: refuse,
     refresh: refuse,
+    checkpoint: refuse,
     deprovision: refuse,
   })
 }
@@ -1121,6 +1122,7 @@ async function createYrdRuntimeHost(
         importOrphan: (sourcePath: string) =>
           importOrphanJournal({ dir: repository.stateDir, sourcePath, importedBy: defaultActor, log }),
       }),
+      process,
     })
     let closePromise: Promise<void> | undefined
     const close = () =>

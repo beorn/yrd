@@ -6,6 +6,8 @@ import type { JobResult } from "@yrd/job"
 import type { Process } from "@yrd/process"
 import type { BayWorkspace } from "./plugin.ts"
 import type {
+  CheckpointBayInput,
+  CheckpointedBay,
   DeprovisionBayInput,
   DeprovisionedBay,
   ProvisionBayInput,
@@ -223,7 +225,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
   return {
     revision: createHash("sha256")
       .update(
-        JSON.stringify({ implementation: "yrd-git-workspace-v3", repo, baysRoot, intakeRemote: options.intakeRemote }),
+        JSON.stringify({ implementation: "yrd-git-workspace-v4", repo, baysRoot, intakeRemote: options.intakeRemote }),
       )
       .digest("hex"),
 
@@ -238,7 +240,12 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
         await ignoreInRepositoryBays(git, repo, baysRoot)
         await prepareWorktreeConfig(git, repo, options.intakeRemote !== undefined)
         if (input.from === undefined) {
-          await git.run(repo, ["worktree", "add", "-b", input.branch, path, baseSha])
+          const existing = await git.run(repo, ["rev-parse", "--verify", `refs/heads/${input.branch}^{commit}`], true)
+          if (existing.code === 0) {
+            await git.run(repo, ["worktree", "add", path, input.branch])
+          } else {
+            await git.run(repo, ["worktree", "add", "-b", input.branch, path, baseSha])
+          }
         } else {
           await git.commit(repo, input.from)
           await git.run(repo, ["worktree", "add", path, input.from])
@@ -272,6 +279,44 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
         return { status: "passed", output: { path: input.path, headSha, baseSha, dirty: status.stdout.trim() !== "" } }
       } catch (cause) {
         return failure("refresh-failed", cause)
+      }
+    },
+
+    async checkpoint(input: CheckpointBayInput): Promise<JobResult<CheckpointedBay>> {
+      if (input.path === undefined) return failure("checkpoint-failed", `bay '${input.bay}' has no workspace path`)
+      try {
+        const branch = (await git.run(input.path, ["branch", "--show-current"])).stdout.trim()
+        if (branch !== input.branch) {
+          throw new Error(`workspace '${input.path}' is on branch '${branch}', expected '${input.branch}'`)
+        }
+        const submodules = await git.run(
+          input.path,
+          [
+            "submodule",
+            "foreach",
+            "--recursive",
+            "--quiet",
+            'dirty=$(git status --porcelain); test -z "$dirty" || { printf "%s\\n" "$displaypath"; exit 1; }',
+          ],
+          true,
+        )
+        if (submodules.code !== 0) {
+          throw new Error(
+            `workspace '${input.path}' has dirty submodule work at ${submodules.stdout.trim() || "an unknown path"}; ` +
+              "leaving the Bay open so the nested work stays recoverable",
+          )
+        }
+        const status = await git.run(input.path, ["status", "--porcelain", "--ignore-submodules=none"])
+        const wip = status.stdout.trim() !== ""
+        if (wip) {
+          await git.run(input.path, ["add", "-A"])
+          await git.run(input.path, ["commit", "-m", `wip: ${input.claim}`])
+        }
+        const headSha = await git.commit(input.path, "HEAD")
+        await git.run(input.path, ["push", "--set-upstream", "origin", `HEAD:refs/heads/${input.branch}`])
+        return { status: "passed", output: { headSha, pushed: true, wip } }
+      } catch (cause) {
+        return failure("checkpoint-failed", cause)
       }
     },
 

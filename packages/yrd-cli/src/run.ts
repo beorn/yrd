@@ -26,7 +26,7 @@ import type { Contest } from "@yrd/contest"
 import { createFailure, failureFact, raiseFailure, type DeepReadonly, type JournalSnapshot } from "@yrd/core"
 import { isConcurrentSettlementConflict } from "@yrd/job"
 import type { Job, JobError } from "@yrd/job"
-import { createProcess, type Process } from "@yrd/process"
+import { createProcess, type Process, type ProcessResult } from "@yrd/process"
 import {
   isQueueRunningConflict,
   Queues,
@@ -1257,6 +1257,161 @@ async function openBay(
     { command, ...(pr === undefined ? {} : { pr }), bay },
     createElement(BayStatusView, { bays: [bay] }),
   )
+}
+
+function bayRunIdentity(claim: string): Readonly<{ claim: string; name: string; branch: string }> {
+  const normalized = claim.trim()
+  const name = basename(normalized)
+  if (
+    normalized === "" ||
+    name === "." ||
+    name === ".." ||
+    name.includes("..") ||
+    name.endsWith(".lock") ||
+    !/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u.test(name)
+  ) {
+    usage("bay run CLAIM must end in a Git-safe issue slug")
+  }
+  return { claim: normalized, name, branch: `task/${name}` }
+}
+
+async function checkpointRunBay(app: YrdCliApp, bay: Bay, claim: string, io: YrdCliIO): Promise<Bay> {
+  const result = await app.bays.checkpoint({ bay: bay.id, claim })
+  assertJobsPassed(await runJobs(app, app.jobs.requested(result), io), `bay '${bay.id}' checkpoint`)
+  const checkpointed = app.bays.get(bay.id)
+  if (checkpointed === undefined || checkpointed.status !== "active" || checkpointed.headSha === undefined) {
+    refusal(`bay '${bay.id}' did not retain an active checkpoint`)
+  }
+  return checkpointed
+}
+
+async function draftRunBay(app: YrdCliApp, bay: Bay, claim: string, io: YrdCliIO): Promise<void> {
+  const pr = await app.bays.submitSelection(bay.id, {
+    issue: claim,
+    draft: true,
+    resolveRevision: (ref) => optionalRevision(ref, io),
+    run: runtimeOptions(io),
+  })
+  if (pr.status !== "pushed" || pr.branch !== bay.branch || pr.issue !== claim) {
+    refusal(`bay '${bay.id}' did not retain a branch-backed draft for '${claim}'`)
+  }
+}
+
+function childFailureReason(result: ProcessResult): string {
+  if (result.timedOut) return "child timed out"
+  if (result.escapedDescendant === true) return "child exited with an escaped descendant"
+  if (result.stalled === true) return "child stalled"
+  if (result.signal !== null) return `child exited after ${result.signal}`
+  if (result.sweepFailure !== undefined) return `child cleanup failed: ${result.sweepFailure}`
+  return `child exited ${result.exitCode}`
+}
+
+function errorDetail(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+async function orphanRunBay(app: YrdCliApp, bay: Bay, reason: string, result?: ProcessResult): Promise<void> {
+  await app.bays.orphan({
+    bay: bay.id,
+    reason,
+    ...(result === undefined ? {} : { exitCode: result.exitCode }),
+    ...(result?.signal === null || result?.signal === undefined ? {} : { signal: result.signal }),
+    ...(result?.timedOut === true ? { timedOut: true } : {}),
+    ...(result?.stalled === true ? { stalled: true } : {}),
+    ...(result?.sweepFailure === undefined ? {} : { sweepFailure: result.sweepFailure }),
+    ...(result?.escapedDescendant === true ? { escapedDescendant: true } : {}),
+  })
+}
+
+function childOutput(io: YrdCliIO): Readonly<{
+  write(output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>): void
+  flush(): void
+}> {
+  const decoders = {
+    stdout: new TextDecoder(),
+    stderr: new TextDecoder(),
+  }
+  return {
+    write({ stream, chunk }) {
+      const text = decoders[stream].decode(chunk, { stream: true })
+      if (text !== "") io[stream](text)
+    },
+    flush() {
+      for (const stream of ["stdout", "stderr"] as const) {
+        const text = decoders[stream].decode()
+        if (text !== "") io[stream](text)
+      }
+    },
+  }
+}
+
+async function runBay(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  claim: string,
+  argv: readonly string[],
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
+  if (services.process === undefined) configuration("bay run requires the process-backed Yrd runtime")
+  if (argv.length === 0) usage("bay run requires a command after CLAIM")
+  const identity = bayRunIdentity(claim)
+  const opened = await app.bays.open({
+    name: identity.name,
+    issue: identity.claim,
+    branch: identity.branch,
+  })
+  assertJobsPassed(await runJobs(app, app.jobs.requested(opened), io), `bay '${identity.name}' provision`)
+  let bay = app.bays.get(identity.name)
+  if (bay?.path === undefined || bay.status !== "active") {
+    refusal(`bay '${identity.name}' did not become active`)
+  }
+
+  // The branch and draft are durable before the child receives control. The
+  // draft is the claim record; Yrd deliberately does not grow a tracker lease.
+  bay = await checkpointRunBay(app, bay, identity.claim, io)
+  await draftRunBay(app, bay, identity.claim, io)
+
+  const output = childOutput(io)
+  let child: ProcessResult
+  try {
+    child = await services.process.run({
+      argv,
+      cwd: bay.path,
+      onOutput: output.write,
+    })
+  } catch (error) {
+    output.flush()
+    await orphanRunBay(app, bay, `child could not settle: ${errorDetail(error)}`)
+    throw error
+  }
+  output.flush()
+
+  const succeeded =
+    child.exitCode === 0 &&
+    child.signal === null &&
+    !child.timedOut &&
+    child.stalled !== true &&
+    child.sweepFailure === undefined &&
+    child.escapedDescendant !== true
+  if (!succeeded) {
+    const reason = childFailureReason(child)
+    await orphanRunBay(app, bay, reason, child)
+    io.stderr(`yrd: ${reason}; Bay '${bay.id}' is preserved and marked orphan\n`)
+    return 1
+  }
+
+  try {
+    bay = await checkpointRunBay(app, bay, identity.claim, io)
+    await draftRunBay(app, bay, identity.claim, io)
+    const closing = await app.bays.close({ bay: bay.id })
+    assertJobsPassed(await runJobs(app, app.jobs.requested(closing), io), `bay '${bay.id}' close`)
+    const closed = app.bays.get(bay.id)
+    if (closed?.status !== "closed") refusal(`bay '${bay.id}' did not close synchronously`)
+    return 0
+  } catch (error) {
+    await orphanRunBay(app, bay, `post-child checkpoint or close failed: ${errorDetail(error)}`)
+    throw error
+  }
 }
 
 async function refreshBays(
@@ -2538,7 +2693,7 @@ function queueRunIsFollow(action: Readonly<{ opts(): unknown; args: readonly str
 }
 
 const READ_ONLY_COMMANDS: Readonly<Record<string, readonly string[]>> = {
-  bay: ["_list", "path", "log"],
+  bay: ["_list", "list", "path", "log"],
   queue: ["_list", "list", "audit"],
   pr: ["list", "view", "runs", "diff", "status", "checks"],
   issue: ["_list", "view"],
@@ -4686,6 +4841,15 @@ function buildProgram(
     .command("_list", { isDefault: true, hidden: true })
     .option("--json", "emit stable JSON")
     .action(async (options) => listBays(installed(), options, io))
+  bay
+    .command("list")
+    .description("list work bays")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => listBays(installed(), options, io))
+  bay
+    .command("run <claim> <command...>")
+    .description("run one command in a claim-backed Bay")
+    .action(async (claim, command) => setExit(await runBay(installed(), installedServices(), claim, command, io)))
   bay
     .command("open <name>")
     .description("open a work bay")

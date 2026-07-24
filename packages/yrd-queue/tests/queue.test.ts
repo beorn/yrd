@@ -380,6 +380,7 @@ function workspace(): BayWorkspace {
       status: "passed",
       output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE, dirty: false },
     }),
+    checkpoint: () => ({ status: "passed", output: { headSha: HEAD, pushed: true, wip: false } }),
     deprovision: () => ({ status: "passed", output: {} }),
   }
 }
