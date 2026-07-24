@@ -496,10 +496,18 @@ function finishRemoteEvaluator(...args: string[]): string[] {
 }
 
 async function openAndSubmit(app: TestApp): Promise<void> {
-  const open = outputIO()
-  expect(await runYrd(app, yrd("bay", "open", "one"), open.io)).toBe(0)
+  await openTestBay(app, { name: "one" })
   const submit = outputIO({ cwd: "/repo/.bays/B1" })
   expect(await runYrd(app, yrd("bay", "submit"), submit.io)).toBe(0)
+}
+
+async function openTestBay(app: TestApp, input: Parameters<TestApp["bays"]["open"]>[0]): Promise<void> {
+  const opened = await app.bays.open(input)
+  const jobs = await app.jobs.runMany(app.jobs.requested(opened), {
+    runner: "cli-test",
+    leaseMs: 60_000,
+  })
+  expect(jobs.every((job) => job.status === "passed")).toBe(true)
 }
 
 function fakeJob(input: {
@@ -683,8 +691,8 @@ describe("runYrd", () => {
     expect(await runYrd(app, gitBay("--help"), gitHelp.io)).toBe(0)
     expect(gitHelp.stdout()).toContain("Usage: git bay")
     expect(gitHelp.stdout()).toContain("list")
-    expect(gitHelp.stdout()).toContain("run")
     expect(gitHelp.stdout()).toContain("open")
+    expect(gitHelp.stdout()).toContain("in")
     expect(gitHelp.stdout()).toContain("path")
     expect(gitHelp.stdout()).toContain("refresh")
     expect(gitHelp.stdout()).toContain("submit")
@@ -695,13 +703,6 @@ describe("runYrd", () => {
     expect(gitHelp.stdout()).not.toMatch(/^\s+issue /mu)
     expect(gitHelp.stdout()).not.toMatch(/^\s+contest /mu)
     expect(gitHelp.stdout()).not.toMatch(/^\s+help /mu)
-
-    const opened = outputIO({ color: true, columns: 64 })
-    expect(await runYrd(app, gitBay("open", "from-git"), opened.io)).toBe(0)
-    expect(opened.stdout()).toContain("BAY")
-    expect(opened.stdout()).toContain("STATUS")
-    expect(opened.stdout()).toContain("PATH")
-    expect(opened.stdout()).toContain("file:///repo/.bays/B1")
 
     const yrdHelp = outputIO()
     expect(await runYrd(app, yrd("contest", "--help"), yrdHelp.io)).toBe(0)
@@ -1616,7 +1617,7 @@ describe("runYrd", () => {
   it("keeps unrelated members runnable when a recut supersedes their shared predecessor batch", async () => {
     const app = await createApp({ batch: 2, waitingCheck: true })
     await openAndSubmit(app)
-    expect(await runYrd(app, yrd("bay", "open", "two"), outputIO().io)).toBe(0)
+    await openTestBay(app, { name: "two" })
     expect(await runYrd(app, yrd("bay", "submit"), outputIO({ cwd: "/repo/.bays/B2" }).io)).toBe(0)
     expect(await app.queue.run({ prs: ["PR1", "PR2"] }, { runner: "cli-test", leaseMs: 60_000 })).toMatchObject([
       {
@@ -1701,7 +1702,7 @@ describe("runYrd", () => {
     })
   })
 
-  it("run cancel re-queues a waiting run's PRs (submitted), not rejected (#59)", async () => {
+  it("queue cancel re-queues a waiting run's PRs (submitted), not rejected (#59)", async () => {
     const app = await createApp({ waitingCheck: true })
     await openAndSubmit(app)
     // Drain PR1 into a resident run: the waiting check leaves R1 non-terminal.
@@ -1710,7 +1711,7 @@ describe("runYrd", () => {
     ])
 
     const cancel = outputIO()
-    expect(await runYrd(app, yrd("run", "cancel", "R1"), cancel.io), cancel.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("queue", "cancel", "R1"), cancel.io), cancel.stderr()).toBe(0)
     expect(cancel.stdout()).toContain("re-queued")
 
     // The run is terminal-canceled and its active check job is aborted...
@@ -1735,13 +1736,13 @@ describe("runYrd", () => {
     expect(redrain.some((run) => run.id !== "R1" && run.prs.some((member) => member.id === "PR1"))).toBe(true)
   })
 
-  it("run cancel refuses a terminal run (#59)", async () => {
+  it("queue cancel refuses a terminal run (#59)", async () => {
     const app = await createApp()
     await openAndSubmit(app)
     // Drain PR1 to completion: R1 is terminal (passed/integrated), not cancelable.
     expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), outputIO().io)).toBe(0)
     const cancel = outputIO()
-    expect(await runYrd(app, yrd("run", "cancel", "R1"), cancel.io)).not.toBe(0)
+    expect(await runYrd(app, yrd("queue", "cancel", "R1"), cancel.io)).not.toBe(0)
     expect(cancel.stderr()).toContain("only a running or waiting run")
   })
 
@@ -2861,8 +2862,7 @@ describe("runYrd", () => {
     const checkRuns: string[] = []
     const mergeRuns: string[] = []
     const app = await createApp({ checkRuns, mergeRuns })
-    const open = outputIO()
-    expect(await runYrd(app, yrd("bay", "open", "one"), open.io), open.stderr()).toBe(0)
+    await openTestBay(app, { name: "one" })
 
     const submit = outputIO({ cwd: "/repo/.bays/B1" })
     expect(await runYrd(app, yrd("pr", "submit", "--follow"), submit.io), submit.stderr()).toBe(0)
@@ -2989,11 +2989,9 @@ describe("runYrd", () => {
     expect(prSubmit.stdout()).not.toContain(`--${["li", "ne"].join("")} <branch>`)
   })
 
-  it("opens, refreshes, and closes bays through installed command refs while driving jobs", async () => {
+  it("refreshes and closes an active Bay through installed command refs while driving jobs", async () => {
     const app = await createApp()
-    const open = outputIO({ color: true, columns: 64 })
-    expect(await runYrd(app, yrd("bay", "open", "fix-readme", "--from", "topic/readme"), open.io)).toBe(0)
-    expect(open.stdout()).toContain("file:///repo/.bays/B1")
+    await openTestBay(app, { name: "fix-readme", branch: "topic/readme" })
 
     const state = app.state()
     expect(state.bays.byId.B1).toMatchObject({
@@ -3024,8 +3022,7 @@ describe("runYrd", () => {
 
   it("closes a draft-backed Bay without withdrawing its PR", async () => {
     const app = await createApp({ waitingCheck: true })
-    const open = outputIO()
-    expect(await runYrd(app, yrd("bay", "open", "draft-close"), open.io), open.stderr()).toBe(0)
+    await openTestBay(app, { name: "draft-close" })
 
     const create = outputIO({ cwd: "/repo/.bays/B1" })
     expect(await runYrd(app, yrd("pr", "create"), create.io), create.stderr()).toBe(0)
@@ -3044,8 +3041,7 @@ describe("runYrd", () => {
 
   it("certifies exact-head handoff readiness and exposes the shared lifecycle projection", async () => {
     const app = await createApp()
-    const open = outputIO()
-    expect(await runYrd(app, yrd("bay", "open", "handoff-cli", "--json"), open.io), open.stderr()).toBe(0)
+    await openTestBay(app, { name: "handoff-cli" })
 
     const before = outputIO()
     expect(await runYrd(app, yrd("bay", "--json"), before.io), before.stderr()).toBe(0)
@@ -3102,8 +3098,7 @@ describe("runYrd", () => {
       evidence,
       "--json",
     )
-    const open = outputIO()
-    expect(await runYrd(app, yrd("bay", "open", "submitted-retry", "--json"), open.io), open.stderr()).toBe(0)
+    await openTestBay(app, { name: "submitted-retry" })
     const first = outputIO()
     expect(await runYrd(app, args, first.io), first.stderr()).toBe(0)
     await app.bays.intake({ bay: "B1", headSha: HEAD_SHA })
@@ -3120,8 +3115,7 @@ describe("runYrd", () => {
 
   it("refreshes the Bay before certifying a newly committed handoff head", async () => {
     const app = await createApp({ refreshedHead: MERGED_SHA })
-    const open = outputIO()
-    expect(await runYrd(app, yrd("bay", "open", "fresh-handoff", "--json"), open.io), open.stderr()).toBe(0)
+    await openTestBay(app, { name: "fresh-handoff" })
     expect(app.bays.get("B1")).toMatchObject({ headSha: HEAD_SHA })
 
     const handoff = outputIO()
@@ -3156,10 +3150,7 @@ describe("runYrd", () => {
     { surface: "git bay", command: (...args: string[]) => gitBay(...args) },
   ])("projects one active Bay path through canonical selectors on $surface", async ({ command }) => {
     const app = await createApp()
-    const opened = outputIO()
-    expect(await runYrd(app, command("open", "fix-readme", "--from", "topic/readme"), opened.io), opened.stderr()).toBe(
-      0,
-    )
+    await openTestBay(app, { name: "fix-readme", branch: "topic/readme" })
     const beforePathEvents = await Array.fromAsync(app.events()).then((events) => events.length)
 
     for (const selector of ["B1", "fix-readme", "topic/readme"]) {
@@ -3179,8 +3170,7 @@ describe("runYrd", () => {
 
     const longPath = `/repo/${"nested-segment/".repeat(12)}bay path with spaces/B1`
     const longApp = await createApp({ bayPath: longPath })
-    const longOpened = outputIO()
-    expect(await runYrd(longApp, command("open", "long-path"), longOpened.io), longOpened.stderr()).toBe(0)
+    await openTestBay(longApp, { name: "long-path" })
     const narrow = outputIO({ columns: 12 })
     expect(await runYrd(longApp, command("path", "long-path"), narrow.io), narrow.stderr()).toBe(0)
     expect(narrow.stdout()).toBe(`${longPath}\n`)
@@ -3194,10 +3184,8 @@ describe("runYrd", () => {
     expect(missing.stderr()).toContain("no bay 'missing'")
     expect(missing.stderr()).toContain("yrd bay")
 
-    const first = outputIO()
-    expect(await runYrd(app, yrd("bay", "open", "shared", "--from", "topic/one"), first.io), first.stderr()).toBe(0)
-    const second = outputIO()
-    expect(await runYrd(app, yrd("bay", "open", "other", "--from", "shared"), second.io), second.stderr()).toBe(0)
+    await openTestBay(app, { name: "shared", branch: "topic/one" })
+    await openTestBay(app, { name: "other", branch: "shared" })
     const before = await Array.fromAsync(app.events()).then((events) => events.length)
 
     const ambiguous = outputIO()
@@ -3211,12 +3199,11 @@ describe("runYrd", () => {
     const inactive = outputIO()
     expect(await runYrd(app, yrd("bay", "path", "B1"), inactive.io)).toBe(1)
     expect(inactive.stderr()).toContain("bay 'B1' is closed; expected an active bay")
-    expect(inactive.stderr()).toContain("yrd bay open <name>")
+    expect(inactive.stderr()).toContain("yrd bay open --bay <name> -- <command>")
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(afterClose)
 
     const relativeApp = await createApp({ bayPath: "relative/B1" })
-    const relativeOpen = outputIO()
-    expect(await runYrd(relativeApp, yrd("bay", "open", "relative"), relativeOpen.io), relativeOpen.stderr()).toBe(0)
+    await openTestBay(relativeApp, { name: "relative" })
     const beforeRelative = await Array.fromAsync(relativeApp.events()).then((events) => events.length)
     const relative = outputIO()
     expect(await runYrd(relativeApp, yrd("bay", "path", "B1"), relative.io)).toBe(1)
@@ -3225,27 +3212,15 @@ describe("runYrd", () => {
     expect(await Array.fromAsync(relativeApp.events()).then((events) => events.length)).toBe(beforeRelative)
   })
 
-  it("records tracker-neutral issue and actor links when opening a bay", async () => {
+  it("rejects retired persistent-open configuration flags without writing state", async () => {
     const app = await createApp()
-    const output = outputIO({ color: true, columns: 96 })
-
-    expect(
-      await runYrd(
-        app,
-        yrd("bay", "open", "linked-work", "--issue", "github:beorn/yrd#42", "--actor", "codex:apex"),
-        output.io,
-      ),
-      output.stderr(),
-    ).toBe(0)
-    expect(app.state().bays.byId.B1).toMatchObject({
-      name: "linked-work",
-      issue: "github:beorn/yrd#42",
-      actor: "codex:apex",
-    })
-    expect(output.stdout()).toContain("ISSUE")
-    expect(output.stdout()).toContain("github:beorn/yrd#42")
-    expect(output.stdout()).toContain("ACTOR")
-    expect(output.stdout()).toContain("codex:apex")
+    const before = await Array.fromAsync(app.events()).then((events) => events.length)
+    for (const option of ["--actor", "--from", "--base", "--json"]) {
+      const output = outputIO()
+      expect(await runYrd(app, yrd("bay", "open", "--bay", "linked-work", option, "retired"), output.io)).toBe(2)
+      expect(output.stderr(), option).toContain(`unknown option '${option}'`)
+    }
+    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
 
   it("submits inferred bays and runs selected queue steps instead of merely enqueueing jobs", async () => {
@@ -3296,8 +3271,7 @@ describe("runYrd", () => {
   it("refreshes an active bay before submit and warns while using the committed head for dirty work", async () => {
     const refreshedHead = "2".repeat(40)
     const clean = await createApp({ refreshedHead })
-    const open = outputIO()
-    expect(await runYrd(clean, yrd("bay", "open", "fresh-head"), open.io)).toBe(0)
+    await openTestBay(clean, { name: "fresh-head" })
     const submit = outputIO({ cwd: "/repo/.bays/B1" })
     expect(await runYrd(clean, yrd("bay", "submit"), submit.io)).toBe(0)
     expect(clean.state().bays.prs.PR1).toMatchObject({
@@ -3308,7 +3282,7 @@ describe("runYrd", () => {
     })
 
     const dirty = await createApp({ dirtyBay: true })
-    expect(await runYrd(dirty, yrd("bay", "open", "dirty"), outputIO().io)).toBe(0)
+    await openTestBay(dirty, { name: "dirty" })
     const warned = outputIO({ cwd: "/repo/.bays/B1" })
     expect(await runYrd(dirty, yrd("bay", "submit", "--json"), warned.io), warned.stderr()).toBe(0)
     expect(JSON.parse(warned.stdout())).toMatchObject({
@@ -4409,7 +4383,7 @@ describe("runYrd", () => {
   it("passes zero-or-more selectors to the queue as one batch-capable candidate set", async () => {
     const app = await createApp({ batch: 2 })
     await openAndSubmit(app)
-    expect(await runYrd(app, yrd("bay", "open", "two"), outputIO().io)).toBe(0)
+    await openTestBay(app, { name: "two" })
     expect(await runYrd(app, yrd("bay", "submit"), outputIO({ cwd: "/repo/.bays/B2" }).io)).toBe(0)
 
     const integrated = outputIO()
@@ -9444,7 +9418,7 @@ describe("explicit queue step authority", () => {
       mergeWait: { started: () => mergeStarted.resolve(), until: releaseMerge.promise },
     })
     await openAndSubmit(app)
-    expect(await runYrd(app, yrd("bay", "open", "two"), outputIO().io)).toBe(0)
+    await openTestBay(app, { name: "two" })
     expect(await runYrd(app, yrd("bay", "submit"), outputIO({ cwd: "/repo/.bays/B2" }).io)).toBe(0)
 
     const completed = outputIO()

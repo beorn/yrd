@@ -95,7 +95,7 @@ That replaces ambiguous `wip-preserved-*` branches with inspectable state:
 | ------------------------- | ------------------------------------- |
 | dirty worktree            | active bay, not submit-ready          |
 | ahead branch              | pushed or submitted PR                |
-| branch needing repair     | `bay open --from <branch>`            |
+| branch needing repair     | draft PR plus `bay open --pr <PR>`    |
 | external CI still running | waiting queue step with URL and token |
 | author-owned failure      | needs-author PR with typed receipt    |
 | unattributed rejection    | rejected PR with evidence             |
@@ -129,29 +129,18 @@ authority; candidate content can never override it. There is no separate
 
 ```console
 $ cd my-repository
-$ yrd bay open fix-release
-BAY  STATUS  BRANCH             BASE  PATH
-B1   active  issue/fix-release  main  /work/my-repository/.bays/B1
+$ yrd bay open --bay fix-release -- ag "Fix release ordering and commit the result."
+bay fix-release → new task/fix-release, no issue linked, name fix-release
 
-$ cd /work/my-repository/.bays/B1
-$ ...edit and test...
-$ git commit -am "fix: release ordering"
-
-$ yrd pr submit --follow --correlation tribe-request:req-42
-PR   STATUS     BRANCH             BASE  REV  HEAD
-PR1  submitted  issue/fix-release  main  1    a13f09b1c821
-
-$ yrd queue run PR1
-RUN  PRS  STATE   STEPS
-R2   PR1  passed  merge=passed
-
-$ yrd
-main@91803b2137d8 OPEN 0 ACTIVE 0 INTEGRATED 1 REJECTED 0
-
-$ yrd bay close
-BAY  STATUS  BRANCH             BASE  PATH
-B1   closed  issue/fix-release  main  /work/my-repository/.bays/B1
+$ yrd pr create task/fix-release
+$ yrd pr ready PR1
+$ yrd pr checks PR1 --follow
 ```
+
+`bay open` owns the complete foreground lifecycle: provision, run the exact
+child argv (or `$SHELL` by default), checkpoint, push, and close. A failed or
+interrupted child preserves the Bay as an orphan for diagnosis. Use `yrd in`
+for a guest process in an already-open Bay.
 
 Plain PR submit is a handoff: it schedules checks and returns, while an
 integrator follows the same journaled Queue run and drains integration:
@@ -181,7 +170,7 @@ $ yrd pr checks PR2 --follow
 admission, or Queue work is started until `pr ready` (ordinary reviewed work)
 or `pr recut --queue` (authored-root carriers). `pr create` does not push a Git
 branch; callers push first, then create the draft from that exact resolvable
-commit. `bay run` creates or reuses `task/<claim-slug>` and pushes recoverable
+commit. `bay open` creates or reuses `task/<issue-slug>` and pushes recoverable
 checkpoints, but never creates or recuts a PR implicitly. Review and comment
 facts pin the current revision and head SHA; a new head makes old verdicts
 visibly stale. Reviewer assignment and richer policy belong to the calling
@@ -194,39 +183,56 @@ bun yrd --help
 bun yrd
 bun yrd pr runs PR1
 
-# Installed alias for `yrd bay open example`:
-git bay open example
+# Installed projection for `yrd bay open --bay example`:
+git bay open --bay example
 
 # One foreground child, bracketed by a pushed branch carrier and synchronous cleanup
-# (`yrd bay run` is the equivalent projection):
-yrd run @tracker/fix-release -- vi README.md
+yrd bay open @tracker/fix-release -- vi README.md
 
 # Continue an existing delivery branch without implicitly recutting its PR:
-yrd run --pr task/fix-release -- vi README.md
+yrd bay open --pr task/fix-release -- vi README.md
 
 # One guest in the owner's existing Bay; from inside that Bay, omit the selector:
-yrd run --exec fix-release -- ag
-yrd sh --exec
+yrd in fix-release ag
+yrd in
+
+# Resolve an issue first (or fall back to an existing PR) and launch ag with a mission:
+yrd do @tracker/fix-release
+
+# Open a scratch Bay and run $SHELL as its owner:
+yrd sh --bay scratch
 ```
 
 Installed binaries are `yrd`, `git-yrd`, and `git-bay`. Git resolves
 `git bay ...` through `git-bay` automatically.
 
-On a clean child exit, `bay run` commits root-worktree changes as
-`wip: <claim>`, pushes the same task branch, and removes the Bay before
+On a clean child exit, `bay open` commits root-worktree changes as
+`wip: <issue-or-bay>`, pushes the same task branch, and removes the Bay before
 returning. No PR or Queue record is created; use `pr create` explicitly, or
 `--pr <selector>` to continue an existing PR's branch without recutting it.
 A non-zero or abnormal child leaves the workspace open and records a durable
 `orphan` fact visible through `yrd bay list --json`. Dirty submodules are never
 guessed into a publication: checkpointing fails loudly and preserves the Bay.
 
-`run --exec` attaches a guest process without opening, checkpointing, closing,
-or otherwise taking ownership of the Bay lifecycle. Its live address is
-`<bay-or-explicit-name>:<child-pid>`; Yrd prints that address and exports the
-same value as `HAB_NAME`. `--name @issue/helper` supplies an explicit
-subpersona. With no command, `run` and `run --exec` use `$SHELL`; `yrd sh` is
-that spelling directly, while `yrd ag` runs `ag`. Both aliases accept
-`--exec`.
+`bay in` (also spelled root `yrd in`) attaches a guest process without opening,
+checkpointing, closing, or otherwise taking ownership of the Bay lifecycle.
+Its live address is `<bay-or-explicit-name>:<child-pid>`; Yrd prints that
+address and exports the same value as `HAB_NAME`. `--name @issue/helper`
+supplies an explicit subpersona. With no command, both `bay open` and `bay in`
+use `$SHELL`. `yrd sh` is owner sugar for `bay open` plus `$SHELL`; exact
+`in ag` launches `ag` with the guest-only contract primer.
+
+An open config is explicit and deterministic. A positional config is always an
+issue reference; `--issue` is its named alias and the two cannot be combined.
+Use `--bay` for an issue-less friendly Bay name and `--pr` only to continue an
+existing PR branch. The four resolved nouns are:
+
+| Noun  | Resolution order                                          |
+| ----- | --------------------------------------------------------- |
+| issue | `--issue`, then the positional config                     |
+| PR    | `--pr`, then the issue's live PR, then a generated branch |
+| Bay   | `--bay`, then the positional config, then the PR           |
+| name  | `--name`, `HAB_NAME`, `TRIBE_NAME`, then the Bay           |
 
 ## Execution records
 
@@ -263,7 +269,7 @@ command acts on a queue—base branches.
 
 State-oriented public verbs accept `--json` and return an invoked-command
 discriminator such as `pr.submit`, `pr.status`, or `queue.run`. The foreground
-`bay run` bracket is the deliberate exception: it streams the child's stdio
+`bay open`/`bay in` bracket is the deliberate exception: it streams the child's stdio
 unchanged and returns success only when both the child and bracket complete
 cleanly. Human output uses Silvery tables, semantic status color, and OSC 8
 links for paths, logs, and artifacts.
@@ -292,15 +298,16 @@ The top-level surface is deliberately small:
 
 ```text
 yrd                         dashboard across queues, PRs, and recent outcomes
-yrd run                    own a Bay lifecycle; --exec attaches a PID-addressed guest
-yrd sh / yrd ag            $SHELL and ag aliases for run; both compose with --exec
+yrd in                     attach a PID-addressed guest to an existing Bay
+yrd do                     resolve an issue or PR and open an ag mission
+yrd sh                     own a Bay lifecycle and run $SHELL
 yrd pr                      list PRs; create, submit, view, runs, diff, checkout,
                             status, edit, checks, regression, close, and merge teaching
-yrd bay                     list bays; run, open, path, refresh, submit, and close
+yrd bay                     list bays; open, in, path, refresh, submit, and close
 yrd issue                   read-only issue list and joined delivery view
 yrd contest                 list; open, eval, view, finish, select, promote
 yrd queue                   render the queue timeline by default; list/ls is canonical;
-                            run, pause, resume, recover, finish, init, deinit, audit
+                            run, cancel, pause, resume, recover, finish, init, deinit, audit
 yrd log                     terminal queue history; --all adds lossless records
 yrd watch                   thin alias for yrd queue list --watch
 yrd prime                   agent briefing plus current delivery context
@@ -310,12 +317,12 @@ yrd prime                   agent briefing plus current delivery context
 
 ```text
 yrd bay list [--json]
-yrd run [--exec] [--pr <selector>] [<claim-or-selector>] [-- <command...>]
-yrd bay run [--exec] [--pr <selector>] [<claim-or-selector>] [-- <command...>]
-yrd sh [--exec] [--pr <selector>] [<claim-or-selector>]
-yrd ag [--exec] [--pr <selector>] [<claim-or-selector>]
-yrd bay open <name> [--from <branch>] [--base <branch>]
-  [--issue <ref>] [--actor <id>] [--json]
+yrd bay open [<issue>] [--issue <issue>] [--pr <selector>] [--bay <name>]
+  [-- <command...>]
+yrd bay in [<bay>] [ag | -- <command...>]
+yrd in [<bay>] [ag | -- <command...>]
+yrd do <issue-or-pr>
+yrd sh [<issue>] [--issue <issue>] [--pr <selector>] [--bay <name>]
 yrd bay path <selector> [--json]
 yrd bay refresh [selector...] [--json]
 yrd bay submit [selector...] [--base <branch>]
@@ -328,21 +335,21 @@ The same commands are available through the standalone `git bay` projection.
 submission core as `pr submit`; `bay submit` remains a handoff, while new
 callers use the PR-native check-admission surface below.
 
-| Command   | Input                                                   | Output and state                                                                         |
-| --------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `list`    | None                                                    | Lists every Bay, including durable failure and orphan facts                              |
-| `run`     | Claim/selector or `--pr`; exact argv; optional `--exec` | Owns the bracket without implicit PR intake, or attaches a PID-addressed lifecycle guest |
-| `open`    | New bay name; optional source, base, issue, and actor   | Prints the worktree path; creates and provisions a named bay                             |
-| `path`    | One Bay ID, name, or branch selector                    | Prints the exact absolute path of one active Bay; read-only and never refreshes it       |
-| `refresh` | Zero or more bays                                       | Refreshes Git head, base, dirty, path, and workspace status                              |
-| `submit`  | Bays, PRs, or source branches                           | Creates or advances PRs to `submitted`; never executes Queue work                        |
-| `close`   | Zero or more bays                                       | Deprovisions clean terminal bays; `--withdraw` explicitly cancels an associated live PR  |
+| Command   | Input                                              | Output and state                                                                        |
+| --------- | -------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `list`    | None                                               | Lists every Bay, including durable failure and orphan facts                             |
+| `open`    | Issue, `--issue`, `--pr`, or `--bay`; exact argv   | Owns the bracket, checkpoints the branch, and closes cleanly without implicit PR intake |
+| `in`      | Bay selector; exact argv or the exact `ag` operand | Attaches a PID-addressed lifecycle guest; never owns configuration or closure           |
+| `path`    | One Bay ID, name, or branch selector               | Prints the exact absolute path of one active Bay; read-only and never refreshes it      |
+| `refresh` | Zero or more bays                                  | Refreshes Git head, base, dirty, path, and workspace status                             |
+| `submit`  | Bays, PRs, or source branches                      | Creates or advances PRs to `submitted`; never executes Queue work                       |
+| `close`   | Zero or more bays                                  | Deprovisions clean terminal bays; `--withdraw` explicitly cancels an associated live PR |
 
-Submodule repositories are ready when `bay open` returns. Yrd recursively
-materializes the recorded gitlinks while keeping each Bay's refs, config, and
-working tree isolated. For every initial clone whose exact commit already
-exists in the source repository, Git borrows that matching local object store
-with `--reference`; only a genuinely new pin falls back to the configured
+Submodule repositories are ready before the `bay open` child starts. Yrd
+recursively materializes the recorded gitlinks while keeping each Bay's refs,
+config, and working tree isolated. For every initial clone whose exact commit
+already exists in the source repository, Git borrows that matching local object
+store with `--reference`; only a genuinely new pin falls back to the configured
 remote. Yrd records that fallback boundary in repository-local Git config as
 `submodule.alternateLocation=superproject` and
 `submodule.alternateErrorStrategy=info`. There is no Yrd-specific cache knob.
@@ -355,19 +362,16 @@ back normally. Exact-SHA reachability proofs intentionally remain backed by
 fresh remote stores, so local borrowing cannot turn an unpushed pin into a
 passing delivery proof.
 
-`--head` is an alias for `--from`. `--queue` is an alias for `--base`. The
-canonical words are source branch (`--from`) and base branch (`--base`).
-
 `bay path` resolves through the same canonical ID/name/branch selector as the
 other Bay operations. It refuses unknown, ambiguous, inactive, or pathless
 Bays. Plain output is the absolute path plus one newline; JSON is the stable
 `{"bay":"B1","command":"bay.path","path":"/absolute/path"}` projection.
 
-`--issue` stores an opaque tracker-neutral reference such as `km:@yrd/core/42`
-or `github:beorn/yrd#42`. `--actor` records the worker or implementation
-identity. Yrd preserves these links but does not import tracker lifecycle or
-fleet policy. Actor attribution does not launch a process; an explicit composed
-runner, such as Contest's `ag` runner, mans the Bay.
+`--issue` resolves and stores an opaque tracker-neutral reference such as
+`km:@yrd/core/42` or `github:beorn/yrd#42`. Yrd preserves that link but does not
+import tracker lifecycle or fleet policy. Runtime identity follows the global
+`--name`, `HAB_NAME`, `TRIBE_NAME`, and Bay fallback ladder. Supplying a name
+does not assign or launch a worker; the explicit child argv mans the Bay.
 
 A submitted PR also carries a `--title` (its subject) and a `--description`
 (its body). When either flag is omitted, `pr submit` seeds it from the head
@@ -389,12 +393,15 @@ revisions and Runs, followed by scalar facts and the diff. Step tabs keep the
 executed command immediately above its output and link the real artifact path
 for the full log.
 
-`open --from` uses an existing branch; there is no `adopt` command. Direct
-branch submission does not provision a worktree:
+To continue an existing branch, first make its delivery identity explicit, then
+target that existing PR. Direct branch submission does not provision a
+worktree:
 
 ```bash
-yrd bay open release-fix --from fix/release --base release/2.0
-yrd pr submit fix/release --base release/2.0 --correlation tribe-request:req-42
+git push -u origin fix/release
+yrd pr create fix/release --base release/2.0
+yrd bay open --pr fix/release -- "$SHELL"
+yrd pr ready fix/release --correlation tribe-request:req-42
 ```
 
 Both submission surfaces accept `--correlation <namespace:id>`. The namespace
@@ -561,27 +568,23 @@ otherwise the Queue cannot prove the gitlink object is remotely reachable.
 
 #### Manning an Ordinary Bay
 
-Yrd attributes an ordinary Bay to an actor but does not assign, launch, lease,
-or resume that actor. The caller owns those policies. A human, Tent, or another
-Hab app composes the workflow explicitly:
+Yrd carries the selected runtime name but does not assign, lease, or resume an
+actor. The caller owns those policies. A human, Tent, or another Hab app
+composes the workflow explicitly:
 
 ```bash
 # Claim github:beorn/yrd#42 in the caller's issue system first.
-yrd bay open fix-42 --issue github:beorn/yrd#42 --actor @agent/3
-
-cd /path/printed/by/yrd
-ag code codex --new --name @agent/3 -- "Implement github:beorn/yrd#42 and commit the result."
-
-cd -
-yrd pr submit fix-42 --follow
-yrd queue run fix-42
+yrd --name @agent/3 bay open --issue github:beorn/yrd#42 -- \
+  ag "Implement github:beorn/yrd#42 and commit the result."
+yrd pr create task/42 --issue github:beorn/yrd#42
+yrd pr ready task/42
 ```
 
 Contest is different because launching comparable implementations is part of
 its domain contract: `contest open` creates the bays and its configured runner
 launches each competitor. If two non-Contest callers later need the same
 manning lifecycle, their shared behavior can be extracted above Yrd instead of
-turning actor attribution into a hidden side effect of `bay open`.
+turning assignment into a hidden side effect of `bay open`.
 
 ### Queue Operations
 
@@ -592,6 +595,7 @@ yrd queue ls [filter...] [the same options]
 yrd queue [filter...] [the same options]
 yrd watch [filter...] [the same options except --watch is implied]
 yrd queue run [selector...] [--steps [step...]] [--follow | --once] [--interval <seconds>] [--json]
+yrd queue cancel <run> [--reason <text>] [--json]
 yrd queue pause [base] [--json]
 yrd queue pause [base] --reason <text> [--allow [pr...]] [--json]
 yrd queue resume [base] [--json]
@@ -1104,8 +1108,9 @@ Different base branches have independent queue state but share the repository's
 event journal, receiver, artifacts, and configured plugins:
 
 ```bash
-yrd bay open release-fix --base release/2.0
-yrd bay submit --base release/2.0 --correlation tribe-request:release-2.0
+yrd bay open --bay release-fix -- "$SHELL"
+yrd pr create task/release-fix --base release/2.0
+yrd pr ready task/release-fix --correlation tribe-request:release-2.0
 yrd queue --base release/2.0
 ```
 

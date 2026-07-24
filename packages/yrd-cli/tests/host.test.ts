@@ -1209,7 +1209,9 @@ notify:
     expect(
       commandBlock
         .split("\n")
-        .flatMap((text) => text.match(/^\s{2}(?<command>[a-z]+)(?:\s+\[[^\]]+\])*\s{2,}/u)?.groups?.command ?? []),
+        .flatMap(
+          (text) => text.match(/^\s{2}(?<command>[a-z]+)(?:\s+(?:\[[^\]]+\]|<[^>]+>))*\s{2,}/u)?.groups?.command ?? [],
+        ),
     ).toEqual([
       "pr",
       "bay",
@@ -1223,9 +1225,9 @@ notify:
       "watch",
       "prime",
       "init",
-      "run",
+      "in",
+      "do",
       "sh",
-      "ag",
     ])
     expect(stdout).not.toMatch(/\b(?:pr\|prs|bay\|bays|issue\|issues|contest\|contests|queue\|queues)\b/u)
     expect(stderr).toBe("")
@@ -1336,23 +1338,17 @@ notify:
     const { repo } = await repository()
     const ambient = join(repo, "..", "bay-path-ambient")
     await mkdir(ambient)
-    let opened = ""
-    let stderr = ""
+    await using owner = await createYrdHost({ cwd: repo })
+    const opened = await owner.app.bays.open({ name: "selected" })
+    const jobs = await owner.app.jobs.runMany(owner.app.jobs.requested(opened), {
+      runner: "test",
+      leaseMs: 60_000,
+    })
+    expect(jobs.every((job) => job.status === "passed")).toBe(true)
+    await owner.close()
 
-    expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "bay", "open", "selected", "--json"], {
-        cwd: ambient,
-        stdout: (text) => {
-          opened += text
-        },
-        stderr: (text) => {
-          stderr += text
-        },
-      }),
-      stderr,
-    ).toBe(0)
+    let stderr = ""
     const path = join(repo, ".bays", "B1")
-    expect(JSON.parse(opened)).toMatchObject({ bay: { id: "B1", path } })
 
     let projected = ""
     stderr = ""
@@ -2600,18 +2596,14 @@ notify:
   it("submits the current linked-worktree branch when no bay selector is given", async () => {
     const { repo, featureSha } = await repository()
     const linked = join(repo, "..", "current")
-    let setupStderr = ""
-
-    expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "bay", "open", "stale"], {
-        cwd: repo,
-        stdout: () => undefined,
-        stderr: (text) => {
-          setupStderr += text
-        },
-      }),
-      setupStderr,
-    ).toBe(0)
+    await using setup = await createYrdHost({ cwd: repo })
+    const opened = await setup.app.bays.open({ name: "stale" })
+    const jobs = await setup.app.jobs.runMany(setup.app.jobs.requested(opened), {
+      runner: "test",
+      leaseMs: 60_000,
+    })
+    expect(jobs.every((job) => job.status === "passed")).toBe(true)
+    await setup.close()
     await git(repo, "worktree", "add", "-q", linked, "issue/feature")
 
     let stdout = ""

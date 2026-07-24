@@ -325,13 +325,13 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           if (decision.kind === "refuse" && decision.reason === "unproven-existing") {
             throw new Error(
               `branch '${input.branch}' already exists without matching claim provenance; ` +
-                "link that branch to the claim's draft PR, then rerun bay run",
+                "link that branch to the claim's draft PR, then reopen with bay open",
             )
           }
           if (decision.kind === "refuse") {
             throw new Error(
               `live claim branch '${input.branch}' has no remote or tracking carrier; ` +
-                "restore the draft PR head before rerunning bay run",
+                "restore the draft PR head before reopening with bay open",
             )
           }
           if (decision.carrier === "remote" && input.remoteBranch === undefined) {
@@ -347,7 +347,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
             if (carriesClaimHead.code !== 0) {
               throw new Error(
                 `local branch '${input.branch}' does not descend from the live claim head; ` +
-                  "restore or reconcile the draft PR branch before rerunning bay run",
+                  "restore or reconcile the draft PR branch before reopening with bay open",
               )
             }
           }

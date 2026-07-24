@@ -158,7 +158,7 @@ function recordingProcess(requests: ProcessRequest[]): Pick<Process, "run"> {
 describe("PR signal observer", () => {
   it("does not hold the notifications writer.lock across delivery (D4)", async () => {
     // The incident: a one-shot's drain held .git/yrd/notifications/writer.lock across
-    // every `tribe` delivery subprocess (up to 5s each), so a run cancel starved the
+    // every `tribe` delivery subprocess (up to 5s each), so a queue cancel starved the
     // resident for minutes. Delivery must happen OUTSIDE the lock — the lock guards
     // only the cursor read/write.
     const dir = await stateDir()
@@ -227,7 +227,7 @@ describe("PR signal observer", () => {
   })
 
   it("bounds a canceled ghost's closure delivery and terminates promptly (D4 regression)", async () => {
-    // The incident: `run cancel` of a ghost run held the writer.lock for minutes,
+    // The incident: `queue cancel` of a ghost run held the writer.lock for minutes,
     // closing opened balls one slow `tribe pending --close` at a time. With delivery
     // unlocked and a one-shot budget, the cancel closes what it quickly can, defers
     // loudly, and RETURNS in bounded time instead of spinning.

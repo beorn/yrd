@@ -6,7 +6,7 @@
  * two-step — press `x` to arm a confirmation, then `y`/Enter to confirm — and it
  * is fail-safe: any other key, Escape, or a second `x` dismisses the prompt
  * without canceling. The confirmed cancel is wired to the SAME path as the
- * `run cancel <R>` CLI (app.queue.cancelRun); the reducer only decides state.
+ * `queue cancel <R>` CLI (app.queue.cancelRun); the reducer only decides state.
  *
  * Extracted as a pure function so the decision is unit-testable without mounting
  * the React watch pane (whose live renderer is exercised separately).

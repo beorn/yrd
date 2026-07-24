@@ -628,7 +628,7 @@ function hasBranchReuseProvenance(
   branch: string,
 ): boolean {
   return (
-    Object.values(state.prs).some((pr) => pr.branch === branch && pr.issue === identity.issue && isLivePR(pr.status)) ||
+    Object.values(state.prs).some((pr) => pr.branch === branch && pr.issue === identity.issue && isLivePR(pr)) ||
     Object.values(state.byId).some(
       (bay) =>
         bay.status === "closed" && bay.branch === branch && bay.name === identity.name && bay.issue === identity.issue,
