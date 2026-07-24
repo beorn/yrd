@@ -1166,7 +1166,22 @@ notify:
       commandBlock
         .split("\n")
         .flatMap((text) => text.match(/^\s{2}(?<command>[a-z]+)(?:\s+\[[^\]]+\])*\s{2,}/u)?.groups?.command ?? []),
-    ).toEqual(["pr", "bay", "issue", "contest", "queue", "journal", "migrate", "log", "watch", "prime", "init", "run"])
+    ).toEqual([
+      "pr",
+      "bay",
+      "issue",
+      "contest",
+      "queue",
+      "journal",
+      "migrate",
+      "log",
+      "watch",
+      "prime",
+      "init",
+      "run",
+      "sh",
+      "ag",
+    ])
     expect(stdout).not.toMatch(/\b(?:pr\|prs|bay\|bays|issue\|issues|contest\|contests|queue\|queues)\b/u)
     expect(stderr).toBe("")
     expect(await Bun.file(join(root, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(false)
@@ -2795,7 +2810,7 @@ notify:
       }),
     ).toBe(0)
     expect(stdout).toContain(`main@${baseSha.slice(0, 12)}`)
-    expect(stdout).toMatch(/PR1\s+issue\/feature\s+rejected/u)
+    expect(stdout).toMatch(/pr#1\.1\s+issue\/feature\s+rejected/u)
     expect(stdout).not.toContain(featureSha.slice(0, 12))
     expect(stderr).toBe("")
 
@@ -2904,7 +2919,7 @@ notify:
     expect(exitCode, stderr).toBe(0)
     expect(stderr).toBe("")
     expect(stdout).toContain("Recent failures")
-    expect(stdout.match(/PR1/gu)).toHaveLength(2)
+    expect(stdout.match(/pr#1\.[12]/gu)).toHaveLength(2)
     expect(`${stdout}\n${stderr}`).not.toMatch(/precedes/u)
     expect(await journalEnvelope(repo)).toEqual(journalBefore)
   })
