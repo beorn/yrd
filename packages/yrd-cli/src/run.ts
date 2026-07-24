@@ -61,6 +61,7 @@ import {
   stableJson,
   usage,
   type YrdContext,
+  type YrdPersona,
 } from "./invocation.ts"
 import { getLiveRenderer } from "./live-renderer.ts"
 import {
@@ -1034,6 +1035,9 @@ function issueDeliveryRows(bridge: TrackerBridgeV2): IssueDeliveryRow[] {
 }
 
 type RuntimePosture = "active" | "viewer" | "bracketed-bay-run" | "one-shot-queue-run" | "resident-queue-run"
+// Commander binds handlers before bootstrap resolves the invocation, so io carries the selected persona into bay run.
+const RuntimePersona = Symbol("yrd.runtime-persona")
+type RuntimePersonaIO = YrdCliIO & { [RuntimePersona]?: YrdPersona }
 
 type RuntimeBootstrap = Readonly<{
   ambientCwd: string
@@ -1303,29 +1307,33 @@ async function openBay(
   )
 }
 
-function bayRunIdentity(app: YrdCliApp, claim: string): Readonly<{ claim: string; name: string; branch: string }> {
-  const normalized = claim.trim()
-  const name = basename(normalized)
+function bayRunIdentity(
+  app: YrdCliApp,
+  requestedName: string,
+  issue: string | undefined,
+): Readonly<{ claim: string; name: string; branch: string; issue?: string; reattached: boolean }> {
+  const name = requestedName.trim()
   if (
-    normalized === "" ||
+    name === "" ||
     name === "." ||
     name === ".." ||
     name.includes("..") ||
     name.endsWith(".lock") ||
     !/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u.test(name)
   ) {
-    usage("bay run CLAIM must end in a Git-safe issue slug")
+    usage("bay run name must be Git-safe")
   }
-  const claimPrs = app.bays.prs().filter((pr) => pr.issue === normalized && isLivePR(pr))
+  const claim = issue ?? name
+  const claimPrs = issue === undefined ? [] : app.bays.prs().filter((pr) => pr.issue === issue && isLivePR(pr))
   if (claimPrs.length > 1) {
     refusal(
-      `claim '${normalized}' has multiple live PRs (${claimPrs.map((pr) => pr.id).join(", ")}); ` +
+      `claim '${claim}' has multiple live PRs (${claimPrs.map((pr) => pr.id).join(", ")}); ` +
         "withdraw the duplicate before rerunning bay run",
     )
   }
   const claimPr = claimPrs[0]
   if (claimPr !== undefined) {
-    return { claim: normalized, name, branch: claimPr.branch }
+    return { claim, name, branch: claimPr.branch, issue, reattached: true }
   }
 
   const bays = app.bays.list()
@@ -1335,17 +1343,17 @@ function bayRunIdentity(app: YrdCliApp, claim: string): Readonly<{ claim: string
     ...bays.filter((bay) => bay.branch === branch).map((bay) => bay.issue),
     ...prs.filter((pr) => pr.branch === branch).map((pr) => pr.issue),
   ]
-  const isForeignBranch = (branch: string) => branchOwners(branch).some((issue) => issue !== normalized)
-  const terminalDefault = prs.some((pr) => pr.branch === defaultBranch && pr.issue === normalized && !isLivePR(pr))
-  const collisionBranch = `${defaultBranch}-${createHash("sha256").update(normalized).digest("hex").slice(0, 8)}`
+  const isForeignBranch = (branch: string) => branchOwners(branch).some((owner) => owner !== issue)
+  const terminalDefault = prs.some((pr) => pr.branch === defaultBranch && pr.issue === issue && !isLivePR(pr))
+  const collisionBranch = `${defaultBranch}-${createHash("sha256").update(claim).digest("hex").slice(0, 8)}`
   const branch = isForeignBranch(defaultBranch) || terminalDefault ? collisionBranch : defaultBranch
   if (isForeignBranch(branch)) {
     refusal(
-      `claim '${normalized}' collides with existing branch '${branch}'; ` +
+      `claim '${claim}' collides with existing branch '${branch}'; ` +
         "link a distinct draft PR branch to the claim, then rerun bay run",
     )
   }
-  return { claim: normalized, name, branch }
+  return { claim, name, branch, ...(issue === undefined ? {} : { issue }), reattached: false }
 }
 
 async function checkpointRunBay(app: YrdCliApp, bay: Bay, claim: string, io: YrdCliIO): Promise<Bay> {
@@ -1358,15 +1366,15 @@ async function checkpointRunBay(app: YrdCliApp, bay: Bay, claim: string, io: Yrd
   return checkpointed
 }
 
-async function draftRunBay(app: YrdCliApp, bay: Bay, claim: string, io: YrdCliIO): Promise<void> {
+async function draftRunBay(app: YrdCliApp, bay: Bay, issue: string | undefined, io: YrdCliIO): Promise<void> {
   const pr = await app.bays.submitSelection(bay.id, {
-    issue: claim,
+    ...(issue === undefined ? {} : { issue }),
     draft: true,
     resolveRevision: (ref) => optionalRevision(ref, io),
     run: runtimeOptions(io),
   })
-  if (prDeliveryState(pr) !== "pushed" || pr.branch !== bay.branch || pr.issue !== claim) {
-    refusal(`bay '${bay.id}' did not retain a branch-backed draft for '${claim}'`)
+  if (prDeliveryState(pr) !== "pushed" || pr.branch !== bay.branch || pr.issue !== issue) {
+    refusal(`bay '${bay.id}' did not retain its branch-backed draft`)
   }
 }
 
@@ -1433,25 +1441,36 @@ async function runBay(
   services: YrdCliServices,
   claim: string,
   argv: readonly string[],
+  options: Readonly<{ issue?: string }>,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
   if (services.process === undefined) configuration("bay run requires the process-backed Yrd runtime")
   if (argv.length === 0) usage("bay run requires a command after CLAIM")
-  const identity = bayRunIdentity(app, claim)
+  const persona = (io as RuntimePersonaIO)[RuntimePersona]
+  const name = persona?.name ?? basename(claim).replace(/^@/u, "")
+  const issue = options.issue ?? (claim.startsWith("@") ? claim : undefined)
+  if (issue !== undefined) await app.issues.resolve(app.issues.ref(issue))
+  const identity = bayRunIdentity(app, name, issue)
+  io.stdout(
+    `bay ${identity.name} → ${identity.reattached ? `reattached ${identity.branch}` : `new ${identity.branch}`}, ${
+      identity.issue === undefined ? "no issue linked" : `linked ${identity.issue}`
+    }\n`,
+  )
   const existingBayIds = new Set(app.bays.list().map((candidate) => candidate.id))
   let bay: Bay | undefined
   try {
     const opened = await app.bays.open({
       name: identity.name,
-      issue: identity.claim,
       branch: identity.branch,
+      ...(identity.issue === undefined ? {} : { issue: identity.issue }),
+      ...(persona === undefined ? {} : { actor: persona.mailbox }),
     })
     assertJobsPassed(await runJobs(app, app.jobs.requested(opened), io), `bay '${identity.name}' provision`)
     const active = app.bays
       .list()
       .filter(
         (candidate) =>
-          candidate.status === "active" && candidate.branch === identity.branch && candidate.issue === identity.claim,
+          candidate.status === "active" && candidate.branch === identity.branch && candidate.issue === identity.issue,
       )
     bay = active.length === 1 ? active[0] : undefined
     if (bay?.path === undefined || bay.status !== "active") {
@@ -1463,7 +1482,7 @@ async function runBay(
     // draft is the claim record; Yrd deliberately does not grow a tracker lease.
     bay = await checkpointRunBay(app, bay, identity.claim, io)
     if (await preserveInterruptedRunBay(app, bay, "pre-child checkpoint", io)) return 1
-    await draftRunBay(app, bay, identity.claim, io)
+    await draftRunBay(app, bay, identity.issue, io)
     if (await preserveInterruptedRunBay(app, bay, "pre-child draft", io)) return 1
   } catch (error) {
     bay ??= app.bays
@@ -1473,7 +1492,7 @@ async function runBay(
           !existingBayIds.has(candidate.id) &&
           candidate.status !== "closed" &&
           candidate.branch === identity.branch &&
-          candidate.issue === identity.claim,
+          candidate.issue === identity.issue,
       )
     if (bay !== undefined) {
       await orphanRunBay(app, bay, `pre-child setup failed: ${errorDetail(error)}`)
@@ -1515,7 +1534,7 @@ async function runBay(
   try {
     bay = await checkpointRunBay(app, bay, identity.claim, io)
     if (await preserveInterruptedRunBay(app, bay, "post-child checkpoint", io)) return 1
-    await draftRunBay(app, bay, identity.claim, io)
+    await draftRunBay(app, bay, identity.issue, io)
     if (await preserveInterruptedRunBay(app, bay, "post-child draft", io)) return 1
     const closing = await app.bays.close({ bay: bay.id })
     assertJobsPassed(await runJobs(app, app.jobs.requested(closing), io), `bay '${bay.id}' close`)
@@ -2877,6 +2896,46 @@ function runtimePosture(
   if (action.name() === "run" && action.parent?.name() === "bay") return "bracketed-bay-run"
   if (action.name() !== "run" || action.parent?.name() !== "queue") return "active"
   return queueRunIsFollow(action) ? "resident-queue-run" : "one-shot-queue-run"
+}
+
+type RuntimeGlobalOptions = Readonly<{
+  repo?: string
+  config?: string
+  name?: string
+  wire?: string
+  verbose?: number
+  quiet?: number
+  logLevel?: string
+}>
+
+function resolveRuntimeContext(
+  globals: RuntimeGlobalOptions,
+  bootstrap: RuntimeBootstrap,
+  action: Readonly<{ args: readonly unknown[] }>,
+  posture: RuntimePosture,
+): YrdContext {
+  const fallbackName =
+    posture === "bracketed-bay-run" && typeof action.args[0] === "string" ? action.args[0] : undefined
+  const selected = resolveYrdContext(
+    { ...globals, ...(fallbackName === undefined ? {} : { fallbackName }) },
+    bootstrap.env,
+    bootstrap.ambientCwd,
+  )
+  // TRIBE_NAME is a transitional fleet-attribution fallback, not authority
+  // to rename existing claim-shaped work. Until tent exports HAB_NAME, keep
+  // the seat mailbox while the positional work name remains stable.
+  if (
+    fallbackName === undefined ||
+    selected.persona?.registration !== "existing" ||
+    globals.name !== undefined ||
+    bootstrap.env.HAB_NAME?.trim()
+  ) {
+    return selected
+  }
+  return {
+    ...selected,
+    persona: { ...selected.persona, name: basename(fallbackName).replace(/^@/u, "") },
+  }
 }
 
 async function runQueues(
@@ -5071,24 +5130,20 @@ function buildProgram(
   if (bootstrap !== undefined) {
     program.hook("preAction", async (_root, action) => {
       if (runtimeApp !== undefined) return
-      const globals = action.optsWithGlobals() as Readonly<{
-        repo?: string
-        config?: string
-        verbose?: number
-        quiet?: number
-        logLevel?: string
-      }>
-      const selected = resolveYrdContext(globals, bootstrap.env, bootstrap.ambientCwd)
+      const globals = action.optsWithGlobals() as RuntimeGlobalOptions
+      const posture = runtimePosture(action)
+      const selected = resolveRuntimeContext(globals, bootstrap, action, posture)
       // `queue run` resident detection now derives from the run MODE (Tip B):
       // follow is the default, `--once` opts out, and the deprecated `--watch`
       // alias still selects follow (queueRunIsFollow mirrors resolveQueueRunMode
       // at the pre-action boundary). Read-only commands are viewers regardless
       // of whether they are static or resident: reads must never drain receiver
       // receipts, settle notifications, or require an active submitter identity.
-      const loaded = await bootstrap.load(selected, runtimePosture(action))
+      const loaded = await bootstrap.load(selected, posture)
       runtimeApp = loaded.app
       runtimeServices = loaded.services
       Object.assign(io, loaded.io)
+      ;(io as RuntimePersonaIO)[RuntimePersona] = selected.persona
     })
   }
   if (projection === "root") program.version(YRD_VERSION, "-V, --version")
@@ -5134,7 +5189,10 @@ function buildProgram(
   bay
     .command("run <claim> <command...>")
     .description("run one command in a claim-backed Bay")
-    .action(async (claim, command) => setExit(await runBay(installed(), installedServices(), claim, command, io)))
+    .option("--issue <ref>", "link a different issue reference")
+    .action(async (claim, command, options) =>
+      setExit(await runBay(installed(), installedServices(), claim, command, options, io)),
+    )
   bay
     .command("open <name>")
     .description("open a work bay")

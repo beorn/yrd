@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
-import { mkdirSync } from "node:fs"
+import { accessSync, constants, mkdirSync } from "node:fs"
 import { hostname } from "node:os"
-import { join, relative, resolve, sep } from "node:path"
+import { delimiter, join, relative, resolve, sep } from "node:path"
 import { clearLine, cursorTo } from "node:readline"
 import { createScope, type Scope } from "@silvery/scope"
 import {
@@ -77,7 +77,7 @@ import {
   type YrdRefuseConfig,
   type YrdStepConfig,
 } from "./config.ts"
-import { classifyFailure, resolveInvocation } from "./invocation.ts"
+import { classifyFailure, resolveInvocation, type YrdPersona } from "./invocation.ts"
 import { withLiveRenderer } from "./live-renderer.ts"
 import { createYrdLogger, residentObservability, resolveYrdObservability } from "./observability.ts"
 import { formatResidentLogLine, residentArtifactHome } from "./runner-timeline.ts"
@@ -88,6 +88,9 @@ import { queueStepRevision, type ToolchainFingerprint } from "./host-revision.ts
 import {
   createSignalObserver,
   createTribeSignalAdapter,
+  createWireSignalAdapter,
+  registerTribeSignalRecipient,
+  type RejectedSignal,
   type SignalDeliveryAdapter,
   type SignalObserver,
 } from "./signals.ts"
@@ -1020,6 +1023,96 @@ export type YrdHostOptions = Readonly<{
   signalAdapter?: SignalDeliveryAdapter
 }>
 
+type YrdRuntimeHostOptions = YrdHostOptions &
+  Readonly<{
+    persona?: YrdPersona
+    interactive?: boolean
+    wire?: string
+    wireOutput?: (text: string) => void
+  }>
+
+function isWireCapture(destination: string): boolean {
+  return destination === "-" || destination.startsWith("file:") || destination.startsWith("fd:")
+}
+
+function executableOnPath(name: string, env: NodeJS.ProcessEnv): string | undefined {
+  for (const directory of env.PATH?.split(delimiter) ?? []) {
+    if (directory === "") continue
+    const candidate = resolve(directory, name)
+    try {
+      accessSync(candidate, constants.X_OK)
+      return candidate
+    } catch {
+      // Keep searching the host-owned PATH.
+    }
+  }
+  return undefined
+}
+
+async function createRuntimeSignalAdapter(options: {
+  process: Process
+  env: NodeJS.ProcessEnv
+  actor: string
+  persona?: YrdPersona
+  interactive?: boolean
+  wire?: string
+  output?: (text: string) => void
+  injected?: SignalDeliveryAdapter
+  attributedReceipt(event: RejectedSignal): ReturnType<typeof authorAttributionReceipt>
+}): Promise<SignalDeliveryAdapter> {
+  if (options.injected !== undefined) return options.injected
+  const captureWire = options.wire !== undefined && isWireCapture(options.wire)
+  if (captureWire) {
+    if (options.output === undefined) {
+      raiseFailure(
+        "configuration",
+        "signal-wire-output-missing",
+        "yrd: a capture wire requires an ordinary output sink",
+      )
+    }
+    return createWireSignalAdapter(options.wire, options.output, options.actor, options.attributedReceipt)
+  }
+
+  const signalProcess =
+    options.wire === undefined
+      ? options.process
+      : {
+          run: (input: Parameters<Process["run"]>[0]) =>
+            options.process.run({ ...input, env: { ...options.env, ...input.env, TRIBE_SOCKET: options.wire } }),
+        }
+  const executable = executableOnPath("tribe", options.env)
+  if (options.persona?.registration === "ensure") {
+    try {
+      if (executable === undefined) {
+        throw new Error(`yrd: Tribe signal mailbox registration failed for '${options.actor}': executable unavailable`)
+      }
+      await registerTribeSignalRecipient(signalProcess, options.actor, executable)
+    } catch (error) {
+      if (options.interactive !== true) throw error
+    }
+  }
+  try {
+    if (executable === undefined) {
+      raiseFailure(
+        "configuration",
+        "signal-adapter-missing",
+        "yrd: notify routes require the 'tribe' executable, but no live Tribe adapter is available",
+      )
+    }
+    return createTribeSignalAdapter(signalProcess, options.actor, options.attributedReceipt, executable)
+  } catch (error) {
+    if (options.interactive !== true) throw error
+    return {
+      send() {
+        throw error
+      },
+      close() {
+        throw error
+      },
+    }
+  }
+}
+
 export async function createYrdHost(options: YrdHostOptions = {}): Promise<YrdHost> {
   return createYrdRuntimeHost(options, undefined, "active")
 }
@@ -1070,7 +1163,7 @@ async function createViewerReceiver(repository: YrdRepository, process: Process)
 }
 
 async function createYrdRuntimeHost(
-  options: YrdHostOptions,
+  options: YrdRuntimeHostOptions,
   resident: ResidentRunnerIdentity | undefined,
   mode: "active" | "viewer",
 ): Promise<YrdHost> {
@@ -1105,7 +1198,7 @@ async function createYrdRuntimeHost(
         ? createJournal({ dir: repository.stateDir, inject: { log } })
         : createReadOnlyJournal({ dir: repository.stateDir, inject: { log } })
     const routes = loaded.config.notify ?? {}
-    const defaultActor = env.TRIBE_NAME?.trim() || "operator"
+    const defaultActor = options.persona?.mailbox ?? (env.TRIBE_NAME?.trim() || "operator")
     if (mode === "active") {
       const submitterRoute = Object.entries(routes).find(([, targets]) => targets?.includes("submitter") === true)?.[0]
       if (submitterRoute !== undefined && !SignalRecipientSchema.safeParse(defaultActor).success) {
@@ -1123,21 +1216,29 @@ async function createYrdRuntimeHost(
         )
       }
       if (Object.keys(routes).length > 0) {
+        const adapter = await createRuntimeSignalAdapter({
+          process,
+          env,
+          actor: defaultActor,
+          ...(options.persona === undefined ? {} : { persona: options.persona }),
+          interactive: options.interactive,
+          ...(options.wire === undefined ? {} : { wire: options.wire }),
+          output: options.wireOutput,
+          injected: options.signalAdapter,
+          attributedReceipt: (event) =>
+            authorAttributionReceipt(app?.queue.get(event.run), {
+              pr: event.pr,
+              revision: event.revision,
+              headSha: event.headSha,
+            }),
+        })
         signals = createSignalObserver({
           journal,
           stateDir: repository.stateDir,
           routes,
           sender: defaultActor,
           reviewRequired: loaded.config.requires.includes("review"),
-          adapter:
-            options.signalAdapter ??
-            createTribeSignalAdapter(process, defaultActor, (event) => {
-              return authorAttributionReceipt(app?.queue.get(event.run), {
-                pr: event.pr,
-                revision: event.revision,
-                headSha: event.headSha,
-              })
-            }),
+          adapter,
           log,
           // The resident is the primary drainer and delivers unbounded; every other
           // (one-shot) process gets a bounded delivery budget so it can never hold the
@@ -1423,6 +1524,10 @@ export async function runYrdProcess(
             env,
             log: runtimeLog,
             ...(context.configPath === undefined ? {} : { configPath: context.configPath }),
+            ...(context.persona === undefined ? {} : { persona: context.persona }),
+            ...(context.wire === undefined ? {} : { wire: context.wire }),
+            interactive: io.interactive === true,
+            wireOutput: (text) => io.stdout(text),
           },
           resident,
           posture === "viewer" ? "viewer" : "active",
