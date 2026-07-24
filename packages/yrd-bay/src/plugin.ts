@@ -622,6 +622,20 @@ export type BayBaseTarget = Readonly<{
 export type ResolveBayBaseContext = Readonly<{ branch?: string }>
 export type ResolveBayBase = (base: string, context?: ResolveBayBaseContext) => BayBaseTarget | Promise<BayBaseTarget>
 
+function hasBranchReuseProvenance(
+  state: DeepReadonly<BaysState>,
+  identity: Pick<OpenBayArgs, "name" | "issue">,
+  branch: string,
+): boolean {
+  return (
+    Object.values(state.prs).some((pr) => pr.branch === branch && pr.issue === identity.issue && isLivePR(pr.status)) ||
+    Object.values(state.byId).some(
+      (bay) =>
+        bay.status === "closed" && bay.branch === branch && bay.name === identity.name && bay.issue === identity.issue,
+    )
+  )
+}
+
 export function createBays(
   state: ReadSignal<DeepReadonly<BaysState>>,
   jobs: Jobs,
@@ -675,10 +689,12 @@ export function createBays(
 
   const open = async (args: OpenBayArgs): Promise<CommandResult> => {
     const branch = args.branch ?? args.from ?? defaultBayBranch(args.name)
+    const reusesKnownBranch =
+      args.from === undefined && hasBranchReuseProvenance(state(), { name: args.name, issue: args.issue }, branch)
     const resolved = await target(
       args.base,
       args.baseSha,
-      args.issue === undefined || args.from !== undefined ? undefined : branch,
+      args.from === undefined && (args.issue !== undefined || reusesKnownBranch) ? branch : undefined,
     )
     return actions.open({ ...args, ...resolved })
   }
@@ -1320,9 +1336,7 @@ function openBay(
   if (Object.values(current.byId).some((bay) => bay.status !== "closed" && bay.branch === branch)) {
     throw new Error(`yrd: branch '${branch}' is already open in another bay`)
   }
-  const reuseClaimBranch =
-    args.issue !== undefined &&
-    Object.values(current.prs).some((pr) => pr.branch === branch && pr.issue === args.issue && isLivePR(pr))
+  const reuseBranch = hasBranchReuseProvenance(current, { name: args.name, issue: args.issue }, branch)
   const opened = {
     id,
     name: args.name,
@@ -1344,7 +1358,7 @@ function openBay(
         ...(args.baseSha === undefined ? {} : { baseSha: args.baseSha }),
         ...(args.from === undefined ? {} : { from: args.from }),
         ...(args.issue === undefined ? {} : { issue: args.issue }),
-        ...(reuseClaimBranch ? { reuseBranch: true } : {}),
+        ...(reuseBranch ? { reuseBranch: true } : {}),
         ...(args.remoteBranch === undefined ? {} : { remoteBranch: args.remoteBranch }),
       }),
     ],

@@ -39,6 +39,21 @@ afterEach(async () => {
 })
 
 describe("yrd bay run", { timeout: 30_000 }, () => {
+  it("projects owner, guest, and explicit-PR options through every run alias", async () => {
+    const { repo } = await repository()
+    for (const args of [
+      ["run", "--help"],
+      ["bay", "run", "--help"],
+      ["sh", "--help"],
+      ["ag", "--help"],
+    ] as const) {
+      const help = output(repo)
+      expect(await yrd(repo, help.io, ...args), `${args.join(" ")}\n${help.stderr()}`).toBe(0)
+      expect(help.stdout()).toContain("--exec")
+      expect(help.stdout()).toContain("--pr <selector>")
+    }
+  })
+
   it("resolves a sigil issue to one name and registers its derived persona in a fresh TTY", async () => {
     const { repo } = await repository()
     await configureNotify(repo)
@@ -62,11 +77,14 @@ describe("yrd bay run", { timeout: 30_000 }, () => {
 
       expect(run.stdout()).toContain("bay blabla1 → new task/blabla1, linked @km/test/blabla1")
       expect(await readFile(fake.log, "utf8")).toContain("join @dev/blabla1 --delivery pull --json")
+      const bays = output(repo)
+      expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
+      expect(JSON.parse(bays.stdout())).toMatchObject({
+        bays: [expect.objectContaining({ issue: "@km/test/blabla1", actor: "@dev/blabla1", status: "closed" })],
+      })
       const prs = output(repo)
       expect(await yrd(repo, prs.io, "pr", "list", "--issue", "@km/test/blabla1", "--json"), prs.stderr()).toBe(0)
-      expect(JSON.parse(prs.stdout())).toMatchObject({
-        prs: [{ branch: "task/blabla1", revisions: [expect.objectContaining({ actor: "@dev/blabla1" })] }],
-      })
+      expect(JSON.parse(prs.stdout())).toMatchObject({ prs: [] })
     } finally {
       restoreEnv("HAB_NAME", habName)
       restoreEnv("HAB_WIRE", habWire)
@@ -144,6 +162,23 @@ describe("yrd bay run", { timeout: 30_000 }, () => {
         draft.stderr(),
       ).toBe(0)
 
+      const create = output(repo)
+      expect(
+        await yrd(
+          repo,
+          create.io,
+          "--name",
+          "s2-fixture",
+          "--wire",
+          `file:${wireLog}`,
+          "pr",
+          "create",
+          BRANCH,
+          "--issue",
+          CLAIM,
+        ),
+        create.stderr(),
+      ).toBe(0)
       const wire = output(repo)
       expect(
         await yrd(repo, wire.io, "--name", "s2-fixture", "--wire", `file:${wireLog}`, "pr", "ready", BRANCH),
@@ -255,6 +290,33 @@ describe("yrd bay run", { timeout: 30_000 }, () => {
     const helperIdentity = await readFile(join(repo, ".bays", "B1", "helper.name"), "utf8")
     expect(helperIdentity).toMatch(/^@shared\/helper:(\d+) \1$/u)
     expect(helper.stdout()).toContain(`bay ${helperIdentity.split(" ")[0]} → attached task/shared, no issue linked`)
+
+    const previousHabName = process.env.HAB_NAME
+    process.env.HAB_NAME = "@shared/env-helper"
+    try {
+      const envHelper = output(repo)
+      expect(
+        await yrd(
+          repo,
+          envHelper.io,
+          "run",
+          "--exec",
+          "shared",
+          "--",
+          "sh",
+          "-c",
+          'printf "%s %s" "$HAB_NAME" "$$" > env-helper.name',
+        ),
+        envHelper.stderr(),
+      ).toBe(0)
+      const envHelperIdentity = await readFile(join(repo, ".bays", "B1", "env-helper.name"), "utf8")
+      expect(envHelperIdentity).toMatch(/^@shared\/env-helper:(\d+) \1$/u)
+      expect(envHelper.stdout()).toContain(
+        `bay ${envHelperIdentity.split(" ")[0]} → attached task/shared, no issue linked`,
+      )
+    } finally {
+      restoreEnv("HAB_NAME", previousHabName)
+    }
 
     const shell = join(repo, "..", "cwd-shell")
     await writeFile(
@@ -403,7 +465,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
     }
   })
 
-  it("creates a branch-backed draft, runs exact argv, and closes the clean Bay synchronously", async () => {
+  it("keeps a branch carrier without creating a PR, runs exact argv, and closes synchronously", async () => {
     const { repo } = await repository()
     const run = output(repo)
 
@@ -436,9 +498,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
 
     const prs = output(repo)
     expect(await yrd(repo, prs.io, "pr", "list", "--issue", CLAIM, "--json"), prs.stderr()).toBe(0)
-    expect(JSON.parse(prs.stdout())).toMatchObject({
-      prs: [{ branch: BRANCH, issue: CLAIM, status: "pushed" }],
-    })
+    expect(JSON.parse(prs.stdout())).toMatchObject({ prs: [] })
   })
 
   it("commits and pushes root work as `wip:` before synchronously closing", async () => {
@@ -453,9 +513,12 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
     expect(await git(repo, "log", `refs/remotes/origin/${BRANCH}`, "-1", "--format=%s")).toMatch(/^wip:/u)
     expect(await git(repo, "show", `refs/remotes/origin/${BRANCH}:scratch.txt`)).toBe("payload")
     expect(await git(repo, "worktree", "list", "--porcelain")).not.toContain(`${repo}/.bays/`)
+    const prs = output(repo)
+    expect(await yrd(repo, prs.io, "pr", "list", "--issue", CLAIM, "--json"), prs.stderr()).toBe(0)
+    expect(JSON.parse(prs.stdout())).toMatchObject({ prs: [] })
   })
 
-  it("reopens a closed claim and updates the same draft on a later run", async () => {
+  it("reopens a closed claim without implicitly creating or updating a PR", async () => {
     const { repo } = await repository()
     const clean = output(repo)
     expect(await yrd(repo, clean.io, "bay", "run", CLAIM, "--", "true"), clean.stderr()).toBe(0)
@@ -469,18 +532,17 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
     expect(await git(repo, "log", `refs/remotes/origin/${BRANCH}`, "-1", "--format=%s")).toMatch(/^wip:/u)
     const prs = output(repo)
     expect(await yrd(repo, prs.io, "pr", "list", "--issue", CLAIM, "--json"), prs.stderr()).toBe(0)
-    expect(JSON.parse(prs.stdout())).toMatchObject({
-      prs: [{ branch: BRANCH, issue: CLAIM, status: "pushed", revs: [{}, { n: 2 }] }],
-    })
+    expect(JSON.parse(prs.stdout())).toMatchObject({ prs: [] })
   })
 
-  it("uses the branch of an existing claim draft instead of minting a second PR", async () => {
+  it("uses the branch of an existing claim draft without implicitly recutting it", async () => {
     const { repo } = await repository()
     const branch = "topic/existing-claim"
     await git(repo, "switch", "-qc", branch)
     await writeFile(join(repo, "claim.txt"), "existing\n")
     await git(repo, "add", "claim.txt")
     await git(repo, "commit", "-qm", "existing claim")
+    const originalHead = await git(repo, "rev-parse", "HEAD")
     await git(repo, "push", "-q", "-u", "origin", branch)
     await git(repo, "switch", "-q", "main")
 
@@ -498,7 +560,38 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
     const prs = output(repo)
     expect(await yrd(repo, prs.io, "pr", "list", "--issue", CLAIM, "--json"), prs.stderr()).toBe(0)
     expect(JSON.parse(prs.stdout())).toMatchObject({
-      prs: [{ branch, issue: CLAIM, status: "pushed", revs: [{}, { n: 2 }] }],
+      prs: [{ branch, issue: CLAIM, status: "pushed", revision: 1, headSha: originalHead }],
+    })
+  })
+
+  it("targets an existing PR branch through --pr without implicitly recutting it", async () => {
+    const { repo } = await repository()
+    const branch = "topic/explicit-target"
+    await git(repo, "switch", "-qc", branch)
+    await writeFile(join(repo, "claim.txt"), "existing\n")
+    await git(repo, "add", "claim.txt")
+    await git(repo, "commit", "-qm", "existing target")
+    const originalHead = await git(repo, "rev-parse", "HEAD")
+    await git(repo, "push", "-q", "-u", "origin", branch)
+    await git(repo, "switch", "-q", "main")
+
+    const draft = output(repo)
+    expect(await yrd(repo, draft.io, "pr", "create", branch), draft.stderr()).toBe(0)
+    await git(repo, "branch", "-D", branch)
+    await git(repo, "update-ref", "-d", `refs/remotes/origin/${branch}`)
+
+    const run = output(repo)
+    expect(
+      await yrd(repo, run.io, "run", "--pr", branch, "--", "sh", "-c", "printf continued > continued.txt"),
+      run.stderr(),
+    ).toBe(0)
+    expect(run.stdout()).toContain(`bay explicit-target → reattached ${branch}, no issue linked`)
+    expect(await git(repo, "show", `refs/remotes/origin/${branch}:continued.txt`)).toBe("continued")
+
+    const prs = output(repo)
+    expect(await yrd(repo, prs.io, "pr", "view", branch, "--json"), prs.stderr()).toBe(0)
+    expect(JSON.parse(prs.stdout())).toMatchObject({
+      pr: { branch, status: "pushed", revision: 1, headSha: originalHead },
     })
   })
 
@@ -654,7 +747,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
     })
   })
 
-  it("keeps distinct full claims with the same basename on distinct PR branches", async () => {
+  it("keeps distinct full claims with the same basename on distinct branch carriers", async () => {
     const { repo } = await repository()
     const firstClaim = "@km/a/shared-slug"
     const secondClaim = "@ag/b/shared-slug"
@@ -667,10 +760,10 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
     const second = output(repo)
     expect(await yrd(repo, second.io, "bay", "run", secondClaim, "--", "true"), second.stderr()).toBe(0)
 
-    const prs = output(repo)
-    expect(await yrd(repo, prs.io, "pr", "list", "--json"), prs.stderr()).toBe(0)
-    const rows = (JSON.parse(prs.stdout()) as { prs: readonly { branch: string; issue?: string }[] }).prs.filter(
-      (pr) => pr.issue === firstClaim || pr.issue === secondClaim,
+    const bays = output(repo)
+    expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
+    const rows = (JSON.parse(bays.stdout()) as { bays: readonly { branch: string; issue?: string }[] }).bays.filter(
+      (bay) => bay.issue === firstClaim || bay.issue === secondClaim,
     )
     expect(rows).toHaveLength(2)
     expect(new Set(rows.map((pr) => pr.branch))).toHaveProperty("size", 2)

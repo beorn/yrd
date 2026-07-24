@@ -1227,7 +1227,8 @@ async function createYrdRuntimeHost(
         raiseFailure(
           "configuration",
           "signal-submitter-missing",
-          `yrd: notify.${submitterRoute} targets submitter, but TRIBE_NAME is not a Tribe recipient; set TRIBE_NAME to the submitting Tribe handle (for example, @agent/2)`,
+          `yrd: notify.${submitterRoute} targets submitter, but no valid persona mailbox resolved; ` +
+            "set --name, HAB_NAME, or transitional TRIBE_NAME (for example, @agent/2)",
         )
       }
       if (routes["pr/needs-review"] !== undefined && !loaded.config.requires.includes("review")) {

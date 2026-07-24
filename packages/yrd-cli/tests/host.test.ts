@@ -911,7 +911,7 @@ notify:
     expect(failure).toMatchObject({
       failure: { kind: "configuration", code: "signal-submitter-missing" },
     })
-    expect((failure as Error).message).toContain("set TRIBE_NAME to the submitting Tribe handle")
+    expect((failure as Error).message).toContain("set --name, HAB_NAME, or transitional TRIBE_NAME")
   })
 
   it("runs the literal queue watch viewer without Tribe identity or notification settlement", async () => {
