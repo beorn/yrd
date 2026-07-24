@@ -1,7 +1,7 @@
 /**
- * @failure `run cancel` / watch x-to-cancel either deadlocks the resident when its active merge is canceled, or the watch affordance fires on an ambiguous key, diverging from the shared cancel path.
+ * @failure `queue cancel` / watch x-to-cancel either deadlocks the resident when its active merge is canceled, or the watch affordance fires on an ambiguous key, diverging from the shared cancel path.
  * @level l2
- * @consumer @yrd/cli run cancel + watch x-to-cancel
+ * @consumer @yrd/cli queue cancel + watch x-to-cancel
  */
 import { createElement } from "react"
 import { createRenderer, waitFor } from "silvery/test"
@@ -68,9 +68,9 @@ function residentHarness(runResponses: readonly (() => Promise<readonly unknown[
   return { app, io, gate, signal, warnings, stderr, runCalls: () => runCalls }
 }
 
-describe("run cancel of an ACTIVE (merging) run never deadlocks the resident", () => {
+describe("queue cancel of an ACTIVE (merging) run never deadlocks the resident", () => {
   it("observes a peer's cancel of its in-flight merge as a settlement conflict and recovers", async () => {
-    // The `run cancel <R>` surface is a SEPARATE process: it journals the cancel
+    // The `queue cancel <R>` surface is a SEPARATE process: it journals the cancel
     // and aborts the run's active merge JOB. The resident is NOT the canceler, so
     // it never does an in-writer synchronous cancel of its own active merge (which
     // deadlocks — the drive loop holds the writer while blocked mid-merge).

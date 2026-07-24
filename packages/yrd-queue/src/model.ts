@@ -267,7 +267,7 @@ export type QueueRecord = Readonly<{
   parent?: QueueRunId
   isolationPart?: 0 | 1
   failure?: QueueFailure
-  // Run-level cancellation (the `run cancel` surface): a run aborted before it lands,
+  // Run-level cancellation (the `queue cancel` surface): a run aborted before it lands,
   // but — unlike a failure — its member PRs are NOT rejected/canceled; they stay
   // submitted so a future drain re-queues them. Projection-only; no started run
   // carries these, so QueueRecordSchema stays unchanged.

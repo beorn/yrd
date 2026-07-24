@@ -204,7 +204,7 @@ function eraseStep<Input extends PRShape, Output extends PRShape>(step: StepDef<
 export const DEFAULT_STEP_TIMEOUT_MS = 15 * 60_000
 const GIT_TIMEOUT_MS = 30_000
 /** Bounded notification-delivery budget for a one-shot (non-resident) process, so a
- * command like `run cancel` delivers what it quickly can, then defers the rest to the
+ * command like `queue cancel` delivers what it quickly can, then defers the rest to the
  * resident and exits — it can never hold the notifications lifecycle open for minutes
  * and starve the resident's dispatch. (D4) */
 const ONE_SHOT_DELIVERY_BUDGET_MS = 3_000
@@ -1472,7 +1472,7 @@ export async function runYrdProcess(
         oneShotRunner = posture === "one-shot-queue-run" ? runner?.id : undefined
         shutdownLog = runnerLog
         const drain =
-          posture === "resident-queue-run" || posture === "bracketed-bay-run" ? new AbortController() : undefined
+          posture === "resident-queue-run" || posture === "bracketed-bay-open" ? new AbortController() : undefined
         removeShutdownSignals = bindProcessShutdown(
           closeHost,
           drain === undefined
@@ -1482,7 +1482,7 @@ export async function runYrdProcess(
                 if (posture === "resident-queue-run") {
                   reportGracefulShutdown(runnerLog, signal)
                 } else {
-                  runtimeLog.warn?.("bay run interruption requested — preserving the active Bay before exit", {
+                  runtimeLog.warn?.("bay open interruption requested — preserving the active Bay before exit", {
                     signal,
                     mode: "orphan",
                   })

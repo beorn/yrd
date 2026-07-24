@@ -60,6 +60,7 @@ const QUEUE_SUBCOMMANDS = new Set([
   "resume",
   "recover",
   "run",
+  "cancel",
   "finish",
 ])
 
