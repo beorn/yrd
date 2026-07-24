@@ -89,7 +89,7 @@ describe("watch detail — pending row whose latest run ran a superseded revisio
       // (c) The blocker is scoped to the historical revision, not presented as
       //     the PR's current blocker.
       expect(app.text).toContain("BLOCKER (rev 1)")
-      expect(app.text).toContain("check-failed: check command exited 1")
+      expect(app.text).toContain("err=check-failed — check command exited 1")
     } finally {
       app.unmount()
     }

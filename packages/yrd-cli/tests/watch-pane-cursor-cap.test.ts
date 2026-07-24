@@ -63,8 +63,6 @@ describe("QueueWatchFrame fill-timeline cursor", () => {
       // identity heads the pane; the JOB body resolves the same run below,
       // without PR-list or log-accordion chrome.
       expect(app.text.split("\n")[0], "detail resolves the running run").toContain("pr#R.1")
-      await app.press("l")
-      await app.waitForLayoutStable()
       expect(app.text, "detail resolves the running run's job").toContain("JOB yrd#JRR-check")
       expect(app.text).not.toContain("RUN LOGS")
       expect(app.text).not.toMatch(/(?:^|\s)(?:▸|•)\s+PRS\b/gmu)

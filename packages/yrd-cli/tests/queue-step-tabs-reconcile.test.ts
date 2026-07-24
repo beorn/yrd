@@ -230,7 +230,8 @@ describe("queue step tabs same-run reconciliation (21106)", () => {
       await app.waitForLayoutStable()
 
       expect(app.text).toContain("art:stdout")
-      expect(app.text).toContain("open full log")
+      expect(app.text).toContain("(f) /repo/.git/yrd/artifacts/R100/check/attempt-1/output.log")
+      expect(app.text).not.toContain("open full log")
       expect(app.text).toContain("live check output")
     } finally {
       app.unmount()

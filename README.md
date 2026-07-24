@@ -337,9 +337,15 @@ carried forward unchanged across `pr recut` and `pr ready` revisions. The `pr
 list` SUBJECT column shows the title over the branch name. `pr view` and the
 watch detail pane render the title and description block; issue URLs, paths, and
 path-form ids render as OSC 8 links (path-form ids use km's internal-link URI).
-The watch detail keeps run identity/status at the top, then
-`ISSUE / PRs / TIMELINE / LANDING` facts, equal-width workflow-step tabs,
-inline step details, and the executed command immediately above its logs.
+The watch detail keeps the PR identity in its title, then a persistent
+`RUN` block with submitted/started/completed clocks and age/runtime/wait
+durations above the workflow tabs. One outlined status notice owns the
+observable state, cause, automation, and next owner; later unstarted steps after
+a failed predecessor render canceled. The newest-output step is selected by
+default. The PR tab presents one chronological, two-tone activity stream across
+revisions and Runs, followed by scalar facts and the diff. Step tabs keep the
+executed command immediately above its output and link the real artifact path
+for the full log.
 
 `open --from` uses an existing branch; there is no `adopt` command. Direct
 branch submission does not provision a worktree:

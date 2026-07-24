@@ -81,7 +81,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
       expect(rowY).toBeGreaterThan(0)
       expect(rowX).toBeGreaterThan(0)
       await app.click(rowX, rowY)
-      await waitFor(() => detailTitleRow(app.text).includes("pr#4.1 "))
+      await waitFor(() => detailTitleRow(app.text).includes("pr#4.1"))
       expect(detailTitleRow(app.text)).not.toContain("pr#42.1")
     } finally {
       app.unmount()
@@ -105,12 +105,12 @@ describe("QueueWatchFrame 21106 interaction", () => {
       await term.mouse.move(row4X, row4Y)
       await handle.waitForLayoutStable()
       expect(detailTitleRow(term.screen.getText()), "hover must not switch the detail selection").toContain("pr#42.1")
-      expect(detailTitleRow(term.screen.getText())).not.toContain("pr#4.1 ")
+      expect(detailTitleRow(term.screen.getText())).not.toContain("pr#4.1")
 
       // Click pr#4.1's row — NOW the detail follows the click to PR4.
       await term.mouse.down(row4X, row4Y)
       await term.mouse.up(row4X, row4Y)
-      await waitFor(() => detailTitleRow(term.screen.getText()).includes("pr#4.1 "))
+      await waitFor(() => detailTitleRow(term.screen.getText()).includes("pr#4.1"))
       expect(detailTitleRow(term.screen.getText())).not.toContain("pr#42.1")
     } finally {
       handle.unmount()
@@ -240,40 +240,35 @@ describe("QueueWatchFrame 21106 interaction", () => {
     }
   })
 
-  it("toggles status buckets with p/r/f/d and filters the timeline rows", async () => {
+  it("selects status courts with o/r/d/f and restores all courts with a", async () => {
     const snapshot = queueTimelineStories["contract-overview"].snapshot
     const render = createRenderer({ cols: 200, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
       expect(app.text).toContain("pr#5.1")
-      // The status buckets are TogglePills now (label constant, state by colour),
-      // so the toggle is verified by the rows appearing/disappearing, not by an
-      // ✓/○ lifecycle glyph. Item 3: pills are plain words, no [f] brackets.
+      // Lowercase court keys select exactly one bucket. Labels stay constant
+      // and selection is conveyed by colour, so row membership is the proof.
       expect(app.text, "the failed pill renders").toContain("failed")
 
       await app.press("f")
-      await waitFor(() => !app.text.includes("pr#5.1"))
+      await waitFor(() => app.text.includes("main#5") && !app.text.includes("main#42") && !app.text.includes("main#4"))
 
-      await app.press("f")
-      await waitFor(() => app.text.includes("pr#5.1"))
+      await app.press("a")
+      await waitFor(() => app.text.includes("main#5") && app.text.includes("main#42") && app.text.includes("main#4"))
 
       await app.press("d")
-      await waitFor(() => !app.text.includes("pr#4.1"))
+      await waitFor(() => app.text.includes("main#4") && !app.text.includes("main#5") && !app.text.includes("main#42"))
 
-      // `p` toggles the pending bucket — it never pauses.
-      await app.press("p")
-      await waitFor(() => !app.text.includes("Prepare release notes"))
+      await app.press("o")
+      await waitFor(() => app.text.includes("× rev") && !app.text.includes("main#4"))
       expect(app.text).not.toContain("PAUSED")
-      await app.press("p")
-      await app.press("d")
-      await waitFor(() => app.text.includes("pr#4.1"))
     } finally {
       app.unmount()
     }
   })
 
-  it("toggles a status bucket by clicking its pill", async () => {
+  it("selects a status court by clicking its pill", async () => {
     const snapshot = queueTimelineStories["contract-overview"].snapshot
     const render = createRenderer({ cols: 200, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot }))
@@ -282,14 +277,16 @@ describe("QueueWatchFrame 21106 interaction", () => {
       expect(app.text).toContain("pr#42.1")
       // The pills row (the one carrying all four plain-word pills) sits below
       // the list; find `running` there, not in a running PR row above it.
-      const filterY = app.text.split("\n").findIndex((row) => /todo.*running.*failed.*done/u.test(row))
+      const filterY = app.text.split("\n").findIndex((row) => /open.*running.*done.*failed.*all/u.test(row))
       const filterX = app.text.split("\n")[filterY]?.indexOf("running") ?? -1
       expect(filterY).toBeGreaterThan(0)
       expect(filterX).toBeGreaterThan(0)
-      // Clicking the running pill toggles the running bucket off — the running
-      // rows drop out (state is colour, so the filtering behaviour is the proof).
+      // Clicking a pill selects that court, matching the lowercase key path.
       await app.click(filterX + 1, filterY)
-      await waitFor(() => !app.text.includes("pr#42.1"))
+      await app.waitForLayoutStable()
+      expect(app.text).toContain("main#42")
+      expect(app.text).not.toContain("main#5")
+      expect(app.text).not.toContain("pr#4.1")
     } finally {
       app.unmount()
     }

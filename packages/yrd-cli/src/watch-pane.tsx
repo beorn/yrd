@@ -206,7 +206,7 @@ function queueArtifactOutputLines(
         ? [
             {
               key: `${outputKey}:full-log`,
-              text: "open full log",
+              text: `(f) ${output.path}`,
               kind: "link" as const,
               href: pathToFileURL(output.path).href,
             },
@@ -314,8 +314,8 @@ function QueueArtifactOutputList({ outputs, inline }: { outputs: readonly QueueA
               // `throw`) from killing the watch loop, while the global throw stays a
               // safety net for silvery's own pipeline bugs everywhere else.
               // Log rows render ONE terminal row each (truncate, never wrap) so a
-              // few long lines can't fill the pane; "open full log" is the escape
-              // hatch for full content.
+              // few long lines can't fill the pane; the linked artifact-path row
+              // above is the escape hatch for full content.
               <Text bgConflict="ignore" wrap="truncate" minWidth={0}>
                 {row.text}
               </Text>
@@ -355,7 +355,7 @@ const COMMAND_OUTPUT_TAIL_LINES = 10
  * leading space so it cannot collide with a real step name (step names are
  * bare identifiers like `check`/`merge`, never space-prefixed).
  */
-const PR_TAB_ID = " pr"
+const PR_TAB_ID = " pr"
 const PR_TAB_LABEL = "PR"
 
 function queueDefaultStepTab(data: QueueShowData, outputs: readonly QueueArtifactOutput[]): string {
@@ -995,7 +995,10 @@ function queueWatchActionRow(
   rows: readonly QueueWatchCursorRow[],
   runningRunOrder: ReadonlyMap<string, number>,
 ): QueueWatchCursorRow | undefined {
-  return firstRunningCursorRow(rows, runningRunOrder) ?? rows.find((row) => row.status === "submitted")
+  return (
+    firstRunningCursorRow(rows, runningRunOrder) ??
+    rows.find((row) => row.status === "ready" || row.status === "pending")
+  )
 }
 
 /** Pure cursor reconciliation: row identity and operator intent are state;
@@ -1246,9 +1249,10 @@ export function QueueWatchFrame({
 }) {
   const { columns, rows: viewportRows } = useWindowSize()
   const tier = queueDetailTier(columns, Math.max(0, viewportRows - 1))
-  // The four operator buckets (user respec 2026-07-15): p/r/f/d toggle them
-  // and the FILTER row's checkbox indicators mirror + click-toggle the same
-  // state. Initial visibility mirrors the CLI-level --status filters.
+  // The four operator buckets (user respec 2026-07-23): lowercase o/r/d/f and
+  // pill clicks select one court, `a` restores all, and uppercase O/R/D/F
+  // toggles individual membership. Initial visibility mirrors the CLI-level
+  // --status filters.
   const [visibleBuckets, setVisibleBuckets] = useState<ReadonlySet<QueueTimelineStatusBucket>>(() =>
     snapshot.projection === undefined
       ? new Set(QUEUE_TIMELINE_STATUS_BUCKETS)

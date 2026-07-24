@@ -194,7 +194,9 @@ describe("queue timeline chrome 21106", () => {
       const integratedRow = rowAt(app.text, rowIndexOf(app.text, "pr#4.1"))
       expect(integratedRow).toContain(" done ")
       expect(integratedRow).not.toContain(" ok ")
-      const rejectedRow = rowAt(app.text, rowIndexOf(app.text, "pr#5.1"))
+      const revisedRow = rowAt(app.text, rowIndexOf(app.text, "pr#5.1"))
+      expect(revisedRow).toContain(" rev ")
+      const rejectedRow = rowAt(app.text, rowIndexOf(app.text, "main#5"))
       expect(rejectedRow).toContain(" fail ")
       expect(rejectedRow).not.toContain(" rej ")
     } finally {
@@ -255,7 +257,7 @@ describe("queue timeline chrome 21106", () => {
       for (let offset = 0; offset < message.length; offset += 4) {
         expect(app.cell(startX + offset, messageY).fg, `fg at offset ${offset}`).toEqual(messageFg)
       }
-      const rejectedY = rowIndexOf(app.text, "pr#5.1")
+      const rejectedY = rowIndexOf(app.text, "main#5")
       const rejectedLine = rowAt(app.text, rejectedY)
       const failX = rejectedLine.indexOf("fail")
       expect(messageFg, "NO RUNNER shares the error fg").toEqual(app.cell(failX, rejectedY).fg)

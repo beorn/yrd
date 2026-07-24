@@ -1014,7 +1014,7 @@ export const queueTimelineStories: Readonly<Record<QueueTimelineStoryName, Queue
   "selected-rejected": {
     snapshot: fixtureSnapshot(fixtureResult([rejectedPr], [rejectedRun]), { attempts: rejectedAttempts }),
     widths: [100],
-    selectedStatus: "rejected",
+    selectedStatus: "rev",
   },
   "selected-integrated": { snapshot: integratedSnapshot, widths: [100], selectedStatus: "integrated" },
   "detail-right": { snapshot: integratedSnapshot, widths: [140], viewport: { columns: 200, rows: 50 } },

@@ -5419,56 +5419,182 @@ export function QueueDetailSinglePrHeader({ pr }: { pr: PR }) {
   )
 }
 
-function runFailureReason(data: QueueShowData | undefined): string | undefined {
-  if (data?.failure !== undefined) return data.failure.summary
-  const failed = data?.steps.findLast(
-    (step) =>
-      presentFact(step.errorCode) !== undefined ||
-      presentFact(step.error) !== undefined ||
-      presentFact(step.lost) !== undefined ||
-      presentFact(step.detail) !== undefined,
-  )
-  if (failed === undefined) return undefined
-  const code = presentFact(failed.errorCode)
-  const message = presentFact(failed.error) ?? presentFact(failed.lost) ?? presentFact(failed.detail)
-  if (code === undefined) return message
-  return actionableFailureSummary(actionableFailure({ code, message: message ?? "failed" }))
+type PrActivityEntry = Readonly<{
+  at: string
+  rank: number
+  text: string
+  status?: StatusNoticeState
+  statusLabel?: string
+  detail?: string
+}>
+
+function runActivityState(data: QueueShowData): StatusNoticeState {
+  if (data.status === "running" || data.status === "waiting") return "running"
+  if (data.status === "passed") return data.integration === undefined ? "done" : "integrated"
+  if (data.failure !== undefined) return failureStatusClass(data.failure.code)
+  return data.status === "canceled" ? "canceled" : "failed"
 }
 
-function prLineageLines(pr: PR, memberRevision: number, runDetails: readonly QueueShowData[]): readonly string[] {
-  const terminal = prRevisionClocks(pr)
-    .filter((clock) => clock.revision <= memberRevision)
-    .flatMap((clock) => {
-      if (clock.terminal === undefined) return []
-      const submittedAt = clock.submittedAt ?? clock.pushedAt
-      const ageMs = elapsedMs(submittedAt, clock.terminal.at, `PR '${pr.id}' revision ${clock.revision} terminal age`)
-      const reason =
-        clock.terminal.status === "rejected"
-          ? (runFailureReason(runDetails.find((detail) => detail.run === clock.terminal?.run)) ?? "reason not recorded")
-          : undefined
-      const suffix = reason !== undefined ? ` (${reason})` : ageMs === undefined ? "" : ` (age ${mediaDuration(ageMs)})`
-      return [
-        {
-          at: clock.terminal.at,
-          line: `${queueLogClock(clock.terminal.at, true, false)} r${clock.revision} ${clock.terminal.status}${suffix}`,
-        },
-      ]
+function prActivityEntries(
+  pr: PR,
+  memberRevision: number,
+  runDetails: readonly QueueShowData[],
+  currentRow: QueueTimelineProjectedRow | undefined,
+): readonly PrActivityEntry[] {
+  const entries: PrActivityEntry[] = []
+  const revisions = pr.revisions.filter((revision) => revision.revision <= memberRevision)
+  for (const revision of revisions) {
+    const submitted = revision.submittedAt !== undefined
+    const activityAt = revision.submittedAt ?? revision.pushedAt
+    if (revision.recut !== undefined) {
+      entries.push({
+        at: revision.pushedAt,
+        rank: 10,
+        text: `r${revision.revision} recut of r${revision.recut.fromRevision}${
+          revision.baseSha === undefined ? "" : ` onto ${revision.baseSha.slice(0, 8)}`
+        }`,
+      })
+    }
+    entries.push({
+      at: activityAt,
+      rank: 20,
+      text: `r${revision.revision} ${submitted ? "submitted" : "registered"} by ${revision.actor ?? "-"}`,
     })
-  const submitted = pr.revisions.find((candidate) => candidate.revision === memberRevision)
-  const entries =
-    submitted === undefined
-      ? terminal
-      : [
-          ...terminal,
-          {
-            at: submitted.submittedAt ?? submitted.pushedAt,
-            line: `${queueLogClock(submitted.submittedAt ?? submitted.pushedAt, true, false)} submitted by ${submitted.actor ?? "-"}`,
-          },
-        ]
-  // The detail timeline reads strictly newest-first (user directive
-  // 2026-07-21): the selected revision's submit sorts among earlier
-  // revisions' terminals instead of always trailing them.
-  return entries.toSorted((left, right) => right.at.localeCompare(left.at)).map((entry) => entry.line)
+  }
+  for (const request of pr.checkRequests.filter((request) => request.revision <= memberRevision)) {
+    const currentQueued =
+      currentRow?.pr === pr.id &&
+      currentRow.revision === request.revision &&
+      (currentRow.status === "ready" || currentRow.status === "pending")
+    entries.push({
+      at: request.at,
+      rank: 30,
+      text: `r${request.revision} check requested`,
+      ...(currentQueued
+        ? {
+            status: "queued" as const,
+            statusLabel: `queued${currentRow.position === undefined ? "" : ` position ${currentRow.position}`}`,
+          }
+        : {}),
+    })
+  }
+  for (const review of pr.reviews.filter((review) => review.revision <= memberRevision)) {
+    entries.push({
+      at: review.at,
+      rank: 40,
+      text: `r${review.revision} review ${review.decision} by ${review.actor}`,
+      ...(presentFact(review.note) === undefined ? {} : { detail: presentFact(review.note) }),
+    })
+  }
+  for (const comment of pr.comments.filter((comment) => comment.revision <= memberRevision)) {
+    entries.push({
+      at: comment.at,
+      rank: 50,
+      text: `r${comment.revision} comment by ${comment.actor}`,
+      ...(presentFact(comment.note) === undefined ? {} : { detail: presentFact(comment.note) }),
+    })
+  }
+
+  const representedRuns = new Set<string>()
+  for (const data of runDetails) {
+    const member = data.prs.find((candidate) => candidate.id === pr.id && candidate.revision <= memberRevision)
+    if (member === undefined) continue
+    const at = presentFact(data.finished) ?? presentFact(data.started)
+    if (at === undefined) continue
+    representedRuns.add(`${member.revision}:${data.run}`)
+    const state = runActivityState(data)
+    entries.push({
+      at,
+      rank: 60,
+      text: `r${member.revision} run ${formatNounId(data.base, runIdValue(data.run))}`,
+      status: state,
+      statusLabel: state === "failed" ? data.outcome : state,
+      ...(data.failure === undefined ? {} : { detail: data.failure.summary }),
+    })
+  }
+
+  // Old retained PRs can outlive their Run records. Preserve those terminal
+  // clocks as honest activity without manufacturing details the journal lacks.
+  for (const revision of revisions) {
+    const terminal = revision.terminal
+    if (terminal === undefined || representedRuns.has(`${revision.revision}:${terminal.run}`)) continue
+    const state =
+      terminal.status === "integrated" ? "integrated" : terminal.status === "canceled" ? "canceled" : "rejected"
+    entries.push({
+      at: terminal.at,
+      rank: 60,
+      text: `r${revision.revision} run ${terminal.run}`,
+      status: state,
+      statusLabel: terminal.status,
+    })
+  }
+
+  return entries.toSorted(
+    (left, right) => left.at.localeCompare(right.at) || left.rank - right.rank || left.text.localeCompare(right.text),
+  )
+}
+
+function QueuePrActivity({ entries }: { entries: readonly PrActivityEntry[] }) {
+  if (entries.length === 0) return null
+  return (
+    <Box flexDirection="column" minWidth={0}>
+      {entries.map((entry, index) => {
+        const presentation = entry.status === undefined ? undefined : statusPresentation(entry.status)
+        return (
+          <Box key={`${entry.at}:${entry.rank}:${index}`} flexDirection="row" minWidth={0}>
+            <Text color="$fg-muted" flexShrink={0}>
+              {queueLogClock(entry.at, true, false)}{" "}
+            </Text>
+            <Text wrap="wrap" minWidth={0} bgConflict="ignore">
+              {entry.text}
+              {presentation === undefined ? null : (
+                <Text color={presentation.color}>
+                  {" "}
+                  {presentation.glyph} {entry.statusLabel ?? entry.status}
+                </Text>
+              )}
+              {entry.detail === undefined ? "" : ` — ${entry.detail}`}
+            </Text>
+          </Box>
+        )
+      })}
+    </Box>
+  )
+}
+
+function descriptionWithoutDuplicatedIssue(
+  description: string | undefined,
+  issue: string | undefined,
+): string | undefined {
+  if (description === undefined || issue === undefined) return description
+  const duplicate = `issue: ${issue}`.toLocaleLowerCase()
+  return presentFact(
+    description
+      .split("\n")
+      .filter((line) => line.trim().toLocaleLowerCase() !== duplicate)
+      .join("\n"),
+  )
+}
+
+function prAgeLabel(
+  pr: PR | undefined,
+  revision: number,
+  row: QueueTimelineProjectedRow | undefined,
+): string | undefined {
+  if (row?.ageMs === null || row?.ageMs === undefined) return undefined
+  const count = pr?.revisions.filter((candidate) => candidate.revision <= revision).length ?? 1
+  const countLabel = `${count} ${count === 1 ? "revision" : "revisions"}`
+  const total = `${mediaDuration(row.ageMs)} total`
+  if (row.queueWaitMs === null) return `${countLabel} · ${total}`
+  const currentLabel =
+    row.group === "pending"
+      ? "queued"
+      : row.group === "draft"
+        ? "registered"
+        : row.group === "running"
+          ? "waited"
+          : "waited"
+  return `${countLabel} · ${total} · r${revision} ${currentLabel} ${mediaDuration(row.queueWaitMs)}`
 }
 
 function prDetailFacts(pr: PR, revision: number): readonly Readonly<{ key: string; value: string }>[] {
@@ -5483,22 +5609,9 @@ function prDetailFacts(pr: PR, revision: number): readonly Readonly<{ key: strin
     ...(correlation === undefined ? [] : [{ key: "correlation", value: `${correlation.namespace}:${correlation.id}` }]),
     { key: "head", value: retained?.headSha ?? pr.headSha },
     { key: "base", value: retained?.base ?? pr.base },
-    ...(retained?.recut === undefined ? [] : [{ key: "recut", value: boundedQueue(safeText(retained.recut), 160) }]),
     ...(retained?.composition === undefined
       ? []
       : [{ key: "composition", value: boundedQueue(safeText(retained.composition), 160) }]),
-    ...pr.reviews.map((review) => ({
-      key: "review",
-      value: `${review.decision} by ${review.actor} at ${queueLogClock(review.at, true, false)}${presentFact(review.note) === undefined ? "" : ` — ${presentFact(review.note)}`}`,
-    })),
-    ...pr.comments.map((comment) => ({
-      key: "comment",
-      value: `${comment.actor} at ${queueLogClock(comment.at, true, false)} — ${comment.note}`,
-    })),
-    ...pr.checkRequests.map((request) => ({
-      key: "check requested",
-      value: queueLogClock(request.at, true, false),
-    })),
     ...(requestedReviewers.length === 0 ? [] : [{ key: "requested reviewers", value: requestedReviewers.join(", ") }]),
     ...((pr.regressions?.length ?? 0) === 0
       ? []
@@ -5511,8 +5624,8 @@ function prDetailFacts(pr: PR, revision: number): readonly Readonly<{ key: strin
  * The PR-scoped detail header (user directive 2026-07-21, supersedes Round-6
  * Revision A v4's run-scoped member blocks): the detail view is FOR a PR, so
  * this block leads the pane body — branch under the identity title, then the
- * bold subject, then the newest-first timeline, then the aligned KEY/value
- * facts. `titleAbove` drops the identity row when the pane title (see
+ * bold subject, then the chronological activity timeline, then the aligned
+ * KEY/value facts. `titleAbove` drops the identity row when the pane title (see
  * QueueDetailTitle) already owns it.
  */
 export function QueueDetailRunPrBlocks({
@@ -5552,16 +5665,24 @@ export function QueueDetailRunPrBlocks({
         const pr = prs.find((candidate) => candidate.id === member.id)
         const subject =
           presentFact(pr?.title) ?? presentFact(member.name) ?? presentFact(pr?.name) ?? memberRow?.subject
-        const description = presentFact(pr?.description)
         const issue = presentFact(pr?.issue)
-        const lineage =
+        const description = descriptionWithoutDuplicatedIssue(presentFact(pr?.description), issue)
+        const activity =
           pr === undefined
             ? memberRow?.timestamp === null || memberRow?.timestamp === undefined
               ? []
-              : [`${queueLogClock(memberRow.timestamp, true, false)} submitted by ${memberRow.submitter ?? "-"}`]
-            : prLineageLines(pr, member.revision, runDetails)
+              : [
+                  {
+                    at: memberRow.timestamp,
+                    rank: 20,
+                    text: `r${member.revision} submitted by ${memberRow.submitter ?? "-"}`,
+                  },
+                ]
+            : prActivityEntries(pr, member.revision, runDetails, memberRow ?? row)
+        const age = prAgeLabel(pr, member.revision, memberRow ?? row)
         const facts = [
           ...(position === undefined ? [] : [{ key: "position", value: String(position) }]),
+          ...(age === undefined ? [] : [{ key: "age", value: age }]),
           ...(pr === undefined ? [] : prDetailFacts(pr, member.revision)),
         ]
         const factKeyWidth = Math.max(0, ...facts.map((fact) => fact.key.length)) + 2
@@ -5598,14 +5719,10 @@ export function QueueDetailRunPrBlocks({
               </>
             )}
             {description === undefined ? null : <DescriptionBlock description={description} />}
-            {lineage.length === 0 ? null : (
+            {activity.length === 0 ? null : (
               <>
                 <Box height={1} flexShrink={0} />
-                {lineage.map((line, lineIndex) => (
-                  <Text key={`lineage:${lineIndex}`} wrap="wrap">
-                    {line}
-                  </Text>
-                ))}
+                <QueuePrActivity entries={activity} />
               </>
             )}
             {facts.length === 0 ? null : (

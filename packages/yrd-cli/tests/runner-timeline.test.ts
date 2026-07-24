@@ -384,8 +384,8 @@ describe("resident runner step-row grammar", () => {
   })
 })
 
-describe("resident runner roll-up suppression (kept in JSONL, dropped from the human stream)", () => {
-  it("suppresses the redundant run settlement (INFO) — each step already reported once", () => {
+describe("resident runner settlement summary", () => {
+  it("prints the run's final stale class and truthful automatic next action", () => {
     const runSettled = log("yrd:queue:run", "info", "run settled", {
       ...RUNNER_SCOPE,
       run: "R324",
@@ -394,8 +394,27 @@ describe("resident runner roll-up suppression (kept in JSONL, dropped from the h
       outcome: "settled",
       steps: ["check", "merge"],
       durationMs: 78_000,
+      error: { code: "stale-base", message: "the queue base advanced" },
+      prs: [{ pr: "PR411", revision: 2 }],
     })
-    expect(formatResidentLogLine(runSettled, { color: false })).toBeUndefined()
+    expect(visible(formatResidentLogLine(runSettled, { color: false }))).toBe(
+      "[main#324] settled status=failed class=stale next=auto-recut pr=PR411.2",
+    )
+  })
+
+  it("names the observable lease timeout and automatic requeue", () => {
+    const runSettled = log("yrd:queue:run", "info", "run settled", {
+      ...RUNNER_SCOPE,
+      run: "R325",
+      base: "main",
+      status: "failed",
+      outcome: "settled",
+      error: { code: "job-lost", message: "runner stopped renewing the lease" },
+      prs: [{ pr: "PR412", revision: 3 }],
+    })
+    expect(visible(formatResidentLogLine(runSettled, { color: false }))).toBe(
+      "[main#325] settled status=failed class=timeout next=auto-requeue pr=PR412.3",
+    )
   })
 
   it("suppresses the redundant compose settlement (INFO), success or mixed", () => {

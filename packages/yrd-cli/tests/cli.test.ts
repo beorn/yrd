@@ -2875,7 +2875,8 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("pr", "status"), humanStatus.io), humanStatus.stderr()).toBe(0)
     expect(humanStatus.stdout()).toContain("needs-author")
     expect(humanStatus.stdout()).toContain("submitted composition cannot be built")
-    expect(humanStatus.stdout()).toContain("NEXT fix the branch and push; the same PR resumes automatically")
+    expect(humanStatus.stdout()).toContain("RESOLVE fix the branch and push; the same PR resumes automatically")
+    expect(humanStatus.stdout()).not.toContain("\nNEXT ")
     expect(humanStatus.stdout()).not.toContain("retry the same Yrd command")
 
     const list = outputIO()
@@ -4810,7 +4811,7 @@ describe("runYrd", () => {
     expect(rendered).not.toContain("siblings none")
     // Item 2/3: the status pills row moved BELOW the list (was directly above
     // the header) and dropped its "FILTER" label — plain-word pills now.
-    const pillsRowIndex = rows.findIndex((row) => /todo.*running.*failed.*done/u.test(row))
+    const pillsRowIndex = rows.findIndex((row) => /open.*running.*done.*failed.*all/u.test(row))
     expect(pillsRowIndex, "pills row renders below the rows").toBeGreaterThan(rows.indexOf(second!))
     const flowIndex = rows.findIndex((row) => row.includes("╭─ FLOW "))
     expect(flowIndex).toBeGreaterThan(pillsRowIndex)
@@ -5423,12 +5424,12 @@ describe("runYrd", () => {
         ),
       )
       const rows = fixed.split("\n")
-      const filter = rows.find((row) => /todo.*running.*failed.*done/u.test(row))
+      const filter = rows.find((row) => /open.*running.*done.*failed.*all/u.test(row))
       // The pills share the row with the left-aligned coverage text ("retained
       // since …" / "... N more"), so assert the pill cluster is present rather
       // than owning the whole row (W1, 2026-07-16). Item 3: no "FILTER" label,
       // no [p] brackets — the since= dimension survives, pills are plain words.
-      expect.soft(filter).toContain("since=6:00:00 todo running failed done")
+      expect.soft(filter).toContain("since=6:00:00 open running done failed all")
       // The FLOW + TIME boxes read the SAME consolidated queueFlowMetrics
       // aggregate at every tier. The landed per-24h throughput fact stays in the
       // aggregate (projection.metrics.throughput) for --json consumers.
@@ -5564,8 +5565,9 @@ describe("runYrd", () => {
       const frame = stripOsc8Targets(frameHandle.text)
       expect(frame).toContain("pr#1.1")
       expect(frame).toContain("QUEUE main")
-      expect(frame.split("\n").find((row) => row.includes("pr#1.1"))).toContain("ready")
-      expect(frame).not.toContain("position 1")
+      expect(frame.split("\n").find((row) => row.includes("pr#1.1") && row.includes(" ready "))).toContain("ready")
+      expect(frame).toContain("Queued at position 1")
+      expect(frame).toMatch(/POSITION\s+1/u)
       expect(frame).toContain("AGE")
       expect(frame).toContain("WAIT")
       expect(frame).toContain("NO RUNNER - no drained run in window")

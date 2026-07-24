@@ -4,7 +4,13 @@ import { hyperlink } from "@silvery/ansi"
 import type { Event } from "loggily"
 import { artifactHref, artifactLabel, artifactLocation } from "./artifact-reference.ts"
 import { failureSlug } from "./failure-slug.ts"
-import { statusPresentation } from "./status-presentation.ts"
+import {
+  failureAutomation,
+  failureStatusClass,
+  statusPresentation,
+  statusPresentationState,
+  type StatusPresentationColor,
+} from "./status-presentation.ts"
 
 /**
  * Pure watch-timeline grammar shared by the interactive queue view and the
@@ -327,6 +333,35 @@ function renderStartedRow(props: OutcomeProps, color: boolean, artifactRoot?: st
     : `${tag} ${verb}${composedPRTail(props, color)}`
 }
 
+function ansiForStatus(color: StatusPresentationColor): string {
+  if (color === "$fg-success") return ANSI.green
+  if (color === "$fg-warning") return ANSI.yellow
+  if (color === "$fg-error") return ANSI.red
+  if (color === "$fg-info") return ANSI.blue
+  return ANSI.dim
+}
+
+function settlementPRTail(props: OutcomeProps): string {
+  const refs = (props.prs ?? []).flatMap((pr) => (pr.pr === undefined ? [] : [`${pr.pr}.${pr.revision ?? 1}`]))
+  if (refs.length === 0) return ""
+  return refs.length === 1 ? ` pr=${refs[0]}` : ` prs=${refs.join(",")}`
+}
+
+/** A terminal run settlement is the one intentional run-level roll-up: it
+ * carries the same observable class and automation policy as StatusNotice. */
+function renderSettlementRow(props: OutcomeProps, color: boolean): string | undefined {
+  if (props.outcome !== "settled" || props.run === undefined) return undefined
+  const code = props.error?.code ?? props.failure?.code
+  const statusClass = code === undefined ? statusPresentationState(props.status ?? "failed") : failureStatusClass(code)
+  const presentation = statusPresentation(statusClass)
+  const verb = paint(color, ansiForStatus(presentation.color))("settled")
+  const next =
+    statusClass === "stale" || statusClass === "env" || statusClass === "timeout"
+      ? failureAutomation(statusClass)
+      : "none"
+  return `${timelineTag(props, color)} ${verb} status=${props.status ?? "failed"} class=${statusClass} next=${next}${settlementPRTail(props)}`
+}
+
 /** Generic INFO/WARN/ERROR notice fields as a dimmed JSON tail, minus the
  * session-constant scope identity. Lifecycle narration rows deliberately do
  * not call this: their full structured records live only in JSONL. */
@@ -371,6 +406,11 @@ export function formatResidentLogLine(event: Event, options: ResidentLogFormatOp
   // projection bookkeeping event into the skippable human lane. Full fidelity
   // remains in JSONL. TRACE is likewise never human narration.
   if ((level === "debug" || level === "trace") && options.includeDebug !== true) return undefined
+
+  if (namespace === RUN_SCOPE && level === "info") {
+    const settlement = renderSettlementRow(props, color)
+    if (settlement !== undefined) return settlement
+  }
 
   // The per-run / per-cycle roll-ups a step row already reported. A genuine
   // non-step failure escalates to ERROR (queueRunOutcome) or WARN (a refusal)

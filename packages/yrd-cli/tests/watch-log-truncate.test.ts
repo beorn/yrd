@@ -2,18 +2,14 @@
 // progress line) wraps across many rows in the watch detail pane, so a handful of log
 // lines fills the whole pane and the operator loses the run-facts/steps context above.
 // Log rows must render ONE terminal row each — truncated, never wrapped — with the
-// "open full log" OSC8 link as the escape hatch for full content.
+// linked artifact-path row as the escape hatch for full content.
 // @level l2
 // @consumer yrd watch / queue list --watch detail pane log rows
 
 import { createElement } from "react"
 import { Box, renderString } from "silvery"
 import { describe, expect, it } from "vitest"
-import {
-  QueueArtifactOutputView,
-  QueueInlineArtifactOutputRows,
-  type QueueArtifactOutput,
-} from "../src/watch-pane.tsx"
+import { QueueArtifactOutputView, QueueInlineArtifactOutputRows, type QueueArtifactOutput } from "../src/watch-pane.tsx"
 
 const HEAD = "HEAD-OF-LINE"
 const TAIL = "TAIL-MARKER-BEYOND-WIDTH"

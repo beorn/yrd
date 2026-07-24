@@ -178,13 +178,13 @@ describe("queue timeline non-integrated rows", () => {
     expect(draftIndex).toBeLessThan(readyIndex)
   })
 
-  it("labels a re-pushed PR with failed-submission history as `rev` (warn/hollow, editable)", async () => {
+  it("labels a re-pushed PR with failed-submission history as `rev` (needs-author/error, editable)", async () => {
     const projection = project([draftPr(), revisionPr(), submittedPr()])
     const revRow = projection.rows.find((row) => row.pr === "PR5")
 
     expect(revRow?.status).toBe("rev")
     expect(revRow?.group).toBe("draft")
-    expect(revRow?.glyph).toBe("◌")
+    expect(revRow?.glyph).toBe("×")
     // No retained run for the prior rejection here, so the detail degrades to the
     // bare `rev` label (it grows a `· <slug>` annotation when the run survives).
     expect(revRow?.detail).toBe("rev")
@@ -197,7 +197,7 @@ describe("queue timeline non-integrated rows", () => {
     const app = createRenderer({ cols: 120, rows: 30 })(createElement(QueueTimelineView, { projection, columns: 120 }))
     try {
       await app.waitForLayoutStable()
-      expect(app.text).toContain("◌ rev")
+      expect(app.text).toContain("× rev")
       expect(app.text).not.toContain("revising")
 
       const statusFg = (pr: string, status: string) => {

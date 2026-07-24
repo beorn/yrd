@@ -91,8 +91,6 @@ describe("queue watch per-pane selection scopes (item 4a)", () => {
     const app = render(createElement(QueueWatchFrame, { snapshot: twoPaneSnapshot() }))
     try {
       await app.waitForLayoutStable()
-      await app.press("l")
-      await app.waitForLayoutStable()
       const text = app.text
       // Columns 0..103 are the QUEUE pane, 104+ the DETAIL pane (0.52 split of 200).
       const LEFT_MAX = 103

@@ -101,17 +101,19 @@ describe("queue timeline 21106 contract", () => {
     expect(staleFrame).toContain("RUNNER STALE — last tick 1:00:00 ago")
   })
 
-  it("projects one selectable row per exact PR revision with composite cursor identity", () => {
+  it("projects each draft and run occurrence with composite cursor identity", () => {
     const projection = contractProjection()
     expect(projection.rows.map((row) => [row.group, row.status, row.run ?? row.pr, row.pr, row.revision])).toEqual([
+      ["draft", "rev", "PR5", "PR5", 1],
       ["pending", "ready", "PR1", "PR1", 1],
       ["running", "running", "R42", "PR42", 1],
       ["running", "running", "R42", "PR43", 1],
       ["completed", "rejected", "R5", "PR5", 1],
       ["completed", "integrated", "R4", "PR4", 1],
     ])
-    expect(projection.rows[0]?.id.startsWith("main:pr:PR1:1:")).toBe(true)
-    expect(projection.rows.slice(1).map((row) => row.id)).toEqual([
+    expect(projection.rows[0]?.id.startsWith("main:draft:PR5:1:")).toBe(true)
+    expect(projection.rows[1]?.id.startsWith("main:pr:PR1:1:")).toBe(true)
+    expect(projection.rows.slice(2).map((row) => row.id)).toEqual([
       "main:run:R42:PR42:1",
       "main:run:R42:PR43:1",
       "main:run:R5:PR5:1",
@@ -121,8 +123,16 @@ describe("queue timeline 21106 contract", () => {
     const minute = 60_000
     // Batched members repeat the Run facts (step, total) while AGE and queue
     // wait stay member facts.
-    expect(projection.rows.map((row) => row.step)).toEqual([undefined, "2:check", "2:check", undefined, undefined])
+    expect(projection.rows.map((row) => row.step)).toEqual([
+      undefined,
+      undefined,
+      "2:check",
+      "2:check",
+      undefined,
+      undefined,
+    ])
     expect(projection.rows.map((row) => row.totalMs)).toEqual([
+      null,
       null,
       20 * minute,
       20 * minute,
@@ -130,15 +140,17 @@ describe("queue timeline 21106 contract", () => {
       15 * minute,
     ])
     expect(projection.rows.map((row) => row.ageMs)).toEqual([
+      75 * minute,
       50 * minute,
       36 * minute,
       34 * minute,
       27 * minute,
       25 * minute,
     ])
-    expect(projection.rows.map((row) => row.glyph)).toEqual(["○", "●", "●", "×", "✓"])
+    expect(projection.rows.map((row) => row.glyph)).toEqual(["×", "○", "●", "●", "×", "✓"])
     // BY: the submitting actor of each exact PR revision, lossless in JSON.
     expect(projection.rows.map((row) => row.submitter)).toEqual([
+      "@agent/2",
       "@cto",
       "@agent/3",
       "@agent/5",
@@ -151,8 +163,9 @@ describe("queue timeline 21106 contract", () => {
       startedAt: "2026-07-13T11:00:00.000Z",
       lastTickAt: "2026-07-13T11:59:58.000Z",
     })
-    expect(projection.rows[1]?.headSha).toBe("c".repeat(40))
+    expect(projection.rows[2]?.headSha).toBe("c".repeat(40))
     expect(projection.rows.map((row) => row.subject)).toEqual([
+      "Reject broken payload",
       "Prepare release notes",
       "Align host navigation keybindings without disturbing internal pane controls",
       "Carry the production split-pane contract into the queue detail surface",
@@ -218,7 +231,8 @@ describe("queue timeline 21106 contract", () => {
     const pending = rows[rowIndex(rows, "pr#1.1")]
     const lead = rows[rowIndex(rows, "pr#42.1")]
     const partner = rows[rowIndex(rows, "pr#43.1")]
-    const rejected = rows[rowIndex(rows, "pr#5.1")]
+    const revised = rows[rowIndex(rows, "pr#5.1")]
+    const rejected = rows[rowIndex(rows, "main#5")]
     const integrated = rows[rowIndex(rows, "pr#4.1")]
 
     // Row contract (user directive 2026-07-16): STEP folded into the flexible
@@ -229,17 +243,20 @@ describe("queue timeline 21106 contract", () => {
       /^16:40:00 ○ ready\s+-\s+pr#1\.1 @yrd\/core\/21120-pr-state-notifications\s+@cto\s+50:00$/u,
     )
     expect(lead?.trim()).toMatch(
-      /^17:10:00 ● run\s+main#42 pr#42\.1 @hab\/super\/21135-herdr-keybindings\s+@agent\/3 36:00 20:00$/u,
+      /^17:10:00 ● run\s+main#42 pr#42\.1 @hab\/super\/21135-herdr-keybindings\s+@agent\/3\s+36:00 20:00$/u,
     )
-    expect(partner?.trim()).toMatch(/^-\s+-\s+-\s+pr#43\.1 @si\/ui\/21119-split-pane\s+@agent\/5 34:00\s+-$/u)
+    expect(partner?.trim()).toMatch(/^-\s+-\s+-\s+pr#43\.1 @si\/ui\/21119-split-pane\s+@agent\/5\s+34:00\s+-$/u)
+    expect(revised?.trim()).toMatch(/^16:15:00 × rev\s+-\s+pr#5\.1\s+\S topic\/pr5\s+@agent\/2\s+1:15:00$/u)
     expect(rejected?.trim()).toMatch(
-      /^16:42:00 × fail\s+main#5\s+pr#5\.1\s+\S topic\/pr5 \(err=typecheck-failed\)\s+@agent\/2 27:00 12:00$/u,
+      /^16:42:00 × fail\s+main#5\s+pr#5\.1\s+\S topic\/pr5 \(err=typecheck-failed\)\s+@agent\/2\s+27:00 12:00$/u,
     )
-    expect(integrated?.trim()).toMatch(/^16:25:00 ✓ done\s+main#4\s+pr#4\.1\s+\S topic\/pr4\s+@agent\/7 25:00 15:00$/u)
+    expect(integrated?.trim()).toMatch(
+      /^16:25:00 ✓ done\s+main#4\s+pr#4\.1\s+\S topic\/pr4\s+@agent\/7\s+25:00 15:00$/u,
+    )
 
     // No row carries the removed clock glyph, and a not-yet-started run shows a
     // muted "-" in the RUN cell (item 9) instead of a run id, no run duration.
-    for (const row of [pending, lead, partner, rejected, integrated]) expect(row).not.toContain("◷")
+    for (const row of [revised, pending, lead, partner, rejected, integrated]) expect(row).not.toContain("◷")
     expect(pending).not.toContain("main#")
   })
 
@@ -295,14 +312,16 @@ describe("queue timeline 21106 contract", () => {
     const rows = (await renderTimeline(projection, 160)).map((row) => row.trimEnd())
     const pending = rows[rowIndex(rows, "pr#1.1")]
     const running = rows[rowIndex(rows, "pr#42.1")]
-    const rejected = rows[rowIndex(rows, "pr#5.1")]
+    const revised = rows[rowIndex(rows, "pr#5.1")]
+    const rejected = rows[rowIndex(rows, "main#5")]
     const integrated = rows[rowIndex(rows, "pr#4.1")]
 
     expect(pending).toContain("○ ready")
     expect(running).toContain("● run")
+    expect(revised).toContain("× rev")
     expect(rejected).toContain("× fail")
     expect(integrated).toContain("✓ done")
-    for (const row of [pending, running, rejected, integrated]) expect(row).not.toContain("task/")
+    for (const row of [revised, pending, running, rejected, integrated]) expect(row).not.toContain("task/")
 
     const production = queueTimelineStories["production-overview"].snapshot.projection
     if (production === undefined) throw new Error("production-overview is missing its projection")
@@ -397,7 +416,7 @@ describe("queue timeline 21106 contract", () => {
     for (const row of rows) expect(Array.from(row).length).toBeLessThanOrEqual(80)
     const lead = rows[rowIndex(rows, "pr#42.1")]
     expect(lead).toContain("main#42")
-    expect(lead).toContain("@hab/super/21135-herdr-keybind…")
+    expect(lead).toContain("@hab/super/21135-herdr-keybindin…")
     expect(lead).not.toContain(" for ")
     expect(lead).not.toContain("2:check")
     expect(lead).toContain("36:00")
@@ -408,7 +427,7 @@ describe("queue timeline 21106 contract", () => {
     expect(lead?.trimStart().startsWith("17:10:00 ● run")).toBe(true)
     expect(lead).not.toContain("@agent/3")
     expect(rows.some((row) => row.includes("BY"))).toBe(false)
-    const rejected = rows[rowIndex(rows, "pr#5.1")]
+    const rejected = rows[rowIndex(rows, "main#5")]
     expect(rejected).toContain("typecheck-failed")
     expect(rejected).toContain("12:00")
     expect(rejected).not.toContain("◷")
@@ -432,7 +451,7 @@ describe("queue timeline 21106 contract", () => {
       const runningMarker = cell("●", "pr#42.1").fg
       const successMarker = cell("✓", "pr#4.1").fg
       const successText = cell("done", "pr#4.1").fg
-      const failureText = cell("typecheck-failed", "pr#5.1").fg
+      const failureText = cell("typecheck-failed", "main#5").fg
       const mutedTime = cell("16:40:00", "pr#1.1").fg
       const mutedAge = cell("50:00", "pr#1.1").fg
 
@@ -708,12 +727,13 @@ describe("queue timeline 21106 contract", () => {
       await handle.waitForLayoutStable()
       await handle.press("h")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("16:54 submitted by @agent/3")
+      expect(handle.text).toContain("16:54 r1 submitted by @agent/3")
       expect(handle.text, "the partner PR's own submit timeline is not shown").not.toContain(
-        "16:56 submitted by @agent/5",
+        "16:56 r1 submitted by @agent/5",
       )
-      // The run-region PRs list only heads step tabs, not the PR tab.
-      expect(handle.text, "the PR tab does not repeat the RUN region").not.toContain("RUN main#42")
+      // The composite RUN/status context persists while the PR activity tab is
+      // selected, so identity and timing never disappear during diagnosis.
+      expect(handle.text, "the PR tab preserves the RUN region").toContain("RUN main#42")
     } finally {
       handle.unmount()
     }
@@ -764,7 +784,7 @@ describe("queue timeline 21106 contract", () => {
     }
     // Pending and running rows keep aging with canonical start semantics.
     const growing = before.rows.filter((row) => row.group !== "completed").map((row) => row.id)
-    expect(growing).toHaveLength(3)
+    expect(growing).toHaveLength(4)
     for (const id of growing) {
       expect(a.get(id)?.ageMs, id).toBe((b.get(id)?.ageMs ?? Number.NaN) + 5 * minute)
     }
@@ -801,9 +821,15 @@ describe("queue timeline 21106 contract", () => {
     expect(frame).not.toContain("╭─ STATUS ")
 
     for (const [index, row] of projection.rows.entries()) {
-      const rendered = rows[rowIndex(rows, formatQueuePrId(row.pr, row.revision))]
-      if (rendered === undefined) throw new Error(`missing rendered row for ${row.id}`)
       const continuation = index > 0 && row.run !== undefined && projection.rows[index - 1]?.run === row.run
+      const pr = formatQueuePrId(row.pr, row.revision)
+      const run = row.run === undefined ? undefined : `${row.base}#${row.run.replace(/^R/u, "")}`
+      const rendered = rows.find(
+        (candidate) =>
+          candidate.includes(pr) &&
+          (row.run === undefined || continuation || (run !== undefined && candidate.includes(run))),
+      )
+      if (rendered === undefined) throw new Error(`missing rendered row for ${row.id}`)
       if (row.timestamp !== null && !continuation) expect(rendered, row.id).toContain(wallClock(row.timestamp))
       if (row.submitter !== undefined) expect(rendered, row.id).toContain(row.submitter)
       if (row.issue !== undefined) expect(rendered, row.id).toContain(row.issue)
