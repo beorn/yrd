@@ -179,9 +179,8 @@ $ yrd pr checks PR2 --follow
 admission, or Queue work is started until `pr ready` (ordinary reviewed work)
 or `pr recut --queue` (authored-root carriers). `pr create` does not push a Git
 branch; callers push first, then create the draft from that exact resolvable
-commit. The explicit bracketed exception is `bay run`: it creates or reuses
-`task/<claim-slug>`, pushes a checkpoint and records the draft before the child
-starts, then synchronously checkpoints and closes on success. Review and comment
+commit. `bay run` creates or reuses `task/<claim-slug>` and pushes recoverable
+checkpoints, but never creates or recuts a PR implicitly. Review and comment
 facts pin the current revision and head SHA; a new head makes old verdicts
 visibly stale. Reviewer assignment and richer policy belong to the calling
 coordination system.
@@ -196,9 +195,12 @@ bun yrd pr runs PR1
 # Installed alias for `yrd bay open example`:
 git bay open example
 
-# One foreground child, bracketed by a pushed draft and synchronous cleanup
+# One foreground child, bracketed by a pushed branch carrier and synchronous cleanup
 # (`yrd bay run` is the equivalent projection):
 yrd run @tracker/fix-release -- vi README.md
+
+# Continue an existing delivery branch without implicitly recutting its PR:
+yrd run --pr task/fix-release -- vi README.md
 
 # One guest in the owner's existing Bay; from inside that Bay, omit the selector:
 yrd run --exec fix-release -- ag
@@ -209,11 +211,12 @@ Installed binaries are `yrd`, `git-yrd`, and `git-bay`. Git resolves
 `git bay ...` through `git-bay` automatically.
 
 On a clean child exit, `bay run` commits root-worktree changes as
-`wip: <claim>`, pushes the same task branch, refreshes its draft, and removes
-the Bay before returning. A non-zero or abnormal child leaves the workspace
-open and records a durable `orphan` fact visible through `yrd bay list --json`.
-Dirty submodules are never guessed into a publication: checkpointing fails
-loudly and preserves the Bay.
+`wip: <claim>`, pushes the same task branch, and removes the Bay before
+returning. No PR or Queue record is created; use `pr create` explicitly, or
+`--pr <selector>` to continue an existing PR's branch without recutting it.
+A non-zero or abnormal child leaves the workspace open and records a durable
+`orphan` fact visible through `yrd bay list --json`. Dirty submodules are never
+guessed into a publication: checkpointing fails loudly and preserves the Bay.
 
 `run --exec` attaches a guest process without opening, checkpointing, closing,
 or otherwise taking ownership of the Bay lifecycle. Its live address is
@@ -305,10 +308,10 @@ yrd prime                   agent briefing plus current delivery context
 
 ```text
 yrd bay list [--json]
-yrd run [--exec] [<claim-or-selector>] [-- <command...>]
-yrd bay run [--exec] [<claim-or-selector>] [-- <command...>]
-yrd sh [--exec] [<claim-or-selector>]
-yrd ag [--exec] [<claim-or-selector>]
+yrd run [--exec] [--pr <selector>] [<claim-or-selector>] [-- <command...>]
+yrd bay run [--exec] [--pr <selector>] [<claim-or-selector>] [-- <command...>]
+yrd sh [--exec] [--pr <selector>] [<claim-or-selector>]
+yrd ag [--exec] [--pr <selector>] [<claim-or-selector>]
 yrd bay open <name> [--from <branch>] [--base <branch>]
   [--issue <ref>] [--actor <id>] [--json]
 yrd bay path <selector> [--json]
@@ -323,15 +326,15 @@ The same commands are available through the standalone `git bay` projection.
 submission core as `pr submit`; `bay submit` remains a handoff, while new
 callers use the PR-native check-admission surface below.
 
-| Command   | Input                                                 | Output and state                                                                        |
-| --------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `list`    | None                                                  | Lists every Bay, including durable failure and orphan facts                             |
-| `run`     | Claim/selector plus exact argv; optional `--exec`     | Owns the bracket, or attaches a PID-addressed guest without taking its lifecycle        |
-| `open`    | New bay name; optional source, base, issue, and actor | Prints the worktree path; creates and provisions a named bay                            |
-| `path`    | One Bay ID, name, or branch selector                  | Prints the exact absolute path of one active Bay; read-only and never refreshes it      |
-| `refresh` | Zero or more bays                                     | Refreshes Git head, base, dirty, path, and workspace status                             |
-| `submit`  | Bays, PRs, or source branches                         | Creates or advances PRs to `submitted`; never executes Queue work                       |
-| `close`   | Zero or more bays                                     | Deprovisions clean terminal bays; `--withdraw` explicitly cancels an associated live PR |
+| Command   | Input                                                   | Output and state                                                                         |
+| --------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `list`    | None                                                    | Lists every Bay, including durable failure and orphan facts                              |
+| `run`     | Claim/selector or `--pr`; exact argv; optional `--exec` | Owns the bracket without implicit PR intake, or attaches a PID-addressed lifecycle guest |
+| `open`    | New bay name; optional source, base, issue, and actor   | Prints the worktree path; creates and provisions a named bay                             |
+| `path`    | One Bay ID, name, or branch selector                    | Prints the exact absolute path of one active Bay; read-only and never refreshes it       |
+| `refresh` | Zero or more bays                                       | Refreshes Git head, base, dirty, path, and workspace status                              |
+| `submit`  | Bays, PRs, or source branches                           | Creates or advances PRs to `submitted`; never executes Queue work                        |
+| `close`   | Zero or more bays                                       | Deprovisions clean terminal bays; `--withdraw` explicitly cancels an associated live PR  |
 
 Submodule repositories are ready when `bay open` returns. Yrd recursively
 materializes the recorded gitlinks while keeping each Bay's refs, config, and
@@ -967,8 +970,10 @@ The cursor is recovery bookkeeping, not another event store or scheduler.
 
 Configuration is closed-world: an unknown event name, malformed target, or
 missing Tribe executable refuses startup instead of becoming an inert label.
-Routing to `submitter` also requires `TRIBE_NAME` to identify the current
-submitting `@` handle at startup. A needs-review route without
+Routing to `submitter` on an active noninteractive command also requires a
+valid persona mailbox from `--name`, `HAB_NAME`, or transitional `TRIBE_NAME`;
+bracketed `run` derives and registers its persona through the documented name
+ladder, while interactive delivery remains fail-soft. A needs-review route without
 `requires: [review]` is rejected rather than stored as an inert label.
 Historical rejections written before the routable fact shape remain replayable
 but are not retroactively delivered. If a pre-actor revision is rejected after
