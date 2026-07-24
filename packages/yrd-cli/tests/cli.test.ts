@@ -10598,6 +10598,24 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     }
   })
 
+  it("scopes a PR-focused watch snapshot before projecting older terminal runs", async () => {
+    const app = await createApp({ batch: 2 })
+    try {
+      await openAndSubmit(app)
+
+      const open = outputIO()
+      expect(await runYrd(app, yrd("bay", "open", "two"), open.io)).toBe(0)
+      const submit = outputIO({ cwd: "/repo/.bays/B2" })
+      expect(await runYrd(app, yrd("bay", "submit"), submit.io)).toBe(0)
+      await app.queue.run({ prs: ["PR1", "PR2"] }, { runner: "test", leaseMs: 60_000 })
+
+      const snapshot = await runInternals.queueListSnapshot(app, [], { pr: "PR2" }, outputIO().io)
+      expect(new Set(snapshot.projection.rows.map((row) => row.pr))).toEqual(new Set(["PR2"]))
+    } finally {
+      await app.close()
+    }
+  })
+
   it("resolves and permanently caches one async diff for an immutable focused revision", async () => {
     const calls: string[][] = []
     const resolver = runInternals.createQueuePrDiffResolver({

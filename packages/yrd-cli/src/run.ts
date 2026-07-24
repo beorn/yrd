@@ -2989,12 +2989,22 @@ async function queueStatusSnapshots(
     const canonical = app.queue.status(group.base)
     const aliases = [...group.aliases].filter((base) => base !== group.base).map((base) => app.queue.status(base))
     const runs = mergedQueueRuns(canonical, aliases)
+    const scopeRun = (run: QueueRun): QueueRun[] => {
+      if (target.selected.size === 0) return [run]
+      const prs = run.prs.filter((member) => target.selected.has(member.id))
+      return prs.length === 0 ? [] : [{ ...run, prs }]
+    }
+    const scopedRuns = {
+      running: runs.running.flatMap(scopeRun),
+      waiting: runs.waiting.flatMap(scopeRun),
+      finished: runs.finished.flatMap(scopeRun),
+    }
     const prs = Object.values(state.bays.prs).filter(
       (pr) => group.aliases.has(pr.base) && (target.selected.size === 0 || target.selected.has(pr.id)),
     )
     results.push({
       base: group.base,
-      ...runs,
+      ...scopedRuns,
       ...(canonical.pause === undefined ? {} : { pause: canonical.pause }),
       ...(group.headSha === undefined ? {} : { headSha: group.headSha }),
       prs,
