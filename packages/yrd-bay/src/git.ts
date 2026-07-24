@@ -69,6 +69,52 @@ function failure(code: string, cause: unknown): JobResult<never> {
   return { status: "failed", error: { code, message: cause instanceof Error ? cause.message : String(cause) } }
 }
 
+async function remoteBranchHead(git: Git, repo: string, branch: string): Promise<string | undefined> {
+  const result = await git.run(repo, ["ls-remote", "--exit-code", "origin", `refs/heads/${branch}`], true)
+  if (result.code === 2) return undefined
+  if (result.code !== 0) {
+    throw new Error(
+      `could not verify branch '${branch}' on origin: ` +
+        (result.stderr.trim() || result.stdout.trim() || `git ls-remote exited ${result.code}`),
+    )
+  }
+  const headSha = result.stdout.trim().split(/\s+/u)[0]
+  if (headSha === undefined || !/^[0-9a-f]{40,64}$/u.test(headSha)) {
+    throw new Error(`origin returned no commit for branch '${branch}'`)
+  }
+  return headSha
+}
+
+type BranchCarrier = "remote" | "tracking"
+type BranchProvisionDecision =
+  | Readonly<{ kind: "open"; source: "local" | "tracking" | "base"; carrier?: BranchCarrier }>
+  | Readonly<{ kind: "refuse"; reason: "unproven-existing" | "missing-carrier" }>
+
+function decideBranchProvision(input: {
+  claim: boolean
+  reuse: boolean
+  local: boolean
+  tracking: boolean
+  remote: boolean
+}): BranchProvisionDecision {
+  // One state table owns branch provenance:
+  // - ordinary open: local > tracking > base;
+  // - fresh claim: every pre-existing carrier refuses, otherwise base;
+  // - live claim: authoritative remote > tracking, no carrier refuses, and local is only a candidate source.
+  if (!input.claim) {
+    return { kind: "open", source: input.local ? "local" : input.tracking ? "tracking" : "base" }
+  }
+  if (!input.reuse) {
+    return input.local || input.tracking || input.remote
+      ? { kind: "refuse", reason: "unproven-existing" }
+      : { kind: "open", source: "base" }
+  }
+  const carrier: BranchCarrier | undefined = input.remote ? "remote" : input.tracking ? "tracking" : undefined
+  return carrier === undefined
+    ? { kind: "refuse", reason: "missing-carrier" }
+    : { kind: "open", source: input.local ? "local" : "tracking", carrier }
+}
+
 function safeBayPath(root: string, bay: string): string {
   const path = resolve(root, bay)
   const prefix = `${resolve(root)}/`
@@ -225,7 +271,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
   return {
     revision: createHash("sha256")
       .update(
-        JSON.stringify({ implementation: "yrd-git-workspace-v5", repo, baysRoot, intakeRemote: options.intakeRemote }),
+        JSON.stringify({ implementation: "yrd-git-workspace-v6", repo, baysRoot, intakeRemote: options.intakeRemote }),
       )
       .digest("hex"),
 
@@ -242,22 +288,57 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
         if (input.from === undefined) {
           const localRef = `refs/heads/${input.branch}`
           const remoteRef = `refs/remotes/origin/${input.branch}`
-          const [local, remote] = await Promise.all([
+          const [local, tracking] = await Promise.all([
             git.run(repo, ["rev-parse", "--verify", `${localRef}^{commit}`], true),
             git.run(repo, ["rev-parse", "--verify", `${remoteRef}^{commit}`], true),
           ])
-          if (input.issue !== undefined && input.reuseBranch !== true && (local.code === 0 || remote.code === 0)) {
+          const remoteHead = input.issue === undefined ? undefined : await remoteBranchHead(git, repo, input.branch)
+          const remoteExists = remoteHead !== undefined
+          const decision = decideBranchProvision({
+            claim: input.issue !== undefined,
+            reuse: input.reuseBranch === true,
+            local: local.code === 0,
+            tracking: tracking.code === 0,
+            remote: remoteExists,
+          })
+          if (decision.kind === "refuse" && decision.reason === "unproven-existing") {
             throw new Error(
               `branch '${input.branch}' already exists without matching claim provenance; ` +
                 "link that branch to the claim's draft PR, then rerun bay run",
             )
           }
-          if (local.code === 0) {
+          if (decision.kind === "refuse") {
+            throw new Error(
+              `live claim branch '${input.branch}' has no remote or tracking carrier; ` +
+                "restore the draft PR head before rerunning bay run",
+            )
+          }
+          if (decision.carrier === "remote") {
+            await git.run(repo, [
+              "fetch",
+              "--no-recurse-submodules",
+              "origin",
+              `refs/heads/${input.branch}:${remoteRef}`,
+            ])
+          }
+          if (decision.carrier !== undefined && decision.source === "local") {
+            const carriesClaimHead = await git.run(repo, ["merge-base", "--is-ancestor", remoteRef, localRef], true)
+            if (carriesClaimHead.code !== 0) {
+              throw new Error(
+                `local branch '${input.branch}' does not descend from the live claim head; ` +
+                  "restore or reconcile the draft PR branch before rerunning bay run",
+              )
+            }
+          }
+          if (decision.source === "local") {
             await git.run(repo, ["worktree", "add", path, input.branch])
-          } else if (remote.code === 0) {
+          } else if (decision.source === "tracking") {
             await git.run(repo, ["worktree", "add", "-b", input.branch, path, remoteRef])
           } else {
             await git.run(repo, ["worktree", "add", "-b", input.branch, path, baseSha])
+          }
+          if (decision.carrier !== undefined || decision.source === "tracking") {
+            await git.run(path, ["branch", "--set-upstream-to", `origin/${input.branch}`, input.branch])
           }
         } else {
           await git.commit(repo, input.from)
@@ -326,6 +407,41 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           await git.run(input.path, ["commit", "-m", `wip: ${input.claim}`])
         }
         const headSha = await git.commit(input.path, "HEAD")
+        const trackingRef = `refs/remotes/origin/${input.branch}`
+        const [tracking, remoteHead] = await Promise.all([
+          git.run(input.path, ["rev-parse", "--verify", `${trackingRef}^{commit}`], true),
+          remoteBranchHead(git, input.path, input.branch),
+        ])
+        const trackedHead = tracking.code === 0 ? tracking.stdout.trim() : undefined
+        if (trackedHead !== undefined) {
+          const carriesTrackedHead = await git.run(
+            input.path,
+            ["merge-base", "--is-ancestor", trackedHead, headSha],
+            true,
+          )
+          if (carriesTrackedHead.code !== 0) {
+            throw new Error(
+              `Bay '${input.bay}' no longer descends from its tracked claim head; ` +
+                "restore or reconcile the branch before checkpointing again",
+            )
+          }
+        }
+        if (remoteHead === headSha) {
+          // A previous attempt can complete the ordinary push before its process result is observed.
+          // Content-addressed equality proves that origin already has this exact authored checkpoint.
+          await git.run(input.path, ["update-ref", trackingRef, remoteHead, trackedHead ?? "0".repeat(headSha.length)])
+          await git.run(input.path, ["branch", "--set-upstream-to", `origin/${input.branch}`, input.branch])
+          return { status: "passed", output: { headSha, pushed: true, wip } }
+        }
+        if (
+          (trackedHead === undefined && remoteHead !== undefined) ||
+          (trackedHead !== undefined && remoteHead !== undefined && remoteHead !== trackedHead)
+        ) {
+          throw new Error(
+            `origin branch '${input.branch}' changed after Bay '${input.bay}' was provisioned; ` +
+              `fetch origin '${input.branch}' and reconcile it before checkpointing again`,
+          )
+        }
         await git.run(input.path, ["push", "--set-upstream", "origin", `HEAD:refs/heads/${input.branch}`])
         return { status: "passed", output: { headSha, pushed: true, wip } }
       } catch (cause) {

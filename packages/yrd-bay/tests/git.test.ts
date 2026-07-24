@@ -270,6 +270,145 @@ describe("createGitWorkspace", () => {
     expect((await git(repo, ["ls-remote", "origin", `refs/heads/${bay.branch}`])).stdout).toBe("")
   })
 
+  it("refuses to overwrite a branch created remotely after claim provisioning", async () => {
+    const { root, repo, intake } = await repository()
+    await git(repo, ["remote", "add", "origin", intake])
+    await git(repo, ["push", "-qu", "origin", "main"])
+    await using process = createProcess()
+    await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
+
+    await runRequested(
+      app,
+      await app.bays.open({
+        name: "lease-race",
+        issue: "@km/test/lease-race",
+        branch: "task/lease-race",
+      }),
+    )
+    const bay = app.bays.get("B1")
+    if (bay?.path === undefined || bay.headSha === undefined) throw new Error("expected active Bay head and path")
+    await git(intake, ["update-ref", "refs/heads/task/lease-race", bay.headSha])
+    await writeFile(join(bay.path, "claimed.txt"), "ours\n")
+
+    await runRequested(app, await app.bays.checkpoint({ bay: bay.id, claim: "@km/test/lease-race" }))
+
+    expect(app.bays.get("B1")).toMatchObject({ status: "active", failure: { code: "checkpoint-failed" } })
+    expect((await git(intake, ["rev-parse", "refs/heads/task/lease-race"])).stdout).toBe(bay.headSha)
+    expect((await git(bay.path, ["rev-parse", "HEAD"])).stdout).not.toBe(bay.headSha)
+  })
+
+  it("refuses to repair a divergent tracking lease even when origin equals the Bay head", async () => {
+    const { root, repo, intake } = await repository()
+    await git(repo, ["remote", "add", "origin", intake])
+    await git(repo, ["push", "-qu", "origin", "main"])
+    await using process = createProcess()
+    await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
+
+    await runRequested(
+      app,
+      await app.bays.open({
+        name: "divergent-lease",
+        issue: "@km/test/divergent-lease",
+        branch: "task/divergent-lease",
+      }),
+    )
+    const bay = app.bays.get("B1")
+    if (bay?.path === undefined || bay.headSha === undefined) throw new Error("expected active Bay head and path")
+    await git(repo, ["switch", "-qc", "divergent-carrier"])
+    await writeFile(join(repo, "divergent.txt"), "divergent\n")
+    await git(repo, ["add", "divergent.txt"])
+    await git(repo, ["commit", "-qm", "divergent carrier"])
+    const divergentHead = (await git(repo, ["rev-parse", "HEAD"])).stdout
+    await git(repo, ["switch", "-q", "main"])
+    await git(repo, ["update-ref", "refs/remotes/origin/task/divergent-lease", divergentHead])
+    await git(intake, ["update-ref", "refs/heads/task/divergent-lease", bay.headSha])
+
+    await runRequested(app, await app.bays.checkpoint({ bay: bay.id, claim: "@km/test/divergent-lease" }))
+
+    expect(app.bays.get("B1")).toMatchObject({ status: "active", failure: { code: "checkpoint-failed" } })
+    expect((await git(repo, ["rev-parse", "refs/remotes/origin/task/divergent-lease"])).stdout).toBe(divergentHead)
+  })
+
+  it("replays a completed claim push after its process result is interrupted without force-pushing", async () => {
+    const { root, repo, intake } = await repository()
+    await git(repo, ["remote", "add", "origin", intake])
+    await git(repo, ["push", "-qu", "origin", "main"])
+    const originalHook = join(repo, ".git", "hooks", "pre-push")
+    await writeFile(
+      originalHook,
+      [
+        "#!/bin/sh",
+        "git_dir=$(git rev-parse --git-common-dir)",
+        'printf chained > "$git_dir/yrd-pre-push-ran"',
+        "",
+      ].join("\n"),
+    )
+    await chmod(originalHook, 0o755)
+    await using actual = createProcess()
+    const pushes: string[][] = []
+    let interruptPushResult = true
+    let replayingPush = false
+    const process: Pick<Process, "run"> = {
+      async run(request) {
+        const args = request.argv.slice(3)
+        if (replayingPush && args[0] === "fetch") {
+          return {
+            exitCode: 124,
+            signal: "SIGTERM",
+            stdout: "",
+            stderr: "",
+            durationMs: 1,
+            timedOut: true,
+            verdict: "TIMED_OUT",
+            stalled: false,
+          }
+        }
+        if (args.includes("push")) {
+          pushes.push(args)
+          const result = await actual.run(request)
+          if (result.exitCode === 0 && interruptPushResult) {
+            interruptPushResult = false
+            replayingPush = true
+            return processResult(1, "simulated push completion interruption")
+          }
+          return result
+        }
+        return actual.run(request)
+      },
+    }
+    await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
+
+    await runRequested(
+      app,
+      await app.bays.open({
+        name: "lease-replay",
+        issue: "@km/test/lease-replay",
+        branch: "task/lease-replay",
+      }),
+    )
+    const bay = app.bays.get("B1")
+    if (bay?.path === undefined) throw new Error("expected active Bay path")
+    await writeFile(join(bay.path, "claimed.txt"), "ours\n")
+
+    await runRequested(app, await app.bays.checkpoint({ bay: bay.id, claim: "@km/test/lease-replay" }))
+    expect(app.bays.get("B1")).toMatchObject({ status: "active", failure: { code: "checkpoint-failed" } })
+    const pushedHead = (await git(intake, ["rev-parse", "refs/heads/task/lease-replay"])).stdout
+    await git(bay.path, ["update-ref", "-d", "refs/remotes/origin/task/lease-replay"])
+
+    await runRequested(app, await app.bays.checkpoint({ bay: bay.id, claim: "@km/test/lease-replay" }))
+
+    expect(app.bays.get("B1")).toMatchObject({ status: "active", headSha: pushedHead, failure: undefined })
+    expect((await git(bay.path, ["rev-parse", "refs/remotes/origin/task/lease-replay"])).stdout).toBe(pushedHead)
+    await writeFile(join(bay.path, "continued.txt"), "continued\n")
+    await runRequested(app, await app.bays.checkpoint({ bay: bay.id, claim: "@km/test/lease-replay" }))
+
+    expect((await git(intake, ["show", "refs/heads/task/lease-replay:continued.txt"])).stdout).toBe("continued")
+    expect(pushes).toHaveLength(2)
+    expect(pushes[0]?.some((argument) => argument.startsWith("--force"))).toBe(false)
+    expect(pushes[1]?.some((argument) => argument.startsWith("--force"))).toBe(false)
+    expect(await readFile(join(repo, ".git", "yrd-pre-push-ran"), "utf8")).toBe("chained")
+  })
+
   it("resumes close after interruption leaves the preservation ref behind", async () => {
     const { root, repo } = await repository()
     await using actual = createProcess()
@@ -559,6 +698,29 @@ describe("createGitWorkspace", () => {
     if (bay?.path === undefined) throw new Error("expected active Bay path")
     expect(bay).toMatchObject({ status: "active", branch: "issue/reopen" })
     expect((await git(bay.path, ["branch", "--show-current"])).stdout).toBe("issue/reopen")
+  })
+
+  it("opens an ordinary remote-tracking-only branch at its recorded head", async () => {
+    const { root, repo, intake } = await repository()
+    await git(repo, ["remote", "add", "origin", intake])
+    await git(repo, ["push", "-qu", "origin", "main"])
+    await git(repo, ["switch", "-qc", "issue/tracked-remote"])
+    await writeFile(join(repo, "remote.txt"), "remote head\n")
+    await git(repo, ["add", "remote.txt"])
+    await git(repo, ["commit", "-qm", "remote branch head"])
+    const remoteHead = (await git(repo, ["rev-parse", "HEAD"])).stdout
+    await git(repo, ["push", "-qu", "origin", "issue/tracked-remote"])
+    await git(repo, ["switch", "-q", "main"])
+    await git(repo, ["branch", "-D", "issue/tracked-remote"])
+    await using process = createProcess()
+    await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
+
+    await runRequested(app, await app.bays.open({ name: "tracked-remote" }))
+
+    const bay = app.bays.get("B1")
+    if (bay?.path === undefined) throw new Error("expected active Bay path")
+    expect(bay).toMatchObject({ status: "active", branch: "issue/tracked-remote", headSha: remoteHead })
+    expect((await git(bay.path, ["rev-parse", "HEAD"])).stdout).toBe(remoteHead)
   })
 
   it("refreshes the committed head and reports uncommitted work", async () => {
