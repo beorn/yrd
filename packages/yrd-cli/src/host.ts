@@ -975,8 +975,8 @@ async function createRuntimeSignalAdapter(options: {
   attributedReceipt(event: RejectedSignal): ReturnType<typeof authorAttributionReceipt>
 }): Promise<SignalDeliveryAdapter> {
   if (options.injected !== undefined) return options.injected
-  const captureWire = options.wire !== undefined && isWireCapture(options.wire)
-  if (captureWire) {
+  const wire = options.wire
+  if (wire !== undefined && isWireCapture(wire)) {
     if (options.output === undefined) {
       raiseFailure(
         "configuration",
@@ -984,7 +984,7 @@ async function createRuntimeSignalAdapter(options: {
         "yrd: a capture wire requires an ordinary output sink",
       )
     }
-    return createWireSignalAdapter(options.wire, options.output, options.actor, options.attributedReceipt)
+    return createWireSignalAdapter(wire, options.output, options.actor, options.attributedReceipt)
   }
 
   const signalProcess =
@@ -1224,6 +1224,7 @@ async function createYrdRuntimeHost(
           importOrphanJournal({ dir: repository.stateDir, sourcePath, importedBy: defaultActor, log }),
       }),
       process,
+      environment: env,
     })
     let closePromise: Promise<void> | undefined
     const close = () =>

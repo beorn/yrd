@@ -41,6 +41,8 @@ export type YrdCliServices = Readonly<{
   recut?: GitPRRecutter
   journal?: YrdCliJournalAdministration
   process?: Pick<Process, "run">
+  /** Exact host environment inherited by Bay child processes. */
+  environment?: NodeJS.ProcessEnv
 }>
 
 /** Read-only Git facts `pr prune` proves its superseded verdicts with. The

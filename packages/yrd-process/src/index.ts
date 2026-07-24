@@ -12,6 +12,10 @@ export type ProcessRequest = Readonly<{
    * inherit stdin/stdout/stderr and stay in the foreground process group so
    * editors and agent harnesses receive ordinary terminal input. */
   interactive?: boolean
+  /** Observe the direct child PID synchronously after spawn and before run()
+   * awaits output or exit. A thrown observer error terminates and settles the
+   * child before the error is propagated. */
+  onStart?: (pid: number) => void
   onOutput?: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => void
   timeoutMs?: number
   /** Explicit inter-output silence lease. It starts with the first observed
@@ -105,6 +109,27 @@ type Spawned = Readonly<{
 }>
 
 export type Spawn = (argv: readonly string[], options: SpawnOptions) => Spawned
+
+const NO_START_OBSERVER_ERROR = Symbol("no-start-observer-error")
+
+function observeProcessStart(
+  observer: ProcessRequest["onStart"],
+  pid: number,
+  terminate: () => void,
+): unknown | typeof NO_START_OBSERVER_ERROR {
+  if (observer === undefined) return NO_START_OBSERVER_ERROR
+  try {
+    observer(pid)
+    return NO_START_OBSERVER_ERROR
+  } catch (error) {
+    terminate()
+    return error
+  }
+}
+
+function propagateStartObserverError(error: unknown | typeof NO_START_OBSERVER_ERROR): void {
+  if (error !== NO_START_OBSERVER_ERROR) throw error
+}
 
 /**
  * Default bounded wait for the output pipe to reach EOF after the DIRECT child
@@ -337,6 +362,7 @@ export function createProcess(
         const onAbort = () => terminate()
         signal.addEventListener("abort", onAbort, { once: true })
         if (signal.aborted) terminate()
+        const startObserverError = observeProcessStart(request.onStart, child.pid, terminate)
         const renewProgressLease = (bytes: number): void => {
           lastProgressAtMs = now()
           lastProgressBytes += bytes
@@ -433,6 +459,7 @@ export function createProcess(
         cancelKill?.()
         cancelReap?.()
         if (outputError !== undefined) throw outputError
+        propagateStartObserverError(startObserverError)
         const result: ProcessResult = {
           exitCode,
           signal: child.signalCode,
@@ -512,7 +539,10 @@ async function readBounded(
     abandon === undefined
       ? undefined
       : new Promise((resolve) => {
-          if (abandon.aborted) return resolve(ABANDONED)
+          if (abandon.aborted) {
+            resolve(ABANDONED)
+            return
+          }
           abandon.addEventListener("abort", () => resolve(ABANDONED), { once: true })
         })
   try {

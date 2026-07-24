@@ -108,6 +108,64 @@ describe("Process", () => {
     )
   })
 
+  it("reports the spawned child PID before awaiting its exit", async () => {
+    const exited = Promise.withResolvers<number>()
+    const events: string[] = []
+    const spawn: Spawn = () => {
+      events.push("spawn")
+      return {
+        pid: 4242,
+        stdout: bytes(""),
+        stderr: bytes(""),
+        exited: exited.promise,
+        signalCode: null,
+        kill() {},
+      }
+    }
+    await using process = createProcess({ inject: { spawn } })
+
+    const running = process.run({
+      argv: ["worker"],
+      onStart(pid) {
+        events.push(`start:${pid}`)
+      },
+    })
+    try {
+      await vi.waitFor(() => expect(events).toEqual(["spawn", "start:4242"]))
+    } finally {
+      exited.resolve(0)
+    }
+
+    await expect(running).resolves.toMatchObject({ exitCode: 0 })
+  })
+
+  it("settles the child before propagating an onStart observer failure", async () => {
+    const exited = Promise.withResolvers<number>()
+    const kills: NodeJS.Signals[] = []
+    const spawn: Spawn = () => ({
+      pid: 4242,
+      stdout: bytes(""),
+      stderr: bytes(""),
+      exited: exited.promise,
+      signalCode: "SIGTERM",
+      kill(signal = "SIGTERM") {
+        kills.push(signal as NodeJS.Signals)
+        exited.resolve(143)
+      },
+    })
+    await using process = createProcess({ inject: { spawn } })
+
+    await expect(
+      process.run({
+        argv: ["worker"],
+        onStart() {
+          throw new Error("observer failed")
+        },
+      }),
+    ).rejects.toThrow("observer failed")
+    expect(kills).toEqual(["SIGTERM"])
+  })
+
   it("owns timeout and cancellation through its Scope", async () => {
     await using process = createProcess({ env: { PATH: Bun.env.PATH } })
     const result = await process.run({ argv: shellCommand("sleep 10"), timeoutMs: 10 })

@@ -196,8 +196,13 @@ bun yrd pr runs PR1
 # Installed alias for `yrd bay open example`:
 git bay open example
 
-# One foreground child, bracketed by a pushed draft and synchronous cleanup:
-yrd bay run @tracker/fix-release -- vi README.md
+# One foreground child, bracketed by a pushed draft and synchronous cleanup
+# (`yrd bay run` is the equivalent projection):
+yrd run @tracker/fix-release -- vi README.md
+
+# One guest in the owner's existing Bay; from inside that Bay, omit the selector:
+yrd run --exec fix-release -- ag
+yrd sh --exec
 ```
 
 Installed binaries are `yrd`, `git-yrd`, and `git-bay`. Git resolves
@@ -209,6 +214,14 @@ the Bay before returning. A non-zero or abnormal child leaves the workspace
 open and records a durable `orphan` fact visible through `yrd bay list --json`.
 Dirty submodules are never guessed into a publication: checkpointing fails
 loudly and preserves the Bay.
+
+`run --exec` attaches a guest process without opening, checkpointing, closing,
+or otherwise taking ownership of the Bay lifecycle. Its live address is
+`<bay-or-explicit-name>:<child-pid>`; Yrd prints that address and exports the
+same value as `HAB_NAME`. `--name @issue/helper` supplies an explicit
+subpersona. With no command, `run` and `run --exec` use `$SHELL`; `yrd sh` is
+that spelling directly, while `yrd ag` runs `ag`. Both aliases accept
+`--exec`.
 
 ## Execution records
 
@@ -274,6 +287,8 @@ The top-level surface is deliberately small:
 
 ```text
 yrd                         dashboard across queues, PRs, and recent outcomes
+yrd run                    own a Bay lifecycle; --exec attaches a PID-addressed guest
+yrd sh / yrd ag            $SHELL and ag aliases for run; both compose with --exec
 yrd pr                      list PRs; create, submit, view, runs, diff, checkout,
                             status, edit, checks, regression, close, and merge teaching
 yrd bay                     list bays; run, open, path, refresh, submit, and close
@@ -290,7 +305,10 @@ yrd prime                   agent briefing plus current delivery context
 
 ```text
 yrd bay list [--json]
-yrd bay run <claim> -- <command...>
+yrd run [--exec] [<claim-or-selector>] [-- <command...>]
+yrd bay run [--exec] [<claim-or-selector>] [-- <command...>]
+yrd sh [--exec] [<claim-or-selector>]
+yrd ag [--exec] [<claim-or-selector>]
 yrd bay open <name> [--from <branch>] [--base <branch>]
   [--issue <ref>] [--actor <id>] [--json]
 yrd bay path <selector> [--json]
@@ -305,14 +323,14 @@ The same commands are available through the standalone `git bay` projection.
 submission core as `pr submit`; `bay submit` remains a handoff, while new
 callers use the PR-native check-admission surface below.
 
-| Command   | Input                                                 | Output and state                                                                      |
-| --------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `list`    | None                                                  | Lists every Bay, including durable failure and orphan facts                           |
-| `run`     | Claim plus exact child argv                           | Brackets the child with a pushed draft, checkpoint, and synchronous close-or-orphan   |
-| `open`    | New bay name; optional source, base, issue, and actor | Prints the worktree path; creates and provisions a named bay                          |
-| `path`    | One Bay ID, name, or branch selector                  | Prints the exact absolute path of one active Bay; read-only and never refreshes it    |
-| `refresh` | Zero or more bays                                     | Refreshes Git head, base, dirty, path, and workspace status                           |
-| `submit`  | Bays, PRs, or source branches                         | Creates or advances PRs to `submitted`; never executes Queue work                     |
+| Command   | Input                                                 | Output and state                                                                        |
+| --------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `list`    | None                                                  | Lists every Bay, including durable failure and orphan facts                             |
+| `run`     | Claim/selector plus exact argv; optional `--exec`     | Owns the bracket, or attaches a PID-addressed guest without taking its lifecycle        |
+| `open`    | New bay name; optional source, base, issue, and actor | Prints the worktree path; creates and provisions a named bay                            |
+| `path`    | One Bay ID, name, or branch selector                  | Prints the exact absolute path of one active Bay; read-only and never refreshes it      |
+| `refresh` | Zero or more bays                                     | Refreshes Git head, base, dirty, path, and workspace status                             |
+| `submit`  | Bays, PRs, or source branches                         | Creates or advances PRs to `submitted`; never executes Queue work                       |
 | `close`   | Zero or more bays                                     | Deprovisions clean terminal bays; `--withdraw` explicitly cancels an associated live PR |
 
 Submodule repositories are ready when `bay open` returns. Yrd recursively
