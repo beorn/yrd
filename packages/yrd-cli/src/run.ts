@@ -178,7 +178,9 @@ export async function runQueueGit(
 
 async function gitAsync(cwd: string, args: readonly string[]): Promise<string> {
   await using process = createProcess()
-  return runQueueGit(process, cwd, args)
+  // `await` is load-bearing: returning the promise would dispose the process
+  // before its Git child settles, turning every focused diff into git-error.
+  return await runQueueGit(process, cwd, args)
 }
 
 function queueGitDir(cwd: string): string | undefined {
