@@ -197,7 +197,7 @@ bun yrd pr runs PR1
 git bay open example
 
 # One foreground child, bracketed by a pushed draft and synchronous cleanup:
-yrd bay run @tracker/fix-release -- "$EDITOR" README.md
+yrd bay run @tracker/fix-release -- vi README.md
 ```
 
 Installed binaries are `yrd`, `git-yrd`, and `git-bay`. Git resolves
