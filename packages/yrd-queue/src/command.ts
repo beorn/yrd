@@ -3871,7 +3871,7 @@ async function authoritativeQueueBase(
         repo,
         refreshRemoteBranches.length === 0
           ? ["fetch", "--no-recurse-submodules", "--quiet", "origin", `+${source}:${target}`]
-          : ["fetch", "--no-recurse-submodules", "--quiet", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"],
+          : ["fetch", "--no-recurse-submodules", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*"],
         true,
       )
       if (fetched.code === 0) return inspectQueueBase(git, repo, branch)
@@ -3998,8 +3998,8 @@ export async function resolveGitQueueTarget(options: {
   branch: string
   env?: NodeJS.ProcessEnv
   /** Refresh these sibling remote branches in the same authoritative fetch.
-   * The multi-ref path prunes tracking refs so an absent branch is a fresh
-   * negative fact rather than a stale local carrier. */
+   * Deleted remote branches deliberately retain their last tracking head:
+   * live drafts may recover from that durable carrier and republish it. */
   refreshRemoteBranches?: readonly string[]
 }): Promise<GitQueueTarget> {
   const repo = resolve(options.repo)
