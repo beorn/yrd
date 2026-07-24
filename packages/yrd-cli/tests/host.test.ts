@@ -867,6 +867,7 @@ notify:
       // Read-only surfaces never record or route a submitter. They must not
       // require TRIBE_NAME merely because a notification route names one.
       const reads: readonly (readonly string[])[] = [
+        ["log", "--json"],
         ["pr", "view", "PR1", "--json"],
         ["pr", "runs", "PR1", "--json"],
         ["pr", "diff", "PR1", "--json"],
