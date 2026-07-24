@@ -301,6 +301,13 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
             git.run(repo, ["rev-parse", "--verify", `${localRef}^{commit}`], true),
             git.run(repo, ["rev-parse", "--verify", `${remoteRef}^{commit}`], true),
           ])
+          const trackedHead = tracking.code === 0 ? tracking.stdout.trim() : undefined
+          if (input.remoteBranch !== undefined && trackedHead !== input.remoteBranch.headSha) {
+            throw new Error(
+              `remote-tracking branch '${input.branch}' changed after its authority snapshot; ` +
+                "retry Bay provisioning against one fresh queue/branch snapshot",
+            )
+          }
           const remoteHead =
             input.issue === undefined
               ? undefined
