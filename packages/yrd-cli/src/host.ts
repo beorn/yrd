@@ -14,6 +14,7 @@ import {
   withBays,
   type BayWorkspace,
   type GitPushReceiver,
+  type RemoteBranchSnapshot,
   type ReceiverReceipt,
   type ReceiverTarget,
 } from "@yrd/bay"
@@ -563,17 +564,33 @@ async function resolveQueueTarget(
   repo: string,
   configuredBase: string,
   requestedBase: string,
-  options: Readonly<{ refreshAuthority?: boolean }> = {},
-): Promise<Readonly<{ base: string; sha: string }>> {
+  options: Readonly<{ refreshAuthority?: boolean; remoteBranch?: string }> = {},
+): Promise<Readonly<{ base: string; sha: string; remoteBranch?: RemoteBranchSnapshot }>> {
   const configured = baseIdentity(configuredBase)
   const requested = baseIdentity(requestedBase)
   const base = requested === configured ? configured : requested
   if (requestedBase !== base && (await resolveCommit(process, repo, requestedBase)) === undefined) {
     throw new Error(`yrd: queue base '${requestedBase}' does not resolve`)
   }
-  const inspect = options.refreshAuthority === true ? resolveGitQueueTarget : inspectGitQueueTarget
-  const target = await inspect({ inject: { process }, repo, branch: base })
-  return { base, sha: target.sha }
+  const target =
+    options.refreshAuthority === true
+      ? await resolveGitQueueTarget({
+          inject: { process },
+          repo,
+          branch: base,
+          ...(options.remoteBranch === undefined ? {} : { refreshRemoteBranches: [options.remoteBranch] }),
+        })
+      : await inspectGitQueueTarget({ inject: { process }, repo, branch: base })
+  if (options.remoteBranch === undefined || target.remote !== "origin") return { base, sha: target.sha }
+  const headSha = await resolveCommit(process, repo, `refs/remotes/origin/${options.remoteBranch}`)
+  return {
+    base,
+    sha: target.sha,
+    remoteBranch: {
+      branch: options.remoteBranch,
+      ...(headSha === undefined ? {} : { headSha }),
+    },
+  }
 }
 
 function localContestGit(process: Pick<Process, "run">, repo: string): ContestGit {
@@ -714,11 +731,16 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
       jobs: bayJobs,
       defaultBase: baseIdentity(options.config.base),
       ...(options.defaultActor === undefined ? {} : { defaultActor: options.defaultActor }),
-      resolveBase: async (base) => {
+      resolveBase: async (base, context) => {
         const target = await resolveQueueTarget(options.process, options.repo, options.config.base, base, {
           refreshAuthority: true,
+          ...(context?.branch === undefined ? {} : { remoteBranch: context.branch }),
         })
-        return { base: target.base, baseSha: target.sha }
+        return {
+          base: target.base,
+          baseSha: target.sha,
+          ...(target.remoteBranch === undefined ? {} : { remoteBranch: target.remoteBranch }),
+        }
       },
       ...(flowConfig === undefined
         ? {}

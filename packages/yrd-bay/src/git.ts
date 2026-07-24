@@ -292,11 +292,21 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
         if (input.from === undefined) {
           const localRef = `refs/heads/${input.branch}`
           const remoteRef = `refs/remotes/origin/${input.branch}`
+          if (input.remoteBranch !== undefined && input.remoteBranch.branch !== input.branch) {
+            throw new Error(
+              `remote branch snapshot '${input.remoteBranch.branch}' does not match Bay branch '${input.branch}'`,
+            )
+          }
           const [local, tracking] = await Promise.all([
             git.run(repo, ["rev-parse", "--verify", `${localRef}^{commit}`], true),
             git.run(repo, ["rev-parse", "--verify", `${remoteRef}^{commit}`], true),
           ])
-          const remoteHead = input.issue === undefined ? undefined : await remoteBranchHead(git, repo, input.branch)
+          const remoteHead =
+            input.issue === undefined
+              ? undefined
+              : input.remoteBranch === undefined
+                ? await remoteBranchHead(git, repo, input.branch)
+                : input.remoteBranch.headSha
           const remoteExists = remoteHead !== undefined
           const decision = decideBranchProvision({
             claim: input.issue !== undefined,
@@ -317,7 +327,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
                 "restore the draft PR head before rerunning bay run",
             )
           }
-          if (decision.carrier === "remote") {
+          if (decision.carrier === "remote" && input.remoteBranch === undefined) {
             await git.run(repo, [
               "fetch",
               "--no-recurse-submodules",

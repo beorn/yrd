@@ -588,6 +588,14 @@ export type BaysState = Readonly<{
   >
 }>
 
+export const RemoteBranchSnapshotSchema = z
+  .object({
+    branch: GitRefSchema,
+    headSha: GitShaSchema.optional(),
+  })
+  .strict()
+export type RemoteBranchSnapshot = z.infer<typeof RemoteBranchSnapshotSchema>
+
 export const ProvisionBayInputSchema = z
   .object({
     bay: BayIdSchema,
@@ -598,6 +606,7 @@ export const ProvisionBayInputSchema = z
     from: GitRefSchema.optional(),
     issue: z.string().trim().min(1).optional(),
     reuseBranch: z.boolean().optional(),
+    remoteBranch: RemoteBranchSnapshotSchema.optional(),
   })
   .strict()
 export type ProvisionBayInput = z.infer<typeof ProvisionBayInputSchema>

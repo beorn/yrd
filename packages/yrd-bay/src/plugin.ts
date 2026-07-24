@@ -47,6 +47,7 @@ import {
   ProvisionedBaySchema,
   RefreshBayInputSchema,
   RefreshedBaySchema,
+  RemoteBranchSnapshotSchema,
   baseIdentity,
   defaultBayBranch,
   checksRequested,
@@ -91,6 +92,7 @@ import {
   type ProvisionedBay,
   type RefreshBayInput,
   type RefreshedBay,
+  type RemoteBranchSnapshot,
 } from "./model.ts"
 
 const TextSchema = z.string().trim().min(1)
@@ -112,6 +114,7 @@ const OpenBayArgsSchema = z
     from: GitRefSchema.optional(),
     base: GitRefSchema.optional(),
     baseSha: GitShaSchema.optional(),
+    remoteBranch: RemoteBranchSnapshotSchema.optional(),
   })
   .strict()
 export type OpenBayArgs = z.infer<typeof OpenBayArgsSchema>
@@ -611,8 +614,13 @@ type BayActions = Pick<
   | "recordRegression"
 >
 
-export type BayBaseTarget = Readonly<{ base: string; baseSha?: string }>
-export type ResolveBayBase = (base: string) => BayBaseTarget | Promise<BayBaseTarget>
+export type BayBaseTarget = Readonly<{
+  base: string
+  baseSha?: string
+  remoteBranch?: RemoteBranchSnapshot
+}>
+export type ResolveBayBaseContext = Readonly<{ branch?: string }>
+export type ResolveBayBase = (base: string, context?: ResolveBayBaseContext) => BayBaseTarget | Promise<BayBaseTarget>
 
 export function createBays(
   state: ReadSignal<DeepReadonly<BaysState>>,
@@ -637,13 +645,24 @@ export function createBays(
     }
   }
 
-  const target = async (base: string | undefined, baseSha: string | undefined): Promise<BayBaseTarget> => {
+  const target = async (
+    base: string | undefined,
+    baseSha: string | undefined,
+    branch?: string,
+  ): Promise<BayBaseTarget> => {
     const requested = base ?? options.defaultBase
     const selected =
       options.resolveBase === undefined
         ? { base: requested, ...(baseSha === undefined ? {} : { baseSha }) }
-        : await options.resolveBase(requested)
+        : await options.resolveBase(requested, branch === undefined ? undefined : { branch })
     const resolved = { ...selected, base: baseIdentity(selected.base) }
+    if (resolved.remoteBranch !== undefined && resolved.remoteBranch.branch !== branch) {
+      raiseFailure(
+        "infrastructure",
+        "bay-branch-authority-mismatch",
+        `yrd: Bay branch authority resolved '${resolved.remoteBranch.branch}', expected '${branch ?? "none"}'`,
+      )
+    }
     if (baseSha !== undefined && resolved.baseSha !== undefined && baseSha !== resolved.baseSha) {
       raiseFailure(
         "refusal",
@@ -655,7 +674,12 @@ export function createBays(
   }
 
   const open = async (args: OpenBayArgs): Promise<CommandResult> => {
-    const resolved = await target(args.base, args.baseSha)
+    const branch = args.branch ?? args.from ?? defaultBayBranch(args.name)
+    const resolved = await target(
+      args.base,
+      args.baseSha,
+      args.issue === undefined || args.from !== undefined ? undefined : branch,
+    )
     return actions.open({ ...args, ...resolved })
   }
   const intake = async (args: IntakePRArgs): Promise<CommandResult> => {
@@ -1321,6 +1345,7 @@ function openBay(
         ...(args.from === undefined ? {} : { from: args.from }),
         ...(args.issue === undefined ? {} : { issue: args.issue }),
         ...(reuseClaimBranch ? { reuseBranch: true } : {}),
+        ...(args.remoteBranch === undefined ? {} : { remoteBranch: args.remoteBranch }),
       }),
     ],
   }

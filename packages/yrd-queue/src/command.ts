@@ -4107,17 +4107,27 @@ async function sourceCandidateRefError(
   return undefined
 }
 
-async function authoritativeQueueBase(git: Git, repo: string, branch: string): Promise<GitQueueTarget> {
+async function authoritativeQueueBase(
+  git: Git,
+  repo: string,
+  branch: string,
+  refreshRemoteBranches: readonly string[] = [],
+): Promise<GitQueueTarget> {
   const remote = await git.run(repo, ["config", "--get", "remote.origin.url"], true)
   if (remote.code !== 0 || remote.stdout === "") return inspectQueueBase(git, repo, branch)
   const source = `refs/heads/${branch}`
   const target = `refs/remotes/origin/${branch}`
+  for (const additional of refreshRemoteBranches) {
+    await git.run(repo, ["check-ref-format", "--branch", additional])
+  }
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     let detail: string
     try {
       const fetched = await git.run(
         repo,
-        ["fetch", "--no-recurse-submodules", "--quiet", "origin", `+${source}:${target}`],
+        refreshRemoteBranches.length === 0
+          ? ["fetch", "--no-recurse-submodules", "--quiet", "origin", `+${source}:${target}`]
+          : ["fetch", "--no-recurse-submodules", "--quiet", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"],
         true,
       )
       if (fetched.code === 0) return await inspectQueueBase(git, repo, branch)
@@ -4243,9 +4253,18 @@ export async function resolveGitQueueTarget(options: {
   repo: string
   branch: string
   env?: NodeJS.ProcessEnv
+  /** Refresh these sibling remote branches in the same authoritative fetch.
+   * The multi-ref path prunes tracking refs so an absent branch is a fresh
+   * negative fact rather than a stale local carrier. */
+  refreshRemoteBranches?: readonly string[]
 }): Promise<GitQueueTarget> {
   const repo = resolve(options.repo)
-  return authoritativeQueueBase(createGit(options.inject.process, options.env), repo, options.branch)
+  return authoritativeQueueBase(
+    createGit(options.inject.process, options.env),
+    repo,
+    options.branch,
+    options.refreshRemoteBranches,
+  )
 }
 
 async function landingError(

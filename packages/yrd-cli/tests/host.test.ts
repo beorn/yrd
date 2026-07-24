@@ -486,6 +486,123 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
   })
 
+  it("coalesces Bay base refresh and prunes stale live-branch authority", async () => {
+    const { repo, featureSha } = await repository()
+    const remote = join(repo, "..", "origin.git")
+    await git(repo, "init", "-q", "--bare", remote)
+    await git(repo, "remote", "add", "origin", remote)
+    await git(repo, "push", "-q", "origin", "main", "issue/feature")
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check"],
+      requires: [],
+      definitions: { check: { run: "true", runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    const commands: string[][] = []
+    await using runtimeProcess = createProcess({ cwd: repo })
+    const tracedProcess = {
+      run: async (request: Parameters<typeof runtimeProcess.run>[0]) => {
+        commands.push([...request.argv])
+        return runtimeProcess.run(request)
+      },
+    }
+    await using app = await createDefaultYrdApp({
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal: createMemoryJournal(),
+      process: tracedProcess,
+      config,
+    })
+    await app.bays.submit({
+      branch: "issue/feature",
+      headSha: featureSha,
+      base: "main",
+      issue: "@issue/feature",
+      draft: true,
+    })
+    commands.length = 0
+
+    const opened = await app.bays.open({
+      name: "feature",
+      branch: "issue/feature",
+      issue: "@issue/feature",
+    })
+    const jobs = await app.jobs.runMany(app.jobs.requested(opened), { runner: "test", leaseMs: 60_000 })
+
+    expect(jobs.every((job) => job.status === "passed")).toBe(true)
+    const remoteCommands = () =>
+      commands.filter(
+        (argv) =>
+          argv[0] === "git" && argv[1] === "-C" && argv[2] === repo && (argv[3] === "fetch" || argv[3] === "ls-remote"),
+      )
+    expect(remoteCommands()).toEqual([
+      expect.arrayContaining([
+        "git",
+        "-C",
+        repo,
+        "fetch",
+        "--no-recurse-submodules",
+        "--quiet",
+        "--prune",
+        "origin",
+        "+refs/heads/*:refs/remotes/origin/*",
+      ]),
+    ])
+    expect(await git(repo, "rev-parse", "refs/remotes/origin/issue/feature")).toBe(featureSha)
+
+    await git(repo, "switch", "-qc", "issue/stale")
+    await writeFile(join(repo, "stale.txt"), "stale\n")
+    await git(repo, "add", "stale.txt")
+    await git(repo, "commit", "-qm", "stale feature")
+    const staleSha = await git(repo, "rev-parse", "HEAD")
+    await git(repo, "switch", "-q", "main")
+    await git(repo, "push", "-q", "origin", "issue/stale")
+    await app.bays.submit({
+      branch: "issue/stale",
+      headSha: staleSha,
+      base: "main",
+      issue: "@issue/stale",
+      draft: true,
+    })
+    await git(repo, "push", "-q", "origin", "--delete", "issue/stale")
+    await git(repo, "update-ref", "refs/remotes/origin/issue/stale", staleSha)
+    commands.length = 0
+
+    const stale = await app.bays.open({
+      name: "stale",
+      branch: "issue/stale",
+      issue: "@issue/stale",
+    })
+    const staleJobs = await app.jobs.runMany(app.jobs.requested(stale), { runner: "test", leaseMs: 60_000 })
+
+    expect(staleJobs).toEqual([
+      expect.objectContaining({
+        status: "failed",
+        error: expect.objectContaining({
+          code: "provision-failed",
+          message: expect.stringContaining("has no remote or tracking carrier"),
+        }),
+      }),
+    ])
+    expect(remoteCommands()).toEqual([
+      expect.arrayContaining([
+        "git",
+        "-C",
+        repo,
+        "fetch",
+        "--no-recurse-submodules",
+        "--quiet",
+        "--prune",
+        "origin",
+        "+refs/heads/*:refs/remotes/origin/*",
+      ]),
+    ])
+    expect(await git(repo, "for-each-ref", "--format=%(refname)", "refs/remotes/origin/issue/stale")).toBe("")
+  })
+
   it("adds one queue-authority fetch per same-base cycle instead of one per PR", async () => {
     const { repo, featureSha } = await repository()
     const addFeature = async (branch: string, file: string): Promise<string> => {
