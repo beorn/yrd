@@ -744,8 +744,8 @@ export function createBays(
       options.composition === undefined ? undefined : CompositionV1Schema.parse(options.composition)
     let snapshot = state()
     const resolved = resolvePRMatch(snapshot, selector)
-    let pr = resolved?.value
     const selectedBay = resolveBay(snapshot, selector)
+    let pr = resolved?.value ?? (selectedBay === undefined ? undefined : resolvePR(snapshot, selectedBay.branch))
     // A closed Bay is archive evidence, not permanent ownership of its branch
     // alias. Addressing that branch again must use the direct-branch delivery
     // path; canonical Bay id/name selectors still resolve the closed Bay and
@@ -801,7 +801,7 @@ export function createBays(
       if (bay.headSha === undefined) {
         raiseFailure("refusal", "bay-head-missing", `yrd: bay '${bay.id}' has no committed head to submit`)
       }
-      pr = prForBay(snapshot, bay.id)
+      pr = prForBay(snapshot, bay.id) ?? resolvePR(snapshot, bay.branch)
       const composition = requestedComposition ?? pr?.composition
       if (pr === undefined || pr.headSha !== bay.headSha || !sameComposition(composition, pr.composition)) {
         await intake({
@@ -1301,7 +1301,9 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
   if (bay !== undefined && bay.status !== "active") throw new Error(`yrd: bay '${bay.id}' is ${bay.status}, not active`)
   const branch = args.branch ?? bay?.branch
   if (branch === undefined) throw new Error("yrd: bay.intake: 'bay' or 'branch' is required")
-  const existing = bay === undefined ? resolvePR(current, branch) : prForBay(current, bay.id)
+  const associated = bay === undefined ? undefined : prForBay(current, bay.id)
+  const branchPR = resolvePR(current, branch)
+  const existing = associated ?? (branchPR !== undefined && isLivePR(branchPR.status) ? branchPR : undefined)
   // An omitted receiver base belongs to the recorded PR before the process
   // default. Otherwise replaying an unchanged needs-author PR against a
   // non-default base silently looks like a new authored revision.
@@ -1935,7 +1937,7 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
     throw new Error(`yrd: bay '${bay.id}' is ${bay.status}; wait for its workspace job`)
   }
   if (bay.status === "closed") throw new Error(`yrd: bay '${bay.id}' is already closed`)
-  const pr = prForBay(current, bay.id)
+  const pr = prForBay(current, bay.id) ?? resolvePR(current, bay.branch)
   if (pr !== undefined && pr.status !== "pushed" && isLivePR(pr.status) && args.withdraw !== true) {
     throw new Error(`yrd: PR '${pr.id}' is ${pr.status}; run it through the queue or withdraw it before closing`)
   }
@@ -2113,6 +2115,8 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
             }
           : {
               ...existing,
+              ...(pushed.bay === undefined ? {} : { bay: pushed.bay }),
+              ...(pushed.name === undefined ? {} : { name: pushed.name }),
               ...(pushed.issue === undefined ? {} : { issue: pushed.issue }),
               base,
               status: "pushed",

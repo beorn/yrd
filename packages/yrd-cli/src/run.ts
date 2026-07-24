@@ -1361,7 +1361,13 @@ async function runBay(
     branch: identity.branch,
   })
   assertJobsPassed(await runJobs(app, app.jobs.requested(opened), io), `bay '${identity.name}' provision`)
-  let bay = app.bays.get(identity.name)
+  const active = app.bays
+    .list()
+    .filter(
+      (candidate) =>
+        candidate.status === "active" && candidate.branch === identity.branch && candidate.issue === identity.claim,
+    )
+  let bay = active.length === 1 ? active[0] : undefined
   if (bay?.path === undefined || bay.status !== "active") {
     refusal(`bay '${identity.name}' did not become active`)
   }
@@ -1371,20 +1377,20 @@ async function runBay(
   bay = await checkpointRunBay(app, bay, identity.claim, io)
   await draftRunBay(app, bay, identity.claim, io)
 
-  const output = childOutput(io)
+  const output = io.interactive === true ? undefined : childOutput(io)
   let child: ProcessResult
   try {
     child = await services.process.run({
       argv,
       cwd: bay.path,
-      onOutput: output.write,
+      ...(output === undefined ? { interactive: true } : { onOutput: output.write }),
     })
   } catch (error) {
-    output.flush()
+    output?.flush()
     await orphanRunBay(app, bay, `child could not settle: ${errorDetail(error)}`)
     throw error
   }
-  output.flush()
+  output?.flush()
 
   const succeeded =
     child.exitCode === 0 &&

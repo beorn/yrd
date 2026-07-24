@@ -3084,6 +3084,21 @@ describe("runYrd", () => {
     expect(app.state().bays.byId.B1?.status).toBe("closed")
   })
 
+  it("closes a draft-backed Bay without withdrawing its PR", async () => {
+    const app = await createApp()
+    const open = outputIO()
+    expect(await runYrd(app, yrd("bay", "open", "draft-close"), open.io), open.stderr()).toBe(0)
+
+    const create = outputIO({ cwd: "/repo/.bays/B1" })
+    expect(await runYrd(app, yrd("pr", "create"), create.io), create.stderr()).toBe(0)
+    expect(app.bays.pr("PR1")).toMatchObject({ status: "pushed", bay: "B1" })
+
+    const close = outputIO({ cwd: "/repo/.bays/B1" })
+    expect(await runYrd(app, yrd("bay", "close"), close.io), close.stderr()).toBe(0)
+    expect(app.bays.get("B1")?.status).toBe("closed")
+    expect(app.bays.pr("PR1")?.status).toBe("pushed")
+  })
+
   it("certifies exact-head handoff readiness and exposes the shared lifecycle projection", async () => {
     const app = await createApp()
     const open = outputIO()

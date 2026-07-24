@@ -177,12 +177,14 @@ $ yrd pr checks PR2 --follow
 
 `pr create` records the existing `pushed` state: no submission, check request,
 admission, or Queue work is started until `pr ready` (ordinary reviewed work)
-or `pr recut --queue` (authored-root carriers). Yrd is local-only and never
-pushes a Git branch; callers that require remote reachability push first, then
-create the draft from that exact resolvable commit. Review and comment facts pin
-the current revision and head SHA; a new head makes old verdicts visibly stale.
-Reviewer assignment and richer policy belong to the calling coordination
-system.
+or `pr recut --queue` (authored-root carriers). `pr create` does not push a Git
+branch; callers push first, then create the draft from that exact resolvable
+commit. The explicit bracketed exception is `bay run`: it creates or reuses
+`task/<claim-slug>`, pushes a checkpoint and records the draft before the child
+starts, then synchronously checkpoints and closes on success. Review and comment
+facts pin the current revision and head SHA; a new head makes old verdicts
+visibly stale. Reviewer assignment and richer policy belong to the calling
+coordination system.
 
 During development in this repository:
 
@@ -193,10 +195,20 @@ bun yrd pr runs PR1
 
 # Installed alias for `yrd bay open example`:
 git bay open example
+
+# One foreground child, bracketed by a pushed draft and synchronous cleanup:
+yrd bay run @tracker/fix-release -- "$EDITOR" README.md
 ```
 
 Installed binaries are `yrd`, `git-yrd`, and `git-bay`. Git resolves
 `git bay ...` through `git-bay` automatically.
+
+On a clean child exit, `bay run` commits root-worktree changes as
+`wip: <claim>`, pushes the same task branch, refreshes its draft, and removes
+the Bay before returning. A non-zero or abnormal child leaves the workspace
+open and records a durable `orphan` fact visible through `yrd bay list --json`.
+Dirty submodules are never guessed into a publication: checkpointing fails
+loudly and preserves the Bay.
 
 ## Execution records
 

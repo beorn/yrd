@@ -50,6 +50,32 @@ describe("Process", () => {
     await expect(process.run({ argv: "printf unsafe" as never })).rejects.toThrow("argv")
   })
 
+  it("inherits terminal stdio without detaching interactive children", async () => {
+    let observed: Parameters<Spawn>[1] | undefined
+    const spawn: Spawn = (_argv, options) => {
+      observed = options
+      return {
+        pid: 4242,
+        stdout: bytes(""),
+        stderr: bytes(""),
+        exited: Promise.resolve(0),
+        signalCode: null,
+        kill() {},
+      }
+    }
+    await using process = createProcess({ inject: { spawn } })
+
+    const result = await process.run({ argv: ["editor"], interactive: true })
+
+    expect(observed).toMatchObject({
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
+      detached: false,
+    })
+    expect(result).toMatchObject({ exitCode: 0, stdout: "", stderr: "" })
+  })
+
   it("owns timeout and cancellation through its Scope", async () => {
     await using process = createProcess({ env: { PATH: Bun.env.PATH } })
     const result = await process.run({ argv: shellCommand("sleep 10"), timeoutMs: 10 })

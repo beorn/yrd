@@ -1217,6 +1217,7 @@ function defaultIO(): YrdCliIO {
   const io: YrdCliIO = {
     stdout: (text) => process.stdout.write(text),
     stderr: (text) => process.stderr.write(text),
+    interactive,
     stderrIsTTY,
     clearStderrLine: () => {
       const positioned = cursorTo(process.stderr, 0)

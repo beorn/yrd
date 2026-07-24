@@ -74,6 +74,8 @@ export type PruneGitFacts = Readonly<{
 export type YrdCliIO = {
   stdout(text: string): void
   stderr(text: string): void
+  /** Whether stdin/stdout are the invoking foreground terminal. */
+  interactive?: boolean
   /** Whether stderr is an interactive terminal suitable for human-only output. */
   stderrIsTTY?: boolean
   /** Clear the current stderr terminal row without exposing terminal escapes to the CLI. */

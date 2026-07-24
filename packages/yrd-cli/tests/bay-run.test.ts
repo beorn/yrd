@@ -71,6 +71,25 @@ describe("yrd bay run", { timeout: 30_000 }, () => {
     expect(await git(repo, "worktree", "list", "--porcelain")).not.toContain(`${repo}/.bays/`)
   })
 
+  it("reopens a closed claim and updates the same draft on a later run", async () => {
+    const { repo } = await repository()
+    const clean = output(repo)
+    expect(await yrd(repo, clean.io, "bay", "run", CLAIM, "--", "true"), clean.stderr()).toBe(0)
+
+    const dirty = output(repo)
+    expect(
+      await yrd(repo, dirty.io, "bay", "run", CLAIM, "--", "sh", "-c", "printf later > later.txt"),
+      dirty.stderr(),
+    ).toBe(0)
+
+    expect(await git(repo, "log", `refs/remotes/origin/${BRANCH}`, "-1", "--format=%s")).toMatch(/^wip:/u)
+    const prs = output(repo)
+    expect(await yrd(repo, prs.io, "pr", "list", "--issue", CLAIM, "--json"), prs.stderr()).toBe(0)
+    expect(JSON.parse(prs.stdout())).toMatchObject({
+      prs: [{ branch: BRANCH, issue: CLAIM, status: "pushed", revision: 2 }],
+    })
+  })
+
   it("preserves and durably flags a failed child's Bay instead of closing it", async () => {
     const { repo } = await repository()
     const run = output(repo)

@@ -358,7 +358,16 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       batchSize: 1,
       defaultSteps: ["security", "merge", "publish"],
     })
-    expect(Object.keys(app.commands.bay)).toEqual(["open", "refresh", "intake", "submit", "close"])
+    expect(Object.keys(app.commands.bay)).toEqual([
+      "open",
+      "refresh",
+      "checkpoint",
+      "orphan",
+      "certifyHandoff",
+      "intake",
+      "submit",
+      "close",
+    ])
     expect(Object.keys(app.commands.pr)).toEqual([
       "close",
       "edit",

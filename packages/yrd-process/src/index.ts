@@ -6,6 +6,10 @@ export type ProcessRequest = Readonly<{
   cwd?: string
   env?: NodeJS.ProcessEnv
   stdin?: string | Uint8Array
+  /** Attach the child directly to the invoking terminal. Interactive runs
+   * inherit stdin/stdout/stderr and stay in the foreground process group so
+   * editors and agent harnesses receive ordinary terminal input. */
+  interactive?: boolean
   onOutput?: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => void
   timeoutMs?: number
   /** Explicit inter-output silence lease. It starts with the first observed
@@ -76,20 +80,23 @@ export function shellCommand(script: string): readonly ["sh", "-c", string] {
   return Object.freeze(["sh", "-c", script])
 }
 
-type SpawnOptions = Readonly<{
-  cwd: string
-  env: Record<string, string>
-  stdin: "ignore" | Blob
-  stdout: "pipe"
-  stderr: "pipe"
-  signal: AbortSignal
-}>
+type SpawnOptions = Readonly<
+  {
+    cwd: string
+    env: Record<string, string>
+    signal: AbortSignal
+    detached: boolean
+  } & (
+    | Readonly<{ stdin: "ignore" | Blob; stdout: "pipe"; stderr: "pipe" }>
+    | Readonly<{ stdin: "inherit"; stdout: "inherit"; stderr: "inherit" }>
+  )
+>
 
 type Spawned = Readonly<{
   /** Child pid — the process-GROUP id when the spawn established leadership. */
   pid: number
-  stdout: ReadableStream<Uint8Array>
-  stderr: ReadableStream<Uint8Array>
+  stdout: ReadableStream<Uint8Array> | null
+  stderr: ReadableStream<Uint8Array> | null
   exited: Promise<number>
   signalCode: NodeJS.Signals | null
   kill(signal?: number | NodeJS.Signals): void
@@ -143,11 +150,6 @@ export function createProcess(
   const log = options.inject?.log?.child("process") ?? createLogger("yrd:process")
   const now = options.inject?.now ?? performance.now.bind(performance)
   const spawn = options.inject?.spawn ?? spawnProcess
-  // Group settlement is the DEFAULT spawn's contract (it establishes group
-  // leadership via detached:true). An INJECTED spawn (test seam) gets the
-  // direct-child kill contract only — signalling a real OS group at a fake
-  // pid would strafe unrelated processes.
-  const groupSettlement = options.inject?.spawn === undefined
   const cwd = options.cwd ?? process.cwd()
   const env = definedEnv(options.env ?? process.env)
   const maxOutputBytes = positiveInteger(options.maxOutputBytes ?? 16 * 1024 * 1024, "maxOutputBytes")
@@ -203,6 +205,15 @@ export function createProcess(
       ) {
         throw new RangeError("yrd: Process postExitDrainGraceMs must be a positive integer")
       }
+      if (request.interactive === true && request.stdin !== undefined) {
+        throw new TypeError("yrd: Process interactive runs inherit stdin and cannot provide buffered input")
+      }
+      if (request.interactive === true && request.onOutput !== undefined) {
+        throw new TypeError("yrd: Process interactive runs inherit output and cannot capture onOutput")
+      }
+      if (request.interactive === true && request.noProgressTimeoutMs !== undefined) {
+        throw new TypeError("yrd: Process interactive runs cannot measure piped output progress")
+      }
       const postExitDrainGraceMs = request.postExitDrainGraceMs ?? defaultPostExitDrainGraceMs
 
       // Keep the run scope independent: parent Scope disposal is child-first,
@@ -225,14 +236,34 @@ export function createProcess(
       let cancelDrainGrace: (() => void) | undefined
       using span = log.span?.("run", { argv, cwd: request.cwd ?? cwd })
       try {
-        const child = spawn(argv, {
-          cwd: request.cwd ?? cwd,
-          env: request.env === undefined ? env : definedEnv(request.env),
-          stdin: request.stdin === undefined ? "ignore" : inputBlob(request.stdin),
-          stdout: "pipe",
-          stderr: "pipe",
-          signal,
-        })
+        const interactive = request.interactive === true
+        const child = spawn(
+          argv,
+          interactive
+            ? {
+                cwd: request.cwd ?? cwd,
+                env: request.env === undefined ? env : definedEnv(request.env),
+                stdin: "inherit",
+                stdout: "inherit",
+                stderr: "inherit",
+                signal,
+                detached: false,
+              }
+            : {
+                cwd: request.cwd ?? cwd,
+                env: request.env === undefined ? env : definedEnv(request.env),
+                stdin: request.stdin === undefined ? "ignore" : inputBlob(request.stdin),
+                stdout: "pipe",
+                stderr: "pipe",
+                signal,
+                detached: true,
+              },
+        )
+        // Pipe-mode default children lead a process group so cancellation
+        // settles their full tree. Interactive children must remain in the
+        // invoking foreground group for terminal job control, so their child
+        // harness owns descendant settlement and Yrd signals the direct child.
+        const groupSettlement = !interactive && options.inject?.spawn === undefined
         let terminating = false
         let sweepFailure: string | undefined
         // 21012 S1 — settlement owns the FULL process tree. The default spawn
@@ -331,7 +362,10 @@ export function createProcess(
             terminate()
           }, request.timeoutMs)
         }
-        const capturesDone = Promise.all([capture(child.stdout, "stdout"), capture(child.stderr, "stderr")])
+        const capturesDone =
+          child.stdout === null || child.stderr === null
+            ? Promise.resolve(["", ""] as const)
+            : Promise.all([capture(child.stdout, "stdout"), capture(child.stderr, "stderr")])
 
         // Bind run()'s completion to the DIRECT child's PID exit — NOT to stream
         // close. A descendant that escaped the group sweep can hold the pipe
@@ -493,11 +527,24 @@ async function readBounded(
 }
 
 function spawnProcess(argv: readonly string[], options: SpawnOptions): Spawned {
-  // detached:true = the child becomes its own process-GROUP leader, which is
-  // what lets settlement signal the whole tree via -pid. Bun's NATIVE spawn
-  // honors this (probed + pinned by the bun-canary test); the node:child_process
-  // compat shim ignores it — do not port this file to node:child_process.
-  return Bun.spawn([...argv], { ...options, detached: true })
+  // detached:true in pipe mode makes the child a process-GROUP leader, which
+  // lets settlement signal the whole tree via -pid. Interactive mode passes
+  // detached:false so the child remains attached to terminal job control.
+  // Bun's NATIVE spawn honors this; node:child_process does not.
+  if (options.stdout === "pipe") return Bun.spawn([...argv], options)
+  const child = Bun.spawn([...argv], options)
+  return {
+    pid: child.pid,
+    stdout: null,
+    stderr: null,
+    exited: child.exited,
+    get signalCode() {
+      return child.signalCode
+    },
+    kill(signal) {
+      child.kill(signal)
+    },
+  }
 }
 
 function definedEnv(input: NodeJS.ProcessEnv | undefined): Record<string, string> {
