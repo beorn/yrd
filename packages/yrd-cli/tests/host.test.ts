@@ -1231,6 +1231,8 @@ notify:
       "prime",
       "init",
       "run",
+      "sh",
+      "ag",
     ])
     expect(stdout).not.toMatch(/\b(?:pr\|prs|bay\|bays|issue\|issues|contest\|contests|queue\|queues)\b/u)
     expect(stderr).toBe("")
