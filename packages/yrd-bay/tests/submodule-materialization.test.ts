@@ -63,8 +63,12 @@ describe("materializeSubmodules", () => {
     expect(
       commands
         .filter(({ args }) => args.includes("update"))
-        .map(({ args }) => args.at(-1))
-        .toSorted(),
-    ).toEqual(paths.toSorted())
+        .map(({ args }) => {
+          const path = args.at(-1)
+          if (path === undefined) throw new Error("expected every update to name a submodule path")
+          return path
+        })
+        .toSorted((left, right) => left.localeCompare(right)),
+    ).toEqual(paths.toSorted((left, right) => left.localeCompare(right)))
   })
 })

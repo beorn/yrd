@@ -4460,7 +4460,8 @@ describe("Queue command adapters", () => {
           const result = await process.run(request)
           return {
             ...result,
-            stdout: result.stdout.replace(/(submodule\.[^\n]+\.url\n)[\s\S]*/u, "$1../dep.git"),
+            // oxlint-disable-next-line no-control-regex -- `git config --null` records are NUL-delimited by contract.
+            stdout: result.stdout.replace(/(submodule\.[^\u0000\n]+\.url\n)[^\u0000]*/u, "$1../dep.git"),
           }
         }
         if (request.argv.at(-1) === "remote.origin.url") {

@@ -110,25 +110,25 @@ type Spawned = Readonly<{
 
 export type Spawn = (argv: readonly string[], options: SpawnOptions) => Spawned
 
-const NO_START_OBSERVER_ERROR = Symbol("no-start-observer-error")
+type StartObserverFailure = Readonly<{ error: unknown }> | undefined
 
 function observeProcessStart(
   observer: ProcessRequest["onStart"],
   pid: number,
   terminate: () => void,
-): unknown | typeof NO_START_OBSERVER_ERROR {
-  if (observer === undefined) return NO_START_OBSERVER_ERROR
+): StartObserverFailure {
+  if (observer === undefined) return undefined
   try {
     observer(pid)
-    return NO_START_OBSERVER_ERROR
+    return undefined
   } catch (error) {
     terminate()
-    return error
+    return { error }
   }
 }
 
-function propagateStartObserverError(error: unknown | typeof NO_START_OBSERVER_ERROR): void {
-  if (error !== NO_START_OBSERVER_ERROR) throw error
+function propagateStartObserverError(failure: StartObserverFailure): void {
+  if (failure !== undefined) throw failure.error
 }
 
 /**
