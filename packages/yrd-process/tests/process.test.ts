@@ -76,6 +76,38 @@ describe("Process", () => {
     expect(result).toMatchObject({ exitCode: 0, stdout: "", stderr: "" })
   })
 
+  it("can inherit piped input while retaining captured output and process-group ownership", async () => {
+    let observed: Parameters<Spawn>[1] | undefined
+    const spawn: Spawn = (_argv, options) => {
+      observed = options
+      return {
+        pid: 4242,
+        stdout: bytes("output"),
+        stderr: bytes(""),
+        exited: Promise.resolve(0),
+        signalCode: null,
+        kill() {},
+      }
+    }
+    await using process = createProcess({ inject: { spawn } })
+
+    const result = await process.run({ argv: ["filter"], inheritStdin: true })
+
+    expect(observed).toMatchObject({
+      stdin: "inherit",
+      stdout: "pipe",
+      stderr: "pipe",
+      detached: true,
+    })
+    expect(result).toMatchObject({ exitCode: 0, stdout: "output" })
+    await expect(process.run({ argv: ["filter"], inheritStdin: true, stdin: "buffered" })).rejects.toThrow(
+      "cannot inherit stdin and provide buffered input",
+    )
+    await expect(process.run({ argv: ["filter"], inheritStdin: true, interactive: true })).rejects.toThrow(
+      "cannot combine inheritStdin with interactive",
+    )
+  })
+
   it("owns timeout and cancellation through its Scope", async () => {
     await using process = createProcess({ env: { PATH: Bun.env.PATH } })
     const result = await process.run({ argv: shellCommand("sleep 10"), timeoutMs: 10 })

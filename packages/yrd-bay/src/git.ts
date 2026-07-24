@@ -225,7 +225,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
   return {
     revision: createHash("sha256")
       .update(
-        JSON.stringify({ implementation: "yrd-git-workspace-v4", repo, baysRoot, intakeRemote: options.intakeRemote }),
+        JSON.stringify({ implementation: "yrd-git-workspace-v5", repo, baysRoot, intakeRemote: options.intakeRemote }),
       )
       .digest("hex"),
 
@@ -240,9 +240,22 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
         await ignoreInRepositoryBays(git, repo, baysRoot)
         await prepareWorktreeConfig(git, repo, options.intakeRemote !== undefined)
         if (input.from === undefined) {
-          const existing = await git.run(repo, ["rev-parse", "--verify", `refs/heads/${input.branch}^{commit}`], true)
-          if (existing.code === 0) {
+          const localRef = `refs/heads/${input.branch}`
+          const remoteRef = `refs/remotes/origin/${input.branch}`
+          const [local, remote] = await Promise.all([
+            git.run(repo, ["rev-parse", "--verify", `${localRef}^{commit}`], true),
+            git.run(repo, ["rev-parse", "--verify", `${remoteRef}^{commit}`], true),
+          ])
+          if (input.issue !== undefined && input.reuseBranch !== true && (local.code === 0 || remote.code === 0)) {
+            throw new Error(
+              `branch '${input.branch}' already exists without matching claim provenance; ` +
+                "link that branch to the claim's draft PR, then rerun bay run",
+            )
+          }
+          if (local.code === 0) {
             await git.run(repo, ["worktree", "add", path, input.branch])
+          } else if (remote.code === 0) {
+            await git.run(repo, ["worktree", "add", "-b", input.branch, path, remoteRef])
           } else {
             await git.run(repo, ["worktree", "add", "-b", input.branch, path, baseSha])
           }

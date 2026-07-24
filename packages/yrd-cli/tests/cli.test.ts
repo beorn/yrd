@@ -632,6 +632,8 @@ describe("runYrd", () => {
     const gitHelp = outputIO()
     expect(await runYrd(app, gitBay("--help"), gitHelp.io)).toBe(0)
     expect(gitHelp.stdout()).toContain("Usage: git bay")
+    expect(gitHelp.stdout()).toContain("list")
+    expect(gitHelp.stdout()).toContain("run")
     expect(gitHelp.stdout()).toContain("open")
     expect(gitHelp.stdout()).toContain("path")
     expect(gitHelp.stdout()).toContain("refresh")
@@ -3085,18 +3087,22 @@ describe("runYrd", () => {
   })
 
   it("closes a draft-backed Bay without withdrawing its PR", async () => {
-    const app = await createApp()
+    const app = await createApp({ waitingCheck: true })
     const open = outputIO()
     expect(await runYrd(app, yrd("bay", "open", "draft-close"), open.io), open.stderr()).toBe(0)
 
     const create = outputIO({ cwd: "/repo/.bays/B1" })
     expect(await runYrd(app, yrd("pr", "create"), create.io), create.stderr()).toBe(0)
     expect(app.bays.pr("PR1")).toMatchObject({ status: "pushed", bay: "B1" })
+    await app.bays.requestChecks({ pr: "PR1" })
+    await app.queue.admit({ prs: ["PR1"] })
+    expect(app.queue.get("R1")).toMatchObject({ status: "running", steps: [{ job: { status: "requested" } }] })
 
     const close = outputIO({ cwd: "/repo/.bays/B1" })
     expect(await runYrd(app, yrd("bay", "close"), close.io), close.stderr()).toBe(0)
     expect(app.bays.get("B1")?.status).toBe("closed")
     expect(app.bays.pr("PR1")?.status).toBe("pushed")
+    expect(app.queue.get("R1")).toMatchObject({ status: "running", steps: [{ job: { status: "requested" } }] })
   })
 
   it("certifies exact-head handoff readiness and exposes the shared lifecycle projection", async () => {

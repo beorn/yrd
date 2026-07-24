@@ -1338,14 +1338,22 @@ export async function runYrdProcess(
         const runnerLog = runtimeLog.child("runner")
         oneShotRunner = posture === "one-shot-queue-run" ? runner?.id : undefined
         shutdownLog = runnerLog
-        const drain = posture === "resident-queue-run" ? new AbortController() : undefined
+        const drain =
+          posture === "resident-queue-run" || posture === "bracketed-bay-run" ? new AbortController() : undefined
         removeShutdownSignals = bindProcessShutdown(
           closeHost,
           drain === undefined
             ? undefined
             : (signal) => {
-                drain.abort()
-                reportGracefulShutdown(runnerLog, signal)
+                drain.abort(signal)
+                if (posture === "resident-queue-run") {
+                  reportGracefulShutdown(runnerLog, signal)
+                } else {
+                  runtimeLog.warn?.("bay run interruption requested — preserving the active Bay before exit", {
+                    signal,
+                    mode: "orphan",
+                  })
+                }
               },
         )
         return {

@@ -248,6 +248,28 @@ describe("createGitWorkspace", () => {
     expect(existsSync(dirtyPath)).toBe(true)
   })
 
+  it("refuses to checkpoint dirty submodule work without committing or pushing it", async () => {
+    const { root, repo, intake } = await repository()
+    await addSubmodule(root, repo)
+    await git(repo, ["remote", "add", "origin", intake])
+    await git(repo, ["push", "-qu", "origin", "main"])
+    await using process = createProcess()
+    await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
+
+    await runRequested(app, await app.bays.open({ name: "checkpoint-dirty-submodule" }))
+    const bay = app.bays.get("B1")
+    if (bay?.path === undefined || bay.headSha === undefined) throw new Error("expected active Bay head and path")
+    const dirtyPath = join(bay.path, "vendor", "dependency", "dependency.txt")
+    await writeFile(dirtyPath, "dirty dependency\n")
+
+    await runRequested(app, await app.bays.checkpoint({ bay: bay.id, claim: "@km/test/dirty-submodule" }))
+
+    expect(app.bays.get("B1")).toMatchObject({ status: "active", failure: { code: "checkpoint-failed" } })
+    expect((await git(bay.path, ["rev-parse", "HEAD"])).stdout).toBe(bay.headSha)
+    expect(existsSync(dirtyPath)).toBe(true)
+    expect((await git(repo, ["ls-remote", "origin", `refs/heads/${bay.branch}`])).stdout).toBe("")
+  })
+
   it("resumes close after interruption leaves the preservation ref behind", async () => {
     const { root, repo } = await repository()
     await using actual = createProcess()
@@ -523,6 +545,20 @@ describe("createGitWorkspace", () => {
     if (bay?.path === undefined) throw new Error("expected active Bay path")
     expect(bay).toMatchObject({ status: "active", branch: "release-fix", from: "release-fix" })
     expect((await git(bay.path, ["branch", "--show-current"])).stdout).toBe("release-fix")
+  })
+
+  it("retains ordinary bay open's implicit existing-branch behavior", async () => {
+    const { root, repo } = await repository()
+    await git(repo, ["branch", "issue/reopen"])
+    await using process = createProcess()
+    await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
+
+    await runRequested(app, await app.bays.open({ name: "reopen" }))
+
+    const bay = app.bays.get("B1")
+    if (bay?.path === undefined) throw new Error("expected active Bay path")
+    expect(bay).toMatchObject({ status: "active", branch: "issue/reopen" })
+    expect((await git(bay.path, ["branch", "--show-current"])).stdout).toBe("issue/reopen")
   })
 
   it("refreshes the committed head and reports uncommitted work", async () => {

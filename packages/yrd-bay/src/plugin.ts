@@ -1196,6 +1196,9 @@ function openBay(
   if (Object.values(current.byId).some((bay) => bay.status !== "closed" && bay.branch === branch)) {
     throw new Error(`yrd: branch '${branch}' is already open in another bay`)
   }
+  const reuseClaimBranch =
+    args.issue !== undefined &&
+    Object.values(current.prs).some((pr) => pr.branch === branch && pr.issue === args.issue && isLivePR(pr.status))
   const opened = {
     id,
     name: args.name,
@@ -1216,6 +1219,8 @@ function openBay(
         base,
         ...(args.baseSha === undefined ? {} : { baseSha: args.baseSha }),
         ...(args.from === undefined ? {} : { from: args.from }),
+        ...(args.issue === undefined ? {} : { issue: args.issue }),
+        ...(reuseClaimBranch ? { reuseBranch: true } : {}),
       }),
     ],
   }
@@ -1257,7 +1262,7 @@ function checkpointBay(
 
 function orphanBay(state: DeepReadonly<BayState>, args: OrphanBayArgs) {
   const bay = required(resolveBay(state.bays, args.bay), "bay", args.bay)
-  if (bay.status !== "active") throw new Error(`yrd: bay '${bay.id}' is ${bay.status}, not active`)
+  if (bay.status === "closed") throw new Error(`yrd: bay '${bay.id}' is closed, not recoverable`)
   return {
     events: [
       event("bay/orphaned", {

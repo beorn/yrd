@@ -243,9 +243,12 @@ selectors means all eligible work for that operation.
 Selectors resolve PR ids, bay ids, bay names, source branches, and—where the
 command acts on a queue—base branches.
 
-Every public verb accepts `--json` and returns an invoked-command discriminator
-such as `pr.submit`, `pr.status`, or `queue.run`. Human output uses Silvery
-tables, semantic status color, and OSC 8 links for paths, logs, and artifacts.
+State-oriented public verbs accept `--json` and return an invoked-command
+discriminator such as `pr.submit`, `pr.status`, or `queue.run`. The foreground
+`bay run` bracket is the deliberate exception: it streams the child's stdio
+unchanged and returns success only when both the child and bracket complete
+cleanly. Human output uses Silvery tables, semantic status color, and OSC 8
+links for paths, logs, and artifacts.
 
 Delivery objects expose one canonical `status` (or attempt `outcome`) in human
 and JSON output. When a compatibility-era stored status cannot express that
@@ -273,7 +276,7 @@ The top-level surface is deliberately small:
 yrd                         dashboard across queues, PRs, and recent outcomes
 yrd pr                      list PRs; create, submit, view, runs, diff, checkout,
                             status, edit, checks, regression, close, and merge teaching
-yrd bay                     list bays; open, path, refresh, submit, and close
+yrd bay                     list bays; run, open, path, refresh, submit, and close
 yrd issue                   read-only issue list and joined delivery view
 yrd contest                 list; open, eval, view, finish, select, promote
 yrd queue                   show the queue timeline by default; list/ls is canonical;
@@ -286,6 +289,8 @@ yrd prime                   agent briefing plus current delivery context
 ### Bay Operations
 
 ```text
+yrd bay list [--json]
+yrd bay run <claim> -- <command...>
 yrd bay open <name> [--from <branch>] [--base <branch>]
   [--issue <ref>] [--actor <id>] [--json]
 yrd bay path <selector> [--json]
@@ -300,13 +305,15 @@ The same commands are available through the standalone `git bay` projection.
 submission core as `pr submit`; `bay submit` remains a handoff, while new
 callers use the PR-native check-admission surface below.
 
-| Command   | Input                                                 | Output and state                                                                   |
-| --------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `open`    | New bay name; optional source, base, issue, and actor | Prints the worktree path; creates and provisions a named bay                       |
-| `path`    | One Bay ID, name, or branch selector                  | Prints the exact absolute path of one active Bay; read-only and never refreshes it |
-| `refresh` | Zero or more bays                                     | Refreshes Git head, base, dirty, path, and workspace status                        |
-| `submit`  | Bays, PRs, or source branches                         | Creates or advances PRs to `submitted`; never executes Queue work                  |
-| `close`   | Zero or more bays                                     | Deprovisions clean terminal bays; `--withdraw` explicitly cancels a live PR        |
+| Command   | Input                                                 | Output and state                                                                      |
+| --------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `list`    | None                                                  | Lists every Bay, including durable failure and orphan facts                           |
+| `run`     | Claim plus exact child argv                           | Brackets the child with a pushed draft, checkpoint, and synchronous close-or-orphan   |
+| `open`    | New bay name; optional source, base, issue, and actor | Prints the worktree path; creates and provisions a named bay                          |
+| `path`    | One Bay ID, name, or branch selector                  | Prints the exact absolute path of one active Bay; read-only and never refreshes it    |
+| `refresh` | Zero or more bays                                     | Refreshes Git head, base, dirty, path, and workspace status                           |
+| `submit`  | Bays, PRs, or source branches                         | Creates or advances PRs to `submitted`; never executes Queue work                     |
+| `close`   | Zero or more bays                                     | Deprovisions clean terminal bays; `--withdraw` explicitly cancels an associated live PR |
 
 Submodule repositories are ready when `bay open` returns. Yrd recursively
 materializes the recorded gitlinks while keeping each Bay's refs, config, and

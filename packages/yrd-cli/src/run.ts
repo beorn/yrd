@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process"
+import { createHash } from "node:crypto"
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { basename, isAbsolute, join, relative, resolve } from "node:path"
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
@@ -7,6 +8,7 @@ import {
   CompositionV1Schema,
   CorrelationSchema,
   baseIdentity,
+  isLivePR,
   prRevisionLineage,
   prSourceReadyAt,
   isConcurrentCheckabilityConflict,
@@ -991,7 +993,7 @@ function issueDeliveryRows(bridge: TrackerBridgeV2): IssueDeliveryRow[] {
   })
 }
 
-type RuntimePosture = "active" | "viewer" | "one-shot-queue-run" | "resident-queue-run"
+type RuntimePosture = "active" | "viewer" | "bracketed-bay-run" | "one-shot-queue-run" | "resident-queue-run"
 
 type RuntimeBootstrap = Readonly<{
   ambientCwd: string
@@ -1259,7 +1261,7 @@ async function openBay(
   )
 }
 
-function bayRunIdentity(claim: string): Readonly<{ claim: string; name: string; branch: string }> {
+function bayRunIdentity(app: YrdCliApp, claim: string): Readonly<{ claim: string; name: string; branch: string }> {
   const normalized = claim.trim()
   const name = basename(normalized)
   if (
@@ -1272,7 +1274,38 @@ function bayRunIdentity(claim: string): Readonly<{ claim: string; name: string; 
   ) {
     usage("bay run CLAIM must end in a Git-safe issue slug")
   }
-  return { claim: normalized, name, branch: `task/${name}` }
+  const claimPrs = app.bays.prs().filter((pr) => pr.issue === normalized && isLivePR(pr.status))
+  if (claimPrs.length > 1) {
+    refusal(
+      `claim '${normalized}' has multiple live PRs (${claimPrs.map((pr) => pr.id).join(", ")}); ` +
+        "withdraw the duplicate before rerunning bay run",
+    )
+  }
+  const claimPr = claimPrs[0]
+  if (claimPr !== undefined) {
+    return { claim: normalized, name, branch: claimPr.branch }
+  }
+
+  const bays = app.bays.list()
+  const prs = app.bays.prs()
+  const defaultBranch = `task/${name}`
+  const branchOwners = (branch: string) => [
+    ...bays.filter((bay) => bay.branch === branch).map((bay) => bay.issue),
+    ...prs.filter((pr) => pr.branch === branch).map((pr) => pr.issue),
+  ]
+  const isForeignBranch = (branch: string) => branchOwners(branch).some((issue) => issue !== normalized)
+  const terminalDefault = prs.some(
+    (pr) => pr.branch === defaultBranch && pr.issue === normalized && !isLivePR(pr.status),
+  )
+  const collisionBranch = `${defaultBranch}-${createHash("sha256").update(normalized).digest("hex").slice(0, 8)}`
+  const branch = isForeignBranch(defaultBranch) || terminalDefault ? collisionBranch : defaultBranch
+  if (isForeignBranch(branch)) {
+    refusal(
+      `claim '${normalized}' collides with existing branch '${branch}'; ` +
+        "link a distinct draft PR branch to the claim, then rerun bay run",
+    )
+  }
+  return { claim: normalized, name, branch }
 }
 
 async function checkpointRunBay(app: YrdCliApp, bay: Bay, claim: string, io: YrdCliIO): Promise<Bay> {
@@ -1323,6 +1356,16 @@ async function orphanRunBay(app: YrdCliApp, bay: Bay, reason: string, result?: P
   })
 }
 
+async function preserveInterruptedRunBay(app: YrdCliApp, bay: Bay, phase: string, io: YrdCliIO): Promise<boolean> {
+  const signal = io.drainSignal
+  if (signal?.aborted !== true) return false
+  const source = typeof signal.reason === "string" ? ` by ${signal.reason}` : ""
+  const reason = `bay run interrupted during ${phase}${source}`
+  await orphanRunBay(app, bay, reason)
+  io.stderr(`yrd: ${reason}; Bay '${bay.id}' is preserved and marked orphan\n`)
+  return true
+}
+
 function childOutput(io: YrdCliIO): Readonly<{
   write(output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>): void
   flush(): void
@@ -1354,28 +1397,49 @@ async function runBay(
 ): Promise<YrdCliExitCode> {
   if (services.process === undefined) configuration("bay run requires the process-backed Yrd runtime")
   if (argv.length === 0) usage("bay run requires a command after CLAIM")
-  const identity = bayRunIdentity(claim)
-  const opened = await app.bays.open({
-    name: identity.name,
-    issue: identity.claim,
-    branch: identity.branch,
-  })
-  assertJobsPassed(await runJobs(app, app.jobs.requested(opened), io), `bay '${identity.name}' provision`)
-  const active = app.bays
-    .list()
-    .filter(
-      (candidate) =>
-        candidate.status === "active" && candidate.branch === identity.branch && candidate.issue === identity.claim,
-    )
-  let bay = active.length === 1 ? active[0] : undefined
-  if (bay?.path === undefined || bay.status !== "active") {
-    refusal(`bay '${identity.name}' did not become active`)
-  }
+  const identity = bayRunIdentity(app, claim)
+  const existingBayIds = new Set(app.bays.list().map((candidate) => candidate.id))
+  let bay: Bay | undefined
+  try {
+    const opened = await app.bays.open({
+      name: identity.name,
+      issue: identity.claim,
+      branch: identity.branch,
+    })
+    assertJobsPassed(await runJobs(app, app.jobs.requested(opened), io), `bay '${identity.name}' provision`)
+    const active = app.bays
+      .list()
+      .filter(
+        (candidate) =>
+          candidate.status === "active" && candidate.branch === identity.branch && candidate.issue === identity.claim,
+      )
+    bay = active.length === 1 ? active[0] : undefined
+    if (bay?.path === undefined || bay.status !== "active") {
+      refusal(`bay '${identity.name}' did not become active`)
+    }
+    if (await preserveInterruptedRunBay(app, bay, "pre-child provision", io)) return 1
 
-  // The branch and draft are durable before the child receives control. The
-  // draft is the claim record; Yrd deliberately does not grow a tracker lease.
-  bay = await checkpointRunBay(app, bay, identity.claim, io)
-  await draftRunBay(app, bay, identity.claim, io)
+    // The branch and draft are durable before the child receives control. The
+    // draft is the claim record; Yrd deliberately does not grow a tracker lease.
+    bay = await checkpointRunBay(app, bay, identity.claim, io)
+    if (await preserveInterruptedRunBay(app, bay, "pre-child checkpoint", io)) return 1
+    await draftRunBay(app, bay, identity.claim, io)
+    if (await preserveInterruptedRunBay(app, bay, "pre-child draft", io)) return 1
+  } catch (error) {
+    bay ??= app.bays
+      .list()
+      .findLast(
+        (candidate) =>
+          !existingBayIds.has(candidate.id) &&
+          candidate.status !== "closed" &&
+          candidate.branch === identity.branch &&
+          candidate.issue === identity.claim,
+      )
+    if (bay !== undefined) {
+      await orphanRunBay(app, bay, `pre-child setup failed: ${errorDetail(error)}`)
+    }
+    throw error
+  }
 
   const output = io.interactive === true ? undefined : childOutput(io)
   let child: ProcessResult
@@ -1383,7 +1447,8 @@ async function runBay(
     child = await services.process.run({
       argv,
       cwd: bay.path,
-      ...(output === undefined ? { interactive: true } : { onOutput: output.write }),
+      ...(io.drainSignal === undefined ? {} : { signal: io.drainSignal }),
+      ...(output === undefined ? { interactive: true } : { inheritStdin: true, onOutput: output.write }),
     })
   } catch (error) {
     output?.flush()
@@ -1405,10 +1470,13 @@ async function runBay(
     io.stderr(`yrd: ${reason}; Bay '${bay.id}' is preserved and marked orphan\n`)
     return 1
   }
+  if (await preserveInterruptedRunBay(app, bay, "child completion", io)) return 1
 
   try {
     bay = await checkpointRunBay(app, bay, identity.claim, io)
+    if (await preserveInterruptedRunBay(app, bay, "post-child checkpoint", io)) return 1
     await draftRunBay(app, bay, identity.claim, io)
+    if (await preserveInterruptedRunBay(app, bay, "post-child draft", io)) return 1
     const closing = await app.bays.close({ bay: bay.id })
     assertJobsPassed(await runJobs(app, app.jobs.requested(closing), io), `bay '${bay.id}' close`)
     const closed = app.bays.get(bay.id)
@@ -1493,16 +1561,17 @@ async function closeBays(
   const bays = selectedBays(stateOf(app).bays, selectors, io.cwd ?? process.cwd(), "close")
   const closed: Bay[] = []
   for (const bay of bays) {
-    const withdrawing = app.bays
-      .prs()
-      .find((pr) => pr.bay === bay.id && (pr.status === "pushed" || pr.status === "submitted"))
+    const withdrawing =
+      options.withdraw === true
+        ? app.bays.prs().filter((pr) => (pr.bay === bay.id || pr.branch === bay.branch) && isLivePR(pr.status))
+        : []
     const result = await app.bays.close({
       bay: bay.id,
       ...(options.withdraw === true ? { withdraw: true } : {}),
     })
-    if (withdrawing !== undefined) {
+    if (withdrawing.length > 0) {
       await app.queue.cancel({
-        prs: [withdrawing.id],
+        prs: withdrawing.map((pr) => pr.id),
         by: io.runner ?? "operator",
         reason: "PR withdrawn",
       })
@@ -2725,6 +2794,7 @@ function runtimePosture(
   }>,
 ): RuntimePosture {
   if (isReadOnlyInvocation(action)) return "viewer"
+  if (action.name() === "run" && action.parent?.name() === "bay") return "bracketed-bay-run"
   if (action.name() !== "run" || action.parent?.name() !== "queue") return "active"
   return queueRunIsFollow(action) ? "resident-queue-run" : "one-shot-queue-run"
 }

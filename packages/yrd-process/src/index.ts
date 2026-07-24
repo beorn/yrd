@@ -6,6 +6,8 @@ export type ProcessRequest = Readonly<{
   cwd?: string
   env?: NodeJS.ProcessEnv
   stdin?: string | Uint8Array
+  /** Inherit the caller's stdin while keeping stdout/stderr captured. */
+  inheritStdin?: boolean
   /** Attach the child directly to the invoking terminal. Interactive runs
    * inherit stdin/stdout/stderr and stay in the foreground process group so
    * editors and agent harnesses receive ordinary terminal input. */
@@ -87,7 +89,7 @@ type SpawnOptions = Readonly<
     signal: AbortSignal
     detached: boolean
   } & (
-    | Readonly<{ stdin: "ignore" | Blob; stdout: "pipe"; stderr: "pipe" }>
+    | Readonly<{ stdin: "ignore" | "inherit" | Blob; stdout: "pipe"; stderr: "pipe" }>
     | Readonly<{ stdin: "inherit"; stdout: "inherit"; stderr: "inherit" }>
   )
 >
@@ -208,6 +210,12 @@ export function createProcess(
       if (request.interactive === true && request.stdin !== undefined) {
         throw new TypeError("yrd: Process interactive runs inherit stdin and cannot provide buffered input")
       }
+      if (request.inheritStdin === true && request.stdin !== undefined) {
+        throw new TypeError("yrd: Process cannot inherit stdin and provide buffered input")
+      }
+      if (request.interactive === true && request.inheritStdin === true) {
+        throw new TypeError("yrd: Process cannot combine inheritStdin with interactive")
+      }
       if (request.interactive === true && request.onOutput !== undefined) {
         throw new TypeError("yrd: Process interactive runs inherit output and cannot capture onOutput")
       }
@@ -252,7 +260,12 @@ export function createProcess(
             : {
                 cwd: request.cwd ?? cwd,
                 env: request.env === undefined ? env : definedEnv(request.env),
-                stdin: request.stdin === undefined ? "ignore" : inputBlob(request.stdin),
+                stdin:
+                  request.inheritStdin === true
+                    ? "inherit"
+                    : request.stdin === undefined
+                      ? "ignore"
+                      : inputBlob(request.stdin),
                 stdout: "pipe",
                 stderr: "pipe",
                 signal,

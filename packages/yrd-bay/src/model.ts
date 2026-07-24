@@ -549,6 +549,8 @@ export const ProvisionBayInputSchema = z
     base: GitRefSchema,
     baseSha: GitShaSchema.optional(),
     from: GitRefSchema.optional(),
+    issue: z.string().trim().min(1).optional(),
+    reuseBranch: z.boolean().optional(),
   })
   .strict()
 export type ProvisionBayInput = z.infer<typeof ProvisionBayInputSchema>
@@ -734,12 +736,14 @@ export function prForBay(state: BaysState, bay: BayId): PR | undefined {
 export function resolveBay(state: BaysState, selector: string): Bay | undefined {
   return resolveSelector(
     selector,
-    Object.values(state.byId).map((bay) => ({
-      canonical: bay.id,
-      aliases: [bay.name, bay.branch],
-      value: bay,
-    })),
-    { kind: "Bay" },
+    Object.values(state.byId)
+      .toSorted((left, right) => right.id.localeCompare(left.id, undefined, { numeric: true }))
+      .map((bay) => ({
+        canonical: bay.id,
+        aliases: [bay.name, bay.branch],
+        value: bay,
+      })),
+    { kind: "Bay", prefer: (bay) => bay.status !== "closed" },
   )
 }
 
