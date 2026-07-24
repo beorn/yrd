@@ -1610,7 +1610,7 @@ function defaultRunArgv(services: YrdCliServices): readonly string[] {
   return [shell === undefined || shell === "" ? "/bin/sh" : shell]
 }
 
-function execSessionBaseName(bay: Bay, explicitName: string | undefined): string {
+function guestSessionBaseName(bay: Bay, explicitName: string | undefined): string {
   const name = explicitName ?? bay.name
   if (
     name.includes(":") ||
@@ -1622,7 +1622,7 @@ function execSessionBaseName(bay: Bay, explicitName: string | undefined): string
   return name
 }
 
-function execSessionArgv(baseName: string, argv: readonly string[]): readonly string[] {
+function guestSessionArgv(baseName: string, argv: readonly string[]): readonly string[] {
   return [
     "/bin/sh",
     "-c",
@@ -1698,8 +1698,8 @@ async function enterBay(
   if (processService === undefined) configuration("yrd in requires the process-backed Yrd runtime")
   const runtime = io as RuntimeInvocationIO
   const bay = resolveGuestBay(app, selector, runtime[RuntimeInvocationCwd] ?? io.cwd ?? process.cwd())
-  const baseName = execSessionBaseName(bay, runtime[RuntimeSessionName])
-  const child = await runBayChild(processService, bay, execSessionArgv(baseName, guestArgv(services, bay, argv)), io, {
+  const baseName = guestSessionBaseName(bay, runtime[RuntimeSessionName])
+  const child = await runBayChild(processService, bay, guestSessionArgv(baseName, guestArgv(services, bay, argv)), io, {
     env: services.environment ?? process.env,
     onStart(pid) {
       const resolved: BayOpenResolution = {
