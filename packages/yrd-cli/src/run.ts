@@ -3044,17 +3044,35 @@ export async function queueListSnapshot(
     state: state.bays,
     runner,
   })
+  // `--json` must answer the SAME question the human renderer answers. The
+  // projection owns filtering (--status/--latest/filter terms), and its `rows`
+  // are the full filtered set (`rowLimit` only trims what the view draws), so
+  // narrow the JSON payload to those runs instead of shipping every retained run
+  // — `queue list --status running --json` used to emit all 669 runs / 14 MB
+  // while the same command without `--json` correctly showed one row.
+  const filtered =
+    projection.filters.statuses.length > 0 || projection.filters.terms.length > 0 || projection.filters.latest
+  const projectedRuns = new Set(projection.rows.flatMap((row) => (row.run === undefined ? [] : [row.run])))
+  const narrow = (
+    rows: readonly QueueStatusResult[],
+    keep: (run: Readonly<{ id: string }>) => boolean,
+  ): readonly QueueStatusResult[] =>
+    rows.map((result) => ({
+      ...result,
+      running: result.running.filter(keep),
+      waiting: result.waiting.filter(keep),
+      finished: result.finished.filter(keep),
+    }))
+  // The listing payload (`results`) is what `--json` prints, so the display
+  // filters must reach it. `focus` is the watch pane's cursor, not a listing
+  // filter — it narrows the artifact/diff side only, exactly as before.
+  const filteredResults = filtered ? narrow(results, (run) => projectedRuns.has(run.id)) : results
   const outputResults =
     focus === undefined
-      ? results
+      ? filteredResults
       : focus.run === undefined
         ? []
-        : results.map((result) => ({
-            ...result,
-            running: result.running.filter((run) => run.id === focus.run),
-            waiting: result.waiting.filter((run) => run.id === focus.run),
-            finished: result.finished.filter((run) => run.id === focus.run),
-          }))
+        : narrow(filteredResults, (run) => run.id === focus.run)
   const outputRunIds = new Set(
     outputResults.flatMap((result) => [...result.running, ...result.waiting, ...result.finished].map((run) => run.id)),
   )
@@ -3105,7 +3123,7 @@ export async function queueListSnapshot(
       )
     : undefined
   return {
-    results,
+    results: filteredResults,
     now,
     projection,
     ...(outputs.length === 0 ? {} : { outputs }),
@@ -4833,7 +4851,9 @@ function buildProgram(
     .action(async (base, options) => resumeQueue(installed(), base, options, io))
   queue
     .command("recover")
-    .description("recover expired runner leases; --runner force-settles a known-dead runner's unexpired leases too")
+    .description(
+      "recover expired runner leases and settle orphaned runs whose step never started; --runner force-settles a known-dead runner's unexpired leases too",
+    )
     .option("--reason <text>", "record the recovery reason")
     .option("--runner <id>", "force-settle this known-dead runner's leases now, even if unexpired")
     .option("--json", "emit stable JSON")

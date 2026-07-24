@@ -206,6 +206,7 @@ export type QueueRunAuthority = Readonly<{
       | "stale-check"
       | "stale-steps"
       | "stale-plan"
+      | "orphaned-run"
       | "source-publish"
       | "scratch-cleanup-failed"
     ref: string
@@ -273,6 +274,14 @@ export type QueueRecord = Readonly<{
   canceledAt?: string
   canceledBy?: string
   cancelReason?: string
+  // Record-level proof that the run reached `passed`. `failed` and `canceled`
+  // already carry their terminal fact on the record (`failure`, `canceledAt`);
+  // `passed` was derived from the step Jobs alone, so once Job retention pruned
+  // a finished root's Jobs the run re-projected as `running` FOREVER (a phantom
+  // `● run` row whose clock ticks up; live incident R1583, 45h). Stamped when
+  // the run settles. Projection-only; no started run carries it, so
+  // QueueRecordSchema stays unchanged.
+  passedAt?: string
 }>
 
 export type QueueStep = InstalledStep & Readonly<{ job?: Job }>

@@ -80,6 +80,7 @@ import {
   type QueuesState,
   type QueueStep,
   type QueueUnassociatedTerminal,
+  type StepName,
   type StepSelection,
   type PREligibility,
   type PRCheckRecord,
@@ -166,6 +167,13 @@ export type AdmitSelection = Readonly<{ prs?: readonly string[] }>
 
 const AdvanceArgsSchema = z.object({ run: QueueRunIdSchema }).strict()
 const SettledArgsSchema = AdvanceArgsSchema
+/** The settlement FACT. `status` is the run's terminal projection captured while
+ * its Jobs are still retained, so the record keeps its outcome after Job
+ * retention prunes them. Optional: journals written before this field replay
+ * unchanged (their runs stay Job-derived). */
+const SettledEventSchema = SettledArgsSchema.extend({
+  status: z.enum(["passed", "failed", "canceled"]).optional(),
+}).strict()
 const IsolateArgsSchema = AdvanceArgsSchema.extend({ part: z.union([z.literal(0), z.literal(1)]) }).strict()
 export type PauseQueueArgs = Readonly<{ base: string; reason: string; allowedPRs: readonly string[] }>
 export type RecoverQueueOptions = Readonly<{ recoveryTime: string; reason?: string; runner?: string }>
@@ -210,6 +218,8 @@ const QuiesceLegacyRunArgsSchema = z
   })
   .strict()
 export type QuiesceLegacyRunArgs = Readonly<z.infer<typeof QuiesceLegacyRunArgsSchema>>
+const SettleOrphanedRunArgsSchema = QuiesceLegacyRunArgsSchema
+export type SettleOrphanedRunArgs = Readonly<z.infer<typeof SettleOrphanedRunArgsSchema>>
 const QueueAuthorityTokenFactSchema = z.object({
   pr: PRIdSchema,
   revision: z.number().int().positive(),
@@ -389,6 +399,7 @@ export type QueueCommands = Readonly<{
     retireStalePlan: CommandHandler<Readonly<{ run: QueueRunId }>, RuntimeState>
     cancelRun: CommandHandler<CancelRunArgs, RuntimeState>
     quiesceLegacyRun: CommandHandler<QuiesceLegacyRunArgs, RuntimeState>
+    settleOrphanedRun: CommandHandler<SettleOrphanedRunArgs, RuntimeState>
     associateTerminals: CommandHandler<AssociateTerminalsArgs, RuntimeState>
   }>
 }>
@@ -539,7 +550,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/run/started": z.object({ run: QueueStartSchema }).strict(),
         "queue/run/failed": QueueFailedSchema,
         "queue/run/canceled": CancelRunArgsSchema,
-        "queue/run/settled": SettledArgsSchema,
+        "queue/run/settled": SettledEventSchema,
         "queue/paused": PauseQueueArgsSchema,
         "queue/resumed": ResumeQueueArgsSchema,
         "queue/batch/isolated": z
@@ -555,7 +566,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/run/started": z.object({ run: ReplayQueueStartSchema }).strict(),
         "queue/run/failed": ReplayQueueFailedSchema,
         "queue/run/canceled": CancelRunArgsSchema,
-        "queue/run/settled": SettledArgsSchema,
+        "queue/run/settled": SettledEventSchema,
       },
       projectionVersion: "queues-v6-needs-author",
       project: projectQueues,
@@ -582,6 +593,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               retireStalePlan: (run) => yrd.dispatch(commands.queue.retireStalePlan, { run }),
               cancelRun: (args) => yrd.dispatch(commands.queue.cancelRun, args),
               quiesceLegacyRun: (args) => yrd.dispatch(commands.queue.quiesceLegacyRun, args),
+              settleOrphanedRun: (args) => yrd.dispatch(commands.queue.settleOrphanedRun, args),
               associateTerminals: (args) => yrd.dispatch(commands.queue.associateTerminals, args),
               requestChecks: (pr, baseSha) =>
                 yrd.bays.requestChecks({ pr, ...(baseSha === undefined ? {} : { baseSha }) }),
@@ -613,6 +625,7 @@ type QueueActions = Readonly<{
   retireStalePlan(run: QueueRunId): Promise<CommandResult>
   cancelRun(args: CancelRunArgs): Promise<CommandResult>
   quiesceLegacyRun(args: QuiesceLegacyRunArgs): Promise<CommandResult>
+  settleOrphanedRun(args: SettleOrphanedRunArgs): Promise<CommandResult>
   associateTerminals(args: AssociateTerminalsArgs): Promise<CommandResult>
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
 }>
@@ -1422,6 +1435,27 @@ function createQueue<Shape extends PRShape>(
               runs: [...new Set(settledOrphans.map((orphan) => orphan.run))],
             })
           }
+          // Settle every run whose cursor step has had no Job past the orphan
+          // grace: nothing else can. `jobs.recover()` above walks Jobs, and
+          // `advance` no-ops without one, so a jobless run is projected `running`
+          // forever (R1582 ticked for 45h over an already-integrated PR). Loud
+          // structured receipt naming every settled run and the step it stalled on.
+          const orphanedRuns = orphanedJoblessRuns(runtime(), recoverOptions.recoveryTime)
+          for (const orphan of orphanedRuns) {
+            await actions.settleOrphanedRun({
+              run: orphan.run,
+              reason: `yrd: runner disappeared before step '${orphan.step}' started; no job since ${orphan.since}`,
+            })
+            affected.add(orphan.run)
+          }
+          if (orphanedRuns.length > 0) {
+            log.warn?.("queue recover settled orphaned runs whose cursor step never started", {
+              action: "recover-orphan-run-settle",
+              reason: "orphaned-run",
+              runs: orphanedRuns.map((orphan) => orphan.run),
+              steps: orphanedRuns.map((orphan) => orphan.step),
+            })
+          }
           // Retire every FAILED batch whose recorded plan drifted so it can never
           // isolate — otherwise it re-refuses isolation every compose cycle forever
           // (the isolate-path zombie). Typed stale-plan release; loud receipt.
@@ -1875,7 +1909,15 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
       if (needsSettlement(state, run)) return { events: [] }
       const root = resolveQueueAuthorityRoot(state.queues.authority, run.id)
       const claimed = Object.values(state.queues.authority.claims).some((token) => token.consumedBy === root)
-      return { events: claimed ? [event("queue/run/settled", { run: root })] : [] }
+      // Carry the run's terminal projection into the settlement fact. `passed`
+      // is the outcome that has no other record-level proof, so without this the
+      // run's status dies with its Jobs when retention prunes them. The fact
+      // names `root`, so only attach a status the root's own projection owns.
+      const settledRun = root === run.id ? run : materializeRun(Queues.record(state.queues, root), state.jobs)
+      const status = settledRun.status === "running" || settledRun.status === "waiting" ? undefined : settledRun.status
+      return {
+        events: claimed ? [event("queue/run/settled", { run: root, ...(status === undefined ? {} : { status }) })] : [],
+      }
     },
   })
 
@@ -2044,6 +2086,33 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
     },
   })
 
+  const settleOrphanedRun = command({
+    title: "Settle a queue run whose writer disappeared before its step started",
+    params: SettleOrphanedRunArgsSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: SettleOrphanedRunArgs) {
+      const record = Queues.resolve(state.queues, args.run)
+      if (record === undefined) raiseFailure("refusal", "run-not-found", `yrd: no queue run '${args.run}'`)
+      const run = materializeRun(record, state.jobs)
+      // Idempotent: a replay or a second recover meets a terminal run and settles
+      // nothing, never a duplicate failure event.
+      if (Queues.terminal(run)) return { events: [] }
+      const step = run.steps[run.cursor]
+      // Guard the typed release: only a genuinely jobless cursor settles here. A
+      // run with a live Job belongs to lease recovery, which reclaims it honestly.
+      if (step === undefined || step.job !== undefined) {
+        raiseFailure(
+          "refusal",
+          "run-not-orphaned",
+          `yrd: queue run '${args.run}' has a job at step '${step?.name ?? run.cursor}'; nothing to settle`,
+        )
+      }
+      // Fail (not cancel) so record.failure fixes the run terminal; `orphaned-run`
+      // releases the run's queue authority, so a member PR that is still submitted
+      // re-admits fresh instead of being rejected for a fault that is not its own.
+      return { events: [queueFailedEvent(state, record, { code: "orphaned-run", message: args.reason })] }
+    },
+  })
+
   return {
     queue: {
       admit,
@@ -2056,6 +2125,7 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
       retireStalePlan,
       cancelRun,
       quiesceLegacyRun,
+      settleOrphanedRun,
       associateTerminals,
     },
   }
@@ -2093,6 +2163,11 @@ function queueAuthorityReleaseReason(
     error?.code === "stale-check" ||
     error?.code === "stale-steps" ||
     error?.code === "stale-plan" ||
+    // `orphaned-run` is the jobless sibling: the run's writer vanished before the
+    // cursor step was requested (or its Jobs aged out of retention while the
+    // record survived), so no Job exists to lose and no advance can ever move it.
+    // The member PRs are blameless — release so they re-admit fresh.
+    error?.code === "orphaned-run" ||
     isInfraRetryCompositionFailure(error?.code)
   ) {
     return error.code
@@ -2347,15 +2422,21 @@ function terminalAuthorityMatches(
 }
 
 function projectSettledQueueRun(state: DeepReadonly<QueueState>, applied: Event): QueueState {
-  const settled = SettledArgsSchema.parse(applied.data)
+  const settled = SettledEventSchema.parse(applied.data)
   const record = Queues.get(state.queues, settled.run)
   if (record === undefined) throw new Error(`yrd: no queue run '${settled.run}'`)
   if (record.parent !== undefined) throw new Error(`yrd: settled queue run '${settled.run}' is not a root`)
+  // A settled `passed` run is terminal on the record from here on, so Job
+  // retention can prune its Jobs without resurrecting it as a phantom `running`.
+  // `failed`/`canceled` already carry their own record-level fact.
+  const settledRecord =
+    settled.status === "passed" && record.passedAt === undefined ? { ...record, passedAt: applied.ts } : record
   return {
     queues: markQueueTerminalRoot(
       {
         ...state.queues,
         authority: settleRunClaim(state.queues.authority, record.id),
+        ...(settledRecord === record ? {} : { records: Queues.set(state.queues.records, settledRecord) }),
       },
       record.id,
     ),
@@ -2954,7 +3035,7 @@ function queueLifecycleRun(applied: Event): QueueRunId | undefined {
   }
   if (applied.name === "queue/run/failed") return ReplayQueueFailedSchema.parse(applied.data).run
   if (applied.name === "queue/run/canceled") return CancelRunArgsSchema.parse(applied.data).run
-  if (applied.name === "queue/run/settled") return SettledArgsSchema.parse(applied.data).run
+  if (applied.name === "queue/run/settled") return SettledEventSchema.parse(applied.data).run
   return undefined
 }
 
@@ -3061,7 +3142,11 @@ function materializeRun(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<Jo
           ? "failed"
           : waiting
             ? "waiting"
-            : passed
+            : // A settled `passed` record outranks the absence of its Jobs: Job
+              // retention prunes a finished root's Jobs, and without the record's
+              // own proof the run re-projects as `running` FOREVER — no recovery
+              // path can reach it, because advanceQueue no-ops with no Job.
+              passed || record.passedAt !== undefined
               ? "passed"
               : "running"
   const last = steps.at(-1)?.job
@@ -3071,9 +3156,7 @@ function materializeRun(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<Jo
     (failed?.status === "failed" || failed?.status === "lost" || failed?.status === "canceled"
       ? failed.finishedAt
       : status === "passed"
-        ? last?.status === "passed"
-          ? last.finishedAt
-          : record.startedAt
+        ? ((last?.status === "passed" ? last.finishedAt : undefined) ?? record.passedAt ?? record.startedAt)
         : undefined)
   const shape = shapeThrough(record, jobs)
   const {
@@ -3257,6 +3340,53 @@ type UnisolableStalePlanBatch = Readonly<{ run: QueueRunId; drift: string }>
  * which flips {@link bisectable} false, so they self-exclude here — the detection
  * clears once retired (audit stops lying).
  */
+/** A run whose cursor step has no Job and that no writer can still be starting.
+ *
+ * A Job is requested in the SAME event batch as the transition that entitles it
+ * (`startRun` emits `queue/run/started` + the step-0 request; `advanceQueue`
+ * emits the next request with the previous step's terminal projection), so the
+ * only legitimate joblessness at the cursor is the window between a Job
+ * finishing and the next `advance` — seconds under a live runner. Past
+ * {@link ORPHANED_RUN_GRACE_MS} the writer is gone, and the run can NEVER settle
+ * on its own: `advanceQueue` returns no events when the cursor has no Job, and
+ * `jobs.recover()` iterates Jobs, so it has nothing to reclaim. That is the
+ * permanent phantom `● run` (live incident: R1582, 45h and counting).
+ */
+const ORPHANED_RUN_GRACE_MS = 15 * 60_000
+
+type OrphanedRun = Readonly<{ run: QueueRunId; step: StepName; since: string }>
+
+/** The last instant this run is known to have been driven: the newest terminal
+ * step Job before the cursor, else the run's start. Anchoring on `startedAt`
+ * alone would settle a long-lived multi-step run that just advanced. */
+function lastDriven(record: DeepReadonly<QueueRecord>, run: QueueRun): string {
+  let latest = record.startedAt
+  for (const step of run.steps.slice(0, run.cursor)) {
+    const job = step.job
+    const finishedAt =
+      job?.status === "passed" || job?.status === "failed" || job?.status === "lost" || job?.status === "canceled"
+        ? job.finishedAt
+        : undefined
+    if (finishedAt !== undefined && Date.parse(finishedAt) > Date.parse(latest)) latest = finishedAt
+  }
+  return latest
+}
+
+function orphanedJoblessRuns(state: DeepReadonly<RuntimeState>, recoveryTime: string): readonly OrphanedRun[] {
+  const cutoff = Date.parse(recoveryTime) - ORPHANED_RUN_GRACE_MS
+  const orphans: OrphanedRun[] = []
+  for (const record of Queues.values(state.queues)) {
+    const run = materializeRun(record, state.jobs)
+    if (Queues.terminal(run)) continue
+    const step = run.steps[run.cursor]
+    if (step === undefined || step.job !== undefined) continue
+    const since = lastDriven(record, run)
+    if (Date.parse(since) > cutoff) continue
+    orphans.push({ run: record.id, step: step.name, since })
+  }
+  return orphans
+}
+
 function unisolableStalePlanBatches(
   state: DeepReadonly<RuntimeState>,
   byName: ReadonlyMap<string, RuntimeStep>,
@@ -3315,6 +3445,19 @@ function auditQueues(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeS
       continue
     }
     if (Queues.terminal(run)) continue
+    // Step 0's Job is requested in the same event batch as `queue/run/started`,
+    // so a non-terminal run with NO Job at all never started and never can:
+    // `advance` no-ops without a Job. Unambiguous — unlike a later cursor step,
+    // this cannot be the brief window between a Job finishing and the next
+    // advance, so flag it with no clock. `recover` settles it.
+    if (run.steps.every((step) => step.job === undefined)) {
+      findings.push({
+        code: "orphaned-run",
+        message: `queue run '${record.id}' is ${run.status} with no job for any step; it can never advance`,
+        run: record.id,
+        ...(record.steps[0] === undefined ? {} : { step: record.steps[0].name }),
+      })
+    }
     for (const planned of record.steps) {
       const current = installed.get(planned.name)
       if (current === undefined) {

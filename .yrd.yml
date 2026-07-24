@@ -1,5 +1,11 @@
-steps:
-  verify: bun install --frozen-lockfile --ignore-scripts && bun run test
+# Yrd's own queue. `steps` is the ORDERED LIST of step names to run; each name
+# resolves to a top-level step definition block (a bare string is shorthand for
+# `run:`). The old `steps: {verify: "..."}` object form has not parsed since the
+# step-selection schema landed, so every `yrd` command run from this repo died
+# with "config steps Invalid input: expected array, received object".
+steps: [verify]
+
+verify: bun install --frozen-lockfile --ignore-scripts && bun run test
 
 contest:
   concurrency: 2
