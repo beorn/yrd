@@ -1006,7 +1006,7 @@ async function createRuntimeSignalAdapter(options: {
         "yrd: a capture wire requires an ordinary output sink",
       )
     }
-    return createWireSignalAdapter(wire, options.output, options.actor, options.attributedReceipt)
+    return createWireSignalAdapter(wire, options.output, options.actor, (event) => options.attributedReceipt(event))
   }
 
   const signalProcess =
@@ -1035,7 +1035,12 @@ async function createRuntimeSignalAdapter(options: {
         "yrd: notify routes require the 'tribe' executable, but no live Tribe adapter is available",
       )
     }
-    return createTribeSignalAdapter(signalProcess, options.actor, options.attributedReceipt, executable)
+    return createTribeSignalAdapter(
+      signalProcess,
+      options.actor,
+      (event) => options.attributedReceipt(event),
+      executable,
+    )
   } catch (error) {
     if (options.interactive !== true) throw error
     return {

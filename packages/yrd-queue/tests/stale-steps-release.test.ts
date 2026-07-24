@@ -8,7 +8,7 @@ import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
-import { withStep, withQueue, Queues, type PRShape, type StepExecution } from "@yrd/queue"
+import { withStep, withQueue, Queues, type StepExecution } from "@yrd/queue"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)

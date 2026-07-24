@@ -3861,7 +3861,9 @@ describe("Queue command adapters", () => {
     )
     expect(proofFetches).toHaveLength(2)
     expect(proofFetches.map(({ argv }) => argv.at(-2))).toEqual([origin, origin])
-    expect(proofFetches.map(({ argv }) => argv.at(-1)).sort()).toEqual([...pins].sort())
+    expect(
+      proofFetches.map(({ argv }) => argv.at(-1)).sort((left, right) => (left ?? "").localeCompare(right ?? "")),
+    ).toEqual([...pins].sort((left, right) => left.localeCompare(right)))
     const proofStores = new Set(proofFetches.map(({ argv }) => argv[2]))
     expect([...proofStores]).toEqual([initializations[0]?.argv.at(-1)])
 
@@ -4193,7 +4195,8 @@ describe("Queue command adapters", () => {
           const result = await process.run(request)
           return {
             ...result,
-            stdout: result.stdout.replace(/(submodule\.[^\0\n]+\.url\n)[^\0]*/u, "$1../dep.git"),
+            // oxlint-disable-next-line no-control-regex -- `git config --null` records are NUL-delimited by contract.
+            stdout: result.stdout.replace(/(submodule\.[^\u0000\n]+\.url\n)[^\u0000]*/u, "$1../dep.git"),
           }
         }
         if (request.argv.at(-1) === "remote.origin.url") {
