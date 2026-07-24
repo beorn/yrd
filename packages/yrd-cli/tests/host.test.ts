@@ -486,7 +486,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
   })
 
-  it("coalesces Bay base refresh and prunes stale live-branch authority", async () => {
+  it("coalesces Bay base refresh without pruning a recoverable tracking carrier", async () => {
     const { repo, featureSha } = await repository()
     const remote = join(repo, "..", "origin.git")
     await git(repo, "init", "-q", "--bare", remote)
@@ -546,47 +546,41 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
         "fetch",
         "--no-recurse-submodules",
         "--quiet",
-        "--prune",
         "origin",
         "+refs/heads/*:refs/remotes/origin/*",
       ]),
     ])
     expect(await git(repo, "rev-parse", "refs/remotes/origin/issue/feature")).toBe(featureSha)
 
-    await git(repo, "switch", "-qc", "issue/stale")
-    await writeFile(join(repo, "stale.txt"), "stale\n")
-    await git(repo, "add", "stale.txt")
-    await git(repo, "commit", "-qm", "stale feature")
-    const staleSha = await git(repo, "rev-parse", "HEAD")
+    await git(repo, "switch", "-qc", "issue/recoverable")
+    await writeFile(join(repo, "recoverable.txt"), "recoverable\n")
+    await git(repo, "add", "recoverable.txt")
+    await git(repo, "commit", "-qm", "recoverable feature")
+    const recoverableSha = await git(repo, "rev-parse", "HEAD")
     await git(repo, "switch", "-q", "main")
-    await git(repo, "push", "-q", "origin", "issue/stale")
+    await git(repo, "push", "-q", "origin", "issue/recoverable")
     await app.bays.submit({
-      branch: "issue/stale",
-      headSha: staleSha,
+      branch: "issue/recoverable",
+      headSha: recoverableSha,
       base: "main",
-      issue: "@issue/stale",
+      issue: "@issue/recoverable",
       draft: true,
     })
-    await git(repo, "push", "-q", "origin", "--delete", "issue/stale")
-    await git(repo, "update-ref", "refs/remotes/origin/issue/stale", staleSha)
+    await git(repo, "push", "-q", "origin", "--delete", "issue/recoverable")
+    await git(repo, "update-ref", "refs/remotes/origin/issue/recoverable", recoverableSha)
     commands.length = 0
 
-    const stale = await app.bays.open({
-      name: "stale",
-      branch: "issue/stale",
-      issue: "@issue/stale",
+    const recoverable = await app.bays.open({
+      name: "recoverable",
+      branch: "issue/recoverable",
+      issue: "@issue/recoverable",
     })
-    const staleJobs = await app.jobs.runMany(app.jobs.requested(stale), { runner: "test", leaseMs: 60_000 })
+    const recoverableJobs = await app.jobs.runMany(app.jobs.requested(recoverable), {
+      runner: "test",
+      leaseMs: 60_000,
+    })
 
-    expect(staleJobs).toEqual([
-      expect.objectContaining({
-        status: "failed",
-        error: expect.objectContaining({
-          code: "provision-failed",
-          message: expect.stringContaining("has no remote or tracking carrier"),
-        }),
-      }),
-    ])
+    expect(recoverableJobs.every((job) => job.status === "passed")).toBe(true)
     expect(remoteCommands()).toEqual([
       expect.arrayContaining([
         "git",
@@ -595,12 +589,11 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
         "fetch",
         "--no-recurse-submodules",
         "--quiet",
-        "--prune",
         "origin",
         "+refs/heads/*:refs/remotes/origin/*",
       ]),
     ])
-    expect(await git(repo, "for-each-ref", "--format=%(refname)", "refs/remotes/origin/issue/stale")).toBe("")
+    expect(await git(repo, "rev-parse", "refs/remotes/origin/issue/recoverable")).toBe(recoverableSha)
   })
 
   it("adds one queue-authority fetch per same-base cycle instead of one per PR", async () => {
