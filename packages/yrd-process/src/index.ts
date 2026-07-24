@@ -362,7 +362,7 @@ export function createProcess(
             terminate()
           }, request.timeoutMs)
         }
-        const capturesDone =
+        const capturesDone: Promise<readonly [string, string]> =
           child.stdout === null || child.stderr === null
             ? Promise.resolve(["", ""] as const)
             : Promise.all([capture(child.stdout, "stdout"), capture(child.stderr, "stderr")])
