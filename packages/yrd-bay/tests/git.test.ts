@@ -723,6 +723,47 @@ describe("createGitWorkspace", () => {
     expect((await git(bay.path, ["rev-parse", "HEAD"])).stdout).toBe(remoteHead)
   })
 
+  it("refuses a remote-tracking head that changed after its provisioning snapshot", async () => {
+    const { root, repo, intake } = await repository()
+    await git(repo, ["remote", "add", "origin", intake])
+    await git(repo, ["push", "-qu", "origin", "main"])
+    const branch = "task/snapshot-race"
+    await git(repo, ["switch", "-qc", branch])
+    await writeFile(join(repo, "snapshot.txt"), "pinned\n")
+    await git(repo, ["add", "snapshot.txt"])
+    await git(repo, ["commit", "-qm", "pinned branch head"])
+    const snapshotHead = (await git(repo, ["rev-parse", "HEAD"])).stdout
+    await git(repo, ["push", "-qu", "origin", branch])
+    await writeFile(join(repo, "later.txt"), "moved\n")
+    await git(repo, ["add", "later.txt"])
+    await git(repo, ["commit", "-qm", "move tracking after snapshot"])
+    const movedHead = (await git(repo, ["rev-parse", "HEAD"])).stdout
+    await git(repo, ["switch", "-q", "main"])
+    await git(repo, ["branch", "-D", branch])
+    await git(repo, ["update-ref", `refs/remotes/origin/${branch}`, movedHead])
+
+    await using process = createProcess()
+    const adapter = await workspace(process, { repo, baysRoot: join(root, "bays") })
+    const provisioned = await adapter.provision(
+      {
+        bay: "B1",
+        name: "snapshot-race",
+        branch,
+        base: "main",
+        baseSha: (await git(repo, ["rev-parse", "main"])).stdout,
+        issue: "@km/test/snapshot-race",
+        reuseBranch: true,
+        remoteBranch: { branch, headSha: snapshotHead },
+      },
+      { id: "provision-B1", attempt: 1, runner: "test", signal: new AbortController().signal },
+    )
+
+    expect(provisioned).toMatchObject({
+      status: "failed",
+      error: { code: "provision-failed", message: expect.stringContaining("changed after its authority snapshot") },
+    })
+  })
+
   it("refreshes the committed head and reports uncommitted work", async () => {
     const { root, repo } = await repository()
     await using process = createProcess()
