@@ -93,7 +93,15 @@ export async function materializeSubmodules(
 
     const entries = await submodules(git, worktree)
     if (!Array.isArray(entries)) return entries
-    const prepared: Array<Readonly<{ args: readonly string[]; nestedReference: string | undefined; path: string }>> = []
+    const resolved: Array<
+      Readonly<{
+        canBorrow: boolean
+        name: string
+        path: string
+        referenceSubmodule: string | undefined
+        required: string
+      }>
+    > = []
     for (const { name, path } of entries) {
       const required = await requiredGitlink(git, worktree, path)
       if (required === undefined) {
@@ -101,11 +109,18 @@ export async function materializeSubmodules(
       }
       const referenceSubmodule = reference === undefined ? undefined : join(reference, path)
       const canBorrow = referenceSubmodule !== undefined && (await referenceContains(git, referenceSubmodule, required))
+      resolved.push({ canBorrow, name, path, referenceSubmodule, required })
+    }
+    if (resolved.length > 0) {
+      const initArgs = ["submodule", "init", "--", ...resolved.map(({ path }) => path)]
       const initialized =
         git.mutateConfig === undefined
-          ? await git.run(worktree, ["submodule", "init", "--", path], true)
-          : await git.mutateConfig(worktree, ["submodule", "init", "--", path])
+          ? await git.run(worktree, initArgs, true)
+          : await git.mutateConfig(worktree, initArgs)
       if (initialized.code !== 0) return initialized
+    }
+    const prepared: Array<Readonly<{ args: readonly string[]; nestedReference: string | undefined; path: string }>> = []
+    for (const { canBorrow, name, path, referenceSubmodule, required } of resolved) {
       const configuredUrl = await git.run(worktree, ["config", "--get", `submodule.${name}.url`], true)
       if (configuredUrl.code !== 0 || configuredUrl.stdout.trim() === "") {
         return {
@@ -114,34 +129,35 @@ export async function materializeSubmodules(
           stderr: configuredUrl.stderr || `could not resolve configured URL for submodule '${name}' in ${worktree}`,
         }
       }
+      const borrowFrom = canBorrow && referenceSubmodule !== undefined ? referenceSubmodule : undefined
       const args = [
         "-c",
         `submodule.alternateLocation=${SUBMODULE_ALTERNATE_LOCATION}`,
         "-c",
         `submodule.alternateErrorStrategy=${SUBMODULE_ALTERNATE_ERROR_STRATEGY}`,
-        ...(canBorrow
-          ? [
+        ...(borrowFrom === undefined
+          ? []
+          : [
               "-c",
               "protocol.file.allow=always",
               "-c",
-              `url.${pathToFileURL(referenceSubmodule).href}.insteadOf=${configuredUrl.stdout.trim()}`,
-            ]
-          : []),
+              `url.${pathToFileURL(borrowFrom).href}.insteadOf=${configuredUrl.stdout.trim()}`,
+            ]),
         "submodule",
         "update",
         "--init",
         ...(options.force ? ["--force"] : []),
-        ...(canBorrow ? ["--reference", referenceSubmodule] : []),
+        ...(borrowFrom === undefined ? [] : ["--reference", borrowFrom]),
         "--",
         path,
       ]
-      if (canBorrow) {
+      if (borrowFrom !== undefined) {
         borrowed += 1
       } else if (referenceSubmodule !== undefined) {
         remoteFallbacks += 1
         log(`[submodules] ${path}: local store lacks ${required.slice(0, 12)}; using the configured remote fallback`)
       }
-      prepared.push({ args, nestedReference: canBorrow ? referenceSubmodule : undefined, path })
+      prepared.push({ args, nestedReference: borrowFrom, path })
     }
     for (let start = 0; start < prepared.length; start += MAX_CONCURRENT_SUBMODULE_UPDATES) {
       const results = await Promise.all(
