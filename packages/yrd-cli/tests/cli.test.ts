@@ -916,7 +916,7 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("pr", "submit", "topic/wait-json", "--wait", "--json"), json.io), json.stderr()).toBe(
       1,
     )
-    const submitProjection = JSON.parse(json.stdout())
+    const submitProjection = JSON.parse(json.stdout()) as Readonly<{ prs: readonly unknown[] }>
     expect(submitProjection).toMatchObject({
       command: "pr.submit",
       prs: [
@@ -2858,7 +2858,7 @@ describe("runYrd", () => {
 
     const status = outputIO({ cwd: "/repo/.bays/B1" })
     expect(await runYrd(app, yrd("pr", "status", "--json"), status.io), status.stderr()).toBe(0)
-    const statusProjection = JSON.parse(status.stdout())
+    const statusProjection = JSON.parse(status.stdout()) as Readonly<{ pr: unknown }>
     expect(statusProjection).toMatchObject({
       command: "pr.status",
       pr: { id: "PR1", status: "needs-author" },
@@ -9643,7 +9643,7 @@ describe("typed issue landing bridge", () => {
     const runs = outputIO()
     expect(await runYrd(app, yrd("pr", "runs", "PR1", "--json"), runs.io), runs.stderr()).toBe(0)
     expect(trackerBridgeV2(runs.stdout())).toEqual(v2)
-    const runsProjection = JSON.parse(runs.stdout())
+    const runsProjection = JSON.parse(runs.stdout()) as Readonly<{ pr: unknown }>
     expect(runsProjection).toMatchObject({
       command: "pr.runs",
       pr: { id: "PR1", status: "needs-author" },
