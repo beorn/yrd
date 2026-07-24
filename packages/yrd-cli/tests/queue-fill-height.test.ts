@@ -47,13 +47,13 @@ describe("queue timeline fill height (item 5)", () => {
       // No `... N more` residue: every retained row is reachable in the pane.
       expect(app.text, "fill suppresses the pre-slice residue").not.toMatch(/\.\.\. \d+ more/u)
 
-      // The FLOW box anchors below the filled rows — the row block
+      // The STATS box anchors below the filled rows — the row block
       // claims the slack, so the box sits after the last PR row.
       const rows = app.text.split("\n")
-      const flowY = rows.findIndex((row) => row.includes("╭─ FLOW "))
+      const statsY = rows.findIndex((row) => row.includes("╭─ STATS "))
       const lastRowY = rows.reduce((last, row, index) => (/pr#\d\d\.\d/u.test(row) ? index : last), -1)
-      expect(flowY, "FLOW box renders").toBeGreaterThan(0)
-      expect(flowY, "FLOW box sits below the filled rows").toBeGreaterThan(lastRowY)
+      expect(statsY, "STATS box renders").toBeGreaterThan(0)
+      expect(statsY, "STATS box sits below the filled rows").toBeGreaterThan(lastRowY)
     } finally {
       app.unmount()
     }

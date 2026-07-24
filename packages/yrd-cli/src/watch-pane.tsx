@@ -50,7 +50,7 @@ import { reduceRunCancelKey } from "./watch-cancel.ts"
 const LIST_NATURAL_WIDTH = 80
 const DETAIL_NATURAL_WIDTH = 72
 // This compact primary height reserves the queue title, runner, filter, table
-// header, and useful data rows. The taller grouped FLOW/TIME summary has its
+// header, and useful data rows. The taller calendar STATS panel has its
 // own responsive height gate and is omitted when a split only fits this floor.
 const LIST_NATURAL_HEIGHT = 19
 const DETAIL_NATURAL_HEIGHT = 12
@@ -1513,7 +1513,7 @@ export function QueueWatchFrame({
     // The QUEUE pane is its own selection scope (item 4a): a drag started here
     // resolves to this Box as the nearest `contain` boundary, so it never grows
     // across the SplitPane divider into the DETAIL pane. `contain` keeps the
-    // rows selectable while bounding the range; the STATUS/FLOW/TIME boxes nest
+    // rows selectable while bounding the range; the STATUS/STATS boxes nest
     // their own tighter scopes inside it.
     <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0} paddingX={1} userSelect="contain">
       {timeline}

@@ -72,7 +72,6 @@ import {
   prListRows,
   prDetailData,
   projectedPrStatus,
-  queueRevisionKey,
   queueRunRevisionClocks,
   queueTimelineAdmissionTimes,
   queueTimelineProjection,
@@ -2152,14 +2151,13 @@ async function applyPrSelectionVerb(
   let checks: readonly PRCheckViewRecord[] = prCheckRecords(app, selected)
   if (options.follow === true && !checksTerminal(checks)) checks = await followCheckRecords(app, selected, checks, io)
   const currentPrs = selected.map((selector) => requiredPr(app, selector))
-  const eligibilities = currentPrs.map((pr) => app.queue.eligibility(pr.id))
+  const current = currentPrs.map((pr) => ({ pr, eligibility: app.queue.eligibility(pr.id) }))
   await printResult(
     io,
     jsonEnabled(options),
     {
       command,
-      prs: currentPrs.map((pr, index) => {
-        const eligibility = eligibilities[index]!
+      prs: current.map(({ pr, eligibility }) => {
         return {
           ...projectPrTaskStatusWithEligibility(pr, eligibility),
           eligibility: projectEligibilityTaskStatus(eligibility),
@@ -2172,7 +2170,7 @@ async function applyPrSelectionVerb(
       prs: currentPrs,
       runs: followed,
       checks,
-      eligibilities,
+      eligibilities: current.map(({ eligibility }) => eligibility),
       now: io.now?.() ?? Date.now(),
     }),
   )
@@ -3207,6 +3205,55 @@ type QueuePrDiffResolver = Readonly<{
   resolve(cwd: string, pr: PR, revision: number, now?: number): Promise<QueuePrDiff>
 }>
 
+type QueueAttemptResolver = Readonly<{
+  resolve(state: YrdCliState): Promise<readonly QueueAttempt[]>
+}>
+
+function queueAttemptFingerprint(state: YrdCliState): string {
+  return Object.values(state.jobs.byId)
+    .map((job) =>
+      JSON.stringify([
+        job.id,
+        job.definition,
+        job.revision,
+        job.status,
+        job.attempt,
+        "startedAt" in job ? job.startedAt : null,
+        "finishedAt" in job ? job.finishedAt : null,
+      ]),
+    )
+    .toSorted()
+    .join("\n")
+}
+
+/**
+ * Cache the immutable attempt projection between relevant Job transitions.
+ * Runner heartbeat/lease timestamps deliberately do not enter the fingerprint,
+ * so a one-second watch tick never triggers another full journal replay.
+ */
+export function createQueueAttemptResolver(app: Pick<YrdCliApp, "events">): QueueAttemptResolver {
+  let fingerprint: string | undefined
+  let cached: readonly QueueAttempt[] = []
+  let pending: Promise<readonly QueueAttempt[]> | undefined
+  return {
+    async resolve(state) {
+      const next = queueAttemptFingerprint(state)
+      if (next === fingerprint) return cached
+      if (pending !== undefined) return pending
+      pending = queueLogAttempts(app.events()).then((attempts) => {
+        cached = Object.freeze(attempts)
+        fingerprint = next
+        return cached
+      })
+      try {
+        return await pending
+      } finally {
+        pending = undefined
+      }
+    },
+  }
+}
+
 /** Async, focus-scoped diff resolver. Missing immutable objects are retried only
  * after a bounded window, while successful revision deltas remain stable. */
 export function createQueuePrDiffResolver(
@@ -3258,9 +3305,10 @@ export async function queueListSnapshot(
     includeOutputs?: boolean
     focus?: QueueWatchFocus
     diffResolver?: QueuePrDiffResolver
+    attemptResolver?: QueueAttemptResolver
   }> = {},
 ): Promise<QueueListSnapshot> {
-  const { includeOutputs = false, focus, diffResolver } = details
+  const { includeOutputs = false, focus, diffResolver, attemptResolver } = details
   // The watch loop reuses one app across ticks, and app.state() is the mount-time
   // journal projection — it never tails cross-process runner appends on its own.
   // Fold new frames first so each snapshot's rows are as fresh as its clock;
@@ -3273,6 +3321,7 @@ export async function queueListSnapshot(
   const now = io.now?.() ?? Date.now()
   const base = results[0]?.base ?? baseIdentity(requestedBase)
   const runner = activeResidentRunner(await residentRunnerStatus(io.cwd ?? process.cwd()))
+  const attempts = await (attemptResolver?.resolve(state) ?? queueLogAttempts(app.events()))
   const projection = queueTimelineProjection(results, {
     now,
     windowMs: queueTimelineWindow(options.since),
@@ -3282,6 +3331,7 @@ export async function queueListSnapshot(
     latest: options.latest === true,
     rowLimit: queueTimelineRowLimit(io),
     submissionTimes: queueTimelineAdmissionTimes(results),
+    attempts,
     siblingBases: queueBases(state),
     base,
     state: state.bays,
@@ -3319,9 +3369,7 @@ export async function queueListSnapshot(
   const outputRunIds = new Set(
     outputResults.flatMap((result) => [...result.running, ...result.waiting, ...result.finished].map((run) => run.id)),
   )
-  const outputAttempts = includeOutputs
-    ? (await queueLogAttempts(app.events())).filter((attempt) => outputRunIds.has(attempt.run))
-    : []
+  const outputAttempts = includeOutputs ? attempts.filter((attempt) => outputRunIds.has(attempt.run)) : []
   const outputs =
     includeOutputs && io.artifactRoot !== undefined
       ? await queueArtifactOutputs(outputResults, io.artifactRoot, outputAttempts)
@@ -3475,11 +3523,17 @@ function initSourceLabel(row: InitRow): string {
 }
 
 function renderInitTable(rows: readonly InitRow[]): string {
-  const header = ["SUBMODULE", "BRANCH", "SOURCE"] as const
-  const cells = rows.map((row) => [row.path, row.branch ?? "-", initSourceLabel(row)] as const)
-  const widths = header.map((label, column) => Math.max(label.length, ...cells.map((cell) => cell[column]!.length)))
-  const formatRow = (cell: readonly string[]): string =>
-    cell.map((text, column) => (column === cell.length - 1 ? text : text.padEnd(widths[column]!))).join("  ")
+  type TableRow = readonly [submodule: string, branch: string, source: string]
+  type TableWidths = readonly [submodule: number, branch: number, source: number]
+  const header: TableRow = ["SUBMODULE", "BRANCH", "SOURCE"]
+  const cells: readonly TableRow[] = rows.map((row) => [row.path, row.branch ?? "-", initSourceLabel(row)])
+  const widths: TableWidths = [
+    Math.max(header[0].length, ...cells.map(([submodule]) => submodule.length)),
+    Math.max(header[1].length, ...cells.map(([, branch]) => branch.length)),
+    Math.max(header[2].length, ...cells.map(([, , source]) => source.length)),
+  ]
+  const formatRow = ([submodule, branch, source]: TableRow): string =>
+    `${submodule.padEnd(widths[0])}  ${branch.padEnd(widths[1])}  ${source}`
   return [formatRow(header), ...cells.map(formatRow)].join("\n")
 }
 
@@ -4471,11 +4525,13 @@ async function watchQueue(
   const interval = 1_000
   const scope = io.scope ?? app.scope
   const diffResolver = createQueuePrDiffResolver()
+  const attemptResolver = createQueueAttemptResolver(app)
   const load = async (focus?: QueueWatchFocus): Promise<QueueListSnapshot> =>
     queueListSnapshot(app, filters, options, io, {
       includeOutputs: !jsonEnabled(options) && focus !== undefined,
       focus,
       diffResolver,
+      attemptResolver,
     })
 
   if (!jsonEnabled(options)) {

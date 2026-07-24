@@ -22,6 +22,18 @@ export type StatusPresentation = Readonly<{
 }>
 
 export type FailureStatusClass = "failed" | "env" | "stale" | "timeout" | "canceled" | "needs-author"
+export type FailureBreakdownClass = "check-failed" | "env" | "stale" | "timeout" | "config-drift" | "canceled" | "other"
+
+export const FAILURE_BREAKDOWN_CLASSES: readonly FailureBreakdownClass[] = [
+  "check-failed",
+  "env",
+  "stale",
+  "timeout",
+  "config-drift",
+  "canceled",
+  "other",
+]
+
 export type StatusAutomation = "auto-requeue" | "auto-recut" | "none"
 export type FailureDisposition = Readonly<{
   state: FailureStatusClass
@@ -72,11 +84,15 @@ const STATUS_ALIASES: Readonly<Record<string, StatusPresentationState>> = {
   legacy: "rejected",
 }
 
+function knownStatusPresentationState(normalized: string): StatusPresentationState | null {
+  if (Object.hasOwn(STATUS_PRESENTATIONS, normalized)) return normalized as StatusPresentationState
+  return STATUS_ALIASES[normalized] ?? null
+}
+
 export function statusPresentationState(status: string): StatusPresentationState {
   const normalized = status.trim().toLocaleLowerCase()
-  if (Object.hasOwn(STATUS_PRESENTATIONS, normalized)) return normalized as StatusPresentationState
-  const alias = STATUS_ALIASES[normalized]
-  if (alias !== undefined) return alias
+  const state = knownStatusPresentationState(normalized)
+  if (state !== null) return state
   throw new TypeError(`yrd: unknown presentation status '${status}'`)
 }
 
@@ -132,4 +148,25 @@ export function failureDisposition(code: string): FailureDisposition {
  * named, never an uncorroborated cause: `job-lost` is a lease timeout. */
 export function failureStatusClass(code: string): FailureStatusClass {
   return failureDisposition(code).state
+}
+
+/** The statistics breakdown is a projection of the same durable failure
+ * classifier and presentation aliases used by StatusNotice. Only the two
+ * operator-requested classes are intentionally more specific. */
+export function failureBreakdownClass(code: string): FailureBreakdownClass {
+  const normalized = code.trim().toLocaleLowerCase()
+  if (normalized === "check-failed") return "check-failed"
+  if (normalized === "config-drift") return "config-drift"
+  const status = failureStatusClass(normalized)
+  if (status === "env" || status === "stale" || status === "timeout" || status === "canceled") return status
+  const terminalStatus = knownStatusPresentationState(normalized)
+  if (
+    terminalStatus === "env" ||
+    terminalStatus === "stale" ||
+    terminalStatus === "timeout" ||
+    terminalStatus === "canceled"
+  ) {
+    return terminalStatus
+  }
+  return "other"
 }

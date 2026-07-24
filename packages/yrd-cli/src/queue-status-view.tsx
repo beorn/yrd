@@ -59,6 +59,7 @@ import {
   TaskStatusValue,
 } from "./status-view.tsx"
 import {
+  failureBreakdownClass,
   failureDisposition,
   failureStatusClass,
   statusPresentation,
@@ -86,7 +87,17 @@ import {
   type TaskStatus,
   type TaskStatusFields,
 } from "./task-status.ts"
-import { TimeStatsBox, TIME_STATS_TWO_ACROSS_MIN_WIDTH } from "./time-stats-box.tsx"
+import { QueueStatsPanel } from "./time-stats-box.tsx"
+import { finiteNonnegative, numericDistribution } from "./numeric-distribution.ts"
+import {
+  type QueueTerminalFact,
+  type QueueTerminalMemberFact,
+  type QueueTerminalOutcome,
+} from "./queue-terminal-facts.ts"
+import { TitledBox } from "./queue-view-primitives.tsx"
+
+export type { QueueTerminalFact, QueueTerminalMemberFact, QueueTerminalOutcome } from "./queue-terminal-facts.ts"
+export { TitledBox, timelineMetric } from "./queue-view-primitives.tsx"
 
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 
@@ -173,6 +184,8 @@ export type QueueTimelineGroup = "draft" | "pending" | "running" | "completed"
 export type QueueTimelineRevisionLineage = Readonly<{
   pr: string
   revisions: readonly number[]
+  /** Draft/registration clock when retained; absent for legacy submissions. */
+  registeredAt?: string
   sourceReadyAt?: string
 }>
 
@@ -264,10 +277,10 @@ export type QueueTimelineProjection = Readonly<{
   rows: readonly QueueTimelineProjectedRow[]
   details: readonly QueueShowData[]
   metrics: QueueFlowMetrics
-  /** Every retained completed-Run terminal fact, for the windowed FLOW/TIME boxes. */
+  /** Every retained completed-Run terminal fact, for the calendar STATS panel. */
   timeStatsFacts: readonly QueueTerminalFact[]
   /** Oldest timestamped journal record (ms), or null when none — drives the "-" coverage gate. */
-  earliestEventMs: number | null
+  earliestFactMs: number | null
 }>
 
 export type QueueTimelineProjectionOptions = Readonly<{
@@ -290,24 +303,6 @@ export type QueueTimelineProjectionOptions = Readonly<{
   base?: string
   state?: BaysState
   runner?: QueueTimelineRunner | null
-}>
-
-export type QueueTerminalOutcome =
-  | "integrated"
-  | "rejected"
-  | "environment-refused"
-  | "stale"
-  | "lost"
-  | "legacy"
-  | "refused"
-  | "canceled"
-
-export type QueueTerminalFact = Readonly<{
-  run: string
-  terminalAtMs: number
-  outcome: QueueTerminalOutcome
-  activeMs: number | null
-  queueWaitMs: readonly number[]
 }>
 
 export type DurationDistribution = Readonly<{
@@ -356,7 +351,7 @@ export type QueueFlowMetrics = Readonly<{
     allTerminal: DurationDistribution
     integratedOnly: DurationDistribution
     // Active duration of every non-integrated terminal Run.
-    // Drives the FLOW / TIME / FAILED section; the complement of integratedOnly.
+    // Retained JSON aggregate complement of integratedOnly.
     failedOnly: DurationDistribution
   }>
   queueWait: QueueWaitDistribution
@@ -741,38 +736,15 @@ function currentTerminalFact(pr: PR): PRRevisionTerminal | undefined {
   return { status: pr.status, at }
 }
 
-function finiteNonnegative(value: number, subject: string): number {
-  if (!Number.isFinite(value)) throw new TypeError(`yrd: ${subject} must be finite`)
-  if (value < 0) throw new RangeError(`yrd: ${subject} must not be negative`)
-  return value
-}
-
-function arithmeticMedian(sorted: readonly number[]): number | null {
-  if (sorted.length === 0) return null
-  const upperIndex = Math.floor(sorted.length / 2)
-  const upper = sorted[upperIndex]
-  if (upper === undefined) return null
-  if (sorted.length % 2 === 1) return upper
-  const lower = sorted[upperIndex - 1]
-  return lower === undefined ? null : (lower + upper) / 2
-}
-
-function nearestRank(sorted: readonly number[], percentile: number): number | null {
-  if (sorted.length === 0) return null
-  return sorted[Math.max(0, Math.ceil(percentile * sorted.length) - 1)] ?? null
-}
-
 function durationDistribution(values: readonly number[]): DurationDistribution {
-  const sorted = values.toSorted((left, right) => left - right)
-  const n = sorted.length
-  if (n === 0) return { n, minMs: null, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null }
+  const { n, min, avg, p50, p90, max } = numericDistribution(values, "FLOW duration sample")
   return {
     n,
-    minMs: sorted[0] ?? null,
-    avgMs: sorted.reduce((sum, value) => sum + value, 0) / n,
-    p50Ms: arithmeticMedian(sorted),
-    p90Ms: nearestRank(sorted, 0.9),
-    maxMs: sorted[n - 1] ?? null,
+    minMs: min,
+    avgMs: avg,
+    p50Ms: p50,
+    p90Ms: p90,
+    maxMs: max,
   }
 }
 
@@ -1653,10 +1625,12 @@ function timelineRevisionLineage(pr: PR, revision = pr.revision): QueueTimelineR
     }
   }
   const revisions = prRevisionLineage(pr, revision)
+  const registeredAt = revisions[0]?.pushedAt
   const sourceReadyAt = prSourceReadyAt(pr, revision)
   return {
     pr: pr.id,
     revisions: revisions.map((candidate) => candidate.revision),
+    ...(registeredAt === undefined ? {} : { registeredAt }),
     ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
   }
 }
@@ -2011,24 +1985,77 @@ export function queueTimelineAdmissionTimes(results: readonly QueueStatusResult[
  * queue wait. Pass the window-filtered rows for the single-window `metrics`, or
  * the raw rows for the windowed time-stats fact set.
  */
-function foldTerminalFacts(rows: readonly QueueTimelineProjectedRow[]): QueueTerminalFact[] {
+function failedAttemptsByRun(attempts: readonly QueueAttempt[]): ReadonlyMap<string, number> {
+  const byRun = new Map<string, number>()
+  for (const attempt of attempts) {
+    if (attempt.outcome === "passed") continue
+    byRun.set(attempt.run, (byRun.get(attempt.run) ?? 0) + 1)
+  }
+  return byRun
+}
+
+function terminalMemberFact(
+  row: QueueTimelineProjectedRow,
+  run: string,
+  terminalAt: string,
+  failedAttempts: ReadonlyMap<string, number>,
+): QueueTerminalMemberFact {
+  const lineage = row.revisionLineage.find((candidate) => candidate.pr === row.pr)
+  const totalStart = lineage?.registeredAt ?? lineage?.sourceReadyAt
+  const totalMs =
+    totalStart === undefined ? null : (elapsedMs(totalStart, terminalAt, `PR '${row.pr}' total duration`) ?? null)
+  return {
+    pr: row.pr,
+    revision: row.revision,
+    totalMs,
+    totalApproximate: totalStart !== undefined && lineage?.registeredAt === undefined,
+    // Agent-held time becomes journal truth with the draft/claim model (21707).
+    // Queue data must never stand in for it.
+    codingMs: null,
+    jobRunMs: row.activeMs,
+    retries: Math.max(0, (lineage?.revisions.length ?? 1) - 1) + (failedAttempts.get(run) ?? 0),
+  }
+}
+
+function foldTerminalFacts(
+  rows: readonly QueueTimelineProjectedRow[],
+  attempts: readonly QueueAttempt[],
+): QueueTerminalFact[] {
   const byRun = new Map<string, QueueTerminalFact>()
+  const failedAttempts = failedAttemptsByRun(attempts)
   for (const row of rows) {
-    if (row.group !== "completed" || row.timestampMs === null || row.run === undefined) continue
+    if (row.group !== "completed" || row.timestamp === null || row.timestampMs === null || row.run === undefined) {
+      continue
+    }
     const key = `${row.base}:${row.run}`
     const fact = byRun.get(key)
     const waits = row.queueWaitMs === null ? [] : [row.queueWaitMs]
+    const outcome = terminalOutcome(row.status)
+    const failureClass = outcome === "integrated" ? null : failureBreakdownClass(row.failure?.code ?? row.status)
+    const member = terminalMemberFact(row, row.run, row.timestamp, failedAttempts)
     if (fact === undefined) {
       byRun.set(key, {
         run: row.run,
         terminalAtMs: row.timestampMs,
-        outcome: terminalOutcome(row.status),
+        outcome,
+        failureClass,
         activeMs: row.totalMs,
         queueWaitMs: waits,
+        members: [member],
       })
       continue
     }
-    byRun.set(key, { ...fact, queueWaitMs: [...fact.queueWaitMs, ...waits] })
+    if (fact.outcome !== outcome || fact.failureClass !== failureClass) {
+      throw new Error(`yrd: Run '${row.run}' member rows disagree on terminal outcome`)
+    }
+    if (fact.members.some((candidate) => candidate.pr === member.pr)) {
+      throw new Error(`yrd: Run '${row.run}' repeats terminal PR member '${member.pr}'`)
+    }
+    byRun.set(key, {
+      ...fact,
+      queueWaitMs: [...fact.queueWaitMs, ...waits],
+      members: [...fact.members, member],
+    })
   }
   return [...byRun.values()]
 }
@@ -2082,19 +2109,18 @@ export function queueTimelineProjection(
   const metricsRows = metricsWindowMs === options.windowMs ? displayed : selectRows(options.now - metricsWindowMs)
   // Metrics stay per-Run: member rows of one batched Run fold into one terminal
   // fact carrying every visible member's queue wait.
-  const terminalFacts = foldTerminalFacts(metricsRows)
-  // The windowed FLOW/TIME boxes read their own rolling windows (hour/day/week/
-  // month) off the SAME consolidated queueFlowMetrics aggregate. It folds the
-  // FULL retained fact horizon (rawRows, before any window bound), NOT the
-  // display `windowMs` listing nor the 24h `metricsWindowMs` default — so WK/MON
-  // read seven/thirty days of Runs and never inherit the 24h metrics window. The
-  // per-box span lives in time-stats.ts; `earliestEventMs` gates each with "-"
-  // until history reaches back a full window. Unfiltered by the operator's view
-  // so a health readout never hides failures behind a status/term filter.
-  const timeStatsFacts = foldTerminalFacts(rawRows)
-  // The journal's data horizon: the oldest timestamped record we hold. A rolling
-  // window renders `-` until the horizon reaches back a full span.
-  const earliestEventMs = rawRows.reduce<number | null>(
+  const terminalFacts = foldTerminalFacts(metricsRows, options.attempts ?? [])
+  // The calendar STATS panel folds the FULL retained fact horizon (rawRows,
+  // before any window bound), NOT the display `windowMs` listing nor the
+  // `metricsWindowMs` default. `earliestFactMs` gates each calendar bucket
+  // until retained history reaches its start. Facts stay unfiltered by the
+  // operator's view so a health readout never hides failures behind a filter.
+  const timeStatsFacts = foldTerminalFacts(rawRows, options.attempts ?? [])
+  // The retained terminal-fact horizon: the oldest timestamped row this
+  // projection can still count. This is intentionally more conservative than
+  // the journal's first event because compacted Run facts cannot prove a zero;
+  // a calendar bucket renders `—` until retained facts reach its start.
+  const earliestFactMs = rawRows.reduce<number | null>(
     (earliest, row) =>
       row.timestampMs === null ? earliest : earliest === null ? row.timestampMs : Math.min(earliest, row.timestampMs),
     null,
@@ -2143,7 +2169,7 @@ export function queueTimelineProjection(
     details,
     metrics: queueFlowMetrics(terminalFacts, { now: options.now, windowMs: metricsWindowMs, oldestOpenMs }),
     timeStatsFacts,
-    earliestEventMs,
+    earliestFactMs,
   }
 }
 
@@ -3106,21 +3132,6 @@ function queueLogSubmissionTime(
   return clock.admittedBy === "submission" ? clock.submittedAt : undefined
 }
 
-export function timelineMetric(value: number | null): string {
-  if (value === null) return "-"
-  const duration = mediaDuration(value)
-  if (duration.length <= 6) return duration
-
-  const totalMinutes = Math.floor(value / 60_000)
-  const totalHours = Math.floor(totalMinutes / 60)
-  if (totalHours < 100) return `${totalHours}h${String(totalMinutes % 60).padStart(2, "0")}m`
-
-  const totalDays = Math.floor(totalHours / 24)
-  if (totalDays < 100) return `${totalDays}d${String(totalHours % 24).padStart(2, "0")}h`
-  if (totalDays < 100_000) return `${totalDays}d`
-  return ">99kd"
-}
-
 // The queue content surface is left-flush (15e killed the dead left gutter)
 // and capped at 160 cells on wide viewports.
 const TIMELINE_CONTENT_CAP = 160
@@ -3352,7 +3363,7 @@ function historicalStepP50Ms(
       ),
     )
     .toSorted((left, right) => left - right)
-  return arithmeticMedian(durations)
+  return numericDistribution(durations, `historical '${step}' duration`).p50
 }
 
 function noticeExplanation(
@@ -3958,113 +3969,6 @@ function runnerTiming(projection: QueueTimelineProjection): Readonly<{ ageMs: nu
 }
 
 /**
- * The one title-in-border chrome idiom every watch box uses (user directive
- * 2026-07-16): a FULL round border (all four corners) with a LEFT-aligned name
- * label punched into the top edge — `╭─ TITLE ──────╮`. The label inherits the
- * effective border color, so a stale/error box turns border and title red
- * together. `fill` stretches the frame to its parent (pane usage); `padding`
- * widens the inner content padding from the single-row default (`paddingX=1`);
- * `flushTop` drops the top padding so the first content row (e.g. the QUEUE
- * pane's `updated` clock) reads flush beneath the title instead of below a gap.
- */
-export function TitledBox({
-  title,
-  titleRight,
-  borderColor,
-  padding,
-  fill = false,
-  marginTop,
-  flushTop = false,
-  children,
-}: Readonly<{
-  title: string
-  /** Right-aligned label punched into the top edge — `╭─ TITLE ──── LABEL ─╮`
-   *  (user directive 2026-07-21: the RUNNER box carries its uptime/downtime
-   *  timer here). Inherits the effective border color like the left title. */
-  titleRight?: string
-  borderColor?: string
-  padding?: number
-  fill?: boolean
-  marginTop?: number
-  flushTop?: boolean
-  children: React.ReactNode
-}>) {
-  // One resolved border value drives both the border glyphs and the label so
-  // they are provably the same color (the default, or the error-red override).
-  const border = borderColor ?? "$border-default"
-  const bodyPadding =
-    padding === undefined
-      ? { paddingX: 1, paddingTop: flushTop ? 0 : undefined }
-      : flushTop
-        ? { paddingLeft: padding, paddingRight: padding, paddingBottom: padding, paddingTop: 0 }
-        : { padding }
-  return (
-    <Box
-      width="100%"
-      height={fill ? "100%" : undefined}
-      flexDirection="column"
-      minWidth={0}
-      minHeight={0}
-      flexShrink={fill ? 1 : 0}
-      flexGrow={fill ? 1 : undefined}
-      marginTop={marginTop}
-      // Each titled box (STATUS / FLOW / TIME) is its own selection scope
-      // (item 4a): a drag started inside it resolves to this box as the nearest
-      // `contain` boundary, so it never grows into a sibling box or the pane
-      // around it. Nested inside the pane's own scope; `contain` keeps content
-      // selectable while bounding the range.
-      userSelect="contain"
-    >
-      <Box flexDirection="row" width="100%" flexShrink={0} minWidth={0}>
-        <Text color={border} flexShrink={0}>
-          {"╭─ "}
-        </Text>
-        <Text color={border} bold flexShrink={0}>
-          {title}
-        </Text>
-        <Text color={border} flexShrink={0}>
-          {" "}
-        </Text>
-        {/* Flex-grow fill: a top-only round border renders the `─` run that
-            stretches from the label to the rounded top-right corner. */}
-        <Box
-          height={1}
-          flexGrow={1}
-          flexShrink={1}
-          minWidth={0}
-          borderStyle="round"
-          borderColor={border}
-          borderLeft={false}
-          borderRight={false}
-          borderBottom={false}
-        />
-        {titleRight === undefined ? null : (
-          <Text color={border} flexShrink={0}>
-            {` ${titleRight} ─`}
-          </Text>
-        )}
-        <Text color={border} flexShrink={0}>
-          {"╮"}
-        </Text>
-      </Box>
-      <Box
-        borderStyle="round"
-        borderTop={false}
-        borderColor={border}
-        width="100%"
-        flexDirection="column"
-        flexGrow={fill ? 1 : undefined}
-        minWidth={0}
-        minHeight={0}
-        {...bodyPadding}
-      >
-        {children}
-      </Box>
-    </Box>
-  )
-}
-
-/**
  * Adaptive runner clock (user directive 2026-07-21): `ss`, `m:ss`, or
  * `h:mm:ss` depending on magnitude — the RUNNER box always shows a timer.
  */
@@ -4213,11 +4117,8 @@ function TimelineRunnerBox({ projection, live = false }: { projection: QueueTime
   )
 }
 
-// The separately bordered FLOW and TIME boxes share one rolling-window model;
-// TIME's INTEGRATED/FAILED/WAIT groups stack. They render from
-// `time-stats-box.tsx`, which windows the SAME
-// consolidated `queueFlowMetrics` aggregate (throughput + per-24h +
-// oldestOpenMs, landed 36effce43e) across HR/DAY/WK/MON via `time-stats.ts`.
+// The STATS panel projects the retained journal facts into width-adaptive local
+// hour buckets plus fixed calendar periods. It owns no parallel bookkeeping.
 
 /** The four operator-facing status buckets (user respec 2026-07-15). */
 export type QueueTimelineStatusBucket = "open" | "running" | "done" | "failed"
@@ -4474,12 +4375,10 @@ function QueueUpdatedClock({ now }: { now: string }) {
   )
 }
 
-// The grouped round-5 TIME IA occupies 17 rows beside FLOW or 27 when the
-// boxes stack. Preserve fixed queue chrome plus at least two data rows; below
-// that pane height, omit the complete secondary metrics pair instead of
-// collapsing ListView to a zero-height viewport.
-const QUEUE_METRICS_ROW_MIN_PANE_ROWS = 28
-const QUEUE_METRICS_STACK_MIN_PANE_ROWS = 38
+// Preserve fixed queue chrome plus at least two data rows. Below this pane
+// height, omit the secondary STATS panel instead of collapsing ListView to a
+// zero-height viewport.
+const QUEUE_STATS_MIN_PANE_ROWS = 24
 
 function ProjectedQueueTimeline({
   projection,
@@ -4532,8 +4431,6 @@ function ProjectedQueueTimeline({
     rows.some((row) => row.timestamp !== null && row.timestamp.slice(0, 10) !== projection.now.slice(0, 10))
   const layout = timelineCellLayout(rows, includeDate, columns)
   const { rows: viewportRows } = useWindowSize()
-  const metricsMinPaneRows =
-    columns >= TIME_STATS_TWO_ACROSS_MIN_WIDTH ? QUEUE_METRICS_ROW_MIN_PANE_ROWS : QUEUE_METRICS_STACK_MIN_PANE_ROWS
   return (
     <Box width="100%" minWidth={0} minHeight={0} flexGrow={fillHeight ? 1 : undefined}>
       <Box flexGrow={1} flexBasis={0} maxWidth={TIMELINE_CONTENT_CAP} flexDirection="column" minWidth={0} minHeight={0}>
@@ -4566,7 +4463,7 @@ function ProjectedQueueTimeline({
         ) : (
           // In fill mode (item 5) the row block claims the pane's vertical
           // slack so the virtualizing ListView shows as many rows as fit and
-          // scrolls the rest; FLOW/TIME then anchor at the bottom. Off fill it
+          // scrolls the rest; STATS then anchors at the bottom. Off fill it
           // stays content-sized.
           <Box flexDirection="column" minWidth={0} flexShrink={1} minHeight={0} flexGrow={fillHeight ? 1 : undefined}>
             <TimelineHeader layout={layout} />
@@ -4619,12 +4516,12 @@ function ProjectedQueueTimeline({
             />
           </Box>
         )}
-        {/* An empty fill pane's spacer pushes the pills + FLOW/TIME boxes to
+        {/* An empty fill pane's spacer pushes the pills + STATS panel to
             the bottom; a non-empty fill pane grows its row block instead, so no
             spacer competes with it. */}
         {fillHeight && rows.length === 0 ? <Box flexGrow={1} minHeight={0} /> : null}
         {/* FILTER pills + coverage row — BELOW the list (item 2, new vertical
-            order optional STATUS → header → rows → pills → FLOW/TIME). The "... N more" /
+            order optional STATUS → header → rows → pills → STATS). The "... N more" /
             retained coverage reads on the left, the very-dim toggle-pills
             right-align. In fill mode the coverage degrades to EMPTY (the rows
             virtualize and scroll, so nothing is permanently hidden — no "... 0
@@ -4652,11 +4549,11 @@ function ProjectedQueueTimeline({
         </Box>
         {!fillHeight ||
         (availableRows ?? viewportRows) === 0 ||
-        (availableRows ?? viewportRows) >= metricsMinPaneRows ? (
-          <TimeStatsBox
+        (availableRows ?? viewportRows) >= QUEUE_STATS_MIN_PANE_ROWS ? (
+          <QueueStatsPanel
             facts={projection.timeStatsFacts}
             now={projection.now}
-            earliestEventMs={projection.earliestEventMs}
+            earliestFactMs={projection.earliestFactMs}
             width={columns}
           />
         ) : null}
