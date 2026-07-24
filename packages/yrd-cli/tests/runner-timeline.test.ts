@@ -10,7 +10,7 @@ import { pathToFileURL } from "node:url"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import type { Event } from "loggily"
 import { stripAnsi } from "silvery"
-import { formatResidentLogLine } from "../src/runner-timeline.ts"
+import { formatResidentLogLine, timelineStatusGlyph } from "../src/runner-timeline.ts"
 
 // A fixed event time so generic notice prefixes remain deterministic.
 const AT = Date.parse("2026-07-16T18:40:23.000Z")
@@ -41,6 +41,29 @@ function grammar(row: string | undefined): string {
 function visible(row: string | undefined): string {
   return stripAnsi(grammar(row))
 }
+
+describe("shared status presentation vocabulary", () => {
+  it.each([
+    ["queued", "○"],
+    ["running", "●"],
+    ["done", "✓"],
+    ["integrated", "✓"],
+    ["failed", "×"],
+    ["env", "×"],
+    ["stale", "×"],
+    ["timeout", "×"],
+    ["canceled", "−"],
+    ["needs-author", "×"],
+    ["draft", "◌"],
+    ["rejected", "×"],
+  ] as const)("maps %s to %s", (status, glyph) => {
+    expect(timelineStatusGlyph(status)).toBe(glyph)
+  })
+
+  it("rejects an unknown status instead of silently styling it", () => {
+    expect(() => timelineStatusGlyph("mystery-state")).toThrow("unknown presentation status")
+  })
+})
 
 describe("resident runner step-row grammar", () => {
   const stepPassed = log("yrd:jobs:check", "info", "check succeeded", {

@@ -158,6 +158,49 @@ describe("queue step tabs same-run reconciliation (21106)", () => {
     expect(frame).toContain("typecheck found three unsafe assignments")
   })
 
+  it("selects the failing/latest-output step and marks unstarted successors canceled", async () => {
+    const failed = fixtureStep(
+      "check",
+      fixtureJob("J101-check", "failed", {
+        requestedAt: "2026-07-13T11:39:00.000Z",
+        startedAt: "2026-07-13T11:40:00.000Z",
+        finishedAt: "2026-07-13T11:42:00.000Z",
+        error: { code: "check-failed", message: "focused tests failed" },
+      }),
+    )
+    const successor = fixtureStep("integrate")
+    const run = fixtureRun("R101", [STEP_PR], "failed", "2026-07-13T11:40:00.000Z", {
+      finishedAt: "2026-07-13T11:42:00.000Z",
+      error: { code: "check-failed", message: "focused tests failed" },
+      steps: [failed, successor],
+    })
+    const outputs: readonly QueueArtifactOutput[] = [
+      {
+        source: "recorded",
+        run: "R101",
+        step: "check",
+        attempt: 1,
+        path: "/repo/.git/yrd/artifacts/R101/check/attempt-1/stderr.log",
+        text: "the failing assertion is immediately visible\n",
+      },
+    ]
+    const frame = await renderString(
+      h(QueueWorkflowStepTabs, {
+        data: queueShowData(run),
+        outputs,
+        compact: true,
+        active: false,
+        prs: [STEP_PR],
+      }),
+      { width: 110, height: 40, plain: true },
+    )
+
+    expect(frame).toContain("the failing assertion is immediately visible")
+    expect(frame).toMatch(/1: check\s+2: integrate/u)
+    expect(frame).toMatch(/× failed(?:\s+\S+)?\s+− canceled/u)
+    expect(frame).not.toMatch(/2: integrate[\s\S]*○ (?:queued|requested)/u)
+  })
+
   it("renders proof-file and full-output links beside the selected step's inline tail", async () => {
     const stdoutUri = "artifact://R100/check/attempt-1/stdout.log"
     const steps: readonly StepState[] = [

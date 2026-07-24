@@ -4,6 +4,7 @@ import { hyperlink } from "@silvery/ansi"
 import type { Event } from "loggily"
 import { artifactHref, artifactLabel, artifactLocation } from "./artifact-reference.ts"
 import { failureSlug } from "./failure-slug.ts"
+import { statusPresentation } from "./status-presentation.ts"
 
 /**
  * Pure watch-timeline grammar shared by the interactive queue view and the
@@ -27,17 +28,7 @@ export const TIMELINE_BRANCH_ICON = ""
 
 /** Distinct queue lifecycle markers from the settled km/ag watch vocabulary. */
 export function timelineStatusGlyph(status: string): string {
-  if (["checking", "running", "waiting"].includes(status)) return "●"
-  if (["integrated", "passed"].includes(status)) return "✓"
-  if (["rejected", "failed", "lost", "stale", "legacy", "refused", "environment-refused"].includes(status)) {
-    return "×"
-  }
-  if (["withdrawn", "retired", "canceled"].includes(status)) return "−"
-  // Pre-run WIP (draft = clean, rev = a draft with failed-submission history)
-  // gets a hollow dotted marker, distinct from the solid `○` a `ready` row
-  // carries. Color separates draft (muted) from rev (warn).
-  if (status === "draft" || status === "rev") return "◌"
-  return "○"
+  return statusPresentation(status).glyph
 }
 
 /** Coarse human duration (largest unit): the watch timeline's formatDuration. */

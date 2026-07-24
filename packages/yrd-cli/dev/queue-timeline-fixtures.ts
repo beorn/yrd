@@ -224,7 +224,7 @@ export function fixtureJob(id: string, status: Job["status"], options: FixtureJo
 
 export function fixtureStep(
   name: string,
-  job: Job,
+  job?: Job,
   options: Readonly<{
     title?: string
     revision?: string
@@ -240,7 +240,7 @@ export function fixtureStep(
     integrates: options.integrates ?? false,
     needsIntegration: options.needsIntegration ?? false,
     ...(options.classification === undefined ? {} : { classification: options.classification }),
-    job,
+    ...(job === undefined ? {} : { job }),
   }
 }
 

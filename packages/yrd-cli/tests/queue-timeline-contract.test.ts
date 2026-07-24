@@ -226,12 +226,12 @@ describe("queue timeline 21106 contract", () => {
     // (item R); run duration is a bare dimmed time — no `◷` glyph (item S). The
     // branch glyph (U+E0A0) is matched as one non-space char.
     expect(pending?.trim()).toMatch(
-      /^16:40:00 ○ ready\s+-\s+pr#1\.1 for @yrd\/core\/21120-pr-state-notifications\s+@cto\s+50:00$/u,
+      /^16:40:00 ○ ready\s+-\s+pr#1\.1 @yrd\/core\/21120-pr-state-notifications\s+@cto\s+50:00$/u,
     )
     expect(lead?.trim()).toMatch(
-      /^17:10:00 ● run\s+main#42 pr#42\.1 for @hab\/super\/21135-herdr-keybindings\s+@agent\/3 36:00 20:00$/u,
+      /^17:10:00 ● run\s+main#42 pr#42\.1 @hab\/super\/21135-herdr-keybindings\s+@agent\/3 36:00 20:00$/u,
     )
-    expect(partner?.trim()).toMatch(/^-\s+-\s+-\s+pr#43\.1 for @si\/ui\/21119-split-pane\s+@agent\/5 34:00\s+-$/u)
+    expect(partner?.trim()).toMatch(/^-\s+-\s+-\s+pr#43\.1 @si\/ui\/21119-split-pane\s+@agent\/5 34:00\s+-$/u)
     expect(rejected?.trim()).toMatch(
       /^16:42:00 × fail\s+main#5\s+pr#5\.1\s+\S topic\/pr5 \(err=typecheck-failed\)\s+@agent\/2 27:00 12:00$/u,
     )
@@ -241,6 +241,17 @@ describe("queue timeline 21106 contract", () => {
     // muted "-" in the RUN cell (item 9) instead of a run id, no run duration.
     for (const row of [pending, lead, partner, rejected, integrated]) expect(row).not.toContain("◷")
     expect(pending).not.toContain("main#")
+  })
+
+  it("places the issue directly after the PR identity without filler", async () => {
+    const rows = (await renderTimeline(contractProjection(), 160)).map((row) => row.trimEnd())
+    const pending = rows[rowIndex(rows, "@yrd/core/21120-pr-state-notifications")]
+    const running = rows[rowIndex(rows, "@hab/super/21135-herdr-keybindings")]
+
+    expect(pending).toContain("pr#1.1 @yrd/core/21120-pr-state-notifications")
+    expect(running).toContain("pr#42.1 @hab/super/21135-herdr-keybindings")
+    expect(pending).not.toContain(" for ")
+    expect(running).not.toContain(" for ")
   })
 
   it("keys continuation rows by base and run, and keeps the selected issue blue", async () => {
@@ -265,11 +276,11 @@ describe("queue timeline 21106 contract", () => {
       const partnerY = rowIndex(rows, "@si/ui/21119-split-pane")
       const leadIssueX = rows[leadY]?.indexOf("@hab/super/21135-herdr-keybindings") ?? -1
       const partnerIssueX = rows[partnerY]?.indexOf("@si/ui/21119-split-pane") ?? -1
-      const leadForX = rows[leadY]?.indexOf("for") ?? -1
+      const leadRunX = rows[leadY]?.indexOf("main#42") ?? -1
 
       expect(rows[partnerY]).toContain("release#42")
       expect(app.cell(leadIssueX, leadY).fg).toEqual(app.cell(partnerIssueX, partnerY).fg)
-      expect(app.cell(leadIssueX, leadY).fg).not.toEqual(app.cell(leadForX, leadY).fg)
+      expect(app.cell(leadIssueX, leadY).fg).not.toEqual(app.cell(leadRunX, leadY).fg)
     } finally {
       app.unmount()
     }
@@ -386,7 +397,8 @@ describe("queue timeline 21106 contract", () => {
     for (const row of rows) expect(Array.from(row).length).toBeLessThanOrEqual(80)
     const lead = rows[rowIndex(rows, "pr#42.1")]
     expect(lead).toContain("main#42")
-    expect(lead).toContain("for @hab/super/21135-herdr-keybind…")
+    expect(lead).toContain("@hab/super/21135-herdr-keybind…")
+    expect(lead).not.toContain(" for ")
     expect(lead).not.toContain("2:check")
     expect(lead).toContain("36:00")
     expect(lead).toContain("20:00")

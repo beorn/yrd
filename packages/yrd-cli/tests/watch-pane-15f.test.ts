@@ -41,9 +41,7 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       await waitFor(() => !app.text.includes("125 tests collected"))
 
       const rows = app.text.split("\n")
-      const tabsY = rows.findIndex(
-        (row) => row.includes("prepare") && row.includes("check") && row.includes("merge"),
-      )
+      const tabsY = rows.findIndex((row) => row.includes("prepare") && row.includes("check") && row.includes("merge"))
       const tabsLine = rows[tabsY]
       if (tabsLine === undefined) throw new Error("workflow-step tab bar did not render")
       // The tab bar sits below the run facts, so it can share a text row with a
@@ -89,9 +87,7 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       // without navigating.
       await waitFor(() => app.text.includes("125 tests collected"))
       const rows = app.text.split("\n")
-      const tabsY = rows.findIndex(
-        (row) => row.includes("prepare") && row.includes("check") && row.includes("merge"),
-      )
+      const tabsY = rows.findIndex((row) => row.includes("prepare") && row.includes("check") && row.includes("merge"))
       const tabsLine = rows[tabsY] ?? ""
       const statusLine = rows[tabsY + 1] ?? ""
       expect(statusLine).toMatch(/✓ passed\s+\d+(?:m(?:\d+s)?|s)/u)
@@ -132,23 +128,20 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
     try {
       await app.waitForLayoutStable()
       await app.press("Enter")
-      await app.press("l")
-      await app.press("l")
       await app.waitForLayoutStable()
       await waitFor(() => app.text.includes("JOB"))
       const rows = app.text.split("\n")
-      // Enter,l,l lands two tabs right of the default (PR tab 0), i.e. on a
-      // real step tab (merge) — run context only renders for step tabs, not
-      // the PR tab. Run timing is below the tabs; selected step internals
+      // The newest-output default lands on the merge step. The composite RUN
+      // identity/timing header leads the tab strip; selected step internals
       // begin with JOB.
       const runFactsY = rows.findIndex((l) => l.includes("Started "))
       const tabsY = rows.findIndex((l) => l.includes("check") && l.includes("merge"))
       const stepContentY = rows.findIndex((l) => l.includes("JOB"))
-      // H revised: the step tabs are the visual title of their section, so
-      // they render ABOVE the run-level facts, which sit above the step content.
+      // 21751 restores the original detail IA: run facts above the tabs, step
+      // content below them.
       expect(tabsY, "step tabs present").toBeGreaterThanOrEqual(0)
-      expect(runFactsY, "run facts below the step tabs").toBeGreaterThan(tabsY)
-      expect(stepContentY, "step content below the run facts").toBeGreaterThan(runFactsY)
+      expect(runFactsY, "run facts above the step tabs").toBeLessThan(tabsY)
+      expect(stepContentY, "step content below the tabs").toBeGreaterThan(tabsY)
       expect(app.text).toContain("RUNNER")
       expect(app.text).not.toContain("DETAILS")
       expect(app.text).not.toContain("RUN LOGS")
