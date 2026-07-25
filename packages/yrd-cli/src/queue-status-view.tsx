@@ -721,6 +721,9 @@ function currentTerminalFact(pr: PR): PRRevisionTerminal | undefined {
     case "integrated":
       at = pr.integratedAt
       break
+    case "already-landed":
+      at = pr.alreadyLandedAt
+      break
     case "withdrawn":
       at = pr.withdrawnAt
       break
@@ -782,7 +785,7 @@ export function queueFlowMetrics(
     if (seenRuns.has(fact.run)) throw new Error(`yrd: duplicate terminal FLOW fact for Run '${fact.run}'`)
     seenRuns.add(fact.run)
 
-    if (fact.outcome === "integrated") integrated += 1
+    if (fact.outcome === "integrated" || fact.outcome === "already-landed") integrated += 1
     else if (fact.outcome === "rejected") rejected += 1
     else if (fact.outcome === "environment-refused") environmentRefused += 1
     else if (fact.outcome === "stale") stale += 1
@@ -798,7 +801,7 @@ export function queueFlowMetrics(
     if (fact.activeMs !== null) {
       const activeMs = finiteNonnegative(fact.activeMs, `Run '${fact.run}' active duration`)
       activeAll.push(activeMs)
-      if (fact.outcome === "integrated") activeIntegrated.push(activeMs)
+      if (fact.outcome === "integrated" || fact.outcome === "already-landed") activeIntegrated.push(activeMs)
       else activeFailed.push(activeMs)
     }
     for (const wait of fact.queueWaitMs) {
@@ -1246,7 +1249,10 @@ function stepOutput(step: QueueStep): string {
 }
 
 function queueOutcome(run: QueueRun): string {
-  if (run.status === "passed") return queueIntegration(run) === undefined ? "passed" : "integrated"
+  if (run.status === "passed") {
+    const integration = queueIntegration(run)
+    return integration === undefined ? "passed" : integration.alreadyLanded === undefined ? "integrated" : "already-landed"
+  }
   if (run.status === "failed") return terminalProjection(run).display
   // "canceled" is a distinct terminal outcome — a canceled run is NOT rejected;
   // its PRs re-queue. "running"/"waiting" fall through unchanged.
@@ -1546,7 +1552,11 @@ type QueueTerminalProjection = Readonly<{ outcome: QueueTerminalOutcome; display
  * failure fact / STEP cell without bloating the fixed STATUS column.
  */
 function terminalProjection(run: QueueRun): QueueTerminalProjection {
-  if (run.status === "passed") return { outcome: "integrated", display: "integrated" }
+  if (run.status === "passed") {
+    return queueIntegration(run)?.alreadyLanded === undefined
+      ? { outcome: "integrated", display: "integrated" }
+      : { outcome: "already-landed", display: "already-landed" }
+  }
   const status = run.status as string
   if (status === "running" || status === "waiting") {
     throw new TypeError(`yrd: nonterminal Run '${run.id}' cannot be projected as a terminal outcome`)
@@ -1579,6 +1589,7 @@ function timelineStatusFilter(status: QueueTimelineStatus): QueueTimelineStatusF
   // they surface under the default view and the todo bucket, without minting new
   // CLI status filters.
   if (status === "draft" || status === "rev" || status === "ready") return "pending"
+  if (status === "already-landed") return "integrated"
   if (status === "pending" || status === "running" || status === "rejected" || status === "integrated") {
     return status
   }
@@ -1685,7 +1696,8 @@ function timelineRunMemberRows(
   const totalMs = running ? elapsedRunMs : (durations.totalDurationMs ?? null)
   const activeMs = running ? null : (durations.activeDurationMs ?? null)
   const waitMs = running ? null : (durations.waitDurationMs ?? null)
-  const failure = status === "integrated" ? undefined : failureFact(run, relevantStep(run))
+  const landed = status === "integrated" || status === "already-landed"
+  const failure = landed ? undefined : failureFact(run, relevantStep(run))
   const step = relevantStep(run)
   // The row's STEP cell names the currently executing step; a later queued
   // step (requested) only shows when nothing is actively running.
@@ -1695,7 +1707,7 @@ function timelineRunMemberRows(
     running && currentStep !== undefined ? `${run.steps.indexOf(currentStep) + 1}:${currentStep.name}` : undefined
   const baseDetail =
     failure === undefined
-      ? status === "integrated"
+      ? landed
         ? queueLanding(run)
         : step === undefined
           ? run.status
@@ -2207,7 +2219,15 @@ function projectPR(
   const revisionLineage = lineage.revisions
   const touchedAt = latest(
     ...(runOverride === undefined
-      ? [revision?.pushedAt, submittedAt, revision?.terminal?.at, pr.rejectedAt, pr.integratedAt, pr.withdrawnAt]
+      ? [
+          revision?.pushedAt,
+          submittedAt,
+          revision?.terminal?.at,
+          pr.rejectedAt,
+          pr.integratedAt,
+          pr.alreadyLandedAt,
+          pr.withdrawnAt,
+        ]
       : []),
     run?.startedAt,
     run?.finishedAt,
@@ -2244,9 +2264,11 @@ function projectPR(
           ? pr.rejectedAt
           : pr.status === "integrated"
             ? pr.integratedAt
-            : pr.status === "withdrawn"
-              ? pr.withdrawnAt
-              : undefined
+            : pr.status === "already-landed"
+              ? pr.alreadyLandedAt
+              : pr.status === "withdrawn"
+                ? pr.withdrawnAt
+                : undefined
       : undefined)
   const parsedTerminalAt = terminalAt === undefined ? Number.NaN : Date.parse(terminalAt)
   const ageAt = Number.isFinite(parsedTerminalAt) ? parsedTerminalAt : now
@@ -2343,7 +2365,7 @@ export function humanQueueProjection(
     target: `${result.base}${result.headSha === undefined ? "" : `@${result.headSha.slice(0, 12)}`}`,
     open: queueRows.length,
     activeCount: queueRows.filter((row) => ["checking", "waiting"].includes(row.state)).length,
-    integrated: rows.filter((row) => row.nativeStatus === "integrated").length,
+    integrated: rows.filter((row) => row.nativeStatus === "integrated" || row.nativeStatus === "already-landed").length,
     rejected: rows.filter((row) => row.nativeStatus === "rejected" && row.state !== "needs-author").length,
     needsAuthor: rows.filter((row) => row.state === "needs-author").length,
     ...(result.pause === undefined ? {} : { pause: result.pause }),
@@ -3551,6 +3573,7 @@ const TIMELINE_STATUS_WORDS = {
   pending: "todo",
   running: "run",
   integrated: "done",
+  "already-landed": "done",
   rejected: "fail",
   "environment-refused": "env",
   stale: "stale",
@@ -4128,12 +4151,12 @@ export const QUEUE_TIMELINE_STATUS_BUCKETS: readonly QueueTimelineStatusBucket[]
 /** Bucket a row status onto the operator courts (user respec 2026-07-23):
  * `open` = the agents' court (draft/rev — editable, next action is the author);
  * `running` = the queue's court (ready/queued/running — next action is the
- * runner); every non-integrated terminal outcome is `failed`; integrated is
- * `done`. */
+ * runner); every non-success terminal outcome is `failed`; integrated and
+ * already-landed are `done`. */
 export function queueTimelineStatusBucket(status: QueueTimelineStatus): QueueTimelineStatusBucket {
   if (status === "draft" || status === "rev") return "open"
   if (status === "ready" || status === "pending" || status === "running") return "running"
-  return status === "integrated" ? "done" : "failed"
+  return status === "integrated" || status === "already-landed" ? "done" : "failed"
 }
 
 /** Project CLI-level status filters onto the four display buckets. CLI
@@ -4756,7 +4779,10 @@ export function queueLogRows(
           activeSteps: durations.activeSteps,
           retries: String(Math.max(0, runOutputQueueageIndex(finished, run, pr.revision, pr.id))),
           landing: queueLanding(run),
-          integration: outcome === "integrated" && run.status === "passed" ? queueOutcomeIntegration(run) : undefined,
+          integration:
+            (outcome === "integrated" || outcome === "already-landed") && run.status === "passed"
+              ? queueOutcomeIntegration(run)
+              : undefined,
           parent: run.parent ?? "-",
           isolationPart: isolationPartLabel(run),
           result: safeText(run.prs.length > 0 ? run.prs : ["-"]),
@@ -5105,6 +5131,7 @@ export function QueueLogView({
 
 function queueShowNextAction(data: QueueShowData): string {
   if (data.outcome === "integrated") return "none — landing proof is recorded"
+  if (data.outcome === "already-landed") return "none — equivalence proof is recorded; no merge was needed"
   if (data.status === "running" || data.status === "waiting") return "follow live output or wait for the current step"
   if (data.status === "canceled" || data.outcome === "canceled" || data.failure?.code === "run-canceled") {
     return "no resubmission — the PR remains submitted and re-queues automatically"

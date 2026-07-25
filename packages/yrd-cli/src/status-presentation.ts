@@ -68,6 +68,7 @@ const STATUS_ALIASES: Readonly<Record<string, StatusPresentationState>> = {
   passed: "done",
   success: "done",
   succeeded: "done",
+  "already-landed": "integrated",
   "environment-refused": "env",
   "queue-environment-refused": "env",
   lost: "timeout",
