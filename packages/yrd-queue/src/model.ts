@@ -291,6 +291,8 @@ export type RunAuthority = Readonly<{
       | "stale-steps"
       | "stale-plan"
       | "orphaned-run"
+      | "component-main-promotion-failed"
+      | "component-main-inspection-failed"
       | "source-publish"
       | "scratch-cleanup-failed"
     ref: string
