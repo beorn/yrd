@@ -2273,7 +2273,7 @@ async function bayStatusCommand(
   selectors: readonly string[],
   options: { json?: boolean },
   io: YrdCliIO,
-): Promise<0 | 1 | 2> {
+): Promise<YrdCliExitCode> {
   const cwd = io.cwd ?? process.cwd()
   const bays =
     selectors.length === 0
@@ -2283,7 +2283,8 @@ async function bayStatusCommand(
 
   const reports: BayStatusReport[] = bays.map((bay) => classifyBayStatus(gatherBayStatusFacts(app, bay, cwd)))
   // Aggregate exit: any BLOCK → 1; else any UNKNOWN → 2; else 0.
-  let exit: 0 | 1 | 2 = 0
+  // YrdCliExitCode is 0|1|2|3; bay status uses the 0/1/2 subset (2 = unknown).
+  let exit: YrdCliExitCode = 0
   for (const report of reports) {
     if (report.exit === 1) exit = 1
     else if (report.exit === 2 && exit === 0) exit = 2
@@ -2299,7 +2300,11 @@ async function bayStatusCommand(
 }
 
 /** Sweep open bays via the status oracle. --dry-run is the DEFAULT (22290). */
-async function bayPruneCommand(app: YrdCliApp, options: { json?: boolean; apply?: boolean }, io: YrdCliIO): Promise<0> {
+async function bayPruneCommand(
+  app: YrdCliApp,
+  options: { json?: boolean; apply?: boolean },
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
   const cwd = io.cwd ?? process.cwd()
   const open = app.bays.list().filter((bay) => bay.status !== "closed")
   const reports = open.map((bay) => classifyBayStatus(gatherBayStatusFacts(app, bay, cwd)))
@@ -4749,16 +4754,27 @@ export async function requireFreshInstalledBaseline(
       (finding) => finding.code === "config-drift" || finding.code === "runtime-drift",
     )
   }
-  let drift = await auditDrift()
+  const drift = await auditDrift()
   if (drift.length === 0) return
-  if (options.reloadInPlace !== undefined && drift.some((finding) => finding.code === "config-drift")) {
-    if (administration.deprovision === undefined || administration.provision === undefined) {
-      configuration("queue config drift reload requires both queue.deinit and queue.init capabilities")
-    }
-    await administration.deprovision(options.reloadInPlace.base)
-    await administration.provision(options.reloadInPlace.base)
-    drift = await auditDrift()
-    if (drift.length === 0) return
+  // 22306 residual (with 22334 constraint): follow-mode may re-provision on
+  // config-drift via the SAME `provision()` path as `queue init` — one descriptor
+  // recipe, not a second revision family. That converts "landing advanced the
+  // base / another seat wrote a foreign baseline" into a hiccup, not a fatal
+  // resident exit. One-shot stays fail-loud (no accidental baseline rewrite).
+  // Runtime-drift still fails: this process's construction-time step set is
+  // wrong and needs a restart, not another baseline write.
+  const reload = options.reloadInPlace
+  if (
+    reload !== undefined &&
+    administration.provision !== undefined &&
+    drift.every((finding) => finding.code === "config-drift")
+  ) {
+    await administration.provision(reload.base)
+    const after = await auditDrift()
+    if (after.length === 0) return
+    const firstAfter = after[0]
+    if (firstAfter === undefined) return
+    raiseFailure("refusal", firstAfter.code, after.map((finding) => finding.message).join("\n"))
   }
   const first = drift[0]
   if (first === undefined) return
@@ -5032,6 +5048,40 @@ function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefine
     return {
       message: "resident runner skipped a cycle — a candidate PR left the checkable set mid-compose",
       props: { action: "resident-withdraw-skip", pr: error.prId, status: error.status, reason: error.message },
+    }
+  }
+  // 22306 architectural belt: any remaining PR-scoped refusal that escaped the
+  // per-candidate wrap is still a cycle skip, not a resident death. Covers
+  // authored-gitlink / recut-certificate / pr-not-admissible and the rest of
+  // the needs-author + recut-lineage composition buckets if they bubble out.
+  const fact = failureFact(error)
+  if (fact !== undefined && (fact.kind === "refusal" || fact.kind === "infrastructure")) {
+    const prScoped =
+      fact.code === "pr-not-admissible" ||
+      fact.code === "pr-not-ready" ||
+      fact.code === "pr-not-found" ||
+      fact.code === "command-refused" ||
+      fact.code === "candidate-ref-refused" ||
+      fact.code === "recut-certificate" ||
+      fact.code === "authored-gitlink" ||
+      fact.code === "composition-invalid" ||
+      fact.code === "wrapper-mismatch" ||
+      fact.code === "source-missing" ||
+      fact.code === "source-lineage" ||
+      fact.code === "payload-certificate" ||
+      fact.code === "payload-identity" ||
+      fact.code === "payload-mismatch" ||
+      fact.code === "payload-overlap" ||
+      fact.code === "gitlink-inspection" ||
+      fact.code === "refused-path" ||
+      fact.code === "refused-path-inspection" ||
+      fact.code === "restack-conflict" ||
+      fact.code === "restack-failed"
+    if (prScoped) {
+      return {
+        message: "resident runner skipped a cycle lost to a per-PR refusal",
+        props: { action: "resident-pr-refusal-skip", code: fact.code, reason: fact.message },
+      }
     }
   }
   return undefined

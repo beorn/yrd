@@ -818,7 +818,7 @@ git commit -qm "work $name"
         const manualFixture = await repository()
         const manual = output(manualFixture.repo)
         expect(
-          await yrd(manualFixture.repo, manual.io, "run", CLAIM, "--", "ag", "Do the issue, then submit."),
+          await yrd(manualFixture.repo, manual.io, "bay", "run", CLAIM, "--", "ag", "Do the issue, then submit."),
           manual.stderr(),
         ).toBe(0)
         expect(manual.stdout()).toContain("worked s2-fixture")
@@ -861,7 +861,7 @@ git commit -qm "work $name"
     })
   })
 
-  it("keeps sh/run/ag as owner aliases and gives `in ag` the guest-only primer", async () => {
+  it("keeps sh/ag as owner aliases and gives `in ag` the guest-only primer", async () => {
     return withoutRuntimeName(async () => {
       const { repo } = await repository()
       const tools = join(repo, "..", "alias-tools")
@@ -921,13 +921,6 @@ printf '%s' '${label}' > '${label}-ran.txt'
         const [ownerExit, ownerStderr] = await Promise.all([owner.exited, new Response(owner.stderr).text()])
         expect(ownerExit, ownerStderr).toBe(0)
 
-        const runOwner = output(repo)
-        expect(
-          await yrd(repo, runOwner.io, "run", "--bay", "run-owner", "--", shell, "run-arg"),
-          runOwner.stderr(),
-        ).toBe(0)
-        expect(runOwner.stdout()).toContain("bay run-owner → new task/run-owner, no issue linked, name run-owner")
-
         const agOwner = output(repo)
         expect(await yrd(repo, agOwner.io, "ag", "--bay", "ag-owner"), agOwner.stderr()).toBe(0)
         expect(agOwner.stdout()).toContain("bay ag-owner → new task/ag-owner, no issue linked, name ag-owner")
@@ -939,8 +932,7 @@ printf '%s' '${label}' > '${label}-ran.txt'
         expect(lines[2]).toContain("You are a guest in Bay shared")
         expect(lines[2]).toContain("no configuration or lifecycle authority")
         expect(lines[2]).toContain("owner close captures")
-        expect(lines[3]).toMatch(/^sh run-owner \d+ run-arg$/u)
-        expect(lines[4]).toMatch(/^ag ag-owner \d+\s*$/u)
+        expect(lines[3]).toMatch(/^ag ag-owner \d+\s*$/u)
         expect(shellGuest.stdout()).toContain(
           `bay shared → attached task/shared, no issue linked, name ${lines[1]?.split(" ")[1]}`,
         )

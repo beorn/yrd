@@ -3065,8 +3065,8 @@ describe("runYrd", () => {
     )
 
     const close = outputIO({ cwd: "/repo/.bays/B1" })
-    expect(await runYrd(app, yrd("bay", "close"), close.io)).toBe(0)
-    expect(close.stdout()).toBe("closed fix-readme\n")
+    expect(await runYrd(app, yrd("bay", "close", "--force", "B1"), close.io)).toBe(0)
+    expect(close.stdout()).toContain("closed fix-readme\n")
     expect(app.state().bays.byId.B1?.status).toBe("closed")
   })
 
@@ -3083,7 +3083,7 @@ describe("runYrd", () => {
     expect(app.queue.get("R1")).toMatchObject({ status: "queued", steps: [{ job: { status: "queued" } }] })
 
     const close = outputIO({ cwd: "/repo/.bays/B1" })
-    expect(await runYrd(app, yrd("bay", "close"), close.io), close.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("bay", "close", "--force", "B1"), close.io), close.stderr()).toBe(0)
     expect(app.bays.get("B1")?.status).toBe("closed")
     expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("pushed")
     expect(app.queue.get("R1")).toMatchObject({ status: "queued", steps: [{ job: { status: "queued" } }] })
@@ -3244,7 +3244,7 @@ describe("runYrd", () => {
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
 
     const closed = outputIO()
-    expect(await runYrd(app, yrd("bay", "close", "B1"), closed.io), closed.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("bay", "close", "--force", "B1"), closed.io), closed.stderr()).toBe(0)
     const afterClose = await Array.fromAsync(app.events()).then((events) => events.length)
     const inactive = outputIO()
     expect(await runYrd(app, yrd("bay", "path", "B1"), inactive.io)).toBe(1)
@@ -4044,7 +4044,10 @@ describe("runYrd", () => {
     await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["merge"] })
 
     const close = outputIO({ cwd: "/repo/.bays/B1" })
-    expect(await runYrd(app, yrd("bay", "close", "--withdraw", "--json"), close.io), close.stderr()).toBe(0)
+    expect(
+      await runYrd(app, yrd("bay", "close", "--withdraw", "--force", "B1", "--json"), close.io),
+      close.stderr(),
+    ).toBe(0)
 
     expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
     expect(app.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "success" })
