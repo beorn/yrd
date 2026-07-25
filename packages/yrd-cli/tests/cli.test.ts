@@ -507,7 +507,7 @@ async function openTestBay(app: TestApp, input: Parameters<TestApp["bays"]["open
     runner: "cli-test",
     leaseMs: 60_000,
   })
-  expect(jobs.every((job) => job.status === "passed")).toBe(true)
+  expect(jobs.every((job) => job.status === "completed" && job.conclusion === "success")).toBe(true)
 }
 
 function fakeJob(input: {

@@ -528,7 +528,7 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
       const traffic = await readFile(wireLog, "utf8")
       expect(traffic).toContain('"wire":"tribe.send"')
       expect(traffic).toContain('"to":"@dev/s2-fixture"')
-      expect(traffic).toContain("Yrd rejected")
+      expect(traffic).toContain("Yrd failed")
       expect(await Bun.file(fake.log).exists()).toBe(false)
       expect(await Bun.file(decoyWire).exists()).toBe(false)
     } finally {
@@ -1063,7 +1063,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
     const prs = output(repo)
     expect(await yrd(repo, prs.io, "pr", "list", "--issue", CLAIM, "--json"), prs.stderr()).toBe(0)
     expect(JSON.parse(prs.stdout())).toMatchObject({
-      prs: [{ branch, issue: CLAIM, status: "pushed", revision: 1, headSha: originalHead }],
+      prs: [{ branch, issue: CLAIM, status: "pushed", revs: [{ n: 1, head: originalHead }] }],
     })
   })
 
@@ -1094,7 +1094,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
     const prs = output(repo)
     expect(await yrd(repo, prs.io, "pr", "view", branch, "--json"), prs.stderr()).toBe(0)
     expect(JSON.parse(prs.stdout())).toMatchObject({
-      pr: { branch, status: "pushed", revision: 1, headSha: originalHead },
+      pr: { branch, status: "pushed", revs: [{ n: 1, head: originalHead }] },
     })
   })
 
@@ -1478,7 +1478,7 @@ steps: [check, merge]
 check: ${JSON.stringify(check)}
 merge: {}
 notify:
-  pr/rejected: [submitter]
+  run/failed: [submitter]
 `,
   )
   await git(repo, "add", ".yrd.yml")

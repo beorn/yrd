@@ -532,7 +532,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     })
     const jobs = await app.jobs.runMany(app.jobs.requested(opened), { runner: "test", leaseMs: 60_000 })
 
-    expect(jobs.every((job) => job.status === "passed")).toBe(true)
+    expect(jobs.every((job) => job.status === "completed" && job.conclusion === "success")).toBe(true)
     const remoteCommands = () =>
       commands.filter(
         (argv) =>
@@ -580,7 +580,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       leaseMs: 60_000,
     })
 
-    expect(recoverableJobs.every((job) => job.status === "passed")).toBe(true)
+    expect(recoverableJobs.every((job) => job.status === "completed" && job.conclusion === "success")).toBe(true)
     expect(remoteCommands()).toEqual([
       expect.arrayContaining([
         "git",
@@ -1346,7 +1346,7 @@ notify:
       runner: "test",
       leaseMs: 60_000,
     })
-    expect(jobs.every((job) => job.status === "passed")).toBe(true)
+    expect(jobs.every((job) => job.status === "completed" && job.conclusion === "success")).toBe(true)
     await owner.close()
 
     let stderr = ""
@@ -2604,7 +2604,7 @@ notify:
       runner: "test",
       leaseMs: 60_000,
     })
-    expect(jobs.every((job) => job.status === "passed")).toBe(true)
+    expect(jobs.every((job) => job.status === "completed" && job.conclusion === "success")).toBe(true)
     await setup.close()
     await git(repo, "worktree", "add", "-q", linked, "issue/feature")
 
