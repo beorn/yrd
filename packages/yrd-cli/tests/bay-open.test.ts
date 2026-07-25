@@ -1,5 +1,5 @@
 /**
- * @failure `yrd bay open` loses work, returns before cleanup, or leaves a failed child unflagged.
+ * @failure `yrd bay open/run` loses work, returns before cleanup, or leaves a failed child unflagged.
  * @level l3
  * @consumer @yrd/cli Bay lifecycle
  */
@@ -42,11 +42,20 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 
-describe("yrd bay open/in/do", { timeout: 30_000 }, () => {
-  it("exposes config only on open and its owner aliases, never on guest attach", async () => {
+describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
+  it("separates persistent open from scoped run and keeps config off guest attach", async () => {
     const { repo } = await repository()
+    const open = output(repo)
+    expect(await yrd(repo, open.io, "bay", "open", "--help"), open.stderr()).toBe(0)
+    expect(open.stdout()).toContain("[config]")
+    expect(open.stdout()).not.toContain("[command...]")
+    expect(open.stdout()).not.toContain("--keep")
+    for (const flag of ["--issue <ref>", "--pr <selector>", "--bay <name>"]) {
+      expect(open.stdout()).toContain(flag)
+    }
+
     for (const args of [
-      ["bay", "open", "--help"],
+      ["bay", "run", "--help"],
       ["sh", "--help"],
       ["run", "--help"],
       ["ag", "--help"],
@@ -57,6 +66,9 @@ describe("yrd bay open/in/do", { timeout: 30_000 }, () => {
       expect(help.stdout()).toContain("--pr <selector>")
       expect(help.stdout()).toContain("--bay <name>")
       expect(help.stdout()).not.toContain("--exec")
+      if (args[0] === "run" || args[1] === "run") {
+        expect(help.stdout()).toContain("--keep")
+      }
     }
     for (const args of [
       ["bay", "in", "--help"],
@@ -73,26 +85,133 @@ describe("yrd bay open/in/do", { timeout: 30_000 }, () => {
     expect(doHelp.stdout()).toContain("<issue-or-pr>")
   })
 
-  it("resolves every open-table row without sigil dispatch or implicit PR intake", async () => {
+  it("opens a persistent Bay without running a command", async () => {
+    return withoutRuntimeName(async () => {
+      const { repo } = await repository()
+      const shell = join(repo, "..", "must-not-run")
+      const marker = join(repo, "..", "shell-ran")
+      await writeFile(shell, `#!/bin/sh\n: > "$YRD_TEST_SHELL_MARKER"\n`)
+      await chmod(shell, 0o755)
+      const previousShell = process.env.SHELL
+      const previousMarker = process.env.YRD_TEST_SHELL_MARKER
+      process.env.SHELL = shell
+      process.env.YRD_TEST_SHELL_MARKER = marker
+      try {
+        const opened = output(repo)
+        expect(await yrd(repo, opened.io, "bay", "open", "--bay", "docs"), opened.stderr()).toBe(0)
+        expect(opened.stdout()).toContain("bay docs → new task/docs, no issue linked, name docs")
+        expect(await Bun.file(marker).exists()).toBe(false)
+
+        const path = output(repo)
+        expect(await yrd(repo, path.io, "bay", "path", "docs"), path.stderr()).toBe(0)
+        expect(await git(path.stdout().trim(), "branch", "--show-current")).toBe("task/docs")
+
+        const bays = output(repo)
+        expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
+        expect(JSON.parse(bays.stdout())).toMatchObject({
+          bays: [expect.objectContaining({ name: "docs", status: "active" })],
+        })
+
+        const closed = output(repo)
+        expect(await yrd(repo, closed.io, "bay", "close", "docs"), closed.stderr()).toBe(0)
+      } finally {
+        restoreEnv("SHELL", previousShell)
+        restoreEnv("YRD_TEST_SHELL_MARKER", previousMarker)
+      }
+    })
+  })
+
+  it("runs one scoped command and keeps a successful Bay only with --keep", async () => {
+    return withoutRuntimeName(async () => {
+      const closedFixture = await repository()
+      const run = output(closedFixture.repo)
+      expect(
+        await yrd(
+          closedFixture.repo,
+          run.io,
+          "bay",
+          "run",
+          "--bay",
+          "once",
+          "--",
+          "sh",
+          "-c",
+          "printf done > result.txt",
+        ),
+        run.stderr(),
+      ).toBe(0)
+      expect(run.stdout()).toContain("bay once → new task/once, no issue linked, name once")
+      expect(await git(closedFixture.repo, "show", "refs/remotes/origin/task/once:result.txt")).toBe("done")
+      const closedPath = output(closedFixture.repo)
+      expect(await yrd(closedFixture.repo, closedPath.io, "bay", "path", "once")).not.toBe(0)
+
+      const keptFixture = await repository()
+      const kept = output(keptFixture.repo)
+      expect(
+        await yrd(
+          keptFixture.repo,
+          kept.io,
+          "bay",
+          "run",
+          "--keep",
+          "--bay",
+          "kept",
+          "--",
+          "sh",
+          "-c",
+          "printf kept > result.txt; git add result.txt; git commit -qm kept",
+        ),
+        kept.stderr(),
+      ).toBe(0)
+      const keptPath = output(keptFixture.repo)
+      expect(await yrd(keptFixture.repo, keptPath.io, "bay", "path", "kept"), keptPath.stderr()).toBe(0)
+      expect(await readFile(join(keptPath.stdout().trim(), "result.txt"), "utf8")).toBe("kept")
+
+      const closed = output(keptFixture.repo)
+      expect(await yrd(keptFixture.repo, closed.io, "bay", "close", "kept"), closed.stderr()).toBe(0)
+    })
+  })
+
+  it("refuses commands on open and scoped runs against an already-open Bay", async () => {
+    const { repo } = await repository()
+    const previousShell = process.env.SHELL
+    process.env.SHELL = "/usr/bin/true"
+    try {
+      const opened = output(repo)
+      expect(await yrd(repo, opened.io, "bay", "open", "--bay", "shared"), opened.stderr()).toBe(0)
+
+      const command = output(repo)
+      expect(await yrd(repo, command.io, "bay", "open", "--bay", "other", "--", "true")).toBe(2)
+      expect(command.stderr()).toContain("yrd bay run")
+
+      const duplicate = output(repo)
+      expect(await yrd(repo, duplicate.io, "bay", "run", "--bay", "shared", "--", "true")).not.toBe(0)
+      expect(duplicate.stderr()).toContain("yrd in shared")
+    } finally {
+      restoreEnv("SHELL", previousShell)
+    }
+  })
+
+  it("resolves every run-table row without sigil dispatch or implicit PR intake", async () => {
     return withoutRuntimeName(async () => {
       const journeys = [
         {
           label: "bare positional issue",
-          args: ["bay", "open", CLAIM, "--", "sh", "-c", 'printf %s "$HAB_NAME" > resolved.name'],
+          args: ["bay", "run", CLAIM, "--", "sh", "-c", 'printf %s "$HAB_NAME" > resolved.name'],
           expected: `bay s2-fixture → new ${BRANCH}, linked ${CLAIM}, name s2-fixture`,
           branch: BRANCH,
           name: "s2-fixture",
         },
         {
           label: "explicit issue",
-          args: ["bay", "open", "--issue", CLAIM, "--", "sh", "-c", 'printf %s "$HAB_NAME" > resolved.name'],
+          args: ["bay", "run", "--issue", CLAIM, "--", "sh", "-c", 'printf %s "$HAB_NAME" > resolved.name'],
           expected: `bay s2-fixture → new ${BRANCH}, linked ${CLAIM}, name s2-fixture`,
           branch: BRANCH,
           name: "s2-fixture",
         },
         {
           label: "issue-less explicit bay",
-          args: ["bay", "open", "--bay", "sandbox", "--", "sh", "-c", 'printf %s "$HAB_NAME" > resolved.name'],
+          args: ["bay", "run", "--bay", "sandbox", "--", "sh", "-c", 'printf %s "$HAB_NAME" > resolved.name'],
           expected: "bay sandbox → new task/sandbox, no issue linked, name sandbox",
           branch: "task/sandbox",
           name: "sandbox",
@@ -101,7 +220,7 @@ describe("yrd bay open/in/do", { timeout: 30_000 }, () => {
           label: "distinct bay linked to an issue",
           args: [
             "bay",
-            "open",
+            "run",
             "--bay",
             "named-bay",
             "--issue",
@@ -121,7 +240,7 @@ describe("yrd bay open/in/do", { timeout: 30_000 }, () => {
             "--name",
             "named-session",
             "bay",
-            "open",
+            "run",
             CLAIM,
             "--",
             "sh",
@@ -161,7 +280,7 @@ describe("yrd bay open/in/do", { timeout: 30_000 }, () => {
           targeted.repo,
           continued.io,
           "bay",
-          "open",
+          "run",
           "--pr",
           branch,
           "--",
@@ -189,7 +308,7 @@ describe("yrd bay open/in/do", { timeout: 30_000 }, () => {
       delete process.env.HAB_NAME
       try {
         const opened = output(anonymous.repo)
-        expect(await yrd(anonymous.repo, opened.io, "bay", "open"), opened.stderr()).toBe(0)
+        expect(await yrd(anonymous.repo, opened.io, "bay", "run"), opened.stderr()).toBe(0)
         const match = opened.stdout().match(/bay (yrd-[0-9a-f]{12}) → new task\/\1, no issue linked, name \1/u)
         expect(match).not.toBeNull()
         expect(await readFile(shellLog, "utf8")).toBe(match?.[1])
@@ -206,7 +325,7 @@ describe("yrd bay open/in/do", { timeout: 30_000 }, () => {
       const { repo } = await repository()
       const opened = output(repo)
       expect(
-        await gitBay(repo, opened.io, "open", "--bay", "projected", "--", "sh", "-c", "printf git-bay > projected"),
+        await gitBay(repo, opened.io, "run", "--bay", "projected", "--", "sh", "-c", "printf git-bay > projected"),
         opened.stderr(),
       ).toBe(0)
       expect(opened.stdout()).toContain("bay projected → new task/projected, no issue linked, name projected")
@@ -225,7 +344,7 @@ describe("yrd bay open/in/do", { timeout: 30_000 }, () => {
     process.env.TEST_ISSUE_MISSING = "friendly"
     try {
       const typo = output(repo)
-      expect(await yrd(repo, typo.io, "bay", "open", "friendly", "--", "true")).not.toBe(0)
+      expect(await yrd(repo, typo.io, "bay", "open", "friendly")).not.toBe(0)
       expect(typo.stderr()).toContain("missing issue friendly")
     } finally {
       restoreEnv("TEST_ISSUE_MISSING", previousMissing)
@@ -242,7 +361,7 @@ describe("yrd bay open/in/do", { timeout: 30_000 }, () => {
       process.env.LOGGILY_FILE = logFile
       try {
         const opened = output(repo)
-        expect(await yrd(repo, opened.io, "bay", "open", "--bay", "logged", "--", "true"), opened.stderr()).toBe(0)
+        expect(await yrd(repo, opened.io, "bay", "run", "--bay", "logged", "--", "true"), opened.stderr()).toBe(0)
         const records = (await readFile(logFile, "utf8"))
           .trim()
           .split("\n")
@@ -268,7 +387,7 @@ describe("yrd bay open/in/do", { timeout: 30_000 }, () => {
 
       const quiet = await repository()
       const opened = output(quiet.repo)
-      expect(await yrd(quiet.repo, opened.io, "bay", "open", "--bay", "quiet", "--", "true"), opened.stderr()).toBe(0)
+      expect(await yrd(quiet.repo, opened.io, "bay", "run", "--bay", "quiet", "--", "true"), opened.stderr()).toBe(0)
       expect(opened.stderr()).toBe("")
     })
   })
@@ -292,7 +411,7 @@ describe("yrd bay open/in/do", { timeout: 30_000 }, () => {
     try {
       const run = output(repo)
       run.io.interactive = true
-      expect(await yrd(repo, run.io, "bay", "open", "@km/test/blabla1", "--", "true"), run.stderr()).toBe(0)
+      expect(await yrd(repo, run.io, "bay", "run", "@km/test/blabla1", "--", "true"), run.stderr()).toBe(0)
 
       expect(run.stdout()).toContain("bay blabla1 → new task/blabla1, linked @km/test/blabla1")
       expect(await readFile(fake.log, "utf8")).toContain("join @dev/blabla1 --delivery pull --json")
@@ -330,7 +449,7 @@ describe("yrd bay open/in/do", { timeout: 30_000 }, () => {
       const tty = output(interactiveFixture.repo)
       tty.io.interactive = true
       expect(
-        await yrd(interactiveFixture.repo, tty.io, "bay", "open", "--bay", "friendly", "--", "true"),
+        await yrd(interactiveFixture.repo, tty.io, "bay", "run", "--bay", "friendly", "--", "true"),
         tty.stderr(),
       ).toBe(0)
       expect(tty.stdout()).toContain("bay friendly → new task/friendly, no issue linked")
@@ -339,7 +458,7 @@ describe("yrd bay open/in/do", { timeout: 30_000 }, () => {
       const pipedFixture = await repository()
       await configureNotify(pipedFixture.repo)
       const piped = output(pipedFixture.repo)
-      expect(await yrd(pipedFixture.repo, piped.io, "bay", "open", "--bay", "piped", "--", "true")).not.toBe(0)
+      expect(await yrd(pipedFixture.repo, piped.io, "bay", "run", "--bay", "piped", "--", "true")).not.toBe(0)
       expect(piped.stderr()).toContain("mailbox registration")
     } finally {
       restoreEnv("HAB_NAME", habName)
@@ -376,7 +495,7 @@ describe("yrd bay open/in/do", { timeout: 30_000 }, () => {
           "--wire",
           `file:${wireLog}`,
           "bay",
-          "open",
+          "run",
           "s2-fixture",
           "--",
           "true",
@@ -427,7 +546,7 @@ describe("yrd bay open/in/do", { timeout: 30_000 }, () => {
 
     expect(await yrd(repo, run.io, "in", "missing", "--", "true")).not.toBe(0)
     expect(run.stderr()).toContain("no open bay 'missing'")
-    expect(run.stderr()).toContain("yrd bay open --bay missing -- <command>")
+    expect(run.stderr()).toContain("yrd bay open --bay missing")
 
     const unwritable = output(repo)
     expect(await yrd(repo, unwritable.io, "bay", "in", "missing", "--issue", CLAIM)).toBe(2)
@@ -446,7 +565,7 @@ describe("yrd bay open/in/do", { timeout: 30_000 }, () => {
       const owner = spawnYrd(
         repo,
         "bay",
-        "open",
+        "run",
         "--bay",
         "shared",
         "--",
@@ -459,7 +578,7 @@ describe("yrd bay open/in/do", { timeout: 30_000 }, () => {
       await eventually(async () => access(join(repo, ".bays", "B1", "owner.started")))
 
       const duplicate = output(repo)
-      expect(await yrd(repo, duplicate.io, "bay", "open", "--bay", "shared", "--", "true")).not.toBe(0)
+      expect(await yrd(repo, duplicate.io, "bay", "run", "--bay", "shared", "--", "true")).not.toBe(0)
       expect(duplicate.stderr()).toContain("yrd in shared -- <command>")
 
       const firstGuest = spawnYrd(
@@ -651,6 +770,77 @@ printf '%s' "$*" > agent.prompt
     })
   })
 
+  it("makes manual run plus ag and automatic do converge on integrated PR state", async () => {
+    return withoutRuntimeName(async () => {
+      const tools = await mkdtemp(join(tmpdir(), "yrd-do-submit-tools-"))
+      roots.push(tools)
+      await writeFile(
+        join(tools, "ag"),
+        `#!/bin/sh
+name="\${HAB_NAME##*/}"
+printf 'worked %s\\n' "$name"
+printf '%s\\n' "$*" > agent.prompt
+printf '%s\\n' "$name" > result.txt
+git add agent.prompt result.txt
+git commit -qm "work $name"
+"$YRD_TEST_BUN" "$YRD_TEST_CLI" bay submit
+"$YRD_TEST_BUN" "$YRD_TEST_CLI" queue run PR1 --steps check,merge
+`,
+      )
+      await chmod(join(tools, "ag"), 0o755)
+      const previousPath = process.env.PATH
+      const previousBun = process.env.YRD_TEST_BUN
+      const previousCli = process.env.YRD_TEST_CLI
+      process.env.PATH = `${tools}:${previousPath ?? ""}`
+      process.env.YRD_TEST_BUN = process.execPath
+      process.env.YRD_TEST_CLI = join(import.meta.dirname, "../../../bin/yrd.ts")
+      try {
+        const manualFixture = await repository()
+        const manual = output(manualFixture.repo)
+        expect(
+          await yrd(manualFixture.repo, manual.io, "run", CLAIM, "--", "ag", "Do the issue, then submit."),
+          manual.stderr(),
+        ).toBe(0)
+        expect(manual.stdout()).toContain("worked s2-fixture")
+
+        const automaticFixture = await repository()
+        const automatic = output(automaticFixture.repo)
+        expect(await yrd(automaticFixture.repo, automatic.io, "do", CLAIM), automatic.stderr()).toBe(0)
+        expect(automatic.stdout()).toContain("worked s2-fixture")
+
+        const projections = []
+        for (const repo of [manualFixture.repo, automaticFixture.repo]) {
+          const prs = output(repo)
+          expect(await yrd(repo, prs.io, "pr", "list", "--json"), prs.stderr()).toBe(0)
+          const projection = JSON.parse(prs.stdout()) as {
+            prs: readonly { branch: string; issue?: string; status: string; taskStatus: string }[]
+          }
+          expect(projection.prs).toHaveLength(1)
+          const pr = projection.prs[0]
+          if (pr === undefined) throw new Error("issue journey did not create a PR")
+          projections.push({
+            branch: pr.branch,
+            issue: pr.issue,
+            status: pr.status,
+            taskStatus: pr.taskStatus,
+          })
+          expect(await git(repo, "show", `refs/remotes/origin/${BRANCH}:result.txt`)).toBe("s2-fixture")
+        }
+        expect(projections[0]).toEqual({
+          branch: BRANCH,
+          issue: CLAIM,
+          status: "integrated",
+          taskStatus: "done",
+        })
+        expect(projections[1]).toEqual(projections[0])
+      } finally {
+        restoreEnv("PATH", previousPath)
+        restoreEnv("YRD_TEST_BUN", previousBun)
+        restoreEnv("YRD_TEST_CLI", previousCli)
+      }
+    })
+  })
+
   it("keeps sh/run/ag as owner aliases and gives `in ag` the guest-only primer", async () => {
     return withoutRuntimeName(async () => {
       const { repo } = await repository()
@@ -689,7 +879,7 @@ printf '%s' '${label}' > '${label}-ran.txt'
         const owner = spawnYrd(
           repo,
           "bay",
-          "open",
+          "run",
           "--bay",
           "shared",
           "--",
@@ -699,9 +889,10 @@ printf '%s' '${label}' > '${label}-ran.txt'
           "_",
           ownerStop,
         )
-        await eventually(async () => access(join(repo, ".bays", "B2", "ready")))
+        const bayPath = await activeBayPath(repo, "shared")
+        await eventually(async () => access(join(bayPath, "ready")))
 
-        const shellGuest = output(join(repo, ".bays", "B2"))
+        const shellGuest = output(bayPath)
         expect(await yrd(repo, shellGuest.io, "in"), shellGuest.stderr()).toBe(0)
         const agGuest = output(repo)
         expect(await yrd(repo, agGuest.io, "in", "shared", "ag"), agGuest.stderr()).toBe(0)
@@ -744,7 +935,7 @@ printf '%s' '${label}' > '${label}-ran.txt'
     })
   })
 
-  it("runs $SHELL in a fresh uniquely named Bay when open has no operands", async () => {
+  it("runs $SHELL in a fresh uniquely named Bay when run has no operands", async () => {
     return withoutRuntimeName(async () => {
       const { repo } = await repository()
       const shell = join(repo, "..", "fixture-shell")
@@ -764,7 +955,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
       delete process.env.HAB_NAME
       try {
         const run = output(repo)
-        expect(await yrd(repo, run.io, "bay", "open"), run.stderr()).toBe(0)
+        expect(await yrd(repo, run.io, "bay", "run"), run.stderr()).toBe(0)
         const match = run.stdout().match(/bay (yrd-[0-9a-f]{12}) → new task\/\1, no issue linked/u)
         expect(match).not.toBeNull()
         expect(await readFile(shellLog, "utf8")).toBe(match?.[1])
@@ -786,7 +977,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
         repo,
         run.io,
         "bay",
-        "open",
+        "run",
         CLAIM,
         "--",
         "sh",
@@ -818,7 +1009,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
     const run = output(repo)
 
     expect(
-      await yrd(repo, run.io, "bay", "open", CLAIM, "--", "sh", "-c", "printf payload > scratch.txt"),
+      await yrd(repo, run.io, "bay", "run", CLAIM, "--", "sh", "-c", "printf payload > scratch.txt"),
       run.stderr(),
     ).toBe(0)
 
@@ -833,11 +1024,11 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
   it("reopens a closed claim without implicitly creating or updating a PR", async () => {
     const { repo } = await repository()
     const clean = output(repo)
-    expect(await yrd(repo, clean.io, "bay", "open", CLAIM, "--", "true"), clean.stderr()).toBe(0)
+    expect(await yrd(repo, clean.io, "bay", "run", CLAIM, "--", "true"), clean.stderr()).toBe(0)
 
     const dirty = output(repo)
     expect(
-      await yrd(repo, dirty.io, "bay", "open", CLAIM, "--", "sh", "-c", "printf later > later.txt"),
+      await yrd(repo, dirty.io, "bay", "run", CLAIM, "--", "sh", "-c", "printf later > later.txt"),
       dirty.stderr(),
     ).toBe(0)
 
@@ -864,7 +1055,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
     await git(repo, "update-ref", "-d", `refs/remotes/origin/${branch}`)
     const run = output(repo)
     expect(
-      await yrd(repo, run.io, "bay", "open", CLAIM, "--", "sh", "-c", "printf continued > continued.txt"),
+      await yrd(repo, run.io, "bay", "run", CLAIM, "--", "sh", "-c", "printf continued > continued.txt"),
       run.stderr(),
     ).toBe(0)
 
@@ -894,7 +1085,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
 
     const run = output(repo)
     expect(
-      await yrd(repo, run.io, "bay", "open", "--pr", branch, "--", "sh", "-c", "printf continued > continued.txt"),
+      await yrd(repo, run.io, "bay", "run", "--pr", branch, "--", "sh", "-c", "printf continued > continued.txt"),
       run.stderr(),
     ).toBe(0)
     expect(run.stdout()).toContain(`bay explicit-target → reattached ${branch}, no issue linked`)
@@ -923,7 +1114,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
 
     const run = output(repo)
     expect(
-      await yrd(repo, run.io, "bay", "open", CLAIM, "--", "sh", "-c", "printf continued > continued.txt"),
+      await yrd(repo, run.io, "bay", "run", CLAIM, "--", "sh", "-c", "printf continued > continued.txt"),
       run.stderr(),
     ).toBe(0)
 
@@ -948,7 +1139,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
 
     const run = output(repo)
     expect(
-      await yrd(repo, run.io, "bay", "open", CLAIM, "--", "sh", "-c", "printf continued > continued.txt"),
+      await yrd(repo, run.io, "bay", "run", CLAIM, "--", "sh", "-c", "printf continued > continued.txt"),
       run.stderr(),
     ).toBe(0)
 
@@ -973,7 +1164,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
     await git(repo, "branch", "-f", branch, "main")
 
     const run = output(repo)
-    expect(await yrd(repo, run.io, "bay", "open", CLAIM, "--", "true"), run.stderr()).not.toBe(0)
+    expect(await yrd(repo, run.io, "bay", "run", CLAIM, "--", "true"), run.stderr()).not.toBe(0)
     expect(await git(repo, "ls-remote", "origin", `refs/heads/${branch}`)).toBe("")
   })
 
@@ -1000,7 +1191,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
       }
 
       const run = output(repo)
-      expect(await yrd(repo, run.io, "bay", "open", CLAIM, "--", "true"), run.stderr()).not.toBe(0)
+      expect(await yrd(repo, run.io, "bay", "run", CLAIM, "--", "true"), run.stderr()).not.toBe(0)
       expect(await git(repo, "ls-remote", "origin", `refs/heads/${branch}`)).toBe("")
     }
   })
@@ -1016,7 +1207,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
     await git(repo, "switch", "-q", "main")
 
     const run = output(repo)
-    expect(await yrd(repo, run.io, "bay", "open", claim, "--", "true"), run.stderr()).not.toBe(0)
+    expect(await yrd(repo, run.io, "bay", "run", claim, "--", "true"), run.stderr()).not.toBe(0)
     expect(await git(repo, "ls-remote", "origin", `refs/heads/${branch}`)).toBe("")
 
     const bays = output(repo)
@@ -1025,7 +1216,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
       bays: [
         expect.objectContaining({
           issue: claim,
-          orphan: expect.objectContaining({ reason: expect.stringContaining("pre-child setup failed") }),
+          orphan: expect.objectContaining({ reason: expect.stringContaining("setup failed") }),
         }),
       ],
     })
@@ -1044,7 +1235,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
     await git(repo, "update-ref", "-d", `refs/remotes/origin/${branch}`)
 
     const run = output(repo)
-    expect(await yrd(repo, run.io, "bay", "open", claim, "--", "true"), run.stderr()).not.toBe(0)
+    expect(await yrd(repo, run.io, "bay", "run", claim, "--", "true"), run.stderr()).not.toBe(0)
     expect(await git(repo, "ls-remote", "origin", `refs/heads/${branch}`)).toBe(`${remoteHead}\trefs/heads/${branch}`)
 
     const bays = output(repo)
@@ -1053,7 +1244,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
       bays: [
         expect.objectContaining({
           issue: claim,
-          orphan: expect.objectContaining({ reason: expect.stringContaining("pre-child setup failed") }),
+          orphan: expect.objectContaining({ reason: expect.stringContaining("setup failed") }),
         }),
       ],
     })
@@ -1064,13 +1255,13 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
     const firstClaim = "@km/a/shared-slug"
     const secondClaim = "@ag/b/shared-slug"
     const first = output(repo)
-    expect(await yrd(repo, first.io, "bay", "open", firstClaim, "--", "true"), first.stderr()).toBe(0)
+    expect(await yrd(repo, first.io, "bay", "run", firstClaim, "--", "true"), first.stderr()).toBe(0)
     await writeFile(join(repo, "advance.txt"), "new base\n")
     await git(repo, "add", "advance.txt")
     await git(repo, "commit", "-qm", "advance base")
     await git(repo, "push", "-q", "origin", "main")
     const second = output(repo)
-    expect(await yrd(repo, second.io, "bay", "open", secondClaim, "--", "true"), second.stderr()).toBe(0)
+    expect(await yrd(repo, second.io, "bay", "run", secondClaim, "--", "true"), second.stderr()).toBe(0)
 
     const bays = output(repo)
     expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
@@ -1085,22 +1276,22 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
     const { repo } = await repository()
     const claim = "@km/test/alias-active"
     const clean = output(repo)
-    expect(await yrd(repo, clean.io, "bay", "open", claim, "--", "true"), clean.stderr()).toBe(0)
+    expect(await yrd(repo, clean.io, "bay", "run", claim, "--", "true"), clean.stderr()).toBe(0)
     const failed = output(repo)
-    expect(await yrd(repo, failed.io, "bay", "open", claim, "--", "sh", "-c", "exit 17"), failed.stderr()).toBe(1)
+    expect(await yrd(repo, failed.io, "bay", "run", claim, "--", "sh", "-c", "exit 17"), failed.stderr()).toBe(1)
 
     const path = output(repo)
     expect(await yrd(repo, path.io, "bay", "path", "alias-active"), path.stderr()).toBe(0)
-    expect(path.stdout()).toContain(join(repo, ".bays", "B2"))
+    expect(await git(path.stdout().trim(), "branch", "--show-current")).toMatch(/^task\/alias-active(?:-|$)/u)
   })
 
   it("does not rewrite an existing orphan when a duplicate active claim is refused", async () => {
     const { repo } = await repository()
     const failed = output(repo)
-    expect(await yrd(repo, failed.io, "bay", "open", CLAIM, "--", "sh", "-c", "exit 17"), failed.stderr()).toBe(1)
+    expect(await yrd(repo, failed.io, "bay", "run", CLAIM, "--", "sh", "-c", "exit 17"), failed.stderr()).toBe(1)
 
     const duplicate = output(repo)
-    expect(await yrd(repo, duplicate.io, "bay", "open", CLAIM, "--", "true"), duplicate.stderr()).not.toBe(0)
+    expect(await yrd(repo, duplicate.io, "bay", "run", CLAIM, "--", "true"), duplicate.stderr()).not.toBe(0)
 
     const bays = output(repo)
     expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
@@ -1123,7 +1314,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
         "--repo",
         repo,
         "bay",
-        "open",
+        "run",
         "@km/test/stdin",
         "--",
         "sh",
@@ -1141,7 +1332,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
     const run = output(repo)
 
     expect(
-      await yrd(repo, run.io, "bay", "open", CLAIM, "--", "sh", "-c", "printf preserve > crash.txt; exit 17"),
+      await yrd(repo, run.io, "bay", "run", CLAIM, "--", "sh", "-c", "printf preserve > crash.txt; exit 17"),
       run.stderr(),
     ).toBe(1)
 
@@ -1173,7 +1364,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
         "--repo",
         repo,
         "bay",
-        "open",
+        "run",
         CLAIM,
         "--",
         "sh",
@@ -1228,7 +1419,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
         "--repo",
         repo,
         "bay",
-        "open",
+        "run",
         CLAIM,
         "--",
         "sh",
@@ -1370,6 +1561,19 @@ function spawnYrd(repo: string, ...args: string[]) {
     stdout: "pipe",
     stderr: "pipe",
   })
+}
+
+async function activeBayPath(repo: string, selector: string): Promise<string> {
+  let resolved: string | undefined
+  await eventually(async () => {
+    const path = output(repo)
+    const exitCode = await yrd(repo, path.io, "bay", "path", selector)
+    if (exitCode !== 0) throw new Error(path.stderr())
+    resolved = path.stdout().trim()
+    await access(resolved)
+  })
+  if (resolved === undefined) throw new Error(`Bay '${selector}' did not expose an active path`)
+  return resolved
 }
 
 async function git(cwd: string, ...args: string[]): Promise<string> {

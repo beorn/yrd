@@ -2989,6 +2989,35 @@ describe("runYrd", () => {
     expect(prSubmit.stdout()).not.toContain(`--${["li", "ne"].join("")} <branch>`)
   })
 
+  it("uses one friendly Bay root and the compact BAY STATUS ISSUE BY BASE BRANCH table", async () => {
+    const app = await createApp()
+    await openTestBay(app, {
+      name: "friendly",
+      issue: "@km/test/friendly",
+      actor: "@dev/friendly",
+      branch: "task/friendly-branch-that-uses-the-available-width",
+    })
+    vi.stubEnv("HOME", "/repo")
+    try {
+      const list = outputIO({ columns: 120 })
+      expect(await runYrd(app, yrd("bay", "list"), list.io), list.stderr()).toBe(0)
+      const lines = stripAnsi(list.stdout()).trimEnd().split("\n")
+      expect(lines[0]).toBe("Bays in ~/.bays/")
+      expect(lines[1]).toBe("")
+      expect(lines[2]?.trim().split(/\s+/u)).toEqual(["BAY", "STATUS", "ISSUE", "BY", "BASE", "BRANCH"])
+      expect(lines[3]).toContain("B1")
+      expect(lines[3]).toContain("active")
+      expect(lines[3]).toContain("@km/test/friendly")
+      expect(lines[3]).toContain("@dev/friendly")
+      expect(lines[3]).toContain("main")
+      expect(lines[3]).toContain("task/friendly-branch-that-uses-the-available-width")
+      expect(list.stdout()).not.toContain("ACTOR")
+      expect(list.stdout()).not.toContain("PATH")
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
   it("refreshes and closes an active Bay through installed command refs while driving jobs", async () => {
     const app = await createApp()
     await openTestBay(app, { name: "fix-readme", branch: "topic/readme" })
@@ -3015,8 +3044,7 @@ describe("runYrd", () => {
 
     const close = outputIO({ cwd: "/repo/.bays/B1" })
     expect(await runYrd(app, yrd("bay", "close"), close.io)).toBe(0)
-    expect(close.stdout()).toContain("B1")
-    expect(close.stdout()).toContain("closed")
+    expect(close.stdout()).toBe("closed fix-readme\n")
     expect(app.state().bays.byId.B1?.status).toBe("closed")
   })
 
@@ -3199,7 +3227,7 @@ describe("runYrd", () => {
     const inactive = outputIO()
     expect(await runYrd(app, yrd("bay", "path", "B1"), inactive.io)).toBe(1)
     expect(inactive.stderr()).toContain("bay 'B1' is closed; expected an active bay")
-    expect(inactive.stderr()).toContain("yrd bay open --bay <name> -- <command>")
+    expect(inactive.stderr()).toContain("yrd bay open --bay <name>")
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(afterClose)
 
     const relativeApp = await createApp({ bayPath: "relative/B1" })

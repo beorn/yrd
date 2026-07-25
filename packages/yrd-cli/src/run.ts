@@ -1540,7 +1540,7 @@ async function preserveInterruptedRunBay(app: YrdCliApp, bay: Bay, phase: string
   const signal = io.drainSignal
   if (signal?.aborted !== true) return false
   const source = typeof signal.reason === "string" ? ` by ${signal.reason}` : ""
-  const reason = `bay open interrupted during ${phase}${source}`
+  const reason = `Bay lifecycle interrupted during ${phase}${source}`
   await orphanRunBay(app, bay, reason)
   io.stderr(`yrd: ${reason}; Bay '${bay.id}' is preserved and marked orphan\n`)
   return true
@@ -1637,10 +1637,7 @@ function resolveGuestBay(app: YrdCliApp, selector: string | undefined, cwd: stri
   if (selector === undefined) {
     const bay = currentBay(stateOf(app).bays, cwd)
     if (bay?.status !== "active") {
-      refusal(
-        "no open bay contains the current directory; " +
-          "run 'yrd bay open --bay <name> -- <command>' to create its owner",
-      )
+      refusal("no open bay contains the current directory; " + "run 'yrd bay open --bay <name>' to create its owner")
     }
     return bay
   }
@@ -1650,7 +1647,7 @@ function resolveGuestBay(app: YrdCliApp, selector: string | undefined, cwd: stri
       (bay) => bay.status === "active" && (bay.id === selector || bay.name === selector || bay.branch === selector),
     )
   if (active.length === 0) {
-    refusal(`no open bay '${selector}'; run 'yrd bay open --bay ${selector} -- <command>' to create its owner`)
+    refusal(`no open bay '${selector}'; run 'yrd bay open --bay ${selector}' to create its owner`)
   }
   if (active.length > 1) {
     refusal(
@@ -1723,7 +1720,7 @@ function exactOperands(left: readonly string[], right: readonly string[]): boole
   return left.length === right.length && left.every((value, index) => value === right[index])
 }
 
-function bayOpenOperands(
+function bayRunOperands(
   config: string | undefined,
   command: readonly string[] | undefined,
   io: YrdCliIO,
@@ -1731,7 +1728,7 @@ function bayOpenOperands(
   const parsedCommand = command ?? []
   const explicitChild = (io as RuntimeInvocationIO)[RuntimeChildArgv]
   if (explicitChild === undefined) {
-    if (parsedCommand.length > 0) usage("bay open child commands must follow --")
+    if (parsedCommand.length > 0) usage("bay run child commands must follow --")
     return { ...(config === undefined ? {} : { arg: config }), argv: [] }
   }
   if (exactOperands(parsedCommand, explicitChild)) {
@@ -1740,7 +1737,7 @@ function bayOpenOperands(
   if (config !== undefined && exactOperands([config, ...parsedCommand], explicitChild)) {
     return { argv: explicitChild }
   }
-  usage("bay open could not separate its config from the child command; place the command after --")
+  usage("bay run could not separate its config from the child command; place the command after --")
 }
 
 function bayInOperands(
@@ -1765,11 +1762,9 @@ function bayInOperands(
   usage("yrd in could not separate its Bay selector from the child command; place the command after --")
 }
 
-async function openBaySession(
+async function prepareOwnedBay(
   app: YrdCliApp,
-  services: YrdCliServices,
   arg: string | undefined,
-  childArgv: readonly string[] | ((resolved: BayOpenResolution) => readonly string[]),
   options: BayOpenOptions,
   io: YrdCliIO,
   preResolved: Readonly<{
@@ -1777,8 +1772,7 @@ async function openBaySession(
     targetedPr?: PR
     via?: "issue" | "pr"
   }> = {},
-): Promise<YrdCliExitCode> {
-  if (services.process === undefined) configuration("bay open requires the process-backed Yrd runtime")
+): Promise<Readonly<{ identity: BayOpenResolution; bay: Bay }>> {
   const persona = (io as RuntimePersonaIO)[RuntimePersona]
   const identity = await resolveBayOpen(app, arg, options, io, preResolved)
   const existing = openRunBay(app, identity)
@@ -1826,10 +1820,41 @@ async function openBaySession(
           candidate.issue === identity.issue,
       )
     if (bay !== undefined) {
-      await orphanRunBay(app, bay, `pre-child setup failed: ${errorDetail(error)}`)
+      await orphanRunBay(app, bay, `Bay setup failed: ${errorDetail(error)}`)
     }
     throw error
   }
+  return { identity, bay }
+}
+
+async function openPersistentBay(
+  app: YrdCliApp,
+  arg: string | undefined,
+  options: BayOpenOptions,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
+  await prepareOwnedBay(app, arg, options, io)
+  return 0
+}
+
+async function runBaySession(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  arg: string | undefined,
+  childArgv: readonly string[] | ((resolved: BayOpenResolution) => readonly string[]),
+  options: BayOpenOptions,
+  io: YrdCliIO,
+  runOptions: Readonly<{ keep?: boolean }> = {},
+  preResolved: Readonly<{
+    issueResolved?: boolean
+    targetedPr?: PR
+    via?: "issue" | "pr"
+  }> = {},
+): Promise<YrdCliExitCode> {
+  if (services.process === undefined) configuration("bay run requires the process-backed Yrd runtime")
+  const provisioned = await prepareOwnedBay(app, arg, options, io, preResolved)
+  const { identity } = provisioned
+  let { bay } = provisioned
 
   let child: ProcessResult
   try {
@@ -1853,6 +1878,7 @@ async function openBaySession(
     return 1
   }
   if (await preserveInterruptedRunBay(app, bay, "child completion", io)) return 1
+  if (runOptions.keep === true) return 0
 
   try {
     bay = await checkpointRunBay(app, bay, identity.claim, io)
@@ -1861,6 +1887,7 @@ async function openBaySession(
     assertJobsPassed(await runJobs(app, app.jobs.requested(closing), io), `bay '${bay.id}' close`)
     const closed = app.bays.get(bay.id)
     if (closed?.status !== "closed") refusal(`bay '${bay.id}' did not close synchronously`)
+    io.stdout(`closed ${identity.bay}\n`)
     return 0
   } catch (error) {
     await orphanRunBay(app, bay, `post-child checkpoint or close failed: ${errorDetail(error)}`)
@@ -1881,25 +1908,27 @@ async function doWork(
     issueFailure = error
   }
   if (issueFailure === undefined) {
-    return openBaySession(
+    return runBaySession(
       app,
       services,
       selector,
       (resolved) => ["ag", issueMissionPrimer(resolved, selector)],
       {},
       io,
+      {},
       { issueResolved: true, via: "issue" },
     )
   }
   const targetedPr = app.bays.pr(selector)
   if (targetedPr === undefined) throw issueFailure
-  return openBaySession(
+  return runBaySession(
     app,
     services,
     undefined,
     (resolved) => ["ag", issueMissionPrimer(resolved, selector)],
     { pr: selector, bay: derivedWorkName(selector) },
     io,
+    {},
     { targetedPr, via: "pr" },
   )
 }
@@ -1996,6 +2025,11 @@ async function closeBays(
     const current = app.bays.get(bay.id)
     if (current === undefined) throw new Error(`yrd: bay '${bay.id}' disappeared after close`)
     closed.push(current)
+  }
+  const [only] = closed
+  if (!jsonEnabled(options) && only !== undefined && closed.length === 1) {
+    io.stdout(`closed ${only.name}\n`)
+    return
   }
   await printResult(
     io,
@@ -2738,8 +2772,7 @@ function pathBay(app: YrdCliApp, selector: string, options: JsonOption, io: YrdC
   if (bay === undefined) refusal(`no bay '${selector}'; run 'yrd bay' to list available Bays`)
   if (bay.status !== "active") {
     refusal(
-      `bay '${bay.id}' is ${bay.status}; expected an active bay; ` +
-        "run 'yrd bay open --bay <name> -- <command>' to create one",
+      `bay '${bay.id}' is ${bay.status}; expected an active bay; ` + "run 'yrd bay open --bay <name>' to create one",
     )
   }
   if (bay.path === undefined || !isAbsolute(bay.path)) {
@@ -3238,8 +3271,13 @@ function isBracketedBayCommand(
 ): boolean {
   const name = action.name()
   const parent = action.parent?.name()
-  if ((name === "open" || name === "in") && (parent === "bay" || parent === "git bay")) return true
-  return (name === "in" || name === "do" || name === "sh") && (parent === "yrd" || parent === "git yrd")
+  if ((name === "open" || name === "run" || name === "in") && (parent === "bay" || parent === "git bay")) {
+    return true
+  }
+  return (
+    (name === "in" || name === "do" || name === "sh" || name === "run" || name === "ag") &&
+    (parent === "yrd" || parent === "git yrd")
+  )
 }
 
 /** Read-only invocations never settle PR state or route submitter receipts. */
@@ -5438,7 +5476,8 @@ function configureOutput(command: CliCommand, io: YrdCliIO, output: CommanderOut
 function addExamples(program: CliCommand, name: string, projection: "root" | "bay"): void {
   const bay = projection === "bay" ? name : `${name} bay`
   const examples: [string, string][] = [
-    [`$ ${bay} open --bay fix -- ag`, "own a scratch Bay lifecycle"],
+    [`$ ${bay} open --bay fix`, "open and keep a scratch Bay"],
+    [`$ ${bay} run @km/test/fix -- ag`, "run one scoped command"],
     [`$ ${bay} in fix ag`, "join an open Bay as a guest"],
     [`$ ${bay} submit`, "submit the current bay as a PR"],
   ]
@@ -5502,40 +5541,50 @@ function addRootBayCommands(
     .action(async (selector) => setExit(await doWork(installed(), installedServices(), selector, io)))
   program
     .command("sh [config]")
-    .description("open an owned Bay and run $SHELL")
+    .description("run $SHELL in a scoped Bay")
     .option("--issue <ref>", "link an issue without a positional")
     .option("--pr <selector>", "continue an existing PR branch without recutting or submitting it")
     .option("--bay <name>", "choose an issue-less or issue-linked Bay identity")
+    .option("--keep", "leave a successful run open")
     .action(async (config, options) =>
       setExit(
-        await openBaySession(
+        await runBaySession(
           installed(),
           installedServices(),
           config,
           defaultRunArgv(installedServices()),
           options,
           io,
+          { keep: options.keep },
         ),
       ),
     )
   program
     .command("run [config] [command...]")
-    .description("alias for bay open; own a Bay lifecycle around one command (defaults to $SHELL)")
+    .description("alias for bay run; run one scoped command (defaults to $SHELL)")
     .option("--issue <ref>", "link an issue without a positional")
     .option("--pr <selector>", "continue an existing PR branch without recutting or submitting it")
     .option("--bay <name>", "choose an issue-less or issue-linked Bay identity")
+    .option("--keep", "leave a successful run open")
     .action(async (config, command, options) => {
-      const request = bayOpenOperands(config, command, io)
-      setExit(await openBaySession(installed(), installedServices(), request.arg, request.argv, options, io))
+      const request = bayRunOperands(config, command, io)
+      setExit(
+        await runBaySession(installed(), installedServices(), request.arg, request.argv, options, io, {
+          keep: options.keep,
+        }),
+      )
     })
   program
     .command("ag [config]")
-    .description("open an owned Bay and run ag")
+    .description("run ag in a scoped Bay")
     .option("--issue <ref>", "link an issue without a positional")
     .option("--pr <selector>", "continue an existing PR branch without recutting or submitting it")
     .option("--bay <name>", "choose an issue-less or issue-linked Bay identity")
+    .option("--keep", "leave a successful run open")
     .action(async (config, options) =>
-      setExit(await openBaySession(installed(), installedServices(), config, ["ag"], options, io)),
+      setExit(
+        await runBaySession(installed(), installedServices(), config, ["ag"], options, io, { keep: options.keep }),
+      ),
     )
 }
 
@@ -5627,14 +5676,31 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (options) => listBays(installed(), options, io))
   bay
-    .command("open [config] [command...]")
-    .description("open and own a Bay lifecycle around one command (defaults to $SHELL)")
+    .command("open [config]")
+    .description("open and keep a Bay")
     .option("--issue <ref>", "link an issue without a positional")
     .option("--pr <selector>", "continue an existing PR branch without recutting or submitting it")
     .option("--bay <name>", "choose an issue-less or issue-linked Bay identity")
+    .action(async (config, options) => {
+      if ((io as RuntimeInvocationIO)[RuntimeChildArgv] !== undefined) {
+        usage("bay open does not run commands; use 'yrd bay run <config> -- <command>'")
+      }
+      setExit(await openPersistentBay(installed(), config, options, io))
+    })
+  bay
+    .command("run [config] [command...]")
+    .description("run one scoped command (defaults to $SHELL)")
+    .option("--issue <ref>", "link an issue without a positional")
+    .option("--pr <selector>", "continue an existing PR branch without recutting or submitting it")
+    .option("--bay <name>", "choose an issue-less or issue-linked Bay identity")
+    .option("--keep", "leave a successful run open")
     .action(async (config, command, options) => {
-      const request = bayOpenOperands(config, command, io)
-      setExit(await openBaySession(installed(), installedServices(), request.arg, request.argv, options, io))
+      const request = bayRunOperands(config, command, io)
+      setExit(
+        await runBaySession(installed(), installedServices(), request.arg, request.argv, options, io, {
+          keep: options.keep,
+        }),
+      )
     })
   bay
     .command("in [bay] [command...]")
