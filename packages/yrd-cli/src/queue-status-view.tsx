@@ -90,6 +90,7 @@ import {
   runTaskStatusOf,
   stepTaskStatusOf,
   taskStatusFields,
+  taskStatusGlyph,
   type StatusGlyph,
   type TaskStatus,
   type TaskStatusFields,
@@ -338,6 +339,8 @@ export type QueueFlowMetrics = Readonly<{
   outcomes: Readonly<{
     integrated: number
     alreadyLanded: number
+    /** Completed without merge proof — not a landing (21801/22323). */
+    passed: number
     rejected: number
     environmentRefused: number
     stale: number
@@ -629,6 +632,9 @@ type GateEvidence = Readonly<{
   residualCount: number
 }>
 
+/** Perfect-detector landing class for scripts (21801 / 22323). */
+export type LandingVerdict = "landed" | "already-landed" | "non-landing" | "failed" | "running" | "canceled"
+
 export type QueueShowData = Readonly<{
   run: string
   candidateId: string
@@ -638,6 +644,10 @@ export type QueueShowData = Readonly<{
   taskStatus: TaskStatus
   glyph: StatusGlyph
   outcome: string
+  /** Perfect detector: landed only when merge/integration proof exists. */
+  landingVerdict: LandingVerdict
+  /** Step names in run order — scripts must not infer landing from glyph alone. */
+  stepNames: readonly string[]
   started: string
   finished: string
   duration: string
@@ -813,6 +823,7 @@ export function queueFlowMetrics(
   const waits: number[] = []
   let integrated = 0
   let alreadyLanded = 0
+  let passed = 0
   let rejected = 0
   let environmentRefused = 0
   let stale = 0
@@ -829,6 +840,7 @@ export function queueFlowMetrics(
 
     if (fact.outcome === "integrated") integrated += 1
     else if (fact.outcome === "already-landed") alreadyLanded += 1
+    else if (fact.outcome === "passed") passed += 1
     else if (fact.outcome === "rejected") rejected += 1
     else if (fact.outcome === "environment-refused") environmentRefused += 1
     else if (fact.outcome === "stale") stale += 1
@@ -857,7 +869,18 @@ export function queueFlowMetrics(
   return {
     windowMs,
     terminalAttempts: seenRuns.size,
-    outcomes: { integrated, alreadyLanded, rejected, environmentRefused, stale, lost, legacy, refused, canceled },
+    outcomes: {
+      integrated,
+      alreadyLanded,
+      passed,
+      rejected,
+      environmentRefused,
+      stale,
+      lost,
+      legacy,
+      refused,
+      canceled,
+    },
     decisionRejection: {
       rejected,
       decisions,
@@ -1350,6 +1373,22 @@ function queueOutcome(run: Run): string {
   return run.status === "waiting" ? "waiting" : "running"
 }
 
+/** Perfect detectors from the 6h phantom audit (22323): outcome=integrated or
+ * steps-include-merge ⇒ landed; outcome=passed + admission-only ⇒ non-landing.
+ * Duration is secondary and must never drive this verdict. */
+export function landingVerdictOfOutcome(outcome: string): LandingVerdict {
+  if (outcome === "integrated") return "landed"
+  if (outcome === "already-landed") return "already-landed"
+  if (outcome === "passed") return "non-landing"
+  if (outcome === "running" || outcome === "waiting") return "running"
+  if (outcome === "canceled" || outcome === "retired") return "canceled"
+  return "failed"
+}
+
+export function stepNamesOfRun(run: Run): readonly string[] {
+  return run.steps.map((step) => step.name)
+}
+
 function queueIntegration(run: Run): IntegrationProof | undefined {
   return run.integration ?? ("integration" in run.shape ? run.shape.integration : undefined)
 }
@@ -1656,7 +1695,14 @@ function terminalProjection(run: Run): QueueTerminalProjection {
     throw new TypeError(`yrd: nonterminal Run '${run.id}' cannot be projected as a terminal outcome`)
   }
   if (run.conclusion === "success") {
-    return queueIntegration(run)?.alreadyLanded === undefined
+    // Perfect detector (21801 / 22323 audit): only a recorded integration proof
+    // is a landing. `queueIntegration(run)?.alreadyLanded === undefined` used to
+    // treat missing proof as integrated because `undefined?.x === undefined`.
+    const integration = queueIntegration(run)
+    if (integration === undefined) {
+      return { outcome: "passed", display: "passed" }
+    }
+    return integration.alreadyLanded === undefined
       ? { outcome: "integrated", display: "integrated" }
       : { outcome: "already-landed", display: "already-landed" }
   }
@@ -2160,7 +2206,7 @@ function foldTerminalFacts(
     const waits = row.queueWaitMs === null ? [] : [row.queueWaitMs]
     const outcome = terminalOutcome(row.status)
     const failureClass =
-      outcome === "integrated" || outcome === "already-landed"
+      outcome === "integrated" || outcome === "already-landed" || outcome === "passed"
         ? null
         : failureBreakdownClass(row.failure?.code ?? row.status)
     const member = terminalMemberFact(row, row.run, row.timestamp, failedAttempts)
@@ -3486,7 +3532,8 @@ function noticeState(
 ): StatusNoticeState | undefined {
   if (data !== undefined) {
     if (data.status === "completed" && data.conclusion === "success") {
-      return data.integration === undefined ? "done" : "integrated"
+      // Non-landing success is "passed", never "done" (21801).
+      return data.integration === undefined ? "passed" : "integrated"
     }
     if (data.status === "completed" && data.conclusion === "failure") return failureState ?? "failed"
     if (data.status === "completed" && data.conclusion === "timed_out") return "timeout"
@@ -3748,6 +3795,8 @@ const TIMELINE_STATUS_WORDS = {
   running: "run",
   integrated: "done",
   "already-landed": "done",
+  // Non-landing success — never the word "done" (21801 / 22323).
+  passed: "pass",
   rejected: "fail",
   "environment-refused": "env",
   stale: "stale",
@@ -4326,7 +4375,7 @@ export const QUEUE_TIMELINE_STATUS_BUCKETS: readonly QueueTimelineStatusBucket[]
  * `open` = the agents' court (draft/rev — editable, next action is the author);
  * `running` = the queue's court (ready/queued/running — next action is the
  * runner); every non-success terminal outcome is `failed`; integrated and
- * already-landed are `done`. */
+ * already-landed are `done`. Admission-only `passed` is NOT done (21801). */
 export function queueTimelineStatusBucket(status: QueueTimelineStatus): QueueTimelineStatusBucket {
   if (status === "draft" || status === "rev") return "open"
   if (status === "ready" || status === "pending" || status === "running") return "running"
@@ -5211,6 +5260,14 @@ export function queueShowData(
   const durations = runDurations(run, runAttempts)
   const runDurationMs = durations.totalDurationMs
   const taskStatus = runTaskStatusOf(run)
+  const outcome = queueOutcome(run)
+  const landingVerdict = landingVerdictOfOutcome(outcome)
+  const stepNames = stepNamesOfRun(run)
+  // Glyph for non-landing success must not share ✓ with real merges (21801).
+  const glyph =
+    landingVerdict === "non-landing"
+      ? (statusPresentation("passed").glyph as StatusGlyph)
+      : taskStatusGlyph(taskStatus)
   const runFailure = failureFact(run, relevantStep(run))
   return {
     run: run.id,
@@ -5218,8 +5275,11 @@ export function queueShowData(
     base: run.base,
     status: run.status,
     ...(run.conclusion === undefined ? {} : { conclusion: run.conclusion }),
-    ...taskStatusFields(taskStatus),
-    outcome: queueOutcome(run),
+    taskStatus,
+    glyph,
+    outcome,
+    landingVerdict,
+    stepNames,
     started: toIso(run.startedAt),
     finished: run.finishedAt === undefined ? "-" : toIso(run.finishedAt),
     duration: runDurationMs === undefined ? "-" : preciseDuration(runDurationMs),
@@ -5529,7 +5589,7 @@ type PrActivityEntry = Readonly<{
 
 function runActivityState(data: QueueShowData): StatusNoticeState {
   if (data.status === "queued" || data.status === "in_progress" || data.status === "waiting") return "running"
-  if (data.conclusion === "success") return data.integration === undefined ? "done" : "integrated"
+  if (data.conclusion === "success") return data.integration === undefined ? "passed" : "integrated"
   if (data.failure !== undefined) return failureStatusClass(data.failure.code)
   return data.conclusion === "cancelled" ? "canceled" : "failed"
 }

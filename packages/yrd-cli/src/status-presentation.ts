@@ -5,6 +5,8 @@ export type StatusPresentationState =
   | "running"
   | "done"
   | "integrated"
+  /** Step success without a merge/landing proof (admission-only phantom). */
+  | "passed"
   | "failed"
   | "env"
   | "stale"
@@ -46,6 +48,9 @@ const STATUS_PRESENTATIONS = {
   running: { glyph: "◉", color: "$fg-info" },
   done: { glyph: "✓", color: "$fg-success" },
   integrated: { glyph: "✓", color: "$fg-success" },
+  // Non-landing success must NOT share the green check with real merges
+  // (@yrd/core/21096-cli-ux/21801; audit 22323: outcome=passed admission-only).
+  passed: { glyph: "◌", color: "$fg-warning" },
   failed: { glyph: "×", color: "$fg-error" },
   env: { glyph: "×", color: "$fg-warning" },
   stale: { glyph: "×", color: "$fg-warning" },
@@ -65,7 +70,7 @@ const STATUS_ALIASES: Readonly<Record<string, StatusPresentationState>> = {
   waiting: "running",
   checking: "running",
   wip: "running",
-  passed: "done",
+  // "passed" is a first-class presentation state (non-landing), not an alias of done.
   success: "done",
   succeeded: "done",
   "already-landed": "integrated",
@@ -83,6 +88,9 @@ const STATUS_ALIASES: Readonly<Record<string, StatusPresentationState>> = {
   rev: "needs-author",
   refused: "rejected",
   legacy: "rejected",
+  // Admission-only / incomplete success aliases
+  "non-landing": "passed",
+  "admission-only": "passed",
 }
 
 function knownStatusPresentationState(normalized: string): StatusPresentationState | null {

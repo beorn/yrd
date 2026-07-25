@@ -15,6 +15,8 @@ export type QueueStatsBucket = Readonly<{
     all: number
     integrated: number
     alreadyLanded: number
+    /** Admission-only / non-landing successes (21801) — not FAILS, not INTEGRATED. */
+    passed: number
     fails: number
     failureBreakdown: Readonly<Record<FailureBreakdownClass, number>>
   }>
@@ -119,7 +121,7 @@ function failureBreakdown(facts: readonly QueueTerminalFact[]): Readonly<Record<
     number
   >
   for (const fact of facts) {
-    if (fact.outcome === "integrated" || fact.outcome === "already-landed") continue
+    if (fact.outcome === "integrated" || fact.outcome === "already-landed" || fact.outcome === "passed") continue
     const failureClass = fact.failureClass ?? "other"
     counts[failureClass] += 1
   }
@@ -138,6 +140,8 @@ function queueStatsBucket(
     .filter((fact) => fact.outcome === "already-landed")
     .flatMap((fact) => fact.members)
   const totalMembers = integratedMembers.filter((member) => member.totalMs !== null)
+  const isLanding = (outcome: string) => outcome === "integrated" || outcome === "already-landed"
+  const isNonLandingSuccess = (outcome: string) => outcome === "passed"
   return {
     ...window,
     covered: earliestFactMs !== null && earliestFactMs <= window.startMs,
@@ -145,7 +149,8 @@ function queueStatsBucket(
       all: selected.length,
       integrated: integratedMembers.length,
       alreadyLanded: alreadyLandedMembers.length,
-      fails: selected.filter((fact) => fact.outcome !== "integrated" && fact.outcome !== "already-landed").length,
+      passed: selected.filter((fact) => isNonLandingSuccess(fact.outcome)).length,
+      fails: selected.filter((fact) => !isLanding(fact.outcome) && !isNonLandingSuccess(fact.outcome)).length,
       failureBreakdown: failureBreakdown(selected),
     },
     total: {
