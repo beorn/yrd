@@ -29,7 +29,12 @@ import {
   type JsonValue,
 } from "./domain.ts"
 import { asFailure, raiseFailure } from "./failure.ts"
-import { parseJournalFrame, type JournalCompatibility, type JournalFrame } from "./frame.ts"
+import {
+  assertJournalReaderCompatibility,
+  parseJournalFrame,
+  type JournalCompatibility,
+  type JournalFrame,
+} from "./frame.ts"
 import { cloneFrozen, freeze, type DeepReadonly } from "./immutable.ts"
 import type { Cursor, Journal, JournalCheckpoint, JournalHistory, JournalHistoryDiagnostics } from "./journal.ts"
 
@@ -983,6 +988,7 @@ function parseCheckpointFrame(value: unknown, commandHashes: Map<string, string>
   if (!plainRecord(value) || !plainRecord(value.command) || !plainRecord(value.cause) || !Array.isArray(value.events)) {
     throw new Error("checkpoint contains an invalid journal frame")
   }
+  const compatibility = assertJournalReaderCompatibility(value)
   const command = value.command
   const cause = value.cause
   const jsonPostorder: object[] = []
@@ -1006,7 +1012,7 @@ function parseCheckpointFrame(value: unknown, commandHashes: Map<string, string>
     !optionalNonemptyString(cause.traceId) ||
     !optionalNonemptyString(cause.spanId) ||
     (Object.hasOwn(value, "value") && !checkpointJson(value.value, jsonPostorder)) ||
-    !exactKeys(value, ["cause", "command", "events", "value"])
+    !exactKeys(value, ["cause", "command", "events", "value", "compatibility"])
   ) {
     throw new Error("checkpoint contains an invalid journal frame")
   }
@@ -1032,6 +1038,7 @@ function parseCheckpointFrame(value: unknown, commandHashes: Map<string, string>
   for (const node of jsonPostorder) Object.freeze(node)
   Object.freeze(command)
   Object.freeze(cause)
+  if (compatibility !== undefined && plainRecord(value.compatibility)) Object.freeze(value.compatibility)
   for (const applied of value.events) Object.freeze(applied)
   Object.freeze(value.events)
   return Object.freeze(value) as JournalFrame

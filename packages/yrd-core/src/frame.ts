@@ -31,7 +31,7 @@ export function journalFrameCompatibility(value: unknown): JournalCompatibility 
   return JournalCompatibilitySchema.parse(value.compatibility)
 }
 
-export function parseJournalFrame(value: unknown): JournalFrame {
+export function assertJournalReaderCompatibility(value: unknown): JournalCompatibility | undefined {
   const compatibility = journalFrameCompatibility(value)
   if (compatibility !== undefined && compatibility.version > JOURNAL_READER_VERSION) {
     raiseFailure(
@@ -40,6 +40,11 @@ export function parseJournalFrame(value: unknown): JournalFrame {
       `yrd: journal schema v${compatibility.version} requires reader pin ${compatibility.reader}; this reader supports through v${JOURNAL_READER_VERSION}`,
     )
   }
+  return compatibility
+}
+
+export function parseJournalFrame(value: unknown): JournalFrame {
+  assertJournalReaderCompatibility(value)
   const frame = JournalFrameSchema.parse(value)
   Command.assertCause(frame.command, frame.cause)
   return freeze(frame) as JournalFrame

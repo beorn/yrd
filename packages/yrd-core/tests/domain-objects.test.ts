@@ -342,6 +342,34 @@ describe("Yrd domain objects", () => {
     expect(recovered.state().counter.value).toBe(4)
   })
 
+  it("restores versioned receipt frames from a projection checkpoint", async () => {
+    const backing = createMemoryJournal<unknown>()
+    const cache = createCheckpointJournal(backing)
+    const definition = withCounter()(createYrdDef())
+    const compatibility = { version: 1, reader: "a".repeat(40) }
+    const writer = await createYrd(definition, {
+      inject: {
+        journal: cache.journal,
+        compatibility,
+        id: ids("versioned-checkpoint-command", "versioned-checkpoint-event"),
+      },
+    })
+    await writer.dispatch({ op: "counter.add", args: { by: 4 } })
+    await writer.close()
+    cache.reads.length = 0
+
+    await using restored = await createYrd(definition, { inject: { journal: cache.journal } })
+
+    expect(cache.reads[0]).toBe(1)
+    expect(restored.state().counter.value).toBe(4)
+    expect(cache.stored()).toMatchObject({
+      cursor: 1,
+      value: {
+        receipts: [expect.objectContaining({ compatibility })],
+      },
+    })
+  })
+
   it("allows legacy payloads only while replaying and never widens current appends", async () => {
     type FactState = { facts: { total: number } }
     const journal = createMemoryJournal()
