@@ -1609,7 +1609,27 @@ function createQueue<Shape extends PRShape>(
             if (runOptions.continueAdmissions?.() === false) break
             warnFlowDrift(candidate.map((pr) => pr.flow))
             const baseSha = await resolveCandidateBaseSha(candidate, resolveCycleBase)
-            const facts = await candidateFacts(candidate, baseSha)
+            // 22306 / 22332 companion: a single Candidate whose prepare refuses
+            // (infrastructure or refusal) must not abort the selectorless drain.
+            // Keep 22332's reserved-id retry inside candidateFacts; this catch
+            // only isolates the exhausted residual failure to one partition.
+            let facts: z.infer<typeof CandidateCreatedSchema> | undefined
+            try {
+              facts = await candidateFacts(candidate, baseSha)
+            } catch (error) {
+              const fact = failureFact(error)
+              if (!selectorless || fact === undefined || (fact.kind !== "refusal" && fact.kind !== "infrastructure")) {
+                throw error
+              }
+              log.warn?.("queue compose skipped a Candidate that could not be prepared", {
+                action: "compose-candidate-skip",
+                ...(candidate.length === 1 ? { pr: candidate[0]?.id } : { prs: candidate.map((pr) => pr.id) }),
+                code: fact.code,
+                kind: fact.kind,
+                reason: fact.message,
+              })
+              continue
+            }
             const started = await actions.run({
               prs: candidate.map((pr) => pr.id),
               ...(args.steps === undefined ? {} : { steps: args.steps }),
