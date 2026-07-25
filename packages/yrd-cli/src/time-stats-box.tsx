@@ -199,6 +199,11 @@ const STATS_ROWS: readonly StatsRow[] = [
     value: (bucket) => countCell(bucket, bucket.runs.integrated),
   },
   {
+    label: "ALREADY",
+    color: "$fg-success",
+    value: (bucket) => countCell(bucket, bucket.runs.alreadyLanded),
+  },
+  {
     label: "FAILS",
     color: "$fg-error",
     metric: "fails",

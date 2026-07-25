@@ -287,6 +287,11 @@ async function createApp(
     baseFailure?: boolean
     clock?: () => string
     mergeCommits?: readonly string[]
+    mergeAlreadyLanded?: Readonly<{
+      candidateSha: string
+      candidateTreeSha: string
+      baseTreeSha: string
+    }>
     mergeWait?: Readonly<{ started: () => void; until: Promise<void> }>
     sourceRewrites?: readonly SourceRewrite[]
     journal?: Journal<unknown>
@@ -356,7 +361,14 @@ async function createApp(
   const merge = withMerge(
     async (
       _input: StepExecution<CheckedShape>,
-    ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => {
+    ): Promise<
+      JobResult<{
+        commit: string
+        baseSha: string
+        alreadyLanded?: Readonly<{ candidateSha: string; candidateTreeSha: string; baseTreeSha: string }>
+        sourceRewrites?: readonly SourceRewrite[]
+      }>
+    > => {
       options.mergeRuns?.push("merge")
       options.mergeWait?.started()
       if (options.mergeWait !== undefined) await options.mergeWait.until
@@ -366,6 +378,7 @@ async function createApp(
         output: {
           commit,
           baseSha: commit,
+          ...(options.mergeAlreadyLanded === undefined ? {} : { alreadyLanded: options.mergeAlreadyLanded }),
           ...(options.sourceRewrites === undefined ? {} : { sourceRewrites: options.sourceRewrites }),
         },
       }
@@ -4439,6 +4452,7 @@ describe("runYrd", () => {
       fact("R1", "integrated", 10, [5, 15], now - 6 * 60 * minute),
       fact("R2", "rejected", 20, [25]),
       fact("R3", "environment-refused", 30, [35]),
+      fact("R-deduped", "already-landed", 40, [45]),
       fact("R4", "integrated", 100, [95]),
       fact("R-old", "rejected", 1_000, [1_000], now - 6 * 60 * minute - 1),
       fact("R-future", "rejected", 1_000, [1_000], now + 1),
@@ -4448,9 +4462,10 @@ describe("runYrd", () => {
     // oldestOpenMs is a live-queue fact the caller supplies, null when absent.
     expect(queueFlowMetrics(facts, { now, windowMs: 6 * 60 * minute })).toEqual({
       windowMs: 6 * 60 * minute,
-      terminalAttempts: 4,
+      terminalAttempts: 5,
       outcomes: {
         integrated: 2,
+        alreadyLanded: 1,
         rejected: 1,
         environmentRefused: 1,
         stale: 0,
@@ -4459,15 +4474,15 @@ describe("runYrd", () => {
         refused: 0,
         canceled: 0,
       },
-      decisionRejection: { rejected: 1, decisions: 3, rate: 1 / 3 },
+      decisionRejection: { rejected: 1, decisions: 4, rate: 1 / 4 },
       throughput: { landed: 2, per24h: 8 },
       oldestOpenMs: null,
       activeRun: {
         allTerminal: {
-          n: 4,
+          n: 5,
           minMs: 10 * minute,
           avgMs: 40 * minute,
-          p50Ms: 25 * minute,
+          p50Ms: 30 * minute,
           p90Ms: 100 * minute,
           maxMs: 100 * minute,
         },
@@ -4478,6 +4493,14 @@ describe("runYrd", () => {
           p50Ms: 55 * minute,
           p90Ms: 100 * minute,
           maxMs: 100 * minute,
+        },
+        alreadyLandedOnly: {
+          n: 1,
+          minMs: 40 * minute,
+          avgMs: 40 * minute,
+          p50Ms: 40 * minute,
+          p90Ms: 40 * minute,
+          maxMs: 40 * minute,
         },
         // R2 (rejected, 20m) + R3 (env-refused, 30m); the failed complement.
         failedOnly: {
@@ -4490,9 +4513,9 @@ describe("runYrd", () => {
         },
       },
       queueWait: {
-        n: 5,
-        avgMs: 35 * minute,
-        p50Ms: 25 * minute,
+        n: 6,
+        avgMs: (220 / 6) * minute,
+        p50Ms: 30 * minute,
         p90Ms: 95 * minute,
         maxMs: 95 * minute,
       },
@@ -4502,6 +4525,7 @@ describe("runYrd", () => {
       terminalAttempts: 0,
       outcomes: {
         integrated: 0,
+        alreadyLanded: 0,
         rejected: 0,
         environmentRefused: 0,
         stale: 0,
@@ -4516,6 +4540,7 @@ describe("runYrd", () => {
       activeRun: {
         allTerminal: { n: 0, minMs: null, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null },
         integratedOnly: { n: 0, minMs: null, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null },
+        alreadyLandedOnly: { n: 0, minMs: null, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null },
         failedOnly: { n: 0, minMs: null, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null },
       },
       queueWait: { n: 0, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null },
@@ -5312,6 +5337,7 @@ describe("runYrd", () => {
     ).toEqual(Object.fromEntries(cases.map((entry) => [entry.run, { status: entry.status, glyph: "×" }])))
     expect(projection.metrics.outcomes).toEqual({
       integrated: 0,
+      alreadyLanded: 0,
       rejected: 2,
       environmentRefused: 1,
       stale: 3,
@@ -5586,6 +5612,7 @@ describe("runYrd", () => {
         terminalAttempts: 44,
         outcomes: {
           integrated: 39,
+          alreadyLanded: 0,
           rejected: 5,
           environmentRefused: 0,
           stale: 0,
@@ -9774,6 +9801,67 @@ describe("typed issue landing bridge", () => {
         await app.close()
       }
     }
+  })
+
+  it("preserves already-landed equivalence evidence in both tracker bridge versions", async () => {
+    const issueRef = "@yrd/22207-noop-merge-dedup-at-admission"
+    const equivalentTreeSha = "b".repeat(40)
+    await using app = await createApp({
+      mergeCommits: [BASE_SHA],
+      mergeAlreadyLanded: {
+        candidateSha: HEAD_SHA,
+        candidateTreeSha: equivalentTreeSha,
+        baseTreeSha: equivalentTreeSha,
+      },
+    })
+    await app.bays.submit({
+      branch: "topic/already-landed-bridge",
+      headSha: HEAD_SHA,
+      base: "main",
+      issue: issueRef,
+    })
+    const [run] = await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
+    if (run === undefined) throw new Error("expected an already-landed Queue run")
+
+    expect(app.bays.pr("PR1")).toMatchObject({
+      status: "already-landed",
+      integration: { commit: BASE_SHA, baseSha: BASE_SHA },
+      alreadyLanded: {
+        candidateSha: HEAD_SHA,
+        candidateTreeSha: equivalentTreeSha,
+        baseTreeSha: equivalentTreeSha,
+      },
+    })
+    expect(
+      humanQueueProjection(
+        { base: "main", prs: [...app.bays.prs()], running: [], waiting: [], finished: [run] },
+        Date.parse("2026-07-09T12:01:00.000Z"),
+        { state: app.state().bays },
+      ),
+    ).toMatchObject({ integrated: 0, alreadyLanded: 1 })
+
+    const output = outputIO()
+    expect(await runYrd(app, yrd("issue", "view", issueRef, "--json"), output.io), output.stderr()).toBe(0)
+    const expectedDelivery = {
+      issueRef,
+      pr: "PR1",
+      revision: 1,
+      headSha: HEAD_SHA,
+      status: "already-landed",
+      runs: ["R1"],
+      baseSha: BASE_SHA,
+      candidateSha: HEAD_SHA,
+      candidateTreeSha: equivalentTreeSha,
+      baseTreeSha: equivalentTreeSha,
+    }
+    expect(trackerBridge(output.stdout())).toMatchObject({ version: 1, deliveries: [expectedDelivery] })
+    expect(trackerBridgeV2(output.stdout())).toMatchObject({ version: 2, deliveries: [expectedDelivery] })
+
+    const human = outputIO()
+    expect(await runYrd(app, yrd("issue", "view", issueRef), human.io), human.stderr()).toBe(0)
+    expect(human.stdout()).toContain("PR1 rev1 already-landed")
+    expect(human.stdout()).toContain(`ALREADY LANDED ${HEAD_SHA} TREE ${equivalentTreeSha} = BASE`)
+    expect(human.stdout()).toContain(`${BASE_SHA} TREE ${equivalentTreeSha}`)
   })
 
   it("adds needs-author with its attributed receipt in trackerBridge v2 and degrades it explicitly in v1", async () => {

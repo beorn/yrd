@@ -2418,6 +2418,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       assertTerminalApplies(pr, changed, applied.name)
       return patchPR(pr, {
         status: "already-landed",
+        needsAuthor: undefined,
         integratedAt: undefined,
         alreadyLandedAt: applied.ts,
         terminalRun: changed.run,

@@ -278,7 +278,7 @@ export async function residentRunnerStatus(cwd: string): Promise<QueueTimelineRu
  * the pre-marker "NO RUNNER"/absent semantics. Reclaim, by contrast, consumes the
  * raw marker (it needs the dead pid), so it must NOT go through this filter. */
 function activeResidentRunner(runner: QueueTimelineRunner | null): QueueTimelineRunner | null {
-  return runner !== null && runner.exitedAt !== undefined ? null : runner
+  return runner?.exitedAt !== undefined ? null : runner
 }
 
 type RunnerGitDistance = Readonly<{
@@ -936,6 +936,7 @@ const TRACKER_V1_STATUS_MAP = {
   "needs-author": "rejected",
   rejected: "rejected",
   integrated: "integrated",
+  "already-landed": "already-landed",
   withdrawn: "withdrawn",
   canceled: "canceled",
 } as const satisfies Record<TrackerDeliveryV2["status"], TrackerDeliveryV1["status"]>
@@ -966,6 +967,19 @@ function trackerDeliveryV1(delivery: TrackerDeliveryV2): TrackerDeliveryV1 {
       status,
       landingSha: delivery.landingSha,
       ...(delivery.regressions === undefined ? {} : { regressions: delivery.regressions }),
+    }
+  }
+  if (status === "already-landed") {
+    if (delivery.status !== "already-landed") {
+      throw new TypeError(`trackerBridge v1 status mapping for '${delivery.status}' lost its equivalence proof`)
+    }
+    return {
+      ...identity,
+      status,
+      baseSha: delivery.baseSha,
+      candidateSha: delivery.candidateSha,
+      candidateTreeSha: delivery.candidateTreeSha,
+      baseTreeSha: delivery.baseTreeSha,
     }
   }
   return { ...identity, status }

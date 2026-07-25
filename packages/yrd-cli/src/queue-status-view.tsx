@@ -327,6 +327,7 @@ export type QueueFlowMetrics = Readonly<{
   terminalAttempts: number
   outcomes: Readonly<{
     integrated: number
+    alreadyLanded: number
     rejected: number
     environmentRefused: number
     stale: number
@@ -350,8 +351,9 @@ export type QueueFlowMetrics = Readonly<{
   activeRun: Readonly<{
     allTerminal: DurationDistribution
     integratedOnly: DurationDistribution
-    // Active duration of every non-integrated terminal Run.
-    // Retained JSON aggregate complement of integratedOnly.
+    alreadyLandedOnly: DurationDistribution
+    // Active duration of every unsuccessful terminal Run.
+    // Retained JSON aggregate excluding both successful terminal outcomes.
     failedOnly: DurationDistribution
   }>
   queueWait: QueueWaitDistribution
@@ -559,6 +561,7 @@ export type HumanQueueProjection = Readonly<{
   open: number
   activeCount: number
   integrated: number
+  alreadyLanded: number
   rejected: number
   needsAuthor: number
   pause?: QueueSummary["pause"]
@@ -768,9 +771,11 @@ export function queueFlowMetrics(
   const seenRuns = new Set<string>()
   const activeAll: number[] = []
   const activeIntegrated: number[] = []
+  const activeAlreadyLanded: number[] = []
   const activeFailed: number[] = []
   const waits: number[] = []
   let integrated = 0
+  let alreadyLanded = 0
   let rejected = 0
   let environmentRefused = 0
   let stale = 0
@@ -785,7 +790,8 @@ export function queueFlowMetrics(
     if (seenRuns.has(fact.run)) throw new Error(`yrd: duplicate terminal FLOW fact for Run '${fact.run}'`)
     seenRuns.add(fact.run)
 
-    if (fact.outcome === "integrated" || fact.outcome === "already-landed") integrated += 1
+    if (fact.outcome === "integrated") integrated += 1
+    else if (fact.outcome === "already-landed") alreadyLanded += 1
     else if (fact.outcome === "rejected") rejected += 1
     else if (fact.outcome === "environment-refused") environmentRefused += 1
     else if (fact.outcome === "stale") stale += 1
@@ -801,7 +807,8 @@ export function queueFlowMetrics(
     if (fact.activeMs !== null) {
       const activeMs = finiteNonnegative(fact.activeMs, `Run '${fact.run}' active duration`)
       activeAll.push(activeMs)
-      if (fact.outcome === "integrated" || fact.outcome === "already-landed") activeIntegrated.push(activeMs)
+      if (fact.outcome === "integrated") activeIntegrated.push(activeMs)
+      else if (fact.outcome === "already-landed") activeAlreadyLanded.push(activeMs)
       else activeFailed.push(activeMs)
     }
     for (const wait of fact.queueWaitMs) {
@@ -809,11 +816,11 @@ export function queueFlowMetrics(
     }
   }
 
-  const decisions = integrated + rejected
+  const decisions = integrated + alreadyLanded + rejected
   return {
     windowMs,
     terminalAttempts: seenRuns.size,
-    outcomes: { integrated, rejected, environmentRefused, stale, lost, legacy, refused, canceled },
+    outcomes: { integrated, alreadyLanded, rejected, environmentRefused, stale, lost, legacy, refused, canceled },
     decisionRejection: {
       rejected,
       decisions,
@@ -824,6 +831,7 @@ export function queueFlowMetrics(
     activeRun: {
       allTerminal: durationDistribution(activeAll),
       integratedOnly: durationDistribution(activeIntegrated),
+      alreadyLandedOnly: durationDistribution(activeAlreadyLanded),
       failedOnly: durationDistribution(activeFailed),
     },
     queueWait: waitDistribution(waits),
@@ -1251,7 +1259,11 @@ function stepOutput(step: QueueStep): string {
 function queueOutcome(run: QueueRun): string {
   if (run.status === "passed") {
     const integration = queueIntegration(run)
-    return integration === undefined ? "passed" : integration.alreadyLanded === undefined ? "integrated" : "already-landed"
+    return integration === undefined
+      ? "passed"
+      : integration.alreadyLanded === undefined
+        ? "integrated"
+        : "already-landed"
   }
   if (run.status === "failed") return terminalProjection(run).display
   // "canceled" is a distinct terminal outcome — a canceled run is NOT rejected;
@@ -2043,7 +2055,10 @@ function foldTerminalFacts(
     const fact = byRun.get(key)
     const waits = row.queueWaitMs === null ? [] : [row.queueWaitMs]
     const outcome = terminalOutcome(row.status)
-    const failureClass = outcome === "integrated" ? null : failureBreakdownClass(row.failure?.code ?? row.status)
+    const failureClass =
+      outcome === "integrated" || outcome === "already-landed"
+        ? null
+        : failureBreakdownClass(row.failure?.code ?? row.status)
     const member = terminalMemberFact(row, row.run, row.timestamp, failedAttempts)
     if (fact === undefined) {
       byRun.set(key, {
@@ -2365,7 +2380,8 @@ export function humanQueueProjection(
     target: `${result.base}${result.headSha === undefined ? "" : `@${result.headSha.slice(0, 12)}`}`,
     open: queueRows.length,
     activeCount: queueRows.filter((row) => ["checking", "waiting"].includes(row.state)).length,
-    integrated: rows.filter((row) => row.nativeStatus === "integrated" || row.nativeStatus === "already-landed").length,
+    integrated: rows.filter((row) => row.nativeStatus === "integrated").length,
+    alreadyLanded: rows.filter((row) => row.nativeStatus === "already-landed").length,
     rejected: rows.filter((row) => row.nativeStatus === "rejected" && row.state !== "needs-author").length,
     needsAuthor: rows.filter((row) => row.state === "needs-author").length,
     ...(result.pause === undefined ? {} : { pause: result.pause }),
@@ -2821,7 +2837,9 @@ export function queueStatusRows(
   now: number,
 ): Row[] {
   return projectedPRRows(state, result, now).filter(
-    (row) => selected.has(row.pr) || (row.nativeStatus !== "integrated" && row.nativeStatus !== "withdrawn"),
+    (row) =>
+      selected.has(row.pr) ||
+      (row.nativeStatus !== "integrated" && row.nativeStatus !== "already-landed" && row.nativeStatus !== "withdrawn"),
   )
 }
 
@@ -2832,6 +2850,12 @@ function SummaryQueue({ projection }: { projection: HumanQueueProjection }) {
         <Text bold>QUEUE</Text> {projection.target} <Text bold>OPEN</Text> {projection.open} <Text bold>ACTIVE</Text>{" "}
         {projection.activeCount} <Text bold>INTEGRATED</Text> {projection.integrated} <Text bold>REJECTED</Text>{" "}
         {projection.rejected}
+        {projection.alreadyLanded === 0 ? null : (
+          <>
+            {" "}
+            <Text bold>ALREADY-LANDED</Text> {projection.alreadyLanded}
+          </>
+        )}
         {projection.needsAuthor === 0 ? null : (
           <>
             {" "}

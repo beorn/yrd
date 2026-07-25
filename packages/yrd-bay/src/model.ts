@@ -665,11 +665,7 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
       }
       const pr = prForBay(state, bay.id)
       const landedAt =
-        pr?.status === "integrated"
-          ? pr.integratedAt
-          : pr?.status === "already-landed"
-            ? pr.alreadyLandedAt
-            : undefined
+        pr?.status === "integrated" ? pr.integratedAt : pr?.status === "already-landed" ? pr.alreadyLandedAt : undefined
       if (
         bay.headSha !== undefined &&
         pr?.headSha === bay.headSha &&
