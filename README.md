@@ -454,6 +454,11 @@ an expected-current revision/head guard, so an authored revision that arrives
 while Git proof is running wins and the stale automatic result is deferred.
 Patch drift and gitlink pins that require authored composition remain loud,
 typed refusals; an independent PR can still refresh in the same cycle.
+Likewise, selectorless composition ejects a PR whose exact submit/check
+authority was already consumed, records `pr/needs-author` with the refusal code
+and an executable `pr recut --preflight --queue` remedy, and keeps draining its
+healthy peers. An explicitly targeted run still fails loud after recording the
+same author receipt.
 
 For a human-authored root carrier, use the machine-owned path rather than
 attaching a composition manifest:
@@ -607,9 +612,11 @@ losslessly.
 tries the resident's existing OS lease (it never creates a second authority),
 checks heartbeat freshness and installed-baseline drift, and emits
 `hab-service-health/1`. Exit 0 means a healthy resident owns the lease; exit 1
-means no resident owns it; exit 2 means unhealthy and carries a typed error
-with `cause` and `resolution` steps. `--json` also reports the checkout HEAD
-and ahead/behind distance from each installed base SHA.
+means no resident owns it while the queue is empty; exit 2 means unhealthy and
+carries a typed error with `cause` and `resolution` steps. In particular,
+submitted work with no resident is `resident-runner-missing`, never a quiet
+absence. `--json` also reports the checkout HEAD and ahead/behind distance from
+each installed base SHA.
 
 `--steps` narrows a run. Omitted means the configured default sequence. An
 explicit empty `--steps` runs no steps. Re-entry is PR-owner-authorized: inspect
@@ -621,6 +628,12 @@ consumes the submit fact. Queue commands cannot mint authored authority. The
 resident freshness transition is the one mechanical carry-forward: its
 certified successor atomically retains the admitted revision's submit and check
 authority on the same PR.
+
+The resident re-proves the installed baseline before every cycle. A
+`config-drift` finding first executes the same in-place `queue deinit`/`queue
+init` migration printed by the health surface, then re-audits before admitting
+work. If either capability is absent or the post-migration audit remains red
+(including true runtime drift), the process exits loudly for its supervisor.
 
 To stop a resident `queue run` (its follow-by-default form), send `SIGINT` (Ctrl-C) or `SIGTERM`.
 The first signal stops new admission, lets the active run finish, and exits with
