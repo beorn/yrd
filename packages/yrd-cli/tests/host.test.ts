@@ -1880,7 +1880,7 @@ notify:
     })
     expect(stderr).toContain("dep")
     expect(stderr).toContain(pin)
-    expect(stderr).toContain(`git -C '${component}' push origin '${pin}:refs/heads/${branch}'`)
+    expect(stderr).toContain(`cd '${component}' && git push origin '${pin}:refs/heads/${branch}'`)
 
     let listed = ""
     expect(
@@ -1974,7 +1974,67 @@ notify:
         code: "submodule-pin-unpublished",
       },
     })
-    expect(stderr).toContain(`git -C '${component}' push origin '${pin}:refs/heads/${branch}'`)
+    expect(stderr).toContain(`cd '${component}' && git push origin '${pin}:refs/heads/${branch}'`)
+
+    let listed = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "list", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          listed += text
+        },
+        stderr: () => undefined,
+      }),
+    ).toBe(0)
+    expect(JSON.parse(listed)).toMatchObject({
+      prs: [{ id: "PR1", branch, status: "pushed", checkRequests: [] }],
+    })
+  })
+
+  it("refuses pr recut --queue when the recut revision retains an unpublished changed submodule pin", async () => {
+    const { repo, branch, pin } = await unpublishedSubmodulePinRepository()
+    const component = await realpath(join(repo, "dep"))
+    let stdout = ""
+    let stderr = ""
+
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "create", branch, "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+      stderr,
+    ).toBe(0)
+
+    stdout = ""
+    stderr = ""
+    expect(
+      await runYrdProcess(
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "recut", "PR1", "--queue", "--json"],
+        {
+          cwd: repo,
+          stdout: (text) => {
+            stdout += text
+          },
+          stderr: (text) => {
+            stderr += text
+          },
+        },
+      ),
+      stderr,
+    ).toBe(1)
+    expect(stdout).toBe("")
+    expect(JSON.parse(stderr)).toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "submodule-pin-unpublished",
+      },
+    })
+    expect(stderr).toContain(`cd '${component}' && git push origin '${pin}:refs/heads/${branch}'`)
 
     let listed = ""
     expect(

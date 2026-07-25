@@ -1938,7 +1938,7 @@ async function requirePublishedSubmodulePins(pr: PR, services: YrdCliServices, i
     .map(
       ({ path, pin, repository }) =>
         `submodule '${path}' pin '${pin}' is on zero refs fetched from origin; publish it before submitting:\n` +
-        `git -C ${shellQuote(repository)} push origin ${shellQuote(`${pin}:refs/heads/${pr.branch}`)}`,
+        `cd ${shellQuote(repository)} && git push origin ${shellQuote(`${pin}:refs/heads/${pr.branch}`)}`,
     )
     .join("\n")
   raiseFailure(
@@ -2019,7 +2019,7 @@ type ExecuteRecutPrOptions = Readonly<{
 
 async function executeRecutPr(
   app: YrdCliApp,
-  services: Pick<YrdCliServices, "recut">,
+  services: Pick<YrdCliServices, "process" | "recut">,
   selector: string,
   options: ExecuteRecutPrOptions,
   io: YrdCliIO,
@@ -2104,6 +2104,7 @@ async function executeRecutPr(
   let current = requiredPr(app, pr.id)
   let admitted: readonly Run[] = []
   if (options.queue === true) {
+    await requirePublishedSubmodulePins(current, services, io)
     if (!unchanged) {
       await app.queue.cancel({
         prs: [current.id],
