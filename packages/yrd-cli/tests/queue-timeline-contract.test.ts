@@ -27,8 +27,12 @@ const contractProjection = (): QueueTimelineProjection => {
   return projection
 }
 
-async function renderTimeline(projection: QueueTimelineProjection, width: number): Promise<string[]> {
-  const rendered = await renderString(createElement(QueueTimelineView, { projection, columns: width }), {
+async function renderTimeline(
+  projection: QueueTimelineProjection,
+  width: number,
+  runnerRefusal?: Readonly<{ code: string; message: string; run?: string; step?: string }>,
+): Promise<string[]> {
+  const rendered = await renderString(createElement(QueueTimelineView, { projection, columns: width, runnerRefusal }), {
     width,
     height: 45,
     plain: true,
@@ -114,6 +118,27 @@ describe("queue timeline 21106 contract", () => {
     expect(staleFrame.match(/╭─ RUNNER /gu)).toHaveLength(1)
     expect(staleFrame).toContain("[84042]")
     expect(staleFrame).toContain("RUNNER STALE — last tick 1:00:00 ago")
+  })
+
+  it("distinguishes a missing runner process from a stale-step contract refusal", async () => {
+    const refused = {
+      ...contractProjection(),
+      runner: null,
+    }
+    const frame = (
+      await renderTimeline(refused, 120, {
+        code: "step-revision-drift",
+        message: "queue run 'R2670' requires step 'check' revision 'v1', installed 'v2'",
+        run: "R2670",
+        step: "check",
+      })
+    ).join("\n")
+
+    expect(frame).toContain("NO RUNNER - runner refused: stale step contract on R2670")
+    expect(frame).toContain(
+      "step-revision-drift: queue run 'R2670' requires step 'check' revision 'v1', installed 'v2'",
+    )
+    expect(frame).not.toContain("NO RUNNER - no drained run in window")
   })
 
   it("projects each draft and run occurrence with composite cursor identity", () => {

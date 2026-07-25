@@ -154,6 +154,43 @@ describe("stale-steps release — a drifted next step frees the run instead of k
     expect(Queues.ids(replayed.state().queues)).toContain("R2")
   })
 
+  it("queue recover reports and releases a queued current step with a stale Job revision", async () => {
+    const journal = createMemoryJournal()
+    const id = ids()
+
+    {
+      await using app = await createApp("second-v1", journal, id)
+      const pr = await submitBranch(app, "issue/recover-stale-current-step")
+      await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["first", "second"] })
+      const firstJob = app.queue.get("R1")?.steps[0]?.job
+      if (firstJob === undefined) throw new Error("expected requested first step")
+      await app.jobs.run(firstJob.id, runtime)
+      await app.dispatch(app.commands.queue.advance, { run: "R1" })
+    }
+
+    await using replayed = await createApp("second-v2", journal, id)
+    expect(replayed.queue.audit().findings).toMatchObject([
+      expect.objectContaining({ code: "step-revision-drift", run: "R1", step: "second" }),
+    ])
+
+    const recovered = await replayed.queue.recover({
+      recoveryTime: "2026-01-01T00:05:00.000Z",
+      reason: "operator recovery",
+    })
+    expect(recovered).toMatchObject([
+      {
+        id: "R1",
+        status: "completed",
+        conclusion: "failure",
+        error: expect.objectContaining({ code: "stale-steps" }),
+      },
+    ])
+    expect(replayed.queue.audit().findings).not.toContainEqual(
+      expect.objectContaining({ code: "step-revision-drift", run: "R1" }),
+    )
+    expect(prDeliveryState(replayed.state().bays.prs.PR1!)).toBe("submitted")
+  })
+
   it("re-admits the still-submitted PR under the installed config after a stale-steps release", async () => {
     const journal = createMemoryJournal()
     const id = ids()

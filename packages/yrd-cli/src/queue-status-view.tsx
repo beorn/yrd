@@ -268,6 +268,13 @@ export type QueueTimelineRunner = Readonly<{
   clean?: boolean
 }>
 
+export type QueueRunnerRefusal = Readonly<{
+  code: string
+  message: string
+  run?: string
+  step?: string
+}>
+
 export type QueueTimelineProjection = Readonly<{
   now: string
   base: string
@@ -4305,7 +4312,15 @@ function RunnerActivity({
  * is a pulsing `$` shell prompt. Border severity: down/stale red, paused
  * warning, healthy default.
  */
-function TimelineRunnerBox({ projection, live = false }: { projection: QueueTimelineProjection; live?: boolean }) {
+function TimelineRunnerBox({
+  projection,
+  runnerRefusal,
+  live = false,
+}: {
+  projection: QueueTimelineProjection
+  runnerRefusal?: QueueRunnerRefusal
+  live?: boolean
+}) {
   const runner = projection.runner
   const timing = runnerTiming(projection)
   const runnerStale = timing !== null && timing.ageMs > RUNNER_STALE_MS
@@ -4340,9 +4355,11 @@ function TimelineRunnerBox({ projection, live = false }: { projection: QueueTime
         </RunnerActivity>
         {runner === null ? (
           <Text color="$fg-error" bold wrap="truncate" minWidth={0}>
-            {drained === null
-              ? "NO RUNNER - no drained run in window"
-              : `NO RUNNER - queue last drained ${mediaDuration(now - drained)} ago`}
+            {runnerRefusal !== undefined
+              ? `NO RUNNER - runner refused: stale step contract on ${runnerRefusal.run ?? "unknown run"}`
+              : drained === null
+                ? "NO RUNNER - no drained run in window"
+                : `NO RUNNER - queue last drained ${mediaDuration(now - drained)} ago`}
           </Text>
         ) : (
           <Text color={marker.color} wrap="truncate" minWidth={0}>
@@ -4350,6 +4367,11 @@ function TimelineRunnerBox({ projection, live = false }: { projection: QueueTime
           </Text>
         )}
       </Box>
+      {runner === null && runnerRefusal !== undefined ? (
+        <Text color="$fg-error" wrap="truncate" minWidth={0}>
+          {runnerRefusal.code}: {runnerRefusal.message}
+        </Text>
+      ) : null}
       {runnerStale && timing !== null ? (
         <Text color="$fg-error" bold wrap="truncate">
           RUNNER STALE — last tick {mediaDuration(timing.ageMs)} ago
@@ -4638,6 +4660,7 @@ const QUEUE_STATS_MIN_PANE_ROWS = 24
 
 function ProjectedQueueTimeline({
   projection,
+  runnerRefusal,
   nav,
   cursorKey,
   onCursor,
@@ -4653,6 +4676,7 @@ function ProjectedQueueTimeline({
   listRef,
 }: {
   projection: QueueTimelineProjection
+  runnerRefusal?: QueueRunnerRefusal
   nav: boolean
   cursorKey?: number
   onCursor?: (index: number) => void
@@ -4710,7 +4734,7 @@ function ProjectedQueueTimeline({
             </Box>
           </>
         )}
-        <TimelineRunnerBox projection={projection} live={nav} />
+        <TimelineRunnerBox projection={projection} runnerRefusal={runnerRefusal} live={nav} />
         {/* No blank row above the table header (item 5): the header sits flush
             under the boxes above it. The pills + coverage row moved BELOW the
             list (item 2), rendered after the rows block. */}
@@ -4820,6 +4844,7 @@ function ProjectedQueueTimeline({
 
 export function QueueTimelineView({
   projection,
+  runnerRefusal,
   results,
   now,
   latest = false,
@@ -4839,6 +4864,7 @@ export function QueueTimelineView({
   listRef,
 }: {
   projection?: QueueTimelineProjection
+  runnerRefusal?: QueueRunnerRefusal
   results?: readonly QueueStatusResult[]
   now?: number
   latest?: boolean
@@ -4864,6 +4890,7 @@ export function QueueTimelineView({
     return (
       <ProjectedQueueTimeline
         projection={projection}
+        runnerRefusal={runnerRefusal}
         nav={nav}
         cursorKey={cursorKey}
         onCursor={onCursor}

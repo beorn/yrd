@@ -38,6 +38,7 @@ import {
   queueTimelineVisibleDefaultCursorId,
   queueTimelineVisibleRows,
   type QueueShowData,
+  type QueueRunnerRefusal,
   type QueueStatusResult,
   type QueueTimelineProjection,
   type QueueTimelineProjectedRow,
@@ -132,6 +133,7 @@ export type QueueWatchSnapshot = Readonly<{
   results: readonly QueueStatusResult[]
   now: number
   projection?: QueueTimelineProjection
+  runnerRefusal?: QueueRunnerRefusal
   outputs?: readonly QueueArtifactOutput[]
   /** Revision-bound source deltas shown in the PR-scoped detail header. */
   diffs?: readonly QueuePrDiff[]
@@ -1456,6 +1458,7 @@ export function QueueWatchFrame({
     ) : (
       <QueueTimelineView
         projection={snapshot.projection}
+        runnerRefusal={snapshot.runnerRefusal}
         columns={timelineColumns}
         nav={!helpOpen}
         cursorKey={cursor}

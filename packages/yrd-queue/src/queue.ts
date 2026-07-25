@@ -1868,7 +1868,19 @@ function createQueue<Shape extends PRShape>(
           let snapshot = runtime()
           const recoveryRoots = new Set([...rootsBeforeRecovery, ...activeQueueRootIds(snapshot.queues.authority)])
           const candidates = [...recoveryRoots].flatMap((root) => queueTree(snapshot.queues, snapshot.jobs, root))
+          const staleQueued: Array<{ run: RunId; step: StepName; drift: string }> = []
           for (const candidate of candidates) {
+            const active = candidate.steps[candidate.cursor]
+            const drift = active?.job?.status === "queued" ? plannedStepDrift(byName, active) : undefined
+            if (active !== undefined && drift !== undefined) {
+              const reconciled = await actions.advance(candidate.id)
+              if (reconciled.events.length > 0) {
+                affected.add(candidate.id)
+                staleQueued.push({ run: candidate.id, step: active.name, drift })
+              }
+              snapshot = runtime()
+              continue
+            }
             const ownsRecoveredJob = candidate.steps.some(
               (step) => step.job !== undefined && recoveredJobs.has(step.job.id),
             )
@@ -1879,6 +1891,15 @@ function createQueue<Shape extends PRShape>(
               snapshot = runtime()
             }
             if (ownsRecoveredJob) affected.add(candidate.id)
+          }
+          if (staleQueued.length > 0) {
+            log.warn?.("Stopped queue runs whose queued step definition changed.", {
+              action: "recover-stale-steps-release",
+              reason: "stale-steps",
+              runs: staleQueued.map(({ run }) => run),
+              steps: staleQueued.map(({ step }) => step),
+              details: staleQueued.map(({ drift }) => drift),
+            })
           }
           // Orphan hygiene: cancel every requested Job whose parent run is
           // terminal or absent, so a state upgrade or a settled/canceled run that

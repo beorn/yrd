@@ -91,6 +91,7 @@ import {
   runRevisionClock,
   queueShowData,
   type QueueAttempt,
+  type QueueRunnerRefusal,
   type QueueTimelineProjection,
   type QueueTimelineRunner,
   type QueueTimelineStatusFilter,
@@ -3928,6 +3929,13 @@ function queueBases(state: YrdCliState): string[] {
 
 type QueueListSnapshot = QueueWatchSnapshot & Readonly<{ projection: QueueTimelineProjection }>
 
+function queueRunnerRefusal(app: Pick<YrdCliApp, "queue">): QueueRunnerRefusal | undefined {
+  const finding = app.queue
+    .audit()
+    .findings.find(({ code }) => code === "step-revision-drift" || code === "step-unavailable")
+  return finding === undefined ? undefined : { ...finding }
+}
+
 const QUEUE_ARTIFACT_TAIL_BYTES = 64 * 1_024
 
 async function artifactTail(path: string): Promise<Readonly<{ text: string; truncatedBytes: number }> | undefined> {
@@ -4226,6 +4234,7 @@ export async function queueListSnapshot(
   const now = io.now?.() ?? Date.now()
   const base = results[0]?.base ?? baseIdentity(requestedBase)
   const runner = activeResidentRunner(await residentRunnerStatus(io.cwd ?? process.cwd()))
+  const runnerRefusal = runner === null ? queueRunnerRefusal(app) : undefined
   const attempts = await (attemptResolver?.resolve(state) ?? queueLogAttempts(app.events()))
   const projection = queueTimelineProjection(results, {
     now,
@@ -4322,6 +4331,7 @@ export async function queueListSnapshot(
     results: filteredResults,
     now,
     projection,
+    ...(runnerRefusal === undefined ? {} : { runnerRefusal }),
     ...(outputs.length === 0 ? {} : { outputs }),
     ...(diffs.length === 0 ? {} : { diffs }),
     ...(commands === undefined || Object.keys(commands).length === 0 ? {} : { commands }),
@@ -4343,7 +4353,11 @@ async function listQueues(
       projection: snapshot.projection,
       results: snapshot.results.map(projectQueueStatusResultTaskStatus),
     },
-    createElement(QueueTimelineView, { projection: snapshot.projection, columns: io.columns ?? 120 }),
+    createElement(QueueTimelineView, {
+      projection: snapshot.projection,
+      runnerRefusal: snapshot.runnerRefusal,
+      columns: io.columns ?? 120,
+    }),
     submoduleTrackingWarnings(io.cwd ?? process.cwd()),
   )
 }
@@ -5570,7 +5584,11 @@ async function watchQueue(
         projection: snapshot.projection,
         results: snapshot.results.map(projectQueueStatusResultTaskStatus),
       },
-      createElement(QueueTimelineView, { projection: snapshot.projection, columns: io.columns ?? 120 }),
+      createElement(QueueTimelineView, {
+        projection: snapshot.projection,
+        runnerRefusal: snapshot.runnerRefusal,
+        columns: io.columns ?? 120,
+      }),
     )
     if (scope.signal.aborted) return 0
     await scope.sleep(interval)

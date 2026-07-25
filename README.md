@@ -643,7 +643,7 @@ yrd queue deinit [base] [--json]
 | `run`                | Zero or more eligible PRs                         | Sole drain imperative; resident follow-runner by default (was `--watch`), a single pass with `--once` or PR selectors |
 | `pause`              | Optional base; reason and allowlist to mutate     | Bare reads current pauses; with a reason, pauses new runs (including retries) while active work settles               |
 | `resume`             | Optional base                                     | Removes the queue pause                                                                                               |
-| `recover`            | Optional reason                                   | Marks only work with expired runner leases lost; a no-op appends nothing                                              |
+| `recover`            | Optional reason or known-dead runner id           | Reconciles abandoned work and releases queued runs whose installed step definition changed                            |
 | `finish`             | One waiting PR/step plus job/runner/attempt/token | Records external-runner evidence and resumes that exact durable run                                                   |
 | `audit`              | Repository                                        | Journal, projection, pinned-plan, and installed-step findings; no state change                                        |
 | `init`               | Optional base                                     | Resolves and validates queue environment resources                                                                    |
@@ -1241,22 +1241,29 @@ Evaluation Job generation for that case and derives the complete run history
 from Jobs, without adding another lifecycle store.
 
 Job requests pin the definition revision used to create them. Pending execution
-is refused if current plugin code has a different revision. A waiting Job may
-still finish after revision drift because its token, attempt, runner, and
-stable definition output contract fence that already-launched work. Queue runs
-also pin their complete ordered step descriptors, so historical status remains
-readable after config changes and `queue audit` reports unavailable pending
-plans.
+is refused if current plugin code has a different revision. Before execution,
+Queue reconciles a queued current step against its pinned plan: revision drift
+retires that Run as `stale-steps`, releases its authority, and leaves its PR
+submitted for fresh admission under the installed plan. `queue recover` performs
+the same reconciliation explicitly. A waiting Job may still finish after
+revision drift because its token, attempt, runner, and stable definition output
+contract fence that already-launched work. Queue runs also pin their complete
+ordered step descriptors, so historical status remains readable after config
+changes and `queue audit` reports unavailable pending plans. While such a
+finding blocks an absent resident, the RUNNER frame names the stale Run instead
+of collapsing the refusal into a generic `NO RUNNER` message.
 
 Yrd owns the Job record and imports backend lifecycle events. Running work has
 an expiring, heartbeated runner lease; crashed work becomes `lost` and can be
 retried. A `waiting` Job has no launcher lease and remains durable until a
 token-matched finish arrives.
 
-`yrd queue recover` expires stale running leases and reconciles already-terminal
-failure facts. Recovery has no runner options and never executes requested Jobs,
-creates batch-isolation work, or merges a PR; normal queue execution remains the
-only path that can advance those effects.
+`yrd queue recover` expires stale running leases, can force-settle a named
+known-dead runner, reconciles already-terminal failure facts, releases queued
+current steps whose definition revision drifted, and retires other proven
+orphan/stale-plan states. Recovery never executes requested Jobs, creates
+batch-isolation work, or merges a PR; normal queue execution remains the only
+path that can advance those effects.
 
 Execution is **at least once** across crashes: a runner may perform an
 external side effect before its settlement frame is committed. Yrd accepts only
