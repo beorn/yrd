@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { mkdirSync } from "node:fs"
+import { mkdirSync, readFileSync } from "node:fs"
 import { hostname } from "node:os"
 import { join, relative, resolve, sep } from "node:path"
 import { clearLine, cursorTo } from "node:readline"
@@ -851,42 +851,86 @@ function residentRunnerLog(log: ConditionalLogger, identity: ResidentRunnerIdent
   })
 }
 
+function residentRunnerLockOwnerPid(stateDir: string): number | undefined {
+  try {
+    const value = JSON.parse(readFileSync(join(stateDir, "resident-runner", "writer.lock"), "utf8")) as {
+      pid?: unknown
+    }
+    return typeof value.pid === "number" && Number.isSafeInteger(value.pid) && value.pid > 0 ? value.pid : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (cause) {
+    // ESRCH = no such process (dead). EPERM and friends = exists but not signalable — treat as live.
+    return (cause as NodeJS.ErrnoException).code !== "ESRCH"
+  }
+}
+
 async function acquireResidentRunner(
   stateDir: string,
   identity: ResidentRunnerIdentity,
   log: ConditionalLogger,
 ): Promise<ResidentRunnerLease> {
   const runnerLog = log.child("runner")
-  const released = Promise.withResolvers<void>()
-  const acquired = Promise.withResolvers<void>()
-  const held = createExclusive(join(stateDir, "resident-runner"), { timeoutMs: 0 }).run(async () => {
-    acquired.resolve()
-    await released.promise
-  })
-  try {
-    await Promise.race([acquired.promise, held])
-  } catch (error) {
-    if (failureFact(error)?.code === "exclusive-busy") {
-      const detail = error instanceof Error ? error.message.replace(/^yrd:\s*/u, "") : String(error)
-      raiseFailure(
-        "refusal",
-        "resident-runner-active",
-        `yrd: resident-runner-active: ${detail}. Stop the active 'yrd queue run' before starting another.`,
-      )
+  // When a prior owner died hard, the kernel may still be releasing the flock
+  // for a beat after the pid is gone. Retry briefly if the lock body names a
+  // dead pid so re-arm does not need a human `rm` of writer.lock (22306).
+  const attempts = 8
+  let lastError: unknown
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const released = Promise.withResolvers<void>()
+    const acquired = Promise.withResolvers<void>()
+    const held = createExclusive(join(stateDir, "resident-runner"), { timeoutMs: 0 }).run(async () => {
+      acquired.resolve()
+      await released.promise
+    })
+    try {
+      await Promise.race([acquired.promise, held])
+      runnerLog.info?.("Resident runner lease acquired", { runner: identity.id, stateDir })
+      let closePromise: Promise<void> | undefined
+      return Object.freeze({
+        close: () =>
+          (closePromise ??= (async () => {
+            released.resolve()
+            await held
+            runnerLog.info?.("Resident runner lease released", { runner: identity.id, stateDir })
+          })()),
+      })
+    } catch (error) {
+      lastError = error
+      if (failureFact(error)?.code !== "exclusive-busy") throw error
+      const ownerPid = residentRunnerLockOwnerPid(stateDir)
+      const ownerDead = ownerPid !== undefined && !processAlive(ownerPid)
+      if (!ownerDead || attempt === attempts - 1) break
+      runnerLog.warn?.("resident-runner lock busy with dead owner pid; retrying reclaim", {
+        action: "resident-runner-lock-reap-retry",
+        ownerPid,
+        attempt: attempt + 1,
+      })
+      await Bun.sleep(25 * (attempt + 1))
     }
-    throw error
   }
-  runnerLog.info?.("Resident runner lease acquired", { runner: identity.id, stateDir })
-
-  let closePromise: Promise<void> | undefined
-  return Object.freeze({
-    close: () =>
-      (closePromise ??= (async () => {
-        released.resolve()
-        await held
-        runnerLog.info?.("Resident runner lease released", { runner: identity.id, stateDir })
-      })()),
-  })
+  const error = lastError
+  if (failureFact(error)?.code === "exclusive-busy") {
+    const detail = error instanceof Error ? error.message.replace(/^yrd:\s*/u, "") : String(error)
+    const ownerPid = residentRunnerLockOwnerPid(stateDir)
+    const deadHint =
+      ownerPid !== undefined && !processAlive(ownerPid)
+        ? ` Owner pid ${ownerPid} is dead — if re-arm keeps failing, inspect \`lsof ${join(stateDir, "resident-runner", "writer.lock")}\` for a live holder.`
+        : ""
+    raiseFailure(
+      "refusal",
+      "resident-runner-active",
+      `yrd: resident-runner-active: ${detail}. Stop the active 'yrd queue run' before starting another.${deadHint}`,
+    )
+  }
+  throw error
 }
 
 async function closeRuntime(

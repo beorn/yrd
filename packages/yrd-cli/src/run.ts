@@ -4250,13 +4250,26 @@ export async function requireFreshInstalledBaseline(
   }
   const drift = await auditDrift()
   if (drift.length === 0) return
-  // 22334: NEVER rewrite installed-baseline from the run path. Auto deinit+init
-  // (reloadInPlace) was a second writer that installed a different revision
-  // family than `queue init`, so every follow cycle fought the baseline forever
-  // — including after FAILED composes that had no business being authorities.
-  // Drift is fail-loud with the migration remedy; only explicit `queue init`
-  // (and `queue deinit`) may write the baseline.
-  void options.reloadInPlace
+  // 22306 residual (with 22334 constraint): follow-mode may re-provision on
+  // config-drift via the SAME `provision()` path as `queue init` — one descriptor
+  // recipe, not a second revision family. That converts "landing advanced the
+  // base / another seat wrote a foreign baseline" into a hiccup, not a fatal
+  // resident exit. One-shot stays fail-loud (no accidental baseline rewrite).
+  // Runtime-drift still fails: this process's construction-time step set is
+  // wrong and needs a restart, not another baseline write.
+  const reload = options.reloadInPlace
+  if (
+    reload !== undefined &&
+    administration.provision !== undefined &&
+    drift.every((finding) => finding.code === "config-drift")
+  ) {
+    await administration.provision(reload.base)
+    const after = await auditDrift()
+    if (after.length === 0) return
+    const firstAfter = after[0]
+    if (firstAfter === undefined) return
+    raiseFailure("refusal", firstAfter.code, after.map((finding) => finding.message).join("\n"))
+  }
   const first = drift[0]
   if (first === undefined) return
   raiseFailure("refusal", first.code, drift.map((finding) => finding.message).join("\n"))
