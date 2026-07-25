@@ -120,7 +120,6 @@ export type DefaultYrdAppOptions = Readonly<{
   stateDir: string
   baysRoot: string
   journal: Journal<unknown>
-  journalCompatibility?: JournalCompatibility
   process: Pick<Process, "run">
   config: ResolvedYrdProjectConfig
   receiverPath?: string
@@ -765,7 +764,7 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
   return createYrd(contests(queue(base)), {
     inject: {
       journal: options.journal,
-      compatibility: options.journalCompatibility ?? CURRENT_JOURNAL_COMPATIBILITY,
+      compatibility: CURRENT_JOURNAL_COMPATIBILITY,
       ...(options.scope === undefined ? {} : { scope: options.scope }),
       ...(options.log === undefined ? {} : { log: options.log }),
     },
