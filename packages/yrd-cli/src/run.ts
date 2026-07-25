@@ -4544,6 +4544,15 @@ function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefine
       props: { action: "resident-withdraw-skip", pr: error.prId, status: error.status, reason: error.message },
     }
   }
+  // Belt-and-suspenders for the pre-PrCheckabilityConflict raiseFailure shape
+  // (`pr-not-admissible`) if any call site still emits it (22306 #3).
+  const fact = failureFact(error)
+  if (fact?.code === "pr-not-admissible") {
+    return {
+      message: "resident runner skipped a cycle — a PR is no longer admissible (already terminal)",
+      props: { action: "resident-admissible-skip", code: fact.code, reason: fact.message },
+    }
+  }
   return undefined
 }
 

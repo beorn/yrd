@@ -153,6 +153,25 @@ describe("resident runner — a PR withdrawn mid-compose never kills the watch l
     )
     expect(h.warnings).toEqual([])
   })
+
+  it("skips when a PR is already integrated mid-compose (22306 #3)", async () => {
+    // Multi-driver / same-runner race: PR lands between snapshot and the next
+    // admit/run; "integrated, not admissible" must not kill the resident.
+    const h = harness([
+      () => Promise.reject(new PrCheckabilityConflict("PR1578", "integrated")),
+      () => {
+        h.signal.aborted = true
+        return Promise.resolve([])
+      },
+    ])
+    await expect(followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).resolves.toBe(0)
+    expect(h.runCalls()).toBe(2)
+    expect(h.warnings).toContainEqual(
+      expect.objectContaining({
+        props: expect.objectContaining({ action: "resident-withdraw-skip", pr: "PR1578", status: "integrated" }),
+      }),
+    )
+  })
 })
 
 describe("resident runner — tolerated skips are loggily-only (Defect 3)", () => {

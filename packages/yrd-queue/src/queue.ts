@@ -5,6 +5,7 @@ import {
   PRIdSchema,
   PRNeedsAuthorFactSchema,
   PRTerminalAssociationSchema,
+  PrCheckabilityConflict,
   baseIdentity,
   checkRequest,
   checksRequested,
@@ -1322,22 +1323,40 @@ function createQueue<Shape extends PRShape>(
     selection?: AdmitArgs["selection"],
   ): Promise<Run[]> => {
     const admitted: Run[] = []
+    // Implicit (selectorless) drains absorb per-PR terminal races; explicit
+    // targeting stays fail-loud so a one-shot caller sees the real outcome.
+    const selectorless = selection !== "explicit"
     for (const selector of selectors) {
-      const pr = resolvePR(runtime().bays, selector)
-      if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
-      warnFlowDrift([pr.flow])
-      const baseSha = await resolveCandidateBaseSha([pr], resolveCycleBase)
-      const candidate = await candidateFacts([pr], baseSha)
-      const started = startedRun(
-        await actions.admit({
+      try {
+        const pr = resolvePR(runtime().bays, selector)
+        if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
+        warnFlowDrift([pr.flow])
+        const baseSha = await resolveCandidateBaseSha([pr], resolveCycleBase)
+        const candidate = await candidateFacts([pr], baseSha)
+        const started = startedRun(
+          await actions.admit({
+            pr: selector,
+            baseSha,
+            ...(candidate === undefined ? {} : { candidate }),
+            ...(selection === undefined ? {} : { selection }),
+          }),
+        )
+        if (started !== undefined) {
+          admitted.push(Queues.terminal(started) ? await reportFreshTerminal(started) : started)
+        }
+      } catch (error) {
+        const fact = failureFact(error)
+        const checkability = error instanceof PrCheckabilityConflict
+        if (!selectorless || (!checkability && (fact === undefined || fact.kind !== "refusal"))) {
+          throw error
+        }
+        log.warn?.("queue admit skipped a PR that is no longer admissible", {
+          action: "compose-candidate-skip",
           pr: selector,
-          baseSha,
-          ...(candidate === undefined ? {} : { candidate }),
-          ...(selection === undefined ? {} : { selection }),
-        }),
-      )
-      if (started !== undefined) {
-        admitted.push(Queues.terminal(started) ? await reportFreshTerminal(started) : started)
+          code: checkability ? "pr-not-checkable" : fact?.code,
+          kind: checkability ? "refusal" : fact?.kind,
+          reason: error instanceof Error ? error.message : String(error),
+        })
       }
     }
     return admitted
@@ -2173,8 +2192,17 @@ function createQueueCommands(
       const pr = resolvePR(state.bays, args.pr)
       if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${args.pr}'`)
       const delivery = prDeliveryState(pr)
+      // Integrated / already-landed is success, not failure: a peer (or this same
+      // drain) may have finished the PR between the compose snapshot and admit.
+      // Returning empty keeps the selectorless resident alive (22306 #3).
+      if (delivery === "integrated" || delivery === "already-landed") {
+        return { events: [] }
+      }
       if (delivery !== "pushed" && delivery !== "submitted") {
-        raiseFailure("refusal", "pr-not-admissible", `yrd: PR '${pr.id}' is ${delivery}, not admissible`)
+        // Terminal races (withdrawn/canceled/rejected mid-compose) are losable for
+        // the resident via isConcurrentCheckabilityConflict — same shape as the
+        // bay "not checkable" path. Explicit one-shots still surface the throw.
+        throw new PrCheckabilityConflict(pr.id, delivery)
       }
       // A pause lets the currently active Job settle, but every admission
       // retry is a fresh Run. Guard the command itself so a selector chosen
