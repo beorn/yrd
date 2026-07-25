@@ -4513,6 +4513,7 @@ describe("runYrd", () => {
       outcomes: {
         integrated: 2,
         alreadyLanded: 1,
+        passed: 0,
         rejected: 1,
         environmentRefused: 1,
         stale: 0,
@@ -4573,6 +4574,7 @@ describe("runYrd", () => {
       outcomes: {
         integrated: 0,
         alreadyLanded: 0,
+        passed: 0,
         rejected: 0,
         environmentRefused: 0,
         stale: 0,
@@ -5388,6 +5390,7 @@ describe("runYrd", () => {
     expect(projection.metrics.outcomes).toEqual({
       integrated: 0,
       alreadyLanded: 0,
+      passed: 0,
       rejected: 2,
       environmentRefused: 1,
       stale: 3,
@@ -5660,6 +5663,7 @@ describe("runYrd", () => {
         outcomes: {
           integrated: 39,
           alreadyLanded: 0,
+          passed: 0,
           rejected: 5,
           environmentRefused: 0,
           stale: 0,

@@ -107,7 +107,10 @@ const OpenBayArgsSchema = z
   .object({
     name: TextSchema,
     issue: TextSchema.optional(),
+    /** Legacy author identity (pre-`by`). Prefer `by` for new writers. */
     actor: TextSchema.optional(),
+    /** Author / mailbox identity for the open (newer journal rows use this). */
+    by: TextSchema.optional(),
     branch: GitRefSchema.optional(),
     from: GitRefSchema.optional(),
     base: GitRefSchema.optional(),
@@ -300,6 +303,8 @@ const BayOpenedSchema = z
     name: TextSchema,
     issue: TextSchema.optional(),
     actor: TextSchema.optional(),
+    /** Newer open events carry author identity as `by` (journal-version-skew 2026-07-25). */
+    by: TextSchema.optional(),
     from: GitRefSchema.optional(),
     branch: GitRefSchema,
     base: GitRefSchema,
@@ -1299,11 +1304,13 @@ function openBay(
   const reuseClaimBranch =
     args.issue !== undefined &&
     Object.values(current.prs).some((pr) => pr.branch === branch && pr.issue === args.issue && isLivePR(pr))
+  const author = args.by ?? args.actor
   const opened = {
     id,
     name: args.name,
     ...(args.issue === undefined ? {} : { issue: args.issue }),
-    ...(args.actor === undefined ? {} : { actor: args.actor }),
+    // Prefer `by` (current journal shape); keep `actor` only when that was the sole input.
+    ...(author === undefined ? {} : args.by !== undefined ? { by: author } : { actor: author }),
     ...(args.from === undefined ? {} : { from: args.from }),
     ...(args.baseSha === undefined ? {} : { baseSha: args.baseSha }),
     branch,
@@ -2168,8 +2175,11 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
   switch (applied.name) {
     case "bay/opened": {
       const opened = BayOpenedSchema.parse(data)
+      const { by, actor, ...rest } = opened
+      const author = by ?? actor
       return saveBay({
-        ...opened,
+        ...rest,
+        ...(author === undefined ? {} : { actor: author }),
         base: baseIdentity(opened.base),
         status: "opening",
         openedAt: applied.ts,
