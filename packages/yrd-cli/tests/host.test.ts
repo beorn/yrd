@@ -169,6 +169,48 @@ async function compositionRepository(): Promise<{
   return { repo, oldPinSha, newPinSha, sourceTipSha, rootBaseSha }
 }
 
+async function unpublishedSubmodulePinRepository(): Promise<{
+  repo: string
+  branch: string
+  pin: string
+}> {
+  const root = await mkdtemp(join(tmpdir(), "yrd-unpublished-submodule-pin-"))
+  roots.push(root)
+  const moduleRemote = join(root, "module.git")
+  const module = join(root, "module")
+  const repo = join(root, "repo")
+  const branch = "issue/unpublished-submodule-pin"
+
+  await git(root, "init", "--bare", "-q", "-b", "main", moduleRemote)
+  await git(root, "init", "-q", "-b", "main", module)
+  await git(module, "config", "user.name", "Yrd Test")
+  await git(module, "config", "user.email", "yrd@example.invalid")
+  await git(module, "remote", "add", "origin", moduleRemote)
+  await writeFile(join(module, "README.md"), "published\n")
+  await git(module, "add", "README.md")
+  await git(module, "commit", "-qm", "published module base")
+  await git(module, "push", "-qu", "origin", "main")
+
+  await git(root, "init", "-q", "-b", "main", repo)
+  await git(repo, "config", "user.name", "Yrd Test")
+  await git(repo, "config", "user.email", "yrd@example.invalid")
+  await git(repo, "config", "protocol.file.allow", "always")
+  await writeFile(join(repo, "README.md"), "root\n")
+  await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "true"\nmerge: {}\n')
+  await git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", moduleRemote, "dep")
+  await git(repo, "add", "README.md", ".yrd.yml", ".gitmodules", "dep")
+  await git(repo, "commit", "-qm", "published root base")
+  await git(repo, "switch", "-qc", branch)
+
+  await writeFile(join(repo, "dep", "local-only.txt"), "not published\n")
+  await git(join(repo, "dep"), "add", "local-only.txt")
+  await git(join(repo, "dep"), "commit", "-qm", "local-only submodule work")
+  const pin = await git(join(repo, "dep"), "rev-parse", "HEAD")
+  await git(repo, "add", "dep")
+  await git(repo, "commit", "-qm", "point at local-only submodule work")
+  return { repo, branch, pin }
+}
+
 describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
   it("binds installed-step revisions to every toolchain fingerprint component", () => {
     const toolchain = { bun: "1.3.0", node: "24.0.0", platform: "darwin", arch: "arm64" }
@@ -1809,6 +1851,144 @@ notify:
       guidance: { watch: "yrd watch --pr PR1" },
     })
     expect(await journalEnvelope(repo)).toEqual(before)
+  })
+
+  it("refuses pr submit when a changed submodule pin is on zero origin refs", async () => {
+    const { repo, branch, pin } = await unpublishedSubmodulePinRepository()
+    const component = await realpath(join(repo, "dep"))
+    let stdout = ""
+    let stderr = ""
+
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "submit", branch, "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+      stderr,
+    ).toBe(1)
+    expect(stdout).toBe("")
+    expect(JSON.parse(stderr)).toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "submodule-pin-unpublished",
+      },
+    })
+    expect(stderr).toContain("dep")
+    expect(stderr).toContain(pin)
+    expect(stderr).toContain(`git -C '${component}' push origin '${pin}:refs/heads/${branch}'`)
+
+    let listed = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "list", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          listed += text
+        },
+        stderr: () => undefined,
+      }),
+    ).toBe(0)
+    expect(JSON.parse(listed)).toMatchObject({
+      prs: [{ branch, checkRequests: [] }],
+    })
+
+    await git(component, "push", "-q", "origin", `${pin}:refs/heads/${branch}`)
+    stdout = ""
+    stderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "submit", branch, "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+      stderr,
+    ).toBe(0)
+    expect(stderr).toBe("")
+    expect(JSON.parse(stdout)).toMatchObject({
+      prs: [{ branch }],
+    })
+
+    listed = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "list", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          listed += text
+        },
+        stderr: () => undefined,
+      }),
+    ).toBe(0)
+    expect(JSON.parse(listed).prs[0].checkRequests).toHaveLength(1)
+  })
+
+  it("keeps a draft pushed when pr ready refuses an unpublished changed submodule pin", async () => {
+    const { repo, branch, pin } = await unpublishedSubmodulePinRepository()
+    const component = await realpath(join(repo, "dep"))
+    let stdout = ""
+    let stderr = ""
+
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "create", branch, "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+      stderr,
+    ).toBe(0)
+    expect(stderr).toBe("")
+    const created = JSON.parse(stdout)
+    expect(created).toMatchObject({
+      prs: [{ id: "PR1", branch }],
+    })
+
+    stdout = ""
+    stderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "ready", "PR1", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+      stderr,
+    ).toBe(1)
+    expect(stdout).toBe("")
+    expect(JSON.parse(stderr)).toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "submodule-pin-unpublished",
+      },
+    })
+    expect(stderr).toContain(`git -C '${component}' push origin '${pin}:refs/heads/${branch}'`)
+
+    let listed = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "list", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          listed += text
+        },
+        stderr: () => undefined,
+      }),
+    ).toBe(0)
+    expect(JSON.parse(listed)).toMatchObject({
+      prs: [{ id: "PR1", branch, status: "pushed", checkRequests: [] }],
+    })
   })
 
   it("executes every bare read and no-op recovery without creating journal state", async () => {

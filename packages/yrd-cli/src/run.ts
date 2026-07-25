@@ -137,6 +137,7 @@ import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState }
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
 import { artifactLocation, directArtifacts, nestedArtifacts, uniqueArtifacts } from "./artifact-reference.ts"
 import { readInstalledBaselines } from "./installed-baseline.ts"
+import { unpublishedChangedSubmodulePins } from "./pr-submodule-publication.ts"
 // The live watch UI is loaded lazily at its single use site in watchQueue(): it is the only
 // module that pulls silvery's SplitPane, and eagerly importing it here would make every CLI
 // path (yrd --version, submit, one-shot queue) require the interactive TUI dependency at module
@@ -1916,7 +1917,45 @@ async function closePrs(
   )
 }
 
-async function readyPr(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): Promise<YrdCliExitCode> {
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`
+}
+
+async function requirePublishedSubmodulePins(pr: PR, services: YrdCliServices, io: YrdCliIO): Promise<void> {
+  if (services.process === undefined) return
+  const baseSha = prBaseSha(pr)
+  if (baseSha === undefined) {
+    raiseFailure("refusal", "pr-base-missing", `yrd: PR '${pr.id}' has no immutable base SHA`)
+  }
+  const unpublished = await unpublishedChangedSubmodulePins({
+    process: services.process,
+    repo: io.cwd ?? process.cwd(),
+    baseSha,
+    headSha: prHead(pr),
+  })
+  if (unpublished.length === 0) return
+  const detail = unpublished
+    .map(
+      ({ path, pin, repository }) =>
+        `submodule '${path}' pin '${pin}' is on zero refs fetched from origin; publish it before submitting:\n` +
+        `git -C ${shellQuote(repository)} push origin ${shellQuote(`${pin}:refs/heads/${pr.branch}`)}`,
+    )
+    .join("\n")
+  raiseFailure(
+    "refusal",
+    "submodule-pin-unpublished",
+    `yrd: PR '${pr.id}' changes unpublished submodule pins:\n${detail}`,
+  )
+}
+
+async function readyPr(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  selector: string,
+  options: JsonOption,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
+  await requirePublishedSubmodulePins(requiredPr(app, selector), services, io)
   await app.bays.ready({ pr: selector })
   let pr = app.bays.pr(selector)
   if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after ready`)
@@ -2334,6 +2373,7 @@ async function resolveSubmitMetadata(
 
 async function applyPrSelectionVerb(
   app: YrdCliApp,
+  services: YrdCliServices,
   selectors: readonly string[],
   options: {
     follow?: boolean
@@ -2436,6 +2476,7 @@ async function applyPrSelectionVerb(
     const delivery = prDeliveryState(pr)
     return delivery === "pushed" || delivery === "submitted"
   })
+  for (const pr of checkable) await requirePublishedSubmodulePins(pr, services, io)
   for (const pr of checkable) await app.bays.requestChecks({ pr: pr.id })
   const selected = checkable.map((pr) => pr.id)
   if (selected.length === 0 || (options.wait !== true && options.follow !== true)) {
@@ -5517,7 +5558,7 @@ function buildProgram(
     .option("--composition <path>", "immutable version-1 source composition JSON")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) =>
-      setExit(await applyPrSelectionVerb(installed(), selectors, options, io, "bay.submit")),
+      setExit(await applyPrSelectionVerb(installed(), installedServices(), selectors, options, io, "bay.submit")),
     )
   bay
     .command("close [selector...]")
@@ -5742,7 +5783,14 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (selector, options) =>
       setExit(
-        await applyPrSelectionVerb(installed(), selector === undefined ? [] : [selector], options, io, "pr.create"),
+        await applyPrSelectionVerb(
+          installed(),
+          installedServices(),
+          selector === undefined ? [] : [selector],
+          options,
+          io,
+          "pr.create",
+        ),
       ),
     )
   addAuthoredCarrierWorkflow(create, name)
@@ -5765,7 +5813,7 @@ function buildProgram(
     )
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) =>
-      setExit(await applyPrSelectionVerb(installed(), selectors, options, io, "pr.submit")),
+      setExit(await applyPrSelectionVerb(installed(), installedServices(), selectors, options, io, "pr.submit")),
     )
   pr.command("view <selector>")
     .description("show a PR and its runs")
@@ -5812,7 +5860,9 @@ function buildProgram(
   pr.command("ready <selector>")
     .description("submit a pushed PR revision and admit configured checks")
     .option("--json", "emit stable JSON")
-    .action(async (selector, options) => setExit(await readyPr(installed(), selector, options, io)))
+    .action(async (selector, options) =>
+      setExit(await readyPr(installed(), installedServices(), selector, options, io)),
+    )
   pr.command("review <selector>")
     .description("record a revision-bound review verdict")
     .option("--approve", "approve the current revision")
