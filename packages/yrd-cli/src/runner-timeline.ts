@@ -13,7 +13,7 @@ import {
 
 /**
  * Pure watch-timeline grammar shared by the interactive queue view and the
- * resident follow-runner's human narration. Lifecycle rows read one state
+ * resident follow-runner's human narration. Its INFO/ERROR lifecycle rows read one state
  * transition per row — `[<base>#<run>/<index>-<step>] starting|finished` —
  * with the bracketed identity itself linking to the owned artifact directory.
  * Keeping these helpers here (not in the queue view .tsx) means the headless
@@ -372,7 +372,7 @@ function jsonTail(props: Record<string, unknown>, color: boolean): string {
 }
 
 /**
- * Format one resident-runner log Event as a human line, or `undefined` to
+ * Format one resident-runner log Event as a human row, or `undefined` to
  * suppress it from the human stream (it still reaches the JSONL file sink).
  *
  * - `yrd:jobs:<step>` transitions → bracket-first step narration.
@@ -390,7 +390,7 @@ export function formatResidentLogLine(event: Event, options: ResidentLogFormatOp
   const level = event.level
   const props = (event.props ?? {}) as OutcomeProps & Record<string, unknown>
 
-  // Low-level journal bookkeeping is noise on the human line — JSONL sink only.
+  // Low-level journal bookkeeping is noise on the human row — JSONL sink only.
   // Its warn/error escalations still surface below as notices.
   if (namespace.startsWith("yrd:journal:") && (level === "info" || level === "debug")) return undefined
 

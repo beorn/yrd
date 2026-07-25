@@ -1,5 +1,13 @@
 import { pathToFileURL } from "node:url"
-import type { Bay, PR, PRRegression } from "@yrd/bay"
+import {
+  prDeliveryState,
+  prHead,
+  prRevisionNumber,
+  type Bay,
+  type PR,
+  type PRDeliveryState,
+  type PRRegression,
+} from "@yrd/bay"
 import type { Contest, ContestEvaluationRun } from "@yrd/contest"
 import type { JobError } from "@yrd/job"
 import type { PREligibility } from "@yrd/queue"
@@ -108,15 +116,19 @@ export function TaskStatusValue({
 
 function evaluatorVerdict(run: ContestEvaluationRun | undefined): string {
   if (run?.result !== undefined) return run.result.verdict
-  const status = run?.job.status
-  return status === undefined || status === "requested" ? "queued" : status
+  const job = run?.job
+  if (job === undefined || job.status === "queued") return "queued"
+  if (job.status === "in_progress") return "running"
+  return job.status === "completed" ? job.conclusion : job.status
 }
 
 function evaluatorSummary(run: ContestEvaluationRun | undefined): string {
   if (run?.result?.summary !== undefined) return run.result.summary
   const job = run?.job
-  if (job?.status === "failed") return actionableFailureSummary(actionableFailure(job.error))
-  if (job?.status === "lost") {
+  if (job?.status === "completed" && job.conclusion === "failure") {
+    return actionableFailureSummary(actionableFailure(job.error))
+  }
+  if (job?.status === "completed" && job.conclusion === "timed_out") {
     return actionableFailureSummary(actionableFailure({ code: "job-lost", message: job.lostReason }))
   }
   if (job !== undefined && "detail" in job && job.detail !== undefined) return job.detail
@@ -125,8 +137,10 @@ function evaluatorSummary(run: ContestEvaluationRun | undefined): string {
 
 function evaluatorFailure(run: ContestEvaluationRun | undefined): ActionableFailure | undefined {
   const job = run?.job
-  if (job?.status === "failed") return actionableFailure(job.error)
-  if (job?.status === "lost") return actionableFailure({ code: "job-lost", message: job.lostReason })
+  if (job?.status === "completed" && job.conclusion === "failure") return actionableFailure(job.error)
+  if (job?.status === "completed" && job.conclusion === "timed_out") {
+    return actionableFailure({ code: "job-lost", message: job.lostReason })
+  }
   return undefined
 }
 
@@ -208,22 +222,13 @@ export function BayStatusView({ bays }: { bays: readonly Bay[] }) {
   return <Table data={bays} columns={columns} />
 }
 
-export function PRStatusView({
-  prs,
-  eligibilities = [],
-}: {
-  prs: readonly PR[]
-  eligibilities?: readonly PREligibility[]
-}) {
-  const rows = prs.map((pr) => {
-    const projected = projectPRTaskStatus(pr)
-    const eligibility = eligibilities.find((candidate) => candidate.pr === pr.id)
-    return {
-      ...projected,
-      status: eligibility?.reason?.code === "needs-author" ? "needs-author" : projected.status,
-      head: pr.headSha.slice(0, 12),
-    }
-  })
+export function PRStatusView({ prs }: { prs: readonly PR[] }) {
+  const rows = prs.map((pr) => ({
+    ...projectPRTaskStatus(pr),
+    status: prDeliveryState(pr),
+    revision: prRevisionNumber(pr),
+    head: prHead(pr).slice(0, 12),
+  }))
   return (
     <Table
       data={rows}
@@ -259,7 +264,7 @@ export type IssueDeliveryRow = Readonly<{
   pr: string
   revision: number
   headSha: string
-  status: PR["status"] | "needs-author"
+  status: PRDeliveryState
   runs: readonly string[]
   landingSha?: string
   bounce?: Readonly<{ run: string; detail?: string }>

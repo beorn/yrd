@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest"
 import { Command, createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs } from "@yrd/job"
 import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
+import { currentPRRev, prDeliveryState, type PR } from "../src/model.ts"
 
 const HEAD_1 = "1".repeat(40)
 const HEAD_2 = "2".repeat(40)
@@ -25,16 +26,22 @@ function workspaceAdapter(): BayWorkspace {
   return {
     revision: "test-workspace-v1",
     provision: (input) => ({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD_1, baseSha: BASE },
     }),
     refresh: (input) => ({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD_1, baseSha: BASE, dirty: false },
     }),
-    checkpoint: () => ({ status: "passed", output: { headSha: HEAD_1, pushed: true, wip: false } }),
-    deprovision: () => ({ status: "passed", output: {} }),
+    deprovision: () => ({ status: "completed", conclusion: "success", output: {} }),
   }
+}
+
+function prFacts(pr: PR | undefined) {
+  if (pr === undefined) throw new Error("expected PR")
+  return { ...pr, delivery: prDeliveryState(pr), current: currentPRRev(pr) }
 }
 
 /** Seed a journal with one integrated PR per entry (all on the given branch, so
@@ -87,11 +94,11 @@ describe("resolvePR live-preference + requireLivePR mutation guard", () => {
     await app.bays.submitSelection("topic/b", mint(HEAD_2))
 
     // Read: the branch selector resolves the LIVE PR, not the frozen integrated one.
-    expect(app.bays.pr("topic/b")).toMatchObject({ id: "PR2", status: "submitted" })
+    expect(prFacts(app.bays.pr("topic/b"))).toMatchObject({ id: "PR2", delivery: "submitted" })
     // Mutate (withdraw) by branch: acts on the live delivery.
     await app.bays.closePr({ pr: "topic/b" })
-    expect(app.bays.pr("PR2")).toMatchObject({ status: "withdrawn" })
-    expect(app.bays.pr("PR1")).toMatchObject({ status: "integrated" })
+    expect(prFacts(app.bays.pr("PR2"))).toMatchObject({ delivery: "withdrawn" })
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({ delivery: "integrated" })
   })
 
   it("resolves a branch with multiple terminal PRs + one live PR to the live one", async () => {
@@ -102,7 +109,7 @@ describe("resolvePR live-preference + requireLivePR mutation guard", () => {
     // Two integrated PRs already collide on topic/c; a new head mints the live PR3.
     await app.bays.submitSelection("topic/c", mint(HEAD_3))
 
-    expect(app.bays.pr("topic/c")).toMatchObject({ id: "PR3", status: "submitted" })
+    expect(prFacts(app.bays.pr("topic/c"))).toMatchObject({ id: "PR3", delivery: "submitted" })
     await app.bays.requestChecks({ pr: "topic/c" })
     expect(app.bays.pr("PR3")).toMatchObject({ checkRequests: [expect.objectContaining({ headSha: HEAD_3 })] })
   })
@@ -113,7 +120,7 @@ describe("resolvePR live-preference + requireLivePR mutation guard", () => {
       { pr: "PR2", headSha: HEAD_2, commit: "b".repeat(40) },
     ])
     // Read: an all-terminal branch resolves the MOST RECENT terminal (PR2).
-    expect(app.bays.pr("topic/d")).toMatchObject({ id: "PR2", status: "integrated" })
+    expect(prFacts(app.bays.pr("topic/d"))).toMatchObject({ id: "PR2", delivery: "integrated" })
     // Mutate by branch: no live delivery → loud, typed refusal that points at PR id.
     await expect(app.bays.closePr({ pr: "topic/d" })).rejects.toMatchObject({
       failure: { kind: "refusal", code: "no-live-pr" },

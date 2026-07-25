@@ -26,6 +26,7 @@
       "version": "0.0.1",
       "dependencies": {
         "@silvery/signals": "^0.21.0",
+        "@yrd/config": "workspace:*",
         "@yrd/core": "workspace:*",
         "@yrd/job": "workspace:*",
         "@yrd/persistence": "workspace:*",
@@ -41,6 +42,7 @@
         "@silvery/commander": "^0.21.0",
         "@silvery/scope": "^0.21.0",
         "@yrd/bay": "workspace:*",
+        "@yrd/config": "workspace:*",
         "@yrd/contest": "workspace:*",
         "@yrd/core": "workspace:*",
         "@yrd/issue": "workspace:*",
@@ -52,6 +54,13 @@
         "react": "^19.2.0",
         "silvery": "^0.21.1",
         "zod": "^4.4.3",
+      },
+    },
+    "packages/yrd-config": {
+      "name": "@yrd/config",
+      "version": "0.0.1",
+      "dependencies": {
+        "@yrd/core": "workspace:*",
       },
     },
     "packages/yrd-contest": {
@@ -125,6 +134,7 @@
       "dependencies": {
         "@silvery/signals": "^0.21.0",
         "@yrd/bay": "workspace:*",
+        "@yrd/config": "workspace:*",
         "@yrd/core": "workspace:*",
         "@yrd/job": "workspace:*",
         "@yrd/process": "workspace:*",
@@ -278,6 +288,8 @@
     "@yrd/bay": ["@yrd/bay@workspace:packages/yrd-bay"],
 
     "@yrd/cli": ["@yrd/cli@workspace:packages/yrd-cli"],
+
+    "@yrd/config": ["@yrd/config@workspace:packages/yrd-config"],
 
     "@yrd/contest": ["@yrd/contest@workspace:packages/yrd-contest"],
 

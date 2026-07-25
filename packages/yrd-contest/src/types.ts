@@ -199,8 +199,16 @@ export type ContestRecord = DeepReadonly<z.infer<typeof ContestRecordSchema>>
 export type ContestsState = Readonly<{ records: Readonly<Record<string, ContestRecord>> }>
 
 export type ContestEvaluationRun =
-  | Readonly<{ generation: number; job: Extract<Job, { status: "passed" }>; result: EvaluatorResult }>
-  | Readonly<{ generation: number; job: Exclude<Job, { status: "passed" }>; result?: never }>
+  | Readonly<{
+      generation: number
+      job: Extract<Job, { status: "completed"; conclusion: "success" }>
+      result: EvaluatorResult
+    }>
+  | Readonly<{
+      generation: number
+      job: Exclude<Job, { status: "completed"; conclusion: "success" }>
+      result?: never
+    }>
 
 export type ContestEvaluation = Readonly<{
   evaluator: string

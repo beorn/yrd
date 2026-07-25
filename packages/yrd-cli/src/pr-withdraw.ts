@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process"
 import { createElement } from "react"
-import { isLivePR, type PR } from "@yrd/bay"
+import { currentPRRev, isLivePR, prDeliveryState, type PR } from "@yrd/bay"
 import { raiseFailure } from "@yrd/core"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import { usage } from "./invocation.ts"
@@ -31,8 +31,9 @@ function requiredLivePr(app: YrdCliApp, selector: string): PR {
   if (pr === undefined) {
     raiseFailure("refusal", "pr-missing", `yrd: no PR '${selector}'`)
   }
-  if (!isLivePR(pr.status)) {
-    raiseFailure("refusal", "pr-terminal", `yrd: PR '${pr.id}' is ${pr.status}; a terminal PR cannot be withdrawn`)
+  const delivery = prDeliveryState(pr)
+  if (!isLivePR(pr)) {
+    raiseFailure("refusal", "pr-terminal", `yrd: PR '${pr.id}' is ${delivery}; a terminal PR cannot be withdrawn`)
   }
   return pr as PR
 }
@@ -185,16 +186,17 @@ async function contentChecks(headSha: string, baseSha: string, git: PruneGitFact
  * check that ran (and every check that was skipped, with why) is named in the
  * returned row so the operator sees exactly what was verified. */
 async function pruneVerdict(pr: PR, baseSha: string, git: PruneGitFacts, dryRun: boolean): Promise<PruneRow> {
+  const revision = currentPRRev(pr)
   const identity = {
     pr: pr.id,
     branch: pr.branch,
-    revision: pr.revision,
-    headSha: pr.headSha,
+    revision: revision.n,
+    headSha: revision.head,
     base: pr.base,
     baseSha,
   }
-  const checks = await contentChecks(pr.headSha, baseSha, git)
-  if (!checks.headPresent) {
+  const head = await git.resolveCommit(revision.head)
+  if (head === undefined) {
     return {
       ...identity,
       checks,
@@ -202,10 +204,17 @@ async function pruneVerdict(pr: PR, baseSha: string, git: PruneGitFacts, dryRun:
       detail: `head commit is not present in this repository; nothing could be verified — kept`,
     }
   }
-  const superseded = checks.ancestorOfBase === true || checks.mergeTree === "identical"
-  const checked = `ancestor-of-base=${checks.ancestorOfBase === true ? "yes" : "no"}, merge-tree=${
-    checks.mergeTree === "skipped" ? "skipped (head already reachable)" : checks.mergeTree
-  }`
+  const ancestor = await git.isAncestor(revision.head, baseSha)
+  const mergeTree = ancestor
+    ? ("skipped" as const)
+    : await (async () => {
+        const merged = await git.mergeTree(baseSha, revision.head)
+        if (merged === undefined) return "conflicts" as const
+        return merged === (await git.treeOf(baseSha)) ? ("identical" as const) : ("divergent" as const)
+      })()
+  const checks: PruneChecks = { headPresent: true, ancestorOfBase: ancestor, mergeTree }
+  const superseded = ancestor || mergeTree === "identical"
+  const checked = `ancestor-of-base=${ancestor ? "yes" : "no"}, merge-tree=${mergeTree === "skipped" ? "skipped (head already reachable)" : mergeTree}`
   if (!superseded) {
     return { ...identity, checks, verdict: "keep", detail: `${checked} — live content not on base — kept` }
   }
@@ -369,7 +378,7 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
   const git = io.pruneGit === undefined ? createPruneGitFacts(cwd) : io.pruneGit(cwd)
   const live = app.bays
     .prs()
-    .filter((pr) => isLivePR(pr.status))
+    .filter((pr) => isLivePR(pr))
     .toSorted((left, right) => left.id.localeCompare(right.id, "en", { numeric: true })) as readonly PR[]
 
   const rows: PruneRow[] = []

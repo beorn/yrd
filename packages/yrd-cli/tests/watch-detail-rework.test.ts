@@ -122,8 +122,8 @@ function glyphColumn(app: ReturnType<ReturnType<typeof createRenderer>>, row: nu
   return -1
 }
 
-describe("detail title row — PR identity only", () => {
-  it("emphasizes the identity and leaves status to the notice below", () => {
+describe("detail title row — target identity emphasis + right-aligned outcome", () => {
+  it("emphasizes the identity, right-aligns STATUS/OUTCOME, and omits corner time", () => {
     const pr = fixturePr("PR42", "submitted", "2026-07-13T10:30:00.000Z", "Land it")
     const run = fixtureRun("R42", [pr], "passed", "2026-07-13T10:40:00.000Z", {
       finishedAt: "2026-07-13T10:55:00.000Z",
@@ -136,14 +136,16 @@ describe("detail title row — PR identity only", () => {
     const app = createRenderer({ cols: 120, rows: 6 })(
       createElement(Box, { width: 120 }, createElement(QueueDetailTitle, { row })),
     )
+    const projectedOnly = createRenderer({ cols: 120, rows: 6 })(
+      createElement(Box, { width: 120 }, createElement(QueueDetailTitle, { row })),
+    )
     try {
       // The title is PR-scoped. Run identity, timing, and status belong to the
       // composite header + notice below it.
       expect(app.text).toContain("pr#42.1")
       expect(app.text).not.toContain("RUN main#42")
       expect(app.text).not.toContain("topic/pr42")
-      expect(app.text).not.toContain("passed")
-      expect(app.text).not.toContain("integrated")
+      expect(app.text).toContain(`${data.glyph} completed, integrated`)
 
       const titleRow = app.text.split("\n").findIndex((text) => text.includes("pr#42.1"))
       expect(titleRow).toBeGreaterThanOrEqual(0)
@@ -156,8 +158,12 @@ describe("detail title row — PR identity only", () => {
       expect(glyphColumn(app, titleRow), "branch marker belongs in the member block, not the title").toBe(-1)
 
       expect(app.text).not.toContain("15m00s")
+      expect(projectedOnly.text).toContain("pr#42.1")
+      expect(projectedOnly.text).not.toContain("CANDIDATE")
+      expect(projectedOnly.text).not.toContain("RUN main#42")
     } finally {
       app.unmount()
+      projectedOnly.unmount()
     }
   })
 

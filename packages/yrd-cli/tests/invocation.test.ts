@@ -19,6 +19,10 @@ describe("canonicalizeYrdCommandAliases", () => {
     { args: ["queue", "run", "PR1"], expected: ["queue", "run", "PR1"] },
     { args: ["queue", "finish", "R1"], expected: ["queue", "finish", "R1"] },
     { args: ["--repo", "prs", "issues", "--json"], expected: ["--repo", "prs", "issue", "--json"] },
+    {
+      args: ["--config", "delivery/yard.ts", "prs", "--json"],
+      expected: ["--config", "delivery/yard.ts", "pr", "--json"],
+    },
     { args: ["--log-level=debug", "contests"], expected: ["--log-level=debug", "contest"] },
     { args: ["bay", "open", "prs"], expected: ["bay", "open", "prs"] },
   ])("canonicalizes parse-only command aliases in $args", ({ args, expected }) => {
@@ -60,10 +64,11 @@ describe("resolveYrdContext", () => {
   it.each([
     {
       name: "CLI selector over environment",
-      options: { repo: "../cli-repo" },
+      options: { repo: "../cli-repo", config: "delivery/yard.ts" },
       env: { YRD_REPO: "../env-repo" },
       context: {
         repo: resolve(ambient, "../cli-repo"),
+        configPath: "delivery/yard.ts",
         observability: { level: "warn", spans: false, explicitLevel: false },
       },
     },

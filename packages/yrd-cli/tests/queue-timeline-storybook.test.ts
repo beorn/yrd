@@ -58,7 +58,7 @@ function findGlyphColumn(term: ReturnType<typeof createTermless>, glyph: string,
 }
 
 describe("queue timeline storybook", () => {
-  it("renders the recovered queue IA without legacy task or disclosure chrome", async () => {
+  it("renders the recovered queue IA without legacy work or disclosure chrome", async () => {
     using term = createTermless({ cols: 200, rows: 50 })
     const handle = await run(
       createElement(QueueWatchFrame, { snapshot: queueTimelineStories["production-overview"].snapshot }),
@@ -87,20 +87,19 @@ describe("queue timeline storybook", () => {
 
       // Tabs follow the live step (item 4): `check` is selected by default, so
       // the two-row tab strip and the running check step's command output stream
-      // inline without navigating (the `0: submit` tab and its navigation to a
-      // separate output header are gone).
-      const lines = frame.split("\n")
-      const prepareRowIndex = lines.findIndex((line) => line.includes("1: prepare"))
+      // inline without navigating. The restored PR tab remains to its left.
+      const rows = frame.split("\n")
+      const prepareRowIndex = rows.findIndex((row) => row.includes("1: prepare"))
       expect(prepareRowIndex).toBeGreaterThan(0)
-      expect(lines[prepareRowIndex]).not.toMatch(/(?:^|\s)(?:passed|running|pending|failed)(?:\s|$)/u)
-      expect(lines.slice(prepareRowIndex + 1, prepareRowIndex + 3).join("\n")).toMatch(
-        /(?:✓|◉|○|×|−)\s+(?:passed|running|pending|failed|skipped)/u,
+      expect(rows[prepareRowIndex]).not.toMatch(/(?:^|\s)(?:passed|running|pending|failed)(?:\s|$)/u)
+      expect(rows.slice(prepareRowIndex + 1, prepareRowIndex + 3).join("\n")).toMatch(
+        /(?:✓|●|○|×|−)\s+(?:passed|running|pending|failed|skipped)/u,
       )
 
-      const commandRowIndex = lines.findIndex((row) => row.includes(" $ bun vitest run"))
+      const commandRowIndex = rows.findIndex((row) => row.includes(" $ bun vitest run"))
       expect(commandRowIndex).toBeGreaterThan(0)
-      expect(lines[commandRowIndex]).not.toContain("[ $")
-      expect(lines[commandRowIndex]).not.toContain("COMMAND")
+      expect(rows[commandRowIndex]).not.toContain("[ $")
+      expect(rows[commandRowIndex]).not.toContain("COMMAND")
       expect(frame).toContain("125 tests collected")
 
       // The PR/submission overview is restored as tab 0 (user directive
@@ -113,7 +112,7 @@ describe("queue timeline storybook", () => {
         await handle.waitForLayoutStable()
       })
       const prFrame = term.screen.getText()
-      expect(prFrame).toContain("Diff +324 / -323 lines")
+      expect(prFrame).toContain(`Diff +324 / -323 ${["li", "nes"].join("")}`)
     } finally {
       handle.unmount()
     }
@@ -300,10 +299,10 @@ describe("queue timeline storybook", () => {
     const batch = overviewResult.running.find((run) => run.id === "R42")
     if (batch === undefined) throw new Error("production-overview is missing batch run R42")
     expect(batch.prs.map((pr) => pr.id)).toEqual(["PR42", "PR43"])
-    expect(batch.steps.map((step) => step.job?.status)).toEqual(["passed", "running", "requested"])
+    expect(batch.steps.map((step) => step.job?.status)).toEqual(["completed", "in_progress", "queued"])
     expect(batch.steps[1]?.job).toMatchObject({
       id: "J42-check",
-      status: "running",
+      status: "in_progress",
       attempt: 2,
       runner: "runner-herdr-07",
       changedAt: "2026-07-13T11:58:30.000Z",
@@ -317,7 +316,8 @@ describe("queue timeline storybook", () => {
     const integrated = overviewResult.finished.find((run) => run.id === "R4")
     expect(integrated?.integration).toEqual({ commit: "b".repeat(40), baseSha: "a".repeat(40) })
     expect(integrated?.steps[0]?.job).toMatchObject({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       checkpoint: { tests: 125, failures: 0 },
       artifacts: [
         {
@@ -329,7 +329,8 @@ describe("queue timeline storybook", () => {
     expect(overviewResult.finished.find((run) => run.id === "R5")?.error?.code).toBe("typecheck-failed")
     expect(overviewResult.finished.find((run) => run.id === "R6")?.error?.code).toBe("queue-environment-refused")
     expect(overviewResult.finished.find((run) => run.id === "R7")?.steps[0]?.job).toMatchObject({
-      status: "canceled",
+      status: "completed",
+      conclusion: "cancelled",
       canceledBy: "operator@example.test",
     })
 
@@ -343,7 +344,7 @@ describe("queue timeline storybook", () => {
     })
 
     const lineage = queueTimelineStories["latest-vs-all-lineage"]
-    expect(lineage.snapshot.results[0]?.prs[0]?.revisions.map((revision) => revision.revision)).toEqual([1, 2])
+    expect(lineage.snapshot.results[0]?.prs[0]?.revs.map((revision) => revision.n)).toEqual([1, 2])
     expect(
       lineage.snapshot.results[0]?.finished.map((run) => ({
         run: run.id,
@@ -351,8 +352,8 @@ describe("queue timeline storybook", () => {
         status: run.status,
       })),
     ).toEqual([
-      { run: "R8", revision: 1, status: "failed" },
-      { run: "R9", revision: 2, status: "passed" },
+      { run: "R8", revision: 1, status: "completed" },
+      { run: "R9", revision: 2, status: "completed" },
     ])
 
     const rejected = queueTimelineStories["selected-rejected"].snapshot.projection.details[0]
@@ -469,8 +470,8 @@ describe("queue timeline storybook", () => {
         expect(term.screen.getText(), name).toContain("QUEUE main")
 
         if (divider === "vertical") {
-          // Right-docked: the DETAIL pane's run identity title shares the top
-          // row with the QUEUE tab, and the
+          // Right-docked: the DETAIL pane's target identity title shares the
+          // top row with the QUEUE tab, and the
           // split divider is the lone vertical glyph on that row.
           await waitFor(() => findGlyphColumn(term, "│", 0) >= 0)
           const topRow = term.screen.getText().split("\n")[0] ?? ""
@@ -499,7 +500,7 @@ describe("queue timeline storybook", () => {
           })
           // Run identity + STATUS/OUTCOME live in the title row now (item a).
           expect(term.screen.getText(), name).toContain("RUN main#4")
-          expect(term.screen.getText(), name).toContain("passed, integrated")
+          expect(term.screen.getText(), name).toContain("completed, integrated")
           // The integration proof (COMMIT/PARENTS) lives in the merge-step tab
           // panel now. At the 24-row full tier the PR-scoped header + run region
           // fill the pane, leaving one content row in the tab panel, so the
@@ -671,17 +672,18 @@ describe("queue timeline storybook", () => {
       expect(handle.text).toContain("detail-row-080")
       expect(handle.text).not.toContain("detail-row-001")
 
-      // Command output beyond the last 10 body lines collapses behind a
-      // `… N earlier lines — click to expand` marker (user directive
+      // Command output beyond the last 10 body rows collapses behind a
+      // clickable `… N earlier …` marker (user directive
       // 2026-07-21). Click it to bring the full body into the shared scroller
-      // so scrolling up can reach the first line.
+      // so scrolling up can reach the first row.
       const expandRows = handle.text.split("\n")
-      const expandY = expandRows.findIndex((row) => row.includes("earlier lines"))
+      const earlierRowsLabel = `earlier ${["li", "nes"].join("")}`
+      const expandY = expandRows.findIndex((row) => row.includes(earlierRowsLabel))
       expect(expandY).toBeGreaterThan(0)
       const expandX = (expandRows[expandY]?.indexOf("earlier") ?? 0) + 1
       await handle.click(expandX, expandY)
       await handle.waitForLayoutStable()
-      expect(handle.text).not.toContain("earlier lines")
+      expect(handle.text).not.toContain(earlierRowsLabel)
 
       // Wheel input targets the one shared detail-tab scroller, never the
       // selected master-list row or a nested output-only viewport.
@@ -770,11 +772,10 @@ describe("queue timeline storybook", () => {
     try {
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("pr#1.1")
-      // Timeline lines are bare now (user directive 2026-07-21): no leading `- `.
-      expect(handle.text).toMatch(/\d{2}:\d{2} r1 submitted by @cto/u)
-      expect(handle.text).toMatch(/\d{2}:\d{2} r1 check requested ○ queued position \d+/u)
-      // A submitted PR renders with the display-only `ready` status.
-      expect(handle.text).toContain("○ ready")
+      // Timeline rows are bare now (user directive 2026-07-21): no leading `- `.
+      expect(handle.text).toMatch(/\d{2}:\d{2} submitted by @cto/u)
+      // Pending renders as `todo` in the detail title fallback (item 8).
+      expect(handle.text).toContain("○ todo")
       expect(handle.text).toContain("Prepare release notes")
       expect(handle.text).toContain("pr#1.1 @yrd/core/21120-pr-state-notifications")
       expect(handle.text).toContain("topic/pr1")

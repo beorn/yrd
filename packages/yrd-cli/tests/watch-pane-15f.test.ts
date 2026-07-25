@@ -146,16 +146,17 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       expect(app.text).not.toContain("DETAILS")
       expect(app.text).not.toContain("RUN LOGS")
 
-      // Command follows JOB/RUNNER; inline output follows the command. The merge
-      // step renders its recorded command ($ bun vitest run in the fixture) with
-      // the native PARENTS summary as its output; PARENTS also appears once above
+      // Command follows JOB/RUNNER; inline output follows the command. The target
+      // model records the merge command itself, with the native PARENTS summary
+      // as its output; PARENTS also appears once above
       // the command as a merge fact, so anchor the output on the last occurrence.
-      const commandY = rows.findIndex((line) => line.includes("$ bun vitest run"))
+      const commandLabel = "$ git merge --no-ff --no-edit"
+      const commandY = rows.findIndex((line) => line.includes(commandLabel))
       expect(commandY, "command header present").toBeGreaterThan(tabsY)
       expect(commandY, "command follows the step internals").toBeGreaterThan(stepContentY)
       const outputY = rows.findLastIndex((row) => row.includes("PARENTS "))
       expect(outputY, "inline output follows the command").toBeGreaterThan(commandY)
-      const commandX = rows[commandY]?.indexOf("$ bun vitest run") ?? -1
+      const commandX = rows[commandY]?.indexOf(commandLabel) ?? -1
       // The command execution header is emphasized by bold weight and a filled
       // surface; it inherits the default foreground (no explicit fg color).
       expect(app.cell(commandX, commandY).bold).toBe(true)

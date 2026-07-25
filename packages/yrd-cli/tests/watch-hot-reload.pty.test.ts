@@ -56,7 +56,7 @@ function processGroupMembers(pgid: number): number[] {
     .toString()
     .trim()
     .split("\n")
-    .map((line) => line.trim().split(/\s+/u).map(Number))
+    .map((raw) => raw.trim().split(/\s+/u).map(Number))
     .filter((fields) => fields[1] === pgid)
     .map((fields) => fields[0]!)
 }
@@ -114,6 +114,8 @@ describe("yrd watch hot reload (installed)", () => {
       const failedRepo = createRepository("yrd-installed-watch-failed-")
       roots.push(failedRepo)
       writeFileSync(join(failedRepo, ".yrd.yml"), "steps: [\n")
+      git(failedRepo, "add", ".yrd.yml")
+      git(failedRepo, "-c", "commit.gpgsign=false", "commit", "-qm", "invalid base config")
       const failed = await launchInstalledWatch(failedRepo)
       try {
         await expectBoundedExit(failed.terminal)
@@ -130,9 +132,12 @@ describe("yrd watch hot reload (installed)", () => {
         roots.push(repo)
         const running = await launchInstalledWatch(repo)
         try {
-          // The 2026-07-15 footer respec removed the LIVE indicator; the
-          // exact keybinding footer is the stable liveness sentinel.
-          await running.terminal.waitFor("q quit", 10_000)
+          // The 2026-07-15 footer respec removed both the LIVE indicator and
+          // keybinding footer; the queue identity is the stable liveness sentinel.
+          await running.terminal.waitFor("QUEUE main", 10_000).catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error)
+            throw new Error(`${message}; exit=${running.terminal.exitInfo ?? "pending"}\n${running.terminal.getText()}`)
+          })
           expect(running.terminal.alive).toBe(true)
           const members = processGroupMembers(running.pid)
           expect(members).toContain(running.pid)

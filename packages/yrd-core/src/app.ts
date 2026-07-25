@@ -292,6 +292,18 @@ export async function createYrd<State extends object, Commands extends CommandTr
     }
   }
 
+  const canonicalEvent = (applied: Event, source: "append" | "replay"): Event => {
+    const currentSchema = definition.events[applied.name]
+    if (currentSchema === undefined) throw new Error(`yrd: no event definition for '${applied.name}'`)
+    const current = currentSchema.safeParse(applied.data)
+    const data = current.success
+      ? current.data
+      : source === "append"
+        ? currentSchema.parse(applied.data)
+        : (definition.replayEvents[applied.name] ?? currentSchema).parse(applied.data)
+    return freeze(EventSchema.parse({ ...applied, data })) as Event
+  }
+
   const fold = async (base: Projection): Promise<Projection> => {
     using span = coreLog.span?.("replay", { after: base.cursor })
     let next = base
@@ -330,15 +342,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
     for (const applied of frame.events) {
       if (eventIds.has(applied.id)) throw new Error(`yrd: journal contains duplicate event id '${applied.id}'`)
       eventIds.add(applied.id)
-      const currentSchema = definition.events[applied.name]
-      if (currentSchema === undefined) throw new Error(`yrd: no event definition for '${applied.name}'`)
-      const current = currentSchema.safeParse(applied.data)
-      const data = current.success
-        ? current.data
-        : source === "append"
-          ? currentSchema.parse(applied.data)
-          : (definition.replayEvents[applied.name] ?? currentSchema).parse(applied.data)
-      const validated = freeze(EventSchema.parse({ ...applied, data })) as Event
+      const validated = canonicalEvent(applied, source)
       const projected = definition.project(nextState, validated, frame.cause)
       nextState = freeze(projected) as DeepReadonly<State>
     }
@@ -612,13 +616,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
       for (const value of batch.values) {
         const frame = parseJournalFrame(value)
         for (const applied of frame.events) {
-          const currentSchema = definition.events[applied.name]
-          if (currentSchema === undefined) throw new Error(`yrd: no event definition for '${applied.name}'`)
-          const current = currentSchema.safeParse(applied.data)
-          const data = current.success
-            ? current.data
-            : (definition.replayEvents[applied.name] ?? currentSchema).parse(applied.data)
-          const validated = freeze(EventSchema.parse({ ...applied, data })) as Event
+          const validated = canonicalEvent(applied, "replay")
           historical = freeze(definition.project(historical, validated, frame.cause)) as DeepReadonly<State>
           at = validated.ts
         }
@@ -795,7 +793,9 @@ export async function createYrd<State extends object, Commands extends CommandTr
     async *events() {
       await refresh()
       for await (const batch of journal.read()) {
-        for (const value of batch.values) yield* parseJournalFrame(value).events
+        for (const value of batch.values) {
+          for (const applied of parseJournalFrame(value).events) yield canonicalEvent(applied, "replay")
+        }
       }
     },
     close,

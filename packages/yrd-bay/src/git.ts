@@ -66,7 +66,11 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
 }
 
 function failure(code: string, cause: unknown): JobResult<never> {
-  return { status: "failed", error: { code, message: cause instanceof Error ? cause.message : String(cause) } }
+  return {
+    status: "completed",
+    conclusion: "failure",
+    error: { code, message: cause instanceof Error ? cause.message : String(cause) },
+  }
 }
 
 async function remoteBranchHead(git: Git, repo: string, branch: string): Promise<string | undefined> {
@@ -352,7 +356,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
         if (options.intakeRemote !== undefined) {
           await configureIntake(git, path, options.intakeRemote)
         }
-        return { status: "passed", output: { path, headSha, baseSha } }
+        return { status: "completed", conclusion: "success", output: { path, headSha, baseSha } }
       } catch (cause) {
         return failure("provision-failed", cause)
       }
@@ -370,7 +374,11 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           git.commit(repo, input.base),
           git.run(input.path, ["status", "--porcelain"]),
         ])
-        return { status: "passed", output: { path: input.path, headSha, baseSha, dirty: status.stdout.trim() !== "" } }
+        return {
+          status: "completed",
+          conclusion: "success",
+          output: { path: input.path, headSha, baseSha, dirty: status.stdout.trim() !== "" },
+        }
       } catch (cause) {
         return failure("refresh-failed", cause)
       }
@@ -458,7 +466,8 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           // invent.
           if (input.headSha === undefined) return { status: "passed", output: {} }
           return {
-            status: "passed",
+            status: "completed",
+            conclusion: "success",
             output: {
               headSha: input.headSha,
               preservedRef: await requirePreservedBay(git, repo, input.bay, input.headSha),
@@ -468,7 +477,8 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
         const status = await git.run(input.path, ["status", "--porcelain", "--ignore-submodules=none"])
         if (status.stdout.trim() !== "") {
           return {
-            status: "failed",
+            status: "completed",
+            conclusion: "failure",
             error: {
               code: "dirty-worktree",
               message: `workspace '${input.path}' has uncommitted work:\n${status.stdout.trim()}`,
@@ -477,8 +487,8 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
         }
         const headSha = await git.commit(input.path, "HEAD")
         const preservedRef = await preserveClosedBay(git, repo, input.bay, headSha)
-        await git.run(repo, ["worktree", "remove", "--force", input.path], false, GIT_CLEANUP_TIMEOUT_MS)
-        return { status: "passed", output: { headSha, preservedRef } }
+        await git.run(repo, ["worktree", "remove", "--force", input.path])
+        return { status: "completed", conclusion: "success", output: { headSha, preservedRef } }
       } catch (cause) {
         return failure("deprovision-failed", cause)
       }

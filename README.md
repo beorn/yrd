@@ -6,7 +6,7 @@
 
 **Agents are fast!** Unleash 100 on one machine. What could go wrong?
 
-- **GitHub feels like the DMV.** Agents wait in line for remote CI you don't control.
+- **GitHub feels like the DMV.** Agents wait in a remote CI queue you don't control.
 - **Your machine melts.** Unmanaged local test runs max every core.
 - **Git throws up its hands.** Many agents, one repo: lock fights, racing merges, half-landed features.
 - **So much software.** Repos grow big and plentiful, and you'll want to vendor more. You need a [**superproject**](#superprojects), a repo of repos.
@@ -110,20 +110,22 @@ The CLI initializes `.git/yrd/` on the first repository-backed command. Help is
 repository-independent and never creates Yrd state.
 
 Every command accepts one global repository selector. `--repo <path>` (or
-`YRD_REPO`) selects the Git repository, its `.yrd.yml`, durable Yrd state, and
-operation root. Selecting a linked worktree preserves its current-bay and
-current-branch behavior while config and state still resolve through the shared
-repository authority. The CLI value overrides the environment value, which
-overrides discovery from the caller's directory. Relative values resolve
-against that one original caller directory.
+`YRD_REPO`) selects the Git repository, durable Yrd state, and operation root.
+Selecting a linked worktree preserves its current-bay and current-branch
+behavior while config and state still resolve through the shared repository
+authority. The CLI value overrides the environment value, which overrides
+discovery from the caller's directory. Relative values resolve against that one
+original caller directory.
 
 ```console
 $ yrd --repo /work/my-repository/.bays/B1 pr status --json
 ```
 
-The selector is global and may also follow a subcommand. `.yrd.yml` remains the
-only configuration path; there is no separate `--cwd`, `--config`, or `--root`
-surface.
+The selector is global and may also follow a subcommand. Config defaults to the
+base branch's `.yrd.ts`, with `.yrd.yml` as the legacy fallback.
+`--config <path>` selects another base-relative `.ts`, `.yml`, or `.yaml`
+authority; candidate content can never override it. There is no separate
+`--cwd` or `--root` surface.
 
 ```console
 $ cd my-repository
@@ -279,7 +281,7 @@ yrd pr                      list PRs; create, submit, view, runs, diff, checkout
 yrd bay                     list bays; run, open, path, refresh, submit, and close
 yrd issue                   read-only issue list and joined delivery view
 yrd contest                 list; open, eval, view, finish, select, promote
-yrd queue                   show the queue timeline by default; list/ls is canonical;
+yrd queue                   render the queue timeline by default; list/ls is canonical;
                             run, pause, resume, recover, finish, init, deinit, audit
 yrd log                     terminal queue history; --all adds lossless records
 yrd watch                   thin alias for yrd queue list --watch
@@ -796,6 +798,34 @@ its `failure` retains `{ kind, code, message }` and adds the actionable
 
 ## Queues and Steps
 
+The base branch's `.yrd.ts` is the canonical flow authority. It exports one
+`@yrd/config` value whose predicates select exactly one versioned `FlowDef` for
+each immutable submission. Zero matches and ambiguous matches are refusals, not
+first-match-wins policy. Yrd pins the selected flow name, revision, and
+structural fingerprint on the PR and every Run; `yrd doctor` reports
+unchanged-revision drift and refuses resumable work across a revision change.
+
+```ts
+import { defineConfig, yrd } from "@yrd/config"
+
+export default defineConfig(
+  yrd.flow({
+    name: "main",
+    rev: "1",
+    on: ({ base }) => base === "main",
+    steps: [
+      yrd.check("check", { run: "bun vitest run --changed" }),
+      yrd.merge(),
+      yrd.action("deploy", { run: "bun run deploy" }),
+    ],
+  }),
+)
+```
+
+Yrd reads that source from the authoritative base tree, never from Candidate
+content. `--config <path>` selects another base-relative TypeScript or YAML
+authority without weakening that boundary.
+
 Steps are immutable definitions and typed state transitions, not a
 workflow-language DSL. `withStep()` preserves the current shape. `withMerge()`
 changes it to an integrated shape. A post-merge step therefore cannot be
@@ -810,7 +840,7 @@ const review = withStep("coderabbit", reviewRunner, {
 const merge = withMerge(gitMergeRunner, { revision: "git-merge-v1" })
 const deploy = withStep("deploy", deployRunner, {
   revision: "deploy-v1",
-  needsIntegration: true,
+  kind: "action",
 })
 const queue = withQueue({ steps: [check, review, merge, deploy] as const })
 const contests = withContests({ runners, evaluators, git })
@@ -842,7 +872,8 @@ entity slices; `yrd log --all` uses that lossless path, while default status
 remains bounded. Bare `log --all` discovers bases from that history too, so a
 fully retired base is not hidden merely because no live Bay or Queue names it.
 
-The default `.yrd.yml` adapter turns arbitrary shell-backed names into the same
+For existing repositories, the `.yrd.yml` legacy adapter turns arbitrary
+shell-backed names into the same
 plugins:
 
 ```yaml

@@ -3,7 +3,7 @@
  * @level l3
  * @consumer @yrd/contest orchestration
  */
-import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, prDeliveryState, withBays, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe, type Journal } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { withIssues } from "@yrd/issue"
@@ -31,13 +31,22 @@ function workspace(): BayWorkspace {
     revision: "test-workspace-v1",
     provision(input) {
       if (input.baseSha !== BASE_SHA) {
-        return { status: "failed", error: { code: "wrong-base", message: "contest Bay was not pinned" } }
+        return {
+          status: "completed",
+          conclusion: "failure",
+          error: { code: "wrong-base", message: "contest Bay was not pinned" },
+        }
       }
-      return { status: "passed", output: { path: `/repo/.bays/${input.bay}`, headSha: BASE_SHA, baseSha: BASE_SHA } }
+      return {
+        status: "completed",
+        conclusion: "success",
+        output: { path: `/repo/.bays/${input.bay}`, headSha: BASE_SHA, baseSha: BASE_SHA },
+      }
     },
     refresh(input) {
       return {
-        status: "passed",
+        status: "completed",
+        conclusion: "success",
         output: { path: `/repo/.bays/${input.bay}`, headSha: BASE_SHA, baseSha: BASE_SHA, dirty: false },
       }
     },
@@ -45,7 +54,7 @@ function workspace(): BayWorkspace {
       return { status: "passed", output: { headSha: BASE_SHA, pushed: true, wip: false } }
     },
     deprovision() {
-      return { status: "passed", output: {} }
+      return { status: "completed", conclusion: "success", output: {} }
     },
   }
 }
@@ -90,11 +99,15 @@ function fixtures(
           return { status: "waiting", token: `remote-${input.attempt}`, detail: "capacity pending" }
         }
         if (input.competitor.model === options.failedRunner) {
-          return { status: "failed", error: { code: "runner-failed", message: "agent process failed" } }
+          return {
+            status: "completed",
+            conclusion: "failure",
+            error: { code: "runner-failed", message: "agent process failed" },
+          }
         }
         const output = outputFor(input.attempt, input.competitor.model, input.bay.id, input.bay.branch)
         pins.set(output.pin.ref, output.pin.commit)
-        return { status: "passed", output }
+        return { status: "completed", conclusion: "success", output }
       } finally {
         active -= 1
       }
@@ -109,7 +122,8 @@ function fixtures(
         return { status: "waiting", token: "eval-A2", artifacts: [{ kind: "queue", uri: "artifact://eval/A2" }] }
       }
       return {
-        status: "passed",
+        status: "completed",
+        conclusion: "success",
         output: {
           verdict: control.evaluatorVerdict,
           summary: `private tests ${control.evaluatorVerdict}`,
@@ -127,7 +141,11 @@ function fixtures(
       if (options.waitingAdvisory === true && input.attempt === "A2") {
         return { status: "waiting", token: "review-A2" }
       }
-      return { status: "passed", output: { verdict: input.attempt === "A2" ? "failed" : "passed", artifacts: [] } }
+      return {
+        status: "completed",
+        conclusion: "success",
+        output: { verdict: input.attempt === "A2" ? "failed" : "passed", artifacts: [] },
+      }
     },
   }
   const git: ContestGit = { revision: "git-v1", resolveCommit: (ref) => pins.get(ref) }
@@ -179,14 +197,22 @@ describe("Contests", () => {
     expect(ready).toMatchObject({ id: "C1", status: "ready", attemptOrder: ["A1", "A2"] })
     expect(ready.attempts.A1).toMatchObject({
       status: "passing",
-      runner: { status: "passed" },
+      runner: { status: "completed", conclusion: "success" },
       pin: { commit: CODEX_SHA, bay: "B1" },
       wallTimeMs: 12_000,
-      evaluations: { "held-out": { runs: [{ job: { status: "passed" }, result: { verdict: "passed" } }] } },
+      evaluations: {
+        "held-out": {
+          runs: [{ job: { status: "completed", conclusion: "success" }, result: { verdict: "passed" } }],
+        },
+      },
     })
     expect(ready.attempts.A2).toMatchObject({
       status: "passing",
-      evaluations: { review: { runs: [{ job: { status: "passed" }, result: { verdict: "failed" } }] } },
+      evaluations: {
+        review: {
+          runs: [{ job: { status: "completed", conclusion: "success" }, result: { verdict: "failed" } }],
+        },
+      },
     })
 
     const durable = app.state().contests.records.C1!
@@ -204,11 +230,24 @@ describe("Contests", () => {
       promotion: {
         attempt: "A2",
         commit: CLAUDE_SHA,
-        job: { status: "passed" },
-        pr: { id: "PR1", status: "submitted", headSha: CLAUDE_SHA },
+        job: { status: "completed", conclusion: "success" },
+        pr: {
+          id: "PR1",
+          state: "open",
+          merged: false,
+          revs: [{ n: 1, head: CLAUDE_SHA }],
+        },
       },
     })
-    expect(app.bays.pr("PR1")).toMatchObject({ bay: "B2", headSha: CLAUDE_SHA, status: "submitted" })
+    const submitted = app.bays.pr("PR1")
+    expect(submitted).toMatchObject({
+      bay: "B2",
+      state: "open",
+      merged: false,
+      revs: [{ n: 1, head: CLAUDE_SHA }],
+    })
+    if (submitted === undefined) throw new Error("promoted PR was not retained")
+    expect(prDeliveryState(submitted)).toBe("submitted")
     expect(app.state().contests.records.C1?.promotion).not.toHaveProperty("status")
     expect(app.state().contests.records.C1?.promotion).not.toHaveProperty("job")
 
@@ -231,7 +270,7 @@ describe("Contests", () => {
 
     expect(await app.contests.promote({ contest: "C1" }, runtime)).toMatchObject({
       status: "promotion-failed",
-      promotion: { job: { status: "failed", error: { code: "pin-moved" } } },
+      promotion: { job: { status: "completed", conclusion: "failure", error: { code: "pin-moved" } } },
     })
     expect(app.bays.prs()).toEqual([])
   })
@@ -252,7 +291,7 @@ describe("Contests", () => {
       attempt: runner.attempt,
       runner: runner.runner,
       token: runner.token,
-      result: { status: "passed", output },
+      result: { status: "completed", conclusion: "success", output },
     })
     expect(await app.contests.evaluate("C1", runtime)).toMatchObject({
       attempts: {
@@ -268,11 +307,22 @@ describe("Contests", () => {
       attempt: "A2",
       evaluator: "held-out",
       token: evaluation.token,
-      result: { status: "failed", error: { code: "remote-timeout", message: "remote evaluator timed out" } },
+      result: {
+        status: "completed",
+        conclusion: "failure",
+        error: { code: "remote-timeout", message: "remote evaluator timed out" },
+      },
     })
     expect(app.contests.get("C1")).toMatchObject({
       attempts: {
-        A2: { status: "failed", evaluations: { "held-out": { runs: [{ job: { status: "failed", attempt: 1 } }] } } },
+        A2: {
+          status: "failed",
+          evaluations: {
+            "held-out": {
+              runs: [{ job: { status: "completed", conclusion: "failure", attempt: 1 } }],
+            },
+          },
+        },
       },
     })
 
@@ -280,7 +330,11 @@ describe("Contests", () => {
     const retried = await app.contests.evaluate("C1", { ...runtime, retry: true })
     expect(retried.attempts.A2).toMatchObject({
       status: "passing",
-      evaluations: { "held-out": { runs: [{ job: { id: evaluation.id, status: "passed", attempt: 2 } }] } },
+      evaluations: {
+        "held-out": {
+          runs: [{ job: { id: evaluation.id, status: "completed", conclusion: "success", attempt: 2 } }],
+        },
+      },
     })
   })
 
@@ -307,7 +361,10 @@ describe("Contests", () => {
       status: "ready",
       attempts: {
         A1: { status: "passing" },
-        A2: { status: "failed", runner: { status: "failed", error: { code: "runner-failed" } } },
+        A2: {
+          status: "failed",
+          runner: { status: "completed", conclusion: "failure", error: { code: "runner-failed" } },
+        },
       },
     })
     expect(ready.attempts.A2?.evaluations["held-out"]?.runs).toEqual([])
@@ -336,12 +393,20 @@ describe("Contests", () => {
         "held-out": {
           runs: [
             { generation: 1, job: { id: first.id }, result: { verdict: "failed" } },
-            { generation: 2, job: { status: "passed" }, result: { verdict: "passed" } },
+            {
+              generation: 2,
+              job: { status: "completed", conclusion: "success" },
+              result: { verdict: "passed" },
+            },
           ],
         },
       },
     })
-    expect(app.jobs.get(first.id)).toMatchObject({ status: "passed", output: { verdict: "failed" } })
+    expect(app.jobs.get(first.id)).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+      output: { verdict: "failed" },
+    })
     expect(setup.runnerCalls()).toBe(2)
     const selected = await app.contests.select({ contest: "C1", attempt: "A1" })
     await expect(app.contests.evaluate("C1", runtime)).rejects.toThrow("evaluations are frozen")

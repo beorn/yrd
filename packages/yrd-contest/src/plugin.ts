@@ -1,4 +1,14 @@
-import { defaultBayBranch, prForBay, resolveBay, type Bay, type HasBays, type PR } from "@yrd/bay"
+import {
+  defaultBayBranch,
+  prDeliveryState,
+  prForBay,
+  prHead,
+  prRevisionNumber,
+  resolveBay,
+  type Bay,
+  type HasBays,
+  type PR,
+} from "@yrd/bay"
 import {
   command,
   event,
@@ -352,7 +362,9 @@ function createContestCommands(
         throw new Error("yrd: contest selection changed during promotion")
       }
       const verification = jobByKey(state, promotionKey(record.id))
-      if (verification?.status !== "passed") throw new Error(`yrd: contest promotion verification has not passed`)
+      if (verification?.status !== "completed" || verification.conclusion !== "success") {
+        throw new Error(`yrd: contest promotion verification has not passed`)
+      }
       const verified = PromotionVerifiedSchema.parse(verification.output)
       if (verified.commit.toLowerCase() !== promotion.pin.commit.toLowerCase()) {
         throw new Error("yrd: contest promotion verified a different commit")
@@ -361,15 +373,16 @@ function createContestCommands(
       if (pr === undefined || !exactPR(pr, promotion.pin, record.base)) {
         throw new Error(`yrd: PR '${args.pr}' does not contain the selected contest commit`)
       }
-      if (pr.status !== "submitted" && pr.status !== "integrated") {
-        throw new Error(`yrd: PR '${pr.id}' is ${pr.status}, not submitted`)
+      const delivery = prDeliveryState(pr)
+      if (delivery !== "submitted" && delivery !== "integrated") {
+        throw new Error(`yrd: PR '${pr.id}' is ${delivery}, not submitted`)
       }
       return {
         events: [
           event("contest/promoted", {
             contest: record.id,
             pr: pr.id,
-            revision: pr.revision,
+            revision: prRevisionNumber(pr),
             commit: promotion.pin.commit,
           }),
         ],
@@ -529,10 +542,14 @@ async function retryFailedJobs(contestId: string, options: Parameters<typeof cre
   const ids = new Set<string>()
   for (const attemptId of record.attemptOrder) {
     const runner = jobByKey(state, attemptRunnerKey(record.id, attemptId))
-    if (runner?.status === "failed" || runner?.status === "lost") ids.add(runner.id)
+    if (runner?.status === "completed" && (runner.conclusion === "failure" || runner.conclusion === "timed_out")) {
+      ids.add(runner.id)
+    }
     for (const evaluator of record.evaluators) {
       const latest = evaluationJobs(state, record.id, attemptId, evaluator.id).at(-1)
-      if (latest?.status === "failed" || latest?.status === "lost") ids.add(latest.id)
+      if (latest?.status === "completed" && (latest.conclusion === "failure" || latest.conclusion === "timed_out")) {
+        ids.add(latest.id)
+      }
     }
   }
   for (const id of ids) await options.jobs.retry(id)
@@ -567,11 +584,11 @@ function requestedJobs(contestId: string, state: DeepReadonly<ContestRuntimeStat
   for (const attemptId of record.attemptOrder) {
     const attempt = requiredAttempt(record, attemptId)
     const bay = attemptBay(state, attempt)
-    if (bay?.jobId !== undefined && state.jobs.byId[bay.jobId]?.status === "requested") ids.add(bay.jobId)
+    if (bay?.jobId !== undefined && state.jobs.byId[bay.jobId]?.status === "queued") ids.add(bay.jobId)
     addRequested(ids, state, attemptRunnerKey(record.id, attempt.id))
     for (const evaluator of record.evaluators) {
       const current = evaluationJobs(state, record.id, attempt.id, evaluator.id).at(-1)
-      if (current?.status === "requested") ids.add(current.id)
+      if (current?.status === "queued") ids.add(current.id)
     }
   }
   addRequested(ids, state, promotionKey(record.id))
@@ -580,7 +597,7 @@ function requestedJobs(contestId: string, state: DeepReadonly<ContestRuntimeStat
 
 function addRequested(ids: Set<string>, state: DeepReadonly<ContestRuntimeState>, key: string): void {
   const id = state.jobs.byKey[key]
-  if (id !== undefined && state.jobs.byId[id]?.status === "requested") ids.add(id)
+  if (id !== undefined && state.jobs.byId[id]?.status === "queued") ids.add(id)
 }
 
 async function finalizePromotion(contestId: string, options: Parameters<typeof createContests>[0]): Promise<boolean> {
@@ -589,7 +606,7 @@ async function finalizePromotion(contestId: string, options: Parameters<typeof c
   const promotion = record.promotion
   if (promotion === undefined || promotion.result !== undefined) return false
   const verification = jobByKey(state, promotionKey(contestId))
-  if (verification?.status !== "passed") return false
+  if (verification?.status !== "completed" || verification.conclusion !== "success") return false
   const pr = await ensureExactPR(record, promotion.pin, options)
   const finalized = await options.actions.finalize(contestId, pr.id)
   return finalized.events.length > 0
@@ -601,7 +618,7 @@ async function ensureExactPR(
   options: Parameters<typeof createContests>[0],
 ): Promise<DeepReadonly<PR>> {
   let pr = prForBay(options.runtime().bays, pin.bay)
-  if (pr === undefined || !exactPR(pr, pin, record.base) || pr.status === "rejected") {
+  if (pr === undefined || !exactPR(pr, pin, record.base) || prDeliveryState(pr) === "rejected") {
     // Promotion intake trusts the verified write-once pin and intentionally re-drives a rejected winner.
     await options.bays.intake({
       bay: pin.bay,
@@ -613,11 +630,15 @@ async function ensureExactPR(
   if (pr === undefined || !exactPR(pr, pin, record.base)) {
     throw new Error(`yrd: selected Bay '${pin.bay}' did not produce the exact contest PR`)
   }
-  if (pr.status === "pushed") {
+  if (prDeliveryState(pr) === "pushed") {
     await options.bays.submit({ pr: pr.id })
     pr = prForBay(options.runtime().bays, pin.bay)
   }
-  if (pr === undefined || !exactPR(pr, pin, record.base) || (pr.status !== "submitted" && pr.status !== "integrated")) {
+  if (
+    pr === undefined ||
+    !exactPR(pr, pin, record.base) ||
+    (prDeliveryState(pr) !== "submitted" && prDeliveryState(pr) !== "integrated")
+  ) {
     throw new Error(`yrd: selected contest commit was not submitted`)
   }
   return pr
@@ -694,14 +715,18 @@ function contestView(record: DeepReadonly<ContestRecord>, state: DeepReadonly<Co
 
   let status: Contest["status"]
   if (record.promotion?.result !== undefined) status = "promoted"
-  else if (promotion?.job?.status === "failed" || promotion?.job?.status === "lost") status = "promotion-failed"
-  else if (promotion !== undefined) status = "promoting"
+  else if (
+    promotion?.job?.status === "completed" &&
+    (promotion.job.conclusion === "failure" || promotion.job.conclusion === "timed_out")
+  ) {
+    status = "promotion-failed"
+  } else if (promotion !== undefined) status = "promoting"
   else if (record.selection !== undefined) status = "selected"
   else {
     const values = Object.values(attempts)
     const terminal = values.every((attempt) => {
       if (!["passing", "rejected", "failed", "lost"].includes(attempt.status)) return false
-      if (attempt.runner?.status !== "passed") return true
+      if (attempt.runner?.status !== "completed" || attempt.runner.conclusion !== "success") return true
       return record.evaluators.every((evaluator) => {
         const latest = attempt.evaluations[evaluator.id]?.runs.at(-1)
         return latest !== undefined && Job.terminal(latest.job)
@@ -735,7 +760,7 @@ function attemptView(
   const evaluations = Object.fromEntries(
     record.evaluators.map((spec) => {
       const runs = evaluationJobs(state, record.id, attempt.id, spec.id).map((job, index): ContestEvaluationRun => {
-        if (job.status === "passed") {
+        if (job.status === "completed" && job.conclusion === "success") {
           return { generation: index + 1, job, result: EvaluatorResultSchema.parse(job.output) }
         }
         return { generation: index + 1, job }
@@ -780,17 +805,17 @@ function attemptStatus(
   if (bay === undefined || bay.status === "opening") return "preparing"
   if (bay.status !== "active") return "failed"
   if (runner === undefined) return "preparing"
-  if (runner.status === "requested") return "queued"
-  if (runner.status === "running") return "running"
+  if (runner.status === "queued") return "queued"
+  if (runner.status === "in_progress") return "running"
   if (runner.status === "waiting") return "waiting"
-  if (runner.status === "lost") return "lost"
-  if (runner.status === "failed" || output === undefined) return "failed"
+  if (runner.status === "completed" && runner.conclusion === "timed_out") return "lost"
+  if ((runner.status === "completed" && runner.conclusion !== "success") || output === undefined) return "failed"
   const heldOut = Object.values(evaluations).filter(({ authority }) => authority === "held-out")
   const latest = heldOut.map(({ runs }) => runs.at(-1))
-  if (latest.some((run) => run?.job.status === "lost")) return "lost"
-  if (latest.some((run) => run?.job.status === "failed")) return "failed"
+  if (latest.some((run) => run?.job.status === "completed" && run.job.conclusion === "timed_out")) return "lost"
+  if (latest.some((run) => run?.job.status === "completed" && run.job.conclusion !== "success")) return "failed"
   if (latest.some((run) => run?.job.status === "waiting")) return "waiting"
-  if (latest.some((run) => run?.job.status !== "passed")) return "evaluating"
+  if (latest.some((run) => run?.job.status !== "completed" || run.job.conclusion !== "success")) return "evaluating"
   return latest.some((run) => run?.result?.verdict !== "passed") ? "rejected" : "passing"
 }
 
@@ -852,11 +877,17 @@ function evaluationJobs(
 }
 
 function failedEvaluationVerdict(job: DeepReadonly<Job>): boolean {
-  return job.status === "passed" && EvaluatorResultSchema.parse(job.output).verdict !== "passed"
+  return (
+    job.status === "completed" &&
+    job.conclusion === "success" &&
+    EvaluatorResultSchema.parse(job.output).verdict !== "passed"
+  )
 }
 
 function passedRunnerOutput(job: DeepReadonly<Job> | undefined): AttemptRunOutput | undefined {
-  return job?.status === "passed" ? AttemptRunOutputSchema.parse(job.output) : undefined
+  return job?.status === "completed" && job.conclusion === "success"
+    ? AttemptRunOutputSchema.parse(job.output)
+    : undefined
 }
 
 function exactPR(pr: DeepReadonly<PR>, pin: DeepReadonly<z.infer<typeof GitRevisionPinSchema>>, base: string): boolean {
@@ -864,7 +895,7 @@ function exactPR(pr: DeepReadonly<PR>, pin: DeepReadonly<z.infer<typeof GitRevis
     pr.bay === pin.bay &&
     pr.branch === pin.branch &&
     pr.base === base &&
-    pr.headSha.toLowerCase() === pin.commit.toLowerCase()
+    prHead(pr).toLowerCase() === pin.commit.toLowerCase()
   )
 }
 
@@ -883,7 +914,7 @@ function runnerJobDef(runner: ContestRunnerDef): RunnerJobDef {
     output: AttemptRunOutputSchema,
     async execute(input, context) {
       const result = await runner.run(input, context)
-      if (result.status !== "passed") return result
+      if (result.status !== "completed" || result.conclusion !== "success") return result
       const output = AttemptRunOutputSchema.parse(result.output)
       const expectedRef = `refs/yrd/attempts/${input.contest}/${input.attempt}`
       if (output.pin.bay !== input.bay.id || output.pin.branch !== input.bay.branch || output.pin.ref !== expectedRef) {
@@ -892,7 +923,7 @@ function runnerJobDef(runner: ContestRunnerDef): RunnerJobDef {
       if (input.bay.baseSha !== undefined && output.pin.baseSha !== input.bay.baseSha) {
         return failed("attempt-base-mismatch", "runner returned a pin from a different base commit")
       }
-      return { status: "passed", output }
+      return { status: "completed", conclusion: "success", output }
     },
   })
 }
@@ -921,7 +952,11 @@ function promotionJobDef(git: ContestGit): PromotionJobDef {
         if (resolved?.toLowerCase() !== input.pin.commit.toLowerCase()) {
           return failed("pin-moved", `Git ref '${input.pin.ref}' resolves to '${resolved ?? "missing"}'`)
         }
-        return { status: "passed", output: { commit: input.pin.commit.toLowerCase() } }
+        return {
+          status: "completed",
+          conclusion: "success",
+          output: { commit: input.pin.commit.toLowerCase() },
+        }
       } catch (error) {
         return failed("pin-resolution-failed", error)
       }
@@ -930,7 +965,11 @@ function promotionJobDef(git: ContestGit): PromotionJobDef {
 }
 
 function failed(code: string, cause: unknown): JobResult<never> {
-  return { status: "failed", error: { code, message: cause instanceof Error ? cause.message : String(cause) } }
+  return {
+    status: "completed",
+    conclusion: "failure",
+    error: { code, message: cause instanceof Error ? cause.message : String(cause) },
+  }
 }
 
 function definitionMap<Value extends object, Key extends keyof Value>(

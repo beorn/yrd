@@ -330,7 +330,12 @@ describe("Yrd domain objects", () => {
       events: {
         "fact/recorded": z.object({ value: z.number().int(), identity: z.string().min(1) }).strict(),
       },
-      replayEvents: { "fact/recorded": z.object({ value: z.number().int() }).strict() },
+      replayEvents: {
+        "fact/recorded": z
+          .object({ value: z.number().int() })
+          .strict()
+          .transform((fact) => ({ ...fact, identity: "legacy-v0" })),
+      },
       project: projectFact,
     })
 
@@ -348,6 +353,9 @@ describe("Yrd domain objects", () => {
       inject: { journal, id: ids("current-command", "current-event") },
     })
     expect(reader.state().facts.total).toBe(2)
+    await expect(Array.fromAsync(reader.events())).resolves.toMatchObject([
+      { name: "fact/recorded", data: { value: 2, identity: "legacy-v0" } },
+    ])
     await expect(reader.dispatch(reader.commands.fact.record, { value: 3 })).rejects.toThrow()
     expect(reader.state().facts.total).toBe(2)
     await reader.dispatch(reader.commands.fact.record, { value: 3, identity: "current-v1" })

@@ -1,5 +1,5 @@
 import type { DeepReadonly } from "@yrd/core"
-import { Queues, type QueueRecord, type QueueRunId, type QueuesState } from "./model.ts"
+import { Queues, type QueueRecord, type QueuesState, type RunId } from "./model.ts"
 import {
   emptyQueueProjectionIndex,
   indexQueueStart,
@@ -10,8 +10,8 @@ import {
 
 const TERMINAL_QUEUE_WINDOW = 512
 
-export function queueRetentionRoot(queues: DeepReadonly<QueuesState>, id: QueueRunId): QueueRunId {
-  const seen = new Set<QueueRunId>()
+export function queueRetentionRoot(queues: DeepReadonly<QueuesState>, id: RunId): RunId {
+  const seen = new Set<RunId>()
   let root = id
   while (true) {
     if (seen.has(root)) throw new Error(`yrd: queue retention ancestry for '${id}' is cyclic`)
@@ -28,17 +28,17 @@ export function queueRetentionRoot(queues: DeepReadonly<QueuesState>, id: QueueR
  * complete for everything else. */
 export function compactQueuesState(
   queues: DeepReadonly<QueuesState>,
-  protectedRoots: ReadonlySet<QueueRunId> = new Set(),
+  protectedRoots: ReadonlySet<RunId> = new Set(),
 ): QueuesState {
   if (Object.keys(queues.retention.terminalOrder).length <= TERMINAL_QUEUE_WINDOW) return queues as QueuesState
   const records = Queues.values(queues)
-  const trees = new Map<QueueRunId, QueueRecord[]>()
+  const trees = new Map<RunId, QueueRecord[]>()
   for (const record of records) {
     const root = queueRetentionRoot(queues, record.id)
     trees.set(root, [...(trees.get(root) ?? []), record])
   }
-  const terminalRoots: Array<Readonly<{ root: QueueRunId; order: number }>> = []
-  const retainedRoots = new Set<QueueRunId>()
+  const terminalRoots: Array<Readonly<{ root: RunId; order: number }>> = []
+  const retainedRoots = new Set<RunId>()
   for (const root of trees.keys()) {
     const order = queues.retention.terminalOrder[root]
     if (order === undefined || protectedRoots.has(root)) retainedRoots.add(root)

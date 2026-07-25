@@ -18,14 +18,17 @@ import { computed, type ReadSignal } from "@silvery/signals"
 import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
 import {
-  JobErrorSchema,
   JobRequestSchema,
   JobWaitingSchema,
+  JobErrorSchema,
   jobTerminalResultSchema,
   type JobDef,
+  type JobConclusion,
+  type JobError,
   type JobRequest,
   type JobResult,
   type JobWaiting,
+  type RuntimeContext,
 } from "./job.ts"
 
 const IdSchema = z.string().trim().min(1)
@@ -43,7 +46,9 @@ const JobBaseSchema = z
     changedAt: TimestampSchema,
   })
   .strict()
-const JobExecutionSchema = z.object({ startedAt: TimestampSchema, runner: IdSchema }).strict()
+const JobExecutionSchema = z
+  .object({ startedAt: TimestampSchema, runner: IdSchema, context: IdSchema.optional() })
+  .strict()
 const JobEvidenceSchema = z
   .object({
     token: IdSchema.optional(),
@@ -56,43 +61,140 @@ const JobEvidenceSchema = z
 const ExecutingJobBaseSchema = JobBaseSchema.extend(JobExecutionSchema.shape)
 const EvidencedJobBaseSchema = ExecutingJobBaseSchema.extend(JobEvidenceSchema.shape)
 const JobSchema = z.union([
-  JobBaseSchema.extend({ status: z.literal("requested") }).strict(),
-  ExecutingJobBaseSchema.extend({ status: z.literal("running"), leaseExpiresAt: TimestampSchema }).strict(),
+  JobBaseSchema.extend({ status: z.literal("queued") }).strict(),
+  ExecutingJobBaseSchema.extend({ status: z.literal("in_progress"), leaseExpiresAt: TimestampSchema }).strict(),
   EvidencedJobBaseSchema.extend({ status: z.literal("waiting"), token: IdSchema }).strict(),
   EvidencedJobBaseSchema.extend({
-    status: z.literal("passed"),
+    status: z.literal("completed"),
+    conclusion: z.literal("success"),
     finishedAt: TimestampSchema,
     output: JsonSchema,
   }).strict(),
   EvidencedJobBaseSchema.extend({
-    status: z.literal("failed"),
+    status: z.literal("completed"),
+    conclusion: z.literal("failure"),
     finishedAt: TimestampSchema,
     error: JobErrorSchema,
     output: JsonSchema.optional(),
   }).strict(),
   ExecutingJobBaseSchema.extend({
-    status: z.literal("lost"),
+    status: z.literal("completed"),
+    conclusion: z.literal("timed_out"),
     finishedAt: TimestampSchema,
     lostReason: z.string().min(1),
   }).strict(),
   JobBaseSchema.extend({
-    status: z.literal("canceled"),
+    status: z.literal("completed"),
+    conclusion: z.literal("skipped"),
+    finishedAt: TimestampSchema,
+  }).strict(),
+  JobBaseSchema.extend({
+    status: z.literal("completed"),
+    conclusion: z.literal("cancelled"),
     finishedAt: TimestampSchema,
     canceledBy: IdSchema,
     cancelReason: z.string().min(1),
   }).strict(),
   EvidencedJobBaseSchema.extend({
-    status: z.literal("canceled"),
+    status: z.literal("completed"),
+    conclusion: z.literal("cancelled"),
     finishedAt: TimestampSchema,
     canceledBy: IdSchema,
     cancelReason: z.string().min(1),
   }).strict(),
 ])
+const LegacyJobSchema = z.union([
+  JobBaseSchema.extend({ status: z.literal("requested") })
+    .strict()
+    .transform((job) => ({ ...job, status: "queued" as const })),
+  ExecutingJobBaseSchema.extend({ status: z.literal("running"), leaseExpiresAt: TimestampSchema })
+    .strict()
+    .transform((job) => ({ ...job, status: "in_progress" as const })),
+  EvidencedJobBaseSchema.extend({
+    status: z.literal("passed"),
+    finishedAt: TimestampSchema,
+    output: JsonSchema,
+  })
+    .strict()
+    .transform((job) => ({ ...job, status: "completed" as const, conclusion: "success" as const })),
+  EvidencedJobBaseSchema.extend({
+    status: z.literal("failed"),
+    finishedAt: TimestampSchema,
+    error: JobErrorSchema,
+    output: JsonSchema.optional(),
+  })
+    .strict()
+    .transform((job) => ({ ...job, status: "completed" as const, conclusion: "failure" as const })),
+  ExecutingJobBaseSchema.extend({
+    status: z.literal("lost"),
+    finishedAt: TimestampSchema,
+    lostReason: z.string().min(1),
+  })
+    .strict()
+    .transform((job) => ({ ...job, status: "completed" as const, conclusion: "timed_out" as const })),
+  JobBaseSchema.extend({
+    status: z.literal("canceled"),
+    finishedAt: TimestampSchema,
+    canceledBy: IdSchema,
+    cancelReason: z.string().min(1),
+  })
+    .strict()
+    .transform((job) => ({ ...job, status: "completed" as const, conclusion: "cancelled" as const })),
+  EvidencedJobBaseSchema.extend({
+    status: z.literal("canceled"),
+    finishedAt: TimestampSchema,
+    canceledBy: IdSchema,
+    cancelReason: z.string().min(1),
+  })
+    .strict()
+    .transform((job) => ({ ...job, status: "completed" as const, conclusion: "cancelled" as const })),
+])
+const ReplayJobSchema = z.union([JobSchema, LegacyJobSchema])
 
-export type Job = DeepReadonly<z.infer<typeof JobSchema>>
-type JobBase = DeepReadonly<z.infer<typeof JobBaseSchema>>
-type JobExecution = DeepReadonly<z.infer<typeof JobExecutionSchema>>
-type JobEvidence = DeepReadonly<z.infer<typeof JobEvidenceSchema>>
+type JobBase = Readonly<z.infer<typeof JobBaseSchema>>
+
+type JobExecution = Readonly<{
+  startedAt: string
+  runner: string
+  context?: string
+}>
+
+type JobEvidence = Readonly<{
+  token?: string
+  url?: string
+  detail?: string
+  artifacts?: readonly JsonValue[]
+  checkpoint?: JsonValue
+}>
+
+type JobCancellation = Readonly<{
+  status: "completed"
+  conclusion: "cancelled"
+  finishedAt: string
+  canceledBy: string
+  cancelReason: string
+}>
+
+export type Job =
+  | (JobBase & { status: "queued" })
+  | (JobBase & JobExecution & { status: "in_progress"; leaseExpiresAt: string })
+  | (JobBase & JobExecution & JobEvidence & { status: "waiting"; token: string })
+  | (JobBase &
+      JobExecution &
+      JobEvidence & { status: "completed"; conclusion: "success"; finishedAt: string; output: JsonValue })
+  | (JobBase &
+      JobExecution &
+      JobEvidence & {
+        status: "completed"
+        conclusion: "failure"
+        finishedAt: string
+        error: JobError
+        output?: JsonValue
+      })
+  | (JobBase & JobExecution & { status: "completed"; conclusion: "timed_out"; finishedAt: string; lostReason: string })
+  | (JobBase & { status: "completed"; conclusion: "skipped"; finishedAt: string })
+  | (JobBase & JobCancellation)
+  | (JobBase & JobExecution & JobEvidence & JobCancellation)
 
 function jobResultAttributes(definition: JobDef, result: Job, observed?: JobResult): Readonly<Record<string, unknown>> {
   const projected = observed === undefined ? undefined : definition.observeResult?.(observed)
@@ -100,9 +202,10 @@ function jobResultAttributes(definition: JobDef, result: Job, observed?: JobResu
     ...projected,
     status: result.status,
     // Surface the failed Job's canonical error code so a human row can render
-    // `err=<slug>` — the failing step owns the single ERROR line. Definition
+    // `err=<slug>` — the failing step owns the single ERROR record. Definition
     // projections cannot replace this durable status/error truth.
-    ...(result.status === "failed" ? { error: result.error } : {}),
+    ...(result.status === "completed" ? { conclusion: result.conclusion } : {}),
+    ...(result.status === "completed" && result.conclusion === "failure" ? { error: result.error } : {}),
   }
 }
 
@@ -210,7 +313,7 @@ function terminalizeUnstartedLegacyQueueFailure(state: DeepReadonly<JobsState>, 
 
   let byId: Record<string, Job> | undefined
   for (const [id, job] of Object.entries(state.byId)) {
-    if (queueJobRun(job.key) !== run || job.status !== "requested") continue
+    if (queueJobRun(job.key) !== run || job.status !== "queued") continue
     byId ??= { ...state.byId } as Record<string, Job>
     // Old Queue writers could journal the terminal failure without the matching
     // Job cancellation. Derive that missing terminal projection from immutable
@@ -372,11 +475,29 @@ export function compactJobsState(state: DeepReadonly<JobsState>): JobsState {
 }
 
 const RestoreJobSchema = z.object({ job: JobSchema, retention: z.literal("detached-queue").optional() }).strict()
+const ReplayRestoreJobSchema = z
+  .object({ job: ReplayJobSchema, retention: z.literal("detached-queue").optional() })
+  .strict()
 type RestoreJob = Readonly<z.infer<typeof RestoreJobSchema>>
 
-const TerminalResultSchema = z.discriminatedUnion("status", [
-  z.object({ status: z.literal("passed"), output: JsonSchema }).strict(),
-  z.object({ status: z.literal("failed"), error: JobErrorSchema, output: JsonSchema.optional() }).strict(),
+const TerminalResultSchema = jobTerminalResultSchema(JsonSchema)
+const LegacyTerminalResultSchema = z.union([
+  z
+    .object({ status: z.literal("passed"), output: JsonSchema })
+    .strict()
+    .transform((result) => ({
+      ...result,
+      status: "completed" as const,
+      conclusion: "success" as const,
+    })),
+  z
+    .object({ status: z.literal("failed"), error: JobErrorSchema, output: JsonSchema.optional() })
+    .strict()
+    .transform((result) => ({
+      ...result,
+      status: "completed" as const,
+      conclusion: "failure" as const,
+    })),
 ])
 
 const CancelJobInputSchema = z
@@ -389,6 +510,16 @@ const CancelJobInputSchema = z
   .strict()
 export type CancelJobInput = Readonly<z.infer<typeof CancelJobInputSchema>>
 
+const FinishJobTransitionBaseSchema = z
+  .object({
+    type: z.literal("finish"),
+    id: IdSchema,
+    attempt: AttemptSchema,
+    runner: IdSchema,
+    token: IdSchema.optional(),
+  })
+  .strict()
+
 export const JobTransitionSchema = z.discriminatedUnion("type", [
   z
     .object({
@@ -396,6 +527,7 @@ export const JobTransitionSchema = z.discriminatedUnion("type", [
       id: IdSchema,
       attempt: AttemptSchema,
       runner: IdSchema,
+      context: IdSchema.optional(),
       leaseExpiresAt: TimestampSchema,
     })
     .strict(),
@@ -416,16 +548,7 @@ export const JobTransitionSchema = z.discriminatedUnion("type", [
       runner: IdSchema,
     })
     .strict(),
-  z
-    .object({
-      type: z.literal("finish"),
-      id: IdSchema,
-      attempt: AttemptSchema,
-      runner: IdSchema,
-      token: IdSchema.optional(),
-      result: TerminalResultSchema,
-    })
-    .strict(),
+  FinishJobTransitionBaseSchema.extend({ result: TerminalResultSchema }).strict(),
   z
     .object({
       type: z.literal("lose"),
@@ -439,6 +562,10 @@ export const JobTransitionSchema = z.discriminatedUnion("type", [
   CancelJobInputSchema.extend({ type: z.literal("cancel") }).strict(),
   z.object({ type: z.literal("retry"), id: IdSchema }).strict(),
 ])
+const ReplayJobTransitionSchema = z.union([
+  JobTransitionSchema,
+  FinishJobTransitionBaseSchema.extend({ result: LegacyTerminalResultSchema }).strict(),
+])
 export type JobTransition = z.infer<typeof JobTransitionSchema>
 
 export const Job = Object.freeze({
@@ -449,7 +576,7 @@ export const Job = Object.freeze({
       revision: request.revision,
       input: request.input,
       ...(request.key === undefined ? {} : { key: request.key }),
-      status: "requested",
+      status: "queued",
       attempt: 0,
       requestedAt: at,
       changedAt: at,
@@ -461,28 +588,29 @@ export const Job = Object.freeze({
 
     switch (change.type) {
       case "start":
-        requireStatus(current, "requested", "requested")
+        requireStatus(current, "queued", "queued")
         if (change.attempt !== current.attempt + 1) {
           throw new Error(`yrd: job '${current.id}' started attempt ${change.attempt} after attempt ${current.attempt}`)
         }
         return {
           ...jobBase(current),
-          status: "running",
+          status: "in_progress",
           attempt: change.attempt,
           changedAt: at,
           startedAt: at,
           runner: change.runner,
+          ...(change.context === undefined ? {} : { context: change.context }),
           leaseExpiresAt: change.leaseExpiresAt,
         }
 
       case "heartbeat":
         requireOwner(current, change)
-        requireStatus(current, "running", "running")
+        requireStatus(current, "in_progress", "in_progress")
         return { ...current, changedAt: at, leaseExpiresAt: change.leaseExpiresAt }
 
       case "wait":
         requireOwner(current, change)
-        requireStatus(current, "running", "running")
+        requireStatus(current, "in_progress", "in_progress")
         return {
           ...execution(current),
           ...evidence(change),
@@ -493,7 +621,7 @@ export const Job = Object.freeze({
 
       case "finish": {
         requireOwner(current, change)
-        requireStatus(current, "running or waiting", "running", "waiting")
+        requireStatus(current, "in_progress or waiting", "in_progress", "waiting")
         if (current.status === "waiting" && change.token !== current.token) {
           throw new Error(`yrd: job '${current.id}' token mismatch`)
         }
@@ -503,11 +631,12 @@ export const Job = Object.freeze({
           changedAt: at,
           finishedAt: at,
         }
-        return change.result.status === "passed"
-          ? { ...finished, status: "passed", output: change.result.output }
+        return change.result.conclusion === "success"
+          ? { ...finished, status: "completed", conclusion: "success", output: change.result.output }
           : {
               ...finished,
-              status: "failed",
+              status: "completed",
+              conclusion: "failure",
               error: change.result.error,
               ...(change.result.output === undefined ? {} : { output: change.result.output }),
             }
@@ -515,13 +644,14 @@ export const Job = Object.freeze({
 
       case "lose":
         requireOwner(current, change)
-        requireStatus(current, "running", "running")
+        requireStatus(current, "in_progress", "in_progress")
         if (current.leaseExpiresAt !== change.leaseExpiresAt) {
           throw new Error(`yrd: job '${current.id}' lease changed before recovery`)
         }
         return {
           ...execution(current),
-          status: "lost",
+          status: "completed",
+          conclusion: "timed_out",
           changedAt: at,
           finishedAt: at,
           lostReason: change.reason,
@@ -529,11 +659,12 @@ export const Job = Object.freeze({
 
       case "cancel":
         requireAttempt(current, change)
-        requireStatus(current, "requested, running or waiting", "requested", "running", "waiting")
+        requireStatus(current, "queued, in_progress or waiting", "queued", "in_progress", "waiting")
         return {
-          ...(current.status === "requested" ? jobBase(current) : execution(current)),
+          ...(current.status === "queued" ? jobBase(current) : execution(current)),
           ...(current.status === "waiting" ? evidence(current) : {}),
-          status: "canceled",
+          status: "completed",
+          conclusion: "cancelled",
           changedAt: at,
           finishedAt: at,
           canceledBy: change.by,
@@ -541,8 +672,8 @@ export const Job = Object.freeze({
         }
 
       case "retry":
-        requireStatus(current, "lost or failed", "lost", "failed")
-        return { ...jobBase(current), status: "requested", changedAt: at }
+        requireConclusion(current, "timed_out or failure", "timed_out", "failure")
+        return { ...jobBase(current), status: "queued", changedAt: at }
     }
   },
 
@@ -555,14 +686,9 @@ export const Job = Object.freeze({
   },
 })
 
-const TERMINAL_JOB_STATUSES: ReadonlySet<Job["status"]> = new Set<Job["status"]>([
-  "passed",
-  "failed",
-  "lost",
-  "canceled",
-])
+const TERMINAL_JOB_STATUSES: ReadonlySet<Job["status"]> = new Set<Job["status"]>(["completed"])
 
-/** A Job status is terminal once no further transition can run: passed/failed/lost/canceled. */
+/** A Job status is terminal once it is completed; conclusion records how it ended. */
 export function isTerminalJobStatus(status: Job["status"]): boolean {
   return TERMINAL_JOB_STATUSES.has(status)
 }
@@ -591,10 +717,10 @@ export class JobStateConflict extends Error {
 
 /**
  * True when an error is a JobStateConflict whose Job had already reached a
- * terminal status — i.e. a concurrent writer settled (canceled/passed/failed/
- * lost) the Job between a runtime's snapshot and its action. This is a normal,
+ * terminal status — i.e. a concurrent writer completed the Job between a
+ * runtime's snapshot and its action. This is a normal,
  * losable race for a long-lived resident runner: skip and continue. A conflict
- * against a still-live status (requested/running/waiting) is NOT losable — it
+ * against a still-live status (queued/in_progress/waiting) is NOT losable — it
  * signals a real invalid transition and must keep propagating (fail-loud).
  */
 export function isConcurrentSettlementConflict(error: unknown): error is JobStateConflict {
@@ -606,6 +732,7 @@ export type RunJobOptions = Readonly<{
   leaseMs: number
   heartbeatMs?: number
   now?: () => number
+  context?: RuntimeContext
 }>
 
 export type RunManyJobOptions = RunJobOptions & Readonly<{ concurrency?: number }>
@@ -702,7 +829,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
           const request = JobRequestSchema.parse(applied.data)
           if (request.key === key) bind(applied.id)
         } else if (applied.name === "job/restored") {
-          const restored = RestoreJobSchema.parse(applied.data)
+          const restored = ReplayRestoreJobSchema.parse(applied.data)
           if (restored.job.key === key) bind(restored.job.id)
         }
       }
@@ -757,9 +884,11 @@ export function createJobs(options: CreateJobsOptions): Jobs {
       leaseMs: runOptions.leaseMs,
       heartbeatMs: runOptions.heartbeatMs,
     })
+    const executionContext = runOptions.context
+    const contextId = executionContext === undefined ? undefined : IdSchema.parse(executionContext.id)
     const heartbeatMs = parsed.heartbeatMs ?? Math.max(1, Math.floor(parsed.leaseMs / 3))
     const requested = current(id)
-    requireStatus(requested, "requested", "requested")
+    requireStatus(requested, "queued", "queued")
     const installed = definitionFor(requested)
     const attempt = requested.attempt + 1
     const now = runOptions.now ?? Date.now
@@ -777,9 +906,9 @@ export function createJobs(options: CreateJobsOptions): Jobs {
           leaseMs: parsed.leaseMs,
         },
         outcome: (result) =>
-          result.status === "passed"
+          result.status === "completed" && result.conclusion === "success"
             ? "succeeded"
-            : result.status === "running" || result.status === "waiting"
+            : result.status === "in_progress" || result.status === "waiting" || result.status === "queued"
               ? "progress"
               : "failed",
         resultAttributes: (result) => jobResultAttributes(installed, result, observedResult),
@@ -790,10 +919,11 @@ export function createJobs(options: CreateJobsOptions): Jobs {
           id,
           attempt,
           runner: parsed.runner,
+          ...(contextId === undefined ? {} : { context: contextId }),
           leaseExpiresAt: lease(now, parsed.leaseMs),
         })
         const started = current(id)
-        if (!Job.owns(started, attempt, parsed.runner, "running")) return started
+        if (!Job.owns(started, attempt, parsed.runner, "in_progress")) return started
 
         const scope = options.scope.child(`job:${id}:${attempt}`)
         activeScopes.set(id, { attempt, scope })
@@ -807,13 +937,14 @@ export function createJobs(options: CreateJobsOptions): Jobs {
                 attempt,
                 runner: parsed.runner,
                 signal: progress.signal,
+                ...(executionContext === undefined ? {} : { context: executionContext }),
                 observeProgress: progress.observe,
                 reportProgress: progress.report,
               }),
             heartbeatMs,
             async (renew) => {
               const active = current(id)
-              if (active.status !== "running" || !Job.owns(active, attempt, parsed.runner, "running")) {
+              if (active.status !== "in_progress" || !Job.owns(active, attempt, parsed.runner, "in_progress")) {
                 throw new Error(`yrd: job '${id}' lost execution ownership`)
               }
               if (!renew) {
@@ -837,7 +968,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
         }
 
         const active = current(id)
-        if (!Job.owns(active, attempt, parsed.runner, "running")) return active
+        if (!Job.owns(active, attempt, parsed.runner, "in_progress")) return active
         const result =
           outcome.heartbeatError === undefined
             ? outcome.result
@@ -904,6 +1035,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
         leaseMs: runManyOptions.leaseMs,
         ...(runManyOptions.heartbeatMs === undefined ? {} : { heartbeatMs: runManyOptions.heartbeatMs }),
         ...(runManyOptions.now === undefined ? {} : { now: runManyOptions.now }),
+        ...(runManyOptions.context === undefined ? {} : { context: runManyOptions.context }),
       }
       const results: Job[] = []
       let next = 0
@@ -913,7 +1045,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
           const id = ids[index]
           if (id === undefined) break
           const job = current(id)
-          results[index] = job.status === "requested" ? await run(id, runOptions) : job
+          results[index] = job.status === "queued" ? await run(id, runOptions) : job
         }
       }
       await Promise.all(Array.from({ length: Math.min(concurrency, ids.length) }, worker))
@@ -945,7 +1077,8 @@ export function createJobs(options: CreateJobsOptions): Jobs {
             revision: job.revision,
             completion: true,
           },
-          outcome: (finished) => (finished.status === "passed" ? "succeeded" : "failed"),
+          outcome: (finished) =>
+            finished.status === "completed" && finished.conclusion === "success" ? "succeeded" : "failed",
           resultAttributes: (finished) => jobResultAttributes(installedDef, finished, result),
         },
         async () => {
@@ -968,7 +1101,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
       if (live === undefined) {
         const historical = archived("job", id)
         if (historical === undefined) throw new Error(`yrd: no job '${id}'`)
-        requireStatus(historical, "lost or failed", "lost", "failed")
+        requireConclusion(historical, "timed_out or failure", "timed_out", "failure")
         await options.restore(historical, queueJobRun(historical.key) === undefined ? undefined : "detached-queue")
         return current(id)
       }
@@ -990,7 +1123,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
       const deadRunner = parsed.runner
       const recovered: string[] = []
       for (const job of Object.values(state().byId)) {
-        if (job.status !== "running") continue
+        if (job.status !== "in_progress") continue
         const named = deadRunner !== undefined && job.runner === deadRunner
         const expired = Date.parse(job.leaseExpiresAt) <= cutoff
         if (!named && !expired) continue
@@ -1067,7 +1200,7 @@ export function withJobs(options: JobsOptions = {}) {
       if (args.job.key !== undefined && state.jobs.byKey[args.job.key] !== undefined) {
         throw new Error(`yrd: job key '${args.job.key}' is already in use`)
       }
-      requireStatus(args.job, "lost or failed", "lost", "failed")
+      requireConclusion(args.job, "timed_out or failure", "timed_out", "failure")
       return { events: [event("job/restored", args)] }
     },
   })
@@ -1083,7 +1216,11 @@ export function withJobs(options: JobsOptions = {}) {
         "job/transitioned": JobTransitionSchema,
         "job/restored": RestoreJobSchema,
       },
-      projectionVersion: "jobs-v7-legacy-failure-retention",
+      replayEvents: {
+        "job/transitioned": ReplayJobTransitionSchema,
+        "job/restored": ReplayRestoreJobSchema,
+      },
+      projectionVersion: "jobs-v8-target-model-retention",
       project: projectJobs,
       compact: (state) => ({ jobs: compactJobsState(state.jobs) }),
       create(yrd) {
@@ -1186,7 +1323,7 @@ function projectJobs(state: DeepReadonly<{ jobs: JobsState }>, applied: Event): 
     }
   }
   if (applied.name === "job/restored") {
-    const restoredFact = RestoreJobSchema.parse(applied.data)
+    const restoredFact = ReplayRestoreJobSchema.parse(applied.data)
     const archived = restoredFact.job
     const current = state.jobs.byId[archived.id]
     if (current !== undefined && JSON.stringify(JobSchema.parse(current)) !== JSON.stringify(archived)) {
@@ -1206,7 +1343,7 @@ function projectJobs(state: DeepReadonly<{ jobs: JobsState }>, applied: Event): 
     }
   }
   if (applied.name !== "job/transitioned") return state
-  const change = applied.data as JobTransition
+  const change = ReplayJobTransitionSchema.parse(applied.data)
   const current = state.jobs.byId[change.id]
   const projected = Job.apply(current, change, applied.ts)
   const byId = { ...state.jobs.byId, [change.id]: projected }
@@ -1319,7 +1456,8 @@ function settlement(id: string, attempt: number, runner: string, result: JobResu
 
 function failed(code: string, error: unknown): JobResult<never> {
   return {
-    status: "failed",
+    status: "completed",
+    conclusion: "failure",
     error: { code, message: error instanceof Error ? error.message : String(error) },
   }
 }
@@ -1334,7 +1472,12 @@ function jobBase(job: Job): JobBase {
 }
 
 function execution(job: Job & JobExecution): JobBase & JobExecution {
-  return { ...jobBase(job), startedAt: job.startedAt, runner: job.runner }
+  return {
+    ...jobBase(job),
+    startedAt: job.startedAt,
+    runner: job.runner,
+    ...(job.context === undefined ? {} : { context: job.context }),
+  }
 }
 
 function evidence(source: JobEvidence): JobEvidence {
@@ -1370,9 +1513,20 @@ function requireStatus<Status extends Job["status"]>(
   }
 }
 
-function sameLease(left: Job, right: Extract<Job, { status: "running" }>): boolean {
+function requireConclusion<Conclusion extends JobConclusion>(
+  job: Job,
+  expected: string,
+  ...allowed: readonly Conclusion[]
+): asserts job is Extract<Job, { status: "completed"; conclusion: Conclusion }> {
+  if (job.status !== "completed" || !(allowed as readonly JobConclusion[]).includes(job.conclusion)) {
+    const actual = job.status === "completed" ? `${job.status}+${job.conclusion}` : job.status
+    throw new JobStateConflict(job.id, job.status, `${expected}; actual ${actual}`)
+  }
+}
+
+function sameLease(left: Job, right: Extract<Job, { status: "in_progress" }>): boolean {
   return (
-    left.status === "running" &&
+    left.status === "in_progress" &&
     left.attempt === right.attempt &&
     left.runner === right.runner &&
     left.leaseExpiresAt === right.leaseExpiresAt

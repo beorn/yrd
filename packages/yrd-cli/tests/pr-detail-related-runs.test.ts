@@ -2,8 +2,8 @@
 // @level l1
 // @consumer @yrd/cli
 
-import type { PR } from "@yrd/bay"
-import type { QueueRun } from "@yrd/queue"
+import { prBaseSha, prHead, prRevisionNumber, type PR } from "@yrd/bay"
+import type { Run } from "@yrd/queue"
 import { describe, expect, test } from "vitest"
 import { prDetailData } from "../src/queue-status-view.tsx"
 
@@ -17,11 +17,9 @@ function fixturePr(id: string, submittedAt: string): PR {
     name: `Fixture ${id}`,
     branch: `topic/${id.toLocaleLowerCase()}`,
     base: "main",
-    status: "submitted",
-    revision: 1,
-    headSha,
-    baseSha: BASE_SHA,
-    revisions: [{ revision: 1, headSha, base: "main", baseSha: BASE_SHA, pushedAt: submittedAt, submittedAt }],
+    state: "open",
+    merged: false,
+    revs: [{ n: 1, head: headSha, base: "main", baseSha: BASE_SHA, pushedAt: submittedAt, submittedAt }],
     submittedAt,
     reviews: [],
     comments: [],
@@ -29,33 +27,43 @@ function fixturePr(id: string, submittedAt: string): PR {
   }
 }
 
-function fixtureRun(id: string, prs: readonly PR[], status: QueueRun["status"], startedAt: string): QueueRun {
+function fixtureRun(
+  id: string,
+  prs: readonly PR[],
+  status: Run["status"],
+  startedAt: string,
+  conclusion?: Run["conclusion"],
+): Run {
   return {
     id,
+    queueId: "Q:main",
+    candidateId: `C:${id}`,
     prs: prs.map((pr) => ({
       id: pr.id,
       name: pr.name,
       branch: pr.branch,
       base: pr.base,
-      revision: pr.revision,
-      headSha: pr.headSha,
-      baseSha: pr.baseSha,
+      revision: prRevisionNumber(pr),
+      headSha: prHead(pr),
+      baseSha: prBaseSha(pr),
     })),
     base: "main",
+    jobs: [],
     steps: [],
     startedAt,
     cursor: 0,
     shape: { results: {} },
     status,
+    ...(conclusion === undefined ? {} : { conclusion }),
   }
 }
 
 describe("prDetailData related runs", () => {
   const pr1 = fixturePr("PR1", "2026-07-13T09:00:00.000Z")
   const pr2 = fixturePr("PR2", "2026-07-13T09:05:00.000Z")
-  const pr1RetryRun = fixtureRun("R1", [pr1], "failed", "2026-07-13T10:00:00.000Z")
-  const pr2Run = fixtureRun("R2", [pr2], "failed", "2026-07-13T10:30:00.000Z")
-  const pr1LatestRun = fixtureRun("R3", [pr1], "running", "2026-07-13T11:00:00.000Z")
+  const pr1RetryRun = fixtureRun("R1", [pr1], "completed", "2026-07-13T10:00:00.000Z", "failure")
+  const pr2Run = fixtureRun("R2", [pr2], "completed", "2026-07-13T10:30:00.000Z", "failure")
+  const pr1LatestRun = fixtureRun("R3", [pr1], "in_progress", "2026-07-13T11:00:00.000Z")
   const runs = [pr1RetryRun, pr2Run, pr1LatestRun]
 
   test("includes only runs the PR is a member of, keeping order", () => {
