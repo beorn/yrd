@@ -54,6 +54,16 @@ const authoredGitlinksEnv = { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITL
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 type Checked = AddStepResult<PRShape, "check", GitCheckResultEvidence>
 
+function expectNonInteractiveRebases(commands: readonly (readonly string[])[]): void {
+  const editorCapable = commands.filter((command) => !command.includes("--abort"))
+  expect(editorCapable.length).toBeGreaterThan(0)
+  for (const command of editorCapable) {
+    const rebase = command.indexOf("rebase")
+    expect(rebase).toBeGreaterThan(1)
+    expect(command.slice(rebase - 2, rebase + 1), command.join(" ")).toEqual(["-c", "core.editor=true", "rebase"])
+  }
+}
+
 function prFacts(pr: PR | undefined) {
   if (pr === undefined) throw new Error("expected PR")
   const revision = currentPRRev(pr)
@@ -672,7 +682,16 @@ describe("Queue command adapters", () => {
     expect(rawDiff).toContain("+beta")
 
     await using process = createProcess()
-    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+    const rebaseCommands: string[][] = []
+    const capturingProcess: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "git" && request.argv.includes("rebase")) {
+          rebaseCommands.push([...request.argv])
+        }
+        return process.run(request)
+      },
+    }
+    const result = await createGitPRRecutter({ inject: { process: capturingProcess }, repo }).recut({
       id: "PR1",
       branch: "issue/payload",
       base: "main",
@@ -683,6 +702,7 @@ describe("Queue command adapters", () => {
 
     expect(result.patchId).toMatch(/^[0-9a-f]{40}$/u)
     expect(await git(repo, ["show", `${result.headSha}:payload.dat`])).toBe("beta")
+    expectNonInteractiveRebases(rebaseCommands)
   })
 
   it("certifies the raw carrier object when a local replacement ref is present", async () => {
@@ -844,8 +864,12 @@ describe("Queue command adapters", () => {
     await git(repo, ["submodule", "update", "--init", "--recursive"])
     await using delegate = createProcess()
     let afterRebase: ((path: string) => Promise<void>) | undefined
+    const rebaseCommands: string[][] = []
     const process = {
       run: async (request: ProcessRequest): Promise<ProcessResult> => {
+        if (request.argv[0] === "git" && request.argv.includes("rebase")) {
+          rebaseCommands.push([...request.argv])
+        }
         const result = await delegate.run(request)
         if (result.exitCode === 0 && request.argv.includes("rebase") && afterRebase !== undefined) {
           const mutate = afterRebase
@@ -974,6 +998,8 @@ describe("Queue command adapters", () => {
         message: expect.stringContaining("did not preserve deterministic union identity"),
       },
     })
+    expectNonInteractiveRebases(rebaseCommands)
+    expect(rebaseCommands.some((command) => command.includes("--continue"))).toBe(true)
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
   }, 30_000)
 
@@ -1422,10 +1448,14 @@ describe("Queue command adapters", () => {
     const { repo, module, oldPinSha, newPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
     await using process = createProcess()
     const proofCommands: string[][] = []
+    const rebaseCommands: string[][] = []
     const proofProcess: Pick<Process, "run"> = {
       run(request) {
         if (request.argv[0] === "git" && (request.argv.includes("patch-id") || request.argv.includes("range-diff"))) {
           proofCommands.push([...request.argv])
+        }
+        if (request.argv[0] === "git" && request.argv.includes("rebase")) {
+          rebaseCommands.push([...request.argv])
         }
         return process.run(request)
       },
@@ -1489,6 +1519,7 @@ describe("Queue command adapters", () => {
     expect(proofCommands.filter((command) => command.includes("range-diff"))).toEqual([
       expect.arrayContaining(["range-diff", "--no-color", "--no-dual-color", "--no-patch"]),
     ])
+    expectNonInteractiveRebases(rebaseCommands)
     const landedTree = await git(repo, ["ls-tree", "main", "dep"])
     const landedPinSha = landedTree.split(/\s+/u)[2]
     expect(landedPinSha).toBe(evidence.sourceRewrites?.[0]?.newTipSha)
