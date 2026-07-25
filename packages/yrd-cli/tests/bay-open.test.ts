@@ -5,7 +5,7 @@
  */
 import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { isAbsolute, join } from "node:path"
+import { basename, isAbsolute, join } from "node:path"
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest"
 import { runYrdProcess } from "../src/host.ts"
 import type { YrdCliIO } from "../src/types.ts"
@@ -173,9 +173,13 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
       const keptPath = output(keptFixture.repo)
       expect(await yrd(keptFixture.repo, keptPath.io, "bay", "path", "kept"), keptPath.stderr()).toBe(0)
       expect(await readFile(join(keptPath.stdout().trim(), "result.txt"), "utf8")).toBe("kept")
+      await git(keptPath.stdout().trim(), "push", "-q", "origin", "HEAD:task/kept")
 
       const closed = output(keptFixture.repo)
-      expect(await yrd(keptFixture.repo, closed.io, "bay", "close", "kept"), closed.stderr()).toBe(0)
+      expect(
+        await yrd(keptFixture.repo, closed.io, "bay", "close", "kept"),
+        `${closed.stdout()}${closed.stderr()}`,
+      ).toBe(0)
     })
   })
 
@@ -401,8 +405,9 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
     })
   })
 
-  it("resolves a sigil issue to one name and registers its derived persona in a fresh TTY", async () => {
+  it("resolves a sigil issue and registers its mechanical persona in a fresh TTY", async () => {
     const { repo } = await repository()
+    const mailbox = `@dev/${basename(repo)}:${String(process.pid)}`
     await configureNotify(repo)
     const fake = await fakeTribe(repo)
     const habName = process.env.HAB_NAME
@@ -423,11 +428,11 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
       expect(await yrd(repo, run.io, "bay", "run", "@km/test/blabla1", "--", "true"), run.stderr()).toBe(0)
 
       expect(run.stdout()).toContain("bay blabla1 → new task/blabla1, linked @km/test/blabla1")
-      expect(await readFile(fake.log, "utf8")).toContain("join @dev/blabla1 --delivery pull --json")
+      expect(await readFile(fake.log, "utf8")).toContain(`join ${mailbox} --delivery pull --json`)
       const bays = output(repo)
       expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
       expect(JSON.parse(bays.stdout())).toMatchObject({
-        bays: [expect.objectContaining({ issue: "@km/test/blabla1", by: "@dev/blabla1", status: "closed" })],
+        bays: [expect.objectContaining({ issue: "@km/test/blabla1", by: mailbox, status: "closed" })],
       })
       const prs = output(repo)
       expect(await yrd(repo, prs.io, "pr", "list", "--issue", "@km/test/blabla1", "--json"), prs.stderr()).toBe(0)
