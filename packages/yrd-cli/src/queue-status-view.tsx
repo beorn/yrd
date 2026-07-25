@@ -23,6 +23,7 @@ import type {
   IntegrationProof,
   PRCheckRecord,
   PREligibility,
+  QueueAuditFinding,
   Run,
   QueueStep,
   QueueSummary,
@@ -2611,6 +2612,33 @@ export function QueueRunsView({ runs }: { runs: readonly Run[] }) {
         { header: "STEPS", key: "steps", grow: true },
       ]}
     />
+  )
+}
+
+export function QueueRecoveryView({
+  runs,
+  findings,
+}: {
+  runs: readonly Run[]
+  findings: readonly QueueAuditFinding[]
+}) {
+  if (findings.length === 0) return <QueueRunsView runs={runs} />
+  return (
+    <Box flexDirection="column">
+      {runs.length === 0 ? null : <QueueRunsView runs={runs} />}
+      <Text color="$fg-error" bold>
+        Recovery left blocking queue findings:
+      </Text>
+      {findings.map((finding) => (
+        <Text
+          key={`${finding.code}:${finding.run ?? ""}:${finding.step ?? ""}:${finding.message}`}
+          color="$fg-error"
+        >
+          {finding.run === undefined ? "" : `${finding.run} `}
+          {finding.code}: {finding.message}
+        </Text>
+      ))}
+    </Box>
   )
 }
 

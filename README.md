@@ -1263,7 +1263,9 @@ known-dead runner, reconciles already-terminal failure facts, releases queued
 current steps whose definition revision drifted, and retires other proven
 orphan/stale-plan states. Recovery never executes requested Jobs, creates
 batch-isolation work, or merges a PR; normal queue execution remains the only
-path that can advance those effects.
+path that can advance those effects. If audit findings remain after recovery,
+the human result names each blocking Run and reason instead of reporting
+`Queue idle`; the JSON recovery result remains the stable list of settled Runs.
 
 Execution is **at least once** across crashes: a runner may perform an
 external side effect before its settlement frame is committed. Yrd accepts only

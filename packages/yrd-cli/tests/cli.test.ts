@@ -311,6 +311,7 @@ async function createApp(
     batch?: false | number
     waitingEvaluator?: string
     mergeRuns?: string[]
+    mergeRevision?: string
     failingCheck?: boolean
     checkFailure?: Readonly<{ code: string; message: string; artifact?: string }>
     requires?: readonly ["review"]
@@ -327,6 +328,7 @@ async function createApp(
     mergeWait?: Readonly<{ started: () => void; until: Promise<void> }>
     sourceRewrites?: readonly SourceRewrite[]
     journal?: Journal<unknown>
+    id?: () => string
     log?: ReturnType<typeof createLogger>
   } = {},
 ) {
@@ -419,7 +421,7 @@ async function createApp(
         },
       }
     },
-    { revision: "merge-v1" },
+    { revision: options.mergeRevision ?? "merge-v1" },
   )
   const queue = withQueue({
     steps: [check, merge] as const,
@@ -441,7 +443,7 @@ async function createApp(
     inject: {
       journal: options.journal ?? createMemoryJournal(),
       clock: options.clock ?? (() => "2026-07-09T12:00:00.000Z"),
-      id: ids(),
+      id: options.id ?? ids(),
       // Match production DI (host.ts injects the CLI logger). Without this the
       // app falls back to createLogger("yrd") — loggily's default console
       // transport — and incidental warn/error lifecycle logs (yrd:jobs,
@@ -4238,6 +4240,32 @@ describe("runYrd", () => {
       ref: failed.id,
     })
     expect(events.map(({ name }) => name)).not.toContain("pr/rejected")
+  })
+
+  it("names unresolved step drift instead of reporting queue recovery idle", async () => {
+    const journal = createMemoryJournal()
+    const id = ids()
+
+    {
+      await using app = await createApp({ journal, id, waitingCheck: true, mergeRevision: "merge-v1" })
+      await openAndSubmit(app)
+      expect((await app.queue.run({ prs: ["PR1"] }, { runner: "first-runner", leaseMs: 60_000 }))[0]).toMatchObject({
+        id: "R1",
+        status: "waiting",
+      })
+    }
+
+    await using replayed = await createApp({ journal, id, waitingCheck: true, mergeRevision: "merge-v2" })
+    expect(replayed.queue.audit().findings).toContainEqual(
+      expect.objectContaining({ code: "step-revision-drift", run: "R1", step: "merge" }),
+    )
+
+    const recovery = outputIO({ now: () => Date.parse("2026-07-09T12:00:30.000Z") })
+    expect(await runYrd(replayed, yrd("queue", "recover"), recovery.io), recovery.stderr()).toBe(0)
+    expect(recovery.stdout()).not.toContain("Queue idle")
+    expect(recovery.stdout()).toContain("R1")
+    expect(recovery.stdout()).toContain("step-revision-drift")
+    expect(recovery.stdout()).toContain("requires step 'merge' revision 'merge-v1', installed 'merge-v2'")
   })
 
   it("force-recovers an unexpired ghost from a named dead runner via queue recover --runner (D2)", async () => {

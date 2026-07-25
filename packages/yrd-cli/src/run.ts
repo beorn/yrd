@@ -70,6 +70,7 @@ import {
   PRDetailView,
   PRListView,
   PRRunsView,
+  QueueRecoveryView,
   QueueRunsView,
   QueueTimelineView,
   QueueStatusView,
@@ -3800,11 +3801,12 @@ async function recoverQueue(
     ...(options.reason === undefined ? {} : { reason: options.reason }),
     ...(options.runner === undefined ? {} : { runner: options.runner }),
   })
+  const findings = app.queue.audit().findings
   await printResult(
     io,
     jsonEnabled(options),
     { command: "queue.recover", results: runs.map(projectQueueRunTaskStatus) },
-    createElement(QueueRunsView, { runs }),
+    createElement(QueueRecoveryView, { runs, findings }),
   )
 }
 
