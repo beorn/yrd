@@ -48,15 +48,15 @@ function workspace(): BayWorkspace {
  * revision, so a replay under a bumped deploy revision leaves R1 stuck AFTER the
  * merge integrated but BEFORE the drifted deploy — the throw that must be skipped
  * (not fatal) in a selectorless compose. */
-function mergeDeployPlugin(deployRevision: string) {
-  const merge = withMerge(
-    (): JobResult<{ commit: string; baseSha: string }> => ({
-      status: "completed",
-      conclusion: "success",
-      output: { commit: MERGED, baseSha: BASE },
-    }),
-    { revision: "merge-v1" },
-  )
+function mergeDeployPlugin(
+  deployRevision: string,
+  mergeRun: () => JobResult<{ commit: string; baseSha: string }> = () => ({
+    status: "completed",
+    conclusion: "success",
+    output: { commit: MERGED, baseSha: BASE },
+  }),
+) {
+  const merge = withMerge(mergeRun, { revision: "merge-v1" })
   const deploy = withStep(
     "deploy",
     (_input: StepExecution): JobResult<{ environment: string }> => ({
@@ -74,9 +74,10 @@ async function createApp(
   journal = createMemoryJournal(),
   id: () => string = ids(),
   log?: ReturnType<typeof createLogger>,
+  mergeRun?: () => JobResult<{ commit: string; baseSha: string }>,
 ) {
   const bayJobs = createBayJobDefs(workspace())
-  const queue = mergeDeployPlugin(deployRevision)
+  const queue = mergeDeployPlugin(deployRevision, mergeRun)
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   return createYrd(queue(base), {
     inject: {
@@ -112,6 +113,67 @@ async function seedStuckRun(deployRevision: string, journal: ReturnType<typeof c
 }
 
 describe("compose candidate isolation — one poisoned candidate never aborts the whole selectorless drain", () => {
+  it("ejects a Candidate whose submit authority was consumed and still integrates its healthy peer", async () => {
+    let mergeCalls = 0
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    await using app = await createApp("deploy-v1", createMemoryJournal(), ids(), log, () => {
+      mergeCalls += 1
+      return mergeCalls === 1
+        ? {
+            status: "completed",
+            conclusion: "failure",
+            error: { code: "merge-conflict", message: "poisoned Candidate does not merge" },
+          }
+        : { status: "completed", conclusion: "success", output: { commit: MERGED, baseSha: BASE } }
+    })
+    const poisoned = await submitBranch(app, "issue/consumed-authority")
+    const first = await app.queue.run({ prs: [poisoned.id], steps: ["merge"] }, runtime)
+    expect(first).toMatchObject([{ conclusion: "failure", error: { code: "merge-conflict" } }])
+    const healthy = await submitBranch(app, "issue/healthy-peer")
+
+    const drained = await app.queue.run({}, runtime)
+
+    expect(drained).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          conclusion: "success",
+          prs: [expect.objectContaining({ id: healthy.id })],
+        }),
+      ]),
+    )
+    expect(mergeCalls).toBe(2)
+    const skip = events.find(
+      (event): event is Extract<LogEvent, { kind: "log" }> =>
+        event.kind === "log" &&
+        event.level === "warn" &&
+        event.namespace === "yrd:queue" &&
+        event.props?.action === "compose-candidate-skip",
+    )
+    expect(skip?.props).toMatchObject({
+      action: "compose-candidate-skip",
+      code: "queue-submit-authority-consumed",
+      pr: poisoned.id,
+    })
+    const journalEvents = await Array.fromAsync(app.events())
+    const needsAuthor = journalEvents.find(
+      (applied) =>
+        applied.name === "pr/needs-author" && (applied.data as Readonly<{ pr?: unknown }>).pr === poisoned.id,
+    )
+    expect(needsAuthor?.data).toMatchObject({
+      pr: poisoned.id,
+      receipt: {
+        code: "queue-submit-authority-consumed",
+        message: expect.stringContaining(`yrd pr recut ${poisoned.id} --preflight --queue`),
+      },
+    })
+    expect(app.state().bays.prs[poisoned.id]).toMatchObject({
+      needsAuthor: { receipt: { code: "queue-submit-authority-consumed" } },
+    })
+    await expect(app.queue.run({}, runtime)).resolves.toEqual([])
+    log.end()
+  })
+
   it("skips a poisoned resumable run with a loud warn and keeps the compose alive", async () => {
     const journal = createMemoryJournal()
     const id = ids()

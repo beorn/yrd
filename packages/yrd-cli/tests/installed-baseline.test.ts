@@ -188,6 +188,36 @@ describe("installed baseline persistence", () => {
 })
 
 describe("run gate", () => {
+  it("reloads config drift in place when the resident opts into the executable deinit/init remedy", async () => {
+    let stale = true
+    let auditCalls = 0
+    const lifecycle: string[] = []
+    const services = {
+      queue: {
+        auditEnvironment: async () => {
+          auditCalls += 1
+          return stale
+            ? { findings: [{ code: "config-drift", message: "installed baseline is stale" }] }
+            : { findings: [] }
+        },
+        deprovision: async (base: string) => {
+          lifecycle.push(`deinit:${base}`)
+          return { base, released: ["installed-baseline"] }
+        },
+        provision: async (base: string) => {
+          lifecycle.push(`init:${base}`)
+          stale = false
+          return { base }
+        },
+      },
+    } as unknown as Parameters<typeof requireFreshInstalledBaseline>[0]
+
+    await expect(requireFreshInstalledBaseline(services, { reloadInPlace: { base: "main" } })).resolves.toBeUndefined()
+
+    expect(lifecycle).toEqual(["deinit:main", "init:main"])
+    expect(auditCalls).toBe(2)
+  })
+
   it("refuses to start runs on config drift and passes through other findings", async () => {
     await expect(
       requireFreshInstalledBaseline({
