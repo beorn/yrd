@@ -1482,7 +1482,44 @@ function createQueue<Shape extends PRShape>(
             ),
           )
           const requested = requestedPRs(snapshot.bays, args, consumed)
-          const checked = explicitStepAuthority ? [] : requested.filter((pr) => checksRequested(pr))
+          const authoritySteps = selectSteps(steps, args.steps ?? snapshot.queues.defaultSteps)
+          const authorityGaps = selectorless
+            ? requested.flatMap((pr) => {
+                const prSnapshot = Queues.snapshot(pr)
+                return queueAuthorityGaps(
+                  snapshot.queues.authority,
+                  [prSnapshot],
+                  authoritySteps,
+                  integratedPRShape([pr]) !== undefined,
+                )
+              })
+            : []
+          for (const gap of authorityGaps) {
+            if (gap.reason === "consumed") {
+              const ejected = await actions.run({
+                prs: [gap.pr],
+                ...(args.steps === undefined ? {} : { steps: args.steps }),
+              })
+              if (!ejected.events.some((applied) => applied.name === "pr/needs-author")) {
+                throw new Error(`yrd: consumed authority for PR '${gap.pr}' produced no needs-author receipt`)
+              }
+            }
+            log.warn?.("queue compose ejected a candidate without runnable authority", {
+              action: "compose-candidate-skip",
+              pr: gap.pr,
+              code: `queue-${gap.kind}-authority-${gap.reason}`,
+              reason:
+                gap.reason === "consumed"
+                  ? `${gap.kind} authority was consumed by queue run '${gap.consumedBy}'`
+                  : `no ${gap.kind} authority fact exists`,
+              remedy: `yrd pr recut ${gap.pr} --preflight --queue`,
+            })
+          }
+          const authorityGapIds = new Set(authorityGaps.map((gap) => gap.pr))
+          snapshot = runtime()
+          const checked = explicitStepAuthority
+            ? []
+            : requested.filter((pr) => !authorityGapIds.has(pr.id) && checksRequested(pr))
           const before = new Map(checked.map((pr) => [pr.id, checkEligibility(snapshot, pr, steps).status]))
           await refreshCheckIdentities(checked, resolveCycleBase)
           const admissions = await drainAdmissions(
@@ -1527,7 +1564,7 @@ function createQueue<Shape extends PRShape>(
           // Exclude them from merge selection without aborting the whole phase,
           // so unrelated ready PRs can integrate while targeted one-PR drains
           // return their admission receipt instead of a checks-running refusal.
-          const unavailable = new Set([...consumed, ...pendingIds])
+          const unavailable = new Set([...consumed, ...pendingIds, ...authorityGaps.map((gap) => gap.pr)])
           const prs = runnablePRs(snapshot, args, steps, unavailable, { explicitStepAuthority }).filter(
             (pr) => !activeBases.has(baseIdentity(pr.base)),
           )
@@ -1542,6 +1579,19 @@ function createQueue<Shape extends PRShape>(
               baseSha,
               ...(facts === undefined ? {} : { candidate: facts }),
             })
+            const ejected = started.events.find((applied) => applied.name === "pr/needs-author")
+            if (ejected !== undefined) {
+              const refusal = PRNeedsAuthorFactSchema.parse(ejected.data)
+              if (!selectorless) raiseFailure("refusal", refusal.receipt.code, refusal.receipt.message)
+              log.warn?.("queue compose ejected a candidate without runnable authority", {
+                action: "compose-candidate-skip",
+                pr: refusal.pr,
+                code: refusal.receipt.code,
+                reason: refusal.receipt.message,
+                remedy: `yrd pr recut ${refusal.pr} --preflight --queue`,
+              })
+              continue
+            }
             const startedEvent = started.events.find((applied) => applied.name === "queue/run/started")
             // A submitted PR whose configured plan is entirely admission work can
             // already be satisfied by a retained successful Run. The command is
@@ -2142,9 +2192,6 @@ function createQueueCommands(
     apply(state: DeepReadonly<RuntimeState>, args: QueueRunArgs) {
       if (args.steps?.length === 0) return { events: [] }
       const selected = selectSteps(steps, args.steps ?? state.queues.defaultSteps)
-      if (requiresPreparedCandidate && args.candidate === undefined) {
-        throw new Error("yrd: queue run requires prepared Candidate facts")
-      }
       const selection = stepSelection(
         state.queues,
         steps,
@@ -2197,7 +2244,20 @@ function createQueueCommands(
           : undefined
       const remaining = reuse === undefined ? selected : selected.slice(reuse.count)
       if (remaining.length === 0) return { events: [] }
-      requireQueueAuthority(state.queues.authority, candidateSnapshots, remaining, integrated !== undefined)
+      const authorityGap = queueAuthorityGaps(
+        state.queues.authority,
+        candidateSnapshots,
+        remaining,
+        integrated !== undefined,
+      )[0]
+      if (authorityGap !== undefined) {
+        const needsAuthor = queueAuthorityNeedsAuthorEvent(state, authorityGap, remaining)
+        if (needsAuthor !== undefined) return { events: [needsAuthor] }
+        requireQueueAuthority(state.queues.authority, candidateSnapshots, remaining, integrated !== undefined)
+      }
+      if (requiresPreparedCandidate && args.candidate === undefined) {
+        throw new Error("yrd: queue run requires prepared Candidate facts")
+      }
       const started = startRun(
         state.queues,
         Queues.nextId(state.queues),
@@ -2491,6 +2551,39 @@ type QueueAuthorityGap = Readonly<{
   reason: "missing" | "consumed"
   consumedBy?: RunId
 }>
+
+function queueAuthorityNeedsAuthorEvent(
+  state: DeepReadonly<RuntimeState>,
+  gap: QueueAuthorityGap,
+  steps: readonly DeepReadonly<InstalledStep>[],
+): EventDraft | undefined {
+  if (gap.reason !== "consumed") return undefined
+  if (gap.consumedBy === undefined) {
+    throw new Error(`yrd: consumed ${gap.kind} authority for PR '${gap.pr}' has no consuming queue run`)
+  }
+  const pr = state.bays.prs[gap.pr]
+  if (pr === undefined || prDeliveryState(pr) !== "submitted") return undefined
+  const revision = pr.revs.find((candidate) => candidate.n === gap.revision && candidate.head === gap.headSha)
+  if (revision === undefined) return undefined
+  const code = `queue-${gap.kind}-authority-consumed`
+  const remedy = `yrd pr recut ${gap.pr} --preflight --queue`
+  const message =
+    `yrd: PR '${gap.pr}' revision ${gap.revision} (${gap.headSha}) cannot start a queue run: ` +
+    `${gap.kind} authority was consumed by queue run '${gap.consumedBy}'\nresolve: ${remedy}`
+  const step = steps.find((candidate) => candidate.kind === "merge")?.name ?? steps[0]?.name ?? "queue"
+  return event("pr/needs-author", {
+    pr: gap.pr,
+    revision: gap.revision,
+    headSha: gap.headSha,
+    run: gap.consumedBy,
+    ...(pr.issue === undefined ? {} : { issueRef: pr.issue }),
+    ...(prCorrelation(pr) === undefined ? {} : { correlation: prCorrelation(pr) }),
+    ...(revision.actor === undefined ? {} : { actor: revision.actor }),
+    step,
+    detail: message,
+    receipt: { code, message },
+  })
+}
 
 function queueAuthorityReleaseReason(
   error: DeepReadonly<JobError> | undefined,
