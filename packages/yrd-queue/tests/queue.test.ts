@@ -8,6 +8,7 @@ import { createLogger, type ConditionalLogger, type Event as LogEvent } from "lo
 import { createBayJobDefs, currentPRRev, prDeliveryState, withBays, type BayWorkspace, type PR } from "@yrd/bay"
 import {
   Command,
+  createFailure,
   createMemoryJournal,
   createYrd,
   createYrdDef,
@@ -576,6 +577,45 @@ describe("Queue", () => {
       ref: "refs/yrd/candidates/C1",
       mergeability: "mergeable",
       revs: [{ pr: pr.id, n: 1, head: HEAD }],
+    })
+    expect(run?.steps[0]?.job).toMatchObject({ status: "completed", conclusion: "success" })
+  })
+
+  // 22332 C2465 shape: one run, two compose prepares that would produce different
+  // trees for the SAME candidate id must not refuse the run — allocate a fresh id.
+  it("retries candidate allocation when prepare refuses a self-colliding id (22332)", async () => {
+    const prepared: string[] = []
+    await using app = await createQueueApp({
+      prepareCandidate: (input) => {
+        prepared.push(input.id)
+        // First allocation C1 collides like an orphan/self-retry pin with different evidence.
+        if (input.id === "C1") {
+          throw createFailure({
+            kind: "infrastructure",
+            code: "candidate-ref-refused",
+            message: `yrd: Candidate ref 'refs/yrd/candidates/${input.id}' — you already wrote this id at ${"a".repeat(40)}; this prepare produced different evidence ${"b".repeat(40)} (compose self-retry must allocate a fresh id)`,
+          })
+        }
+        const { prs: _prs, ...candidate } = input
+        return {
+          ...candidate,
+          sha: MERGED,
+          ref: `refs/yrd/candidates/${input.id}`,
+          mergeability: "mergeable" as const,
+        }
+      },
+    })
+    const pr = await submitBranch(app, "topic/self-collision-retry")
+
+    const [run] = await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+
+    expect(prepared).toEqual(["C1", "C2"])
+    expect(run?.candidateId).toBe("C2")
+    expect(app.state().queues.candidates.C2).toMatchObject({
+      id: "C2",
+      sha: MERGED,
+      ref: "refs/yrd/candidates/C2",
+      mergeability: "mergeable",
     })
     expect(run?.steps[0]?.job).toMatchObject({ status: "completed", conclusion: "success" })
   })
