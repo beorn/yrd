@@ -5518,6 +5518,25 @@ function addRootBayCommands(
         ),
       ),
     )
+  program
+    .command("run [config] [command...]")
+    .description("alias for bay open; own a Bay lifecycle around one command (defaults to $SHELL)")
+    .option("--issue <ref>", "link an issue without a positional")
+    .option("--pr <selector>", "continue an existing PR branch without recutting or submitting it")
+    .option("--bay <name>", "choose an issue-less or issue-linked Bay identity")
+    .action(async (config, command, options) => {
+      const request = bayOpenOperands(config, command, io)
+      setExit(await openBaySession(installed(), installedServices(), request.arg, request.argv, options, io))
+    })
+  program
+    .command("ag [config]")
+    .description("open an owned Bay and run ag")
+    .option("--issue <ref>", "link an issue without a positional")
+    .option("--pr <selector>", "continue an existing PR branch without recutting or submitting it")
+    .option("--bay <name>", "choose an issue-less or issue-linked Bay identity")
+    .action(async (config, options) =>
+      setExit(await openBaySession(installed(), installedServices(), config, ["ag"], options, io)),
+    )
 }
 
 function buildProgram(
