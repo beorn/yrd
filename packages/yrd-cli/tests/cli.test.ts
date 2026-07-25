@@ -4288,6 +4288,10 @@ describe("runYrd", () => {
     expect(recovery.stdout()).not.toContain("Queue idle")
     expect(recovery.stdout()).toContain("config-drift")
     expect(recovery.stdout()).toContain("queue base 'main' installed baseline is stale")
+
+    const json = outputIO()
+    expect(await runYrd(app, yrd("queue", "recover", "--json"), json.io, services), json.stderr()).toBe(0)
+    expect(JSON.parse(json.stdout())).toEqual({ command: "queue.recover", results: [] })
   })
 
   it("force-recovers an unexpired ghost from a named dead runner via queue recover --runner (D2)", async () => {
