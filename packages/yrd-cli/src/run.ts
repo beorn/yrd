@@ -98,6 +98,13 @@ import {
 import { submittedPrPositions } from "./queue-position.ts"
 import { preflightRecut, prunePrs, withdrawPrs } from "./pr-withdraw.ts"
 import { resolveSubmitSelectors } from "./submit-selection.ts"
+import {
+  classifyBayStatus,
+  formatBayStatusHuman,
+  parseOwnerPid,
+  type BayStatusFacts,
+  type BayStatusReport,
+} from "./bay-status.ts"
 import { diagnostic, printHuman, printResult, printResultWithWarnings } from "./output.tsx"
 import {
   createSubmoduleBranchResolver,
@@ -1622,12 +1629,29 @@ async function certifyBayHandoff(
 async function closeBays(
   app: YrdCliApp,
   selectors: readonly string[],
-  options: { withdraw?: boolean; json?: boolean },
+  options: { withdraw?: boolean; json?: boolean; force?: boolean },
   io: YrdCliIO,
 ): Promise<void> {
-  const bays = selectedBays(stateOf(app).bays, selectors, io.cwd ?? process.cwd(), "close")
+  const cwd = io.cwd ?? process.cwd()
+  // --force requires an explicit bay name/id (no empty selector = all open).
+  if (options.force === true && selectors.length === 0) {
+    usage("bay close --force requires an explicit bay selector (no glob/all)")
+  }
+  const bays = selectedBays(stateOf(app).bays, selectors, cwd, "close")
   const closed: Bay[] = []
+  const refused: BayStatusReport[] = []
   for (const bay of bays) {
+    const report = classifyBayStatus(gatherBayStatusFacts(app, bay, cwd))
+    if (options.force !== true && report.exit !== 0) {
+      refused.push(report)
+      continue
+    }
+    if (options.force === true && report.exit !== 0) {
+      await printHuman(
+        io,
+        `FORCE close ${bay.id} ${bay.name}: status exit=${report.exit} (destroying despite blocks)\n${formatBayStatusHuman(report)}`,
+      )
+    }
     const withdrawing =
       options.withdraw === true
         ? app.bays.prs().filter((pr) => (pr.bay === bay.id || pr.branch === bay.branch) && isLivePR(pr))
@@ -1648,12 +1672,224 @@ async function closeBays(
     if (current === undefined) throw new Error(`yrd: bay '${bay.id}' disappeared after close`)
     closed.push(current)
   }
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "bay.close", bays: closed },
-    createElement(BayStatusView, { bays: closed }),
-  )
+  if (refused.length > 0) {
+    const body = refused.map((report) => formatBayStatusHuman(report)).join("\n\n")
+    await printHuman(io, `bay close refused (status non-zero); nothing destroyed:\n\n${body}`)
+    if (closed.length === 0) {
+      raiseFailure(
+        "refusal",
+        "request-refused",
+        `bay close refused for ${String(refused.length)} bay(s); re-run bay status or bay close --force <name>`,
+      )
+    }
+  }
+  if (closed.length === 0 && refused.length === 0) {
+    usage("bay close requires at least one bay selector")
+  }
+  if (closed.length > 0) {
+    await printResult(
+      io,
+      jsonEnabled(options),
+      { command: "bay.close", bays: closed, refused: refused.map((report) => report.bay) },
+      createElement(BayStatusView, { bays: closed }),
+    )
+  }
+}
+
+/** Gather live facts for one bay; classification stays pure in bay-status.ts (22290). */
+function gatherBayStatusFacts(app: YrdCliApp, bay: Bay, repoRoot: string): BayStatusFacts {
+  const ownerPid = parseOwnerPid(bay.name, bay.actor)
+  let ownerAlive: boolean | undefined
+  if (ownerPid !== undefined) {
+    try {
+      process.kill(ownerPid, 0)
+      ownerAlive = true
+    } catch (error) {
+      const code =
+        typeof error === "object" && error !== null && "code" in error
+          ? String((error as { code?: unknown }).code)
+          : undefined
+      ownerAlive = code === "ESRCH" ? false : undefined
+    }
+  }
+
+  const path = bay.path
+  let worktreeDirty: boolean | undefined
+  let worktreeMissing: boolean | undefined
+  let tipLanded: boolean | undefined
+  let tipLandedUnknown: boolean | undefined
+  let aheadOfOrigin: number | undefined
+  let stashAttributed = 0
+  let stashUnknown: boolean | undefined
+
+  if (path === undefined) {
+    worktreeMissing = undefined
+  } else {
+    try {
+      const status = gitSync(path, ["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"])
+      worktreeDirty = status.trim() !== ""
+      worktreeMissing = false
+    } catch {
+      // path missing or not a git dir
+      try {
+        gitSync(path, ["rev-parse", "--is-inside-work-tree"])
+        worktreeDirty = undefined
+        worktreeMissing = false
+      } catch {
+        worktreeMissing = true
+      }
+    }
+
+    if (worktreeMissing !== true) {
+      try {
+        const head = gitSync(path, ["rev-parse", "HEAD"]).trim()
+        // Prefer superproject origin/main when bay is a linked worktree of the repo.
+        const originMain = gitSync(repoRoot, ["rev-parse", "origin/main"]).trim()
+        try {
+          gitSync(path, ["merge-base", "--is-ancestor", head, originMain])
+          tipLanded = true
+          aheadOfOrigin = 0
+        } catch {
+          tipLanded = false
+          try {
+            const counts = gitSync(path, ["rev-list", "--left-right", "--count", `${originMain}...${head}`])
+              .trim()
+              .split(/\s+/u)
+              .map(Number)
+            const ahead = counts[1]
+            if (Number.isSafeInteger(ahead)) aheadOfOrigin = ahead
+          } catch {
+            tipLandedUnknown = true
+          }
+        }
+      } catch {
+        tipLandedUnknown = true
+      }
+
+      try {
+        const stash = gitSync(path, ["stash", "list"])
+        // Best-effort: count stashes whose message mentions bay id/branch/name.
+        const tokens = [bay.id, bay.branch, bay.name].filter(Boolean)
+        stashAttributed = stash
+          .split("\n")
+          .filter((line) => line.trim() !== "" && tokens.some((token) => line.includes(token))).length
+      } catch {
+        stashUnknown = true
+      }
+    }
+  }
+
+  const openPrIds = app.bays
+    .prs()
+    .filter((pr) => (pr.bay === bay.id || pr.branch === bay.branch) && isLivePR(pr))
+    .map((pr) => pr.id)
+
+  return {
+    bayId: bay.id,
+    name: bay.name,
+    branch: bay.branch,
+    ...(path === undefined ? {} : { path }),
+    ...(ownerPid === undefined ? {} : { ownerPid }),
+    ...(ownerAlive === undefined ? {} : { ownerAlive }),
+    ...(worktreeDirty === undefined ? {} : { worktreeDirty }),
+    ...(worktreeMissing === undefined ? {} : { worktreeMissing }),
+    ...(tipLanded === undefined ? {} : { tipLanded }),
+    ...(tipLandedUnknown === undefined ? {} : { tipLandedUnknown }),
+    ...(aheadOfOrigin === undefined ? {} : { aheadOfOrigin }),
+    stashAttributed,
+    ...(stashUnknown === undefined ? {} : { stashUnknown }),
+    openPrIds,
+  }
+}
+
+async function bayStatusCommand(
+  app: YrdCliApp,
+  selectors: readonly string[],
+  options: { json?: boolean },
+  io: YrdCliIO,
+): Promise<number> {
+  const cwd = io.cwd ?? process.cwd()
+  const bays =
+    selectors.length === 0
+      ? app.bays.list().filter((bay) => bay.status !== "closed")
+      : selectedBays(stateOf(app).bays, selectors, cwd, "status")
+  if (bays.length === 0) usage("bay status requires at least one open bay (or a selector)")
+
+  const reports: BayStatusReport[] = bays.map((bay) => classifyBayStatus(gatherBayStatusFacts(app, bay, cwd)))
+  // Aggregate exit: any BLOCK → 1; else any UNKNOWN → 2; else 0.
+  let exit: 0 | 1 | 2 = 0
+  for (const report of reports) {
+    if (report.exit === 1) exit = 1
+    else if (report.exit === 2 && exit === 0) exit = 2
+  }
+
+  if (jsonEnabled(options)) {
+    await printResult(io, true, { command: "bay.status", wrapper: "git", exit, reports }, null)
+  } else {
+    const text = reports.map((report) => formatBayStatusHuman(report)).join("\n\n")
+    await printHuman(io, text)
+  }
+  return exit
+}
+
+/** Sweep open bays via the status oracle. --dry-run is the DEFAULT (22290). */
+async function bayPruneCommand(
+  app: YrdCliApp,
+  options: { json?: boolean; apply?: boolean },
+  io: YrdCliIO,
+): Promise<number> {
+  const cwd = io.cwd ?? process.cwd()
+  const open = app.bays.list().filter((bay) => bay.status !== "closed")
+  const reports = open.map((bay) => classifyBayStatus(gatherBayStatusFacts(app, bay, cwd)))
+  const safe = reports.filter((report) => report.exit === 0)
+  const survivors = reports.filter((report) => report.exit !== 0)
+  const dryRun = options.apply !== true
+
+  if (jsonEnabled(options)) {
+    await printResult(
+      io,
+      true,
+      {
+        command: "bay.prune",
+        dryRun,
+        examined: reports.length,
+        safe: safe.map((report) => report.bay),
+        survivors: survivors.map((report) => ({
+          bay: report.bay,
+          exit: report.exit,
+          lines: report.lines,
+        })),
+        closed: dryRun ? [] : safe.map((report) => report.bay),
+      },
+      null,
+    )
+  } else {
+    const lines = [
+      `bay prune ${dryRun ? "(dry-run DEFAULT — pass --apply to close safe bays)" : "(APPLY)"}`,
+      `examined ${String(reports.length)} open bay(s); safe=${String(safe.length)}; survivors=${String(survivors.length)}`,
+      "",
+      ...safe.map((report) => `SAFE  ${report.bay} ${report.name}  ${report.branch}`),
+      ...survivors.map(
+        (report) =>
+          `KEEP  ${report.bay} ${report.name}  exit=${String(report.exit)}\n${report.lines
+            .filter((line) => line.verdict !== "PASS")
+            .map((line) => `      ${line.class} ${line.verdict} ${line.evidence}`)
+            .join("\n")}`,
+      ),
+    ]
+    await printHuman(io, lines.join("\n"))
+  }
+
+  if (!dryRun && safe.length > 0) {
+    await closeBays(
+      app,
+      safe.map((report) => report.bay),
+      { json: options.json },
+      io,
+    )
+  }
+  // Exit 0 if nothing unsafe blocked an apply; dry-run always 0 after report.
+  return 0
 }
 
 async function closePrs(
@@ -5231,10 +5467,22 @@ function buildProgram(
     )
   bay
     .command("close [selector...]")
-    .description("close work bays")
+    .description("close work bays (consults bay status first; refuses unless --force)")
     .option("--withdraw", "withdraw a live PR before closing")
+    .option("--force", "bypass bay status (requires explicit bay name; prints what is destroyed)")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => closeBays(installed(), selectors, options, io))
+  bay
+    .command("status [selector...]")
+    .description("safety oracle: is this bay safe to remove? (exit 0=safe 1=not-safe 2=unknown)")
+    .option("--json", "emit stable JSON")
+    .action(async (selectors, options) => setExit(await bayStatusCommand(installed(), selectors, options, io)))
+  bay
+    .command("prune")
+    .description("report (default) or close every bay that bay status says is safe")
+    .option("--apply", "actually close safe bays (default is dry-run)")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => setExit(await bayPruneCommand(installed(), options, io)))
 
   if (projection === "bay") {
     addExamples(program, name, projection)

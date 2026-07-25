@@ -237,7 +237,7 @@ export type QueueTimelineProjectedRow = Readonly<{
   activeMs: number | null
   waitMs: number | null
   queueWaitMs: number | null
-  /** Perfect-detector landing class (21801) — present on completed Run rows. */
+  /** Diagnostic landing class for display/JSON (21801) — not a success verdict. */
   landingVerdict?: LandingVerdict
   /** Step names in run order — scripts must not infer landing from glyph alone. */
   stepNames?: readonly string[]
@@ -1377,9 +1377,11 @@ function queueOutcome(run: Run): string {
   return run.status === "waiting" ? "waiting" : "running"
 }
 
-/** Perfect detectors from the 6h phantom audit (22323): outcome=integrated or
- * steps-include-merge ⇒ landed; outcome=passed + admission-only ⇒ non-landing.
- * Duration is secondary and must never drive this verdict. */
+/** Diagnostic classification of a journal outcome for display/JSON (21801).
+ * DESCRIBES the recorded outcome; does NOT adjudicate success. Exit code of the
+ * merge step remains the sole success channel (CTO 2026-07-25: one test for
+ * success). Maps: integrated/already-landed → landed*; passed without
+ * integration proof → non-landing; duration is secondary and never drives this. */
 export function landingVerdictOfOutcome(outcome: string): LandingVerdict {
   if (outcome === "integrated") return "landed"
   if (outcome === "already-landed") return "already-landed"
