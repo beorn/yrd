@@ -232,7 +232,7 @@ type LegacyTailState = Readonly<{
 
 function context(options: JournalOptions): Context {
   const inject = (options.inject ?? {}) as InternalInject
-  const log = inject.log?.child("journal") ?? createLogger("yrd:journal", [{ level: "warn" }])
+  const log = inject.log?.child("storage") ?? createLogger("yrd:storage", [{ level: "warn" }])
   return {
     dir: options.dir,
     path: join(options.dir, DATABASE_FILE),
@@ -350,28 +350,16 @@ async function loadCheckpoint(
         snapshot.checkpoint_sha256 === null ||
         sha256(Buffer.from(checkpointJson)) !== snapshot.checkpoint_sha256
       ) {
-        runtime.log.warn?.("journal projection checkpoint invalid; replaying journal authority", {
-          action: "full-replay",
-          reason: "checkpoint-checksum-mismatch",
-          path: runtime.path,
-        })
+        runtime.log.warn?.("Saved state is damaged; rebuilding it.")
         return undefined
       }
       if (snapshot.checkpoint_identity !== identity) {
-        runtime.log.warn?.("journal projection checkpoint identity changed; replaying journal authority", {
-          action: "full-replay",
-          reason: "checkpoint-identity-mismatch",
-          expected: identity,
-          observed: snapshot.checkpoint_identity,
-        })
+        runtime.log.info?.("Saved state is outdated; rebuilding it.")
         return undefined
       }
       const checkpoint = JSON.parse(checkpointJson) as JournalCheckpoint
       if (checkpoint.identity !== identity || checkpoint.cursor !== snapshot.cursor) {
-        runtime.log.warn?.("journal projection checkpoint binding is invalid; replaying journal authority", {
-          action: "full-replay",
-          reason: "checkpoint-binding-mismatch",
-        })
+        runtime.log.warn?.("Saved state is inconsistent; rebuilding it.")
         return undefined
       }
       return checkpoint
@@ -405,14 +393,7 @@ async function saveCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): 
         current.prefix_sha256 !== prepared.snapshotPrefixSha256 ||
         current.prefix_last_cursor !== prepared.snapshotPrefixLastCursor
       ) {
-        runtime.log.warn?.("journal projection checkpoint refused: snapshot advanced under the prepared save", {
-          action: "skipped",
-          reason: "checkpoint-cas-stale",
-          cursor: checkpoint.cursor,
-          head,
-          snapshotCursor: current.cursor,
-          preparedSnapshotCursor: prepared.snapshotCursor,
-        })
+        runtime.log.debug?.("Saved state changed before this update finished; skipped this update.")
         return false
       }
       database.run("BEGIN IMMEDIATE")
@@ -446,11 +427,7 @@ async function saveCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): 
           )
         if (updated.changes !== 1) {
           rollback(database)
-          runtime.log.warn?.("journal projection checkpoint refused: snapshot row CAS matched no rows", {
-            action: "skipped",
-            reason: "checkpoint-cas-miss",
-            cursor: checkpoint.cursor,
-          })
+          runtime.log.debug?.("Saved state changed before this update finished; skipped this update.")
           return false
         }
         database.query("DELETE FROM journal_events WHERE cursor <= ?").run(checkpoint.cursor)
@@ -459,7 +436,7 @@ async function saveCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): 
         rollback(database)
         throw error
       }
-      runtime.log.debug?.("journal projection checkpoint written", {
+      runtime.log.debug?.("Saved current state.", {
         action: "checkpoint-written",
         path: runtime.path,
         cursor: checkpoint.cursor,
@@ -469,12 +446,10 @@ async function saveCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): 
       return true
     })
   } catch (error) {
-    runtime.log.error?.("journal projection checkpoint write failed; journal remains authoritative", {
-      action: "skipped",
-      reason: "checkpoint-write-failed",
-      path: runtime.path,
-      error: error instanceof Error ? error.message : String(error),
-    })
+    runtime.log.warn?.(
+      "Could not save Yrd's current state; the command succeeded, but the next command may start more slowly.",
+      { error: error instanceof Error ? error.message : String(error) },
+    )
     return false
   }
 }
@@ -486,13 +461,7 @@ function prepareCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): Pre
     const { head, snapshot } = assertComplete(database, runtime.path)
     if (checkpoint.cursor > head || checkpoint.cursor < snapshot.cursor) {
       database.run("COMMIT")
-      runtime.log.warn?.("journal projection checkpoint refused: cursor outside snapshot..head", {
-        action: "skipped",
-        reason: "checkpoint-cursor-out-of-range",
-        cursor: checkpoint.cursor,
-        head,
-        snapshotCursor: snapshot.cursor,
-      })
+      runtime.log.debug?.("Saved state is already newer; skipped this update.")
       return null
     }
     if (checkpoint.cursor !== snapshot.cursor) {
@@ -505,11 +474,9 @@ function prepareCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): Pre
         .get(checkpoint.cursor, checkpoint.cursor, checkpoint.cursor)
       if (committed?.committed !== 1) {
         database.run("COMMIT")
-        runtime.log.warn?.("journal projection checkpoint refused: no committed row at cursor", {
-          action: "skipped",
-          reason: "checkpoint-cursor-uncommitted",
-          cursor: checkpoint.cursor,
-        })
+        runtime.log.warn?.(
+          "Could not save Yrd's current state because part of its history is missing; no work was lost.",
+        )
         return null
       }
     }
@@ -852,7 +819,7 @@ async function publishCandidate(runtime: Context, legacy: LegacySource | null): 
     } finally {
       live.close()
     }
-    runtime.log.info?.("journal SQLite authority published", {
+    runtime.log.info?.("Yrd's saved state is ready.", {
       action: legacy === null ? "initialized" : "migrated",
       path: runtime.path,
       cursor: head,
@@ -1398,11 +1365,7 @@ function incrementalVacuum(runtime: Context, database: Database): void {
   try {
     database.run("PRAGMA incremental_vacuum(256)")
   } catch (error) {
-    runtime.log.warn?.("journal incremental vacuum deferred after a committed checkpoint", {
-      action: "deferred",
-      reason: "incremental-vacuum-failed",
-      path: runtime.path,
-      pages: 256,
+    runtime.log.warn?.("Saved state, but could not reclaim old storage yet; Yrd will retry later.", {
       error: error instanceof Error ? error.message : String(error),
     })
   }
@@ -1433,36 +1396,22 @@ function checkpointWal(runtime: Context, database: Database): void {
       checkpointedFrames: result.checkpointed,
     }
     if (result.busy > 0 || result.checkpointed < result.log) {
-      runtime.log.warn?.("journal WAL checkpoint deferred by a pinned reader", {
-        action: "deferred",
-        reason: "wal-checkpoint-pinned",
-        ...details,
-      })
+      runtime.log.debug?.("Another Yrd command is still reading; storage cleanup will retry later.", details)
     } else {
       const truncated = database
         .query<{ busy: number; log: number; checkpointed: number }, []>("PRAGMA wal_checkpoint(TRUNCATE)")
         .get()
       if (truncated === null) throw new Error("SQLite returned no WAL truncation result")
       if (truncated.busy > 0 || truncated.log !== 0 || truncated.checkpointed !== 0) {
-        runtime.log.warn?.("journal WAL truncation deferred by a pinned reader", {
-          action: "deferred",
-          reason: "wal-truncate-pinned",
-          path: runtime.path,
-          busy: truncated.busy,
-          logFrames: truncated.log,
-          checkpointedFrames: truncated.checkpointed,
-        })
+        runtime.log.debug?.("Another Yrd command is still reading; storage cleanup will retry later.")
       } else {
-        runtime.log.debug?.("journal WAL checkpoint completed", { action: "checkpointed", ...details })
+        runtime.log.debug?.("Finished storage cleanup.", { action: "checkpointed", ...details })
       }
     }
   } catch (error) {
     // A reader may pin the WAL. The acknowledged transaction remains durable;
     // a later writer close retries the maintenance checkpoint under the lock.
-    runtime.log.warn?.("journal WAL checkpoint deferred after a maintenance failure", {
-      action: "deferred",
-      reason: "wal-checkpoint-failed",
-      path: runtime.path,
+    runtime.log.warn?.("Could not finish storage cleanup; saved work is safe and Yrd will retry later.", {
       error: error instanceof Error ? error.message : String(error),
     })
   }
@@ -1512,13 +1461,7 @@ async function readLegacySource(runtime: Context): Promise<LegacySource | null> 
   const committedEnd = source.lastIndexOf(10) + 1
   const raw = source.subarray(0, committedEnd)
   if (committedEnd !== source.length) {
-    runtime.log.warn?.("journal discarded an unacknowledged partial v3 tail before migration", {
-      action: "recovered",
-      reason: "uncommitted-v3-tail",
-      path: v3Path,
-      committedBytes: committedEnd,
-      discardedBytes: source.length - committedEnd,
-    })
+    runtime.log.warn?.("Ignored an incomplete old state record while upgrading; saved work is unchanged.")
   }
   const rows = decodeLegacyBytes(raw, 0, v3Path)
   return {
@@ -1544,32 +1487,25 @@ async function recoverInterruptedSqliteCutover(runtime: Context): Promise<boolea
     const marker = legacySqliteCutover(parseSignedJson(await readFile(path), path))
     assertSqliteCutoverBinding(marker, pointer, path)
     if (marker.state === "published") {
-      throw new Error(
-        `yrd: published SQLite journal authority is missing at ${runtime.path}; refusing legacy resurrection`,
-      )
+      throw new Error(`yrd: saved state is missing at ${runtime.path}; stopped to avoid restoring outdated data`)
     }
     const candidate = join(runtime.dir, marker.candidate)
     if (!(await exists(candidate))) {
       throw new Error(
-        `yrd: interrupted SQLite cutover candidate is missing at ${candidate}; refusing legacy resurrection`,
+        `yrd: interrupted state upgrade is missing ${candidate}; stopped to avoid restoring outdated data`,
       )
     }
     using database = openReadOnly(candidate)
     const { snapshot } = assertComplete(database, candidate)
     readVerifiedPrefix(database, snapshot)
     if (readMetadata(database, "source_fingerprint") !== marker.fingerprint) {
-      throw new Error(`yrd: interrupted SQLite cutover candidate fingerprint mismatch at ${candidate}`)
+      throw new Error(`yrd: interrupted state upgrade changed at ${candidate}; stopped to avoid using it`)
     }
     database.close()
     await rename(candidate, runtime.path)
     await syncDirectory(runtime.dir)
     await writeSqliteCutoverMarker(runtime, marker, "published")
-    runtime.log.warn?.("journal completed an interrupted SQLite cutover from its verified candidate", {
-      action: "recovered",
-      reason: "sqlite-cutover-pre-publish",
-      pointer: path,
-      backup: join(runtime.dir, marker.backup),
-    })
+    runtime.log.info?.("Finished an interrupted Yrd state upgrade.")
     return true
   }
   return false

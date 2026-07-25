@@ -1,4 +1,4 @@
-import { raiseFailure, type CommandTree, type YrdDef } from "@yrd/core"
+import { failureFact, raiseFailure, type CommandTree, type YrdDef } from "@yrd/core"
 import * as z from "zod"
 
 const TextSchema = z.string().trim().min(1)
@@ -66,7 +66,18 @@ export function createIssues(options: IssuesOptions = {}): Issues {
           `yrd: no issue source '${canonical.source}' is registered`,
         )
       }
-      const value = await source.resolve(canonical)
+      let value: Issue | undefined
+      try {
+        value = await source.resolve(canonical)
+      } catch (error) {
+        if (failureFact(error) !== undefined) throw error
+        const detail = (error instanceof Error ? error.message : String(error)).replace(/^yrd:\s*/u, "")
+        raiseFailure(
+          "infrastructure",
+          "issue-source-failed",
+          `yrd: cannot resolve issue '${canonical.id}': configured source '${source.id}' failed: ${detail}`,
+        )
+      }
       if (!value) {
         raiseFailure("refusal", "issue-not-found", `yrd: issue '${canonical.source}:${canonical.id}' was not found`)
       }

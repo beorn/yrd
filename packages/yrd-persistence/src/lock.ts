@@ -100,15 +100,25 @@ function flock(fd: number, operation: number): number {
   return libc.flock(fd, operation)
 }
 
+export function posixLibcCandidates(platform: NodeJS.Platform): readonly string[] {
+  if (platform === "darwin") return ["libc.dylib"]
+  if (platform === "linux") return ["libc.so.6", "libc.so"]
+  return [`libc.${suffix}`]
+}
+
 function loadFlock(): Flock {
-  const path = process.platform === "darwin" ? "libc.dylib" : `libc.${suffix}`
-  try {
-    return dlopen(path, {
-      flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
-    }).symbols as unknown as Flock
-  } catch (cause) {
-    throw new Error(`yrd: failed to load POSIX flock from ${path}`, { cause })
+  const candidates = posixLibcCandidates(process.platform)
+  let cause: unknown
+  for (const path of candidates) {
+    try {
+      return dlopen(path, {
+        flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+      }).symbols as unknown as Flock
+    } catch (error) {
+      cause = error
+    }
   }
+  throw new Error(`yrd: failed to load POSIX flock from ${candidates.join(" or ")}`, { cause })
 }
 
 function busy(path: string): Error {

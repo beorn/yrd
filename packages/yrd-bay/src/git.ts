@@ -292,11 +292,28 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
         if (input.from === undefined) {
           const localRef = `refs/heads/${input.branch}`
           const remoteRef = `refs/remotes/origin/${input.branch}`
+          if (input.remoteBranch !== undefined && input.remoteBranch.branch !== input.branch) {
+            throw new Error(
+              `remote branch snapshot '${input.remoteBranch.branch}' does not match Bay branch '${input.branch}'`,
+            )
+          }
           const [local, tracking] = await Promise.all([
             git.run(repo, ["rev-parse", "--verify", `${localRef}^{commit}`], true),
             git.run(repo, ["rev-parse", "--verify", `${remoteRef}^{commit}`], true),
           ])
-          const remoteHead = input.issue === undefined ? undefined : await remoteBranchHead(git, repo, input.branch)
+          const trackedHead = tracking.code === 0 ? tracking.stdout.trim() : undefined
+          if (input.remoteBranch !== undefined && trackedHead !== input.remoteBranch.headSha) {
+            throw new Error(
+              `remote-tracking branch '${input.branch}' changed after its authority snapshot; ` +
+                "retry Bay provisioning against one fresh queue/branch snapshot",
+            )
+          }
+          const remoteHead =
+            input.issue === undefined
+              ? undefined
+              : input.remoteBranch === undefined
+                ? await remoteBranchHead(git, repo, input.branch)
+                : input.remoteBranch.headSha
           const remoteExists = remoteHead !== undefined
           const decision = decideBranchProvision({
             claim: input.issue !== undefined,
@@ -308,16 +325,16 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           if (decision.kind === "refuse" && decision.reason === "unproven-existing") {
             throw new Error(
               `branch '${input.branch}' already exists without matching claim provenance; ` +
-                "link that branch to the claim's draft PR, then rerun bay run",
+                "link that branch to the claim's draft PR, then reopen with bay open",
             )
           }
           if (decision.kind === "refuse") {
             throw new Error(
               `live claim branch '${input.branch}' has no remote or tracking carrier; ` +
-                "restore the draft PR head before rerunning bay run",
+                "restore the draft PR head before reopening with bay open",
             )
           }
-          if (decision.carrier === "remote") {
+          if (decision.carrier === "remote" && input.remoteBranch === undefined) {
             await git.run(repo, [
               "fetch",
               "--no-recurse-submodules",
@@ -330,7 +347,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
             if (carriesClaimHead.code !== 0) {
               throw new Error(
                 `local branch '${input.branch}' does not descend from the live claim head; ` +
-                  "restore or reconcile the draft PR branch before rerunning bay run",
+                  "restore or reconcile the draft PR branch before reopening with bay open",
               )
             }
           }
@@ -409,12 +426,51 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           )
         }
         const status = await git.run(input.path, ["status", "--porcelain", "--ignore-submodules=none"])
-        const wip = status.stdout.trim() !== ""
+        const dirtyStatus = status.stdout.trim()
+        const wip = dirtyStatus !== ""
+        const beforeHead = await git.commit(input.path, "HEAD")
+        let headSha = beforeHead
         if (wip) {
           await git.run(input.path, ["add", "-A"])
-          await git.run(input.path, ["commit", "-m", `wip: ${input.claim}`])
+          const stagedTree = (await git.run(input.path, ["write-tree"])).stdout.trim()
+          const committed = await git.run(input.path, ["commit", "-m", `wip: ${input.claim}`], true)
+          if (committed.code !== 0) {
+            const remaining = (
+              await git.run(input.path, ["status", "--porcelain", "--ignore-submodules=none"])
+            ).stdout.trim()
+            throw new Error(
+              `workspace '${input.path}' reported uncommitted work:\n${dirtyStatus}\n` +
+                `but the checkpoint commit failed: ${committed.stderr.trim() || committed.stdout.trim() || `exit ${String(committed.code)}`}` +
+                (remaining === "" ? "" : `\nremaining uncommitted work:\n${remaining}`) +
+                "\nThe Bay remains open and no archive receipt was written. Fix the commit failure, then retry.",
+            )
+          }
+          headSha = await git.commit(input.path, "HEAD")
+          if (headSha === beforeHead) {
+            const remaining = (
+              await git.run(input.path, ["status", "--porcelain", "--ignore-submodules=none"])
+            ).stdout.trim()
+            throw new Error(
+              `workspace '${input.path}' reported uncommitted work:\n${dirtyStatus}\n` +
+                `but the checkpoint commit reported success and did not advance HEAD '${beforeHead}'; ` +
+                (remaining === ""
+                  ? "the dirty content disappeared from the index/worktree during the commit"
+                  : `the work remains uncommitted:\n${remaining}`) +
+                "\nThe Bay remains open and no archive receipt was written. " +
+                "Fix the Git hook or filter so committing the listed paths advances HEAD, then retry.",
+            )
+          }
+          const committedTree = (await git.run(input.path, ["rev-parse", "--verify", "HEAD^{tree}"])).stdout.trim()
+          if (committedTree !== stagedTree) {
+            throw new Error(
+              `workspace '${input.path}' reported uncommitted work:\n${dirtyStatus}\n` +
+                `but checkpoint commit '${headSha}' contains tree '${committedTree}', not staged tree '${stagedTree}'; ` +
+                "the commit did not preserve the staged content.\n" +
+                "The Bay remains open and no archive receipt was written. " +
+                "Fix the Git hook or filter that replaced the staged content, then retry.",
+            )
+          }
         }
-        const headSha = await git.commit(input.path, "HEAD")
         const trackingRef = `refs/remotes/origin/${input.branch}`
         const [tracking, remoteHead] = await Promise.all([
           git.run(input.path, ["rev-parse", "--verify", `${trackingRef}^{commit}`], true),

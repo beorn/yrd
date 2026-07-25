@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto"
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { writeSync } from "node:fs"
+import { appendFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import {
   PRAlreadyLandedSchema,
@@ -7,6 +8,7 @@ import {
   PRNeedsAuthorFactSchema,
   PRRejectedFactSchema,
   PRWithdrawnSchema,
+  normalizeV2Submitter,
   type PRNeedsAuthorFact,
   type PRRejectedFact,
 } from "@yrd/bay"
@@ -18,30 +20,40 @@ import { createLogger, type ConditionalLogger } from "loggily"
 import * as z from "zod"
 import { actionableFailure, formatActionableFailure } from "./actionable-error.ts"
 import type { SignalRouteTarget, SignalRoutes } from "./config.ts"
+import { stableJson } from "./invocation.ts"
 
 const TextSchema = z.string().trim().min(1)
 const RevisionSchema = z.number().int().positive()
 const GitShaSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu)
 const REVIEW_BALL_TTL_MS = 10 * 60_000
-const SignalPRSchema = z
+const SignalPRDataObjectSchema = z
   .object({
     pr: TextSchema,
     revision: RevisionSchema,
     headSha: GitShaSchema,
-    actor: TextSchema.optional(),
+    submitter: TextSchema.optional(),
   })
-  .strict()
-const SubmittedSignalDataSchema = SignalPRSchema.loose()
-const IntegratedSignalDataSchema = SignalPRSchema.extend({ run: TextSchema, landingSha: GitShaSchema }).loose()
+  .loose()
+const SignalPRDataSchema = z.preprocess(normalizeV2Submitter, SignalPRDataObjectSchema)
+const SubmittedSignalDataSchema = SignalPRDataSchema
+const IntegratedSignalDataSchema = z.preprocess(
+  normalizeV2Submitter,
+  SignalPRDataObjectSchema.extend({ run: TextSchema, landingSha: GitShaSchema }).loose(),
+)
 const RunFailedSignalDataSchema = z
   .object({
     run: TextSchema,
     error: z.object({ code: TextSchema, message: z.string() }).loose(),
-    prs: z.array(SignalPRSchema).min(1),
+    prs: z.array(SignalPRDataSchema).min(1),
   })
   .loose()
 
-export type SignalPR = Readonly<z.infer<typeof SignalPRSchema>>
+export type SignalPR = Readonly<{
+  pr: string
+  revision: number
+  headSha: string
+  submitter?: string
+}>
 
 export type RejectedSignal = Readonly<{
   id: string
@@ -94,7 +106,7 @@ export type AlreadyLandedSignal = Readonly<{
   pr: string
   revision: number
   headSha: string
-  actor?: string
+  submitter?: string
   run: string
   baseSha: string
   candidateSha: string
@@ -220,19 +232,23 @@ export function createSignalObserver(
                 : (options.routes[signal.kind] ?? [])
           const recipients = new Set(targets.flatMap((target) => resolveRecipients(signal, target)))
           if (targets.includes("submitter") && ![...recipients].some((recipient) => recipient !== "*")) {
-            log.warn?.("PR signal has no recorded submitter; delivery skipped", {
-              event: signal.id,
-              kind: signal.kind,
-              ...(signal.kind === "run/failed" ? { run: signal.run } : "pr" in signal ? { pr: signal.pr } : {}),
-            })
+            const prs =
+              signal.kind === "run/failed" || signal.kind === "pr/integrated"
+                ? signal.prs.map((pr) => pr.pr)
+                : [signal.pr]
+            log.warn?.(
+              prs.length === 1
+                ? `Could not notify the person who submitted PR ${prs[0]}; no recipient was recorded.`
+                : `Could not notify the people who submitted ${prs.length} PRs; no recipients were recorded.`,
+            )
           }
           for (const recipient of recipients) {
             if (state.sent[signal.id]?.includes(recipient) === true) continue
-            if (overBudget()) return deferDelivery(log, cursorPath, deadline)
+            if (overBudget()) return deferDelivery(log)
             await options.adapter.send({ recipient, event: signal }) // UNLOCKED
             state = addSent(state, signal.id, recipient)
             // Record the request ball we just opened so a later terminal signal can close this
-            // exact id + recipient, even if the actor or routes drift before then.
+            // exact id + recipient, even if the submitter or routes drift before then.
             state = recordOpened(state, signal, recipient, options.sender)
             await persist(state)
           }
@@ -244,7 +260,7 @@ export function createSignalObserver(
             for (const ball of openedBallsFor(state, settledPRs)) {
               const key = `close:${ball.recipient}:${ball.requestId}`
               if (state.sent[signal.id]?.includes(key) !== true) {
-                if (overBudget()) return deferDelivery(log, cursorPath, deadline)
+                if (overBudget()) return deferDelivery(log)
                 await options.adapter.close({
                   recipient: ball.recipient,
                   request: ball.requestId,
@@ -265,7 +281,7 @@ export function createSignalObserver(
               if (ledgerSettled.has(coverageKey(closure.pr, closure.revision, closure.kind))) continue
               const key = `close:${closure.recipient}:${closure.request}`
               if (state.sent[signal.id]?.includes(key) === true) continue
-              if (overBudget()) return deferDelivery(log, cursorPath, deadline)
+              if (overBudget()) return deferDelivery(log)
               await options.adapter.close(closure) // UNLOCKED
               state = addSent(state, signal.id, key)
               await persist(state)
@@ -285,7 +301,7 @@ export function createSignalObserver(
       try {
         await drain(options.deliveryBudgetMs === undefined ? undefined : Date.now() + options.deliveryBudgetMs)
       } catch (error) {
-        log.warn?.("PR signal delivery deferred", { error: errorDetail(error), cursor: cursorPath })
+        log.warn?.("Could not send a PR notification; Yrd will retry it.", { error: errorDetail(error) })
         requested = false
       }
     }
@@ -335,15 +351,8 @@ export function createTribeSignalAdapter(
   process: Pick<Process, "run">,
   sender?: string,
   attributedReceipt?: (event: RejectedSignal) => JobError | undefined,
+  executable = tribeExecutable(),
 ): SignalDeliveryAdapter {
-  const executable = Bun.which("tribe")
-  if (executable === null) {
-    raiseFailure(
-      "configuration",
-      "signal-adapter-missing",
-      "yrd: notify routes require the 'tribe' executable, but no live Tribe adapter is available",
-    )
-  }
   const execute = async (argv: readonly string[], action: string): Promise<void> => {
     const result = await process.run({ argv, timeoutMs: 5_000 })
     if (result.exitCode !== 0 || result.timedOut) {
@@ -389,6 +398,103 @@ export function createTribeSignalAdapter(
   })
 }
 
+export async function registerTribeSignalRecipient(
+  process: Pick<Process, "run">,
+  recipient: string,
+  executable = tribeExecutable(),
+): Promise<void> {
+  const result = await process.run({
+    argv: [executable, "join", recipient, "--delivery", "pull", "--json"],
+    timeoutMs: 5_000,
+  })
+  if (result.exitCode !== 0 || result.timedOut) {
+    throw new Error(
+      `yrd: Tribe signal mailbox registration failed for '${recipient}' (${
+        result.timedOut ? "timed out" : `exit ${result.exitCode}`
+      }): ${result.stderr.trim() || result.stdout.trim()}`,
+    )
+  }
+}
+
+/** Capture the same messages the live Tribe adapter would send, without
+ * contacting the daemon. `-` writes ordinary stdout, `file:` appends JSONL,
+ * and `fd:` writes the inherited descriptor (the mdspec fixture seam). */
+export function createWireSignalAdapter(
+  destination: string,
+  stdout: (text: string) => void,
+  sender?: string,
+  attributedReceipt?: (event: RejectedSignal) => JobError | undefined,
+): SignalDeliveryAdapter {
+  const write = wireWriter(destination, stdout)
+  return Object.freeze({
+    async send(delivery) {
+      const request = trackedRequestId(delivery.event, delivery.recipient, sender)
+      const tracked = request !== undefined
+      const receipt =
+        delivery.event.kind === "pr/needs-author"
+          ? delivery.event.receipt
+          : delivery.event.kind === "pr/rejected"
+            ? attributedReceipt?.(delivery.event)
+            : undefined
+      await write(
+        stableJson({
+          wire: "tribe.send",
+          to: delivery.recipient,
+          message: deliveryText(delivery, receipt),
+          type: tracked ? "request" : "notify",
+          summary: deliverySummary(delivery, receipt),
+          delivery: tracked ? "push" : "pull",
+          ...(request === undefined ? {} : { request, expiresInMs: REVIEW_BALL_TTL_MS }),
+        }),
+      )
+    },
+    async close(closure) {
+      await write(
+        stableJson({
+          wire: "tribe.pending.close",
+          owner: closure.recipient,
+          request: closure.request,
+        }),
+      )
+    },
+  })
+}
+
+function tribeExecutable(): string {
+  const executable = Bun.which("tribe")
+  if (executable !== null) return executable
+  raiseFailure(
+    "configuration",
+    "signal-adapter-missing",
+    "yrd: notify routes require the 'tribe' executable, but no live Tribe adapter is available",
+  )
+}
+
+function wireWriter(destination: string, stdout: (text: string) => void): (text: string) => void | Promise<void> {
+  if (destination === "-") return stdout
+  if (destination.startsWith("file:")) {
+    const path = destination.slice("file:".length)
+    if (path === "") {
+      raiseFailure("configuration", "signal-wire-invalid", "yrd: file wire destination requires a path")
+    }
+    return (text) => appendFile(path, text)
+  }
+  if (destination.startsWith("fd:")) {
+    const fd = Number(destination.slice("fd:".length))
+    if (!Number.isSafeInteger(fd) || fd < 0) {
+      raiseFailure("configuration", "signal-wire-invalid", "yrd: fd wire destination requires a non-negative integer")
+    }
+    return (text) => {
+      writeSync(fd, text)
+    }
+  }
+  raiseFailure(
+    "configuration",
+    "signal-wire-capture-invalid",
+    `yrd: '${destination}' is a live socket, not a capture sink`,
+  )
+}
+
 const OpenedBallSchema = z
   .object({
     pr: TextSchema,
@@ -411,7 +517,7 @@ const CursorFileSchema = z
 const CursorStateSchema = CursorFileSchema.extend({
   // Durable opened-ledger: the EXACT request ball (id + recipient) recorded when each PR revision
   // was put up for review. Legacy rejection entries remain readable after rejection became
-  // evidence-only. A terminal signal closes precisely these — immune to actor/route drift. The
+  // evidence-only. A terminal signal closes precisely these — immune to submitter/route drift. The
   // optional top-level field reads the short-lived drifted format and is immediately migrated into
   // the v1 `sent` record, which older worktree readers already preserve and ignore.
   opened: z.array(OpenedBallSchema).default([]),
@@ -426,11 +532,8 @@ function errorDetail(error: unknown): string {
  * its budget is spent, leaving the un-advanced cursor for the resident's observer to
  * finish. This is the "never starve the resident, defer instead of spinning" contract:
  * the one-shot exits promptly and the delivery is not lost. */
-function deferDelivery(log: ConditionalLogger, cursorPath: string, deadline: number | undefined): void {
-  log.warn?.("PR signal delivery deferred — delivery budget spent; a resident runner will complete it", {
-    cursor: cursorPath,
-    ...(deadline === undefined ? {} : { deadline: new Date(deadline).toISOString() }),
-  })
+function deferDelivery(log: ConditionalLogger): void {
+  log.warn?.("A PR notification is still pending; the background Yrd runner will retry it.")
 }
 
 function signalsOf(events: readonly Event[], reviewRequired: boolean): readonly RoutableSignal[] {
@@ -448,7 +551,7 @@ function signalsOf(events: readonly Event[], reviewRequired: boolean): readonly 
       pr: parsed.data.pr,
       revision: parsed.data.revision,
       headSha: parsed.data.headSha,
-      ...(parsed.data.actor === undefined ? {} : { actor: parsed.data.actor }),
+      ...(parsed.data.submitter === undefined ? {} : { submitter: parsed.data.submitter }),
     }
     integrated.set(
       key,
@@ -470,14 +573,24 @@ function signalsOf(events: readonly Event[], reviewRequired: boolean): readonly 
 function directSignalOf(event: Event, reviewRequired: boolean): RoutableSignal | undefined {
   if (event.name === "pr/needs-author") {
     const data = PRNeedsAuthorFactSchema.parse(event.data)
-    return Object.freeze({ id: event.id, kind: "pr/needs-author", at: event.ts, ...data })
+    return Object.freeze({
+      id: event.id,
+      kind: "pr/needs-author",
+      at: event.ts,
+      ...data,
+    })
   }
   if (event.name === "pr/rejected") {
     if (typeof event.data !== "object" || event.data === null || Array.isArray(event.data) || !("step" in event.data)) {
       return undefined
     }
     const data = PRRejectedFactSchema.parse(event.data)
-    return Object.freeze({ id: event.id, kind: "pr/rejected", at: event.ts, ...data })
+    return Object.freeze({
+      id: event.id,
+      kind: "pr/rejected",
+      at: event.ts,
+      ...data,
+    })
   }
   if (event.name === "pr/submitted" && reviewRequired) {
     const parsed = SubmittedSignalDataSchema.safeParse(event.data)
@@ -489,7 +602,7 @@ function directSignalOf(event: Event, reviewRequired: boolean): RoutableSignal |
       pr: parsed.data.pr,
       revision: parsed.data.revision,
       headSha: parsed.data.headSha,
-      ...(parsed.data.actor === undefined ? {} : { actor: parsed.data.actor }),
+      ...(parsed.data.submitter === undefined ? {} : { submitter: parsed.data.submitter }),
     })
   }
   if (event.name === "queue/run/failed") {
@@ -507,7 +620,12 @@ function directSignalOf(event: Event, reviewRequired: boolean): RoutableSignal |
   if (event.name === "pr/already-landed") {
     const parsed = PRAlreadyLandedSchema.safeParse(event.data)
     if (!parsed.success) return undefined
-    return Object.freeze({ id: event.id, kind: "pr/already-landed", at: event.ts, ...parsed.data })
+    return Object.freeze({
+      id: event.id,
+      kind: "pr/already-landed",
+      at: event.ts,
+      ...parsed.data,
+    })
   }
   if (event.name === "pr/withdrawn") {
     const parsed = PRWithdrawnSchema.safeParse(event.data)
@@ -519,7 +637,7 @@ function directSignalOf(event: Event, reviewRequired: boolean): RoutableSignal |
       pr: parsed.data.pr,
       revision: parsed.data.revision,
       headSha: parsed.data.headSha,
-      ...(parsed.data.actor === undefined ? {} : { actor: parsed.data.actor }),
+      ...(parsed.data.submitter === undefined ? {} : { submitter: parsed.data.submitter }),
     })
   }
   if (event.name === "pr/canceled") {
@@ -532,7 +650,7 @@ function directSignalOf(event: Event, reviewRequired: boolean): RoutableSignal |
       pr: parsed.data.pr,
       revision: parsed.data.revision,
       headSha: parsed.data.headSha,
-      ...(parsed.data.actor === undefined ? {} : { actor: parsed.data.actor }),
+      ...(parsed.data.submitter === undefined ? {} : { submitter: parsed.data.submitter }),
     })
   }
   return undefined
@@ -542,9 +660,9 @@ function resolveRecipients(signal: RoutableSignal, target: SignalRouteTarget): r
   if (target === "broadcast") return ["*"]
   if (target !== "submitter") return [target]
   if (signal.kind === "pr/integrated" || signal.kind === "run/failed") {
-    return [...new Set(signal.prs.flatMap((pr) => (pr.actor === undefined ? [] : [pr.actor])))]
+    return [...new Set(signal.prs.flatMap((pr) => (pr.submitter === undefined ? [] : [pr.submitter])))]
   }
-  return signal.actor === undefined ? [] : [signal.actor]
+  return signal.submitter === undefined ? [] : [signal.submitter]
 }
 
 function isTerminalSignal(signal: RoutableSignal): signal is TerminalSignal {
@@ -565,7 +683,7 @@ function terminalPRs(signal: TerminalSignal): readonly SignalPR[] {
       pr: signal.pr,
       revision: signal.revision,
       headSha: signal.headSha,
-      ...(signal.actor === undefined ? {} : { actor: signal.actor }),
+      ...(signal.submitter === undefined ? {} : { submitter: signal.submitter }),
     },
   ]
 }
@@ -576,7 +694,13 @@ function closuresFor(signal: TerminalSignal, routes: SignalRoutes): readonly Sig
     for (const kind of ["pr/rejected", "pr/needs-review"] as const) {
       for (const target of routes[kind] ?? []) {
         const recipients =
-          target === "submitter" ? (pr.actor === undefined ? [] : [pr.actor]) : target === "broadcast" ? [] : [target]
+          target === "submitter"
+            ? pr.submitter === undefined
+              ? []
+              : [pr.submitter]
+            : target === "broadcast"
+              ? []
+              : [target]
         for (const recipient of recipients) {
           // A terminal event settles the whole revision chain, so close every prior revision's
           // request id — not just the terminal revision's. Otherwise a rev-1 rejection ball outlives

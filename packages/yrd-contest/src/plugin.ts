@@ -564,7 +564,7 @@ async function ensureBays(contestId: string, options: Parameters<typeof createCo
       await options.bays.open({
         name: attempt.bayName,
         issue: `${record.issue.ref.source}:${record.issue.ref.id}`,
-        actor: attempt.competitor.id,
+        by: attempt.competitor.id,
         base: attempt.base,
         baseSha: record.baseSha,
       })

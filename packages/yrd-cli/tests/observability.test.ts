@@ -117,13 +117,13 @@ describe("resident runner observability", () => {
     expect(lifecycle.debug).toBeTypeOf("function")
     expect(process.debug).toBeUndefined()
     lifecycle.debug?.("check started")
-    process.debug?.("process exited")
+    process.debug?.("Command finished.")
     process.warn?.("process drain warning")
     log.end()
 
     expect(human.join("")).toContain("check started")
     expect(human.join("")).toContain("process drain warning")
-    expect(human.join("")).not.toContain("process exited")
+    expect(human.join("")).not.toContain("Command finished.")
   })
 
   it("preserves explicitly requested DEBUG on the human sink", () => {
@@ -134,9 +134,9 @@ describe("resident runner observability", () => {
       (text) => human.push(text),
       (event) => (event.kind === "log" ? event.message : undefined),
     )
-    log.child("process").debug?.("process exited")
+    log.child("process").debug?.("Command finished.")
     log.end()
-    expect(human.join("")).toContain("process exited")
+    expect(human.join("")).toContain("Command finished.")
   })
 })
 
@@ -150,9 +150,9 @@ describe("Yrd lifecycle records", () => {
       // deepest failing job/step owns the single ERROR, so the enclosing
       // run/compose settle at INFO instead of re-raising the same failure.
       settled: "info",
-      refused: "warn",
+      refused: "info",
       recovered: "warn",
-      failed: "error",
+      failed: "info",
     })
   })
 
@@ -246,7 +246,7 @@ describe("Yrd lifecycle records", () => {
     const events: Event[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: Event) => events.push(event) }])
 
-    await observeYrdLifecycle(log.child("journal"), { lifecycle: "lock" }, async () => undefined)
+    await observeYrdLifecycle(log.child("storage"), { lifecycle: "lock" }, async () => undefined)
     await observeYrdLifecycle(log.child("queue"), { lifecycle: "compose" }, async () => [])
     await observeYrdLifecycle(log.child("queue"), { lifecycle: "run" }, async () => [])
 
@@ -256,7 +256,7 @@ describe("Yrd lifecycle records", () => {
         .filter((event) => event.props?.outcome === "succeeded")
         .map((event) => [event.namespace, event.level]),
     ).toEqual([
-      ["yrd:journal:lock", "debug"],
+      ["yrd:storage:lock", "debug"],
       ["yrd:queue:compose", "debug"],
       ["yrd:queue:run", "info"],
     ])
@@ -331,7 +331,7 @@ describe("Yrd lifecycle records", () => {
     log.end()
   })
 
-  it("maps expected refusals to WARN and unexpected failures to ERROR", async () => {
+  it("leaves command failures to the CLI while residents retain their lifecycle records", async () => {
     const events: Event[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: Event) => events.push(event) }])
 
@@ -352,8 +352,8 @@ describe("Yrd lifecycle records", () => {
         .filter((event) => event.props?.outcome !== "started")
         .map((event) => [event.namespace, event.level, event.props?.outcome]),
     ).toEqual([
-      ["yrd:admit", "warn", "refused"],
-      ["yrd:remote", "error", "failed"],
+      ["yrd:admit", "info", "refused"],
+      ["yrd:remote", "info", "failed"],
     ])
     log.end()
   })
@@ -371,7 +371,6 @@ describe("Yrd lifecycle records", () => {
         kind: "log",
         namespace: "yrd:check",
         level: "error",
-        message: "check duration invalid",
         props: expect.objectContaining({
           lifecycle: "check",
           outcome: "succeeded",
@@ -437,7 +436,7 @@ describe("observable CLI exemplar", () => {
       .split("\n")
       .map((entry) => JSON.parse(entry) as Record<string, unknown>)
     const evidence = records.filter((record) =>
-      ["yrd:bay:submit", "yrd:journal:append", "yrd:journal:lock", "yrd:process:run"].includes(String(record.name)),
+      ["yrd:bay:submit", "yrd:storage:append", "yrd:storage:lock", "yrd:process:run"].includes(String(record.name)),
     )
     expect(evidence.find((record) => record.level === "info" && record.name === "yrd:bay:submit")).toEqual(
       expect.objectContaining({
@@ -450,12 +449,12 @@ describe("observable CLI exemplar", () => {
     )
     expect(
       evidence.find(
-        (record) => record.level === "info" && record.name === "yrd:journal:append" && record.op === "bay.submit",
+        (record) => record.level === "info" && record.name === "yrd:storage:append" && record.op === "bay.submit",
       ),
     ).toEqual(expect.objectContaining({ outcome: "succeeded", durationMs: expect.any(Number) }))
     expect(
       evidence.find(
-        (record) => record.level === "debug" && record.name === "yrd:journal:lock" && record.outcome === "succeeded",
+        (record) => record.level === "debug" && record.name === "yrd:storage:lock" && record.outcome === "succeeded",
       ),
     ).toEqual(expect.objectContaining({ durationMs: expect.any(Number) }))
     expect(

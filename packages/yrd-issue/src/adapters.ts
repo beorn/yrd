@@ -81,7 +81,7 @@ function createIssueSource(
       }
       if (result.exitCode !== 0) {
         throw new Error(
-          `yrd: issue source '${sourceId}' exited ${result.exitCode}: ${result.stderr.trim() || result.stdout.trim()}`,
+          result.stderr.trim() || result.stdout.trim() || `command exited ${result.exitCode} without output`,
         )
       }
       try {

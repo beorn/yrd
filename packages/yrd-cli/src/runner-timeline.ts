@@ -392,7 +392,7 @@ export function formatResidentLogLine(event: Event, options: ResidentLogFormatOp
 
   // Low-level journal bookkeeping is noise on the human row — JSONL sink only.
   // Its warn/error escalations still surface below as notices.
-  if (namespace.startsWith("yrd:journal:") && (level === "info" || level === "debug")) return undefined
+  if (namespace.startsWith("yrd:storage:") && (level === "info" || level === "debug")) return undefined
 
   if (namespace.startsWith("yrd:jobs:") || namespace === RUN_SCOPE) {
     const started = renderStartedRow(props, color, options.artifactRoot)

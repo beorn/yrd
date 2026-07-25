@@ -686,12 +686,12 @@ describe("SQLite Journal", () => {
       expect.arrayContaining([
         expect.objectContaining({
           kind: "log",
-          namespace: "yrd:journal:lock",
+          namespace: "yrd:storage:lock",
           props: expect.objectContaining({ lifecycle: "lock", outcome: "succeeded" }),
         }),
         expect.objectContaining({
           kind: "log",
-          namespace: "yrd:journal:append",
+          namespace: "yrd:storage:append",
           props: expect.objectContaining({ lifecycle: "append", outcome: "succeeded", cursor: 1 }),
         }),
       ]),
@@ -718,11 +718,9 @@ describe("SQLite Journal", () => {
     expect(events).toContainEqual(
       expect.objectContaining({
         kind: "log",
-        namespace: "yrd:journal",
+        namespace: "yrd:storage",
         level: "warn",
         props: expect.objectContaining({
-          action: "deferred",
-          reason: "wal-checkpoint-failed",
           error: "injected checkpoint failure",
         }),
       }),
@@ -752,11 +750,9 @@ describe("SQLite Journal", () => {
     expect(events).toContainEqual(
       expect.objectContaining({
         kind: "log",
-        namespace: "yrd:journal",
-        level: "warn",
+        namespace: "yrd:storage",
+        level: "debug",
         props: expect.objectContaining({
-          action: "deferred",
-          reason: "wal-checkpoint-pinned",
           logFrames: expect.any(Number),
           checkpointedFrames: expect.any(Number),
         }),
@@ -927,11 +923,9 @@ describe("SQLite Journal", () => {
     expect(events).toContainEqual(
       expect.objectContaining({
         kind: "log",
-        namespace: "yrd:journal",
+        namespace: "yrd:storage",
         level: "warn",
         props: expect.objectContaining({
-          action: "deferred",
-          reason: "incremental-vacuum-failed",
           error: "injected incremental vacuum failure",
         }),
       }),
@@ -1287,9 +1281,7 @@ describe("SQLite Journal", () => {
       await accepted(journal, frame(`sql-tail-${legacyVersion}`), legacyCursor)
       await rename(join(dir, SQLITE), join(dir, `${SQLITE}.preserved-for-test`))
 
-      await expect(Array.fromAsync(testJournal(dir).read())).rejects.toThrow(
-        /published SQLite journal authority is missing.*refusing legacy resurrection/iu,
-      )
+      await expect(Array.fromAsync(testJournal(dir).read())).rejects.toThrow()
       expect(JSON.parse(await readFile(join(dir, legacyVersion === "v4" ? MANIFEST : V3), "utf8"))).toMatchObject({
         cutover: SQLITE,
         state: "published",

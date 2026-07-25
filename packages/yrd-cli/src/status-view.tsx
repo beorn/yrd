@@ -1,3 +1,5 @@
+import { homedir } from "node:os"
+import { dirname } from "node:path"
 import { pathToFileURL } from "node:url"
 import {
   prDeliveryState,
@@ -188,38 +190,63 @@ function heldOutEvaluationRows(contest: Contest): EvaluationRow[] {
   })
 }
 
+type BayStatusRow = Readonly<{
+  bay: string
+  status: string
+  issue: string
+  by: string
+  base: string
+  branch: string
+}>
+
+function friendlyPath(path: string): string {
+  const home = process.env["HOME"] ?? homedir()
+  if (path === home) return "~"
+  return path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : path
+}
+
+function bayRoot(bays: readonly Bay[]): string | undefined {
+  const roots = new Set(bays.flatMap((bay) => (bay.path === undefined ? [] : [dirname(bay.path)])))
+  return roots.size === 1 ? roots.values().next().value : undefined
+}
+
 export function BayStatusView({ bays }: { bays: readonly Bay[] }) {
-  const columns: TableColumn<Bay>[] = [
-    { header: "BAY", key: "id" },
+  const rows: BayStatusRow[] = bays.map((bay) => ({
+    bay: bay.id,
+    status: bay.status,
+    issue: bay.issue ?? "-",
+    by: bay.by ?? "-",
+    base: bay.base,
+    branch: bay.branch,
+  }))
+  const columns: TableColumn<BayStatusRow>[] = [
+    { header: "BAY", key: "bay" },
     {
       header: "STATUS",
       key: "status",
-      minWidth: 11,
+      minWidth: 7,
       render: (bay) => <StatusValue value={bay.status} />,
     },
-    ...(bays.some((bay) => bay.issue !== undefined)
-      ? ([{ header: "ISSUE", key: "issue", grow: true }] satisfies TableColumn<Bay>[])
-      : []),
-    ...(bays.some((bay) => bay.actor !== undefined)
-      ? ([{ header: "ACTOR", key: "actor" }] satisfies TableColumn<Bay>[])
-      : []),
-    { header: "BRANCH", key: "branch", grow: true },
+    { header: "ISSUE", key: "issue", grow: true },
+    { header: "BY", key: "by" },
     { header: "BASE", key: "base" },
-    {
-      header: "PATH",
-      key: "path",
-      grow: true,
-      render: (bay) =>
-        bay.path === undefined ? (
-          "-"
-        ) : (
-          <Link href={pathToFileURL(bay.path).href} minWidth={0} maxWidth="100%" wrap="truncate">
-            {bay.path}
-          </Link>
-        ),
-    },
+    { header: "BRANCH", key: "branch", grow: true },
   ]
-  return <Table data={bays} columns={columns} />
+  const root = bayRoot(bays)
+  return (
+    <Box flexDirection="column" width="100%">
+      {root === undefined ? (
+        <Text>Bays</Text>
+      ) : (
+        <Text>
+          Bays in <Link href={pathToFileURL(root).href}>{friendlyPath(root)}/</Link>
+        </Text>
+      )}
+      <Box marginTop={1} width="100%">
+        <Table data={rows} columns={columns} />
+      </Box>
+    </Box>
+  )
 }
 
 export function PRStatusView({ prs, eligibilities }: { prs: readonly PR[]; eligibilities?: readonly PREligibility[] }) {

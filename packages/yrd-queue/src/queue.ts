@@ -5,10 +5,12 @@ import {
   PRIdSchema,
   PRNeedsAuthorFactSchema,
   PRTerminalAssociationSchema,
+  PrCheckabilityConflict,
   baseIdentity,
   checkRequest,
   checksRequested,
   currentPRRev,
+  normalizeV2Submitter,
   prBaseSha,
   prComposition,
   prCorrelation,
@@ -233,14 +235,17 @@ const PauseQueueArgsSchema = z
 const ResumeQueueArgsSchema = z.object({ base: GitRefSchema }).strict()
 const QueueStartSchema = QueueRecordSchema.omit({ startedAt: true, failure: true })
 const ReplayQueueStartSchema = ReplayQueueRecordSchema.omit({ startedAt: true, failure: true })
-const QueueFailedPRSchema = z
-  .object({
-    pr: PRIdSchema,
-    revision: z.number().int().positive(),
-    headSha: GitShaSchema,
-    actor: z.string().trim().min(1).optional(),
-  })
-  .strict()
+const QueueFailedPRSchema = z.preprocess(
+  normalizeV2Submitter,
+  z
+    .object({
+      pr: PRIdSchema,
+      revision: z.number().int().positive(),
+      headSha: GitShaSchema,
+      submitter: z.string().trim().min(1).optional(),
+    })
+    .strict(),
+)
 const LegacyQueueFailedSchema = z.object({ run: RunIdSchema, error: JobErrorSchema }).strict()
 const QueueFailedSchema = LegacyQueueFailedSchema.extend({
   prs: z.array(QueueFailedPRSchema).min(1),
@@ -1093,7 +1098,7 @@ function createQueue<Shape extends PRShape>(
             ...(materializesCandidate && candidate.ref !== undefined ? { candidateRef: candidate.ref } : {}),
           })
           if (submitted.status === "completed" && submitted.conclusion === "cancelled") {
-            log.warn?.("queue step settlement lost to a peer transition; skipping the settled job", {
+            log.warn?.("Another Yrd runner finished this job first; using its result.", {
               action: "canceled-skip",
               run: id,
               job: submitted.id,
@@ -1115,7 +1120,7 @@ function createQueue<Shape extends PRShape>(
           await actions.refresh()
           const raced = runtime().jobs.byId[active.job.id]
           if (raced === undefined || !Job.terminal(raced)) throw cause
-          log.warn?.("queue step settlement lost to a peer transition; skipping the settled job", {
+          log.warn?.("Another Yrd runner finished this job first; using its result.", {
             action: "canceled-skip",
             run: id,
             job: active.job.id,
@@ -1221,6 +1226,19 @@ function createQueue<Shape extends PRShape>(
     return requiredCandidateBaseSha(prs.map(Queues.snapshot))
   }
 
+  // 22332: ids reserved by in-flight prepares (pin may land on disk before
+  // queue/candidate/created is journaled). Without this set, a compose retry
+  // reuses nextCandidateId's journal-only max and self-collides on its own ref.
+  const reservedCandidateIds = new Set<string>()
+  const allocateCandidateId = (): string => {
+    const journaled = Object.keys(runtime().queues.candidates)
+      .filter((id) => /^C\d+$/u.test(id))
+      .map((id) => Number(id.slice(1)))
+    const reserved = [...reservedCandidateIds].filter((id) => /^C\d+$/u.test(id)).map((id) => Number(id.slice(1)))
+    return `C${Math.max(0, ...journaled, ...reserved) + 1}`
+  }
+  const CANDIDATE_REF_COLLISION_LIMIT = 32
+
   const candidateFactsForSnapshots = async (
     snapshots: readonly DeepReadonly<PRSnapshot>[],
     baseSha: string,
@@ -1234,43 +1252,63 @@ function createQueue<Shape extends PRShape>(
     if (prepareCandidate === undefined) return undefined
     const first = pinned[0]
     if (first === undefined) throw new Error("yrd: a Candidate requires at least one PR")
-    const input: CandidatePreparationInput = {
-      id: Queues.nextCandidateId(runtime().queues),
-      queueId: queueIdentity(first),
-      baseSha,
-      revs: pinned.map((member) => ({ pr: member.id, n: member.revision, head: member.headSha })),
-      prs: pinned,
-    }
-    const prepared = CandidateCreatedSchema.parse(await prepareCandidate(input))
-    if (
-      prepared.id !== input.id ||
-      prepared.queueId !== input.queueId ||
-      prepared.baseSha !== input.baseSha ||
-      prepared.revs.length !== input.revs.length ||
-      prepared.revs.some((revision, index) => {
-        const expected = input.revs[index]
-        return (
-          expected === undefined ||
-          revision.pr !== expected.pr ||
-          revision.n !== expected.n ||
-          revision.head !== expected.head
-        )
-      })
-    ) {
-      throw new Error(`yrd: Candidate preparer changed immutable content identity for '${input.id}'`)
-    }
-    if (prepared.mergeability === "unknown") {
-      throw new Error(`yrd: Candidate preparer left mergeability unknown for '${input.id}'`)
-    }
-    if (prepared.mergeability === "mergeable") {
-      if (prepared.sha === undefined || prepared.ref === undefined) {
-        throw new Error(`yrd: mergeable Candidate '${input.id}' requires a synthetic SHA and ref`)
+    const queueId = queueIdentity(first)
+    const revs = pinned.map((member) => ({ pr: member.id, n: member.revision, head: member.headSha }))
+    let lastRefused: unknown
+    for (let collision = 0; collision < CANDIDATE_REF_COLLISION_LIMIT; collision += 1) {
+      const id = allocateCandidateId()
+      reservedCandidateIds.add(id)
+      const input: CandidatePreparationInput = {
+        id,
+        queueId,
+        baseSha,
+        revs,
+        prs: pinned,
       }
-      if (prepared.ref !== `refs/yrd/candidates/${input.id}`) {
-        throw new Error(`yrd: Candidate '${input.id}' must publish refs/yrd/candidates/${input.id}`)
+      let prepared: z.infer<typeof CandidateCreatedSchema>
+      try {
+        prepared = CandidateCreatedSchema.parse(await prepareCandidate(input))
+      } catch (error) {
+        // Self-collision / orphan ref / foreign holder: bump id and retry.
+        // Self-collision becomes structurally impossible rather than fatal.
+        if (failureFact(error)?.code === "candidate-ref-refused") {
+          lastRefused = error
+          continue
+        }
+        throw error
       }
+      if (
+        prepared.id !== input.id ||
+        prepared.queueId !== input.queueId ||
+        prepared.baseSha !== input.baseSha ||
+        prepared.revs.length !== input.revs.length ||
+        prepared.revs.some((revision, index) => {
+          const expected = input.revs[index]
+          return (
+            expected === undefined ||
+            revision.pr !== expected.pr ||
+            revision.n !== expected.n ||
+            revision.head !== expected.head
+          )
+        })
+      ) {
+        throw new Error(`yrd: Candidate preparer changed immutable content identity for '${input.id}'`)
+      }
+      if (prepared.mergeability === "unknown") {
+        throw new Error(`yrd: Candidate preparer left mergeability unknown for '${input.id}'`)
+      }
+      if (prepared.mergeability === "mergeable") {
+        if (prepared.sha === undefined || prepared.ref === undefined) {
+          throw new Error(`yrd: mergeable Candidate '${input.id}' requires a synthetic SHA and ref`)
+        }
+        if (prepared.ref !== `refs/yrd/candidates/${input.id}`) {
+          throw new Error(`yrd: Candidate '${input.id}' must publish refs/yrd/candidates/${input.id}`)
+        }
+      }
+      return prepared
     }
-    return prepared
+    if (lastRefused !== undefined) throw lastRefused
+    throw new Error(`yrd: Candidate id allocation exhausted ${CANDIDATE_REF_COLLISION_LIMIT} collision identities`)
   }
 
   const candidateFacts = (
@@ -1285,22 +1323,40 @@ function createQueue<Shape extends PRShape>(
     selection?: AdmitArgs["selection"],
   ): Promise<Run[]> => {
     const admitted: Run[] = []
+    // Implicit (selectorless) drains absorb per-PR terminal races; explicit
+    // targeting stays fail-loud so a one-shot caller sees the real outcome.
+    const selectorless = selection !== "explicit"
     for (const selector of selectors) {
-      const pr = resolvePR(runtime().bays, selector)
-      if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
-      warnFlowDrift([pr.flow])
-      const baseSha = await resolveCandidateBaseSha([pr], resolveCycleBase)
-      const candidate = await candidateFacts([pr], baseSha)
-      const started = startedRun(
-        await actions.admit({
+      try {
+        const pr = resolvePR(runtime().bays, selector)
+        if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
+        warnFlowDrift([pr.flow])
+        const baseSha = await resolveCandidateBaseSha([pr], resolveCycleBase)
+        const candidate = await candidateFacts([pr], baseSha)
+        const started = startedRun(
+          await actions.admit({
+            pr: selector,
+            baseSha,
+            ...(candidate === undefined ? {} : { candidate }),
+            ...(selection === undefined ? {} : { selection }),
+          }),
+        )
+        if (started !== undefined) {
+          admitted.push(Queues.terminal(started) ? await reportFreshTerminal(started) : started)
+        }
+      } catch (error) {
+        const fact = failureFact(error)
+        const checkability = error instanceof PrCheckabilityConflict
+        if (!selectorless || (!checkability && (fact === undefined || fact.kind !== "refusal"))) {
+          throw error
+        }
+        log.warn?.("queue admit skipped a PR that is no longer admissible", {
+          action: "compose-candidate-skip",
           pr: selector,
-          baseSha,
-          ...(candidate === undefined ? {} : { candidate }),
-          ...(selection === undefined ? {} : { selection }),
-        }),
-      )
-      if (started !== undefined) {
-        admitted.push(Queues.terminal(started) ? await reportFreshTerminal(started) : started)
+          code: checkability ? "pr-not-checkable" : fact?.code,
+          kind: checkability ? "refusal" : fact?.kind,
+          reason: error instanceof Error ? error.message : String(error),
+        })
       }
     }
     return admitted
@@ -1444,7 +1500,7 @@ function createQueue<Shape extends PRShape>(
               // Retire it once so it cannot poison every future resident cycle.
               if (fact.code === "stale-plan") {
                 await actions.retireStalePlan(candidateId)
-                log.warn?.("queue compose retired an un-isolable stale-plan batch", {
+                log.warn?.("Skipped an outdated batch because its PRs can no longer be tested together.", {
                   action: "compose-stale-plan-retire",
                   run: candidateId,
                   code: fact.code,
@@ -1452,7 +1508,7 @@ function createQueue<Shape extends PRShape>(
                 })
                 return
               }
-              log.warn?.("queue compose skipped a candidate lost to a losable refusal", {
+              log.warn?.("Skipped a PR that changed while its batch was being prepared.", {
                 action: "compose-candidate-skip",
                 run: candidateId,
                 code: fact.code,
@@ -1495,25 +1551,41 @@ function createQueue<Shape extends PRShape>(
               })
             : []
           for (const gap of authorityGaps) {
-            if (gap.reason === "consumed") {
-              const ejected = await actions.run({
-                prs: [gap.pr],
-                ...(args.steps === undefined ? {} : { steps: args.steps }),
-              })
-              if (!ejected.events.some((applied) => applied.name === "pr/needs-author")) {
-                throw new Error(`yrd: consumed authority for PR '${gap.pr}' produced no needs-author receipt`)
+            try {
+              if (gap.reason === "consumed") {
+                const ejected = await actions.run({
+                  prs: [gap.pr],
+                  ...(args.steps === undefined ? {} : { steps: args.steps }),
+                })
+                if (!ejected.events.some((applied) => applied.name === "pr/needs-author")) {
+                  throw new Error(`yrd: consumed authority for PR '${gap.pr}' produced no needs-author receipt`)
+                }
               }
+              log.warn?.("queue compose ejected a candidate without runnable authority", {
+                action: "compose-candidate-skip",
+                pr: gap.pr,
+                code: `queue-${gap.kind}-authority-${gap.reason}`,
+                reason:
+                  gap.reason === "consumed"
+                    ? `${gap.kind} authority was consumed by queue run '${gap.consumedBy}'`
+                    : `no ${gap.kind} authority fact exists`,
+                remedy: `yrd pr recut ${gap.pr} --preflight --queue`,
+              })
+            } catch (error) {
+              // 22306 class: a single PR's authority/eject refusal must not abort the
+              // selectorless drain (same boundary as the per-candidate wrap below).
+              const fact = failureFact(error)
+              if (!selectorless || fact === undefined || (fact.kind !== "refusal" && fact.kind !== "infrastructure")) {
+                throw error
+              }
+              log.warn?.("queue compose skipped an authority-gap PR lost to a losable refusal", {
+                action: "compose-candidate-skip",
+                pr: gap.pr,
+                code: fact.code,
+                kind: fact.kind,
+                reason: fact.message,
+              })
             }
-            log.warn?.("queue compose ejected a candidate without runnable authority", {
-              action: "compose-candidate-skip",
-              pr: gap.pr,
-              code: `queue-${gap.kind}-authority-${gap.reason}`,
-              reason:
-                gap.reason === "consumed"
-                  ? `${gap.kind} authority was consumed by queue run '${gap.consumedBy}'`
-                  : `no ${gap.kind} authority fact exists`,
-              remedy: `yrd pr recut ${gap.pr} --preflight --queue`,
-            })
           }
           const authorityGapIds = new Set(authorityGaps.map((gap) => gap.pr))
           snapshot = runtime()
@@ -1521,13 +1593,32 @@ function createQueue<Shape extends PRShape>(
             ? []
             : requested.filter((pr) => !authorityGapIds.has(pr.id) && checksRequested(pr))
           const before = new Map(checked.map((pr) => [pr.id, checkEligibility(snapshot, pr, steps).status]))
-          await refreshCheckIdentities(checked, resolveCycleBase)
-          const admissions = await drainAdmissions(
-            checked.map((pr) => pr.id),
-            runOptions,
-            resolveCycleBase,
-            selection,
-          )
+          // Isolate admission-phase work the same way as merge-candidate work: one
+          // PR's preparation/admit refusal (authored-gitlink, recut-certificate, …)
+          // must not kill the whole selectorless pass (22306 architectural gap).
+          let admissions: Run[] = []
+          try {
+            await refreshCheckIdentities(checked, resolveCycleBase)
+            admissions = await drainAdmissions(
+              checked.map((pr) => pr.id),
+              runOptions,
+              resolveCycleBase,
+              selection,
+            )
+          } catch (error) {
+            const fact = failureFact(error)
+            if (!selectorless || fact === undefined || (fact.kind !== "refusal" && fact.kind !== "infrastructure")) {
+              throw error
+            }
+            log.warn?.("queue compose skipped admission-phase work lost to a losable refusal", {
+              action: "compose-candidate-skip",
+              code: fact.code,
+              kind: fact.kind,
+              reason: fact.message,
+              prs: checked.map((pr) => pr.id),
+            })
+            admissions = []
+          }
           snapshot = runtime()
           const unsettled = checked.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "passed")
           const pending = unsettled.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "failed")
@@ -1570,61 +1661,83 @@ function createQueue<Shape extends PRShape>(
           )
           for (const candidate of partitionCandidates(prs, snapshot.queues.batchSize)) {
             if (runOptions.continueAdmissions?.() === false) break
-            warnFlowDrift(candidate.map((pr) => pr.flow))
-            const baseSha = await resolveCandidateBaseSha(candidate, resolveCycleBase)
-            let facts: z.infer<typeof CandidateCreatedSchema> | undefined
+            // 22306 residual: wrap the FULL per-candidate admission (base resolve,
+            // prepare, start, settle) so a recut-certificate / command-refused /
+            // candidate-ref-refused on ONE partition cannot exit the selectorless
+            // drain. Explicit PR targeting still fails loud.
             try {
-              facts = await candidateFacts(candidate, baseSha)
+              warnFlowDrift(candidate.map((pr) => pr.flow))
+              const baseSha = await resolveCandidateBaseSha(candidate, resolveCycleBase)
+              let facts: z.infer<typeof CandidateCreatedSchema> | undefined
+              try {
+                facts = await candidateFacts(candidate, baseSha)
+              } catch (error) {
+                const fact = failureFact(error)
+                if (
+                  !selectorless ||
+                  fact === undefined ||
+                  (fact.kind !== "refusal" && fact.kind !== "infrastructure")
+                ) {
+                  throw error
+                }
+                log.warn?.("queue compose skipped a Candidate that could not be prepared", {
+                  action: "compose-candidate-skip",
+                  ...(candidate.length === 1 ? { pr: candidate[0]?.id } : { prs: candidate.map((pr) => pr.id) }),
+                  code: fact.code,
+                  kind: fact.kind,
+                  reason: fact.message,
+                })
+                continue
+              }
+              const started = await actions.run({
+                prs: candidate.map((pr) => pr.id),
+                ...(args.steps === undefined ? {} : { steps: args.steps }),
+                baseSha,
+                ...(facts === undefined ? {} : { candidate: facts }),
+              })
+              const ejected = started.events.find((applied) => applied.name === "pr/needs-author")
+              if (ejected !== undefined) {
+                const refusal = PRNeedsAuthorFactSchema.parse(ejected.data)
+                if (!selectorless) raiseFailure("refusal", refusal.receipt.code, refusal.receipt.message)
+                log.warn?.("queue compose ejected a candidate without runnable authority", {
+                  action: "compose-candidate-skip",
+                  pr: refusal.pr,
+                  code: refusal.receipt.code,
+                  reason: refusal.receipt.message,
+                  remedy: `yrd pr recut ${refusal.pr} --preflight --queue`,
+                })
+                continue
+              }
+              const startedEvent = started.events.find((applied) => applied.name === "queue/run/started")
+              // A submitted PR whose configured plan is entirely admission work can
+              // already be satisfied by a retained successful Run. The command is
+              // then an intentional idempotent no-op; keep draining later candidates
+              // instead of terminating a resident runner at the first cached PR.
+              if (
+                startedEvent === undefined &&
+                started.events.every((event) => event.name === "queue/candidate/created")
+              ) {
+                continue
+              }
+              if (startedEvent === undefined) throw new Error("yrd: queue run did not start a run")
+              const id = QueueStartSchema.parse((startedEvent.data as { run?: unknown }).run).id
+              roots.push(id)
+              const root = current(id)
+              if (Queues.terminal(root)) await reportFreshTerminal(root)
+              else await settleCandidate(id)
             } catch (error) {
               const fact = failureFact(error)
               if (!selectorless || fact === undefined || (fact.kind !== "refusal" && fact.kind !== "infrastructure")) {
                 throw error
               }
-              log.warn?.("queue compose skipped a Candidate that could not be prepared", {
+              log.warn?.("queue compose skipped a candidate lost to a losable refusal", {
                 action: "compose-candidate-skip",
                 ...(candidate.length === 1 ? { pr: candidate[0]?.id } : { prs: candidate.map((pr) => pr.id) }),
                 code: fact.code,
                 kind: fact.kind,
                 reason: fact.message,
               })
-              continue
             }
-            const started = await actions.run({
-              prs: candidate.map((pr) => pr.id),
-              ...(args.steps === undefined ? {} : { steps: args.steps }),
-              baseSha,
-              ...(facts === undefined ? {} : { candidate: facts }),
-            })
-            const ejected = started.events.find((applied) => applied.name === "pr/needs-author")
-            if (ejected !== undefined) {
-              const refusal = PRNeedsAuthorFactSchema.parse(ejected.data)
-              if (!selectorless) raiseFailure("refusal", refusal.receipt.code, refusal.receipt.message)
-              log.warn?.("queue compose ejected a candidate without runnable authority", {
-                action: "compose-candidate-skip",
-                pr: refusal.pr,
-                code: refusal.receipt.code,
-                reason: refusal.receipt.message,
-                remedy: `yrd pr recut ${refusal.pr} --preflight --queue`,
-              })
-              continue
-            }
-            const startedEvent = started.events.find((applied) => applied.name === "queue/run/started")
-            // A submitted PR whose configured plan is entirely admission work can
-            // already be satisfied by a retained successful Run. The command is
-            // then an intentional idempotent no-op; keep draining later candidates
-            // instead of terminating a resident runner at the first cached PR.
-            if (
-              startedEvent === undefined &&
-              started.events.every((event) => event.name === "queue/candidate/created")
-            ) {
-              continue
-            }
-            if (startedEvent === undefined) throw new Error("yrd: queue run did not start a run")
-            const id = QueueStartSchema.parse((startedEvent.data as { run?: unknown }).run).id
-            roots.push(id)
-            const root = current(id)
-            if (Queues.terminal(root)) await reportFreshTerminal(root)
-            else await settleCandidate(id)
           }
           const final = runtime()
           return [...new Set([...roots, ...pendingAdmissionRoots])].flatMap((root) =>
@@ -1755,7 +1868,19 @@ function createQueue<Shape extends PRShape>(
           let snapshot = runtime()
           const recoveryRoots = new Set([...rootsBeforeRecovery, ...activeQueueRootIds(snapshot.queues.authority)])
           const candidates = [...recoveryRoots].flatMap((root) => queueTree(snapshot.queues, snapshot.jobs, root))
+          const staleQueued: Array<{ run: RunId; step: StepName; drift: string }> = []
           for (const candidate of candidates) {
+            const active = candidate.steps[candidate.cursor]
+            const drift = active?.job?.status === "queued" ? plannedStepDrift(byName, active) : undefined
+            if (active !== undefined && drift !== undefined) {
+              const reconciled = await actions.advance(candidate.id)
+              if (reconciled.events.length > 0) {
+                affected.add(candidate.id)
+                staleQueued.push({ run: candidate.id, step: active.name, drift })
+              }
+              snapshot = runtime()
+              continue
+            }
             const ownsRecoveredJob = candidate.steps.some(
               (step) => step.job !== undefined && recoveredJobs.has(step.job.id),
             )
@@ -1766,6 +1891,15 @@ function createQueue<Shape extends PRShape>(
               snapshot = runtime()
             }
             if (ownsRecoveredJob) affected.add(candidate.id)
+          }
+          if (staleQueued.length > 0) {
+            log.warn?.("Stopped queue runs whose queued step definition changed.", {
+              action: "recover-stale-steps-release",
+              reason: "stale-steps",
+              runs: staleQueued.map(({ run }) => run),
+              steps: staleQueued.map(({ step }) => step),
+              details: staleQueued.map(({ drift }) => drift),
+            })
           }
           // Orphan hygiene: cancel every requested Job whose parent run is
           // terminal or absent, so a state upgrade or a settled/canceled run that
@@ -1785,7 +1919,7 @@ function createQueue<Shape extends PRShape>(
             if (orphan.reason === "run-terminal") affected.add(orphan.run)
           }
           if (settledOrphans.length > 0) {
-            log.warn?.("queue recover settled orphaned requested jobs whose parent run is terminal or absent", {
+            log.warn?.("Stopped jobs whose queue run had already ended.", {
               action: "recover-orphan-settle",
               reason: "orphaned-requested-job",
               jobs: settledOrphans.map((orphan) => orphan.job.id),
@@ -1806,7 +1940,7 @@ function createQueue<Shape extends PRShape>(
             affected.add(orphan.run)
           }
           if (orphanedRuns.length > 0) {
-            log.warn?.("queue recover settled orphaned runs whose cursor step never started", {
+            log.warn?.("Stopped queue runs whose next step never started.", {
               action: "recover-orphan-run-settle",
               reason: "orphaned-run",
               runs: orphanedRuns.map((orphan) => orphan.run),
@@ -1822,7 +1956,7 @@ function createQueue<Shape extends PRShape>(
             affected.add(batch.run)
           }
           if (retiredBatches.length > 0) {
-            log.warn?.("queue recover retired un-isolable stale-plan batches", {
+            log.warn?.("Removed outdated batches that can no longer be tested.", {
               action: "recover-stale-plan-retire",
               reason: "stale-plan",
               runs: retiredBatches.map((batch) => batch.run),
@@ -1909,7 +2043,7 @@ function createQueue<Shape extends PRShape>(
       }
       if (quiesced.length > 0) {
         // ONE loud structured receipt naming every settled root and job.
-        log.warn?.(`legacy pre-settlement queue roots quiesced: ${quiesced.map((entry) => entry.run).join(", ")}`, {
+        log.warn?.(`Stopped old queue runs during startup: ${quiesced.map((entry) => entry.run).join(", ")}.`, {
           action: "legacy-quiesce",
           reason: "legacy-quiesced",
           by: options.by,
@@ -2094,12 +2228,14 @@ function queueFailedEvent(
     ...(job === undefined ? {} : { job: { id: job.id, attempt: job.attempt } }),
     prs: run.prs.map((pr) => {
       const current = state.bays.prs[pr.id]
-      const actor = current?.revs.find((revision) => revision.n === pr.revision && revision.head === pr.headSha)?.actor
+      const submitter = current?.revs.find(
+        (revision) => revision.n === pr.revision && revision.head === pr.headSha,
+      )?.submitter
       return {
         pr: pr.id,
         revision: pr.revision,
         headSha: pr.headSha,
-        ...(actor === undefined ? {} : { actor }),
+        ...(submitter === undefined ? {} : { submitter }),
       }
     }),
   })
@@ -2118,8 +2254,17 @@ function createQueueCommands(
       const pr = resolvePR(state.bays, args.pr)
       if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${args.pr}'`)
       const delivery = prDeliveryState(pr)
+      // Integrated / already-landed is success, not failure: a peer (or this same
+      // drain) may have finished the PR between the compose snapshot and admit.
+      // Returning empty keeps the selectorless resident alive (22306 #3).
+      if (delivery === "integrated" || delivery === "already-landed") {
+        return { events: [] }
+      }
       if (delivery !== "pushed" && delivery !== "submitted") {
-        raiseFailure("refusal", "pr-not-admissible", `yrd: PR '${pr.id}' is ${delivery}, not admissible`)
+        // Terminal races (withdrawn/canceled/rejected mid-compose) are losable for
+        // the resident via isConcurrentCheckabilityConflict — same shape as the
+        // bay "not checkable" path. Explicit one-shots still surface the throw.
+        throw new PrCheckabilityConflict(pr.id, delivery)
       }
       // A pause lets the currently active Job settle, but every admission
       // retry is a fresh Run. Guard the command itself so a selector chosen
@@ -2594,7 +2739,7 @@ function queueAuthorityNeedsAuthorEvent(
     run: gap.consumedBy,
     ...(pr.issue === undefined ? {} : { issueRef: pr.issue }),
     ...(prCorrelation(pr) === undefined ? {} : { correlation: prCorrelation(pr) }),
-    ...(revision.actor === undefined ? {} : { actor: revision.actor }),
+    ...(revision.submitter === undefined ? {} : { submitter: revision.submitter }),
     step,
     detail: message,
     receipt: { code, message },
@@ -2622,6 +2767,12 @@ function queueAuthorityReleaseReason(
     error?.code === "stale-check" ||
     error?.code === "stale-steps" ||
     error?.code === "stale-plan" ||
+    // The authoritative root may already have landed when publication of its
+    // derived component-main refs hits a transient push/fetch failure. The
+    // promotion is idempotent and the root must never be compensated; release
+    // the same PR revision so a fresh merge attempt reconciles the missing refs.
+    error?.code === "component-main-promotion-failed" ||
+    error?.code === "component-main-inspection-failed" ||
     // `orphaned-run` is the jobless sibling: the run's writer vanished before the
     // cursor step was requested (or its Jobs aged out of retention while the
     // record survived), so no Job exists to lose and no advance can ever move it.
@@ -3664,11 +3815,17 @@ function advanceQueue(
   const jobs = queueJobs(record, state.jobs)
   const index = jobs.length - 1
   const job = jobs[index]
-  if (job === undefined || job.status === "queued" || job.status === "in_progress" || job.status === "waiting") {
-    return { events: [] }
-  }
+  if (job === undefined) return { events: [] }
   const planned = record.steps[index]
   if (planned === undefined) throw new Error(`yrd: queue run '${record.id}' lost step ${index}`)
+  if (job.status === "queued") {
+    const drift = plannedStepDrift(steps, planned)
+    return {
+      events:
+        drift === undefined ? [] : [queueFailedEvent(state, record, { code: "stale-steps", message: `yrd: ${drift}` })],
+    }
+  }
+  if (job.status === "in_progress" || job.status === "waiting") return { events: [] }
   if (!jobSucceeded(job)) {
     const before = shapeThrough(record, state.jobs, index)
     if (job.conclusion === "cancelled") {
@@ -3725,7 +3882,7 @@ function advanceQueue(
       run: record.id,
       ...(current.issue === undefined ? {} : { issueRef: current.issue }),
       ...(prCorrelation(current) === undefined ? {} : { correlation: prCorrelation(current) }),
-      ...(revision?.actor === undefined ? {} : { actor: revision.actor }),
+      ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
       step: planned.name,
       ...(evidence === undefined ? {} : { evidence }),
       detail: failure.message,
@@ -3766,7 +3923,7 @@ function advanceQueue(
             candidateTreeSha: alreadyLanded.candidateTreeSha,
             baseTreeSha: alreadyLanded.baseTreeSha,
             ...(prCorrelation(current) === undefined ? {} : { correlation: prCorrelation(current) }),
-            ...(revision.actor === undefined ? {} : { actor: revision.actor }),
+            ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
           }),
         )
         continue
@@ -3790,7 +3947,7 @@ function advanceQueue(
           landingSha: shape.integration.commit,
           baseSha: shape.integration.baseSha,
           ...(revision.correlation === undefined ? {} : { correlation: revision.correlation }),
-          ...(revision.actor === undefined ? {} : { actor: revision.actor }),
+          ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
         }),
       )
     }
@@ -4946,7 +5103,7 @@ function prEligibility(
     approved: reviewed.approved,
     stale: reviewed.stale.length > 0 && reviewed.current === undefined,
     ...(reviewed.current?.decision === undefined ? {} : { decision: reviewed.current.decision }),
-    ...(reviewed.current?.actor === undefined ? {} : { actor: reviewed.current.actor }),
+    ...(reviewed.current?.by === undefined ? {} : { by: reviewed.current.by }),
     ...(reviewed.current?.ref === undefined ? {} : { ref: reviewed.current.ref }),
   }
   const checks = checkEligibility(state, pr, steps)
@@ -5045,7 +5202,7 @@ function prEligibility(
       if (reviewed.current?.decision === "reject") {
         return result({
           code: "review-rejected",
-          message: `PR '${pr.id}' was rejected by ${reviewed.current.actor} for revision ${prRevisionNumber(pr)}`,
+          message: `PR '${pr.id}' was rejected by ${reviewed.current.by} for revision ${prRevisionNumber(pr)}`,
         })
       }
       return result({

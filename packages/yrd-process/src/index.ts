@@ -12,6 +12,10 @@ export type ProcessRequest = Readonly<{
    * inherit stdin/stdout/stderr and stay in the foreground process group so
    * editors and agent harnesses receive ordinary terminal input. */
   interactive?: boolean
+  /** Observe the direct child PID synchronously after spawn and before run()
+   * awaits output or exit. A thrown observer error terminates and settles the
+   * child before the error is propagated. */
+  onStart?: (pid: number) => void
   onOutput?: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => void
   timeoutMs?: number
   /** Explicit inter-output silence lease. It starts with the first observed
@@ -105,6 +109,27 @@ type Spawned = Readonly<{
 }>
 
 export type Spawn = (argv: readonly string[], options: SpawnOptions) => Spawned
+
+type StartObserverFailure = Readonly<{ error: unknown }> | undefined
+
+function observeProcessStart(
+  observer: ProcessRequest["onStart"],
+  pid: number,
+  terminate: () => void,
+): StartObserverFailure {
+  if (observer === undefined) return undefined
+  try {
+    observer(pid)
+    return undefined
+  } catch (error) {
+    terminate()
+    return { error }
+  }
+}
+
+function propagateStartObserverError(failure: StartObserverFailure): void {
+  if (failure !== undefined) throw failure.error
+}
 
 /**
  * Default bounded wait for the output pipe to reach EOF after the DIRECT child
@@ -337,6 +362,7 @@ export function createProcess(
         const onAbort = () => terminate()
         signal.addEventListener("abort", onAbort, { once: true })
         if (signal.aborted) terminate()
+        const startObserverError = observeProcessStart(request.onStart, child.pid, terminate)
         const renewProgressLease = (bytes: number): void => {
           lastProgressAtMs = now()
           lastProgressBytes += bytes
@@ -409,11 +435,14 @@ export function createProcess(
           if (!drainedCleanly) {
             escapedDescendant = true
             stalled = true
-            log.warn?.("descendant held the output pipe open past child exit — abandoning drain", {
-              argv,
-              pid: child.pid,
-              postExitDrainGraceMs,
-            })
+            log.warn?.(
+              "The command exited, but a child process kept its output open; stopped waiting for more output.",
+              {
+                argv,
+                pid: child.pid,
+                postExitDrainGraceMs,
+              },
+            )
             // The child is already dead; SIGKILL the leaked in-group descendants
             // now (best-effort — a setsid escapee survives, which is why we also
             // release our own read end below so run() returns regardless).
@@ -423,7 +452,10 @@ export function createProcess(
         } else {
           // Forced settle: the child never reaped (sweepFailure already loud);
           // the pipe is held by the live tree, so release our read end.
-          log.warn?.("abandoning output drain — direct child never settled after SIGKILL", { argv, pid: child.pid })
+          log.warn?.("The command did not finish after it was killed; stopped waiting for more output.", {
+            argv,
+            pid: child.pid,
+          })
           drainAbort.abort()
         }
         const [stdout, stderr] = await capturesDone
@@ -433,6 +465,7 @@ export function createProcess(
         cancelKill?.()
         cancelReap?.()
         if (outputError !== undefined) throw outputError
+        propagateStartObserverError(startObserverError)
         const result: ProcessResult = {
           exitCode,
           signal: child.signalCode,
@@ -447,7 +480,7 @@ export function createProcess(
           ...(sweepFailure === undefined ? {} : { sweepFailure }),
           ...(escapedDescendant ? { escapedDescendant: true } : {}),
         } as ProcessResult
-        log.debug?.("process exited", {
+        log.debug?.("Command finished.", {
           argv,
           exitCode: result.exitCode,
           signal: result.signal,
@@ -512,7 +545,10 @@ async function readBounded(
     abandon === undefined
       ? undefined
       : new Promise((resolve) => {
-          if (abandon.aborted) return resolve(ABANDONED)
+          if (abandon.aborted) {
+            resolve(ABANDONED)
+            return
+          }
           abandon.addEventListener("abort", () => resolve(ABANDONED), { once: true })
         })
   try {

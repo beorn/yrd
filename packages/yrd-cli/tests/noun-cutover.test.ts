@@ -24,6 +24,19 @@ function scannedFiles(path: string): string[] {
 }
 
 describe("noun cutover ratchet", () => {
+  it("documents persistent open separately from scoped run", () => {
+    const readme = readFileSync(join(root, "README.md"), "utf8")
+    const prose = readme.replaceAll(/\s+/gu, " ")
+
+    expect(prose).toContain("`bay open` creates a persistent Bay and returns")
+    expect(prose).toContain("`bay run` owns the scoped foreground lifecycle")
+    expect(prose).toContain("Top-level `yrd run` acts on queue-run records")
+    expect(readme).toContain("yrd bay open --bay example")
+    expect(readme).toContain("yrd bay run @tracker/fix-release -- vi README.md")
+    expect(prose).not.toContain("`bay open` owns the complete foreground lifecycle")
+    expect(readme).not.toMatch(/^yrd(?: --name [^\n]+)? bay open[^\n]*\s--\s/mu)
+  })
+
   it("documents public recovery and the command-event core model", () => {
     const readme = readFileSync(join(root, "README.md"), "utf8")
     const prose = readme.replaceAll(/\s+/gu, " ")
@@ -37,6 +50,7 @@ describe("noun cutover ratchet", () => {
   it("keeps retired nouns and routes out of product code and current documentation", () => {
     const queueNoun = ["li", "ne"].join("")
     const issueNoun = ["ta", "sk"].join("")
+    const retiredRoleNoun = ["act", "or"].join("")
     const runnerNoun = ["exec", "utor"].join("")
     const waitOption = `--${["wa", "it"].join("")}`
     const integrateVerb = ["inte", "grate"].join("")
@@ -44,17 +58,21 @@ describe("noun cutover ratchet", () => {
     const releaseVerb = ["re", "lease"].join("")
     const statusVerb = ["sta", "tus"].join("")
     const projectionStatus = new RegExp(`${issueNoun}[-_]?${statusVerb}`, "giu")
+    const branchPrefix = new RegExp(`\\b${issueNoun}/`, "giu")
     const showVerb = ["sh", "ow"].join("")
     const logVerb = ["lo", "g"].join("")
     const evaluateVerb = ["eval", "uate"].join("")
     const competeVerb = ["com", "pete"].join("")
     const adminNoun = ["ad", "min"].join("")
     const forbidden = [
-      new RegExp(`\\b${queueNoun}s?\\b`, "iu"),
+      new RegExp(`\\byrd\\s+${queueNoun}s?\\b`, "iu"),
+      new RegExp(`\\bqueue\\s+${queueNoun}s?\\b`, "iu"),
       new RegExp(`\\b${queueNoun}[-A-Z_]`, "u"),
       new RegExp(`\\b${queueNoun.toUpperCase()}[A-Z_]`, "u"),
       new RegExp(`\\b${queueNoun[0]?.toUpperCase()}${queueNoun.slice(1)}[A-Z_]`, "u"),
-      new RegExp(issueNoun, "iu"),
+      new RegExp(`\\byrd\\s+${issueNoun}s?\\b`, "iu"),
+      new RegExp(`\\b${issueNoun}\\s+(?:list|show|view|create|open|close|submit|claim|ready|status)\\b`, "iu"),
+      new RegExp(`\\b${retiredRoleNoun}\\b`, "iu"),
       new RegExp(runnerNoun, "iu"),
       new RegExp(waitOption, "u"),
       new RegExp(
@@ -62,7 +80,6 @@ describe("noun cutover ratchet", () => {
         "iu",
       ),
       new RegExp(`\\byrd\\s+(?:${integrateVerb}|${holdVerb}|${releaseVerb}|${adminNoun})\\b`, "iu"),
-      new RegExp(`\\byrd\\s+run\\b`, "iu"),
       new RegExp(`\\bcontest\\s+(?:${evaluateVerb}|${showVerb})\\b`, "iu"),
       new RegExp(`\\bissue\\s+${competeVerb}\\b`, "iu"),
       new RegExp(`\\bqueue\\s+run[^\\n]{0,80}${["--re", "try"].join("")}`, "iu"),
@@ -88,21 +105,18 @@ describe("noun cutover ratchet", () => {
           .replaceAll(lintDirective, "")
           .replaceAll("HOLD THE LINE", "")
           .replaceAll(projectionStatus, "")
+          .replaceAll(branchPrefix, "")
         for (const expression of forbidden) {
           const match = expression.exec(searchable)
           if (match !== null) failures.push(`${relative}:${index + 1}: ${match[0]}`)
         }
       }
     }
-    // Ratchet floor, not zero: the retired-noun cutover is not yet complete. The
-    // residue is over-broad matches on legitimate tokens the crude regexes cannot
-    // distinguish from product nouns — the revision Lineage header, the spinner
-    // style value, the diagnostic source-position field, common loop-variable
-    // identifiers, and the repo's own branch-prefix convention. Making the guard
-    // precise (so it targets only genuine retired product-nouns) is a separate
-    // decision tracked under 21106; until then this floor prevents NEW violations.
+    // Ratchet floor, not zero: the retired-noun cutover is not yet complete.
+    // Match public routes and identifier-shaped nouns rather than ordinary prose
+    // words such as "line", the task/ branch prefix, or taskStatus projections.
     // NEVER raise this baseline; lower it as genuine fixes land.
-    const NOUN_CUTOVER_BASELINE = 71
+    const NOUN_CUTOVER_BASELINE = 9
     expect(failures.length, failures.join("\n")).toBeLessThanOrEqual(NOUN_CUTOVER_BASELINE)
   })
 

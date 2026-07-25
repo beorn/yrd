@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto"
+import { resolve } from "node:path"
 import { stepGateMode, type YrdStepConfig } from "./config.ts"
 
 export type ToolchainFingerprint = Readonly<{
@@ -20,6 +21,15 @@ export type QueueStepRevisionInput = Readonly<{
   resolvedCommand?: readonly string[]
 }>
 
+/**
+ * Absolute-path identity for revision fingerprints (22334).
+ * Relative vs absolute repo/stateDir/baysRoot used to produce two revision
+ * families that init and the run path swapped forever.
+ */
+function stablePath(path: string): string {
+  return resolve(path)
+}
+
 /** Internal identity seam for configured queue steps; intentionally not exported by the package root. */
 export function queueStepRevision(input: QueueStepRevisionInput): string {
   return createHash("sha256")
@@ -31,9 +41,9 @@ export function queueStepRevision(input: QueueStepRevisionInput): string {
             : input.checkoutParent === undefined
               ? "yrd-queue-command-v3"
               : "yrd-queue-command-v4",
-        repo: input.repo,
-        stateDir: input.stateDir,
-        ...(input.checkoutParent === undefined ? {} : { checkoutParent: input.checkoutParent }),
+        repo: stablePath(input.repo),
+        stateDir: stablePath(input.stateDir),
+        ...(input.checkoutParent === undefined ? {} : { checkoutParent: stablePath(input.checkoutParent) }),
         name: input.name,
         run: input.config.run,
         resolvedCommand: input.resolvedCommand,

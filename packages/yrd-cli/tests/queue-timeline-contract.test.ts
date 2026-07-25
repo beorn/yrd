@@ -10,6 +10,7 @@ import { queueTimelineStories } from "../dev/queue-timeline-fixtures.ts"
 import { FAILURE_SLUGS } from "../src/failure-slug.ts"
 import {
   formatQueuePrId,
+  QueueRecoveryView,
   QueueTimelineView,
   PRDetailView,
   queueTimelineAdmissionTimes,
@@ -27,8 +28,12 @@ const contractProjection = (): QueueTimelineProjection => {
   return projection
 }
 
-async function renderTimeline(projection: QueueTimelineProjection, width: number): Promise<string[]> {
-  const rendered = await renderString(createElement(QueueTimelineView, { projection, columns: width }), {
+async function renderTimeline(
+  projection: QueueTimelineProjection,
+  width: number,
+  runnerRefusal?: Readonly<{ code: string; message: string; run?: string; step?: string }>,
+): Promise<string[]> {
+  const rendered = await renderString(createElement(QueueTimelineView, { projection, columns: width, runnerRefusal }), {
     width,
     height: 45,
     plain: true,
@@ -116,6 +121,49 @@ describe("queue timeline 21106 contract", () => {
     expect(staleFrame).toContain("RUNNER STALE — last tick 1:00:00 ago")
   })
 
+  it("distinguishes a missing runner process from a stale-step contract refusal", async () => {
+    const refused = {
+      ...contractProjection(),
+      runner: null,
+    }
+    const frame = (
+      await renderTimeline(refused, 120, {
+        code: "step-revision-drift",
+        message: "queue run 'R2670' requires step 'check' revision 'v1', installed 'v2'",
+        run: "R2670",
+        step: "check",
+      })
+    ).join("\n")
+
+    expect(frame).toContain("NO RUNNER - runner refused: stale step contract on R2670")
+    expect(frame).toContain(
+      "step-revision-drift: queue run 'R2670' requires step 'check' revision 'v1', installed 'v2'",
+    )
+    expect(frame).not.toContain("NO RUNNER - no drained run in window")
+  })
+
+  it("does not call recovery idle while audit still names a blocking run", async () => {
+    const frame = await renderString(
+      createElement(QueueRecoveryView, {
+        runs: [],
+        findings: [
+          {
+            code: "step-revision-drift",
+            message: "queue run 'R2670' requires step 'merge' revision 'v1', installed 'v2'",
+            run: "R2670",
+            step: "merge",
+          },
+        ],
+      }),
+      { width: 120, plain: true },
+    )
+
+    expect(frame).not.toContain("Queue idle")
+    expect(frame).toContain("R2670")
+    expect(frame).toContain("step-revision-drift")
+    expect(frame).toContain("requires step 'merge' revision 'v1', installed 'v2'")
+  })
+
   it("projects each draft and run occurrence with composite cursor identity", () => {
     const projection = contractProjection()
     expect(projection.rows.map((row) => [row.group, row.status, row.run ?? row.pr, row.pr, row.revision])).toEqual([
@@ -164,7 +212,7 @@ describe("queue timeline 21106 contract", () => {
       25 * minute,
     ])
     expect(projection.rows.map((row) => row.glyph)).toEqual(["×", "○", "◉", "◉", "×", "✓"])
-    // BY: the submitting actor of each exact PR revision, lossless in JSON.
+    // BY: the submitter of each exact PR revision, lossless in JSON.
     expect(projection.rows.map((row) => row.submitter)).toEqual([
       "@agent/2",
       "@cto",

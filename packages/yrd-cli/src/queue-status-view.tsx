@@ -23,6 +23,7 @@ import type {
   IntegrationProof,
   PRCheckRecord,
   PREligibility,
+  QueueAuditFinding,
   Run,
   QueueStep,
   QueueSummary,
@@ -224,7 +225,7 @@ export type QueueTimelineProjectedRow = Readonly<{
   /** Canonical issue path for this PR revision; presentation may replace the branch with this stronger identity. */
   issue?: string
   subject: string
-  /** The actor who submitted this exact PR revision; absent only for journals written before submitter identity. */
+  /** The identity that submitted this exact PR revision; absent only for older journals. */
   submitter?: string
   step?: string
   detail: string
@@ -237,7 +238,7 @@ export type QueueTimelineProjectedRow = Readonly<{
   activeMs: number | null
   waitMs: number | null
   queueWaitMs: number | null
-  /** Perfect-detector landing class (21801) — present on completed Run rows. */
+  /** Diagnostic landing class for display/JSON (21801) — not a success verdict. */
   landingVerdict?: LandingVerdict
   /** Step names in run order — scripts must not infer landing from glyph alone. */
   stepNames?: readonly string[]
@@ -266,6 +267,13 @@ export type QueueTimelineRunner = Readonly<{
   /** With `exitedAt`: true = clean operator/drain stop, false = signal-forced or
    * crash exit. Absent while the runner is live. */
   clean?: boolean
+}>
+
+export type QueueRunnerRefusal = Readonly<{
+  code: string
+  message: string
+  run?: string
+  step?: string
 }>
 
 export type QueueTimelineProjection = Readonly<{
@@ -760,7 +768,7 @@ function eligibilityForCurrentRevision(result: QueueStatusResult, pr: PR): PREli
 /** The submitter handle recorded on one exact immutable PR revision, or
  * undefined for revisions journaled before submitter identity was recorded. */
 function revisionSubmitter(pr: PR, revision = prRevisionNumber(pr), headSha = prHead(pr)): string | undefined {
-  return pr.revs.find((candidate) => candidate.n === revision && candidate.head === headSha)?.actor
+  return pr.revs.find((candidate) => candidate.n === revision && candidate.head === headSha)?.submitter
 }
 
 function currentTerminalFact(pr: PR): PRRevTerminal | undefined {
@@ -1377,9 +1385,11 @@ function queueOutcome(run: Run): string {
   return run.status === "waiting" ? "waiting" : "running"
 }
 
-/** Perfect detectors from the 6h phantom audit (22323): outcome=integrated or
- * steps-include-merge ⇒ landed; outcome=passed + admission-only ⇒ non-landing.
- * Duration is secondary and must never drive this verdict. */
+/** Diagnostic classification of a journal outcome for display/JSON (21801).
+ * DESCRIBES the recorded outcome; does NOT adjudicate success. Exit code of the
+ * merge step remains the sole success channel (CTO 2026-07-25: one test for
+ * success). Maps: integrated/already-landed → landed*; passed without
+ * integration proof → non-landing; duration is secondary and never drives this. */
 export function landingVerdictOfOutcome(outcome: string): LandingVerdict {
   if (outcome === "integrated") return "landed"
   if (outcome === "already-landed") return "already-landed"
@@ -2605,6 +2615,33 @@ export function QueueRunsView({ runs }: { runs: readonly Run[] }) {
   )
 }
 
+export function QueueRecoveryView({
+  runs,
+  findings,
+}: {
+  runs: readonly Run[]
+  findings: readonly QueueAuditFinding[]
+}) {
+  if (findings.length === 0) return <QueueRunsView runs={runs} />
+  return (
+    <Box flexDirection="column">
+      {runs.length === 0 ? null : <QueueRunsView runs={runs} />}
+      <Text color="$fg-error" bold>
+        Recovery left blocking queue findings:
+      </Text>
+      {findings.map((finding) => (
+        <Text
+          key={`${finding.code}:${finding.run ?? ""}:${finding.step ?? ""}:${finding.message}`}
+          color="$fg-error"
+        >
+          {finding.run === undefined ? "" : `${finding.run} `}
+          {finding.code}: {finding.message}
+        </Text>
+      ))}
+    </Box>
+  )
+}
+
 function queueRunSteps(run: Run): string {
   const selection = run.stepSelection
   const omitted = selection !== undefined && "omittedSteps" in selection ? selection.omittedSteps : undefined
@@ -3519,7 +3556,7 @@ export type StatusNotice = Readonly<{
     kind: "requeue" | "recut" | "retry" | "none"
     when: string
   }>
-  actor?: "author" | "ci" | "queue"
+  owner?: "author" | "ci" | "queue"
 }>
 
 function statusNoticeFailure(
@@ -3708,8 +3745,8 @@ export function queueStatusNotice(
       : automation === "auto-requeue"
         ? ({ kind: "requeue", when: "on the next queue pass" } as const)
         : noticeAutomation(state)
-  const actor =
-    disposition?.actor ??
+  const owner =
+    disposition?.owner ??
     (state === "queued" || state === "running" || state === "env" || state === "timeout"
       ? "queue"
       : state === "failed" || state === "rejected" || state === "needs-author" || state === "draft"
@@ -3721,7 +3758,7 @@ export function queueStatusNotice(
     headline: noticeHeadline(state, row, data),
     explanation: noticeExplanation(state, row, data, failure, context.stepP50Ms ?? null),
     auto,
-    ...(actor === undefined ? {} : { actor }),
+    ...(owner === undefined ? {} : { owner }),
   }
 }
 
@@ -4303,7 +4340,15 @@ function RunnerActivity({
  * is a pulsing `$` shell prompt. Border severity: down/stale red, paused
  * warning, healthy default.
  */
-function TimelineRunnerBox({ projection, live = false }: { projection: QueueTimelineProjection; live?: boolean }) {
+function TimelineRunnerBox({
+  projection,
+  runnerRefusal,
+  live = false,
+}: {
+  projection: QueueTimelineProjection
+  runnerRefusal?: QueueRunnerRefusal
+  live?: boolean
+}) {
   const runner = projection.runner
   const timing = runnerTiming(projection)
   const runnerStale = timing !== null && timing.ageMs > RUNNER_STALE_MS
@@ -4338,9 +4383,11 @@ function TimelineRunnerBox({ projection, live = false }: { projection: QueueTime
         </RunnerActivity>
         {runner === null ? (
           <Text color="$fg-error" bold wrap="truncate" minWidth={0}>
-            {drained === null
-              ? "NO RUNNER - no drained run in window"
-              : `NO RUNNER - queue last drained ${mediaDuration(now - drained)} ago`}
+            {runnerRefusal !== undefined
+              ? `NO RUNNER - runner refused: stale step contract on ${runnerRefusal.run ?? "unknown run"}`
+              : drained === null
+                ? "NO RUNNER - no drained run in window"
+                : `NO RUNNER - queue last drained ${mediaDuration(now - drained)} ago`}
           </Text>
         ) : (
           <Text color={marker.color} wrap="truncate" minWidth={0}>
@@ -4348,6 +4395,11 @@ function TimelineRunnerBox({ projection, live = false }: { projection: QueueTime
           </Text>
         )}
       </Box>
+      {runner === null && runnerRefusal !== undefined ? (
+        <Text color="$fg-error" wrap="truncate" minWidth={0}>
+          {runnerRefusal.code}: {runnerRefusal.message}
+        </Text>
+      ) : null}
       {runnerStale && timing !== null ? (
         <Text color="$fg-error" bold wrap="truncate">
           RUNNER STALE — last tick {mediaDuration(timing.ageMs)} ago
@@ -4636,6 +4688,7 @@ const QUEUE_STATS_MIN_PANE_ROWS = 24
 
 function ProjectedQueueTimeline({
   projection,
+  runnerRefusal,
   nav,
   cursorKey,
   onCursor,
@@ -4651,6 +4704,7 @@ function ProjectedQueueTimeline({
   listRef,
 }: {
   projection: QueueTimelineProjection
+  runnerRefusal?: QueueRunnerRefusal
   nav: boolean
   cursorKey?: number
   onCursor?: (index: number) => void
@@ -4708,7 +4762,7 @@ function ProjectedQueueTimeline({
             </Box>
           </>
         )}
-        <TimelineRunnerBox projection={projection} live={nav} />
+        <TimelineRunnerBox projection={projection} runnerRefusal={runnerRefusal} live={nav} />
         {/* No blank row above the table header (item 5): the header sits flush
             under the boxes above it. The pills + coverage row moved BELOW the
             list (item 2), rendered after the rows block. */}
@@ -4818,6 +4872,7 @@ function ProjectedQueueTimeline({
 
 export function QueueTimelineView({
   projection,
+  runnerRefusal,
   results,
   now,
   latest = false,
@@ -4837,6 +4892,7 @@ export function QueueTimelineView({
   listRef,
 }: {
   projection?: QueueTimelineProjection
+  runnerRefusal?: QueueRunnerRefusal
   results?: readonly QueueStatusResult[]
   now?: number
   latest?: boolean
@@ -4862,6 +4918,7 @@ export function QueueTimelineView({
     return (
       <ProjectedQueueTimeline
         projection={projection}
+        runnerRefusal={runnerRefusal}
         nav={nav}
         cursorKey={cursorKey}
         onCursor={onCursor}
@@ -5578,12 +5635,12 @@ export function QueueIntegrationFacts({ data }: { data: QueueShowData }) {
 
 function prReviewLine(review: PR["reviews"][number]): string {
   const note = presentFact(review.note)
-  return `REVIEW ${review.decision} ${review.actor} ${detailClock(review.at)}${note === undefined ? "" : ` — ${note}`}`
+  return `REVIEW ${review.decision} ${review.by} ${detailClock(review.at)}${note === undefined ? "" : ` — ${note}`}`
 }
 
 function prCommentLine(comment: PR["comments"][number]): string {
   const note = presentFact(comment.note)
-  return `COMMENT ${comment.actor} ${detailClock(comment.at)}${note === undefined ? "" : ` — ${note}`}`
+  return `COMMENT ${comment.by} ${detailClock(comment.at)}${note === undefined ? "" : ` — ${note}`}`
 }
 
 type PrActivityEntry = Readonly<{
@@ -5625,7 +5682,7 @@ function prTerminalLineageEntries(
   const entries =
     submittedAt === undefined
       ? terminal
-      : [...terminal, { at: submittedAt, rank: 20, text: `submitted by ${submitted?.actor ?? "-"}` }]
+      : [...terminal, { at: submittedAt, rank: 20, text: `submitted by ${submitted?.submitter ?? "-"}` }]
   return entries.toSorted(
     (left, right) => right.at.localeCompare(left.at) || right.rank - left.rank || left.text.localeCompare(right.text),
   )
@@ -5653,7 +5710,7 @@ function prActivityEntries(
     entries.push({
       at: activityAt,
       rank: 20,
-      text: `r${revision.n} ${submitted ? "submitted" : "registered"} by ${revision.actor ?? "-"}`,
+      text: `r${revision.n} ${submitted ? "submitted" : "registered"} by ${revision.submitter ?? "-"}`,
     })
   }
   for (const request of pr.checkRequests) {
@@ -5677,7 +5734,7 @@ function prActivityEntries(
     entries.push({
       at: review.at,
       rank: 40,
-      text: `r${review.revision} review ${review.decision} by ${review.actor}`,
+      text: `r${review.revision} review ${review.decision} by ${review.by}`,
       ...(presentFact(review.note) === undefined ? {} : { detail: presentFact(review.note) }),
     })
   }
@@ -5685,7 +5742,7 @@ function prActivityEntries(
     entries.push({
       at: comment.at,
       rank: 50,
-      text: `r${comment.revision} comment by ${comment.actor}`,
+      text: `r${comment.revision} comment by ${comment.by}`,
       ...(presentFact(comment.note) === undefined ? {} : { detail: presentFact(comment.note) }),
     })
   }

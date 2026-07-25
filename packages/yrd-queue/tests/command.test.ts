@@ -54,6 +54,16 @@ const authoredGitlinksEnv = { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITL
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 type Checked = AddStepResult<PRShape, "check", GitCheckResultEvidence>
 
+function expectNonInteractiveRebases(commands: readonly (readonly string[])[]): void {
+  const editorCapable = commands.filter((command) => !command.includes("--abort"))
+  expect(editorCapable.length).toBeGreaterThan(0)
+  for (const command of editorCapable) {
+    const rebase = command.indexOf("rebase")
+    expect(rebase).toBeGreaterThan(1)
+    expect(command.slice(rebase - 2, rebase + 1), command.join(" ")).toEqual(["-c", "core.editor=true", "rebase"])
+  }
+}
+
 function prFacts(pr: PR | undefined) {
   if (pr === undefined) throw new Error("expected PR")
   const revision = currentPRRev(pr)
@@ -157,6 +167,151 @@ async function hookedSubmoduleRepository(options: {
   )
   await chmod(hook, 0o755)
   return { repo, remote, baseSha, featureSha, moduleSha }
+}
+
+async function componentMainLandingRepository(options: Readonly<{ pushSuccessor?: boolean }> = {}): Promise<{
+  repo: string
+  component: string
+  rootRemote: string
+  componentRemote: string
+  rootBaseSha: string
+  componentBaseSha: string
+  pinSha: string
+  successorSha: string
+  featureSha: string
+}> {
+  const { repo } = await repository()
+  const component = join(repo, "..", "component")
+  const componentRemote = join(repo, "..", "component-origin.git")
+  await Bun.$`git init -q -b main ${component}`
+  await git(component, ["config", "user.name", "Yrd Test"])
+  await git(component, ["config", "user.email", "yrd@example.invalid"])
+  await writeFile(join(component, "version.txt"), "base\n")
+  await git(component, ["add", "version.txt"])
+  await git(component, ["commit", "-qm", "base"])
+  const componentBaseSha = await git(component, ["rev-parse", "HEAD"])
+  await Bun.$`git init -q --bare ${componentRemote}`
+  await git(component, ["remote", "add", "origin", componentRemote])
+  await git(component, ["push", "-q", "origin", "main"])
+
+  await git(repo, ["config", "protocol.file.allow", "always"])
+  await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", componentRemote, "dep"])
+  await git(repo, ["commit", "-qam", "add dependency"])
+  const rootBaseSha = await git(repo, ["rev-parse", "HEAD"])
+  const rootRemote = join(repo, "..", "root-origin.git")
+  await Bun.$`git init -q --bare ${rootRemote}`
+  await git(repo, ["remote", "add", "origin", rootRemote])
+  await git(repo, ["push", "-q", "origin", "main"])
+
+  await git(component, ["switch", "-qc", "task/component"])
+  await writeFile(join(component, "version.txt"), "pin\n")
+  await git(component, ["commit", "-qam", "pin"])
+  const pinSha = await git(component, ["rev-parse", "HEAD"])
+  await git(component, ["push", "-q", "origin", "task/component"])
+
+  await git(repo, ["switch", "-qc", "issue/feature"])
+  await git(join(repo, "dep"), ["fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+  await git(join(repo, "dep"), ["checkout", "-q", pinSha])
+  await git(repo, ["add", "dep"])
+  await git(repo, ["commit", "-qm", "pin dependency"])
+  const featureSha = await git(repo, ["rev-parse", "HEAD"])
+  await git(repo, ["push", "-q", "origin", "issue/feature"])
+  await git(repo, ["switch", "-q", "main"])
+  await git(repo, ["-c", "protocol.file.allow=always", "submodule", "update", "-q"])
+
+  let successorSha = pinSha
+  if (options.pushSuccessor === true) {
+    // The submit-time publication guard has already observed pinSha on this
+    // branch. Preserve the disputed timeline as an explicit falsification:
+    // an ordinary fast-forward successor still contains the earlier pin.
+    await writeFile(join(component, "version.txt"), "successor\n")
+    await git(component, ["commit", "-qam", "successor"])
+    successorSha = await git(component, ["rev-parse", "HEAD"])
+    await git(component, ["push", "-q", "origin", "task/component"])
+  }
+  await git(join(repo, "dep"), ["fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+
+  return {
+    repo,
+    component,
+    rootRemote,
+    componentRemote,
+    rootBaseSha,
+    componentBaseSha,
+    pinSha,
+    successorSha,
+    featureSha,
+  }
+}
+
+async function multiComponentMainLandingRepository(): Promise<{
+  repo: string
+  rootRemote: string
+  rootBaseSha: string
+  featureSha: string
+  components: readonly Readonly<{
+    path: string
+    remote: string
+    baseSha: string
+    pinSha: string
+  }>[]
+}> {
+  const { repo } = await repository()
+  await git(repo, ["config", "protocol.file.allow", "always"])
+  const components: Array<{ path: string; remote: string; baseSha: string; pinSha: string; worktree: string }> = []
+
+  for (const name of ["a", "b"]) {
+    const path = `dep-${name}`
+    const worktree = join(repo, "..", `component-${name}`)
+    const remote = join(repo, "..", `component-${name}-origin.git`)
+    await Bun.$`git init -q -b main ${worktree}`
+    await git(worktree, ["config", "user.name", "Yrd Test"])
+    await git(worktree, ["config", "user.email", "yrd@example.invalid"])
+    await writeFile(join(worktree, "version.txt"), `base-${name}\n`)
+    await git(worktree, ["add", "version.txt"])
+    await git(worktree, ["commit", "-qm", `base ${name}`])
+    const baseSha = await git(worktree, ["rev-parse", "HEAD"])
+    await Bun.$`git init -q --bare ${remote}`
+    await git(worktree, ["remote", "add", "origin", remote])
+    await git(worktree, ["push", "-q", "origin", "main"])
+    await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", remote, path])
+    components.push({ path, remote, baseSha, pinSha: baseSha, worktree })
+  }
+  await git(repo, ["commit", "-qm", "add dependencies"])
+  const rootBaseSha = await git(repo, ["rev-parse", "HEAD"])
+  const rootRemote = join(repo, "..", "multi-root-origin.git")
+  await Bun.$`git init -q --bare ${rootRemote}`
+  await git(repo, ["remote", "add", "origin", rootRemote])
+  await git(repo, ["push", "-q", "origin", "main"])
+
+  for (const component of components) {
+    await git(component.worktree, ["switch", "-qc", `task/${component.path}`])
+    await writeFile(join(component.worktree, "version.txt"), `pin-${component.path}\n`)
+    await git(component.worktree, ["commit", "-qam", `pin ${component.path}`])
+    component.pinSha = await git(component.worktree, ["rev-parse", "HEAD"])
+    await git(component.worktree, ["push", "-q", "origin", `task/${component.path}`])
+  }
+
+  await git(repo, ["switch", "-qc", "issue/feature"])
+  for (const component of components) {
+    const checkout = join(repo, component.path)
+    await git(checkout, ["fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+    await git(checkout, ["checkout", "-q", component.pinSha])
+    await git(repo, ["add", component.path])
+  }
+  await git(repo, ["commit", "-qm", "pin dependencies"])
+  const featureSha = await git(repo, ["rev-parse", "HEAD"])
+  await git(repo, ["push", "-q", "origin", "issue/feature"])
+  await git(repo, ["switch", "-q", "main"])
+  await git(repo, ["-c", "protocol.file.allow=always", "submodule", "update", "-q"])
+
+  return {
+    repo,
+    rootRemote,
+    rootBaseSha,
+    featureSha,
+    components: components.map(({ path, remote, baseSha, pinSha }) => ({ path, remote, baseSha, pinSha })),
+  }
 }
 
 async function divergentSubmoduleRepository(kind: "clean" | "conflict"): Promise<{
@@ -381,6 +536,7 @@ async function checkedQueue(
     environmentOverrides?: Readonly<Record<string, string>>
     environmentPassthrough?: readonly string[]
     refuse?: Readonly<{ paths: readonly string[]; reason?: string }>
+    mergeCommand?: readonly string[]
   }> = {},
 ) {
   const bayJobs = createBayJobDefs(unusedWorkspace)
@@ -410,13 +566,21 @@ async function checkedQueue(
     },
   )
   const merge = withMerge(
-    gitMergeStep<Checked>({
-      inject: { process },
-      repo,
-      ...(options.env === undefined ? {} : { env: options.env }),
-      ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
-    }),
-    { revision: "git-merge-v1" },
+    options.mergeCommand === undefined
+      ? gitMergeStep<Checked>({
+          inject: { process },
+          repo,
+          ...(options.env === undefined ? {} : { env: options.env }),
+          ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
+        })
+      : configuredMergeStep<Checked>({
+          inject: { process },
+          repo,
+          command: options.mergeCommand,
+          ...(options.env === undefined ? {} : { env: options.env }),
+          ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
+        }),
+    { revision: options.mergeCommand === undefined ? "git-merge-v1" : "configured-merge-v1" },
   )
   const queue = withQueue({
     steps: [check, merge] as const,
@@ -541,6 +705,7 @@ describe("Queue command adapters", () => {
       failure: {
         kind: "infrastructure",
         code: "candidate-ref-refused",
+        // foreign-holder: stable sentence; self-retry uses a different shape
         message: "yrd: Candidate ref 'refs/yrd/candidates/C1' is already occupied by different evidence",
       },
     })
@@ -671,7 +836,16 @@ describe("Queue command adapters", () => {
     expect(rawDiff).toContain("+beta")
 
     await using process = createProcess()
-    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+    const rebaseCommands: string[][] = []
+    const capturingProcess: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "git" && request.argv.includes("rebase")) {
+          rebaseCommands.push([...request.argv])
+        }
+        return process.run(request)
+      },
+    }
+    const result = await createGitPRRecutter({ inject: { process: capturingProcess }, repo }).recut({
       id: "PR1",
       branch: "issue/payload",
       base: "main",
@@ -682,6 +856,7 @@ describe("Queue command adapters", () => {
 
     expect(result.patchId).toMatch(/^[0-9a-f]{40}$/u)
     expect(await git(repo, ["show", `${result.headSha}:payload.dat`])).toBe("beta")
+    expectNonInteractiveRebases(rebaseCommands)
   })
 
   it("certifies the raw carrier object when a local replacement ref is present", async () => {
@@ -843,8 +1018,12 @@ describe("Queue command adapters", () => {
     await git(repo, ["submodule", "update", "--init", "--recursive"])
     await using delegate = createProcess()
     let afterRebase: ((path: string) => Promise<void>) | undefined
+    const rebaseCommands: string[][] = []
     const process = {
       run: async (request: ProcessRequest): Promise<ProcessResult> => {
+        if (request.argv[0] === "git" && request.argv.includes("rebase")) {
+          rebaseCommands.push([...request.argv])
+        }
         const result = await delegate.run(request)
         if (result.exitCode === 0 && request.argv.includes("rebase") && afterRebase !== undefined) {
           const mutate = afterRebase
@@ -973,6 +1152,8 @@ describe("Queue command adapters", () => {
         message: expect.stringContaining("did not preserve deterministic union identity"),
       },
     })
+    expectNonInteractiveRebases(rebaseCommands)
+    expect(rebaseCommands.some((command) => command.includes("--continue"))).toBe(true)
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
   }, 30_000)
 
@@ -1421,10 +1602,14 @@ describe("Queue command adapters", () => {
     const { repo, module, oldPinSha, newPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
     await using process = createProcess()
     const proofCommands: string[][] = []
+    const rebaseCommands: string[][] = []
     const proofProcess: Pick<Process, "run"> = {
       run(request) {
         if (request.argv[0] === "git" && (request.argv.includes("patch-id") || request.argv.includes("range-diff"))) {
           proofCommands.push([...request.argv])
+        }
+        if (request.argv[0] === "git" && request.argv.includes("rebase")) {
+          rebaseCommands.push([...request.argv])
         }
         return process.run(request)
       },
@@ -1488,6 +1673,7 @@ describe("Queue command adapters", () => {
     expect(proofCommands.filter((command) => command.includes("range-diff"))).toEqual([
       expect.arrayContaining(["range-diff", "--no-color", "--no-dual-color", "--no-patch"]),
     ])
+    expectNonInteractiveRebases(rebaseCommands)
     const landedTree = await git(repo, ["ls-tree", "main", "dep"])
     const landedPinSha = landedTree.split(/\s+/u)[2]
     expect(landedPinSha).toBe(evidence.sourceRewrites?.[0]?.newTipSha)
@@ -4213,7 +4399,7 @@ describe("Queue command adapters", () => {
     // timeout-robustness lineage owns the 120s default across the whole proof.
     expect(requests.filter(({ argv }) => argv[0] === "git").every(({ timeoutMs }) => timeoutMs === 120_000)).toBe(true)
     const initializations = requests.filter(
-      ({ argv }) => argv[0] === "git" && argv.includes("init") && argv.includes("--bare"),
+      ({ argv }) => argv[0] === "git" && argv.includes("init") && argv.includes("--bare") && argv.includes("--quiet"),
     )
     const proofFetches = requests.filter(({ argv }) => argv.includes("--depth=1") && argv.includes("--filter=tree:0"))
     expect(initializations).toHaveLength(1)
@@ -4564,7 +4750,8 @@ describe("Queue command adapters", () => {
           const result = await process.run(request)
           return {
             ...result,
-            stdout: result.stdout.replace(/(submodule\.[^\n]+\.url\n)[\s\S]*/u, "$1../dep.git"),
+            // oxlint-disable-next-line no-control-regex -- `git config --null` records are NUL-delimited by contract.
+            stdout: result.stdout.replace(/(submodule\.[^\u0000\n]+\.url\n)[^\u0000]*/u, "$1../dep.git"),
           }
         }
         if (request.argv.at(-1) === "remote.origin.url") {
@@ -4957,6 +5144,229 @@ describe("Queue command adapters", () => {
     expect(run).toMatchObject({ status: "completed", conclusion: "success", prs: [{ headSha: featureSha }] })
     expect(await git(remote, ["ls-tree", "main", "dep"])).toContain(moduleSha)
   })
+
+  it("keeps the submit-time publication carrier after an ordinary task-branch fast-forward", async () => {
+    const fixture = await componentMainLandingRepository({ pushSuccessor: true })
+    const carriers = await git(join(fixture.repo, "dep"), [
+      "for-each-ref",
+      `--contains=${fixture.pinSha}`,
+      "--format=%(refname)",
+      "refs/remotes/origin/",
+    ])
+
+    expect(carriers).toContain("refs/remotes/origin/task/component")
+    expect(
+      await git(fixture.componentRemote, ["merge-base", "--is-ancestor", fixture.pinSha, fixture.successorSha]),
+    ).toBe("")
+  })
+
+  it.each(["native", "configured"] as const)(
+    "advances component main when a root gitlink lands (%s)",
+    async (mode) => {
+      const fixture = await componentMainLandingRepository()
+      expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.componentBaseSha)
+
+      await using process = createProcess()
+      await using app = await checkedQueue(process, fixture.repo, ["true"], {
+        env: authoredGitlinksEnv,
+        ...(mode === "configured"
+          ? { mergeCommand: shellCommand('git push origin "$YRD_CANDIDATE_SHA":refs/heads/main') }
+          : {}),
+      })
+      await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+      expect(run).toMatchObject({ status: "completed", conclusion: "success" })
+      expect(await git(fixture.rootRemote, ["ls-tree", "main", "dep"])).toContain(fixture.pinSha)
+      expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.pinSha)
+    },
+    20_000,
+  )
+
+  it("classifies against freshly fetched component main instead of a stale bay tracking ref", async () => {
+    const fixture = await componentMainLandingRepository()
+    const bayComponent = join(fixture.repo, "dep")
+    expect(await git(bayComponent, ["rev-parse", "origin/main"])).toBe(fixture.componentBaseSha)
+    await git(fixture.component, ["push", "-q", "origin", `${fixture.pinSha}:refs/heads/main`])
+    expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.pinSha)
+    expect(await git(bayComponent, ["rev-parse", "origin/main"])).toBe(fixture.componentBaseSha)
+
+    await using process = createProcess()
+    const componentPushes: ProcessRequest[] = []
+    const recordingProcess: Pick<Process, "run"> = {
+      run(request) {
+        if (
+          request.argv[0] === "git" &&
+          request.argv.includes("push") &&
+          request.argv.includes(fixture.componentRemote)
+        ) {
+          componentPushes.push(request)
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(recordingProcess, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({ status: "completed", conclusion: "success" })
+    expect(componentPushes).toEqual([])
+    expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.pinSha)
+  }, 20_000)
+
+  it("refuses a non-ancestral component main without landing or force-pushing", async () => {
+    const fixture = await componentMainLandingRepository()
+    await git(fixture.component, ["switch", "-q", "main"])
+    await writeFile(join(fixture.component, "divergent.txt"), "divergent main\n")
+    await git(fixture.component, ["add", "divergent.txt"])
+    await git(fixture.component, ["commit", "-qm", "divergent main"])
+    const divergentMainSha = await git(fixture.component, ["rev-parse", "HEAD"])
+    await git(fixture.component, ["push", "-q", "origin", "main"])
+
+    await using process = createProcess()
+    const pushes: string[][] = []
+    const recordingProcess: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "git" && request.argv.includes("push")) pushes.push([...request.argv])
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(recordingProcess, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: {
+        code: "component-main-non-ancestral",
+        message: expect.stringMatching(/NON-ANCESTRAL.*dep.*diverge/u),
+      },
+    })
+    expect(await git(fixture.rootRemote, ["rev-parse", "main"])).toBe(fixture.rootBaseSha)
+    expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(divergentMainSha)
+    expect(pushes.flat()).not.toContain("--force")
+  }, 20_000)
+
+  it("leaves the root landed and converges component main when a transient promotion failure is retried", async () => {
+    const fixture = await componentMainLandingRepository()
+    await using process = createProcess()
+    let failedPromotion = false
+    const flakyProcess: Pick<Process, "run"> = {
+      run(request) {
+        if (
+          !failedPromotion &&
+          request.argv[0] === "git" &&
+          request.argv.includes("push") &&
+          request.argv.includes(fixture.componentRemote)
+        ) {
+          failedPromotion = true
+          return Promise.resolve({
+            exitCode: 1,
+            signal: null,
+            stdout: "",
+            stderr: "transient component push failure",
+            durationMs: 1,
+            timedOut: false,
+          })
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(flakyProcess, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+    await app.bays.submit({
+      branch: "issue/feature",
+      headSha: fixture.featureSha,
+      base: "main",
+      baseSha: fixture.rootBaseSha,
+    })
+
+    const first = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(failedPromotion).toBe(true)
+    expect(first).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "component-main-promotion-failed" },
+    })
+    expect(await git(fixture.rootRemote, ["ls-tree", "main", "dep"])).toContain(fixture.pinSha)
+    expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.componentBaseSha)
+
+    const retried = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(retried).toMatchObject({ status: "completed", conclusion: "success" })
+    expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.pinSha)
+  }, 30_000)
+
+  it("keeps earlier component fast-forwards and converges the remaining origins on retry", async () => {
+    const fixture = await multiComponentMainLandingRepository()
+    const [firstComponent, secondComponent] = fixture.components
+    if (firstComponent === undefined || secondComponent === undefined)
+      throw new Error("missing multi-component fixture")
+    await using process = createProcess()
+    let failedSecondPromotion = false
+    const componentPushes: string[][] = []
+    const flakyProcess: Pick<Process, "run"> = {
+      run(request) {
+        if (
+          request.argv[0] === "git" &&
+          request.argv.includes("push") &&
+          fixture.components.some((component) => request.argv.includes(component.remote))
+        ) {
+          componentPushes.push([...request.argv])
+        }
+        if (
+          !failedSecondPromotion &&
+          request.argv[0] === "git" &&
+          request.argv.includes("push") &&
+          request.argv.includes(secondComponent.remote)
+        ) {
+          failedSecondPromotion = true
+          return Promise.resolve({
+            exitCode: 1,
+            signal: null,
+            stdout: "",
+            stderr: "transient second component push failure",
+            durationMs: 1,
+            timedOut: false,
+          })
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(flakyProcess, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+    await app.bays.submit({
+      branch: "issue/feature",
+      headSha: fixture.featureSha,
+      base: "main",
+      baseSha: fixture.rootBaseSha,
+    })
+
+    const first = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(failedSecondPromotion).toBe(true)
+    expect(first).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "component-main-promotion-failed" },
+    })
+    expect(await git(fixture.rootRemote, ["rev-parse", "main"])).not.toBe(fixture.rootBaseSha)
+    expect(await git(firstComponent.remote, ["rev-parse", "main"])).toBe(firstComponent.pinSha)
+    expect(await git(secondComponent.remote, ["rev-parse", "main"])).toBe(secondComponent.baseSha)
+    expect(componentPushes.filter((argv) => argv.includes(firstComponent.remote))).toHaveLength(1)
+    expect(componentPushes.filter((argv) => argv.includes(secondComponent.remote))).toHaveLength(1)
+
+    const retried = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(retried).toMatchObject({ status: "completed", conclusion: "success" })
+    expect(await git(firstComponent.remote, ["rev-parse", "main"])).toBe(firstComponent.pinSha)
+    expect(await git(secondComponent.remote, ["rev-parse", "main"])).toBe(secondComponent.pinSha)
+    expect(componentPushes.filter((argv) => argv.includes(firstComponent.remote))).toHaveLength(1)
+    expect(componentPushes.filter((argv) => argv.includes(secondComponent.remote))).toHaveLength(2)
+  }, 40_000)
 
   it("rejects a checked candidate that fails a hook even when the operator tree passes it", async () => {
     const { repo, remote, baseSha, featureSha } = await hookedSubmoduleRepository({

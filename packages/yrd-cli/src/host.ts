@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
-import { mkdirSync } from "node:fs"
+import { accessSync, constants, mkdirSync, readFileSync } from "node:fs"
 import { hostname } from "node:os"
-import { join, relative, resolve, sep } from "node:path"
+import { delimiter, join, relative, resolve, sep } from "node:path"
 import { clearLine, cursorTo } from "node:readline"
 import { createScope, type Scope } from "@silvery/scope"
 import {
@@ -14,6 +14,7 @@ import {
   withBays,
   type BayWorkspace,
   type GitPushReceiver,
+  type RemoteBranchSnapshot,
   type ReceiverReceipt,
   type ReceiverTarget,
 } from "@yrd/bay"
@@ -71,13 +72,12 @@ import { cleanGitEnvironment } from "./git-environment.ts"
 import { withGitIndexLockRetry } from "./git-index-lock-retry.ts"
 import {
   loadYrdConfig,
-  SignalRecipientSchema,
   stepGateMode,
   type ResolvedYrdProjectConfig,
   type YrdRefuseConfig,
   type YrdStepConfig,
 } from "./config.ts"
-import { classifyFailure, resolveInvocation } from "./invocation.ts"
+import { classifyFailure, resolveInvocation, type YrdPersona } from "./invocation.ts"
 import { withLiveRenderer } from "./live-renderer.ts"
 import { createYrdLogger, residentObservability, resolveYrdObservability } from "./observability.ts"
 import { formatResidentLogLine, residentArtifactHome } from "./runner-timeline.ts"
@@ -88,6 +88,9 @@ import { queueStepRevision, type ToolchainFingerprint } from "./host-revision.ts
 import {
   createSignalObserver,
   createTribeSignalAdapter,
+  createWireSignalAdapter,
+  registerTribeSignalRecipient,
+  type RejectedSignal,
   type SignalDeliveryAdapter,
   type SignalObserver,
 } from "./signals.ts"
@@ -110,7 +113,7 @@ export type DefaultYrdAppOptions = Readonly<{
   contestRunners?: readonly ContestRunnerDef[]
   contestEvaluators?: readonly ContestEvaluatorDef[]
   contestGit?: ContestGit
-  defaultActor?: string
+  defaultSubmitter?: string
   scope?: Scope
   log?: ConditionalLogger
   /** Opt-in warm candidate-worktree pool shared across check steps (R40). */
@@ -205,7 +208,7 @@ function eraseStep<Input extends PRShape, Output extends PRShape>(step: StepDef<
 export const DEFAULT_STEP_TIMEOUT_MS = 15 * 60_000
 const GIT_TIMEOUT_MS = 30_000
 /** Bounded notification-delivery budget for a one-shot (non-resident) process, so a
- * command like `run cancel` delivers what it quickly can, then defers the rest to the
+ * command like `queue cancel` delivers what it quickly can, then defers the rest to the
  * resident and exits — it can never hold the notifications lifecycle open for minutes
  * and starve the resident's dispatch. (D4) */
 const ONE_SHOT_DELIVERY_BUDGET_MS = 3_000
@@ -560,17 +563,33 @@ async function resolveQueueTarget(
   repo: string,
   configuredBase: string,
   requestedBase: string,
-  options: Readonly<{ refreshAuthority?: boolean }> = {},
-): Promise<Readonly<{ base: string; sha: string }>> {
+  options: Readonly<{ refreshAuthority?: boolean; remoteBranch?: string }> = {},
+): Promise<Readonly<{ base: string; sha: string; remoteBranch?: RemoteBranchSnapshot }>> {
   const configured = baseIdentity(configuredBase)
   const requested = baseIdentity(requestedBase)
   const base = requested === configured ? configured : requested
   if (requestedBase !== base && (await resolveCommit(process, repo, requestedBase)) === undefined) {
     throw new Error(`yrd: queue base '${requestedBase}' does not resolve`)
   }
-  const inspect = options.refreshAuthority === true ? resolveGitQueueTarget : inspectGitQueueTarget
-  const target = await inspect({ inject: { process }, repo, branch: base })
-  return { base, sha: target.sha }
+  const target =
+    options.refreshAuthority === true
+      ? await resolveGitQueueTarget({
+          inject: { process },
+          repo,
+          branch: base,
+          ...(options.remoteBranch === undefined ? {} : { refreshRemoteBranches: [options.remoteBranch] }),
+        })
+      : await inspectGitQueueTarget({ inject: { process }, repo, branch: base })
+  if (options.remoteBranch === undefined || target.remote !== "origin") return { base, sha: target.sha }
+  const headSha = await resolveCommit(process, repo, `refs/remotes/origin/${options.remoteBranch}`)
+  return {
+    base,
+    sha: target.sha,
+    remoteBranch: {
+      branch: options.remoteBranch,
+      ...(headSha === undefined ? {} : { headSha }),
+    },
+  }
 }
 
 function localContestGit(process: Pick<Process, "run">, repo: string): ContestGit {
@@ -710,12 +729,17 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
     withBays({
       jobs: bayJobs,
       defaultBase: baseIdentity(options.config.base),
-      ...(options.defaultActor === undefined ? {} : { defaultActor: options.defaultActor }),
-      resolveBase: async (base) => {
+      ...(options.defaultSubmitter === undefined ? {} : { defaultSubmitter: options.defaultSubmitter }),
+      resolveBase: async (base, context) => {
         const target = await resolveQueueTarget(options.process, options.repo, options.config.base, base, {
           refreshAuthority: true,
+          ...(context?.branch === undefined ? {} : { remoteBranch: context.branch }),
         })
-        return { base: target.base, baseSha: target.sha }
+        return {
+          base: target.base,
+          baseSha: target.sha,
+          ...(target.remoteBranch === undefined ? {} : { remoteBranch: target.remoteBranch }),
+        }
       },
       ...(flowConfig === undefined
         ? {}
@@ -851,42 +875,86 @@ function residentRunnerLog(log: ConditionalLogger, identity: ResidentRunnerIdent
   })
 }
 
+function residentRunnerLockOwnerPid(stateDir: string): number | undefined {
+  try {
+    const value = JSON.parse(readFileSync(join(stateDir, "resident-runner", "writer.lock"), "utf8")) as {
+      pid?: unknown
+    }
+    return typeof value.pid === "number" && Number.isSafeInteger(value.pid) && value.pid > 0 ? value.pid : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (cause) {
+    // ESRCH = no such process (dead). EPERM and friends = exists but not signalable — treat as live.
+    return (cause as NodeJS.ErrnoException).code !== "ESRCH"
+  }
+}
+
 async function acquireResidentRunner(
   stateDir: string,
   identity: ResidentRunnerIdentity,
   log: ConditionalLogger,
 ): Promise<ResidentRunnerLease> {
   const runnerLog = log.child("runner")
-  const released = Promise.withResolvers<void>()
-  const acquired = Promise.withResolvers<void>()
-  const held = createExclusive(join(stateDir, "resident-runner"), { timeoutMs: 0 }).run(async () => {
-    acquired.resolve()
-    await released.promise
-  })
-  try {
-    await Promise.race([acquired.promise, held])
-  } catch (error) {
-    if (failureFact(error)?.code === "exclusive-busy") {
-      const detail = error instanceof Error ? error.message.replace(/^yrd:\s*/u, "") : String(error)
-      raiseFailure(
-        "refusal",
-        "resident-runner-active",
-        `yrd: resident-runner-active: ${detail}. Stop the active 'yrd queue run' before starting another.`,
-      )
+  // When a prior owner died hard, the kernel may still be releasing the flock
+  // for a beat after the pid is gone. Retry briefly if the lock body names a
+  // dead pid so re-arm does not need a human `rm` of writer.lock (22306).
+  const attempts = 8
+  let lastError: unknown
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const released = Promise.withResolvers<void>()
+    const acquired = Promise.withResolvers<void>()
+    const held = createExclusive(join(stateDir, "resident-runner"), { timeoutMs: 0 }).run(async () => {
+      acquired.resolve()
+      await released.promise
+    })
+    try {
+      await Promise.race([acquired.promise, held])
+      runnerLog.info?.("Resident runner lease acquired", { runner: identity.id, stateDir })
+      let closePromise: Promise<void> | undefined
+      return Object.freeze({
+        close: () =>
+          (closePromise ??= (async () => {
+            released.resolve()
+            await held
+            runnerLog.info?.("Resident runner lease released", { runner: identity.id, stateDir })
+          })()),
+      })
+    } catch (error) {
+      lastError = error
+      if (failureFact(error)?.code !== "exclusive-busy") throw error
+      const ownerPid = residentRunnerLockOwnerPid(stateDir)
+      const ownerDead = ownerPid !== undefined && !processAlive(ownerPid)
+      if (!ownerDead || attempt === attempts - 1) break
+      runnerLog.warn?.("resident-runner lock busy with dead owner pid; retrying reclaim", {
+        action: "resident-runner-lock-reap-retry",
+        ownerPid,
+        attempt: attempt + 1,
+      })
+      await Bun.sleep(25 * (attempt + 1))
     }
-    throw error
   }
-  runnerLog.info?.("Resident runner lease acquired", { runner: identity.id, stateDir })
-
-  let closePromise: Promise<void> | undefined
-  return Object.freeze({
-    close: () =>
-      (closePromise ??= (async () => {
-        released.resolve()
-        await held
-        runnerLog.info?.("Resident runner lease released", { runner: identity.id, stateDir })
-      })()),
-  })
+  const error = lastError
+  if (failureFact(error)?.code === "exclusive-busy") {
+    const detail = error instanceof Error ? error.message.replace(/^yrd:\s*/u, "") : String(error)
+    const ownerPid = residentRunnerLockOwnerPid(stateDir)
+    const deadHint =
+      ownerPid !== undefined && !processAlive(ownerPid)
+        ? ` Owner pid ${ownerPid} is dead — if re-arm keeps failing, inspect \`lsof ${join(stateDir, "resident-runner", "writer.lock")}\` for a live holder.`
+        : ""
+    raiseFailure(
+      "refusal",
+      "resident-runner-active",
+      `yrd: resident-runner-active: ${detail}. Stop the active 'yrd queue run' before starting another.${deadHint}`,
+    )
+  }
+  throw error
 }
 
 async function closeRuntime(
@@ -930,13 +998,7 @@ const ONE_SHOT_RECOVERY_CUTOFF = "1970-01-01T00:00:00.000Z"
  * stream. The force-stop hint and its consequences are structured FIELDS, so a
  * viewer can surface them without parsing prose. */
 export function reportGracefulShutdown(log: ConditionalLogger, signal: ShutdownSignal): void {
-  log.warn?.("graceful drain requested — finishing the active run before exit", {
-    signal,
-    mode: "drain",
-    forceStop: "press Ctrl-C again to force stop",
-    onForceStop: 'the active run may need `yrd queue recover`; its job settles as "job-lost"',
-    recovery: "yrd queue recover",
-  })
+  log.warn?.(`Stopping after the current run finishes (${signal}); press Ctrl-C again to stop immediately.`)
 }
 
 async function settleOneShotQueueRun(
@@ -955,17 +1017,10 @@ async function settleOneShotQueueRun(
       reason: `one-shot queue runner interrupted by ${signal}`,
     })
     if (runs.length > 0) {
-      log.warn?.("one-shot queue run interrupted — settled before exit", {
-        signal,
-        runner,
-        runs: runs.map((run) => run.id),
-        outcome: "job-lost",
-      })
+      log.warn?.(`Stopped queue run ${runs.map((run) => run.id).join(", ")} safely after ${signal}.`)
     }
   } catch (error) {
-    log.error?.("one-shot queue run interrupted — settlement failed before exit", {
-      signal,
-      runner,
+    log.error?.(`Could not stop the queue run safely after ${signal}; run 'yrd queue recover'.`, {
       error: error instanceof Error ? error.message : String(error),
     })
     throw error
@@ -1020,6 +1075,103 @@ export type YrdHostOptions = Readonly<{
   signalAdapter?: SignalDeliveryAdapter
 }>
 
+type YrdRuntimeHostOptions = YrdHostOptions &
+  Readonly<{
+    persona?: YrdPersona
+    interactive?: boolean
+    wire?: string
+    wireOutput?: (text: string) => void
+  }>
+
+function isWireCapture(destination: string): boolean {
+  return destination === "-" || destination.startsWith("file:") || destination.startsWith("fd:")
+}
+
+function executableOnPath(name: string, env: NodeJS.ProcessEnv): string | undefined {
+  for (const directory of env.PATH?.split(delimiter) ?? []) {
+    if (directory === "") continue
+    const candidate = resolve(directory, name)
+    try {
+      accessSync(candidate, constants.X_OK)
+      return candidate
+    } catch {
+      // Keep searching the host-owned PATH.
+    }
+  }
+  return undefined
+}
+
+async function createRuntimeSignalAdapter(options: {
+  process: Process
+  env: NodeJS.ProcessEnv
+  recipient: string
+  persona?: YrdPersona
+  interactive?: boolean
+  wire?: string
+  output?: (text: string) => void
+  injected?: SignalDeliveryAdapter
+  attributedReceipt(event: RejectedSignal): ReturnType<typeof authorAttributionReceipt>
+}): Promise<SignalDeliveryAdapter> {
+  if (options.injected !== undefined) return options.injected
+  const wire = options.wire
+  if (wire !== undefined && isWireCapture(wire)) {
+    if (options.output === undefined) {
+      raiseFailure(
+        "configuration",
+        "signal-wire-output-missing",
+        "yrd: a capture wire requires an ordinary output sink",
+      )
+    }
+    return createWireSignalAdapter(wire, options.output, options.recipient, (event) => options.attributedReceipt(event))
+  }
+
+  const signalProcess =
+    options.wire === undefined
+      ? options.process
+      : {
+          run: (input: Parameters<Process["run"]>[0]) =>
+            options.process.run({ ...input, env: { ...options.env, ...input.env, TRIBE_SOCKET: options.wire } }),
+        }
+  const executable = executableOnPath("tribe", options.env)
+  if (options.persona?.registration === "ensure") {
+    try {
+      if (executable === undefined) {
+        throw new Error(
+          `yrd: Tribe signal mailbox registration failed for '${options.recipient}': executable unavailable`,
+        )
+      }
+      await registerTribeSignalRecipient(signalProcess, options.recipient, executable)
+    } catch (error) {
+      if (options.interactive !== true) throw error
+    }
+  }
+  try {
+    if (executable === undefined) {
+      raiseFailure(
+        "configuration",
+        "signal-adapter-missing",
+        "yrd: notify routes require the 'tribe' executable, but no live Tribe adapter is available",
+      )
+    }
+    return createTribeSignalAdapter(
+      signalProcess,
+      options.recipient,
+      (event) => options.attributedReceipt(event),
+      executable,
+    )
+  } catch (error) {
+    if (options.interactive !== true) throw error
+    return {
+      send() {
+        throw error
+      },
+      close() {
+        throw error
+      },
+    }
+  }
+}
+
 export async function createYrdHost(options: YrdHostOptions = {}): Promise<YrdHost> {
   return createYrdRuntimeHost(options, undefined, "active")
 }
@@ -1070,7 +1222,7 @@ async function createViewerReceiver(repository: YrdRepository, process: Process)
 }
 
 async function createYrdRuntimeHost(
-  options: YrdHostOptions,
+  options: YrdRuntimeHostOptions,
   resident: ResidentRunnerIdentity | undefined,
   mode: "active" | "viewer",
 ): Promise<YrdHost> {
@@ -1105,16 +1257,8 @@ async function createYrdRuntimeHost(
         ? createJournal({ dir: repository.stateDir, inject: { log } })
         : createReadOnlyJournal({ dir: repository.stateDir, inject: { log } })
     const routes = loaded.config.notify ?? {}
-    const defaultActor = env.TRIBE_NAME?.trim() || "operator"
+    const defaultSubmitter = options.persona?.mailbox ?? (env.TRIBE_NAME?.trim() || "operator")
     if (mode === "active") {
-      const submitterRoute = Object.entries(routes).find(([, targets]) => targets?.includes("submitter") === true)?.[0]
-      if (submitterRoute !== undefined && !SignalRecipientSchema.safeParse(defaultActor).success) {
-        raiseFailure(
-          "configuration",
-          "signal-submitter-missing",
-          `yrd: notify.${submitterRoute} targets submitter, but TRIBE_NAME is not a Tribe recipient; set TRIBE_NAME to the submitting Tribe handle (for example, @agent/2)`,
-        )
-      }
       if (routes["pr/needs-review"] !== undefined && !loaded.config.requires.includes("review")) {
         raiseFailure(
           "configuration",
@@ -1123,21 +1267,29 @@ async function createYrdRuntimeHost(
         )
       }
       if (Object.keys(routes).length > 0) {
+        const adapter = await createRuntimeSignalAdapter({
+          process,
+          env,
+          recipient: defaultSubmitter,
+          ...(options.persona === undefined ? {} : { persona: options.persona }),
+          interactive: options.interactive,
+          ...(options.wire === undefined ? {} : { wire: options.wire }),
+          output: options.wireOutput,
+          injected: options.signalAdapter,
+          attributedReceipt: (event) =>
+            authorAttributionReceipt(app?.queue.get(event.run), {
+              pr: event.pr,
+              revision: event.revision,
+              headSha: event.headSha,
+            }),
+        })
         signals = createSignalObserver({
           journal,
           stateDir: repository.stateDir,
           routes,
-          sender: defaultActor,
+          sender: defaultSubmitter,
           reviewRequired: loaded.config.requires.includes("review"),
-          adapter:
-            options.signalAdapter ??
-            createTribeSignalAdapter(process, defaultActor, (event) => {
-              return authorAttributionReceipt(app?.queue.get(event.run), {
-                pr: event.pr,
-                revision: event.revision,
-                headSha: event.headSha,
-              })
-            }),
+          adapter,
           log,
           // The resident is the primary drainer and delivers unbounded; every other
           // (one-shot) process gets a bounded delivery budget so it can never hold the
@@ -1163,7 +1315,7 @@ async function createYrdRuntimeHost(
       journal: signals?.journal ?? journal,
       process,
       config: loaded.config,
-      defaultActor,
+      defaultSubmitter,
       scope,
       log,
       candidatePool,
@@ -1209,9 +1361,10 @@ async function createYrdRuntimeHost(
       recut: createGitPRRecutter({ inject: { process }, repo: repository.repo, env }),
       journal: Object.freeze({
         importOrphan: (sourcePath: string) =>
-          importOrphanJournal({ dir: repository.stateDir, sourcePath, importedBy: defaultActor, log }),
+          importOrphanJournal({ dir: repository.stateDir, sourcePath, importedBy: defaultSubmitter, log }),
       }),
       process,
+      environment: env,
     })
     let closePromise: Promise<void> | undefined
     const close = () =>
@@ -1423,6 +1576,10 @@ export async function runYrdProcess(
             env,
             log: runtimeLog,
             ...(context.configPath === undefined ? {} : { configPath: context.configPath }),
+            ...(context.persona === undefined ? {} : { persona: context.persona }),
+            ...(context.wire === undefined ? {} : { wire: context.wire }),
+            interactive: io.interactive === true,
+            wireOutput: (text) => io.stdout(text),
           },
           resident,
           posture === "viewer" ? "viewer" : "active",
@@ -1433,7 +1590,7 @@ export async function runYrdProcess(
         oneShotRunner = posture === "one-shot-queue-run" ? runner?.id : undefined
         shutdownLog = runnerLog
         const drain =
-          posture === "resident-queue-run" || posture === "bracketed-bay-run" ? new AbortController() : undefined
+          posture === "resident-queue-run" || posture === "bracketed-bay-open" ? new AbortController() : undefined
         removeShutdownSignals = bindProcessShutdown(
           closeHost,
           drain === undefined
@@ -1443,10 +1600,7 @@ export async function runYrdProcess(
                 if (posture === "resident-queue-run") {
                   reportGracefulShutdown(runnerLog, signal)
                 } else {
-                  runtimeLog.warn?.("bay run interruption requested — preserving the active Bay before exit", {
-                    signal,
-                    mode: "orphan",
-                  })
+                  runtimeLog.warn?.(`Bay work was interrupted by ${signal}; preserving the Bay instead of closing it.`)
                 }
               },
         )

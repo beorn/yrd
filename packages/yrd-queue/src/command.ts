@@ -1366,6 +1366,8 @@ async function recutDirectPR(
         "user.name=Yrd Queue",
         "-c",
         "user.email=yrd-queue@example.invalid",
+        "-c",
+        "core.editor=true",
         "rebase",
         "--onto",
         target.sha,
@@ -1886,6 +1888,10 @@ export type GitCandidatePreparerOptions = Readonly<{
 export function gitCandidatePreparer(options: GitCandidatePreparerOptions): CandidatePreparer {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
+  // 22332: pins this preparer instance has successfully written. Lets CAS
+  // refusal text distinguish "you already wrote this id" (compose self-retry
+  // with a different tree) from "another run holds this id".
+  const pinsByThisPreparer = new Map<string, string>()
   return async (input): Promise<PreparedCandidate> => {
     const mergeability = await mergeTreeCandidate(git, repo, input)
     const needsDomainComposition = input.prs.some((pr) => pr.composition !== undefined || pr.recut !== undefined)
@@ -1936,25 +1942,28 @@ export function gitCandidatePreparer(options: GitCandidatePreparerOptions): Cand
         true,
       )
       if (pinned.code !== 0) {
-        const published = await git.optionalCommit(repo, ref)
-        // A concurrent writer publishing the same immutable evidence is
-        // equivalent to this compare-and-create succeeding.
-        if (published === undefined) {
-          const detail = pinned.stderr || pinned.stdout || `git update-ref exited ${pinned.code}`
+        const existing = await git.optionalCommit(repo, ref)
+        if (existing !== candidate.output.sha) {
+          // 22332: never collapse self-retry and foreign-holder into one sentence.
+          // Fail Loud: absent-ref refusals carry git's own stderr (not just exit code).
+          const prior = pinsByThisPreparer.get(ref)
+          const gitDetail = (pinned.stderr || pinned.stdout || "").replace(/\s+/gu, " ").trim()
+          const message =
+            prior !== undefined
+              ? `yrd: Candidate ref '${ref}' — you already wrote this id at ${prior}; this prepare produced different evidence ${candidate.output.sha} (compose self-retry must allocate a fresh id)`
+              : existing === undefined
+                ? gitDetail.length > 0
+                  ? `yrd: Candidate ref '${ref}' could not be created: ${gitDetail}`
+                  : `yrd: Candidate ref '${ref}' could not be created (code ${pinned.code})`
+                : `yrd: Candidate ref '${ref}' is already occupied by different evidence`
           throw createFailure({
             kind: "infrastructure",
             code: "candidate-ref-refused",
-            message: `yrd: Candidate ref '${ref}' could not be created: ${detail}`,
-          })
-        }
-        if (published !== candidate.output.sha) {
-          throw createFailure({
-            kind: "infrastructure",
-            code: "candidate-ref-refused",
-            message: `yrd: Candidate ref '${ref}' is already occupied by different evidence`,
+            message,
           })
         }
       }
+      pinsByThisPreparer.set(ref, candidate.output.sha)
       return {
         id: input.id,
         queueId: input.queueId,
@@ -2425,6 +2434,8 @@ async function rebaseSource(
         "user.name=Yrd Queue",
         "-c",
         "user.email=yrd-queue@example.invalid",
+        "-c",
+        "core.editor=true",
         "rebase",
         "--onto",
         currentPin,
@@ -3015,6 +3026,17 @@ async function refusedPayloadPaths(
 
 type CandidateSubmodulePin = Readonly<{ path: string; sha: string; origin: string }>
 type MutableSubmoduleConfig = { path?: string; url?: string }
+type ComponentMainPromotion = Readonly<{
+  origin: string
+  repository: string
+  mainSha: string
+  targetSha: string
+  paths: readonly string[]
+}>
+type ComponentMainPromotionFailure = Readonly<{ code: string; message: string }>
+type ComponentMainPromotionPlan =
+  | Readonly<{ status: "passed"; promotions: readonly ComponentMainPromotion[] }>
+  | Readonly<{ status: "failed"; error: ComponentMainPromotionFailure }>
 
 const REMOTE_SCHEME = /^[a-z][a-z0-9+.-]*:/iu
 const FILTER_UNSUPPORTED =
@@ -3143,6 +3165,266 @@ async function candidateSubmodulePins(
     }
     return { ...gitlink, origin: resolveSubmoduleOrigin(repo, superOrigin, url) }
   })
+}
+
+function componentMainFailure(code: string, message: string): ComponentMainPromotionFailure {
+  return { code, message: `yrd: ${message}` }
+}
+
+async function fetchComponentMain(
+  git: Git,
+  repository: string,
+  origin: string,
+): Promise<
+  Readonly<{ status: "passed"; sha: string }> | Readonly<{ status: "failed"; error: ComponentMainPromotionFailure }>
+> {
+  const ref = "refs/yrd/component-main"
+  const fetched = await git.run(
+    repository,
+    ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", origin, `+refs/heads/main:${ref}`],
+    true,
+  )
+  if (fetched.code !== 0) {
+    return {
+      status: "failed",
+      error: componentMainFailure(
+        "component-main-inspection-failed",
+        `could not refresh component main from '${origin}': ${fetched.stderr || fetched.stdout || "git fetch failed"}`,
+      ),
+    }
+  }
+  return { status: "passed", sha: await git.commit(repository, ref) }
+}
+
+async function fetchComponentPin(
+  git: Git,
+  repository: string,
+  pin: CandidateSubmodulePin,
+): Promise<ComponentMainPromotionFailure | undefined> {
+  if ((await git.optionalCommit(repository, pin.sha)) === pin.sha) return undefined
+  const fetched = await git.run(
+    repository,
+    ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", pin.origin, pin.sha],
+    true,
+  )
+  if (fetched.code === 0 && (await git.optionalCommit(repository, pin.sha)) === pin.sha) return undefined
+  return componentMainFailure(
+    "component-main-inspection-failed",
+    `could not load landed pin '${pin.sha}' for '${pin.path}' from '${pin.origin}': ${
+      fetched.stderr || fetched.stdout || "git fetch failed"
+    }`,
+  )
+}
+
+async function planComponentMainPromotions(
+  git: Git,
+  repo: string,
+  baseSha: string | undefined,
+  candidateSha: string,
+  scratchRoot: string,
+): Promise<ComponentMainPromotionPlan> {
+  const candidatePins = await candidateSubmodulePins(git, repo, repo, candidateSha)
+  const basePins =
+    baseSha === undefined
+      ? new Map<string, CandidateSubmodulePin>()
+      : new Map((await candidateSubmodulePins(git, repo, repo, baseSha)).map((pin) => [pin.path, pin] as const))
+  const changed: CandidateSubmodulePin[] = []
+  const untrustedOrigins = new Set<string>()
+  for (const pin of candidatePins) {
+    if (baseSha !== undefined && (await readGitlink(git, repo, baseSha, pin.path)) === pin.sha) continue
+    const basePin = basePins.get(pin.path)
+    if (baseSha === undefined) {
+      // A landed root tree is the authority for its own component registry.
+      // Reconciliation therefore trusts its standing .gitmodules origins and
+      // audits every pin, including gaps left by earlier failed actuators.
+    } else if (basePin === undefined) {
+      untrustedOrigins.add(pin.path)
+    } else if (basePin.origin !== pin.origin) {
+      return {
+        status: "failed",
+        error: componentMainFailure(
+          "component-main-origin-changed",
+          `component origin for '${pin.path}' changed from '${basePin.origin}' to '${pin.origin}'; review the new remote before granting main-update authority`,
+        ),
+      }
+    }
+    changed.push(pin)
+  }
+  const groups = new Map<string, CandidateSubmodulePin[]>()
+  for (const pin of changed) groups.set(pin.origin, [...(groups.get(pin.origin) ?? []), pin])
+
+  const promotions: ComponentMainPromotion[] = []
+  let groupIndex = 0
+  for (const [origin, pins] of [...groups].sort(([left], [right]) => left.localeCompare(right))) {
+    const repository = join(scratchRoot, `component-${String(groupIndex)}`)
+    groupIndex += 1
+    await mkdir(repository, { recursive: true })
+    const initialized = await git.run(repository, ["init", "--bare"], true)
+    if (initialized.code !== 0) {
+      return {
+        status: "failed",
+        error: componentMainFailure(
+          "component-main-inspection-failed",
+          `could not initialize component ancestry probe for '${origin}': ${
+            initialized.stderr || initialized.stdout || "git init failed"
+          }`,
+        ),
+      }
+    }
+    const componentMain = await fetchComponentMain(git, repository, origin)
+    if (componentMain.status === "failed") return componentMain
+
+    let targetSha = componentMain.sha
+    let targetPath = "component main"
+    for (const pin of pins.toSorted((left, right) => left.path.localeCompare(right.path))) {
+      const missing = await fetchComponentPin(git, repository, pin)
+      if (missing !== undefined) return { status: "failed", error: missing }
+
+      const reached = await git.run(repository, ["merge-base", "--is-ancestor", pin.sha, targetSha], true)
+      if (reached.code === 0) continue
+      if (reached.code !== 1) {
+        return {
+          status: "failed",
+          error: componentMainFailure(
+            "component-main-inspection-failed",
+            `could not compare landed pin '${pin.sha}' for '${pin.path}' with '${targetSha}': ${
+              reached.stderr || reached.stdout || "git merge-base failed"
+            }`,
+          ),
+        }
+      }
+
+      const fastForward = await git.run(repository, ["merge-base", "--is-ancestor", targetSha, pin.sha], true)
+      if (fastForward.code === 0) {
+        targetSha = pin.sha
+        targetPath = `'${pin.path}'`
+        continue
+      }
+      if (fastForward.code !== 1) {
+        return {
+          status: "failed",
+          error: componentMainFailure(
+            "component-main-inspection-failed",
+            `could not compare '${targetSha}' with landed pin '${pin.sha}' for '${pin.path}': ${
+              fastForward.stderr || fastForward.stdout || "git merge-base failed"
+            }`,
+          ),
+        }
+      }
+      return {
+        status: "failed",
+        error: componentMainFailure(
+          "component-main-non-ancestral",
+          `NON-ANCESTRAL component lineage at '${origin}': ${targetPath} '${targetSha}' and landed pin '${pin.path}' '${pin.sha}' diverge; compose the divergent component histories before retrying`,
+        ),
+      }
+    }
+    if (targetSha !== componentMain.sha) {
+      const untrusted = pins.map((pin) => pin.path).filter((path) => untrustedOrigins.has(path))
+      if (untrusted.length > 0) {
+        return {
+          status: "failed",
+          error: componentMainFailure(
+            "component-main-origin-untrusted",
+            `new component [${untrusted.join(", ")}] requires main to advance at '${origin}'; review the new remote before granting main-update authority`,
+          ),
+        }
+      }
+      promotions.push({
+        origin,
+        repository,
+        mainSha: componentMain.sha,
+        targetSha,
+        paths: pins.map((pin) => pin.path).toSorted(),
+      })
+    }
+  }
+  return { status: "passed", promotions }
+}
+
+async function applyComponentMainPromotions(
+  git: Git,
+  promotions: readonly ComponentMainPromotion[],
+): Promise<ComponentMainPromotionFailure | undefined> {
+  for (const promotion of promotions) {
+    const pushed = await git.run(
+      promotion.repository,
+      ["push", "--porcelain", promotion.origin, `${promotion.targetSha}:refs/heads/main`],
+      true,
+    )
+    if (pushed.code === 0) continue
+
+    const refreshed = await fetchComponentMain(git, promotion.repository, promotion.origin)
+    if (refreshed.status === "failed") {
+      return componentMainFailure(
+        "component-main-promotion-failed",
+        `component main promotion for [${promotion.paths.join(", ")}] failed and its result could not be verified: ${refreshed.error.message}`,
+      )
+    }
+    const reached = await git.run(
+      promotion.repository,
+      ["merge-base", "--is-ancestor", promotion.targetSha, refreshed.sha],
+      true,
+    )
+    if (reached.code === 0) continue
+    if (reached.code !== 1) {
+      return componentMainFailure(
+        "component-main-promotion-failed",
+        `could not verify component main after promoting [${promotion.paths.join(", ")}]: ${
+          reached.stderr || reached.stdout || "git merge-base failed"
+        }`,
+      )
+    }
+    const stillFastForward = await git.run(
+      promotion.repository,
+      ["merge-base", "--is-ancestor", refreshed.sha, promotion.targetSha],
+      true,
+    )
+    if (stillFastForward.code === 1) {
+      return componentMainFailure(
+        "component-main-diverged-after-landing",
+        `NON-ANCESTRAL component lineage at '${promotion.origin}': component main '${refreshed.sha}' diverged from landed pin '${promotion.targetSha}' for [${promotion.paths.join(", ")}]; compose the divergent histories`,
+      )
+    }
+    return componentMainFailure(
+      "component-main-promotion-failed",
+      `could not fast-forward component main from '${promotion.mainSha}' to '${promotion.targetSha}' for [${promotion.paths.join(", ")}]: ${
+        pushed.stderr || pushed.stdout || "git push failed"
+      }`,
+    )
+  }
+  return undefined
+}
+
+async function withComponentMainPromotions<Output extends JsonValue>(
+  git: Git,
+  repo: string,
+  baseSha: string | undefined,
+  candidateSha: string,
+  run: (promotions: readonly ComponentMainPromotion[]) => Promise<JobResult<Output>>,
+): Promise<JobResult<Output>> {
+  const root = await mkdtemp(join(await realpath(tmpdir()), "yrd-component-main-"))
+  let outcome: JobResult<Output> | undefined
+  let operationFailure: unknown
+  try {
+    const planned = await planComponentMainPromotions(git, repo, baseSha, candidateSha, root)
+    outcome =
+      planned.status === "failed" ? failed(planned.error.code, planned.error.message) : await run(planned.promotions)
+  } catch (cause) {
+    operationFailure = cause
+  }
+  let cleanupFailure: string | undefined
+  try {
+    await rm(root, { recursive: true, force: true })
+  } catch (cause) {
+    cleanupFailure = messageOf(cause)
+  }
+  if (operationFailure !== undefined) throw operationFailure
+  if (outcome === undefined) throw new Error("component main promotion produced no result")
+  if ((outcome.status === "completed" && outcome.conclusion === "failure") || cleanupFailure === undefined) {
+    return outcome
+  }
+  return failed("scratch-cleanup-failed", cleanupFailure)
 }
 
 type CandidateSubmoduleConflictResult =
@@ -4120,17 +4402,27 @@ async function sourceCandidateRefError(
   return undefined
 }
 
-async function authoritativeQueueBase(git: Git, repo: string, branch: string): Promise<GitQueueTarget> {
+async function authoritativeQueueBase(
+  git: Git,
+  repo: string,
+  branch: string,
+  refreshRemoteBranches: readonly string[] = [],
+): Promise<GitQueueTarget> {
   const remote = await git.run(repo, ["config", "--get", "remote.origin.url"], true)
   if (remote.code !== 0 || remote.stdout === "") return inspectQueueBase(git, repo, branch)
   const source = `refs/heads/${branch}`
   const target = `refs/remotes/origin/${branch}`
+  for (const additional of refreshRemoteBranches) {
+    await git.run(repo, ["check-ref-format", "--branch", additional])
+  }
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     let detail: string
     try {
       const fetched = await git.run(
         repo,
-        ["fetch", "--no-recurse-submodules", "--quiet", "origin", `+${source}:${target}`],
+        refreshRemoteBranches.length === 0
+          ? ["fetch", "--no-recurse-submodules", "--quiet", "origin", `+${source}:${target}`]
+          : ["fetch", "--no-recurse-submodules", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*"],
         true,
       )
       if (fetched.code === 0) return await inspectQueueBase(git, repo, branch)
@@ -4256,9 +4548,18 @@ export async function resolveGitQueueTarget(options: {
   repo: string
   branch: string
   env?: NodeJS.ProcessEnv
+  /** Refresh these sibling remote branches in the same authoritative fetch.
+   * Deleted remote branches deliberately retain their last tracking head:
+   * live drafts may recover from that durable carrier and republish it. */
+  refreshRemoteBranches?: readonly string[]
 }): Promise<GitQueueTarget> {
   const repo = resolve(options.repo)
-  return authoritativeQueueBase(createGit(options.inject.process, options.env), repo, options.branch)
+  return authoritativeQueueBase(
+    createGit(options.inject.process, options.env),
+    repo,
+    options.branch,
+    options.refreshRemoteBranches,
+  )
 }
 
 async function landingError(
@@ -4338,11 +4639,15 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
       if (alreadyLanded !== undefined) {
         const cancellation = mergeAuthorityCancellation(context)
         if (cancellation !== undefined) return cancellation
-        return {
-          status: "completed",
-          conclusion: "success",
-          output: integrationProof(baseSha, checked, alreadyLanded),
-        }
+        return withComponentMainPromotions(git, repo, undefined, checked.candidateSha, async (promotions) => {
+          const promotionFailure = await applyComponentMainPromotions(git, promotions)
+          if (promotionFailure !== undefined) return failed(promotionFailure.code, promotionFailure.message)
+          return {
+            status: "completed",
+            conclusion: "success",
+            output: integrationProof(baseSha, checked, alreadyLanded),
+          }
+        })
       }
       const remote = base.remote
       if (remote !== undefined) {
@@ -4367,19 +4672,25 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
             if (sourceRefError !== undefined) return failed("invalid-candidate", sourceRefError)
             const cancellation = mergeAuthorityCancellation(context)
             if (cancellation !== undefined) return cancellation
-            const pushed = await git.run(
-              path,
-              ["push", "--porcelain", remote, `${checked.candidateSha}:${branchRef}`],
-              true,
-            )
-            if (pushed.code !== 0) {
-              return failed("merge-push-failed", pushed.stderr || pushed.stdout || `could not update '${branch}'`)
-            }
-            return {
-              status: "completed",
-              conclusion: "success",
-              output: integrationProof(checked.candidateSha, checked),
-            }
+            return withComponentMainPromotions(git, repo, checked.baseSha, checked.candidateSha, async (promotions) => {
+              const pushed = await git.run(
+                path,
+                ["push", "--porcelain", remote, `${checked.candidateSha}:${branchRef}`],
+                true,
+              )
+              if (pushed.code !== 0) {
+                return failed("merge-push-failed", pushed.stderr || pushed.stdout || `could not update '${branch}'`)
+              }
+              const promotionFailure = await applyComponentMainPromotions(git, promotions)
+              if (promotionFailure !== undefined) {
+                return failed(promotionFailure.code, promotionFailure.message)
+              }
+              return {
+                status: "completed",
+                conclusion: "success",
+                output: integrationProof(checked.candidateSha, checked),
+              }
+            })
           },
         )
         const landing = await authoritativeQueueBase(git, repo, branch)
@@ -4390,6 +4701,37 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
             const rollbackError = await rollbackQueueBase(git, repo, base, landing)
             if (rollbackError !== undefined) return failed("merge-rollback-failed", rollbackError)
             return failed("invalid-candidate", sourceRefError)
+          }
+          if (
+            attempted.status === "completed" &&
+            attempted.conclusion === "failure" &&
+            (attempted.error.code === "component-main-promotion-failed" ||
+              attempted.error.code === "component-main-diverged-after-landing")
+          ) {
+            return attempted
+          }
+          if (
+            attempted.status === "completed" &&
+            attempted.conclusion === "failure" &&
+            attempted.error.code === "merge-push-failed"
+          ) {
+            const reconciled = await withComponentMainPromotions(
+              git,
+              repo,
+              checked.baseSha,
+              checked.candidateSha,
+              async (promotions) => {
+                const promotionFailure = await applyComponentMainPromotions(git, promotions)
+                return promotionFailure === undefined
+                  ? {
+                      status: "completed" as const,
+                      conclusion: "success" as const,
+                      output: integrationProof(landing.sha, checked),
+                    }
+                  : failed<IntegrationProof>(promotionFailure.code, promotionFailure.message)
+              },
+            )
+            return reconciled
           }
           return {
             status: "completed",
@@ -4484,11 +4826,15 @@ export function configuredMergeStep<Shape extends PRShape>(
       if (alreadyLanded !== undefined) {
         const cancellation = mergeAuthorityCancellation(context)
         if (cancellation !== undefined) return cancellation
-        return {
-          status: "completed",
-          conclusion: "success",
-          output: integrationProof(candidate.base.sha, candidate.checked, alreadyLanded),
-        }
+        return withComponentMainPromotions(git, repo, undefined, candidate.checked.candidateSha, async (promotions) => {
+          const promotionFailure = await applyComponentMainPromotions(git, promotions)
+          if (promotionFailure !== undefined) return failed(promotionFailure.code, promotionFailure.message)
+          return {
+            status: "completed",
+            conclusion: "success",
+            output: integrationProof(candidate.base.sha, candidate.checked, alreadyLanded),
+          }
+        })
       }
       const command = configuredCommandStep<Shape>({
         inject: options.inject,
@@ -4509,44 +4855,60 @@ export function configuredMergeStep<Shape extends PRShape>(
         }),
       })
 
-      const cancellation = mergeAuthorityCancellation(context)
-      if (cancellation !== undefined) return cancellation
-      const outcome = await command(input, context)
-      let landing: GitQueueTarget
-      try {
-        landing = await authoritativeQueueBase(git, repo, branch)
-      } catch (cause) {
-        const refusal = queueAuthorityRefusal(cause)
-        if (refusal !== undefined) {
-          return failedWithEvidence(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
-        }
-        return outcome.status === "completed" && outcome.conclusion === "failure"
-          ? failed(outcome.error.code, outcome.error.message)
-          : failed("merge-verification-failed", messageOf(cause))
-      }
-      const missing = await landingError(git, repo, input, candidate.checked, landing.sha)
-      if (missing === undefined) {
-        const sourceRefError = await sourceCandidateRefError(git, repo, candidate.checked.sourceRewrites ?? [])
-        if (sourceRefError !== undefined) {
-          const rollbackError = await rollbackQueueBase(git, repo, candidate.base, landing)
-          if (rollbackError !== undefined) return failed("merge-rollback-failed", rollbackError)
-          return failed("invalid-candidate", sourceRefError)
-        }
-        return {
-          status: "completed",
-          conclusion: "success",
-          output: integrationProof(landing.sha, candidate.checked),
-        }
-      }
-      if (outcome.status === "completed" && outcome.conclusion === "failure") {
-        return failed(outcome.error.code, outcome.error.message)
-      }
-      if (outcome.status === "waiting") {
-        return failed("merge-command-waited", "merge commands cannot leave a waiting external effect")
-      }
-      return failed(
-        "merge-command-did-not-land",
-        `merge command exited successfully but '${branch}' does not contain '${missing}'`,
+      return withComponentMainPromotions(
+        git,
+        repo,
+        candidate.checked.baseSha,
+        candidate.checked.candidateSha,
+        async (promotions) => {
+          const cancellation = mergeAuthorityCancellation(context)
+          if (cancellation !== undefined) return cancellation
+          const outcome = await command(input, context)
+          let landing: GitQueueTarget
+          try {
+            landing = await authoritativeQueueBase(git, repo, branch)
+          } catch (cause) {
+            const refusal = queueAuthorityRefusal(cause)
+            if (refusal !== undefined) {
+              return failedWithEvidence(
+                failureFact(cause)?.code ?? "queue-environment-refused",
+                messageOf(cause),
+                refusal,
+              )
+            }
+            return outcome.status === "completed" && outcome.conclusion === "failure"
+              ? failed(outcome.error.code, outcome.error.message)
+              : failed("merge-verification-failed", messageOf(cause))
+          }
+          const missing = await landingError(git, repo, input, candidate.checked, landing.sha)
+          if (missing === undefined) {
+            const sourceRefError = await sourceCandidateRefError(git, repo, candidate.checked.sourceRewrites ?? [])
+            if (sourceRefError !== undefined) {
+              const rollbackError = await rollbackQueueBase(git, repo, candidate.base, landing)
+              if (rollbackError !== undefined) return failed("merge-rollback-failed", rollbackError)
+              return failed("invalid-candidate", sourceRefError)
+            }
+            const promotionFailure = await applyComponentMainPromotions(git, promotions)
+            if (promotionFailure !== undefined) {
+              return failed(promotionFailure.code, promotionFailure.message)
+            }
+            return {
+              status: "completed",
+              conclusion: "success",
+              output: integrationProof(landing.sha, candidate.checked),
+            }
+          }
+          if (outcome.status === "completed" && outcome.conclusion === "failure") {
+            return failed(outcome.error.code, outcome.error.message)
+          }
+          if (outcome.status === "waiting") {
+            return failed("merge-command-waited", "merge commands cannot leave a waiting external effect")
+          }
+          return failed(
+            "merge-command-did-not-land",
+            `merge command exited successfully but '${branch}' does not contain '${missing}'`,
+          )
+        },
       )
     } catch (cause) {
       const refusal =

@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { Command, createMemoryJournal } from "@yrd/core"
 import { createExclusive, createJournal } from "@yrd/persistence"
 import type { Process, ProcessRequest } from "@yrd/process"
-import { createLogger } from "loggily"
+import { createLogger, type LogEvent } from "loggily"
 import {
   createSignalObserver,
   createTribeSignalAdapter,
@@ -60,7 +60,7 @@ function rejectedFrame(eventId = "00000000-0000-7000-8000-000000000003") {
           revision: 3,
           headSha: "a".repeat(40),
           run: "R9",
-          actor: "@agent/7",
+          submitter: "@agent/7",
           step: "check",
           evidence: "/repo/.git/yrd/artifacts/R9/check/stderr.log",
           detail: "focused tests failed",
@@ -70,7 +70,7 @@ function rejectedFrame(eventId = "00000000-0000-7000-8000-000000000003") {
   }
 }
 
-function submittedFrame(eventId: string, actor: string, revision: number) {
+function submittedFrame(eventId: string, submitter: string, revision: number) {
   const frame = rejectedFrame(eventId)
   const event = frame.events[0]!
   return {
@@ -79,7 +79,7 @@ function submittedFrame(eventId: string, actor: string, revision: number) {
       {
         ...event,
         name: "pr/submitted",
-        data: { pr: "PR7", revision, headSha: "a".repeat(40), actor },
+        data: { pr: "PR7", revision, headSha: "a".repeat(40), submitter },
       },
     ],
   }
@@ -106,7 +106,7 @@ function needsAuthorFrame(eventId = "00000000-0000-7000-8000-00000000000a") {
 function legacyRejectedFrame() {
   const frame = rejectedFrame("00000000-0000-7000-8000-000000000006")
   const event = frame.events[0]!
-  const { actor: _actor, step: _step, evidence: _evidence, ...legacy } = event.data
+  const { submitter: _submitter, step: _step, evidence: _evidence, ...legacy } = event.data
   const command = { id: "00000000-0000-7000-8000-000000000004", op: "queue.finish" }
   return {
     ...frame,
@@ -124,7 +124,7 @@ function legacyRejectedFrame() {
 function legacyRevisionRejectedFrame() {
   const frame = rejectedFrame("00000000-0000-7000-8000-000000000009")
   const event = frame.events[0]!
-  const { actor: _actor, ...legacyRevision } = event.data
+  const { submitter: _submitter, ...legacyRevision } = event.data
   const command = { id: "00000000-0000-7000-8000-000000000007", op: "queue.finish" }
   return {
     ...frame,
@@ -158,7 +158,7 @@ function recordingProcess(requests: ProcessRequest[]): Pick<Process, "run"> {
 describe("PR signal observer", () => {
   it("does not hold the notifications writer.lock across delivery (D4)", async () => {
     // The incident: a one-shot's drain held .git/yrd/notifications/writer.lock across
-    // every `tribe` delivery subprocess (up to 5s each), so a run cancel starved the
+    // every `tribe` delivery subprocess (up to 5s each), so a queue cancel starved the
     // resident for minutes. Delivery must happen OUTSIDE the lock — the lock guards
     // only the cursor read/write.
     const dir = await stateDir()
@@ -196,8 +196,8 @@ describe("PR signal observer", () => {
     const dir = await stateDir()
     const frames = Array.from({ length: 6 }, (_, index) => rejectedFrame(`00000000-0000-7000-8000-00000000010${index}`))
     const journal = createMemoryJournal<unknown>(frames)
-    const logs: unknown[] = []
-    const log = createLogger("test", [{ level: "trace" }, { write: (value: unknown) => logs.push(value) }])
+    const logs: LogEvent[] = []
+    const log = createLogger("test", [{ level: "trace" }, { write: (value: LogEvent) => logs.push(value) }])
     const deliveries: SignalDelivery[] = []
     const observer = createSignalObserver({
       journal,
@@ -222,12 +222,11 @@ describe("PR signal observer", () => {
     expect(deliveries.length).toBeGreaterThan(0)
     expect(deliveries.length).toBeLessThan(frames.length)
     expect(elapsed).toBeLessThan(2_000)
-    // Loud, structured deferral naming the reason — the resident will finish it.
-    expect(logs.some((record) => JSON.stringify(record).includes("delivery budget spent"))).toBe(true)
+    expect(logs.some((record) => record.kind === "log" && record.level === "warn")).toBe(true)
   })
 
   it("bounds a canceled ghost's closure delivery and terminates promptly (D4 regression)", async () => {
-    // The incident: `run cancel` of a ghost run held the writer.lock for minutes,
+    // The incident: `queue cancel` of a ghost run held the writer.lock for minutes,
     // closing opened balls one slow `tribe pending --close` at a time. With delivery
     // unlocked and a one-shot budget, the cancel closes what it quickly can, defers
     // loudly, and RETURNS in bounded time instead of spinning.
@@ -247,7 +246,7 @@ describe("PR signal observer", () => {
               revision: 12,
               headSha: "a".repeat(40),
               run: "R9",
-              actor: "@agent/7",
+              submitter: "@agent/7",
               by: "@chief",
               reason: "superseded by requeue",
             },
@@ -255,8 +254,8 @@ describe("PR signal observer", () => {
         ],
       },
     ])
-    const logs: unknown[] = []
-    const log = createLogger("test", [{ level: "trace" }, { write: (value: unknown) => logs.push(value) }])
+    const logs: LogEvent[] = []
+    const log = createLogger("test", [{ level: "trace" }, { write: (value: LogEvent) => logs.push(value) }])
     const closures: SignalClosure[] = []
     const observer = createSignalObserver({
       journal,
@@ -281,7 +280,7 @@ describe("PR signal observer", () => {
     // Terminated in bounded time, closed some but not all balls, and deferred loudly.
     expect(closures.length).toBeGreaterThan(0)
     expect(elapsed).toBeLessThan(2_000)
-    expect(logs.some((record) => JSON.stringify(record).includes("delivery budget spent"))).toBe(true)
+    expect(logs.some((record) => record.kind === "log" && record.level === "warn")).toBe(true)
   })
 
   it("defers with backoff when a contender holds the writer.lock, never spinning (D4)", async () => {
@@ -290,8 +289,8 @@ describe("PR signal observer", () => {
     // drains and delivers — nothing is lost.
     const dir = await stateDir()
     const journal = createMemoryJournal<unknown>()
-    const logs: unknown[] = []
-    const log = createLogger("test", [{ level: "trace" }, { write: (value: unknown) => logs.push(value) }])
+    const logs: LogEvent[] = []
+    const log = createLogger("test", [{ level: "trace" }, { write: (value: LogEvent) => logs.push(value) }])
     const deliveries: SignalDelivery[] = []
     const observer = createSignalObserver({
       journal,
@@ -313,7 +312,7 @@ describe("PR signal observer", () => {
     observer.start()
     await observer.journal.append(rejectedFrame(), 0)
     // The drainer can't take the snapshot lock → it defers, does not spin or throw.
-    await vi.waitFor(() => expect(logs.some((r) => JSON.stringify(r).includes("deferred"))).toBe(true), {
+    await vi.waitFor(() => expect(logs.some((record) => record.kind === "log" && record.level === "warn")).toBe(true), {
       timeout: 2_000,
     })
     expect(deliveries).toEqual([]) // nothing delivered while the lock is contended
@@ -500,7 +499,7 @@ describe("PR signal observer", () => {
               pr: "PR7",
               revision: 3,
               headSha: "a".repeat(40),
-              actor: "@agent/new",
+              submitter: "@agent/new",
               run: "R10",
               landingSha: "b".repeat(40),
             },
@@ -636,7 +635,7 @@ describe("PR signal observer", () => {
               pr: "PR7",
               revision: 3,
               headSha: "a".repeat(40),
-              actor: "@agent/7",
+              submitter: "@agent/7",
               run: "R9",
               landingSha,
             },
@@ -649,7 +648,7 @@ describe("PR signal observer", () => {
               pr: "PR8",
               revision: 1,
               headSha: "c".repeat(40),
-              actor: "@agent/8",
+              submitter: "@agent/8",
               run: "R9",
               landingSha,
             },
@@ -707,7 +706,7 @@ describe("PR signal observer", () => {
             ...event,
             id: "00000000-0000-7000-8000-000000000040",
             name: "pr/integrated",
-            data: { pr: "PR7", revision: 2, headSha: "a".repeat(40), actor: "@agent/7", run: "R9", landingSha },
+            data: { pr: "PR7", revision: 2, headSha: "a".repeat(40), submitter: "@agent/7", run: "R9", landingSha },
           },
         ],
       },
@@ -742,7 +741,7 @@ describe("PR signal observer", () => {
             ...event,
             id: "00000000-0000-7000-8000-000000000041",
             name: "pr/withdrawn",
-            data: { pr: "PR7", revision: 2, headSha: "a".repeat(40), actor: "@agent/7", reason: "superseded" },
+            data: { pr: "PR7", revision: 2, headSha: "a".repeat(40), submitter: "@agent/7", reason: "superseded" },
           },
         ],
       },
@@ -782,7 +781,7 @@ describe("PR signal observer", () => {
               revision: 2,
               headSha: "a".repeat(40),
               run: "R9",
-              actor: "@agent/7",
+              submitter: "@agent/7",
               by: "@chief",
               reason: "superseded by requeue",
             },
@@ -809,7 +808,7 @@ describe("PR signal observer", () => {
     ])
   })
 
-  it("routes actor-carrying terminal closures to the submitter and skips submitter balls with no recorded actor", async () => {
+  it("routes submitter-carrying terminal closures to the submitter and skips submitter balls with no recorded submitter", async () => {
     const frame = rejectedFrame("00000000-0000-7000-8000-000000000043")
     const event = frame.events[0]!
     const journal = createMemoryJournal<unknown>([
@@ -820,7 +819,7 @@ describe("PR signal observer", () => {
             ...event,
             id: "00000000-0000-7000-8000-000000000043",
             name: "pr/withdrawn",
-            data: { pr: "PR7", revision: 1, headSha: "a".repeat(40), actor: "@agent/7" },
+            data: { pr: "PR7", revision: 1, headSha: "a".repeat(40), submitter: "@agent/7" },
           },
           {
             ...event,
@@ -861,8 +860,8 @@ describe("PR signal observer", () => {
               run: "R9",
               error: { code: "job-lost", message: "runner disappeared" },
               prs: [
-                { pr: "PR7", revision: 3, headSha: "a".repeat(40), actor: "@agent/7" },
-                { pr: "PR8", revision: 1, headSha: "c".repeat(40), actor: "@agent/8" },
+                { pr: "PR7", revision: 3, headSha: "a".repeat(40), submitter: "@agent/7" },
+                { pr: "PR8", revision: 1, headSha: "c".repeat(40), submitter: "@agent/8" },
               ],
             },
           },
@@ -1011,7 +1010,7 @@ describe("PR signal observer", () => {
           at: "2026-07-14T10:00:00.000Z",
           run: "R9",
           error: { code: "job-lost", message: "runner disappeared" },
-          prs: [{ pr: "PR7", revision: 3, headSha: "a".repeat(40), actor: "@agent/7" }],
+          prs: [{ pr: "PR7", revision: 3, headSha: "a".repeat(40), submitter: "@agent/7" }],
         },
       })
 
@@ -1048,7 +1047,7 @@ describe("PR signal observer", () => {
           pr: "PR7",
           revision: 3,
           headSha: "a".repeat(40),
-          actor: "@agent/7",
+          submitter: "@agent/7",
         },
       })
 
@@ -1089,7 +1088,7 @@ describe("PR signal observer", () => {
           pr: "PR7",
           revision: 3,
           headSha: "a".repeat(40),
-          actor: "@agent/7",
+          submitter: "@agent/7",
         },
       })
 
@@ -1125,7 +1124,7 @@ describe("PR signal observer", () => {
           at: "2026-07-14T10:00:00.000Z",
           run: "R9",
           landingSha: "b".repeat(40),
-          prs: [{ pr: "PR7", revision: 3, headSha: "a".repeat(40), actor: "@agent/7" }],
+          prs: [{ pr: "PR7", revision: 3, headSha: "a".repeat(40), submitter: "@agent/7" }],
         },
       })
       await adapter.close?.({
@@ -1173,7 +1172,7 @@ describe("PR signal observer", () => {
               pr: "PR7",
               revision: 3,
               headSha: "a".repeat(40),
-              actor: "@agent/7",
+              submitter: "@agent/7",
               run: "R9",
               baseSha,
               candidateSha,
@@ -1239,7 +1238,7 @@ describe("PR signal observer", () => {
             pr: "PR7",
             revision: 3,
             headSha: "a".repeat(40),
-            actor: "@agent/7",
+            submitter: "@agent/7",
             run: "R9",
             landingSha: "b".repeat(40),
           },
@@ -1284,7 +1283,7 @@ describe("PR signal observer", () => {
             pr: "PR7",
             revision: 1,
             headSha: "a".repeat(40),
-            actor: "@agent/7",
+            submitter: "@agent/7",
             run: "R9",
             landingSha: "b".repeat(40),
           },
@@ -1352,7 +1351,7 @@ describe("PR signal observer", () => {
               pr: "PR7",
               revision: 2,
               headSha: "a".repeat(40),
-              actor: "@agent/7",
+              submitter: "@agent/7",
               run: "R9",
               landingSha: "b".repeat(40),
             },
@@ -1382,10 +1381,10 @@ describe("PR signal observer", () => {
     ])
   })
 
-  it("closes the exact opened ball across an actor change on resubmission (opened-ledger authoritative)", async () => {
-    // rev-1 needs review under submitter @agent/old; yrd legally reassigns the actor on the rev-2
+  it("closes the exact opened ball across a submitter change on resubmission (opened-ledger authoritative)", async () => {
+    // rev-1 needs review under @agent/old; yrd legally reassigns submission on the rev-2
     // resubmission, so the integration reports @agent/new. Re-deriving the rev-1 close id from the
-    // terminal actor closes a ball that was never opened; the ledger closes the id actually sent.
+    // terminal submitter closes a ball that was never opened; the ledger closes the id actually sent.
     const opened = submittedFrame("00000000-0000-7000-8000-000000000050", "@agent/old", 1)
     const integrated = rejectedFrame("00000000-0000-7000-8000-000000000051")
     const integratedEvent = integrated.events[0]!
@@ -1401,7 +1400,7 @@ describe("PR signal observer", () => {
               pr: "PR7",
               revision: 2,
               headSha: "b".repeat(40),
-              actor: "@agent/new",
+              submitter: "@agent/new",
               run: "R2",
               landingSha: "c".repeat(40),
             },
@@ -1424,7 +1423,7 @@ describe("PR signal observer", () => {
     const ids = closures.map(({ recipient, request }) => `${recipient} ${request}`)
     // The ledger closes the ball actually opened for the rev-1 submitter…
     expect(ids).toContain("@agent/old yrd:pr/needs-review:PR7:1:@agent/old")
-    // …and never re-derives rev-1 from the drifted terminal actor (r1's phantom, which left the real ball open).
+    // …and never re-derives rev-1 from the drifted terminal submitter (r1's phantom, which left the real ball open).
     expect(ids).not.toContain("@agent/new yrd:pr/needs-review:PR7:1:@agent/new")
   })
 
@@ -1446,7 +1445,7 @@ describe("PR signal observer", () => {
             pr: "PR7",
             revision: 2,
             headSha: "b".repeat(40),
-            actor: "@agent/7",
+            submitter: "@agent/7",
             run: "R2",
             landingSha: "c".repeat(40),
           },

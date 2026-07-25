@@ -50,6 +50,8 @@ export type YrdCliServices = Readonly<{
   process?: Pick<Process, "run">
   /** Live base-authority flow config for deterministic doctor diagnostics. */
   config?: YrdConfig
+  /** Exact host environment inherited by Bay child processes. */
+  environment?: NodeJS.ProcessEnv
 }>
 
 /** Read-only Git facts `pr prune` proves its superseded verdicts with. The
