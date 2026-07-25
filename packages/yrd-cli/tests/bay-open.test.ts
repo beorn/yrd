@@ -1033,6 +1033,38 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
     expect(JSON.parse(prs.stdout())).toMatchObject({ prs: [] })
   })
 
+  it("refuses to archive an unchanged head when the dirty checkpoint commit no-ops", async () => {
+    const { repo } = await repository()
+    const originalHead = await git(repo, "rev-parse", "HEAD")
+    const postCommit = join(repo, ".git", "hooks", "post-commit")
+    await writeFile(
+      postCommit,
+      ["#!/bin/sh", 'case "$(git log -1 --format=%s)" in', "  wip:*) git reset --hard -q HEAD^ ;;", "esac", ""].join(
+        "\n",
+      ),
+    )
+    await chmod(postCommit, 0o755)
+    const run = output(repo)
+
+    expect(
+      await yrd(repo, run.io, "bay", "run", CLAIM, "--", "sh", "-c", "printf payload > scratch.txt"),
+      run.stderr(),
+    ).toBe(1)
+    expect(run.stderr()).toContain("scratch.txt")
+    expect(run.stderr()).toContain("did not advance HEAD")
+    expect(await git(repo, "rev-parse", `refs/remotes/origin/${BRANCH}`)).toBe(originalHead)
+    await expect(git(repo, "show", `refs/remotes/origin/${BRANCH}:scratch.txt`)).rejects.toThrow()
+    await expect(git(repo, "rev-parse", "--verify", "refs/yrd/closed/B1")).rejects.toThrow()
+    const bays = output(repo)
+    expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
+    const projection = JSON.parse(bays.stdout()) as {
+      bays: readonly { archive?: unknown; issue?: string; status: string }[]
+    }
+    const failed = projection.bays.find((bay) => bay.issue === CLAIM)
+    expect(failed).toMatchObject({ issue: CLAIM, status: "active" })
+    expect(failed?.archive).toBeUndefined()
+  })
+
   it("reopens a closed claim without implicitly creating or updating a PR", async () => {
     const { repo } = await repository()
     const clean = output(repo)
