@@ -3,7 +3,7 @@
 // @consumer @yrd/cli
 
 import type { PR } from "@yrd/bay"
-import type { QueueRun } from "@yrd/queue"
+import type { Run } from "@yrd/queue"
 import { createElement } from "react"
 import { createRenderer } from "silvery/test"
 import { describe, expect, it } from "vitest"
@@ -35,12 +35,10 @@ function draftPr(): PR {
     name: "Draft change",
     branch: "topic/pr7",
     base: "main",
-    status: "pushed",
-    revision: 1,
-    headSha,
-    baseSha: BASE_SHA,
-    revisions: [
-      { revision: 1, headSha, base: "main", baseSha: BASE_SHA, pushedAt: REGISTERED_AT, actor: "alice@example.test" },
+    state: "open",
+    merged: false,
+    revs: [
+      { n: 1, head: headSha, base: "main", baseSha: BASE_SHA, pushedAt: REGISTERED_AT, actor: "alice@example.test" },
     ],
     reviews: [],
     comments: [],
@@ -58,22 +56,20 @@ function revisionPr(): PR {
     name: "Revising change",
     branch: "topic/pr5",
     base: "main",
-    status: "pushed",
-    revision: 2,
-    headSha,
-    baseSha: BASE_SHA,
-    revisions: [
+    state: "open",
+    merged: false,
+    revs: [
       {
-        revision: 1,
-        headSha: priorHeadSha,
+        n: 1,
+        head: priorHeadSha,
         base: "main",
         baseSha: BASE_SHA,
         pushedAt: "2026-07-13T08:00:00.000Z",
         submittedAt: "2026-07-13T08:05:00.000Z",
         actor: "carol@example.test",
-        terminal: { status: "rejected", at: "2026-07-13T09:00:00.000Z", run: "R9" },
+        terminal: { kind: "rejected", at: "2026-07-13T09:00:00.000Z", run: "R9" },
       },
-      { revision: 2, headSha, base: "main", baseSha: BASE_SHA, pushedAt: REGISTERED_AT, actor: "carol@example.test" },
+      { n: 2, head: headSha, base: "main", baseSha: BASE_SHA, pushedAt: REGISTERED_AT, actor: "carol@example.test" },
     ],
     reviews: [],
     comments: [],
@@ -89,14 +85,12 @@ function submittedPr(): PR {
     name: "Submitted change",
     branch: "topic/pr3",
     base: "main",
-    status: "submitted",
-    revision: 1,
-    headSha,
-    baseSha: BASE_SHA,
-    revisions: [
+    state: "open",
+    merged: false,
+    revs: [
       {
-        revision: 1,
-        headSha,
+        n: 1,
+        head: headSha,
         base: "main",
         baseSha: BASE_SHA,
         pushedAt: REGISTERED_AT,
@@ -111,11 +105,11 @@ function submittedPr(): PR {
   }
 }
 
-function result(prs: readonly PR[], finished: readonly QueueRun[] = []): QueueStatusResult {
+function result(prs: readonly PR[], finished: readonly Run[] = []): QueueStatusResult {
   return { base: "main", running: [], waiting: [], finished: [...finished], prs: [...prs] }
 }
 
-function project(prs: readonly PR[], finished: readonly QueueRun[] = []) {
+function project(prs: readonly PR[], finished: readonly Run[] = []) {
   const results = [result(prs, finished)]
   const options: QueueTimelineProjectionOptions = {
     now: NOW,
@@ -130,9 +124,11 @@ function project(prs: readonly PR[], finished: readonly QueueRun[] = []) {
   return queueTimelineProjection(results, options)
 }
 
-function rejectedRun(): QueueRun {
+function rejectedRun(): Run {
   return {
     id: "R9",
+    queueId: "Q:main",
+    candidateId: "C:R9",
     prs: [
       {
         id: "PR5",
@@ -144,10 +140,12 @@ function rejectedRun(): QueueRun {
       },
     ],
     base: "main",
+    jobs: [],
     steps: [],
     startedAt: "2026-07-13T08:30:00.000Z",
     cursor: 0,
-    status: "failed",
+    status: "completed",
+    conclusion: "failure",
     shape: { results: {} },
     finishedAt: "2026-07-13T09:00:00.000Z",
     error: { code: "typecheck-failed", message: "payload does not typecheck" },
@@ -303,21 +301,19 @@ function rejectedPr(): PR {
     name: "Rejected change",
     branch: "topic/pr5",
     base: "main",
-    status: "rejected",
+    state: "open",
+    merged: false,
     rejectedAt: "2026-07-13T09:00:00.000Z",
-    revision: 1,
-    headSha,
-    baseSha: BASE_SHA,
-    revisions: [
+    revs: [
       {
-        revision: 1,
-        headSha,
+        n: 1,
+        head: headSha,
         base: "main",
         baseSha: BASE_SHA,
         pushedAt: "2026-07-13T08:00:00.000Z",
         submittedAt: "2026-07-13T08:05:00.000Z",
         actor: "carol@example.test",
-        terminal: { status: "rejected", at: "2026-07-13T09:00:00.000Z", run: "R9" },
+        terminal: { kind: "rejected", at: "2026-07-13T09:00:00.000Z", run: "R9" },
       },
     ],
     reviews: [],

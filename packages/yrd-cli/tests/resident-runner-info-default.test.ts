@@ -71,6 +71,13 @@ async function readRecords(file: string): Promise<Record<string, unknown>[]> {
     .map((entry) => JSON.parse(entry) as Record<string, unknown>)
 }
 
+function defaultResidentProcessEnv(overrides: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env = { ...process.env }
+  delete env.LOG_LEVEL
+  delete env.DEBUG
+  return { ...env, ...overrides }
+}
+
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
@@ -181,7 +188,7 @@ check:
       cwd: repo,
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, LOGGILY_FILE: logFile, NO_COLOR: "1" },
+      env: defaultResidentProcessEnv({ LOGGILY_FILE: logFile, NO_COLOR: "1" }),
     })
     const drainStdout = new Response(cli.stdout).text()
     const drainStderr = new Response(cli.stderr).text()
@@ -217,7 +224,7 @@ check:
       cwd: repo,
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, LOGGILY_FILE: logFile, NO_COLOR: "1" },
+      env: defaultResidentProcessEnv({ LOGGILY_FILE: logFile, NO_COLOR: "1" }),
     })
     const stdoutText = new Response(cli.stdout).text()
     let stderrText = ""

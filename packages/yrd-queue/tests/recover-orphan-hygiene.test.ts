@@ -24,15 +24,21 @@ function workspace(): BayWorkspace {
   return {
     revision: "test-workspace-v1",
     provision: (input) => ({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE },
     }),
     refresh: (input) => ({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE, dirty: false },
     }),
-    checkpoint: () => ({ status: "passed", output: { headSha: HEAD, pushed: true, wip: false } }),
-    deprovision: () => ({ status: "passed", output: {} }),
+    checkpoint: () => ({
+      status: "completed",
+      conclusion: "success",
+      output: { headSha: HEAD, pushed: true, wip: false },
+    }),
+    deprovision: () => ({ status: "completed", conclusion: "success", output: {} }),
   }
 }
 
@@ -44,13 +50,18 @@ async function createApp(
   const bayJobs = createBayJobDefs(workspace())
   const first = withStep(
     "first",
-    (): JobResult<{ first: boolean }> => ({ status: "passed", output: { first: true } }),
+    (): JobResult<{ first: boolean }> => ({ status: "completed", conclusion: "success", output: { first: true } }),
     { revision: "first-v1", output: z.object({ first: z.boolean() }).strict() },
   )
   const queue = withQueue({ steps: [first] as const, batch: false, defaultSteps: ["first"] })
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   return createYrd(queue(base), {
-    inject: { journal, id, clock: () => "2026-01-01T00:00:00.000Z", ...(log === undefined ? {} : { log }) },
+    inject: {
+      journal,
+      id,
+      clock: () => "2026-01-01T00:00:00.000Z",
+      log: log ?? createLogger("test", [{ level: "silent" }]),
+    },
   })
 }
 
@@ -62,9 +73,9 @@ async function submitBranch(app: Awaited<ReturnType<typeof createApp>>, branch: 
   return pr
 }
 
-/** Seed R1 with a still-requested `first` Job, then cancel the RUN via the
- * low-level command — which marks R1 terminal (canceled) but does NOT terminalize
- * its pending Job. That leftover requested Job is the orphan a state upgrade
+/** Seed R1 with a still-queued `first` Job, then cancel the RUN via the
+ * low-level command — which completes R1 as cancelled but does NOT terminalize
+ * its pending Job. That leftover queued Job is the orphan a state upgrade
  * strands. */
 async function seedOrphan(app: Awaited<ReturnType<typeof createApp>>) {
   const pr = await submitBranch(app, "issue/orphaned-requested")
@@ -72,10 +83,10 @@ async function seedOrphan(app: Awaited<ReturnType<typeof createApp>>) {
   const job = app.queue.get("R1")?.steps[0]?.job
   if (job === undefined) throw new Error("expected requested first step")
   await app.dispatch(app.commands.queue.cancelRun, { run: "R1", by: "tester", reason: "seed orphan" })
-  // The run is terminal (canceled) but the low-level cancelRun command does NOT
+  // The run is terminal (completed+cancelled) but the low-level cancelRun command does NOT
   // terminalize the pending Job — that is exactly the strand.
-  expect(app.queue.get("R1")?.status).toBe("canceled")
-  expect(app.queue.get("R1")?.steps[0]?.job?.status).toBe("requested")
+  expect(app.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "cancelled" })
+  expect(app.queue.get("R1")?.steps[0]?.job?.status).toBe("queued")
   return job.id
 }
 
@@ -97,13 +108,13 @@ describe("recover orphan hygiene — a stranded requested Job is flagged and set
     const jobId = await seedOrphan(app)
 
     // Precondition: the orphan is live before recovery.
-    expect(app.state().jobs.byId[jobId]?.status).toBe("requested")
+    expect(app.state().jobs.byId[jobId]?.status).toBe("queued")
     expect(app.queue.audit().findings.some((f) => f.code === "orphaned-requested-job")).toBe(true)
 
     await app.queue.recover({ recoveryTime: "2026-01-01T00:05:00.000Z", reason: "orphan-hygiene test" })
 
     // The Job is settled (canceled) and the audit no longer flags it.
-    expect(app.state().jobs.byId[jobId]?.status).toBe("canceled")
+    expect(app.state().jobs.byId[jobId]).toMatchObject({ status: "completed", conclusion: "cancelled" })
     expect(app.queue.audit().findings.some((f) => f.code === "orphaned-requested-job")).toBe(false)
 
     const receipt = events.find(

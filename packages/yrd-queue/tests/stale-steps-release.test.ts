@@ -4,7 +4,8 @@
  * @consumer @yrd/queue
  */
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
+import { createLogger } from "loggily"
+import { createBayJobDefs, prDeliveryState, withBays, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
@@ -25,15 +26,21 @@ function workspace(): BayWorkspace {
   return {
     revision: "test-workspace-v1",
     provision: (input) => ({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE },
     }),
     refresh: (input) => ({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE, dirty: false },
     }),
-    checkpoint: () => ({ status: "passed", output: { headSha: HEAD, pushed: true, wip: false } }),
-    deprovision: () => ({ status: "passed", output: {} }),
+    checkpoint: () => ({
+      status: "completed",
+      conclusion: "success",
+      output: { headSha: HEAD, pushed: true, wip: false },
+    }),
+    deprovision: () => ({ status: "completed", conclusion: "success", output: {} }),
   }
 }
 
@@ -43,12 +50,16 @@ function workspace(): BayWorkspace {
 function twoStepPlugin(secondRevision: string) {
   const first = withStep(
     "first",
-    (): JobResult<{ first: boolean }> => ({ status: "passed", output: { first: true } }),
+    (): JobResult<{ first: boolean }> => ({ status: "completed", conclusion: "success", output: { first: true } }),
     { revision: "first-v1", output: FirstResultSchema },
   )
   const second = withStep(
     "second",
-    (_input: StepExecution): JobResult<{ second: boolean }> => ({ status: "passed", output: { second: true } }),
+    (_input: StepExecution): JobResult<{ second: boolean }> => ({
+      status: "completed",
+      conclusion: "success",
+      output: { second: true },
+    }),
     { revision: secondRevision, output: SecondResultSchema },
   )
   return withQueue({ steps: [first, second] as const, batch: false, defaultSteps: ["first", "second"] })
@@ -58,7 +69,14 @@ async function createApp(secondRevision: string, journal = createMemoryJournal()
   const bayJobs = createBayJobDefs(workspace())
   const queue = twoStepPlugin(secondRevision)
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
-  return createYrd(queue(base), { inject: { journal, id, clock: () => "2026-01-01T00:00:00.000Z" } })
+  return createYrd(queue(base), {
+    inject: {
+      journal,
+      id,
+      clock: () => "2026-01-01T00:00:00.000Z",
+      log: createLogger("test", [{ level: "silent" }]),
+    },
+  })
 }
 
 async function submitBranch(app: Awaited<ReturnType<typeof createApp>>, branch: string) {
@@ -83,7 +101,7 @@ describe("stale-steps release — a drifted next step frees the run instead of k
       await app.jobs.run(firstJob.id, runtime)
       // First passed; the SECOND step was never requested — that is the pending
       // boundary the drift lands on when the config moves.
-      expect(app.queue.get("R1")?.steps[0]?.job?.status).toBe("passed")
+      expect(app.queue.get("R1")?.steps[0]?.job?.status).toBe("completed")
       expect(app.queue.get("R1")?.steps[1]?.job).toBeUndefined()
     }
 
@@ -93,12 +111,13 @@ describe("stale-steps release — a drifted next step frees the run instead of k
     await expect(replayed.dispatch(replayed.commands.queue.advance, { run: "R1" })).resolves.toBeDefined()
 
     expect(replayed.queue.get("R1")).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: expect.objectContaining({ code: "stale-steps" }),
     })
     // Authority released and the PR stays submitted, so it re-admits fresh.
     expect(replayed.state().queues.authority.runs).toBeDefined()
-    expect(replayed.state().bays.prs.PR1?.status).toBe("submitted")
+    expect(prDeliveryState(replayed.state().bays.prs.PR1!)).toBe("submitted")
   })
 
   it("re-admits the still-submitted PR under the installed config after a stale-steps release", async () => {
@@ -117,13 +136,14 @@ describe("stale-steps release — a drifted next step frees the run instead of k
     await using replayed = await createApp("second-v2", journal, id)
     await replayed.dispatch(replayed.commands.queue.advance, { run: "R1" })
     expect(replayed.queue.get("R1")).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: expect.objectContaining({ code: "stale-steps" }),
     })
 
     // A fresh explicit run composes a NEW run under the installed (v2) revision.
     const readmitted = await replayed.queue.run({ prs: ["PR1"], steps: ["first", "second"] }, runtime)
-    expect(readmitted.at(-1)).toMatchObject({ status: "passed" })
+    expect(readmitted.at(-1)).toMatchObject({ status: "completed", conclusion: "success" })
     expect(Queues.ids(replayed.state().queues)).toContain("R2")
   })
 })

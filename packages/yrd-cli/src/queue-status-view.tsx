@@ -27,6 +27,7 @@ import type {
   QueueStep,
   QueueSummary,
 } from "@yrd/queue"
+import { GateCertificateSchema } from "@yrd/queue"
 import {
   Box,
   formatNounId,
@@ -1364,7 +1365,13 @@ function queueState(pr: PR, run: Run | undefined): string {
   if (run?.status === "queued" || run?.status === "in_progress") return "checking"
   if (run?.status === "waiting") return "waiting"
   if (run?.status === "completed") return terminalProjection(run).display
-  return prDeliveryState(pr)
+  return projectedPrStatus(pr)
+}
+
+export function projectedPrStatus(pr: PR, eligibility?: PREligibility): PRDeliveryState | "needs-author" {
+  return pr.needsAuthor !== undefined || eligibility?.reason?.code === "needs-author"
+    ? "needs-author"
+    : prDeliveryState(pr)
 }
 
 function stepError(step: QueueStep): string {
@@ -1713,6 +1720,7 @@ function timelineRevisionLineage(pr: PR, revision = prRevisionNumber(pr)): Queue
   return {
     pr: pr.id,
     revisions: revisions.map((candidate) => candidate.n),
+    ...(registeredAt === undefined ? {} : { registeredAt }),
     ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
   }
 }
@@ -1841,8 +1849,8 @@ function timelineRunMemberRows(
  * the derived signal — never a stored status — that turns a `draft` into a
  * `rev` row. `canceled`/`withdrawn` terminals are supersessions, not
  * failures, so they do not count. */
-function lastFailedSubmission(pr: PR): PR["revisions"][number] | undefined {
-  return pr.revisions.filter((revision) => revision.terminal?.status === "rejected").at(-1)
+function lastFailedSubmission(pr: PR): PR["revs"][number] | undefined {
+  return pr.revs.filter((revision) => revision.terminal?.kind === "rejected").at(-1)
 }
 
 /**
@@ -1857,10 +1865,12 @@ function lastFailedSubmission(pr: PR): PR["revisions"][number] | undefined {
  * retains, so the pre-cutover backlog of ancient rejected PRs cannot flood the
  * band; once the run ages out of retention, the corpse stays hidden.
  */
-function preRunTimelineStatus(pr: PR, runs: readonly QueueRun[]): "draft" | "rev" | "ready" | undefined {
-  if (pr.status === "submitted") return "ready"
-  if (pr.status === "pushed") return lastFailedSubmission(pr) === undefined ? "draft" : "rev"
-  if (pr.status === "rejected") {
+function preRunTimelineStatus(pr: PR, runs: readonly Run[]): "draft" | "rev" | "ready" | undefined {
+  const delivery = prDeliveryState(pr)
+  if (pr.needsAuthor !== undefined) return "rev"
+  if (delivery === "submitted") return "ready"
+  if (delivery === "pushed") return lastFailedSubmission(pr) === undefined ? "draft" : "rev"
+  if (delivery === "rejected") {
     const runId = lastFailedSubmission(pr)?.terminal?.run
     if (runId !== undefined && runs.some((run) => run.id === runId)) return "rev"
   }
@@ -1869,7 +1879,7 @@ function preRunTimelineStatus(pr: PR, runs: readonly QueueRun[]): "draft" | "rev
 
 /** `rev · <slug>` annotated with the code of the most recent failed
  * submission when that run is still retained; bare `rev` otherwise. */
-function revisionDetail(pr: PR, runs: readonly QueueRun[]): string {
+function revisionDetail(pr: PR, runs: readonly Run[]): string {
   const runId = lastFailedSubmission(pr)?.terminal?.run
   const run = runId === undefined ? undefined : runs.find((candidate) => candidate.id === runId)
   const code = run === undefined ? undefined : failureFact(run, relevantStep(run))?.code
@@ -1897,10 +1907,13 @@ function timelineNonIntegratedRows(
     [...result.running, ...result.waiting].flatMap((run) => run.prs.map((member) => queueRevisionKey(member))),
   )
   const positions = submittedPrPositions(result.prs)
-  return result.prs.flatMap((pr) => {
+  const runs = [...result.running, ...result.waiting, ...result.finished]
+  return result.prs.flatMap((pr): QueueTimelineProjectedRow[] => {
     const revision = currentPRRev(pr)
     const revisionKey = queueRevisionKey({ id: pr.id, revision: revision.n, headSha: revision.head })
-    if (prDeliveryState(pr) !== "submitted" || activeRevisions.has(revisionKey)) return []
+    const status = preRunTimelineStatus(pr, runs)
+    if (status === undefined) return []
+    if (status === "ready" && activeRevisions.has(revisionKey)) return []
     const timestamp = submissionTimes.get(revisionKey) ?? revision.submittedAt ?? pr.submittedAt ?? null
     const timestampMs = parsedTimelineTimestamp(timestamp ?? undefined, `PR '${pr.id}' submission`)
     const position = positions.get(pr.id)
@@ -1910,7 +1923,7 @@ function timelineNonIntegratedRows(
     const candidate = latestCandidateForCurrentRevision(result, pr)
     const eligibility = eligibilityForCurrentRevision(result, pr)
     const blockingReason = eligibility?.runnable === false ? eligibility.reason : undefined
-    const detail = withTimelineLineage(
+    const readyDetail = withTimelineLineage(
       blockingReason?.message ?? (position === undefined ? "queued" : `position ${position}`),
       revisionLineage,
     )
@@ -1919,27 +1932,24 @@ function timelineNonIntegratedRows(
     const subject = boundedQueue(bayPath ?? pr.title ?? pr.name ?? pr.branch, 80)
 
     if (status === "ready") {
-      const timestamp = submissionTimes.get(queueRevisionKey(pr)) ?? pr.submittedAt ?? null
-      const position = positions.get(pr.id)
-      const sourceReadyAt = revisionLineage[0]?.sourceReadyAt ?? timestamp ?? undefined
-      const detail = withTimelineLineage(position === undefined ? "ready" : `position ${position}`, revisionLineage)
       return [
         {
-          id: `${pr.base}:pr:${pr.id}:${pr.revision}:${pr.headSha}`,
+          id: `${pr.base}:pr:${pr.id}:${revision.n}:${revision.head}`,
           base: pr.base,
           group: "pending" as const,
           status,
           glyph: statusGlyph(status),
           timestamp,
-          timestampMs: parsedTimelineTimestamp(timestamp ?? undefined, `PR '${pr.id}' submission`),
+          timestampMs,
+          ...(candidate === undefined ? {} : { candidateId: candidate.id }),
           pr: pr.id,
-          revision: pr.revision,
-          headSha: pr.headSha,
+          revision: revision.n,
+          headSha: revision.head,
           branch: pr.branch,
           ...(issue === undefined ? {} : { issue }),
           subject,
           ...(submitter === undefined ? {} : { submitter }),
-          detail,
+          detail: readyDetail,
           ...(position === undefined ? {} : { position }),
           ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
           revisionLineage,
@@ -1953,19 +1963,17 @@ function timelineNonIntegratedRows(
     }
 
     // draft | rev — pushed, pre-queue WIP anchored on registration (pushedAt).
-    const registeredAt = pr.revisions.find(
-      (candidate) => candidate.revision === pr.revision && candidate.headSha === pr.headSha,
-    )?.pushedAt
+    const registeredAt = revision.pushedAt
     const detail = status === "rev" ? revisionDetail(pr, runs) : "draft"
     return [
       {
-        id: `${pr.base}:pr:${pr.id}:${revision.n}:${revision.head}`,
+        id: `${pr.base}:draft:${pr.id}:${revision.n}:${revision.head}`,
         base: pr.base,
-        group: "pending" as const,
-        status: "pending" as const,
-        glyph: statusGlyph("pending"),
-        timestamp,
-        timestampMs,
+        group: "draft" as const,
+        status,
+        glyph: statusGlyph(status),
+        timestamp: registeredAt,
+        timestampMs: parsedTimelineTimestamp(registeredAt, `PR '${pr.id}' registration`),
         ...(candidate === undefined ? {} : { candidateId: candidate.id }),
         pr: pr.id,
         revision: revision.n,
@@ -1980,7 +1988,7 @@ function timelineNonIntegratedRows(
         ...(blockingReason === undefined
           ? {}
           : { failure: { code: blockingReason.code, message: blockingReason.message } }),
-        ageMs: timelineAge(sourceReadyAt, nowIso, `PR '${pr.id}' source-ready age`),
+        ageMs: timelineAge(registeredAt, nowIso, `PR '${pr.id}' source-ready age`),
         totalMs: null,
         activeMs: null,
         waitMs: null,
@@ -2335,7 +2343,12 @@ function projectPR(
   const artifact = artifactHref(artifacts[0])
   const candidateConflict =
     run === undefined && eligibility?.runnable === false && eligibility.reason?.code === "candidate-conflicting"
-  const stateLabel = candidateConflict ? eligibility.reason.code : queueState(pr, run)
+  const projectedState = projectedPrStatus(pr, eligibility)
+  const stateLabel = candidateConflict
+    ? eligibility.reason.code
+    : projectedState === "needs-author"
+      ? projectedState
+      : queueState(pr, run)
   const taskStatus = candidateConflict
     ? "blocked"
     : runOverride === undefined || run === undefined
@@ -2446,7 +2459,7 @@ export function humanQueueProjection(
     ...rows.filter((row) => {
       if (represented.has(row.pr)) return false
       return selected.size === 0
-        ? row.nativeStatus === "rejected" || row.nativeStatus === "needs-author"
+        ? row.nativeStatus === "rejected" || row.state === "needs-author"
         : selected.has(row.pr) && row.nativeStatus !== "submitted"
     }),
   ]
@@ -2573,7 +2586,7 @@ export function prListRows(
     if (!eligibility.runnable && eligibility.reason === undefined) {
       throw new Error(`yrd: PR '${pr.id}' revision ${revision} is ineligible without a typed blocking reason`)
     }
-    const projected = projectPR(undefined, summary, pr, now, undefined, eligibility)
+    const projected = projectPR(undefined, summary, pr, now, undefined, undefined, eligibility)
     const state = projectedPrStatus(pr, eligibility)
     return {
       pr: projected.pr,
@@ -2806,6 +2819,7 @@ export function PRDetailView({
   position,
 }: {
   pr: PR
+  eligibility?: PREligibility
   runs: readonly Run[]
   attempts?: readonly QueueAttempt[]
   now: number
@@ -3203,7 +3217,7 @@ export function QueueWatchView({
       .flatMap((result) =>
         result.prs.map((candidate) => ({
           pr: candidate,
-          eligibility: result.eligibilities?.[candidate.id],
+          eligibility: eligibilityForCurrentRevision(result, candidate),
         })),
       )
       .find(({ pr: candidate }) => candidate.id === pr)
@@ -3328,14 +3342,7 @@ export function QueueDetailTitle({ row, issue }: { row?: QueueTimelineProjectedR
   if (row.run !== undefined && row.candidateId === undefined) {
     throw new Error(`yrd: queue timeline Run '${row.run}' is missing its Candidate identity`)
   }
-  if (row.run !== undefined && data !== undefined && data.candidateId !== row.candidateId) {
-    throw new Error(
-      `yrd: queue timeline Run '${row.run}' Candidate '${row.candidateId}' disagrees with detail Candidate '${data.candidateId}'`,
-    )
-  }
-  const outcome = detailStatusOutcome(row, data)
   const presentIssue = presentFact(issue)
-  const running = data === undefined ? row.status === "running" : data.status === "in_progress"
   return (
     <Box flexDirection="row" width="100%" minWidth={0} overflow="hidden" flexShrink={0}>
       <QueuePrId pr={row.pr} revision={row.revision} color="$fg-warning" flexShrink={0} />
@@ -3388,7 +3395,7 @@ export function QueueDetailRunHeader({ data, row }: { data: QueueShowData; row?:
         paddingX={1}
       >
         <Text bold wrap="truncate" minWidth={0}>
-          RUN <QueueRunId base={data.base} run={data.run} />
+          RUN <RunId base={data.base} run={data.run} />
         </Text>
       </Box>
       {timingRows.map((timing) => (
@@ -3432,8 +3439,15 @@ function noticeState(
   failureState: FailureDisposition["state"] | undefined,
 ): StatusNoticeState | undefined {
   if (data !== undefined) {
-    if (data.status === "passed") return data.integration === undefined ? "done" : "integrated"
-    if (data.status === "failed") return failureState ?? "failed"
+    if (data.status === "completed" && data.conclusion === "success") {
+      return data.integration === undefined ? "done" : "integrated"
+    }
+    if (data.status === "completed" && data.conclusion === "failure") return failureState ?? "failed"
+    if (data.status === "completed" && data.conclusion === "timed_out") return "timeout"
+    if (data.status === "completed" && (data.conclusion === "cancelled" || data.conclusion === "skipped")) {
+      return "canceled"
+    }
+    if (data.status === "in_progress") return "running"
     return statusPresentationState(data.status)
   }
   if (row === undefined) return undefined
@@ -3446,13 +3460,15 @@ function noticeHeadline(
   row: QueueTimelineProjectedRow | undefined,
   data: QueueShowData | undefined,
 ): string {
-  if (data?.status === "failed") {
+  if (data?.status === "completed" && data.conclusion === "failure") {
     if (state === "failed" && (data.outcome === "rejected" || row?.status === "rejected")) {
       return "failed, rejected"
     }
     return state === "failed" ? "failed" : `failed, ${state}`
   }
-  if (data?.status === "passed" && state === "integrated") return "passed, integrated"
+  if (data?.status === "completed" && data.conclusion === "success" && state === "integrated") {
+    return "passed, integrated"
+  }
   if (state === "needs-author") return "needs author"
   return state
 }
@@ -3633,12 +3649,25 @@ export function QueueStatusNotice({
       color={notice.color}
       paddingX={1}
     >
-      <Text bold wrap="truncate" minWidth={0}>
-        RUN <RunId base={data.base} run={data.run} />
-      </Text>
-      {outcome === undefined ? null : (
-        <Text bold color={outcome.color} flexShrink={0}>
-          {outcome.text}
+      <Box flexDirection="row" minWidth={0}>
+        {live && notice.state === "running" ? (
+          <Pulse
+            synchronized
+            colors={[notice.color, "$fg-muted"]}
+            intervalMs={AG_PULSE_INTERVAL_MS}
+            bold
+            flexShrink={0}
+          >
+            {notice.glyph}
+          </Pulse>
+        ) : (
+          <Text bold color={notice.color} flexShrink={0}>
+            {notice.glyph}
+          </Text>
+        )}
+        <Text bold color={notice.color} wrap="wrap" minWidth={0}>
+          {" "}
+          {notice.headline}
         </Text>
       </Box>
       <Box paddingLeft={2} minWidth={0}>
@@ -5093,10 +5122,13 @@ function queueShowAttemptRow(run: Run, attempt: QueueAttempt): QueueShowRow {
   }
 }
 
-function queueShowRows(run: QueueRun, attempts: readonly QueueAttempt[]): readonly QueueShowRow[] {
+function queueShowRows(run: Run, attempts: readonly QueueAttempt[]): readonly QueueShowRow[] {
   const terminalStepIndex = run.steps.findIndex((step) => {
-    const status = step.job?.status as string | undefined
-    return status === "failed" || status === "lost" || status === "canceled" || status === "cancelled"
+    const job = step.job
+    return (
+      job?.status === "completed" &&
+      (job.conclusion === "failure" || job.conclusion === "timed_out" || job.conclusion === "cancelled")
+    )
   })
   const usedAttempts = new Set<QueueAttempt>()
   const planned = run.steps.flatMap((step, index) => {
@@ -5107,7 +5139,7 @@ function queueShowRows(run: QueueRun, attempts: readonly QueueAttempt[]): readon
     }
     const row = queueShowStepRow(run, step)
     const canceled =
-      terminalStepIndex >= 0 && index > terminalStepIndex && (step.job === undefined || step.job.status === "requested")
+      terminalStepIndex >= 0 && index > terminalStepIndex && (step.job === undefined || step.job.status === "queued")
     return canceled ? [{ ...row, status: "canceled", ...taskStatusFields("dropped") }] : [row]
   })
   const unplanned = attempts
@@ -5244,6 +5276,10 @@ function queueShowNextAction(data: QueueShowData): string {
   if (["queued", "in_progress", "waiting"].includes(data.status)) {
     return "follow live output or wait for the current step"
   }
+  if (data.outcome === "canceled" || data.failure?.code === "run-canceled") {
+    return "no resubmission — the PR remains submitted and re-queues automatically"
+  }
+  const errorCode = presentFact(data.steps.findLast((step) => presentFact(step.errorCode) !== undefined)?.errorCode)
   const actionable = data.failure ?? data.steps.findLast((step) => step.failure !== undefined)?.failure
   if (actionable !== undefined) return actionable.resolution.join("; then ")
   if (errorCode === "queue-environment-refused") {
@@ -5422,6 +5458,16 @@ export function QueueIntegrationFacts({ data }: { data: QueueShowData }) {
   )
 }
 
+function prReviewLine(review: PR["reviews"][number]): string {
+  const note = presentFact(review.note)
+  return `REVIEW ${review.decision} ${review.actor} ${detailClock(review.at)}${note === undefined ? "" : ` — ${note}`}`
+}
+
+function prCommentLine(comment: PR["comments"][number]): string {
+  const note = presentFact(comment.note)
+  return `COMMENT ${comment.actor} ${detailClock(comment.at)}${note === undefined ? "" : ` — ${note}`}`
+}
+
 type PrActivityEntry = Readonly<{
   at: string
   rank: number
@@ -5432,10 +5478,39 @@ type PrActivityEntry = Readonly<{
 }>
 
 function runActivityState(data: QueueShowData): StatusNoticeState {
-  if (data.status === "running" || data.status === "waiting") return "running"
-  if (data.status === "passed") return data.integration === undefined ? "done" : "integrated"
+  if (data.status === "queued" || data.status === "in_progress" || data.status === "waiting") return "running"
+  if (data.conclusion === "success") return data.integration === undefined ? "done" : "integrated"
   if (data.failure !== undefined) return failureStatusClass(data.failure.code)
-  return data.status === "canceled" ? "canceled" : "failed"
+  return data.conclusion === "cancelled" ? "canceled" : "failed"
+}
+
+function prTerminalLineageEntries(
+  pr: PR,
+  memberRevision: number,
+  runDetails: readonly QueueShowData[],
+): readonly PrActivityEntry[] {
+  const terminal = prRevisionClocks(pr)
+    .filter((clock) => clock.revision <= memberRevision)
+    .flatMap((clock) => {
+      if (clock.terminal === undefined) return []
+      const submittedAt = clock.submittedAt ?? clock.pushedAt
+      const ageMs = elapsedMs(submittedAt, clock.terminal.at, `PR '${pr.id}' revision ${clock.revision} terminal age`)
+      const reason =
+        clock.terminal.kind === "rejected"
+          ? (runDetails.find((detail) => detail.run === clock.terminal?.run)?.failure?.summary ?? "reason not recorded")
+          : undefined
+      const suffix = reason !== undefined ? ` (${reason})` : ageMs === undefined ? "" : ` (age ${mediaDuration(ageMs)})`
+      return [{ at: clock.terminal.at, rank: 60, text: `r${clock.revision} ${clock.terminal.kind}${suffix}` }]
+    })
+  const submitted = pr.revs.find((revision) => revision.n === memberRevision)
+  const submittedAt = submitted?.submittedAt ?? submitted?.pushedAt
+  const entries =
+    submittedAt === undefined
+      ? terminal
+      : [...terminal, { at: submittedAt, rank: 20, text: `submitted by ${submitted?.actor ?? "-"}` }]
+  return entries.toSorted(
+    (left, right) => right.at.localeCompare(left.at) || right.rank - left.rank || left.text.localeCompare(right.text),
+  )
 }
 
 function prActivityEntries(
@@ -5444,7 +5519,7 @@ function prActivityEntries(
   currentRow: QueueTimelineProjectedRow | undefined,
 ): readonly PrActivityEntry[] {
   const entries: PrActivityEntry[] = []
-  const revisions = pr.revisions
+  const revisions = pr.revs
   for (const revision of revisions) {
     const submitted = revision.submittedAt !== undefined
     const activityAt = revision.submittedAt ?? revision.pushedAt
@@ -5452,7 +5527,7 @@ function prActivityEntries(
       entries.push({
         at: revision.pushedAt,
         rank: 10,
-        text: `r${revision.revision} recut of r${revision.recut.fromRevision}${
+        text: `r${revision.n} recut of r${revision.recut.fromRevision}${
           revision.baseSha === undefined ? "" : ` onto ${revision.baseSha.slice(0, 8)}`
         }`,
       })
@@ -5460,7 +5535,7 @@ function prActivityEntries(
     entries.push({
       at: activityAt,
       rank: 20,
-      text: `r${revision.revision} ${submitted ? "submitted" : "registered"} by ${revision.actor ?? "-"}`,
+      text: `r${revision.n} ${submitted ? "submitted" : "registered"} by ${revision.actor ?? "-"}`,
     })
   }
   for (const request of pr.checkRequests) {
@@ -5519,15 +5594,14 @@ function prActivityEntries(
   // clocks as honest activity without manufacturing details the journal lacks.
   for (const revision of revisions) {
     const terminal = revision.terminal
-    if (terminal === undefined || representedRuns.has(`${revision.revision}:${terminal.run}`)) continue
-    const state =
-      terminal.status === "integrated" ? "integrated" : terminal.status === "canceled" ? "canceled" : "rejected"
+    if (terminal === undefined || representedRuns.has(`${revision.n}:${terminal.run}`)) continue
+    const state = terminal.kind === "integrated" ? "integrated" : terminal.kind === "canceled" ? "canceled" : "rejected"
     entries.push({
       at: terminal.at,
       rank: 60,
-      text: `r${revision.revision} run ${terminal.run}`,
+      text: `r${revision.n}${terminal.run === undefined ? "" : ` run ${terminal.run}`}`,
       status: state,
-      statusLabel: terminal.status,
+      statusLabel: terminal.kind,
     })
   }
 
@@ -5578,45 +5652,32 @@ function descriptionWithoutDuplicatedIssue(
   )
 }
 
-function prLineageLines(pr: PR, memberRevision: number, runDetails: readonly QueueShowData[]): readonly string[] {
-  const terminal = prRevisionClocks(pr)
-    .filter((clock) => clock.revision <= memberRevision)
-    .flatMap((clock) => {
-      if (clock.terminal === undefined) return []
-      const submittedAt = clock.submittedAt ?? clock.pushedAt
-      const ageMs = elapsedMs(submittedAt, clock.terminal.at, `PR '${pr.id}' revision ${clock.revision} terminal age`)
-      const reason =
-        clock.terminal.kind === "rejected"
-          ? (runFailureReason(runDetails.find((detail) => detail.run === clock.terminal?.run)) ?? "reason not recorded")
-          : undefined
-      const suffix = reason !== undefined ? ` (${reason})` : ageMs === undefined ? "" : ` (age ${mediaDuration(ageMs)})`
-      return [
-        {
-          at: clock.terminal.at,
-          line: `${queueLogClock(clock.terminal.at, true, false)} r${clock.revision} ${clock.terminal.kind}${suffix}`,
-        },
-      ]
-    })
-  const submitted = pr.revs.find((candidate) => candidate.n === memberRevision)
-  const submittedAt = submitted?.submittedAt ?? submitted?.pushedAt
-  const entries =
-    submitted === undefined || submittedAt === undefined
-      ? terminal
-      : [
-          ...terminal,
-          {
-            at: submittedAt,
-            line: `${queueLogClock(submittedAt, true, false)} submitted by ${submitted.actor ?? "-"}`,
-          },
-        ]
-  // The detail timeline reads strictly newest-first (user directive
-  // 2026-07-21): the selected revision's submit sorts among earlier
-  // revisions' terminals instead of always trailing them.
-  return entries.toSorted((left, right) => right.at.localeCompare(left.at)).map((entry) => entry.line)
+function prAgeLabel(
+  pr: PR | undefined,
+  revision: number,
+  row: QueueTimelineProjectedRow | undefined,
+): string | undefined {
+  if (row?.ageMs === null || row?.ageMs === undefined) return undefined
+  const count = pr?.revs.filter((candidate) => candidate.n <= revision).length ?? 1
+  const countLabel = `${count} ${count === 1 ? "revision" : "revisions"}`
+  const total = `${mediaDuration(row.ageMs)} total`
+  if (row.queueWaitMs === null) return `${countLabel} · ${total}`
+  const currentLabel =
+    row.group === "pending"
+      ? "queued"
+      : row.group === "draft"
+        ? "registered"
+        : row.group === "running"
+          ? "waited"
+          : "waited"
+  return `${countLabel} · ${total} · r${revision} ${currentLabel} ${mediaDuration(row.queueWaitMs)}`
 }
 
 function prDetailFacts(pr: PR, revision: number): readonly Readonly<{ key: string; value: string }>[] {
   const retained = pr.revs.find((candidate) => candidate.n === revision)
+  const checkRequest = pr.checkRequests.findLast(
+    (request) => request.revision === revision && request.headSha === retained?.head,
+  )
   const correlation = retained?.correlation
   const note = presentFact(pr.note)
   const detail = presentFact(pr.detail)
@@ -5631,6 +5692,9 @@ function prDetailFacts(pr: PR, revision: number): readonly Readonly<{ key: strin
       ? []
       : [{ key: "composition", value: boundedQueue(safeText(retained.composition), 160) }]),
     ...(requestedReviewers.length === 0 ? [] : [{ key: "requested reviewers", value: requestedReviewers.join(", ") }]),
+    ...(checkRequest === undefined
+      ? []
+      : [{ key: "check requested", value: queueLogClock(checkRequest.at, false, false) }]),
     ...((pr.regressions?.length ?? 0) === 0
       ? []
       : [{ key: "regressions", value: boundedQueue(safeText(pr.regressions), 160) }]),
@@ -5696,7 +5760,9 @@ export function QueueDetailRunPrBlocks({
                     text: `r${member.revision} submitted by ${memberRow.submitter ?? "-"}`,
                   },
                 ]
-            : prActivityEntries(pr, runDetails, memberRow ?? row)
+            : data?.status === "completed" && member.revision === prRevisionNumber(pr)
+              ? prTerminalLineageEntries(pr, member.revision, runDetails)
+              : prActivityEntries(pr, runDetails, memberRow ?? row)
         const age = prAgeLabel(pr, member.revision, memberRow ?? row)
         const facts = [
           ...(position === undefined ? [] : [{ key: "position", value: String(position) }]),
@@ -5862,15 +5928,6 @@ function queueRunTimingRow(data: QueueShowData): string | undefined {
     ...(wait === undefined ? [] : [`wait ${wait}`]),
   ]
   return durations.length === 0 ? clocks : `${clocks} (${durations.join(", ")})`
-}
-
-/**
- * NEXT guidance is a failure-only cue (item g, 2026-07-16): suppressed for
- * integrated, passed, running, and waiting runs so the pane never shows the
- * empty `NEXT none`.
- */
-function queueShowNeedsNext(data: QueueShowData): boolean {
-  return data.outcome === "rejected"
 }
 
 /**
@@ -6317,11 +6374,20 @@ export function PRRunsView({ data }: { data: PRRunsData }) {
   const clocks = prRevisionClocks(data.pr)
   if (clocks.length === 0) return <Text color="$fg-muted">No revision history recorded.</Text>
   const projectedStatus = projectedPrStatus(data.pr, data.eligibility)
-  const needsAuthor = data.eligibility?.reason?.code === "needs-author" ? data.eligibility.reason : undefined
+  const eligibilityRefusal = data.eligibility?.reason?.code === "needs-author" ? data.eligibility.reason : undefined
+  const needsAuthor =
+    eligibilityRefusal ??
+    (data.pr.needsAuthor === undefined
+      ? undefined
+      : {
+          message: data.pr.needsAuthor.detail ?? data.pr.needsAuthor.receipt.message,
+          receipt: data.pr.needsAuthor.receipt,
+        })
+  const currentRevision = currentPRRev(data.pr)
   return (
     <Box flexDirection="column">
       <Text wrap="wrap">
-        <QueuePrId pr={data.pr.id} revision={data.pr.revision} /> STATUS <StatusValue value={projectedStatus} />
+        <QueuePrId pr={data.pr.id} revision={currentRevision.n} /> STATUS <StatusValue value={projectedStatus} />
       </Text>
       {needsAuthor === undefined ? null : (
         <>
@@ -6357,8 +6423,8 @@ export function PRRunsView({ data }: { data: PRRunsData }) {
                   <QueueShowView
                     data={run}
                     {...(needsAuthor !== undefined &&
-                    clock.revision === data.pr.revision &&
-                    clock.headSha === data.pr.headSha
+                    clock.revision === currentRevision.n &&
+                    clock.headSha === currentRevision.head
                       ? { nextAction: "fix the branch and push; the same PR resumes automatically" }
                       : {})}
                   />

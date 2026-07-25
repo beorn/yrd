@@ -14,6 +14,7 @@ import {
   prCorrelation,
   prDeliveryState,
   prHead,
+  isLivePR,
   prRevisionNumber,
   prRevisionLineage,
   prSourceReadyAt,
@@ -334,7 +335,7 @@ async function admitWithResidentPolicy(
   app: Pick<YrdCliApp, "queue">,
   prs: readonly string[],
   io: YrdCliIO,
-): Promise<readonly QueueRun[]> {
+): Promise<readonly Run[]> {
   return (await residentHoldsDrainLease(io)) ? app.queue.admit({ prs }) : app.queue.admit({ prs }, runtimeOptions(io))
 }
 
@@ -786,7 +787,7 @@ type TrackerDeliveryIdentity = Readonly<{
   pr: string
   revision: number
   headSha: string
-  status: PRDeliveryState
+  status: PRDeliveryState | "needs-author"
   at: string
   runs: readonly string[]
   correlation?: Correlation
@@ -843,6 +844,28 @@ function trackerDeliveryV2(
     runs,
     ...(revision.correlation === undefined ? {} : { correlation: revision.correlation }),
   }
+  const refusalFact =
+    pr.needsAuthor ??
+    (eligibility.reason?.code === "needs-author" && eligibility.reason.receipt !== undefined
+      ? {
+          at: pr.rejectedAt ?? revision.submittedAt ?? revision.pushedAt,
+          run: pr.terminalRun ?? eligibility.checks.run ?? "unknown",
+          receipt: eligibility.reason.receipt,
+          detail: eligibility.reason.message,
+        }
+      : undefined)
+  if (refusalFact !== undefined) {
+    return {
+      ...identity,
+      status: "needs-author",
+      at: refusalFact.at,
+      bounce: {
+        run: refusalFact.run,
+        ...(refusalFact.detail === undefined ? {} : { detail: refusalFact.detail }),
+      },
+      attributedReceipt: refusalFact.receipt,
+    }
+  }
   switch (prDeliveryState(pr)) {
     case "pushed":
       return { ...identity, status: "pushed", at: revision.pushedAt }
@@ -856,18 +879,6 @@ function trackerDeliveryV2(
         refusal(`trackerBridge v1 cannot project rejected PR '${pr.id}' without a typed Queue bounce run`)
       }
       const bounce = { run: pr.terminalRun, ...(pr.detail === undefined ? {} : { detail: pr.detail }) }
-      if (eligibility.reason?.code === "needs-author") {
-        if (eligibility.reason.receipt === undefined) {
-          refusal(`trackerBridge v2 cannot project needs-author PR '${pr.id}' without an attributed receipt`)
-        }
-        return {
-          ...identity,
-          status: "needs-author",
-          at: pr.rejectedAt,
-          bounce,
-          attributedReceipt: eligibility.reason.receipt,
-        }
-      }
       return {
         ...identity,
         status: "rejected",
@@ -1183,7 +1194,6 @@ function projectQueueSummaryTaskStatus(summary: QueueSummary) {
 }
 
 function projectQueueStatusResultTaskStatus(result: QueueStatusResult) {
-  const { eligibilities, ...visible } = result
   return {
     ...projectQueueSummaryTaskStatus(result),
     prs: result.prs.map(projectPRTaskStatus),
@@ -1204,7 +1214,8 @@ function projectEligibilityTaskStatus(eligibility: PREligibility) {
 function projectPrTaskStatusWithEligibility(pr: PR, eligibility: PREligibility) {
   const projected = projectPRTaskStatus(pr)
   const status = projectedPrStatus(pr, eligibility)
-  return status === pr.status ? projected : { ...projected, nativeStatus: pr.status, status }
+  const nativeStatus = prDeliveryState(pr)
+  return status === nativeStatus ? projected : { ...projected, nativeStatus, status }
 }
 
 function projectCheckTaskStatus(check: PRCheckViewRecord) {
@@ -1260,7 +1271,7 @@ function bayRunIdentity(app: YrdCliApp, claim: string): Readonly<{ claim: string
   ) {
     usage("bay run CLAIM must end in a Git-safe issue slug")
   }
-  const claimPrs = app.bays.prs().filter((pr) => pr.issue === normalized && isLivePR(pr.status))
+  const claimPrs = app.bays.prs().filter((pr) => pr.issue === normalized && isLivePR(pr))
   if (claimPrs.length > 1) {
     refusal(
       `claim '${normalized}' has multiple live PRs (${claimPrs.map((pr) => pr.id).join(", ")}); ` +
@@ -1280,9 +1291,7 @@ function bayRunIdentity(app: YrdCliApp, claim: string): Readonly<{ claim: string
     ...prs.filter((pr) => pr.branch === branch).map((pr) => pr.issue),
   ]
   const isForeignBranch = (branch: string) => branchOwners(branch).some((issue) => issue !== normalized)
-  const terminalDefault = prs.some(
-    (pr) => pr.branch === defaultBranch && pr.issue === normalized && !isLivePR(pr.status),
-  )
+  const terminalDefault = prs.some((pr) => pr.branch === defaultBranch && pr.issue === normalized && !isLivePR(pr))
   const collisionBranch = `${defaultBranch}-${createHash("sha256").update(normalized).digest("hex").slice(0, 8)}`
   const branch = isForeignBranch(defaultBranch) || terminalDefault ? collisionBranch : defaultBranch
   if (isForeignBranch(branch)) {
@@ -1298,7 +1307,7 @@ async function checkpointRunBay(app: YrdCliApp, bay: Bay, claim: string, io: Yrd
   const result = await app.bays.checkpoint({ bay: bay.id, claim })
   assertJobsPassed(await runJobs(app, app.jobs.requested(result), io), `bay '${bay.id}' checkpoint`)
   const checkpointed = app.bays.get(bay.id)
-  if (checkpointed === undefined || checkpointed.status !== "active" || checkpointed.headSha === undefined) {
+  if (checkpointed?.status !== "active" || checkpointed.headSha === undefined) {
     refusal(`bay '${bay.id}' did not retain an active checkpoint`)
   }
   return checkpointed
@@ -1311,7 +1320,7 @@ async function draftRunBay(app: YrdCliApp, bay: Bay, claim: string, io: YrdCliIO
     resolveRevision: (ref) => optionalRevision(ref, io),
     run: runtimeOptions(io),
   })
-  if (pr.status !== "pushed" || pr.branch !== bay.branch || pr.issue !== claim) {
+  if (prDeliveryState(pr) !== "pushed" || pr.branch !== bay.branch || pr.issue !== claim) {
     refusal(`bay '${bay.id}' did not retain a branch-backed draft for '${claim}'`)
   }
 }
@@ -1547,10 +1556,10 @@ async function closeBays(
   const bays = selectedBays(stateOf(app).bays, selectors, io.cwd ?? process.cwd(), "close")
   const closed: Bay[] = []
   for (const bay of bays) {
-    const withdrawing = app.bays.prs().find((pr) => {
-      const delivery = prDeliveryState(pr)
-      return pr.bay === bay.id && (delivery === "pushed" || delivery === "submitted")
-    })
+    const withdrawing =
+      options.withdraw === true
+        ? app.bays.prs().filter((pr) => (pr.bay === bay.id || pr.branch === bay.branch) && isLivePR(pr))
+        : []
     const result = await app.bays.close({
       bay: bay.id,
       ...(options.withdraw === true ? { withdraw: true } : {}),
@@ -2014,7 +2023,7 @@ async function applyPrSelectionVerb(
   selectors: readonly string[],
   options: {
     follow?: boolean
-    draft?: boolean
+    wait?: boolean
     base?: string
     queue?: string
     issue?: string
@@ -2049,8 +2058,9 @@ async function applyPrSelectionVerb(
     if (createOnly) {
       const bay = app.bays.get(selector)
       const existing = app.bays.pr(bay?.branch ?? selector)
-      if (existing !== undefined && existing.status !== "pushed" && existing.status !== "rejected") {
-        refusal(`PR '${existing.id}' is already ${existing.status}; create is only for a draft PR`)
+      const delivery = existing === undefined ? undefined : prDeliveryState(existing)
+      if (existing !== undefined && delivery !== "pushed" && delivery !== "rejected") {
+        refusal(`PR '${existing.id}' is already ${delivery}; create is only for a draft PR`)
       }
     }
     const metadata = await resolveSubmitMetadata(app, selector, options, io)
@@ -2106,14 +2116,15 @@ async function applyPrSelectionVerb(
   })
   for (const pr of checkable) await app.bays.requestChecks({ pr: pr.id })
   const selected = checkable.map((pr) => pr.id)
-  if (selected.length === 0 || options.follow !== true) {
+  if (selected.length === 0 || (options.wait !== true && options.follow !== true)) {
     // D8 — submit is a ledger write, not a negotiation. The submission and its
     // check request are now recorded; return success WITHOUT composing or
     // draining. The runner loop admits and settles this PR on its next cycle,
     // and any composition problem surfaces later as an in-queue `needs-author`
     // state (yrd-queue PREligibility) — never as a submit-time door refusal.
-    // `--follow` opts back into the synchronous drain; with nothing checkable
-    // (e.g. an already-merged same-head resubmit) there is nothing to drain.
+    // `--wait`/`--follow` opt back into the synchronous drain; with nothing
+    // checkable (e.g. an already-merged same-head resubmit) there is nothing
+    // to drain.
     await printResult(
       io,
       jsonEnabled(options),
@@ -2289,7 +2300,6 @@ async function listPrs(
   const matching = app.bays
     .prs()
     .filter((pr) => base === undefined || baseIdentity(pr.base) === base)
-    .filter((pr) => options.state === undefined || prDeliveryState(pr) === options.state)
     .filter((pr) => options.issue === undefined || pr.issue === options.issue)
     .toSorted((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }))
   const json = jsonEnabled(options)
@@ -2307,11 +2317,11 @@ async function listPrs(
       ({ pr, eligibility }) =>
         options.state === undefined ||
         projectedPrStatus(pr, eligibility) === options.state ||
-        pr.status === options.state ||
+        prDeliveryState(pr) === options.state ||
         // v1 clients used `rejected` as the only author-fix bucket. Keep that
         // filter as a read-compatible superset while every returned row tells
         // the truth with native `status: needs-author`.
-        (options.state === "rejected" && pr.status === "needs-author"),
+        (options.state === "rejected" && projectedPrStatus(pr, eligibility) === "needs-author"),
     )
     .filter(({ pr, eligibility, needsReview }) =>
       options.needsReview === true
@@ -2659,7 +2669,6 @@ function issueRows(app: YrdCliApp, state: DeepReadonly<YrdCliState>, selected?: 
         (contest) => `${contest.issue.ref.source}:${contest.issue.ref.id}` === issue,
       )
       const taskStatus = issueTaskStatusOf({ prs, contests: joinedContests })
-      const prStatuses = prs.map((pr) => projectedPrStatus(pr, app.queue.eligibility(pr.id, state)))
       return {
         issue,
         ...taskStatusFields(taskStatus),
@@ -2970,6 +2979,16 @@ async function queueStatusSnapshots(
     const canonical = app.queue.status(group.base)
     const aliases = [...group.aliases].filter((base) => base !== group.base).map((base) => app.queue.status(base))
     const runs = mergedQueueRuns(canonical, aliases)
+    const scopeRun = (run: Run): Run[] => {
+      if (target.selected.size === 0) return [run]
+      const prs = run.prs.filter((member) => target.selected.has(member.id))
+      return prs.length === 0 ? [] : [{ ...run, prs }]
+    }
+    const scopedRuns = {
+      running: runs.running.flatMap(scopeRun),
+      waiting: runs.waiting.flatMap(scopeRun),
+      finished: runs.finished.flatMap(scopeRun),
+    }
     const prs = Object.values(state.bays.prs).filter(
       (pr) => group.aliases.has(pr.base) && (target.selected.size === 0 || target.selected.has(pr.id)),
     )
@@ -4833,6 +4852,7 @@ function prMergeRefusalDetail(
   outcome?: "rejected"
 }> {
   const delivery = prDeliveryState(pr)
+  const projectedStatus = projectedPrStatus(pr)
   if (latestRun?.status === "completed" && latestRun.conclusion === "failure") {
     const inspect = `yrd pr runs ${pr.id}`
     const resubmit = "fix the branch and run yrd pr submit again"
@@ -5290,8 +5310,8 @@ function buildProgram(
   addAuthoredCarrierWorkflow(create, name)
   pr.command("submit [selector...]")
     .description("submit PR revisions and admit configured checks")
-    .option("--draft", "register a pushed PR without requesting or admitting checks")
-    .option("--follow", "synchronously drain and follow admitted checks; default records and returns")
+    .option("--wait", "block on the synchronous drain (pre-decouple behavior); default records and returns")
+    .option("--follow", "follow admitted checks to a terminal result (implies --wait)")
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")

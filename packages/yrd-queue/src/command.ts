@@ -3479,7 +3479,7 @@ function gateCertificate(
   })
 }
 
-type PassedCommandResult = Extract<JobResult<CommandEvidence>, { status: "passed" }>
+type PassedCommandResult = Extract<JobResult<CommandEvidence>, { status: "completed"; conclusion: "success" }>
 
 function certifyPassingCommand(
   outcome: PassedCommandResult,
@@ -3511,7 +3511,8 @@ function certifyPassingCommand(
     )
   }
   return {
-    status: "passed",
+    status: "completed",
+    conclusion: "success",
     output: GitCheckEvidenceSchema.parse({
       ...evidence,
       certificate: gateCertificate(candidate, mode, reports),
@@ -3711,11 +3712,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
               context,
             )
             if (outcome.status === "completed" && outcome.conclusion === "success") {
-              return {
-                status: "completed",
-                conclusion: "success",
-                output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...candidateMetadata }),
-              }
+              return certifyPassingCommand(outcome, candidate, mode, classification, purpose, options.comparisonReady)
             }
             if (outcome.status === "waiting") {
               return {
@@ -3762,11 +3759,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
           }
 
           if (outcome.status === "completed" && outcome.conclusion === "success") {
-            return {
-              status: "completed",
-              conclusion: "success",
-              output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...candidateMetadata }),
-            }
+            return certifyPassingCommand(outcome, candidate, mode, classification, purpose, options.comparisonReady)
           }
           if (outcome.status !== "completed" || outcome.conclusion !== "failure") {
             const error = comparisonOutcomeError(outcome, purpose, "candidate")
@@ -4113,7 +4106,7 @@ async function authoritativeQueueBase(git: Git, repo: string, branch: string): P
         ["fetch", "--no-recurse-submodules", "--quiet", "origin", `+${source}:${target}`],
         true,
       )
-      if (fetched.code === 0) return inspectQueueBase(git, repo, branch)
+      if (fetched.code === 0) return await inspectQueueBase(git, repo, branch)
       detail = fetched.stderr || fetched.stdout || `could not refresh origin/${branch}`
     } catch (cause) {
       detail = messageOf(cause)

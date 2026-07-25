@@ -1,6 +1,7 @@
 import * as z from "zod"
 import { raiseFailure, resolveSelector, resolveSelectorMatch, type SelectorMatch } from "@yrd/core"
 import type { FlowPin } from "@yrd/config"
+import { JobErrorSchema, type JobError } from "@yrd/job"
 
 export const BayIdSchema = z.string().trim().min(1)
 export const PRIdSchema = z.string().trim().min(1)
@@ -260,7 +261,14 @@ export type BranchLifecycle =
     >
 
 /** W2-facing delivery label derived from canonical PR/PRRev facts. Never stored. */
-export type PRDeliveryState = "pushed" | "submitted" | "rejected" | "integrated" | "withdrawn" | "canceled"
+export type PRDeliveryState =
+  | "pushed"
+  | "submitted"
+  | "needs-author"
+  | "rejected"
+  | "integrated"
+  | "withdrawn"
+  | "canceled"
 
 const NON_CHECKABLE_PR_STATES: ReadonlySet<PRDeliveryState> = new Set<PRDeliveryState>([
   "integrated",
@@ -475,6 +483,7 @@ export function prDeliveryState(pr: PR): PRDeliveryState {
     if (pr.canceledAt !== undefined) return "canceled"
     return "withdrawn"
   }
+  if (pr.needsAuthor !== undefined) return "needs-author"
   const revision = currentPRRev(pr)
   if (revision.terminal?.kind === "rejected") return "rejected"
   return revision.submittedAt === undefined ? "pushed" : "submitted"

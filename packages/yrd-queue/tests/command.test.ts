@@ -355,6 +355,11 @@ const unusedWorkspace: BayWorkspace = {
   revision: "unused-workspace-v1",
   provision: () => ({ status: "completed", conclusion: "failure", error: { code: "unused", message: "not used" } }),
   refresh: () => ({ status: "completed", conclusion: "failure", error: { code: "unused", message: "not used" } }),
+  checkpoint: () => ({
+    status: "completed",
+    conclusion: "failure",
+    error: { code: "unused", message: "not used" },
+  }),
   deprovision: () => ({ status: "completed", conclusion: "success", output: {} }),
 }
 
@@ -1569,7 +1574,7 @@ describe("Queue command adapters", () => {
     })
     // End-to-end through the REAL compose path: the composition refusal commits
     // native needs-author with its typed receipt, never a terminal rejection.
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "needs-author" })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "needs-author" })
     const eventNames = (await Array.fromAsync(app.events())).map(({ name }) => name)
     expect(eventNames).toContain("pr/needs-author")
     expect(eventNames).not.toContain("pr/rejected")
@@ -1600,14 +1605,16 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: {
         code: "refused-path",
         message: expect.stringMatching(/@km\/note\.md.*hub\/plan\.md.*sibling state repo/u),
       },
     })
     expect(run.steps[0]?.job).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       output: { conflicts: [{ repo: ".", paths: ["@km/note.md", "hub/plan.md"] }] },
     })
     expect(await git(repo, ["rev-parse", "main"])).toBe(baseSha)
@@ -1622,7 +1629,7 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run).toMatchObject({ status: "passed" })
+    expect(run).toMatchObject({ status: "completed", conclusion: "success" })
   })
 
   it("redirects an invalid manual composition to the authored-root draft and recut flow", async () => {
@@ -1937,7 +1944,9 @@ describe("Queue command adapters", () => {
         withJobs({ definitions: [bayJobs, queue.jobDefs] }),
         withBays({ jobs: bayJobs }),
       )
-      const app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
+      const app = await createYrd(queue(base), {
+        inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
+      })
       await app.bays.submit({ branch: "issue/progress", headSha: "a".repeat(40), base: "main" })
       return { aborted, app, completed, mergeRuns, started, [Symbol.asyncDispose]: () => app.close() }
     }
@@ -2550,7 +2559,7 @@ describe("Queue command adapters", () => {
         },
       },
     })
-    expect(app.state().bays.prs.PR1).toMatchObject({
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
       status: "needs-author",
       needsAuthor: { receipt: { code: "check-failed" } },
     })
@@ -2660,9 +2669,11 @@ describe("Queue command adapters", () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
-    expect(run).toMatchObject({ status: "passed" })
+    expect(run).toMatchObject({ status: "completed", conclusion: "success" })
     const job = run?.steps[0]?.job
-    if (job?.status !== "passed") throw new Error("structured child reports did not pass")
+    if (job?.status !== "completed" || job.conclusion !== "success") {
+      throw new Error("structured child reports did not pass")
+    }
     const evidence = GitCheckEvidenceSchema.parse(job.output)
     expect(evidence.certificate).toEqual({
       version: 1,
@@ -2712,7 +2723,7 @@ describe("Queue command adapters", () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
-    expect(run).toMatchObject({ status: "failed", error: { code: "check-failed" } })
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
     expect(configuredRuns).toBe(1)
   })
 
@@ -2743,9 +2754,11 @@ describe("Queue command adapters", () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
-    expect(run).toMatchObject({ status: "passed" })
+    expect(run).toMatchObject({ status: "completed", conclusion: "success" })
     const job = run?.steps[0]?.job
-    if (job?.status !== "passed") throw new Error("certified compound diagnostics did not pass")
+    if (job?.status !== "completed" || job.conclusion !== "success") {
+      throw new Error("certified compound diagnostics did not pass")
+    }
     const evidence = GitCheckEvidenceSchema.parse(job.output)
     expect(evidence.certificate?.reports.map(({ comparator, residual }) => [comparator.id, residual.count])).toEqual([
       ["bead-hygiene", 3],
@@ -2778,7 +2791,7 @@ describe("Queue command adapters", () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
-    expect(run).toMatchObject({ status: "failed", error: { code: "check-failed" } })
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
     expect(configuredRuns).toBe(1)
   })
 
@@ -2793,7 +2806,11 @@ describe("Queue command adapters", () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
-    expect(run).toMatchObject({ status: "failed", error: { code: "check-comparison-not-ready" } })
+    expect(run).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "check-comparison-not-ready" },
+    })
   })
 
   it("fails closed when a child emits a malformed structured report", async () => {
@@ -2805,7 +2822,11 @@ describe("Queue command adapters", () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
-    expect(run).toMatchObject({ status: "failed", error: { code: "check-gate-report-invalid" } })
+    expect(run).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "check-gate-report-invalid" },
+    })
   })
 
   it("refuses a green strict command that reports a non-empty residual", async () => {
@@ -2822,7 +2843,7 @@ describe("Queue command adapters", () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
-    expect(run).toMatchObject({ status: "failed", error: { code: "check-strict-residual" } })
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-strict-residual" } })
   })
 
   it("strict mode keeps an inherited diagnostics failure terminal and skips the parent run", async () => {
@@ -2844,9 +2865,11 @@ describe("Queue command adapters", () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
-    expect(run).toMatchObject({ status: "failed", error: { code: "check-failed" } })
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
     const job = run?.steps[0]?.job
-    if (job?.status !== "failed") throw new Error("strict inherited failure did not fail")
+    if (job?.status !== "completed" || job.conclusion !== "failure") {
+      throw new Error("strict inherited failure did not fail")
+    }
     const evidence = GitCheckEvidenceSchema.parse(job.output)
     expect(evidence.mode).toBe("strict")
     expect(evidence.comparison).toBeUndefined()
@@ -3204,12 +3227,12 @@ describe("Queue command adapters", () => {
     })
     expect(evidence.detail).toContain("[yrd-base-health]")
     expect(evidence.artifacts.every((artifact) => existsSync(artifact.path))).toBe(true)
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected" })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted" })
     const eligibility = app.queue.eligibility("PR1")
-    expect(eligibility).toMatchObject({ reason: { code: "rejected" } })
+    expect(eligibility).toMatchObject({ reason: { code: "checks-failed" } })
     expect(eligibility.reason).not.toHaveProperty("receipt")
     const eventNames = (await Array.fromAsync(app.events())).map(({ name }) => name)
-    expect(eventNames).toContain("pr/rejected")
+    expect(eventNames).not.toContain("pr/rejected")
     expect(eventNames).not.toContain("pr/needs-author")
   })
 
@@ -3654,7 +3677,7 @@ describe("Queue command adapters", () => {
       conclusion: "failure",
       error: { code: "scratch-cleanup-failed", message: "cleanup denied" },
     })
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted" })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted" })
     const eventNames = (await Array.fromAsync(app.events())).map(({ name }) => name)
     expect(eventNames).not.toContain("pr/rejected")
     expect(eventNames).not.toContain("pr/needs-author")
@@ -4041,7 +4064,9 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run.status).toBe("completed")
-    expect(requests.filter(({ argv }) => argv[0] === "git").every(({ timeoutMs }) => timeoutMs === 30_000)).toBe(true)
+    // Union behavior: queue Git operations lock the shared repository, so the
+    // timeout-robustness lineage owns the 120s default across the whole proof.
+    expect(requests.filter(({ argv }) => argv[0] === "git").every(({ timeoutMs }) => timeoutMs === 120_000)).toBe(true)
     const initializations = requests.filter(
       ({ argv }) => argv[0] === "git" && argv.includes("init") && argv.includes("--bare"),
     )
@@ -4736,7 +4761,9 @@ describe("Queue command adapters", () => {
       resolveBaseSha: (base) => queueBaseSha(fixture.repo, base),
     })
     const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
-    await using app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
+    await using app = await createYrd(queue(base), {
+      inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
+    })
     await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
@@ -4937,7 +4964,9 @@ describe("Queue command adapters", () => {
       resolveBaseSha: (base) => queueBaseSha(repo, base),
     })
     const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
-    await using app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
+    await using app = await createYrd(queue(base), {
+      inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
+    })
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
@@ -5065,7 +5094,9 @@ describe("Queue command adapters", () => {
       resolveBaseSha: (base) => queueBaseSha(repo, base),
     })
     const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
-    await using app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
+    await using app = await createYrd(queue(base), {
+      inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
+    })
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
@@ -5136,7 +5167,9 @@ describe("Queue command adapters", () => {
       resolveBaseSha: (base) => queueBaseSha(repo, base),
     })
     const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
-    await using app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
+    await using app = await createYrd(queue(base), {
+      inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
+    })
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
@@ -5215,7 +5248,9 @@ describe("Queue command adapters", () => {
       resolveBaseSha: (base) => queueBaseSha(repo, base),
     })
     const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
-    await using app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
+    await using app = await createYrd(queue(base), {
+      inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
+    })
     await app.bays.submit({
       branch: "issue/source",
       headSha: rootBaseSha,
@@ -5260,7 +5295,9 @@ describe("Queue command adapters", () => {
       resolveBaseSha: (base) => queueBaseSha(repo, base),
     })
     const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
-    await using app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
+    await using app = await createYrd(queue(base), {
+      inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
+    })
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     expect((await app.queue.run({ prs: ["PR1"] }, runtime))[0]).toMatchObject({

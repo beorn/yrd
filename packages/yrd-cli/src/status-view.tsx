@@ -222,13 +222,20 @@ export function BayStatusView({ bays }: { bays: readonly Bay[] }) {
   return <Table data={bays} columns={columns} />
 }
 
-export function PRStatusView({ prs }: { prs: readonly PR[] }) {
-  const rows = prs.map((pr) => ({
-    ...projectPRTaskStatus(pr),
-    status: prDeliveryState(pr),
-    revision: prRevisionNumber(pr),
-    head: prHead(pr).slice(0, 12),
-  }))
+export function PRStatusView({ prs, eligibilities }: { prs: readonly PR[]; eligibilities?: readonly PREligibility[] }) {
+  const rows = prs.map((pr) => {
+    const revision = prRevisionNumber(pr)
+    const eligibility = eligibilities?.find((candidate) => candidate.pr === pr.id && candidate.revision === revision)
+    return {
+      ...projectPRTaskStatus(pr),
+      status:
+        pr.needsAuthor !== undefined || eligibility?.reason?.code === "needs-author"
+          ? ("needs-author" as const)
+          : prDeliveryState(pr),
+      revision,
+      head: prHead(pr).slice(0, 12),
+    }
+  })
   return (
     <Table
       data={rows}
@@ -264,7 +271,7 @@ export type IssueDeliveryRow = Readonly<{
   pr: string
   revision: number
   headSha: string
-  status: PRDeliveryState
+  status: PRDeliveryState | "needs-author"
   runs: readonly string[]
   landingSha?: string
   bounce?: Readonly<{ run: string; detail?: string }>

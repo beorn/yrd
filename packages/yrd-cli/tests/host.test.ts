@@ -18,7 +18,11 @@ import { createExclusive, createJournal } from "@yrd/persistence"
 import { createProcess, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createLogger, type ConditionalLogger } from "loggily"
 import * as z from "zod"
-import { createDefaultYrdApp, createYrdHost, runYrdProcess } from "../src/host.ts"
+import {
+  createDefaultYrdApp as createDefaultYrdAppRaw,
+  createYrdHost as createYrdHostRaw,
+  runYrdProcess,
+} from "../src/host.ts"
 import { queueStepRevision } from "../src/host-revision.ts"
 import type { ResolvedYrdProjectConfig } from "../src/config.ts"
 import { classifyFailure } from "../src/invocation.ts"
@@ -27,6 +31,15 @@ import { discoverYrdRepository } from "../src/repository.ts"
 import type { SignalDelivery, SignalDeliveryAdapter } from "../src/signals.ts"
 
 const roots: string[] = []
+const silentLog = createLogger("test", [{ level: "silent" }])
+
+function createDefaultYrdApp(options: Parameters<typeof createDefaultYrdAppRaw>[0]) {
+  return createDefaultYrdAppRaw({ ...options, log: options.log ?? silentLog })
+}
+
+function createYrdHost(options: Parameters<typeof createYrdHostRaw>[0] = {}) {
+  return createYrdHostRaw({ ...options, log: options.log ?? silentLog })
+}
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
@@ -249,9 +262,11 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]
-    expect(run).toMatchObject({ status: "passed" })
+    expect(run).toMatchObject({ status: "completed", conclusion: "success" })
     const job = run?.steps[0]?.job
-    if (job?.status !== "passed") throw new Error("strict-mode step did not pass")
+    if (job?.status !== "completed" || job.conclusion !== "success") {
+      throw new Error("strict-mode step did not pass")
+    }
     const evidence = GitCheckEvidenceSchema.parse(job.output)
     expect(evidence).toMatchObject({
       mode: "strict",
@@ -371,7 +386,16 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       batchSize: 1,
       defaultSteps: ["security", "merge", "publish"],
     })
-    expect(Object.keys(app.commands.bay)).toEqual(["open", "refresh", "certifyHandoff", "intake", "submit", "close"])
+    expect(Object.keys(app.commands.bay)).toEqual([
+      "open",
+      "refresh",
+      "checkpoint",
+      "orphan",
+      "certifyHandoff",
+      "intake",
+      "submit",
+      "close",
+    ])
     expect(Object.keys(app.commands.pr)).toEqual([
       "close",
       "edit",
@@ -1867,7 +1891,7 @@ notify:
       }),
     ).toBe(1)
     const rejected = JSON.parse(refusal) as Readonly<{
-      guidance: Readonly<{ inspect: string; fixPush: string }>
+      guidance: Readonly<{ inspect: string; resubmit: string }>
     }>
     expect(rejected).toMatchObject({
       command: "pr.merge",
@@ -1878,7 +1902,7 @@ notify:
     })
     expect(rejected.guidance).toEqual({
       inspect: "yrd pr runs PR1",
-      fixPush: "fix the branch and push; the same PR resumes automatically",
+      resubmit: "fix the branch and run yrd pr submit again",
     })
     expect(await journalEnvelope(repo)).toEqual(before)
   })
@@ -2359,26 +2383,31 @@ notify:
     }
   })
 
-  it("reaps an active configured child before SIGINT releases its runner lease", async () => {
-    const { repo, featureSha } = await repository()
-    const childPidPath = join(repo, "active-check.pid")
-    const grandchildPidPath = join(repo, "active-check-grandchild.pid")
-    const progressPath = join(repo, "active-check.progress")
-    const finishedPath = join(repo, "active-check.finished")
-    const scratchPath = join(repo, "active-check.scratch")
-    const command = [
-      `printf '%s\\n' "$$" > ${JSON.stringify(childPidPath)}`,
-      `pwd > ${JSON.stringify(scratchPath)}`,
-      `sh -c 'trap "" TERM; while :; do sleep 1; done' & printf '%s\\n' "$!" > ${JSON.stringify(grandchildPidPath)}`,
-      "i=0",
-      `while [ "$i" -lt 200 ]; do printf '%s\\n' "$i" >> ${JSON.stringify(progressPath)}; i=$((i + 1)); sleep 0.05; done`,
-      `touch ${JSON.stringify(finishedPath)}`,
-    ].join("; ")
-    await commitYrdConfig(
-      repo,
-      `steps: [check, merge]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 30000\n`,
-    )
-    const baseSha = await git(repo, "rev-parse", "main")
+  it.each([
+    ["selector", "SIGINT" as const, 130, ["PR1"] as const],
+    ["--once", "SIGTERM" as const, 143, ["--once"] as const],
+  ])(
+    "%s one-shot settles and reaps its active run on %s",
+    async (_mode, signal, exitCode, args) => {
+      const { repo, featureSha } = await repository()
+      const childPidPath = join(repo, "active-check.pid")
+      const grandchildPidPath = join(repo, "active-check-grandchild.pid")
+      const progressPath = join(repo, "active-check.progress")
+      const finishedPath = join(repo, "active-check.finished")
+      const scratchPath = join(repo, "active-check.scratch")
+      const command = [
+        `printf '%s\\n' "$$" > ${JSON.stringify(childPidPath)}`,
+        `pwd > ${JSON.stringify(scratchPath)}`,
+        `sh -c 'trap "" TERM; while :; do sleep 1; done' & printf '%s\\n' "$!" > ${JSON.stringify(grandchildPidPath)}`,
+        "i=0",
+        `while [ "$i" -lt 200 ]; do printf '%s\\n' "$i" >> ${JSON.stringify(progressPath)}; i=$((i + 1)); sleep 0.05; done`,
+        `touch ${JSON.stringify(finishedPath)}`,
+      ].join("; ")
+      await commitYrdConfig(
+        repo,
+        `steps: [check, merge]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 30000\n`,
+      )
+      const baseSha = await git(repo, "rev-parse", "main")
 
       await using submitter = await createYrdHost({ cwd: repo })
       await submitter.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
@@ -2409,34 +2438,37 @@ notify:
         await vi.waitFor(() => expect(processExists(childPid!)).toBe(false), { timeout: 5_000 })
         await vi.waitFor(() => expect(processExists(grandchildPid!)).toBe(false), { timeout: 5_000 })
 
-      await using recovery = await createYrdHost({ cwd: repo })
-      const recovered = await recovery.app.queue.recover({
-        recoveryTime: "2100-01-01T00:00:00.000Z",
-      })
-      expect(recovered).toEqual([
-        expect.objectContaining({
+        await using recovery = await createYrdHost({ cwd: repo })
+        const settled = recovery.app.queue.get("R1")
+        expect(settled).toMatchObject({
           status: "completed",
           conclusion: "failure",
-          error: expect.objectContaining({ code: "job-lost" }),
-          steps: expect.arrayContaining([expect.objectContaining({ job: expect.objectContaining({ attempt: 1 }) })]),
-        }),
-      ])
-      expect(
-        recovered.flatMap((run) => run.steps.flatMap((step) => (step.job === undefined ? [] : [step.job.attempt]))),
-      ).toEqual([1])
-      expect(await git(repo, "rev-parse", "main")).toBe(baseSha)
-      expect(await Bun.file(finishedPath).exists()).toBe(false)
-      const scratch = (await readFile(scratchPath, "utf8")).trim()
-      expect(
-        existsSync(scratch),
-        [await cliStdout, await cliStderr, await git(repo, "worktree", "list", "--porcelain")].join("\n"),
-      ).toBe(false)
-    } finally {
-      if (childPid !== undefined && processExists(childPid)) {
-        try {
-          process.kill(-childPid, "SIGKILL")
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ESRCH") cleanupError ??= error
+          error: expect.objectContaining({ code: "job-lost", message: expect.stringContaining(signal) }),
+          steps: expect.arrayContaining([
+            expect.objectContaining({
+              job: expect.objectContaining({ attempt: 1, runner: `yrd-cli:${cli.pid}` }),
+            }),
+          ]),
+        })
+        const redundantRecovery = await recovery.app.queue.recover({
+          recoveryTime: "2100-01-01T00:00:00.000Z",
+        })
+        expect(redundantRecovery).toEqual([])
+        expect(settled?.steps.flatMap((step) => (step.job === undefined ? [] : [step.job.attempt]))).toEqual([1])
+        expect(await git(repo, "rev-parse", "main")).toBe(baseSha)
+        expect(await Bun.file(finishedPath).exists()).toBe(false)
+        const scratch = (await readFile(scratchPath, "utf8")).trim()
+        expect(
+          existsSync(scratch),
+          [await cliStdout, await cliStderr, await git(repo, "worktree", "list", "--porcelain")].join("\n"),
+        ).toBe(false)
+      } finally {
+        if (childPid !== undefined && processExists(childPid)) {
+          try {
+            process.kill(-childPid, "SIGKILL")
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ESRCH") cleanupError ??= error
+          }
         }
         if (grandchildPid !== undefined && processExists(grandchildPid)) {
           try {

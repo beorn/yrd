@@ -148,11 +148,12 @@ function pruneFailureMessage(pr: string, action: "judged" | "withdrawn", error: 
 
 function pruneError(pr: PR, baseSha: string | undefined, error: unknown, checks: PruneChecks = {}): PruneRow {
   const message = pruneFailureMessage(pr.id, "judged", error)
+  const revision = currentPRRev(pr)
   return {
     pr: pr.id,
     branch: pr.branch,
-    revision: pr.revision,
-    headSha: pr.headSha,
+    revision: revision.n,
+    headSha: revision.head,
     base: pr.base,
     ...(baseSha === undefined ? {} : { baseSha }),
     checks,
@@ -195,8 +196,8 @@ async function pruneVerdict(pr: PR, baseSha: string, git: PruneGitFacts, dryRun:
     base: pr.base,
     baseSha,
   }
-  const head = await git.resolveCommit(revision.head)
-  if (head === undefined) {
+  const checks = await contentChecks(revision.head, baseSha, git)
+  if (checks.headPresent !== true) {
     return {
       ...identity,
       checks,
@@ -204,15 +205,8 @@ async function pruneVerdict(pr: PR, baseSha: string, git: PruneGitFacts, dryRun:
       detail: `head commit is not present in this repository; nothing could be verified — kept`,
     }
   }
-  const ancestor = await git.isAncestor(revision.head, baseSha)
-  const mergeTree = ancestor
-    ? ("skipped" as const)
-    : await (async () => {
-        const merged = await git.mergeTree(baseSha, revision.head)
-        if (merged === undefined) return "conflicts" as const
-        return merged === (await git.treeOf(baseSha)) ? ("identical" as const) : ("divergent" as const)
-      })()
-  const checks: PruneChecks = { headPresent: true, ancestorOfBase: ancestor, mergeTree }
+  const ancestor = checks.ancestorOfBase === true
+  const mergeTree = checks.mergeTree ?? "conflicts"
   const superseded = ancestor || mergeTree === "identical"
   const checked = `ancestor-of-base=${ancestor ? "yes" : "no"}, merge-tree=${mergeTree === "skipped" ? "skipped (head already reachable)" : mergeTree}`
   if (!superseded) {
@@ -244,8 +238,8 @@ export async function preflightRecut(
     usage("--revision must be a positive integer")
   }
   const pr = requiredLivePr(app, selector)
-  const revision = options.revision ?? pr.revision
-  const source = pr.revisions.find((candidate) => candidate.revision === revision)
+  const revision = options.revision ?? currentPRRev(pr).n
+  const source = pr.revs.find((candidate) => candidate.n === revision)
   if (source === undefined) {
     raiseFailure("refusal", "revision-missing", `yrd: PR '${pr.id}' has no revision ${revision}`)
   }
@@ -253,14 +247,14 @@ export async function preflightRecut(
     raiseFailure(
       "refusal",
       "recut-preflight-composition",
-      `yrd: PR '${pr.id}' revision ${source.revision} has composed source payloads; root-tree preflight cannot prove every source yet`,
+      `yrd: PR '${pr.id}' revision ${source.n} has composed source payloads; root-tree preflight cannot prove every source yet`,
     )
   }
   if (source.baseSha === undefined) {
     raiseFailure(
       "configuration",
       "recut-preflight-source-base-missing",
-      `yrd: PR '${pr.id}' revision ${source.revision} has no immutable source base; preflight cannot classify its pin distance`,
+      `yrd: PR '${pr.id}' revision ${source.n} has no immutable source base; preflight cannot classify its pin distance`,
     )
   }
 
@@ -274,12 +268,12 @@ export async function preflightRecut(
       `yrd: PR '${pr.id}' targets base '${pr.base}' but neither 'origin/${pr.base}' nor '${pr.base}' resolves to a commit here`,
     )
   }
-  const checks = await contentChecks(source.headSha, targetBaseSha, git)
+  const checks = await contentChecks(source.head, targetBaseSha, git)
   if (!checks.headPresent) {
     raiseFailure(
       "configuration",
       "recut-preflight-head-missing",
-      `yrd: PR '${pr.id}' revision ${source.revision} head '${source.headSha}' is not present in this repository`,
+      `yrd: PR '${pr.id}' revision ${source.n} head '${source.head}' is not present in this repository`,
     )
   }
   if (checks.ancestorOfBase === undefined || checks.mergeTree === undefined) {
@@ -304,11 +298,11 @@ export async function preflightRecut(
     raiseFailure(
       "refusal",
       "recut-preflight-base-diverged",
-      `yrd: PR '${pr.id}' revision ${source.revision} base ${short(source.baseSha)} diverged from target ${short(targetBaseSha)} ` +
+      `yrd: PR '${pr.id}' revision ${source.n} base ${short(source.baseSha)} diverged from target ${short(targetBaseSha)} ` +
         `(source-only=${distance.sourceOnly}, target-only=${distance.targetOnly})`,
     )
   }
-  const patch = await patchMatch(source.baseSha, source.headSha, targetBaseSha)
+  const patch = await patchMatch(source.baseSha, source.head, targetBaseSha)
   const subsumed = checks.ancestorOfBase === true || checks.mergeTree === "identical"
   const requiresForce = app.queue.eligibility(pr.id).checks.status === "passed"
   const certifiedCurrentBase = distance.targetOnly === 0 && source.recut !== undefined
@@ -319,7 +313,7 @@ export async function preflightRecut(
       : requiresForce
         ? "RECUT-FORCE"
         : "RECUT"
-  const revisionFlag = options.revision === undefined ? "" : ` --revision ${source.revision}`
+  const revisionFlag = options.revision === undefined ? "" : ` --revision ${source.n}`
   const queueFlag = options.queue === true ? " --queue" : ""
   const recutCommand = `yrd pr recut ${pr.id}${revisionFlag}${queueFlag}`
   const next =
@@ -333,7 +327,7 @@ export async function preflightRecut(
             ? `yrd pr ready ${pr.id}`
             : `yrd pr view ${pr.id}`
   const evidence: RecutPreflightResult["evidence"] = {
-    headSha: source.headSha,
+    headSha: source.head,
     sourceBaseSha: source.baseSha,
     targetBase: pr.base,
     targetBaseSha,
@@ -349,7 +343,7 @@ export async function preflightRecut(
   const result: RecutPreflightResult = {
     command: "pr.recut.preflight",
     pr: pr.id,
-    revision: source.revision,
+    revision: source.n,
     verdict,
     evidence,
     next,
@@ -359,7 +353,7 @@ export async function preflightRecut(
     jsonEnabled(options),
     result,
     [
-      `${verdict} ${pr.id} r${source.revision}`,
+      `${verdict} ${pr.id} r${source.n}`,
       `pin-distance: source-only=${distance.sourceOnly}, target-only=${distance.targetOnly} (${short(source.baseSha)}..${short(targetBaseSha)})`,
       `patch-id-match-target: ${patch.targetSha === undefined ? "none" : short(patch.targetSha)} (patch-id=${patch.patchId ?? "none"})`,
       `tree-proof: ancestor=${checks.ancestorOfBase === true ? "yes" : "no"}, merge-tree=${checks.mergeTree}`,

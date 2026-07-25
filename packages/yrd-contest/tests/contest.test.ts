@@ -8,6 +8,7 @@ import { createMemoryJournal, createYrd, createYrdDef, pipe, type Journal } from
 import { withJobs, type JobResult } from "@yrd/job"
 import { withIssues } from "@yrd/issue"
 import { describe, expect, it } from "vitest"
+import { createLogger } from "loggily"
 import {
   withContests,
   type AttemptRunOutput,
@@ -51,7 +52,7 @@ function workspace(): BayWorkspace {
       }
     },
     checkpoint() {
-      return { status: "passed", output: { headSha: BASE_SHA, pushed: true, wip: false } }
+      return { status: "completed", conclusion: "success", output: { headSha: BASE_SHA, pushed: true, wip: false } }
     },
     deprovision() {
       return { status: "completed", conclusion: "success", output: {} }
@@ -166,7 +167,12 @@ async function createApp(journal: Journal<unknown>, setup = fixtures()) {
     withBays({ jobs: bayJobs, defaultBase: "main" }),
   )
   return createYrd(contests(base), {
-    inject: { journal, clock: () => "2026-07-09T12:00:00.000Z", id: ids() },
+    inject: {
+      journal,
+      clock: () => "2026-07-09T12:00:00.000Z",
+      id: ids(),
+      log: createLogger("test", [{ level: "silent" }]),
+    },
   })
 }
 

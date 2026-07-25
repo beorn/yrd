@@ -742,8 +742,7 @@ export function QueueWorkflowStepTabs({
   // output or terminal step. Operator selection overrides it; the parent
   // remounts on run change, resetting that override.
   const tabNames = useMemo(() => (data === undefined ? [] : [PR_TAB_ID, ...names]), [data, names])
-  const liveStep =
-    data === undefined ? undefined : (data.steps.findLast((step) => step.status === "running")?.step ?? PR_TAB_ID)
+  const liveStep = data === undefined ? undefined : queueDefaultStepTab(data, outputs)
   const [userSelectedStep, setUserSelectedStep] = useState<string | null>(null)
   const activeStep = resolveStepTabSelection(tabNames, liveStep, userSelectedStep)
 
@@ -823,97 +822,72 @@ export function QueueWorkflowStepTabs({
           />
         </>
       ) : activeStep === undefined ? null : (
-        <Tabs value={activeStep} onChange={setUserSelectedStep} isActive={active}>
-          {activeStep === PR_TAB_ID ? (
-            <QueueDetailPrSection
-              data={data}
-              {...(row === undefined ? {} : { row })}
-              rows={runRows}
-              prs={prs}
-              runDetails={runDetails}
-              diffs={diffs}
-              {...(highlightPr === undefined ? {} : { highlightPr })}
-              showDiff={false}
-            />
-          ) : null}
+        <>
+          <QueueDetailRunHeader data={data} {...(row === undefined ? {} : { row })} />
+          <QueueStatusNotice
+            {...(row === undefined ? {} : { row })}
+            data={data}
+            runDetails={runDetails}
+            live={active}
+          />
           <Box height={1} flexShrink={0} />
-          <TabList>
-            {tabNames.map((name) => (
-              <Box
-                key={name}
-                backgroundColor={activeStep === name ? "$bg-selected" : "$bg-surface-subtle"}
-                paddingLeft={2}
-                paddingY={1}
-                width={stepTabWidth + 4}
-                flexShrink={0}
-              >
-                <Tab value={name}>{stepTabLabel(name, activeStep === name)}</Tab>
-              </Box>
-            ))}
-          </TabList>
-          <Box height={1} flexShrink={0} />
-          {activeStep === PR_TAB_ID ? null : (
-            <>
-              <QueueDetailRunHeader data={data} />
-              <QueueShowView
-                data={data}
-                compact={compact}
-                highlightPr={highlightPr}
-                section="run"
-                titleAbove
-                showMembers={data.prs.length > 1}
-                showIntegration={false}
-              />
-              <Box height={1} flexShrink={0} />
-            </>
-          )}
-          <TabPanel value={PR_TAB_ID}>
-            <QueueTabScrollArea>
-              <QueueDetailPrSection
-                data={data}
-                {...(row === undefined ? {} : { row })}
-                rows={runRows}
-                prs={prs}
-                runDetails={runDetails}
-                diffs={diffs}
-                {...(highlightPr === undefined ? {} : { highlightPr })}
-                showFacts={false}
-              />
-            </QueueTabScrollArea>
-          </TabPanel>
-          {names.map((name) => {
-            const stepRows = data.steps.filter((row) => row.step === name)
-            const stepOutputs = outputs.filter((output) => output.step === name)
-            const stepData: QueueShowData = { ...data, steps: stepRows }
-            // The job input is durable proof of what this run actually executed;
-            // current config is only a preview for a step that has no job yet.
-            const executions = queueStepExecutions({ data, name, stepRows, stepOutputs, commands })
-            return (
-              <TabPanel key={name} value={name}>
-                <QueueTabScrollArea followEnd>
-                  {/* Only the step-level facts here; the run-level facts render
-                  once above the step tabs. */}
-                  <QueueShowView
-                    data={stepData}
-                    compact={compact}
-                    highlightPr={highlightPr}
-                    section="steps"
-                    showLogArtifacts
-                    {...(selectedPr?.issue === undefined ? {} : { stepIssue: selectedPr.issue })}
-                  />
-                  {name === "merge" && data.integration !== undefined ? (
-                    <>
-                      <Text wrap="truncate">COMMIT {data.integration.commit}</Text>
-                      <Text wrap="truncate">
-                        PARENTS {[data.integration.baseSha, ...data.prs.map((pr) => pr.headSha)].join(" ")}
-                      </Text>
-                    </>
-                  ) : null}
-                  {executions.map((execution, index) => (
-                    <QueueCommandExecutionBlock
-                      key={`${name}:execution:${index}`}
-                      {...(execution.command === undefined ? {} : { command: execution.command })}
-                      outputs={execution.outputs}
+          <Tabs value={activeStep} onChange={setUserSelectedStep} isActive={active}>
+            <TabList>
+              {tabNames.map((name) => (
+                <Box
+                  key={name}
+                  backgroundColor={activeStep === name ? "$bg-selected" : "$bg-surface-subtle"}
+                  paddingLeft={2}
+                  paddingY={1}
+                  width={stepTabWidth + 4}
+                  flexShrink={0}
+                >
+                  <Tab value={name}>{stepTabLabel(name, activeStep === name)}</Tab>
+                </Box>
+              ))}
+            </TabList>
+            <Box height={1} flexShrink={0} />
+            <TabPanel value={PR_TAB_ID}>
+              <QueueTabScrollArea>
+                <QueueDetailPrSection
+                  data={data}
+                  {...(row === undefined ? {} : { row })}
+                  rows={runRows}
+                  prs={prs}
+                  runDetails={runDetails}
+                  diffs={diffs}
+                  {...(highlightPr === undefined ? {} : { highlightPr })}
+                />
+              </QueueTabScrollArea>
+            </TabPanel>
+            {names.map((name) => {
+              const stepRows = data.steps.filter((row) => row.step === name)
+              const stepOutputs = outputs.filter((output) => output.step === name)
+              const stepData: QueueShowData = { ...data, steps: stepRows }
+              // The job input is durable proof of what this run actually executed;
+              // current config is only a preview for a step that has no job yet.
+              const executions = queueStepExecutions({ data, name, stepRows, stepOutputs, commands })
+              return (
+                <TabPanel key={name} value={name}>
+                  <QueueTabScrollArea followEnd>
+                    <QueueShowView
+                      data={data}
+                      compact={compact}
+                      highlightPr={highlightPr}
+                      section="run"
+                      titleAbove
+                      showMembers={data.prs.length > 1}
+                      showIntegration={false}
+                      showFailureDetails={false}
+                    />
+                    <Box height={1} flexShrink={0} />
+                    <QueueShowView
+                      data={stepData}
+                      compact={compact}
+                      highlightPr={highlightPr}
+                      section="steps"
+                      showLogArtifacts
+                      showFailureDetails={false}
                     />
                     {name === "merge" && data.integration !== undefined ? (
                       <>

@@ -169,6 +169,7 @@ export type ResolvedYrdProjectConfig = Readonly<{
   definitions: Readonly<Record<string, YrdStepConfig>>
   contest: Readonly<{ concurrency: number; timeoutMs: number; evaluators: readonly string[] }>
   notify?: SignalRoutes
+  refuse?: YrdRefuseConfig
   /** Programmatic flow authority. Optional only for direct legacy test/app construction. */
   flows?: readonly FlowDef[]
 }>
@@ -328,6 +329,7 @@ export async function loadYrdConfig(options: {
         evaluators: parsed.contest.evaluators ?? ["check"],
       },
       notify: parsed.notify ?? {},
+      ...(parsed.refuse === undefined ? {} : { refuse: parsed.refuse }),
       flows: flows.flows,
     },
   }

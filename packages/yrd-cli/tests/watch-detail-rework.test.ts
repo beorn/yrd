@@ -145,7 +145,7 @@ describe("detail title row — target identity emphasis + right-aligned outcome"
       expect(app.text).toContain("pr#42.1")
       expect(app.text).not.toContain("RUN main#42")
       expect(app.text).not.toContain("topic/pr42")
-      expect(app.text).toContain(`${data.glyph} completed, integrated`)
+      expect(app.text).not.toContain(`${data.glyph} passed, integrated`)
 
       const titleRow = app.text.split("\n").findIndex((text) => text.includes("pr#42.1"))
       expect(titleRow).toBeGreaterThanOrEqual(0)

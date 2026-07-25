@@ -28,15 +28,21 @@ function workspace(): BayWorkspace {
   return {
     revision: "test-workspace-v1",
     provision: (input) => ({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE },
     }),
     refresh: (input) => ({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE, dirty: false },
     }),
-    checkpoint: () => ({ status: "passed", output: { headSha: HEAD, pushed: true, wip: false } }),
-    deprovision: () => ({ status: "passed", output: {} }),
+    checkpoint: () => ({
+      status: "completed",
+      conclusion: "success",
+      output: { headSha: HEAD, pushed: true, wip: false },
+    }),
+    deprovision: () => ({ status: "completed", conclusion: "success", output: {} }),
   }
 }
 
@@ -48,7 +54,7 @@ async function createApp(
   const bayJobs = createBayJobDefs(workspace())
   const first = withStep(
     "first",
-    (): JobResult<{ first: boolean }> => ({ status: "passed", output: { first: true } }),
+    (): JobResult<{ first: boolean }> => ({ status: "completed", conclusion: "success", output: { first: true } }),
     {
       revision: "first-v1",
       output: z.object({ first: z.boolean() }).strict(),
@@ -57,7 +63,7 @@ async function createApp(
   const queue = withQueue({ steps: [first] as const, batch: false, defaultSteps: ["first"] })
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   return createYrd(queue(base), {
-    inject: { journal, id, clock: () => START, ...(log === undefined ? {} : { log }) },
+    inject: { journal, id, clock: () => START, log: log ?? createLogger("test", [{ level: "silent" }]) },
   })
 }
 
@@ -105,16 +111,16 @@ async function joblessRun(log?: ReturnType<typeof createLogger>) {
 }
 
 describe("orphaned run recovery — a run with no Job at its cursor step can never settle itself", () => {
-  it("projects a jobless run as running, and neither advance nor job recovery can move it", async () => {
+  it("projects a jobless run as queued, and neither advance nor job recovery can move it", async () => {
     await using app = await joblessRun()
 
     const run = app.queue.get("R1")
     expect(run?.steps[0]?.job, "the surgery must leave the run Job-less").toBeUndefined()
     // This is the defect's shape: no Job to reclaim, and advance emits nothing.
-    expect(run?.status).toBe("running")
+    expect(run?.status).toBe("queued")
     expect(await app.jobs.recover({ now: STALE, reason: "lease sweep" })).toEqual([])
     await app.dispatch(app.commands.queue.advance, { run: "R1" })
-    expect(app.queue.get("R1")?.status, "advance cannot move a run with no job at its cursor").toBe("running")
+    expect(app.queue.get("R1")?.status, "advance cannot move a run with no job at its cursor").toBe("queued")
   })
 
   it("audit flags the jobless run instead of printing clean", async () => {
@@ -134,7 +140,7 @@ describe("orphaned run recovery — a run with no Job at its cursor step can nev
     await app.queue.recover({ recoveryTime: STALE, reason: "resident restart" })
 
     const run = app.queue.get("R1")
-    expect(run?.status).toBe("failed")
+    expect(run?.status).toBe("completed")
     expect(run?.finishedAt, "a settled run must carry a finish instant").toBeDefined()
     expect(run?.error?.code).toBe("orphaned-run")
     // Truthful and specific: this is NOT lease expiry — there was never a Job.
@@ -158,7 +164,7 @@ describe("orphaned run recovery — a run with no Job at its cursor step can nev
     // previous Job finishing and the next advance. Settling here would abort live work.
     await app.queue.recover({ recoveryTime: FRESH, reason: "resident restart" })
 
-    expect(app.queue.get("R1")?.status, "a run inside the orphan grace is still live").toBe("running")
+    expect(app.queue.get("R1")?.status, "a run inside the orphan grace is still live").toBe("queued")
     expect(app.queue.get("R1")?.error).toBeUndefined()
   })
 
@@ -190,14 +196,14 @@ describe("a finished run stays terminal after its Jobs are pruned", () => {
       await using seed = await createApp(journal)
       const pr = await submitBranch(seed, "issue/passes")
       await seed.queue.run({ prs: [pr.id], steps: ["first"] }, { runner: "local", leaseMs: 60_000 })
-      expect(seed.queue.get("R1")?.status, "the seed run must reach passed").toBe("passed")
+      expect(seed.queue.get("R1")?.status, "the seed run must reach passed").toBe("completed")
     }
 
     // Job retention prunes a finished root's Jobs; the Queue record outlives them.
     await using pruned = await createApp(await withoutJobEvents(journal), ids(100))
 
     const run = pruned.queue.get("R1")
-    expect(run?.status, "a settled passed run must not resurrect as a phantom `running`").toBe("passed")
+    expect(run?.status, "a settled passed run must not resurrect as a phantom `running`").toBe("completed")
     expect(run?.finishedAt).toBeDefined()
     expect(pruned.queue.audit().findings.some((item) => item.code === "orphaned-run")).toBe(false)
   })

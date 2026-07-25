@@ -407,6 +407,11 @@ function workspace(): BayWorkspace {
       conclusion: "success",
       output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE, dirty: false },
     }),
+    checkpoint: () => ({
+      status: "completed",
+      conclusion: "success",
+      output: { headSha: HEAD, pushed: true, wip: false },
+    }),
     deprovision: () => ({ status: "completed", conclusion: "success", output: {} }),
   }
 }
@@ -533,7 +538,7 @@ async function createQueueApp(
   )
   const definition = queue(base)
   return createYrd(definition, {
-    inject: { journal, id, clock, ...(log === undefined ? {} : { log }) },
+    inject: { journal, id, clock, log: log ?? createLogger("test", [{ level: "silent" }]) },
   })
 }
 
@@ -3083,7 +3088,7 @@ describe("Queue", () => {
       },
     ])
     expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
-      delivery: "canceled",
+      delivery: "submitted",
       revision: revision.n,
       headSha: revision.head,
       correlation,
@@ -3091,7 +3096,7 @@ describe("Queue", () => {
         {
           n: revision.n,
           head: revision.head,
-          terminal: { kind: "canceled", at: "2026-01-01T00:00:00.000Z" },
+          terminal: undefined,
         },
       ],
     })
@@ -3123,11 +3128,16 @@ describe("Queue", () => {
       prs: [{ id: pr.id, revision: revision.n, headSha: revision.head, correlation }],
     })
     expect(prFacts(replayed.state().bays.prs[pr.id])).toMatchObject({
-      delivery: "canceled",
-      revs: [{ terminal: { kind: "canceled", at: "2026-01-01T00:00:00.000Z" } }],
+      delivery: "submitted",
+      revs: [{ terminal: undefined }],
     })
     await expect(replayed.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)).resolves.toMatchObject([
-      { id: "R2", status: "passed", prs: [{ id: pr.id, revision: pr.revision, headSha: pr.headSha, correlation }] },
+      {
+        id: "R2",
+        status: "completed",
+        conclusion: "success",
+        prs: [{ id: pr.id, revision: revision.n, headSha: revision.head, correlation }],
+      },
     ])
   })
 
@@ -3571,7 +3581,7 @@ describe("Queue", () => {
         const pr = input.prs[0]
         if (pr === undefined) throw new Error("expected one PR per admission check")
         checkedPRs.push(pr.id)
-        return { status: "passed", output: { checked: true } }
+        return { status: "completed", conclusion: "success", output: { checked: true } }
       },
     })
     const active = await submitBranch(app, "issue/unrelated-active-check")
@@ -3579,14 +3589,14 @@ describe("Queue", () => {
     for (const pr of [active, selected]) await app.bays.requestChecks({ pr: pr.id })
 
     expect(await app.queue.admit({ prs: [active.id] })).toMatchObject([
-      { id: "R1", status: "running", prs: [{ id: active.id }] },
+      { id: "R1", status: "queued", prs: [{ id: active.id }] },
     ])
-    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "requested" })
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "queued" })
 
     await app.queue.run({ prs: [selected.id] }, runtime)
 
     expect(checkedPRs).toEqual([])
-    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "requested" })
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "queued" })
     expect(app.queue.eligibility(selected.id)).toMatchObject({
       runnable: false,
       reason: { code: "checks-pending" },
@@ -3596,7 +3606,7 @@ describe("Queue", () => {
 
   it("waits for every selected check before composing a mixed-ready explicit selection", async () => {
     await using app = await createQueueApp({
-      check: () => ({ status: "passed", output: { checked: true } }),
+      check: () => ({ status: "completed", conclusion: "success", output: { checked: true } }),
     })
     const ready = await submitBranch(app, "issue/ready-selected-check")
     await app.bays.requestChecks({ pr: ready.id })
@@ -3617,7 +3627,7 @@ describe("Queue", () => {
       readyAdmission.id,
     ])
     expect(Queues.ids(app.state().queues)).toEqual(runIdsBefore)
-    expect(app.queue.get(admission.id)?.steps[0]?.job).toMatchObject({ status: "requested" })
+    expect(app.queue.get(admission.id)?.steps[0]?.job).toMatchObject({ status: "queued" })
     expect(app.queue.eligibility(ready.id)).toMatchObject({ runnable: true })
     expect(app.queue.eligibility(pending.id)).toMatchObject({ checks: { status: "queued" } })
   })
@@ -3631,7 +3641,7 @@ describe("Queue", () => {
           const pr = input.prs[0]
           if (pr === undefined) throw new Error("expected one PR per admission check")
           checkedPRs.push(pr.id)
-          return { status: "passed", output: { checked: true } }
+          return { status: "completed", conclusion: "success", output: { checked: true } }
         },
       },
       journal,
@@ -3660,7 +3670,7 @@ describe("Queue", () => {
           .map(({ command }) => command.args),
       )
     }
-    expect(admissionArgs).toContainEqual({ pr: selected.id, selection: "explicit" })
+    expect(admissionArgs).toContainEqual({ pr: selected.id, baseSha: BASE, selection: "explicit" })
   })
 
   it("scopes an explicit Queue.admit drain after resolving a branch selector", async () => {
@@ -3670,7 +3680,7 @@ describe("Queue", () => {
         const pr = input.prs[0]
         if (pr === undefined) throw new Error("expected one PR per admission check")
         checkedPRs.push(pr.id)
-        return { status: "passed", output: { checked: true } }
+        return { status: "completed", conclusion: "success", output: { checked: true } }
       },
     })
     const queued = await submitBranch(app, "issue/unrelated-queued-admit")
@@ -4103,10 +4113,13 @@ describe("Queue", () => {
 
   it("keeps admission globally FIFO even when a later PR is selected explicitly", async () => {
     const checked: string[] = []
-    await using app = await createQueueApp({
-      check: (input) => {
-        checked.push(input.prs[0]!.id)
-        return { status: "completed", conclusion: "success", output: { checked: true } }
+    const journal = createMemoryJournal()
+    await using app = await createQueueApp(
+      {
+        check: (input) => {
+          checked.push(input.prs[0]!.id)
+          return { status: "completed", conclusion: "success", output: { checked: true } }
+        },
       },
       journal,
     )
@@ -4132,7 +4145,12 @@ describe("Queue", () => {
           .map(({ command }) => command.args),
       )
     }
-    expect(admissionArgs).toStrictEqual([{ pr: second.id }, { pr: first.id }, { pr: second.id }, { pr: second.id }])
+    expect(admissionArgs).toStrictEqual([
+      { pr: second.id, baseSha: BASE },
+      { pr: first.id, baseSha: BASE },
+      { pr: second.id, baseSha: BASE },
+      { pr: second.id, baseSha: BASE },
+    ])
   })
 
   it("orders admission age and position from the check request fact, not the earlier push", async () => {
@@ -5005,7 +5023,9 @@ describe("Queue", () => {
     const bayJobs = createBayJobDefs(workspace())
     const withoutSteps = withQueue({ steps: [] as const })
     const historyBase = pipe(createYrdDef(), withJobs({ definitions: bayJobs }), withBays({ jobs: bayJobs }))
-    await using history = await createYrd(withoutSteps(historyBase), { inject: { journal } })
+    await using history = await createYrd(withoutSteps(historyBase), {
+      inject: { journal, log: createLogger("test", [{ level: "silent" }]) },
+    })
     expect(history.queue.get(completed[0]!.id)).toMatchObject({ status: "completed", conclusion: "success" })
   })
 

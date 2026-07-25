@@ -6,6 +6,7 @@
  * @consumer @yrd/bay
  */
 import { describe, expect, it } from "vitest"
+import { createLogger } from "loggily"
 import { Command, createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs } from "@yrd/job"
 import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
@@ -34,6 +35,11 @@ function workspaceAdapter(): BayWorkspace {
       status: "completed",
       conclusion: "success",
       output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD_1, baseSha: BASE, dirty: false },
+    }),
+    checkpoint: () => ({
+      status: "completed",
+      conclusion: "success",
+      output: { headSha: HEAD_1, pushed: true, wip: false },
     }),
     deprovision: () => ({ status: "completed", conclusion: "success", output: {} }),
   }
@@ -82,7 +88,9 @@ async function appWithIntegrated(
   ])
   const jobs = createBayJobDefs(workspaceAdapter())
   const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
-  return createYrd(definition, { inject: { journal, clock: () => at, id: nextId } })
+  return createYrd(definition, {
+    inject: { journal, clock: () => at, id: nextId, log: createLogger("test", [{ level: "silent" }]) },
+  })
 }
 
 const mint = (tip: string) => ({ base: "main", resolveRevision: async () => tip, run: runtime })

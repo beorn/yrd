@@ -5,7 +5,8 @@
  */
 import { describe, expect, it } from "vitest"
 import { defineConfig, yrd } from "@yrd/config"
-import { loadYrdConfig, parseYrdConfig } from "../src/config.ts"
+import { DIAGNOSTICS_COMPARISON_READY } from "@yrd/queue"
+import { loadYrdConfig, parseYrdConfig, stepGateMode } from "../src/config.ts"
 
 describe("Yrd config", () => {
   it("parses the flat queue policy and top-level step definitions", () => {

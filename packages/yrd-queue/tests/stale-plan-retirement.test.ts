@@ -25,15 +25,21 @@ function workspace(): BayWorkspace {
   return {
     revision: "test-workspace-v1",
     provision: (input) => ({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE },
     }),
     refresh: (input) => ({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE, dirty: false },
     }),
-    checkpoint: () => ({ status: "passed", output: { headSha: HEAD, pushed: true, wip: false } }),
-    deprovision: () => ({ status: "passed", output: {} }),
+    checkpoint: () => ({
+      status: "completed",
+      conclusion: "success",
+      output: { headSha: HEAD, pushed: true, wip: false },
+    }),
+    deprovision: () => ({ status: "completed", conclusion: "success", output: {} }),
   }
 }
 
@@ -44,8 +50,8 @@ function checkBatchPlugin(checkRevision: string) {
     "check",
     (input: StepExecution): JobResult<{ checked: boolean }> =>
       input.prs.length > 1
-        ? { status: "failed", error: { code: "check-failed", message: "red batch" } }
-        : { status: "passed", output: { checked: true } },
+        ? { status: "completed", conclusion: "failure", error: { code: "check-failed", message: "red batch" } }
+        : { status: "completed", conclusion: "success", output: { checked: true } },
     { revision: checkRevision, output: CheckResultSchema },
   )
   return withQueue({ steps: [check] as const, batch: 2, defaultSteps: ["check"] })
@@ -61,7 +67,12 @@ async function createApp(
   const queue = checkBatchPlugin(checkRevision)
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   return createYrd(queue(base), {
-    inject: { journal, id, clock: () => "2026-01-01T00:00:00.000Z", ...(log === undefined ? {} : { log }) },
+    inject: {
+      journal,
+      id,
+      clock: () => "2026-01-01T00:00:00.000Z",
+      log: log ?? createLogger("test", [{ level: "silent" }]),
+    },
   })
 }
 
@@ -87,7 +98,7 @@ async function seedStalePlanBatch(journal: Journal<unknown>, id: () => string, l
     await app.jobs.run(checkJob.id, runtime)
     const r1 = app.queue.get("R1")
     // Failed 2-PR batch, no isolation children yet — the bisectable pre-condition.
-    expect(r1?.status).toBe("failed")
+    expect(r1?.status).toBe("completed")
     expect(r1?.prs.length).toBe(2)
   }
   // Reopen under the drifted revision.
@@ -110,7 +121,11 @@ describe("stale-plan retirement — an un-isolable drifted batch is retired, not
     await expect(replayed.queue.run({}, runtime)).resolves.toBeDefined()
 
     const r1 = replayed.queue.get("R1")
-    expect(r1).toMatchObject({ status: "failed", error: expect.objectContaining({ code: "stale-plan" }) })
+    expect(r1).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: expect.objectContaining({ code: "stale-plan" }),
+    })
 
     const retire = events.find(
       (event): event is Extract<LogEvent, { kind: "log" }> =>
@@ -141,7 +156,8 @@ describe("stale-plan retirement — an un-isolable drifted batch is retired, not
     await replayed.queue.recover({ recoveryTime: "2026-01-01T00:05:00.000Z", reason: "stale-plan hygiene test" })
 
     expect(replayed.queue.get("R1")).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: expect.objectContaining({ code: "stale-plan" }),
     })
     expect(replayed.queue.audit().findings.some((f) => f.code === "unisolable-stale-plan")).toBe(false)
@@ -174,7 +190,8 @@ describe("stale-plan retirement — an un-isolable drifted batch is retired, not
     // retireStalePlan is idempotent and definitive: it settles once, then no-ops.
     await replayed.dispatch(replayed.commands.queue.retireStalePlan, { run: "R1" })
     expect(replayed.queue.get("R1")).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: expect.objectContaining({ code: "stale-plan" }),
     })
     expect(replayed.queue.audit().findings.some((f) => f.code === "unisolable-stale-plan")).toBe(false)

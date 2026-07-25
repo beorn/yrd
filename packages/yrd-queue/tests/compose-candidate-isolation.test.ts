@@ -26,15 +26,21 @@ function workspace(): BayWorkspace {
   return {
     revision: "test-workspace-v1",
     provision: (input) => ({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE },
     }),
     refresh: (input) => ({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE, dirty: false },
     }),
-    checkpoint: () => ({ status: "passed", output: { headSha: HEAD, pushed: true, wip: false } }),
-    deprovision: () => ({ status: "passed", output: {} }),
+    checkpoint: () => ({
+      status: "completed",
+      conclusion: "success",
+      output: { headSha: HEAD, pushed: true, wip: false },
+    }),
+    deprovision: () => ({ status: "completed", conclusion: "success", output: {} }),
   }
 }
 
@@ -45,7 +51,8 @@ function workspace(): BayWorkspace {
 function mergeDeployPlugin(deployRevision: string) {
   const merge = withMerge(
     (): JobResult<{ commit: string; baseSha: string }> => ({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { commit: MERGED, baseSha: BASE },
     }),
     { revision: "merge-v1" },
@@ -53,10 +60,11 @@ function mergeDeployPlugin(deployRevision: string) {
   const deploy = withStep(
     "deploy",
     (_input: StepExecution): JobResult<{ environment: string }> => ({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { environment: "staging" },
     }),
-    { revision: deployRevision, needsIntegration: true, output: DeployResultSchema },
+    { revision: deployRevision, kind: "action", output: DeployResultSchema },
   )
   return withQueue({ steps: [merge, deploy] as const, batch: false, defaultSteps: ["merge", "deploy"] })
 }
@@ -71,7 +79,12 @@ async function createApp(
   const queue = mergeDeployPlugin(deployRevision)
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   return createYrd(queue(base), {
-    inject: { journal, id, clock: () => "2026-01-01T00:00:00.000Z", ...(log === undefined ? {} : { log }) },
+    inject: {
+      journal,
+      id,
+      clock: () => "2026-01-01T00:00:00.000Z",
+      log: log ?? createLogger("test", [{ level: "silent" }]),
+    },
   })
 }
 
@@ -94,7 +107,7 @@ async function seedStuckRun(deployRevision: string, journal: ReturnType<typeof c
   const mergeJob = app.queue.get("R1")?.steps[0]?.job
   if (mergeJob === undefined) throw new Error("expected requested merge")
   await app.jobs.run(mergeJob.id, runtime)
-  expect(app.queue.get("R1")?.steps[0]?.job?.status).toBe("passed")
+  expect(app.queue.get("R1")?.steps[0]?.job?.status).toBe("completed")
   expect(app.queue.get("R1")?.steps[1]?.job).toBeUndefined()
 }
 

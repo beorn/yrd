@@ -31,18 +31,21 @@ function workspace() {
   return {
     revision: "json-filter-workspace-v1",
     provision: (input: { bay: string }) => ({
-      status: "passed" as const,
+      status: "completed" as const,
+      conclusion: "success" as const,
       output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD_SHA, baseSha: BASE_SHA },
     }),
     refresh: (input: { bay: string; path?: string }) => ({
-      status: "passed" as const,
+      status: "completed" as const,
+      conclusion: "success" as const,
       output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD_SHA, baseSha: BASE_SHA, dirty: false },
     }),
     checkpoint: () => ({
-      status: "passed" as const,
+      status: "completed" as const,
+      conclusion: "success" as const,
       output: { headSha: HEAD_SHA, pushed: true as const, wip: false },
     }),
-    deprovision: () => ({ status: "passed" as const, output: {} }),
+    deprovision: () => ({ status: "completed" as const, conclusion: "success" as const, output: {} }),
   }
 }
 
@@ -53,7 +56,8 @@ function contestAdapters() {
     revision: "ag-runner-v1",
     async run(input): Promise<JobResult<AttemptRunOutput>> {
       return {
-        status: "passed",
+        status: "completed",
+        conclusion: "success",
         output: {
           pin: {
             commit: "c".repeat(40),
@@ -75,7 +79,7 @@ function contestAdapters() {
     revision: "held-out-v1",
     authority: "held-out",
     async evaluate() {
-      return { status: "passed", output: { verdict: "passed", artifacts: [] } }
+      return { status: "completed", conclusion: "success", output: { verdict: "passed", artifacts: [] } }
     },
   }
   const git: ContestGit = { revision: "git-v1", resolveCommit: () => BASE_SHA }
@@ -84,16 +88,21 @@ function contestAdapters() {
 
 async function createCliApp() {
   const bayJobs = createBayJobDefs(workspace())
-  const check = withStep("check", (): JobResult<JsonValue> => ({ status: "passed", output: { checked: true } }), {
-    revision: "check-v1",
-    output: JsonSchema,
-    classification: "carrier",
-  })
+  const check = withStep(
+    "check",
+    (): JobResult<JsonValue> => ({ status: "completed", conclusion: "success", output: { checked: true } }),
+    {
+      revision: "check-v1",
+      output: JsonSchema,
+      classification: "carrier",
+    },
+  )
   const merge = withMerge(
     async (
       _input: StepExecution<PRShape>,
     ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => ({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { commit: MERGED_SHA, baseSha: MERGED_SHA },
     }),
     { revision: "merge-v1" },

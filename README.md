@@ -307,14 +307,14 @@ The same commands are available through the standalone `git bay` projection.
 submission core as `pr submit`; `bay submit` remains a handoff, while new
 callers use the PR-native check-admission surface below.
 
-| Command   | Input                                                 | Output and state                                                                      |
-| --------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `list`    | None                                                  | Lists every Bay, including durable failure and orphan facts                           |
-| `run`     | Claim plus exact child argv                           | Brackets the child with a pushed draft, checkpoint, and synchronous close-or-orphan   |
-| `open`    | New bay name; optional source, base, issue, and actor | Prints the worktree path; creates and provisions a named bay                          |
-| `path`    | One Bay ID, name, or branch selector                  | Prints the exact absolute path of one active Bay; read-only and never refreshes it    |
-| `refresh` | Zero or more bays                                     | Refreshes Git head, base, dirty, path, and workspace status                           |
-| `submit`  | Bays, PRs, or source branches                         | Creates or advances PRs to `submitted`; never executes Queue work                     |
+| Command   | Input                                                 | Output and state                                                                        |
+| --------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `list`    | None                                                  | Lists every Bay, including durable failure and orphan facts                             |
+| `run`     | Claim plus exact child argv                           | Brackets the child with a pushed draft, checkpoint, and synchronous close-or-orphan     |
+| `open`    | New bay name; optional source, base, issue, and actor | Prints the worktree path; creates and provisions a named bay                            |
+| `path`    | One Bay ID, name, or branch selector                  | Prints the exact absolute path of one active Bay; read-only and never refreshes it      |
+| `refresh` | Zero or more bays                                     | Refreshes Git head, base, dirty, path, and workspace status                             |
+| `submit`  | Bays, PRs, or source branches                         | Creates or advances PRs to `submitted`; never executes Queue work                       |
 | `close`   | Zero or more bays                                     | Deprovisions clean terminal bays; `--withdraw` explicitly cancels an associated live PR |
 
 Submodule repositories are ready when `bay open` returns. Yrd recursively
@@ -1156,12 +1156,13 @@ with the same intent returns its committed `CommandResult`; reusing it for
 different arguments is refused. The Git receiver uses its receipt as a dispatch
 key, so replay after a lost response cannot create a second PR revision.
 
-Jobs are the single durable executable lifecycle: requested, running, waiting,
-passed, failed, or lost. `withJobs()` installs that authority when the
-application needs executable work. Queue and Contest records retain domain
-facts; their Job ids, status, attempts, timing, and evidence are derived from
-typed Job inputs and results. This prevents three competing retry and recovery
-implementations.
+Jobs are the single durable executable lifecycle. Their native status is
+`queued`, `in_progress`, `waiting`, or `completed`; completed Jobs carry a
+`success`, `failure`, `cancelled`, `skipped`, or `timed_out` conclusion.
+`withJobs()` installs that authority when the application needs executable
+work. Queue and Contest records retain domain facts; their Job ids, status,
+conclusion, attempts, timing, and evidence are derived from typed Job inputs
+and results. This prevents three competing retry and recovery implementations.
 
 A Job retry is infrastructure recovery for the same failed or lost Job and
 keeps its id. A Contest re-evaluation is different: an evaluator may complete

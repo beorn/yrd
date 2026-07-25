@@ -15,7 +15,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, prDeliveryState, withBays } from "@yrd/bay"
+import { createBayJobDefs, currentPRRev, prDeliveryState, withBays } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type Journal, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { createJournal } from "@yrd/persistence"
@@ -69,6 +69,11 @@ function workspace() {
       status: "completed" as const,
       conclusion: "success" as const,
       output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD_SHA, baseSha: BASE_SHA, dirty: false },
+    }),
+    checkpoint: () => ({
+      status: "completed" as const,
+      conclusion: "success" as const,
+      output: { headSha: HEAD_SHA, pushed: true as const, wip: false },
     }),
     deprovision: () => ({ status: "completed" as const, conclusion: "success" as const, output: {} }),
   }
@@ -428,7 +433,7 @@ describe("pr recut --preflight", () => {
       },
     })
     expect((await Array.fromAsync(app.events())).length).toBe(before)
-    expect(app.state().bays.prs.PR1).toMatchObject({ revision: 1, headSha: HEAD_SHA })
+    expect(currentPRRev(app.state().bays.prs.PR1!)).toMatchObject({ n: 1, head: HEAD_SHA })
   })
 
   it.each([

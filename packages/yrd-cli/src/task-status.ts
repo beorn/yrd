@@ -45,7 +45,7 @@ export function prTaskStatusOf(pr: PR): TaskStatus {
   return prDeliveryTaskStatusOf(prDeliveryState(pr))
 }
 
-export function prDeliveryTaskStatusOf(delivery: PRDeliveryState): TaskStatus {
+export function prDeliveryTaskStatusOf(delivery: PRDeliveryState | "needs-author"): TaskStatus {
   switch (delivery) {
     case "pushed":
       return "todo"

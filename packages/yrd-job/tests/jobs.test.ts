@@ -141,7 +141,7 @@ async function jobsApp(
       journal: options.journal ?? createMemoryJournal(),
       clock: options.clock,
       id: options.id,
-      log: options.log,
+      log: options.log ?? createLogger("test", [{ level: "silent" }]),
     },
   })
   return app
@@ -331,7 +331,7 @@ describe("Jobs", () => {
               id: JOB_ID,
               attempt: 1,
               runner: "legacy-runner",
-              result: { status: "passed", output: { receipt: "legacy-ok" } },
+              result: { status: "completed", conclusion: "success", output: { receipt: "legacy-ok" } },
             },
           },
         ],

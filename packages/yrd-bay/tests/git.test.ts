@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { createMemoryJournal, createYrd, createYrdDef, pipe, type CommandResult } from "@yrd/core"
 import { withJobs } from "@yrd/job"
 import { createProcess, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
+import { createLogger } from "loggily"
 import { createGitWorkspace, type GitWorkspaceOptions } from "../src/git.ts"
 import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
 
@@ -65,7 +66,9 @@ async function addSubmodule(root: string, repo: string): Promise<void> {
 async function createApp(adapter: BayWorkspace) {
   const jobs = createBayJobDefs(adapter)
   const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs }))
-  return createYrd(definition, { inject: { journal: createMemoryJournal() } })
+  return createYrd(definition, {
+    inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
+  })
 }
 
 async function runRequested(app: Awaited<ReturnType<typeof createApp>>, result: CommandResult): Promise<void> {
@@ -116,7 +119,7 @@ describe("createGitWorkspace", () => {
         { bay: "B1", branch: "issue/unmaterialized" },
         { id: "deprovision-B1", attempt: 1, runner: "test", signal: new AbortController().signal },
       ),
-    ).resolves.toEqual({ status: "passed", output: {} })
+    ).resolves.toEqual({ status: "completed", conclusion: "success", output: {} })
     expect((await git(repo, ["rev-parse", "--verify", "refs/yrd/closed/B1"], true)).code).toBe(128)
   })
 

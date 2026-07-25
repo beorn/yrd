@@ -7,7 +7,8 @@
  * @consumer @yrd/queue
  */
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
+import { createLogger } from "loggily"
+import { createBayJobDefs, currentPRRev, prDeliveryState, withBays, type BayWorkspace, type PR } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
@@ -33,6 +34,26 @@ function ids(): () => string {
   return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
 }
 
+function prFacts(pr: PR | undefined) {
+  if (pr === undefined) throw new Error("expected PR")
+  const revision = currentPRRev(pr)
+  return {
+    ...pr,
+    status: prDeliveryState(pr),
+    revision: revision.n,
+    headSha: revision.head,
+    base: revision.base,
+    baseSha: revision.baseSha,
+    correlation: revision.correlation,
+    composition: revision.composition,
+    revisions: pr.revs.map((item) => ({
+      ...item,
+      revision: item.n,
+      headSha: item.head,
+    })),
+  }
+}
+
 function workspace(): BayWorkspace {
   return {
     revision: "test-workspace-v1",
@@ -45,6 +66,11 @@ function workspace(): BayWorkspace {
       status: "completed",
       conclusion: "success",
       output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE, dirty: false },
+    }),
+    checkpoint: () => ({
+      status: "completed",
+      conclusion: "success",
+      output: { headSha: HEAD, pushed: true, wip: false },
     }),
     deprovision: () => ({ status: "completed", conclusion: "success", output: {} }),
   }
@@ -61,7 +87,12 @@ async function createQueueApp(check?: StepRunner<PRShape, CheckResult>) {
   const bayJobs = createBayJobDefs(workspace())
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   return createYrd(queue(base), {
-    inject: { journal: createMemoryJournal(), id: ids(), clock: () => "2026-01-01T00:00:00.000Z" },
+    inject: {
+      journal: createMemoryJournal(),
+      id: ids(),
+      clock: () => "2026-01-01T00:00:00.000Z",
+      log: createLogger("test", [{ level: "silent" }]),
+    },
   })
 }
 
@@ -86,7 +117,12 @@ async function createIntegratingApp(
   const bayJobs = createBayJobDefs(workspace())
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   return createYrd(queue(base), {
-    inject: { journal: createMemoryJournal(), id: ids(), clock: () => "2026-01-01T00:00:00.000Z" },
+    inject: {
+      journal: createMemoryJournal(),
+      id: ids(),
+      clock: () => "2026-01-01T00:00:00.000Z",
+      log: createLogger("test", [{ level: "silent" }]),
+    },
   })
 }
 
@@ -115,7 +151,7 @@ describe("native needs-author lifecycle", () => {
 
     await expect(app.queue.run({}, runtime)).resolves.toMatchObject([{ status: "completed", conclusion: "failure" }])
 
-    expect(app.bays.pr(pr)).toMatchObject({
+    expect(prFacts(app.bays.pr(pr))).toMatchObject({
       id: pr,
       status: "needs-author",
       needsAuthor: {
@@ -127,8 +163,8 @@ describe("native needs-author lifecycle", () => {
         },
       },
     })
-    expect(app.bays.pr(pr)?.revisions[0]).toMatchObject({ submittedAt: "2026-01-01T00:00:00.000Z" })
-    expect(app.bays.pr(pr)?.revisions[0]?.terminal).toBeUndefined()
+    expect(prFacts(app.bays.pr(pr)).revisions[0]).toMatchObject({ submittedAt: "2026-01-01T00:00:00.000Z" })
+    expect(prFacts(app.bays.pr(pr)).revisions[0]?.terminal).toBeUndefined()
     const events = await Array.fromAsync(app.events())
     expect(events.map(({ name }) => name)).toContain("pr/needs-author")
     expect(events.map(({ name }) => name)).not.toContain("pr/rejected")
@@ -145,14 +181,14 @@ describe("native needs-author lifecycle", () => {
       resolveRevision: async (selector) => (selector === "main" ? BASE : HEAD),
       run: runtime,
     })
-    expect(correlated).toMatchObject({
+    expect(prFacts(correlated)).toMatchObject({
       id: pr,
       revision: 1,
       status: "needs-author",
       correlation,
       revisions: [{ revision: 1, correlation }],
     })
-    expect(correlated.revisions).toHaveLength(1)
+    expect(correlated.revs).toHaveLength(1)
 
     const eligibility = app.queue.eligibility(pr)
     expect(eligibility.runnable).toBe(false)
@@ -178,14 +214,14 @@ describe("native needs-author lifecycle", () => {
       baseSha: BASE,
     })
     expect(replay.events).toEqual([])
-    expect(app.bays.pr(pr)).toMatchObject({ id: pr, revision: 1, headSha: HEAD, status: "needs-author" })
+    expect(prFacts(app.bays.pr(pr))).toMatchObject({ id: pr, revision: 1, headSha: HEAD, status: "needs-author" })
     expect(await Array.fromAsync(app.events())).toEqual(beforeReplay)
 
     // A fix push advances this already-submitted PR in place and re-requests
     // checks. There is no withdraw/new-PR or submit-again ceremony.
     const fixedHead = "2".repeat(40)
     await app.bays.intake({ branch: "topic/authored-root", headSha: fixedHead, base: "main", baseSha: BASE })
-    expect(app.bays.pr(pr)).toMatchObject({ id: pr, revision: 2, headSha: fixedHead, status: "submitted" })
+    expect(prFacts(app.bays.pr(pr))).toMatchObject({ id: pr, revision: 2, headSha: fixedHead, status: "submitted" })
     expect(app.bays.checksRequested(pr)).toBe(true)
     expect(app.queue.eligibility(pr).checks.status).toBe("queued")
     expect(authorAttributionReceipt(app.queue.get("R1"), { pr, revision: 1, headSha: HEAD })).toMatchObject({
@@ -195,7 +231,8 @@ describe("native needs-author lifecycle", () => {
 
   it("does not reopen needs-author when same-head optional metadata, including a non-default base, is omitted", async () => {
     await using app = await createQueueApp(() => ({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: { code: "composition-invalid", message: "submitted composition cannot be built" },
     }))
     const composition = {
@@ -220,7 +257,7 @@ describe("native needs-author lifecycle", () => {
     })
     await app.bays.requestChecks({ pr: "PR1" })
     await app.queue.run({}, runtime)
-    expect(app.bays.pr("PR1")).toMatchObject({ revision: 1, status: "needs-author" })
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({ revision: 1, status: "needs-author" })
 
     const before = await Array.fromAsync(app.events())
     const omitted = await app.bays.intake({
@@ -235,7 +272,7 @@ describe("native needs-author lifecycle", () => {
 
     expect(omitted.events).toEqual([])
     expect(changedMetadata.events).toEqual([])
-    expect(app.bays.pr("PR1")).toMatchObject({
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
       revision: 1,
       headSha: HEAD,
       status: "needs-author",
@@ -258,7 +295,7 @@ describe("native needs-author lifecycle", () => {
       composition: changedComposition,
     })
     expect(authoredChange.events.map(({ name }) => name)).toEqual(["pr/pushed", "pr/submitted", "pr/checks-requested"])
-    expect(app.bays.pr("PR1")).toMatchObject({
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
       revision: 2,
       headSha: HEAD,
       status: "submitted",
@@ -266,9 +303,10 @@ describe("native needs-author lifecycle", () => {
     })
   })
 
-  it("keeps a same-head legacy rejection on its recorded non-default base", async () => {
+  it("keeps a same-head ordinary check failure on its recorded non-default base", async () => {
     await using app = await createQueueApp(() => ({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: { code: "check-failed", message: "opaque check failure" },
     }))
     await app.bays.submit({
@@ -279,20 +317,20 @@ describe("native needs-author lifecycle", () => {
     })
     await app.bays.requestChecks({ pr: "PR1" })
     await app.queue.run({}, runtime)
-    expect(app.bays.pr("PR1")).toMatchObject({
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
       revision: 1,
-      status: "rejected",
+      status: "submitted",
       base: "release/2.0",
       baseSha: BASE,
     })
 
     const before = await Array.fromAsync(app.events())
-    const replay = await app.bays.submit({ branch: "topic/legacy-replay", headSha: HEAD })
+    const replay = await app.bays.intake({ branch: "topic/legacy-replay", headSha: HEAD })
 
     expect(replay.events).toEqual([])
-    expect(app.bays.pr("PR1")).toMatchObject({
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
       revision: 1,
-      status: "rejected",
+      status: "submitted",
       base: "release/2.0",
       baseSha: BASE,
     })
@@ -360,14 +398,14 @@ describe("native needs-author lifecycle", () => {
     await using app = await createQueueApp(async () => {
       started.resolve()
       await release.promise
-      return { status: "passed", output: { checked: true } }
+      return { status: "completed", conclusion: "success", output: { checked: true } }
     })
     const active = await submitWithChecks(app, "topic/active")
     const running = app.queue.run({ prs: [active] }, runtime)
     await started.promise
 
     const duringRun = await submitWithChecks(app, "topic/during-run", "2".repeat(40))
-    expect(app.bays.pr(duringRun)).toMatchObject({ status: "submitted", branch: "topic/during-run" })
+    expect(prFacts(app.bays.pr(duringRun))).toMatchObject({ status: "submitted", branch: "topic/during-run" })
     expect(app.bays.checksRequested(duringRun)).toBe(true)
 
     release.resolve()
@@ -375,7 +413,7 @@ describe("native needs-author lifecycle", () => {
 
     await app.queue.pause({ base: "main", reason: "operator freeze", allowedPRs: [] })
     const duringPause = await submitWithChecks(app, "topic/during-pause", "3".repeat(40))
-    expect(app.bays.pr(duringPause)).toMatchObject({ status: "submitted", branch: "topic/during-pause" })
+    expect(prFacts(app.bays.pr(duringPause))).toMatchObject({ status: "submitted", branch: "topic/during-pause" })
     expect(app.bays.checksRequested(duringPause)).toBe(true)
 
     expect(app.queue.eligibility(duringRun).checks.status).toBe("queued")

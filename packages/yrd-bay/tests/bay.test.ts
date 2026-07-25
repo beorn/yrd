@@ -33,6 +33,7 @@ const HEAD_1 = "1".repeat(40)
 const HEAD_2 = "2".repeat(40)
 const BASE = "a".repeat(40)
 const runtime = { runner: "local", leaseMs: 60_000 }
+const silentLog = createLogger("test", [{ level: "silent" }])
 
 function ids(): () => string {
   let value = 0
@@ -61,7 +62,7 @@ async function createApp(
       journal: createMemoryJournal(),
       clock: () => "2026-01-01T00:00:00.000Z",
       id: ids(),
-      ...(log === undefined ? {} : { log }),
+      log: log ?? silentLog,
     },
   })
 }
@@ -88,7 +89,11 @@ function createWorkspaceHarness() {
     },
     checkpoint(input) {
       workspace.calls.push(`checkpoint:${input.bay}`)
-      return { status: "passed", output: { headSha: HEAD_2, pushed: true, wip: workspace.dirty } }
+      return {
+        status: "completed",
+        conclusion: "success",
+        output: { headSha: HEAD_2, pushed: true, wip: workspace.dirty },
+      }
     },
     deprovision(input): JobResult<DeprovisionedBay> {
       workspace.calls.push(`deprovision:${input.bay}`)
@@ -758,7 +763,7 @@ describe("withBays", () => {
   it("runs a pinned bay through refresh, PR revisions, withdrawal, and close", async () => {
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {})
     const error = vi.spyOn(console, "error").mockImplementation(() => {})
-    const { app, workspace } = await createHarness()
+    const { app, workspace } = await createHarness(createLogger("test"))
 
     const opened = await app.bays.open({ name: "fix-release", baseSha: BASE })
     expect(app.bays.state().byId.B1?.status).toBe("opening")
@@ -814,7 +819,7 @@ describe("withBays", () => {
     })
 
     workspace.dirty = true
-    const refused = await app.bays.close({ bay: "B1" })
+    const refused = await app.bays.close({ bay: "B1", withdraw: true })
     await finishJob(app, refused)
     expect(prFacts(app.bays.state().prs.PR1)).toMatchObject({
       state: "closed",
@@ -834,11 +839,11 @@ describe("withBays", () => {
 
     const withdrawn = await app.bays.close({ bay: "B1", withdraw: true })
     await finishJob(app, withdrawn)
-    expect(app.bays.pr("PR1")).toMatchObject({
-      status: "withdrawn",
-      revisions: [
-        { revision: 1, submittedAt: "2026-01-01T00:00:00.000Z" },
-        { revision: 2, terminal: { status: "withdrawn", at: "2026-01-01T00:00:00.000Z" } },
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
+      delivery: "withdrawn",
+      revs: [
+        { n: 1, submittedAt: "2026-01-01T00:00:00.000Z" },
+        { n: 2, terminal: { kind: "withdrawn", at: "2026-01-01T00:00:00.000Z" } },
       ],
     })
 
@@ -1906,12 +1911,11 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
 
     const drafted = await app.bays.submitSelection(branch, { ...directOptions(HEAD_2), draft: true })
 
-    expect(drafted).toMatchObject({
+    expect(prFacts(drafted)).toMatchObject({
       id: "PR1",
       branch,
-      status: "pushed",
-      revision: 1,
-      headSha: HEAD_2,
+      delivery: "pushed",
+      current: { n: 1, head: HEAD_2 },
     })
     expect(drafted.bay).toBeUndefined()
   })

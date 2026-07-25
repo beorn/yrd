@@ -86,7 +86,7 @@ describe("yrd bay run", { timeout: 30_000 }, () => {
     const prs = output(repo)
     expect(await yrd(repo, prs.io, "pr", "list", "--issue", CLAIM, "--json"), prs.stderr()).toBe(0)
     expect(JSON.parse(prs.stdout())).toMatchObject({
-      prs: [{ branch: BRANCH, issue: CLAIM, status: "pushed", revision: 2 }],
+      prs: [{ branch: BRANCH, issue: CLAIM, status: "pushed", revs: [{}, { n: 2 }] }],
     })
   })
 
@@ -114,7 +114,7 @@ describe("yrd bay run", { timeout: 30_000 }, () => {
     const prs = output(repo)
     expect(await yrd(repo, prs.io, "pr", "list", "--issue", CLAIM, "--json"), prs.stderr()).toBe(0)
     expect(JSON.parse(prs.stdout())).toMatchObject({
-      prs: [{ branch, issue: CLAIM, status: "pushed", revision: 2 }],
+      prs: [{ branch, issue: CLAIM, status: "pushed", revs: [{}, { n: 2 }] }],
     })
   })
 

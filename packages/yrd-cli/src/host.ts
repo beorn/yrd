@@ -25,7 +25,7 @@ import {
   type ContestGit,
   type ContestRunnerDef,
 } from "@yrd/contest"
-import { createYrd, createYrdDef, failureFact, pipe, raiseFailure, type Journal } from "@yrd/core"
+import { createFailure, createYrd, createYrdDef, failureFact, pipe, raiseFailure, type Journal } from "@yrd/core"
 import { defineConfig, selectFlow } from "@yrd/config"
 import { localRunner, withJobs } from "@yrd/job"
 import {
@@ -252,6 +252,8 @@ function candidateStep(
   name: string,
   config: YrdStepConfig,
   revision: string,
+  candidatePool: CandidatePool | undefined,
+  refuse: YrdRefuseConfig | undefined,
   kind: "check" | "action",
 ): RuntimeStep {
   return eraseStep(
@@ -276,6 +278,7 @@ function candidateStep(
         ...(config.environmentPassthrough === undefined
           ? {}
           : { environmentPassthrough: config.environmentPassthrough }),
+        ...(candidatePool === undefined ? {} : { candidatePool }),
         ...(refuse === undefined ? {} : { refuse }),
       }),
       {
@@ -453,6 +456,8 @@ function configuredQueueSteps(
         name,
         config,
         revision,
+        options.candidatePool,
+        options.config.refuse,
         descriptor.kind,
       )
     }

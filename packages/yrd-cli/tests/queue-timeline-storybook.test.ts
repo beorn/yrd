@@ -500,7 +500,7 @@ describe("queue timeline storybook", () => {
           })
           // Run identity + STATUS/OUTCOME live in the title row now (item a).
           expect(term.screen.getText(), name).toContain("RUN main#4")
-          expect(term.screen.getText(), name).toContain("completed, integrated")
+          expect(term.screen.getText(), name).toContain("passed, integrated")
           // The integration proof (COMMIT/PARENTS) lives in the merge-step tab
           // panel now. At the 24-row full tier the PR-scoped header + run region
           // fill the pane, leaving one content row in the tab panel, so the
@@ -773,9 +773,9 @@ describe("queue timeline storybook", () => {
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("pr#1.1")
       // Timeline rows are bare now (user directive 2026-07-21): no leading `- `.
-      expect(handle.text).toMatch(/\d{2}:\d{2} submitted by @cto/u)
+      expect(handle.text).toMatch(/\d{2}:\d{2} r1 submitted by @cto/u)
       // Pending renders as `todo` in the detail title fallback (item 8).
-      expect(handle.text).toContain("○ todo")
+      expect(handle.text).toContain("○ queued")
       expect(handle.text).toContain("Prepare release notes")
       expect(handle.text).toContain("pr#1.1 @yrd/core/21120-pr-state-notifications")
       expect(handle.text).toContain("topic/pr1")

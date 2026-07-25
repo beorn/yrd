@@ -439,7 +439,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           // Content-addressed equality proves that origin already has this exact authored checkpoint.
           await git.run(input.path, ["update-ref", trackingRef, remoteHead, trackedHead ?? "0".repeat(headSha.length)])
           await git.run(input.path, ["branch", "--set-upstream-to", `origin/${input.branch}`, input.branch])
-          return { status: "passed", output: { headSha, pushed: true, wip } }
+          return { status: "completed", conclusion: "success", output: { headSha, pushed: true, wip } }
         }
         if (
           (trackedHead === undefined && remoteHead !== undefined) ||
@@ -451,7 +451,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           )
         }
         await git.run(input.path, ["push", "--set-upstream", "origin", `HEAD:refs/heads/${input.branch}`])
-        return { status: "passed", output: { headSha, pushed: true, wip } }
+        return { status: "completed", conclusion: "success", output: { headSha, pushed: true, wip } }
       } catch (cause) {
         return failure("checkpoint-failed", cause)
       }
@@ -464,7 +464,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           // recorded. Closing that lifecycle is an idempotent no-op: there is
           // no authored head to preserve and therefore no archive proof to
           // invent.
-          if (input.headSha === undefined) return { status: "passed", output: {} }
+          if (input.headSha === undefined) return { status: "completed", conclusion: "success", output: {} }
           return {
             status: "completed",
             conclusion: "success",
@@ -487,7 +487,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
         }
         const headSha = await git.commit(input.path, "HEAD")
         const preservedRef = await preserveClosedBay(git, repo, input.bay, headSha)
-        await git.run(repo, ["worktree", "remove", "--force", input.path])
+        await git.run(repo, ["worktree", "remove", "--force", input.path], false, GIT_CLEANUP_TIMEOUT_MS)
         return { status: "completed", conclusion: "success", output: { headSha, preservedRef } }
       } catch (cause) {
         return failure("deprovision-failed", cause)

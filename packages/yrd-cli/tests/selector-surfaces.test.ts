@@ -26,6 +26,7 @@ import {
   type ContestGit,
   type ContestRunnerDef,
 } from "@yrd/contest"
+import { createLogger } from "loggily"
 
 const HEAD_SHA = "1".repeat(40)
 const BASE_SHA = "a".repeat(40)
@@ -48,6 +49,11 @@ function workspace() {
       status: "completed" as const,
       conclusion: "success" as const,
       output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD_SHA, baseSha: BASE_SHA, dirty: false },
+    }),
+    checkpoint: () => ({
+      status: "completed" as const,
+      conclusion: "success" as const,
+      output: { headSha: HEAD_SHA, pushed: true as const, wip: false },
     }),
     deprovision: () => ({ status: "completed" as const, conclusion: "success" as const, output: {} }),
   }
@@ -119,7 +125,12 @@ async function createCliApp(overrides: { check?: () => JobResult<JsonValue> } = 
     withBays({ jobs: bayJobs, defaultBase: "main", resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }) }),
   )
   return createYrd(contests(queue(base)), {
-    inject: { journal: createMemoryJournal(), clock: () => "2026-07-09T12:00:00.000Z", id: ids() },
+    inject: {
+      journal: createMemoryJournal(),
+      clock: () => "2026-07-09T12:00:00.000Z",
+      id: ids(),
+      log: createLogger("test", [{ level: "silent" }]),
+    },
   })
 }
 

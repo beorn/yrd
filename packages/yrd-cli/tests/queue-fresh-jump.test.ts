@@ -5,6 +5,7 @@
 import { createElement } from "react"
 import { createRenderer, waitFor } from "silvery/test"
 import { describe, expect, it } from "vitest"
+import { currentPRRev } from "@yrd/bay"
 import { fixturePr, fixtureResult, fixtureRun, fixtureSnapshot } from "../dev/queue-timeline-fixtures.ts"
 import type { QueueWatchSnapshot } from "../src/watch-pane.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
@@ -76,17 +77,18 @@ function finishItem(item: FixtureItem, finishedMinute: number): FixtureItem {
   const finishedAt = clock(finishedMinute)
   const submittedAt = item.pr.submittedAt ?? clock(finishedMinute - 2)
   const runId = item.run.id
+  const revision = currentPRRev(item.pr)
   const pr = fixturePr(item.pr.id, "integrated", submittedAt, item.pr.name ?? `Finished ${item.pr.id}`, {
-    headSha: item.pr.headSha,
+    headSha: revision.head,
     terminalRun: runId,
     integratedAt: finishedAt,
     integration: { commit: INTEGRATED_SHA, baseSha: BASE_SHA },
     revisions: [
       {
-        revision: item.pr.revision,
-        headSha: item.pr.headSha,
-        base: item.pr.base,
-        baseSha: item.pr.baseSha,
+        revision: revision.n,
+        headSha: revision.head,
+        base: revision.base,
+        baseSha: revision.baseSha,
         pushedAt: submittedAt,
         submittedAt,
         terminal: { status: "integrated", at: finishedAt, run: runId },
