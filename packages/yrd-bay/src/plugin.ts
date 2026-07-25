@@ -617,7 +617,7 @@ export function createBays(
     const resolved = await target(args.base, args.baseSha)
     return actions.open({ ...args, ...resolved })
   }
-  const intake = async (args: IntakePRArgs): Promise<CommandResult> => {
+  const intake = async (args: IntakePRArgs, preserveRecordedBase = false): Promise<CommandResult> => {
     const selectedPR = (): DeepReadonly<PR> | undefined => {
       const snapshot = state()
       const bay = args.bay === undefined ? undefined : resolveBay(snapshot, args.bay)
@@ -644,10 +644,16 @@ export function createBays(
       async () => {
         const bay = args.bay === undefined ? undefined : resolveBay(state(), args.bay)
         const recorded = selectedPR()
-        const resolved = await target(
-          args.base ?? bay?.base ?? recorded?.base,
-          args.baseSha ?? bay?.baseSha ?? recorded?.baseSha,
-        )
+        const requestedBase = args.base ?? bay?.base ?? recorded?.base
+        const recordedBaseSha = args.baseSha ?? bay?.baseSha ?? recorded?.baseSha
+        // Updating a draft from its active Bay is a ledger write for the
+        // already-materialized branch, not queue admission. Preserve the Bay's
+        // recorded base pin even if the named base advanced while provisioning;
+        // non-draft revision intake still re-resolves and enforces queue-base-moved.
+        const resolved =
+          preserveRecordedBase && recordedBaseSha !== undefined
+            ? { base: baseIdentity(requestedBase ?? options.defaultBase), baseSha: recordedBaseSha }
+            : await target(requestedBase, recordedBaseSha)
         return actions.intake({ ...args, ...resolved })
       },
     )
@@ -804,13 +810,16 @@ export function createBays(
       pr = prForBay(snapshot, bay.id) ?? resolvePR(snapshot, bay.branch)
       const composition = requestedComposition ?? pr?.composition
       if (pr === undefined || pr.headSha !== bay.headSha || !sameComposition(composition, pr.composition)) {
-        await intake({
-          bay: bay.id,
-          headSha: bay.headSha,
-          ...(bay.baseSha === undefined ? {} : { baseSha: bay.baseSha }),
-          ...(options.issue === undefined ? {} : { issue: options.issue }),
-          ...(composition === undefined ? {} : { composition }),
-        })
+        await intake(
+          {
+            bay: bay.id,
+            headSha: bay.headSha,
+            ...(bay.baseSha === undefined ? {} : { baseSha: bay.baseSha }),
+            ...(options.issue === undefined ? {} : { issue: options.issue }),
+            ...(composition === undefined ? {} : { composition }),
+          },
+          options.draft === true,
+        )
         pr = prForBay(state(), bay.id)
       }
     }

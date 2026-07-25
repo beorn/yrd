@@ -35,12 +35,22 @@ function ids(): () => string {
   return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
 }
 
-async function createApp(workspace: BayWorkspace, log?: ConditionalLogger, defaultActor?: string) {
+async function createApp(
+  workspace: BayWorkspace,
+  log?: ConditionalLogger,
+  defaultActor?: string,
+  resolveBaseSha?: () => string,
+) {
   const jobs = createBayJobDefs(workspace)
   const definition = pipe(
     createYrdDef(),
     withJobs({ definitions: jobs }),
-    withBays({ jobs, defaultBase: "main", ...(defaultActor === undefined ? {} : { defaultActor }) }),
+    withBays({
+      jobs,
+      defaultBase: "main",
+      ...(defaultActor === undefined ? {} : { defaultActor }),
+      ...(resolveBaseSha === undefined ? {} : { resolveBase: (base: string) => ({ base, baseSha: resolveBaseSha() }) }),
+    }),
   )
   return createYrd(definition, {
     inject: {
@@ -204,6 +214,45 @@ describe("withBays", () => {
       status: "submitted",
     })
     await app.close()
+  })
+
+  it("revises an active draft at its recorded base when the queue moves after the Bay opens", async () => {
+    const harness = createWorkspaceHarness()
+    let queueBase = BASE
+    await using app = await createApp(harness.adapter, undefined, undefined, () => queueBase)
+    await finishJob(app, await app.bays.open({ name: "moving-base", issue: "@km/test/moving-base" }))
+    await app.bays.intake({ bay: "B1", headSha: HEAD_1, baseSha: BASE })
+
+    queueBase = "b".repeat(40)
+    const drafted = await app.bays.submitSelection("B1", {
+      draft: true,
+      resolveRevision: async () => undefined,
+      run: runtime,
+    })
+
+    expect(drafted).toMatchObject({
+      id: "PR1",
+      status: "pushed",
+      revision: 2,
+      headSha: HEAD_2,
+      baseSha: BASE,
+    })
+  })
+
+  it("still refuses non-draft revision intake after the queue base moves", async () => {
+    const harness = createWorkspaceHarness()
+    let queueBase = BASE
+    await using app = await createApp(harness.adapter, undefined, undefined, () => queueBase)
+    await finishJob(app, await app.bays.open({ name: "strict-moving-base" }))
+    await app.bays.intake({ bay: "B1", headSha: HEAD_1, baseSha: BASE })
+
+    queueBase = "b".repeat(40)
+    await expect(
+      app.bays.submitSelection("B1", {
+        resolveRevision: async () => undefined,
+        run: runtime,
+      }),
+    ).rejects.toMatchObject({ failure: { kind: "refusal", code: "queue-base-moved" } })
   })
 
   it("re-resolves a moved branch tip when re-submitting a bay-less pushed (draft) PR", async () => {

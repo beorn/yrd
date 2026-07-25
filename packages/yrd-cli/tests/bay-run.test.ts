@@ -74,20 +74,72 @@ describe("yrd bay run", { timeout: 30_000 }, () => {
   it("reopens a closed claim and updates the same draft on a later run", async () => {
     const { repo } = await repository()
     const clean = output(repo)
-    expect(await yrd(repo, clean.io, "bay", "run", CLAIM, "--", "true"), clean.stderr()).toBe(0)
+    expect(
+      await yrd(repo, clean.io, "bay", "run", CLAIM, "--", "sh", "-c", "printf initial > scratch.txt"),
+      clean.stderr(),
+    ).toBe(0)
+
+    await git(repo, "switch", "-qC", BRANCH, `origin/${BRANCH}`)
+    await writeFile(join(repo, "scratch.txt"), "external\n")
+    await git(repo, "add", "scratch.txt")
+    await git(repo, "commit", "-qm", "advance branch outside Yrd")
+    await git(repo, "push", "-q", "origin", BRANCH)
+    const previousHead = await git(repo, "rev-parse", "HEAD")
+    await git(repo, "switch", "-q", "main")
+    await git(repo, "branch", "-D", BRANCH)
+
+    const previousBase = await git(repo, "rev-parse", "main")
+    const movedBase = await git(repo, "commit-tree", `${previousBase}^{tree}`, "-p", previousBase, "-m", "move main")
+    const postCheckout = join(repo, ".git", "hooks", "post-checkout")
+    await writeFile(postCheckout, `#!/bin/sh\ngit update-ref refs/heads/main ${movedBase}\n`)
+    await chmod(postCheckout, 0o755)
 
     const dirty = output(repo)
     expect(
-      await yrd(repo, dirty.io, "bay", "run", CLAIM, "--", "sh", "-c", "printf later > later.txt"),
+      await yrd(repo, dirty.io, "bay", "run", CLAIM, "--", "sh", "-c", "printf later > scratch.txt"),
       dirty.stderr(),
     ).toBe(0)
 
-    expect(await git(repo, "log", `refs/remotes/origin/${BRANCH}`, "-1", "--format=%s")).toMatch(/^wip:/u)
+    const currentHead = await git(repo, "rev-parse", `refs/remotes/origin/${BRANCH}`)
+    expect(currentHead).not.toBe(previousHead)
+    expect(await git(repo, "show", `${currentHead}:scratch.txt`)).toBe("later")
     const prs = output(repo)
     expect(await yrd(repo, prs.io, "pr", "list", "--issue", CLAIM, "--json"), prs.stderr()).toBe(0)
     expect(JSON.parse(prs.stdout())).toMatchObject({
-      prs: [{ branch: BRANCH, issue: CLAIM, status: "pushed", revision: 2 }],
+      prs: [{ id: "PR1", branch: BRANCH, issue: CLAIM, status: "pushed" }],
     })
+  })
+
+  it("fails loudly without an archive receipt when dirty work cannot be committed", async () => {
+    const { repo } = await repository()
+    const initial = output(repo)
+    expect(
+      await yrd(repo, initial.io, "bay", "run", CLAIM, "--", "sh", "-c", "printf initial > scratch.txt"),
+      initial.stderr(),
+    ).toBe(0)
+    const previousHead = await git(repo, "rev-parse", `refs/remotes/origin/${BRANCH}`)
+
+    const preCommit = join(repo, ".git", "hooks", "pre-commit")
+    await writeFile(preCommit, "#!/bin/sh\nexit 1\n")
+    await chmod(preCommit, 0o755)
+
+    const dirty = output(repo)
+    const exitCode = await yrd(repo, dirty.io, "bay", "run", CLAIM, "--", "sh", "-c", "printf later > scratch.txt")
+    expect(exitCode).not.toBe(0)
+    expect(dirty.stderr()).toMatch(/commit|checkpoint/iu)
+    expect(await git(repo, "rev-parse", `refs/remotes/origin/${BRANCH}`)).toBe(previousHead)
+
+    const bays = output(repo)
+    expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
+    const activeBay = (
+      JSON.parse(bays.stdout()) as {
+        bays: readonly { id: string; issue?: string; status: string }[]
+      }
+    ).bays.find((bay) => bay.issue === CLAIM && bay.status !== "closed")
+    expect(activeBay).toMatchObject({ status: "active" })
+    expect(await git(repo, "for-each-ref", "--format=%(refname)", "refs/yrd/closed")).not.toContain(
+      `refs/yrd/closed/${activeBay?.id}`,
+    )
   })
 
   it("uses the branch of an existing claim draft instead of minting a second PR", async () => {
