@@ -1807,7 +1807,7 @@ async function bayStatusCommand(
   selectors: readonly string[],
   options: { json?: boolean },
   io: YrdCliIO,
-): Promise<number> {
+): Promise<YrdCliExitCode> {
   const cwd = io.cwd ?? process.cwd()
   const bays =
     selectors.length === 0
@@ -1837,7 +1837,7 @@ async function bayPruneCommand(
   app: YrdCliApp,
   options: { json?: boolean; apply?: boolean },
   io: YrdCliIO,
-): Promise<number> {
+): Promise<YrdCliExitCode> {
   const cwd = io.cwd ?? process.cwd()
   const open = app.bays.list().filter((bay) => bay.status !== "closed")
   const reports = open.map((bay) => classifyBayStatus(gatherBayStatusFacts(app, bay, cwd)))
