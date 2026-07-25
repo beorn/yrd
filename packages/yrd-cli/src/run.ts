@@ -42,6 +42,7 @@ import {
   Queues,
   resolveSubmoduleOrigin,
   type PREligibility,
+  type QueueAuditFinding,
   type QueueSummary,
   type Run,
 } from "@yrd/queue"
@@ -3787,6 +3788,7 @@ async function queuePauses(app: YrdCliApp, base: string | undefined, io: YrdCliI
 
 async function recoverQueue(
   app: YrdCliApp,
+  services: YrdCliServices,
   options: JsonOption & Readonly<{ reason?: string; runner?: string }>,
   io: YrdCliIO,
 ): Promise<void> {
@@ -3801,13 +3803,22 @@ async function recoverQueue(
     ...(options.reason === undefined ? {} : { reason: options.reason }),
     ...(options.runner === undefined ? {} : { runner: options.runner }),
   })
-  const findings = app.queue.audit().findings
+  const findings = await queueAuditFindings(app, services)
   await printResult(
     io,
     jsonEnabled(options),
     { command: "queue.recover", results: runs.map(projectQueueRunTaskStatus) },
     createElement(QueueRecoveryView, { runs, findings }),
   )
+}
+
+async function queueAuditFindings(
+  app: Pick<YrdCliApp, "queue">,
+  services: YrdCliServices,
+): Promise<readonly QueueAuditFinding[]> {
+  const core = app.queue.audit()
+  const environment = await services.queue?.auditEnvironment?.()
+  return [...core.findings, ...(environment?.findings ?? [])]
 }
 
 async function migrateTerminalAssociations(
@@ -4853,10 +4864,8 @@ async function queueAudit(
   options: JsonOption,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
-  const core = app.queue.audit()
-  const environment = await services.queue?.auditEnvironment?.()
   const result = {
-    findings: [...core.findings, ...(environment?.findings ?? [])].map((finding) => ({
+    findings: (await queueAuditFindings(app, services)).map((finding) => ({
       ...finding,
       ...actionableFailure(finding),
     })),
@@ -6306,7 +6315,7 @@ function buildProgram(
     .option("--reason <text>", "record the recovery reason")
     .option("--runner <id>", "force-settle this known-dead runner's leases now, even if unexpired")
     .option("--json", "emit stable JSON")
-    .action(async (options) => recoverQueue(installed(), options, io))
+    .action(async (options) => recoverQueue(installed(), installedServices(), options, io))
   queue
     .command("run [selector...]")
     .description("drain the queue — resident follow by default; --once or PR selectors for a single pass")

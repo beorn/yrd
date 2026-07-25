@@ -4268,6 +4268,28 @@ describe("runYrd", () => {
     expect(recovery.stdout()).toContain("requires step 'merge' revision 'merge-v1', installed 'merge-v2'")
   })
 
+  it("names environment audit blockers instead of reporting queue recovery idle", async () => {
+    const app = await createApp()
+    const services: YrdCliServices = {
+      queue: {
+        auditEnvironment: async () => ({
+          findings: [
+            {
+              code: "config-drift",
+              message: "queue base 'main' installed baseline is stale",
+            },
+          ],
+        }),
+      },
+    }
+    const recovery = outputIO()
+
+    expect(await runYrd(app, yrd("queue", "recover"), recovery.io, services), recovery.stderr()).toBe(0)
+    expect(recovery.stdout()).not.toContain("Queue idle")
+    expect(recovery.stdout()).toContain("config-drift")
+    expect(recovery.stdout()).toContain("queue base 'main' installed baseline is stale")
+  })
+
   it("force-recovers an unexpired ghost from a named dead runner via queue recover --runner (D2)", async () => {
     const app = await createApp({ waitingCheck: true })
     await openAndSubmit(app)
