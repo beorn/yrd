@@ -1994,7 +1994,8 @@ notify:
         stderr: () => undefined,
       }),
     ).toBe(0)
-    expect(JSON.parse(listed).prs[0].checkRequests).toHaveLength(1)
+    const listedPrs = JSON.parse(listed) as { prs: Array<{ checkRequests: unknown[] }> }
+    expect(listedPrs.prs[0]?.checkRequests).toHaveLength(1)
   })
 
   it("keeps a draft pushed when pr ready refuses an unpublished changed submodule pin", async () => {
