@@ -25,8 +25,10 @@ import {
   configuredCommandStep,
   configuredMergeStep,
   createGitPRRecutter,
+  gitCandidatePreparer,
   gitCheckStep,
   gitMergeStep,
+  PRSnapshotSchema,
   withQueue,
   withMerge,
   withStep,
@@ -444,6 +446,109 @@ function expectedCandidateRef(run: string, step: string, job: string, attempt: n
 }
 
 describe("Queue command adapters", () => {
+  it("reports an absent Candidate ref as a write refusal with Git evidence", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const baseSha = await git(repo, ["rev-parse", "main"])
+    await using process = createProcess()
+    const refusingProcess: Pick<Process, "run"> = {
+      async run(request) {
+        if (
+          request.argv[0] === "git" &&
+          request.argv[3] === "update-ref" &&
+          request.argv[5] === "refs/yrd/candidates/C1"
+        ) {
+          return {
+            exitCode: 1,
+            signal: null,
+            stdout: "",
+            stderr: "fatal: cannot lock ref 'refs/yrd/candidates/C1': transient lock failure",
+            durationMs: 1,
+            timedOut: false,
+            verdict: "EXITED",
+          }
+        }
+        return process.run(request)
+      },
+    }
+    const preparer = gitCandidatePreparer({ inject: { process: refusingProcess }, repo })
+    const pr = PRSnapshotSchema.parse({
+      id: "PR1",
+      branch: "issue/feature",
+      base: "main",
+      revision: 1,
+      headSha: featureSha,
+      baseSha,
+    })
+
+    await expect(
+      preparer({
+        id: "C1",
+        queueId: "main",
+        baseSha,
+        revs: [{ pr: pr.id, n: pr.revision, head: pr.headSha }],
+        prs: [pr],
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "infrastructure",
+        code: "candidate-ref-refused",
+        message: expect.stringContaining(
+          "Candidate ref 'refs/yrd/candidates/C1' could not be created: fatal: cannot lock ref",
+        ),
+      },
+    })
+    expect(await git(repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates/C1"])).toBe("")
+  })
+
+  it("keeps a genuinely occupied Candidate ref distinct from an absent write refusal", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const baseSha = await git(repo, ["rev-parse", "main"])
+    await using process = createProcess()
+    let raced = false
+    const racingProcess: Pick<Process, "run"> = {
+      async run(request) {
+        if (
+          !raced &&
+          request.argv[0] === "git" &&
+          request.argv[3] === "update-ref" &&
+          request.argv[5] === "refs/yrd/candidates/C1"
+        ) {
+          raced = true
+          await git(repo, ["update-ref", "refs/yrd/candidates/C1", baseSha])
+        }
+        return process.run(request)
+      },
+    }
+    const preparer = gitCandidatePreparer({ inject: { process: racingProcess }, repo })
+    const pr = PRSnapshotSchema.parse({
+      id: "PR1",
+      branch: "issue/feature",
+      base: "main",
+      revision: 1,
+      headSha: featureSha,
+      baseSha,
+    })
+
+    await expect(
+      preparer({
+        id: "C1",
+        queueId: "main",
+        baseSha,
+        revs: [{ pr: pr.id, n: pr.revision, head: pr.headSha }],
+        prs: [pr],
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "infrastructure",
+        code: "candidate-ref-refused",
+        // foreign-holder: stable sentence; self-retry uses a different shape
+        message: "yrd: Candidate ref 'refs/yrd/candidates/C1' is already occupied by different evidence",
+      },
+    })
+    expect(raced).toBe(true)
+    expect(await git(repo, ["rev-parse", "refs/yrd/candidates/C1"])).toBe(baseSha)
+  })
+
   it("recuts one direct payload as an exact direct child and refuses overlapping authority", async () => {
     const { repo, candidate } = await repository("candidate")
     const oldBaseSha = await git(repo, ["rev-parse", "main"])
