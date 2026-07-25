@@ -1935,12 +1935,25 @@ export function gitCandidatePreparer(options: GitCandidatePreparerOptions): Cand
         ["update-ref", "--create-reflog", ref, candidate.output.sha, "0".repeat(candidate.output.sha.length)],
         true,
       )
-      if (pinned.code !== 0 && (await git.optionalCommit(repo, ref)) !== candidate.output.sha) {
-        throw createFailure({
-          kind: "infrastructure",
-          code: "candidate-ref-refused",
-          message: `yrd: Candidate ref '${ref}' is already occupied by different evidence`,
-        })
+      if (pinned.code !== 0) {
+        const published = await git.optionalCommit(repo, ref)
+        // A concurrent writer publishing the same immutable evidence is
+        // equivalent to this compare-and-create succeeding.
+        if (published === undefined) {
+          const detail = pinned.stderr || pinned.stdout || `git update-ref exited ${pinned.code}`
+          throw createFailure({
+            kind: "infrastructure",
+            code: "candidate-ref-refused",
+            message: `yrd: Candidate ref '${ref}' could not be created: ${detail}`,
+          })
+        }
+        if (published !== candidate.output.sha) {
+          throw createFailure({
+            kind: "infrastructure",
+            code: "candidate-ref-refused",
+            message: `yrd: Candidate ref '${ref}' is already occupied by different evidence`,
+          })
+        }
       }
       return {
         id: input.id,

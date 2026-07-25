@@ -6,10 +6,10 @@
 import { describe, expect, it } from "vitest"
 import { createLogger, type Event as LogEvent } from "loggily"
 import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
-import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
+import { createFailure, createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
-import { withMerge, withStep, withQueue, type StepExecution } from "@yrd/queue"
+import { withMerge, withStep, withQueue, type CandidatePreparer, type StepExecution } from "@yrd/queue"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -55,6 +55,7 @@ function mergeDeployPlugin(
     conclusion: "success",
     output: { commit: MERGED, baseSha: BASE },
   }),
+  prepareCandidate?: CandidatePreparer,
 ) {
   const merge = withMerge(mergeRun, { revision: "merge-v1" })
   const deploy = withStep(
@@ -66,7 +67,12 @@ function mergeDeployPlugin(
     }),
     { revision: deployRevision, kind: "action", output: DeployResultSchema },
   )
-  return withQueue({ steps: [merge, deploy] as const, batch: false, defaultSteps: ["merge", "deploy"] })
+  return withQueue({
+    steps: [merge, deploy] as const,
+    batch: false,
+    defaultSteps: ["merge", "deploy"],
+    ...(prepareCandidate === undefined ? {} : { prepareCandidate }),
+  })
 }
 
 async function createApp(
@@ -75,9 +81,10 @@ async function createApp(
   id: () => string = ids(),
   log?: ReturnType<typeof createLogger>,
   mergeRun?: () => JobResult<{ commit: string; baseSha: string }>,
+  prepareCandidate?: CandidatePreparer,
 ) {
   const bayJobs = createBayJobDefs(workspace())
-  const queue = mergeDeployPlugin(deployRevision, mergeRun)
+  const queue = mergeDeployPlugin(deployRevision, mergeRun, prepareCandidate)
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   return createYrd(queue(base), {
     inject: {
@@ -113,6 +120,74 @@ async function seedStuckRun(deployRevision: string, journal: ReturnType<typeof c
 }
 
 describe("compose candidate isolation — one poisoned candidate never aborts the whole selectorless drain", () => {
+  it("skips an infrastructure-refused Candidate preparation and still integrates its healthy peer", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    let poisonedId = ""
+    const prepareCandidate: CandidatePreparer = (input) => {
+      if (input.prs.some((pr) => pr.id === poisonedId)) {
+        throw createFailure({
+          kind: "infrastructure",
+          code: "candidate-ref-refused",
+          message: `yrd: Candidate ref 'refs/yrd/candidates/${input.id}' could not be created`,
+        })
+      }
+      const { prs: _prs, ...candidate } = input
+      return {
+        ...candidate,
+        sha: MERGED,
+        ref: `refs/yrd/candidates/${input.id}`,
+        mergeability: "mergeable",
+      }
+    }
+    await using app = await createApp("deploy-v1", createMemoryJournal(), ids(), log, undefined, prepareCandidate)
+    const poisoned = await submitBranch(app, "issue/ref-write-refused")
+    poisonedId = poisoned.id
+    const healthy = await submitBranch(app, "issue/healthy-peer")
+
+    const drained = await app.queue.run({}, runtime)
+
+    expect(drained).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          conclusion: "success",
+          prs: [expect.objectContaining({ id: healthy.id })],
+        }),
+      ]),
+    )
+    expect(app.state().bays.prs[poisoned.id]?.integration).toBeUndefined()
+    const skip = events.find(
+      (event): event is Extract<LogEvent, { kind: "log" }> =>
+        event.kind === "log" &&
+        event.level === "warn" &&
+        event.namespace === "yrd:queue" &&
+        event.props?.action === "compose-candidate-skip" &&
+        event.props?.pr === poisoned.id,
+    )
+    expect(skip?.props).toMatchObject({
+      action: "compose-candidate-skip",
+      code: "candidate-ref-refused",
+      pr: poisoned.id,
+    })
+    log.end()
+  })
+
+  it("keeps the same Candidate preparation refusal loud when explicitly targeted", async () => {
+    const prepareCandidate: CandidatePreparer = (input) => {
+      throw createFailure({
+        kind: "infrastructure",
+        code: "candidate-ref-refused",
+        message: `yrd: Candidate ref 'refs/yrd/candidates/${input.id}' could not be created`,
+      })
+    }
+    await using app = await createApp("deploy-v1", createMemoryJournal(), ids(), undefined, undefined, prepareCandidate)
+    const poisoned = await submitBranch(app, "issue/ref-write-refused")
+
+    await expect(app.queue.run({ prs: [poisoned.id] }, runtime)).rejects.toMatchObject({
+      failure: { kind: "infrastructure", code: "candidate-ref-refused" },
+    })
+  })
+
   it("ejects a Candidate whose submit authority was consumed and still integrates its healthy peer", async () => {
     let mergeCalls = 0
     const events: LogEvent[] = []

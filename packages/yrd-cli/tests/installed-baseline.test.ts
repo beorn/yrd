@@ -298,6 +298,35 @@ async function queueRepository(check: string): Promise<string> {
 }
 
 describe("host installed baseline", () => {
+  it("replaces a foreign-runtime baseline with this resident's real configured descriptors", async () => {
+    const repo = await queueRepository("true")
+    const resident = await createYrdHost({ cwd: repo })
+    try {
+      await resident.services.queue?.provision?.("main")
+      const current = (await readInstalledBaselines(resident.repository.stateDir)).main
+      if (current === undefined) throw new Error("expected provisioned main baseline")
+      await writeInstalledBaseline(resident.repository.stateDir, {
+        ...current,
+        installedAt: "2026-07-24T00:00:00.000Z",
+        steps: current.steps.map((installed, index) => ({
+          ...installed,
+          revision: `${index}`.repeat(64),
+        })),
+      })
+
+      const before = await resident.services.queue?.auditEnvironment?.()
+      expect(before?.findings).toMatchObject([{ code: "config-drift" }])
+
+      await requireFreshInstalledBaseline(resident.services, { reloadInPlace: { base: "main" } })
+
+      expect(await resident.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+      const reloaded = (await readInstalledBaselines(resident.repository.stateDir)).main
+      expect(reloaded?.steps).toEqual(current.steps)
+    } finally {
+      await resident.close()
+    }
+  })
+
   it("provision persists the baseline, audit stays clean, config change drifts, deinit migrates", async () => {
     const repo = await queueRepository("true")
     const host = await createYrdHost({ cwd: repo })
