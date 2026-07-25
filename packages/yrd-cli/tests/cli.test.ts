@@ -3016,8 +3016,9 @@ describe("runYrd", () => {
 
       const json = outputIO()
       expect(await runYrd(app, yrd("bay", "list", "--json"), json.io), json.stderr()).toBe(0)
-      expect(JSON.parse(json.stdout()).bays[0]).toMatchObject({ by: "@dev/friendly" })
-      expect(JSON.parse(json.stdout()).bays[0]).not.toHaveProperty(retiredRoleNoun)
+      const listed = JSON.parse(json.stdout()) as Readonly<{ bays: readonly Record<string, unknown>[] }>
+      expect(listed.bays[0]).toMatchObject({ by: "@dev/friendly" })
+      expect(listed.bays[0]).not.toHaveProperty(retiredRoleNoun)
     } finally {
       vi.unstubAllEnvs()
     }
