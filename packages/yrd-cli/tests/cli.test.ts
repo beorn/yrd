@@ -4406,6 +4406,25 @@ describe("runYrd", () => {
     expect(app.queue.status("main").pause).toBeUndefined()
   })
 
+  it("refuses to read-fall-back when a base is named without --reason", async () => {
+    // Naming a base is an unambiguous intent to pause THAT queue. Falling back
+    // to the listing read printed "No paused queues." and exited 0, which reads
+    // as success — an operator froze the queue for a state cutover, believed it
+    // was paused, and landings invalidated the sync underneath them. The bare
+    // `queue pause` listing (no base) stays a read; naming a base must not.
+    const app = await createApp()
+    const named = outputIO()
+    expect(await runYrd(app, yrd("queue", "pause", "main"), named.io)).toBe(2)
+    expect(named.stderr()).toContain("--reason")
+    expect(named.stdout()).not.toContain("No paused queues.")
+    expect(app.queue.status("main").pause).toBeUndefined()
+
+    // The no-base listing read is unchanged.
+    const listing = outputIO()
+    expect(await runYrd(app, yrd("queue", "pause", "--json"), listing.io)).toBe(0)
+    expect(JSON.parse(listing.stdout())).toEqual({ command: "queue.pause", pauses: [] })
+  })
+
   it("passes zero-or-more selectors to the queue as one batch-capable candidate set", async () => {
     const app = await createApp({ batch: 2 })
     await openAndSubmit(app)

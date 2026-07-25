@@ -3189,6 +3189,14 @@ async function pauseQueue(
 ): Promise<void> {
   if (options.reason === undefined) {
     if (csv(options.allow) !== undefined) usage("--allow requires --reason")
+    // Naming a base is an unambiguous intent to pause THAT queue, so it must
+    // never fall back to the listing read: that printed "No paused queues."
+    // and exited 0, which an operator reads as a successful pause. It happened
+    // during a state-repo cutover — the queue was believed frozen, kept
+    // landing, and the landings invalidated the sync. Bare `queue pause` with
+    // no base stays a read; the sibling `--allow requires --reason` refusal
+    // above already treats a reason-less pause as not a pause.
+    if (base !== undefined) usage("pausing a queue requires --reason; `yrd queue pause` with no base lists pauses")
     const pauses = await queuePauses(app, base, io)
     const human =
       pauses.length === 0
