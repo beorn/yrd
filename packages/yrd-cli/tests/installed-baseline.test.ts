@@ -3,6 +3,7 @@
  * @level l2
  * @consumer @yrd/cli host
  */
+import { createHash } from "node:crypto"
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -21,6 +22,7 @@ import {
   writeInstalledBaseline,
   type InstalledBaseline,
 } from "../src/installed-baseline.ts"
+import { queueStepRevision } from "../src/host-revision.ts"
 
 const roots: string[] = []
 
@@ -45,6 +47,25 @@ function baseline(steps: readonly InstalledStep[], base = "main"): InstalledBase
     installedAt: "2026-07-15T00:00:00.000Z",
     steps,
   }
+}
+
+function preComponentPromotionNativeMergeRevision(): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        implementation: "yrd-native-merge-v3",
+        repo: "/repo",
+        stateDir: "/repo/.git/yrd",
+        name: "merge",
+        runner: "local",
+        classification: "carrier",
+        mode: "delta",
+        timeoutMs: 60_000,
+        noProgressMs: 600_000,
+        toolchain: { bun: "1.3.11", node: "24.0.0", platform: "darwin", arch: "arm64" },
+      }),
+    )
+    .digest("hex")
 }
 
 describe("installed baseline drift", () => {
@@ -87,6 +108,31 @@ describe("installed baseline drift", () => {
     expect(finding?.message).toContain("resident runtime diverges from the installed baseline")
     expect(finding?.message).toContain("step 'check' revision 'v2' installed, runtime 'v1'")
     expect(finding?.message).toContain("Restart this queue runner process")
+  })
+
+  it("fences a resident whose native merge predates post-landing component promotion (22366)", () => {
+    const currentRevision = queueStepRevision({
+      repo: "/repo",
+      stateDir: "/repo/.git/yrd",
+      name: "merge",
+      config: { runner: "local" },
+      timeoutMs: 60_000,
+      noProgressMs: 600_000,
+      toolchain: { bun: "1.3.11", node: "24.0.0", platform: "darwin", arch: "arm64" },
+    })
+    const installed = [step("merge", currentRevision, { kind: "merge" })]
+    const staleRuntime = [
+      step("merge", preComponentPromotionNativeMergeRevision(), {
+        kind: "merge",
+      }),
+    ]
+
+    // R2715 ran under a resident loaded before component promotion existed.
+    // The runtime must become distinguishable before it can report root-only success.
+    expect(runtimeBaselineDrift(baseline(installed), staleRuntime)).toMatchObject({
+      code: "runtime-drift",
+      message: expect.stringContaining("Restart this queue runner process"),
+    })
   })
 
   it("reports drift when the same steps are reordered (revisions exclude order)", () => {

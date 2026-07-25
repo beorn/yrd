@@ -30,6 +30,16 @@ function stablePath(path: string): string {
   return resolve(path)
 }
 
+/**
+ * Construction-time identity for the native merge implementation.
+ *
+ * Native merge semantics run inside the long-lived resident. Advance this
+ * generation whenever those semantics change so the three-way installed
+ * baseline audit fences a resident that still has the prior implementation
+ * loaded instead of letting it execute under a current-looking identity.
+ */
+const NATIVE_MERGE_IMPLEMENTATION_REVISION = "yrd-native-merge-v4"
+
 /** Internal identity seam for configured queue steps; intentionally not exported by the package root. */
 export function queueStepRevision(input: QueueStepRevisionInput): string {
   return createHash("sha256")
@@ -37,7 +47,7 @@ export function queueStepRevision(input: QueueStepRevisionInput): string {
       JSON.stringify({
         implementation:
           input.name === "merge" && input.resolvedCommand === undefined
-            ? "yrd-native-merge-v3"
+            ? NATIVE_MERGE_IMPLEMENTATION_REVISION
             : input.checkoutParent === undefined
               ? "yrd-queue-command-v3"
               : "yrd-queue-command-v4",

@@ -5163,7 +5163,9 @@ describe("Queue command adapters", () => {
   it.each(["native", "configured"] as const)(
     "advances component main when a root gitlink lands (%s)",
     async (mode) => {
-      const fixture = await componentMainLandingRepository()
+      // The task branch advances again after publishing the pin, matching the
+      // production sequence that made the post-landing actuator necessary.
+      const fixture = await componentMainLandingRepository({ pushSuccessor: true })
       expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.componentBaseSha)
 
       await using process = createProcess()
