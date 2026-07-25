@@ -57,7 +57,6 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
     for (const args of [
       ["bay", "run", "--help"],
       ["sh", "--help"],
-      ["run", "--help"],
       ["ag", "--help"],
     ] as const) {
       const help = output(repo)
@@ -66,10 +65,17 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
       expect(help.stdout()).toContain("--pr <selector>")
       expect(help.stdout()).toContain("--bay <name>")
       expect(help.stdout()).not.toContain("--exec")
-      if (args[0] === "run" || args[1] === "run") {
+      if (args[1] === "run") {
         expect(help.stdout()).toContain("--keep")
       }
     }
+    const runHelp = output(repo)
+    expect(await yrd(repo, runHelp.io, "run", "--help"), runHelp.stderr()).toBe(0)
+    expect(runHelp.stdout()).toContain("act on individual queue runs")
+    expect(runHelp.stdout()).toContain("cancel")
+    expect(runHelp.stdout()).not.toContain("--issue")
+    expect(runHelp.stdout()).not.toContain("--bay")
+
     for (const args of [
       ["bay", "in", "--help"],
       ["in", "--help"],

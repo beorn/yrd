@@ -228,8 +228,8 @@ checkpointing, closing, or otherwise taking ownership of the Bay lifecycle.
 Its live address is `<bay-or-explicit-name>:<child-pid>`; Yrd prints that
 address and exports the same value as `HAB_NAME`. `--name @issue/helper`
 supplies an explicit subpersona. `bay open` takes no command; `bay run` and
-`bay in` default to `$SHELL`. `yrd run` is the short spelling of `yrd bay run`;
-`yrd sh` selects `$SHELL`, and `yrd ag` selects `ag`. Exact `in ag` launches
+`bay in` default to `$SHELL`. Top-level `yrd run` acts on queue-run records;
+`yrd sh` selects `$SHELL`, and `yrd ag` selects `ag`. Exact `in ag` launches an
 `ag` with the guest-only contract primer.
 
 An open config is explicit and deterministic. A positional config is always an
@@ -310,7 +310,7 @@ The top-level surface is deliberately small:
 yrd                         dashboard across queues, PRs, and recent outcomes
 yrd in                     attach a PID-addressed guest to an existing Bay
 yrd do                     resolve an issue or PR and run an ag mission
-yrd run                    short spelling of bay run
+yrd run                    act on individual queue runs
 yrd sh                     run $SHELL in a scoped Bay
 yrd ag                     run ag in a scoped Bay
 yrd pr                      list PRs; create, submit, view, runs, diff, checkout,
@@ -335,8 +335,6 @@ yrd bay run [<issue>] [--issue <issue>] [--pr <selector>] [--bay <name>]
 yrd bay in [<bay>] [ag | -- <command...>]
 yrd in [<bay>] [ag | -- <command...>]
 yrd do <issue-or-pr>
-yrd run [<issue>] [--issue <issue>] [--pr <selector>] [--bay <name>]
-  [--keep] [-- <command...>]
 yrd sh [<issue>] [--issue <issue>] [--pr <selector>] [--bay <name>]
   [--keep]
 yrd ag [<issue>] [--issue <issue>] [--pr <selector>] [--bay <name>]
@@ -346,6 +344,12 @@ yrd bay refresh [selector...] [--json]
 yrd bay submit [selector...] [--base <branch>]
   [--correlation <namespace:id>] [--composition <path>] [--json]
 yrd bay close [selector...] [--withdraw] [--json]
+```
+
+Queue-run records remain a separate object:
+
+```text
+yrd run cancel <selector> [--reason <text>] [--json]
 ```
 
 The same commands are available through the standalone `git bay` projection.

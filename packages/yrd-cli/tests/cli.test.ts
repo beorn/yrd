@@ -1703,7 +1703,7 @@ describe("runYrd", () => {
     })
   })
 
-  it("queue cancel re-queues a waiting run's PRs (submitted), not rejected (#59)", async () => {
+  it("run cancel re-queues a waiting run's PRs (submitted), not rejected (#59)", async () => {
     const app = await createApp({ waitingCheck: true })
     await openAndSubmit(app)
     // Drain PR1 into a resident run: the waiting check leaves R1 non-terminal.
@@ -1712,7 +1712,7 @@ describe("runYrd", () => {
     ])
 
     const cancel = outputIO()
-    expect(await runYrd(app, yrd("queue", "cancel", "R1"), cancel.io), cancel.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("run", "cancel", "R1"), cancel.io), cancel.stderr()).toBe(0)
     expect(cancel.stdout()).toContain("re-queued")
 
     // The run is terminal-canceled and its active check job is aborted...

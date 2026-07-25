@@ -2299,11 +2299,7 @@ async function bayStatusCommand(
 }
 
 /** Sweep open bays via the status oracle. --dry-run is the DEFAULT (22290). */
-async function bayPruneCommand(
-  app: YrdCliApp,
-  options: { json?: boolean; apply?: boolean },
-  io: YrdCliIO,
-): Promise<0> {
+async function bayPruneCommand(app: YrdCliApp, options: { json?: boolean; apply?: boolean }, io: YrdCliIO): Promise<0> {
   const cwd = io.cwd ?? process.cwd()
   const open = app.bays.list().filter((bay) => bay.status !== "closed")
   const reports = open.map((bay) => classifyBayStatus(gatherBayStatusFacts(app, bay, cwd)))
@@ -5872,21 +5868,14 @@ function addRootBayCommands(
         ),
       ),
     )
-  program
-    .command("run [config] [command...]")
-    .description("alias for bay run; run one scoped command (defaults to $SHELL)")
-    .option("--issue <ref>", "link an issue without a positional")
-    .option("--pr <selector>", "continue an existing PR without creating or submitting a revision")
-    .option("--bay <name>", "choose an issue-less or issue-linked Bay identity")
-    .option("--keep", "leave a successful run open")
-    .action(async (config, command, options) => {
-      const request = bayRunOperands(config, command, io)
-      setExit(
-        await runBaySession(installed(), installedServices(), request.arg, request.argv, options, io, {
-          keep: options.keep,
-        }),
-      )
-    })
+  const run = program.command("run").description("act on individual queue runs")
+  run.helpCommand(false)
+  run
+    .command("cancel <selector>")
+    .description("cancel a waiting or running run; its PRs re-queue for a future drain, they are NOT rejected")
+    .option("--reason <text>", "human-readable cancellation reason")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => setExit(await cancelQueueRun(installed(), selector, options, io)))
   program
     .command("ag [config]")
     .description("run ag in a scoped Bay")

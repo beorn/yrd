@@ -30,7 +30,7 @@ describe("noun cutover ratchet", () => {
 
     expect(prose).toContain("`bay open` creates a persistent Bay and returns")
     expect(prose).toContain("`bay run` owns the scoped foreground lifecycle")
-    expect(prose).toContain("`yrd run` is the short spelling of `yrd bay run`")
+    expect(prose).toContain("Top-level `yrd run` acts on queue-run records")
     expect(readme).toContain("yrd bay open --bay example")
     expect(readme).toContain("yrd bay run @tracker/fix-release -- vi README.md")
     expect(prose).not.toContain("`bay open` owns the complete foreground lifecycle")
