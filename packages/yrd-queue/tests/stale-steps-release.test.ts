@@ -120,6 +120,40 @@ describe("stale-steps release — a drifted next step frees the run instead of k
     expect(prDeliveryState(replayed.state().bays.prs.PR1!)).toBe("submitted")
   })
 
+  it("releases a queued current step whose requested Job revision drifted before execution", async () => {
+    const journal = createMemoryJournal()
+    const id = ids()
+
+    {
+      await using app = await createApp("second-v1", journal, id)
+      const pr = await submitBranch(app, "issue/stale-current-step")
+      await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["first", "second"] })
+      const firstJob = app.queue.get("R1")?.steps[0]?.job
+      if (firstJob === undefined) throw new Error("expected requested first step")
+      await app.jobs.run(firstJob.id, runtime)
+      await app.dispatch(app.commands.queue.advance, { run: "R1" })
+      expect(app.queue.get("R1")?.steps[1]?.job).toMatchObject({
+        status: "queued",
+        revision: "second-v1",
+      })
+    }
+
+    // Replay after the requested current Job's definition moved. The resident
+    // compose path must retire R1 before Jobs.run sees the stale revision.
+    await using replayed = await createApp("second-v2", journal, id)
+    await expect(replayed.queue.run({ prs: ["PR1"] }, runtime)).resolves.toBeDefined()
+    expect(replayed.queue.get("R1")).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: expect.objectContaining({ code: "stale-steps" }),
+    })
+    expect(prDeliveryState(replayed.state().bays.prs.PR1!)).toBe("submitted")
+
+    const readmitted = await replayed.queue.run({ prs: ["PR1"] }, runtime)
+    expect(readmitted.at(-1)).toMatchObject({ status: "completed", conclusion: "success" })
+    expect(Queues.ids(replayed.state().queues)).toContain("R2")
+  })
+
   it("re-admits the still-submitted PR under the installed config after a stale-steps release", async () => {
     const journal = createMemoryJournal()
     const id = ids()

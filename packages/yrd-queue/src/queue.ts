@@ -3788,11 +3788,17 @@ function advanceQueue(
   const jobs = queueJobs(record, state.jobs)
   const index = jobs.length - 1
   const job = jobs[index]
-  if (job === undefined || job.status === "queued" || job.status === "in_progress" || job.status === "waiting") {
-    return { events: [] }
-  }
+  if (job === undefined) return { events: [] }
   const planned = record.steps[index]
   if (planned === undefined) throw new Error(`yrd: queue run '${record.id}' lost step ${index}`)
+  if (job.status === "queued") {
+    const drift = plannedStepDrift(steps, planned)
+    return {
+      events:
+        drift === undefined ? [] : [queueFailedEvent(state, record, { code: "stale-steps", message: `yrd: ${drift}` })],
+    }
+  }
+  if (job.status === "in_progress" || job.status === "waiting") return { events: [] }
   if (!jobSucceeded(job)) {
     const before = shapeThrough(record, state.jobs, index)
     if (job.conclusion === "cancelled") {
