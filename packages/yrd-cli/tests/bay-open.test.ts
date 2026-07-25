@@ -5,7 +5,7 @@
  */
 import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { isAbsolute, join } from "node:path"
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest"
 import { runYrdProcess } from "../src/host.ts"
 import type { YrdCliIO } from "../src/types.ts"
@@ -23,7 +23,7 @@ beforeAll(async () => {
     join(issueToolRoot, "km"),
     `#!/bin/sh
 if [ "$TEST_ISSUE_MISSING" = "$YRD_ISSUE_ID" ]; then
-  printf 'missing issue %s\n' "$YRD_ISSUE_ID" >&2
+  printf 'Node not found: %s\n' "$YRD_ISSUE_ID" >&2
   exit 1
 fi
 printf '%s\n' '{"node":{"title":"Fixture issue","name":"fixture","version":1}}'
@@ -88,6 +88,8 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
   it("opens a persistent Bay without running a command", async () => {
     return withoutRuntimeName(async () => {
       const { repo } = await repository()
+      await configureNotify(repo)
+      const wire = `file:${join(repo, "..", "wire.jsonl")}`
       const shell = join(repo, "..", "must-not-run")
       const marker = join(repo, "..", "shell-ran")
       await writeFile(shell, `#!/bin/sh\n: > "$YRD_TEST_SHELL_MARKER"\n`)
@@ -98,13 +100,13 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
       process.env.YRD_TEST_SHELL_MARKER = marker
       try {
         const opened = output(repo)
-        expect(await yrd(repo, opened.io, "bay", "open", "--bay", "docs"), opened.stderr()).toBe(0)
-        expect(opened.stdout()).toContain("bay docs → new task/docs, no issue linked, name docs")
+        expect(await yrd(repo, opened.io, "--wire", wire, "bay", "open", "--bay", "docs"), opened.stderr()).toBe(0)
         expect(await Bun.file(marker).exists()).toBe(false)
-
-        const path = output(repo)
-        expect(await yrd(repo, path.io, "bay", "path", "docs"), path.stderr()).toBe(0)
-        expect(await git(path.stdout().trim(), "branch", "--show-current")).toBe("task/docs")
+        const bayPath = opened.stdout().trim()
+        expect(isAbsolute(bayPath)).toBe(true)
+        expect(opened.stdout().trimEnd()).not.toContain("\n")
+        expect(opened.stderr()).toContain("bay docs → new task/docs, no issue linked, name docs")
+        expect(await git(bayPath, "branch", "--show-current")).toBe("task/docs")
 
         const bays = output(repo)
         expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
@@ -113,7 +115,12 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
         })
 
         const closed = output(repo)
-        expect(await yrd(repo, closed.io, "bay", "close", "docs"), closed.stderr()).toBe(0)
+        expect(await yrd(repo, closed.io, "--wire", wire, "bay", "close", "docs"), closed.stderr()).toBe(0)
+        const afterClose = output(repo)
+        expect(await yrd(repo, afterClose.io, "bay", "list", "--json"), afterClose.stderr()).toBe(0)
+        expect(JSON.parse(afterClose.stdout())).toMatchObject({
+          bays: [expect.objectContaining({ name: "docs", status: "closed" })],
+        })
       } finally {
         restoreEnv("SHELL", previousShell)
         restoreEnv("YRD_TEST_SHELL_MARKER", previousMarker)
@@ -345,7 +352,9 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
     try {
       const typo = output(repo)
       expect(await yrd(repo, typo.io, "bay", "open", "friendly")).not.toBe(0)
-      expect(typo.stderr()).toContain("missing issue friendly")
+      expect(typo.stderr()).toContain(
+        "error: cannot resolve issue 'friendly': configured source 'km' failed: Node not found: friendly",
+      )
     } finally {
       restoreEnv("TEST_ISSUE_MISSING", previousMissing)
     }

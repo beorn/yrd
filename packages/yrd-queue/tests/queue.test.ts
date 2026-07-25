@@ -627,15 +627,15 @@ describe("Queue", () => {
     await expect(app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)).rejects.toThrow(
       "conflicts in Candidate 'C1'",
     )
-    const runErrors = events.filter(
+    const runFailures = events.filter(
       (event) =>
         event.kind === "log" &&
         event.namespace === "yrd:queue:run" &&
-        event.level === "error" &&
+        event.level === "info" &&
         event.props?.run === "R1",
     )
-    expect(runErrors).toHaveLength(1)
-    expect(runErrors[0]?.props).toMatchObject({
+    expect(runFailures).toHaveLength(1)
+    expect(runFailures[0]?.props).toMatchObject({
       lifecycle: "run",
       outcome: "failed",
       error: { code: "candidate-conflicting" },
@@ -1955,10 +1955,7 @@ describe("Queue", () => {
     ).toEqual({ artifacts: [remote] })
   })
 
-  it("reports ONE failure ERROR at the deepest job — the enclosing run and compose settle at INFO", async () => {
-    // A single failure must not fire ERROR three times (jobs:check + queue:run +
-    // queue:compose). The failing Job owns the one ERROR; the run and compose
-    // that merely contain it settle at INFO, so operators see the failure once.
+  it("keeps internal failure lifecycles at INFO so the CLI owns the user-facing error", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     await using app = await createQueueApp(
@@ -1977,10 +1974,12 @@ describe("Queue", () => {
     await submitBranch(app, "issue/one-error")
     await app.queue.run({ prs: ["PR1"], steps: ["check"] }, runtime)
 
-    const errors = events
-      .filter((event): event is Extract<LogEvent, { kind: "log" }> => event.kind === "log" && event.level === "error")
-      .map((event) => event.namespace)
-    expect(errors).toEqual(["yrd:jobs:check"])
+    expect(
+      events.find(
+        (event): event is Extract<LogEvent, { kind: "log" }> =>
+          event.kind === "log" && event.namespace === "yrd:jobs:check" && event.props?.outcome === "failed",
+      ),
+    ).toMatchObject({ level: "info" })
 
     const run = events.find(
       (event): event is Extract<LogEvent, { kind: "log" }> =>
@@ -2172,7 +2171,7 @@ describe("Queue", () => {
           landingSha: MERGED,
           baseSha: BASE,
           correlation,
-          actor: "operator",
+          submitter: "operator",
         },
       }),
     )
@@ -2217,7 +2216,7 @@ describe("Queue", () => {
             evidence: { artifacts: [{ name: "stderr", path: "artifact://R1/check/stderr.log" }] },
           },
           job: { id: expect.any(String), attempt: 1 },
-          prs: [{ pr: "PR1", revision: 1, headSha: HEAD, actor: "operator" }],
+          prs: [{ pr: "PR1", revision: 1, headSha: HEAD, submitter: "operator" }],
         },
       }),
     )
@@ -2225,7 +2224,7 @@ describe("Queue", () => {
       state: "open",
       merged: false,
       issue: issueRef,
-      revs: [{ n: 1, head: HEAD, actor: "operator", correlation }],
+      revs: [{ n: 1, head: HEAD, submitter: "operator", correlation }],
     })
     const rejectedRun = rejectedApp.queue.get("R1")
     expect(rejectedRun).toMatchObject({
@@ -2975,7 +2974,7 @@ describe("Queue", () => {
         data: {
           run: "R1",
           error: { code: "job-lost" },
-          prs: [{ pr: "PR1", revision: 1, headSha: HEAD, actor: "operator" }],
+          prs: [{ pr: "PR1", revision: 1, headSha: HEAD, submitter: "operator" }],
         },
       },
     ])

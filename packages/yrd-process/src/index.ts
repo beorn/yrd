@@ -435,11 +435,14 @@ export function createProcess(
           if (!drainedCleanly) {
             escapedDescendant = true
             stalled = true
-            log.warn?.("descendant held the output pipe open past child exit — abandoning drain", {
-              argv,
-              pid: child.pid,
-              postExitDrainGraceMs,
-            })
+            log.warn?.(
+              "The command exited, but a child process kept its output open; stopped waiting for more output.",
+              {
+                argv,
+                pid: child.pid,
+                postExitDrainGraceMs,
+              },
+            )
             // The child is already dead; SIGKILL the leaked in-group descendants
             // now (best-effort — a setsid escapee survives, which is why we also
             // release our own read end below so run() returns regardless).
@@ -449,7 +452,10 @@ export function createProcess(
         } else {
           // Forced settle: the child never reaped (sweepFailure already loud);
           // the pipe is held by the live tree, so release our read end.
-          log.warn?.("abandoning output drain — direct child never settled after SIGKILL", { argv, pid: child.pid })
+          log.warn?.("The command did not finish after it was killed; stopped waiting for more output.", {
+            argv,
+            pid: child.pid,
+          })
           drainAbort.abort()
         }
         const [stdout, stderr] = await capturesDone
@@ -474,7 +480,7 @@ export function createProcess(
           ...(sweepFailure === undefined ? {} : { sweepFailure }),
           ...(escapedDescendant ? { escapedDescendant: true } : {}),
         } as ProcessResult
-        log.debug?.("process exited", {
+        log.debug?.("Command finished.", {
           argv,
           exitCode: result.exitCode,
           signal: result.signal,

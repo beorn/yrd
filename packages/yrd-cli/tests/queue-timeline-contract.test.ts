@@ -164,7 +164,7 @@ describe("queue timeline 21106 contract", () => {
       25 * minute,
     ])
     expect(projection.rows.map((row) => row.glyph)).toEqual(["×", "○", "◉", "◉", "×", "✓"])
-    // BY: the submitting actor of each exact PR revision, lossless in JSON.
+    // BY: the submitter of each exact PR revision, lossless in JSON.
     expect(projection.rows.map((row) => row.submitter)).toEqual([
       "@agent/2",
       "@cto",

@@ -72,7 +72,6 @@ import { cleanGitEnvironment } from "./git-environment.ts"
 import { withGitIndexLockRetry } from "./git-index-lock-retry.ts"
 import {
   loadYrdConfig,
-  SignalRecipientSchema,
   stepGateMode,
   type ResolvedYrdProjectConfig,
   type YrdRefuseConfig,
@@ -955,13 +954,7 @@ const ONE_SHOT_RECOVERY_CUTOFF = "1970-01-01T00:00:00.000Z"
  * stream. The force-stop hint and its consequences are structured FIELDS, so a
  * viewer can surface them without parsing prose. */
 export function reportGracefulShutdown(log: ConditionalLogger, signal: ShutdownSignal): void {
-  log.warn?.("graceful drain requested — finishing the active run before exit", {
-    signal,
-    mode: "drain",
-    forceStop: "press Ctrl-C again to force stop",
-    onForceStop: 'the active run may need `yrd queue recover`; its job settles as "job-lost"',
-    recovery: "yrd queue recover",
-  })
+  log.warn?.(`Stopping after the current run finishes (${signal}); press Ctrl-C again to stop immediately.`)
 }
 
 async function settleOneShotQueueRun(
@@ -980,17 +973,10 @@ async function settleOneShotQueueRun(
       reason: `one-shot queue runner interrupted by ${signal}`,
     })
     if (runs.length > 0) {
-      log.warn?.("one-shot queue run interrupted — settled before exit", {
-        signal,
-        runner,
-        runs: runs.map((run) => run.id),
-        outcome: "job-lost",
-      })
+      log.warn?.(`Stopped queue run ${runs.map((run) => run.id).join(", ")} safely after ${signal}.`)
     }
   } catch (error) {
-    log.error?.("one-shot queue run interrupted — settlement failed before exit", {
-      signal,
-      runner,
+    log.error?.(`Could not stop the queue run safely after ${signal}; run 'yrd queue recover'.`, {
       error: error instanceof Error ? error.message : String(error),
     })
     throw error
@@ -1229,15 +1215,6 @@ async function createYrdRuntimeHost(
     const routes = loaded.config.notify ?? {}
     const defaultSubmitter = options.persona?.mailbox ?? (env.TRIBE_NAME?.trim() || "operator")
     if (mode === "active") {
-      const submitterRoute = Object.entries(routes).find(([, targets]) => targets?.includes("submitter") === true)?.[0]
-      if (submitterRoute !== undefined && !SignalRecipientSchema.safeParse(defaultSubmitter).success) {
-        raiseFailure(
-          "configuration",
-          "signal-submitter-missing",
-          `yrd: notify.${submitterRoute} targets submitter, but no valid persona mailbox resolved; ` +
-            "set --name, HAB_NAME, or transitional TRIBE_NAME (for example, @agent/2)",
-        )
-      }
       if (routes["pr/needs-review"] !== undefined && !loaded.config.requires.includes("review")) {
         raiseFailure(
           "configuration",
@@ -1579,10 +1556,7 @@ export async function runYrdProcess(
                 if (posture === "resident-queue-run") {
                   reportGracefulShutdown(runnerLog, signal)
                 } else {
-                  runtimeLog.warn?.("bay open interruption requested — preserving the active Bay before exit", {
-                    signal,
-                    mode: "orphan",
-                  })
+                  runtimeLog.warn?.(`Bay work was interrupted by ${signal}; preserving the Bay instead of closing it.`)
                 }
               },
         )

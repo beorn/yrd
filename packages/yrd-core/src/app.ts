@@ -274,21 +274,17 @@ export async function createYrd<State extends object, Commands extends CommandTr
   let checkpointWork: Promise<void> | undefined
   let checkpointWarning = false
 
-  const warnCheckpoint = (message: string, error: unknown): void => {
+  const reportSavedStateRebuild = (message: string): void => {
     if (checkpointWarning) return
     checkpointWarning = true
-    coreLog.warn?.(message, {
-      action: "full-replay",
-      reason: "projection-checkpoint-invalid",
-      error: error instanceof Error ? error.message : String(error),
-    })
+    coreLog.info?.(message)
   }
 
   if (checkpointStore !== undefined) {
     try {
       checkpointIdentity = projectionCheckpointIdentity(definition)
-    } catch (error) {
-      warnCheckpoint("projection checkpoint identity could not be derived; replaying journal authority", error)
+    } catch {
+      reportSavedStateRebuild("Saved state cannot be reused with this configuration; rebuilding it.")
     }
   }
 
@@ -465,8 +461,8 @@ export async function createYrd<State extends object, Commands extends CommandTr
       const restored = restoreProjection(checkpoint)
       checkpointCursor = checkpoint.cursor
       return restored
-    } catch (error) {
-      warnCheckpoint("projection checkpoint is invalid; replaying journal authority", error)
+    } catch {
+      reportSavedStateRebuild("Saved state is inconsistent; rebuilding it.")
       return undefined
     }
   }
@@ -493,11 +489,10 @@ export async function createYrd<State extends object, Commands extends CommandTr
       if (saved) checkpointCursor = next.cursor
       return saved
     } catch (error) {
-      coreLog.error?.("projection checkpoint write failed; journal remains authoritative", {
-        action: "skipped",
-        reason: "projection-checkpoint-write-failed",
-        error: error instanceof Error ? error.message : String(error),
-      })
+      coreLog.warn?.(
+        "Could not save Yrd's current state; the command succeeded, but the next command may start more slowly.",
+        { error: error instanceof Error ? error.message : String(error) },
+      )
       return false
     }
   }
@@ -555,11 +550,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
       // gap (2026-07-20 outage: CI admissions froze on cold-fold debt).
       if (!checkpointWarning && checkpointDebt() >= PROJECTION_CHECKPOINT_HIGH_WATER_FRAMES) {
         checkpointWarning = true
-        coreLog.warn?.("projection checkpoint debt exceeds high-water but this consumer cannot flush", {
-          action: "deferred",
-          reason: "checkpoint-flush-unavailable",
-          debt: checkpointDebt(),
-        })
+        coreLog.info?.("Yrd's saved state will be updated by the next write-capable command.")
       }
       return
     }
@@ -809,9 +800,9 @@ export async function createYrd<State extends object, Commands extends CommandTr
     } else {
       try {
         projection = await fold(restored)
-      } catch (error) {
+      } catch {
         checkpointCursor = undefined
-        warnCheckpoint("projection checkpoint tail replay failed; replaying journal authority", error)
+        reportSavedStateRebuild("Saved state is inconsistent; rebuilding it.")
         projection = await fold(emptyProjection())
       }
     }

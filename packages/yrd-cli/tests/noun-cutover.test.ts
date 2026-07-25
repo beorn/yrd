@@ -50,6 +50,7 @@ describe("noun cutover ratchet", () => {
   it("keeps retired nouns and routes out of product code and current documentation", () => {
     const queueNoun = ["li", "ne"].join("")
     const issueNoun = ["ta", "sk"].join("")
+    const retiredRoleNoun = ["act", "or"].join("")
     const runnerNoun = ["exec", "utor"].join("")
     const waitOption = `--${["wa", "it"].join("")}`
     const integrateVerb = ["inte", "grate"].join("")
@@ -71,6 +72,7 @@ describe("noun cutover ratchet", () => {
       new RegExp(`\\b${queueNoun[0]?.toUpperCase()}${queueNoun.slice(1)}[A-Z_]`, "u"),
       new RegExp(`\\byrd\\s+${issueNoun}s?\\b`, "iu"),
       new RegExp(`\\b${issueNoun}\\s+(?:list|show|view|create|open|close|submit|claim|ready|status)\\b`, "iu"),
+      new RegExp(`\\b${retiredRoleNoun}\\b`, "iu"),
       new RegExp(runnerNoun, "iu"),
       new RegExp(waitOption, "u"),
       new RegExp(

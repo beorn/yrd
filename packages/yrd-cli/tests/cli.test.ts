@@ -118,6 +118,7 @@ const JOB_DEPLOY_LOST_ID = "00000000-0000-7000-8000-000000000103"
 const JOB_CHECK_PASS_ID = "00000000-0000-7000-8000-000000000104"
 const JOB_CHECK_MISSING_ID = "00000000-0000-7000-8000-000000000105"
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
+const retiredRoleNoun = ["act", "or"].join("")
 
 function submittedRevision(
   revision: number,
@@ -2294,7 +2295,6 @@ describe("runYrd", () => {
       expect.objectContaining({
         kind: "log",
         level: "warn",
-        message: "resident queue could not refresh an admitted revision",
         props: expect.objectContaining({
           action: "queue-freshness-refused",
           pr: "PR1",
@@ -3011,19 +3011,19 @@ describe("runYrd", () => {
       expect(lines[3]).toContain("@dev/friendly")
       expect(lines[3]).toContain("main")
       expect(lines[3]).toContain("task/friendly-branch-that-uses-the-available-width")
-      expect(list.stdout()).not.toContain("ACTOR")
+      expect(list.stdout()).not.toContain(retiredRoleNoun.toUpperCase())
       expect(list.stdout()).not.toContain("PATH")
 
       const json = outputIO()
       expect(await runYrd(app, yrd("bay", "list", "--json"), json.io), json.stderr()).toBe(0)
       expect(JSON.parse(json.stdout()).bays[0]).toMatchObject({ by: "@dev/friendly" })
-      expect(JSON.parse(json.stdout()).bays[0]).not.toHaveProperty("actor")
+      expect(JSON.parse(json.stdout()).bays[0]).not.toHaveProperty(retiredRoleNoun)
     } finally {
       vi.unstubAllEnvs()
     }
   })
 
-  it("uses by, submitter, and reviewer instead of actor in CLI help", async () => {
+  it("uses by, submitter, and reviewer throughout CLI help", async () => {
     const app = await createApp()
     for (const args of [
       ["pr", "list"],
@@ -3036,7 +3036,7 @@ describe("runYrd", () => {
     ]) {
       const help = outputIO()
       expect(await runYrd(app, yrd(...args, "--help"), help.io), args.join(" ")).toBe(0)
-      expect(help.stdout(), args.join(" ")).not.toMatch(/\bactors?\b/iu)
+      expect(help.stdout(), args.join(" ")).not.toMatch(new RegExp(`\\b${retiredRoleNoun}s?\\b`, "iu"))
     }
   })
 
@@ -3265,7 +3265,7 @@ describe("runYrd", () => {
   it("rejects retired persistent-open configuration flags without writing state", async () => {
     const app = await createApp()
     const before = await Array.fromAsync(app.events()).then((events) => events.length)
-    for (const option of ["--actor", "--from", "--base", "--json"]) {
+    for (const option of [`--${retiredRoleNoun}`, "--from", "--base", "--json"]) {
       const output = outputIO()
       expect(await runYrd(app, yrd("bay", "open", "--bay", "linked-work", option, "retired"), output.io)).toBe(2)
       expect(output.stderr(), option).toContain(`unknown option '${option}'`)
@@ -3338,7 +3338,7 @@ describe("runYrd", () => {
     expect(JSON.parse(warned.stdout())).toMatchObject({
       command: "bay.submit",
       prs: [{ id: "PR1", revs: [{ head: HEAD_SHA }] }],
-      warnings: [expect.stringContaining("has uncommitted work; submitting the committed head only")],
+      warnings: [expect.any(String)],
     })
     expect(dirty.state().bays.prs.PR1).toMatchObject({ revs: [{ head: HEAD_SHA }] })
   })

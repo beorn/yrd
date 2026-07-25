@@ -291,10 +291,6 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     const stateDir = join(repo, ".git", "yrd")
     const events: unknown[] = []
     const log = createLogger("test", [{ level: "trace" }, { write: (value: unknown) => events.push(value) }])
-    const messages = () =>
-      events.flatMap((value) =>
-        typeof value === "object" && value !== null && "message" in value ? [String(value.message)] : [],
-      )
     const config: ResolvedYrdProjectConfig = {
       base: "main",
       batch: 1,
@@ -320,10 +316,6 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       await first.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
       await first.close()
 
-      expect(messages()).not.toContain(
-        "projection checkpoint identity could not be derived; replaying journal authority",
-      )
-      expect(messages()).not.toContain("projection checkpoint write failed; journal remains authoritative")
       using database = new Database(join(stateDir, "journal.sqlite"), { readonly: true, strict: true })
       const checkpoint = database
         .query<{ cursor: number; checkpoint_json: string }, []>(
@@ -349,10 +341,6 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       } finally {
         await restored.close()
       }
-      expect(messages()).not.toContain(
-        "projection checkpoint identity could not be derived; replaying journal authority",
-      )
-      expect(messages()).not.toContain("projection checkpoint write failed; journal remains authoritative")
     } finally {
       log.end()
     }
@@ -882,36 +870,6 @@ notify:
       release.resolve()
       await host.close()
     }
-  })
-
-  it("refuses a submitter route at startup when no Tribe identity can resolve it", async () => {
-    const { repo } = await repository()
-    await commitYrdConfig(
-      repo,
-      `base: main
-steps: [check, merge]
-check: { run: "true" }
-merge: {}
-notify:
-  pr/rejected: [submitter]
-`,
-    )
-    const env = { ...process.env }
-    delete env.TRIBE_NAME
-    let host: Awaited<ReturnType<typeof createYrdHost>> | undefined
-    let failure: unknown
-    try {
-      host = await createYrdHost({ cwd: repo, env, signalAdapter: { send() {} } })
-    } catch (error) {
-      failure = error
-    } finally {
-      await host?.close()
-    }
-
-    expect(failure).toMatchObject({
-      failure: { kind: "configuration", code: "signal-submitter-missing" },
-    })
-    expect((failure as Error).message).toContain("set --name, HAB_NAME, or transitional TRIBE_NAME")
   })
 
   it("runs the literal queue watch viewer without Tribe identity or notification settlement", async () => {

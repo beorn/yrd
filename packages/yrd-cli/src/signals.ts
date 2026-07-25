@@ -8,6 +8,7 @@ import {
   PRNeedsAuthorFactSchema,
   PRRejectedFactSchema,
   PRWithdrawnSchema,
+  normalizeV2Submitter,
   type PRNeedsAuthorFact,
   type PRRejectedFact,
 } from "@yrd/bay"
@@ -25,23 +26,25 @@ const TextSchema = z.string().trim().min(1)
 const RevisionSchema = z.number().int().positive()
 const GitShaSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu)
 const REVIEW_BALL_TTL_MS = 10 * 60_000
-// Journal v2 keeps the historical `actor` key; routable signals normalize it
-// to `submitter` immediately after decoding.
-const PersistedSignalPRSchema = z
+const SignalPRDataObjectSchema = z
   .object({
     pr: TextSchema,
     revision: RevisionSchema,
     headSha: GitShaSchema,
-    actor: TextSchema.optional(),
+    submitter: TextSchema.optional(),
   })
-  .strict()
-const SubmittedSignalDataSchema = PersistedSignalPRSchema.loose()
-const IntegratedSignalDataSchema = PersistedSignalPRSchema.extend({ run: TextSchema, landingSha: GitShaSchema }).loose()
+  .loose()
+const SignalPRDataSchema = z.preprocess(normalizeV2Submitter, SignalPRDataObjectSchema)
+const SubmittedSignalDataSchema = SignalPRDataSchema
+const IntegratedSignalDataSchema = z.preprocess(
+  normalizeV2Submitter,
+  SignalPRDataObjectSchema.extend({ run: TextSchema, landingSha: GitShaSchema }).loose(),
+)
 const RunFailedSignalDataSchema = z
   .object({
     run: TextSchema,
     error: z.object({ code: TextSchema, message: z.string() }).loose(),
-    prs: z.array(PersistedSignalPRSchema).min(1),
+    prs: z.array(SignalPRDataSchema).min(1),
   })
   .loose()
 
@@ -57,16 +60,14 @@ export type RejectedSignal = Readonly<{
   kind: "pr/rejected"
   at: string
 }> &
-  Omit<PRRejectedFact, "actor"> &
-  Readonly<{ submitter?: string }>
+  PRRejectedFact
 
 export type NeedsAuthorSignal = Readonly<{
   id: string
   kind: "pr/needs-author"
   at: string
 }> &
-  Omit<PRNeedsAuthorFact, "actor"> &
-  Readonly<{ submitter?: string }>
+  PRNeedsAuthorFact
 
 export type NeedsReviewSignal = Readonly<{
   id: string
@@ -231,15 +232,19 @@ export function createSignalObserver(
                 : (options.routes[signal.kind] ?? [])
           const recipients = new Set(targets.flatMap((target) => resolveRecipients(signal, target)))
           if (targets.includes("submitter") && ![...recipients].some((recipient) => recipient !== "*")) {
-            log.warn?.("PR signal has no recorded submitter; delivery skipped", {
-              event: signal.id,
-              kind: signal.kind,
-              ...(signal.kind === "run/failed" ? { run: signal.run } : "pr" in signal ? { pr: signal.pr } : {}),
-            })
+            const prs =
+              signal.kind === "run/failed" || signal.kind === "pr/integrated"
+                ? signal.prs.map((pr) => pr.pr)
+                : [signal.pr]
+            log.warn?.(
+              prs.length === 1
+                ? `Could not notify the person who submitted PR ${prs[0]}; no recipient was recorded.`
+                : `Could not notify the people who submitted ${prs.length} PRs; no recipients were recorded.`,
+            )
           }
           for (const recipient of recipients) {
             if (state.sent[signal.id]?.includes(recipient) === true) continue
-            if (overBudget()) return deferDelivery(log, cursorPath, deadline)
+            if (overBudget()) return deferDelivery(log)
             await options.adapter.send({ recipient, event: signal }) // UNLOCKED
             state = addSent(state, signal.id, recipient)
             // Record the request ball we just opened so a later terminal signal can close this
@@ -255,7 +260,7 @@ export function createSignalObserver(
             for (const ball of openedBallsFor(state, settledPRs)) {
               const key = `close:${ball.recipient}:${ball.requestId}`
               if (state.sent[signal.id]?.includes(key) !== true) {
-                if (overBudget()) return deferDelivery(log, cursorPath, deadline)
+                if (overBudget()) return deferDelivery(log)
                 await options.adapter.close({
                   recipient: ball.recipient,
                   request: ball.requestId,
@@ -276,7 +281,7 @@ export function createSignalObserver(
               if (ledgerSettled.has(coverageKey(closure.pr, closure.revision, closure.kind))) continue
               const key = `close:${closure.recipient}:${closure.request}`
               if (state.sent[signal.id]?.includes(key) === true) continue
-              if (overBudget()) return deferDelivery(log, cursorPath, deadline)
+              if (overBudget()) return deferDelivery(log)
               await options.adapter.close(closure) // UNLOCKED
               state = addSent(state, signal.id, key)
               await persist(state)
@@ -296,7 +301,7 @@ export function createSignalObserver(
       try {
         await drain(options.deliveryBudgetMs === undefined ? undefined : Date.now() + options.deliveryBudgetMs)
       } catch (error) {
-        log.warn?.("PR signal delivery deferred", { error: errorDetail(error), cursor: cursorPath })
+        log.warn?.("Could not send a PR notification; Yrd will retry it.", { error: errorDetail(error) })
         requested = false
       }
     }
@@ -527,11 +532,8 @@ function errorDetail(error: unknown): string {
  * its budget is spent, leaving the un-advanced cursor for the resident's observer to
  * finish. This is the "never starve the resident, defer instead of spinning" contract:
  * the one-shot exits promptly and the delivery is not lost. */
-function deferDelivery(log: ConditionalLogger, cursorPath: string, deadline: number | undefined): void {
-  log.warn?.("PR signal delivery deferred — delivery budget spent; a resident runner will complete it", {
-    cursor: cursorPath,
-    ...(deadline === undefined ? {} : { deadline: new Date(deadline).toISOString() }),
-  })
+function deferDelivery(log: ConditionalLogger): void {
+  log.warn?.("A PR notification is still pending; the background Yrd runner will retry it.")
 }
 
 function signalsOf(events: readonly Event[], reviewRequired: boolean): readonly RoutableSignal[] {
@@ -549,7 +551,7 @@ function signalsOf(events: readonly Event[], reviewRequired: boolean): readonly 
       pr: parsed.data.pr,
       revision: parsed.data.revision,
       headSha: parsed.data.headSha,
-      ...(parsed.data.actor === undefined ? {} : { submitter: parsed.data.actor }),
+      ...(parsed.data.submitter === undefined ? {} : { submitter: parsed.data.submitter }),
     }
     integrated.set(
       key,
@@ -571,13 +573,11 @@ function signalsOf(events: readonly Event[], reviewRequired: boolean): readonly 
 function directSignalOf(event: Event, reviewRequired: boolean): RoutableSignal | undefined {
   if (event.name === "pr/needs-author") {
     const data = PRNeedsAuthorFactSchema.parse(event.data)
-    const { actor: persistedSubmitter, ...fact } = data
     return Object.freeze({
       id: event.id,
       kind: "pr/needs-author",
       at: event.ts,
-      ...fact,
-      ...(persistedSubmitter === undefined ? {} : { submitter: persistedSubmitter }),
+      ...data,
     })
   }
   if (event.name === "pr/rejected") {
@@ -585,13 +585,11 @@ function directSignalOf(event: Event, reviewRequired: boolean): RoutableSignal |
       return undefined
     }
     const data = PRRejectedFactSchema.parse(event.data)
-    const { actor: persistedSubmitter, ...fact } = data
     return Object.freeze({
       id: event.id,
       kind: "pr/rejected",
       at: event.ts,
-      ...fact,
-      ...(persistedSubmitter === undefined ? {} : { submitter: persistedSubmitter }),
+      ...data,
     })
   }
   if (event.name === "pr/submitted" && reviewRequired) {
@@ -604,7 +602,7 @@ function directSignalOf(event: Event, reviewRequired: boolean): RoutableSignal |
       pr: parsed.data.pr,
       revision: parsed.data.revision,
       headSha: parsed.data.headSha,
-      ...(parsed.data.actor === undefined ? {} : { submitter: parsed.data.actor }),
+      ...(parsed.data.submitter === undefined ? {} : { submitter: parsed.data.submitter }),
     })
   }
   if (event.name === "queue/run/failed") {
@@ -616,22 +614,17 @@ function directSignalOf(event: Event, reviewRequired: boolean): RoutableSignal |
       at: event.ts,
       run: parsed.data.run,
       error: { code: parsed.data.error.code, message: parsed.data.error.message },
-      prs: parsed.data.prs.map(({ actor: persistedSubmitter, ...pr }) => ({
-        ...pr,
-        ...(persistedSubmitter === undefined ? {} : { submitter: persistedSubmitter }),
-      })),
+      prs: parsed.data.prs,
     })
   }
   if (event.name === "pr/already-landed") {
     const parsed = PRAlreadyLandedSchema.safeParse(event.data)
     if (!parsed.success) return undefined
-    const { actor: persistedSubmitter, ...fact } = parsed.data
     return Object.freeze({
       id: event.id,
       kind: "pr/already-landed",
       at: event.ts,
-      ...fact,
-      ...(persistedSubmitter === undefined ? {} : { submitter: persistedSubmitter }),
+      ...parsed.data,
     })
   }
   if (event.name === "pr/withdrawn") {
@@ -644,7 +637,7 @@ function directSignalOf(event: Event, reviewRequired: boolean): RoutableSignal |
       pr: parsed.data.pr,
       revision: parsed.data.revision,
       headSha: parsed.data.headSha,
-      ...(parsed.data.actor === undefined ? {} : { submitter: parsed.data.actor }),
+      ...(parsed.data.submitter === undefined ? {} : { submitter: parsed.data.submitter }),
     })
   }
   if (event.name === "pr/canceled") {
@@ -657,7 +650,7 @@ function directSignalOf(event: Event, reviewRequired: boolean): RoutableSignal |
       pr: parsed.data.pr,
       revision: parsed.data.revision,
       headSha: parsed.data.headSha,
-      ...(parsed.data.actor === undefined ? {} : { submitter: parsed.data.actor }),
+      ...(parsed.data.submitter === undefined ? {} : { submitter: parsed.data.submitter }),
     })
   }
   return undefined

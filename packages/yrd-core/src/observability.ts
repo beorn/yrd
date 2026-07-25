@@ -12,9 +12,12 @@ export const YRD_LIFECYCLE_LEVELS = Object.freeze({
   // ERROR; the enclosing levels settle at INFO so one failure is reported once,
   // never re-raised as a duplicate ERROR up the tree.
   settled: "info",
-  refused: "warn",
+  // One-shot commands report their final error at the CLI boundary. Keeping
+  // lifecycle failures at INFO avoids printing the same failure twice; the
+  // resident runner enables INFO and still records every background outcome.
+  refused: "info",
   recovered: "warn",
-  failed: "error",
+  failed: "info",
 } as const satisfies Record<string, Exclude<LogLevel, "silent">>)
 
 // Lock acquisition and composition are routine per-cycle plumbing. Their
@@ -97,7 +100,9 @@ export async function observeYrdLifecycle<Result>(
       ...(failure === undefined ? {} : { failure }),
     })
     if (span !== undefined) Object.assign(span.spanData as Record<string, unknown>, spanProps)
-    if (invalidDuration) log.error?.(`${options.lifecycle} duration invalid`, { ...spanProps })
+    if (invalidDuration) {
+      log.error?.(`Could not measure how long ${options.lifecycle} took; its result is unchanged.`, { ...spanProps })
+    }
     emitLifecycle(log, options.lifecycle, outcome, summary ?? outcome, { ...spanProps })
   }
 

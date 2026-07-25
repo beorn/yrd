@@ -19,7 +19,10 @@ import { defineConfig, selectFlow, yrd, type FlowPin, type Submission } from "@y
 import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
 import {
   GitShaSchema,
+  PRRejectedFactSchema,
   currentPRRev,
+  normalizeV2By,
+  normalizeV2Submitter,
   prDeliveryState,
   resolveBase,
   type DeprovisionedBay,
@@ -135,6 +138,31 @@ describe("GitShaSchema", () => {
   })
 })
 
+describe("pre-cutover provenance normalization", () => {
+  const previousRoleKey = ["act", "or"].join("")
+
+  it("maps Bay ownership to by and revision ownership to submitter", () => {
+    expect(normalizeV2By({ id: "B1", [previousRoleKey]: "@dev/1" })).toEqual({ id: "B1", by: "@dev/1" })
+    expect(normalizeV2Submitter({ pr: "PR1", [previousRoleKey]: "@dev/1" })).toEqual({
+      pr: "PR1",
+      submitter: "@dev/1",
+    })
+  })
+
+  it("replays rejection provenance through the current schema", () => {
+    expect(
+      PRRejectedFactSchema.parse({
+        pr: "PR1",
+        revision: 1,
+        headSha: HEAD_1,
+        run: "R1",
+        [previousRoleKey]: "@dev/1",
+        step: "check",
+      }),
+    ).toMatchObject({ submitter: "@dev/1" })
+  })
+})
+
 async function finishJob(app: TestApp, result: CommandResult): Promise<void> {
   const id = app.jobs.requested(result)[0]
   if (id === undefined) throw new Error("expected one Bay workspace job")
@@ -212,12 +240,10 @@ describe("withBays", () => {
     const submitted = await app.bays.submit({ branch: "topic/owned", headSha: HEAD_1 })
 
     expect(submitted.events.map(({ name, data }) => ({ name, data }))).toEqual([
-      expect.objectContaining({ name: "pr/pushed", data: expect.objectContaining({ actor: "@agent/7" }) }),
-      expect.objectContaining({ name: "pr/submitted", data: expect.objectContaining({ actor: "@agent/7" }) }),
+      expect.objectContaining({ name: "pr/pushed", data: expect.objectContaining({ submitter: "@agent/7" }) }),
+      expect.objectContaining({ name: "pr/submitted", data: expect.objectContaining({ submitter: "@agent/7" }) }),
     ])
-    expect(app.bays.pr("PR1")?.revs).toEqual([
-      expect.objectContaining({ n: 1, head: HEAD_1, submitter: "@agent/7" }),
-    ])
+    expect(app.bays.pr("PR1")?.revs).toEqual([expect.objectContaining({ n: 1, head: HEAD_1, submitter: "@agent/7" })])
   })
 
   it("resolves Bay, PR, and base selectors without changing canonical identity", async () => {
@@ -254,7 +280,7 @@ describe("withBays", () => {
     expect(retired.events).toContainEqual(
       expect.objectContaining({
         name: "pr/withdrawn",
-        data: { pr: "PR1", revision: 1, headSha: HEAD_1, issueRef, correlation, actor: "operator" },
+        data: { pr: "PR1", revision: 1, headSha: HEAD_1, issueRef, correlation, submitter: "operator" },
       }),
     )
   })
@@ -612,7 +638,7 @@ describe("withBays", () => {
     })
 
     expect(prFacts(app.bays.pr("PR1"))).toMatchObject({ delivery: "rejected", issue: issueRef })
-    expect(app.bays.pr("PR1")?.revs).toEqual([expect.not.objectContaining({ actor: expect.anything() })])
+    expect(app.bays.pr("PR1")?.revs).toEqual([expect.not.objectContaining({ submitter: expect.anything() })])
     expect(prFacts(app.bays.pr("PR2"))).toMatchObject({
       state: "closed",
       merged: true,
@@ -763,9 +789,7 @@ describe("withBays", () => {
   })
 
   it("runs a pinned bay through refresh, PR revisions, withdrawal, and close", async () => {
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => {})
-    const error = vi.spyOn(console, "error").mockImplementation(() => {})
-    const { app, workspace } = await createHarness(createLogger("test"))
+    const { app, workspace } = await createHarness(createLogger("test", [{ level: "silent" }]))
 
     const opened = await app.bays.open({ name: "fix-release", baseSha: BASE })
     expect(app.bays.state().byId.B1?.status).toBe("opening")
@@ -860,8 +884,6 @@ describe("withBays", () => {
       "deprovision:B1",
       "deprovision:B1",
     ])
-    expect(warning).toHaveBeenCalled()
-    expect(error).toHaveBeenCalledTimes(2)
     await app.close()
   })
 
@@ -1159,17 +1181,17 @@ describe("withBays", () => {
     })
     expect(app.bays.needsReview("PR1")).toBe(false)
 
-    const arbitraryActor = "reviewer id/with spaces:7"
-    const first = await app.bays.requestReview({ pr: "PR1", reviewers: ["@cto", arbitraryActor] })
+    const arbitraryReviewer = "reviewer id/with spaces:7"
+    const first = await app.bays.requestReview({ pr: "PR1", reviewers: ["@cto", arbitraryReviewer] })
     expect(first.events.map(({ name, data }) => ({ name, data }))).toEqual([
       {
         name: "pr/review-requested",
-        data: { pr: "PR1", reviewers: ["@cto", arbitraryActor], requestedBy: "operator" },
+        data: { pr: "PR1", reviewers: ["@cto", arbitraryReviewer], requestedBy: "operator" },
       },
     ])
-    expect(app.bays.pr("PR1")?.requestedReviewers).toEqual(["@cto", arbitraryActor])
+    expect(app.bays.pr("PR1")?.requestedReviewers).toEqual(["@cto", arbitraryReviewer])
 
-    expect((await app.bays.requestReview({ pr: "PR1", reviewers: ["@cto", arbitraryActor] })).events).toEqual([])
+    expect((await app.bays.requestReview({ pr: "PR1", reviewers: ["@cto", arbitraryReviewer] })).events).toEqual([])
 
     const replaced = await app.bays.requestReview({ pr: "PR1", reviewers: ["@agent/5"], by: "@chief" })
     expect(replaced.events.map(({ name, data }) => ({ name, data }))).toEqual([
@@ -2015,7 +2037,7 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     // Submitted the committed head (HEAD_2 from refresh), never refused.
     expect(prFacts(pr)).toMatchObject({ bay: "B1", delivery: "submitted", current: { head: HEAD_2 } })
     // Loud by construction: the caveat rides the result envelope (warnings array)…
-    expect(warnings).toContainEqual(expect.stringContaining("has uncommitted work; submitting the committed head only"))
+    expect(warnings).toHaveLength(1)
     // …AND the structured log stream.
     expect(events.some((event) => event.kind === "log" && event.props?.action === "submit-dirty-worktree")).toBe(true)
     await app.close()

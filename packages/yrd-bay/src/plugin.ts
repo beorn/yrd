@@ -55,6 +55,8 @@ import {
   emptyBaysState,
   isLivePR,
   needsReview,
+  normalizeV2By,
+  normalizeV2Submitter,
   prBaseSha,
   prComposition,
   prCorrelation,
@@ -297,20 +299,21 @@ const PrRegressionArgsSchema = z
   .strict()
 export type PrRegressionArgs = z.infer<typeof PrRegressionArgsSchema>
 
-// Journal v2 spells BY/submitter provenance `actor`. Keep that wire spelling
-// readable and writable here; public models normalize it to `by`/`submitter`.
-const BayOpenedSchema = z
-  .object({
-    id: BayIdSchema,
-    name: TextSchema,
-    issue: TextSchema.optional(),
-    actor: TextSchema.optional(),
-    from: GitRefSchema.optional(),
-    branch: GitRefSchema,
-    base: GitRefSchema,
-    baseSha: GitShaSchema.optional(),
-  })
-  .strict()
+const BayOpenedSchema = z.preprocess(
+  normalizeV2By,
+  z
+    .object({
+      id: BayIdSchema,
+      name: TextSchema,
+      issue: TextSchema.optional(),
+      by: TextSchema.optional(),
+      from: GitRefSchema.optional(),
+      branch: GitRefSchema,
+      base: GitRefSchema,
+      baseSha: GitShaSchema.optional(),
+    })
+    .strict(),
+)
 const BayClosingSchema = z.object({ bay: BayIdSchema }).strict()
 const LegacyPRPushedSchema = z
   .object({
@@ -348,21 +351,30 @@ const PRRecutFactSchema = z
     transition: PRFreshnessTransitionSchema.optional(),
   })
   .strict()
-const PRPushedSchema = LegacyPRPushedSchema.extend({ actor: TextSchema }).strict()
+const PRPushedSchema = z.preprocess(
+  normalizeV2Submitter,
+  LegacyPRPushedSchema.extend({ submitter: TextSchema }).strict(),
+)
 const PRRevisionIdentitySchema = z.object({ pr: PRIdSchema, revision: RevisionSchema, headSha: GitShaSchema }).strict()
 const LegacyPRRevisionSchema = PRRevisionIdentitySchema.extend({ correlation: CorrelationSchema.optional() }).strict()
-const PRRevisionSchema = LegacyPRRevisionSchema.extend({ actor: TextSchema, flow: FlowPinSchema.optional() }).strict()
+const PRRevisionSchema = z.preprocess(
+  normalizeV2Submitter,
+  LegacyPRRevisionSchema.extend({ submitter: TextSchema, flow: FlowPinSchema.optional() }).strict(),
+)
 const PRCorrelationBoundSchema = PRRevisionIdentitySchema.extend({ correlation: CorrelationSchema }).strict()
 const PRTerminalIdentitySchema = PRRevisionIdentitySchema.extend({
   issueRef: TextSchema.optional(),
   correlation: CorrelationSchema.optional(),
 }).strict()
 const PRQueueTerminalIdentitySchema = PRTerminalIdentitySchema.extend({ run: TextSchema }).strict()
-export const PRWithdrawnSchema = PRTerminalIdentitySchema.extend({
-  reason: TextSchema.optional(),
-  /** Submitter of the withdrawn revision — carried so terminal ball closures can route back to the author. */
-  actor: TextSchema.optional(),
-}).strict()
+export const PRWithdrawnSchema = z.preprocess(
+  normalizeV2Submitter,
+  PRTerminalIdentitySchema.extend({
+    reason: TextSchema.optional(),
+    /** Carried so terminal ball closures can route back to the revision submitter. */
+    submitter: TextSchema.optional(),
+  }).strict(),
+)
 const LegacyPRWithdrawnSchema = z
   .object({
     pr: PRIdSchema,
@@ -384,31 +396,37 @@ const TransitionalPRRejectedSchema = PRQueueTerminalIdentitySchema.extend({
   detail: z.string().optional(),
 }).strict()
 const PRReplayRejectedSchema = z.union([PRRejectedFactSchema, TransitionalPRRejectedSchema, LegacyPRRejectedSchema])
-const PRIntegratedSchema = PRQueueTerminalIdentitySchema.extend({
-  commit: GitShaSchema,
-  landingSha: GitShaSchema,
-  baseSha: GitShaSchema,
-  /** Missing only when a current integration terminates a pre-identity legacy revision. */
-  actor: TextSchema.optional(),
-})
-  .strict()
-  .refine(({ commit, landingSha }) => commit === landingSha, {
-    message: "landingSha must equal the integration proof commit",
-    path: ["landingSha"],
+const PRIntegratedSchema = z.preprocess(
+  normalizeV2Submitter,
+  PRQueueTerminalIdentitySchema.extend({
+    commit: GitShaSchema,
+    landingSha: GitShaSchema,
+    baseSha: GitShaSchema,
+    /** Missing only when a current integration terminates a pre-identity legacy revision. */
+    submitter: TextSchema.optional(),
   })
-export const PRAlreadyLandedSchema = PRQueueTerminalIdentitySchema.extend({
-  baseSha: GitShaSchema,
-  candidateSha: GitShaSchema,
-  candidateTreeSha: GitShaSchema,
-  baseTreeSha: GitShaSchema,
-  /** Missing only when a current terminal event closes a pre-identity legacy revision. */
-  actor: TextSchema.optional(),
-})
-  .strict()
-  .refine(({ candidateTreeSha, baseTreeSha }) => candidateTreeSha === baseTreeSha, {
-    message: "candidateTreeSha must equal baseTreeSha",
-    path: ["candidateTreeSha"],
+    .strict()
+    .refine(({ commit, landingSha }) => commit === landingSha, {
+      message: "landingSha must equal the integration proof commit",
+      path: ["landingSha"],
+    }),
+)
+export const PRAlreadyLandedSchema = z.preprocess(
+  normalizeV2Submitter,
+  PRQueueTerminalIdentitySchema.extend({
+    baseSha: GitShaSchema,
+    candidateSha: GitShaSchema,
+    candidateTreeSha: GitShaSchema,
+    baseTreeSha: GitShaSchema,
+    /** Missing only when a current terminal event closes a pre-identity legacy revision. */
+    submitter: TextSchema.optional(),
   })
+    .strict()
+    .refine(({ candidateTreeSha, baseTreeSha }) => candidateTreeSha === baseTreeSha, {
+      message: "candidateTreeSha must equal baseTreeSha",
+      path: ["candidateTreeSha"],
+    }),
+)
 const LegacyPRIntegratedSchema = z
   .object({
     pr: PRIdSchema,
@@ -419,12 +437,15 @@ const LegacyPRIntegratedSchema = z
     correlation: CorrelationSchema.optional(),
   })
   .strict()
-export const PRCanceledSchema = PRQueueTerminalIdentitySchema.extend({
-  by: TextSchema,
-  reason: TextSchema,
-  /** Submitter of the canceled revision — carried so terminal ball closures can route back to the author. */
-  actor: TextSchema.optional(),
-}).strict()
+export const PRCanceledSchema = z.preprocess(
+  normalizeV2Submitter,
+  PRQueueTerminalIdentitySchema.extend({
+    by: TextSchema,
+    reason: TextSchema,
+    /** Carried so terminal ball closures can route back to the revision submitter. */
+    submitter: TextSchema.optional(),
+  }).strict(),
+)
 const LegacyPRCanceledSchema = PRRevisionIdentitySchema.extend({
   correlation: CorrelationSchema.optional(),
   by: TextSchema,
@@ -450,27 +471,33 @@ const PRRegressionSchema: z.ZodType<PRRegressionFact> = z
     repairLandingSha: GitShaSchema,
   })
   .strict()
-const PRReviewFactSchema = z
-  .object({
-    pr: PRIdSchema,
-    revision: RevisionSchema,
-    headSha: GitShaSchema,
-    actor: TextSchema,
-    decision: PRReviewDecisionSchema,
-    ref: TextSchema.optional(),
-    note: TextSchema.optional(),
-  })
-  .strict()
-const PRCommentFactSchema = z
-  .object({
-    pr: PRIdSchema,
-    revision: RevisionSchema,
-    headSha: GitShaSchema,
-    actor: TextSchema,
-    note: TextSchema,
-    ref: TextSchema.optional(),
-  })
-  .strict()
+const PRReviewFactSchema = z.preprocess(
+  normalizeV2By,
+  z
+    .object({
+      pr: PRIdSchema,
+      revision: RevisionSchema,
+      headSha: GitShaSchema,
+      by: TextSchema,
+      decision: PRReviewDecisionSchema,
+      ref: TextSchema.optional(),
+      note: TextSchema.optional(),
+    })
+    .strict(),
+)
+const PRCommentFactSchema = z.preprocess(
+  normalizeV2By,
+  z
+    .object({
+      pr: PRIdSchema,
+      revision: RevisionSchema,
+      headSha: GitShaSchema,
+      by: TextSchema,
+      note: TextSchema,
+      ref: TextSchema.optional(),
+    })
+    .strict(),
+)
 const PRCheckRequestFactSchema = PRRevisionIdentitySchema.extend({ baseSha: GitShaSchema.optional() }).strict()
 const PRReviewRequestFactSchema = z
   .object({ pr: PRIdSchema, reviewers: z.array(TextSchema), requestedBy: TextSchema })
@@ -920,7 +947,9 @@ export function createBays(
         // loudly that the uncommitted worktree changes are NOT part of this
         // submission. The warning rides the result envelope (options.warnings)
         // AND the log stream — loud by construction, never a silent fallback.
-        const warning = `yrd: bay '${bay.id}' has uncommitted work; submitting the committed head only`
+        const warning =
+          `Bay '${bay.id}' has uncommitted work; the PR includes only committed changes. ` +
+          "The uncommitted changes remain in the Bay."
         options.warnings?.push(warning)
         log?.warn?.(warning, { action: "submit-dirty-worktree", bay: bay.id })
       }
@@ -1343,7 +1372,7 @@ function openBay(
     id,
     name: args.name,
     ...(args.issue === undefined ? {} : { issue: args.issue }),
-    ...(args.by === undefined ? {} : { actor: args.by }),
+    ...(args.by === undefined ? {} : { by: args.by }),
     ...(args.from === undefined ? {} : { from: args.from }),
     ...(args.baseSha === undefined ? {} : { baseSha: args.baseSha }),
     branch,
@@ -1505,14 +1534,14 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
     ...(replayComposition === undefined ? {} : { composition: replayComposition }),
     ...(args.receipt === undefined ? {} : { receipt: args.receipt }),
     revision,
-    actor: submitter,
+    submitter,
   }
   return {
     events: [
       event("pr/pushed", pushed),
       ...(resumesSubmission
         ? [
-            event("pr/submitted", { pr: id, revision, headSha: args.headSha, actor: submitter }),
+            event("pr/submitted", { pr: id, revision, headSha: args.headSha, submitter }),
             event("pr/checks-requested", {
               pr: id,
               revision,
@@ -1544,7 +1573,7 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
         event("pr/submitted", {
           pr: pr.id,
           ...revisionIdentity(pr),
-          actor: args.submitter ?? defaultSubmitter,
+          submitter: args.submitter ?? defaultSubmitter,
           ...(args.flow === undefined ? {} : { flow: args.flow }),
         }),
       ],
@@ -1604,7 +1633,7 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
     ...(args.correlation === undefined ? {} : { correlation: args.correlation }),
     ...(composition === undefined ? {} : { composition }),
     revision,
-    actor: submitter,
+    submitter,
   }
   return {
     events: [
@@ -1616,7 +1645,7 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
               pr: id,
               revision,
               headSha: args.headSha,
-              actor: submitter,
+              submitter,
               ...(args.flow === undefined ? {} : { flow: args.flow }),
               ...(args.correlation === undefined ? {} : { correlation: args.correlation }),
             }),
@@ -1683,7 +1712,7 @@ function terminalIdentity(pr: DeepReadonly<PR>) {
   return {
     ...revisionIdentity(pr),
     ...(pr.issue === undefined ? {} : { issueRef: pr.issue }),
-    ...(submitter === undefined ? {} : { actor: submitter }),
+    ...(submitter === undefined ? {} : { submitter }),
   }
 }
 
@@ -1876,7 +1905,7 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
               pr: pr.id,
               revision: successor.revision,
               headSha: successor.headSha,
-              actor: successorSubmitter,
+              submitter: successorSubmitter,
               ...(predecessor.correlation === undefined ? {} : { correlation: predecessor.correlation }),
             }),
             event("pr/checks-requested", {
@@ -1918,7 +1947,7 @@ function reviewPr(state: DeepReadonly<BayState>, args: PrReviewArgs) {
     pr: pr.id,
     revision: prRevisionNumber(pr),
     headSha: prHead(pr),
-    actor: args.by,
+    by: args.by,
     decision: args.decision,
     ...(args.ref === undefined ? {} : { ref: args.ref }),
     ...(args.note === undefined ? {} : { note: args.note }),
@@ -1932,7 +1961,7 @@ function commentPr(state: DeepReadonly<BayState>, args: PrCommentArgs) {
     pr: pr.id,
     revision: prRevisionNumber(pr),
     headSha: prHead(pr),
-    actor: args.by,
+    by: args.by,
     note: args.note,
     ...(args.ref === undefined ? {} : { ref: args.ref }),
   })
@@ -2066,7 +2095,7 @@ function reviewFact(
       const same =
         prior.revision === fact.revision &&
         prior.headSha === fact.headSha &&
-        prior.by === fact.actor &&
+        prior.by === fact.by &&
         prior.ref === fact.ref &&
         (kind === "review"
           ? "decision" in prior && "decision" in fact && prior.decision === fact.decision && prior.note === fact.note
@@ -2209,10 +2238,8 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
   switch (applied.name) {
     case "bay/opened": {
       const opened = BayOpenedSchema.parse(data)
-      const { actor: persistedBy, ...bay } = opened
       return saveBay({
-        ...bay,
-        ...(persistedBy === undefined ? {} : { by: persistedBy }),
+        ...opened,
         base: baseIdentity(opened.base),
         status: "opening",
         openedAt: applied.ts,
@@ -2263,7 +2290,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         base,
         ...(pushed.baseSha === undefined ? {} : { baseSha: pushed.baseSha }),
         ...(pushed.composition === undefined ? {} : { composition: pushed.composition }),
-        ...(parsed.success ? { submitter: parsed.data.actor } : {}),
+        ...(parsed.success ? { submitter: parsed.data.submitter } : {}),
         pushedAt: applied.ts,
         ...(pushed.correlation === undefined ? {} : { correlation: pushed.correlation }),
       }
@@ -2432,7 +2459,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         if (revision.n !== prRevisionNumber(pr) || revision.head !== prHead(pr)) return revision
         return {
           ...revision,
-          ...(parsed.success ? { submitter: parsed.data.actor } : {}),
+          ...(parsed.success ? { submitter: parsed.data.submitter } : {}),
           ...(correlation === undefined ? {} : { correlation: { ...correlation } }),
         }
       })
@@ -2654,16 +2681,14 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       const reviewed = PRReviewFactSchema.parse(data)
       const pr = current.prs[reviewed.pr]
       if (pr === undefined) return state
-      const { actor: persistedBy, ...fact } = reviewed
-      const review: PRReview = { ...fact, by: persistedBy, at: applied.ts }
+      const review: PRReview = { ...reviewed, at: applied.ts }
       return patchPR(pr, { reviews: [...pr.reviews, review] })
     }
     case "pr/commented": {
       const commented = PRCommentFactSchema.parse(data)
       const pr = current.prs[commented.pr]
       if (pr === undefined) return state
-      const { actor: persistedBy, ...fact } = commented
-      const comment: PRComment = { ...fact, by: persistedBy, at: applied.ts }
+      const comment: PRComment = { ...commented, at: applied.ts }
       return patchPR(pr, { comments: [...pr.comments, comment] })
     }
     case "pr/review-requested": {

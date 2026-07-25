@@ -1478,8 +1478,9 @@ function printBayResolution(
     via?: "issue" | "pr"
   }>,
   resolution: string,
+  write: (text: string) => unknown = io.stdout,
 ): void {
-  io.stdout(
+  write(
     `bay ${resolved.bay} → ${resolution} ${resolved.branch}, ` +
       `${resolved.issue === undefined ? "no issue linked" : `linked ${resolved.issue}`}, name ${resolved.name}` +
       `${resolved.via === undefined ? "" : `, via ${resolved.via}`}\n`,
@@ -1781,8 +1782,6 @@ async function prepareOwnedBay(
       `bay '${identity.bay}' is already open as ${existing.id}; ` + `attach with 'yrd in ${identity.bay} -- <command>'`,
     )
   }
-  printBayResolution(io, identity, identity.reattached ? "reattached" : "new")
-  logBayResolution(app, identity)
   const existingBayIds = new Set(app.bays.list().map((candidate) => candidate.id))
   let bay: Bay | undefined
   try {
@@ -1809,6 +1808,7 @@ async function prepareOwnedBay(
     // creation and revision intake remain explicit delivery actions.
     bay = await checkpointRunBay(app, bay, identity.claim, io)
     if (await preserveInterruptedRunBay(app, bay, "pre-child checkpoint", io)) return undefined
+    logBayResolution(app, identity)
   } catch (error) {
     bay ??= app.bays
       .list()
@@ -1833,7 +1833,12 @@ async function openPersistentBay(
   options: BayOpenOptions,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
-  return (await prepareOwnedBay(app, arg, options, io)) === undefined ? 1 : 0
+  const opened = await prepareOwnedBay(app, arg, options, io)
+  if (opened === undefined) return 1
+  if (opened.bay.path === undefined) throw new Error(`yrd: Bay '${opened.bay.id}' opened without a workspace path`)
+  printBayResolution(io, opened.identity, opened.identity.reattached ? "reattached" : "new", io.stderr)
+  io.stdout(`${opened.bay.path}\n`)
+  return 0
 }
 
 async function runBaySession(
@@ -1855,6 +1860,7 @@ async function runBaySession(
   if (provisioned === undefined) return 1
   const { identity } = provisioned
   let { bay } = provisioned
+  printBayResolution(io, identity, identity.reattached ? "reattached" : "new")
 
   let child: ProcessResult
   try {
@@ -2006,25 +2012,44 @@ async function closeBays(
   const bays = selectedBays(stateOf(app).bays, selectors, io.cwd ?? process.cwd(), "close")
   const closed: Bay[] = []
   for (const bay of bays) {
-    const withdrawing =
-      options.withdraw === true
-        ? app.bays.prs().filter((pr) => (pr.bay === bay.id || pr.branch === bay.branch) && isLivePR(pr))
-        : []
-    const result = await app.bays.close({
-      bay: bay.id,
-      ...(options.withdraw === true ? { withdraw: true } : {}),
-    })
-    if (withdrawing.length > 0) {
-      await app.queue.cancel({
-        prs: withdrawing.map((pr) => pr.id),
-        by: io.runner ?? "operator",
-        reason: "PR withdrawn",
+    try {
+      const withdrawing =
+        options.withdraw === true
+          ? app.bays.prs().filter((pr) => (pr.bay === bay.id || pr.branch === bay.branch) && isLivePR(pr))
+          : []
+      const result = await app.bays.close({
+        bay: bay.id,
+        ...(options.withdraw === true ? { withdraw: true } : {}),
       })
+      if (withdrawing.length > 0) {
+        await app.queue.cancel({
+          prs: withdrawing.map((pr) => pr.id),
+          by: io.runner ?? "operator",
+          reason: "PR withdrawn",
+        })
+      }
+      assertJobsPassed(await runJobs(app, app.jobs.requested(result), io), `bay '${bay.id}' close`)
+      const current = app.bays.get(bay.id)
+      if (current === undefined) throw new Error(`yrd: Bay '${bay.name}' disappeared while it was closing`)
+      closed.push(current)
+    } catch (error) {
+      const current = app.bays.get(bay.id)
+      const detail = errorDetail(error).replace(/^yrd:\s*/u, "")
+      const earlier = closed.length === 0 ? "" : `Closed ${closed.map((entry) => entry.name).join(", ")}. `
+      const message =
+        current?.status === "closed"
+          ? `${earlier}Bay '${bay.name}' closed, but the command did not finish: ${detail}`
+          : `${earlier}Bay '${bay.name}' was not closed: ${detail}`
+      const fact = failureFact(error)
+      throw createFailure(
+        {
+          kind: fact?.kind ?? "infrastructure",
+          code: fact?.code ?? "bay-close-failed",
+          message,
+        },
+        error,
+      )
     }
-    assertJobsPassed(await runJobs(app, app.jobs.requested(result), io), `bay '${bay.id}' close`)
-    const current = app.bays.get(bay.id)
-    if (current === undefined) throw new Error(`yrd: bay '${bay.id}' disappeared after close`)
-    closed.push(current)
   }
   const [only] = closed
   if (!jsonEnabled(options) && only !== undefined && closed.length === 1) {
@@ -4668,7 +4693,7 @@ function createResidentRecoveryReporter(log: YrdCliApp["log"]): Readonly<{
   let busy: ResidentBusyWindow | null = null
   const flush = (): void => {
     if (busy !== null && busy.suppressed > 0) {
-      log.warn?.("resident runner suppressed repeated busy-queue refusals", {
+      log.warn?.(`Queue ${busy.base} is still busy; skipped ${busy.suppressed} repeated messages.`, {
         action: "resident-busy-summary",
         base: busy.base,
         run: busy.run,
@@ -4807,7 +4832,7 @@ export async function refreshAdmittedQueueRevisions(
     const ids = runs.map(({ id }) => id)
     const revision = prRevisionNumber(pr)
     outcomes.push({ status: "recovered", pr: pr.id, revision, runs: ids })
-    app.log.info?.("resident queue recovered an interrupted freshness transition", {
+    app.log.info?.("Recovered an interrupted PR update.", {
       action: "queue-freshness-recovered",
       pr: pr.id,
       revision,
@@ -4862,7 +4887,7 @@ export async function refreshAdmittedQueueRevisions(
         headSha: refreshedRevision.head,
         patchId: recut.result.patchId,
       })
-      app.log.info?.("resident queue refreshed an admitted revision onto the current base", {
+      app.log.info?.("Updated a queued PR to the latest base.", {
         action: "queue-freshness-refreshed",
         pr: recut.current.id,
         revision: refreshedRevision.n,
@@ -4883,7 +4908,7 @@ export async function refreshAdmittedQueueRevisions(
           code: "recut-current-changed",
           message: failure.message,
         })
-        app.log.info?.("resident queue deferred freshness after the current revision changed", {
+        app.log.info?.("Skipped updating a queued PR because it changed.", {
           action: "queue-freshness-deferred",
           pr: candidate.id,
           revision: candidateRevision.n,
@@ -4903,7 +4928,7 @@ export async function refreshAdmittedQueueRevisions(
         code: failure.code,
         message: failure.message,
       })
-      app.log.warn?.("resident queue could not refresh an admitted revision", {
+      app.log.warn?.(`Could not update PR ${candidate.id} to the latest base; it remains queued.`, {
         action: "queue-freshness-refused",
         pr: candidate.id,
         revision: candidateRevision.n,
@@ -4939,7 +4964,7 @@ export async function residentRecoverySweep(
     reason: "resident lease-expiry sweep",
   })
   if (settled.length > 0) {
-    app.log.warn?.("resident runner settled lapsed runs via lease-expiry sweep", {
+    app.log.warn?.(`Stopped abandoned queue runs: ${settled.map((run) => run.id).join(", ")}.`, {
       action: "resident-recovery-sweep",
       reason: "runner lease expired",
       runs: settled.map((run) => run.id),
@@ -4962,7 +4987,7 @@ export async function followQueueRuns(
     // deprecation as a structured loggily warn — never a bare 'yrd:' stderr write,
     // since the resident's stdout is a log stream — then behave identically to
     // follow. Emitted exactly once, before the drain loop.
-    app.log.warn?.("deprecated: follow is the default; --watch is removed next release", {
+    app.log.warn?.("--watch is no longer needed; queue run already follows by default.", {
       action: "queue-run-watch-deprecated",
     })
   }
@@ -5543,7 +5568,7 @@ function addRootBayCommands(
     .command("sh [config]")
     .description("run $SHELL in a scoped Bay")
     .option("--issue <ref>", "link an issue without a positional")
-    .option("--pr <selector>", "continue an existing PR branch without recutting or submitting it")
+    .option("--pr <selector>", "continue an existing PR without creating or submitting a revision")
     .option("--bay <name>", "choose an issue-less or issue-linked Bay identity")
     .option("--keep", "leave a successful run open")
     .action(async (config, options) =>
@@ -5563,7 +5588,7 @@ function addRootBayCommands(
     .command("run [config] [command...]")
     .description("alias for bay run; run one scoped command (defaults to $SHELL)")
     .option("--issue <ref>", "link an issue without a positional")
-    .option("--pr <selector>", "continue an existing PR branch without recutting or submitting it")
+    .option("--pr <selector>", "continue an existing PR without creating or submitting a revision")
     .option("--bay <name>", "choose an issue-less or issue-linked Bay identity")
     .option("--keep", "leave a successful run open")
     .action(async (config, command, options) => {
@@ -5578,7 +5603,7 @@ function addRootBayCommands(
     .command("ag [config]")
     .description("run ag in a scoped Bay")
     .option("--issue <ref>", "link an issue without a positional")
-    .option("--pr <selector>", "continue an existing PR branch without recutting or submitting it")
+    .option("--pr <selector>", "continue an existing PR without creating or submitting a revision")
     .option("--bay <name>", "choose an issue-less or issue-linked Bay identity")
     .option("--keep", "leave a successful run open")
     .action(async (config, options) =>
@@ -5676,10 +5701,11 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (options) => listBays(installed(), options, io))
   bay
-    .command("open [config]")
+    .command("open")
+    .argument("[config]", "issue to link; omit for an anonymous Bay")
     .description("open and keep a Bay")
     .option("--issue <ref>", "link an issue without a positional")
-    .option("--pr <selector>", "continue an existing PR branch without recutting or submitting it")
+    .option("--pr <selector>", "continue an existing PR without creating or submitting a revision")
     .option("--bay <name>", "choose an issue-less or issue-linked Bay identity")
     .action(async (config, options) => {
       if ((io as RuntimeInvocationIO)[RuntimeChildArgv] !== undefined) {
@@ -5691,7 +5717,7 @@ function buildProgram(
     .command("run [config] [command...]")
     .description("run one scoped command (defaults to $SHELL)")
     .option("--issue <ref>", "link an issue without a positional")
-    .option("--pr <selector>", "continue an existing PR branch without recutting or submitting it")
+    .option("--pr <selector>", "continue an existing PR without creating or submitting a revision")
     .option("--bay <name>", "choose an issue-less or issue-linked Bay identity")
     .option("--keep", "leave a successful run open")
     .action(async (config, command, options) => {

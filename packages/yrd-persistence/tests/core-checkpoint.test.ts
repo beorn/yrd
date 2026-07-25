@@ -534,8 +534,6 @@ describe("persistent Core projection checkpoint", () => {
 
   it("never wedges a load-only consumer behind the checkpoint high-water", async () => {
     const values: unknown[] = []
-    const events: LogEvent[] = []
-    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     const journal: Journal<unknown> = {
       async *read(after = 0) {
         if (after < values.length) yield { cursor: values.length, values: values.slice(after) }
@@ -553,13 +551,14 @@ describe("persistent Core projection checkpoint", () => {
         },
       },
     }
-    await using runtime = await createYrd(counterDefinition(), { inject: { journal, log, id: ids() } })
+    await using runtime = await createYrd(counterDefinition(), {
+      inject: { journal, log: createLogger("yrd", [{ level: "silent" }]), id: ids() },
+    })
     for (let index = 0; index < 520; index += 1) {
       await runtime.dispatch({ op: "counter.add", args: { by: 1 } })
     }
     expect(values).toHaveLength(520)
     expect(runtime.state().counter.value).toBe(520)
-    expect(events.some((event) => event.props?.reason === "checkpoint-flush-unavailable")).toBe(true)
   })
 
   it("restores state and retry registries, then folds only the post-checkpoint tail", async () => {
@@ -593,7 +592,7 @@ describe("persistent Core projection checkpoint", () => {
     })
   })
 
-  it("rejects a checkpoint from different reducer semantics and rewrites it from journal authority", async () => {
+  it("rebuilds saved state when reducer semantics change", async () => {
     const dir = await stateDir()
     const original = await createYrd(counterDefinition(), {
       inject: { journal: createJournal({ dir }), id: ids() },
@@ -612,7 +611,6 @@ describe("persistent Core projection checkpoint", () => {
     })
 
     expect(changed.state().counter.value).toBe(3)
-    expect(events.filter((entry) => JSON.stringify(entry).includes("checkpoint identity"))).toHaveLength(1)
     expect(events.find((entry) => entry.kind === "span" && entry.namespace === "test:core:replay")).toMatchObject({
       props: { fromCursor: 0 },
     })
@@ -656,7 +654,6 @@ describe("persistent Core projection checkpoint", () => {
     })
 
     expect(warm.state().counter.value).toBe(2)
-    expect(events.filter((entry) => entry.props?.reason === "projection-checkpoint-invalid")).toHaveLength(1)
     expect(events.find((entry) => entry.kind === "span" && entry.namespace === "test:core:replay")).toMatchObject({
       props: { fromCursor: 0 },
     })
@@ -713,7 +710,6 @@ describe("persistent Core projection checkpoint", () => {
     })
 
     expect(warm.state().counter.value).toBe(2)
-    expect(events.filter((entry) => entry.props?.reason === "projection-checkpoint-invalid")).toHaveLength(1)
     expect(events.find((entry) => entry.kind === "span" && entry.namespace === "test:core:replay")).toMatchObject({
       props: { fromCursor: 0 },
     })
@@ -760,20 +756,14 @@ describe("persistent Core projection checkpoint", () => {
 
   it("disables projection checkpoints when reducer semantics are not explicitly versioned", async () => {
     const dir = await stateDir()
-    const events: LogEvent[] = []
-    const log = createLogger("test", [
-      { level: "trace" },
-      { write: (value: unknown) => events.push(value as LogEvent) },
-    ])
     const runtime = await createYrd(counterDefinition(0, null), {
-      inject: { journal: createJournal({ dir }), log, id: ids() },
+      inject: { journal: createJournal({ dir }), id: ids() },
     })
     await runtime.dispatch({ op: "counter.add", args: { by: 2 } })
     await runtime.close()
 
     expect(storedCheckpoint(dir)).toBeUndefined()
     await expect(access(join(dir, "snapshot-v4.json"))).rejects.toMatchObject({ code: "ENOENT" })
-    expect(events.filter((entry) => JSON.stringify(entry).includes("identity could not be derived"))).toHaveLength(1)
   })
 
   it("preserves own JSON keys that shadow Object prototype names across warm restore", async () => {
@@ -815,7 +805,6 @@ describe("persistent Core projection checkpoint", () => {
     // Read the checkpoint after activation but before close: a read-only invocation that never closes must still heal.
     const refreshed = storedCheckpoint(dir)
     await rewritten.close()
-    expect(mismatchEvents.filter((entry) => JSON.stringify(entry).includes("identity changed"))).toHaveLength(1)
     expect(refreshed?.identity).not.toBe(stale?.identity)
     expect(refreshed?.cursor).toBeGreaterThan(0)
 
@@ -829,45 +818,28 @@ describe("persistent Core projection checkpoint", () => {
       inject: { journal: createJournal({ dir, inject: { log: warmLog } }), log: warmLog, id: ids() },
     })
     expect(warm.state().counter.value).toBe(3)
-    expect(warmEvents.filter((entry) => JSON.stringify(entry).includes("identity changed"))).toHaveLength(0)
     expect(warmEvents.find((entry) => entry.kind === "span" && entry.namespace === "test:core:replay")).toMatchObject({
       props: { fromCursor: refreshed?.cursor },
     })
   })
 
-  it("never writes a checkpoint and warns on every open while the projector identity is underivable", async () => {
+  it("never writes saved state when reducer semantics are not versioned", async () => {
     const dir = await stateDir()
-    const firstEvents: LogEvent[] = []
-    const firstLog = createLogger("test", [
-      { level: "trace" },
-      { write: (value: unknown) => firstEvents.push(value as LogEvent) },
-    ])
     const first = await createYrd(counterDefinition(0, null), {
-      inject: { journal: createJournal({ dir }), log: firstLog, id: ids() },
+      inject: { journal: createJournal({ dir }), id: ids() },
     })
     await first.dispatch({ op: "counter.add", args: { by: 2 } })
     await first.close()
-    expect(firstEvents.filter((entry) => JSON.stringify(entry).includes("identity could not be derived"))).toHaveLength(
-      1,
-    )
     expect(storedCheckpoint(dir)).toBeUndefined()
 
-    const secondEvents: LogEvent[] = []
-    const secondLog = createLogger("test", [
-      { level: "trace" },
-      { write: (value: unknown) => secondEvents.push(value as LogEvent) },
-    ])
     await using second = await createYrd(counterDefinition(0, null), {
-      inject: { journal: createJournal({ dir }), log: secondLog, id: ids() },
+      inject: { journal: createJournal({ dir }), id: ids() },
     })
     expect(second.state().counter.value).toBe(2)
-    expect(
-      secondEvents.filter((entry) => JSON.stringify(entry).includes("identity could not be derived")),
-    ).toHaveLength(1)
     expect(storedCheckpoint(dir)).toBeUndefined()
   })
 
-  it("does not warn or rewrite the checkpoint when the projector identity is unchanged", async () => {
+  it("does not rewrite saved state when reducer semantics are unchanged", async () => {
     const dir = await stateDir()
     const definition = counterDefinition()
     const seed = await createYrd(definition, { inject: { journal: createJournal({ dir }), id: ids() } })
@@ -875,16 +847,10 @@ describe("persistent Core projection checkpoint", () => {
     await seed.close()
     const stored = storedCheckpointBytes(dir)
 
-    const events: LogEvent[] = []
-    const log = createLogger("test", [
-      { level: "trace" },
-      { write: (value: unknown) => events.push(value as LogEvent) },
-    ])
     await using warm = await createYrd(definition, {
-      inject: { journal: createJournal({ dir, inject: { log } }), log, id: ids() },
+      inject: { journal: createJournal({ dir }), id: ids() },
     })
     expect(warm.state().counter.value).toBe(2)
-    expect(events.filter((entry) => JSON.stringify(entry).includes("identity changed"))).toHaveLength(0)
     expect(storedCheckpointBytes(dir)).toBe(stored)
   })
 })

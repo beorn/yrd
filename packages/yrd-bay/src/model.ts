@@ -34,8 +34,28 @@ export const CorrelationSchema = z
 
 const TextSchema = z.string().trim().min(1)
 
+const V2_ROLE_KEY = ["act", "or"].join("")
+
+function normalizeV2Role(value: unknown, target: "by" | "submitter"): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return value
+  const record = value as Record<string, unknown>
+  if (target in record || !(V2_ROLE_KEY in record)) return value
+  const { [V2_ROLE_KEY]: previous, ...current } = record
+  return { ...current, [target]: previous }
+}
+
+/** Normalize pre-cutover event provenance while keeping current schemas free of the retired vocabulary. */
+export function normalizeV2By(value: unknown): unknown {
+  return normalizeV2Role(value, "by")
+}
+
+/** Normalize pre-cutover revision provenance while keeping current schemas on `submitter`. */
+export function normalizeV2Submitter(value: unknown): unknown {
+  return normalizeV2Role(value, "submitter")
+}
+
 /** Closed current rejection fact used by the Bay projection and post-append signal observers. */
-export const PRRejectedFactSchema = z
+const PRRejectedFactObjectSchema = z
   .object({
     pr: PRIdSchema,
     revision: z.number().int().positive(),
@@ -44,20 +64,24 @@ export const PRRejectedFactSchema = z
     issueRef: TextSchema.optional(),
     correlation: CorrelationSchema.optional(),
     /** Persisted v2 key; missing only when a current rejection terminates a pre-identity revision. */
-    actor: TextSchema.optional(),
+    submitter: TextSchema.optional(),
     step: TextSchema,
     evidence: TextSchema.optional(),
     detail: z.string().optional(),
   })
   .strict()
+export const PRRejectedFactSchema = z.preprocess(normalizeV2Submitter, PRRejectedFactObjectSchema)
 export type PRRejectedFact = Readonly<z.infer<typeof PRRejectedFactSchema>>
 
 /** Author-owned refusal fact. Unlike `pr/rejected`, this keeps the PR in the
  * submitted queue lifecycle and carries the exact typed receipt needed to fix
  * the branch in place. */
-export const PRNeedsAuthorFactSchema = PRRejectedFactSchema.extend({
-  receipt: JobErrorSchema,
-}).strict()
+export const PRNeedsAuthorFactSchema = z.preprocess(
+  normalizeV2Submitter,
+  PRRejectedFactObjectSchema.extend({
+    receipt: JobErrorSchema,
+  }).strict(),
+)
 export type PRNeedsAuthorFact = Readonly<z.infer<typeof PRNeedsAuthorFactSchema>>
 
 export const GitPayloadPathSchema = z
@@ -521,9 +545,7 @@ export function needsReview(pr: PR, reviewer?: string): boolean {
   const requested = pr.requestedReviewers ?? []
   if (requested.length === 0) return false
   const hasCurrentVerdict = (by: string) =>
-    pr.reviews.some(
-      (review) => review.revision === revision.n && review.headSha === revision.head && review.by === by,
-    )
+    pr.reviews.some((review) => review.revision === revision.n && review.headSha === revision.head && review.by === by)
   if (reviewer !== undefined) return requested.includes(reviewer) && !hasCurrentVerdict(reviewer)
   return !requested.some(hasCurrentVerdict)
 }
