@@ -120,13 +120,14 @@ describe("yrd bay run", { timeout: 30_000 }, () => {
     const previousHead = await git(repo, "rev-parse", `refs/remotes/origin/${BRANCH}`)
 
     const preCommit = join(repo, ".git", "hooks", "pre-commit")
-    await writeFile(preCommit, "#!/bin/sh\nexit 1\n")
+    await writeFile(preCommit, "#!/bin/sh\necho 'blocked by test pre-commit hook' >&2\nexit 1\n")
     await chmod(preCommit, 0o755)
 
     const dirty = output(repo)
     const exitCode = await yrd(repo, dirty.io, "bay", "run", CLAIM, "--", "sh", "-c", "printf later > scratch.txt")
     expect(exitCode).not.toBe(0)
-    expect(dirty.stderr()).toMatch(/commit|checkpoint/iu)
+    expect(dirty.stderr()).toContain("scratch.txt")
+    expect(dirty.stderr()).toContain("blocked by test pre-commit hook")
     expect(await git(repo, "rev-parse", `refs/remotes/origin/${BRANCH}`)).toBe(previousHead)
 
     const bays = output(repo)

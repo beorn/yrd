@@ -403,8 +403,15 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
         const status = await git.run(input.path, ["status", "--porcelain", "--ignore-submodules=none"])
         const wip = status.stdout.trim() !== ""
         if (wip) {
-          await git.run(input.path, ["add", "-A"])
-          await git.run(input.path, ["commit", "-m", `wip: ${input.claim}`])
+          try {
+            await git.run(input.path, ["add", "-A"])
+            await git.run(input.path, ["commit", "-m", `wip: ${input.claim}`])
+          } catch (cause) {
+            const reason = cause instanceof Error ? cause.message : String(cause)
+            throw new Error(`could not commit dirty workspace '${input.path}':\n${status.stdout.trim()}\n${reason}`, {
+              cause,
+            })
+          }
         }
         const headSha = await git.commit(input.path, "HEAD")
         const trackingRef = `refs/remotes/origin/${input.branch}`
