@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process"
-import { readFileSync } from "node:fs"
+import { accessSync, constants, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import distribution from "../../../package.json" with { type: "json" }
 
@@ -7,8 +7,8 @@ import distribution from "../../../package.json" with { type: "json" }
 export const YRD_VERSION = distribution.version
 const GIT_TIMEOUT_MS = 5_000
 
-function yrdSourceRoot(): string | undefined {
-  let directory = import.meta.dirname
+export function yrdSourceRoot(start = import.meta.dirname): string | undefined {
+  let directory = start
   for (;;) {
     try {
       const candidate = JSON.parse(readFileSync(join(directory, "package.json"), "utf8")) as { name?: unknown }
@@ -33,6 +33,13 @@ function sourceGit(args: readonly string[]): { status: number; stdout: string } 
   for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key]
   const root = yrdSourceRoot()
   if (root === undefined) return { status: 1, stdout: "" }
+  try {
+    accessSync(join(root, ".git"), constants.F_OK)
+  } catch {
+    // An installed package nested under a consumer repository must never
+    // inherit the consumer's HEAD as Yrd's runtime identity.
+    return { status: 1, stdout: "" }
+  }
   const result = spawnSync("git", ["-C", root, ...args], {
     cwd: root,
     encoding: "utf8",

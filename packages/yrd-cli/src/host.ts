@@ -61,6 +61,7 @@ import {
   readInstalledBaselines,
   removeInstalledBaseline,
   runtimeBaselineDrift,
+  runtimeImplementationSourceDrift,
   writeInstalledBaseline,
 } from "./installed-baseline.ts"
 import { createExclusive, createJournal, createReadOnlyJournal, importOrphanJournal } from "@yrd/persistence"
@@ -69,6 +70,12 @@ import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import type { ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
 import { cleanGitEnvironment } from "./git-environment.ts"
+import {
+  authoritativeImplementationSource,
+  implementationSourceIdentity,
+  sourceRepositoryFor,
+  type ImplementationSourceRepository,
+} from "./implementation-source.ts"
 import { withGitIndexLockRetry } from "./git-index-lock-retry.ts"
 import {
   loadYrdConfig,
@@ -121,6 +128,12 @@ export type DefaultYrdAppOptions = Readonly<{
   /** Runtime Runner identity recorded on fresh Jobs. */
   runnerId?: string
 }>
+
+type DefaultYrdRuntimeAppOptions = DefaultYrdAppOptions &
+  Readonly<{
+    /** Git identity of the native implementation actually loaded by this host. */
+    implementationSource?: string
+  }>
 
 function validateConfig(config: ResolvedYrdProjectConfig): void {
   for (const name of config.steps) {
@@ -305,6 +318,7 @@ function configuredStepDescriptors(
   fixed: Readonly<{ repo: string; stateDir: string; baysRoot: string }>,
   config: ResolvedYrdProjectConfig,
   mergeCommand: readonly string[] | undefined,
+  implementationSource?: string,
 ): readonly InstalledStep[] {
   const toolchain = hostToolchainFingerprint()
   const mergeIndex = config.steps.indexOf("merge")
@@ -327,8 +341,10 @@ function configuredStepDescriptors(
           noProgressMs,
           toolchain,
           resolvedCommand: mergeCommand,
+          ...(mergeCommand === undefined && implementationSource !== undefined ? { implementationSource } : {}),
         }),
         kind,
+        ...(implementationSource === undefined ? {} : { implementationSource }),
       }
     }
     if (kind === "check") {
@@ -372,15 +388,26 @@ async function reloadConfiguredStepDescriptors(
   repository: YrdRepository,
   process: Pick<Process, "run">,
   configPath?: string,
+  sourceRepository?: ImplementationSourceRepository,
 ): Promise<readonly InstalledStep[]> {
   const loaded = await loadRepositoryConfig(repository, process, configPath)
   validateConfig(loaded.config)
+  const target = await resolveQueueTarget(process, repository.repo, loaded.config.base, loaded.config.base, {
+    refreshAuthority: true,
+  })
+  const implementationSource = await authoritativeImplementationSource(
+    process,
+    repository.repo,
+    target.sha,
+    sourceRepository,
+  )
   const mergeCommand =
     loaded.config.definitions.merge?.run === undefined ? undefined : shellCommand(loaded.config.definitions.merge.run)
   return configuredStepDescriptors(
     { repo: repository.repo, stateDir: repository.stateDir, baysRoot: repository.baysRoot },
     loaded.config,
     mergeCommand,
+    implementationSource,
   )
 }
 
@@ -411,13 +438,14 @@ function integratedRunner(
 }
 
 function configuredQueueSteps(
-  options: DefaultYrdAppOptions,
+  options: DefaultYrdRuntimeAppOptions,
   mergeCommand: readonly string[] | undefined,
 ): readonly RuntimeStep[] {
   const descriptors = configuredStepDescriptors(
     { repo: options.repo, stateDir: options.stateDir, baysRoot: options.baysRoot },
     options.config,
     mergeCommand,
+    options.implementationSource,
   )
   return options.config.steps.map((name, index) => {
     const config = options.config.definitions[name] ?? { runner: "local" as const }
@@ -446,7 +474,12 @@ function configuredQueueSteps(
                   : { environmentPassthrough: config.environmentPassthrough }),
                 ...(options.config.refuse === undefined ? {} : { refuse: options.config.refuse }),
               }),
-          { revision },
+          {
+            revision,
+            ...(descriptor.implementationSource === undefined
+              ? {}
+              : { implementationSource: descriptor.implementationSource }),
+          },
         ),
       )
     }
@@ -660,7 +693,7 @@ function defaultContestAdapters(options: DefaultYrdAppOptions): {
 }
 
 /** Compose the built-in workflow from immutable plugins and injected resources. */
-export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promise<YrdCliApp> {
+async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions): Promise<YrdCliApp> {
   validateConfig(options.config)
   const flowConfig = options.config.flows === undefined ? undefined : defineConfig(...options.config.flows)
   const mergeCommand =
@@ -755,12 +788,18 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
   })
 }
 
+export function createDefaultYrdApp(options: DefaultYrdAppOptions): Promise<YrdCliApp> {
+  return createDefaultYrdRuntimeApp(options)
+}
+
 export type YrdHost = Readonly<{
   app: YrdCliApp
   repository: YrdRepository
   config: ResolvedYrdProjectConfig
   receiver: GitPushReceiver
   process: Process
+  /** Native implementation identity captured exactly once during host startup. */
+  implementationSource?: string
   services: YrdCliServices
   drain(): Promise<void>
   /** Releases the owned app, process, and scope. Idempotent with async disposal. */
@@ -793,6 +832,12 @@ function queueAdministration(
   defaultBase: string,
   deriveConfiguredSteps: () => Promise<readonly InstalledStep[]>,
   runtimeSteps: () => readonly InstalledStep[],
+  implementationSource:
+    | Readonly<{
+        loaded: string
+        current(): Promise<string | undefined>
+      }>
+    | undefined,
 ): YrdCliQueueAdministration {
   const inspect = async (base = defaultBase) => {
     const baseSha = await resolveCommit(process, repository.repo, base)
@@ -811,17 +856,26 @@ function queueAdministration(
       // agree is the runtime leg proven, so a resident built before another
       // process's migration fails loud instead of certifying baseline == disk
       // while it still executes the old steps.
-      const [baselines, current] = await Promise.all([
+      const [baselines, current, workingSource] = await Promise.all([
         readInstalledBaselines(repository.stateDir),
         deriveConfiguredSteps(),
+        implementationSource?.current(),
       ])
       const runtime = runtimeSteps()
-      const findings = Object.values(baselines).flatMap((baseline) => {
-        const configDrift = installedBaselineDrift(baseline, current)
-        if (configDrift !== undefined) return [configDrift]
-        const runtimeDrift = runtimeBaselineDrift(baseline, runtime)
-        return runtimeDrift === undefined ? [] : [runtimeDrift]
-      })
+      const pinnedSource = current.find((step) => step.kind === "merge")?.implementationSource
+      const sourceDrift =
+        implementationSource === undefined
+          ? undefined
+          : runtimeImplementationSourceDrift(implementationSource.loaded, workingSource, pinnedSource)
+      const findings = [
+        ...(sourceDrift === undefined ? [] : [sourceDrift]),
+        ...Object.values(baselines).flatMap((baseline) => {
+          const configDrift = installedBaselineDrift(baseline, current)
+          if (configDrift !== undefined) return [configDrift]
+          const runtimeDrift = runtimeBaselineDrift(baseline, runtime)
+          return runtimeDrift === undefined ? [] : [runtimeDrift]
+        }),
+      ]
       return { findings }
     },
     async provision(base) {
@@ -1244,6 +1298,7 @@ async function createYrdRuntimeHost(
     if (resident !== undefined) residentLease = await acquireResidentRunner(repository.stateDir, resident, log)
     using _setupSpan = log.span?.("setup", { phase: "pre-worktree", repo: repository.repo })
     const loaded = await loadRepositoryConfig(repository, process, options.configPath)
+    const discoveredImplementationSource = sourceRepositoryFor(import.meta.url)
     const receiver =
       mode === "active"
         ? await createGitPushReceiver({
@@ -1307,7 +1362,17 @@ async function createYrdRuntimeHost(
         log,
       })
     }
-    app = await createDefaultYrdApp({
+    const implementationSource = await implementationSourceIdentity(process, discoveredImplementationSource)
+    if (resident !== undefined && implementationSource === undefined) {
+      raiseFailure(
+        "refusal",
+        "runtime-source-unavailable",
+        "yrd: resident runner cannot determine the implementation source it loaded; refusing to start",
+      )
+    }
+    const implementationSourceRepository =
+      implementationSource === undefined ? undefined : discoveredImplementationSource
+    app = await createDefaultYrdRuntimeApp({
       repo: repository.repo,
       stateDir: repository.stateDir,
       baysRoot: repository.baysRoot,
@@ -1320,6 +1385,7 @@ async function createYrdRuntimeHost(
       log,
       candidatePool,
       runnerId: resident?.id ?? `yrd-cli:${globalThis.process.pid}`,
+      ...(implementationSource === undefined ? {} : { implementationSource }),
     })
     if (mode === "active") {
       // Cutover migration: a pre-settlement (v1) journal can leave non-terminal
@@ -1353,10 +1419,16 @@ async function createYrdRuntimeHost(
         process,
         repository,
         loaded.config.base,
-        () => reloadConfiguredStepDescriptors(repository, process, options.configPath),
+        () => reloadConfiguredStepDescriptors(repository, process, options.configPath, implementationSourceRepository),
         // The RUNTIME leg must come from the live runtime object — the steps
         // this process actually installed — never re-derived from config.
         () => runtimeApp.queue.steps(),
+        implementationSource === undefined || implementationSourceRepository === undefined
+          ? undefined
+          : {
+              loaded: implementationSource,
+              current: () => implementationSourceIdentity(process, implementationSourceRepository),
+            },
       ),
       recut: createGitPRRecutter({ inject: { process }, repo: repository.repo, env }),
       journal: Object.freeze({
@@ -1377,6 +1449,7 @@ async function createYrdRuntimeHost(
       config: loaded.config,
       receiver,
       process,
+      ...(implementationSource === undefined ? {} : { implementationSource }),
       services,
       drain,
       close,
@@ -1403,7 +1476,11 @@ async function runReceiverHook(mode: "pre-receive" | "post-receive", env: NodeJS
     const receiver = await loadGitPushReceiver(resolve(globalThis.process.cwd(), gitDir), runtimeProcess)
     const repository = await discoverYrdRepository({ cwd: receiver.mainRepo, env, process: runtimeProcess })
     const loaded = await loadRepositoryConfig(repository, runtimeProcess)
-    app = await createDefaultYrdApp({
+    const implementationSource = await implementationSourceIdentity(
+      runtimeProcess,
+      sourceRepositoryFor(import.meta.url),
+    )
+    app = await createDefaultYrdRuntimeApp({
       repo: repository.repo,
       stateDir: repository.stateDir,
       baysRoot: repository.baysRoot,
@@ -1413,6 +1490,7 @@ async function runReceiverHook(mode: "pre-receive" | "post-receive", env: NodeJS
       config: loaded.config,
       scope,
       log,
+      ...(implementationSource === undefined ? {} : { implementationSource }),
     })
     const runtimeApp = app
     await runReceiverHookFromEnvironment(mode, {
@@ -1611,6 +1689,9 @@ export async function runYrdProcess(
             cwd: activeHost.repository.worktree,
             artifactRoot: join(activeHost.repository.stateDir, "artifacts"),
             ...(runner === undefined ? {} : { runner: runner.id }),
+            ...(runner === undefined || activeHost.implementationSource === undefined
+              ? {}
+              : { implementationSource: activeHost.implementationSource }),
             concurrency: io.concurrency ?? activeHost.config.contest.concurrency,
             resolveRevision: (ref, cwd) =>
               io.resolveRevision === undefined

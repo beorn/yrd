@@ -469,6 +469,7 @@ function outputIO(overrides: Partial<YrdCliIO> = {}) {
     cwd: "/repo",
     runner: "cli-test",
     leaseMs: 60_000,
+    implementationSource: `git:${"1".repeat(40)}`,
     now: () => Date.parse("2026-07-09T12:01:00.000Z"),
     ...overrides,
   }
@@ -5156,6 +5157,7 @@ describe("runYrd", () => {
       pid: 4242,
       startedAt: "2026-07-13T11:00:00.000Z",
       lastTickAt: "2026-07-13T11:59:55.000Z",
+      implementationSource: "git:35562d1579f140669a453b310340582b8cc1b42f",
     }
     writeFileSync(statusPath, JSON.stringify(runner))
 
@@ -5178,6 +5180,27 @@ describe("runYrd", () => {
       })
       expect(await runYrd(app, yrd("queue", "list"), stale.io), stale.stderr()).toBe(0)
       expect(stale.stdout()).toContain("RUNNER STALE")
+      expect(stale.stdout()).toContain(runner.implementationSource)
+
+      const { implementationSource: _legacySource, ...legacyRunner } = runner
+      writeFileSync(statusPath, JSON.stringify(legacyRunner))
+      const legacy = outputIO({
+        cwd: repo,
+        now: () => Date.parse("2026-07-13T12:00:00.000Z"),
+        resolveQueueTarget,
+      })
+      expect(await runYrd(app, yrd("queue", "list", "--json"), legacy.io), legacy.stderr()).toBe(0)
+      expect(JSON.parse(legacy.stdout())).toMatchObject({
+        command: "queue.list",
+        projection: { runner: { implementationSource: "unknown" } },
+      })
+      const legacyHuman = outputIO({
+        cwd: repo,
+        now: () => Date.parse("2026-07-13T12:00:00.000Z"),
+        resolveQueueTarget,
+      })
+      expect(await runYrd(app, yrd("queue", "list"), legacyHuman.io), legacyHuman.stderr()).toBe(0)
+      expect(legacyHuman.stdout()).toContain("source unknown")
 
       rmSync(statusPath)
       const absent = outputIO({ cwd: repo, resolveQueueTarget })
@@ -5360,10 +5383,13 @@ describe("runYrd", () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-heartbeat-"))
     execFileSync("git", ["init", "-q", repo])
     const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
+    const implementationSource = "git:35562d1579f140669a453b310340582b8cc1b42f"
     let now = Date.parse("2026-07-13T12:00:00.000Z")
     try {
       const heartbeat = await runInternals.startResidentRunnerHeartbeat(
-        outputIO({ cwd: repo, runner: `yrd-cli:${process.pid}`, now: () => now }).io,
+        Object.assign(outputIO({ cwd: repo, runner: `yrd-cli:${process.pid}`, now: () => now }).io, {
+          implementationSource,
+        }),
         { intervalMs: 5 },
       )
       try {
@@ -5373,6 +5399,7 @@ describe("runYrd", () => {
           lastTickAt: "2026-07-13T12:00:00.000Z",
           // The dedicated RUNNER box renders stale-runner details as `[pid] <command>`.
           command: expect.any(String),
+          implementationSource,
         })
         now += 1_000
         await vi.waitFor(
@@ -5402,6 +5429,35 @@ describe("runYrd", () => {
       expect(runInternals.planResidentRunnerReclaim(prior, process.pid + 1, () => false)).toEqual({
         reclaim: true,
         runner: `yrd-cli:${process.pid}`,
+      })
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
+  it("refuses a resident heartbeat when startup could not identify the loaded implementation", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "yrd-runner-heartbeat-unknown-"))
+    execFileSync("git", ["init", "-q", repo])
+    try {
+      const attempt = await runInternals
+        .startResidentRunnerHeartbeat(
+          outputIO({ cwd: repo, runner: `yrd-cli:${process.pid}`, implementationSource: undefined }).io,
+          {
+            intervalMs: 5,
+          },
+        )
+        .then(
+          (heartbeat) => ({ heartbeat }),
+          (error: unknown) => ({ error }),
+        )
+      if ("heartbeat" in attempt) await attempt.heartbeat.close(false)
+      expect(attempt).toMatchObject({
+        error: {
+          failure: {
+            kind: "refusal",
+            code: "runtime-source-unavailable",
+          },
+        },
       })
     } finally {
       rmSync(repo, { recursive: true, force: true })

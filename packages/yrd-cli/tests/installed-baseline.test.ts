@@ -3,8 +3,8 @@
  * @level l2
  * @consumer @yrd/cli host
  */
-import { createHash } from "node:crypto"
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
+import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -49,7 +49,7 @@ function baseline(steps: readonly InstalledStep[], base = "main"): InstalledBase
   }
 }
 
-function preComponentPromotionNativeMergeRevision(): string {
+function historicalV3NativeMergeRevision(env?: Readonly<Record<string, string>>): string {
   return createHash("sha256")
     .update(
       JSON.stringify({
@@ -58,6 +58,7 @@ function preComponentPromotionNativeMergeRevision(): string {
         stateDir: "/repo/.git/yrd",
         name: "merge",
         runner: "local",
+        env,
         classification: "carrier",
         mode: "delta",
         timeoutMs: 60_000,
@@ -110,8 +111,8 @@ describe("installed baseline drift", () => {
     expect(finding?.message).toContain("Restart this queue runner process")
   })
 
-  it("fences a resident whose native merge predates post-landing component promotion (22366)", () => {
-    const currentRevision = queueStepRevision({
+  it("fences a resident when the authoritative native-merge source advances after startup (22366)", () => {
+    const input = {
       repo: "/repo",
       stateDir: "/repo/.git/yrd",
       name: "merge",
@@ -119,17 +120,64 @@ describe("installed baseline drift", () => {
       timeoutMs: 60_000,
       noProgressMs: 600_000,
       toolchain: { bun: "1.3.11", node: "24.0.0", platform: "darwin", arch: "arm64" },
+    } as const
+    const loadedSource = "git:35562d1579f140669a453b310340582b8cc1b42f"
+    const pinnedSource = "git:748dbd87dd6a30a5d4f41de4459b01d8014d791f"
+    const staleRuntimeRevision = queueStepRevision({
+      ...input,
+      implementationSource: loadedSource,
     })
-    const installed = [step("merge", currentRevision, { kind: "merge" })]
+    const currentRevision = queueStepRevision({
+      ...input,
+      implementationSource: pinnedSource,
+    })
+    expect(
+      queueStepRevision({
+        ...input,
+        resolvedCommand: ["true"],
+        implementationSource: loadedSource,
+      }),
+    ).toBe(
+      queueStepRevision({
+        ...input,
+        resolvedCommand: ["true"],
+        implementationSource: pinnedSource,
+      }),
+    )
+    const installed = [step("merge", currentRevision, { kind: "merge", implementationSource: pinnedSource })]
+    const staleRuntime = [step("merge", staleRuntimeRevision, { kind: "merge", implementationSource: loadedSource })]
+
+    // R2715 ran under a resident loaded from the prior Yrd pin. The runtime
+    // identity must stay bound to that startup source while fresh derivation
+    // observes the authoritative pin advance.
+    const finding = runtimeBaselineDrift(baseline(installed), staleRuntime)
+    expect(finding).toMatchObject({
+      code: "runtime-drift",
+      message: expect.stringContaining("Restart this queue runner process"),
+    })
+    expect(finding?.message).toContain(currentRevision.slice(0, 8))
+    expect(finding?.message).toContain(staleRuntimeRevision.slice(0, 8))
+    expect(finding?.message).toContain(pinnedSource)
+    expect(finding?.message).toContain(loadedSource)
+  })
+
+  it("keeps the one-time config epoch observable to pre-source-identity v3 residents (22366)", () => {
     const staleRuntime = [
-      step("merge", preComponentPromotionNativeMergeRevision(), {
+      step("merge", historicalV3NativeMergeRevision(), {
         kind: "merge",
       }),
     ]
+    const migrated = [
+      step(
+        "merge",
+        historicalV3NativeMergeRevision({
+          NATIVE_MERGE_IMPLEMENTATION: "post-landing-component-main-v1",
+        }),
+        { kind: "merge" },
+      ),
+    ]
 
-    // R2715 ran under a resident loaded before component promotion existed.
-    // The runtime must become distinguishable before it can report root-only success.
-    expect(runtimeBaselineDrift(baseline(installed), staleRuntime)).toMatchObject({
+    expect(runtimeBaselineDrift(baseline(migrated), staleRuntime)).toMatchObject({
       code: "runtime-drift",
       message: expect.stringContaining("Restart this queue runner process"),
     })

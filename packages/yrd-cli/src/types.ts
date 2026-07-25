@@ -104,6 +104,8 @@ export type YrdCliIO = {
   /** Process-host-owned step artifact root used by the live read-only output projection. */
   artifactRoot?: string
   runner?: string
+  /** Host-owned implementation identity captured before a resident starts serving. */
+  implementationSource?: string
   leaseMs?: number
   concurrency?: number
   now?: () => number

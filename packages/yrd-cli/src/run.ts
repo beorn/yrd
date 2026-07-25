@@ -271,6 +271,17 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
   if (record.clean !== undefined && typeof record.clean !== "boolean") {
     raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner clean flag is invalid")
   }
+  if (
+    record.implementationSource !== undefined &&
+    (typeof record.implementationSource !== "string" ||
+      !/^(?:dirty|git):[0-9a-f]{40,64}$/u.test(record.implementationSource))
+  ) {
+    raiseFailure(
+      "infrastructure",
+      "resident-runner-status-invalid",
+      "yrd: resident runner implementationSource is invalid",
+    )
+  }
   return {
     pid: record.pid as number,
     startedAt,
@@ -278,6 +289,8 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
     ...(record.command === undefined ? {} : { command: record.command as string }),
     ...(record.exitedAt === undefined ? {} : { exitedAt: residentRunnerTimestamp(record.exitedAt, "exitedAt") }),
     ...(record.clean === undefined ? {} : { clean: record.clean }),
+    implementationSource:
+      record.implementationSource === undefined ? "unknown" : (record.implementationSource as string),
   }
 }
 
@@ -650,6 +663,14 @@ export async function startResidentRunnerHeartbeat(
   }
   const directory = join(path, "..")
   const temporary = `${path}.${process.pid}.tmp`
+  const implementationSource = io.implementationSource
+  if (implementationSource === undefined) {
+    raiseFailure(
+      "refusal",
+      "runtime-source-unavailable",
+      "yrd: resident runner startup did not capture an implementation source; refusing to serve",
+    )
+  }
   const nowIso = (): string => {
     const now = io.now?.() ?? Date.now()
     if (!Number.isFinite(now) || now < 0) throw new TypeError("yrd: resident runner heartbeat clock is invalid")
@@ -660,7 +681,14 @@ export async function startResidentRunnerHeartbeat(
   const command = [basename(process.argv[0] ?? "bun"), ...process.argv.slice(1)].join(" ")
   const writeStatus = async (exit?: Readonly<{ exitedAt: string; clean: boolean }>): Promise<void> => {
     await mkdir(directory, { recursive: true })
-    const status: QueueTimelineRunner = { pid: process.pid, startedAt, lastTickAt: nowIso(), command, ...exit }
+    const status: QueueTimelineRunner = {
+      pid: process.pid,
+      startedAt,
+      lastTickAt: nowIso(),
+      command,
+      implementationSource,
+      ...exit,
+    }
     try {
       await writeFile(temporary, `${JSON.stringify(status)}\n`, "utf8")
       await rename(temporary, path)

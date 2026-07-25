@@ -336,6 +336,7 @@ export type StepDef<Input extends PRShape, Output extends PRShape> = Readonly<{
   revision: string
   kind: StepKind
   classification?: "base" | "carrier"
+  implementationSource?: string
   job: JobDef<StepExecution, JsonValue>
   readonly [inputShape]?: Input
   readonly [outputShape]?: Output
@@ -396,7 +397,7 @@ export function withStep<const Name extends string, Shape extends PRShape, Outpu
 
 export function withMerge<Shape extends PRShape>(
   runner: StepRunner<Shape, IntegrationProof>,
-  options: Readonly<{ revision: string; title?: string }>,
+  options: Readonly<{ revision: string; title?: string; implementationSource?: string }>,
 ): StepDef<Shape, Shape & IntegratedShape> {
   const job = createJobDef({
     name: "queue.step.merge",
@@ -413,6 +414,7 @@ export function withMerge<Shape extends PRShape>(
     title: job.title,
     revision: job.revision,
     kind: "merge",
+    ...(options.implementationSource === undefined ? {} : { implementationSource: options.implementationSource }),
     job,
   }) as StepDef<Shape, Shape & IntegratedShape>
 }
@@ -3492,6 +3494,7 @@ function descriptor(step: RuntimeStep | QueueStep): InstalledStep {
     revision: step.revision,
     kind: step.kind,
     ...(step.classification === undefined ? {} : { classification: step.classification }),
+    ...(step.implementationSource === undefined ? {} : { implementationSource: step.implementationSource }),
   }
 }
 

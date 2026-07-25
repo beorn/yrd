@@ -168,10 +168,18 @@ function stepPlanDeltas(
       )
       continue
     }
+    const installedSource = installed.implementationSource ?? "unknown"
+    const liveSource = liveStep.implementationSource ?? "unknown"
+    const sourceDelta =
+      installedSource === liveSource
+        ? ""
+        : `; implementation source installed '${installedSource}', ${vocabulary.live} '${liveSource}'`
     if (liveStep.revision !== installed.revision) {
       deltas.push(
-        `step '${installed.name}' revision '${shortRevision(installed.revision)}' installed, ${vocabulary.live} '${shortRevision(liveStep.revision)}'`,
+        `step '${installed.name}' revision '${shortRevision(installed.revision)}' installed, ${vocabulary.live} '${shortRevision(liveStep.revision)}'${sourceDelta}`,
       )
+    } else if (sourceDelta !== "") {
+      deltas.push(`step '${installed.name}'${sourceDelta}`)
     } else if (liveStep.kind !== installed.kind || liveStep.classification !== installed.classification) {
       deltas.push(`step '${installed.name}' integration contract changed`)
     }
@@ -226,5 +234,29 @@ export function runtimeBaselineDrift(
   return {
     code: "runtime-drift",
     message: `queue base '${baseline.base}' resident runtime diverges from the installed baseline: ${deltas.join("; ")}. Restart this queue runner process so it loads the installed baseline before starting runs.`,
+  }
+}
+
+/** Refuse a mutable source root before admission. A startup capture can prove
+ * what eager imports loaded, but lazy imports would observe a later checkout.
+ * The authoritative pin is included so an operator can compare all three raw
+ * identities without translating an internal step hash. */
+export function runtimeImplementationSourceDrift(
+  loaded: string,
+  workingTree: string | undefined,
+  pinned: string | undefined,
+): QueueAuditFinding | undefined {
+  const current = workingTree ?? "unknown"
+  const authority = pinned ?? "unknown"
+  // Pinned-source movement is handled by the baseline-vs-config leg so follow
+  // mode can migrate through the existing provision path. This direct leg owns
+  // only the split-revision hazard: the mutable module root changed underneath
+  // the still-running process.
+  if (current === loaded) return undefined
+  return {
+    code: "runtime-drift",
+    message:
+      `resident implementation source changed or is unprovable: loaded '${loaded}', working tree '${current}', pinned '${authority}'. ` +
+      "Stop and restart this queue runner from the pinned immutable source before starting runs.",
   }
 }

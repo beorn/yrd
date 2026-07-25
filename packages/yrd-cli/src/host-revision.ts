@@ -19,6 +19,8 @@ export type QueueStepRevisionInput = Readonly<{
   toolchain: ToolchainFingerprint
   checkoutParent?: string
   resolvedCommand?: readonly string[]
+  /** Startup/runtime source identity for an in-process native implementation. */
+  implementationSource?: string
 }>
 
 /**
@@ -42,15 +44,18 @@ const NATIVE_MERGE_IMPLEMENTATION_REVISION = "yrd-native-merge-v4"
 
 /** Internal identity seam for configured queue steps; intentionally not exported by the package root. */
 export function queueStepRevision(input: QueueStepRevisionInput): string {
+  const nativeMerge = input.name === "merge" && input.resolvedCommand === undefined
   return createHash("sha256")
     .update(
       JSON.stringify({
-        implementation:
-          input.name === "merge" && input.resolvedCommand === undefined
-            ? NATIVE_MERGE_IMPLEMENTATION_REVISION
-            : input.checkoutParent === undefined
-              ? "yrd-queue-command-v3"
-              : "yrd-queue-command-v4",
+        implementation: nativeMerge
+          ? NATIVE_MERGE_IMPLEMENTATION_REVISION
+          : input.checkoutParent === undefined
+            ? "yrd-queue-command-v3"
+            : "yrd-queue-command-v4",
+        ...(nativeMerge && input.implementationSource !== undefined
+          ? { implementationSource: input.implementationSource }
+          : {}),
         repo: stablePath(input.repo),
         stateDir: stablePath(input.stateDir),
         ...(input.checkoutParent === undefined ? {} : { checkoutParent: stablePath(input.checkoutParent) }),

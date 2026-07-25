@@ -207,12 +207,67 @@ export const AlreadyLandedEvidenceSchema = z
     path: ["candidateTreeSha"],
   }) as z.ZodType<AlreadyLandedEvidence>
 
+export type ComponentMainReceipt = Readonly<{
+  path: string
+  origin: string
+  pinSha: string
+  mainBeforeSha: string
+  mainAfterSha: string
+  action: "verified" | "fast-forwarded"
+}>
+
+export const ComponentMainReceiptSchema = z
+  .object({
+    path: z.string().min(1),
+    origin: z.string().min(1),
+    pinSha: GitShaSchema,
+    mainBeforeSha: GitShaSchema,
+    mainAfterSha: GitShaSchema,
+    action: z.enum(["verified", "fast-forwarded"]),
+  })
+  .strict() as z.ZodType<ComponentMainReceipt>
+
+export type ComponentMainRefusal = Readonly<{
+  path: string
+  origin: string
+  pinSha: string
+  mainSha?: string
+  code: string
+  message: string
+}>
+
+export const ComponentMainRefusalSchema = z
+  .object({
+    path: z.string().min(1),
+    origin: z.string().min(1),
+    pinSha: GitShaSchema,
+    mainSha: GitShaSchema.optional(),
+    code: z.string().min(1),
+    message: z.string().min(1),
+  })
+  .strict() as z.ZodType<ComponentMainRefusal>
+
+export type ComponentMainOutcomes = Readonly<{
+  kind: "component-main-outcomes"
+  receipts: readonly ComponentMainReceipt[]
+  refusals: readonly ComponentMainRefusal[]
+}>
+
+export const ComponentMainOutcomesSchema = z
+  .object({
+    kind: z.literal("component-main-outcomes"),
+    receipts: z.array(ComponentMainReceiptSchema),
+    refusals: z.array(ComponentMainRefusalSchema),
+  })
+  .strict() as z.ZodType<ComponentMainOutcomes>
+
 export type IntegrationProof = Readonly<{
   commit: string
   baseSha: string
   alreadyLanded?: AlreadyLandedEvidence
   sourceRewrites?: readonly SourceRewrite[]
   submoduleResolutions?: readonly QueueSubmoduleResolutionEvidence[]
+  componentMains?: readonly ComponentMainReceipt[]
 }>
 
 export const IntegrationProofSchema = z
@@ -223,6 +278,7 @@ export const IntegrationProofSchema = z
     alreadyLanded: AlreadyLandedEvidenceSchema.optional(),
     sourceRewrites: z.array(SourceRewriteSchema).optional(),
     submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),
+    componentMains: z.array(ComponentMainReceiptSchema).min(1).optional(),
   })
   .strict() as z.ZodType<IntegrationProof>
 
@@ -245,6 +301,8 @@ export type InstalledStep = Readonly<{
   revision: string
   kind: StepKind
   classification?: "base" | "carrier"
+  /** Raw source identity captured for the in-process Yrd implementation. */
+  implementationSource?: string
 }>
 
 export type SkippedStep = InstalledStep &
@@ -509,6 +567,10 @@ export const InstalledStepSchema = z
     revision: z.string().trim().min(1),
     kind: z.enum(["check", "action", "merge"]),
     classification: z.enum(["base", "carrier"]).optional(),
+    implementationSource: z
+      .string()
+      .regex(/^(?:dirty|git):[0-9a-f]{40,64}$/u)
+      .optional(),
   })
   .strict()
 
@@ -521,6 +583,7 @@ export const ReplayInstalledStepSchema = z.preprocess((value) => {
     integrates?: unknown
     needsIntegration?: unknown
     classification?: unknown
+    implementationSource?: unknown
   }>
   return {
     name: legacy.name,
@@ -528,6 +591,7 @@ export const ReplayInstalledStepSchema = z.preprocess((value) => {
     revision: legacy.revision,
     kind: legacy.integrates === true ? "merge" : legacy.needsIntegration === true ? "action" : "check",
     ...(legacy.classification === undefined ? {} : { classification: legacy.classification }),
+    ...(legacy.implementationSource === undefined ? {} : { implementationSource: legacy.implementationSource }),
   }
 }, InstalledStepSchema)
 

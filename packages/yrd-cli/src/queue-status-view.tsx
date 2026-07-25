@@ -260,6 +260,8 @@ export type QueueTimelineRunner = Readonly<{
   lastTickAt: string
   /** The resident runner's launch command; absent for status records written before it was captured. */
   command?: string
+  /** Exact Yrd source captured by the resident heartbeat at startup. */
+  implementationSource?: string
   /** ISO time the resident wrote its exit marker on shutdown. The status file is
    * NEVER deleted on close — it is left with this marker so a successor can still
    * reclaim this pid's leases (idempotently). Absent while the runner is live. */
@@ -2630,10 +2632,7 @@ export function QueueRecoveryView({
         Recovery left blocking queue findings:
       </Text>
       {findings.map((finding) => (
-        <Text
-          key={`${finding.code}:${finding.run ?? ""}:${finding.step ?? ""}:${finding.message}`}
-          color="$fg-error"
-        >
+        <Text key={`${finding.code}:${finding.run ?? ""}:${finding.step ?? ""}:${finding.message}`} color="$fg-error">
           {finding.run === undefined ? "" : `${finding.run} `}
           {finding.code}: {finding.message}
         </Text>
@@ -4395,6 +4394,11 @@ function TimelineRunnerBox({
           </Text>
         )}
       </Box>
+      {runner === null ? null : (
+        <Text color="$fg-muted" wrap="truncate" minWidth={0}>
+          source {runner.implementationSource ?? "unknown"}
+        </Text>
+      )}
       {runner === null && runnerRefusal !== undefined ? (
         <Text color="$fg-error" wrap="truncate" minWidth={0}>
           {runnerRefusal.code}: {runnerRefusal.message}
@@ -5330,9 +5334,7 @@ export function queueShowData(
   const stepNames = stepNamesOfRun(run)
   // Glyph for non-landing success must not share ✓ with real merges (21801).
   const glyph =
-    landingVerdict === "non-landing"
-      ? (statusPresentation("passed").glyph as StatusGlyph)
-      : taskStatusGlyph(taskStatus)
+    landingVerdict === "non-landing" ? (statusPresentation("passed").glyph as StatusGlyph) : taskStatusGlyph(taskStatus)
   const runFailure = failureFact(run, relevantStep(run))
   return {
     run: run.id,

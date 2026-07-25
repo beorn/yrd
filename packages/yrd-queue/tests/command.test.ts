@@ -451,6 +451,7 @@ async function groupedSubmoduleRepository(): Promise<{
   await writeFile(join(origin, "version.txt"), "base\n")
   await git(origin, ["add", "version.txt"])
   await git(origin, ["commit", "-qm", "base"])
+  const componentBase = await git(origin, ["rev-parse", "HEAD"])
 
   await git(repo, ["config", "protocol.file.allow", "always"])
   await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", origin, "dep-a"])
@@ -463,11 +464,18 @@ async function groupedSubmoduleRepository(): Promise<{
   await writeFile(join(origin, "version.txt"), "two\n")
   await git(origin, ["commit", "-qam", "two"])
   const second = await git(origin, ["rev-parse", "HEAD"])
+  await git(origin, ["branch", "pin-first", first])
+  await git(origin, ["branch", "pin-second", second])
+  await git(origin, ["switch", "-q", "--detach", componentBase])
+  await git(origin, ["branch", "-f", "main", componentBase])
 
   await git(repo, ["switch", "-qc", "issue/feature"])
   for (const [path, sha] of [
-    ["dep-a", first],
-    ["dep-b", second],
+    // Deliberately put the descendant first in path order. Promotion planning
+    // must recognize that dep-b's older pin is already covered by dep-a's
+    // target instead of falsely calling the same-origin chain divergent.
+    ["dep-a", second],
+    ["dep-b", first],
   ] as const) {
     await git(join(repo, path), ["fetch", "-q", "origin"])
     await git(join(repo, path), ["checkout", "-q", sha])
@@ -1406,7 +1414,7 @@ describe("Queue command adapters", () => {
 
     if (valid) {
       expect(run.status, run.error?.message).toBe("completed")
-      expect(run.conclusion).toBe("success")
+      expect(run.conclusion, run.error?.message).toBe("success")
     } else {
       expect(run.status).toBe("completed")
       expect(run.error).toMatchObject({
@@ -4394,7 +4402,13 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run.status).toBe("completed")
+    expect(run.status, run.error?.message).toBe("completed")
+    expect(run.conclusion, run.error?.message).toBe("success")
+    expect(await git(origin, ["rev-parse", "main"])).toBe(pins[1])
+    expect((run.integration as unknown as { componentMains?: unknown }).componentMains).toEqual([
+      expect.objectContaining({ action: "fast-forwarded", path: "dep-a", pinSha: pins[1] }),
+      expect.objectContaining({ action: "fast-forwarded", path: "dep-b", pinSha: pins[0] }),
+    ])
     // Union behavior: queue Git operations lock the shared repository, so the
     // timeout-robustness lineage owns the 120s default across the whole proof.
     expect(requests.filter(({ argv }) => argv[0] === "git").every(({ timeoutMs }) => timeoutMs === 120_000)).toBe(true)
@@ -5180,10 +5194,178 @@ describe("Queue command adapters", () => {
       const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
       expect(run).toMatchObject({ status: "completed", conclusion: "success" })
+      expect((run.integration as unknown as { componentMains?: unknown }).componentMains).toEqual([
+        {
+          action: "fast-forwarded",
+          mainAfterSha: fixture.pinSha,
+          mainBeforeSha: fixture.componentBaseSha,
+          origin: fixture.componentRemote,
+          path: "dep",
+          pinSha: fixture.pinSha,
+        },
+      ])
       expect(await git(fixture.rootRemote, ["ls-tree", "main", "dep"])).toContain(fixture.pinSha)
       expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.pinSha)
     },
     20_000,
+  )
+
+  it("refuses a success-looking no-op actuator instead of emitting an empty component outcome set", async () => {
+    const fixture = await componentMainLandingRepository()
+    await using process = createProcess()
+    const noOpProcess: Pick<Process, "run"> = {
+      run(request) {
+        if (
+          request.argv[0] === "git" &&
+          request.argv.includes("push") &&
+          request.argv.includes(fixture.componentRemote)
+        ) {
+          return Promise.resolve({
+            exitCode: 0,
+            signal: null,
+            stdout: "Done",
+            stderr: "",
+            durationMs: 1,
+            timedOut: false,
+          })
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(noOpProcess, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: {
+        code: "component-main-promotion-failed",
+        evidence: {
+          kind: "component-main-outcomes",
+          receipts: [],
+          refusals: [
+            {
+              code: "component-main-promotion-failed",
+              path: "dep",
+              pinSha: fixture.pinSha,
+            },
+          ],
+        },
+      },
+    })
+    expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.componentBaseSha)
+  }, 20_000)
+
+  it.each(["native", "configured"] as const)(
+    "converges a component-main gap left by an earlier root-only landing while landing a later PR (%s)",
+    async (mode) => {
+      const fixture = await componentMainLandingRepository()
+
+      // Preserve the production R2715 residue: the root pin landed, but its
+      // component main never advanced. The next carrier does not touch the
+      // gitlink, so changed-pin-only planning cannot see the standing gap.
+      await git(fixture.repo, ["push", "-q", "origin", `${fixture.featureSha}:refs/heads/main`])
+      expect(await git(fixture.rootRemote, ["ls-tree", "main", "dep"])).toContain(fixture.pinSha)
+      expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.componentBaseSha)
+
+      await git(fixture.repo, ["switch", "-q", "issue/feature"])
+      await git(fixture.repo, ["branch", "-f", "main", fixture.featureSha])
+      await git(fixture.repo, ["switch", "-qc", "issue/followup", fixture.featureSha])
+      await writeFile(join(fixture.repo, "followup.txt"), "followup\n")
+      await git(fixture.repo, ["add", "followup.txt"])
+      await git(fixture.repo, ["commit", "-qm", "followup"])
+      const followupSha = await git(fixture.repo, ["rev-parse", "HEAD"])
+      await git(fixture.repo, ["push", "-q", "origin", "issue/followup"])
+
+      await using process = createProcess()
+      await using app = await checkedQueue(process, fixture.repo, ["true"], {
+        env: authoredGitlinksEnv,
+        ...(mode === "configured"
+          ? { mergeCommand: shellCommand('git push origin "$YRD_CANDIDATE_SHA":refs/heads/main') }
+          : {}),
+      })
+      await app.bays.submit({ branch: "issue/followup", headSha: followupSha, base: "main" })
+
+      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+      expect(run).toMatchObject({ status: "completed", conclusion: "success" })
+      expect(await git(fixture.rootRemote, ["merge-base", "--is-ancestor", followupSha, "main"])).toBe("")
+      expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.pinSha)
+    },
+    20_000,
+  )
+
+  it.each(["native", "configured"] as const)(
+    "advances safe component mains while loudly refusing an independent standing divergence (%s)",
+    async (mode) => {
+      const fixture = await multiComponentMainLandingRepository()
+      const [divergentComponent, safeComponent] = fixture.components
+      if (divergentComponent === undefined || safeComponent === undefined) {
+        throw new Error("missing multi-component fixture")
+      }
+
+      const divergentWorktree = join(fixture.repo, "..", "divergent-component-main")
+      await git(join(fixture.repo, ".."), ["clone", "-q", divergentComponent.remote, divergentWorktree])
+      await git(divergentWorktree, ["config", "user.name", "Yrd Test"])
+      await git(divergentWorktree, ["config", "user.email", "yrd@example.invalid"])
+      await writeFile(join(divergentWorktree, "divergent.txt"), "divergent\n")
+      await git(divergentWorktree, ["add", "divergent.txt"])
+      await git(divergentWorktree, ["commit", "-qm", "divergent main"])
+      const divergentMainSha = await git(divergentWorktree, ["rev-parse", "HEAD"])
+      await git(divergentWorktree, ["push", "-q", "origin", "main"])
+
+      // Preserve a root-only landing with two standing component gaps. The
+      // first origin now needs a compose; the second remains a plain FF.
+      await git(fixture.repo, ["push", "-q", "origin", `${fixture.featureSha}:refs/heads/main`])
+      await git(fixture.repo, ["switch", "-q", "issue/feature"])
+      await git(fixture.repo, ["branch", "-f", "main", fixture.featureSha])
+      await git(fixture.repo, ["switch", "-qc", "issue/followup", fixture.featureSha])
+      await writeFile(join(fixture.repo, "followup.txt"), "followup\n")
+      await git(fixture.repo, ["add", "followup.txt"])
+      await git(fixture.repo, ["commit", "-qm", "followup"])
+      const followupSha = await git(fixture.repo, ["rev-parse", "HEAD"])
+      await git(fixture.repo, ["push", "-q", "origin", "issue/followup"])
+
+      await using process = createProcess()
+      await using app = await checkedQueue(process, fixture.repo, ["true"], {
+        env: authoredGitlinksEnv,
+        ...(mode === "configured"
+          ? { mergeCommand: shellCommand('git push origin "$YRD_CANDIDATE_SHA":refs/heads/main') }
+          : {}),
+      })
+      await app.bays.submit({ branch: "issue/followup", headSha: followupSha, base: "main" })
+
+      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+      expect(run).toMatchObject({
+        status: "completed",
+        conclusion: "failure",
+        error: { code: "component-main-non-ancestral" },
+      })
+      expect(run.error?.evidence).toMatchObject({
+        kind: "component-main-outcomes",
+        receipts: [
+          {
+            action: "fast-forwarded",
+            path: safeComponent.path,
+            pinSha: safeComponent.pinSha,
+          },
+        ],
+        refusals: [
+          {
+            code: "component-main-non-ancestral",
+            path: divergentComponent.path,
+            pinSha: divergentComponent.pinSha,
+          },
+        ],
+      })
+      expect(await git(fixture.rootRemote, ["merge-base", "--is-ancestor", followupSha, "main"])).toBe("")
+      expect(await git(divergentComponent.remote, ["rev-parse", "main"])).toBe(divergentMainSha)
+      expect(await git(safeComponent.remote, ["rev-parse", "main"])).toBe(safeComponent.pinSha)
+    },
+    40_000,
   )
 
   it("classifies against freshly fetched component main instead of a stale bay tracking ref", async () => {
@@ -5215,6 +5397,16 @@ describe("Queue command adapters", () => {
 
     expect(run).toMatchObject({ status: "completed", conclusion: "success" })
     expect(componentPushes).toEqual([])
+    expect((run.integration as unknown as { componentMains?: unknown }).componentMains).toEqual([
+      {
+        action: "verified",
+        mainAfterSha: fixture.pinSha,
+        mainBeforeSha: fixture.pinSha,
+        origin: fixture.componentRemote,
+        path: "dep",
+        pinSha: fixture.pinSha,
+      },
+    ])
     expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.pinSha)
   }, 20_000)
 
@@ -5246,6 +5438,18 @@ describe("Queue command adapters", () => {
       error: {
         code: "component-main-non-ancestral",
         message: expect.stringMatching(/NON-ANCESTRAL.*dep.*diverge/u),
+        evidence: {
+          kind: "component-main-outcomes",
+          receipts: [],
+          refusals: [
+            {
+              code: "component-main-non-ancestral",
+              origin: fixture.componentRemote,
+              path: "dep",
+              pinSha: fixture.pinSha,
+            },
+          ],
+        },
       },
     })
     expect(await git(fixture.rootRemote, ["rev-parse", "main"])).toBe(fixture.rootBaseSha)
@@ -5292,7 +5496,20 @@ describe("Queue command adapters", () => {
     expect(first).toMatchObject({
       status: "completed",
       conclusion: "failure",
-      error: { code: "component-main-promotion-failed" },
+      error: {
+        code: "component-main-promotion-failed",
+        evidence: {
+          kind: "component-main-outcomes",
+          receipts: [],
+          refusals: [
+            {
+              code: "component-main-promotion-failed",
+              path: "dep",
+              pinSha: fixture.pinSha,
+            },
+          ],
+        },
+      },
     })
     expect(await git(fixture.rootRemote, ["ls-tree", "main", "dep"])).toContain(fixture.pinSha)
     expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.componentBaseSha)
@@ -5300,14 +5517,25 @@ describe("Queue command adapters", () => {
     const retried = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(retried).toMatchObject({ status: "completed", conclusion: "success" })
+    expect((retried.integration as unknown as { componentMains?: unknown }).componentMains).toEqual([
+      {
+        action: "fast-forwarded",
+        mainAfterSha: fixture.pinSha,
+        mainBeforeSha: fixture.componentBaseSha,
+        origin: fixture.componentRemote,
+        path: "dep",
+        pinSha: fixture.pinSha,
+      },
+    ])
     expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.pinSha)
   }, 30_000)
 
   it("keeps earlier component fast-forwards and converges the remaining origins on retry", async () => {
     const fixture = await multiComponentMainLandingRepository()
     const [firstComponent, secondComponent] = fixture.components
-    if (firstComponent === undefined || secondComponent === undefined)
+    if (firstComponent === undefined || secondComponent === undefined) {
       throw new Error("missing multi-component fixture")
+    }
     await using process = createProcess()
     let failedSecondPromotion = false
     const componentPushes: string[][] = []
@@ -5353,7 +5581,26 @@ describe("Queue command adapters", () => {
     expect(first).toMatchObject({
       status: "completed",
       conclusion: "failure",
-      error: { code: "component-main-promotion-failed" },
+      error: {
+        code: "component-main-promotion-failed",
+        evidence: {
+          kind: "component-main-outcomes",
+          receipts: [
+            {
+              action: "fast-forwarded",
+              path: firstComponent.path,
+              pinSha: firstComponent.pinSha,
+            },
+          ],
+          refusals: [
+            {
+              code: "component-main-promotion-failed",
+              path: secondComponent.path,
+              pinSha: secondComponent.pinSha,
+            },
+          ],
+        },
+      },
     })
     expect(await git(fixture.rootRemote, ["rev-parse", "main"])).not.toBe(fixture.rootBaseSha)
     expect(await git(firstComponent.remote, ["rev-parse", "main"])).toBe(firstComponent.pinSha)
@@ -5364,6 +5611,18 @@ describe("Queue command adapters", () => {
     const retried = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(retried).toMatchObject({ status: "completed", conclusion: "success" })
+    expect((retried.integration as unknown as { componentMains?: unknown }).componentMains).toEqual([
+      expect.objectContaining({
+        action: "verified",
+        path: firstComponent.path,
+        pinSha: firstComponent.pinSha,
+      }),
+      expect.objectContaining({
+        action: "fast-forwarded",
+        path: secondComponent.path,
+        pinSha: secondComponent.pinSha,
+      }),
+    ])
     expect(await git(firstComponent.remote, ["rev-parse", "main"])).toBe(firstComponent.pinSha)
     expect(await git(secondComponent.remote, ["rev-parse", "main"])).toBe(secondComponent.pinSha)
     expect(componentPushes.filter((argv) => argv.includes(firstComponent.remote))).toHaveLength(1)
