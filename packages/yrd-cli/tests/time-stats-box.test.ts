@@ -18,7 +18,7 @@ function fact(
 ): QueueTerminalFact {
   return {
     activeMs: MINUTE,
-    failureClass: overrides.outcome === "integrated" ? null : "other",
+    failureClass: overrides.outcome === "integrated" || overrides.outcome === "already-landed" ? null : "other",
     members: [],
     queueWaitMs: [],
     ...overrides,
@@ -138,6 +138,7 @@ describe("QueueStatsPanel", () => {
       "RUNS",
       "ALL",
       "INTEGRATED",
+      "ALREADY",
       "FAILS",
       "AVG TIME",
       "TOTAL",
@@ -161,6 +162,31 @@ describe("QueueStatsPanel", () => {
     expect(rowContaining(app, "QUEUE WAIT")).toContain("2:00")
     expect(rowContaining(app, "JOB RUN")).toContain("6:00")
     expect(rowContaining(app, "RETRIES")).toMatch(/RETRIES\s+1\b/u)
+  })
+
+  it("shows already-landed PRs without inflating integrated or failed metrics", () => {
+    const deduplicated = fact({
+      run: "deduplicated",
+      terminalAtMs: NOW_MS - 4 * MINUTE,
+      outcome: "already-landed",
+      members: [
+        {
+          pr: "PR4",
+          revision: 1,
+          totalMs: 4 * MINUTE,
+          totalApproximate: false,
+          codingMs: null,
+          jobRunMs: 4 * MINUTE,
+          retries: 0,
+        },
+      ],
+    })
+    const render = createRenderer({ cols: 126, rows: 30 })
+    const app = render(boxesElement({ facts: [...FACTS, deduplicated], now: NOW, earliestFactMs: HORIZON, width: 126 }))
+    expect(rowContaining(app, "ALL")).toMatch(/ALL\s+3\b/u)
+    expect(rowContaining(app, "INTEGRATED")).toMatch(/INTEGRATED\s+2\b/u)
+    expect(rowContaining(app, "ALREADY")).toMatch(/ALREADY\s+1\b/u)
+    expect(rowContaining(app, "FAILS")).toMatch(/FAILS\s+1\b/u)
   })
 
   it("renders uncovered buckets as an em dash and never a fabricated number", () => {

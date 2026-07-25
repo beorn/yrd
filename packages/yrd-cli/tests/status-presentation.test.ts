@@ -8,6 +8,7 @@ import { failureDisposition, statusPresentation } from "../src/status-presentati
 describe("shared queue status presentation", () => {
   it("uses the specified pulsing-disk glyph for running work", () => {
     expect(statusPresentation("running")).toEqual({ glyph: "◉", color: "$fg-info" })
+    expect(statusPresentation("already-landed")).toEqual({ glyph: "✓", color: "$fg-success" })
   })
 
   it.each([

@@ -27,6 +27,7 @@ notify:
   pr/rejected: [submitter, "@ci"]
   pr/needs-review: ["@cto"]
   pr/integrated: [broadcast]
+  pr/already-landed: [submitter]
   run/failed: [submitter, "@ci"]
 `),
       ),
@@ -47,6 +48,7 @@ notify:
         "pr/rejected": ["submitter", "@ci"],
         "pr/needs-review": ["@cto"],
         "pr/integrated": ["broadcast"],
+        "pr/already-landed": ["submitter"],
         "run/failed": ["submitter", "@ci"],
       },
     })

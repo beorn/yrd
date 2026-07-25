@@ -1,6 +1,7 @@
 import {
   GitRefSchema,
   GitShaSchema,
+  PRAlreadyLandedSchema,
   PRIdSchema,
   PRNeedsAuthorFactSchema,
   PRTerminalAssociationSchema,
@@ -3043,6 +3044,16 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
       },
     }
   }
+  if (applied.name === "pr/already-landed") {
+    const alreadyLanded = PRAlreadyLandedSchema.parse(applied.data)
+    if (!terminalAuthorityMatches(state.queues.authority, alreadyLanded, applied.name, true)) return state
+    return {
+      queues: {
+        ...state.queues,
+        authority: invalidatePRAuthority(state.queues.authority, alreadyLanded.pr, "already-landed"),
+      },
+    }
+  }
   if (applied.name === "pr/withdrawn" || applied.name === "pr/canceled") {
     const closed = QueueAuthorityPRFactSchema.parse(applied.data)
     if (closed.revision !== undefined && closed.headSha !== undefined) {
@@ -3620,6 +3631,37 @@ function advanceQueue(
   if (planned.kind === "merge") {
     if (!isIntegrated(shape)) throw new Error(`yrd: merge step '${planned.name}' produced no integration proof`)
     for (const current of samePayloadPRs(state.bays, record.prs)) {
+      const alreadyLanded = shape.integration.alreadyLanded
+      if (alreadyLanded !== undefined) {
+        const existingEvidence = current.alreadyLanded
+        if (
+          prDeliveryState(current) === "already-landed" &&
+          current.integration?.commit === shape.integration.commit &&
+          current.integration?.baseSha === shape.integration.baseSha &&
+          existingEvidence?.candidateSha === alreadyLanded.candidateSha &&
+          existingEvidence.candidateTreeSha === alreadyLanded.candidateTreeSha &&
+          existingEvidence.baseTreeSha === alreadyLanded.baseTreeSha
+        ) {
+          continue
+        }
+        const revision = currentPRRev(current)
+        events.push(
+          event("pr/already-landed", {
+            pr: current.id,
+            revision: revision.n,
+            headSha: revision.head,
+            run: record.id,
+            ...(current.issue === undefined ? {} : { issueRef: current.issue }),
+            baseSha: shape.integration.baseSha,
+            candidateSha: alreadyLanded.candidateSha,
+            candidateTreeSha: alreadyLanded.candidateTreeSha,
+            baseTreeSha: alreadyLanded.baseTreeSha,
+            ...(prCorrelation(current) === undefined ? {} : { correlation: prCorrelation(current) }),
+            ...(revision.actor === undefined ? {} : { actor: revision.actor }),
+          }),
+        )
+        continue
+      }
       if (
         current.merged &&
         current.integration?.commit === shape.integration.commit &&
@@ -4273,7 +4315,7 @@ function requestedPRs(
   ).filter((pr) => !excluded.has(pr.id))
   for (const pr of prs) {
     const delivery = prDeliveryState(pr)
-    if (delivery !== "submitted" && delivery !== "integrated") {
+    if (delivery !== "submitted" && delivery !== "integrated" && delivery !== "already-landed") {
       raiseFailure("refusal", "pr-not-ready", `yrd: PR '${pr.id}' is ${delivery}, not ready for the queue`)
     }
   }
@@ -4811,7 +4853,8 @@ function prEligibility(
     checks,
   })
   const delivery = prDeliveryState(pr)
-  const resumingIntegration = options.resumeIntegrated === true && delivery === "integrated"
+  const resumingIntegration =
+    options.resumeIntegrated === true && (delivery === "integrated" || delivery === "already-landed")
   if (!resumingIntegration) {
     if (delivery === "pushed") {
       return result({ code: "draft", message: `PR '${pr.id}' is pushed, not ready` })
@@ -4949,13 +4992,38 @@ function prShape(prs: readonly PRSnapshot[]): PRShape {
 function integratedPRShape(prs: readonly PR[]): IntegratedShape | undefined {
   if (prs.every((pr) => !pr.merged)) return undefined
   const proof = prs[0]?.integration
+  const alreadyLanded = prs[0]?.alreadyLanded
   if (
     proof === undefined ||
-    prs.some((pr) => !pr.merged || pr.integration?.commit !== proof.commit || pr.integration?.baseSha !== proof.baseSha)
+    prs.some(
+      (pr) =>
+        !pr.merged ||
+        pr.integration?.commit !== proof.commit ||
+        pr.integration?.baseSha !== proof.baseSha ||
+        (alreadyLanded === undefined) !== (pr.alreadyLanded === undefined) ||
+        (alreadyLanded !== undefined &&
+          (pr.alreadyLanded?.baseSha !== proof.baseSha ||
+            pr.alreadyLanded.candidateSha !== alreadyLanded.candidateSha ||
+            pr.alreadyLanded.candidateTreeSha !== alreadyLanded.candidateTreeSha ||
+            pr.alreadyLanded.baseTreeSha !== alreadyLanded.baseTreeSha)),
+    )
   ) {
     throw new Error("yrd: every PR in a queue candidate must share one integration proof")
   }
-  return { ...prShape(prs.map(Queues.snapshot)), integration: proof }
+  return {
+    ...prShape(prs.map(Queues.snapshot)),
+    integration:
+      alreadyLanded === undefined
+        ? proof
+        : {
+            ...proof,
+            alreadyLanded: {
+              candidateSha: alreadyLanded.candidateSha,
+              candidateTreeSha: alreadyLanded.candidateTreeSha,
+              baseTreeSha: alreadyLanded.baseTreeSha,
+            },
+          },
+  }
 }
 
 function pinnedPRError(state: DeepReadonly<BaysState>, snapshots: readonly PRSnapshot[]): JobError | undefined {
@@ -5006,10 +5074,18 @@ function needsAdvance(state: DeepReadonly<RuntimeState>, run: Run): boolean {
     if (step.kind !== "merge" || run.integration === undefined) return false
     return run.prs.some((pr) => {
       const current = state.bays.prs[pr.id]
+      const alreadyLanded = run.integration?.alreadyLanded
+      const currentAlreadyLanded = current?.alreadyLanded
       return (
         current?.merged !== true ||
         current.integration?.commit !== run.integration?.commit ||
-        current.integration?.baseSha !== run.integration?.baseSha
+        current.integration?.baseSha !== run.integration?.baseSha ||
+        (alreadyLanded === undefined) !== (currentAlreadyLanded === undefined) ||
+        (alreadyLanded !== undefined &&
+          (currentAlreadyLanded?.baseSha !== run.integration?.baseSha ||
+            currentAlreadyLanded?.candidateSha !== alreadyLanded.candidateSha ||
+            currentAlreadyLanded?.candidateTreeSha !== alreadyLanded.candidateTreeSha ||
+            currentAlreadyLanded?.baseTreeSha !== alreadyLanded.baseTreeSha))
       )
     })
   }

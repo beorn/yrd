@@ -2,6 +2,7 @@ import type { FailureBreakdownClass } from "./status-presentation.ts"
 
 export type QueueTerminalOutcome =
   | "integrated"
+  | "already-landed"
   | "rejected"
   | "environment-refused"
   | "stale"

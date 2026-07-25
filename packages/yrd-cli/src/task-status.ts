@@ -55,6 +55,7 @@ export function prDeliveryTaskStatusOf(delivery: PRDeliveryState | "needs-author
     case "rejected":
       return "blocked"
     case "integrated":
+    case "already-landed":
       return "done"
     case "withdrawn":
     case "canceled":

@@ -14,7 +14,7 @@ function fact(
 ): QueueTerminalFact {
   return {
     activeMs: 60_000,
-    failureClass: overrides.outcome === "integrated" ? null : "other",
+    failureClass: overrides.outcome === "integrated" || overrides.outcome === "already-landed" ? null : "other",
     members: [],
     queueWaitMs: [],
     ...overrides,
@@ -93,6 +93,32 @@ describe("queueStats calendar buckets", () => {
     expect(previousHour?.runs).toMatchObject({ all: 1, integrated: 1, fails: 0 })
     expect(today?.label).toBe("TODAY")
     expect(today?.runs).toMatchObject({ all: 3, integrated: 3, fails: 1 })
+  })
+
+  it("keeps already-landed PRs out of integration and failure counts", () => {
+    const now = new Date(2026, 6, 16, 13, 30).getTime()
+    const terminalAtMs = new Date(2026, 6, 16, 13, 10).getTime()
+    const facts: QueueTerminalFact[] = [
+      fact({
+        run: "integrated",
+        terminalAtMs,
+        outcome: "integrated",
+        members: [member({ pr: "PR1", totalMs: MINUTE, retries: 1 })],
+      }),
+      fact({
+        run: "deduplicated",
+        terminalAtMs,
+        outcome: "already-landed",
+        members: [member({ pr: "PR2", totalMs: 2 * MINUTE, retries: 4 })],
+      }),
+      fact({ run: "failed", terminalAtMs, outcome: "rejected", members: [member({ pr: "PR3" })] }),
+    ]
+
+    const hour = queueStats(facts, now, new Date(2026, 5, 1).getTime(), 1)[0]!
+    expect(hour.runs).toMatchObject({ all: 3, integrated: 1, alreadyLanded: 1, fails: 1 })
+    expect(hour.runs.failureBreakdown.other).toBe(1)
+    expect(hour.total.n).toBe(1)
+    expect(hour.retries).toMatchObject({ n: 1, avg: 1 })
   })
 
   it("uses local calendar boundaries for yesterday, Monday-based week, and month", () => {

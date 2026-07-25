@@ -800,6 +800,14 @@ type TrackerDeliveryV1 =
   | (TrackerDeliveryIdentity & Readonly<{ status: "rejected"; bounce: TrackerBounce }>)
   | (TrackerDeliveryIdentity &
       Readonly<{ status: "integrated"; landingSha: string; regressions?: readonly PRRegression[] }>)
+  | (TrackerDeliveryIdentity &
+      Readonly<{
+        status: "already-landed"
+        baseSha: string
+        candidateSha: string
+        candidateTreeSha: string
+        baseTreeSha: string
+      }>)
 
 type TrackerDeliveryV2 =
   | TrackerDeliveryV1
@@ -896,6 +904,21 @@ function trackerDeliveryV2(
         ...(pr.regressions === undefined || pr.regressions.length === 0 ? {} : { regressions: pr.regressions }),
       }
     }
+    case "already-landed": {
+      const landing = prLandingOutcome(pr)
+      if (landing.outcome !== "already-landed") {
+        refusal(`already-landed PR '${pr.id}' has no canonical equivalence proof`)
+      }
+      return {
+        ...identity,
+        status: "already-landed",
+        at: landing.at,
+        baseSha: landing.baseSha,
+        candidateSha: landing.candidateSha,
+        candidateTreeSha: landing.candidateTreeSha,
+        baseTreeSha: landing.baseTreeSha,
+      }
+    }
     case "withdrawn":
       return pr.withdrawnAt === undefined ? undefined : { ...identity, status: "withdrawn", at: pr.withdrawnAt }
     case "canceled":
@@ -909,6 +932,7 @@ const TRACKER_V1_STATUS_MAP = {
   "needs-author": "rejected",
   rejected: "rejected",
   integrated: "integrated",
+  "already-landed": "already-landed",
   withdrawn: "withdrawn",
   canceled: "canceled",
 } as const satisfies Record<TrackerDeliveryV2["status"], TrackerDeliveryV1["status"]>
@@ -939,6 +963,19 @@ function trackerDeliveryV1(delivery: TrackerDeliveryV2): TrackerDeliveryV1 {
       status,
       landingSha: delivery.landingSha,
       ...(delivery.regressions === undefined ? {} : { regressions: delivery.regressions }),
+    }
+  }
+  if (status === "already-landed") {
+    if (delivery.status !== "already-landed") {
+      throw new TypeError(`trackerBridge v1 status mapping for '${delivery.status}' lost its equivalence proof`)
+    }
+    return {
+      ...identity,
+      status,
+      baseSha: delivery.baseSha,
+      candidateSha: delivery.candidateSha,
+      candidateTreeSha: delivery.candidateTreeSha,
+      baseTreeSha: delivery.baseTreeSha,
     }
   }
   return { ...identity, status }
@@ -978,6 +1015,14 @@ function issueDeliveryRows(bridge: TrackerBridgeV2): IssueDeliveryRow[] {
         ? {
             landingSha: delivery.landingSha,
             ...(delivery.regressions === undefined ? {} : { regressions: delivery.regressions }),
+          }
+        : {}),
+      ...(delivery.status === "already-landed"
+        ? {
+            baseSha: delivery.baseSha,
+            candidateSha: delivery.candidateSha,
+            candidateTreeSha: delivery.candidateTreeSha,
+            baseTreeSha: delivery.baseTreeSha,
           }
         : {}),
       ...(delivery.status === "rejected" ? { bounce: delivery.bounce } : {}),
@@ -1681,7 +1726,12 @@ async function executeRecutPr(
   const delivery = prDeliveryState(pr)
   const currentRevision = currentPRRev(pr)
   const expectedCurrent = { revision: currentRevision.n, headSha: currentRevision.head }
-  if (delivery === "integrated" || delivery === "withdrawn" || delivery === "canceled") {
+  if (
+    delivery === "integrated" ||
+    delivery === "already-landed" ||
+    delivery === "withdrawn" ||
+    delivery === "canceled"
+  ) {
     raiseFailure("refusal", "terminal-target", `yrd: PR '${pr.id}' is ${delivery}; terminal PRs cannot be recut`)
   }
   // Refuse to silently discard a green check: if the PR's current head already
@@ -2078,7 +2128,11 @@ async function applyPrSelectionVerb(
       run: runtimeOptions(io),
       warnings,
     })
-    if (reviewers.length > 0 && prDeliveryState(pr) !== "integrated") {
+    const delivery = prDeliveryState(pr)
+    if (createOnly && delivery !== "pushed") {
+      refusal(`PR '${pr.id}' is already ${delivery}; create is only for a draft PR`)
+    }
+    if (reviewers.length > 0 && delivery !== "integrated" && delivery !== "already-landed") {
       await app.bays.requestReview({
         pr: pr.id,
         reviewers: [...reviewers],
@@ -2099,14 +2153,18 @@ async function applyPrSelectionVerb(
     )
     return 0
   }
-  // Q1 — a same-head resubmit of a landed branch returns the frozen integrated
-  // PR ("already merged", exit 0). It is not checkable and must not be admitted;
+  // Q1 — a same-head resubmit of a landed branch returns the frozen landed PR
+  // (integrated or equivalence-proven already-landed, exit 0). It is not checkable and must not be admitted;
   // surface the informational note in the result envelope and drain only the
   // live submissions.
   for (const pr of prs) {
     if (prDeliveryState(pr) === "integrated") {
       warnings.push(
         `already merged as PR '${pr.id}'${pr.integration === undefined ? "" : ` (${pr.integration.commit})`}`,
+      )
+    } else if (prDeliveryState(pr) === "already-landed") {
+      warnings.push(
+        `already landed as PR '${pr.id}'${pr.integration === undefined ? "" : ` (${pr.integration.baseSha})`}`,
       )
     }
   }
@@ -2193,10 +2251,40 @@ type PRLandingOutcome =
       at: string
       run?: string
     }>
-  | Readonly<{ outcome: "not-landed"; status: Exclude<PRDeliveryState, "integrated"> }>
+  | Readonly<{
+      outcome: "already-landed"
+      status: "already-landed"
+      baseSha: string
+      candidateSha: string
+      candidateTreeSha: string
+      baseTreeSha: string
+      at: string
+      run: string
+    }>
+  | Readonly<{ outcome: "not-landed"; status: Exclude<PRDeliveryState, "integrated" | "already-landed"> }>
 
 function prLandingOutcome(pr: DeepReadonly<PR>): PRLandingOutcome {
   const delivery = prDeliveryState(pr)
+  if (delivery === "already-landed") {
+    if (
+      pr.integration === undefined ||
+      pr.alreadyLanded === undefined ||
+      pr.alreadyLandedAt === undefined ||
+      pr.terminalRun === undefined
+    ) {
+      refusal(`already-landed PR '${pr.id}' is missing canonical equivalence proof`)
+    }
+    return {
+      outcome: "already-landed",
+      status: "already-landed",
+      baseSha: pr.integration.baseSha,
+      candidateSha: pr.alreadyLanded.candidateSha,
+      candidateTreeSha: pr.alreadyLanded.candidateTreeSha,
+      baseTreeSha: pr.alreadyLanded.baseTreeSha,
+      at: pr.alreadyLandedAt,
+      run: pr.terminalRun,
+    }
+  }
   if (delivery !== "integrated") return { outcome: "not-landed", status: delivery }
   if (pr.integration === undefined || pr.integratedAt === undefined) {
     refusal(`integrated PR '${pr.id}' is missing canonical landing proof`)
@@ -2229,7 +2317,9 @@ function sameIssueIntegratedCompositions(app: YrdCliApp, pr: PR): readonly Compo
       .prs()
       .filter(
         (candidate) =>
-          candidate.id !== pr.id && candidate.issue === pr.issue && prDeliveryState(candidate) === "integrated",
+          candidate.id !== pr.id &&
+          candidate.issue === pr.issue &&
+          (prDeliveryState(candidate) === "integrated" || prDeliveryState(candidate) === "already-landed"),
       )
       .map((candidate) => candidate.id),
   )

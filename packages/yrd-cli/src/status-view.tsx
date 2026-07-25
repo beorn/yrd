@@ -274,6 +274,10 @@ export type IssueDeliveryRow = Readonly<{
   status: PRDeliveryState | "needs-author"
   runs: readonly string[]
   landingSha?: string
+  baseSha?: string
+  candidateSha?: string
+  candidateTreeSha?: string
+  baseTreeSha?: string
   bounce?: Readonly<{ run: string; detail?: string }>
   attributedReceipt?: JobError
   regressions?: readonly PRRegression[]
@@ -340,6 +344,12 @@ function IssueDeliveryView({ delivery }: { delivery: IssueDeliveryRow }) {
       </Text>
       <Text wrap="wrap">HEAD {delivery.headSha}</Text>
       {delivery.landingSha === undefined ? null : <Text wrap="wrap">LANDING {delivery.landingSha}</Text>}
+      {delivery.candidateSha === undefined ? null : (
+        <Text wrap="wrap">
+          ALREADY LANDED {delivery.candidateSha} TREE {delivery.candidateTreeSha} = BASE {delivery.baseSha} TREE{" "}
+          {delivery.baseTreeSha}
+        </Text>
+      )}
       {delivery.bounce === undefined ? null : (
         <Text wrap="wrap" color="$fg-error">
           BOUNCE {delivery.bounce.run}

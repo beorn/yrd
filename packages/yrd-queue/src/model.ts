@@ -189,9 +189,28 @@ export const CandidateSchema = z
   })
   .strict()
 
+export type AlreadyLandedEvidence = Readonly<{
+  candidateSha: string
+  candidateTreeSha: string
+  baseTreeSha: string
+}>
+
+export const AlreadyLandedEvidenceSchema = z
+  .object({
+    candidateSha: GitShaSchema,
+    candidateTreeSha: GitShaSchema,
+    baseTreeSha: GitShaSchema,
+  })
+  .strict()
+  .refine(({ candidateTreeSha, baseTreeSha }) => candidateTreeSha === baseTreeSha, {
+    message: "candidateTreeSha must equal baseTreeSha",
+    path: ["candidateTreeSha"],
+  }) as z.ZodType<AlreadyLandedEvidence>
+
 export type IntegrationProof = Readonly<{
   commit: string
   baseSha: string
+  alreadyLanded?: AlreadyLandedEvidence
   sourceRewrites?: readonly SourceRewrite[]
   submoduleResolutions?: readonly QueueSubmoduleResolutionEvidence[]
 }>
@@ -201,6 +220,7 @@ export const IntegrationProofSchema = z
     commit: GitShaSchema,
     // The base branch tip after integration, not the pre-integration base.
     baseSha: GitShaSchema,
+    alreadyLanded: AlreadyLandedEvidenceSchema.optional(),
     sourceRewrites: z.array(SourceRewriteSchema).optional(),
     submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),
   })
@@ -294,7 +314,10 @@ export type QueueTerminalAssociations = Readonly<{
 
 export type QueueAuthorityState = Readonly<{
   statuses: Readonly<
-    Record<string, "pushed" | "submitted" | "needs-author" | "rejected" | "withdrawn" | "integrated" | "canceled">
+    Record<
+      string,
+      "pushed" | "submitted" | "needs-author" | "rejected" | "withdrawn" | "integrated" | "already-landed" | "canceled"
+    >
   >
   current: Readonly<Record<string, QueueAuthorityToken>>
   submits: Readonly<Record<string, QueueAuthorityToken>>

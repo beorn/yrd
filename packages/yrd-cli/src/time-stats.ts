@@ -14,6 +14,7 @@ export type QueueStatsBucket = Readonly<{
   runs: Readonly<{
     all: number
     integrated: number
+    alreadyLanded: number
     fails: number
     failureBreakdown: Readonly<Record<FailureBreakdownClass, number>>
   }>
@@ -118,7 +119,7 @@ function failureBreakdown(facts: readonly QueueTerminalFact[]): Readonly<Record<
     number
   >
   for (const fact of facts) {
-    if (fact.outcome === "integrated") continue
+    if (fact.outcome === "integrated" || fact.outcome === "already-landed") continue
     const failureClass = fact.failureClass ?? "other"
     counts[failureClass] += 1
   }
@@ -133,6 +134,9 @@ function queueStatsBucket(
   const selected = facts.filter((fact) => fact.terminalAtMs >= window.startMs && fact.terminalAtMs < window.endMs)
   const members = selected.flatMap((fact) => fact.members)
   const integratedMembers = selected.filter((fact) => fact.outcome === "integrated").flatMap((fact) => fact.members)
+  const alreadyLandedMembers = selected
+    .filter((fact) => fact.outcome === "already-landed")
+    .flatMap((fact) => fact.members)
   const totalMembers = integratedMembers.filter((member) => member.totalMs !== null)
   return {
     ...window,
@@ -140,7 +144,8 @@ function queueStatsBucket(
     runs: {
       all: selected.length,
       integrated: integratedMembers.length,
-      fails: selected.filter((fact) => fact.outcome !== "integrated").length,
+      alreadyLanded: alreadyLandedMembers.length,
+      fails: selected.filter((fact) => fact.outcome !== "integrated" && fact.outcome !== "already-landed").length,
       failureBreakdown: failureBreakdown(selected),
     },
     total: {

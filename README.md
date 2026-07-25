@@ -99,7 +99,7 @@ That replaces ambiguous `wip-preserved-*` branches with inspectable state:
 | external CI still running | waiting queue step with URL and token |
 | author-owned failure      | needs-author PR with typed receipt    |
 | unattributed rejection    | rejected PR with evidence             |
-| completed work            | integrated PR and closable bay        |
+| completed work            | integrated or already-landed PR and closable bay |
 
 Yrd does not invent commits or silently discard work. It prevents ambiguous WIP
 by making the normal workflow create named bays and durable PRs from the start.
@@ -263,7 +263,7 @@ changing the domain vocabulary does not change this five-state contract:
 | `todo`       | `[ ]` | pushed                | queued              | requested              | pending |
 | `wip`        | `[/]` | submitted             | running or waiting  | started                | running |
 | `blocked`    | `[!]` | needs-author/rejected | failed              | failed or lost         | failed  |
-| `done`       | `[x]` | integrated            | passed              | passed                 | passed  |
+| `done`       | `[x]` | integrated/already-landed | passed           | passed                 | passed  |
 | `dropped`    | `[-]` | withdrawn or canceled | retired or canceled | superseded or canceled | skipped |
 
 The read-only issue lens derives the same projection from its joined PR and
@@ -381,12 +381,13 @@ and opaque id bind to the exact PR revision and remain on its terminal facts;
 rebinding a live PR to a different correlation is refused.
 
 A branch name is a moving delivery selector, while a PR id is immutable
-evidence. Submitting an integrated PR by id is idempotent; submitting its branch
-at the landed head is an already-merged no-op, and a newer head on that same
-branch mints a fresh PR. A withdrawn or canceled branch reopens its existing PR
-at the next revision. `needs-author` and legacy rejected revisions remain live:
-fix the branch and push, and the same PR resumes automatically as its next
-revision.
+evidence. Submitting an integrated or `already-landed` PR by id is idempotent;
+submitting its branch at the landed head is an informational no-op, and a newer
+head on that same branch mints a fresh PR. `already-landed` records the base,
+Candidate, and equal tree hashes without creating a merge commit. A withdrawn
+or canceled branch reopens its existing PR at the next revision.
+`needs-author` and legacy rejected revisions remain live: fix the branch and
+push, and the same PR resumes automatically as its next revision.
 
 ### PR Eligibility and Checks
 
@@ -714,10 +715,11 @@ issue creation and editing remain in the tracker. `yrd issue --json` and `yrd
 pr runs --json` include the same compatibility-safe pair: the deprecated
 `trackerBridge` v1 envelope and the canonical `trackerBridgeV2` envelope. Each
 delivery carries the exact opaque `issueRef`, PR revision/head, projected
-status, Queue runs, and one journal `asOf` cursor; integrated deliveries alone
-carry `landingSha`. V2 projects an author-attributable red as `needs-author`
-with its `attributedReceipt` and typed bounce. V1 keeps its original status
-value set and explicitly degrades that state to `rejected` plus the same bounce;
+status, Queue runs, and one journal `asOf` cursor. Integrated deliveries carry
+`landingSha`; `already-landed` deliveries instead carry the base, Candidate,
+and equal tree hashes that prove no merge was needed. V2 projects an
+author-attributable red as `needs-author` with its `attributedReceipt` and typed
+bounce. V1 explicitly degrades that state to `rejected` plus the same bounce;
 consumers should migrate to `trackerBridgeV2`. Canceled and withdrawn remain
 distinct terminal outcomes.
 
@@ -902,6 +904,7 @@ notify:
   pr/rejected: [submitter]
   pr/needs-review: ["@cto"]
   pr/integrated: [broadcast]
+  pr/already-landed: [submitter]
   run/failed: [submitter, "@ci"]
 ```
 
@@ -954,6 +957,7 @@ a Queue step. Its Tribe intake policy is explicit:
 | `pr/rejected`     | notify       | pull     | none               | —          |
 | `pr/needs-review` | request      | push     | exact recipient/id | 10 minutes |
 | `pr/integrated`   | notify       | pull     | none               | —          |
+| `pr/already-landed` | notify     | pull     | none               | —          |
 | `run/failed`      | notify       | pull     | none               | —          |
 
 `pr/needs-review` is projected from a committed submission only when
@@ -965,9 +969,10 @@ even a route that outlives its seat cannot own a semantic response obligation.
 `submitter` resolves to the actor recorded on the exact PR revision, while an
 explicit `@name` routes to that Tribe member. `pr/integrated: [broadcast]`
 aggregates all PRs sharing one landing fact into one pull notification and wakes
-nobody. Terminal PR signals close the exact review requests recorded in the
-durable opened ledger, plus deterministic rejection ids retained for pre-policy
-legacy cleanup.
+nobody. `pr/already-landed` notifies the exact submitter with the equivalence
+proof and makes the no-merge terminal outcome explicit. Terminal PR signals
+close the exact review requests recorded in the durable opened ledger, plus
+deterministic rejection ids retained for pre-policy legacy cleanup.
 
 Signal delivery starts only after the journal append commits and never blocks
 the Run. A cursor under `.git/yrd/notifications/` records journal progress and
