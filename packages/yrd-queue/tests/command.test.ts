@@ -541,8 +541,8 @@ describe("Queue command adapters", () => {
       failure: {
         kind: "infrastructure",
         code: "candidate-ref-refused",
-        // 22332: distinguish foreign-holder vs self-retry in the message
-        message: expect.stringMatching(/another run holds this id|you already wrote this id/u),
+        // foreign-holder: stable sentence; self-retry uses a different shape
+        message: "yrd: Candidate ref 'refs/yrd/candidates/C1' is already occupied by different evidence",
       },
     })
     expect(raced).toBe(true)
