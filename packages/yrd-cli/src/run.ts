@@ -1807,7 +1807,7 @@ async function bayStatusCommand(
   selectors: readonly string[],
   options: { json?: boolean },
   io: YrdCliIO,
-): Promise<number> {
+): Promise<YrdCliExitCode> {
   const cwd = io.cwd ?? process.cwd()
   const bays =
     selectors.length === 0
@@ -1817,7 +1817,8 @@ async function bayStatusCommand(
 
   const reports: BayStatusReport[] = bays.map((bay) => classifyBayStatus(gatherBayStatusFacts(app, bay, cwd)))
   // Aggregate exit: any BLOCK → 1; else any UNKNOWN → 2; else 0.
-  let exit: 0 | 1 | 2 = 0
+  // YrdCliExitCode is 0|1|2|3; bay status uses the 0/1/2 subset (2 = unknown).
+  let exit: YrdCliExitCode = 0
   for (const report of reports) {
     if (report.exit === 1) exit = 1
     else if (report.exit === 2 && exit === 0) exit = 2
@@ -1837,7 +1838,7 @@ async function bayPruneCommand(
   app: YrdCliApp,
   options: { json?: boolean; apply?: boolean },
   io: YrdCliIO,
-): Promise<number> {
+): Promise<YrdCliExitCode> {
   const cwd = io.cwd ?? process.cwd()
   const open = app.bays.list().filter((bay) => bay.status !== "closed")
   const reports = open.map((bay) => classifyBayStatus(gatherBayStatusFacts(app, bay, cwd)))
