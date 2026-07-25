@@ -108,6 +108,37 @@ describe("yrd bay run", { timeout: 30_000 }, () => {
     expect(failed?.archive).toBeUndefined()
   })
 
+  it("refuses to archive an advancing checkpoint that lost the staged content", async () => {
+    const { repo } = await repository()
+    const originalHead = await git(repo, "rev-parse", "HEAD")
+    const postCommit = join(repo, ".git", "hooks", "post-commit")
+    await writeFile(
+      postCommit,
+      [
+        "#!/bin/sh",
+        'case "$(git log -1 --format=%s)" in',
+        "  wip:*)",
+        "    git reset --hard -q HEAD^",
+        "    git commit --allow-empty -qm 'replacement checkpoint'",
+        "    ;;",
+        "esac",
+        "",
+      ].join("\n"),
+    )
+    await chmod(postCommit, 0o755)
+    const run = output(repo)
+
+    expect(
+      await yrd(repo, run.io, "bay", "run", CLAIM, "--", "sh", "-c", "printf payload > scratch.txt"),
+      run.stderr(),
+    ).toBe(1)
+    expect(run.stderr()).toContain("scratch.txt")
+    expect(run.stderr()).toContain("did not preserve the staged content")
+    expect(await git(repo, "rev-parse", `refs/remotes/origin/${BRANCH}`)).toBe(originalHead)
+    await expect(git(repo, "show", `refs/remotes/origin/${BRANCH}:scratch.txt`)).rejects.toThrow()
+    await expect(git(repo, "rev-parse", "--verify", "refs/yrd/closed/B1")).rejects.toThrow()
+  })
+
   it("reopens a closed claim and updates the same draft on a later run", async () => {
     const { repo } = await repository()
     const clean = output(repo)

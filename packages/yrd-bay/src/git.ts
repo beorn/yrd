@@ -415,6 +415,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
         let headSha = beforeHead
         if (wip) {
           await git.run(input.path, ["add", "-A"])
+          const stagedTree = (await git.run(input.path, ["write-tree"])).stdout.trim()
           const committed = await git.run(input.path, ["commit", "-m", `wip: ${input.claim}`], true)
           if (committed.code !== 0) {
             const remaining = (
@@ -423,7 +424,8 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
             throw new Error(
               `workspace '${input.path}' reported uncommitted work:\n${dirtyStatus}\n` +
                 `but the checkpoint commit failed: ${committed.stderr.trim() || committed.stdout.trim() || `exit ${String(committed.code)}`}` +
-                (remaining === "" ? "" : `\nremaining uncommitted work:\n${remaining}`),
+                (remaining === "" ? "" : `\nremaining uncommitted work:\n${remaining}`) +
+                "\nThe Bay remains open and no archive receipt was written. Fix the commit failure, then retry.",
             )
           }
           headSha = await git.commit(input.path, "HEAD")
@@ -436,7 +438,19 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
                 `but the checkpoint commit reported success and did not advance HEAD '${beforeHead}'; ` +
                 (remaining === ""
                   ? "the dirty content disappeared from the index/worktree during the commit"
-                  : `the work remains uncommitted:\n${remaining}`),
+                  : `the work remains uncommitted:\n${remaining}`) +
+                "\nThe Bay remains open and no archive receipt was written. " +
+                "Fix the Git hook or filter so committing the listed paths advances HEAD, then retry.",
+            )
+          }
+          const committedTree = (await git.run(input.path, ["rev-parse", "--verify", "HEAD^{tree}"])).stdout.trim()
+          if (committedTree !== stagedTree) {
+            throw new Error(
+              `workspace '${input.path}' reported uncommitted work:\n${dirtyStatus}\n` +
+                `but checkpoint commit '${headSha}' contains tree '${committedTree}', not staged tree '${stagedTree}'; ` +
+                "the commit did not preserve the staged content.\n" +
+                "The Bay remains open and no archive receipt was written. " +
+                "Fix the Git hook or filter that replaced the staged content, then retry.",
             )
           }
         }
