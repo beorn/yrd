@@ -4537,6 +4537,7 @@ describe("runYrd", () => {
       outcomes: {
         integrated: 2,
         alreadyLanded: 1,
+        passed: 0,
         rejected: 1,
         environmentRefused: 1,
         stale: 0,
@@ -4597,6 +4598,7 @@ describe("runYrd", () => {
       outcomes: {
         integrated: 0,
         alreadyLanded: 0,
+        passed: 0,
         rejected: 0,
         environmentRefused: 0,
         stale: 0,
@@ -5147,6 +5149,20 @@ describe("runYrd", () => {
         facts: { lease: "free", git: { dirty: true, baselines: [{ base: "main", ahead: 1, behind: 0 }] } },
       })
 
+      await openAndSubmit(app)
+      const stranded = outputIO({ cwd: repo })
+      expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), stranded.io, services)).toBe(2)
+      expect(JSON.parse(stranded.stdout())).toMatchObject({
+        schema: "hab-service-health/1",
+        state: "unhealthy",
+        running: false,
+        error: {
+          code: "resident-runner-missing",
+          resolution: ["Start or restart the resident queue runner."],
+        },
+        facts: { lease: "free", runnerStatus: "missing" },
+      })
+
       lock = createExclusive(join(stateDir, "resident-runner"), { timeoutMs: 0 }).run(async () => {
         lockAcquired.resolve()
         await lockRelease.promise
@@ -5398,6 +5414,7 @@ describe("runYrd", () => {
     expect(projection.metrics.outcomes).toEqual({
       integrated: 0,
       alreadyLanded: 0,
+      passed: 0,
       rejected: 2,
       environmentRefused: 1,
       stale: 3,
@@ -5670,6 +5687,7 @@ describe("runYrd", () => {
         outcomes: {
           integrated: 39,
           alreadyLanded: 0,
+          passed: 0,
           rejected: 5,
           environmentRefused: 0,
           stale: 0,

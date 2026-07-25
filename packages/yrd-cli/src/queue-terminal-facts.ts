@@ -3,6 +3,8 @@ import type { FailureBreakdownClass } from "./status-presentation.ts"
 export type QueueTerminalOutcome =
   | "integrated"
   | "already-landed"
+  /** Completed success without merge/integration proof — admission-only / non-landing. */
+  | "passed"
   | "rejected"
   | "environment-refused"
   | "stale"

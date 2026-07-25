@@ -204,6 +204,12 @@ const STATS_ROWS: readonly StatsRow[] = [
     value: (bucket) => countCell(bucket, bucket.runs.alreadyLanded),
   },
   {
+    // Non-landing success (admission-only). Not a fail, not integrated (21801).
+    label: "PASS",
+    color: "$fg-warning",
+    value: (bucket) => countCell(bucket, bucket.runs.passed),
+  },
+  {
     label: "FAILS",
     color: "$fg-error",
     metric: "fails",

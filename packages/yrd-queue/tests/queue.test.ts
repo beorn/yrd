@@ -4327,12 +4327,31 @@ describe("Queue", () => {
     await expect(app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)).rejects.toThrow(
       /submit authority was consumed/iu,
     )
-    expect(await Array.fromAsync(app.events())).toEqual(beforeRetry)
+    const afterRetry = await Array.fromAsync(app.events())
+    expect(afterRetry.slice(beforeRetry.length)).toMatchObject([
+      {
+        name: "pr/needs-author",
+        data: {
+          pr: pr.id,
+          revision: pr.revision,
+          headSha: pr.headSha,
+          run: "R1",
+          receipt: {
+            code: "queue-submit-authority-consumed",
+            message: expect.stringContaining(`yrd pr recut ${pr.id} --preflight --queue`),
+          },
+        },
+      },
+    ])
+    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
+      delivery: "needs-author",
+      revision: pr.revision,
+      headSha: pr.headSha,
+    })
     expect(Queues.ids(app.state().queues)).toEqual(["R1"])
     expect(mergeCalls).toBe(1)
 
     await app.bays.intake({ branch: pr.branch, headSha: UPDATED, base: pr.base, baseSha: BASE })
-    await app.bays.submit({ pr: pr.id })
     expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
       delivery: "submitted",
       revision: 2,

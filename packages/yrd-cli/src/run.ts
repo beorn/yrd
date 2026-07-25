@@ -394,6 +394,7 @@ function runnerHealthError(code: string, cause: string, resolution: readonly str
 }
 
 async function queueRunnerHealth(
+  app: YrdCliApp | undefined,
   services: YrdCliServices,
   io: YrdCliIO,
 ): Promise<{
@@ -446,6 +447,27 @@ async function queueRunnerHealth(
       }
     }
     if (!leaseHeld) {
+      const state = app === undefined ? undefined : stateOf(app)
+      const hasQueuedWork =
+        state !== undefined && Object.values(state.bays.prs).some((pr) => prDeliveryState(pr) === "submitted")
+      if (hasQueuedWork) {
+        return {
+          exitCode: 2,
+          payload: {
+            schema: "hab-service-health/1",
+            command: "queue.list.check",
+            service: "yrd-runner",
+            state: "unhealthy",
+            running: false,
+            error: runnerHealthError(
+              "resident-runner-missing",
+              "the queue has work but no resident runner owns the drain lease",
+              ["Start or restart the resident queue runner."],
+            ),
+            facts,
+          },
+        }
+      }
       return {
         exitCode: 1,
         payload: {
@@ -507,8 +529,13 @@ async function queueRunnerHealth(
   }
 }
 
-async function checkQueueRunner(services: YrdCliServices, options: JsonOption, io: YrdCliIO): Promise<YrdCliExitCode> {
-  const result = await queueRunnerHealth(services, io)
+async function checkQueueRunner(
+  app: YrdCliApp | undefined,
+  services: YrdCliServices,
+  options: JsonOption,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
+  const result = await queueRunnerHealth(app, services, io)
   const gitLines = result.payload.facts.git.baselines.map((distance) =>
     distance.unavailable === undefined
       ? `git ${distance.base}: ahead=${distance.ahead ?? 0} behind=${distance.behind ?? 0} baseline=${distance.baseSha.slice(0, 12)}`
@@ -4462,7 +4489,10 @@ async function logRuns(
  * blocks the run — config drift with the migration remedy, runtime drift
  * (merge-queue R41b: this process's installed steps diverge from the migrated
  * baseline) with the restart remedy. */
-export async function requireFreshInstalledBaseline(services: YrdCliServices): Promise<void> {
+export async function requireFreshInstalledBaseline(
+  services: YrdCliServices,
+  options: Readonly<{ reloadInPlace?: Readonly<{ base?: string }> }> = {},
+): Promise<void> {
   const administration = services.queue
   // No queue administration is wired (embedded / no-administration host) → the
   // installed-baseline gate is a legacy no-op, as before.
@@ -4473,9 +4503,23 @@ export async function requireFreshInstalledBaseline(services: YrdCliServices): P
   if (administration.auditEnvironment === undefined) {
     configuration("queue.audit capability is not installed")
   }
-  const result = await administration.auditEnvironment()
-  const drift = result.findings.filter((finding) => finding.code === "config-drift" || finding.code === "runtime-drift")
+  const auditDrift = async () => {
+    const result = await administration.auditEnvironment?.()
+    return (result?.findings ?? []).filter(
+      (finding) => finding.code === "config-drift" || finding.code === "runtime-drift",
+    )
+  }
+  let drift = await auditDrift()
   if (drift.length === 0) return
+  if (options.reloadInPlace !== undefined && drift.some((finding) => finding.code === "config-drift")) {
+    if (administration.deprovision === undefined || administration.provision === undefined) {
+      configuration("queue config drift reload requires both queue.deinit and queue.init capabilities")
+    }
+    await administration.deprovision(options.reloadInPlace.base)
+    await administration.provision(options.reloadInPlace.base)
+    drift = await auditDrift()
+    if (drift.length === 0) return
+  }
   const first = drift[0]
   if (first === undefined) return
   raiseFailure("refusal", first.code, drift.map((finding) => finding.message).join("\n"))
@@ -5830,7 +5874,7 @@ function buildProgram(
   const listQueue = async (filters: string[], options: QueueListOptions): Promise<void> => {
     if (options.check === true) {
       if (options.watch === true || filters.length > 0) usage("queue list --check does not accept --watch or filters")
-      setExit(await checkQueueRunner(installedServices(), options, io))
+      setExit(await checkQueueRunner(installed(), installedServices(), options, io))
       return
     }
     if (options.watch === true) {
@@ -5908,8 +5952,10 @@ function buildProgram(
     .option("--interval <seconds>", "follow-mode poll interval in seconds", int)
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => {
-      const gate = () => requireFreshInstalledBaseline(installedServices())
-      if (resolveQueueRunMode(selectors, options) === "follow") {
+      const mode = resolveQueueRunMode(selectors, options)
+      const gate = () =>
+        requireFreshInstalledBaseline(installedServices(), mode === "follow" ? { reloadInPlace: {} } : {})
+      if (mode === "follow") {
         setExit(await followQueueRuns(installed(), selectors, options, io, gate, installedServices()))
         return
       }
@@ -6346,6 +6392,7 @@ async function executeYrd(
   } catch (error) {
     if (queueRunnerCheckRequested(args)) {
       return checkQueueRunner(
+        undefined,
         {
           queue: {
             auditEnvironment: () => Promise.reject(error),
