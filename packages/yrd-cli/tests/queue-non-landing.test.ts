@@ -125,10 +125,13 @@ describe("21801 non-landing detector (perfect signals)", () => {
     expect(row).toBeDefined()
     expect(row?.status).toBe("passed")
     expect(row?.glyph).toBe("◌")
+    // Row-level JSON (not only details) carries the script-facing fields.
+    expect(row?.landingVerdict).toBe("non-landing")
+    expect(row?.stepNames).toEqual(["bead-identity-admission"])
     expect(queueTimelineStatusBucket("passed")).toBe("failed") // not the done court
     expect(projection.metrics.outcomes.passed).toBe(1)
     expect(projection.metrics.outcomes.integrated).toBe(0)
-    // JSON details carry the script-facing fields
+    // JSON details carry the same script-facing fields
     const detail = projection.details.find((candidate) => candidate.run === run.id)
     expect(detail?.outcome).toBe("passed")
     expect(detail?.landingVerdict).toBe("non-landing")

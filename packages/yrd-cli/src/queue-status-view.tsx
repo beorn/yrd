@@ -237,6 +237,10 @@ export type QueueTimelineProjectedRow = Readonly<{
   activeMs: number | null
   waitMs: number | null
   queueWaitMs: number | null
+  /** Perfect-detector landing class (21801) — present on completed Run rows. */
+  landingVerdict?: LandingVerdict
+  /** Step names in run order — scripts must not infer landing from glyph alone. */
+  stepNames?: readonly string[]
 }>
 
 export type QueueTimelineRepeat = Readonly<{
@@ -1861,6 +1865,8 @@ function timelineRunMemberRows(
       : actionableFailureSummary(actionableFailure(failure))
   const queueWaits = timelineQueueWaits(run, submissionTimes)
   const ageEndIso = running ? nowIso : (run.finishedAt ?? nowIso)
+  const stepNames = stepNamesOfRun(run)
+  const landingVerdict = running ? ("running" as const) : landingVerdictOfOutcome(status)
   return run.prs.map((member, index) => {
     const current = result.prs.find((candidate) => candidate.id === member.id)
     if (current === undefined) throw new Error(`yrd: run '${run.id}' has no retained PR '${member.id}'`)
@@ -1908,6 +1914,8 @@ function timelineRunMemberRows(
       activeMs,
       waitMs,
       queueWaitMs: queueWaits[index] ?? null,
+      landingVerdict,
+      stepNames,
     }
   })
 }
