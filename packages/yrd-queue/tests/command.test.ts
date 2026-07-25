@@ -53,11 +53,12 @@ const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 type Checked = AddStepResult<PRShape, "check", GitCheckResultEvidence>
 
 function expectNonInteractiveRebases(commands: readonly (readonly string[])[]): void {
-  expect(commands.length).toBeGreaterThan(0)
-  for (const command of commands) {
+  const editorCapable = commands.filter((command) => !command.includes("--abort"))
+  expect(editorCapable.length).toBeGreaterThan(0)
+  for (const command of editorCapable) {
     const rebase = command.indexOf("rebase")
     expect(rebase).toBeGreaterThan(1)
-    expect(command.slice(rebase - 2, rebase + 1)).toEqual(["-c", "core.editor=true", "rebase"])
+    expect(command.slice(rebase - 2, rebase + 1), command.join(" ")).toEqual(["-c", "core.editor=true", "rebase"])
   }
 }
 
@@ -758,8 +759,12 @@ describe("Queue command adapters", () => {
     await git(repo, ["submodule", "update", "--init", "--recursive"])
     await using delegate = createProcess()
     let afterRebase: ((path: string) => Promise<void>) | undefined
+    const rebaseCommands: string[][] = []
     const process = {
       run: async (request: ProcessRequest): Promise<ProcessResult> => {
+        if (request.argv[0] === "git" && request.argv.includes("rebase")) {
+          rebaseCommands.push([...request.argv])
+        }
         const result = await delegate.run(request)
         if (result.exitCode === 0 && request.argv.includes("rebase") && afterRebase !== undefined) {
           const mutate = afterRebase
@@ -888,6 +893,8 @@ describe("Queue command adapters", () => {
         message: expect.stringContaining("did not preserve deterministic union identity"),
       },
     })
+    expectNonInteractiveRebases(rebaseCommands)
+    expect(rebaseCommands.some((command) => command.includes("--continue"))).toBe(true)
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
   }, 30_000)
 
