@@ -427,15 +427,15 @@ yrd pr submit [selector...] [--follow] [--base <branch>]
   [--issue <ref>] [--title <text>] [--description <text>]
   [--correlation <namespace:id>] [--json]
 yrd pr list [--base <branch>] [--state <state>] [--issue <ref>]
-  [--needs-review [--reviewer <actor>]] [--json]
+  [--needs-review [--reviewer <reviewer>]] [--json]
 yrd pr edit <selector> [--issue <ref>] [--note <text>]
   [--title <text>] [--description <text>] [--json]
 yrd pr recut <selector> [--revision <number>] [--preflight] [--queue]
   [--force] [--json]
 yrd pr ready <selector> [--json]
 yrd pr review <selector> (--approve | --reject)
-  [--by <actor>] [--ref <id>] [--note <text>] [--json]
-yrd pr comment <selector> --note <text> [--by <actor>] [--ref <id>] [--json]
+  [--by <identity>] [--ref <id>] [--note <text>] [--json]
+yrd pr comment <selector> --note <text> [--by <identity>] [--ref <id>] [--json]
 yrd pr checks <selector...> [--follow] [--json]
 yrd pr close [selector...] [--json]
 ```
@@ -568,8 +568,8 @@ otherwise the Queue cannot prove the gitlink object is remotely reachable.
 
 #### Manning an Ordinary Bay
 
-Yrd carries the selected runtime name but does not assign, lease, or resume an
-actor. The caller owns those policies. A human, Tent, or another Hab app
+Yrd carries the selected runtime name but does not assign, lease, or resume
+work. The caller owns those policies. A human, Tent, or another Hab app
 composes the workflow explicitly:
 
 ```bash
@@ -722,7 +722,7 @@ yrd contest eval <contest> [--retry] [--json]
 yrd contest view <contest> [--json]
 yrd contest finish <contest> [--attempt <attempt>] [--evaluator <id>]
   (--ok | --fail | --error <code>) --token <token> [evidence options]
-yrd contest select <contest> --winner <attempt> [--by <actor>] [--reason <text>]
+yrd contest select <contest> --winner <attempt> [--by <identity>] [--reason <text>]
 yrd contest promote <contest> [--json]
 ```
 
@@ -991,7 +991,7 @@ step, Run, and typed attribution receipt; if its canonical route is absent, Yrd
 falls back to the configured `pr/rejected` route for v1 configuration
 compatibility. Generic rejection and Run failure remain outcome evidence, so
 even a route that outlives its seat cannot own a semantic response obligation.
-`submitter` resolves to the actor recorded on the exact PR revision, while an
+`submitter` resolves to the identity recorded on the exact PR revision, while an
 explicit `@name` routes to that Tribe member. `pr/integrated: [broadcast]`
 aggregates all PRs sharing one landing fact into one pull notification and wakes
 nobody. `pr/already-landed` notifies the exact submitter with the equivalence
@@ -1016,7 +1016,7 @@ bracketed `run` derives and registers its persona through the documented name
 ladder, while interactive delivery remains fail-soft. A needs-review route without
 `requires: [review]` is rejected rather than stored as an inert label.
 Historical rejections written before the routable fact shape remain replayable
-but are not retroactively delivered. If a pre-actor revision is rejected after
+but are not retroactively delivered. If a pre-identity revision is rejected after
 upgrade, its unavailable submitter is logged and skipped without starving later
 signals.
 

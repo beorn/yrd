@@ -1289,7 +1289,7 @@ async function provisionBay(
     base?: string
     queue?: string
     issue?: string
-    actor?: string
+    by?: string
     json?: boolean
   },
   io: YrdCliIO,
@@ -1301,7 +1301,7 @@ async function provisionBay(
   const result = await app.bays.open({
     name,
     ...(options.issue === undefined ? {} : { issue: options.issue }),
-    ...(options.actor === undefined ? {} : { actor: options.actor }),
+    ...(options.by === undefined ? {} : { by: options.by }),
     ...(from === undefined ? {} : { from }),
     ...(base === undefined ? {} : { base }),
   })
@@ -1772,7 +1772,7 @@ async function prepareOwnedBay(
     targetedPr?: PR
     via?: "issue" | "pr"
   }> = {},
-): Promise<Readonly<{ identity: BayOpenResolution; bay: Bay }>> {
+): Promise<Readonly<{ identity: BayOpenResolution; bay: Bay }> | undefined> {
   const persona = (io as RuntimePersonaIO)[RuntimePersona]
   const identity = await resolveBayOpen(app, arg, options, io, preResolved)
   const existing = openRunBay(app, identity)
@@ -1790,7 +1790,7 @@ async function prepareOwnedBay(
       name: identity.bay,
       branch: identity.branch,
       ...(identity.issue === undefined ? {} : { issue: identity.issue }),
-      ...(persona === undefined ? {} : { actor: persona.mailbox }),
+      ...(persona === undefined ? {} : { by: persona.mailbox }),
     })
     assertJobsPassed(await runJobs(app, app.jobs.requested(opened), io), `bay '${identity.bay}' provision`)
     const active = app.bays
@@ -1803,12 +1803,12 @@ async function prepareOwnedBay(
     if (bay?.path === undefined || bay.status !== "active") {
       refusal(`bay '${identity.bay}' did not become active`)
     }
-    if (await preserveInterruptedRunBay(app, bay, "pre-child provision", io)) return 1
+    if (await preserveInterruptedRunBay(app, bay, "pre-child provision", io)) return undefined
 
     // The branch carrier is durable before the child receives control. PR
     // creation and revision intake remain explicit delivery actions.
     bay = await checkpointRunBay(app, bay, identity.claim, io)
-    if (await preserveInterruptedRunBay(app, bay, "pre-child checkpoint", io)) return 1
+    if (await preserveInterruptedRunBay(app, bay, "pre-child checkpoint", io)) return undefined
   } catch (error) {
     bay ??= app.bays
       .list()
@@ -1833,8 +1833,7 @@ async function openPersistentBay(
   options: BayOpenOptions,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
-  await prepareOwnedBay(app, arg, options, io)
-  return 0
+  return (await prepareOwnedBay(app, arg, options, io)) === undefined ? 1 : 0
 }
 
 async function runBaySession(
@@ -1853,6 +1852,7 @@ async function runBaySession(
 ): Promise<YrdCliExitCode> {
   if (services.process === undefined) configuration("bay run requires the process-backed Yrd runtime")
   const provisioned = await prepareOwnedBay(app, arg, options, io, preResolved)
+  if (provisioned === undefined) return 1
   const { identity } = provisioned
   let { bay } = provisioned
 
@@ -2254,7 +2254,7 @@ async function reviewPr(
   if (options.approve === options.reject) usage("pr review requires exactly one of --approve or --reject")
   await app.bays.review({
     pr: selector,
-    actor: options.by ?? io.runner ?? "operator",
+    by: options.by ?? io.runner ?? "operator",
     decision: options.approve === true ? "approve" : "reject",
     ...(options.ref === undefined ? {} : { ref: options.ref }),
     ...(options.note === undefined ? {} : { note: options.note }),
@@ -2275,27 +2275,27 @@ async function reviewPr(
       review,
       eligibility: projectEligibilityTaskStatus(app.queue.eligibility(pr.id)),
     },
-    `${pr.id} revision ${prRevisionNumber(pr)} ${review.decision} by ${review.actor}`,
+    `${pr.id} revision ${prRevisionNumber(pr)} ${review.decision} by ${review.by}`,
   )
 }
 
 async function requestReviewPr(
   app: YrdCliApp,
   selector: string,
-  actors: readonly string[],
+  reviewers: readonly string[],
   options: JsonOption & Readonly<{ clear?: boolean; by?: string }>,
   io: YrdCliIO,
 ): Promise<void> {
-  if (options.clear === true && actors.length > 0) {
-    usage("pr request-review --clear cannot combine with reviewer actors")
+  if (options.clear === true && reviewers.length > 0) {
+    usage("pr request-review --clear cannot combine with reviewer identities")
   }
-  if (options.clear !== true && actors.length === 0) {
-    usage("pr request-review requires reviewer actors or --clear")
+  if (options.clear !== true && reviewers.length === 0) {
+    usage("pr request-review requires reviewer identities or --clear")
   }
   await app.bays.requestReview({
     pr: selector,
-    reviewers: options.clear === true ? [] : [...actors],
-    actor: options.by ?? io.runner ?? "operator",
+    reviewers: options.clear === true ? [] : [...reviewers],
+    by: options.by ?? io.runner ?? "operator",
   })
   const pr = app.bays.pr(selector)
   if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after request-review`)
@@ -2321,7 +2321,7 @@ async function commentPr(
   if (options.note === undefined || options.note.trim() === "") usage("pr comment requires --note <text>")
   await app.bays.comment({
     pr: selector,
-    actor: options.by ?? io.runner ?? "operator",
+    by: options.by ?? io.runner ?? "operator",
     note: options.note,
     ...(options.ref === undefined ? {} : { ref: options.ref }),
   })
@@ -2334,7 +2334,7 @@ async function commentPr(
     io,
     jsonEnabled(options),
     { command: "pr.comment", pr: prFact(pr), comment },
-    `${pr.id} revision ${prRevisionNumber(pr)} commented by ${comment.actor}`,
+    `${pr.id} revision ${prRevisionNumber(pr)} commented by ${comment.by}`,
   )
 }
 
@@ -2546,7 +2546,7 @@ async function applyPrSelectionVerb(
       await app.bays.requestReview({
         pr: pr.id,
         reviewers: [...reviewers],
-        ...(io.runner === undefined ? {} : { actor: io.runner }),
+        ...(io.runner === undefined ? {} : { by: io.runner }),
       })
       const requested = app.bays.pr(pr.id)
       if (requested === undefined) throw new Error(`yrd: PR '${pr.id}' disappeared after request-review`)
@@ -5934,7 +5934,7 @@ function buildProgram(
     .option("--state <state>", "scope PRs to one native or projected state")
     .option("--issue <ref>", "scope PRs to one issue reference")
     .option("--needs-review", "show revisions needing approval")
-    .option("--reviewer <actor>", "scope --needs-review to one requested reviewer")
+    .option("--reviewer <reviewer>", "scope --needs-review to one requested reviewer")
     .option("--json", "emit stable JSON")
     .action(async (options) => listPrs(installed(), options, io))
   const create = pr
@@ -5948,8 +5948,8 @@ function buildProgram(
     .option("--correlation <namespace:id>", "bind an opaque correlation to the draft revision")
     .option("--composition <path>", "queue-generated source composition JSON; not for authored root carriers")
     .option(
-      "--reviewer <actor>",
-      "request a review from <actor> right after create (repeatable)",
+      "--reviewer <reviewer>",
+      "request a review from <reviewer> right after create (repeatable)",
       (value: string, previous: readonly string[]) => [...previous, value],
       [] as readonly string[],
     )
@@ -5972,8 +5972,8 @@ function buildProgram(
     .option("--correlation <namespace:id>", "bind an opaque correlation to the submitted revision")
     .option("--composition <path>", "queue-generated source composition JSON; not for authored root carriers")
     .option(
-      "--reviewer <actor>",
-      "request a review from <actor> right after submit (repeatable)",
+      "--reviewer <reviewer>",
+      "request a review from <reviewer> right after submit (repeatable)",
       (value: string, previous: readonly string[]) => [...previous, value],
       [] as readonly string[],
     )
@@ -6031,20 +6031,20 @@ function buildProgram(
     .description("record a revision-bound review verdict")
     .option("--approve", "approve the current revision")
     .option("--reject", "reject the current revision")
-    .option("--by <actor>", "reviewer identity")
+    .option("--by <identity>", "reviewer identity")
     .option("--ref <id>", "idempotency reference")
     .option("--note <text>", "review note")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => reviewPr(installed(), selector, options, io))
-  pr.command("request-review <selector> [actors...]")
+  pr.command("request-review <selector> [reviewers...]")
     .description("replace the requested reviewers for a PR (declarative set)")
     .option("--clear", "clear the requested reviewer set")
-    .option("--by <actor>", "requesting identity")
+    .option("--by <identity>", "requesting identity")
     .option("--json", "emit stable JSON")
-    .action(async (selector, actors, options) => requestReviewPr(installed(), selector, actors, options, io))
+    .action(async (selector, reviewers, options) => requestReviewPr(installed(), selector, reviewers, options, io))
   pr.command("comment <selector>")
     .description("record a non-gating revision comment")
-    .option("--by <actor>", "commenter identity")
+    .option("--by <identity>", "commenter identity")
     .option("--ref <id>", "idempotency reference")
     .requiredOption("--note <text>", "comment text")
     .option("--json", "emit stable JSON")
@@ -6160,7 +6160,7 @@ function buildProgram(
     .command("select <contest>")
     .description("select a winner")
     .option("--winner <attempt>", "winning attempt id")
-    .option("--by <actor>", "selector identity")
+    .option("--by <identity>", "selector identity")
     .option("--reason <text>", "selection rationale")
     .option("--json", "emit stable JSON")
     .action(async (contestId, options) => selectContest(installed(), contestId, options, io))

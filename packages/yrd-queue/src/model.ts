@@ -456,7 +456,7 @@ export type PREligibility = Readonly<{
     approved: boolean
     stale: boolean
     decision?: "approve" | "reject"
-    actor?: string
+    by?: string
     ref?: string
   }>
   checks: Readonly<{

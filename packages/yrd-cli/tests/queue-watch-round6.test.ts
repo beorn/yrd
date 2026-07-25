@@ -87,7 +87,7 @@ describe("queue watch user round 6", () => {
     const lead = {
       ...fixturePr("PR60", "integrated", "2026-07-13T10:30:00.000Z", "Lead fallback", {
         revision: 4,
-        actor: "@ci",
+        submitter: "@ci",
         issue: "@yrd/core/21514-detail-pane",
         note: "visual confirmation required",
         headSha: leadHead,
@@ -99,7 +99,7 @@ describe("queue watch user round 6", () => {
             baseSha,
             pushedAt: "2026-07-12T22:14:00.000Z",
             submittedAt: "2026-07-12T22:14:00.000Z",
-            actor: "@ci",
+            submitter: "@ci",
             terminal: { status: "rejected" as const, at: "2026-07-12T22:15:00.000Z", run: "R57" },
           },
           {
@@ -115,7 +115,7 @@ describe("queue watch user round 6", () => {
             },
             pushedAt: "2026-07-12T22:19:00.000Z",
             submittedAt: "2026-07-12T22:19:00.000Z",
-            actor: "@ci",
+            submitter: "@ci",
             terminal: { status: "rejected" as const, at: "2026-07-12T22:20:00.000Z", run: "R58" },
           },
           {
@@ -131,7 +131,7 @@ describe("queue watch user round 6", () => {
             },
             pushedAt: "2026-07-12T22:29:00.000Z",
             submittedAt: "2026-07-12T22:29:00.000Z",
-            actor: "@ci",
+            submitter: "@ci",
             terminal: { status: "rejected" as const, at: "2026-07-12T22:30:00.000Z", run: "R59" },
           },
           {
@@ -147,7 +147,7 @@ describe("queue watch user round 6", () => {
             },
             pushedAt: "2026-07-13T10:30:00.000Z",
             submittedAt: "2026-07-13T10:30:00.000Z",
-            actor: "@ci",
+            submitter: "@ci",
             correlation: { namespace: "tribe", id: "21514-round6-agent1" },
             terminal: { status: "integrated" as const, at: "2026-07-13T10:41:00.000Z", run: "R60" },
           },
@@ -174,7 +174,7 @@ describe("queue watch user round 6", () => {
         {
           revision: 4,
           headSha: leadHead,
-          actor: "@chief",
+          by: "@chief",
           decision: "approve" as const,
           at: "2026-07-13T10:36:00.000Z",
           note: "The final hierarchy is clear.",
@@ -184,14 +184,14 @@ describe("queue watch user round 6", () => {
         {
           revision: 4,
           headSha: leadHead,
-          actor: "@agent/8",
+          by: "@agent/8",
           at: "2026-07-13T10:37:00.000Z",
           note: "Focused evidence is attached.",
         },
       ],
     }
     const partner = fixturePr("PR61", "integrated", "2026-07-13T10:31:00.000Z", "Partner subject", {
-      actor: "@ci",
+      submitter: "@ci",
       issue: "@yrd/core/21525-queue-watch",
       headSha: partnerHead,
       revisions: [
@@ -202,7 +202,7 @@ describe("queue watch user round 6", () => {
           baseSha,
           pushedAt: "2026-07-13T10:31:00.000Z",
           submittedAt: "2026-07-13T10:31:00.000Z",
-          actor: "@ci",
+          submitter: "@ci",
           terminal: { status: "integrated", at: "2026-07-13T10:41:00.000Z", run: "R60" },
         },
       ],
@@ -429,7 +429,7 @@ describe("queue watch user round 6", () => {
     const pr = fixturePr("PR63", "submitted", "2026-07-13T11:52:00.000Z", "Long-suffering queue item", {
       revision: 3,
       headSha: head3,
-      actor: "@agent/8",
+      submitter: "@agent/8",
       revisions: [
         {
           revision: 1,
@@ -438,7 +438,7 @@ describe("queue watch user round 6", () => {
           baseSha: "a".repeat(40),
           pushedAt: "2026-07-13T11:03:00.000Z",
           submittedAt: "2026-07-13T11:03:00.000Z",
-          actor: "@agent/8",
+          submitter: "@agent/8",
           terminal: { status: "rejected", at: "2026-07-13T11:08:00.000Z", run: "R61" },
         },
         {
@@ -454,7 +454,7 @@ describe("queue watch user round 6", () => {
           },
           pushedAt: "2026-07-13T11:20:00.000Z",
           submittedAt: "2026-07-13T11:20:00.000Z",
-          actor: "@agent/8",
+          submitter: "@agent/8",
           terminal: { status: "rejected", at: "2026-07-13T11:25:00.000Z", run: "R62" },
         },
         {
@@ -470,7 +470,7 @@ describe("queue watch user round 6", () => {
           },
           pushedAt: "2026-07-13T11:52:00.000Z",
           submittedAt: "2026-07-13T11:52:00.000Z",
-          actor: "@agent/8",
+          submitter: "@agent/8",
         },
       ],
     })

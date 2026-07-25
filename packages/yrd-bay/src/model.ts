@@ -43,7 +43,7 @@ export const PRRejectedFactSchema = z
     run: TextSchema,
     issueRef: TextSchema.optional(),
     correlation: CorrelationSchema.optional(),
-    /** Missing only when a current rejection terminates a pre-actor legacy revision. */
+    /** Persisted v2 key; missing only when a current rejection terminates a pre-identity revision. */
     actor: TextSchema.optional(),
     step: TextSchema,
     evidence: TextSchema.optional(),
@@ -193,7 +193,7 @@ export type Bay = Readonly<{
   id: BayId
   name: string
   issue?: string
-  actor?: string
+  by?: string
   branch: string
   base: string
   from?: string
@@ -217,7 +217,7 @@ type BranchLifecycleBase = Readonly<{
   bay: BayId
   name: string
   issue?: string
-  actor?: string
+  by?: string
   branch: string
   openedAt: string
 }>
@@ -352,7 +352,7 @@ export type PRRev = Readonly<{
   base: string
   baseSha?: string
   /** Missing only while replaying journals written before submitter identity was recorded. */
-  actor?: string
+  submitter?: string
   correlation?: Correlation
   composition?: CompositionV1
   recut?: PRRecutProof
@@ -364,7 +364,7 @@ export type PRReviewDecision = "approve" | "reject"
 export type PRReview = Readonly<{
   revision: number
   headSha: string
-  actor: string
+  by: string
   decision: PRReviewDecision
   at: string
   ref?: string
@@ -375,7 +375,7 @@ export type PRReview = Readonly<{
 export type PRComment = Readonly<{
   revision: number
   headSha: string
-  actor: string
+  by: string
   note: string
   at: string
   ref?: string
@@ -520,9 +520,9 @@ export function needsReview(pr: PR, reviewer?: string): boolean {
   const revision = currentPRRev(pr)
   const requested = pr.requestedReviewers ?? []
   if (requested.length === 0) return false
-  const hasCurrentVerdict = (actor: string) =>
+  const hasCurrentVerdict = (by: string) =>
     pr.reviews.some(
-      (review) => review.revision === revision.n && review.headSha === revision.head && review.actor === actor,
+      (review) => review.revision === revision.n && review.headSha === revision.head && review.by === by,
     )
   if (reviewer !== undefined) return requested.includes(reviewer) && !hasCurrentVerdict(reviewer)
   return !requested.some(hasCurrentVerdict)
@@ -693,7 +693,7 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
         bay: bay.id,
         name: bay.name,
         ...(bay.issue === undefined ? {} : { issue: bay.issue }),
-        ...(bay.actor === undefined ? {} : { actor: bay.actor }),
+        ...(bay.by === undefined ? {} : { by: bay.by }),
         branch: bay.branch,
         openedAt: bay.openedAt,
       }

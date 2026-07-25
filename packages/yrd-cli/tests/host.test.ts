@@ -853,7 +853,7 @@ notify:
     })
     try {
       await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-      expect(host.app.bays.pr("PR1")?.revs).toEqual([expect.objectContaining({ actor: "@agent/7" })])
+      expect(host.app.bays.pr("PR1")?.revs).toEqual([expect.objectContaining({ submitter: "@agent/7" })])
 
       const settled = await Promise.race([
         host.app.queue
@@ -1228,6 +1228,8 @@ notify:
       "in",
       "do",
       "sh",
+      "run",
+      "ag",
     ])
     expect(stdout).not.toMatch(/\b(?:pr\|prs|bay\|bays|issue\|issues|contest\|contests|queue\|queues)\b/u)
     expect(stderr).toBe("")

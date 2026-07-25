@@ -114,7 +114,7 @@ export type DefaultYrdAppOptions = Readonly<{
   contestRunners?: readonly ContestRunnerDef[]
   contestEvaluators?: readonly ContestEvaluatorDef[]
   contestGit?: ContestGit
-  defaultActor?: string
+  defaultSubmitter?: string
   scope?: Scope
   log?: ConditionalLogger
   /** Opt-in warm candidate-worktree pool shared across check steps (R40). */
@@ -730,7 +730,7 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
     withBays({
       jobs: bayJobs,
       defaultBase: baseIdentity(options.config.base),
-      ...(options.defaultActor === undefined ? {} : { defaultActor: options.defaultActor }),
+      ...(options.defaultSubmitter === undefined ? {} : { defaultSubmitter: options.defaultSubmitter }),
       resolveBase: async (base, context) => {
         const target = await resolveQueueTarget(options.process, options.repo, options.config.base, base, {
           refreshAuthority: true,
@@ -1074,7 +1074,7 @@ function executableOnPath(name: string, env: NodeJS.ProcessEnv): string | undefi
 async function createRuntimeSignalAdapter(options: {
   process: Process
   env: NodeJS.ProcessEnv
-  actor: string
+  recipient: string
   persona?: YrdPersona
   interactive?: boolean
   wire?: string
@@ -1092,7 +1092,7 @@ async function createRuntimeSignalAdapter(options: {
         "yrd: a capture wire requires an ordinary output sink",
       )
     }
-    return createWireSignalAdapter(wire, options.output, options.actor, (event) => options.attributedReceipt(event))
+    return createWireSignalAdapter(wire, options.output, options.recipient, (event) => options.attributedReceipt(event))
   }
 
   const signalProcess =
@@ -1106,9 +1106,11 @@ async function createRuntimeSignalAdapter(options: {
   if (options.persona?.registration === "ensure") {
     try {
       if (executable === undefined) {
-        throw new Error(`yrd: Tribe signal mailbox registration failed for '${options.actor}': executable unavailable`)
+        throw new Error(
+          `yrd: Tribe signal mailbox registration failed for '${options.recipient}': executable unavailable`,
+        )
       }
-      await registerTribeSignalRecipient(signalProcess, options.actor, executable)
+      await registerTribeSignalRecipient(signalProcess, options.recipient, executable)
     } catch (error) {
       if (options.interactive !== true) throw error
     }
@@ -1123,7 +1125,7 @@ async function createRuntimeSignalAdapter(options: {
     }
     return createTribeSignalAdapter(
       signalProcess,
-      options.actor,
+      options.recipient,
       (event) => options.attributedReceipt(event),
       executable,
     )
@@ -1225,10 +1227,10 @@ async function createYrdRuntimeHost(
         ? createJournal({ dir: repository.stateDir, inject: { log } })
         : createReadOnlyJournal({ dir: repository.stateDir, inject: { log } })
     const routes = loaded.config.notify ?? {}
-    const defaultActor = options.persona?.mailbox ?? (env.TRIBE_NAME?.trim() || "operator")
+    const defaultSubmitter = options.persona?.mailbox ?? (env.TRIBE_NAME?.trim() || "operator")
     if (mode === "active") {
       const submitterRoute = Object.entries(routes).find(([, targets]) => targets?.includes("submitter") === true)?.[0]
-      if (submitterRoute !== undefined && !SignalRecipientSchema.safeParse(defaultActor).success) {
+      if (submitterRoute !== undefined && !SignalRecipientSchema.safeParse(defaultSubmitter).success) {
         raiseFailure(
           "configuration",
           "signal-submitter-missing",
@@ -1247,7 +1249,7 @@ async function createYrdRuntimeHost(
         const adapter = await createRuntimeSignalAdapter({
           process,
           env,
-          actor: defaultActor,
+          recipient: defaultSubmitter,
           ...(options.persona === undefined ? {} : { persona: options.persona }),
           interactive: options.interactive,
           ...(options.wire === undefined ? {} : { wire: options.wire }),
@@ -1264,7 +1266,7 @@ async function createYrdRuntimeHost(
           journal,
           stateDir: repository.stateDir,
           routes,
-          sender: defaultActor,
+          sender: defaultSubmitter,
           reviewRequired: loaded.config.requires.includes("review"),
           adapter,
           log,
@@ -1292,7 +1294,7 @@ async function createYrdRuntimeHost(
       journal: signals?.journal ?? journal,
       process,
       config: loaded.config,
-      defaultActor,
+      defaultSubmitter,
       scope,
       log,
       candidatePool,
@@ -1338,7 +1340,7 @@ async function createYrdRuntimeHost(
       recut: createGitPRRecutter({ inject: { process }, repo: repository.repo, env }),
       journal: Object.freeze({
         importOrphan: (sourcePath: string) =>
-          importOrphanJournal({ dir: repository.stateDir, sourcePath, importedBy: defaultActor, log }),
+          importOrphanJournal({ dir: repository.stateDir, sourcePath, importedBy: defaultSubmitter, log }),
       }),
       process,
       environment: env,

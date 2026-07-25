@@ -43,7 +43,7 @@ function ids(): () => string {
 async function createApp(
   workspace: BayWorkspace,
   log?: ConditionalLogger,
-  defaultActor?: string,
+  defaultSubmitter?: string,
   selectSubmissionFlow?: (submission: Submission) => FlowPin,
 ) {
   const jobs = createBayJobDefs(workspace)
@@ -53,7 +53,7 @@ async function createApp(
     withBays({
       jobs,
       defaultBase: "main",
-      ...(defaultActor === undefined ? {} : { defaultActor }),
+      ...(defaultSubmitter === undefined ? {} : { defaultSubmitter }),
       ...(selectSubmissionFlow === undefined ? {} : { selectFlow: selectSubmissionFlow }),
     }),
   )
@@ -206,7 +206,7 @@ describe("withBays", () => {
     })
   })
 
-  it("records the submitting actor on strict current revision facts", async () => {
+  it("records the submitter on strict current revision facts", async () => {
     await using app = await createApp(createWorkspaceHarness().adapter, undefined, "@agent/7")
 
     const submitted = await app.bays.submit({ branch: "topic/owned", headSha: HEAD_1 })
@@ -215,7 +215,9 @@ describe("withBays", () => {
       expect.objectContaining({ name: "pr/pushed", data: expect.objectContaining({ actor: "@agent/7" }) }),
       expect.objectContaining({ name: "pr/submitted", data: expect.objectContaining({ actor: "@agent/7" }) }),
     ])
-    expect(app.bays.pr("PR1")?.revs).toEqual([expect.objectContaining({ n: 1, head: HEAD_1, actor: "@agent/7" })])
+    expect(app.bays.pr("PR1")?.revs).toEqual([
+      expect.objectContaining({ n: 1, head: HEAD_1, submitter: "@agent/7" }),
+    ])
   })
 
   it("resolves Bay, PR, and base selectors without changing canonical identity", async () => {
@@ -1094,7 +1096,7 @@ describe("withBays", () => {
 
     const comment = {
       pr: "PR1",
-      actor: "@cto",
+      by: "@cto",
       ref: "dialog-1",
       note: "Please explain the failure mode.",
     }
@@ -1103,7 +1105,7 @@ describe("withBays", () => {
 
     const approval = {
       pr: "PR1",
-      actor: "@cto",
+      by: "@cto",
       decision: "approve" as const,
       ref: "verdict-1",
       note: "Exact revision reviewed.",
@@ -1120,13 +1122,13 @@ describe("withBays", () => {
 
     expect(app.bays.reviewState("PR1")).toMatchObject({
       approved: true,
-      current: { revision: 1, headSha: HEAD_1, actor: "@cto", decision: "approve", ref: "verdict-1" },
+      current: { revision: 1, headSha: HEAD_1, by: "@cto", decision: "approve", ref: "verdict-1" },
       stale: [],
     })
     expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
       delivery: "pushed",
-      reviews: [{ revision: 1, headSha: HEAD_1, decision: "approve", actor: "@cto", ref: "verdict-1" }],
-      comments: [{ revision: 1, headSha: HEAD_1, actor: "@cto", ref: "dialog-1" }],
+      reviews: [{ revision: 1, headSha: HEAD_1, decision: "approve", by: "@cto", ref: "verdict-1" }],
+      comments: [{ revision: 1, headSha: HEAD_1, by: "@cto", ref: "dialog-1" }],
     })
 
     expect((await app.bays.ready({ pr: "PR1" })).events).toHaveLength(1)
@@ -1169,7 +1171,7 @@ describe("withBays", () => {
 
     expect((await app.bays.requestReview({ pr: "PR1", reviewers: ["@cto", arbitraryActor] })).events).toEqual([])
 
-    const replaced = await app.bays.requestReview({ pr: "PR1", reviewers: ["@agent/5"], actor: "@chief" })
+    const replaced = await app.bays.requestReview({ pr: "PR1", reviewers: ["@agent/5"], by: "@chief" })
     expect(replaced.events.map(({ name, data }) => ({ name, data }))).toEqual([
       { name: "pr/review-requested", data: { pr: "PR1", reviewers: ["@agent/5"], requestedBy: "@chief" } },
     ])
@@ -1195,10 +1197,10 @@ describe("withBays", () => {
     expect(app.bays.needsReview("PR1", "@cto")).toBe(true)
     expect(app.bays.needsReview("PR1", "@stranger")).toBe(false)
 
-    await app.bays.review({ pr: "PR1", actor: "@stranger", decision: "approve", ref: "stranger-1" })
+    await app.bays.review({ pr: "PR1", by: "@stranger", decision: "approve", ref: "stranger-1" })
     expect(app.bays.needsReview("PR1")).toBe(true)
 
-    await app.bays.review({ pr: "PR1", actor: "@cto", decision: "reject", ref: "verdict-1" })
+    await app.bays.review({ pr: "PR1", by: "@cto", decision: "reject", ref: "verdict-1" })
     expect(app.bays.needsReview("PR1")).toBe(false)
     expect(app.bays.needsReview("PR1", "@cto")).toBe(false)
     expect(app.bays.needsReview("PR1", "@agent/5")).toBe(true)
@@ -1220,7 +1222,7 @@ describe("withBays", () => {
 
     await app.bays.submit({ branch: "issue/recut-request", headSha: HEAD_1, baseSha: BASE })
     await app.bays.requestReview({ pr: "PR1", reviewers: ["@cto"] })
-    await app.bays.review({ pr: "PR1", actor: "@cto", decision: "approve", ref: "verdict-1" })
+    await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: "verdict-1" })
     expect(app.bays.needsReview("PR1")).toBe(false)
 
     await app.bays.recut({
@@ -1334,7 +1336,7 @@ describe("withBays", () => {
     })
     await app.bays.review({
       pr: "PR1",
-      actor: "@cto",
+      by: "@cto",
       decision: "approve",
       ref: "review-revision-1",
       note: "Reviewed immutable payload.",

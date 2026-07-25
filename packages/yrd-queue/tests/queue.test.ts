@@ -3430,22 +3430,22 @@ describe("Queue", () => {
       review: { required: true, approved: false },
     })
     await app.bays.ready({ pr: "PR1" })
-    await app.bays.comment({ pr: "PR1", actor: "@cto", ref: "question-1", note: "Why this shape?" })
+    await app.bays.comment({ pr: "PR1", by: "@cto", ref: "question-1", note: "Why this shape?" })
     expect(app.queue.eligibility("PR1")).toMatchObject({
       runnable: false,
       reason: { code: "review-required", message: "PR 'PR1' needs approval for revision 1" },
       review: { required: true, approved: false },
     })
-    await app.bays.review({ pr: "PR1", actor: "@cto", decision: "reject", ref: "verdict-red" })
+    await app.bays.review({ pr: "PR1", by: "@cto", decision: "reject", ref: "verdict-red" })
     expect(app.queue.eligibility("PR1")).toMatchObject({
       runnable: false,
       reason: { code: "review-rejected", message: "PR 'PR1' was rejected by @cto for revision 1" },
-      review: { required: true, approved: false, decision: "reject", actor: "@cto", ref: "verdict-red" },
+      review: { required: true, approved: false, decision: "reject", by: "@cto", ref: "verdict-red" },
     })
-    await app.bays.review({ pr: "PR1", actor: "@cto", decision: "approve", ref: "verdict-1" })
+    await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: "verdict-1" })
     expect(app.queue.eligibility("PR1")).toMatchObject({
       runnable: true,
-      review: { required: true, approved: true, decision: "approve", actor: "@cto", ref: "verdict-1" },
+      review: { required: true, approved: true, decision: "approve", by: "@cto", ref: "verdict-1" },
     })
 
     await app.bays.ready({ pr: "PR1" })
@@ -3460,7 +3460,7 @@ describe("Queue", () => {
       baseSha: BASE,
       draft: true,
     })
-    await app.bays.review({ pr: "PR2", actor: "@cto", decision: "approve", ref: "verdict-2" })
+    await app.bays.review({ pr: "PR2", by: "@cto", decision: "approve", ref: "verdict-2" })
     await app.bays.ready({ pr: "PR2" })
     await app.bays.intake({ branch: "issue/review-stales", headSha: "4".repeat(40), base: "main", baseSha: BASE })
     await app.bays.ready({ pr: "PR2" })
@@ -3478,7 +3478,7 @@ describe("Queue", () => {
       baseSha: BASE,
       draft: true,
     })
-    await app.bays.review({ pr: "PR3", actor: "@cto", decision: "reject", ref: "verdict-3" })
+    await app.bays.review({ pr: "PR3", by: "@cto", decision: "reject", ref: "verdict-3" })
     await app.bays.ready({ pr: "PR3" })
     expect(app.queue.eligibility("PR3")).toMatchObject({
       runnable: false,

@@ -1011,7 +1011,7 @@ describe("PR signal observer", () => {
           at: "2026-07-14T10:00:00.000Z",
           run: "R9",
           error: { code: "job-lost", message: "runner disappeared" },
-          prs: [{ pr: "PR7", revision: 3, headSha: "a".repeat(40), actor: "@agent/7" }],
+          prs: [{ pr: "PR7", revision: 3, headSha: "a".repeat(40), submitter: "@agent/7" }],
         },
       })
 
@@ -1048,7 +1048,7 @@ describe("PR signal observer", () => {
           pr: "PR7",
           revision: 3,
           headSha: "a".repeat(40),
-          actor: "@agent/7",
+          submitter: "@agent/7",
         },
       })
 
@@ -1089,7 +1089,7 @@ describe("PR signal observer", () => {
           pr: "PR7",
           revision: 3,
           headSha: "a".repeat(40),
-          actor: "@agent/7",
+          submitter: "@agent/7",
         },
       })
 
@@ -1125,7 +1125,7 @@ describe("PR signal observer", () => {
           at: "2026-07-14T10:00:00.000Z",
           run: "R9",
           landingSha: "b".repeat(40),
-          prs: [{ pr: "PR7", revision: 3, headSha: "a".repeat(40), actor: "@agent/7" }],
+          prs: [{ pr: "PR7", revision: 3, headSha: "a".repeat(40), submitter: "@agent/7" }],
         },
       })
       await adapter.close?.({

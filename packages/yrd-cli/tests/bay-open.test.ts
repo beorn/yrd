@@ -418,7 +418,7 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
       const bays = output(repo)
       expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
       expect(JSON.parse(bays.stdout())).toMatchObject({
-        bays: [expect.objectContaining({ issue: "@km/test/blabla1", actor: "@dev/blabla1", status: "closed" })],
+        bays: [expect.objectContaining({ issue: "@km/test/blabla1", by: "@dev/blabla1", status: "closed" })],
       })
       const prs = output(repo)
       expect(await yrd(repo, prs.io, "pr", "list", "--issue", "@km/test/blabla1", "--json"), prs.stderr()).toBe(0)

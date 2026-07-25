@@ -25,7 +25,9 @@ const TextSchema = z.string().trim().min(1)
 const RevisionSchema = z.number().int().positive()
 const GitShaSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu)
 const REVIEW_BALL_TTL_MS = 10 * 60_000
-const SignalPRSchema = z
+// Journal v2 keeps the historical `actor` key; routable signals normalize it
+// to `submitter` immediately after decoding.
+const PersistedSignalPRSchema = z
   .object({
     pr: TextSchema,
     revision: RevisionSchema,
@@ -33,31 +35,38 @@ const SignalPRSchema = z
     actor: TextSchema.optional(),
   })
   .strict()
-const SubmittedSignalDataSchema = SignalPRSchema.loose()
-const IntegratedSignalDataSchema = SignalPRSchema.extend({ run: TextSchema, landingSha: GitShaSchema }).loose()
+const SubmittedSignalDataSchema = PersistedSignalPRSchema.loose()
+const IntegratedSignalDataSchema = PersistedSignalPRSchema.extend({ run: TextSchema, landingSha: GitShaSchema }).loose()
 const RunFailedSignalDataSchema = z
   .object({
     run: TextSchema,
     error: z.object({ code: TextSchema, message: z.string() }).loose(),
-    prs: z.array(SignalPRSchema).min(1),
+    prs: z.array(PersistedSignalPRSchema).min(1),
   })
   .loose()
 
-export type SignalPR = Readonly<z.infer<typeof SignalPRSchema>>
+export type SignalPR = Readonly<{
+  pr: string
+  revision: number
+  headSha: string
+  submitter?: string
+}>
 
 export type RejectedSignal = Readonly<{
   id: string
   kind: "pr/rejected"
   at: string
 }> &
-  PRRejectedFact
+  Omit<PRRejectedFact, "actor"> &
+  Readonly<{ submitter?: string }>
 
 export type NeedsAuthorSignal = Readonly<{
   id: string
   kind: "pr/needs-author"
   at: string
 }> &
-  PRNeedsAuthorFact
+  Omit<PRNeedsAuthorFact, "actor"> &
+  Readonly<{ submitter?: string }>
 
 export type NeedsReviewSignal = Readonly<{
   id: string
@@ -96,7 +105,7 @@ export type AlreadyLandedSignal = Readonly<{
   pr: string
   revision: number
   headSha: string
-  actor?: string
+  submitter?: string
   run: string
   baseSha: string
   candidateSha: string
@@ -234,7 +243,7 @@ export function createSignalObserver(
             await options.adapter.send({ recipient, event: signal }) // UNLOCKED
             state = addSent(state, signal.id, recipient)
             // Record the request ball we just opened so a later terminal signal can close this
-            // exact id + recipient, even if the actor or routes drift before then.
+            // exact id + recipient, even if the submitter or routes drift before then.
             state = recordOpened(state, signal, recipient, options.sender)
             await persist(state)
           }
@@ -503,7 +512,7 @@ const CursorFileSchema = z
 const CursorStateSchema = CursorFileSchema.extend({
   // Durable opened-ledger: the EXACT request ball (id + recipient) recorded when each PR revision
   // was put up for review. Legacy rejection entries remain readable after rejection became
-  // evidence-only. A terminal signal closes precisely these — immune to actor/route drift. The
+  // evidence-only. A terminal signal closes precisely these — immune to submitter/route drift. The
   // optional top-level field reads the short-lived drifted format and is immediately migrated into
   // the v1 `sent` record, which older worktree readers already preserve and ignore.
   opened: z.array(OpenedBallSchema).default([]),
@@ -540,7 +549,7 @@ function signalsOf(events: readonly Event[], reviewRequired: boolean): readonly 
       pr: parsed.data.pr,
       revision: parsed.data.revision,
       headSha: parsed.data.headSha,
-      ...(parsed.data.actor === undefined ? {} : { actor: parsed.data.actor }),
+      ...(parsed.data.actor === undefined ? {} : { submitter: parsed.data.actor }),
     }
     integrated.set(
       key,
@@ -562,14 +571,28 @@ function signalsOf(events: readonly Event[], reviewRequired: boolean): readonly 
 function directSignalOf(event: Event, reviewRequired: boolean): RoutableSignal | undefined {
   if (event.name === "pr/needs-author") {
     const data = PRNeedsAuthorFactSchema.parse(event.data)
-    return Object.freeze({ id: event.id, kind: "pr/needs-author", at: event.ts, ...data })
+    const { actor: persistedSubmitter, ...fact } = data
+    return Object.freeze({
+      id: event.id,
+      kind: "pr/needs-author",
+      at: event.ts,
+      ...fact,
+      ...(persistedSubmitter === undefined ? {} : { submitter: persistedSubmitter }),
+    })
   }
   if (event.name === "pr/rejected") {
     if (typeof event.data !== "object" || event.data === null || Array.isArray(event.data) || !("step" in event.data)) {
       return undefined
     }
     const data = PRRejectedFactSchema.parse(event.data)
-    return Object.freeze({ id: event.id, kind: "pr/rejected", at: event.ts, ...data })
+    const { actor: persistedSubmitter, ...fact } = data
+    return Object.freeze({
+      id: event.id,
+      kind: "pr/rejected",
+      at: event.ts,
+      ...fact,
+      ...(persistedSubmitter === undefined ? {} : { submitter: persistedSubmitter }),
+    })
   }
   if (event.name === "pr/submitted" && reviewRequired) {
     const parsed = SubmittedSignalDataSchema.safeParse(event.data)
@@ -581,7 +604,7 @@ function directSignalOf(event: Event, reviewRequired: boolean): RoutableSignal |
       pr: parsed.data.pr,
       revision: parsed.data.revision,
       headSha: parsed.data.headSha,
-      ...(parsed.data.actor === undefined ? {} : { actor: parsed.data.actor }),
+      ...(parsed.data.actor === undefined ? {} : { submitter: parsed.data.actor }),
     })
   }
   if (event.name === "queue/run/failed") {
@@ -593,13 +616,23 @@ function directSignalOf(event: Event, reviewRequired: boolean): RoutableSignal |
       at: event.ts,
       run: parsed.data.run,
       error: { code: parsed.data.error.code, message: parsed.data.error.message },
-      prs: parsed.data.prs,
+      prs: parsed.data.prs.map(({ actor: persistedSubmitter, ...pr }) => ({
+        ...pr,
+        ...(persistedSubmitter === undefined ? {} : { submitter: persistedSubmitter }),
+      })),
     })
   }
   if (event.name === "pr/already-landed") {
     const parsed = PRAlreadyLandedSchema.safeParse(event.data)
     if (!parsed.success) return undefined
-    return Object.freeze({ id: event.id, kind: "pr/already-landed", at: event.ts, ...parsed.data })
+    const { actor: persistedSubmitter, ...fact } = parsed.data
+    return Object.freeze({
+      id: event.id,
+      kind: "pr/already-landed",
+      at: event.ts,
+      ...fact,
+      ...(persistedSubmitter === undefined ? {} : { submitter: persistedSubmitter }),
+    })
   }
   if (event.name === "pr/withdrawn") {
     const parsed = PRWithdrawnSchema.safeParse(event.data)
@@ -611,7 +644,7 @@ function directSignalOf(event: Event, reviewRequired: boolean): RoutableSignal |
       pr: parsed.data.pr,
       revision: parsed.data.revision,
       headSha: parsed.data.headSha,
-      ...(parsed.data.actor === undefined ? {} : { actor: parsed.data.actor }),
+      ...(parsed.data.actor === undefined ? {} : { submitter: parsed.data.actor }),
     })
   }
   if (event.name === "pr/canceled") {
@@ -624,7 +657,7 @@ function directSignalOf(event: Event, reviewRequired: boolean): RoutableSignal |
       pr: parsed.data.pr,
       revision: parsed.data.revision,
       headSha: parsed.data.headSha,
-      ...(parsed.data.actor === undefined ? {} : { actor: parsed.data.actor }),
+      ...(parsed.data.actor === undefined ? {} : { submitter: parsed.data.actor }),
     })
   }
   return undefined
@@ -634,9 +667,9 @@ function resolveRecipients(signal: RoutableSignal, target: SignalRouteTarget): r
   if (target === "broadcast") return ["*"]
   if (target !== "submitter") return [target]
   if (signal.kind === "pr/integrated" || signal.kind === "run/failed") {
-    return [...new Set(signal.prs.flatMap((pr) => (pr.actor === undefined ? [] : [pr.actor])))]
+    return [...new Set(signal.prs.flatMap((pr) => (pr.submitter === undefined ? [] : [pr.submitter])))]
   }
-  return signal.actor === undefined ? [] : [signal.actor]
+  return signal.submitter === undefined ? [] : [signal.submitter]
 }
 
 function isTerminalSignal(signal: RoutableSignal): signal is TerminalSignal {
@@ -657,7 +690,7 @@ function terminalPRs(signal: TerminalSignal): readonly SignalPR[] {
       pr: signal.pr,
       revision: signal.revision,
       headSha: signal.headSha,
-      ...(signal.actor === undefined ? {} : { actor: signal.actor }),
+      ...(signal.submitter === undefined ? {} : { submitter: signal.submitter }),
     },
   ]
 }
@@ -668,7 +701,13 @@ function closuresFor(signal: TerminalSignal, routes: SignalRoutes): readonly Sig
     for (const kind of ["pr/rejected", "pr/needs-review"] as const) {
       for (const target of routes[kind] ?? []) {
         const recipients =
-          target === "submitter" ? (pr.actor === undefined ? [] : [pr.actor]) : target === "broadcast" ? [] : [target]
+          target === "submitter"
+            ? pr.submitter === undefined
+              ? []
+              : [pr.submitter]
+            : target === "broadcast"
+              ? []
+              : [target]
         for (const recipient of recipients) {
           // A terminal event settles the whole revision chain, so close every prior revision's
           // request id — not just the terminal revision's. Otherwise a rev-1 rejection ball outlives

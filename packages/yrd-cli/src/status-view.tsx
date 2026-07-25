@@ -215,7 +215,7 @@ export function BayStatusView({ bays }: { bays: readonly Bay[] }) {
     bay: bay.id,
     status: bay.status,
     issue: bay.issue ?? "-",
-    by: bay.actor ?? "-",
+    by: bay.by ?? "-",
     base: bay.base,
     branch: bay.branch,
   }))
@@ -243,7 +243,7 @@ export function BayStatusView({ bays }: { bays: readonly Bay[] }) {
         </Text>
       )}
       <Box marginTop={1} width="100%">
-        <Table data={rows} columns={columns} width="100%" />
+        <Table data={rows} columns={columns} />
       </Box>
     </Box>
   )

@@ -221,7 +221,7 @@ describe("watch detail composite header + status notice", () => {
     const headSha = "9".repeat(40)
     const pr = {
       ...fixturePr("PR9", "rejected", "2026-07-13T10:30:00.000Z", "Repair the check", {
-        actor: "@agent/8",
+        submitter: "@agent/8",
         headSha,
         issue: "@yrd/core/21096-cli-ux/21751-watch-detail-status-dry",
         revisions: [
@@ -232,7 +232,7 @@ describe("watch detail composite header + status notice", () => {
             baseSha: "a".repeat(40),
             pushedAt: "2026-07-13T10:30:00.000Z",
             submittedAt: "2026-07-13T10:30:00.000Z",
-            actor: "@agent/8",
+            submitter: "@agent/8",
             terminal: {
               status: "rejected",
               at: "2026-07-13T10:42:00.000Z",
@@ -362,7 +362,7 @@ describe("watch detail composite header + status notice", () => {
       expect(notice).toMatchObject({
         state,
         auto: { kind: automaticKind },
-        actor: "queue",
+        owner: "queue",
       })
       expect(notice?.explanation).toContain(explanation)
       expect(notice?.explanation).toContain(next)

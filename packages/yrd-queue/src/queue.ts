@@ -233,6 +233,7 @@ const PauseQueueArgsSchema = z
 const ResumeQueueArgsSchema = z.object({ base: GitRefSchema }).strict()
 const QueueStartSchema = QueueRecordSchema.omit({ startedAt: true, failure: true })
 const ReplayQueueStartSchema = ReplayQueueRecordSchema.omit({ startedAt: true, failure: true })
+// Journal v2 keeps the historical `actor` key; the live model calls it submitter.
 const QueueFailedPRSchema = z
   .object({
     pr: PRIdSchema,
@@ -2028,12 +2029,14 @@ function queueFailedEvent(
     ...(job === undefined ? {} : { job: { id: job.id, attempt: job.attempt } }),
     prs: run.prs.map((pr) => {
       const current = state.bays.prs[pr.id]
-      const actor = current?.revs.find((revision) => revision.n === pr.revision && revision.head === pr.headSha)?.actor
+      const submitter = current?.revs.find(
+        (revision) => revision.n === pr.revision && revision.head === pr.headSha,
+      )?.submitter
       return {
         pr: pr.id,
         revision: pr.revision,
         headSha: pr.headSha,
-        ...(actor === undefined ? {} : { actor }),
+        ...(submitter === undefined ? {} : { actor: submitter }),
       }
     }),
   })
@@ -3616,7 +3619,7 @@ function advanceQueue(
       run: record.id,
       ...(current.issue === undefined ? {} : { issueRef: current.issue }),
       ...(prCorrelation(current) === undefined ? {} : { correlation: prCorrelation(current) }),
-      ...(revision?.actor === undefined ? {} : { actor: revision.actor }),
+      ...(revision?.submitter === undefined ? {} : { actor: revision.submitter }),
       step: planned.name,
       ...(evidence === undefined ? {} : { evidence }),
       detail: failure.message,
@@ -3657,7 +3660,7 @@ function advanceQueue(
             candidateTreeSha: alreadyLanded.candidateTreeSha,
             baseTreeSha: alreadyLanded.baseTreeSha,
             ...(prCorrelation(current) === undefined ? {} : { correlation: prCorrelation(current) }),
-            ...(revision.actor === undefined ? {} : { actor: revision.actor }),
+            ...(revision?.submitter === undefined ? {} : { actor: revision.submitter }),
           }),
         )
         continue
@@ -3681,7 +3684,7 @@ function advanceQueue(
           landingSha: shape.integration.commit,
           baseSha: shape.integration.baseSha,
           ...(revision.correlation === undefined ? {} : { correlation: revision.correlation }),
-          ...(revision.actor === undefined ? {} : { actor: revision.actor }),
+          ...(revision?.submitter === undefined ? {} : { actor: revision.submitter }),
         }),
       )
     }
@@ -4837,7 +4840,7 @@ function prEligibility(
     approved: reviewed.approved,
     stale: reviewed.stale.length > 0 && reviewed.current === undefined,
     ...(reviewed.current?.decision === undefined ? {} : { decision: reviewed.current.decision }),
-    ...(reviewed.current?.actor === undefined ? {} : { actor: reviewed.current.actor }),
+    ...(reviewed.current?.by === undefined ? {} : { by: reviewed.current.by }),
     ...(reviewed.current?.ref === undefined ? {} : { ref: reviewed.current.ref }),
   }
   const checks = checkEligibility(state, pr, steps)
@@ -4936,7 +4939,7 @@ function prEligibility(
       if (reviewed.current?.decision === "reject") {
         return result({
           code: "review-rejected",
-          message: `PR '${pr.id}' was rejected by ${reviewed.current.actor} for revision ${prRevisionNumber(pr)}`,
+          message: `PR '${pr.id}' was rejected by ${reviewed.current.by} for revision ${prRevisionNumber(pr)}`,
         })
       }
       return result({

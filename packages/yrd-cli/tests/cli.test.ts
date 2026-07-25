@@ -1830,7 +1830,7 @@ describe("runYrd", () => {
     await app.bays.submit({ branch: "issue/recut", headSha: HEAD_SHA, baseSha: BASE_SHA, correlation })
     const sourceReadyAt = app.bays.pr("PR1")?.revs[0]?.submittedAt
     if (sourceReadyAt === undefined) throw new Error("missing first revision submission clock")
-    await app.bays.review({ pr: "PR1", actor: "@cto", decision: "approve", ref: "review-r1" })
+    await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: "review-r1" })
     await app.bays.requestChecks({ pr: "PR1" })
     expect(await app.queue.admit({ prs: ["PR1"] })).toMatchObject([
       {
@@ -2419,7 +2419,7 @@ describe("runYrd", () => {
       pushedAt: string,
       submittedAt?: string,
       terminal?: PRRev["terminal"],
-      actor?: string,
+      submitter?: string,
     ): PRRev => ({
       n: 1,
       head: headSha,
@@ -2428,7 +2428,7 @@ describe("runYrd", () => {
       pushedAt,
       ...(submittedAt === undefined ? {} : { submittedAt }),
       ...(terminal === undefined ? {} : { terminal }),
-      ...(actor === undefined ? {} : { actor }),
+      ...(submitter === undefined ? {} : { submitter }),
     })
     const pr = (id: string, branch: string, status: PRDeliveryState, clock: PRRev): PR => ({
       id,
@@ -2526,7 +2526,7 @@ describe("runYrd", () => {
           revision: 1,
           runnable: false,
           reason: { code: "terminal", message: "integrated" },
-          review: { required: true, approved: true, stale: false, decision: "approve", actor: "@cto" },
+          review: { required: true, approved: true, stale: false, decision: "approve", by: "@cto" },
           checks: { status: "passed", run: "R5" },
         },
       },
@@ -2994,7 +2994,7 @@ describe("runYrd", () => {
     await openTestBay(app, {
       name: "friendly",
       issue: "@km/test/friendly",
-      actor: "@dev/friendly",
+      by: "@dev/friendly",
       branch: "task/friendly-branch-that-uses-the-available-width",
     })
     vi.stubEnv("HOME", "/repo")
@@ -3013,8 +3013,30 @@ describe("runYrd", () => {
       expect(lines[3]).toContain("task/friendly-branch-that-uses-the-available-width")
       expect(list.stdout()).not.toContain("ACTOR")
       expect(list.stdout()).not.toContain("PATH")
+
+      const json = outputIO()
+      expect(await runYrd(app, yrd("bay", "list", "--json"), json.io), json.stderr()).toBe(0)
+      expect(JSON.parse(json.stdout()).bays[0]).toMatchObject({ by: "@dev/friendly" })
+      expect(JSON.parse(json.stdout()).bays[0]).not.toHaveProperty("actor")
     } finally {
       vi.unstubAllEnvs()
+    }
+  })
+
+  it("uses by, submitter, and reviewer instead of actor in CLI help", async () => {
+    const app = await createApp()
+    for (const args of [
+      ["pr", "list"],
+      ["pr", "create"],
+      ["pr", "submit"],
+      ["pr", "review"],
+      ["pr", "request-review"],
+      ["pr", "comment"],
+      ["contest", "select"],
+    ]) {
+      const help = outputIO()
+      expect(await runYrd(app, yrd(...args, "--help"), help.io), args.join(" ")).toBe(0)
+      expect(help.stdout(), args.join(" ")).not.toMatch(/\bactors?\b/iu)
     }
   })
 
@@ -3422,7 +3444,7 @@ describe("runYrd", () => {
     ).toBe(0)
     expect(JSON.parse(comment.stdout())).toMatchObject({
       command: "pr.comment",
-      comment: { actor: "@cto", ref: "question-1", note: "Why?", revision: 1 },
+      comment: { by: "@cto", ref: "question-1", note: "Why?", revision: 1 },
     })
     const secondComment = outputIO()
     expect(
@@ -3457,7 +3479,7 @@ describe("runYrd", () => {
     ).toBe(0)
     expect(JSON.parse(review.stdout())).toMatchObject({
       command: "pr.review",
-      review: { actor: "@cto", decision: "approve", ref: "verdict-1", revision: 1, headSha: HEAD_SHA },
+      review: { by: "@cto", decision: "approve", ref: "verdict-1", revision: 1, headSha: HEAD_SHA },
     })
     const replay = outputIO()
     expect(
@@ -3677,12 +3699,12 @@ describe("runYrd", () => {
       needsReview: false,
     })
 
-    const missingActors = outputIO()
-    expect(await runYrd(app, yrd("pr", "request-review", "PR1"), missingActors.io)).toBe(2)
-    expect(missingActors.stderr()).toContain("requires reviewer actors or --clear")
+    const missingReviewers = outputIO()
+    expect(await runYrd(app, yrd("pr", "request-review", "PR1"), missingReviewers.io)).toBe(2)
+    expect(missingReviewers.stderr()).toContain("requires reviewer identities or --clear")
     const conflictingClear = outputIO()
     expect(await runYrd(app, yrd("pr", "request-review", "PR1", "@cto", "--clear"), conflictingClear.io)).toBe(2)
-    expect(conflictingClear.stderr()).toContain("cannot combine with reviewer actors")
+    expect(conflictingClear.stderr()).toContain("cannot combine with reviewer identities")
     const reviewerWithoutInbox = outputIO()
     expect(await runYrd(app, yrd("pr", "list", "--reviewer", "@cto", "--json"), reviewerWithoutInbox.io)).toBe(2)
     expect(reviewerWithoutInbox.stderr()).toContain("--reviewer requires --needs-review")
@@ -4948,7 +4970,7 @@ describe("runYrd", () => {
     const now = Date.parse("2026-07-13T12:00:00.000Z")
     const submittedAt = "2026-07-13T11:30:00.000Z"
     const finishedAt = "2026-07-13T11:50:00.000Z"
-    const pr = (id: string, actor: string, headSha: string): PR => ({
+    const pr = (id: string, submitter: string, headSha: string): PR => ({
       id,
       name: `${id} subject`,
       branch: `topic/${id}`,
@@ -4963,7 +4985,7 @@ describe("runYrd", () => {
           baseSha: BASE_SHA,
           pushedAt: submittedAt,
           submittedAt,
-          actor,
+          submitter,
           terminal: { kind: "integrated", at: finishedAt },
         },
       ],
