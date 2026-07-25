@@ -4248,17 +4248,15 @@ export async function requireFreshInstalledBaseline(
       (finding) => finding.code === "config-drift" || finding.code === "runtime-drift",
     )
   }
-  let drift = await auditDrift()
+  const drift = await auditDrift()
   if (drift.length === 0) return
-  if (options.reloadInPlace !== undefined && drift.some((finding) => finding.code === "config-drift")) {
-    if (administration.deprovision === undefined || administration.provision === undefined) {
-      configuration("queue config drift reload requires both queue.deinit and queue.init capabilities")
-    }
-    await administration.deprovision(options.reloadInPlace.base)
-    await administration.provision(options.reloadInPlace.base)
-    drift = await auditDrift()
-    if (drift.length === 0) return
-  }
+  // 22334: NEVER rewrite installed-baseline from the run path. Auto deinit+init
+  // (reloadInPlace) was a second writer that installed a different revision
+  // family than `queue init`, so every follow cycle fought the baseline forever
+  // — including after FAILED composes that had no business being authorities.
+  // Drift is fail-loud with the migration remedy; only explicit `queue init`
+  // (and `queue deinit`) may write the baseline.
+  void options.reloadInPlace
   const first = drift[0]
   if (first === undefined) return
   raiseFailure("refusal", first.code, drift.map((finding) => finding.message).join("\n"))

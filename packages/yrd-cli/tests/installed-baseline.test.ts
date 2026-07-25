@@ -188,34 +188,31 @@ describe("installed baseline persistence", () => {
 })
 
 describe("run gate", () => {
-  it("reloads config drift in place when the resident opts into the executable deinit/init remedy", async () => {
-    let stale = true
-    let auditCalls = 0
+  it("never rewrites the baseline from the run path even when reloadInPlace is requested (22334)", async () => {
+    // Auto deinit+init from the gate was a second writer that installed a
+    // different revision family than `queue init`, so follow cycles fought the
+    // baseline forever — including after failed composes. Drift is fail-loud.
     const lifecycle: string[] = []
     const services = {
       queue: {
-        auditEnvironment: async () => {
-          auditCalls += 1
-          return stale
-            ? { findings: [{ code: "config-drift", message: "installed baseline is stale" }] }
-            : { findings: [] }
-        },
+        auditEnvironment: async () => ({
+          findings: [{ code: "config-drift", message: "installed baseline is stale" }],
+        }),
         deprovision: async (base: string) => {
           lifecycle.push(`deinit:${base}`)
           return { base, released: ["installed-baseline"] }
         },
         provision: async (base: string) => {
           lifecycle.push(`init:${base}`)
-          stale = false
           return { base }
         },
       },
     } as unknown as Parameters<typeof requireFreshInstalledBaseline>[0]
 
-    await expect(requireFreshInstalledBaseline(services, { reloadInPlace: { base: "main" } })).resolves.toBeUndefined()
-
-    expect(lifecycle).toEqual(["deinit:main", "init:main"])
-    expect(auditCalls).toBe(2)
+    await expect(requireFreshInstalledBaseline(services, { reloadInPlace: { base: "main" } })).rejects.toMatchObject({
+      failure: { kind: "refusal", code: "config-drift" },
+    })
+    expect(lifecycle).toEqual([])
   })
 
   it("refuses to start runs on config drift and passes through other findings", async () => {
@@ -298,30 +295,37 @@ async function queueRepository(check: string): Promise<string> {
 }
 
 describe("host installed baseline", () => {
-  it("replaces a foreign-runtime baseline with this resident's real configured descriptors", async () => {
+  it("refuses foreign baseline drift and leaves the file untouched until explicit queue init (22334)", async () => {
     const repo = await queueRepository("true")
     const resident = await createYrdHost({ cwd: repo })
     try {
       await resident.services.queue?.provision?.("main")
       const current = (await readInstalledBaselines(resident.repository.stateDir)).main
       if (current === undefined) throw new Error("expected provisioned main baseline")
-      await writeInstalledBaseline(resident.repository.stateDir, {
+      const foreign = {
         ...current,
         installedAt: "2026-07-24T00:00:00.000Z",
         steps: current.steps.map((installed, index) => ({
           ...installed,
           revision: `${index}`.repeat(64),
         })),
-      })
+      }
+      await writeInstalledBaseline(resident.repository.stateDir, foreign)
 
       const before = await resident.services.queue?.auditEnvironment?.()
       expect(before?.findings).toMatchObject([{ code: "config-drift" }])
 
-      await requireFreshInstalledBaseline(resident.services, { reloadInPlace: { base: "main" } })
+      await expect(
+        requireFreshInstalledBaseline(resident.services, { reloadInPlace: { base: "main" } }),
+      ).rejects.toMatchObject({ failure: { kind: "refusal", code: "config-drift" } })
 
+      // Gate must not rewrite: foreign baseline remains until operator deinit/init.
+      const after = (await readInstalledBaselines(resident.repository.stateDir)).main
+      expect(after?.steps.map((s) => s.revision)).toEqual(foreign.steps.map((s) => s.revision))
+
+      await resident.services.queue?.deprovision?.("main")
+      await resident.services.queue?.provision?.("main")
       expect(await resident.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
-      const reloaded = (await readInstalledBaselines(resident.repository.stateDir)).main
-      expect(reloaded?.steps).toEqual(current.steps)
     } finally {
       await resident.close()
     }
