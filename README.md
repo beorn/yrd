@@ -873,6 +873,10 @@ unchanged-revision drift and refuses resumable work across a revision change.
 import { defineConfig, yrd } from "@yrd/config"
 
 export default defineConfig(
+  yrd.journal({
+    version: 1,
+    reader: "0123456789abcdef0123456789abcdef01234567",
+  }),
   yrd.flow({
     name: "main",
     rev: "1",
@@ -888,7 +892,10 @@ export default defineConfig(
 
 Yrd reads that source from the authoritative base tree, never from Candidate
 content. `--config <path>` selects another base-relative TypeScript or YAML
-authority without weakening that boundary.
+authority without weakening that boundary. The optional `yrd.journal(...)`
+declaration is the oldest reader contract every writer must preserve. A writer
+whose stamped semantic journal version is newer refuses before append and
+names its exact required reader commit.
 
 Steps are immutable definitions and typed state transitions, not a
 workflow-language DSL. `withStep()` preserves the current shape. `withMerge()`
@@ -944,6 +951,9 @@ plugins:
 base: main
 batch: 8
 steps: [check, coderabbit, sec-check, merge, deploy]
+journal:
+  version: 1
+  reader: "0123456789abcdef0123456789abcdef01234567"
 
 requires: [review]
 

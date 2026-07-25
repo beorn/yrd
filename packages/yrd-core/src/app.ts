@@ -29,7 +29,7 @@ import {
   type JsonValue,
 } from "./domain.ts"
 import { asFailure, raiseFailure } from "./failure.ts"
-import { parseJournalFrame, type JournalFrame } from "./frame.ts"
+import { parseJournalFrame, type JournalCompatibility, type JournalFrame } from "./frame.ts"
 import { cloneFrozen, freeze, type DeepReadonly } from "./immutable.ts"
 import type { Cursor, Journal, JournalCheckpoint, JournalHistory, JournalHistoryDiagnostics } from "./journal.ts"
 
@@ -223,6 +223,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
   options: Readonly<{
     inject: Readonly<{
       journal: Journal<unknown>
+      compatibility?: JournalCompatibility
       clock?: () => string
       id?: () => string
       log?: ConditionalLogger
@@ -709,7 +710,13 @@ export async function createYrd<State extends object, Commands extends CommandTr
         return EventSchema.parse({ id: id(), name: draft.name, ts: clock(), data: schema.parse(draft.data) })
       })
       const value = result.value === undefined ? undefined : JsonSchema.parse(result.value)
-      const frame = parseJournalFrame({ cause, command: canonical, events, ...(value === undefined ? {} : { value }) })
+      const frame = parseJournalFrame({
+        cause,
+        command: canonical,
+        events,
+        ...(value === undefined ? {} : { value }),
+        ...(options.inject.compatibility === undefined ? {} : { compatibility: options.inject.compatibility }),
+      })
       if (history?.hasIdentity("cause", frame.cause.id) === true) {
         raiseFailure("refusal", "cause-id-conflict", `yrd: cause id '${frame.cause.id}' is already in use`)
       }

@@ -237,6 +237,35 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     }
   })
 
+  it("threads an explicit journal compatibility contract into every host append", async () => {
+    const { repo, featureSha } = await repository()
+    const journal = createMemoryJournal()
+    const compatibility = { version: 1, reader: "a".repeat(40) }
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      requires: [],
+      definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+    await using app = await createDefaultYrdApp({
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal,
+      journalCompatibility: compatibility,
+      process: runtimeProcess,
+      config,
+    })
+
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const batches = await Array.fromAsync(journal.read())
+    expect(batches.flatMap(({ values }) => values)).toEqual([expect.objectContaining({ compatibility })])
+  })
+
   it("threads an explicit diagnostics comparator into the installed runtime step", async () => {
     const { repo, featureSha } = await repository()
     const config: ResolvedYrdProjectConfig = {

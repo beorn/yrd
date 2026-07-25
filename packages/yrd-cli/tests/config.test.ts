@@ -22,6 +22,7 @@ review: { run: bun run review, runner: waiting }
 merge: { run: git merge --no-ff "$YRD_TARGET" }
 deploy: bun run deploy
 contest: { concurrency: 2, timeoutMs: 1800000, evaluators: [check] }
+journal: { version: 1, reader: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa }
 notify:
   pr/needs-author: [submitter]
   pr/rejected: [submitter, "@ci"]
@@ -43,6 +44,7 @@ notify:
         deploy: { run: "bun run deploy", runner: "local" },
       },
       contest: { concurrency: 2, timeoutMs: 1_800_000, evaluators: ["check"] },
+      journal: { version: 1, reader: "a".repeat(40) },
       notify: {
         "pr/needs-author": ["submitter"],
         "pr/rejected": ["submitter", "@ci"],
@@ -109,6 +111,7 @@ refuse:
       loadModule: () =>
         Promise.resolve(
           defineConfig(
+            yrd.journal({ version: 1, reader: "b".repeat(40) }),
             yrd.flow({
               name: "docs",
               rev: "5",
@@ -128,6 +131,7 @@ refuse:
         publish: { runner: "local" },
         merge: { runner: "local" },
       },
+      journal: { version: 1, reader: "b".repeat(40) },
       flows: [expect.objectContaining({ name: "docs", rev: "5" })],
     })
   })
@@ -163,6 +167,8 @@ refuse:
     [{ check: { run: "bun run check", classification: "branch" } }, "check.classification"],
     [{ check: { runner: "remote" } }, "check.runner must be local or waiting"],
     [{ contest: { concurrency: 0 } }, "contest.concurrency must be an integer >= 1"],
+    [{ journal: { version: 1, reader: "short" } }, "journal.reader"],
+    [{ journal: { version: 0, reader: "a".repeat(40) } }, "journal.version"],
     [{ notify: { "pr/typo": ["submitter"] } }, "notify.pr/typo"],
     [{ notify: { "pr/rejected": ["reviewer"] } }, "notify.pr/rejected"],
     [{ notify: { "pr/needs-author": ["reviewer"] } }, "notify.pr/needs-author"],
