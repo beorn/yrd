@@ -1886,6 +1886,10 @@ export type GitCandidatePreparerOptions = Readonly<{
 export function gitCandidatePreparer(options: GitCandidatePreparerOptions): CandidatePreparer {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
+  // 22332: pins this preparer instance has successfully written. Lets CAS
+  // refusal text distinguish "you already wrote this id" (compose self-retry
+  // with a different tree) from "another run holds this id".
+  const pinsByThisPreparer = new Map<string, string>()
   return async (input): Promise<PreparedCandidate> => {
     const mergeability = await mergeTreeCandidate(git, repo, input)
     const needsDomainComposition = input.prs.some((pr) => pr.composition !== undefined || pr.recut !== undefined)
@@ -1935,13 +1939,25 @@ export function gitCandidatePreparer(options: GitCandidatePreparerOptions): Cand
         ["update-ref", "--create-reflog", ref, candidate.output.sha, "0".repeat(candidate.output.sha.length)],
         true,
       )
-      if (pinned.code !== 0 && (await git.optionalCommit(repo, ref)) !== candidate.output.sha) {
-        throw createFailure({
-          kind: "infrastructure",
-          code: "candidate-ref-refused",
-          message: `yrd: Candidate ref '${ref}' is already occupied by different evidence`,
-        })
+      if (pinned.code !== 0) {
+        const existing = await git.optionalCommit(repo, ref)
+        if (existing !== candidate.output.sha) {
+          // 22332: never collapse self-retry and foreign-holder into one sentence.
+          const prior = pinsByThisPreparer.get(ref)
+          const message =
+            prior !== undefined
+              ? `yrd: Candidate ref '${ref}' — you already wrote this id at ${prior}; this prepare produced different evidence ${candidate.output.sha} (compose self-retry must allocate a fresh id)`
+              : existing === undefined
+                ? `yrd: Candidate ref '${ref}' create-only CAS refused and the ref does not resolve (code ${pinned.code})`
+                : `yrd: Candidate ref '${ref}' — another run holds this id at ${existing}; this prepare produced ${candidate.output.sha}`
+          throw createFailure({
+            kind: "infrastructure",
+            code: "candidate-ref-refused",
+            message,
+          })
+        }
       }
+      pinsByThisPreparer.set(ref, candidate.output.sha)
       return {
         id: input.id,
         queueId: input.queueId,
