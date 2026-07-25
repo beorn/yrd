@@ -453,7 +453,7 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
     }
   })
 
-  it("keeps mailbox registration supplementary in a TTY but fail-loud in a pipe", async () => {
+  it("keeps mailbox registration supplementary when stderr is a TTY but fail-loud without one", async () => {
     const interactiveFixture = await repository()
     await configureNotify(interactiveFixture.repo)
     const fake = await fakeTribe(interactiveFixture.repo, false)
@@ -467,7 +467,8 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
     process.env.TRIBE_TEST_LOG = fake.log
     try {
       const tty = output(interactiveFixture.repo)
-      tty.io.interactive = true
+      tty.io.interactive = false
+      tty.io.stderrIsTTY = true
       expect(
         await yrd(interactiveFixture.repo, tty.io, "bay", "run", "--bay", "friendly", "--", "true"),
         tty.stderr(),

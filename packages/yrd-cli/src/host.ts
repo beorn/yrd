@@ -1078,7 +1078,7 @@ export type YrdHostOptions = Readonly<{
 type YrdRuntimeHostOptions = YrdHostOptions &
   Readonly<{
     persona?: YrdPersona
-    interactive?: boolean
+    stderrIsTTY?: boolean
     wire?: string
     wireOutput?: (text: string) => void
   }>
@@ -1106,7 +1106,7 @@ async function createRuntimeSignalAdapter(options: {
   env: NodeJS.ProcessEnv
   recipient: string
   persona?: YrdPersona
-  interactive?: boolean
+  stderrIsTTY?: boolean
   wire?: string
   output?: (text: string) => void
   injected?: SignalDeliveryAdapter
@@ -1142,7 +1142,7 @@ async function createRuntimeSignalAdapter(options: {
       }
       await registerTribeSignalRecipient(signalProcess, options.recipient, executable)
     } catch (error) {
-      if (options.interactive !== true) throw error
+      if (options.stderrIsTTY !== true) throw error
     }
   }
   try {
@@ -1160,7 +1160,7 @@ async function createRuntimeSignalAdapter(options: {
       executable,
     )
   } catch (error) {
-    if (options.interactive !== true) throw error
+    if (options.stderrIsTTY !== true) throw error
     return {
       send() {
         throw error
@@ -1272,7 +1272,7 @@ async function createYrdRuntimeHost(
           env,
           recipient: defaultSubmitter,
           ...(options.persona === undefined ? {} : { persona: options.persona }),
-          interactive: options.interactive,
+          stderrIsTTY: options.stderrIsTTY,
           ...(options.wire === undefined ? {} : { wire: options.wire }),
           output: options.wireOutput,
           injected: options.signalAdapter,
@@ -1578,7 +1578,7 @@ export async function runYrdProcess(
             ...(context.configPath === undefined ? {} : { configPath: context.configPath }),
             ...(context.persona === undefined ? {} : { persona: context.persona }),
             ...(context.wire === undefined ? {} : { wire: context.wire }),
-            interactive: io.interactive === true,
+            stderrIsTTY: io.stderrIsTTY === true,
             wireOutput: (text) => io.stdout(text),
           },
           resident,
