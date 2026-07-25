@@ -31,6 +31,7 @@ import {
   createYrd,
   createYrdDef,
   failureFact,
+  JOURNAL_READER_VERSION,
   pipe,
   raiseFailure,
   type Journal,
@@ -110,7 +111,7 @@ type RuntimeStep = StepDef<PRShape, PRShape>
 const RawGitPushPattern = /(?:^|[\n;&|])\s*git\s+push(?:\s|$)/u
 
 export const CURRENT_JOURNAL_COMPATIBILITY = Object.freeze({
-  version: 1,
+  version: JOURNAL_READER_VERSION,
   reader: "0024983f6ba0b17a0550c779d3d756014ad75ec4",
 }) satisfies JournalCompatibility
 
