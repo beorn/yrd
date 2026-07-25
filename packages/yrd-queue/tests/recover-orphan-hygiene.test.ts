@@ -13,7 +13,6 @@ import { withStep, withQueue } from "@yrd/queue"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
-const runtime = { runner: "local", leaseMs: 60_000 }
 
 function ids(initial = 0): () => string {
   let value = initial

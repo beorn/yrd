@@ -156,7 +156,7 @@ describe("watch detail completeness — primary PR activity projection", () => {
         {
           revision: 1,
           headSha: head,
-          actor: "reviewer@example.test",
+          by: "reviewer@example.test",
           decision: "approve",
           at: "2026-07-13T11:14:00.000Z",
           ref: "review://PR9/1",
@@ -167,7 +167,7 @@ describe("watch detail completeness — primary PR activity projection", () => {
         {
           revision: 1,
           headSha: head,
-          actor: "author@example.test",
+          by: "author@example.test",
           note: "Retain this source position after re-render.",
           at: "2026-07-13T11:15:00.000Z",
         },

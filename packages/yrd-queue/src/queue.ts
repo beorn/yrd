@@ -10,6 +10,7 @@ import {
   checkRequest,
   checksRequested,
   currentPRRev,
+  normalizeV2Submitter,
   prBaseSha,
   prComposition,
   prCorrelation,
@@ -234,14 +235,17 @@ const PauseQueueArgsSchema = z
 const ResumeQueueArgsSchema = z.object({ base: GitRefSchema }).strict()
 const QueueStartSchema = QueueRecordSchema.omit({ startedAt: true, failure: true })
 const ReplayQueueStartSchema = ReplayQueueRecordSchema.omit({ startedAt: true, failure: true })
-const QueueFailedPRSchema = z
-  .object({
-    pr: PRIdSchema,
-    revision: z.number().int().positive(),
-    headSha: GitShaSchema,
-    actor: z.string().trim().min(1).optional(),
-  })
-  .strict()
+const QueueFailedPRSchema = z.preprocess(
+  normalizeV2Submitter,
+  z
+    .object({
+      pr: PRIdSchema,
+      revision: z.number().int().positive(),
+      headSha: GitShaSchema,
+      submitter: z.string().trim().min(1).optional(),
+    })
+    .strict(),
+)
 const LegacyQueueFailedSchema = z.object({ run: RunIdSchema, error: JobErrorSchema }).strict()
 const QueueFailedSchema = LegacyQueueFailedSchema.extend({
   prs: z.array(QueueFailedPRSchema).min(1),
@@ -1094,7 +1098,7 @@ function createQueue<Shape extends PRShape>(
             ...(materializesCandidate && candidate.ref !== undefined ? { candidateRef: candidate.ref } : {}),
           })
           if (submitted.status === "completed" && submitted.conclusion === "cancelled") {
-            log.warn?.("queue step settlement lost to a peer transition; skipping the settled job", {
+            log.warn?.("Another Yrd runner finished this job first; using its result.", {
               action: "canceled-skip",
               run: id,
               job: submitted.id,
@@ -1116,7 +1120,7 @@ function createQueue<Shape extends PRShape>(
           await actions.refresh()
           const raced = runtime().jobs.byId[active.job.id]
           if (raced === undefined || !Job.terminal(raced)) throw cause
-          log.warn?.("queue step settlement lost to a peer transition; skipping the settled job", {
+          log.warn?.("Another Yrd runner finished this job first; using its result.", {
             action: "canceled-skip",
             run: id,
             job: active.job.id,
@@ -1500,7 +1504,7 @@ function createQueue<Shape extends PRShape>(
               // Retire it once so it cannot poison every future resident cycle.
               if (fact.code === "stale-plan") {
                 await actions.retireStalePlan(candidateId)
-                log.warn?.("queue compose retired an un-isolable stale-plan batch", {
+                log.warn?.("Skipped an outdated batch because its PRs can no longer be tested together.", {
                   action: "compose-stale-plan-retire",
                   run: candidateId,
                   code: fact.code,
@@ -1508,7 +1512,7 @@ function createQueue<Shape extends PRShape>(
                 })
                 return
               }
-              log.warn?.("queue compose skipped a candidate lost to a losable refusal", {
+              log.warn?.("Skipped a PR that changed while its batch was being prepared.", {
                 action: "compose-candidate-skip",
                 run: candidateId,
                 code: fact.code,
@@ -1894,7 +1898,7 @@ function createQueue<Shape extends PRShape>(
             if (orphan.reason === "run-terminal") affected.add(orphan.run)
           }
           if (settledOrphans.length > 0) {
-            log.warn?.("queue recover settled orphaned requested jobs whose parent run is terminal or absent", {
+            log.warn?.("Stopped jobs whose queue run had already ended.", {
               action: "recover-orphan-settle",
               reason: "orphaned-requested-job",
               jobs: settledOrphans.map((orphan) => orphan.job.id),
@@ -1915,7 +1919,7 @@ function createQueue<Shape extends PRShape>(
             affected.add(orphan.run)
           }
           if (orphanedRuns.length > 0) {
-            log.warn?.("queue recover settled orphaned runs whose cursor step never started", {
+            log.warn?.("Stopped queue runs whose next step never started.", {
               action: "recover-orphan-run-settle",
               reason: "orphaned-run",
               runs: orphanedRuns.map((orphan) => orphan.run),
@@ -1931,7 +1935,7 @@ function createQueue<Shape extends PRShape>(
             affected.add(batch.run)
           }
           if (retiredBatches.length > 0) {
-            log.warn?.("queue recover retired un-isolable stale-plan batches", {
+            log.warn?.("Removed outdated batches that can no longer be tested.", {
               action: "recover-stale-plan-retire",
               reason: "stale-plan",
               runs: retiredBatches.map((batch) => batch.run),
@@ -2018,7 +2022,7 @@ function createQueue<Shape extends PRShape>(
       }
       if (quiesced.length > 0) {
         // ONE loud structured receipt naming every settled root and job.
-        log.warn?.(`legacy pre-settlement queue roots quiesced: ${quiesced.map((entry) => entry.run).join(", ")}`, {
+        log.warn?.(`Stopped old queue runs during startup: ${quiesced.map((entry) => entry.run).join(", ")}.`, {
           action: "legacy-quiesce",
           reason: "legacy-quiesced",
           by: options.by,
@@ -2203,12 +2207,14 @@ function queueFailedEvent(
     ...(job === undefined ? {} : { job: { id: job.id, attempt: job.attempt } }),
     prs: run.prs.map((pr) => {
       const current = state.bays.prs[pr.id]
-      const actor = current?.revs.find((revision) => revision.n === pr.revision && revision.head === pr.headSha)?.actor
+      const submitter = current?.revs.find(
+        (revision) => revision.n === pr.revision && revision.head === pr.headSha,
+      )?.submitter
       return {
         pr: pr.id,
         revision: pr.revision,
         headSha: pr.headSha,
-        ...(actor === undefined ? {} : { actor }),
+        ...(submitter === undefined ? {} : { submitter }),
       }
     }),
   })
@@ -2712,7 +2718,7 @@ function queueAuthorityNeedsAuthorEvent(
     run: gap.consumedBy,
     ...(pr.issue === undefined ? {} : { issueRef: pr.issue }),
     ...(prCorrelation(pr) === undefined ? {} : { correlation: prCorrelation(pr) }),
-    ...(revision.actor === undefined ? {} : { actor: revision.actor }),
+    ...(revision.submitter === undefined ? {} : { submitter: revision.submitter }),
     step,
     detail: message,
     receipt: { code, message },
@@ -3843,7 +3849,7 @@ function advanceQueue(
       run: record.id,
       ...(current.issue === undefined ? {} : { issueRef: current.issue }),
       ...(prCorrelation(current) === undefined ? {} : { correlation: prCorrelation(current) }),
-      ...(revision?.actor === undefined ? {} : { actor: revision.actor }),
+      ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
       step: planned.name,
       ...(evidence === undefined ? {} : { evidence }),
       detail: failure.message,
@@ -3884,7 +3890,7 @@ function advanceQueue(
             candidateTreeSha: alreadyLanded.candidateTreeSha,
             baseTreeSha: alreadyLanded.baseTreeSha,
             ...(prCorrelation(current) === undefined ? {} : { correlation: prCorrelation(current) }),
-            ...(revision.actor === undefined ? {} : { actor: revision.actor }),
+            ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
           }),
         )
         continue
@@ -3908,7 +3914,7 @@ function advanceQueue(
           landingSha: shape.integration.commit,
           baseSha: shape.integration.baseSha,
           ...(revision.correlation === undefined ? {} : { correlation: revision.correlation }),
-          ...(revision.actor === undefined ? {} : { actor: revision.actor }),
+          ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
         }),
       )
     }
@@ -5064,7 +5070,7 @@ function prEligibility(
     approved: reviewed.approved,
     stale: reviewed.stale.length > 0 && reviewed.current === undefined,
     ...(reviewed.current?.decision === undefined ? {} : { decision: reviewed.current.decision }),
-    ...(reviewed.current?.actor === undefined ? {} : { actor: reviewed.current.actor }),
+    ...(reviewed.current?.by === undefined ? {} : { by: reviewed.current.by }),
     ...(reviewed.current?.ref === undefined ? {} : { ref: reviewed.current.ref }),
   }
   const checks = checkEligibility(state, pr, steps)
@@ -5163,7 +5169,7 @@ function prEligibility(
       if (reviewed.current?.decision === "reject") {
         return result({
           code: "review-rejected",
-          message: `PR '${pr.id}' was rejected by ${reviewed.current.actor} for revision ${prRevisionNumber(pr)}`,
+          message: `PR '${pr.id}' was rejected by ${reviewed.current.by} for revision ${prRevisionNumber(pr)}`,
         })
       }
       return result({

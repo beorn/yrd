@@ -23,7 +23,7 @@ const ALL_STATUSES: readonly QueueTimelineStatusFilter[] = ["pending", "running"
 type FixturePrOptions = Readonly<{
   revision?: number
   headSha?: string
-  actor?: string
+  submitter?: string
   revisions?: readonly FixtureRevision[]
   reviews?: PR["reviews"]
   comments?: PR["comments"]
@@ -48,7 +48,7 @@ type LegacyFixtureRevision = Readonly<{
   headSha: string
   base: string
   baseSha?: string
-  actor?: string
+  submitter?: string
   correlation?: PR["revs"][number]["correlation"]
   composition?: PR["revs"][number]["composition"]
   recut?: PR["revs"][number]["recut"]
@@ -69,7 +69,7 @@ function fixtureRevision(revision: FixtureRevision): PR["revs"][number] {
     head: revision.headSha,
     base: revision.base,
     ...(revision.baseSha === undefined ? {} : { baseSha: revision.baseSha }),
-    ...(revision.actor === undefined ? {} : { actor: revision.actor }),
+    ...(revision.submitter === undefined ? {} : { submitter: revision.submitter }),
     ...(revision.correlation === undefined ? {} : { correlation: revision.correlation }),
     ...(revision.composition === undefined ? {} : { composition: revision.composition }),
     ...(revision.recut === undefined ? {} : { recut: revision.recut }),
@@ -126,7 +126,7 @@ export function fixturePr(
         baseSha: BASE_SHA,
         pushedAt: submittedAt,
         ...(status === "pushed" ? {} : { submittedAt }),
-        ...(options.actor === undefined ? {} : { actor: options.actor }),
+        ...(options.submitter === undefined ? {} : { submitter: options.submitter }),
         ...defaultTerminal,
       },
     ]
@@ -184,7 +184,7 @@ function terminalFixturePr(
         baseSha: BASE_SHA,
         pushedAt: submittedAt,
         submittedAt,
-        ...(options.actor === undefined ? {} : { actor: options.actor }),
+        ...(options.submitter === undefined ? {} : { submitter: options.submitter }),
         terminal: { status, at: terminalAt, run },
       },
     ],
@@ -438,14 +438,14 @@ export function fixtureSnapshot(
 
 const pendingOneHead = "1".repeat(40)
 const pendingOne = fixturePr("PR1", "submitted", "2026-07-13T11:10:00.000Z", "Prepare release notes", {
-  actor: "@cto",
+  submitter: "@cto",
   issue: "@yrd/core/21120-pr-state-notifications",
   note: "Keep the operator-facing notification contract visible during review.",
   reviews: [
     {
       revision: 1,
       headSha: pendingOneHead,
-      actor: "reviewer@example.test",
+      by: "reviewer@example.test",
       decision: "approve",
       at: "2026-07-13T11:14:00.000Z",
       ref: "review://PR1/1",
@@ -456,7 +456,7 @@ const pendingOne = fixturePr("PR1", "submitted", "2026-07-13T11:10:00.000Z", "Pr
     {
       revision: 1,
       headSha: pendingOneHead,
-      actor: "author@example.test",
+      by: "author@example.test",
       note: "The selected detail should retain this source position.",
       at: "2026-07-13T11:15:00.000Z",
       ref: "packages/yrd-cli/src/queue-status-view.tsx:1463",
@@ -480,7 +480,7 @@ const integratedPr = terminalFixturePr(
   "2026-07-13T10:55:00.000Z",
   "R4",
   "Land the durable patch",
-  { actor: "@agent/7" },
+  { submitter: "@agent/7" },
 )
 const rejectedPr = terminalFixturePr(
   "PR5",
@@ -489,7 +489,7 @@ const rejectedPr = terminalFixturePr(
   "2026-07-13T11:12:00.000Z",
   "R5",
   "Reject broken payload",
-  { actor: "@agent/2", detail: "typecheck-failed: packages/yrd-cli/src/run.ts:1428" },
+  { submitter: "@agent/2", detail: "typecheck-failed: packages/yrd-cli/src/run.ts:1428" },
 )
 const environmentPr = fixturePr("PR6", "submitted", "2026-07-13T10:50:00.000Z", "Retry stale environment")
 const canceledPr = terminalFixturePr(
@@ -510,13 +510,13 @@ const batchLeadPr = fixturePr(
   "Align host navigation keybindings without disturbing internal pane controls",
   {
     headSha: batchLeadHead,
-    actor: "@agent/3",
+    submitter: "@agent/3",
     issue: "@hab/super/21135-herdr-keybindings",
     reviews: [
       {
         revision: 1,
         headSha: batchLeadHead,
-        actor: "chief@example.test",
+        by: "chief@example.test",
         decision: "approve",
         at: "2026-07-13T11:28:00.000Z",
         ref: "request://9097d479",
@@ -526,7 +526,7 @@ const batchLeadPr = fixturePr(
       {
         revision: 1,
         headSha: batchLeadHead,
-        actor: "operator@example.test",
+        by: "operator@example.test",
         note: "Preserve Option+1..9 and the accepted pane-focus precedent.",
         at: "2026-07-13T11:29:00.000Z",
         ref: "config/herdr.toml:18",
@@ -549,7 +549,7 @@ const batchPartnerPr = fixturePr(
   "Carry the production split-pane contract into the queue detail surface",
   {
     headSha: batchPartnerHead,
-    actor: "@agent/5",
+    submitter: "@agent/5",
     issue: "@si/ui/21119-split-pane",
     checkRequests: [
       {
@@ -821,7 +821,7 @@ const lineagePr = fixturePr("PR8", "integrated", "2026-07-13T09:30:00.000Z", "Re
     {
       revision: 1,
       headSha: lineageRevisionOneHead,
-      actor: "reviewer@example.test",
+      by: "reviewer@example.test",
       decision: "reject",
       at: "2026-07-13T09:05:00.000Z",
       note: "Revision 1 retained a stale failure.",
@@ -829,7 +829,7 @@ const lineagePr = fixturePr("PR8", "integrated", "2026-07-13T09:30:00.000Z", "Re
     {
       revision: 2,
       headSha: lineageRevisionTwoHead,
-      actor: "reviewer@example.test",
+      by: "reviewer@example.test",
       decision: "approve",
       at: "2026-07-13T09:32:00.000Z",
       ref: "review://PR8/2",
@@ -839,7 +839,7 @@ const lineagePr = fixturePr("PR8", "integrated", "2026-07-13T09:30:00.000Z", "Re
     {
       revision: 2,
       headSha: lineageRevisionTwoHead,
-      actor: "author@example.test",
+      by: "author@example.test",
       note: "Revision 2 addresses the exact failed assertion.",
       at: "2026-07-13T09:31:00.000Z",
       ref: "packages/yrd-cli/tests/queue-timeline-storybook.test.ts:1",

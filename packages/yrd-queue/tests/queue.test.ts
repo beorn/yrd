@@ -667,15 +667,15 @@ describe("Queue", () => {
     await expect(app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)).rejects.toThrow(
       "conflicts in Candidate 'C1'",
     )
-    const runErrors = events.filter(
+    const runFailures = events.filter(
       (event) =>
         event.kind === "log" &&
         event.namespace === "yrd:queue:run" &&
-        event.level === "error" &&
+        event.level === "info" &&
         event.props?.run === "R1",
     )
-    expect(runErrors).toHaveLength(1)
-    expect(runErrors[0]?.props).toMatchObject({
+    expect(runFailures).toHaveLength(1)
+    expect(runFailures[0]?.props).toMatchObject({
       lifecycle: "run",
       outcome: "failed",
       error: { code: "candidate-conflicting" },
@@ -1995,10 +1995,7 @@ describe("Queue", () => {
     ).toEqual({ artifacts: [remote] })
   })
 
-  it("reports ONE failure ERROR at the deepest job — the enclosing run and compose settle at INFO", async () => {
-    // A single failure must not fire ERROR three times (jobs:check + queue:run +
-    // queue:compose). The failing Job owns the one ERROR; the run and compose
-    // that merely contain it settle at INFO, so operators see the failure once.
+  it("keeps internal failure lifecycles at INFO so the CLI owns the user-facing error", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     await using app = await createQueueApp(
@@ -2017,10 +2014,12 @@ describe("Queue", () => {
     await submitBranch(app, "issue/one-error")
     await app.queue.run({ prs: ["PR1"], steps: ["check"] }, runtime)
 
-    const errors = events
-      .filter((event): event is Extract<LogEvent, { kind: "log" }> => event.kind === "log" && event.level === "error")
-      .map((event) => event.namespace)
-    expect(errors).toEqual(["yrd:jobs:check"])
+    expect(
+      events.find(
+        (event): event is Extract<LogEvent, { kind: "log" }> =>
+          event.kind === "log" && event.namespace === "yrd:jobs:check" && event.props?.outcome === "failed",
+      ),
+    ).toMatchObject({ level: "info" })
 
     const run = events.find(
       (event): event is Extract<LogEvent, { kind: "log" }> =>
@@ -2212,7 +2211,7 @@ describe("Queue", () => {
           landingSha: MERGED,
           baseSha: BASE,
           correlation,
-          actor: "operator",
+          submitter: "operator",
         },
       }),
     )
@@ -2257,7 +2256,7 @@ describe("Queue", () => {
             evidence: { artifacts: [{ name: "stderr", path: "artifact://R1/check/stderr.log" }] },
           },
           job: { id: expect.any(String), attempt: 1 },
-          prs: [{ pr: "PR1", revision: 1, headSha: HEAD, actor: "operator" }],
+          prs: [{ pr: "PR1", revision: 1, headSha: HEAD, submitter: "operator" }],
         },
       }),
     )
@@ -2265,7 +2264,7 @@ describe("Queue", () => {
       state: "open",
       merged: false,
       issue: issueRef,
-      revs: [{ n: 1, head: HEAD, actor: "operator", correlation }],
+      revs: [{ n: 1, head: HEAD, submitter: "operator", correlation }],
     })
     const rejectedRun = rejectedApp.queue.get("R1")
     expect(rejectedRun).toMatchObject({
@@ -3015,7 +3014,7 @@ describe("Queue", () => {
         data: {
           run: "R1",
           error: { code: "job-lost" },
-          prs: [{ pr: "PR1", revision: 1, headSha: HEAD, actor: "operator" }],
+          prs: [{ pr: "PR1", revision: 1, headSha: HEAD, submitter: "operator" }],
         },
       },
     ])
@@ -3470,22 +3469,22 @@ describe("Queue", () => {
       review: { required: true, approved: false },
     })
     await app.bays.ready({ pr: "PR1" })
-    await app.bays.comment({ pr: "PR1", actor: "@cto", ref: "question-1", note: "Why this shape?" })
+    await app.bays.comment({ pr: "PR1", by: "@cto", ref: "question-1", note: "Why this shape?" })
     expect(app.queue.eligibility("PR1")).toMatchObject({
       runnable: false,
       reason: { code: "review-required", message: "PR 'PR1' needs approval for revision 1" },
       review: { required: true, approved: false },
     })
-    await app.bays.review({ pr: "PR1", actor: "@cto", decision: "reject", ref: "verdict-red" })
+    await app.bays.review({ pr: "PR1", by: "@cto", decision: "reject", ref: "verdict-red" })
     expect(app.queue.eligibility("PR1")).toMatchObject({
       runnable: false,
       reason: { code: "review-rejected", message: "PR 'PR1' was rejected by @cto for revision 1" },
-      review: { required: true, approved: false, decision: "reject", actor: "@cto", ref: "verdict-red" },
+      review: { required: true, approved: false, decision: "reject", by: "@cto", ref: "verdict-red" },
     })
-    await app.bays.review({ pr: "PR1", actor: "@cto", decision: "approve", ref: "verdict-1" })
+    await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: "verdict-1" })
     expect(app.queue.eligibility("PR1")).toMatchObject({
       runnable: true,
-      review: { required: true, approved: true, decision: "approve", actor: "@cto", ref: "verdict-1" },
+      review: { required: true, approved: true, decision: "approve", by: "@cto", ref: "verdict-1" },
     })
 
     await app.bays.ready({ pr: "PR1" })
@@ -3500,7 +3499,7 @@ describe("Queue", () => {
       baseSha: BASE,
       draft: true,
     })
-    await app.bays.review({ pr: "PR2", actor: "@cto", decision: "approve", ref: "verdict-2" })
+    await app.bays.review({ pr: "PR2", by: "@cto", decision: "approve", ref: "verdict-2" })
     await app.bays.ready({ pr: "PR2" })
     await app.bays.intake({ branch: "issue/review-stales", headSha: "4".repeat(40), base: "main", baseSha: BASE })
     await app.bays.ready({ pr: "PR2" })
@@ -3518,7 +3517,7 @@ describe("Queue", () => {
       baseSha: BASE,
       draft: true,
     })
-    await app.bays.review({ pr: "PR3", actor: "@cto", decision: "reject", ref: "verdict-3" })
+    await app.bays.review({ pr: "PR3", by: "@cto", decision: "reject", ref: "verdict-3" })
     await app.bays.ready({ pr: "PR3" })
     expect(app.queue.eligibility("PR3")).toMatchObject({
       runnable: false,

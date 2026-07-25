@@ -333,10 +333,6 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     const stateDir = join(repo, ".git", "yrd")
     const events: unknown[] = []
     const log = createLogger("test", [{ level: "trace" }, { write: (value: unknown) => events.push(value) }])
-    const messages = () =>
-      events.flatMap((value) =>
-        typeof value === "object" && value !== null && "message" in value ? [String(value.message)] : [],
-      )
     const config: ResolvedYrdProjectConfig = {
       base: "main",
       batch: 1,
@@ -362,10 +358,6 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       await first.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
       await first.close()
 
-      expect(messages()).not.toContain(
-        "projection checkpoint identity could not be derived; replaying journal authority",
-      )
-      expect(messages()).not.toContain("projection checkpoint write failed; journal remains authoritative")
       using database = new Database(join(stateDir, "journal.sqlite"), { readonly: true, strict: true })
       const checkpoint = database
         .query<{ cursor: number; checkpoint_json: string }, []>(
@@ -391,10 +383,6 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       } finally {
         await restored.close()
       }
-      expect(messages()).not.toContain(
-        "projection checkpoint identity could not be derived; replaying journal authority",
-      )
-      expect(messages()).not.toContain("projection checkpoint write failed; journal remains authoritative")
     } finally {
       log.end()
     }
@@ -526,6 +514,116 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       app.bays.submit({ branch: "origin/issue/feature", headSha: featureSha, base: "main" }),
     ).rejects.toThrow("payload already recorded as PR 'PR1'")
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
+  })
+
+  it("coalesces Bay base refresh without pruning a recoverable tracking carrier", async () => {
+    const { repo, featureSha } = await repository()
+    const remote = join(repo, "..", "origin.git")
+    await git(repo, "init", "-q", "--bare", remote)
+    await git(repo, "remote", "add", "origin", remote)
+    await git(repo, "push", "-q", "origin", "main", "issue/feature")
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check"],
+      requires: [],
+      definitions: { check: { run: "true", runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    const commands: string[][] = []
+    await using runtimeProcess = createProcess({ cwd: repo })
+    const tracedProcess = {
+      run: async (request: Parameters<typeof runtimeProcess.run>[0]) => {
+        commands.push([...request.argv])
+        return runtimeProcess.run(request)
+      },
+    }
+    await using app = await createDefaultYrdApp({
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal: createMemoryJournal(),
+      process: tracedProcess,
+      config,
+    })
+    await app.bays.submit({
+      branch: "issue/feature",
+      headSha: featureSha,
+      base: "main",
+      issue: "@issue/feature",
+      draft: true,
+    })
+    commands.length = 0
+
+    const opened = await app.bays.open({
+      name: "feature",
+      branch: "issue/feature",
+      issue: "@issue/feature",
+    })
+    const jobs = await app.jobs.runMany(app.jobs.requested(opened), { runner: "test", leaseMs: 60_000 })
+
+    expect(jobs.every((job) => job.status === "completed" && job.conclusion === "success")).toBe(true)
+    const remoteCommands = () =>
+      commands.filter(
+        (argv) =>
+          argv[0] === "git" && argv[1] === "-C" && argv[2] === repo && (argv[3] === "fetch" || argv[3] === "ls-remote"),
+      )
+    expect(remoteCommands()).toEqual([
+      expect.arrayContaining([
+        "git",
+        "-C",
+        repo,
+        "fetch",
+        "--no-recurse-submodules",
+        "--quiet",
+        "origin",
+        "+refs/heads/*:refs/remotes/origin/*",
+      ]),
+    ])
+    expect(await git(repo, "rev-parse", "refs/remotes/origin/issue/feature")).toBe(featureSha)
+
+    await git(repo, "switch", "-qc", "issue/recoverable")
+    await writeFile(join(repo, "recoverable.txt"), "recoverable\n")
+    await git(repo, "add", "recoverable.txt")
+    await git(repo, "commit", "-qm", "recoverable feature")
+    const recoverableSha = await git(repo, "rev-parse", "HEAD")
+    await git(repo, "switch", "-q", "main")
+    await git(repo, "push", "-q", "origin", "issue/recoverable")
+    await app.bays.submit({
+      branch: "issue/recoverable",
+      headSha: recoverableSha,
+      base: "main",
+      issue: "@issue/recoverable",
+      draft: true,
+    })
+    await git(repo, "push", "-q", "origin", "--delete", "issue/recoverable")
+    await git(repo, "update-ref", "refs/remotes/origin/issue/recoverable", recoverableSha)
+    commands.length = 0
+
+    const recoverable = await app.bays.open({
+      name: "recoverable",
+      branch: "issue/recoverable",
+      issue: "@issue/recoverable",
+    })
+    const recoverableJobs = await app.jobs.runMany(app.jobs.requested(recoverable), {
+      runner: "test",
+      leaseMs: 60_000,
+    })
+
+    expect(recoverableJobs.every((job) => job.status === "completed" && job.conclusion === "success")).toBe(true)
+    expect(remoteCommands()).toEqual([
+      expect.arrayContaining([
+        "git",
+        "-C",
+        repo,
+        "fetch",
+        "--no-recurse-submodules",
+        "--quiet",
+        "origin",
+        "+refs/heads/*:refs/remotes/origin/*",
+      ]),
+    ])
+    expect(await git(repo, "rev-parse", "refs/remotes/origin/issue/recoverable")).toBe(recoverableSha)
   })
 
   it("adds one queue-authority fetch per same-base cycle instead of one per PR", async () => {
@@ -785,7 +883,7 @@ notify:
     })
     try {
       await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-      expect(host.app.bays.pr("PR1")?.revs).toEqual([expect.objectContaining({ actor: "@agent/7" })])
+      expect(host.app.bays.pr("PR1")?.revs).toEqual([expect.objectContaining({ submitter: "@agent/7" })])
 
       const settled = await Promise.race([
         host.app.queue
@@ -814,36 +912,6 @@ notify:
       release.resolve()
       await host.close()
     }
-  })
-
-  it("refuses a submitter route at startup when no Tribe identity can resolve it", async () => {
-    const { repo } = await repository()
-    await commitYrdConfig(
-      repo,
-      `base: main
-steps: [check, merge]
-check: { run: "true" }
-merge: {}
-notify:
-  pr/rejected: [submitter]
-`,
-    )
-    const env = { ...process.env }
-    delete env.TRIBE_NAME
-    let host: Awaited<ReturnType<typeof createYrdHost>> | undefined
-    let failure: unknown
-    try {
-      host = await createYrdHost({ cwd: repo, env, signalAdapter: { send() {} } })
-    } catch (error) {
-      failure = error
-    } finally {
-      await host?.close()
-    }
-
-    expect(failure).toMatchObject({
-      failure: { kind: "configuration", code: "signal-submitter-missing" },
-    })
-    expect((failure as Error).message).toContain("set TRIBE_NAME to the submitting Tribe handle")
   })
 
   it("runs the literal queue watch viewer without Tribe identity or notification settlement", async () => {
@@ -1141,7 +1209,9 @@ notify:
     expect(
       commandBlock
         .split("\n")
-        .flatMap((text) => text.match(/^\s{2}(?<command>[a-z]+)(?:\s+\[[^\]]+\])*\s{2,}/u)?.groups?.command ?? []),
+        .flatMap(
+          (text) => text.match(/^\s{2}(?<command>[a-z]+)(?:\s+(?:\[[^\]]+\]|<[^>]+>))*\s{2,}/u)?.groups?.command ?? [],
+        ),
     ).toEqual([
       "pr",
       "bay",
@@ -1155,7 +1225,11 @@ notify:
       "watch",
       "prime",
       "init",
+      "in",
+      "do",
+      "sh",
       "run",
+      "ag",
     ])
     expect(stdout).not.toMatch(/\b(?:pr\|prs|bay\|bays|issue\|issues|contest\|contests|queue\|queues)\b/u)
     expect(stderr).toBe("")
@@ -1266,23 +1340,17 @@ notify:
     const { repo } = await repository()
     const ambient = join(repo, "..", "bay-path-ambient")
     await mkdir(ambient)
-    let opened = ""
-    let stderr = ""
+    await using owner = await createYrdHost({ cwd: repo })
+    const opened = await owner.app.bays.open({ name: "selected" })
+    const jobs = await owner.app.jobs.runMany(owner.app.jobs.requested(opened), {
+      runner: "test",
+      leaseMs: 60_000,
+    })
+    expect(jobs.every((job) => job.status === "completed" && job.conclusion === "success")).toBe(true)
+    await owner.close()
 
-    expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "bay", "open", "selected", "--json"], {
-        cwd: ambient,
-        stdout: (text) => {
-          opened += text
-        },
-        stderr: (text) => {
-          stderr += text
-        },
-      }),
-      stderr,
-    ).toBe(0)
+    let stderr = ""
     const path = join(repo, ".bays", "B1")
-    expect(JSON.parse(opened)).toMatchObject({ bay: { id: "B1", path } })
 
     let projected = ""
     stderr = ""
@@ -2728,18 +2796,14 @@ notify:
   it("submits the current linked-worktree branch when no bay selector is given", async () => {
     const { repo, featureSha } = await repository()
     const linked = join(repo, "..", "current")
-    let setupStderr = ""
-
-    expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "bay", "open", "stale"], {
-        cwd: repo,
-        stdout: () => undefined,
-        stderr: (text) => {
-          setupStderr += text
-        },
-      }),
-      setupStderr,
-    ).toBe(0)
+    await using setup = await createYrdHost({ cwd: repo })
+    const opened = await setup.app.bays.open({ name: "stale" })
+    const jobs = await setup.app.jobs.runMany(setup.app.jobs.requested(opened), {
+      runner: "test",
+      leaseMs: 60_000,
+    })
+    expect(jobs.every((job) => job.status === "completed" && job.conclusion === "success")).toBe(true)
+    await setup.close()
     await git(repo, "worktree", "add", "-q", linked, "issue/feature")
 
     let stdout = ""

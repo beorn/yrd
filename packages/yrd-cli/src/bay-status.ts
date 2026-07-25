@@ -39,6 +39,8 @@ export type BayStatusFacts = Readonly<{
   path?: string
   /** Parsed PID from `:<PID>` address when present; undefined if no handle. */
   ownerPid?: number
+  /** The command checking status is the process that owns this Bay. */
+  ownerIsCaller?: boolean
   /** Result of `kill -0` when ownerPid is set; undefined if not checked. */
   ownerAlive?: boolean
   /** `git status --porcelain` empty when path exists. */
@@ -46,6 +48,8 @@ export type BayStatusFacts = Readonly<{
   worktreeMissing?: boolean
   /** Tip is ancestor of origin/main OR patch-id-equivalent (caller decides). */
   tipLanded?: boolean
+  /** Ref or equivalence proof that makes the tip durable. */
+  tipDurableAt?: string
   tipLandedUnknown?: boolean
   /** Commits not on origin/main (ahead count) when computable. */
   aheadOfOrigin?: number
@@ -56,7 +60,7 @@ export type BayStatusFacts = Readonly<{
   openPrIds?: readonly string[]
 }>
 
-/** Extract trailing `:<digits>` PID from a bay name or actor address (22287). */
+/** Extract trailing `:<digits>` PID from a bay name or BY address (22287). */
 export function parseOwnerPid(...candidates: readonly (string | undefined)[]): number | undefined {
   for (const raw of candidates) {
     if (raw === undefined) continue
@@ -77,7 +81,13 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
     lines.push({
       class: "owner",
       verdict: "UNKNOWN",
-      evidence: "no :<PID> address on bay name/actor — cannot prove actor liveness",
+      evidence: "no :<PID> address on bay name/BY — cannot prove owner liveness",
+    })
+  } else if (facts.ownerIsCaller === true) {
+    lines.push({
+      class: "owner",
+      verdict: "PASS",
+      evidence: `this Yrd process owns the Bay (pid ${facts.ownerPid})`,
     })
   } else if (facts.ownerAlive === undefined) {
     lines.push({
@@ -141,9 +151,11 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
       class: "commits",
       verdict: "PASS",
       evidence:
-        facts.aheadOfOrigin === 0
-          ? "tip is not ahead of origin/main"
-          : "tip is landed (ancestor or patch-id equivalent of origin/main)",
+        facts.tipDurableAt !== undefined
+          ? `tip is durable at ${facts.tipDurableAt}`
+          : facts.aheadOfOrigin === 0
+            ? "tip is not ahead of origin/main"
+            : "tip is landed (ancestor or patch-id equivalent of origin/main)",
     })
   } else {
     lines.push({
@@ -226,6 +238,8 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
 
 export function formatBayStatusHuman(report: BayStatusReport): string {
   const header = `bay ${report.bay} ${report.name}  branch ${report.branch}  wrapper=${report.wrapper}  exit=${report.exit}  safe=${report.safe === null ? "unknown" : report.safe}`
-  const body = report.lines.map((line) => `  ${line.class.padEnd(9)} ${line.verdict.padEnd(7)} ${line.evidence}`).join("\n")
+  const body = report.lines
+    .map((line) => `  ${line.class.padEnd(9)} ${line.verdict.padEnd(7)} ${line.evidence}`)
+    .join("\n")
   return `${header}\n${body}`
 }

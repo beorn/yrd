@@ -12,6 +12,12 @@ export type Invocation = Readonly<{
 
 export type FailureVerdict = Readonly<{ exitCode: YrdCliExitCode; failure: FailureFact }>
 
+export type YrdPersona = Readonly<{
+  name: string
+  mailbox: string
+  registration: "ensure" | "existing"
+}>
+
 export type YrdContext = Readonly<{
   /** Git path used to discover the repository and its operation root. */
   repo: string
@@ -19,6 +25,10 @@ export type YrdContext = Readonly<{
   configPath?: string
   /** One host-owned logging policy shared by every command service. */
   observability: YrdObservability
+  /** One resolved work/persona name and its durable notification mailbox. */
+  persona?: YrdPersona
+  /** Notification wire destination: Unix socket, `file:<path>`, `fd:<n>`, or `-`. */
+  wire?: string
 }>
 
 const increaseDiagnostics = (_value: string, previous: number): number => previous + 1
@@ -28,6 +38,8 @@ export function configureYrdGlobalOptions(program: CliCommand): CliCommand {
   return program
     .option("--repo <path>", "repository authority and operation root (env: YRD_REPO)")
     .option("--config <path>", "base-relative .yrd.ts/.yml config authority")
+    .option("--name <name>", "one session/PR/branch/Bay name (env: HAB_NAME)")
+    .option("--wire <socket>", "notification wire socket or capture sink (env: HAB_WIRE)")
     .option("-v, --verbose", "increase diagnostics (-vv enables spans, -vvv traces)", increaseDiagnostics, 0)
     .option("-q, --quiet", "reduce diagnostics (-q errors only, -qq silent)", increaseDiagnostics, 0)
     .option("--log-level <level>", "set trace|debug|info|warn|error|silent (env: LOG_LEVEL)")
@@ -51,13 +63,14 @@ const QUEUE_SUBCOMMANDS = new Set([
   "resume",
   "recover",
   "run",
+  "cancel",
   "finish",
 ])
 
 function rootCommandIndex(args: readonly string[]): number | undefined {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]
-    if (arg === "--repo" || arg === "--config" || arg === "--log-level") {
+    if (arg === "--repo" || arg === "--config" || arg === "--name" || arg === "--wire" || arg === "--log-level") {
       index += 1
       continue
     }
@@ -116,16 +129,53 @@ export function yrdCommandOperand(args: readonly string[]): string | undefined {
 /** Resolve the one repository selector against the captured invocation
  * directory. CLI overrides environment; ambient discovery is the fallback. */
 export function resolveYrdContext(
-  options: Readonly<{ repo?: string; config?: string }> & YrdObservabilityFlags,
+  options: Readonly<{ repo?: string; config?: string; name?: string; wire?: string; fallbackName?: string }> &
+    YrdObservabilityFlags,
   env: Readonly<Record<string, string | undefined>>,
   ambientCwd: string,
 ): YrdContext {
   const ambient = resolve(ambientCwd)
+  const explicitName = nonempty(options.name)
+  const habName = nonempty(env.HAB_NAME)
+  const tribeName = nonempty(env.TRIBE_NAME)
+  const fallbackName = nonempty(options.fallbackName)
+  const persona =
+    explicitName !== undefined
+      ? derivedPersona(explicitName)
+      : habName !== undefined
+        ? derivedPersona(habName)
+        : tribeName !== undefined
+          ? transitionalPersona(tribeName)
+          : fallbackName === undefined
+            ? undefined
+            : derivedPersona(fallbackName)
+  const wire = nonempty(options.wire) ?? nonempty(env.HAB_WIRE)
   return Object.freeze({
     repo: resolve(ambient, options.repo ?? env.YRD_REPO ?? "."),
     ...(options.config === undefined ? {} : { configPath: options.config }),
     observability: resolveYrdObservability(options, env),
+    ...(persona === undefined ? {} : { persona }),
+    ...(wire === undefined ? {} : { wire }),
   })
+}
+
+function nonempty(value: string | undefined): string | undefined {
+  const trimmed = value?.trim()
+  return trimmed === undefined || trimmed === "" ? undefined : trimmed
+}
+
+function personaName(value: string): string {
+  const leaf = basename(value).replace(/^@/u, "")
+  return leaf
+}
+
+function derivedPersona(value: string): YrdPersona {
+  const name = personaName(value)
+  return Object.freeze({ name, mailbox: `@dev/${name}`, registration: "ensure" })
+}
+
+function transitionalPersona(mailbox: string): YrdPersona {
+  return Object.freeze({ name: personaName(mailbox), mailbox, registration: "existing" })
 }
 
 function executableName(value: string | undefined): string {

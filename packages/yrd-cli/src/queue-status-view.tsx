@@ -224,7 +224,7 @@ export type QueueTimelineProjectedRow = Readonly<{
   /** Canonical issue path for this PR revision; presentation may replace the branch with this stronger identity. */
   issue?: string
   subject: string
-  /** The actor who submitted this exact PR revision; absent only for journals written before submitter identity. */
+  /** The identity that submitted this exact PR revision; absent only for older journals. */
   submitter?: string
   step?: string
   detail: string
@@ -760,7 +760,7 @@ function eligibilityForCurrentRevision(result: QueueStatusResult, pr: PR): PREli
 /** The submitter handle recorded on one exact immutable PR revision, or
  * undefined for revisions journaled before submitter identity was recorded. */
 function revisionSubmitter(pr: PR, revision = prRevisionNumber(pr), headSha = prHead(pr)): string | undefined {
-  return pr.revs.find((candidate) => candidate.n === revision && candidate.head === headSha)?.actor
+  return pr.revs.find((candidate) => candidate.n === revision && candidate.head === headSha)?.submitter
 }
 
 function currentTerminalFact(pr: PR): PRRevTerminal | undefined {
@@ -3521,7 +3521,7 @@ export type StatusNotice = Readonly<{
     kind: "requeue" | "recut" | "retry" | "none"
     when: string
   }>
-  actor?: "author" | "ci" | "queue"
+  owner?: "author" | "ci" | "queue"
 }>
 
 function statusNoticeFailure(
@@ -3710,8 +3710,8 @@ export function queueStatusNotice(
       : automation === "auto-requeue"
         ? ({ kind: "requeue", when: "on the next queue pass" } as const)
         : noticeAutomation(state)
-  const actor =
-    disposition?.actor ??
+  const owner =
+    disposition?.owner ??
     (state === "queued" || state === "running" || state === "env" || state === "timeout"
       ? "queue"
       : state === "failed" || state === "rejected" || state === "needs-author" || state === "draft"
@@ -3723,7 +3723,7 @@ export function queueStatusNotice(
     headline: noticeHeadline(state, row, data),
     explanation: noticeExplanation(state, row, data, failure, context.stepP50Ms ?? null),
     auto,
-    ...(actor === undefined ? {} : { actor }),
+    ...(owner === undefined ? {} : { owner }),
   }
 }
 
@@ -5580,12 +5580,12 @@ export function QueueIntegrationFacts({ data }: { data: QueueShowData }) {
 
 function prReviewLine(review: PR["reviews"][number]): string {
   const note = presentFact(review.note)
-  return `REVIEW ${review.decision} ${review.actor} ${detailClock(review.at)}${note === undefined ? "" : ` — ${note}`}`
+  return `REVIEW ${review.decision} ${review.by} ${detailClock(review.at)}${note === undefined ? "" : ` — ${note}`}`
 }
 
 function prCommentLine(comment: PR["comments"][number]): string {
   const note = presentFact(comment.note)
-  return `COMMENT ${comment.actor} ${detailClock(comment.at)}${note === undefined ? "" : ` — ${note}`}`
+  return `COMMENT ${comment.by} ${detailClock(comment.at)}${note === undefined ? "" : ` — ${note}`}`
 }
 
 type PrActivityEntry = Readonly<{
@@ -5627,7 +5627,7 @@ function prTerminalLineageEntries(
   const entries =
     submittedAt === undefined
       ? terminal
-      : [...terminal, { at: submittedAt, rank: 20, text: `submitted by ${submitted?.actor ?? "-"}` }]
+      : [...terminal, { at: submittedAt, rank: 20, text: `submitted by ${submitted?.submitter ?? "-"}` }]
   return entries.toSorted(
     (left, right) => right.at.localeCompare(left.at) || right.rank - left.rank || left.text.localeCompare(right.text),
   )
@@ -5655,7 +5655,7 @@ function prActivityEntries(
     entries.push({
       at: activityAt,
       rank: 20,
-      text: `r${revision.n} ${submitted ? "submitted" : "registered"} by ${revision.actor ?? "-"}`,
+      text: `r${revision.n} ${submitted ? "submitted" : "registered"} by ${revision.submitter ?? "-"}`,
     })
   }
   for (const request of pr.checkRequests) {
@@ -5679,7 +5679,7 @@ function prActivityEntries(
     entries.push({
       at: review.at,
       rank: 40,
-      text: `r${review.revision} review ${review.decision} by ${review.actor}`,
+      text: `r${review.revision} review ${review.decision} by ${review.by}`,
       ...(presentFact(review.note) === undefined ? {} : { detail: presentFact(review.note) }),
     })
   }
@@ -5687,7 +5687,7 @@ function prActivityEntries(
     entries.push({
       at: comment.at,
       rank: 50,
-      text: `r${comment.revision} comment by ${comment.actor}`,
+      text: `r${comment.revision} comment by ${comment.by}`,
       ...(presentFact(comment.note) === undefined ? {} : { detail: presentFact(comment.note) }),
     })
   }

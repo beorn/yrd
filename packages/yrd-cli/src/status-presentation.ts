@@ -40,7 +40,7 @@ export type StatusAutomation = "auto-requeue" | "auto-recut" | "none"
 export type FailureDisposition = Readonly<{
   state: FailureStatusClass
   automation: StatusAutomation
-  actor: "author" | "queue"
+  owner: "author" | "queue"
 }>
 
 const STATUS_PRESENTATIONS = {
@@ -130,27 +130,27 @@ const INFRA_RETRY_FAILURE_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKE
  * of its own. Keep those journal-observable distinctions intact.
  */
 export function failureDisposition(code: string): FailureDisposition {
-  if (code === "stale-base") return { state: "stale", automation: "auto-recut", actor: "queue" }
+  if (code === "stale-base") return { state: "stale", automation: "auto-recut", owner: "queue" }
   if (AUTO_REQUEUE_STALE_FAILURE_CODES.has(code)) {
-    return { state: "stale", automation: "auto-requeue", actor: "queue" }
+    return { state: "stale", automation: "auto-requeue", owner: "queue" }
   }
-  if (code === "stale-pr") return { state: "stale", automation: "none", actor: "queue" }
+  if (code === "stale-pr") return { state: "stale", automation: "none", owner: "queue" }
   if (
     code === "queue-environment-refused" ||
     code === "environment-refused" ||
     code === "orphaned-run" ||
     INFRA_RETRY_FAILURE_CODES.has(code)
   ) {
-    return { state: "env", automation: "auto-requeue", actor: "queue" }
+    return { state: "env", automation: "auto-requeue", owner: "queue" }
   }
   if (code === "job-lost" || code === "lease-timeout" || code === "job-lease-expired") {
-    return { state: "timeout", automation: "auto-requeue", actor: "queue" }
+    return { state: "timeout", automation: "auto-requeue", owner: "queue" }
   }
-  if (CANCELED_FAILURE_CODES.has(code)) return { state: "canceled", automation: "none", actor: "queue" }
+  if (CANCELED_FAILURE_CODES.has(code)) return { state: "canceled", automation: "none", owner: "queue" }
   if (NEEDS_AUTHOR_FAILURE_CODES.has(code)) {
-    return { state: "needs-author", automation: "none", actor: "author" }
+    return { state: "needs-author", automation: "none", owner: "author" }
   }
-  return { state: "failed", automation: "none", actor: "author" }
+  return { state: "failed", automation: "none", owner: "author" }
 }
 
 /** Display classification for a durable queue failure. The observable is

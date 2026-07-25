@@ -292,11 +292,28 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
         if (input.from === undefined) {
           const localRef = `refs/heads/${input.branch}`
           const remoteRef = `refs/remotes/origin/${input.branch}`
+          if (input.remoteBranch !== undefined && input.remoteBranch.branch !== input.branch) {
+            throw new Error(
+              `remote branch snapshot '${input.remoteBranch.branch}' does not match Bay branch '${input.branch}'`,
+            )
+          }
           const [local, tracking] = await Promise.all([
             git.run(repo, ["rev-parse", "--verify", `${localRef}^{commit}`], true),
             git.run(repo, ["rev-parse", "--verify", `${remoteRef}^{commit}`], true),
           ])
-          const remoteHead = input.issue === undefined ? undefined : await remoteBranchHead(git, repo, input.branch)
+          const trackedHead = tracking.code === 0 ? tracking.stdout.trim() : undefined
+          if (input.remoteBranch !== undefined && trackedHead !== input.remoteBranch.headSha) {
+            throw new Error(
+              `remote-tracking branch '${input.branch}' changed after its authority snapshot; ` +
+                "retry Bay provisioning against one fresh queue/branch snapshot",
+            )
+          }
+          const remoteHead =
+            input.issue === undefined
+              ? undefined
+              : input.remoteBranch === undefined
+                ? await remoteBranchHead(git, repo, input.branch)
+                : input.remoteBranch.headSha
           const remoteExists = remoteHead !== undefined
           const decision = decideBranchProvision({
             claim: input.issue !== undefined,
@@ -308,16 +325,16 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           if (decision.kind === "refuse" && decision.reason === "unproven-existing") {
             throw new Error(
               `branch '${input.branch}' already exists without matching claim provenance; ` +
-                "link that branch to the claim's draft PR, then rerun bay run",
+                "link that branch to the claim's draft PR, then reopen with bay open",
             )
           }
           if (decision.kind === "refuse") {
             throw new Error(
               `live claim branch '${input.branch}' has no remote or tracking carrier; ` +
-                "restore the draft PR head before rerunning bay run",
+                "restore the draft PR head before reopening with bay open",
             )
           }
-          if (decision.carrier === "remote") {
+          if (decision.carrier === "remote" && input.remoteBranch === undefined) {
             await git.run(repo, [
               "fetch",
               "--no-recurse-submodules",
@@ -330,7 +347,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
             if (carriesClaimHead.code !== 0) {
               throw new Error(
                 `local branch '${input.branch}' does not descend from the live claim head; ` +
-                  "restore or reconcile the draft PR branch before rerunning bay run",
+                  "restore or reconcile the draft PR branch before reopening with bay open",
               )
             }
           }

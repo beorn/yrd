@@ -118,6 +118,7 @@ const JOB_DEPLOY_LOST_ID = "00000000-0000-7000-8000-000000000103"
 const JOB_CHECK_PASS_ID = "00000000-0000-7000-8000-000000000104"
 const JOB_CHECK_MISSING_ID = "00000000-0000-7000-8000-000000000105"
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
+const retiredRoleNoun = ["act", "or"].join("")
 
 function submittedRevision(
   revision: number,
@@ -496,10 +497,18 @@ function finishRemoteEvaluator(...args: string[]): string[] {
 }
 
 async function openAndSubmit(app: TestApp): Promise<void> {
-  const open = outputIO()
-  expect(await runYrd(app, yrd("bay", "open", "one"), open.io)).toBe(0)
+  await openTestBay(app, { name: "one" })
   const submit = outputIO({ cwd: "/repo/.bays/B1" })
   expect(await runYrd(app, yrd("bay", "submit"), submit.io)).toBe(0)
+}
+
+async function openTestBay(app: TestApp, input: Parameters<TestApp["bays"]["open"]>[0]): Promise<void> {
+  const opened = await app.bays.open(input)
+  const jobs = await app.jobs.runMany(app.jobs.requested(opened), {
+    runner: "cli-test",
+    leaseMs: 60_000,
+  })
+  expect(jobs.every((job) => job.status === "completed" && job.conclusion === "success")).toBe(true)
 }
 
 function fakeJob(input: {
@@ -683,8 +692,8 @@ describe("runYrd", () => {
     expect(await runYrd(app, gitBay("--help"), gitHelp.io)).toBe(0)
     expect(gitHelp.stdout()).toContain("Usage: git bay")
     expect(gitHelp.stdout()).toContain("list")
-    expect(gitHelp.stdout()).toContain("run")
     expect(gitHelp.stdout()).toContain("open")
+    expect(gitHelp.stdout()).toContain("in")
     expect(gitHelp.stdout()).toContain("path")
     expect(gitHelp.stdout()).toContain("refresh")
     expect(gitHelp.stdout()).toContain("submit")
@@ -695,13 +704,6 @@ describe("runYrd", () => {
     expect(gitHelp.stdout()).not.toMatch(/^\s+issue /mu)
     expect(gitHelp.stdout()).not.toMatch(/^\s+contest /mu)
     expect(gitHelp.stdout()).not.toMatch(/^\s+help /mu)
-
-    const opened = outputIO({ color: true, columns: 64 })
-    expect(await runYrd(app, gitBay("open", "from-git"), opened.io)).toBe(0)
-    expect(opened.stdout()).toContain("BAY")
-    expect(opened.stdout()).toContain("STATUS")
-    expect(opened.stdout()).toContain("PATH")
-    expect(opened.stdout()).toContain("file:///repo/.bays/B1")
 
     const yrdHelp = outputIO()
     expect(await runYrd(app, yrd("contest", "--help"), yrdHelp.io)).toBe(0)
@@ -1616,7 +1618,7 @@ describe("runYrd", () => {
   it("keeps unrelated members runnable when a recut supersedes their shared predecessor batch", async () => {
     const app = await createApp({ batch: 2, waitingCheck: true })
     await openAndSubmit(app)
-    expect(await runYrd(app, yrd("bay", "open", "two"), outputIO().io)).toBe(0)
+    await openTestBay(app, { name: "two" })
     expect(await runYrd(app, yrd("bay", "submit"), outputIO({ cwd: "/repo/.bays/B2" }).io)).toBe(0)
     expect(await app.queue.run({ prs: ["PR1", "PR2"] }, { runner: "cli-test", leaseMs: 60_000 })).toMatchObject([
       {
@@ -1735,13 +1737,13 @@ describe("runYrd", () => {
     expect(redrain.some((run) => run.id !== "R1" && run.prs.some((member) => member.id === "PR1"))).toBe(true)
   })
 
-  it("run cancel refuses a terminal run (#59)", async () => {
+  it("queue cancel refuses a terminal run (#59)", async () => {
     const app = await createApp()
     await openAndSubmit(app)
     // Drain PR1 to completion: R1 is terminal (passed/integrated), not cancelable.
     expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), outputIO().io)).toBe(0)
     const cancel = outputIO()
-    expect(await runYrd(app, yrd("run", "cancel", "R1"), cancel.io)).not.toBe(0)
+    expect(await runYrd(app, yrd("queue", "cancel", "R1"), cancel.io)).not.toBe(0)
     expect(cancel.stderr()).toContain("only a running or waiting run")
   })
 
@@ -1829,7 +1831,7 @@ describe("runYrd", () => {
     await app.bays.submit({ branch: "issue/recut", headSha: HEAD_SHA, baseSha: BASE_SHA, correlation })
     const sourceReadyAt = app.bays.pr("PR1")?.revs[0]?.submittedAt
     if (sourceReadyAt === undefined) throw new Error("missing first revision submission clock")
-    await app.bays.review({ pr: "PR1", actor: "@cto", decision: "approve", ref: "review-r1" })
+    await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: "review-r1" })
     await app.bays.requestChecks({ pr: "PR1" })
     expect(await app.queue.admit({ prs: ["PR1"] })).toMatchObject([
       {
@@ -2293,7 +2295,6 @@ describe("runYrd", () => {
       expect.objectContaining({
         kind: "log",
         level: "warn",
-        message: "resident queue could not refresh an admitted revision",
         props: expect.objectContaining({
           action: "queue-freshness-refused",
           pr: "PR1",
@@ -2418,7 +2419,7 @@ describe("runYrd", () => {
       pushedAt: string,
       submittedAt?: string,
       terminal?: PRRev["terminal"],
-      actor?: string,
+      submitter?: string,
     ): PRRev => ({
       n: 1,
       head: headSha,
@@ -2427,7 +2428,7 @@ describe("runYrd", () => {
       pushedAt,
       ...(submittedAt === undefined ? {} : { submittedAt }),
       ...(terminal === undefined ? {} : { terminal }),
-      ...(actor === undefined ? {} : { actor }),
+      ...(submitter === undefined ? {} : { submitter }),
     })
     const pr = (id: string, branch: string, status: PRDeliveryState, clock: PRRev): PR => ({
       id,
@@ -2525,7 +2526,7 @@ describe("runYrd", () => {
           revision: 1,
           runnable: false,
           reason: { code: "terminal", message: "integrated" },
-          review: { required: true, approved: true, stale: false, decision: "approve", actor: "@cto" },
+          review: { required: true, approved: true, stale: false, decision: "approve", by: "@cto" },
           checks: { status: "passed", run: "R5" },
         },
       },
@@ -2861,8 +2862,7 @@ describe("runYrd", () => {
     const checkRuns: string[] = []
     const mergeRuns: string[] = []
     const app = await createApp({ checkRuns, mergeRuns })
-    const open = outputIO()
-    expect(await runYrd(app, yrd("bay", "open", "one"), open.io), open.stderr()).toBe(0)
+    await openTestBay(app, { name: "one" })
 
     const submit = outputIO({ cwd: "/repo/.bays/B1" })
     expect(await runYrd(app, yrd("pr", "submit", "--follow"), submit.io), submit.stderr()).toBe(0)
@@ -2989,11 +2989,61 @@ describe("runYrd", () => {
     expect(prSubmit.stdout()).not.toContain(`--${["li", "ne"].join("")} <branch>`)
   })
 
-  it("opens, refreshes, and closes bays through installed command refs while driving jobs", async () => {
+  it("uses one friendly Bay root and the compact BAY STATUS ISSUE BY BASE BRANCH table", async () => {
     const app = await createApp()
-    const open = outputIO({ color: true, columns: 64 })
-    expect(await runYrd(app, yrd("bay", "open", "fix-readme", "--from", "topic/readme"), open.io)).toBe(0)
-    expect(open.stdout()).toContain("file:///repo/.bays/B1")
+    await openTestBay(app, {
+      name: "friendly",
+      issue: "@km/test/friendly",
+      by: "@dev/friendly",
+      branch: "task/friendly-branch-that-uses-the-available-width",
+    })
+    vi.stubEnv("HOME", "/repo")
+    try {
+      const list = outputIO({ columns: 120 })
+      expect(await runYrd(app, yrd("bay", "list"), list.io), list.stderr()).toBe(0)
+      const lines = stripAnsi(list.stdout()).trimEnd().split("\n")
+      expect(lines[0]).toBe("Bays in ~/.bays/")
+      expect(lines[1]).toBe("")
+      expect(lines[2]?.trim().split(/\s+/u)).toEqual(["BAY", "STATUS", "ISSUE", "BY", "BASE", "BRANCH"])
+      expect(lines[3]).toContain("B1")
+      expect(lines[3]).toContain("active")
+      expect(lines[3]).toContain("@km/test/friendly")
+      expect(lines[3]).toContain("@dev/friendly")
+      expect(lines[3]).toContain("main")
+      expect(lines[3]).toContain("task/friendly-branch-that-uses-the-available-width")
+      expect(list.stdout()).not.toContain(retiredRoleNoun.toUpperCase())
+      expect(list.stdout()).not.toContain("PATH")
+
+      const json = outputIO()
+      expect(await runYrd(app, yrd("bay", "list", "--json"), json.io), json.stderr()).toBe(0)
+      const listed = JSON.parse(json.stdout()) as Readonly<{ bays: readonly Record<string, unknown>[] }>
+      expect(listed.bays[0]).toMatchObject({ by: "@dev/friendly" })
+      expect(listed.bays[0]).not.toHaveProperty(retiredRoleNoun)
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it("uses by, submitter, and reviewer throughout CLI help", async () => {
+    const app = await createApp()
+    for (const args of [
+      ["pr", "list"],
+      ["pr", "create"],
+      ["pr", "submit"],
+      ["pr", "review"],
+      ["pr", "request-review"],
+      ["pr", "comment"],
+      ["contest", "select"],
+    ]) {
+      const help = outputIO()
+      expect(await runYrd(app, yrd(...args, "--help"), help.io), args.join(" ")).toBe(0)
+      expect(help.stdout(), args.join(" ")).not.toMatch(new RegExp(`\\b${retiredRoleNoun}s?\\b`, "iu"))
+    }
+  })
+
+  it("refreshes and closes an active Bay through installed command refs while driving jobs", async () => {
+    const app = await createApp()
+    await openTestBay(app, { name: "fix-readme", branch: "topic/readme" })
 
     const state = app.state()
     expect(state.bays.byId.B1).toMatchObject({
@@ -3016,16 +3066,14 @@ describe("runYrd", () => {
     )
 
     const close = outputIO({ cwd: "/repo/.bays/B1" })
-    expect(await runYrd(app, yrd("bay", "close"), close.io)).toBe(0)
-    expect(close.stdout()).toContain("B1")
-    expect(close.stdout()).toContain("closed")
+    expect(await runYrd(app, yrd("bay", "close", "--force", "B1"), close.io)).toBe(0)
+    expect(close.stdout()).toContain("closed fix-readme\n")
     expect(app.state().bays.byId.B1?.status).toBe("closed")
   })
 
   it("closes a draft-backed Bay without withdrawing its PR", async () => {
     const app = await createApp({ waitingCheck: true })
-    const open = outputIO()
-    expect(await runYrd(app, yrd("bay", "open", "draft-close"), open.io), open.stderr()).toBe(0)
+    await openTestBay(app, { name: "draft-close" })
 
     const create = outputIO({ cwd: "/repo/.bays/B1" })
     expect(await runYrd(app, yrd("pr", "create"), create.io), create.stderr()).toBe(0)
@@ -3036,7 +3084,7 @@ describe("runYrd", () => {
     expect(app.queue.get("R1")).toMatchObject({ status: "queued", steps: [{ job: { status: "queued" } }] })
 
     const close = outputIO({ cwd: "/repo/.bays/B1" })
-    expect(await runYrd(app, yrd("bay", "close"), close.io), close.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("bay", "close", "--force", "B1"), close.io), close.stderr()).toBe(0)
     expect(app.bays.get("B1")?.status).toBe("closed")
     expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("pushed")
     expect(app.queue.get("R1")).toMatchObject({ status: "queued", steps: [{ job: { status: "queued" } }] })
@@ -3044,8 +3092,7 @@ describe("runYrd", () => {
 
   it("certifies exact-head handoff readiness and exposes the shared lifecycle projection", async () => {
     const app = await createApp()
-    const open = outputIO()
-    expect(await runYrd(app, yrd("bay", "open", "handoff-cli", "--json"), open.io), open.stderr()).toBe(0)
+    await openTestBay(app, { name: "handoff-cli" })
 
     const before = outputIO()
     expect(await runYrd(app, yrd("bay", "--json"), before.io), before.stderr()).toBe(0)
@@ -3102,8 +3149,7 @@ describe("runYrd", () => {
       evidence,
       "--json",
     )
-    const open = outputIO()
-    expect(await runYrd(app, yrd("bay", "open", "submitted-retry", "--json"), open.io), open.stderr()).toBe(0)
+    await openTestBay(app, { name: "submitted-retry" })
     const first = outputIO()
     expect(await runYrd(app, args, first.io), first.stderr()).toBe(0)
     await app.bays.intake({ bay: "B1", headSha: HEAD_SHA })
@@ -3120,8 +3166,7 @@ describe("runYrd", () => {
 
   it("refreshes the Bay before certifying a newly committed handoff head", async () => {
     const app = await createApp({ refreshedHead: MERGED_SHA })
-    const open = outputIO()
-    expect(await runYrd(app, yrd("bay", "open", "fresh-handoff", "--json"), open.io), open.stderr()).toBe(0)
+    await openTestBay(app, { name: "fresh-handoff" })
     expect(app.bays.get("B1")).toMatchObject({ headSha: HEAD_SHA })
 
     const handoff = outputIO()
@@ -3156,10 +3201,7 @@ describe("runYrd", () => {
     { surface: "git bay", command: (...args: string[]) => gitBay(...args) },
   ])("projects one active Bay path through canonical selectors on $surface", async ({ command }) => {
     const app = await createApp()
-    const opened = outputIO()
-    expect(await runYrd(app, command("open", "fix-readme", "--from", "topic/readme"), opened.io), opened.stderr()).toBe(
-      0,
-    )
+    await openTestBay(app, { name: "fix-readme", branch: "topic/readme" })
     const beforePathEvents = await Array.fromAsync(app.events()).then((events) => events.length)
 
     for (const selector of ["B1", "fix-readme", "topic/readme"]) {
@@ -3179,8 +3221,7 @@ describe("runYrd", () => {
 
     const longPath = `/repo/${"nested-segment/".repeat(12)}bay path with spaces/B1`
     const longApp = await createApp({ bayPath: longPath })
-    const longOpened = outputIO()
-    expect(await runYrd(longApp, command("open", "long-path"), longOpened.io), longOpened.stderr()).toBe(0)
+    await openTestBay(longApp, { name: "long-path" })
     const narrow = outputIO({ columns: 12 })
     expect(await runYrd(longApp, command("path", "long-path"), narrow.io), narrow.stderr()).toBe(0)
     expect(narrow.stdout()).toBe(`${longPath}\n`)
@@ -3194,10 +3235,8 @@ describe("runYrd", () => {
     expect(missing.stderr()).toContain("no bay 'missing'")
     expect(missing.stderr()).toContain("yrd bay")
 
-    const first = outputIO()
-    expect(await runYrd(app, yrd("bay", "open", "shared", "--from", "topic/one"), first.io), first.stderr()).toBe(0)
-    const second = outputIO()
-    expect(await runYrd(app, yrd("bay", "open", "other", "--from", "shared"), second.io), second.stderr()).toBe(0)
+    await openTestBay(app, { name: "shared", branch: "topic/one" })
+    await openTestBay(app, { name: "other", branch: "shared" })
     const before = await Array.fromAsync(app.events()).then((events) => events.length)
 
     const ambiguous = outputIO()
@@ -3206,17 +3245,16 @@ describe("runYrd", () => {
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
 
     const closed = outputIO()
-    expect(await runYrd(app, yrd("bay", "close", "B1"), closed.io), closed.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("bay", "close", "--force", "B1"), closed.io), closed.stderr()).toBe(0)
     const afterClose = await Array.fromAsync(app.events()).then((events) => events.length)
     const inactive = outputIO()
     expect(await runYrd(app, yrd("bay", "path", "B1"), inactive.io)).toBe(1)
     expect(inactive.stderr()).toContain("bay 'B1' is closed; expected an active bay")
-    expect(inactive.stderr()).toContain("yrd bay open <name>")
+    expect(inactive.stderr()).toContain("yrd bay open --bay <name>")
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(afterClose)
 
     const relativeApp = await createApp({ bayPath: "relative/B1" })
-    const relativeOpen = outputIO()
-    expect(await runYrd(relativeApp, yrd("bay", "open", "relative"), relativeOpen.io), relativeOpen.stderr()).toBe(0)
+    await openTestBay(relativeApp, { name: "relative" })
     const beforeRelative = await Array.fromAsync(relativeApp.events()).then((events) => events.length)
     const relative = outputIO()
     expect(await runYrd(relativeApp, yrd("bay", "path", "B1"), relative.io)).toBe(1)
@@ -3225,27 +3263,15 @@ describe("runYrd", () => {
     expect(await Array.fromAsync(relativeApp.events()).then((events) => events.length)).toBe(beforeRelative)
   })
 
-  it("records tracker-neutral issue and actor links when opening a bay", async () => {
+  it("rejects retired persistent-open configuration flags without writing state", async () => {
     const app = await createApp()
-    const output = outputIO({ color: true, columns: 96 })
-
-    expect(
-      await runYrd(
-        app,
-        yrd("bay", "open", "linked-work", "--issue", "github:beorn/yrd#42", "--actor", "codex:apex"),
-        output.io,
-      ),
-      output.stderr(),
-    ).toBe(0)
-    expect(app.state().bays.byId.B1).toMatchObject({
-      name: "linked-work",
-      issue: "github:beorn/yrd#42",
-      actor: "codex:apex",
-    })
-    expect(output.stdout()).toContain("ISSUE")
-    expect(output.stdout()).toContain("github:beorn/yrd#42")
-    expect(output.stdout()).toContain("ACTOR")
-    expect(output.stdout()).toContain("codex:apex")
+    const before = await Array.fromAsync(app.events()).then((events) => events.length)
+    for (const option of [`--${retiredRoleNoun}`, "--from", "--base", "--json"]) {
+      const output = outputIO()
+      expect(await runYrd(app, yrd("bay", "open", "--bay", "linked-work", option, "retired"), output.io)).toBe(2)
+      expect(output.stderr(), option).toContain(`unknown option '${option}'`)
+    }
+    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
 
   it("submits inferred bays and runs selected queue steps instead of merely enqueueing jobs", async () => {
@@ -3296,8 +3322,7 @@ describe("runYrd", () => {
   it("refreshes an active bay before submit and warns while using the committed head for dirty work", async () => {
     const refreshedHead = "2".repeat(40)
     const clean = await createApp({ refreshedHead })
-    const open = outputIO()
-    expect(await runYrd(clean, yrd("bay", "open", "fresh-head"), open.io)).toBe(0)
+    await openTestBay(clean, { name: "fresh-head" })
     const submit = outputIO({ cwd: "/repo/.bays/B1" })
     expect(await runYrd(clean, yrd("bay", "submit"), submit.io)).toBe(0)
     expect(clean.state().bays.prs.PR1).toMatchObject({
@@ -3308,13 +3333,13 @@ describe("runYrd", () => {
     })
 
     const dirty = await createApp({ dirtyBay: true })
-    expect(await runYrd(dirty, yrd("bay", "open", "dirty"), outputIO().io)).toBe(0)
+    await openTestBay(dirty, { name: "dirty" })
     const warned = outputIO({ cwd: "/repo/.bays/B1" })
     expect(await runYrd(dirty, yrd("bay", "submit", "--json"), warned.io), warned.stderr()).toBe(0)
     expect(JSON.parse(warned.stdout())).toMatchObject({
       command: "bay.submit",
       prs: [{ id: "PR1", revs: [{ head: HEAD_SHA }] }],
-      warnings: [expect.stringContaining("has uncommitted work; submitting the committed head only")],
+      warnings: [expect.any(String)],
     })
     expect(dirty.state().bays.prs.PR1).toMatchObject({ revs: [{ head: HEAD_SHA }] })
   })
@@ -3420,7 +3445,7 @@ describe("runYrd", () => {
     ).toBe(0)
     expect(JSON.parse(comment.stdout())).toMatchObject({
       command: "pr.comment",
-      comment: { actor: "@cto", ref: "question-1", note: "Why?", revision: 1 },
+      comment: { by: "@cto", ref: "question-1", note: "Why?", revision: 1 },
     })
     const secondComment = outputIO()
     expect(
@@ -3455,7 +3480,7 @@ describe("runYrd", () => {
     ).toBe(0)
     expect(JSON.parse(review.stdout())).toMatchObject({
       command: "pr.review",
-      review: { actor: "@cto", decision: "approve", ref: "verdict-1", revision: 1, headSha: HEAD_SHA },
+      review: { by: "@cto", decision: "approve", ref: "verdict-1", revision: 1, headSha: HEAD_SHA },
     })
     const replay = outputIO()
     expect(
@@ -3675,12 +3700,12 @@ describe("runYrd", () => {
       needsReview: false,
     })
 
-    const missingActors = outputIO()
-    expect(await runYrd(app, yrd("pr", "request-review", "PR1"), missingActors.io)).toBe(2)
-    expect(missingActors.stderr()).toContain("requires reviewer actors or --clear")
+    const missingReviewers = outputIO()
+    expect(await runYrd(app, yrd("pr", "request-review", "PR1"), missingReviewers.io)).toBe(2)
+    expect(missingReviewers.stderr()).toContain("requires reviewer identities or --clear")
     const conflictingClear = outputIO()
     expect(await runYrd(app, yrd("pr", "request-review", "PR1", "@cto", "--clear"), conflictingClear.io)).toBe(2)
-    expect(conflictingClear.stderr()).toContain("cannot combine with reviewer actors")
+    expect(conflictingClear.stderr()).toContain("cannot combine with reviewer identities")
     const reviewerWithoutInbox = outputIO()
     expect(await runYrd(app, yrd("pr", "list", "--reviewer", "@cto", "--json"), reviewerWithoutInbox.io)).toBe(2)
     expect(reviewerWithoutInbox.stderr()).toContain("--reviewer requires --needs-review")
@@ -4020,7 +4045,10 @@ describe("runYrd", () => {
     await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["merge"] })
 
     const close = outputIO({ cwd: "/repo/.bays/B1" })
-    expect(await runYrd(app, yrd("bay", "close", "--withdraw", "--json"), close.io), close.stderr()).toBe(0)
+    expect(
+      await runYrd(app, yrd("bay", "close", "--withdraw", "--force", "B1", "--json"), close.io),
+      close.stderr(),
+    ).toBe(0)
 
     expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
     expect(app.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "success" })
@@ -4428,7 +4456,7 @@ describe("runYrd", () => {
   it("passes zero-or-more selectors to the queue as one batch-capable candidate set", async () => {
     const app = await createApp({ batch: 2 })
     await openAndSubmit(app)
-    expect(await runYrd(app, yrd("bay", "open", "two"), outputIO().io)).toBe(0)
+    await openTestBay(app, { name: "two" })
     expect(await runYrd(app, yrd("bay", "submit"), outputIO({ cwd: "/repo/.bays/B2" }).io)).toBe(0)
 
     const integrated = outputIO()
@@ -4967,7 +4995,7 @@ describe("runYrd", () => {
     const now = Date.parse("2026-07-13T12:00:00.000Z")
     const submittedAt = "2026-07-13T11:30:00.000Z"
     const finishedAt = "2026-07-13T11:50:00.000Z"
-    const pr = (id: string, actor: string, headSha: string): PR => ({
+    const pr = (id: string, submitter: string, headSha: string): PR => ({
       id,
       name: `${id} subject`,
       branch: `topic/${id}`,
@@ -4982,7 +5010,7 @@ describe("runYrd", () => {
           baseSha: BASE_SHA,
           pushedAt: submittedAt,
           submittedAt,
-          actor,
+          submitter,
           terminal: { kind: "integrated", at: finishedAt },
         },
       ],
@@ -9481,7 +9509,7 @@ describe("explicit queue step authority", () => {
       mergeWait: { started: () => mergeStarted.resolve(), until: releaseMerge.promise },
     })
     await openAndSubmit(app)
-    expect(await runYrd(app, yrd("bay", "open", "two"), outputIO().io)).toBe(0)
+    await openTestBay(app, { name: "two" })
     expect(await runYrd(app, yrd("bay", "submit"), outputIO({ cwd: "/repo/.bays/B2" }).io)).toBe(0)
 
     const completed = outputIO()

@@ -24,7 +24,7 @@ describe("shared queue status presentation", () => {
     ["authored-gitlink", "needs-author", "none", "author"],
     ["check-failed", "failed", "none", "author"],
     ["run-canceled", "canceled", "none", "queue"],
-  ] as const)("classifies %s once for every watch/log consumer", (code, state, automation, actor) => {
-    expect(failureDisposition(code)).toEqual({ state, automation, actor })
+  ] as const)("classifies %s once for every watch/log consumer", (code, state, automation, owner) => {
+    expect(failureDisposition(code)).toEqual({ state, automation, owner })
   })
 })

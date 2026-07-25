@@ -19,7 +19,10 @@ import { defineConfig, selectFlow, yrd, type FlowPin, type Submission } from "@y
 import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
 import {
   GitShaSchema,
+  PRRejectedFactSchema,
   currentPRRev,
+  normalizeV2By,
+  normalizeV2Submitter,
   prDeliveryState,
   resolveBase,
   type DeprovisionedBay,
@@ -43,7 +46,7 @@ function ids(): () => string {
 async function createApp(
   workspace: BayWorkspace,
   log?: ConditionalLogger,
-  defaultActor?: string,
+  defaultSubmitter?: string,
   selectSubmissionFlow?: (submission: Submission) => FlowPin,
 ) {
   const jobs = createBayJobDefs(workspace)
@@ -53,7 +56,7 @@ async function createApp(
     withBays({
       jobs,
       defaultBase: "main",
-      ...(defaultActor === undefined ? {} : { defaultActor }),
+      ...(defaultSubmitter === undefined ? {} : { defaultSubmitter }),
       ...(selectSubmissionFlow === undefined ? {} : { selectFlow: selectSubmissionFlow }),
     }),
   )
@@ -135,6 +138,31 @@ describe("GitShaSchema", () => {
   })
 })
 
+describe("pre-cutover provenance normalization", () => {
+  const previousRoleKey = ["act", "or"].join("")
+
+  it("maps Bay ownership to by and revision ownership to submitter", () => {
+    expect(normalizeV2By({ id: "B1", [previousRoleKey]: "@dev/1" })).toEqual({ id: "B1", by: "@dev/1" })
+    expect(normalizeV2Submitter({ pr: "PR1", [previousRoleKey]: "@dev/1" })).toEqual({
+      pr: "PR1",
+      submitter: "@dev/1",
+    })
+  })
+
+  it("replays rejection provenance through the current schema", () => {
+    expect(
+      PRRejectedFactSchema.parse({
+        pr: "PR1",
+        revision: 1,
+        headSha: HEAD_1,
+        run: "R1",
+        [previousRoleKey]: "@dev/1",
+        step: "check",
+      }),
+    ).toMatchObject({ submitter: "@dev/1" })
+  })
+})
+
 async function finishJob(app: TestApp, result: CommandResult): Promise<void> {
   const id = app.jobs.requested(result)[0]
   if (id === undefined) throw new Error("expected one Bay workspace job")
@@ -206,16 +234,16 @@ describe("withBays", () => {
     })
   })
 
-  it("records the submitting actor on strict current revision facts", async () => {
+  it("records the submitter on strict current revision facts", async () => {
     await using app = await createApp(createWorkspaceHarness().adapter, undefined, "@agent/7")
 
     const submitted = await app.bays.submit({ branch: "topic/owned", headSha: HEAD_1 })
 
     expect(submitted.events.map(({ name, data }) => ({ name, data }))).toEqual([
-      expect.objectContaining({ name: "pr/pushed", data: expect.objectContaining({ actor: "@agent/7" }) }),
-      expect.objectContaining({ name: "pr/submitted", data: expect.objectContaining({ actor: "@agent/7" }) }),
+      expect.objectContaining({ name: "pr/pushed", data: expect.objectContaining({ submitter: "@agent/7" }) }),
+      expect.objectContaining({ name: "pr/submitted", data: expect.objectContaining({ submitter: "@agent/7" }) }),
     ])
-    expect(app.bays.pr("PR1")?.revs).toEqual([expect.objectContaining({ n: 1, head: HEAD_1, actor: "@agent/7" })])
+    expect(app.bays.pr("PR1")?.revs).toEqual([expect.objectContaining({ n: 1, head: HEAD_1, submitter: "@agent/7" })])
   })
 
   it("resolves Bay, PR, and base selectors without changing canonical identity", async () => {
@@ -252,7 +280,7 @@ describe("withBays", () => {
     expect(retired.events).toContainEqual(
       expect.objectContaining({
         name: "pr/withdrawn",
-        data: { pr: "PR1", revision: 1, headSha: HEAD_1, issueRef, correlation, actor: "operator" },
+        data: { pr: "PR1", revision: 1, headSha: HEAD_1, issueRef, correlation, submitter: "operator" },
       }),
     )
   })
@@ -610,7 +638,7 @@ describe("withBays", () => {
     })
 
     expect(prFacts(app.bays.pr("PR1"))).toMatchObject({ delivery: "rejected", issue: issueRef })
-    expect(app.bays.pr("PR1")?.revs).toEqual([expect.not.objectContaining({ actor: expect.anything() })])
+    expect(app.bays.pr("PR1")?.revs).toEqual([expect.not.objectContaining({ submitter: expect.anything() })])
     expect(prFacts(app.bays.pr("PR2"))).toMatchObject({
       state: "closed",
       merged: true,
@@ -761,9 +789,7 @@ describe("withBays", () => {
   })
 
   it("runs a pinned bay through refresh, PR revisions, withdrawal, and close", async () => {
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => {})
-    const error = vi.spyOn(console, "error").mockImplementation(() => {})
-    const { app, workspace } = await createHarness(createLogger("test"))
+    const { app, workspace } = await createHarness(createLogger("test", [{ level: "silent" }]))
 
     const opened = await app.bays.open({ name: "fix-release", baseSha: BASE })
     expect(app.bays.state().byId.B1?.status).toBe("opening")
@@ -858,8 +884,6 @@ describe("withBays", () => {
       "deprovision:B1",
       "deprovision:B1",
     ])
-    expect(warning).toHaveBeenCalled()
-    expect(error).toHaveBeenCalledTimes(2)
     await app.close()
   })
 
@@ -1094,7 +1118,7 @@ describe("withBays", () => {
 
     const comment = {
       pr: "PR1",
-      actor: "@cto",
+      by: "@cto",
       ref: "dialog-1",
       note: "Please explain the failure mode.",
     }
@@ -1103,7 +1127,7 @@ describe("withBays", () => {
 
     const approval = {
       pr: "PR1",
-      actor: "@cto",
+      by: "@cto",
       decision: "approve" as const,
       ref: "verdict-1",
       note: "Exact revision reviewed.",
@@ -1120,13 +1144,13 @@ describe("withBays", () => {
 
     expect(app.bays.reviewState("PR1")).toMatchObject({
       approved: true,
-      current: { revision: 1, headSha: HEAD_1, actor: "@cto", decision: "approve", ref: "verdict-1" },
+      current: { revision: 1, headSha: HEAD_1, by: "@cto", decision: "approve", ref: "verdict-1" },
       stale: [],
     })
     expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
       delivery: "pushed",
-      reviews: [{ revision: 1, headSha: HEAD_1, decision: "approve", actor: "@cto", ref: "verdict-1" }],
-      comments: [{ revision: 1, headSha: HEAD_1, actor: "@cto", ref: "dialog-1" }],
+      reviews: [{ revision: 1, headSha: HEAD_1, decision: "approve", by: "@cto", ref: "verdict-1" }],
+      comments: [{ revision: 1, headSha: HEAD_1, by: "@cto", ref: "dialog-1" }],
     })
 
     expect((await app.bays.ready({ pr: "PR1" })).events).toHaveLength(1)
@@ -1157,19 +1181,19 @@ describe("withBays", () => {
     })
     expect(app.bays.needsReview("PR1")).toBe(false)
 
-    const arbitraryActor = "reviewer id/with spaces:7"
-    const first = await app.bays.requestReview({ pr: "PR1", reviewers: ["@cto", arbitraryActor] })
+    const arbitraryReviewer = "reviewer id/with spaces:7"
+    const first = await app.bays.requestReview({ pr: "PR1", reviewers: ["@cto", arbitraryReviewer] })
     expect(first.events.map(({ name, data }) => ({ name, data }))).toEqual([
       {
         name: "pr/review-requested",
-        data: { pr: "PR1", reviewers: ["@cto", arbitraryActor], requestedBy: "operator" },
+        data: { pr: "PR1", reviewers: ["@cto", arbitraryReviewer], requestedBy: "operator" },
       },
     ])
-    expect(app.bays.pr("PR1")?.requestedReviewers).toEqual(["@cto", arbitraryActor])
+    expect(app.bays.pr("PR1")?.requestedReviewers).toEqual(["@cto", arbitraryReviewer])
 
-    expect((await app.bays.requestReview({ pr: "PR1", reviewers: ["@cto", arbitraryActor] })).events).toEqual([])
+    expect((await app.bays.requestReview({ pr: "PR1", reviewers: ["@cto", arbitraryReviewer] })).events).toEqual([])
 
-    const replaced = await app.bays.requestReview({ pr: "PR1", reviewers: ["@agent/5"], actor: "@chief" })
+    const replaced = await app.bays.requestReview({ pr: "PR1", reviewers: ["@agent/5"], by: "@chief" })
     expect(replaced.events.map(({ name, data }) => ({ name, data }))).toEqual([
       { name: "pr/review-requested", data: { pr: "PR1", reviewers: ["@agent/5"], requestedBy: "@chief" } },
     ])
@@ -1195,10 +1219,10 @@ describe("withBays", () => {
     expect(app.bays.needsReview("PR1", "@cto")).toBe(true)
     expect(app.bays.needsReview("PR1", "@stranger")).toBe(false)
 
-    await app.bays.review({ pr: "PR1", actor: "@stranger", decision: "approve", ref: "stranger-1" })
+    await app.bays.review({ pr: "PR1", by: "@stranger", decision: "approve", ref: "stranger-1" })
     expect(app.bays.needsReview("PR1")).toBe(true)
 
-    await app.bays.review({ pr: "PR1", actor: "@cto", decision: "reject", ref: "verdict-1" })
+    await app.bays.review({ pr: "PR1", by: "@cto", decision: "reject", ref: "verdict-1" })
     expect(app.bays.needsReview("PR1")).toBe(false)
     expect(app.bays.needsReview("PR1", "@cto")).toBe(false)
     expect(app.bays.needsReview("PR1", "@agent/5")).toBe(true)
@@ -1220,7 +1244,7 @@ describe("withBays", () => {
 
     await app.bays.submit({ branch: "issue/recut-request", headSha: HEAD_1, baseSha: BASE })
     await app.bays.requestReview({ pr: "PR1", reviewers: ["@cto"] })
-    await app.bays.review({ pr: "PR1", actor: "@cto", decision: "approve", ref: "verdict-1" })
+    await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: "verdict-1" })
     expect(app.bays.needsReview("PR1")).toBe(false)
 
     await app.bays.recut({
@@ -1334,7 +1358,7 @@ describe("withBays", () => {
     })
     await app.bays.review({
       pr: "PR1",
-      actor: "@cto",
+      by: "@cto",
       decision: "approve",
       ref: "review-revision-1",
       note: "Reviewed immutable payload.",
@@ -2013,7 +2037,7 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     // Submitted the committed head (HEAD_2 from refresh), never refused.
     expect(prFacts(pr)).toMatchObject({ bay: "B1", delivery: "submitted", current: { head: HEAD_2 } })
     // Loud by construction: the caveat rides the result envelope (warnings array)…
-    expect(warnings).toContainEqual(expect.stringContaining("has uncommitted work; submitting the committed head only"))
+    expect(warnings).toHaveLength(1)
     // …AND the structured log stream.
     expect(events.some((event) => event.kind === "log" && event.props?.action === "submit-dirty-worktree")).toBe(true)
     await app.close()

@@ -454,8 +454,8 @@ describe("resident runner settlement summary", () => {
     expect(formatResidentLogLine(composeMixed, { color: false })).toBeUndefined()
   })
 
-  it("suppresses low-level journal chatter (INFO/DEBUG) — it stays in the JSONL sink", () => {
-    const lock = log("yrd:journal:lock", "info", "lock succeeded", {
+  it("suppresses low-level storage chatter (INFO/DEBUG) — it stays in the JSONL sink", () => {
+    const lock = log("yrd:storage:lock", "info", "lock succeeded", {
       ...RUNNER_SCOPE,
       path: "/x/writer.lock",
       outcome: "succeeded",
@@ -467,7 +467,7 @@ describe("resident runner settlement summary", () => {
 
 describe("resident runner notices", () => {
   it("keeps non-lifecycle DEBUG bookkeeping in JSONL only", () => {
-    const processExit = log("yrd:process", "debug", "process exited", {
+    const processExit = log("yrd:process", "debug", "Command finished.", {
       argv: ["git", "status"],
       stdout: "large command output",
       exitCode: 0,
@@ -476,12 +476,12 @@ describe("resident runner notices", () => {
   })
 
   it("surfaces non-lifecycle DEBUG when the operator explicitly requested debug", () => {
-    const processExit = log("yrd:process", "debug", "process exited", {
+    const processExit = log("yrd:process", "debug", "Command finished.", {
       argv: ["git", "status"],
       exitCode: 0,
     })
     const plain = formatResidentLogLine(processExit, { color: false, includeDebug: true })
-    expect(plain).toContain("DEBUG yrd:process process exited")
+    expect(plain).toContain("DEBUG yrd:process Command finished.")
     expect(plain).toContain('"exitCode":0')
   })
 

@@ -4,12 +4,7 @@
  * @consumer @yrd/cli
  */
 import { describe, expect, it } from "vitest"
-import {
-  classifyBayStatus,
-  formatBayStatusHuman,
-  parseOwnerPid,
-  type BayStatusFacts,
-} from "../src/bay-status.ts"
+import { classifyBayStatus, formatBayStatusHuman, parseOwnerPid, type BayStatusFacts } from "../src/bay-status.ts"
 
 const base: BayStatusFacts = {
   bayId: "B1",
@@ -24,7 +19,7 @@ const base: BayStatusFacts = {
 }
 
 describe("parseOwnerPid", () => {
-  it("reads trailing :PID from name or actor", () => {
+  it("reads trailing :PID from name or BY", () => {
     expect(parseOwnerPid("bay:12345")).toBe(12345)
     expect(parseOwnerPid(undefined, "@agent/3:9988")).toBe(9988)
     expect(parseOwnerPid("plain", "@agent/3")).toBeUndefined()
