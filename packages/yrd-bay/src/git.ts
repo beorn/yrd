@@ -409,12 +409,37 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           )
         }
         const status = await git.run(input.path, ["status", "--porcelain", "--ignore-submodules=none"])
-        const wip = status.stdout.trim() !== ""
+        const dirtyStatus = status.stdout.trim()
+        const wip = dirtyStatus !== ""
+        const beforeHead = await git.commit(input.path, "HEAD")
+        let headSha = beforeHead
         if (wip) {
           await git.run(input.path, ["add", "-A"])
-          await git.run(input.path, ["commit", "-m", `wip: ${input.claim}`])
+          const committed = await git.run(input.path, ["commit", "-m", `wip: ${input.claim}`], true)
+          if (committed.code !== 0) {
+            const remaining = (
+              await git.run(input.path, ["status", "--porcelain", "--ignore-submodules=none"])
+            ).stdout.trim()
+            throw new Error(
+              `workspace '${input.path}' reported uncommitted work:\n${dirtyStatus}\n` +
+                `but the checkpoint commit failed: ${committed.stderr.trim() || committed.stdout.trim() || `exit ${String(committed.code)}`}` +
+                (remaining === "" ? "" : `\nremaining uncommitted work:\n${remaining}`),
+            )
+          }
+          headSha = await git.commit(input.path, "HEAD")
+          if (headSha === beforeHead) {
+            const remaining = (
+              await git.run(input.path, ["status", "--porcelain", "--ignore-submodules=none"])
+            ).stdout.trim()
+            throw new Error(
+              `workspace '${input.path}' reported uncommitted work:\n${dirtyStatus}\n` +
+                `but the checkpoint commit reported success and did not advance HEAD '${beforeHead}'; ` +
+                (remaining === ""
+                  ? "the dirty content disappeared from the index/worktree during the commit"
+                  : `the work remains uncommitted:\n${remaining}`),
+            )
+          }
         }
-        const headSha = await git.commit(input.path, "HEAD")
         const trackingRef = `refs/remotes/origin/${input.branch}`
         const [tracking, remoteHead] = await Promise.all([
           git.run(input.path, ["rev-parse", "--verify", `${trackingRef}^{commit}`], true),

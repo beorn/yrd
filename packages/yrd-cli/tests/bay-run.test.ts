@@ -59,6 +59,7 @@ describe("yrd bay run", { timeout: 30_000 }, () => {
 
   it("commits and pushes root work as `wip:` before synchronously closing", async () => {
     const { repo } = await repository()
+    const originalHead = await git(repo, "rev-parse", "HEAD")
     const run = output(repo)
 
     expect(
@@ -66,9 +67,45 @@ describe("yrd bay run", { timeout: 30_000 }, () => {
       run.stderr(),
     ).toBe(0)
 
+    const archivedHead = await git(repo, "rev-parse", `refs/remotes/origin/${BRANCH}`)
+    expect(archivedHead).not.toBe(originalHead)
+    expect(await git(repo, "rev-parse", "refs/yrd/closed/B1")).toBe(archivedHead)
     expect(await git(repo, "log", `refs/remotes/origin/${BRANCH}`, "-1", "--format=%s")).toMatch(/^wip:/u)
     expect(await git(repo, "show", `refs/remotes/origin/${BRANCH}:scratch.txt`)).toBe("payload")
+    expect(await git(repo, "show", "refs/yrd/closed/B1:scratch.txt")).toBe("payload")
     expect(await git(repo, "worktree", "list", "--porcelain")).not.toContain(`${repo}/.bays/`)
+  })
+
+  it("refuses to archive an unchanged head when the dirty checkpoint commit no-ops", async () => {
+    const { repo } = await repository()
+    const originalHead = await git(repo, "rev-parse", "HEAD")
+    const postCommit = join(repo, ".git", "hooks", "post-commit")
+    await writeFile(
+      postCommit,
+      ["#!/bin/sh", 'case "$(git log -1 --format=%s)" in', "  wip:*) git reset --hard -q HEAD^ ;;", "esac", ""].join(
+        "\n",
+      ),
+    )
+    await chmod(postCommit, 0o755)
+    const run = output(repo)
+
+    expect(
+      await yrd(repo, run.io, "bay", "run", CLAIM, "--", "sh", "-c", "printf payload > scratch.txt"),
+      run.stderr(),
+    ).toBe(1)
+    expect(run.stderr()).toContain("scratch.txt")
+    expect(run.stderr()).toContain("did not advance HEAD")
+    expect(await git(repo, "rev-parse", `refs/remotes/origin/${BRANCH}`)).toBe(originalHead)
+    await expect(git(repo, "show", `refs/remotes/origin/${BRANCH}:scratch.txt`)).rejects.toThrow()
+    await expect(git(repo, "rev-parse", "--verify", "refs/yrd/closed/B1")).rejects.toThrow()
+    const bays = output(repo)
+    expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
+    const projection = JSON.parse(bays.stdout()) as {
+      bays: readonly { archive?: unknown; issue?: string; status: string }[]
+    }
+    const failed = projection.bays.find((bay) => bay.issue === CLAIM)
+    expect(failed).toMatchObject({ issue: CLAIM, status: "active" })
+    expect(failed?.archive).toBeUndefined()
   })
 
   it("reopens a closed claim and updates the same draft on a later run", async () => {
