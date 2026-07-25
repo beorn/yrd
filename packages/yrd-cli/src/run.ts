@@ -98,6 +98,13 @@ import {
 import { submittedPrPositions } from "./queue-position.ts"
 import { preflightRecut, prunePrs, withdrawPrs } from "./pr-withdraw.ts"
 import { resolveSubmitSelectors } from "./submit-selection.ts"
+import {
+  classifyBayStatus,
+  formatBayStatusHuman,
+  parseOwnerPid,
+  type BayStatusFacts,
+  type BayStatusReport,
+} from "./bay-status.ts"
 import { diagnostic, printHuman, printResult, printResultWithWarnings } from "./output.tsx"
 import {
   createSubmoduleBranchResolver,
@@ -1654,6 +1661,142 @@ async function closeBays(
     { command: "bay.close", bays: closed },
     createElement(BayStatusView, { bays: closed }),
   )
+}
+
+/** Gather live facts for one bay; classification stays pure in bay-status.ts (22290). */
+function gatherBayStatusFacts(app: YrdCliApp, bay: Bay, repoRoot: string): BayStatusFacts {
+  const ownerPid = parseOwnerPid(bay.name, bay.actor)
+  let ownerAlive: boolean | undefined
+  if (ownerPid !== undefined) {
+    try {
+      process.kill(ownerPid, 0)
+      ownerAlive = true
+    } catch (error) {
+      const code =
+        typeof error === "object" && error !== null && "code" in error
+          ? String((error as { code?: unknown }).code)
+          : undefined
+      ownerAlive = code === "ESRCH" ? false : undefined
+    }
+  }
+
+  const path = bay.path
+  let worktreeDirty: boolean | undefined
+  let worktreeMissing: boolean | undefined
+  let tipLanded: boolean | undefined
+  let tipLandedUnknown: boolean | undefined
+  let aheadOfOrigin: number | undefined
+  let stashAttributed = 0
+  let stashUnknown: boolean | undefined
+
+  if (path === undefined) {
+    worktreeMissing = undefined
+  } else {
+    try {
+      const status = gitSync(path, ["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"])
+      worktreeDirty = status.trim() !== ""
+      worktreeMissing = false
+    } catch {
+      // path missing or not a git dir
+      try {
+        gitSync(path, ["rev-parse", "--is-inside-work-tree"])
+        worktreeDirty = undefined
+        worktreeMissing = false
+      } catch {
+        worktreeMissing = true
+      }
+    }
+
+    if (worktreeMissing !== true) {
+      try {
+        const head = gitSync(path, ["rev-parse", "HEAD"]).trim()
+        // Prefer superproject origin/main when bay is a linked worktree of the repo.
+        const originMain = gitSync(repoRoot, ["rev-parse", "origin/main"]).trim()
+        try {
+          gitSync(path, ["merge-base", "--is-ancestor", head, originMain])
+          tipLanded = true
+          aheadOfOrigin = 0
+        } catch {
+          tipLanded = false
+          try {
+            const counts = gitSync(path, ["rev-list", "--left-right", "--count", `${originMain}...${head}`])
+              .trim()
+              .split(/\s+/u)
+              .map(Number)
+            const ahead = counts[1]
+            if (Number.isSafeInteger(ahead)) aheadOfOrigin = ahead
+          } catch {
+            tipLandedUnknown = true
+          }
+        }
+      } catch {
+        tipLandedUnknown = true
+      }
+
+      try {
+        const stash = gitSync(path, ["stash", "list"])
+        // Best-effort: count stashes whose message mentions bay id/branch/name.
+        const tokens = [bay.id, bay.branch, bay.name].filter(Boolean)
+        stashAttributed = stash
+          .split("\n")
+          .filter((line) => line.trim() !== "" && tokens.some((token) => line.includes(token))).length
+      } catch {
+        stashUnknown = true
+      }
+    }
+  }
+
+  const openPrIds = app.bays
+    .prs()
+    .filter((pr) => (pr.bay === bay.id || pr.branch === bay.branch) && isLivePR(pr))
+    .map((pr) => pr.id)
+
+  return {
+    bayId: bay.id,
+    name: bay.name,
+    branch: bay.branch,
+    ...(path === undefined ? {} : { path }),
+    ...(ownerPid === undefined ? {} : { ownerPid }),
+    ...(ownerAlive === undefined ? {} : { ownerAlive }),
+    ...(worktreeDirty === undefined ? {} : { worktreeDirty }),
+    ...(worktreeMissing === undefined ? {} : { worktreeMissing }),
+    ...(tipLanded === undefined ? {} : { tipLanded }),
+    ...(tipLandedUnknown === undefined ? {} : { tipLandedUnknown }),
+    ...(aheadOfOrigin === undefined ? {} : { aheadOfOrigin }),
+    stashAttributed,
+    ...(stashUnknown === undefined ? {} : { stashUnknown }),
+    openPrIds,
+  }
+}
+
+async function bayStatusCommand(
+  app: YrdCliApp,
+  selectors: readonly string[],
+  options: { json?: boolean },
+  io: YrdCliIO,
+): Promise<number> {
+  const cwd = io.cwd ?? process.cwd()
+  const bays =
+    selectors.length === 0
+      ? app.bays.list().filter((bay) => bay.status !== "closed")
+      : selectedBays(stateOf(app).bays, selectors, cwd, "status")
+  if (bays.length === 0) usage("bay status requires at least one open bay (or a selector)")
+
+  const reports: BayStatusReport[] = bays.map((bay) => classifyBayStatus(gatherBayStatusFacts(app, bay, cwd)))
+  // Aggregate exit: any BLOCK → 1; else any UNKNOWN → 2; else 0.
+  let exit: 0 | 1 | 2 = 0
+  for (const report of reports) {
+    if (report.exit === 1) exit = 1
+    else if (report.exit === 2 && exit === 0) exit = 2
+  }
+
+  if (jsonEnabled(options)) {
+    await printResult(io, true, { command: "bay.status", wrapper: "git", exit, reports }, null)
+  } else {
+    const text = reports.map((report) => formatBayStatusHuman(report)).join("\n\n")
+    await printHuman(io, text)
+  }
+  return exit
 }
 
 async function closePrs(
@@ -5235,6 +5378,11 @@ function buildProgram(
     .option("--withdraw", "withdraw a live PR before closing")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => closeBays(installed(), selectors, options, io))
+  bay
+    .command("status [selector...]")
+    .description("safety oracle: is this bay safe to remove? (exit 0=safe 1=not-safe 2=unknown)")
+    .option("--json", "emit stable JSON")
+    .action(async (selectors, options) => setExit(await bayStatusCommand(installed(), selectors, options, io)))
 
   if (projection === "bay") {
     addExamples(program, name, projection)
