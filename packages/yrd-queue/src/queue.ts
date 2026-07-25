@@ -1234,9 +1234,7 @@ function createQueue<Shape extends PRShape>(
     const journaled = Object.keys(runtime().queues.candidates)
       .filter((id) => /^C\d+$/u.test(id))
       .map((id) => Number(id.slice(1)))
-    const reserved = [...reservedCandidateIds]
-      .filter((id) => /^C\d+$/u.test(id))
-      .map((id) => Number(id.slice(1)))
+    const reserved = [...reservedCandidateIds].filter((id) => /^C\d+$/u.test(id)).map((id) => Number(id.slice(1)))
     return `C${Math.max(0, ...journaled, ...reserved) + 1}`
   }
   const CANDIDATE_REF_COLLISION_LIMIT = 32
@@ -1310,9 +1308,7 @@ function createQueue<Shape extends PRShape>(
       return prepared
     }
     if (lastRefused !== undefined) throw lastRefused
-    throw new Error(
-      `yrd: Candidate id allocation exhausted ${CANDIDATE_REF_COLLISION_LIMIT} collision identities`,
-    )
+    throw new Error(`yrd: Candidate id allocation exhausted ${CANDIDATE_REF_COLLISION_LIMIT} collision identities`)
   }
 
   const candidateFacts = (
@@ -1677,7 +1673,11 @@ function createQueue<Shape extends PRShape>(
                 facts = await candidateFacts(candidate, baseSha)
               } catch (error) {
                 const fact = failureFact(error)
-                if (!selectorless || fact === undefined || (fact.kind !== "refusal" && fact.kind !== "infrastructure")) {
+                if (
+                  !selectorless ||
+                  fact === undefined ||
+                  (fact.kind !== "refusal" && fact.kind !== "infrastructure")
+                ) {
                   throw error
                 }
                 log.warn?.("queue compose skipped a Candidate that could not be prepared", {
