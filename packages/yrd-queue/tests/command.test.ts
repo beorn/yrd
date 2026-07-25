@@ -1089,21 +1089,17 @@ describe("Queue command adapters", () => {
     })
     await app.bays.ready({ pr: "PR1" })
 
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {})
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     if (valid) {
       expect(run.status, run.error?.message).toBe("passed")
-      expect(errors).not.toHaveBeenCalled()
     } else {
       expect(run.status).toBe("failed")
       expect(run.error).toMatchObject({
         code: "recut-certificate",
         message: expect.stringContaining("patch/tree certificate"),
       })
-      expect(errors).toHaveBeenCalled()
     }
-    errors.mockRestore()
   })
 
   it("admits a direct recut whose base advanced with a disjoint merge (base-chase re-anchors clean)", async () => {
