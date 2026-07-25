@@ -43,11 +43,13 @@ afterEach(async () => {
 })
 
 describe("yrd bay open/in/do", { timeout: 30_000 }, () => {
-  it("exposes config only on open, command-only guest attach, and the two root sugars", async () => {
+  it("exposes config only on open and its owner aliases, never on guest attach", async () => {
     const { repo } = await repository()
     for (const args of [
       ["bay", "open", "--help"],
       ["sh", "--help"],
+      ["run", "--help"],
+      ["ag", "--help"],
     ] as const) {
       const help = output(repo)
       expect(await yrd(repo, help.io, ...args), `${args.join(" ")}\n${help.stderr()}`).toBe(0)
@@ -69,15 +71,6 @@ describe("yrd bay open/in/do", { timeout: 30_000 }, () => {
     const doHelp = output(repo)
     expect(await yrd(repo, doHelp.io, "do", "--help"), doHelp.stderr()).toBe(0)
     expect(doHelp.stdout()).toContain("<issue-or-pr>")
-
-    for (const retired of [
-      ["run", "--", "true"],
-      ["ag", "--", "true"],
-    ] as const) {
-      const result = output(repo)
-      expect(await yrd(repo, result.io, ...retired)).toBe(2)
-      expect(result.stderr()).toContain(`unknown command '${retired[0]}'`)
-    }
   })
 
   it("resolves every open-table row without sigil dispatch or implicit PR intake", async () => {
@@ -658,7 +651,7 @@ printf '%s' "$*" > agent.prompt
     })
   })
 
-  it("keeps sh as owner sugar and gives `in ag` the guest-only primer", async () => {
+  it("keeps sh/run/ag as owner aliases and gives `in ag` the guest-only primer", async () => {
     return withoutRuntimeName(async () => {
       const { repo } = await repository()
       const tools = join(repo, "..", "alias-tools")
@@ -717,6 +710,17 @@ printf '%s' '${label}' > '${label}-ran.txt'
         const [ownerExit, ownerStderr] = await Promise.all([owner.exited, new Response(owner.stderr).text()])
         expect(ownerExit, ownerStderr).toBe(0)
 
+        const runOwner = output(repo)
+        expect(
+          await yrd(repo, runOwner.io, "run", "--bay", "run-owner", "--", shell, "run-arg"),
+          runOwner.stderr(),
+        ).toBe(0)
+        expect(runOwner.stdout()).toContain("bay run-owner → new task/run-owner, no issue linked, name run-owner")
+
+        const agOwner = output(repo)
+        expect(await yrd(repo, agOwner.io, "ag", "--bay", "ag-owner"), agOwner.stderr()).toBe(0)
+        expect(agOwner.stdout()).toContain("bay ag-owner → new task/ag-owner, no issue linked, name ag-owner")
+
         const lines = (await readFile(log, "utf8")).trim().split("\n")
         expect(lines[0]).toMatch(/^sh shell-owner \d+\s*$/u)
         expect(lines[1]).toMatch(/^sh shared:(\d+) \1\s*$/u)
@@ -724,6 +728,8 @@ printf '%s' '${label}' > '${label}-ran.txt'
         expect(lines[2]).toContain("You are a guest in Bay shared")
         expect(lines[2]).toContain("no configuration or lifecycle authority")
         expect(lines[2]).toContain("owner close captures")
+        expect(lines[3]).toMatch(/^sh run-owner \d+ run-arg$/u)
+        expect(lines[4]).toMatch(/^ag ag-owner \d+\s*$/u)
         expect(shellGuest.stdout()).toContain(
           `bay shared → attached task/shared, no issue linked, name ${lines[1]?.split(" ")[1]}`,
         )
