@@ -1551,25 +1551,41 @@ function createQueue<Shape extends PRShape>(
               })
             : []
           for (const gap of authorityGaps) {
-            if (gap.reason === "consumed") {
-              const ejected = await actions.run({
-                prs: [gap.pr],
-                ...(args.steps === undefined ? {} : { steps: args.steps }),
-              })
-              if (!ejected.events.some((applied) => applied.name === "pr/needs-author")) {
-                throw new Error(`yrd: consumed authority for PR '${gap.pr}' produced no needs-author receipt`)
+            try {
+              if (gap.reason === "consumed") {
+                const ejected = await actions.run({
+                  prs: [gap.pr],
+                  ...(args.steps === undefined ? {} : { steps: args.steps }),
+                })
+                if (!ejected.events.some((applied) => applied.name === "pr/needs-author")) {
+                  throw new Error(`yrd: consumed authority for PR '${gap.pr}' produced no needs-author receipt`)
+                }
               }
+              log.warn?.("queue compose ejected a candidate without runnable authority", {
+                action: "compose-candidate-skip",
+                pr: gap.pr,
+                code: `queue-${gap.kind}-authority-${gap.reason}`,
+                reason:
+                  gap.reason === "consumed"
+                    ? `${gap.kind} authority was consumed by queue run '${gap.consumedBy}'`
+                    : `no ${gap.kind} authority fact exists`,
+                remedy: `yrd pr recut ${gap.pr} --preflight --queue`,
+              })
+            } catch (error) {
+              // 22306 class: a single PR's authority/eject refusal must not abort the
+              // selectorless drain (same boundary as the per-candidate wrap below).
+              const fact = failureFact(error)
+              if (!selectorless || fact === undefined || (fact.kind !== "refusal" && fact.kind !== "infrastructure")) {
+                throw error
+              }
+              log.warn?.("queue compose skipped an authority-gap PR lost to a losable refusal", {
+                action: "compose-candidate-skip",
+                pr: gap.pr,
+                code: fact.code,
+                kind: fact.kind,
+                reason: fact.message,
+              })
             }
-            log.warn?.("queue compose ejected a candidate without runnable authority", {
-              action: "compose-candidate-skip",
-              pr: gap.pr,
-              code: `queue-${gap.kind}-authority-${gap.reason}`,
-              reason:
-                gap.reason === "consumed"
-                  ? `${gap.kind} authority was consumed by queue run '${gap.consumedBy}'`
-                  : `no ${gap.kind} authority fact exists`,
-              remedy: `yrd pr recut ${gap.pr} --preflight --queue`,
-            })
           }
           const authorityGapIds = new Set(authorityGaps.map((gap) => gap.pr))
           snapshot = runtime()
@@ -1577,13 +1593,32 @@ function createQueue<Shape extends PRShape>(
             ? []
             : requested.filter((pr) => !authorityGapIds.has(pr.id) && checksRequested(pr))
           const before = new Map(checked.map((pr) => [pr.id, checkEligibility(snapshot, pr, steps).status]))
-          await refreshCheckIdentities(checked, resolveCycleBase)
-          const admissions = await drainAdmissions(
-            checked.map((pr) => pr.id),
-            runOptions,
-            resolveCycleBase,
-            selection,
-          )
+          // Isolate admission-phase work the same way as merge-candidate work: one
+          // PR's preparation/admit refusal (authored-gitlink, recut-certificate, …)
+          // must not kill the whole selectorless pass (22306 architectural gap).
+          let admissions: Run[] = []
+          try {
+            await refreshCheckIdentities(checked, resolveCycleBase)
+            admissions = await drainAdmissions(
+              checked.map((pr) => pr.id),
+              runOptions,
+              resolveCycleBase,
+              selection,
+            )
+          } catch (error) {
+            const fact = failureFact(error)
+            if (!selectorless || fact === undefined || (fact.kind !== "refusal" && fact.kind !== "infrastructure")) {
+              throw error
+            }
+            log.warn?.("queue compose skipped admission-phase work lost to a losable refusal", {
+              action: "compose-candidate-skip",
+              code: fact.code,
+              kind: fact.kind,
+              reason: fact.message,
+              prs: checked.map((pr) => pr.id),
+            })
+            admissions = []
+          }
           snapshot = runtime()
           const unsettled = checked.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "passed")
           const pending = unsettled.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "failed")

@@ -4544,13 +4544,38 @@ function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefine
       props: { action: "resident-withdraw-skip", pr: error.prId, status: error.status, reason: error.message },
     }
   }
-  // Belt-and-suspenders for the pre-PrCheckabilityConflict raiseFailure shape
-  // (`pr-not-admissible`) if any call site still emits it (22306 #3).
+  // 22306 architectural belt: any remaining PR-scoped refusal that escaped the
+  // per-candidate wrap is still a cycle skip, not a resident death. Covers
+  // authored-gitlink / recut-certificate / pr-not-admissible and the rest of
+  // the needs-author + recut-lineage composition buckets if they bubble out.
   const fact = failureFact(error)
-  if (fact?.code === "pr-not-admissible") {
-    return {
-      message: "resident runner skipped a cycle — a PR is no longer admissible (already terminal)",
-      props: { action: "resident-admissible-skip", code: fact.code, reason: fact.message },
+  if (fact !== undefined && (fact.kind === "refusal" || fact.kind === "infrastructure")) {
+    const prScoped =
+      fact.code === "pr-not-admissible" ||
+      fact.code === "pr-not-ready" ||
+      fact.code === "pr-not-found" ||
+      fact.code === "command-refused" ||
+      fact.code === "candidate-ref-refused" ||
+      fact.code === "recut-certificate" ||
+      fact.code === "authored-gitlink" ||
+      fact.code === "composition-invalid" ||
+      fact.code === "wrapper-mismatch" ||
+      fact.code === "source-missing" ||
+      fact.code === "source-lineage" ||
+      fact.code === "payload-certificate" ||
+      fact.code === "payload-identity" ||
+      fact.code === "payload-mismatch" ||
+      fact.code === "payload-overlap" ||
+      fact.code === "gitlink-inspection" ||
+      fact.code === "refused-path" ||
+      fact.code === "refused-path-inspection" ||
+      fact.code === "restack-conflict" ||
+      fact.code === "restack-failed"
+    if (prScoped) {
+      return {
+        message: "resident runner skipped a cycle lost to a per-PR refusal",
+        props: { action: "resident-pr-refusal-skip", code: fact.code, reason: fact.message },
+      }
     }
   }
   return undefined
