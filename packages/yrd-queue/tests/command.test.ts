@@ -169,6 +169,78 @@ async function hookedSubmoduleRepository(options: {
   return { repo, remote, baseSha, featureSha, moduleSha }
 }
 
+async function componentMainLandingRepository(): Promise<{
+  repo: string
+  component: string
+  rootRemote: string
+  componentRemote: string
+  rootBaseSha: string
+  componentBaseSha: string
+  pinSha: string
+  successorSha: string
+  featureSha: string
+}> {
+  const { repo } = await repository()
+  const component = join(repo, "..", "component")
+  const componentRemote = join(repo, "..", "component-origin.git")
+  await Bun.$`git init -q -b main ${component}`
+  await git(component, ["config", "user.name", "Yrd Test"])
+  await git(component, ["config", "user.email", "yrd@example.invalid"])
+  await writeFile(join(component, "version.txt"), "base\n")
+  await git(component, ["add", "version.txt"])
+  await git(component, ["commit", "-qm", "base"])
+  const componentBaseSha = await git(component, ["rev-parse", "HEAD"])
+  await Bun.$`git init -q --bare ${componentRemote}`
+  await git(component, ["remote", "add", "origin", componentRemote])
+  await git(component, ["push", "-q", "origin", "main"])
+
+  await git(repo, ["config", "protocol.file.allow", "always"])
+  await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", componentRemote, "dep"])
+  await git(repo, ["commit", "-qam", "add dependency"])
+  const rootBaseSha = await git(repo, ["rev-parse", "HEAD"])
+  const rootRemote = join(repo, "..", "root-origin.git")
+  await Bun.$`git init -q --bare ${rootRemote}`
+  await git(repo, ["remote", "add", "origin", rootRemote])
+  await git(repo, ["push", "-q", "origin", "main"])
+
+  await git(component, ["switch", "-qc", "task/component"])
+  await writeFile(join(component, "version.txt"), "pin\n")
+  await git(component, ["commit", "-qam", "pin"])
+  const pinSha = await git(component, ["rev-parse", "HEAD"])
+  await git(component, ["push", "-q", "origin", "task/component"])
+
+  await git(repo, ["switch", "-qc", "issue/feature"])
+  await git(join(repo, "dep"), ["fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+  await git(join(repo, "dep"), ["checkout", "-q", pinSha])
+  await git(repo, ["add", "dep"])
+  await git(repo, ["commit", "-qm", "pin dependency"])
+  const featureSha = await git(repo, ["rev-parse", "HEAD"])
+  await git(repo, ["push", "-q", "origin", "issue/feature"])
+  await git(repo, ["switch", "-q", "main"])
+  await git(repo, ["-c", "protocol.file.allow=always", "submodule", "update", "-q"])
+
+  // The submit-time publication guard has already observed pinSha on this
+  // branch. Reproduce the real timeline: the author ordinarily pushes again
+  // before the root PR lands.
+  await writeFile(join(component, "version.txt"), "successor\n")
+  await git(component, ["commit", "-qam", "successor"])
+  const successorSha = await git(component, ["rev-parse", "HEAD"])
+  await git(component, ["push", "-q", "origin", "task/component"])
+  await git(join(repo, "dep"), ["fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+
+  return {
+    repo,
+    component,
+    rootRemote,
+    componentRemote,
+    rootBaseSha,
+    componentBaseSha,
+    pinSha,
+    successorSha,
+    featureSha,
+  }
+}
+
 async function divergentSubmoduleRepository(kind: "clean" | "conflict"): Promise<{
   repo: string
   module: string
@@ -391,6 +463,7 @@ async function checkedQueue(
     environmentOverrides?: Readonly<Record<string, string>>
     environmentPassthrough?: readonly string[]
     refuse?: Readonly<{ paths: readonly string[]; reason?: string }>
+    mergeCommand?: readonly string[]
   }> = {},
 ) {
   const bayJobs = createBayJobDefs(unusedWorkspace)
@@ -420,13 +493,21 @@ async function checkedQueue(
     },
   )
   const merge = withMerge(
-    gitMergeStep<Checked>({
-      inject: { process },
-      repo,
-      ...(options.env === undefined ? {} : { env: options.env }),
-      ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
-    }),
-    { revision: "git-merge-v1" },
+    options.mergeCommand === undefined
+      ? gitMergeStep<Checked>({
+          inject: { process },
+          repo,
+          ...(options.env === undefined ? {} : { env: options.env }),
+          ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
+        })
+      : configuredMergeStep<Checked>({
+          inject: { process },
+          repo,
+          command: options.mergeCommand,
+          ...(options.env === undefined ? {} : { env: options.env }),
+          ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
+        }),
+    { revision: options.mergeCommand === undefined ? "git-merge-v1" : "configured-merge-v1" },
   )
   const queue = withQueue({
     steps: [check, merge] as const,
@@ -4245,7 +4326,7 @@ describe("Queue command adapters", () => {
     // timeout-robustness lineage owns the 120s default across the whole proof.
     expect(requests.filter(({ argv }) => argv[0] === "git").every(({ timeoutMs }) => timeoutMs === 120_000)).toBe(true)
     const initializations = requests.filter(
-      ({ argv }) => argv[0] === "git" && argv.includes("init") && argv.includes("--bare"),
+      ({ argv }) => argv[0] === "git" && argv.includes("init") && argv.includes("--bare") && argv.includes("--quiet"),
     )
     const proofFetches = requests.filter(({ argv }) => argv.includes("--depth=1") && argv.includes("--filter=tree:0"))
     expect(initializations).toHaveLength(1)
@@ -4990,6 +5071,75 @@ describe("Queue command adapters", () => {
     expect(run).toMatchObject({ status: "completed", conclusion: "success", prs: [{ headSha: featureSha }] })
     expect(await git(remote, ["ls-tree", "main", "dep"])).toContain(moduleSha)
   })
+
+  it.each(["native", "configured"] as const)(
+    "advances component main after the root lands when the author pushes the same task branch again (%s)",
+    async (mode) => {
+      const fixture = await componentMainLandingRepository()
+      const carriers = await git(join(fixture.repo, "dep"), [
+        "for-each-ref",
+        `--contains=${fixture.pinSha}`,
+        "--format=%(refname)",
+        "refs/remotes/origin/",
+      ])
+      expect(carriers).toContain("refs/remotes/origin/task/component")
+      expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.componentBaseSha)
+
+      await using process = createProcess()
+      await using app = await checkedQueue(process, fixture.repo, ["true"], {
+        env: authoredGitlinksEnv,
+        ...(mode === "configured"
+          ? { mergeCommand: shellCommand('git push origin "$YRD_CANDIDATE_SHA":refs/heads/main') }
+          : {}),
+      })
+      await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+      expect(run).toMatchObject({ status: "completed", conclusion: "success" })
+      expect(await git(fixture.rootRemote, ["ls-tree", "main", "dep"])).toContain(fixture.pinSha)
+      expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.pinSha)
+      expect(
+        await git(fixture.componentRemote, ["merge-base", "--is-ancestor", fixture.pinSha, fixture.successorSha]),
+      ).toBe("")
+    },
+    20_000,
+  )
+
+  it("refuses a non-ancestral component main without landing or force-pushing", async () => {
+    const fixture = await componentMainLandingRepository()
+    await git(fixture.component, ["switch", "-q", "main"])
+    await writeFile(join(fixture.component, "divergent.txt"), "divergent main\n")
+    await git(fixture.component, ["add", "divergent.txt"])
+    await git(fixture.component, ["commit", "-qm", "divergent main"])
+    const divergentMainSha = await git(fixture.component, ["rev-parse", "HEAD"])
+    await git(fixture.component, ["push", "-q", "origin", "main"])
+
+    await using process = createProcess()
+    const pushes: string[][] = []
+    const recordingProcess: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "git" && request.argv.includes("push")) pushes.push([...request.argv])
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(recordingProcess, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: {
+        code: "component-main-non-ancestral",
+        message: expect.stringMatching(/NON-ANCESTRAL.*dep.*diverge/u),
+      },
+    })
+    expect(await git(fixture.rootRemote, ["rev-parse", "main"])).toBe(fixture.rootBaseSha)
+    expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(divergentMainSha)
+    expect(pushes.flat()).not.toContain("--force")
+  }, 20_000)
 
   it("rejects a checked candidate that fails a hook even when the operator tree passes it", async () => {
     const { repo, remote, baseSha, featureSha } = await hookedSubmoduleRepository({
