@@ -109,6 +109,11 @@ type RuntimeStep = StepDef<PRShape, PRShape>
 
 const RawGitPushPattern = /(?:^|[\n;&|])\s*git\s+push(?:\s|$)/u
 
+export const CURRENT_JOURNAL_COMPATIBILITY = Object.freeze({
+  version: 1,
+  reader: "0024983f6ba0b17a0550c779d3d756014ad75ec4",
+}) satisfies JournalCompatibility
+
 export type DefaultYrdAppOptions = Readonly<{
   repo: string
   stateDir: string
@@ -759,7 +764,7 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
   return createYrd(contests(queue(base)), {
     inject: {
       journal: options.journal,
-      ...(options.journalCompatibility === undefined ? {} : { compatibility: options.journalCompatibility }),
+      compatibility: options.journalCompatibility ?? CURRENT_JOURNAL_COMPATIBILITY,
       ...(options.scope === undefined ? {} : { scope: options.scope }),
       ...(options.log === undefined ? {} : { log: options.log }),
     },
