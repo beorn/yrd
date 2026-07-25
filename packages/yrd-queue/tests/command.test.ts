@@ -52,6 +52,15 @@ const authoredGitlinksEnv = { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITL
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 type Checked = AddStepResult<PRShape, "check", GitCheckResultEvidence>
 
+function expectNonInteractiveRebases(commands: readonly (readonly string[])[]): void {
+  expect(commands.length).toBeGreaterThan(0)
+  for (const command of commands) {
+    const rebase = command.indexOf("rebase")
+    expect(rebase).toBeGreaterThan(1)
+    expect(command.slice(rebase - 2, rebase + 1)).toEqual(["-c", "core.editor=true", "rebase"])
+  }
+}
+
 function prFacts(pr: PR | undefined) {
   if (pr === undefined) throw new Error("expected PR")
   const revision = currentPRRev(pr)
@@ -567,7 +576,16 @@ describe("Queue command adapters", () => {
     expect(rawDiff).toContain("+beta")
 
     await using process = createProcess()
-    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+    const rebaseCommands: string[][] = []
+    const capturingProcess: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "git" && request.argv.includes("rebase")) {
+          rebaseCommands.push([...request.argv])
+        }
+        return process.run(request)
+      },
+    }
+    const result = await createGitPRRecutter({ inject: { process: capturingProcess }, repo }).recut({
       id: "PR1",
       branch: "issue/payload",
       base: "main",
@@ -578,6 +596,7 @@ describe("Queue command adapters", () => {
 
     expect(result.patchId).toMatch(/^[0-9a-f]{40}$/u)
     expect(await git(repo, ["show", `${result.headSha}:payload.dat`])).toBe("beta")
+    expectNonInteractiveRebases(rebaseCommands)
   })
 
   it("certifies the raw carrier object when a local replacement ref is present", async () => {
@@ -1317,10 +1336,14 @@ describe("Queue command adapters", () => {
     const { repo, module, oldPinSha, newPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
     await using process = createProcess()
     const proofCommands: string[][] = []
+    const rebaseCommands: string[][] = []
     const proofProcess: Pick<Process, "run"> = {
       run(request) {
         if (request.argv[0] === "git" && (request.argv.includes("patch-id") || request.argv.includes("range-diff"))) {
           proofCommands.push([...request.argv])
+        }
+        if (request.argv[0] === "git" && request.argv.includes("rebase")) {
+          rebaseCommands.push([...request.argv])
         }
         return process.run(request)
       },
@@ -1384,6 +1407,7 @@ describe("Queue command adapters", () => {
     expect(proofCommands.filter((command) => command.includes("range-diff"))).toEqual([
       expect.arrayContaining(["range-diff", "--no-color", "--no-dual-color", "--no-patch"]),
     ])
+    expectNonInteractiveRebases(rebaseCommands)
     const landedTree = await git(repo, ["ls-tree", "main", "dep"])
     const landedPinSha = landedTree.split(/\s+/u)[2]
     expect(landedPinSha).toBe(evidence.sourceRewrites?.[0]?.newTipSha)
