@@ -3219,20 +3219,25 @@ async function fetchComponentPin(
 async function planComponentMainPromotions(
   git: Git,
   repo: string,
-  baseSha: string,
+  baseSha: string | undefined,
   candidateSha: string,
   scratchRoot: string,
 ): Promise<ComponentMainPromotionPlan> {
-  const basePins = new Map(
-    (await candidateSubmodulePins(git, repo, repo, baseSha)).map((pin) => [pin.path, pin] as const),
-  )
   const candidatePins = await candidateSubmodulePins(git, repo, repo, candidateSha)
+  const basePins =
+    baseSha === undefined
+      ? new Map<string, CandidateSubmodulePin>()
+      : new Map((await candidateSubmodulePins(git, repo, repo, baseSha)).map((pin) => [pin.path, pin] as const))
   const changed: CandidateSubmodulePin[] = []
   const untrustedOrigins = new Set<string>()
   for (const pin of candidatePins) {
-    if ((await readGitlink(git, repo, baseSha, pin.path)) === pin.sha) continue
+    if (baseSha !== undefined && (await readGitlink(git, repo, baseSha, pin.path)) === pin.sha) continue
     const basePin = basePins.get(pin.path)
-    if (basePin === undefined) {
+    if (baseSha === undefined) {
+      // A landed root tree is the authority for its own component registry.
+      // Reconciliation therefore trusts its standing .gitmodules origins and
+      // audits every pin, including gaps left by earlier failed actuators.
+    } else if (basePin === undefined) {
       untrustedOrigins.add(pin.path)
     } else if (basePin.origin !== pin.origin) {
       return {
@@ -3394,7 +3399,7 @@ async function applyComponentMainPromotions(
 async function withComponentMainPromotions<Output extends JsonValue>(
   git: Git,
   repo: string,
-  baseSha: string,
+  baseSha: string | undefined,
   candidateSha: string,
   run: (promotions: readonly ComponentMainPromotion[]) => Promise<JobResult<Output>>,
 ): Promise<JobResult<Output>> {
@@ -4378,11 +4383,6 @@ function mergeAuthorityCancellation(context: Pick<JobContext, "signal">): Failed
   }
 }
 
-function alreadyLandedPromotionBase(input: StepExecution, checked: PinnedCandidate): string {
-  const recorded = [...new Set(input.prs.flatMap((pr) => (pr.baseSha === undefined ? [] : [pr.baseSha])))]
-  return recorded.length === 1 ? (recorded[0] ?? checked.baseSha) : checked.baseSha
-}
-
 async function sourceCandidateRefError(
   git: Git,
   repo: string,
@@ -4639,21 +4639,15 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
       if (alreadyLanded !== undefined) {
         const cancellation = mergeAuthorityCancellation(context)
         if (cancellation !== undefined) return cancellation
-        return withComponentMainPromotions(
-          git,
-          repo,
-          alreadyLandedPromotionBase(input, checked),
-          checked.candidateSha,
-          async (promotions) => {
-            const promotionFailure = await applyComponentMainPromotions(git, promotions)
-            if (promotionFailure !== undefined) return failed(promotionFailure.code, promotionFailure.message)
-            return {
-              status: "completed",
-              conclusion: "success",
-              output: integrationProof(baseSha, checked, alreadyLanded),
-            }
-          },
-        )
+        return withComponentMainPromotions(git, repo, undefined, checked.candidateSha, async (promotions) => {
+          const promotionFailure = await applyComponentMainPromotions(git, promotions)
+          if (promotionFailure !== undefined) return failed(promotionFailure.code, promotionFailure.message)
+          return {
+            status: "completed",
+            conclusion: "success",
+            output: integrationProof(baseSha, checked, alreadyLanded),
+          }
+        })
       }
       const remote = base.remote
       if (remote !== undefined) {
@@ -4714,8 +4708,6 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
             (attempted.error.code === "component-main-promotion-failed" ||
               attempted.error.code === "component-main-diverged-after-landing")
           ) {
-            const rollbackError = await rollbackQueueBase(git, repo, base, landing)
-            if (rollbackError !== undefined) return failed("merge-rollback-failed", rollbackError)
             return attempted
           }
           if (
@@ -4739,10 +4731,6 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
                   : failed<IntegrationProof>(promotionFailure.code, promotionFailure.message)
               },
             )
-            if (reconciled.status === "completed" && reconciled.conclusion === "failure") {
-              const rollbackError = await rollbackQueueBase(git, repo, base, landing)
-              if (rollbackError !== undefined) return failed("merge-rollback-failed", rollbackError)
-            }
             return reconciled
           }
           return {
@@ -4838,21 +4826,15 @@ export function configuredMergeStep<Shape extends PRShape>(
       if (alreadyLanded !== undefined) {
         const cancellation = mergeAuthorityCancellation(context)
         if (cancellation !== undefined) return cancellation
-        return withComponentMainPromotions(
-          git,
-          repo,
-          alreadyLandedPromotionBase(input, candidate.checked),
-          candidate.checked.candidateSha,
-          async (promotions) => {
-            const promotionFailure = await applyComponentMainPromotions(git, promotions)
-            if (promotionFailure !== undefined) return failed(promotionFailure.code, promotionFailure.message)
-            return {
-              status: "completed",
-              conclusion: "success",
-              output: integrationProof(candidate.base.sha, candidate.checked, alreadyLanded),
-            }
-          },
-        )
+        return withComponentMainPromotions(git, repo, undefined, candidate.checked.candidateSha, async (promotions) => {
+          const promotionFailure = await applyComponentMainPromotions(git, promotions)
+          if (promotionFailure !== undefined) return failed(promotionFailure.code, promotionFailure.message)
+          return {
+            status: "completed",
+            conclusion: "success",
+            output: integrationProof(candidate.base.sha, candidate.checked, alreadyLanded),
+          }
+        })
       }
       const command = configuredCommandStep<Shape>({
         inject: options.inject,
@@ -4908,8 +4890,6 @@ export function configuredMergeStep<Shape extends PRShape>(
             }
             const promotionFailure = await applyComponentMainPromotions(git, promotions)
             if (promotionFailure !== undefined) {
-              const rollbackError = await rollbackQueueBase(git, repo, candidate.base, landing)
-              if (rollbackError !== undefined) return failed("merge-rollback-failed", rollbackError)
               return failed(promotionFailure.code, promotionFailure.message)
             }
             return {

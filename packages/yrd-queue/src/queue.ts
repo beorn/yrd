@@ -2767,6 +2767,12 @@ function queueAuthorityReleaseReason(
     error?.code === "stale-check" ||
     error?.code === "stale-steps" ||
     error?.code === "stale-plan" ||
+    // The authoritative root may already have landed when publication of its
+    // derived component-main refs hits a transient push/fetch failure. The
+    // promotion is idempotent and the root must never be compensated; release
+    // the same PR revision so a fresh merge attempt reconciles the missing refs.
+    error?.code === "component-main-promotion-failed" ||
+    error?.code === "component-main-inspection-failed" ||
     // `orphaned-run` is the jobless sibling: the run's writer vanished before the
     // cursor step was requested (or its Jobs aged out of retention while the
     // record survived), so no Job exists to lose and no advance can ever move it.

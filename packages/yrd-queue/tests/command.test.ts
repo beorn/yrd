@@ -169,7 +169,7 @@ async function hookedSubmoduleRepository(options: {
   return { repo, remote, baseSha, featureSha, moduleSha }
 }
 
-async function componentMainLandingRepository(): Promise<{
+async function componentMainLandingRepository(options: Readonly<{ pushSuccessor?: boolean }> = {}): Promise<{
   repo: string
   component: string
   rootRemote: string
@@ -219,13 +219,16 @@ async function componentMainLandingRepository(): Promise<{
   await git(repo, ["switch", "-q", "main"])
   await git(repo, ["-c", "protocol.file.allow=always", "submodule", "update", "-q"])
 
-  // The submit-time publication guard has already observed pinSha on this
-  // branch. Reproduce the real timeline: the author ordinarily pushes again
-  // before the root PR lands.
-  await writeFile(join(component, "version.txt"), "successor\n")
-  await git(component, ["commit", "-qam", "successor"])
-  const successorSha = await git(component, ["rev-parse", "HEAD"])
-  await git(component, ["push", "-q", "origin", "task/component"])
+  let successorSha = pinSha
+  if (options.pushSuccessor === true) {
+    // The submit-time publication guard has already observed pinSha on this
+    // branch. Preserve the disputed timeline as an explicit falsification:
+    // an ordinary fast-forward successor still contains the earlier pin.
+    await writeFile(join(component, "version.txt"), "successor\n")
+    await git(component, ["commit", "-qam", "successor"])
+    successorSha = await git(component, ["rev-parse", "HEAD"])
+    await git(component, ["push", "-q", "origin", "task/component"])
+  }
   await git(join(repo, "dep"), ["fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*"])
 
   return {
@@ -238,6 +241,76 @@ async function componentMainLandingRepository(): Promise<{
     pinSha,
     successorSha,
     featureSha,
+  }
+}
+
+async function multiComponentMainLandingRepository(): Promise<{
+  repo: string
+  rootRemote: string
+  rootBaseSha: string
+  featureSha: string
+  components: readonly Readonly<{
+    path: string
+    remote: string
+    baseSha: string
+    pinSha: string
+  }>[]
+}> {
+  const { repo } = await repository()
+  await git(repo, ["config", "protocol.file.allow", "always"])
+  const components: Array<{ path: string; remote: string; baseSha: string; pinSha: string; worktree: string }> = []
+
+  for (const name of ["a", "b"]) {
+    const path = `dep-${name}`
+    const worktree = join(repo, "..", `component-${name}`)
+    const remote = join(repo, "..", `component-${name}-origin.git`)
+    await Bun.$`git init -q -b main ${worktree}`
+    await git(worktree, ["config", "user.name", "Yrd Test"])
+    await git(worktree, ["config", "user.email", "yrd@example.invalid"])
+    await writeFile(join(worktree, "version.txt"), `base-${name}\n`)
+    await git(worktree, ["add", "version.txt"])
+    await git(worktree, ["commit", "-qm", `base ${name}`])
+    const baseSha = await git(worktree, ["rev-parse", "HEAD"])
+    await Bun.$`git init -q --bare ${remote}`
+    await git(worktree, ["remote", "add", "origin", remote])
+    await git(worktree, ["push", "-q", "origin", "main"])
+    await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", remote, path])
+    components.push({ path, remote, baseSha, pinSha: baseSha, worktree })
+  }
+  await git(repo, ["commit", "-qm", "add dependencies"])
+  const rootBaseSha = await git(repo, ["rev-parse", "HEAD"])
+  const rootRemote = join(repo, "..", "multi-root-origin.git")
+  await Bun.$`git init -q --bare ${rootRemote}`
+  await git(repo, ["remote", "add", "origin", rootRemote])
+  await git(repo, ["push", "-q", "origin", "main"])
+
+  for (const component of components) {
+    await git(component.worktree, ["switch", "-qc", `task/${component.path}`])
+    await writeFile(join(component.worktree, "version.txt"), `pin-${component.path}\n`)
+    await git(component.worktree, ["commit", "-qam", `pin ${component.path}`])
+    component.pinSha = await git(component.worktree, ["rev-parse", "HEAD"])
+    await git(component.worktree, ["push", "-q", "origin", `task/${component.path}`])
+  }
+
+  await git(repo, ["switch", "-qc", "issue/feature"])
+  for (const component of components) {
+    const checkout = join(repo, component.path)
+    await git(checkout, ["fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+    await git(checkout, ["checkout", "-q", component.pinSha])
+    await git(repo, ["add", component.path])
+  }
+  await git(repo, ["commit", "-qm", "pin dependencies"])
+  const featureSha = await git(repo, ["rev-parse", "HEAD"])
+  await git(repo, ["push", "-q", "origin", "issue/feature"])
+  await git(repo, ["switch", "-q", "main"])
+  await git(repo, ["-c", "protocol.file.allow=always", "submodule", "update", "-q"])
+
+  return {
+    repo,
+    rootRemote,
+    rootBaseSha,
+    featureSha,
+    components: components.map(({ path, remote, baseSha, pinSha }) => ({ path, remote, baseSha, pinSha })),
   }
 }
 
@@ -5072,17 +5145,25 @@ describe("Queue command adapters", () => {
     expect(await git(remote, ["ls-tree", "main", "dep"])).toContain(moduleSha)
   })
 
+  it("keeps the submit-time publication carrier after an ordinary task-branch fast-forward", async () => {
+    const fixture = await componentMainLandingRepository({ pushSuccessor: true })
+    const carriers = await git(join(fixture.repo, "dep"), [
+      "for-each-ref",
+      `--contains=${fixture.pinSha}`,
+      "--format=%(refname)",
+      "refs/remotes/origin/",
+    ])
+
+    expect(carriers).toContain("refs/remotes/origin/task/component")
+    expect(
+      await git(fixture.componentRemote, ["merge-base", "--is-ancestor", fixture.pinSha, fixture.successorSha]),
+    ).toBe("")
+  })
+
   it.each(["native", "configured"] as const)(
-    "advances component main after the root lands when the author pushes the same task branch again (%s)",
+    "advances component main when a root gitlink lands (%s)",
     async (mode) => {
       const fixture = await componentMainLandingRepository()
-      const carriers = await git(join(fixture.repo, "dep"), [
-        "for-each-ref",
-        `--contains=${fixture.pinSha}`,
-        "--format=%(refname)",
-        "refs/remotes/origin/",
-      ])
-      expect(carriers).toContain("refs/remotes/origin/task/component")
       expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.componentBaseSha)
 
       await using process = createProcess()
@@ -5099,12 +5180,41 @@ describe("Queue command adapters", () => {
       expect(run).toMatchObject({ status: "completed", conclusion: "success" })
       expect(await git(fixture.rootRemote, ["ls-tree", "main", "dep"])).toContain(fixture.pinSha)
       expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.pinSha)
-      expect(
-        await git(fixture.componentRemote, ["merge-base", "--is-ancestor", fixture.pinSha, fixture.successorSha]),
-      ).toBe("")
     },
     20_000,
   )
+
+  it("classifies against freshly fetched component main instead of a stale bay tracking ref", async () => {
+    const fixture = await componentMainLandingRepository()
+    const bayComponent = join(fixture.repo, "dep")
+    expect(await git(bayComponent, ["rev-parse", "origin/main"])).toBe(fixture.componentBaseSha)
+    await git(fixture.component, ["push", "-q", "origin", `${fixture.pinSha}:refs/heads/main`])
+    expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.pinSha)
+    expect(await git(bayComponent, ["rev-parse", "origin/main"])).toBe(fixture.componentBaseSha)
+
+    await using process = createProcess()
+    const componentPushes: ProcessRequest[] = []
+    const recordingProcess: Pick<Process, "run"> = {
+      run(request) {
+        if (
+          request.argv[0] === "git" &&
+          request.argv.includes("push") &&
+          request.argv.includes(fixture.componentRemote)
+        ) {
+          componentPushes.push(request)
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(recordingProcess, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({ status: "completed", conclusion: "success" })
+    expect(componentPushes).toEqual([])
+    expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.pinSha)
+  }, 20_000)
 
   it("refuses a non-ancestral component main without landing or force-pushing", async () => {
     const fixture = await componentMainLandingRepository()
@@ -5140,6 +5250,123 @@ describe("Queue command adapters", () => {
     expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(divergentMainSha)
     expect(pushes.flat()).not.toContain("--force")
   }, 20_000)
+
+  it("leaves the root landed and converges component main when a transient promotion failure is retried", async () => {
+    const fixture = await componentMainLandingRepository()
+    await using process = createProcess()
+    let failedPromotion = false
+    const flakyProcess: Pick<Process, "run"> = {
+      run(request) {
+        if (
+          !failedPromotion &&
+          request.argv[0] === "git" &&
+          request.argv.includes("push") &&
+          request.argv.includes(fixture.componentRemote)
+        ) {
+          failedPromotion = true
+          return Promise.resolve({
+            exitCode: 1,
+            signal: null,
+            stdout: "",
+            stderr: "transient component push failure",
+            durationMs: 1,
+            timedOut: false,
+          })
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(flakyProcess, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+    await app.bays.submit({
+      branch: "issue/feature",
+      headSha: fixture.featureSha,
+      base: "main",
+      baseSha: fixture.rootBaseSha,
+    })
+
+    const first = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(failedPromotion).toBe(true)
+    expect(first).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "component-main-promotion-failed" },
+    })
+    expect(await git(fixture.rootRemote, ["ls-tree", "main", "dep"])).toContain(fixture.pinSha)
+    expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.componentBaseSha)
+
+    const retried = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(retried).toMatchObject({ status: "completed", conclusion: "success" })
+    expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.pinSha)
+  }, 30_000)
+
+  it("keeps earlier component fast-forwards and converges the remaining origins on retry", async () => {
+    const fixture = await multiComponentMainLandingRepository()
+    const [firstComponent, secondComponent] = fixture.components
+    if (firstComponent === undefined || secondComponent === undefined)
+      throw new Error("missing multi-component fixture")
+    await using process = createProcess()
+    let failedSecondPromotion = false
+    const componentPushes: string[][] = []
+    const flakyProcess: Pick<Process, "run"> = {
+      run(request) {
+        if (
+          request.argv[0] === "git" &&
+          request.argv.includes("push") &&
+          fixture.components.some((component) => request.argv.includes(component.remote))
+        ) {
+          componentPushes.push([...request.argv])
+        }
+        if (
+          !failedSecondPromotion &&
+          request.argv[0] === "git" &&
+          request.argv.includes("push") &&
+          request.argv.includes(secondComponent.remote)
+        ) {
+          failedSecondPromotion = true
+          return Promise.resolve({
+            exitCode: 1,
+            signal: null,
+            stdout: "",
+            stderr: "transient second component push failure",
+            durationMs: 1,
+            timedOut: false,
+          })
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(flakyProcess, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+    await app.bays.submit({
+      branch: "issue/feature",
+      headSha: fixture.featureSha,
+      base: "main",
+      baseSha: fixture.rootBaseSha,
+    })
+
+    const first = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(failedSecondPromotion).toBe(true)
+    expect(first).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "component-main-promotion-failed" },
+    })
+    expect(await git(fixture.rootRemote, ["rev-parse", "main"])).not.toBe(fixture.rootBaseSha)
+    expect(await git(firstComponent.remote, ["rev-parse", "main"])).toBe(firstComponent.pinSha)
+    expect(await git(secondComponent.remote, ["rev-parse", "main"])).toBe(secondComponent.baseSha)
+    expect(componentPushes.filter((argv) => argv.includes(firstComponent.remote))).toHaveLength(1)
+    expect(componentPushes.filter((argv) => argv.includes(secondComponent.remote))).toHaveLength(1)
+
+    const retried = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(retried).toMatchObject({ status: "completed", conclusion: "success" })
+    expect(await git(firstComponent.remote, ["rev-parse", "main"])).toBe(firstComponent.pinSha)
+    expect(await git(secondComponent.remote, ["rev-parse", "main"])).toBe(secondComponent.pinSha)
+    expect(componentPushes.filter((argv) => argv.includes(firstComponent.remote))).toHaveLength(1)
+    expect(componentPushes.filter((argv) => argv.includes(secondComponent.remote))).toHaveLength(2)
+  }, 40_000)
 
   it("rejects a checked candidate that fails a hook even when the operator tree passes it", async () => {
     const { repo, remote, baseSha, featureSha } = await hookedSubmoduleRepository({
