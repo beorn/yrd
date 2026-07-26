@@ -51,7 +51,7 @@ describe("classifyBayStatus", () => {
     expect(report.safe).toBe(false)
     const commits = report.lines.find((line) => line.class === "commits")
     expect(commits?.verdict).toBe("BLOCK")
-    expect(commits?.evidence).toMatch(/3 commit/)
+    expect(commits?.evidence).toMatch(/3 unique commit/)
   })
 
   it("exit 1 when owner is live", () => {
