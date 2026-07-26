@@ -579,6 +579,56 @@ describe("createGitWorkspace", () => {
     expect(existsSync(bay.path)).toBe(true)
   })
 
+  it("provisions a bay from a commit SHA while another worktree still holds the branch (22358)", async () => {
+    // Specimen: yrd pr checkout used the PR branch name; git refuses a second checkout of a
+    // branch another worktree holds. Gate bays must materialize the recorded head in detached HEAD.
+    const { root, repo } = await repository()
+    await git(repo, ["checkout", "-qb", "topic/held-by-author"])
+    await writeFile(join(repo, "feature.txt"), "candidate\n")
+    await git(repo, ["add", "feature.txt"])
+    await git(repo, ["commit", "-qm", "candidate head"])
+    const head = (await git(repo, ["rev-parse", "HEAD"])).stdout
+    // Leave the branch free in the primary worktree, then hold it in the author slot —
+    // the specimen state when @ci tries to bay a live seat's PR.
+    await git(repo, ["checkout", "-q", "main"])
+    const authorSlot = join(root, "author-slot")
+    await git(repo, ["worktree", "add", "-q", authorSlot, "topic/held-by-author"])
+
+    await using process = createProcess()
+    const adapter = await workspace(process, { repo, baysRoot: join(root, "bays") })
+
+    // Branch-name as `from` reproduces the specimen failure while the author holds the branch.
+    const branchHeld = await adapter.provision({
+      bay: "B-branch",
+      name: "pr-branch-held",
+      branch: "topic/held-by-author",
+      base: "main",
+      from: "topic/held-by-author",
+    })
+    expect(branchHeld).toMatchObject({ status: "completed", conclusion: "failure" })
+    expect(String((branchHeld as { error?: { message?: string } }).error?.message ?? branchHeld)).toMatch(
+      /already used by worktree|is already checked out/iu,
+    )
+
+    // Detached HEAD at the recorded SHA succeeds and matches the revision.
+    const detached = await adapter.provision({
+      bay: "B-detached",
+      name: "pr-pr-detached",
+      branch: head,
+      base: "main",
+      from: head,
+    })
+    expect(detached).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+      output: { headSha: head },
+    })
+    const path = (detached as { output: { path: string } }).output.path
+    expect((await git(path, ["rev-parse", "HEAD"])).stdout).toBe(head)
+    expect((await git(path, ["branch", "--show-current"])).stdout).toBe("")
+    expect((await git(path, ["show", "-s", "--format=%s", "HEAD"])).stdout).toBe("candidate head")
+  })
+
   it("provisions intake-enabled bays concurrently without racing the shared remote", async () => {
     const { root, repo, intake } = await repository()
     await using process = createProcess()

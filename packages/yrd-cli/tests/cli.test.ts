@@ -216,16 +216,25 @@ function overlapProbe(): OverlapProbe {
 }
 
 function workspace(
-  options: { dirty?: boolean; path?: string; refreshedHead?: string; probe?: OverlapProbe } = {},
+  options: {
+    dirty?: boolean
+    path?: string
+    refreshedHead?: string
+    probe?: OverlapProbe
+    provisions?: Array<Record<string, unknown>>
+  } = {},
 ): BayWorkspace {
   return {
     revision: "test-workspace-v1",
     async provision(input) {
       await options.probe?.pause("bay")
+      options.provisions?.push({ ...input })
+      const from = typeof input.from === "string" ? input.from : undefined
+      const headSha = from !== undefined && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(from) ? from : HEAD_SHA
       return {
         status: "completed",
         conclusion: "success",
-        output: { path: options.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD_SHA, baseSha: BASE_SHA },
+        output: { path: options.path ?? `/repo/.bays/${input.bay}`, headSha, baseSha: BASE_SHA },
       }
     },
     refresh(input) {
@@ -311,6 +320,7 @@ async function createApp(
     bayPath?: string
     refreshedHead?: string
     probe?: OverlapProbe
+    provisions?: Array<Record<string, unknown>>
     baseResolutions?: string[]
     batch?: false | number
     waitingEvaluator?: string
@@ -343,6 +353,7 @@ async function createApp(
       path: options.bayPath,
       refreshedHead: options.refreshedHead,
       probe: options.probe,
+      provisions: options.provisions,
     }),
   )
   const check = withStep(
@@ -943,6 +954,31 @@ describe("runYrd", () => {
     const dashboard = outputIO()
     expect(await runYrd(app, yrd("--json"), dashboard.io), dashboard.stderr()).toBe(0)
     expect(JSON.parse(dashboard.stdout())).toMatchObject({ command: "dashboard" })
+  })
+
+  it("22358: pr checkout provisions from the recorded head SHA, not the branch name", async () => {
+    // Acceptance: bay a PR while the author still holds the branch. Branch-name checkout refuses;
+    // detached HEAD at the revision head is the immutable candidate @ci needs to gate.
+    const provisions: Array<Record<string, unknown>> = []
+    const app = await createApp({ provisions })
+    await app.bays.submit({ branch: "topic/held-by-author", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+
+    const checkout = outputIO()
+    expect(await runYrd(app, yrd("pr", "checkout", "PR1", "--json"), checkout.io), checkout.stderr()).toBe(0)
+    const payload = JSON.parse(checkout.stdout()) as Readonly<{
+      command: string
+      pr: string
+      bay: { status: string; headSha?: string }
+    }>
+    expect(payload).toMatchObject({
+      command: "pr.checkout",
+      pr: "PR1",
+      bay: { status: "active", headSha: HEAD_SHA },
+    })
+    expect(provisions).toHaveLength(1)
+    expect(provisions[0]).toMatchObject({ from: HEAD_SHA })
+    expect(provisions[0]?.from).not.toBe("topic/held-by-author")
+    expect(app.bays.get("pr-pr1")).toMatchObject({ status: "active", headSha: HEAD_SHA })
   })
 
   it("Q1: resubmitting a landed branch reports already-merged for the same head and mints a fresh delivery for a new head", async () => {

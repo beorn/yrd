@@ -3581,14 +3581,26 @@ async function checkoutPr(
 ): Promise<void> {
   const pr = requiredPr(app, selector)
   const name = options.bay ?? `pr-${pr.id.toLowerCase()}`
+  // Detached HEAD at the recorded revision head — never the branch name.
+  // Authors keep the task branch checked out in their slot while the PR is open;
+  // `git worktree add <path> <branch>` refuses that second checkout (22358).
+  // The candidate is an immutable SHA; bay provision already supports `from` as a commit.
+  const head = prHead(pr)
   await provisionBay(
     app,
     name,
-    { from: pr.branch, base: pr.base, ...(pr.issue === undefined ? {} : { issue: pr.issue }), ...options },
+    { from: head, base: pr.base, ...(pr.issue === undefined ? {} : { issue: pr.issue }), ...options },
     io,
     "pr.checkout",
     pr.id,
   )
+  const bay = app.bays.get(name)
+  if (bay?.headSha !== undefined && bay.headSha.toLowerCase() !== head.toLowerCase()) {
+    refusal(
+      `bay '${name}' HEAD ${bay.headSha} does not match PR '${pr.id}' revision head ${head}; ` +
+        "retry pr checkout against a fresh PR revision snapshot",
+    )
+  }
 }
 
 function currentGitBranch(cwd: string, io: YrdCliIO): string | undefined {
@@ -6679,7 +6691,7 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => diffPr(installed(), selector, options, io))
   pr.command("checkout <selector>")
-    .description("materialize a bay from a PR branch")
+    .description("materialize a bay from a PR revision head (detached HEAD)")
     .option("--bay <name>", "name the new bay")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => checkoutPr(installed(), selector, options, io))
