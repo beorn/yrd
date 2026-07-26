@@ -597,27 +597,40 @@ describe("createGitWorkspace", () => {
     await using process = createProcess()
     const adapter = await workspace(process, { repo, baysRoot: join(root, "bays") })
 
+    const jobContext = {
+      id: "provision-22358",
+      attempt: 1,
+      runner: "test",
+      signal: new AbortController().signal,
+    }
+
     // Branch-name as `from` reproduces the specimen failure while the author holds the branch.
-    const branchHeld = await adapter.provision({
-      bay: "B-branch",
-      name: "pr-branch-held",
-      branch: "topic/held-by-author",
-      base: "main",
-      from: "topic/held-by-author",
-    })
+    const branchHeld = await adapter.provision(
+      {
+        bay: "B-branch",
+        name: "pr-branch-held",
+        branch: "topic/held-by-author",
+        base: "main",
+        from: "topic/held-by-author",
+      },
+      jobContext,
+    )
     expect(branchHeld).toMatchObject({ status: "completed", conclusion: "failure" })
     expect(String((branchHeld as { error?: { message?: string } }).error?.message ?? branchHeld)).toMatch(
       /already used by worktree|is already checked out/iu,
     )
 
     // Detached HEAD at the recorded SHA succeeds and matches the revision.
-    const detached = await adapter.provision({
-      bay: "B-detached",
-      name: "pr-pr-detached",
-      branch: head,
-      base: "main",
-      from: head,
-    })
+    const detached = await adapter.provision(
+      {
+        bay: "B-detached",
+        name: "pr-pr-detached",
+        branch: head,
+        base: "main",
+        from: head,
+      },
+      { ...jobContext, id: "provision-22358-detached" },
+    )
     expect(detached).toMatchObject({
       status: "completed",
       conclusion: "success",
