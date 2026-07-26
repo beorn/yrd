@@ -51,7 +51,23 @@ describe("classifyBayStatus", () => {
     expect(report.safe).toBe(false)
     const commits = report.lines.find((line) => line.class === "commits")
     expect(commits?.verdict).toBe("BLOCK")
-    expect(commits?.evidence).toMatch(/3 commit/)
+    expect(commits?.evidence).toMatch(/3 unique commit/)
+  })
+
+  it("exit 2 when a failed refresh leaves even landed-looking origin evidence stale", () => {
+    const report = classifyBayStatus({
+      ...base,
+      ownerPid: 9,
+      ownerAlive: false,
+      tipDurableAt: "origin/main",
+      remoteTrackingFresh: false,
+    })
+    expect(report.exit).toBe(2)
+    expect(report.safe).toBeNull()
+    expect(report.lines.find((line) => line.class === "commits")).toMatchObject({
+      verdict: "UNKNOWN",
+      evidence: expect.stringMatching(/could not refresh and prune origin refs/u),
+    })
   })
 
   it("exit 1 when owner is live", () => {

@@ -41,9 +41,9 @@ type EvaluationRow = Readonly<{
 export { formatDuration }
 
 export function statusVariant(status: string): "default" | "accent" | "error" | "warning" | "success" | "info" {
-  if (["active", "closed", "integrated", "passed", "passing", "promoted"].includes(status)) return "success"
-  if (["rejected", "failed", "lost", "promotion-failed"].includes(status)) return "error"
-  if (status === "waiting" || status === "needs-author") return "warning"
+  if (["active", "closed", "integrated", "passed", "passing", "promoted", "safe"].includes(status)) return "success"
+  if (["rejected", "failed", "lost", "promotion-failed", "blocked"].includes(status)) return "error"
+  if (status === "waiting" || status === "needs-author" || status === "unknown") return "warning"
   if (["checking", "running", "evaluating", "promoting"].includes(status)) return "info"
   if (["submitted", "ready", "selected", "queued"].includes(status)) return "accent"
   return "default"
@@ -193,6 +193,7 @@ function heldOutEvaluationRows(contest: Contest): EvaluationRow[] {
 type BayStatusRow = Readonly<{
   bay: string
   status: string
+  safety: string
   issue: string
   by: string
   base: string
@@ -210,10 +211,17 @@ function bayRoot(bays: readonly Bay[]): string | undefined {
   return roots.size === 1 ? roots.values().next().value : undefined
 }
 
-export function BayStatusView({ bays }: { bays: readonly Bay[] }) {
+export function BayStatusView({
+  bays,
+  safety,
+}: {
+  bays: readonly Bay[]
+  safety?: ReadonlyMap<string, "safe" | "blocked" | "unknown">
+}) {
   const rows: BayStatusRow[] = bays.map((bay) => ({
     bay: bay.id,
     status: bay.status,
+    safety: safety?.get(bay.id) ?? "-",
     issue: bay.issue ?? "-",
     by: bay.by ?? "-",
     base: bay.base,
@@ -232,6 +240,14 @@ export function BayStatusView({ bays }: { bays: readonly Bay[] }) {
     { header: "BASE", key: "base" },
     { header: "BRANCH", key: "branch", grow: true },
   ]
+  if (safety !== undefined) {
+    columns.splice(2, 0, {
+      header: "SAFETY",
+      key: "safety",
+      minWidth: 7,
+      render: (bay) => <StatusValue value={bay.safety} />,
+    })
+  }
   const root = bayRoot(bays)
   return (
     <Box flexDirection="column" width="100%">

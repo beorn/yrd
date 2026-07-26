@@ -7,12 +7,16 @@ import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from
 import { tmpdir } from "node:os"
 import { basename, isAbsolute, join } from "node:path"
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest"
-import { runYrdProcess } from "../src/host.ts"
+import { CURRENT_JOURNAL_COMPATIBILITY, runYrdProcess } from "../src/host.ts"
 import type { YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
 const CLAIM = "@km/test/s2-fixture"
 const BRANCH = "task/s2-fixture"
+const JOURNAL_CONFIG = `journal:
+  version: ${CURRENT_JOURNAL_COMPATIBILITY.version}
+  reader: "${CURRENT_JOURNAL_COMPATIBILITY.reader}"
+`
 let originalPath: string | undefined
 let issueToolRoot: string | undefined
 
@@ -75,6 +79,9 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
     expect(runHelp.stdout()).toContain("cancel")
     expect(runHelp.stdout()).not.toContain("--issue")
     expect(runHelp.stdout()).not.toContain("--bay")
+    const listHelp = output(repo)
+    expect(await yrd(repo, listHelp.io, "bay", "list", "--help"), listHelp.stderr()).toBe(0)
+    expect(listHelp.stdout()).toContain("--check")
 
     for (const args of [
       ["bay", "in", "--help"],
@@ -186,6 +193,132 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
         await yrd(keptFixture.repo, closed.io, "bay", "close", "kept"),
         `${closed.stdout()}${closed.stderr()}`,
       ).toBe(0)
+    })
+  })
+
+  it("does not trust a stale remote-tracking ref as durability proof", async () => {
+    return withoutRuntimeName(async () => {
+      const { repo } = await repository()
+      const kept = output(repo)
+      expect(
+        await yrd(
+          repo,
+          kept.io,
+          "bay",
+          "run",
+          "--keep",
+          "--bay",
+          "stale-remote",
+          "--",
+          "sh",
+          "-c",
+          "printf risk > risk.txt; git add risk.txt; git commit -qm risk",
+        ),
+        kept.stderr(),
+      ).toBe(0)
+
+      const path = output(repo)
+      expect(await yrd(repo, path.io, "bay", "path", "stale-remote"), path.stderr()).toBe(0)
+      const bayPath = path.stdout().trim()
+      await git(bayPath, "push", "-q", "origin", "HEAD:task/stale-remote")
+
+      const remoteTrackingRef = "refs/remotes/origin/task/stale-remote"
+      const remoteBranchRef = "refs/heads/task/stale-remote"
+      const pushedTip = await git(repo, "rev-parse", remoteTrackingRef)
+      await git(join(repo, "..", "origin.git"), "update-ref", "-d", remoteBranchRef)
+      expect(await git(repo, "ls-remote", "--heads", "origin", remoteBranchRef)).toBe("")
+      expect(await git(repo, "rev-parse", remoteTrackingRef)).toBe(pushedTip)
+
+      const status = output(repo)
+      expect(
+        await yrd(repo, status.io, "bay", "status", "stale-remote", "--json"),
+        `${status.stdout()}${status.stderr()}`,
+      ).toBe(1)
+      const payload = JSON.parse(status.stdout()) as {
+        reports: readonly {
+          bay: string
+          lines: readonly { class: string; verdict: string; evidence: string }[]
+        }[]
+      }
+      expect(payload.reports[0]?.lines.find((line) => line.class === "commits")).toMatchObject({
+        verdict: "BLOCK",
+        evidence: expect.stringMatching(/no advertised origin ref.*at risk/u),
+      })
+
+      const listed = output(repo)
+      expect(
+        await yrd(repo, listed.io, "bay", "list", "--check", "--json"),
+        `${listed.stdout()}${listed.stderr()}`,
+      ).toBe(0)
+      const listPayload = JSON.parse(listed.stdout()) as {
+        reports: readonly {
+          bay: string
+          exit: number
+          lines: readonly { class: string; verdict: string; evidence: string }[]
+        }[]
+      }
+      expect(listPayload.reports).toContainEqual(
+        expect.objectContaining({
+          bay: payload.reports[0]?.bay,
+          exit: 1,
+          lines: expect.arrayContaining([expect.objectContaining({ class: "commits", verdict: "BLOCK" })]),
+        }),
+      )
+
+      const humanList = output(repo)
+      expect(
+        await yrd(repo, humanList.io, "bay", "list", "--check"),
+        `${humanList.stdout()}${humanList.stderr()}`,
+      ).toBe(0)
+      expect(humanList.stdout()).toContain("SAFETY")
+      expect(humanList.stdout()).toContain("blocked")
+    })
+  })
+
+  it("accepts a patch-equivalent landing even when commit ancestry differs", async () => {
+    return withoutRuntimeName(async () => {
+      const { repo } = await repository()
+      const kept = output(repo)
+      expect(
+        await yrd(
+          repo,
+          kept.io,
+          "bay",
+          "run",
+          "--keep",
+          "--bay",
+          "patch-landed",
+          "--",
+          "sh",
+          "-c",
+          "printf same > landed.txt; git add landed.txt; git commit -qm branch-copy",
+        ),
+        kept.stderr(),
+      ).toBe(0)
+
+      const path = output(repo)
+      expect(await yrd(repo, path.io, "bay", "path", "patch-landed"), path.stderr()).toBe(0)
+      const bayPath = path.stdout().trim()
+      await writeFile(join(repo, "landed.txt"), "same")
+      await git(repo, "add", "landed.txt")
+      await git(repo, "commit", "-qm", "main-copy")
+      await git(repo, "push", "-q", "origin", "main")
+      expect(await git(bayPath, "cherry", "origin/main", "HEAD")).toMatch(/^- /u)
+
+      const status = output(repo)
+      expect(
+        await yrd(repo, status.io, "bay", "status", "patch-landed", "--json"),
+        `${status.stdout()}${status.stderr()}`,
+      ).toBe(0)
+      const payload = JSON.parse(status.stdout()) as {
+        reports: readonly {
+          lines: readonly { class: string; verdict: string; evidence: string }[]
+        }[]
+      }
+      expect(payload.reports[0]?.lines.find((line) => line.class === "commits")).toMatchObject({
+        verdict: "PASS",
+        evidence: "tip is durable at origin/main (same changes)",
+      })
     })
   })
 
@@ -1567,7 +1700,15 @@ async function repository(): Promise<{ repo: string }> {
   await git(repo, "config", "user.email", "yrd@example.invalid")
   await git(repo, "remote", "add", "origin", origin)
   await writeFile(join(repo, "README.md"), "main\n")
-  await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "true"\nmerge: {}\n')
+  await writeFile(
+    join(repo, ".yrd.yml"),
+    `base: main
+batch: 1
+steps: [check, merge]
+check: "true"
+merge: {}
+${JOURNAL_CONFIG}`,
+  )
   await git(repo, "add", "README.md", ".yrd.yml")
   await git(repo, "commit", "-qm", "main")
   await git(repo, "push", "-q", "-u", "origin", "main")
@@ -1582,6 +1723,7 @@ batch: 1
 steps: [check, merge]
 check: ${JSON.stringify(check)}
 merge: {}
+${JOURNAL_CONFIG}
 notify:
   run/failed: [submitter]
 `,

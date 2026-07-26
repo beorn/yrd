@@ -53,6 +53,10 @@ export type BayStatusFacts = Readonly<{
   tipLandedUnknown?: boolean
   /** Commits not on origin/main (ahead count) when computable. */
   aheadOfOrigin?: number
+  /** Commits whose stable patch is absent from origin/main. */
+  uniquePatches?: number
+  /** Whether origin remote-tracking refs were refreshed and pruned for this report. */
+  remoteTrackingFresh?: boolean
   /** Repo-global stash entries attributed to this bay (best-effort). */
   stashAttributed?: number
   stashUnknown?: boolean
@@ -140,7 +144,23 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
   }
 
   // commits — clean tree alone is NOT enough (22290 sample: 22/25 clean-but-ahead)
-  if (facts.tipLandedUnknown === true || (facts.tipLanded === undefined && facts.aheadOfOrigin === undefined)) {
+  const unique = facts.uniquePatches ?? facts.aheadOfOrigin
+  if (facts.remoteTrackingFresh === false) {
+    lines.push({
+      class: "commits",
+      verdict: "UNKNOWN",
+      evidence: "could not refresh and prune origin refs — commit durability is unknown",
+    })
+  } else if (facts.tipDurableAt !== undefined && facts.tipLanded !== true) {
+    lines.push({
+      class: "commits",
+      verdict: "PASS",
+      evidence:
+        unique === undefined
+          ? `tip is pushed to ${facts.tipDurableAt} — unlanded but durable`
+          : `tip has ${unique} unique commit(s) pushed to ${facts.tipDurableAt} — unlanded but durable`,
+    })
+  } else if (facts.tipLandedUnknown === true || (facts.tipLanded === undefined && facts.aheadOfOrigin === undefined)) {
     lines.push({
       class: "commits",
       verdict: "UNKNOWN",
@@ -162,9 +182,9 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
       class: "commits",
       verdict: "BLOCK",
       evidence:
-        facts.aheadOfOrigin !== undefined
-          ? `tip is ${facts.aheadOfOrigin} commit(s) ahead of origin/main (unpushed/unlanded work)`
-          : "tip is not landed on origin/main",
+        unique !== undefined
+          ? `tip has ${unique} unique commit(s) on no advertised origin ref — at risk`
+          : "tip is not landed and is on no advertised origin ref — at risk",
     })
   }
 

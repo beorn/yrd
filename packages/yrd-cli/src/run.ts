@@ -2134,8 +2134,9 @@ async function closeBays(
   const bays = selectedBays(stateOf(app).bays, selectors, cwd, "close")
   const closed: Bay[] = []
   const refused: BayStatusReport[] = []
+  const remoteTrackingFresh = refreshBayStatusOrigin(cwd)
   for (const bay of bays) {
-    const report = classifyBayStatus(gatherBayStatusFacts(app, bay, cwd))
+    const report = classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh))
     if (options.force !== true && report.exit !== 0) {
       refused.push(report)
       continue
@@ -2218,8 +2219,27 @@ async function closeBays(
   }
 }
 
+/**
+ * Refresh once per status/close/prune command so a deleted remote branch cannot
+ * survive as a stale local tracking ref and authorize destructive cleanup.
+ * This is the same fetch-before-git-cherry boundary used by branch-triage.
+ */
+function refreshBayStatusOrigin(repoRoot: string): boolean {
+  try {
+    gitSync(repoRoot, ["fetch", "--no-recurse-submodules", "--prune", "--quiet", "origin"])
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** Gather live facts for one bay; classification stays pure in bay-status.ts (22290). */
-function gatherBayStatusFacts(app: YrdCliApp, bay: Bay, repoRoot: string): BayStatusFacts {
+function gatherBayStatusFacts(
+  app: YrdCliApp,
+  bay: Bay,
+  repoRoot: string,
+  remoteTrackingFresh: boolean,
+): BayStatusFacts {
   const ownerPid = parseOwnerPid(bay.name, bay.by)
   const ownerIsCaller = ownerPid === process.pid
   let ownerAlive: boolean | undefined
@@ -2243,6 +2263,7 @@ function gatherBayStatusFacts(app: YrdCliApp, bay: Bay, repoRoot: string): BaySt
   let tipDurableAt: string | undefined
   let tipLandedUnknown: boolean | undefined
   let aheadOfOrigin: number | undefined
+  let uniquePatches: number | undefined
   let stashAttributed = 0
   let stashUnknown: boolean | undefined
 
@@ -2274,6 +2295,7 @@ function gatherBayStatusFacts(app: YrdCliApp, bay: Bay, repoRoot: string): BaySt
           tipLanded = true
           tipDurableAt = "origin/main"
           aheadOfOrigin = 0
+          uniquePatches = 0
         } catch {
           tipLanded = false
           try {
@@ -2287,29 +2309,30 @@ function gatherBayStatusFacts(app: YrdCliApp, bay: Bay, repoRoot: string): BaySt
             tipLandedUnknown = true
           }
           try {
-            const remoteRef = gitSync(path, [
-              "for-each-ref",
-              "--format=%(refname:short)",
-              "--contains",
-              head,
-              "refs/remotes/",
-            ])
+            uniquePatches = gitSync(path, ["cherry", originMain, head])
               .split("\n")
-              .map((ref) => ref.trim())
-              .find((ref) => ref !== "" && ref !== "origin")
-            if (remoteRef !== undefined) {
+              .filter((line) => line.startsWith("+ ")).length
+            if (uniquePatches === 0) {
               tipLanded = true
-              tipDurableAt = remoteRef
+              tipDurableAt = "origin/main (same changes)"
               tipLandedUnknown = undefined
-            } else {
-              const unique = gitSync(path, ["cherry", "origin/main", head])
+            } else if (remoteTrackingFresh) {
+              const remoteRef = gitSync(path, [
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "--contains",
+                head,
+                "refs/remotes/origin/",
+              ])
                 .split("\n")
-                .filter((line) => line.startsWith("+ "))
-              if (unique.length === 0) {
-                tipLanded = true
-                tipDurableAt = "origin/main (same changes)"
+                .map((ref) => ref.trim())
+                .find((ref) => ref !== "" && ref !== "origin")
+              if (remoteRef !== undefined) {
+                tipDurableAt = remoteRef
                 tipLandedUnknown = undefined
               }
+            } else {
+              tipLandedUnknown = true
             }
           } catch {
             tipLandedUnknown = true
@@ -2351,6 +2374,8 @@ function gatherBayStatusFacts(app: YrdCliApp, bay: Bay, repoRoot: string): BaySt
     ...(tipDurableAt === undefined ? {} : { tipDurableAt }),
     ...(tipLandedUnknown === undefined ? {} : { tipLandedUnknown }),
     ...(aheadOfOrigin === undefined ? {} : { aheadOfOrigin }),
+    ...(uniquePatches === undefined ? {} : { uniquePatches }),
+    remoteTrackingFresh,
     stashAttributed,
     ...(stashUnknown === undefined ? {} : { stashUnknown }),
     openPrIds,
@@ -2370,7 +2395,10 @@ async function bayStatusCommand(
       : selectedBays(stateOf(app).bays, selectors, cwd, "status")
   if (bays.length === 0) usage("bay status requires at least one open bay (or a selector)")
 
-  const reports: BayStatusReport[] = bays.map((bay) => classifyBayStatus(gatherBayStatusFacts(app, bay, cwd)))
+  const remoteTrackingFresh = refreshBayStatusOrigin(cwd)
+  const reports: BayStatusReport[] = bays.map((bay) =>
+    classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh)),
+  )
   // Aggregate exit: any BLOCK → 1; else any UNKNOWN → 2; else 0.
   // YrdCliExitCode is 0|1|2|3; bay status uses the 0/1/2 subset (2 = unknown).
   let exit: YrdCliExitCode = 0
@@ -2396,7 +2424,8 @@ async function bayPruneCommand(
 ): Promise<YrdCliExitCode> {
   const cwd = io.cwd ?? process.cwd()
   const open = app.bays.list().filter((bay) => bay.status !== "closed")
-  const reports = open.map((bay) => classifyBayStatus(gatherBayStatusFacts(app, bay, cwd)))
+  const remoteTrackingFresh = refreshBayStatusOrigin(cwd)
+  const reports = open.map((bay) => classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh)))
   const safe = reports.filter((report) => report.exit === 0)
   const survivors = reports.filter((report) => report.exit !== 0)
   const dryRun = options.apply !== true
@@ -3233,13 +3262,38 @@ function sameIssueIntegratedCompositions(app: YrdCliApp, pr: PR): readonly Compo
   return compositions.length === 0 ? undefined : compositions
 }
 
-async function listBays(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Promise<void> {
+async function listBays(
+  app: YrdCliApp,
+  options: JsonOption & Readonly<{ check?: boolean }>,
+  io: YrdCliIO,
+): Promise<void> {
   const bays = app.bays.list()
+  const open = bays.filter((bay) => bay.status !== "closed")
+  const cwd = io.cwd ?? process.cwd()
+  let reports: BayStatusReport[] | undefined
+  if (options.check === true) {
+    const remoteTrackingFresh = refreshBayStatusOrigin(cwd)
+    reports = open.map((bay) => classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh)))
+  }
+  const safety =
+    reports === undefined
+      ? undefined
+      : new Map(
+          reports.map((report) => [
+            report.bay,
+            report.exit === 0 ? ("safe" as const) : report.exit === 1 ? ("blocked" as const) : ("unknown" as const),
+          ]),
+        )
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "bay.list", bays, lifecycles: app.bays.branchLifecycles() },
-    createElement(BayStatusView, { bays }),
+    {
+      command: "bay.list",
+      bays,
+      lifecycles: app.bays.branchLifecycles(),
+      ...(reports === undefined ? {} : { reports }),
+    },
+    createElement(BayStatusView, { bays, ...(safety === undefined ? {} : { safety }) }),
   )
 }
 
@@ -6217,11 +6271,13 @@ function buildProgram(
   bay
     .command("_list", { isDefault: true, hidden: true })
     .option("--json", "emit stable JSON")
+    .option("--check", "compute live destroy-safety status (fetches origin; may be slow)")
     .action(async (options) => listBays(installed(), options, io))
   bay
     .command("list")
     .description("list work bays")
     .option("--json", "emit stable JSON")
+    .option("--check", "compute live destroy-safety status (fetches origin; may be slow)")
     .action(async (options) => listBays(installed(), options, io))
   bay
     .command("open")
