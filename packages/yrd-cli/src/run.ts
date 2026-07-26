@@ -101,6 +101,7 @@ import {
 } from "./queue-status-view.tsx"
 import { submittedPrPositions } from "./queue-position.ts"
 import { preflightRecut, prunePrs, withdrawPrs } from "./pr-withdraw.ts"
+import { requireImplicitRecutBranchFreshness } from "./recut-branch-freshness.ts"
 import { resolveSubmitSelectors } from "./submit-selection.ts"
 import {
   classifyBayStatus,
@@ -292,13 +293,32 @@ export async function residentRunnerStatus(cwd: string): Promise<QueueTimelineRu
   }
 }
 
+/** Whether the recorded pid still names a live process. ESRCH is proof it is
+ * gone; EPERM proves the opposite — a process exists that this user does not
+ * own — so only ESRCH may retire a runner. */
+function residentRunnerRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (cause) {
+    return (cause as NodeJS.ErrnoException).code !== "ESRCH"
+  }
+}
+
 /** The status file is no longer deleted on close (D1a) — a departed runner leaves
  * an exit marker so a successor can reclaim its pid. For DISPLAY (health + timeline)
  * an exited runner is not draining, so it reads as "no active runner", preserving
  * the pre-marker "NO RUNNER"/absent semantics. Reclaim, by contrast, consumes the
- * raw marker (it needs the dead pid), so it must NOT go through this filter. */
+ * raw marker (it needs the dead pid), so it must NOT go through this filter.
+ *
+ * `exitedAt` alone only retires runners that got to write it. A SIGKILL, an OOM,
+ * or a crash leaves the record behind with a plausible pid and a frozen
+ * heartbeat, which then displays as STALE — "a runner that is running late" —
+ * for an unattended queue (22374). The pid probe is what separates departed from
+ * late, so display asks it directly. */
 function activeResidentRunner(runner: QueueTimelineRunner | null): QueueTimelineRunner | null {
-  return runner?.exitedAt !== undefined ? null : runner
+  if (runner === null || runner.exitedAt !== undefined) return null
+  return residentRunnerRunning(runner.pid) ? runner : null
 }
 
 type RunnerGitDistance = Readonly<{
@@ -316,11 +336,35 @@ type RunnerGitHealth = Readonly<{
   baselines: readonly RunnerGitDistance[]
 }>
 
+/** The toolchain THIS invocation is running on. Step identity no longer depends
+ * on the launcher's bun/node versions (22374), but which binary is in the
+ * caller's PATH remains the discriminating read whenever a resident and an
+ * operator disagree — and `execPath` is the part that names the install rather
+ * than merely a version two installs can share. */
+type RunnerLauncherFacts = Readonly<{
+  bun: string
+  node: string
+  platform: string
+  arch: string
+  execPath: string
+}>
+
+function runnerLauncherFacts(): RunnerLauncherFacts {
+  return {
+    bun: Bun.version,
+    node: process.versions.node,
+    platform: process.platform,
+    arch: process.arch,
+    execPath: process.execPath,
+  }
+}
+
 type RunnerHealthFacts = Readonly<{
   lease: "held" | "free" | "unknown"
   runnerStatus: "fresh" | "stale" | "missing"
   runnerAgeMs?: number
   runner?: QueueTimelineRunner
+  launcher: RunnerLauncherFacts
   git: RunnerGitHealth
 }>
 
@@ -436,6 +480,7 @@ async function queueRunnerHealth(
       runnerStatus,
       ...(runnerAgeMs === undefined ? {} : { runnerAgeMs }),
       ...(runner === null ? {} : { runner }),
+      launcher: runnerLauncherFacts(),
       git,
     }
     const drift = auditResult.findings.filter(
@@ -534,7 +579,7 @@ async function queueRunnerHealth(
         state: "unhealthy",
         running: leaseHeld === true,
         error: actionableFailure(fact),
-        facts: { lease, runnerStatus: "missing", git },
+        facts: { lease, runnerStatus: "missing", launcher: runnerLauncherFacts(), git },
       },
     }
   }
@@ -2458,6 +2503,12 @@ async function recutPr(
   options: JsonOption & Readonly<{ revision?: number; queue?: boolean; force?: boolean; preflight?: boolean }>,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
+  const pr = requiredPr(app, selector)
+  const selectedRevision = options.revision ?? currentPRRev(pr).n
+  const selected = pr.revs.find((revision) => revision.n === selectedRevision)
+  if (isLivePR(pr) && selected !== undefined) {
+    await requireImplicitRecutBranchFreshness(pr, selected, options, services, io)
+  }
   if (options.preflight === true) {
     await preflightRecut(app, selector, options, io)
     return 0
@@ -2506,6 +2557,14 @@ async function executeRecutPr(
   ) {
     raiseFailure("refusal", "terminal-target", `yrd: PR '${pr.id}' is ${delivery}; terminal PRs cannot be recut`)
   }
+  if (options.revision !== undefined && (!Number.isInteger(options.revision) || options.revision < 1)) {
+    usage("--revision must be a positive integer")
+  }
+  const fromRevision = options.revision ?? currentRevision.n
+  const source = pr.revs.find((revision) => revision.n === fromRevision)
+  if (source === undefined) {
+    raiseFailure("refusal", "revision-missing", `yrd: PR '${pr.id}' has no revision ${fromRevision}`)
+  }
   // Refuse to silently discard a green check: if the PR's current head already
   // holds a passing check for its current revision, recutting supersedes that
   // revision and throws the passing result away. Require an explicit --force so
@@ -2517,14 +2576,6 @@ async function executeRecutPr(
       `yrd: PR '${pr.id}' revision ${currentRevision.n} already holds a passing check; recut would discard it. ` +
         "Re-run with --force to override.",
     )
-  }
-  if (options.revision !== undefined && (!Number.isInteger(options.revision) || options.revision < 1)) {
-    usage("--revision must be a positive integer")
-  }
-  const fromRevision = options.revision ?? currentRevision.n
-  const source = pr.revs.find((revision) => revision.n === fromRevision)
-  if (source === undefined) {
-    raiseFailure("refusal", "revision-missing", `yrd: PR '${pr.id}' has no revision ${fromRevision}`)
   }
   const approval = pr.reviews.findLast(
     (review) => review.revision === source.n && review.headSha === source.head && review.decision === "approve",
@@ -2556,6 +2607,25 @@ async function executeRecutPr(
           },
         }),
   })
+  const sources =
+    result.unchanged && currentRevision.recut?.sources !== undefined
+      ? currentRevision.recut.sources
+      : [
+          {
+            repo: ".",
+            fromHeadSha: source.head,
+            toHeadSha: result.headSha,
+            patchId: result.patchId,
+            rangeDiff: "=" as const,
+          },
+          ...(result.sourceRewrites ?? []).map((rewrite) => ({
+            repo: rewrite.repo,
+            fromHeadSha: rewrite.oldTipSha,
+            toHeadSha: rewrite.newTipSha,
+            patchId: rewrite.patchId,
+            rangeDiff: rewrite.rangeDiff,
+          })),
+        ]
   const recorded = await app.bays.recut({
     pr: pr.id,
     fromRevision: source.n,
@@ -2564,6 +2634,7 @@ async function executeRecutPr(
     treeSha: result.treeSha,
     patchId: result.patchId,
     reviewCarried: approval !== undefined,
+    sources,
     ...(result.composition === undefined ? {} : { composition: result.composition }),
     expectedCurrent,
     ...(options.transition === undefined ? {} : { transition: options.transition }),

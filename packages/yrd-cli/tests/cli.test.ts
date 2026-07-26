@@ -16,6 +16,7 @@ import {
   currentPRRev,
   prBaseSha,
   prDeliveryState,
+  prRevisionLineage,
   withBays,
   type BayWorkspace,
   type PR,
@@ -37,7 +38,7 @@ import {
 } from "@yrd/core"
 import { withJobs, type Job, type JobResult } from "@yrd/job"
 import { createExclusive, createJournal } from "@yrd/persistence"
-import type { ProcessRequest, ProcessResult } from "@yrd/process"
+import { createProcess, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import {
   Queues,
   type Run,
@@ -112,6 +113,9 @@ import { QueueWatchFrame, QueueWatchPane, queueDetailTier, type QueueWatchPanePr
 const BASE_SHA = "a".repeat(40)
 const HEAD_SHA = "1".repeat(40)
 const MERGED_SHA = "b".repeat(40)
+const PR1640_RECORDED_HEAD = "4d8615400959a1443b1664e707eecee10d6ebe95"
+const PR1640_LIVE_HEAD = "b3fae22ec7a08288b586a28b123a9e11ad3bca91"
+const PR1640_BRANCH = "task/@yrd/core/22366-post-landing-component-main"
 const JOB_PREPARE_PASS_ID = "00000000-0000-7000-8000-000000000101"
 const JOB_CHECK_FAILED_ID = "00000000-0000-7000-8000-000000000102"
 const JOB_DEPLOY_LOST_ID = "00000000-0000-7000-8000-000000000103"
@@ -473,6 +477,22 @@ function outputIO(overrides: Partial<YrdCliIO> = {}) {
     ...overrides,
   }
   return { io, stdout: () => stdout, stderr: () => stderr }
+}
+
+function recutIO(app: TestApp, selector = "PR1", overrides: Partial<YrdCliIO> = {}) {
+  const pr = app.bays.pr(selector)
+  if (pr === undefined) throw new Error(`missing ${selector}`)
+  const recorded = prRevisionLineage(pr)[0]
+  if (recorded === undefined) throw new Error(`missing ${selector} source lineage`)
+  return outputIO({
+    pruneGit: () => ({
+      resolveCommit: (ref) => (ref === `origin/${pr.branch}` || ref === pr.branch ? recorded.head : undefined),
+      isAncestor: () => false,
+      mergeTree: () => undefined,
+      treeOf: () => recorded.head,
+    }),
+    ...overrides,
+  })
 }
 
 function yrd(...args: string[]): string[] {
@@ -1375,7 +1395,7 @@ describe("runYrd", () => {
     expect(Queues.ids(app.state().queues)).toEqual([])
     expect(checkedRevisions).toEqual([])
 
-    const recut = outputIO()
+    const recut = recutIO(app)
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), recut.io, services)).toBe(0)
     expect(JSON.parse(recut.stdout())).toMatchObject({
       pr: "PR1",
@@ -1431,7 +1451,7 @@ describe("runYrd", () => {
     // recut's embedded driver raced the resident — two drivers on one queue,
     // and the raced runs were lost. Recut must enqueue and leave settlement to
     // the resident.
-    const recut = outputIO({ residentLeaseHeld: () => Promise.resolve(true) })
+    const recut = recutIO(app, "PR1", { residentLeaseHeld: () => Promise.resolve(true) })
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), recut.io, services)).toBe(0)
     expect(checkedRevisions).toEqual([])
     expect(app.queue.get("R1")).toMatchObject({ prs: [{ id: "PR1", revision: 2 }] })
@@ -1539,11 +1559,12 @@ describe("runYrd", () => {
             treeSha: "a".repeat(40),
             patchId: "b".repeat(40),
             unchanged: false,
+            sourceRewrites: [rewrite],
           })
         },
       },
     } as unknown as YrdCliServices
-    const recut = outputIO()
+    const recut = recutIO(app, "PR3")
 
     expect(await runYrd(app, yrd("pr", "recut", "PR3", "--queue", "--json"), recut.io, services)).toBe(0)
     expect(requests).toEqual([
@@ -1563,6 +1584,26 @@ describe("runYrd", () => {
         })),
       }),
     ])
+    expect(currentPRRev(app.bays.pr("PR3")!)).toMatchObject({
+      recut: {
+        sources: [
+          {
+            repo: ".",
+            fromHeadSha: "2".repeat(40),
+            toHeadSha: "8".repeat(40),
+            patchId: "b".repeat(40),
+            rangeDiff: "=",
+          },
+          {
+            repo: "vendor/yrd",
+            fromHeadSha: rewrite.oldTipSha,
+            toHeadSha: rewrite.newTipSha,
+            patchId: rewrite.patchId,
+            rangeDiff: "=",
+          },
+        ],
+      },
+    })
   })
 
   it("certifies and queues a pin-only authored carrier after draft registration", async () => {
@@ -1590,7 +1631,7 @@ describe("runYrd", () => {
     expect(Queues.ids(app.state().queues)).toEqual([])
     expect(checkedRevisions).toEqual([])
 
-    const recut = outputIO()
+    const recut = recutIO(app)
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), recut.io, services)).toBe(0)
     expect(JSON.parse(recut.stdout())).toMatchObject({
       pr: "PR1",
@@ -1646,7 +1687,7 @@ describe("runYrd", () => {
         },
       },
     } as unknown as YrdCliServices
-    const recut = outputIO()
+    const recut = recutIO(app)
 
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), recut.io, services)).toBe(0)
     expect(app.queue.get("R1")).toMatchObject({
@@ -1690,7 +1731,7 @@ describe("runYrd", () => {
       },
     } as unknown as YrdCliServices
 
-    const output = outputIO()
+    const output = recutIO(app)
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), output.io, services)).toBe(0)
 
     expect(app.queue.get("R1")).toMatchObject({
@@ -1781,7 +1822,7 @@ describe("runYrd", () => {
       },
     } as unknown as YrdCliServices
 
-    const output = outputIO()
+    const output = recutIO(app, "PR2")
     expect(await runYrd(app, yrd("pr", "recut", "PR2", "--queue", "--json"), output.io, services)).toBe(0)
 
     expect(app.queue.get("R1")).toMatchObject({
@@ -1845,7 +1886,7 @@ describe("runYrd", () => {
     ])
     expect(checkRuns).toEqual([])
     expect(mergeRuns).toEqual([])
-    const output = outputIO()
+    const output = recutIO(app)
 
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), output.io, services)).toBe(0)
 
@@ -1878,7 +1919,21 @@ describe("runYrd", () => {
       n: 2,
       head: nextHead,
       correlation,
-      recut: { fromRevision: 1, treeSha, patchId, reviewCarried: true },
+      recut: {
+        fromRevision: 1,
+        treeSha,
+        patchId,
+        reviewCarried: true,
+        sources: [
+          {
+            repo: ".",
+            fromHeadSha: HEAD_SHA,
+            toHeadSha: nextHead,
+            patchId,
+            rangeDiff: "=",
+          },
+        ],
+      },
     })
     expect(recutPr.revs).toMatchObject([
       { n: 1, correlation, submittedAt: sourceReadyAt },
@@ -1917,11 +1972,119 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("pr", "view", "PR1"), detail.io, services)).toBe(0)
     expect(detail.stdout()).toContain(`SOURCE READY ${sourceReadyAt}`)
     expect(detail.stdout()).toContain("HISTORY rev1→rev2")
+    expect(detail.stdout()).toContain(`RECOMPOSED . ${HEAD_SHA.slice(0, 12)}→${nextHead.slice(0, 12)}`)
 
     const repeated = outputIO()
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--revision", "1", "--json"), repeated.io, services)).toBe(0)
     expect(JSON.parse(repeated.stdout())).toMatchObject({ revision: 2, unchanged: true })
     expect(app.bays.pr("PR1")?.revs).toHaveLength(2)
+  })
+
+  it("refuses PR1640's implicit stale replay before invoking the recutter", async () => {
+    const app = await createApp()
+    const requests: unknown[] = []
+    const services = {
+      recut: {
+        recut(input: unknown) {
+          requests.push(input)
+          return Promise.resolve({
+            headSha: "3".repeat(40),
+            baseSha: "b".repeat(40),
+            treeSha: "c".repeat(40),
+            patchId: "d".repeat(40),
+            unchanged: false,
+          })
+        },
+      },
+    } as unknown as YrdCliServices
+    await app.bays.submit({
+      branch: PR1640_BRANCH,
+      headSha: PR1640_RECORDED_HEAD,
+      baseSha: BASE_SHA,
+    })
+    const output = outputIO({
+      pruneGit: () => ({
+        resolveCommit: (ref) =>
+          ref === `origin/${PR1640_BRANCH}` || ref === PR1640_BRANCH ? PR1640_LIVE_HEAD : undefined,
+        isAncestor: () => false,
+        mergeTree: () => undefined,
+        treeOf: () => PR1640_LIVE_HEAD,
+      }),
+    })
+
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), output.io, services)).toBe(1)
+    expect(output.stderr()).toContain(`recorded revision 1 head '${PR1640_RECORDED_HEAD}'`)
+    expect(output.stderr()).toContain(`live branch '${PR1640_BRANCH}' is '${PR1640_LIVE_HEAD}'`)
+    expect(output.stderr()).toContain(`yrd pr submit ${PR1640_BRANCH}`)
+    expect(output.stderr()).toContain("yrd pr recut PR1 --revision 1 --preflight --queue")
+    expect(requests).toEqual([])
+    expect(app.bays.pr("PR1")?.revs).toHaveLength(1)
+  })
+
+  it("refreshes a stale tracking ref before comparing the authored branch", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-recut-live-branch-"))
+    const remote = join(root, "remote.git")
+    const author = join(root, "author")
+    const observer = join(root, "observer")
+    const branch = "topic/live-head"
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim()
+    try {
+      execFileSync("git", ["init", "--bare", remote], { stdio: "ignore" })
+      execFileSync("git", ["init", "-b", "main", author], { stdio: "ignore" })
+      git(author, "config", "user.name", "Yrd Test")
+      git(author, "config", "user.email", "yrd@example.test")
+      writeFileSync(join(author, "specimen.txt"), "base\n")
+      git(author, "add", "specimen.txt")
+      git(author, "commit", "-m", "base")
+      git(author, "remote", "add", "origin", remote)
+      git(author, "push", "-u", "origin", "main")
+      git(remote, "symbolic-ref", "HEAD", "refs/heads/main")
+      git(author, "switch", "-c", branch)
+      writeFileSync(join(author, "specimen.txt"), "base\nrecorded\n")
+      git(author, "commit", "-am", "recorded PR head")
+      const recordedHead = git(author, "rev-parse", "HEAD")
+      git(author, "push", "-u", "origin", branch)
+      execFileSync("git", ["clone", "--quiet", remote, observer], { stdio: "ignore" })
+      git(observer, "fetch", "--quiet", "origin", `${branch}:refs/remotes/origin/${branch}`)
+      expect(git(observer, "rev-parse", `origin/${branch}`)).toBe(recordedHead)
+
+      writeFileSync(join(author, "specimen.txt"), "base\nrecorded\nlive\n")
+      git(author, "commit", "-am", "advance live branch")
+      const liveHead = git(author, "rev-parse", "HEAD")
+      git(author, "push", "origin", branch)
+      expect(git(observer, "rev-parse", `origin/${branch}`)).toBe(recordedHead)
+
+      const app = await createApp()
+      await app.bays.submit({ branch, headSha: recordedHead, baseSha: BASE_SHA })
+      const requests: unknown[] = []
+      await using runtimeProcess = createProcess({ cwd: observer })
+      const services = {
+        process: runtimeProcess,
+        recut: {
+          recut(input: unknown) {
+            requests.push(input)
+            return Promise.resolve({
+              headSha: "3".repeat(40),
+              baseSha: "b".repeat(40),
+              treeSha: "c".repeat(40),
+              patchId: "d".repeat(40),
+              unchanged: false,
+            })
+          },
+        },
+      } as unknown as YrdCliServices
+      const output = outputIO({ cwd: observer })
+
+      expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), output.io, services)).toBe(1)
+      expect(output.stderr()).toContain(`recorded revision 1 head '${recordedHead}'`)
+      expect(output.stderr()).toContain(`live branch '${branch}' is '${liveHead}'`)
+      expect(output.stderr()).toContain("advance live branch")
+      expect(requests).toEqual([])
+      expect(git(observer, "rev-parse", `origin/${branch}`)).toBe(liveHead)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it("mechanically recuts an admitted certificate across consecutive base advances (R1304/R1307)", async () => {
@@ -2354,7 +2517,7 @@ describe("runYrd", () => {
         },
       },
     } as unknown as YrdCliServices
-    const output = outputIO()
+    const output = recutIO(app)
 
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--json"), output.io, services)).toBe(0)
 
@@ -2396,7 +2559,7 @@ describe("runYrd", () => {
     } as unknown as YrdCliServices
 
     // Without --force the recut is refused so nobody mechanically discards the green check.
-    const refused = outputIO()
+    const refused = recutIO(app)
     expect(await runYrd(app, yrd("pr", "recut", "PR1"), refused.io, services)).toBe(1)
     expect(refused.stderr()).toContain("passing check")
     expect(refused.stderr()).toContain("--force")
@@ -2406,7 +2569,7 @@ describe("runYrd", () => {
     expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 1, head: HEAD_SHA })
 
     // With --force the recut proceeds exactly as before the guard.
-    const forced = outputIO()
+    const forced = recutIO(app)
     expect(
       await runYrd(app, yrd("pr", "recut", "PR1", "--force", "--json"), forced.io, services),
       forced.stderr(),
@@ -5146,14 +5309,28 @@ describe("runYrd", () => {
     expect(statsIndex).toBeGreaterThan(pillsRowIndex)
   })
 
-  it("projects fresh, stale, and absent resident runner heartbeats", async () => {
+  /** A pid PROVEN absent by signal 0, rather than a large number assumed unused. */
+  function unusedPid(): number {
+    for (let candidate = 4_194_303; candidate > 4_190_000; candidate -= 1) {
+      try {
+        process.kill(candidate, 0)
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code === "ESRCH") return candidate
+      }
+    }
+    throw new Error("no unused pid available for the departed-runner probe")
+  }
+
+  it("projects fresh, stale, dead-pid, and absent resident runner heartbeats", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-status-"))
     execFileSync("git", ["init", "-q", repo])
     const statusDir = join(repo, ".git", "yrd", "resident-runner")
     const statusPath = join(statusDir, "status.json")
     mkdirSync(statusDir, { recursive: true })
+    // A LIVE pid, because fresh/stale are heartbeat classifications OF a running
+    // runner. This process is the only pid a test can prove is alive.
     const runner = {
-      pid: 4242,
+      pid: process.pid,
       startedAt: "2026-07-13T11:00:00.000Z",
       lastTickAt: "2026-07-13T11:59:55.000Z",
     }
@@ -5178,6 +5355,22 @@ describe("runYrd", () => {
       })
       expect(await runYrd(app, yrd("queue", "list"), stale.io), stale.stderr()).toBe(0)
       expect(stale.stdout()).toContain("RUNNER STALE")
+
+      // A runner killed by SIGKILL, OOM, or a crash never writes `exitedAt`, so
+      // its status file outlives it with a plausible pid and a frozen heartbeat.
+      // Reading that as STALE describes a runner that is merely late; the queue
+      // is in fact unattended, and the operator needs the second answer. Live
+      // specimen 2026-07-25: pid 20486 gone, `queue list` said STALE, and the
+      // outage was found by whoever next ran a command.
+      writeFileSync(statusPath, JSON.stringify({ ...runner, pid: unusedPid() }))
+      const dead = outputIO({
+        cwd: repo,
+        now: () => Date.parse("2026-07-13T12:00:20.001Z"),
+        resolveQueueTarget,
+      })
+      expect(await runYrd(app, yrd("queue", "list"), dead.io), dead.stderr()).toBe(0)
+      expect(dead.stdout()).toContain("NO RUNNER - no drained run in window")
+      expect(dead.stdout(), "a departed runner is not a late one").not.toContain("RUNNER STALE")
 
       rmSync(statusPath)
       const absent = outputIO({ cwd: repo, resolveQueueTarget })

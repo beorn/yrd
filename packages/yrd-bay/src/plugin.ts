@@ -40,6 +40,7 @@ import {
   GitShaSchema,
   PRIdSchema,
   PRFreshnessTransitionSchema,
+  PRRecutSourceSchema,
   PRNeedsAuthorFactSchema,
   PRRejectedFactSchema,
   PRTerminalAssociationSchema,
@@ -253,6 +254,7 @@ const PrRecutArgsSchema = z
     treeSha: GitShaSchema,
     patchId: GitShaSchema,
     reviewCarried: z.boolean(),
+    sources: z.array(PRRecutSourceSchema).min(1).readonly().optional(),
     composition: CompositionV1Schema.optional(),
     expectedCurrent: PrRecutExpectedCurrentSchema.optional(),
     transition: PRFreshnessTransitionSchema.optional(),
@@ -345,6 +347,7 @@ const PRRecutFactSchema = z
     baseSha: GitShaSchema,
     treeSha: GitShaSchema,
     reviewCarried: z.boolean(),
+    sources: z.array(PRRecutSourceSchema).min(1).readonly().optional(),
     predecessor: PRRecutLineageSchema,
     successor: PRRecutLineageSchema.extend({ baseSha: GitShaSchema }).strict(),
     composition: CompositionV1Schema.optional(),
@@ -1827,6 +1830,7 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
     recut.patchId === args.patchId &&
     recut.treeSha === args.treeSha &&
     recut.reviewCarried === args.reviewCarried &&
+    JSON.stringify(recut.sources) === JSON.stringify(args.sources) &&
     recut.transition?.from === args.transition?.from &&
     recut.transition?.to === args.transition?.to &&
     sameComposition(prComposition(pr), args.composition)
@@ -1889,6 +1893,7 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
         baseSha: args.baseSha,
         treeSha: args.treeSha,
         reviewCarried: args.reviewCarried,
+        ...(args.sources === undefined ? {} : { sources: args.sources }),
         predecessor: {
           revision: predecessor.n,
           headSha: predecessor.head,
@@ -2375,6 +2380,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         patchId: recut.patchId,
         treeSha: recut.treeSha,
         reviewCarried: recut.reviewCarried,
+        ...(recut.sources === undefined ? {} : { sources: recut.sources }),
         ...(recut.transition === undefined ? {} : { transition: recut.transition }),
       }
       const correlation = predecessor.correlation

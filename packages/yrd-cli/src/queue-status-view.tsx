@@ -2630,10 +2630,7 @@ export function QueueRecoveryView({
         Recovery left blocking queue findings:
       </Text>
       {findings.map((finding) => (
-        <Text
-          key={`${finding.code}:${finding.run ?? ""}:${finding.step ?? ""}:${finding.message}`}
-          color="$fg-error"
-        >
+        <Text key={`${finding.code}:${finding.run ?? ""}:${finding.step ?? ""}:${finding.message}`} color="$fg-error">
           {finding.run === undefined ? "" : `${finding.run} `}
           {finding.code}: {finding.message}
         </Text>
@@ -2974,6 +2971,7 @@ export function PRDetailView({
   const detail = prDetailData(pr, runs, attempts)
   const lineage = timelineRevisionLineage(pr)
   const revisionLineage = lineage.revisions.map((revision) => `rev${revision}`).join("→")
+  const recomposedSources = prRevisionLineage(pr).flatMap((candidate) => candidate.recut?.sources ?? [])
   const taskStatus = prTaskStatusOf(pr)
   const projectionFields = taskStatusFields(taskStatus)
 
@@ -3010,6 +3008,14 @@ export function PRDetailView({
       <Text>
         <Text bold>SOURCE READY</Text> {lineage.sourceReadyAt ?? "-"} <Text bold>HISTORY</Text> {revisionLineage}
       </Text>
+      {recomposedSources.length === 0 ? null : (
+        <Text wrap="wrap">
+          <Text bold>RECOMPOSED</Text>{" "}
+          {recomposedSources
+            .map(({ repo, fromHeadSha, toHeadSha }) => `${repo} ${fromHeadSha.slice(0, 12)}→${toHeadSha.slice(0, 12)}`)
+            .join(" · ")}
+        </Text>
+      )}
       {pr.description === undefined ? null : (
         <Box flexDirection="column" minWidth={0}>
           <Text bold>DESCRIPTION</Text>
@@ -5330,9 +5336,7 @@ export function queueShowData(
   const stepNames = stepNamesOfRun(run)
   // Glyph for non-landing success must not share ✓ with real merges (21801).
   const glyph =
-    landingVerdict === "non-landing"
-      ? (statusPresentation("passed").glyph as StatusGlyph)
-      : taskStatusGlyph(taskStatus)
+    landingVerdict === "non-landing" ? (statusPresentation("passed").glyph as StatusGlyph) : taskStatusGlyph(taskStatus)
   const runFailure = failureFact(run, relevantStep(run))
   return {
     run: run.id,

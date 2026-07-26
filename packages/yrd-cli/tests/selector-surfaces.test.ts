@@ -155,6 +155,17 @@ function outputIO(overrides: Partial<YrdCliIO> = {}) {
   return { io, stdout: () => stdout, stderr: () => stderr }
 }
 
+function recutOutputIO() {
+  return outputIO({
+    pruneGit: () => ({
+      resolveCommit: (ref) => (ref === "origin/Topic/One" || ref === "Topic/One" ? HEAD_SHA : undefined),
+      isAncestor: () => false,
+      mergeTree: () => undefined,
+      treeOf: () => HEAD_SHA,
+    }),
+  })
+}
+
 function yrd(...args: string[]): string[] {
   return ["/usr/bin/bun", "/repo/bin/yrd.ts", ...args]
 }
@@ -300,7 +311,7 @@ describe("case-insensitive CLI selector surfaces", () => {
   it("recuts through the folded selector and echoes the canonical PR", async () => {
     const app = await createCliApp()
     await submitOnePR(app)
-    const output = outputIO()
+    const output = recutOutputIO()
 
     expect(await runYrd(app, yrd("pr", "recut", "pr1", "--json"), output.io, stubRecutter()), output.stderr()).toBe(0)
     expect(JSON.parse(output.stdout())).toMatchObject({ pr: "PR1" })
@@ -334,7 +345,7 @@ describe("case-insensitive CLI selector surfaces", () => {
     expect(refused.stderr()).toContain("PR 'PR1' checks failed in R1")
 
     // The sanctioned retry: recut the folded selector back into the queue.
-    const requeued = outputIO()
+    const requeued = recutOutputIO()
     expect(
       await runYrd(app, yrd("pr", "recut", "pr1", "--queue", "--json"), requeued.io, stubRecutter()),
       requeued.stderr(),
