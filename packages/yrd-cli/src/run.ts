@@ -2627,7 +2627,6 @@ async function executeRecutPr(
     treeSha: result.treeSha,
     patchId: result.patchId,
     reviewCarried: approval !== undefined,
-    provenance: sources,
     ...(prCorrelation(current) === undefined ? {} : { correlation: prCorrelation(current) }),
     sourceReadyAt: prSourceReadyAt(current),
     lineage: prRevisionLineage(current).map((revision) => revision.n),
