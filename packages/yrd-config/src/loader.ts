@@ -2,8 +2,8 @@ import { createHash } from "node:crypto"
 import { mkdir, stat, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { pathToFileURL } from "node:url"
-import { asFailure, createFailure } from "@yrd/core"
-import { defineConfig, type FlowDef, type YrdConfig } from "./model.ts"
+import { asFailure, createFailure, type JournalCompatibility } from "@yrd/core"
+import { defineConfig, withJournalCompatibility, type FlowDef, type YrdConfig } from "./model.ts"
 
 type ConfigModule = Readonly<{ default?: unknown }>
 
@@ -32,7 +32,10 @@ function parseModule(module: ConfigModule, path: string): YrdConfig {
       message: `yrd: ${path} must default-export defineConfig(...)`,
     })
   }
-  return defineConfig(...(value.flows as readonly FlowDef[]))
+  const flows = value.flows as readonly FlowDef[]
+  return "journal" in value && value.journal !== undefined
+    ? defineConfig(withJournalCompatibility(value.journal as JournalCompatibility), ...flows)
+    : defineConfig(...flows)
 }
 
 /** Load one programmatic config. Authority callers pass the blob read from the

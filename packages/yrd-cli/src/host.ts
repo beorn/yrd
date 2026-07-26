@@ -26,8 +26,18 @@ import {
   type ContestGit,
   type ContestRunnerDef,
 } from "@yrd/contest"
-import { createFailure, createYrd, createYrdDef, failureFact, pipe, raiseFailure, type Journal } from "@yrd/core"
-import { defineConfig, selectFlow } from "@yrd/config"
+import {
+  createFailure,
+  createYrd,
+  createYrdDef,
+  failureFact,
+  JOURNAL_READER_VERSION,
+  pipe,
+  raiseFailure,
+  type Journal,
+  type JournalCompatibility,
+} from "@yrd/core"
+import { defineConfig, selectFlow, withJournalCompatibility } from "@yrd/config"
 import { localRunner, withJobs } from "@yrd/job"
 import {
   configuredCommandStep,
@@ -99,6 +109,11 @@ import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliQueueAdministration, Yr
 type RuntimeStep = StepDef<PRShape, PRShape>
 
 const RawGitPushPattern = /(?:^|[\n;&|])\s*git\s+push(?:\s|$)/u
+
+export const CURRENT_JOURNAL_COMPATIBILITY = Object.freeze({
+  version: JOURNAL_READER_VERSION,
+  reader: "0024983f6ba0b17a0550c779d3d756014ad75ec4",
+}) satisfies JournalCompatibility
 
 export type DefaultYrdAppOptions = Readonly<{
   repo: string
@@ -749,6 +764,7 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
   return createYrd(contests(queue(base)), {
     inject: {
       journal: options.journal,
+      compatibility: CURRENT_JOURNAL_COMPATIBILITY,
       ...(options.scope === undefined ? {} : { scope: options.scope }),
       ...(options.log === undefined ? {} : { log: options.log }),
     },
@@ -1254,8 +1270,16 @@ async function createYrdRuntimeHost(
         : await createViewerReceiver(repository, process)
     const journal =
       mode === "active"
-        ? createJournal({ dir: repository.stateDir, inject: { log } })
-        : createReadOnlyJournal({ dir: repository.stateDir, inject: { log } })
+        ? createJournal({
+            dir: repository.stateDir,
+            ...(loaded.config.journal === undefined ? {} : { compatibility: loaded.config.journal }),
+            inject: { log },
+          })
+        : createReadOnlyJournal({
+            dir: repository.stateDir,
+            ...(loaded.config.journal === undefined ? {} : { compatibility: loaded.config.journal }),
+            inject: { log },
+          })
     const routes = loaded.config.notify ?? {}
     const defaultSubmitter = options.persona?.mailbox ?? (env.TRIBE_NAME?.trim() || "operator")
     if (mode === "active") {
@@ -1348,7 +1372,14 @@ async function createYrdRuntimeHost(
     }
     if (mode === "active") await drain()
     const services = Object.freeze({
-      ...(loaded.config.flows === undefined ? {} : { config: defineConfig(...loaded.config.flows) }),
+      ...(loaded.config.flows === undefined
+        ? {}
+        : {
+            config:
+              loaded.config.journal === undefined
+                ? defineConfig(...loaded.config.flows)
+                : defineConfig(withJournalCompatibility(loaded.config.journal), ...loaded.config.flows),
+          }),
       queue: queueAdministration(
         process,
         repository,
@@ -1408,7 +1439,11 @@ async function runReceiverHook(mode: "pre-receive" | "post-receive", env: NodeJS
       stateDir: repository.stateDir,
       baysRoot: repository.baysRoot,
       receiverPath: receiver.receiverPath,
-      journal: createJournal({ dir: repository.stateDir, inject: { log } }),
+      journal: createJournal({
+        dir: repository.stateDir,
+        ...(loaded.config.journal === undefined ? {} : { compatibility: loaded.config.journal }),
+        inject: { log },
+      }),
       process: runtimeProcess,
       config: loaded.config,
       scope,

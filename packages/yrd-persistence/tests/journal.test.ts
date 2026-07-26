@@ -17,6 +17,7 @@ import {
   type Event,
   type Journal,
   type JournalCheckpoint,
+  type JournalCompatibility,
 } from "@yrd/core"
 import {
   assertSafeWalVersion,
@@ -40,6 +41,7 @@ const SAFE_SQLITE = "3.53.0"
 
 type ExpectedJournalOptions = Readonly<{
   dir: string
+  compatibility?: JournalCompatibility
   lock?: ExclusiveOptions
   inject?: Readonly<{
     exclusive?: Exclusive
@@ -645,6 +647,47 @@ describe("SQLite Journal", () => {
     const head = left.appended ? left.cursor : right.cursor
     expect(await accepted(firstJournal, loser, head)).toBe(2)
     await expect(Array.fromAsync(secondJournal.read())).resolves.toEqual([{ cursor: 2, values: [winner, loser] }])
+  })
+
+  it("refuses a writer above the configured reader floor before append and names the required pin", async () => {
+    const dir = await directory()
+    const configuredReader = "0".repeat(40)
+    const requiredReader = "9f0366a691e38a7468905425a8bab6fd020b3954"
+    const journal = createJournal({
+      dir,
+      compatibility: { version: 1, reader: configuredReader },
+      inject: { sqliteVersion: SAFE_SQLITE },
+    } as unknown as Parameters<typeof createJournal>[0])
+    const value = {
+      ...frame("newer-writer"),
+      compatibility: { version: 2, reader: requiredReader },
+    }
+
+    await expect(journal.append(value, 0)).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "journal-write-version-floor",
+        message: expect.stringContaining(requiredReader),
+      },
+    })
+    expect(await missing(join(dir, SQLITE))).toBe(true)
+    await expect(Array.fromAsync(testReadOnlyJournal(dir).read())).resolves.toEqual([])
+  })
+
+  it("round-trips legacy frames and admitted versioned frames through the same journal", async () => {
+    const dir = await directory()
+    const compatibility = { version: 1, reader: "a".repeat(40) }
+    const journal = createJournal({
+      dir,
+      compatibility,
+      inject: { sqliteVersion: SAFE_SQLITE },
+    } as unknown as Parameters<typeof createJournal>[0])
+    const legacy = frame("legacy-compatible")
+    const versioned = { ...frame("versioned-compatible"), compatibility }
+
+    const first = await accepted(journal, legacy, 0)
+    await expect(journal.append(versioned, first)).resolves.toEqual({ appended: true, cursor: 2 })
+    await expect(Array.fromAsync(journal.read())).resolves.toEqual([{ cursor: 2, values: [legacy, versioned] }])
   })
 
   it("releases the writer lock before the caller consumes a pinned read result", async () => {

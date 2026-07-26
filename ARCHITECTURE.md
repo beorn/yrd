@@ -146,6 +146,14 @@ replays committed frames and reruns the pure command decision. The filesystem
 adapter takes its OS lock only for repair, comparison, append, and data sync.
 There is no writer-lease API and no hidden async execution context.
 
+Every current Frame may name a semantic journal compatibility contract as
+`{ version, reader }`. Numeric `version` alone orders formats; the full commit
+`reader` is the remediation pin for a runtime below that version. Core refuses
+future frames at read time. Persistence receives the base-authoritative
+configured reader floor and refuses a higher-version Frame before opening or
+mutating storage. Legacy Frames have no compatibility field and are version 0.
+This contract is independent of the SQLite envelope's schema version.
+
 The repository format is one strict `journal.sqlite` authority in WAL mode.
 `journal_events` holds the bounded append tail, `journal_history` holds covered
 frames as immutable cursor-addressable rows, and the singleton snapshot binds

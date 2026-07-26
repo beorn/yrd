@@ -19,6 +19,7 @@ import { createProcess, type Process, type ProcessRequest, type ProcessResult } 
 import { createLogger, type ConditionalLogger } from "loggily"
 import * as z from "zod"
 import {
+  CURRENT_JOURNAL_COMPATIBILITY,
   createDefaultYrdApp as createDefaultYrdAppRaw,
   createYrdHost as createYrdHostRaw,
   runYrdProcess,
@@ -63,6 +64,7 @@ async function journalEnvelope(repo: string) {
 function testJournal(dir: string, log?: ConditionalLogger) {
   return createJournal({
     dir,
+    compatibility: CURRENT_JOURNAL_COMPATIBILITY,
     inject: { sqliteVersion: "3.53.0", ...(log === undefined ? {} : { log }) },
   } as unknown as Parameters<typeof createJournal>[0])
 }
@@ -94,6 +96,13 @@ async function byteManifest(root: string): Promise<readonly string[]> {
   return entries.toSorted()
 }
 
+function journalCompatibilityYaml(): string {
+  return `journal:
+  version: ${CURRENT_JOURNAL_COMPATIBILITY.version}
+  reader: "${CURRENT_JOURNAL_COMPATIBILITY.reader}"
+`
+}
+
 async function repository(): Promise<{ repo: string; featureSha: string }> {
   const root = await mkdtemp(join(tmpdir(), "yrd-host-"))
   roots.push(root)
@@ -103,7 +112,8 @@ async function repository(): Promise<{ repo: string; featureSha: string }> {
   await git(repo, "config", "user.name", "Yrd Test")
   await git(repo, "config", "user.email", "yrd@example.invalid")
   await writeFile(join(repo, "README.md"), "main\n")
-  await git(repo, "add", "README.md")
+  await writeFile(join(repo, ".yrd.yml"), journalCompatibilityYaml())
+  await git(repo, "add", "README.md", ".yrd.yml")
   await git(repo, "commit", "-qm", "main")
   await git(repo, "switch", "-qc", "issue/feature")
   await writeFile(join(repo, "feature.txt"), "feature\n")
@@ -117,7 +127,7 @@ async function repository(): Promise<{ repo: string; featureSha: string }> {
 /** Install legacy spelling on the base branch: config authority is the base,
  * never the operator worktree's uncommitted bytes (design C5). */
 async function commitYrdConfig(repo: string, source: string): Promise<void> {
-  await writeFile(join(repo, ".yrd.yml"), source)
+  await writeFile(join(repo, ".yrd.yml"), `${journalCompatibilityYaml()}${source}`)
   await git(repo, "add", ".yrd.yml")
   await git(repo, "commit", "-qm", "test Yrd config")
 }
@@ -142,7 +152,18 @@ async function compositionRepository(): Promise<{
   const oldPinSha = await git(module, "rev-parse", "HEAD")
 
   await git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "dep")
-  await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "true"\nmerge: {}\n')
+  await writeFile(
+    join(repo, ".yrd.yml"),
+    `base: main
+batch: 1
+steps: [check, merge]
+journal:
+  version: ${CURRENT_JOURNAL_COMPATIBILITY.version}
+  reader: "${CURRENT_JOURNAL_COMPATIBILITY.reader}"
+check: "true"
+merge: {}
+`,
+  )
   await git(repo, "add", ".yrd.yml", ".gitmodules", "dep")
   await git(repo, "commit", "-qm", "add dependency and queue")
 
@@ -196,7 +217,18 @@ async function unpublishedSubmodulePinRepository(): Promise<{
   await git(repo, "config", "user.email", "yrd@example.invalid")
   await git(repo, "config", "protocol.file.allow", "always")
   await writeFile(join(repo, "README.md"), "root\n")
-  await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "true"\nmerge: {}\n')
+  await writeFile(
+    join(repo, ".yrd.yml"),
+    `base: main
+batch: 1
+steps: [check, merge]
+journal:
+  version: ${CURRENT_JOURNAL_COMPATIBILITY.version}
+  reader: "${CURRENT_JOURNAL_COMPATIBILITY.reader}"
+check: "true"
+merge: {}
+`,
+  )
   await git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", moduleRemote, "dep")
   await git(repo, "add", "README.md", ".yrd.yml", ".gitmodules", "dep")
   await git(repo, "commit", "-qm", "published root base")
@@ -246,6 +278,72 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     ]) {
       expect(queueStepRevision({ ...input, toolchain: launcher })).toBe(baseline)
     }
+  })
+
+  it("stamps every default-host append with the current journal compatibility contract", async () => {
+    const { repo, featureSha } = await repository()
+    const journal = createMemoryJournal()
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      requires: [],
+      definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+    await using app = await createDefaultYrdApp({
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal,
+      process: runtimeProcess,
+      config,
+    })
+
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const batches = await Array.fromAsync(journal.read())
+    expect(batches.flatMap(({ values }) => values)).toEqual([
+      expect.objectContaining({ compatibility: CURRENT_JOURNAL_COMPATIBILITY }),
+    ])
+  })
+
+  it("refuses the current default-host writer when no reader floor is configured", async () => {
+    const { repo, featureSha } = await repository()
+    const stateDir = join(repo, ".git", "yrd-no-reader-floor")
+    const journal = createJournal({
+      dir: stateDir,
+      inject: { sqliteVersion: "3.53.0" },
+    } as unknown as Parameters<typeof createJournal>[0])
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      requires: [],
+      definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+    await using app = await createDefaultYrdApp({
+      repo,
+      stateDir,
+      baysRoot: join(repo, ".bays"),
+      journal,
+      process: runtimeProcess,
+      config,
+    })
+
+    await expect(app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })).rejects.toMatchObject(
+      {
+        failure: {
+          kind: "refusal",
+          code: "journal-write-version-floor",
+          message: expect.stringContaining(CURRENT_JOURNAL_COMPATIBILITY.reader),
+        },
+      },
+    )
+    await expect(Array.fromAsync(journal.read())).resolves.toEqual([])
   })
 
   it("threads an explicit diagnostics comparator into the installed runtime step", async () => {
@@ -864,6 +962,17 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 })
 
 describe("createYrdHost", { timeout: 20_000 }, () => {
+  it("loads the base-authoritative reader floor and persists current versioned frames", async () => {
+    const { repo, featureSha } = await repository()
+    await commitYrdConfig(repo, 'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "true"\nmerge: {}\n')
+
+    await using host = await createYrdHost({ cwd: repo })
+    await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const frames = (await journalEnvelope(repo)).flatMap(({ values }) => values)
+    expect(frames).toEqual([expect.objectContaining({ compatibility: CURRENT_JOURNAL_COMPATIBILITY })])
+  })
+
   it("routes a failed Run to its revision submitter without awaiting delivery", async () => {
     const { repo, featureSha } = await repository()
     await commitYrdConfig(
@@ -1020,7 +1129,7 @@ notify:
     const { repo, featureSha } = await repository()
     await writeFile(
       join(repo, ".yrd.yml"),
-      `base: main
+      `${journalCompatibilityYaml()}base: main
 steps: [check, merge]
 check: { run: "true" }
 merge: {}
@@ -1457,6 +1566,7 @@ notify:
     await writeFile(
       join(repo, ".yrd.yml"),
       [
+        journalCompatibilityYaml().trimEnd(),
         "base: main",
         "batch: 1",
         "steps: [check, merge]",
@@ -1541,6 +1651,7 @@ notify:
     await writeFile(
       join(repo, ".yrd.yml"),
       [
+        journalCompatibilityYaml().trimEnd(),
         "base: main",
         "batch: 2",
         "steps: [check, merge]",
@@ -1615,6 +1726,7 @@ notify:
     await writeFile(
       join(repo, ".yrd.yml"),
       [
+        journalCompatibilityYaml().trimEnd(),
         "base: main",
         "batch: 1",
         "steps: [check, merge]",
@@ -1694,6 +1806,7 @@ notify:
     await writeFile(
       join(repo, ".yrd.yml"),
       [
+        journalCompatibilityYaml().trimEnd(),
         "base: main",
         "batch: 1",
         "steps: [main-health, check, merge]",

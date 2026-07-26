@@ -16,6 +16,24 @@ for await (const batch of journal.read(afterCursor)) {
 await journal.append(frame, expectedCursor)
 ```
 
+Hosts may configure the oldest admitted reader explicitly:
+
+```ts
+const journal = createJournal({
+  dir: ".git/yrd",
+  compatibility: {
+    version: 1,
+    reader: "0123456789abcdef0123456789abcdef01234567",
+  },
+})
+```
+
+If a frame requires a higher semantic journal version, `append()` refuses with
+`journal-write-version-floor` and names the frame's exact reader pin before it
+creates, opens, locks, or mutates SQLite. The commit pins are diagnostics, not
+an ordering mechanism. SQLite's internal `schema_version` is independent of
+this Core frame contract.
+
 The synchronous factory is lazy. A fresh mutable journal creates
 `journal.sqlite` on its first operation; a read-only journal never creates,
 migrates, checkpoints, or appends authority.
@@ -44,8 +62,9 @@ Append is a `BEGIN IMMEDIATE` compare-and-append transaction under
 `writer.lock`. It compares the durable head, inserts one checksummed frame,
 updates the head metadata, and commits with `synchronous=FULL`. A stale cursor
 returns `{ appended: false, cursor }`; Core replays and repeats its pure command
-decision. Every mutable connection is explicitly checkpointed and closed while
-the external lock is held.
+decision. The semantic reader-floor check runs before this storage boundary.
+Every mutable connection is explicitly checkpointed and closed while the
+external lock is held.
 
 SQLite WAL is refused at runtime on affected builds. Yrd accepts SQLite
 `>=3.51.3` and the official `3.50.7` / `3.44.6` fixed backports; the gate uses
