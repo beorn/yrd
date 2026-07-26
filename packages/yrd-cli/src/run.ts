@@ -3316,6 +3316,16 @@ async function listBays(
   io: YrdCliIO,
 ): Promise<void> {
   const bays = app.bays.list()
+  const prs = app.bays.prs()
+  const jsonBays = bays.map((bay) => {
+    const pr =
+      prs.findLast((candidate) => candidate.bay === bay.id) ??
+      prs.findLast((candidate) => candidate.branch === bay.branch)
+    return {
+      ...bay,
+      ...(pr === undefined ? {} : { pr: { id: pr.id, sessions: pr.sessions ?? [] } }),
+    }
+  })
   const open = bays.filter((bay) => bay.status !== "closed")
   const cwd = io.cwd ?? process.cwd()
   let reports: BayStatusReport[] | undefined
@@ -3337,7 +3347,7 @@ async function listBays(
     jsonEnabled(options),
     {
       command: "bay.list",
-      bays,
+      bays: jsonBays,
       lifecycles: app.bays.branchLifecycles(),
       ...(reports === undefined ? {} : { reports }),
     },

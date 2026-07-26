@@ -3199,6 +3199,28 @@ describe("runYrd", () => {
     }
   })
 
+  it("joins PR sessions into Bay JSON without widening the human table", async () => {
+    const app = await createApp()
+    await openTestBay(app, { name: "session-link", issue: "@km/test/session-link" })
+    const create = outputIO({ cwd: "/repo/.bays/B1", resolveRevision: () => Promise.resolve(HEAD_SHA) })
+    expect(await runYrd(app, yrd("pr", "create"), create.io), create.stderr()).toBe(0)
+    await app.bays.startSession({ pr: "PR1", launchId: "hab-session-link" })
+
+    const json = outputIO()
+    expect(await runYrd(app, yrd("bay", "list", "--json"), json.io), json.stderr()).toBe(0)
+    expect(JSON.parse(json.stdout())).toMatchObject({
+      bays: [
+        {
+          id: "B1",
+          pr: {
+            id: "PR1",
+            sessions: [{ launchId: "hab-session-link", startedAt: expect.any(String) }],
+          },
+        },
+      ],
+    })
+  })
+
   it("uses by, submitter, and reviewer throughout CLI help", async () => {
     const app = await createApp()
     for (const args of [
