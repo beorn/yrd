@@ -420,6 +420,17 @@ export type PRComment = Readonly<{
   ref?: string
 }>
 
+export const PRSessionOutcomeSchema = z.enum(["completed", "withdrawn", "crashed", "superseded"])
+export type PRSessionOutcome = z.infer<typeof PRSessionOutcomeSchema>
+
+/** Thin link to the authoritative Hab session record identified by launchId. */
+export type PRSession = Readonly<{
+  launchId: string
+  startedAt: string
+  endedAt?: string
+  outcome?: PRSessionOutcome
+}>
+
 export type PRReviewState = Readonly<{
   approved: boolean
   current?: PRReview
@@ -481,6 +492,7 @@ export type PR = Readonly<{
   revs: readonly PRRev[]
   reviews: readonly PRReview[]
   comments: readonly PRComment[]
+  sessions?: readonly PRSession[]
   checkRequests: readonly PRCheckRequest[]
   /** Current requested-reviewer set (latest pr/review-requested fact wins;
    * revision-independent, so recuts and new revisions keep the request).

@@ -3596,6 +3596,34 @@ describe("runYrd", () => {
     expect(createEvents).not.toContain("pr/checks-requested")
     expect(createEvents.some((name) => name.startsWith("queue/run/"))).toBe(false)
 
+    const sessionStart = outputIO()
+    expect(
+      await runYrd(app, yrd("pr", "session", "start", "PR1", "--launch-id", "hab-launch-1", "--json"), sessionStart.io),
+      sessionStart.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(sessionStart.stdout())).toMatchObject({
+      command: "pr.session.start",
+      session: { launchId: "hab-launch-1", startedAt: expect.any(String) },
+    })
+
+    const sessionStop = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "session", "stop", "PR1", "--launch-id", "hab-launch-1", "--outcome", "completed", "--json"),
+        sessionStop.io,
+      ),
+      sessionStop.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(sessionStop.stdout())).toMatchObject({
+      command: "pr.session.stop",
+      session: {
+        launchId: "hab-launch-1",
+        endedAt: expect.any(String),
+        outcome: "completed",
+      },
+    })
+
     const inbox = outputIO()
     expect(await runYrd(app, yrd("pr", "list", "--needs-review", "--json"), inbox.io), inbox.stderr()).toBe(0)
     expect(JSON.parse(inbox.stdout())).toMatchObject({

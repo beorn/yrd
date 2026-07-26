@@ -170,6 +170,43 @@ async function finishJob(app: TestApp, result: CommandResult): Promise<void> {
 }
 
 describe("withBays", () => {
+  it("records Hab launches as bounded PR sessions without copying the Hab session record", async () => {
+    await using app = (await createHarness()).app
+    await app.bays.submit({ branch: "task/session-history", headSha: HEAD_1, draft: true })
+
+    const started = await app.bays.startSession({ pr: "PR1", launchId: "hab-launch-1" })
+    expect(started.events.map(({ name }) => name)).toEqual(["pr/session-started"])
+    expect(app.bays.pr("PR1")?.sessions).toEqual([{ launchId: "hab-launch-1", startedAt: "2026-01-01T00:00:00.000Z" }])
+
+    expect((await app.bays.startSession({ pr: "PR1", launchId: "hab-launch-1" })).events).toEqual([])
+    const stopped = await app.bays.stopSession({
+      pr: "PR1",
+      launchId: "hab-launch-1",
+      outcome: "completed",
+    })
+    expect(stopped.events.map(({ name }) => name)).toEqual(["pr/session-ended"])
+    expect(app.bays.pr("PR1")?.sessions).toEqual([
+      {
+        launchId: "hab-launch-1",
+        startedAt: "2026-01-01T00:00:00.000Z",
+        endedAt: "2026-01-01T00:00:00.000Z",
+        outcome: "completed",
+      },
+    ])
+    expect(
+      (
+        await app.bays.stopSession({
+          pr: "PR1",
+          launchId: "hab-launch-1",
+          outcome: "completed",
+        })
+      ).events,
+    ).toEqual([])
+    await expect(app.bays.stopSession({ pr: "PR1", launchId: "missing", outcome: "crashed" })).rejects.toThrow(
+      "has no session 'missing'",
+    )
+  })
+
   it("pins the exactly-one Flow revision and structural fingerprint at PR enrollment", async () => {
     const config = defineConfig(
       yrd.flow({

@@ -31,6 +31,7 @@ import {
   type PRDeliveryState,
   type PRRegression,
   type PRRegressionSeverity,
+  type PRSessionOutcome,
 } from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
 import { createFailure, failureFact, raiseFailure, type DeepReadonly, type JournalSnapshot } from "@yrd/core"
@@ -2838,6 +2839,53 @@ async function commentPr(
     jsonEnabled(options),
     { command: "pr.comment", pr: prFact(pr), comment },
     `${pr.id} revision ${prRevisionNumber(pr)} commented by ${comment.by}`,
+  )
+}
+
+async function startPrSession(
+  app: YrdCliApp,
+  selector: string,
+  options: JsonOption & Readonly<{ launchId?: string }>,
+  io: YrdCliIO,
+): Promise<void> {
+  if (options.launchId === undefined || options.launchId.trim() === "") {
+    usage("pr session start requires --launch-id <id>")
+  }
+  await app.bays.startSession({ pr: selector, launchId: options.launchId })
+  const pr = requiredPr(app, selector)
+  const session = pr.sessions?.find((candidate) => candidate.launchId === options.launchId)
+  if (session === undefined) throw new Error(`yrd: PR '${pr.id}' did not retain session '${options.launchId}'`)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "pr.session.start", pr: prFact(pr), session },
+    `${pr.id} session ${session.launchId} started`,
+  )
+}
+
+async function stopPrSession(
+  app: YrdCliApp,
+  selector: string,
+  options: JsonOption & Readonly<{ launchId?: string; outcome?: string }>,
+  io: YrdCliIO,
+): Promise<void> {
+  if (options.launchId === undefined || options.launchId.trim() === "") {
+    usage("pr session stop requires --launch-id <id>")
+  }
+  const outcomes: readonly PRSessionOutcome[] = ["completed", "withdrawn", "crashed", "superseded"]
+  if (!outcomes.includes(options.outcome as PRSessionOutcome)) {
+    usage("pr session stop requires --outcome completed|withdrawn|crashed|superseded")
+  }
+  const outcome = options.outcome as PRSessionOutcome
+  await app.bays.stopSession({ pr: selector, launchId: options.launchId, outcome })
+  const pr = requiredPr(app, selector)
+  const session = pr.sessions?.find((candidate) => candidate.launchId === options.launchId)
+  if (session === undefined) throw new Error(`yrd: PR '${pr.id}' did not retain session '${options.launchId}'`)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "pr.session.stop", pr: prFact(pr), session },
+    `${pr.id} session ${session.launchId} stopped (${outcome})`,
   )
 }
 
@@ -6677,6 +6725,20 @@ function buildProgram(
     .requiredOption("--note <text>", "comment text")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => commentPr(installed(), selector, options, io))
+  const session = pr.command("session").description("record Hab sessions on a PR")
+  session
+    .command("start <selector>")
+    .description("record a started Hab session")
+    .requiredOption("--launch-id <id>", "Hab launch identity")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => startPrSession(installed(), selector, options, io))
+  session
+    .command("stop <selector>")
+    .description("record a terminal Hab session outcome")
+    .requiredOption("--launch-id <id>", "Hab launch identity")
+    .requiredOption("--outcome <outcome>", "completed, withdrawn, crashed, or superseded")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => stopPrSession(installed(), selector, options, io))
   pr.command("checks <selector...>")
     .description("show admitted checks for current PR revisions")
     .option("--follow", "follow active checks to a terminal result")
