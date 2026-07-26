@@ -36,6 +36,7 @@ import {
   type GitCheckEvidence,
   type GitCheckResultEvidence,
   type PRShape,
+  type RefusePathsPolicy,
   type StepExecution,
 } from "@yrd/queue"
 
@@ -547,7 +548,7 @@ async function checkedQueue(
     env?: NodeJS.ProcessEnv
     environmentOverrides?: Readonly<Record<string, string>>
     environmentPassthrough?: readonly string[]
-    refuse?: Readonly<{ paths: readonly string[]; reason?: string }>
+    refuse?: RefusePathsPolicy
     mergeCommand?: readonly string[]
   }> = {},
 ) {
@@ -1918,6 +1919,110 @@ describe("Queue command adapters", () => {
       status: "completed",
       conclusion: "failure",
       output: { conflicts: [{ repo: ".", paths: ["@km/note.md", "hub/plan.md"] }] },
+    })
+    expect(await git(repo, ["rev-parse", "main"])).toBe(baseSha)
+  })
+
+  it("admits only the issue-bound exact tombstone set for one state decommission", async () => {
+    const issue = "@pm/infra/21489-pm-state-repo-split/22386-decommission-hh-state-roots"
+    const tombstone = [
+      "# PM state moved",
+      "",
+      "Authoritative PM state moved to hh-pm.",
+      "Do not read, write, or edit PM state here.",
+      "Resolve with `bun tent state-repo root`; read logical nodes with `bun km show <logical-path>`.",
+      "",
+    ].join("\n")
+    const { repo } = await repository()
+    await git(repo, ["switch", "-qc", "state-baseline"])
+    await mkdir(join(repo, "@km"), { recursive: true })
+    await mkdir(join(repo, "hub", "pm"), { recursive: true })
+    await writeFile(join(repo, "@km", "bead.md"), "state\n")
+    await writeFile(join(repo, "hub", "pm", "plan.md"), "state\n")
+    await writeFile(join(repo, "+kanban.md"), "state\n")
+    await git(repo, ["add", "."])
+    await git(repo, ["commit", "-qm", "state baseline"])
+    const stateBase = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["branch", "-f", "main", stateBase])
+    await git(repo, ["switch", "-qc", "issue/decommission"])
+    await rm(join(repo, "@km"), { recursive: true })
+    await rm(join(repo, "hub", "pm"), { recursive: true })
+    await mkdir(join(repo, "@km"), { recursive: true })
+    await mkdir(join(repo, "hub", "pm"), { recursive: true })
+    await writeFile(join(repo, "@km", "README.md"), tombstone)
+    await writeFile(join(repo, "hub", "pm", "README.md"), tombstone)
+    await writeFile(join(repo, "+kanban.md"), tombstone)
+    await git(repo, ["add", "-A"])
+    await git(repo, ["commit", "-qm", "decommission state roots"])
+    const headSha = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "main"])
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, ["true"], {
+      refuse: {
+        paths: ["@", "+", "hub/pm/"],
+        reason: "pm state lives in the sibling state repo",
+        exception: {
+          kind: "state-decommission-v1",
+          issue,
+          roots: ["+kanban.md", "@km", "hub/pm"],
+          tombstone,
+        },
+      },
+    })
+    await app.bays.submit({
+      branch: "issue/decommission",
+      headSha,
+      base: "main",
+      baseSha: stateBase,
+      issue,
+    })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run, JSON.stringify(run, null, 2)).toMatchObject({ status: "completed", conclusion: "success" })
+    expect(await git(repo, ["rev-parse", "main^{tree}"])).toBe(await git(repo, ["rev-parse", `${headSha}^{tree}`]))
+  })
+
+  it("self-expires the state-decommission exception once the base is already tombstoned", async () => {
+    const issue = "@pm/infra/21489-pm-state-repo-split/22386-decommission-hh-state-roots"
+    const tombstone = "# PM state moved\n\nAuthoritative PM state moved to hh-pm.\n"
+    const { repo } = await repository()
+    await git(repo, ["switch", "-qc", "state-baseline"])
+    await mkdir(join(repo, "@km"), { recursive: true })
+    await writeFile(join(repo, "@km", "README.md"), tombstone)
+    await git(repo, ["add", "."])
+    await git(repo, ["commit", "-qm", "already decommissioned"])
+    const baseSha = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["branch", "-f", "main", baseSha])
+    await git(repo, ["switch", "-qc", "issue/reuse"])
+    await chmod(join(repo, "@km", "README.md"), 0o755)
+    await git(repo, ["add", "@km/README.md"])
+    await git(repo, ["commit", "-qm", "try to reuse expired exception"])
+    const headSha = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "main"])
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, ["true"], {
+      refuse: {
+        paths: ["@"],
+        exception: {
+          kind: "state-decommission-v1",
+          issue,
+          roots: ["@km"],
+          tombstone,
+        },
+      },
+    })
+    await app.bays.submit({ branch: "issue/reuse", headSha, base: "main", baseSha, issue })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: {
+        code: "refused-path",
+        message: expect.stringMatching(/state-decommission-v1.*base is already.*expired/iu),
+      },
     })
     expect(await git(repo, ["rev-parse", "main"])).toBe(baseSha)
   })

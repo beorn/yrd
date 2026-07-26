@@ -1800,13 +1800,20 @@ async function prepareCandidate(
       const inspected = await refusedPayloadPaths(git, path, pr.headSha, refuse.paths)
       if (inspected.status === "failed") return inspected
       if (inspected.output.length > 0) {
-        const shown = inspected.output.slice(0, 8).join(", ") + (inspected.output.length > 8 ? ", …" : "")
-        return candidateFailure(
-          "refused-path",
-          `PR '${pr.id}' touches refused path(s) [${shown}]${refuse.reason === undefined ? "" : `; ${refuse.reason}`}`,
-          ".",
-          inspected.output,
-        )
+        const exception = await stateDecommissionException(git, path, pr.issue, pr.headSha, inspected.output, refuse)
+        if (exception.status !== "passed") {
+          const shown = inspected.output.slice(0, 8).join(", ") + (inspected.output.length > 8 ? ", …" : "")
+          return candidateFailure(
+            "refused-path",
+            exception.status === "failed"
+              ? `PR '${pr.id}' state-decommission-v1 refusal: ${exception.message}`
+              : `PR '${pr.id}' touches refused path(s) [${shown}]${
+                  refuse.reason === undefined ? "" : `; ${refuse.reason}`
+                }`,
+            ".",
+            inspected.output,
+          )
+        }
       }
     }
     if (pr.composition !== undefined) {
@@ -3129,11 +3136,122 @@ async function authoredGitlinkPaths(
   return { status: "passed", output: gitlinks }
 }
 
+export type StateDecommissionException = Readonly<{
+  kind: "state-decommission-v1"
+  issue: string
+  roots: readonly string[]
+  tombstone: string
+}>
+
 /** Refusal boundary for split-out path roots (e.g. pm state moved to a sibling
  * repo): a payload path is refused when it starts with any configured entry.
  * Entries are plain prefixes — "@" covers every top-level sigil root, "hub/"
- * covers that tree. Policy comes from project config; absent config disables. */
-export type RefusePathsPolicy = Readonly<{ paths: readonly string[]; reason?: string }>
+ * covers that tree. Policy comes from trusted base config; absent config
+ * disables. The sole exception is an exact, issue-bound tombstone migration
+ * whose final shape is verified from Git objects and self-expires after landing. */
+export type RefusePathsPolicy = Readonly<{
+  paths: readonly string[]
+  reason?: string
+  exception?: StateDecommissionException
+}>
+
+type StateDecommissionDisposition =
+  | Readonly<{ status: "not-applicable" }>
+  | Readonly<{ status: "passed" }>
+  | Readonly<{ status: "failed"; message: string }>
+
+function containsRepoPath(root: string, path: string): boolean {
+  return root.endsWith(".md") ? path === root : path === root || path.startsWith(`${root}/`)
+}
+
+function validStateDecommissionRoot(root: string): boolean {
+  return (
+    root !== "" &&
+    !root.startsWith("/") &&
+    !root.includes("\\") &&
+    root.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..")
+  )
+}
+
+function stateDecommissionTombstonePath(root: string): string {
+  return root.endsWith(".md") ? root : `${root}/README.md`
+}
+
+async function exactStateDecommissionShape(
+  git: Git,
+  repo: string,
+  ref: string,
+  exception: StateDecommissionException,
+): Promise<Readonly<{ exact: boolean; detail?: string }>> {
+  for (const root of exception.roots) {
+    const expected = stateDecommissionTombstonePath(root)
+    const listing = await git.run(repo, ["ls-tree", "-r", "--name-only", "-z", ref, "--", root], true)
+    if (listing.code !== 0) {
+      return { exact: false, detail: `cannot inspect '${root}' at '${ref}': ${listing.stderr || listing.stdout}` }
+    }
+    const paths = nulPaths(listing.stdout)
+    if (!samePaths(paths, [expected])) {
+      return {
+        exact: false,
+        detail: `'${root}' must contain only '${expected}' (found ${paths.length === 0 ? "nothing" : paths.join(", ")})`,
+      }
+    }
+    const content = await git.raw(repo, ["show", `${ref}:${expected}`], true)
+    if (content.code !== 0) {
+      return { exact: false, detail: `cannot read tombstone '${expected}' at '${ref}': ${content.stderr}` }
+    }
+    if (content.stdout !== exception.tombstone) {
+      return { exact: false, detail: `tombstone '${expected}' does not match the trusted exact body` }
+    }
+  }
+  return { exact: true }
+}
+
+async function stateDecommissionException(
+  git: Git,
+  repo: string,
+  issue: string | undefined,
+  headSha: string,
+  refusedPaths: readonly string[],
+  policy: RefusePathsPolicy,
+): Promise<StateDecommissionDisposition> {
+  const exception = policy.exception
+  if (exception === undefined || issue !== exception.issue) return { status: "not-applicable" }
+  if (
+    exception.kind !== "state-decommission-v1" ||
+    exception.roots.length === 0 ||
+    new Set(exception.roots).size !== exception.roots.length ||
+    exception.roots.some((root) => !validStateDecommissionRoot(root))
+  ) {
+    return { status: "failed", message: "trusted exception has an invalid or duplicate root" }
+  }
+  const uncovered = exception.roots.filter(
+    (root) => !policy.paths.some((prefix) => stateDecommissionTombstonePath(root).startsWith(prefix)),
+  )
+  if (uncovered.length > 0) {
+    return {
+      status: "failed",
+      message: `trusted exception roots are outside refuse.paths: ${uncovered.join(", ")}`,
+    }
+  }
+  const unexpected = refusedPaths.filter((path) => !exception.roots.some((root) => containsRepoPath(root, path)))
+  if (unexpected.length > 0) {
+    return {
+      status: "failed",
+      message: `payload touches refused paths outside the trusted root set: ${unexpected.join(", ")}`,
+    }
+  }
+  const candidate = await exactStateDecommissionShape(git, repo, headSha, exception)
+  if (!candidate.exact) return { status: "failed", message: candidate.detail ?? "candidate tombstones are invalid" }
+  const base = await exactStateDecommissionShape(git, repo, "HEAD", exception)
+  if (base.exact) {
+    return {
+      status: "failed",
+      message: "the authoritative base is already tombstoned; this one-shot exception is expired",
+    }
+  }
+  return { status: "passed" }
+}
 
 async function refusedPayloadPaths(
   git: Git,

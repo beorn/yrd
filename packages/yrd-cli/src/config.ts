@@ -135,10 +135,38 @@ const ContestSchema = z
  * state split into a sibling repo). Entries are plain path prefixes: "@" covers
  * every top-level sigil root, "hub/" that tree. `reason` is appended to the
  * refusal so the pointer to the right home comes from the repo's own config. */
+const StateDecommissionRootSchema = TextSchema.refine(
+  (root) =>
+    !root.startsWith("/") &&
+    !root.includes("\\") &&
+    root.split("/").every((segment) => segment !== "" && segment !== "." && segment !== ".."),
+  { message: "must be a canonical repository-relative root" },
+)
+const StateDecommissionExceptionSchema = z
+  .object({
+    kind: z.literal("state-decommission-v1"),
+    issue: TextSchema,
+    roots: z
+      .array(StateDecommissionRootSchema)
+      .min(1)
+      .superRefine((roots, context) => {
+        if (new Set(roots).size !== roots.length) {
+          context.addIssue({ code: "custom", message: "contains duplicate roots" })
+        }
+      })
+      .readonly(),
+    /** Exact bytes every file-root tombstone or directory README must carry. */
+    tombstone: z.string().min(1),
+  })
+  .strict()
+  .readonly()
 const RefuseSchema = z
   .object({
     paths: z.array(TextSchema).min(1).readonly(),
     reason: TextSchema.optional(),
+    /** One trusted-base, issue-bound migration exception. It cannot be supplied
+     * by the candidate because the host loads project config from base. */
+    exception: StateDecommissionExceptionSchema.optional(),
   })
   .strict()
 

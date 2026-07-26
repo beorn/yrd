@@ -70,12 +70,42 @@ notify:
 refuse:
   paths: ["@", "hub/"]
   reason: pm state lives in the sibling state repo
+  exception:
+    kind: state-decommission-v1
+    issue: "@pm/infra/21489-pm-state-repo-split/22386-decommission-hh-state-roots"
+    roots: ["+kanban.md", "@km", "hub/pm"]
+    tombstone: |
+      # PM state moved
+
+      Authoritative PM state moved to hh-pm.
 `),
       ).refuse,
-    ).toEqual({ paths: ["@", "hub/"], reason: "pm state lives in the sibling state repo" })
+    ).toEqual({
+      paths: ["@", "hub/"],
+      reason: "pm state lives in the sibling state repo",
+      exception: {
+        kind: "state-decommission-v1",
+        issue: "@pm/infra/21489-pm-state-repo-split/22386-decommission-hh-state-roots",
+        roots: ["+kanban.md", "@km", "hub/pm"],
+        tombstone: "# PM state moved\n\nAuthoritative PM state moved to hh-pm.\n",
+      },
+    })
     expect(parseYrdConfig({}).refuse).toBeUndefined()
     expect(() => parseYrdConfig({ refuse: { paths: [] } })).toThrow()
     expect(() => parseYrdConfig({ refuse: { paths: ["@"], pointer: "x" } })).toThrow()
+    expect(() =>
+      parseYrdConfig({
+        refuse: {
+          paths: ["@"],
+          exception: {
+            kind: "state-decommission-v1",
+            issue: "@pm/infra/21489-pm-state-repo-split/22386",
+            roots: [],
+            tombstone: "moved",
+          },
+        },
+      }),
+    ).toThrow()
   })
 
   it("loads one file and fills useful defaults", async () => {
