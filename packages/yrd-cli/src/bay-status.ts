@@ -145,7 +145,13 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
 
   // commits — clean tree alone is NOT enough (22290 sample: 22/25 clean-but-ahead)
   const unique = facts.uniquePatches ?? facts.aheadOfOrigin
-  if (facts.tipDurableAt !== undefined && facts.tipLanded !== true) {
+  if (facts.remoteTrackingFresh === false) {
+    lines.push({
+      class: "commits",
+      verdict: "UNKNOWN",
+      evidence: "could not refresh and prune origin refs — commit durability is unknown",
+    })
+  } else if (facts.tipDurableAt !== undefined && facts.tipLanded !== true) {
     lines.push({
       class: "commits",
       verdict: "PASS",
@@ -158,10 +164,7 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
     lines.push({
       class: "commits",
       verdict: "UNKNOWN",
-      evidence:
-        facts.remoteTrackingFresh === false
-          ? "could not refresh and prune origin refs — unique work durability is unknown"
-          : "could not prove tip is landed on origin/main (ancestry/patch-id unavailable)",
+      evidence: "could not prove tip is landed on origin/main (ancestry/patch-id unavailable)",
     })
   } else if (facts.tipLanded === true || facts.aheadOfOrigin === 0) {
     lines.push({
