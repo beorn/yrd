@@ -359,12 +359,27 @@ export const PRFreshnessTransitionSchema = z
   .strict()
 export type PRFreshnessTransition = Readonly<z.infer<typeof PRFreshnessTransitionSchema>>
 
+export const PRRecutSourceSchema = z
+  .object({
+    repo: z.string().trim().min(1),
+    fromHeadSha: GitShaSchema,
+    toHeadSha: GitShaSchema,
+    patchId: GitShaSchema,
+    rangeDiff: z.literal("="),
+  })
+  .strict()
+  .readonly()
+export type PRRecutSource = Readonly<z.infer<typeof PRRecutSourceSchema>>
+
 export const PRRecutProofSchema = z
   .object({
     fromRevision: z.number().int().positive(),
     patchId: GitShaSchema,
     treeSha: GitShaSchema,
     reviewCarried: z.boolean(),
+    /** Durable non-ancestral identity mapping for the root and any rewritten
+     * component heads. Missing only while replaying pre-provenance journals. */
+    sources: z.array(PRRecutSourceSchema).min(1).readonly().optional(),
     transition: PRFreshnessTransitionSchema.optional(),
   })
   .strict()

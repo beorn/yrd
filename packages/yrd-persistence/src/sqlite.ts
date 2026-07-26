@@ -5,10 +5,14 @@ import { basename, join } from "node:path"
 import { gunzipSync } from "node:zlib"
 import { constants, Database } from "bun:sqlite"
 import {
+  JournalCompatibilitySchema,
+  journalFrameCompatibility,
   observeYrdLifecycle,
   parseJournalFrame,
+  raiseFailure,
   type Journal,
   type JournalCheckpoint,
+  type JournalCompatibility,
   type JournalEntityKind,
   type JournalHistory,
   type JournalHistoryDiagnostics,
@@ -75,6 +79,7 @@ const LEGACY_CANDIDATE_PATH = /^\.journal\.sqlite-[0-9a-f-]{36}$/iu
 
 type JournalOptions = Readonly<{
   dir: string
+  compatibility?: JournalCompatibility
   lock?: ExclusiveOptions
   inject?: Readonly<{
     exclusive?: Exclusive
@@ -94,6 +99,7 @@ type JournalMode = "mutable" | "read-only"
 type Context = Readonly<{
   dir: string
   path: string
+  compatibility?: JournalCompatibility
   exclusive: Exclusive
   log: ConditionalLogger
   platform: string
@@ -236,6 +242,9 @@ function context(options: JournalOptions): Context {
   return {
     dir: options.dir,
     path: join(options.dir, DATABASE_FILE),
+    ...(options.compatibility === undefined
+      ? {}
+      : { compatibility: JournalCompatibilitySchema.parse(options.compatibility) }),
     exclusive: inject.exclusive ?? createExclusive(options.dir, options.lock, { log }),
     log,
     platform: inject.platform ?? process.platform,
@@ -274,9 +283,17 @@ function createJournalWithMode(options: JournalOptions, mode: JournalMode): Jour
           : await readBatches(runtime, after, before)
       for (const batch of batches) yield batch
     },
-    append(value, expectedCursor) {
+    async append(value, expectedCursor) {
       assertCursor(expectedCursor)
       if (mode === "read-only") return Promise.reject(new Error("yrd: read-only journal cannot append"))
+      const required = journalFrameCompatibility(value)
+      if (required !== undefined && required.version > (runtime.compatibility?.version ?? 0)) {
+        raiseFailure(
+          "refusal",
+          "journal-write-version-floor",
+          `yrd: journal schema v${required.version} requires reader pin ${required.reader}; configured reader floor is v${runtime.compatibility?.version ?? 0}${runtime.compatibility === undefined ? "" : ` at ${runtime.compatibility.reader}`}`,
+        )
+      }
       const frame = parseJournalFrame(value)
       return observeYrdLifecycle(
         runtime.log,

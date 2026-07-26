@@ -43,6 +43,9 @@ const PR380_PATCH_ID = "cce1b8d2e6b8167b77aa50e0f880b74d3fa8871d"
 const PR380_LANDING_SHA = "868194792c4b2c1b07bd5a67c37ad3e21fd35ce1"
 const PR473_LANDING_SHA = "b47e240a6c3091b4687de96296d39c0a610df200"
 const PR476_PATCH_ID = "172a29302878f4f7fd0dcfad917ddbf434e78d04"
+const PR1640_RECORDED_HEAD = "4d8615400959a1443b1664e707eecee10d6ebe95"
+const PR1640_LIVE_HEAD = "b3fae22ec7a08288b586a28b123a9e11ad3bca91"
+const PR1640_BRANCH = "task/@yrd/core/22366-post-landing-component-main"
 const OVERSIZED_MERGE_TREE_BYTES = 1024 * 1024
 
 function ids(initial = 0): () => string {
@@ -253,7 +256,9 @@ function recutPreflightGit(overrides: Partial<RecutPreflightGitFacts> = {}): Rec
           ? TARGET_BASE_SHA
           : ref === BASE_SHA || ref === HEAD_SHA || ref === HEAD2_SHA
             ? ref
-            : undefined,
+            : ref.includes("/")
+              ? HEAD_SHA
+              : undefined,
       mergeTree: () => BASE_TREE,
       treeOf: (sha) => {
         if (sha !== TARGET_BASE_SHA) throw new Error(`treeOf must only inspect the target tip, got ${sha}`)
@@ -400,6 +405,45 @@ describe("pr withdraw journal replay", () => {
 })
 
 describe("pr recut --preflight", () => {
+  it("refuses PR1640's recorded revision after its reviewed branch moves unless replay is explicit", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({
+      branch: PR1640_BRANCH,
+      headSha: PR1640_RECORDED_HEAD,
+      base: "main",
+      baseSha: BASE_SHA,
+    })
+    const before = (await Array.fromAsync(app.events())).length
+    const facts = recutPreflightGit({
+      resolveCommit: (ref) =>
+        ref === "origin/main"
+          ? TARGET_BASE_SHA
+          : ref === `origin/${PR1640_BRANCH}` || ref === PR1640_BRANCH
+            ? PR1640_LIVE_HEAD
+            : ref === BASE_SHA || ref === PR1640_RECORDED_HEAD
+              ? ref
+              : undefined,
+      mergeTree: () => OTHER_TREE,
+      patchMatch: () => ({ patchId: PR476_PATCH_ID }),
+    })
+    const refused = outputIO({ pruneGit: () => facts })
+
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--queue", "--json"), refused.io)).toBe(1)
+    expect(refused.stderr()).toContain(`recorded revision 1 head '${PR1640_RECORDED_HEAD}'`)
+    expect(refused.stderr()).toContain(`live branch '${PR1640_BRANCH}' is '${PR1640_LIVE_HEAD}'`)
+    expect(refused.stderr()).toContain(`git log --oneline ${PR1640_RECORDED_HEAD}..${PR1640_LIVE_HEAD}`)
+    expect(refused.stderr()).toContain(`yrd pr submit ${PR1640_BRANCH}`)
+    expect(refused.stderr()).toContain("yrd pr recut PR1 --revision 1 --preflight --queue")
+    expect((await Array.fromAsync(app.events())).length).toBe(before)
+
+    const replay = outputIO({ pruneGit: () => facts })
+    expect(
+      await runYrd(app, yrd("pr", "recut", "PR1", "--revision", "1", "--preflight", "--queue", "--json"), replay.io),
+      replay.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(replay.stdout())).toMatchObject({ pr: "PR1", revision: 1, verdict: "RECUT" })
+  })
+
   it("replays PR380 as SUBSUMED-WITHDRAW without recutting or emitting events", async () => {
     const app = await createCliApp()
     await app.bays.submit({
@@ -530,7 +574,13 @@ describe("pr recut --preflight", () => {
       pruneGit: () =>
         recutPreflightGit({
           resolveCommit: (ref) =>
-            ref === "origin/main" || ref === BASE_SHA ? BASE_SHA : ref === HEAD2_SHA ? HEAD2_SHA : undefined,
+            ref === "origin/main" || ref === BASE_SHA
+              ? BASE_SHA
+              : ref === "origin/topic/fresh" || ref === "topic/fresh" || ref === HEAD_SHA
+                ? HEAD_SHA
+                : ref === HEAD2_SHA
+                  ? HEAD2_SHA
+                  : undefined,
           mergeTree: () => OTHER_TREE,
           treeOf: (sha) => {
             if (sha !== BASE_SHA) throw new Error(`treeOf must only inspect the target tip, got ${sha}`)
@@ -607,6 +657,14 @@ describe("pr recut --preflight", () => {
     const diverged = outputIO({
       pruneGit: () =>
         recutPreflightGit({
+          resolveCommit: (ref) =>
+            ref === "origin/main"
+              ? TARGET_BASE_SHA
+              : ref === "origin/topic/revisions" || ref === "topic/revisions"
+                ? HEAD2_SHA
+                : ref === BASE_SHA || ref === HEAD_SHA || ref === HEAD2_SHA
+                  ? ref
+                  : undefined,
           mergeTree: () => OTHER_TREE,
           pinDistance: () => ({ sourceOnly: 1, targetOnly: 2 }),
         }),

@@ -11,7 +11,7 @@ import {
   type StepDef,
   type YrdConfig,
 } from "@yrd/config"
-import { asFailure, createFailure } from "@yrd/core"
+import { asFailure, createFailure, JournalCompatibilitySchema, type JournalCompatibility } from "@yrd/core"
 import { DIAGNOSTICS_COMPARISON_READY, GateModeSchema, type GateMode } from "@yrd/queue"
 import * as z from "zod"
 
@@ -149,6 +149,7 @@ const ProjectSchema = z
     steps: StepNamesSchema.optional(),
     requires: RequirementsSchema.optional(),
     contest: ContestSchema,
+    journal: JournalCompatibilitySchema.optional(),
     notify: NotifySchema.optional(),
     refuse: RefuseSchema.optional(),
   })
@@ -164,6 +165,7 @@ export type YrdProjectConfig = Readonly<{
   requires?: readonly "review"[]
   definitions: Readonly<Record<string, YrdStepConfig>>
   contest: Readonly<z.infer<typeof ContestSchema>>
+  journal?: JournalCompatibility
   notify?: SignalRoutes
   refuse?: YrdRefuseConfig
 }>
@@ -175,6 +177,7 @@ export type ResolvedYrdProjectConfig = Readonly<{
   requires: readonly "review"[]
   definitions: Readonly<Record<string, YrdStepConfig>>
   contest: Readonly<{ concurrency: number; timeoutMs: number; evaluators: readonly string[] }>
+  journal?: JournalCompatibility
   notify?: SignalRoutes
   refuse?: YrdRefuseConfig
   /** Programmatic flow authority. Optional only for direct legacy test/app construction. */
@@ -192,7 +195,7 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
   }
   const parsed = ProjectSchema.safeParse(value ?? {})
   if (parsed.success) {
-    const { base, batch, steps, requires, contest, notify, refuse, ...definitions } = parsed.data
+    const { base, batch, steps, requires, contest, journal, notify, refuse, ...definitions } = parsed.data
     return {
       ...(base === undefined ? {} : { base }),
       ...(batch === undefined ? {} : { batch }),
@@ -200,6 +203,7 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
       ...(requires === undefined ? {} : { requires }),
       definitions,
       contest,
+      ...(journal === undefined ? {} : { journal }),
       ...(notify === undefined ? {} : { notify }),
       ...(refuse === undefined ? {} : { refuse }),
     }
@@ -214,7 +218,7 @@ function configError(issue: z.core.$ZodIssue): Error {
   if (
     issue.code === "invalid_type" &&
     issue.path.length === 1 &&
-    !["base", "batch", "steps", "requires", "contest", "notify", "refuse"].includes(path)
+    !["base", "batch", "steps", "requires", "contest", "journal", "notify", "refuse"].includes(path)
   ) {
     return new Error(`yrd: config ${path} is not supported`)
   }
@@ -335,6 +339,7 @@ export async function loadYrdConfig(options: {
         timeoutMs: parsed.contest.timeoutMs ?? 30 * 60_000,
         evaluators: parsed.contest.evaluators ?? ["check"],
       },
+      ...(parsed.journal === undefined ? {} : { journal: parsed.journal }),
       notify: parsed.notify ?? {},
       ...(parsed.refuse === undefined ? {} : { refuse: parsed.refuse }),
       flows: flows.flows,
@@ -431,6 +436,7 @@ function resolveFlowConfig(config: YrdConfig, defaultBase: string): ResolvedYrdP
       timeoutMs: 30 * 60_000,
       evaluators: names.filter((name) => name !== "merge").slice(0, 1),
     },
+    ...(config.journal === undefined ? {} : { journal: config.journal }),
     notify: {},
     flows: config.flows,
   }

@@ -159,6 +159,55 @@ describe("Yrd domain objects", () => {
     await app.close()
   })
 
+  it("stamps appended frames with the injected journal compatibility contract", async () => {
+    const journal = createMemoryJournal()
+    const compatibility = { version: 1, reader: "a".repeat(40) }
+    await using app = await createYrd(withCounter()(createYrdDef()), {
+      inject: {
+        journal,
+        compatibility,
+        clock: () => "2026-07-09T12:00:00.000Z",
+        id: ids("versioned-command", "versioned-event"),
+      },
+    })
+
+    await app.dispatch(app.commands.counter.add, { by: 1 })
+
+    await expect(Array.fromAsync(journal.read())).resolves.toEqual([
+      expect.objectContaining({
+        values: [expect.objectContaining({ compatibility })],
+      }),
+    ])
+  })
+
+  it("refuses a future journal frame and names the exact required reader pin", () => {
+    const command = Core.Command.parse({
+      id: "00000000-0000-7000-8000-000000000001",
+      op: "test.record",
+    })
+    const requiredReader = "b".repeat(40)
+    const value = {
+      cause: Core.CauseSchema.parse({
+        id: "00000000-0000-7000-8000-000000000002",
+        commandId: command.id,
+        op: command.op,
+        commandHash: Core.Command.hash(command),
+      }),
+      command,
+      events: [],
+      compatibility: { version: 2, reader: requiredReader },
+    }
+
+    expect(() => Core.parseJournalFrame(value)).toThrow(requiredReader)
+    try {
+      Core.parseJournalFrame(value)
+    } catch (error) {
+      expect(error).toMatchObject({
+        failure: { kind: "refusal", code: "journal-version-skew" },
+      })
+    }
+  })
+
   it("replays before exposing state and refreshes ordinary reads", async () => {
     const events: LogEvent[] = []
     const log = createLogger("test", [
@@ -291,6 +340,34 @@ describe("Yrd domain objects", () => {
       recovered.dispatch({ op: "counter.add", args: { by: 4 } }, { key: "preserved-retry" }),
     ).resolves.toMatchObject({ events: [{ name: "counter/changed" }] })
     expect(recovered.state().counter.value).toBe(4)
+  })
+
+  it("restores versioned receipt frames from a projection checkpoint", async () => {
+    const backing = createMemoryJournal<unknown>()
+    const cache = createCheckpointJournal(backing)
+    const definition = withCounter()(createYrdDef())
+    const compatibility = { version: 1, reader: "a".repeat(40) }
+    const writer = await createYrd(definition, {
+      inject: {
+        journal: cache.journal,
+        compatibility,
+        id: ids("versioned-checkpoint-command", "versioned-checkpoint-event"),
+      },
+    })
+    await writer.dispatch({ op: "counter.add", args: { by: 4 } })
+    await writer.close()
+    cache.reads.length = 0
+
+    await using restored = await createYrd(definition, { inject: { journal: cache.journal } })
+
+    expect(cache.reads[0]).toBe(1)
+    expect(restored.state().counter.value).toBe(4)
+    expect(cache.stored()).toMatchObject({
+      cursor: 1,
+      value: {
+        receipts: [expect.objectContaining({ compatibility })],
+      },
+    })
   })
 
   it("allows legacy payloads only while replaying and never widens current appends", async () => {

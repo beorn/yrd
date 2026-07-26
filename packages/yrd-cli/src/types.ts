@@ -80,6 +80,15 @@ export type PruneGitFacts = Readonly<{
     headSha: string,
     targetBaseSha: string,
   ): Readonly<{ patchId?: string; targetSha?: string }> | Promise<Readonly<{ patchId?: string; targetSha?: string }>>
+  /** Which of the given commits are present here AND already reachable from the
+   * base tip — one batched answer for a whole listing. `pr list` reconciles
+   * every row whose recorded state claims its content never landed, so the
+   * naive one-process-per-row shape would cost seconds on a full projection.
+   * A commit missing from this repository is never reported as landed: absence
+   * of the object is not evidence about the content. Implementations that omit
+   * this fact are still answered exactly, one `resolveCommit` + `isAncestor`
+   * pair per head. */
+  landedOnBase?(baseSha: string, heads: readonly string[]): readonly string[] | Promise<readonly string[]>
 }>
 
 export type YrdCliIO = {

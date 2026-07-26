@@ -2697,6 +2697,7 @@ export function prListRows(
   entries: readonly Readonly<{ pr: PR; eligibility: PREligibility }>[],
   runs: readonly Run[],
   now: number,
+  landings: ReadonlyMap<string, Readonly<{ code: string }>> = new Map(),
 ): PRListRow[] {
   const summary: QueueSummary = {
     base: "*",
@@ -2715,12 +2716,18 @@ export function prListRows(
       throw new Error(`yrd: PR '${pr.id}' revision ${revision} is ineligible without a typed blocking reason`)
     }
     const projected = projectPR(undefined, summary, pr, now, undefined, undefined, eligibility)
-    const state = projectedPrStatus(pr, eligibility)
+    // A proven landing outranks the recorded state: `withdrawn` is a claim
+    // about content, and a head already reachable from the base contradicts it.
+    // Showing the later write as the whole truth sends the author back to
+    // re-cut a branch that is already on the base branch (22376).
+    const landing = landings.get(pr.id)
+    const state = landing === undefined ? projectedPrStatus(pr, eligibility) : "already-landed"
+    const glyph = landing === undefined ? projected.glyph : "✓"
     return {
       pr: projected.pr,
       state,
-      stateLabel: `${projected.glyph} ${state}`,
-      glyph: projected.glyph,
+      stateLabel: `${glyph} ${state}`,
+      glyph,
       revision,
       lineage: projected.revisionLineage.join("→"),
       subject: projected.subject,
@@ -2728,23 +2735,43 @@ export function prListRows(
       target: projected.target,
       review: reviewLabel(eligibility),
       checks: checkLabels[eligibility.checks.status],
-      why: eligibility.reason?.code ?? "-",
+      why: landing?.code ?? eligibility.reason?.code ?? "-",
       age: projected.age,
       touched: projected.touched,
     }
   })
 }
 
+/** Table sizes its viewport by ROW count, so a cell that wraps to a second
+ * physical line evicts a row off the bottom without a word. Every custom cell
+ * renderer in this table therefore carries the same single-line contract the
+ * Table's own default cell has: shrinkable, capped at the track, truncating
+ * rather than wrapping. The live specimen is 22376 — two `already-landed`
+ * labels one cell too wide for the STATE track hid the two NEWEST PRs. */
 function PRStateValue({ row }: { row: PRListRow }) {
   const variant = statusVariant(row.state)
   return (
-    <Text bold color={variant === "default" ? "$fg" : `$fg-${variant}`}>
+    <Text bold color={variant === "default" ? "$fg" : `$fg-${variant}`} minWidth={0} maxWidth="100%" wrap="truncate">
       {row.stateLabel}
     </Text>
   )
 }
 
-export function PRListView({ rows, columns: terminalColumns }: { rows: readonly PRListRow[]; columns: number }) {
+/** The one place that decides how much of the PR list an operator is shown.
+ * `hidden` is not decoration: a listing that withheld rows must say so and say
+ * how many, because an inventory that reads complete and is not is worse than
+ * an error (22376). */
+export type PRListWindow = Readonly<{ hidden: number; total: number }>
+
+export function PRListView({
+  rows,
+  columns: terminalColumns,
+  window: listWindow,
+}: {
+  rows: readonly PRListRow[]
+  columns: number
+  window?: PRListWindow
+}) {
   const base: TableColumn<PRListRow> = { header: "BASE", key: "target", minWidth: 6, maxWidth: 14 }
   const submitter: TableColumn<PRListRow> = { header: "BY", key: "submitter", minWidth: 4, maxWidth: 10 }
   const ageColumn: TableColumn<PRListRow> = { header: "AGE", key: "age", minWidth: 5, maxWidth: 7 }
@@ -2752,6 +2779,20 @@ export function PRListView({ rows, columns: terminalColumns }: { rows: readonly 
   const prWidth = Math.min(
     16,
     rows.reduce((width, row) => Math.max(width, formatQueuePrId(row.pr, row.revision).length + 2), 8),
+  )
+  // Track padding is 2, so a label needs label.length + 2 of track before the
+  // Table's own cell would have to cut it. Sizing from the widest label present
+  // keeps every state readable in full; the truncation contract in PRStateValue
+  // is the guarantee, not the plan.
+  const stateWidth = Math.min(
+    20,
+    rows.reduce((width, row) => Math.max(width, row.stateLabel.length + 2), 15),
+  )
+  // WHY holds typed reason codes. It keeps its historical 18 unless a row
+  // carries a longer code — a reconciled landing does — and never exceeds 25.
+  const whyWidth = Math.min(
+    25,
+    rows.reduce((width, row) => Math.max(width, row.why.length + 2), 18),
   )
   const columns: TableColumn<PRListRow>[] = [
     {
@@ -2764,8 +2805,8 @@ export function PRListView({ rows, columns: terminalColumns }: { rows: readonly 
     {
       header: "STATE",
       key: "stateLabel",
-      minWidth: 15,
-      maxWidth: 16,
+      minWidth: stateWidth,
+      maxWidth: stateWidth,
       render: (row: PRListRow) => <PRStateValue row={row} />,
     },
     { header: "HISTORY", key: "lineage", minWidth: 8, maxWidth: 10 },
@@ -2774,11 +2815,22 @@ export function PRListView({ rows, columns: terminalColumns }: { rows: readonly 
     ...(terminalColumns >= 100 ? [base] : []),
     { header: "REVIEW", key: "review", minWidth: 8, maxWidth: 8 },
     { header: "CHECKS", key: "checks", minWidth: 8, maxWidth: 8 },
-    { header: "WHY", key: "why", minWidth: 5, maxWidth: 18, grow: true },
+    { header: "WHY", key: "why", minWidth: 5, maxWidth: whyWidth, grow: true },
     ...(terminalColumns >= 110 ? [ageColumn] : []),
     ...(terminalColumns >= 120 ? [changed] : []),
   ]
-  return <Table data={rows} columns={columns} />
+  const hidden = listWindow === undefined || listWindow.hidden <= 0 ? undefined : listWindow
+  return (
+    <Box flexDirection="column">
+      <Table data={rows} columns={columns} />
+      {hidden === undefined ? null : (
+        <Text color="$fg-muted">
+          {`${hidden.hidden} of ${hidden.total} rows hidden by the default window; the ${rows.length} newest are shown` +
+            ` — scope it (--base/--state/--issue) or use --json for all ${hidden.total}.`}
+        </Text>
+      )}
+    </Box>
+  )
 }
 
 export type PRCheckViewRecord = PRCheckRecord
@@ -2973,6 +3025,7 @@ export function PRDetailView({
   const detail = prDetailData(pr, runs, attempts)
   const lineage = timelineRevisionLineage(pr)
   const revisionLineage = lineage.revisions.map((revision) => `rev${revision}`).join("→")
+  const recomposedSources = prRevisionLineage(pr).flatMap((candidate) => candidate.recut?.sources ?? [])
   const taskStatus = prTaskStatusOf(pr)
   const projectionFields = taskStatusFields(taskStatus)
 
@@ -3009,6 +3062,14 @@ export function PRDetailView({
       <Text>
         <Text bold>SOURCE READY</Text> {lineage.sourceReadyAt ?? "-"} <Text bold>HISTORY</Text> {revisionLineage}
       </Text>
+      {recomposedSources.length === 0 ? null : (
+        <Text wrap="wrap">
+          <Text bold>RECOMPOSED</Text>{" "}
+          {recomposedSources
+            .map(({ repo, fromHeadSha, toHeadSha }) => `${repo} ${fromHeadSha.slice(0, 12)}→${toHeadSha.slice(0, 12)}`)
+            .join(" · ")}
+        </Text>
+      )}
       {pr.description === undefined ? null : (
         <Box flexDirection="column" minWidth={0}>
           <Text bold>DESCRIPTION</Text>

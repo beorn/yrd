@@ -152,6 +152,13 @@ Append is optimistic compare-and-append. On conflict, Core catches up and reruns
 the pure command decision. `createMemoryJournal()` is the focused-test adapter;
 filesystem durability belongs to `@yrd/persistence`.
 
+Frames may carry `compatibility: { version, reader }`. `version` is the
+monotonic semantic journal contract used for comparison; `reader` is the full
+commit pin operators must install when their runtime cannot parse that
+version. Legacy frames omit the field and remain version 0. A runtime refuses
+a frame above `JOURNAL_READER_VERSION` before projecting it, and an injected
+compatibility value is stamped on every new frame.
+
 History is still Journal authority, not a projection database. Its facts must
 be derived transactionally from frames and fail loud if a lookup disagrees with
 the checksummed frame. Plugins may register a pure private `compact` projection

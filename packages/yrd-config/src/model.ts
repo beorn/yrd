@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { createFailure } from "@yrd/core"
+import { createFailure, JournalCompatibilitySchema, type JournalCompatibility } from "@yrd/core"
 
 const NamePattern = /^[a-z][a-z0-9_-]*$/u
 
@@ -59,7 +59,15 @@ export type FlowPin = Readonly<{
   fingerprint: string
 }>
 
-export type YrdConfig = Readonly<{ flows: readonly FlowDef[] }>
+export type JournalConfigDef = Readonly<{
+  kind: "journal"
+  compatibility: JournalCompatibility
+}>
+
+export type YrdConfig = Readonly<{
+  flows: readonly FlowDef[]
+  journal?: JournalCompatibility
+}>
 export type SelectedFlow = Readonly<{ flow: FlowDef; pin: FlowPin }>
 
 export type FlowDiagnostic = Readonly<{
@@ -153,9 +161,25 @@ export function withFlow(definition: FlowDef): FlowDef {
   return Object.freeze({ name: flowName, rev, on: definition.on, steps: Object.freeze(steps) })
 }
 
+/** Declare the oldest reader contract that every writer must preserve. */
+export function withJournalCompatibility(compatibility: JournalCompatibility): JournalConfigDef {
+  return Object.freeze({
+    kind: "journal",
+    compatibility: Object.freeze(JournalCompatibilitySchema.parse(compatibility)),
+  })
+}
+
 /** One config constructor; the variadic form keeps author files declarative. */
-export function defineConfig(...definitions: readonly FlowDef[]): YrdConfig {
-  const flows = definitions.map(withFlow)
+export function defineConfig(...definitions: readonly (FlowDef | JournalConfigDef)[]): YrdConfig {
+  const journalDefinitions = definitions.filter(
+    (definition): definition is JournalConfigDef => "kind" in definition && definition.kind === "journal",
+  )
+  if (journalDefinitions.length > 1) {
+    configuration("invalid-config", "yrd: config permits at most one journal compatibility floor")
+  }
+  const flows = definitions
+    .filter((definition): definition is FlowDef => !("kind" in definition && definition.kind === "journal"))
+    .map(withFlow)
   if (flows.length === 0) configuration("invalid-config", "yrd: config requires at least one flow")
   const duplicate = flows.find(
     (candidate, index) => flows.findIndex((other) => other.name === candidate.name) !== index,
@@ -163,7 +187,11 @@ export function defineConfig(...definitions: readonly FlowDef[]): YrdConfig {
   if (duplicate !== undefined) {
     configuration("invalid-config", `yrd: config contains duplicate flow '${duplicate.name}'`)
   }
-  return Object.freeze({ flows: Object.freeze(flows) })
+  const journal = journalDefinitions[0]?.compatibility
+  return Object.freeze({
+    flows: Object.freeze(flows),
+    ...(journal === undefined ? {} : { journal }),
+  })
 }
 
 /** Structural identity deliberately excludes executable text and predicates.
@@ -247,5 +275,6 @@ export const yrd = Object.freeze({
   action: withActionStep,
   merge: withMergeStep,
   flow: withFlow,
+  journal: withJournalCompatibility,
   config: defineConfig,
 })
