@@ -1990,46 +1990,53 @@ describe("runYrd", () => {
     expect(app.bays.pr("PR1")?.revs).toHaveLength(2)
   })
 
-  it("refuses PR1640's implicit stale replay before invoking the recutter", async () => {
-    const app = await createApp()
-    const requests: unknown[] = []
-    const services = {
-      recut: {
-        recut(input: unknown) {
-          requests.push(input)
-          return Promise.resolve({
-            headSha: "3".repeat(40),
-            baseSha: "b".repeat(40),
-            treeSha: "c".repeat(40),
-            patchId: "d".repeat(40),
-            unchanged: false,
-          })
+  it.each([
+    { draft: false, refreshVerb: "submit" },
+    { draft: true, refreshVerb: "create" },
+  ])(
+    "refuses PR1640's implicit stale replay and tells a $draft draft to $refreshVerb the live head",
+    async ({ draft, refreshVerb }) => {
+      const app = await createApp()
+      const requests: unknown[] = []
+      const services = {
+        recut: {
+          recut(input: unknown) {
+            requests.push(input)
+            return Promise.resolve({
+              headSha: "3".repeat(40),
+              baseSha: "b".repeat(40),
+              treeSha: "c".repeat(40),
+              patchId: "d".repeat(40),
+              unchanged: false,
+            })
+          },
         },
-      },
-    } as unknown as YrdCliServices
-    await app.bays.submit({
-      branch: PR1640_BRANCH,
-      headSha: PR1640_RECORDED_HEAD,
-      baseSha: BASE_SHA,
-    })
-    const output = outputIO({
-      pruneGit: () => ({
-        resolveCommit: (ref) =>
-          ref === `origin/${PR1640_BRANCH}` || ref === PR1640_BRANCH ? PR1640_LIVE_HEAD : undefined,
-        isAncestor: () => false,
-        mergeTree: () => undefined,
-        treeOf: () => PR1640_LIVE_HEAD,
-      }),
-    })
+      } as unknown as YrdCliServices
+      await app.bays.submit({
+        branch: PR1640_BRANCH,
+        headSha: PR1640_RECORDED_HEAD,
+        baseSha: BASE_SHA,
+        ...(draft ? { draft: true } : {}),
+      })
+      const output = outputIO({
+        pruneGit: () => ({
+          resolveCommit: (ref) =>
+            ref === `origin/${PR1640_BRANCH}` || ref === PR1640_BRANCH ? PR1640_LIVE_HEAD : undefined,
+          isAncestor: () => false,
+          mergeTree: () => undefined,
+          treeOf: () => PR1640_LIVE_HEAD,
+        }),
+      })
 
-    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), output.io, services)).toBe(1)
-    expect(output.stderr()).toContain(`recorded revision 1 head '${PR1640_RECORDED_HEAD}'`)
-    expect(output.stderr()).toContain(`live branch '${PR1640_BRANCH}' is '${PR1640_LIVE_HEAD}'`)
-    expect(output.stderr()).toContain(`yrd pr submit ${PR1640_BRANCH}`)
-    expect(output.stderr()).toContain("yrd pr recut PR1 --revision 1 --preflight --queue")
-    expect(requests).toEqual([])
-    expect(app.bays.pr("PR1")?.revs).toHaveLength(1)
-  })
+      expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), output.io, services)).toBe(1)
+      expect(output.stderr()).toContain(`recorded revision 1 head '${PR1640_RECORDED_HEAD}'`)
+      expect(output.stderr()).toContain(`live branch '${PR1640_BRANCH}' is '${PR1640_LIVE_HEAD}'`)
+      expect(output.stderr()).toContain(`yrd pr ${refreshVerb} ${PR1640_BRANCH}`)
+      expect(output.stderr()).toContain("yrd pr recut PR1 --revision 1 --preflight --queue")
+      expect(requests).toEqual([])
+      expect(app.bays.pr("PR1")?.revs).toHaveLength(1)
+    },
+  )
 
   it("refreshes a stale tracking ref before comparing the authored branch", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-recut-live-branch-"))

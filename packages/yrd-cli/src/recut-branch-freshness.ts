@@ -1,4 +1,4 @@
-import { prRevisionLineage, type PR, type PRRev } from "@yrd/bay"
+import { prDeliveryState, prRevisionLineage, type PR, type PRRev } from "@yrd/bay"
 import { raiseFailure } from "@yrd/core"
 import type { Process, ProcessResult } from "@yrd/process"
 import { cleanGitEnvironment } from "./git-environment.ts"
@@ -134,13 +134,14 @@ export async function requireImplicitRecutBranchFreshness(
   if (liveHead === recorded.head) return
 
   const queueFlag = options.queue === true ? " --queue" : ""
+  const recordVerb = prDeliveryState(pr) === "pushed" ? "create" : "submit"
   raiseFailure(
     "refusal",
     "recut-branch-moved",
     `yrd: PR '${pr.id}' recorded revision ${recorded.n} head '${recorded.head}', but live branch ` +
       `'${pr.branch}' is '${liveHead}'. Recut-by-PR is reproducible and will not silently replay stale work.\n` +
       `${await commitRangeEvidence(services, io, recorded.head, liveHead)}\n` +
-      `To submit the live head for fresh review:\n  yrd pr submit ${pr.branch}\n` +
+      `To record the live head for fresh review:\n  yrd pr ${recordVerb} ${pr.branch}\n` +
       `  yrd pr recut ${pr.id} --preflight${queueFlag}\n` +
       `To deliberately replay the recorded revision:\n` +
       `  yrd pr recut ${pr.id} --revision ${recorded.n} --preflight${queueFlag}`,
