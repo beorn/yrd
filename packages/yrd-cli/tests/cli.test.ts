@@ -5309,14 +5309,28 @@ describe("runYrd", () => {
     expect(statsIndex).toBeGreaterThan(pillsRowIndex)
   })
 
-  it("projects fresh, stale, and absent resident runner heartbeats", async () => {
+  /** A pid PROVEN absent by signal 0, rather than a large number assumed unused. */
+  function unusedPid(): number {
+    for (let candidate = 4_194_303; candidate > 4_190_000; candidate -= 1) {
+      try {
+        process.kill(candidate, 0)
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code === "ESRCH") return candidate
+      }
+    }
+    throw new Error("no unused pid available for the departed-runner probe")
+  }
+
+  it("projects fresh, stale, dead-pid, and absent resident runner heartbeats", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-status-"))
     execFileSync("git", ["init", "-q", repo])
     const statusDir = join(repo, ".git", "yrd", "resident-runner")
     const statusPath = join(statusDir, "status.json")
     mkdirSync(statusDir, { recursive: true })
+    // A LIVE pid, because fresh/stale are heartbeat classifications OF a running
+    // runner. This process is the only pid a test can prove is alive.
     const runner = {
-      pid: 4242,
+      pid: process.pid,
       startedAt: "2026-07-13T11:00:00.000Z",
       lastTickAt: "2026-07-13T11:59:55.000Z",
     }
@@ -5341,6 +5355,22 @@ describe("runYrd", () => {
       })
       expect(await runYrd(app, yrd("queue", "list"), stale.io), stale.stderr()).toBe(0)
       expect(stale.stdout()).toContain("RUNNER STALE")
+
+      // A runner killed by SIGKILL, OOM, or a crash never writes `exitedAt`, so
+      // its status file outlives it with a plausible pid and a frozen heartbeat.
+      // Reading that as STALE describes a runner that is merely late; the queue
+      // is in fact unattended, and the operator needs the second answer. Live
+      // specimen 2026-07-25: pid 20486 gone, `queue status` said STALE, and the
+      // outage was found by whoever next ran a command.
+      writeFileSync(statusPath, JSON.stringify({ ...runner, pid: unusedPid() }))
+      const dead = outputIO({
+        cwd: repo,
+        now: () => Date.parse("2026-07-13T12:00:20.001Z"),
+        resolveQueueTarget,
+      })
+      expect(await runYrd(app, yrd("queue", "list"), dead.io), dead.stderr()).toBe(0)
+      expect(dead.stdout()).toContain("NO RUNNER - no drained run in window")
+      expect(dead.stdout(), "a departed runner is not a late one").not.toContain("RUNNER STALE")
 
       rmSync(statusPath)
       const absent = outputIO({ cwd: repo, resolveQueueTarget })

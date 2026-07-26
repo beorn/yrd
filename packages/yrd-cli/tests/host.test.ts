@@ -212,7 +212,7 @@ async function unpublishedSubmodulePinRepository(): Promise<{
 }
 
 describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
-  it("binds installed-step revisions to every toolchain fingerprint component", () => {
+  it("binds installed-step revisions to the host axes, not to the launcher's own version", () => {
     const toolchain = { bun: "1.3.0", node: "24.0.0", platform: "darwin", arch: "arm64" }
     const input = {
       repo: "/repo",
@@ -227,13 +227,24 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 
     // The queue suite owns revision→cache-miss behavior; this host seam owns
     // the preceding fingerprint→revision identity edge.
+    //
+    // This assertion used to read "every toolchain fingerprint component",
+    // which made 22374 a passing test rather than a caught bug: `bun` and
+    // `node` name whichever binary invoked yrd, so one host with two bun
+    // installs minted two permanent revision families and the resident and its
+    // operators overwrote each other's baseline on every drain. Identity
+    // follows what a step would actually RUN.
     for (const changed of [
-      { ...toolchain, bun: "1.3.1" },
-      { ...toolchain, node: "24.1.0" },
       { ...toolchain, platform: "linux" },
       { ...toolchain, arch: "x64" },
     ]) {
       expect(queueStepRevision({ ...input, toolchain: changed })).not.toBe(baseline)
+    }
+    for (const launcher of [
+      { ...toolchain, bun: "1.3.1" },
+      { ...toolchain, node: "24.1.0" },
+    ]) {
+      expect(queueStepRevision({ ...input, toolchain: launcher })).toBe(baseline)
     }
   })
 

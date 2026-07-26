@@ -30,6 +30,25 @@ function stablePath(path: string): string {
   return resolve(path)
 }
 
+/**
+ * Launcher-independent toolchain identity for revision fingerprints (22374,
+ * the same class as 22334 above).
+ *
+ * `bun` and `node` report whichever binary happened to invoke this process, so
+ * a host with two bun installs — an operator shell's and a supervisor's frozen
+ * PATH — computed two permanent revision families for byte-identical config.
+ * The resident and every operator then overwrote each other's installed
+ * baseline on every drain, and the failure surfaced as `config-drift`: a
+ * message naming the config, which had never changed.
+ *
+ * `platform` and `arch` stay in the hash. They decide which binaries a step's
+ * commands actually resolve to, and they cannot differ between two shells on
+ * one host — so they carry identity without carrying the accident.
+ */
+function stableToolchain(toolchain: ToolchainFingerprint): Pick<ToolchainFingerprint, "platform" | "arch"> {
+  return { platform: toolchain.platform, arch: toolchain.arch }
+}
+
 /** Internal identity seam for configured queue steps; intentionally not exported by the package root. */
 export function queueStepRevision(input: QueueStepRevisionInput): string {
   return createHash("sha256")
@@ -59,7 +78,7 @@ export function queueStepRevision(input: QueueStepRevisionInput): string {
         mode: stepGateMode(input.config),
         timeoutMs: input.timeoutMs,
         noProgressMs: input.noProgressMs,
-        toolchain: input.toolchain,
+        toolchain: stableToolchain(input.toolchain),
       }),
     )
     .digest("hex")
