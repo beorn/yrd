@@ -3620,7 +3620,7 @@ describe("runYrd", () => {
 
     const sessionStart = outputIO()
     expect(
-      await runYrd(app, yrd("pr", "session", "start", "PR1", "--launch-id", "hab-launch-1", "--json"), sessionStart.io),
+      await runYrd(app, yrd("pr", "session", "start", "PR1", "--launch", "hab-launch-1", "--json"), sessionStart.io),
       sessionStart.stderr(),
     ).toBe(0)
     expect(JSON.parse(sessionStart.stdout())).toMatchObject({
@@ -3632,7 +3632,7 @@ describe("runYrd", () => {
     expect(
       await runYrd(
         app,
-        yrd("pr", "session", "stop", "PR1", "--launch-id", "hab-launch-1", "--outcome", "completed", "--json"),
+        yrd("pr", "session", "stop", "PR1", "--launch", "hab-launch-1", "--outcome", "completed", "--json"),
         sessionStop.io,
       ),
       sessionStop.stderr(),

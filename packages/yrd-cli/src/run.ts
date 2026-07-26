@@ -2845,16 +2845,16 @@ async function commentPr(
 async function startPrSession(
   app: YrdCliApp,
   selector: string,
-  options: JsonOption & Readonly<{ launchId?: string }>,
+  options: JsonOption & Readonly<{ launch?: string }>,
   io: YrdCliIO,
 ): Promise<void> {
-  if (options.launchId === undefined || options.launchId.trim() === "") {
-    usage("pr session start requires --launch-id <id>")
+  if (options.launch === undefined || options.launch.trim() === "") {
+    usage("pr session start requires --launch <id>")
   }
-  await app.bays.startSession({ pr: selector, launchId: options.launchId })
+  await app.bays.startSession({ pr: selector, launchId: options.launch })
   const pr = requiredPr(app, selector)
-  const session = pr.sessions?.find((candidate) => candidate.launchId === options.launchId)
-  if (session === undefined) throw new Error(`yrd: PR '${pr.id}' did not retain session '${options.launchId}'`)
+  const session = pr.sessions?.find((candidate) => candidate.launchId === options.launch)
+  if (session === undefined) throw new Error(`yrd: PR '${pr.id}' did not retain session '${options.launch}'`)
   await printResult(
     io,
     jsonEnabled(options),
@@ -2866,21 +2866,21 @@ async function startPrSession(
 async function stopPrSession(
   app: YrdCliApp,
   selector: string,
-  options: JsonOption & Readonly<{ launchId?: string; outcome?: string }>,
+  options: JsonOption & Readonly<{ launch?: string; outcome?: string }>,
   io: YrdCliIO,
 ): Promise<void> {
-  if (options.launchId === undefined || options.launchId.trim() === "") {
-    usage("pr session stop requires --launch-id <id>")
+  if (options.launch === undefined || options.launch.trim() === "") {
+    usage("pr session stop requires --launch <id>")
   }
   const outcomes: readonly PRSessionOutcome[] = ["completed", "withdrawn", "crashed", "superseded"]
   if (!outcomes.includes(options.outcome as PRSessionOutcome)) {
     usage("pr session stop requires --outcome completed|withdrawn|crashed|superseded")
   }
   const outcome = options.outcome as PRSessionOutcome
-  await app.bays.stopSession({ pr: selector, launchId: options.launchId, outcome })
+  await app.bays.stopSession({ pr: selector, launchId: options.launch, outcome })
   const pr = requiredPr(app, selector)
-  const session = pr.sessions?.find((candidate) => candidate.launchId === options.launchId)
-  if (session === undefined) throw new Error(`yrd: PR '${pr.id}' did not retain session '${options.launchId}'`)
+  const session = pr.sessions?.find((candidate) => candidate.launchId === options.launch)
+  if (session === undefined) throw new Error(`yrd: PR '${pr.id}' did not retain session '${options.launch}'`)
   await printResult(
     io,
     jsonEnabled(options),
@@ -6739,13 +6739,13 @@ function buildProgram(
   session
     .command("start <selector>")
     .description("record a started Hab session")
-    .requiredOption("--launch-id <id>", "Hab launch identity")
+    .requiredOption("--launch <id>", "Hab launch identity")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => startPrSession(installed(), selector, options, io))
   session
     .command("stop <selector>")
     .description("record a terminal Hab session outcome")
-    .requiredOption("--launch-id <id>", "Hab launch identity")
+    .requiredOption("--launch <id>", "Hab launch identity")
     .requiredOption("--outcome <outcome>", "completed, withdrawn, crashed, or superseded")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => stopPrSession(installed(), selector, options, io))
