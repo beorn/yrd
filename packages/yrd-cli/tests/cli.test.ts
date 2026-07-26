@@ -5360,7 +5360,7 @@ describe("runYrd", () => {
       // its status file outlives it with a plausible pid and a frozen heartbeat.
       // Reading that as STALE describes a runner that is merely late; the queue
       // is in fact unattended, and the operator needs the second answer. Live
-      // specimen 2026-07-25: pid 20486 gone, `queue status` said STALE, and the
+      // specimen 2026-07-25: pid 20486 gone, `queue list` said STALE, and the
       // outage was found by whoever next ran a command.
       writeFileSync(statusPath, JSON.stringify({ ...runner, pid: unusedPid() }))
       const dead = outputIO({
