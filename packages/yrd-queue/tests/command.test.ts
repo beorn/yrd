@@ -29,6 +29,7 @@ import {
   gitCheckStep,
   gitMergeStep,
   PRSnapshotSchema,
+  validateStateDecommissionException,
   withQueue,
   withMerge,
   withStep,
@@ -1921,6 +1922,50 @@ describe("Queue command adapters", () => {
       output: { conflicts: [{ repo: ".", paths: ["@km/note.md", "hub/plan.md"] }] },
     })
     expect(await git(repo, ["rev-parse", "main"])).toBe(baseSha)
+  })
+
+  it("keeps the decommission waiver bound to its issue and exact root set", () => {
+    const issue = "@pm/infra/21489-pm-state-repo-split/22386-decommission-hh-state-roots"
+    const tombstone = "# moved\n"
+    const policy = {
+      paths: ["@", "+"],
+      exception: {
+        kind: "state-decommission-v1" as const,
+        issue,
+        roots: ["+kanban.md", "@km"],
+        tombstone,
+      },
+    }
+    const base = {
+      paths: { "+kanban.md": ["+kanban.md"], "@km": ["@km/old.md"] },
+      contents: { "+kanban.md": "old\n", "@km/README.md": undefined },
+    }
+    const candidate = {
+      paths: { "+kanban.md": ["+kanban.md"], "@km": ["@km/README.md"] },
+      contents: { "+kanban.md": tombstone, "@km/README.md": tombstone },
+    }
+
+    expect(
+      validateStateDecommissionException({
+        issue: "@pm/infra/other",
+        refusedPaths: ["+kanban.md", "@km/old.md", "@km/README.md"],
+        policy,
+        base,
+        candidate,
+      }),
+    ).toEqual({ status: "not-applicable" })
+    expect(
+      validateStateDecommissionException({
+        issue,
+        refusedPaths: ["+kanban.md", "@km/old.md", "@other/escape.md"],
+        policy,
+        base,
+        candidate,
+      }),
+    ).toEqual({
+      status: "failed",
+      message: "payload touches refused paths outside the trusted root set: @other/escape.md",
+    })
   })
 
   it("admits only the issue-bound exact tombstone set for one state decommission", async () => {

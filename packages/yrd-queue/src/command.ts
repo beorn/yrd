@@ -3155,10 +3155,16 @@ export type RefusePathsPolicy = Readonly<{
   exception?: StateDecommissionException
 }>
 
-type StateDecommissionDisposition =
+export type StateDecommissionDisposition =
   | Readonly<{ status: "not-applicable" }>
   | Readonly<{ status: "passed" }>
   | Readonly<{ status: "failed"; message: string }>
+
+export type StateDecommissionSnapshot = Readonly<{
+  paths: Readonly<Record<string, readonly string[]>>
+  contents: Readonly<Record<string, string | undefined>>
+  errors?: readonly string[]
+}>
 
 function containsRepoPath(root: string, path: string): boolean {
   return root.endsWith(".md") ? path === root : path === root || path.startsWith(`${root}/`)
@@ -3173,48 +3179,46 @@ function validStateDecommissionRoot(root: string): boolean {
   )
 }
 
-function stateDecommissionTombstonePath(root: string): string {
+export function stateDecommissionTombstonePath(root: string): string {
   return root.endsWith(".md") ? root : `${root}/README.md`
 }
 
-async function exactStateDecommissionShape(
-  git: Git,
-  repo: string,
-  ref: string,
+function exactStateDecommissionShape(
+  snapshot: StateDecommissionSnapshot,
   exception: StateDecommissionException,
-): Promise<Readonly<{ exact: boolean; detail?: string }>> {
+): Readonly<{ exact: boolean; detail?: string }> {
+  if ((snapshot.errors?.length ?? 0) > 0) {
+    return { exact: false, detail: snapshot.errors?.join("; ") }
+  }
   for (const root of exception.roots) {
     const expected = stateDecommissionTombstonePath(root)
-    const listing = await git.run(repo, ["ls-tree", "-r", "--name-only", "-z", ref, "--", root], true)
-    if (listing.code !== 0) {
-      return { exact: false, detail: `cannot inspect '${root}' at '${ref}': ${listing.stderr || listing.stdout}` }
-    }
-    const paths = nulPaths(listing.stdout)
+    const paths = snapshot.paths[root] ?? []
     if (!samePaths(paths, [expected])) {
       return {
         exact: false,
         detail: `'${root}' must contain only '${expected}' (found ${paths.length === 0 ? "nothing" : paths.join(", ")})`,
       }
     }
-    const content = await git.raw(repo, ["show", `${ref}:${expected}`], true)
-    if (content.code !== 0) {
-      return { exact: false, detail: `cannot read tombstone '${expected}' at '${ref}': ${content.stderr}` }
-    }
-    if (content.stdout !== exception.tombstone) {
+    if (snapshot.contents[expected] !== exception.tombstone) {
       return { exact: false, detail: `tombstone '${expected}' does not match the trusted exact body` }
     }
   }
   return { exact: true }
 }
 
-async function stateDecommissionException(
-  git: Git,
-  repo: string,
-  issue: string | undefined,
-  headSha: string,
-  refusedPaths: readonly string[],
-  policy: RefusePathsPolicy,
-): Promise<StateDecommissionDisposition> {
+/** Shared pure validator used by both Queue admission and Tent handoff.
+ * Callers collect base/candidate Git objects independently; the policy itself
+ * must always come from trusted base authority. */
+export function validateStateDecommissionException(
+  input: Readonly<{
+    issue: string | undefined
+    refusedPaths: readonly string[]
+    policy: RefusePathsPolicy
+    base: StateDecommissionSnapshot
+    candidate: StateDecommissionSnapshot
+  }>,
+): StateDecommissionDisposition {
+  const { issue, refusedPaths, policy } = input
   const exception = policy.exception
   if (exception === undefined || issue !== exception.issue) return { status: "not-applicable" }
   if (
@@ -3241,9 +3245,9 @@ async function stateDecommissionException(
       message: `payload touches refused paths outside the trusted root set: ${unexpected.join(", ")}`,
     }
   }
-  const candidate = await exactStateDecommissionShape(git, repo, headSha, exception)
+  const candidate = exactStateDecommissionShape(input.candidate, exception)
   if (!candidate.exact) return { status: "failed", message: candidate.detail ?? "candidate tombstones are invalid" }
-  const base = await exactStateDecommissionShape(git, repo, "HEAD", exception)
+  const base = exactStateDecommissionShape(input.base, exception)
   if (base.exact) {
     return {
       status: "failed",
@@ -3251,6 +3255,50 @@ async function stateDecommissionException(
     }
   }
   return { status: "passed" }
+}
+
+async function collectStateDecommissionSnapshot(
+  git: Git,
+  repo: string,
+  ref: string,
+  exception: StateDecommissionException,
+): Promise<StateDecommissionSnapshot> {
+  const paths: Record<string, readonly string[]> = {}
+  const contents: Record<string, string | undefined> = {}
+  const errors: string[] = []
+  for (const root of exception.roots) {
+    const expected = stateDecommissionTombstonePath(root)
+    const listing = await git.run(repo, ["ls-tree", "-r", "--name-only", "-z", ref, "--", root], true)
+    if (listing.code !== 0) {
+      errors.push(`cannot inspect '${root}' at '${ref}': ${listing.stderr || listing.stdout}`)
+      continue
+    }
+    paths[root] = nulPaths(listing.stdout)
+    const content = await git.raw(repo, ["show", `${ref}:${expected}`], true)
+    contents[expected] = content.code === 0 ? content.stdout : undefined
+  }
+  return {
+    paths,
+    contents,
+    ...(errors.length === 0 ? {} : { errors }),
+  }
+}
+
+async function stateDecommissionException(
+  git: Git,
+  repo: string,
+  issue: string | undefined,
+  headSha: string,
+  refusedPaths: readonly string[],
+  policy: RefusePathsPolicy,
+): Promise<StateDecommissionDisposition> {
+  const exception = policy.exception
+  if (exception === undefined || issue !== exception.issue) return { status: "not-applicable" }
+  const [base, candidate] = await Promise.all([
+    collectStateDecommissionSnapshot(git, repo, "HEAD", exception),
+    collectStateDecommissionSnapshot(git, repo, headSha, exception),
+  ])
+  return validateStateDecommissionException({ issue, refusedPaths, policy, base, candidate })
 }
 
 async function refusedPayloadPaths(
