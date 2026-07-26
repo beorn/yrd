@@ -3214,6 +3214,7 @@ describe("runYrd", () => {
           id: "B1",
           pr: {
             id: "PR1",
+            status: "pushed",
             sessions: [{ launchId: "hab-session-link", startedAt: expect.any(String) }],
           },
         },

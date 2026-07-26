@@ -3323,7 +3323,7 @@ async function listBays(
       prs.findLast((candidate) => candidate.branch === bay.branch)
     return {
       ...bay,
-      ...(pr === undefined ? {} : { pr: { id: pr.id, sessions: pr.sessions ?? [] } }),
+      ...(pr === undefined ? {} : { pr: { id: pr.id, status: prDeliveryState(pr), sessions: pr.sessions ?? [] } }),
     }
   })
   const open = bays.filter((bay) => bay.status !== "closed")
