@@ -885,9 +885,7 @@ function queueAdministration(
               ? finding
               : { ...finding, message: `${finding.message} ${sourceDrift.message}` },
           )
-        : sourceDrift === undefined
-          ? baselineFindings
-          : [sourceDrift]
+        : [...(sourceDrift === undefined ? [] : [sourceDrift]), ...baselineFindings]
       return { findings }
     },
     async provision(base) {

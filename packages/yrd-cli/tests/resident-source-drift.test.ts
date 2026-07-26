@@ -117,9 +117,11 @@ it("refuses before claim when authoritative native source advances under a live 
     await expect(refusal).rejects.toThrow(source.loaded)
     await expect(refusal).rejects.toThrow(source.authoritative)
     const runtimeAudit = await resident.services.queue?.auditEnvironment?.()
-    expect(runtimeAudit).toMatchObject({
-      findings: [{ code: "runtime-drift" }],
-    })
+    expect(runtimeAudit?.findings).toHaveLength(2)
+    expect(runtimeAudit?.findings).toEqual([
+      expect.objectContaining({ code: "runtime-drift" }),
+      expect.objectContaining({ code: "runtime-drift" }),
+    ])
     expect(runtimeAudit?.findings[0]?.message).toContain(`loaded '${source.loaded}'`)
     expect(runtimeAudit?.findings[0]?.message).toContain(`working tree '${source.current}'`)
     expect(runtimeAudit?.findings[0]?.message).toContain(`pinned '${source.authoritative}'`)
@@ -132,4 +134,35 @@ it("refuses before claim when authoritative native source advances under a live 
   await using restarted = await createYrdHost({ cwd: repo })
   expect(await restarted.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
   await requireFreshInstalledBaseline(restarted.services)
+})
+
+it("reports source drift and an independent stale runtime step together", async () => {
+  const repo = await queueRepository()
+  await writeFile(
+    join(repo, ".yrd.yml"),
+    "base: main\nbatch: 1\nsteps: [check, merge]\ncheck:\n  run: 'true'\nmerge: {}\n",
+  )
+  await git(repo, "add", ".yrd.yml")
+  await git(repo, "commit", "-qm", "add check")
+  await using resident = await createYrdHost({ cwd: repo })
+  await resident.services.queue?.provision?.("main")
+
+  await writeFile(
+    join(repo, ".yrd.yml"),
+    "base: main\nbatch: 1\nsteps: [check, merge]\ncheck:\n  run: 'printf changed'\nmerge: {}\n",
+  )
+  await git(repo, "add", ".yrd.yml")
+  await git(repo, "commit", "-qm", "change check")
+  source.authoritative = "git:748dbd87dd6a30a5d4f41de4459b01d8014d791f"
+  // Model follow-mode's sanctioned migration: baseline and disk agree, while
+  // the resident still contains both its startup source and check revision.
+  await resident.services.queue?.provision?.("main")
+
+  const audit = await resident.services.queue?.auditEnvironment?.()
+
+  expect(audit?.findings).toHaveLength(2)
+  expect(audit?.findings[0]?.message).toContain(`loaded '${source.loaded}'`)
+  expect(audit?.findings[0]?.message).toContain(`pinned '${source.authoritative}'`)
+  expect(audit?.findings[1]?.message).toContain("step 'check'")
+  expect(audit?.findings[1]?.message).toContain("resident runtime diverges")
 })
