@@ -4773,6 +4773,15 @@ function checkEligibility(
   const run = checkFactRun(state, Queues.snapshot(pr), selected)
   if (run !== undefined) return { status: checkRunStatus(run, selected.length), ...timing, run: run.id }
   if (request === undefined) return { status: "not-requested" }
+  // Only an open delivery can hold a live admission slot — the same predicate
+  // `admissionQueue` filters on. Check requests are append-only history, so a
+  // withdrawn/canceled/integrated PR keeps its `queuedAt` fact while its status
+  // stops claiming a slot the queue can never run. `admissionQueue` already
+  // excludes it, but that exclusion only ever reached `position`, never
+  // `status`. Runs that actually executed are settled above and survive: they
+  // are recorded facts, not a claim about a live slot. (22390)
+  const delivery = prDeliveryState(pr as PR)
+  if (delivery !== "pushed" && delivery !== "submitted") return { status: "not-requested", ...timing }
   const queued = admissionQueue(state, steps)
   const position = queued.findIndex((candidate) => candidate.id === pr.id)
   return { status: "queued", ...timing, ...(position < 0 ? {} : { position: position + 1 }) }
