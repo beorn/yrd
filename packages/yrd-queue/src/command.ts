@@ -1067,11 +1067,19 @@ export function createGitPRRecutter(options: {
 async function recutPR(git: Git, repo: string, input: PRRecutInput): Promise<PRRecutResult> {
   const target = await authoritativeQueueBase(git, repo, input.base)
   const current = input.current
+  // An already-landed direct revision delivers nothing beyond the base, so its
+  // head IS the base and `target..head` has no patch identity to certify
+  // against. Re-derive it from the immutable source instead of refusing
+  // `recut-certificate` on the fast path (22373). Composed revisions legitimately
+  // sit at the base and certify by wrapper replay, so they keep the fast path.
+  const alreadyLandedDirect =
+    (current?.composition ?? input.composition) === undefined && current?.headSha === target.sha
   if (
     (current?.revision === input.revision || current?.fromRevision === input.revision) &&
     current.baseSha === target.sha &&
     current.treeSha !== undefined &&
-    current.patchId !== undefined
+    current.patchId !== undefined &&
+    !alreadyLandedDirect
   ) {
     await assertCurrentRecutCertificate(git, repo, target, input, current)
     return {
@@ -1325,23 +1333,36 @@ async function recutDirectPR(
     }
   }
   const authority = await changedPaths(git, repo, sourceBase, target.sha)
+  const overlapping = intersection(payload, authority)
   const absorbedGitlinks = await absorbedAuthoredGitlinks(
     git,
     repo,
     sourceBase,
     input.headSha,
     target.sha,
-    intersection(payload, authority),
+    overlapping,
     input.currentCompositions,
   )
   const absorbedSet = new Set(absorbedGitlinks)
-  const effectivePayload = payload.filter((path) => !absorbedSet.has(path))
+  // 22373: rebasing onto a base that already landed part of this branch drops
+  // those commits as patch-equivalent — the healthy outcome of a moved base,
+  // not a loss. The expected payload is therefore recomposed for the new base,
+  // one proven path at a time, before it is compared with what materialized.
+  // The comparison itself stays exact set equality: a path that vanishes
+  // WITHOUT an already-landed proof still refuses, loudly, as it must.
+  const absorbedContent = await absorbedAuthoredPaths(git, repo, input.headSha, target.sha, overlapping, absorbedSet)
+  const absorbedPaths = [...absorbedGitlinks, ...absorbedContent].toSorted()
+  const absorbedPathSet = new Set(absorbedPaths)
+  const effectivePayload = payload.filter((path) => !absorbedPathSet.has(path))
   if (effectivePayload.length === 0) {
-    throw createFailure({
-      kind: "refusal",
-      code: "payload-certificate",
-      message: `yrd: PR '${input.id}' has no root payload after absorbing current gitlinks`,
-    })
+    if (absorbedPaths.length === 0) {
+      throw createFailure({
+        kind: "refusal",
+        code: "payload-certificate",
+        message: `yrd: PR '${input.id}' revision ${input.revision} changes nothing against its recorded base`,
+      })
+    }
+    return absorbedRecutResult(git, repo, target, input, sourceBase)
   }
   const overlap = intersection(effectivePayload, authority)
   const overlapSet = new Set(overlap)
@@ -1544,8 +1565,12 @@ async function recutDirectPR(
         })
       }
     }
-    const hasGitlinkExceptions = absorbedGitlinks.length > 0 || ffCarrierGitlinks.size > 0
-    if (usedUnionMerge && hasGitlinkExceptions) {
+    // Absorbed paths (gitlinks by pin ancestry, ordinary paths by already-landed
+    // end state) legitimately have no counterpart in the recut range, so the
+    // whole-range range-diff can no longer be the certificate; the ordered
+    // patch sequence over the remaining paths owns it instead.
+    const hasAbsorbedExceptions = absorbedPaths.length > 0 || ffCarrierGitlinks.size > 0
+    if (usedUnionMerge && hasAbsorbedExceptions) {
       const sourceCount = await git.run(repo, ["rev-list", "--count", `${sourceBase}..${input.headSha}`], true)
       const recutCount = await git.run(path, ["rev-list", "--count", `${target.sha}..${headSha}`], true)
       if (sourceCount.code !== 0 || recutCount.code !== 0 || sourceCount.stdout !== "1" || recutCount.stdout !== "1") {
@@ -1555,7 +1580,7 @@ async function recutDirectPR(
           message: `yrd: PR '${input.id}' union-merge recut requires one root commit`,
         })
       }
-    } else if (!hasGitlinkExceptions) {
+    } else if (!hasAbsorbedExceptions) {
       const rangeDiff = await git.rangeDiff(path, sourceBase, input.headSha, target.sha, headSha)
       if (rangeDiff.code !== 0 || !isEqualRangeDiff(rangeDiff.stdout)) {
         throw createFailure({
@@ -1571,10 +1596,10 @@ async function recutDirectPR(
         repo,
         sourceBase,
         input.headSha,
-        absorbedGitlinks,
+        absorbedPaths,
         ffGitlinks,
       )
-      const recutSequence = await certifiedPatchSequence(git, path, target.sha, headSha, absorbedGitlinks, ffGitlinks)
+      const recutSequence = await certifiedPatchSequence(git, path, target.sha, headSha, absorbedPaths, ffGitlinks)
       if (sourceSequence === undefined || recutSequence === undefined) {
         throw createFailure({
           kind: "refusal",
@@ -2749,6 +2774,100 @@ async function certifiedPatchSequence(
     if (patchId !== undefined) slots.push(patchId)
   }
   return slots
+}
+
+/**
+ * `<mode> <type> <object>` per requested path at `ref`, or `undefined` when the
+ * tree could not be read exactly. A path missing from the map is a fact the
+ * caller may reason about (the tree has no such entry); an undefined map is
+ * indeterminacy and must never be read as one. Any unparseable record fails the
+ * whole read rather than silently narrowing it.
+ */
+async function readTreeEntries(
+  git: Git,
+  repo: string,
+  ref: string,
+  paths: readonly string[],
+): Promise<Map<string, string> | undefined> {
+  const result = await git.run(repo, ["ls-tree", "-z", ref, "--", ...paths], true)
+  if (result.code !== 0) return undefined
+  const entries = new Map<string, string>()
+  for (const record of result.stdout.split("\0")) {
+    if (record === "") continue
+    const header = /^([0-7]{6} [a-z]+ [0-9a-f]{40,64})\t/u.exec(record)
+    const entry = header?.[1]
+    if (header === null || entry === undefined) return undefined
+    entries.set(record.slice(header[0].length), entry)
+  }
+  return entries
+}
+
+/**
+ * Payload paths the authoritative base already carries in exactly the authored
+ * end state — the ordinary-file sibling of `absorbedAuthoredGitlinks`.
+ *
+ * A rebase onto such a base drops those commits as patch-equivalent, which is
+ * correct and complete: every byte the author wrote for that path is already
+ * on the base. Without this the recut compares a payload recorded against the
+ * OLD base with what materialized against the NEW one and refuses for the
+ * difference it just created by being right (22373, PR1646).
+ *
+ * The proof is the delivered end state, not the commit shape: the base's tree
+ * entry for the path is identical to the authored head's (same mode, same
+ * object, or absent on both sides for a delete the base also landed). Callers
+ * pass only paths already known to be in both the payload and the base's own
+ * authority range, so an equal entry means the base moved that path to exactly
+ * where the author left it. Anything unprovable stays in the expected payload,
+ * where a vanished path still refuses — the failure mode of this proof is a
+ * loud refusal, never a silent drop.
+ */
+async function absorbedAuthoredPaths(
+  git: Git,
+  repo: string,
+  sourceHead: string,
+  target: string,
+  overlaps: readonly string[],
+  gitlinks: ReadonlySet<string>,
+): Promise<string[]> {
+  const candidates = overlaps.filter((path) => !gitlinks.has(path))
+  if (candidates.length === 0) return []
+  const authored = await readTreeEntries(git, repo, sourceHead, candidates)
+  const current = await readTreeEntries(git, repo, target, candidates)
+  if (authored === undefined || current === undefined) return []
+  return candidates.filter((path) => authored.get(path) === current.get(path))
+}
+
+/**
+ * The recut result for a branch whose every authored path the base already
+ * landed. There is nothing left to deliver, so the recut head IS the base: the
+ * merge step then proves already-landed from candidate/base tree equality and
+ * closes the PR, instead of the drain wedging on a `payload-mismatch … got []`
+ * that an operator has to withdraw by hand (22373). The recorded identity stays
+ * the authored patch id — the patch this revision delivers, which the base now
+ * carries — so a repeated recut is idempotent.
+ */
+async function absorbedRecutResult(
+  git: Git,
+  repo: string,
+  target: GitQueueTarget,
+  input: PRRecutInput,
+  sourceBase: string,
+): Promise<PRRecutResult> {
+  const patchId = await git.stablePatchId(repo, sourceBase, input.headSha)
+  if (patchId === undefined) {
+    throw createFailure({
+      kind: "refusal",
+      code: "payload-certificate",
+      message: `yrd: PR '${input.id}' revision ${input.revision} has no stable patch identity`,
+    })
+  }
+  return {
+    headSha: target.sha,
+    baseSha: target.sha,
+    treeSha: (await git.run(repo, ["rev-parse", `${target.sha}^{tree}`])).stdout,
+    patchId,
+    unchanged: false,
+  }
 }
 
 async function absorbedAuthoredGitlinks(

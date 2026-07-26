@@ -101,6 +101,7 @@ import {
 } from "./queue-status-view.tsx"
 import { submittedPrPositions } from "./queue-position.ts"
 import { preflightRecut, prunePrs, withdrawPrs } from "./pr-withdraw.ts"
+import { reconcilePrLandings, type PrLanding } from "./pr-landing.ts"
 import { requireImplicitRecutBranchFreshness } from "./recut-branch-freshness.ts"
 import { resolveSubmitSelectors } from "./submit-selection.ts"
 import {
@@ -1352,8 +1353,19 @@ function projectEligibilityTaskStatus(eligibility: PREligibility) {
   }
 }
 
-function projectPrTaskStatusWithEligibility(pr: PR, eligibility: PREligibility) {
+function projectPrTaskStatusWithEligibility(pr: PR, eligibility: PREligibility, landing?: PrLanding) {
   const projected = projectPRTaskStatus(pr)
+  // A proven landing is the strongest projection there is: it contradicts the
+  // recorded state with content, so it wins over both the native state and the
+  // eligibility projection. `nativeStatus` keeps the record readable (22376).
+  if (landing !== undefined) {
+    return {
+      ...projected,
+      nativeStatus: landing.recorded,
+      status: "already-landed" as const,
+      landedOnBase: { baseSha: landing.baseSha, headSha: landing.headSha, code: landing.code },
+    }
+  }
   const status = projectedPrStatus(pr, eligibility)
   const nativeStatus = prDeliveryState(pr)
   return status === nativeStatus ? projected : { ...projected, nativeStatus, status }
@@ -3327,13 +3339,17 @@ async function listPrs(
     )
   const selected = new Set(rows.map(({ pr }) => pr.id))
   const runs = allQueueRuns(app).filter((run) => run.prs.some((member) => selected.has(member.id)))
-  await printResult(
+  const { landings, warnings } = await reconcilePrLandings(
+    rows.map(({ pr }) => pr),
+    io,
+  )
+  await printResultWithWarnings(
     io,
     json,
     {
       command: "pr.list",
       prs: rows.map(({ pr, eligibility, needsReview }) => ({
-        ...projectPrTaskStatusWithEligibility(pr, eligibility),
+        ...projectPrTaskStatusWithEligibility(pr, eligibility, landings.get(pr.id)),
         eligibility: projectEligibilityTaskStatus(eligibility),
         requestedReviewers: pr.requestedReviewers ?? [],
         needsReview,
@@ -3341,9 +3357,11 @@ async function listPrs(
       runs: runs.map(projectQueueRunTaskStatus),
     },
     createElement(PRListView, {
-      rows: prListRows(rows, runs, io.now?.() ?? Date.now()),
+      rows: prListRows(rows, runs, io.now?.() ?? Date.now(), landings),
       columns: io.columns ?? 120,
+      window: { hidden: matching.length - listed.length, total: matching.length },
     }),
+    warnings,
   )
 }
 

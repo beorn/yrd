@@ -1251,7 +1251,12 @@ describe("runYrd", () => {
   // Deliberately crosses both 8-bit wrap boundaries (256 and 512) through the
   // real journal/projection path; this is a scale correctness test, not a 5s
   // latency contract, and needs headroom on loaded CI hosts.
-  it("windows only the unfiltered human PR list and never wraps revision counts", async () => {
+  // 22376 rewrote this test's human half. It used to assert the window was
+  // exactly `header + 20 rows` and nothing else — which is precisely the shape
+  // that let `pr list` withhold 500 rows while reading as a complete inventory.
+  // The contract now runs in both directions: every windowed row is rendered,
+  // AND the count it withheld is on screen.
+  it("windows only the unfiltered human PR list, says what it withheld, and never wraps revision counts", async () => {
     const app = await createApp()
     for (const index of Array.from({ length: 520 }, (_, offset) => offset + 1)) {
       await app.bays.submit({
@@ -1265,11 +1270,12 @@ describe("runYrd", () => {
     for (const columns of [80, 120]) {
       const human = outputIO({ columns })
       expect(await runYrd(app, yrd("pr", "list"), human.io), human.stderr()).toBe(0)
-      const physical = stripAnsi(human.stdout())
-        .split("\n")
-        .filter((row) => row !== "")
-      expect(physical).toHaveLength(expected.length + 1)
-      expect(physical.slice(1).map((row) => row.match(/pr#(\d+)\.1/u)?.[1])).toEqual(expected.map((id) => id.slice(2)))
+      const text = stripAnsi(human.stdout())
+      const physical = text.split("\n").filter((row) => row !== "")
+      const rows = physical.filter((row) => /pr#\d+\.\d/u.test(row))
+      expect(rows.map((row) => row.match(/pr#(\d+)\.1/u)?.[1])).toEqual(expected.map((id) => id.slice(2)))
+      expect(text).toMatch(/500 of 520 rows hidden/u)
+      expect(text).toContain("--json")
       expect(physical).not.toContainEqual(expect.stringMatching(/^\s*\d+\s*$/u))
     }
 
@@ -1282,7 +1288,10 @@ describe("runYrd", () => {
 
     const filtered = outputIO({ columns: 120 })
     expect(await runYrd(app, yrd("pr", "list", "--base", "main"), filtered.io), filtered.stderr()).toBe(0)
-    expect(stripAnsi(filtered.stdout()).split("\n").filter(Boolean)).toHaveLength(521)
+    const filteredText = stripAnsi(filtered.stdout())
+    expect(filteredText.split("\n").filter(Boolean)).toHaveLength(521)
+    // An unwindowed projection has nothing to disclose, and must not pretend it does.
+    expect(filteredText).not.toMatch(/hidden/u)
   }, 15_000)
 
   it("executes bare projections with their canonical JSON discriminators", async () => {
