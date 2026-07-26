@@ -14,6 +14,9 @@ type JsonOption = Readonly<{ json?: boolean }>
 const DEFAULT_WITHDRAW_REASON = "PR withdrawn"
 const GIT_TIMEOUT_MS = 30_000
 const GIT_OUTPUT_MAX_BYTES = 64 * 1024 * 1024
+/** Commits per `rev-list` invocation, so a listing with thousands of candidate
+ * heads cannot overflow the argument vector. */
+const REV_LIST_BATCH = 400
 
 function jsonEnabled(options: JsonOption): boolean {
   return options.json === true
@@ -531,6 +534,34 @@ export function createPruneGitFacts(cwd: string): PruneGitFacts {
         )
       }
       return { sourceOnly, targetOnly }
+    },
+    landedOnBase(baseSha: string, heads: readonly string[]): readonly string[] {
+      const unique = [...new Set(heads)]
+      if (unique.length === 0) return []
+      // Two batched calls, independent of row count. `cat-file --batch-check`
+      // names which commits this repository actually has; `rev-list --no-walk`
+      // then lists the ones that are NOT reachable from the base tip. Landed is
+      // the difference — never the absence of an object, which would let a
+      // shallow or unfetched checkout invent landings.
+      const presence = git(["cat-file", "--batch-check=%(objectname) %(objecttype)"], [], `${unique.join("\n")}\n`)
+      const resolved = new Map<string, string>()
+      for (const [index, line] of presence.stdout.trim().split("\n").entries()) {
+        const [name, type] = line.trim().split(/\s+/u)
+        const requested = unique[index]
+        if (requested === undefined || name === undefined || type !== "commit") continue
+        resolved.set(name, requested)
+      }
+      if (resolved.size === 0) return []
+      const present = [...resolved.keys()]
+      const unlanded = new Set<string>()
+      for (let start = 0; start < present.length; start += REV_LIST_BATCH) {
+        const batch = present.slice(start, start + REV_LIST_BATCH)
+        for (const line of git(["rev-list", "--no-walk", ...batch, "--not", baseSha], []).stdout.split("\n")) {
+          const sha = line.trim()
+          if (sha !== "") unlanded.add(sha)
+        }
+      }
+      return present.filter((sha) => !unlanded.has(sha)).map((sha) => resolved.get(sha) ?? sha)
     },
     patchMatch(sourceBaseSha: string, headSha: string, targetBaseSha: string) {
       const diff = git(["diff", "--no-ext-diff", "--binary", sourceBaseSha, headSha], []).stdout
