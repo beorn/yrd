@@ -488,6 +488,28 @@ still receives a successor revision with the derived patch/tree certificate.
 detail, and watch output retain the recut lineage and cumulative source-ready
 age while reporting the successor revision's queue wait separately.
 
+An implicit PR-id recut is reproducible, not "whatever is on the branch now."
+Before either preflight or mutation, Yrd refreshes that exact branch from
+`origin` and compares its server-observed tip with the recorded authored source.
+If they differ, recut refuses before composition, journal writes, or admission;
+the refusal names both heads, the intervening commits, and both explicit paths:
+
+```bash
+# Current intent: register the new head, reopening revision-bound review.
+yrd pr submit <branch>
+yrd pr recut <PR> --preflight --queue
+
+# Historical intent: deliberately replay the recorded immutable revision.
+yrd pr recut <PR> --revision <number> --preflight --queue
+```
+
+Every new recut revision also persists `recut.sources`: the root source head and
+each rewritten component head mapped to the mechanically equivalent successor.
+This is the durable identity bridge when recomposition intentionally breaks Git
+ancestry. `yrd pr view <PR> --json` exposes it under
+`.detail.pr.revs[].recut.sources`, while the human detail view prints the same
+mapping as `RECOMPOSED`.
+
 `pr recut --preflight` is the non-mutating decision surface. It pins the
 authoritative target once and emits exactly one of `SUBSUMED-WITHDRAW`,
 `RECUT`, `RECUT-FORCE`, or `FRESH-NOOP`, followed by the exact next command.

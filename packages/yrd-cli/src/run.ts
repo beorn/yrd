@@ -101,6 +101,7 @@ import {
 } from "./queue-status-view.tsx"
 import { submittedPrPositions } from "./queue-position.ts"
 import { preflightRecut, prunePrs, withdrawPrs } from "./pr-withdraw.ts"
+import { requireImplicitRecutBranchFreshness } from "./recut-branch-freshness.ts"
 import { resolveSubmitSelectors } from "./submit-selection.ts"
 import {
   classifyBayStatus,
@@ -2458,6 +2459,12 @@ async function recutPr(
   options: JsonOption & Readonly<{ revision?: number; queue?: boolean; force?: boolean; preflight?: boolean }>,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
+  const pr = requiredPr(app, selector)
+  const selectedRevision = options.revision ?? currentPRRev(pr).n
+  const selected = pr.revs.find((revision) => revision.n === selectedRevision)
+  if (isLivePR(pr) && selected !== undefined) {
+    await requireImplicitRecutBranchFreshness(pr, selected, options, services, io)
+  }
   if (options.preflight === true) {
     await preflightRecut(app, selector, options, io)
     return 0
@@ -2506,6 +2513,14 @@ async function executeRecutPr(
   ) {
     raiseFailure("refusal", "terminal-target", `yrd: PR '${pr.id}' is ${delivery}; terminal PRs cannot be recut`)
   }
+  if (options.revision !== undefined && (!Number.isInteger(options.revision) || options.revision < 1)) {
+    usage("--revision must be a positive integer")
+  }
+  const fromRevision = options.revision ?? currentRevision.n
+  const source = pr.revs.find((revision) => revision.n === fromRevision)
+  if (source === undefined) {
+    raiseFailure("refusal", "revision-missing", `yrd: PR '${pr.id}' has no revision ${fromRevision}`)
+  }
   // Refuse to silently discard a green check: if the PR's current head already
   // holds a passing check for its current revision, recutting supersedes that
   // revision and throws the passing result away. Require an explicit --force so
@@ -2517,14 +2532,6 @@ async function executeRecutPr(
       `yrd: PR '${pr.id}' revision ${currentRevision.n} already holds a passing check; recut would discard it. ` +
         "Re-run with --force to override.",
     )
-  }
-  if (options.revision !== undefined && (!Number.isInteger(options.revision) || options.revision < 1)) {
-    usage("--revision must be a positive integer")
-  }
-  const fromRevision = options.revision ?? currentRevision.n
-  const source = pr.revs.find((revision) => revision.n === fromRevision)
-  if (source === undefined) {
-    raiseFailure("refusal", "revision-missing", `yrd: PR '${pr.id}' has no revision ${fromRevision}`)
   }
   const approval = pr.reviews.findLast(
     (review) => review.revision === source.n && review.headSha === source.head && review.decision === "approve",
@@ -2556,6 +2563,25 @@ async function executeRecutPr(
           },
         }),
   })
+  const sources =
+    result.unchanged && currentRevision.recut?.sources !== undefined
+      ? currentRevision.recut.sources
+      : [
+          {
+            repo: ".",
+            fromHeadSha: source.head,
+            toHeadSha: result.headSha,
+            patchId: result.patchId,
+            rangeDiff: "=" as const,
+          },
+          ...(result.sourceRewrites ?? []).map((rewrite) => ({
+            repo: rewrite.repo,
+            fromHeadSha: rewrite.oldTipSha,
+            toHeadSha: rewrite.newTipSha,
+            patchId: rewrite.patchId,
+            rangeDiff: rewrite.rangeDiff,
+          })),
+        ]
   const recorded = await app.bays.recut({
     pr: pr.id,
     fromRevision: source.n,
@@ -2564,6 +2590,7 @@ async function executeRecutPr(
     treeSha: result.treeSha,
     patchId: result.patchId,
     reviewCarried: approval !== undefined,
+    sources,
     ...(result.composition === undefined ? {} : { composition: result.composition }),
     expectedCurrent,
     ...(options.transition === undefined ? {} : { transition: options.transition }),
@@ -2600,6 +2627,7 @@ async function executeRecutPr(
     treeSha: result.treeSha,
     patchId: result.patchId,
     reviewCarried: approval !== undefined,
+    provenance: sources,
     ...(prCorrelation(current) === undefined ? {} : { correlation: prCorrelation(current) }),
     sourceReadyAt: prSourceReadyAt(current),
     lineage: prRevisionLineage(current).map((revision) => revision.n),

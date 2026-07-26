@@ -2083,7 +2083,19 @@ notify:
     stderr = ""
     expect(
       await runYrdProcess(
-        ["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "recut", "PR1", "--queue", "--json"],
+        [
+          "/usr/bin/bun",
+          "/usr/local/bin/yrd",
+          "--repo",
+          repo,
+          "pr",
+          "recut",
+          "PR1",
+          "--revision",
+          "1",
+          "--queue",
+          "--json",
+        ],
         {
           cwd: repo,
           stdout: (text) => {
