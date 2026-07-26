@@ -63,11 +63,19 @@ it("refuses before claim when the mutable implementation root changes under a li
   try {
     await resident.services.queue?.provision?.("main")
     expect(await resident.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+    expect(await resident.services.queue?.implementationSources?.()).toEqual({
+      current: source.loaded,
+      pinned: source.authoritative,
+    })
 
     // PID 88083 survived this exact class in production: vendor/yrd moved
     // 35562d -> acca14 -> 35562d while the resident stayed alive, so lazy
     // imports could load a different revision than the startup capture.
     source.current = "git:acca14a7cc3fa6ebc44051f2f5752884653d62b6"
+    expect(await resident.services.queue?.implementationSources?.()).toEqual({
+      current: source.current,
+      pinned: source.authoritative,
+    })
     const audit = await resident.services.queue?.auditEnvironment?.()
     expect(audit).toMatchObject({ findings: [{ code: "runtime-drift" }] })
     expect(audit?.findings[0]?.message).toContain(`loaded '${source.loaded}'`)
@@ -99,6 +107,10 @@ it("refuses before claim when authoritative native source advances under a live 
     // The process remains alive with the construction-time source while a
     // freshly fetched authority leg observes the new Yrd gitlink.
     source.authoritative = "git:748dbd87dd6a30a5d4f41de4459b01d8014d791f"
+    expect(await resident.services.queue?.implementationSources?.()).toEqual({
+      current: source.current,
+      pinned: source.authoritative,
+    })
     const configAudit = await resident.services.queue?.auditEnvironment?.()
     expect(configAudit).toMatchObject({
       findings: [{ code: "config-drift" }],

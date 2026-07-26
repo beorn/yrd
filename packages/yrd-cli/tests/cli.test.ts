@@ -5160,6 +5160,15 @@ describe("runYrd", () => {
       implementationSource: "git:35562d1579f140669a453b310340582b8cc1b42f",
     }
     writeFileSync(statusPath, JSON.stringify(runner))
+    const sources = {
+      current: runner.implementationSource,
+      pinned: runner.implementationSource,
+    }
+    const services = {
+      queue: {
+        implementationSources: async () => sources,
+      },
+    } as unknown as YrdCliServices
 
     try {
       const app = await createApp()
@@ -5170,17 +5179,69 @@ describe("runYrd", () => {
         now: () => Date.parse("2026-07-13T12:00:00.000Z"),
         resolveQueueTarget,
       })
-      expect(await runYrd(app, yrd("queue", "list", "--json"), fresh.io), fresh.stderr()).toBe(0)
-      expect(JSON.parse(fresh.stdout())).toMatchObject({ command: "queue.list", projection: { runner } })
+      expect(await runYrd(app, yrd("queue", "list", "--json"), fresh.io, services), fresh.stderr()).toBe(0)
+      expect(JSON.parse(fresh.stdout())).toMatchObject({
+        command: "queue.list",
+        projection: {
+          runner: {
+            ...runner,
+            implementationSources: {
+              startup: runner.implementationSource,
+              current: sources.current,
+              pinned: sources.pinned,
+              agreement: "equal",
+            },
+          },
+        },
+      })
+      const healthy = outputIO({
+        cwd: repo,
+        now: () => Date.parse("2026-07-13T12:00:00.000Z"),
+        resolveQueueTarget,
+      })
+      expect(await runYrd(app, yrd("queue", "list"), healthy.io, services), healthy.stderr()).toBe(0)
+      expect(healthy.stdout()).toContain(`source ${runner.implementationSource} (startup=current=pinned)`)
 
       const stale = outputIO({
         cwd: repo,
         now: () => Date.parse("2026-07-13T12:00:20.001Z"),
         resolveQueueTarget,
       })
-      expect(await runYrd(app, yrd("queue", "list"), stale.io), stale.stderr()).toBe(0)
+      expect(await runYrd(app, yrd("queue", "list"), stale.io, services), stale.stderr()).toBe(0)
       expect(stale.stdout()).toContain("RUNNER STALE")
       expect(stale.stdout()).toContain(runner.implementationSource)
+
+      sources.current = `git:${"2".repeat(40)}`
+      sources.pinned = `git:${"3".repeat(40)}`
+      const drift = outputIO({
+        cwd: repo,
+        now: () => Date.parse("2026-07-13T12:00:00.000Z"),
+        resolveQueueTarget,
+      })
+      expect(await runYrd(app, yrd("queue", "list"), drift.io, services), drift.stderr()).toBe(0)
+      expect(drift.stdout()).toContain(`source startup ${runner.implementationSource}`)
+      expect(drift.stdout()).toContain(`source current ${sources.current}`)
+      expect(drift.stdout()).toContain(`source pinned ${sources.pinned}`)
+      expect(drift.stdout()).not.toContain("(startup=current=pinned)")
+      const driftJson = outputIO({
+        cwd: repo,
+        now: () => Date.parse("2026-07-13T12:00:00.000Z"),
+        resolveQueueTarget,
+      })
+      expect(await runYrd(app, yrd("queue", "list", "--json"), driftJson.io, services), driftJson.stderr()).toBe(0)
+      expect(JSON.parse(driftJson.stdout())).toMatchObject({
+        projection: {
+          runner: {
+            implementationSource: runner.implementationSource,
+            implementationSources: {
+              startup: runner.implementationSource,
+              current: sources.current,
+              pinned: sources.pinned,
+              agreement: "different",
+            },
+          },
+        },
+      })
 
       const { implementationSource: _legacySource, ...legacyRunner } = runner
       writeFileSync(statusPath, JSON.stringify(legacyRunner))
@@ -5200,7 +5261,9 @@ describe("runYrd", () => {
         resolveQueueTarget,
       })
       expect(await runYrd(app, yrd("queue", "list"), legacyHuman.io), legacyHuman.stderr()).toBe(0)
-      expect(legacyHuman.stdout()).toContain("source unknown")
+      expect(legacyHuman.stdout()).toContain("source startup unknown")
+      expect(legacyHuman.stdout()).toContain("source current unknown")
+      expect(legacyHuman.stdout()).toContain("source pinned unknown")
 
       rmSync(statusPath)
       const absent = outputIO({ cwd: repo, resolveQueueTarget })

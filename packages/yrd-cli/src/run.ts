@@ -4260,9 +4260,10 @@ export async function queueListSnapshot(
     focus?: QueueWatchFocus
     diffResolver?: QueuePrDiffResolver
     attemptResolver?: QueueAttemptResolver
+    implementationSources?: NonNullable<YrdCliServices["queue"]>["implementationSources"]
   }> = {},
 ): Promise<QueueListSnapshot> {
-  const { includeOutputs = false, focus, diffResolver, attemptResolver } = details
+  const { includeOutputs = false, focus, diffResolver, attemptResolver, implementationSources } = details
   // The watch loop reuses one app across ticks, and app.state() is the mount-time
   // journal projection — it never tails cross-process runner appends on its own.
   // Fold new frames first so each snapshot's rows are as fresh as its clock;
@@ -4274,7 +4275,30 @@ export async function queueListSnapshot(
   const { results } = await queueStatusSnapshots(app, state, target, io)
   const now = io.now?.() ?? Date.now()
   const base = results[0]?.base ?? baseIdentity(requestedBase)
-  const runner = activeResidentRunner(await residentRunnerStatus(io.cwd ?? process.cwd()))
+  const heartbeatRunner = activeResidentRunner(await residentRunnerStatus(io.cwd ?? process.cwd()))
+  const observedSources =
+    heartbeatRunner === null || implementationSources === undefined ? undefined : await implementationSources()
+  const startupSource = heartbeatRunner?.implementationSource ?? "unknown"
+  const currentSource = observedSources?.current ?? "unknown"
+  const pinnedSource = observedSources?.pinned ?? "unknown"
+  const agreement: NonNullable<QueueTimelineRunner["implementationSources"]>["agreement"] =
+    startupSource === "unknown" || currentSource === "unknown" || pinnedSource === "unknown"
+      ? "unproven"
+      : startupSource === currentSource && currentSource === pinnedSource
+        ? "equal"
+        : "different"
+  const runner =
+    heartbeatRunner === null
+      ? null
+      : {
+          ...heartbeatRunner,
+          implementationSources: {
+            startup: startupSource,
+            current: currentSource,
+            pinned: pinnedSource,
+            agreement,
+          },
+        }
   const runnerRefusal = runner === null ? queueRunnerRefusal(app) : undefined
   const attempts = await (attemptResolver?.resolve(state) ?? queueLogAttempts(app.events()))
   const projection = queueTimelineProjection(results, {
@@ -4384,8 +4408,11 @@ async function listQueues(
   filters: readonly string[],
   options: QueueListOptions,
   io: YrdCliIO,
+  services: YrdCliServices,
 ): Promise<void> {
-  const snapshot = await queueListSnapshot(app, filters, options, io)
+  const snapshot = await queueListSnapshot(app, filters, options, io, {
+    implementationSources: services.queue?.implementationSources,
+  })
   await printResultWithWarnings(
     io,
     jsonEnabled(options),
@@ -5572,6 +5599,7 @@ async function watchQueue(
   filters: readonly string[],
   options: WatchOptions,
   io: YrdCliIO,
+  services: YrdCliServices,
 ): Promise<YrdCliExitCode> {
   const interval = 1_000
   const scope = io.scope ?? app.scope
@@ -5583,6 +5611,7 @@ async function watchQueue(
       focus,
       diffResolver,
       attemptResolver,
+      implementationSources: services.queue?.implementationSources,
     })
 
   if (!jsonEnabled(options)) {
@@ -6255,7 +6284,7 @@ function buildProgram(
     .option("--latest", "show only the latest Run for each PR")
     .option("--json", "emit stable JSON")
     .action(async (filters, options) => {
-      setExit(await watchQueue(installed(), filters, options, io))
+      setExit(await watchQueue(installed(), filters, options, io, installedServices()))
     })
 
   program
@@ -6280,10 +6309,10 @@ function buildProgram(
       return
     }
     if (options.watch === true) {
-      setExit(await watchQueue(installed(), filters, options, io))
+      setExit(await watchQueue(installed(), filters, options, io, installedServices()))
       return
     }
-    await listQueues(installed(), filters, options, io)
+    await listQueues(installed(), filters, options, io, installedServices())
   }
   queue
     .command("_list [filter...]", { isDefault: true, hidden: true })

@@ -262,6 +262,15 @@ export type QueueTimelineRunner = Readonly<{
   command?: string
   /** Exact Yrd source captured by the resident heartbeat at startup. */
   implementationSource?: string
+  /** Operator projection of all three source authorities. This is deliberately
+   * absent from the heartbeat file: startup is captured by the resident, while
+   * current and pinned are freshly observed by the listing process. */
+  implementationSources?: Readonly<{
+    startup: string
+    current: string
+    pinned: string
+    agreement: "equal" | "different" | "unproven"
+  }>
   /** ISO time the resident wrote its exit marker on shutdown. The status file is
    * NEVER deleted on close — it is left with this marker so a successor can still
    * reclaim this pid's leases (idempotently). Absent while the runner is live. */
@@ -4394,10 +4403,22 @@ function TimelineRunnerBox({
           </Text>
         )}
       </Box>
-      {runner === null ? null : (
+      {runner === null ? null : runner.implementationSources?.agreement === "equal" ? (
         <Text color="$fg-muted" wrap="truncate" minWidth={0}>
-          source {runner.implementationSource ?? "unknown"}
+          source {runner.implementationSources.startup} (startup=current=pinned)
         </Text>
+      ) : (
+        <>
+          <Text color="$fg-muted" wrap="truncate" minWidth={0}>
+            source startup {runner.implementationSources?.startup ?? runner.implementationSource ?? "unknown"}
+          </Text>
+          <Text color="$fg-muted" wrap="truncate" minWidth={0}>
+            source current {runner.implementationSources?.current ?? "unknown"}
+          </Text>
+          <Text color="$fg-muted" wrap="truncate" minWidth={0}>
+            source pinned {runner.implementationSources?.pinned ?? "unknown"}
+          </Text>
+        </>
       )}
       {runner === null && runnerRefusal !== undefined ? (
         <Text color="$fg-error" wrap="truncate" minWidth={0}>

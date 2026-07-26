@@ -18,6 +18,10 @@ export type { QueueAuditFinding, QueueAuditResult } from "@yrd/queue"
  * CLI never simulates these lifecycle operations when no plugin owns them. */
 export type YrdCliQueueAdministration = Readonly<{
   auditEnvironment?(): Promise<QueueAuditResult>
+  /** Fresh operator-facing implementation identities. The resident startup
+   * value remains heartbeat-owned; these two values are re-derived so status
+   * cannot collapse a stale executor into one apparently authoritative SHA. */
+  implementationSources?(): Promise<Readonly<{ current?: string; pinned?: string }>>
   provision?(base?: string): Promise<unknown>
   deprovision?(base?: string): Promise<unknown>
 }>

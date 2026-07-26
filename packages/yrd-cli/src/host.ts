@@ -845,6 +845,14 @@ function queueAdministration(
     return { base, baseSha }
   }
   return Object.freeze({
+    async implementationSources(): Promise<Readonly<{ current?: string; pinned?: string }>> {
+      const [current, configured] = await Promise.all([implementationSource?.current(), deriveConfiguredSteps()])
+      const pinned = configured.find((step) => step.kind === "merge")?.implementationSource
+      return {
+        ...(current === undefined ? {} : { current }),
+        ...(pinned === undefined ? {} : { pinned }),
+      }
+    },
     async auditEnvironment(): Promise<QueueAuditResult> {
       // Re-derive the selected config's steps from disk on EVERY audit so a
       // config change after startup is proven, not masked by a stale snapshot.
