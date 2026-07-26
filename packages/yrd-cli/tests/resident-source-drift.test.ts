@@ -103,8 +103,9 @@ it("refuses before claim when authoritative native source advances under a live 
     expect(configAudit).toMatchObject({
       findings: [{ code: "config-drift" }],
     })
-    expect(configAudit?.findings[0]?.message).toContain(source.loaded)
-    expect(configAudit?.findings[0]?.message).toContain(source.authoritative)
+    expect(configAudit?.findings[0]?.message).toContain(`loaded '${source.loaded}'`)
+    expect(configAudit?.findings[0]?.message).toContain(`working tree '${source.current}'`)
+    expect(configAudit?.findings[0]?.message).toContain(`pinned '${source.authoritative}'`)
 
     // Follow mode migrates the persisted baseline through the one provision
     // path, then the same gate must expose the still-loaded runtime and refuse
@@ -119,8 +120,9 @@ it("refuses before claim when authoritative native source advances under a live 
     expect(runtimeAudit).toMatchObject({
       findings: [{ code: "runtime-drift" }],
     })
-    expect(runtimeAudit?.findings[0]?.message).toContain(source.loaded)
-    expect(runtimeAudit?.findings[0]?.message).toContain(source.authoritative)
+    expect(runtimeAudit?.findings[0]?.message).toContain(`loaded '${source.loaded}'`)
+    expect(runtimeAudit?.findings[0]?.message).toContain(`working tree '${source.current}'`)
+    expect(runtimeAudit?.findings[0]?.message).toContain(`pinned '${source.authoritative}'`)
   } finally {
     await resident.close()
   }

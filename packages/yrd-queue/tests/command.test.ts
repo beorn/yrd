@@ -169,7 +169,9 @@ async function hookedSubmoduleRepository(options: {
   return { repo, remote, baseSha, featureSha, moduleSha }
 }
 
-async function componentMainLandingRepository(options: Readonly<{ pushSuccessor?: boolean }> = {}): Promise<{
+async function componentMainLandingRepository(
+  options: Readonly<{ pushSuccessor?: boolean; nonBareComponentOrigin?: boolean }> = {},
+): Promise<{
   repo: string
   component: string
   rootRemote: string
@@ -182,7 +184,7 @@ async function componentMainLandingRepository(options: Readonly<{ pushSuccessor?
 }> {
   const { repo } = await repository()
   const component = join(repo, "..", "component")
-  const componentRemote = join(repo, "..", "component-origin.git")
+  const bareComponentRemote = join(repo, "..", "component-origin.git")
   await Bun.$`git init -q -b main ${component}`
   await git(component, ["config", "user.name", "Yrd Test"])
   await git(component, ["config", "user.email", "yrd@example.invalid"])
@@ -190,9 +192,10 @@ async function componentMainLandingRepository(options: Readonly<{ pushSuccessor?
   await git(component, ["add", "version.txt"])
   await git(component, ["commit", "-qm", "base"])
   const componentBaseSha = await git(component, ["rev-parse", "HEAD"])
-  await Bun.$`git init -q --bare ${componentRemote}`
-  await git(component, ["remote", "add", "origin", componentRemote])
+  await Bun.$`git init -q --bare ${bareComponentRemote}`
+  await git(component, ["remote", "add", "origin", bareComponentRemote])
   await git(component, ["push", "-q", "origin", "main"])
+  const componentRemote = options.nonBareComponentOrigin === true ? component : bareComponentRemote
 
   await git(repo, ["config", "protocol.file.allow", "always"])
   await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", componentRemote, "dep"])
@@ -208,6 +211,7 @@ async function componentMainLandingRepository(options: Readonly<{ pushSuccessor?
   await git(component, ["commit", "-qam", "pin"])
   const pinSha = await git(component, ["rev-parse", "HEAD"])
   await git(component, ["push", "-q", "origin", "task/component"])
+  if (options.nonBareComponentOrigin === true) await git(component, ["switch", "-q", "main"])
 
   await git(repo, ["switch", "-qc", "issue/feature"])
   await git(join(repo, "dep"), ["fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*"])
@@ -5256,6 +5260,53 @@ describe("Queue command adapters", () => {
       },
     })
     expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.componentBaseSha)
+  }, 20_000)
+
+  it("fast-forwards a clean checked-out main at a local non-bare component origin", async () => {
+    const fixture = await componentMainLandingRepository({ nonBareComponentOrigin: true })
+    await using process = createProcess()
+    await using app = await checkedQueue(process, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({ status: "completed", conclusion: "success" })
+    expect((run.integration as unknown as { componentMains?: unknown }).componentMains).toEqual([
+      expect.objectContaining({ action: "fast-forwarded", path: "dep", pinSha: fixture.pinSha }),
+    ])
+    expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.pinSha)
+    expect(await readFile(join(fixture.component, "version.txt"), "utf8")).toBe("pin\n")
+  }, 20_000)
+
+  it("refuses to advance a dirty checked-out main at a local non-bare component origin", async () => {
+    const fixture = await componentMainLandingRepository({ nonBareComponentOrigin: true })
+    await writeFile(join(fixture.component, "version.txt"), "dirty\n")
+    await using process = createProcess()
+    await using app = await checkedQueue(process, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: {
+        code: "component-main-promotion-failed",
+        evidence: {
+          kind: "component-main-outcomes",
+          receipts: [],
+          refusals: [
+            expect.objectContaining({
+              code: "component-main-promotion-failed",
+              path: "dep",
+              pinSha: fixture.pinSha,
+            }),
+          ],
+        },
+      },
+    })
+    expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.componentBaseSha)
+    expect(await readFile(join(fixture.component, "version.txt"), "utf8")).toBe("dirty\n")
   }, 20_000)
 
   it.each(["native", "configured"] as const)(

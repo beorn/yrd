@@ -248,11 +248,10 @@ export function runtimeImplementationSourceDrift(
 ): QueueAuditFinding | undefined {
   const current = workingTree ?? "unknown"
   const authority = pinned ?? "unknown"
-  // Pinned-source movement is handled by the baseline-vs-config leg so follow
-  // mode can migrate through the existing provision path. This direct leg owns
-  // only the split-revision hazard: the mutable module root changed underneath
-  // the still-running process.
-  if (current === loaded) return undefined
+  // A queue with no in-process native merge has no pinned implementation
+  // authority to compare. Undefined therefore means "not applicable", while
+  // an unavailable working-tree probe remains a fail-loud unknown.
+  if (current === loaded && (pinned === undefined || authority === loaded)) return undefined
   return {
     code: "runtime-drift",
     message:

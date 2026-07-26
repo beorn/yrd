@@ -19,6 +19,7 @@ import {
   readInstalledBaselines,
   removeInstalledBaseline,
   runtimeBaselineDrift,
+  runtimeImplementationSourceDrift,
   writeInstalledBaseline,
   type InstalledBaseline,
 } from "../src/installed-baseline.ts"
@@ -159,6 +160,18 @@ describe("installed baseline drift", () => {
     expect(finding?.message).toContain(staleRuntimeRevision.slice(0, 8))
     expect(finding?.message).toContain(pinnedSource)
     expect(finding?.message).toContain(loadedSource)
+  })
+
+  it("names loaded, working-tree, and pinned identities when only the authoritative pin advances (22366)", () => {
+    const loadedSource = "git:35562d1579f140669a453b310340582b8cc1b42f"
+    const pinnedSource = "git:748dbd87dd6a30a5d4f41de4459b01d8014d791f"
+
+    const finding = runtimeImplementationSourceDrift(loadedSource, loadedSource, pinnedSource)
+
+    expect(finding).toMatchObject({ code: "runtime-drift" })
+    expect(finding?.message).toContain(`loaded '${loadedSource}'`)
+    expect(finding?.message).toContain(`working tree '${loadedSource}'`)
+    expect(finding?.message).toContain(`pinned '${pinnedSource}'`)
   })
 
   it("keeps the one-time config epoch observable to pre-source-identity v3 residents (22366)", () => {

@@ -24,6 +24,7 @@ import {
   QueueSubmoduleResolutionEvidenceSchema,
   SourceRewriteSchema,
 } from "./model.ts"
+import { componentMainScratchCleanupFailure } from "./component-main-outcome.ts"
 import type { CandidatePool } from "./candidate-pool.ts"
 import type {
   CandidatePreparationInput,
@@ -3723,7 +3724,7 @@ async function withComponentMainPromotions(
   if ((outcome.status === "completed" && outcome.conclusion === "failure") || cleanupFailure === undefined) {
     return outcome
   }
-  return failed("scratch-cleanup-failed", cleanupFailure)
+  return componentMainScratchCleanupFailure(outcome, cleanupFailure)
 }
 
 type CandidateSubmoduleConflictResult =

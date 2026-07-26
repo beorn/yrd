@@ -867,15 +867,27 @@ function queueAdministration(
         implementationSource === undefined
           ? undefined
           : runtimeImplementationSourceDrift(implementationSource.loaded, workingSource, pinnedSource)
-      const findings = [
-        ...(sourceDrift === undefined ? [] : [sourceDrift]),
-        ...Object.values(baselines).flatMap((baseline) => {
-          const configDrift = installedBaselineDrift(baseline, current)
-          if (configDrift !== undefined) return [configDrift]
-          const runtimeDrift = runtimeBaselineDrift(baseline, runtime)
-          return runtimeDrift === undefined ? [] : [runtimeDrift]
-        }),
-      ]
+      const baselineFindings = Object.values(baselines).flatMap((baseline) => {
+        const configDrift = installedBaselineDrift(baseline, current)
+        if (configDrift !== undefined) return [configDrift]
+        const runtimeDrift = runtimeBaselineDrift(baseline, runtime)
+        return runtimeDrift === undefined ? [] : [runtimeDrift]
+      })
+      const hasConfigDrift = baselineFindings.some((finding) => finding.code === "config-drift")
+      // Preserve the existing migration-before-restart remedy ordering. A
+      // pinned-source advance first migrates the durable baseline, then the
+      // next audit refuses the still-loaded resident. Both stages still name
+      // the raw three-way identities so an operator never has to infer which
+      // observer is stale from an opaque step hash.
+      const findings = hasConfigDrift
+        ? baselineFindings.map((finding) =>
+            finding.code !== "config-drift" || sourceDrift === undefined
+              ? finding
+              : { ...finding, message: `${finding.message} ${sourceDrift.message}` },
+          )
+        : sourceDrift === undefined
+          ? baselineFindings
+          : [sourceDrift]
       return { findings }
     },
     async provision(base) {
