@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { appendFile, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
+import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { isAbsolute, join, resolve, sep } from "node:path"
 import { createFailure, failureFact, type JsonValue, type YrdFailure } from "@yrd/core"
@@ -885,16 +885,6 @@ const GIT_TIMEOUT_MS = 120_000
  * sites (worktree remove) stay self-documenting and independently tunable. */
 const GIT_CLEANUP_TIMEOUT_MS = 120_000
 
-function concatenateBytes(chunks: readonly Uint8Array[]): Uint8Array {
-  const output = new Uint8Array(chunks.reduce((length, chunk) => length + chunk.byteLength, 0))
-  let offset = 0
-  for (const chunk of chunks) {
-    output.set(chunk, offset)
-    offset += chunk.byteLength
-  }
-  return output
-}
-
 function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv = globalThis.process.env) {
   const env = Object.fromEntries(
     Object.entries(environment).filter(([key, value]) => value !== undefined && !key.startsWith("GIT_")),
@@ -969,25 +959,39 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
     to: string,
     paths?: readonly string[],
   ): Promise<string | undefined> => {
-    const diffChunks: Uint8Array[] = []
-    const diff = await execute(
-      repo,
-      ["diff", ...CERTIFICATE_DIFF_OPTIONS, "--full-index", "--binary", from, to, "--", ...(paths ?? [])],
-      true,
-      false,
-      diffChunks,
-    )
-    if (diff.code !== 0) return undefined
-    const result = await process.run({
-      argv: ["git", "-C", repo, "patch-id", "--stable"],
-      cwd: repo,
-      env,
-      stdin: concatenateBytes(diffChunks),
-      timeoutMs: GIT_TIMEOUT_MS,
-    })
-    if (result.timedOut) throw new Error(`yrd: git patch-id --stable timed out after ${GIT_TIMEOUT_MS}ms`)
-    if (result.exitCode !== 0) return undefined
-    return /^([0-9a-f]{40,64})\s+[0-9a-f]{40,64}$/iu.exec(result.stdout.trim())?.[1]
+    const scratch = await mkdtemp(join(await realpath(tmpdir()), "yrd-patch-id-"))
+    const diffPath = join(scratch, "payload.diff")
+    try {
+      const diff = await execute(
+        repo,
+        [
+          "diff",
+          ...CERTIFICATE_DIFF_OPTIONS,
+          "--full-index",
+          "--binary",
+          `--output=${diffPath}`,
+          from,
+          to,
+          "--",
+          ...(paths ?? []),
+        ],
+        true,
+        true,
+      )
+      if (diff.code !== 0) return undefined
+      const result = await process.run({
+        argv: ["git", "-C", repo, "patch-id", "--stable"],
+        cwd: repo,
+        env,
+        stdin: await readFile(diffPath),
+        timeoutMs: GIT_TIMEOUT_MS,
+      })
+      if (result.timedOut) throw new Error(`yrd: git patch-id --stable timed out after ${GIT_TIMEOUT_MS}ms`)
+      if (result.exitCode !== 0) return undefined
+      return /^([0-9a-f]{40,64})\s+[0-9a-f]{40,64}$/iu.exec(result.stdout.trim())?.[1]
+    } finally {
+      await rm(scratch, { recursive: true, force: true })
+    }
   }
   const rangeDiff = (repo: string, oldBase: string, oldTip: string, newBase: string, newTip: string) =>
     run(

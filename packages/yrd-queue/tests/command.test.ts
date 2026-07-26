@@ -775,6 +775,38 @@ describe("Queue command adapters", () => {
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
   })
 
+  it("recuts a direct payload whose patch certificate exceeds the process output ceiling", async () => {
+    const { repo } = await repository()
+    const oldBaseSha = await git(repo, ["rev-parse", "main"])
+    await git(repo, ["switch", "-qc", "issue/oversized"])
+    await writeFile(join(repo, "oversized.txt"), `${"x".repeat(17 * 1024 * 1024)}\n`)
+    await git(repo, ["add", "oversized.txt"])
+    await git(repo, ["commit", "-qm", "oversized payload"])
+    const featureSha = await git(repo, ["rev-parse", "HEAD"])
+
+    await git(repo, ["switch", "-q", "main"])
+    await writeFile(join(repo, "upstream.txt"), "advance authority\n")
+    await git(repo, ["add", "upstream.txt"])
+    await git(repo, ["commit", "-qm", "advance authority"])
+    const currentBaseSha = await git(repo, ["rev-parse", "main"])
+
+    await using process = createProcess()
+    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      id: "PR-OVERSIZED",
+      branch: "issue/oversized",
+      base: "main",
+      revision: 1,
+      headSha: featureSha,
+      baseSha: oldBaseSha,
+    })
+
+    expect(result).toMatchObject({
+      baseSha: currentBaseSha,
+      patchId: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      unchanged: false,
+    })
+  })
+
   it.each([
     { certificate: "exact", tree: "exact", patch: "exact", valid: true },
     { certificate: "stale tree", tree: "stale", patch: "exact", valid: false },
