@@ -3222,13 +3222,38 @@ function sameIssueIntegratedCompositions(app: YrdCliApp, pr: PR): readonly Compo
   return compositions.length === 0 ? undefined : compositions
 }
 
-async function listBays(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Promise<void> {
+async function listBays(
+  app: YrdCliApp,
+  options: JsonOption & Readonly<{ check?: boolean }>,
+  io: YrdCliIO,
+): Promise<void> {
   const bays = app.bays.list()
+  const open = bays.filter((bay) => bay.status !== "closed")
+  const cwd = io.cwd ?? process.cwd()
+  let reports: BayStatusReport[] | undefined
+  if (options.check === true) {
+    const remoteTrackingFresh = refreshBayStatusOrigin(cwd)
+    reports = open.map((bay) => classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh)))
+  }
+  const safety =
+    reports === undefined
+      ? undefined
+      : new Map(
+          reports.map((report) => [
+            report.bay,
+            report.exit === 0 ? ("safe" as const) : report.exit === 1 ? ("blocked" as const) : ("unknown" as const),
+          ]),
+        )
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "bay.list", bays, lifecycles: app.bays.branchLifecycles() },
-    createElement(BayStatusView, { bays }),
+    {
+      command: "bay.list",
+      bays,
+      lifecycles: app.bays.branchLifecycles(),
+      ...(reports === undefined ? {} : { reports }),
+    },
+    createElement(BayStatusView, { bays, ...(safety === undefined ? {} : { safety }) }),
   )
 }
 
@@ -6200,11 +6225,13 @@ function buildProgram(
   bay
     .command("_list", { isDefault: true, hidden: true })
     .option("--json", "emit stable JSON")
+    .option("--check", "compute live destroy-safety status (fetches origin; may be slow)")
     .action(async (options) => listBays(installed(), options, io))
   bay
     .command("list")
     .description("list work bays")
     .option("--json", "emit stable JSON")
+    .option("--check", "compute live destroy-safety status (fetches origin; may be slow)")
     .action(async (options) => listBays(installed(), options, io))
   bay
     .command("open")

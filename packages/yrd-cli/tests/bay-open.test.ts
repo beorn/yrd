@@ -79,6 +79,9 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
     expect(runHelp.stdout()).toContain("cancel")
     expect(runHelp.stdout()).not.toContain("--issue")
     expect(runHelp.stdout()).not.toContain("--bay")
+    const listHelp = output(repo)
+    expect(await yrd(repo, listHelp.io, "bay", "list", "--help"), listHelp.stderr()).toBe(0)
+    expect(listHelp.stdout()).toContain("--check")
 
     for (const args of [
       ["bay", "in", "--help"],
@@ -233,6 +236,7 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
       ).toBe(1)
       const payload = JSON.parse(status.stdout()) as {
         reports: readonly {
+          bay: string
           lines: readonly { class: string; verdict: string; evidence: string }[]
         }[]
       }
@@ -240,6 +244,34 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
         verdict: "BLOCK",
         evidence: expect.stringMatching(/no advertised origin ref.*at risk/u),
       })
+
+      const listed = output(repo)
+      expect(
+        await yrd(repo, listed.io, "bay", "list", "--check", "--json"),
+        `${listed.stdout()}${listed.stderr()}`,
+      ).toBe(0)
+      const listPayload = JSON.parse(listed.stdout()) as {
+        reports: readonly {
+          bay: string
+          exit: number
+          lines: readonly { class: string; verdict: string; evidence: string }[]
+        }[]
+      }
+      expect(listPayload.reports).toContainEqual(
+        expect.objectContaining({
+          bay: payload.reports[0]?.bay,
+          exit: 1,
+          lines: expect.arrayContaining([expect.objectContaining({ class: "commits", verdict: "BLOCK" })]),
+        }),
+      )
+
+      const humanList = output(repo)
+      expect(
+        await yrd(repo, humanList.io, "bay", "list", "--check"),
+        `${humanList.stdout()}${humanList.stderr()}`,
+      ).toBe(0)
+      expect(humanList.stdout()).toContain("SAFETY")
+      expect(humanList.stdout()).toContain("blocked")
     })
   })
 
