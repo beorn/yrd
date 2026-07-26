@@ -453,7 +453,7 @@ describe("host installed baseline", () => {
       // Follow gate re-provisions through the one true descriptor path — not a
       // second revision family — and the audit is clean afterwards.
       await requireFreshInstalledBaseline(resident.services, { reloadInPlace: { base: "main" } })
-      expect(await resident.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+      expect(await resident.services.queue?.auditEnvironment?.()).toMatchObject({ findings: [] })
       const healed = (await readInstalledBaselines(resident.repository.stateDir)).main
       expect(healed?.steps.map((s) => s.revision)).toEqual(current.steps.map((s) => s.revision))
     } finally {
@@ -495,7 +495,7 @@ describe("host installed baseline", () => {
       await host.services.queue?.provision?.("main")
       const stored = await readFile(installedBaselinePath(host.repository.stateDir), "utf8")
       expect(JSON.parse(stored)).toMatchObject({ version: 1, baselines: { main: { base: "main" } } })
-      expect(await host.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+      expect(await host.services.queue?.auditEnvironment?.()).toMatchObject({ findings: [] })
     } finally {
       await host.close()
     }
@@ -514,9 +514,9 @@ describe("host installed baseline", () => {
       )
       const deprovisioned = (await drifted.services.queue?.deprovision?.("main")) as { released: string[] }
       expect(deprovisioned.released).toEqual(["installed-baseline"])
-      expect(await drifted.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+      expect(await drifted.services.queue?.auditEnvironment?.()).toMatchObject({ findings: [] })
       await drifted.services.queue?.provision?.("main")
-      expect(await drifted.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+      expect(await drifted.services.queue?.auditEnvironment?.()).toMatchObject({ findings: [] })
       await requireFreshInstalledBaseline(drifted.services)
     } finally {
       await drifted.close()
@@ -529,7 +529,7 @@ describe("host installed baseline", () => {
     try {
       await resident.services.queue?.provision?.("main")
       // Three-way equal (runtime == baseline == disk) → clean.
-      expect(await resident.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+      expect(await resident.services.queue?.auditEnvironment?.()).toMatchObject({ findings: [] })
 
       // Disk moves to v2 while runtime and baseline stay v1: the DISK leg —
       // exactly ONE finding with the migration remedy (existing class).
@@ -550,7 +550,7 @@ describe("host installed baseline", () => {
       try {
         await migrator.services.queue?.deprovision?.("main")
         await migrator.services.queue?.provision?.("main")
-        expect(await migrator.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+        expect(await migrator.services.queue?.auditEnvironment?.()).toMatchObject({ findings: [] })
       } finally {
         await migrator.close()
       }
@@ -575,7 +575,7 @@ describe("host installed baseline", () => {
     const host = await createYrdHost({ cwd: repo })
     try {
       await host.services.queue?.provision?.("stale/base")
-      expect(await host.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+      expect(await host.services.queue?.auditEnvironment?.()).toMatchObject({ findings: [] })
     } finally {
       await host.close()
     }
@@ -598,7 +598,7 @@ describe("host installed baseline", () => {
       }
       expect(deprovisioned.released).toEqual(["installed-baseline"])
       expect(deprovisioned.baseSha).toMatch(/^[0-9a-f]{40}$/u)
-      expect(await after.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+      expect(await after.services.queue?.auditEnvironment?.()).toMatchObject({ findings: [] })
       await requireFreshInstalledBaseline(after.services)
     } finally {
       await after.close()

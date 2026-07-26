@@ -280,6 +280,17 @@ export type QueueTimelineRunner = Readonly<{
   clean?: boolean
 }>
 
+export function runnerImplementationSourceLines(runner: QueueTimelineRunner): readonly string[] {
+  if (runner.implementationSources?.agreement === "equal") {
+    return [`source ${runner.implementationSources.startup} (startup=current=pinned)`]
+  }
+  return [
+    `source startup ${runner.implementationSources?.startup ?? runner.implementationSource ?? "unknown"}`,
+    `source current ${runner.implementationSources?.current ?? "unknown"}`,
+    `source pinned ${runner.implementationSources?.pinned ?? "unknown"}`,
+  ]
+}
+
 export type QueueRunnerRefusal = Readonly<{
   code: string
   message: string
@@ -4403,23 +4414,13 @@ function TimelineRunnerBox({
           </Text>
         )}
       </Box>
-      {runner === null ? null : runner.implementationSources?.agreement === "equal" ? (
-        <Text color="$fg-muted" wrap="truncate" minWidth={0}>
-          source {runner.implementationSources.startup} (startup=current=pinned)
-        </Text>
-      ) : (
-        <>
-          <Text color="$fg-muted" wrap="truncate" minWidth={0}>
-            source startup {runner.implementationSources?.startup ?? runner.implementationSource ?? "unknown"}
-          </Text>
-          <Text color="$fg-muted" wrap="truncate" minWidth={0}>
-            source current {runner.implementationSources?.current ?? "unknown"}
-          </Text>
-          <Text color="$fg-muted" wrap="truncate" minWidth={0}>
-            source pinned {runner.implementationSources?.pinned ?? "unknown"}
-          </Text>
-        </>
-      )}
+      {runner === null
+        ? null
+        : runnerImplementationSourceLines(runner).map((line) => (
+            <Text key={line} color="$fg-muted" wrap="truncate" minWidth={0}>
+              {line}
+            </Text>
+          ))}
       {runner === null && runnerRefusal !== undefined ? (
         <Text color="$fg-error" wrap="truncate" minWidth={0}>
           {runnerRefusal.code}: {runnerRefusal.message}

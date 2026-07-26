@@ -86,6 +86,7 @@ import {
   prDetailData,
   projectedPrStatus,
   queueRunRevisionClocks,
+  runnerImplementationSourceLines,
   queueTimelineAdmissionTimes,
   queueTimelineProjection,
   QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
@@ -137,7 +138,14 @@ import {
   projectQueueRunTaskStatus,
   taskStatusFields,
 } from "./task-status.ts"
-import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState } from "./types.ts"
+import type {
+  YrdCliApp,
+  YrdCliExitCode,
+  YrdCliIO,
+  YrdCliServices,
+  YrdCliState,
+  YrdImplementationSources,
+} from "./types.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
 import { artifactLocation, directArtifacts, nestedArtifacts, uniqueArtifacts } from "./artifact-reference.ts"
 import { readInstalledBaselines } from "./installed-baseline.ts"
@@ -314,6 +322,26 @@ function activeResidentRunner(runner: QueueTimelineRunner | null): QueueTimeline
   return runner?.exitedAt !== undefined ? null : runner
 }
 
+function projectRunnerImplementationSources(
+  runner: QueueTimelineRunner | null,
+  observed: YrdImplementationSources | undefined,
+): QueueTimelineRunner | null {
+  if (runner === null) return null
+  const startup = runner.implementationSource ?? "unknown"
+  const current = observed?.current ?? "unknown"
+  const pinned = observed?.pinned ?? "unknown"
+  const agreement: NonNullable<QueueTimelineRunner["implementationSources"]>["agreement"] =
+    startup === "unknown" || current === "unknown" || pinned === "unknown"
+      ? "unproven"
+      : startup === current && current === pinned
+        ? "equal"
+        : "different"
+  return {
+    ...runner,
+    implementationSources: { startup, current, pinned, agreement },
+  }
+}
+
 type RunnerGitDistance = Readonly<{
   base: string
   baseSha: string
@@ -438,9 +466,10 @@ async function queueRunnerHealth(
         "yrd: queue.audit capability is not installed; runner health cannot prove baseline freshness",
       )
     }
-    const runner = activeResidentRunner(await residentRunnerStatus(cwd))
+    const heartbeatRunner = activeResidentRunner(await residentRunnerStatus(cwd))
     git = await runnerGitHealth(cwd)
     const auditResult = await audit()
+    const runner = projectRunnerImplementationSources(heartbeatRunner, auditResult.implementationSources)
     const now = io.now?.() ?? Date.now()
     const runnerAgeMs = runner === null ? undefined : Math.max(0, now - Date.parse(runner.lastTickAt))
     const runnerStatus = runnerAgeMs === undefined ? "missing" : runnerAgeMs > RUNNER_STALE_MS ? "stale" : "fresh"
@@ -567,6 +596,7 @@ async function checkQueueRunner(
   )
   const human = [
     `yrd-runner ${result.payload.state} (lease=${result.payload.facts.lease}, heartbeat=${result.payload.facts.runnerStatus})`,
+    ...(result.payload.facts.runner === undefined ? [] : runnerImplementationSourceLines(result.payload.facts.runner)),
     ...(result.payload.error === undefined ? [] : [formatActionableFailure(result.payload.error)]),
     ...gitLines,
   ].join("\n")
@@ -4278,27 +4308,7 @@ export async function queueListSnapshot(
   const heartbeatRunner = activeResidentRunner(await residentRunnerStatus(io.cwd ?? process.cwd()))
   const observedSources =
     heartbeatRunner === null || implementationSources === undefined ? undefined : await implementationSources()
-  const startupSource = heartbeatRunner?.implementationSource ?? "unknown"
-  const currentSource = observedSources?.current ?? "unknown"
-  const pinnedSource = observedSources?.pinned ?? "unknown"
-  const agreement: NonNullable<QueueTimelineRunner["implementationSources"]>["agreement"] =
-    startupSource === "unknown" || currentSource === "unknown" || pinnedSource === "unknown"
-      ? "unproven"
-      : startupSource === currentSource && currentSource === pinnedSource
-        ? "equal"
-        : "different"
-  const runner =
-    heartbeatRunner === null
-      ? null
-      : {
-          ...heartbeatRunner,
-          implementationSources: {
-            startup: startupSource,
-            current: currentSource,
-            pinned: pinnedSource,
-            agreement,
-          },
-        }
+  const runner = projectRunnerImplementationSources(heartbeatRunner, observedSources)
   const runnerRefusal = runner === null ? queueRunnerRefusal(app) : undefined
   const attempts = await (attemptResolver?.resolve(state) ?? queueLogAttempts(app.events()))
   const projection = queueTimelineProjection(results, {

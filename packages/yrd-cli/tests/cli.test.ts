@@ -5284,6 +5284,8 @@ describe("runYrd", () => {
     execFileSync("git", ["-C", repo, "commit", "-qm", "base"])
     const baseSha = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()
     const stateDir = join(repo, ".git", "yrd")
+    const implementationSource = `git:${"1".repeat(40)}`
+    const implementationSources = { current: implementationSource, pinned: implementationSource }
     await writeInstalledBaseline(stateDir, {
       base: "main",
       baseSha,
@@ -5297,7 +5299,11 @@ describe("runYrd", () => {
 
     const app = await createApp()
     let findings: Array<{ code: string; message: string }> = []
-    const services: YrdCliServices = { queue: { auditEnvironment: async () => ({ findings }) } }
+    const services: YrdCliServices = {
+      queue: {
+        auditEnvironment: async () => ({ findings, implementationSources }),
+      },
+    }
     const lockRelease = Promise.withResolvers<void>()
     const lockAcquired = Promise.withResolvers<void>()
     let lock: Promise<void> | undefined
@@ -5339,6 +5345,7 @@ describe("runYrd", () => {
           startedAt: "2026-07-09T12:00:00.000Z",
           lastTickAt: "2026-07-09T12:00:58.000Z",
           command: "yrd queue run --follow",
+          implementationSource,
         }),
       )
 
@@ -5348,8 +5355,43 @@ describe("runYrd", () => {
         schema: "hab-service-health/1",
         state: "healthy",
         running: true,
-        facts: { lease: "held", runnerStatus: "fresh" },
+        facts: {
+          lease: "held",
+          runnerStatus: "fresh",
+          runner: {
+            implementationSources: {
+              startup: implementationSource,
+              current: implementationSources.current,
+              pinned: implementationSources.pinned,
+              agreement: "equal",
+            },
+          },
+        },
       })
+      const healthyHuman = outputIO({ cwd: repo })
+      expect(await runYrd(app, yrd("queue", "list", "--check"), healthyHuman.io, services)).toBe(0)
+      expect(healthyHuman.stdout()).toContain(`source ${implementationSource} (startup=current=pinned)`)
+
+      implementationSources.current = `git:${"2".repeat(40)}`
+      const changedSource = outputIO({ cwd: repo })
+      expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), changedSource.io, services)).toBe(0)
+      expect(JSON.parse(changedSource.stdout())).toMatchObject({
+        facts: {
+          runner: {
+            implementationSources: {
+              startup: implementationSource,
+              current: implementationSources.current,
+              pinned: implementationSources.pinned,
+              agreement: "different",
+            },
+          },
+        },
+      })
+      const changedSourceHuman = outputIO({ cwd: repo })
+      expect(await runYrd(app, yrd("queue", "list", "--check"), changedSourceHuman.io, services)).toBe(0)
+      expect(changedSourceHuman.stdout()).toContain(`source startup ${implementationSource}`)
+      expect(changedSourceHuman.stdout()).toContain(`source current ${implementationSources.current}`)
+      expect(changedSourceHuman.stdout()).toContain(`source pinned ${implementationSources.pinned}`)
 
       const failedAudit = outputIO({ cwd: repo })
       const failedAuditServices: YrdCliServices = {

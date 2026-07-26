@@ -51,7 +51,6 @@ import {
   type InstalledStep,
   type IntegratedShape,
   type PRShape,
-  type QueueAuditResult,
   type StepDef,
   type StepExecution,
   type StepRunner,
@@ -844,16 +843,22 @@ function queueAdministration(
     if (baseSha === undefined) throw new Error(`yrd: queue base '${base}' does not resolve`)
     return { base, baseSha }
   }
-  return Object.freeze({
-    async implementationSources(): Promise<Readonly<{ current?: string; pinned?: string }>> {
-      const [current, configured] = await Promise.all([implementationSource?.current(), deriveConfiguredSteps()])
-      const pinned = configured.find((step) => step.kind === "merge")?.implementationSource
-      return {
-        ...(current === undefined ? {} : { current }),
+  const observeImplementationSources = async () => {
+    const [workingTree, configuredSteps] = await Promise.all([implementationSource?.current(), deriveConfiguredSteps()])
+    const pinned = configuredSteps.find((step) => step.kind === "merge")?.implementationSource
+    return {
+      configuredSteps,
+      sources: {
+        ...(workingTree === undefined ? {} : { current: workingTree }),
         ...(pinned === undefined ? {} : { pinned }),
-      }
+      },
+    }
+  }
+  return Object.freeze({
+    async implementationSources() {
+      return (await observeImplementationSources()).sources
     },
-    async auditEnvironment(): Promise<QueueAuditResult> {
+    async auditEnvironment() {
       // Re-derive the selected config's steps from disk on EVERY audit so a
       // config change after startup is proven, not masked by a stale snapshot.
       // The audit proves THREE-WAY equality (merge-queue R41b): runtime
@@ -864,17 +869,20 @@ function queueAdministration(
       // agree is the runtime leg proven, so a resident built before another
       // process's migration fails loud instead of certifying baseline == disk
       // while it still executes the old steps.
-      const [baselines, current, workingSource] = await Promise.all([
+      const [baselines, observation] = await Promise.all([
         readInstalledBaselines(repository.stateDir),
-        deriveConfiguredSteps(),
-        implementationSource?.current(),
+        observeImplementationSources(),
       ])
+      const current = observation.configuredSteps
       const runtime = runtimeSteps()
-      const pinnedSource = current.find((step) => step.kind === "merge")?.implementationSource
       const sourceDrift =
         implementationSource === undefined
           ? undefined
-          : runtimeImplementationSourceDrift(implementationSource.loaded, workingSource, pinnedSource)
+          : runtimeImplementationSourceDrift(
+              implementationSource.loaded,
+              observation.sources.current,
+              observation.sources.pinned,
+            )
       const baselineFindings = Object.values(baselines).flatMap((baseline) => {
         const configDrift = installedBaselineDrift(baseline, current)
         if (configDrift !== undefined) return [configDrift]
@@ -894,7 +902,7 @@ function queueAdministration(
               : { ...finding, message: `${finding.message} ${sourceDrift.message}` },
           )
         : [...(sourceDrift === undefined ? [] : [sourceDrift]), ...baselineFindings]
-      return { findings }
+      return { findings, implementationSources: observation.sources }
     },
     async provision(base) {
       const [inspected, current] = await Promise.all([inspect(base), deriveConfiguredSteps()])

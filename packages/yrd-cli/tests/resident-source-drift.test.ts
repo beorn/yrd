@@ -62,7 +62,10 @@ it("refuses before claim when the mutable implementation root changes under a li
   const resident = await createYrdHost({ cwd: repo })
   try {
     await resident.services.queue?.provision?.("main")
-    expect(await resident.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+    expect(await resident.services.queue?.auditEnvironment?.()).toMatchObject({
+      findings: [],
+      implementationSources: { current: source.current, pinned: source.authoritative },
+    })
     expect(await resident.services.queue?.implementationSources?.()).toEqual({
       current: source.loaded,
       pinned: source.authoritative,
@@ -90,7 +93,10 @@ it("refuses before claim when the mutable implementation root changes under a li
     // mutable root returns to the startup SHA, but the continuation cycle
     // inside the window already refused rather than silently claiming work.
     source.current = source.loaded
-    expect(await resident.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+    expect(await resident.services.queue?.auditEnvironment?.()).toMatchObject({
+      findings: [],
+      implementationSources: { current: source.current, pinned: source.authoritative },
+    })
     await requireFreshInstalledBaseline(resident.services)
   } finally {
     await resident.close()
@@ -102,7 +108,10 @@ it("refuses before claim when authoritative native source advances under a live 
   const resident = await createYrdHost({ cwd: repo })
   try {
     await resident.services.queue?.provision?.("main")
-    expect(await resident.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+    expect(await resident.services.queue?.auditEnvironment?.()).toMatchObject({
+      findings: [],
+      implementationSources: { current: source.current, pinned: source.authoritative },
+    })
 
     // The process remains alive with the construction-time source while a
     // freshly fetched authority leg observes the new Yrd gitlink.
@@ -144,7 +153,10 @@ it("refuses before claim when authoritative native source advances under a live 
   source.loaded = source.authoritative
   source.current = source.authoritative
   await using restarted = await createYrdHost({ cwd: repo })
-  expect(await restarted.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+  expect(await restarted.services.queue?.auditEnvironment?.()).toMatchObject({
+    findings: [],
+    implementationSources: { current: source.current, pinned: source.authoritative },
+  })
   await requireFreshInstalledBaseline(restarted.services)
 })
 

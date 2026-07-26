@@ -14,14 +14,24 @@ export type YrdCliExitCode = 0 | 1 | 2 | 3
 
 export type { QueueAuditFinding, QueueAuditResult } from "@yrd/queue"
 
+export type YrdImplementationSources = Readonly<{
+  current?: string
+  pinned?: string
+}>
+
+export type YrdCliQueueAuditResult = QueueAuditResult &
+  Readonly<{
+    implementationSources?: YrdImplementationSources
+  }>
+
 /** Optional operator capabilities supplied by a queue-environment plugin. The
  * CLI never simulates these lifecycle operations when no plugin owns them. */
 export type YrdCliQueueAdministration = Readonly<{
-  auditEnvironment?(): Promise<QueueAuditResult>
+  auditEnvironment?(): Promise<YrdCliQueueAuditResult>
   /** Fresh operator-facing implementation identities. The resident startup
    * value remains heartbeat-owned; these two values are re-derived so status
    * cannot collapse a stale executor into one apparently authoritative SHA. */
-  implementationSources?(): Promise<Readonly<{ current?: string; pinned?: string }>>
+  implementationSources?(): Promise<YrdImplementationSources>
   provision?(base?: string): Promise<unknown>
   deprovision?(base?: string): Promise<unknown>
 }>
