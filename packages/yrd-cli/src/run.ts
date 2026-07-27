@@ -61,6 +61,7 @@ import {
   resolveManagedDoPlan,
   runManagedDo,
   type ManagedDoCommand,
+  type ManagedDoDelivery,
   type ManagedDoResult,
   type ManagedDoStages,
 } from "./do-managed.ts"
@@ -2150,27 +2151,11 @@ function managedDoStages(
         refusal(`recut ${input.preflight ? "preflight " : ""}for PR '${input.pr}' exited ${exit}`)
       }
     },
-    observeDelivery: async (input) => {
-      const pr = requiredPr(app, input.pr)
-      const state = prDeliveryState(pr)
-      const landing = prLandingOutcome(pr)
-      const landingSha =
-        landing.outcome === "landed"
-          ? landing.landingSha
-          : landing.outcome === "already-landed"
-            ? landing.candidateSha
-            : undefined
-      const findings = app.queue
-        .audit()
-        .findings.filter((finding) => finding.pr === undefined || finding.pr === pr.id)
-        .map((finding) => ({
-          code: finding.code,
-          message: finding.message,
-          ...(finding.count === undefined ? {} : { count: finding.count }),
-        }))
-      return { state, ...(landingSha === undefined ? {} : { landingSha }), findings }
-    },
-    sleep: (ms) => new Promise<void>((settle) => setTimeout(settle, ms)),
+    observeDelivery: (input) => observeManagedDoDelivery(app, input.pr),
+    sleep: (ms) =>
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, ms)
+      }),
     now: () => (io.now === undefined ? Date.now() : io.now()),
     wallNow: () => new Date(),
     recordBoundary,
@@ -3478,6 +3463,31 @@ function prLandingOutcome(pr: DeepReadonly<PR>): PRLandingOutcome {
     at: pr.integratedAt,
     ...(pr.terminalRun === undefined ? {} : { run: pr.terminalRun }),
   }
+}
+
+/** Refresh the append-only journal before classifying managed delivery.
+ * The resident queue runner writes from another process, so the command's
+ * startup projection cannot prove a later landing without replaying new frames. */
+export async function observeManagedDoDelivery(app: YrdCliApp, selector: string): Promise<ManagedDoDelivery> {
+  await app.refresh()
+  const pr = requiredPr(app, selector)
+  const state = prDeliveryState(pr)
+  const landing = prLandingOutcome(pr)
+  const landingSha =
+    landing.outcome === "landed"
+      ? landing.landingSha
+      : landing.outcome === "already-landed"
+        ? landing.candidateSha
+        : undefined
+  const findings = app.queue
+    .audit()
+    .findings.filter((finding) => finding.pr === undefined || finding.pr === pr.id)
+    .map((finding) => ({
+      code: finding.code,
+      message: finding.message,
+      ...(finding.count === undefined ? {} : { count: finding.count }),
+    }))
+  return { state, ...(landingSha === undefined ? {} : { landingSha }), findings }
 }
 
 function allQueueRuns(app: YrdCliApp): Run[] {

@@ -20,6 +20,8 @@ import {
   type ManagedDoStageBoundary,
   type ManagedDoStages,
 } from "../src/do-managed.ts"
+import { observeManagedDoDelivery } from "../src/run.ts"
+import type { YrdCliApp } from "../src/types.ts"
 
 const ISSUE = "@yrd/core/22398"
 const LANE = "@dev/0"
@@ -254,6 +256,41 @@ describe("managed do composition", () => {
     const result = await runManagedDo({ issue: ISSUE, plan: plan(), stages, lock: FREE_LOCK })
     expect(result.outcome).toBe("landed")
     expect(recorded.calls.filter((call) => call === "carrier")).toHaveLength(3)
+  })
+})
+
+describe("managed do delivery observation", () => {
+  it("refreshes the durable projection before classifying a resident landing", async () => {
+    const pushed = {
+      id: CARRIER,
+      state: "open",
+      merged: false,
+      revs: [{ n: 1, head: "b".repeat(40), pushedAt: "2026-07-27T18:00:00.000Z" }],
+    }
+    const landed = {
+      ...pushed,
+      state: "closed",
+      merged: true,
+      integratedAt: "2026-07-27T18:01:00.000Z",
+      integration: { commit: LANDED, baseSha: "c".repeat(40) },
+    }
+    let current = pushed
+    const refresh = vi.fn(async () => {
+      current = landed
+      return {}
+    })
+    const app = {
+      refresh,
+      bays: { pr: () => current },
+      queue: { audit: () => ({ findings: [] }) },
+    } as unknown as YrdCliApp
+
+    await expect(observeManagedDoDelivery(app, CARRIER)).resolves.toEqual({
+      state: "integrated",
+      landingSha: LANDED,
+      findings: [],
+    })
+    expect(refresh).toHaveBeenCalledOnce()
   })
 })
 
