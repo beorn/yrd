@@ -40,7 +40,7 @@ export type ManagedDoTrail = Readonly<{
   carrier?: string
 }>
 
-export type ManagedDoResult = Readonly<{
+type ManagedDoTerminalResult = Readonly<{
   outcome: ManagedDoOutcome
   /** The stage that produced this result — always named, on every path. */
   stage: ManagedDoStage
@@ -55,6 +55,22 @@ export type ManagedDoResult = Readonly<{
   escalation?: string
 }>
 
+export type ManagedDoStageTiming = Readonly<{
+  stage: ManagedDoStage
+  phase: Exclude<ManagedDoStagePhase, "started">
+  startedAt: string
+  endedAt: string
+  durationMs: number
+}>
+
+export type ManagedDoResult = ManagedDoTerminalResult &
+  Readonly<{
+    startedAt: string
+    endedAt: string
+    durationMs: number
+    timings: readonly ManagedDoStageTiming[]
+  }>
+
 export type ManagedDoStagePhase = "started" | "completed" | "refused" | "timed-out"
 
 /** One wall-clock-stamped transition in the managed verb. Domain commands
@@ -67,6 +83,8 @@ export type ManagedDoStageBoundary = Readonly<{
   stage: ManagedDoStage
   phase: ManagedDoStagePhase
   trail: ManagedDoTrail
+  /** Present on terminal boundaries; measured from this stage's started row. */
+  durationMs?: number
   reason?: string
 }>
 
@@ -78,6 +96,7 @@ export type ManagedDoStageBoundaryInput = Omit<ManagedDoStageBoundary, "at"> &
   }>
 
 export type ManagedDoJournal = (boundary: ManagedDoStageBoundaryInput) => Promise<void>
+export type ManagedDoScoreboard = (result: ManagedDoResult) => Promise<void>
 
 /** A repository-configured command template. Same shape as a configured check
  * step: a shell `run` string plus an optional wall-clock bound. Yrd substitutes
@@ -221,11 +240,11 @@ function refused(
   trail: ManagedDoTrail,
   reason: string,
   extra: Readonly<{ remedy?: readonly string[]; escalation?: string }> = {},
-): ManagedDoResult {
+): ManagedDoTerminalResult {
   return Object.freeze({ outcome: "refused" as const, stage, trail, reason, ...extra })
 }
 
-function timedOut(stage: ManagedDoStage, trail: ManagedDoTrail, reason: string): ManagedDoResult {
+function timedOut(stage: ManagedDoStage, trail: ManagedDoTrail, reason: string): ManagedDoTerminalResult {
   return Object.freeze({ outcome: "timed-out" as const, stage, trail, reason })
 }
 
@@ -285,7 +304,7 @@ async function refuseAt(
   trail: ManagedDoTrail,
   reason: string,
   extra: Readonly<{ remedy?: readonly string[]; escalation?: string }> = {},
-): Promise<ManagedDoResult> {
+): Promise<ManagedDoTerminalResult> {
   return refused(stage, trail, joinedReason(reason, await emitBoundary(stages, stage, "refused", trail, reason)), extra)
 }
 
@@ -293,7 +312,7 @@ async function startStage(
   stages: ManagedDoStages,
   stage: ManagedDoStage,
   trail: ManagedDoTrail,
-): Promise<ManagedDoResult | undefined> {
+): Promise<ManagedDoTerminalResult | undefined> {
   const failure = await emitBoundary(stages, stage, "started", trail)
   return failure === undefined ? undefined : refused(stage, trail, failure)
 }
@@ -302,12 +321,15 @@ async function completeStage(
   stages: ManagedDoStages,
   stage: ManagedDoStage,
   trail: ManagedDoTrail,
-): Promise<ManagedDoResult | undefined> {
+): Promise<ManagedDoTerminalResult | undefined> {
   const failure = await emitBoundary(stages, stage, "completed", trail)
   return failure === undefined ? undefined : refused(stage, trail, failure)
 }
 
-async function finishStageResult(stages: ManagedDoStages, result: ManagedDoResult): Promise<ManagedDoResult> {
+async function finishStageResult(
+  stages: ManagedDoStages,
+  result: ManagedDoTerminalResult,
+): Promise<ManagedDoTerminalResult> {
   const phase: ManagedDoStagePhase =
     result.outcome === "landed" ? "completed" : result.outcome === "timed-out" ? "timed-out" : "refused"
   const journalFailure = await emitBoundary(stages, result.stage, phase, result.trail, result.reason)
@@ -318,9 +340,67 @@ async function finishStageResult(stages: ManagedDoStages, result: ManagedDoResul
   })
 }
 
+function boundaryDurationMs(startedAt: string, endedAt: string): number {
+  const elapsed = Date.parse(endedAt) - Date.parse(startedAt)
+  return Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : 0
+}
+
+function measureManagedDo(stages: ManagedDoStages): Readonly<{
+  stages: ManagedDoStages
+  finish(result: ManagedDoTerminalResult): ManagedDoResult
+}> {
+  const starts = new Map<ManagedDoStage, string>()
+  const timings: ManagedDoStageTiming[] = []
+  let startedAt: string | undefined
+  let endedAt: string | undefined
+  return {
+    stages: {
+      ...stages,
+      recordBoundary: async (boundary) => {
+        startedAt ??= boundary.at
+        endedAt = boundary.at
+        if (boundary.phase === "started") {
+          starts.set(boundary.stage, boundary.at)
+          await stages.recordBoundary(boundary)
+          return
+        }
+        const stageStartedAt = starts.get(boundary.stage) ?? boundary.at
+        const timing: ManagedDoStageTiming = Object.freeze({
+          stage: boundary.stage,
+          phase: boundary.phase,
+          startedAt: stageStartedAt,
+          endedAt: boundary.at,
+          durationMs: boundaryDurationMs(stageStartedAt, boundary.at),
+        })
+        timings.push(timing)
+        await stages.recordBoundary({ ...boundary, durationMs: timing.durationMs })
+      },
+    },
+    finish: (result) => {
+      const first = startedAt ?? stages.wallNow().toISOString()
+      const last = endedAt ?? first
+      return Object.freeze({
+        ...result,
+        startedAt: first,
+        endedAt: last,
+        durationMs: boundaryDurationMs(first, last),
+        timings: Object.freeze([...timings]),
+      })
+    },
+  }
+}
+
 export async function runManagedDo(
   request: Readonly<{ issue: string; plan: ManagedDoPlan; stages: ManagedDoStages; lock: ManagedDoLock }>,
 ): Promise<ManagedDoResult> {
+  const measured = measureManagedDo(request.stages)
+  const result = await runManagedDoUnmeasured({ ...request, stages: measured.stages })
+  return measured.finish(result)
+}
+
+async function runManagedDoUnmeasured(
+  request: Readonly<{ issue: string; plan: ManagedDoPlan; stages: ManagedDoStages; lock: ManagedDoLock }>,
+): Promise<ManagedDoTerminalResult> {
   const { issue, plan, stages, lock } = request
   const trail: ManagedDoTrail = { issue, lane: plan.settings.lane }
   const concurrencyStart = await startStage(stages, "concurrency", trail)
@@ -359,7 +439,7 @@ export async function runManagedDo(
   }
 }
 
-async function drive(issue: string, plan: ManagedDoPlan, stages: ManagedDoStages): Promise<ManagedDoResult> {
+async function drive(issue: string, plan: ManagedDoPlan, stages: ManagedDoStages): Promise<ManagedDoTerminalResult> {
   const { settings } = plan
   let trail: ManagedDoTrail = { issue, lane: settings.lane }
 
@@ -452,7 +532,7 @@ async function closeAfterLaunchFailure(
   trail: ManagedDoTrail,
   reason: string,
   stage: "bay" | "launch" = "launch",
-): Promise<ManagedDoResult> {
+): Promise<ManagedDoTerminalResult> {
   let cleanupFailure: string | undefined
   try {
     await stages.closeBay({ bay: bay.bay })
@@ -467,7 +547,7 @@ async function awaitCarrier(
   trail: ManagedDoTrail,
   settings: ManagedDoSettings,
   stages: ManagedDoStages,
-): Promise<Readonly<{ headSha: string }> | Readonly<{ result: ManagedDoResult }>> {
+): Promise<Readonly<{ headSha: string }> | Readonly<{ result: ManagedDoTerminalResult }>> {
   const leaseBase = bay.headSha
   const deadline = stages.now() + settings.carrierTimeoutMs
   for (;;) {
@@ -502,7 +582,7 @@ async function admit(
   bay: ManagedDoBay,
   issue: string,
   stages: ManagedDoStages,
-): Promise<ManagedDoResult | undefined> {
+): Promise<ManagedDoTerminalResult | undefined> {
   for (const preflight of [true, false]) {
     try {
       await stages.recut({ pr, preflight })
@@ -525,7 +605,7 @@ async function recover(
   issue: string,
   stages: ManagedDoStages,
   preflight: boolean,
-): Promise<ManagedDoResult | undefined> {
+): Promise<ManagedDoTerminalResult | undefined> {
   let delivery: PRDeliveryState | undefined
   try {
     delivery = (await stages.observeDelivery({ pr })).state
@@ -569,7 +649,7 @@ async function observe(
   trail: ManagedDoTrail,
   settings: ManagedDoSettings,
   stages: ManagedDoStages,
-): Promise<ManagedDoResult> {
+): Promise<ManagedDoTerminalResult> {
   const deadline = stages.now() + settings.landingTimeoutMs
   for (;;) {
     let delivery: ManagedDoDelivery
@@ -628,6 +708,50 @@ export function createManagedDoJournal(options: Readonly<{ stateDir: string; now
     await mkdir(dir, { recursive: true })
     const at = boundary.at ?? now().toISOString()
     await appendFile(path, `${JSON.stringify({ schema: 1, at, ...boundary })}\n`, "utf8")
+  }
+}
+
+function formatManagedDoDuration(durationMs: number): string {
+  const milliseconds = Math.max(0, Math.round(durationMs))
+  if (milliseconds < 1_000) return `${milliseconds}ms`
+  if (milliseconds < 60_000) return `${(milliseconds / 1_000).toFixed(3)}s`
+  const minutes = Math.floor(milliseconds / 60_000)
+  const seconds = ((milliseconds % 60_000) / 1_000).toFixed(3).padStart(6, "0")
+  return `${minutes}:${seconds}`
+}
+
+/** Stable plain-text projection used by every managed-do exit path. */
+export function formatManagedDoTimingTable(result: ManagedDoResult): string {
+  const rows = [
+    ...result.timings.map((timing) => ({
+      stage: timing.stage,
+      duration: formatManagedDoDuration(timing.durationMs),
+      outcome: timing.phase,
+    })),
+    { stage: "TOTAL", duration: formatManagedDoDuration(result.durationMs), outcome: result.outcome },
+  ]
+  const stageWidth = Math.max("STAGE".length, ...rows.map((row) => row.stage.length))
+  const durationWidth = Math.max("DURATION".length, ...rows.map((row) => row.duration.length))
+  return [
+    "managed do stage durations",
+    `${"STAGE".padEnd(stageWidth)}  ${"DURATION".padStart(durationWidth)}  OUTCOME`,
+    ...rows.map((row) => `${row.stage.padEnd(stageWidth)}  ${row.duration.padStart(durationWidth)}  ${row.outcome}`),
+    "",
+  ].join("\n")
+}
+
+/** Append one terminal summary per managed run. The detailed boundary journal
+ * stays lossless; this row is the comparison-ready speed scoreboard. */
+export function createManagedDoScoreboard(options: Readonly<{ stateDir: string }>): ManagedDoScoreboard {
+  const dir = join(options.stateDir, "do-managed")
+  const path = join(dir, "scoreboard.jsonl")
+  return async (result) => {
+    await mkdir(dir, { recursive: true })
+    await appendFile(
+      path,
+      `${JSON.stringify({ schema: 1, issue: result.trail.issue, lane: result.trail.lane, ...result })}\n`,
+      "utf8",
+    )
   }
 }
 

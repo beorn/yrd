@@ -9,6 +9,8 @@ import { describe, expect, it, vi } from "vitest"
 import { createFailure } from "@yrd/core"
 import {
   createManagedDoJournal,
+  createManagedDoScoreboard,
+  formatManagedDoTimingTable,
   managedDoRequested,
   resolveManagedDoPlan,
   runManagedDo,
@@ -184,6 +186,23 @@ describe("managed do composition", () => {
     expect(result.landingSha).toBe(LANDED)
     expect(result.ancestry).toBe(`git merge-base --is-ancestor ${LANDED} origin/main`)
     expect(result.trail).toMatchObject({ issue: ISSUE, lane: LANE, bay: BAY, branch: BRANCH, carrier: CARRIER })
+    expect(result.timings).toHaveLength(9)
+    expect(result.timings.map(({ stage, phase, durationMs }) => ({ stage, phase, durationMs }))).toEqual([
+      { stage: "concurrency", phase: "completed", durationMs: 1_000 },
+      { stage: "assign", phase: "completed", durationMs: 1_000 },
+      { stage: "seat", phase: "completed", durationMs: 1_000 },
+      { stage: "bay", phase: "completed", durationMs: 1_000 },
+      { stage: "launch", phase: "completed", durationMs: 1_000 },
+      { stage: "carrier", phase: "completed", durationMs: 1_000 },
+      { stage: "draft", phase: "completed", durationMs: 1_000 },
+      { stage: "recut", phase: "completed", durationMs: 1_000 },
+      { stage: "observe", phase: "completed", durationMs: 1_000 },
+    ])
+    expect(result).toMatchObject({
+      startedAt: "2026-07-27T17:00:00.000Z",
+      endedAt: "2026-07-27T17:00:17.000Z",
+      durationMs: 17_000,
+    })
     expect(recorded.calls).toEqual([
       `assign:${ISSUE}:${LANE}`,
       `seat:${ISSUE}:${LANE}`,
@@ -364,6 +383,42 @@ describe("managed do boundary journal", () => {
           trail: { issue: ISSUE, lane: LANE },
         },
       ])
+    } finally {
+      await rm(stateDir, { recursive: true, force: true })
+    }
+  })
+
+  it("prints exact stage durations and appends one durable scoreboard row per terminal run", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "yrd-do-scoreboard-"))
+    try {
+      const { stages } = createStages()
+      const first = await runManagedDo({ issue: ISSUE, plan: plan(), stages, lock: FREE_LOCK })
+      const append = createManagedDoScoreboard({ stateDir })
+      await append(first)
+      await append({ ...first, durationMs: 12_000, endedAt: "2026-07-27T17:00:12.000Z" })
+
+      const table = formatManagedDoTimingTable(first)
+      expect(table).toContain("STAGE")
+      expect(table).toContain("assign")
+      expect(table).toContain("1.000s")
+      expect(table).toContain("TOTAL")
+
+      const rows = (await readFile(join(stateDir, "do-managed", "scoreboard.jsonl"), "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as unknown)
+      expect(rows).toHaveLength(2)
+      expect(rows[0]).toMatchObject({
+        schema: 1,
+        issue: ISSUE,
+        lane: LANE,
+        outcome: "landed",
+        durationMs: 17_000,
+        timings: expect.arrayContaining([
+          expect.objectContaining({ stage: "concurrency", phase: "completed", durationMs: 1_000 }),
+        ]),
+      })
+      expect(rows[1]).toMatchObject({ schema: 1, durationMs: 12_000 })
     } finally {
       await rm(stateDir, { recursive: true, force: true })
     }

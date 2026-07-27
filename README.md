@@ -402,7 +402,9 @@ concurrency is capped at one run per repository; a marker under the state
 directory records the holder, and a marker whose process is gone is reclaimed
 loudly rather than silently obeyed or silently overwritten. The sibling
 `do-managed/journal.jsonl` records every stage's started and terminal boundary
-with its own wall-clock timestamp.
+with its own wall-clock timestamp; terminal rows also carry the measured
+`durationMs`. Every exit prints the stage-duration table and appends one
+comparison-ready run row to `do-managed/scoreboard.jsonl`.
 
 When a stage fails, the failure's `resolution` is followed at most once, and only
 when every step stays inside the managed verb set (draft, then recut). A failure
@@ -418,7 +420,7 @@ do:
   assign: my-tracker assign "$YRD_DO_ISSUE" "$YRD_DO_LANE" --first
   seat: my-coordinator seat-recycle "$YRD_DO_LANE"
   launch:
-    run: my-habitat up "$YRD_DO_LANE"
+    run: cd "$YRD_DO_BAY_PATH" && my-repo-bootstrap && my-habitat up "$YRD_DO_LANE"
     timeoutMs: 120000
   pollMs: 30000 # default 30s
   carrierTimeoutMs: 2700000 # default 45m — bounded wait for the first commit
@@ -429,7 +431,9 @@ All three commands are ordinary shell strings, exactly like a configured check s
 and Yrd never rewrites the text. The issue, lane and Bay reach the child as
 environment values — `YRD_DO_ISSUE`, `YRD_DO_LANE`, and for launch also
 `YRD_DO_BAY` and `YRD_DO_BAY_PATH` — the same way `$YRD_BASE_SHA` reaches a
-check step. Yrd holds no tracker and no habitat knowledge of its own.
+check step. The repository's launch command owns any dependency preparation its
+seat requires and performs it inside `YRD_DO_BAY_PATH` before starting that
+seat. Yrd holds no tracker, package-manager, or habitat knowledge of its own.
 
 Submodule repositories are ready when `bay open` returns and before a `bay run`
 child starts. Yrd

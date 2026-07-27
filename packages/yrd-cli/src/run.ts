@@ -55,6 +55,8 @@ import { actionableFailure, formatActionableFailure } from "./actionable-error.t
 import {
   createManagedDoJournal,
   createManagedDoLock,
+  createManagedDoScoreboard,
+  formatManagedDoTimingTable,
   managedDoRequested,
   resolveManagedDoPlan,
   runManagedDo,
@@ -2177,6 +2179,7 @@ function managedDoStages(
 }
 
 function reportManagedDo(result: ManagedDoResult, io: YrdCliIO): YrdCliExitCode {
+  io.stderr(formatManagedDoTimingTable(result))
   const trail =
     `issue=${result.trail.issue} lane=${result.trail.lane} ` +
     `bay=${result.trail.bay ?? "-"} branch=${result.trail.branch ?? "-"} carrier=${result.trail.carrier ?? "-"}`
@@ -2248,6 +2251,16 @@ async function doWorkManaged(
     ),
     lock: createManagedDoLock({ stateDir }),
   })
+  try {
+    await createManagedDoScoreboard({ stateDir })(result)
+  } catch (error) {
+    io.stderr(formatManagedDoTimingTable(result))
+    io.stderr(
+      `yrd: managed do refused after stage '${result.stage}': could not append the speed scoreboard: ` +
+        `${error instanceof Error ? error.message : String(error)}\n`,
+    )
+    return 1
+  }
   return reportManagedDo(result, io)
 }
 
