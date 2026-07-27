@@ -37,7 +37,7 @@ import type { Contest } from "@yrd/contest"
 import { createFailure, failureFact, raiseFailure, type DeepReadonly, type JournalSnapshot } from "@yrd/core"
 import { isConcurrentSettlementConflict } from "@yrd/job"
 import type { Job, JobError } from "@yrd/job"
-import { createProcess, type Process, type ProcessResult } from "@yrd/process"
+import { createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
 import {
   isQueueRunningConflict,
   Queues,
@@ -52,6 +52,15 @@ import { loadYrdConfig } from "./config.ts"
 import { diagnoseYrdFlows } from "./config-doctor.ts"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import { actionableFailure, formatActionableFailure } from "./actionable-error.ts"
+import {
+  createManagedDoLock,
+  managedDoRequested,
+  resolveManagedDoPlan,
+  runManagedDo,
+  type ManagedDoCommand,
+  type ManagedDoResult,
+  type ManagedDoStages,
+} from "./do-managed.ts"
 import {
   canonicalizeYrdCommandAliases,
   classifyFailure,
@@ -2024,7 +2033,13 @@ async function doWork(
   services: YrdCliServices,
   selector: string,
   io: YrdCliIO,
+  options: Readonly<{ seat?: boolean }> = {},
 ): Promise<YrdCliExitCode> {
+  // Two shapes, one verb. A person at a terminal keeps the interactive Bay
+  // session below. `--seat`, or a caller with no terminal, takes the managed
+  // composition: it drives the same existing surfaces without a human in the
+  // middle and returns only landed, refused, or timed out.
+  if (managedDoRequested(options, io)) return doWorkManaged(app, services, selector, io)
   let issueFailure: unknown
   try {
     await app.issues.resolve(app.issues.ref(selector))
@@ -2055,6 +2070,163 @@ async function doWork(
     {},
     { targetedPr, via: "pr" },
   )
+}
+
+function commandOutputTail(result: ProcessResult, limit = 600): string {
+  const text = (result.stderr.trim() === "" ? result.stdout : result.stderr).trim()
+  if (text === "") return "(no output)"
+  return text.length <= limit ? text : `…${text.slice(-limit)}`
+}
+
+/** Bind the managed `do` stages to the surfaces that already own them. Nothing
+ * here is a new engine: assign and launch are repository-configured commands,
+ * the Bay comes from the same provisioning path `bay open` uses, and delivery is
+ * read from the PR projection plus the queue audit. */
+function managedDoStages(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  io: YrdCliIO,
+  runCommand: (stage: string, command: ManagedDoCommand, env: Readonly<Record<string, string>>) => Promise<void>,
+  commands: Readonly<{ assign: ManagedDoCommand; launch: ManagedDoCommand }>,
+): ManagedDoStages {
+  let bayId: string | undefined
+  return {
+    assign: (input) => runCommand("assign", commands.assign, { YRD_DO_ISSUE: input.issue, YRD_DO_LANE: input.lane }),
+    openBay: async (input) => {
+      const opened = await prepareOwnedBay(app, input.issue, {}, io, { issueResolved: true, via: "issue" })
+      if (opened === undefined) refusal(`Bay for issue '${input.issue}' was interrupted before it could be used`)
+      if (opened.bay.path === undefined) refusal(`Bay '${opened.bay.id}' opened without a workspace path`)
+      bayId = opened.bay.id
+      return {
+        bay: opened.bay.id,
+        branch: opened.identity.branch,
+        path: opened.bay.path,
+        ...(opened.bay.headSha === undefined ? {} : { headSha: opened.bay.headSha }),
+      }
+    },
+    launch: (input) =>
+      runCommand("launch", commands.launch, {
+        YRD_DO_ISSUE: input.issue,
+        YRD_DO_LANE: input.lane,
+        YRD_DO_BAY: input.bay,
+        YRD_DO_BAY_PATH: input.path,
+      }),
+    observeCarrier: async (input) => {
+      const current = app.bays.get(bayId ?? input.bay)
+      if (current === undefined) refusal(`Bay '${input.bay}' disappeared while awaiting a carrier`)
+      const refreshed = await refreshBay(app, current, io)
+      return refreshed.headSha === undefined ? {} : { headSha: refreshed.headSha }
+    },
+    createDraft: async (input) => {
+      const exit = await applyPrSelectionVerb(app, services, [input.branch], { issue: input.issue }, io, "pr.create")
+      if (exit !== 0) refusal(`draft create for branch '${input.branch}' exited ${exit}`)
+      const pr = app.bays.pr(input.branch)
+      if (pr === undefined) refusal(`branch '${input.branch}' has no PR after create`)
+      return { pr: pr.id }
+    },
+    recut: async (input) => {
+      const exit = await recutPr(
+        app,
+        services,
+        input.pr,
+        { queue: true, ...(input.preflight ? { preflight: true } : {}) },
+        io,
+      )
+      if (exit !== 0) {
+        refusal(`recut ${input.preflight ? "preflight " : ""}for PR '${input.pr}' exited ${exit}`)
+      }
+    },
+    observeDelivery: async (input) => {
+      const pr = requiredPr(app, input.pr)
+      const state = prDeliveryState(pr)
+      const landing = prLandingOutcome(pr)
+      const landingSha =
+        landing.outcome === "landed"
+          ? landing.landingSha
+          : landing.outcome === "already-landed"
+            ? landing.candidateSha
+            : undefined
+      const findings = app.queue
+        .audit()
+        .findings.filter((finding) => finding.pr === undefined || finding.pr === pr.id)
+        .map((finding) => ({
+          code: finding.code,
+          message: finding.message,
+          ...(finding.count === undefined ? {} : { count: finding.count }),
+        }))
+      return { state, ...(landingSha === undefined ? {} : { landingSha }), findings }
+    },
+    sleep: (ms) => new Promise<void>((settle) => setTimeout(settle, ms)),
+    now: () => (io.now === undefined ? Date.now() : io.now()),
+    note: (text) => io.stderr(text),
+  }
+}
+
+function reportManagedDo(result: ManagedDoResult, io: YrdCliIO): YrdCliExitCode {
+  const trail =
+    `issue=${result.trail.issue} lane=${result.trail.lane} ` +
+    `bay=${result.trail.bay ?? "-"} branch=${result.trail.branch ?? "-"} carrier=${result.trail.carrier ?? "-"}`
+  if (result.outcome === "landed") {
+    io.stdout(`landed ${result.landingSha}\n`)
+    io.stdout(`${result.ancestry}\n`)
+    io.stderr(`yrd: ${trail} stage=${result.stage}\n`)
+    return 0
+  }
+  io.stderr(`yrd: managed do ${result.outcome} at stage '${result.stage}': ${result.reason}\n`)
+  io.stderr(`yrd: ${trail}\n`)
+  if (result.escalation !== undefined) io.stderr(`yrd: escalate: ${result.escalation}\n`)
+  for (const step of result.remedy ?? []) io.stderr(`yrd: manual: ${step}\n`)
+  return 1
+}
+
+/** The managed composition: assign, Bay, launch, bounded wait for a carrier,
+ * DRAFT before any gitlink commit, recut --queue, then OBSERVE the resident
+ * runner land it. `queue run` is deliberately absent — one queue, one driver. */
+async function doWorkManaged(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  selector: string,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
+  const runner = services.process
+  if (runner === undefined) configuration("managed 'do' requires the process-backed Yrd runtime")
+  const stateDir = io.stateDir
+  if (stateDir === undefined) {
+    configuration("managed 'do' requires the host state directory; it holds the single-run concurrency marker")
+  }
+  if (services.base === undefined) {
+    configuration("managed 'do' requires the resolved base branch for its ancestry proof")
+  }
+  const plan = resolveManagedDoPlan({
+    ...(services.managedDo === undefined ? {} : { do: services.managedDo }),
+    base: services.base,
+  })
+  // Managed work is issue-driven and refuses before it assigns anything: an
+  // unresolvable selector must never leave a tracker write or a Bay behind.
+  await app.issues.resolve(app.issues.ref(selector))
+  const cwd = io.cwd ?? process.cwd()
+  const runCommand = async (
+    stage: string,
+    command: ManagedDoCommand,
+    env: Readonly<Record<string, string>>,
+  ): Promise<void> => {
+    const result = await runner.run({
+      argv: shellCommand(command.run),
+      cwd,
+      env: { ...(services.environment ?? process.env), ...env },
+      ...(command.timeoutMs === undefined ? {} : { timeoutMs: command.timeoutMs }),
+    })
+    if (result.exitCode !== 0) {
+      refusal(`${stage} command exited ${result.exitCode}: ${commandOutputTail(result)}`)
+    }
+  }
+  const result = await runManagedDo({
+    issue: selector,
+    plan,
+    stages: managedDoStages(app, services, io, runCommand, { assign: plan.assign, launch: plan.launch }),
+    lock: createManagedDoLock({ stateDir }),
+  })
+  return reportManagedDo(result, io)
 }
 
 async function refreshBays(
@@ -6205,7 +6377,10 @@ function addRootBayCommands(
   program
     .command("do <issue-or-pr>")
     .description("work an issue first, or continue an existing PR when no issue resolves")
-    .action(async (selector) => setExit(await doWork(installed(), installedServices(), selector, io)))
+    .option("--seat", "drive the managed composition (assign, Bay, launch, carrier, draft, recut, observe)")
+    .action(async (selector, options) =>
+      setExit(await doWork(installed(), installedServices(), selector, io, { seat: options.seat === true })),
+    )
   program
     .command("sh [config]")
     .description("run $SHELL in a scoped Bay")

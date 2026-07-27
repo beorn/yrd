@@ -923,6 +923,19 @@ printf '%s' "$*" > agent.prompt
     })
   })
 
+  it("refuses managed do by config key name and never provisions a bay", async () => {
+    const fixture = await repository()
+    const seat = output(fixture.repo)
+    // The fixture config declares no `do:` block, so the managed path must name
+    // the missing key instead of inventing a lane, an assignment or a launch.
+    expect(await yrd(fixture.repo, seat.io, "do", CLAIM, "--seat")).toBe(2)
+    expect(seat.stderr()).toContain("do.lane")
+    expect(seat.stderr()).toContain(".yrd.yml")
+    const bays = output(fixture.repo)
+    expect(await yrd(fixture.repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
+    expect((JSON.parse(bays.stdout()) as { bays: readonly unknown[] }).bays).toEqual([])
+  })
+
   it("makes manual run plus ag and automatic do converge on integrated PR state", async () => {
     return withoutRuntimeName(async () => {
       const tools = await mkdtemp(join(tmpdir(), "yrd-do-submit-tools-"))

@@ -7,6 +7,7 @@ import type { HasIssues } from "@yrd/issue"
 import type { OrphanJournalImportResult } from "@yrd/persistence"
 import type { Process } from "@yrd/process"
 import type { Scope } from "@silvery/scope"
+import type { ManagedDoConfig } from "./do-managed.ts"
 import type { SubmoduleBranchResolver } from "./submodule-tracking.ts"
 import type { YrdConfig } from "@yrd/config"
 
@@ -50,6 +51,11 @@ export type YrdCliServices = Readonly<{
   process?: Pick<Process, "run">
   /** Live base-authority flow config for deterministic doctor diagnostics. */
   config?: YrdConfig
+  /** Repository-owned managed `do` policy (`do:` in the project config). Absent
+   * means the managed path refuses by name instead of inventing a command. */
+  managedDo?: ManagedDoConfig
+  /** Configured base branch, for the ancestry proof a managed landing prints. */
+  base?: string
   /** Exact host environment inherited by Bay child processes. */
   environment?: NodeJS.ProcessEnv
 }>
@@ -112,6 +118,9 @@ export type YrdCliIO = {
   residentLeaseHeld?(cwd: string): Promise<boolean>
   /** Process-host-owned step artifact root used by the live read-only output projection. */
   artifactRoot?: string
+  /** Host-owned durable state directory. The managed `do` concurrency marker
+   * lives under it; absent means no managed run can claim the cap. */
+  stateDir?: string
   runner?: string
   /** Host-owned implementation identity captured before a resident starts serving. */
   implementationSource?: string

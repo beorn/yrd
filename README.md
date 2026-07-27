@@ -309,7 +309,8 @@ The top-level surface is deliberately small:
 ```text
 yrd                         dashboard across queues, PRs, and recent outcomes
 yrd in                     attach a PID-addressed guest to an existing Bay
-yrd do                     resolve an issue or PR and run an ag mission
+yrd do                     resolve an issue or PR and run an ag mission;
+                           --seat drives the managed composition instead
 yrd run                    act on individual queue runs
 yrd sh                     run $SHELL in a scoped Bay
 yrd ag                     run ag in a scoped Bay
@@ -334,7 +335,7 @@ yrd bay run [<issue>] [--issue <issue>] [--pr <selector>] [--bay <name>]
   [--keep] [-- <command...>]
 yrd bay in [<bay>] [ag | -- <command...>]
 yrd in [<bay>] [ag | -- <command...>]
-yrd do <issue-or-pr>
+yrd do <issue-or-pr> [--seat]
 yrd sh [<issue>] [--issue <issue>] [--pr <selector>] [--bay <name>]
   [--keep]
 yrd ag [<issue>] [--issue <issue>] [--pr <selector>] [--bay <name>]
@@ -367,6 +368,64 @@ callers use the PR-native check-admission surface below.
 | `refresh` | Zero or more bays                                  | Re-reads Git head, base, dirty, path, and workspace status                               |
 | `submit`  | Bays, PRs, or source branches                      | Creates or advances PRs to `submitted`; never executes Queue work                        |
 | `close`   | Zero or more bays                                  | Checkpoints and deprovisions bays; `--withdraw` explicitly cancels an associated live PR |
+
+#### Managed work — `do --seat`
+
+`yrd do <issue>` has two shapes and one verb. A person at a terminal gets the
+interactive Bay session above. `--seat`, or a process host that reports no
+terminal, takes the **managed composition**: the same existing surfaces driven
+end to end with nobody in the middle.
+
+```text
+yrd do <issue> --seat
+  → assign        the configured command binds the issue to the configured lane
+  → bay           the same provisioning path `bay open --issue` uses
+  → launch        the configured command starts the agent seat in that Bay
+  → carrier       bounded poll until the Bay's branch advances past its lease base
+  → draft         yrd pr create <branch> --issue <issue>   (DRAFT, before any gitlink commit)
+  → recut         yrd pr recut <PR> --preflight --queue, then --queue
+  → observe       poll the carrier until it lands, is refused, or the wait expires
+```
+
+The last stage is an **observation, not an action**: `yrd queue run` is
+deliberately absent, because a resident runner already holds the drain lease and
+a driver that runs the queue is the second driver that lease exists to prevent.
+`pr ready` and `pr submit` are never used — the managed carrier is a draft that
+only `recut --queue` advances.
+
+Supervision is thin and declared: one bounded poll per stage, a timeout, and a
+refusal that always names the stage plus the issue, the Bay and the carrier, so a
+run that dies leaves a diagnosable trail instead of a stranded Bay. A landing
+prints the merge commit and the ancestry command that proves it. Managed
+concurrency is capped at one run per repository; a marker under the state
+directory records the holder, and a marker whose process is gone is reclaimed
+loudly rather than silently obeyed or silently overwritten.
+
+When a stage fails, the failure's `resolution` is followed at most once, and only
+when every step stays inside the managed verb set (draft, then recut). A failure
+carrying an `escalation` — a compose that can conflict, where resolution is human
+judgment — stops the run with the stage named and prints the recipe as guidance.
+
+The repository owns the two commands, so the managed path refuses by NAME when
+they are absent. Configure them in `.yrd.yml`:
+
+```yaml
+do:
+  lane: "@dev/0" # the persona the issue is assigned to; Yrd never invents one
+  assign: my-tracker assign "$YRD_DO_ISSUE" "$YRD_DO_LANE" --first
+  launch:
+    run: my-habitat up "$YRD_DO_LANE"
+    timeoutMs: 120000
+  pollMs: 30000 # default 30s
+  carrierTimeoutMs: 2700000 # default 45m — bounded wait for the first commit
+  landingTimeoutMs: 2700000 # default 45m — bounded wait for the landing
+```
+
+Both commands are ordinary shell strings, exactly like a configured check step,
+and Yrd never rewrites the text. The issue, lane and Bay reach the child as
+environment values — `YRD_DO_ISSUE`, `YRD_DO_LANE`, and for launch also
+`YRD_DO_BAY` and `YRD_DO_BAY_PATH` — the same way `$YRD_BASE_SHA` reaches a
+check step. Yrd holds no tracker and no habitat knowledge of its own.
 
 Submodule repositories are ready when `bay open` returns and before a `bay run`
 child starts. Yrd
