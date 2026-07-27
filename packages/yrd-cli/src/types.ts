@@ -15,6 +15,15 @@ export type YrdCliExitCode = 0 | 1 | 2 | 3
 
 export type { QueueAuditFinding, QueueAuditResult } from "@yrd/queue"
 
+/** Opaque host-owned reason a Bay must not be destroyed. The host resolves its
+ * own consumers; Yrd only matches the Bay identity/path and reports evidence. */
+export type YrdBayProtection = Readonly<{
+  bay: string
+  path: string
+  source: string
+  evidence: string
+}>
+
 /** Optional operator capabilities supplied by a queue-environment plugin. The
  * CLI never simulates these lifecycle operations when no plugin owns them. */
 export type YrdCliQueueAdministration = Readonly<{
@@ -121,6 +130,8 @@ export type YrdCliIO = {
   /** Host-owned durable state directory. The managed `do` concurrency marker
    * lives under it; absent means no managed run can claim the cap. */
   stateDir?: string
+  /** Fresh host-owned Bay destroy protections for this invocation. */
+  bayProtections?: readonly YrdBayProtection[]
   runner?: string
   /** Host-owned implementation identity captured before a resident starts serving. */
   implementationSource?: string

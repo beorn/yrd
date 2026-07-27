@@ -118,6 +118,9 @@ import {
   classifyBayStatus,
   formatBayStatusHuman,
   parseOwnerPid,
+  parseYrdBayProtections,
+  protectionEvidenceForBay,
+  YRD_BAY_PROTECTIONS_ENV,
   type BayStatusFacts,
   type BayStatusReport,
 } from "./bay-status.ts"
@@ -149,7 +152,7 @@ import {
   projectQueueRunTaskStatus,
   taskStatusFields,
 } from "./task-status.ts"
-import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState } from "./types.ts"
+import type { YrdBayProtection, YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState } from "./types.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
 import { artifactLocation, directArtifacts, nestedArtifacts, uniqueArtifacts } from "./artifact-reference.ts"
 import { readInstalledBaselines } from "./installed-baseline.ts"
@@ -2308,8 +2311,9 @@ async function closeBays(
   const closed: Bay[] = []
   const refused: BayStatusReport[] = []
   const remoteTrackingFresh = refreshBayStatusOrigin(cwd)
+  const protections = activeBayProtections(io)
   for (const bay of bays) {
-    const report = classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh))
+    const report = classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections))
     if (options.force !== true && report.exit !== 0) {
       refused.push(report)
       continue
@@ -2412,6 +2416,7 @@ function gatherBayStatusFacts(
   bay: Bay,
   repoRoot: string,
   remoteTrackingFresh: boolean,
+  protections: readonly YrdBayProtection[],
 ): BayStatusFacts {
   const ownerPid = parseOwnerPid(bay.name, bay.by)
   const ownerIsCaller = ownerPid === process.pid
@@ -2538,6 +2543,7 @@ function gatherBayStatusFacts(
     name: bay.name,
     branch: bay.branch,
     ...(path === undefined ? {} : { path }),
+    protectedBy: protectionEvidenceForBay(protections, { id: bay.id, ...(path === undefined ? {} : { path }) }),
     ...(ownerPid === undefined ? {} : { ownerPid }),
     ...(ownerPid === undefined ? {} : { ownerIsCaller }),
     ...(ownerAlive === undefined ? {} : { ownerAlive }),
@@ -2555,6 +2561,10 @@ function gatherBayStatusFacts(
   }
 }
 
+function activeBayProtections(io: YrdCliIO): readonly YrdBayProtection[] {
+  return io.bayProtections ?? parseYrdBayProtections(process.env[YRD_BAY_PROTECTIONS_ENV])
+}
+
 async function bayStatusCommand(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -2569,8 +2579,9 @@ async function bayStatusCommand(
   if (bays.length === 0) usage("bay status requires at least one open bay (or a selector)")
 
   const remoteTrackingFresh = refreshBayStatusOrigin(cwd)
+  const protections = activeBayProtections(io)
   const reports: BayStatusReport[] = bays.map((bay) =>
-    classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh)),
+    classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections)),
   )
   // Aggregate exit: any BLOCK → 1; else any UNKNOWN → 2; else 0.
   // YrdCliExitCode is 0|1|2|3; bay status uses the 0/1/2 subset (2 = unknown).
@@ -2598,7 +2609,10 @@ async function bayPruneCommand(
   const cwd = io.cwd ?? process.cwd()
   const open = app.bays.list().filter((bay) => bay.status !== "closed")
   const remoteTrackingFresh = refreshBayStatusOrigin(cwd)
-  const reports = open.map((bay) => classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh)))
+  const protections = activeBayProtections(io)
+  const reports = open.map((bay) =>
+    classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections)),
+  )
   const safe = reports.filter((report) => report.exit === 0)
   const survivors = reports.filter((report) => report.exit !== 0)
   const dryRun = options.apply !== true
@@ -3503,7 +3517,10 @@ async function listBays(
   let reports: BayStatusReport[] | undefined
   if (options.check === true) {
     const remoteTrackingFresh = refreshBayStatusOrigin(cwd)
-    reports = open.map((bay) => classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh)))
+    const protections = activeBayProtections(io)
+    reports = open.map((bay) =>
+      classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections)),
+    )
   }
   const safety =
     reports === undefined

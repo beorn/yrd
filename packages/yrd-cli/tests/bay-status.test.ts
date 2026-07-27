@@ -4,7 +4,14 @@
  * @consumer @yrd/cli
  */
 import { describe, expect, it } from "vitest"
-import { classifyBayStatus, formatBayStatusHuman, parseOwnerPid, type BayStatusFacts } from "../src/bay-status.ts"
+import {
+  classifyBayStatus,
+  formatBayStatusHuman,
+  parseOwnerPid,
+  parseYrdBayProtections,
+  protectionEvidenceForBay,
+  type BayStatusFacts,
+} from "../src/bay-status.ts"
 
 const base: BayStatusFacts = {
   bayId: "B1",
@@ -23,6 +30,39 @@ describe("parseOwnerPid", () => {
     expect(parseOwnerPid("bay:12345")).toBe(12345)
     expect(parseOwnerPid(undefined, "@agent/3:9988")).toBe(9988)
     expect(parseOwnerPid("plain", "@agent/3")).toBeUndefined()
+  })
+})
+
+describe("host-owned Bay protections", () => {
+  const encoded = JSON.stringify({
+    schema: "yrd-bay-protections/1",
+    protections: [
+      {
+        bay: "B198",
+        path: "/repo/.bays/B198",
+        source: "inhab-status-home",
+        evidence: "Inhab status home @dev.1 last state is ready",
+      },
+    ],
+  })
+
+  it("parses the versioned envelope and matches by Bay id or exact path", () => {
+    const protections = parseYrdBayProtections(encoded)
+
+    expect(protectionEvidenceForBay(protections, { id: "B198", path: "/other/.bays/B198" })).toEqual([
+      "Inhab status home @dev.1 last state is ready",
+    ])
+    expect(protectionEvidenceForBay(protections, { id: "B9", path: "/repo/.bays/B198" })).toEqual([
+      "Inhab status home @dev.1 last state is ready",
+    ])
+  })
+
+  it("fails loud on a malformed protection envelope", () => {
+    expect(() =>
+      parseYrdBayProtections(
+        '{"schema":"yrd-bay-protections/1","protections":[{"bay":"B1","path":"/repo/.bays/B1","source":"host"}]}',
+      ),
+    ).toThrow(/protection.*evidence/i)
   })
 })
 
@@ -78,6 +118,22 @@ describe("classifyBayStatus", () => {
     })
     expect(report.exit).toBe(1)
     expect(report.lines.find((line) => line.class === "owner")?.verdict).toBe("BLOCK")
+  })
+
+  it("exit 1 when a live external consumer protects an otherwise removable bay", () => {
+    const report = classifyBayStatus({
+      ...base,
+      ownerPid: 42,
+      ownerAlive: false,
+      protectedBy: ["inhab status home @dev.1 is ready"],
+    })
+
+    expect(report.exit).toBe(1)
+    expect(report.safe).toBe(false)
+    expect(report.lines.find((line) => line.class === "consumer")).toMatchObject({
+      verdict: "BLOCK",
+      evidence: expect.stringContaining("@dev.1"),
+    })
   })
 
   it("exit 2 when owner PID is missing (unprovable must not look safe)", () => {

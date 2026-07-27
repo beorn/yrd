@@ -8,7 +8,12 @@
  * This does not close bays; `bay close` / `bay prune` call it.
  */
 
-export type BayStatusClass = "owner" | "worktree" | "commits" | "stash" | "pr"
+import type { YrdBayProtection } from "./types.ts"
+
+export const YRD_BAY_PROTECTIONS_ENV = "YRD_BAY_PROTECTIONS" as const
+export const YRD_BAY_PROTECTIONS_SCHEMA = "yrd-bay-protections/1" as const
+
+export type BayStatusClass = "owner" | "consumer" | "worktree" | "commits" | "stash" | "pr"
 
 export type BayStatusVerdict = "PASS" | "BLOCK" | "UNKNOWN"
 
@@ -43,6 +48,8 @@ export type BayStatusFacts = Readonly<{
   ownerIsCaller?: boolean
   /** Result of `kill -0` when ownerPid is set; undefined if not checked. */
   ownerAlive?: boolean
+  /** Host-owned live consumers that still reference this Bay. */
+  protectedBy?: readonly string[]
   /** `git status --porcelain` empty when path exists. */
   worktreeDirty?: boolean
   worktreeMissing?: boolean
@@ -75,6 +82,53 @@ export function parseOwnerPid(...candidates: readonly (string | undefined)[]): n
     }
   }
   return undefined
+}
+
+export function parseYrdBayProtections(raw: string | undefined): readonly YrdBayProtection[] {
+  if (raw === undefined) return []
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch (error) {
+    throw new TypeError(`${YRD_BAY_PROTECTIONS_ENV} must contain valid JSON`, { cause: error })
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError(`${YRD_BAY_PROTECTIONS_ENV} must be an object`)
+  }
+  const envelope = value as Record<string, unknown>
+  if (envelope["schema"] !== YRD_BAY_PROTECTIONS_SCHEMA) {
+    throw new TypeError(`${YRD_BAY_PROTECTIONS_ENV}.schema must be ${JSON.stringify(YRD_BAY_PROTECTIONS_SCHEMA)}`)
+  }
+  const rows = envelope["protections"]
+  if (!Array.isArray(rows)) throw new TypeError(`${YRD_BAY_PROTECTIONS_ENV}.protections must be an array`)
+  return rows.map((row, index) => {
+    if (typeof row !== "object" || row === null || Array.isArray(row)) {
+      throw new TypeError(`${YRD_BAY_PROTECTIONS_ENV}.protections[${index}] must be an object`)
+    }
+    const protection = row as Record<string, unknown>
+    return {
+      bay: protectionText(protection["bay"], index, "bay"),
+      path: protectionText(protection["path"], index, "path"),
+      source: protectionText(protection["source"], index, "source"),
+      evidence: protectionText(protection["evidence"], index, "evidence"),
+    }
+  })
+}
+
+export function protectionEvidenceForBay(
+  protections: readonly YrdBayProtection[],
+  bay: Readonly<{ id: string; path?: string }>,
+): string[] {
+  return protections
+    .filter((protection) => protection.bay === bay.id || (bay.path !== undefined && protection.path === bay.path))
+    .map((protection) => protection.evidence)
+}
+
+function protectionText(value: unknown, index: number, field: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new TypeError(`${YRD_BAY_PROTECTIONS_ENV}.protections[${index}].${field} must be a non-empty string`)
+  }
+  return value
 }
 
 export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
@@ -110,6 +164,21 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
       class: "owner",
       verdict: "PASS",
       evidence: `owner pid ${facts.ownerPid} is dead (kill -0 ESRCH)`,
+    })
+  }
+
+  // consumer — a generic host seam; Yrd never imports the consumer's policy.
+  if ((facts.protectedBy?.length ?? 0) > 0) {
+    lines.push({
+      class: "consumer",
+      verdict: "BLOCK",
+      evidence: facts.protectedBy!.join("; "),
+    })
+  } else {
+    lines.push({
+      class: "consumer",
+      verdict: "PASS",
+      evidence: "no live external consumer references this Bay",
     })
   }
 

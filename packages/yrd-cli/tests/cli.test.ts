@@ -3279,6 +3279,46 @@ describe("runYrd", () => {
     expect(app.state().bays.byId.B1?.status).toBe("closed")
   })
 
+  it.each([
+    { projection: "yrd", argv: () => yrd("bay", "prune", "--apply", "--json") },
+    { projection: "git-bay", argv: () => gitBay("prune", "--apply", "--json") },
+  ])("$projection prune refuses a Bay protected by a live external consumer", async ({ argv }) => {
+    const app = await createApp()
+    await openTestBay(app, { name: "protected", branch: "topic/protected" })
+    const output = outputIO({
+      bayProtections: [
+        {
+          bay: "B1",
+          path: "/repo/.bays/B1",
+          source: "inhab-status",
+          evidence: "Inhab status home @dev.1 last state is ready",
+        },
+      ],
+    })
+
+    expect(await runYrd(app, argv(), output.io), output.stderr()).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "bay.prune",
+      dryRun: false,
+      safe: [],
+      closed: [],
+      survivors: [
+        {
+          bay: "B1",
+          exit: 1,
+          lines: expect.arrayContaining([
+            {
+              class: "consumer",
+              verdict: "BLOCK",
+              evidence: expect.stringContaining("@dev.1"),
+            },
+          ]),
+        },
+      ],
+    })
+    expect(app.state().bays.byId.B1?.status).toBe("active")
+  })
+
   it("closes a draft-backed Bay without withdrawing its PR", async () => {
     const app = await createApp({ waitingCheck: true })
     await openTestBay(app, { name: "draft-close" })
