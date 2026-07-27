@@ -157,9 +157,11 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       blockedMs: 5 * 3_600_000 + 46 * 60_000,
     })
     const finding = app.queue.audit().findings.find((item) => item.code === "admission-refusal-loop")
-    expect(finding?.message).toContain("3 consecutive")
-    expect(finding?.message).toContain("authored-gitlink")
-    expect(finding?.message).toContain("head of the admission queue")
+    expect(finding?.message).toBe(
+      `PR '${pr.id}' at the head of the admission queue was refused 3 consecutive times over 5h46m ` +
+        `(since 2026-01-01T00:00:00.000Z) without ever being admitted; latest refusal 'authored-gitlink': ` +
+        `yrd: PR '${pr.id}' authors a gitlink bump; recut it before admission`,
+    )
     log.end()
   })
 
