@@ -3,6 +3,7 @@ import { dirname, relative, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import type { Process } from "@yrd/process"
 import { cleanGitEnvironment } from "./git-environment.ts"
+import type { YrdRepository } from "./repository.ts"
 import { yrdSourceRoot } from "./version.ts"
 
 const GIT_TIMEOUT_MS = 30_000
@@ -112,12 +113,12 @@ export async function implementationSourceIdentity(
  * advance observable even when a dirty shared checkout still contains old code. */
 export async function authoritativeImplementationSource(
   process: Pick<Process, "run">,
-  repository: string,
+  repository: Pick<YrdRepository, "repo" | "worktree">,
   authoritySha: string,
   sourceRepository?: ImplementationSourceRepository,
 ): Promise<string | undefined> {
   if (sourceRepository === undefined) return undefined
-  const sourcePath = relative(resolve(repository), resolve(sourceRepository.root))
+  const sourcePath = relative(resolve(repository.worktree), resolve(sourceRepository.root))
   if (sourcePath === "" || sourcePath === ".") return sourceIdentity(authoritySha)
   if (sourcePath === ".." || sourcePath.startsWith(`..${sep}`)) {
     return implementationSourceIdentity(process, sourceRepository)
@@ -126,8 +127,8 @@ export async function authoritativeImplementationSource(
   const gitPath = sourcePath.split(sep).join("/")
   const args = ["ls-tree", "--full-tree", authoritySha, "--", gitPath]
   const tree = await process.run({
-    argv: ["git", "-C", repository, ...args],
-    cwd: repository,
+    argv: ["git", "-C", repository.repo, ...args],
+    cwd: repository.repo,
     env: cleanGitEnvironment(globalThis.process.env),
     timeoutMs: GIT_TIMEOUT_MS,
   })

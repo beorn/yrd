@@ -412,7 +412,7 @@ async function reloadConfiguredStepDescriptors(
   })
   const implementationSource = await authoritativeImplementationSource(
     process,
-    repository.repo,
+    repository,
     target.sha,
     sourceRepository,
   )

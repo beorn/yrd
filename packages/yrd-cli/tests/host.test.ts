@@ -392,9 +392,24 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(
       await authoritativeImplementationSource(
         process,
-        discovered.repo,
+        discovered,
         await git(repo, "rev-parse", "main"),
         sourceRepository,
+      ),
+    ).toBe(`git:${authoritativeSha}`)
+
+    const linked = join(repo, ".worktrees", "linked")
+    await mkdir(join(repo, ".worktrees"), { recursive: true })
+    await git(repo, "worktree", "add", "-q", "--detach", linked, "main")
+    await git(linked, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "-q", "runtime")
+    await git(join(linked, "runtime"), "checkout", "-q", loadedSha)
+    const linkedRepository = await discoverYrdRepository({ cwd: linked, process })
+    expect(
+      await authoritativeImplementationSource(
+        process,
+        linkedRepository,
+        await git(repo, "rev-parse", "main"),
+        { root: join(linked, "runtime") },
       ),
     ).toBe(`git:${authoritativeSha}`)
 
