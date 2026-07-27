@@ -53,6 +53,7 @@ import { diagnoseYrdFlows } from "./config-doctor.ts"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import { actionableFailure, formatActionableFailure } from "./actionable-error.ts"
 import {
+  createManagedDoJournal,
   createManagedDoLock,
   managedDoRequested,
   resolveManagedDoPlan,
@@ -2090,11 +2091,13 @@ function managedDoStages(
   services: YrdCliServices,
   io: YrdCliIO,
   runCommand: (stage: string, command: ManagedDoCommand, env: Readonly<Record<string, string>>) => Promise<void>,
-  commands: Readonly<{ assign: ManagedDoCommand; launch: ManagedDoCommand }>,
+  commands: Readonly<{ assign: ManagedDoCommand; seat: ManagedDoCommand; launch: ManagedDoCommand }>,
+  recordBoundary: ReturnType<typeof createManagedDoJournal>,
 ): ManagedDoStages {
   let bayId: string | undefined
   return {
     assign: (input) => runCommand("assign", commands.assign, { YRD_DO_ISSUE: input.issue, YRD_DO_LANE: input.lane }),
+    decideSeat: (input) => runCommand("seat", commands.seat, { YRD_DO_ISSUE: input.issue, YRD_DO_LANE: input.lane }),
     openBay: async (input) => {
       const opened = await prepareOwnedBay(app, input.issue, {}, io, { issueResolved: true, via: "issue" })
       if (opened === undefined) refusal(`Bay for issue '${input.issue}' was interrupted before it could be used`)
@@ -2114,6 +2117,12 @@ function managedDoStages(
         YRD_DO_BAY: input.bay,
         YRD_DO_BAY_PATH: input.path,
       }),
+    closeBay: async (input) => {
+      const closing = await app.bays.close({ bay: input.bay })
+      assertJobsPassed(await runJobs(app, app.jobs.requested(closing), io), `bay '${input.bay}' rollback`)
+      const closed = app.bays.get(input.bay)
+      if (closed?.status !== "closed") refusal(`Bay '${input.bay}' did not close after managed launch refusal`)
+    },
     observeCarrier: async (input) => {
       const current = app.bays.get(bayId ?? input.bay)
       if (current === undefined) refusal(`Bay '${input.bay}' disappeared while awaiting a carrier`)
@@ -2161,6 +2170,8 @@ function managedDoStages(
     },
     sleep: (ms) => new Promise<void>((settle) => setTimeout(settle, ms)),
     now: () => (io.now === undefined ? Date.now() : io.now()),
+    wallNow: () => new Date(),
+    recordBoundary,
     note: (text) => io.stderr(text),
   }
 }
@@ -2182,9 +2193,10 @@ function reportManagedDo(result: ManagedDoResult, io: YrdCliIO): YrdCliExitCode 
   return 1
 }
 
-/** The managed composition: assign, Bay, launch, bounded wait for a carrier,
- * DRAFT before any gitlink commit, recut --queue, then OBSERVE the resident
- * runner land it. `queue run` is deliberately absent — one queue, one driver. */
+/** The managed composition: assign, decide/recycle the seat, Bay, launch,
+ * bounded wait for a carrier, DRAFT before any gitlink commit, recut --queue,
+ * then OBSERVE the resident runner land it. `queue run` is deliberately absent
+ * — one queue, one driver. */
 async function doWorkManaged(
   app: YrdCliApp,
   services: YrdCliServices,
@@ -2226,7 +2238,14 @@ async function doWorkManaged(
   const result = await runManagedDo({
     issue: selector,
     plan,
-    stages: managedDoStages(app, services, io, runCommand, { assign: plan.assign, launch: plan.launch }),
+    stages: managedDoStages(
+      app,
+      services,
+      io,
+      runCommand,
+      { assign: plan.assign, seat: plan.seat, launch: plan.launch },
+      createManagedDoJournal({ stateDir }),
+    ),
     lock: createManagedDoLock({ stateDir }),
   })
   return reportManagedDo(result, io)
@@ -6394,7 +6413,10 @@ function addRootBayCommands(
   program
     .command("do <issue-or-pr>")
     .description("work an issue first, or continue an existing PR when no issue resolves")
-    .option("--seat", "drive the managed composition (assign, Bay, launch, carrier, draft, recut, observe)")
+    .option(
+      "--seat",
+      "drive the managed composition (assign, seat decision, Bay, launch, carrier, draft, recut, observe)",
+    )
     .action(async (selector, options) =>
       setExit(await doWork(installed(), installedServices(), selector, io, { seat: options.seat === true })),
     )

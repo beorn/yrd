@@ -116,6 +116,7 @@ merge: { run: git merge --no-ff "$YRD_TARGET" }
 do:
   lane: "@dev/0"
   assign: tent assign "$YRD_DO_ISSUE" "$YRD_DO_LANE" --first
+  seat: tent seat-recycle "$YRD_DO_LANE"
   launch:
     run: hab up "$YRD_DO_LANE"
     timeoutMs: 120000
@@ -127,6 +128,7 @@ do:
     expect(parsed.do).toEqual({
       lane: "@dev/0",
       assign: { run: 'tent assign "$YRD_DO_ISSUE" "$YRD_DO_LANE" --first' },
+      seat: { run: 'tent seat-recycle "$YRD_DO_LANE"' },
       launch: { run: 'hab up "$YRD_DO_LANE"', timeoutMs: 120_000 },
       pollMs: 30_000,
       carrierTimeoutMs: 2_700_000,
@@ -145,9 +147,16 @@ do:
       repo: "/repo",
       defaultBase: "main",
       read: (path) =>
-        Promise.resolve(path.endsWith(".yrd.yml") ? 'do:\n  lane: "@dev/0"\n  assign: a\n  launch: l\n' : undefined),
+        Promise.resolve(
+          path.endsWith(".yrd.yml") ? 'do:\n  lane: "@dev/0"\n  assign: a\n  seat: s\n  launch: l\n' : undefined,
+        ),
     })
-    expect(loaded.config.do).toEqual({ lane: "@dev/0", assign: { run: "a" }, launch: { run: "l" } })
+    expect(loaded.config.do).toEqual({
+      lane: "@dev/0",
+      assign: { run: "a" },
+      seat: { run: "s" },
+      launch: { run: "l" },
+    })
   })
 
   it("loads one file and fills useful defaults", async () => {

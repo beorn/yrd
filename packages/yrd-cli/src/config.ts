@@ -188,12 +188,13 @@ const DoCommandSchema = z.preprocess(
 )
 
 /** Managed `do` composition policy. Absent keys are refused LOUDLY at the point
- * of use, naming the missing key: the assignment and launch commands are
+ * of use, naming the missing key: assignment, seat preparation and launch are
  * repository policy (which tracker, which habitat) and Yrd must never guess. */
 const DoSchema = z
   .object({
     lane: TextSchema.optional(),
     assign: DoCommandSchema.optional(),
+    seat: DoCommandSchema.optional(),
     launch: DoCommandSchema.optional(),
     pollMs: z.number().int().min(1).optional(),
     carrierTimeoutMs: z.number().int().min(1).optional(),

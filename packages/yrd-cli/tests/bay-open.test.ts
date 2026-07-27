@@ -936,6 +936,40 @@ printf '%s' "$*" > agent.prompt
     expect((JSON.parse(bays.stdout()) as { bays: readonly unknown[] }).bays).toEqual([])
   })
 
+  it("runs a refused seat decision before Bay provisioning", async () => {
+    const fixture = await repository()
+    await configureManagedDo(fixture.repo, { seat: "false", launch: "true" })
+
+    const seat = output(fixture.repo)
+    expect(await yrd(fixture.repo, seat.io, "do", CLAIM, "--seat")).toBe(1)
+    expect(seat.stderr()).toContain("stage 'seat'")
+
+    const bays = output(fixture.repo)
+    expect(await yrd(fixture.repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
+    expect((JSON.parse(bays.stdout()) as { bays: readonly unknown[] }).bays).toEqual([])
+  })
+
+  it("deprovisions the just-opened Bay when managed launch refuses", async () => {
+    const fixture = await repository()
+    await configureManagedDo(fixture.repo, { seat: "true", launch: "false" })
+
+    const launch = output(fixture.repo)
+    expect(await yrd(fixture.repo, launch.io, "do", CLAIM, "--seat")).toBe(1)
+    expect(launch.stderr()).toContain("stage 'launch'")
+
+    const bays = output(fixture.repo)
+    expect(await yrd(fixture.repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
+    const projection = JSON.parse(bays.stdout()) as {
+      bays: readonly { issue?: string; branch: string; status: string; orphan?: unknown }[]
+    }
+    expect(projection).toMatchObject({
+      bays: [expect.objectContaining({ issue: CLAIM, branch: BRANCH, status: "closed" })],
+    })
+    expect(projection.bays[0]?.orphan).toBeUndefined()
+    const worktrees = await git(fixture.repo, "worktree", "list", "--porcelain")
+    expect(worktrees).not.toContain("/.bays/")
+  })
+
   it("makes manual run plus ag and automatic do converge on integrated PR state", async () => {
     return withoutRuntimeName(async () => {
       const tools = await mkdtemp(join(tmpdir(), "yrd-do-submit-tools-"))
@@ -1743,6 +1777,33 @@ notify:
   )
   await git(repo, "add", ".yrd.yml")
   await git(repo, "commit", "-qm", "configure notifications")
+  await git(repo, "push", "-q", "origin", "main")
+}
+
+async function configureManagedDo(
+  repo: string,
+  commands: Readonly<{ seat: "true" | "false"; launch: "true" | "false" }>,
+): Promise<void> {
+  await writeFile(
+    join(repo, ".yrd.yml"),
+    `base: main
+batch: 1
+steps: [check, merge]
+check: "true"
+merge: {}
+${JOURNAL_CONFIG}
+do:
+  lane: "@dev/0"
+  assign: "true"
+  seat: ${JSON.stringify(commands.seat)}
+  launch: ${JSON.stringify(commands.launch)}
+  pollMs: 1
+  carrierTimeoutMs: 10
+  landingTimeoutMs: 10
+`,
+  )
+  await git(repo, "add", ".yrd.yml")
+  await git(repo, "commit", "-qm", "configure managed do")
   await git(repo, "push", "-q", "origin", "main")
 }
 

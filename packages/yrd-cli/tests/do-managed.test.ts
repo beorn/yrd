@@ -2,15 +2,20 @@
 // @level l2
 // @consumer @yrd/cli
 
+import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
 import { createFailure } from "@yrd/core"
 import {
+  createManagedDoJournal,
   managedDoRequested,
   resolveManagedDoPlan,
   runManagedDo,
   type ManagedDoConfig,
   type ManagedDoDelivery,
   type ManagedDoLock,
+  type ManagedDoStageBoundary,
   type ManagedDoStages,
 } from "../src/do-managed.ts"
 
@@ -24,6 +29,7 @@ const LANDED = "a".repeat(40)
 const CONFIG: ManagedDoConfig = {
   lane: LANE,
   assign: { run: "tent assign" },
+  seat: { run: "tent seat-recycle" },
   launch: { run: "hab up" },
   pollMs: 1_000,
   carrierTimeoutMs: 5_000,
@@ -34,7 +40,7 @@ function plan(config: ManagedDoConfig = CONFIG) {
   return resolveManagedDoPlan({ do: config, base: "main" })
 }
 
-type Recorded = Readonly<{ calls: string[]; notes: string[] }>
+type Recorded = Readonly<{ calls: string[]; notes: string[]; boundaries: ManagedDoStageBoundary[] }>
 
 type StageOverrides = Partial<ManagedDoStages> &
   Readonly<{
@@ -56,7 +62,9 @@ function createStages(overrides: StageOverrides = {}): {
 } {
   const calls: string[] = []
   const notes: string[] = []
+  const boundaries: ManagedDoStageBoundary[] = []
   let clock = 0
+  let wallClock = 0
   const heads = [...(overrides.heads ?? ["b".repeat(40)])]
   const deliveries = [...(overrides.deliveries ?? [{ state: "integrated", landingSha: LANDED, findings: [] }])]
   const forbidden = { queueRun: vi.fn(), prReady: vi.fn(), prSubmit: vi.fn() }
@@ -64,12 +72,18 @@ function createStages(overrides: StageOverrides = {}): {
     assign: async (input) => {
       calls.push(`assign:${input.issue}:${input.lane}`)
     },
+    decideSeat: async (input) => {
+      calls.push(`seat:${input.issue}:${input.lane}`)
+    },
     openBay: async (input) => {
       calls.push(`bay:${input.issue}`)
       return { bay: BAY, branch: BRANCH, path: `/bays/${BAY}`, headSha: "0".repeat(40) }
     },
     launch: async (input) => {
       calls.push(`launch:${input.bay}:${input.lane}`)
+    },
+    closeBay: async (input) => {
+      calls.push(`close:${input.bay}`)
     },
     observeCarrier: async () => {
       calls.push("carrier")
@@ -93,12 +107,16 @@ function createStages(overrides: StageOverrides = {}): {
       clock += ms
     },
     now: () => clock,
+    wallNow: () => new Date(Date.UTC(2026, 6, 27, 17, 0, wallClock++)),
+    recordBoundary: async (boundary) => {
+      boundaries.push(boundary)
+    },
     note: (text) => {
       notes.push(text)
     },
   }
   const { heads: _heads, deliveries: _deliveries, ...stageOverrides } = overrides
-  return { stages: { ...base, ...stageOverrides }, recorded: { calls, notes }, forbidden }
+  return { stages: { ...base, ...stageOverrides }, recorded: { calls, notes, boundaries }, forbidden }
 }
 
 const FREE_LOCK: ManagedDoLock = {
@@ -135,9 +153,10 @@ describe("managed do configuration", () => {
   it("refuses by name for every missing key", () => {
     expect(() => resolveManagedDoPlan({ base: "main" })).toThrow(/do\.lane/u)
     expect(() => resolveManagedDoPlan({ do: { lane: LANE }, base: "main" })).toThrow(/do\.assign/u)
-    expect(() => resolveManagedDoPlan({ do: { lane: LANE, assign: { run: "x" } }, base: "main" })).toThrow(
-      /do\.launch/u,
-    )
+    expect(() => resolveManagedDoPlan({ do: { lane: LANE, assign: { run: "x" } }, base: "main" })).toThrow(/do\.seat/u)
+    expect(() =>
+      resolveManagedDoPlan({ do: { lane: LANE, assign: { run: "x" }, seat: { run: "s" } }, base: "main" }),
+    ).toThrow(/do\.launch/u)
   })
 
   it("names the config file in the refusal so the operator knows where to write the key", () => {
@@ -146,7 +165,7 @@ describe("managed do configuration", () => {
 
   it("defaults the bounded wait to 45 minutes and the poll interval to 30 seconds", () => {
     const resolved = resolveManagedDoPlan({
-      do: { lane: LANE, assign: { run: "a" }, launch: { run: "l" } },
+      do: { lane: LANE, assign: { run: "a" }, seat: { run: "s" }, launch: { run: "l" } },
       base: "main",
     })
     expect(resolved.settings.carrierTimeoutMs).toBe(45 * 60_000)
@@ -156,7 +175,7 @@ describe("managed do configuration", () => {
 })
 
 describe("managed do composition", () => {
-  it("drives assign, bay, launch, carrier, draft, recut, observe in order and proves the landing", async () => {
+  it("decides the seat before opening a Bay, timestamps every stage boundary, and proves the landing", async () => {
     const { stages, recorded, forbidden } = createStages()
     const result = await runManagedDo({ issue: ISSUE, plan: plan(), stages, lock: FREE_LOCK })
 
@@ -167,6 +186,7 @@ describe("managed do composition", () => {
     expect(result.trail).toMatchObject({ issue: ISSUE, lane: LANE, bay: BAY, branch: BRANCH, carrier: CARRIER })
     expect(recorded.calls).toEqual([
       `assign:${ISSUE}:${LANE}`,
+      `seat:${ISSUE}:${LANE}`,
       `bay:${ISSUE}`,
       `launch:${BAY}:${LANE}`,
       "carrier",
@@ -175,6 +195,27 @@ describe("managed do composition", () => {
       `recut:${CARRIER}:queue`,
       "observe",
     ])
+    expect(recorded.boundaries.map(({ stage, phase }) => `${stage}:${phase}`)).toEqual([
+      "concurrency:started",
+      "concurrency:completed",
+      "assign:started",
+      "assign:completed",
+      "seat:started",
+      "seat:completed",
+      "bay:started",
+      "bay:completed",
+      "launch:started",
+      "launch:completed",
+      "carrier:started",
+      "carrier:completed",
+      "draft:started",
+      "draft:completed",
+      "recut:started",
+      "recut:completed",
+      "observe:started",
+      "observe:completed",
+    ])
+    expect(recorded.boundaries.every(({ at }) => /^2026-07-27T17:00:\d{2}\.000Z$/u.test(at))).toBe(true)
     expect(forbidden.queueRun).not.toHaveBeenCalled()
     expect(forbidden.prReady).not.toHaveBeenCalled()
     expect(forbidden.prSubmit).not.toHaveBeenCalled()
@@ -220,8 +261,22 @@ describe("managed do refusals", () => {
     expect(result).toMatchObject({ outcome: "refused", stage: "bay" })
   })
 
-  it("names the launch stage and surfaces the child's output", async () => {
-    const { stages } = createStages({
+  it("refuses a seat decision before opening a Bay", async () => {
+    const { stages, recorded } = createStages({
+      decideSeat: async () => {
+        throw failure("seat-refused", "live incumbent could not be recycled")
+      },
+    })
+    const result = await runManagedDo({ issue: ISSUE, plan: plan(), stages, lock: FREE_LOCK })
+    expect(result).toMatchObject({ outcome: "refused", stage: "seat" })
+    expect(result.reason).toContain("could not be recycled")
+    expect(result.trail.bay).toBeUndefined()
+    expect(recorded.calls).toEqual([`assign:${ISSUE}:${LANE}`])
+    expect(recorded.boundaries.at(-1)).toMatchObject({ stage: "seat", phase: "refused" })
+  })
+
+  it("closes the exact fresh Bay when launch refuses and surfaces the child's output", async () => {
+    const { stages, recorded } = createStages({
       launch: async () => {
         throw failure("launch-refused", "launch exited 2: no declaration for @dev/0")
       },
@@ -230,6 +285,8 @@ describe("managed do refusals", () => {
     expect(result).toMatchObject({ outcome: "refused", stage: "launch" })
     expect(result.reason).toContain("no declaration for @dev/0")
     expect(result.trail.bay).toBe(BAY)
+    expect(recorded.calls).toEqual([`assign:${ISSUE}:${LANE}`, `seat:${ISSUE}:${LANE}`, `bay:${ISSUE}`, `close:${BAY}`])
+    expect(recorded.boundaries.at(-1)).toMatchObject({ stage: "launch", phase: "refused" })
   })
 
   it("times out at the carrier stage with the bay in the trail", async () => {
@@ -273,6 +330,43 @@ describe("managed do refusals", () => {
     const result = await runManagedDo({ issue: ISSUE, plan: plan(), stages, lock: FREE_LOCK })
     expect(result).toMatchObject({ outcome: "refused", stage: "observe" })
     expect(result.landingSha).toBeUndefined()
+  })
+})
+
+describe("managed do boundary journal", () => {
+  it("appends schema-1 wall-clock stage boundaries under the managed-do state directory", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "yrd-do-journal-"))
+    try {
+      const journal = createManagedDoJournal({
+        stateDir,
+        now: () => new Date("2026-07-27T17:08:20.724Z"),
+      })
+      await journal({
+        issue: ISSUE,
+        lane: LANE,
+        stage: "seat",
+        phase: "completed",
+        trail: { issue: ISSUE, lane: LANE },
+      })
+
+      const rows = (await readFile(join(stateDir, "do-managed", "journal.jsonl"), "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as unknown)
+      expect(rows).toEqual([
+        {
+          schema: 1,
+          at: "2026-07-27T17:08:20.724Z",
+          issue: ISSUE,
+          lane: LANE,
+          stage: "seat",
+          phase: "completed",
+          trail: { issue: ISSUE, lane: LANE },
+        },
+      ])
+    } finally {
+      await rm(stateDir, { recursive: true, force: true })
+    }
   })
 })
 

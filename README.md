@@ -379,6 +379,7 @@ end to end with nobody in the middle.
 ```text
 yrd do <issue> --seat
   → assign        the configured command binds the issue to the configured lane
+  → seat          the configured command settles/recycles that lane before any Bay exists
   → bay           the same provisioning path `bay open --issue` uses
   → launch        the configured command starts the agent seat in that Bay
   → carrier       bounded poll until the Bay's branch advances past its lease base
@@ -399,20 +400,23 @@ run that dies leaves a diagnosable trail instead of a stranded Bay. A landing
 prints the merge commit and the ancestry command that proves it. Managed
 concurrency is capped at one run per repository; a marker under the state
 directory records the holder, and a marker whose process is gone is reclaimed
-loudly rather than silently obeyed or silently overwritten.
+loudly rather than silently obeyed or silently overwritten. The sibling
+`do-managed/journal.jsonl` records every stage's started and terminal boundary
+with its own wall-clock timestamp.
 
 When a stage fails, the failure's `resolution` is followed at most once, and only
 when every step stays inside the managed verb set (draft, then recut). A failure
 carrying an `escalation` — a compose that can conflict, where resolution is human
 judgment — stops the run with the stage named and prints the recipe as guidance.
 
-The repository owns the two commands, so the managed path refuses by NAME when
+The repository owns the three commands, so the managed path refuses by NAME when
 they are absent. Configure them in `.yrd.yml`:
 
 ```yaml
 do:
   lane: "@dev/0" # the persona the issue is assigned to; Yrd never invents one
   assign: my-tracker assign "$YRD_DO_ISSUE" "$YRD_DO_LANE" --first
+  seat: my-coordinator seat-recycle "$YRD_DO_LANE"
   launch:
     run: my-habitat up "$YRD_DO_LANE"
     timeoutMs: 120000
@@ -421,7 +425,7 @@ do:
   landingTimeoutMs: 2700000 # default 45m — bounded wait for the landing
 ```
 
-Both commands are ordinary shell strings, exactly like a configured check step,
+All three commands are ordinary shell strings, exactly like a configured check step,
 and Yrd never rewrites the text. The issue, lane and Bay reach the child as
 environment values — `YRD_DO_ISSUE`, `YRD_DO_LANE`, and for launch also
 `YRD_DO_BAY` and `YRD_DO_BAY_PATH` — the same way `$YRD_BASE_SHA` reaches a
