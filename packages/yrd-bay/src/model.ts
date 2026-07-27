@@ -488,6 +488,12 @@ export type PR = Readonly<{
   base: string
   state: "open" | "closed"
   merged: boolean
+  /** Opt-in "merge into latest": when true, an implicit recut whose live branch
+   * head no longer matches the recorded revision RE-RECORDS the live head
+   * instead of refusing. Each run still executes a frozen recorded revision;
+   * tracking only automates the re-recording an operator would otherwise type.
+   * Absent means untracked — the reproducibility refusal stands. */
+  track?: boolean
   flow?: FlowPin
   revs: readonly PRRev[]
   reviews: readonly PRReview[]

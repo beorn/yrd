@@ -210,6 +210,10 @@ export type SubmitSelectionOptions = Readonly<{
   issue?: string
   title?: string
   description?: string
+  /** Opt in to "merge into latest" for every later implicit recut of this PR
+   * (see `PR.track`). Only a live PR records it: tracking governs future
+   * re-recording, which a terminal PR no longer has. */
+  track?: boolean
   draft?: boolean
   correlation?: Correlation
   composition?: CompositionV1
@@ -235,12 +239,17 @@ const PrEditArgsSchema = z
     note: TextSchema.optional(),
     title: TextSchema.optional(),
     description: TextSchema.optional(),
+    track: z.boolean().optional(),
   })
   .strict()
   .refine(
-    ({ issue, note, title, description }) =>
-      issue !== undefined || note !== undefined || title !== undefined || description !== undefined,
-    { message: "'issue', 'note', 'title', or 'description' is required" },
+    ({ issue, note, title, description, track }) =>
+      issue !== undefined ||
+      note !== undefined ||
+      title !== undefined ||
+      description !== undefined ||
+      track !== undefined,
+    { message: "'issue', 'note', 'title', 'description', or 'track' is required" },
   )
 export type PrEditArgs = z.infer<typeof PrEditArgsSchema>
 
@@ -886,15 +895,30 @@ export function createBays(
   }
   const bindMetadata = async (
     pr: DeepReadonly<PR>,
-    metadata: Pick<SubmitSelectionOptions, "title" | "description">,
+    metadata: Pick<SubmitSelectionOptions, "title" | "description" | "track" | "warnings">,
   ): Promise<DeepReadonly<PR>> => {
     const titleChanged = metadata.title !== undefined && metadata.title !== pr.title
     const descriptionChanged = metadata.description !== undefined && metadata.description !== pr.description
-    if (!titleChanged && !descriptionChanged) return pr
+    // Tracking only governs a FUTURE implicit recut, which a terminal PR (an
+    // integrated/already-landed same-head resubmit reaches this seam at exit 0)
+    // no longer has. Recording it there would refuse the whole submit, so state
+    // loudly that the flag was not recorded instead of pretending it was.
+    const trackable = isLivePR(pr)
+    const trackChanged = metadata.track !== undefined && metadata.track !== (pr.track ?? false)
+    if (trackChanged && !trackable) {
+      const warning =
+        `PR '${pr.id}' is ${prDeliveryState(pr)}; --track was NOT recorded. ` +
+        "Tracking governs future recuts, and this PR has none."
+      metadata.warnings?.push(warning)
+      log?.warn?.(warning, { action: "submit-track-terminal", pr: pr.id })
+    }
+    const recordTrack = trackChanged && trackable
+    if (!titleChanged && !descriptionChanged && !recordTrack) return pr
     await actions.editPr({
       pr: pr.id,
       ...(titleChanged ? { title: metadata.title } : {}),
       ...(descriptionChanged ? { description: metadata.description } : {}),
+      ...(recordTrack ? { track: metadata.track } : {}),
     })
     const bound = resolvePR(state(), pr.id)
     if (bound === undefined) {
@@ -2257,11 +2281,14 @@ function editPr(state: DeepReadonly<BayState>, args: PrEditArgs) {
       `yrd: PR '${pr.id}' is ${delivery}; issue can only be linked while pushed or submitted`,
     )
   }
-  // Title and description are mutable delivery metadata (unlike the immutable
-  // issue join): a later edit overwrites the prior value with no conflict.
+  // Title, description and tracking are mutable delivery metadata (unlike the
+  // immutable issue join): a later edit overwrites the prior value with no conflict.
   const titleChanged = args.title !== undefined && args.title !== pr.title
   const descriptionChanged = args.description !== undefined && args.description !== pr.description
-  if (!issueChanged && args.note === undefined && !titleChanged && !descriptionChanged) return { events: [] }
+  const trackChanged = args.track !== undefined && args.track !== (pr.track ?? false)
+  if (!issueChanged && args.note === undefined && !titleChanged && !descriptionChanged && !trackChanged) {
+    return { events: [] }
+  }
   return {
     events: [
       event("pr/edited", {
@@ -2270,6 +2297,7 @@ function editPr(state: DeepReadonly<BayState>, args: PrEditArgs) {
         ...(args.note === undefined ? {} : { note: args.note }),
         ...(titleChanged ? { title: args.title } : {}),
         ...(descriptionChanged ? { description: args.description } : {}),
+        ...(trackChanged ? { track: args.track } : {}),
       }),
     ],
   }
@@ -2744,6 +2772,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
             ...(changed.note === undefined ? {} : { note: changed.note }),
             ...(changed.title === undefined ? {} : { title: changed.title }),
             ...(changed.description === undefined ? {} : { description: changed.description }),
+            ...(changed.track === undefined ? {} : { track: changed.track }),
           })
     }
     case "pr/reviewed": {
