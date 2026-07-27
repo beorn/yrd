@@ -15,6 +15,7 @@ import {
   prRecut,
   prRevisionNumber,
   type PR,
+  type PRId,
 } from "@yrd/bay"
 import { JsonSchema, resolveSelector, type JsonValue } from "@yrd/core"
 import type { FlowPin, StepKind } from "@yrd/config"
@@ -472,6 +473,29 @@ export const QueuePauseSchema = z
   })
   .strict() as z.ZodType<QueuePause>
 
+/**
+ * One PR's live streak of compose/admission refusals — every cycle that skipped
+ * it WITHOUT producing a queue run. A refusal at admission never mints a run
+ * record, so this ledger is the only durable trace of a head-of-line wedge (the
+ * matching `compose-candidate-skip` warns are loggily-only and die with the
+ * process). Reset when the PR is admitted, pushed, or recut.
+ */
+export type QueueAdmissionRefusal = Readonly<{
+  pr: PRId
+  /** The refusal code of the most recent skip in this streak. */
+  code: string
+  /** The failure-fact kind of the most recent skip, when it carried one. */
+  kind?: string
+  /** The refusal message of the most recent skip. */
+  reason: string
+  /** Consecutive refusals since the last admission / push / recut. */
+  count: number
+  /** Journal timestamp of the first refusal in this streak. */
+  firstAt: string
+  /** Journal timestamp of the most recent refusal in this streak. */
+  lastAt: string
+}>
+
 export type QueuesState = Readonly<{
   batchSize: number
   defaultSteps?: readonly StepName[]
@@ -482,6 +506,7 @@ export type QueuesState = Readonly<{
   index: QueueProjectionIndex
   authority: QueueAuthorityState
   terminalAssociations: QueueTerminalAssociations
+  admissionRefusals: Readonly<Record<PRId, QueueAdmissionRefusal>>
   retention: Readonly<{ terminalOrder: Readonly<Record<RunId, number>> }>
 }>
 
@@ -556,6 +581,14 @@ export type QueueAuditFinding = Readonly<{
   run?: RunId
   pr?: string
   step?: StepName
+  /** The upstream refusal code behind the finding; `code` names the finding class. */
+  refusal?: string
+  /** Consecutive occurrences behind the finding. */
+  count?: number
+  /** ISO timestamp of the first occurrence in the current streak. */
+  since?: string
+  /** Observed block span — last occurrence minus first, in milliseconds. */
+  blockedMs?: number
 }>
 
 export type QueueAuditResult = Readonly<{ findings: readonly QueueAuditFinding[] }>
@@ -766,6 +799,7 @@ export const Queues = Object.freeze({
       },
       authority: { statuses: {}, current: {}, submits: {}, checks: {}, claims: {}, runs: {} },
       terminalAssociations: { pending: {}, applied: {} },
+      admissionRefusals: {},
       retention: { terminalOrder: {} },
     }
   },
