@@ -53,6 +53,8 @@ const ROOT_COMMAND_ALIASES = {
   queues: "queue",
 } as const
 
+const LIST_COMMAND_PARENTS = new Set(["bay", "pr", "queue"])
+
 const QUEUE_SUBCOMMANDS = new Set([
   "_list",
   "list",
@@ -84,7 +86,10 @@ function rootCommandIndex(args: readonly string[]): number | undefined {
  * help and suggestions canonical without requiring a newer Commander API. */
 export function canonicalizeYrdCommandAliases(args: readonly string[], projection: Invocation["projection"]): string[] {
   const canonical = [...args]
-  if (projection !== "root") return canonical
+  if (projection === "bay") {
+    if (canonical[0] === "ls") canonical[0] = "list"
+    return canonical
+  }
 
   const commandIndex = rootCommandIndex(canonical)
   if (commandIndex === undefined) return canonical
@@ -96,10 +101,7 @@ export function canonicalizeYrdCommandAliases(args: readonly string[], projectio
     canonical.splice(commandIndex, 1, "queue", "list", "--watch")
   }
 
-  if (
-    (canonical[commandIndex] === "pr" || canonical[commandIndex] === "queue") &&
-    canonical[commandIndex + 1] === "ls"
-  ) {
+  if (LIST_COMMAND_PARENTS.has(canonical[commandIndex] ?? "") && canonical[commandIndex + 1] === "ls") {
     canonical[commandIndex + 1] = "list"
   }
   // `queue watch [filter...]` is the live projection of `queue list --watch`;

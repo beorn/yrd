@@ -3209,6 +3209,16 @@ describe("runYrd", () => {
     }
   })
 
+  it.each([
+    ["yrd bay", yrd("bay", "ls", "--json")],
+    ["git bay", gitBay("ls", "--json")],
+  ] as const)("accepts %s ls as the bay list alias", async (_surface, argv) => {
+    const app = await createApp()
+    const output = outputIO()
+    expect(await runYrd(app, argv, output.io), output.stderr()).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({ bays: [] })
+  })
+
   it("joins PR sessions into Bay JSON without widening the human table", async () => {
     const app = await createApp()
     await openTestBay(app, { name: "session-link", issue: "@km/test/session-link" })

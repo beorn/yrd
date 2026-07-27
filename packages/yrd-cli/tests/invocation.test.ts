@@ -4,6 +4,10 @@ import { describe, expect, it } from "vitest"
 import { canonicalizeYrdCommandAliases, resolveInvocation, resolveYrdContext } from "../src/invocation.ts"
 
 describe("canonicalizeYrdCommandAliases", () => {
+  it.each(["bay", "pr", "queue"])("canonicalizes every public list alias: %s ls", (command) => {
+    expect(canonicalizeYrdCommandAliases([command, "ls", "--json"], "root")).toEqual([command, "list", "--json"])
+  })
+
   it.each([
     { args: ["prs", "ls", "--json"], expected: ["pr", "list", "--json"] },
     { args: ["queues", "ls", "--latest"], expected: ["queue", "list", "--latest"] },
@@ -32,6 +36,7 @@ describe("canonicalizeYrdCommandAliases", () => {
 
   it("does not project root aliases onto git-bay", () => {
     expect(canonicalizeYrdCommandAliases(["bays"], "bay")).toEqual(["bays"])
+    expect(canonicalizeYrdCommandAliases(["ls", "--json"], "bay")).toEqual(["list", "--json"])
   })
 })
 
