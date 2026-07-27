@@ -2192,8 +2192,14 @@ function candidateFailure(
   }
 }
 
+/** 22396 — a candidate reaches this path only after admission, so its PR is
+ * submitted and `yrd pr create` (accepted only for a draft PR) would refuse.
+ * `yrd pr submit <branch>` re-records the corrected branch in every delivery
+ * state, so the embedded remedy stays executable wherever it is surfaced —
+ * including the generic `embeddedYrdCommands` projection that lifts these
+ * quoted commands straight into a machine-readable `resolution[]`. */
 function authoredRootWorkflow(pr: string): string {
-  return `authored root carriers use 'yrd pr create <branch>', then 'yrd pr recut ${pr} --preflight --queue' and run its exact next command on that same PR; no composition manifest or manual triage is needed`
+  return `authored root carriers use 'yrd pr submit <branch>', then 'yrd pr recut ${pr} --preflight --queue' and run its exact next command on that same PR; no composition manifest or manual triage is needed`
 }
 
 function withAuthoredRootWorkflow(failure: CandidateFailure, pr: string): CandidateFailure {

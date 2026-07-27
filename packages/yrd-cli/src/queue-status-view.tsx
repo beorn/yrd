@@ -1659,8 +1659,12 @@ function failureFact(run: Run | undefined, step: QueueStep | undefined): { code:
   return run?.error
 }
 
-function projectFailure(fact: FailureLike, evidence?: HumanFailureProjection["evidence"]): HumanFailureProjection {
-  const failure = actionableFailure(fact)
+function projectFailure(
+  fact: FailureLike,
+  evidence?: HumanFailureProjection["evidence"],
+  delivery?: PRDeliveryState,
+): HumanFailureProjection {
+  const failure = actionableFailure(fact, { ...(delivery === undefined ? {} : { delivery }) })
   return {
     ...failure,
     summary: actionableFailureSummary(failure),
@@ -2956,7 +2960,8 @@ export type PRDetailData = Readonly<{
 
 export function prDetailData(pr: PR, runs: readonly Run[], attempts: readonly QueueAttempt[] = []): PRDetailData {
   const matchingRuns = runs.filter((run) => run.prs.some((member) => member.id === pr.id))
-  const details = matchingRuns.map((run) => queueShowData(run, matchingRuns, attempts))
+  const delivery = prDeliveryState(pr)
+  const details = matchingRuns.map((run) => queueShowData(run, matchingRuns, attempts, undefined, delivery))
   const latest = latestPRRun(pr, matchingRuns)
   const run = latest === undefined ? undefined : details.find((detail) => detail.run === latest.id)
   return { pr, runs: details, ...(run === undefined ? {} : { run }) }
@@ -2964,14 +2969,15 @@ export function prDetailData(pr: PR, runs: readonly Run[], attempts: readonly Qu
 
 function diagnosticBlocker(pr: PR, run: Run | undefined, step: QueueStep | undefined, now: number): string | undefined {
   const job = step?.job
+  const context = { delivery: prDeliveryState(pr) }
   if (job?.status === "completed" && job.conclusion === "failure") {
-    return actionableFailureSummary(actionableFailure(job.error))
+    return actionableFailureSummary(actionableFailure(job.error, context))
   }
   if (job?.status === "completed" && job.conclusion === "timed_out") {
-    return actionableFailureSummary(actionableFailure({ code: "job-lost", message: job.lostReason }))
+    return actionableFailureSummary(actionableFailure({ code: "job-lost", message: job.lostReason }, context))
   }
   if (job?.status === "completed" && job.conclusion === "cancelled") {
-    return actionableFailureSummary(actionableFailure({ code: "job-canceled", message: job.cancelReason }))
+    return actionableFailureSummary(actionableFailure({ code: "job-canceled", message: job.cancelReason }, context))
   }
   if (job?.status === "in_progress") {
     const leaseExpiresAt = Date.parse(job.leaseExpiresAt)
@@ -2985,7 +2991,7 @@ function diagnosticBlocker(pr: PR, run: Run | undefined, step: QueueStep | undef
     }
   }
   if (job?.status === "waiting") return `waiting: ${singleQueue(job.detail ?? job.url ?? job.token)}`
-  if (run?.error !== undefined) return actionableFailureSummary(actionableFailure(run.error))
+  if (run?.error !== undefined) return actionableFailureSummary(actionableFailure(run.error, context))
   if (pr.detail !== undefined) return singleQueue(pr.detail)
   return undefined
 }
@@ -3234,6 +3240,18 @@ function ActionableFailureView({ failure }: { failure: ActionableFailure }) {
           RESOLVE {step}
         </Text>
       ))}
+      {failure.escalation === undefined ? null : (
+        <>
+          <Text color="$fg-error" wrap="wrap">
+            ESCALATE {failure.escalation.reason}
+          </Text>
+          {failure.escalation.steps.map((step, index) => (
+            <Text key={`${failure.code}:escalation:${index}`} wrap="wrap">
+              MANUAL {step}
+            </Text>
+          ))}
+        </>
+      )}
       {failure.reference === undefined ? null : <Text wrap="wrap">REFERENCE {failure.reference}</Text>}
     </Box>
   )
@@ -5237,7 +5255,7 @@ function correlationField(pr: Run["prs"][number] | PR | undefined): Readonly<{ c
   return { correlation }
 }
 
-function queueShowStepRow(run: Run, step: QueueStep): QueueShowRow {
+function queueShowStepRow(run: Run, step: QueueStep, delivery?: PRDeliveryState): QueueShowRow {
   const location = artifactLocation(step)
   const locations = stepLocations(step)
   const command = stepCommand(step)
@@ -5269,7 +5287,7 @@ function queueShowStepRow(run: Run, step: QueueStep): QueueShowRow {
     ...(command === undefined ? {} : { command }),
     errorCode: stepErrorCode(step),
     error: stepError(step),
-    ...(stepFailure === undefined ? {} : { failure: projectFailure(stepFailure) }),
+    ...(stepFailure === undefined ? {} : { failure: projectFailure(stepFailure, undefined, delivery) }),
     lost: stepLost(step),
     detail: stepDetail(step),
     output: stepOutput(step),
@@ -5283,11 +5301,11 @@ function queueShowStepRow(run: Run, step: QueueStep): QueueShowRow {
   }
 }
 
-function queueShowAttemptRow(run: Run, attempt: QueueAttempt): QueueShowRow {
+function queueShowAttemptRow(run: Run, attempt: QueueAttempt, delivery?: PRDeliveryState): QueueShowRow {
   const step = run.steps[attempt.index] ?? run.steps.find((candidate) => candidate.name === attempt.step)
   if (step?.job?.id === attempt.job && step.job.attempt === attempt.attempt) {
     return {
-      ...queueShowStepRow(run, step),
+      ...queueShowStepRow(run, step, delivery),
       requested: toIso(attempt.requestedAt),
       started: toIso(attempt.startedAt),
       finished: toIso(attempt.finishedAt),
@@ -5305,9 +5323,9 @@ function queueShowAttemptRow(run: Run, attempt: QueueAttempt): QueueShowRow {
   const taskStatus = jobAttemptTaskStatusOf(attempt)
   const attemptFailure =
     attempt.result.status === "failed"
-      ? projectFailure(attempt.result.error)
+      ? projectFailure(attempt.result.error, undefined, delivery)
       : attempt.result.status === "lost"
-        ? projectFailure({ code: "job-lost", message: attempt.result.reason })
+        ? projectFailure({ code: "job-lost", message: attempt.result.reason }, undefined, delivery)
         : undefined
   return {
     step: attempt.step,
@@ -5350,7 +5368,11 @@ function queueShowAttemptRow(run: Run, attempt: QueueAttempt): QueueShowRow {
   }
 }
 
-function queueShowRows(run: Run, attempts: readonly QueueAttempt[]): readonly QueueShowRow[] {
+function queueShowRows(
+  run: Run,
+  attempts: readonly QueueAttempt[],
+  delivery?: PRDeliveryState,
+): readonly QueueShowRow[] {
   const terminalStepIndex = run.steps.findIndex((step) => {
     const job = step.job
     return (
@@ -5363,16 +5385,16 @@ function queueShowRows(run: Run, attempts: readonly QueueAttempt[]): readonly Qu
     const stepAttempts = attempts.filter((attempt) => attempt.index === index)
     if (stepAttempts.length > 0) {
       for (const attempt of stepAttempts) usedAttempts.add(attempt)
-      return stepAttempts.map((attempt) => queueShowAttemptRow(run, attempt))
+      return stepAttempts.map((attempt) => queueShowAttemptRow(run, attempt, delivery))
     }
-    const row = queueShowStepRow(run, step)
+    const row = queueShowStepRow(run, step, delivery)
     const canceled =
       terminalStepIndex >= 0 && index > terminalStepIndex && (step.job === undefined || step.job.status === "queued")
     return canceled ? [{ ...row, status: "canceled", ...taskStatusFields("dropped") }] : [row]
   })
   const unplanned = attempts
     .filter((attempt) => !usedAttempts.has(attempt))
-    .map((attempt) => queueShowAttemptRow(run, attempt))
+    .map((attempt) => queueShowAttemptRow(run, attempt, delivery))
   return [...planned, ...unplanned]
 }
 
@@ -5381,6 +5403,7 @@ export function queueShowData(
   allRuns: readonly Run[] = [],
   attempts: readonly QueueAttempt[] = [],
   revisionClock?: PRRunRevisionClock,
+  delivery?: PRDeliveryState,
 ): QueueShowData {
   const finished = allRuns.filter((candidate) => candidate.status === "completed")
   const runAttempts = attempts
@@ -5423,11 +5446,11 @@ export function queueShowData(
     integration: run.status === "completed" && run.conclusion === "success" ? queueIntegration(run) : undefined,
     parent: run.parent ?? "-",
     isolationPart: isolationPartLabel(run),
-    ...(runFailure === undefined ? {} : { failure: projectFailure(runFailure) }),
+    ...(runFailure === undefined ? {} : { failure: projectFailure(runFailure, undefined, delivery) }),
     prs: run.prs,
     ...(revisionClock === undefined ? {} : { revisionClock }),
     attempts: runAttempts,
-    steps: queueShowRows(run, runAttempts),
+    steps: queueShowRows(run, runAttempts, delivery),
   }
 }
 

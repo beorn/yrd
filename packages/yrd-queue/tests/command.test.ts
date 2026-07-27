@@ -1899,7 +1899,7 @@ describe("Queue command adapters", () => {
       error: {
         code: "authored-gitlink",
         message: expect.stringMatching(
-          /yrd pr create <branch>.*yrd pr recut PR1 --preflight --queue.*exact next command.*same PR.*no composition manifest or manual triage/iu,
+          /yrd pr submit <branch>.*yrd pr recut PR1 --preflight --queue.*exact next command.*same PR.*no composition manifest or manual triage/iu,
         ),
       },
     })
@@ -2148,7 +2148,7 @@ describe("Queue command adapters", () => {
       error: {
         code: "composition-invalid",
         message: expect.stringMatching(
-          /yrd pr create <branch>.*yrd pr recut PR1 --preflight --queue.*exact next command.*same PR.*no composition manifest or manual triage/iu,
+          /yrd pr submit <branch>.*yrd pr recut PR1 --preflight --queue.*exact next command.*same PR.*no composition manifest or manual triage/iu,
         ),
       },
     })
