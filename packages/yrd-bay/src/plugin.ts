@@ -988,16 +988,20 @@ export function createBays(
       }
     }
 
-    // Re-submitting a bay-less PR must re-resolve the branch's current tip rather than reuse
-    // the recorded revision's head: a pushed (e.g. draft) or submitted PR whose branch has since
-    // moved would otherwise re-register the stale head. Only an active bay reads its head from
-    // the workspace (handled above), so this covers the direct-branch case.
+    // Re-submitting a PR that has no LIVE workspace must re-resolve the branch's current tip
+    // rather than reuse the recorded revision's head: a pushed (e.g. draft) or submitted PR
+    // whose branch has since moved would otherwise re-register the stale head. Only an ACTIVE
+    // bay reads its head from the workspace (handled above); every other shape — bay-less
+    // direct branch, and a PR whose bay is closing/closed/failed (reachable by PR id or by the
+    // retired bay's id, where the closedBranchAlias escape above does not apply) — resolves the
+    // branch tip here. Without this, an idempotent retry re-presented the recorded head at
+    // exit 0 and an automated driver concluded the carrier matched its branch when it did not.
     if (
       pr !== undefined &&
       (prDeliveryState(pr) === "submitted" ||
         prDeliveryState(pr) === "needs-author" ||
         prDeliveryState(pr) === "pushed") &&
-      bay === undefined
+      bay?.status !== "active"
     ) {
       const headSha = await options.resolveRevision(pr.branch)
       if (headSha === undefined && prDeliveryState(pr) === "submitted") {

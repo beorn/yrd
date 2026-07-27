@@ -396,6 +396,42 @@ describe("withBays", () => {
     expect(prFacts(stable)).toMatchObject({ delivery: "submitted", current: { n: 2, head: HEAD_2 } })
   })
 
+  it("re-resolves a moved branch tip for a closed-Bay draft addressed by PR id or Bay id", async () => {
+    // Only an ACTIVE Bay reads its head from a workspace. A closed Bay owns no
+    // workspace, so an id-addressed retry must re-resolve the branch tip exactly
+    // like the bay-less path — never re-present the recorded head at exit 0.
+    const HEAD_3 = "3".repeat(40)
+    await using app = (await createHarness()).app
+    await finishJob(app, await app.bays.open({ name: "retired-draft" }))
+    await app.bays.intake({ bay: "B1", headSha: HEAD_1, baseSha: BASE })
+    await finishJob(app, await app.bays.close({ bay: "B1" }))
+    expect(app.bays.get("B1")?.status).toBe("closed")
+
+    let tip = HEAD_1
+    const create = (selector: string) =>
+      app.bays.submitSelection(selector, { resolveRevision: async () => tip, run: runtime, draft: true })
+
+    const drafted = await create("PR1")
+    expect(prFacts(drafted)).toMatchObject({ id: "PR1", delivery: "pushed", current: { n: 1, head: HEAD_1 } })
+
+    // The branch advances after the Bay was retired. Retrying `pr create` by PR
+    // id must record the CURRENT tip, not the stale revision-1 head.
+    tip = HEAD_2
+    const byPrId = await create("PR1")
+    expect(prFacts(byPrId)).toMatchObject({ id: "PR1", delivery: "pushed", current: { n: 2, head: HEAD_2 } })
+
+    // Same for the closed Bay's own id — the selector that resolves the Bay
+    // without matching its branch name.
+    tip = HEAD_3
+    const byBayId = await create("B1")
+    expect(prFacts(byBayId)).toMatchObject({ id: "PR1", delivery: "pushed", current: { n: 3, head: HEAD_3 } })
+
+    // An unmoved tip stays idempotent — no spurious revision.
+    const stable = await create("PR1")
+    expect(prFacts(stable)).toMatchObject({ id: "PR1", delivery: "pushed", current: { n: 3, head: HEAD_3 } })
+    expect(stable.bay).toBe("B1")
+  })
+
   it("mints a fresh delivery PR for a new head on a landed branch (Q1), no delivery-nonce branch", async () => {
     const nextId = ids()
     const seededCommand = { id: nextId(), op: "fixture.integrated-branch" }
