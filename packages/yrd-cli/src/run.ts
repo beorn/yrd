@@ -31,6 +31,7 @@ import {
   type PRDeliveryState,
   type PRRegression,
   type PRRegressionSeverity,
+  type PRRev,
   type PRSessionOutcome,
 } from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
@@ -62,6 +63,7 @@ import {
   runManagedDo,
   type ManagedDoCommand,
   type ManagedDoDelivery,
+  type ManagedDoOverrides,
   type ManagedDoResult,
   type ManagedDoStages,
 } from "./do-managed.ts"
@@ -2040,13 +2042,16 @@ async function doWork(
   services: YrdCliServices,
   selector: string,
   io: YrdCliIO,
-  options: Readonly<{ seat?: boolean }> = {},
+  options: Readonly<{ seat?: boolean; lane?: string }> = {},
 ): Promise<YrdCliExitCode> {
   // Two shapes, one verb. A person at a terminal keeps the interactive Bay
   // session below. `--seat`, or a caller with no terminal, takes the managed
   // composition: it drives the same existing surfaces without a human in the
   // middle and returns only landed, refused, or timed out.
-  if (managedDoRequested(options, io)) return doWorkManaged(app, services, selector, io)
+  if (managedDoRequested(options, io)) {
+    return doWorkManaged(app, services, selector, io, options.lane === undefined ? {} : { lane: options.lane })
+  }
+  if (options.lane !== undefined) usage("--lane selects a managed dispatch lane; it requires --seat")
   let issueFailure: unknown
   try {
     await app.issues.resolve(app.issues.ref(selector))
@@ -2133,7 +2138,8 @@ function managedDoStages(
       return refreshed.headSha === undefined ? {} : { headSha: refreshed.headSha }
     },
     createDraft: async (input) => {
-      const exit = await applyPrSelectionVerb(app, services, [input.branch], { issue: input.issue }, io, "pr.create")
+      const options = { issue: input.issue, ...(input.track ? { track: true } : {}) }
+      const exit = await applyPrSelectionVerb(app, services, [input.branch], options, io, "pr.create")
       if (exit !== 0) refusal(`draft create for branch '${input.branch}' exited ${exit}`)
       const pr = app.bays.pr(input.branch)
       if (pr === undefined) refusal(`branch '${input.branch}' has no PR after create`)
@@ -2190,6 +2196,7 @@ async function doWorkManaged(
   services: YrdCliServices,
   selector: string,
   io: YrdCliIO,
+  overrides: ManagedDoOverrides,
 ): Promise<YrdCliExitCode> {
   const runner = services.process
   if (runner === undefined) configuration("managed 'do' requires the process-backed Yrd runtime")
@@ -2200,10 +2207,13 @@ async function doWorkManaged(
   if (services.base === undefined) {
     configuration("managed 'do' requires the resolved base branch for its ancestry proof")
   }
-  const plan = resolveManagedDoPlan({
-    ...(services.managedDo === undefined ? {} : { do: services.managedDo }),
-    base: services.base,
-  })
+  const plan = resolveManagedDoPlan(
+    {
+      ...(services.managedDo === undefined ? {} : { do: services.managedDo }),
+      base: services.base,
+    },
+    overrides,
+  )
   // Managed work is issue-driven and refuses before it assigns anything: an
   // unresolvable selector must never leave a tracker write or a Bay behind.
   await app.issues.resolve(app.issues.ref(selector))
@@ -2769,6 +2779,43 @@ async function readyPr(
     : 0
 }
 
+/** The tracked "merge into latest" step. A tracked PR whose branch moved records
+ * the observed live head as its next revision — the same ledger write
+ * `yrd pr submit <branch>` performs — so the recut continues on a FRESH frozen
+ * revision instead of refusing. The head recorded is exactly the one the
+ * freshness observer just proved live, never a second, racier resolution. */
+async function recordTrackedRevision(
+  app: YrdCliApp,
+  pr: PR,
+  drift: Readonly<{ recorded: PRRev; liveHead: string }>,
+  io: YrdCliIO,
+): Promise<void> {
+  const warnings: string[] = []
+  await app.bays.submitSelection(pr.branch, {
+    // A draft carrier stays a draft: recording a revision must not also promote
+    // its delivery state. Every other live state re-submits, as by hand.
+    ...(prDeliveryState(pr) === "pushed" ? { draft: true } : {}),
+    resolveRevision: async (ref) => (ref === pr.branch ? drift.liveHead : optionalRevision(ref, io)),
+    run: runtimeOptions(io),
+    warnings,
+  })
+  const recorded = requiredPr(app, pr.id)
+  const revision = currentPRRev(recorded)
+  if (revision.head !== drift.liveHead) {
+    raiseFailure(
+      "infrastructure",
+      "recut-track-record-failed",
+      `yrd: PR '${pr.id}' is tracked, but recording live branch '${pr.branch}' head '${drift.liveHead}' left ` +
+        `revision ${revision.n} on '${revision.head}'`,
+    )
+  }
+  io.stderr(
+    `yrd: PR '${pr.id}' tracks '${pr.branch}'; recorded ${drift.recorded.head} -> ${drift.liveHead} ` +
+      `(revision ${drift.recorded.n} -> ${revision.n})\n`,
+  )
+  for (const warning of warnings) io.stderr(`yrd: ${warning}\n`)
+}
+
 async function recutPr(
   app: YrdCliApp,
   services: YrdCliServices,
@@ -2780,7 +2827,8 @@ async function recutPr(
   const selectedRevision = options.revision ?? currentPRRev(pr).n
   const selected = pr.revs.find((revision) => revision.n === selectedRevision)
   if (isLivePR(pr) && selected !== undefined) {
-    await requireImplicitRecutBranchFreshness(pr, selected, options, services, io)
+    const freshness = await requireImplicitRecutBranchFreshness(pr, selected, options, services, io)
+    if (freshness.status === "tracked-drift") await recordTrackedRevision(app, pr, freshness, io)
   }
   if (options.preflight === true) {
     await preflightRecut(app, selector, options, io)
@@ -3232,6 +3280,10 @@ async function resolveSubmitMetadata(
   }
 }
 
+/** One spelling of the tracking opt-in across every surface that records it. */
+const TRACK_OPTION_DESCRIPTION =
+  "merge into latest: a later implicit recut re-records the live branch head instead of refusing"
+
 async function applyPrSelectionVerb(
   app: YrdCliApp,
   services: YrdCliServices,
@@ -3247,6 +3299,7 @@ async function applyPrSelectionVerb(
     correlation?: string
     composition?: string
     reviewer?: readonly string[]
+    track?: boolean
     json?: boolean
   },
   io: YrdCliIO,
@@ -3286,6 +3339,7 @@ async function applyPrSelectionVerb(
       ...(options.issue === undefined ? {} : { issue: options.issue }),
       ...(metadata.title === undefined ? {} : { title: metadata.title }),
       ...(metadata.description === undefined ? {} : { description: metadata.description }),
+      ...(options.track === true ? { track: true } : {}),
       ...(createOnly ? { draft: true } : {}),
       ...(correlation === undefined ? {} : { correlation }),
       ...(composition === undefined ? {} : { composition }),
@@ -3868,16 +3922,27 @@ async function statusPr(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
 async function editPr(
   app: YrdCliApp,
   selector: string,
-  options: JsonOption & Readonly<{ issue?: string; note?: string; title?: string; description?: string }>,
+  options: JsonOption &
+    Readonly<{
+      issue?: string
+      note?: string
+      title?: string
+      description?: string
+      track?: boolean
+      untrack?: boolean
+    }>,
   io: YrdCliIO,
 ): Promise<void> {
+  if (options.track === true && options.untrack === true) usage("pr edit takes --track or --untrack, not both")
+  const track = options.track === true ? true : options.untrack === true ? false : undefined
   if (
     options.issue === undefined &&
     options.note === undefined &&
     options.title === undefined &&
-    options.description === undefined
+    options.description === undefined &&
+    track === undefined
   ) {
-    usage("pr edit requires --issue, --note, --title, or --description")
+    usage("pr edit requires --issue, --note, --title, --description, --track, or --untrack")
   }
   const pr = requiredPr(app, selector)
   await app.bays.editPr({
@@ -3886,6 +3951,7 @@ async function editPr(
     ...(options.note === undefined ? {} : { note: options.note }),
     ...(options.title === undefined ? {} : { title: options.title }),
     ...(options.description === undefined ? {} : { description: options.description }),
+    ...(track === undefined ? {} : { track }),
   })
   const edited = requiredPr(app, pr.id)
   await printResult(
@@ -6440,8 +6506,14 @@ function addRootBayCommands(
       "--seat",
       "drive the managed composition (assign, seat decision, Bay, launch, carrier, draft, recut, observe)",
     )
+    .option("--lane <persona>", "dispatch lane for this managed run (default: .yrd.yml key 'do.lane')")
     .action(async (selector, options) =>
-      setExit(await doWork(installed(), installedServices(), selector, io, { seat: options.seat === true })),
+      setExit(
+        await doWork(installed(), installedServices(), selector, io, {
+          seat: options.seat === true,
+          ...(options.lane === undefined ? {} : { lane: String(options.lane) }),
+        }),
+      ),
     )
   program
     .command("sh [config]")
@@ -6644,6 +6716,7 @@ function buildProgram(
     .option("--description <text>", "PR description body (defaults to the head commit body)")
     .option("--correlation <namespace:id>", "bind an opaque correlation to the submitted revision")
     .option("--composition <path>", "immutable version-1 source composition JSON")
+    .option("--track", TRACK_OPTION_DESCRIPTION)
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) =>
       setExit(await applyPrSelectionVerb(installed(), installedServices(), selectors, options, io, "bay.submit")),
@@ -6867,6 +6940,7 @@ function buildProgram(
       (value: string, previous: readonly string[]) => [...previous, value],
       [] as readonly string[],
     )
+    .option("--track", TRACK_OPTION_DESCRIPTION)
     .option("--json", "emit stable JSON")
     .action(async (selector, options) =>
       setExit(
@@ -6898,6 +6972,7 @@ function buildProgram(
       (value: string, previous: readonly string[]) => [...previous, value],
       [] as readonly string[],
     )
+    .option("--track", TRACK_OPTION_DESCRIPTION)
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) =>
       setExit(await applyPrSelectionVerb(installed(), installedServices(), selectors, options, io, "pr.submit")),
@@ -6925,11 +7000,13 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (options) => statusPr(installed(), options, io))
   pr.command("edit <selector>")
-    .description("edit the issue link, note, title, or description")
+    .description("edit the issue link, note, title, description, or branch tracking")
     .option("--issue <ref>", "set the tracker-neutral issue reference")
     .option("--note <text>", "set the delivery note")
     .option("--title <text>", "set the PR subject")
     .option("--description <text>", "set the PR description body")
+    .option("--track", TRACK_OPTION_DESCRIPTION)
+    .option("--untrack", "stop tracking: restore the stale-head recut refusal")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => editPr(installed(), selector, options, io))
   const recut = pr

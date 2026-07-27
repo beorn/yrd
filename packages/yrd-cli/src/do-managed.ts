@@ -3,7 +3,7 @@ import { join } from "node:path"
 import type { PRDeliveryState } from "@yrd/bay"
 import { failureFact } from "@yrd/core"
 import { actionableFailure, type ActionableFailure } from "./actionable-error.ts"
-import { configuration } from "./invocation.ts"
+import { configuration, usage } from "./invocation.ts"
 
 /**
  * The managed composition behind `yrd do`.
@@ -106,6 +106,8 @@ export type ManagedDoCommand = Readonly<{ run: string; timeoutMs?: number }>
 
 export type ManagedDoConfig = Readonly<{
   lane?: string
+  /** Opt the managed carrier OUT of branch tracking (default: tracked). */
+  track?: boolean
   assign?: ManagedDoCommand
   seat?: ManagedDoCommand
   launch?: ManagedDoCommand
@@ -117,6 +119,7 @@ export type ManagedDoConfig = Readonly<{
 export type ManagedDoSettings = Readonly<{
   lane: string
   base: string
+  track: boolean
   pollMs: number
   carrierTimeoutMs: number
   landingTimeoutMs: number
@@ -137,6 +140,11 @@ export type ManagedDoDelivery = Readonly<{
 
 export type ManagedDoBay = Readonly<{ bay: string; branch: string; path: string; headSha?: string }>
 
+/** Everything the draft stage needs, including whether the carrier TRACKS its
+ * branch. Managed dispatches track by default: no one is at the keyboard to
+ * re-record a carrier whose seat pushed one more commit. */
+export type ManagedDraftRequest = Readonly<{ branch: string; issue: string; track: boolean }>
+
 /** Every stage the composition drives, injected so the order, the refusal paths
  * and the timeout are unit-testable without a repository. */
 export type ManagedDoStages = Readonly<{
@@ -150,7 +158,7 @@ export type ManagedDoStages = Readonly<{
   closeBay(input: Readonly<{ bay: string }>): Promise<void>
   /** One poll tick over the Bay's refreshed workspace head. */
   observeCarrier(input: Readonly<{ bay: string; branch: string }>): Promise<Readonly<{ headSha?: string }>>
-  createDraft(input: Readonly<{ branch: string; issue: string }>): Promise<Readonly<{ pr: string }>>
+  createDraft(input: ManagedDraftRequest): Promise<Readonly<{ pr: string }>>
   recut(input: Readonly<{ pr: string; preflight: boolean }>): Promise<void>
   observeDelivery(input: Readonly<{ pr: string }>): Promise<ManagedDoDelivery>
   sleep(ms: number): Promise<void>
@@ -200,16 +208,28 @@ function requireCommand(value: ManagedDoCommand | undefined, key: string): Manag
   return value
 }
 
-export function resolveManagedDoPlan(config: Readonly<{ do?: ManagedDoConfig; base: string }>): ManagedDoPlan {
+/** Per-invocation overrides. `--lane` makes the lane a parameter of the verb so
+ * N simultaneous dispatches can run on N lanes; the configured `do.lane` stays
+ * the default, and one of the two must be present — Yrd never invents a
+ * persona identity. */
+export type ManagedDoOverrides = Readonly<{ lane?: string }>
+
+export function resolveManagedDoPlan(
+  config: Readonly<{ do?: ManagedDoConfig; base: string }>,
+  overrides: ManagedDoOverrides = {},
+): ManagedDoPlan {
   const declared = config.do ?? {}
-  const lane = declared.lane?.trim()
+  const requested = overrides.lane?.trim()
+  if (overrides.lane !== undefined && requested === "") usage("--lane requires a persona identity")
+  const lane = requested ?? declared.lane?.trim()
   if (lane === undefined || lane === "") {
-    configuration(`managed 'do' requires ${CONFIG_FILE} key 'do.lane'; Yrd never invents a persona identity`)
+    configuration(`managed 'do' requires --lane or ${CONFIG_FILE} key 'do.lane'; Yrd never invents a persona identity`)
   }
   return Object.freeze({
     settings: Object.freeze({
       lane,
       base: config.base,
+      track: declared.track ?? true,
       pollMs: declared.pollMs ?? DEFAULT_POLL_MS,
       carrierTimeoutMs: declared.carrierTimeoutMs ?? DEFAULT_TIMEOUT_MS,
       landingTimeoutMs: declared.landingTimeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -503,9 +523,10 @@ async function drive(issue: string, plan: ManagedDoPlan, stages: ManagedDoStages
   // the only shape that can be corrected mechanically.
   const draftStart = await startStage(stages, "draft", trail)
   if (draftStart !== undefined) return draftStart
+  const draftRequest: ManagedDraftRequest = { branch: bay.branch, issue, track: settings.track }
   let pr: string
   try {
-    pr = (await stages.createDraft({ branch: bay.branch, issue })).pr
+    pr = (await stages.createDraft(draftRequest)).pr
   } catch (error) {
     const actionable = classify(error, undefined)
     return refuseAt(stages, "draft", trail, actionable.cause, { remedy: actionable.resolution })
@@ -516,7 +537,7 @@ async function drive(issue: string, plan: ManagedDoPlan, stages: ManagedDoStages
 
   const recutStart = await startStage(stages, "recut", trail)
   if (recutStart !== undefined) return recutStart
-  const admitted = await admit(pr, trail, bay, issue, stages)
+  const admitted = await admit(pr, trail, draftRequest, stages)
   if (admitted !== undefined) return finishStageResult(stages, admitted)
   const recutComplete = await completeStage(stages, "recut", trail)
   if (recutComplete !== undefined) return recutComplete
@@ -579,15 +600,14 @@ async function awaitCarrier(
 async function admit(
   pr: string,
   trail: ManagedDoTrail,
-  bay: ManagedDoBay,
-  issue: string,
+  draft: ManagedDraftRequest,
   stages: ManagedDoStages,
 ): Promise<ManagedDoTerminalResult | undefined> {
   for (const preflight of [true, false]) {
     try {
       await stages.recut({ pr, preflight })
     } catch (error) {
-      const recovered = await recover(error, pr, trail, bay, issue, stages, preflight)
+      const recovered = await recover(error, pr, trail, draft, stages, preflight)
       if (recovered !== undefined) return recovered
     }
   }
@@ -601,8 +621,7 @@ async function recover(
   error: unknown,
   pr: string,
   trail: ManagedDoTrail,
-  bay: ManagedDoBay,
-  issue: string,
+  draft: ManagedDraftRequest,
   stages: ManagedDoStages,
   preflight: boolean,
 ): Promise<ManagedDoTerminalResult | undefined> {
@@ -630,7 +649,7 @@ async function recover(
   }
   try {
     for (const step of steps) {
-      if (step.kind === "draft") await stages.createDraft({ branch: bay.branch, issue })
+      if (step.kind === "draft") await stages.createDraft(draft)
       else await stages.recut({ pr, preflight: step.preflight })
     }
     await stages.recut({ pr, preflight })

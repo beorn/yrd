@@ -95,7 +95,7 @@ function createStages(overrides: StageOverrides = {}): {
       return head === undefined ? {} : { headSha: head }
     },
     createDraft: async (input) => {
-      calls.push(`draft:${input.branch}:${input.issue}`)
+      calls.push(`draft:${input.branch}:${input.issue}:track=${String(input.track)}`)
       return { pr: CARRIER }
     },
     recut: async (input) => {
@@ -167,6 +167,25 @@ describe("managed do configuration", () => {
     expect(() => resolveManagedDoPlan({ base: "main" })).toThrow(/\.yrd\.yml/u)
   })
 
+  it("takes the lane from --lane, falls back to the configured default, and refuses when neither states one", () => {
+    expect(resolveManagedDoPlan({ do: CONFIG, base: "main" }, { lane: "@dev/7" }).settings.lane).toBe("@dev/7")
+    expect(resolveManagedDoPlan({ do: CONFIG, base: "main" }, {}).settings.lane).toBe(LANE)
+    const laneless: ManagedDoConfig = { ...CONFIG, lane: undefined }
+    expect(resolveManagedDoPlan({ do: laneless, base: "main" }, { lane: "@dev/7" }).settings.lane).toBe("@dev/7")
+    expect(() => resolveManagedDoPlan({ do: laneless, base: "main" })).toThrow(/--lane or \.yrd\.yml key 'do\.lane'/u)
+  })
+
+  it("refuses an empty --lane instead of falling back to the configured default", () => {
+    expect(() => resolveManagedDoPlan({ do: CONFIG, base: "main" }, { lane: "   " })).toThrow(
+      /--lane requires a persona identity/u,
+    )
+  })
+
+  it("tracks the managed carrier by default and only stops when the repository says so", () => {
+    expect(resolveManagedDoPlan({ do: CONFIG, base: "main" }).settings.track).toBe(true)
+    expect(resolveManagedDoPlan({ do: { ...CONFIG, track: false }, base: "main" }).settings.track).toBe(false)
+  })
+
   it("defaults the bounded wait to 45 minutes and the poll interval to 30 seconds", () => {
     const resolved = resolveManagedDoPlan({
       do: { lane: LANE, assign: { run: "a" }, seat: { run: "s" }, launch: { run: "l" } },
@@ -211,7 +230,7 @@ describe("managed do composition", () => {
       `bay:${ISSUE}`,
       `launch:${BAY}:${LANE}`,
       "carrier",
-      `draft:${BRANCH}:${ISSUE}`,
+      `draft:${BRANCH}:${ISSUE}:track=true`,
       `recut:${CARRIER}:preflight`,
       `recut:${CARRIER}:queue`,
       "observe",
@@ -240,6 +259,18 @@ describe("managed do composition", () => {
     expect(forbidden.queueRun).not.toHaveBeenCalled()
     expect(forbidden.prReady).not.toHaveBeenCalled()
     expect(forbidden.prSubmit).not.toHaveBeenCalled()
+  })
+
+  it("cuts a TRACKED carrier so a seat's next push re-records itself instead of waiting for a human", async () => {
+    const { stages, recorded } = createStages()
+    await runManagedDo({ issue: ISSUE, plan: plan(), stages, lock: FREE_LOCK })
+    expect(recorded.calls).toContain(`draft:${BRANCH}:${ISSUE}:track=true`)
+  })
+
+  it("honors a repository that opted its managed carriers out of tracking", async () => {
+    const { stages, recorded } = createStages()
+    await runManagedDo({ issue: ISSUE, plan: plan({ ...CONFIG, track: false }), stages, lock: FREE_LOCK })
+    expect(recorded.calls).toContain(`draft:${BRANCH}:${ISSUE}:track=false`)
   })
 
   it("cuts the draft before the first recut", async () => {
