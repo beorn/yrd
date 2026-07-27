@@ -5323,16 +5323,24 @@ describe("Queue command adapters", () => {
     expect(await git(fixture.repo, ["ls-tree", "main", "dep"])).toContain(resolution.sha)
   }, 20_000)
 
-  it("runs remote push hooks from the checked candidate tree and submodule pins", async () => {
+  it("runs remote push hooks without inheriting recursive submodule pushes", async () => {
     const { repo, remote, featureSha, moduleSha } = await hookedSubmoduleRepository({
       baseVersion: "base",
       candidateVersion: "candidate",
       requiredVersion: "candidate",
     })
+    await git(repo, ["config", "push.recurseSubmodules", "on-demand"])
 
     await using process = createProcess()
+    const pushes: (readonly string[])[] = []
+    const recordingProcess: Pick<Process, "run"> = {
+      async run(request) {
+        if (request.argv[0] === "git" && request.argv[3] === "push") pushes.push(request.argv)
+        return process.run(request)
+      },
+    }
     await using app = await checkedQueue(
-      process,
+      recordingProcess,
       repo,
       shellCommand('git submodule update --init --recursive && test "$(cat dep/version.txt)" = candidate'),
       { env: { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITLINKS: "1" } },
@@ -5342,6 +5350,9 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run).toMatchObject({ status: "completed", conclusion: "success", prs: [{ headSha: featureSha }] })
+    const proof = IntegrationProofSchema.parse(run.integration)
+    const rootPush = pushes.find((argv) => argv.includes(`${proof.commit}:refs/heads/main`))
+    expect(rootPush).toContain("--recurse-submodules=no")
     expect(await git(remote, ["ls-tree", "main", "dep"])).toContain(moduleSha)
   })
 

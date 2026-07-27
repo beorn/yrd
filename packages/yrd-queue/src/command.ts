@@ -5275,9 +5275,11 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
             const cancellation = mergeAuthorityCancellation(context)
             if (cancellation !== undefined) return cancellation
             return withComponentMainPromotions(git, repo, checked.baseSha, checked.candidateSha, async () => {
+              // Component mains are promoted explicitly around this root push.
+              // A caller's recursive-push config would replay the root-only SHA refspec inside each component.
               const pushed = await git.run(
                 path,
-                ["push", "--porcelain", remote, `${checked.candidateSha}:${branchRef}`],
+                ["push", "--porcelain", "--recurse-submodules=no", remote, `${checked.candidateSha}:${branchRef}`],
                 true,
               )
               if (pushed.code !== 0) {
