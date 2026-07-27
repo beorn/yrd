@@ -113,25 +113,39 @@ async function commitRangeEvidence(
         .join("\n")}\ninspect: ${command}`
 }
 
+/** Either the recut may proceed on its recorded source, or the PR opted into
+ * tracking and its branch moved, so the caller must re-record the live head
+ * before continuing. Every other drift already refused inside the check. */
+export type RecutBranchFreshness =
+  | Readonly<{ status: "fresh" }>
+  | Readonly<{ status: "tracked-drift"; recorded: PRRev; liveHead: string }>
+
 /** Manual recut is reproducible: it operates on a recorded immutable source.
  * If the authored branch moved, implicit selection is ambiguous and must stop
  * before Git composition, journal writes, or Queue admission. Explicit
  * `--revision` is the deliberate replay spelling; resident freshness recuts
- * are already bound to admitted authority and bypass this author-facing gate. */
+ * are already bound to admitted authority and bypass this author-facing gate.
+ *
+ * A TRACKED PR (`yrd pr submit --track`, and every managed `yrd do` carrier)
+ * answered that ambiguity up front: the live head is the intended source. It
+ * returns `tracked-drift` so the caller records the new revision — the same
+ * operation an operator performs by hand — and continues. Reproducibility is
+ * untouched: each run still executes a frozen recorded revision. */
 export async function requireImplicitRecutBranchFreshness(
   pr: PR,
   selected: PRRev,
   options: RecutBranchFreshnessOptions,
   services: Pick<YrdCliServices, "process">,
   io: YrdCliIO,
-): Promise<void> {
-  if (options.revision !== undefined || options.transition !== undefined) return
+): Promise<RecutBranchFreshness> {
+  if (options.revision !== undefined || options.transition !== undefined) return { status: "fresh" }
   const recorded = prRevisionLineage(pr, selected.n)[0]
   if (recorded === undefined) {
     throw new Error(`yrd: PR '${pr.id}' revision ${selected.n} has no recorded source lineage`)
   }
   const liveHead = await liveBranchHead(pr, services, io)
-  if (liveHead === recorded.head) return
+  if (liveHead === recorded.head) return { status: "fresh" }
+  if (pr.track === true) return { status: "tracked-drift", recorded, liveHead }
 
   const queueFlag = options.queue === true ? " --queue" : ""
   const recordVerb = prDeliveryState(pr) === "pushed" ? "create" : "submit"
