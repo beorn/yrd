@@ -233,6 +233,21 @@ const PauseQueueArgsSchema = z
     }
   }) as z.ZodType<PauseQueueArgs>
 const ResumeQueueArgsSchema = z.object({ base: GitRefSchema }).strict()
+/** One compose/admission cycle that skipped a PR without producing a queue run.
+ * The `compose-candidate-skip` warns that accompany it are loggily-only, so this
+ * is the fact that makes a head-of-line refusal loop survive the process. */
+const AdmissionRefusedSchema = z
+  .object({
+    pr: PRIdSchema,
+    code: z.string().trim().min(1),
+    kind: z.string().trim().min(1).optional(),
+    reason: z.string().trim().min(1),
+  })
+  .strict()
+type AdmissionRefusedArgs = Readonly<z.infer<typeof AdmissionRefusedSchema>>
+/** Consecutive refusals before `queue audit` calls a PR wedged. One skip is a
+ * normal losable race in a selectorless drain; a third identical cycle is not. */
+const ADMISSION_REFUSAL_LOOP_THRESHOLD = 3
 const QueueStartSchema = QueueRecordSchema.omit({ startedAt: true, failure: true })
 const ReplayQueueStartSchema = ReplayQueueRecordSchema.omit({ startedAt: true, failure: true })
 const QueueFailedPRSchema = z.preprocess(
@@ -475,6 +490,7 @@ export type QueueCommands = Readonly<{
     quiesceLegacyRun: CommandHandler<QuiesceLegacyRunArgs, RuntimeState>
     settleOrphanedRun: CommandHandler<SettleOrphanedRunArgs, RuntimeState>
     associateTerminals: CommandHandler<AssociateTerminalsArgs, RuntimeState>
+    admissionRefused: CommandHandler<AdmissionRefusedArgs, RuntimeState>
   }>
 }>
 
@@ -630,6 +646,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/paused": PauseQueueArgsSchema,
         "queue/resumed": ResumeQueueArgsSchema,
         "queue/batch/isolated": BatchIsolatedSchema,
+        "queue/admission/refused": AdmissionRefusedSchema,
       },
       replayEvents: {
         "queue/candidate/created": CandidateCreatedSchema,
@@ -638,7 +655,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/run/canceled": QueueRunCanceledFactSchema,
         "queue/run/settled": SettledEventSchema,
       },
-      projectionVersion: "queues-v6-target-model-retention",
+      projectionVersion: "queues-v7-admission-refusals",
       project: projectQueues,
       compact: (state, complete) => {
         const runtime = complete as unknown as DeepReadonly<RuntimeState>
@@ -682,6 +699,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               quiesceLegacyRun: (args) => yrd.dispatch(commands.queue.quiesceLegacyRun, args),
               settleOrphanedRun: (args) => yrd.dispatch(commands.queue.settleOrphanedRun, args),
               associateTerminals: (args) => yrd.dispatch(commands.queue.associateTerminals, args),
+              admissionRefused: (args) => yrd.dispatch(commands.queue.admissionRefused, args),
               requestChecks: (pr, baseSha) =>
                 yrd.bays.requestChecks({ pr, ...(baseSha === undefined ? {} : { baseSha }) }),
             },
@@ -717,6 +735,7 @@ type QueueActions = Readonly<{
   quiesceLegacyRun(args: QuiesceLegacyRunArgs): Promise<CommandResult>
   settleOrphanedRun(args: SettleOrphanedRunArgs): Promise<CommandResult>
   associateTerminals(args: AssociateTerminalsArgs): Promise<CommandResult>
+  admissionRefused(args: AdmissionRefusedArgs): Promise<CommandResult>
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
 }>
 
@@ -1319,6 +1338,46 @@ function createQueue<Shape extends PRShape>(
   ): Promise<z.infer<typeof CandidateCreatedSchema> | undefined> =>
     candidateFactsForSnapshots(prs.map(Queues.snapshot), baseSha)
 
+  /**
+   * Journal the per-PR refusal behind every `compose-candidate-skip` warn below.
+   * The warns are loggily-only — they die with the process, and a PR refused at
+   * ADMISSION never becomes a run record — so without this the whole class of
+   * head-of-line wedge is invisible to `queue audit` (22395).
+   */
+  const noteCandidateRefusal = async (
+    selectors: readonly (string | undefined)[],
+    refusal: Readonly<{ code?: string; kind?: string; reason: string }>,
+  ): Promise<void> => {
+    for (const selector of selectors) {
+      if (selector === undefined) continue
+      const pr = resolvePR(runtime().bays, selector)
+      // A selector that names no PR is the `pr-not-found` refusal itself: there
+      // is nothing to attribute a streak to, and the caller already logged it
+      // loud. Anything else would invent a wedge against a phantom id.
+      if (pr === undefined) continue
+      try {
+        await actions.admissionRefused({
+          pr: pr.id,
+          // A losable skip always carries a fact code; name the gap rather than
+          // dropping the cycle silently if one ever does not.
+          code: refusal.code ?? "unclassified-refusal",
+          ...(refusal.kind === undefined ? {} : { kind: refusal.kind }),
+          reason: refusal.reason,
+        })
+      } catch (error) {
+        // Bookkeeping must never convert a survivable skip into a resident kill,
+        // but it must never fail quietly either — an unrecorded cycle is exactly
+        // the blindness this ledger exists to remove.
+        log.error?.("queue could not journal an admission refusal; the wedge oracle will under-count", {
+          action: "admission-refusal-unrecorded",
+          pr: pr.id,
+          code: refusal.code,
+          reason: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+  }
+
   const dispatchAdmissions = async (
     selectors: readonly string[],
     resolveCycleBase: CycleBaseResolver | undefined,
@@ -1352,13 +1411,17 @@ function createQueue<Shape extends PRShape>(
         if (!selectorless || (!checkability && (fact === undefined || fact.kind !== "refusal"))) {
           throw error
         }
+        const refusal = {
+          ...(checkability ? { code: "pr-not-checkable" } : fact?.code === undefined ? {} : { code: fact.code }),
+          ...(checkability ? { kind: "refusal" } : fact?.kind === undefined ? {} : { kind: fact.kind }),
+          reason: error instanceof Error ? error.message : String(error),
+        }
         log.warn?.("queue admit skipped a PR that is no longer admissible", {
           action: "compose-candidate-skip",
           pr: selector,
-          code: checkability ? "pr-not-checkable" : fact?.code,
-          kind: checkability ? "refusal" : fact?.kind,
-          reason: error instanceof Error ? error.message : String(error),
+          ...refusal,
         })
+        await noteCandidateRefusal([selector], refusal)
       }
     }
     return admitted
@@ -1510,6 +1573,9 @@ function createQueue<Shape extends PRShape>(
                 })
                 return
               }
+              // Not ledgered: this skip is run-scoped, and a run record already
+              // exists — the record walk in `auditQueues` can see it. The ledger
+              // covers only the skips that never mint a record.
               log.warn?.("Skipped a PR that changed while its batch was being prepared.", {
                 action: "compose-candidate-skip",
                 run: candidateId,
@@ -1563,16 +1629,26 @@ function createQueue<Shape extends PRShape>(
                   throw new Error(`yrd: consumed authority for PR '${gap.pr}' produced no needs-author receipt`)
                 }
               }
+              const gapReason =
+                gap.reason === "consumed"
+                  ? `${gap.kind} authority was consumed by queue run '${gap.consumedBy}'`
+                  : `no ${gap.kind} authority fact exists`
               log.warn?.("queue compose ejected a candidate without runnable authority", {
                 action: "compose-candidate-skip",
                 pr: gap.pr,
                 code: `queue-${gap.kind}-authority-${gap.reason}`,
-                reason:
-                  gap.reason === "consumed"
-                    ? `${gap.kind} authority was consumed by queue run '${gap.consumedBy}'`
-                    : `no ${gap.kind} authority fact exists`,
+                reason: gapReason,
                 remedy: `yrd pr recut ${gap.pr} --preflight --queue`,
               })
+              // A `consumed` gap ejects with a durable `pr/needs-author` receipt,
+              // so it leaves a trace and stops repeating. A `missing` gap leaves
+              // nothing and re-skips the same PR every cycle — ledger that one.
+              if (gap.reason === "missing") {
+                await noteCandidateRefusal([gap.pr], {
+                  code: `queue-${gap.kind}-authority-missing`,
+                  reason: gapReason,
+                })
+              }
             } catch (error) {
               // 22306 class: a single PR's authority/eject refusal must not abort the
               // selectorless drain (same boundary as the per-candidate wrap below).
@@ -1587,6 +1663,7 @@ function createQueue<Shape extends PRShape>(
                 kind: fact.kind,
                 reason: fact.message,
               })
+              await noteCandidateRefusal([gap.pr], { code: fact.code, kind: fact.kind, reason: fact.message })
             }
           }
           const authorityGapIds = new Set(authorityGaps.map((gap) => gap.pr))
@@ -1619,6 +1696,10 @@ function createQueue<Shape extends PRShape>(
               reason: fact.message,
               prs: checked.map((pr) => pr.id),
             })
+            await noteCandidateRefusal(
+              checked.map((pr) => pr.id),
+              { code: fact.code, kind: fact.kind, reason: fact.message },
+            )
             admissions = []
           }
           snapshot = runtime()
@@ -1689,6 +1770,10 @@ function createQueue<Shape extends PRShape>(
                   kind: fact.kind,
                   reason: fact.message,
                 })
+                await noteCandidateRefusal(
+                  candidate.map((pr) => pr.id),
+                  { code: fact.code, kind: fact.kind, reason: fact.message },
+                )
                 continue
               }
               const started = await actions.run({
@@ -1739,6 +1824,10 @@ function createQueue<Shape extends PRShape>(
                 kind: fact.kind,
                 reason: fact.message,
               })
+              await noteCandidateRefusal(
+                candidate.map((pr) => pr.id),
+                { code: fact.code, kind: fact.kind, reason: fact.message },
+              )
             }
           }
           const final = runtime()
@@ -2686,6 +2775,19 @@ function createQueueCommands(
     },
   })
 
+  const admissionRefused = command({
+    title: "Record a compose cycle that skipped a PR without admitting it",
+    params: AdmissionRefusedSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: AdmissionRefusedArgs) {
+      // Fail loud on an unattributable refusal: the ledger's whole job is to name
+      // the wedged PR, so a phantom id must never become a phantom finding.
+      if (state.bays.prs[args.pr] === undefined) {
+        raiseFailure("refusal", "pr-not-found", `yrd: no PR '${args.pr}'`)
+      }
+      return { events: [event("queue/admission/refused", args)] }
+    },
+  })
+
   return {
     queue: {
       admit,
@@ -2700,6 +2802,7 @@ function createQueueCommands(
       quiesceLegacyRun,
       settleOrphanedRun,
       associateTerminals,
+      admissionRefused,
     },
   }
 }
@@ -3095,7 +3198,21 @@ function compactQueueProjection(
     }
     terminalOrder[record.id] = order
   }
-  return compactQueuesState({ ...queues, retention: { terminalOrder } }, queueDecisionRoots(queues, bays))
+  // A refusal streak only describes a PR that is still trying to get in. Drop
+  // the entries for PRs that left the bay or reached a terminal delivery state
+  // so the ledger cannot grow without bound (or outlive the wedge it names).
+  const admissionRefusals = Object.fromEntries(
+    Object.entries(queues.admissionRefusals).filter(([id]) => {
+      const pr = bays.prs[id]
+      if (pr === undefined) return false
+      const delivery = prDeliveryState(pr)
+      return delivery === "pushed" || delivery === "submitted"
+    }),
+  )
+  return compactQueuesState(
+    { ...queues, admissionRefusals, retention: { terminalOrder } },
+    queueDecisionRoots(queues, bays),
+  )
 }
 
 function queueDecisionRoots(queues: DeepReadonly<QueuesState>, bays: DeepReadonly<BaysState>): ReadonlySet<RunId> {
@@ -3179,7 +3296,10 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     const invalidated = invalidatePRAuthority(state.queues.authority, token.pr, "pushed")
     return {
       queues: {
-        ...state.queues,
+        // A push or recut is the operator's answer to the refusal: the old streak
+        // describes a revision that no longer exists, so it must not keep the
+        // wedge finding alive against fresh content.
+        ...clearAdmissionRefusals(state.queues, [token.pr]),
         authority: { ...invalidated, current: { ...invalidated.current, [token.pr]: token } },
       },
     }
@@ -3408,7 +3528,12 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     })
     const record: QueueRecord = { ...replayed, queueId, candidateId }
     const queues = {
-      ...state.queues,
+      // Admission succeeded for every member PR, so their refusal streaks end
+      // here — "consecutive refusals WITHOUT admission" is the whole claim.
+      ...clearAdmissionRefusals(
+        state.queues,
+        record.prs.map(({ id }) => id),
+      ),
       candidates:
         legacyCandidate === undefined
           ? state.queues.candidates
@@ -3475,7 +3600,42 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     }
     return { queues: record.parent === undefined ? markQueueTerminalRoot(queues, record.id) : queues }
   }
+  if (applied.name === "queue/admission/refused") {
+    const refusal = AdmissionRefusedSchema.parse(applied.data)
+    const streak = state.queues.admissionRefusals[refusal.pr]
+    return {
+      queues: {
+        ...state.queues,
+        admissionRefusals: {
+          ...state.queues.admissionRefusals,
+          [refusal.pr]: {
+            pr: refusal.pr,
+            code: refusal.code,
+            ...(refusal.kind === undefined ? {} : { kind: refusal.kind }),
+            reason: refusal.reason,
+            // The streak counts cycles, not codes: a wedge that flaps between
+            // refusal codes is still one PR that never got in. The latest code
+            // is what an operator needs to act on.
+            count: (streak?.count ?? 0) + 1,
+            firstAt: streak?.firstAt ?? applied.ts,
+            lastAt: applied.ts,
+          },
+        },
+      },
+    }
+  }
   return state
+}
+
+/** Drop the refusal streaks for PRs that just got in (or whose refused revision
+ * was replaced). Exported semantics live in {@link QueueAdmissionRefusal}. */
+function clearAdmissionRefusals(queues: DeepReadonly<QueuesState>, prs: readonly string[]): QueuesState {
+  const dropped = new Set(prs.filter((pr) => queues.admissionRefusals[pr] !== undefined))
+  if (dropped.size === 0) return queues as QueuesState
+  return {
+    ...(queues as QueuesState),
+    admissionRefusals: Object.fromEntries(Object.entries(queues.admissionRefusals).filter(([pr]) => !dropped.has(pr))),
+  }
 }
 
 function installSteps(definitions: readonly AnyStepDef[]): readonly RuntimeStep[] {
@@ -4498,7 +4658,44 @@ function auditQueues(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeS
       run: batch.run,
     })
   }
+  // Every code above walks RUN RECORDS. A PR refused at ADMISSION never becomes
+  // one, so a head-of-line refusal loop was structurally invisible here: `queue
+  // audit` reported `findings: []` through a 5h46m block while each cycle logged
+  // a loggily-only `compose-candidate-skip`. The refusal ledger is the durable
+  // trace of exactly that, so read it (22395).
+  const head = admissionQueue(state, steps)[0]
+  for (const refusal of Object.values(state.queues.admissionRefusals).toSorted((left, right) =>
+    left.pr.localeCompare(right.pr, undefined, { numeric: true }),
+  )) {
+    if (refusal.count < ADMISSION_REFUSAL_LOOP_THRESHOLD) continue
+    const blockedMs = Math.max(0, Date.parse(refusal.lastAt) - Date.parse(refusal.firstAt))
+    const position = head?.id === refusal.pr ? " at the head of the admission queue" : ""
+    findings.push({
+      code: "admission-refusal-loop",
+      message:
+        `PR '${refusal.pr}'${position} was refused ${refusal.count} consecutive times ` +
+        `over ${formatRefusalSpan(blockedMs)} (since ${refusal.firstAt}) without ever being admitted; ` +
+        `latest refusal '${refusal.code}': ${refusal.reason}`,
+      pr: refusal.pr,
+      refusal: refusal.code,
+      count: refusal.count,
+      since: refusal.firstAt,
+      blockedMs,
+    })
+  }
   return { findings }
+}
+
+/** Compact block span for the audit message. Deliberately derived from the two
+ * journal timestamps rather than a wall clock, so `queue audit` stays a pure
+ * function of projected state and the number is reproducible on replay. */
+function formatRefusalSpan(milliseconds: number): string {
+  const seconds = Math.max(0, Math.round(milliseconds / 1_000))
+  const hours = Math.floor(seconds / 3_600)
+  const minutes = Math.floor((seconds % 3_600) / 60)
+  if (hours > 0) return `${hours}h${String(minutes).padStart(2, "0")}m`
+  if (minutes > 0) return `${minutes}m${String(seconds % 60).padStart(2, "0")}s`
+  return `${seconds}s`
 }
 
 /** Classify a planned step against the installed catalog: `undefined` when it

@@ -48,6 +48,7 @@ import {
   withMerge,
   withStep,
   type AddStepResult,
+  type CandidatePreparer,
   type SourceRewrite,
   type PRShape,
   type StepExecution,
@@ -334,6 +335,7 @@ async function createApp(
     journal?: Journal<unknown>
     id?: () => string
     log?: ReturnType<typeof createLogger>
+    prepareCandidate?: CandidatePreparer
   } = {},
 ) {
   const contest = contestAdapters(options.probe, options.baseResolutions, options.waitingEvaluator)
@@ -431,6 +433,7 @@ async function createApp(
     steps: [check, merge] as const,
     batch: options.batch ?? false,
     ...(options.requires === undefined ? {} : { requires: options.requires }),
+    ...(options.prepareCandidate === undefined ? {} : { prepareCandidate: options.prepareCandidate }),
   })
   const contests = withContests({ runners: [contest.runner], evaluators: [contest.evaluator], git: contest.git })
   const base = pipe(
@@ -4497,6 +4500,49 @@ describe("runYrd", () => {
     expect(recovery.stdout()).toContain("R1")
     expect(recovery.stdout()).toContain("step-revision-drift")
     expect(recovery.stdout()).toContain("requires step 'merge' revision 'merge-v1', installed 'merge-v2'")
+  })
+
+  it("names a head-of-line admission refusal loop instead of reporting queue recovery idle", async () => {
+    let now = "2026-07-09T12:00:00.000Z"
+    await using app = await createApp({
+      clock: () => now,
+      // The wedge shape: a typed refusal the selectorless drain survives, so it
+      // retries the identical PR every cycle and never mints a run record.
+      prepareCandidate: () => {
+        throw createFailure({
+          kind: "refusal",
+          code: "authored-gitlink",
+          message: "yrd: PR 'PR1' authors a gitlink bump; recut it before admission",
+        })
+      },
+    })
+    await openAndSubmit(app)
+    await app.bays.requestChecks({ pr: "PR1" })
+
+    for (const at of ["2026-07-09T12:00:00.000Z", "2026-07-09T14:00:00.000Z", "2026-07-09T17:46:00.000Z"]) {
+      now = at
+      await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })
+    }
+    // Nothing for the run-record walk to see — this is exactly the state in which
+    // `queue audit` used to report `findings: []` (22395).
+    expect(Queues.ids(app.state().queues)).toEqual([])
+    expect(app.queue.audit().findings).toContainEqual({
+      code: "admission-refusal-loop",
+      message: expect.stringContaining("PR1"),
+      pr: "PR1",
+      refusal: "authored-gitlink",
+      count: 3,
+      since: "2026-07-09T12:00:00.000Z",
+      blockedMs: 5 * 3_600_000 + 46 * 60_000,
+    })
+
+    const recovery = outputIO({ now: () => Date.parse("2026-07-09T17:46:30.000Z") })
+    expect(await runYrd(app, yrd("queue", "recover"), recovery.io), recovery.stderr()).toBe(0)
+    const text = stripAnsi(recovery.stdout())
+    expect(text).not.toContain("Queue idle")
+    expect(text).toContain("admission-refusal-loop")
+    expect(text).toContain("PR1")
+    expect(text).toContain("authored-gitlink")
   })
 
   it("names environment audit blockers instead of reporting queue recovery idle", async () => {
