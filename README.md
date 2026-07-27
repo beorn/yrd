@@ -538,10 +538,19 @@ For a human-authored root carrier, use the machine-owned path rather than
 attaching a composition manifest:
 
 ```bash
-yrd pr create <branch>
+# Re-record the corrected branch. `create` keeps a draft PR a draft and is
+# accepted only while the PR is `pushed`; every other delivery state uses
+# `submit`, which no state refuses.
+yrd pr create <branch>   # draft (pushed) PR
+yrd pr submit <branch>   # submitted, needs-author, rejected, reopened
 yrd pr recut <PR> --preflight --queue
 # Run the exact `next:` command printed by preflight.
 ```
+
+A terminal PR (integrated, already-landed, withdrawn, canceled) cannot be
+recut; resubmitting its branch reopens or mints the delivery instead. The
+printed `resolve:` steps follow the PR's current delivery state, so they never
+name a command that state refuses.
 
 The preflight returns `RECUT-FORCE` when an authored-root rejection left a
 passing check attached to the current revision, making the required override
@@ -609,10 +618,17 @@ git -C <submodule> merge <authoritative-pin>
 # Resolve any content conflicts and commit before continuing.
 git -C <submodule> push -u origin HEAD
 git add <submodule> && git commit -m "fix(yrd): compose <submodule> pins"
-yrd pr create <branch>
+yrd pr submit <branch>   # or `yrd pr create <branch>` while the PR is a draft
 yrd pr recut <PR> --preflight --queue
 # Run the exact `next:` command printed by preflight.
 ```
+
+This recipe is deliberately NOT a machine remedy. Its merge composes two
+divergent submodule pins and can conflict, and resolving that conflict is a
+judgment call, so `recut-gitlink-conflict` projects an escalation instead: its
+`resolution` says escalate to a human, and the recipe rides `escalation.steps`
+(`ESCALATE`/`MANUAL` rows in the views, `escalate:`/`manual:` lines on stderr)
+as guidance for that human. Nothing should execute it unattended.
 
 The composition commit must be published before the root carrier is submitted;
 otherwise the Queue cannot prove the gitlink object is remotely reachable.

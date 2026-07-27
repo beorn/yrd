@@ -3508,7 +3508,7 @@ async function viewPrRuns(app: YrdCliApp, selector: string, options: JsonOption,
     const data = {
       pr,
       eligibility,
-      runs: runs.map((run) => queueShowData(run, runs, attempts, runRevisionClock(pr, run))),
+      runs: runs.map((run) => queueShowData(run, runs, attempts, runRevisionClock(pr, run), prDeliveryState(pr))),
     }
     await printResult(
       io,
