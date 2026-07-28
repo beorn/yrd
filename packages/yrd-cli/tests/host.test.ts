@@ -615,7 +615,10 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       "ready",
       "review",
       "comment",
+      "startSession",
+      "stopSession",
       "requestChecks",
+      "recordAdmission",
       "requestReview",
       "regression",
     ])
@@ -1928,11 +1931,9 @@ notify:
       ),
       submitStderr,
     ).toBe(1)
-    // The failed Job owns exactly one ERROR; the enclosing run and admit settle
-    // at INFO instead of duplicating the terminal failure.
-    expect(submitStderr.trim().split("\n")).toEqual([
-      expect.stringMatching(/\bERROR yrd:jobs:main-health main-health failed\b/u),
-    ])
+    // One-shot lifecycle outcomes are structured in the command result. The
+    // resident owns lifecycle narration; submit does not duplicate it on stderr.
+    expect(submitStderr).toBe("")
     const submitted = JSON.parse(submitStdout) as { checks: Record<string, unknown>[] }
     expect(submitted).toMatchObject({
       command: "pr.submit",
@@ -1940,17 +1941,18 @@ notify:
         {
           pr: "PR1",
           revision: 1,
-          run: "R1",
+          job: expect.any(String),
           step: "main-health",
           status: "failed",
           classification: "base",
-          command: ["sh", "-c", expect.stringContaining("main-health-read")],
+          command: ["queue.step.main-health"],
           diagnostics: expect.stringContaining(
             `[yrd-base-health] base ${baseSha.slice(0, 12)} is red: test:fast failed`,
           ),
         },
       ],
     })
+    expect(submitted.checks[0]).not.toHaveProperty("run")
 
     let checksStdout = ""
     let checksStderr = ""
@@ -1989,8 +1991,8 @@ notify:
       expect(stderr).toBe("")
       expect(stdout).toContain("main-health")
       expect(stdout).toContain("base")
-      expect(stdout).toContain("test:fast failed")
-      expect(stdout).toContain("main-health-read")
+      expect(stdout).toMatch(/test:fast\s+failed/u)
+      expect(stdout).toContain("queue.step.main-health")
       if (color) expect(stdout).toContain("\u001b[")
       else expect(stdout).not.toContain("\u001b[")
     }
@@ -2164,8 +2166,9 @@ notify:
     await git(component, "push", "-q", "origin", `${pin}:refs/heads/${branch}`)
     stdout = ""
     stderr = ""
-    expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "submit", branch, "--json"], {
+    const publishedExit = await runYrdProcess(
+      ["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "submit", branch, "--json"],
+      {
         cwd: repo,
         stdout: (text) => {
           stdout += text
@@ -2173,12 +2176,13 @@ notify:
         stderr: (text) => {
           stderr += text
         },
-      }),
-      stderr,
-    ).toBe(0)
+      },
+    )
+    expect(publishedExit).toBe(1)
     expect(stderr).toBe("")
     expect(JSON.parse(stdout)).toMatchObject({
-      prs: [{ branch }],
+      checks: [{ error: { code: "authored-gitlink" }, pr: "PR1", revision: 1, status: "failed" }],
+      prs: [{ branch, status: "needs-author" }],
     })
 
     listed = ""
@@ -2364,7 +2368,7 @@ notify:
     expect(await Bun.file(join(repo, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(false)
   })
 
-  it("teaches exact inspect-and-fix-push guidance for a rejected direct-branch PR without appending", async () => {
+  it("teaches exact inspection guidance for a needs-author direct-branch PR without appending", async () => {
     const { repo } = await repository()
     await commitYrdConfig(
       repo,
@@ -2409,18 +2413,15 @@ notify:
       }),
     ).toBe(1)
     const rejected = JSON.parse(refusal) as Readonly<{
-      guidance: Readonly<{ inspect: string; resubmit: string }>
+      guidance: Readonly<{ view: string }>
     }>
     expect(rejected).toMatchObject({
       command: "pr.merge",
-      status: "submitted",
-      outcome: "rejected",
-      run: "R1",
-      next: "yrd pr runs PR1",
+      status: "needs-author",
+      next: "yrd pr view PR1",
     })
     expect(rejected.guidance).toEqual({
-      inspect: "yrd pr runs PR1",
-      resubmit: "fix the branch and run yrd pr submit again",
+      view: "yrd pr view PR1",
     })
     expect(await journalEnvelope(repo)).toEqual(before)
   })
@@ -2831,19 +2832,20 @@ notify:
     const startedPath = join(repo, "..", "second-check.started")
     const finishedPath = join(repo, "..", "second-check.finished")
     const artifactRoot = join(repo, ".git", "yrd", "artifacts")
-    const nativeMergeArtifacts = join(artifactRoot, "R2", "1-merge", "attempt-1")
     const failedOutput = "FAILURE_OUTPUT_ONLY_IN_ARTIFACT"
     const passedOutput = "PASS_OUTPUT_ONLY_IN_ARTIFACT"
     const command = [
-      `if test -f feature.txt; then printf '${failedOutput}\\n' >&2; exit 7; fi`,
+      `if git cat-file -e "$YRD_CANDIDATE_SHA:feature.txt" 2>/dev/null; then printf '${failedOutput}\\n' >&2; exit 7; fi`,
       `printf '${passedOutput}\\n'`,
       `touch ${JSON.stringify(startedPath)}`,
       "sleep 0.2",
+      'git merge --ff-only "$YRD_CANDIDATE_SHA"',
+      "git push origin main",
       `touch ${JSON.stringify(finishedPath)}`,
     ].join("; ")
     await commitYrdConfig(
       repo,
-      `base: main\nbatch: 1\nsteps: [check, merge]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 5000\n`,
+      `base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "true"\nmerge:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 5000\n`,
     )
     await git(repo, "switch", "-qc", "issue/second", "main")
     await writeFile(join(repo, "second.txt"), "second\n")
@@ -2855,6 +2857,13 @@ notify:
     await using submitter = await createYrdHost({ cwd: repo })
     await submitter.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
     await submitter.app.bays.submit({ branch: "issue/second", headSha: secondSha, base: "main" })
+    const first = submitter.app.bays.pr("issue/feature")!
+    const second = submitter.app.bays.pr("issue/second")!
+    await submitter.app.bays.requestChecks({ pr: first.id })
+    await submitter.app.bays.requestChecks({ pr: second.id })
+    await submitter.app.queue.admitRevision({ prs: [first.id, second.id] }, { runner: "test", leaseMs: 60_000 })
+    expect([first.id, second.id].map((id) => prDeliveryState(submitter.app.bays.pr(id)!))).toEqual(["ready", "ready"])
+    expect(Queues.ids(submitter.app.state().queues)).toEqual([])
     await submitter.close()
 
     const cli = Bun.spawn(
@@ -2865,10 +2874,13 @@ notify:
     const stderr = new Response(cli.stderr).text()
     try {
       await vi.waitFor(async () => expect(await Bun.file(startedPath).exists()).toBe(true), { timeout: 5_000 })
-      await vi.waitFor(() => expect(existsSync(nativeMergeArtifacts)).toBe(true), { timeout: 5_000 })
       cli.kill("SIGTERM")
       await vi.waitFor(async () => expect(await Bun.file(finishedPath).exists()).toBe(true), { timeout: 5_000 })
-      expect(await cli.exited, await stderr).toBe(0)
+      const exitCode = await cli.exited
+      const narration = await stderr
+      const structured = await stdout
+      expect(exitCode, structured).toBe(0)
+      expect(narration).toBe("")
 
       await using settled = await createYrdHost({ cwd: repo })
       const runIds = Queues.ids(settled.app.state().queues)
@@ -2876,23 +2888,14 @@ notify:
       expect(runIds.map((id) => settled.app.queue.get(id)?.status)).toEqual(["completed", "completed"])
       expect(runIds.map((id) => settled.app.queue.get(id)?.conclusion)).toEqual(["failure", "success"])
 
-      const narration = await stderr
-      const failedLog = join(artifactRoot, "R1", "0-check", "attempt-1", "stderr.log")
-      const passedLog = join(artifactRoot, "R2", "0-check", "attempt-1", "stdout.log")
-      const failedAttempt = join(artifactRoot, "R1", "0-check", "attempt-1")
-      const passedAttempt = join(artifactRoot, "R2", "0-check", "attempt-1")
-      expect(narration).toContain(pathToFileURL(join(artifactRoot, "R1")).href)
-      expect(narration).toContain(pathToFileURL(join(artifactRoot, "R2")).href)
-      expect(narration).toContain(pathToFileURL(failedAttempt).href)
-      expect(narration).toContain(pathToFileURL(passedAttempt).href)
-      expect(narration).toContain(pathToFileURL(nativeMergeArtifacts).href)
-      expect(narration).not.toContain(pathToFileURL(failedLog).href)
-      expect(narration).not.toContain(pathToFileURL(passedLog).href)
-      expect(narration).not.toContain(failedOutput)
-      expect(narration).not.toContain(passedOutput)
+      const failedLog = join(artifactRoot, "R1", "0-merge", "attempt-1", "stderr.log")
+      const passedLog = join(artifactRoot, "R2", "0-merge", "attempt-1", "stdout.log")
+      expect(structured).toContain('"id":"R1"')
+      expect(structured).toContain('"id":"R2"')
+      expect(structured).not.toContain(failedOutput)
+      expect(structured).not.toContain(passedOutput)
       expect(await readFile(failedLog, "utf8")).toContain(failedOutput)
       expect(await readFile(passedLog, "utf8")).toContain(passedOutput)
-      expect(existsSync(nativeMergeArtifacts)).toBe(true)
     } finally {
       cli.kill("SIGKILL")
       await cli.exited
