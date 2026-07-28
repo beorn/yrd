@@ -204,15 +204,15 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
         const bays = output(repo)
         expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
         expect(JSON.parse(bays.stdout())).toMatchObject({
-          bays: [expect.objectContaining({ name: "docs", status: "active" })],
+          bays: [expect.objectContaining({ name: "docs", nativeStatus: "active", status: "open" })],
         })
 
         const closed = output(repo)
         expect(await yrd(repo, closed.io, "--wire", wire, "bay", "close", "docs"), closed.stderr()).toBe(0)
         const afterClose = output(repo)
-        expect(await yrd(repo, afterClose.io, "bay", "list", "--json"), afterClose.stderr()).toBe(0)
+        expect(await yrd(repo, afterClose.io, "bay", "list", "--closed", "--json"), afterClose.stderr()).toBe(0)
         expect(JSON.parse(afterClose.stdout())).toMatchObject({
-          bays: [expect.objectContaining({ name: "docs", status: "closed" })],
+          bays: [expect.objectContaining({ name: "docs", nativeStatus: "closed", status: "done" })],
         })
       } finally {
         restoreEnv("SHELL", previousShell)
@@ -649,9 +649,16 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
       expect(run.stdout()).toContain("bay blabla1 → new task/blabla1, linked @km/test/blabla1")
       expect(await readFile(fake.log, "utf8")).toContain(`join ${mailbox} --delivery pull --json`)
       const bays = output(repo)
-      expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
+      expect(await yrd(repo, bays.io, "bay", "list", "--closed", "--json"), bays.stderr()).toBe(0)
       expect(JSON.parse(bays.stdout())).toMatchObject({
-        bays: [expect.objectContaining({ issue: "@km/test/blabla1", by: mailbox, status: "closed" })],
+        bays: [
+          expect.objectContaining({
+            issue: "@km/test/blabla1",
+            by: mailbox,
+            nativeStatus: "closed",
+            status: "done",
+          }),
+        ],
       })
       const prs = output(repo)
       expect(await yrd(repo, prs.io, "pr", "list", "--issue", "@km/test/blabla1", "--json"), prs.stderr()).toBe(0)
@@ -1070,7 +1077,7 @@ printf '%s %s' "$HAB_NAME" "$$" > cwd-guest.name
         expect(primer).toContain(`Mission: work issue ${CLAIM}`)
 
         const after = output(fixture.repo)
-        expect(await yrd(fixture.repo, after.io, "bay", "list", "--json"), after.stderr()).toBe(0)
+        expect(await yrd(fixture.repo, after.io, "bay", "list", "--all", "--json"), after.stderr()).toBe(0)
         const bays = (JSON.parse(after.stdout()) as { bays: readonly { id: string }[] }).bays
         expect(bays.map((bay) => bay.id)).toEqual(existing.map((bay) => bay.id))
       } finally {
@@ -1384,12 +1391,25 @@ exec git --git-dir=${JSON.stringify(origin)} update-ref refs/heads/main ${movedB
     expect(launch.stderr()).toContain("stage 'launch'")
 
     const bays = output(fixture.repo)
-    expect(await yrd(fixture.repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
+    expect(await yrd(fixture.repo, bays.io, "bay", "list", "--closed", "--json"), bays.stderr()).toBe(0)
     const projection = JSON.parse(bays.stdout()) as {
-      bays: readonly { issue?: string; branch: string; status: string; orphan?: unknown }[]
+      bays: readonly {
+        issue?: string
+        branch: string
+        nativeStatus: string
+        status: string
+        orphan?: unknown
+      }[]
     }
     expect(projection).toMatchObject({
-      bays: [expect.objectContaining({ issue: CLAIM, branch: BRANCH, status: "closed" })],
+      bays: [
+        expect.objectContaining({
+          issue: CLAIM,
+          branch: BRANCH,
+          nativeStatus: "closed",
+          status: "done",
+        }),
+      ],
     })
     expect(projection.bays[0]?.orphan).toBeUndefined()
     const worktrees = await git(fixture.repo, "worktree", "list", "--porcelain")
@@ -1668,7 +1688,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
       bays: readonly { archive?: unknown; issue?: string; status: string }[]
     }
     const failed = projection.bays.find((bay) => bay.issue === CLAIM)
-    expect(failed).toMatchObject({ issue: CLAIM, status: "active" })
+    expect(failed).toMatchObject({ issue: CLAIM, status: "open" })
     expect(failed?.archive).toBeUndefined()
   })
 
@@ -1700,7 +1720,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
       bays: readonly { archive?: unknown; issue?: string; status: string }[]
     }
     const failed = projection.bays.find((bay) => bay.issue === CLAIM)
-    expect(failed).toMatchObject({ issue: CLAIM, status: "active" })
+    expect(failed).toMatchObject({ issue: CLAIM, status: "open" })
     expect(failed?.archive).toBeUndefined()
   })
 
@@ -1925,7 +1945,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
     expect(await git(repo, "ls-remote", "origin", `refs/heads/${branch}`)).toBe("")
 
     const bays = output(repo)
-    expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
+    expect(await yrd(repo, bays.io, "bay", "list", "--closed", "--json"), bays.stderr()).toBe(0)
     expect(JSON.parse(bays.stdout())).toMatchObject({
       bays: [
         expect.objectContaining({
@@ -1953,7 +1973,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
     expect(await git(repo, "ls-remote", "origin", `refs/heads/${branch}`)).toBe(`${remoteHead}\trefs/heads/${branch}`)
 
     const bays = output(repo)
-    expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
+    expect(await yrd(repo, bays.io, "bay", "list", "--closed", "--json"), bays.stderr()).toBe(0)
     expect(JSON.parse(bays.stdout())).toMatchObject({
       bays: [
         expect.objectContaining({
@@ -1978,7 +1998,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
     expect(await yrd(repo, second.io, "bay", "run", secondClaim, "--", "true"), second.stderr()).toBe(0)
 
     const bays = output(repo)
-    expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
+    expect(await yrd(repo, bays.io, "bay", "list", "--closed", "--json"), bays.stderr()).toBe(0)
     const rows = (JSON.parse(bays.stdout()) as { bays: readonly { branch: string; issue?: string }[] }).bays.filter(
       (bay) => bay.issue === firstClaim || bay.issue === secondClaim,
     )
@@ -2062,7 +2082,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
     }
     const orphan = projection.bays.find((bay) => bay.issue === CLAIM && bay.orphan !== undefined)
     expect(orphan).toMatchObject({
-      status: "active",
+      status: "open",
       orphan: { exitCode: 17, reason: expect.stringContaining("child exited 17") },
     })
     if (orphan?.path === undefined) throw new Error("orphaned Bay did not retain its workspace path")
@@ -2099,7 +2119,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
       bays: [
         expect.objectContaining({
           issue: CLAIM,
-          status: "active",
+          status: "open",
           orphan: expect.objectContaining({ reason: expect.stringContaining("child exited after SIGTERM") }),
         }),
       ],
@@ -2154,7 +2174,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
       bays: [
         expect.objectContaining({
           issue: CLAIM,
-          status: "active",
+          status: "open",
           orphan: expect.objectContaining({
             reason: expect.stringContaining("interrupted during post-child checkpoint"),
           }),
