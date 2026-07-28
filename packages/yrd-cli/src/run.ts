@@ -1865,7 +1865,7 @@ async function ensureBayDependencies(
  * Returns whether the checkout actually moved, because a merge that moved it
  * can have moved the manifest or the lockfile with it.
  */
-async function convergeAdoptedBay(
+async function convergeBayOntoBase(
   processService: Pick<Process, "run">,
   bay: Bay,
   path: string,
@@ -2326,7 +2326,7 @@ async function runBaySession(
   // it was found rather than adding a second orphan on top of the first.
   const moved =
     provisioned.adopted === true && bay.path !== undefined
-      ? await convergeAdoptedBay(services.process, bay, bay.path, io, env)
+      ? await convergeBayOntoBase(services.process, bay, bay.path, io, env)
       : false
 
   let child: ProcessResult
@@ -2456,18 +2456,34 @@ function managedDoStages(
   commands: Readonly<{ assign: ManagedDoCommand; seat: ManagedDoCommand; launch: ManagedDoCommand }>,
   recordBoundary: ReturnType<typeof createManagedDoJournal>,
 ): ManagedDoStages {
+  const processService = services.process
+  if (processService === undefined) configuration("managed 'do' requires the process-backed Yrd runtime")
   let bayId: string | undefined
   return {
     assign: (input) => runCommand("assign", commands.assign, { YRD_DO_ISSUE: input.issue, YRD_DO_LANE: input.lane }),
     decideSeat: (input) => runCommand("seat", commands.seat, { YRD_DO_ISSUE: input.issue, YRD_DO_LANE: input.lane }),
     openBay: async (input) => {
       const opened = await prepareResolvedIssueBay(app, input.issue, io)
-      bayId = opened.bay.id
+      let bay = opened.bay
+      const environment = services.environment ?? process.env
+      try {
+        const moved = await convergeBayOntoBase(processService, bay, bay.path, io, environment)
+        if (moved) {
+          const refreshed = await refreshBay(app, bay, io)
+          if (refreshed.path === undefined) refusal(`Bay '${refreshed.id}' lost its workspace path during refresh`)
+          bay = { ...refreshed, path: refreshed.path }
+        }
+        await ensureBayDependencies(processService, bay, bay.path, io, environment, moved)
+      } catch (error) {
+        await orphanRunBay(app, bay, `Bay setup failed: ${errorDetail(error)}`)
+        throw error
+      }
+      bayId = bay.id
       return {
-        bay: opened.bay.id,
+        bay: bay.id,
         branch: opened.identity.branch,
-        path: opened.bay.path,
-        ...(opened.bay.headSha === undefined ? {} : { headSha: opened.bay.headSha }),
+        path: bay.path,
+        ...(bay.headSha === undefined ? {} : { headSha: bay.headSha }),
       }
     },
     launch: (input) =>

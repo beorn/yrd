@@ -1269,6 +1269,33 @@ exit 2
     expect((JSON.parse(bays.stdout()) as { bays: readonly unknown[] }).bays).toEqual([])
   })
 
+  it("provisions a managed Bay before the repository launch command", async () => {
+    return withoutRuntimeName(async () => {
+      const fixture = await packagedRepository()
+      const tools = await packageManagerShim()
+      try {
+        await configureManagedDo(fixture.repo, {
+          seat: "true",
+          launch: 'test -d "$YRD_DO_BAY_PATH/node_modules"',
+        })
+
+        const managed = output(fixture.repo)
+        expect(await yrd(fixture.repo, managed.io, "do", CLAIM, "--seat")).toBe(1)
+        // No carrier is produced by the fixture, so a correctly provisioned
+        // launch advances to the carrier timeout. Before 22447 it refused at
+        // launch because only the repository's long shell hook installed deps.
+        expect(managed.stderr()).toContain("stage 'carrier'")
+        expect(managed.stderr()).not.toContain("stage 'launch'")
+        expect((await readFile(tools.log, "utf8")).trim().split("\n")).toEqual([
+          "install --frozen-lockfile --ignore-scripts",
+          "run postinstall",
+        ])
+      } finally {
+        await tools.restore()
+      }
+    })
+  })
+
   it("runs a refused seat decision before Bay provisioning", async () => {
     const fixture = await repository()
     await configureManagedDo(fixture.repo, { seat: "false", launch: "true" })
@@ -2215,10 +2242,7 @@ notify:
   await git(repo, "push", "-q", "origin", "main")
 }
 
-async function configureManagedDo(
-  repo: string,
-  commands: Readonly<{ seat: "true" | "false"; launch: "true" | "false" }>,
-): Promise<void> {
+async function configureManagedDo(repo: string, commands: Readonly<{ seat: string; launch: string }>): Promise<void> {
   await writeFile(
     join(repo, ".yrd.yml"),
     `base: main
