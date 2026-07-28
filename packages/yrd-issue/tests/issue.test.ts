@@ -5,7 +5,28 @@
  */
 import { expect, it } from "vitest"
 import { createMemoryJournal, createYrd, createYrdDef } from "@yrd/core"
-import { createCommandIssueSource, createKmIssueSource, createIssues, withIssues } from "../src/index.ts"
+import { createCommandIssueSource, createKmIssueSource, createIssues, withIssues, type Issue } from "../src/index.ts"
+
+async function resolveKmNode(node: Readonly<Record<string, unknown>>): Promise<Issue> {
+  const source = createKmIssueSource({
+    process: {
+      async run() {
+        return {
+          exitCode: 0,
+          signal: null,
+          stderr: "",
+          stdout: JSON.stringify({ node }),
+          durationMs: 1,
+          timedOut: false,
+        }
+      },
+    },
+  })
+  return await createIssues({ sources: [source] }).resolve({
+    source: "km",
+    id: "@ag/tribe/22497-daemon-silent-send-truncation",
+  })
+}
 
 it("resolves source-owned ids and composes without mutating its host", async () => {
   let argv: readonly string[] = []
@@ -76,6 +97,51 @@ it("projects km context while keeping a path-form id as one argument", async () 
   const issue = await createIssues({ sources: [source] }).resolve({ source: "km", id: "@yrd/core/21012" })
   expect(argv.at(-1)).toBe("@yrd/core/21012")
   expect(issue).toMatchObject({ title: "Implement Yrd", description: "Ship it", revision: "v2" })
+})
+
+it("reads a blank km version as absent so an unreconciled node still resolves", async () => {
+  // A bead that has not yet been through a reconcile pass carries version: "".
+  // The updated_at fallback exists for exactly that node, but `??` only steps
+  // over null/undefined, so the empty string survived to a schema that refuses
+  // it — and yrd could not open work on a legitimate, pushed, indexed bead.
+  await expect(
+    resolveKmNode({ title: "Fix the daemon", version: "", updated_at: 1785257396576 }),
+  ).resolves.toMatchObject({ revision: "1785257396576" })
+  await expect(
+    resolveKmNode({ title: "Fix the daemon", version: "   ", updated_at: 1785257396576 }),
+  ).resolves.toMatchObject({ revision: "1785257396576" })
+})
+
+it("keeps a real km version, including the falsy ones a truthiness test would drop", async () => {
+  await expect(
+    resolveKmNode({ title: "Fix the daemon", version: "reconcile-parsed-01KY", updated_at: 1785257396576 }),
+  ).resolves.toMatchObject({ revision: "reconcile-parsed-01KY" })
+  // Revision 0 is a revision. `||` would read it as absence and silently
+  // report the node one revision it does not have instead of the one it does.
+  await expect(
+    resolveKmNode({ title: "Fix the daemon", version: 0, updated_at: 1785257396576 }),
+  ).resolves.toMatchObject({ revision: "0" })
+})
+
+it("omits the revision entirely when neither km field carries one", async () => {
+  await expect(resolveKmNode({ title: "Fix the daemon", version: "", updated_at: "" })).resolves.not.toHaveProperty(
+    "revision",
+  )
+})
+
+it("falls through a blank km title to the fields that stand in for it", async () => {
+  // Same shape as the revision defect: `??` reads "" as a title and hands the
+  // schema a value it refuses, instead of using the fallback chain that exists.
+  await expect(resolveKmNode({ title: "", content: "Fix the daemon" })).resolves.toMatchObject({
+    title: "Fix the daemon",
+  })
+  await expect(resolveKmNode({ title: " ", content: " ", name: "22497-daemon" })).resolves.toMatchObject({
+    title: "22497-daemon",
+  })
+})
+
+it("treats a blank km url as no url rather than an unusable one", async () => {
+  await expect(resolveKmNode({ title: "Fix the daemon", data: { url: "" } })).resolves.not.toHaveProperty("url")
 })
 
 it("strips DEBUG from the issue subprocess and says so out loud", async () => {

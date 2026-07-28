@@ -49,17 +49,36 @@ export function createKmIssueSource(options: SourceOptions): IssueSource {
     (value, ref) => {
       const context = KmContextSchema.parse(value)
       const body = context.blocks?.at(-1)?.body?.join("\n").trim()
-      const revision = context.node.version ?? context.node.updated_at
+      const revision = present(context.node.version) ?? present(context.node.updated_at)
+      const url = present(context.node.data?.url)
       return {
         ref,
-        title: context.node.title ?? context.node.content ?? context.node.name,
+        title: present(context.node.title) ?? present(context.node.content) ?? present(context.node.name),
         ...(body ? { description: body } : {}),
-        ...(context.node.data?.url === undefined ? {} : { url: context.node.data.url }),
+        ...(url === undefined ? {} : { url }),
         ...(context.node.data?.labels === undefined ? {} : { labels: context.node.data.labels }),
-        ...(revision === undefined ? {} : { revision: String(revision) }),
+        ...(revision === undefined ? {} : { revision }),
       }
     },
   )
+}
+
+/**
+ * Read a km field the way `Issue` reads it: every text field on that schema is
+ * trimmed and refuses to be blank, so a blank field is a field the node does
+ * not have. `??` alone disagrees — it steps over null/undefined only, so the
+ * `version: ""` a km node carries before its first reconcile pass survived to
+ * the schema, which then refused the whole issue and left yrd unable to open
+ * work on a legitimate bead. The fallbacks each `??` chain already names exist
+ * for exactly that node; this makes them fire.
+ *
+ * Blankness, not falsiness, is the test: `0` is a revision, and a truthiness
+ * check would report the node one it does not have instead of the one it does.
+ */
+function present(value: string | number | undefined): string | undefined {
+  if (value === undefined) return undefined
+  const text = String(value).trim()
+  return text === "" ? undefined : text
 }
 
 function createIssueSource(
