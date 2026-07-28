@@ -840,7 +840,8 @@ export async function createYrd<State extends object, Commands extends CommandTr
       await refresh()
       for await (const batch of journal.read()) {
         for (const value of batch.values) {
-          for (const applied of parseJournalFrame(value).events) yield canonicalEvent(applied, "replay")
+          assertJournalReaderCompatibility(value)
+          for (const applied of journalFrameEvents(value)) yield canonicalEvent(applied, "replay")
         }
       }
     },
@@ -1087,6 +1088,38 @@ function parseCheckpointFrame(value: unknown, commandHashes: Map<string, string>
   for (const applied of value.events) Object.freeze(applied)
   Object.freeze(value.events)
   return Object.freeze(value) as JournalFrame
+}
+
+/**
+ * Read the applied events out of a journal frame without re-parsing the frame.
+ *
+ * `events()` yields events, not frames: it never surfaces `cause`, `command`,
+ * `value`, or `compatibility`. Running the full `parseJournalFrame` Zod clone
+ * over every frame therefore validates fields the caller cannot observe, and it
+ * does so on top of validation that already happened — `Journal.read`
+ * implementations parse each frame before yielding it (the SQLite journal in
+ * `decodeStoredEvent`), and every frame this generator can reach has already
+ * been folded through `parseJournalFrame` by `refresh()` or by the process that
+ * wrote the checkpoint. Measured on a 45.6k-frame / 43.6k-event journal, the
+ * duplicate parse was 785ms of the 2322ms `yrd queue list` spent inside
+ * `events()`.
+ *
+ * What callers receive is still fully validated, and more strictly than the
+ * frame parse validated it: `canonicalEvent` parses each `data` against that
+ * event's own schema (or its replay schema) and then re-parses the whole event
+ * through the strict `EventSchema`. The one frame-level gate with no per-event
+ * equivalent is the journal reader-version refusal, so `events()` keeps calling
+ * `assertJournalReaderCompatibility` — an O(1) field check, 9ms across the same
+ * 45.6k frames. This mirrors `parseCheckpointFrame`, which already trades the
+ * full Zod clone for targeted checks on already-validated receipts.
+ *
+ * A malformed value still fails loud here rather than yielding partial events.
+ */
+function journalFrameEvents(value: unknown): readonly Event[] {
+  if (!plainRecord(value) || !Array.isArray(value.events)) {
+    throw new Error("yrd: journal frame is missing its events array")
+  }
+  return value.events as readonly Event[]
 }
 
 function checkpointJson(value: unknown, postorder: object[]): value is JsonValue {

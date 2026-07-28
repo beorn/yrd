@@ -1,3 +1,4 @@
+import { compareNatural } from "@yrd/core"
 import type {
   InstalledStep,
   PRSnapshot,
@@ -173,7 +174,7 @@ function lookupSnapshots(snapshot: Readonly<PRSnapshot>): readonly Readonly<PRSn
 }
 
 function compareRunIds(left: RunId, right: RunId): number {
-  return left.localeCompare(right, undefined, { numeric: true })
+  return compareNatural(left, right)
 }
 
 function latestRunId(current: RunId | undefined, candidate: RunId): RunId {

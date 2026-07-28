@@ -1,4 +1,4 @@
-import type { DeepReadonly } from "@yrd/core"
+import { compareNatural, type DeepReadonly } from "@yrd/core"
 import { Queues, type QueueRecord, type QueuesState, type RunId } from "./model.ts"
 import {
   emptyQueueProjectionIndex,
@@ -45,9 +45,7 @@ export function compactQueuesState(
     else terminalRoots.push({ root, order })
   }
   terminalRoots
-    .toSorted(
-      (left, right) => right.order - left.order || right.root.localeCompare(left.root, undefined, { numeric: true }),
-    )
+    .toSorted((left, right) => right.order - left.order || compareNatural(right.root, left.root))
     .slice(0, TERMINAL_QUEUE_WINDOW)
     .forEach(({ root }) => retainedRoots.add(root))
   const keep = new Set(

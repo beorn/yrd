@@ -379,10 +379,16 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
   const dryRun = options.dryRun === true
   const cwd = io.cwd ?? process.cwd()
   const git = io.pruneGit === undefined ? createPruneGitFacts(cwd) : io.pruneGit(cwd)
+  // This comparator deliberately pins the "en" locale so the printed prune verdict
+  // order is identical on every host — `compareNatural` (host default locale) would
+  // not guarantee that. Cold path: one sort of the live PRs per `yrd pr prune`, not
+  // the per-tick listing path the collator hoist targets.
   const live = app.bays
     .prs()
     .filter((pr) => isLivePR(pr))
-    .toSorted((left, right) => left.id.localeCompare(right.id, "en", { numeric: true })) as readonly PR[]
+    .toSorted(
+      (left, right) => left.id.localeCompare(right.id, "en", { numeric: true }), // collator-hoist-allow: locale-pinned, cold path
+    ) as readonly PR[]
 
   const rows: PruneRow[] = []
   for (const pr of live) {

@@ -1,4 +1,5 @@
 import { currentPRRev, prDeliveryState, type PR, type PRDeliveryState } from "@yrd/bay"
+import { compareNatural } from "@yrd/core"
 import { ADMISSION_REFUSAL_LOOP_THRESHOLD, type QueueAdmissionRefusal } from "@yrd/queue"
 import { actionableFailure, recutRefusedByDelivery, type FailureLike } from "./actionable-error.ts"
 
@@ -187,7 +188,7 @@ export type ResidentRefusalStall = Readonly<{
 function stallSignature(observation: ResidentRefusalObservation): string {
   return observation.refusals
     .map((refusal) => `${refusal.pr}|${refusal.code}|${observation.heads[refusal.pr] ?? ""}`)
-    .toSorted((left, right) => left.localeCompare(right, undefined, { numeric: true }))
+    .toSorted(compareNatural)
     .join(",")
 }
 
@@ -231,9 +232,7 @@ export function planRefusalRemedies(
   attempted: ReadonlySet<string>,
 ): readonly RefusalRemedyPlan[] {
   const plans: RefusalRemedyPlan[] = []
-  for (const refusal of Object.values(refusals).toSorted((left, right) =>
-    left.pr.localeCompare(right.pr, undefined, { numeric: true }),
-  )) {
+  for (const refusal of Object.values(refusals).toSorted((left, right) => compareNatural(left.pr, right.pr))) {
     if (refusal.count < ADMISSION_REFUSAL_LOOP_THRESHOLD) continue
     const pr = prs[refusal.pr]
     // The ledger is retained past its PR (compaction drops streaks for PRs the

@@ -17,7 +17,7 @@ import {
   type PRRevClock,
   type PRRevTerminal,
 } from "@yrd/bay"
-import type { Event, JsonValue } from "@yrd/core"
+import { compareNatural, type Event, type JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type {
   Candidate,
@@ -2113,7 +2113,7 @@ function timelineSort(left: QueueTimelineProjectedRow, right: QueueTimelineProje
   const leftAt = left.timestampMs ?? Number.NEGATIVE_INFINITY
   const rightAt = right.timestampMs ?? Number.NEGATIVE_INFINITY
   if (leftAt !== rightAt) return left.group === "completed" ? rightAt - leftAt : leftAt - rightAt
-  return left.id.localeCompare(right.id, undefined, { numeric: true })
+  return compareNatural(left.id, right.id)
 }
 
 function timelineMatches(row: QueueTimelineProjectedRow, terms: readonly string[]): boolean {
@@ -2530,7 +2530,7 @@ function projectedPRRows(state: BaysState | undefined, result: QueueStatusResult
 
 function byTouchedNewest(left: HumanPRProjection, right: HumanPRProjection): number {
   const order = (right.touchedAt ?? "").localeCompare(left.touchedAt ?? "")
-  return order === 0 ? left.pr.localeCompare(right.pr, undefined, { numeric: true }) : order
+  return order === 0 ? compareNatural(left.pr, right.pr) : order
 }
 
 function requiredQueuePosition(positions: ReadonlyMap<string, number>, pr: string): number {
