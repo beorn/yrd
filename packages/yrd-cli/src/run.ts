@@ -1023,7 +1023,8 @@ function trackerDeliveryV2(
       attributedReceipt: refusalFact.receipt,
     }
   }
-  switch (prDeliveryState(pr)) {
+  const delivery = prDeliveryState(pr)
+  switch (delivery) {
     case "pushed":
       return { ...identity, status: "pushed", at: revision.pushedAt }
     // `ready` is revision-admission evidence inside Yrd. The delivery remains
@@ -1033,6 +1034,8 @@ function trackerDeliveryV2(
       return revision.submittedAt === undefined
         ? undefined
         : { ...identity, status: "submitted", at: revision.submittedAt }
+    case "needs-author":
+      refusal(`trackerBridge v2 cannot project needs-author PR '${pr.id}' without an attributed refusal`)
     case "rejected":
       if (pr.rejectedAt === undefined) return undefined
       if (pr.terminalRun === undefined) {
@@ -1075,6 +1078,10 @@ function trackerDeliveryV2(
       return pr.withdrawnAt === undefined ? undefined : { ...identity, status: "withdrawn", at: pr.withdrawnAt }
     case "canceled":
       return pr.canceledAt === undefined ? undefined : { ...identity, status: "canceled", at: pr.canceledAt }
+    default: {
+      const unhandled: never = delivery
+      throw new TypeError(`yrd: unknown PR delivery state '${String(unhandled)}'`)
+    }
   }
 }
 
