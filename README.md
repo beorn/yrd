@@ -425,7 +425,7 @@ do:
   assign: my-tracker assign "$YRD_DO_ISSUE" "$YRD_DO_LANE" --first
   seat: my-coordinator seat-recycle "$YRD_DO_LANE"
   launch:
-    run: cd "$YRD_DO_BAY_PATH" && my-repo-bootstrap && my-habitat up "$YRD_DO_LANE"
+    run: my-habitat up "$YRD_DO_LANE"
     timeoutMs: 120000
   pollMs: 30000 # default 30s
   carrierTimeoutMs: 2700000 # default 45m — bounded wait for the first commit
@@ -436,9 +436,11 @@ All three commands are ordinary shell strings, exactly like a configured check s
 and Yrd never rewrites the text. The issue, lane and Bay reach the child as
 environment values — `YRD_DO_ISSUE`, `YRD_DO_LANE`, and for launch also
 `YRD_DO_BAY` and `YRD_DO_BAY_PATH` — the same way `$YRD_BASE_SHA` reaches a
-check step. The repository's launch command owns any dependency preparation its
-seat requires and performs it inside `YRD_DO_BAY_PATH` before starting that
-seat. Yrd holds no tracker, package-manager, or habitat knowledge of its own.
+check step. Before the launch command runs, Yrd converges the managed Bay onto
+its base, refreshes its recorded pin when the checkout moves, and installs the
+declared dependencies plus the repository's own postinstall. The repository's
+launch command therefore only starts the seat. Yrd holds no tracker or habitat
+knowledge of its own.
 
 Submodule repositories are ready when `bay open` returns and before a `bay run`
 child starts. Yrd

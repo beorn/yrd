@@ -1764,18 +1764,38 @@ const BAY_PACKAGE_MANAGERS = [
  * own generous lease so a cold cache is not mistaken for a hang. */
 const BAY_PROVISION_TIMEOUT_MS = 900_000
 
-function bayManifestPostinstall(manifest: string, path: string): boolean {
+function bayManifestProvisioning(
+  manifest: string,
+  path: string,
+): {
+  readonly hasDependencies: boolean
+  readonly hasPostinstall: boolean
+} {
   let parsed: unknown
   try {
     parsed = JSON.parse(manifest)
   } catch (error) {
     refusal(`bay manifest '${path}' is not valid JSON: ${errorDetail(error)}`)
   }
-  if (typeof parsed !== "object" || parsed === null) return false
+  if (typeof parsed !== "object" || parsed === null) {
+    return { hasDependencies: false, hasPostinstall: false }
+  }
+  const manifestObject = parsed as Record<string, unknown>
+  const hasDependencies = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"].some(
+    (field) => {
+      const dependencies = manifestObject[field]
+      return typeof dependencies === "object" && dependencies !== null && Object.keys(dependencies).length > 0
+    },
+  )
   const scripts = (parsed as { scripts?: unknown }).scripts
-  if (typeof scripts !== "object" || scripts === null) return false
+  if (typeof scripts !== "object" || scripts === null) {
+    return { hasDependencies, hasPostinstall: false }
+  }
   const postinstall = (scripts as { postinstall?: unknown }).postinstall
-  return typeof postinstall === "string" && postinstall.trim() !== ""
+  return {
+    hasDependencies,
+    hasPostinstall: typeof postinstall === "string" && postinstall.trim() !== "",
+  }
 }
 
 /**
@@ -1787,9 +1807,8 @@ function bayManifestPostinstall(manifest: string, path: string): boolean {
  * one evening (2026-07-27). The child exits, Yrd preserves the Bay as an orphan,
  * and the operator is left holding a mystery that was one install away.
  *
- * The managed lane already installs in its configured launch stage. This is the
- * same guarantee at the one place every Bay child passes through, so the session
- * a person opens by hand gets it too.
+ * Managed setup and interactive Bay children share this helper, so both install
+ * before launch or child start; managed setup additionally converges first.
  *
  * Third-party lifecycle scripts stay off: provisioning a Bay must not run
  * install hooks nobody reviewed. The repository's OWN `postinstall` does run,
@@ -1809,14 +1828,14 @@ async function ensureBayDependencies(
   // Already provisioned: an adopted or reused Bay pays nothing, unless a
   // converge just moved the checkout out from under what is installed.
   if (!reinstall && existsSync(join(path, "node_modules"))) return
+  const manifest = bayManifestProvisioning(await readFile(manifestPath, "utf8"), manifestPath)
   const chosen = BAY_PACKAGE_MANAGERS.find((candidate) => existsSync(join(path, candidate.lockfile)))
   if (chosen === undefined) {
-    io.stderr(
-      `yrd: bay '${bay.id}' declares dependencies in package.json but has no node_modules and none of ` +
-        `${BAY_PACKAGE_MANAGERS.map((candidate) => candidate.lockfile).join(", ")} to name its package manager; ` +
-        "its child starts with nothing installed\n",
+    if (!manifest.hasDependencies && !manifest.hasPostinstall) return
+    refusal(
+      `bay '${bay.id}' requires provisioning but has no recognized package-manager lockfile; expected one of ` +
+        BAY_PACKAGE_MANAGERS.map((candidate) => candidate.lockfile).join(", "),
     )
-    return
   }
 
   const provision = async (argv: readonly string[]): Promise<void> => {
@@ -1841,21 +1860,21 @@ async function ensureBayDependencies(
   }
 
   await provision([chosen.manager, ...chosen.install])
-  if (bayManifestPostinstall(await readFile(manifestPath, "utf8"), manifestPath)) {
+  if (manifest.hasPostinstall) {
     await provision([chosen.manager, "run", "postinstall"])
   }
 }
 
 /**
- * Walk an adopted Bay's checkout up to its base before anything runs in it.
+ * Walk an owner-controlled Bay's checkout up to its base before launch.
  *
- * A Bay adopted from a failed attempt was cut whenever that attempt started,
- * and the base has moved since. The agent that walks in reads, builds and
- * reasons about superseded code: B238 held a pre-fix `vendor/yrd`, so the Bay's
+ * A Bay adopted from a failed attempt was cut whenever that attempt started.
+ * A freshly opened managed Bay can also skew while its preceding dispatch
+ * stages run and the base advances. In both cases, launching superseded code
+ * recreates the same failure: B238 held a pre-fix `vendor/yrd`, so the Bay's
  * own Yrd behaved unlike the version string the operator was reading off the
- * screen. A fresh Bay is cut from the base and needs none of this, and a guest
- * has no lifecycle authority to merge into somebody else's branch — so this is
- * the adoption's own step.
+ * screen. Guests still have no lifecycle authority to merge into somebody
+ * else's branch; only the owning run and managed composition call this seam.
  *
  * Merge, never rebase: the Bay's branch is pushed work. A conflict is a
  * judgement only the operator can make, so the merge is abandoned rather than
@@ -1865,7 +1884,7 @@ async function ensureBayDependencies(
  * Returns whether the checkout actually moved, because a merge that moved it
  * can have moved the manifest or the lockfile with it.
  */
-async function convergeAdoptedBay(
+async function convergeBayOntoBase(
   processService: Pick<Process, "run">,
   bay: Bay,
   path: string,
@@ -2326,7 +2345,7 @@ async function runBaySession(
   // it was found rather than adding a second orphan on top of the first.
   const moved =
     provisioned.adopted === true && bay.path !== undefined
-      ? await convergeAdoptedBay(services.process, bay, bay.path, io, env)
+      ? await convergeBayOntoBase(services.process, bay, bay.path, io, env)
       : false
 
   let child: ProcessResult
@@ -2456,18 +2475,34 @@ function managedDoStages(
   commands: Readonly<{ assign: ManagedDoCommand; seat: ManagedDoCommand; launch: ManagedDoCommand }>,
   recordBoundary: ReturnType<typeof createManagedDoJournal>,
 ): ManagedDoStages {
+  const processService = services.process
+  if (processService === undefined) configuration("managed 'do' requires the process-backed Yrd runtime")
   let bayId: string | undefined
   return {
     assign: (input) => runCommand("assign", commands.assign, { YRD_DO_ISSUE: input.issue, YRD_DO_LANE: input.lane }),
     decideSeat: (input) => runCommand("seat", commands.seat, { YRD_DO_ISSUE: input.issue, YRD_DO_LANE: input.lane }),
     openBay: async (input) => {
       const opened = await prepareResolvedIssueBay(app, input.issue, io)
-      bayId = opened.bay.id
+      let bay = opened.bay
+      const environment = services.environment ?? process.env
+      try {
+        const moved = await convergeBayOntoBase(processService, bay, bay.path, io, environment)
+        if (moved) {
+          const refreshed = await refreshBay(app, bay, io)
+          if (refreshed.path === undefined) refusal(`Bay '${refreshed.id}' lost its workspace path during refresh`)
+          bay = { ...refreshed, path: refreshed.path }
+        }
+        await ensureBayDependencies(processService, bay, bay.path, io, environment, moved)
+      } catch (error) {
+        await orphanRunBay(app, bay, `Bay setup failed: ${errorDetail(error)}`)
+        throw error
+      }
+      bayId = bay.id
       return {
-        bay: opened.bay.id,
+        bay: bay.id,
         branch: opened.identity.branch,
-        path: opened.bay.path,
-        ...(opened.bay.headSha === undefined ? {} : { headSha: opened.bay.headSha }),
+        path: bay.path,
+        ...(bay.headSha === undefined ? {} : { headSha: bay.headSha }),
       }
     },
     launch: (input) =>
