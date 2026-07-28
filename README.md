@@ -172,8 +172,10 @@ $ yrd pr checks PR2 --follow
 admission, or Queue work is started until `pr ready` (ordinary reviewed work)
 or `pr recut --queue` (authored-root carriers). `pr create` does not push a Git
 branch; callers push first, then create the draft from that exact resolvable
-commit. `bay open` and `bay run` create or reuse `task/<issue-slug>`, but never
-create or recut a PR implicitly. `bay run` and explicit `bay close` push
+commit. `issue ensure` is the issue-first composition of those Git-side facts:
+it creates or reuses one clean issue-owned Bay and one tracked draft PR.
+`bay open` and `bay run` otherwise create or reuse `task/<issue-slug>`, but
+never create or recut a PR implicitly. `bay run` and explicit `bay close` push
 recoverable checkpoints. Review and comment facts pin the current revision and
 head SHA; a new head makes old verdicts visibly stale. Reviewer assignment and
 richer policy belong to the calling coordination system.
@@ -205,6 +207,9 @@ yrd in
 
 # Resolve an issue first (or fall back to an existing PR) and launch ag with a mission:
 yrd do @tracker/fix-release
+
+# Ensure the durable Git-side workspace and tracked draft without launching a process:
+yrd issue ensure @tracker/fix-release
 
 # Run $SHELL in a scoped scratch Bay:
 yrd sh --bay scratch
@@ -317,7 +322,7 @@ yrd ag                     run ag in a scoped Bay
 yrd pr                      list PRs; create, submit, view, runs, diff, checkout,
                             status, edit, checks, regression, close, and merge teaching
 yrd bay                     list bays; open, run, in, path, refresh, submit, and close
-yrd issue                   read-only issue list and joined delivery view
+yrd issue                   issue list/view plus Bay + tracked-draft ensure
 yrd contest                 list; open, eval, view, finish, select, promote
 yrd queue                   render the queue timeline by default; list/ls is canonical;
                             run, cancel, pause, resume, recover, finish, init, deinit, audit
@@ -855,6 +860,7 @@ lease out.
 ```text
 yrd issue [--json]
 yrd issue view <issue> [--json]
+yrd issue ensure <issue> [--json]
 yrd migrate terminal-associations [--apply] [--json]
 yrd pr regression <pr> --run <run> --detected-at <timestamp>
   --severity <level> --evidence <ref> --implementation-run <ref>
@@ -877,18 +883,23 @@ Yrd records wall time, token counts, reported USD cost, stdout/stderr,
 artifacts, the write-once attempt ref, and evaluator results. Missing provider
 metrics remain missing; Yrd does not guess cost.
 
-The issue surface is read-only and joins delivery facts to tracker references;
-issue creation and editing remain in the tracker. `yrd issue --json` and `yrd
-pr runs --json` include the same compatibility-safe pair: the deprecated
-`trackerBridge` v1 envelope and the canonical `trackerBridgeV2` envelope. Each
-delivery carries the exact opaque `issueRef`, PR revision/head, projected
-status, Queue runs, and one journal `asOf` cursor. Integrated deliveries carry
-`landingSha`; `already-landed` deliveries instead carry the base, Candidate,
-and equal tree hashes that prove no merge was needed. V2 projects an
-author-attributable red as `needs-author` with its `attributedReceipt` and typed
-bounce. V1 explicitly degrades that state to `rejected` plus the same bounce;
-consumers should migrate to `trackerBridgeV2`. Canceled and withdrawn remain
-distinct terminal outcomes.
+The issue list/view lens is read-only and joins delivery facts to tracker
+references; issue creation and editing remain in the tracker. `issue ensure`
+is the sole mutating issue subcommand: it idempotently ensures one clean
+issue-owned Bay and one `track: true` draft PR. It does not assign a worker,
+choose a seat, launch a process, submit the PR, or execute Queue work; launchers
+compose those responsibilities outside this Git-side verb.
+
+`yrd issue --json` and `yrd pr runs --json` include the same
+compatibility-safe pair: the deprecated `trackerBridge` v1 envelope and the
+canonical `trackerBridgeV2` envelope. Each delivery carries the exact opaque
+`issueRef`, PR revision/head, projected status, Queue runs, and one journal
+`asOf` cursor. Integrated deliveries carry `landingSha`; `already-landed`
+deliveries instead carry the base, Candidate, and equal tree hashes that prove
+no merge was needed. V2 projects an author-attributable red as `needs-author`
+with its `attributedReceipt` and typed bounce. V1 explicitly degrades that
+state to `rejected` plus the same bounce; consumers should migrate to
+`trackerBridgeV2`. Canceled and withdrawn remain distinct terminal outcomes.
 
 The human `yrd issue view <issue>` surface projects those same typed facts: it
 prints exact PR revision/head, Queue runs, canonical projected status, landing

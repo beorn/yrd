@@ -109,6 +109,47 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
     const doHelp = output(repo)
     expect(await yrd(repo, doHelp.io, "do", "--help"), doHelp.stderr()).toBe(0)
     expect(doHelp.stdout()).toContain("<issue-or-pr>")
+    const issueHelp = output(repo)
+    expect(await yrd(repo, issueHelp.io, "issue", "--help"), issueHelp.stderr()).toBe(0)
+    expect(issueHelp.stdout()).toContain("ensure [options] <issue>")
+  })
+
+  it("ensures one issue-owned Bay and one tracked draft PR idempotently", async () => {
+    return withoutRuntimeName(async () => {
+      const { repo } = await repository()
+      const first = output(repo)
+      expect(await yrd(repo, first.io, "issue", "ensure", CLAIM, "--json"), first.stderr()).toBe(0)
+      const firstResult = JSON.parse(first.stdout()) as {
+        command: string
+        issue: string
+        bay: { id: string; issue?: string; branch: string; status: string }
+        pr: { id: string; issue?: string; branch: string; track?: boolean; status: string; revs: readonly unknown[] }
+      }
+      expect(firstResult).toMatchObject({
+        command: "issue.ensure",
+        issue: CLAIM,
+        bay: { id: "B1", issue: CLAIM, branch: BRANCH, status: "active" },
+        pr: { id: "PR1", issue: CLAIM, branch: BRANCH, track: true, status: "pushed" },
+      })
+
+      const second = output(repo)
+      expect(await yrd(repo, second.io, "issue", "ensure", CLAIM, "--json"), second.stderr()).toBe(0)
+      const secondResult = JSON.parse(second.stdout()) as typeof firstResult
+      expect(secondResult).toMatchObject({
+        command: "issue.ensure",
+        issue: CLAIM,
+        bay: { id: "B1" },
+        pr: { id: "PR1" },
+      })
+      expect(secondResult.pr.revs).toEqual(firstResult.pr.revs)
+
+      const bays = output(repo)
+      expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
+      expect((JSON.parse(bays.stdout()) as { bays: readonly unknown[] }).bays).toHaveLength(1)
+      const prs = output(repo)
+      expect(await yrd(repo, prs.io, "pr", "list", "--json"), prs.stderr()).toBe(0)
+      expect((JSON.parse(prs.stdout()) as { prs: readonly unknown[] }).prs).toHaveLength(1)
+    })
   })
 
   it("opens a persistent Bay without running a command", async () => {

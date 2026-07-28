@@ -1525,6 +1525,8 @@ type BayOpenIntent = Readonly<{
   sessionName?: string
   /** Walk back into the Bay a previous failed attempt left behind, when it is provably idle. */
   adopt?: boolean
+  /** Reuse the exact clean issue Bay instead of refusing; reserved for idempotent delivery ensure. */
+  reuseActive?: boolean
   /** The child this caller would have run, so a refusal can name the command that works. */
   guestArgv?: (resolved: BayOpenResolution) => readonly string[]
 }>
@@ -2129,6 +2131,7 @@ function bayInOperands(
 }
 
 type PreparedBay = Readonly<{ identity: BayOpenResolution; bay: Bay; adopted?: boolean }>
+type PreparedIssueBay = Omit<PreparedBay, "bay"> & Readonly<{ bay: Bay & Readonly<{ path: string }> }>
 
 /**
  * The `yrd in` invocation that actually attaches to `bay` and runs the child.
@@ -2198,6 +2201,18 @@ async function prepareOwnedBay(
   const identity = await resolveBayOpen(app, arg, options, io, preResolved)
   const existing = openRunBay(app, identity)
   if (existing !== undefined) {
+    if (preResolved.reuseActive === true && existing.issue === identity.issue && existing.branch === identity.branch) {
+      const refreshed = await refreshBay(app, existing, io)
+      if (refreshed.dirty === true) {
+        refusal(
+          `bay '${refreshed.id}' holds uncommitted changes; checkpoint them before ensuring its draft PR; inspect it with:\n` +
+            `  ${guestAttachCommand(refreshed, preResolved.guestArgv, identity)}`,
+        )
+      }
+      if (refreshed.path === undefined) refusal(`Bay '${refreshed.id}' has no workspace path`)
+      logBayResolution(app, identity)
+      return { identity, bay: refreshed }
+    }
     const adopted =
       preResolved.adopt === true ? await adoptIdleBay(app, existing, identity, io, preResolved.guestArgv) : undefined
     if (adopted !== undefined) return adopted
@@ -2249,6 +2264,27 @@ async function prepareOwnedBay(
     throw error
   }
   return { identity, bay }
+}
+
+/** Git-side issue ownership shared by `issue ensure` and today's managed
+ * `do`. The caller resolves the tracker reference before entering this seam;
+ * `reuseActive` is intentionally opt-in so interactive/managed ownership keeps
+ * its existing exclusive-open refusal. */
+async function prepareResolvedIssueBay(
+  app: YrdCliApp,
+  issue: string,
+  io: YrdCliIO,
+  options: Readonly<{ reuseActive?: boolean }> = {},
+): Promise<PreparedIssueBay> {
+  const opened = await prepareOwnedBay(app, issue, {}, io, {
+    issueResolved: true,
+    via: "issue",
+    ...(options.reuseActive === true ? { reuseActive: true } : {}),
+  })
+  if (opened === undefined) refusal(`Bay for issue '${issue}' was interrupted before it could be used`)
+  const path = opened.bay.path
+  if (path === undefined) refusal(`Bay '${opened.bay.id}' opened without a workspace path`)
+  return { ...opened, bay: { ...opened.bay, path } }
 }
 
 async function openPersistentBay(
@@ -2398,6 +2434,33 @@ function commandOutputTail(result: ProcessResult, limit = 600): string {
   return text.length <= limit ? text : `…${text.slice(-limit)}`
 }
 
+/** Record or reuse the one draft PR for an issue branch. This deliberately
+ * delegates to the public `pr create` core so the managed path and the
+ * standalone ensure verb cannot drift on PR identity, revision, or tracking. */
+async function ensureIssueDraft(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  issue: string,
+  branch: string,
+  io: YrdCliIO,
+  options: Readonly<{ track: boolean; emitResult?: boolean }>,
+): Promise<PR> {
+  const selection = { issue, ...(options.track ? { track: true } : {}) }
+  const exit = await applyPrSelectionVerb(
+    app,
+    services,
+    [branch],
+    selection,
+    io,
+    "pr.create",
+    options.emitResult !== false,
+  )
+  if (exit !== 0) refusal(`draft create for branch '${branch}' exited ${exit}`)
+  const pr = app.bays.pr(branch)
+  if (pr === undefined) refusal(`branch '${branch}' has no PR after create`)
+  return pr
+}
+
 /** Bind the managed `do` stages to the surfaces that already own them. Nothing
  * here is a new engine: assign and launch are repository-configured commands,
  * the Bay comes from the same provisioning path `bay open` uses, and delivery is
@@ -2415,9 +2478,7 @@ function managedDoStages(
     assign: (input) => runCommand("assign", commands.assign, { YRD_DO_ISSUE: input.issue, YRD_DO_LANE: input.lane }),
     decideSeat: (input) => runCommand("seat", commands.seat, { YRD_DO_ISSUE: input.issue, YRD_DO_LANE: input.lane }),
     openBay: async (input) => {
-      const opened = await prepareOwnedBay(app, input.issue, {}, io, { issueResolved: true, via: "issue" })
-      if (opened === undefined) refusal(`Bay for issue '${input.issue}' was interrupted before it could be used`)
-      if (opened.bay.path === undefined) refusal(`Bay '${opened.bay.id}' opened without a workspace path`)
+      const opened = await prepareResolvedIssueBay(app, input.issue, io)
       bayId = opened.bay.id
       return {
         bay: opened.bay.id,
@@ -2446,11 +2507,7 @@ function managedDoStages(
       return refreshed.headSha === undefined ? {} : { headSha: refreshed.headSha }
     },
     createDraft: async (input) => {
-      const options = { issue: input.issue, ...(input.track ? { track: true } : {}) }
-      const exit = await applyPrSelectionVerb(app, services, [input.branch], options, io, "pr.create")
-      if (exit !== 0) refusal(`draft create for branch '${input.branch}' exited ${exit}`)
-      const pr = app.bays.pr(input.branch)
-      if (pr === undefined) refusal(`branch '${input.branch}' has no PR after create`)
+      const pr = await ensureIssueDraft(app, services, input.issue, input.branch, io, { track: input.track })
       return { pr: pr.id }
     },
     recut: async (input) => {
@@ -3612,6 +3669,7 @@ async function applyPrSelectionVerb(
   },
   io: YrdCliIO,
   command: "bay.submit" | "pr.create" | "pr.submit",
+  emitResult = true,
 ): Promise<YrdCliExitCode> {
   const createOnly = command === "pr.create"
   const correlation = parseCorrelation(options.correlation)
@@ -3672,12 +3730,14 @@ async function applyPrSelectionVerb(
     prs.push(pr)
   }
   if (command === "bay.submit" || createOnly) {
-    await printResult(
-      io,
-      jsonEnabled(options),
-      { command, prs: prs.map(projectPRTaskStatus), ...(warnings.length > 0 ? { warnings } : {}) },
-      createElement(PRResultView, { prs, runs: [] }),
-    )
+    if (emitResult) {
+      await printResult(
+        io,
+        jsonEnabled(options),
+        { command, prs: prs.map(projectPRTaskStatus), ...(warnings.length > 0 ? { warnings } : {}) },
+        createElement(PRResultView, { prs, runs: [] }),
+      )
+    }
     return 0
   }
   // Q1 — a same-head resubmit of a landed branch returns the frozen landed PR
@@ -4381,6 +4441,33 @@ function issueRows(app: YrdCliApp, state: DeepReadonly<YrdCliState>, selected?: 
           "in-flight",
       }
     })
+}
+
+async function ensureIssueDelivery(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  issue: string,
+  options: JsonOption,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
+  await app.issues.resolve(app.issues.ref(issue))
+  const opened = await prepareResolvedIssueBay(app, issue, io, { reuseActive: true })
+  const pr = await ensureIssueDraft(app, services, issue, opened.identity.branch, io, {
+    track: true,
+    emitResult: false,
+  })
+  await printResult(
+    io,
+    jsonEnabled(options),
+    {
+      command: "issue.ensure",
+      issue,
+      bay: opened.bay,
+      pr: projectPRTaskStatus(pr),
+    },
+    `issue ${issue} → bay ${opened.bay.id} ${opened.identity.branch} → tracked draft ${pr.id}`,
+  )
+  return 0
 }
 
 async function listIssues(app: YrdCliApp, options: JsonOption, io: YrdCliIO, selected?: string): Promise<void> {
@@ -7711,6 +7798,13 @@ function buildProgram(
     .description("show Yrd delivery records joined to an issue")
     .option("--json", "emit stable JSON")
     .action(async (issueId, options) => listIssues(installed(), options, io, issueId))
+  issue
+    .command("ensure <issue>")
+    .description("ensure one issue-owned Bay and one tracked draft PR")
+    .option("--json", "emit stable JSON")
+    .action(async (issueId, options) =>
+      setExit(await ensureIssueDelivery(installed(), installedServices(), issueId, options, io)),
+    )
 
   const contest = program.command("contest").description("inspect and select contest attempts")
   contest.helpCommand(false)
