@@ -217,12 +217,25 @@ function overlapProbe(): OverlapProbe {
 }
 
 function workspace(
-  options: { dirty?: boolean; path?: string; refreshedHead?: string; probe?: OverlapProbe } = {},
+  options: {
+    dirty?: boolean
+    path?: string
+    refreshedHead?: string
+    probe?: OverlapProbe
+    failingBay?: string
+  } = {},
 ): BayWorkspace {
   return {
     revision: "test-workspace-v1",
     async provision(input) {
       await options.probe?.pause("bay")
+      if (input.bay === options.failingBay) {
+        return {
+          status: "completed",
+          conclusion: "failure",
+          error: { code: "provision-failed", message: `failed to provision ${input.bay}` },
+        }
+      }
       return {
         status: "completed",
         conclusion: "success",
@@ -310,6 +323,7 @@ async function createApp(
     waitingCheck?: boolean
     dirtyBay?: boolean
     bayPath?: string
+    failingBay?: string
     refreshedHead?: string
     probe?: OverlapProbe
     baseResolutions?: string[]
@@ -343,6 +357,7 @@ async function createApp(
     workspace({
       dirty: options.dirtyBay,
       path: options.bayPath,
+      failingBay: options.failingBay,
       refreshedHead: options.refreshedHead,
       probe: options.probe,
     }),
@@ -3237,7 +3252,7 @@ describe("runYrd", () => {
       expect(lines[1]).toBe("")
       expect(lines[2]?.trim().split(/\s+/u)).toEqual(["BAY", "STATUS", "ISSUE", "BY", "BASE", "BRANCH"])
       expect(lines[3]).toContain("B1")
-      expect(lines[3]).toContain("active")
+      expect(lines[3]).toContain("open")
       expect(lines[3]).toContain("@km/test/friendly")
       expect(lines[3]).toContain("@dev/friendly")
       expect(lines[3]).toContain("main")
@@ -3248,11 +3263,62 @@ describe("runYrd", () => {
       const json = outputIO()
       expect(await runYrd(app, yrd("bay", "list", "--json"), json.io), json.stderr()).toBe(0)
       const listed = JSON.parse(json.stdout()) as Readonly<{ bays: readonly Record<string, unknown>[] }>
-      expect(listed.bays[0]).toMatchObject({ by: "@dev/friendly" })
+      expect(listed.bays[0]).toMatchObject({ by: "@dev/friendly", status: "open", nativeStatus: "active" })
       expect(listed.bays[0]).not.toHaveProperty(retiredRoleNoun)
     } finally {
       vi.unstubAllEnvs()
     }
+  })
+
+  it("lists only open Bays by default and makes terminal history explicit", async () => {
+    const app = await createApp({ failingBay: "B3" })
+    await openTestBay(app, { name: "open" })
+    await openTestBay(app, { name: "done" })
+
+    const close = outputIO()
+    expect(await runYrd(app, yrd("bay", "close", "--force", "B2"), close.io), close.stderr()).toBe(0)
+
+    const failedOpen = await app.bays.open({ name: "fail" })
+    const failedJobs = await app.jobs.runMany(app.jobs.requested(failedOpen), {
+      runner: "cli-test",
+      leaseMs: 60_000,
+    })
+    expect(failedJobs).toEqual([
+      expect.objectContaining({
+        status: "completed",
+        conclusion: "failure",
+        error: expect.objectContaining({ code: "provision-failed" }),
+      }),
+    ])
+    expect(Object.values(app.state().bays.byId).map((bay) => bay.status)).toEqual(["active", "closed", "failed"])
+
+    const open = outputIO()
+    expect(await runYrd(app, yrd("bay", "list", "--json"), open.io), open.stderr()).toBe(0)
+    expect(JSON.parse(open.stdout())).toMatchObject({
+      bays: [{ id: "B1", status: "open", nativeStatus: "active" }],
+      lifecycles: [{ bay: "B1", status: "open" }],
+    })
+
+    const closed = outputIO()
+    expect(await runYrd(app, yrd("bay", "list", "--closed", "--json"), closed.io), closed.stderr()).toBe(0)
+    expect(JSON.parse(closed.stdout())).toMatchObject({
+      bays: [
+        { id: "B2", status: "done", nativeStatus: "closed" },
+        { id: "B3", status: "fail", nativeStatus: "failed" },
+      ],
+    })
+
+    const all = outputIO()
+    expect(await runYrd(app, yrd("bay", "list", "--all", "--json"), all.io), all.stderr()).toBe(0)
+    expect(JSON.parse(all.stdout()).bays).toMatchObject([
+      { id: "B1", status: "open" },
+      { id: "B2", status: "done" },
+      { id: "B3", status: "fail" },
+    ])
+
+    const conflict = outputIO()
+    expect(await runYrd(app, yrd("bay", "list", "--all", "--closed"), conflict.io)).toBe(2)
+    expect(conflict.stderr()).toContain("--all and --closed are mutually exclusive")
   })
 
   it.each([

@@ -22,6 +22,7 @@ import {
   type ActionableFailure,
 } from "./actionable-error.ts"
 import { formatDuration } from "./runner-timeline.ts"
+import { hasStatusPresentation, lifecyclePresentation, statusPresentation } from "./status-presentation.ts"
 import { projectPRTaskStatus, type StatusGlyph, type TaskStatus, type TaskStatusFields } from "./task-status.ts"
 
 type EvaluationRow = Readonly<{
@@ -41,12 +42,17 @@ type EvaluationRow = Readonly<{
 // Re-exported so existing `./status-view.tsx` consumers are unaffected.
 export { formatDuration }
 
-export function statusVariant(status: string): "default" | "accent" | "error" | "warning" | "success" | "info" {
-  if (["active", "closed", "integrated", "passed", "passing", "promoted", "safe"].includes(status)) return "success"
-  if (["rejected", "failed", "lost", "promotion-failed", "blocked"].includes(status)) return "error"
+type StatusVariant = "default" | "accent" | "error" | "warning" | "success" | "info" | "muted"
+
+export function statusVariant(status: string): StatusVariant {
+  if (hasStatusPresentation(status)) {
+    return statusPresentation(status).color.slice("$fg-".length) as Exclude<StatusVariant, "default">
+  }
+  if (["passing", "promoted", "safe"].includes(status)) return "success"
+  if (["promotion-failed", "blocked"].includes(status)) return "error"
   if (status === "waiting" || status === "needs-author" || status === "unknown") return "warning"
-  if (["checking", "running", "evaluating", "promoting"].includes(status)) return "info"
-  if (["submitted", "ready", "selected", "queued"].includes(status)) return "accent"
+  if (["evaluating", "promoting"].includes(status)) return "info"
+  if (status === "selected") return "accent"
   return "default"
 }
 
@@ -212,16 +218,26 @@ function bayRoot(bays: readonly Bay[]): string | undefined {
   return roots.size === 1 ? roots.values().next().value : undefined
 }
 
+function LifecycleStatusValue({ value }: { value: string }) {
+  return (
+    <Text bold color={lifecyclePresentation(value).color} minWidth={0} maxWidth="100%" wrap="truncate">
+      {value}
+    </Text>
+  )
+}
+
 export function BayStatusView({
   bays,
   safety,
+  statuses,
 }: {
   bays: readonly Bay[]
   safety?: ReadonlyMap<string, "safe" | "blocked" | "unknown">
+  statuses?: ReadonlyMap<string, string>
 }) {
   const rows: BayStatusRow[] = bays.map((bay) => ({
     bay: bay.id,
-    status: bay.status,
+    status: statuses?.get(bay.id) ?? bay.status,
     safety: safety?.get(bay.id) ?? "-",
     issue: bay.issue ?? "-",
     by: bay.by ?? "-",
@@ -234,7 +250,7 @@ export function BayStatusView({
       header: "STATUS",
       key: "status",
       minWidth: 7,
-      render: (bay) => <StatusValue value={bay.status} />,
+      render: (bay) => <LifecycleStatusValue value={bay.status} />,
     },
     { header: "ISSUE", key: "issue", grow: true },
     { header: "BY", key: "by" },

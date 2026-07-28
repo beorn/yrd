@@ -3,9 +3,33 @@
 // @consumer @yrd/cli
 
 import { describe, expect, it } from "vitest"
-import { failureDisposition, statusPresentation } from "../src/status-presentation.ts"
+import {
+  failureDisposition,
+  lifecyclePresentation,
+  lifecycleStatus,
+  statusPresentation,
+} from "../src/status-presentation.ts"
 
 describe("shared queue status presentation", () => {
+  it("projects bay and queue states through one open/working/done/fail vocabulary", () => {
+    expect([
+      lifecycleStatus("active"),
+      lifecycleStatus("opening"),
+      lifecycleStatus("closed"),
+      lifecycleStatus("failed"),
+    ]).toEqual(["open", "working", "done", "fail"])
+
+    expect(lifecyclePresentation("active")).toEqual({ glyph: "○", color: "$fg-accent" })
+    expect(lifecyclePresentation("opening")).toEqual({ glyph: "◉", color: "$fg-info" })
+    expect(lifecyclePresentation("closed")).toEqual({ glyph: "✓", color: "$fg-success" })
+    expect(lifecyclePresentation("failed")).toEqual({ glyph: "×", color: "$fg-error" })
+
+    expect(statusPresentation("queued")).toEqual(lifecyclePresentation("open"))
+    expect(statusPresentation("running")).toEqual(lifecyclePresentation("working"))
+    expect(statusPresentation("done")).toEqual(lifecyclePresentation("done"))
+    expect(statusPresentation("failed")).toEqual(lifecyclePresentation("fail"))
+  })
+
   it("uses the specified pulsing-disk glyph for running work", () => {
     expect(statusPresentation("running")).toEqual({ glyph: "◉", color: "$fg-info" })
     expect(statusPresentation("already-landed")).toEqual({ glyph: "✓", color: "$fg-success" })

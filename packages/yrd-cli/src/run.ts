@@ -139,6 +139,7 @@ import {
 import { reconcilePrLandings, type PrLanding } from "./pr-landing.ts"
 import { requireImplicitRecutBranchFreshness } from "./recut-branch-freshness.ts"
 import { resolveSubmitSelectors } from "./submit-selection.ts"
+import { lifecycleStatus } from "./status-presentation.ts"
 import {
   classifyBayStatus,
   formatBayStatusHuman,
@@ -4003,10 +4004,23 @@ function sameIssueIntegratedCompositions(app: YrdCliApp, pr: PR): readonly Compo
 
 async function listBays(
   app: YrdCliApp,
-  options: JsonOption & Readonly<{ check?: boolean }>,
+  options: JsonOption & Readonly<{ all?: boolean; check?: boolean; closed?: boolean }>,
   io: YrdCliIO,
 ): Promise<void> {
-  const bays = app.bays.list()
+  if (options.all === true && options.closed === true) usage("--all and --closed are mutually exclusive")
+  const allBays = app.bays.list()
+  const statuses = new Map(allBays.map((bay) => [bay.id, lifecycleStatus(bay.status)]))
+  const isTerminal = (bay: DeepReadonly<Bay>): boolean => {
+    const status = statuses.get(bay.id)
+    return status === "done" || status === "fail"
+  }
+  const bays =
+    options.all === true
+      ? allBays
+      : options.closed === true
+        ? allBays.filter(isTerminal)
+        : allBays.filter((bay) => !isTerminal(bay))
+  const visibleBayIds = new Set(bays.map((bay) => bay.id))
   const prs = app.bays.prs()
   const jsonBays = bays.map((bay) => {
     const pr =
@@ -4014,10 +4028,12 @@ async function listBays(
       prs.findLast((candidate) => candidate.branch === bay.branch)
     return {
       ...bay,
+      nativeStatus: bay.status,
+      status: statuses.get(bay.id),
       ...(pr === undefined ? {} : { pr: { id: pr.id, status: prDeliveryState(pr), sessions: pr.sessions ?? [] } }),
     }
   })
-  const open = bays.filter((bay) => bay.status !== "closed")
+  const open = bays.filter((bay) => !isTerminal(bay))
   const cwd = io.cwd ?? process.cwd()
   let reports: BayStatusReport[] | undefined
   if (options.check === true) {
@@ -4042,10 +4058,14 @@ async function listBays(
     {
       command: "bay.list",
       bays: jsonBays,
-      lifecycles: app.bays.branchLifecycles(),
+      lifecycles: app.bays.branchLifecycles().filter((lifecycle) => visibleBayIds.has(lifecycle.bay)),
       ...(reports === undefined ? {} : { reports }),
     },
-    createElement(BayStatusView, { bays, ...(safety === undefined ? {} : { safety }) }),
+    createElement(BayStatusView, {
+      bays,
+      statuses,
+      ...(safety === undefined ? {} : { safety }),
+    }),
   )
 }
 
@@ -7372,12 +7392,16 @@ function buildProgram(
   bay
     .command("_list", { isDefault: true, hidden: true })
     .option("--json", "emit stable JSON")
+    .option("--all", "include open and terminal Bays")
+    .option("--closed", "show terminal Bays only")
     .option("--check", "compute live destroy-safety status (fetches origin; may be slow)")
     .action(async (options) => listBays(installed(), options, io))
   bay
     .command("list")
     .description("list work bays")
     .option("--json", "emit stable JSON")
+    .option("--all", "include open and terminal Bays")
+    .option("--closed", "show terminal Bays only")
     .option("--check", "compute live destroy-safety status (fetches origin; may be slow)")
     .action(async (options) => listBays(installed(), options, io))
   bay

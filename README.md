@@ -334,7 +334,7 @@ yrd prime                   agent briefing plus current delivery context
 ### Bay Operations
 
 ```text
-yrd bay list [--json]
+yrd bay list [--closed | --all] [--json]
 yrd bay open [<issue>] [--issue <issue>] [--pr <selector>] [--bay <name>]
 yrd bay run [<issue>] [--issue <issue>] [--pr <selector>] [--bay <name>]
   [--keep] [-- <command...>]
@@ -351,6 +351,11 @@ yrd bay submit [selector...] [--base <branch>]
   [--correlation <namespace:id>] [--composition <path>] [--json]
 yrd bay close [selector...] [--withdraw] [--json]
 ```
+
+`yrd bay list` shows open and in-progress Bays by default. Use `--closed` for
+terminal history or `--all` for both. List status uses the shared lifecycle
+projection: `open` (blue), `working`, `done`, or `fail`; JSON preserves the
+persisted Bay value in `nativeStatus`.
 
 Queue-run records remain a separate object:
 

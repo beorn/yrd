@@ -16,7 +16,15 @@ export type StatusPresentationState =
   | "draft"
   | "rejected"
 
-export type StatusPresentationColor = "$fg-info" | "$fg-success" | "$fg-warning" | "$fg-error" | "$fg-muted"
+export type LifecycleStatus = "open" | "working" | "done" | "fail"
+
+export type StatusPresentationColor =
+  | "$fg-accent"
+  | "$fg-info"
+  | "$fg-success"
+  | "$fg-warning"
+  | "$fg-error"
+  | "$fg-muted"
 
 export type StatusPresentation = Readonly<{
   glyph: "○" | "◉" | "✓" | "×" | "−" | "◌"
@@ -43,22 +51,57 @@ export type FailureDisposition = Readonly<{
   owner: "author" | "queue"
 }>
 
-const STATUS_PRESENTATIONS = {
-  queued: { glyph: "○", color: "$fg-info" },
-  running: { glyph: "◉", color: "$fg-info" },
+const LIFECYCLE_PRESENTATIONS = {
+  open: { glyph: "○", color: "$fg-accent" },
+  working: { glyph: "◉", color: "$fg-info" },
   done: { glyph: "✓", color: "$fg-success" },
-  integrated: { glyph: "✓", color: "$fg-success" },
+  fail: { glyph: "×", color: "$fg-error" },
+} as const satisfies Readonly<Record<LifecycleStatus, StatusPresentation>>
+
+const LIFECYCLE_ALIASES: Readonly<Record<string, LifecycleStatus>> = {
+  active: "open",
+  queued: "open",
+  opening: "working",
+  closing: "working",
+  running: "working",
+  closed: "done",
+  integrated: "done",
+  failed: "fail",
+  rejected: "fail",
+}
+
+function knownLifecycleStatus(normalized: string): LifecycleStatus | null {
+  if (Object.hasOwn(LIFECYCLE_PRESENTATIONS, normalized)) return normalized as LifecycleStatus
+  return LIFECYCLE_ALIASES[normalized] ?? null
+}
+
+export function lifecycleStatus(status: string): LifecycleStatus {
+  const normalized = status.trim().toLocaleLowerCase()
+  const projected = knownLifecycleStatus(normalized)
+  if (projected !== null) return projected
+  throw new TypeError(`yrd: unknown lifecycle status '${status}'`)
+}
+
+export function lifecyclePresentation(status: string): StatusPresentation {
+  return LIFECYCLE_PRESENTATIONS[lifecycleStatus(status)]
+}
+
+const STATUS_PRESENTATIONS = {
+  queued: LIFECYCLE_PRESENTATIONS.open,
+  running: LIFECYCLE_PRESENTATIONS.working,
+  done: LIFECYCLE_PRESENTATIONS.done,
+  integrated: LIFECYCLE_PRESENTATIONS.done,
   // Non-landing success must NOT share the green check with real merges
   // (@yrd/core/21096-cli-ux/21801; audit 22323: outcome=passed admission-only).
   passed: { glyph: "◌", color: "$fg-warning" },
-  failed: { glyph: "×", color: "$fg-error" },
+  failed: LIFECYCLE_PRESENTATIONS.fail,
   env: { glyph: "×", color: "$fg-warning" },
   stale: { glyph: "×", color: "$fg-warning" },
   timeout: { glyph: "×", color: "$fg-error" },
   canceled: { glyph: "−", color: "$fg-muted" },
   "needs-author": { glyph: "×", color: "$fg-warning" },
   draft: { glyph: "◌", color: "$fg-muted" },
-  rejected: { glyph: "×", color: "$fg-error" },
+  rejected: LIFECYCLE_PRESENTATIONS.fail,
 } as const satisfies Readonly<Record<StatusPresentationState, StatusPresentation>>
 
 const STATUS_ALIASES: Readonly<Record<string, StatusPresentationState>> = {
@@ -93,9 +136,23 @@ const STATUS_ALIASES: Readonly<Record<string, StatusPresentationState>> = {
   "admission-only": "passed",
 }
 
+const LIFECYCLE_PRESENTATION_STATES: Readonly<Record<LifecycleStatus, StatusPresentationState>> = {
+  open: "queued",
+  working: "running",
+  done: "done",
+  fail: "failed",
+}
+
 function knownStatusPresentationState(normalized: string): StatusPresentationState | null {
   if (Object.hasOwn(STATUS_PRESENTATIONS, normalized)) return normalized as StatusPresentationState
-  return STATUS_ALIASES[normalized] ?? null
+  const direct = STATUS_ALIASES[normalized]
+  if (direct !== undefined) return direct
+  const lifecycle = knownLifecycleStatus(normalized)
+  return lifecycle === null ? null : LIFECYCLE_PRESENTATION_STATES[lifecycle]
+}
+
+export function hasStatusPresentation(status: string): boolean {
+  return knownStatusPresentationState(status.trim().toLocaleLowerCase()) !== null
 }
 
 export function statusPresentationState(status: string): StatusPresentationState {
