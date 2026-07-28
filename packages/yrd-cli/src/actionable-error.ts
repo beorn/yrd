@@ -67,6 +67,13 @@ const RECUT_REFUSING_STATES: ReadonlySet<PRDeliveryState> = new Set<PRDeliverySt
   "canceled",
 ])
 
+/** Whether `yrd pr recut` is refused outright by this delivery state. The one
+ * home for the fact, so a caller that decides whether a printed remedy can be
+ * applied mechanically reads the same answer the printer used. */
+export function recutRefusedByDelivery(delivery: PRDeliveryState | undefined): boolean {
+  return delivery !== undefined && RECUT_REFUSING_STATES.has(delivery)
+}
+
 /** Re-record the branch's corrected head onto the PR.
  *
  * `yrd pr create <branch>` is accepted only for a draft (pushed) PR — the
@@ -82,7 +89,7 @@ function recordCommand(delivery: PRDeliveryState | undefined): string {
 }
 
 function recutSteps(pr: string, delivery: PRDeliveryState | undefined): readonly string[] {
-  if (delivery !== undefined && RECUT_REFUSING_STATES.has(delivery)) return []
+  if (recutRefusedByDelivery(delivery)) return []
   return [`yrd pr recut ${pr} --preflight --queue`]
 }
 

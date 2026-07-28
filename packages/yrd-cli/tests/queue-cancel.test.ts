@@ -53,6 +53,9 @@ function residentHarness(runResponses: readonly (() => Promise<readonly unknown[
   let runCalls = 0
   const app = {
     scope: { signal, sleep: async () => undefined },
+    // Nothing has ever been refused here: the follow loop reads the admission
+    // refusal ledger after each settled cycle for its stall health check.
+    state: () => ({ bays: { prs: {} }, queues: { admissionRefusals: {} } }),
     log: { warn: (message: string, props: Record<string, unknown>) => warnings.push({ message, props }) },
     queue: {
       run: async () => {

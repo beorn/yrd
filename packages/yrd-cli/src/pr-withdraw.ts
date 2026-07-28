@@ -231,12 +231,17 @@ export type RecutPreflightOptions = JsonOption & Readonly<{ revision?: number; q
  * creating refs, appending journal events, or calling the recutter. Exact
  * ancestry/tree equivalence authorizes withdrawal; patch-id is attribution
  * evidence only because stable patch IDs intentionally ignore whitespace. */
+/** Classify a PR against its live base and print the verdict plus the ONE exact
+ * command that follows from it. The result is returned as well as printed, so a
+ * mechanical caller (the resident's self-applied-remedy pass, 22474) runs the
+ * same `next` a human would have read off the terminal — one decision function,
+ * never a second copy of the verdict rules. */
 export async function preflightRecut(
   app: YrdCliApp,
   selector: string,
   options: RecutPreflightOptions,
   io: YrdCliIO,
-): Promise<void> {
+): Promise<RecutPreflightResult> {
   if (options.revision !== undefined && (!Number.isInteger(options.revision) || options.revision < 1)) {
     usage("--revision must be a positive integer")
   }
@@ -363,6 +368,7 @@ export async function preflightRecut(
       `next: ${next}`,
     ].join("\n"),
   )
+  return result
 }
 
 /** `yrd pr prune [--dry-run]` — scan every live PR against its base tip and

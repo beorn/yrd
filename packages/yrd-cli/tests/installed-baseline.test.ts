@@ -385,6 +385,9 @@ describe("run gate", () => {
     let runCalls = 0
     const app = {
       scope: { signal: { aborted: false }, sleep: async () => undefined },
+      // Nothing has ever been refused here: the follow loop reads the admission
+      // refusal ledger after each settled cycle for its stall health check.
+      state: () => ({ bays: { prs: {} }, queues: { admissionRefusals: {} } }),
       queue: {
         run: async () => {
           runCalls += 1

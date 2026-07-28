@@ -246,8 +246,12 @@ const AdmissionRefusedSchema = z
   .strict()
 type AdmissionRefusedArgs = Readonly<z.infer<typeof AdmissionRefusedSchema>>
 /** Consecutive refusals before `queue audit` calls a PR wedged. One skip is a
- * normal losable race in a selectorless drain; a third identical cycle is not. */
-const ADMISSION_REFUSAL_LOOP_THRESHOLD = 3
+ * normal losable race in a selectorless drain; a third identical cycle is not.
+ *
+ * Exported because the runner's self-applied-remedy pass (22474) acts on
+ * exactly the PRs the queue itself calls wedged — one number, one home, so the
+ * remedy can never fire earlier than the finding that justifies it. */
+export const ADMISSION_REFUSAL_LOOP_THRESHOLD = 3
 const QueueStartSchema = QueueRecordSchema.omit({ startedAt: true, failure: true })
 const ReplayQueueStartSchema = ReplayQueueRecordSchema.omit({ startedAt: true, failure: true })
 const QueueFailedPRSchema = z.preprocess(
@@ -1378,12 +1382,18 @@ function createQueue<Shape extends PRShape>(
     }
   }
 
+  /** One admission turn's outcome. `refused` names the selectors this turn
+   * skipped with a typed per-PR refusal, so the drain can release the line
+   * instead of re-picking the same refused head forever (22474). */
+  type AdmissionDispatch = Readonly<{ admitted: Run[]; refused: readonly string[] }>
+
   const dispatchAdmissions = async (
     selectors: readonly string[],
     resolveCycleBase: CycleBaseResolver | undefined,
     selection?: AdmitArgs["selection"],
-  ): Promise<Run[]> => {
+  ): Promise<AdmissionDispatch> => {
     const admitted: Run[] = []
+    const refused: string[] = []
     // Implicit (selectorless) drains absorb per-PR terminal races; explicit
     // targeting stays fail-loud so a one-shot caller sees the real outcome.
     const selectorless = selection !== "explicit"
@@ -1422,9 +1432,10 @@ function createQueue<Shape extends PRShape>(
           ...refusal,
         })
         await noteCandidateRefusal([selector], refusal)
+        refused.push(selector)
       }
     }
-    return admitted
+    return { admitted, refused }
   }
 
   const drainAdmissions = async (
@@ -1435,6 +1446,14 @@ function createQueue<Shape extends PRShape>(
   ): Promise<Run[]> => {
     const targets = new Set(selectors)
     const outcomes = new Map<RunId, Run>()
+    // PRs this drain already refused. A resident drain dispatches ONE queued PR
+    // per turn (see below), so without this set a refused head is re-picked as
+    // the head every turn and the drain ends having admitted nothing — the
+    // head-of-line wedge (22474): PR1791 held the whole queue through 44
+    // consecutive refusal cycles while seven ready PRs stacked behind it. The
+    // set only releases the LINE; the refusal itself is still ledgered exactly
+    // once per cycle by dispatchAdmissions.
+    const released = new Set<string>()
     const remember = (candidate: Run): void => {
       if (candidate.prs.some((pr) => targets.has(pr.id))) outcomes.set(candidate.id, candidate)
     }
@@ -1456,13 +1475,25 @@ function createQueue<Shape extends PRShape>(
         continue
       }
 
-      const queued = admissionQueue(snapshot, steps, selection === "explicit" ? targets : undefined)
-      const admitted = await dispatchAdmissions(
-        (options.continueAdmissions === undefined ? queued : queued.slice(0, 1)).map((pr) => pr.id),
+      const queued = admissionQueue(snapshot, steps, selection === "explicit" ? targets : undefined).filter(
+        (pr) => !released.has(pr.id),
+      )
+      // A resident (`continueAdmissions` installed) admits one PR per turn so a
+      // drain signal can interrupt between admissions; a one-shot dispatches the
+      // whole queue in a single turn and needs no release.
+      const turn = options.continueAdmissions === undefined ? queued : queued.slice(0, 1)
+      const dispatched = await dispatchAdmissions(
+        turn.map((pr) => pr.id),
         resolveCycleBase,
         selection,
       )
-      if (admitted.length > 0) continue
+      if (dispatched.admitted.length > 0) continue
+      for (const pr of dispatched.refused) released.add(pr)
+      // Head-of-line release: the turn admitted nothing because it was refused,
+      // and PRs behind it have not been tried yet. Take the next one. `released`
+      // grows by at least one whenever this branch is taken, so `queued` strictly
+      // shrinks and the loop still terminates.
+      if (dispatched.refused.length > 0 && queued.length > turn.length) continue
 
       for (const selector of targets) {
         const pr = resolvePR(snapshot.bays, selector)
@@ -1514,7 +1545,7 @@ function createQueue<Shape extends PRShape>(
               ? admissionQueue(snapshot, steps).map((pr) => pr.id)
               : selected.map((pr) => pr.id)
           return runOptions === undefined
-            ? dispatchAdmissions(selectors, resolveCycleBase)
+            ? (await dispatchAdmissions(selectors, resolveCycleBase)).admitted
             : drainAdmissions(selectors, runOptions, resolveCycleBase, selection)
         },
       )
@@ -2385,9 +2416,8 @@ function createQueueCommands(
         requireQueueAuthority(state.queues.authority, [snapshot], selected)
       }
       if (runningQueue(state.queues, state.jobs, pr.base) !== undefined) return { events: [] }
-      if (args.selection !== "explicit" && checksRequested(pr)) {
-        const first = admissionQueue(state, steps)[0]
-        if (first !== undefined && first.id !== pr.id) return { events: [] }
+      if (args.selection !== "explicit" && checksRequested(pr) && admissionLineHolder(state, steps, pr) !== undefined) {
+        return { events: [] }
       }
       return startRun(
         state.queues,
@@ -4942,6 +4972,34 @@ function admissionQueue(
       const rightAt = checkQueueTime(right)
       return leftAt.localeCompare(rightAt) || left.id.localeCompare(right.id, undefined, { numeric: true })
     })
+}
+
+/**
+ * The PR ahead of `pr` that legitimately holds the admission line, or
+ * `undefined` when nothing does and `pr` may be admitted now.
+ *
+ * Admission is FIFO, and it used to be strict: only `admissionQueue[0]` could
+ * ever be admitted. That made ONE unadmittable carrier freeze the door for
+ * every ready PR behind it, because a refused PR keeps its head position — the
+ * 22474 wedge (PR1791 held the line through 44 consecutive refusal cycles,
+ * PR1787 through 30, with seven ready PRs stacked behind them, each cleared by
+ * hand). A PR carrying a live admission-refusal streak has demonstrably NOT
+ * gotten in, so it stops holding the line while keeping its queue position: it
+ * is still retried on its own turn, and its streak clears the moment it is
+ * admitted, pushed, or recut ({@link QueueAdmissionRefusal}).
+ *
+ * Only PRs strictly AHEAD of `pr` are considered, so a PR with a stale streak
+ * of its own is never blocked by the very PRs it outranks.
+ */
+function admissionLineHolder(
+  state: DeepReadonly<RuntimeState>,
+  steps: readonly RuntimeStep[],
+  pr: DeepReadonly<PR>,
+): DeepReadonly<PR> | undefined {
+  const queued = admissionQueue(state, steps)
+  const position = queued.findIndex((candidate) => candidate.id === pr.id)
+  const ahead = position < 0 ? queued : queued.slice(0, position)
+  return ahead.find((candidate) => state.queues.admissionRefusals[candidate.id] === undefined)
 }
 
 function blockingQueuePause(

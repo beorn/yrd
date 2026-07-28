@@ -116,7 +116,24 @@ import {
   type QueueStatusResult,
 } from "./queue-status-view.tsx"
 import { submittedPrPositions } from "./queue-position.ts"
-import { preflightRecut, prunePrs, withdrawPrs } from "./pr-withdraw.ts"
+import {
+  preflightRecut,
+  prunePrs,
+  withdrawPrs,
+  type RecutPreflightResult,
+  type RecutPreflightVerdict,
+} from "./pr-withdraw.ts"
+import {
+  foldRefusalStall,
+  formatRemedyCommand,
+  planRefusalRemedies,
+  refusalRemedyKey,
+  RESIDENT_REFUSAL_STALL_CYCLES,
+  type RefusalRemedyPlan,
+  type RemedyStep,
+  type ResidentRefusalObservation,
+  type ResidentRefusalStall,
+} from "./refusal-remedy.ts"
 import { reconcilePrLandings, type PrLanding } from "./pr-landing.ts"
 import { requireImplicitRecutBranchFreshness } from "./recut-branch-freshness.ts"
 import { resolveSubmitSelectors } from "./submit-selection.ts"
@@ -250,6 +267,12 @@ const RESIDENT_RECOVERY_SWEEP_MS = 60_000
  * signal-forced interruption exits non-zero so hab `restart=on-failure` resumes
  * draining instead of leaving the queue's live work stranded. */
 const RESIDENT_INTERRUPTED_EXIT: YrdCliExitCode = 3
+/** A resident that restarts itself out of presumptive poisoned-observer state
+ * (22474 specimen 3) exits with the same UNCLEAN code as a signal-forced stop:
+ * both mean "this runner stopped with queue work outstanding — start another
+ * one", which is exactly what `restart: on-failure` does. The distinguishing
+ * evidence is the loud `resident-refusal-stall-restart` record, not the code. */
+const RESIDENT_POISONED_EXIT: YrdCliExitCode = RESIDENT_INTERRUPTED_EXIT
 
 function residentRunnerStatusPath(cwd: string): string | undefined {
   const gitDir = queueGitDir(cwd)
@@ -5986,6 +6009,257 @@ export async function refreshAdmittedQueueRevisions(
   return outcomes
 }
 
+/** What the resident did about one wedged PR this cycle. */
+export type RefusalRemedyOutcome =
+  | Readonly<{
+      status: "applied"
+      pr: string
+      revision: number
+      code: string
+      count: number
+      /** Every command the runner ran, verbatim, in order. */
+      commands: readonly string[]
+      verdict: RecutPreflightVerdict
+    }>
+  | Readonly<{
+      status: "escalated"
+      pr: string
+      revision: number
+      code: string
+      count: number
+      reason: string
+      /** The printed remedy the human takes — unchanged from the refusal. */
+      resolution: readonly string[]
+    }>
+  | Readonly<{
+      status: "failed"
+      pr: string
+      revision: number
+      code: string
+      count: number
+      commands: readonly string[]
+      failure: string
+      resolution: readonly string[]
+    }>
+
+/** Re-record the branch's corrected head onto the PR — the in-process spelling
+ * of the `yrd pr submit|create <branch>` step the printed remedy leads with. */
+async function applyRedeliveryStep(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  step: Extract<RemedyStep, { verb: "submit" | "create" }>,
+  io: YrdCliIO,
+): Promise<void> {
+  const warnings: string[] = []
+  const submitted = await app.bays.submitSelection(step.branch, {
+    ...(step.verb === "create" ? { draft: true } : {}),
+    resolveRevision: (ref) => optionalRevision(ref, io),
+    run: runtimeOptions(io),
+    warnings,
+  })
+  const delivery = prDeliveryState(submitted)
+  if (delivery !== "pushed" && delivery !== "submitted") return
+  await requirePublishedSubmodulePins(submitted, services, io)
+  if (!app.bays.checksRequested(submitted.id)) await app.bays.requestChecks({ pr: submitted.id })
+}
+
+/** Run the exact command `yrd pr recut --preflight` printed. The verdict IS the
+ * decision — this never re-parses the printed string, so the runner and the
+ * human who reads the same line can never diverge. */
+async function applyPreflightVerdict(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  preflight: RecutPreflightResult,
+  io: YrdCliIO,
+): Promise<void> {
+  if (preflight.verdict === "SUBSUMED-WITHDRAW") {
+    // Withdrawal ENDS a delivery, and `yrd pr prune` already owns unattended
+    // subsumption on its own schedule. The runner's job is to unwedge the line,
+    // not to retire someone's PR mid-cycle.
+    raiseFailure(
+      "refusal",
+      "refusal-remedy-needs-withdraw",
+      `yrd: PR '${preflight.pr}' preflight verdict SUBSUMED-WITHDRAW is an operator decision; run: ${preflight.next}`,
+    )
+  }
+  if (preflight.verdict === "FRESH-NOOP") {
+    const pr = requiredPr(app, preflight.pr)
+    await requirePublishedSubmodulePins(pr, services, io)
+    if (prDeliveryState(pr) === "pushed") await app.bays.ready({ pr: pr.id })
+    if (!app.bays.checksRequested(pr.id)) await app.bays.requestChecks({ pr: pr.id })
+    return
+  }
+  // `admit: false` for the same reason the freshness pass uses it: the compose
+  // that follows in THIS cycle owns admission. The remedy's job is to leave a
+  // queueable revision behind, not to start a second admission path.
+  await executeRecutPr(
+    app,
+    services,
+    preflight.pr,
+    { queue: true, admit: false, ...(preflight.verdict === "RECUT-FORCE" ? { force: true } : {}) },
+    io,
+  )
+}
+
+async function applyRefusalRemedy(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  plan: RefusalRemedyPlan,
+  steps: readonly RemedyStep[],
+  commands: string[],
+  io: YrdCliIO,
+): Promise<RecutPreflightVerdict> {
+  let verdict: RecutPreflightVerdict | undefined
+  for (const step of steps) {
+    commands.push(formatRemedyCommand(step))
+    if (step.verb !== "recut") {
+      await applyRedeliveryStep(app, services, step, io)
+      continue
+    }
+    if (step.preflight !== true) {
+      await executeRecutPr(app, services, step.pr, { queue: step.queue, force: step.force, admit: false }, io)
+      continue
+    }
+    // "…and run its exact next command on that same PR" — the third command of
+    // the printed drill, the one a human had to read off the terminal.
+    const preflight = await preflightRecut(app, step.pr, { queue: step.queue }, io)
+    commands.push(preflight.next)
+    await applyPreflightVerdict(app, services, preflight, io)
+    verdict = preflight.verdict
+  }
+  if (verdict === undefined) throw new Error(`yrd: PR '${plan.pr}' remedy ran no preflight step`)
+  return verdict
+}
+
+/**
+ * 22474 — apply the refusal remedy the queue itself printed, instead of
+ * printing it and waiting for a human to press the button.
+ *
+ * The admission/compose path refuses an authored-gitlink carrier (and its
+ * siblings) with a message that names the exact deterministic drill: re-record
+ * the branch, preflight the recut, run its next command. Because a refusal used
+ * to hold the head of the line, one such PR wedged the whole queue until an
+ * operator typed those three commands — PR1791 through 44 consecutive refusal
+ * cycles, PR1787 through 30, both cleared by hand on 2026-07-27.
+ *
+ * Runs inside the existing serialized resident cycle beside
+ * {@link refreshAdmittedQueueRevisions}: same installed recutter, same journal,
+ * no second writer or scheduler. Applies at most one remedy per PR REVISION, so
+ * a remedy that fails degrades to the printed refusal rather than becoming its
+ * own loop; a remedy that succeeds produces a new revision, which is what makes
+ * progress instead of repetition.
+ */
+export async function applyRefusalRemedies(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  io: YrdCliIO,
+  attempted: Set<string>,
+): Promise<readonly RefusalRemedyOutcome[]> {
+  const snapshot = stateOf(app)
+  const outcomes: RefusalRemedyOutcome[] = []
+  for (const plan of planRefusalRemedies(snapshot.queues.admissionRefusals, snapshot.bays.prs, attempted)) {
+    if (io.drainSignal?.aborted === true) break
+    // Recorded BEFORE the attempt. A remedy that throws must degrade to the
+    // printed refusal, never re-arm itself on the next cycle.
+    attempted.add(plan.key)
+    // …and the revision the attempt LEAVES BEHIND. A remedy re-records the
+    // branch, so a half-applied one lands the PR on a fresh revision with a
+    // fresh key — without this the "once per revision" bound would be satisfied
+    // by a loop that mints a new revision every cycle. The runner never
+    // remedies its own output; a human's next push mints a different revision
+    // again and is eligible as normal.
+    const settleAttempt = (): void => {
+      const current = app.bays.pr(plan.pr)
+      if (current === undefined) return
+      const revision = currentPRRev(current)
+      attempted.add(refusalRemedyKey(current.id, revision.n, revision.head))
+    }
+    const identity = { pr: plan.pr, revision: plan.revision, code: plan.failure.code, count: plan.count }
+    const projected = actionableFailure(plan.failure, {
+      delivery: prDeliveryState(requiredPr(app, plan.pr)),
+    })
+    if (plan.remedy.kind === "judgment") {
+      outcomes.push({ status: "escalated", ...identity, reason: plan.remedy.reason, resolution: projected.resolution })
+      app.log.warn?.(`PR ${plan.pr} needs a person: its refusal has no mechanical remedy.`, {
+        action: "queue-refusal-escalated",
+        ...identity,
+        reason: plan.remedy.reason,
+        resolution: projected.resolution,
+        refusal: plan.failure.message,
+      })
+      continue
+    }
+    const commands: string[] = []
+    try {
+      const verdict = await applyRefusalRemedy(app, services, plan, plan.remedy.steps, commands, io)
+      outcomes.push({ status: "applied", ...identity, commands, verdict })
+      app.log.info?.(`Applied PR ${plan.pr}'s own printed refusal remedy.`, {
+        action: "queue-refusal-remedy-applied",
+        ...identity,
+        commands,
+        verdict,
+      })
+    } catch (error) {
+      const failure = error instanceof Error ? error.message : String(error)
+      outcomes.push({ status: "failed", ...identity, commands, failure, resolution: projected.resolution })
+      app.log.warn?.(`Could not apply PR ${plan.pr}'s printed refusal remedy; it needs a person.`, {
+        action: "queue-refusal-remedy-failed",
+        ...identity,
+        commands,
+        failure,
+        resolution: projected.resolution,
+      })
+    } finally {
+      settleAttempt()
+    }
+  }
+  return outcomes
+}
+
+/** Reduce the live refusal ledger and this cycle's run count to the
+ * poisoned-observer observation. Reads only projected state — no extra git or
+ * network work on a cycle that already did none. */
+function observeResidentRefusals(app: YrdCliApp, runs: number): ResidentRefusalObservation {
+  const snapshot = stateOf(app)
+  const refusals = Object.values(snapshot.queues.admissionRefusals)
+  return {
+    runs,
+    refusals: refusals.map(({ pr, code, count }) => ({ pr, code, count })),
+    heads: Object.fromEntries(
+      refusals.flatMap((refusal) => {
+        const pr = snapshot.bays.prs[refusal.pr]
+        return pr === undefined ? [] : [[refusal.pr, currentPRRev(pr).head] as const]
+      }),
+    ),
+  }
+}
+
+/**
+ * Fold one settled cycle into the poisoned-observer window and say whether the
+ * runner should restart itself (22474 specimen 3). Off (window cleared) for a
+ * targeted one-shot, which has no next cycle to break out of.
+ */
+function residentRefusalHealth(
+  app: YrdCliApp,
+  stall: ResidentRefusalStall | undefined,
+  runs: number,
+  watching: boolean,
+): Readonly<{ stall: ResidentRefusalStall | undefined; restart: boolean }> {
+  if (!watching) return { stall: undefined, restart: false }
+  const next = foldRefusalStall(stall, observeResidentRefusals(app, runs))
+  if (next === undefined || next.cycles < RESIDENT_REFUSAL_STALL_CYCLES) return { stall: next, restart: false }
+  app.log.warn?.(
+    `Queue runner refused every candidate for ${next.cycles} consecutive cycles with nothing changing; restarting.`,
+    {
+      action: "resident-refusal-stall-restart",
+      cycles: next.cycles,
+      prs: Object.keys(next.counts).toSorted((left, right) => left.localeCompare(right, undefined, { numeric: true })),
+      signature: next.signature,
+    },
+  )
+  return { stall: next, restart: true }
+}
+
 /**
  * D1b — the resident's per-tick unscoped lease-expiry recovery sweep. `recover`
  * with NO runner arg settles any orphaned running Job whose lease has lapsed,
@@ -6023,7 +6297,7 @@ export async function followQueueRuns(
   options: { steps?: unknown; json?: boolean; interval?: number; watch?: boolean },
   io: YrdCliIO,
   gate: () => Promise<void>,
-  services: Pick<YrdCliServices, "recut"> = {},
+  services: YrdCliServices = {},
 ): Promise<YrdCliExitCode> {
   if (options.watch === true) {
     // `--watch` is a DEPRECATED no-op alias of follow (the default). Reaching
@@ -6058,6 +6332,13 @@ export async function followQueueRuns(
   // first tick — it catches older-generation ghosts the one-shot startup reclaim
   // (pid-scoped, last pid only) cannot.
   let lastSweepAt = 0
+  // PR revisions this resident already tried a printed refusal remedy on (22474).
+  // Process-scoped on purpose: it bounds a LOOP, and a restarted resident facing
+  // a still-wedged PR deserves exactly one fresh attempt.
+  const remedied = new Set<string>()
+  // Consecutive all-candidate-refusal cycles against an unchanged world (22474
+  // specimen 3). Also process-scoped: it is a claim about THIS process.
+  let stall: ResidentRefusalStall | undefined
   try {
     heartbeat?.check()
     if (heartbeat !== undefined && selectors.length === 0 && !jsonEnabled(options)) {
@@ -6080,10 +6361,14 @@ export async function followQueueRuns(
       // seam. The installed CLI always supplies the recutter; a caller that does
       // not install one retains the historical drain-only behavior.
       const freshness = services.recut === undefined ? [] : await refreshAdmittedQueueRevisions(app, services, io)
+      // 22474 — a wedged PR whose refusal printed a deterministic remedy gets
+      // that remedy applied here, once per revision, before the next compose
+      // snapshot. Same recutter, same serialized cycle as the freshness pass.
+      const remedies = services.recut === undefined ? [] : await applyRefusalRemedies(app, services, io, remedied)
       // A mechanical recut may itself take long enough for installed Queue
       // definitions to move. Re-prove the baseline before admitting its fresh
       // revision; never start a Run under the pre-recut gate snapshot.
-      if (freshness.length > 0) await gate()
+      if (freshness.length > 0 || remedies.some((outcome) => outcome.status === "applied")) await gate()
       let runs: readonly Run[]
       try {
         runs = await runQueues(app, selectors, options, io)
@@ -6126,6 +6411,18 @@ export async function followQueueRuns(
         }
       }
       const exit: YrdCliExitCode = runs.some(Queues.failed) ? 1 : 0
+      // 22474 specimen 3 — self-health. A long-lived drain that refuses EVERY
+      // candidate, cycle after cycle, against a world that is not moving has
+      // stopped being evidence about the PRs and become evidence about itself.
+      // Gated on the selectorless loop, not on resident identity: a targeted
+      // one-shot has no next cycle to break out of.
+      const health = residentRefusalHealth(app, stall, runs.length, selectors.length === 0)
+      stall = health.stall
+      // Exit UNCLEAN so `restart: on-failure` re-execs a fresh process with
+      // fresh observation state — mechanically the SIGINT + `yrd queue run` an
+      // operator performed by hand, minus the 2.5h wait. The heartbeat's
+      // close(cleanShutdown=false) in the finally releases the lease.
+      if (health.restart) return RESIDENT_POISONED_EXIT
       if (drainRequested()) {
         if (runs.every(Queues.terminal)) {
           // Operator drain finished with no in-flight work left — the one clean stop.
