@@ -326,6 +326,63 @@ function queueHistoryFrames(count: number, failedRun?: number): readonly Journal
   })
 }
 
+/** Turn one terminal-history fixture into the legacy failed-batch shape that
+ * recovery retires when its recorded step is no longer installed. */
+function staleLegacyBatchFrame(frame: JournalFrame, parent?: string): JournalFrame {
+  const stale = structuredClone(frame)
+  const started = stale.events.find(({ name }) => name === "queue/run/started")
+  const requested = stale.events.find(({ name }) => name === "job/requested")
+  const finished = stale.events.find(({ name, data }) => {
+    const transition = data as { type?: unknown }
+    return name === "job/transitioned" && transition.type === "finish"
+  })
+  if (started === undefined || requested === undefined || finished === undefined) {
+    throw new Error("expected Queue start, request, and finish fixtures")
+  }
+  const startedData = started.data as {
+    run?: {
+      id?: unknown
+      settlement?: unknown
+      parent?: string
+      isolationPart?: 0 | 1
+      prs?: Array<Record<string, unknown>>
+    }
+  }
+  const run = startedData.run
+  const first = run?.prs?.[0]
+  if (run === undefined || typeof run.id !== "string" || first === undefined) {
+    throw new Error("expected Queue run fixture")
+  }
+  delete run.settlement
+  if (parent !== undefined) {
+    run.parent = parent
+    run.isolationPart = 0
+  }
+  const prs = [
+    first,
+    {
+      ...first,
+      id: `${String(first.id)}-peer`,
+      branch: `${String(first.branch)}-peer`,
+      headSha: MERGED,
+    },
+  ]
+  run.prs = prs
+  const requestData = requested.data as { input?: { prs?: Array<Record<string, unknown>> } }
+  if (requestData.input === undefined) throw new Error("expected Queue Job input fixture")
+  requestData.input.prs = prs
+  const finishData = finished.data as { result?: unknown }
+  finishData.result = {
+    status: "completed",
+    conclusion: "failure",
+    error: { code: "fixture", message: "failed batch awaits isolation" },
+  }
+  return parseJournalFrame({
+    ...stale,
+    events: stale.events.filter(({ name }) => name !== "queue/run/settled"),
+  })
+}
+
 function legacyQueueHistoryFrames(count: number): readonly JournalFrame[] {
   return queueHistoryFrames(count).map((frame) => {
     const legacy = structuredClone(frame)
@@ -1303,6 +1360,49 @@ describe("Queue", () => {
     ).resolves.toMatchObject({ quiesced: [{ run: "R1" }] })
     expect(injected).toBe(true)
     expect(Queues.get(app.state().queues, "R2")).toBeUndefined()
+  }, 15_000)
+
+  it("skips a planned stale batch that an earlier retirement evicts at the retention boundary", async () => {
+    const history = queueHistoryFrames(514)
+    const first = history[0]
+    const oldRoot = history[1]
+    const oldChild = history[2]
+    if (first === undefined || oldRoot === undefined || oldChild === undefined) {
+      throw new Error("expected stale-plan compaction fixtures")
+    }
+    // R2 is the oldest retained terminal tree; its unresolved child R3 is a
+    // planned stale batch. R1 is deliberately replayed last, so retiring it
+    // adds the 513th terminal tree and compacts R2/R3 before recovery reaches
+    // its already-planned R3 entry — the live R523 -> R533 startup sequence.
+    const journal = indexedJournal([
+      oldRoot,
+      staleLegacyBatchFrame(oldChild, "R2"),
+      ...history.slice(3),
+      staleLegacyBatchFrame(first),
+    ])
+    await using app = await createQueueApp(
+      { defaultSteps: ["check"], checkRevision: "check-v2" },
+      journal,
+      undefined,
+      ids(4_000_000),
+      createLogger("test", [{ level: "error" }, { write() {} }]),
+    )
+
+    expect(
+      app.queue
+        .audit()
+        .findings.filter(({ code }) => code === "unisolable-stale-plan")
+        .map(({ run }) => run),
+    ).toEqual(["R1", "R3"])
+
+    await expect(
+      app.queue.recover({ recoveryTime: "2026-01-01T01:00:00.000Z", reason: "startup retention hygiene" }),
+    ).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "R1", error: expect.objectContaining({ code: "stale-plan" }) }),
+      ]),
+    )
+    expect(Queues.get(app.state().queues, "R3")).toBeUndefined()
   }, 15_000)
 
   it("resolves PR, Run, and base selectors while preserving canonical records", async () => {

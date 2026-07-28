@@ -2360,10 +2360,23 @@ function createQueue<Shape extends PRShape>(
           // Retire every FAILED batch whose recorded plan drifted so it can never
           // isolate — otherwise it re-refuses isolation every compose cycle forever
           // (the isolate-path zombie). Typed stale-plan release; loud receipt.
-          const retiredBatches = unisolableStalePlanBatches(runtime(), byName)
-          for (const batch of retiredBatches) {
-            await actions.retireStalePlan(batch.run)
-            affected.add(batch.run)
+          const plannedRetirements = unisolableStalePlanBatches(runtime(), byName)
+          const retiredBatches: UnisolableStalePlanBatch[] = []
+          for (const planned of plannedRetirements) {
+            // Each retirement appends and re-compacts the live projection. That
+            // can evict another old planned batch before this loop reaches it
+            // (live: retiring R523 crossed the retention boundary and evicted
+            // R533). Re-resolve against the refreshed projection instead of
+            // dispatching a stale plan into a now-archived run.
+            const snapshot = runtime()
+            const record = Queues.get(snapshot.queues, planned.run)
+            if (record === undefined) continue
+            const run = materializeRun(record, snapshot.jobs)
+            if (!bisectable(run) || recordedPlanDrift(run.steps, byName) === undefined) continue
+            const result = await actions.retireStalePlan(planned.run)
+            if (result.events.length === 0) continue
+            retiredBatches.push(planned)
+            affected.add(planned.run)
           }
           if (retiredBatches.length > 0) {
             log.warn?.("Removed outdated batches that can no longer be tested.", {
@@ -2374,7 +2387,13 @@ function createQueue<Shape extends PRShape>(
           }
           for (const id of await cleanupSettledRoots()) affected.add(id)
           const final = runtime()
-          return [...affected].map((id) => materializeRun(Queues.record(final.queues, id), final.jobs))
+          return [...affected].map((id) => {
+            const record = Queues.get(final.queues, id)
+            if (record !== undefined) return materializeRun(record, final.jobs)
+            const historical = archived(id)
+            if (historical !== undefined) return historical
+            throw new Error(`yrd: recovered queue run '${id}' is absent from live projection and journal history`)
+          })
         },
       )
     },
