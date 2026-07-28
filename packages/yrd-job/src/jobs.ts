@@ -1216,6 +1216,11 @@ export function withJobs(options: JobsOptions = {}) {
         "job/transitioned": JobTransitionSchema,
         "job/restored": RestoreJobSchema,
       },
+      eventVersions: {
+        "job/requested": 1,
+        "job/transitioned": 1,
+        "job/restored": 1,
+      },
       replayEvents: {
         "job/transitioned": ReplayJobTransitionSchema,
         "job/restored": ReplayRestoreJobSchema,

@@ -48,6 +48,7 @@ function withCounter() {
       events: {
         "counter/changed": z.object({ from: z.number().int(), by: z.number().int() }),
       },
+      eventVersions: { "counter/changed": 1 },
       projectionVersion: "counter-v1",
       project(state, applied) {
         if (applied.name !== "counter/changed") return { counter: state.counter }
@@ -180,6 +181,58 @@ describe("Yrd domain objects", () => {
     ])
   })
 
+  it("refuses an event definition above the installed writer compatibility before append", async () => {
+    const record = command({
+      title: "Record a future fact",
+      params: z.object({ value: z.number().int() }).strict(),
+      apply: (_state: object, args: { value: number }) => ({
+        events: [event("future/recorded", args)],
+      }),
+    })
+    const definition = createYrdDef().extend({
+      commands: { future: { record } },
+      events: { "future/recorded": z.object({ value: z.number().int() }).strict() },
+      eventVersions: { "future/recorded": 2 },
+    })
+    const journal = createMemoryJournal()
+    await using app = await createYrd(definition, {
+      inject: {
+        journal,
+        compatibility: { version: 1, reader: "a".repeat(40) },
+      },
+    })
+
+    await expect(app.dispatch(app.commands.future.record, { value: 1 })).rejects.toMatchObject({
+      failure: {
+        kind: "configuration",
+        code: "journal-event-version-skew",
+        message: expect.stringContaining("future/recorded"),
+      },
+    })
+    await expect(Array.fromAsync(journal.read())).resolves.toEqual([])
+  })
+
+  it("refuses a versioned host when any writable event omits reader-version metadata", async () => {
+    const definition = createYrdDef().extend({
+      events: { "unversioned/recorded": z.object({}).strict() },
+    })
+
+    await expect(
+      createYrd(definition, {
+        inject: {
+          journal: createMemoryJournal(),
+          compatibility: { version: 1, reader: "a".repeat(40) },
+        },
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "configuration",
+        code: "journal-event-version-missing",
+        message: expect.stringContaining("unversioned/recorded"),
+      },
+    })
+  })
+
   it("refuses a future journal frame and names the exact required reader pin", () => {
     const command = Core.Command.parse({
       id: "00000000-0000-7000-8000-000000000001",
@@ -195,7 +248,7 @@ describe("Yrd domain objects", () => {
       }),
       command,
       events: [],
-      compatibility: { version: 2, reader: requiredReader },
+      compatibility: { version: Core.JOURNAL_READER_VERSION + 1, reader: requiredReader },
     }
 
     expect(() => Core.parseJournalFrame(value)).toThrow(requiredReader)

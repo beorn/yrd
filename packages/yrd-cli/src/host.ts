@@ -31,7 +31,6 @@ import {
   createYrd,
   createYrdDef,
   failureFact,
-  JOURNAL_READER_VERSION,
   pipe,
   raiseFailure,
   type Journal,
@@ -118,7 +117,10 @@ type RuntimeStep = StepDef<PRShape, PRShape>
 const RawGitPushPattern = /(?:^|[\n;&|])\s*git\s+push(?:\s|$)/u
 
 export const CURRENT_JOURNAL_COMPATIBILITY = Object.freeze({
-  version: JOURNAL_READER_VERSION,
+  // Reader support lands before writer activation. Keep this explicit so a
+  // newly readable event version cannot be emitted until its reader pin and
+  // repository floor land in the follow-up activation commit.
+  version: 1,
   reader: "0024983f6ba0b17a0550c779d3d756014ad75ec4",
 }) satisfies JournalCompatibility
 

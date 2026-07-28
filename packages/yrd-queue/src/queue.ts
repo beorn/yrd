@@ -685,6 +685,17 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/batch/isolated": BatchIsolatedSchema,
         "queue/admission/refused": AdmissionRefusedSchema,
       },
+      eventVersions: {
+        "queue/candidate/created": 1,
+        "queue/run/started": 1,
+        "queue/run/failed": 1,
+        "queue/run/canceled": 1,
+        "queue/run/settled": 1,
+        "queue/paused": 1,
+        "queue/resumed": 1,
+        "queue/batch/isolated": 1,
+        "queue/admission/refused": 1,
+      },
       replayEvents: {
         "queue/candidate/created": CandidateCreatedSchema,
         "queue/run/started": z.object({ run: ReplayQueueStartSchema }).strict(),

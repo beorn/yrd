@@ -133,6 +133,12 @@ export function withContests(options: WithContestsOptions): ContestPlugin {
         "contest/promotion/requested": PromotionRequestSchema,
         "contest/promoted": PromotedSchema,
       },
+      eventVersions: {
+        "contest/opened": 1,
+        "contest/selected": 1,
+        "contest/promotion/requested": 1,
+        "contest/promoted": 1,
+      },
       projectionVersion: "contests-v1",
       project: projectContests,
       create(yrd) {

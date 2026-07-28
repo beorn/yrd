@@ -31,6 +31,7 @@ import {
 import { asFailure, raiseFailure } from "./failure.ts"
 import {
   assertJournalReaderCompatibility,
+  JOURNAL_READER_VERSION,
   parseJournalFrame,
   type JournalCompatibility,
   type JournalFrame,
@@ -76,6 +77,7 @@ export type CommandDef<State extends object, Args extends JsonValue | undefined>
 }>
 
 type EventSchemas = Readonly<Record<string, z.ZodType<JsonValue>>>
+type EventVersions = Readonly<Record<string, number>>
 type Project<State extends object> = (state: DeepReadonly<State>, event: Event, cause: Cause) => State
 type Empty = Readonly<Record<never, never>>
 const projectionVersions = Symbol("yrd.projectionVersions")
@@ -143,6 +145,7 @@ type Contribution<
   initialState?: AddedState
   commands?: AddedCommands
   events?: EventSchemas
+  eventVersions?: EventVersions
   replayEvents?: EventSchemas
   projectionVersion?: string
   project?(state: DeepReadonly<AddedState>, event: Event, cause: Cause): AddedState
@@ -159,6 +162,7 @@ export type YrdDef<
   initialState: DeepReadonly<State>
   commands: Commands
   events: EventSchemas
+  eventVersions: EventVersions
   replayEvents: EventSchemas
   project: Project<State>
   validate(state: DeepReadonly<State>): void
@@ -214,6 +218,7 @@ export function createYrdDef(): YrdDef {
     initialState: {},
     commands: {},
     events: {},
+    eventVersions: {},
     replayEvents: {},
     project: (state) => state,
     validate: () => {},
@@ -221,6 +226,45 @@ export function createYrdDef(): YrdDef {
     [projectionVersions]: [],
     create: () => ({}),
   })
+}
+
+function validateEventVersions(
+  events: EventSchemas,
+  eventVersions: EventVersions,
+  writer: JournalCompatibility | undefined,
+): void {
+  for (const [name, version] of Object.entries(eventVersions)) {
+    if (events[name] === undefined) {
+      raiseFailure(
+        "configuration",
+        "journal-event-version-orphan",
+        `yrd: journal event version metadata names missing event definition '${name}'`,
+      )
+    }
+    if (!Number.isSafeInteger(version) || version < 0) {
+      raiseFailure(
+        "configuration",
+        "journal-event-version-invalid",
+        `yrd: event '${name}' has invalid journal reader version '${version}'`,
+      )
+    }
+    if (version > JOURNAL_READER_VERSION) {
+      raiseFailure(
+        "configuration",
+        "journal-event-reader-unsupported",
+        `yrd: event '${name}' requires journal reader v${version}; this reader supports through v${JOURNAL_READER_VERSION}`,
+      )
+    }
+  }
+  if (writer === undefined) return
+  for (const name of Object.keys(events)) {
+    if (eventVersions[name] !== undefined) continue
+    raiseFailure(
+      "configuration",
+      "journal-event-version-missing",
+      `yrd: event '${name}' must declare the minimum journal reader version before this host can write`,
+    )
+  }
 }
 
 export async function createYrd<State extends object, Commands extends CommandTree, Features extends object>(
@@ -248,6 +292,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
     commands as SilveryCommandTree<unknown>,
   ) as SerializableCommandRegistry<AnyCommand>
   const state = signal<DeepReadonly<State>>(cloneFrozen(definition.initialState) as DeepReadonly<State>)
+  validateEventVersions(definition.events, definition.eventVersions, options.inject.compatibility)
 
   type Projection = Readonly<{
     cursor: Cursor
@@ -712,6 +757,16 @@ export async function createYrd<State extends object, Commands extends CommandTr
         if (schema === undefined) {
           raiseFailure("configuration", "event-not-installed", `yrd: no event definition for '${draft.name}'`)
         }
+        const requiredVersion = definition.eventVersions[draft.name]
+        if (options.inject.compatibility !== undefined && requiredVersion !== undefined) {
+          if (requiredVersion > options.inject.compatibility.version) {
+            raiseFailure(
+              "configuration",
+              "journal-event-version-skew",
+              `yrd: event '${draft.name}' requires journal reader v${requiredVersion}; this writer is configured for v${options.inject.compatibility.version} at ${options.inject.compatibility.reader}`,
+            )
+          }
+        }
         return EventSchema.parse({ id: id(), name: draft.name, ts: clock(), data: schema.parse(draft.data) })
       })
       const value = result.value === undefined ? undefined : JsonSchema.parse(result.value)
@@ -833,6 +888,7 @@ function buildDef<State extends object, Commands extends CommandTree, Features e
   initialState: DeepReadonly<State>
   commands: Commands
   events: EventSchemas
+  eventVersions: EventVersions
   replayEvents: EventSchemas
   project: Project<State>
   validate(state: DeepReadonly<State>): void
@@ -856,6 +912,7 @@ function buildDef<State extends object, Commands extends CommandTree, Features e
       const initialState = mergeState(values.initialState, addedState)
       const commands = mergeCommands(values.commands, addedCommands)
       const events = mergeFields(values.events, contribution.events ?? {}, "event")
+      const eventVersions = mergeFields(values.eventVersions, contribution.eventVersions ?? {}, "event version")
       const replayEvents = mergeFields(values.replayEvents, contribution.replayEvents ?? {}, "replay event")
       for (const name of Object.keys(replayEvents)) {
         if (events[name] === undefined) throw new Error(`yrd: replay event '${name}' has no append event definition`)
@@ -866,6 +923,7 @@ function buildDef<State extends object, Commands extends CommandTree, Features e
         initialState,
         commands,
         events,
+        eventVersions,
         replayEvents,
         [projectionVersions]:
           contribution.project === undefined

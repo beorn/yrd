@@ -3,7 +3,7 @@ import { CauseSchema, Command, CommandSchema, EventSchema, JsonSchema } from "./
 import { raiseFailure } from "./failure.ts"
 import { freeze } from "./immutable.ts"
 
-export const JOURNAL_READER_VERSION = 1
+export const JOURNAL_READER_VERSION = 2
 
 export const JournalCompatibilitySchema = z
   .object({
