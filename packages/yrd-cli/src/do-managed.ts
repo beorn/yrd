@@ -19,16 +19,23 @@ import { configuration, usage } from "./invocation.ts"
  * the carrier so a dead run leaves a diagnosable trail instead of a stranded Bay.
  */
 
-export type ManagedDoStage =
-  | "concurrency"
-  | "assign"
-  | "seat"
-  | "bay"
-  | "launch"
-  | "carrier"
-  | "draft"
-  | "recut"
-  | "observe"
+/** The stages, in the order `drive` runs them. This array is the ONE authority
+ * on the composition's shape: the type, the docs, and the phase-sequence
+ * regression all derive from it, so a new stage cannot be added to the driver
+ * without appearing in the story an operator reads. */
+export const MANAGED_DO_STAGES = Object.freeze([
+  "concurrency",
+  "assign",
+  "seat",
+  "bay",
+  "launch",
+  "carrier",
+  "draft",
+  "recut",
+  "observe",
+] as const)
+
+export type ManagedDoStage = (typeof MANAGED_DO_STAGES)[number]
 
 export type ManagedDoOutcome = "landed" | "refused" | "timed-out"
 

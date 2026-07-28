@@ -1,6 +1,14 @@
 import type { Process } from "@yrd/process"
+import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
-import { Issue, IssueRefSchema, IssueSchema, type IssueRef, type IssueSource } from "./issues.ts"
+import {
+  ISSUE_LOG_NAMESPACE,
+  Issue,
+  IssueRefSchema,
+  IssueSchema,
+  type IssueRef,
+  type IssueSource,
+} from "./issues.ts"
 
 type SourceOptions = Readonly<{
   process: Pick<Process, "run">
@@ -10,6 +18,10 @@ type SourceOptions = Readonly<{
   env?: NodeJS.ProcessEnv
   /** Sink for the loud notice this adapter owes its operator. Defaults to stderr. */
   warn?: (text: string) => void
+  /** Host logger (the ROOT one, as everywhere else in the host wiring). The
+   * adapter names itself `yrd:issues:source` so one namespace covers every
+   * configured source instead of inventing one per tracker. */
+  log?: ConditionalLogger
 }>
 
 const IssueFieldsSchema = IssueSchema.omit({ ref: true })
@@ -68,6 +80,7 @@ function createIssueSource(
   project: (value: unknown, ref: IssueRef) => unknown,
 ): IssueSource {
   const sourceId = IssueRefSchema.shape.source.parse(options.id)
+  const log = options.log?.child(ISSUE_LOG_NAMESPACE).child("source")
   return {
     id: sourceId,
     async resolve(ref) {
@@ -83,38 +96,83 @@ function createIssueSource(
         ),
         timeoutMs: ISSUE_SOURCE_TIMEOUT_MS,
       })
+      log?.debug?.("Issue source answered.", {
+        source: sourceId,
+        issue: ref.id,
+        argv: command,
+        cwd: options.cwd,
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+        timedOut: result.timedOut,
+        stdoutBytes: result.stdout.length,
+        stderrBytes: result.stderr.length,
+      })
+      // Every refusal below states what was RUN, what came BACK, and what was
+      // EXPECTED. A source failure is the operator's first contact with an
+      // unfamiliar tracker command; a verdict without its evidence costs them a
+      // repro run to learn what Yrd already had in hand.
       if (result.timedOut) {
-        throw new Error(`yrd: issue source '${sourceId}' timed out after ${ISSUE_SOURCE_TIMEOUT_MS}ms`)
+        throw new Error(
+          `yrd: issue source '${sourceId}' timed out after ${ISSUE_SOURCE_TIMEOUT_MS}ms for '${ref.id}'; ` +
+            evidence(command, result),
+        )
       }
       if (result.exitCode !== 0) {
         throw new Error(
-          result.stderr.trim() || result.stdout.trim() || `command exited ${result.exitCode} without output`,
+          `yrd: issue source '${sourceId}' exited ${result.exitCode} for '${ref.id}'; ${evidence(command, result)}`,
+        )
+      }
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(result.stdout)
+      } catch (error) {
+        // The command and its actual output ARE the diagnosis. A bare "invalid
+        // JSON" hides the usual cause — a log line the source wrote onto the
+        // same stdout the protocol owns — and costs an operator a repro run.
+        if (!(error instanceof SyntaxError)) throw error
+        throw new Error(
+          `yrd: issue source '${sourceId}' returned invalid JSON for '${ref.id}'; ` +
+            `command: ${command.join(" ")}; stdout: ${outputEvidence(result.stdout)}`,
         )
       }
       try {
-        return Issue.parse(project(JSON.parse(result.stdout), ref))
+        return Issue.parse(project(parsed, ref))
       } catch (error) {
-        if (error instanceof SyntaxError) {
-          // The command and its actual output ARE the diagnosis. A bare "invalid
-          // JSON" hides the usual cause — a log line the source wrote onto the
-          // same stdout the protocol owns — and costs an operator a repro run.
-          throw new Error(
-            `yrd: issue source '${sourceId}' returned invalid JSON for '${ref.id}'; ` +
-              `command: ${command.join(" ")}; stdout: ${stdoutEvidence(result.stdout)}`,
-          )
-        }
-        throw error
+        // Well-formed JSON that is not a well-formed ISSUE. The schema complaint
+        // alone names a field, never the command that produced it, so an
+        // operator cannot tell a broken source from a genuinely thin issue.
+        throw new Error(
+          `yrd: issue source '${sourceId}' returned JSON that is not an issue for '${ref.id}': ` +
+            `${detail(error)}; command: ${command.join(" ")}; stdout: ${outputEvidence(result.stdout)}`,
+        )
       }
     },
   }
 }
 
-const STDOUT_EVIDENCE_LIMIT = 200
+const OUTPUT_EVIDENCE_LIMIT = 200
 
-function stdoutEvidence(stdout: string): string {
-  if (stdout === "") return "(empty)"
-  const head = stdout.slice(0, STDOUT_EVIDENCE_LIMIT)
-  return JSON.stringify(stdout.length > STDOUT_EVIDENCE_LIMIT ? `${head}…` : head)
+function evidence(command: readonly string[], result: Readonly<{ stdout: string; stderr: string }>): string {
+  return (
+    `command: ${command.join(" ")}; ` +
+    `stderr: ${outputEvidence(result.stderr)}; stdout: ${outputEvidence(result.stdout)}`
+  )
+}
+
+function outputEvidence(output: string): string {
+  if (output === "") return "(empty)"
+  const head = output.slice(0, OUTPUT_EVIDENCE_LIMIT)
+  return JSON.stringify(output.length > OUTPUT_EVIDENCE_LIMIT ? `${head}…` : head)
+}
+
+/** A raw ZodError message is a multi-line JSON dump of its issue list, which
+ * buries the one field that actually failed. Render the shape complaint the way
+ * an operator reads it: `node.title: expected string`. */
+function detail(error: unknown): string {
+  if (error instanceof z.ZodError) {
+    return error.issues.map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`).join(", ")
+  }
+  return error instanceof Error ? error.message : String(error)
 }
 
 function defaultWarn(text: string): void {

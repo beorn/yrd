@@ -270,6 +270,14 @@ results remain return values and events; CLI formatting is a presentation
 layer over those values, not a second logging path. Core replay spans report
 their frame count, event count, and cursor range along with Loggily's duration.
 
+Severity is not a per-package decision: `YRD_LIFECYCLE_LEVELS` maps a lifecycle
+outcome to a level, and every observed lifecycle uses it. A failure is reported
+once — the deepest failing job or step owns the ERROR, enclosing lifecycles
+settle at INFO. Lifecycle starts are DEBUG unless they are milestones, which is
+what makes `-v` alone the one-line story of a run. The phase map, the namespace
+scheme, and the rule for adding a phase live in
+[docs/do-lifecycle.md](docs/do-lifecycle.md).
+
 Expected failures cross package boundaries as one serializable `FailureFact`
 with `kind`, stable `code`, and `message`. The CLI has one pure projection from
 that fact to its exit verdict. It never infers machine behavior from error

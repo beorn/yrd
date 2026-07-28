@@ -268,6 +268,15 @@ export function createProcess(
       let cancelReap: (() => void) | undefined
       let cancelDrainGrace: (() => void) | undefined
       using span = log.span?.("run", { argv, cwd: request.cwd ?? cwd })
+      // A command that HANGS never reaches "Command finished.", so the start row
+      // is the only evidence naming what the process is waiting on. It is the
+      // noisiest row Yrd emits (every Git plumbing call), hence TRACE.
+      log.trace?.("Command started.", {
+        argv,
+        cwd: request.cwd ?? cwd,
+        ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
+        ...(request.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: request.noProgressTimeoutMs }),
+      })
       try {
         const interactive = request.interactive === true
         const child = spawn(
@@ -482,6 +491,10 @@ export function createProcess(
         } as ProcessResult
         log.debug?.("Command finished.", {
           argv,
+          // The working directory decides what most Yrd commands mean (which
+          // repo, which Bay, which submodule), so a finished row without it
+          // cannot be matched back to the run it describes.
+          cwd: request.cwd ?? cwd,
           exitCode: result.exitCode,
           signal: result.signal,
           durationMs: result.durationMs,

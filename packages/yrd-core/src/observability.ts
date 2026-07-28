@@ -59,6 +59,11 @@ export type YrdLifecycleOptions<Result> = Readonly<{
    * severity still derives from `outcome`. Only consulted on a non-throwing
    * result. */
   label?: (result: Result) => string | undefined
+  /** Promote this lifecycle's START to INFO because the phase is an operator
+   * milestone rather than routine plumbing. Delivery steps (a `run` plus a
+   * `step` identity) are milestones by construction; every other caller that
+   * belongs in the one-line story of a run has to say so explicitly. */
+  milestone?: boolean
   now?: () => number
 }>
 
@@ -79,10 +84,15 @@ export async function observeYrdLifecycle<Result>(
     lifecycle: options.lifecycle,
   }
   const span = log.span?.(undefined, () => spanProps)
-  // Delivery-step starts are operator milestones: surface them at INFO even
-  // though routine lifecycle starts remain DEBUG. This keeps configured step
-  // names generic while making batch execution visible without enabling DEBUG.
-  const startLevel = options.identity?.run !== undefined && options.identity.step !== undefined ? "info" : undefined
+  // Milestone starts are operator events: surface them at INFO even though
+  // routine lifecycle starts remain DEBUG. This keeps configured step names
+  // generic while making batch execution visible without enabling DEBUG. A
+  // delivery step (run + step) is a milestone by construction; anything else
+  // opts in with `milestone`.
+  const startLevel =
+    options.milestone === true || (options.identity?.run !== undefined && options.identity.step !== undefined)
+      ? "info"
+      : undefined
   emitLifecycle(log, options.lifecycle, "started", "started", { ...spanProps, outcome: "started" }, startLevel)
 
   const finish = (outcome: YrdLifecycleOutcome, error?: unknown, result?: Result): void => {

@@ -1,7 +1,13 @@
-import { failureFact, raiseFailure, type CommandTree, type YrdDef } from "@yrd/core"
+import { failureFact, observeYrdLifecycle, raiseFailure, type CommandTree, type YrdDef } from "@yrd/core"
+import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
 
 const TextSchema = z.string().trim().min(1)
+
+/** The one namespace segment this layer owns. Both the resolver and its command
+ * adapters hang off it, so `DEBUG='yrd:issues:*'` is the whole issue story and
+ * neither file has to guess what the other named itself. */
+export const ISSUE_LOG_NAMESPACE = "issues"
 
 export const IssueRefSchema = z.object({ source: TextSchema, id: TextSchema })
 export type IssueRef = z.infer<typeof IssueRefSchema>
@@ -26,7 +32,14 @@ export type Issues = Readonly<{
   resolve(ref: IssueRef): Promise<Issue>
 }>
 export type HasIssues = Readonly<{ issues: Issues }>
-export type IssuesOptions = Readonly<{ sources?: readonly IssueSource[]; defaultSource?: string }>
+export type IssuesOptions = Readonly<{
+  sources?: readonly IssueSource[]
+  defaultSource?: string
+  /** Host logger. Issue resolution is the FIRST phase of `yrd do`, so its
+   * boundary belongs in the one-line story of a run — not only in the process
+   * rows of whatever subprocess a source happens to spawn. */
+  log?: ConditionalLogger
+}>
 
 export const Issue = Object.freeze({
   ref(source: unknown, id: unknown): IssueRef {
@@ -47,6 +60,7 @@ export function createIssues(options: IssuesOptions = {}): Issues {
     sourceById.set(id, source)
   }
   const defaultSource = IssueRefSchema.shape.source.parse(options.defaultSource ?? "km")
+  const log = options.log?.child(ISSUE_LOG_NAMESPACE)
 
   return {
     sources: [...sourceById.keys()],
@@ -57,40 +71,49 @@ export function createIssues(options: IssuesOptions = {}): Issues {
         : Issue.ref(defaultSource, input)
     },
     async resolve(ref) {
-      const canonical = IssueRefSchema.parse(ref)
-      const source = sourceById.get(canonical.source)
-      if (!source) {
-        raiseFailure(
-          "configuration",
-          "issue-source-missing",
-          `yrd: no issue source '${canonical.source}' is registered`,
-        )
-      }
-      let value: Issue | undefined
-      try {
-        value = await source.resolve(canonical)
-      } catch (error) {
-        if (failureFact(error) !== undefined) throw error
-        const detail = (error instanceof Error ? error.message : String(error)).replace(/^yrd:\s*/u, "")
-        raiseFailure(
-          "infrastructure",
-          "issue-source-failed",
-          `yrd: cannot resolve issue '${canonical.id}': configured source '${source.id}' failed: ${detail}`,
-        )
-      }
-      if (!value) {
-        raiseFailure("refusal", "issue-not-found", `yrd: issue '${canonical.source}:${canonical.id}' was not found`)
-      }
-      const issue = Issue.parse(value)
-      if (issue.ref.source !== canonical.source || issue.ref.id !== canonical.id) {
-        raiseFailure(
-          "infrastructure",
-          "issue-source-invalid",
-          `yrd: issue source '${source.id}' returned the wrong issue`,
-        )
-      }
-      return issue
+      if (log === undefined) return resolveIssue(ref)
+      return observeYrdLifecycle(
+        log,
+        {
+          lifecycle: "resolve",
+          identity: { issue: `${ref.source}:${ref.id}` },
+          milestone: true,
+          resultAttributes: (issue: Issue) => ({
+            title: issue.title,
+            ...(issue.revision === undefined ? {} : { revision: issue.revision }),
+          }),
+        },
+        () => resolveIssue(ref),
+      )
     },
+  }
+
+  async function resolveIssue(ref: IssueRef): Promise<Issue> {
+    const canonical = IssueRefSchema.parse(ref)
+    const source = sourceById.get(canonical.source)
+    if (!source) {
+      raiseFailure("configuration", "issue-source-missing", `yrd: no issue source '${canonical.source}' is registered`)
+    }
+    let value: Issue | undefined
+    try {
+      value = await source.resolve(canonical)
+    } catch (error) {
+      if (failureFact(error) !== undefined) throw error
+      const detail = (error instanceof Error ? error.message : String(error)).replace(/^yrd:\s*/u, "")
+      raiseFailure(
+        "infrastructure",
+        "issue-source-failed",
+        `yrd: cannot resolve issue '${canonical.id}': configured source '${source.id}' failed: ${detail}`,
+      )
+    }
+    if (!value) {
+      raiseFailure("refusal", "issue-not-found", `yrd: issue '${canonical.source}:${canonical.id}' was not found`)
+    }
+    const issue = Issue.parse(value)
+    if (issue.ref.source !== canonical.source || issue.ref.id !== canonical.id) {
+      raiseFailure("infrastructure", "issue-source-invalid", `yrd: issue source '${source.id}' returned the wrong issue`)
+    }
+    return issue
   }
 }
 

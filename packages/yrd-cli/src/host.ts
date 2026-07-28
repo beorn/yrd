@@ -772,7 +772,14 @@ async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions):
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({
-      sources: options.issueSources ?? [createKmIssueSource({ process: options.process, cwd: options.repo })],
+      sources: options.issueSources ?? [
+        createKmIssueSource({
+          process: options.process,
+          cwd: options.repo,
+          ...(options.log === undefined ? {} : { log: options.log }),
+        }),
+      ],
+      ...(options.log === undefined ? {} : { log: options.log }),
     }),
     withBays({
       jobs: bayJobs,

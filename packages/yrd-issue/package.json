@@ -9,6 +9,7 @@
   "dependencies": {
     "@yrd/core": "workspace:*",
     "@yrd/process": "workspace:*",
+    "loggily": "^0.10.2",
     "zod": "^4.4.3"
   }
 }

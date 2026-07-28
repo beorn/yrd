@@ -67,6 +67,7 @@ import {
   type ManagedDoResult,
   type ManagedDoStages,
 } from "./do-managed.ts"
+import { observeManagedDo } from "./do-observability.ts"
 import {
   canonicalizeYrdCommandAliases,
   classifyFailure,
@@ -2204,6 +2205,15 @@ async function doWork(
   }
   const targetedPr = app.bays.pr(selector)
   if (targetedPr === undefined) throw issueFailure
+  // The selector resolved as a PR, so `do` continues — but the issue attempt
+  // that failed on the way here is real evidence (a broken tracker command
+  // looks exactly like a selector that was always a PR). Say what was dropped
+  // and why; never discard it silently.
+  app.log.warn?.("Issue resolution failed; continuing with the PR the selector names.", {
+    selector,
+    pr: targetedPr.id,
+    reason: issueFailure instanceof Error ? issueFailure.message : String(issueFailure),
+  })
   return runBaySession(
     app,
     services,
@@ -2362,7 +2372,10 @@ async function doWorkManaged(
       ...(command.timeoutMs === undefined ? {} : { timeoutMs: command.timeoutMs }),
     })
     if (result.exitCode !== 0) {
-      refusal(`${stage} command exited ${result.exitCode}: ${commandOutputTail(result)}`)
+      // Name the command as CONFIGURED. These three come from `.yrd.yml`, so an
+      // operator reading the refusal is usually looking at someone else's
+      // shell text and cannot guess it from the stage name alone.
+      refusal(`${stage} command '${command.run}' exited ${result.exitCode}: ${commandOutputTail(result)}`)
     }
   }
   const result = await runManagedDo({
@@ -2374,7 +2387,10 @@ async function doWorkManaged(
       io,
       runCommand,
       { assign: plan.assign, seat: plan.seat, launch: plan.launch },
-      createManagedDoJournal({ stateDir }),
+      // The composition's transitions reach BOTH rails: the durable JSONL
+      // journal a later speed analysis reads, and `yrd:do` so `-v` tells the
+      // one-line story of the run while it is still happening.
+      observeManagedDo(app.log, createManagedDoJournal({ stateDir })),
     ),
     lock: createManagedDoLock({ stateDir }),
   })

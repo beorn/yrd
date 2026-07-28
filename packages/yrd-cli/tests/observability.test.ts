@@ -7,10 +7,11 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { createFailure } from "@yrd/core"
+import { createFailure, createMemoryJournal } from "@yrd/core"
+import { createProcess } from "@yrd/process"
 import { createLogger, type Event } from "loggily"
 import { runObservableCli } from "../examples/observable-cli/index.ts"
-import { runYrdProcess } from "../src/host.ts"
+import { createDefaultYrdApp, runYrdProcess } from "../src/host.ts"
 import {
   YRD_LIFECYCLE_LEVELS,
   createYrdLogger,
@@ -589,5 +590,50 @@ describe("observable CLI exemplar", () => {
         argv: ["git", "fetch", "origin"],
       }),
     )
+  })
+
+  it("wires the host logger through to issue resolution, the first phase of `yrd do`", async () => {
+    // The host builds the default km issue source itself, so this is the seam
+    // that can silently do nothing: the source and the resolver each accept a
+    // logger, and a host that forgets to pass one leaves `yrd do` opening in
+    // silence exactly the way 22477 reported.
+    const root = await mkdtemp(join(tmpdir(), "yrd-issue-wiring-"))
+    roots.push(root)
+    const repo = await repository(root)
+    const events: Event[] = []
+    const log = createLogger("yrd", [{ level: "trace", spans: false }, { write: (event: Event) => events.push(event) }])
+    await using runtimeProcess = createProcess({ cwd: repo })
+    await using app = await createDefaultYrdApp({
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal: createMemoryJournal(),
+      process: runtimeProcess,
+      log,
+      config: {
+        base: "main",
+        batch: 1,
+        steps: ["check"],
+        requires: [],
+        definitions: { check: { run: "true", runner: "local" } },
+        contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+      },
+    })
+
+    // No tracker is reachable from a scratch repo, so this resolution FAILS —
+    // which is the interesting case: the phase must still announce itself.
+    await app.issues.resolve(app.issues.ref("@yrd/core/22477")).then(
+      () => undefined,
+      () => undefined,
+    )
+    log.end()
+
+    const resolve = events.filter(
+      (event): event is Extract<Event, { kind: "log" }> =>
+        event.kind === "log" && event.namespace === "yrd:issues:resolve",
+    )
+    expect(resolve.map((event) => event.props?.outcome)).toEqual(["started", expect.any(String)])
+    expect(resolve[0]?.level, "issue resolution is a milestone, readable at -v").toBe("info")
+    expect(resolve[0]?.props).toMatchObject({ issue: "km:@yrd/core/22477" })
   })
 })
