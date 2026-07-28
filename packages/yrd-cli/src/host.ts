@@ -117,11 +117,10 @@ type RuntimeStep = StepDef<PRShape, PRShape>
 const RawGitPushPattern = /(?:^|[\n;&|])\s*git\s+push(?:\s|$)/u
 
 export const CURRENT_JOURNAL_COMPATIBILITY = Object.freeze({
-  // Reader support lands before writer activation. Keep this explicit so a
-  // newly readable event version cannot be emitted until its reader pin and
-  // repository floor land in the follow-up activation commit.
-  version: 1,
-  reader: "0024983f6ba0b17a0550c779d3d756014ad75ec4",
+  // The pin names the preceding reader-only commit, never this activation
+  // commit: operators can install that reader before any v2 writer is enabled.
+  version: 2,
+  reader: "5a3b38539a9240364052bfdcf3e75edd7922a98f",
 }) satisfies JournalCompatibility
 
 export type DefaultYrdAppOptions = Readonly<{
