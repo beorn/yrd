@@ -1,7 +1,7 @@
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
-import { canonicalizeYrdCommandAliases, resolveInvocation, resolveYrdContext } from "../src/invocation.ts"
+import { canonicalizeYrdCommandAliases, classifyFailure, resolveInvocation, resolveYrdContext } from "../src/invocation.ts"
 
 describe("canonicalizeYrdCommandAliases", () => {
   it.each(["bay", "pr", "queue"])("canonicalizes every public list alias: %s ls", (command) => {
@@ -29,9 +29,60 @@ describe("canonicalizeYrdCommandAliases", () => {
     },
     { args: ["--log-level=debug", "contests"], expected: ["--log-level=debug", "contest"] },
     { args: ["bay", "open", "prs"], expected: ["bay", "open", "prs"] },
+    // The bare filter operand is the deliberate convenience shape: anything a
+    // subcommand spelling cannot be (ids, paths, mixed case, hyphenated codes)
+    // still resolves to `queue list <filter>`.
+    { args: ["queue", "PR123"], expected: ["queue", "list", "PR123"] },
+    { args: ["queue", "R1", "--latest"], expected: ["queue", "list", "R1", "--latest"] },
+    { args: ["queue", "resident-runner-missing"], expected: ["queue", "list", "resident-runner-missing"] },
+    { args: ["queue", "ls"], expected: ["queue", "list"] },
+    { args: ["queue", "list"], expected: ["queue", "list"] },
+    { args: ["queue", "_list", "PR1"], expected: ["queue", "_list", "PR1"] },
+    { args: ["watch"], expected: ["queue", "list", "--watch"] },
+    // `--` ends option and command resolution: never splice a subcommand across
+    // it, and treat what follows as the literal terms the caller wrote.
+    { args: ["queue", "--", "ls"], expected: ["queue", "--", "ls"] },
+    { args: ["queue", "--", "lst"], expected: ["queue", "--", "lst"] },
+    { args: ["queue", "ls", "--", "x"], expected: ["queue", "list", "--", "x"] },
+    { args: ["--", "queues", "ls"], expected: ["--", "queues", "ls"] },
+    // The command operand is Commander's answer, not a hand-kept option table:
+    // a value-taking option the table does not know consumes nothing, so its
+    // operand is never mistaken for the command.
+    { args: ["--profile", "queues", "ls"], expected: ["--profile", "queues", "ls"] },
+    { args: ["--repo", "queue", "queue", "ls"], expected: ["--repo", "queue", "queue", "list"] },
   ])("canonicalizes parse-only command aliases in $args", ({ args, expected }) => {
     expect(canonicalizeYrdCommandAliases(args, "root")).toEqual(expected)
     expect(args).not.toBe(expected)
+  })
+
+  it.each([
+    {
+      args: ["queue", "lst"],
+      message: "unknown queue subcommand 'lst'; did you mean 'list'? (use 'queue list lst' to match it as a filter)",
+    },
+    {
+      args: ["queue", "satus"],
+      message:
+        "unknown queue subcommand 'satus'; queue subcommands are audit, cancel, deinit, finish, init, list, pause, recover, resume, run (use 'queue list satus' to match it as a filter)",
+    },
+    {
+      args: ["queue", "delete", "PR123"],
+      message:
+        "unknown queue subcommand 'delete'; queue subcommands are audit, cancel, deinit, finish, init, list, pause, recover, resume, run (use 'queue list delete' to match it as a filter)",
+    },
+  ])("refuses the probable mistyped queue subcommand in $args", ({ args, message }) => {
+    let caught: unknown
+    try {
+      canonicalizeYrdCommandAliases(args, "root")
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(Error)
+    expect((caught as Error).message).toBe(message)
+    expect(classifyFailure(caught)).toEqual({
+      exitCode: 2,
+      failure: { kind: "usage", code: "invalid-usage", message },
+    })
   })
 
   it("does not project root aliases onto git-bay", () => {
