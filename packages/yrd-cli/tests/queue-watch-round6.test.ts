@@ -583,7 +583,7 @@ describe("queue watch user round 6", () => {
       expect(app.cell(prepareX, tabsY).bg).not.toEqual(app.cell(checkX, tabsY).bg)
       expect(Math.abs(firstStride - secondStride), "all tabs use the widest content width").toBeLessThanOrEqual(1)
       expect(firstStride, "tabs do not stretch across the whole detail pane").toBeLessThan(20)
-      expect(statusRow).toMatch(/✓ passed\s+\d+(?:m(?:\d+s)?|s)/u)
+      expect(statusRow).toMatch(/◌ passed\s+\d+(?:m(?:\d+s)?|s)/u)
       expect(app.cell(prepareX - 2, tabsY).bg, "two cells of left padding inherit the tab fill").toEqual(
         app.cell(prepareX, tabsY).bg,
       )

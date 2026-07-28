@@ -90,16 +90,16 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       const tabsY = rows.findIndex((row) => row.includes("prepare") && row.includes("check") && row.includes("merge"))
       const tabsLine = rows[tabsY] ?? ""
       const statusLine = rows[tabsY + 1] ?? ""
-      expect(statusLine).toMatch(/✓ passed\s+\d+(?:m(?:\d+s)?|s)/u)
+      expect(statusLine).toMatch(/◌ passed\s+\d+(?:m(?:\d+s)?|s)/u)
       expect(rows[tabsY + 2]).not.toMatch(/◷\s+\d/u)
       const checkX = tabsLine.indexOf("check", tabsLine.indexOf("prepare"))
       const prepareX = tabsLine.indexOf("prepare")
       const mergeX = tabsLine.indexOf("merge", checkX)
-      const doneGlyph = app.cell(prepareX - 3, tabsY + 1)
+      const passedGlyph = app.cell(prepareX - 3, tabsY + 1)
       const runningGlyph = app.cell(checkX - 3, tabsY + 1)
-      expect(statusLine).toContain("✓ passed")
+      expect(statusLine).toContain("◌ passed")
       expect(statusLine).toContain("◉ running")
-      expect(doneGlyph.fg, "done and running glyphs retain distinct semantic colors").not.toEqual(runningGlyph.fg)
+      expect(passedGlyph.fg, "passed and running glyphs retain distinct semantic colors").not.toEqual(runningGlyph.fg)
 
       // Round 6: active and inactive tabs both have distinct filled surfaces.
       const selectedTab = app.cell(checkX, tabsY)
