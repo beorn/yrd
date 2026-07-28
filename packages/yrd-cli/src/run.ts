@@ -2439,26 +2439,16 @@ function commandOutputTail(result: ProcessResult, limit = 600): string {
  * standalone ensure verb cannot drift on PR identity, revision, or tracking. */
 async function ensureIssueDraft(
   app: YrdCliApp,
-  services: YrdCliServices,
   issue: string,
   branch: string,
   io: YrdCliIO,
-  options: Readonly<{ track: boolean; emitResult?: boolean }>,
-): Promise<PR> {
+  options: Readonly<{ track: boolean }>,
+): Promise<Readonly<{ pr: PR; warnings: readonly string[] }>> {
   const selection = { issue, ...(options.track ? { track: true } : {}) }
-  const exit = await applyPrSelectionVerb(
-    app,
-    services,
-    [branch],
-    selection,
-    io,
-    "pr.create",
-    options.emitResult !== false,
-  )
-  if (exit !== 0) refusal(`draft create for branch '${branch}' exited ${exit}`)
-  const pr = app.bays.pr(branch)
+  const result = await applyPrSelection(app, [branch], selection, io, "pr.create")
+  const pr = result.prs[0]
   if (pr === undefined) refusal(`branch '${branch}' has no PR after create`)
-  return pr
+  return { pr, warnings: result.warnings }
 }
 
 /** Bind the managed `do` stages to the surfaces that already own them. Nothing
@@ -2507,8 +2497,9 @@ function managedDoStages(
       return refreshed.headSha === undefined ? {} : { headSha: refreshed.headSha }
     },
     createDraft: async (input) => {
-      const pr = await ensureIssueDraft(app, services, input.issue, input.branch, io, { track: input.track })
-      return { pr: pr.id }
+      const draft = await ensureIssueDraft(app, input.issue, input.branch, io, { track: input.track })
+      await printPrSelectionResult(io, {}, "pr.create", { prs: [draft.pr], warnings: draft.warnings })
+      return { pr: draft.pr.id }
     },
     recut: async (input) => {
       const exit = await recutPr(
@@ -3649,28 +3640,31 @@ async function resolveSubmitMetadata(
 const TRACK_OPTION_DESCRIPTION =
   "merge into latest: a later implicit recut re-records the live branch head instead of refusing"
 
-async function applyPrSelectionVerb(
+type PrSelectionOptions = {
+  follow?: boolean
+  wait?: boolean
+  base?: string
+  queue?: string
+  issue?: string
+  title?: string
+  description?: string
+  correlation?: string
+  composition?: string
+  reviewer?: readonly string[]
+  track?: boolean
+  json?: boolean
+}
+
+type PrSelectionCommand = "bay.submit" | "pr.create" | "pr.submit"
+type PrSelectionResult = Readonly<{ prs: readonly PR[]; warnings: readonly string[] }>
+
+async function applyPrSelection(
   app: YrdCliApp,
-  services: YrdCliServices,
   selectors: readonly string[],
-  options: {
-    follow?: boolean
-    wait?: boolean
-    base?: string
-    queue?: string
-    issue?: string
-    title?: string
-    description?: string
-    correlation?: string
-    composition?: string
-    reviewer?: readonly string[]
-    track?: boolean
-    json?: boolean
-  },
+  options: PrSelectionOptions,
   io: YrdCliIO,
-  command: "bay.submit" | "pr.create" | "pr.submit",
-  emitResult = true,
-): Promise<YrdCliExitCode> {
+  command: PrSelectionCommand,
+): Promise<PrSelectionResult> {
   const createOnly = command === "pr.create"
   const correlation = parseCorrelation(options.correlation)
   const state = stateOf(app)
@@ -3729,15 +3723,38 @@ async function applyPrSelectionVerb(
     }
     prs.push(pr)
   }
+  return { prs, warnings }
+}
+
+async function printPrSelectionResult(
+  io: YrdCliIO,
+  options: JsonOption,
+  command: PrSelectionCommand,
+  result: PrSelectionResult,
+): Promise<void> {
+  await printResultWithWarnings(
+    io,
+    jsonEnabled(options),
+    { command, prs: result.prs.map(projectPRTaskStatus) },
+    createElement(PRResultView, { prs: result.prs, runs: [] }),
+    result.warnings,
+  )
+}
+
+async function applyPrSelectionVerb(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  selectors: readonly string[],
+  options: PrSelectionOptions,
+  io: YrdCliIO,
+  command: PrSelectionCommand,
+): Promise<YrdCliExitCode> {
+  const result = await applyPrSelection(app, selectors, options, io, command)
+  const prs = [...result.prs]
+  const warnings = [...result.warnings]
+  const createOnly = command === "pr.create"
   if (command === "bay.submit" || createOnly) {
-    if (emitResult) {
-      await printResult(
-        io,
-        jsonEnabled(options),
-        { command, prs: prs.map(projectPRTaskStatus), ...(warnings.length > 0 ? { warnings } : {}) },
-        createElement(PRResultView, { prs, runs: [] }),
-      )
-    }
+    await printPrSelectionResult(io, options, command, result)
     return 0
   }
   // Q1 — a same-head resubmit of a landed branch returns the frozen landed PR
@@ -4445,27 +4462,26 @@ function issueRows(app: YrdCliApp, state: DeepReadonly<YrdCliState>, selected?: 
 
 async function ensureIssueDelivery(
   app: YrdCliApp,
-  services: YrdCliServices,
   issue: string,
   options: JsonOption,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
   await app.issues.resolve(app.issues.ref(issue))
   const opened = await prepareResolvedIssueBay(app, issue, io, { reuseActive: true })
-  const pr = await ensureIssueDraft(app, services, issue, opened.identity.branch, io, {
+  const draft = await ensureIssueDraft(app, issue, opened.identity.branch, io, {
     track: true,
-    emitResult: false,
   })
-  await printResult(
+  await printResultWithWarnings(
     io,
     jsonEnabled(options),
     {
       command: "issue.ensure",
       issue,
       bay: opened.bay,
-      pr: projectPRTaskStatus(pr),
+      pr: projectPRTaskStatus(draft.pr),
     },
-    `issue ${issue} → bay ${opened.bay.id} ${opened.identity.branch} → tracked draft ${pr.id}`,
+    `issue ${issue} → bay ${opened.bay.id} ${opened.identity.branch} → tracked draft ${draft.pr.id}`,
+    draft.warnings,
   )
   return 0
 }
@@ -5328,7 +5344,10 @@ async function primeYrd(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
       position: pr === undefined ? undefined : await queuedPrPosition(state, pr, io),
       pause: queue?.pause,
     },
-    boundaries: ["the queue is the only merger", "issues are read-only references; edit them in the tracker"],
+    boundaries: [
+      "the queue is the only merger",
+      "the tracker owns issue content; issue ensure creates only Git delivery facts",
+    ],
     json: "add --json to every read or mutation",
   }
   const live = [
@@ -5345,7 +5364,7 @@ async function primeYrd(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
     ...briefing.loop.map((step, index) => `${index + 1}. ${step}`),
     `Live: ${live}`,
     "The queue is the only merger; pr merge only teaches the correct next command.",
-    "The tracker holds the pen; yrd's issue surface is a read-only lens.",
+    "The tracker holds the pen; issue list/view are read-only, while issue ensure creates only Git delivery facts.",
     "Use --json for lossless machine-readable output.",
   ].join("\n")
   await printResult(io, jsonEnabled(options), { command: "prime", ...briefing }, human)
@@ -7280,7 +7299,7 @@ function buildProgram(
       "Pick an issue -> work it in a bay -> create a draft -> submit it ->\nPRs queue per base -> a run verifies and merges each one -> integrated,\nor parked for the author with a typed receipt.",
     )
     program.addHelpSection("Objects:", [
-      ["issue", "tracker-owned intent; yrd exposes a read-only delivery lens"],
+      ["issue", "tracker-owned intent; delivery lens plus Git-side ensure"],
       ["bay", "isolated Git workspace; also standalone as git-bay"],
       ["pr", "persistent branch delivery; draft until submitted; the queue's unit"],
       ["contest", "competing implementations; winner promotes to a PR"],
@@ -7802,9 +7821,7 @@ function buildProgram(
     .command("ensure <issue>")
     .description("ensure one issue-owned Bay and one tracked draft PR")
     .option("--json", "emit stable JSON")
-    .action(async (issueId, options) =>
-      setExit(await ensureIssueDelivery(installed(), installedServices(), issueId, options, io)),
-    )
+    .action(async (issueId, options) => setExit(await ensureIssueDelivery(installed(), issueId, options, io)))
 
   const contest = program.command("contest").description("inspect and select contest attempts")
   contest.helpCommand(false)

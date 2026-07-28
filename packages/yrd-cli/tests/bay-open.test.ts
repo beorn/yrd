@@ -143,12 +143,32 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
       })
       expect(secondResult.pr.revs).toEqual(firstResult.pr.revs)
 
+      const human = output(repo)
+      expect(await yrd(repo, human.io, "issue", "ensure", CLAIM), human.stderr()).toBe(0)
+      expect(human.stdout()).toBe(`issue ${CLAIM} → bay B1 ${BRANCH} → tracked draft PR1\n`)
+
       const bays = output(repo)
       expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
       expect((JSON.parse(bays.stdout()) as { bays: readonly unknown[] }).bays).toHaveLength(1)
       const prs = output(repo)
       expect(await yrd(repo, prs.io, "pr", "list", "--json"), prs.stderr()).toBe(0)
       expect((JSON.parse(prs.stdout()) as { prs: readonly unknown[] }).prs).toHaveLength(1)
+    })
+  })
+
+  it("refuses to ensure a draft from an active Bay with uncommitted work", async () => {
+    return withoutRuntimeName(async () => {
+      const { repo } = await repository()
+      const first = output(repo)
+      expect(await yrd(repo, first.io, "issue", "ensure", CLAIM, "--json"), first.stderr()).toBe(0)
+      const ensured = JSON.parse(first.stdout()) as { bay: { path: string } }
+      await writeFile(join(ensured.bay.path, "uncommitted.txt"), "not durable\n")
+
+      const retry = output(repo)
+      expect(await yrd(repo, retry.io, "issue", "ensure", CLAIM)).toBe(1)
+      expect(retry.stderr()).toContain("holds uncommitted changes")
+      expect(retry.stderr()).toContain("checkpoint them before ensuring its draft PR")
+      expect(retry.stderr()).toContain("yrd in B1")
     })
   })
 
