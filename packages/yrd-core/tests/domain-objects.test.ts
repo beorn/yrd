@@ -392,7 +392,7 @@ describe("Yrd domain objects", () => {
     expect(cache.reads[0]).toBe(0)
     expect(recovered.state().counter.value).toBe(4)
     expect(cache.stored()).toMatchObject({ cursor: 1, value: { v: 1 } })
-    expect(events.filter((entry) => JSON.stringify(entry).includes("projection checkpoint"))).toHaveLength(1)
+    expect(events.filter((entry) => JSON.stringify(entry).includes("Saved state is inconsistent"))).toHaveLength(1)
     await expect(
       recovered.dispatch({ op: "counter.add", args: { by: 4 } }, { key: "preserved-retry" }),
     ).resolves.toMatchObject({ events: [{ name: "counter/changed" }] })
