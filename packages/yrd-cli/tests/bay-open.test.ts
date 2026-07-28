@@ -1276,8 +1276,29 @@ exit 2
       try {
         await configureManagedDo(fixture.repo, {
           seat: "true",
-          launch: 'test -d "$YRD_DO_BAY_PATH/node_modules"',
+          launch: 'test -f "$YRD_DO_BAY_PATH/moved-managed.txt" && test -d "$YRD_DO_BAY_PATH/node_modules"',
         })
+
+        // Advance only the remote from the post-checkout hook fired by Bay
+        // creation. The Bay has already checked out the old base at that point,
+        // so the managed lifecycle must fetch, converge, refresh its recorded
+        // head, and provision before launch.
+        await git(fixture.repo, "checkout", "-qb", "future-base")
+        await writeFile(join(fixture.repo, "moved-managed.txt"), "advanced during Bay creation\n")
+        await git(fixture.repo, "add", "moved-managed.txt")
+        await git(fixture.repo, "commit", "-qm", "advance while the managed Bay opens")
+        const movedBase = await git(fixture.repo, "rev-parse", "HEAD")
+        await git(fixture.repo, "push", "-q", "origin", `${movedBase}:refs/heads/future-base`)
+        await git(fixture.repo, "checkout", "-q", "main")
+        const origin = await git(fixture.repo, "remote", "get-url", "origin")
+        const hook = join(fixture.repo, ".git", "hooks", "post-checkout")
+        await writeFile(
+          hook,
+          `#!/bin/sh
+exec git --git-dir=${JSON.stringify(origin)} update-ref refs/heads/main ${movedBase}
+`,
+        )
+        await chmod(hook, 0o755)
 
         const managed = output(fixture.repo)
         expect(await yrd(fixture.repo, managed.io, "do", CLAIM, "--seat")).toBe(1)
@@ -1286,14 +1307,44 @@ exit 2
         // launch because only the repository's long shell hook installed deps.
         expect(managed.stderr()).toContain("stage 'carrier'")
         expect(managed.stderr()).not.toContain("stage 'launch'")
+        expect(managed.stderr()).toContain("converging onto main")
         expect((await readFile(tools.log, "utf8")).trim().split("\n")).toEqual([
           "install --frozen-lockfile --ignore-scripts",
           "run postinstall",
         ])
+        const bayPath = await activeBayPath(fixture.repo, "B1")
+        const observed = await git(bayPath, "rev-parse", "HEAD")
+        await git(fixture.repo, "merge-base", "--is-ancestor", movedBase, observed)
+        const bays = output(fixture.repo)
+        expect(await yrd(fixture.repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
+        const recorded = (JSON.parse(bays.stdout()) as { bays: readonly { id: string; headSha?: string }[] }).bays
+        expect(recorded.find((bay) => bay.id === "B1")?.headSha).toBe(observed)
       } finally {
         await tools.restore()
       }
     })
+  })
+
+  it("refuses a managed Bay with declared dependencies but no deterministic package manager", async () => {
+    const fixture = await repository()
+    await writeFile(
+      join(fixture.repo, "package.json"),
+      `${JSON.stringify({ name: "unlocked-fixture", private: true, dependencies: { picocolors: "1.1.1" } }, null, 2)}\n`,
+    )
+    await git(fixture.repo, "add", "package.json")
+    await git(fixture.repo, "commit", "-qm", "declare unlocked dependencies")
+    await git(fixture.repo, "push", "-q", "origin", "main")
+    await configureManagedDo(fixture.repo, {
+      seat: "true",
+      launch: 'touch "$YRD_DO_BAY_PATH/launch-ran"',
+    })
+
+    const managed = output(fixture.repo)
+    expect(await yrd(fixture.repo, managed.io, "do", CLAIM, "--seat")).toBe(1)
+    expect(managed.stderr()).toContain("stage 'bay'")
+    expect(managed.stderr()).toContain("no recognized package-manager lockfile")
+    const bayPath = await activeBayPath(fixture.repo, "B1")
+    await expect(access(join(bayPath, "launch-ran"))).rejects.toThrow()
   })
 
   it("runs a refused seat decision before Bay provisioning", async () => {

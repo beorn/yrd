@@ -1764,18 +1764,38 @@ const BAY_PACKAGE_MANAGERS = [
  * own generous lease so a cold cache is not mistaken for a hang. */
 const BAY_PROVISION_TIMEOUT_MS = 900_000
 
-function bayManifestPostinstall(manifest: string, path: string): boolean {
+function bayManifestProvisioning(
+  manifest: string,
+  path: string,
+): {
+  readonly hasDependencies: boolean
+  readonly hasPostinstall: boolean
+} {
   let parsed: unknown
   try {
     parsed = JSON.parse(manifest)
   } catch (error) {
     refusal(`bay manifest '${path}' is not valid JSON: ${errorDetail(error)}`)
   }
-  if (typeof parsed !== "object" || parsed === null) return false
+  if (typeof parsed !== "object" || parsed === null) {
+    return { hasDependencies: false, hasPostinstall: false }
+  }
+  const manifestObject = parsed as Record<string, unknown>
+  const hasDependencies = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"].some(
+    (field) => {
+      const dependencies = manifestObject[field]
+      return typeof dependencies === "object" && dependencies !== null && Object.keys(dependencies).length > 0
+    },
+  )
   const scripts = (parsed as { scripts?: unknown }).scripts
-  if (typeof scripts !== "object" || scripts === null) return false
+  if (typeof scripts !== "object" || scripts === null) {
+    return { hasDependencies, hasPostinstall: false }
+  }
   const postinstall = (scripts as { postinstall?: unknown }).postinstall
-  return typeof postinstall === "string" && postinstall.trim() !== ""
+  return {
+    hasDependencies,
+    hasPostinstall: typeof postinstall === "string" && postinstall.trim() !== "",
+  }
 }
 
 /**
@@ -1787,9 +1807,8 @@ function bayManifestPostinstall(manifest: string, path: string): boolean {
  * one evening (2026-07-27). The child exits, Yrd preserves the Bay as an orphan,
  * and the operator is left holding a mystery that was one install away.
  *
- * The managed lane already installs in its configured launch stage. This is the
- * same guarantee at the one place every Bay child passes through, so the session
- * a person opens by hand gets it too.
+ * Managed setup and interactive Bay children share this helper, so both install
+ * before launch or child start; managed setup additionally converges first.
  *
  * Third-party lifecycle scripts stay off: provisioning a Bay must not run
  * install hooks nobody reviewed. The repository's OWN `postinstall` does run,
@@ -1809,14 +1828,14 @@ async function ensureBayDependencies(
   // Already provisioned: an adopted or reused Bay pays nothing, unless a
   // converge just moved the checkout out from under what is installed.
   if (!reinstall && existsSync(join(path, "node_modules"))) return
+  const manifest = bayManifestProvisioning(await readFile(manifestPath, "utf8"), manifestPath)
   const chosen = BAY_PACKAGE_MANAGERS.find((candidate) => existsSync(join(path, candidate.lockfile)))
   if (chosen === undefined) {
-    io.stderr(
-      `yrd: bay '${bay.id}' declares dependencies in package.json but has no node_modules and none of ` +
-        `${BAY_PACKAGE_MANAGERS.map((candidate) => candidate.lockfile).join(", ")} to name its package manager; ` +
-        "its child starts with nothing installed\n",
+    if (!manifest.hasDependencies && !manifest.hasPostinstall) return
+    refusal(
+      `bay '${bay.id}' requires provisioning but has no recognized package-manager lockfile; expected one of ` +
+        BAY_PACKAGE_MANAGERS.map((candidate) => candidate.lockfile).join(", "),
     )
-    return
   }
 
   const provision = async (argv: readonly string[]): Promise<void> => {
@@ -1841,7 +1860,7 @@ async function ensureBayDependencies(
   }
 
   await provision([chosen.manager, ...chosen.install])
-  if (bayManifestPostinstall(await readFile(manifestPath, "utf8"), manifestPath)) {
+  if (manifest.hasPostinstall) {
     await provision([chosen.manager, "run", "postinstall"])
   }
 }
