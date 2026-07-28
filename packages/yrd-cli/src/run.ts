@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
+import { existsSync } from "node:fs"
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { basename, isAbsolute, join, relative, resolve } from "node:path"
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
@@ -1751,6 +1752,103 @@ function childOutput(io: YrdCliIO): Readonly<{
   }
 }
 
+/**
+ * Package managers a Bay can be provisioned with, named by the lockfile the
+ * repository committed. Yrd does not choose one — the repository already chose
+ * when it wrote a lockfile, and one it does not recognise is reported rather
+ * than guessed at.
+ */
+const BAY_PACKAGE_MANAGERS = [
+  { lockfile: "bun.lock", manager: "bun", install: ["install", "--frozen-lockfile", "--ignore-scripts"] },
+  { lockfile: "bun.lockb", manager: "bun", install: ["install", "--frozen-lockfile", "--ignore-scripts"] },
+  { lockfile: "pnpm-lock.yaml", manager: "pnpm", install: ["install", "--frozen-lockfile", "--ignore-scripts"] },
+  { lockfile: "package-lock.json", manager: "npm", install: ["ci", "--ignore-scripts"] },
+] as const satisfies readonly Readonly<{ lockfile: string; manager: string; install: readonly string[] }>[]
+
+/** A Bay install is a provisioning step, not the operator's work; it gets its
+ * own generous lease so a cold cache is not mistaken for a hang. */
+const BAY_PROVISION_TIMEOUT_MS = 900_000
+
+function bayManifestPostinstall(manifest: string, path: string): boolean {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(manifest)
+  } catch (error) {
+    refusal(`bay manifest '${path}' is not valid JSON: ${errorDetail(error)}`)
+  }
+  if (typeof parsed !== "object" || parsed === null) return false
+  const scripts = (parsed as { scripts?: unknown }).scripts
+  if (typeof scripts !== "object" || scripts === null) return false
+  const postinstall = (scripts as { postinstall?: unknown }).postinstall
+  return typeof postinstall === "string" && postinstall.trim() !== ""
+}
+
+/**
+ * Make a Bay runnable before anything is launched inside it.
+ *
+ * A Bay is a brand-new worktree: it carries every tracked file and none of the
+ * installed dependencies, so the first thing an agent harness does in a fresh
+ * one is fail to resolve a module — `Cannot find package 'picocolors'`, twice in
+ * one evening (2026-07-27). The child exits, Yrd preserves the Bay as an orphan,
+ * and the operator is left holding a mystery that was one install away.
+ *
+ * The managed lane already installs in its configured launch stage. This is the
+ * same guarantee at the one place every Bay child passes through, so the session
+ * a person opens by hand gets it too.
+ *
+ * Third-party lifecycle scripts stay off: provisioning a Bay must not run
+ * install hooks nobody reviewed. The repository's OWN `postinstall` does run,
+ * because it is first-party codegen, and skipping it leaves a checkout that
+ * installed cleanly and still cannot boot.
+ */
+async function ensureBayDependencies(
+  processService: Pick<Process, "run">,
+  bay: Bay,
+  path: string,
+  io: YrdCliIO,
+  env: NodeJS.ProcessEnv | undefined,
+): Promise<void> {
+  const manifestPath = join(path, "package.json")
+  if (!existsSync(manifestPath)) return
+  // Already provisioned: an adopted or reused Bay pays nothing.
+  if (existsSync(join(path, "node_modules"))) return
+  const chosen = BAY_PACKAGE_MANAGERS.find((candidate) => existsSync(join(path, candidate.lockfile)))
+  if (chosen === undefined) {
+    io.stderr(
+      `yrd: bay '${bay.id}' declares dependencies in package.json but has no node_modules and none of ` +
+        `${BAY_PACKAGE_MANAGERS.map((candidate) => candidate.lockfile).join(", ")} to name its package manager; ` +
+        "its child starts with nothing installed\n",
+    )
+    return
+  }
+
+  const provision = async (argv: readonly string[]): Promise<void> => {
+    io.stderr(`yrd: bay '${bay.id}' provisioning: ${argv.join(" ")}\n`)
+    const decoder = new TextDecoder()
+    const result = await processService.run({
+      argv,
+      cwd: path,
+      ...(env === undefined ? {} : { env }),
+      timeoutMs: BAY_PROVISION_TIMEOUT_MS,
+      ...(io.drainSignal === undefined ? {} : { signal: io.drainSignal }),
+      onOutput({ chunk }) {
+        const text = decoder.decode(chunk, { stream: true })
+        if (text !== "") io.stderr(text)
+      },
+    })
+    if (childSucceeded(result)) return
+    refusal(
+      `bay '${bay.id}' could not install its dependencies; ` +
+        `${argv.join(" ")} ${childFailureReason(result)}\n${commandOutputTail(result)}`,
+    )
+  }
+
+  await provision([chosen.manager, ...chosen.install])
+  if (bayManifestPostinstall(await readFile(manifestPath, "utf8"), manifestPath)) {
+    await provision([chosen.manager, "run", "postinstall"])
+  }
+}
+
 async function runBayChild(
   processService: Pick<Process, "run">,
   bay: Bay,
@@ -1762,6 +1860,7 @@ async function runBayChild(
   }> = {},
 ): Promise<ProcessResult> {
   if (bay.path === undefined) refusal(`bay '${bay.id}' has no active workspace path`)
+  await ensureBayDependencies(processService, bay, bay.path, io, options.env)
   const output = io.interactive === true ? undefined : childOutput(io)
   try {
     return await processService.run({

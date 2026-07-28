@@ -17,12 +17,17 @@ const JOURNAL_CONFIG = `journal:
   version: ${CURRENT_JOURNAL_COMPATIBILITY.version}
   reader: "${CURRENT_JOURNAL_COMPATIBILITY.reader}"
 `
-/** Stand-in `ag` that records who it was launched as and the exact argv it received. */
+/**
+ * Stand-in `ag` that records who it was launched as, the exact argv it received,
+ * and whether the Bay was runnable when it started — a real agent harness
+ * resolves modules before it can do anything else.
+ */
 const AG_ARGV_RECORDER = `#!/bin/sh
 printf '%s' "$HAB_NAME" > agent.name
 printf '%s' "$*" > agent.prompt
 : > agent.argv
 for arg in "$@"; do printf '%s\\n' "$arg" >> agent.argv; done
+if [ -d node_modules ]; then printf 'present' > agent.deps; else printf 'absent' > agent.deps; fi
 `
 let originalPath: string | undefined
 let issueToolRoot: string | undefined
@@ -1024,6 +1029,87 @@ printf '%s %s' "$HAB_NAME" "$$" > cwd-guest.name
     })
   })
 
+  it("installs a fresh Bay's dependencies before its child starts", async () => {
+    return withoutRuntimeName(async () => {
+      const fixture = await packagedRepository()
+      const tools = await packageManagerShim()
+      try {
+        const run = output(fixture.repo)
+        expect(await yrd(fixture.repo, run.io, "do", CLAIM), run.stderr()).toBe(0)
+        // The repository named its package manager with a lockfile; the child
+        // must find its dependencies already installed, which is the whole
+        // point — `ag` died on module resolution without this.
+        expect((await readFile(tools.log, "utf8")).trim().split("\n")).toEqual([
+          "install --frozen-lockfile --ignore-scripts",
+          "run postinstall",
+        ])
+        expect(await git(fixture.repo, "show", `refs/remotes/origin/${BRANCH}:agent.deps`)).toBe("present")
+        expect(run.stderr()).toContain("bun install --frozen-lockfile --ignore-scripts")
+      } finally {
+        await tools.restore()
+      }
+    })
+  })
+
+  it("does not reinstall dependencies an adopted Bay already has", async () => {
+    return withoutRuntimeName(async () => {
+      const fixture = await packagedRepository()
+      const tools = await packageManagerShim()
+      try {
+        // Attempt one provisions the Bay, then its child dies. The Bay is
+        // preserved with node_modules intact, so the retry has nothing to do.
+        await writeFile(join(tools.bin, "ag"), "#!/bin/sh\nexit 2\n")
+        await chmod(join(tools.bin, "ag"), 0o755)
+        const first = output(fixture.repo)
+        expect(await yrd(fixture.repo, first.io, "do", CLAIM)).toBe(1)
+        const installed = (await readFile(tools.log, "utf8")).trim().split("\n")
+        expect(installed).toHaveLength(2)
+
+        await writeFile(join(tools.bin, "ag"), AG_ARGV_RECORDER)
+        await chmod(join(tools.bin, "ag"), 0o755)
+        const retry = output(fixture.repo)
+        expect(await yrd(fixture.repo, retry.io, "do", CLAIM), retry.stderr()).toBe(0)
+        expect(retry.stdout()).toContain("adopted")
+        expect((await readFile(tools.log, "utf8")).trim().split("\n")).toEqual(installed)
+        expect(retry.stderr()).not.toContain("install --frozen-lockfile")
+      } finally {
+        await tools.restore()
+      }
+    })
+  })
+
+  it("fails the launch loudly when a Bay's dependencies cannot be installed", async () => {
+    return withoutRuntimeName(async () => {
+      const fixture = await packagedRepository()
+      const tools = await packageManagerShim({ install: "fails" })
+      try {
+        const run = output(fixture.repo)
+        expect(await yrd(fixture.repo, run.io, "do", CLAIM)).toBe(1)
+        const stderr = run.stderr()
+        expect(stderr).toContain("could not install its dependencies")
+        expect(stderr).toContain("bun install --frozen-lockfile --ignore-scripts")
+        // The tail is the diagnosis: without it the operator holds an orphaned
+        // Bay and no reason.
+        expect(stderr).toContain("lockfile had changes, but lockfile is frozen")
+
+        // A child must never start in a Bay that could not be provisioned.
+        const bayPath = await activeBayPath(fixture.repo, "B1")
+        await expect(access(join(bayPath, "agent.argv"))).rejects.toThrow()
+        const bays = output(fixture.repo)
+        expect(await yrd(fixture.repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
+        expect(JSON.parse(bays.stdout())).toMatchObject({
+          bays: [
+            expect.objectContaining({
+              orphan: expect.objectContaining({ reason: expect.stringContaining("bun install") }),
+            }),
+          ],
+        })
+      } finally {
+        await tools.restore()
+      }
+    })
+  })
+
   it("refuses managed do by config key name and never provisions a bay", async () => {
     const fixture = await repository()
     const seat = output(fixture.repo)
@@ -1873,6 +1959,96 @@ ${JOURNAL_CONFIG}`,
   await git(repo, "commit", "-qm", "main")
   await git(repo, "push", "-q", "-u", "origin", "main")
   return { repo }
+}
+
+/**
+ * A repository that declares dependencies, the way every repository a Bay is
+ * cut from does. `node_modules` is ignored so an installed Bay still reads as
+ * clean — an adoption must not mistake its own provisioning for the operator's
+ * uncommitted work.
+ */
+async function packagedRepository(): Promise<{ repo: string }> {
+  const fixture = await repository()
+  await writeFile(
+    join(fixture.repo, "package.json"),
+    `${JSON.stringify({ name: "bay-fixture", private: true, scripts: { postinstall: "true" } }, null, 2)}\n`,
+  )
+  await writeFile(join(fixture.repo, "bun.lock"), "{}\n")
+  await writeFile(join(fixture.repo, ".gitignore"), "node_modules/\n")
+  await git(fixture.repo, "add", "package.json", "bun.lock", ".gitignore")
+  await git(fixture.repo, "commit", "-qm", "declare dependencies")
+  await git(fixture.repo, "push", "-q", "origin", "main")
+  return fixture
+}
+
+/**
+ * `bun` and `ag` stand-ins on PATH.
+ *
+ * The package-manager shim records provisioning argv and passes everything else
+ * through to the real Bun: the managed push receiver runs under
+ * `#!/usr/bin/env bun`, so a shim that swallowed every invocation would break
+ * the Bay's own delivery path rather than the install under test.
+ */
+async function packageManagerShim(
+  options: Readonly<{ install?: "succeeds" | "fails" }> = {},
+): Promise<{ bin: string; log: string; restore(): Promise<void> }> {
+  const bin = await mkdtemp(join(tmpdir(), "yrd-bay-deps-tools-"))
+  roots.push(bin)
+  const log = join(bin, "package-manager.log")
+  await writeFile(log, "")
+  const provision =
+    options.install === "fails"
+      ? `  install)
+    printf 'error: lockfile had changes, but lockfile is frozen\\n' >&2
+    exit 1
+    ;;
+  run)
+    exit 0
+    ;;`
+      : `  install)
+    mkdir -p node_modules
+    exit 0
+    ;;
+  run)
+    exit 0
+    ;;`
+  await writeFile(
+    join(bin, "bun"),
+    `#!/bin/sh
+case "$1" in
+  install|run)
+    printf '%s\\n' "$*" >> "$YRD_TEST_PACKAGE_MANAGER_LOG"
+    ;;
+  *)
+    exec "$YRD_TEST_REAL_BUN" "$@"
+    ;;
+esac
+case "$1" in
+${provision}
+esac
+`,
+  )
+  await chmod(join(bin, "bun"), 0o755)
+  await writeFile(join(bin, "ag"), AG_ARGV_RECORDER)
+  await chmod(join(bin, "ag"), 0o755)
+  const previous = {
+    path: process.env.PATH,
+    log: process.env.YRD_TEST_PACKAGE_MANAGER_LOG,
+    bun: process.env.YRD_TEST_REAL_BUN,
+  }
+  process.env.PATH = `${bin}:${previous.path ?? ""}`
+  process.env.YRD_TEST_PACKAGE_MANAGER_LOG = log
+  process.env.YRD_TEST_REAL_BUN = process.execPath
+  return {
+    bin,
+    log,
+    restore: async () => {
+      restoreEnv("PATH", previous.path)
+      restoreEnv("YRD_TEST_PACKAGE_MANAGER_LOG", previous.log)
+      restoreEnv("YRD_TEST_REAL_BUN", previous.bun)
+      await Promise.resolve()
+    },
+  }
 }
 
 async function configureNotify(repo: string, check = "true"): Promise<void> {
