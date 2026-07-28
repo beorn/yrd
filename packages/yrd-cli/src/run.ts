@@ -1807,11 +1807,13 @@ async function ensureBayDependencies(
   path: string,
   io: YrdCliIO,
   env: NodeJS.ProcessEnv | undefined,
+  reinstall: boolean,
 ): Promise<void> {
   const manifestPath = join(path, "package.json")
   if (!existsSync(manifestPath)) return
-  // Already provisioned: an adopted or reused Bay pays nothing.
-  if (existsSync(join(path, "node_modules"))) return
+  // Already provisioned: an adopted or reused Bay pays nothing, unless a
+  // converge just moved the checkout out from under what is installed.
+  if (!reinstall && existsSync(join(path, "node_modules"))) return
   const chosen = BAY_PACKAGE_MANAGERS.find((candidate) => existsSync(join(path, candidate.lockfile)))
   if (chosen === undefined) {
     io.stderr(
@@ -1849,6 +1851,71 @@ async function ensureBayDependencies(
   }
 }
 
+/**
+ * Walk an adopted Bay's checkout up to its base before anything runs in it.
+ *
+ * A Bay adopted from a failed attempt was cut whenever that attempt started,
+ * and the base has moved since. The agent that walks in reads, builds and
+ * reasons about superseded code: B238 held a pre-fix `vendor/yrd`, so the Bay's
+ * own Yrd behaved unlike the version string the operator was reading off the
+ * screen. A fresh Bay is cut from the base and needs none of this, and a guest
+ * has no lifecycle authority to merge into somebody else's branch — so this is
+ * the adoption's own step.
+ *
+ * Merge, never rebase: the Bay's branch is pushed work. A conflict is a
+ * judgement only the operator can make, so the merge is abandoned rather than
+ * left half-applied, and the refusal carries the command that puts them inside
+ * the Bay to make it.
+ *
+ * Returns whether the checkout actually moved, because a merge that moved it
+ * can have moved the manifest or the lockfile with it.
+ */
+async function convergeAdoptedBay(
+  processService: Pick<Process, "run">,
+  bay: Bay,
+  path: string,
+  io: YrdCliIO,
+  env: NodeJS.ProcessEnv | undefined,
+): Promise<boolean> {
+  const gitEnv = cleanGitEnvironment(env ?? process.env)
+  const git = (argv: readonly string[]): Promise<ProcessResult> =>
+    processService.run({
+      argv: ["git", ...argv],
+      cwd: path,
+      env: gitEnv,
+      timeoutMs: BAY_PROVISION_TIMEOUT_MS,
+      ...(io.drainSignal === undefined ? {} : { signal: io.drainSignal }),
+    })
+  const head = async (): Promise<string> => {
+    const result = await git(["rev-parse", "HEAD"])
+    if (!childSucceeded(result)) {
+      refusal(`bay '${bay.id}' has no readable HEAD; git rev-parse ${childFailureReason(result)}`)
+    }
+    return result.stdout.trim()
+  }
+
+  const before = await head()
+  io.stderr(`yrd: bay '${bay.id}' converging onto ${bay.base}\n`)
+  const fetched = await git(["fetch", "origin", bay.base])
+  if (!childSucceeded(fetched)) {
+    refusal(
+      `bay '${bay.id}' could not fetch its base '${bay.base}'; ` +
+        `git fetch ${childFailureReason(fetched)}\n${commandOutputTail(fetched)}`,
+    )
+  }
+  const merged = await git(["merge", "--no-edit", `origin/${bay.base}`])
+  if (!childSucceeded(merged)) {
+    // Leave the Bay adoptable instead of half-merged: the operator reruns the
+    // exact merge below, in the Bay, and decides it there.
+    await git(["merge", "--abort"])
+    refusal(
+      `bay '${bay.id}' holds work that could not be merged with '${bay.base}'; resolve it in the Bay:\n` +
+        `  yrd in ${bay.id} -- git merge origin/${bay.base}\n${commandOutputTail(merged)}`,
+    )
+  }
+  return (await head()) !== before
+}
+
 async function runBayChild(
   processService: Pick<Process, "run">,
   bay: Bay,
@@ -1857,10 +1924,13 @@ async function runBayChild(
   options: Readonly<{
     env?: NodeJS.ProcessEnv
     onStart?: (pid: number) => void
+    /** Provision even when `node_modules` is present: the checkout just moved
+     * under it, so what is installed there may no longer be what it declares. */
+    reinstall?: boolean
   }> = {},
 ): Promise<ProcessResult> {
   if (bay.path === undefined) refusal(`bay '${bay.id}' has no active workspace path`)
-  await ensureBayDependencies(processService, bay, bay.path, io, options.env)
+  await ensureBayDependencies(processService, bay, bay.path, io, options.env, options.reinstall === true)
   const output = io.interactive === true ? undefined : childOutput(io)
   try {
     return await processService.run({
@@ -2221,14 +2291,21 @@ async function runBaySession(
     provisioned.adopted === true ? "adopted" : identity.reattached ? "reattached" : "new",
   )
 
+  const env = { ...(services.environment ?? process.env), HAB_NAME: identity.name }
+  // An adopted Bay is as old as the attempt that abandoned it. Converge before
+  // the child exists, so a refusal here leaves the Bay exactly as adoptable as
+  // it was found rather than adding a second orphan on top of the first.
+  const moved =
+    provisioned.adopted === true && bay.path !== undefined
+      ? await convergeAdoptedBay(services.process, bay, bay.path, io, env)
+      : false
+
   let child: ProcessResult
   try {
     const argv = typeof childArgv === "function" ? childArgv(identity) : childArgv
     child = await runBayChild(services.process, bay, argv.length === 0 ? defaultRunArgv(services) : argv, io, {
-      env: {
-        ...(services.environment ?? process.env),
-        HAB_NAME: identity.name,
-      },
+      env,
+      ...(moved ? { reinstall: true } : {}),
     })
   } catch (error) {
     await orphanRunBay(app, bay, `child could not settle: ${errorDetail(error)}`)

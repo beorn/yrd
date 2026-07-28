@@ -28,6 +28,7 @@ printf '%s' "$*" > agent.prompt
 : > agent.argv
 for arg in "$@"; do printf '%s\\n' "$arg" >> agent.argv; done
 if [ -d node_modules ]; then printf 'present' > agent.deps; else printf 'absent' > agent.deps; fi
+git rev-parse HEAD > agent.head 2>/dev/null || printf 'none' > agent.head
 `
 let originalPath: string | undefined
 let issueToolRoot: string | undefined
@@ -1072,6 +1073,90 @@ printf '%s %s' "$HAB_NAME" "$$" > cwd-guest.name
         expect(retry.stdout()).toContain("adopted")
         expect((await readFile(tools.log, "utf8")).trim().split("\n")).toEqual(installed)
         expect(retry.stderr()).not.toContain("install --frozen-lockfile")
+      } finally {
+        await tools.restore()
+      }
+    })
+  })
+
+  it("converges an adopted Bay onto its base before the child starts", async () => {
+    return withoutRuntimeName(async () => {
+      const fixture = await packagedRepository()
+      const tools = await packageManagerShim()
+      try {
+        await writeFile(join(tools.bin, "ag"), "#!/bin/sh\nexit 2\n")
+        await chmod(join(tools.bin, "ag"), 0o755)
+        expect(await yrd(fixture.repo, output(fixture.repo).io, "do", CLAIM)).toBe(1)
+        const provisioned = (await readFile(tools.log, "utf8")).trim().split("\n")
+        expect(provisioned).toHaveLength(2)
+
+        // Base moves on, the way it does between a failed attempt and the
+        // retry. The adopted Bay is now behind, and an agent working there
+        // would read, build and reason about superseded code.
+        await writeFile(join(fixture.repo, "moved.txt"), "base moved\n")
+        await git(fixture.repo, "add", "moved.txt")
+        await git(fixture.repo, "commit", "-qm", "advance the base")
+        await git(fixture.repo, "push", "-q", "origin", "main")
+        const movedBase = await git(fixture.repo, "rev-parse", "HEAD")
+
+        await writeFile(join(tools.bin, "ag"), AG_ARGV_RECORDER)
+        await chmod(join(tools.bin, "ag"), 0o755)
+        const retry = output(fixture.repo)
+        expect(await yrd(fixture.repo, retry.io, "do", CLAIM), retry.stderr()).toBe(0)
+        expect(retry.stdout()).toContain("adopted")
+
+        // The child's own view of HEAD already contained the new base, so the
+        // converge landed before the exec rather than after it.
+        const observed = await git(fixture.repo, "show", `refs/remotes/origin/${BRANCH}:agent.head`)
+        await git(fixture.repo, "merge-base", "--is-ancestor", movedBase, observed)
+        // A merge that moved the checkout can move package.json or the
+        // lockfile with it, so the dependencies are installed again.
+        expect((await readFile(tools.log, "utf8")).trim().split("\n")).toHaveLength(4)
+      } finally {
+        await tools.restore()
+      }
+    })
+  })
+
+  it("refuses an adopted Bay whose converge conflicts, naming the command that resolves it", async () => {
+    return withoutRuntimeName(async () => {
+      const fixture = await packagedRepository()
+      const tools = await packageManagerShim()
+      try {
+        // The Bay's own commit and the base both touch one file, so the
+        // converge cannot be decided mechanically.
+        await writeFile(
+          join(tools.bin, "ag"),
+          `#!/bin/sh
+printf 'bay edit\\n' > contested.txt
+git add contested.txt
+git -c user.name=Bay -c user.email=bay@example.invalid commit -qm 'bay work'
+exit 2
+`,
+        )
+        await chmod(join(tools.bin, "ag"), 0o755)
+        expect(await yrd(fixture.repo, output(fixture.repo).io, "do", CLAIM)).toBe(1)
+
+        await writeFile(join(fixture.repo, "contested.txt"), "base edit\n")
+        await git(fixture.repo, "add", "contested.txt")
+        await git(fixture.repo, "commit", "-qm", "contest the same file")
+        await git(fixture.repo, "push", "-q", "origin", "main")
+
+        await writeFile(join(tools.bin, "ag"), AG_ARGV_RECORDER)
+        await chmod(join(tools.bin, "ag"), 0o755)
+        const retry = output(fixture.repo)
+        expect(await yrd(fixture.repo, retry.io, "do", CLAIM)).toBe(1)
+        const remedy = retry.stderr()
+        expect(remedy).toContain("could not be merged")
+        expect(remedy).toContain("yrd in B1 -- git merge origin/main")
+        expect(remedy).not.toContain("<command>")
+
+        // No child ran, and the aborted merge left the Bay adoptable rather
+        // than half-merged.
+        const bayPath = await activeBayPath(fixture.repo, "B1")
+        await expect(access(join(bayPath, "agent.argv"))).rejects.toThrow()
+        const status = await git(bayPath, "status", "--porcelain")
+        expect(status).toBe("")
       } finally {
         await tools.restore()
       }
