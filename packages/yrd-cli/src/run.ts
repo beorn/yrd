@@ -1847,15 +1847,15 @@ async function ensureBayDependencies(
 }
 
 /**
- * Walk an adopted Bay's checkout up to its base before anything runs in it.
+ * Walk an owner-controlled Bay's checkout up to its base before launch.
  *
- * A Bay adopted from a failed attempt was cut whenever that attempt started,
- * and the base has moved since. The agent that walks in reads, builds and
- * reasons about superseded code: B238 held a pre-fix `vendor/yrd`, so the Bay's
+ * A Bay adopted from a failed attempt was cut whenever that attempt started.
+ * A freshly opened managed Bay can also skew while its preceding dispatch
+ * stages run and the base advances. In both cases, launching superseded code
+ * recreates the same failure: B238 held a pre-fix `vendor/yrd`, so the Bay's
  * own Yrd behaved unlike the version string the operator was reading off the
- * screen. A fresh Bay is cut from the base and needs none of this, and a guest
- * has no lifecycle authority to merge into somebody else's branch — so this is
- * the adoption's own step.
+ * screen. Guests still have no lifecycle authority to merge into somebody
+ * else's branch; only the owning run and managed composition call this seam.
  *
  * Merge, never rebase: the Bay's branch is pushed work. A conflict is a
  * judgement only the operator can make, so the merge is abandoned rather than
