@@ -351,6 +351,44 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     await expect(Array.fromAsync(journal.read())).resolves.toEqual([])
   })
 
+  it("refuses the activated writer while the repository still installs the prior reader floor", async () => {
+    const { repo, featureSha } = await repository()
+    const stateDir = join(repo, ".git", "yrd-prior-reader-floor")
+    const journal = createJournal({
+      dir: stateDir,
+      compatibility: { version: CURRENT_JOURNAL_COMPATIBILITY.version - 1, reader: "0".repeat(40) },
+      inject: { sqliteVersion: "3.53.0" },
+    } as unknown as Parameters<typeof createJournal>[0])
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      requires: [],
+      definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+    await using app = await createDefaultYrdApp({
+      repo,
+      stateDir,
+      baysRoot: join(repo, ".bays"),
+      journal,
+      process: runtimeProcess,
+      config,
+    })
+
+    await expect(app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })).rejects.toMatchObject(
+      {
+        failure: {
+          kind: "refusal",
+          code: "journal-write-version-floor",
+          message: expect.stringContaining(CURRENT_JOURNAL_COMPATIBILITY.reader),
+        },
+      },
+    )
+    await expect(Array.fromAsync(journal.read())).resolves.toEqual([])
+  })
+
   it("distinguishes loaded native source from the freshly fetched authoritative gitlink", async () => {
     const { repo } = await repository()
     const root = join(repo, "..")
