@@ -14,6 +14,7 @@ import {
   createYrd,
   createYrdDef,
   event,
+  journalEvent,
   parseJournalFrame,
   type CommandTree,
   type Journal,
@@ -95,7 +96,9 @@ function counterDefinition(offset = 0, projectionVersion: string | null = `count
   const contribution = {
     initialState: { counter: { value: 0 } },
     commands: { counter: { add } },
-    events: { "counter/changed": z.object({ from: z.number().int(), by: z.number().int() }) },
+    events: {
+      "counter/changed": journalEvent(1, z.object({ from: z.number().int(), by: z.number().int() })),
+    },
     ...(projectionVersion === null ? {} : { projectionVersion }),
     project(state: CounterState, applied: { name: string; data: unknown }) {
       const by = (applied.data as { by: number }).by
@@ -117,7 +120,7 @@ function prototypeKeyDefinition() {
   return createYrdDef().extend({
     initialState: { values: {} as Record<string, string> },
     commands: { values: { put } },
-    events: { "values/put": z.object({ key: z.string(), value: z.string() }) },
+    events: { "values/put": journalEvent(1, z.object({ key: z.string(), value: z.string() })) },
     projectionVersion: "prototype-key-v1",
     project(state: PrototypeKeyState, applied: { name: string; data: unknown }) {
       const { key, value } = applied.data as { key: string; value: string }
@@ -197,7 +200,7 @@ describe("persistent Core projection checkpoint", () => {
     const definition = createYrdDef().extend({
       initialState: { items: [] as number[] },
       commands: { items: { add } },
-      events: { "items/added": z.object({ value: z.number().int() }) },
+      events: { "items/added": journalEvent(1, z.object({ value: z.number().int() })) },
       projectionVersion: "custom-journal-retention-v1",
       project(state: { items: number[] }, applied: { data: unknown }) {
         return { items: [...state.items, (applied.data as { value: number }).value] }
@@ -227,7 +230,7 @@ describe("persistent Core projection checkpoint", () => {
     const definition = createYrdDef().extend({
       initialState: { items: [] as number[] },
       commands: { items: { addPair } },
-      events: { "items/added": z.object({ value: z.number().int() }) },
+      events: { "items/added": journalEvent(1, z.object({ value: z.number().int() })) },
       projectionVersion: "atomic-frame-compaction-v1",
       project(state: { items: number[] }, applied: { data: unknown }) {
         return { items: [...state.items, (applied.data as { value: number }).value] }
@@ -259,7 +262,7 @@ describe("persistent Core projection checkpoint", () => {
       createYrdDef().extend({
         initialState: { items: [] as number[] },
         commands: { items: { add } },
-        events: { "items/added": z.object({ value: z.number().int() }) },
+        events: { "items/added": journalEvent(1, z.object({ value: z.number().int() })) },
         projectionVersion: version,
         project(state: { items: number[] }, applied: { data: unknown }) {
           return { items: [...state.items, (applied.data as { value: number }).value] }

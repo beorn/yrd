@@ -1,6 +1,7 @@
 import {
   command,
   event,
+  journalEvent,
   type CommandHandler,
   type CommandResult,
   type CommandTree,
@@ -1212,9 +1213,9 @@ export function withJobs(options: JobsOptions = {}) {
       initialState: { jobs: emptyJobsState() },
       commands: { job: { transition, restore } },
       events: {
-        "job/requested": JobRequestSchema,
-        "job/transitioned": JobTransitionSchema,
-        "job/restored": RestoreJobSchema,
+        "job/requested": journalEvent(1, JobRequestSchema),
+        "job/transitioned": journalEvent(1, JobTransitionSchema),
+        "job/restored": journalEvent(1, RestoreJobSchema),
       },
       replayEvents: {
         "job/transitioned": ReplayJobTransitionSchema,

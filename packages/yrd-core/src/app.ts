@@ -31,6 +31,7 @@ import {
 import { asFailure, raiseFailure } from "./failure.ts"
 import {
   assertJournalReaderCompatibility,
+  JOURNAL_READER_VERSION,
   parseJournalFrame,
   type JournalCompatibility,
   type JournalFrame,
@@ -75,7 +76,10 @@ export type CommandDef<State extends object, Args extends JsonValue | undefined>
   apply(state: DeepReadonly<State>, args: Args, context: Omit<CommandContext<State>, "state">): ApplyResult
 }>
 
-type EventSchemas = Readonly<Record<string, z.ZodType<JsonValue>>>
+type EventSchema = z.ZodType<JsonValue>
+type EventSchemas = Readonly<Record<string, EventSchema>>
+export type JournalEventDef = Readonly<{ reader: number; schema: EventSchema }>
+type JournalEvents = Readonly<Record<string, JournalEventDef>>
 type Project<State extends object> = (state: DeepReadonly<State>, event: Event, cause: Cause) => State
 type Empty = Readonly<Record<never, never>>
 const projectionVersions = Symbol("yrd.projectionVersions")
@@ -142,7 +146,7 @@ type Contribution<
 > = Readonly<{
   initialState?: AddedState
   commands?: AddedCommands
-  events?: EventSchemas
+  events?: JournalEvents
   replayEvents?: EventSchemas
   projectionVersion?: string
   project?(state: DeepReadonly<AddedState>, event: Event, cause: Cause): AddedState
@@ -158,7 +162,7 @@ export type YrdDef<
 > = Readonly<{
   initialState: DeepReadonly<State>
   commands: Commands
-  events: EventSchemas
+  events: JournalEvents
   replayEvents: EventSchemas
   project: Project<State>
   validate(state: DeepReadonly<State>): void
@@ -223,6 +227,36 @@ export function createYrdDef(): YrdDef {
   })
 }
 
+export function journalEvent(reader: number, schema: EventSchema): JournalEventDef {
+  if (!Number.isSafeInteger(reader) || reader < 0) {
+    raiseFailure(
+      "configuration",
+      "journal-event-version-invalid",
+      `yrd: journal event has invalid minimum reader version '${reader}'`,
+    )
+  }
+  return Object.freeze({ reader, schema })
+}
+
+function validateJournalEvents(events: JournalEvents): void {
+  for (const [name, definition] of Object.entries(events)) {
+    if (!Number.isSafeInteger(definition.reader) || definition.reader < 0) {
+      raiseFailure(
+        "configuration",
+        "journal-event-version-invalid",
+        `yrd: event '${name}' has invalid minimum reader version '${definition.reader}'`,
+      )
+    }
+    if (definition.reader > JOURNAL_READER_VERSION) {
+      raiseFailure(
+        "configuration",
+        "journal-event-reader-unsupported",
+        `yrd: event '${name}' requires journal reader v${definition.reader}; this reader supports through v${JOURNAL_READER_VERSION}`,
+      )
+    }
+  }
+}
+
 export async function createYrd<State extends object, Commands extends CommandTree, Features extends object>(
   definition: YrdDef<State, Commands, Features>,
   options: Readonly<{
@@ -248,6 +282,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
     commands as SilveryCommandTree<unknown>,
   ) as SerializableCommandRegistry<AnyCommand>
   const state = signal<DeepReadonly<State>>(cloneFrozen(definition.initialState) as DeepReadonly<State>)
+  validateJournalEvents(definition.events)
 
   type Projection = Readonly<{
     cursor: Cursor
@@ -295,8 +330,9 @@ export async function createYrd<State extends object, Commands extends CommandTr
   }
 
   const canonicalEvent = (applied: Event, source: "append" | "replay"): Event => {
-    const currentSchema = definition.events[applied.name]
-    if (currentSchema === undefined) throw new Error(`yrd: no event definition for '${applied.name}'`)
+    const currentDefinition = definition.events[applied.name]
+    if (currentDefinition === undefined) throw new Error(`yrd: no event definition for '${applied.name}'`)
+    const currentSchema = currentDefinition.schema
     const current = currentSchema.safeParse(applied.data)
     const data = current.success
       ? current.data
@@ -708,11 +744,18 @@ export async function createYrd<State extends object, Commands extends CommandTr
         raiseFailure("configuration", "async-command", `yrd: command '${parsed.op}' must be synchronous`)
       }
       const events = result.events.map((draft) => {
-        const schema = definition.events[draft.name]
-        if (schema === undefined) {
+        const installed = definition.events[draft.name]
+        if (installed === undefined) {
           raiseFailure("configuration", "event-not-installed", `yrd: no event definition for '${draft.name}'`)
         }
-        return EventSchema.parse({ id: id(), name: draft.name, ts: clock(), data: schema.parse(draft.data) })
+        if (options.inject.compatibility !== undefined && installed.reader > options.inject.compatibility.version) {
+          raiseFailure(
+            "configuration",
+            "journal-event-version-skew",
+            `yrd: event '${draft.name}' requires journal reader v${installed.reader}; this writer is configured for v${options.inject.compatibility.version} at ${options.inject.compatibility.reader}`,
+          )
+        }
+        return EventSchema.parse({ id: id(), name: draft.name, ts: clock(), data: installed.schema.parse(draft.data) })
       })
       const value = result.value === undefined ? undefined : JsonSchema.parse(result.value)
       const frame = parseJournalFrame({
@@ -832,7 +875,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
 function buildDef<State extends object, Commands extends CommandTree, Features extends object>(values: {
   initialState: DeepReadonly<State>
   commands: Commands
-  events: EventSchemas
+  events: JournalEvents
   replayEvents: EventSchemas
   project: Project<State>
   validate(state: DeepReadonly<State>): void
@@ -930,10 +973,12 @@ function projectionCheckpointIdentity<State extends object, Commands extends Com
           return [name, z.toJSONSchema(schema, { io: "input" })]
         }),
     )
+  const journalSchemaIdentity = (events: JournalEvents) =>
+    schemaIdentity(Object.fromEntries(Object.entries(events).map(([name, definition]) => [name, definition.schema])))
   const encoded = canonicalize({
     v: PROJECTION_CHECKPOINT_VERSION,
     initialState: definition.initialState,
-    events: schemaIdentity(definition.events),
+    events: journalSchemaIdentity(definition.events),
     replayEvents: schemaIdentity(definition.replayEvents),
     projectionVersions: versions,
   })

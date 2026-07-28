@@ -27,7 +27,7 @@ function withMessages() {
     definition.extend({
       initialState: { messages: [] as string[] },
       commands: { message: { send } },
-      events: { "message/sent": z.object({ text: z.string() }) },
+      events: { "message/sent": journalEvent(1, z.object({ text: z.string() })) },
       project(state, applied) {
         if (applied.name !== "message/sent") return state
         const data = applied.data as { text: string }
@@ -158,6 +158,12 @@ commit pin operators must install when their runtime cannot parse that
 version. Legacy frames omit the field and remain version 0. A runtime refuses
 a frame above `JOURNAL_READER_VERSION` before projecting it, and an injected
 compatibility value is stamped on every new frame.
+
+Every writable event is a `journalEvent(reader, schema)`, so its minimum reader
+and payload schema are one inseparable definition. An event above the active
+writer version refuses before append. Reader support and writer activation
+therefore land as separate commits: first raise `JOURNAL_READER_VERSION`, then
+activate that version with the first commit's full reader pin.
 
 History is still Journal authority, not a projection database. Its facts must
 be derived transactionally from frames and fail loud if a lookup disagrees with
