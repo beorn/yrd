@@ -252,14 +252,46 @@ async function gitAsync(cwd: string, args: readonly string[]): Promise<string> {
   return await runQueueGit(process, cwd, args)
 }
 
+/** Memoized answers for {@link queueGitDir}, keyed by the cwd exactly as passed
+ * (normalizing it would itself cost a syscall, and every caller already threads
+ * one stable cwd). A repository's common Git directory cannot move under a
+ * running process, so this is immutable process state, not a staleness risk.
+ * The absence answer is cached too — otherwise the not-a-repository path keeps
+ * paying the fork it is supposed to have stopped paying. */
+const queueGitDirs = new Map<string, string | undefined>()
+
+/** `git rev-parse --git-common-dir` for the queue repository.
+ *
+ * `residentRunnerStatus` sits on top of this, and `queueListSnapshot` calls that
+ * unconditionally — once per 1s watch tick AND once per focus/cursor change. The
+ * lookup is `execFileSync`, so an uncached call BLOCKS the watch UI on a git fork
+ * for every keypress. The value is immutable for the lifetime of the process, so
+ * it is computed once per cwd and memoized. */
 function queueGitDir(cwd: string): string | undefined {
+  if (queueGitDirs.has(cwd)) return queueGitDirs.get(cwd)
+  const gitDir = readQueueGitDir(cwd)
+  queueGitDirs.set(cwd, gitDir)
+  return gitDir
+}
+
+function readQueueGitDir(cwd: string): string | undefined {
   try {
     const output = gitSync(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
     const gitDir = output.trim()
     if (gitDir === "") return undefined
     return isAbsolute(gitDir) ? gitDir : resolve(cwd, gitDir)
   } catch (error) {
+    // A timeout is a transient failure, never an answer: rethrow it so the caller
+    // sees it and `queueGitDir` leaves the memo unpopulated for this cwd, rather
+    // than poisoning the whole process with a cached "no git dir".
     if (isGitTimeoutError(error)) throw error
+    // silent-fallback-allow: `rev-parse --git-common-dir` fails exactly when `cwd`
+    // is not inside a Git repository. That is a legitimate ABSENCE, and it is
+    // reported loudly by every caller rather than swallowed here —
+    // `residentRunnerLeaseHeld` and `runnerGitHealth` raise
+    // `runner-health-unavailable` naming the cwd, and `residentRunnerStatusPath`
+    // returns undefined so `residentRunnerStatus` answers "no resident runner".
+    // The only information discarded is git's wording of "not a repository".
     return undefined
   }
 }
