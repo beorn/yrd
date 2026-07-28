@@ -8,6 +8,8 @@ type SourceOptions = Readonly<{
   command?: readonly string[]
   cwd?: string
   env?: NodeJS.ProcessEnv
+  /** Sink for the loud notice this adapter owes its operator. Defaults to stderr. */
+  warn?: (text: string) => void
 }>
 
 const IssueFieldsSchema = IssueSchema.omit({ ref: true })
@@ -70,10 +72,15 @@ function createIssueSource(
     id: sourceId,
     async resolve(ref) {
       if (ref.source !== sourceId) throw new Error(`yrd: issue source '${sourceId}' cannot resolve '${ref.source}'`)
+      const command = argv(ref.id)
       const result = await options.process.run({
-        argv: argv(ref.id),
+        argv: command,
         cwd: options.cwd,
-        env: cleanEnvironment({ ...options.env, YRD_ISSUE_SOURCE: ref.source, YRD_ISSUE_ID: ref.id }),
+        env: cleanEnvironment(
+          { ...options.env, YRD_ISSUE_SOURCE: ref.source, YRD_ISSUE_ID: ref.id },
+          sourceId,
+          options.warn === undefined ? {} : { warn: options.warn },
+        ),
         timeoutMs: ISSUE_SOURCE_TIMEOUT_MS,
       })
       if (result.timedOut) {
@@ -88,7 +95,13 @@ function createIssueSource(
         return Issue.parse(project(JSON.parse(result.stdout), ref))
       } catch (error) {
         if (error instanceof SyntaxError) {
-          throw new Error(`yrd: issue source '${sourceId}' returned invalid JSON for '${ref.id}'`)
+          // The command and its actual output ARE the diagnosis. A bare "invalid
+          // JSON" hides the usual cause — a log line the source wrote onto the
+          // same stdout the protocol owns — and costs an operator a repro run.
+          throw new Error(
+            `yrd: issue source '${sourceId}' returned invalid JSON for '${ref.id}'; ` +
+              `command: ${command.join(" ")}; stdout: ${stdoutEvidence(result.stdout)}`,
+          )
         }
         throw error
       }
@@ -96,11 +109,47 @@ function createIssueSource(
   }
 }
 
-function cleanEnvironment(overrides: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
+const STDOUT_EVIDENCE_LIMIT = 200
+
+function stdoutEvidence(stdout: string): string {
+  if (stdout === "") return "(empty)"
+  const head = stdout.slice(0, STDOUT_EVIDENCE_LIMIT)
+  return JSON.stringify(stdout.length > STDOUT_EVIDENCE_LIMIT ? `${head}…` : head)
+}
+
+function defaultWarn(text: string): void {
+  process.stderr.write(`${text}\n`)
+}
+
+/**
+ * Project the ambient environment onto an issue-source subprocess.
+ *
+ * `stdout` is the protocol channel: the source answers in JSON there and
+ * nowhere else. `DEBUG` makes debug-style loggers (km's among them) write their
+ * stream to that same channel, which corrupts every response. Drop it — but say
+ * so, because a silently dropped variable is an operator asking why their debug
+ * run shows nothing. `DEBUG_LOG` is the file rail and stays: it is exactly the
+ * escape hatch this refusal points at.
+ */
+function cleanEnvironment(
+  overrides: NodeJS.ProcessEnv | undefined,
+  sourceId: string,
+  options: Readonly<{ warn?: (text: string) => void }> = {},
+): NodeJS.ProcessEnv {
+  const merged = { ...process.env, ...overrides }
+  if (merged.DEBUG !== undefined) {
+    ;(options.warn ?? defaultWarn)(
+      `yrd: dropped DEBUG=${merged.DEBUG} from the '${sourceId}' issue-source subprocess — ` +
+        "debug output on stdout corrupts the JSON protocol; use DEBUG_LOG=<file> to capture it instead",
+    )
+  }
   return Object.fromEntries(
-    Object.entries({ ...process.env, ...overrides }).filter(
+    Object.entries(merged).filter(
       ([key, value]) =>
-        value !== undefined && !key.startsWith("GIT_") && (!key.startsWith("YRD_") || key.startsWith("YRD_ISSUE_")),
+        value !== undefined &&
+        key !== "DEBUG" &&
+        !key.startsWith("GIT_") &&
+        (!key.startsWith("YRD_") || key.startsWith("YRD_ISSUE_")),
     ),
   )
 }

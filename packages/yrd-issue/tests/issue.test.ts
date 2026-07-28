@@ -77,3 +77,53 @@ it("projects km context while keeping a path-form id as one argument", async () 
   expect(argv.at(-1)).toBe("@yrd/core/21012")
   expect(issue).toMatchObject({ title: "Implement Yrd", description: "Ship it", revision: "v2" })
 })
+
+it("strips DEBUG from the issue subprocess and says so out loud", async () => {
+  let environment: NodeJS.ProcessEnv | undefined
+  const warnings: string[] = []
+  const source = createKmIssueSource({
+    env: { DEBUG: "*", DEBUG_LOG: "/tmp/km-debug.log", CALLER_TEST_MARKER: "preserved" },
+    warn: (text) => warnings.push(text),
+    process: {
+      async run(request) {
+        environment = request.env
+        return {
+          exitCode: 0,
+          signal: null,
+          stderr: "",
+          stdout: '{"node":{"content":"Implement Yrd"}}',
+          durationMs: 1,
+          timedOut: false,
+        }
+      },
+    },
+  })
+  await createIssues({ sources: [source] }).resolve({ source: "km", id: "@yrd/core/21012" })
+  // DEBUG makes km write its debug stream to stdout, which is the same channel
+  // the --json protocol uses. Strip it, and never strip it quietly.
+  expect(environment).not.toHaveProperty("DEBUG")
+  expect(environment).toMatchObject({ DEBUG_LOG: "/tmp/km-debug.log", CALLER_TEST_MARKER: "preserved" })
+  expect(warnings.join("\n")).toContain("DEBUG")
+  expect(warnings.join("\n")).toContain("km")
+})
+
+it("names the command and the offending output when an issue source returns invalid JSON", async () => {
+  const stdout = `DEBUG km:storage:repo createRepo rootPath=/repo\n{"node":{"content":"Implement Yrd"}}\n`
+  const source = createKmIssueSource({
+    process: {
+      async run() {
+        return { exitCode: 0, signal: null, stderr: "", stdout, durationMs: 1, timedOut: false }
+      },
+    },
+  })
+  const failure = await createIssues({ sources: [source] })
+    .resolve({ source: "km", id: "@yrd/core/21012" })
+    .then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+  expect(failure).toBeInstanceOf(Error)
+  const message = (failure as Error).message
+  expect(message).toContain("km show --one --context --json @yrd/core/21012")
+  expect(message).toContain("DEBUG km:storage:repo createRepo")
+})

@@ -17,6 +17,13 @@ const JOURNAL_CONFIG = `journal:
   version: ${CURRENT_JOURNAL_COMPATIBILITY.version}
   reader: "${CURRENT_JOURNAL_COMPATIBILITY.reader}"
 `
+/** Stand-in `ag` that records who it was launched as and the exact argv it received. */
+const AG_ARGV_RECORDER = `#!/bin/sh
+printf '%s' "$HAB_NAME" > agent.name
+printf '%s' "$*" > agent.prompt
+: > agent.argv
+for arg in "$@"; do printf '%s\\n' "$arg" >> agent.argv; done
+`
 let originalPath: string | undefined
 let issueToolRoot: string | undefined
 
@@ -336,7 +343,7 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
 
       const duplicate = output(repo)
       expect(await yrd(repo, duplicate.io, "bay", "run", "--bay", "shared", "--", "true")).not.toBe(0)
-      expect(duplicate.stderr()).toContain("yrd in shared")
+      expect(duplicate.stderr()).toContain("yrd in B1 -- true")
     } finally {
       restoreEnv("SHELL", previousShell)
     }
@@ -732,7 +739,9 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
 
       const duplicate = output(repo)
       expect(await yrd(repo, duplicate.io, "bay", "run", "--bay", "shared", "--", "true")).not.toBe(0)
-      expect(duplicate.stderr()).toContain("yrd in shared -- <command>")
+      // The refusal names the Bay's id and the exact child, so the operator can
+      // paste it without filling in a placeholder.
+      expect(duplicate.stderr()).toContain("yrd in B1 -- true")
 
       const firstGuest = spawnYrd(
         repo,
@@ -872,13 +881,7 @@ printf '%s %s' "$HAB_NAME" "$$" > cwd-guest.name
     return withoutRuntimeName(async () => {
       const tools = await mkdtemp(join(tmpdir(), "yrd-do-tools-"))
       roots.push(tools)
-      await writeFile(
-        join(tools, "ag"),
-        `#!/bin/sh
-printf '%s' "$HAB_NAME" > agent.name
-printf '%s' "$*" > agent.prompt
-`,
-      )
+      await writeFile(join(tools, "ag"), AG_ARGV_RECORDER)
       await chmod(join(tools, "ag"), 0o755)
       const previousPath = process.env.PATH
       process.env.PATH = `${tools}:${previousPath ?? ""}`
@@ -892,6 +895,13 @@ printf '%s' "$*" > agent.prompt
         expect(issuePrimer).toContain(`Mission: work issue ${CLAIM}`)
         expect(issuePrimer).toContain("claim")
         expect(issuePrimer).toContain("work order")
+        // `ag <text>` is a subcommand lookup that exits 2. The primer is the
+        // seat's opening prompt, so it rides after `code --`, never as argv[0].
+        const issueArgv = (await git(issueJourney.repo, "show", `refs/remotes/origin/${BRANCH}:agent.argv`)).split("\n")
+        expect(issueArgv[0]).toBe("code")
+        expect(issueArgv[1]).toBe("--")
+        expect(issueArgv[2]).toContain(`Mission: work issue ${CLAIM}`)
+        expect(issueArgv).toHaveLength(3)
 
         const prJourney = await repository()
         const branch = "topic/do-existing"
@@ -914,12 +924,103 @@ printf '%s' "$*" > agent.prompt
           const prPrimer = await git(prJourney.repo, "show", `refs/remotes/origin/${branch}:agent.prompt`)
           expect(prPrimer).toContain("Mission: continue PR PR1")
           expect(prPrimer).toContain(branch)
+          const prArgv = (await git(prJourney.repo, "show", `refs/remotes/origin/${branch}:agent.argv`)).split("\n")
+          expect(prArgv[0]).toBe("code")
+          expect(prArgv[1]).toBe("--")
+          expect(prArgv[2]).toContain("Mission: continue PR PR1")
         } finally {
           restoreEnv("TEST_ISSUE_MISSING", previousMissing)
         }
       } finally {
         restoreEnv("PATH", previousPath)
       }
+    })
+  })
+
+  it("names a do seat for the configured lane, never for the invoking session", async () => {
+    const tools = await mkdtemp(join(tmpdir(), "yrd-do-lane-tools-"))
+    roots.push(tools)
+    await writeFile(join(tools, "ag"), AG_ARGV_RECORDER)
+    await chmod(join(tools, "ag"), 0o755)
+    const previousPath = process.env.PATH
+    const previousHab = process.env.HAB_NAME
+    const previousTribe = process.env.TRIBE_NAME
+    process.env.PATH = `${tools}:${previousPath ?? ""}`
+    // A chief seat dispatching work carries its own identity in the ambient
+    // environment. That identity belongs to the dispatcher, not to the seat
+    // being dispatched, and must never be stamped onto the new Bay session.
+    process.env.HAB_NAME = "@chief"
+    process.env.TRIBE_NAME = "@chief"
+    try {
+      const fixture = await repository()
+      await configureManagedDo(fixture.repo, { seat: "true", launch: "true" })
+      const run = output(fixture.repo)
+      expect(await yrd(fixture.repo, run.io, "do", CLAIM), run.stderr()).toBe(0)
+      expect(run.stdout()).toContain("name @dev/0")
+      expect(run.stdout()).not.toContain("name @chief")
+      expect(await git(fixture.repo, "show", `refs/remotes/origin/${BRANCH}:agent.name`)).toBe("@dev/0")
+    } finally {
+      restoreEnv("PATH", previousPath)
+      restoreEnv("HAB_NAME", previousHab)
+      restoreEnv("TRIBE_NAME", previousTribe)
+    }
+  })
+
+  it("adopts the orphaned Bay of a failed do instead of refusing the retry", async () => {
+    return withoutRuntimeName(async () => {
+      const tools = await mkdtemp(join(tmpdir(), "yrd-do-retry-tools-"))
+      roots.push(tools)
+      const ag = join(tools, "ag")
+      // Attempt one dies the way a misassembled launch dies: the agent binary
+      // rejects its own argv and exits. Yrd preserves the untouched Bay as an
+      // orphan, which is the state the retry finds.
+      await writeFile(ag, "#!/bin/sh\nexit 2\n")
+      await chmod(ag, 0o755)
+      const previousPath = process.env.PATH
+      process.env.PATH = `${tools}:${previousPath ?? ""}`
+      try {
+        const fixture = await repository()
+        const first = output(fixture.repo)
+        expect(await yrd(fixture.repo, first.io, "do", CLAIM)).toBe(1)
+        const before = output(fixture.repo)
+        expect(await yrd(fixture.repo, before.io, "bay", "list", "--json"), before.stderr()).toBe(0)
+        const existing = (JSON.parse(before.stdout()) as { bays: readonly { id: string; orphan?: unknown }[] }).bays
+        expect(existing).toHaveLength(1)
+        expect(existing[0]?.orphan).toBeDefined()
+
+        await writeFile(ag, AG_ARGV_RECORDER)
+        await chmod(ag, 0o755)
+        const retry = output(fixture.repo)
+        expect(await yrd(fixture.repo, retry.io, "do", CLAIM), retry.stderr()).toBe(0)
+        expect(retry.stdout()).toContain(`bay s2-fixture → adopted ${BRANCH}, linked ${CLAIM}`)
+        const primer = await git(fixture.repo, "show", `refs/remotes/origin/${BRANCH}:agent.prompt`)
+        expect(primer).toContain(`Mission: work issue ${CLAIM}`)
+
+        const after = output(fixture.repo)
+        expect(await yrd(fixture.repo, after.io, "bay", "list", "--json"), after.stderr()).toBe(0)
+        const bays = (JSON.parse(after.stdout()) as { bays: readonly { id: string }[] }).bays
+        expect(bays.map((bay) => bay.id)).toEqual(existing.map((bay) => bay.id))
+      } finally {
+        restoreEnv("PATH", previousPath)
+      }
+    })
+  })
+
+  it("hands a rerun a copy-pasteable command when the open Bay cannot be adopted", async () => {
+    return withoutRuntimeName(async () => {
+      const fixture = await repository()
+      // A Bay opened by hand may still have a live owner in it, so `do` must not
+      // walk in. The refusal has to carry the command that does work, not a
+      // placeholder the operator has to finish themselves.
+      const opened = output(fixture.repo)
+      expect(await yrd(fixture.repo, opened.io, "bay", "open", CLAIM), opened.stderr()).toBe(0)
+
+      const retry = output(fixture.repo)
+      expect(await yrd(fixture.repo, retry.io, "do", CLAIM)).toBe(1)
+      const remedy = retry.stderr()
+      expect(remedy).toContain("yrd in B1 -- ag code -- ")
+      expect(remedy).toContain(`Mission: work issue ${CLAIM}`)
+      expect(remedy).not.toContain("<command>")
     })
   })
 
@@ -1118,6 +1219,9 @@ printf '%s' '${label}' > '${label}-ran.txt'
         expect(lines[0]).toMatch(/^sh shell-owner \d+\s*$/u)
         expect(lines[1]).toMatch(/^sh shared:(\d+) \1\s*$/u)
         expect(lines[2]).toMatch(/^ag shared:(\d+) \1 /u)
+        // `yrd in <bay> ag` expands to the coding verb with the guest primer
+        // after the separator — `ag <primer>` is a subcommand lookup that fails.
+        expect(lines[2]).toMatch(/^ag shared:\d+ \d+ code -- You are a guest in Bay shared/u)
         expect(lines[2]).toContain("You are a guest in Bay shared")
         expect(lines[2]).toContain("no configuration or lifecycle authority")
         expect(lines[2]).toContain("owner close captures")

@@ -1171,11 +1171,21 @@ type RuntimePosture = "active" | "viewer" | "bracketed-bay-open" | "one-shot-que
 const RuntimePersona = Symbol("yrd.runtime-persona")
 type RuntimePersonaIO = YrdCliIO & { [RuntimePersona]?: YrdPersona }
 const RuntimeInvocationCwd = Symbol("yrd.runtime-invocation-cwd")
+/** `--name`: the operator naming this session on purpose. */
 const RuntimeSessionName = Symbol("yrd.runtime-session-name")
+/**
+ * The identity of whoever is running the command, read from HAB_NAME/TRIBE_NAME.
+ *
+ * Kept apart from `--name` because the two answer different questions. A guest
+ * attaching to someone else's Bay is correctly its ambient self; a seat that
+ * `do` dispatches is not the dispatcher, so `do` must not read this.
+ */
+const RuntimeAmbientName = Symbol("yrd.runtime-ambient-name")
 const RuntimeChildArgv = Symbol("yrd.runtime-child-argv")
 type RuntimeInvocationIO = RuntimePersonaIO & {
   [RuntimeInvocationCwd]?: string
   [RuntimeSessionName]?: string
+  [RuntimeAmbientName]?: string
   [RuntimeChildArgv]?: readonly string[]
 }
 
@@ -1482,6 +1492,19 @@ type BayOpenResolution = Readonly<{
   via?: "issue" | "pr"
 }>
 
+/** What the caller already knows about the Bay it is asking for. */
+type BayOpenIntent = Readonly<{
+  issueResolved?: boolean
+  targetedPr?: PR
+  via?: "issue" | "pr"
+  /** Name for the session this Bay is being opened for; overrides ambient identity. */
+  sessionName?: string
+  /** Walk back into the Bay a previous failed attempt left behind, when it is provably idle. */
+  adopt?: boolean
+  /** The child this caller would have run, so a refusal can name the command that works. */
+  guestArgv?: (resolved: BayOpenResolution) => readonly string[]
+}>
+
 function bayOpenIdentity(
   app: YrdCliApp,
   requestedBay: string,
@@ -1553,11 +1576,7 @@ async function resolveBayOpen(
   arg: string | undefined,
   options: BayOpenOptions,
   io: YrdCliIO,
-  resolved: Readonly<{
-    issueResolved?: boolean
-    targetedPr?: PR
-    via?: "issue" | "pr"
-  }> = {},
+  resolved: BayOpenIntent = {},
 ): Promise<BayOpenResolution> {
   if (arg !== undefined && options.issue !== undefined) {
     usage("bay open positional config and --issue are aliases; pass exactly one")
@@ -1572,7 +1591,11 @@ async function resolveBayOpen(
       ? undefined
       : (app.bays.pr(options.pr) ?? refusal(`no PR '${options.pr}'; create it explicitly before using --pr`)))
   const runtime = io as RuntimeInvocationIO
-  const explicitName = runtime[RuntimeSessionName]?.trim()
+  // Precedence, strongest first: the caller's own decision (a `do` lane), an
+  // explicit `--name`, then whoever is running the command. `do` supplies the
+  // first so the seat is never named after its dispatcher.
+  const chosenName = resolved.sessionName?.trim() || runtime[RuntimeSessionName]?.trim()
+  const explicitName = chosenName || runtime[RuntimeAmbientName]?.trim()
   const generated = generatedBayName()
   const branchSeed =
     issue === undefined
@@ -1816,9 +1839,21 @@ function issueMissionPrimer(resolved: BayOpenResolution, selector: string): stri
   )
 }
 
+/**
+ * Launch the coding agent with `primer` as its opening prompt.
+ *
+ * `ag <text>` is a subcommand lookup, so handing a primer to bare `ag` exits 2
+ * before the session starts — the 2026-07-27 dispatch failure. `code` is the
+ * verb that starts a coding seat, and `--` keeps a primer that happens to open
+ * with a dash from being read as a flag.
+ */
+function agentArgv(primer: string): readonly string[] {
+  return ["ag", "code", "--", primer]
+}
+
 function guestArgv(services: YrdCliServices, bay: Bay, argv: readonly string[]): readonly string[] {
   if (argv.length === 0) return defaultRunArgv(services)
-  return argv.length === 1 && argv[0] === "ag" ? ["ag", bayGuestPrimer(bay)] : argv
+  return argv.length === 1 && argv[0] === "ag" ? agentArgv(bayGuestPrimer(bay)) : argv
 }
 
 async function enterBay(
@@ -1832,7 +1867,9 @@ async function enterBay(
   if (processService === undefined) configuration("yrd in requires the process-backed Yrd runtime")
   const runtime = io as RuntimeInvocationIO
   const bay = resolveGuestBay(app, selector, runtime[RuntimeInvocationCwd] ?? io.cwd ?? process.cwd())
-  const baseName = guestSessionBaseName(bay, runtime[RuntimeSessionName])
+  // A guest attaches as itself: `--name` if given, otherwise its own ambient
+  // identity. Unlike `do`, nobody else's session is being created here.
+  const baseName = guestSessionBaseName(bay, runtime[RuntimeSessionName] ?? runtime[RuntimeAmbientName])
   const child = await runBayChild(processService, bay, guestSessionArgv(baseName, guestArgv(services, bay, argv)), io, {
     env: services.environment ?? process.env,
     onStart(pid) {
@@ -1899,23 +1936,82 @@ function bayInOperands(
   usage("yrd in could not separate its Bay selector from the child command; place the command after --")
 }
 
+type PreparedBay = Readonly<{ identity: BayOpenResolution; bay: Bay; adopted?: boolean }>
+
+/**
+ * The `yrd in` invocation that actually attaches to `bay` and runs the child.
+ *
+ * A refusal that ends in `<command>` makes the operator finish the sentence,
+ * and they cannot: the guest command carries a primer this code just built.
+ * Emit the whole thing, quoted, ready to paste.
+ */
+function guestAttachCommand(
+  bay: Bay,
+  guestArgv: ((resolved: BayOpenResolution) => readonly string[]) | undefined,
+  resolved?: BayOpenResolution,
+): string {
+  const argv = guestArgv === undefined || resolved === undefined ? [] : guestArgv(resolved)
+  // With no child to name, the bare form is already complete: `yrd in` starts
+  // the operator's shell in the Bay.
+  return argv.length === 0 ? `yrd in ${bay.id}` : `yrd in ${bay.id} -- ${argv.map(shellArgument).join(" ")}`
+}
+
+/** Quote only what a shell would otherwise mangle, so the command stays readable. */
+function shellArgument(value: string): string {
+  return /^[A-Za-z0-9_@%+=:,./-]+$/u.test(value) ? value : shellQuote(value)
+}
+
+/**
+ * Walk back into a Bay a previous attempt abandoned, when nothing can be lost.
+ *
+ * Three facts have to hold together. The Bay must carry an orphan record —
+ * Yrd writes that only after the child process has exited, so no owner can
+ * still be inside. The issue must match exactly, because a Bay that merely
+ * shares a branch name is different work. And the worktree must be clean, so
+ * adopting cannot bury an edit somebody else left uncommitted. Anything short
+ * of all three falls through to the refusal, which now names a command that
+ * works.
+ */
+async function adoptIdleBay(
+  app: YrdCliApp,
+  existing: Bay,
+  identity: BayOpenResolution,
+  io: YrdCliIO,
+  guestArgv: ((resolved: BayOpenResolution) => readonly string[]) | undefined,
+): Promise<PreparedBay | undefined> {
+  if (existing.orphan === undefined) return undefined
+  if (identity.issue === undefined || existing.issue !== identity.issue) return undefined
+  if (existing.branch !== identity.branch) return undefined
+  const refreshed = await refreshBay(app, existing, io)
+  if (refreshed.dirty === true) {
+    io.stderr(
+      `yrd: bay '${refreshed.id}' holds uncommitted changes and was not adopted; inspect it with:\n` +
+        `  ${guestAttachCommand(refreshed, guestArgv, identity)}\n`,
+    )
+    return undefined
+  }
+  if (refreshed.path === undefined) return undefined
+  logBayResolution(app, identity)
+  return { identity, bay: refreshed, adopted: true }
+}
+
 async function prepareOwnedBay(
   app: YrdCliApp,
   arg: string | undefined,
   options: BayOpenOptions,
   io: YrdCliIO,
-  preResolved: Readonly<{
-    issueResolved?: boolean
-    targetedPr?: PR
-    via?: "issue" | "pr"
-  }> = {},
-): Promise<Readonly<{ identity: BayOpenResolution; bay: Bay }> | undefined> {
+  preResolved: BayOpenIntent = {},
+): Promise<PreparedBay | undefined> {
   const persona = (io as RuntimePersonaIO)[RuntimePersona]
   const identity = await resolveBayOpen(app, arg, options, io, preResolved)
   const existing = openRunBay(app, identity)
   if (existing !== undefined) {
+    const adopted =
+      preResolved.adopt === true ? await adoptIdleBay(app, existing, identity, io, preResolved.guestArgv) : undefined
+    if (adopted !== undefined) return adopted
     refusal(
-      `bay '${identity.bay}' is already open as ${existing.id}; ` + `attach with 'yrd in ${identity.bay} -- <command>'`,
+      `bay '${identity.bay}' is already open as ${existing.id}; attach with:\n` +
+        `  ${guestAttachCommand(existing, preResolved.guestArgv, identity)}`,
     )
   }
   const existingBayIds = new Set(app.bays.list().map((candidate) => candidate.id))
@@ -1985,18 +2081,23 @@ async function runBaySession(
   options: BayOpenOptions,
   io: YrdCliIO,
   runOptions: Readonly<{ keep?: boolean }> = {},
-  preResolved: Readonly<{
-    issueResolved?: boolean
-    targetedPr?: PR
-    via?: "issue" | "pr"
-  }> = {},
+  preResolved: BayOpenIntent = {},
 ): Promise<YrdCliExitCode> {
   if (services.process === undefined) configuration("bay run requires the process-backed Yrd runtime")
-  const provisioned = await prepareOwnedBay(app, arg, options, io, preResolved)
+  // A refusal here should hand back the command this call was about to run, so
+  // the operator can attach and run exactly that.
+  const provisioned = await prepareOwnedBay(app, arg, options, io, {
+    guestArgv: (resolved) => (typeof childArgv === "function" ? childArgv(resolved) : childArgv),
+    ...preResolved,
+  })
   if (provisioned === undefined) return 1
   const { identity } = provisioned
   let { bay } = provisioned
-  printBayResolution(io, identity, identity.reattached ? "reattached" : "new")
+  printBayResolution(
+    io,
+    identity,
+    provisioned.adopted === true ? "adopted" : identity.reattached ? "reattached" : "new",
+  )
 
   let child: ProcessResult
   try {
@@ -2052,6 +2153,14 @@ async function doWork(
     return doWorkManaged(app, services, selector, io, options.lane === undefined ? {} : { lane: options.lane })
   }
   if (options.lane !== undefined) usage("--lane selects a managed dispatch lane; it requires --seat")
+  // The seat this Bay is opened for belongs to the configured lane. Without
+  // this the ambient HAB_NAME of whoever typed `yrd do` — a chief seat, most
+  // often — would be stamped onto a session that is not theirs.
+  const lane = services.managedDo?.lane?.trim()
+  const seatIntent: BayOpenIntent = {
+    adopt: true,
+    ...(lane === undefined || lane === "" ? {} : { sessionName: lane }),
+  }
   let issueFailure: unknown
   try {
     await app.issues.resolve(app.issues.ref(selector))
@@ -2063,11 +2172,11 @@ async function doWork(
       app,
       services,
       selector,
-      (resolved) => ["ag", issueMissionPrimer(resolved, selector)],
+      (resolved) => agentArgv(issueMissionPrimer(resolved, selector)),
       {},
       io,
       {},
-      { issueResolved: true, via: "issue" },
+      { ...seatIntent, issueResolved: true, via: "issue" },
     )
   }
   const targetedPr = app.bays.pr(selector)
@@ -2076,11 +2185,11 @@ async function doWork(
     app,
     services,
     undefined,
-    (resolved) => ["ag", issueMissionPrimer(resolved, selector)],
+    (resolved) => agentArgv(issueMissionPrimer(resolved, selector)),
     { pr: selector, bay: derivedWorkName(selector) },
     io,
     {},
-    { targetedPr, via: "pr" },
+    { ...seatIntent, targetedPr, via: "pr" },
   )
 }
 
@@ -6596,10 +6705,10 @@ function buildProgram(
       const loaded = await bootstrap.load(selected, posture)
       runtimeApp = loaded.app
       runtimeServices = loaded.services
-      const explicitSessionName =
-        globals.name?.trim() || bootstrap.env.HAB_NAME?.trim() || bootstrap.env.TRIBE_NAME?.trim()
+      const ambientSessionName = bootstrap.env.HAB_NAME?.trim() || bootstrap.env.TRIBE_NAME?.trim()
       runtimeIO[RuntimeInvocationCwd] = bootstrap.ambientCwd
-      runtimeIO[RuntimeSessionName] = explicitSessionName || undefined
+      runtimeIO[RuntimeSessionName] = globals.name?.trim() || undefined
+      runtimeIO[RuntimeAmbientName] = ambientSessionName || undefined
       Object.assign(io, loaded.io)
       runtimeIO[RuntimePersona] = selected.persona
     })
