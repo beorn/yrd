@@ -6,6 +6,7 @@ import {
   prDeliveryState,
   prCorrelation,
   prHead,
+  prNeedsAuthor,
   prRevisionLineage,
   prRevisionNumber,
   prSourceReadyAt,
@@ -739,7 +740,9 @@ function latest(...timestamps: (string | undefined)[]): string | undefined {
 export function latestRunForCurrentRevision(pr: PR, summary: QueueSummary): Run | undefined {
   const revision = currentPRRev(pr)
   const current = queueRevisionKey({ id: pr.id, revision: revision.n, headSha: revision.head })
-  const currentSubmission = prDeliveryState(pr) === "submitted" ? (revision.submittedAt ?? pr.submittedAt) : undefined
+  const delivery = prDeliveryState(pr)
+  const currentSubmission =
+    delivery === "submitted" || delivery === "ready" ? (revision.submittedAt ?? pr.submittedAt) : undefined
   return [...summary.running, ...summary.waiting, ...summary.finished]
     .filter((run) => run.prs.some((member) => queueRevisionKey(member) === current))
     .filter(
@@ -1440,7 +1443,7 @@ function queueState(pr: PR, run: Run | undefined): string {
 }
 
 export function projectedPrStatus(pr: PR, eligibility?: PREligibility): PRDeliveryState | "needs-author" {
-  return pr.needsAuthor !== undefined || eligibility?.reason?.code === "needs-author"
+  return prNeedsAuthor(pr) !== undefined || eligibility?.reason?.code === "needs-author"
     ? "needs-author"
     : prDeliveryState(pr)
 }
@@ -1664,7 +1667,7 @@ function projectFailure(
   evidence?: HumanFailureProjection["evidence"],
   delivery?: PRDeliveryState,
 ): HumanFailureProjection {
-  const failure = actionableFailure(fact, { ...(delivery === undefined ? {} : { delivery }) })
+  const failure = actionableFailure(fact, (delivery === undefined ? {} : { delivery }))
   return {
     ...failure,
     summary: actionableFailureSummary(failure),
@@ -1959,8 +1962,8 @@ function lastFailedSubmission(pr: PR): PR["revs"][number] | undefined {
  */
 function preRunTimelineStatus(pr: PR, runs: readonly Run[]): "draft" | "rev" | "ready" | undefined {
   const delivery = prDeliveryState(pr)
-  if (pr.needsAuthor !== undefined) return "rev"
-  if (delivery === "submitted") return "ready"
+  if (prNeedsAuthor(pr) !== undefined) return "rev"
+  if (delivery === "submitted" || delivery === "ready") return "ready"
   if (delivery === "pushed") return lastFailedSubmission(pr) === undefined ? "draft" : "rev"
   if (delivery === "rejected") {
     const runId = lastFailedSubmission(pr)?.terminal?.run
@@ -2464,7 +2467,7 @@ function projectPR(
     runOverride?.finishedAt ??
     (isCurrentRevision
       ? prDeliveryState(pr) === "needs-author"
-        ? pr.needsAuthor?.at
+        ? prNeedsAuthor(pr)?.at
         : prDeliveryState(pr) === "rejected"
           ? pr.rejectedAt
           : prDeliveryState(pr) === "integrated"
@@ -2549,14 +2552,17 @@ export function humanQueueProjection(
   const rows = projectedPRRows(options.state, result, now)
   const positions = options.positions ?? submittedPrPositions(result.prs)
   const queueRows = rows
-    .filter((row) => row.nativeStatus === "submitted")
+    .filter((row) => row.nativeStatus === "submitted" || row.nativeStatus === "ready")
     .toSorted((left, right) => requiredQueuePosition(positions, left.pr) - requiredQueuePosition(positions, right.pr))
   const historical = result.finished.flatMap((run) =>
     run.prs.flatMap((member) => {
       const pr = result.prs.find((candidate) => candidate.id === member.id)
       if (pr === undefined) return []
       if (selected.size === 0 && (run.status !== "completed" || run.conclusion !== "failure")) return []
-      if (selected.size > 0 && (!selected.has(pr.id) || prDeliveryState(pr) === "submitted")) return []
+      const delivery = prDeliveryState(pr)
+      if (selected.size > 0 && (!selected.has(pr.id) || delivery === "submitted" || delivery === "ready")) {
+        return []
+      }
       return [projectPR(options.state, result, pr, now, run)]
     }),
   )
@@ -2567,7 +2573,7 @@ export function humanQueueProjection(
       if (represented.has(row.pr)) return false
       return selected.size === 0
         ? row.nativeStatus === "rejected" || row.state === "needs-author"
-        : selected.has(row.pr) && row.nativeStatus !== "submitted"
+        : selected.has(row.pr) && row.nativeStatus !== "submitted" && row.nativeStatus !== "ready"
     }),
   ]
   const queue = queueRows
@@ -6636,13 +6642,14 @@ export function PRRunsView({ data }: { data: PRRunsData }) {
   if (clocks.length === 0) return <Text color="$fg-muted">No revision history recorded.</Text>
   const projectedStatus = projectedPrStatus(data.pr, data.eligibility)
   const eligibilityRefusal = data.eligibility?.reason?.code === "needs-author" ? data.eligibility.reason : undefined
+  const revisionRefusal = prNeedsAuthor(data.pr)
   const needsAuthor =
     eligibilityRefusal ??
-    (data.pr.needsAuthor === undefined
+    (revisionRefusal === undefined
       ? undefined
       : {
-          message: data.pr.needsAuthor.detail ?? data.pr.needsAuthor.receipt.message,
-          receipt: data.pr.needsAuthor.receipt,
+          message: revisionRefusal.detail ?? revisionRefusal.receipt.message,
+          receipt: revisionRefusal.receipt,
         })
   const currentRevision = currentPRRev(data.pr)
   return (

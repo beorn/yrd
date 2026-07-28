@@ -50,6 +50,7 @@ export function prDeliveryTaskStatusOf(delivery: PRDeliveryState | "needs-author
     case "pushed":
       return "todo"
     case "submitted":
+    case "ready":
       return "wip"
     case "needs-author":
     case "rejected":

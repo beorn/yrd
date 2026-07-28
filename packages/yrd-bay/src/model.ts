@@ -1,5 +1,12 @@
 import * as z from "zod"
-import { raiseFailure, resolveSelector, resolveSelectorMatch, type SelectorMatch } from "@yrd/core"
+import {
+  JsonSchema,
+  raiseFailure,
+  resolveSelector,
+  resolveSelectorMatch,
+  type JsonValue,
+  type SelectorMatch,
+} from "@yrd/core"
 import type { FlowPin } from "@yrd/config"
 import { JobErrorSchema, type JobError } from "@yrd/job"
 
@@ -288,6 +295,7 @@ export type BranchLifecycle =
 export type PRDeliveryState =
   | "pushed"
   | "submitted"
+  | "ready"
   | "needs-author"
   | "rejected"
   | "integrated"
@@ -354,6 +362,88 @@ export type PRRevClock = Readonly<{
   terminal?: PRRevTerminal
 }>
 
+export type PRAdmissionStep = Readonly<{
+  name: string
+  revision: string
+  job: string
+  status: "passed" | "refused"
+  output?: JsonValue
+  receipt?: JobError
+}>
+
+export const PRAdmissionStepSchema = z
+  .object({
+    name: TextSchema,
+    revision: TextSchema,
+    job: TextSchema,
+    status: z.enum(["passed", "refused"]),
+    output: JsonSchema.optional(),
+    receipt: JobErrorSchema.optional(),
+  })
+  .strict()
+  .superRefine((step, context) => {
+    if ((step.status === "passed") !== (step.receipt === undefined)) {
+      context.addIssue({
+        code: "custom",
+        message:
+          step.status === "passed"
+            ? "passed admission step cannot carry a receipt"
+            : "refused admission step requires a receipt",
+        path: ["receipt"],
+      })
+    }
+  }) as z.ZodType<PRAdmissionStep>
+
+const PRAdmissionBaseSchema = z.object({
+  baseSha: GitShaSchema,
+  candidate: TextSchema.optional(),
+  steps: z.array(PRAdmissionStepSchema),
+})
+
+export type PRAdmissionRecord =
+  | Readonly<{
+      status: "passed"
+      baseSha: string
+      candidate?: string
+      steps: readonly PRAdmissionStep[]
+    }>
+  | Readonly<{
+      status: "refused"
+      kind: "refusal" | "infrastructure"
+      baseSha: string
+      candidate?: string
+      steps: readonly PRAdmissionStep[]
+      step: string
+      receipt: JobError
+    }>
+
+export const PRAdmissionRecordSchema = z.discriminatedUnion("status", [
+  PRAdmissionBaseSchema.extend({ status: z.literal("passed") }).strict(),
+  PRAdmissionBaseSchema.extend({
+    status: z.literal("refused"),
+    kind: z.enum(["refusal", "infrastructure"]),
+    step: TextSchema,
+    receipt: JobErrorSchema,
+  }).strict(),
+]) as z.ZodType<PRAdmissionRecord>
+export type PRAdmission = PRAdmissionRecord & Readonly<{ at: string }>
+
+export type PRAdmissionRecordedFact = Readonly<{
+  pr: PRId
+  revision: number
+  headSha: string
+  admission: PRAdmissionRecord
+}>
+
+export const PRAdmissionRecordedFactSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: z.number().int().positive(),
+    headSha: GitShaSchema,
+    admission: PRAdmissionRecordSchema,
+  })
+  .strict() as z.ZodType<PRAdmissionRecordedFact>
+
 export const PRFreshnessTransitionSchema = z
   .object({ from: z.literal("admitted"), to: z.literal("refreshed") })
   .strict()
@@ -395,6 +485,9 @@ export type PRRev = Readonly<{
   correlation?: Correlation
   composition?: CompositionV1
   recut?: PRRecutProof
+  /** Admission is a verdict about this immutable revision, not a landing
+   * attempt. A later base revalidation replaces it on the same revision. */
+  admission?: PRAdmission
 }> &
   PRRevClock
 
@@ -506,8 +599,8 @@ export type PR = Readonly<{
    * identical in meaning to the empty set. */
   requestedReviewers?: readonly string[]
   regressions?: readonly PRRegression[]
-  /** Exact author-owned refusal for the current revision. The PR remains
-   * submitted/in-queue; a changed push clears this fact and resumes the same PR. */
+  /** Legacy pre-revision-admission projection. New refusal evidence lives on
+   * `currentPRRev(pr).admission`; retained so old journals remain readable. */
   needsAuthor?: Readonly<{
     at: string
     run: string
@@ -537,6 +630,22 @@ export function currentPRRev(pr: Pick<PR, "id" | "revs">): PRRev {
   return revision
 }
 
+export const prAdmission = (pr: Pick<PR, "id" | "revs">): PRAdmission | undefined => currentPRRev(pr).admission
+
+export function prNeedsAuthor(pr: PR): PR["needsAuthor"] | undefined {
+  if (pr.needsAuthor !== undefined) return pr.needsAuthor
+  const admission = prAdmission(pr)
+  if (admission?.status !== "refused" || admission.kind !== "refusal") return undefined
+  const failed = admission.steps.find((step) => step.status === "refused")
+  return {
+    at: admission.at,
+    run: failed?.job ?? `admission:${pr.id}:${currentPRRev(pr).n}`,
+    step: admission.step,
+    receipt: admission.receipt,
+    detail: admission.receipt.message,
+  }
+}
+
 export const prRevisionNumber = (pr: PR): number => currentPRRev(pr).n
 export const prHead = (pr: PR): string => currentPRRev(pr).head
 export const prBaseSha = (pr: PR): string | undefined => currentPRRev(pr).baseSha
@@ -551,10 +660,11 @@ export function prDeliveryState(pr: PR): PRDeliveryState {
     if (pr.canceledAt !== undefined) return "canceled"
     return "withdrawn"
   }
-  if (pr.needsAuthor !== undefined) return "needs-author"
   const revision = currentPRRev(pr)
+  if (prNeedsAuthor(pr) !== undefined) return "needs-author"
   if (revision.terminal?.kind === "rejected") return "rejected"
-  return revision.submittedAt === undefined ? "pushed" : "submitted"
+  if (revision.submittedAt === undefined) return "pushed"
+  return revision.admission?.status === "passed" ? "ready" : "submitted"
 }
 
 export function reviewState(pr: PR): PRReviewState {
@@ -573,7 +683,8 @@ export function reviewState(pr: PR): PRReviewState {
  * Verdicts are revision-bound while requests are not, so a recut without a
  * carried review naturally reopens this projection. */
 export function needsReview(pr: PR, reviewer?: string): boolean {
-  if (prDeliveryState(pr) !== "submitted") return false
+  const delivery = prDeliveryState(pr)
+  if (delivery !== "submitted" && delivery !== "ready") return false
   const revision = currentPRRev(pr)
   const requested = pr.requestedReviewers ?? []
   if (requested.length === 0) return false

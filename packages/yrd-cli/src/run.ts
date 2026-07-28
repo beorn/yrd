@@ -16,6 +16,7 @@ import {
   prDeliveryState,
   prHead,
   isLivePR,
+  prNeedsAuthor,
   prRevisionNumber,
   prRevisionLineage,
   prSourceReadyAt,
@@ -435,21 +436,9 @@ type RunnerHealthPayload = Readonly<{
   facts: RunnerHealthFacts
 }>
 
-/** Whether the host-wired resident owns this invocation's drain lease. Bare
- * embedders without the optional probe retain the historical embedded drive. */
-async function residentHoldsDrainLease(io: YrdCliIO): Promise<boolean> {
-  if (io.residentLeaseHeld === undefined || io.cwd === undefined) return false
-  return io.residentLeaseHeld(io.cwd)
-}
-
-/** Ready and recut enqueue behind a live resident instead of starting a
- * competing embedded driver (R1664/R1668). */
-async function admitWithResidentPolicy(
-  app: Pick<YrdCliApp, "queue">,
-  prs: readonly string[],
-  io: YrdCliIO,
-): Promise<readonly Run[]> {
-  return (await residentHoldsDrainLease(io)) ? app.queue.admit({ prs }) : app.queue.admit({ prs }, runtimeOptions(io))
+/** Ready and recut prove the current revision before it enters the landing queue. */
+async function admitRevision(app: Pick<YrdCliApp, "queue">, prs: readonly string[], io: YrdCliIO): Promise<void> {
+  await app.queue.admitRevision({ prs }, runtimeOptions(io))
 }
 
 export async function residentRunnerLeaseHeld(cwd: string): Promise<boolean> {
@@ -562,7 +551,11 @@ async function queueRunnerHealth(
     if (!leaseHeld) {
       const state = app === undefined ? undefined : stateOf(app)
       const hasQueuedWork =
-        state !== undefined && Object.values(state.bays.prs).some((pr) => prDeliveryState(pr) === "submitted")
+        state !== undefined &&
+        Object.values(state.bays.prs).some((pr) => {
+          const delivery = prDeliveryState(pr)
+          return delivery === "submitted" || delivery === "ready"
+        })
       if (hasQueuedWork) {
         return {
           exitCode: 2,
@@ -1009,7 +1002,7 @@ function trackerDeliveryV2(
     ...(revision.correlation === undefined ? {} : { correlation: revision.correlation }),
   }
   const refusalFact =
-    pr.needsAuthor ??
+    prNeedsAuthor(pr) ??
     (eligibility.reason?.code === "needs-author" && eligibility.reason.receipt !== undefined
       ? {
           at: pr.rejectedAt ?? revision.submittedAt ?? revision.pushedAt,
@@ -3065,7 +3058,7 @@ async function readyPr(
   let pr = app.bays.pr(selector)
   if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after ready`)
   if (!app.bays.checksRequested(pr.id)) await app.bays.requestChecks({ pr: pr.id })
-  const admitted = await admitWithResidentPolicy(app, [pr.id], io)
+  await admitRevision(app, [pr.id], io)
   pr = app.bays.pr(pr.id)
   if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after check admission`)
   const eligibility = app.queue.eligibility(pr.id)
@@ -3079,12 +3072,7 @@ async function readyPr(
     },
     createElement(PRResultView, { prs: [pr], runs: [], eligibilities: [eligibility] }),
   )
-  return admitted.some(
-    (run) =>
-      Queues.failed(run) && run.prs.some((member) => member.id === pr.id && member.revision === prRevisionNumber(pr)),
-  )
-    ? 1
-    : 0
+  return prDeliveryState(pr) === "needs-author" ? 1 : 0
 }
 
 /** The tracked "merge into latest" step. A tracked PR whose branch moved records
@@ -3150,12 +3138,7 @@ async function recutPr(
     outcome.output,
     `${outcome.current.id} revision ${revision} ${outcome.unchanged ? "already matches" : "recut onto"} ${outcome.result.baseSha}`,
   )
-  return outcome.admitted.some(
-    (run) =>
-      Queues.failed(run) && run.prs.some((member) => member.id === outcome.current.id && member.revision === revision),
-  )
-    ? 1
-    : 0
+  return prDeliveryState(outcome.current) === "needs-author" ? 1 : 0
 }
 
 type ExecuteRecutPrOptions = Readonly<{
@@ -3271,7 +3254,6 @@ async function executeRecutPr(
   const unchanged = recorded.events.length === 0
 
   let current = requiredPr(app, pr.id)
-  let admitted: readonly Run[] = []
   if (options.queue === true) {
     await requirePublishedSubmodulePins(current, services, io)
     if (!unchanged) {
@@ -3284,12 +3266,12 @@ async function executeRecutPr(
     if (prDeliveryState(current) === "pushed") await app.bays.ready({ pr: current.id })
     current = requiredPr(app, current.id)
     const currentDelivery = prDeliveryState(current)
-    if (currentDelivery !== "submitted") {
+    if (currentDelivery !== "submitted" && currentDelivery !== "ready") {
       raiseFailure("refusal", "recut-not-ready", `yrd: PR '${current.id}' is ${currentDelivery}, not ready`)
     }
     if (!app.bays.checksRequested(current.id)) await app.bays.requestChecks({ pr: current.id })
     if (options.admit !== false) {
-      admitted = await admitWithResidentPolicy(app, [current.id], io)
+      await admitRevision(app, [current.id], io)
     }
     current = requiredPr(app, current.id)
   }
@@ -3305,7 +3287,7 @@ async function executeRecutPr(
     lineage: prRevisionLineage(current).map((revision) => revision.n),
     unchanged,
   }
-  return { admitted, current, output, result, unchanged }
+  return { current, output, result, unchanged }
 }
 
 async function reviewPr(
@@ -3486,6 +3468,10 @@ async function followCheckRecords(
     if (scope.signal.aborted) return records
     await app.refresh()
     if (scope.signal.aborted) return records
+    const revisionAdmissions = selectors.filter((selector) => app.queue.eligibility(selector).checks.run === undefined)
+    if (revisionAdmissions.length > 0) {
+      await app.queue.admitRevision({ prs: revisionAdmissions }, runtimeOptions(io))
+    }
     records = [...prCheckRecords(app, selectors)]
   }
   return records
@@ -3697,20 +3683,12 @@ async function applyPrSelectionVerb(
   }
   const checkable = prs.filter((pr) => {
     const delivery = prDeliveryState(pr)
-    return delivery === "pushed" || delivery === "submitted"
+    return delivery === "pushed" || delivery === "submitted" || delivery === "ready"
   })
   for (const pr of checkable) await requirePublishedSubmodulePins(pr, services, io)
   for (const pr of checkable) await app.bays.requestChecks({ pr: pr.id })
   const selected = checkable.map((pr) => pr.id)
-  if (selected.length === 0 || (options.wait !== true && options.follow !== true)) {
-    // D8 — submit is a ledger write, not a negotiation. The submission and its
-    // check request are now recorded; return success WITHOUT composing or
-    // draining. The runner loop admits and settles this PR on its next cycle,
-    // and any composition problem surfaces later as an in-queue `needs-author`
-    // state (yrd-queue PREligibility) — never as a submit-time door refusal.
-    // `--wait`/`--follow` opt back into the synchronous drain; with nothing
-    // checkable (e.g. an already-merged same-head resubmit) there is nothing
-    // to drain.
+  if (selected.length === 0) {
     await printResult(
       io,
       jsonEnabled(options),
@@ -3719,9 +3697,10 @@ async function applyPrSelectionVerb(
     )
     return 0
   }
-  const followed = (await app.queue.admit({ prs: selected }, runtimeOptions(io))).filter((run) =>
-    run.prs.some((member) => prs.some((pr) => pr.id === member.id && prRevisionNumber(pr) === member.revision)),
-  )
+  // Admission is a synchronous revision verdict. It runs at submit so callers
+  // receive ready/refused evidence immediately; it is never deferred to the
+  // resident and never creates a Queue Run.
+  await app.queue.admitRevision({ prs: selected }, runtimeOptions(io))
   let checks: readonly PRCheckViewRecord[] = prCheckRecords(app, selected)
   if (options.follow === true && !checksTerminal(checks)) checks = await followCheckRecords(app, selected, checks, io)
   const currentPrs = selected.map((selector) => requiredPr(app, selector))
@@ -3742,13 +3721,13 @@ async function applyPrSelectionVerb(
     },
     createElement(PRResultView, {
       prs: currentPrs,
-      runs: followed,
+      runs: [],
       checks,
       eligibilities: current.map(({ eligibility }) => eligibility),
       now: io.now?.() ?? Date.now(),
     }),
   )
-  return checks.some((check) => check.status === "failed") || followed.some(Queues.failed) ? 1 : 0
+  return checks.some((check) => check.status === "failed") ? 1 : 0
 }
 
 async function readComposition(path: string | undefined, io: YrdCliIO): Promise<CompositionV1 | undefined> {
@@ -4011,7 +3990,9 @@ async function listPrs(
         ? options.reviewer !== undefined
           ? needsReview
           : needsReview ||
-            ((prDeliveryState(pr) === "pushed" || prDeliveryState(pr) === "submitted") &&
+            ((prDeliveryState(pr) === "pushed" ||
+              prDeliveryState(pr) === "submitted" ||
+              prDeliveryState(pr) === "ready") &&
               eligibility.review.required &&
               !eligibility.review.approved)
         : true,
@@ -4055,7 +4036,9 @@ async function viewPr(
   const state = stateOf(app)
   const target = resolveQueueTargets(state, [pr.id], undefined, pr.id)
   const { results } = await queueStatusSnapshots(app, state, target, io)
-  const positions = prDeliveryState(pr) === "submitted" ? await queuedPrPositions(state, pr.base, io) : undefined
+  const delivery = prDeliveryState(pr)
+  const positions =
+    delivery === "submitted" || delivery === "ready" ? await queuedPrPositions(state, pr.base, io) : undefined
   const position = positions?.get(pr.id)
   const runs = prQueueRuns(app, pr)
   const attempts = await queueLogAttempts(app.events())
@@ -4209,7 +4192,8 @@ function currentPr(app: YrdCliApp, io: YrdCliIO): PR {
 }
 
 async function queuedPrPosition(state: YrdCliState, pr: PR, io: YrdCliIO): Promise<number | undefined> {
-  if (prDeliveryState(pr) !== "submitted") return undefined
+  const delivery = prDeliveryState(pr)
+  if (delivery !== "submitted" && delivery !== "ready") return undefined
   return (await queuedPrPositions(state, pr.base, io)).get(pr.id)
 }
 
@@ -5836,7 +5820,8 @@ async function finishQueue(
   }
   const attempt = Number(options.attempt)
   if (!Number.isSafeInteger(attempt) || attempt < 1) usage("--attempt must be a positive integer")
-  const waiting = app.queue.waiting(selector, options.step)
+  const revisionAdmission = app.queue.waitingAdmission(selector, options.step)
+  const waiting = revisionAdmission ?? app.queue.waiting(selector, options.step)
   const selectedJob = waiting.step.job
   const recordedArtifacts = artifacts(options.artifact)
   const exitCode = positiveInteger(options.exitCode, "--exit-code")
@@ -5851,29 +5836,42 @@ async function finishQueue(
     ...(exitCode === undefined ? {} : { exitCode }),
     ...(durationMs === undefined ? {} : { durationMs }),
   }
-  const resumed = await app.queue.finish(
-    selector,
-    {
-      job: jobId,
-      step: waiting.step.name,
-      runner,
-      attempt,
-      token,
-      result:
-        options.ok === true
-          ? { status: "completed", conclusion: "success", output: evidence }
-          : {
-              status: "completed",
-              conclusion: "failure",
-              error: {
-                code: `${waiting.step.name}-failed`,
-                message: options.detail ?? `${waiting.step.name} failed externally`,
-              },
-              output: evidence,
+  const completion = {
+    job: jobId,
+    step: waiting.step.name,
+    runner,
+    attempt,
+    token,
+    result:
+      options.ok === true
+        ? ({ status: "completed", conclusion: "success", output: evidence } as const)
+        : ({
+            status: "completed",
+            conclusion: "failure",
+            error: {
+              code: `${waiting.step.name}-failed`,
+              message: options.detail ?? `${waiting.step.name} failed externally`,
             },
-    },
-    runtimeOptions(io),
-  )
+            output: evidence,
+          } as const),
+  }
+  if (revisionAdmission !== undefined) {
+    await app.queue.finishAdmission(selector, completion, runtimeOptions(io))
+    const pr = requiredPr(app, selector)
+    const checks = prCheckRecords(app, [pr.id])
+    await printResult(
+      io,
+      jsonEnabled(options),
+      {
+        command: "queue.finish",
+        pr: projectPrTaskStatusWithEligibility(pr, app.queue.eligibility(pr.id)),
+        checks: checks.map(projectCheckTaskStatus),
+      },
+      `${pr.id} ${prDeliveryState(pr)}`,
+    )
+    return
+  }
+  const resumed = await app.queue.finish(selector, completion, runtimeOptions(io))
   await printResult(
     io,
     jsonEnabled(options),
@@ -6083,7 +6081,10 @@ export async function refreshAdmittedQueueRevisions(
     })
   }
   const candidates = Object.values(snapshot.bays.prs)
-    .filter((pr) => prDeliveryState(pr) === "submitted" && app.bays.checksRequested(pr.id))
+    .filter((pr) => {
+      const delivery = prDeliveryState(pr)
+      return (delivery === "submitted" || delivery === "ready") && app.bays.checksRequested(pr.id)
+    })
     .toSorted(
       (left, right) =>
         baseIdentity(left.base).localeCompare(baseIdentity(right.base)) ||
@@ -6234,7 +6235,7 @@ async function applyRedeliveryStep(
     warnings,
   })
   const delivery = prDeliveryState(submitted)
-  if (delivery !== "pushed" && delivery !== "submitted") return
+  if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready") return
   await requirePublishedSubmodulePins(submitted, services, io)
   if (!app.bays.checksRequested(submitted.id)) await app.bays.requestChecks({ pr: submitted.id })
 }
@@ -6972,7 +6973,7 @@ function prMergeRefusalDetail(
       outcome: "rejected",
     }
   }
-  if (delivery === "submitted") {
+  if (delivery === "submitted" || delivery === "ready") {
     const watch = `yrd watch --pr ${pr.id}`
     return {
       next: watch,

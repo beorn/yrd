@@ -377,7 +377,15 @@ export type QueueAuthorityState = Readonly<{
   statuses: Readonly<
     Record<
       string,
-      "pushed" | "submitted" | "needs-author" | "rejected" | "withdrawn" | "integrated" | "already-landed" | "canceled"
+      | "pushed"
+      | "submitted"
+      | "ready"
+      | "needs-author"
+      | "rejected"
+      | "withdrawn"
+      | "integrated"
+      | "already-landed"
+      | "canceled"
     >
   >
   current: Readonly<Record<string, QueueAuthorityToken>>
@@ -557,6 +565,7 @@ export type PRCheckRecord = Readonly<{
   revision: number
   status: PREligibility["checks"]["status"]
   run?: RunId
+  job?: string
   step?: StepName
   classification?: "base" | "carrier"
   queuedAt?: string

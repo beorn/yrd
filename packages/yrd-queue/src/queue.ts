@@ -2,6 +2,7 @@ import {
   GitRefSchema,
   GitShaSchema,
   PRAlreadyLandedSchema,
+  PRAdmissionRecordedFactSchema,
   PRIdSchema,
   PRNeedsAuthorFactSchema,
   PRTerminalAssociationSchema,
@@ -12,10 +13,12 @@ import {
   currentPRRev,
   normalizeV2Submitter,
   prBaseSha,
+  prAdmission,
   prComposition,
   prCorrelation,
   prDeliveryState,
   prHead,
+  prNeedsAuthor,
   prRevisionNumber,
   resolveBase,
   resolvePR,
@@ -23,6 +26,9 @@ import {
   type BaysState,
   type HasBays,
   type PR,
+  type PRAdmissionRecord,
+  type PRAdmissionRecordedFact,
+  type PRAdmissionStep,
 } from "@yrd/bay"
 import {
   command,
@@ -172,6 +178,17 @@ const StepExecutionSchema = z
     shape: JsonSchema,
   })
   .strict() as unknown as z.ZodType<StepExecution>
+
+const AdmissionStepArgsSchema = z
+  .object({
+    pr: PRSnapshotSchema,
+    candidate: CandidateCreatedSchema,
+    step: StepNameSchema,
+    index: z.number().int().nonnegative(),
+    shape: JsonSchema,
+  })
+  .strict()
+type AdmissionStepArgs = Readonly<z.infer<typeof AdmissionStepArgsSchema>>
 
 const QueueRunArgsSchema = z
   .object({
@@ -483,6 +500,7 @@ function queueBase(state: DeepReadonly<RuntimeState>, selector: string): string 
 export type QueueCommands = Readonly<{
   queue: Readonly<{
     admit: CommandHandler<AdmitArgs, RuntimeState>
+    admissionStep: CommandHandler<AdmissionStepArgs, RuntimeState>
     run: CommandHandler<QueueRunArgs, RuntimeState>
     pause: CommandHandler<PauseQueueArgs, RuntimeState>
     resume: CommandHandler<Readonly<{ base: string }>, RuntimeState>
@@ -553,12 +571,21 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   readonly shape?: Shape
   state: ReadSignal<DeepReadonly<QueuesState>>
   steps(): readonly InstalledStep[]
+  /**
+   * Execute submit-time admission against the current revision and retain the
+   * verdict on that revision. Unlike legacy `admit`, this never creates a
+   * Queue Run; Queue Runs are reserved for landing attempts.
+   */
+  admitRevision(args: AdmitSelection, options: RunJobOptions): Promise<void>
+  /** Legacy Run-shaped admission retained for replay and waiting callers. */
   admit(args: AdmitSelection, options?: RunJobOptions): Promise<readonly Run[]>
   pause(args: PauseQueueArgs): Promise<QueuePause>
   resume(base: string): Promise<void>
   run(args: QueueRunArgs, options: QueueRunOptions): Promise<readonly Run[]>
   waiting(selector: string, step?: string): WaitingQueueStep
+  waitingAdmission(selector: string, step?: string): WaitingAdmissionStep | undefined
   finish(selector: string, completion: FinishQueueArgs, options: RunJobOptions): Promise<Run>
+  finishAdmission(selector: string, completion: FinishQueueArgs, options: RunJobOptions): Promise<void>
   cancel(args: CancelQueueArgs): Promise<readonly Run[]>
   cancelRun(args: CancelRunArgs): Promise<Run>
   recover(options: RecoverQueueOptions): Promise<readonly Run[]>
@@ -598,6 +625,12 @@ export type QueueRunOptions = RunJobOptions & Readonly<{ continueAdmissions?: ()
 export type WaitingQueueStep = Readonly<{
   run: Run
   step: QueueStep & Readonly<{ job: Extract<Job, { status: "waiting" }> }>
+}>
+
+export type WaitingAdmissionStep = Readonly<{
+  pr: string
+  revision: number
+  step: Readonly<{ name: string; job: Extract<Job, { status: "waiting" }> }>
 }>
 
 export type FinishQueueArgs = Omit<JobCompletion, "token"> & Readonly<{ job: Job["id"]; step?: string; token: string }>
@@ -687,6 +720,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
             {
               refresh: () => yrd.refresh(),
               admit: (args) => yrd.dispatch(commands.queue.admit, args),
+              admissionStep: (args) => yrd.dispatch(commands.queue.admissionStep, args),
               run: (args) => yrd.dispatch(commands.queue.run, args),
               pause: (args) => yrd.dispatch(commands.queue.pause, args),
               resume: (base) => yrd.dispatch(commands.queue.resume, { base }),
@@ -704,6 +738,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               settleOrphanedRun: (args) => yrd.dispatch(commands.queue.settleOrphanedRun, args),
               associateTerminals: (args) => yrd.dispatch(commands.queue.associateTerminals, args),
               admissionRefused: (args) => yrd.dispatch(commands.queue.admissionRefused, args),
+              recordAdmission: (args) => yrd.bays.recordAdmission(args),
               requestChecks: (pr, baseSha) =>
                 yrd.bays.requestChecks({ pr, ...(baseSha === undefined ? {} : { baseSha }) }),
             },
@@ -728,6 +763,7 @@ type RuntimeStep = AnyStepDef
 type QueueActions = Readonly<{
   refresh(): Promise<unknown>
   admit(args: AdmitArgs): Promise<CommandResult>
+  admissionStep(args: AdmissionStepArgs): Promise<CommandResult>
   run(args: QueueRunArgs): Promise<CommandResult>
   pause(args: PauseQueueArgs): Promise<CommandResult>
   resume(base: string): Promise<CommandResult>
@@ -740,6 +776,7 @@ type QueueActions = Readonly<{
   settleOrphanedRun(args: SettleOrphanedRunArgs): Promise<CommandResult>
   associateTerminals(args: AssociateTerminalsArgs): Promise<CommandResult>
   admissionRefused(args: AdmissionRefusedArgs): Promise<CommandResult>
+  recordAdmission(args: PRAdmissionRecordedFact): Promise<CommandResult>
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
 }>
 
@@ -1342,6 +1379,182 @@ function createQueue<Shape extends PRShape>(
   ): Promise<z.infer<typeof CandidateCreatedSchema> | undefined> =>
     candidateFactsForSnapshots(prs.map(Queues.snapshot), baseSha)
 
+  const recordRevisionAdmission = (pr: DeepReadonly<PR>, admission: PRAdmissionRecord): Promise<CommandResult> =>
+    actions.recordAdmission({
+      pr: pr.id,
+      revision: prRevisionNumber(pr),
+      headSha: prHead(pr),
+      admission,
+    })
+
+  const refuseRevisionAdmission = async (
+    pr: DeepReadonly<PR>,
+    baseSha: string,
+    step: string,
+    receipt: JobError,
+    options: Readonly<{
+      candidate?: string
+      kind?: "refusal" | "infrastructure"
+      steps?: readonly PRAdmissionStep[]
+    }> = {},
+  ): Promise<void> => {
+    await recordRevisionAdmission(pr, {
+      status: "refused",
+      kind: options.kind ?? "refusal",
+      baseSha,
+      ...(options.candidate === undefined ? {} : { candidate: options.candidate }),
+      steps: [...(options.steps ?? [])],
+      step,
+      receipt,
+    })
+  }
+
+  const admitPRRevision = async (pr: DeepReadonly<PR>, baseSha: string, runOptions: RunJobOptions): Promise<void> => {
+    const selected = admissionSteps(runtime().queues, steps)
+    const prior = prAdmission(pr)
+    if (
+      prior?.status === "passed" &&
+      prior.baseSha === baseSha &&
+      prior.steps.length === selected.length &&
+      prior.steps.every(
+        (evidence, index) =>
+          evidence.status === "passed" &&
+          evidence.name === selected[index]?.name &&
+          evidence.revision === selected[index]?.revision,
+      )
+    ) {
+      return
+    }
+    const snapshot = pinCandidateBaseSha([Queues.snapshot(pr)], baseSha)[0]
+    if (snapshot === undefined) throw new Error(`yrd: admission lost PR '${pr.id}'`)
+    let prepared: z.infer<typeof CandidateCreatedSchema> | undefined
+    try {
+      prepared = await candidateFactsForSnapshots([snapshot], baseSha)
+    } catch (error) {
+      const fact = failureFact(error)
+      const kind = fact?.kind === "infrastructure" ? "infrastructure" : "refusal"
+      await refuseRevisionAdmission(
+        pr,
+        baseSha,
+        "candidate",
+        {
+          code: fact?.code ?? "candidate-refused",
+          message: fact?.message ?? (error instanceof Error ? error.message : String(error)),
+        },
+        { kind },
+      )
+      if (kind === "infrastructure") throw error
+      return
+    }
+    const candidate = CandidateCreatedSchema.parse(
+      prepared ?? {
+        id: allocateCandidateId(),
+        queueId: queueIdentity(snapshot),
+        baseSha,
+        revs: [{ pr: snapshot.id, n: snapshot.revision, head: snapshot.headSha }],
+        mergeability: "unknown",
+      },
+    )
+    if (candidate.mergeability === "conflicting") {
+      await refuseRevisionAdmission(
+        pr,
+        baseSha,
+        "candidate",
+        {
+          code: "candidate-conflicting",
+          message: `Candidate '${candidate.id}' conflicts before admission`,
+        },
+        { candidate: candidate.id },
+      )
+      return
+    }
+    const executor =
+      configuredRunner ??
+      localRunner({
+        id: runOptions.runner,
+        jobs,
+        leaseMs: runOptions.leaseMs,
+        ...(runOptions.heartbeatMs === undefined ? {} : { heartbeatMs: runOptions.heartbeatMs }),
+        ...(runOptions.now === undefined ? {} : { now: runOptions.now }),
+      })
+    const evidence: PRAdmissionStep[] = []
+    let shape: PRShape = prShape([snapshot])
+    for (const [index, step] of selected.entries()) {
+      const requested = await actions.admissionStep({
+        pr: snapshot,
+        candidate,
+        step: step.name,
+        index,
+        shape,
+      })
+      const key = admissionJobKey(snapshot, baseSha, index)
+      const jobId = jobs.requested(requested)[0] ?? jobs.getByKey(key)?.id
+      if (jobId === undefined) throw new Error(`yrd: admission step '${step.name}' did not request a Job`)
+      const job = await executor.submit({
+        job: jobId,
+        context:
+          configuredRunner === undefined
+            ? { scope: "job", candidate: "none" }
+            : { scope: "job", candidate: "rw", capabilities: ["git"] },
+        ...(configuredRunner !== undefined && candidate.ref !== undefined ? { candidateRef: candidate.ref } : {}),
+      })
+      if (job.status !== "completed") {
+        // A remote Runner may yield durable waiting work. The revision remains
+        // submitted until a later observation calls this idempotent path again;
+        // the standalone Job is the live progress fact, never a Queue Run.
+        return
+      }
+      if (job.conclusion !== "success") {
+        const receipt = jobFailure(job)
+        const failed: PRAdmissionStep = {
+          name: step.name,
+          revision: step.revision,
+          job: job.id,
+          status: "refused",
+          ...("output" in job && job.output !== undefined ? { output: job.output } : {}),
+          receipt,
+        }
+        await refuseRevisionAdmission(pr, baseSha, step.name, receipt, {
+          candidate: candidate.id,
+          kind: job.conclusion === "failure" ? "refusal" : "infrastructure",
+          steps: [...evidence, failed],
+        })
+        return
+      }
+      evidence.push({
+        name: step.name,
+        revision: step.revision,
+        job: job.id,
+        status: "passed",
+        output: job.output,
+      })
+      shape = { ...shape, results: { ...shape.results, [step.name]: job.output } }
+    }
+    await recordRevisionAdmission(pr, {
+      status: "passed",
+      baseSha,
+      candidate: candidate.id,
+      steps: evidence,
+    })
+  }
+
+  const waitingRevisionAdmission = (selector: string, requestedStep?: string): WaitingAdmissionStep | undefined => {
+    const pr = resolvePR(runtime().bays, selector)
+    if (pr === undefined) return undefined
+    const request = checkRequest(pr)
+    const baseSha = request?.baseSha ?? prBaseSha(pr)
+    if (baseSha === undefined) return undefined
+    const snapshot = pinCandidateBaseSha([Queues.snapshot(pr)], baseSha)[0]
+    if (snapshot === undefined) return undefined
+    for (const [index, step] of admissionSteps(runtime().queues, steps).entries()) {
+      if (requestedStep !== undefined && step.name !== requestedStep) continue
+      const job = jobs.getByKey(admissionJobKey(snapshot, baseSha, index))
+      if (job?.status !== "waiting") continue
+      return { pr: pr.id, revision: prRevisionNumber(pr), step: { name: step.name, job } }
+    }
+    return undefined
+  }
+
   /**
    * Journal the per-PR refusal behind every `compose-candidate-skip` warn below.
    * The warns are loggily-only — they die with the process, and a PR refused at
@@ -1418,7 +1631,7 @@ function createQueue<Shape extends PRShape>(
       } catch (error) {
         const fact = failureFact(error)
         const checkability = error instanceof PrCheckabilityConflict
-        if (!selectorless || (!checkability && (fact === undefined || fact.kind !== "refusal"))) {
+        if (!selectorless || (!checkability && fact?.kind !== "refusal")) {
           throw error
         }
         const refusal = {
@@ -1550,6 +1763,42 @@ function createQueue<Shape extends PRShape>(
         },
       )
     },
+    async admitRevision(args, runOptions) {
+      const resolveCycleBase = createBaseResolutionCycle()
+      const requestedSelectors = args.prs?.length ? args.prs : undefined
+      await actions.refresh()
+      await cleanupSettledRoots()
+      let snapshot = runtime()
+      const selected =
+        requestedSelectors === undefined
+          ? admissionQueue(snapshot, steps)
+          : requestedSelectors.map((selector) => {
+              const pr = resolvePR(snapshot.bays, selector)
+              if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
+              return pr
+            })
+      await refreshCheckIdentities(selected, resolveCycleBase)
+      snapshot = runtime()
+      const prs =
+        requestedSelectors === undefined
+          ? admissionQueue(snapshot, steps)
+          : selected.map((pr) => {
+              const current = resolvePR(snapshot.bays, pr.id)
+              if (current === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${pr.id}'`)
+              return current
+            })
+      for (const pr of prs) {
+        const staleRuns = activeQueueRuns(runtime().queues, runtime().jobs).filter((run) =>
+          run.prs.some(
+            (member) =>
+              member.id === pr.id && (member.revision !== prRevisionNumber(pr) || member.headSha !== prHead(pr)),
+          ),
+        )
+        for (const stale of staleRuns) await settle(stale.id, runOptions)
+        const baseSha = await resolveCandidateBaseSha([pr], resolveCycleBase)
+        await admitPRRevision(pr, baseSha, runOptions)
+      }
+    },
     async pause(args) {
       const snapshot = runtime()
       const base = queueBase(snapshot, args.base)
@@ -1565,6 +1814,42 @@ function createQueue<Shape extends PRShape>(
     },
     async resume(base) {
       await actions.resume(queueBase(runtime(), base))
+    },
+    waitingAdmission(selector, step) {
+      return waitingRevisionAdmission(selector, step)
+    },
+    async finishAdmission(selector, completion, options) {
+      const waiting = waitingRevisionAdmission(selector, completion.step)
+      if (waiting === undefined) {
+        raiseFailure(
+          "refusal",
+          "admission-step-not-waiting",
+          `yrd: PR '${selector}' has no waiting revision admission${completion.step === undefined ? "" : ` '${completion.step}'`} step`,
+        )
+      }
+      if (waiting.step.job.id !== completion.job) {
+        raiseFailure(
+          "refusal",
+          "job-mismatch",
+          `yrd: waiting admission step '${waiting.step.name}' belongs to Job '${waiting.step.job.id}', not '${completion.job}'`,
+        )
+      }
+      await jobs.finish(completion.job, {
+        attempt: completion.attempt,
+        runner: completion.runner,
+        token: completion.token,
+        result: completion.result,
+      })
+      const pr = resolvePR(runtime().bays, waiting.pr)
+      if (pr === undefined || prRevisionNumber(pr) !== waiting.revision) {
+        raiseFailure("refusal", "stale-pr", `yrd: PR '${waiting.pr}' changed while admission was waiting`)
+      }
+      const request = checkRequest(pr)
+      const baseSha = request?.baseSha ?? prBaseSha(pr)
+      if (baseSha === undefined) {
+        raiseFailure("infrastructure", "base-sha-missing", `yrd: PR '${pr.id}' admission has no resolved base`)
+      }
+      await admitPRRevision(pr, baseSha, options)
     },
     async run(args, runOptions) {
       return observeYrdLifecycle(
@@ -1703,14 +1988,26 @@ function createQueue<Shape extends PRShape>(
             ? []
             : requested.filter((pr) => !authorityGapIds.has(pr.id) && checksRequested(pr))
           const before = new Map(checked.map((pr) => [pr.id, checkEligibility(snapshot, pr, steps).status]))
-          // Isolate admission-phase work the same way as merge-candidate work: one
-          // PR's preparation/admit refusal (authored-gitlink, recut-certificate, …)
-          // must not kill the whole selectorless pass (22306 architectural gap).
+          // Admission is revision-owned evidence, not a Queue Run. Revalidate
+          // each requested revision against this cycle's base before selecting
+          // landing work. Journals created before this cutover have no revision
+          // evidence; preserve their old Run-shaped admission path until that
+          // revision settles, while every new submit uses the no-Run path.
           let admissions: Run[] = []
           try {
             await refreshCheckIdentities(checked, resolveCycleBase)
+            const currentChecked = checked.flatMap((pr) => {
+              const current = resolvePR(runtime().bays, pr.id)
+              return current === undefined ? [] : [current]
+            })
+            const revisionOwned = currentChecked.filter((pr) => prAdmission(pr) !== undefined)
+            const legacy = currentChecked.filter((pr) => prAdmission(pr) === undefined)
+            for (const current of revisionOwned) {
+              const baseSha = await resolveCandidateBaseSha([current], resolveCycleBase)
+              await admitPRRevision(current, baseSha, runOptions)
+            }
             admissions = await drainAdmissions(
-              checked.map((pr) => pr.id),
+              legacy.map((pr) => pr.id),
               runOptions,
               resolveCycleBase,
               selection,
@@ -1731,10 +2028,13 @@ function createQueue<Shape extends PRShape>(
               checked.map((pr) => pr.id),
               { code: fact.code, kind: fact.kind, reason: fact.message },
             )
-            admissions = []
           }
           snapshot = runtime()
-          const unsettled = checked.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "passed")
+          const currentChecked = checked.flatMap((pr) => {
+            const current = resolvePR(snapshot.bays, pr.id)
+            return current === undefined ? [] : [current]
+          })
+          const unsettled = currentChecked.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "passed")
           const pending = unsettled.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "failed")
           const pendingIds = new Set(pending.map((pr) => pr.id))
           const pendingAdmissionRoots = admissions
@@ -1744,19 +2044,6 @@ function createQueue<Shape extends PRShape>(
             const newlyFailed = unsettled.some(
               (pr) => before.get(pr.id) !== "failed" && checkEligibility(snapshot, pr, steps).status === "failed",
             )
-            // Pause the merge phase ONLY when a check newly failed this tick,
-            // so requeue/recut policy sees the failure before the next batch
-            // composes. An in-flight (running/queued) check must NEVER gate the
-            // merge phase: under continuous submissions the resident sees an
-            // unsettled check on every tick, and gating on it starves merges
-            // indefinitely (2026-07-22 merge-starvation livelock — checks
-            // completed in 48s-2m14s all day while zero merge steps ran).
-            // Liveness beats check-freshness here: landing a runnable PR can
-            // stale an in-flight sibling check, which the stale/recut path
-            // already classifies and (with auto-recut) requeues.
-            // An explicit PR selection is different: if that PR's check is
-            // still queued or running, there is no other requested merge work
-            // to preserve and composing it now would violate the selection.
             if (
               newlyFailed ||
               (selection === "explicit" &&
@@ -2382,7 +2669,7 @@ function createQueueCommands(
       if (delivery === "integrated" || delivery === "already-landed") {
         return { events: [] }
       }
-      if (delivery !== "pushed" && delivery !== "submitted") {
+      if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready") {
         // Terminal races (withdrawn/canceled/rejected mid-compose) are losable for
         // the resident via isConcurrentCheckabilityConflict — same shape as the
         // bay "not checkable" path. Explicit one-shots still surface the throw.
@@ -2429,6 +2716,60 @@ function createQueueCommands(
         stepSelection(state.queues, steps, selected, "admission"),
         prShape(candidateSnapshots),
       )
+    },
+  })
+
+  const admissionStep = command({
+    title: "Run one revision admission step",
+    params: AdmissionStepArgsSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: AdmissionStepArgs) {
+      const pr = state.bays.prs[args.pr.id]
+      if (
+        pr === undefined ||
+        prRevisionNumber(pr) !== args.pr.revision ||
+        prHead(pr) !== args.pr.headSha ||
+        baseIdentity(pr.base) !== baseIdentity(args.pr.base)
+      ) {
+        raiseFailure(
+          "refusal",
+          "stale-pr",
+          `yrd: admission targets stale revision ${args.pr.revision} (${args.pr.headSha}) of PR '${args.pr.id}'`,
+        )
+      }
+      const selected = admissionSteps(state.queues, steps)
+      const step = selected[args.index]
+      if (step === undefined || step.name !== args.step) {
+        throw new Error(`yrd: admission step ${args.index} is '${step?.name ?? "missing"}', not '${args.step}'`)
+      }
+      if (
+        args.candidate.baseSha !== args.pr.baseSha ||
+        args.candidate.revs.length !== 1 ||
+        args.candidate.revs[0]?.pr !== args.pr.id ||
+        args.candidate.revs[0]?.n !== args.pr.revision ||
+        args.candidate.revs[0]?.head !== args.pr.headSha
+      ) {
+        throw new Error(`yrd: admission Candidate '${args.candidate.id}' does not match PR '${args.pr.id}'`)
+      }
+      const key = admissionJobKey(args.pr, args.candidate.baseSha, args.index)
+      if (state.jobs.byKey[key] !== undefined) return { events: [] }
+      return {
+        events: [
+          ...(state.queues.candidates[args.candidate.id] === undefined
+            ? [event("queue/candidate/created", args.candidate)]
+            : []),
+          step.job.request(
+            {
+              run: admissionExecutionId(args.pr, args.candidate.baseSha),
+              step: step.name,
+              index: args.index,
+              prs: [args.pr],
+              candidate: args.candidate,
+              shape: args.shape as PRShape,
+            },
+            { key },
+          ),
+        ],
+      }
     },
   })
 
@@ -2522,9 +2863,12 @@ function createQueueCommands(
       const candidateSnapshots = pinCandidateBaseSha(snapshots, candidateBaseSha)
       const reuse =
         integrated === undefined && !explicitStepAuthority
-          ? reusablePrefix(state, candidateSnapshots, selected)
+          ? (reusableRevisionAdmission(state, candidateSnapshots, selected) ??
+            reusablePrefix(state, candidateSnapshots, selected))
           : undefined
       const remaining = reuse === undefined ? selected : selected.slice(reuse.count)
+      const reusedRun: RunId | undefined =
+        reuse !== undefined && "run" in reuse && typeof reuse.run === "string" ? reuse.run : undefined
       if (remaining.length === 0) return { events: [] }
       const authorityGap = queueAuthorityGaps(
         state.queues.authority,
@@ -2551,7 +2895,9 @@ function createQueueCommands(
         reuse?.shape ?? integrated ?? prShape(candidateSnapshots),
         integrated?.integration,
         {},
-        reuse === undefined ? undefined : { run: reuse.run, results: reuse.shape.results },
+        reuse === undefined
+          ? undefined
+          : { ...(reusedRun === undefined ? {} : { run: reusedRun }), results: reuse.shape.results },
       )
       return superseded === undefined
         ? started
@@ -2821,6 +3167,7 @@ function createQueueCommands(
   return {
     queue: {
       admit,
+      admissionStep,
       run,
       pause,
       resume,
@@ -2858,7 +3205,9 @@ function queueAuthorityNeedsAuthorEvent(
     throw new Error(`yrd: consumed ${gap.kind} authority for PR '${gap.pr}' has no consuming queue run`)
   }
   const pr = state.bays.prs[gap.pr]
-  if (pr === undefined || prDeliveryState(pr) !== "submitted") return undefined
+  if (pr === undefined || (prDeliveryState(pr) !== "submitted" && prDeliveryState(pr) !== "ready")) {
+    return undefined
+  }
   const revision = pr.revs.find((candidate) => candidate.n === gap.revision && candidate.head === gap.headSha)
   if (revision === undefined) return undefined
   const code = `queue-${gap.kind}-authority-consumed`
@@ -3365,10 +3714,31 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
       },
     }
   }
+  if (applied.name === "pr/admission-recorded") {
+    const recorded = PRAdmissionRecordedFactSchema.parse(applied.data)
+    if (!currentAuthorityMatches(state.queues.authority, recorded)) return state
+    const status: QueueAuthorityState["statuses"][string] =
+      recorded.admission.status === "passed"
+        ? "ready"
+        : recorded.admission.kind === "refusal"
+          ? "needs-author"
+          : "submitted"
+    const queues = {
+      ...state.queues,
+      authority: {
+        ...state.queues.authority,
+        statuses: { ...state.queues.authority.statuses, [recorded.pr]: status },
+      },
+    }
+    return { queues: status === "ready" ? clearAdmissionRefusals(queues, [recorded.pr]) : queues }
+  }
   if (applied.name === "pr/needs-author") {
     const needsAuthor = PRNeedsAuthorFactSchema.parse(applied.data)
     if (!currentAuthorityMatches(state.queues.authority, needsAuthor)) return state
-    if (state.queues.authority.statuses[needsAuthor.pr] !== "submitted") {
+    if (
+      state.queues.authority.statuses[needsAuthor.pr] !== "submitted" &&
+      state.queues.authority.statuses[needsAuthor.pr] !== "ready"
+    ) {
       throw new Error(
         `yrd: queue authority for PR '${needsAuthor.pr}' is ${state.queues.authority.statuses[needsAuthor.pr] ?? "missing"}; '${applied.name}' requires submitted`,
       )
@@ -3750,7 +4120,7 @@ function startRun(
   shape: PRShape,
   integration?: IntegrationProof,
   lineage: Readonly<{ parent?: RunId; isolationPart?: 0 | 1 }> = {},
-  reuse?: Readonly<{ run: RunId; results: Readonly<Record<string, JsonValue>> }>,
+  reuse?: Readonly<{ run?: RunId; results: Readonly<Record<string, JsonValue>> }>,
 ): Readonly<{ run: QueueStart; events: readonly EventDraft[] }> {
   const pr = prs[0]
   if (pr === undefined) throw new Error("yrd: a queue run requires at least one PR")
@@ -3798,7 +4168,8 @@ function startRun(
     steps: selected.map(descriptor),
     ...(selection === undefined ? {} : { stepSelection: selection }),
     ...(integration === undefined ? {} : { initialIntegration: integration }),
-    ...(reuse === undefined ? {} : { initialResults: reuse.results, reusedFrom: reuse.run }),
+    ...(reuse === undefined ? {} : { initialResults: reuse.results }),
+    ...(reuse?.run === undefined ? {} : { reusedFrom: reuse.run }),
     ...lineage,
   }
   if (candidate.mergeability === "conflicting") {
@@ -4064,7 +4435,7 @@ function advanceQueue(
       isIntegrated(before) ||
       pr === undefined ||
       current === undefined ||
-      prDeliveryState(current) !== "submitted"
+      (prDeliveryState(current) !== "submitted" && prDeliveryState(current) !== "ready")
     ) {
       return { events: [failed] }
     }
@@ -4401,6 +4772,14 @@ function queueJobs(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<JobsSta
 
 function jobKey(run: RunId, index: number): string {
   return `queue:${run}:${index}`
+}
+
+function admissionExecutionId(pr: DeepReadonly<PRSnapshot>, baseSha: string): string {
+  return `admission:${pr.id}:${pr.revision}:${baseSha}`
+}
+
+function admissionJobKey(pr: DeepReadonly<PRSnapshot>, baseSha: string, index: number): string {
+  return `${admissionExecutionId(pr, baseSha)}:${index}`
 }
 
 function shapeThrough(
@@ -4795,7 +5174,10 @@ function requestedPRs(
   const prs = (
     explicit ??
     Object.values(state.prs)
-      .filter((pr) => prDeliveryState(pr) === "submitted")
+      .filter((pr) => {
+        const delivery = prDeliveryState(pr)
+        return delivery === "submitted" || delivery === "ready"
+      })
       .toSorted((left, right) => {
         const leftSubmittedAt = currentPRRev(left).submittedAt
         const rightSubmittedAt = currentPRRev(right).submittedAt
@@ -4811,7 +5193,12 @@ function requestedPRs(
   ).filter((pr) => !excluded.has(pr.id))
   for (const pr of prs) {
     const delivery = prDeliveryState(pr)
-    if (delivery !== "submitted" && delivery !== "integrated" && delivery !== "already-landed") {
+    if (
+      delivery !== "submitted" &&
+      delivery !== "ready" &&
+      delivery !== "integrated" &&
+      delivery !== "already-landed"
+    ) {
       raiseFailure("refusal", "pr-not-ready", `yrd: PR '${pr.id}' is ${delivery}, not ready for the queue`)
     }
   }
@@ -5025,6 +5412,19 @@ function checkEligibility(
   const timing = request === undefined ? {} : { queuedAt: request.at }
   const selected = admissionSteps(state.queues, steps)
   if (selected.length === 0) return { status: "passed", ...timing }
+  const admission = prAdmission(pr)
+  const requestedBase = request?.baseSha ?? prBaseSha(pr)
+  const matchesAdmission =
+    admission !== undefined &&
+    requestedBase !== undefined &&
+    admission.baseSha === requestedBase &&
+    admission.steps.every(
+      (evidence, index) => evidence.name === selected[index]?.name && evidence.revision === selected[index]?.revision,
+    )
+  if (matchesAdmission && admission.status === "passed" && admission.steps.length === selected.length) {
+    return { status: "passed", ...timing }
+  }
+  if (matchesAdmission && admission.status === "refused") return { status: "failed", ...timing }
   const run = checkFactRun(state, Queues.snapshot(pr), selected)
   if (run !== undefined) return { status: checkRunStatus(run, selected.length), ...timing, run: run.id }
   if (request === undefined) return { status: "not-requested" }
@@ -5036,7 +5436,9 @@ function checkEligibility(
   // `status`. Runs that actually executed are settled above and survive: they
   // are recorded facts, not a claim about a live slot. (22390)
   const delivery = prDeliveryState(pr as PR)
-  if (delivery !== "pushed" && delivery !== "submitted") return { status: "not-requested", ...timing }
+  if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready") {
+    return { status: "not-requested", ...timing }
+  }
   const queued = admissionQueue(state, steps)
   const position = queued.findIndex((candidate) => candidate.id === pr.id)
   return { status: "queued", ...timing, ...(position < 0 ? {} : { position: position + 1 }) }
@@ -5135,12 +5537,114 @@ function projectCheckStep(
   }
 }
 
+function projectRevisionAdmissionJobs(
+  state: DeepReadonly<RuntimeState>,
+  pr: DeepReadonly<PR>,
+  steps: readonly RuntimeStep[],
+  queuedAt: string | undefined,
+): PRCheckRecord[] | undefined {
+  const request = checkRequest(pr)
+  const baseSha = request?.baseSha ?? prBaseSha(pr)
+  if (baseSha === undefined) return undefined
+  const snapshot = pinCandidateBaseSha([Queues.snapshot(pr)], baseSha)[0]
+  if (snapshot === undefined) return undefined
+  const selected = admissionSteps(state.queues, steps)
+  const jobs = selected.map((_, index) => {
+    const id = state.jobs.byKey[admissionJobKey(snapshot, baseSha, index)]
+    return id === undefined ? undefined : state.jobs.byId[id]
+  })
+  if (jobs.every((job) => job === undefined)) return undefined
+  return selected.map((step, index) => {
+    const job = jobs[index]
+    if (job === undefined) {
+      return {
+        pr: pr.id,
+        revision: prRevisionNumber(pr),
+        step: step.name,
+        status: "queued",
+        classification: step.classification ?? "carrier",
+        command: [`queue.step.${step.name}`],
+        ...(queuedAt === undefined ? {} : { queuedAt }),
+      }
+    }
+    const evidence = checkEvidence(job as Job)
+    const error = jobFailed(job as Job) ? jobFailure(job as Job) : undefined
+    const diagnostics =
+      Array.isArray(evidence?.diagnostics) || typeof evidence?.detail === "string"
+        ? ((evidence?.diagnostics ?? evidence?.detail) as JsonValue)
+        : job.status === "waiting" && job.detail !== undefined
+          ? job.detail
+          : error?.message
+    const artifact = firstArtifact(evidence, error === undefined ? undefined : "stderr")
+    const status: PRCheckRecord["status"] =
+      job.status !== "completed"
+        ? job.status === "queued"
+          ? "queued"
+          : "checking"
+        : job.conclusion === "success"
+          ? "passed"
+          : "failed"
+    return {
+      pr: pr.id,
+      revision: prRevisionNumber(pr),
+      job: job.id,
+      step: step.name,
+      status,
+      classification: step.classification ?? "carrier",
+      command: [job.definition],
+      ...(queuedAt === undefined ? {} : { queuedAt }),
+      ...(diagnostics === undefined ? {} : { diagnostics }),
+      ...(artifact === undefined ? {} : { artifact }),
+      ...(error === undefined ? {} : { error }),
+    }
+  })
+}
+
 function projectPRChecks(
   state: DeepReadonly<RuntimeState>,
   pr: DeepReadonly<PR>,
   steps: readonly RuntimeStep[],
 ): PRCheckRecord[] {
   const checks = checkEligibility(state, pr, steps)
+  const admission = prAdmission(pr)
+  if (admission !== undefined) {
+    const records = admission.steps.map((evidence) => {
+      const step = steps.find((candidate) => candidate.name === evidence.name)
+      const output = evidence.output === undefined ? undefined : objectValue(evidence.output)
+      const diagnostics =
+        Array.isArray(output?.diagnostics) || typeof output?.detail === "string"
+          ? ((output?.diagnostics ?? output?.detail) as JsonValue)
+          : evidence.receipt?.message
+      const artifact = firstArtifact(evidence.output, evidence.receipt === undefined ? undefined : "stderr")
+      return {
+        pr: pr.id,
+        revision: prRevisionNumber(pr),
+        job: evidence.job,
+        step: evidence.name,
+        status: evidence.status === "passed" ? ("passed" as const) : ("failed" as const),
+        classification: step?.classification ?? "carrier",
+        command: [`queue.step.${evidence.name}`],
+        ...(checks.queuedAt === undefined ? {} : { queuedAt: checks.queuedAt }),
+        ...(diagnostics === undefined ? {} : { diagnostics }),
+        ...(artifact === undefined ? {} : { artifact }),
+        ...(evidence.receipt === undefined ? {} : { error: evidence.receipt }),
+      }
+    })
+    if (records.length > 0) return records
+    if (admission.status === "refused") {
+      return [
+        {
+          pr: pr.id,
+          revision: prRevisionNumber(pr),
+          status: "failed",
+          ...(checks.queuedAt === undefined ? {} : { queuedAt: checks.queuedAt }),
+          error: admission.receipt,
+        },
+      ]
+    }
+  }
+  const revisionJobs = projectRevisionAdmissionJobs(state, pr, steps, checks.queuedAt)
+  if (revisionJobs !== undefined) return revisionJobs
   const run = checks.run === undefined ? undefined : materializeRun(Queues.record(state.queues, checks.run), state.jobs)
   if (run === undefined) {
     return [
@@ -5180,6 +5684,43 @@ function projectPRChecks(
         },
       ]
     : projected
+}
+
+function reusableRevisionAdmission(
+  state: DeepReadonly<RuntimeState>,
+  snapshots: readonly DeepReadonly<PRSnapshot>[],
+  selected: readonly RuntimeStep[],
+): Readonly<{ count: number; shape: PRShape }> | undefined {
+  const snapshot = snapshots.length === 1 ? snapshots[0] : undefined
+  if (snapshot?.baseSha === undefined) return undefined
+  const pr = state.bays.prs[snapshot.id]
+  if (pr === undefined || prRevisionNumber(pr) !== snapshot.revision || prHead(pr) !== snapshot.headSha) {
+    return undefined
+  }
+  const boundary = selected.findIndex((step) => step.kind === "merge")
+  const prefix = boundary < 0 ? selected : selected.slice(0, boundary)
+  if (prefix.length === 0) return undefined
+  const admission = prAdmission(pr)
+  if (
+    admission?.status !== "passed" ||
+    admission.baseSha !== snapshot.baseSha ||
+    admission.steps.length !== prefix.length ||
+    admission.steps.some(
+      (evidence, index) =>
+        evidence.status !== "passed" ||
+        evidence.name !== prefix[index]?.name ||
+        evidence.revision !== prefix[index]?.revision ||
+        evidence.output === undefined,
+    )
+  ) {
+    return undefined
+  }
+  return {
+    count: prefix.length,
+    shape: {
+      results: Object.fromEntries(admission.steps.map((evidence) => [evidence.name, evidence.output as JsonValue])),
+    },
+  }
 }
 
 function reusablePrefix(
@@ -5324,7 +5865,8 @@ function needsAuthorReceipt(
   pr: DeepReadonly<PR>,
   steps: readonly RuntimeStep[],
 ): JobError | undefined {
-  if (pr.needsAuthor !== undefined) return pr.needsAuthor.receipt
+  const current = prNeedsAuthor(pr)
+  if (current !== undefined) return current.receipt
   const runIds = new Set<RunId>()
   const checkRun = checkEligibility(state, pr, steps).run
   if (checkRun !== undefined) runIds.add(checkRun)
@@ -5393,7 +5935,7 @@ function prEligibility(
       return result({ code: "draft", message: `PR '${pr.id}' is pushed, not ready` })
     }
     if (delivery === "needs-author") {
-      const receipt = pr.needsAuthor?.receipt
+      const receipt = prNeedsAuthor(pr)?.receipt
       if (receipt === undefined) {
         throw new Error(`yrd: PR '${pr.id}' is needs-author without an attribution receipt`)
       }
@@ -5410,7 +5952,10 @@ function prEligibility(
     // receipt attached, ahead of the generic `rejected`/`checks-failed` verdicts.
     // This is a derived projection over the failed check's recorded refusal
     // evidence; it stores no new PR state (the bay state is untouched).
-    if (options.ignoreChecks !== true && (delivery === "submitted" || delivery === "rejected")) {
+    if (
+      options.ignoreChecks !== true &&
+      (delivery === "submitted" || delivery === "ready" || delivery === "rejected")
+    ) {
       const receipt = needsAuthorReceipt(state, pr, steps)
       if (receipt !== undefined) {
         return result({
@@ -5423,7 +5968,7 @@ function prEligibility(
     if (delivery === "rejected") {
       return result({ code: "rejected", message: `PR '${pr.id}' is rejected; submit it again before queueing` })
     }
-    if (delivery !== "submitted") {
+    if (delivery !== "submitted" && delivery !== "ready") {
       return result({ code: "terminal", message: `PR '${pr.id}' is ${delivery}, not queueable` })
     }
     const revision = currentPRRev(pr)
@@ -5631,7 +6176,9 @@ function needsAdvance(state: DeepReadonly<RuntimeState>, run: Run): boolean {
       current !== undefined &&
       prRevisionNumber(current) === member.revision &&
       prHead(current) === member.headSha &&
-      (prDeliveryState(current) === "pushed" || prDeliveryState(current) === "submitted")
+      (prDeliveryState(current) === "pushed" ||
+        prDeliveryState(current) === "submitted" ||
+        prDeliveryState(current) === "ready")
     )
   })
 }
