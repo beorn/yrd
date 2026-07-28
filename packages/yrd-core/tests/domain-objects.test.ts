@@ -14,6 +14,7 @@ import {
   createYrd,
   createYrdDef,
   event,
+  journalEvent,
   type CommandTree,
   type Journal,
   type YrdDef,
@@ -46,9 +47,8 @@ function withCounter() {
       initialState: { counter: { value: 0 } },
       commands: { counter: { add } },
       events: {
-        "counter/changed": z.object({ from: z.number().int(), by: z.number().int() }),
+        "counter/changed": journalEvent(1, z.object({ from: z.number().int(), by: z.number().int() })),
       },
-      eventVersions: { "counter/changed": 1 },
       projectionVersion: "counter-v1",
       project(state, applied) {
         if (applied.name !== "counter/changed") return { counter: state.counter }
@@ -191,8 +191,7 @@ describe("Yrd domain objects", () => {
     })
     const definition = createYrdDef().extend({
       commands: { future: { record } },
-      events: { "future/recorded": z.object({ value: z.number().int() }).strict() },
-      eventVersions: { "future/recorded": 2 },
+      events: { "future/recorded": journalEvent(2, z.object({ value: z.number().int() }).strict()) },
     })
     const journal = createMemoryJournal()
     await using app = await createYrd(definition, {
@@ -212,25 +211,30 @@ describe("Yrd domain objects", () => {
     await expect(Array.fromAsync(journal.read())).resolves.toEqual([])
   })
 
-  it("refuses a versioned host when any writable event omits reader-version metadata", async () => {
-    const definition = createYrdDef().extend({
-      events: { "unversioned/recorded": z.object({}).strict() },
-    })
-
-    await expect(
-      createYrd(definition, {
-        inject: {
-          journal: createMemoryJournal(),
-          compatibility: { version: 1, reader: "a".repeat(40) },
+  it("refuses invalid minimum reader metadata when an event definition is created", () => {
+    expect(() => journalEvent(-1, z.object({}).strict())).toThrow()
+    try {
+      journalEvent(Number.NaN, z.object({}).strict())
+    } catch (error) {
+      expect(error).toMatchObject({
+        failure: {
+          kind: "configuration",
+          code: "journal-event-version-invalid",
         },
-      }),
-    ).rejects.toMatchObject({
-      failure: {
-        kind: "configuration",
-        code: "journal-event-version-missing",
-        message: expect.stringContaining("unversioned/recorded"),
-      },
+      })
+      return
+    }
+    throw new Error("expected invalid journal event reader to fail")
+  })
+
+  it("freezes the event schema and minimum reader as one definition", () => {
+    const schema = z.object({}).strict()
+    const definition = journalEvent(2, schema)
+    expect(definition).toEqual({
+      reader: 2,
+      schema,
     })
+    expect(Object.isFrozen(definition)).toBe(true)
   })
 
   it("refuses a future journal frame and names the exact required reader pin", () => {
@@ -444,7 +448,7 @@ describe("Yrd domain objects", () => {
     const legacy = createYrdDef().extend({
       initialState: { facts: { total: 0 } },
       commands: { fact: { record } },
-      events: { "fact/recorded": z.object({ value: z.number().int() }).strict() },
+      events: { "fact/recorded": journalEvent(0, z.object({ value: z.number().int() }).strict()) },
       project: projectFact,
     })
 
@@ -458,7 +462,7 @@ describe("Yrd domain objects", () => {
       initialState: { facts: { total: 0 } },
       commands: { fact: { record } },
       events: {
-        "fact/recorded": z.object({ value: z.number().int(), identity: z.string().min(1) }).strict(),
+        "fact/recorded": journalEvent(1, z.object({ value: z.number().int(), identity: z.string().min(1) }).strict()),
       },
       replayEvents: {
         "fact/recorded": z
@@ -473,7 +477,7 @@ describe("Yrd domain objects", () => {
       initialState: { facts: { total: 0 } },
       commands: { fact: { record } },
       events: {
-        "fact/recorded": z.object({ value: z.number().int(), identity: z.string().min(1) }).strict(),
+        "fact/recorded": journalEvent(1, z.object({ value: z.number().int(), identity: z.string().min(1) }).strict()),
       },
       project: projectFact,
     })
@@ -622,7 +626,7 @@ describe("Yrd domain objects", () => {
     const definition = createYrdDef().extend({
       initialState: { gate: { open: true } },
       commands: { gate: { close } },
-      events: { "gate/closed": z.object({}) },
+      events: { "gate/closed": journalEvent(1, z.object({})) },
       project(state, applied) {
         return { gate: { open: applied.name === "gate/closed" ? false : state.gate.open } }
       },
