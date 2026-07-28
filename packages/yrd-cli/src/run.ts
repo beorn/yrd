@@ -1026,6 +1026,9 @@ function trackerDeliveryV2(
   switch (prDeliveryState(pr)) {
     case "pushed":
       return { ...identity, status: "pushed", at: revision.pushedAt }
+    // `ready` is revision-admission evidence inside Yrd. The delivery remains
+    // externally submitted until it reaches a terminal landing state.
+    case "ready":
     case "submitted":
       return revision.submittedAt === undefined
         ? undefined

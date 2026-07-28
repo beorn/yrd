@@ -10195,6 +10195,31 @@ function legacyRejectedJournal(runIds: readonly string[] = ["R1"], terminalAt = 
 }
 
 describe("typed issue landing bridge", () => {
+  it("keeps an admitted ready revision externally submitted in both tracker bridges", async () => {
+    const issueRef = "@yrd/core/22494-trackerbridge-drops-submitted-delivery"
+    await using app = await createApp()
+    const submitted = outputIO({ resolveRevision: async () => HEAD_SHA })
+
+    expect(
+      await runYrd(app, yrd("pr", "submit", "topic/ready-tracker-bridge", "--issue", issueRef, "--json"), submitted.io),
+      submitted.stderr(),
+    ).toBe(0)
+    expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("ready")
+
+    const output = outputIO()
+    expect(await runYrd(app, yrd("issue", "view", issueRef, "--json"), output.io), output.stderr()).toBe(0)
+    const expectedDelivery = {
+      issueRef,
+      pr: "PR1",
+      revision: 1,
+      headSha: HEAD_SHA,
+      status: "submitted",
+      runs: [],
+    }
+    expect(trackerBridge(output.stdout())).toMatchObject({ version: 1, deliveries: [expectedDelivery] })
+    expect(trackerBridgeV2(output.stdout())).toMatchObject({ version: 2, deliveries: [expectedDelivery] })
+  })
+
   it("projects native PR states and fresh failed Runs from one exact journal cursor", async () => {
     for (const status of ["pushed", "submitted", "rejected", "integrated", "withdrawn", "canceled"] as const) {
       const issueRef = `@km/all/21091-${status}`
