@@ -1,5 +1,6 @@
 import * as z from "zod"
 import {
+  compareNatural,
   JsonSchema,
   raiseFailure,
   resolveSelector,
@@ -951,7 +952,7 @@ export function resolveBay(state: BaysState, selector: string): Bay | undefined 
   return resolveSelector(
     selector,
     Object.values(state.byId)
-      .toSorted((left, right) => right.id.localeCompare(left.id, undefined, { numeric: true }))
+      .toSorted((left, right) => compareNatural(right.id, left.id))
       .map((bay) => ({
         canonical: bay.id,
         aliases: [bay.name, bay.branch],
@@ -974,7 +975,7 @@ export function resolvePRMatch(state: BaysState, selector: string): SelectorMatc
   return resolveSelectorMatch(
     selector,
     Object.values(state.prs)
-      .toSorted((left, right) => right.id.localeCompare(left.id, undefined, { numeric: true }))
+      .toSorted((left, right) => compareNatural(right.id, left.id))
       .map((pr) => {
         const bay = pr.bay === undefined ? undefined : state.byId[pr.bay]
         return {

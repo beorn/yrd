@@ -17,7 +17,7 @@ import {
   type PR,
   type PRId,
 } from "@yrd/bay"
-import { JsonSchema, resolveSelector, type JsonValue } from "@yrd/core"
+import { compareNatural, JsonSchema, resolveSelector, type JsonValue } from "@yrd/core"
 import type { FlowPin, StepKind } from "@yrd/config"
 import { JobErrorSchema, type Job, type JobError } from "@yrd/job"
 import * as z from "zod"
@@ -777,7 +777,7 @@ function resolveQueueRecord(state: QueuesState, id: RunId): QueueRecord | undefi
 }
 
 function compareRunIds(left: RunId, right: RunId): number {
-  return left.localeCompare(right, undefined, { numeric: true })
+  return compareNatural(left, right)
 }
 
 function queueRecordValues(state: QueuesState): readonly QueueRecord[] {

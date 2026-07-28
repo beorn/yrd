@@ -13,6 +13,7 @@ import {
   command,
   event,
   Command,
+  compareNatural,
   journalEvent,
   raiseFailure,
   type CommandTree,
@@ -488,9 +489,7 @@ function createContests(
     },
     get,
     list() {
-      return Object.keys(options.state().records)
-        .toSorted((left, right) => left.localeCompare(right, undefined, { numeric: true }))
-        .map(required)
+      return Object.keys(options.state().records).toSorted(compareNatural).map(required)
     },
     async compete(args) {
       using _span = options.log.span?.("compete", { issue: args.issue.ref, competitors: args.competitors.length })

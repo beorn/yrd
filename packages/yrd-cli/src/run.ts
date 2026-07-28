@@ -37,7 +37,14 @@ import {
   type PRSessionOutcome,
 } from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
-import { createFailure, failureFact, raiseFailure, type DeepReadonly, type JournalSnapshot } from "@yrd/core"
+import {
+  compareNatural,
+  createFailure,
+  failureFact,
+  raiseFailure,
+  type DeepReadonly,
+  type JournalSnapshot,
+} from "@yrd/core"
 import { isConcurrentSettlementConflict } from "@yrd/job"
 import type { Job, JobError } from "@yrd/job"
 import { createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
@@ -991,7 +998,7 @@ function trackerDeliveryV2(
     )
     .toSorted((left, right) => {
       const started = left.startedAt.localeCompare(right.startedAt)
-      return started === 0 ? left.id.localeCompare(right.id, undefined, { numeric: true }) : started
+      return started === 0 ? compareNatural(left.id, right.id) : started
     })
     .map(({ id }) => id)
   const identity = {
@@ -1149,7 +1156,7 @@ function trackerBridges(
   const deliveries = Object.values(snapshot.state.bays.prs)
     .map((pr) => trackerDeliveryV2(pr, snapshot.state, app.queue.eligibility(pr.id, snapshot.state)))
     .filter((delivery): delivery is TrackerDeliveryV2 => delivery !== undefined && include(delivery))
-    .toSorted((left, right) => left.pr.localeCompare(right.pr, undefined, { numeric: true }))
+    .toSorted((left, right) => compareNatural(left.pr, right.pr))
   const trackerBridgeV2 = { version: 2 as const, asOf: snapshot.asOf, deliveries }
   return {
     trackerBridge: {
@@ -1297,9 +1304,7 @@ function currentBay(state: BaysState, cwd: string): Bay | undefined {
 }
 
 function sortedBays(state: BaysState): Bay[] {
-  return Object.values(state.byId).toSorted((left, right) =>
-    left.id.localeCompare(right.id, undefined, { numeric: true }),
-  )
+  return Object.values(state.byId).toSorted((left, right) => compareNatural(left.id, right.id))
 }
 
 function unique<Value extends { id: string }>(values: readonly Value[]): Value[] {
@@ -1308,7 +1313,7 @@ function unique<Value extends { id: string }>(values: readonly Value[]): Value[]
 
 function byQueueRunChronology(left: Run, right: Run): number {
   const started = left.startedAt.localeCompare(right.startedAt)
-  return started === 0 ? left.id.localeCompare(right.id, undefined, { numeric: true }) : started
+  return started === 0 ? compareNatural(left.id, right.id) : started
 }
 
 export function mergedQueueRuns(
@@ -4105,7 +4110,7 @@ async function listPrs(
     .prs()
     .filter((pr) => base === undefined || baseIdentity(pr.base) === base)
     .filter((pr) => options.issue === undefined || pr.issue === options.issue)
-    .toSorted((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }))
+    .toSorted((left, right) => compareNatural(left.id, right.id))
   const json = jsonEnabled(options)
   // Preserve the bounded human default before deriving eligibility. A state
   // filter must inspect every candidate because `needs-author` is projected
@@ -6229,9 +6234,7 @@ export async function refreshAdmittedQueueRevisions(
     staleRunsByPr.set(pr.id, [run])
     staleRunIds.add(run.id)
   }
-  for (const run of [...staleRunIds].toSorted((left, right) =>
-    left.localeCompare(right, undefined, { numeric: true }),
-  )) {
+  for (const run of [...staleRunIds].toSorted(compareNatural)) {
     await app.queue.cancelRun({
       run,
       by: io.runner ?? "yrd-cli",
@@ -6258,8 +6261,7 @@ export async function refreshAdmittedQueueRevisions(
     })
     .toSorted(
       (left, right) =>
-        baseIdentity(left.base).localeCompare(baseIdentity(right.base)) ||
-        left.id.localeCompare(right.id, undefined, { numeric: true }),
+        baseIdentity(left.base).localeCompare(baseIdentity(right.base)) || compareNatural(left.id, right.id),
     )
   if (candidates.length === 0) return outcomes
 
@@ -6601,7 +6603,7 @@ function residentRefusalHealth(
     {
       action: "resident-refusal-stall-restart",
       cycles: next.cycles,
-      prs: Object.keys(next.counts).toSorted((left, right) => left.localeCompare(right, undefined, { numeric: true })),
+      prs: Object.keys(next.counts).toSorted(compareNatural),
       signature: next.signature,
     },
   )

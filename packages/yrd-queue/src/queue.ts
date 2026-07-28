@@ -32,6 +32,7 @@ import {
 } from "@yrd/bay"
 import {
   command,
+  compareNatural,
   event,
   failureFact,
   journalEvent,
@@ -861,11 +862,7 @@ function terminalAssociationPlan(state: DeepReadonly<RuntimeState>, appended = 0
           ),
         )
         .map((record) => materializeRun(record, state.jobs))
-        .toSorted(
-          (left, right) =>
-            left.startedAt.localeCompare(right.startedAt) ||
-            left.id.localeCompare(right.id, undefined, { numeric: true }),
-        )
+        .toSorted((left, right) => left.startedAt.localeCompare(right.startedAt) || compareNatural(left.id, right.id))
       const candidates = runs.map(
         (run): TerminalAssociationCandidate => ({
           run: run.id,
@@ -1720,9 +1717,7 @@ function createQueue<Shape extends PRShape>(
       }
       break
     }
-    return [...outcomes.values()].toSorted((left, right) =>
-      left.id.localeCompare(right.id, undefined, { numeric: true }),
-    )
+    return [...outcomes.values()].toSorted((left, right) => compareNatural(left.id, right.id))
   }
 
   return Object.freeze({
@@ -2802,9 +2797,7 @@ function createQueueCommands(
       const paused = {
         ...args,
         base,
-        allowedPRs: [...args.allowedPRs].toSorted((left, right) =>
-          left.localeCompare(right, undefined, { numeric: true }),
-        ),
+        allowedPRs: [...args.allowedPRs].toSorted(compareNatural),
       }
       const current = state.queues.pauses[base]
       if (
@@ -4317,7 +4310,7 @@ function legacyRootTargets(state: DeepReadonly<RuntimeState>): readonly LegacyRo
       const target = legacyRootTargetForRecord(state, record)
       return target === undefined ? [] : [target]
     })
-    .toSorted((left, right) => left.run.localeCompare(right.run, undefined, { numeric: true }))
+    .toSorted((left, right) => compareNatural(left.run, right.run))
 }
 
 function legacyRootTarget(state: DeepReadonly<RuntimeState>, run: RunId): LegacyRootTarget | undefined {
@@ -4828,7 +4821,7 @@ function shapeThrough(
 function orderedQueues(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<JobsState>): Run[] {
   return Queues.values(queues)
     .map((record) => materializeRun(record, jobs))
-    .toSorted((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }))
+    .toSorted((left, right) => compareNatural(left.id, right.id))
 }
 
 function runningQueue(
@@ -5094,7 +5087,7 @@ function auditQueues(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeS
   // trace of exactly that, so read it (22395).
   const head = admissionQueue(state, steps)[0]
   for (const refusal of Object.values(state.queues.admissionRefusals).toSorted((left, right) =>
-    left.pr.localeCompare(right.pr, undefined, { numeric: true }),
+    compareNatural(left.pr, right.pr),
   )) {
     if (refusal.count < ADMISSION_REFUSAL_LOOP_THRESHOLD) continue
     const blockedMs = Math.max(0, Date.parse(refusal.lastAt) - Date.parse(refusal.firstAt))
@@ -5205,10 +5198,7 @@ function requestedPRs(
         if (rightSubmittedAt === undefined) {
           throw new Error(`yrd: queued PR '${right.id}' has no submission time`)
         }
-        return (
-          leftSubmittedAt.localeCompare(rightSubmittedAt) ||
-          left.id.localeCompare(right.id, undefined, { numeric: true })
-        )
+        return leftSubmittedAt.localeCompare(rightSubmittedAt) || compareNatural(left.id, right.id)
       })
   ).filter((pr) => !excluded.has(pr.id))
   for (const pr of prs) {
@@ -5377,7 +5367,7 @@ function admissionQueue(
     .toSorted((left, right) => {
       const leftAt = checkQueueTime(left)
       const rightAt = checkQueueTime(right)
-      return leftAt.localeCompare(rightAt) || left.id.localeCompare(right.id, undefined, { numeric: true })
+      return leftAt.localeCompare(rightAt) || compareNatural(left.id, right.id)
     })
 }
 
