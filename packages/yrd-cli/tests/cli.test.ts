@@ -3310,7 +3310,8 @@ describe("runYrd", () => {
 
     const all = outputIO()
     expect(await runYrd(app, yrd("bay", "list", "--all", "--json"), all.io), all.stderr()).toBe(0)
-    expect(JSON.parse(all.stdout()).bays).toMatchObject([
+    const allListed = JSON.parse(all.stdout()) as Readonly<{ bays: readonly Record<string, unknown>[] }>
+    expect(allListed.bays).toMatchObject([
       { id: "B1", status: "open" },
       { id: "B2", status: "done" },
       { id: "B3", status: "fail" },
