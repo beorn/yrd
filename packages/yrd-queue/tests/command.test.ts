@@ -2815,7 +2815,7 @@ describe("Queue command adapters", () => {
     const step = configuredCommandStep<PRShape>({
       inject: { process },
       command: shellCommand(
-        "printf 'first\\n'; while [ ! -f \"$YRD_RELEASE\" ]; do sleep 0.01; done; printf 'second\\n'",
+        "printf 'first\\n'; fixture_ticks=0; while [ ! -f \"$YRD_RELEASE\" ] && [ \"$fixture_ticks\" -lt 6000 ]; do fixture_ticks=$((fixture_ticks + 1)); sleep 0.01; done; printf 'second\\n'",
       ),
       cwd,
       purpose: "check",

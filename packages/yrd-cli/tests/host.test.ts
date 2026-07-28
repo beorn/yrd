@@ -39,6 +39,8 @@ import type { SignalDelivery, SignalDeliveryAdapter } from "../src/signals.ts"
 
 const roots: string[] = []
 const silentLog = createLogger("test", [{ level: "silent" }])
+const BOUNDED_ONE_SECOND_LOOP =
+  'fixture_ticks=0; while [ "$fixture_ticks" -lt 120 ]; do fixture_ticks=$((fixture_ticks + 1)); sleep 1; done'
 
 function createDefaultYrdApp(options: Parameters<typeof createDefaultYrdAppRaw>[0]) {
   return createDefaultYrdAppRaw({ ...options, log: options.log ?? silentLog })
@@ -2646,8 +2648,8 @@ notify:
     const command = [
       `trap 'touch ${JSON.stringify(hardStopPath)}' TERM`,
       `printf '%s\\n' "$$" > ${JSON.stringify(childPidPath)}`,
-      `sh -c 'trap "" TERM; while :; do sleep 1; done' & printf '%s\\n' "$!" > ${JSON.stringify(grandchildPidPath)}`,
-      "while :; do sleep 1; done",
+      `sh -c 'trap "" TERM; ${BOUNDED_ONE_SECOND_LOOP}' & printf '%s\\n' "$!" > ${JSON.stringify(grandchildPidPath)}`,
+      BOUNDED_ONE_SECOND_LOOP,
     ].join("; ")
     await commitYrdConfig(repo, `steps: [check]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 30000\n`)
 
@@ -3020,7 +3022,7 @@ notify:
       const command = [
         `printf '%s\\n' "$$" > ${JSON.stringify(childPidPath)}`,
         `pwd > ${JSON.stringify(scratchPath)}`,
-        `sh -c 'trap "" TERM; while :; do sleep 1; done' & printf '%s\\n' "$!" > ${JSON.stringify(grandchildPidPath)}`,
+        `sh -c 'trap "" TERM; ${BOUNDED_ONE_SECOND_LOOP}' & printf '%s\\n' "$!" > ${JSON.stringify(grandchildPidPath)}`,
         "i=0",
         `while [ "$i" -lt 200 ]; do printf '%s\\n' "$i" >> ${JSON.stringify(progressPath)}; i=$((i + 1)); sleep 0.05; done`,
         `touch ${JSON.stringify(finishedPath)}`,

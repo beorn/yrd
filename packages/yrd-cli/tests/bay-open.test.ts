@@ -11,8 +11,13 @@ import { CURRENT_JOURNAL_COMPATIBILITY, runYrdProcess } from "../src/host.ts"
 import type { YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
+const spawnedYrdProcesses = new Set<ReturnType<typeof Bun.spawn>>()
 const CLAIM = "@km/test/s2-fixture"
 const BRANCH = "task/s2-fixture"
+const BOUNDED_ONE_SECOND_LOOP =
+  'fixture_ticks=0; while [ "$fixture_ticks" -lt 120 ]; do fixture_ticks=$((fixture_ticks + 1)); sleep 1; done'
+const BOUNDED_RELEASE_FILE_LOOP =
+  'fixture_ticks=0; while [ ! -f "$1" ] && [ "$fixture_ticks" -lt 1200 ]; do fixture_ticks=$((fixture_ticks + 1)); sleep 0.05; done'
 const JOURNAL_CONFIG = `journal:
   version: ${CURRENT_JOURNAL_COMPATIBILITY.version}
   reader: "${CURRENT_JOURNAL_COMPATIBILITY.reader}"
@@ -56,6 +61,7 @@ afterAll(async () => {
 })
 
 afterEach(async () => {
+  await stopSpawnedYrdProcesses()
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 
@@ -798,7 +804,7 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
         "--",
         "sh",
         "-c",
-        'printf owner > owner.txt; : > owner.started; while [ ! -f "$1" ]; do sleep 0.05; done',
+        `printf owner > owner.txt; : > owner.started; ${BOUNDED_RELEASE_FILE_LOOP}`,
         "_",
         ownerStop,
       )
@@ -817,7 +823,7 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
         "--",
         "sh",
         "-c",
-        'printf "%s %s" "$HAB_NAME" "$$" > guest-one.name; : > guest-one.started; while [ ! -f "$1" ]; do sleep 0.05; done',
+        `printf "%s %s" "$HAB_NAME" "$$" > guest-one.name; : > guest-one.started; ${BOUNDED_RELEASE_FILE_LOOP}`,
         "_",
         guestStop,
       )
@@ -1505,7 +1511,7 @@ printf '%s' '${label}' > '${label}-ran.txt'
           "--",
           "sh",
           "-c",
-          ': > ready; while [ ! -f "$1" ]; do sleep 0.05; done',
+          `: > ready; ${BOUNDED_RELEASE_FILE_LOOP}`,
           "_",
           ownerStop,
         )
@@ -2077,7 +2083,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
         "--",
         "sh",
         "-c",
-        "printf started > child.started; while :; do sleep 1; done",
+        `printf started > child.started; ${BOUNDED_ONE_SECOND_LOOP}`,
       ],
       { cwd: repo, env: process.env, stdout: "pipe", stderr: "pipe" },
     )
@@ -2386,12 +2392,34 @@ function gitBay(repo: string, io: YrdCliIO, ...args: string[]): Promise<0 | 1 | 
 }
 
 function spawnYrd(repo: string, ...args: string[]) {
-  return Bun.spawn([process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "--repo", repo, ...args], {
-    cwd: repo,
-    env: process.env,
-    stdout: "pipe",
-    stderr: "pipe",
-  })
+  const child = Bun.spawn(
+    [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "--repo", repo, ...args],
+    {
+      cwd: repo,
+      env: process.env,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  )
+  spawnedYrdProcesses.add(child)
+  void child.exited.then(() => spawnedYrdProcesses.delete(child))
+  return child
+}
+
+async function stopSpawnedYrdProcesses(): Promise<void> {
+  const processes = Array.from(spawnedYrdProcesses)
+  spawnedYrdProcesses.clear()
+  for (const child of processes) {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM")
+  }
+  await Promise.all(
+    processes.map(async (child) => {
+      const outcome = await Promise.race([child.exited, Bun.sleep(3_000).then(() => "timeout" as const)])
+      if (outcome !== "timeout") return
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
+      await child.exited
+    }),
+  )
 }
 
 async function activeBayPath(repo: string, selector: string): Promise<string> {
