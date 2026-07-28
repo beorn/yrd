@@ -1,15 +1,48 @@
 import { createHash } from "node:crypto"
-import { dirname, relative, resolve, sep } from "node:path"
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import type { Process } from "@yrd/process"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import { yrdSourceRoot } from "./version.ts"
 
 const GIT_TIMEOUT_MS = 30_000
+export const YRD_WRAPPER_IMPLEMENTATION_SOURCE_ENV = "YRD_WRAPPER_IMPLEMENTATION_SOURCE"
+export const YRD_WRAPPER_IMPLEMENTATION_REPOSITORY_ENV = "YRD_WRAPPER_IMPLEMENTATION_REPOSITORY"
 
 export type ImplementationSourceRepository = Readonly<{
   root: string
 }>
+
+export type ImplementationSourceBridge = Readonly<{
+  identity: string
+  repository: ImplementationSourceRepository
+}>
+
+/**
+ * Consume the one-process attestation installed by a trusted launcher.
+ *
+ * Git-owned source checkouts remain the default. This bridge exists for sealed
+ * deployment roots whose launcher has already verified immutable bytes and can
+ * attest both the loaded revision and the mutable source checkout used for
+ * authoritative gitlink freshness checks.
+ */
+export function takeImplementationSourceBridge(env: NodeJS.ProcessEnv): ImplementationSourceBridge | undefined {
+  const identity = env[YRD_WRAPPER_IMPLEMENTATION_SOURCE_ENV]?.trim()
+  const repository = env[YRD_WRAPPER_IMPLEMENTATION_REPOSITORY_ENV]?.trim()
+  delete env[YRD_WRAPPER_IMPLEMENTATION_SOURCE_ENV]
+  delete env[YRD_WRAPPER_IMPLEMENTATION_REPOSITORY_ENV]
+  if (identity === undefined && repository === undefined) return undefined
+  if (identity === undefined || repository === undefined) {
+    throw new Error("yrd: installed implementation-source attestation is incomplete")
+  }
+  if (!/^(?:dirty|git):[0-9a-f]{40,64}$/u.test(identity)) {
+    throw new Error("yrd: installed implementation-source identity is invalid")
+  }
+  if (!isAbsolute(repository) || resolve(repository) !== repository) {
+    throw new Error("yrd: installed implementation-source repository is not an absolute normalized path")
+  }
+  return { identity, repository: { root: repository } }
+}
 
 /** Find the owning Yrd source checkout for one loaded module without doing I/O
  * at import time. The package-root boundary prevents an installed node_modules

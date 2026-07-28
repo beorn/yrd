@@ -83,6 +83,7 @@ import {
   authoritativeImplementationSource,
   implementationSourceIdentity,
   sourceRepositoryFor,
+  takeImplementationSourceBridge,
   type ImplementationSourceRepository,
 } from "./implementation-source.ts"
 import { withGitIndexLockRetry } from "./git-index-lock-retry.ts"
@@ -1162,6 +1163,10 @@ type YrdRuntimeHostOptions = YrdHostOptions &
     interactive?: boolean
     wire?: string
     wireOutput?: (text: string) => void
+    /** Loaded identity attested by the process host for a gitless sealed root. */
+    implementationSource?: string
+    /** Mutable checkout used only for current/authoritative source comparison. */
+    implementationSourceRepository?: ImplementationSourceRepository
   }>
 
 function isWireCapture(destination: string): boolean {
@@ -1326,6 +1331,7 @@ async function createYrdRuntimeHost(
     using _setupSpan = log.span?.("setup", { phase: "pre-worktree", repo: repository.repo })
     const loaded = await loadRepositoryConfig(repository, process, options.configPath)
     const discoveredImplementationSource = sourceRepositoryFor(import.meta.url)
+    const implementationSourceRepository = options.implementationSourceRepository ?? discoveredImplementationSource
     const receiver =
       mode === "active"
         ? await createGitPushReceiver({
@@ -1397,7 +1403,8 @@ async function createYrdRuntimeHost(
         log,
       })
     }
-    const implementationSource = await implementationSourceIdentity(process, discoveredImplementationSource)
+    const implementationSource =
+      options.implementationSource ?? (await implementationSourceIdentity(process, discoveredImplementationSource))
     if (resident !== undefined && implementationSource === undefined) {
       raiseFailure(
         "refusal",
@@ -1405,8 +1412,8 @@ async function createYrdRuntimeHost(
         "yrd: resident runner cannot determine the implementation source it loaded; refusing to start",
       )
     }
-    const implementationSourceRepository =
-      implementationSource === undefined ? undefined : discoveredImplementationSource
+    const trackedImplementationSourceRepository =
+      implementationSource === undefined ? undefined : implementationSourceRepository
     app = await createDefaultYrdRuntimeApp({
       repo: repository.repo,
       stateDir: repository.stateDir,
@@ -1461,15 +1468,21 @@ async function createYrdRuntimeHost(
         process,
         repository,
         loaded.config.base,
-        () => reloadConfiguredStepDescriptors(repository, process, options.configPath, implementationSourceRepository),
+        () =>
+          reloadConfiguredStepDescriptors(
+            repository,
+            process,
+            options.configPath,
+            trackedImplementationSourceRepository,
+          ),
         // The RUNTIME leg must come from the live runtime object — the steps
         // this process actually installed — never re-derived from config.
         () => runtimeApp.queue.steps(),
-        implementationSource === undefined || implementationSourceRepository === undefined
+        implementationSource === undefined || trackedImplementationSourceRepository === undefined
           ? undefined
           : {
               loaded: implementationSource,
-              current: () => implementationSourceIdentity(process, implementationSourceRepository),
+              current: () => implementationSourceIdentity(process, trackedImplementationSourceRepository),
             },
       ),
       recut: createGitPRRecutter({ inject: { process }, repo: repository.repo, env }),
@@ -1663,6 +1676,14 @@ export async function runYrdProcess(
     })())
   let removeShutdownSignals: () => void = () => undefined
   try {
+    const sourceBridge = takeImplementationSourceBridge(env)
+    if (
+      io.implementationSource !== undefined &&
+      sourceBridge !== undefined &&
+      io.implementationSource !== sourceBridge.identity
+    ) {
+      throw new Error("yrd: process-host implementation source conflicts with launcher attestation")
+    }
     return await runYrdProcessRuntime(argv, io, {
       ambientCwd: io.cwd ?? globalThis.process.cwd(),
       env,
@@ -1706,6 +1727,10 @@ export async function runYrdProcess(
             ...(context.wire === undefined ? {} : { wire: context.wire }),
             interactive: io.interactive === true,
             wireOutput: (text) => io.stdout(text),
+            ...(io.implementationSource === undefined && sourceBridge === undefined
+              ? {}
+              : { implementationSource: io.implementationSource ?? sourceBridge!.identity }),
+            ...(sourceBridge === undefined ? {} : { implementationSourceRepository: sourceBridge.repository }),
           },
           resident,
           posture === "viewer" ? "viewer" : "active",
