@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url"
 import {
   prDeliveryState,
   prHead,
+  prNeedsAuthor,
   prRevisionNumber,
   type Bay,
   type PR,
@@ -272,7 +273,7 @@ export function PRStatusView({ prs, eligibilities }: { prs: readonly PR[]; eligi
     return {
       ...projectPRTaskStatus(pr),
       status:
-        pr.needsAuthor !== undefined || eligibility?.reason?.code === "needs-author"
+        prNeedsAuthor(pr) !== undefined || eligibility?.reason?.code === "needs-author"
           ? ("needs-author" as const)
           : prDeliveryState(pr),
       revision,

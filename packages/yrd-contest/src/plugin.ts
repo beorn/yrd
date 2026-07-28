@@ -374,7 +374,7 @@ function createContestCommands(
         throw new Error(`yrd: PR '${args.pr}' does not contain the selected contest commit`)
       }
       const delivery = prDeliveryState(pr)
-      if (delivery !== "submitted" && delivery !== "integrated") {
+      if (delivery !== "submitted" && delivery !== "ready" && delivery !== "integrated") {
         throw new Error(`yrd: PR '${pr.id}' is ${delivery}, not submitted`)
       }
       return {
@@ -637,7 +637,7 @@ async function ensureExactPR(
   if (
     pr === undefined ||
     !exactPR(pr, pin, record.base) ||
-    (prDeliveryState(pr) !== "submitted" && prDeliveryState(pr) !== "integrated")
+    (prDeliveryState(pr) !== "submitted" && prDeliveryState(pr) !== "ready" && prDeliveryState(pr) !== "integrated")
   ) {
     throw new Error(`yrd: selected contest commit was not submitted`)
   }

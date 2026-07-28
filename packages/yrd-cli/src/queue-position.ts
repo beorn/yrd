@@ -1,9 +1,12 @@
 import { currentPRRev, prDeliveryState, type PR } from "@yrd/bay"
 
-/** One-based positions for every submitted PR, before any renderer row budget. */
+/** One-based positions for every live queue revision, before any renderer row budget. */
 export function submittedPrPositions(prs: readonly PR[]): ReadonlyMap<string, number> {
   const ordered = prs
-    .filter((pr) => prDeliveryState(pr) === "submitted")
+    .filter((pr) => {
+      const delivery = prDeliveryState(pr)
+      return delivery === "submitted" || delivery === "ready"
+    })
     .toSorted((left, right) => {
       const leftSubmittedAt = currentPRRev(left).submittedAt ?? left.submittedAt
       const rightSubmittedAt = currentPRRev(right).submittedAt ?? right.submittedAt
