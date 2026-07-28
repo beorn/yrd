@@ -46,8 +46,23 @@ function setting(value: string | undefined): string | undefined {
   return normalized === undefined || normalized === "" ? undefined : normalized
 }
 
-/** Resolve the sole Yrd logging policy. CLI controls override LOG_LEVEL;
- * DEBUG remains a namespace filter and never changes severity. */
+/** Resolve the sole Yrd logging policy. CLI controls override LOG_LEVEL, and
+ * LOG_LEVEL overrides the DEBUG implication below.
+ *
+ * DEBUG is a namespace FILTER, but setting one also IMPLIES `debug` severity
+ * when the operator chose no level. It used to leave severity alone, which made
+ * the knob inert exactly as documented: at the default `warn`, `DEBUG=yrd:core`
+ * narrowed which namespaces could pass while the level still dropped every
+ * debug record, so the documented invocation emitted ZERO BYTES. `DEBUG='*'`
+ * emitted zero bytes too — proof the silence was never a namespace typo. That
+ * cost real time: a multi-second stage of `queue ls` stayed invisible for weeks
+ * because the one tool pointed at it was dead. Every other ecosystem reads
+ * `DEBUG=ns` as "enable", so diverging silently had no upside.
+ *
+ * An explicit level still wins, from any of the three sources that count as an
+ * operator choice (`--log-level`, `-v`/`-q`, `LOG_LEVEL`), and `explicitLevel`
+ * deliberately stays false here — DEBUG selects a default, it is not the
+ * operator pinning a level, and `residentObservability` keys off that. */
 export function resolveYrdObservability(
   flags: YrdObservabilityFlags,
   env: Readonly<Record<string, string | undefined>>,
@@ -63,6 +78,7 @@ export function resolveYrdObservability(
 
   const explicit = level(flags.logLevel, "--log-level")
   const configured = level(env.LOG_LEVEL, "LOG_LEVEL")
+  const namespaces = setting(env.DEBUG)
   const selected =
     explicit ??
     (verbose >= 3
@@ -75,11 +91,13 @@ export function resolveYrdObservability(
             ? "silent"
             : quiet === 1
               ? "error"
-              : (configured ?? "warn"))
+              : // Last resort only: every branch above is an explicit operator
+                // choice and keeps its level. DEBUG= just moves the DEFAULT.
+                (configured ?? (namespaces === undefined ? "warn" : "debug")))
 
   return Object.freeze({
     level: selected,
-    ...(setting(env.DEBUG) === undefined ? {} : { debug: setting(env.DEBUG) }),
+    ...(namespaces === undefined ? {} : { debug: namespaces }),
     ...(setting(env.LOGGILY_FILE) === undefined ? {} : { file: setting(env.LOGGILY_FILE) }),
     spans: selected === "trace" || selected === "debug",
     explicitLevel: explicit !== undefined || configured !== undefined || verbose > 0 || quiet > 0,

@@ -53,14 +53,26 @@ describe("Yrd observability controls", () => {
   it.each([
     [{}, {}, { level: "warn", spans: false, explicitLevel: false }],
     [{}, { LOG_LEVEL: "info" }, { level: "info", spans: false, explicitLevel: true }],
-    [{}, { DEBUG: "yrd:queue" }, { level: "warn", debug: "yrd:queue", spans: false, explicitLevel: false }],
+    // DEBUG= implies debug severity when the operator chose no level. Setting a
+    // namespace filter and getting silence is the trap this repo cares about:
+    // the knob is documented, and used exactly as documented it emitted zero
+    // bytes, which is why a multi-second stage stayed invisible for weeks.
+    [{}, { DEBUG: "yrd:queue" }, { level: "debug", debug: "yrd:queue", spans: true, explicitLevel: false }],
+    // The control that proves silence was never a namespace typo.
+    [{}, { DEBUG: "*" }, { level: "debug", debug: "*", spans: true, explicitLevel: false }],
+    // ...but an EXPLICIT level always wins over the implication, from any of the
+    // three sources that count as an operator choice.
+    [{}, { DEBUG: "yrd:core", LOG_LEVEL: "warn" }, { level: "warn", debug: "yrd:core", spans: false, explicitLevel: true }],
+    [{ logLevel: "error" }, { DEBUG: "yrd:core" }, { level: "error", debug: "yrd:core", spans: false, explicitLevel: true }],
+    [{ quiet: 1 }, { DEBUG: "yrd:core" }, { level: "error", debug: "yrd:core", spans: false, explicitLevel: true }],
+    [{ verbose: 1 }, { DEBUG: "yrd:core" }, { level: "info", debug: "yrd:core", spans: false, explicitLevel: true }],
     [{ verbose: 1 }, { LOG_LEVEL: "error" }, { level: "info", spans: false, explicitLevel: true }],
     [{ verbose: 2 }, { LOG_LEVEL: "error" }, { level: "debug", spans: true, explicitLevel: true }],
     [{ verbose: 3 }, { LOG_LEVEL: "error" }, { level: "trace", spans: true, explicitLevel: true }],
     [{ quiet: 1 }, { LOG_LEVEL: "trace" }, { level: "error", spans: false, explicitLevel: true }],
     [{ quiet: 2 }, { LOG_LEVEL: "trace" }, { level: "silent", spans: false, explicitLevel: true }],
     [{ logLevel: "debug" }, { LOG_LEVEL: "error" }, { level: "debug", spans: true, explicitLevel: true }],
-  ] as const)("resolves CLI controls before LOG_LEVEL while DEBUG only filters namespaces", (flags, env, expected) => {
+  ] as const)("resolves CLI controls before LOG_LEVEL, and DEBUG implies debug unless a level was chosen", (flags, env, expected) => {
     expect(resolveYrdObservability(flags, env)).toEqual(expected)
   })
 
