@@ -94,7 +94,7 @@ That replaces ambiguous `wip-preserved-*` branches with inspectable state:
 | Unmanaged state           | Yrd state                                        |
 | ------------------------- | ------------------------------------------------ |
 | dirty worktree            | active bay, not submit-ready                     |
-| ahead branch              | pushed or submitted PR                           |
+| ahead branch              | pushed, submitted, or ready PR                   |
 | branch needing repair     | draft PR plus `bay open --pr <PR>`               |
 | external CI still running | waiting queue step with URL and token            |
 | author-owned failure      | needs-author PR with typed receipt               |
@@ -902,6 +902,9 @@ no merge was needed. V2 projects an author-attributable red as `needs-author`
 with its `attributedReceipt` and typed bounce. V1 explicitly degrades that
 state to `rejected` plus the same bounce; consumers should migrate to
 `trackerBridgeV2`. Canceled and withdrawn remain distinct terminal outcomes.
+An internally admitted `ready` revision remains externally `submitted` in
+both bridge versions until it reaches a terminal outcome; `ready` is Yrd
+admission evidence, not a tracker delivery status.
 
 The human `yrd issue view <issue>` surface projects those same typed facts: it
 prints exact PR revision/head, Queue runs, canonical projected status, landing

@@ -251,7 +251,7 @@ describe("implicit recut of a moved branch", () => {
     const app = await createCliApp()
     let head = RECORDED_HEAD
     await submitBranch(app, () => head, "--track")
-    expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
+    expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("ready")
 
     head = LIVE_HEAD
     const tracked = outputIO(() => head)
@@ -269,8 +269,8 @@ describe("implicit recut of a moved branch", () => {
     const recorded = app.bays.pr("PR1")!
     expect(currentPRRev(recorded).n).toBe(2)
     expect(currentPRRev(recorded).head).toBe(LIVE_HEAD)
-    // Re-recording a submitted PR leaves it submitted, and tracking survives the
-    // new revision so the NEXT push re-records itself too.
+    // Re-recording an admitted PR creates a fresh submitted revision, and
+    // tracking survives so the NEXT push re-records itself too.
     expect(prDeliveryState(recorded)).toBe("submitted")
     expect(recorded.track).toBe(true)
     // The recut then classifies the FRESH revision, not the stale one.

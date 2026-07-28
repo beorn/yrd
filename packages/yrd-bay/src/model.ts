@@ -310,9 +310,9 @@ const NON_CHECKABLE_PR_STATES: ReadonlySet<PRDeliveryState> = new Set<PRDelivery
   "canceled",
 ])
 
-/** A PR can only accept new check requests while pushed/submitted/rejected; once
- * it reaches a terminal status (integrated/already-landed/withdrawn/canceled)
- * it is no longer checkable. */
+/** A PR can accept new check requests in every non-terminal delivery state.
+ * Once it reaches integrated/already-landed/withdrawn/canceled, it is no
+ * longer checkable. */
 export function isNonCheckablePRState(state: PRDeliveryState): boolean {
   return NON_CHECKABLE_PR_STATES.has(state)
 }
