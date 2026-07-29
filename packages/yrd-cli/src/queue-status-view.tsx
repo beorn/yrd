@@ -2292,6 +2292,50 @@ function queueAttemptsByRun(attempts: readonly QueueAttempt[]): ReadonlyMap<stri
 }
 
 const NO_ATTEMPTS: readonly QueueAttempt[] = Object.freeze([])
+const NO_RUNS: readonly Run[] = Object.freeze([])
+
+/** Index the Runs a detail row can name, keyed `base:id`.
+ *
+ * The detail build used to `allRuns.find(...)` per row — 677 rows against 655
+ * Runs is ~443k comparisons per snapshot, on the same tick-and-keypress path as
+ * the attempt scan. First-wins insertion preserves `find`'s exact semantics if a
+ * base ever carries a duplicate Run id. */
+function queueRunsByKey(runs: readonly Run[]): ReadonlyMap<string, Run> {
+  const byKey = new Map<string, Run>()
+  for (const run of runs) {
+    const key = `${run.base}:${run.id}`
+    if (!byKey.has(key)) byKey.set(key, run)
+  }
+  return byKey
+}
+
+/** Group completed Runs by the PR revision they carried, keyed `prId\0revision`.
+ *
+ * `queueShowData` uses the Run list it is handed for exactly one thing: the
+ * retry ordinal, via `queueShowRetries` -> `runOutputQueueageIndex`, which keeps
+ * only the completed Runs carrying this Run's first PR at the same revision.
+ * Handing it that group directly is semantically identical — both of its filters
+ * become no-ops over the already-matching set — and turns a per-detail-row scan
+ * and sort of every finished Run into one pass. */
+function queueRetryPeers(finished: readonly Run[]): ReadonlyMap<string, readonly Run[]> {
+  const byRevision = new Map<string, Run[]>()
+  for (const run of finished) {
+    if (run.status !== "completed") continue
+    for (const member of run.prs) {
+      const key = `${member.id}\0${String(member.revision)}`
+      const peers = byRevision.get(key)
+      if (peers === undefined) byRevision.set(key, [run])
+      else peers.push(run)
+    }
+  }
+  return byRevision
+}
+
+function queueRetryPeersOf(peers: ReadonlyMap<string, readonly Run[]>, run: Run): readonly Run[] {
+  const first = run.prs[0]
+  if (first === undefined) return NO_RUNS
+  return peers.get(`${first.id}\0${String(first.revision)}`) ?? NO_RUNS
+}
 
 export function queueTimelineProjection(
   results: readonly QueueStatusResult[],
@@ -2368,15 +2412,22 @@ export function queueTimelineProjection(
   )
   const allRuns = results.flatMap((result) => [...result.running, ...result.waiting, ...result.finished])
   const finished = results.flatMap((result) => result.finished)
+  const runsByKey = queueRunsByKey(allRuns)
+  const retryPeers = queueRetryPeers(finished)
   const detailRuns = new Set<string>()
   const details = rows.flatMap((row) => {
-    if (row.run === undefined || detailRuns.has(`${row.base}:${row.run}`)) return []
-    detailRuns.add(`${row.base}:${row.run}`)
-    const run = allRuns.find((candidate) => candidate.id === row.run && candidate.base === row.base)
-    // `queueShowData` re-filters the attempts it is handed down to this Run, so
-    // passing the pre-narrowed slice is semantically identical and drops the
-    // per-Run scan of every attempt in the journal.
-    return run === undefined ? [] : [queueShowData(run, finished, attemptsByRun.get(run.id) ?? NO_ATTEMPTS)]
+    if (row.run === undefined) return []
+    const key = `${row.base}:${row.run}`
+    if (detailRuns.has(key)) return []
+    detailRuns.add(key)
+    const run = runsByKey.get(key)
+    // `queueShowData` re-filters both lists it is handed down to this Run, so
+    // passing the pre-narrowed slices is semantically identical and drops two
+    // per-detail-row scans of the whole journal: every attempt, and every
+    // finished Run.
+    return run === undefined
+      ? []
+      : [queueShowData(run, queueRetryPeersOf(retryPeers, run), attemptsByRun.get(run.id) ?? NO_ATTEMPTS)]
   })
   const limit = Math.max(1, Math.floor(options.rowLimit))
   const retainedSince =
