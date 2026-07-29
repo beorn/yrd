@@ -1,5 +1,6 @@
 import type { ReactNode } from "react"
 import { displayLength } from "@silvery/ansi"
+import { stageAsync } from "@yrd/core"
 import { Text, renderString } from "silvery"
 import { actionableFailure, formatHumanFailure, type ActionableFailure } from "./actionable-error.ts"
 import { classifyFailure, stableJson, unrecognizedKeyFailure } from "./invocation.ts"
@@ -9,11 +10,15 @@ import { formatYrdRuntimeVersion } from "./version.ts"
 export type HumanOutput = ReactNode
 
 async function rendered(io: YrdCliIO, output: HumanOutput, width = Math.min(io.columns ?? 120, 120)): Promise<string> {
-  const text = await renderString(typeof output === "string" ? <Text>{output}</Text> : <>{output}</>, {
-    width,
-    height: 10_000,
-    plain: io.color !== true,
-  })
+  // The single funnel for every human-facing view, so one stage covers all the
+  // react/silvery/flexily work the CLI does.
+  const text = await stageAsync("render", () =>
+    renderString(typeof output === "string" ? <Text>{output}</Text> : <>{output}</>, {
+      width,
+      height: 10_000,
+      plain: io.color !== true,
+    }),
+  )
   return text.endsWith("\n") ? text : `${text}\n`
 }
 

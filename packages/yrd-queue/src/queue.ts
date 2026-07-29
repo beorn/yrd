@@ -40,6 +40,7 @@ import {
   observeYrdLifecycle,
   parseJournalFrame,
   raiseFailure,
+  stage,
   type CommandHandler,
   type CommandResult,
   type CommandTree,
@@ -2394,10 +2395,14 @@ function createQueue<Shape extends PRShape>(
     },
     audit: () => auditQueues(runtime(), steps),
     eligibility(selector, projected) {
-      const snapshot = projected ?? runtime()
-      const pr = resolvePR(snapshot.bays, selector)
-      if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
-      return prEligibility(snapshot, pr, steps)
+      // Called once per PR by the queue views, and the single largest stage of a
+      // cold `queue ls` — resolvePR plus prEligibility together dominate it.
+      return stage("eligibility", () => {
+        const snapshot = projected ?? runtime()
+        const pr = resolvePR(snapshot.bays, selector)
+        if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
+        return prEligibility(snapshot, pr, steps)
+      })
     },
     eligibilities(projected) {
       const snapshot = projected ?? runtime()
