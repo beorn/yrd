@@ -110,6 +110,7 @@ import {
   prListRows,
   prDetailData,
   projectedPrStatus,
+  queuePauseWarnings,
   queueRunRevisionClocks,
   queueTimelineAdmissionTimes,
   queueTimelineProjection,
@@ -5015,7 +5016,7 @@ async function renderDashboard(
       selected: target.selected,
       now: io.now?.() ?? Date.now(),
     }),
-    submoduleTrackingWarnings(io.cwd ?? process.cwd()),
+    [...queuePauseWarnings(state.bays, results), ...submoduleTrackingWarnings(io.cwd ?? process.cwd())],
   )
 }
 
@@ -5073,7 +5074,8 @@ function queueBases(state: YrdCliState): string[] {
   ].toSorted()
 }
 
-type QueueListSnapshot = QueueWatchSnapshot & Readonly<{ projection: QueueTimelineProjection }>
+type QueueListSnapshot = QueueWatchSnapshot &
+  Readonly<{ projection: QueueTimelineProjection; state: YrdCliState["bays"] }>
 
 function queueRunnerRefusal(app: Pick<YrdCliApp, "queue">): QueueRunnerRefusal | undefined {
   const finding = app.queue
@@ -5493,6 +5495,7 @@ export async function queueListSnapshot(
     : undefined
   return {
     results: filteredResults,
+    state: state.bays,
     now,
     projection,
     ...(runnerRefusal === undefined ? {} : { runnerRefusal }),
@@ -5529,9 +5532,10 @@ async function listQueues(
     createElement(QueueTimelineView, {
       projection: snapshot.projection,
       runnerRefusal: snapshot.runnerRefusal,
+      state: snapshot.state,
       columns: io.columns ?? 120,
     }),
-    submoduleTrackingWarnings(io.cwd ?? process.cwd()),
+    [...queuePauseWarnings(snapshot.state, snapshot.results), ...submoduleTrackingWarnings(io.cwd ?? process.cwd())],
   )
 }
 
@@ -7103,7 +7107,7 @@ async function watchQueue(
 
   while (true) {
     const snapshot = await load()
-    await printResult(
+    await printResultWithWarnings(
       io,
       true,
       {
@@ -7114,8 +7118,10 @@ async function watchQueue(
       createElement(QueueTimelineView, {
         projection: snapshot.projection,
         runnerRefusal: snapshot.runnerRefusal,
+        state: snapshot.state,
         columns: io.columns ?? 120,
       }),
+      [...queuePauseWarnings(snapshot.state, snapshot.results), ...submoduleTrackingWarnings(io.cwd ?? process.cwd())],
     )
     if (scope.signal.aborted) return 0
     await scope.sleep(interval)

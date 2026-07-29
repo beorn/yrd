@@ -5001,6 +5001,7 @@ describe("runYrd", () => {
     const app = await createApp()
     await app.bays.submit({ branch: "issue/blocked", headSha: "1".repeat(40), base: "main" })
     await app.bays.submit({ branch: "issue/allowed", headSha: "2".repeat(40), base: "main" })
+    await app.bays.submit({ branch: "issue/also-allowed", headSha: "3".repeat(40), base: "main" })
     const beforeRead = await Array.fromAsync(app.events()).then((events) => events.length)
     const unpaused = outputIO()
     expect(await runYrd(app, yrd("queue", "pause", "--json"), unpaused.io)).toBe(0)
@@ -5012,20 +5013,20 @@ describe("runYrd", () => {
     expect(
       await runYrd(
         app,
-        yrd("queue", "pause", "main", "--reason", "operator freeze", "--allow", "PR2", "--json"),
+        yrd("queue", "pause", "main", "--reason", "operator freeze", "--allow", "PR2", "PR3", "--json"),
         pause.io,
       ),
     ).toBe(0)
     expect(JSON.parse(pause.stdout())).toMatchObject({
       command: "queue.pause",
-      pause: { base: "main", reason: "operator freeze", allowedPRs: ["PR2"] },
+      pause: { base: "main", reason: "operator freeze", allowedPRs: ["PR2", "PR3"] },
     })
     const afterPause = await Array.fromAsync(app.events()).then((events) => events.length)
     const paused = outputIO()
     expect(await runYrd(app, yrd("queue", "pause", "--json"), paused.io)).toBe(0)
     expect(JSON.parse(paused.stdout())).toMatchObject({
       command: "queue.pause",
-      pauses: [{ base: "main", reason: "operator freeze", allowedPRs: ["PR2"] }],
+      pauses: [{ base: "main", reason: "operator freeze", allowedPRs: ["PR2", "PR3"] }],
     })
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(afterPause)
 
@@ -5035,24 +5036,67 @@ describe("runYrd", () => {
     expect(Queues.ids(app.state().queues)).toEqual([])
 
     const eligible = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), eligible.io), eligible.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "PR2", "--json"), eligible.io), eligible.stderr()).toBe(0)
     expect(JSON.parse(eligible.stdout())).toMatchObject({
       results: [{ prs: [{ id: "PR2" }], status: "completed", conclusion: "success" }],
     })
     expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
     expect(prDeliveryState(app.state().bays.prs.PR2!)).toBe("integrated")
 
+    const partiallyStale = outputIO({ columns: 120 })
+    expect(await runYrd(app, yrd(), partiallyStale.io)).toBe(0)
+    expect(partiallyStale.stdout()).toContain("PR2 integrated")
+    expect(partiallyStale.stdout()).toContain("PR3 submitted")
+    expect(partiallyStale.stdout()).not.toContain("BLOCKING EVERYTHING")
+
+    const secondEligible = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "PR3", "--json"), secondEligible.io)).toBe(0)
+    expect(JSON.parse(secondEligible.stdout())).toMatchObject({
+      results: [{ prs: [{ id: "PR3" }], status: "completed", conclusion: "success" }],
+    })
+    expect(prDeliveryState(app.state().bays.prs.PR3!)).toBe("integrated")
+
+    await app.bays.submit({ branch: "issue/newly-blocked", headSha: "4".repeat(40), base: "main" })
+
     const status = outputIO()
     expect(await runYrd(app, yrd("--json"), status.io)).toBe(0)
     expect(JSON.parse(status.stdout())).toMatchObject({
-      results: [{ base: "main", pause: { reason: "operator freeze", allowedPRs: ["PR2"] } }],
+      warnings: [
+        "[pause-blocks-all] queue 'main' pause blocks every PR: all allowed PRs are terminal (PR2 integrated, PR3 integrated)",
+      ],
+      results: [{ base: "main", pause: { reason: "operator freeze", allowedPRs: ["PR2", "PR3"] } }],
     })
 
-    const humanStatus = outputIO({ columns: 100 })
+    const humanStatus = outputIO({ columns: 120 })
     expect(await runYrd(app, yrd(), humanStatus.io)).toBe(0)
-    expect(humanStatus.stdout()).toContain("PAUSE")
+    expect(humanStatus.stdout()).toContain("BLOCKING EVERYTHING")
     expect(humanStatus.stdout()).toContain("operator freeze")
-    expect(humanStatus.stdout()).toContain("PR2")
+    expect(humanStatus.stdout()).toContain("PR2 integrated")
+    expect(humanStatus.stdout()).toContain("PR3 integrated")
+    expect(humanStatus.stdout()).toContain("pr#4.1 issue/newly-blocked submitted")
+
+    const queueList = outputIO({
+      columns: 120,
+      resolveQueueTarget: async () => ({ base: "main", sha: BASE_SHA }),
+    })
+    expect(await runYrd(app, yrd("queue", "ls"), queueList.io), queueList.stderr()).toBe(0)
+    expect(queueList.stdout()).toContain("PAUSE BLOCKING EVERYTHING")
+    expect(queueList.stdout()).toContain("PR2 integrated")
+    expect(queueList.stdout()).toContain("PR3 integrated")
+
+    const queueListJson = outputIO({
+      resolveQueueTarget: async () => ({ base: "main", sha: BASE_SHA }),
+    })
+    expect(await runYrd(app, yrd("queue", "ls", "--json"), queueListJson.io), queueListJson.stderr()).toBe(0)
+    expect(JSON.parse(queueListJson.stdout())).toMatchObject({
+      warnings: [
+        "[pause-blocks-all] queue 'main' pause blocks every PR: all allowed PRs are terminal (PR2 integrated, PR3 integrated)",
+      ],
+    })
+
+    const newlyBlocked = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "PR4", "--json"), newlyBlocked.io)).toBe(1)
+    expect(newlyBlocked.stderr()).toContain("queue 'main' is paused: operator freeze")
 
     const resume = outputIO()
     expect(await runYrd(app, yrd("queue", "resume", "main", "--json"), resume.io)).toBe(0)

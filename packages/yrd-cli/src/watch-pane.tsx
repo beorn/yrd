@@ -22,7 +22,7 @@ import {
   useWindowSize,
   type ListViewHandle,
 } from "silvery"
-import { prRevisionNumber, type PR } from "@yrd/bay"
+import { prRevisionNumber, type BaysState, type PR } from "@yrd/bay"
 import {
   QUEUE_TIMELINE_STATUS_BUCKETS,
   QueueDetailRunHeader,
@@ -131,6 +131,7 @@ function queueTimelineHeight(rows: number, tier: QueueDetailTier, detailOpen: bo
 
 export type QueueWatchSnapshot = Readonly<{
   results: readonly QueueStatusResult[]
+  state?: BaysState
   now: number
   projection?: QueueTimelineProjection
   runnerRefusal?: QueueRunnerRefusal
@@ -1457,6 +1458,7 @@ export function QueueWatchFrame({
     snapshot.projection === undefined ? (
       <QueueTimelineView
         results={snapshot.results}
+        state={snapshot.state}
         now={snapshot.now}
         columns={timelineColumns}
         nav={!helpOpen}
@@ -1469,6 +1471,7 @@ export function QueueWatchFrame({
       <QueueTimelineView
         projection={snapshot.projection}
         runnerRefusal={snapshot.runnerRefusal}
+        state={snapshot.state}
         columns={timelineColumns}
         nav={!helpOpen}
         cursorKey={cursor}

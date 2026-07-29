@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url"
 import type React from "react"
 import {
   currentPRRev,
+  isNonCheckablePRState,
   prDeliveryState,
   prCorrelation,
   prHead,
@@ -10,6 +11,7 @@ import {
   prRevisionLineage,
   prRevisionNumber,
   prSourceReadyAt,
+  resolvePR,
   type BaysState,
   type Correlation,
   type PR,
@@ -165,6 +167,47 @@ export type QueueStatusResult = QueueSummary &
     candidates?: readonly Candidate[]
     eligibilities?: readonly PREligibility[]
   }>
+
+type QueuePauseAllowListMember = Readonly<{
+  id: string
+  status: PRDeliveryState | "unknown"
+}>
+
+type QueuePauseHealth = Readonly<{
+  members: readonly QueuePauseAllowListMember[]
+  blocksAll: boolean
+}>
+
+function queuePauseHealth(state: BaysState, pause: NonNullable<QueueSummary["pause"]>): QueuePauseHealth {
+  const members = pause.allowedPRs.map((id) => {
+    const pr = resolvePR(state, id)
+    return { id, status: pr === undefined ? ("unknown" as const) : prDeliveryState(pr) }
+  })
+  return {
+    members,
+    blocksAll:
+      members.length > 0 && members.every(({ status }) => status !== "unknown" && isNonCheckablePRState(status)),
+  }
+}
+
+function queuePauseAllowedText(
+  pause: NonNullable<QueueSummary["pause"]>,
+  health: QueuePauseHealth | undefined,
+): string {
+  if (pause.allowedPRs.length === 0) return "none"
+  return health?.members.map(({ id, status }) => `${id} ${status}`).join(", ") ?? pause.allowedPRs.join(", ")
+}
+
+export function queuePauseWarnings(state: BaysState, results: readonly QueueStatusResult[]): string[] {
+  return results.flatMap((result) => {
+    if (result.pause === undefined) return []
+    const health = queuePauseHealth(state, result.pause)
+    if (!health.blocksAll) return []
+    return [
+      `[pause-blocks-all] queue '${result.base}' pause blocks every PR: all allowed PRs are terminal (${queuePauseAllowedText(result.pause, health)})`,
+    ]
+  })
+}
 
 export type QueueTimelineRow = Readonly<{
   key: string
@@ -3419,17 +3462,20 @@ export function QueueStatusView({
     <Box flexDirection="column">
       {results.map((result, index) => {
         const projection = humanQueueProjection(result, now, { selected, state, positions })
-        const allowed = projection.pause?.allowedPRs.length === 0 ? "none" : projection.pause?.allowedPRs.join(", ")
+        const pauseHealth = projection.pause === undefined ? undefined : queuePauseHealth(state, projection.pause)
+        const allowed = projection.pause === undefined ? "none" : queuePauseAllowedText(projection.pause, pauseHealth)
         return (
           <Box key={result.base} flexDirection="column" marginTop={index === 0 ? 0 : 1}>
             <SummaryQueue projection={projection} />
             {projection.pause !== undefined && (
               <Box height={1}>
                 <Text wrap="truncate">
-                  <Text color="$fg-warning" bold>
-                    PAUSE
+                  <Text color={pauseHealth?.blocksAll === true ? "$fg-error" : "$fg-warning"} bold>
+                    {pauseHealth?.blocksAll === true ? "⚠ PAUSE BLOCKING EVERYTHING" : "PAUSE"}
                   </Text>
-                  {`: ${projection.pause.reason} (allowed: ${allowed})`}
+                  {pauseHealth?.blocksAll === true
+                    ? ` — ${projection.pause.reason} (allowed: ${allowed})`
+                    : `: ${projection.pause.reason} (allowed: ${allowed})`}
                 </Text>
               </Box>
             )}
@@ -4518,10 +4564,12 @@ function RunnerActivity({
 function TimelineRunnerBox({
   projection,
   runnerRefusal,
+  state,
   live = false,
 }: {
   projection: QueueTimelineProjection
   runnerRefusal?: QueueRunnerRefusal
+  state?: BaysState
   live?: boolean
 }) {
   const runner = projection.runner
@@ -4529,6 +4577,8 @@ function TimelineRunnerBox({
   const runnerStale = timing !== null && timing.ageMs > RUNNER_STALE_MS
   const marker = queueHealthMarker(projection)
   const pause = projection.pause
+  const pauseHealth = pause === undefined || state === undefined ? undefined : queuePauseHealth(state, pause)
+  const pauseAllowed = pause === undefined ? "none" : queuePauseAllowedText(pause, pauseHealth)
   const now = Date.parse(projection.now)
   const drained = timelineLastDrainedMs(projection)
   const downMs =
@@ -4589,12 +4639,19 @@ function TimelineRunnerBox({
         <>
           <Box height={1} flexShrink={0} />
           <Box height={1} flexDirection="row" gap={1} minWidth={0}>
-            <Text color="$fg-warning" flexShrink={0}>
-              ×
+            <Text color={pauseHealth?.blocksAll === true ? "$fg-error" : "$fg-warning"} flexShrink={0}>
+              {pauseHealth?.blocksAll === true ? "⚠" : "×"}
             </Text>
-            <Text color="$fg-warning" wrap="truncate" minWidth={0}>
-              <Text bold>STATUS</Text> HOLD THE LINE — {pause.reason} · allowed{" "}
-              {pause.allowedPRs.length === 0 ? "none" : pause.allowedPRs.join(",")}
+            <Text color={pauseHealth?.blocksAll === true ? "$fg-error" : "$fg-warning"} wrap="truncate" minWidth={0}>
+              {pauseHealth?.blocksAll === true ? (
+                <>
+                  <Text bold>PAUSE BLOCKING EVERYTHING</Text> — {pause.reason} · allowed {pauseAllowed}
+                </>
+              ) : (
+                <>
+                  <Text bold>STATUS</Text> HOLD THE LINE — {pause.reason} · allowed {pauseAllowed}
+                </>
+              )}
             </Text>
           </Box>
         </>
@@ -4869,6 +4926,7 @@ const QUEUE_STATS_MIN_PANE_ROWS = 24
 function ProjectedQueueTimeline({
   projection,
   runnerRefusal,
+  state,
   nav,
   cursorKey,
   onCursor,
@@ -4885,6 +4943,7 @@ function ProjectedQueueTimeline({
 }: {
   projection: QueueTimelineProjection
   runnerRefusal?: QueueRunnerRefusal
+  state?: BaysState
   nav: boolean
   cursorKey?: number
   onCursor?: (index: number) => void
@@ -4942,7 +5001,7 @@ function ProjectedQueueTimeline({
             </Box>
           </>
         )}
-        <TimelineRunnerBox projection={projection} runnerRefusal={runnerRefusal} live={nav} />
+        <TimelineRunnerBox projection={projection} runnerRefusal={runnerRefusal} state={state} live={nav} />
         {/* No blank row above the table header (item 5): the header sits flush
             under the boxes above it. The pills + coverage row moved BELOW the
             list (item 2), rendered after the rows block. */}
@@ -5099,6 +5158,7 @@ export function QueueTimelineView({
       <ProjectedQueueTimeline
         projection={projection}
         runnerRefusal={runnerRefusal}
+        state={state}
         nav={nav}
         cursorKey={cursorKey}
         onCursor={onCursor}
