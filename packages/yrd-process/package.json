@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@silvery/scope": "^0.21.0",
+    "@yrd/core": "workspace:*",
     "loggily": "^0.10.2"
   }
 }

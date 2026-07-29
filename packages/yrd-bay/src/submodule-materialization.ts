@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 
@@ -65,7 +66,25 @@ async function requiredGitlink(git: SubmoduleGit, repo: string, path: string): P
   return /^160000 commit ([0-9a-f]+)\t/mu.exec(tree.stdout)?.[1]
 }
 
-async function referenceContains(git: SubmoduleGit, reference: string, sha: string): Promise<boolean> {
+/**
+ * Decide whether `reference` can lend the objects behind `sha`. A candidate that
+ * ADDS a submodule names a reference path the base checkout never had, so the
+ * path is routinely absent — and git cannot be asked about an absent checkout at
+ * all, because a missing working directory fails inside posix_spawn before git
+ * parses its arguments. An absent store holds no objects either way, so the only
+ * borrow answer it can support is "none"; the caller's configured-remote
+ * fallback then resolves the pin.
+ */
+async function referenceContains(
+  git: SubmoduleGit,
+  reference: string,
+  sha: string,
+  log: (message: string) => void,
+): Promise<boolean> {
+  if (!existsSync(reference)) {
+    log(`[submodules] reference checkout '${reference}' is absent; borrowing nothing and using the configured remote`)
+    return false
+  }
   return (await git.run(reference, ["cat-file", "-e", `${sha}^{commit}`], true)).code === 0
 }
 
@@ -108,7 +127,8 @@ export async function materializeSubmodules(
         return { code: 1, stdout: "", stderr: `could not resolve gitlink '${path}' in ${worktree}` }
       }
       const referenceSubmodule = reference === undefined ? undefined : join(reference, path)
-      const canBorrow = referenceSubmodule !== undefined && (await referenceContains(git, referenceSubmodule, required))
+      const canBorrow =
+        referenceSubmodule !== undefined && (await referenceContains(git, referenceSubmodule, required, log))
       resolved.push({ canBorrow, name, path, referenceSubmodule, required })
     }
     if (resolved.length > 0) {

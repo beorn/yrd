@@ -4986,6 +4986,19 @@ async function sourceCandidateRefError(
 ): Promise<string | undefined> {
   for (const source of sources) {
     const sourceRepo = join(repo, source.repo)
+    // Every sibling that spawns git in a `join(repo, <gitlink>)` path proves the
+    // path first: an absent working directory fails inside posix_spawn, which no
+    // allowFailure can contain, and a source store that is not materialized can
+    // hold no candidate ref either way. This runs on the landing path, so the
+    // answer must be this function's own per-candidate error string.
+    try {
+      await realpath(sourceRepo)
+    } catch {
+      return (
+        `source '${source.repo}' is not initialized at '${sourceRepo}'; ` +
+        `its candidate ref '${source.candidateRef}' cannot be proven`
+      )
+    }
     const fetched = await git.run(
       sourceRepo,
       ["fetch", "--no-recurse-submodules", "--quiet", "origin", source.candidateRef],

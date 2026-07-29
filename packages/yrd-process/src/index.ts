@@ -1,4 +1,7 @@
+import { statSync } from "node:fs"
+import { resolve } from "node:path"
 import { createScope, type Scope } from "@silvery/scope"
+import { createFailure } from "@yrd/core"
 import { createLogger, type ConditionalLogger } from "loggily"
 import { pathReapFailure, reapOwnedPath, type PathReapResult } from "./path-reaper.ts"
 
@@ -257,6 +260,7 @@ export function createProcess(
         throw new TypeError("yrd: Process interactive runs cannot measure piped output progress")
       }
       const postExitDrainGraceMs = request.postExitDrainGraceMs ?? defaultPostExitDrainGraceMs
+      requireSpawnDirectory(argv, request.cwd ?? cwd)
 
       // Keep the run scope independent: parent Scope disposal is child-first,
       // which would cancel this run's SIGKILL grace before close can drain it.
@@ -627,6 +631,30 @@ function definedEnv(input: NodeJS.ProcessEnv | undefined): Record<string, string
 function positiveInteger(value: number, name: string): number {
   if (!Number.isSafeInteger(value) || value < 1) throw new RangeError(`yrd: Process ${name} must be a positive integer`)
   return value
+}
+
+/**
+ * Prove the working directory exists before spawning into it. An absent cwd
+ * fails inside posix_spawn with an ENOENT that names neither the directory nor
+ * the command — indistinguishable from a missing executable, and untyped, so no
+ * caller can classify it and every recovery path treats it as a fatal fault.
+ * Yrd derives spawn directories from candidate content (bay, scratch, and
+ * reference checkouts, including nested submodule paths a candidate ADDS but
+ * the base checkout lacks), so an absent one is an ordinary per-candidate
+ * condition that must stay containable instead of killing a long-lived runner.
+ */
+function requireSpawnDirectory(argv: readonly string[], cwd: string): void {
+  const path = resolve(cwd)
+  const stats = statSync(path, { throwIfNoEntry: false })
+  if (stats?.isDirectory() === true) return
+  const command = argv.slice(0, 6).join(" ") + (argv.length > 6 ? " ..." : "")
+  throw createFailure({
+    kind: "infrastructure",
+    code: "spawn-cwd-missing",
+    message:
+      `yrd: cannot run '${command}' — its working directory '${path}' ` +
+      (stats === undefined ? "does not exist" : "is not a directory"),
+  })
 }
 
 function validateArgv(value: unknown): readonly [string, ...string[]] {

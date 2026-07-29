@@ -6475,6 +6475,13 @@ function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefine
   // per-candidate wrap is still a cycle skip, not a resident death. Covers
   // authored-gitlink / recut-certificate / pr-not-admissible and the rest of
   // the needs-author + recut-lineage composition buckets if they bubble out.
+  // 22584 adds spawn-cwd-missing: every spawn directory Yrd derives is candidate
+  // content (bay, scratch, and reference checkouts, down to nested submodule
+  // paths a candidate ADDS but the base lacks), so an absent one is per-candidate
+  // by construction. The resident's OWN root is re-proven by every other command
+  // in the cycle, so a genuinely absent root keeps warning loudly each interval —
+  // and the message names the absolute path, which the bare posix_spawn ENOENT
+  // this replaces never did.
   const fact = failureFact(error)
   if (fact !== undefined && (fact.kind === "refusal" || fact.kind === "infrastructure")) {
     const prScoped =
@@ -6497,7 +6504,8 @@ function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefine
       fact.code === "refused-path" ||
       fact.code === "refused-path-inspection" ||
       fact.code === "restack-conflict" ||
-      fact.code === "restack-failed"
+      fact.code === "restack-failed" ||
+      fact.code === "spawn-cwd-missing"
     if (prScoped) {
       return {
         message: "resident runner skipped a cycle lost to a per-PR refusal",
