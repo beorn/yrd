@@ -11,8 +11,15 @@ export const JOURNAL_READER_VERSION = SUPPORTED_VERSIONS.at(-1) ?? 0
 export const JournalCompatibilitySchema = z
   .object({
     version: z.number().int().min(1),
+    /** Retired by the compiled-capability cutover. Existing immutable frames
+     * still carry the pin, so validate and discard it while replaying them. */
+    reader: z
+      .string()
+      .regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u)
+      .optional(),
   })
   .strict()
+  .transform(({ version }) => ({ version }))
 
 export type JournalCompatibility = Readonly<z.infer<typeof JournalCompatibilitySchema>>
 

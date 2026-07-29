@@ -264,6 +264,31 @@ describe("Yrd domain objects", () => {
     }
   })
 
+  it("replays frames carrying the retired reader pin without exposing it", () => {
+    const command = Core.Command.parse({
+      id: "00000000-0000-7000-8000-000000000001",
+      op: "test.record",
+    })
+    const value = {
+      cause: Core.CauseSchema.parse({
+        id: "00000000-0000-7000-8000-000000000002",
+        commandId: command.id,
+        op: command.op,
+        commandHash: Core.Command.hash(command),
+      }),
+      command,
+      events: [],
+      compatibility: {
+        version: Core.JOURNAL_READER_VERSION,
+        reader: "5a3b38539a9240364052bfdcf3e75edd7922a98f",
+      },
+    }
+
+    expect(Core.parseJournalFrame(value).compatibility).toEqual({
+      version: Core.JOURNAL_READER_VERSION,
+    })
+  })
+
   it("replays before exposing state and refreshes ordinary reads", async () => {
     const events: LogEvent[] = []
     const log = createLogger("test", [
