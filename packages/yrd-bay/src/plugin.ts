@@ -159,6 +159,16 @@ const BayHandoffCertifiedSchema = z
   .object({ bay: BayIdSchema, branch: GitRefSchema, headSha: GitShaSchema, evidence: TextSchema })
   .strict()
 
+const PRExpectedCurrentSchema = z
+  .object({
+    pr: TextSchema,
+    revision: RevisionSchema,
+    headSha: GitShaSchema,
+    track: z.boolean().optional(),
+  })
+  .strict()
+type PRExpectedCurrent = Readonly<z.infer<typeof PRExpectedCurrentSchema>>
+
 const IntakePRArgsSchema = z
   .object({
     bay: TextSchema.optional(),
@@ -174,6 +184,7 @@ const IntakePRArgsSchema = z
       .string()
       .regex(/^[0-9a-f]{64}$/u)
       .optional(),
+    expectedCurrent: PRExpectedCurrentSchema.optional(),
   })
   .strict()
   .refine(({ bay, branch }) => bay !== undefined || branch !== undefined, {
@@ -188,6 +199,7 @@ const SubmitArgsSchema = z.union([
       submitter: TextSchema.optional(),
       correlation: CorrelationSchema.optional(),
       flow: FlowPinSchema.optional(),
+      expectedCurrent: PRExpectedCurrentSchema.optional(),
     })
     .strict(),
   z
@@ -214,9 +226,9 @@ export type SubmitSelectionOptions = Readonly<{
   issue?: string
   title?: string
   description?: string
-  /** Opt in to "merge into latest" for every later implicit recut of this PR
-   * (see `PR.track`). Only a live PR records it: tracking governs future
-   * re-recording, which a terminal PR no longer has. */
+  /** Opt in to resident "merge into latest" and every later manual implicit
+   * recut of this PR (see `PR.track`). Only a live PR records it: tracking
+   * governs future revisions, which a terminal PR no longer has. */
   track?: boolean
   draft?: boolean
   correlation?: Correlation
@@ -257,9 +269,11 @@ const PrEditArgsSchema = z
   )
 export type PrEditArgs = z.infer<typeof PrEditArgsSchema>
 
-const PrReadyArgsSchema = z.object({ pr: TextSchema }).strict()
+const PrReadyArgsSchema = z.object({ pr: TextSchema, expectedCurrent: PRExpectedCurrentSchema.optional() }).strict()
 export type PrReadyArgs = z.infer<typeof PrReadyArgsSchema>
-const PrRecutExpectedCurrentSchema = z.object({ revision: RevisionSchema, headSha: GitShaSchema }).strict()
+const PrRecutExpectedCurrentSchema = z
+  .object({ revision: RevisionSchema, headSha: GitShaSchema, track: z.boolean().optional() })
+  .strict()
 const PrRecutArgsSchema = z
   .object({
     pr: TextSchema,
@@ -287,7 +301,9 @@ const PrSettleSupersededArgsSchema = z
   })
   .strict()
 export type PrSettleSupersededArgs = z.infer<typeof PrSettleSupersededArgsSchema>
-const PrRequestChecksArgsSchema = z.object({ pr: TextSchema, baseSha: GitShaSchema.optional() }).strict()
+const PrRequestChecksArgsSchema = z
+  .object({ pr: TextSchema, baseSha: GitShaSchema.optional(), expectedCurrent: PRExpectedCurrentSchema.optional() })
+  .strict()
 export type PrRequestChecksArgs = z.infer<typeof PrRequestChecksArgsSchema>
 const PrRequestReviewArgsSchema = z
   .object({ pr: TextSchema, reviewers: z.array(TextSchema), by: TextSchema.optional() })
@@ -307,7 +323,13 @@ const PrReviewArgsSchema = z
 export type PrReviewArgs = z.infer<typeof PrReviewArgsSchema>
 
 const PrCommentArgsSchema = z
-  .object({ pr: TextSchema, by: TextSchema, note: TextSchema, ref: TextSchema.optional() })
+  .object({
+    pr: TextSchema,
+    by: TextSchema,
+    note: TextSchema,
+    ref: TextSchema.optional(),
+    expectedCurrent: PRExpectedCurrentSchema.optional(),
+  })
   .strict()
 export type PrCommentArgs = z.infer<typeof PrCommentArgsSchema>
 
@@ -933,10 +955,11 @@ export function createBays(
   ): Promise<DeepReadonly<PR>> => {
     const titleChanged = metadata.title !== undefined && metadata.title !== pr.title
     const descriptionChanged = metadata.description !== undefined && metadata.description !== pr.description
-    // Tracking only governs a FUTURE implicit recut, which a terminal PR (an
-    // integrated/already-landed same-head resubmit reaches this seam at exit 0)
-    // no longer has. Recording it there would refuse the whole submit, so state
-    // loudly that the flag was not recorded instead of pretending it was.
+    // Tracking only governs FUTURE resident preparation or a manual implicit
+    // recut, which a terminal PR (an integrated/already-landed same-head
+    // resubmit reaches this seam at exit 0) no longer has. Recording it there
+    // would refuse the whole submit, so state loudly that the flag was not
+    // recorded instead of pretending it was.
     const trackable = isLivePR(pr)
     const trackChanged = metadata.track !== undefined && metadata.track !== (pr.track ?? false)
     if (trackChanged && !trackable) {
@@ -1591,12 +1614,63 @@ function certifyBayHandoff(state: DeepReadonly<BayState>, args: CertifyHandoffAr
   }
 }
 
+function requireExpectedPRCurrent(
+  state: DeepReadonly<BaysState>,
+  expected: PRExpectedCurrent,
+  operation: "intake" | "submit" | "ready" | "request-checks" | "comment",
+): LivePR {
+  const pr = resolvePR(state, expected.pr)
+  const matches =
+    pr !== undefined &&
+    isLivePR(pr) &&
+    prRevisionNumber(pr) === expected.revision &&
+    prHead(pr) === expected.headSha &&
+    (expected.track === undefined || (pr.track ?? false) === expected.track)
+  if (matches) return pr as LivePR
+  const actual =
+    pr === undefined
+      ? "missing"
+      : `${prDeliveryState(pr)} revision ${prRevisionNumber(pr)}@${prHead(pr)} track=${String(pr.track ?? false)}`
+  const expectedTracking = expected.track === undefined ? "" : ` track=${String(expected.track)}`
+  raiseFailure(
+    "refusal",
+    `${operation}-current-changed`,
+    `yrd: PR '${expected.pr}' changed from revision ${expected.revision}@${expected.headSha}` +
+      `${expectedTracking} to ${actual} before ${operation}`,
+  )
+}
+
+function requireExpectedPRTargetCurrent(
+  state: DeepReadonly<BaysState>,
+  target: string,
+  expected: PRExpectedCurrent,
+  operation: "submit" | "ready" | "request-checks" | "comment",
+): LivePR {
+  const pr = requireExpectedPRCurrent(state, expected, operation)
+  const targetPr = resolvePR(state, target)
+  if (targetPr?.id === pr.id) return pr
+  raiseFailure(
+    "refusal",
+    `${operation}-current-changed`,
+    `yrd: expected PR '${pr.id}' does not match ${operation} target '${target}'`,
+  )
+}
+
 function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase: string, defaultSubmitter: string) {
   const current = state.bays
   const bay = args.bay === undefined ? undefined : required(resolveBay(current, args.bay), "bay", args.bay)
   if (bay !== undefined && bay.status !== "active") throw new Error(`yrd: bay '${bay.id}' is ${bay.status}, not active`)
   const branch = args.branch ?? bay?.branch
   if (branch === undefined) throw new Error("yrd: bay.intake: 'bay' or 'branch' is required")
+  const expected =
+    args.expectedCurrent === undefined ? undefined : requireExpectedPRCurrent(current, args.expectedCurrent, "intake")
+  if (expected !== undefined && expected.branch !== branch) {
+    raiseFailure(
+      "refusal",
+      "intake-current-changed",
+      `yrd: expected PR '${expected.id}' branch '${expected.branch}' does not match intake branch '${branch}'`,
+    )
+  }
   const associated = bay === undefined ? undefined : prForBay(current, bay.id)
   const branchPR = resolvePR(current, branch)
   const existing = associated ?? (branchPR !== undefined && isLivePR(branchPR) ? branchPR : undefined)
@@ -1684,7 +1758,10 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
     // selector refuses no-live-pr here. The D2/Q1 terminal-branch reopen/mint
     // semantics live entirely in the {branch} path and submitSelectionOperation,
     // never this {pr} path, so no pre-guard resolution is needed here.
-    const pr: LivePR = requireLivePR(current, args.pr)
+    const pr: LivePR =
+      args.expectedCurrent === undefined
+        ? requireLivePR(current, args.pr)
+        : requireExpectedPRTargetCurrent(current, args.pr, args.expectedCurrent, "submit")
     if (args.correlation !== undefined) return bindPRCorrelation(pr, args.correlation)
     if (prDeliveryState(pr) !== "pushed") {
       throw new Error(`yrd: PR '${pr.id}' is ${prDeliveryState(pr)}, not pushed`)
@@ -1924,7 +2001,10 @@ function associateRejectedTerminalRun(
 }
 
 function readyPr(state: DeepReadonly<BayState>, args: PrReadyArgs, defaultSubmitter: string) {
-  const pr: LivePR = requireLivePR(state.bays, args.pr)
+  const pr: LivePR =
+    args.expectedCurrent === undefined
+      ? requireLivePR(state.bays, args.pr)
+      : requireExpectedPRTargetCurrent(state.bays, args.pr, args.expectedCurrent, "ready")
   if (prDeliveryState(pr) === "submitted" || prDeliveryState(pr) === "ready") return { events: [] }
   return submitWork(state, args, "main", defaultSubmitter)
 }
@@ -2003,6 +2083,14 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
     recut.transition?.from === args.transition?.from &&
     recut.transition?.to === args.transition?.to &&
     sameComposition(prComposition(pr), args.composition)
+  if (args.expectedCurrent?.track !== undefined && (pr.track ?? false) !== args.expectedCurrent.track) {
+    raiseFailure(
+      "refusal",
+      "recut-current-changed",
+      `yrd: PR '${pr.id}' tracking changed from ${String(args.expectedCurrent.track)} ` +
+        `to ${String(pr.track ?? false)} while the recut was computed`,
+    )
+  }
   if (unchanged) return { events: [] }
 
   if (
@@ -2012,8 +2100,8 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
     raiseFailure(
       "refusal",
       "recut-current-changed",
-      `yrd: PR '${pr.id}' current revision changed from ${args.expectedCurrent.revision}@${args.expectedCurrent.headSha} ` +
-        `to ${prRevisionNumber(pr)}@${prHead(pr)} while the recut was computed`,
+      `yrd: PR '${pr.id}' current revision changed from ${args.expectedCurrent.revision}@${args.expectedCurrent.headSha}` +
+        ` to ${prRevisionNumber(pr)}@${prHead(pr)} while the recut was computed`,
     )
   }
   if (args.transition !== undefined) {
@@ -2134,7 +2222,10 @@ function reviewPr(state: DeepReadonly<BayState>, args: PrReviewArgs) {
 }
 
 function commentPr(state: DeepReadonly<BayState>, args: PrCommentArgs) {
-  const pr: LivePR = requireLivePR(state.bays, args.pr)
+  const pr: LivePR =
+    args.expectedCurrent === undefined
+      ? requireLivePR(state.bays, args.pr)
+      : requireExpectedPRTargetCurrent(state.bays, args.pr, args.expectedCurrent, "comment")
   const fact = PRCommentFactSchema.parse({
     pr: pr.id,
     revision: prRevisionNumber(pr),
@@ -2172,7 +2263,10 @@ function stopPrSession(state: DeepReadonly<BayState>, args: PrSessionStopArgs) {
 }
 
 function requestPrChecks(state: DeepReadonly<BayState>, args: PrRequestChecksArgs) {
-  const pr: LivePR = requireLivePR(state.bays, args.pr)
+  const pr: LivePR =
+    args.expectedCurrent === undefined
+      ? requireLivePR(state.bays, args.pr)
+      : requireExpectedPRTargetCurrent(state.bays, args.pr, args.expectedCurrent, "request-checks")
   const delivery = prDeliveryState(pr)
   if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready" && delivery !== "rejected") {
     throw new PrCheckabilityConflict(pr.id, delivery)

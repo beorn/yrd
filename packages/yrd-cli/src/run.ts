@@ -3290,31 +3290,60 @@ async function recordTrackedRevision(
   pr: PR,
   drift: Readonly<{ recorded: PRRev; liveHead: string }>,
   io: YrdCliIO,
-): Promise<void> {
-  const warnings: string[] = []
-  await app.bays.submitSelection(pr.branch, {
-    // A draft carrier stays a draft: recording a revision must not also promote
-    // its delivery state. Every other live state re-submits, as by hand.
-    ...(prDeliveryState(pr) === "pushed" ? { draft: true } : {}),
-    resolveRevision: async (ref) => (ref === pr.branch ? drift.liveHead : optionalRevision(ref, io)),
-    run: runtimeOptions(io),
-    warnings,
+  narration: "command" | "resident" = "command",
+): Promise<PRRev> {
+  const expected = currentPRRev(pr)
+  await app.bays.intake({
+    branch: pr.branch,
+    headSha: drift.liveHead,
+    base: pr.base,
+    expectedCurrent: {
+      pr: pr.id,
+      revision: expected.n,
+      headSha: expected.head,
+      track: true,
+    },
   })
+  const ingested = requiredPr(app, pr.id)
+  const ingestedRevision = currentPRRev(ingested)
+  if (prDeliveryState(ingested) === "pushed") {
+    await app.bays.submit({
+      pr: ingested.id,
+      expectedCurrent: {
+        pr: ingested.id,
+        revision: ingestedRevision.n,
+        headSha: ingestedRevision.head,
+        track: true,
+      },
+    })
+  }
   const recorded = requiredPr(app, pr.id)
   const revision = currentPRRev(recorded)
   if (revision.head !== drift.liveHead) {
     raiseFailure(
-      "infrastructure",
-      "recut-track-record-failed",
+      "refusal",
+      "track-current-changed",
       `yrd: PR '${pr.id}' is tracked, but recording live branch '${pr.branch}' head '${drift.liveHead}' left ` +
         `revision ${revision.n} on '${revision.head}'`,
     )
   }
-  io.stderr(
-    `yrd: PR '${pr.id}' tracks '${pr.branch}'; recorded ${drift.recorded.head} -> ${drift.liveHead} ` +
-      `(revision ${drift.recorded.n} -> ${revision.n})\n`,
-  )
-  for (const warning of warnings) io.stderr(`yrd: ${warning}\n`)
+  if (narration === "resident") {
+    app.log.info?.("Recorded a tracked PR branch update.", {
+      action: "queue-track-recorded",
+      pr: pr.id,
+      branch: pr.branch,
+      fromHead: drift.recorded.head,
+      toHead: drift.liveHead,
+      fromRevision: drift.recorded.n,
+      toRevision: revision.n,
+    })
+  } else {
+    io.stderr(
+      `yrd: PR '${pr.id}' tracks '${pr.branch}'; recorded ${drift.recorded.head} -> ${drift.liveHead} ` +
+        `(revision ${drift.recorded.n} -> ${revision.n})\n`,
+    )
+  }
+  return revision
 }
 
 async function recutPr(
@@ -3352,7 +3381,33 @@ type ExecuteRecutPrOptions = Readonly<{
   force?: boolean
   admit?: boolean
   transition?: PRFreshnessTransition
+  expectedCurrent?: Readonly<{ revision: number; headSha: string; track?: boolean }>
 }>
+
+async function cancelSupersededRevisionRuns(
+  app: YrdCliApp,
+  identity: Readonly<{ pr: string; revision: number; headSha: string }>,
+  by: string,
+  reason: string,
+): Promise<void> {
+  const runs = allQueueRuns(app).filter(
+    (run) =>
+      !Queues.terminal(run) &&
+      run.prs.some(
+        (member) =>
+          member.id === identity.pr && member.revision === identity.revision && member.headSha === identity.headSha,
+      ),
+  )
+  for (const run of runs) {
+    try {
+      await app.queue.cancelRun({ run: run.id, by, reason })
+    } catch (error) {
+      const failure = failureFact(error)
+      if (failure?.kind === "refusal" && failure.code === "run-terminal") continue
+      throw error
+    }
+  }
+}
 
 async function executeRecutPr(
   app: YrdCliApp,
@@ -3365,7 +3420,22 @@ async function executeRecutPr(
   const pr = requiredPr(app, selector)
   const delivery = prDeliveryState(pr)
   const currentRevision = currentPRRev(pr)
-  const expectedCurrent = { revision: currentRevision.n, headSha: currentRevision.head }
+  const expectedCurrent = options.expectedCurrent ?? {
+    revision: currentRevision.n,
+    headSha: currentRevision.head,
+  }
+  if (
+    currentRevision.n !== expectedCurrent.revision ||
+    currentRevision.head !== expectedCurrent.headSha ||
+    (expectedCurrent.track !== undefined && (pr.track ?? false) !== expectedCurrent.track)
+  ) {
+    raiseFailure(
+      "refusal",
+      "recut-current-changed",
+      `yrd: PR '${pr.id}' current revision changed from ${expectedCurrent.revision}@${expectedCurrent.headSha} ` +
+        `to ${currentRevision.n}@${currentRevision.head} before the recut was computed`,
+    )
+  }
   if (
     delivery === "integrated" ||
     delivery === "already-landed" ||
@@ -3488,23 +3558,40 @@ async function executeRecutPr(
   })
   const unchanged = recorded.events.length === 0
 
+  const queueExpectedCurrent = {
+    pr: pr.id,
+    revision: unchanged ? expectedCurrent.revision : expectedCurrent.revision + 1,
+    headSha: unchanged ? expectedCurrent.headSha : result.headSha,
+    ...(expectedCurrent.track === undefined ? {} : { track: expectedCurrent.track }),
+  }
   let current = requiredPr(app, pr.id)
   if (options.queue === true) {
+    await app.bays.ready({ pr: pr.id, expectedCurrent: queueExpectedCurrent })
+    current = requiredPr(app, pr.id)
     await requirePublishedSubmodulePins(current, services, io)
     if (!unchanged) {
-      await app.queue.cancel({
-        prs: [current.id],
-        by: io.runner ?? "operator",
-        reason: `PR recut superseded revision ${source.n}`,
-      })
+      const by = io.runner ?? "operator"
+      const reason = `PR recut superseded revision ${source.n}`
+      if (expectedCurrent.track === true) {
+        await cancelSupersededRevisionRuns(
+          app,
+          { pr: pr.id, revision: expectedCurrent.revision, headSha: expectedCurrent.headSha },
+          by,
+          reason,
+        )
+      } else {
+        await app.queue.cancel({ prs: [current.id], by, reason })
+      }
     }
-    if (prDeliveryState(current) === "pushed") await app.bays.ready({ pr: current.id })
     current = requiredPr(app, current.id)
     const currentDelivery = prDeliveryState(current)
     if (currentDelivery !== "submitted" && currentDelivery !== "ready") {
       raiseFailure("refusal", "recut-not-ready", `yrd: PR '${current.id}' is ${currentDelivery}, not ready`)
     }
-    if (!app.bays.checksRequested(current.id)) await app.bays.requestChecks({ pr: current.id })
+    if (!app.bays.checksRequested(current.id)) {
+      await app.bays.requestChecks({ pr: current.id, expectedCurrent: queueExpectedCurrent })
+    }
+    await app.bays.ready({ pr: current.id, expectedCurrent: queueExpectedCurrent })
     if (options.admit !== false) {
       await admitRevision(app, [current.id], io)
     }
@@ -3811,7 +3898,7 @@ async function resolveSubmitMetadata(
 
 /** One spelling of the tracking opt-in across every surface that records it. */
 const TRACK_OPTION_DESCRIPTION =
-  "merge into latest: a later implicit recut re-records the live branch head instead of refusing"
+  "merge into latest: the resident records, preflights, and queues later branch pushes as frozen revisions"
 
 type PrSelectionOptions = {
   follow?: boolean
@@ -6526,6 +6613,183 @@ function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefine
   return undefined
 }
 
+export type ResidentTrackedRevisionTransition =
+  | Readonly<{
+      status: "applied"
+      pr: string
+      branch: string
+      fromRevision: number
+      fromHead: string
+      sourceRevision: number
+      sourceHead: string
+      currentRevision: number
+      verdict: RecutPreflightVerdict
+      recorded: boolean
+    }>
+  | Readonly<{
+      status: "deferred"
+      pr: string
+      branch: string
+      revision: number
+      headSha: string
+      code: string
+      message: string
+    }>
+  | Readonly<{
+      status: "needs-person"
+      pr: string
+      branch: string
+      revision: number
+      headSha: string
+      code: "refusal-remedy-needs-withdraw"
+      message: string
+    }>
+
+function trackedPreflightSettlementRef(pr: PR, revision: Pick<PRRev, "n" | "head">): string {
+  return `yrd:track-preflight-needs-person:${pr.id}:${revision.n}:${revision.head}`
+}
+
+function trackedPreflightNeedsPerson(pr: PR, revision: PRRev): boolean {
+  const ref = trackedPreflightSettlementRef(pr, revision)
+  return pr.comments.some(
+    (comment) => comment.revision === revision.n && comment.headSha === revision.head && comment.ref === ref,
+  )
+}
+
+/**
+ * Observe opted-in PR branches before the resident's normal base-freshness
+ * pass. When a branch moved, record the exact observed SHA as an immutable
+ * revision and execute the existing preflight verdict on that revision. A
+ * crash after recording but before preflight leaves checks unrequested; the
+ * next cycle recognizes and resumes that durable intermediate state.
+ */
+export async function refreshTrackedQueueRevisions(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  io: YrdCliIO,
+): Promise<readonly ResidentTrackedRevisionTransition[]> {
+  const candidates = Object.values(stateOf(app).bays.prs)
+    .filter((pr) => {
+      const delivery = prDeliveryState(pr)
+      return pr.track === true && isLivePR(pr) && delivery !== "pushed"
+    })
+    .toSorted(
+      (left, right) =>
+        baseIdentity(left.base).localeCompare(baseIdentity(right.base)) || compareNatural(left.id, right.id),
+    )
+  const outcomes: ResidentTrackedRevisionTransition[] = []
+
+  for (const candidate of candidates) {
+    if (io.drainSignal?.aborted === true) break
+    const before = currentPRRev(candidate)
+    let classified: RecutPreflightResult | undefined
+    try {
+      const freshness = await requireImplicitRecutBranchFreshness(candidate, before, { queue: true }, services, io)
+      const interrupted = !app.bays.checksRequested(candidate.id) && !trackedPreflightNeedsPerson(candidate, before)
+      if (freshness.status === "fresh" && !interrupted) continue
+
+      const source =
+        freshness.status === "tracked-drift"
+          ? await recordTrackedRevision(app, candidate, freshness, io, "resident")
+          : currentPRRev(requiredPr(app, candidate.id))
+      classified = await preflightRecut(app, candidate.id, { queue: true }, io)
+      await applyPreflightVerdict(app, services, classified, io, { track: true })
+      const current = currentPRRev(requiredPr(app, candidate.id))
+      const outcome: ResidentTrackedRevisionTransition = {
+        status: "applied",
+        pr: candidate.id,
+        branch: candidate.branch,
+        fromRevision: before.n,
+        fromHead: before.head,
+        sourceRevision: source.n,
+        sourceHead: source.head,
+        currentRevision: current.n,
+        verdict: classified.verdict,
+        recorded: freshness.status === "tracked-drift",
+      }
+      outcomes.push(outcome)
+      app.log.info?.("Prepared the latest tracked PR revision for Queue admission.", {
+        action: "queue-track-prepared",
+        ...outcome,
+      })
+    } catch (error) {
+      const failure = failureFact(error)
+      if (failure?.kind !== "refusal") throw error
+      if (failure.code === "refusal-remedy-needs-withdraw") {
+        if (classified === undefined) throw error
+        const classifiedRevision = { n: classified.revision, head: classified.evidence.headSha }
+        const currentPr = requiredPr(app, candidate.id)
+        try {
+          await app.bays.comment({
+            pr: currentPr.id,
+            by: io.runner ?? "yrd-cli",
+            ref: trackedPreflightSettlementRef(currentPr, classifiedRevision),
+            note: failure.message,
+            expectedCurrent: {
+              pr: currentPr.id,
+              revision: classifiedRevision.n,
+              headSha: classifiedRevision.head,
+              track: true,
+            },
+          })
+        } catch (settlementError) {
+          const settlementFailure = failureFact(settlementError)
+          if (settlementFailure?.kind !== "refusal" || settlementFailure.code !== "comment-current-changed") {
+            throw settlementError
+          }
+          const outcome: ResidentTrackedRevisionTransition = {
+            status: "deferred",
+            pr: candidate.id,
+            branch: candidate.branch,
+            revision: classifiedRevision.n,
+            headSha: classifiedRevision.head,
+            code: settlementFailure.code,
+            message: settlementFailure.message,
+          }
+          outcomes.push(outcome)
+          app.log.info?.("Skipped settling a tracked PR preflight because the PR changed.", {
+            action: "queue-track-settlement-deferred",
+            ...outcome,
+          })
+          continue
+        }
+        const outcome: ResidentTrackedRevisionTransition = {
+          status: "needs-person",
+          pr: currentPr.id,
+          branch: currentPr.branch,
+          revision: classifiedRevision.n,
+          headSha: classifiedRevision.head,
+          code: failure.code,
+          message: failure.message,
+        }
+        outcomes.push(outcome)
+        app.log.warn?.(`Tracked PR ${currentPr.id} needs an operator decision before Queue admission.`, {
+          action: "queue-track-needs-person",
+          ...outcome,
+        })
+        continue
+      }
+      const deferredRevision =
+        classified === undefined ? before : { n: classified.revision, head: classified.evidence.headSha }
+      const outcome: ResidentTrackedRevisionTransition = {
+        status: "deferred",
+        pr: candidate.id,
+        branch: candidate.branch,
+        revision: deferredRevision.n,
+        headSha: deferredRevision.head,
+        code: failure.code,
+        message: failure.message,
+      }
+      outcomes.push(outcome)
+      app.log.warn?.(`Could not prepare tracked PR ${candidate.id}; it remains queued for another cycle.`, {
+        action: "queue-track-deferred",
+        ...outcome,
+      })
+    }
+  }
+  return outcomes
+}
+
 type ResidentQueueFreshnessTransition =
   | Readonly<{
       status: "settled"
@@ -6807,7 +7071,14 @@ async function applyPreflightVerdict(
   services: YrdCliServices,
   preflight: RecutPreflightResult,
   io: YrdCliIO,
+  requirements: Readonly<{ track?: true }> = {},
 ): Promise<void> {
+  const expectedCurrent = {
+    pr: preflight.pr,
+    revision: preflight.revision,
+    headSha: preflight.evidence.headSha,
+    ...requirements,
+  }
   if (preflight.verdict === "SUBSUMED-WITHDRAW") {
     // Withdrawal ENDS a delivery, and `yrd pr prune` already owns unattended
     // subsumption on its own schedule. The runner's job is to unwedge the line,
@@ -6819,10 +7090,13 @@ async function applyPreflightVerdict(
     )
   }
   if (preflight.verdict === "FRESH-NOOP") {
+    await app.bays.ready({ pr: preflight.pr, expectedCurrent })
     const pr = requiredPr(app, preflight.pr)
     await requirePublishedSubmodulePins(pr, services, io)
-    if (prDeliveryState(pr) === "pushed") await app.bays.ready({ pr: pr.id })
-    if (!app.bays.checksRequested(pr.id)) await app.bays.requestChecks({ pr: pr.id })
+    if (!app.bays.checksRequested(pr.id)) {
+      await app.bays.requestChecks({ pr: pr.id, expectedCurrent })
+    }
+    await app.bays.ready({ pr: pr.id, expectedCurrent })
     return
   }
   // `admit: false` for the same reason the freshness pass uses it: the compose
@@ -6832,7 +7106,17 @@ async function applyPreflightVerdict(
     app,
     services,
     preflight.pr,
-    { queue: true, admit: false, ...(preflight.verdict === "RECUT-FORCE" ? { force: true } : {}) },
+    {
+      revision: preflight.revision,
+      queue: true,
+      admit: false,
+      expectedCurrent: {
+        revision: preflight.revision,
+        headSha: preflight.evidence.headSha,
+        ...requirements,
+      },
+      ...(preflight.verdict === "RECUT-FORCE" ? { force: true } : {}),
+    },
     io,
   )
 }
@@ -7053,6 +7337,30 @@ export async function residentRecoverySweep(
   return sweepNow
 }
 
+/**
+ * Run every revision-preparation robot in the resident's single-writer cycle.
+ * Ordering is load-bearing: track the authored branch first, refresh that
+ * frozen revision onto the queue base second, then repair prior admission
+ * refusals. The return value tells the caller whether to re-prove its installed
+ * baseline before composing.
+ */
+async function prepareResidentQueueCycle(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  io: YrdCliIO,
+  remedied: Set<string>,
+): Promise<boolean> {
+  if (services.recut === undefined) return false
+  const tracking = await refreshTrackedQueueRevisions(app, services, io)
+  const freshness = await refreshAdmittedQueueRevisions(app, services, io)
+  const remedies = await applyRefusalRemedies(app, services, io, remedied)
+  return (
+    tracking.some((outcome) => outcome.status === "applied") ||
+    freshness.length > 0 ||
+    remedies.some((outcome) => outcome.status === "applied")
+  )
+}
+
 export async function followQueueRuns(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -7123,15 +7431,13 @@ export async function followQueueRuns(
       // The optional default preserves the narrow followQueueRuns test/programmatic
       // seam. The installed CLI always supplies the recutter; a caller that does
       // not install one retains the historical drain-only behavior.
-      const freshness = services.recut === undefined ? [] : await refreshAdmittedQueueRevisions(app, services, io)
       // 22474 — a wedged PR whose refusal printed a deterministic remedy gets
       // that remedy applied here, once per revision, before the next compose
       // snapshot. Same recutter, same serialized cycle as the freshness pass.
-      const remedies = services.recut === undefined ? [] : await applyRefusalRemedies(app, services, io, remedied)
       // A mechanical recut may itself take long enough for installed Queue
       // definitions to move. Re-prove the baseline before admitting its fresh
       // revision; never start a Run under the pre-recut gate snapshot.
-      if (freshness.length > 0 || remedies.some((outcome) => outcome.status === "applied")) await gate()
+      if (await prepareResidentQueueCycle(app, services, io, remedied)) await gate()
       let runs: readonly Run[]
       try {
         runs = await runQueues(app, selectors, options, io)

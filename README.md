@@ -524,17 +524,17 @@ push, and the same PR resumes automatically as its next revision.
 ### PR Eligibility and Checks
 
 ```text
-yrd pr create [selector] [--base <branch>] [--issue <ref>]
+yrd pr create [selector] [--base <branch>] [--issue <ref>] [--track]
   [--title <text>] [--description <text>]
   [--correlation <namespace:id>] [--json]
-yrd pr submit [selector...] [--follow] [--base <branch>]
+yrd pr submit [selector...] [--follow] [--base <branch>] [--track]
   [--issue <ref>] [--title <text>] [--description <text>]
   [--correlation <namespace:id>] [--json]
 yrd pr checkout <selector> [--bay <name>] [--json]
 yrd pr list [--base <branch>] [--state <state>] [--issue <ref>]
   [--needs-review [--reviewer <reviewer>]] [--json]
 yrd pr edit <selector> [--issue <ref>] [--note <text>]
-  [--title <text>] [--description <text>] [--json]
+  [--title <text>] [--description <text>] [--track | --untrack] [--json]
 yrd pr recut <selector> [--revision <number>] [--preflight] [--queue]
   [--force] [--json]
 yrd pr ready <selector> [--json]
@@ -558,6 +558,16 @@ Run. `pr checks` renders the same typed evidence in human or newline-delimited
 JSON output, including command argv, concise diagnostics,
 base-versus-carrier classification, and artifact paths.
 
+`--track` opts a live PR into resident “merge into latest.” Before every Queue
+cycle, the resident observes the branch from `origin`; when its tip moved, Yrd
+records that exact SHA as a new immutable revision, runs `pr recut --preflight
+--queue`, and applies every queue-safe typed verdict before normal admission.
+Decision-required withdrawal verdicts remain loud for an operator. A run
+always pins one frozen revision—tracking changes which revision is prepared,
+never a running Candidate. `pr edit <PR> --untrack` stops future observation
+immediately. Direct `pr create` / `pr submit` tracking is opt-in; the flag
+introduces no project-wide default.
+
 `pr checkout` is immutable inspection: it provisions the recorded revision
 head in detached HEAD and asserts the resulting Bay head before reporting
 success. The PR author's live branch may remain checked out elsewhere. Use
@@ -578,8 +588,9 @@ age while reporting the successor revision's queue wait separately.
 An implicit PR-id recut is reproducible, not "whatever is on the branch now."
 Before either preflight or mutation, Yrd refreshes that exact branch from
 `origin` and compares its server-observed tip with the recorded authored source.
-If they differ, recut refuses before composition, journal writes, or admission;
-the refusal names both heads, the intervening commits, and both explicit paths:
+For an untracked PR, a difference refuses before composition, journal writes,
+or admission; the refusal names both heads, the intervening commits, and both
+explicit paths:
 
 ```bash
 # Current intent: register the new head, reopening revision-bound review.
@@ -607,8 +618,10 @@ whitespace. Missing objects, diverged bases, and composed source payloads fail
 closed instead of producing a guessed verdict. Pass `--queue` to include queue
 admission in the recommended next command.
 
-The resident Queue owns freshness after admission. Before each run snapshot it
-compares every admitted revision's immutable base with the authoritative base;
+The resident Queue owns both tracked-source and admitted-base freshness. It
+first records and preflights branch movement for opted-in PRs, then, before each
+run snapshot, compares every admitted revision's immutable base with the
+authoritative base;
 when the base advanced, it records an `admitted -> refreshed` recut on the same
 PR with the same patch-id lineage and a fresh certificate. The append carries
 an expected-current revision/head guard, so an authored revision that arrives
@@ -621,7 +634,11 @@ SHA, equal tree hashes, and the authored patch id. Replaying the same journal
 therefore performs no Git work and appends nothing.
 Patch drift and gitlink pins that require authored composition remain loud,
 typed refusals; an independent PR can still refresh in the same cycle.
-Likewise, selectorless composition ejects a PR whose exact submit/check
+Likewise, a tracked revision whose preflight proves `SUBSUMED-WITHDRAW` records
+one revision-bound machine comment and stays out of admission until an operator
+decides; later resident cycles do not repeat the same warning, while a new
+branch push creates a new revision and is evaluated normally.
+Separately, selectorless composition ejects a PR whose exact submit/check
 authority was already consumed, records `pr/needs-author` with the refusal code
 and an executable `pr recut --preflight --queue` remedy, and keeps draining its
 healthy peers. An explicitly targeted run still fails loud after recording the

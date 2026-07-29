@@ -1582,6 +1582,59 @@ describe("withBays", () => {
     expect(authored.revs).toMatchObject([{ n: 1 }, { n: 2 }])
   })
 
+  it("guards observed tracking intent on intake and its revision-bound settlement comment", async () => {
+    await using app = (await createHarness()).app
+
+    await app.bays.submit({ branch: "issue/tracked-race", headSha: HEAD_1, baseSha: BASE, draft: true })
+    await app.bays.editPr({ pr: "PR1", track: true })
+    const expectedCurrent = { pr: "PR1", revision: 1, headSha: HEAD_1, track: true }
+    await app.bays.editPr({ pr: "PR1", track: false })
+
+    await expect(
+      app.bays.intake({
+        branch: "issue/tracked-race",
+        headSha: HEAD_2,
+        expectedCurrent,
+      }),
+    ).rejects.toMatchObject({ failure: { kind: "refusal", code: "intake-current-changed" } })
+    await expect(
+      app.bays.comment({
+        pr: "PR1",
+        by: "yrd-cli",
+        note: "operator decision required",
+        ref: `yrd:track-preflight-needs-person:PR1:1:${HEAD_1}`,
+        expectedCurrent,
+      }),
+    ).rejects.toMatchObject({ failure: { kind: "refusal", code: "comment-current-changed" } })
+    await expect(app.bays.submit({ pr: "PR1", expectedCurrent })).rejects.toMatchObject({
+      failure: { kind: "refusal", code: "submit-current-changed" },
+    })
+    await expect(app.bays.ready({ pr: "PR1", expectedCurrent })).rejects.toMatchObject({
+      failure: { kind: "refusal", code: "ready-current-changed" },
+    })
+    await expect(app.bays.requestChecks({ pr: "PR1", expectedCurrent })).rejects.toMatchObject({
+      failure: { kind: "refusal", code: "request-checks-current-changed" },
+    })
+
+    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 1, head: HEAD_1 })
+    expect(app.bays.pr("PR1")?.comments).toEqual([])
+
+    await app.bays.submit({ branch: "issue/tracked-close-race", headSha: HEAD_2, baseSha: BASE, draft: true })
+    await app.bays.editPr({ pr: "PR2", track: true })
+    const closedExpectedCurrent = { pr: "PR2", revision: 1, headSha: HEAD_2, track: true }
+    await app.bays.closePr({ pr: "PR2" })
+    await expect(
+      app.bays.comment({
+        pr: "PR2",
+        by: "yrd-cli",
+        note: "operator decision required",
+        ref: `yrd:track-preflight-needs-person:PR2:1:${HEAD_2}`,
+        expectedCurrent: closedExpectedCurrent,
+      }),
+    ).rejects.toMatchObject({ failure: { kind: "refusal", code: "comment-current-changed" } })
+    expect(app.bays.pr("PR2")?.comments).toEqual([])
+  })
+
   it("settles a refresh-superseded recut revision without minting an empty successor (22528)", async () => {
     await using app = (await createHarness()).app
     const nextBase = "b".repeat(40)

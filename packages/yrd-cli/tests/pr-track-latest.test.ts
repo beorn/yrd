@@ -10,13 +10,14 @@
  * live branch head is injected through YrdCliIO.pruneGit + resolveRevision, so
  * "the branch moved" is a deterministic fact rather than a Git race.
  */
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { createBayJobDefs, currentPRRev, prDeliveryState, withBays } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
-import { runYrd, type PruneGitFacts, type YrdCliIO } from "@yrd/cli"
+import { runYrd, type PruneGitFacts, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
 import { withMerge, withQueue, withStep, type PRShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
 import { withIssues } from "@yrd/issue"
+import { createLogger } from "loggily"
 import {
   withContests,
   type AttemptRunOutput,
@@ -24,16 +25,20 @@ import {
   type ContestGit,
   type ContestRunnerDef,
 } from "@yrd/contest"
+import * as runInternals from "../src/run.ts"
 
 const BRANCH = "task/@yrd/core/22454-pr-track-latest"
 const RECORDED_HEAD = "4d8615400959a1443b1664e707eecee10d6ebe95"
 const LIVE_HEAD = "b3fae22ec7a08288b586a28b123a9e11ad3bca91"
+const NEXT_LIVE_HEAD = "c".repeat(40)
 const BASE_SHA = "a".repeat(40)
 const TARGET_BASE_SHA = "d".repeat(40)
 const MERGED_SHA = "b".repeat(40)
 const BASE_TREE = "e".repeat(40)
 const OTHER_TREE = "f".repeat(40)
 const OTHER_PATCH_ID = "172a29302878f4f7fd0dcfad917ddbf434e78d04"
+const RECUT_HEAD = "9".repeat(40)
+const RECUT_TREE = "8".repeat(40)
 
 function ids(initial = 0): () => string {
   let value = initial
@@ -105,11 +110,18 @@ function contestAdapters() {
   return { runner, evaluator, git }
 }
 
-async function createCliApp() {
+async function createCliApp(behavior: Readonly<{ failingCheck?: boolean }> = {}) {
   const bayJobs = createBayJobDefs(workspace())
   const check = withStep(
     "check",
-    (): JobResult<JsonValue> => ({ status: "completed", conclusion: "success", output: { checked: true } }),
+    (): JobResult<JsonValue> =>
+      behavior.failingCheck === true
+        ? {
+            status: "completed",
+            conclusion: "failure",
+            error: { code: "authored-failure", message: "authored revision needs work" },
+          }
+        : { status: "completed", conclusion: "success", output: { checked: true } },
     { revision: "check-v1", output: JsonSchema, classification: "carrier" },
   )
   const merge = withMerge(
@@ -132,7 +144,12 @@ async function createCliApp() {
     withBays({ jobs: bayJobs, defaultBase: "main", resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }) }),
   )
   return createYrd(contests(queue(base)), {
-    inject: { journal: createMemoryJournal(), clock: () => "2026-07-27T12:00:00.000Z", id: ids() },
+    inject: {
+      journal: createMemoryJournal(),
+      clock: () => "2026-07-27T12:00:00.000Z",
+      id: ids(),
+      log: createLogger("yrd", [{ level: "silent" }]),
+    },
   })
 }
 
@@ -146,7 +163,13 @@ function trackGit(branchHead: () => string): PruneGitFacts {
     resolveCommit: (ref) => {
       if (ref === "origin/main") return TARGET_BASE_SHA
       if (ref === BRANCH || ref === `origin/${BRANCH}`) return branchHead()
-      return ref === BASE_SHA || ref === RECORDED_HEAD || ref === LIVE_HEAD ? ref : undefined
+      return ref === BASE_SHA ||
+        ref === RECORDED_HEAD ||
+        ref === LIVE_HEAD ||
+        ref === NEXT_LIVE_HEAD ||
+        ref === RECUT_HEAD
+        ? ref
+        : undefined
     },
     isAncestor: () => false,
     // The merged tree differs from the target tip's tree, so the payload is
@@ -309,5 +332,523 @@ describe("implicit recut of a moved branch", () => {
     expect(replay.stderr()).not.toContain("tracks")
     expect(currentPRRev(app.bays.pr("PR1")!).n).toBe(1)
     expect(JSON.parse(replay.stdout())).toMatchObject({ pr: "PR1", revision: 1 })
+  })
+})
+
+describe("resident merge-into-latest", () => {
+  it("records a tracked branch push, preflights it, and queues the frozen recut without an operator turn", async () => {
+    const app = await createCliApp()
+    let head = RECORDED_HEAD
+    await submitBranch(app, () => head, "--track")
+    head = LIVE_HEAD
+
+    const output = outputIO(() => head)
+    const controller = new AbortController()
+    const io: YrdCliIO = {
+      ...output.io,
+      resolveQueueTarget: async () => ({ base: "main", sha: TARGET_BASE_SHA }),
+      scope: {
+        signal: controller.signal,
+        sleep: async () => {
+          controller.abort()
+        },
+      },
+    }
+    const recut = vi.fn(async () => ({
+      headSha: RECUT_HEAD,
+      baseSha: TARGET_BASE_SHA,
+      treeSha: RECUT_TREE,
+      patchId: OTHER_PATCH_ID,
+      unchanged: false,
+    }))
+    const gate = vi.fn(async () => undefined)
+
+    await expect(
+      runInternals.followQueueRuns(app, [], { json: true, interval: 1 }, io, gate, {
+        recut: { recut },
+      } as YrdCliServices),
+    ).resolves.toBe(0)
+
+    expect(recut).toHaveBeenCalledOnce()
+    expect(recut).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "PR1",
+        revision: 2,
+        headSha: LIVE_HEAD,
+      }),
+    )
+    expect(app.bays.pr("PR1")).toMatchObject({
+      track: true,
+      revs: [
+        { n: 1, head: RECORDED_HEAD },
+        { n: 2, head: LIVE_HEAD },
+        { n: 3, head: RECUT_HEAD },
+      ],
+    })
+    expect(output.stderr()).toBe("")
+  })
+
+  it("resumes after the live revision was recorded but its preflight was interrupted", async () => {
+    const app = await createCliApp()
+    let head = RECORDED_HEAD
+    await submitBranch(app, () => head, "--track")
+
+    head = LIVE_HEAD
+    await app.bays.submitSelection(BRANCH, {
+      resolveRevision: async () => head,
+      run: { runner: "track-test", leaseMs: 60_000 },
+    })
+    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: LIVE_HEAD })
+    expect(app.bays.checksRequested("PR1")).toBe(false)
+
+    const output = outputIO(() => head)
+    const recut = vi.fn(async () => ({
+      headSha: RECUT_HEAD,
+      baseSha: TARGET_BASE_SHA,
+      treeSha: RECUT_TREE,
+      patchId: OTHER_PATCH_ID,
+      unchanged: false,
+    }))
+    const services = { recut: { recut } } as YrdCliServices
+
+    await expect(runInternals.refreshTrackedQueueRevisions(app, services, output.io)).resolves.toMatchObject([
+      {
+        status: "applied",
+        pr: "PR1",
+        recorded: false,
+        sourceRevision: 2,
+        sourceHead: LIVE_HEAD,
+        currentRevision: 3,
+        verdict: "RECUT",
+      },
+    ])
+    expect(recut).toHaveBeenCalledOnce()
+    expect(app.bays.checksRequested("PR1")).toBe(true)
+
+    // A completed cycle is idempotent until the branch moves again.
+    await expect(runInternals.refreshTrackedQueueRevisions(app, services, output.io)).resolves.toEqual([])
+    expect(recut).toHaveBeenCalledOnce()
+  })
+
+  it("does not observe or re-record an untracked branch", async () => {
+    const app = await createCliApp()
+    let head = RECORDED_HEAD
+    await submitBranch(app, () => head)
+    head = LIVE_HEAD
+
+    const recut = vi.fn()
+    const output = outputIO(() => head)
+    await expect(
+      runInternals.refreshTrackedQueueRevisions(app, { recut: { recut } } as YrdCliServices, output.io),
+    ).resolves.toEqual([])
+    expect(recut).not.toHaveBeenCalled()
+    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 1, head: RECORDED_HEAD })
+  })
+
+  it("preserves an authored push that arrives while the tracked recut is computing", async () => {
+    const app = await createCliApp()
+    let head = RECORDED_HEAD
+    await submitBranch(app, () => head, "--track")
+    head = LIVE_HEAD
+
+    const output = outputIO(() => head)
+    let attempt = 0
+    const recut = vi.fn(async () => {
+      attempt += 1
+      if (attempt === 1) {
+        head = NEXT_LIVE_HEAD
+        await app.bays.submitSelection(BRANCH, {
+          resolveRevision: async () => head,
+          run: { runner: "track-test", leaseMs: 60_000 },
+        })
+      }
+      return {
+        headSha: RECUT_HEAD,
+        baseSha: TARGET_BASE_SHA,
+        treeSha: RECUT_TREE,
+        patchId: OTHER_PATCH_ID,
+        unchanged: false,
+      }
+    })
+    const services = { recut: { recut } } as YrdCliServices
+
+    await expect(runInternals.refreshTrackedQueueRevisions(app, services, output.io)).resolves.toMatchObject([
+      {
+        status: "deferred",
+        pr: "PR1",
+        code: "recut-current-changed",
+      },
+    ])
+    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 3, head: NEXT_LIVE_HEAD })
+
+    await expect(runInternals.refreshTrackedQueueRevisions(app, services, output.io)).resolves.toMatchObject([
+      {
+        status: "applied",
+        pr: "PR1",
+        sourceRevision: 3,
+        sourceHead: NEXT_LIVE_HEAD,
+        currentRevision: 4,
+      },
+    ])
+    expect(recut).toHaveBeenCalledTimes(2)
+    expect(app.bays.pr("PR1")?.revs).toMatchObject([
+      { n: 1, head: RECORDED_HEAD },
+      { n: 2, head: LIVE_HEAD },
+      { n: 3, head: NEXT_LIVE_HEAD },
+      { n: 4, head: RECUT_HEAD },
+    ])
+  })
+
+  it("does not apply a RECUT verdict after a newer authored revision arrives during preflight", async () => {
+    const app = await createCliApp()
+    let head = RECORDED_HEAD
+    await submitBranch(app, () => head, "--track")
+    head = LIVE_HEAD
+
+    const output = outputIO(() => head)
+    const git = trackGit(() => head)
+    let advanced = false
+    const io: YrdCliIO = {
+      ...output.io,
+      pruneGit: () => ({
+        ...git,
+        patchMatch: async (...args) => {
+          if (!advanced) {
+            advanced = true
+            head = NEXT_LIVE_HEAD
+            await app.bays.submitSelection(BRANCH, {
+              resolveRevision: async () => head,
+              run: { runner: "track-test", leaseMs: 60_000 },
+            })
+          }
+          return git.patchMatch!(...args)
+        },
+      }),
+    }
+    const recut = vi.fn()
+
+    await expect(
+      runInternals.refreshTrackedQueueRevisions(app, { recut: { recut } } as YrdCliServices, io),
+    ).resolves.toMatchObject([
+      {
+        status: "deferred",
+        pr: "PR1",
+        revision: 2,
+        headSha: LIVE_HEAD,
+        code: "recut-current-changed",
+      },
+    ])
+    expect(recut).not.toHaveBeenCalled()
+    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 3, head: NEXT_LIVE_HEAD })
+  })
+
+  it("does not apply a RECUT verdict after tracking is disabled while the recut is computing", async () => {
+    const app = await createCliApp()
+    let head = RECORDED_HEAD
+    await submitBranch(app, () => head, "--track")
+    head = LIVE_HEAD
+
+    const recut = vi.fn(async () => {
+      await app.bays.editPr({ pr: "PR1", track: false })
+      return {
+        headSha: RECUT_HEAD,
+        baseSha: TARGET_BASE_SHA,
+        treeSha: RECUT_TREE,
+        patchId: OTHER_PATCH_ID,
+        unchanged: false,
+      }
+    })
+
+    await expect(
+      runInternals.refreshTrackedQueueRevisions(app, { recut: { recut } } as YrdCliServices, outputIO(() => head).io),
+    ).resolves.toMatchObject([
+      {
+        status: "deferred",
+        pr: "PR1",
+        revision: 2,
+        headSha: LIVE_HEAD,
+        code: "recut-current-changed",
+      },
+    ])
+    expect(app.bays.pr("PR1")?.track).toBe(false)
+    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: LIVE_HEAD })
+  })
+
+  it("does not cancel a successor by PR wildcard when it arrives during pin inspection", async () => {
+    const app = await createCliApp()
+    let head = RECORDED_HEAD
+    await submitBranch(app, () => head, "--track")
+    head = LIVE_HEAD
+
+    let advanced = false
+    const process = {
+      run: async () => {
+        if (!advanced) {
+          advanced = true
+          head = NEXT_LIVE_HEAD
+          await app.bays.submitSelection(BRANCH, {
+            resolveRevision: async () => head,
+            run: { runner: "track-test", leaseMs: 60_000 },
+          })
+        }
+        return { exitCode: 0, signal: null, stdout: "", stderr: "", durationMs: 1, timedOut: false as const }
+      },
+      reapPath: async () => ({ targetedPids: [], survivorPids: [], forcedKill: false, signalFailures: [] }),
+    }
+    const broadCancel = vi.fn(app.queue.cancel.bind(app.queue))
+    const residentApp = { ...app, queue: { ...app.queue, cancel: broadCancel } }
+    const recut = vi.fn(async () => ({
+      headSha: RECUT_HEAD,
+      baseSha: TARGET_BASE_SHA,
+      treeSha: RECUT_TREE,
+      patchId: OTHER_PATCH_ID,
+      unchanged: false,
+    }))
+
+    await expect(
+      runInternals.refreshTrackedQueueRevisions(
+        residentApp,
+        { process, recut: { recut } } as YrdCliServices,
+        outputIO(() => head).io,
+      ),
+    ).resolves.toMatchObject([
+      {
+        status: "deferred",
+        pr: "PR1",
+        revision: 2,
+        headSha: LIVE_HEAD,
+        code: "request-checks-current-changed",
+      },
+    ])
+    expect(broadCancel).not.toHaveBeenCalled()
+    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 4, head: NEXT_LIVE_HEAD })
+  })
+
+  it("does not submit a successor through an earlier tracked record transition", async () => {
+    const app = await createCliApp()
+    let head = RECORDED_HEAD
+    await submitBranch(app, () => head, "--track")
+    head = LIVE_HEAD
+
+    const bays = {
+      ...app.bays,
+      submit: async (args: Parameters<typeof app.bays.submit>[0]) => {
+        head = NEXT_LIVE_HEAD
+        await app.bays.submitSelection(BRANCH, {
+          resolveRevision: async () => head,
+          run: { runner: "track-test", leaseMs: 60_000 },
+        })
+        return app.bays.submit(args)
+      },
+    }
+    const residentApp = { ...app, bays }
+    const recut = vi.fn()
+
+    await expect(
+      runInternals.refreshTrackedQueueRevisions(
+        residentApp,
+        { recut: { recut } } as YrdCliServices,
+        outputIO(() => head).io,
+      ),
+    ).resolves.toMatchObject([
+      {
+        status: "deferred",
+        pr: "PR1",
+        code: "submit-current-changed",
+      },
+    ])
+    expect(recut).not.toHaveBeenCalled()
+    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 3, head: NEXT_LIVE_HEAD })
+  })
+
+  it("does not record stale tracking intent when --untrack wins during branch observation", async () => {
+    const app = await createCliApp()
+    let head = RECORDED_HEAD
+    await submitBranch(app, () => head, "--track")
+    head = LIVE_HEAD
+
+    const output = outputIO(() => head)
+    const git = trackGit(() => head)
+    let untracked = false
+    const io: YrdCliIO = {
+      ...output.io,
+      pruneGit: () => ({
+        ...git,
+        resolveCommit: async (ref) => {
+          if (!untracked && ref === `origin/${BRANCH}`) {
+            untracked = true
+            await app.bays.editPr({ pr: "PR1", track: false })
+          }
+          return git.resolveCommit(ref)
+        },
+      }),
+    }
+    const recut = vi.fn()
+
+    await expect(
+      runInternals.refreshTrackedQueueRevisions(app, { recut: { recut } } as YrdCliServices, io),
+    ).resolves.toMatchObject([{ status: "deferred", pr: "PR1", code: "intake-current-changed" }])
+    expect(app.bays.pr("PR1")?.track).toBe(false)
+    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 1, head: RECORDED_HEAD })
+    expect(recut).not.toHaveBeenCalled()
+  })
+
+  it("settles a decision-required preflight once for the exact tracked revision", async () => {
+    const app = await createCliApp()
+    let head = RECORDED_HEAD
+    await submitBranch(app, () => head, "--track")
+    head = LIVE_HEAD
+
+    const output = outputIO(() => head)
+    const git = trackGit(() => head)
+    const io: YrdCliIO = {
+      ...output.io,
+      pruneGit: () => ({ ...git, isAncestor: () => true }),
+    }
+    const services = { recut: { recut: vi.fn() } } as YrdCliServices
+
+    await expect(runInternals.refreshTrackedQueueRevisions(app, services, io)).resolves.toMatchObject([
+      {
+        status: "needs-person",
+        pr: "PR1",
+        revision: 2,
+        headSha: LIVE_HEAD,
+        code: "refusal-remedy-needs-withdraw",
+      },
+    ])
+    expect(app.bays.pr("PR1")?.comments).toHaveLength(1)
+    await expect(runInternals.refreshTrackedQueueRevisions(app, services, io)).resolves.toEqual([])
+    expect(app.bays.pr("PR1")?.comments).toHaveLength(1)
+  })
+
+  it("does not attach a stale decision-required verdict to a newer authored revision", async () => {
+    const app = await createCliApp()
+    let head = RECORDED_HEAD
+    await submitBranch(app, () => head, "--track")
+    head = LIVE_HEAD
+
+    const output = outputIO(() => head)
+    const git = trackGit(() => head)
+    let advanced = false
+    const io: YrdCliIO = {
+      ...output.io,
+      pruneGit: () => ({
+        ...git,
+        isAncestor: async () => {
+          if (!advanced) {
+            advanced = true
+            head = NEXT_LIVE_HEAD
+            await app.bays.submitSelection(BRANCH, {
+              resolveRevision: async () => head,
+              run: { runner: "track-test", leaseMs: 60_000 },
+            })
+          }
+          return true
+        },
+      }),
+    }
+    const services = { recut: { recut: vi.fn() } } as YrdCliServices
+
+    await expect(runInternals.refreshTrackedQueueRevisions(app, services, io)).resolves.toMatchObject([
+      {
+        status: "deferred",
+        pr: "PR1",
+        revision: 2,
+        headSha: LIVE_HEAD,
+        code: "comment-current-changed",
+      },
+    ])
+    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 3, head: NEXT_LIVE_HEAD })
+    expect(app.bays.pr("PR1")?.comments).toEqual([])
+  })
+
+  it("does not apply a FRESH-NOOP verdict after a newer authored revision arrives during preflight", async () => {
+    const app = await createCliApp()
+    let head = RECORDED_HEAD
+    await submitBranch(app, () => head, "--track")
+    head = LIVE_HEAD
+    await app.bays.submitSelection(BRANCH, {
+      resolveRevision: async () => head,
+      run: { runner: "track-test", leaseMs: 60_000 },
+    })
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 2,
+      headSha: RECUT_HEAD,
+      baseSha: BASE_SHA,
+      treeSha: RECUT_TREE,
+      patchId: OTHER_PATCH_ID,
+      reviewCarried: false,
+      expectedCurrent: { revision: 2, headSha: LIVE_HEAD },
+    })
+    await app.bays.submit({ pr: "PR1" })
+    head = RECUT_HEAD
+    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 3, head: RECUT_HEAD })
+    expect(app.bays.checksRequested("PR1")).toBe(false)
+
+    const output = outputIO(() => head)
+    const git = trackGit(() => head)
+    let advanced = false
+    const io: YrdCliIO = {
+      ...output.io,
+      pruneGit: () => ({
+        ...git,
+        resolveCommit: (ref) => (ref === "origin/main" ? BASE_SHA : git.resolveCommit(ref)),
+        treeOf: (sha) => (sha === BASE_SHA ? BASE_TREE : git.treeOf(sha)),
+        pinDistance: () => ({ sourceOnly: 0, targetOnly: 0 }),
+        patchMatch: async (...args) => {
+          if (!advanced) {
+            advanced = true
+            head = NEXT_LIVE_HEAD
+            await app.bays.submitSelection(BRANCH, {
+              resolveRevision: async () => head,
+              run: { runner: "track-test", leaseMs: 60_000 },
+            })
+          }
+          return git.patchMatch!(...args)
+        },
+      }),
+    }
+
+    await expect(
+      runInternals.refreshTrackedQueueRevisions(app, { recut: { recut: vi.fn() } } as YrdCliServices, io),
+    ).resolves.toMatchObject([
+      {
+        status: "deferred",
+        pr: "PR1",
+        revision: 3,
+        headSha: RECUT_HEAD,
+        code: "ready-current-changed",
+      },
+    ])
+    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 4, head: NEXT_LIVE_HEAD })
+    expect(app.bays.checksRequested("PR1")).toBe(false)
+  })
+
+  it("observes the next push for a tracked PR whose prior checks need author work", async () => {
+    const behavior = { failingCheck: true }
+    const app = await createCliApp(behavior)
+    let head = RECORDED_HEAD
+    const submitted = outputIO(() => head)
+    expect(
+      await runYrd(app, yrd("pr", "submit", BRANCH, "--issue", "km#22454", "--track", "--json"), submitted.io),
+    ).toBe(1)
+    expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("needs-author")
+
+    behavior.failingCheck = false
+    head = LIVE_HEAD
+    const output = outputIO(() => head)
+    const recut = vi.fn(async () => ({
+      headSha: RECUT_HEAD,
+      baseSha: TARGET_BASE_SHA,
+      treeSha: RECUT_TREE,
+      patchId: OTHER_PATCH_ID,
+      unchanged: false,
+    }))
+    await expect(
+      runInternals.refreshTrackedQueueRevisions(app, { recut: { recut } } as YrdCliServices, output.io),
+    ).resolves.toMatchObject([{ status: "applied", pr: "PR1", recorded: true, sourceHead: LIVE_HEAD }])
+    expect(recut).toHaveBeenCalledWith(expect.objectContaining({ revision: 2, headSha: LIVE_HEAD }))
+    expect(app.bays.checksRequested("PR1")).toBe(true)
   })
 })
