@@ -77,11 +77,11 @@ describe("stage clock", () => {
     expect(stageReport().stages["async-stage"]).toBeGreaterThan(15)
   })
 
-  // NO SILENT ERRORS: stages whose lifetimes CROSS cannot be attributed, and
-  // quietly wrong milliseconds are worse than a crash — the whole point is a
-  // table someone will trust without re-deriving it. The started-second /
-  // finished-first case nests correctly and is fine; this is the other one.
-  test("refuses to attribute stages whose lifetimes cross", async () => {
+  // Crossing lifetimes make the per-stage split approximate. The instrument
+  // must SAY so and must not take the command down with it — `yrd watch` can
+  // have a deferred history scan in flight while a render starts, and a
+  // profiler that can kill the product is worse than an approximate number.
+  test("counts crossed lifetimes instead of throwing", async () => {
     // `first` opens first and closes first, so when it closes, `second` is on
     // top of the stack — the frames interleave instead of nesting.
     const first = stageAsync("first", async () => {
@@ -90,6 +90,15 @@ describe("stage clock", () => {
     const second = stageAsync("second", async () => {
       await new Promise((resolve) => setTimeout(resolve, 40))
     })
-    await expect(Promise.all([first, second])).rejects.toThrow(/Stages must nest/)
+    await expect(Promise.all([first, second])).resolves.toBeDefined()
+    const report = stageReport()
+    expect(report.crossedStages).toBeGreaterThan(0)
+    // Still reconciles, so the table remains readable even when approximate.
+    expect(report.accountedMs + report.unaccountedMs).toBeCloseTo(report.totalMs, 1)
+  })
+
+  test("reports crossedStages: 0 when every stage nested cleanly", () => {
+    stage("outer", () => stage("inner", () => spin(5)))
+    expect(stageReport().crossedStages).toBe(0)
   })
 })
