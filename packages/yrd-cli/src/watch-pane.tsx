@@ -1430,10 +1430,20 @@ export function QueueWatchFrame({
         ? []
         : [selectedProjectedRow]
       : (snapshot.projection?.rows.filter((candidate) => candidate.run === selectedRow.run) ?? [])
-  const detailRunDetails = snapshot.results.flatMap((result) => {
-    const runs = [...result.running, ...result.waiting, ...result.finished]
-    return runs.map((run) => queueShowData(run, runs))
-  })
+  // Every Run's detail projection, and it depends on nothing but the snapshot.
+  // Unmemoized it was rebuilt on EVERY render — so moving the cursor, which only
+  // changes which row is highlighted, re-derived the whole queue's details. That
+  // is the per-keypress cost the operator feels; `queueShowData` is O(runs) per
+  // Run, so the rebuild is quadratic in queue size. A new snapshot arrives per
+  // watch tick, which is when this legitimately has to run again.
+  const detailRunDetails = useMemo(
+    () =>
+      snapshot.results.flatMap((result) => {
+        const runs = [...result.running, ...result.waiting, ...result.finished]
+        return runs.map((run) => queueShowData(run, runs))
+      }),
+    [snapshot.results],
+  )
   const detailMemberIds = new Set(
     detailData?.prs.map((member) => member.id) ?? (detailPr === undefined ? [] : [detailPr]),
   )
