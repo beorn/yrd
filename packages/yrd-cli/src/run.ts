@@ -113,8 +113,8 @@ import {
   queuePauseWarnings,
   queueRunRevisionClocks,
   queueTimelineAdmissionTimes,
+  createQueueTimelineProjectionClock,
   queueTimelineProjection,
-  reclockQueueTimelineProjection,
   QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
   RUNNER_STALE_MS,
   runRevisionClock,
@@ -5472,20 +5472,25 @@ function narrowQueueResults(
   }))
 }
 
+type QueueListSnapshotBuild = Readonly<{
+  snapshot: QueueListSnapshot
+  reclock(now: number): QueueTimelineProjection
+}>
+
 async function buildQueueListSnapshot(
   app: YrdCliApp,
   filters: readonly string[],
   options: QueueListOptions,
   io: YrdCliIO,
   observed: QueueListObservation,
-): Promise<QueueListSnapshot> {
+): Promise<QueueListSnapshotBuild> {
   const { state, now, runner, attempts } = observed
   const requestedBase = options.base ?? "main"
   const target = resolveQueueTargets(state, [], requestedBase, options.pr)
   const { results } = await queueStatusSnapshots(app, state, target, io)
   const base = results[0]?.base ?? baseIdentity(requestedBase)
   const runnerRefusal = runner === null ? queueRunnerRefusal(app) : undefined
-  const projection = queueTimelineProjection(results, {
+  const clock = createQueueTimelineProjectionClock(results, {
     now,
     windowMs: queueTimelineWindow(options.since),
     metricsWindowMs: queueMetricsWindow(options.since),
@@ -5500,6 +5505,7 @@ async function buildQueueListSnapshot(
     state: state.bays,
     runner,
   })
+  const projection = clock.projection
   // `--json` must answer the SAME question the human renderer answers. The
   // projection owns filtering (--status/--latest/filter terms), and its `rows`
   // are the full filtered set (`rowLimit` only trims what the view draws).
@@ -5508,11 +5514,14 @@ async function buildQueueListSnapshot(
   const projectedRuns = new Set(projection.rows.flatMap((row) => (row.run === undefined ? [] : [row.run])))
   const filteredResults = filtered ? narrowQueueResults(results, (run) => projectedRuns.has(run.id)) : results
   return {
-    results: filteredResults,
-    state: state.bays,
-    now,
-    projection,
-    ...(runnerRefusal === undefined ? {} : { runnerRefusal }),
+    snapshot: {
+      results: filteredResults,
+      state: state.bays,
+      now,
+      projection,
+      ...(runnerRefusal === undefined ? {} : { runnerRefusal }),
+    },
+    reclock: clock.reclock,
   }
 }
 
@@ -5590,7 +5599,7 @@ export async function queueListSnapshot(
   const { includeOutputs = false, focus, diffResolver, attemptResolver } = details
   const resolver = attemptResolver ?? createQueueAttemptResolver(app)
   const observed = await observeQueueList(app, io, {}, resolver)
-  const snapshot = await buildQueueListSnapshot(app, filters, options, io, observed)
+  const { snapshot } = await buildQueueListSnapshot(app, filters, options, io, observed)
   return includeOutputs
     ? attachQueueListDetails(snapshot, observed.attempts, io, focus, diffResolver ?? createQueuePrDiffResolver())
     : snapshot
@@ -5615,6 +5624,7 @@ export function createQueueListSnapshotLoader(
     | Readonly<{
         observed: QueueListObservation
         snapshot: QueueListSnapshot
+        reclock(now: number): QueueTimelineProjection
       }>
     | undefined
   return {
@@ -5634,21 +5644,21 @@ export function createQueueListSnapshotLoader(
         attempts: cached?.observed.attempts === observed.attempts ? "memory" : "changed",
         runner: cached?.observed.runnerToken === observed.runnerToken ? "unchanged" : "changed",
       })
-      const snapshot =
+      const built: QueueListSnapshotBuild =
         unchanged && cached !== undefined
           ? {
-              ...cached.snapshot,
-              now: observed.now,
-              projection: reclockQueueTimelineProjection(
-                cached.snapshot.projection,
-                observed.now,
-                queueMetricsWindow(options.since),
-              ),
+              snapshot: {
+                ...cached.snapshot,
+                now: observed.now,
+                projection: cached.reclock(observed.now),
+              },
+              reclock: cached.reclock,
             }
           : await buildQueueListSnapshot(app, filters, options, io, observed)
+      const { snapshot } = built
       cached = {
         observed,
-        snapshot,
+        ...built,
       }
       if (span) {
         Object.assign(span.spanData, {

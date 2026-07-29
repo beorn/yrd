@@ -91,6 +91,7 @@ import {
   queueLogRows,
   prListRows,
   queueRevisionKey,
+  createQueueTimelineProjectionClock,
   queueRunRevisionKey,
   queueTimelineAdmissionTimes,
   runRevisionClock,
@@ -6466,6 +6467,26 @@ describe("runYrd", () => {
     expect(projection.timeStatsFacts.find((fact) => fact.run === "R3")).toMatchObject({
       failureClass: "env",
     })
+    const filteredOptions = {
+      now,
+      windowMs: 60 * minute,
+      metricsWindowMs: 2 * 60 * minute,
+      statuses: ["rejected"] as const,
+      terms: [] as string[],
+      latest: false,
+      rowLimit: 4,
+      submissionTimes,
+      retainedSinceMs: Date.parse("2026-07-13T07:00:00.000Z"),
+      siblingBases: ["release"],
+    }
+    const clock = createQueueTimelineProjectionClock([result], filteredOptions)
+    const filtered = clock.projection
+    const later = now + 31 * minute
+    const reclocked = clock.reclock(later)
+    const rebuilt = queueTimelineProjection([result], { ...filteredOptions, now: later })
+    expect(reclocked, "the clock-only path must be a differential oracle for a full rebuild").toEqual(rebuilt)
+    expect(reclocked.timeStatsFacts).toBe(filtered.timeStatsFacts)
+
     const constrainedProjection = {
       ...projection,
       now: "2026-07-14T12:00:00.000Z",

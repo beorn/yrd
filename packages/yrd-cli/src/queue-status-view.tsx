@@ -2380,10 +2380,15 @@ function queueRetryPeersOf(peers: ReadonlyMap<string, readonly Run[]>, run: Run)
   return peers.get(`${first.id}\0${String(first.revision)}`) ?? NO_RUNS
 }
 
-export function queueTimelineProjection(
+type QueueTimelineProjectionBuild = Readonly<{
+  projection: QueueTimelineProjection
+  metricFacts: readonly QueueTerminalFact[]
+}>
+
+function buildQueueTimelineProjection(
   results: readonly QueueStatusResult[],
   options: QueueTimelineProjectionOptions,
-): QueueTimelineProjection {
+): QueueTimelineProjectionBuild {
   if (!Number.isFinite(options.now) || options.now < 0) throw new TypeError("yrd: timeline snapshot time is invalid")
   if (!Number.isFinite(options.windowMs) || options.windowMs < 0) {
     throw new TypeError("yrd: timeline window is invalid")
@@ -2483,7 +2488,7 @@ export function queueTimelineProjection(
       if (row.ageMs === null) return oldest
       return oldest === null ? row.ageMs : Math.max(oldest, row.ageMs)
     }, null)
-  return {
+  const projection: QueueTimelineProjection = {
     now: nowIso,
     base,
     siblingBases: [...new Set(options.siblingBases ?? [])].filter((candidate) => candidate !== base).toSorted(),
@@ -2509,6 +2514,35 @@ export function queueTimelineProjection(
     timeStatsFacts,
     earliestFactMs,
   }
+  return { projection, metricFacts: terminalFacts }
+}
+
+export function queueTimelineProjection(
+  results: readonly QueueStatusResult[],
+  options: QueueTimelineProjectionOptions,
+): QueueTimelineProjection {
+  return buildQueueTimelineProjection(results, options).projection
+}
+
+export type QueueTimelineProjectionClock = Readonly<{
+  projection: QueueTimelineProjection
+  reclock(now: number): QueueTimelineProjection
+}>
+
+export function createQueueTimelineProjectionClock(
+  results: readonly QueueStatusResult[],
+  options: QueueTimelineProjectionOptions,
+): QueueTimelineProjectionClock {
+  const built = buildQueueTimelineProjection(results, options)
+  const metricsWindowMs = options.metricsWindowMs ?? options.windowMs
+  let current = built.projection
+  return Object.freeze({
+    projection: current,
+    reclock(now) {
+      current = reclockQueueTimelineProjection(current, now, metricsWindowMs, built.metricFacts)
+      return current
+    },
+  })
 }
 
 function reclockTimelineRow(row: QueueTimelineProjectedRow, nowIso: string): QueueTimelineProjectedRow {
@@ -2534,14 +2568,16 @@ function reclockTimelineRow(row: QueueTimelineProjectedRow, nowIso: string): Que
  * folding, detail construction, and terminal statistics remain shared by
  * identity; time can only move rows out of a fixed window, never into it.
  */
-export function reclockQueueTimelineProjection(
+function reclockQueueTimelineProjection(
   projection: QueueTimelineProjection,
   now: number,
   metricsWindowMs: number,
+  metricFacts: readonly QueueTerminalFact[],
 ): QueueTimelineProjection {
   const nowIso = new Date(now).toISOString()
   if (nowIso === projection.now) return projection
   const sinceMs = now - projection.filters.windowMs
+  const requestedSince = new Date(sinceMs).toISOString()
   const rows = projection.rows
     .map((row) => reclockTimelineRow(row, nowIso))
     .filter((row) => row.timestampMs === null || (row.timestampMs >= sinceMs && row.timestampMs <= now))
@@ -2556,12 +2592,17 @@ export function reclockQueueTimelineProjection(
     )
   const retainedSinceMs =
     projection.coverage.retainedSince === undefined ? undefined : Date.parse(projection.coverage.retainedSince)
-  return {
+  const reclocked: QueueTimelineProjection = {
     ...projection,
     now: nowIso,
     oldestOpenMs,
+    filters: {
+      ...projection.filters,
+      since: requestedSince,
+    },
     coverage: {
       ...projection.coverage,
+      requestedSince,
       complete:
         projection.filters.windowMs >= QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS ||
         retainedSinceMs === undefined ||
@@ -2574,8 +2615,9 @@ export function reclockQueueTimelineProjection(
     },
     rows,
     details,
-    metrics: queueFlowMetrics(projection.timeStatsFacts, { now, windowMs: metricsWindowMs, oldestOpenMs }),
+    metrics: queueFlowMetrics(metricFacts, { now, windowMs: metricsWindowMs, oldestOpenMs }),
   }
+  return reclocked
 }
 
 function failureEvidence(step: QueueStep | undefined): HumanFailureProjection["evidence"] {
