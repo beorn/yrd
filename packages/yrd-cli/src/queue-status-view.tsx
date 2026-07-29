@@ -17,7 +17,7 @@ import {
   type PRRevClock,
   type PRRevTerminal,
 } from "@yrd/bay"
-import { compareNatural, type Event, type JsonValue } from "@yrd/core"
+import { compareNatural, stageAsync, type Event, type JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type {
   Candidate,
@@ -481,7 +481,15 @@ export function queueRunRevisionClocks(prs: Iterable<PR>, runs: Iterable<Run>): 
   return clocks
 }
 
+/** Folds the whole journal history into attempt rows. This is the consumer that
+ * actually reads the event log on a cold `queue ls` — replay reports zero events
+ * because the checkpoint is current, but this scan still decodes every stored
+ * event, so "replay did nothing" never meant "the journal was not read". */
 export async function queueLogAttempts(events: AsyncIterable<Event> | Iterable<Event>): Promise<QueueAttempt[]> {
+  return stageAsync("history-scan", () => scanQueueLogAttempts(events))
+}
+
+async function scanQueueLogAttempts(events: AsyncIterable<Event> | Iterable<Event>): Promise<QueueAttempt[]> {
   const requested = new Map<string, RequestedJob>()
   const started = new Map<string, StartedAttempt>()
   const attempts: QueueAttempt[] = []

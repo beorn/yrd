@@ -33,6 +33,7 @@ import {
   failureFact,
   pipe,
   raiseFailure,
+  stageReport,
   type Journal,
   type JournalCompatibility,
 } from "@yrd/core"
@@ -1792,6 +1793,13 @@ export async function runYrdProcess(
       await closeHost()
     } finally {
       removeShutdownSignals()
+      // One command, one stage table. Emitted last so it covers the whole
+      // invocation, and through the host-owned logger so `DEBUG=yrd:perf`
+      // reaches it like any other namespace. `unaccountedMs` is the honest row:
+      // a breakdown that silently omits most of the command reads as coverage,
+      // which is how a multi-second stage stayed invisible behind a `totalMs`
+      // that described 2% of the work.
+      log?.child("perf").debug?.("command stage breakdown", stageReport())
       log?.end()
     }
   }

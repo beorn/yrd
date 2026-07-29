@@ -37,6 +37,7 @@ import {
   type JournalFrame,
 } from "./frame.ts"
 import { cloneFrozen, freeze, type DeepReadonly } from "./immutable.ts"
+import { stage } from "./stage-clock.ts"
 import type { Cursor, Journal, JournalCheckpoint, JournalHistory, JournalHistoryDiagnostics } from "./journal.ts"
 
 export type { DeepReadonly } from "./immutable.ts"
@@ -500,7 +501,10 @@ export async function createYrd<State extends object, Commands extends CommandTr
     try {
       checkpoint = await checkpointStore.load(checkpointIdentity)
       if (checkpoint === undefined) return undefined
-      const restored = restoreProjection(checkpoint)
+      // Wrapped at the CALL so the stage covers the whole restore including the
+      // deep `freeze(state)` in its return — the existing `totalMs` inside
+      // restoreProjection stops before that freeze and so under-reports itself.
+      const restored = stage("checkpoint-restore", () => restoreProjection(checkpoint as JournalCheckpoint))
       checkpointCursor = checkpoint.cursor
       return restored
     } catch {
