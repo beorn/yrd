@@ -73,6 +73,15 @@ function failure(code: string, cause: unknown): JobResult<never> {
   }
 }
 
+function rethrowWorktreeOwnershipConflict(cause: unknown): never {
+  const message = cause instanceof Error ? cause.message : String(cause)
+  if (!/already used by worktree|is already checked out/iu.test(message)) throw cause
+  throw new Error(
+    `${message}\nThe branch remains owned by its existing worktree; ` +
+      "use a commit SHA as 'from' to materialize detached HEAD instead.",
+  )
+}
+
 async function remoteBranchHead(git: Git, repo: string, branch: string): Promise<string | undefined> {
   const result = await git.run(repo, ["ls-remote", "--exit-code", "origin", `refs/heads/${branch}`], true)
   if (result.code === 2) return undefined
@@ -352,7 +361,11 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
             }
           }
           if (decision.source === "local") {
-            await git.run(repo, ["worktree", "add", path, input.branch])
+            try {
+              await git.run(repo, ["worktree", "add", path, input.branch])
+            } catch (cause) {
+              rethrowWorktreeOwnershipConflict(cause)
+            }
           } else if (decision.source === "tracking") {
             await git.run(repo, ["worktree", "add", "-b", input.branch, path, remoteRef])
           } else {
@@ -363,7 +376,11 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           }
         } else {
           await git.commit(repo, input.from)
-          await git.run(repo, ["worktree", "add", path, input.from])
+          try {
+            await git.run(repo, ["worktree", "add", path, input.from])
+          } catch (cause) {
+            rethrowWorktreeOwnershipConflict(cause)
+          }
         }
         const materialized = await materializeSubmodules(git, { worktree: path, referenceWorktree: repo })
         if (materialized.code !== 0) {

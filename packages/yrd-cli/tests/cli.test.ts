@@ -223,12 +223,15 @@ function workspace(
     refreshedHead?: string
     probe?: OverlapProbe
     failingBay?: string
+    provisions?: Array<Record<string, unknown>>
+    provisionedHead?: string
   } = {},
 ): BayWorkspace {
   return {
     revision: "test-workspace-v1",
     async provision(input) {
       await options.probe?.pause("bay")
+      options.provisions?.push({ ...input })
       if (input.bay === options.failingBay) {
         return {
           status: "completed",
@@ -236,10 +239,14 @@ function workspace(
           error: { code: "provision-failed", message: `failed to provision ${input.bay}` },
         }
       }
+      const from = typeof input.from === "string" ? input.from : undefined
+      const headSha =
+        options.provisionedHead ??
+        (from !== undefined && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(from) ? from : HEAD_SHA)
       return {
         status: "completed",
         conclusion: "success",
-        output: { path: options.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD_SHA, baseSha: BASE_SHA },
+        output: { path: options.path ?? `/repo/.bays/${input.bay}`, headSha, baseSha: BASE_SHA },
       }
     },
     refresh(input) {
@@ -326,6 +333,8 @@ async function createApp(
     failingBay?: string
     refreshedHead?: string
     probe?: OverlapProbe
+    provisions?: Array<Record<string, unknown>>
+    provisionedHead?: string
     baseResolutions?: string[]
     batch?: false | number
     waitingEvaluator?: string
@@ -360,6 +369,8 @@ async function createApp(
       failingBay: options.failingBay,
       refreshedHead: options.refreshedHead,
       probe: options.probe,
+      provisions: options.provisions,
+      provisionedHead: options.provisionedHead,
     }),
   )
   const check = withStep(
@@ -1001,6 +1012,43 @@ describe("runYrd", () => {
     const dashboard = outputIO()
     expect(await runYrd(app, yrd("--json"), dashboard.io), dashboard.stderr()).toBe(0)
     expect(JSON.parse(dashboard.stdout())).toMatchObject({ command: "dashboard" })
+  })
+
+  it("22358: pr checkout provisions from the recorded head SHA, not the branch name", async () => {
+    // Acceptance: bay a PR while the author still holds the branch. Branch-name checkout refuses;
+    // detached HEAD at the revision head is the immutable candidate @ci needs to gate.
+    const mismatched = await createApp({ provisionedHead: "f".repeat(40) })
+    await mismatched.bays.submit({
+      branch: "topic/held-by-author",
+      headSha: HEAD_SHA,
+      base: "main",
+      baseSha: BASE_SHA,
+    })
+    const refused = outputIO()
+    expect(await runYrd(mismatched, yrd("pr", "checkout", "PR1", "--json"), refused.io)).toBe(1)
+    expect(refused.stdout()).toBe("")
+    expect(refused.stderr()).toContain(`does not match PR 'PR1' revision head ${HEAD_SHA}`)
+
+    const provisions: Array<Record<string, unknown>> = []
+    const app = await createApp({ provisions })
+    await app.bays.submit({ branch: "topic/held-by-author", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+
+    const checkout = outputIO()
+    expect(await runYrd(app, yrd("pr", "checkout", "PR1", "--json"), checkout.io), checkout.stderr()).toBe(0)
+    const payload = JSON.parse(checkout.stdout()) as Readonly<{
+      command: string
+      pr: string
+      bay: { status: string; headSha?: string }
+    }>
+    expect(payload).toMatchObject({
+      command: "pr.checkout",
+      pr: "PR1",
+      bay: { status: "active", headSha: HEAD_SHA },
+    })
+    expect(provisions).toHaveLength(1)
+    expect(provisions[0]).toMatchObject({ from: HEAD_SHA })
+    expect(provisions[0]?.from).not.toBe("topic/held-by-author")
+    expect(app.bays.get("pr-pr1")).toMatchObject({ status: "active", headSha: HEAD_SHA })
   })
 
   it("Q1: resubmitting a landed branch reports already-merged for the same head and mints a fresh delivery for a new head", async () => {

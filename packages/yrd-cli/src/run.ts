@@ -1508,6 +1508,7 @@ async function provisionBay(
     issue?: string
     by?: string
     json?: boolean
+    expectedHead?: string
   },
   io: YrdCliIO,
   command: string,
@@ -1525,6 +1526,11 @@ async function provisionBay(
   assertJobsPassed(await runJobs(app, app.jobs.requested(result), io), `bay '${name}' provision`)
   const bay = app.bays.get(name)
   if (bay?.path === undefined || bay.status !== "active") refusal(`bay '${name}' did not become active`)
+  if (options.expectedHead !== undefined && bay.headSha?.toLowerCase() !== options.expectedHead.toLowerCase()) {
+    const expected =
+      pr === undefined ? `expected head ${options.expectedHead}` : `PR '${pr}' revision head ${options.expectedHead}`
+    refusal(`bay '${name}' HEAD ${bay.headSha ?? "(missing)"} does not match ${expected}`)
+  }
   await printResult(
     io,
     jsonEnabled(options),
@@ -4381,10 +4387,19 @@ async function checkoutPr(
 ): Promise<void> {
   const pr = requiredPr(app, selector)
   const name = options.bay ?? `pr-${pr.id.toLowerCase()}`
+  // PR checkout is immutable inspection: authors normally keep the branch checked
+  // out in their own Bay, while its recorded revision remains safe to materialize detached.
+  const head = prHead(pr)
   await provisionBay(
     app,
     name,
-    { from: pr.branch, base: pr.base, ...(pr.issue === undefined ? {} : { issue: pr.issue }), ...options },
+    {
+      from: head,
+      expectedHead: head,
+      base: pr.base,
+      ...(pr.issue === undefined ? {} : { issue: pr.issue }),
+      ...options,
+    },
     io,
     "pr.checkout",
     pr.id,
@@ -7828,7 +7843,7 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => diffPr(installed(), selector, options, io))
   pr.command("checkout <selector>")
-    .description("materialize a bay from a PR branch")
+    .description("materialize a bay from a PR revision head (detached HEAD)")
     .option("--bay <name>", "name the new bay")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => checkoutPr(installed(), selector, options, io))
