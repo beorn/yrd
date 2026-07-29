@@ -110,8 +110,10 @@ import {
   prListRows,
   prDetailData,
   projectedPrStatus,
+  queuePauseWarnings,
   queueRunRevisionClocks,
   queueTimelineAdmissionTimes,
+  createQueueTimelineProjectionClock,
   queueTimelineProjection,
   QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
   RUNNER_STALE_MS,
@@ -124,6 +126,7 @@ import {
   type QueueTimelineStatusFilter,
   type QueueStatusResult,
 } from "./queue-status-view.tsx"
+import { queueReadBoundary } from "./queue-read-boundary.ts"
 import { submittedPrPositions } from "./queue-position.ts"
 import {
   preflightRecut,
@@ -316,7 +319,8 @@ const RESIDENT_INTERRUPTED_EXIT: YrdCliExitCode = 3
  * evidence is the loud `resident-refusal-stall-restart` record, not the code. */
 const RESIDENT_POISONED_EXIT: YrdCliExitCode = RESIDENT_INTERRUPTED_EXIT
 
-function residentRunnerStatusPath(cwd: string): string | undefined {
+function residentRunnerStatusPath(cwd: string, stateDir?: string): string | undefined {
+  if (stateDir !== undefined) return join(stateDir, "resident-runner", "status.json")
   const gitDir = queueGitDir(cwd)
   return gitDir === undefined ? undefined : join(gitDir, "yrd", "resident-runner", "status.json")
 }
@@ -380,8 +384,8 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
   }
 }
 
-export async function residentRunnerStatus(cwd: string): Promise<QueueTimelineRunner | null> {
-  const path = residentRunnerStatusPath(cwd)
+export async function residentRunnerStatus(cwd: string, stateDir?: string): Promise<QueueTimelineRunner | null> {
+  const path = residentRunnerStatusPath(cwd, stateDir)
   if (path === undefined) return null
   try {
     return parseResidentRunnerStatus(await readFile(path, "utf8"))
@@ -2536,7 +2540,12 @@ function managedDoStages(
   app: YrdCliApp,
   services: YrdCliServices,
   io: YrdCliIO,
-  runCommand: (stage: string, command: ManagedDoCommand, env: Readonly<Record<string, string>>) => Promise<void>,
+  runCommand: (
+    stage: string,
+    command: ManagedDoCommand,
+    env: Readonly<Record<string, string>>,
+    commandCwd?: string,
+  ) => Promise<void>,
   commands: Readonly<{ assign: ManagedDoCommand; seat: ManagedDoCommand; launch: ManagedDoCommand }>,
   recordBoundary: ReturnType<typeof createManagedDoJournal>,
 ): ManagedDoStages {
@@ -2571,12 +2580,17 @@ function managedDoStages(
       }
     },
     launch: (input) =>
-      runCommand("launch", commands.launch, {
-        YRD_DO_ISSUE: input.issue,
-        YRD_DO_LANE: input.lane,
-        YRD_DO_BAY: input.bay,
-        YRD_DO_BAY_PATH: input.path,
-      }),
+      runCommand(
+        "launch",
+        commands.launch,
+        {
+          YRD_DO_ISSUE: input.issue,
+          YRD_DO_LANE: input.lane,
+          YRD_DO_BAY: input.bay,
+          YRD_DO_BAY_PATH: input.path,
+        },
+        input.path,
+      ),
     closeBay: async (input) => {
       const bay = app.bays.get(input.bay)
       if (bay === undefined) refusal(`Bay '${input.bay}' disappeared before managed rollback`)
@@ -2671,10 +2685,11 @@ async function doWorkManaged(
     stage: string,
     command: ManagedDoCommand,
     env: Readonly<Record<string, string>>,
+    commandCwd = cwd,
   ): Promise<void> => {
     const result = await runner.run({
       argv: shellCommand(command.run),
-      cwd,
+      cwd: commandCwd,
       env: { ...(services.environment ?? process.env), ...env },
       ...(command.timeoutMs === undefined ? {} : { timeoutMs: command.timeoutMs }),
     })
@@ -5001,6 +5016,7 @@ async function renderDashboard(
   selectors: readonly string[],
   options: JsonOption,
   io: YrdCliIO,
+  services: YrdCliServices = {},
 ): Promise<void> {
   const state = stateOf(app)
   const target = resolveQueueTargets(state, selectors, undefined, undefined)
@@ -5015,8 +5031,12 @@ async function renderDashboard(
       selected: target.selected,
       now: io.now?.() ?? Date.now(),
     }),
-    submoduleTrackingWarnings(io.cwd ?? process.cwd()),
+    [...queuePauseWarnings(state.bays, results), ...queueSurfaceWarnings(services, io.cwd ?? process.cwd())],
   )
+}
+
+function queueSurfaceWarnings(services: YrdCliServices, cwd: string): readonly string[] {
+  return queueReadBoundary(services)?.submoduleWarnings ?? submoduleTrackingWarnings(cwd)
 }
 
 async function queueStatusSnapshots(
@@ -5073,7 +5093,8 @@ function queueBases(state: YrdCliState): string[] {
   ].toSorted()
 }
 
-type QueueListSnapshot = QueueWatchSnapshot & Readonly<{ projection: QueueTimelineProjection }>
+type QueueListSnapshot = QueueWatchSnapshot &
+  Readonly<{ projection: QueueTimelineProjection; state: YrdCliState["bays"] }>
 
 function queueRunnerRefusal(app: Pick<YrdCliApp, "queue">): QueueRunnerRefusal | undefined {
   const finding = app.queue
@@ -5373,34 +5394,114 @@ export function createQueuePrDiffResolver(
   }
 }
 
-export async function queueListSnapshot(
+type QueueListObservation = Readonly<{
+  state: YrdCliState
+  stateSource: "journal" | "memory"
+  cursor: number
+  generation: number
+  attempts: readonly QueueAttempt[]
+  runner: QueueTimelineRunner | null
+  runnerToken: string
+  now: number
+}>
+
+function queueRunnerToken(runner: QueueTimelineRunner | null): string {
+  return runner === null
+    ? "none"
+    : JSON.stringify([
+        runner.pid,
+        runner.startedAt,
+        runner.lastTickAt,
+        runner.command ?? null,
+        runner.implementationSource ?? null,
+        runner.exitedAt ?? null,
+        runner.clean ?? null,
+      ])
+}
+
+async function observeQueueList(
+  app: YrdCliApp,
+  io: YrdCliIO,
+  services: YrdCliServices,
+  attemptResolver: QueueAttemptResolver,
+  previous?: QueueListObservation,
+): Promise<QueueListObservation> {
+  const durable = queueReadBoundary(services)?.readModel
+  let state: YrdCliState
+  let stateSource: QueueListObservation["stateSource"]
+  let cursor: number
+  let generation = 0
+  let attempts: readonly QueueAttempt[]
+  if (durable === undefined) {
+    const journal = await app.journalSnapshot()
+    state = journal.state as YrdCliState
+    stateSource = "journal"
+    cursor = journal.asOf.cursor
+    attempts = await attemptResolver.resolve(state)
+  } else {
+    const read = await durable.snapshot()
+    cursor = read.cursor
+    if (previous !== undefined && read.cursor === previous.cursor) {
+      state = previous.state
+      stateSource = "memory"
+    } else {
+      let journal = await app.journalSnapshot()
+      if (read.cursor > journal.asOf.cursor) journal = await app.journalSnapshot()
+      if (read.cursor !== journal.asOf.cursor) {
+        throw new Error(
+          `yrd: queue read boundary cursor ${String(read.cursor)} does not match Journal cursor ${String(journal.asOf.cursor)}`,
+        )
+      }
+      state = journal.state as YrdCliState
+      stateSource = "journal"
+    }
+    generation = read.generation
+    attempts = read.attempts
+  }
+  const runner = activeResidentRunner(await residentRunnerStatus(io.cwd ?? process.cwd(), io.stateDir))
+  return {
+    state,
+    stateSource,
+    cursor,
+    generation,
+    attempts,
+    runner,
+    runnerToken: queueRunnerToken(runner),
+    now: io.now?.() ?? Date.now(),
+  }
+}
+
+function narrowQueueResults(
+  rows: readonly QueueStatusResult[],
+  keep: (run: Readonly<{ id: string }>) => boolean,
+): readonly QueueStatusResult[] {
+  return rows.map((result) => ({
+    ...result,
+    running: result.running.filter(keep),
+    waiting: result.waiting.filter(keep),
+    finished: result.finished.filter(keep),
+  }))
+}
+
+type QueueListSnapshotBuild = Readonly<{
+  snapshot: QueueListSnapshot
+  reclock(now: number): QueueTimelineProjection
+}>
+
+async function buildQueueListSnapshot(
   app: YrdCliApp,
   filters: readonly string[],
   options: QueueListOptions,
   io: YrdCliIO,
-  details: Readonly<{
-    includeOutputs?: boolean
-    focus?: QueueWatchFocus
-    diffResolver?: QueuePrDiffResolver
-    attemptResolver?: QueueAttemptResolver
-  }> = {},
-): Promise<QueueListSnapshot> {
-  const { includeOutputs = false, focus, diffResolver, attemptResolver } = details
-  // The watch loop reuses one app across ticks, and app.state() is the mount-time
-  // journal projection — it never tails cross-process runner appends on its own.
-  // Fold new frames first so each snapshot's rows are as fresh as its clock;
-  // otherwise `now`/`runner` tick over frozen rows (running shows 0 while active).
-  await app.refresh()
-  const state = stateOf(app)
+  observed: QueueListObservation,
+): Promise<QueueListSnapshotBuild> {
+  const { state, now, runner, attempts } = observed
   const requestedBase = options.base ?? "main"
   const target = resolveQueueTargets(state, [], requestedBase, options.pr)
   const { results } = await queueStatusSnapshots(app, state, target, io)
-  const now = io.now?.() ?? Date.now()
   const base = results[0]?.base ?? baseIdentity(requestedBase)
-  const runner = activeResidentRunner(await residentRunnerStatus(io.cwd ?? process.cwd()))
   const runnerRefusal = runner === null ? queueRunnerRefusal(app) : undefined
-  const attempts = await (attemptResolver?.resolve(state) ?? queueLogAttempts(app.events()))
-  const projection = queueTimelineProjection(results, {
+  const clock = createQueueTimelineProjectionClock(results, {
     now,
     windowMs: queueTimelineWindow(options.since),
     metricsWindowMs: queueMetricsWindow(options.since),
@@ -5415,90 +5516,172 @@ export async function queueListSnapshot(
     state: state.bays,
     runner,
   })
+  const projection = clock.projection
   // `--json` must answer the SAME question the human renderer answers. The
   // projection owns filtering (--status/--latest/filter terms), and its `rows`
-  // are the full filtered set (`rowLimit` only trims what the view draws), so
-  // narrow the JSON payload to those runs instead of shipping every retained run
-  // — `queue list --status running --json` used to emit all 669 runs / 14 MB
-  // while the same command without `--json` correctly showed one row.
+  // are the full filtered set (`rowLimit` only trims what the view draws).
   const filtered =
     projection.filters.statuses.length > 0 || projection.filters.terms.length > 0 || projection.filters.latest
   const projectedRuns = new Set(projection.rows.flatMap((row) => (row.run === undefined ? [] : [row.run])))
-  const narrow = (
-    rows: readonly QueueStatusResult[],
-    keep: (run: Readonly<{ id: string }>) => boolean,
-  ): readonly QueueStatusResult[] =>
-    rows.map((result) => ({
-      ...result,
-      running: result.running.filter(keep),
-      waiting: result.waiting.filter(keep),
-      finished: result.finished.filter(keep),
-    }))
-  // The listing payload (`results`) is what `--json` prints, so the display
-  // filters must reach it. `focus` is the watch pane's cursor, not a listing
-  // filter — it narrows the artifact/diff side only, exactly as before.
-  const filteredResults = filtered ? narrow(results, (run) => projectedRuns.has(run.id)) : results
+  const filteredResults = filtered ? narrowQueueResults(results, (run) => projectedRuns.has(run.id)) : results
+  return {
+    snapshot: {
+      results: filteredResults,
+      state: state.bays,
+      now,
+      projection,
+      ...(runnerRefusal === undefined ? {} : { runnerRefusal }),
+    },
+    reclock: clock.reclock,
+  }
+}
+
+async function attachQueueListDetails(
+  snapshot: QueueListSnapshot,
+  attempts: readonly QueueAttempt[],
+  io: YrdCliIO,
+  focus: QueueWatchFocus | undefined,
+  diffResolver: QueuePrDiffResolver,
+): Promise<QueueListSnapshot> {
   const outputResults =
     focus === undefined
-      ? filteredResults
+      ? snapshot.results
       : focus.run === undefined
         ? []
-        : narrow(filteredResults, (run) => run.id === focus.run)
+        : narrowQueueResults(snapshot.results, (run) => run.id === focus.run)
   const outputRunIds = new Set(
     outputResults.flatMap((result) => [...result.running, ...result.waiting, ...result.finished].map((run) => run.id)),
   )
-  const outputAttempts = includeOutputs ? attempts.filter((attempt) => outputRunIds.has(attempt.run)) : []
+  const outputAttempts = attempts.filter((attempt) => outputRunIds.has(attempt.run))
   const outputs =
-    includeOutputs && io.artifactRoot !== undefined
-      ? await queueArtifactOutputs(outputResults, io.artifactRoot, outputAttempts)
-      : []
-  const diffs = includeOutputs
-    ? await (async () => {
-        const prsById = new Map(results.flatMap((result) => result.prs).map((pr) => [pr.id, pr] as const))
-        if (focus !== undefined) {
-          const focusedPr = prsById.get(focus.pr)
-          if (focusedPr === undefined) return []
-          const resolver = diffResolver ?? createQueuePrDiffResolver()
-          return [await resolver.resolve(io.cwd ?? process.cwd(), focusedPr, focus.revision, now)]
-        }
-        const visibleRevisions = new Map(
-          projection.rows.flatMap((row) => {
-            const pr = prsById.get(row.pr)
-            return pr === undefined ? [] : [[`${row.pr}:${row.revision}`, { pr, revision: row.revision }] as const]
-          }),
-        )
-        return [...visibleRevisions.values()].map(({ pr, revision }) => {
-          let diff: QueuePrDiff
-          try {
-            diff = queuePrDiff(io.cwd ?? process.cwd(), pr, revision)
-          } catch (error) {
-            if (isGitTimeoutError(error)) throw error
-            diff = { pr: pr.id, revision, unavailable: "git-error" }
-          }
-          return diff
+    io.artifactRoot === undefined ? [] : await queueArtifactOutputs(outputResults, io.artifactRoot, outputAttempts)
+  const prsById = new Map(snapshot.results.flatMap((result) => result.prs).map((pr) => [pr.id, pr] as const))
+  const diffs = await (async (): Promise<readonly QueuePrDiff[]> => {
+    if (focus !== undefined) {
+      const focusedPr = prsById.get(focus.pr)
+      if (focusedPr === undefined) return []
+      return [await diffResolver.resolve(io.cwd ?? process.cwd(), focusedPr, focus.revision, snapshot.now)]
+    }
+    const visibleRevisions = new Map(
+      snapshot.projection.rows.flatMap((row) => {
+        const pr = prsById.get(row.pr)
+        return pr === undefined ? [] : [[`${row.pr}:${row.revision}`, { pr, revision: row.revision }] as const]
+      }),
+    )
+    return [...visibleRevisions.values()].map(({ pr, revision }) => {
+      try {
+        return queuePrDiff(io.cwd ?? process.cwd(), pr, revision)
+      } catch (error) {
+        if (isGitTimeoutError(error)) throw error
+        return { pr: pr.id, revision, unavailable: "git-error" }
+      }
+    })
+  })()
+  const commands = Object.fromEntries(
+    Object.entries(
+      (
+        await loadYrdConfig({
+          repo: io.cwd ?? process.cwd(),
+          defaultBase: snapshot.projection.base,
         })
-      })()
-    : []
-  const commands = includeOutputs
-    ? Object.fromEntries(
-        Object.entries(
-          (
-            await loadYrdConfig({
-              repo: io.cwd ?? process.cwd(),
-              defaultBase: base,
-            })
-          ).config.definitions,
-        ).flatMap(([name, definition]) => (definition.run === undefined ? [] : [[name, definition.run] as const])),
-      )
-    : undefined
+      ).config.definitions,
+    ).flatMap(([name, definition]) => (definition.run === undefined ? [] : [[name, definition.run] as const])),
+  )
   return {
-    results: filteredResults,
-    now,
-    projection,
-    ...(runnerRefusal === undefined ? {} : { runnerRefusal }),
+    ...snapshot,
     ...(outputs.length === 0 ? {} : { outputs }),
     ...(diffs.length === 0 ? {} : { diffs }),
-    ...(commands === undefined || Object.keys(commands).length === 0 ? {} : { commands }),
+    ...(Object.keys(commands).length === 0 ? {} : { commands }),
+  }
+}
+
+export async function queueListSnapshot(
+  app: YrdCliApp,
+  filters: readonly string[],
+  options: QueueListOptions,
+  io: YrdCliIO,
+  details: Readonly<{
+    includeOutputs?: boolean
+    focus?: QueueWatchFocus
+    diffResolver?: QueuePrDiffResolver
+    attemptResolver?: QueueAttemptResolver
+  }> = {},
+): Promise<QueueListSnapshot> {
+  const { includeOutputs = false, focus, diffResolver, attemptResolver } = details
+  const resolver = attemptResolver ?? createQueueAttemptResolver(app)
+  const observed = await observeQueueList(app, io, {}, resolver)
+  const { snapshot } = await buildQueueListSnapshot(app, filters, options, io, observed)
+  return includeOutputs
+    ? attachQueueListDetails(snapshot, observed.attempts, io, focus, diffResolver ?? createQueuePrDiffResolver())
+    : snapshot
+}
+
+type QueueListSnapshotLoader = Readonly<{
+  load(focus?: QueueWatchFocus): Promise<QueueListSnapshot>
+}>
+
+export function createQueueListSnapshotLoader(
+  app: YrdCliApp,
+  filters: readonly string[],
+  options: QueueListOptions,
+  io: YrdCliIO,
+  services: YrdCliServices,
+  includeOutputs: boolean,
+): QueueListSnapshotLoader {
+  const attemptResolver = createQueueAttemptResolver(services.queueReadModel ?? app)
+  const diffResolver = createQueuePrDiffResolver()
+  const log = app.log.child("queue-read")
+  let cached:
+    | Readonly<{
+        observed: QueueListObservation
+        snapshot: QueueListSnapshot
+        reclock(now: number): QueueTimelineProjection
+      }>
+    | undefined
+  return {
+    async load(focus) {
+      const observed = await observeQueueList(app, io, services, attemptResolver, cached?.observed)
+      const unchanged =
+        cached !== undefined &&
+        cached.observed.cursor === observed.cursor &&
+        cached.observed.generation === observed.generation &&
+        cached.observed.attempts === observed.attempts &&
+        cached.observed.runnerToken === observed.runnerToken
+      using span = log.span?.("snapshot", {
+        cursor: observed.cursor,
+        generation: observed.generation,
+        state: observed.stateSource,
+        projection: unchanged ? "clock-only" : "rebuilt",
+        attempts: cached?.observed.attempts === observed.attempts ? "memory" : "changed",
+        runner: cached?.observed.runnerToken === observed.runnerToken ? "unchanged" : "changed",
+      })
+      const built: QueueListSnapshotBuild =
+        unchanged && cached !== undefined
+          ? {
+              snapshot: {
+                ...cached.snapshot,
+                now: observed.now,
+                projection: cached.reclock(observed.now),
+              },
+              reclock: cached.reclock,
+            }
+          : await buildQueueListSnapshot(app, filters, options, io, observed)
+      const { snapshot } = built
+      cached = {
+        observed,
+        ...built,
+      }
+      if (span) {
+        Object.assign(span.spanData, {
+          results: snapshot.results.length,
+          rows: snapshot.projection.rows.length,
+          timeStatsFacts: snapshot.projection.timeStatsFacts.length,
+        })
+      }
+      return includeOutputs && focus !== undefined
+        ? await attachQueueListDetails(snapshot, observed.attempts, io, focus, diffResolver)
+        : snapshot
+    },
   }
 }
 
@@ -5509,15 +5692,7 @@ async function listQueues(
   io: YrdCliIO,
   services: YrdCliServices,
 ): Promise<void> {
-  const snapshot = await queueListSnapshot(
-    app,
-    filters,
-    options,
-    io,
-    services.queueReadModel === undefined
-      ? {}
-      : { attemptResolver: createQueueAttemptResolver(services.queueReadModel) },
-  )
+  const snapshot = await createQueueListSnapshotLoader(app, filters, options, io, services, false).load()
   await printResultWithWarnings(
     io,
     jsonEnabled(options),
@@ -5529,9 +5704,13 @@ async function listQueues(
     createElement(QueueTimelineView, {
       projection: snapshot.projection,
       runnerRefusal: snapshot.runnerRefusal,
+      state: snapshot.state,
       columns: io.columns ?? 120,
     }),
-    submoduleTrackingWarnings(io.cwd ?? process.cwd()),
+    [
+      ...queuePauseWarnings(snapshot.state, snapshot.results),
+      ...queueSurfaceWarnings(services, io.cwd ?? process.cwd()),
+    ],
   )
 }
 
@@ -5539,8 +5718,9 @@ async function dashboard(
   app: YrdCliApp,
   options: JsonOption & Readonly<{ base?: string }>,
   io: YrdCliIO,
+  services: YrdCliServices,
 ): Promise<void> {
-  await renderDashboard(app, options.base === undefined ? [] : [options.base], options, io)
+  await renderDashboard(app, options.base === undefined ? [] : [options.base], options, io, services)
 }
 
 async function primeYrd(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Promise<void> {
@@ -7063,15 +7243,8 @@ async function watchQueue(
 ): Promise<YrdCliExitCode> {
   const interval = 1_000
   const scope = io.scope ?? app.scope
-  const diffResolver = createQueuePrDiffResolver()
-  const attemptResolver = createQueueAttemptResolver(services.queueReadModel ?? app)
-  const load = async (focus?: QueueWatchFocus): Promise<QueueListSnapshot> =>
-    queueListSnapshot(app, filters, options, io, {
-      includeOutputs: !jsonEnabled(options) && focus !== undefined,
-      focus,
-      diffResolver,
-      attemptResolver,
-    })
+  const query = createQueueListSnapshotLoader(app, filters, options, io, services, !jsonEnabled(options))
+  const load = (focus?: QueueWatchFocus): Promise<QueueListSnapshot> => query.load(focus)
 
   if (!jsonEnabled(options)) {
     io.stderr(`yrd watch runtime: ${formatYrdRuntimeVersion()}\n`)
@@ -7103,7 +7276,7 @@ async function watchQueue(
 
   while (true) {
     const snapshot = await load()
-    await printResult(
+    await printResultWithWarnings(
       io,
       true,
       {
@@ -7114,8 +7287,13 @@ async function watchQueue(
       createElement(QueueTimelineView, {
         projection: snapshot.projection,
         runnerRefusal: snapshot.runnerRefusal,
+        state: snapshot.state,
         columns: io.columns ?? 120,
       }),
+      [
+        ...queuePauseWarnings(snapshot.state, snapshot.results),
+        ...queueSurfaceWarnings(services, io.cwd ?? process.cwd()),
+      ],
     )
     if (scope.signal.aborted) return 0
     await scope.sleep(interval)
@@ -7615,7 +7793,7 @@ function buildProgram(
       .command("_dashboard", { isDefault: true, hidden: true })
       .option("--base <branch>", "scope the dashboard to one base")
       .option("--json", "emit stable JSON")
-      .action(async (options) => dashboard(installed(), options, io))
+      .action(async (options) => dashboard(installed(), options, io, installedServices()))
     program
       .command("doctor")
       .description("diagnose base-authority Flow revision and structural drift")

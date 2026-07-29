@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url"
 import type React from "react"
 import {
   currentPRRev,
+  isNonCheckablePRState,
   prDeliveryState,
   prCorrelation,
   prHead,
@@ -10,6 +11,7 @@ import {
   prRevisionLineage,
   prRevisionNumber,
   prSourceReadyAt,
+  resolvePR,
   type BaysState,
   type Correlation,
   type PR,
@@ -165,6 +167,47 @@ export type QueueStatusResult = QueueSummary &
     candidates?: readonly Candidate[]
     eligibilities?: readonly PREligibility[]
   }>
+
+type QueuePauseAllowListMember = Readonly<{
+  id: string
+  status: PRDeliveryState | "unknown"
+}>
+
+type QueuePauseHealth = Readonly<{
+  members: readonly QueuePauseAllowListMember[]
+  blocksAll: boolean
+}>
+
+function queuePauseHealth(state: BaysState, pause: NonNullable<QueueSummary["pause"]>): QueuePauseHealth {
+  const members = pause.allowedPRs.map((id) => {
+    const pr = resolvePR(state, id)
+    return { id, status: pr === undefined ? ("unknown" as const) : prDeliveryState(pr) }
+  })
+  return {
+    members,
+    blocksAll:
+      members.length > 0 && members.every(({ status }) => status !== "unknown" && isNonCheckablePRState(status)),
+  }
+}
+
+function queuePauseAllowedText(
+  pause: NonNullable<QueueSummary["pause"]>,
+  health: QueuePauseHealth | undefined,
+): string {
+  if (pause.allowedPRs.length === 0) return "none"
+  return health?.members.map(({ id, status }) => `${id} ${status}`).join(", ") ?? pause.allowedPRs.join(", ")
+}
+
+export function queuePauseWarnings(state: BaysState, results: readonly QueueStatusResult[]): string[] {
+  return results.flatMap((result) => {
+    if (result.pause === undefined) return []
+    const health = queuePauseHealth(state, result.pause)
+    if (!health.blocksAll) return []
+    return [
+      `[pause-blocks-all] queue '${result.base}' pause blocks every PR: all allowed PRs are terminal (${queuePauseAllowedText(result.pause, health)})`,
+    ]
+  })
+}
 
 export type QueueTimelineRow = Readonly<{
   key: string
@@ -2337,10 +2380,15 @@ function queueRetryPeersOf(peers: ReadonlyMap<string, readonly Run[]>, run: Run)
   return peers.get(`${first.id}\0${String(first.revision)}`) ?? NO_RUNS
 }
 
-export function queueTimelineProjection(
+type QueueTimelineProjectionBuild = Readonly<{
+  projection: QueueTimelineProjection
+  metricFacts: readonly QueueTerminalFact[]
+}>
+
+function buildQueueTimelineProjection(
   results: readonly QueueStatusResult[],
   options: QueueTimelineProjectionOptions,
-): QueueTimelineProjection {
+): QueueTimelineProjectionBuild {
   if (!Number.isFinite(options.now) || options.now < 0) throw new TypeError("yrd: timeline snapshot time is invalid")
   if (!Number.isFinite(options.windowMs) || options.windowMs < 0) {
     throw new TypeError("yrd: timeline window is invalid")
@@ -2440,7 +2488,7 @@ export function queueTimelineProjection(
       if (row.ageMs === null) return oldest
       return oldest === null ? row.ageMs : Math.max(oldest, row.ageMs)
     }, null)
-  return {
+  const projection: QueueTimelineProjection = {
     now: nowIso,
     base,
     siblingBases: [...new Set(options.siblingBases ?? [])].filter((candidate) => candidate !== base).toSorted(),
@@ -2466,6 +2514,110 @@ export function queueTimelineProjection(
     timeStatsFacts,
     earliestFactMs,
   }
+  return { projection, metricFacts: terminalFacts }
+}
+
+export function queueTimelineProjection(
+  results: readonly QueueStatusResult[],
+  options: QueueTimelineProjectionOptions,
+): QueueTimelineProjection {
+  return buildQueueTimelineProjection(results, options).projection
+}
+
+export type QueueTimelineProjectionClock = Readonly<{
+  projection: QueueTimelineProjection
+  reclock(now: number): QueueTimelineProjection
+}>
+
+export function createQueueTimelineProjectionClock(
+  results: readonly QueueStatusResult[],
+  options: QueueTimelineProjectionOptions,
+): QueueTimelineProjectionClock {
+  const built = buildQueueTimelineProjection(results, options)
+  const metricsWindowMs = options.metricsWindowMs ?? options.windowMs
+  let current = built.projection
+  return Object.freeze({
+    projection: current,
+    reclock(now) {
+      current = reclockQueueTimelineProjection(current, now, metricsWindowMs, built.metricFacts)
+      return current
+    },
+  })
+}
+
+function reclockTimelineRow(row: QueueTimelineProjectedRow, nowIso: string): QueueTimelineProjectedRow {
+  if (row.group === "completed") return row
+  const ageMs = timelineAge(row.sourceReadyAt, nowIso, `PR '${row.pr}' source-ready age`)
+  if (row.group === "running") {
+    return {
+      ...row,
+      ageMs,
+      totalMs: timelineAge(row.timestamp ?? undefined, nowIso, `Run '${row.run ?? "unknown"}' active duration`),
+    }
+  }
+  if (row.group === "pending") {
+    const queueWaitMs = timelineAge(row.timestamp ?? undefined, nowIso, `PR '${row.pr}' queue wait`)
+    return { ...row, ageMs, waitMs: queueWaitMs, queueWaitMs }
+  }
+  return { ...row, ageMs }
+}
+
+/**
+ * Advance only wall-clock-derived queue facts while the Journal cursor, read
+ * model generation, and resident-runner token stay unchanged. Durable Run/PR
+ * folding, detail construction, and terminal statistics remain shared by
+ * identity; time can only move rows out of a fixed window, never into it.
+ */
+function reclockQueueTimelineProjection(
+  projection: QueueTimelineProjection,
+  now: number,
+  metricsWindowMs: number,
+  metricFacts: readonly QueueTerminalFact[],
+): QueueTimelineProjection {
+  const nowIso = new Date(now).toISOString()
+  if (nowIso === projection.now) return projection
+  const sinceMs = now - projection.filters.windowMs
+  const requestedSince = new Date(sinceMs).toISOString()
+  const rows = projection.rows
+    .map((row) => reclockTimelineRow(row, nowIso))
+    .filter((row) => row.timestampMs === null || (row.timestampMs >= sinceMs && row.timestampMs <= now))
+  const retainedRuns = new Set(rows.flatMap((row) => (row.run === undefined ? [] : [row.run])))
+  const retainedDetails = projection.details.filter((detail) => retainedRuns.has(detail.run))
+  const details = retainedDetails.length === projection.details.length ? projection.details : retainedDetails
+  const oldestOpenMs = rows
+    .filter((row) => row.group === "pending")
+    .reduce<number | null>(
+      (oldest, row) => (row.ageMs === null ? oldest : oldest === null ? row.ageMs : Math.max(oldest, row.ageMs)),
+      null,
+    )
+  const retainedSinceMs =
+    projection.coverage.retainedSince === undefined ? undefined : Date.parse(projection.coverage.retainedSince)
+  const reclocked: QueueTimelineProjection = {
+    ...projection,
+    now: nowIso,
+    oldestOpenMs,
+    filters: {
+      ...projection.filters,
+      since: requestedSince,
+    },
+    coverage: {
+      ...projection.coverage,
+      requestedSince,
+      complete:
+        projection.filters.windowMs >= QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS ||
+        retainedSinceMs === undefined ||
+        retainedSinceMs <= sinceMs,
+    },
+    display: {
+      ...projection.display,
+      shown: Math.min(rows.length, projection.display.limit),
+      hidden: Math.max(0, rows.length - projection.display.limit),
+    },
+    rows,
+    details,
+    metrics: queueFlowMetrics(metricFacts, { now, windowMs: metricsWindowMs, oldestOpenMs }),
+  }
+  return reclocked
 }
 
 function failureEvidence(step: QueueStep | undefined): HumanFailureProjection["evidence"] {
@@ -3419,17 +3571,20 @@ export function QueueStatusView({
     <Box flexDirection="column">
       {results.map((result, index) => {
         const projection = humanQueueProjection(result, now, { selected, state, positions })
-        const allowed = projection.pause?.allowedPRs.length === 0 ? "none" : projection.pause?.allowedPRs.join(", ")
+        const pauseHealth = projection.pause === undefined ? undefined : queuePauseHealth(state, projection.pause)
+        const allowed = projection.pause === undefined ? "none" : queuePauseAllowedText(projection.pause, pauseHealth)
         return (
           <Box key={result.base} flexDirection="column" marginTop={index === 0 ? 0 : 1}>
             <SummaryQueue projection={projection} />
             {projection.pause !== undefined && (
               <Box height={1}>
                 <Text wrap="truncate">
-                  <Text color="$fg-warning" bold>
-                    PAUSE
+                  <Text color={pauseHealth?.blocksAll === true ? "$fg-error" : "$fg-warning"} bold>
+                    {pauseHealth?.blocksAll === true ? "⚠ PAUSE BLOCKING EVERYTHING" : "PAUSE"}
                   </Text>
-                  {`: ${projection.pause.reason} (allowed: ${allowed})`}
+                  {pauseHealth?.blocksAll === true
+                    ? ` — ${projection.pause.reason} (allowed: ${allowed})`
+                    : `: ${projection.pause.reason} (allowed: ${allowed})`}
                 </Text>
               </Box>
             )}
@@ -4518,10 +4673,12 @@ function RunnerActivity({
 function TimelineRunnerBox({
   projection,
   runnerRefusal,
+  state,
   live = false,
 }: {
   projection: QueueTimelineProjection
   runnerRefusal?: QueueRunnerRefusal
+  state?: BaysState
   live?: boolean
 }) {
   const runner = projection.runner
@@ -4529,6 +4686,8 @@ function TimelineRunnerBox({
   const runnerStale = timing !== null && timing.ageMs > RUNNER_STALE_MS
   const marker = queueHealthMarker(projection)
   const pause = projection.pause
+  const pauseHealth = pause === undefined || state === undefined ? undefined : queuePauseHealth(state, pause)
+  const pauseAllowed = pause === undefined ? "none" : queuePauseAllowedText(pause, pauseHealth)
   const now = Date.parse(projection.now)
   const drained = timelineLastDrainedMs(projection)
   const downMs =
@@ -4589,12 +4748,19 @@ function TimelineRunnerBox({
         <>
           <Box height={1} flexShrink={0} />
           <Box height={1} flexDirection="row" gap={1} minWidth={0}>
-            <Text color="$fg-warning" flexShrink={0}>
-              ×
+            <Text color={pauseHealth?.blocksAll === true ? "$fg-error" : "$fg-warning"} flexShrink={0}>
+              {pauseHealth?.blocksAll === true ? "⚠" : "×"}
             </Text>
-            <Text color="$fg-warning" wrap="truncate" minWidth={0}>
-              <Text bold>STATUS</Text> HOLD THE LINE — {pause.reason} · allowed{" "}
-              {pause.allowedPRs.length === 0 ? "none" : pause.allowedPRs.join(",")}
+            <Text color={pauseHealth?.blocksAll === true ? "$fg-error" : "$fg-warning"} wrap="truncate" minWidth={0}>
+              {pauseHealth?.blocksAll === true ? (
+                <>
+                  <Text bold>PAUSE BLOCKING EVERYTHING</Text> — {pause.reason} · allowed {pauseAllowed}
+                </>
+              ) : (
+                <>
+                  <Text bold>STATUS</Text> HOLD THE LINE — {pause.reason} · allowed {pauseAllowed}
+                </>
+              )}
             </Text>
           </Box>
         </>
@@ -4869,6 +5035,7 @@ const QUEUE_STATS_MIN_PANE_ROWS = 24
 function ProjectedQueueTimeline({
   projection,
   runnerRefusal,
+  state,
   nav,
   cursorKey,
   onCursor,
@@ -4885,6 +5052,7 @@ function ProjectedQueueTimeline({
 }: {
   projection: QueueTimelineProjection
   runnerRefusal?: QueueRunnerRefusal
+  state?: BaysState
   nav: boolean
   cursorKey?: number
   onCursor?: (index: number) => void
@@ -4942,7 +5110,7 @@ function ProjectedQueueTimeline({
             </Box>
           </>
         )}
-        <TimelineRunnerBox projection={projection} runnerRefusal={runnerRefusal} live={nav} />
+        <TimelineRunnerBox projection={projection} runnerRefusal={runnerRefusal} state={state} live={nav} />
         {/* No blank row above the table header (item 5): the header sits flush
             under the boxes above it. The pills + coverage row moved BELOW the
             list (item 2), rendered after the rows block. */}
@@ -5099,6 +5267,7 @@ export function QueueTimelineView({
       <ProjectedQueueTimeline
         projection={projection}
         runnerRefusal={runnerRefusal}
+        state={state}
         nav={nav}
         cursorKey={cursorKey}
         onCursor={onCursor}

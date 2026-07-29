@@ -120,6 +120,8 @@ import {
 } from "./signals.ts"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliQueueAdministration, YrdCliServices } from "./types.ts"
 import { createQueueReadModel } from "./queue-read-model.ts"
+import { QueueReadBoundary, queueReadBases } from "./queue-read-boundary.ts"
+import { submoduleTrackingWarnings } from "./submodule-tracking.ts"
 
 type RuntimeStep = StepDef<PRShape, PRShape>
 
@@ -1472,6 +1474,10 @@ async function createYrdRuntimeHost(
     }
     if (mode === "active") await drain()
     const services = Object.freeze({
+      [QueueReadBoundary]: Object.freeze({
+        readModel: queueReadModel,
+        submoduleWarnings: mode === "viewer" ? submoduleTrackingWarnings(repository.worktree) : [],
+      }),
       ...(loaded.config.flows === undefined
         ? {}
         : {
@@ -1765,6 +1771,29 @@ export async function runYrdProcess(
           resident,
           posture === "viewer" ? "viewer" : "active",
         )
+        const queueTargets = new Map<string, Promise<Readonly<{ base: string; sha: string }>>>()
+        const resolveReadQueueTarget = (ref: string, cwd: string): Promise<Readonly<{ base: string; sha: string }>> => {
+          const key = `${cwd}\0${ref}`
+          const cached = queueTargets.get(key)
+          if (cached !== undefined) return cached
+          const pending =
+            io.resolveQueueTarget === undefined
+              ? resolveQueueTarget(activeHost.process, activeHost.repository.repo, activeHost.config.base, ref)
+              : io.resolveQueueTarget(ref, cwd)
+          const recoverable = pending.catch((error: unknown) => {
+            queueTargets.delete(key)
+            throw error
+          })
+          queueTargets.set(key, recoverable)
+          return recoverable
+        }
+        if (posture === "viewer") {
+          await Promise.all(
+            queueReadBases(activeHost.app.state(), activeHost.config.base).map((base) =>
+              resolveReadQueueTarget(base, activeHost.repository.worktree),
+            ),
+          )
+        }
         residentArtifacts.root = join(activeHost.repository.stateDir, "artifacts")
         host = activeHost
         const runnerLog = runtimeLog.child("runner")
@@ -1805,10 +1834,7 @@ export async function runYrdProcess(
               io.resolveCommitMeta === undefined
                 ? resolveCommitMeta(activeHost.process, cwd, ref)
                 : io.resolveCommitMeta(ref, cwd),
-            resolveQueueTarget: (ref, cwd) =>
-              io.resolveQueueTarget === undefined
-                ? resolveQueueTarget(activeHost.process, activeHost.repository.repo, activeHost.config.base, ref)
-                : io.resolveQueueTarget(ref, cwd),
+            resolveQueueTarget: resolveReadQueueTarget,
             ...(drain === undefined ? {} : { drainSignal: drain.signal }),
           },
         }
