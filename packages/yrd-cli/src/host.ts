@@ -1142,7 +1142,9 @@ function assertResidentSupportsJournalVersion(stateDir: string, target: number):
   }
   const versions =
     Array.isArray(record.journalVersions) &&
-    record.journalVersions.every((version) => Number.isSafeInteger(version) && version > 0)
+    record.journalVersions.every(
+      (version: unknown) => typeof version === "number" && Number.isSafeInteger(version) && version > 0,
+    )
       ? (record.journalVersions as number[])
       : []
   const capability = Math.max(0, ...versions)
