@@ -24,6 +24,25 @@ function scannedFiles(path: string): string[] {
 }
 
 describe("noun cutover ratchet", () => {
+  it("keeps managed agent orchestration out of Yrd product code and docs", () => {
+    const violations = [
+      join(root, "README.md"),
+      join(root, "ARCHITECTURE.md"),
+      join(root, "TODO.md"),
+      ...scannedFiles(join(root, "packages", "yrd-cli", "src")),
+    ].flatMap((file) =>
+      readFileSync(file, "utf8")
+        .split(/\r?\n/u)
+        .flatMap((line, index) =>
+          /\byrd do\b|\bManagedDo\b|YRD_DO_|\.command\("do"/u.test(line)
+            ? [`${file.slice(root.length + 1)}:${index + 1}: ${line.trim()}`]
+            : [],
+        ),
+    )
+
+    expect(violations, "agent launch/composition does not belong in Yrd product code").toEqual([])
+  })
+
   it("documents persistent open separately from scoped run", () => {
     const readme = readFileSync(join(root, "README.md"), "utf8")
     const prose = readme.replaceAll(/\s+/gu, " ")

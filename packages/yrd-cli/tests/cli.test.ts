@@ -2401,11 +2401,6 @@ describe("runYrd", () => {
     expect(recutInputs).toHaveLength(1)
     expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("already-landed")
     expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: absorbedHead })
-    await expect(runInternals.observeManagedDoDelivery(app, "PR1")).resolves.toEqual({
-      state: "already-landed",
-      landingSha: nextBase,
-      findings: [],
-    })
     const appended = (await Array.fromAsync(app.events())).slice(before)
     expect(appended.filter(({ name }) => name === "pr/already-landed")).toEqual([
       expect.objectContaining({

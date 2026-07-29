@@ -63,7 +63,6 @@ import { loadYrdConfig, renderYrdConfigScaffold } from "./config.ts"
 import { diagnoseYrdFlows } from "./config-doctor.ts"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import { actionableFailure, formatActionableFailure } from "./actionable-error.ts"
-import type { ManagedDoDelivery } from "./do-managed.ts"
 import {
   canonicalizeYrdCommandAliases,
   classifyFailure,
@@ -2096,17 +2095,6 @@ function bayGuestPrimer(bay: Bay): string {
   )
 }
 
-function issueMissionPrimer(resolved: BayOpenResolution, selector: string): string {
-  const mission =
-    resolved.via === "pr"
-      ? `Mission: continue PR ${selector} on branch ${resolved.branch}.`
-      : `Mission: work issue ${resolved.issue ?? selector} on branch ${resolved.branch}.`
-  return (
-    `${mission} Read the issue and its acceptance criteria, claim the authorized work before editing, ` +
-    "follow the durable work order, test first, and hand the completed evidence back through the repository workflow."
-  )
-}
-
 /**
  * Launch the coding agent with `primer` as its opening prompt.
  *
@@ -2136,7 +2124,7 @@ async function enterBay(
   const runtime = io as RuntimeInvocationIO
   const bay = resolveGuestBay(app, selector, runtime[RuntimeInvocationCwd] ?? io.cwd ?? process.cwd())
   // A guest attaches as itself: `--name` if given, otherwise its own ambient
-  // identity. Unlike `do`, nobody else's session is being created here.
+  // identity. Nobody else's session is being created here.
   const baseName = guestSessionBaseName(bay, runtime[RuntimeSessionName] ?? runtime[RuntimeAmbientName])
   const child = await runBayChild(processService, bay, guestSessionArgv(baseName, guestArgv(services, bay, argv)), io, {
     env: services.environment ?? process.env,
@@ -2449,54 +2437,15 @@ async function runBaySession(
   }
 }
 
-async function doWork(
-  app: YrdCliApp,
-  services: YrdCliServices,
-  selector: string,
-  io: YrdCliIO,
-): Promise<YrdCliExitCode> {
-  const seatIntent: BayOpenIntent = { adopt: true }
-  let issueFailure: unknown
-  try {
-    await app.issues.resolve(app.issues.ref(selector))
-  } catch (error) {
-    issueFailure = error
-  }
-  if (issueFailure === undefined) {
-    return runBaySession(
-      app,
-      services,
-      selector,
-      (resolved) => agentArgv(issueMissionPrimer(resolved, selector)),
-      {},
-      io,
-      {},
-      { ...seatIntent, issueResolved: true, via: "issue" },
-    )
-  }
-  const targetedPr = app.bays.pr(selector)
-  if (targetedPr === undefined) throw issueFailure
-  return runBaySession(
-    app,
-    services,
-    undefined,
-    (resolved) => agentArgv(issueMissionPrimer(resolved, selector)),
-    { pr: selector, bay: derivedWorkName(selector) },
-    io,
-    {},
-    { ...seatIntent, targetedPr, via: "pr" },
-  )
-}
-
 function commandOutputTail(result: ProcessResult, limit = 600): string {
   const text = (result.stderr.trim() === "" ? result.stdout : result.stderr).trim()
   if (text === "") return "(no output)"
   return text.length <= limit ? text : `…${text.slice(-limit)}`
 }
 
-/** Record or reuse the one draft PR for an issue branch. This deliberately
- * delegates to the public `pr create` core so the managed path and the
- * standalone ensure verb cannot drift on PR identity, revision, or tracking. */
+/** Record or reuse the one draft PR for an issue branch. The issue ensure
+ * surface delegates to the public `pr create` core so PR identity, revision,
+ * and tracking cannot drift. */
 async function ensureIssueDraft(
   app: YrdCliApp,
   issue: string,
@@ -3955,31 +3904,6 @@ function prLandingOutcome(pr: DeepReadonly<PR>): PRLandingOutcome {
   }
 }
 
-/** Refresh the append-only journal before classifying managed delivery.
- * The resident queue runner writes from another process, so the command's
- * startup projection cannot prove a later landing without replaying new frames. */
-export async function observeManagedDoDelivery(app: YrdCliApp, selector: string): Promise<ManagedDoDelivery> {
-  await app.refresh()
-  const pr = requiredPr(app, selector)
-  const state = prDeliveryState(pr)
-  const landing = prLandingOutcome(pr)
-  const landingSha =
-    landing.outcome === "landed"
-      ? landing.landingSha
-      : landing.outcome === "already-landed"
-        ? landing.candidateSha
-        : undefined
-  const findings = app.queue
-    .audit()
-    .findings.filter((finding) => finding.pr === undefined || finding.pr === pr.id)
-    .map((finding) => ({
-      code: finding.code,
-      message: finding.message,
-      ...(finding.count === undefined ? {} : { count: finding.count }),
-    }))
-  return { state, ...(landingSha === undefined ? {} : { landingSha }), findings }
-}
-
 function allQueueRuns(app: YrdCliApp): Run[] {
   return Queues.ids(stateOf(app).queues)
     .map((id) => app.queue.get(id))
@@ -4668,7 +4592,7 @@ function isBracketedBayCommand(
     return true
   }
   return (
-    (name === "in" || name === "do" || name === "sh" || name === "run" || name === "ag") &&
+    (name === "in" || name === "sh" || name === "run" || name === "ag") &&
     (parent === "yrd" || parent === "git yrd")
   )
 }
@@ -7865,10 +7789,6 @@ function addRootBayCommands(
       const request = bayInOperands(bay, command, io)
       setExit(await enterBay(installed(), installedServices(), request.selector, request.argv, io))
     })
-  program
-    .command("do <issue-or-pr>")
-    .description("work an issue first, or continue an existing PR when no issue resolves")
-    .action(async (selector) => setExit(await doWork(installed(), installedServices(), selector, io)))
   program
     .command("sh [config]")
     .description("run $SHELL in a scoped Bay")

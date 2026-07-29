@@ -179,6 +179,13 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
       message: `yrd: remove '${retiredWrapper}:' and configure the required checks as 'checks: [...]'`,
     })
   }
+  if (typeof value === "object" && value !== null && "do" in value) {
+    throw createFailure({
+      kind: "configuration",
+      code: "invalid-config",
+      message: "yrd: config do is not supported; .yrd.yml contains delivery correctness only",
+    })
+  }
   const parsed = ProjectSchema.safeParse(value ?? {})
   if (parsed.success) {
     const { base, batch, checks, requires, contest, notify } = parsed.data

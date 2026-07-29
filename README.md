@@ -205,9 +205,6 @@ yrd bay run --pr task/fix-release -- vi README.md
 yrd in fix-release ag
 yrd in
 
-# Resolve an issue first (or fall back to an existing PR) and launch ag with a mission:
-yrd do @tracker/fix-release
-
 # Ensure the durable Git-side workspace and tracked draft without launching a process:
 yrd issue ensure @tracker/fix-release
 
@@ -315,8 +312,6 @@ The top-level surface is deliberately small:
 ```text
 yrd                         dashboard across queues, PRs, and recent outcomes
 yrd in                     attach a PID-addressed guest to an existing Bay
-yrd do                     resolve an issue or PR and run an ag mission;
-                           --seat drives the managed composition instead
 yrd run                    act on individual queue runs
 yrd sh                     run $SHELL in a scoped Bay
 yrd ag                     run ag in a scoped Bay
@@ -341,7 +336,6 @@ yrd bay run [<issue>] [--issue <issue>] [--pr <selector>] [--bay <name>]
   [--keep] [-- <command...>]
 yrd bay in [<bay>] [ag | -- <command...>]
 yrd in [<bay>] [ag | -- <command...>]
-yrd do <issue-or-pr>
 yrd sh [<issue>] [--issue <issue>] [--pr <selector>] [--bay <name>]
   [--keep]
 yrd ag [<issue>] [--issue <issue>] [--pr <selector>] [--bay <name>]
@@ -380,10 +374,12 @@ callers use the PR-native required-check surface below.
 | `submit`  | Bays, PRs, or source branches                      | Creates or advances PRs to `submitted`; never executes Queue work                                                                                                     |
 | `close`   | Zero or more bays                                  | Reaps and verifies processes holding each Bay, then checkpoints and deprovisions it; survivor PIDs fail loudly. `--withdraw` explicitly cancels an associated live PR |
 
-`yrd do <issue-or-pr>` remains the ordinary interactive issue-first Bay
-workflow. Assignment, seat lifecycle, and agent launch belong to the calling
-habitat or coordination layer; Yrd no longer accepts repository `do:` policy or
-managed `--seat`/`--lane` options.
+#### Process launch boundary
+
+Yrd owns Git-side delivery: issue resolution, Bays, draft PR identity, recuts, and
+serialized landing. Agent selection, launch, supervision, and retry belong to the
+launcher. A launcher can compose `hab run` with `yrd issue ensure` and the
+ordinary PR/Queue verbs without putting agent policy in Yrd or `.yrd.yml`.
 
 Submodule repositories are ready when `bay open` returns and before a `bay run`
 child starts. Yrd
