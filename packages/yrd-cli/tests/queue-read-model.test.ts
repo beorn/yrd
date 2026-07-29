@@ -198,14 +198,18 @@ describe("queue read model", () => {
     const events = attemptEvents("cache")
     await journal.append(journalFrame("cache", events), 0)
 
-    const first = await model.attempts()
-    expect(await model.attempts()).toBe(first)
+    const first = await model.snapshot()
+    const unchanged = await model.snapshot()
+    expect(unchanged).toMatchObject({ cursor: first.cursor, generation: first.generation })
+    expect(unchanged.attempts).toBe(first.attempts)
 
     await journal.views.rebuild()
 
-    const rebuilt = await model.attempts()
-    expect(rebuilt).toEqual(first)
-    expect(rebuilt).not.toBe(first)
+    const rebuilt = await model.snapshot()
+    expect(rebuilt.cursor).toBe(first.cursor)
+    expect(rebuilt.generation).toBeGreaterThan(first.generation)
+    expect(rebuilt.attempts).toEqual(first.attempts)
+    expect(rebuilt.attempts).not.toBe(first.attempts)
   })
 
   it("uses the run/sequence index for scoped attempt reads", async () => {

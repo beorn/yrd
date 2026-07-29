@@ -4,13 +4,22 @@
 
 import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { Database } from "bun:sqlite"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
-import { createLogger, type LogEvent } from "loggily"
+import { createLogger, type Event as LoggerEvent, type LogEvent } from "loggily"
 import {
   createBayJobDefs,
   currentPRRev,
@@ -99,6 +108,7 @@ import {
 } from "../src/queue-status-view.tsx"
 import { withLiveRenderer } from "../src/live-renderer.ts"
 import * as runInternals from "../src/run.ts"
+import { QueueReadBoundary } from "../src/queue-read-boundary.ts"
 import { queueStats } from "../src/time-stats.ts"
 import type { YrdCliState } from "../src/types.ts"
 import { YRD_VERSION } from "../src/version.ts"
@@ -11546,6 +11556,214 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     comments: [],
     checkRequests: [],
   } satisfies PR
+
+  it("keeps literal one-shot queue reads fork-free", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "yrd-queue-read-forks-"))
+    const bin = join(repo, "bin")
+    const log = join(repo, "git.log")
+    mkdirSync(bin)
+    writeFileSync(log, "")
+    execFileSync("git", ["init", "-q", repo])
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-qm", "base"])
+    const baseSha = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()
+
+    const originalPath = process.env.PATH ?? ""
+    writeFileSync(
+      join(bin, "git"),
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\nPATH=${JSON.stringify(originalPath)} exec git "$@"\n`,
+    )
+    chmodSync(join(bin, "git"), 0o755)
+
+    const app = await createApp()
+    try {
+      await openAndSubmit(app)
+      process.env.PATH = `${bin}:${originalPath}`
+      const resolveQueueTarget = async (ref: string) => ({
+        base: ref,
+        sha: baseSha,
+      })
+      const services = {
+        [QueueReadBoundary]: { submoduleWarnings: [] },
+      } as unknown as YrdCliServices
+
+      for (const argv of [yrd("queue", "list", "--json"), yrd("--json")]) {
+        const output = outputIO({ cwd: repo, stateDir: join(repo, ".git", "yrd"), resolveQueueTarget })
+        expect(await runYrd(app, argv, output.io, services), output.stderr()).toBe(0)
+      }
+
+      expect(readFileSync(log, "utf8").trim().split("\n").filter(Boolean)).toEqual([])
+    } finally {
+      process.env.PATH = originalPath
+      await app.close()
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
+  it("reuses durable watch facts on an unchanged shipping-path tick and advances only the clock", async () => {
+    const app = await createApp()
+    try {
+      await openAndSubmit(app)
+      let now = Date.parse("2026-07-09T12:01:00.000Z")
+      let targetResolutions = 0
+      let mounted: ReactElement | undefined
+      const output = outputIO({
+        now: () => now,
+        resolveQueueTarget: async () => {
+          targetResolutions += 1
+          return { base: "main", sha: BASE_SHA }
+        },
+      })
+      const attempts: readonly QueueAttempt[] = Object.freeze([])
+      const cursor = (await app.journalSnapshot()).asOf.cursor
+      const journalSnapshot = vi.fn(app.journalSnapshot.bind(app))
+      const viewer = { ...app, journalSnapshot } as TestApp
+      const services = {
+        [QueueReadBoundary]: {
+          readModel: { snapshot: async () => ({ cursor, generation: 1, attempts }) },
+          submoduleWarnings: [],
+        },
+      } as unknown as YrdCliServices
+      const live = withLiveRenderer(output.io, async (element) => {
+        mounted = element
+      })
+
+      expect(await runYrd(viewer, yrd("queue", "list", "--watch"), live, services), output.stderr()).toBe(0)
+      if (mounted === undefined) throw new Error("expected queue watch pane to mount")
+      const { initial, load } = mounted.props as QueueWatchPaneProps
+      expect(targetResolutions).toBe(1)
+      expect(journalSnapshot).toHaveBeenCalledTimes(1)
+
+      now += 1_000
+      const tick = await load()
+
+      expect(targetResolutions, "an unchanged tick must not resolve the queue target again").toBe(1)
+      expect(journalSnapshot, "an unchanged durable cursor must not fold the Journal again").toHaveBeenCalledTimes(1)
+      expect(tick.results).toBe(initial.results)
+      expect(tick.projection?.details).toBe(initial.projection?.details)
+      expect(tick.projection?.timeStatsFacts).toBe(initial.projection?.timeStatsFacts)
+      expect(tick.projection?.rows.map((row) => row.id)).toEqual(initial.projection?.rows.map((row) => row.id))
+      expect(tick.projection?.rows[0]?.ageMs).toBe((initial.projection?.rows[0]?.ageMs ?? 0) + 1_000)
+      expect(tick.now).toBe(now)
+      expect(tick.projection?.now).toBe(new Date(now).toISOString())
+    } finally {
+      await app.close()
+    }
+  })
+
+  it("rebuilds on Journal cursor changes and reports clock-only cache hits in queue-read spans", async () => {
+    const journal = createMemoryJournal()
+    const logs: LoggerEvent[] = []
+    const runner = await createApp({ journal })
+    const viewer = await createApp({
+      journal,
+      log: createLogger("yrd", [{ level: "trace" }, { write: (event: LoggerEvent) => logs.push(event) }]),
+    })
+    let now = Date.parse("2026-07-09T12:01:00.000Z")
+    let targetResolutions = 0
+    const loader = runInternals.createQueueListSnapshotLoader(
+      viewer,
+      [],
+      {},
+      outputIO({
+        now: () => now,
+        resolveQueueTarget: async () => {
+          targetResolutions += 1
+          return { base: "main", sha: BASE_SHA }
+        },
+      }).io,
+      {},
+      false,
+    )
+    try {
+      const empty = await loader.load()
+      expect(empty.results.flatMap((result) => result.prs)).toEqual([])
+      expect(targetResolutions).toBe(1)
+
+      await openAndSubmit(runner)
+      const changed = await loader.load()
+      expect(changed.results.flatMap((result) => result.prs.map((pr) => pr.id))).toContain("PR1")
+      expect(targetResolutions, "a new Journal cursor must rebuild the durable projection").toBe(2)
+
+      now += 1_000
+      const reclocked = await loader.load()
+      expect(targetResolutions, "an unchanged cursor must reuse the durable projection").toBe(2)
+      expect(reclocked.results).toBe(changed.results)
+      expect(reclocked.projection.timeStatsFacts).toBe(changed.projection.timeStatsFacts)
+
+      const spans = logs.filter(
+        (event): event is Extract<LoggerEvent, { kind: "span" }> =>
+          event.kind === "span" && event.namespace === "yrd:queue-read:snapshot",
+      )
+      expect(spans.map(({ props }) => props)).toEqual([
+        expect.objectContaining({ cursor: 0, projection: "rebuilt", attempts: "changed" }),
+        expect.objectContaining({ cursor: expect.any(Number), projection: "rebuilt", attempts: "changed" }),
+        expect.objectContaining({ cursor: expect.any(Number), projection: "clock-only", attempts: "memory" }),
+      ])
+      expect(spans[1]?.props?.cursor).toBe(spans[2]?.props?.cursor)
+      expect(spans[2]?.props).toMatchObject({
+        generation: 0,
+        state: "journal",
+        runner: "unchanged",
+        results: changed.results.length,
+        rows: changed.projection.rows.length,
+        timeStatsFacts: changed.projection.timeStatsFacts.length,
+      })
+    } finally {
+      await Promise.all([runner.close(), viewer.close()])
+    }
+  })
+
+  it("invalidates an unchanged Journal projection when the resident-runner token advances", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-watch-runner-token-"))
+    const stateDir = join(root, "yrd")
+    const statusPath = join(stateDir, "resident-runner", "status.json")
+    mkdirSync(join(statusPath, ".."), { recursive: true })
+    const app = await createApp()
+    const attempts: readonly QueueAttempt[] = Object.freeze([])
+    let targetResolutions = 0
+    let now = Date.parse("2026-07-09T12:01:00.000Z")
+    const runner = {
+      pid: process.pid,
+      startedAt: "2026-07-09T12:00:00.000Z",
+      lastTickAt: "2026-07-09T12:00:58.000Z",
+      implementationSource: `git:${"1".repeat(40)}`,
+    }
+    const writeRunner = (lastTickAt: string) => writeFileSync(statusPath, JSON.stringify({ ...runner, lastTickAt }))
+    writeRunner(runner.lastTickAt)
+    try {
+      await openAndSubmit(app)
+      const loader = runInternals.createQueueListSnapshotLoader(
+        app,
+        [],
+        {},
+        outputIO({
+          stateDir,
+          now: () => now,
+          resolveQueueTarget: async () => {
+            targetResolutions += 1
+            return { base: "main", sha: BASE_SHA }
+          },
+        }).io,
+        { queueReadModel: { attempts: async () => attempts } },
+        false,
+      )
+
+      const first = await loader.load()
+      now += 1_000
+      const reclocked = await loader.load()
+      expect(targetResolutions).toBe(1)
+      expect(reclocked.results).toBe(first.results)
+
+      writeRunner("2026-07-09T12:00:59.000Z")
+      const heartbeat = await loader.load()
+      expect(targetResolutions, "a new heartbeat token must rebuild runner-derived facts").toBe(2)
+      expect(heartbeat.results).not.toBe(reclocked.results)
+      expect(heartbeat.projection.runner?.lastTickAt).toBe("2026-07-09T12:00:59.000Z")
+    } finally {
+      await app.close()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
 
   it("bounds the watch Git runner and reports a timeout", async () => {
     const requests: ProcessRequest[] = []

@@ -12,11 +12,27 @@ export type QueueReadModel = Readonly<{
   attempts(): Promise<readonly QueueAttempt[]>
 }>
 
-export function createQueueReadModel(options: Readonly<{ dir: string }>): QueueReadModel {
+type QueueReadModelSnapshot = Readonly<{
+  cursor: number
+  generation: number
+  attempts: readonly QueueAttempt[]
+}>
+
+export type VersionedQueueReadModel = QueueReadModel &
+  Readonly<{
+    snapshot(): Promise<QueueReadModelSnapshot>
+  }>
+
+export function createQueueReadModel(options: Readonly<{ dir: string }>): VersionedQueueReadModel {
   const path = join(options.dir, "journal.sqlite")
   let cachedCursor: number | undefined
   let cachedGeneration: number | undefined
   let cachedAttempts: readonly QueueAttempt[] = []
+  const empty: QueueReadModelSnapshot = Object.freeze({
+    cursor: 0,
+    generation: 0,
+    attempts: cachedAttempts,
+  })
   const view: JournalView = Object.freeze({
     id: VIEW_ID,
     version: VIEW_VERSION,
@@ -36,23 +52,21 @@ export function createQueueReadModel(options: Readonly<{ dir: string }>): QueueR
     },
   })
 
-  return Object.freeze({
-    view,
-    attempts() {
-      return Promise.resolve().then(() => {
-        if (!existsSync(path)) return []
-        using database = new Database(path, { readonly: true, strict: true })
-        database.run("BEGIN")
-        try {
-          const { cursor, generation } = assertCurrentQueueView(database, view)
-          if (cursor === cachedCursor && generation === cachedGeneration) {
-            database.run("COMMIT")
-            return cachedAttempts
-          }
-          const attempts = Object.freeze(
-            database
-              .query<QueueAttemptRow, []>(
-                `SELECT
+  const snapshot = (): Promise<QueueReadModelSnapshot> =>
+    Promise.resolve().then(() => {
+      if (!existsSync(path)) return empty
+      using database = new Database(path, { readonly: true, strict: true })
+      database.run("BEGIN")
+      try {
+        const { cursor, generation } = assertCurrentQueueView(database, view)
+        if (cursor === cachedCursor && generation === cachedGeneration) {
+          database.run("COMMIT")
+          return Object.freeze({ cursor, generation, attempts: cachedAttempts })
+        }
+        const attempts = Object.freeze(
+          database
+            .query<QueueAttemptRow, []>(
+              `SELECT
                  job_id,
                  run_id,
                  step_name,
@@ -68,20 +82,26 @@ export function createQueueReadModel(options: Readonly<{ dir: string }>): QueueR
                  result_json
                FROM queue_attempts
                ORDER BY sequence_id`,
-              )
-              .all()
-              .map(queueAttempt),
-          )
-          database.run("COMMIT")
-          cachedCursor = cursor
-          cachedGeneration = generation
-          cachedAttempts = attempts
-          return attempts
-        } catch (error) {
-          database.run("ROLLBACK")
-          throw error
-        }
-      })
+            )
+            .all()
+            .map(queueAttempt),
+        )
+        database.run("COMMIT")
+        cachedCursor = cursor
+        cachedGeneration = generation
+        cachedAttempts = attempts
+        return Object.freeze({ cursor, generation, attempts })
+      } catch (error) {
+        database.run("ROLLBACK")
+        throw error
+      }
+    })
+
+  return Object.freeze({
+    view,
+    snapshot,
+    async attempts() {
+      return (await snapshot()).attempts
     },
   })
 }

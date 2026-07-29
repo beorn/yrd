@@ -2511,6 +2511,73 @@ export function queueTimelineProjection(
   }
 }
 
+function reclockTimelineRow(row: QueueTimelineProjectedRow, nowIso: string): QueueTimelineProjectedRow {
+  if (row.group === "completed") return row
+  const ageMs = timelineAge(row.sourceReadyAt, nowIso, `PR '${row.pr}' source-ready age`)
+  if (row.group === "running") {
+    return {
+      ...row,
+      ageMs,
+      totalMs: timelineAge(row.timestamp ?? undefined, nowIso, `Run '${row.run ?? "unknown"}' active duration`),
+    }
+  }
+  if (row.group === "pending") {
+    const queueWaitMs = timelineAge(row.timestamp ?? undefined, nowIso, `PR '${row.pr}' queue wait`)
+    return { ...row, ageMs, waitMs: queueWaitMs, queueWaitMs }
+  }
+  return { ...row, ageMs }
+}
+
+/**
+ * Advance only wall-clock-derived queue facts while the Journal cursor, read
+ * model generation, and resident-runner token stay unchanged. Durable Run/PR
+ * folding, detail construction, and terminal statistics remain shared by
+ * identity; time can only move rows out of a fixed window, never into it.
+ */
+export function reclockQueueTimelineProjection(
+  projection: QueueTimelineProjection,
+  now: number,
+  metricsWindowMs: number,
+): QueueTimelineProjection {
+  const nowIso = new Date(now).toISOString()
+  if (nowIso === projection.now) return projection
+  const sinceMs = now - projection.filters.windowMs
+  const rows = projection.rows
+    .map((row) => reclockTimelineRow(row, nowIso))
+    .filter((row) => row.timestampMs === null || (row.timestampMs >= sinceMs && row.timestampMs <= now))
+  const retainedRuns = new Set(rows.flatMap((row) => (row.run === undefined ? [] : [row.run])))
+  const retainedDetails = projection.details.filter((detail) => retainedRuns.has(detail.run))
+  const details = retainedDetails.length === projection.details.length ? projection.details : retainedDetails
+  const oldestOpenMs = rows
+    .filter((row) => row.group === "pending")
+    .reduce<number | null>(
+      (oldest, row) => (row.ageMs === null ? oldest : oldest === null ? row.ageMs : Math.max(oldest, row.ageMs)),
+      null,
+    )
+  const retainedSinceMs =
+    projection.coverage.retainedSince === undefined ? undefined : Date.parse(projection.coverage.retainedSince)
+  return {
+    ...projection,
+    now: nowIso,
+    oldestOpenMs,
+    coverage: {
+      ...projection.coverage,
+      complete:
+        projection.filters.windowMs >= QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS ||
+        retainedSinceMs === undefined ||
+        retainedSinceMs <= sinceMs,
+    },
+    display: {
+      ...projection.display,
+      shown: Math.min(rows.length, projection.display.limit),
+      hidden: Math.max(0, rows.length - projection.display.limit),
+    },
+    rows,
+    details,
+    metrics: queueFlowMetrics(projection.timeStatsFacts, { now, windowMs: metricsWindowMs, oldestOpenMs }),
+  }
+}
+
 function failureEvidence(step: QueueStep | undefined): HumanFailureProjection["evidence"] {
   const location = stepLocations(step)[0]?.location
   if (location === undefined) return undefined
