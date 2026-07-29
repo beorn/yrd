@@ -37,6 +37,7 @@ import {
   type JsonValue,
 } from "@yrd/core"
 import { withJobs, type Job, type JobResult } from "@yrd/job"
+import { defineConfig, yrd as yrdConfig } from "@yrd/config"
 import { createExclusive, createJournal } from "@yrd/persistence"
 import { createProcess, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import {
@@ -11683,6 +11684,76 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     }
   })
 
+  it("routes queue list attempt history through the installed read model without scanning app.events", async () => {
+    const app = await createApp({ failingCheck: true })
+    try {
+      await openAndSubmit(app)
+      await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+      const attempts = await queueLogAttempts(app.events())
+      let reads = 0
+      const noJournalScan = new Proxy(app, {
+        get(target, property, receiver) {
+          if (property === "events") {
+            return () => {
+              throw new Error("queue list scanned app.events")
+            }
+          }
+          return Reflect.get(target, property, receiver) as unknown
+        },
+      })
+      const services = {
+        queueReadModel: {
+          async attempts() {
+            reads += 1
+            return attempts
+          },
+        },
+      } as unknown as YrdCliServices
+
+      await expect(runYrd(noJournalScan, yrd("queue", "list", "--json"), outputIO().io, services)).resolves.toBe(0)
+      expect(reads).toBe(1)
+    } finally {
+      await app.close()
+    }
+  })
+
+  it("rebuilds registered Journal views through the explicit doctor repair path", async () => {
+    const app = await createApp()
+    try {
+      let rebuilds = 0
+      const services: YrdCliServices = {
+        config: defineConfig(
+          yrdConfig.flow({
+            name: "main",
+            rev: "1",
+            on: () => true,
+            steps: [yrdConfig.check("check")],
+          }),
+        ),
+        journal: {
+          async importOrphan() {
+            throw new Error("not used")
+          },
+          async rebuildViews() {
+            rebuilds += 1
+            return { cursor: 7, frames: 6, views: 1 }
+          },
+        },
+      }
+      const output = outputIO()
+
+      await expect(runYrd(app, yrd("doctor", "--rebuild-views", "--json"), output.io, services)).resolves.toBe(0)
+      expect(JSON.parse(output.stdout())).toMatchObject({
+        command: "doctor",
+        findings: [],
+        rebuilt: { cursor: 7, frames: 6, views: 1 },
+      })
+      expect(rebuilds).toBe(1)
+    } finally {
+      await app.close()
+    }
+  })
+
   it("reuses the attempt projection across heartbeat-only watch ticks and invalidates on a Job transition", async () => {
     const app = await createApp({ failingCheck: true })
     try {
@@ -11730,6 +11801,27 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       } as YrdCliState
       await resolver.resolve(transitioned)
       expect(journalReads).toBe(2)
+    } finally {
+      await app.close()
+    }
+  })
+
+  it("lets the durable read-model cursor decide whether watch ticks need a new projection", async () => {
+    const app = await createApp()
+    try {
+      let reads = 0
+      const attempts: readonly QueueAttempt[] = []
+      const resolver = runInternals.createQueueAttemptResolver({
+        attempts() {
+          reads += 1
+          return Promise.resolve(attempts)
+        },
+      })
+      const state = app.state() as YrdCliState
+
+      await expect(resolver.resolve(state)).resolves.toBe(attempts)
+      await expect(resolver.resolve(state)).resolves.toBe(attempts)
+      expect(reads).toBe(2)
     } finally {
       await app.close()
     }

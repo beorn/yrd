@@ -4,10 +4,11 @@ import type { Yrd } from "@yrd/core"
 import type { HasJobs, HasRunner, JobCommands, JobsState } from "@yrd/job"
 import type { GitPRRecutter, HasQueue, QueueAuditResult, QueueCommands, QueuesState } from "@yrd/queue"
 import type { HasIssues } from "@yrd/issue"
-import type { OrphanJournalImportResult } from "@yrd/persistence"
+import type { JournalViewRebuildResult, OrphanJournalImportResult } from "@yrd/persistence"
 import type { Process } from "@yrd/process"
 import type { Scope } from "@silvery/scope"
 import type { ManagedDoConfig } from "./do-managed.ts"
+import type { QueueReadModel } from "./queue-read-model.ts"
 import type { SubmoduleBranchResolver } from "./submodule-tracking.ts"
 import type { YrdConfig } from "@yrd/config"
 
@@ -34,6 +35,7 @@ export type YrdCliQueueAdministration = Readonly<{
 
 export type YrdCliJournalAdministration = Readonly<{
   importOrphan(sourcePath: string): Promise<OrphanJournalImportResult>
+  rebuildViews?(): Promise<JournalViewRebuildResult>
 }>
 
 export type YrdCliState = Readonly<{
@@ -55,6 +57,7 @@ export type YrdCliApp = Yrd<YrdCliState, YrdCliCommands> &
 
 export type YrdCliServices = Readonly<{
   queue?: YrdCliQueueAdministration
+  queueReadModel?: Pick<QueueReadModel, "attempts">
   recut?: GitPRRecutter
   journal?: YrdCliJournalAdministration
   process?: Pick<Process, "run" | "reapPath">

@@ -14,7 +14,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { currentPRRev, prBaseSha, prDeliveryState } from "@yrd/bay"
 import { createFailure, createMemoryJournal } from "@yrd/core"
 import { DIAGNOSTICS_COMPARISON_READY, GitCheckEvidenceSchema, IntegrationProofSchema, Queues } from "@yrd/queue"
-import { createExclusive, createJournal } from "@yrd/persistence"
+import { createExclusive, createJournal, createReadOnlyJournal } from "@yrd/persistence"
 import { createProcess, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createLogger, type ConditionalLogger } from "loggily"
 import * as z from "zod"
@@ -66,7 +66,7 @@ async function git(repo: string, ...args: string[]): Promise<string> {
 }
 
 async function journalEnvelope(repo: string) {
-  return Array.fromAsync(testJournal(join(repo, ".git", "yrd")).read())
+  return Array.fromAsync(createReadOnlyJournal({ dir: join(repo, ".git", "yrd") }).read())
 }
 
 function testJournal(dir: string, log?: ConditionalLogger) {
@@ -1104,6 +1104,49 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
 
     const frames = (await journalEnvelope(repo)).flatMap(({ values }) => values)
     expect(frames).toEqual([expect.objectContaining({ compatibility: CURRENT_JOURNAL_COMPATIBILITY })])
+  })
+
+  it("boots doctor --rebuild-views through a stale Journal view registration", async () => {
+    const { repo, featureSha } = await repository()
+    await commitYrdConfig(repo, 'base: main\nbatch: 1\nsteps: [check]\ncheck: "true"\n')
+    {
+      await using host = await createYrdHost({ cwd: repo })
+      await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    }
+    const stateDir = join(repo, ".git", "yrd")
+    {
+      using database = new Database(join(stateDir, "journal.sqlite"), { readwrite: true, strict: true })
+      database.run("UPDATE journal_views SET cursor = cursor - 1")
+    }
+    let stdout = ""
+    let stderr = ""
+
+    await expect(
+      runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "doctor", "--rebuild-views", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+    ).resolves.toBe(0)
+    expect(stderr).toBe("")
+    const result = JSON.parse(stdout) as { rebuilt?: { cursor?: number } }
+    expect(result.rebuilt?.cursor).toBeGreaterThan(0)
+    {
+      using database = new Database(join(stateDir, "journal.sqlite"), { readonly: true, strict: true })
+      const head = Number(
+        database.query<{ value: string }, []>("SELECT value FROM journal_metadata WHERE key='head_cursor'").get()
+          ?.value,
+      )
+      expect(
+        database
+          .query<{ cursor: number }, []>("SELECT cursor FROM journal_views WHERE view_id='yrd.queue-attempts'")
+          .get()?.cursor,
+      ).toBe(head)
+    }
   })
 
   it("routes a failed Run to its revision submitter without awaiting delivery", async () => {
@@ -2494,6 +2537,7 @@ notify:
 
     await using host = await createYrdHost({ cwd: repo })
     expect(host.services.recut).toBeDefined()
+    await expect(host.services.queueReadModel?.attempts()).resolves.toEqual([])
     const headSha = await git(repo, "rev-parse", "issue/feature")
     await host.app.bays.submit({ branch: "issue/feature", headSha, base: "main" })
 
@@ -2561,6 +2605,10 @@ notify:
           { runner: "legacy", leaseMs: 60_000, now: () => Date.parse("2026-01-01T00:00:00.000Z") },
         ),
       ).rejects.toThrow("host legacy fixture")
+    }
+    {
+      using database = new Database(join(stateDir, "journal.sqlite"), { readwrite: true, strict: true })
+      database.run("DROP TABLE journal_views")
     }
 
     await using host = await createYrdHost({ cwd: repo })

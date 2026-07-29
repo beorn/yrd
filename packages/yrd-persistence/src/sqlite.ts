@@ -70,6 +70,7 @@ const LEGACY_V3_FILE = "events-v3.jsonl"
 const LEGACY_CUTOVER = `{"v":4,"cutover":"${LEGACY_MANIFEST_FILE}"}\n`
 const SQLITE_CUTOVER_VERSION = 1
 const SCHEMA_VERSION = 2
+const JOURNAL_VIEWS_GENERATION = "journal_views_generation"
 const LEGACY_PRIVATE_PATH = /^events-v4\.[a-zA-Z0-9._-]+$/u
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
@@ -77,10 +78,45 @@ const UUID_V7_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u
 const LEGACY_CANDIDATE_PATH = /^\.journal\.sqlite-[0-9a-f-]{36}$/iu
 
-type JournalOptions = Readonly<{
+export type JournalViewEntry = Readonly<{
+  cursor: number
+  value: unknown
+}>
+
+/**
+ * One rebuildable, SQLite-backed query view maintained by the Journal writer.
+ *
+ * The contributing package owns every domain table, index, and projection
+ * rule. Persistence owns only registration and the transaction that invokes
+ * `apply`, so a thrown projection rolls back the authoritative Frame too.
+ */
+export type JournalView = Readonly<{
+  id: string
+  version: number
+  fingerprint: string
+  install(database: Database): void
+  reset(database: Database): void
+  apply(database: Database, entry: JournalViewEntry): void
+}>
+
+export type JournalViewRebuildResult = Readonly<{
+  cursor: number
+  frames: number
+  views: number
+}>
+
+export type MutableJournal = Journal<unknown> &
+  Readonly<{
+    views: Readonly<{
+      rebuild(): Promise<JournalViewRebuildResult>
+    }>
+  }>
+
+export type JournalOptions = Readonly<{
   dir: string
   compatibility?: JournalCompatibility
   lock?: ExclusiveOptions
+  views?: readonly JournalView[]
   inject?: Readonly<{
     exclusive?: Exclusive
     log?: ConditionalLogger
@@ -104,6 +140,7 @@ type Context = Readonly<{
   log: ConditionalLogger
   platform: string
   sqliteVersion?: string
+  views: readonly JournalView[]
   phase(phase: string, details?: Readonly<Record<string, unknown>>): Promise<void>
 }>
 
@@ -239,6 +276,7 @@ type LegacyTailState = Readonly<{
 function context(options: JournalOptions): Context {
   const inject = (options.inject ?? {}) as InternalInject
   const log = inject.log?.child("storage") ?? createLogger("yrd:storage", [{ level: "warn" }])
+  const views = validateViews(options.views ?? [])
   return {
     dir: options.dir,
     path: join(options.dir, DATABASE_FILE),
@@ -249,12 +287,33 @@ function context(options: JournalOptions): Context {
     log,
     platform: inject.platform ?? process.platform,
     ...(inject.sqliteVersion === undefined ? {} : { sqliteVersion: inject.sqliteVersion }),
+    views,
     async phase(name, details = {}) {
       await inject.phase?.(name, details)
     },
   }
 }
 
+function validateViews(views: readonly JournalView[]): readonly JournalView[] {
+  const ids = new Set<string>()
+  for (const view of views) {
+    if (!/^[a-z][a-z0-9.-]*$/u.test(view.id)) {
+      throw new TypeError(`yrd: journal view id '${view.id}' is invalid`)
+    }
+    if (ids.has(view.id)) throw new TypeError(`yrd: duplicate journal view '${view.id}'`)
+    ids.add(view.id)
+    if (!Number.isSafeInteger(view.version) || view.version < 1) {
+      throw new TypeError(`yrd: journal view '${view.id}' version must be a positive safe integer`)
+    }
+    if (!SHA256_PATTERN.test(view.fingerprint)) {
+      throw new TypeError(`yrd: journal view '${view.id}' fingerprint must be a lowercase SHA-256`)
+    }
+  }
+  return Object.freeze([...views].toSorted((left, right) => left.id.localeCompare(right.id)))
+}
+
+export function createJournal(options: JournalOptions & Readonly<{ views: readonly JournalView[] }>): MutableJournal
+export function createJournal(options: JournalOptions): Journal<unknown>
 export function createJournal(options: JournalOptions): Journal<unknown> {
   return createJournalWithMode(options, "mutable")
 }
@@ -317,6 +376,7 @@ function createJournalWithMode(options: JournalOptions, mode: JournalMode): Jour
                 .query("INSERT INTO journal_events(cursor, value_json, sha256) VALUES (?, ?, ?)")
                 .run(cursor, valueJson, digestText(valueJson))
               insertFrameFacts(database, cursor, frame)
+              applyJournalViews(database, runtime.views, { cursor, value: frame })
               writeMetadata(database, "head_cursor", String(cursor))
               writeMetadata(database, "facts_head", String(cursor))
               database.run("COMMIT")
@@ -347,6 +407,12 @@ function createJournalWithMode(options: JournalOptions, mode: JournalMode): Jour
     },
   })
   Object.defineProperty(journal, "history", { value: history, enumerable: false })
+  if (mode === "mutable") {
+    Object.defineProperty(journal, "views", {
+      value: Object.freeze({ rebuild: () => rebuildJournalViews(runtime) }),
+      enumerable: false,
+    })
+  }
   return journal
 }
 
@@ -630,7 +696,7 @@ async function withMutableDatabase<Result>(
   })
 }
 
-function openMutable(runtime: Context): Database {
+function openMutable(runtime: Context, verifyViews = true): Database {
   const database = new Database(runtime.path, { create: false, readwrite: true, strict: true })
   try {
     const observed = sqliteVersion(database)
@@ -641,7 +707,8 @@ function openMutable(runtime: Context): Database {
     database.fileControl(constants.SQLITE_FCNTL_PERSIST_WAL, 1)
     const row = database.query<{ journal_mode: string }, []>("PRAGMA journal_mode = WAL").get()
     if (row?.journal_mode.toLowerCase() !== "wal") throw new Error("yrd: SQLite refused WAL journal mode")
-    assertComplete(database, runtime.path)
+    const { head } = assertComplete(database, runtime.path)
+    if (verifyViews) assertJournalViews(database, runtime.views, head)
     return database
   } catch (error) {
     database.close()
@@ -649,7 +716,7 @@ function openMutable(runtime: Context): Database {
   }
 }
 
-async function ensureDatabase(runtime: Context): Promise<void> {
+async function ensureDatabase(runtime: Context, verifyViews = true): Promise<void> {
   assertMutablePlatform(runtime)
   if (await exists(runtime.path)) {
     let userVersion: number | undefined
@@ -659,11 +726,20 @@ async function ensureDatabase(runtime: Context): Promise<void> {
       userVersion = database.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version
       maintenancePending = userVersion === SCHEMA_VERSION && readMetadata(database, "maintenance_pending") === "1"
     }
-    if (userVersion === 1) await migrateSchemaV1(runtime)
-    else if (userVersion === SCHEMA_VERSION && maintenancePending) await finishSchemaMaintenance(runtime)
-    using database = openReadOnly(runtime.path)
-    assertComplete(database, runtime.path)
-    await finalizeExistingSqliteCutover(runtime, database)
+    if (userVersion === 1) {
+      await migrateSchemaV1(runtime)
+    } else if (userVersion === SCHEMA_VERSION && maintenancePending) {
+      await finishSchemaMaintenance(runtime)
+    }
+    {
+      using database = openReadOnly(runtime.path)
+      assertComplete(database, runtime.path)
+      if (!hasJournalViewRegistry(database)) await installJournalViews(runtime)
+    }
+    using complete = openReadOnly(runtime.path)
+    const { head } = assertComplete(complete, runtime.path)
+    if (verifyViews) assertJournalViews(complete, runtime.views, head)
+    await finalizeExistingSqliteCutover(runtime, complete)
     return
   }
   await mkdir(runtime.dir, { recursive: true })
@@ -744,6 +820,71 @@ async function migrateSchemaV1(runtime: Context): Promise<void> {
   await finishSchemaMaintenance(runtime)
 }
 
+async function installJournalViews(runtime: Context): Promise<void> {
+  using database = new Database(runtime.path, { create: false, readwrite: true, strict: true })
+  assertSafeWalVersion(runtime.sqliteVersion ?? sqliteVersion(database))
+  const { head } = assertComplete(database, runtime.path)
+  const entries = liveJournalEntries(database)
+  await runtime.phase("journal-views-schema-prepared", { frames: entries.length, views: runtime.views.length })
+  database.run("BEGIN IMMEDIATE")
+  try {
+    createJournalViewRegistry(database, runtime.views)
+    writeMetadata(database, JOURNAL_VIEWS_GENERATION, "1")
+    for (const entry of entries) applyJournalViews(database, runtime.views, entry)
+    setJournalViewsCursor(database, runtime.views, head)
+    assertJournalViews(database, runtime.views, head)
+    database.run("COMMIT")
+  } catch (error) {
+    rollback(database)
+    throw error
+  }
+  await runtime.phase("journal-views-schema-committed", {
+    path: runtime.path,
+    cursor: head,
+    views: runtime.views.length,
+  })
+}
+
+async function rebuildJournalViews(runtime: Context): Promise<JournalViewRebuildResult> {
+  assertMutablePlatform(runtime)
+  return runtime.exclusive.run(async () => {
+    await ensureDatabase(runtime, false)
+    const database = openMutable(runtime, false)
+    try {
+      const { head } = assertComplete(database, runtime.path)
+      const entries = liveJournalEntries(database)
+      await runtime.phase("journal-views-rebuild-prepared", {
+        cursor: head,
+        frames: entries.length,
+        views: runtime.views.length,
+      })
+      database.run("BEGIN IMMEDIATE")
+      try {
+        incrementJournalViewsGeneration(database)
+        for (const view of runtime.views) view.reset(database)
+        database.run("DELETE FROM journal_views")
+        registerJournalViews(database, runtime.views)
+        for (const entry of entries) applyJournalViews(database, runtime.views, entry)
+        setJournalViewsCursor(database, runtime.views, head)
+        assertJournalViews(database, runtime.views, head)
+        database.run("COMMIT")
+      } catch (error) {
+        rollback(database)
+        throw error
+      }
+      await runtime.phase("journal-views-rebuild-committed", {
+        cursor: head,
+        frames: entries.length,
+        views: runtime.views.length,
+      })
+      return { cursor: head, frames: entries.length, views: runtime.views.length }
+    } finally {
+      checkpointWal(runtime, database)
+      database.close()
+    }
+  })
+}
+
 async function finishSchemaMaintenance(runtime: Context): Promise<void> {
   await runtime.phase("schema-v2-maintenance-started", { path: runtime.path })
   using database = new Database(runtime.path, { create: false, readwrite: true, strict: true })
@@ -774,7 +915,7 @@ async function publishCandidate(runtime: Context, legacy: LegacySource | null): 
     database.run("PRAGMA journal_mode = DELETE")
     database.run("PRAGMA synchronous = FULL")
     database.run("PRAGMA auto_vacuum = INCREMENTAL")
-    createSchema(database, head, fingerprint)
+    createSchema(database, head, fingerprint, runtime.views)
     database.run("BEGIN IMMEDIATE")
     try {
       const insertEvent = database.query("INSERT INTO journal_events(cursor, value_json, sha256) VALUES (?, ?, ?)")
@@ -785,7 +926,9 @@ async function publishCandidate(runtime: Context, legacy: LegacySource | null): 
         if (row.kind === "live") {
           const valueJson = JSON.stringify(row.value)
           insertEvent.run(row.cursor, valueJson, digestText(valueJson))
-          insertFrameFacts(database, row.cursor, parseJournalFrame(row.value))
+          const frame = parseJournalFrame(row.value)
+          insertFrameFacts(database, row.cursor, frame)
+          applyJournalViews(database, runtime.views, { cursor: row.cursor, value: frame })
           continue
         }
         const recordJson = JSON.stringify(row.value)
@@ -797,6 +940,7 @@ async function publishCandidate(runtime: Context, legacy: LegacySource | null): 
           row.value.provenance["source-sha256"] ?? "legacy-v4",
         )
       }
+      setJournalViewsCursor(database, runtime.views, head)
       assertJournalFacts(database)
       writeMetadata(database, "migration_complete", "1")
       writeMetadata(database, "facts_head", String(head))
@@ -864,7 +1008,7 @@ async function publishCandidate(runtime: Context, legacy: LegacySource | null): 
   }
 }
 
-function createSchema(database: Database, head: number, fingerprint: string): void {
+function createSchema(database: Database, head: number, fingerprint: string, views: readonly JournalView[]): void {
   database.run(`
     CREATE TABLE journal_metadata (
       key TEXT PRIMARY KEY NOT NULL,
@@ -937,6 +1081,105 @@ function createSchema(database: Database, head: number, fingerprint: string): vo
   writeMetadata(database, "source_fingerprint", fingerprint)
   writeMetadata(database, "migration_complete", "0")
   writeMetadata(database, "maintenance_pending", "0")
+  writeMetadata(database, JOURNAL_VIEWS_GENERATION, "1")
+  createJournalViewRegistry(database, views)
+}
+
+function createJournalViewRegistry(database: Database, views: readonly JournalView[]): void {
+  database.run(`
+    CREATE TABLE journal_views (
+      view_id TEXT PRIMARY KEY NOT NULL,
+      version INTEGER NOT NULL CHECK (version > 0),
+      fingerprint TEXT NOT NULL CHECK (length(fingerprint) = 64),
+      cursor INTEGER NOT NULL CHECK (cursor >= 0)
+    ) STRICT
+  `)
+  registerJournalViews(database, views)
+}
+
+function registerJournalViews(database: Database, views: readonly JournalView[]): void {
+  const register = database.query(
+    "INSERT INTO journal_views(view_id, version, fingerprint, cursor) VALUES (?, ?, ?, ?)",
+  )
+  for (const view of views) {
+    view.install(database)
+    register.run(view.id, view.version, view.fingerprint, 0)
+  }
+}
+
+function applyJournalViews(database: Database, views: readonly JournalView[], entry: JournalViewEntry): void {
+  for (const view of views) {
+    view.apply(database, entry)
+    const updated = database
+      .query(
+        `UPDATE journal_views
+         SET cursor = ?
+         WHERE view_id = ? AND version = ? AND fingerprint = ?`,
+      )
+      .run(entry.cursor, view.id, view.version, view.fingerprint)
+    if (updated.changes !== 1) {
+      throw new Error(
+        `yrd: journal view '${view.id}' is not registered at v${String(view.version)}; run 'yrd doctor --rebuild-views'`,
+      )
+    }
+  }
+}
+
+function setJournalViewsCursor(database: Database, views: readonly JournalView[], cursor: number): void {
+  for (const view of views) {
+    const updated = database
+      .query(
+        `UPDATE journal_views
+         SET cursor = ?
+         WHERE view_id = ? AND version = ? AND fingerprint = ?`,
+      )
+      .run(cursor, view.id, view.version, view.fingerprint)
+    if (updated.changes !== 1) {
+      throw new Error(
+        `yrd: journal view '${view.id}' is not registered at v${String(view.version)}; run 'yrd doctor --rebuild-views'`,
+      )
+    }
+  }
+}
+
+function assertJournalViews(database: Database, views: readonly JournalView[], head: number): void {
+  const registered = database
+    .query<{ view_id: string; version: number; fingerprint: string; cursor: number }, []>(
+      "SELECT view_id, version, fingerprint, cursor FROM journal_views ORDER BY view_id",
+    )
+    .all()
+  const generation = database
+    .query<{ value: string }, [string]>("SELECT value FROM journal_metadata WHERE key = ?")
+    .get(JOURNAL_VIEWS_GENERATION)?.value
+  const parsedGeneration = Number(generation)
+  const matches =
+    Number.isSafeInteger(parsedGeneration) &&
+    parsedGeneration >= 1 &&
+    registered.length === views.length &&
+    registered.every((row, index) => {
+      const view = views[index]
+      return (
+        view !== undefined &&
+        row.view_id === view.id &&
+        row.version === view.version &&
+        row.fingerprint === view.fingerprint &&
+        row.cursor === head
+      )
+    })
+  if (!matches) {
+    throw new Error("yrd: journal view registration does not match; run 'yrd doctor --rebuild-views'")
+  }
+}
+
+function incrementJournalViewsGeneration(database: Database): void {
+  const current = database
+    .query<{ value: string }, [string]>("SELECT value FROM journal_metadata WHERE key = ?")
+    .get(JOURNAL_VIEWS_GENERATION)?.value
+  const generation = current === undefined ? 0 : Number(current)
+  if (!Number.isSafeInteger(generation) || generation < 0 || generation === Number.MAX_SAFE_INTEGER) {
+    throw new Error("yrd: journal view generation is invalid")
+  }
+  writeMetadata(database, JOURNAL_VIEWS_GENERATION, String(generation + 1))
 }
 
 function assertComplete(database: Database, path: string): Readonly<{ head: number; snapshot: SnapshotHeader }> {
@@ -957,7 +1200,7 @@ function assertComplete(database: Database, path: string): Readonly<{ head: numb
   assertCursor(snapshot.cursor)
   assertCursor(snapshot.prefix_last_cursor)
   if (snapshot.prefix_last_cursor !== 0 || readVerifiedPrefix(database, snapshot).length !== 0) {
-    throw new Error("yrd: SQLite journal v2 snapshot must not duplicate row history in prefix_json")
+    throw new Error("yrd: SQLite journal snapshot must not duplicate row history in prefix_json")
   }
   if (snapshot.checkpoint_json_present !== 0 && snapshot.checkpoint_json_present !== 1) {
     throw new Error("yrd: SQLite journal checkpoint presence is invalid")
@@ -1029,6 +1272,16 @@ function assertComplete(database: Database, path: string): Readonly<{ head: numb
     throw new Error(`yrd: SQLite journal lookup facts are not bound to head ${head}`)
   }
   return { head, snapshot }
+}
+
+function hasJournalViewRegistry(database: Database): boolean {
+  return (
+    database
+      .query<{ present: number }, []>(
+        "SELECT 1 AS present FROM sqlite_schema WHERE type = 'table' AND name = 'journal_views'",
+      )
+      .get()?.present === 1
+  )
 }
 
 function readHead(database: Database): number {
@@ -1137,6 +1390,18 @@ function decodeStoredEvent(row: StoredEvent): PrefixEntry {
     throw new Error(`yrd: SQLite journal event checksum mismatch at cursor ${row.cursor}`)
   }
   return { cursor: row.cursor, value: parseJournalFrame(JSON.parse(row.value_json)) }
+}
+
+function liveJournalEntries(database: Database): readonly PrefixEntry[] {
+  return database
+    .query<StoredEvent, []>(
+      `SELECT cursor, value_json, sha256 FROM journal_history
+       UNION ALL
+       SELECT cursor, value_json, sha256 FROM journal_events
+       ORDER BY cursor`,
+    )
+    .all()
+    .map(decodeStoredEvent)
 }
 
 function insertFrameFacts(database: Database, cursor: number, frame: JournalFrame): void {
@@ -2103,6 +2368,7 @@ export async function importOrphanJournal(
     importedBy: string
     importedAt?: string
     log?: ConditionalLogger
+    views?: readonly JournalView[]
   }>,
 ): Promise<OrphanJournalImportResult> {
   const internal = options as typeof options & Readonly<{ inject?: InternalInject }>
@@ -2131,6 +2397,7 @@ export async function importOrphanJournal(
   assertDistinctOrphanSource(records)
   const runtime = context({
     dir: options.dir,
+    ...(options.views === undefined ? {} : { views: options.views }),
     inject: {
       ...internal.inject,
       ...(options.log !== undefined && { log: options.log }),
@@ -2182,6 +2449,7 @@ export async function importOrphanJournal(
       }
       writeMetadata(database, "head_cursor", String(cursor))
       writeMetadata(database, "facts_head", String(cursor))
+      setJournalViewsCursor(database, runtime.views, cursor)
       database.run("COMMIT")
       return { status: "imported" as const, cursor, records: records.length, sourceSha256 }
     } catch (error) {

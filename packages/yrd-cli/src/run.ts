@@ -1232,7 +1232,13 @@ function issueDeliveryRows(bridge: TrackerBridgeV2): IssueDeliveryRow[] {
   })
 }
 
-type RuntimePosture = "active" | "viewer" | "bracketed-bay-open" | "one-shot-queue-run" | "resident-queue-run"
+type RuntimePosture =
+  | "active"
+  | "viewer"
+  | "journal-view-repair"
+  | "bracketed-bay-open"
+  | "one-shot-queue-run"
+  | "resident-queue-run"
 // Commander binds handlers before bootstrap resolves the invocation, so io carries
 // the selected persona and exact bracket operands into bay open/in/do.
 const RuntimePersona = Symbol("yrd.runtime-persona")
@@ -4294,6 +4300,7 @@ async function viewPr(
   selector: string,
   options: JsonOption,
   io: YrdCliIO,
+  services: YrdCliServices,
   command = "pr.view",
 ): Promise<void> {
   const pr = requiredPr(app, selector)
@@ -4305,7 +4312,7 @@ async function viewPr(
     delivery === "submitted" || delivery === "ready" ? await queuedPrPositions(state, pr.base, io) : undefined
   const position = positions?.get(pr.id)
   const runs = prQueueRuns(app, pr)
-  const attempts = await queueLogAttempts(app.events())
+  const attempts = await queueAttempts(app, services)
   const detail = prDetailData(pr, runs, attempts)
   const eligibility = app.queue.eligibility(pr.id)
   await printResult(
@@ -4331,7 +4338,13 @@ async function viewPr(
   )
 }
 
-async function viewPrRuns(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): Promise<void> {
+async function viewPrRuns(
+  app: YrdCliApp,
+  selector: string,
+  options: JsonOption,
+  io: YrdCliIO,
+  services: YrdCliServices,
+): Promise<void> {
   for (let read = 0; read < 3; read += 1) {
     const snapshot = await app.journalSnapshot()
     const pr = resolvePR(snapshot.state.bays, selector)
@@ -4341,7 +4354,7 @@ async function viewPrRuns(app: YrdCliApp, selector: string, options: JsonOption,
       refusal(`no PR '${selector}'`)
     }
     const runs = prQueueRuns(app, pr)
-    const attempts = await queueLogAttempts(app.events())
+    const attempts = await queueAttempts(app, services)
     const confirmed = await app.journalSnapshot()
     if (confirmed.asOf.cursor !== snapshot.asOf.cursor) continue
     const eligibility = app.queue.eligibility(pr.id, snapshot.state)
@@ -4479,9 +4492,9 @@ async function queuedPrPositions(state: YrdCliState, base: string, io: YrdCliIO)
   return submittedPrPositions(candidates)
 }
 
-async function statusPr(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Promise<void> {
+async function statusPr(app: YrdCliApp, options: JsonOption, io: YrdCliIO, services: YrdCliServices): Promise<void> {
   const pr = currentPr(app, io)
-  await viewPr(app, pr.id, options, io, "pr.status")
+  await viewPr(app, pr.id, options, io, services, "pr.status")
 }
 
 async function editPr(
@@ -4782,6 +4795,9 @@ function runtimePosture(
 ): RuntimePosture {
   if (isReadOnlyInvocation(action)) return "viewer"
   if (isBracketedBayCommand(action)) return "bracketed-bay-open"
+  if (action.name() === "doctor" && (action.opts() as Readonly<{ rebuildViews?: boolean }>).rebuildViews === true) {
+    return "journal-view-repair"
+  }
   if (action.name() !== "run" || action.parent?.name() !== "queue") return "active"
   return queueRunIsFollow(action) ? "resident-queue-run" : "one-shot-queue-run"
 }
@@ -5252,6 +5268,13 @@ type QueueAttemptResolver = Readonly<{
   resolve(state: YrdCliState): Promise<readonly QueueAttempt[]>
 }>
 
+function queueAttempts(
+  app: Pick<YrdCliApp, "events">,
+  services: Pick<YrdCliServices, "queueReadModel">,
+): Promise<readonly QueueAttempt[]> {
+  return services.queueReadModel?.attempts() ?? queueLogAttempts(app.events())
+}
+
 function queueAttemptFingerprint(state: YrdCliState): string {
   return Object.values(state.jobs.byId)
     .map((job) =>
@@ -5270,11 +5293,21 @@ function queueAttemptFingerprint(state: YrdCliState): string {
 }
 
 /**
- * Cache the immutable attempt projection between relevant Job transitions.
- * Runner heartbeat/lease timestamps deliberately do not enter the fingerprint,
- * so a one-second watch tick never triggers another full journal replay.
+ * Production hosts consult the SQLite read model on every watch tick and let
+ * its durable cursor/generation cache decide whether to reload. Custom Journal
+ * runtimes retain a state-fingerprinted history-fold fallback so runner
+ * heartbeat/lease timestamps do not trigger another full replay.
  */
-export function createQueueAttemptResolver(app: Pick<YrdCliApp, "events">): QueueAttemptResolver {
+export function createQueueAttemptResolver(
+  source: Pick<YrdCliApp, "events"> | NonNullable<YrdCliServices["queueReadModel"]>,
+): QueueAttemptResolver {
+  if ("attempts" in source) {
+    return {
+      resolve() {
+        return source.attempts()
+      },
+    }
+  }
   let fingerprint: string | undefined
   let cached: readonly QueueAttempt[] = []
   let pending: Promise<readonly QueueAttempt[]> | undefined
@@ -5283,7 +5316,8 @@ export function createQueueAttemptResolver(app: Pick<YrdCliApp, "events">): Queu
       const next = queueAttemptFingerprint(state)
       if (next === fingerprint) return cached
       if (pending !== undefined) return pending
-      pending = queueLogAttempts(app.events()).then((attempts) => {
+      const attempts = queueLogAttempts(source.events())
+      pending = attempts.then((attempts) => {
         cached = Object.freeze(attempts)
         fingerprint = next
         return cached
@@ -5473,8 +5507,17 @@ async function listQueues(
   filters: readonly string[],
   options: QueueListOptions,
   io: YrdCliIO,
+  services: YrdCliServices,
 ): Promise<void> {
-  const snapshot = await queueListSnapshot(app, filters, options, io)
+  const snapshot = await queueListSnapshot(
+    app,
+    filters,
+    options,
+    io,
+    services.queueReadModel === undefined
+      ? {}
+      : { attemptResolver: createQueueAttemptResolver(services.queueReadModel) },
+  )
   await printResultWithWarnings(
     io,
     jsonEnabled(options),
@@ -5847,6 +5890,7 @@ async function logRuns(
   selectors: readonly string[],
   options: QueueLogOptions,
   io: YrdCliIO,
+  services: YrdCliServices,
 ): Promise<void> {
   const state = stateOf(app)
   const target = queueLogTargets(state, selectors, options.base, options.pr)
@@ -5884,7 +5928,7 @@ async function logRuns(
   const runIds = new Set(
     summaries.flatMap((summary) => [...summary.running, ...summary.waiting, ...summary.finished].map((run) => run.id)),
   )
-  const attempts = (await queueLogAttempts(app.events())).filter((attempt) => runIds.has(attempt.run))
+  const attempts = (await queueAttempts(app, services)).filter((attempt) => runIds.has(attempt.run))
   const revisionClocks = queueRunRevisionClocks(
     Object.values(state.bays.prs),
     summaries.flatMap((summary) => summary.finished),
@@ -6004,9 +6048,13 @@ async function queueAudit(
 async function configDoctor(
   app: YrdCliApp,
   services: YrdCliServices,
-  options: JsonOption,
+  options: JsonOption & Readonly<{ rebuildViews?: boolean }>,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
+  const rebuilt =
+    options.rebuildViews === true
+      ? await (services.journal?.rebuildViews?.() ?? configuration("journal view rebuild capability is not installed"))
+      : undefined
   const config = services.config
   if (config === undefined) configuration("config doctor capability is not installed")
   await app.refresh()
@@ -6015,9 +6063,11 @@ async function configDoctor(
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "doctor", findings },
+    { command: "doctor", findings, ...(rebuilt === undefined ? {} : { rebuilt }) },
     findings.length === 0
-      ? "yrd doctor clean"
+      ? rebuilt === undefined
+        ? "yrd doctor clean"
+        : `yrd doctor rebuilt ${String(rebuilt.views)} views at cursor ${String(rebuilt.cursor)}`
       : findings
           .map((finding) => `${finding.severity.toUpperCase()} ${finding.code} ${finding.owner}: ${finding.message}`)
           .join("\n"),
@@ -7009,11 +7059,12 @@ async function watchQueue(
   filters: readonly string[],
   options: WatchOptions,
   io: YrdCliIO,
+  services: YrdCliServices,
 ): Promise<YrdCliExitCode> {
   const interval = 1_000
   const scope = io.scope ?? app.scope
   const diffResolver = createQueuePrDiffResolver()
-  const attemptResolver = createQueueAttemptResolver(app)
+  const attemptResolver = createQueueAttemptResolver(services.queueReadModel ?? app)
   const load = async (focus?: QueueWatchFocus): Promise<QueueListSnapshot> =>
     queueListSnapshot(app, filters, options, io, {
       includeOutputs: !jsonEnabled(options) && focus !== undefined,
@@ -7568,6 +7619,7 @@ function buildProgram(
     program
       .command("doctor")
       .description("diagnose base-authority Flow revision and structural drift")
+      .option("--rebuild-views", "atomically rebuild registered query views from immutable Journal history")
       .option("--json", "emit stable JSON")
       .action(async (options) => setExit(await configDoctor(installed(), installedServices(), options, io)))
   }
@@ -7699,7 +7751,7 @@ function buildProgram(
     .option("-L, --limit <count>", "limit history rows", int, 20)
     .option("--all", "show all rows; include lossless queue and run records in JSON")
     .option("--json", "emit stable JSON")
-    .action(async (options) => logRuns(installed(), [], options, io))
+    .action(async (options) => logRuns(installed(), [], options, io, installedServices()))
 
   program
     .command("watch [filter...]")
@@ -7711,7 +7763,7 @@ function buildProgram(
     .option("--latest", "show only the latest Run for each PR")
     .option("--json", "emit stable JSON")
     .action(async (filters, options) => {
-      setExit(await watchQueue(installed(), filters, options, io))
+      setExit(await watchQueue(installed(), filters, options, io, installedServices()))
     })
 
   program
@@ -7736,10 +7788,10 @@ function buildProgram(
       return
     }
     if (options.watch === true) {
-      setExit(await watchQueue(installed(), filters, options, io))
+      setExit(await watchQueue(installed(), filters, options, io, installedServices()))
       return
     }
-    await listQueues(installed(), filters, options, io)
+    await listQueues(installed(), filters, options, io, installedServices())
   }
   queue
     .command("_list [filter...]", { isDefault: true, hidden: true })
@@ -7923,11 +7975,11 @@ function buildProgram(
   pr.command("view <selector>")
     .description("show a PR and its runs")
     .option("--json", "emit stable JSON")
-    .action(async (selector, options) => viewPr(installed(), selector, options, io))
+    .action(async (selector, options) => viewPr(installed(), selector, options, io, installedServices()))
   pr.command("runs <selector>")
     .description("show run, step, attempt, proof, and artifact detail")
     .option("--json", "emit stable JSON")
-    .action(async (selector, options) => viewPrRuns(installed(), selector, options, io))
+    .action(async (selector, options) => viewPrRuns(installed(), selector, options, io, installedServices()))
   pr.command("diff <selector>")
     .description("show the candidate diff")
     .option("--stat", "show diff statistics")
@@ -7941,7 +7993,7 @@ function buildProgram(
   pr.command("status")
     .description("show the current bay or branch PR")
     .option("--json", "emit stable JSON")
-    .action(async (options) => statusPr(installed(), options, io))
+    .action(async (options) => statusPr(installed(), options, io, installedServices()))
   pr.command("edit <selector>")
     .description("edit the issue link, note, title, description, or branch tracking")
     .option("--issue <ref>", "set the tracker-neutral issue reference")

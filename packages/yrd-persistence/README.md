@@ -16,6 +16,38 @@ for await (const batch of journal.read(afterCursor)) {
 await journal.append(frame, expectedCursor)
 ```
 
+Hosts that need indexed historical queries contribute one or more domain-owned
+views at this same construction seam:
+
+```ts
+const journal = createJournal({
+  dir: ".git/yrd",
+  views: [
+    {
+      id: "example.attempts",
+      version: 1,
+      fingerprint: "…64 lowercase hex characters…",
+      install(database) {
+        database.run("CREATE TABLE example_attempts (...) STRICT")
+      },
+      reset(database) {
+        database.run("DROP TABLE IF EXISTS example_attempts")
+      },
+      apply(database, entry) {
+        // Decode entry.value and update only this view's tables.
+      },
+    },
+  ],
+})
+```
+
+Persistence invokes `apply()` after inserting the validated Frame and its
+journal-owned facts but before the same transaction commits. Any view failure
+rolls the Frame, facts, metadata, registry cursor, and view rows back together.
+The view's package owns its SQL and projection semantics; persistence never
+learns domain status vocabulary. `journal.views.rebuild()` resets and replays
+the configured set atomically from immutable history.
+
 Hosts may configure the oldest admitted reader explicitly:
 
 ```ts
@@ -51,6 +83,9 @@ schema contains:
 - one `journal_snapshot` row binding the history boundary to an independently
   checked, bounded Core projection checkpoint;
 - `journal_orphans`, detached audit frames that never enter Core replay; and
+- `journal_views`, the exact registered view id/version/fingerprint and
+  same-transaction cursor, plus a durable rebuild generation for cache
+  invalidation; and
 - schema, head-cursor, migration-completion, and source-fingerprint metadata.
 
 Fresh SQL cursors begin at `1`. Migration preserves every committed legacy
@@ -65,6 +100,13 @@ returns `{ appended: false, cursor }`; Core replays and repeats its pure command
 decision. The semantic reader-floor check runs before this storage boundary.
 Every mutable connection is explicitly checkpointed and closed while the
 external lock is held.
+
+Every writer must configure the exact durable view set. A missing, added,
+version-changed, fingerprint-changed, or cursor-stale registration refuses
+before append and names the explicit rebuild remedy. The registry is an online
+schema-v2 extension: older schema-v2 readers ignore it safely, while an older
+writer can only make the view stale, which the next current writer/read-model
+open detects instead of silently serving.
 
 SQLite WAL is refused at runtime on affected builds. Yrd accepts SQLite
 `>=3.51.3` and the official `3.50.7` / `3.44.6` fixed backports; the gate uses

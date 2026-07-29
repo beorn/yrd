@@ -27,6 +27,9 @@ import {
   resolveCustomSqliteLibrary,
   type Exclusive,
   type ExclusiveOptions,
+  type JournalOptions,
+  type JournalView,
+  type MutableJournal,
 } from "@yrd/persistence"
 import canonicalize from "canonicalize"
 import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
@@ -43,6 +46,7 @@ type ExpectedJournalOptions = Readonly<{
   dir: string
   compatibility?: JournalCompatibility
   lock?: ExclusiveOptions
+  views?: readonly JournalView[]
   inject?: Readonly<{
     exclusive?: Exclusive
     log?: ConditionalLogger
@@ -142,6 +146,14 @@ function testReadOnlyJournal(dir: string, inject: TestInject = {}): Journal<unkn
   } as unknown as Parameters<typeof createReadOnlyJournal>[0])
 }
 
+function testViewJournal(dir: string, views: readonly JournalView[]): MutableJournal {
+  return createJournal({
+    dir,
+    views,
+    inject: { sqliteVersion: SAFE_SQLITE },
+  } as unknown as JournalOptions & Readonly<{ views: readonly JournalView[] }>)
+}
+
 async function accepted(journal: Journal<unknown>, value: ReturnType<typeof frame>, cursor: number): Promise<number> {
   const result = await journal.append(value, cursor)
   if (!result.appended) throw new Error(`expected append at ${cursor}, observed ${result.cursor}`)
@@ -183,6 +195,7 @@ async function downgradeFixtureToSchemaV1(
     DROP TABLE journal_event_ids;
     DROP TABLE journal_commands;
     DROP TABLE journal_history;
+    DROP TABLE journal_views;
   `)
   database.query("UPDATE journal_metadata SET value = '1' WHERE key = 'schema_version'").run()
   database.query("DELETE FROM journal_metadata WHERE key IN ('facts_head', 'maintenance_pending')").run()
@@ -284,7 +297,7 @@ describe("SQLite Journal", () => {
   it("keeps Core cursors opaque, construction synchronous, and the public option seam frozen", async () => {
     expectTypeOf<Cursor>().toEqualTypeOf<number>()
     expectTypeOf<Parameters<typeof createJournal>[0]>().toEqualTypeOf<ExpectedJournalOptions>()
-    expectTypeOf(createJournal).returns.toEqualTypeOf<Journal<unknown>>()
+    expectTypeOf(createJournal).returns.toMatchTypeOf<Journal<unknown>>()
 
     const dir = await directory()
     const journal = testJournal(dir)
@@ -323,6 +336,7 @@ describe("SQLite Journal", () => {
       "journal_metadata",
       "journal_orphans",
       "journal_snapshot",
+      "journal_views",
     ])
     expect(
       database
@@ -493,6 +507,297 @@ describe("SQLite Journal", () => {
     }
     expect(() => journal.history?.entity("queue", "R2")).toThrow("entity lookup facts disagree")
     expect(() => journal.history?.diagnostics()).toThrow("entity lookup index does not equal")
+  })
+
+  it("co-commits registered views with a frame and rolls both back when projection fails", async () => {
+    const dir = await directory()
+    const view: JournalView = {
+      id: "test.records",
+      version: 1,
+      fingerprint: "a".repeat(64),
+      install(database) {
+        database.run(`
+          CREATE TABLE view_test_records (
+            cursor INTEGER PRIMARY KEY NOT NULL,
+            text TEXT NOT NULL
+          ) STRICT
+        `)
+      },
+      reset(database) {
+        database.run("DELETE FROM view_test_records")
+      },
+      apply(database, entry) {
+        const value = entry.value as ReturnType<typeof frame>
+        const text = (value.events[0]?.data as Readonly<{ text?: string }> | undefined)?.text
+        if (text === undefined) throw new Error("test view requires text")
+        database.query("INSERT INTO view_test_records(cursor, text) VALUES (?, ?)").run(entry.cursor, text)
+        if (text === "fail") throw new Error("injected view failure")
+      },
+    }
+    const journal = testViewJournal(dir, [view])
+    const committed = frame("view-committed", "committed")
+    const refused = frame("view-refused", "fail")
+
+    await expect(journal.append(committed, 0)).resolves.toEqual({ appended: true, cursor: 1 })
+    await expect(journal.append(refused, 1)).rejects.toThrow("injected view failure")
+    await expect(Array.fromAsync(journal.read())).resolves.toEqual([{ cursor: 1, values: [committed] }])
+
+    using database = new Database(join(dir, SQLITE), { readonly: true, strict: true })
+    expect(
+      database
+        .query<{ cursor: number; text: string }, []>("SELECT cursor, text FROM view_test_records ORDER BY cursor")
+        .all(),
+    ).toEqual([{ cursor: 1, text: "committed" }])
+    expect(
+      database
+        .query<{ view_id: string; version: number; fingerprint: string; cursor: number }, []>(
+          "SELECT view_id, version, fingerprint, cursor FROM journal_views",
+        )
+        .all(),
+    ).toEqual([{ view_id: view.id, version: view.version, fingerprint: view.fingerprint, cursor: 1 }])
+  })
+
+  it("never applies a view on stale CAS and refuses writers missing the registered view", async () => {
+    const dir = await directory()
+    let applied = 0
+    const view: JournalView = {
+      id: "test.registration",
+      version: 1,
+      fingerprint: "b".repeat(64),
+      install(database) {
+        database.run("CREATE TABLE view_test_registration(cursor INTEGER PRIMARY KEY NOT NULL) STRICT")
+      },
+      reset(database) {
+        database.run("DELETE FROM view_test_registration")
+      },
+      apply(database, entry) {
+        applied += 1
+        database.query("INSERT INTO view_test_registration(cursor) VALUES (?)").run(entry.cursor)
+      },
+    }
+    const journal = testViewJournal(dir, [view])
+    const committed = frame("view-registration-committed")
+    const stale = frame("view-registration-stale")
+    const unregistered = frame("view-registration-missing")
+
+    await expect(journal.append(committed, 0)).resolves.toEqual({ appended: true, cursor: 1 })
+    await expect(journal.append(stale, 0)).resolves.toEqual({ appended: false, cursor: 1 })
+    expect(applied).toBe(1)
+
+    const missingView = testJournal(dir)
+    await expect(missingView.append(unregistered, 1)).rejects.toThrow(
+      "journal view registration does not match; run 'yrd doctor --rebuild-views'",
+    )
+    await expect(Array.fromAsync(journal.read())).resolves.toEqual([{ cursor: 1, values: [committed] }])
+    expect(applied).toBe(1)
+  })
+
+  it("adds the view registry to schema v2 by rebuilding registered views from immutable history and tail", async () => {
+    const dir = await directory()
+    const source = testJournal(dir)
+    const first = frame("view-migration-history", "history")
+    const second = frame("view-migration-tail", "tail")
+    const firstCursor = await accepted(source, first, 0)
+    const secondCursor = await accepted(source, second, firstCursor)
+    await source.checkpoint?.save?.({
+      identity: "view-migration-v1",
+      cursor: firstCursor,
+      value: { state: "history" },
+    })
+    {
+      using database = new Database(join(dir, SQLITE), { readwrite: true, strict: true })
+      database.run("DROP TABLE journal_views")
+      database.query("UPDATE journal_metadata SET value = '2' WHERE key = 'schema_version'").run()
+      database.run("PRAGMA user_version = 2")
+    }
+    const view: JournalView = {
+      id: "test.migration",
+      version: 1,
+      fingerprint: "c".repeat(64),
+      install(database) {
+        database.run(`
+          CREATE TABLE view_test_migration (
+            cursor INTEGER PRIMARY KEY NOT NULL,
+            text TEXT NOT NULL
+          ) STRICT
+        `)
+      },
+      reset(database) {
+        database.run("DELETE FROM view_test_migration")
+      },
+      apply(database, entry) {
+        const value = entry.value as ReturnType<typeof frame>
+        const text = (value.events[0]?.data as Readonly<{ text?: string }> | undefined)?.text
+        if (text === undefined) throw new Error("test view requires text")
+        database.query("INSERT INTO view_test_migration(cursor, text) VALUES (?, ?)").run(entry.cursor, text)
+      },
+    }
+    const migrated = testViewJournal(dir, [view])
+
+    await expect(Array.fromAsync(migrated.read())).resolves.toEqual([
+      { cursor: firstCursor, values: [first] },
+      { cursor: secondCursor, values: [second] },
+    ])
+    using database = new Database(join(dir, SQLITE), { readonly: true, strict: true })
+    expect(database.query("PRAGMA user_version").get()).toEqual({ user_version: 2 })
+    expect(
+      database
+        .query<{ cursor: number; text: string }, []>("SELECT cursor, text FROM view_test_migration ORDER BY cursor")
+        .all(),
+    ).toEqual([
+      { cursor: firstCursor, text: "history" },
+      { cursor: secondCursor, text: "tail" },
+    ])
+    expect(
+      database
+        .query<{ view_id: string; version: number; fingerprint: string; cursor: number }, []>(
+          "SELECT view_id, version, fingerprint, cursor FROM journal_views",
+        )
+        .get(),
+    ).toEqual({ view_id: view.id, version: view.version, fingerprint: view.fingerprint, cursor: secondCursor })
+  })
+
+  it("rebuilds registered views from immutable history as one maintenance transaction", async () => {
+    const dir = await directory()
+    const view: JournalView = {
+      id: "test.rebuild",
+      version: 1,
+      fingerprint: "d".repeat(64),
+      install(database) {
+        database.run(`
+          CREATE TABLE view_test_rebuild (
+            cursor INTEGER PRIMARY KEY NOT NULL,
+            text TEXT NOT NULL
+          ) STRICT
+        `)
+      },
+      reset(database) {
+        database.run("DROP TABLE IF EXISTS view_test_rebuild")
+      },
+      apply(database, entry) {
+        const value = entry.value as ReturnType<typeof frame>
+        const text = (value.events[0]?.data as Readonly<{ text?: string }> | undefined)?.text
+        if (text === undefined) throw new Error("test view requires text")
+        database.query("INSERT INTO view_test_rebuild(cursor, text) VALUES (?, ?)").run(entry.cursor, text)
+      },
+    }
+    const journal = testViewJournal(dir, [view])
+    const first = frame("view-rebuild-first", "first")
+    const second = frame("view-rebuild-second", "second")
+    const firstCursor = await accepted(journal, first, 0)
+    const secondCursor = await accepted(journal, second, firstCursor)
+    {
+      using database = new Database(join(dir, SQLITE), { readwrite: true, strict: true })
+      database.query("UPDATE view_test_rebuild SET text = 'corrupt' WHERE cursor = ?").run(firstCursor)
+      expect(
+        database
+          .query<{ value: string }, []>("SELECT value FROM journal_metadata WHERE key = 'journal_views_generation'")
+          .get(),
+      ).toEqual({ value: "1" })
+    }
+
+    await expect(journal.views.rebuild()).resolves.toEqual({
+      cursor: secondCursor,
+      frames: 2,
+      views: 1,
+    })
+    using database = new Database(join(dir, SQLITE), { readonly: true, strict: true })
+    expect(
+      database
+        .query<{ cursor: number; text: string }, []>("SELECT cursor, text FROM view_test_rebuild ORDER BY cursor")
+        .all(),
+    ).toEqual([
+      { cursor: firstCursor, text: "first" },
+      { cursor: secondCursor, text: "second" },
+    ])
+    expect(
+      database
+        .query<{ value: string }, []>("SELECT value FROM journal_metadata WHERE key = 'journal_views_generation'")
+        .get(),
+    ).toEqual({ value: "2" })
+  })
+
+  it("rolls a failed view rebuild back to the previously committed rows and registry", async () => {
+    const dir = await directory()
+    let failRebuild = false
+    const view: JournalView = {
+      id: "test.rebuild-rollback",
+      version: 1,
+      fingerprint: "e".repeat(64),
+      install(database) {
+        database.run("CREATE TABLE view_test_rebuild_rollback(cursor INTEGER PRIMARY KEY NOT NULL) STRICT")
+      },
+      reset(database) {
+        database.run("DROP TABLE IF EXISTS view_test_rebuild_rollback")
+      },
+      apply(database, entry) {
+        if (failRebuild && entry.cursor === 2) throw new Error("injected rebuild failure")
+        database.query("INSERT INTO view_test_rebuild_rollback(cursor) VALUES (?)").run(entry.cursor)
+      },
+    }
+    const journal = testViewJournal(dir, [view])
+    await accepted(journal, frame("view-rebuild-rollback-first"), 0)
+    await accepted(journal, frame("view-rebuild-rollback-second"), 1)
+    failRebuild = true
+
+    await expect(journal.views.rebuild()).rejects.toThrow("injected rebuild failure")
+    using database = new Database(join(dir, SQLITE), { readonly: true, strict: true })
+    expect(
+      database.query<{ cursor: number }, []>("SELECT cursor FROM view_test_rebuild_rollback ORDER BY cursor").all(),
+    ).toEqual([{ cursor: 1 }, { cursor: 2 }])
+    expect(
+      database
+        .query<{ view_id: string; version: number; fingerprint: string; cursor: number }, []>(
+          "SELECT view_id, version, fingerprint, cursor FROM journal_views",
+        )
+        .get(),
+    ).toEqual({ view_id: view.id, version: view.version, fingerprint: view.fingerprint, cursor: 2 })
+    expect(
+      database
+        .query<{ value: string }, []>("SELECT value FROM journal_metadata WHERE key = 'journal_views_generation'")
+        .get(),
+    ).toEqual({ value: "1" })
+  })
+
+  it("refuses a changed view definition until an explicit rebuild replaces its registry atomically", async () => {
+    const dir = await directory()
+    const records = (version: number, fingerprint: string): JournalView => ({
+      id: "test.versioned",
+      version,
+      fingerprint,
+      install(database) {
+        database.run("CREATE TABLE view_test_versioned(cursor INTEGER PRIMARY KEY NOT NULL) STRICT")
+      },
+      reset(database) {
+        database.run("DROP TABLE IF EXISTS view_test_versioned")
+      },
+      apply(database, entry) {
+        database.query("INSERT INTO view_test_versioned(cursor) VALUES (?)").run(entry.cursor)
+      },
+    })
+    const original = testViewJournal(dir, [records(1, "f".repeat(64))])
+    await accepted(original, frame("view-versioned-first"), 0)
+    const changedView = records(2, "0".repeat(64))
+    const changed = testViewJournal(dir, [changedView])
+
+    await expect(changed.append(frame("view-versioned-refused"), 1)).rejects.toThrow(
+      "journal view registration does not match; run 'yrd doctor --rebuild-views'",
+    )
+    await expect(changed.views.rebuild()).resolves.toEqual({ cursor: 1, frames: 1, views: 1 })
+    await expect(changed.append(frame("view-versioned-second"), 1)).resolves.toEqual({ appended: true, cursor: 2 })
+    using database = new Database(join(dir, SQLITE), { readonly: true, strict: true })
+    expect(
+      database
+        .query<{ view_id: string; version: number; fingerprint: string; cursor: number }, []>(
+          "SELECT view_id, version, fingerprint, cursor FROM journal_views",
+        )
+        .get(),
+    ).toEqual({
+      view_id: changedView.id,
+      version: changedView.version,
+      fingerprint: changedView.fingerprint,
+      cursor: 2,
+    })
   })
 
   it("migrates schema v1 prefix and tail into row history with identical cursor suffixes and facts", async () => {

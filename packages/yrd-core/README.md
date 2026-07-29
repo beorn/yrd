@@ -106,8 +106,10 @@ journal cursor and latest event timestamp as one deeply frozen value. External
 consumers use the cursor as an explicit resume/staleness boundary instead of
 mixing projections from two journal cuts.
 
-All state is rebuildable from the Journal. There is no mutable projection
-database.
+All state is rebuildable from the Journal. Core owns no mutable projection
+database. A persistence host may maintain transactionally coupled,
+rebuildable query views, but those views are acceleration rather than domain
+authority and do not enter Core's `Journal` port.
 
 Persistence-backed runtimes expose `historySnapshot()` for an intentionally
 complete replay, `events()` over all committed frames, and

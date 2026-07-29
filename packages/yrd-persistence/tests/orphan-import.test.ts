@@ -9,7 +9,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Database } from "bun:sqlite"
 import { CauseSchema, Command, EventSchema, type Cause, type Event, type Journal } from "@yrd/core"
-import { createJournal, importOrphanJournal, readArchivedOrphans } from "@yrd/persistence"
+import { createJournal, importOrphanJournal, readArchivedOrphans, type JournalView } from "@yrd/persistence"
 import canonicalize from "canonicalize"
 import { describe, expect, it } from "vitest"
 
@@ -76,6 +76,48 @@ async function authority(dir: string) {
 }
 
 describe("orphan journal import", () => {
+  it("advances registered view cursors across archived rows without projecting them as live facts", async () => {
+    const f = await fixture()
+    const view: JournalView = {
+      id: "test.orphan-cursor",
+      version: 1,
+      fingerprint: "a".repeat(64),
+      install(database) {
+        database.run("CREATE TABLE view_orphan_live(cursor INTEGER PRIMARY KEY NOT NULL) STRICT")
+      },
+      reset(database) {
+        database.run("DROP TABLE IF EXISTS view_orphan_live")
+      },
+      apply(database, entry) {
+        database.query("INSERT INTO view_orphan_live(cursor) VALUES (?)").run(entry.cursor)
+      },
+    }
+    try {
+      const liveJournal = createJournal({ dir: f.dir, views: [view] })
+      const firstCursor = await accepted(liveJournal, frame("view-live-first"), 0)
+      await writeFile(f.sourcePath, v3Line(frame("view-orphan")))
+
+      const imported = await importOrphans({
+        dir: f.dir,
+        sourcePath: f.sourcePath,
+        importedBy: "@adhoc/0",
+        views: [view],
+      })
+      expect(imported.status).toBe("imported")
+      const secondCursor = await accepted(liveJournal, frame("view-live-second"), imported.cursor)
+
+      using database = new Database(join(f.dir, "journal.sqlite"), { readonly: true, strict: true })
+      expect(
+        database.query<{ cursor: number }, []>("SELECT cursor FROM view_orphan_live ORDER BY cursor").all(),
+      ).toEqual([{ cursor: firstCursor }, { cursor: secondCursor }])
+      expect(
+        database.query<{ cursor: number }, [string]>("SELECT cursor FROM journal_views WHERE view_id = ?").get(view.id),
+      ).toEqual({ cursor: secondCursor })
+    } finally {
+      await rm(f.root, { recursive: true, force: true })
+    }
+  })
+
   it("archives valid v3 rows in SQLite without exposing them to live replay", async () => {
     const f = await fixture()
     try {
