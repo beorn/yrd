@@ -42,6 +42,7 @@ import {
   createFailure,
   failureFact,
   raiseFailure,
+  SUPPORTED_VERSIONS,
   type DeepReadonly,
   type JournalSnapshot,
 } from "@yrd/core"
@@ -58,24 +59,11 @@ import {
   type Run,
 } from "@yrd/queue"
 import { createExclusive } from "@yrd/persistence"
-import { loadYrdConfig } from "./config.ts"
+import { loadYrdConfig, renderYrdConfigScaffold } from "./config.ts"
 import { diagnoseYrdFlows } from "./config-doctor.ts"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import { actionableFailure, formatActionableFailure } from "./actionable-error.ts"
-import {
-  createManagedDoJournal,
-  createManagedDoLock,
-  createManagedDoScoreboard,
-  formatManagedDoTimingTable,
-  managedDoRequested,
-  resolveManagedDoPlan,
-  runManagedDo,
-  type ManagedDoCommand,
-  type ManagedDoDelivery,
-  type ManagedDoOverrides,
-  type ManagedDoResult,
-  type ManagedDoStages,
-} from "./do-managed.ts"
+import type { ManagedDoDelivery } from "./do-managed.ts"
 import {
   canonicalizeYrdCommandAliases,
   classifyFailure,
@@ -372,6 +360,13 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
       "yrd: resident runner implementationSource is invalid",
     )
   }
+  if (
+    record.journalVersions !== undefined &&
+    (!Array.isArray(record.journalVersions) ||
+      record.journalVersions.some((version) => !Number.isSafeInteger(version) || (version as number) < 1))
+  ) {
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner journalVersions is invalid")
+  }
   return {
     pid: record.pid as number,
     startedAt,
@@ -381,6 +376,7 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
     ...(record.clean === undefined ? {} : { clean: record.clean }),
     implementationSource:
       record.implementationSource === undefined ? "unknown" : (record.implementationSource as string),
+    ...(record.journalVersions === undefined ? {} : { journalVersions: record.journalVersions as number[] }),
   }
 }
 
@@ -479,11 +475,6 @@ type RunnerHealthPayload = Readonly<{
   error?: ReturnType<typeof actionableFailure>
   facts: RunnerHealthFacts
 }>
-
-/** Ready and recut prove the current revision before it enters the landing queue. */
-async function admitRevision(app: Pick<YrdCliApp, "queue">, prs: readonly string[], io: YrdCliIO): Promise<void> {
-  await app.queue.admitRevision({ prs }, runtimeOptions(io))
-}
 
 export async function residentRunnerLeaseHeld(cwd: string): Promise<boolean> {
   const gitDir = queueGitDir(cwd)
@@ -813,6 +804,7 @@ export async function startResidentRunnerHeartbeat(
       lastTickAt: nowIso(),
       command,
       implementationSource,
+      journalVersions: SUPPORTED_VERSIONS,
       ...exit,
     }
     try {
@@ -2371,6 +2363,7 @@ async function prepareResolvedIssueBay(
 
 async function openPersistentBay(
   app: YrdCliApp,
+  services: YrdCliServices,
   arg: string | undefined,
   options: BayOpenOptions,
   io: YrdCliIO,
@@ -2378,6 +2371,7 @@ async function openPersistentBay(
   const opened = await prepareOwnedBay(app, arg, options, io)
   if (opened === undefined) return 1
   if (opened.bay.path === undefined) throw new Error(`yrd: Bay '${opened.bay.id}' opened without a workspace path`)
+  await services.checks?.install(opened.bay.path)
   printBayResolution(io, opened.identity, opened.identity.reattached ? "reattached" : "new", io.stderr)
   io.stdout(`${opened.bay.path}\n`)
   return 0
@@ -2403,6 +2397,7 @@ async function runBaySession(
   if (provisioned === undefined) return 1
   const { identity } = provisioned
   let { bay } = provisioned
+  if (bay.path !== undefined) await services.checks?.install(bay.path)
   printBayResolution(
     io,
     identity,
@@ -2459,24 +2454,8 @@ async function doWork(
   services: YrdCliServices,
   selector: string,
   io: YrdCliIO,
-  options: Readonly<{ seat?: boolean; lane?: string }> = {},
 ): Promise<YrdCliExitCode> {
-  // Two shapes, one verb. A person at a terminal keeps the interactive Bay
-  // session below. `--seat`, or a caller with no terminal, takes the managed
-  // composition: it drives the same existing surfaces without a human in the
-  // middle and returns only landed, refused, or timed out.
-  if (managedDoRequested(options, io)) {
-    return doWorkManaged(app, services, selector, io, options.lane === undefined ? {} : { lane: options.lane })
-  }
-  if (options.lane !== undefined) usage("--lane selects a managed dispatch lane; it requires --seat")
-  // The seat this Bay is opened for belongs to the configured lane. Without
-  // this the ambient HAB_NAME of whoever typed `yrd do` — a chief seat, most
-  // often — would be stamped onto a session that is not theirs.
-  const lane = services.managedDo?.lane?.trim()
-  const seatIntent: BayOpenIntent = {
-    adopt: true,
-    ...(lane === undefined || lane === "" ? {} : { sessionName: lane }),
-  }
+  const seatIntent: BayOpenIntent = { adopt: true }
   let issueFailure: unknown
   try {
     await app.issues.resolve(app.issues.ref(selector))
@@ -2530,197 +2509,6 @@ async function ensureIssueDraft(
   const pr = result.prs[0]
   if (pr === undefined) refusal(`branch '${branch}' has no PR after create`)
   return { pr, warnings: result.warnings }
-}
-
-/** Bind the managed `do` stages to the surfaces that already own them. Nothing
- * here is a new engine: assign and launch are repository-configured commands,
- * the Bay comes from the same provisioning path `bay open` uses, and delivery is
- * read from the PR projection plus the queue audit. */
-function managedDoStages(
-  app: YrdCliApp,
-  services: YrdCliServices,
-  io: YrdCliIO,
-  runCommand: (
-    stage: string,
-    command: ManagedDoCommand,
-    env: Readonly<Record<string, string>>,
-    commandCwd?: string,
-  ) => Promise<void>,
-  commands: Readonly<{ assign: ManagedDoCommand; seat: ManagedDoCommand; launch: ManagedDoCommand }>,
-  recordBoundary: ReturnType<typeof createManagedDoJournal>,
-): ManagedDoStages {
-  const processService = services.process
-  if (processService === undefined) configuration("managed 'do' requires the process-backed Yrd runtime")
-  let bayId: string | undefined
-  return {
-    assign: (input) => runCommand("assign", commands.assign, { YRD_DO_ISSUE: input.issue, YRD_DO_LANE: input.lane }),
-    decideSeat: (input) => runCommand("seat", commands.seat, { YRD_DO_ISSUE: input.issue, YRD_DO_LANE: input.lane }),
-    openBay: async (input) => {
-      const opened = await prepareResolvedIssueBay(app, input.issue, io)
-      let bay = opened.bay
-      const environment = services.environment ?? process.env
-      try {
-        const moved = await convergeBayOntoBase(processService, bay, bay.path, io, environment)
-        if (moved) {
-          const refreshed = await refreshBay(app, bay, io)
-          if (refreshed.path === undefined) refusal(`Bay '${refreshed.id}' lost its workspace path during refresh`)
-          bay = { ...refreshed, path: refreshed.path }
-        }
-        await ensureBayDependencies(processService, bay, bay.path, io, environment, moved)
-      } catch (error) {
-        await orphanRunBay(app, bay, `Bay setup failed: ${errorDetail(error)}`)
-        throw error
-      }
-      bayId = bay.id
-      return {
-        bay: bay.id,
-        branch: opened.identity.branch,
-        path: bay.path,
-        ...(bay.headSha === undefined ? {} : { headSha: bay.headSha }),
-      }
-    },
-    launch: (input) =>
-      runCommand(
-        "launch",
-        commands.launch,
-        {
-          YRD_DO_ISSUE: input.issue,
-          YRD_DO_LANE: input.lane,
-          YRD_DO_BAY: input.bay,
-          YRD_DO_BAY_PATH: input.path,
-        },
-        input.path,
-      ),
-    closeBay: async (input) => {
-      const bay = app.bays.get(input.bay)
-      if (bay === undefined) refusal(`Bay '${input.bay}' disappeared before managed rollback`)
-      const closed = await closeBayWithProcessReap(app, processService, bay, {}, io, `bay '${input.bay}' rollback`)
-      if (closed?.status !== "closed") refusal(`Bay '${input.bay}' did not close after managed launch refusal`)
-    },
-    observeCarrier: async (input) => {
-      const current = app.bays.get(bayId ?? input.bay)
-      if (current === undefined) refusal(`Bay '${input.bay}' disappeared while awaiting a carrier`)
-      const refreshed = await refreshBay(app, current, io)
-      return refreshed.headSha === undefined ? {} : { headSha: refreshed.headSha }
-    },
-    createDraft: async (input) => {
-      const draft = await ensureIssueDraft(app, input.issue, input.branch, io, { track: input.track })
-      await printPrSelectionResult(io, {}, "pr.create", { prs: [draft.pr], warnings: draft.warnings })
-      return { pr: draft.pr.id }
-    },
-    recut: async (input) => {
-      const exit = await recutPr(
-        app,
-        services,
-        input.pr,
-        { queue: true, ...(input.preflight ? { preflight: true } : {}) },
-        io,
-      )
-      if (exit !== 0) {
-        refusal(`recut ${input.preflight ? "preflight " : ""}for PR '${input.pr}' exited ${exit}`)
-      }
-    },
-    observeDelivery: (input) => observeManagedDoDelivery(app, input.pr),
-    sleep: (ms) =>
-      new Promise<void>((resolve) => {
-        setTimeout(resolve, ms)
-      }),
-    now: () => (io.now === undefined ? Date.now() : io.now()),
-    wallNow: () => new Date(),
-    recordBoundary,
-    note: (text) => io.stderr(text),
-  }
-}
-
-function reportManagedDo(result: ManagedDoResult, io: YrdCliIO): YrdCliExitCode {
-  io.stderr(formatManagedDoTimingTable(result))
-  const trail =
-    `issue=${result.trail.issue} lane=${result.trail.lane} ` +
-    `bay=${result.trail.bay ?? "-"} branch=${result.trail.branch ?? "-"} carrier=${result.trail.carrier ?? "-"}`
-  if (result.outcome === "landed") {
-    io.stdout(`landed ${result.landingSha}\n`)
-    io.stdout(`${result.ancestry}\n`)
-    io.stderr(`yrd: ${trail} stage=${result.stage}\n`)
-    return 0
-  }
-  io.stderr(`yrd: managed do ${result.outcome} at stage '${result.stage}': ${result.reason}\n`)
-  io.stderr(`yrd: ${trail}\n`)
-  if (result.escalation !== undefined) io.stderr(`yrd: escalate: ${result.escalation}\n`)
-  for (const step of result.remedy ?? []) io.stderr(`yrd: manual: ${step}\n`)
-  return 1
-}
-
-/** The managed composition: assign, decide/recycle the seat, Bay, launch,
- * bounded wait for a carrier, DRAFT before any gitlink commit, recut --queue,
- * then OBSERVE the resident runner land it. `queue run` is deliberately absent
- * — one queue, one driver. */
-async function doWorkManaged(
-  app: YrdCliApp,
-  services: YrdCliServices,
-  selector: string,
-  io: YrdCliIO,
-  overrides: ManagedDoOverrides,
-): Promise<YrdCliExitCode> {
-  const runner = services.process
-  if (runner === undefined) configuration("managed 'do' requires the process-backed Yrd runtime")
-  const stateDir = io.stateDir
-  if (stateDir === undefined) {
-    configuration("managed 'do' requires the host state directory; it holds the single-run concurrency marker")
-  }
-  if (services.base === undefined) {
-    configuration("managed 'do' requires the resolved base branch for its ancestry proof")
-  }
-  const plan = resolveManagedDoPlan(
-    {
-      ...(services.managedDo === undefined ? {} : { do: services.managedDo }),
-      base: services.base,
-    },
-    overrides,
-  )
-  // Managed work is issue-driven and refuses before it assigns anything: an
-  // unresolvable selector must never leave a tracker write or a Bay behind.
-  await app.issues.resolve(app.issues.ref(selector))
-  const cwd = io.cwd ?? process.cwd()
-  const runCommand = async (
-    stage: string,
-    command: ManagedDoCommand,
-    env: Readonly<Record<string, string>>,
-    commandCwd = cwd,
-  ): Promise<void> => {
-    const result = await runner.run({
-      argv: shellCommand(command.run),
-      cwd: commandCwd,
-      env: { ...(services.environment ?? process.env), ...env },
-      ...(command.timeoutMs === undefined ? {} : { timeoutMs: command.timeoutMs }),
-    })
-    if (result.exitCode !== 0) {
-      refusal(`${stage} command exited ${result.exitCode}: ${commandOutputTail(result)}`)
-    }
-  }
-  const result = await runManagedDo({
-    issue: selector,
-    plan,
-    stages: managedDoStages(
-      app,
-      services,
-      io,
-      runCommand,
-      { assign: plan.assign, seat: plan.seat, launch: plan.launch },
-      createManagedDoJournal({ stateDir }),
-    ),
-    lock: createManagedDoLock({ stateDir }),
-  })
-  try {
-    await createManagedDoScoreboard({ stateDir })(result)
-  } catch (error) {
-    io.stderr(formatManagedDoTimingTable(result))
-    io.stderr(
-      `yrd: managed do refused after stage '${result.stage}': could not append the speed scoreboard: ` +
-        `${error instanceof Error ? error.message : String(error)}\n`,
-    )
-    return 1
-  }
-  return reportManagedDo(result, io)
 }
 
 async function refreshBays(
@@ -3258,14 +3046,14 @@ async function readyPr(
   options: JsonOption,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
+  await runRequiredChecks(services, io)
   await requirePublishedSubmodulePins(requiredPr(app, selector), services, io)
   await app.bays.ready({ pr: selector })
   let pr = app.bays.pr(selector)
   if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after ready`)
   if (!app.bays.checksRequested(pr.id)) await app.bays.requestChecks({ pr: pr.id })
-  await admitRevision(app, [pr.id], io)
   pr = app.bays.pr(pr.id)
-  if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after check admission`)
+  if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after requesting checks`)
   const eligibility = app.queue.eligibility(pr.id)
   await printResult(
     io,
@@ -3592,9 +3380,6 @@ async function executeRecutPr(
       await app.bays.requestChecks({ pr: current.id, expectedCurrent: queueExpectedCurrent })
     }
     await app.bays.ready({ pr: current.id, expectedCurrent: queueExpectedCurrent })
-    if (options.admit !== false) {
-      await admitRevision(app, [current.id], io)
-    }
     current = requiredPr(app, current.id)
   }
   const output = {
@@ -3790,10 +3575,6 @@ async function followCheckRecords(
     if (scope.signal.aborted) return records
     await app.refresh()
     if (scope.signal.aborted) return records
-    const revisionAdmissions = selectors.filter((selector) => app.queue.eligibility(selector).checks.run === undefined)
-    if (revisionAdmissions.length > 0) {
-      await app.queue.admitRevision({ prs: revisionAdmissions }, runtimeOptions(io))
-    }
     records = [...prCheckRecords(app, selectors)]
   }
   return records
@@ -4001,6 +3782,24 @@ async function printPrSelectionResult(
   )
 }
 
+function submitRequiredCheckContexts(
+  app: YrdCliApp,
+  selectors: readonly string[],
+  io: YrdCliIO,
+): readonly Readonly<{ cwd: string; ref?: string }>[] {
+  const cwd = io.cwd ?? process.cwd()
+  const state = stateOf(app)
+  const local = currentBay(state.bays, cwd)
+  const currentBranch = currentGitBranch(cwd, io)
+  const inferred = resolveSubmitSelectors(selectors, local?.id ?? currentBranch)
+  return inferred.map((selector) => {
+    const bay = app.bays.get(selector)
+    if (bay?.path !== undefined) return { cwd: bay.path }
+    const branch = app.bays.pr(selector)?.branch ?? bay?.branch ?? selector
+    return branch === currentBranch ? { cwd } : { cwd, ref: branch }
+  })
+}
+
 async function applyPrSelectionVerb(
   app: YrdCliApp,
   services: YrdCliServices,
@@ -4009,6 +3808,11 @@ async function applyPrSelectionVerb(
   io: YrdCliIO,
   command: PrSelectionCommand,
 ): Promise<YrdCliExitCode> {
+  if (command === "pr.submit") {
+    for (const context of submitRequiredCheckContexts(app, selectors, io)) {
+      await runRequiredChecks(services, { ...io, cwd: context.cwd }, undefined, context.ref)
+    }
+  }
   const result = await applyPrSelection(app, selectors, options, io, command)
   const prs = [...result.prs]
   const warnings = [...result.warnings]
@@ -4048,12 +3852,6 @@ async function applyPrSelectionVerb(
     )
     return 0
   }
-  // Admission is a synchronous revision verdict. It runs at submit so callers
-  // receive ready/refused evidence immediately; it is never deferred to the
-  // resident and never creates a Queue Run.
-  await app.queue.admitRevision({ prs: selected }, runtimeOptions(io))
-  let checks: readonly PRCheckViewRecord[] = prCheckRecords(app, selected)
-  if (options.follow === true && !checksTerminal(checks)) checks = await followCheckRecords(app, selected, checks, io)
   const currentPrs = selected.map((selector) => requiredPr(app, selector))
   const current = currentPrs.map((pr) => ({ pr, eligibility: app.queue.eligibility(pr.id) }))
   await printResult(
@@ -4067,18 +3865,16 @@ async function applyPrSelectionVerb(
           eligibility: projectEligibilityTaskStatus(eligibility),
         }
       }),
-      checks: checks.map(projectCheckTaskStatus),
       ...(warnings.length > 0 ? { warnings } : {}),
     },
     createElement(PRResultView, {
       prs: currentPrs,
       runs: [],
-      checks,
       eligibilities: current.map(({ eligibility }) => eligibility),
       now: io.now?.() ?? Date.now(),
     }),
   )
-  return checks.some((check) => check.status === "failed") ? 1 : 0
+  return 0
 }
 
 async function readComposition(path: string | undefined, io: YrdCliIO): Promise<CompositionV1 | undefined> {
@@ -5898,7 +5694,7 @@ function renderInitTable(rows: readonly InitRow[]): string {
 }
 
 /**
- * `yrd init` — set `submodule.<name>.branch` for every submodule that does not
+ * `yrd admin submodule init` — set `submodule.<name>.branch` for every submodule that does not
  * yet track a branch, turning it from PINNED into TRACKED so upstream motion
  * rolls the superproject. The default branch is resolved from the submodule's
  * upstream (`git ls-remote --symref … HEAD`); a reachable remote with no branch
@@ -5924,8 +5720,8 @@ async function initSubmoduleTracking(options: InitOptions, io: YrdCliIO): Promis
     await printResult(
       io,
       json,
-      { command: "init", dryRun, root, results: [], alreadyTracking: 0 },
-      "yrd init: no submodules declared in .gitmodules",
+      { command: "admin.submodule.init", dryRun, root, results: [], alreadyTracking: 0 },
+      "yrd admin submodule init: no submodules declared in .gitmodules",
     )
     return 0
   }
@@ -5933,8 +5729,8 @@ async function initSubmoduleTracking(options: InitOptions, io: YrdCliIO): Promis
     await printResult(
       io,
       json,
-      { command: "init", dryRun, root, results: [], alreadyTracking },
-      `yrd init: all ${entries.length} submodule${entries.length === 1 ? "" : "s"} already track a branch`,
+      { command: "admin.submodule.init", dryRun, root, results: [], alreadyTracking },
+      `yrd admin submodule init: all ${entries.length} submodule${entries.length === 1 ? "" : "s"} already track a branch`,
     )
     return 0
   }
@@ -5954,13 +5750,13 @@ async function initSubmoduleTracking(options: InitOptions, io: YrdCliIO): Promis
   if (dryRun) {
     const wouldSet = rows.filter((row) => row.action === "would-set").length
     summary.push(
-      `yrd init (dry run): would set branch= for ${wouldSet} submodule${wouldSet === 1 ? "" : "s"}` +
+      `yrd admin submodule init (dry run): would set branch= for ${wouldSet} submodule${wouldSet === 1 ? "" : "s"}` +
         `${failures.length > 0 ? `, ${failures.length} unreachable` : ""}`,
     )
     summary.push("(dry run: .gitmodules not modified)")
   } else {
     summary.push(
-      `yrd init: set branch= for ${setCount} submodule${setCount === 1 ? "" : "s"}` +
+      `yrd admin submodule init: set branch= for ${setCount} submodule${setCount === 1 ? "" : "s"}` +
         `${failures.length > 0 ? `, ${failures.length} unreachable (left unset)` : ""}`,
     )
     if (setCount > 0) {
@@ -5980,7 +5776,7 @@ async function initSubmoduleTracking(options: InitOptions, io: YrdCliIO): Promis
     io,
     json,
     {
-      command: "init",
+      command: "admin.submodule.init",
       dryRun,
       root,
       alreadyTracking,
@@ -6265,7 +6061,7 @@ export async function requireFreshInstalledBaseline(
   const drift = await auditDrift()
   if (drift.length === 0) return
   // 22306 residual (with 22334 constraint): follow-mode may re-provision on
-  // config-drift via the SAME `provision()` path as `queue init` — one descriptor
+  // config-drift via the SAME `provision()` path as `admin queue init` — one descriptor
   // recipe, not a second revision family. That converts "landing advanced the
   // base / another seat wrote a foreign baseline" into a hiccup, not a fatal
   // resident exit. One-shot stays fail-loud (no accidental baseline rewrite).
@@ -6366,6 +6162,104 @@ async function journalImportOrphan(
   )
 }
 
+async function runRequiredChecks(
+  services: YrdCliServices,
+  io: YrdCliIO,
+  selected?: readonly string[],
+  ref?: string,
+): Promise<readonly Readonly<{ name: string; exitCode: number }>[]> {
+  const checks = services.checks
+  if (checks === undefined) configuration("required-check capability is not installed")
+  const names = selected ?? checks.names
+  if (names.length === 0) return []
+  await checks.install(io.cwd ?? process.cwd())
+  const results: Array<Readonly<{ name: string; exitCode: number }>> = []
+  for (const name of names) {
+    const result = await checks.run(name, io.cwd ?? process.cwd(), ref === undefined ? undefined : { ref })
+    if (result.stdout !== "") io.stdout(result.stdout)
+    if (result.stderr !== "") io.stderr(result.stderr)
+    if (result.exitCode !== 0 || result.timedOut) {
+      const outcome = result.timedOut ? "timed out" : `exited ${String(result.exitCode)}`
+      raiseFailure(
+        "refusal",
+        "required-check-failed",
+        `yrd: required check failed: '${name}' ${outcome}; fix the working tree and run 'yrd check ${name}'`,
+      )
+    }
+    results.push({ name, exitCode: result.exitCode })
+  }
+  return results
+}
+
+async function checkRequired(
+  services: YrdCliServices,
+  names: readonly string[],
+  options: JsonOption,
+  io: YrdCliIO,
+): Promise<void> {
+  if (names.length === 0) usage("check requires at least one configured check name")
+  const checks = await runRequiredChecks(services, io, names)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "check", checks },
+    `required checks passed: ${checks.map(({ name }) => name).join(", ")}`,
+  )
+}
+
+function generatedReferenceBlock(): string {
+  const scaffold = renderYrdConfigScaffold()
+  const start = scaffold.indexOf("# BEGIN GENERATED YRD CONFIG REFERENCE")
+  if (start < 0) throw new Error("yrd: generated config reference marker is missing")
+  return scaffold.slice(start).trimEnd()
+}
+
+async function initYrdConfig(
+  services: YrdCliServices,
+  options: JsonOption & Readonly<{ refreshComments?: boolean }>,
+  io: YrdCliIO,
+): Promise<void> {
+  const cwd = io.cwd ?? process.cwd()
+  const path = join(cwd, ".yrd.yml")
+  const exists = existsSync(path)
+  if (exists && options.refreshComments !== true) {
+    refusal(`'${path}' already exists; use 'yrd admin init --refresh-comments' to regenerate only its comments`)
+  }
+  let source = exists ? await readFile(path, "utf8") : renderYrdConfigScaffold()
+  if (exists) {
+    const stripped = source.replace(
+      /(?:\n\n)?# BEGIN GENERATED YRD CONFIG REFERENCE[\s\S]*?# END GENERATED YRD CONFIG REFERENCE\s*/u,
+      "",
+    )
+    source = `${stripped.trimEnd()}\n\n${generatedReferenceBlock()}\n`
+  }
+  await writeFile(path, source, "utf8")
+  const hook = await services.checks?.install(cwd)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "admin.init", path, ...(hook === undefined ? {} : { hook }) },
+    `initialized ${path}${hook === undefined ? "" : ` and ${hook}`}`,
+  )
+}
+
+async function bumpJournal(
+  services: YrdCliServices,
+  version: number,
+  options: JsonOption,
+  io: YrdCliIO,
+): Promise<void> {
+  const capability = services.journal?.bump
+  if (capability === undefined) configuration("journal bump capability is not installed")
+  const result = await capability(version)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "admin.journal.bump", ...result },
+    `journal floor bumped v${String(result.from)} → v${String(result.to)}; snapshot ${result.snapshot}; restore drill passed`,
+  )
+}
+
 async function queueAdministration(
   app: YrdCliApp,
   services: YrdCliServices,
@@ -6380,6 +6274,7 @@ async function queueAdministration(
   if (capability === undefined) configuration(`queue.${command} capability is not installed`)
   const selected = selectedBase(stateOf(app), base ?? "main")
   const result = await capability(selected)
+  if (command === "init") await services.checks?.install(io.cwd ?? process.cwd())
   await printResult(
     io,
     jsonEnabled(options),
@@ -7080,7 +6975,7 @@ async function applyPreflightVerdict(
     ...requirements,
   }
   if (preflight.verdict === "SUBSUMED-WITHDRAW") {
-    // Withdrawal ENDS a delivery, and `yrd pr prune` already owns unattended
+    // Withdrawal ENDS a delivery, and `yrd admin pr prune` already owns unattended
     // subsumption on its own schedule. The runner's job is to unwedge the line,
     // not to retire someone's PR mid-cycle.
     raiseFailure(
@@ -7596,10 +7491,7 @@ async function watchQueue(
         state: snapshot.state,
         columns: io.columns ?? 120,
       }),
-      [
-        ...queuePauseWarnings(snapshot.state, snapshot.results),
-        ...queueSurfaceWarnings(services, io.cwd ?? process.cwd()),
-      ],
+      queuePauseWarnings(snapshot.state, snapshot.results),
     )
     if (scope.signal.aborted) return 0
     await scope.sleep(interval)
@@ -7976,19 +7868,7 @@ function addRootBayCommands(
   program
     .command("do <issue-or-pr>")
     .description("work an issue first, or continue an existing PR when no issue resolves")
-    .option(
-      "--seat",
-      "drive the managed composition (assign, seat decision, Bay, launch, carrier, draft, recut, observe)",
-    )
-    .option("--lane <persona>", "dispatch lane for this managed run (default: .yrd.yml key 'do.lane')")
-    .action(async (selector, options) =>
-      setExit(
-        await doWork(installed(), installedServices(), selector, io, {
-          seat: options.seat === true,
-          ...(options.lane === undefined ? {} : { lane: String(options.lane) }),
-        }),
-      ),
-    )
+    .action(async (selector) => setExit(await doWork(installed(), installedServices(), selector, io)))
   program
     .command("sh [config]")
     .description("run $SHELL in a scoped Bay")
@@ -8136,7 +8016,7 @@ function buildProgram(
       if ((io as RuntimeInvocationIO)[RuntimeChildArgv] !== undefined) {
         usage("bay open does not run commands; use 'yrd bay run <config> -- <command>'")
       }
-      setExit(await openPersistentBay(installed(), config, options, io))
+      setExit(await openPersistentBay(installed(), installedServices(), config, options, io))
     })
   bay
     .command("run [config] [command...]")
@@ -8212,13 +8092,6 @@ function buildProgram(
     .description("safety oracle: is this bay safe to remove? (exit 0=safe 1=not-safe 2=unknown)")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await bayStatusCommand(installed(), selectors, options, io)))
-  bay
-    .command("prune")
-    .description("report (default) or close every bay that bay status says is safe")
-    .option("--apply", "actually close safe bays (default is dry-run)")
-    .option("--json", "emit stable JSON")
-    .action(async (options) => setExit(await bayPruneCommand(installed(), installedServices(), options, io)))
-
   if (projection === "bay") {
     addExamples(program, name, projection)
     configureOutput(program, io, commanderOutput)
@@ -8255,13 +8128,6 @@ function buildProgram(
     .description("brief an agent on Yrd and current delivery state")
     .option("--json", "emit stable JSON")
     .action(async (options) => primeYrd(installed(), options, io))
-
-  program
-    .command("init")
-    .description("track submodule branches: set submodule.<name>.branch for every submodule not yet tracking one")
-    .option("--dry-run", "print what would be set without writing .gitmodules")
-    .option("--json", "emit stable JSON")
-    .action(async (options) => setExit(await initSubmoduleTracking(options, io)))
 
   const queue = program.command("queue").description("manage integration queues")
   queue.helpCommand(false)
@@ -8305,16 +8171,6 @@ function buildProgram(
     .description("check queue state")
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await queueAudit(installed(), installedServices(), options, io)))
-  queue
-    .command("init [base]")
-    .description("prepare queue resources")
-    .option("--json", "emit stable JSON")
-    .action(async (base, options) => queueAdministration(installed(), installedServices(), "init", base, options, io))
-  queue
-    .command("deinit [base]")
-    .description("release queue resources")
-    .option("--json", "emit stable JSON")
-    .action(async (base, options) => queueAdministration(installed(), installedServices(), "deinit", base, options, io))
   queue
     .command("pause [base]")
     .description("pause new queue runs")
@@ -8405,7 +8261,7 @@ function buildProgram(
     .action(async (options) => listPrs(installed(), options, io))
   const create = pr
     .command("create [selector]")
-    .description("create a draft PR without requesting or admitting checks")
+    .description("create a draft PR without requesting required checks")
     .option("--base <branch>", "base branch for a direct branch create")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
@@ -8435,9 +8291,7 @@ function buildProgram(
     )
   addAuthoredCarrierWorkflow(create, name)
   pr.command("submit [selector...]")
-    .description("submit PR revisions and admit configured checks")
-    .option("--wait", "block on the synchronous drain (pre-decouple behavior); default records and returns")
-    .option("--follow", "follow admitted checks to a terminal result (implies --wait)")
+    .description("submit PR revisions after the managed local required-check hook")
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
@@ -8493,7 +8347,7 @@ function buildProgram(
     .description("mechanically recut an immutable PR revision onto authoritative current base")
     .option("--revision <number>", "select an older immutable PR revision", int)
     .option("--preflight", "classify recut, withdrawal, force, or no-op without mutating")
-    .option("--queue", "ready the fresh revision and admit its configured checks")
+    .option("--queue", "submit the fresh revision and request its configured checks")
     .option("--force", "recut even when the current revision already holds a passing check")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) =>
@@ -8501,7 +8355,7 @@ function buildProgram(
     )
   addAuthoredCarrierWorkflow(recut, name)
   pr.command("ready <selector>")
-    .description("submit a pushed PR revision and admit configured checks")
+    .description("submit a pushed PR revision and request configured checks")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) =>
       setExit(await readyPr(installed(), installedServices(), selector, options, io)),
@@ -8543,7 +8397,7 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => stopPrSession(installed(), selector, options, io))
   pr.command("checks <selector...>")
-    .description("show admitted checks for current PR revisions")
+    .description("show required-check evidence for current PR revisions")
     .option("--follow", "follow active checks to a terminal result")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await prChecks(installed(), selectors, options, io)))
@@ -8570,11 +8424,6 @@ function buildProgram(
     .option("--reason <text>", "withdrawal rationale recorded on each pr/withdrawn event")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => withdrawPrs(installed(), selectors, options, io))
-  pr.command("prune")
-    .description("withdraw live PRs whose content their base branch already contains")
-    .option("--dry-run", "print every checked verdict without withdrawing")
-    .option("--json", "emit stable JSON")
-    .action(async (options) => prunePrs(installed(), options, io))
   pr.command("merge <selector>")
     .description("teach that the queue is the only merger")
     .option("--json", "emit stable JSON")
@@ -8589,13 +8438,67 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await migrateTerminalAssociations(installed(), options, io)))
 
-  const journal = program.command("journal").description("inspect and recover the durable journal")
-  journal.helpCommand(false)
-  journal
+  program
+    .command("check <name...>")
+    .description("run configured required checks in the current working tree")
+    .option("--json", "emit stable JSON")
+    .action(async (names, options) => checkRequired(installedServices(), names, options, io))
+
+  const admin = program.command("admin").description("perform infrequent repository and state administration")
+  admin.helpCommand(false)
+  admin
+    .command("init")
+    .description("scaffold .yrd.yml and install the managed pre-submit hook")
+    .option("--refresh-comments", "regenerate the schema-owned commented reference block")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => initYrdConfig(installedServices(), options, io))
+  const adminQueue = admin.command("queue").description("administer queue resources")
+  adminQueue
+    .command("init [base]")
+    .description("prepare queue resources")
+    .option("--json", "emit stable JSON")
+    .action(async (base, options) => queueAdministration(installed(), installedServices(), "init", base, options, io))
+  adminQueue
+    .command("deinit [base]")
+    .description("release queue resources")
+    .option("--json", "emit stable JSON")
+    .action(async (base, options) => queueAdministration(installed(), installedServices(), "deinit", base, options, io))
+  const adminBay = admin.command("bay").description("administer work bays")
+  adminBay
+    .command("prune")
+    .description("report (default) or close every bay that bay status says is safe")
+    .option("--apply", "actually close safe bays (default is dry-run)")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => setExit(await bayPruneCommand(installed(), installedServices(), options, io)))
+  const adminPr = admin.command("pr").description("administer pull requests")
+  adminPr
+    .command("prune")
+    .description("withdraw live PRs whose content their base branch already contains")
+    .option("--dry-run", "print every checked verdict without withdrawing")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => prunePrs(installed(), options, io))
+  const adminJournal = admin.command("journal").description("administer the durable journal")
+  adminJournal
+    .command("bump <version>")
+    .description("one-way raise the journal version floor after a tested snapshot restore")
+    .option("--json", "emit stable JSON")
+    .action(async (version, options) => {
+      const parsed = Number(version)
+      if (!Number.isSafeInteger(parsed) || parsed < 1) usage("journal bump version must be a positive integer")
+      await bumpJournal(installedServices(), parsed, options, io)
+    })
+  adminJournal
     .command("import-orphan <source>")
     .description("archive preserved v3 rows without replaying them as live entries")
     .option("--json", "emit stable JSON")
     .action(async (source, options) => journalImportOrphan(installedServices(), source, options, io))
+  const adminSubmodule = admin.command("submodule").description("administer submodule tracking")
+  adminSubmodule
+    .command("init")
+    .description("set submodule.<name>.branch for submodules not yet tracking one")
+    .option("--dry-run", "print what would be set without writing .gitmodules")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => setExit(await initSubmoduleTracking(options, io)))
 
   const issue = program.command("issue").description("inspect tracker-neutral issue delivery")
   issue.helpCommand(false)
@@ -8669,7 +8572,7 @@ function buildProgram(
     .action(async (contestId, options) => setExit(await promoteContest(installed(), contestId, options, io)))
 
   const order = new Map(
-    ["pr", "bay", "issue", "contest", "queue", "doctor", "journal", "migrate", "log", "watch", "prime"].map(
+    ["pr", "bay", "issue", "contest", "queue", "check", "doctor", "admin", "migrate", "log", "watch", "prime"].map(
       (command, index) => [command, index],
     ),
   )

@@ -317,7 +317,7 @@ describe("case-insensitive CLI selector surfaces", () => {
     expect(JSON.parse(output.stdout())).toMatchObject({ pr: "PR1" })
   })
 
-  it("retries a checks-failed PR through folded selectors without renaming it", async () => {
+  it("retries a required-check-failed PR through folded selectors without renaming it", async () => {
     let attempts = 0
     const app = await createCliApp({
       check: (): JobResult<JsonValue> =>
@@ -342,7 +342,7 @@ describe("case-insensitive CLI selector surfaces", () => {
     // resolved to the canonical identity on the retry path.
     const refused = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "pr1", "--json"), refused.io)).not.toBe(0)
-    expect(refused.stderr()).toContain("PR 'PR1' checks failed in R1")
+    expect(refused.stderr()).toContain("PR 'PR1' required check failed in R1")
 
     // The sanctioned retry: recut the folded selector back into the queue.
     const requeued = recutOutputIO()

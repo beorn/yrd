@@ -284,7 +284,11 @@ describe("held-out command evaluator", () => {
     // 30s interactive window; cleanup is correctness-critical, not
     // latency-critical, and a timeout here converts finished check work into
     // a failure. The removal must run under the dedicated cleanup budget.
-    expect(result.status).toBe("passed")
+    expect(result).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+      output: { verdict: "passed" },
+    })
     const removal = fake.requests.find((request) => request.argv.slice(0, 3).join(" ") === "git worktree remove")
     expect(removal?.timeoutMs).toBe(120_000)
   })

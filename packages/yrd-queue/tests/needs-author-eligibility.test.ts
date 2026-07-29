@@ -1,6 +1,6 @@
 /**
  * @failure A composition refusal that reaches the runner is misreported as a plain
- * `checks-failed` (or as a submit-time door refusal), hiding that the author must
+ * `required-check-failed` (or as a submit-time door refusal), hiding that the author must
  * re-author the candidate; and a submitted PR with requested checks is not
  * discoverable by a later queue run when submit did not drain.
  * @level l2
@@ -356,7 +356,7 @@ describe("native needs-author lifecycle", () => {
   })
 
   it("keeps an ordinary check failure (tests/lint) off the needs-author path", async () => {
-    // An ordinary red check keeps the fresh PR open with a `checks-failed`
+    // An ordinary red check keeps the fresh PR open with a `required-check-failed`
     // verdict, never `needs-author` — which is reserved for a composition the
     // queue could not build.
     await using app = await createQueueApp(() => ({
@@ -370,7 +370,7 @@ describe("native needs-author lifecycle", () => {
 
     const eligibility = app.queue.eligibility(pr)
     expect(eligibility.runnable).toBe(false)
-    expect(eligibility.reason?.code).toBe("checks-failed")
+    expect(eligibility.reason?.code).toBe("required-check-failed")
     expect(eligibility.reason?.receipt).toBeUndefined()
     expect(eligibility.reason?.message).toContain("fix the branch and push")
     expect(eligibility.reason?.message).not.toContain("submit it again")

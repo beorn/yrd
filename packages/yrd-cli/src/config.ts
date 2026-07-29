@@ -1,17 +1,7 @@
 import { readFile } from "node:fs/promises"
-import { extname, isAbsolute, join, relative, resolve } from "node:path"
-import {
-  defineConfig,
-  loadConfigModule,
-  withActionStep,
-  withCheckStep,
-  withFlow,
-  withMergeStep,
-  type FlowDef,
-  type StepDef,
-  type YrdConfig,
-} from "@yrd/config"
-import { asFailure, createFailure, JournalCompatibilitySchema, type JournalCompatibility } from "@yrd/core"
+import { isAbsolute, join, relative, resolve } from "node:path"
+import { defineConfig, withActionStep, withCheckStep, withFlow, withMergeStep, type FlowDef } from "@yrd/config"
+import { asFailure, createFailure } from "@yrd/core"
 import { DIAGNOSTICS_COMPARISON_READY, GateModeSchema, type GateMode } from "@yrd/queue"
 import * as z from "zod"
 
@@ -72,7 +62,7 @@ const StepObjectSchema = z
     /** Report id that must be present before a compound diagnostics comparison
      * may run, proving every earlier structured child completed. */
     comparisonReady: z.literal(DIAGNOSTICS_COMPARISON_READY).optional(),
-    /** Admission posture. Delta accepts only a structured, auditable residual
+    /** Required-check posture. Delta accepts only a structured, auditable residual
      * already present at the exact base; strict requires an absolutely green
      * candidate and never invokes a base comparator. */
     mode: GateModeSchema.optional(),
@@ -131,119 +121,51 @@ const ContestSchema = z
   .strict()
   .default({})
 
-/** Admission refusal boundary for path roots that belong elsewhere (e.g. pm
- * state split into a sibling repo). Entries are plain path prefixes: "@" covers
- * every top-level sigil root, "hub/" that tree. `reason` is appended to the
- * refusal so the pointer to the right home comes from the repo's own config. */
-const StateDecommissionRootSchema = TextSchema.refine(
-  (root) =>
-    !root.startsWith("/") &&
-    !root.includes("\\") &&
-    root.split("/").every((segment) => segment !== "" && segment !== "." && segment !== ".."),
-  { message: "must be a canonical repository-relative root" },
-)
-const StateDecommissionExceptionSchema = z
-  .object({
-    kind: z.literal("state-decommission-v1"),
-    issue: TextSchema,
-    roots: z
-      .array(StateDecommissionRootSchema)
-      .min(1)
-      .superRefine((roots, context) => {
-        if (new Set(roots).size !== roots.length) {
-          context.addIssue({ code: "custom", message: "contains duplicate roots" })
-        }
-      })
-      .readonly(),
-    /** Exact bytes every file-root tombstone or directory README must carry. */
-    tombstone: z.string().min(1),
+const InlineCheckSchema = z
+  .record(StepNameSchema, StepSchema)
+  .refine((value) => Object.keys(value).length === 1, { message: "must define exactly one named check" })
+const CheckEntrySchema = z.union([StepNameSchema, InlineCheckSchema])
+const ChecksSchema = z
+  .array(CheckEntrySchema)
+  .superRefine((checks, context) => {
+    const names = checks.map(checkName)
+    if (new Set(names).size !== names.length) context.addIssue({ code: "custom", message: "contains duplicate checks" })
   })
-  .strict()
-  .readonly()
-const RefuseSchema = z
-  .object({
-    paths: z.array(TextSchema).min(1).readonly(),
-    reason: TextSchema.optional(),
-    /** One trusted-base, issue-bound migration exception. It cannot be supplied
-     * by the candidate because the host loads project config from base. */
-    exception: StateDecommissionExceptionSchema.optional(),
-  })
-  .strict()
+  .default([])
 
-/** Command template for a managed `do` stage. Same authoring shape as a
- * configured check step — a shell string, or an object with `run` plus an
- * optional wall-clock bound — because it is the same kind of thing: a command
- * the REPOSITORY owns and Yrd only invokes. The issue, lane and Bay reach the
- * child as `YRD_DO_*` environment values, the way `$YRD_BASE_SHA` reaches a
- * check step; Yrd never rewrites the configured text. */
-const DoCommandObjectSchema = z
-  .object({
-    run: TextSchema,
-    timeoutMs: z.number().int().min(1).optional(),
-  })
-  .strict()
-const DoCommandSchema = z.preprocess(
-  (value) => (typeof value === "string" ? { run: value } : value),
-  DoCommandObjectSchema,
-)
+const ProjectFields = {
+  base: TextSchema.optional(),
+  batch: z.union([z.literal(false), z.number().int().min(0)]).optional(),
+  checks: ChecksSchema,
+  requires: RequirementsSchema.optional(),
+  contest: ContestSchema,
+  notify: NotifySchema.optional(),
+} as const
 
-/** Managed `do` composition policy. Absent keys are refused LOUDLY at the point
- * of use, naming the missing key: assignment, seat preparation and launch are
- * repository policy (which tracker, which habitat) and Yrd must never guess. */
-const DoSchema = z
-  .object({
-    lane: TextSchema.optional(),
-    assign: DoCommandSchema.optional(),
-    seat: DoCommandSchema.optional(),
-    launch: DoCommandSchema.optional(),
-    pollMs: z.number().int().min(1).optional(),
-    carrierTimeoutMs: z.number().int().min(1).optional(),
-    landingTimeoutMs: z.number().int().min(1).optional(),
-  })
-  .strict()
-
-const ProjectSchema = z
-  .object({
-    base: TextSchema.optional(),
-    batch: z.union([z.literal(false), z.number().int().min(0)]).optional(),
-    steps: StepNamesSchema.optional(),
-    requires: RequirementsSchema.optional(),
-    contest: ContestSchema,
-    journal: JournalCompatibilitySchema.optional(),
-    notify: NotifySchema.optional(),
-    refuse: RefuseSchema.optional(),
-    do: DoSchema.optional(),
-  })
-  .catchall(StepSchema)
+const ProjectSchema = z.object(ProjectFields).strict()
 
 export type YrdStepConfig = Readonly<z.infer<typeof StepObjectSchema>>
 export type YrdGateMode = GateMode
-export type YrdRefuseConfig = Readonly<z.infer<typeof RefuseSchema>>
-export type YrdDoConfig = Readonly<z.infer<typeof DoSchema>>
 export type YrdProjectConfig = Readonly<{
   base?: string
   batch?: false | number
-  steps?: readonly string[]
+  checks: readonly z.infer<typeof CheckEntrySchema>[]
   requires?: readonly "review"[]
-  definitions: Readonly<Record<string, YrdStepConfig>>
   contest: Readonly<z.infer<typeof ContestSchema>>
-  journal?: JournalCompatibility
   notify?: SignalRoutes
-  refuse?: YrdRefuseConfig
-  do?: YrdDoConfig
 }>
 
 export type ResolvedYrdProjectConfig = Readonly<{
   base: string
   batch: false | number
+  /** Public configured predicates. Merge is deliberately absent. */
+  checks?: readonly string[]
+  /** Internal Queue execution plan: configured checks plus built-in merge. */
   steps: readonly string[]
   requires: readonly "review"[]
   definitions: Readonly<Record<string, YrdStepConfig>>
   contest: Readonly<{ concurrency: number; timeoutMs: number; evaluators: readonly string[] }>
-  journal?: JournalCompatibility
   notify?: SignalRoutes
-  refuse?: YrdRefuseConfig
-  do?: YrdDoConfig
   /** Programmatic flow authority. Optional only for direct legacy test/app construction. */
   flows?: readonly FlowDef[]
 }>
@@ -254,47 +176,51 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
     throw createFailure({
       kind: "configuration",
       code: "invalid-config",
-      message: `yrd: remove '${retiredWrapper}:' and configure base, batch, steps, and step definitions at the top level`,
+      message: `yrd: remove '${retiredWrapper}:' and configure the required checks as 'checks: [...]'`,
     })
   }
   const parsed = ProjectSchema.safeParse(value ?? {})
   if (parsed.success) {
-    const {
-      base,
-      batch,
-      steps,
-      requires,
-      contest,
-      journal,
-      notify,
-      refuse,
-      do: managedDo,
-      ...definitions
-    } = parsed.data
+    const { base, batch, checks, requires, contest, notify } = parsed.data
     return {
       ...(base === undefined ? {} : { base }),
       ...(batch === undefined ? {} : { batch }),
-      ...(steps === undefined ? {} : { steps }),
+      checks,
       ...(requires === undefined ? {} : { requires }),
-      definitions,
       contest,
-      ...(journal === undefined ? {} : { journal }),
       ...(notify === undefined ? {} : { notify }),
-      ...(refuse === undefined ? {} : { refuse }),
-      ...(managedDo === undefined ? {} : { do: managedDo }),
     }
   }
-  const issue = parsed.error.issues[0]
+  const issue = mostSpecificConfigIssue(parsed.error.issues[0])
   const message = issue === undefined ? "yrd: config is invalid" : configError(issue).message
   throw createFailure({ kind: "configuration", code: "invalid-config", message })
+}
+
+function mostSpecificConfigIssue(issue: z.core.$ZodIssue | undefined): z.core.$ZodIssue | undefined {
+  if (issue?.code !== "invalid_union") return issue
+  return issue.errors
+    .flatMap((issues) => issues.map(mostSpecificConfigIssue))
+    .filter((candidate): candidate is z.core.$ZodIssue => candidate !== undefined)
+    .sort(
+      (left, right) =>
+        right.path.length - left.path.length ||
+        Number(right.code === "custom" || right.code === "unrecognized_keys") -
+          Number(left.code === "custom" || left.code === "unrecognized_keys"),
+    )[0]
 }
 
 function configError(issue: z.core.$ZodIssue): Error {
   const path = issue.path.map(String).join(".")
   if (
+    issue.code === "invalid_key" &&
+    (String(issue.path.at(-1)).startsWith("YRD_") || String(issue.path.at(-1)).startsWith("GIT_"))
+  ) {
+    return new Error(`yrd: config ${path} uses a reserved prefix`)
+  }
+  if (
     issue.code === "invalid_type" &&
     issue.path.length === 1 &&
-    !["base", "batch", "steps", "requires", "contest", "journal", "notify", "refuse", "do"].includes(path)
+    !["base", "batch", "checks", "requires", "contest", "notify"].includes(path)
   ) {
     return new Error(`yrd: config ${path} is not supported`)
   }
@@ -319,7 +245,7 @@ function configError(issue: z.core.$ZodIssue): Error {
   return new Error(`yrd: config${path === "" ? "" : ` ${path}`} ${message}`)
 }
 
-/** Effective admission posture. Delta is deliberately the temporary default
+/** Effective required-check posture. Delta is deliberately the temporary default
  * while inherited debt is being burned down; callers bind this value into
  * step identity so an explicit strict flip invalidates stale installations. */
 export function stepGateMode(config: YrdStepConfig): YrdGateMode {
@@ -343,8 +269,6 @@ export async function loadYrdConfig(options: {
   readAuthority?: (base: string, path: string) => Promise<string | undefined>
   /** Explicit config path from --config; resolved within the repository/base tree. */
   configPath?: string
-  cacheDir?: string
-  loadModule?: (options: Readonly<{ path: string; source: string; cacheDir?: string }>) => Promise<YrdConfig>
 }): Promise<{ path?: string; config: ResolvedYrdProjectConfig }> {
   const repo = resolve(options.repo)
   const explicit = options.configPath === undefined ? undefined : authorityPath(repo, options.configPath)
@@ -352,8 +276,8 @@ export async function loadYrdConfig(options: {
     options.readAuthority === undefined
       ? (options.read ?? defaultRead)(join(repo, authority))
       : options.readAuthority(options.defaultBase, authority)
-  const candidates = explicit === undefined ? [".yrd.ts", ".yrd.yml"] : [explicit]
-  let authority = candidates[0] ?? ".yrd.ts"
+  const candidates = explicit === undefined ? [".yrd.yml"] : [explicit]
+  let authority = candidates[0] ?? ".yrd.yml"
   let source: string | undefined
   for (const candidate of candidates) {
     authority = candidate
@@ -369,31 +293,16 @@ export async function loadYrdConfig(options: {
   }
   const path = join(repo, authority)
 
-  if (source !== undefined && isTypeScriptConfig(authority)) {
-    const flows = await (options.loadModule ?? loadConfigModule)({
-      path,
-      source,
-      ...(options.cacheDir === undefined ? {} : { cacheDir: options.cacheDir }),
-    })
-    return { path, config: resolveFlowConfig(flows, options.defaultBase) }
-  }
-
   let parsed: YrdProjectConfig
   try {
     parsed = parseYrdConfig(source === undefined ? undefined : Bun.YAML.parse(source))
   } catch (error) {
     throw asFailure(error, { kind: "configuration", code: "invalid-config" })
   }
-  const definitions = { ...parsed.definitions }
-  definitions.check ??= { run: 'git diff --check "$YRD_BASE_SHA"..HEAD', runner: "local" }
-  definitions.merge ??= { runner: "local" }
-  const defaultSteps = [
-    "check",
-    ...(definitions.review ? ["review"] : []),
-    "merge",
-    ...(definitions.deploy ? ["deploy"] : []),
-  ]
-  const steps = parsed.steps ?? defaultSteps
+  const definitions = Object.fromEntries(parsed.checks.map(resolveCheck))
+  definitions.merge = { runner: "local", kind: "merge" }
+  const checks = parsed.checks.map(checkName)
+  const steps = [...checks, "merge"]
   const flows = defineConfig(legacyFlow(steps, definitions))
   const kinds = new Map(flows.flows[0]?.steps.map((step) => [step.name, step.kind] as const) ?? [])
   const resolvedDefinitions = Object.fromEntries(
@@ -407,18 +316,16 @@ export async function loadYrdConfig(options: {
     config: {
       base: parsed.base ?? options.defaultBase,
       batch: parsed.batch ?? 1,
+      checks,
       steps,
       requires: parsed.requires ?? [],
       definitions: resolvedDefinitions,
       contest: {
         concurrency: parsed.contest.concurrency ?? 2,
         timeoutMs: parsed.contest.timeoutMs ?? 30 * 60_000,
-        evaluators: parsed.contest.evaluators ?? ["check"],
+        evaluators: parsed.contest.evaluators ?? checks.slice(0, 1),
       },
-      ...(parsed.journal === undefined ? {} : { journal: parsed.journal }),
       notify: parsed.notify ?? {},
-      ...(parsed.refuse === undefined ? {} : { refuse: parsed.refuse }),
-      ...(parsed.do === undefined ? {} : { do: parsed.do }),
       flows: flows.flows,
     },
   }
@@ -434,18 +341,14 @@ function authorityPath(repo: string, requested: string): string {
       message: `yrd: --config '${requested}' must stay inside the repository`,
     })
   }
-  if (!isTypeScriptConfig(inside) && !inside.endsWith(".yml") && !inside.endsWith(".yaml")) {
+  if (!inside.endsWith(".yml") && !inside.endsWith(".yaml")) {
     throw createFailure({
       kind: "configuration",
       code: "config-path-invalid",
-      message: `yrd: --config '${requested}' must name a .ts, .yml, or .yaml file`,
+      message: `yrd: --config '${requested}' must name a .yml or .yaml file`,
     })
   }
   return inside
-}
-
-function isTypeScriptConfig(path: string): boolean {
-  return extname(path) === ".ts"
 }
 
 function legacyFlow(steps: readonly string[], definitions: Readonly<Record<string, YrdStepConfig>>): FlowDef {
@@ -472,49 +375,47 @@ function legacyFlow(steps: readonly string[], definitions: Readonly<Record<strin
   })
 }
 
-function resolvedStep(step: StepDef): YrdStepConfig {
-  return {
-    kind: step.kind,
-    ...(step.run === undefined ? {} : { run: step.run }),
-    runner: step.runner,
-    ...(step.classification === undefined ? {} : { classification: step.classification }),
-    ...(step.env === undefined ? {} : { env: step.env }),
-    ...(step.timeoutMs === undefined ? {} : { timeoutMs: step.timeoutMs }),
-    ...(step.noProgressMs === undefined ? {} : { noProgressMs: step.noProgressMs }),
-  }
+function checkName(check: z.infer<typeof CheckEntrySchema>): string {
+  return typeof check === "string" ? check : (Object.keys(check)[0] ?? "")
 }
 
-function resolveFlowConfig(config: YrdConfig, defaultBase: string): ResolvedYrdProjectConfig {
-  const definitions: Record<string, YrdStepConfig> = {}
-  const names: string[] = []
-  for (const flow of config.flows) {
-    for (const step of flow.steps) {
-      const resolved = resolvedStep(step)
-      const current = definitions[step.name]
-      if (current !== undefined && JSON.stringify(current) !== JSON.stringify(resolved)) {
-        throw createFailure({
-          kind: "configuration",
-          code: "flow-step-conflict",
-          message: `yrd: flow step '${step.name}' has conflicting runner/executable definitions`,
-        })
-      }
-      definitions[step.name] = resolved
-      if (!names.includes(step.name)) names.push(step.name)
-    }
+function resolveCheck(check: z.infer<typeof CheckEntrySchema>): readonly [string, YrdStepConfig] {
+  const name = checkName(check)
+  if (typeof check !== "string") {
+    const definition = check[name]
+    if (definition === undefined) throw new Error(`yrd: configured check '${name}' lost its definition`)
+    return [name, { ...definition, kind: "check" }]
   }
-  return {
-    base: defaultBase,
-    batch: 1,
-    steps: names,
-    requires: [],
-    definitions,
-    contest: {
-      concurrency: 2,
-      timeoutMs: 30 * 60_000,
-      evaluators: names.filter((name) => name !== "merge").slice(0, 1),
-    },
-    ...(config.journal === undefined ? {} : { journal: config.journal }),
-    notify: {},
-    flows: config.flows,
+  if (name === "typecheck") return [name, { run: "bun run typecheck", runner: "local", kind: "check" }]
+  if (name === "check") {
+    return [name, { run: 'git diff --check "$YRD_BASE_SHA"..HEAD', runner: "local", kind: "check" }]
   }
+  throw createFailure({
+    kind: "configuration",
+    code: "check-definition-missing",
+    message: `yrd: required check '${name}' has no built-in definition; use {${name}: {run: ...}}`,
+  })
+}
+
+const GENERATED_REFERENCE_START = "# BEGIN GENERATED YRD CONFIG REFERENCE"
+const GENERATED_REFERENCE_END = "# END GENERATED YRD CONFIG REFERENCE"
+
+export function renderYrdConfigScaffold(): string {
+  const defaults = {
+    base: "main",
+    batch: "1",
+    checks: "[typecheck]",
+    requires: "[]",
+    contest: "{ concurrency: 2, timeoutMs: 1800000, evaluators: [typecheck] }",
+    notify: "{}",
+  } satisfies Readonly<Record<keyof typeof ProjectFields, string>>
+  return [
+    "checks: [typecheck]",
+    "",
+    GENERATED_REFERENCE_START,
+    ...Object.keys(ProjectFields).map((key) => `# ${key}: ${defaults[key as keyof typeof ProjectFields]}`),
+    "# Custom one-line escape hatch: checks: [{lint: {run: bun run lint}}]",
+    GENERATED_REFERENCE_END,
+    "",
+  ].join("\n")
 }

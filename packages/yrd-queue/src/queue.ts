@@ -1452,7 +1452,7 @@ function createQueue<Shape extends PRShape>(
       return
     }
     const snapshot = pinCandidateBaseSha([Queues.snapshot(pr)], baseSha)[0]
-    if (snapshot === undefined) throw new Error(`yrd: admission lost PR '${pr.id}'`)
+    if (snapshot === undefined) throw new Error(`yrd: required-check run lost PR '${pr.id}'`)
     let prepared: z.infer<typeof CandidateCreatedSchema> | undefined
     try {
       prepared = await candidateFactsForSnapshots([snapshot], baseSha)
@@ -1488,7 +1488,7 @@ function createQueue<Shape extends PRShape>(
         "candidate",
         {
           code: "candidate-conflicting",
-          message: `Candidate '${candidate.id}' conflicts before admission`,
+          message: `Candidate '${candidate.id}' conflicts before required checks`,
         },
         { candidate: candidate.id },
       )
@@ -1515,7 +1515,7 @@ function createQueue<Shape extends PRShape>(
       })
       const key = admissionJobKey(snapshot, baseSha, index)
       const jobId = jobs.requested(requested)[0] ?? jobs.getByKey(key)?.id
-      if (jobId === undefined) throw new Error(`yrd: admission step '${step.name}' did not request a Job`)
+      if (jobId === undefined) throw new Error(`yrd: required check '${step.name}' did not request a Job`)
       const job = await admissionRunner.submit({
         job: jobId,
         context:
@@ -1611,7 +1611,7 @@ function createQueue<Shape extends PRShape>(
         // Bookkeeping must never convert a survivable skip into a resident kill,
         // but it must never fail quietly either — an unrecorded cycle is exactly
         // the blindness this ledger exists to remove.
-        log.error?.("queue could not journal an admission refusal; the wedge oracle will under-count", {
+        log.error?.("queue could not journal a required-check refusal; the wedge oracle will under-count", {
           action: "admission-refusal-unrecorded",
           pr: pr.id,
           code: refusal.code,
@@ -1851,14 +1851,14 @@ function createQueue<Shape extends PRShape>(
         raiseFailure(
           "refusal",
           "admission-step-not-waiting",
-          `yrd: PR '${selector}' has no waiting revision admission${completion.step === undefined ? "" : ` '${completion.step}'`} step`,
+          `yrd: PR '${selector}' has no waiting required check${completion.step === undefined ? "" : ` '${completion.step}'`}`,
         )
       }
       if (waiting.step.job.id !== completion.job) {
         raiseFailure(
           "refusal",
           "job-mismatch",
-          `yrd: waiting admission step '${waiting.step.name}' belongs to Job '${waiting.step.job.id}', not '${completion.job}'`,
+          `yrd: waiting required check '${waiting.step.name}' belongs to Job '${waiting.step.job.id}', not '${completion.job}'`,
         )
       }
       await jobs.finish(completion.job, {
@@ -1869,12 +1869,12 @@ function createQueue<Shape extends PRShape>(
       })
       const pr = resolvePR(runtime().bays, waiting.pr)
       if (pr === undefined || prRevisionNumber(pr) !== waiting.revision) {
-        raiseFailure("refusal", "stale-pr", `yrd: PR '${waiting.pr}' changed while admission was waiting`)
+        raiseFailure("refusal", "stale-pr", `yrd: PR '${waiting.pr}' changed while a required check was waiting`)
       }
       const request = checkRequest(pr)
       const baseSha = request?.baseSha ?? prBaseSha(pr)
       if (baseSha === undefined) {
-        raiseFailure("infrastructure", "base-sha-missing", `yrd: PR '${pr.id}' admission has no resolved base`)
+        raiseFailure("infrastructure", "base-sha-missing", `yrd: PR '${pr.id}' required checks have no resolved base`)
       }
       await admitPRRevision(pr, baseSha, options)
     },
@@ -2044,7 +2044,7 @@ function createQueue<Shape extends PRShape>(
             if (!selectorless || fact === undefined || (fact.kind !== "refusal" && fact.kind !== "infrastructure")) {
               throw error
             }
-            log.warn?.("queue compose skipped admission-phase work lost to a losable refusal", {
+            log.warn?.("queue compose skipped required-check work lost to a losable refusal", {
               action: "compose-candidate-skip",
               code: fact.code,
               kind: fact.kind,
@@ -2733,7 +2733,7 @@ function createQueueCommands(
       const selected = admissionSteps(state.queues, steps)
       if (selected.length === 0) return { events: [] }
       if (requiresPreparedCandidate && args.candidate === undefined) {
-        throw new Error("yrd: queue admission requires prepared Candidate facts")
+        throw new Error("yrd: required checks require prepared Candidate facts")
       }
       const snapshot = Queues.snapshot(pr)
       const candidateBaseSha = args.baseSha ?? requiredCandidateBaseSha([snapshot])
@@ -2770,7 +2770,7 @@ function createQueueCommands(
   })
 
   const admissionStep = command({
-    title: "Run one revision admission step",
+    title: "Run one revision required check",
     params: AdmissionStepArgsSchema,
     apply(state: DeepReadonly<RuntimeState>, args: AdmissionStepArgs) {
       const pr = state.bays.prs[args.pr.id]
@@ -2783,13 +2783,13 @@ function createQueueCommands(
         raiseFailure(
           "refusal",
           "stale-pr",
-          `yrd: admission targets stale revision ${args.pr.revision} (${args.pr.headSha}) of PR '${args.pr.id}'`,
+          `yrd: required checks target stale revision ${args.pr.revision} (${args.pr.headSha}) of PR '${args.pr.id}'`,
         )
       }
       const selected = admissionSteps(state.queues, steps)
       const step = selected[args.index]
       if (step === undefined || step.name !== args.step) {
-        throw new Error(`yrd: admission step ${args.index} is '${step?.name ?? "missing"}', not '${args.step}'`)
+        throw new Error(`yrd: required check ${args.index} is '${step?.name ?? "missing"}', not '${args.step}'`)
       }
       if (
         args.candidate.baseSha !== args.pr.baseSha ||
@@ -2798,7 +2798,7 @@ function createQueueCommands(
         args.candidate.revs[0]?.n !== args.pr.revision ||
         args.candidate.revs[0]?.head !== args.pr.headSha
       ) {
-        throw new Error(`yrd: admission Candidate '${args.candidate.id}' does not match PR '${args.pr.id}'`)
+        throw new Error(`yrd: required-check Candidate '${args.candidate.id}' does not match PR '${args.pr.id}'`)
       }
       const key = admissionJobKey(args.pr, args.candidate.baseSha, args.index)
       if (state.jobs.byKey[key] !== undefined) return { events: [] }
@@ -3221,7 +3221,7 @@ function createQueueCommands(
   })
 
   const settleAdmissionRefusal = command({
-    title: "Settle one exact admission refusal as needing a person",
+    title: "Settle one exact required-check refusal as needing a person",
     params: SettleAdmissionRefusalSchema,
     apply(state: DeepReadonly<RuntimeState>, args: SettleAdmissionRefusalArgs) {
       const pr = state.bays.prs[args.pr]
@@ -3236,7 +3236,11 @@ function createQueueCommands(
       }
       const refusal = state.queues.admissionRefusals[args.pr]
       if (refusal === undefined) {
-        raiseFailure("refusal", "admission-refusal-missing", `yrd: PR '${args.pr}' has no admission refusal to settle`)
+        raiseFailure(
+          "refusal",
+          "admission-refusal-missing",
+          `yrd: PR '${args.pr}' has no required-check refusal to settle`,
+        )
       }
       if (refusal.revision !== undefined && (refusal.revision !== args.revision || refusal.headSha !== args.headSha)) {
         raiseFailure(
@@ -3402,7 +3406,11 @@ function requireFreshCheckAuthority(
     sameAuthorityToken(token, pr) && token?.consumedBy !== undefined
       ? `the matching checks fact was consumed by queue run '${token.consumedBy}'`
       : "no fresh matching checks fact exists"
-  raiseFailure("refusal", "checks-failed", `yrd: PR '${pr.id}' checks failed in ${failedRun}; ${detail}`)
+  raiseFailure(
+    "refusal",
+    "required-check-failed",
+    `yrd: PR '${pr.id}' required check failed in ${failedRun}; ${detail}`,
+  )
 }
 
 function queueAuthorityGaps(
@@ -4319,7 +4327,7 @@ function startRun(
           prs: run.prs.map((pr) => ({ pr: pr.id, revision: pr.revision, headSha: pr.headSha })),
           error: {
             code: "candidate-conflicting",
-            message: `Candidate '${candidate.id}' conflicts before Job admission`,
+            message: `Candidate '${candidate.id}' conflicts before Job execution`,
           },
         }),
       ],
@@ -5203,23 +5211,23 @@ function auditQueues(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeS
       run: batch.run,
     })
   }
-  // Every code above walks RUN RECORDS. A PR refused at ADMISSION never becomes
-  // one, so a head-of-line refusal loop was structurally invisible here: `queue
-  // audit` reported `findings: []` through a 5h46m block while each cycle logged
-  // a loggily-only `compose-candidate-skip`. The refusal ledger is the durable
-  // trace of exactly that, so read it (22395).
+  // Every code above walks RUN RECORDS. A PR refused during required checks
+  // never becomes one, so a head-of-line refusal loop was structurally invisible
+  // here: `queue audit` reported `findings: []` through a 5h46m block while each
+  // cycle logged a loggily-only `compose-candidate-skip`. The refusal ledger is
+  // the durable trace of exactly that, so read it (22395).
   const head = admissionQueue(state, steps)[0]
   for (const refusal of Object.values(state.queues.admissionRefusals).toSorted((left, right) =>
     compareNatural(left.pr, right.pr),
   )) {
     if (refusal.settlement !== undefined || refusal.count < ADMISSION_REFUSAL_LOOP_THRESHOLD) continue
     const blockedMs = Math.max(0, Date.parse(refusal.lastAt) - Date.parse(refusal.firstAt))
-    const position = head?.id === refusal.pr ? " at the head of the admission queue" : ""
+    const position = head?.id === refusal.pr ? " at the head of the required-check queue" : ""
     findings.push({
       code: "admission-refusal-loop",
       message:
         `PR '${refusal.pr}'${position} was refused ${refusal.count} consecutive times ` +
-        `over ${formatRefusalSpan(blockedMs)} (since ${refusal.firstAt}) without ever being admitted; ` +
+        `over ${formatRefusalSpan(blockedMs)} (since ${refusal.firstAt}) without ever completing required checks; ` +
         `latest refusal '${refusal.code}': ${refusal.reason}`,
       pr: refusal.pr,
       refusal: refusal.code,
@@ -6088,7 +6096,7 @@ function prEligibility(
     // candidate from what the author submitted, so re-running the same payload
     // cannot pass — whether the failed compose left the PR `submitted` or drove
     // an automatic `rejected`. Project it as `needs-author` with the refusal
-    // receipt attached, ahead of the generic `rejected`/`checks-failed` verdicts.
+    // receipt attached, ahead of the generic `rejected`/`required-check-failed` verdicts.
     // This is a derived projection over the failed check's recorded refusal
     // evidence; it stores no new PR state (the bay state is untouched).
     if (
@@ -6145,8 +6153,8 @@ function prEligibility(
     ) {
       const run = checks.run === undefined ? "" : ` in ${checks.run}`
       return result({
-        code: "checks-failed",
-        message: `PR '${pr.id}' checks failed${run}; fix the branch and push, or request fresh checks`,
+        code: "required-check-failed",
+        message: `PR '${pr.id}' required check failed${run}; fix the branch and push, or request fresh checks`,
       })
     }
     if (required && !reviewed.approved) {

@@ -209,6 +209,16 @@ function yrd(...args: string[]): string[] {
   return ["/usr/bin/bun", "/repo/bin/yrd.ts", ...args]
 }
 
+const noRequiredChecks: YrdCliServices = {
+  checks: {
+    names: [],
+    install: async () => "/repo/.git/yrd/hooks/pre-submit",
+    run: async () => {
+      throw new Error("no configured required check should run")
+    },
+  },
+}
+
 /** `--json` renders a refusal as the failure envelope; its `message` is the exact
  * text a human sees on the plain surface. */
 function failureMessage(stderr: string): string {
@@ -233,7 +243,12 @@ function staleHeadRefusal(revision: number, recordedHead: string): string {
 
 async function submitBranch(app: CliApp, head: () => string, ...flags: string[]): Promise<void> {
   const output = outputIO(head)
-  const exit = await runYrd(app, yrd("pr", "submit", BRANCH, "--issue", "km#22454", "--json", ...flags), output.io)
+  const exit = await runYrd(
+    app,
+    yrd("pr", "submit", BRANCH, "--issue", "km#22454", "--json", ...flags),
+    output.io,
+    noRequiredChecks,
+  )
   expect(exit, output.stderr()).toBe(0)
 }
 
@@ -242,7 +257,10 @@ describe("pr submit --track", () => {
     const app = await createCliApp()
     const output = outputIO(() => RECORDED_HEAD)
 
-    expect(await runYrd(app, yrd("pr", "submit", BRANCH, "--track", "--json"), output.io), output.stderr()).toBe(0)
+    expect(
+      await runYrd(app, yrd("pr", "submit", BRANCH, "--track", "--json"), output.io, noRequiredChecks),
+      output.stderr(),
+    ).toBe(0)
     expect(JSON.parse(output.stdout())).toMatchObject({ command: "pr.submit", prs: [{ id: "PR1", track: true }] })
     expect(app.bays.pr("PR1")?.track).toBe(true)
   })
@@ -274,7 +292,7 @@ describe("implicit recut of a moved branch", () => {
     const app = await createCliApp()
     let head = RECORDED_HEAD
     await submitBranch(app, () => head, "--track")
-    expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("ready")
+    expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
 
     head = LIVE_HEAD
     const tracked = outputIO(() => head)
@@ -292,7 +310,7 @@ describe("implicit recut of a moved branch", () => {
     const recorded = app.bays.pr("PR1")!
     expect(currentPRRev(recorded).n).toBe(2)
     expect(currentPRRev(recorded).head).toBe(LIVE_HEAD)
-    // Re-recording an admitted PR creates a fresh submitted revision, and
+    // Re-recording a submitted PR creates a fresh submitted revision, and
     // tracking survives so the NEXT push re-records itself too.
     expect(prDeliveryState(recorded)).toBe("submitted")
     expect(recorded.track).toBe(true)

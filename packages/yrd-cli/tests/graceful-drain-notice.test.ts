@@ -12,8 +12,8 @@ describe("graceful-drain notice", () => {
     const events: Event[] = []
     const stderr: string[] = []
     const root = createLogger("yrd", [
+      { level: "trace" },
       {
-        level: "trace",
         // A stderr sink modelling the resident's log stream: reportGracefulShutdown
         // must NOT write a bare paragraph to it — only the structured warn record.
         write: (text: string) => stderr.push(text),
@@ -24,6 +24,7 @@ describe("graceful-drain notice", () => {
     const log = root.child("runner")
 
     reportGracefulShutdown(log, "SIGINT")
+    log.end()
 
     // No bare wrapped paragraph — the resident's stdout/stderr IS a log stream;
     // exactly one formatted warn record reaches it.
@@ -46,6 +47,5 @@ describe("graceful-drain notice", () => {
       }),
     })
     expect(String(drain[0]?.message)).not.toContain("\n")
-    log.end()
   })
 })

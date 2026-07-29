@@ -371,7 +371,7 @@ export async function preflightRecut(
   return result
 }
 
-/** `yrd pr prune [--dry-run]` — scan every live PR against its base tip and
+/** `yrd admin pr prune [--dry-run]` — scan every live PR against its base tip and
  * withdraw the ones whose content already landed (head is an ancestor of the
  * base, or merging head into the base reproduces the base tree exactly).
  * Prints one explicit verdict per PR; --dry-run emits no events. */
@@ -381,7 +381,7 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
   const git = io.pruneGit === undefined ? createPruneGitFacts(cwd) : io.pruneGit(cwd)
   // This comparator deliberately pins the "en" locale so the printed prune verdict
   // order is identical on every host — `compareNatural` (host default locale) would
-  // not guarantee that. Cold path: one sort of the live PRs per `yrd pr prune`, not
+  // not guarantee that. Cold path: one sort of the live PRs per `yrd admin pr prune`, not
   // the per-tick listing path the collator hoist targets.
   const live = app.bays
     .prs()

@@ -3754,7 +3754,7 @@ describe("Queue command adapters", () => {
     expect(evidence.artifacts.every((artifact) => existsSync(artifact.path))).toBe(true)
     expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted" })
     const eligibility = app.queue.eligibility("PR1")
-    expect(eligibility).toMatchObject({ reason: { code: "checks-failed" } })
+    expect(eligibility).toMatchObject({ reason: { code: "required-check-failed" } })
     expect(eligibility.reason).not.toHaveProperty("receipt")
     const eventNames = (await Array.fromAsync(app.events())).map(({ name }) => name)
     expect(eventNames).not.toContain("pr/rejected")

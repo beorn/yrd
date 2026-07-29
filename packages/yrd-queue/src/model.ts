@@ -533,7 +533,7 @@ export type PREligibilityReason = Readonly<{
   code:
     | "draft"
     | "checks-pending"
-    | "checks-failed"
+    | "required-check-failed"
     | "needs-author"
     | "candidate-conflicting"
     | "review-required"

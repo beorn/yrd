@@ -25,7 +25,7 @@ function per implementation detail.
 | `Jobs`          | `withJobs()`                                 | Durable execution, leases, waiting work, retries, and recovery                             | `state`, `definition()`, `requireDefinitions()`, `get()`, `run()`, `runMany()`, `finish()`, `retry()`, `recover()`, `requested()`         |
 | `Issues`        | `withIssues()`                               | Resolve issue references through configured sources                                        | `sources`, `ref()`, `resolve()`                                                                                                           |
 | `Bays`          | `withBays()`                                 | Query isolated bays and own revision-bound PR facts                                        | `state`, bay/PR queries, `submitSelection()`, `ready()`, `review()`, `comment()`, regression records, check requests, lifecycle mutations |
-| `Queue`         | `withQueue()`                                | Admit checks and integrate eligible PRs through one configured scheduler                   | `state`, `steps()`, `admit()`, eligibility/check projections, `pause()`, `resume()`, `run()`, `finish()`, `recover()`, `audit()`          |
+| `Queue`         | `withQueue()`                                | Run required checks and integrate eligible PRs through one scheduler                        | `state`, check/eligibility projections, `pause()`, `resume()`, `run()`, `finish()`, `recover()`, `audit()`                              |
 | `Contests`      | `withContests()`                             | Run, evaluate, select, and promote competing implementations                               | `state`, `resolveBase()`, `get()`, `list()`, `compete()`, `evaluate()`, `waiting()`, `finish()`, `select()`, `promote()`                  |
 | Signal observer | `createSignalObserver()`                     | Route an enumerated post-append event subset outside the Queue lane                        | `start()`, `close()`                                                                                                                      |
 
@@ -50,7 +50,7 @@ The objects above operate on plain records:
 | `Candidate`            | Immutable queue/base plus ordered PR revision content selected for one or more attempts |
 | `Job`                  | Durable executable lifecycle and evidence                                               |
 | `Run`                  | Pinned PR set, base, installed-step plan, reusable results, and integration facts       |
-| `Runner`               | Submit/observe/cancel control-plane adapter with bounded admission                      |
+| `Runner`               | Submit/observe/cancel control-plane adapter with bounded execution                      |
 | `Context`              | Acquired execution location and candidate-access evidence recorded on a Job             |
 | `Step`                 | Configured typed transition in a Queue                                                  |
 | `Contest`              | Issue, competitors, attempts, selection, and promotion facts                            |
@@ -146,13 +146,14 @@ replays committed frames and reruns the pure command decision. The filesystem
 adapter takes its OS lock only for repair, comparison, append, and data sync.
 There is no writer-lease API and no hidden async execution context.
 
-Every current Frame may name a semantic journal compatibility contract as
-`{ version, reader }`. Numeric `version` alone orders formats; the full commit
-`reader` is the remediation pin for a runtime below that version. Core refuses
-future frames at read time. Persistence receives the base-authoritative
-configured reader floor and refuses a higher-version Frame before opening or
-mutating storage. Legacy Frames have no compatibility field and are version 0.
-This contract is independent of the SQLite envelope's schema version.
+Every current Frame names its semantic journal version. Core's compiled
+`SUPPORTED_VERSIONS` constant is the reader capability; future frames fail
+loudly at the typed read boundary. The journal stores its own one-way version
+floor. A fresh journal initializes that floor from its creating writer, while
+an existing lower-floor journal refuses newer writes until the explicit
+`yrd admin journal bump` recovery ceremony succeeds. No repository config or
+reader commit SHA participates in compatibility. This contract is independent
+of the SQLite envelope's schema version.
 
 The repository format is one strict `journal.sqlite` authority in WAL mode.
 `journal_events` holds the bounded append tail, `journal_history` holds covered
@@ -196,7 +197,7 @@ Core's private receipt cache retains the latest 4,096 frames. Job and Queue
 compactors run only when the Journal supplies immutable history: all
 nonterminal work remains live, along with the latest 512 terminal Queue roots
 and their complete trees/Jobs plus 512 standalone terminal Jobs. A failed
-admission root that still determines a live PR's retry budget remains as live
+required-check root that still determines a live PR's retry budget remains as live
 decision evidence beyond that terminal window. Archive reads do not repopulate
 live projection state; retrying an archived failed or lost Job appends an
 explicit restore of the same Job id before it runs again. A complete replay

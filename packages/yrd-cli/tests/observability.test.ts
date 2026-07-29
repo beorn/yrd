@@ -39,7 +39,7 @@ async function repository(root: string): Promise<string> {
   await git(repo, "config", "user.name", "Yrd Test")
   await git(repo, "config", "user.email", "yrd@example.invalid")
   await writeFile(join(repo, "README.md"), "main\n")
-  await writeFile(join(repo, ".yrd.yml"), 'steps: [check]\ncheck: "true"\n')
+  await writeFile(join(repo, ".yrd.yml"), 'checks:\n  - {check: {run: "true"}}\n')
   await git(repo, "add", "README.md", ".yrd.yml")
   await git(repo, "commit", "-qm", "main")
   return repo
@@ -62,8 +62,16 @@ describe("Yrd observability controls", () => {
     [{}, { DEBUG: "*" }, { level: "debug", debug: "*", spans: true, explicitLevel: false }],
     // ...but an EXPLICIT level always wins over the implication, from any of the
     // three sources that count as an operator choice.
-    [{}, { DEBUG: "yrd:core", LOG_LEVEL: "warn" }, { level: "warn", debug: "yrd:core", spans: false, explicitLevel: true }],
-    [{ logLevel: "error" }, { DEBUG: "yrd:core" }, { level: "error", debug: "yrd:core", spans: false, explicitLevel: true }],
+    [
+      {},
+      { DEBUG: "yrd:core", LOG_LEVEL: "warn" },
+      { level: "warn", debug: "yrd:core", spans: false, explicitLevel: true },
+    ],
+    [
+      { logLevel: "error" },
+      { DEBUG: "yrd:core" },
+      { level: "error", debug: "yrd:core", spans: false, explicitLevel: true },
+    ],
     [{ quiet: 1 }, { DEBUG: "yrd:core" }, { level: "error", debug: "yrd:core", spans: false, explicitLevel: true }],
     [{ verbose: 1 }, { DEBUG: "yrd:core" }, { level: "info", debug: "yrd:core", spans: false, explicitLevel: true }],
     [{ verbose: 1 }, { LOG_LEVEL: "error" }, { level: "info", spans: false, explicitLevel: true }],
@@ -72,9 +80,12 @@ describe("Yrd observability controls", () => {
     [{ quiet: 1 }, { LOG_LEVEL: "trace" }, { level: "error", spans: false, explicitLevel: true }],
     [{ quiet: 2 }, { LOG_LEVEL: "trace" }, { level: "silent", spans: false, explicitLevel: true }],
     [{ logLevel: "debug" }, { LOG_LEVEL: "error" }, { level: "debug", spans: true, explicitLevel: true }],
-  ] as const)("resolves CLI controls before LOG_LEVEL, and DEBUG implies debug unless a level was chosen", (flags, env, expected) => {
-    expect(resolveYrdObservability(flags, env)).toEqual(expected)
-  })
+  ] as const)(
+    "resolves CLI controls before LOG_LEVEL, and DEBUG implies debug unless a level was chosen",
+    (flags, env, expected) => {
+      expect(resolveYrdObservability(flags, env)).toEqual(expected)
+    },
+  )
 
   it.each([
     [{ verbose: 3, quiet: 1 }, {}, "cannot combine --verbose and --quiet"],

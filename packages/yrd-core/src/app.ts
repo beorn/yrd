@@ -757,7 +757,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
           raiseFailure(
             "configuration",
             "journal-event-version-skew",
-            `yrd: event '${draft.name}' requires journal reader v${installed.reader}; this writer is configured for v${options.inject.compatibility.version} at ${options.inject.compatibility.reader}`,
+            `yrd: event '${draft.name}' requires journal reader v${installed.reader}; this writer supports v${options.inject.compatibility.version}`,
           )
         }
         return EventSchema.parse({ id: id(), name: draft.name, ts: clock(), data: installed.schema.parse(draft.data) })

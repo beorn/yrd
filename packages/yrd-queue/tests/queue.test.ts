@@ -710,7 +710,7 @@ describe("Queue", () => {
       status: "completed",
       conclusion: "failure",
       jobs: [],
-      error: { code: "candidate-conflicting", message: "Candidate 'C1' conflicts before Job admission" },
+      error: { code: "candidate-conflicting", message: "Candidate 'C1' conflicts before Job execution" },
     })
     expect(app.state().queues.candidates.C1).toMatchObject({
       id: "C1",
@@ -3915,7 +3915,7 @@ describe("Queue", () => {
       expect(checks).toBe(2)
       expect(app.queue.eligibility(pr.id)).toMatchObject({
         runnable: false,
-        reason: { code: "checks-failed" },
+        reason: { code: "required-check-failed" },
         checks: { status: "failed", run: "R2" },
       })
       expect(
@@ -3928,7 +3928,7 @@ describe("Queue", () => {
     await using replayed = await createQueueApp(options, journal, undefined, id)
     expect(replayed.queue.eligibility("PR1")).toMatchObject({
       runnable: false,
-      reason: { code: "checks-failed" },
+      reason: { code: "required-check-failed" },
       checks: { status: "failed", run: "R2" },
     })
 
@@ -4898,7 +4898,7 @@ describe("Queue", () => {
     },
   )
 
-  it("reauthorizes a failed draft admission through a fresh exact check request", async () => {
+  it("reauthorizes failed draft required checks through a fresh exact check request", async () => {
     let fail = true
     await using app = await createQueueApp({
       check: (input) =>
@@ -4922,10 +4922,10 @@ describe("Queue", () => {
     await app.bays.ready({ pr: "PR1" })
     expect(app.queue.eligibility("PR1")).toMatchObject({
       runnable: false,
-      reason: { code: "checks-failed" },
+      reason: { code: "required-check-failed" },
       checks: { status: "failed", run: "R1" },
     })
-    await expect(app.queue.run({ prs: ["PR1"] }, runtime)).rejects.toThrow("checks failed in R1")
+    await expect(app.queue.run({ prs: ["PR1"] }, runtime)).rejects.toThrow("required check failed in R1")
 
     fail = false
     const reauthorization = await app.bays.requestChecks({ pr: "PR1" })

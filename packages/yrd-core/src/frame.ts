@@ -3,12 +3,14 @@ import { CauseSchema, Command, CommandSchema, EventSchema, JsonSchema } from "./
 import { raiseFailure } from "./failure.ts"
 import { freeze } from "./immutable.ts"
 
-export const JOURNAL_READER_VERSION = 2
+/** Journal versions this reader understands. The code is the capability
+ * authority; repositories never pin reader commits in consumer config. */
+export const SUPPORTED_VERSIONS = Object.freeze([1, 2] as const)
+export const JOURNAL_READER_VERSION = SUPPORTED_VERSIONS.at(-1) ?? 0
 
 export const JournalCompatibilitySchema = z
   .object({
     version: z.number().int().min(1),
-    reader: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u),
   })
   .strict()
 
@@ -37,7 +39,7 @@ export function assertJournalReaderCompatibility(value: unknown): JournalCompati
     raiseFailure(
       "refusal",
       "journal-version-skew",
-      `yrd: journal schema v${compatibility.version} requires reader pin ${compatibility.reader}; this reader supports through v${JOURNAL_READER_VERSION}`,
+      `yrd: journal schema v${compatibility.version} exceeds this reader's compiled capability v${JOURNAL_READER_VERSION}`,
     )
   }
   return compatibility

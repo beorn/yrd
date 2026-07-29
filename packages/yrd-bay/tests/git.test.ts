@@ -829,7 +829,8 @@ describe("createGitWorkspace", () => {
     )
 
     expect(provisioned).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: { code: "provision-failed", message: expect.stringContaining("changed after its authority snapshot") },
     })
   })

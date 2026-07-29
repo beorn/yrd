@@ -51,7 +51,7 @@ async function queueRepository(): Promise<string> {
   await git(root, "init", "-q", "-b", "main", repo)
   await git(repo, "config", "user.name", "Yrd Test")
   await git(repo, "config", "user.email", "yrd@example.invalid")
-  await writeFile(join(repo, ".yrd.yml"), "base: main\nbatch: 1\nsteps: [merge]\nmerge: {}\n")
+  await writeFile(join(repo, ".yrd.yml"), "base: main\nbatch: 1\nchecks: []\n")
   await git(repo, "add", ".yrd.yml")
   await git(repo, "commit", "-qm", "queue config")
   return repo
@@ -138,19 +138,13 @@ it("refuses before claim when authoritative native source advances under a live 
 
 it("reports source drift and an independent stale runtime step together", async () => {
   const repo = await queueRepository()
-  await writeFile(
-    join(repo, ".yrd.yml"),
-    "base: main\nbatch: 1\nsteps: [check, merge]\ncheck:\n  run: 'true'\nmerge: {}\n",
-  )
+  await writeFile(join(repo, ".yrd.yml"), "base: main\nbatch: 1\nchecks:\n  - {check: {run: 'true'}}\n")
   await git(repo, "add", ".yrd.yml")
   await git(repo, "commit", "-qm", "add check")
   await using resident = await createYrdHost({ cwd: repo })
   await resident.services.queue?.provision?.("main")
 
-  await writeFile(
-    join(repo, ".yrd.yml"),
-    "base: main\nbatch: 1\nsteps: [check, merge]\ncheck:\n  run: 'printf changed'\nmerge: {}\n",
-  )
+  await writeFile(join(repo, ".yrd.yml"), "base: main\nbatch: 1\nchecks:\n  - {check: {run: 'printf changed'}}\n")
   await git(repo, "add", ".yrd.yml")
   await git(repo, "commit", "-qm", "change check")
   source.authoritative = "git:748dbd87dd6a30a5d4f41de4459b01d8014d791f"

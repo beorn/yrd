@@ -809,7 +809,7 @@ describe("pr prune", () => {
       const app = await createCliApp()
       await app.bays.submit({ branch: "topic/quiet-false-negative", headSha, base: "main", baseSha: BASE_SHA })
       const output = outputIO({ cwd: dir })
-      expect(await runYrd(app, yrd("pr", "prune", "--dry-run", "--json"), output.io), output.stderr()).toBe(0)
+      expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run", "--json"), output.io), output.stderr()).toBe(0)
       expect(JSON.parse(output.stdout())).toMatchObject({
         checked: [
           {
@@ -868,7 +868,7 @@ describe("pr prune", () => {
       const app = await createCliApp()
       await app.bays.submit({ branch: "topic/oversized", headSha, base: "main", baseSha: BASE_SHA })
       const output = outputIO({ cwd: dir })
-      expect(await runYrd(app, yrd("pr", "prune", "--dry-run", "--json"), output.io), output.stderr()).toBe(0)
+      expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run", "--json"), output.io), output.stderr()).toBe(0)
       expect(JSON.parse(output.stdout())).toMatchObject({
         command: "pr.prune",
         checked: [
@@ -907,7 +907,7 @@ describe("pr prune", () => {
       },
     })
     const output = outputIO({ pruneGit: () => facts })
-    expect(await runYrd(app, yrd("pr", "prune", "--dry-run", "--json"), output.io), output.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run", "--json"), output.io), output.stderr()).toBe(0)
     expect(judged).toEqual([HEAD_SHA, HEAD2_SHA, HEAD3_SHA])
     expect(JSON.parse(output.stdout())).toMatchObject({
       checked: [
@@ -924,7 +924,7 @@ describe("pr prune", () => {
     })
 
     const human = outputIO({ pruneGit: () => facts, columns: 400 })
-    expect(await runYrd(app, yrd("pr", "prune", "--dry-run"), human.io), human.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run"), human.io), human.stderr()).toBe(0)
     const humanText = human.stdout().replace(/\s+/g, " ")
     expect(humanText).toContain("[error] PR2 topic/broken r1")
     expect(humanText).toContain("PR 'PR2' could not be judged: simulated merge-base transport failure")
@@ -945,7 +945,7 @@ describe("pr prune", () => {
           },
         }),
     })
-    expect(await runYrd(app, yrd("pr", "prune", "--json"), output.io), output.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("admin", "pr", "prune", "--json"), output.io), output.stderr()).toBe(0)
     expect(checkedAncestry).toEqual([`${HEAD_SHA}..${BASE_SHA}`])
     expect(JSON.parse(output.stdout())).toMatchObject({
       command: "pr.prune",
@@ -988,7 +988,7 @@ describe("pr prune", () => {
           },
         }),
     })
-    expect(await runYrd(app, yrd("pr", "prune", "--json"), output.io), output.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("admin", "pr", "prune", "--json"), output.io), output.stderr()).toBe(0)
     expect(JSON.parse(output.stdout())).toMatchObject({
       checked: [
         {
@@ -1014,7 +1014,7 @@ describe("pr prune", () => {
       mergeTree: (_baseSha, headSha) => (headSha === HEAD_SHA ? OTHER_TREE : undefined),
     })
     const json = outputIO({ pruneGit: () => facts })
-    expect(await runYrd(app, yrd("pr", "prune", "--json"), json.io), json.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("admin", "pr", "prune", "--json"), json.io), json.stderr()).toBe(0)
     expect(JSON.parse(json.stdout())).toMatchObject({
       checked: [
         { pr: "PR1", checks: { headPresent: true, ancestorOfBase: false, mergeTree: "divergent" }, verdict: "keep" },
@@ -1028,7 +1028,7 @@ describe("pr prune", () => {
     expect(prDeliveryState(app.state().bays.prs.PR3!)).toBe("submitted")
 
     const human = outputIO({ pruneGit: () => facts, columns: 400 })
-    expect(await runYrd(app, yrd("pr", "prune"), human.io), human.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("admin", "pr", "prune"), human.io), human.stderr()).toBe(0)
     expect(human.stdout()).toContain("[keep] PR1 topic/divergent r1")
     expect(human.stdout()).toContain("merge-tree=divergent")
     expect(human.stdout()).toContain("[keep] PR2 topic/conflicted r1")
@@ -1044,7 +1044,7 @@ describe("pr prune", () => {
     const before = (await Array.fromAsync(app.events())).length
 
     const output = outputIO({ pruneGit: () => pruneGit({ isAncestor: () => true }) })
-    expect(await runYrd(app, yrd("pr", "prune", "--dry-run", "--json"), output.io), output.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run", "--json"), output.io), output.stderr()).toBe(0)
     expect(JSON.parse(output.stdout())).toMatchObject({
       command: "pr.prune",
       dryRun: true,

@@ -44,7 +44,7 @@ const SAFE_SQLITE = "3.53.0"
 
 type ExpectedJournalOptions = Readonly<{
   dir: string
-  compatibility?: JournalCompatibility
+  writerVersion?: number
   lock?: ExclusiveOptions
   views?: readonly JournalView[]
   inject?: Readonly<{
@@ -954,37 +954,90 @@ describe("SQLite Journal", () => {
     await expect(Array.fromAsync(secondJournal.read())).resolves.toEqual([{ cursor: 2, values: [winner, loser] }])
   })
 
-  it("refuses a writer above the configured reader floor before append and names the required pin", async () => {
+  it("births a fresh journal at its creating writer version", async () => {
     const dir = await directory()
-    const configuredReader = "0".repeat(40)
-    const requiredReader = "9f0366a691e38a7468905425a8bab6fd020b3954"
     const journal = createJournal({
       dir,
-      compatibility: { version: 1, reader: configuredReader },
+      writerVersion: 2,
       inject: { sqliteVersion: SAFE_SQLITE },
     } as unknown as Parameters<typeof createJournal>[0])
     const value = {
       ...frame("newer-writer"),
-      compatibility: { version: 2, reader: requiredReader },
+      compatibility: { version: 2 },
     }
 
-    await expect(journal.append(value, 0)).rejects.toMatchObject({
+    await expect(journal.append(value, 0)).resolves.toEqual({ appended: true, cursor: 1 })
+    using database = new Database(join(dir, SQLITE), { readonly: true, strict: true })
+    expect(
+      database
+        .query<{ value: string }, []>("SELECT value FROM journal_metadata WHERE key='journal_version_floor'")
+        .get(),
+    ).toEqual({ value: "2" })
+  })
+
+  it("refuses an existing lower-floor journal until a tested one-way bump", async () => {
+    const dir = await directory()
+    const first = createJournal({
+      dir,
+      writerVersion: 1,
+      inject: { sqliteVersion: SAFE_SQLITE },
+    } as unknown as Parameters<typeof createJournal>[0])
+    await expect(first.append({ ...frame("v1"), compatibility: { version: 1 } }, 0)).resolves.toEqual({
+      appended: true,
+      cursor: 1,
+    })
+
+    const upgraded = createJournal({
+      dir,
+      writerVersion: 2,
+      inject: { sqliteVersion: SAFE_SQLITE },
+    } as unknown as Parameters<typeof createJournal>[0]) as MutableJournal
+    const value = { ...frame("v2"), compatibility: { version: 2 } }
+    await expect(upgraded.append(value, 1)).rejects.toMatchObject({
       failure: {
         kind: "refusal",
         code: "journal-write-version-floor",
-        message: expect.stringContaining(requiredReader),
+        message: expect.stringContaining("yrd admin journal bump 2"),
       },
     })
-    expect(await missing(join(dir, SQLITE))).toBe(true)
-    await expect(Array.fromAsync(testReadOnlyJournal(dir).read())).resolves.toEqual([])
+    const bumped = await upgraded.administration.bump(2)
+    expect(bumped).toMatchObject({ from: 1, to: 2, restoreDrill: "passed" })
+    expect(await Bun.file(bumped.snapshot).exists()).toBe(true)
+    await expect(upgraded.append(value, 1)).resolves.toEqual({ appended: true, cursor: 2 })
+  })
+
+  it("derives a missing floor from existing legacy history instead of the opening writer", async () => {
+    const dir = await directory()
+    const legacy = createJournal({
+      dir,
+      writerVersion: 0,
+      inject: { sqliteVersion: SAFE_SQLITE },
+    } as unknown as Parameters<typeof createJournal>[0])
+    await expect(legacy.append(frame("legacy"), 0)).resolves.toEqual({ appended: true, cursor: 1 })
+    {
+      using database = new Database(join(dir, SQLITE), { create: false, readwrite: true, strict: true })
+      database.query("DELETE FROM journal_metadata WHERE key = 'journal_version_floor'").run()
+    }
+
+    const upgraded = createJournal({
+      dir,
+      writerVersion: 2,
+      inject: { sqliteVersion: SAFE_SQLITE },
+    } as unknown as Parameters<typeof createJournal>[0])
+    await expect(upgraded.append({ ...frame("v2"), compatibility: { version: 2 } }, 1)).rejects.toMatchObject({
+      failure: {
+        code: "journal-write-version-floor",
+        message: expect.stringContaining("journal floor v0"),
+      },
+    })
   })
 
   it("round-trips legacy frames and admitted versioned frames through the same journal", async () => {
     const dir = await directory()
-    const compatibility = { version: 1, reader: "a".repeat(40) }
+    const compatibility = { version: 1 }
     const journal = createJournal({
       dir,
-      compatibility,
+      writerVersion: 1,
       inject: { sqliteVersion: SAFE_SQLITE },
     } as unknown as Parameters<typeof createJournal>[0])
     const legacy = frame("legacy-compatible")

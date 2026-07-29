@@ -92,13 +92,13 @@ describe("actionable failure projection", () => {
     const failure = actionableFailure({
       code: "config-drift",
       message:
-        "queue base 'main' installed baseline is stale. Run 'yrd queue deinit main' then 'yrd queue init main' to migrate it.",
+        "queue base 'main' installed baseline is stale. Run 'yrd admin queue deinit main' then 'yrd admin queue init main' to migrate it.",
     })
 
-    expect(failure.resolution).toEqual(["yrd queue deinit main", "yrd queue init main"])
+    expect(failure.resolution).toEqual(["yrd admin queue deinit main", "yrd admin queue init main"])
     expect(formatActionableFailure(failure)).toContain("err=config-drift")
     expect(formatActionableFailure(failure)).toContain("cause: queue base 'main' installed baseline is stale")
-    expect(formatActionableFailure(failure)).toContain("resolve: yrd queue deinit main")
+    expect(formatActionableFailure(failure)).toContain("resolve: yrd admin queue deinit main")
   })
 })
 

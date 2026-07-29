@@ -1,4 +1,4 @@
-// @failure Submodule branch tracking misreads .gitmodules, warns wrongly, or `yrd init` sets the wrong branch / overwrites an explicit one.
+// @failure Submodule branch tracking misreads .gitmodules, warns wrongly, or `yrd admin submodule init` sets the wrong branch / overwrites an explicit one.
 // @level l2
 // @consumer @yrd/cli
 
@@ -53,7 +53,7 @@ async function superproject(gitmodules?: string, origin?: string): Promise<strin
   await git(root, "config", "user.name", "Yrd Test")
   await git(root, "config", "user.email", "yrd@example.invalid")
   if (origin !== undefined) await git(root, "remote", "add", "origin", origin)
-  await writeFile(join(root, ".yrd.yml"), "base: main\nbatch: 1\nsteps: [check, merge]\ncheck: \"true\"\nmerge: {}\n")
+  await writeFile(join(root, ".yrd.yml"), 'base: main\nbatch: 1\nchecks:\n  - {check: {run: "true"}}\n')
   if (gitmodules !== undefined) await writeFile(join(root, ".gitmodules"), gitmodules)
   await git(root, "add", "-A")
   await git(root, "commit", "-qm", "base")
@@ -172,13 +172,13 @@ describe("unbranchedSubmodules + formatSubmoduleTrackingWarning", () => {
 
   it("formats one message, plural, paths sorted, with the init hint", () => {
     expect(formatSubmoduleTrackingWarning(unbranchedSubmodules(entries))).toBe(
-      "warn: 2 submodules not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/b, vendor/c — run 'yrd init' to set",
+      "warn: 2 submodules not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/b, vendor/c — run 'yrd admin submodule init' to set",
     )
   })
 
   it("uses the singular noun for one", () => {
     expect(formatSubmoduleTrackingWarning([{ name: "vendor/x", path: "vendor/x" }])).toBe(
-      "warn: 1 submodule not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/x — run 'yrd init' to set",
+      "warn: 1 submodule not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/x — run 'yrd admin submodule init' to set",
     )
   })
 
@@ -187,7 +187,7 @@ describe("unbranchedSubmodules + formatSubmoduleTrackingWarning", () => {
   })
 })
 
-// yrd init resolves submodule URLs through @yrd/queue's shared resolver; these
+// yrd admin submodule init resolves submodule URLs through @yrd/queue's shared resolver; these
 // assert the cases yrd-cli relies on (absolute passthrough, ./ and ../ relative
 // resolution against the superproject origin, and the loud no-origin failure).
 describe("resolveSubmoduleOrigin (shared @yrd/queue resolver)", () => {
@@ -234,7 +234,7 @@ describe("real Git helpers against a fixture", () => {
       { name: "vendor/bar", path: "vendor/bar", url: "https://example.com/bar.git", branch: "release" },
     ])
     expect(submoduleTrackingWarnings(root)).toEqual([
-      "warn: 1 submodule not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/foo — run 'yrd init' to set",
+      "warn: 1 submodule not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/foo — run 'yrd admin submodule init' to set",
     ])
   })
 
@@ -278,7 +278,8 @@ describe("createSubmoduleBranchResolver (real ls-remote)", () => {
 })
 
 describe("printResultWithWarnings", () => {
-  const warning = "warn: 1 submodule not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/foo — run 'yrd init' to set"
+  const warning =
+    "warn: 1 submodule not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/foo — run 'yrd admin submodule init' to set"
 
   it("appends a warnings array in JSON mode without disturbing the value", async () => {
     const out = outputIO()
@@ -316,7 +317,7 @@ describe("queue list / dashboard warning surface", () => {
     const payload = JSON.parse(out.stdout()) as { command: string; warnings?: string[]; results: unknown[] }
     expect(payload.command).toBe("queue.list")
     expect(payload.warnings).toEqual([
-      "warn: 1 submodule not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/foo — run 'yrd init' to set",
+      "warn: 1 submodule not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/foo — run 'yrd admin submodule init' to set",
     ])
   })
 
@@ -345,7 +346,7 @@ describe("queue list / dashboard warning surface", () => {
     const payload = JSON.parse(out.stdout()) as { command: string; warnings?: string[] }
     expect(payload.command).toBe("dashboard")
     expect(payload.warnings).toEqual([
-      "warn: 1 submodule not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/foo — run 'yrd init' to set",
+      "warn: 1 submodule not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/foo — run 'yrd admin submodule init' to set",
     ])
   })
 
@@ -380,20 +381,29 @@ describe("queue list / dashboard warning surface", () => {
 
 const resolved = (branch: string): SubmoduleBranchResolution => ({ status: "resolved", branch })
 
-describe("yrd init", () => {
+describe("yrd admin submodule init", () => {
   it("sets a branch for unbranched submodules, never overwriting an explicit one", async () => {
     const root = await superproject(TWO_SUBMODULES)
     const app = await appFor(root)
     const out = outputIO({ cwd: root, resolveSubmoduleDefaultBranch: () => resolved("main") })
-    expect(await runYrd(app, yrd("init", "--json"), out.io), out.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("admin", "submodule", "init", "--json"), out.io), out.stderr()).toBe(0)
     const payload = JSON.parse(out.stdout()) as {
       command: string
       alreadyTracking: number
       results: Array<{ path: string; branch?: string; action: string; source: string }>
     }
-    expect(payload.command).toBe("init")
+    expect(payload.command).toBe("admin.submodule.init")
     expect(payload.alreadyTracking).toBe(1)
-    expect(payload.results).toEqual([{ name: "vendor/foo", path: "vendor/foo", url: "https://example.com/foo.git", branch: "main", source: "remote", action: "set" }])
+    expect(payload.results).toEqual([
+      {
+        name: "vendor/foo",
+        path: "vendor/foo",
+        url: "https://example.com/foo.git",
+        branch: "main",
+        source: "remote",
+        action: "set",
+      },
+    ])
     // vendor/foo now tracks; vendor/bar's explicit branch is untouched.
     expect(await git(root, "config", "--file", ".gitmodules", "--get", "submodule.vendor/foo.branch")).toBe("main")
     expect(await git(root, "config", "--file", ".gitmodules", "--get", "submodule.vendor/bar.branch")).toBe("release")
@@ -404,7 +414,7 @@ describe("yrd init", () => {
     const app = await appFor(root)
     const before = await readFile(join(root, ".gitmodules"), "utf8")
     const out = outputIO({ cwd: root, resolveSubmoduleDefaultBranch: () => resolved("main") })
-    expect(await runYrd(app, yrd("init", "--dry-run", "--json"), out.io), out.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("admin", "submodule", "init", "--dry-run", "--json"), out.io), out.stderr()).toBe(0)
     const payload = JSON.parse(out.stdout()) as { dryRun: boolean; results: Array<{ action: string }> }
     expect(payload.dryRun).toBe(true)
     expect(payload.results.map((row) => row.action)).toEqual(["would-set"])
@@ -415,7 +425,7 @@ describe("yrd init", () => {
     const root = await superproject(TWO_SUBMODULES)
     const app = await appFor(root)
     const out = outputIO({ cwd: root, resolveSubmoduleDefaultBranch: () => resolved("main") })
-    expect(await runYrd(app, yrd("init"), out.io), out.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("admin", "submodule", "init"), out.io), out.stderr()).toBe(0)
     const text = out.stdout()
     expect(text).toContain("SUBMODULE")
     expect(text).toContain("vendor/foo")
@@ -428,9 +438,13 @@ describe("yrd init", () => {
     const app = await appFor(root)
     const out = outputIO({
       cwd: root,
-      resolveSubmoduleDefaultBranch: () => ({ status: "fallback", branch: "main", note: "remote HEAD named no branch; defaulting to main" }),
+      resolveSubmoduleDefaultBranch: () => ({
+        status: "fallback",
+        branch: "main",
+        note: "remote HEAD named no branch; defaulting to main",
+      }),
     })
-    expect(await runYrd(app, yrd("init", "--json"), out.io), out.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("admin", "submodule", "init", "--json"), out.io), out.stderr()).toBe(0)
     const payload = JSON.parse(out.stdout()) as { results: Array<{ source: string; branch?: string; note?: string }> }
     expect(payload.results[0]!.source).toBe("fallback")
     expect(payload.results[0]!.branch).toBe("main")
@@ -455,8 +469,11 @@ describe("yrd init", () => {
       resolveSubmoduleDefaultBranch: (url) =>
         url.includes("foo") ? resolved("main") : { status: "unreachable", detail: "could not connect" },
     })
-    expect(await runYrd(app, yrd("init", "--json"), out.io), out.stderr()).toBe(0)
-    const payload = JSON.parse(out.stdout()) as { results: Array<{ path: string; action: string }>; failures?: unknown[] }
+    expect(await runYrd(app, yrd("admin", "submodule", "init", "--json"), out.io), out.stderr()).toBe(0)
+    const payload = JSON.parse(out.stdout()) as {
+      results: Array<{ path: string; action: string }>
+      failures?: unknown[]
+    }
     expect(payload.results.map((row) => `${row.path}:${row.action}`)).toEqual([
       "vendor/baz:unreachable",
       "vendor/foo:set",
@@ -473,7 +490,7 @@ describe("yrd init", () => {
       cwd: root,
       resolveSubmoduleDefaultBranch: () => ({ status: "unreachable", detail: "network down" }),
     })
-    expect(await runYrd(app, yrd("init", "--json"), out.io)).toBe(1)
+    expect(await runYrd(app, yrd("admin", "submodule", "init", "--json"), out.io)).toBe(1)
   })
 
   it("reports when all submodules already track a branch", async () => {
@@ -488,7 +505,7 @@ describe("yrd init", () => {
     )
     const app = await appFor(root)
     const out = outputIO({ cwd: root, resolveSubmoduleDefaultBranch: () => resolved("main") })
-    expect(await runYrd(app, yrd("init"), out.io), out.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("admin", "submodule", "init"), out.io), out.stderr()).toBe(0)
     expect(out.stdout()).toContain("already track a branch")
   })
 
@@ -496,7 +513,7 @@ describe("yrd init", () => {
     const root = await superproject()
     const app = await appFor(root)
     const out = outputIO({ cwd: root })
-    expect(await runYrd(app, yrd("init"), out.io), out.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("admin", "submodule", "init"), out.io), out.stderr()).toBe(0)
     expect(out.stdout()).toContain("no submodules declared")
   })
 })

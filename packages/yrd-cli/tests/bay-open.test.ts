@@ -7,7 +7,7 @@ import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from
 import { tmpdir } from "node:os"
 import { basename, isAbsolute, join } from "node:path"
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest"
-import { CURRENT_JOURNAL_COMPATIBILITY, runYrdProcess } from "../src/host.ts"
+import { runYrdProcess } from "../src/host.ts"
 import type { YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
@@ -18,10 +18,7 @@ const BOUNDED_ONE_SECOND_LOOP =
   'fixture_ticks=0; while [ "$fixture_ticks" -lt 120 ]; do fixture_ticks=$((fixture_ticks + 1)); sleep 1; done'
 const BOUNDED_RELEASE_FILE_LOOP =
   'fixture_ticks=0; while [ ! -f "$1" ] && [ "$fixture_ticks" -lt 1200 ]; do fixture_ticks=$((fixture_ticks + 1)); sleep 0.05; done'
-const JOURNAL_CONFIG = `journal:
-  version: ${CURRENT_JOURNAL_COMPATIBILITY.version}
-  reader: "${CURRENT_JOURNAL_COMPATIBILITY.reader}"
-`
+const JOURNAL_CONFIG = ""
 /**
  * Stand-in `ag` that records who it was launched as, the exact argv it received,
  * and whether the Bay was runnable when it started — a real agent harness
@@ -815,26 +812,26 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
         draft.stderr(),
       ).toBe(0)
 
-      const create = output(repo)
+      const submit = output(repo)
       expect(
         await yrd(
           repo,
-          create.io,
+          submit.io,
           "--name",
           "s2-fixture",
           "--wire",
           `file:${wireLog}`,
-          "pr",
-          "create",
+          "bay",
+          "submit",
           BRANCH,
           "--issue",
           CLAIM,
         ),
-        create.stderr(),
+        submit.stderr(),
       ).toBe(0)
       const wire = output(repo)
       expect(
-        await yrd(repo, wire.io, "--name", "s2-fixture", "--wire", `file:${wireLog}`, "pr", "ready", BRANCH),
+        await yrd(repo, wire.io, "--name", "s2-fixture", "--wire", `file:${wireLog}`, "queue", "run", "PR1"),
         wire.stderr(),
       ).toBe(1)
       const traffic = await readFile(wireLog, "utf8")
@@ -1088,35 +1085,6 @@ printf '%s %s' "$HAB_NAME" "$$" > cwd-guest.name
     })
   })
 
-  it("names a do seat for the configured lane, never for the invoking session", async () => {
-    const tools = await mkdtemp(join(tmpdir(), "yrd-do-lane-tools-"))
-    roots.push(tools)
-    await writeFile(join(tools, "ag"), AG_ARGV_RECORDER)
-    await chmod(join(tools, "ag"), 0o755)
-    const previousPath = process.env.PATH
-    const previousHab = process.env.HAB_NAME
-    const previousTribe = process.env.TRIBE_NAME
-    process.env.PATH = `${tools}:${previousPath ?? ""}`
-    // A chief seat dispatching work carries its own identity in the ambient
-    // environment. That identity belongs to the dispatcher, not to the seat
-    // being dispatched, and must never be stamped onto the new Bay session.
-    process.env.HAB_NAME = "@chief"
-    process.env.TRIBE_NAME = "@chief"
-    try {
-      const fixture = await repository()
-      await configureManagedDo(fixture.repo, { seat: "true", launch: "true" })
-      const run = output(fixture.repo)
-      expect(await yrd(fixture.repo, run.io, "do", CLAIM), run.stderr()).toBe(0)
-      expect(run.stdout()).toContain("name @dev/0")
-      expect(run.stdout()).not.toContain("name @chief")
-      expect(await git(fixture.repo, "show", `refs/remotes/origin/${BRANCH}:agent.name`)).toBe("@dev/0")
-    } finally {
-      restoreEnv("PATH", previousPath)
-      restoreEnv("HAB_NAME", previousHab)
-      restoreEnv("TRIBE_NAME", previousTribe)
-    }
-  })
-
   it("adopts the orphaned Bay of a failed do instead of refusing the retry", async () => {
     return withoutRuntimeName(async () => {
       const tools = await mkdtemp(join(tmpdir(), "yrd-do-retry-tools-"))
@@ -1340,190 +1308,18 @@ exit 2
     })
   })
 
-  it("refuses managed do by config key name and never provisions a bay", async () => {
+  it("keeps the Hab-owned managed dispatch flags off the Yrd do surface", async () => {
     const fixture = await repository()
+    const help = output(fixture.repo)
+    expect(await yrd(fixture.repo, help.io, "do", "--help")).toBe(0)
+    expect(help.stdout()).not.toContain("--seat")
+    expect(help.stdout()).not.toContain("--lane")
     const seat = output(fixture.repo)
-    // The fixture config declares no `do:` block, so the managed path must name
-    // the missing key instead of inventing a lane, an assignment or a launch.
     expect(await yrd(fixture.repo, seat.io, "do", CLAIM, "--seat")).toBe(2)
-    expect(seat.stderr()).toContain("do.lane")
-    expect(seat.stderr()).toContain(".yrd.yml")
+    expect(seat.stderr()).toContain("unknown option '--seat'")
     const bays = output(fixture.repo)
     expect(await yrd(fixture.repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
     expect((JSON.parse(bays.stdout()) as { bays: readonly unknown[] }).bays).toEqual([])
-  })
-
-  it("provisions a managed Bay before the repository launch command", async () => {
-    return withoutRuntimeName(async () => {
-      const fixture = await packagedRepository()
-      const tools = await packageManagerShim()
-      try {
-        await configureManagedDo(fixture.repo, {
-          seat: "true",
-          launch: 'test -f "$YRD_DO_BAY_PATH/moved-managed.txt" && test -d "$YRD_DO_BAY_PATH/node_modules"',
-        })
-
-        // Advance only the remote from the post-checkout hook fired by Bay
-        // creation. The Bay has already checked out the old base at that point,
-        // so the managed lifecycle must fetch, converge, refresh its recorded
-        // head, and provision before launch.
-        await git(fixture.repo, "checkout", "-qb", "future-base")
-        await writeFile(join(fixture.repo, "moved-managed.txt"), "advanced during Bay creation\n")
-        await git(fixture.repo, "add", "moved-managed.txt")
-        await git(fixture.repo, "commit", "-qm", "advance while the managed Bay opens")
-        const movedBase = await git(fixture.repo, "rev-parse", "HEAD")
-        await git(fixture.repo, "push", "-q", "origin", `${movedBase}:refs/heads/future-base`)
-        await git(fixture.repo, "checkout", "-q", "main")
-        const origin = await git(fixture.repo, "remote", "get-url", "origin")
-        const hook = join(fixture.repo, ".git", "hooks", "post-checkout")
-        await writeFile(
-          hook,
-          `#!/bin/sh
-exec git --git-dir=${JSON.stringify(origin)} update-ref refs/heads/main ${movedBase}
-`,
-        )
-        await chmod(hook, 0o755)
-
-        const managed = output(fixture.repo)
-        expect(await yrd(fixture.repo, managed.io, "do", CLAIM, "--seat")).toBe(1)
-        // No carrier is produced by the fixture, so a correctly provisioned
-        // launch advances to the carrier timeout. Before 22447 it refused at
-        // launch because only the repository's long shell hook installed deps.
-        expect(managed.stderr()).toContain("stage 'carrier'")
-        expect(managed.stderr()).not.toContain("stage 'launch'")
-        expect(managed.stderr()).toContain("converging onto main")
-        expect((await readFile(tools.log, "utf8")).trim().split("\n")).toEqual([
-          "install --frozen-lockfile --ignore-scripts",
-          "run postinstall",
-        ])
-        const bayPath = await activeBayPath(fixture.repo, "B1")
-        const observed = await git(bayPath, "rev-parse", "HEAD")
-        await git(fixture.repo, "merge-base", "--is-ancestor", movedBase, observed)
-        const bays = output(fixture.repo)
-        expect(await yrd(fixture.repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
-        const recorded = (JSON.parse(bays.stdout()) as { bays: readonly { id: string; headSha?: string }[] }).bays
-        expect(recorded.find((bay) => bay.id === "B1")?.headSha).toBe(observed)
-      } finally {
-        await tools.restore()
-      }
-    })
-  })
-
-  it("runs only the managed launch command from the resolved Bay cwd", async () => {
-    const fixture = await repository()
-    const assignCwd = join(fixture.repo, "managed-assign.cwd")
-    const seatCwd = join(fixture.repo, "managed-seat.cwd")
-    const launchCwd = join(fixture.repo, "managed-launch.cwd")
-    await configureManagedDo(fixture.repo, {
-      assign: `pwd > ${JSON.stringify(assignCwd)}`,
-      seat: `pwd > ${JSON.stringify(seatCwd)}`,
-      // The launch command relies on its process cwd; no shell `cd` bridge is
-      // needed (or permitted) between Yrd's Bay provisioning and Hab launch.
-      launch: `pwd > ${JSON.stringify(launchCwd)}`,
-    })
-
-    const managed = output(fixture.repo)
-    expect(await yrd(fixture.repo, managed.io, "do", CLAIM, "--seat")).toBe(1)
-    expect(managed.stderr()).toContain("stage 'carrier'")
-    const bayPath = await activeBayPath(fixture.repo, "B1")
-    expect((await readFile(assignCwd, "utf8")).trim()).toBe(fixture.repo)
-    expect((await readFile(seatCwd, "utf8")).trim()).toBe(fixture.repo)
-    expect((await readFile(launchCwd, "utf8")).trim()).toBe(bayPath)
-  })
-
-  it("refuses a managed Bay with declared dependencies but no deterministic package manager", async () => {
-    const fixture = await repository()
-    await writeFile(
-      join(fixture.repo, "package.json"),
-      `${JSON.stringify({ name: "unlocked-fixture", private: true, dependencies: { picocolors: "1.1.1" } }, null, 2)}\n`,
-    )
-    await git(fixture.repo, "add", "package.json")
-    await git(fixture.repo, "commit", "-qm", "declare unlocked dependencies")
-    await git(fixture.repo, "push", "-q", "origin", "main")
-    await configureManagedDo(fixture.repo, {
-      seat: "true",
-      launch: 'touch "$YRD_DO_BAY_PATH/launch-ran"',
-    })
-
-    const managed = output(fixture.repo)
-    expect(await yrd(fixture.repo, managed.io, "do", CLAIM, "--seat")).toBe(1)
-    expect(managed.stderr()).toContain("stage 'bay'")
-    expect(managed.stderr()).toContain("no recognized package-manager lockfile")
-    const bayPath = await activeBayPath(fixture.repo, "B1")
-    await expect(access(join(bayPath, "launch-ran"))).rejects.toThrow()
-  })
-
-  it("runs a refused seat decision before Bay provisioning", async () => {
-    const fixture = await repository()
-    await configureManagedDo(fixture.repo, { seat: "false", launch: "true" })
-
-    const seat = output(fixture.repo)
-    expect(await yrd(fixture.repo, seat.io, "do", CLAIM, "--seat")).toBe(1)
-    expect(seat.stderr()).toContain("stage 'seat'")
-    expect(seat.stderr()).toContain("managed do stage durations")
-    expect(seat.stderr()).toMatch(/STAGE\s+DURATION\s+OUTCOME/u)
-    expect(seat.stderr()).toMatch(/seat\s+\d+ms\s+refused/u)
-    expect(seat.stderr()).toMatch(/TOTAL\s+\d+ms\s+refused/u)
-    const scoreboard = (await readFile(join(fixture.repo, ".git", "yrd", "do-managed", "scoreboard.jsonl"), "utf8"))
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as { outcome: string; stage: string })
-    expect(scoreboard).toEqual([expect.objectContaining({ outcome: "refused", stage: "seat" })])
-
-    const bays = output(fixture.repo)
-    expect(await yrd(fixture.repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
-    expect((JSON.parse(bays.stdout()) as { bays: readonly unknown[] }).bays).toEqual([])
-  })
-
-  it("deprovisions the just-opened Bay when managed launch refuses", async () => {
-    const fixture = await repository()
-    const heldPidPath = join(fixture.repo, "..", "managed-refusal-held.pid")
-    await configureManagedDo(fixture.repo, {
-      seat: "true",
-      launch:
-        `cd "$YRD_DO_BAY_PATH"; ${JSON.stringify(process.execPath)} -e ` +
-        `${JSON.stringify('process.on("SIGHUP", () => {}); setInterval(() => {}, 1_000)')} ` +
-        `</dev/null >/dev/null 2>&1 & printf "%s" "$!" > ${JSON.stringify(heldPidPath)}; false`,
-    })
-
-    let heldPid = 0
-    try {
-      const launch = output(fixture.repo)
-      expect(await yrd(fixture.repo, launch.io, "do", CLAIM, "--seat")).toBe(1)
-      expect(launch.stderr()).toContain("stage 'launch'")
-      heldPid = Number((await readFile(heldPidPath, "utf8")).trim())
-      expect(heldPid).toBeGreaterThan(1)
-      await eventually(async () => {
-        if (isPidAlive(heldPid)) throw new Error(`managed refusal pid ${heldPid} survived Bay rollback`)
-      }, 2_000)
-
-      const bays = output(fixture.repo)
-      expect(await yrd(fixture.repo, bays.io, "bay", "list", "--closed", "--json"), bays.stderr()).toBe(0)
-      const projection = JSON.parse(bays.stdout()) as {
-        bays: readonly {
-          issue?: string
-          branch: string
-          nativeStatus: string
-          status: string
-          orphan?: unknown
-        }[]
-      }
-      expect(projection).toMatchObject({
-        bays: [
-          expect.objectContaining({
-            issue: CLAIM,
-            branch: BRANCH,
-            nativeStatus: "closed",
-            status: "done",
-          }),
-        ],
-      })
-      expect(projection.bays[0]?.orphan).toBeUndefined()
-      const worktrees = await git(fixture.repo, "worktree", "list", "--porcelain")
-      expect(worktrees).not.toContain("/.bays/")
-    } finally {
-      killQuiet(heldPid)
-    }
   })
 
   it("makes manual run plus ag and automatic do converge on integrated PR state", async () => {
@@ -2310,9 +2106,7 @@ async function repository(): Promise<{ repo: string }> {
     join(repo, ".yrd.yml"),
     `base: main
 batch: 1
-steps: [check, merge]
-check: "true"
-merge: {}
+checks: [{check: {run: "true"}}]
 ${JOURNAL_CONFIG}`,
   )
   await git(repo, "add", "README.md", ".yrd.yml")
@@ -2416,9 +2210,7 @@ async function configureNotify(repo: string, check = "true"): Promise<void> {
     join(repo, ".yrd.yml"),
     `base: main
 batch: 1
-steps: [check, merge]
-check: ${JSON.stringify(check)}
-merge: {}
+checks: [{check: {run: ${JSON.stringify(check)}}}]
 ${JOURNAL_CONFIG}
 notify:
   run/failed: [submitter]
@@ -2426,33 +2218,6 @@ notify:
   )
   await git(repo, "add", ".yrd.yml")
   await git(repo, "commit", "-qm", "configure notifications")
-  await git(repo, "push", "-q", "origin", "main")
-}
-
-async function configureManagedDo(
-  repo: string,
-  commands: Readonly<{ assign?: string; seat: string; launch: string }>,
-): Promise<void> {
-  await writeFile(
-    join(repo, ".yrd.yml"),
-    `base: main
-batch: 1
-steps: [check, merge]
-check: "true"
-merge: {}
-${JOURNAL_CONFIG}
-do:
-  lane: "@dev/0"
-  assign: ${JSON.stringify(commands.assign ?? "true")}
-  seat: ${JSON.stringify(commands.seat)}
-  launch: ${JSON.stringify(commands.launch)}
-  pollMs: 1
-  carrierTimeoutMs: 10
-  landingTimeoutMs: 10
-`,
-  )
-  await git(repo, "add", ".yrd.yml")
-  await git(repo, "commit", "-qm", "configure managed do")
   await git(repo, "push", "-q", "origin", "main")
 }
 

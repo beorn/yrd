@@ -426,7 +426,7 @@ async function queueRepository(check: string): Promise<string> {
   await git(root, "init", "-q", "-b", "main", repo)
   await git(repo, "config", "user.name", "Yrd Test")
   await git(repo, "config", "user.email", "yrd@example.invalid")
-  await writeFile(join(repo, ".yrd.yml"), `base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "${check}"\nmerge: {}\n`)
+  await writeFile(join(repo, ".yrd.yml"), `base: main\nbatch: 1\nchecks:\n  - {check: {run: "${check}"}}\n`)
   await git(repo, "add", ".yrd.yml")
   await git(repo, "commit", "-qm", "queue config")
   return repo
@@ -503,7 +503,7 @@ describe("host installed baseline", () => {
       await host.close()
     }
 
-    await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "false"\nmerge: {}\n')
+    await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 1\nchecks:\n  - {check: {run: "false"}}\n')
     await git(repo, "add", ".yrd.yml")
     await git(repo, "commit", "-qm", "change queue config")
     const drifted = await createYrdHost({ cwd: repo })
@@ -536,10 +536,7 @@ describe("host installed baseline", () => {
 
       // Disk moves to v2 while runtime and baseline stay v1: the DISK leg —
       // exactly ONE finding with the migration remedy (existing class).
-      await writeFile(
-        join(repo, ".yrd.yml"),
-        'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "false"\nmerge: {}\n',
-      )
+      await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 1\nchecks:\n  - {check: {run: "false"}}\n')
       await git(repo, "add", ".yrd.yml")
       await git(repo, "commit", "-qm", "change queue config")
       const diskLeg = await resident.services.queue?.auditEnvironment?.()
@@ -587,7 +584,7 @@ describe("host installed baseline", () => {
     // baseline is both un-resolvable and drifted — exactly the wedge that used
     // to block `queue deinit` (its own prescribed remedy) via a throwing inspect.
     await git(repo, "branch", "-D", "stale/base")
-    await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "false"\nmerge: {}\n')
+    await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 1\nchecks:\n  - {check: {run: "false"}}\n')
     await git(repo, "add", ".yrd.yml")
     await git(repo, "commit", "-qm", "change queue config")
 

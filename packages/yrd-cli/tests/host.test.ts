@@ -72,7 +72,7 @@ async function journalEnvelope(repo: string) {
 function testJournal(dir: string, log?: ConditionalLogger) {
   return createJournal({
     dir,
-    compatibility: CURRENT_JOURNAL_COMPATIBILITY,
+    writerVersion: CURRENT_JOURNAL_COMPATIBILITY.version,
     inject: { sqliteVersion: "3.53.0", ...(log === undefined ? {} : { log }) },
   } as unknown as Parameters<typeof createJournal>[0])
 }
@@ -105,10 +105,7 @@ async function byteManifest(root: string): Promise<readonly string[]> {
 }
 
 function journalCompatibilityYaml(): string {
-  return `journal:
-  version: ${CURRENT_JOURNAL_COMPATIBILITY.version}
-  reader: "${CURRENT_JOURNAL_COMPATIBILITY.reader}"
-`
+  return ""
 }
 
 async function repository(): Promise<{ repo: string; featureSha: string }> {
@@ -120,7 +117,7 @@ async function repository(): Promise<{ repo: string; featureSha: string }> {
   await git(repo, "config", "user.name", "Yrd Test")
   await git(repo, "config", "user.email", "yrd@example.invalid")
   await writeFile(join(repo, "README.md"), "main\n")
-  await writeFile(join(repo, ".yrd.yml"), journalCompatibilityYaml())
+  await writeFile(join(repo, ".yrd.yml"), 'checks: [{check: {run: "true"}}]\n')
   await git(repo, "add", "README.md", ".yrd.yml")
   await git(repo, "commit", "-qm", "main")
   await git(repo, "switch", "-qc", "issue/feature")
@@ -135,7 +132,7 @@ async function repository(): Promise<{ repo: string; featureSha: string }> {
 /** Install legacy spelling on the base branch: config authority is the base,
  * never the operator worktree's uncommitted bytes (design C5). */
 async function commitYrdConfig(repo: string, source: string): Promise<void> {
-  await writeFile(join(repo, ".yrd.yml"), `${journalCompatibilityYaml()}${source}`)
+  await writeFile(join(repo, ".yrd.yml"), source)
   await git(repo, "add", ".yrd.yml")
   await git(repo, "commit", "-qm", "test Yrd config")
 }
@@ -164,12 +161,7 @@ async function compositionRepository(): Promise<{
     join(repo, ".yrd.yml"),
     `base: main
 batch: 1
-steps: [check, merge]
-journal:
-  version: ${CURRENT_JOURNAL_COMPATIBILITY.version}
-  reader: "${CURRENT_JOURNAL_COMPATIBILITY.reader}"
-check: "true"
-merge: {}
+checks: [{check: {run: "true"}}]
 `,
   )
   await git(repo, "add", ".yrd.yml", ".gitmodules", "dep")
@@ -229,12 +221,7 @@ async function unpublishedSubmodulePinRepository(): Promise<{
     join(repo, ".yrd.yml"),
     `base: main
 batch: 1
-steps: [check, merge]
-journal:
-  version: ${CURRENT_JOURNAL_COMPATIBILITY.version}
-  reader: "${CURRENT_JOURNAL_COMPATIBILITY.reader}"
-check: "true"
-merge: {}
+checks: [{check: {run: "true"}}]
 `,
   )
   await git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", moduleRemote, "dep")
@@ -317,11 +304,12 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     ])
   })
 
-  it("refuses the current default-host writer when no reader floor is configured", async () => {
+  it("lets a fresh repository's first writer create the journal at its own version", async () => {
     const { repo, featureSha } = await repository()
     const stateDir = join(repo, ".git", "yrd-no-reader-floor")
     const journal = createJournal({
       dir: stateDir,
+      writerVersion: CURRENT_JOURNAL_COMPATIBILITY.version,
       inject: { sqliteVersion: "3.53.0" },
     } as unknown as Parameters<typeof createJournal>[0])
     const config: ResolvedYrdProjectConfig = {
@@ -342,16 +330,8 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       config,
     })
 
-    await expect(app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })).rejects.toMatchObject(
-      {
-        failure: {
-          kind: "refusal",
-          code: "journal-write-version-floor",
-          message: expect.stringContaining(CURRENT_JOURNAL_COMPATIBILITY.reader),
-        },
-      },
-    )
-    await expect(Array.fromAsync(journal.read())).resolves.toEqual([])
+    await expect(app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })).resolves.toBeDefined()
+    await expect(Array.fromAsync(journal.read())).resolves.toHaveLength(1)
   })
 
   it("refuses the activated writer while the repository still installs the prior reader floor", async () => {
@@ -359,7 +339,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     const stateDir = join(repo, ".git", "yrd-prior-reader-floor")
     const journal = createJournal({
       dir: stateDir,
-      compatibility: { version: CURRENT_JOURNAL_COMPATIBILITY.version - 1, reader: "0".repeat(40) },
+      writerVersion: CURRENT_JOURNAL_COMPATIBILITY.version - 1,
       inject: { sqliteVersion: "3.53.0" },
     } as unknown as Parameters<typeof createJournal>[0])
     const config: ResolvedYrdProjectConfig = {
@@ -385,7 +365,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
         failure: {
           kind: "refusal",
           code: "journal-write-version-floor",
-          message: expect.stringContaining(CURRENT_JOURNAL_COMPATIBILITY.reader),
+          message: expect.stringContaining("yrd admin journal bump 2"),
         },
       },
     )
@@ -1097,7 +1077,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 describe("createYrdHost", { timeout: 20_000 }, () => {
   it("loads the base-authoritative reader floor and persists current versioned frames", async () => {
     const { repo, featureSha } = await repository()
-    await commitYrdConfig(repo, 'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "true"\nmerge: {}\n')
+    await commitYrdConfig(repo, 'base: main\nbatch: 1\nchecks: [{check: {run: "true"}}]\n')
 
     await using host = await createYrdHost({ cwd: repo })
     await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
@@ -1108,7 +1088,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
 
   it("boots doctor --rebuild-views through a stale Journal view registration", async () => {
     const { repo, featureSha } = await repository()
-    await commitYrdConfig(repo, 'base: main\nbatch: 1\nsteps: [check]\ncheck: "true"\n')
+    await commitYrdConfig(repo, 'base: main\nbatch: 1\nchecks: [{check: {run: "true"}}]\n')
     {
       await using host = await createYrdHost({ cwd: repo })
       await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
@@ -1154,9 +1134,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     await commitYrdConfig(
       repo,
       `base: main
-steps: [check, merge]
-check: { run: "printf 'focused failure\\n' >&2; exit 1" }
-merge: {}
+checks: [{check: {run: "printf 'focused failure\\n' >&2; exit 1"}}]
 notify:
   run/failed: [submitter]
 `,
@@ -1215,9 +1193,7 @@ notify:
     await commitYrdConfig(
       repo,
       `base: main
-steps: [check, merge]
-check: { run: "true" }
-merge: {}
+checks: [{check: {run: "true"}}]
 notify:
   pr/rejected: [submitter]
 `,
@@ -1258,9 +1234,7 @@ notify:
     await commitYrdConfig(
       repo,
       `base: main
-steps: [check, merge]
-check: { run: "true" }
-merge: {}
+checks: [{check: {run: "true"}}]
 notify:
   pr/rejected: [submitter]
 `,
@@ -1306,9 +1280,7 @@ notify:
     await writeFile(
       join(repo, ".yrd.yml"),
       `${journalCompatibilityYaml()}base: main
-steps: [check, merge]
-check: { run: "true" }
-merge: {}
+checks: [{check: {run: "true"}}]
 notify:
   pr/rejected: [submitter]
 `,
@@ -1367,9 +1339,7 @@ notify:
     await commitYrdConfig(
       repo,
       `base: main
-steps: [check, merge]
-check: { run: "true" }
-merge: {}
+checks: [{check: {run: "true"}}]
 `,
     )
     await using seeded = await createYrdHost({ cwd: repo, env: { ...process.env, TRIBE_NAME: "@agent/6" } })
@@ -1414,9 +1384,7 @@ merge: {}
     await commitYrdConfig(
       repo,
       `base: main
-steps: [check, merge]
-check: { run: "true" }
-merge: {}
+checks: [{check: {run: "true"}}]
 notify:
   pr/needs-review: ["@cto"]
 `,
@@ -1514,13 +1482,13 @@ notify:
       "issue",
       "contest",
       "queue",
+      "check",
       "doctor",
-      "journal",
+      "admin",
       "migrate",
       "log",
       "watch",
       "prime",
-      "init",
       "in",
       "do",
       "sh",
@@ -1692,10 +1660,7 @@ notify:
 
   it("runs bare root as plain help while preserving the JSON dashboard", async () => {
     const { repo } = await repository()
-    await commitYrdConfig(
-      repo,
-      ["base: main", "batch: 1", "steps: [check, merge]", "check: 'true'", "merge: {}", ""].join("\n"),
-    )
+    await commitYrdConfig(repo, ["base: main", "batch: 1", "checks: [{check: {run: 'true'}}]", ""].join("\n"))
 
     let plain = ""
     let plainError = ""
@@ -1745,9 +1710,7 @@ notify:
         journalCompatibilityYaml().trimEnd(),
         "base: main",
         "batch: 1",
-        "steps: [check, merge]",
-        `check: ${JSON.stringify(`touch ${checkMarker}`)}`,
-        "merge: {}",
+        `checks: [{check: {run: ${JSON.stringify(`touch ${checkMarker}`)}}}]`,
         "",
       ].join("\n"),
     )
@@ -1830,9 +1793,7 @@ notify:
         journalCompatibilityYaml().trimEnd(),
         "base: main",
         "batch: 2",
-        "steps: [check, merge]",
-        `check: ${JSON.stringify(`touch ${checkMarker}`)}`,
-        "merge: {}",
+        `checks: [{check: {run: ${JSON.stringify(`touch ${checkMarker}`)}}}]`,
         "",
       ].join("\n"),
     )
@@ -1905,9 +1866,7 @@ notify:
         journalCompatibilityYaml().trimEnd(),
         "base: main",
         "batch: 1",
-        "steps: [check, merge]",
-        `check: ${JSON.stringify(`printf check >> ${checkMarker}`)}`,
-        "merge: {}",
+        `checks: [{check: {run: ${JSON.stringify(`printf check >> ${checkMarker}`)}}}]`,
         "",
       ].join("\n"),
     )
@@ -1917,7 +1876,7 @@ notify:
     let submitError = ""
     expect(
       await runYrdProcess(
-        ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--base", "main", "--follow", "--json"],
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--base", "main", "--json"],
         {
           cwd: repo,
           stdout: () => undefined,
@@ -1965,137 +1924,54 @@ notify:
     expect(result.results[0]).not.toHaveProperty("reusedFrom")
   })
 
-  it("preserves a literal shipping-config main-health failure through submit --follow and pr checks", async () => {
+  it("runs the managed required check before pr submit mutates the PR journal", async () => {
     const { repo } = await repository()
-    const tentScript = join(repo, ".claude", "skills", "tent", "scripts", "tent.ts")
-    await mkdir(join(repo, ".claude", "skills", "tent", "scripts"), { recursive: true })
-    await writeFile(
-      tentScript,
-      [
-        'const index = process.argv.indexOf("--base-sha")',
-        'const baseSha = index < 0 ? "unknown" : (process.argv[index + 1] ?? "unknown")',
-        "console.log(`[yrd-base-health] base ${baseSha.slice(0, 12)} is red: test:fast failed`)",
-        "process.exitCode = 1",
-        "",
-      ].join("\n"),
-    )
     await writeFile(
       join(repo, ".yrd.yml"),
       [
         journalCompatibilityYaml().trimEnd(),
         "base: main",
         "batch: 1",
-        "steps: [main-health, check, merge]",
         "requires: [review]",
-        "",
-        "main-health:",
-        "  classification: base",
-        "  run: |",
-        '    bun .claude/skills/tent/scripts/tent.ts main-health-read --base-sha "$YRD_BASE_SHA"',
-        "check: |",
-        "  git submodule update --init --recursive --jobs 20 &&",
-        "  bun install --frozen-lockfile --ignore-scripts &&",
-        "  bun run build:info &&",
-        "  bun fix:all &&",
-        '  status="$(git status --porcelain)" &&',
-        '  if test -n "$status"; then printf \'%s\\n\' "$status" >&2; exit 1; fi &&',
-        "  bun run typecheck &&",
-        '  bun run test:affected "$YRD_BASE_SHA"',
-        "merge: {}",
-        "",
-        "contest:",
-        "  concurrency: 2",
-        "  timeoutMs: 1800000",
-        "  evaluators: [check]",
+        "checks:",
+        "  - main-health:",
+        "      classification: base",
+        "      run: |",
+        "        test -f feature.txt &&",
+        '        printf "[yrd-base-health] base %.12s is red: test:fast failed\\n" "$YRD_BASE_SHA" &&',
+        "        exit 1",
         "",
       ].join("\n"),
     )
-    await git(repo, "add", ".yrd.yml", ".claude/skills/tent/scripts/tent.ts")
+    await git(repo, "add", ".yrd.yml")
     await git(repo, "commit", "-qm", "shipping config")
     const baseSha = await git(repo, "rev-parse", "main")
 
     let submitStdout = ""
     let submitStderr = ""
     expect(
-      await runYrdProcess(
-        ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--follow", "--json"],
-        {
-          cwd: repo,
-          stdout: (text) => {
-            submitStdout += text
-          },
-          stderr: (text) => {
-            submitStderr += text
-          },
-        },
-      ),
-      submitStderr,
-    ).toBe(1)
-    // One-shot lifecycle outcomes are structured in the command result. The
-    // resident owns lifecycle narration; submit does not duplicate it on stderr.
-    expect(submitStderr).toBe("")
-    const submitted = JSON.parse(submitStdout) as { checks: Record<string, unknown>[] }
-    expect(submitted).toMatchObject({
-      command: "pr.submit",
-      checks: [
-        {
-          pr: "PR1",
-          revision: 1,
-          job: expect.any(String),
-          step: "main-health",
-          status: "failed",
-          classification: "base",
-          command: ["queue.step.main-health"],
-          diagnostics: expect.stringContaining(
-            `[yrd-base-health] base ${baseSha.slice(0, 12)} is red: test:fast failed`,
-          ),
-        },
-      ],
-    })
-    expect(submitted.checks[0]).not.toHaveProperty("run")
-
-    let checksStdout = ""
-    let checksStderr = ""
-    expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "checks", "PR1", "--json"], {
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--json"], {
         cwd: repo,
         stdout: (text) => {
-          checksStdout += text
+          submitStdout += text
         },
         stderr: (text) => {
-          checksStderr += text
+          submitStderr += text
         },
       }),
-      checksStderr,
+      submitStderr,
     ).toBe(1)
-    expect(checksStderr).toBe("")
-    expect(JSON.parse(checksStdout)).toEqual({ kind: "pr.check", ...submitted.checks[0] })
-
-    for (const color of [false, true]) {
-      let stdout = ""
-      let stderr = ""
-      expect(
-        await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "checks", "PR1"], {
-          cwd: repo,
-          columns: 180,
-          color,
-          stdout: (text) => {
-            stdout += text
-          },
-          stderr: (text) => {
-            stderr += text
-          },
-        }),
-        stderr,
-      ).toBe(1)
-      expect(stderr).toBe("")
-      expect(stdout).toContain("main-health")
-      expect(stdout).toContain("base")
-      expect(stdout).toMatch(/test:fast\s+failed/u)
-      expect(stdout).toContain("queue.step.main-health")
-      if (color) expect(stdout).toContain("\u001b[")
-      else expect(stdout).not.toContain("\u001b[")
-    }
+    expect(submitStdout).toContain(`[yrd-base-health] base ${baseSha.slice(0, 12)} is red: test:fast failed`)
+    expect(JSON.parse(submitStderr)).toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "required-check-failed",
+        message: expect.stringContaining("yrd check main-health"),
+      },
+    })
+    expect((await journalEnvelope(repo)).flatMap(({ values }) => values)).toEqual([])
+    await using host = await createYrdHost({ cwd: repo })
+    expect(host.app.bays.list()).toEqual([])
   })
 
   it("refuses the retired config wrapper before plain or JSON startup mutates state", async () => {
@@ -2119,7 +1995,7 @@ notify:
       ).toBe(2)
       expect(stdout).toBe("")
       expect(stderr).toContain(`remove '${retiredWrapper}:'`)
-      expect(stderr).toContain("configure base, batch, steps, and step definitions at the top level")
+      expect(stderr).toContain("configure the required checks as 'checks: [...]'")
       expect(await Bun.file(join(repo, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(false)
     }
   })
@@ -2278,11 +2154,11 @@ notify:
         },
       },
     )
-    expect(publishedExit).toBe(1)
+    expect(publishedExit, stderr).toBe(0)
     expect(stderr).toBe("")
     expect(JSON.parse(stdout)).toMatchObject({
-      checks: [{ error: { code: "authored-gitlink" }, pr: "PR1", revision: 1, status: "failed" }],
-      prs: [{ branch, status: "needs-author" }],
+      command: "pr.submit",
+      prs: [{ branch, status: "submitted" }],
     })
 
     listed = ""
@@ -2468,17 +2344,17 @@ notify:
     expect(await Bun.file(join(repo, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(false)
   })
 
-  it("teaches exact inspection guidance for a needs-author direct-branch PR without appending", async () => {
+  it("teaches exact run inspection guidance for a submitted direct-branch PR without appending", async () => {
     const { repo } = await repository()
     await commitYrdConfig(
       repo,
       [
         "base: main",
         "batch: 1",
-        "steps: [check, merge]",
-        "check: |",
-        "  if test -f feature.txt; then printf 'feature.txt:1: target regression\\n'; exit 1; fi",
-        "merge: {}",
+        "checks:",
+        "  - check:",
+        "      run: |",
+        "        if test -f feature.txt; then printf 'feature.txt:1: target regression\\n'; exit 1; fi",
         "",
       ].join("\n"),
     )
@@ -2486,19 +2362,24 @@ notify:
     let submitOutput = ""
     let submitError = ""
     expect(
-      await runYrdProcess(
-        ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "--base", "main", "--follow", "--json"],
-        {
-          cwd: repo,
-          stdout: (text) => {
-            submitOutput += text
-          },
-          stderr: (text) => {
-            submitError += text
-          },
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "bay", "submit", "--base", "main", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          submitOutput += text
         },
-      ),
+        stderr: (text) => {
+          submitError += text
+        },
+      }),
       `${submitOutput}\n${submitError}`,
+    ).toBe(0)
+    expect(submitError).toBe("")
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "queue", "run", "PR1", "--json"], {
+        cwd: repo,
+        stdout: () => undefined,
+        stderr: () => undefined,
+      }),
     ).toBe(1)
 
     const before = await journalEnvelope(repo)
@@ -2517,11 +2398,12 @@ notify:
     }>
     expect(rejected).toMatchObject({
       command: "pr.merge",
-      status: "needs-author",
-      next: "yrd pr view PR1",
+      status: "submitted",
+      next: "yrd pr runs PR1",
     })
     expect(rejected.guidance).toEqual({
-      view: "yrd pr view PR1",
+      inspect: "yrd pr runs PR1",
+      resubmit: "fix the branch and run yrd pr submit again",
     })
     expect(await journalEnvelope(repo)).toEqual(before)
   })
@@ -2548,7 +2430,7 @@ notify:
 
   it("quiesces an expired pre-settlement root before active host bring-up completes", async () => {
     const { repo, featureSha } = await repository()
-    await commitYrdConfig(repo, 'base: main\nbatch: 1\nsteps: [check]\ncheck: "true"\n')
+    await commitYrdConfig(repo, 'base: main\nbatch: 1\nchecks: [{check: {run: "true"}}]\n')
     const stateDir = join(repo, ".git", "yrd")
     const config: ResolvedYrdProjectConfig = {
       base: "main",
@@ -2645,14 +2527,14 @@ notify:
 
   it("drains the active run on the first watch signal without admitting another", async () => {
     const { repo, featureSha } = await repository()
-    const startedPath = join(repo, "drain-check.started")
-    const finishedPath = join(repo, "drain-check.finished")
+    const startedPath = join(repo, "..", "drain-check.started")
+    const finishedPath = join(repo, "..", "drain-check.finished")
     const command = [`touch ${JSON.stringify(startedPath)}`, "sleep 0.2", `touch ${JSON.stringify(finishedPath)}`].join(
       "; ",
     )
     await commitYrdConfig(
       repo,
-      `base: main\nbatch: 1\nsteps: [check]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 5000\n`,
+      `base: main\nbatch: 1\nchecks: [{check: {run: ${JSON.stringify(command)}, timeoutMs: 5000}}]\n`,
     )
     await git(repo, "switch", "-qc", "issue/second", "main")
     await writeFile(join(repo, "second.txt"), "second\n")
@@ -2676,7 +2558,7 @@ notify:
       await vi.waitFor(async () => expect(await Bun.file(startedPath).exists()).toBe(true), { timeout: 5_000 })
       cli.kill("SIGTERM")
       await vi.waitFor(async () => expect(await Bun.file(finishedPath).exists()).toBe(true), { timeout: 5_000 })
-      expect(await cli.exited, await stderr).toBe(0)
+      expect(await cli.exited, `${await stdout}\n${await stderr}`).toBe(0)
 
       await using settled = await createYrdHost({ cwd: repo })
       expect(Queues.ids(settled.app.state().queues)).toEqual(["R1"])
@@ -2700,7 +2582,7 @@ notify:
       `sh -c 'trap "" TERM; ${BOUNDED_ONE_SECOND_LOOP}' & printf '%s\\n' "$!" > ${JSON.stringify(grandchildPidPath)}`,
       BOUNDED_ONE_SECOND_LOOP,
     ].join("; ")
-    await commitYrdConfig(repo, `steps: [check]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 30000\n`)
+    await commitYrdConfig(repo, `checks: [{check: {run: ${JSON.stringify(command)}, timeoutMs: 30000}}]\n`)
 
     await using submitter = await createYrdHost({ cwd: repo })
     await submitter.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
@@ -2757,14 +2639,14 @@ notify:
 
   it("refuses a second resident follow-runner with the active runner identity", async () => {
     const { repo, featureSha } = await repository()
-    const startedPath = join(repo, "resident-check.started")
-    const executionsPath = join(repo, "resident-check.executions")
+    const startedPath = join(repo, "..", "resident-check.started")
+    const executionsPath = join(repo, "..", "resident-check.executions")
     const command = [
       `printf 'run\\n' >> ${JSON.stringify(executionsPath)}`,
       `touch ${JSON.stringify(startedPath)}`,
       "sleep 2",
     ].join("; ")
-    await commitYrdConfig(repo, `steps: [check]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 5000\n`)
+    await commitYrdConfig(repo, `checks: [{check: {run: ${JSON.stringify(command)}, timeoutMs: 5000}}]\n`)
     await git(repo, "switch", "-qc", "issue/second", "main")
     await writeFile(join(repo, "second.txt"), "second\n")
     await git(repo, "add", "second.txt")
@@ -2781,7 +2663,7 @@ notify:
       await submitter.close()
     }
     const spawnFollow = (pane: string) => {
-      const logPath = join(repo, `resident-${pane.replace(/[^a-z0-9]+/giu, "-")}.log`)
+      const logPath = join(repo, "..", `resident-${pane.replace(/[^a-z0-9]+/giu, "-")}.log`)
       const child = Bun.spawn(
         [
           process.execPath,
@@ -2827,7 +2709,7 @@ notify:
       expect((await readFile(executionsPath, "utf8")).trim().split("\n")).toEqual(["run"])
       // A graceful drain (SIGTERM) lets the first exit after finishing PR1's run.
       first.child.kill("SIGTERM")
-      await expect(first.child.exited).resolves.toBe(0)
+      expect(await first.child.exited, `${await first.stdout}\n${await first.stderr}`).toBe(0)
 
       // With the lease released, submit PR2 and let a replacement reclaim + drain it.
       {
@@ -2931,7 +2813,6 @@ notify:
 
   it("replaces a dead resident owner after the OS releases its lease", async () => {
     const { repo } = await repository()
-    await commitYrdConfig(repo, 'steps: [check]\ncheck:\n  run: "true"\n')
     const argv = [
       process.execPath,
       join(import.meta.dirname, "../../../bin/yrd.ts"),
@@ -2991,13 +2872,11 @@ notify:
       `printf '${passedOutput}\\n'`,
       `touch ${JSON.stringify(startedPath)}`,
       "sleep 0.2",
-      'git merge --ff-only "$YRD_CANDIDATE_SHA"',
-      "git push origin main",
       `touch ${JSON.stringify(finishedPath)}`,
     ].join("; ")
     await commitYrdConfig(
       repo,
-      `base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "true"\nmerge:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 5000\n`,
+      `base: main\nbatch: 1\nchecks: [{check: {run: ${JSON.stringify(command)}, timeoutMs: 5000}}]\n`,
     )
     await git(repo, "switch", "-qc", "issue/second", "main")
     await writeFile(join(repo, "second.txt"), "second\n")
@@ -3013,8 +2892,10 @@ notify:
     const second = submitter.app.bays.pr("issue/second")!
     await submitter.app.bays.requestChecks({ pr: first.id })
     await submitter.app.bays.requestChecks({ pr: second.id })
-    await submitter.app.queue.admitRevision({ prs: [first.id, second.id] }, { runner: "test", leaseMs: 60_000 })
-    expect([first.id, second.id].map((id) => prDeliveryState(submitter.app.bays.pr(id)!))).toEqual(["ready", "ready"])
+    expect([first.id, second.id].map((id) => prDeliveryState(submitter.app.bays.pr(id)!))).toEqual([
+      "submitted",
+      "submitted",
+    ])
     expect(Queues.ids(submitter.app.state().queues)).toEqual([])
     await submitter.close()
 
@@ -3040,12 +2921,10 @@ notify:
       expect(runIds.map((id) => settled.app.queue.get(id)?.status)).toEqual(["completed", "completed"])
       expect(runIds.map((id) => settled.app.queue.get(id)?.conclusion)).toEqual(["failure", "success"])
 
-      const failedLog = join(artifactRoot, "R1", "0-merge", "attempt-1", "stderr.log")
-      const passedLog = join(artifactRoot, "R2", "0-merge", "attempt-1", "stdout.log")
+      const failedLog = join(artifactRoot, "R1", "0-check", "attempt-1", "stderr.log")
+      const passedLog = join(artifactRoot, "R2", "0-check", "attempt-1", "stdout.log")
       expect(structured).toContain('"id":"R1"')
       expect(structured).toContain('"id":"R2"')
-      expect(structured).not.toContain(failedOutput)
-      expect(structured).not.toContain(passedOutput)
       expect(await readFile(failedLog, "utf8")).toContain(failedOutput)
       expect(await readFile(passedLog, "utf8")).toContain(passedOutput)
     } finally {
@@ -3076,10 +2955,7 @@ notify:
         `while [ "$i" -lt 200 ]; do printf '%s\\n' "$i" >> ${JSON.stringify(progressPath)}; i=$((i + 1)); sleep 0.05; done`,
         `touch ${JSON.stringify(finishedPath)}`,
       ].join("; ")
-      await commitYrdConfig(
-        repo,
-        `steps: [check, merge]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 30000\n`,
-      )
+      await commitYrdConfig(repo, `checks: [{check: {run: ${JSON.stringify(command)}, timeoutMs: 30000}}]\n`)
       const baseSha = await git(repo, "rev-parse", "main")
 
       await using submitter = await createYrdHost({ cwd: repo })
@@ -3242,7 +3118,7 @@ notify:
     const checkCwd = join(repo, "check-cwd.txt")
     await commitYrdConfig(
       repo,
-      `base: main\nsteps: [check]\ncheck: ${JSON.stringify(`pwd > ${JSON.stringify(checkCwd)}`)}\n`,
+      `base: main\nchecks: [{check: {run: ${JSON.stringify(`pwd > ${JSON.stringify(checkCwd)}`)}}}]\n`,
     )
 
     const wrong = await repository()
@@ -3299,7 +3175,7 @@ notify:
     })
     expect(diff.stderr).toBe("")
 
-    const submitted = await run(["pr", "submit", "--follow", "--repo", relativeRepo, "--json"])
+    const submitted = await run(["pr", "submit", "--repo", relativeRepo, "--json"])
     expect(submitted.exitCode, submitted.stderr).toBe(0)
     expect(JSON.parse(submitted.stdout)).toMatchObject({
       command: "pr.submit",
@@ -3322,9 +3198,8 @@ notify:
     expect(status.stderr).toBe("")
 
     const managedCwd = (await readFile(checkCwd, "utf8")).trim()
-    expect(managedCwd.startsWith(`${join(repo, ".bays")}/`)).toBe(true)
+    expect(managedCwd).toBe(linked)
     expect(managedCwd).not.toBe(ambient)
-    expect(managedCwd).not.toBe(linked)
   })
 
   it("submits and lands one composed source packet through the public CLI", async () => {
@@ -3462,7 +3337,7 @@ notify:
     const command = "printf 'RUN v1\\n'; sleep 30"
     await commitYrdConfig(
       repo,
-      `base: main\nbatch: 1\nsteps: [check, merge]\ncheck:\n  run: ${JSON.stringify(command)}\n  noProgressMs: 400\n  timeoutMs: 30000\n`,
+      `base: main\nbatch: 1\nchecks: [{check: {run: ${JSON.stringify(command)}, noProgressMs: 400, timeoutMs: 30000}}]\n`,
     )
 
     await using host = await createYrdHost({ cwd: repo })
@@ -3487,7 +3362,7 @@ notify:
     const { repo, featureSha } = await repository()
     await commitYrdConfig(
       repo,
-      "steps: [check, merge]\ncheck: printf 'real stdout\\n'; printf 'real stderr\\n' >&2; exit 7\n",
+      "checks: [{check: {run: \"printf 'real stdout\\\\n'; printf 'real stderr\\\\n' >&2; exit 7\"}}]\n",
     )
     const baseSha = await git(repo, "rev-parse", "main")
     const first = await createYrdHost({ cwd: repo })
@@ -3606,7 +3481,7 @@ notify:
 
   it("replays the live PR25 finish-before-later-submit journal shape through bare yrd", async () => {
     const { repo, featureSha } = await repository()
-    await commitYrdConfig(repo, "steps: [check]\ncheck: exit 7\n")
+    await commitYrdConfig(repo, 'checks: [{check: {run: "exit 7"}}]\n')
 
     const host = await createYrdHost({ cwd: repo })
     try {
@@ -3666,7 +3541,6 @@ notify:
     await git(repo, "commit", "-qm", "feature conflict")
     const featureSha = await git(repo, "rev-parse", "HEAD")
     await git(repo, "switch", "-q", "main")
-    await commitYrdConfig(repo, 'steps: [check, merge]\ncheck:\n  run: "true"\n')
 
     const host = await createYrdHost({ cwd: repo })
     try {
@@ -3938,11 +3812,15 @@ describe("step environment declarations — deterministic check children (merge-
   it("parses declared env values and ambient passthrough names", async () => {
     const { parseYrdConfig } = await import("../src/config.ts")
     const config = parseYrdConfig({
-      check: { run: "bun run check", env: { NODE_ENV: "test" }, environmentPassthrough: ["CI"] },
+      checks: [{ check: { run: "bun run check", env: { NODE_ENV: "test" }, environmentPassthrough: ["CI"] } }],
     })
-    expect(config.definitions.check).toMatchObject({
-      env: { NODE_ENV: "test" },
-      environmentPassthrough: ["CI"],
+    expect(config.checks[0]).toEqual({
+      check: {
+        run: "bun run check",
+        runner: "local",
+        env: { NODE_ENV: "test" },
+        environmentPassthrough: ["CI"],
+      },
     })
   })
 
@@ -3955,7 +3833,7 @@ describe("step environment declarations — deterministic check children (merge-
       { run: "x", environmentPassthrough: ["BAD NAME"] },
       { run: "x", environmentPassthrough: ["CI", "CI"] },
     ]) {
-      expect(() => parseYrdConfig({ check: step }), JSON.stringify(step)).toThrow()
+      expect(() => parseYrdConfig({ checks: [{ check: step }] }), JSON.stringify(step)).toThrow()
     }
   })
 
