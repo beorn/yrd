@@ -543,6 +543,11 @@ export type PRAlreadyLandedEvidence = Readonly<{
   candidateSha: string
   candidateTreeSha: string
   baseTreeSha: string
+  settlement?: Readonly<{
+    kind: "refresh-superseded"
+    proof: "payload-already-contained"
+    patchId: string
+  }>
 }>
 
 export type PRRegressionSeverity = "low" | "medium" | "high" | "critical"

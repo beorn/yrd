@@ -41,6 +41,7 @@ function harness(
   const verdict = options.verdict ?? "RECUT"
   let head = HEAD
   let revision = 1
+  let settled = false
   const guard = (op: string, detail?: string): void => {
     calls.push({ op, ...(detail === undefined ? {} : { detail }) })
     if (options.failOn === op) {
@@ -83,6 +84,17 @@ function harness(
             count: options.count ?? 3,
             firstAt: "2026-07-27T15:00:00.000Z",
             lastAt: "2026-07-27T15:51:00.000Z",
+            ...(settled
+              ? {
+                  revision,
+                  headSha: head,
+                  settlement: {
+                    disposition: "needs-person",
+                    reason: "the recut certificate requires human judgment",
+                    settledAt: "2026-07-27T16:00:00.000Z",
+                  },
+                }
+              : {}),
           },
         },
       },
@@ -110,6 +122,10 @@ function harness(
     queue: {
       eligibility: () => ({ checks: { status: verdict === "RECUT-FORCE" ? "passed" : "queued" } }),
       cancel: async () => guard("queue.cancel"),
+      settleAdmissionRefusal: async () => {
+        guard("queue.settleAdmissionRefusal")
+        settled = true
+      },
     },
   } as unknown as YrdCliApp
   const io = {
@@ -251,7 +267,10 @@ describe("resident self-applied refusal remedy — the robot presses the button 
     expect(outcomes).toEqual([
       expect.objectContaining({ status: "escalated", pr: "PR1791", code: "recut-certificate" }),
     ])
-    expect(h.calls).toEqual([])
+    expect(h.ops()).toEqual(["queue.settleAdmissionRefusal"])
+    // A restarted resident has an empty process-local Set. The durable Queue
+    // settlement remains authoritative and must still suppress re-selection.
+    expect(await applyRefusalRemedies(h.app, h.services, h.io, new Set())).toEqual([])
     expect(h.warns).toContainEqual(
       expect.objectContaining({ props: expect.objectContaining({ action: "queue-refusal-escalated" }) }),
     )

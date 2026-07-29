@@ -107,11 +107,16 @@ export type AlreadyLandedSignal = Readonly<{
   revision: number
   headSha: string
   submitter?: string
-  run: string
+  run?: string
   baseSha: string
   candidateSha: string
   candidateTreeSha: string
   baseTreeSha: string
+  settlement?: Readonly<{
+    kind: "refresh-superseded"
+    proof: "payload-already-contained"
+    patchId: string
+  }>
 }>
 
 export type RunFailedSignal = Readonly<{
@@ -854,7 +859,14 @@ function deliveryText(delivery: SignalDelivery, attributedReceipt?: JobError): s
   if (event.kind === "pr/already-landed") {
     return [
       `Yrd found ${event.pr} already landed at ${event.baseSha}; no merge commit was created.`,
-      `run=${event.run}`,
+      ...(event.run === undefined ? [] : [`run=${event.run}`]),
+      ...(event.settlement === undefined
+        ? []
+        : [
+            `settlement=${event.settlement.kind}`,
+            `proof=${event.settlement.proof}`,
+            `patch=${event.settlement.patchId}`,
+          ]),
       `candidate=${event.candidateSha}`,
       `tree=${event.candidateTreeSha}`,
       `event=${event.id}`,

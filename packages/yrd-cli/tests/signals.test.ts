@@ -1223,6 +1223,68 @@ describe("PR signal observer", () => {
     ])
   })
 
+  it("routes a refresh-superseded already-landed receipt without fabricating a Queue run (22528)", async () => {
+    const frame = rejectedFrame("00000000-0000-7000-8000-000000000032")
+    const terminalEvent = frame.events[0]!
+    const baseSha = "b".repeat(40)
+    const treeSha = "d".repeat(40)
+    const patchId = "e".repeat(40)
+    const journal = createMemoryJournal<unknown>([
+      {
+        ...frame,
+        events: [
+          {
+            ...terminalEvent,
+            name: "pr/already-landed",
+            data: {
+              pr: "PR7",
+              revision: 3,
+              headSha: "a".repeat(40),
+              submitter: "@agent/7",
+              baseSha,
+              candidateSha: baseSha,
+              candidateTreeSha: treeSha,
+              baseTreeSha: treeSha,
+              settlement: {
+                kind: "refresh-superseded",
+                proof: "payload-already-contained",
+                patchId,
+              },
+            },
+          },
+        ],
+      },
+    ])
+    const deliveries: SignalDelivery[] = []
+    const observer = createSignalObserver({
+      journal,
+      stateDir: await stateDir(),
+      routes: { "pr/already-landed": ["submitter"] },
+      adapter: recordingAdapter(deliveries, []),
+    })
+
+    observer.start()
+    await observer.close()
+
+    expect(deliveries).toEqual([
+      {
+        recipient: "@agent/7",
+        event: expect.objectContaining({
+          kind: "pr/already-landed",
+          pr: "PR7",
+          baseSha,
+          candidateSha: baseSha,
+          settlement: {
+            kind: "refresh-superseded",
+            proof: "payload-already-contained",
+            patchId,
+          },
+        }),
+      },
+    ])
+    expect(deliveries[0]?.event).not.toHaveProperty("run")
+  })
+
   it("does not record an evidence-only rejection as an opened request ball", async () => {
     const dir = await stateDir()
     const rejected = rejectedFrame("00000000-0000-7000-8000-000000000045")

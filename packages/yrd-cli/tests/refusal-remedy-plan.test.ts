@@ -104,6 +104,20 @@ describe("refusal remedy plan — the runner acts on exactly the PRs the queue c
     expect(plans[0]?.remedy.kind).toBe("judgment")
   })
 
+  it("does not re-plan a durably settled refusal after process restart (22528)", () => {
+    const settled = refusal("PR9", {
+      revision: 1,
+      headSha: HEAD,
+      settlement: {
+        disposition: "needs-person",
+        reason: "the recut certificate requires human judgment",
+        settledAt: "2026-07-27T16:00:00.000Z",
+      },
+    })
+
+    expect(planRefusalRemedies({ PR9: settled }, { PR9: pr("PR9") }, new Set())).toEqual([])
+  })
+
   it("names nothing for a streak whose PR the state no longer holds", () => {
     expect(planRefusalRemedies({ PR404: refusal("PR404") }, {}, new Set())).toEqual([])
   })

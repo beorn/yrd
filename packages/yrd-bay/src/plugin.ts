@@ -276,6 +276,17 @@ const PrRecutArgsSchema = z
   })
   .strict()
 export type PrRecutArgs = z.infer<typeof PrRecutArgsSchema>
+const PrSettleSupersededArgsSchema = z
+  .object({
+    pr: TextSchema,
+    revision: RevisionSchema,
+    headSha: GitShaSchema,
+    baseSha: GitShaSchema,
+    baseTreeSha: GitShaSchema,
+    patchId: GitShaSchema,
+  })
+  .strict()
+export type PrSettleSupersededArgs = z.infer<typeof PrSettleSupersededArgsSchema>
 const PrRequestChecksArgsSchema = z.object({ pr: TextSchema, baseSha: GitShaSchema.optional() }).strict()
 export type PrRequestChecksArgs = z.infer<typeof PrRequestChecksArgsSchema>
 const PrRequestReviewArgsSchema = z
@@ -434,9 +445,18 @@ const PRIntegratedSchema = z.preprocess(
       path: ["landingSha"],
     }),
 )
+const PRAlreadyLandedSettlementSchema = z
+  .object({
+    kind: z.literal("refresh-superseded"),
+    proof: z.literal("payload-already-contained"),
+    patchId: GitShaSchema,
+  })
+  .strict()
 export const PRAlreadyLandedSchema = z.preprocess(
   normalizeV2Submitter,
-  PRQueueTerminalIdentitySchema.extend({
+  PRTerminalIdentitySchema.extend({
+    run: TextSchema.optional(),
+    settlement: PRAlreadyLandedSettlementSchema.optional(),
     baseSha: GitShaSchema,
     candidateSha: GitShaSchema,
     candidateTreeSha: GitShaSchema,
@@ -445,6 +465,10 @@ export const PRAlreadyLandedSchema = z.preprocess(
     submitter: TextSchema.optional(),
   })
     .strict()
+    .refine(({ run, settlement }) => (run === undefined) !== (settlement === undefined), {
+      message: "exactly one of run or settlement is required",
+      path: ["run"],
+    })
     .refine(({ candidateTreeSha, baseTreeSha }) => candidateTreeSha === baseTreeSha, {
       message: "candidateTreeSha must equal baseTreeSha",
       path: ["candidateTreeSha"],
@@ -606,6 +630,7 @@ export type BayCommands = Readonly<{
     close: CommandHandler<PrCloseArgs, BayState>
     edit: CommandHandler<PrEditArgs, BayState>
     recut: CommandHandler<PrRecutArgs, BayState>
+    settleSuperseded: CommandHandler<PrSettleSupersededArgs, BayState>
     ready: CommandHandler<PrReadyArgs, BayState>
     review: CommandHandler<PrReviewArgs, BayState>
     comment: CommandHandler<PrCommentArgs, BayState>
@@ -640,6 +665,7 @@ export type Bays = Readonly<{
   closePr(args: PrCloseArgs): Promise<CommandResult>
   editPr(args: PrEditArgs): Promise<CommandResult>
   recut(args: PrRecutArgs): Promise<CommandResult>
+  settleSuperseded(args: PrSettleSupersededArgs): Promise<CommandResult>
   ready(args: PrReadyArgs): Promise<CommandResult>
   review(args: PrReviewArgs): Promise<CommandResult>
   comment(args: PrCommentArgs): Promise<CommandResult>
@@ -666,6 +692,7 @@ type BayActions = Pick<
   | "closePr"
   | "editPr"
   | "recut"
+  | "settleSuperseded"
   | "ready"
   | "review"
   | "comment"
@@ -1187,6 +1214,7 @@ export function createBays(
     closePr: actions.closePr,
     editPr: actions.editPr,
     recut: actions.recut,
+    settleSuperseded: actions.settleSuperseded,
     ready: actions.ready,
     review: actions.review,
     comment: actions.comment,
@@ -1255,7 +1283,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/canceled": z.union([PRCanceledSchema, LegacyPRCanceledSchema]),
         "pr/admission-recorded": PRAdmissionRecordedFactSchema,
       },
-      projectionVersion: "bays-v9-revision-admission",
+      projectionVersion: "bays-v10-refresh-superseded",
       project: projectBays,
       create(yrd) {
         yrd.jobs.requireDefinitions(options.jobs)
@@ -1276,6 +1304,7 @@ export function withBays(options: WithBaysOptions) {
               closePr: (args) => yrd.dispatch(commands.pr.close, args),
               editPr: (args) => yrd.dispatch(commands.pr.edit, args),
               recut: (args) => yrd.dispatch(commands.pr.recut, args),
+              settleSuperseded: (args) => yrd.dispatch(commands.pr.settleSuperseded, args),
               ready: (args) => yrd.dispatch(commands.pr.ready, args),
               review: (args) => yrd.dispatch(commands.pr.review, args),
               comment: (args) => yrd.dispatch(commands.pr.comment, args),
@@ -1382,6 +1411,11 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultSubmitt
         visibility: "public",
         params: PrRecutArgsSchema,
         apply: (state: BayState, args: PrRecutArgs) => recutPr(state, args, defaultSubmitter),
+      }),
+      settleSuperseded: command({
+        title: "Settle a queued PR whose payload current main already contains",
+        params: PrSettleSupersededArgsSchema,
+        apply: (state: BayState, args: PrSettleSupersededArgs) => settleSupersededPr(state, args),
       }),
       ready: command({
         title: "Mark a PR ready",
@@ -1893,6 +1927,55 @@ function readyPr(state: DeepReadonly<BayState>, args: PrReadyArgs, defaultSubmit
   const pr: LivePR = requireLivePR(state.bays, args.pr)
   if (prDeliveryState(pr) === "submitted" || prDeliveryState(pr) === "ready") return { events: [] }
   return submitWork(state, args, "main", defaultSubmitter)
+}
+
+function settleSupersededPr(state: DeepReadonly<BayState>, args: PrSettleSupersededArgs) {
+  const pr: LivePR = requireLivePR(state.bays, args.pr)
+  const current = currentPRRev(pr)
+  if (current.n !== args.revision || current.head !== args.headSha) {
+    raiseFailure(
+      "refusal",
+      "recut-current-changed",
+      `yrd: PR '${pr.id}' current revision changed from ${args.revision}@${args.headSha} ` +
+        `to ${current.n}@${current.head} while the refresh proof was computed`,
+    )
+  }
+  const delivery = prDeliveryState(pr)
+  if ((delivery !== "submitted" && delivery !== "ready") || !checksRequested(pr)) {
+    raiseFailure(
+      "refusal",
+      "recut-transition-not-admitted",
+      `yrd: PR '${pr.id}' revision ${current.n} is not the admitted revision selected for refresh`,
+    )
+  }
+  if (current.recut !== undefined && current.recut.patchId !== args.patchId) {
+    raiseFailure(
+      "refusal",
+      "recut-patch-drift",
+      `yrd: PR '${pr.id}' automatic refresh changed patch identity from ${current.recut.patchId} to ${args.patchId}`,
+    )
+  }
+  return {
+    events: [
+      event("pr/already-landed", {
+        pr: pr.id,
+        revision: current.n,
+        headSha: current.head,
+        ...(pr.issue === undefined ? {} : { issueRef: pr.issue }),
+        ...(prCorrelation(pr) === undefined ? {} : { correlation: prCorrelation(pr) }),
+        ...(current.submitter === undefined ? {} : { submitter: current.submitter }),
+        baseSha: args.baseSha,
+        candidateSha: args.baseSha,
+        candidateTreeSha: args.baseTreeSha,
+        baseTreeSha: args.baseTreeSha,
+        settlement: {
+          kind: "refresh-superseded",
+          proof: "payload-already-contained",
+          patchId: args.patchId,
+        },
+      }),
+    ],
+  }
 }
 
 function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmitter: string) {
@@ -2747,9 +2830,14 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
           candidateSha: changed.candidateSha,
           candidateTreeSha: changed.candidateTreeSha,
           baseTreeSha: changed.baseTreeSha,
+          ...(changed.settlement === undefined ? {} : { settlement: changed.settlement }),
         },
         revs: patchRevisionClock(pr, {
-          terminal: { kind: "already-landed", at: applied.ts, run: changed.run },
+          terminal: {
+            kind: "already-landed",
+            at: applied.ts,
+            ...(changed.run === undefined ? {} : { run: changed.run }),
+          },
         }),
       })
     }

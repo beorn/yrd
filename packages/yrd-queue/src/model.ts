@@ -490,6 +490,10 @@ export const QueuePauseSchema = z
  */
 export type QueueAdmissionRefusal = Readonly<{
   pr: PRId
+  /** Exact refused revision. Missing only while replaying pre-22528 journals. */
+  revision?: number
+  /** Exact refused head. Missing only while replaying pre-22528 journals. */
+  headSha?: string
   /** The refusal code of the most recent skip in this streak. */
   code: string
   /** The failure-fact kind of the most recent skip, when it carried one. */
@@ -502,6 +506,13 @@ export type QueueAdmissionRefusal = Readonly<{
   firstAt: string
   /** Journal timestamp of the most recent refusal in this streak. */
   lastAt: string
+  /** Durable terminal disposition for this exact revision. A new push/recut
+   * clears the whole refusal entry and therefore re-arms admission. */
+  settlement?: Readonly<{
+    disposition: "needs-person"
+    reason: string
+    settledAt: string
+  }>
 }>
 
 export type QueuesState = Readonly<{

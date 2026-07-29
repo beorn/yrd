@@ -238,4 +238,65 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(app.state().queues.admissionRefusals).toEqual({})
     expect(app.queue.audit().findings).toEqual([])
   })
+
+  it("settles a needs-person refusal for one exact revision and preserves that bound across replay (22528)", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    const journal = createMemoryJournal()
+    const id = ids()
+    let blocked = ""
+    let preparations = 0
+    const refusing = refuseForever(() => blocked)
+    const prepare: CandidatePreparer = (input) => {
+      preparations += 1
+      return refusing(input)
+    }
+    {
+      await using app = await createApp(prepare, clock.read, journal, id)
+      const pr = await submitAndRequestChecks(app, "issue/needs-person")
+      blocked = pr.id
+      for (const at of ["2026-01-01T00:00:00.000Z", "2026-01-01T00:05:00.000Z", "2026-01-01T00:10:00.000Z"]) {
+        clock.set(at)
+        await app.queue.run({}, runtime)
+      }
+      const current = app.bays.pr(pr.id)!.revs.at(-1)!
+      await app.queue.settleAdmissionRefusal({
+        pr: pr.id,
+        revision: current.n,
+        headSha: current.head,
+        disposition: "needs-person",
+        reason: "the recut certificate requires human judgment",
+      })
+      expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({
+        pr: pr.id,
+        revision: current.n,
+        headSha: current.head,
+        settlement: {
+          disposition: "needs-person",
+          reason: "the recut certificate requires human judgment",
+        },
+      })
+    }
+
+    const beforeReplay = await Array.fromAsync(journal.read()).then((events) => events.length)
+    await using replayed = await createApp(prepare, clock.read, journal, id)
+    await expect(replayed.queue.run({}, runtime)).resolves.toEqual([])
+    expect(preparations).toBe(3)
+    expect(await Array.fromAsync(journal.read()).then((events) => events.length)).toBe(beforeReplay)
+
+    // A genuinely new revision is new evidence: the durable settlement applies
+    // only to the exact revision/head it named and must not suppress a new push.
+    const nextHead = "2".repeat(40)
+    await replayed.bays.intake({
+      branch: "issue/needs-person",
+      headSha: nextHead,
+      base: "main",
+      baseSha: BASE,
+    })
+    await replayed.bays.ready({ pr: "PR1" })
+    await replayed.bays.requestChecks({ pr: "PR1", baseSha: BASE })
+    blocked = ""
+    await replayed.queue.run({}, runtime)
+    expect(replayed.queue.eligibility("PR1")).toMatchObject({ checks: { status: "passed" } })
+    expect(replayed.state().queues.admissionRefusals).toEqual({})
+  })
 })

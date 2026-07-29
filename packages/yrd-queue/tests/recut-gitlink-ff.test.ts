@@ -543,6 +543,42 @@ describe("recut fast-forward gitlink resolution", () => {
     },
   )
 
+  it("proves a duplicate gitlink-only carrier is fully contained by current main (22528)", async () => {
+    const { repo, module, moduleA, sourceBase } = await baseRepo()
+    const moduleB = await moduleCommit(module, "main", moduleA, "b")
+    await git(join(repo, "dep"), ["fetch", "-q", "origin", "main"])
+
+    await git(repo, ["switch", "-qc", "issue/feature", sourceBase])
+    await git(repo, ["update-index", "--cacheinfo", `160000,${moduleB},dep`])
+    await git(repo, ["commit", "-qm", "carrier: bump dep to b"])
+    const headSha = await git(repo, ["rev-parse", "HEAD"])
+
+    // Land carrier B independently before refreshing carrier A. The refreshed
+    // branch has no residual payload: its exact gitlink pin is already main.
+    await git(repo, ["switch", "-q", "main"])
+    await git(repo, ["cherry-pick", headSha])
+    const target = await git(repo, ["rev-parse", "HEAD"])
+    await using process = createProcess()
+    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      id: "PR1",
+      branch: "issue/feature",
+      base: "main",
+      revision: 1,
+      headSha,
+      baseSha: sourceBase,
+    })
+
+    expect(result).toMatchObject({
+      headSha: target,
+      baseSha: target,
+      treeSha: await git(repo, ["rev-parse", `${target}^{tree}`]),
+      patchId: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      unchanged: false,
+    })
+    expect(await gitlinkAt(repo, result.headSha)).toBe(moduleB)
+    expect(await git(repo, ["diff", "--name-only", target, result.headSha])).toBe("")
+  })
+
   it("ignores transient absorbed-pin history when the final pin is authoritative", async () => {
     const { repo, module, moduleA, sourceBase } = await baseRepo()
     const moduleB = await moduleCommit(module, "main", moduleA, "b")

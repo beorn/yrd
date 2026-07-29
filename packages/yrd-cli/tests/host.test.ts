@@ -668,6 +668,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       "close",
       "edit",
       "recut",
+      "settleSuperseded",
       "ready",
       "review",
       "comment",

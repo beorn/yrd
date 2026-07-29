@@ -210,8 +210,7 @@ export function foldRefusalStall(
   const signature = stallSignature(observation)
   const counts = Object.fromEntries(observation.refusals.map((refusal) => [refusal.pr, refusal.count]))
   const advanced =
-    previous !== undefined &&
-    previous.signature === signature &&
+    previous?.signature === signature &&
     observation.refusals.every((refusal) => refusal.count > (previous.counts[refusal.pr] ?? Number.POSITIVE_INFINITY))
   return Object.freeze({ signature, counts: Object.freeze(counts), cycles: advanced ? previous.cycles + 1 : 1 })
 }
@@ -233,7 +232,7 @@ export function planRefusalRemedies(
 ): readonly RefusalRemedyPlan[] {
   const plans: RefusalRemedyPlan[] = []
   for (const refusal of Object.values(refusals).toSorted((left, right) => compareNatural(left.pr, right.pr))) {
-    if (refusal.count < ADMISSION_REFUSAL_LOOP_THRESHOLD) continue
+    if (refusal.settlement !== undefined || refusal.count < ADMISSION_REFUSAL_LOOP_THRESHOLD) continue
     const pr = prs[refusal.pr]
     // The ledger is retained past its PR (compaction drops streaks for PRs the
     // state no longer holds); a streak with no PR names nothing to remedy.

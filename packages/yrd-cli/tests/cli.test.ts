@@ -2362,6 +2362,95 @@ describe("runYrd", () => {
     })
   })
 
+  it("settles an admitted revision whose payload current main already contains, then drains the next PR (22528)", async () => {
+    const absorbedHead = "2".repeat(40)
+    const nextHead = "3".repeat(40)
+    const nextBase = "b".repeat(40)
+    const baseTree = "c".repeat(40)
+    const patchId = "d".repeat(40)
+    const recutInputs: unknown[] = []
+    const app = await createApp()
+    const services = {
+      recut: {
+        recut(input: unknown) {
+          recutInputs.push(input)
+          return Promise.resolve({
+            // The recutter has proven that the resolved Queue base already
+            // contains every authored path. Nothing remains to admit or merge.
+            headSha: nextBase,
+            baseSha: nextBase,
+            treeSha: baseTree,
+            patchId,
+            unchanged: false,
+          })
+        },
+      },
+    } as unknown as YrdCliServices
+    const refresh = runInternals.refreshAdmittedQueueRevisions
+    const io = outputIO({ resolveQueueTarget: async () => ({ base: "main", sha: nextBase }) }).io
+
+    await app.bays.submit({ branch: "issue/absorbed", headSha: HEAD_SHA, baseSha: BASE_SHA, draft: true })
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: absorbedHead,
+      baseSha: BASE_SHA,
+      treeSha: "e".repeat(40),
+      patchId,
+      reviewCarried: false,
+    })
+    await app.bays.ready({ pr: "PR1" })
+    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
+
+    const before = await Array.fromAsync(app.events()).then((events) => events.length)
+    await expect(refresh(app, services, io)).resolves.toEqual([
+      expect.objectContaining({ status: "settled", pr: "PR1", proof: "payload-already-contained" }),
+    ])
+
+    expect(recutInputs).toHaveLength(1)
+    expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("already-landed")
+    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: absorbedHead })
+    await expect(runInternals.observeManagedDoDelivery(app, "PR1")).resolves.toEqual({
+      state: "already-landed",
+      landingSha: nextBase,
+      findings: [],
+    })
+    const appended = (await Array.fromAsync(app.events())).slice(before)
+    expect(appended.filter(({ name }) => name === "pr/already-landed")).toEqual([
+      expect.objectContaining({
+        data: expect.objectContaining({
+          pr: "PR1",
+          revision: 2,
+          headSha: absorbedHead,
+          baseSha: nextBase,
+          candidateSha: nextBase,
+          candidateTreeSha: baseTree,
+          baseTreeSha: baseTree,
+          settlement: {
+            kind: "refresh-superseded",
+            proof: "payload-already-contained",
+            patchId,
+          },
+        }),
+      }),
+    ])
+
+    const afterSettlement = await Array.fromAsync(app.events()).then((events) => events.length)
+    await expect(refresh(app, services, io)).resolves.toEqual([])
+    expect(recutInputs).toHaveLength(1)
+    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(afterSettlement)
+
+    // A fresh PR proves that terminal settlement releases the selector instead
+    // of merely hiding PR1 for one resident tick. The in-memory app's canonical
+    // base resolver is intentionally fixed at BASE_SHA, independent of the
+    // refresh seam's injected next-base oracle above.
+    await app.bays.submit({ branch: "issue/next", headSha: nextHead, baseSha: BASE_SHA })
+    await app.bays.requestChecks({ pr: "PR2", baseSha: BASE_SHA })
+    const runs = await app.queue.run({}, { runner: "yrd-cli", leaseMs: 60_000 })
+    expect(runs).toMatchObject([{ prs: [{ id: "PR2", revision: 1, headSha: nextHead }] }])
+    expect(prDeliveryState(app.bays.pr("PR2")!)).toBe("integrated")
+  })
+
   it("runs admitted-to-refreshed as a resident pre-run transition", async () => {
     const nextBase = "b".repeat(40)
     const nextHead = "3".repeat(40)

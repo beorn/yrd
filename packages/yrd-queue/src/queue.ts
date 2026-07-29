@@ -265,6 +265,26 @@ const AdmissionRefusedSchema = z
   })
   .strict()
 type AdmissionRefusedArgs = Readonly<z.infer<typeof AdmissionRefusedSchema>>
+const AdmissionRefusedFactSchema = AdmissionRefusedSchema.extend({
+  /** Optional only for replaying facts written before exact-revision refusal
+   * identity was introduced by 22528. New commands always populate both. */
+  revision: z.number().int().positive().optional(),
+  headSha: GitShaSchema.optional(),
+})
+  .strict()
+  .refine((fact) => (fact.revision === undefined) === (fact.headSha === undefined), {
+    message: "revision and headSha must be provided together",
+  })
+const SettleAdmissionRefusalSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: z.number().int().positive(),
+    headSha: GitShaSchema,
+    disposition: z.literal("needs-person"),
+    reason: z.string().trim().min(1),
+  })
+  .strict()
+export type SettleAdmissionRefusalArgs = Readonly<z.infer<typeof SettleAdmissionRefusalSchema>>
 /** Consecutive refusals before `queue audit` calls a PR wedged. One skip is a
  * normal losable race in a selectorless drain; a third identical cycle is not.
  *
@@ -516,6 +536,7 @@ export type QueueCommands = Readonly<{
     settleOrphanedRun: CommandHandler<SettleOrphanedRunArgs, RuntimeState>
     associateTerminals: CommandHandler<AssociateTerminalsArgs, RuntimeState>
     admissionRefused: CommandHandler<AdmissionRefusedArgs, RuntimeState>
+    settleAdmissionRefusal: CommandHandler<SettleAdmissionRefusalArgs, RuntimeState>
   }>
 }>
 
@@ -599,6 +620,9 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   terminalAssociationPlan(): TerminalAssociationPlan
   migrateTerminalAssociations(): Promise<TerminalAssociationPlan>
   quiesceLegacyRoots(options: QuiesceLegacyRootsOptions): Promise<QuiesceLegacyRootsReceipt>
+  /** Stop selecting one exact refused revision after its automated remedy has
+   * reached a durable needs-person outcome. A new revision clears the fact. */
+  settleAdmissionRefusal(args: SettleAdmissionRefusalArgs): Promise<void>
   get(run: RunId): Run | undefined
   retentionDiagnostics(): Readonly<{
     retainedRuns: number
@@ -686,7 +710,8 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/paused": journalEvent(1, PauseQueueArgsSchema),
         "queue/resumed": journalEvent(1, ResumeQueueArgsSchema),
         "queue/batch/isolated": journalEvent(1, BatchIsolatedSchema),
-        "queue/admission/refused": journalEvent(1, AdmissionRefusedSchema),
+        "queue/admission/refused": journalEvent(1, AdmissionRefusedFactSchema),
+        "queue/admission/settled": journalEvent(1, SettleAdmissionRefusalSchema),
       },
       replayEvents: {
         "queue/candidate/created": CandidateCreatedSchema,
@@ -695,7 +720,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/run/canceled": QueueRunCanceledFactSchema,
         "queue/run/settled": SettledEventSchema,
       },
-      projectionVersion: "queues-v7-admission-refusals",
+      projectionVersion: "queues-v8-admission-settlement",
       project: projectQueues,
       compact: (state, complete) => {
         const runtime = complete as unknown as DeepReadonly<RuntimeState>
@@ -741,6 +766,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               settleOrphanedRun: (args) => yrd.dispatch(commands.queue.settleOrphanedRun, args),
               associateTerminals: (args) => yrd.dispatch(commands.queue.associateTerminals, args),
               admissionRefused: (args) => yrd.dispatch(commands.queue.admissionRefused, args),
+              settleAdmissionRefusal: (args) => yrd.dispatch(commands.queue.settleAdmissionRefusal, args),
               recordAdmission: (args) => yrd.bays.recordAdmission(args),
               requestChecks: (pr, baseSha) =>
                 yrd.bays.requestChecks({ pr, ...(baseSha === undefined ? {} : { baseSha }) }),
@@ -779,6 +805,7 @@ type QueueActions = Readonly<{
   settleOrphanedRun(args: SettleOrphanedRunArgs): Promise<CommandResult>
   associateTerminals(args: AssociateTerminalsArgs): Promise<CommandResult>
   admissionRefused(args: AdmissionRefusedArgs): Promise<CommandResult>
+  settleAdmissionRefusal(args: SettleAdmissionRefusalArgs): Promise<CommandResult>
   recordAdmission(args: PRAdmissionRecordedFact): Promise<CommandResult>
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
 }>
@@ -1467,7 +1494,7 @@ function createQueue<Shape extends PRShape>(
       )
       return
     }
-    const executor =
+    const admissionRunner =
       configuredRunner ??
       localRunner({
         id: runOptions.runner,
@@ -1489,7 +1516,7 @@ function createQueue<Shape extends PRShape>(
       const key = admissionJobKey(snapshot, baseSha, index)
       const jobId = jobs.requested(requested)[0] ?? jobs.getByKey(key)?.id
       if (jobId === undefined) throw new Error(`yrd: admission step '${step.name}' did not request a Job`)
-      const job = await executor.submit({
+      const job = await admissionRunner.submit({
         job: jobId,
         context:
           configuredRunner === undefined
@@ -1811,6 +1838,9 @@ function createQueue<Shape extends PRShape>(
     },
     async resume(base) {
       await actions.resume(queueBase(runtime(), base))
+    },
+    async settleAdmissionRefusal(args) {
+      await actions.settleAdmissionRefusal(args)
     },
     waitingAdmission(selector, step) {
       return waitingRevisionAdmission(selector, step)
@@ -3175,10 +3205,55 @@ function createQueueCommands(
     apply(state: DeepReadonly<RuntimeState>, args: AdmissionRefusedArgs) {
       // Fail loud on an unattributable refusal: the ledger's whole job is to name
       // the wedged PR, so a phantom id must never become a phantom finding.
-      if (state.bays.prs[args.pr] === undefined) {
-        raiseFailure("refusal", "pr-not-found", `yrd: no PR '${args.pr}'`)
+      const pr = state.bays.prs[args.pr]
+      if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${args.pr}'`)
+      const revision = currentPRRev(pr)
+      return {
+        events: [
+          event("queue/admission/refused", {
+            ...args,
+            revision: revision.n,
+            headSha: revision.head,
+          }),
+        ],
       }
-      return { events: [event("queue/admission/refused", args)] }
+    },
+  })
+
+  const settleAdmissionRefusal = command({
+    title: "Settle one exact admission refusal as needing a person",
+    params: SettleAdmissionRefusalSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: SettleAdmissionRefusalArgs) {
+      const pr = state.bays.prs[args.pr]
+      if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${args.pr}'`)
+      const current = currentPRRev(pr)
+      if (current.n !== args.revision || current.head !== args.headSha) {
+        raiseFailure(
+          "refusal",
+          "stale-pr",
+          `yrd: refusal settlement targets stale revision ${args.revision} (${args.headSha}) of PR '${args.pr}'`,
+        )
+      }
+      const refusal = state.queues.admissionRefusals[args.pr]
+      if (refusal === undefined) {
+        raiseFailure("refusal", "admission-refusal-missing", `yrd: PR '${args.pr}' has no admission refusal to settle`)
+      }
+      if (refusal.revision !== undefined && (refusal.revision !== args.revision || refusal.headSha !== args.headSha)) {
+        raiseFailure(
+          "refusal",
+          "admission-refusal-stale",
+          `yrd: PR '${args.pr}' refusal belongs to revision ${refusal.revision} (${refusal.headSha})`,
+        )
+      }
+      if (
+        refusal.settlement?.disposition === args.disposition &&
+        refusal.settlement.reason === args.reason &&
+        refusal.revision === args.revision &&
+        refusal.headSha === args.headSha
+      ) {
+        return { events: [] }
+      }
+      return { events: [event("queue/admission/settled", args)] }
     },
   })
 
@@ -3198,6 +3273,7 @@ function createQueueCommands(
       settleOrphanedRun,
       associateTerminals,
       admissionRefused,
+      settleAdmissionRefusal,
     },
   }
 }
@@ -4019,8 +4095,13 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     return { queues: record.parent === undefined ? markQueueTerminalRoot(queues, record.id) : queues }
   }
   if (applied.name === "queue/admission/refused") {
-    const refusal = AdmissionRefusedSchema.parse(applied.data)
+    const refusal = AdmissionRefusedFactSchema.parse(applied.data)
     const streak = state.queues.admissionRefusals[refusal.pr]
+    const sameRevision =
+      refusal.revision === undefined ||
+      streak?.revision === undefined ||
+      (streak.revision === refusal.revision && streak.headSha === refusal.headSha)
+    const prior = sameRevision ? streak : undefined
     return {
       queues: {
         ...state.queues,
@@ -4028,15 +4109,52 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
           ...state.queues.admissionRefusals,
           [refusal.pr]: {
             pr: refusal.pr,
+            ...(refusal.revision === undefined
+              ? prior?.revision === undefined
+                ? {}
+                : { revision: prior.revision, headSha: prior.headSha }
+              : { revision: refusal.revision, headSha: refusal.headSha }),
             code: refusal.code,
             ...(refusal.kind === undefined ? {} : { kind: refusal.kind }),
             reason: refusal.reason,
             // The streak counts cycles, not codes: a wedge that flaps between
             // refusal codes is still one PR that never got in. The latest code
             // is what an operator needs to act on.
-            count: (streak?.count ?? 0) + 1,
-            firstAt: streak?.firstAt ?? applied.ts,
+            count: (prior?.count ?? 0) + 1,
+            firstAt: prior?.firstAt ?? applied.ts,
             lastAt: applied.ts,
+            ...(prior?.settlement === undefined ? {} : { settlement: prior.settlement }),
+          },
+        },
+      },
+    }
+  }
+  if (applied.name === "queue/admission/settled") {
+    const settlement = SettleAdmissionRefusalSchema.parse(applied.data)
+    const refusal = state.queues.admissionRefusals[settlement.pr]
+    if (refusal === undefined) {
+      throw new Error(`yrd: refusal settlement names PR '${settlement.pr}' without a refusal`)
+    }
+    if (
+      refusal.revision !== undefined &&
+      (refusal.revision !== settlement.revision || refusal.headSha !== settlement.headSha)
+    ) {
+      throw new Error(`yrd: refusal settlement for PR '${settlement.pr}' does not match its refused revision`)
+    }
+    return {
+      queues: {
+        ...state.queues,
+        admissionRefusals: {
+          ...state.queues.admissionRefusals,
+          [settlement.pr]: {
+            ...refusal,
+            revision: settlement.revision,
+            headSha: settlement.headSha,
+            settlement: {
+              disposition: settlement.disposition,
+              reason: settlement.reason,
+              settledAt: applied.ts,
+            },
           },
         },
       },
@@ -5094,7 +5212,7 @@ function auditQueues(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeS
   for (const refusal of Object.values(state.queues.admissionRefusals).toSorted((left, right) =>
     compareNatural(left.pr, right.pr),
   )) {
-    if (refusal.count < ADMISSION_REFUSAL_LOOP_THRESHOLD) continue
+    if (refusal.settlement !== undefined || refusal.count < ADMISSION_REFUSAL_LOOP_THRESHOLD) continue
     const blockedMs = Math.max(0, Date.parse(refusal.lastAt) - Date.parse(refusal.firstAt))
     const position = head?.id === refusal.pr ? " at the head of the admission queue" : ""
     findings.push({
@@ -5359,6 +5477,12 @@ function admissionQueue(
     .filter((pr) => prDeliveryState(pr) === "pushed" || prDeliveryState(pr) === "submitted")
     .filter((pr) => blockingQueuePause(state, pr) === undefined)
     .filter((pr) => checksRequested(pr))
+    .filter((pr) => {
+      const refusal = state.queues.admissionRefusals[pr.id]
+      if (refusal?.settlement === undefined) return true
+      const revision = currentPRRev(pr)
+      return refusal.revision !== revision.n || refusal.headSha !== revision.head
+    })
     .filter((pr) => {
       const snapshot = Queues.snapshot(pr)
       const run = admissionRun(state, snapshot, selected)

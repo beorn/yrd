@@ -3403,6 +3403,36 @@ async function executeRecutPr(
           },
         }),
   })
+  if (options.transition !== undefined && result.headSha === result.baseSha) {
+    await app.bays.settleSuperseded({
+      pr: pr.id,
+      revision: currentRevision.n,
+      headSha: currentRevision.head,
+      baseSha: result.baseSha,
+      baseTreeSha: result.treeSha,
+      patchId: result.patchId,
+    })
+    const current = requiredPr(app, pr.id)
+    return {
+      current,
+      output: {
+        pr: current.id,
+        revision: prRevisionNumber(current),
+        baseSha: result.baseSha,
+        treeSha: result.treeSha,
+        patchId: result.patchId,
+        reviewCarried: approval !== undefined,
+        ...(prCorrelation(current) === undefined ? {} : { correlation: prCorrelation(current) }),
+        sourceReadyAt: prSourceReadyAt(current),
+        lineage: prRevisionLineage(current).map((revision) => revision.n),
+        unchanged: false,
+        settlement: "payload-already-contained" as const,
+      },
+      result,
+      unchanged: false,
+      settlement: "payload-already-contained" as const,
+    }
+  }
   const sources =
     result.unchanged && currentRevision.recut?.sources !== undefined
       ? currentRevision.recut.sources
@@ -3471,7 +3501,7 @@ async function executeRecutPr(
     lineage: prRevisionLineage(current).map((revision) => revision.n),
     unchanged,
   }
-  return { current, output, result, unchanged }
+  return { current, output, result, unchanged, settlement: undefined }
 }
 
 async function reviewPr(
@@ -3979,18 +4009,20 @@ type PRLandingOutcome =
       candidateTreeSha: string
       baseTreeSha: string
       at: string
-      run: string
+      run?: string
     }>
   | Readonly<{ outcome: "not-landed"; status: Exclude<PRDeliveryState, "integrated" | "already-landed"> }>
 
 function prLandingOutcome(pr: DeepReadonly<PR>): PRLandingOutcome {
   const delivery = prDeliveryState(pr)
   if (delivery === "already-landed") {
+    const hasRunProof = pr.terminalRun !== undefined
+    const hasRefreshProof = pr.alreadyLanded?.settlement !== undefined
     if (
       pr.integration === undefined ||
       pr.alreadyLanded === undefined ||
       pr.alreadyLandedAt === undefined ||
-      pr.terminalRun === undefined
+      hasRunProof === hasRefreshProof
     ) {
       refusal(`already-landed PR '${pr.id}' is missing canonical equivalence proof`)
     }
@@ -4002,7 +4034,7 @@ function prLandingOutcome(pr: DeepReadonly<PR>): PRLandingOutcome {
       candidateTreeSha: pr.alreadyLanded.candidateTreeSha,
       baseTreeSha: pr.alreadyLanded.baseTreeSha,
       at: pr.alreadyLandedAt,
-      run: pr.terminalRun,
+      ...(pr.terminalRun === undefined ? {} : { run: pr.terminalRun }),
     }
   }
   if (delivery !== "integrated") return { outcome: "not-landed", status: delivery }
@@ -6266,6 +6298,15 @@ function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefine
 
 type ResidentQueueFreshnessTransition =
   | Readonly<{
+      status: "settled"
+      pr: string
+      revision: number
+      fromBase: string | undefined
+      toBase: string
+      proof: "payload-already-contained"
+      patchId: string
+    }>
+  | Readonly<{
       status: "refreshed"
       pr: string
       revision: number
@@ -6389,6 +6430,27 @@ export async function refreshAdmittedQueueRevisions(
         io,
       )
       const refreshedRevision = currentPRRev(recut.current)
+      if (recut.settlement === "payload-already-contained") {
+        outcomes.push({
+          status: "settled",
+          pr: recut.current.id,
+          revision: refreshedRevision.n,
+          fromBase: candidateRevision.baseSha,
+          toBase: recut.result.baseSha,
+          proof: recut.settlement,
+          patchId: recut.result.patchId,
+        })
+        app.log.info?.("Settled a queued PR whose payload current main already contains.", {
+          action: "queue-freshness-superseded",
+          pr: recut.current.id,
+          revision: refreshedRevision.n,
+          fromBase: candidateRevision.baseSha,
+          toBase: recut.result.baseSha,
+          proof: recut.settlement,
+          patchId: recut.result.patchId,
+        })
+        continue
+      }
       outcomes.push({
         status: "refreshed",
         pr: recut.current.id,
@@ -6622,7 +6684,30 @@ export async function applyRefusalRemedies(
     const projected = actionableFailure(plan.failure, {
       delivery: prDeliveryState(requiredPr(app, plan.pr)),
     })
+    const settleNeedsPerson = async (reason: string): Promise<void> => {
+      const current = app.bays.pr(plan.pr)
+      const refusal = stateOf(app).queues.admissionRefusals[plan.pr]
+      if (current === undefined || refusal === undefined) return
+      const revision = currentPRRev(current)
+      // A mechanical redelivery may already have minted a new revision and
+      // cleared the old refusal. That revision is fresh evidence and must stay
+      // eligible; settle only the exact revision this refusal still names.
+      if (
+        (refusal.revision !== undefined && refusal.revision !== revision.n) ||
+        (refusal.headSha !== undefined && refusal.headSha !== revision.head)
+      ) {
+        return
+      }
+      await app.queue.settleAdmissionRefusal({
+        pr: current.id,
+        revision: revision.n,
+        headSha: revision.head,
+        disposition: "needs-person",
+        reason,
+      })
+    }
     if (plan.remedy.kind === "judgment") {
+      await settleNeedsPerson(plan.remedy.reason)
       outcomes.push({ status: "escalated", ...identity, reason: plan.remedy.reason, resolution: projected.resolution })
       app.log.warn?.(`PR ${plan.pr} needs a person: its refusal has no mechanical remedy.`, {
         action: "queue-refusal-escalated",
@@ -6645,6 +6730,7 @@ export async function applyRefusalRemedies(
       })
     } catch (error) {
       const failure = error instanceof Error ? error.message : String(error)
+      await settleNeedsPerson(failure)
       outcomes.push({ status: "failed", ...identity, commands, failure, resolution: projected.resolution })
       app.log.warn?.(`Could not apply PR ${plan.pr}'s printed refusal remedy; it needs a person.`, {
         action: "queue-refusal-remedy-failed",
@@ -6665,7 +6751,9 @@ export async function applyRefusalRemedies(
  * network work on a cycle that already did none. */
 function observeResidentRefusals(app: YrdCliApp, runs: number): ResidentRefusalObservation {
   const snapshot = stateOf(app)
-  const refusals = Object.values(snapshot.queues.admissionRefusals)
+  const refusals = Object.values(snapshot.queues.admissionRefusals).filter(
+    (refusal) => refusal.settlement === undefined,
+  )
   return {
     runs,
     refusals: refusals.map(({ pr, code, count }) => ({ pr, code, count })),
@@ -6776,9 +6864,10 @@ export async function followQueueRuns(
   // first tick — it catches older-generation ghosts the one-shot startup reclaim
   // (pid-scoped, last pid only) cannot.
   let lastSweepAt = 0
-  // PR revisions this resident already tried a printed refusal remedy on (22474).
-  // Process-scoped on purpose: it bounds a LOOP, and a restarted resident facing
-  // a still-wedged PR deserves exactly one fresh attempt.
+  // PR revisions this process already tried a MECHANICAL printed remedy on
+  // (22474). Queue's durable refusal settlement owns judgment/no-remedy outcomes
+  // across restarts; this Set only prevents a partially applied mechanical drill
+  // from repeating inside the same process before its journal transition clears.
   const remedied = new Set<string>()
   // Consecutive all-candidate-refusal cycles against an unchanged world (22474
   // specimen 3). Also process-scoped: it is a claim about THIS process.

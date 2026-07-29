@@ -1582,6 +1582,81 @@ describe("withBays", () => {
     expect(authored.revs).toMatchObject([{ n: 1 }, { n: 2 }])
   })
 
+  it("settles a refresh-superseded recut revision without minting an empty successor (22528)", async () => {
+    await using app = (await createHarness()).app
+    const nextBase = "b".repeat(40)
+    const baseTreeSha = "c".repeat(40)
+    const patchId = "d".repeat(40)
+
+    await app.bays.submit({ branch: "issue/refresh-superseded", headSha: HEAD_1, baseSha: BASE, draft: true })
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: HEAD_2,
+      baseSha: BASE,
+      treeSha: "e".repeat(40),
+      patchId,
+      reviewCarried: false,
+    })
+    await app.bays.ready({ pr: "PR1" })
+    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE })
+
+    await expect(
+      app.bays.settleSuperseded({
+        pr: "PR1",
+        revision: 2,
+        headSha: HEAD_2,
+        baseSha: nextBase,
+        baseTreeSha,
+        patchId: "f".repeat(40),
+      }),
+    ).rejects.toMatchObject({ failure: { kind: "refusal", code: "recut-patch-drift" } })
+
+    const settled = await app.bays.settleSuperseded({
+      pr: "PR1",
+      revision: 2,
+      headSha: HEAD_2,
+      baseSha: nextBase,
+      baseTreeSha,
+      patchId,
+    })
+    expect(settled.events).toEqual([
+      expect.objectContaining({
+        name: "pr/already-landed",
+        data: expect.objectContaining({
+          pr: "PR1",
+          revision: 2,
+          headSha: HEAD_2,
+          baseSha: nextBase,
+          candidateSha: nextBase,
+          candidateTreeSha: baseTreeSha,
+          baseTreeSha,
+          settlement: {
+            kind: "refresh-superseded",
+            proof: "payload-already-contained",
+            patchId,
+          },
+        }),
+      }),
+    ])
+    const pr = app.bays.pr("PR1")!
+    expect(prDeliveryState(pr)).toBe("already-landed")
+    expect(currentPRRev(pr)).toMatchObject({
+      n: 2,
+      head: HEAD_2,
+      terminal: { kind: "already-landed" },
+    })
+    expect(pr.revs).toHaveLength(2)
+    expect(pr.terminalRun).toBeUndefined()
+    expect(pr.alreadyLanded).toMatchObject({
+      baseSha: nextBase,
+      candidateSha: nextBase,
+      candidateTreeSha: baseTreeSha,
+      baseTreeSha,
+      settlement: { kind: "refresh-superseded", proof: "payload-already-contained", patchId },
+    })
+  })
+
   it("retires the current recut proof when a new authored head starts another revision", async () => {
     await using app = (await createHarness()).app
     const treeSha = "c".repeat(40)

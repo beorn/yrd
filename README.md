@@ -613,6 +613,12 @@ when the base advanced, it records an `admitted -> refreshed` recut on the same
 PR with the same patch-id lineage and a fresh certificate. The append carries
 an expected-current revision/head guard, so an authored revision that arrives
 while Git proof is running wins and the stale automatic result is deferred.
+If the recutter proves that current main already contains the revision's whole
+payload (`head == base` with the base tree), refresh does not mint an empty
+successor. It terminalizes the selected revision as `already-landed` with a
+`refresh-superseded / payload-already-contained` receipt naming the current-main
+SHA, equal tree hashes, and the authored patch id. Replaying the same journal
+therefore performs no Git work and appends nothing.
 Patch drift and gitlink pins that require authored composition remain loud,
 typed refusals; an independent PR can still refresh in the same cycle.
 Likewise, selectorless composition ejects a PR whose exact submit/check
@@ -620,6 +626,15 @@ authority was already consumed, records `pr/needs-author` with the refusal code
 and an executable `pr recut --preflight --queue` remedy, and keeps draining its
 healthy peers. An explicitly targeted run still fails loud after recording the
 same author receipt.
+
+Admission refusals are revision-scoped durable facts. Once the resident's
+existing remedy classifier reaches a judgment-required or failed/no-remedy
+outcome, Queue records a `needs-person` settlement for that exact revision and
+head. Selectorless one-shot and resident drains share the same selector, so
+neither process restart nor another cadence tick can select it again or grow
+the journal. A new authored or recut revision clears the settlement and is
+eligible normally. This is Queue state, not a resident retry cache or restart
+budget.
 
 For a human-authored root carrier, use the machine-owned path rather than
 attaching a composition manifest:
@@ -1068,7 +1083,7 @@ becomes state, CLI selection, events, and status evidence through the same
 definition. Merge is not hardcoded pipeline policy; `withMerge()` is the typed
 transition that supplies integration proof.
 
-The synchronous Queue status projection is intentionally bounded to all live
+The synchronous status projection is intentionally bounded to all live
 trees plus the latest 512 terminal roots. Failed admission evidence remains
 live while it still governs a current PR's retry budget. A root and every
 isolation child otherwise co-retain and co-evict with their Queue-owned Jobs.
@@ -1176,9 +1191,13 @@ even a route that outlives its seat cannot own a semantic response obligation.
 explicit `@name` routes to that Tribe member. `pr/integrated: [broadcast]`
 aggregates all PRs sharing one landing fact into one pull notification and wakes
 nobody. `pr/already-landed` notifies the exact submitter with the equivalence
-proof and makes the no-merge terminal outcome explicit. Terminal PR signals
-close the exact review requests recorded in the durable opened ledger, plus
-deterministic rejection ids retained for pre-policy legacy cleanup.
+proof and makes the no-merge terminal outcome explicit. Ordinary integration
+receipts name their Queue run; refresh-superseded receipts instead name
+`payload-already-contained` plus the patch and current-main proof, because no
+Queue run is fabricated for a payload that has nothing left to deliver.
+Terminal PR signals close the exact review requests recorded in the durable
+opened ledger, plus deterministic rejection ids retained for pre-policy legacy
+cleanup.
 
 Signal delivery starts only after the journal append commits and never blocks
 the Run. A cursor under `.git/yrd/notifications/` records journal progress and
