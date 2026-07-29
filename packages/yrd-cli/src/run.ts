@@ -2540,7 +2540,12 @@ function managedDoStages(
   app: YrdCliApp,
   services: YrdCliServices,
   io: YrdCliIO,
-  runCommand: (stage: string, command: ManagedDoCommand, env: Readonly<Record<string, string>>) => Promise<void>,
+  runCommand: (
+    stage: string,
+    command: ManagedDoCommand,
+    env: Readonly<Record<string, string>>,
+    commandCwd?: string,
+  ) => Promise<void>,
   commands: Readonly<{ assign: ManagedDoCommand; seat: ManagedDoCommand; launch: ManagedDoCommand }>,
   recordBoundary: ReturnType<typeof createManagedDoJournal>,
 ): ManagedDoStages {
@@ -2575,12 +2580,17 @@ function managedDoStages(
       }
     },
     launch: (input) =>
-      runCommand("launch", commands.launch, {
-        YRD_DO_ISSUE: input.issue,
-        YRD_DO_LANE: input.lane,
-        YRD_DO_BAY: input.bay,
-        YRD_DO_BAY_PATH: input.path,
-      }),
+      runCommand(
+        "launch",
+        commands.launch,
+        {
+          YRD_DO_ISSUE: input.issue,
+          YRD_DO_LANE: input.lane,
+          YRD_DO_BAY: input.bay,
+          YRD_DO_BAY_PATH: input.path,
+        },
+        input.path,
+      ),
     closeBay: async (input) => {
       const bay = app.bays.get(input.bay)
       if (bay === undefined) refusal(`Bay '${input.bay}' disappeared before managed rollback`)
@@ -2675,10 +2685,11 @@ async function doWorkManaged(
     stage: string,
     command: ManagedDoCommand,
     env: Readonly<Record<string, string>>,
+    commandCwd = cwd,
   ): Promise<void> => {
     const result = await runner.run({
       argv: shellCommand(command.run),
-      cwd,
+      cwd: commandCwd,
       env: { ...(services.environment ?? process.env), ...env },
       ...(command.timeoutMs === undefined ? {} : { timeoutMs: command.timeoutMs }),
     })

@@ -1409,6 +1409,28 @@ exec git --git-dir=${JSON.stringify(origin)} update-ref refs/heads/main ${movedB
     })
   })
 
+  it("runs only the managed launch command from the resolved Bay cwd", async () => {
+    const fixture = await repository()
+    const assignCwd = join(fixture.repo, "managed-assign.cwd")
+    const seatCwd = join(fixture.repo, "managed-seat.cwd")
+    const launchCwd = join(fixture.repo, "managed-launch.cwd")
+    await configureManagedDo(fixture.repo, {
+      assign: `pwd > ${JSON.stringify(assignCwd)}`,
+      seat: `pwd > ${JSON.stringify(seatCwd)}`,
+      // The launch command relies on its process cwd; no shell `cd` bridge is
+      // needed (or permitted) between Yrd's Bay provisioning and Hab launch.
+      launch: `pwd > ${JSON.stringify(launchCwd)}`,
+    })
+
+    const managed = output(fixture.repo)
+    expect(await yrd(fixture.repo, managed.io, "do", CLAIM, "--seat")).toBe(1)
+    expect(managed.stderr()).toContain("stage 'carrier'")
+    const bayPath = await activeBayPath(fixture.repo, "B1")
+    expect((await readFile(assignCwd, "utf8")).trim()).toBe(fixture.repo)
+    expect((await readFile(seatCwd, "utf8")).trim()).toBe(fixture.repo)
+    expect((await readFile(launchCwd, "utf8")).trim()).toBe(bayPath)
+  })
+
   it("refuses a managed Bay with declared dependencies but no deterministic package manager", async () => {
     const fixture = await repository()
     await writeFile(
@@ -2407,7 +2429,10 @@ notify:
   await git(repo, "push", "-q", "origin", "main")
 }
 
-async function configureManagedDo(repo: string, commands: Readonly<{ seat: string; launch: string }>): Promise<void> {
+async function configureManagedDo(
+  repo: string,
+  commands: Readonly<{ assign?: string; seat: string; launch: string }>,
+): Promise<void> {
   await writeFile(
     join(repo, ".yrd.yml"),
     `base: main
@@ -2418,7 +2443,7 @@ merge: {}
 ${JOURNAL_CONFIG}
 do:
   lane: "@dev/0"
-  assign: "true"
+  assign: ${JSON.stringify(commands.assign ?? "true")}
   seat: ${JSON.stringify(commands.seat)}
   launch: ${JSON.stringify(commands.launch)}
   pollMs: 1
