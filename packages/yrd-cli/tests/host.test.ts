@@ -1106,6 +1106,49 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(frames).toEqual([expect.objectContaining({ compatibility: CURRENT_JOURNAL_COMPATIBILITY })])
   })
 
+  it("boots doctor --rebuild-views through a stale Journal view registration", async () => {
+    const { repo, featureSha } = await repository()
+    await commitYrdConfig(repo, 'base: main\nbatch: 1\nsteps: [check]\ncheck: "true"\n')
+    {
+      await using host = await createYrdHost({ cwd: repo })
+      await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    }
+    const stateDir = join(repo, ".git", "yrd")
+    {
+      using database = new Database(join(stateDir, "journal.sqlite"), { readwrite: true, strict: true })
+      database.run("UPDATE journal_views SET cursor = cursor - 1")
+    }
+    let stdout = ""
+    let stderr = ""
+
+    await expect(
+      runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "doctor", "--rebuild-views", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+    ).resolves.toBe(0)
+    expect(stderr).toBe("")
+    const result = JSON.parse(stdout) as { rebuilt?: { cursor?: number } }
+    expect(result.rebuilt?.cursor).toBeGreaterThan(0)
+    {
+      using database = new Database(join(stateDir, "journal.sqlite"), { readonly: true, strict: true })
+      const head = Number(
+        database.query<{ value: string }, []>("SELECT value FROM journal_metadata WHERE key='head_cursor'").get()
+          ?.value,
+      )
+      expect(
+        database
+          .query<{ cursor: number }, []>("SELECT cursor FROM journal_views WHERE view_id='yrd.queue-attempts'")
+          .get()?.cursor,
+      ).toBe(head)
+    }
+  })
+
   it("routes a failed Run to its revision submitter without awaiting delivery", async () => {
     const { repo, featureSha } = await repository()
     await commitYrdConfig(

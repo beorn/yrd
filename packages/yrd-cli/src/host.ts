@@ -1175,6 +1175,8 @@ type YrdRuntimeHostOptions = YrdHostOptions &
     implementationSource?: string
     /** Mutable checkout used only for current/authoritative source comparison. */
     implementationSourceRepository?: ImplementationSourceRepository
+    /** Repair a stale view registry before the runtime replays Journal history. */
+    repairViewsBeforeReplay?: boolean
   }>
 
 function isWireCapture(destination: string): boolean {
@@ -1362,6 +1364,9 @@ async function createYrdRuntimeHost(
             ...(loaded.config.journal === undefined ? {} : { compatibility: loaded.config.journal }),
             inject: { log },
           })
+    if (options.repairViewsBeforeReplay === true) {
+      await (journal as MutableJournal).views.rebuild()
+    }
     const routes = loaded.config.notify ?? {}
     const defaultSubmitter = options.persona?.mailbox ?? (env.TRIBE_NAME?.trim() || "operator")
     if (mode === "active") {
@@ -1754,6 +1759,7 @@ export async function runYrdProcess(
               ? {}
               : { implementationSource: selectedImplementationSource }),
             ...(sourceBridge === undefined ? {} : { implementationSourceRepository: sourceBridge.repository }),
+            ...(posture === "journal-view-repair" ? { repairViewsBeforeReplay: true } : {}),
           },
           resident,
           posture === "viewer" ? "viewer" : "active",

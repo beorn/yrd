@@ -1232,7 +1232,13 @@ function issueDeliveryRows(bridge: TrackerBridgeV2): IssueDeliveryRow[] {
   })
 }
 
-type RuntimePosture = "active" | "viewer" | "bracketed-bay-open" | "one-shot-queue-run" | "resident-queue-run"
+type RuntimePosture =
+  | "active"
+  | "viewer"
+  | "journal-view-repair"
+  | "bracketed-bay-open"
+  | "one-shot-queue-run"
+  | "resident-queue-run"
 // Commander binds handlers before bootstrap resolves the invocation, so io carries
 // the selected persona and exact bracket operands into bay open/in/do.
 const RuntimePersona = Symbol("yrd.runtime-persona")
@@ -4789,6 +4795,9 @@ function runtimePosture(
 ): RuntimePosture {
   if (isReadOnlyInvocation(action)) return "viewer"
   if (isBracketedBayCommand(action)) return "bracketed-bay-open"
+  if (action.name() === "doctor" && (action.opts() as Readonly<{ rebuildViews?: boolean }>).rebuildViews === true) {
+    return "journal-view-repair"
+  }
   if (action.name() !== "run" || action.parent?.name() !== "queue") return "active"
   return queueRunIsFollow(action) ? "resident-queue-run" : "one-shot-queue-run"
 }
