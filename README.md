@@ -235,7 +235,8 @@ address and exports the same value as `HAB_NAME`. `--name @issue/helper`
 supplies an explicit subpersona. `bay open` takes no command; `bay run` and
 `bay in` default to `$SHELL`. Top-level `yrd run` acts on queue-run records;
 `yrd sh` selects `$SHELL`, and `yrd ag` selects `ag`. Exact `in ag` launches an
-`ag` with the guest-only contract primer.
+`ag` with the guest-only contract primer. Guests never close the owner; the
+inverse remains strict too—owner close reaps every guest still holding the Bay.
 
 An open config is explicit and deterministic. A positional config is always an
 issue reference; `--issue` is its named alias and the two cannot be combined.
@@ -368,16 +369,16 @@ The same commands are available through the standalone `git bay` projection.
 submission core as `pr submit`; `bay submit` remains a handoff, while new
 callers use the PR-native check-admission surface below.
 
-| Command   | Input                                              | Output and state                                                                         |
-| --------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `list`    | None                                               | Lists `BAY STATUS ISSUE BY BASE BRANCH`, including durable failure and orphan facts      |
-| `open`    | Issue, `--issue`, `--pr`, or `--bay`               | Provisions a persistent Bay and returns; never runs a command or creates a PR            |
-| `run`     | Opener configuration plus exact argv               | Owns the scoped bracket, checkpoints, and closes; `--keep` preserves a clean success     |
-| `in`      | Bay selector; exact argv or the exact `ag` operand | Attaches a PID-addressed lifecycle guest; never owns configuration or closure            |
-| `path`    | One Bay ID, name, or branch selector               | Prints the exact absolute path of one active Bay; read-only and never refreshes it       |
-| `refresh` | Zero or more bays                                  | Re-reads Git head, base, dirty, path, and workspace status                               |
-| `submit`  | Bays, PRs, or source branches                      | Creates or advances PRs to `submitted`; never executes Queue work                        |
-| `close`   | Zero or more bays                                  | Checkpoints and deprovisions bays; `--withdraw` explicitly cancels an associated live PR |
+| Command   | Input                                              | Output and state                                                                                                                                                      |
+| --------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list`    | None                                               | Lists `BAY STATUS ISSUE BY BASE BRANCH`, including durable failure and orphan facts                                                                                   |
+| `open`    | Issue, `--issue`, `--pr`, or `--bay`               | Provisions a persistent Bay and returns; never runs a command or creates a PR                                                                                         |
+| `run`     | Opener configuration plus exact argv               | Owns the scoped bracket, checkpoints, and closes; `--keep` preserves a clean success                                                                                  |
+| `in`      | Bay selector; exact argv or the exact `ag` operand | Attaches a PID-addressed lifecycle guest; never owns configuration or closure                                                                                         |
+| `path`    | One Bay ID, name, or branch selector               | Prints the exact absolute path of one active Bay; read-only and never refreshes it                                                                                    |
+| `refresh` | Zero or more bays                                  | Re-reads Git head, base, dirty, path, and workspace status                                                                                                            |
+| `submit`  | Bays, PRs, or source branches                      | Creates or advances PRs to `submitted`; never executes Queue work                                                                                                     |
+| `close`   | Zero or more bays                                  | Reaps and verifies processes holding each Bay, then checkpoints and deprovisions it; survivor PIDs fail loudly. `--withdraw` explicitly cancels an associated live PR |
 
 #### Managed work — `do --seat`
 

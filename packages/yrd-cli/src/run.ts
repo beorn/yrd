@@ -47,7 +47,7 @@ import {
 } from "@yrd/core"
 import { isConcurrentSettlementConflict } from "@yrd/job"
 import type { Job, JobError } from "@yrd/job"
-import { createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
+import { createProcess, pathReapFailure, shellCommand, type Process, type ProcessResult } from "@yrd/process"
 import {
   isQueueRunningConflict,
   Queues,
@@ -1989,6 +1989,9 @@ async function runBayChild(
     /** Provision even when `node_modules` is present: the checkout just moved
      * under it, so what is installed there may no longer be what it declares. */
     reinstall?: boolean
+    /** This child owns the Bay bracket, so its settlement also owns every
+     * process still holding the Bay path. Guests deliberately leave this off. */
+    ownedPath?: boolean
   }> = {},
 ): Promise<ProcessResult> {
   if (bay.path === undefined) refusal(`bay '${bay.id}' has no active workspace path`)
@@ -1998,6 +2001,7 @@ async function runBayChild(
     return await processService.run({
       argv,
       cwd: bay.path,
+      ...(options.ownedPath === true ? { ownedPath: bay.path } : {}),
       ...(options.env === undefined ? {} : { env: options.env }),
       ...(options.onStart === undefined ? {} : { onStart: options.onStart }),
       ...(io.drainSignal === undefined ? {} : { signal: io.drainSignal }),
@@ -2402,6 +2406,7 @@ async function runBaySession(
     child = await runBayChild(services.process, bay, argv.length === 0 ? defaultRunArgv(services) : argv, io, {
       env,
       ...(moved ? { reinstall: true } : {}),
+      ownedPath: true,
     })
   } catch (error) {
     await orphanRunBay(app, bay, `child could not settle: ${errorDetail(error)}`)
@@ -2421,9 +2426,7 @@ async function runBaySession(
   try {
     bay = await checkpointRunBay(app, bay, identity.claim, io)
     if (await preserveInterruptedRunBay(app, bay, "post-child checkpoint", io)) return 1
-    const closing = await app.bays.close({ bay: bay.id })
-    assertJobsPassed(await runJobs(app, app.jobs.requested(closing), io), `bay '${bay.id}' close`)
-    const closed = app.bays.get(bay.id)
+    const closed = await closeBayWithProcessReap(app, services.process, bay, {}, io, `bay '${bay.id}' close`)
     if (closed?.status !== "closed") refusal(`bay '${bay.id}' did not close synchronously`)
     io.stdout(`closed ${identity.bay}\n`)
     return 0
@@ -2561,9 +2564,9 @@ function managedDoStages(
         YRD_DO_BAY_PATH: input.path,
       }),
     closeBay: async (input) => {
-      const closing = await app.bays.close({ bay: input.bay })
-      assertJobsPassed(await runJobs(app, app.jobs.requested(closing), io), `bay '${input.bay}' rollback`)
-      const closed = app.bays.get(input.bay)
+      const bay = app.bays.get(input.bay)
+      if (bay === undefined) refusal(`Bay '${input.bay}' disappeared before managed rollback`)
+      const closed = await closeBayWithProcessReap(app, processService, bay, {}, io, `bay '${input.bay}' rollback`)
       if (closed?.status !== "closed") refusal(`Bay '${input.bay}' did not close after managed launch refusal`)
     },
     observeCarrier: async (input) => {
@@ -2755,8 +2758,47 @@ async function certifyBayHandoff(
   )
 }
 
+async function certifyBayProcessesStopped(
+  processService: Pick<Process, "reapPath"> | undefined,
+  bay: Bay,
+): Promise<void> {
+  if (bay.path === undefined) {
+    throw new Error(`yrd: Bay '${bay.name}' has no workspace path to certify before close`)
+  }
+  if (processService === undefined) configuration("bay close requires the process-backed Yrd runtime")
+  const reaped = await processService.reapPath(bay.path)
+  const failure = pathReapFailure(reaped)
+  if (failure !== undefined) {
+    throw new Error(`yrd: Bay '${bay.name}' process-tree teardown failed: ${failure}`)
+  }
+}
+
+async function closeBayWithProcessReap(
+  app: YrdCliApp,
+  processService: Pick<Process, "reapPath"> | undefined,
+  bay: Bay,
+  options: Readonly<{ withdraw?: boolean }>,
+  io: YrdCliIO,
+  jobContext: string,
+): Promise<Bay> {
+  // First empty the active Bay. Then atomically mark it closing so `bay in`
+  // refuses new guests, and re-census before the deprovision job removes the
+  // ownership root. This closes the attach-between-census-and-delete race.
+  await certifyBayProcessesStopped(processService, bay)
+  const closing = await app.bays.close({
+    bay: bay.id,
+    ...(options.withdraw === true ? { withdraw: true } : {}),
+  })
+  await certifyBayProcessesStopped(processService, bay)
+  assertJobsPassed(await runJobs(app, app.jobs.requested(closing), io), jobContext)
+  const closed = app.bays.get(bay.id)
+  if (closed === undefined) throw new Error(`yrd: Bay '${bay.name}' disappeared while it was closing`)
+  return closed
+}
+
 async function closeBays(
   app: YrdCliApp,
+  services: YrdCliServices,
   selectors: readonly string[],
   options: { withdraw?: boolean; json?: boolean; force?: boolean },
   io: YrdCliIO,
@@ -2788,10 +2830,14 @@ async function closeBays(
         options.withdraw === true
           ? app.bays.prs().filter((pr) => (pr.bay === bay.id || pr.branch === bay.branch) && isLivePR(pr))
           : []
-      const result = await app.bays.close({
-        bay: bay.id,
-        ...(options.withdraw === true ? { withdraw: true } : {}),
-      })
+      const current = await closeBayWithProcessReap(
+        app,
+        services.process,
+        bay,
+        { withdraw: options.withdraw },
+        io,
+        `bay '${bay.id}' close`,
+      )
       if (withdrawing.length > 0) {
         await app.queue.cancel({
           prs: withdrawing.map((pr) => pr.id),
@@ -2799,9 +2845,6 @@ async function closeBays(
           reason: "PR withdrawn",
         })
       }
-      assertJobsPassed(await runJobs(app, app.jobs.requested(result), io), `bay '${bay.id}' close`)
-      const current = app.bays.get(bay.id)
-      if (current === undefined) throw new Error(`yrd: Bay '${bay.name}' disappeared while it was closing`)
       closed.push(current)
     } catch (error) {
       const current = app.bays.get(bay.id)
@@ -3062,6 +3105,7 @@ async function bayStatusCommand(
 /** Sweep open bays via the status oracle. --dry-run is the DEFAULT (22290). */
 async function bayPruneCommand(
   app: YrdCliApp,
+  services: YrdCliServices,
   options: { json?: boolean; apply?: boolean },
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
@@ -3114,6 +3158,7 @@ async function bayPruneCommand(
   if (!dryRun && safe.length > 0) {
     await closeBays(
       app,
+      services,
       safe.map((report) => report.bay),
       { json: options.json },
       io,
@@ -7519,7 +7564,7 @@ function buildProgram(
     .option("--withdraw", "withdraw a live PR before closing")
     .option("--force", "bypass bay status (requires explicit bay name; prints what is destroyed)")
     .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => closeBays(installed(), selectors, options, io))
+    .action(async (selectors, options) => closeBays(installed(), installedServices(), selectors, options, io))
   bay
     .command("status [selector...]")
     .description("safety oracle: is this bay safe to remove? (exit 0=safe 1=not-safe 2=unknown)")
@@ -7530,7 +7575,7 @@ function buildProgram(
     .description("report (default) or close every bay that bay status says is safe")
     .option("--apply", "actually close safe bays (default is dry-run)")
     .option("--json", "emit stable JSON")
-    .action(async (options) => setExit(await bayPruneCommand(installed(), options, io)))
+    .action(async (options) => setExit(await bayPruneCommand(installed(), installedServices(), options, io)))
 
   if (projection === "bay") {
     addExamples(program, name, projection)

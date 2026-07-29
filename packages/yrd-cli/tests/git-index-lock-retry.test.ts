@@ -95,6 +95,7 @@ describe("runWithGitIndexLockRetry", () => {
     let disposals = 0
     const process: Process = {
       run: async () => result(0),
+      reapPath: async () => ({ targetedPids: [], survivorPids: [], forcedKill: false, signalFailures: [] }),
       close: async () => void (closes += 1),
       [Symbol.asyncDispose]: async () => void (disposals += 1),
     }

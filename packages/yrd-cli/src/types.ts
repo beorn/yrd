@@ -57,7 +57,7 @@ export type YrdCliServices = Readonly<{
   queue?: YrdCliQueueAdministration
   recut?: GitPRRecutter
   journal?: YrdCliJournalAdministration
-  process?: Pick<Process, "run">
+  process?: Pick<Process, "run" | "reapPath">
   /** Live base-authority flow config for deterministic doctor diagnostics. */
   config?: YrdConfig
   /** Repository-owned managed `do` policy (`do:` in the project config). Absent

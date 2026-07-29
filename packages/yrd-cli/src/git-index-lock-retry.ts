@@ -66,6 +66,7 @@ export async function runWithGitIndexLockRetry(
 export function withGitIndexLockRetry(process: Process): Process {
   return Object.freeze({
     run: (request: ProcessRequest) => runWithGitIndexLockRetry(process, request),
+    reapPath: (path: string) => process.reapPath(path),
     close: () => process.close(),
     [Symbol.asyncDispose]: () => process[Symbol.asyncDispose](),
   })

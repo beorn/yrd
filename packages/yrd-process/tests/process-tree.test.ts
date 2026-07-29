@@ -7,7 +7,7 @@ import { afterEach, describe, expect, test } from "vitest"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createProcess, type Spawn } from "../src/index.ts"
+import { createProcess, pathReapFailure, type Spawn } from "../src/index.ts"
 
 const scratch: string[] = []
 afterEach(() => {
@@ -31,6 +31,94 @@ async function waitDead(pid: number, ms: number): Promise<boolean> {
 }
 
 describe("createProcess — full process-tree settlement (21012 S1)", () => {
+  test("a failed path reap names every exact survivor pid (22510)", () => {
+    expect(
+      pathReapFailure({
+        targetedPids: [41, 42],
+        survivorPids: [42, 57],
+        forcedKill: true,
+        signalFailures: [],
+      }),
+    ).toBe("process-tree reap failed; survivor pids: 42, 57")
+  })
+
+  test.runIf(process.platform === "darwin" || process.platform === "linux")(
+    "a protected caller holding the owned path is reported as an exact survivor (22510)",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "yrd-protected-path-"))
+      scratch.push(dir)
+      const moduleUrl = new URL("../src/index.ts", import.meta.url).href
+      const source = [
+        `const { createProcess, pathReapFailure } = await import(${JSON.stringify(moduleUrl)})`,
+        `await using owner = createProcess({ killGraceMs: 25, postKillReapGraceMs: 25 })`,
+        `const result = await owner.reapPath(process.cwd())`,
+        `console.log(JSON.stringify({ self: process.pid, result, failure: pathReapFailure(result) }))`,
+      ].join("\n")
+      const helper = Bun.spawn([bunExe, "-e", source], {
+        cwd: dir,
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(helper.stdout).text(),
+        new Response(helper.stderr).text(),
+        helper.exited,
+      ])
+
+      expect(exitCode, stderr).toBe(0)
+      const report = JSON.parse(stdout) as {
+        self: number
+        result: { survivorPids: number[] }
+        failure?: string
+      }
+      expect(report.result.survivorPids).toContain(report.self)
+      expect(report.failure).toContain(`survivor pids: ${report.self}`)
+    },
+  )
+
+  test.runIf(process.platform === "darwin" || process.platform === "linux")(
+    "reaps an exec'd process that left the Bay cwd but retained an open Bay file (22510)",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "yrd-open-file-owner-"))
+      scratch.push(dir)
+      const heldPath = join(dir, "held.txt")
+      writeFileSync(heldPath, "held\n")
+      const source = `process.stdout.write("ready\\n"); setInterval(() => {}, 1_000)`
+      const child = Bun.spawn(
+        ["/bin/sh", "-c", `exec 3<"$1"; cd /; exec "$2" -e "$3"`, "yrd-open-file-fixture", heldPath, bunExe, source],
+        {
+          cwd: "/",
+          detached: true,
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      )
+
+      try {
+        const reader = child.stdout.getReader()
+        const first = await reader.read()
+        reader.releaseLock()
+        expect(new TextDecoder().decode(first.value)).toBe("ready\n")
+
+        await using owner = createProcess({ killGraceMs: 250, postKillReapGraceMs: 250 })
+        const result = await owner.reapPath(dir)
+        expect(result.targetedPids).toContain(child.pid)
+        expect(result.survivorPids).toEqual([])
+        expect(pathReapFailure(result)).toBeUndefined()
+        expect(await waitDead(child.pid, 1_000), `open-file owner ${child.pid} survived path reap`).toBe(true)
+      } finally {
+        try {
+          child.kill("SIGKILL")
+        } catch {
+          // already gone
+        }
+        await child.exited
+      }
+    },
+  )
+
   test("bun canary: Bun.spawn detached:true makes the child a process-group LEADER", async () => {
     // The settlement design rests on this bun behavior (the node:child_process
     // shim IGNORES detached — probed 2026-07-10; the NATIVE API honors it —
@@ -108,8 +196,8 @@ describe("createProcess — full process-tree settlement (21012 S1)", () => {
       expect(childPid).not.toBeNull()
       expect(grandchildPid).not.toBeNull()
       // The whole tree must be DEAD (group swept): TERM-ignoring grandchild
-      // included. Self-daemonizing (setsid) escapees are the documented
-      // residual class — this fixture does not setsid.
+      // included. This fixture pins the fast group layer; the Bay lifecycle
+      // contract separately pins a new-session descendant.
       expect(await waitDead(childPid as number, 3_000), `child ${childPid} survived settlement`).toBe(true)
       expect(await waitDead(grandchildPid as number, 3_000), `grandchild ${grandchildPid} survived settlement`).toBe(
         true,

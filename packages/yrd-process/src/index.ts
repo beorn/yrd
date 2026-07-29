@@ -1,5 +1,8 @@
 import { createScope, type Scope } from "@silvery/scope"
 import { createLogger, type ConditionalLogger } from "loggily"
+import { pathReapFailure, reapOwnedPath, type PathReapResult } from "./path-reaper.ts"
+
+export { pathReapFailure, type PathReapResult } from "./path-reaper.ts"
 
 export type ProcessRequest = Readonly<{
   argv: readonly string[]
@@ -12,6 +15,11 @@ export type ProcessRequest = Readonly<{
    * inherit stdin/stdout/stderr and stay in the foreground process group so
    * editors and agent harnesses receive ordinary terminal input. */
   interactive?: boolean
+  /** Exclusive filesystem box owned by this invocation. Settlement enumerates
+   * every process whose cwd, executable, or open file remains under this path,
+   * then TERM→KILLs and verifies them before run() returns. Use only for
+   * an isolation root such as a Yrd Bay, never for a shared repository cwd. */
+  ownedPath?: string
   /** Observe the direct child PID synchronously after spawn and before run()
    * awaits output or exit. A thrown observer error terminates and settles the
    * child before the error is propagated. */
@@ -22,10 +30,10 @@ export type ProcessRequest = Readonly<{
    * byte, so queue or scheduler startup latency is not child-stall evidence. */
   noProgressTimeoutMs?: number
   /** Bounded wait for the stdout/stderr pipe to reach EOF AFTER the direct
-   * child has EXITED. A descendant that escaped the process-group sweep (a
-   * setsid session leader the `-pid` signal cannot reach) can hold the pipe
-   * open past the child's death; awaiting that EOF is the queue wedge (run()
-   * never returns). Past this grace run() abandons the drain LOUDLY instead of
+   * child has EXITED. A descendant outside the direct child's process group can
+   * hold the pipe open past the child's death; awaiting that EOF is the queue
+   * wedge (run() never returns). An owned-path invocation reaps those processes
+   * first; past this grace run() abandons any remaining drain LOUDLY instead of
    * hanging on a pipe only SIGKILL can free. Default:
    * {@link DEFAULT_POST_EXIT_DRAIN_GRACE_MS}. */
   postExitDrainGraceMs?: number
@@ -73,6 +81,8 @@ export type ProcessResult = ProcessResultBase &
 
 export type Process = Readonly<{
   run(request: ProcessRequest): Promise<ProcessResult>
+  /** Reap and verify every process still holding an exclusive filesystem box. */
+  reapPath(path: string): Promise<PathReapResult>
   /** Aborts and awaits every active run, including process-group settlement. */
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
@@ -134,13 +144,11 @@ function propagateStartObserverError(failure: StartObserverFailure): void {
 /**
  * Default bounded wait for the output pipe to reach EOF after the DIRECT child
  * exits. A child's own buffered bytes are already in the pipe and read in a
- * tight loop the moment it exits, so the ONLY thing that keeps a stream open
- * past child exit is a SURVIVING DESCENDANT — the documented setsid-escapee
- * residual class the `-pid` group sweep cannot reach. Awaiting that pipe
- * unboundedly is the live queue wedge (50–56min hangs, 2026-07-15/16): run()
- * binds its completion to the PID exit and abandons a still-open pipe after
- * this grace. Generous enough that OS scheduling jitter never clips a real
- * child's trailing bytes; tiny beside the wall-clock bound it backstops.
+ * tight loop the moment it exits, so a stream that stays open is survivor
+ * evidence. An invocation with `ownedPath` first reaps every process still
+ * holding its isolation root, including descendants that created a new
+ * session; this grace remains the loud backstop when no exclusive root was
+ * declared or a process escaped every observable ownership fact.
  */
 export const DEFAULT_POST_EXIT_DRAIN_GRACE_MS = 2_000
 
@@ -205,6 +213,7 @@ export function createProcess(
     closing = true
     return (closePromise ??= scope[Symbol.asyncDispose]())
   }
+  const reapPath = (path: string) => reapOwnedPath(path, killGraceMs, postKillReapGraceMs)
   return {
     async run(request) {
       if (closing || scope.disposed) throw new Error("yrd: Process is closed")
@@ -313,8 +322,9 @@ export function createProcess(
         // free). If leadership is absent (custom injected spawn), -pid names a
         // nonexistent group — the child pid is fresh, never OUR pgid — so the
         // signal degrades to ESRCH and we fall back to the direct child.
-        // Self-daemonized (setsid) descendants escape any group signal: the
-        // documented residual lifecycle class, owned by supervision, not here.
+        // A self-daemonized descendant can leave this group. Bay-owned runs
+        // follow group settlement with the exact path census below, so changing
+        // session does not change lifecycle ownership.
         const signalTree = (sig: "SIGTERM" | "SIGKILL"): void => {
           let groupReached = false
           if (groupSettlement) {
@@ -418,6 +428,17 @@ export function createProcess(
           forcedExit.promise,
         ])
 
+        if (request.ownedPath !== undefined) {
+          try {
+            const reaped = await reapPath(request.ownedPath)
+            const failure = pathReapFailure(reaped)
+            if (failure !== undefined) sweepFailure ??= failure
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error)
+            sweepFailure ??= `process-tree census failed for ${request.ownedPath}: ${detail}`
+          }
+        }
+
         // The command has settled (real exit, or forced after an unkillable
         // child). Bound any residual pipe drain: a still-open stream now means a
         // surviving descendant, so wait a bounded grace for a clean EOF, then
@@ -443,9 +464,9 @@ export function createProcess(
                 postExitDrainGraceMs,
               },
             )
-            // The child is already dead; SIGKILL the leaked in-group descendants
-            // now (best-effort — a setsid escapee survives, which is why we also
-            // release our own read end below so run() returns regardless).
+            // The child is already dead; SIGKILL any remaining in-group holder.
+            // An owned-path run already settled out-of-group holders above; the
+            // read-end release keeps undeclared/shared-cwd callers bounded too.
             signalTree("SIGKILL")
             drainAbort.abort()
           }
@@ -519,6 +540,7 @@ export function createProcess(
         await runScope[Symbol.asyncDispose]()
       }
     },
+    reapPath,
     close,
     [Symbol.asyncDispose]: close,
   }

@@ -207,13 +207,28 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
           bays: [expect.objectContaining({ name: "docs", nativeStatus: "active", status: "open" })],
         })
 
-        const closed = output(repo)
-        expect(await yrd(repo, closed.io, "--wire", wire, "bay", "close", "docs"), closed.stderr()).toBe(0)
-        const afterClose = output(repo)
-        expect(await yrd(repo, afterClose.io, "bay", "list", "--closed", "--json"), afterClose.stderr()).toBe(0)
-        expect(JSON.parse(afterClose.stdout())).toMatchObject({
-          bays: [expect.objectContaining({ name: "docs", nativeStatus: "closed", status: "done" })],
+        const held = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1_000)"], {
+          cwd: bayPath,
+          detached: true,
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
         })
+        try {
+          expect(isPidAlive(held.pid)).toBe(true)
+          const closed = output(repo)
+          expect(await yrd(repo, closed.io, "--wire", wire, "bay", "close", "docs"), closed.stderr()).toBe(0)
+          await eventually(async () => {
+            if (isPidAlive(held.pid)) throw new Error(`path-owned pid ${held.pid} survived explicit Bay close`)
+          })
+          const afterClose = output(repo)
+          expect(await yrd(repo, afterClose.io, "bay", "list", "--closed", "--json"), afterClose.stderr()).toBe(0)
+          expect(JSON.parse(afterClose.stdout())).toMatchObject({
+            bays: [expect.objectContaining({ name: "docs", nativeStatus: "closed", status: "done" })],
+          })
+        } finally {
+          killQuiet(held.pid)
+        }
       } finally {
         restoreEnv("SHELL", previousShell)
         restoreEnv("YRD_TEST_SHELL_MARKER", previousMarker)
@@ -273,6 +288,63 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
         await yrd(keptFixture.repo, closed.io, "bay", "close", "kept"),
         `${closed.stdout()}${closed.stderr()}`,
       ).toBe(0)
+    })
+  })
+
+  it("reaps a setsid descendant before a successful Bay run closes (22510)", async () => {
+    return withoutRuntimeName(async () => {
+      const { repo } = await repository()
+      const fixtureRoot = join(repo, "..")
+      const escapedPidPath = join(fixtureRoot, "escaped.pid")
+      const escapedChildPath = join(fixtureRoot, "escaped-child.ts")
+      await writeFile(
+        escapedChildPath,
+        [`process.on("SIGHUP", () => {})`, `process.on("SIGTERM", () => {})`, `setInterval(() => {}, 1_000)`].join(
+          "\n",
+        ),
+      )
+      const spawnEscaped = [
+        `perl -MPOSIX -e '$sid = POSIX::setsid(); open(my $fh, ">", shift @ARGV) or die $!; print $fh "$$ $sid"; close $fh; exec @ARGV or die $!' "$1" "$2" "$3" </dev/null >/dev/null 2>&1 &`,
+        `fixture_ticks=0`,
+        `while [ ! -s "$1" ] && [ "$fixture_ticks" -lt 500 ]; do`,
+        `  fixture_ticks=$((fixture_ticks + 1))`,
+        `  sleep 0.01`,
+        `done`,
+        `test -s "$1"`,
+      ].join("\n")
+      const run = output(repo)
+      let escapedPid = 0
+      try {
+        expect(
+          await yrd(
+            repo,
+            run.io,
+            "bay",
+            "run",
+            "--bay",
+            "escaped-tree",
+            "--",
+            "sh",
+            "-c",
+            spawnEscaped,
+            "yrd-setsid-fixture",
+            escapedPidPath,
+            process.execPath,
+            escapedChildPath,
+          ),
+          run.stderr(),
+        ).toBe(0)
+        const [escapedPidText, escapedSidText] = (await readFile(escapedPidPath, "utf8")).trim().split(/\s+/u)
+        escapedPid = Number(escapedPidText)
+        expect(escapedPid).toBeGreaterThan(1)
+        expect(Number(escapedSidText), "fixture must create a new session, not only a process group").toBe(escapedPid)
+        expect(run.stdout()).toContain("closed escaped-tree")
+        await eventually(async () => {
+          if (isPidAlive(escapedPid)) throw new Error(`setsid descendant ${escapedPid} survived Bay close`)
+        }, 2_000)
+      } finally {
+        killQuiet(escapedPid)
+      }
     })
   })
 
@@ -801,7 +873,6 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
     return withoutRuntimeName(async () => {
       const { repo } = await repository()
       const ownerStop = join(repo, "..", "owner.stop")
-      const guestStop = join(repo, "..", "guest.stop")
       const owner = spawnYrd(
         repo,
         "bay",
@@ -832,7 +903,7 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
         "-c",
         `printf "%s %s" "$HAB_NAME" "$$" > guest-one.name; : > guest-one.started; ${BOUNDED_RELEASE_FILE_LOOP}`,
         "_",
-        guestStop,
+        join(repo, "..", "guest-never-released"),
       )
       await eventually(async () => access(join(repo, ".bays", "B1", "guest-one.started")))
 
@@ -944,13 +1015,13 @@ printf '%s %s' "$HAB_NAME" "$$" > cwd-guest.name
       expect(await git(repo, "show", "refs/remotes/origin/task/shared:helper.name")).toBe(helperIdentity)
       expect(await git(repo, "show", "refs/remotes/origin/task/shared:cwd-guest.name")).toMatch(/^shared:(\d+) \1$/u)
 
-      await writeFile(guestStop, "")
       const [guestExit, guestStdout, guestStderr] = await Promise.all([
         firstGuest.exited,
         new Response(firstGuest.stdout).text(),
         new Response(firstGuest.stderr).text(),
       ])
-      expect(guestExit, guestStderr).toBe(0)
+      expect(guestExit).toBe(1)
+      expect(guestStderr).toContain("guest child exited after SIGTERM")
       expect(guestStdout).toContain(
         `bay shared → attached task/shared, no issue linked, name ${guestOne.split(" ")[0]}`,
       )
@@ -1384,36 +1455,53 @@ exec git --git-dir=${JSON.stringify(origin)} update-ref refs/heads/main ${movedB
 
   it("deprovisions the just-opened Bay when managed launch refuses", async () => {
     const fixture = await repository()
-    await configureManagedDo(fixture.repo, { seat: "true", launch: "false" })
-
-    const launch = output(fixture.repo)
-    expect(await yrd(fixture.repo, launch.io, "do", CLAIM, "--seat")).toBe(1)
-    expect(launch.stderr()).toContain("stage 'launch'")
-
-    const bays = output(fixture.repo)
-    expect(await yrd(fixture.repo, bays.io, "bay", "list", "--closed", "--json"), bays.stderr()).toBe(0)
-    const projection = JSON.parse(bays.stdout()) as {
-      bays: readonly {
-        issue?: string
-        branch: string
-        nativeStatus: string
-        status: string
-        orphan?: unknown
-      }[]
-    }
-    expect(projection).toMatchObject({
-      bays: [
-        expect.objectContaining({
-          issue: CLAIM,
-          branch: BRANCH,
-          nativeStatus: "closed",
-          status: "done",
-        }),
-      ],
+    const heldPidPath = join(fixture.repo, "..", "managed-refusal-held.pid")
+    await configureManagedDo(fixture.repo, {
+      seat: "true",
+      launch:
+        `cd "$YRD_DO_BAY_PATH"; ${JSON.stringify(process.execPath)} -e ` +
+        `${JSON.stringify('process.on("SIGHUP", () => {}); setInterval(() => {}, 1_000)')} ` +
+        `</dev/null >/dev/null 2>&1 & printf "%s" "$!" > ${JSON.stringify(heldPidPath)}; false`,
     })
-    expect(projection.bays[0]?.orphan).toBeUndefined()
-    const worktrees = await git(fixture.repo, "worktree", "list", "--porcelain")
-    expect(worktrees).not.toContain("/.bays/")
+
+    let heldPid = 0
+    try {
+      const launch = output(fixture.repo)
+      expect(await yrd(fixture.repo, launch.io, "do", CLAIM, "--seat")).toBe(1)
+      expect(launch.stderr()).toContain("stage 'launch'")
+      heldPid = Number((await readFile(heldPidPath, "utf8")).trim())
+      expect(heldPid).toBeGreaterThan(1)
+      await eventually(async () => {
+        if (isPidAlive(heldPid)) throw new Error(`managed refusal pid ${heldPid} survived Bay rollback`)
+      }, 2_000)
+
+      const bays = output(fixture.repo)
+      expect(await yrd(fixture.repo, bays.io, "bay", "list", "--closed", "--json"), bays.stderr()).toBe(0)
+      const projection = JSON.parse(bays.stdout()) as {
+        bays: readonly {
+          issue?: string
+          branch: string
+          nativeStatus: string
+          status: string
+          orphan?: unknown
+        }[]
+      }
+      expect(projection).toMatchObject({
+        bays: [
+          expect.objectContaining({
+            issue: CLAIM,
+            branch: BRANCH,
+            nativeStatus: "closed",
+            status: "done",
+          }),
+        ],
+      })
+      expect(projection.bays[0]?.orphan).toBeUndefined()
+      const worktrees = await git(fixture.repo, "worktree", "list", "--porcelain")
+      expect(worktrees).not.toContain("/.bays/")
+    } finally {
+      killQuiet(heldPid)
+    }
   })
 
   it("makes manual run plus ag and automatic do converge on integrated PR state", async () => {
@@ -2479,4 +2567,23 @@ async function eventually(check: () => Promise<unknown>, timeoutMs = 10_000): Pr
     }
   }
   throw lastError ?? new Error(`condition did not become true within ${timeoutMs}ms`)
+}
+
+function isPidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 1) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error instanceof Error && "code" in error && error.code === "EPERM"
+  }
+}
+
+function killQuiet(pid: number): void {
+  if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) return
+  try {
+    process.kill(pid, "SIGKILL")
+  } catch {
+    // already gone
+  }
 }
