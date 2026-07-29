@@ -5284,14 +5284,21 @@ function queueAttemptFingerprint(state: YrdCliState): string {
 }
 
 /**
- * Cache immutable attempts between relevant Job transitions. Production hosts
- * load them from the cursor-cached SQLite read model; custom Journal runtimes
- * retain the pure history-fold fallback. Runner heartbeat/lease timestamps
- * deliberately do not invalidate either projection.
+ * Production hosts consult the SQLite read model on every watch tick and let
+ * its durable cursor/generation cache decide whether to reload. Custom Journal
+ * runtimes retain a state-fingerprinted history-fold fallback so runner
+ * heartbeat/lease timestamps do not trigger another full replay.
  */
 export function createQueueAttemptResolver(
   source: Pick<YrdCliApp, "events"> | NonNullable<YrdCliServices["queueReadModel"]>,
 ): QueueAttemptResolver {
+  if ("attempts" in source) {
+    return {
+      resolve() {
+        return source.attempts()
+      },
+    }
+  }
   let fingerprint: string | undefined
   let cached: readonly QueueAttempt[] = []
   let pending: Promise<readonly QueueAttempt[]> | undefined
@@ -5300,7 +5307,7 @@ export function createQueueAttemptResolver(
       const next = queueAttemptFingerprint(state)
       if (next === fingerprint) return cached
       if (pending !== undefined) return pending
-      const attempts = "attempts" in source ? source.attempts() : queueLogAttempts(source.events())
+      const attempts = queueLogAttempts(source.events())
       pending = attempts.then((attempts) => {
         cached = Object.freeze(attempts)
         fingerprint = next

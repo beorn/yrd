@@ -111,6 +111,26 @@ describe("queue read model", () => {
     await expect(model.attempts()).resolves.toEqual(await queueLogAttempts(events))
   })
 
+  it("caches an unchanged cursor and invalidates the cache after an explicit rebuild", async () => {
+    const dir = await directory()
+    const model = createQueueReadModel({ dir })
+    const journal = createJournal({
+      dir,
+      views: [model.view],
+    })
+    const events = attemptEvents("cache")
+    await journal.append(journalFrame("cache", events), 0)
+
+    const first = await model.attempts()
+    expect(await model.attempts()).toBe(first)
+
+    await journal.views.rebuild()
+
+    const rebuilt = await model.attempts()
+    expect(rebuilt).toEqual(first)
+    expect(rebuilt).not.toBe(first)
+  })
+
   it("uses the run/sequence index for scoped attempt reads", async () => {
     const dir = await directory()
     const model = createQueueReadModel({ dir })
@@ -133,5 +153,20 @@ describe("queue read model", () => {
       .map(({ detail }) => detail)
       .join("\n")
     expect(plan).toContain("queue_attempts_run_sequence")
+  })
+
+  it("refuses a derived attempt row whose result no longer matches the domain shape", async () => {
+    const dir = await directory()
+    const model = createQueueReadModel({ dir })
+    const journal = createJournal({
+      dir,
+      views: [model.view],
+    })
+    await journal.append(journalFrame("integrity", attemptEvents("integrity")), 0)
+
+    using database = new Database(join(dir, "journal.sqlite"), { readwrite: true, strict: true })
+    expect(() => database.query("UPDATE queue_attempts SET result_json = '{}'").run()).toThrow(
+      "CHECK constraint failed",
+    )
   })
 })

@@ -689,6 +689,11 @@ describe("SQLite Journal", () => {
     {
       using database = new Database(join(dir, SQLITE), { readwrite: true, strict: true })
       database.query("UPDATE view_test_rebuild SET text = 'corrupt' WHERE cursor = ?").run(firstCursor)
+      expect(
+        database
+          .query<{ value: string }, []>("SELECT value FROM journal_metadata WHERE key = 'journal_views_generation'")
+          .get(),
+      ).toEqual({ value: "1" })
     }
 
     await expect(journal.views.rebuild()).resolves.toEqual({
@@ -705,6 +710,11 @@ describe("SQLite Journal", () => {
       { cursor: firstCursor, text: "first" },
       { cursor: secondCursor, text: "second" },
     ])
+    expect(
+      database
+        .query<{ value: string }, []>("SELECT value FROM journal_metadata WHERE key = 'journal_views_generation'")
+        .get(),
+    ).toEqual({ value: "2" })
   })
 
   it("rolls a failed view rebuild back to the previously committed rows and registry", async () => {
@@ -742,6 +752,11 @@ describe("SQLite Journal", () => {
         )
         .get(),
     ).toEqual({ view_id: view.id, version: view.version, fingerprint: view.fingerprint, cursor: 2 })
+    expect(
+      database
+        .query<{ value: string }, []>("SELECT value FROM journal_metadata WHERE key = 'journal_views_generation'")
+        .get(),
+    ).toEqual({ value: "1" })
   })
 
   it("refuses a changed view definition until an explicit rebuild replaces its registry atomically", async () => {

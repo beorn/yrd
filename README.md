@@ -1349,7 +1349,8 @@ Command, cause, event, Job, Job-key, and Queue lookup facts are derived from
 the same frames in the same transaction and are equality-checked when read.
 Registered query views follow the same rule: their schema and projection stay
 with the consuming package, their version/fingerprint/cursor live in
-`journal_views`, and a view exception rolls the authoritative Frame back.
+`journal_views`, a durable generation invalidates caches after rebuild, and a
+view exception rolls the authoritative Frame back.
 `yrd doctor --rebuild-views` recreates them from immutable history under the
 writer lock without changing Journal authority.
 Core keeps only the latest 4,096 receipt frames warm. Live projections retain

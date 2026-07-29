@@ -169,10 +169,11 @@ Hosts may also register opaque `JournalView` contributions. The contributing
 package owns each view's domain schema, event decoder, indexes, and queries;
 persistence owns only registration and invoking `apply()` inside the
 authoritative append transaction. `journal_views` binds every view's
-id/version/fingerprint to the Journal cursor. Writers refuse a missing,
-changed, or stale registration, and explicit rebuild resets and replays all
-configured views atomically from immutable row history. Core's `Journal`
-contract and domain projection remain unchanged.
+id/version/fingerprint to the Journal cursor. A durable rebuild generation
+invalidates long-lived query caches even when the head cursor is unchanged.
+Writers refuse a missing, changed, or stale registration, and explicit rebuild
+resets and replays all configured views atomically from immutable row history.
+Core's `Journal` contract and domain projection remain unchanged.
 
 Mutable connections use `synchronous=FULL` and incremental auto-vacuum, are
 bounded by the POSIX writer lock, and are explicitly checkpointed and closed.

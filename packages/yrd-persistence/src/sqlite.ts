@@ -70,6 +70,7 @@ const LEGACY_V3_FILE = "events-v3.jsonl"
 const LEGACY_CUTOVER = `{"v":4,"cutover":"${LEGACY_MANIFEST_FILE}"}\n`
 const SQLITE_CUTOVER_VERSION = 1
 const SCHEMA_VERSION = 2
+const JOURNAL_VIEWS_GENERATION = "journal_views_generation"
 const LEGACY_PRIVATE_PATH = /^events-v4\.[a-zA-Z0-9._-]+$/u
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
@@ -828,6 +829,7 @@ async function installJournalViews(runtime: Context): Promise<void> {
   database.run("BEGIN IMMEDIATE")
   try {
     createJournalViewRegistry(database, runtime.views)
+    writeMetadata(database, JOURNAL_VIEWS_GENERATION, "1")
     for (const entry of entries) applyJournalViews(database, runtime.views, entry)
     setJournalViewsCursor(database, runtime.views, head)
     assertJournalViews(database, runtime.views, head)
@@ -858,6 +860,7 @@ async function rebuildJournalViews(runtime: Context): Promise<JournalViewRebuild
       })
       database.run("BEGIN IMMEDIATE")
       try {
+        incrementJournalViewsGeneration(database)
         for (const view of runtime.views) view.reset(database)
         database.run("DELETE FROM journal_views")
         registerJournalViews(database, runtime.views)
@@ -1078,6 +1081,7 @@ function createSchema(database: Database, head: number, fingerprint: string, vie
   writeMetadata(database, "source_fingerprint", fingerprint)
   writeMetadata(database, "migration_complete", "0")
   writeMetadata(database, "maintenance_pending", "0")
+  writeMetadata(database, JOURNAL_VIEWS_GENERATION, "1")
   createJournalViewRegistry(database, views)
 }
 
@@ -1144,7 +1148,13 @@ function assertJournalViews(database: Database, views: readonly JournalView[], h
       "SELECT view_id, version, fingerprint, cursor FROM journal_views ORDER BY view_id",
     )
     .all()
+  const generation = database
+    .query<{ value: string }, [string]>("SELECT value FROM journal_metadata WHERE key = ?")
+    .get(JOURNAL_VIEWS_GENERATION)?.value
+  const parsedGeneration = Number(generation)
   const matches =
+    Number.isSafeInteger(parsedGeneration) &&
+    parsedGeneration >= 1 &&
     registered.length === views.length &&
     registered.every((row, index) => {
       const view = views[index]
@@ -1159,6 +1169,17 @@ function assertJournalViews(database: Database, views: readonly JournalView[], h
   if (!matches) {
     throw new Error("yrd: journal view registration does not match; run 'yrd doctor --rebuild-views'")
   }
+}
+
+function incrementJournalViewsGeneration(database: Database): void {
+  const current = database
+    .query<{ value: string }, [string]>("SELECT value FROM journal_metadata WHERE key = ?")
+    .get(JOURNAL_VIEWS_GENERATION)?.value
+  const generation = current === undefined ? 0 : Number(current)
+  if (!Number.isSafeInteger(generation) || generation < 0 || generation === Number.MAX_SAFE_INTEGER) {
+    throw new Error("yrd: journal view generation is invalid")
+  }
+  writeMetadata(database, JOURNAL_VIEWS_GENERATION, String(generation + 1))
 }
 
 function assertComplete(database: Database, path: string): Readonly<{ head: number; snapshot: SnapshotHeader }> {

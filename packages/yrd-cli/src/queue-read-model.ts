@@ -7,6 +7,85 @@ import { JobRequestSchema, JobTransitionSchema } from "@yrd/job"
 import type { JournalView, JournalViewEntry } from "@yrd/persistence"
 import type { QueueAttempt } from "./queue-status-view.tsx"
 
+export type QueueReadModel = Readonly<{
+  view: JournalView
+  attempts(): Promise<readonly QueueAttempt[]>
+}>
+
+export function createQueueReadModel(options: Readonly<{ dir: string }>): QueueReadModel {
+  const path = join(options.dir, "journal.sqlite")
+  let cachedCursor: number | undefined
+  let cachedGeneration: number | undefined
+  let cachedAttempts: readonly QueueAttempt[] = []
+  const view: JournalView = Object.freeze({
+    id: VIEW_ID,
+    version: VIEW_VERSION,
+    fingerprint: VIEW_FINGERPRINT,
+    install(database) {
+      database.run(SCHEMA)
+    },
+    reset(database) {
+      database.run(`
+        DROP TABLE IF EXISTS queue_attempts;
+        DROP TABLE IF EXISTS queue_job_starts;
+        DROP TABLE IF EXISTS queue_job_requests;
+      `)
+    },
+    apply(database, entry) {
+      projectQueueFrame(database, entry)
+    },
+  })
+
+  return Object.freeze({
+    view,
+    attempts() {
+      return Promise.resolve().then(() => {
+        if (!existsSync(path)) return []
+        using database = new Database(path, { readonly: true, strict: true })
+        database.run("BEGIN")
+        try {
+          const { cursor, generation } = assertCurrentQueueView(database, view)
+          if (cursor === cachedCursor && generation === cachedGeneration) {
+            database.run("COMMIT")
+            return cachedAttempts
+          }
+          const attempts = Object.freeze(
+            database
+              .query<QueueAttemptRow, []>(
+                `SELECT
+                 job_id,
+                 run_id,
+                 step_name,
+                 step_index,
+                 revision,
+                 attempt,
+                 runner,
+                 outcome,
+                 requested_at,
+                 started_at,
+                 finished_at,
+                 duration_ms,
+                 result_json
+               FROM queue_attempts
+               ORDER BY sequence_id`,
+              )
+              .all()
+              .map(queueAttempt),
+          )
+          database.run("COMMIT")
+          cachedCursor = cursor
+          cachedGeneration = generation
+          cachedAttempts = attempts
+          return attempts
+        } catch (error) {
+          database.run("ROLLBACK")
+          throw error
+        }
+      })
+    },
+  })
+}
+
 const VIEW_ID = "yrd.queue-attempts"
 const VIEW_VERSION = 1
 const ATTEMPT_SEQUENCE_SCALE = 1_000_000
@@ -40,7 +119,24 @@ CREATE TABLE queue_attempts (
   started_at TEXT NOT NULL,
   finished_at TEXT NOT NULL,
   duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
-  result_json TEXT NOT NULL
+  result_json TEXT NOT NULL CHECK (
+    json_valid(result_json)
+    AND COALESCE((
+      (
+        json_extract(result_json, '$.status') = 'passed'
+        AND json_type(result_json, '$.output') IS NOT NULL
+      )
+      OR (
+        json_extract(result_json, '$.status') = 'failed'
+        AND json_type(result_json, '$.error') = 'object'
+      )
+      OR (
+        json_extract(result_json, '$.status') = 'lost'
+        AND json_type(result_json, '$.reason') = 'text'
+        AND length(json_extract(result_json, '$.reason')) > 0
+      )
+    ), 0)
+  )
 ) STRICT;
 CREATE INDEX queue_attempts_run_sequence ON queue_attempts(run_id, sequence_id);
 CREATE INDEX queue_attempts_finished_sequence ON queue_attempts(finished_at, sequence_id);
@@ -78,83 +174,6 @@ type QueueAttemptRow = Readonly<{
   duration_ms: number
   result_json: string
 }>
-
-export type QueueReadModel = Readonly<{
-  view: JournalView
-  attempts(): Promise<readonly QueueAttempt[]>
-}>
-
-export function createQueueReadModel(options: Readonly<{ dir: string }>): QueueReadModel {
-  const path = join(options.dir, "journal.sqlite")
-  let cachedCursor: number | undefined
-  let cachedAttempts: readonly QueueAttempt[] = []
-  const view: JournalView = Object.freeze({
-    id: VIEW_ID,
-    version: VIEW_VERSION,
-    fingerprint: VIEW_FINGERPRINT,
-    install(database) {
-      database.run(SCHEMA)
-    },
-    reset(database) {
-      database.run(`
-        DROP TABLE IF EXISTS queue_attempts;
-        DROP TABLE IF EXISTS queue_job_starts;
-        DROP TABLE IF EXISTS queue_job_requests;
-      `)
-    },
-    apply(database, entry) {
-      projectQueueFrame(database, entry)
-    },
-  })
-
-  return Object.freeze({
-    view,
-    attempts() {
-      return Promise.resolve().then(() => {
-        if (!existsSync(path)) return []
-        using database = new Database(path, { readonly: true, strict: true })
-        database.run("BEGIN")
-        try {
-          const cursor = assertCurrentQueueView(database, view)
-          if (cursor === cachedCursor) {
-            database.run("COMMIT")
-            return cachedAttempts
-          }
-          const attempts = Object.freeze(
-            database
-              .query<QueueAttemptRow, []>(
-                `SELECT
-                 job_id,
-                 run_id,
-                 step_name,
-                 step_index,
-                 revision,
-                 attempt,
-                 runner,
-                 outcome,
-                 requested_at,
-                 started_at,
-                 finished_at,
-                 duration_ms,
-                 result_json
-               FROM queue_attempts
-               ORDER BY sequence_id`,
-              )
-              .all()
-              .map(queueAttempt),
-          )
-          database.run("COMMIT")
-          cachedCursor = cursor
-          cachedAttempts = attempts
-          return attempts
-        } catch (error) {
-          database.run("ROLLBACK")
-          throw error
-        }
-      })
-    },
-  })
-}
 
 function projectQueueFrame(database: Database, entry: JournalViewEntry): void {
   const value = entry.value as Readonly<{ events?: readonly unknown[] }>
@@ -268,10 +287,16 @@ function elapsedMs(startedAt: string, finishedAt: string, job: string, attempt: 
   return finish - start
 }
 
-function assertCurrentQueueView(database: Database, view: JournalView): number {
+function assertCurrentQueueView(
+  database: Database,
+  view: JournalView,
+): Readonly<{ cursor: number; generation: number }> {
   try {
     const head = database
       .query<{ value: string }, []>("SELECT value FROM journal_metadata WHERE key = 'head_cursor'")
+      .get()?.value
+    const generationValue = database
+      .query<{ value: string }, []>("SELECT value FROM journal_metadata WHERE key = 'journal_views_generation'")
       .get()?.value
     const registered = database
       .query<{ version: number; fingerprint: string; cursor: number }, [string]>(
@@ -279,10 +304,14 @@ function assertCurrentQueueView(database: Database, view: JournalView): number {
       )
       .get(view.id)
     const cursor = Number(head)
+    const generation = Number(generationValue)
     if (
       head === undefined ||
       !Number.isSafeInteger(cursor) ||
       cursor < 0 ||
+      generationValue === undefined ||
+      !Number.isSafeInteger(generation) ||
+      generation < 1 ||
       registered === null ||
       registered.version !== view.version ||
       registered.fingerprint !== view.fingerprint ||
@@ -290,7 +319,7 @@ function assertCurrentQueueView(database: Database, view: JournalView): number {
     ) {
       throw new Error("stale")
     }
-    return cursor
+    return { cursor, generation }
   } catch {
     throw new Error("yrd: queue read model is unavailable or stale; run 'yrd doctor --rebuild-views'")
   }

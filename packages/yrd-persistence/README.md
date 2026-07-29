@@ -84,7 +84,8 @@ schema contains:
   checked, bounded Core projection checkpoint;
 - `journal_orphans`, detached audit frames that never enter Core replay; and
 - `journal_views`, the exact registered view id/version/fingerprint and
-  same-transaction cursor; and
+  same-transaction cursor, plus a durable rebuild generation for cache
+  invalidation; and
 - schema, head-cursor, migration-completion, and source-fingerprint metadata.
 
 Fresh SQL cursors begin at `1`. Migration preserves every committed legacy

@@ -11806,6 +11806,27 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     }
   })
 
+  it("lets the durable read-model cursor decide whether watch ticks need a new projection", async () => {
+    const app = await createApp()
+    try {
+      let reads = 0
+      const attempts: readonly QueueAttempt[] = []
+      const resolver = runInternals.createQueueAttemptResolver({
+        attempts() {
+          reads += 1
+          return Promise.resolve(attempts)
+        },
+      })
+      const state = app.state() as YrdCliState
+
+      await expect(resolver.resolve(state)).resolves.toBe(attempts)
+      await expect(resolver.resolve(state)).resolves.toBe(attempts)
+      expect(reads).toBe(2)
+    } finally {
+      await app.close()
+    }
+  })
+
   it("queueListSnapshot tails out-of-process journal appends instead of serving the mount-time projection", async () => {
     // `queue watch` builds ONE long-lived app and reloads on a timer, while a
     // separate resident-runner process appends to the shared journal. The viewer
