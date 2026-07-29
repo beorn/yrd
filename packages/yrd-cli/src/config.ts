@@ -170,38 +170,6 @@ const RefuseSchema = z
   })
   .strict()
 
-/** Command template for a managed `do` stage. Same authoring shape as a
- * configured check step — a shell string, or an object with `run` plus an
- * optional wall-clock bound — because it is the same kind of thing: a command
- * the REPOSITORY owns and Yrd only invokes. The issue, lane and Bay reach the
- * child as `YRD_DO_*` environment values, the way `$YRD_BASE_SHA` reaches a
- * check step; Yrd never rewrites the configured text. */
-const DoCommandObjectSchema = z
-  .object({
-    run: TextSchema,
-    timeoutMs: z.number().int().min(1).optional(),
-  })
-  .strict()
-const DoCommandSchema = z.preprocess(
-  (value) => (typeof value === "string" ? { run: value } : value),
-  DoCommandObjectSchema,
-)
-
-/** Managed `do` composition policy. Absent keys are refused LOUDLY at the point
- * of use, naming the missing key: assignment, seat preparation and launch are
- * repository policy (which tracker, which habitat) and Yrd must never guess. */
-const DoSchema = z
-  .object({
-    lane: TextSchema.optional(),
-    assign: DoCommandSchema.optional(),
-    seat: DoCommandSchema.optional(),
-    launch: DoCommandSchema.optional(),
-    pollMs: z.number().int().min(1).optional(),
-    carrierTimeoutMs: z.number().int().min(1).optional(),
-    landingTimeoutMs: z.number().int().min(1).optional(),
-  })
-  .strict()
-
 const ProjectSchema = z
   .object({
     base: TextSchema.optional(),
@@ -212,14 +180,12 @@ const ProjectSchema = z
     journal: JournalCompatibilitySchema.optional(),
     notify: NotifySchema.optional(),
     refuse: RefuseSchema.optional(),
-    do: DoSchema.optional(),
   })
   .catchall(StepSchema)
 
 export type YrdStepConfig = Readonly<z.infer<typeof StepObjectSchema>>
 export type YrdGateMode = GateMode
 export type YrdRefuseConfig = Readonly<z.infer<typeof RefuseSchema>>
-export type YrdDoConfig = Readonly<z.infer<typeof DoSchema>>
 export type YrdProjectConfig = Readonly<{
   base?: string
   batch?: false | number
@@ -230,7 +196,6 @@ export type YrdProjectConfig = Readonly<{
   journal?: JournalCompatibility
   notify?: SignalRoutes
   refuse?: YrdRefuseConfig
-  do?: YrdDoConfig
 }>
 
 export type ResolvedYrdProjectConfig = Readonly<{
@@ -243,7 +208,6 @@ export type ResolvedYrdProjectConfig = Readonly<{
   journal?: JournalCompatibility
   notify?: SignalRoutes
   refuse?: YrdRefuseConfig
-  do?: YrdDoConfig
   /** Programmatic flow authority. Optional only for direct legacy test/app construction. */
   flows?: readonly FlowDef[]
 }>
@@ -257,20 +221,16 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
       message: `yrd: remove '${retiredWrapper}:' and configure base, batch, steps, and step definitions at the top level`,
     })
   }
+  if (typeof value === "object" && value !== null && "do" in value) {
+    throw createFailure({
+      kind: "configuration",
+      code: "invalid-config",
+      message: "yrd: config do is not supported; launch and agent composition belong to `hab run`",
+    })
+  }
   const parsed = ProjectSchema.safeParse(value ?? {})
   if (parsed.success) {
-    const {
-      base,
-      batch,
-      steps,
-      requires,
-      contest,
-      journal,
-      notify,
-      refuse,
-      do: managedDo,
-      ...definitions
-    } = parsed.data
+    const { base, batch, steps, requires, contest, journal, notify, refuse, ...definitions } = parsed.data
     return {
       ...(base === undefined ? {} : { base }),
       ...(batch === undefined ? {} : { batch }),
@@ -281,7 +241,6 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
       ...(journal === undefined ? {} : { journal }),
       ...(notify === undefined ? {} : { notify }),
       ...(refuse === undefined ? {} : { refuse }),
-      ...(managedDo === undefined ? {} : { do: managedDo }),
     }
   }
   const issue = parsed.error.issues[0]
@@ -294,7 +253,7 @@ function configError(issue: z.core.$ZodIssue): Error {
   if (
     issue.code === "invalid_type" &&
     issue.path.length === 1 &&
-    !["base", "batch", "steps", "requires", "contest", "journal", "notify", "refuse", "do"].includes(path)
+    !["base", "batch", "steps", "requires", "contest", "journal", "notify", "refuse"].includes(path)
   ) {
     return new Error(`yrd: config ${path} is not supported`)
   }
@@ -418,7 +377,6 @@ export async function loadYrdConfig(options: {
       ...(parsed.journal === undefined ? {} : { journal: parsed.journal }),
       notify: parsed.notify ?? {},
       ...(parsed.refuse === undefined ? {} : { refuse: parsed.refuse }),
-      ...(parsed.do === undefined ? {} : { do: parsed.do }),
       flows: flows.flows,
     },
   }

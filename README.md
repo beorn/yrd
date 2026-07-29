@@ -205,9 +205,6 @@ yrd bay run --pr task/fix-release -- vi README.md
 yrd in fix-release ag
 yrd in
 
-# Resolve an issue first (or fall back to an existing PR) and launch ag with a mission:
-yrd do @tracker/fix-release
-
 # Ensure the durable Git-side workspace and tracked draft without launching a process:
 yrd issue ensure @tracker/fix-release
 
@@ -314,8 +311,6 @@ The top-level surface is deliberately small:
 ```text
 yrd                         dashboard across queues, PRs, and recent outcomes
 yrd in                     attach a PID-addressed guest to an existing Bay
-yrd do                     resolve an issue or PR and run an ag mission;
-                           --seat drives the managed composition instead
 yrd run                    act on individual queue runs
 yrd sh                     run $SHELL in a scoped Bay
 yrd ag                     run ag in a scoped Bay
@@ -340,7 +335,6 @@ yrd bay run [<issue>] [--issue <issue>] [--pr <selector>] [--bay <name>]
   [--keep] [-- <command...>]
 yrd bay in [<bay>] [ag | -- <command...>]
 yrd in [<bay>] [ag | -- <command...>]
-yrd do <issue-or-pr> [--seat]
 yrd sh [<issue>] [--issue <issue>] [--pr <selector>] [--bay <name>]
   [--keep]
 yrd ag [<issue>] [--issue <issue>] [--pr <selector>] [--bay <name>]
@@ -379,73 +373,12 @@ callers use the PR-native check-admission surface below.
 | `submit`  | Bays, PRs, or source branches                      | Creates or advances PRs to `submitted`; never executes Queue work                        |
 | `close`   | Zero or more bays                                  | Checkpoints and deprovisions bays; `--withdraw` explicitly cancels an associated live PR |
 
-#### Managed work — `do --seat`
+#### Process launch boundary
 
-`yrd do <issue>` has two shapes and one verb. A person at a terminal gets the
-interactive Bay session above. `--seat`, or a process host that reports no
-terminal, takes the **managed composition**: the same existing surfaces driven
-end to end with nobody in the middle.
-
-```text
-yrd do <issue> --seat
-  → assign        the configured command binds the issue to the configured lane
-  → seat          the configured command settles/recycles that lane before any Bay exists
-  → bay           the same provisioning path `bay open --issue` uses
-  → launch        the configured command starts the agent seat in that Bay
-  → carrier       bounded poll until the Bay's branch advances past its lease base
-  → draft         yrd pr create <branch> --issue <issue>   (DRAFT, before any gitlink commit)
-  → recut         yrd pr recut <PR> --preflight --queue, then --queue
-  → observe       poll the carrier until it lands, is refused, or the wait expires
-```
-
-The last stage is an **observation, not an action**: `yrd queue run` is
-deliberately absent, because a resident runner already holds the drain lease and
-a driver that runs the queue is the second driver that lease exists to prevent.
-`pr ready` and `pr submit` are never used — the managed carrier is a draft that
-only `recut --queue` advances.
-
-Supervision is thin and declared: one bounded poll per stage, a timeout, and a
-refusal that always names the stage plus the issue, the Bay and the carrier, so a
-run that dies leaves a diagnosable trail instead of a stranded Bay. A landing
-prints the merge commit and the ancestry command that proves it. Managed
-concurrency is capped at one run per repository; a marker under the state
-directory records the holder, and a marker whose process is gone is reclaimed
-loudly rather than silently obeyed or silently overwritten. The sibling
-`do-managed/journal.jsonl` records every stage's started and terminal boundary
-with its own wall-clock timestamp; terminal rows also carry the measured
-`durationMs`. Every exit prints the stage-duration table and appends one
-comparison-ready run row to `do-managed/scoreboard.jsonl`.
-
-When a stage fails, the failure's `resolution` is followed at most once, and only
-when every step stays inside the managed verb set (draft, then recut). A failure
-carrying an `escalation` — a compose that can conflict, where resolution is human
-judgment — stops the run with the stage named and prints the recipe as guidance.
-
-The repository owns the three commands, so the managed path refuses by NAME when
-they are absent. Configure them in `.yrd.yml`:
-
-```yaml
-do:
-  lane: "@dev/0" # the persona the issue is assigned to; Yrd never invents one
-  assign: my-tracker assign "$YRD_DO_ISSUE" "$YRD_DO_LANE" --first
-  seat: my-coordinator seat-recycle "$YRD_DO_LANE"
-  launch:
-    run: my-habitat up "$YRD_DO_LANE"
-    timeoutMs: 120000
-  pollMs: 30000 # default 30s
-  carrierTimeoutMs: 2700000 # default 45m — bounded wait for the first commit
-  landingTimeoutMs: 2700000 # default 45m — bounded wait for the landing
-```
-
-All three commands are ordinary shell strings, exactly like a configured check step,
-and Yrd never rewrites the text. The issue, lane and Bay reach the child as
-environment values — `YRD_DO_ISSUE`, `YRD_DO_LANE`, and for launch also
-`YRD_DO_BAY` and `YRD_DO_BAY_PATH` — the same way `$YRD_BASE_SHA` reaches a
-check step. Before the launch command runs, Yrd converges the managed Bay onto
-its base, refreshes its recorded pin when the checkout moves, and installs the
-declared dependencies plus the repository's own postinstall. The repository's
-launch command therefore only starts the seat. Yrd holds no tracker or habitat
-knowledge of its own.
+Yrd owns Git-side delivery: issue resolution, Bays, draft PR identity, recuts, and
+serialized landing. Agent selection, launch, supervision, and retry belong to the
+launcher. A launcher can compose `hab run` with `yrd issue ensure` and the
+ordinary PR/Queue verbs without putting agent policy in Yrd or `.yrd.yml`.
 
 Submodule repositories are ready when `bay open` returns and before a `bay run`
 child starts. Yrd

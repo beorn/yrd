@@ -1487,7 +1487,6 @@ async function createYrdRuntimeHost(
       ),
       recut: createGitPRRecutter({ inject: { process }, repo: repository.repo, env }),
       base: loaded.config.base,
-      ...(loaded.config.do === undefined ? {} : { managedDo: loaded.config.do }),
       journal: Object.freeze({
         importOrphan: (sourcePath: string) =>
           importOrphanJournal({ dir: repository.stateDir, sourcePath, importedBy: defaultSubmitter, log }),
