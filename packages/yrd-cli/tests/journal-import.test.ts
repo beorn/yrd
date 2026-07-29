@@ -28,7 +28,7 @@ function output() {
 
 const app = {} as YrdCliApp
 
-describe("yrd journal import-orphan", () => {
+describe("yrd admin journal import-orphan", () => {
   it("resolves the source from the command cwd and prints the immutable import result", async () => {
     const selected: string[] = []
     const services: YrdCliServices = {
@@ -46,9 +46,9 @@ describe("yrd journal import-orphan", () => {
     }
     const result = output()
 
-    expect(await runYrd(app, argv("journal", "import-orphan", "preserved.jsonl", "--json"), result.io, services)).toBe(
-      0,
-    )
+    expect(
+      await runYrd(app, argv("admin", "journal", "import-orphan", "preserved.jsonl", "--json"), result.io, services),
+    ).toBe(0)
     expect(selected).toEqual(["/repo/preserved.jsonl"])
     expect(JSON.parse(result.stdout())).toEqual({
       command: "journal.import-orphan",
@@ -76,7 +76,9 @@ describe("yrd journal import-orphan", () => {
     }
     const result = output()
 
-    expect(await runYrd(app, argv("journal", "import-orphan", "/tmp/orphan.jsonl"), result.io, services)).toBe(1)
+    expect(await runYrd(app, argv("admin", "journal", "import-orphan", "/tmp/orphan.jsonl"), result.io, services)).toBe(
+      1,
+    )
     expect(result.stdout()).toBe("")
     expect(result.stderr()).toContain("live journal identity collision")
     expect(result.stderr()).toContain("command:01800000-0000-7000-8000-000000000001")
@@ -85,7 +87,7 @@ describe("yrd journal import-orphan", () => {
   it("fails as configuration when the host did not install the import capability", async () => {
     const result = output()
 
-    expect(await runYrd(app, argv("journal", "import-orphan", "orphan.jsonl"), result.io)).toBe(2)
+    expect(await runYrd(app, argv("admin", "journal", "import-orphan", "orphan.jsonl"), result.io)).toBe(2)
     expect(result.stdout()).toBe("")
     expect(result.stderr()).toContain("journal.import-orphan capability is not installed")
   })

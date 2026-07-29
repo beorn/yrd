@@ -306,6 +306,8 @@ export type QueueTimelineRunner = Readonly<{
   command?: string
   /** Exact Yrd source captured by the resident heartbeat at startup. */
   implementationSource?: string
+  /** Compiled-in journal versions this resident can read. */
+  journalVersions?: readonly number[]
   /** ISO time the resident wrote its exit marker on shutdown. The status file is
    * NEVER deleted on close — it is left with this marker so a successor can still
    * reclaim this pid's leases (idempotently). Absent while the runner is live. */
@@ -4019,16 +4021,16 @@ function noticeExplanation(
   if (state === "stale") {
     const prefix = failureSummary === undefined ? "" : `${failureSummary}. `
     if (failure?.code === "stale-base") {
-      return `${prefix}The base advanced after this revision was admitted. Automatically recut and requeued on the next queue pass.`
+      return `${prefix}The base advanced after this revision requested required checks. Automatically recut and requeued on the next queue pass.`
     }
     if (failure?.code === "stale-check") {
-      return `${prefix}The checked candidate changed after admission. Automatically requeued for a fresh check on the next queue pass.`
+      return `${prefix}The checked candidate changed after its required checks. Automatically requeued for fresh checks on the next queue pass.`
     }
     if (failure?.code === "stale-steps") {
-      return `${prefix}The installed step configuration changed after this run was admitted. Automatically requeued under the installed steps on the next queue pass.`
+      return `${prefix}The installed check configuration changed after this run passed its checks. Automatically requeued under the installed checks on the next queue pass.`
     }
     if (failure?.code === "stale-plan") {
-      return `${prefix}The recorded run plan changed after this batch was admitted. Automatically requeued under the installed plan on the next queue pass.`
+      return `${prefix}The recorded run plan changed after this batch began required checks. Automatically requeued under the installed plan on the next queue pass.`
     }
     if (failure?.code === "stale-pr") {
       return `${prefix}The PR revision changed after this run was pinned. This historical run will not retry; follow the current revision's queue state.`
@@ -6892,7 +6894,7 @@ function RunAdmissionClockView({ run }: { run: QueueShowData }) {
   const at = clock.admittedBy === "submission" ? clock.submittedAt : clock.checkRequestedAt
   return (
     <Text wrap="wrap">
-      RUN <RunId base={run.base} run={run.run} /> ADMITTED {clock.admittedBy} AT {at}
+      RUN <RunId base={run.base} run={run.run} /> CHECKS REQUESTED {clock.admittedBy} AT {at}
     </Text>
   )
 }

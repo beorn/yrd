@@ -5,14 +5,13 @@ import { basename, join } from "node:path"
 import { gunzipSync } from "node:zlib"
 import { constants, Database } from "bun:sqlite"
 import {
-  JournalCompatibilitySchema,
+  JOURNAL_READER_VERSION,
   journalFrameCompatibility,
   observeYrdLifecycle,
   parseJournalFrame,
   raiseFailure,
   type Journal,
   type JournalCheckpoint,
-  type JournalCompatibility,
   type JournalEntityKind,
   type JournalHistory,
   type JournalHistoryDiagnostics,
@@ -71,6 +70,7 @@ const LEGACY_CUTOVER = `{"v":4,"cutover":"${LEGACY_MANIFEST_FILE}"}\n`
 const SQLITE_CUTOVER_VERSION = 1
 const SCHEMA_VERSION = 2
 const JOURNAL_VIEWS_GENERATION = "journal_views_generation"
+const JOURNAL_VERSION_FLOOR = "journal_version_floor"
 const LEGACY_PRIVATE_PATH = /^events-v4\.[a-zA-Z0-9._-]+$/u
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
@@ -110,11 +110,22 @@ export type MutableJournal = Journal<unknown> &
     views: Readonly<{
       rebuild(): Promise<JournalViewRebuildResult>
     }>
+    administration: Readonly<{
+      bump(version: number): Promise<JournalVersionBumpResult>
+    }>
   }>
+
+export type JournalVersionBumpResult = Readonly<{
+  from: number
+  to: number
+  snapshot: string
+  restoreDrill: "passed"
+}>
 
 export type JournalOptions = Readonly<{
   dir: string
-  compatibility?: JournalCompatibility
+  /** Version written by this process. Fresh journals are born at this floor. */
+  writerVersion?: number
   lock?: ExclusiveOptions
   views?: readonly JournalView[]
   inject?: Readonly<{
@@ -135,7 +146,7 @@ type JournalMode = "mutable" | "read-only"
 type Context = Readonly<{
   dir: string
   path: string
-  compatibility?: JournalCompatibility
+  writerVersion: number
   exclusive: Exclusive
   log: ConditionalLogger
   platform: string
@@ -280,9 +291,7 @@ function context(options: JournalOptions): Context {
   return {
     dir: options.dir,
     path: join(options.dir, DATABASE_FILE),
-    ...(options.compatibility === undefined
-      ? {}
-      : { compatibility: JournalCompatibilitySchema.parse(options.compatibility) }),
+    writerVersion: journalWriterVersion(options.writerVersion),
     exclusive: inject.exclusive ?? createExclusive(options.dir, options.lock, { log }),
     log,
     platform: inject.platform ?? process.platform,
@@ -292,6 +301,16 @@ function context(options: JournalOptions): Context {
       await inject.phase?.(name, details)
     },
   }
+}
+
+function journalWriterVersion(value: number | undefined): number {
+  const version = value ?? 0
+  if (!Number.isSafeInteger(version) || version < 0 || version > JOURNAL_READER_VERSION) {
+    throw new RangeError(
+      `yrd: journal writer version must be an integer from 0 through ${String(JOURNAL_READER_VERSION)}`,
+    )
+  }
+  return version
 }
 
 function validateViews(views: readonly JournalView[]): readonly JournalView[] {
@@ -315,7 +334,7 @@ function validateViews(views: readonly JournalView[]): readonly JournalView[] {
 export function createJournal(options: JournalOptions & Readonly<{ views: readonly JournalView[] }>): MutableJournal
 export function createJournal(options: JournalOptions): Journal<unknown>
 export function createJournal(options: JournalOptions): Journal<unknown> {
-  return createJournalWithMode(options, "mutable")
+  return createJournalWithMode(options, "mutable") as MutableJournal
 }
 
 export function createReadOnlyJournal(options: JournalOptions): Journal<unknown> {
@@ -345,14 +364,6 @@ function createJournalWithMode(options: JournalOptions, mode: JournalMode): Jour
     async append(value, expectedCursor) {
       assertCursor(expectedCursor)
       if (mode === "read-only") return Promise.reject(new Error("yrd: read-only journal cannot append"))
-      const required = journalFrameCompatibility(value)
-      if (required !== undefined && required.version > (runtime.compatibility?.version ?? 0)) {
-        raiseFailure(
-          "refusal",
-          "journal-write-version-floor",
-          `yrd: journal schema v${required.version} requires reader pin ${required.reader}; configured reader floor is v${runtime.compatibility?.version ?? 0}${runtime.compatibility === undefined ? "" : ` at ${runtime.compatibility.reader}`}`,
-        )
-      }
       const frame = parseJournalFrame(value)
       return observeYrdLifecycle(
         runtime.log,
@@ -365,7 +376,16 @@ function createJournalWithMode(options: JournalOptions, mode: JournalMode): Jour
         },
         () =>
           withMutableDatabase(runtime, (database) => {
+            const required = journalFrameCompatibility(frame)
             const head = readHead(database)
+            const floor = readJournalVersionFloor(database)
+            if (required !== undefined && required.version > floor) {
+              raiseFailure(
+                "refusal",
+                "journal-write-version-floor",
+                `yrd: journal schema v${required.version} exceeds journal floor v${floor}; run 'yrd admin journal bump ${String(required.version)}' after stopping older residents`,
+              )
+            }
             if (head !== expectedCursor) return { appended: false as const, cursor: head }
             const cursor = head + 1
             assertCursor(cursor)
@@ -410,6 +430,10 @@ function createJournalWithMode(options: JournalOptions, mode: JournalMode): Jour
   if (mode === "mutable") {
     Object.defineProperty(journal, "views", {
       value: Object.freeze({ rebuild: () => rebuildJournalViews(runtime) }),
+      enumerable: false,
+    })
+    Object.defineProperty(journal, "administration", {
+      value: Object.freeze({ bump: (version: number) => bumpJournalVersion(runtime, version) }),
       enumerable: false,
     })
   }
@@ -736,6 +760,7 @@ async function ensureDatabase(runtime: Context, verifyViews = true): Promise<voi
       assertComplete(database, runtime.path)
       if (!hasJournalViewRegistry(database)) await installJournalViews(runtime)
     }
+    await ensureJournalVersionFloor(runtime)
     using complete = openReadOnly(runtime.path)
     const { head } = assertComplete(complete, runtime.path)
     if (verifyViews) assertJournalViews(complete, runtime.views, head)
@@ -915,7 +940,7 @@ async function publishCandidate(runtime: Context, legacy: LegacySource | null): 
     database.run("PRAGMA journal_mode = DELETE")
     database.run("PRAGMA synchronous = FULL")
     database.run("PRAGMA auto_vacuum = INCREMENTAL")
-    createSchema(database, head, fingerprint, runtime.views)
+    createSchema(database, head, fingerprint, runtime.views, initialJournalVersionFloor(runtime, rows, legacy === null))
     database.run("BEGIN IMMEDIATE")
     try {
       const insertEvent = database.query("INSERT INTO journal_events(cursor, value_json, sha256) VALUES (?, ?, ?)")
@@ -1008,7 +1033,13 @@ async function publishCandidate(runtime: Context, legacy: LegacySource | null): 
   }
 }
 
-function createSchema(database: Database, head: number, fingerprint: string, views: readonly JournalView[]): void {
+function createSchema(
+  database: Database,
+  head: number,
+  fingerprint: string,
+  views: readonly JournalView[],
+  journalVersionFloor: number,
+): void {
   database.run(`
     CREATE TABLE journal_metadata (
       key TEXT PRIMARY KEY NOT NULL,
@@ -1082,7 +1113,89 @@ function createSchema(database: Database, head: number, fingerprint: string, vie
   writeMetadata(database, "migration_complete", "0")
   writeMetadata(database, "maintenance_pending", "0")
   writeMetadata(database, JOURNAL_VIEWS_GENERATION, "1")
+  writeMetadata(database, JOURNAL_VERSION_FLOOR, String(journalVersionFloor))
   createJournalViewRegistry(database, views)
+}
+
+function initialJournalVersionFloor(runtime: Context, rows: readonly LegacyRow[], fresh: boolean): number {
+  const observed = rows.reduce((floor, row) => {
+    if (row.kind !== "live") return floor
+    return Math.max(floor, journalFrameCompatibility(row.value)?.version ?? 0)
+  }, 0)
+  return fresh ? runtime.writerVersion : observed
+}
+
+function readJournalVersionFloor(database: Database): number {
+  const value = database
+    .query<{ value: string }, [string]>("SELECT value FROM journal_metadata WHERE key = ?")
+    .get(JOURNAL_VERSION_FLOOR)?.value
+  const version = value === undefined ? Number.NaN : Number(value)
+  if (!Number.isSafeInteger(version) || version < 0 || version > JOURNAL_READER_VERSION) {
+    throw new Error(`yrd: journal version floor '${value ?? "missing"}' is invalid`)
+  }
+  return version
+}
+
+async function ensureJournalVersionFloor(runtime: Context): Promise<void> {
+  let observed = 0
+  {
+    using read = openReadOnly(runtime.path)
+    const current = read
+      .query<{ value: string }, [string]>("SELECT value FROM journal_metadata WHERE key = ?")
+      .get(JOURNAL_VERSION_FLOOR)?.value
+    if (current !== undefined) return
+    observed =
+      read
+        .query<{ version: number | null }, []>(
+          `SELECT MAX(version) AS version FROM (
+             SELECT CAST(json_extract(value_json, '$.compatibility.version') AS INTEGER) AS version FROM journal_events
+             UNION ALL
+             SELECT CAST(json_extract(value_json, '$.compatibility.version') AS INTEGER) AS version FROM journal_history
+           )`,
+        )
+        .get()?.version ?? 0
+  }
+  using database = new Database(runtime.path, { create: false, readwrite: true, strict: true })
+  writeMetadata(database, JOURNAL_VERSION_FLOOR, String(observed))
+}
+
+async function bumpJournalVersion(runtime: Context, target: number): Promise<JournalVersionBumpResult> {
+  const version = journalWriterVersion(target)
+  if (version === 0) throw new RangeError("yrd: journal version bump target must be at least 1")
+  await mkdir(join(runtime.dir, "journal-snapshots"), { recursive: true })
+  const snapshot = join(
+    runtime.dir,
+    "journal-snapshots",
+    `pre-bump-v${String(version)}-${new Date().toISOString().replaceAll(/[:.]/gu, "-")}.sqlite`,
+  )
+  return withMutableDatabase(runtime, (database) => {
+    const from = readJournalVersionFloor(database)
+    if (version < from) {
+      raiseFailure(
+        "refusal",
+        "journal-version-bump-one-way",
+        `yrd: journal floor v${from} cannot be lowered to v${version}; restore a pre-bump snapshot with all writers stopped`,
+      )
+    }
+    if (version === from) {
+      raiseFailure("refusal", "journal-version-current", `yrd: journal floor is already v${version}`)
+    }
+    database.run("VACUUM INTO ?", [snapshot])
+    using restored = openReadOnly(snapshot)
+    assertComplete(restored, snapshot)
+    if (readJournalVersionFloor(restored) !== from) {
+      throw new Error(`yrd: journal snapshot restore drill did not preserve floor v${from}`)
+    }
+    database.run("BEGIN IMMEDIATE")
+    try {
+      writeMetadata(database, JOURNAL_VERSION_FLOOR, String(version))
+      database.run("COMMIT")
+    } catch (error) {
+      rollback(database)
+      throw error
+    }
+    return { from, to: version, snapshot, restoreDrill: "passed" as const }
+  })
 }
 
 function createJournalViewRegistry(database: Database, views: readonly JournalView[]): void {

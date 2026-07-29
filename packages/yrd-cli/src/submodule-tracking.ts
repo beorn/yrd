@@ -6,9 +6,9 @@ import { cleanGitEnvironment } from "./git-environment.ts"
  * Submodule tracking: `.gitmodules` `submodule.<name>.branch` is the switch
  * between a TRACKED submodule (upstream changes refresh the superproject's PRs)
  * and a PINNED one (the gitlink only moves when a PR moves it). This module
- * reads that state and helps `yrd init` set a branch for every submodule that
- * has not opted in. Config chooses WHICH ref counts as latest; it never chooses
- * WHETHER latest applies.
+ * reads that state and helps `yrd admin submodule init` set a branch for every
+ * submodule that has not opted in. Config chooses WHICH ref counts as latest;
+ * it never chooses WHETHER latest applies.
  */
 
 /** One declared submodule as read from a superproject's `.gitmodules`. */
@@ -126,7 +126,7 @@ export function formatSubmoduleTrackingWarning(unbranched: readonly SubmoduleEnt
   const noun = unbranched.length === 1 ? "submodule" : "submodules"
   return (
     `warn: ${unbranched.length} ${noun} not tracking a branch ` +
-    `(pinned — upstream changes won't refresh PRs): ${paths.join(", ")} — run 'yrd init' to set`
+    `(pinned — upstream changes won't refresh PRs): ${paths.join(", ")} — run 'yrd admin submodule init' to set`
   )
 }
 
@@ -147,10 +147,20 @@ type GitmodulesRead =
  * no file — Git config exit 1) from a genuine read failure (a malformed file —
  * exit 128). The Git diagnostic is collapsed to one row for both consumers. */
 function readGitmodules(root: string): GitmodulesRead {
-  const result = runGit(root, ["config", "--null", "--file", join(root, ".gitmodules"), "--get-regexp", "^submodule\\."])
+  const result = runGit(root, [
+    "config",
+    "--null",
+    "--file",
+    join(root, ".gitmodules"),
+    "--get-regexp",
+    "^submodule\\.",
+  ])
   if (result.code === 1) return { ok: true, entries: [] }
   if (result.code !== 0) {
-    return { ok: false, detail: firstLine(result.stderr.trim() || result.stdout.trim() || `git config exited ${result.code}`) }
+    return {
+      ok: false,
+      detail: firstLine(result.stderr.trim() || result.stdout.trim() || `git config exited ${result.code}`),
+    }
   }
   return { ok: true, entries: parseGitmodules(result.stdout) }
 }
@@ -173,8 +183,8 @@ export function readSubmoduleEntries(root: string): readonly SubmoduleEntry[] {
  *
  * A read failure degrades to a loud warning here rather than throwing: the
  * advisory must never take down `queue list`/`yrd` with a nonzero exit.
- * `readSubmoduleEntries` and `yrd init` still throw, because there the file IS
- * the job.
+ * `readSubmoduleEntries` and `yrd admin submodule init` still throw, because
+ * there the file IS the job.
  */
 export function submoduleTrackingWarnings(cwd: string): readonly string[] {
   const root = superprojectRoot(cwd)
@@ -212,8 +222,9 @@ export function superprojectOrigin(root: string): string | undefined {
  * The default upstream-default-branch resolver: `git ls-remote --symref <url>
  * HEAD`. A reachable remote whose HEAD names a branch resolves to it; a
  * reachable remote with no branch HEAD takes the documented `main` fallback;
- * an unreachable remote is reported so `yrd init` can list it and leave the
- * submodule unset. Tests inject a resolver instead of reaching the network.
+ * an unreachable remote is reported so `yrd admin submodule init` can list it
+ * and leave the submodule unset. Tests inject a resolver instead of reaching
+ * the network.
  */
 export function createSubmoduleBranchResolver(cwd: string): SubmoduleBranchResolver {
   return (url: string): SubmoduleBranchResolution => {

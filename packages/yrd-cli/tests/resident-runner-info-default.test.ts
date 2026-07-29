@@ -29,7 +29,9 @@ async function git(repo: string, ...args: string[]): Promise<string> {
   return stdout.trim()
 }
 
-async function runnerRepo(config = 'base: main\nbatch: 1\nsteps: [check]\ncheck: "true"\n'): Promise<{ repo: string }> {
+async function runnerRepo(
+  config = 'base: main\nbatch: 1\nchecks:\n  - {check: {run: "true"}}\n',
+): Promise<{ repo: string }> {
   const root = await mkdtemp(join(tmpdir(), "yrd-resident-info-"))
   roots.push(root)
   const repoPath = join(root, "repo")
@@ -86,11 +88,11 @@ describe("resident follow-runner lifecycle levels", () => {
   it("narrates one admission while retaining repeated waiting-run settlement attempts", async () => {
     const { repo } = await queuedRunnerRepo(`base: main
 batch: 1
-steps: [check, merge]
-check:
-  run: |
-    printf '%s\\n' '{"token":"remote-check"}'
-  runner: waiting
+checks:
+  - check:
+      run: |
+        printf '%s\\n' '{"token":"remote-check"}'
+      runner: waiting
 `)
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
@@ -250,7 +252,7 @@ check:
       cli.kill("SIGTERM")
       // The graceful-drain notice is a first-class human row (it is NOT a step
       // roll-up), so it must surface before exit.
-      await vi.waitFor(() => expect(stderrText).toContain("graceful drain requested"), {
+      await vi.waitFor(() => expect(stderrText).toContain("Stopping after the current run finishes"), {
         timeout: 20_000,
         interval: 200,
       })
@@ -265,19 +267,19 @@ check:
     // Every human row leads with the loggily prefix (time LEVEL scope …) — the
     // structured JSON is a dimmed TAIL, so no row STARTS with a raw `{` dump.
     expect(stderrText).not.toMatch(/^\s*\{/mu)
-    expect(stderrText).toMatch(/\bWARN yrd:runner graceful drain requested\b/u)
+    expect(stderrText).toMatch(/\bWARN yrd:runner Stopping after the current run finishes\b/u)
     // The redundant compose settlement roll-up is dropped from the human stream,
-    // and low-level journal:lock chatter never reaches it...
+    // and low-level storage:lock chatter never reaches it...
     expect(stderrText).not.toContain("compose succeeded")
-    expect(stderrText).not.toContain("journal:lock")
+    expect(stderrText).not.toContain("storage:lock")
     // ...while the structured JSONL sink still retains the full journal detail
     // AND the full compose settlement record.
     const records = await readRecords(logFile)
-    expect(records.some((r) => String(r.name) === "yrd:journal:lock")).toBe(true)
+    expect(records.some((r) => String(r.name) === "yrd:storage:lock")).toBe(true)
     expect(records.some((r) => r.name === "yrd:queue:compose" && r.outcome === "succeeded")).toBe(true)
   }, 40_000)
 
-  it("keeps one-shot non-runner commands at WARN — no yrd:journal:lock INFO spam", async () => {
+  it("keeps one-shot non-runner commands at WARN — no yrd:storage:lock INFO spam", async () => {
     const { repo } = await runnerRepo()
     const logFile = join(repo, "one-shot.jsonl")
     const previous = process.env.LOGGILY_FILE
@@ -295,8 +297,8 @@ check:
       else process.env.LOGGILY_FILE = previous
     }
     const records = await readRecords(logFile)
-    expect(records.some((r) => r.level === "info" && String(r.name).startsWith("yrd:journal:lock"))).toBe(false)
+    expect(records.some((r) => r.level === "info" && String(r.name).startsWith("yrd:storage:lock"))).toBe(false)
     expect(records.some((r) => r.level === "info")).toBe(false)
-    expect(stderr.join("")).not.toContain("journal:lock")
+    expect(stderr.join("")).not.toContain("storage:lock")
   }, 20_000)
 })

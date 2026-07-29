@@ -63,7 +63,6 @@ describe("noun cutover ratchet", () => {
     const logVerb = ["lo", "g"].join("")
     const evaluateVerb = ["eval", "uate"].join("")
     const competeVerb = ["com", "pete"].join("")
-    const adminNoun = ["ad", "min"].join("")
     const forbidden = [
       new RegExp(`\\byrd\\s+${queueNoun}s?\\b`, "iu"),
       new RegExp(`\\bqueue\\s+${queueNoun}s?\\b`, "iu"),
@@ -79,7 +78,7 @@ describe("noun cutover ratchet", () => {
         `\\bqueue\\s+(?:${integrateVerb}|${holdVerb}|${releaseVerb}|${statusVerb}|${showVerb}|${logVerb})\\b`,
         "iu",
       ),
-      new RegExp(`\\byrd\\s+(?:${integrateVerb}|${holdVerb}|${releaseVerb}|${adminNoun})\\b`, "iu"),
+      new RegExp(`\\byrd\\s+(?:${integrateVerb}|${holdVerb}|${releaseVerb})\\b`, "iu"),
       new RegExp(`\\bcontest\\s+(?:${evaluateVerb}|${showVerb})\\b`, "iu"),
       new RegExp(`\\bissue\\s+${competeVerb}\\b`, "iu"),
       new RegExp(`\\bqueue\\s+run[^\\n]{0,80}${["--re", "try"].join("")}`, "iu"),

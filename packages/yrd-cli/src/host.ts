@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto"
-import { accessSync, constants, mkdirSync, readFileSync } from "node:fs"
+import { accessSync, chmodSync, constants, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { mkdtemp, rm } from "node:fs/promises"
 import { hostname } from "node:os"
 import { delimiter, join, relative, resolve, sep } from "node:path"
 import { clearLine, cursorTo } from "node:readline"
@@ -33,11 +34,12 @@ import {
   failureFact,
   pipe,
   raiseFailure,
+  SUPPORTED_VERSIONS,
   stageReport,
   type Journal,
   type JournalCompatibility,
 } from "@yrd/core"
-import { defineConfig, selectFlow, withJournalCompatibility } from "@yrd/config"
+import { defineConfig, selectFlow } from "@yrd/config"
 import { localRunner, withJobs } from "@yrd/job"
 import {
   configuredCommandStep,
@@ -94,13 +96,7 @@ import {
   type ImplementationSourceRepository,
 } from "./implementation-source.ts"
 import { withGitIndexLockRetry } from "./git-index-lock-retry.ts"
-import {
-  loadYrdConfig,
-  stepGateMode,
-  type ResolvedYrdProjectConfig,
-  type YrdRefuseConfig,
-  type YrdStepConfig,
-} from "./config.ts"
+import { loadYrdConfig, stepGateMode, type ResolvedYrdProjectConfig, type YrdStepConfig } from "./config.ts"
 import { classifyFailure, resolveInvocation, type YrdPersona } from "./invocation.ts"
 import { withLiveRenderer } from "./live-renderer.ts"
 import { createYrdLogger, residentObservability, resolveYrdObservability } from "./observability.ts"
@@ -118,7 +114,14 @@ import {
   type SignalDeliveryAdapter,
   type SignalObserver,
 } from "./signals.ts"
-import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliQueueAdministration, YrdCliServices } from "./types.ts"
+import type {
+  YrdCliApp,
+  YrdCliChecks,
+  YrdCliExitCode,
+  YrdCliIO,
+  YrdCliQueueAdministration,
+  YrdCliServices,
+} from "./types.ts"
 import { createQueueReadModel } from "./queue-read-model.ts"
 import { QueueReadBoundary, queueReadBases } from "./queue-read-boundary.ts"
 import { submoduleTrackingWarnings } from "./submodule-tracking.ts"
@@ -128,10 +131,7 @@ type RuntimeStep = StepDef<PRShape, PRShape>
 const RawGitPushPattern = /(?:^|[\n;&|])\s*git\s+push(?:\s|$)/u
 
 export const CURRENT_JOURNAL_COMPATIBILITY = Object.freeze({
-  // The pin names the preceding reader-only commit, never this activation
-  // commit: operators can install that reader before any v2 writer is enabled.
-  version: 2,
-  reader: "5a3b38539a9240364052bfdcf3e75edd7922a98f",
+  version: SUPPORTED_VERSIONS.at(-1) ?? 0,
 }) satisfies JournalCompatibility
 
 export type DefaultYrdAppOptions = Readonly<{
@@ -168,7 +168,7 @@ function validateConfig(config: ResolvedYrdProjectConfig): void {
       raiseFailure(
         "configuration",
         "step-command-missing",
-        `yrd: default queue step '${name}' requires steps.${name}.run`,
+        `yrd: required check '${name}' requires an inline run definition`,
       )
     }
   }
@@ -196,6 +196,142 @@ function validateConfig(config: ResolvedYrdProjectConfig): void {
       )
     }
   }
+}
+
+const MANAGED_PRE_SUBMIT_MARKER = "# managed-by-yrd: pre-submit-v1"
+
+function configuredChecks(
+  process: Pick<Process, "run">,
+  stateDir: string,
+  config: ResolvedYrdProjectConfig,
+  environment: NodeJS.ProcessEnv,
+): YrdCliChecks {
+  const names =
+    config.checks ??
+    config.steps.filter(
+      (name) => (config.definitions[name]?.kind ?? (name === "merge" ? "merge" : "check")) === "check",
+    )
+  const hook = join(stateDir, "hooks", "pre-submit")
+  const repo = resolve(stateDir, "../..")
+  const runInCheckout = async (
+    definition: YrdStepConfig,
+    cwd: string,
+    ref: string | undefined,
+  ): Promise<ProcessResult> => {
+    const baseSha = await resolveCommit(process, repo, config.base)
+    if (baseSha === undefined) {
+      raiseFailure(
+        "configuration",
+        "required-check-base-missing",
+        `yrd: required-check base '${config.base}' is missing`,
+      )
+    }
+    const candidateSha = await resolveCommit(process, ref === undefined ? cwd : repo, ref ?? "HEAD")
+    if (candidateSha === undefined) {
+      raiseFailure(
+        "configuration",
+        "required-check-candidate-missing",
+        `yrd: required-check candidate '${ref ?? "HEAD"}' is missing`,
+      )
+    }
+    const inherited = cleanGitEnvironment(environment)
+    const declared = Object.fromEntries(
+      (definition.environmentPassthrough ?? []).flatMap((name) =>
+        environment[name] === undefined ? [] : [[name, environment[name]]],
+      ),
+    )
+    const env = {
+      ...inherited,
+      ...declared,
+      ...definition.env,
+      YRD_REPO: repo,
+      YRD_BASE_SHA: baseSha,
+      YRD_CANDIDATE_SHA: candidateSha,
+      ...(definition.environment === undefined ? {} : { YRD_ENVIRONMENT: definition.environment }),
+    }
+    const run = (workingDirectory: string) =>
+      process.run({
+        argv: shellCommand(definition.run ?? ""),
+        cwd: workingDirectory,
+        env,
+        timeoutMs: stepTimeoutMs(definition),
+      })
+    if (ref === undefined) return run(cwd)
+
+    const parent = join(stateDir, "pre-submit-worktrees")
+    mkdirSync(parent, { recursive: true })
+    const checkout = await mkdtemp(join(parent, "check-"))
+    const add = await process.run({
+      argv: ["git", "-C", repo, "worktree", "add", "--detach", checkout, candidateSha],
+      cwd: repo,
+      env: inherited,
+      timeoutMs: GIT_TIMEOUT_MS,
+    })
+    if (add.exitCode !== 0 || add.timedOut) {
+      await rm(checkout, { recursive: true, force: true })
+      raiseFailure(
+        "infrastructure",
+        "required-check-checkout-failed",
+        add.stderr.trim() || `yrd: could not materialize required-check candidate '${candidateSha}'`,
+      )
+    }
+    try {
+      return await run(checkout)
+    } finally {
+      const removed = await process.run({
+        argv: ["git", "-C", repo, "worktree", "remove", "--force", checkout],
+        cwd: repo,
+        env: inherited,
+        timeoutMs: GIT_TIMEOUT_MS,
+      })
+      if (removed.exitCode !== 0 || removed.timedOut) {
+        raiseFailure(
+          "infrastructure",
+          "required-check-checkout-cleanup-failed",
+          removed.stderr.trim() || `yrd: could not remove required-check checkout '${checkout}'`,
+        )
+      }
+      await rm(checkout, { recursive: true, force: true })
+    }
+  }
+  return Object.freeze({
+    names: Object.freeze([...names]),
+    async run(name, cwd, context) {
+      if (!names.includes(name)) {
+        raiseFailure(
+          "configuration",
+          "required-check-unknown",
+          `yrd: required check '${name}' is not configured (configured: ${names.join(", ") || "none"})`,
+        )
+      }
+      const definition = config.definitions[name]
+      if (definition?.run === undefined) {
+        raiseFailure("configuration", "required-check-command-missing", `yrd: required check '${name}' has no command`)
+      }
+      return runInCheckout(definition, cwd, context?.ref)
+    },
+    async install(_cwd) {
+      mkdirSync(join(stateDir, "hooks"), { recursive: true })
+      let existing: string | undefined
+      try {
+        existing = readFileSync(hook, "utf8")
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+      }
+      if (existing !== undefined && !existing.includes(MANAGED_PRE_SUBMIT_MARKER)) {
+        raiseFailure(
+          "refusal",
+          "pre-submit-hook-unmanaged",
+          `yrd: refusing to replace unmanaged pre-submit hook at '${hook}'`,
+        )
+      }
+      const command = names.length === 0 ? "exit 0" : `exec yrd check ${names.join(" ")}`
+      const source = `#!/bin/sh\n${MANAGED_PRE_SUBMIT_MARKER}\n${command}\n`
+      if (existing !== source) writeFileSync(hook, source, { encoding: "utf8", mode: 0o755 })
+      chmodSync(hook, 0o755)
+      return hook
+    },
+  })
 }
 
 function hostToolchainFingerprint(): ToolchainFingerprint {
@@ -296,7 +432,6 @@ function candidateStep(
   config: YrdStepConfig,
   revision: string,
   candidatePool: CandidatePool | undefined,
-  refuse: YrdRefuseConfig | undefined,
   kind: "check" | "action",
 ): RuntimeStep {
   return eraseStep(
@@ -322,7 +457,6 @@ function candidateStep(
           ? {}
           : { environmentPassthrough: config.environmentPassthrough }),
         ...(candidatePool === undefined ? {} : { candidatePool }),
-        ...(refuse === undefined ? {} : { refuse }),
       }),
       {
         revision,
@@ -486,7 +620,6 @@ function configuredQueueSteps(
             ? gitMergeStep({
                 inject: { process: options.process },
                 repo: options.repo,
-                ...(options.config.refuse === undefined ? {} : { refuse: options.config.refuse }),
               })
             : configuredMergeStep({
                 inject: { process: options.process },
@@ -499,7 +632,6 @@ function configuredQueueSteps(
                 ...(config.environmentPassthrough === undefined
                   ? {}
                   : { environmentPassthrough: config.environmentPassthrough }),
-                ...(options.config.refuse === undefined ? {} : { refuse: options.config.refuse }),
               }),
           {
             revision,
@@ -520,7 +652,6 @@ function configuredQueueSteps(
         config,
         revision,
         options.candidatePool,
-        options.config.refuse,
         descriptor.kind,
       )
     }
@@ -590,7 +721,6 @@ function loadRepositoryConfig(
     repo: repository.repo,
     defaultBase: repository.defaultBase,
     ...(configPath === undefined ? {} : { configPath }),
-    cacheDir: join(repository.stateDir, "config-cache"),
     readAuthority: (base, path) => readConfigFromBase(process, repository, base, path),
   })
 }
@@ -928,7 +1058,7 @@ function queueAdministration(
     async deprovision(base = defaultBase) {
       // Deinit must clear the stored baseline by key WITHOUT requiring the base
       // ref to resolve: a deleted stale base is exactly the case whose prescribed
-      // remedy is `yrd queue deinit <base>`, so a wedged ref must not block it.
+      // remedy is `yrd admin queue deinit <base>`, so a wedged ref must not block it.
       const stored = (await readInstalledBaselines(repository.stateDir))[base]
       const baseSha = (await resolveCommit(process, repository.repo, base)) ?? stored?.baseSha
       const released = (await removeInstalledBaseline(repository.stateDir, base)) ? ["installed-baseline"] : []
@@ -986,6 +1116,42 @@ function processAlive(pid: number): boolean {
   } catch (cause) {
     // ESRCH = no such process (dead). EPERM and friends = exists but not signalable — treat as live.
     return (cause as NodeJS.ErrnoException).code !== "ESRCH"
+  }
+}
+
+function assertResidentSupportsJournalVersion(stateDir: string, target: number): void {
+  let record: Readonly<{
+    pid?: unknown
+    exitedAt?: unknown
+    journalVersions?: unknown
+  }>
+  try {
+    record = JSON.parse(readFileSync(join(stateDir, "resident-runner", "status.json"), "utf8")) as typeof record
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return
+    throw error
+  }
+  if (
+    typeof record.pid !== "number" ||
+    !Number.isSafeInteger(record.pid) ||
+    record.pid <= 0 ||
+    record.exitedAt !== undefined ||
+    !processAlive(record.pid)
+  ) {
+    return
+  }
+  const versions =
+    Array.isArray(record.journalVersions) &&
+    record.journalVersions.every((version) => Number.isSafeInteger(version) && version > 0)
+      ? (record.journalVersions as number[])
+      : []
+  const capability = Math.max(0, ...versions)
+  if (capability < target) {
+    raiseFailure(
+      "refusal",
+      "journal-resident-version-skew",
+      `yrd: live resident pid ${String(record.pid)} supports journal v${String(capability)} but bump target is v${String(target)}; stop or upgrade that resident first`,
+    )
   }
 }
 
@@ -1091,7 +1257,12 @@ const ONE_SHOT_RECOVERY_CUTOFF = "1970-01-01T00:00:00.000Z"
  * stream. The force-stop hint and its consequences are structured FIELDS, so a
  * viewer can surface them without parsing prose. */
 export function reportGracefulShutdown(log: ConditionalLogger, signal: ShutdownSignal): void {
-  log.warn?.(`Stopping after the current run finishes (${signal}); press Ctrl-C again to stop immediately.`)
+  log.warn?.(`Stopping after the current run finishes (${signal}); press Ctrl-C again to stop immediately.`, {
+    signal,
+    mode: "drain",
+    forceStop: "press Ctrl-C again to stop immediately",
+    recovery: "yrd queue recover",
+  })
 }
 
 async function settleOneShotQueueRun(
@@ -1359,12 +1530,11 @@ async function createYrdRuntimeHost(
         ? createJournal({
             dir: repository.stateDir,
             views: [queueReadModel.view],
-            ...(loaded.config.journal === undefined ? {} : { compatibility: loaded.config.journal }),
+            writerVersion: CURRENT_JOURNAL_COMPATIBILITY.version,
             inject: { log },
           })
         : createReadOnlyJournal({
             dir: repository.stateDir,
-            ...(loaded.config.journal === undefined ? {} : { compatibility: loaded.config.journal }),
             inject: { log },
           })
     if (options.repairViewsBeforeReplay === true) {
@@ -1473,19 +1643,13 @@ async function createYrdRuntimeHost(
       }
     }
     if (mode === "active") await drain()
+    const checks = configuredChecks(process, repository.stateDir, loaded.config, env)
     const services = Object.freeze({
       [QueueReadBoundary]: Object.freeze({
         readModel: queueReadModel,
         submoduleWarnings: mode === "viewer" ? submoduleTrackingWarnings(repository.worktree) : [],
       }),
-      ...(loaded.config.flows === undefined
-        ? {}
-        : {
-            config:
-              loaded.config.journal === undefined
-                ? defineConfig(...loaded.config.flows)
-                : defineConfig(withJournalCompatibility(loaded.config.journal), ...loaded.config.flows),
-          }),
+      ...(loaded.config.flows === undefined ? {} : { config: defineConfig(...loaded.config.flows) }),
       queue: queueAdministration(
         process,
         repository,
@@ -1509,7 +1673,7 @@ async function createYrdRuntimeHost(
       ),
       recut: createGitPRRecutter({ inject: { process }, repo: repository.repo, env }),
       base: loaded.config.base,
-      ...(loaded.config.do === undefined ? {} : { managedDo: loaded.config.do }),
+      checks,
       journal: Object.freeze({
         importOrphan: (sourcePath: string) =>
           importOrphanJournal({
@@ -1522,6 +1686,11 @@ async function createYrdRuntimeHost(
         rebuildViews: () => {
           if (mode !== "active") throw new Error("yrd: viewer runtime cannot rebuild Journal views")
           return (journal as MutableJournal).views.rebuild()
+        },
+        bump: (version: number) => {
+          if (mode !== "active") throw new Error("yrd: viewer runtime cannot bump the Journal version")
+          assertResidentSupportsJournalVersion(repository.stateDir, version)
+          return (journal as MutableJournal).administration.bump(version)
         },
       }),
       queueReadModel,
@@ -1578,7 +1747,7 @@ async function runReceiverHook(mode: "pre-receive" | "post-receive", env: NodeJS
       journal: createJournal({
         dir: repository.stateDir,
         views: [createQueueReadModel({ dir: repository.stateDir }).view],
-        ...(loaded.config.journal === undefined ? {} : { compatibility: loaded.config.journal }),
+        writerVersion: CURRENT_JOURNAL_COMPATIBILITY.version,
         inject: { log },
       }),
       process: runtimeProcess,

@@ -1,6 +1,10 @@
-# Yrd target model
+# Yrd model design record
 
-This is the normative target model for the Yrd upgrade. Yrd is repository
+This records the domain-model decisions behind the Yrd upgrade. The current
+repository configuration and CLI contracts are normative in
+[`README.md`](../README.md) and [`ARCHITECTURE.md`](../ARCHITECTURE.md); the v4
+configuration cutover deliberately supersedes this record's earlier
+configuration proposals. Yrd is repository
 scoped: each repository has one configured orchestration system. Section A
 records the model rulings; section B specifies the model and its invariants;
 section C makes supporting decisions explicit; section D maps the current code
@@ -19,8 +23,8 @@ tradeoffs.
 | 6   | Job status/conclusion spellings                        | **Settled, GitHub verbatim** (B6): `status: queued \| in_progress \| waiting \| completed`; `conclusion: success \| failure \| cancelled \| skipped \| timed_out` (`action_required`/`neutral` reserved for adapters that need them). `waiting` is a status, exactly as GitHub Actions uses it for deployment approvals. Run uses the same split. |
 | 7   | Readiness projection + concurrency boundaries          | **Confirmed** derived readiness (no `PRReadiness` aggregate). Merge serialization is a per-`(repository, base branch)` lock shared across all Queues on that base — the lock is keyed by base, not by Queue (C4).                                                                                                                                 |
 | 8   | `Command`/`Event` vs `Op`/`OpCall`                     | **Confirmed CQRS names.** The former `Operation {op, args}` is `Command`; `CommandResult {command, events, value?}` is the dispatch return; `Frame` is below the Journal interface and no longer exported from core. Runtime execution is one `dispatch()` surface rather than the former `command()`/`operation()`/`invoke()` triple.            |
-| 9   | `init/deinit` vs `provision/deprovision`               | **Neither — the question dissolves** (C6). Queues materialize lazily on first submit; the only lifecycle verb is repo-level `yrd init` (optional; first repository-backed command auto-inits, as today). If operational need arises later, `yrd queue pause/resume` — but not in v1.                                                              |
-| 10  | `.yrd.ts` configures Runner/target, not Runner         | **Confirmed.** Runner and Context identities are runtime evidence on the Job. One security amendment: config authority is the base branch (C5).                                                                                                                                                                                                   |
+| 9   | `init/deinit` vs `provision/deprovision`               | **Admin-only lifecycle.** Queues materialize lazily; installed adapters expose `yrd admin queue init/deinit`, while daily queue verbs remain outside `admin`.                                                                                                                                                                                        |
+| 10  | `.yrd.yml` configures checks, not Runner identity      | **Confirmed.** Runner and Context identities are runtime evidence on the Job. Config authority is the base branch (C5), and repository config contains one `checks:` list.                                                                                                                                                                        |
 
 ## B. The model
 
@@ -81,7 +85,7 @@ type FlowDef = Readonly<{
   is rejected: it makes shadowing silent, and loud-at-submit beats
   silent-wrong-lane. Exclusive predicates are cheap to write in TypeScript.
 - The selected flow `name` + `rev` is pinned on the PR's enrollment and on
-  every Run, so historical runs stay explainable after `.yrd.ts` edits.
+  every Run, so historical runs stay explainable after `.yrd.yml` edits.
 - **Drift guard**: the runtime also fingerprints the flow's structural content
   (step names, kinds, order, runner bindings). If the fingerprint changes
   while `rev` does not, submit/doctor warn loudly. Pending/waiting work refuses
@@ -150,7 +154,7 @@ type SourceRewrite = Readonly<{
   reusable-iff-base-and-source-packets-are-unchanged. The key is an index, not
   a second identity; it is computed, not stored.
 - Mergeability is computed via `git merge-tree` — no checkout, no Context
-  lease — before any expensive check is admitted.
+  lease — before any expensive required check starts.
 - The synthetic root commit is published at `refs/yrd/candidates/<id>`. Each
   rewritten source tip is first published under the content-addressed
   `refs/heads/yrd/candidates/<newTipSha>` namespace in that source repository.
@@ -224,7 +228,7 @@ type StepDef = Readonly<{
   waiting, retry, recover) is kept as-is — only vocabulary and the
   status/conclusion split change at its boundary.
 - Runner is the configured control-plane adapter: `submit`, `observe`,
-  `cancel`, plus `maxInFlight` as Yrd's admission limit. Runner and Context
+  `cancel`, plus `maxInFlight` as Yrd's execution limit. Runner and Context
   are runtime evidence recorded on the Job, never configured identities.
 - `ContextReq` stays minimal: `scope: job | run | session | shared`,
   `candidate: none | ro | rw`, optional capability strings. One writable
@@ -261,7 +265,7 @@ concluded success`. Reviews participate as asynchronous required checks
   copies only its bounded digest path rather than the complete history map.
   New Queue starts explicitly declare settlement ownership. The startup
   migration refuses live-leased pre-settlement roots, auto-quiesces only
-  unleased roots with a receipt, and admits terminal legacy roots to bounded
+  unleased roots with a receipt, and retains terminal legacy roots in bounded
   retention. It never guesses whether a historical start still owns work. Git
   stores remain named by content (`prs.git`; candidate refs under
   `refs/yrd/candidates/`).
@@ -279,7 +283,7 @@ the core hierarchy and adds no core concepts.
 speculation.** A Queue processes its queue FIFO; the head batch (up to
 `batch: N`) forms one Candidate; its Run must reach the merge step before the
 next Candidate is constructed. Concurrent check Runs for _other Queues_ and
-other base branches proceed freely under Runner/Context admission.
+other base branches proceed freely under Runner/Context execution.
 GitHub-merge-queue-style stacked speculative candidates are explicitly out of
 v1 — but the model already carries the seam (content-keyed Candidates pinned
 to `baseSha` make speculative results reusable-iff-base-unchanged), so
@@ -294,14 +298,14 @@ checks never take it.
 
 **C5. Config authority is the base branch.** Flows and steps for evaluating a
 Candidate come from the yard's own config (the base checkout / pinned flow
-rev) — never from `.yrd.ts` content inside the submitted revisions. A PR that
-edits `.yrd.ts` takes effect only after it lands. This is the same rule GitHub
+rev) — never from `.yrd.yml` content inside the submitted revisions. A PR that
+edits `.yrd.yml` takes effect only after it lands. This is the same rule GitHub
 enforces for `pull_request_target` workflows, and it is what makes contests
 with agent-written (untrusted) candidate content safe to check.
 
 **C6. Queue lifecycle verbs are deleted.** A Queue exists because a FlowDef
 matched a submission on a base branch; it materializes lazily and needs no
-provision/deprovision/init/deinit. Repo-level `yrd init` stays optional
+provision/deprovision/init/deinit. Repo-level `yrd admin init` stays optional
 (auto-init on first repository-backed command, exactly as today).
 
 **C7. Config spelling audience rule.** Both spellings are the same bindings;
@@ -343,7 +347,7 @@ receive-hook intake, bisection, waiting/finish/recover).
 | `InstalledStep {integrates, needsIntegration}`                | `StepDef {kind: check\|action\|merge}` + order                                              | refit (yrd-queue)                                           |
 | Job results `passed/failed/waiting`                           | GitHub status+conclusion at the boundary; machine unchanged                                 | vocabulary (yrd-job)                                        |
 | injected `checkRunner`/`mergeRunner` capabilities             | `Runner` seam + `localRunner` + `worktreeContexts` leases                                   | generalization (yrd-job/yrd-process)                        |
-| programmatic composition only                                 | `@yrd/config`: `defineConfig` + `with*` + `yrd.*` + `.yrd.ts` discovery + doctor            | new package                                                 |
+| programmatic composition only                                 | `@yrd/config`: `defineConfig` + `with*` + `yrd.*`; repository config remains YAML-only       | new package                                                 |
 | `git bay submit`                                              | `yrd pr submit` (bay keeps workspace verbs only; deprecation alias window for `bay submit`) | CLI move (yrd-cli)                                          |
 | `parent`/`isolationPart` bisection fields                     | child Candidates + `Run.parent` provenance                                                  | refit (yrd-queue)                                           |
 

@@ -124,7 +124,7 @@ describe("flow configuration", () => {
   })
 
   it("declares one journal reader floor alongside flows", () => {
-    const compatibility = { version: 1, reader: "a".repeat(40) }
+    const compatibility = { version: 1 }
     const config = defineConfig(
       yrd.journal(compatibility),
       yrd.flow({ name: "main", rev: "1", on: () => true, steps: [check, merge] }),
@@ -134,14 +134,14 @@ describe("flow configuration", () => {
     expect(() =>
       defineConfig(
         yrd.journal(compatibility),
-        yrd.journal({ version: 1, reader: "b".repeat(40) }),
+        yrd.journal({ version: 2 }),
         yrd.flow({ name: "main", rev: "1", on: () => true, steps: [check, merge] }),
       ),
     ).toThrow("at most one journal compatibility floor")
   })
 })
 
-describe(".yrd.ts module loading", () => {
+describe("programmatic config module loading", () => {
   it("evaluates the supplied base-authority source rather than reading candidate content", async () => {
     const root = await mkdtemp(join(tmpdir(), "yrd-config-"))
     try {
@@ -151,7 +151,7 @@ describe(".yrd.ts module loading", () => {
         source: `
           import { defineConfig, yrd } from "@yrd/config"
           export default defineConfig(
-            yrd.journal({ version: 1, reader: "${"c".repeat(40)}" }),
+            yrd.journal({ version: 1 }),
             yrd.flow({
               name: "base-authority",
               rev: "4",
@@ -161,7 +161,7 @@ describe(".yrd.ts module loading", () => {
           )
         `,
       })
-      expect(loaded.journal).toEqual({ version: 1, reader: "c".repeat(40) })
+      expect(loaded.journal).toEqual({ version: 1 })
       expect(selectFlow(loaded, { base: "main", branch: "topic", head: "d".repeat(40) }).pin).toMatchObject({
         name: "base-authority",
         rev: "4",

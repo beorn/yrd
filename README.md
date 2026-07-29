@@ -121,11 +121,10 @@ original caller directory.
 $ yrd --repo /work/my-repository/.bays/B1 pr status --json
 ```
 
-The selector is global and may also follow a subcommand. Config defaults to the
-base branch's `.yrd.ts`, with `.yrd.yml` as the legacy fallback.
-`--config <path>` selects another base-relative `.ts`, `.yml`, or `.yaml`
-authority; candidate content can never override it. There is no separate
-`--cwd` or `--root` surface.
+The selector is global and may also follow a subcommand. Repository config is
+the base branch's `.yrd.yml`. `--config <path>` selects another base-relative
+`.yml` or `.yaml` authority; candidate content can never override it. There is
+no separate `--cwd` or `--root` surface.
 
 ```console
 $ cd my-repository
@@ -144,8 +143,9 @@ default), checkpoint, push, and close. `--keep` leaves a successful run open.
 A failed or interrupted child preserves the Bay as an orphan for diagnosis.
 Use `yrd in` for a guest process in an already-open Bay.
 
-Plain PR submit is a handoff: it schedules checks and returns, while an
-integrator follows the same journaled Queue run and drains integration:
+Plain PR submit first runs the configured checks in the submitting working tree,
+then records the authoritative check request and returns. The resident Queue
+runs the same checks again against the exact Candidate before it merges:
 
 ```console
 $ yrd pr submit
@@ -158,8 +158,8 @@ RUN     PRS             STATE       STEPS
 R2      PR2              passed      check=passed merge=passed
 ```
 
-For a review-gated repository, the PR-native flow admits checks before the
-revision is queueable:
+For a review-gated repository, `pr ready` records the authoritative check
+request after review approves the current revision:
 
 ```console
 $ yrd pr create issue/another-fix --correlation tribe-request:review-42
@@ -169,7 +169,7 @@ $ yrd pr checks PR2 --follow
 ```
 
 `pr create` records the existing `pushed` state: no submission, check request,
-admission, or Queue work is started until `pr ready` (ordinary reviewed work)
+or Queue work is started until `pr ready` (ordinary reviewed work)
 or `pr recut --queue` (authored-root carriers). `pr create` does not push a Git
 branch; callers push first, then create the draft from that exact resolvable
 commit. `issue ensure` is the issue-first composition of those Git-side facts:
@@ -341,7 +341,7 @@ yrd bay run [<issue>] [--issue <issue>] [--pr <selector>] [--bay <name>]
   [--keep] [-- <command...>]
 yrd bay in [<bay>] [ag | -- <command...>]
 yrd in [<bay>] [ag | -- <command...>]
-yrd do <issue-or-pr> [--seat]
+yrd do <issue-or-pr>
 yrd sh [<issue>] [--issue <issue>] [--pr <selector>] [--bay <name>]
   [--keep]
 yrd ag [<issue>] [--issue <issue>] [--pr <selector>] [--bay <name>]
@@ -367,7 +367,7 @@ yrd run cancel <selector> [--reason <text>] [--json]
 The same commands are available through the standalone `git bay` projection.
 `bay submit` is permanent cross-product vocabulary and delegates to the same
 submission core as `pr submit`; `bay submit` remains a handoff, while new
-callers use the PR-native check-admission surface below.
+callers use the PR-native required-check surface below.
 
 | Command   | Input                                              | Output and state                                                                                                                                                      |
 | --------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -380,73 +380,10 @@ callers use the PR-native check-admission surface below.
 | `submit`  | Bays, PRs, or source branches                      | Creates or advances PRs to `submitted`; never executes Queue work                                                                                                     |
 | `close`   | Zero or more bays                                  | Reaps and verifies processes holding each Bay, then checkpoints and deprovisions it; survivor PIDs fail loudly. `--withdraw` explicitly cancels an associated live PR |
 
-#### Managed work — `do --seat`
-
-`yrd do <issue>` has two shapes and one verb. A person at a terminal gets the
-interactive Bay session above. `--seat`, or a process host that reports no
-terminal, takes the **managed composition**: the same existing surfaces driven
-end to end with nobody in the middle.
-
-```text
-yrd do <issue> --seat
-  → assign        the configured command binds the issue to the configured lane
-  → seat          the configured command settles/recycles that lane before any Bay exists
-  → bay           the same provisioning path `bay open --issue` uses
-  → launch        the configured command starts the agent seat in that Bay
-  → carrier       bounded poll until the Bay's branch advances past its lease base
-  → draft         yrd pr create <branch> --issue <issue>   (DRAFT, before any gitlink commit)
-  → recut         yrd pr recut <PR> --preflight --queue, then --queue
-  → observe       poll the carrier until it lands, is refused, or the wait expires
-```
-
-The last stage is an **observation, not an action**: `yrd queue run` is
-deliberately absent, because a resident runner already holds the drain lease and
-a driver that runs the queue is the second driver that lease exists to prevent.
-`pr ready` and `pr submit` are never used — the managed carrier is a draft that
-only `recut --queue` advances.
-
-Supervision is thin and declared: one bounded poll per stage, a timeout, and a
-refusal that always names the stage plus the issue, the Bay and the carrier, so a
-run that dies leaves a diagnosable trail instead of a stranded Bay. A landing
-prints the merge commit and the ancestry command that proves it. Managed
-concurrency is capped at one run per repository; a marker under the state
-directory records the holder, and a marker whose process is gone is reclaimed
-loudly rather than silently obeyed or silently overwritten. The sibling
-`do-managed/journal.jsonl` records every stage's started and terminal boundary
-with its own wall-clock timestamp; terminal rows also carry the measured
-`durationMs`. Every exit prints the stage-duration table and appends one
-comparison-ready run row to `do-managed/scoreboard.jsonl`.
-
-When a stage fails, the failure's `resolution` is followed at most once, and only
-when every step stays inside the managed verb set (draft, then recut). A failure
-carrying an `escalation` — a compose that can conflict, where resolution is human
-judgment — stops the run with the stage named and prints the recipe as guidance.
-
-The repository owns the three commands, so the managed path refuses by NAME when
-they are absent. Configure them in `.yrd.yml`:
-
-```yaml
-do:
-  lane: "@dev/0" # the persona the issue is assigned to; Yrd never invents one
-  assign: my-tracker assign "$YRD_DO_ISSUE" "$YRD_DO_LANE" --first
-  seat: my-coordinator seat-recycle "$YRD_DO_LANE"
-  launch:
-    run: my-habitat up "$YRD_DO_LANE"
-    timeoutMs: 120000
-  pollMs: 30000 # default 30s
-  carrierTimeoutMs: 2700000 # default 45m — bounded wait for the first commit
-  landingTimeoutMs: 2700000 # default 45m — bounded wait for the landing
-```
-
-All three commands are ordinary shell strings, exactly like a configured check step,
-and Yrd never rewrites the text. The issue, lane and Bay reach the child as
-environment values — `YRD_DO_ISSUE`, `YRD_DO_LANE`, and for launch also
-`YRD_DO_BAY` and `YRD_DO_BAY_PATH` — the same way `$YRD_BASE_SHA` reaches a
-check step. Before the launch command runs, Yrd converges the managed Bay onto
-its base, refreshes its recorded pin when the checkout moves, and installs the
-declared dependencies plus the repository's own postinstall. The repository's
-launch command therefore only starts the seat. Yrd holds no tracker or habitat
-knowledge of its own.
+`yrd do <issue-or-pr>` remains the ordinary interactive issue-first Bay
+workflow. Assignment, seat lifecycle, and agent launch belong to the calling
+habitat or coordination layer; Yrd no longer accepts repository `do:` policy or
+managed `--seat`/`--lane` options.
 
 Submodule repositories are ready when `bay open` returns and before a `bay run`
 child starts. Yrd
@@ -527,7 +464,7 @@ push, and the same PR resumes automatically as its next revision.
 yrd pr create [selector] [--base <branch>] [--issue <ref>]
   [--title <text>] [--description <text>]
   [--correlation <namespace:id>] [--json]
-yrd pr submit [selector...] [--follow] [--base <branch>]
+yrd pr submit [selector...] [--base <branch>]
   [--issue <ref>] [--title <text>] [--description <text>]
   [--correlation <namespace:id>] [--json]
 yrd pr checkout <selector> [--bay <name>] [--json]
@@ -550,13 +487,12 @@ Any explicit list filter keeps the complete matching set, and JSON stays
 lossless.
 
 `pr create` registers only the pushed revision and returns without submitting
-it, requesting checks, or admitting a Run. Plain `pr submit` appends the
-revision, records a check request, schedules the configured pre-merge Queue
-steps, and returns. `pr ready` submits an existing draft and requests and
-admits its configured checks. `--follow` stays attached to the same journaled
-Run. `pr checks` renders the same typed evidence in human or newline-delimited
-JSON output, including command argv, concise diagnostics,
-base-versus-carrier classification, and artifact paths.
+it, requesting checks, or starting Queue work. Plain `pr submit` and `pr ready`
+run the repository's configured checks locally, record the authoritative check
+request, and return without driving Queue execution. `pr checks --follow`
+observes the later Queue-owned check result. It renders the typed evidence in
+human or newline-delimited JSON output, including command argv, concise
+diagnostics, base-versus-carrier classification, and artifact paths.
 
 `pr checkout` is immutable inspection: it provisions the recorded revision
 head in detached HEAD and asserts the resulting Bay head before reporting
@@ -571,14 +507,14 @@ follow that selected payload. When submission recorded authority newer than
 the source branch, recut derives exactly one source merge base and refuses
 ambiguous lineage. A pin-only carrier that already has the authoritative parent
 still receives a successor revision with the derived patch/tree certificate.
-`--queue` readies and admits only that certified revision's fresh checks. List,
+`--queue` readies only that certified revision and requests fresh checks. List,
 detail, and watch output retain the recut lineage and cumulative source-ready
 age while reporting the successor revision's queue wait separately.
 
 An implicit PR-id recut is reproducible, not "whatever is on the branch now."
 Before either preflight or mutation, Yrd refreshes that exact branch from
 `origin` and compares its server-observed tip with the recorded authored source.
-If they differ, recut refuses before composition, journal writes, or admission;
+If they differ, recut refuses before composition, journal writes, or a check request;
 the refusal names both heads, the intervening commits, and both explicit paths:
 
 ```bash
@@ -604,13 +540,13 @@ Its evidence names source/target pin distance, exact ancestry or merge-result
 tree proof, and any stable patch-id landing match. Tree equality—not patch-id
 alone—authorizes withdrawal because stable patch IDs intentionally ignore
 whitespace. Missing objects, diverged bases, and composed source payloads fail
-closed instead of producing a guessed verdict. Pass `--queue` to include queue
-admission in the recommended next command.
+closed instead of producing a guessed verdict. Pass `--queue` to include the
+authoritative check request in the recommended next command.
 
-The resident Queue owns freshness after admission. Before each run snapshot it
-compares every admitted revision's immutable base with the authoritative base;
-when the base advanced, it records an `admitted -> refreshed` recut on the same
-PR with the same patch-id lineage and a fresh certificate. The append carries
+The resident Queue owns freshness. Before each run snapshot it compares every
+requested revision's immutable base with the authoritative base; when the base
+advanced, it records a refreshed recut on the same PR with the same patch-id
+lineage and a fresh certificate. The append carries
 an expected-current revision/head guard, so an authored revision that arrives
 while Git proof is running wins and the stale automatic result is deferred.
 If the recutter proves that current main already contains the revision's whole
@@ -627,7 +563,7 @@ and an executable `pr recut --preflight --queue` remedy, and keeps draining its
 healthy peers. An explicitly targeted run still fails loud after recording the
 same author receipt.
 
-Admission refusals are revision-scoped durable facts. Once the resident's
+Required-check refusals are revision-scoped durable facts. Once the resident's
 existing remedy classifier reaches a judgment-required or failed/no-remedy
 outcome, Queue records a `needs-person` settlement for that exact revision and
 head. Selectorless one-shot and resident drains share the same selector, so
@@ -662,7 +598,7 @@ successor.
 The Queue is the only scheduler. Its journaled passed Run is also the cache:
 integration reuses matching carrier-classified pre-merge work only when
 resolved base SHA, head SHA, installed-step revision/config, and toolchain
-fingerprint all match. Base-classified admission steps always rerun before
+fingerprint all match. Base-classified required checks always rerun before
 integration, so a later same-base red lock cannot reuse an earlier green fact.
 There is no TTL, invalidation database, or second workflow engine.
 
@@ -772,8 +708,11 @@ yrd queue recover [--reason <text>] [--runner <id>] [--json]
 yrd queue finish <selector> [--step <name>] --job <id> --runner <runner>
   --attempt <number> --token <token> (--ok | --fail) [evidence options]
 yrd queue audit [--json]
-yrd queue init [base] [--json]
-yrd queue deinit [base] [--json]
+yrd admin queue init [base] [--json]
+yrd admin queue deinit [base] [--json]
+yrd admin bay prune [--apply] [--json]
+yrd admin pr prune [--dry-run] [--json]
+yrd admin journal bump <version> [--json]
 ```
 
 | Command              | Input                                             | Output and state                                                                                                      |
@@ -786,8 +725,8 @@ yrd queue deinit [base] [--json]
 | `recover`            | Optional reason or known-dead runner id           | Reconciles abandoned work and releases queued runs whose installed step definition changed                            |
 | `finish`             | One waiting PR/step plus job/runner/attempt/token | Records external-runner evidence and resumes that exact durable run                                                   |
 | `audit`              | Repository                                        | Journal, projection, pinned-plan, and installed-step findings; no state change                                        |
-| `init`               | Optional base                                     | Resolves and validates queue environment resources                                                                    |
-| `deinit`             | Optional base                                     | Releases resources owned by the installed queue adapter                                                               |
+| `admin queue init`   | Optional base                                     | Resolves queue resources and installs the managed pre-submit hook                                                      |
+| `admin queue deinit` | Optional base                                     | Releases resources owned by the installed queue adapter                                                               |
 
 `queue list` is the canonical read-only surface. `queue ls` is its spelling
 alias, bare `queue` defaults to it, and top-level `watch` is the same command
@@ -812,20 +751,20 @@ explicit empty `--steps` runs no steps. Re-entry is PR-owner-authorized: inspect
 `needs-author` work with `yrd pr runs <PR>`, fix its source branch, and push.
 The receiver appends a fresh revision on the same PR and records submit and
 check authority for its exact head automatically—there is no second submit
-ceremony. Check admission consumes the check fact, and an integrating Queue run
+ceremony. Required checks consume the check fact, and an integrating Queue run
 consumes the submit fact. Queue commands cannot mint authored authority. The
 resident freshness transition is the one mechanical carry-forward: its
-certified successor atomically retains the admitted revision's submit and check
+certified successor atomically retains the prior revision's submit and check
 authority on the same PR.
 
 The resident re-proves the installed baseline before every cycle. A
-`config-drift` finding first executes the same in-place `queue deinit`/`queue
-init` migration printed by the health surface, then re-audits before admitting
-work. If either capability is absent or the post-migration audit remains red
+`config-drift` finding first executes the same in-place `admin queue deinit` /
+`admin queue init` migration printed by the health surface, then re-audits
+before starting work. If either capability is absent or the post-migration audit remains red
 (including true runtime drift), the process exits loudly for its supervisor.
 
 To stop a resident `queue run` (its follow-by-default form), send `SIGINT` (Ctrl-C) or `SIGTERM`.
-The first signal stops new admission, lets the active run finish, and exits with
+The first signal stops new Queue work, lets the active run finish, and exits with
 that run's result; an idle runner exits cleanly. Send either signal again to
 force the existing hard shutdown and job-tree reap.
 
@@ -847,7 +786,7 @@ is covered separately: it leaves its heartbeat behind, and its successor reclaim
 the leases (see below).
 
 A resident acquires one OS-held lease in the repository's common Yrd state
-before receiver intake or Queue admission. A second resident exits with the
+before receiver intake or required-check execution. A second resident exits with the
 typed `resident-runner-active` refusal and identifies the active
 `yrd-cli:<pid>` runner. Job events retain that runner id; trace logs add
 host and available Herdr/cmux pane provenance. Normal exit and graceful
@@ -869,7 +808,7 @@ bounded budget, then defers the rest loudly for the resident to finish; the resi
 is the primary, unbounded drainer.
 
 An explicit non-empty selection is durable Run authority, not a filter applied
-after configured admission. Yrd neither starts nor reuses omitted configured
+after configured checks. Yrd neither starts nor reuses omitted configured
 checks. In particular, `--steps merge` prepares and pins a fresh candidate with
 the built-in repository, ancestry, lease, and remote-update safeguards; human
 and JSON output record every configured omission as `skipped` with reason
@@ -930,9 +869,9 @@ no merge was needed. V2 projects an author-attributable red as `needs-author`
 with its `attributedReceipt` and typed bounce. V1 explicitly degrades that
 state to `rejected` plus the same bounce; consumers should migrate to
 `trackerBridgeV2`. Canceled and withdrawn remain distinct terminal outcomes.
-An internally admitted `ready` revision remains externally `submitted` in
-both bridge versions until it reaches a terminal outcome; `ready` is Yrd
-admission evidence, not a tracker delivery status.
+A revision with passing required checks remains externally `submitted` in both
+bridge versions until it reaches a terminal outcome; a passing check is Queue
+evidence, not a tracker delivery status.
 
 The human `yrd issue view <issue>` surface projects those same typed facts: it
 prints exact PR revision/head, Queue runs, canonical projected status, landing
@@ -1009,82 +948,45 @@ advice is omitted. With `--json`, a diagnostic is one JSON object on stderr:
 its `failure` retains `{ kind, code, message }` and adds the actionable
 `cause`, `resolution`, and optional `reference`.
 
-## Queues and Steps
+## Required checks and landing
 
-The base branch's `.yrd.ts` is the canonical flow authority. It exports one
-`@yrd/config` value whose predicates select exactly one versioned `FlowDef` for
-each immutable submission. Zero matches and ambiguous matches are refusals, not
-first-match-wins policy. Yrd pins the selected flow name, revision, and
-structural fingerprint on the PR and every Run; `yrd doctor` reports
-unchanged-revision drift and refuses resumable work across a revision change.
+The base branch's `.yrd.yml` is the repository authority. It has one predicate
+list:
 
-```ts
-import { defineConfig, yrd } from "@yrd/config"
-
-export default defineConfig(
-  yrd.journal({
-    version: 1,
-    reader: "0123456789abcdef0123456789abcdef01234567",
-  }),
-  yrd.flow({
-    name: "main",
-    rev: "1",
-    on: ({ base }) => base === "main",
-    steps: [
-      yrd.check("check", { run: "bun vitest run --changed" }),
-      yrd.merge(),
-      yrd.action("deploy", { run: "bun run deploy" }),
-    ],
-  }),
-)
+```yaml
+checks: [typecheck]
 ```
 
-Yrd reads that source from the authoritative base tree, never from Candidate
-content. `--config <path>` selects another base-relative TypeScript or YAML
-authority without weakening that boundary. The optional `yrd.journal(...)`
-declaration is the oldest reader contract every writer must preserve. A writer
-whose stamped semantic journal version is newer refuses before append and
-names its exact required reader commit.
+`typecheck` is a built-in check that runs `bun run typecheck`. `check` is the
+other built-in and runs `git diff --check` against the pinned base. A repository
+may define a one-line command inline:
 
-Steps are immutable definitions and typed state transitions, not a
-workflow-language DSL. `withStep()` preserves the current shape. `withMerge()`
-changes it to an integrated shape. A post-merge step therefore cannot be
-composed before merge without a type error.
-
-```ts
-const bayJobs = createBayJobDefs(workspace)
-const check = withStep("check", checkRunner, { revision: "check-v1" })
-const review = withStep("coderabbit", reviewRunner, {
-  revision: "coderabbit-v1",
-})
-const merge = withMerge(gitMergeRunner, { revision: "git-merge-v1" })
-const deploy = withStep("deploy", deployRunner, {
-  revision: "deploy-v1",
-  kind: "action",
-})
-const queue = withQueue({ steps: [check, review, merge, deploy] as const })
-const contests = withContests({ runners, evaluators, git })
-
-const base = pipe(
-  createYrdDef(),
-  withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
-  withIssues({ sources }),
-  withBays({ jobs: bayJobs }),
-)
-
-await using yrd = await createYrd(contests(queue(base)), {
-  inject: { journal, scope, log },
-})
+```yaml
+checks: [{lint: {run: bun run lint, mode: strict}}]
 ```
 
-`withQueue()` installs the ordered descriptors and exposes the fixed Job
-definitions that the root installs once through `withJobs()`. Every step then
-becomes state, CLI selection, events, and status evidence through the same
-definition. Merge is not hardcoded pipeline policy; `withMerge()` is the typed
-transition that supplies integration proof.
+Merge is not a configurable check. It is Yrd's built-in landing transition, and
+post-landing effects belong to subscribers. The managed pre-submit hook and
+`pr submit`/`pr ready` run the same configured list for fast local feedback.
+The Queue runs it once more against the exact Candidate before the built-in
+merge. Skipping the hook therefore costs feedback latency but cannot weaken the
+landing gate. Run one configured check explicitly with `yrd check <name>`.
+
+`yrd admin init` writes the active one-liner, a generated commented reference
+for every supported key and default, and the managed pre-submit hook.
+`yrd admin init --refresh-comments` replaces only that generated comment block.
+Deleted repository keys—including `steps`, `journal`, `refuse`, `do`, `merge`,
+and named top-level command definitions—fail config load loudly.
+
+The reader's supported journal versions are compiled into Yrd. The journal
+records its own one-way version floor: a fresh journal is born at its creating
+writer's version, while an existing lower-floor journal refuses newer writes
+until `yrd admin journal bump <version>` proves all live residents are capable,
+takes a snapshot, and passes a restore drill. Repository config carries no
+journal version or reader SHA.
 
 The synchronous status projection is intentionally bounded to all live
-trees plus the latest 512 terminal roots. Failed admission evidence remains
+trees plus the latest 512 terminal roots. Failed required-check evidence remains
 live while it still governs a current PR's retry budget. A root and every
 isolation child otherwise co-retain and co-evict with their Queue-owned Jobs.
 Exact selectors and `queue.history()` materialize older runs from journal-owned
@@ -1092,47 +994,7 @@ entity slices; `yrd log --all` uses that lossless path, while default status
 remains bounded. Bare `log --all` discovers bases from that history too, so a
 fully retired base is not hidden merely because no live Bay or Queue names it.
 
-For existing repositories, the `.yrd.yml` legacy adapter turns arbitrary
-shell-backed names into the same
-plugins:
-
-```yaml
-base: main
-batch: 8
-steps: [check, coderabbit, sec-check, merge, deploy]
-journal:
-  version: 1
-  reader: "0123456789abcdef0123456789abcdef01234567"
-
-requires: [review]
-
-check: bun run test
-coderabbit:
-  run: launch-coderabbit
-  runner: waiting
-sec-check: bun run security
-merge:
-  run: land-candidate "$YRD_CANDIDATE_SHA"
-deploy: bun run deploy
-
-contest:
-  concurrency: 2
-  timeoutMs: 1800000
-  evaluators: [check, sec-check]
-
-notify:
-  pr/needs-author: [submitter]
-  pr/rejected: [submitter]
-  pr/needs-review: ["@cto"]
-  pr/integrated: [broadcast]
-  pr/already-landed: [submitter]
-  run/failed: [submitter, "@ci"]
-```
-
-Names before `merge` run against the pinned Candidate. Names after `merge` run
-against the integrated commit. The TypeScript API enforces this statically; the
-YAML adapter validates the same ordering while composing plugins.
-Object-form steps may declare `classification: base` when their evidence is
+Object-form checks may declare `classification: base` when their evidence is
 about the resolved base rather than the submitted carrier; all other steps
 default to `carrier`. The classification is part of the installed-step cache
 identity and appears in typed check evidence.
@@ -1143,9 +1005,9 @@ otherwise opaque output stays on the plain exit-code contract; absence of
 parseable diagnostics never aliases a real command failure to an environment
 refusal. The comparison declaration is part of the installed-step cache
 identity.
-Object-form steps also accept `mode: delta | strict` (default `delta`).
+Object-form checks also accept `mode: delta | strict` (default `delta`).
 `strict` requires an absolutely green Candidate and never runs the parent
-comparator. `delta` may admit inherited diagnostics only through an explicitly
+comparator. `delta` may accept inherited diagnostics only through an explicitly
 declared `comparison: diagnostics`, or through structured child trailers of
 the form `YRD-GATE-REPORT <json>`. Opaque output, truncated diagnostics, and a
 nonzero structured-child exit remain terminal.
@@ -1153,14 +1015,14 @@ nonzero structured-child exit remain terminal.
 A compound command that runs structured children before a diagnostics-only
 tool must emit a zero-residual `diagnostics-comparison-ready` report after every
 structured child passes and declare
-`comparisonReady: diagnostics-comparison-ready` in its step config. Only that
+`comparisonReady: diagnostics-comparison-ready` in its check config. Only that
 marker permits Yrd to compare a final nonzero diagnostics exit against the
 parent; a missing marker is terminal even when the command emitted no report.
 
-Every admitted check records a self-contained v1 gate certificate: mode, exact
+Every required check records a self-contained v1 gate certificate: mode, exact
 base and Candidate SHAs, comparator id/version, and each residual set's content
 hash plus count. The run/PR view projects this as `delta residual:N` or
-`strict residual:0`, so carried red stays visible even when admission is green.
+`strict residual:0`, so carried red stays visible even when the check passes.
 Mode is bound into installed-step identity; flipping a release step to `strict`
 cannot reuse a delta installation.
 `requires: [review]` is the only built-in review policy: the latest verdict for
@@ -1355,7 +1217,7 @@ view exception rolls the authoritative Frame back.
 writer lock without changing Journal authority.
 Core keeps only the latest 4,096 receipt frames warm. Live projections retain
 all nonterminal work, the latest 512 terminal Queue trees with every Job they
-reference, any older failed admission evidence still governing a live PR, and
+reference, any older failed required-check evidence still governing a live PR, and
 the latest 512 standalone terminal Jobs. Exact old retries,
 `Jobs.get()`/retry, Queue selectors, `events()`, and `yrd log --all` resolve from
 immutable history without repopulating those live windows. A custom Journal
@@ -1414,7 +1276,7 @@ Job requests pin the definition revision used to create them. Pending execution
 is refused if current plugin code has a different revision. Before execution,
 Queue reconciles a queued current step against its pinned plan: revision drift
 retires that Run as `stale-steps`, releases its authority, and leaves its PR
-submitted for fresh admission under the installed plan. `queue recover` performs
+submitted for fresh checks under the installed plan. `queue recover` performs
 the same reconciliation explicitly. A waiting Job may still finish after
 revision drift because its token, attempt, runner, and stable definition output
 contract fence that already-launched work. Queue runs also pin their complete

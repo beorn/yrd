@@ -4,10 +4,9 @@ import type { Yrd } from "@yrd/core"
 import type { HasJobs, HasRunner, JobCommands, JobsState } from "@yrd/job"
 import type { GitPRRecutter, HasQueue, QueueAuditResult, QueueCommands, QueuesState } from "@yrd/queue"
 import type { HasIssues } from "@yrd/issue"
-import type { JournalViewRebuildResult, OrphanJournalImportResult } from "@yrd/persistence"
-import type { Process } from "@yrd/process"
+import type { JournalVersionBumpResult, JournalViewRebuildResult, OrphanJournalImportResult } from "@yrd/persistence"
+import type { Process, ProcessResult } from "@yrd/process"
 import type { Scope } from "@silvery/scope"
-import type { ManagedDoConfig } from "./do-managed.ts"
 import type { QueueReadModel } from "./queue-read-model.ts"
 import type { SubmoduleBranchResolver } from "./submodule-tracking.ts"
 import type { YrdConfig } from "@yrd/config"
@@ -36,6 +35,13 @@ export type YrdCliQueueAdministration = Readonly<{
 export type YrdCliJournalAdministration = Readonly<{
   importOrphan(sourcePath: string): Promise<OrphanJournalImportResult>
   rebuildViews?(): Promise<JournalViewRebuildResult>
+  bump?(version: number): Promise<JournalVersionBumpResult>
+}>
+
+export type YrdCliChecks = Readonly<{
+  names: readonly string[]
+  run(name: string, cwd: string, context?: Readonly<{ ref?: string }>): Promise<ProcessResult>
+  install(cwd: string): Promise<string>
 }>
 
 export type YrdCliState = Readonly<{
@@ -60,13 +66,11 @@ export type YrdCliServices = Readonly<{
   queueReadModel?: Pick<QueueReadModel, "attempts">
   recut?: GitPRRecutter
   journal?: YrdCliJournalAdministration
+  checks?: YrdCliChecks
   process?: Pick<Process, "run" | "reapPath">
   /** Live base-authority flow config for deterministic doctor diagnostics. */
   config?: YrdConfig
-  /** Repository-owned managed `do` policy (`do:` in the project config). Absent
-   * means the managed path refuses by name instead of inventing a command. */
-  managedDo?: ManagedDoConfig
-  /** Configured base branch, for the ancestry proof a managed landing prints. */
+  /** Configured base branch. */
   base?: string
   /** Exact host environment inherited by Bay child processes. */
   environment?: NodeJS.ProcessEnv
@@ -149,8 +153,9 @@ export type YrdCliIO = {
   /** Git facts for `pr prune` and `pr recut --preflight`; defaults to real Git
    * plumbing in `cwd`. */
   pruneGit?(cwd: string): PruneGitFacts
-  /** Resolve a submodule's upstream default branch for `yrd init`; defaults to
-   * `git ls-remote --symref`. Tests inject a resolver to avoid the network. */
+  /** Resolve a submodule's upstream default branch for `yrd admin submodule
+   * init`; defaults to `git ls-remote --symref`. Tests inject a resolver to
+   * avoid the network. */
   resolveSubmoduleDefaultBranch?: SubmoduleBranchResolver
   scope?: Pick<Scope, "signal" | "sleep">
   drainSignal?: AbortSignal

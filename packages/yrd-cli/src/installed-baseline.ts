@@ -5,9 +5,9 @@ import { raiseFailure } from "@yrd/core"
 import { createExclusive } from "@yrd/persistence"
 import { ReplayInstalledStepSchema, type InstalledStep, type QueueAuditFinding } from "@yrd/queue"
 
-/** The installed baseline: the queue installation baseline written by `yrd queue
- * init` (provision). It pins the check-definition revisions the operator
- * installed so `yrd queue audit` can detect that the selected current
+/** The installed baseline: the queue installation baseline written by `yrd
+ * admin queue init` (provision). It pins the check-definition revisions the
+ * operator installed so `yrd queue audit` can detect that the selected current
  * repository config drifted before any expensive Run starts. */
 const InstalledBaselineSchema = z
   .object({
@@ -135,7 +135,7 @@ export async function removeInstalledBaseline(
 }
 
 export function installedBaselineRemedy(base: string): string {
-  return `Run 'yrd queue deinit ${base}' then 'yrd queue init ${base}' to migrate the installed baseline before starting runs.`
+  return `Run 'yrd admin queue deinit ${base}' then 'yrd admin queue init ${base}' to migrate the installed baseline before starting runs.`
 }
 
 /** Abbreviate long hash-shaped revisions for the operator message; leave
@@ -237,10 +237,10 @@ export function runtimeBaselineDrift(
   }
 }
 
-/** Refuse a mutable source root before admission. A startup capture can prove
- * what eager imports loaded, but lazy imports would observe a later checkout.
- * The authoritative pin is included so an operator can compare all three raw
- * identities without translating an internal step hash. */
+/** Refuse a mutable source root before required checks. A startup capture can
+ * prove what eager imports loaded, but lazy imports would observe a later
+ * checkout. The authoritative pin is included so an operator can compare all
+ * three raw identities without translating an internal step hash. */
 export function runtimeImplementationSourceDrift(
   loaded: string,
   workingTree: string | undefined,

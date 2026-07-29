@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest"
 import { followQueueRuns } from "../src/run.ts"
 import type { YrdCliApp, YrdCliIO } from "../src/types.ts"
 
-const DEPRECATION = "deprecated: follow is the default; --watch is removed next release"
+const DEPRECATION = "--watch is no longer needed; queue run already follows by default."
 
 type WarnCall = Readonly<{ message: string; props: Record<string, unknown> }>
 
@@ -19,8 +19,8 @@ function harness(runResponses: readonly (() => Promise<readonly unknown[]>)[]) {
   let runCalls = 0
   const app = {
     scope: { signal, sleep: async () => undefined },
-    // Nothing has ever been refused here: the follow loop reads the admission
-    // refusal ledger after each settled cycle for its stall health check.
+    // Nothing has ever been refused here: the follow loop reads the required
+    // check refusal ledger after each settled cycle for its stall health check.
     state: () => ({ bays: { prs: {} }, queues: { admissionRefusals: {} } }),
     log: {
       warn: (message: string, props: Record<string, unknown>) => warnings.push({ message, props }),

@@ -105,7 +105,7 @@ function refuseForever(blocked: () => string): CandidatePreparer {
       throw createFailure({
         kind: "refusal",
         code: "authored-gitlink",
-        message: `yrd: PR '${blocked()}' authors a gitlink bump; recut it before admission`,
+        message: `yrd: PR '${blocked()}' authors a gitlink bump; recut it before required checks`,
       })
     }
     const { prs: _prs, ...candidate } = input
@@ -158,9 +158,9 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     })
     const finding = app.queue.audit().findings.find((item) => item.code === "admission-refusal-loop")
     expect(finding?.message).toBe(
-      `PR '${pr.id}' at the head of the admission queue was refused 3 consecutive times over 5h46m ` +
-        `(since 2026-01-01T00:00:00.000Z) without ever being admitted; latest refusal 'authored-gitlink': ` +
-        `yrd: PR '${pr.id}' authors a gitlink bump; recut it before admission`,
+      `PR '${pr.id}' at the head of the required-check queue was refused 3 consecutive times over 5h46m ` +
+        `(since 2026-01-01T00:00:00.000Z) without ever completing required checks; latest refusal 'authored-gitlink': ` +
+        `yrd: PR '${pr.id}' authors a gitlink bump; recut it before required checks`,
     )
     log.end()
   })

@@ -37,7 +37,7 @@ const increaseDiagnostics = (_value: string, previous: number): number => previo
 export function configureYrdGlobalOptions(program: CliCommand): CliCommand {
   return program
     .option("--repo <path>", "repository authority and operation root (env: YRD_REPO)")
-    .option("--config <path>", "base-relative .yrd.ts/.yml config authority")
+    .option("--config <path>", "base-relative .yml/.yaml config authority")
     .option("--name <name>", "one session/PR/branch/Bay name (env: HAB_NAME)")
     .option("--wire <socket>", "notification wire socket or capture sink (env: HAB_WIRE)")
     .option("-v, --verbose", "increase diagnostics (-vv enables spans, -vvv traces)", increaseDiagnostics, 0)

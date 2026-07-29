@@ -162,7 +162,7 @@ describe("Yrd domain objects", () => {
 
   it("stamps appended frames with the injected journal compatibility contract", async () => {
     const journal = createMemoryJournal()
-    const compatibility = { version: 1, reader: "a".repeat(40) }
+    const compatibility = { version: 1 }
     await using app = await createYrd(withCounter()(createYrdDef()), {
       inject: {
         journal,
@@ -197,7 +197,7 @@ describe("Yrd domain objects", () => {
     await using app = await createYrd(definition, {
       inject: {
         journal,
-        compatibility: { version: 1, reader: "a".repeat(40) },
+        compatibility: { version: 1 },
       },
     })
 
@@ -237,12 +237,11 @@ describe("Yrd domain objects", () => {
     expect(Object.isFrozen(definition)).toBe(true)
   })
 
-  it("refuses a future journal frame and names the exact required reader pin", () => {
+  it("refuses a future journal frame against the compiled reader capability", () => {
     const command = Core.Command.parse({
       id: "00000000-0000-7000-8000-000000000001",
       op: "test.record",
     })
-    const requiredReader = "b".repeat(40)
     const value = {
       cause: Core.CauseSchema.parse({
         id: "00000000-0000-7000-8000-000000000002",
@@ -252,10 +251,10 @@ describe("Yrd domain objects", () => {
       }),
       command,
       events: [],
-      compatibility: { version: Core.JOURNAL_READER_VERSION + 1, reader: requiredReader },
+      compatibility: { version: Core.JOURNAL_READER_VERSION + 1 },
     }
 
-    expect(() => Core.parseJournalFrame(value)).toThrow(requiredReader)
+    expect(() => Core.parseJournalFrame(value)).toThrow(`compiled capability v${Core.JOURNAL_READER_VERSION}`)
     try {
       Core.parseJournalFrame(value)
     } catch (error) {
@@ -403,7 +402,7 @@ describe("Yrd domain objects", () => {
     const backing = createMemoryJournal<unknown>()
     const cache = createCheckpointJournal(backing)
     const definition = withCounter()(createYrdDef())
-    const compatibility = { version: 1, reader: "a".repeat(40) }
+    const compatibility = { version: 1 }
     const writer = await createYrd(definition, {
       inject: {
         journal: cache.journal,

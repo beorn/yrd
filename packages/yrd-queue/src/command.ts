@@ -2192,7 +2192,7 @@ function candidateFailure(
   }
 }
 
-/** 22396 — a candidate reaches this path only after admission, so its PR is
+/** 22396 — a candidate reaches this path only after required checks, so its PR is
  * submitted and `yrd pr create` (accepted only for a draft PR) would refuse.
  * `yrd pr submit <branch>` re-records the corrected branch in every delivery
  * state, so the embedded remedy stays executable wherever it is surfaced —
