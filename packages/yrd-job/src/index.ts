@@ -29,6 +29,7 @@ export {
   Job,
   JobStateConflict,
   JobTransitionSchema,
+  parseJobTransitionForReplay,
   withJobs,
 } from "./jobs.ts"
 export type {

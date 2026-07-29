@@ -28,6 +28,7 @@ import {
   Job,
   JobStateConflict,
   localRunner,
+  parseJobTransitionForReplay,
   withJobs,
   type ContextReq,
   type Job as JobRecord,
@@ -378,6 +379,36 @@ describe("Jobs", () => {
       output: { receipt: "legacy-ok" },
     })
     expect(app.jobs.get(restoredJobId)).toMatchObject({ status: "queued", attempt: 1 })
+  })
+
+  it("normalizes recorded legacy Job transitions and names unsupported immutable values", () => {
+    expect(
+      parseJobTransitionForReplay({
+        type: "finish",
+        id: "019f5d11-2c5b-7191-a89e-c935529fdf65",
+        attempt: 1,
+        runner: "yrd-cli",
+        result: {
+          status: "failed",
+          error: { code: "check-failed", message: "reference already exists" },
+        },
+      }),
+    ).toMatchObject({
+      result: {
+        status: "completed",
+        conclusion: "failure",
+        error: { code: "check-failed" },
+      },
+    })
+    expect(() =>
+      parseJobTransitionForReplay({
+        type: "finish",
+        id: JOB_ID,
+        attempt: 1,
+        runner: "yrd-cli",
+        result: { status: "completed", conclusion: "superseded" },
+      }),
+    ).toThrow(/unsupported Job transition.*superseded/u)
   })
 
   it("retains all live Jobs, the latest 512 standalone terminals, and 512 complete Queue-owned groups", () => {

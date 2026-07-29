@@ -9,6 +9,7 @@ import { join } from "node:path"
 import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it } from "vitest"
 import { CauseSchema, Command, EventSchema, type Event } from "@yrd/core"
+import { parseJobTransitionForReplay } from "@yrd/job"
 import { createJournal } from "@yrd/persistence"
 import { createQueueReadModel } from "../src/queue-read-model.ts"
 import { queueLogAttempts } from "../src/queue-status-view.tsx"
@@ -85,6 +86,53 @@ function attemptEvents(label: string): readonly Event[] {
   ]
 }
 
+function legacyAttemptEvents(): readonly Event[] {
+  return [
+    EventSchema.parse({
+      id: "019f5d11-2c5b-7191-a89e-c935529fdf65",
+      name: "job/requested",
+      ts: "2026-07-13T20:00:34.395Z",
+      data: {
+        definition: "queue.step.check",
+        revision: "03848543a26fa5253440e69e6825fe5380f5301c840f9f883b8a045b1d576297",
+        input: { run: "R1", step: "check", index: 0 },
+        key: "queue:R1:0",
+      },
+    }),
+    EventSchema.parse({
+      id: "019f5d11-2c60-77d8-9584-c3b8b2dd56b3",
+      name: "job/transitioned",
+      ts: "2026-07-13T20:00:34.400Z",
+      data: {
+        type: "start",
+        id: "019f5d11-2c5b-7191-a89e-c935529fdf65",
+        attempt: 1,
+        runner: "yrd-cli",
+        leaseExpiresAt: "2026-07-13T20:05:34.399Z",
+      },
+    }),
+    EventSchema.parse({
+      id: "019f5d11-8af5-750f-94ac-79e0f2dbeab4",
+      name: "job/transitioned",
+      ts: "2026-07-13T20:00:58.613Z",
+      data: {
+        type: "finish",
+        id: "019f5d11-2c5b-7191-a89e-c935529fdf65",
+        attempt: 1,
+        runner: "yrd-cli",
+        result: {
+          status: "failed",
+          error: {
+            code: "check-failed",
+            message:
+              "fatal: update_ref failed for ref 'refs/yrd/candidates/R1/check/attempt-1': cannot lock ref 'refs/yrd/candidates/R1/check/attempt-1': reference already exists",
+          },
+        },
+      },
+    }),
+  ]
+}
+
 describe("queue read model", () => {
   it("answers an empty repository without creating Journal authority", async () => {
     const dir = await directory()
@@ -109,6 +157,35 @@ describe("queue read model", () => {
     })
 
     await expect(model.attempts()).resolves.toEqual(await queueLogAttempts(events))
+  })
+
+  it("normalizes legacy Job finish results while rebuilding real Journal history", async () => {
+    const dir = await directory()
+    const model = createQueueReadModel({ dir })
+    const journal = createJournal({
+      dir,
+      views: [model.view],
+    })
+
+    const events = legacyAttemptEvents()
+    expect(parseJobTransitionForReplay(events[2]?.data)).toMatchObject({
+      type: "finish",
+      result: {
+        status: "completed",
+        conclusion: "failure",
+        error: { code: "check-failed" },
+      },
+    })
+
+    await expect(journal.append(journalFrame("legacy", events), 0)).resolves.toMatchObject({
+      appended: true,
+    })
+    await expect(model.attempts()).resolves.toMatchObject([
+      {
+        outcome: "failed",
+        result: { status: "failed", error: { code: "check-failed" } },
+      },
+    ])
   })
 
   it("caches an unchanged cursor and invalidates the cache after an explicit rebuild", async () => {

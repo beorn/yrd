@@ -569,6 +569,15 @@ const ReplayJobTransitionSchema = z.union([
 ])
 export type JobTransition = z.infer<typeof JobTransitionSchema>
 
+export function parseJobTransitionForReplay(value: unknown): JobTransition {
+  const parsed = ReplayJobTransitionSchema.safeParse(value)
+  if (parsed.success) return parsed.data
+  const encoded = JSON.stringify(value)
+  throw new Error(`yrd: unsupported Job transition in immutable history: ${encoded ?? String(value)}`, {
+    cause: parsed.error,
+  })
+}
+
 export const Job = Object.freeze({
   requested(id: string, at: string, request: JobRequest): Job {
     return {
@@ -1344,7 +1353,7 @@ function projectJobs(state: DeepReadonly<{ jobs: JobsState }>, applied: Event): 
     }
   }
   if (applied.name !== "job/transitioned") return state
-  const change = ReplayJobTransitionSchema.parse(applied.data)
+  const change = parseJobTransitionForReplay(applied.data)
   const current = state.jobs.byId[change.id]
   const projected = Job.apply(current, change, applied.ts)
   const byId = { ...state.jobs.byId, [change.id]: projected }

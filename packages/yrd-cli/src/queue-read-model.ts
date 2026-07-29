@@ -2,8 +2,8 @@ import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { Database } from "bun:sqlite"
-import { EventSchema } from "@yrd/core"
-import { JobRequestSchema, JobTransitionSchema } from "@yrd/job"
+import { EventSchema, type Event } from "@yrd/core"
+import { JobRequestSchema, parseJobTransitionForReplay, type JobTransition } from "@yrd/job"
 import type { JournalView, JournalViewEntry } from "@yrd/persistence"
 import type { QueueAttempt } from "./queue-status-view.tsx"
 
@@ -204,17 +204,25 @@ function projectQueueFrame(database: Database, entry: JournalViewEntry): void {
       continue
     }
     if (event.name !== "job/transitioned") continue
-    const transition = JobTransitionSchema.parse(event.data)
-    if (transition.type === "start") {
-      database
-        .query(
-          `INSERT INTO queue_job_starts(job_id, attempt, runner, started_at)
-           VALUES (?, ?, ?, ?)`,
-        )
-        .run(transition.id, transition.attempt, transition.runner, event.ts)
-      continue
+    const transition = parseQueueJobTransition(database, entry, event)
+    switch (transition.type) {
+      case "start":
+        database
+          .query(
+            `INSERT INTO queue_job_starts(job_id, attempt, runner, started_at)
+             VALUES (?, ?, ?, ?)`,
+          )
+          .run(transition.id, transition.attempt, transition.runner, event.ts)
+        continue
+      case "finish":
+      case "lose":
+        break
+      case "heartbeat":
+      case "wait":
+      case "cancel":
+      case "retry":
+        continue
     }
-    if (transition.type !== "finish" && transition.type !== "lose") continue
 
     const request = database
       .query<QueueRequestRow, [string]>(
@@ -270,6 +278,32 @@ function projectQueueFrame(database: Database, entry: JournalViewEntry): void {
         durationMs,
         JSON.stringify(result),
       )
+  }
+}
+
+function parseQueueJobTransition(database: Database, entry: JournalViewEntry, event: Event): JobTransition {
+  try {
+    return parseJobTransitionForReplay(event.data)
+  } catch (error) {
+    const value = event.data
+    const job =
+      typeof value === "object" &&
+      value !== null &&
+      !Array.isArray(value) &&
+      "id" in value &&
+      typeof value.id === "string"
+        ? value.id
+        : undefined
+    const run =
+      job === undefined
+        ? undefined
+        : database
+            .query<{ run_id: string }, [string]>("SELECT run_id FROM queue_job_requests WHERE job_id = ?")
+            .get(job)?.run_id
+    throw new Error(
+      `yrd: queue read model cannot decode Job transition for run '${run ?? "unknown"}' at Journal row ${String(entry.cursor)}, event '${event.id}'; value=${JSON.stringify(value)}`,
+      { cause: error },
+    )
   }
 }
 

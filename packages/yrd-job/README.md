@@ -98,6 +98,11 @@ its later terminal state consumes the standalone 512-Job window instead of
 resurrecting or displacing a Queue tree. Queue roots and their ordinary Jobs
 co-evict; custom Journals without history disable this compactor.
 
+Consumers that project immutable Job history call
+`parseJobTransitionForReplay(value)`. It is the single compatibility boundary
+that normalizes recorded pre-target `passed`/`failed` finish results and fails
+loud on an unsupported historical value.
+
 A definition parks externally owned work by returning:
 
 ```ts
