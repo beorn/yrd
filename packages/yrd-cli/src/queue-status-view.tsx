@@ -1675,7 +1675,7 @@ function projectFailure(
   evidence?: HumanFailureProjection["evidence"],
   delivery?: PRDeliveryState,
 ): HumanFailureProjection {
-  const failure = actionableFailure(fact, (delivery === undefined ? {} : { delivery }))
+  const failure = actionableFailure(fact, delivery === undefined ? {} : { delivery })
   return {
     ...failure,
     summary: actionableFailureSummary(failure),
@@ -1856,7 +1856,10 @@ function timelineRunMemberRows(
   nowIso: string,
   submissionTimes: ReadonlyMap<string, string | null>,
   state: BaysState | undefined,
-  attempts: readonly QueueAttempt[],
+  /** Attempts for THIS run only — see {@link queueAttemptsByRun}. Narrowing at
+   * the call site keeps the projection linear in the attempt count instead of
+   * rescanning every attempt once per run. */
+  runAttempts: readonly QueueAttempt[],
 ): QueueTimelineProjectedRow[] {
   const running = run.status === "queued" || run.status === "in_progress" || run.status === "waiting"
   const terminal = running ? null : terminalProjection(run)
@@ -1866,10 +1869,7 @@ function timelineRunMemberRows(
   const elapsedRunMs = running
     ? timelineAge(run.startedAt, nowIso, `Run '${run.id}' active duration`)
     : (elapsedMs(run.startedAt, run.finishedAt, `Run '${run.id}' active duration`) ?? null)
-  const durations = runDurations(
-    run,
-    attempts.filter((attempt) => attempt.run === run.id),
-  )
+  const durations = runDurations(run, runAttempts)
   const totalMs = running ? elapsedRunMs : (durations.totalDurationMs ?? null)
   const activeMs = running ? null : (durations.activeDurationMs ?? null)
   const waitMs = running ? null : (durations.waitDurationMs ?? null)
@@ -2272,6 +2272,27 @@ function foldTerminalFacts(
   return [...byRun.values()]
 }
 
+/** Group attempts by their Run once, so the projection can hand each Run only
+ * its own attempts.
+ *
+ * Both hot loops of {@link queueTimelineProjection} — the row build and the
+ * per-Run detail build — used to run `attempts.filter(a => a.run === run.id)`
+ * for every Run, making the projection O(runs x attempts). On a real queue that
+ * is 655 runs against 4356 attempts, ~2.9M comparisons per snapshot, and the
+ * watch loop pays it once per 1s tick AND once per cursor movement. One pass
+ * over the attempts makes the same work linear. */
+function queueAttemptsByRun(attempts: readonly QueueAttempt[]): ReadonlyMap<string, readonly QueueAttempt[]> {
+  const byRun = new Map<string, QueueAttempt[]>()
+  for (const attempt of attempts) {
+    const existing = byRun.get(attempt.run)
+    if (existing === undefined) byRun.set(attempt.run, [attempt])
+    else existing.push(attempt)
+  }
+  return byRun
+}
+
+const NO_ATTEMPTS: readonly QueueAttempt[] = Object.freeze([])
+
 export function queueTimelineProjection(
   results: readonly QueueStatusResult[],
   options: QueueTimelineProjectionOptions,
@@ -2297,10 +2318,18 @@ export function queueTimelineProjection(
   const statuses = TIMELINE_STATUS_ORDER.filter((status) => requestedStatuses.includes(status))
   const selectedStatuses = new Set(statuses)
   const terms = [...new Set(options.terms.map((term) => term.trim().toLocaleLowerCase()).filter(Boolean))]
+  const attemptsByRun = queueAttemptsByRun(options.attempts ?? [])
   const rawRows = results.flatMap((result) => [
     ...timelineNonIntegratedRows(result, nowIso, options.submissionTimes, options.state),
     ...[...result.running, ...result.waiting, ...result.finished].flatMap((run) =>
-      timelineRunMemberRows(result, run, nowIso, options.submissionTimes, options.state, options.attempts ?? []),
+      timelineRunMemberRows(
+        result,
+        run,
+        nowIso,
+        options.submissionTimes,
+        options.state,
+        attemptsByRun.get(run.id) ?? NO_ATTEMPTS,
+      ),
     ),
   ])
   // Status + window + term filtering, then the optional latest-per-PR fold.
@@ -2344,7 +2373,10 @@ export function queueTimelineProjection(
     if (row.run === undefined || detailRuns.has(`${row.base}:${row.run}`)) return []
     detailRuns.add(`${row.base}:${row.run}`)
     const run = allRuns.find((candidate) => candidate.id === row.run && candidate.base === row.base)
-    return run === undefined ? [] : [queueShowData(run, finished, options.attempts ?? [])]
+    // `queueShowData` re-filters the attempts it is handed down to this Run, so
+    // passing the pre-narrowed slice is semantically identical and drops the
+    // per-Run scan of every attempt in the journal.
+    return run === undefined ? [] : [queueShowData(run, finished, attemptsByRun.get(run.id) ?? NO_ATTEMPTS)]
   })
   const limit = Math.max(1, Math.floor(options.rowLimit))
   const retainedSince =
