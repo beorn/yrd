@@ -74,7 +74,13 @@ import {
   runtimeImplementationSourceDrift,
   writeInstalledBaseline,
 } from "./installed-baseline.ts"
-import { createExclusive, createJournal, createReadOnlyJournal, importOrphanJournal } from "@yrd/persistence"
+import {
+  createExclusive,
+  createJournal,
+  createReadOnlyJournal,
+  importOrphanJournal,
+  type MutableJournal,
+} from "@yrd/persistence"
 import { createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
 import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import type { ConditionalLogger } from "loggily"
@@ -113,6 +119,7 @@ import {
   type SignalObserver,
 } from "./signals.ts"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliQueueAdministration, YrdCliServices } from "./types.ts"
+import { createQueueReadModel } from "./queue-read-model.ts"
 
 type RuntimeStep = StepDef<PRShape, PRShape>
 
@@ -1341,10 +1348,12 @@ async function createYrdRuntimeHost(
             process,
           })
         : await createViewerReceiver(repository, process)
+    const queueReadModel = createQueueReadModel({ dir: repository.stateDir })
     const journal =
       mode === "active"
         ? createJournal({
             dir: repository.stateDir,
+            views: [queueReadModel.view],
             ...(loaded.config.journal === undefined ? {} : { compatibility: loaded.config.journal }),
             inject: { log },
           })
@@ -1491,8 +1500,19 @@ async function createYrdRuntimeHost(
       ...(loaded.config.do === undefined ? {} : { managedDo: loaded.config.do }),
       journal: Object.freeze({
         importOrphan: (sourcePath: string) =>
-          importOrphanJournal({ dir: repository.stateDir, sourcePath, importedBy: defaultSubmitter, log }),
+          importOrphanJournal({
+            dir: repository.stateDir,
+            sourcePath,
+            importedBy: defaultSubmitter,
+            views: [queueReadModel.view],
+            log,
+          }),
+        rebuildViews: () => {
+          if (mode !== "active") throw new Error("yrd: viewer runtime cannot rebuild Journal views")
+          return (journal as MutableJournal).views.rebuild()
+        },
       }),
+      queueReadModel,
       process,
       environment: env,
     })
@@ -1545,6 +1565,7 @@ async function runReceiverHook(mode: "pre-receive" | "post-receive", env: NodeJS
       receiverPath: receiver.receiverPath,
       journal: createJournal({
         dir: repository.stateDir,
+        views: [createQueueReadModel({ dir: repository.stateDir }).view],
         ...(loaded.config.journal === undefined ? {} : { compatibility: loaded.config.journal }),
         inject: { log },
       }),
@@ -1718,6 +1739,7 @@ export async function runYrdProcess(
               }
         log = createYrdLogger(observability, (text) => io.stderr(text), human)
         const runtimeLog = resident === undefined ? log : residentRunnerLog(log, resident)
+        const selectedImplementationSource = io.implementationSource ?? sourceBridge?.identity
         const activeHost = await createYrdRuntimeHost(
           {
             cwd: context.repo,
@@ -1728,9 +1750,9 @@ export async function runYrdProcess(
             ...(context.wire === undefined ? {} : { wire: context.wire }),
             interactive: io.interactive === true,
             wireOutput: (text) => io.stdout(text),
-            ...(io.implementationSource === undefined && sourceBridge === undefined
+            ...(selectedImplementationSource === undefined
               ? {}
-              : { implementationSource: io.implementationSource ?? sourceBridge!.identity }),
+              : { implementationSource: selectedImplementationSource }),
             ...(sourceBridge === undefined ? {} : { implementationSourceRepository: sourceBridge.repository }),
           },
           resident,

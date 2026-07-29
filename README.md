@@ -1341,11 +1341,17 @@ rows. Startup restores the validated Core checkpoint and folds only the tail
 into Bay, PR, Queue, Job, and Contest state. Snapshot publication moves covered
 rows into history and binds the bounded checkpoint in one transaction, so old
 notification and bridge cursors remain valid without duplicating the full
-prefix inside the checkpoint. There is no second mutable database or read-model
-authority to reconcile.
+prefix inside the checkpoint. Transactionally coupled, rebuildable query views
+may share this same SQLite file; there is no second mutable database or
+read-model authority to reconcile.
 
 Command, cause, event, Job, Job-key, and Queue lookup facts are derived from
 the same frames in the same transaction and are equality-checked when read.
+Registered query views follow the same rule: their schema and projection stay
+with the consuming package, their version/fingerprint/cursor live in
+`journal_views`, and a view exception rolls the authoritative Frame back.
+`yrd doctor --rebuild-views` recreates them from immutable history under the
+writer lock without changing Journal authority.
 Core keeps only the latest 4,096 receipt frames warm. Live projections retain
 all nonterminal work, the latest 512 terminal Queue trees with every Job they
 reference, any older failed admission evidence still governing a live PR, and

@@ -14,7 +14,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { currentPRRev, prBaseSha, prDeliveryState } from "@yrd/bay"
 import { createFailure, createMemoryJournal } from "@yrd/core"
 import { DIAGNOSTICS_COMPARISON_READY, GitCheckEvidenceSchema, IntegrationProofSchema, Queues } from "@yrd/queue"
-import { createExclusive, createJournal } from "@yrd/persistence"
+import { createExclusive, createJournal, createReadOnlyJournal } from "@yrd/persistence"
 import { createProcess, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createLogger, type ConditionalLogger } from "loggily"
 import * as z from "zod"
@@ -66,7 +66,7 @@ async function git(repo: string, ...args: string[]): Promise<string> {
 }
 
 async function journalEnvelope(repo: string) {
-  return Array.fromAsync(testJournal(join(repo, ".git", "yrd")).read())
+  return Array.fromAsync(createReadOnlyJournal({ dir: join(repo, ".git", "yrd") }).read())
 }
 
 function testJournal(dir: string, log?: ConditionalLogger) {
@@ -2494,6 +2494,7 @@ notify:
 
     await using host = await createYrdHost({ cwd: repo })
     expect(host.services.recut).toBeDefined()
+    await expect(host.services.queueReadModel?.attempts()).resolves.toEqual([])
     const headSha = await git(repo, "rev-parse", "issue/feature")
     await host.app.bays.submit({ branch: "issue/feature", headSha, base: "main" })
 
@@ -2561,6 +2562,10 @@ notify:
           { runner: "legacy", leaseMs: 60_000, now: () => Date.parse("2026-01-01T00:00:00.000Z") },
         ),
       ).rejects.toThrow("host legacy fixture")
+    }
+    {
+      using database = new Database(join(stateDir, "journal.sqlite"), { readwrite: true, strict: true })
+      database.run("DROP TABLE journal_views")
     }
 
     await using host = await createYrdHost({ cwd: repo })

@@ -481,10 +481,10 @@ export function queueRunRevisionClocks(prs: Iterable<PR>, runs: Iterable<Run>): 
   return clocks
 }
 
-/** Folds the whole journal history into attempt rows. This is the consumer that
- * actually reads the event log on a cold `queue ls` — replay reports zero events
- * because the checkpoint is current, but this scan still decodes every stored
- * event, so "replay did nothing" never meant "the journal was not read". */
+/** Compatibility projector for injected/custom runtimes without the installed
+ * Queue read-model service. Production CLI hosts query the transactionally
+ * maintained SQLite view; this pure fold remains the parity oracle and the
+ * explicit fallback for Journals that cannot contribute views. */
 export async function queueLogAttempts(events: AsyncIterable<Event> | Iterable<Event>): Promise<QueueAttempt[]> {
   return stageAsync("history-scan", () => scanQueueLogAttempts(events))
 }
