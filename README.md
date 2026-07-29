@@ -530,6 +530,7 @@ yrd pr create [selector] [--base <branch>] [--issue <ref>]
 yrd pr submit [selector...] [--follow] [--base <branch>]
   [--issue <ref>] [--title <text>] [--description <text>]
   [--correlation <namespace:id>] [--json]
+yrd pr checkout <selector> [--bay <name>] [--json]
 yrd pr list [--base <branch>] [--state <state>] [--issue <ref>]
   [--needs-review [--reviewer <reviewer>]] [--json]
 yrd pr edit <selector> [--issue <ref>] [--note <text>]
@@ -556,6 +557,12 @@ admits its configured checks. `--follow` stays attached to the same journaled
 Run. `pr checks` renders the same typed evidence in human or newline-delimited
 JSON output, including command argv, concise diagnostics,
 base-versus-carrier classification, and artifact paths.
+
+`pr checkout` is immutable inspection: it provisions the recorded revision
+head in detached HEAD and asserts the resulting Bay head before reporting
+success. The PR author's live branch may remain checked out elsewhere. Use
+`bay open --pr <selector>` instead when continuing authored branch work that
+needs refresh or checkpoint operations.
 
 `pr recut` fetches the authoritative base internally and records a mechanically
 equivalent, certificate-bearing successor on the same PR. `--revision` selects

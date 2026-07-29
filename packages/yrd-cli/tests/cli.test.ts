@@ -1028,6 +1028,8 @@ describe("runYrd", () => {
     expect(await runYrd(mismatched, yrd("pr", "checkout", "PR1", "--json"), refused.io)).toBe(1)
     expect(refused.stdout()).toBe("")
     expect(refused.stderr()).toContain(`does not match PR 'PR1' revision head ${HEAD_SHA}`)
+    expect(refused.stderr()).toContain("yrd bay close pr-pr1")
+    expect(refused.stderr()).toContain("yrd pr checkout PR1 --bay pr-pr1")
 
     const provisions: Array<Record<string, unknown>> = []
     const app = await createApp({ provisions })

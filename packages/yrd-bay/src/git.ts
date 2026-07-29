@@ -78,7 +78,7 @@ function rethrowWorktreeOwnershipConflict(cause: unknown): never {
   if (!/already used by worktree|is already checked out/iu.test(message)) throw cause
   throw new Error(
     `${message}\nThe branch remains owned by its existing worktree; ` +
-      "use a commit SHA as 'from' to materialize detached HEAD instead.",
+      "retry with '--from <commit-sha>' to materialize detached HEAD instead.",
   )
 }
 

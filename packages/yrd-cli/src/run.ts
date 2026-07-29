@@ -1529,7 +1529,9 @@ async function provisionBay(
   if (options.expectedHead !== undefined && bay.headSha?.toLowerCase() !== options.expectedHead.toLowerCase()) {
     const expected =
       pr === undefined ? `expected head ${options.expectedHead}` : `PR '${pr}' revision head ${options.expectedHead}`
-    refusal(`bay '${name}' HEAD ${bay.headSha ?? "(missing)"} does not match ${expected}`)
+    const recovery =
+      pr === undefined ? "" : `; run 'yrd bay close ${name}', then retry 'yrd pr checkout ${pr} --bay ${name}'`
+    refusal(`bay '${name}' HEAD ${bay.headSha ?? "(missing)"} does not match ${expected}${recovery}`)
   }
   await printResult(
     io,

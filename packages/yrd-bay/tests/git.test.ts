@@ -617,7 +617,7 @@ describe("createGitWorkspace", () => {
     expect(branchHeld).toMatchObject({ status: "completed", conclusion: "failure" })
     const branchHeldMessage = String((branchHeld as { error?: { message?: string } }).error?.message ?? branchHeld)
     expect(branchHeldMessage).toMatch(/already used by worktree|is already checked out/iu)
-    expect(branchHeldMessage).toContain("commit SHA")
+    expect(branchHeldMessage).toContain("--from <commit-sha>")
 
     // Detached HEAD at the recorded SHA succeeds and matches the revision.
     const detached = await adapter.provision(
