@@ -28,35 +28,38 @@ type Frame = Readonly<{ name: string; started: number }> & { nestedMs: number }
 
 const totals = new Map<string, number>()
 const stack: Frame[] = []
-
-/** Elapsed for a finished frame, folded into its own bucket as self time and
- * into its parent's nested total so the parent does not also claim it. */
-function settle(frame: Frame): void {
-  const elapsed = performance.now() - frame.started
-  const self = elapsed - frame.nestedMs
-  totals.set(frame.name, (totals.get(frame.name) ?? 0) + self)
-  const parent = stack.at(-1)
-  if (parent !== undefined) parent.nestedMs += elapsed
-}
-
-/** NO SILENT ERRORS: if the frame we pop is not the frame we pushed, the stack
- * discipline is broken — concurrently running stages, or a missing finally —
- * and every number after it would be quietly wrong. Fail loud instead. */
-function pop(expected: Frame): void {
-  const actual = stack.pop()
-  if (actual !== expected) {
-    throw new Error(
-      `stage clock: expected to close '${expected.name}' but found '${actual?.name ?? "nothing"}'. ` +
-        "Stages must nest; two stages running concurrently cannot be attributed.",
-    )
-  }
-  settle(expected)
-}
+let crossed = 0
 
 function push(name: string): Frame {
   const frame: Frame = { name, started: performance.now(), nestedMs: 0 }
   stack.push(frame)
   return frame
+}
+
+/** Close a frame wherever it sits.
+ *
+ * Stages nest on the synchronous paths this measures, but async ones CAN cross:
+ * `yrd watch` can have a deferred history scan in flight while a render starts.
+ * When that happens the self-time split between the two is no longer exact.
+ *
+ * This does NOT throw. An instrument that can take down `yrd watch` is worse
+ * than an approximate number — the command is the product, the measurement is
+ * not. Loud without being fatal: every crossing increments a counter that the
+ * report carries, so a reader sees `crossedStages > 0` and knows the split is
+ * approximate rather than trusting it silently. */
+function close(frame: Frame): void {
+  const index = stack.lastIndexOf(frame)
+  if (index === -1) {
+    crossed += 1
+    return
+  }
+  if (index !== stack.length - 1) crossed += 1
+  stack.splice(index, 1)
+  const elapsed = performance.now() - frame.started
+  totals.set(frame.name, (totals.get(frame.name) ?? 0) + (elapsed - frame.nestedMs))
+  // Whatever encloses it now absorbs the elapsed, so no ancestor claims it twice.
+  const parent = stack[index - 1]
+  if (parent !== undefined) parent.nestedMs += elapsed
 }
 
 /** Account `run()` to `name`. Rethrows unchanged — a stage that throws still
@@ -66,17 +69,17 @@ export function stage<Value>(name: string, run: () => Value): Value {
   try {
     return run()
   } finally {
-    pop(frame)
+    close(frame)
   }
 }
 
-/** Async form. The awaited work must not overlap another stage; see pop(). */
+/** Async form. Overlapping another stage is tolerated but counted; see close(). */
 export async function stageAsync<Value>(name: string, run: () => Promise<Value>): Promise<Value> {
   const frame = push(name)
   try {
     return await run()
   } finally {
-    pop(frame)
+    close(frame)
   }
 }
 
@@ -89,6 +92,10 @@ export type StageReport = Readonly<{
   totalMs: number
   /** totalMs - accountedMs: the part still nobody has instrumented. */
   unaccountedMs: number
+  /** Stage lifetimes that crossed instead of nesting. Zero means the per-stage
+   * split is exact; above zero it is approximate, and the reader is told so
+   * rather than left to assume precision the numbers do not have. */
+  crossedStages: number
 }>
 
 export function stageReport(): StageReport {
@@ -105,6 +112,7 @@ export function stageReport(): StageReport {
     accountedMs: Math.round(accountedMs * 100) / 100,
     totalMs: Math.round(totalMs * 100) / 100,
     unaccountedMs: Math.round((totalMs - accountedMs) * 100) / 100,
+    crossedStages: crossed,
   })
 }
 
@@ -112,4 +120,5 @@ export function stageReport(): StageReport {
 export function resetStageClock(): void {
   totals.clear()
   stack.length = 0
+  crossed = 0
 }
