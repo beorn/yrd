@@ -218,7 +218,7 @@ describe("createProcess — escaped-descendant post-exit drain grace (queue-wedg
         try {
           process.kill(leakedPid, "SIGKILL")
         } catch {
-          // ESRCH — already swept, which is the intent anyway.
+          // silent-fallback-allow: ESRCH means cleanup already reached the intended dead state.
         }
       }
     }

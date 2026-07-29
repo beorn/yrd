@@ -2584,6 +2584,6 @@ function killQuiet(pid: number): void {
   try {
     process.kill(pid, "SIGKILL")
   } catch {
-    // already gone
+    // silent-fallback-allow: best-effort fixture cleanup accepts an already-dead process.
   }
 }

@@ -2630,6 +2630,7 @@ async function resolveGitlinkByFinalPin(
   try {
     await realpath(submodule)
   } catch {
+    // silent-fallback-allow: an unmaterialized submodule cannot prove a gitlink fast-forward resolution.
     return undefined
   }
   for (const oid of [authoritativePin, finalPin]) {

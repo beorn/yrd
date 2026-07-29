@@ -35,6 +35,7 @@ export function artifactLocation(value: unknown): ArtifactLocation | undefined {
     const path = fileURLToPath(candidate)
     return existsSync(path) ? { path } : undefined
   } catch {
+    // silent-fallback-allow: an invalid file URL is not a resolvable artifact location.
     return undefined
   }
 }

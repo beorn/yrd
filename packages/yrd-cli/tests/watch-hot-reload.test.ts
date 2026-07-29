@@ -23,7 +23,7 @@ async function waitForLines(path: string, count: number): Promise<string[]> {
       const records = readFileSync(path, "utf8").trim().split("\n").filter(Boolean)
       if (records.length >= count) return records
     } catch {
-      // The supervised process has not created its evidence file yet.
+      // silent-fallback-allow: polling retries until the supervised process creates its evidence file.
     }
     await Bun.sleep(20)
   }

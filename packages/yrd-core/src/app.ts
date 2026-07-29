@@ -508,6 +508,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
       checkpointCursor = checkpoint.cursor
       return restored
     } catch {
+      // silent-fallback-allow: the report below surfaces corruption before the documented rebuild path.
       reportSavedStateRebuild("Saved state is inconsistent; rebuilding it.")
       return undefined
     }

@@ -1438,7 +1438,7 @@ function rollback(database: Database): void {
   try {
     database.run("ROLLBACK")
   } catch {
-    // Preserve the original transaction failure.
+    // silent-fallback-allow: rollback cleanup must not replace the original transaction failure.
   }
 }
 

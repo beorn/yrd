@@ -965,6 +965,7 @@ function residentRunnerLockOwnerPid(stateDir: string): number | undefined {
     }
     return typeof value.pid === "number" && Number.isSafeInteger(value.pid) && value.pid > 0 ? value.pid : undefined
   } catch {
+    // silent-fallback-allow: unreadable advisory owner metadata means the lock owner is unknown.
     return undefined
   }
 }
@@ -1182,7 +1183,7 @@ function executableOnPath(name: string, env: NodeJS.ProcessEnv): string | undefi
       accessSync(candidate, constants.X_OK)
       return candidate
     } catch {
-      // Keep searching the host-owned PATH.
+      // silent-fallback-allow: a missing/non-executable candidate means continue searching PATH.
     }
   }
   return undefined

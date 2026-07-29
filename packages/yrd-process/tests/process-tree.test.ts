@@ -112,7 +112,7 @@ describe("createProcess — full process-tree settlement (21012 S1)", () => {
         try {
           child.kill("SIGKILL")
         } catch {
-          // already gone
+          // silent-fallback-allow: the test cleanup target may already have exited.
         }
         await child.exited
       }
@@ -171,6 +171,7 @@ describe("createProcess — full process-tree settlement (21012 S1)", () => {
       try {
         return Number(readFileSync(f, "utf-8").trim())
       } catch {
+        // silent-fallback-allow: a missing fixture pid file leaves no proven process to clean up.
         return null
       }
     })
@@ -180,7 +181,7 @@ describe("createProcess — full process-tree settlement (21012 S1)", () => {
         try {
           process.kill(pid, "SIGKILL")
         } catch {
-          // ESRCH — already dead, which is what the assertion wants anyway.
+          // silent-fallback-allow: ESRCH means cleanup already reached the asserted dead state.
         }
       }
     }

@@ -293,7 +293,7 @@ function jsonRecords(stdout: string): { transcript: string; records: readonly Re
       entries.push(trimmed)
       records.push(value as Record<string, unknown>)
     } catch {
-      // Ag may write a launch banner before the provider's JSONL stream; stdout.log retains it.
+      // silent-fallback-allow: Ag launch banners are retained in stdout.log but are not JSONL records.
     }
   }
   return { transcript: entries.length === 0 ? "" : `${entries.join("\n")}\n`, records }

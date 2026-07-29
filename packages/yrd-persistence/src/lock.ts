@@ -127,7 +127,7 @@ function busy(path: string): Error {
     const value = JSON.parse(readFileSync(path, "utf8")) as { pid?: unknown }
     if (typeof value.pid === "number") owner = `yrd-cli:${value.pid}`
   } catch {
-    // Diagnostic data never decides lock ownership.
+    // silent-fallback-allow: diagnostic metadata never decides authoritative lock ownership.
   }
   return createFailure({
     kind: "infrastructure",
