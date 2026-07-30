@@ -291,6 +291,7 @@ const RESIDENT_RUNNER_HEARTBEAT_MS = 5_000
  * that die AFTER it. A constant, not config — the throttle is measured in wall
  * time via `io.now`, so a busy tick cadence cannot starve or spam it. */
 const RESIDENT_RECOVERY_SWEEP_MS = 60_000
+const RESIDENT_MAINTENANCE_INTERVAL_MS = 60_000
 
 /** Exit code when a hard signal cuts an unfinished drain short, leaving in-flight
  * work (D3). An operator-requested stop that FINISHES (drain complete) exits 0; a
@@ -4926,6 +4927,7 @@ type QueueListObservation = Readonly<{
   attempts: readonly QueueAttempt[]
   runner: QueueTimelineRunner | null
   runnerToken: string
+  runnerStateToken: string
   now: number
 }>
 
@@ -4936,6 +4938,19 @@ function queueRunnerToken(runner: QueueTimelineRunner | null): string {
         runner.pid,
         runner.startedAt,
         runner.lastTickAt,
+        runner.command ?? null,
+        runner.implementationSource ?? null,
+        runner.exitedAt ?? null,
+        runner.clean ?? null,
+      ])
+}
+
+function queueRunnerStateToken(runner: QueueTimelineRunner | null): string {
+  return runner === null
+    ? "none"
+    : JSON.stringify([
+        runner.pid,
+        runner.startedAt,
         runner.command ?? null,
         runner.implementationSource ?? null,
         runner.exitedAt ?? null,
@@ -4991,6 +5006,7 @@ async function observeQueueList(
     attempts,
     runner,
     runnerToken: queueRunnerToken(runner),
+    runnerStateToken: queueRunnerStateToken(runner),
     now: io.now?.() ?? Date.now(),
   }
 }
@@ -5144,6 +5160,12 @@ type QueueListSnapshotLoader = Readonly<{
   load(focus?: QueueWatchFocus): Promise<QueueListSnapshot>
 }>
 
+const QUEUE_WATCH_CLOCK_INTERVAL_MS = 60_000
+
+function sameQueueListFocus(left: QueueWatchFocus | undefined, right: QueueWatchFocus | undefined): boolean {
+  return left?.pr === right?.pr && left?.revision === right?.revision && left?.run === right?.run
+}
+
 export function createQueueListSnapshotLoader(
   app: YrdCliApp,
   filters: readonly string[],
@@ -5160,6 +5182,10 @@ export function createQueueListSnapshotLoader(
         observed: QueueListObservation
         snapshot: QueueListSnapshot
         reclock(now: number): QueueTimelineProjection
+        displayed: Readonly<{
+          focus: QueueWatchFocus | undefined
+          snapshot: QueueListSnapshot
+        }>
       }>
     | undefined
   return {
@@ -5170,41 +5196,70 @@ export function createQueueListSnapshotLoader(
         cached.observed.cursor === observed.cursor &&
         cached.observed.generation === observed.generation &&
         cached.observed.attempts === observed.attempts &&
-        cached.observed.runnerToken === observed.runnerToken
+        cached.observed.runnerStateToken === observed.runnerStateToken
+      const clockDue =
+        unchanged &&
+        cached !== undefined &&
+        (observed.now < cached.snapshot.now || observed.now - cached.snapshot.now >= QUEUE_WATCH_CLOCK_INTERVAL_MS)
+      const stable = unchanged && !clockDue && cached !== undefined
       using span = log.span?.("snapshot", {
         cursor: observed.cursor,
         generation: observed.generation,
         state: observed.stateSource,
-        projection: unchanged ? "clock-only" : "rebuilt",
+        projection: stable ? "stable" : unchanged ? "clock-only" : "rebuilt",
         attempts: cached?.observed.attempts === observed.attempts ? "memory" : "changed",
-        runner: cached?.observed.runnerToken === observed.runnerToken ? "unchanged" : "changed",
+        runner:
+          cached?.observed.runnerStateToken !== observed.runnerStateToken
+            ? "changed"
+            : cached.observed.runnerToken === observed.runnerToken
+              ? "unchanged"
+              : "heartbeat",
       })
+      if (stable && cached !== undefined && sameQueueListFocus(cached.displayed.focus, focus)) {
+        const current = cached
+        const snapshot = current.displayed.snapshot
+        cached = { ...current, observed }
+        if (span) {
+          Object.assign(span.spanData, {
+            results: snapshot.results.length,
+            rows: snapshot.projection.rows.length,
+            timeStatsFacts: snapshot.projection.timeStatsFacts.length,
+          })
+        }
+        return snapshot
+      }
       const built: QueueListSnapshotBuild =
         unchanged && cached !== undefined
           ? {
               snapshot: {
                 ...cached.snapshot,
                 now: observed.now,
-                projection: cached.reclock(observed.now),
+                projection: {
+                  ...cached.reclock(observed.now),
+                  runner: observed.runner,
+                },
               },
               reclock: cached.reclock,
             }
           : await buildQueueListSnapshot(app, filters, options, io, observed)
       const { snapshot } = built
+      const displayed =
+        includeOutputs && focus !== undefined
+          ? await attachQueueListDetails(snapshot, observed.attempts, io, focus, diffResolver)
+          : snapshot
       cached = {
         observed,
         ...built,
+        displayed: { focus, snapshot: displayed },
       }
       if (span) {
         Object.assign(span.spanData, {
-          results: snapshot.results.length,
-          rows: snapshot.projection.rows.length,
-          timeStatsFacts: snapshot.projection.timeStatsFacts.length,
+          results: displayed.results.length,
+          rows: displayed.projection.rows.length,
+          timeStatsFacts: displayed.projection.timeStatsFacts.length,
         })
       }
-      return includeOutputs && focus !== undefined
-        ? await attachQueueListDetails(snapshot, observed.attempts, io, focus, diffResolver)
-        : snapshot
+      return displayed
     },
   }
 }
@@ -6924,6 +6979,8 @@ export async function followQueueRuns(
   // Consecutive all-candidate-refusal cycles against an unchanged world (22474
   // specimen 3). Also process-scoped: it is a claim about THIS process.
   let stall: ResidentRefusalStall | undefined
+  let firstCycle = true
+  let lastMaintenanceAt = 0
   try {
     heartbeat?.check()
     if (heartbeat !== undefined && selectors.length === 0 && !jsonEnabled(options)) {
@@ -6933,15 +6990,36 @@ export async function followQueueRuns(
     }
     while (true) {
       heartbeat?.check()
+      const starting = firstCycle
+      const beforeRefresh = app.state()
+      if (!starting) await app.refresh()
+      const refreshed = app.state() !== beforeRefresh
+      const cycleNow = io.now?.() ?? Date.now()
+      const maintenanceDue =
+        starting || cycleNow < lastMaintenanceAt || cycleNow - lastMaintenanceAt >= RESIDENT_MAINTENANCE_INTERVAL_MS
+      if (!starting && !refreshed && !maintenanceDue && !drainRequested()) {
+        if (scope.signal.aborted) return 0
+        await sleepUntilDrain(scope.sleep(interval), drainSignal)
+        heartbeat?.check()
+        if (scope.signal.aborted) return 0
+        continue
+      }
+      firstCycle = false
       // Re-prove the installed baseline before EACH cycle: a config change while
       // watching must stop the watch, never let a fresh cycle start expensive
       // Runs on a stale baseline.
       await gate()
-      // D1b — per-tick lease-expiry recovery sweep. ONLY the resident runs it: it
-      // holds the exclusive lease, so its unscoped `recover` write is single-writer
-      // safe. (A one-shot or a bare programmatic followQueueRuns caller — no runner
-      // identity — never sweeps.)
-      if (resident) lastSweepAt = await residentRecoverySweep(app, io, lastSweepAt)
+      if (maintenanceDue) lastMaintenanceAt = cycleNow
+      let runRequired = starting || refreshed
+      // D1b — bounded maintenance lease-expiry recovery sweep. ONLY the resident
+      // runs it: it holds the exclusive lease, so its unscoped `recover` write is
+      // single-writer safe. (A one-shot or a bare programmatic followQueueRuns
+      // caller — no runner identity — never sweeps.)
+      if (resident && maintenanceDue) {
+        const beforeRecovery = app.state()
+        lastSweepAt = await residentRecoverySweep(app, io, lastSweepAt)
+        runRequired ||= app.state() !== beforeRecovery
+      }
       // The optional default preserves the narrow followQueueRuns test/programmatic
       // seam. The installed CLI always supplies the recutter; a caller that does
       // not install one retains the historical drain-only behavior.
@@ -6951,7 +7029,19 @@ export async function followQueueRuns(
       // A mechanical recut may itself take long enough for installed Queue
       // definitions to move. Re-prove the baseline before admitting its fresh
       // revision; never start a Run under the pre-recut gate snapshot.
-      if (await prepareResidentQueueCycle(app, services, io, remedied)) await gate()
+      const beforePreparation = app.state()
+      if (await prepareResidentQueueCycle(app, services, io, remedied)) {
+        runRequired = true
+        await gate()
+      }
+      runRequired ||= app.state() !== beforePreparation
+      if (!runRequired && !drainRequested()) {
+        if (scope.signal.aborted) return 0
+        await sleepUntilDrain(scope.sleep(interval), drainSignal)
+        heartbeat?.check()
+        if (scope.signal.aborted) return 0
+        continue
+      }
       let runs: readonly Run[]
       try {
         runs = await runQueues(app, selectors, options, io)
@@ -7061,7 +7151,7 @@ async function watchQueue(
   io: YrdCliIO,
   services: YrdCliServices,
 ): Promise<YrdCliExitCode> {
-  const interval = 1_000
+  const interval = 15_000
   const scope = io.scope ?? app.scope
   const query = createQueueListSnapshotLoader(app, filters, options, io, services, !jsonEnabled(options))
   const load = (focus?: QueueWatchFocus): Promise<QueueListSnapshot> => query.load(focus)

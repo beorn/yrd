@@ -2514,6 +2514,74 @@ describe("runYrd", () => {
     expect(app.queue.get("R1")).toMatchObject({ status: "waiting", prs: [{ revision: 3, baseSha: nextBase }] })
   })
 
+  it("skips the expensive compose path on unchanged idle follow ticks", async () => {
+    const app = await createApp()
+    const controller = new AbortController()
+    const sleeps: number[] = []
+    const queueRun = vi.fn(app.queue.run.bind(app.queue))
+    const viewer = {
+      ...app,
+      queue: {
+        ...app.queue,
+        run: queueRun,
+      },
+    } as TestApp
+    const gate = vi.fn(async () => undefined)
+    const io = outputIO({
+      now: () => Date.parse("2026-07-09T12:01:00.000Z"),
+      scope: {
+        signal: controller.signal,
+        sleep: async (milliseconds: number) => {
+          sleeps.push(milliseconds)
+          if (sleeps.length === 2) controller.abort()
+        },
+      } as YrdCliIO["scope"],
+    }).io
+
+    await expect(runInternals.followQueueRuns(viewer, [], { json: true, interval: 1 }, io, gate)).resolves.toBe(0)
+    expect(sleeps).toEqual([1_000, 1_000])
+    expect(gate, "an unchanged idle tick must not re-run the installed-baseline gate").toHaveBeenCalledTimes(1)
+    expect(queueRun, "an unchanged idle tick must not traverse and compose the full queue").toHaveBeenCalledTimes(1)
+  })
+
+  it("wakes an idle follow loop when the Journal advances", async () => {
+    const journal = createMemoryJournal()
+    const runner = await createApp({ journal })
+    const writer = await createApp({ journal })
+    const controller = new AbortController()
+    const sleeps: number[] = []
+    const queueRun = vi.fn(runner.queue.run.bind(runner.queue))
+    const viewer = {
+      ...runner,
+      queue: {
+        ...runner.queue,
+        run: queueRun,
+      },
+    } as TestApp
+    const gate = vi.fn(async () => undefined)
+    const io = outputIO({
+      now: () => Date.parse("2026-07-09T12:01:00.000Z"),
+      scope: {
+        signal: controller.signal,
+        sleep: async (milliseconds: number) => {
+          sleeps.push(milliseconds)
+          if (sleeps.length === 1) await openAndSubmit(writer)
+          else controller.abort()
+        },
+      } as YrdCliIO["scope"],
+    }).io
+
+    try {
+      await expect(runInternals.followQueueRuns(viewer, [], { json: true, interval: 1 }, io, gate)).resolves.toBe(0)
+      expect(sleeps).toEqual([1_000, 1_000])
+      expect(gate, "new durable work must re-open the installed-baseline gate").toHaveBeenCalledTimes(2)
+      expect(queueRun, "new durable work must wake the queue compose path").toHaveBeenCalledTimes(2)
+      expect(runner.bays.pr("PR1"), "the wake-up cycle must observe the appended PR").toBeDefined()
+    } finally {
+      await Promise.all([runner.close(), writer.close()])
+    }
+  })
+
   it("recovers a journaled freshness transition when the resident stops before canceling its predecessor", async () => {
     const nextHead = "3".repeat(40)
     const nextBase = "b".repeat(40)
@@ -6585,7 +6653,7 @@ describe("runYrd", () => {
     expect(watch.stderr()).toMatch(/^yrd watch runtime: yrd 0\.0\.1\+[0-9a-f]{10}(?:-dirty)?\n$/u)
     expect(mounted?.type).toBe(QueueWatchPane)
     const props = mounted?.props as QueueWatchPaneProps
-    expect(props.intervalMs).toBe(1_000)
+    expect(props.intervalMs).toBe(15_000)
     expect(props.initial.diffs, "initial paint must not synchronously probe every visible PR").toBeUndefined()
     await expect(props.load({ pr: "PR1", revision: 1 })).resolves.toMatchObject({
       diffs: [{ pr: "PR1", revision: 1, unavailable: "git-error" }],
@@ -7535,7 +7603,7 @@ describe("runYrd", () => {
     expect(watch.stdout()).toContain('"command":"queue.list"')
     expect(watch.stdout()).toContain('"base":"main"')
     expect(watch.stdout()).toContain('"id":"PR1"')
-    expect(sleeps).toEqual([1_000])
+    expect(sleeps).toEqual([15_000])
   })
 
   it("renders the literal empty queue summary within 80- and 120-column budgets", async () => {
@@ -11522,7 +11590,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     }
   })
 
-  it("reuses durable watch facts on an unchanged shipping-path tick and advances only the clock", async () => {
+  it("keeps an unchanged watch snapshot stable between coarse clock pulses", async () => {
     const app = await createApp()
     try {
       await openAndSubmit(app)
@@ -11561,13 +11629,25 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
 
       expect(targetResolutions, "an unchanged tick must not resolve the queue target again").toBe(1)
       expect(journalSnapshot, "an unchanged durable cursor must not fold the Journal again").toHaveBeenCalledTimes(1)
-      expect(tick.results).toBe(initial.results)
-      expect(tick.projection?.details).toBe(initial.projection?.details)
-      expect(tick.projection?.timeStatsFacts).toBe(initial.projection?.timeStatsFacts)
-      expect(tick.projection?.rows.map((row) => row.id)).toEqual(initial.projection?.rows.map((row) => row.id))
-      expect(tick.projection?.rows[0]?.ageMs).toBe((initial.projection?.rows[0]?.ageMs ?? 0) + 1_000)
-      expect(tick.now).toBe(now)
-      expect(tick.projection?.now).toBe(new Date(now).toISOString())
+      expect(tick, "idle polling must not schedule a React render").toBe(initial)
+
+      now += 59_000
+      const clockPulse = await load()
+
+      expect(clockPulse).not.toBe(initial)
+      expect(clockPulse.results).toBe(initial.results)
+      expect(clockPulse.projection?.details).toBe(initial.projection?.details)
+      expect(clockPulse.projection?.timeStatsFacts).toBe(initial.projection?.timeStatsFacts)
+      expect(clockPulse.projection?.rows.map((row) => row.id)).toEqual(initial.projection?.rows.map((row) => row.id))
+      expect(clockPulse.projection?.rows[0]?.ageMs).toBe((initial.projection?.rows[0]?.ageMs ?? 0) + 60_000)
+      expect(clockPulse.now).toBe(now)
+      expect(clockPulse.projection?.now).toBe(new Date(now).toISOString())
+
+      const focus = { pr: "PR1", revision: 1 }
+      const focused = await load(focus)
+      now += 1_000
+      const focusedTick = await load(focus)
+      expect(focusedTick, "idle detail polling must not reload or repaint the selected row").toBe(focused)
     } finally {
       await app.close()
     }
@@ -11607,7 +11687,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       expect(changed.results.flatMap((result) => result.prs.map((pr) => pr.id))).toContain("PR1")
       expect(targetResolutions, "a new Journal cursor must rebuild the durable projection").toBe(2)
 
-      now += 1_000
+      now += 60_000
       const reclocked = await loader.load()
       expect(targetResolutions, "an unchanged cursor must reuse the durable projection").toBe(2)
       expect(reclocked.results).toBe(changed.results)
@@ -11636,7 +11716,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     }
   })
 
-  it("invalidates an unchanged Journal projection when the resident-runner token advances", async () => {
+  it("coalesces resident heartbeats until a clock pulse but rebuilds on runner identity changes", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-watch-runner-token-"))
     const stateDir = join(root, "yrd")
     const statusPath = join(stateDir, "resident-runner", "status.json")
@@ -11673,15 +11753,25 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
 
       const first = await loader.load()
       now += 1_000
-      const reclocked = await loader.load()
+      const stable = await loader.load()
       expect(targetResolutions).toBe(1)
-      expect(reclocked.results).toBe(first.results)
+      expect(stable).toBe(first)
 
       writeRunner("2026-07-09T12:00:59.000Z")
       const heartbeat = await loader.load()
-      expect(targetResolutions, "a new heartbeat token must rebuild runner-derived facts").toBe(2)
-      expect(heartbeat.results).not.toBe(reclocked.results)
-      expect(heartbeat.projection.runner?.lastTickAt).toBe("2026-07-09T12:00:59.000Z")
+      expect(targetResolutions, "a heartbeat alone must not rebuild durable queue facts").toBe(1)
+      expect(heartbeat).toBe(first)
+
+      now += 59_000
+      const reclocked = await loader.load()
+      expect(targetResolutions).toBe(1)
+      expect(reclocked.results).toBe(first.results)
+      expect(reclocked.projection.runner?.lastTickAt).toBe("2026-07-09T12:00:59.000Z")
+
+      writeFileSync(statusPath, JSON.stringify({ ...runner, command: "yrd queue run --follow" }))
+      const replaced = await loader.load()
+      expect(targetResolutions, "runner identity changes must invalidate immediately").toBe(2)
+      expect(replaced.results).not.toBe(reclocked.results)
     } finally {
       await app.close()
       rmSync(root, { recursive: true, force: true })
