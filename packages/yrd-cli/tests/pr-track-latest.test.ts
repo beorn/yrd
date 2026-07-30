@@ -857,7 +857,9 @@ describe("resident merge-into-latest", () => {
       ),
       submitted.stderr(),
     ).toBe(0)
-    await app.queue.run({ prs: ["PR1"] }, { runner: "track-test", leaseMs: 60_000 })
+    await expect(app.queue.run({ prs: ["PR1"] }, { runner: "track-test", leaseMs: 60_000 })).resolves.toMatchObject([
+      { status: "completed", conclusion: "failure", error: { code: "authored-failure" } },
+    ])
     expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
     expect(app.queue.eligibility("PR1")).toMatchObject({ checks: { status: "failed" } })
 
