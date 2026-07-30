@@ -1501,7 +1501,7 @@ async function provisionBay(
   const result = await app.bays.open({
     name,
     ...(options.issue === undefined ? {} : { issue: options.issue }),
-    ...(options.by === undefined ? {} : { by: options.by }),
+    by: options.by ?? currentYrdOwnerAddress(),
     ...(from === undefined ? {} : { from }),
     ...(base === undefined ? {} : { base }),
   })
@@ -1525,6 +1525,11 @@ async function provisionBay(
 
 function generatedBayName(): string {
   return `yrd-${randomUUID().replaceAll("-", "").slice(0, 12)}`
+}
+
+/** Neutral process ownership used only by Bay teardown safety. */
+function currentYrdOwnerAddress(): string {
+  return `yrd:${String(process.pid)}`
 }
 
 function derivedWorkName(value: string): string {
@@ -2084,6 +2089,7 @@ async function prepareOwnedBay(
     const opened = await app.bays.open({
       name: identity.bay,
       branch: identity.branch,
+      by: currentYrdOwnerAddress(),
       ...(identity.issue === undefined ? {} : { issue: identity.issue }),
     })
     assertJobsPassed(await runJobs(app, app.jobs.requested(opened), io), `bay '${identity.bay}' provision`)

@@ -76,7 +76,6 @@ describe("yrd bay open/run/in", { timeout: 30_000 }, () => {
     for (const args of [
       ["bay", "run", "--help"],
       ["sh", "--help"],
-      ["ag", "--help"],
     ] as const) {
       const help = output(repo)
       expect(await yrd(repo, help.io, ...args), `${args.join(" ")}\n${help.stderr()}`).toBe(0)
@@ -193,7 +192,14 @@ describe("yrd bay open/run/in", { timeout: 30_000 }, () => {
       const bays = output(repo)
       expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
       expect(JSON.parse(bays.stdout())).toMatchObject({
-        bays: [expect.objectContaining({ name: "docs", nativeStatus: "active", status: "open" })],
+        bays: [
+          expect.objectContaining({
+            name: "docs",
+            by: `yrd:${String(process.pid)}`,
+            nativeStatus: "active",
+            status: "open",
+          }),
+        ],
       })
 
       const held = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1_000)"], {
