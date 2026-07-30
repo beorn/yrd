@@ -149,10 +149,16 @@ type SourceRewrite = Readonly<{
 
 - Immutable. The _attempt_ is the Run; re-checking the same combination is a
   new Run against the same Candidate, never a mutated Candidate.
-- **Derived content key** `(baseSha, revs[].head + revs[].composition, in order)`
-  deduplicates reconstruction and makes check results
-  reusable-iff-base-and-source-packets-are-unchanged. The key is an index, not
-  a second identity; it is computed, not stored.
+- **Derived artifact key.** It contains the exact base SHA followed by each
+  revision's head and composition in order. It deduplicates reconstruction and
+  makes check results reusable-iff-base-and-source-packets-are-unchanged. The
+  key is an artifact index, not Candidate admission authority; it is computed,
+  not stored.
+- **Exact receipt key.** It adds Queue identity plus each PR's id and revision
+  number to the artifact key. This key selects a Candidate for a Queue attempt.
+  A new PR revision with content-equivalent heads still receives a new
+  immutable Candidate receipt, even when that Candidate reuses the same
+  artifact SHA.
 - Mergeability is computed via `git merge-tree` — no checkout, no Context
   lease — before any expensive required check starts.
 - The synthetic root commit is published at `refs/yrd/candidates/<id>`. Each
@@ -285,8 +291,8 @@ speculation.** A Queue processes its queue FIFO; the head batch (up to
 next Candidate is constructed. Concurrent check Runs for _other Queues_ and
 other base branches proceed freely under Runner/Context execution.
 GitHub-merge-queue-style stacked speculative candidates are explicitly out of
-v1 — but the model already carries the seam (content-keyed Candidates pinned
-to `baseSha` make speculative results reusable-iff-base-unchanged), so
+v1 — but the model already carries the seam (content-keyed Candidate artifacts
+pinned to `baseSha` make speculative results reusable-iff-base-unchanged), so
 speculation can arrive later as a scheduling plugin without model change.
 
 **C3. Queue order.** FIFO by PRRev submission time. No priority DSL in v1;
@@ -342,7 +348,7 @@ receive-hook intake, bisection, waiting/finish/recover).
 | `Operation {op,args}`, `operation()`, `command()`, `invoke()` | `Command`, single `dispatch()`, `CommandResult`                                             | rename + surface collapse (yrd-core)                        |
 | `Frame` exported from core domain                             | storage-internal to Journal                                                                 | demotion (yrd-core/yrd-persistence)                         |
 | `PR` with 5-way `PRStatus` + embedded `revisions[]`           | `PR {state, merged}` + `PRRev` extracted; readiness derived                                 | shrink + extraction (yrd-bay → landing domain in yrd-queue) |
-| `QueueRecord.prs: PRSnapshot[]` + `baseSha`                   | `Candidate` first-class (id, content key, merge-tree mergeability, ref)                     | extraction (yrd-queue)                                      |
+| `QueueRecord.prs: PRSnapshot[]` + `baseSha`                   | `Candidate` (id, exact receipt, artifact key, mergeability, ref)                            | extraction (yrd-queue)                                      |
 | `QueueRun` status `running/waiting/passed/failed`             | `Run` with status+conclusion split                                                          | refit (yrd-queue)                                           |
 | `InstalledStep {integrates, needsIntegration}`                | `StepDef {kind: check\|action\|merge}` + order                                              | refit (yrd-queue)                                           |
 | Job results `passed/failed/waiting`                           | GitHub status+conclusion at the boundary; machine unchanged                                 | vocabulary (yrd-job)                                        |
