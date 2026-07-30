@@ -93,6 +93,7 @@ import {
   takeImplementationSourceBridge,
   type ImplementationSourceRepository,
 } from "./implementation-source.ts"
+import { ensureWorkspaceDependencies } from "./workspace-provisioning.ts"
 import { withGitIndexLockRetry } from "./git-index-lock-retry.ts"
 import { loadYrdConfig, stepGateMode, type ResolvedYrdProjectConfig, type YrdStepConfig } from "./config.ts"
 import { classifyFailure, resolveInvocation } from "./invocation.ts"
@@ -418,13 +419,41 @@ function candidateStep(
   candidatePool: CandidatePool | undefined,
   kind: "check" | "action",
 ): RuntimeStep {
+  const command = shellCommand(stepCommand(name, config))
+  const checkProcess: Pick<Process, "run"> = {
+    async run(request) {
+      if (
+        request.argv.length === command.length &&
+        request.argv.every((argument, index) => argument === command[index])
+      ) {
+        if (request.cwd === undefined) {
+          raiseFailure(
+            "infrastructure",
+            "candidate-provision-failed",
+            `yrd: required check '${name}' has no candidate working directory to provision`,
+          )
+        }
+        await ensureWorkspaceDependencies(process, {
+          path: request.cwd,
+          subject: `required check '${name}' workspace`,
+          manifestSubject: "candidate",
+          ...(request.env === undefined ? {} : { env: request.env }),
+          ...(request.signal === undefined ? {} : { signal: request.signal }),
+          fail(message) {
+            raiseFailure("infrastructure", "candidate-provision-failed", `yrd: ${message}`)
+          },
+        })
+      }
+      return process.run(request)
+    },
+  }
   return eraseStep(
     withStep(
       name,
       gitCheckStep({
-        inject: { process },
+        inject: { process: checkProcess },
         repo,
-        command: shellCommand(stepCommand(name, config)),
+        command,
         checkoutParent,
         artifactRoot: join(stateDir, "artifacts"),
         purpose: name,

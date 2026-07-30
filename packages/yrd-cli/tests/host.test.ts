@@ -128,6 +128,30 @@ async function repository(): Promise<{ repo: string; featureSha: string }> {
   return { repo, featureSha }
 }
 
+async function candidatePackageRepository(): Promise<{ repo: string; featureSha: string }> {
+  const { repo } = await repository()
+  await git(repo, "switch", "-q", "main")
+  await writeFile(
+    join(repo, "package.json"),
+    JSON.stringify({
+      scripts: {
+        typecheck: "test -f node_modules/.provisioned",
+        lint: "test -f node_modules/.provisioned",
+      },
+      devDependencies: { typescript: "6.0.3" },
+    }),
+  )
+  await writeFile(join(repo, "bun.lock"), "lockfileVersion = 1\n")
+  await writeFile(join(repo, ".gitignore"), "node_modules/\n")
+  await git(repo, "add", "package.json", "bun.lock", ".gitignore")
+  await git(repo, "commit", "-qm", "declare candidate toolchain")
+  await git(repo, "switch", "-q", "issue/feature")
+  await git(repo, "merge", "-q", "--no-edit", "main")
+  const featureSha = await git(repo, "rev-parse", "HEAD")
+  await git(repo, "switch", "-q", "main")
+  return { repo, featureSha }
+}
+
 /** Install legacy spelling on the base branch: config authority is the base,
  * never the operator worktree's uncommitted bytes (design C5). */
 async function commitYrdConfig(repo: string, source: string): Promise<void> {
@@ -544,6 +568,111 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       },
     })
   })
+
+  it("provisions dependencies before built-in and custom checks run in candidate worktrees (22541)", async () => {
+    const { repo, featureSha } = await candidatePackageRepository()
+
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["typecheck", "lint"],
+      requires: [],
+      definitions: {
+        typecheck: { run: "bun run typecheck", runner: "local" },
+        lint: { run: "bun run lint", runner: "local" },
+      },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["typecheck"] },
+    }
+    const provisioned: string[] = []
+    await using runtimeProcess = createProcess({ cwd: repo })
+    const process = {
+      run(request: ProcessRequest): Promise<ProcessResult> {
+        if (request.argv.join(" ") !== "bun install --frozen-lockfile --ignore-scripts") {
+          return runtimeProcess.run(request)
+        }
+        if (request.cwd === undefined) throw new Error("candidate provisioning requires a working directory")
+        provisioned.push(request.cwd)
+        return runtimeProcess.run({
+          ...request,
+          argv: ["sh", "-c", "mkdir -p node_modules && : > node_modules/.provisioned"],
+        })
+      },
+    }
+    await using app = await createDefaultYrdApp({
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal: createMemoryJournal(),
+      process,
+      config,
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]
+
+    expect(provisioned).toHaveLength(2)
+    expect(run).toMatchObject({ status: "completed", conclusion: "success" })
+    expect(new Set(provisioned)).toHaveLength(1)
+  })
+
+  it.each([
+    ["a failed dependency install", "exit", "dependency cache unavailable"],
+    ["an unavailable package manager", "throw", "spawn bun ENOENT"],
+  ] as const)(
+    "reports %s as a retryable candidate environment refusal (22541)",
+    async (_label, failureMode, expectedMessage) => {
+      const { repo, featureSha } = await candidatePackageRepository()
+      const config: ResolvedYrdProjectConfig = {
+        base: "main",
+        batch: 1,
+        steps: ["typecheck"],
+        requires: [],
+        definitions: { typecheck: { run: "bun run typecheck", runner: "local" } },
+        contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["typecheck"] },
+      }
+      await using runtimeProcess = createProcess({ cwd: repo })
+      const process = {
+        run(request: ProcessRequest): Promise<ProcessResult> {
+          if (request.argv.join(" ") !== "bun install --frozen-lockfile --ignore-scripts") {
+            return runtimeProcess.run(request)
+          }
+          if (failureMode === "throw") throw new Error(expectedMessage)
+          return runtimeProcess.run({
+            ...request,
+            argv: ["sh", "-c", "printf 'dependency cache unavailable\\n' >&2; exit 7"],
+          })
+        },
+      }
+      await using app = await createDefaultYrdApp({
+        repo,
+        stateDir: join(repo, ".git", "yrd"),
+        baysRoot: join(repo, ".bays"),
+        journal: createMemoryJournal(),
+        process,
+        config,
+      })
+      await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+      const run = (await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]
+
+      expect(run).toMatchObject({
+        status: "completed",
+        conclusion: "failure",
+        error: {
+          code: "queue-environment-refused",
+          evidence: {
+            kind: "check-execution-refusal",
+            phase: "candidate",
+            error: {
+              code: "candidate-provision-failed",
+              message: expect.stringContaining(expectedMessage),
+            },
+            retryable: true,
+          },
+        },
+      })
+    },
+  )
 
   it("activates projection checkpoints for the complete built-in projector stack", async () => {
     const { repo, featureSha } = await repository()

@@ -4632,9 +4632,10 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
               context,
             )
           } catch (cause) {
+            const fact = failureFact(cause)
             const error = JobErrorSchema.parse({
-              code: `${purpose}-candidate-execution-unavailable`,
-              message: messageOf(cause),
+              code: fact?.code ?? `${purpose}-candidate-execution-unavailable`,
+              message: fact?.message ?? messageOf(cause),
             })
             const refusal = GitCheckExecutionRefusalEvidenceSchema.parse({
               ...candidate,
@@ -4713,9 +4714,10 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
               },
             )
           } catch (cause) {
+            const fact = failureFact(cause)
             const error = JobErrorSchema.parse({
-              code: `${purpose}-parent-execution-unavailable`,
-              message: messageOf(cause),
+              code: fact?.code ?? `${purpose}-parent-execution-unavailable`,
+              message: fact?.message ?? messageOf(cause),
             })
             const refusal = GitCheckExecutionRefusalEvidenceSchema.parse({
               ...candidate,
