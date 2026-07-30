@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs"
-import { readFile } from "node:fs/promises"
+import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { Process, ProcessResult } from "@yrd/process"
 
@@ -13,6 +13,7 @@ const PACKAGE_MANAGERS = [
 /** A dependency install prepares an execution environment; it gets a generous
  * lease so a cold package cache is not mistaken for a wedged check. */
 const PROVISION_TIMEOUT_MS = 900_000
+const PROVISION_COMPLETE_MARKER = ".yrd-provision-complete"
 
 type ManifestProvisioning = Readonly<{
   hasDependencies: boolean
@@ -23,13 +24,12 @@ function errorDetail(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-export type WorkspaceDependencyOptions = Readonly<{
+type WorkspaceDependencyOptions = Readonly<{
   path: string
   subject: string
   manifestSubject?: string
   env?: NodeJS.ProcessEnv
   signal?: AbortSignal
-  reinstall?: boolean
   onCommand?: (argv: readonly string[]) => void
   writeOutput?: (text: string) => void
   fail(message: string): never
@@ -107,7 +107,9 @@ export async function ensureWorkspaceDependencies(
 ): Promise<void> {
   const manifestPath = join(options.path, "package.json")
   if (!existsSync(manifestPath)) return
-  if (options.reinstall !== true && existsSync(join(options.path, "node_modules"))) return
+  const dependencyPath = join(options.path, "node_modules")
+  const completionMarker = join(dependencyPath, PROVISION_COMPLETE_MARKER)
+  if (existsSync(completionMarker)) return
   let manifestSource: string
   try {
     manifestSource = await readFile(manifestPath, "utf8")
@@ -166,5 +168,11 @@ export async function ensureWorkspaceDependencies(
   await provision([chosen.manager, ...chosen.install])
   if (manifest.hasPostinstall) {
     await provision([chosen.manager, "run", "postinstall"])
+  }
+  try {
+    await mkdir(dependencyPath, { recursive: true })
+    await writeFile(completionMarker, "complete\n")
+  } catch (error) {
+    options.fail(`${options.subject} could not record completed dependency provisioning: ${errorDetail(error)}`)
   }
 }

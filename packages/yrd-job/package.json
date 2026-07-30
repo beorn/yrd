@@ -7,8 +7,8 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@silvery/scope": "^0.21.0",
-    "@silvery/signals": "^0.21.0",
+    "@silvery/scope": "^0.23.0",
+    "@silvery/signals": "^0.23.0",
     "@yrd/core": "workspace:*",
     "zod": "^4.4.3"
   }

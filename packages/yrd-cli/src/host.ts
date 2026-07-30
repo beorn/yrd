@@ -204,6 +204,7 @@ function configuredChecks(
   const hook = join(stateDir, "hooks", "pre-submit")
   const repo = resolve(stateDir, "../..")
   const runInCheckout = async (
+    name: string,
     definition: YrdStepConfig,
     cwd: string,
     ref: string | undefined,
@@ -266,6 +267,15 @@ function configuredChecks(
       )
     }
     try {
+      await ensureWorkspaceDependencies(process, {
+        path: checkout,
+        subject: `required check '${name}' workspace`,
+        manifestSubject: "candidate",
+        env,
+        fail(message) {
+          raiseFailure("infrastructure", "candidate-provision-failed", `yrd: ${message}`)
+        },
+      })
       return await run(checkout)
     } finally {
       const removed = await process.run({
@@ -298,7 +308,7 @@ function configuredChecks(
       if (definition?.run === undefined) {
         raiseFailure("configuration", "required-check-command-missing", `yrd: required check '${name}' has no command`)
       }
-      return runInCheckout(definition, cwd, context?.ref)
+      return runInCheckout(name, definition, cwd, context?.ref)
     },
     install(_cwd) {
       mkdirSync(join(stateDir, "hooks"), { recursive: true })

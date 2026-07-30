@@ -6,9 +6,30 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFile
 import { tmpdir } from "node:os"
 import { extname, join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
+import { publicDependencyRefusal } from "../../../scripts/verify-public-dependencies"
 
 const root = resolve(import.meta.dirname, "../../..")
 const scannedExtensions = new Set([".json", ".md", ".ts", ".tsx", ".yml"])
+
+function copyStandaloneWorkspace(prefix: string): string {
+  const standalone = mkdtempSync(join(tmpdir(), prefix))
+  copyFileSync(join(root, "package.json"), join(standalone, "package.json"))
+  copyFileSync(join(root, "bun.lock"), join(standalone, "bun.lock"))
+  mkdirSync(join(standalone, "scripts"))
+  copyFileSync(
+    join(root, "scripts", "verify-public-dependencies.ts"),
+    join(standalone, "scripts", "verify-public-dependencies.ts"),
+  )
+  for (const entry of readdirSync(join(root, "packages"), { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const manifest = join(root, "packages", entry.name, "package.json")
+    if (!existsSync(manifest)) continue
+    const target = join(standalone, "packages", entry.name)
+    mkdirSync(target, { recursive: true })
+    copyFileSync(manifest, join(target, "package.json"))
+  }
+  return standalone
+}
 
 function scannedFiles(path: string): string[] {
   const files: string[] = []
@@ -197,18 +218,8 @@ describe("noun cutover ratchet", () => {
   })
 
   it("accepts the checked-in workspace lock in frozen mode", () => {
-    const standalone = mkdtempSync(join(tmpdir(), "yrd-frozen-lock-"))
+    const standalone = copyStandaloneWorkspace("yrd-frozen-lock-")
     try {
-      copyFileSync(join(root, "package.json"), join(standalone, "package.json"))
-      copyFileSync(join(root, "bun.lock"), join(standalone, "bun.lock"))
-      for (const entry of readdirSync(join(root, "packages"), { withFileTypes: true })) {
-        if (!entry.isDirectory()) continue
-        const manifest = join(root, "packages", entry.name, "package.json")
-        if (!existsSync(manifest)) continue
-        const target = join(standalone, "packages", entry.name)
-        mkdirSync(target, { recursive: true })
-        copyFileSync(manifest, join(target, "package.json"))
-      }
       const before = readFileSync(join(standalone, "bun.lock"), "utf8")
       const result = Bun.spawnSync({
         cmd: ["bun", "install", "--frozen-lockfile", "--lockfile-only", "--ignore-scripts"],
@@ -222,5 +233,64 @@ describe("noun cutover ratchet", () => {
     } finally {
       rmSync(standalone, { recursive: true, force: true })
     }
+  })
+
+  it("installs every public test dependency or refuses a known unpublished API loudly", () => {
+    const standalone = copyStandaloneWorkspace("yrd-standalone-deps-")
+    try {
+      const install = Bun.spawnSync({
+        cmd: ["bun", "install", "--frozen-lockfile", "--ignore-scripts"],
+        cwd: standalone,
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const installDetail = `${install.stdout.toString()}${install.stderr.toString()}`
+      expect(install.exitCode, installDetail).toBe(0)
+
+      const imports = Bun.spawnSync({
+        cmd: [
+          "bun",
+          "-e",
+          '["silvery/test", "silvery/term", "@termless/test"].map((specifier) => import.meta.resolve(specifier))',
+        ],
+        cwd: join(standalone, "packages", "yrd-cli"),
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const importDetail = `${imports.stdout.toString()}${imports.stderr.toString()}`
+      expect(imports.exitCode, importDetail).toBe(0)
+
+      const publicApi = Bun.spawnSync({
+        cmd: ["bun", "run", "postinstall"],
+        cwd: standalone,
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const publicApiDetail = `${publicApi.stdout.toString()}${publicApi.stderr.toString()}`
+      const silvery = Bun.spawnSync({
+        cmd: ["bun", "-e", 'const silvery = await import("silvery"); process.exit(!("MarkdownView" in silvery))'],
+        cwd: standalone,
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      if (silvery.exitCode === 0) {
+        expect(publicApi.exitCode, publicApiDetail).toBe(0)
+      } else {
+        expect(publicApi.exitCode).toBe(1)
+        expect(publicApiDetail).toContain("Yrd dependency provisioning refused: Yrd main consumes silvery.MarkdownView")
+        expect(publicApiDetail).toContain("@km/infra/22627-silvery-0232-release")
+      }
+    } finally {
+      rmSync(standalone, { recursive: true, force: true })
+    }
+  })
+
+  it("names the consumer, missing public API, and release bead in the provisioning refusal (22600)", () => {
+    expect(publicDependencyRefusal({})).toBe(
+      "Yrd dependency provisioning refused: Yrd main consumes silvery.MarkdownView, " +
+        "but the installed silvery package predates that public API " +
+        "(MarkdownView was added after 0.23.1). Release: @km/infra/22627-silvery-0232-release.",
+    )
+    expect(publicDependencyRefusal({ MarkdownView() {} })).toBeUndefined()
   })
 })
