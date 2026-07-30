@@ -612,7 +612,7 @@ async function replaySameHeadCandidateRecut() {
   const journal = createMemoryJournal()
   const id = ids()
   const prepared: string[] = []
-  const prepareCandidate: NonNullable<Parameters<typeof queuePlugin>[0]["prepareCandidate"]> = (input) => {
+  const prepareCandidate: NonNullable<NonNullable<Parameters<typeof queuePlugin>[0]>["prepareCandidate"]> = (input) => {
     prepared.push(input.id)
     const { prs: _prs, ...candidate } = input
     return {
@@ -676,20 +676,22 @@ describe("Queue", () => {
     expect(run?.steps[0]?.job).toMatchObject({ status: "completed", conclusion: "success" })
   })
 
-  it.fails("audits a content-equivalent Candidate whose receipt names the prior PR revision", async () => {
+  it("audits a content-equivalent Candidate whose receipt names the prior PR revision", async () => {
     const fixture = await replaySameHeadCandidateRecut()
     await using app = fixture.app
 
-    expect(app.queue.audit().findings).toContainEqual(
-      expect.objectContaining({
-        code: "candidate-revision-mismatch",
-        run: "R1",
-        pr: fixture.pr.id,
-      }),
-    )
+    const finding = app.queue.audit().findings.find(({ code }) => code === "candidate-revision-mismatch")
+    expect(finding).toMatchObject({
+      code: "candidate-revision-mismatch",
+      run: "R1",
+      pr: fixture.pr.id,
+    })
+    expect(finding?.message).toContain("Candidate 'C1'")
+    expect(finding?.message).toContain(`revision 1@${fixture.pr.headSha}`)
+    expect(finding?.message).toContain(`revision 2@${fixture.pr.headSha}`)
   })
 
-  it.fails("mints a fresh Candidate after a same-head PR recut survives a runtime restart", async () => {
+  it("mints a fresh Candidate after a same-head PR recut survives a runtime restart", async () => {
     const fixture = await replaySameHeadCandidateRecut()
     await using app = fixture.app
 

@@ -4316,11 +4316,19 @@ function requiredCandidateBaseSha(prs: readonly DeepReadonly<PRSnapshot>[]): str
   return baseSha
 }
 
-function candidateContentKey(prs: readonly DeepReadonly<PRSnapshot>[], baseSha: string): string {
+function candidateArtifactKey(prs: readonly DeepReadonly<PRSnapshot>[], baseSha: string): string {
   return JSON.stringify([
     prs[0] === undefined ? "" : queueIdentity(prs[0]),
     baseSha,
     ...prs.map((pr) => [pr.headSha, pr.composition]),
+  ])
+}
+
+function candidateReceiptKey(prs: readonly DeepReadonly<PRSnapshot>[], baseSha: string): string {
+  return JSON.stringify([
+    prs[0] === undefined ? "" : queueIdentity(prs[0]),
+    baseSha,
+    ...prs.map((pr) => [pr.id, pr.revision, pr.headSha, pr.composition]),
   ])
 }
 
@@ -4349,14 +4357,14 @@ function candidateFor(
 ): DeepReadonly<Candidate> | undefined {
   const first = prs[0]
   if (first === undefined) return undefined
-  const key = candidateContentKey(prs, baseSha)
+  const key = candidateReceiptKey(prs, baseSha)
   const records = Queues.values(queues)
   const record = records.find((run) => {
     const candidate = queues.candidates[run.candidateId]
     return (
       candidate !== undefined &&
       candidate.mergeability !== "unknown" &&
-      candidateContentKey(run.prs, candidate.baseSha) === key
+      candidateReceiptKey(run.prs, candidate.baseSha) === key
     )
   })
   if (record !== undefined) return queues.candidates[record.candidateId]
@@ -5073,6 +5081,74 @@ function unisolableStalePlanBatches(
   return batches
 }
 
+type CandidateRevisionMismatch = Readonly<{
+  candidate: string
+  run: RunId
+  pr: string
+  recordedRevision: number
+  recordedHead: string
+  currentRevision: number
+  currentHead: string
+}>
+
+/**
+ * Content-equivalent historical Candidates are valid artifacts, but they are
+ * not authority for a newer PR revision. Surface the exact state that used to
+ * make {@link candidateFor} select the old Candidate and then make
+ * {@link startRun} refuse its immutable receipt. Once an exact current receipt
+ * exists, the old Candidate is ordinary history and the finding clears.
+ */
+function candidateRevisionMismatches(state: DeepReadonly<RuntimeState>): readonly CandidateRevisionMismatch[] {
+  const mismatches: CandidateRevisionMismatch[] = []
+  const seen = new Set<string>()
+  for (const record of Queues.values(state.queues)) {
+    const candidate = state.queues.candidates[record.candidateId]
+    if (candidate === undefined || candidate.mergeability === "unknown") continue
+    const current: PRSnapshot[] = []
+    let live = true
+    for (const snapshot of record.prs) {
+      const pr = state.bays.prs[snapshot.id]
+      const delivery = pr === undefined ? undefined : prDeliveryState(pr)
+      if (pr === undefined || (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready")) {
+        live = false
+        break
+      }
+      current.push(Queues.snapshot(pr))
+    }
+    if (!live) continue
+    const currentBaseSha = current[0]?.baseSha
+    if (currentBaseSha === undefined || current.some((snapshot) => snapshot.baseSha !== currentBaseSha)) continue
+    if (candidateArtifactKey(record.prs, candidate.baseSha) !== candidateArtifactKey(current, currentBaseSha)) continue
+    if (candidateReceiptKey(record.prs, candidate.baseSha) === candidateReceiptKey(current, currentBaseSha)) continue
+    if (candidateFor(state.queues, current, currentBaseSha) !== undefined) continue
+    const mismatchIndex = candidate.revs.findIndex((revision, index) => {
+      const snapshot = current[index]
+      return (
+        snapshot === undefined ||
+        revision.pr !== snapshot.id ||
+        revision.n !== snapshot.revision ||
+        revision.head !== snapshot.headSha
+      )
+    })
+    const recorded = candidate.revs[mismatchIndex]
+    const latest = current[mismatchIndex]
+    if (recorded === undefined || latest === undefined) continue
+    const key = candidateReceiptKey(current, currentBaseSha)
+    if (seen.has(key)) continue
+    seen.add(key)
+    mismatches.push({
+      candidate: candidate.id,
+      run: record.id,
+      pr: latest.id,
+      recordedRevision: recorded.n,
+      recordedHead: recorded.head,
+      currentRevision: latest.revision,
+      currentHead: latest.headSha,
+    })
+  }
+  return mismatches
+}
+
 function auditQueues(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): QueueAuditResult {
   const findings: QueueAuditFinding[] = []
   const installed = new Map(steps.map((step) => [step.name, step]))
@@ -5148,6 +5224,17 @@ function auditQueues(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeS
         })
       }
     }
+  }
+  for (const mismatch of candidateRevisionMismatches(state)) {
+    findings.push({
+      code: "candidate-revision-mismatch",
+      message:
+        `Candidate '${mismatch.candidate}' from queue run '${mismatch.run}' records PR '${mismatch.pr}' ` +
+        `revision ${mismatch.recordedRevision}@${mismatch.recordedHead}, but the content-equivalent current receipt is ` +
+        `revision ${mismatch.currentRevision}@${mismatch.currentHead}; no exact current-revision Candidate exists`,
+      run: mismatch.run,
+      pr: mismatch.pr,
+    })
   }
   // The record walk above `continue`s past terminal runs and never inspects Jobs
   // whose run record is gone — so a requested Job stranded under a terminal or
