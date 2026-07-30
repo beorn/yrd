@@ -7,9 +7,9 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@silvery/command": "^0.23.0",
-    "@silvery/scope": "^0.23.0",
-    "@silvery/signals": "^0.23.0",
+    "@silvery/command": "^0.23.2",
+    "@silvery/scope": "^0.23.2",
+    "@silvery/signals": "^0.23.2",
     "canonicalize": "^3.0.0",
     "loggily": "^0.10.2",
     "uuid": "^11.1.0",
