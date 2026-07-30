@@ -143,13 +143,36 @@ async function candidatePackageRepository(): Promise<{ repo: string; featureSha:
   )
   await writeFile(join(repo, "bun.lock"), "lockfileVersion = 1\n")
   await writeFile(join(repo, ".gitignore"), "node_modules/\n")
-  await git(repo, "add", "package.json", "bun.lock", ".gitignore")
+  await writeFile(join(repo, ".yrd.yml"), 'checks: [{typecheck: {run: "bun run typecheck"}}]\n')
+  await git(repo, "add", "package.json", "bun.lock", ".gitignore", ".yrd.yml")
   await git(repo, "commit", "-qm", "declare candidate toolchain")
   await git(repo, "switch", "-q", "issue/feature")
   await git(repo, "merge", "-q", "--no-edit", "main")
   const featureSha = await git(repo, "rev-parse", "HEAD")
   await git(repo, "switch", "-q", "main")
   return { repo, featureSha }
+}
+
+async function fixtureBun(repo: string, install: readonly string[]): Promise<string> {
+  const fixtureBin = join(repo, "..", "bin")
+  await mkdir(fixtureBin, { recursive: true })
+  await writeFile(
+    join(fixtureBin, "bun"),
+    [
+      "#!/bin/sh",
+      'if [ "$1" = "install" ]; then',
+      ...install.map((line) => `  ${line}`),
+      "fi",
+      'if [ "$1" = "run" ] && [ "$2" = "typecheck" ]; then',
+      "  test -f node_modules/.provisioned",
+      "  exit",
+      "fi",
+      "exit 64",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  )
+  return fixtureBin
 }
 
 /** Install legacy spelling on the base branch: config authority is the base,
@@ -1890,6 +1913,75 @@ checks: [{check: {run: "true"}}]
       ],
     })
     expect(result.results[0]).not.toHaveProperty("reusedFrom")
+  })
+
+  it("provisions a detached required-check workspace before pr submit runs it (22600)", async () => {
+    const { repo } = await candidatePackageRepository()
+    const fixtureBin = await fixtureBun(repo, ["mkdir -p node_modules", ": > node_modules/.provisioned", "exit 0"])
+    const previousPath = process.env.PATH
+    process.env.PATH = `${fixtureBin}:${previousPath ?? ""}`
+    try {
+      let stdout = ""
+      let stderr = ""
+      const exitCode = await runYrdProcess(
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--json"],
+        {
+          cwd: repo,
+          stdout: (text) => {
+            stdout += text
+          },
+          stderr: (text) => {
+            stderr += text
+          },
+        },
+      )
+
+      expect(exitCode, stderr).toBe(0)
+      expect(JSON.parse(stdout)).toMatchObject({
+        command: "pr.submit",
+        prs: [{ branch: "issue/feature", status: "submitted" }],
+      })
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+    }
+  })
+
+  it("types a detached required-check provisioning failure before pr submit mutates state (22600)", async () => {
+    const { repo } = await candidatePackageRepository()
+    const fixtureBin = await fixtureBun(repo, ["printf 'dependency cache unavailable\\n' >&2", "exit 7"])
+    const previousPath = process.env.PATH
+    process.env.PATH = `${fixtureBin}:${previousPath ?? ""}`
+    try {
+      let stdout = ""
+      let stderr = ""
+      const exitCode = await runYrdProcess(
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--json"],
+        {
+          cwd: repo,
+          stdout: (text) => {
+            stdout += text
+          },
+          stderr: (text) => {
+            stderr += text
+          },
+        },
+      )
+
+      expect(exitCode).toBe(3)
+      expect(stdout).toBe("")
+      expect(JSON.parse(stderr)).toMatchObject({
+        failure: {
+          kind: "infrastructure",
+          code: "candidate-provision-failed",
+          message: expect.stringContaining("dependency cache unavailable"),
+        },
+      })
+      expect((await journalEnvelope(repo)).flatMap(({ values }) => values)).toEqual([])
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+    }
   })
 
   it("runs the managed required check before pr submit mutates the PR journal", async () => {
