@@ -23,13 +23,12 @@ function errorDetail(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-export type WorkspaceDependencyOptions = Readonly<{
+type WorkspaceDependencyOptions = Readonly<{
   path: string
   subject: string
   manifestSubject?: string
   env?: NodeJS.ProcessEnv
   signal?: AbortSignal
-  reinstall?: boolean
   onCommand?: (argv: readonly string[]) => void
   writeOutput?: (text: string) => void
   fail(message: string): never
@@ -107,7 +106,7 @@ export async function ensureWorkspaceDependencies(
 ): Promise<void> {
   const manifestPath = join(options.path, "package.json")
   if (!existsSync(manifestPath)) return
-  if (options.reinstall !== true && existsSync(join(options.path, "node_modules"))) return
+  if (existsSync(join(options.path, "node_modules"))) return
   let manifestSource: string
   try {
     manifestSource = await readFile(manifestPath, "utf8")
