@@ -3781,3 +3781,89 @@ describe("step environment declarations — deterministic check children (merge-
     )
   })
 })
+
+describe("pre-submit checkout timeout (22648)", () => {
+  /** hh's branch-guard materializes submodules from the repo's post-checkout
+   * hook INSIDE `git worktree add` (measured 34.15s against a 30s kill); a
+   * sleeping hook is that cost, distilled. */
+  async function slowCheckoutRepository(sleepSeconds: number): Promise<{ repo: string }> {
+    const { repo } = await repository()
+    await mkdir(join(repo, ".git", "hooks"), { recursive: true })
+    await writeFile(
+      join(repo, ".git", "hooks", "post-checkout"),
+      `#!/bin/sh\nsleep ${sleepSeconds}\nexit 0\n`,
+      { mode: 0o755 },
+    )
+    return { repo }
+  }
+
+  async function submitFeature(repo: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    let stdout = ""
+    let stderr = ""
+    const exitCode = await runYrdProcess(
+      ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--json"],
+      {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      },
+    )
+    return { exitCode, stdout, stderr }
+  }
+
+  it("types a checkout kill with limit, elapsed, phase, and remedy when the hook outlives the limit (22648)", async () => {
+    const { repo } = await slowCheckoutRepository(2.4)
+    const previous = process.env.YRD_CHECKOUT_TIMEOUT_MS
+    process.env.YRD_CHECKOUT_TIMEOUT_MS = "500"
+    try {
+      const { exitCode, stdout, stderr } = await submitFeature(repo)
+      expect(exitCode, stdout).toBe(3)
+      expect(stdout).toBe("")
+      const { failure } = JSON.parse(stderr) as {
+        failure: { kind: string; code: string; message: string }
+      }
+      expect(failure).toMatchObject({ kind: "infrastructure", code: "required-check-checkout-timeout" })
+      expect(failure.message).toContain("500ms")
+      expect(failure.message).toMatch(/after \d+ms/u)
+      expect(failure.message).toContain("post-checkout")
+      expect(failure.message).toContain("YRD_CHECKOUT_TIMEOUT_MS")
+      expect((await journalEnvelope(repo)).flatMap(({ values }) => values)).toEqual([])
+    } finally {
+      if (previous === undefined) delete process.env.YRD_CHECKOUT_TIMEOUT_MS
+      else process.env.YRD_CHECKOUT_TIMEOUT_MS = previous
+    }
+  })
+
+  it("defaults the materializing-checkout limit with real margin over hh's measured 34s cost (22648)", async () => {
+    const { GIT_MATERIALIZE_TIMEOUT_DEFAULT_MS, resolveCheckoutTimeoutMs } = await import("../src/git-timeouts.ts")
+    expect(GIT_MATERIALIZE_TIMEOUT_DEFAULT_MS).toBeGreaterThanOrEqual(90_000)
+    expect(resolveCheckoutTimeoutMs({})).toBe(GIT_MATERIALIZE_TIMEOUT_DEFAULT_MS)
+  })
+
+  it("refuses an invalid YRD_CHECKOUT_TIMEOUT_MS loudly instead of silently falling back (22648)", async () => {
+    const { resolveCheckoutTimeoutMs } = await import("../src/git-timeouts.ts")
+    expect(() => resolveCheckoutTimeoutMs({ YRD_CHECKOUT_TIMEOUT_MS: "soon" })).toThrow(/YRD_CHECKOUT_TIMEOUT_MS/u)
+    expect(() => resolveCheckoutTimeoutMs({ YRD_CHECKOUT_TIMEOUT_MS: "-5" })).toThrow(/YRD_CHECKOUT_TIMEOUT_MS/u)
+  })
+
+  it("lets a progressing post-checkout hook finish inside the limit (22648)", async () => {
+    const { repo } = await slowCheckoutRepository(1.2)
+    const previous = process.env.YRD_CHECKOUT_TIMEOUT_MS
+    process.env.YRD_CHECKOUT_TIMEOUT_MS = "20000"
+    try {
+      const { exitCode, stdout, stderr } = await submitFeature(repo)
+      expect(exitCode, stderr).toBe(0)
+      expect(JSON.parse(stdout)).toMatchObject({
+        command: "pr.submit",
+        prs: [{ branch: "issue/feature", status: "submitted" }],
+      })
+    } finally {
+      if (previous === undefined) delete process.env.YRD_CHECKOUT_TIMEOUT_MS
+      else process.env.YRD_CHECKOUT_TIMEOUT_MS = previous
+    }
+  })
+})
