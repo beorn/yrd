@@ -11,7 +11,6 @@ export const QueueReadBoundary = Symbol("yrd.queue-read-boundary")
 
 export type QueueReadBoundaryFacts = Readonly<{
   readModel?: Pick<VersionedQueueReadModel, "snapshot">
-  submoduleWarnings: readonly string[]
 }>
 
 type InternalServices = YrdCliServices &

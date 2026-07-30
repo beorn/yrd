@@ -115,7 +115,6 @@ import type {
 } from "./types.ts"
 import { createQueueReadModel } from "./queue-read-model.ts"
 import { QueueReadBoundary, queueReadBases } from "./queue-read-boundary.ts"
-import { submoduleTrackingWarnings } from "./submodule-tracking.ts"
 
 type RuntimeStep = StepDef<PRShape, PRShape>
 
@@ -1529,7 +1528,6 @@ async function createYrdRuntimeHost(
     const services = Object.freeze({
       [QueueReadBoundary]: Object.freeze({
         readModel: queueReadModel,
-        submoduleWarnings: mode === "viewer" ? submoduleTrackingWarnings(repository.worktree) : [],
       }),
       ...(loaded.config.flows === undefined ? {} : { config: defineConfig(...loaded.config.flows) }),
       queue: queueAdministration(

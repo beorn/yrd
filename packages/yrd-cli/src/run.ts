@@ -4541,7 +4541,6 @@ async function renderDashboard(
   selectors: readonly string[],
   options: JsonOption,
   io: YrdCliIO,
-  services: YrdCliServices = {},
 ): Promise<void> {
   const state = stateOf(app)
   const target = resolveQueueTargets(state, selectors, undefined, undefined)
@@ -4556,12 +4555,8 @@ async function renderDashboard(
       selected: target.selected,
       now: io.now?.() ?? Date.now(),
     }),
-    [...queuePauseWarnings(state.bays, results), ...queueSurfaceWarnings(services, io.cwd ?? process.cwd())],
+    queuePauseWarnings(state.bays, results),
   )
-}
-
-function queueSurfaceWarnings(services: YrdCliServices, cwd: string): readonly string[] {
-  return queueReadBoundary(services)?.submoduleWarnings ?? submoduleTrackingWarnings(cwd)
 }
 
 async function queueStatusSnapshots(
@@ -5286,10 +5281,7 @@ async function listQueues(
       state: snapshot.state,
       columns: io.columns ?? 120,
     }),
-    [
-      ...queuePauseWarnings(snapshot.state, snapshot.results),
-      ...queueSurfaceWarnings(services, io.cwd ?? process.cwd()),
-    ],
+    queuePauseWarnings(snapshot.state, snapshot.results),
   )
 }
 
@@ -5297,9 +5289,8 @@ async function dashboard(
   app: YrdCliApp,
   options: JsonOption & Readonly<{ base?: string }>,
   io: YrdCliIO,
-  services: YrdCliServices,
 ): Promise<void> {
-  await renderDashboard(app, options.base === undefined ? [] : [options.base], options, io, services)
+  await renderDashboard(app, options.base === undefined ? [] : [options.base], options, io)
 }
 
 async function primeYrd(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Promise<void> {
@@ -5819,19 +5810,24 @@ async function configDoctor(
   await app.refresh()
   const state = stateOf(app)
   const findings = diagnoseYrdFlows({ prs: Object.values(state.bays.prs), runs: Queues.values(state.queues) }, config)
-  await printResult(
+  const warnings = submoduleTrackingWarnings(io.cwd ?? process.cwd())
+  const clean = findings.length === 0 && warnings.length === 0
+  await printResultWithWarnings(
     io,
     jsonEnabled(options),
     { command: "doctor", findings, ...(rebuilt === undefined ? {} : { rebuilt }) },
     findings.length === 0
-      ? rebuilt === undefined
-        ? "yrd doctor clean"
-        : `yrd doctor rebuilt ${String(rebuilt.views)} views at cursor ${String(rebuilt.cursor)}`
+      ? clean
+        ? rebuilt === undefined
+          ? "yrd doctor clean"
+          : `yrd doctor rebuilt ${String(rebuilt.views)} views at cursor ${String(rebuilt.cursor)}`
+        : `yrd doctor found ${String(warnings.length)} repository warning${warnings.length === 1 ? "" : "s"}`
       : findings
           .map((finding) => `${finding.severity.toUpperCase()} ${finding.code} ${finding.owner}: ${finding.message}`)
           .join("\n"),
+    warnings,
   )
-  return findings.length === 0 ? 0 : 1
+  return clean ? 0 : 1
 }
 
 async function journalImportOrphan(
@@ -7660,10 +7656,10 @@ function buildProgram(
       .command("_dashboard", { isDefault: true, hidden: true })
       .option("--base <branch>", "scope the dashboard to one base")
       .option("--json", "emit stable JSON")
-      .action(async (options) => dashboard(installed(), options, io, installedServices()))
+      .action(async (options) => dashboard(installed(), options, io))
     program
       .command("doctor")
-      .description("diagnose base-authority Flow revision and structural drift")
+      .description("diagnose Flow drift and repository configuration warnings")
       .option("--rebuild-views", "atomically rebuild registered query views from immutable Journal history")
       .option("--json", "emit stable JSON")
       .action(async (options) => setExit(await configDoctor(installed(), installedServices(), options, io)))
