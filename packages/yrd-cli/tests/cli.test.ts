@@ -2582,6 +2582,59 @@ describe("runYrd", () => {
     }
   })
 
+  it.each([1, 8])(
+    "keeps follow compose cycles proportional to journal batches with %i active PRs",
+    async (activeCount) => {
+      const journal = createMemoryJournal()
+      const runner = await createApp({ journal, waitingCheck: true, id: ids(100_000) })
+      const writer = await createApp({ journal, waitingCheck: true, id: ids() })
+      const controller = new AbortController()
+      const sleeps: number[] = []
+      const queueRun = vi.fn(runner.queue.run.bind(runner.queue))
+      const viewer = {
+        ...runner,
+        queue: {
+          ...runner.queue,
+          run: queueRun,
+        },
+      } as TestApp
+      const gate = vi.fn(async () => undefined)
+      const submit = async (index: number) => {
+        await writer.bays.submit({
+          branch: `issue/active-${index}`,
+          headSha: index.toString(16).padStart(40, "0"),
+          baseSha: BASE_SHA,
+        })
+        await writer.bays.requestChecks({ pr: `PR${index}`, baseSha: BASE_SHA })
+      }
+
+      try {
+        for (let index = 1; index <= activeCount; index += 1) await submit(index)
+        await runner.refresh()
+        const io = outputIO({
+          now: () => Date.parse("2026-07-09T12:01:00.000Z"),
+          scope: {
+            signal: controller.signal,
+            sleep: async (milliseconds: number) => {
+              sleeps.push(milliseconds)
+              // One durable batch among otherwise unchanged ticks must cause
+              // exactly one additional compose, independent of queue size.
+              if (sleeps.length === 2) await submit(activeCount + 1)
+              if (sleeps.length === 4) controller.abort()
+            },
+          } as YrdCliIO["scope"],
+        }).io
+
+        await expect(runInternals.followQueueRuns(viewer, [], { json: true, interval: 1 }, io, gate)).resolves.toBe(0)
+        expect(sleeps).toEqual([1_000, 1_000, 1_000, 1_000])
+        expect(gate).toHaveBeenCalledTimes(2)
+        expect(queueRun).toHaveBeenCalledTimes(2)
+      } finally {
+        await Promise.all([runner.close(), writer.close()])
+      }
+    },
+  )
+
   it("recovers a journaled freshness transition when the resident stops before canceling its predecessor", async () => {
     const nextHead = "3".repeat(40)
     const nextBase = "b".repeat(40)
