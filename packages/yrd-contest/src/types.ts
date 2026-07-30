@@ -13,12 +13,10 @@ const CountSchema = z.number().int().nonnegative().nullable()
 
 export type JsonObject = Readonly<Record<string, JsonValue>>
 
-export const CompetitorDefSchema = z
-  .object({ model: TextSchema, harness: DefIdSchema, config: JsonObjectSchema })
-  .strict()
+export const CompetitorDefSchema = z.object({ id: DefIdSchema, runner: DefIdSchema, config: JsonObjectSchema }).strict()
 export type CompetitorDef = DeepReadonly<z.infer<typeof CompetitorDefSchema>>
 
-export const CompetitorSchema = CompetitorDefSchema.extend({ id: TextSchema }).strict()
+export const CompetitorSchema = CompetitorDefSchema
 export type Competitor = DeepReadonly<z.infer<typeof CompetitorSchema>>
 
 export const GitRevisionPinSchema = z
@@ -115,7 +113,7 @@ export const ContestEvaluatorInputSchema = z
 export type ContestEvaluatorInput = DeepReadonly<z.infer<typeof ContestEvaluatorInputSchema>>
 
 export type ContestRunnerDef = Readonly<{
-  harness: string
+  id: string
   revision: string
   run(
     input: ContestRunnerInput,

@@ -170,41 +170,61 @@ async function finishJob(app: TestApp, result: CommandResult): Promise<void> {
 }
 
 describe("withBays", () => {
-  it("records Hab launches as bounded PR sessions without copying the Hab session record", async () => {
-    await using app = (await createHarness()).app
-    await app.bays.submit({ branch: "task/session-history", headSha: HEAD_1, draft: true })
-
-    const started = await app.bays.startSession({ pr: "PR1", launchId: "hab-launch-1" })
-    expect(started.events.map(({ name }) => name)).toEqual(["pr/session-started"])
-    expect(app.bays.pr("PR1")?.sessions).toEqual([{ launchId: "hab-launch-1", startedAt: "2026-01-01T00:00:00.000Z" }])
-
-    expect((await app.bays.startSession({ pr: "PR1", launchId: "hab-launch-1" })).events).toEqual([])
-    const stopped = await app.bays.stopSession({
-      pr: "PR1",
-      launchId: "hab-launch-1",
-      outcome: "completed",
-    })
-    expect(stopped.events.map(({ name }) => name)).toEqual(["pr/session-ended"])
-    expect(app.bays.pr("PR1")?.sessions).toEqual([
+  it("keeps Hab sessions outside Bay while replaying retired session facts as no-ops", async () => {
+    const nextId = ids()
+    const at = "2026-01-01T00:00:00.000Z"
+    const seededCommand = { id: nextId(), op: "fixture.retired-pr-session" }
+    const journal = createMemoryJournal([
       {
-        launchId: "hab-launch-1",
-        startedAt: "2026-01-01T00:00:00.000Z",
-        endedAt: "2026-01-01T00:00:00.000Z",
-        outcome: "completed",
+        command: seededCommand,
+        cause: {
+          id: nextId(),
+          commandId: seededCommand.id,
+          op: seededCommand.op,
+          commandHash: Command.hash(seededCommand),
+        },
+        events: [
+          {
+            id: nextId(),
+            name: "pr/pushed",
+            ts: at,
+            data: {
+              pr: "PR1",
+              branch: "task/session-history",
+              base: "main",
+              headSha: HEAD_1,
+              revision: 1,
+            },
+          },
+          {
+            id: nextId(),
+            name: "pr/session-started",
+            ts: at,
+            data: { pr: "PR1", launchId: "hab-launch-1" },
+          },
+          {
+            id: nextId(),
+            name: "pr/session-ended",
+            ts: at,
+            data: { pr: "PR1", launchId: "hab-launch-1", outcome: "completed" },
+          },
+        ],
       },
     ])
-    expect(
-      (
-        await app.bays.stopSession({
-          pr: "PR1",
-          launchId: "hab-launch-1",
-          outcome: "completed",
-        })
-      ).events,
-    ).toEqual([])
-    await expect(app.bays.stopSession({ pr: "PR1", launchId: "missing", outcome: "crashed" })).rejects.toThrow(
-      "has no session 'missing'",
-    )
+    const jobs = createBayJobDefs(createWorkspaceHarness().adapter)
+    const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
+    await using app = await createYrd(definition, {
+      inject: { journal, clock: () => at, id: nextId, log: silentLog },
+    })
+
+    expect(Object.keys(app.commands.pr)).not.toEqual(expect.arrayContaining(["startSession", "stopSession"]))
+    expect(Object.keys(app.bays)).not.toEqual(expect.arrayContaining(["startSession", "stopSession"]))
+    expect(app.bays.pr("PR1")).not.toHaveProperty("sessions")
+    expect((await Array.fromAsync(app.events())).map(({ name }) => name)).toEqual([
+      "pr/pushed",
+      "pr/session-started",
+      "pr/session-ended",
+    ])
   })
 
   it("pins the exactly-one Flow revision and structural fingerprint at PR enrollment", async () => {

@@ -1,9 +1,9 @@
 # `@yrd/contest`
 
-`@yrd/contest` compares multiple implementations of one real `@yrd/issue`
-Issue. Every competitor gets an isolated `@yrd/bay` Work Bay. Yrd records the
-immutable result commit, runtime, token and cost evidence, artifacts, and
-held-out evaluations needed to choose work that can actually ship.
+`@yrd/contest` is an optional comparison-and-evidence extension for one real
+`@yrd/issue` Issue. Every competitor gets an isolated `@yrd/bay` Work Bay. Yrd
+records the immutable result commit, runtime evidence, artifacts, and held-out
+evaluations needed to choose work that can actually ship.
 
 ## Composition
 
@@ -12,6 +12,17 @@ Create the Contest plugin first so its Jobs can be installed with the rest of
 the runtime:
 
 ```ts
+const runners = [{
+  id: "bench",
+  revision: "bench-v1",
+  run: (input, context) => backend.run(input.competitor.config, input, context),
+}]
+const evaluators = [{
+  id: "private-tests",
+  revision: "private-tests-v1",
+  authority: "held-out",
+  evaluate: (input, context) => backend.evaluate(input, context),
+}]
 const bayJobs = createBayJobDefs(workspace)
 const contests = withContests({ runners, evaluators, git })
 
@@ -29,11 +40,11 @@ Definitions cannot be added or replaced after Yrd starts. Queued Jobs pin the
 definition revision they were created with and refuse to run after revision
 drift.
 
-Runner definitions and their launch arguments are trusted organizer
-configuration. Issue text and competitor output are untrusted inputs, but Yrd
-does not sandbox flags deliberately installed by the operator. An adapter that
-accepts competitor definitions from another trust domain must validate or
-allowlist those flags before composition.
+Competitors are plain `{ id, runner, config }` records. `id` is an opaque
+comparison label, `runner` selects one injected runner port, and `config` is
+uninterpreted JSON passed to that port. Yrd ships no default competitor
+launcher. The embedding host owns validation, trust boundaries, subprocess or
+remote execution, and any domain-specific retry policy.
 
 ## Domain API
 
@@ -43,7 +54,10 @@ allowlist those flags before composition.
 const base = await yrd.contests.resolveBase()
 const contest = await yrd.contests.compete({
   issue,
-  competitors,
+  competitors: [
+    { id: "fast", runner: "bench", config: { profile: "fast" } },
+    { id: "thorough", runner: "bench", config: { profile: "thorough" } },
+  ],
   base: base.base,
   baseSha: base.sha,
 })
@@ -90,8 +104,8 @@ restart-safe reconciliation out of the public command tree.
 ## Evaluation And Promotion
 
 An evaluator marked `held-out` is a promotion gate. An `advisory` evaluator is
-retained as evidence but cannot make an attempt pass or select a winner. LLM
-reviews normally belong in the advisory category.
+retained as evidence but cannot make an attempt pass or select a winner.
+Qualitative reviews normally belong in the advisory category.
 
 Selection requires every configured evaluation to be terminal and one manually
 chosen passing attempt. A durable verification Job first resolves the attempt's

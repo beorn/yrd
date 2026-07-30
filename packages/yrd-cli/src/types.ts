@@ -134,8 +134,7 @@ export type YrdCliIO = {
   residentLeaseHeld?(cwd: string): Promise<boolean>
   /** Process-host-owned step artifact root used by the live read-only output projection. */
   artifactRoot?: string
-  /** Host-owned durable state directory. The managed `do` concurrency marker
-   * lives under it; absent means no managed run can claim the cap. */
+  /** Host-owned durable state directory for artifacts and runtime coordination. */
   stateDir?: string
   /** Fresh host-owned Bay destroy protections for this invocation. */
   bayProtections?: readonly YrdBayProtection[]

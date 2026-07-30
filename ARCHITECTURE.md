@@ -27,11 +27,14 @@ function per implementation detail.
 | `Bays`          | `withBays()`                                 | Query isolated bays and own revision-bound PR facts                                        | `state`, bay/PR queries, `submitSelection()`, `ready()`, `review()`, `comment()`, regression records, check requests, lifecycle mutations |
 | `Queue`         | `withQueue()`                                | Run required checks and integrate eligible PRs through one scheduler                        | `state`, check/eligibility projections, `pause()`, `resume()`, `run()`, `finish()`, `recover()`, `audit()`                              |
 | `Contests`      | `withContests()`                             | Run, evaluate, select, and promote competing implementations                               | `state`, `resolveBase()`, `get()`, `list()`, `compete()`, `evaluate()`, `waiting()`, `finish()`, `select()`, `promote()`                  |
-| Signal observer | `createSignalObserver()`                     | Route an enumerated post-append event subset outside the Queue lane                        | `start()`, `close()`                                                                                                                      |
 
 `Process`, `Git`, issue sources, workspaces, runners, evaluators, clocks, ids,
 loggers, and scopes are injected capabilities. A capability may be one
 function or a small plain object; it is not a global singleton.
+
+Contest competitors are `{ id, runner, config }`: an opaque label, an injected
+runner-port id, and uninterpreted JSON. Yrd has no built-in competitor launcher
+and knows nothing about providers or process harnesses.
 
 ## Domain Data
 

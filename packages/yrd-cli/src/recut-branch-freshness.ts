@@ -126,12 +126,11 @@ export type RecutBranchFreshness =
  * `--revision` is the deliberate replay spelling; resident freshness recuts
  * are already bound to admitted authority and bypass this author-facing gate.
  *
- * A TRACKED PR (`yrd pr submit --track`, and managed `yrd do` carriers by
- * default unless opted out) answered that ambiguity up front: the live head is
- * the intended source. It returns `tracked-drift` so the caller records the new
- * revision — the same operation an operator performs by hand — and continues.
- * Reproducibility is untouched: each run still executes a frozen recorded
- * revision. */
+ * A TRACKED PR (`yrd pr submit --track`) answered that ambiguity up front: the
+ * live head is the intended source. It returns `tracked-drift` so the caller
+ * records the new revision — the same operation an operator performs by hand —
+ * and continues. Reproducibility is untouched: each run still executes a
+ * frozen recorded revision. */
 export async function requireImplicitRecutBranchFreshness(
   pr: PR,
   selected: PRRev,

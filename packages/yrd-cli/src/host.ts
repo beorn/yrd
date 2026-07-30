@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto"
-import { accessSync, chmodSync, constants, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { mkdtemp, rm } from "node:fs/promises"
 import { hostname } from "node:os"
-import { delimiter, join, relative, resolve, sep } from "node:path"
+import { join, relative, resolve, sep } from "node:path"
 import { clearLine, cursorTo } from "node:readline"
 import { createScope, type Scope } from "@silvery/scope"
 import {
@@ -20,7 +20,6 @@ import {
   type ReceiverTarget,
 } from "@yrd/bay"
 import {
-  createAgContestRunner,
   createHeldOutCommandEvaluator,
   withContests,
   type ContestEvaluatorDef,
@@ -45,7 +44,6 @@ import {
   configuredCommandStep,
   configuredMergeStep,
   configuredWaitingCommandStep,
-  authorAttributionReceipt,
   createCandidatePool,
   createCandidatePoolGit,
   createGitPRRecutter,
@@ -98,7 +96,7 @@ import {
 import { ensureWorkspaceDependencies } from "./workspace-provisioning.ts"
 import { withGitIndexLockRetry } from "./git-index-lock-retry.ts"
 import { loadYrdConfig, stepGateMode, type ResolvedYrdProjectConfig, type YrdStepConfig } from "./config.ts"
-import { classifyFailure, resolveInvocation, type YrdPersona } from "./invocation.ts"
+import { classifyFailure, resolveInvocation } from "./invocation.ts"
 import { withLiveRenderer } from "./live-renderer.ts"
 import { createYrdLogger, residentObservability, resolveYrdObservability } from "./observability.ts"
 import { formatResidentLogLine, residentArtifactHome } from "./runner-timeline.ts"
@@ -106,15 +104,6 @@ import { diagnostic } from "./output.tsx"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
 import { residentRunnerLeaseHeld, runYrdHelp, runYrdProcessRuntime, yrdJsonOutputRequested } from "./run.ts"
 import { queueStepRevision, type ToolchainFingerprint } from "./host-revision.ts"
-import {
-  createSignalObserver,
-  createTribeSignalAdapter,
-  createWireSignalAdapter,
-  registerTribeSignalRecipient,
-  type RejectedSignal,
-  type SignalDeliveryAdapter,
-  type SignalObserver,
-} from "./signals.ts"
 import type {
   YrdCliApp,
   YrdCliChecks,
@@ -311,7 +300,7 @@ function configuredChecks(
       }
       return runInCheckout(definition, cwd, context?.ref)
     },
-    async install(_cwd) {
+    install(_cwd) {
       mkdirSync(join(stateDir, "hooks"), { recursive: true })
       let existing: string | undefined
       try {
@@ -330,7 +319,7 @@ function configuredChecks(
       const source = `#!/bin/sh\n${MANAGED_PRE_SUBMIT_MARKER}\n${command}\n`
       if (existing !== source) writeFileSync(hook, source, { encoding: "utf8", mode: 0o755 })
       chmodSync(hook, 0o755)
-      return hook
+      return Promise.resolve(hook)
     },
   })
 }
@@ -384,11 +373,6 @@ function eraseStep<Input extends PRShape, Output extends PRShape>(step: StepDef<
  */
 export const DEFAULT_STEP_TIMEOUT_MS = 15 * 60_000
 const GIT_TIMEOUT_MS = 30_000
-/** Bounded notification-delivery budget for a one-shot (non-resident) process, so a
- * command like `queue cancel` delivers what it quickly can, then defers the rest to the
- * resident and exits — it can never hold the notifications lifecycle open for minutes
- * and starve the resident's dispatch. (D4) */
-const ONE_SHOT_DELIVERY_BUDGET_MS = 3_000
 
 function assertGitDidNotTimeOut(result: Pick<ProcessResult, "timedOut">, args: readonly string[]): void {
   if (result.timedOut) throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
@@ -827,7 +811,7 @@ function bayPath(root: string, bay: string): string {
   return path
 }
 
-function defaultContestAdapters(options: DefaultYrdAppOptions): {
+function contestAdapters(options: DefaultYrdAppOptions): {
   runners: readonly ContestRunnerDef[]
   evaluators: readonly ContestEvaluatorDef[]
   git: ContestGit
@@ -857,24 +841,7 @@ function defaultContestAdapters(options: DefaultYrdAppOptions): {
         inject: { process: options.process },
       })
     })
-  const runners = options.contestRunners ?? [
-    createAgContestRunner({
-      revision: createHash("sha256")
-        .update(
-          JSON.stringify({
-            implementation: "yrd-ag-runner-v2",
-            repo: options.repo,
-            stateDir: options.stateDir,
-            timeoutMs: options.config.contest.timeoutMs,
-          }),
-        )
-        .digest("hex"),
-      command: ["ag"],
-      timeoutMs: options.config.contest.timeoutMs,
-      artifactRoot: join(options.stateDir, "artifacts"),
-      inject: { process: options.process },
-    }),
-  ]
+  const runners = options.contestRunners ?? []
   return { runners, evaluators, git: options.contestGit ?? localContestGit(options.process, options.repo) }
 }
 
@@ -934,9 +901,9 @@ async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions):
       return Object.freeze({ ...runner, [Symbol.asyncDispose]: () => contexts.close() })
     },
   })
-  const contestAdapters = defaultContestAdapters(options)
+  const installedContests = contestAdapters(options)
   const contests = withContests({
-    ...contestAdapters,
+    ...installedContests,
     defaultBase: options.config.base,
   })
   const base = pipe(
@@ -1252,7 +1219,6 @@ async function closeRuntime(
   process: Process,
   scope: Scope,
   resident?: ResidentRunnerLease,
-  signals?: SignalObserver,
   candidatePool?: CandidatePool,
 ): Promise<void> {
   try {
@@ -1264,16 +1230,12 @@ async function closeRuntime(
       await candidatePool?.close()
     } finally {
       try {
-        await signals?.close()
+        await process.close()
       } finally {
         try {
-          await process.close()
+          await scope[Symbol.asyncDispose]()
         } finally {
-          try {
-            await scope[Symbol.asyncDispose]()
-          } finally {
-            await resident?.close()
-          }
+          await resident?.close()
         }
       }
     }
@@ -1367,15 +1329,10 @@ export type YrdHostOptions = Readonly<{
   configPath?: string
   env?: NodeJS.ProcessEnv
   log?: ConditionalLogger
-  signalAdapter?: SignalDeliveryAdapter
 }>
 
 type YrdRuntimeHostOptions = YrdHostOptions &
   Readonly<{
-    persona?: YrdPersona
-    interactive?: boolean
-    wire?: string
-    wireOutput?: (text: string) => void
     /** Loaded identity attested by the process host for a gitless sealed root. */
     implementationSource?: string
     /** Mutable checkout used only for current/authoritative source comparison. */
@@ -1383,95 +1340,6 @@ type YrdRuntimeHostOptions = YrdHostOptions &
     /** Repair a stale view registry before the runtime replays Journal history. */
     repairViewsBeforeReplay?: boolean
   }>
-
-function isWireCapture(destination: string): boolean {
-  return destination === "-" || destination.startsWith("file:") || destination.startsWith("fd:")
-}
-
-function executableOnPath(name: string, env: NodeJS.ProcessEnv): string | undefined {
-  for (const directory of env.PATH?.split(delimiter) ?? []) {
-    if (directory === "") continue
-    const candidate = resolve(directory, name)
-    try {
-      accessSync(candidate, constants.X_OK)
-      return candidate
-    } catch {
-      // silent-fallback-allow: a missing/non-executable candidate means continue searching PATH.
-    }
-  }
-  return undefined
-}
-
-async function createRuntimeSignalAdapter(options: {
-  process: Process
-  env: NodeJS.ProcessEnv
-  recipient: string
-  persona?: YrdPersona
-  interactive?: boolean
-  wire?: string
-  output?: (text: string) => void
-  injected?: SignalDeliveryAdapter
-  attributedReceipt(event: RejectedSignal): ReturnType<typeof authorAttributionReceipt>
-}): Promise<SignalDeliveryAdapter> {
-  if (options.injected !== undefined) return options.injected
-  const wire = options.wire
-  if (wire !== undefined && isWireCapture(wire)) {
-    if (options.output === undefined) {
-      raiseFailure(
-        "configuration",
-        "signal-wire-output-missing",
-        "yrd: a capture wire requires an ordinary output sink",
-      )
-    }
-    return createWireSignalAdapter(wire, options.output, options.recipient, (event) => options.attributedReceipt(event))
-  }
-
-  const signalProcess =
-    options.wire === undefined
-      ? options.process
-      : {
-          run: (input: Parameters<Process["run"]>[0]) =>
-            options.process.run({ ...input, env: { ...options.env, ...input.env, TRIBE_SOCKET: options.wire } }),
-        }
-  const executable = executableOnPath("tribe", options.env)
-  if (options.persona?.registration === "ensure") {
-    try {
-      if (executable === undefined) {
-        throw new Error(
-          `yrd: Tribe signal mailbox registration failed for '${options.recipient}': executable unavailable`,
-        )
-      }
-      await registerTribeSignalRecipient(signalProcess, options.recipient, executable)
-    } catch (error) {
-      if (options.interactive !== true) throw error
-    }
-  }
-  try {
-    if (executable === undefined) {
-      raiseFailure(
-        "configuration",
-        "signal-adapter-missing",
-        "yrd: notify routes require the 'tribe' executable, but no live Tribe adapter is available",
-      )
-    }
-    return createTribeSignalAdapter(
-      signalProcess,
-      options.recipient,
-      (event) => options.attributedReceipt(event),
-      executable,
-    )
-  } catch (error) {
-    if (options.interactive !== true) throw error
-    return {
-      send() {
-        throw error
-      },
-      close() {
-        throw error
-      },
-    }
-  }
-}
 
 export async function createYrdHost(options: YrdHostOptions = {}): Promise<YrdHost> {
   return createYrdRuntimeHost(options, undefined, "active")
@@ -1538,7 +1406,6 @@ async function createYrdRuntimeHost(
   const process = withGitIndexLockRetry(createProcess({ cwd: options.cwd, env, inject: { scope, log } }))
   let app: YrdCliApp | undefined
   let residentLease: ResidentRunnerLease | undefined
-  let signals: SignalObserver | undefined
   let candidatePool: CandidatePool | undefined
   try {
     const repository = await discoverYrdRepository({ cwd: options.cwd, env, process })
@@ -1571,49 +1438,7 @@ async function createYrdRuntimeHost(
     if (options.repairViewsBeforeReplay === true) {
       await (journal as MutableJournal).views.rebuild()
     }
-    const routes = loaded.config.notify ?? {}
-    const defaultSubmitter = options.persona?.mailbox ?? (env.TRIBE_NAME?.trim() || "operator")
-    if (mode === "active") {
-      if (routes["pr/needs-review"] !== undefined && !loaded.config.requires.includes("review")) {
-        raiseFailure(
-          "configuration",
-          "signal-review-policy-missing",
-          "yrd: notify.pr/needs-review requires 'requires: [review]' so the routed eligibility transition can exist",
-        )
-      }
-      if (Object.keys(routes).length > 0) {
-        const adapter = await createRuntimeSignalAdapter({
-          process,
-          env,
-          recipient: defaultSubmitter,
-          ...(options.persona === undefined ? {} : { persona: options.persona }),
-          interactive: options.interactive,
-          ...(options.wire === undefined ? {} : { wire: options.wire }),
-          output: options.wireOutput,
-          injected: options.signalAdapter,
-          attributedReceipt: (event) =>
-            authorAttributionReceipt(app?.queue.get(event.run), {
-              pr: event.pr,
-              revision: event.revision,
-              headSha: event.headSha,
-            }),
-        })
-        signals = createSignalObserver({
-          journal,
-          stateDir: repository.stateDir,
-          routes,
-          sender: defaultSubmitter,
-          reviewRequired: loaded.config.requires.includes("review"),
-          adapter,
-          log,
-          // The resident is the primary drainer and delivers unbounded; every other
-          // (one-shot) process gets a bounded delivery budget so it can never hold the
-          // notifications lifecycle open and starve the resident — it defers loudly
-          // and exits promptly, leaving the rest for the resident. (D4)
-          ...(resident === undefined ? { deliveryBudgetMs: ONE_SHOT_DELIVERY_BUDGET_MS } : {}),
-        })
-      }
-    }
+    const defaultSubmitter = "operator"
     if (mode === "active") {
       candidatePool = createCandidatePool({
         repo: repository.repo,
@@ -1638,7 +1463,7 @@ async function createYrdRuntimeHost(
       stateDir: repository.stateDir,
       baysRoot: repository.baysRoot,
       ...(mode === "active" ? { receiverPath: receiver.receiverPath } : { workspace: createViewerWorkspace() }),
-      journal: signals?.journal ?? journal,
+      journal,
       process,
       config: loaded.config,
       defaultSubmitter,
@@ -1655,7 +1480,6 @@ async function createYrdRuntimeHost(
       // holds a live lease — before any command reads or advances the queue.
       await app.queue.quiesceLegacyRoots({ now: new Date().toISOString(), by: "yrd/migration" })
     }
-    signals?.start()
     const runtimeApp = app
     const resolveTarget = receiverTarget(runtimeApp)
     const receiverLog = log.child("receiver")
@@ -1730,7 +1554,7 @@ async function createYrdRuntimeHost(
     })
     let closePromise: Promise<void> | undefined
     const close = () =>
-      (closePromise ??= closeRuntime(app, process, scope, residentLease, signals, candidatePool).finally(() => {
+      (closePromise ??= closeRuntime(app, process, scope, residentLease, candidatePool).finally(() => {
         if (ownsLog) log.end()
       }))
     return Object.freeze({
@@ -1746,7 +1570,7 @@ async function createYrdRuntimeHost(
       [Symbol.asyncDispose]: close,
     })
   } catch (error) {
-    await closeRuntime(app, process, scope, residentLease, signals, candidatePool)
+    await closeRuntime(app, process, scope, residentLease, candidatePool)
     if (ownsLog) log.end()
     throw error
   }
@@ -1958,10 +1782,6 @@ export async function runYrdProcess(
             env,
             log: runtimeLog,
             ...(context.configPath === undefined ? {} : { configPath: context.configPath }),
-            ...(context.persona === undefined ? {} : { persona: context.persona }),
-            ...(context.wire === undefined ? {} : { wire: context.wire }),
-            interactive: io.interactive === true,
-            wireOutput: (text) => io.stdout(text),
             ...(selectedImplementationSource === undefined
               ? {}
               : { implementationSource: selectedImplementationSource }),

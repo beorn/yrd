@@ -18,8 +18,8 @@ import {
 } from "../src/index.ts"
 
 const BASE_SHA = "a".repeat(40)
-const CODEX_SHA = "1".repeat(40)
-const CLAUDE_SHA = "2".repeat(40)
+const FAST_SHA = "1".repeat(40)
+const THOROUGH_SHA = "2".repeat(40)
 const runtime = { runner: "test", leaseMs: 60_000, concurrency: 1 }
 
 function ids(): () => string {
@@ -60,13 +60,16 @@ function workspace(): BayWorkspace {
   }
 }
 
-function outputFor(attempt: string, model: string, bay: string, branch: string): AttemptRunOutput {
-  const commit = model === "codex" ? CODEX_SHA : CLAUDE_SHA
+function outputFor(attempt: string, competitor: string, bay: string, branch: string): AttemptRunOutput {
+  const commit = competitor === "fast" ? FAST_SHA : THOROUGH_SHA
   return {
     pin: { commit, ref: `refs/yrd/attempts/C1/${attempt}`, bay, branch, baseSha: BASE_SHA },
-    wallTimeMs: model === "codex" ? 12_000 : 15_000,
+    wallTimeMs: competitor === "fast" ? 12_000 : 15_000,
     tokens: { input: 1_000, output: 400, cachedInput: 700, cacheWrite: 20, reasoning: 80 },
-    cost: model === "codex" ? { kind: "reported", usd: 0.42, source: "ag" } : { kind: "missing", reason: "omitted" },
+    cost:
+      competitor === "fast"
+        ? { kind: "reported", usd: 0.42, source: "fixture" }
+        : { kind: "missing", reason: "omitted" },
     artifacts: [{ kind: "patch", uri: `git:${commit}` }],
   }
 }
@@ -88,25 +91,25 @@ function fixtures(
   let maxActive = 0
   let runnerCalls = 0
   const runner: ContestRunnerDef = {
-    harness: "ag",
-    revision: "ag-runner-v1",
+    id: "fixture",
+    revision: "fixture-runner-v1",
     async run(input): Promise<JobResult<AttemptRunOutput>> {
       runnerCalls += 1
       active += 1
       maxActive = Math.max(maxActive, active)
       await Promise.resolve()
       try {
-        if (input.competitor.model === options.waitingRunner) {
+        if (input.competitor.id === options.waitingRunner) {
           return { status: "waiting", token: `remote-${input.attempt}`, detail: "capacity pending" }
         }
-        if (input.competitor.model === options.failedRunner) {
+        if (input.competitor.id === options.failedRunner) {
           return {
             status: "completed",
             conclusion: "failure",
-            error: { code: "runner-failed", message: "agent process failed" },
+            error: { code: "runner-failed", message: "competitor process failed" },
           }
         }
-        const output = outputFor(input.attempt, input.competitor.model, input.bay.id, input.bay.branch)
+        const output = outputFor(input.attempt, input.competitor.id, input.bay.id, input.bay.branch)
         pins.set(output.pin.ref, output.pin.commit)
         return { status: "completed", conclusion: "success", output }
       } finally {
@@ -182,8 +185,8 @@ async function startContest(app: Awaited<ReturnType<typeof createApp>>): Promise
   await app.contests.compete({
     issue,
     competitors: [
-      { model: "codex", harness: "ag", config: { effort: "max" } },
-      { model: "claude", harness: "ag", config: { effort: "max" } },
+      { id: "fast", runner: "fixture", config: { profile: "fast" } },
+      { id: "thorough", runner: "fixture", config: { profile: "thorough" } },
     ],
     evaluators: ["held-out", "review"],
     base: base.base,
@@ -204,7 +207,7 @@ describe("Contests", () => {
     expect(ready.attempts.A1).toMatchObject({
       status: "passing",
       runner: { status: "completed", conclusion: "success" },
-      pin: { commit: CODEX_SHA, bay: "B1" },
+      pin: { commit: FAST_SHA, bay: "B1" },
       wallTimeMs: 12_000,
       evaluations: {
         "held-out": {
@@ -235,13 +238,13 @@ describe("Contests", () => {
       selection: { attempt: "A2", method: "manual" },
       promotion: {
         attempt: "A2",
-        commit: CLAUDE_SHA,
+        commit: THOROUGH_SHA,
         job: { status: "completed", conclusion: "success" },
         pr: {
           id: "PR1",
           state: "open",
           merged: false,
-          revs: [{ n: 1, head: CLAUDE_SHA }],
+          revs: [{ n: 1, head: THOROUGH_SHA }],
         },
       },
     })
@@ -250,7 +253,7 @@ describe("Contests", () => {
       bay: "B2",
       state: "open",
       merged: false,
-      revs: [{ n: 1, head: CLAUDE_SHA }],
+      revs: [{ n: 1, head: THOROUGH_SHA }],
     })
     if (submitted === undefined) throw new Error("promoted PR was not retained")
     expect(prDeliveryState(submitted)).toBe("submitted")
@@ -272,7 +275,7 @@ describe("Contests", () => {
     await startContest(app)
     await app.contests.evaluate("C1", runtime)
     await app.contests.select({ contest: "C1", attempt: "A1" })
-    setup.pins.set("refs/yrd/attempts/C1/A1", CLAUDE_SHA)
+    setup.pins.set("refs/yrd/attempts/C1/A1", THOROUGH_SHA)
 
     expect(await app.contests.promote({ contest: "C1" }, runtime)).toMatchObject({
       status: "promotion-failed",
@@ -282,7 +285,7 @@ describe("Contests", () => {
   })
 
   it("keeps waiting and retry authority on one durable Job", async () => {
-    const setup = fixtures({ waitingRunner: "claude", waitingEvaluator: true })
+    const setup = fixtures({ waitingRunner: "thorough", waitingEvaluator: true })
     await using app = await createApp(createMemoryJournal(), setup)
     await startContest(app)
     expect(await app.contests.evaluate("C1", runtime)).toMatchObject({
@@ -291,7 +294,7 @@ describe("Contests", () => {
 
     const runner = app.contests.get("C1")?.attempts.A2?.runner
     if (runner?.status !== "waiting") throw new Error("runner did not remain waiting")
-    const output = outputFor("A2", "claude", "B2", "issue/contest-c1-a2")
+    const output = outputFor("A2", "thorough", "B2", "issue/contest-c1-a2")
     setup.pins.set(output.pin.ref, output.pin.commit)
     await app.jobs.finish(runner.id, {
       attempt: runner.attempt,
@@ -358,7 +361,7 @@ describe("Contests", () => {
   })
 
   it("terminalizes a failed runner without inventing evaluator jobs", async () => {
-    const setup = fixtures({ failedRunner: "claude" })
+    const setup = fixtures({ failedRunner: "thorough" })
     await using app = await createApp(createMemoryJournal(), setup)
     await startContest(app)
 

@@ -16,36 +16,6 @@ const RequirementsSchema = z.array(z.enum(["review"])).superRefine((requirements
   }
 })
 const RunnerSchema = z.enum(["local", "waiting"])
-export const SignalRecipientSchema = TextSchema.regex(/^@[a-z0-9][a-z0-9/_-]*$/iu)
-const DirectNotifyTargetSchema = z.union([z.literal("submitter"), SignalRecipientSchema])
-const NotifyTargetSchema = z.union([DirectNotifyTargetSchema, z.literal("broadcast")])
-const DirectNotifyTargetsSchema = z
-  .array(DirectNotifyTargetSchema)
-  .min(1)
-  .superRefine((targets, context) => {
-    if (new Set(targets).size !== targets.length) {
-      context.addIssue({ code: "custom", message: "contains duplicate notification targets" })
-    }
-  })
-const NotifySchema = z
-  .object({
-    "pr/needs-author": DirectNotifyTargetsSchema.optional(),
-    "pr/rejected": DirectNotifyTargetsSchema.optional(),
-    "pr/needs-review": DirectNotifyTargetsSchema.optional(),
-    "pr/integrated": z.tuple([z.literal("broadcast")]).optional(),
-    "pr/already-landed": DirectNotifyTargetsSchema.optional(),
-    "run/failed": DirectNotifyTargetsSchema.optional(),
-  })
-  .strict()
-export type SignalRouteTarget = z.infer<typeof NotifyTargetSchema>
-export type SignalKind =
-  | "pr/needs-author"
-  | "pr/rejected"
-  | "pr/needs-review"
-  | "pr/integrated"
-  | "pr/already-landed"
-  | "run/failed"
-export type SignalRoutes = Readonly<Partial<Record<SignalKind, readonly SignalRouteTarget[]>>>
 const EnvironmentNameSchema = TextSchema.regex(/^[A-Za-z_][A-Za-z0-9_]*$/u).refine(
   (name) => !name.startsWith("YRD_") && !name.startsWith("GIT_"),
   { message: "uses a reserved prefix" },
@@ -139,7 +109,6 @@ const ProjectFields = {
   checks: ChecksSchema,
   requires: RequirementsSchema.optional(),
   contest: ContestSchema,
-  notify: NotifySchema.optional(),
 } as const
 
 const ProjectSchema = z.object(ProjectFields).strict()
@@ -152,7 +121,6 @@ export type YrdProjectConfig = Readonly<{
   checks: readonly z.infer<typeof CheckEntrySchema>[]
   requires?: readonly "review"[]
   contest: Readonly<z.infer<typeof ContestSchema>>
-  notify?: SignalRoutes
 }>
 
 export type ResolvedYrdProjectConfig = Readonly<{
@@ -165,7 +133,6 @@ export type ResolvedYrdProjectConfig = Readonly<{
   requires: readonly "review"[]
   definitions: Readonly<Record<string, YrdStepConfig>>
   contest: Readonly<{ concurrency: number; timeoutMs: number; evaluators: readonly string[] }>
-  notify?: SignalRoutes
   /** Programmatic flow authority. Optional only for direct legacy test/app construction. */
   flows?: readonly FlowDef[]
 }>
@@ -179,16 +146,22 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
       message: `yrd: remove '${retiredWrapper}:' and configure the required checks as 'checks: [...]'`,
     })
   }
+  if (typeof value === "object" && value !== null && "do" in value) {
+    throw createFailure({
+      kind: "configuration",
+      code: "invalid-config",
+      message: "yrd: config do is not supported; .yrd.yml contains delivery correctness only",
+    })
+  }
   const parsed = ProjectSchema.safeParse(value ?? {})
   if (parsed.success) {
-    const { base, batch, checks, requires, contest, notify } = parsed.data
+    const { base, batch, checks, requires, contest } = parsed.data
     return {
       ...(base === undefined ? {} : { base }),
       ...(batch === undefined ? {} : { batch }),
       checks,
       ...(requires === undefined ? {} : { requires }),
       contest,
-      ...(notify === undefined ? {} : { notify }),
     }
   }
   const issue = mostSpecificConfigIssue(parsed.error.issues[0])
@@ -220,7 +193,7 @@ function configError(issue: z.core.$ZodIssue): Error {
   if (
     issue.code === "invalid_type" &&
     issue.path.length === 1 &&
-    !["base", "batch", "checks", "requires", "contest", "notify"].includes(path)
+    !["base", "batch", "checks", "requires", "contest"].includes(path)
   ) {
     return new Error(`yrd: config ${path} is not supported`)
   }
@@ -325,7 +298,6 @@ export async function loadYrdConfig(options: {
         timeoutMs: parsed.contest.timeoutMs ?? 30 * 60_000,
         evaluators: parsed.contest.evaluators ?? checks.slice(0, 1),
       },
-      notify: parsed.notify ?? {},
       flows: flows.flows,
     },
   }
@@ -397,25 +369,6 @@ function resolveCheck(check: z.infer<typeof CheckEntrySchema>): readonly [string
   })
 }
 
-const GENERATED_REFERENCE_START = "# BEGIN GENERATED YRD CONFIG REFERENCE"
-const GENERATED_REFERENCE_END = "# END GENERATED YRD CONFIG REFERENCE"
-
 export function renderYrdConfigScaffold(): string {
-  const defaults = {
-    base: "main",
-    batch: "1",
-    checks: "[typecheck]",
-    requires: "[]",
-    contest: "{ concurrency: 2, timeoutMs: 1800000, evaluators: [typecheck] }",
-    notify: "{}",
-  } satisfies Readonly<Record<keyof typeof ProjectFields, string>>
-  return [
-    "checks: [typecheck]",
-    "",
-    GENERATED_REFERENCE_START,
-    ...Object.keys(ProjectFields).map((key) => `# ${key}: ${defaults[key as keyof typeof ProjectFields]}`),
-    "# Custom one-line escape hatch: checks: [{lint: {run: bun run lint}}]",
-    GENERATED_REFERENCE_END,
-    "",
-  ].join("\n")
+  return "checks: [typecheck]\n"
 }

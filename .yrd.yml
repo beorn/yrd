@@ -1,9 +1,1 @@
-# Yrd's own queue. Custom checks are defined inline in the required checks list.
-checks:
-  - verify:
-      run: bun install --frozen-lockfile --ignore-scripts && bun run test
-
-contest:
-  concurrency: 2
-  timeoutMs: 1800000
-  evaluators: [verify]
+checks: [{verify: {run: bun run test}}]
