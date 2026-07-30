@@ -178,6 +178,7 @@ import {
 } from "./task-status.ts"
 import type { YrdBayProtection, YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState } from "./types.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
+import { ensureWorkspaceDependencies } from "./workspace-provisioning.ts"
 import { artifactLocation, directArtifacts, nestedArtifacts, uniqueArtifacts } from "./artifact-reference.ts"
 import { readInstalledBaselines } from "./installed-baseline.ts"
 import { unpublishedChangedSubmodulePins } from "./pr-submodule-publication.ts"
@@ -1806,57 +1807,6 @@ function childOutput(io: YrdCliIO): Readonly<{
 }
 
 /**
- * Package managers a Bay can be provisioned with, named by the lockfile the
- * repository committed. Yrd does not choose one — the repository already chose
- * when it wrote a lockfile, and one it does not recognise is reported rather
- * than guessed at.
- */
-const BAY_PACKAGE_MANAGERS = [
-  { lockfile: "bun.lock", manager: "bun", install: ["install", "--frozen-lockfile", "--ignore-scripts"] },
-  { lockfile: "bun.lockb", manager: "bun", install: ["install", "--frozen-lockfile", "--ignore-scripts"] },
-  { lockfile: "pnpm-lock.yaml", manager: "pnpm", install: ["install", "--frozen-lockfile", "--ignore-scripts"] },
-  { lockfile: "package-lock.json", manager: "npm", install: ["ci", "--ignore-scripts"] },
-] as const satisfies readonly Readonly<{ lockfile: string; manager: string; install: readonly string[] }>[]
-
-/** A Bay install is a provisioning step, not the operator's work; it gets its
- * own generous lease so a cold cache is not mistaken for a hang. */
-const BAY_PROVISION_TIMEOUT_MS = 900_000
-
-function bayManifestProvisioning(
-  manifest: string,
-  path: string,
-): {
-  readonly hasDependencies: boolean
-  readonly hasPostinstall: boolean
-} {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(manifest)
-  } catch (error) {
-    refusal(`bay manifest '${path}' is not valid JSON: ${errorDetail(error)}`)
-  }
-  if (typeof parsed !== "object" || parsed === null) {
-    return { hasDependencies: false, hasPostinstall: false }
-  }
-  const manifestObject = parsed as Record<string, unknown>
-  const hasDependencies = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"].some(
-    (field) => {
-      const dependencies = manifestObject[field]
-      return typeof dependencies === "object" && dependencies !== null && Object.keys(dependencies).length > 0
-    },
-  )
-  const scripts = (parsed as { scripts?: unknown }).scripts
-  if (typeof scripts !== "object" || scripts === null) {
-    return { hasDependencies, hasPostinstall: false }
-  }
-  const postinstall = (scripts as { postinstall?: unknown }).postinstall
-  return {
-    hasDependencies,
-    hasPostinstall: typeof postinstall === "string" && postinstall.trim() !== "",
-  }
-}
-
-/**
  * Make a Bay runnable before anything is launched inside it.
  *
  * A Bay is a brand-new worktree: it carries every tracked file and none of the
@@ -1881,47 +1831,20 @@ async function ensureBayDependencies(
   env: NodeJS.ProcessEnv | undefined,
   reinstall: boolean,
 ): Promise<void> {
-  const manifestPath = join(path, "package.json")
-  if (!existsSync(manifestPath)) return
-  // Already provisioned: an adopted or reused Bay pays nothing, unless a
-  // converge just moved the checkout out from under what is installed.
-  if (!reinstall && existsSync(join(path, "node_modules"))) return
-  const manifest = bayManifestProvisioning(await readFile(manifestPath, "utf8"), manifestPath)
-  const chosen = BAY_PACKAGE_MANAGERS.find((candidate) => existsSync(join(path, candidate.lockfile)))
-  if (chosen === undefined) {
-    if (!manifest.hasDependencies && !manifest.hasPostinstall) return
-    refusal(
-      `bay '${bay.id}' requires provisioning but has no recognized package-manager lockfile; expected one of ` +
-        BAY_PACKAGE_MANAGERS.map((candidate) => candidate.lockfile).join(", "),
-    )
-  }
-
-  const provision = async (argv: readonly string[]): Promise<void> => {
-    io.stderr(`yrd: bay '${bay.id}' provisioning: ${argv.join(" ")}\n`)
-    const decoder = new TextDecoder()
-    const result = await processService.run({
-      argv,
-      cwd: path,
-      ...(env === undefined ? {} : { env }),
-      timeoutMs: BAY_PROVISION_TIMEOUT_MS,
-      ...(io.drainSignal === undefined ? {} : { signal: io.drainSignal }),
-      onOutput({ chunk }) {
-        const text = decoder.decode(chunk, { stream: true })
-        if (text !== "") io.stderr(text)
-      },
-    })
-    if (childSucceeded(result)) return
-    refusal(
-      `bay '${bay.id}' could not install its dependencies; ` +
-        `${argv.join(" ")} ${childFailureReason(result)}\n${commandOutputTail(result)}`,
-    )
-  }
-
-  await provision([chosen.manager, ...chosen.install])
-  if (manifest.hasPostinstall) {
-    await provision([chosen.manager, "run", "postinstall"])
-  }
+  await ensureWorkspaceDependencies(processService, {
+    path,
+    subject: `bay '${bay.id}'`,
+    manifestSubject: "bay",
+    ...(env === undefined ? {} : { env }),
+    ...(io.drainSignal === undefined ? {} : { signal: io.drainSignal }),
+    reinstall,
+    onCommand: (argv) => io.stderr(`yrd: bay '${bay.id}' provisioning: ${argv.join(" ")}\n`),
+    writeOutput: io.stderr,
+    fail: refusal,
+  })
 }
+
+const BAY_CONVERGE_TIMEOUT_MS = 900_000
 
 /**
  * Walk an owner-controlled Bay's checkout up to its base before launch.
@@ -1955,7 +1878,7 @@ async function convergeBayOntoBase(
       argv: ["git", ...argv],
       cwd: path,
       env: gitEnv,
-      timeoutMs: BAY_PROVISION_TIMEOUT_MS,
+      timeoutMs: BAY_CONVERGE_TIMEOUT_MS,
       ...(io.drainSignal === undefined ? {} : { signal: io.drainSignal }),
     })
   const head = async (): Promise<string> => {
