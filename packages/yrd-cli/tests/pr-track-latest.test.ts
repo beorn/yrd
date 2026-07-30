@@ -843,15 +843,22 @@ describe("resident merge-into-latest", () => {
     expect(app.bays.checksRequested("PR1")).toBe(false)
   })
 
-  it("observes the next push for a tracked PR whose prior checks need author work", async () => {
+  it("observes the next push for a tracked PR whose prior frozen check failed", async () => {
     const behavior = { failingCheck: true }
     const app = await createCliApp(behavior)
     let head = RECORDED_HEAD
     const submitted = outputIO(() => head)
-    expect(
-      await runYrd(app, yrd("pr", "submit", BRANCH, "--issue", "km#22454", "--track", "--json"), submitted.io),
-    ).toBe(1)
-    expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("needs-author")
+    const submittedExit = await runYrd(
+      app,
+      yrd("pr", "submit", BRANCH, "--issue", "km#22454", "--track", "--json"),
+      submitted.io,
+      noRequiredChecks,
+    )
+    expect(submittedExit, submitted.stderr()).toBe(0)
+    await expect(app.queue.run({ prs: ["PR1"] }, { runner: "track-test", leaseMs: 60_000 })).resolves.toMatchObject([
+      { status: "completed", conclusion: "failure", error: { code: "authored-failure" } },
+    ])
+    expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
 
     behavior.failingCheck = false
     head = LIVE_HEAD
