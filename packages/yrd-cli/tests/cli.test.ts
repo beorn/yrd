@@ -5390,8 +5390,8 @@ describe("runYrd", () => {
     const attempts = (label: string) => buckets.find((bucket) => bucket.label === label)!.runs.all
     expect(attempts("TODAY")).toBe(1)
     expect(attempts("YESTERDAY")).toBe(0)
-    expect(attempts("THIS WEEK")).toBe(1)
-    expect(attempts("THIS MONTH")).toBe(2)
+    expect(attempts("WEEK")).toBe(1)
+    expect(attempts("MONTH")).toBe(2)
   })
 
   it("keeps failed-attempt retries on the Run that owned them", () => {
@@ -6675,7 +6675,7 @@ describe("runYrd", () => {
       expect(frame).toContain("Queued at position 1")
       expect(frame).toMatch(/POSITION\s+1/u)
       expect(frame).toContain("AGE")
-      expect(frame).toContain("WAIT")
+      expect(frame).toContain("QUEUING")
       expect(frame).toContain("NO RUNNER - no drained run in window")
       // The bottom keybindings footer row was removed entirely (item h).
       expect(frame).not.toContain("q quit")
@@ -11574,7 +11574,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
         sha: baseSha,
       })
       const services = {
-        [QueueReadBoundary]: { submoduleWarnings: [] },
+        [QueueReadBoundary]: {},
       } as unknown as YrdCliServices
 
       for (const argv of [yrd("queue", "list", "--json"), yrd("--json")]) {
@@ -11611,7 +11611,6 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       const services = {
         [QueueReadBoundary]: {
           readModel: { snapshot: async () => ({ cursor, generation: 1, attempts }) },
-          submoduleWarnings: [],
         },
       } as unknown as YrdCliServices
       const live = withLiveRenderer(output.io, async (element) => {

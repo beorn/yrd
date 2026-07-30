@@ -57,6 +57,7 @@ const LIST_NATURAL_HEIGHT = 19
 const DETAIL_NATURAL_HEIGHT = 12
 const DIVIDER_SIZE = 1
 const DEFAULT_SPLIT_RATIO = 0.52
+const QUEUE_PANE_PADDING_X = 1
 
 export type QueueDetailTier = "right" | "below" | "full"
 
@@ -1452,7 +1453,11 @@ export function QueueWatchFrame({
   // The pane title is PR-scoped (user directive 2026-07-21): it carries the
   // selected PR's linked issue beside the pr#id identity.
   const detailTitleIssue = selectedDetailIssue(allFullPrs, selectedRow?.pr, detailPr)
-  const timelineColumns = queueTimelineColumns(columns, tier, detailOpen, splitRatio)
+  const timelineOuterColumns = queueTimelineColumns(columns, tier, detailOpen, splitRatio)
+  const timelineColumns =
+    snapshot.projection === undefined
+      ? timelineOuterColumns
+      : Math.max(0, timelineOuterColumns - 2 * QUEUE_PANE_PADDING_X)
   const timelineRows = queueTimelineHeight(Math.max(0, viewportRows - 1), tier, detailOpen, splitRatio)
   const timeline =
     snapshot.projection === undefined ? (
@@ -1537,7 +1542,15 @@ export function QueueWatchFrame({
     // across the SplitPane divider into the DETAIL pane. `contain` keeps the
     // rows selectable while bounding the range; the STATUS/STATS boxes nest
     // their own tighter scopes inside it.
-    <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0} paddingX={1} userSelect="contain">
+    <Box
+      flexDirection="column"
+      width="100%"
+      height="100%"
+      minWidth={0}
+      minHeight={0}
+      paddingX={QUEUE_PANE_PADDING_X}
+      userSelect="contain"
+    >
       {timeline}
     </Box>
   )
@@ -1545,7 +1558,15 @@ export function QueueWatchFrame({
     // The DETAIL pane is its own selection scope (item 4a): a drag inside the
     // detail body resolves to this Box as the nearest `contain` boundary, so it
     // cannot grow back across the divider into the QUEUE pane.
-    <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0} paddingX={1} userSelect="contain">
+    <Box
+      flexDirection="column"
+      width="100%"
+      height="100%"
+      minWidth={0}
+      minHeight={0}
+      paddingX={QUEUE_PANE_PADDING_X}
+      userSelect="contain"
+    >
       <QueueDetailTitle
         {...(selectedProjectedRow === undefined ? {} : { row: selectedProjectedRow })}
         {...(detailTitleIssue === undefined ? {} : { issue: detailTitleIssue })}

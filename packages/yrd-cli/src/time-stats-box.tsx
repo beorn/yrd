@@ -7,8 +7,9 @@ import { TitledBox, timelineMetric } from "./queue-view-primitives.tsx"
 import { FAILURE_BREAKDOWN_CLASSES } from "./status-presentation.ts"
 import { type QueueStatsBucket, type QueueStatsDurationDistribution, queueStats } from "./time-stats.ts"
 
-const STATS_ROW_LABEL_WIDTH = 10
-const STATS_FIXED_MIN_WIDTH = 49
+const STATS_ROW_LABEL_WIDTH = 12
+const STATS_FIXED_MIN_WIDTH = 48
+const STATS_HOUR_BASE_WIDTH = 50
 const STATS_HOUR_STRIDE = 5
 
 /**
@@ -18,10 +19,10 @@ const STATS_HOUR_STRIDE = 5
  */
 export function queueStatsHourCount(width: number): number {
   if (!Number.isFinite(width)) throw new TypeError("yrd: queue-stats width must be finite")
-  return Math.max(0, Math.floor((Math.trunc(width) - STATS_FIXED_MIN_WIDTH) / STATS_HOUR_STRIDE))
+  return Math.max(0, Math.floor((Math.trunc(width) - STATS_HOUR_BASE_WIDTH) / STATS_HOUR_STRIDE))
 }
 
-type StatsDetailMetric = "fails" | "total" | "coding" | "queueWait" | "jobRun" | "retries"
+type StatsDetailMetric = "fails" | "total" | "queueWait" | "jobRun" | "retries"
 
 type StatsCellDetail = Readonly<{
   key: string
@@ -93,33 +94,27 @@ function failureDetail(bucket: QueueStatsBucket): string {
   return `FAILS · ${bucket.label} · ${breakdown}`
 }
 
-function codingDetail(bucket: QueueStatsBucket): string {
-  if (!bucket.covered) return `CODING · ${bucket.label} · — · journal does not cover the full bucket`
-  return `CODING · ${bucket.label} · — · unavailable until the draft/claim journal model (21707)`
-}
-
 function retryDetail(bucket: QueueStatsBucket): string {
-  if (!bucket.covered) return `RETRIES · ${bucket.label} · — · journal does not cover the full bucket`
-  if (bucket.retries.n === 0) return `RETRIES · ${bucket.label} · — · no settled PR samples`
-  return `RETRIES · ${bucket.label} · avg ${scalarMetric(bucket.retries.avg)} · p50 ${scalarMetric(bucket.retries.p50)} · p95 ${scalarMetric(bucket.retries.p95)} · revisions−1 + failed attempts`
+  if (!bucket.covered) return `RETRIES/RUN · ${bucket.label} · — · journal does not cover the full bucket`
+  if (bucket.retries.n === 0) return `RETRIES/RUN · ${bucket.label} · — · no settled PR samples`
+  return `RETRIES/RUN · ${bucket.label} · avg ${scalarMetric(bucket.retries.avg)} · p50 ${scalarMetric(bucket.retries.p50)} · p95 ${scalarMetric(bucket.retries.p95)} · revisions−1 + failed attempts`
 }
 
 function detailFor(metric: StatsDetailMetric, bucket: QueueStatsBucket): StatsCellDetail {
   const key = statsCellKey(metric, bucket)
   if (metric === "fails") return { key, content: failureDetail(bucket) }
-  if (metric === "coding") return { key, content: codingDetail(bucket) }
   if (metric === "retries") return { key, content: retryDetail(bucket) }
   if (metric === "total") {
     return { key, content: distributionDetail("TOTAL", bucket, bucket.total, bucket.total.approximate) }
   }
   if (metric === "queueWait") {
-    return { key, content: distributionDetail("QUEUE WAIT", bucket, bucket.queueWait) }
+    return { key, content: distributionDetail("QUEUING", bucket, bucket.queueWait) }
   }
-  return { key, content: distributionDetail("JOB RUN", bucket, bucket.jobRun) }
+  return { key, content: distributionDetail("RUNNING", bucket, bucket.jobRun) }
 }
 
 function bucketWidth(bucket: QueueStatsBucket): number {
-  return bucket.kind === "hour" ? 4 : bucket.label.length
+  return bucket.kind === "hour" ? 4 : Math.max(7, bucket.label.length)
 }
 
 function StatsValueCell({
@@ -191,22 +186,21 @@ type StatsRow = Readonly<{
 }>
 
 const STATS_ROWS: readonly StatsRow[] = [
-  { label: "RUNS", heading: true, value: () => "" },
   { label: "ALL", value: (bucket) => countCell(bucket, bucket.runs.all) },
   {
-    label: "INTEGRATED",
+    label: "MERGED",
     color: "$fg-success",
     value: (bucket) => countCell(bucket, bucket.runs.integrated),
   },
   {
-    label: "ALREADY",
+    label: "DUP",
     color: "$fg-success",
     value: (bucket) => countCell(bucket, bucket.runs.alreadyLanded),
   },
   {
     // Non-landing success (admission-only). Not a fail, not integrated (21801).
     label: "PASS",
-    color: "$fg-warning",
+    color: "$fg-success",
     value: (bucket) => countCell(bucket, bucket.runs.passed),
   },
   {
@@ -221,18 +215,17 @@ const STATS_ROWS: readonly StatsRow[] = [
     metric: "total",
     value: (bucket) => averageDurationCell(bucket, bucket.total, bucket.total.approximate),
   },
-  { label: "CODING", metric: "coding", value: () => "—" },
   {
-    label: "QUEUE WAIT",
+    label: "QUEUING",
     metric: "queueWait",
     value: (bucket) => averageDurationCell(bucket, bucket.queueWait),
   },
   {
-    label: "JOB RUN",
+    label: "RUNNING",
     metric: "jobRun",
     value: (bucket) => averageDurationCell(bucket, bucket.jobRun),
   },
-  { label: "RETRIES", metric: "retries", value: averageRetryCell },
+  { label: "RETRIES/RUN", metric: "retries", value: averageRetryCell },
 ]
 
 /**
@@ -255,6 +248,8 @@ export function QueueStatsPanel({
   const nowMs = Date.parse(now)
   if (Number.isNaN(nowMs)) throw new Error(`yrd: invalid queue-stats snapshot '${now}'`)
   const buckets = queueStats(facts, nowMs, earliestFactMs, queueStatsHourCount(width))
+  const hourBuckets = buckets.filter((bucket) => bucket.kind === "hour")
+  const periodBuckets = buckets.filter((bucket) => bucket.kind === "period")
   const [hoveredKey, setHoveredKey] = useState<string | null>(null)
   const [focusedMetric, setFocusedMetric] = useState<StatsDetailMetric | null>(null)
   const today = buckets.find((bucket) => bucket.key === "today") ?? buckets[0]
@@ -269,9 +264,7 @@ export function QueueStatsPanel({
   const details = new Map(
     buckets
       .flatMap((bucket) =>
-        (["fails", "total", "coding", "queueWait", "jobRun", "retries"] as const).map((metric) =>
-          detailFor(metric, bucket),
-        ),
+        STATS_ROWS.flatMap((row) => (row.metric === undefined ? [] : [detailFor(row.metric, bucket)])),
       )
       .map((detail) => [detail.key, detail.content]),
   )
@@ -284,14 +277,32 @@ export function QueueStatsPanel({
         <TitledBox title="STATS" padding={0}>
           <Box flexDirection="column" width="100%" minWidth={0} overflow="hidden">
             <Box flexDirection="row" gap={1} minWidth={0}>
-              <Box width={STATS_ROW_LABEL_WIDTH} flexShrink={0} />
-              {buckets.map((bucket) => (
-                <Box key={bucket.key} width={bucketWidth(bucket)} minWidth={0} flexShrink={0} alignItems="flex-end">
-                  <Text color="$fg-muted" bold wrap="truncate">
-                    {bucket.label}
+              <Box width={STATS_ROW_LABEL_WIDTH} flexShrink={0}>
+                <Text bold>RUNS</Text>
+              </Box>
+              {hourBuckets.length === 0 ? null : (
+                <Box flexDirection="row" gap={1} minWidth={0} flexGrow={1} flexShrink={1} overflow="hidden">
+                  {hourBuckets.map((bucket) => (
+                    <Box key={bucket.key} width={bucketWidth(bucket)} minWidth={0} flexShrink={0} alignItems="flex-end">
+                      <Text color="$fg-muted" bold wrap="truncate">
+                        {bucket.label}
+                      </Text>
+                    </Box>
+                  ))}
+                  <Text color="$fg-muted" bold flexShrink={0}>
+                    …
                   </Text>
                 </Box>
-              ))}
+              )}
+              <Box flexDirection="row" gap={1} flexShrink={0}>
+                {periodBuckets.map((bucket) => (
+                  <Box key={bucket.key} width={bucketWidth(bucket)} minWidth={0} flexShrink={0} alignItems="flex-end">
+                    <Text color="$fg-muted" bold wrap="truncate">
+                      {bucket.label}
+                    </Text>
+                  </Box>
+                ))}
+              </Box>
             </Box>
             {STATS_ROWS.map((row) => (
               <Box
@@ -332,22 +343,47 @@ export function QueueStatsPanel({
                     {row.heading || row.label.length > STATS_ROW_LABEL_WIDTH - 2 ? row.label : `  ${row.label}`}
                   </Text>
                 </Box>
-                {buckets.map((bucket) => (
-                  <StatsValueCell
-                    key={bucket.key}
-                    bucket={bucket}
-                    value={row.value(bucket)}
-                    color={row.color}
-                    {...(row.metric === undefined ? {} : { detail: detailFor(row.metric, bucket) })}
-                    hoveredKey={hoveredKey}
-                    activeKey={activeKey}
-                    onHover={setHoveredKey}
-                    onSelect={(key) => {
-                      const selected = buckets.find((candidate) => key.endsWith(`\0${candidate.key}`))
-                      if (selected !== undefined) setKeyboardBucketKey(selected.key)
-                    }}
-                  />
-                ))}
+                {hourBuckets.length === 0 ? null : (
+                  <Box flexDirection="row" gap={1} minWidth={0} flexGrow={1} flexShrink={1} overflow="hidden">
+                    {hourBuckets.map((bucket) => (
+                      <StatsValueCell
+                        key={bucket.key}
+                        bucket={bucket}
+                        value={row.value(bucket)}
+                        color={row.color}
+                        {...(row.metric === undefined ? {} : { detail: detailFor(row.metric, bucket) })}
+                        hoveredKey={hoveredKey}
+                        activeKey={activeKey}
+                        onHover={setHoveredKey}
+                        onSelect={(key) => {
+                          const selected = buckets.find((candidate) => key.endsWith(`\0${candidate.key}`))
+                          if (selected !== undefined) setKeyboardBucketKey(selected.key)
+                        }}
+                      />
+                    ))}
+                    <Text color="$fg-muted" flexShrink={0}>
+                      ·
+                    </Text>
+                  </Box>
+                )}
+                <Box flexDirection="row" gap={1} flexShrink={0}>
+                  {periodBuckets.map((bucket) => (
+                    <StatsValueCell
+                      key={bucket.key}
+                      bucket={bucket}
+                      value={row.value(bucket)}
+                      color={row.color}
+                      {...(row.metric === undefined ? {} : { detail: detailFor(row.metric, bucket) })}
+                      hoveredKey={hoveredKey}
+                      activeKey={activeKey}
+                      onHover={setHoveredKey}
+                      onSelect={(key) => {
+                        const selected = buckets.find((candidate) => key.endsWith(`\0${candidate.key}`))
+                        if (selected !== undefined) setKeyboardBucketKey(selected.key)
+                      }}
+                    />
+                  ))}
+                </Box>
               </Box>
             ))}
           </Box>

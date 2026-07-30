@@ -70,10 +70,24 @@ function localDayStart(nowMs: number): Date {
   return start
 }
 
-function statsWindows(nowMs: number, hourCount: number): readonly QueueStatsWindow[] {
+function localDayKey(timestampMs: number): string {
+  const date = new Date(timestampMs)
+  return `${String(date.getFullYear())}-${String(date.getMonth())}-${String(date.getDate())}`
+}
+
+function statsWindows(
+  facts: readonly QueueTerminalFact[],
+  nowMs: number,
+  hourCount: number,
+): readonly QueueStatsWindow[] {
   const hourMs = 60 * 60_000
-  const currentHourStartMs = currentLocalHourStart(nowMs)
-  const starts = Array.from({ length: hourCount }, (_, index) => currentHourStartMs - index * hourMs)
+  const starts = [
+    ...new Set(
+      facts.filter((fact) => fact.terminalAtMs <= nowMs).map((fact) => currentLocalHourStart(fact.terminalAtMs)),
+    ),
+  ]
+    .toSorted((left, right) => right - left)
+    .slice(0, hourCount)
   const labels = starts.map((startMs) => String(new Date(startMs).getHours()).padStart(2, "0"))
   const duplicateLabels = Map.groupBy(labels.keys(), (index) => labels[index] ?? "")
   for (const indices of duplicateLabels.values()) {
@@ -83,14 +97,19 @@ function statsWindows(nowMs: number, hourCount: number): readonly QueueStatsWind
       labels[index] = `${labels[index]}${String.fromCharCode("a".charCodeAt(0) + order)}`
     })
   }
+  let newerDay = localDayKey(nowMs)
+  for (const [index, startMs] of starts.entries()) {
+    const day = localDayKey(startMs)
+    if (day !== newerDay) labels[index] = `│${labels[index]}`
+    newerDay = day
+  }
   const hours = starts.map((startMs, index): QueueStatsWindow => {
-    const endMs = index === 0 ? nowMs + 1 : (starts[index - 1] ?? nowMs + 1)
     return {
       key: `hour:${String(startMs)}`,
       label: labels[index] ?? "",
       kind: "hour",
       startMs,
-      endMs,
+      endMs: Math.min(startMs + hourMs, nowMs + 1),
     }
   })
   const today = localDayStart(nowMs)
@@ -110,8 +129,8 @@ function statsWindows(nowMs: number, hourCount: number): readonly QueueStatsWind
       startMs: yesterday.getTime(),
       endMs: today.getTime(),
     },
-    { key: "week", label: "THIS WEEK", kind: "period", startMs: week.getTime(), endMs: nowEnd },
-    { key: "month", label: "THIS MONTH", kind: "period", startMs: month.getTime(), endMs: nowEnd },
+    { key: "week", label: "WEEK", kind: "period", startMs: week.getTime(), endMs: nowEnd },
+    { key: "month", label: "MONTH", kind: "period", startMs: month.getTime(), endMs: nowEnd },
   ]
 }
 
@@ -199,9 +218,9 @@ function validateFacts(facts: readonly QueueTerminalFact[]): void {
 }
 
 /**
- * Project one retained terminal-fact stream into width-selected local hour
- * buckets plus the four fixed calendar periods. The journal remains the only
- * source; this function owns no counters between renders.
+ * Project one retained terminal-fact stream into width-selected, non-zero
+ * local hour buckets plus the four fixed calendar periods. The journal remains
+ * the only source; this function owns no counters between renders.
  */
 export function queueStats(
   facts: readonly QueueTerminalFact[],
@@ -215,5 +234,5 @@ export function queueStats(
   }
   if (earliestFactMs !== null) finiteNonnegative(earliestFactMs, "queue-stats history horizon")
   validateFacts(facts)
-  return statsWindows(now, hourCount).map((window) => queueStatsBucket(window, facts, earliestFactMs))
+  return statsWindows(facts, now, hourCount).map((window) => queueStatsBucket(window, facts, earliestFactMs))
 }

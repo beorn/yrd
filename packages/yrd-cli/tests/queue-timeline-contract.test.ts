@@ -77,21 +77,23 @@ describe("queue timeline 21106 contract", () => {
     for (const cell of [
       "RUNS",
       "ALL",
-      "INTEGRATED",
+      "MERGED",
+      "DUP",
+      "PASS",
       "FAILS",
       "AVG TIME",
       "TOTAL",
-      "CODING",
-      "QUEUE WAIT",
-      "JOB RUN",
-      "RETRIES",
+      "QUEUING",
+      "RUNNING",
+      "RETRIES/RUN",
       "TODAY",
       "YESTERDAY",
-      "THIS WEEK",
-      "THIS MONTH",
+      "WEEK",
+      "MONTH",
     ]) {
       expect(frame).toContain(cell)
     }
+    expect(frame).not.toContain("CODING")
   })
 
   it("renders resident health in RUNNER with the queue-pause STATUS line folded inside it", async () => {
@@ -285,18 +287,20 @@ describe("queue timeline 21106 contract", () => {
     for (const cell of [
       "RUNS",
       "ALL",
-      "INTEGRATED",
+      "MERGED",
+      "DUP",
+      "PASS",
       "FAILS",
       "AVG TIME",
       "TOTAL",
-      "CODING",
-      "QUEUE WAIT",
-      "JOB RUN",
-      "RETRIES",
+      "QUEUING",
+      "RUNNING",
+      "RETRIES/RUN",
     ]) {
       expect(statisticsText).toContain(cell)
     }
-    for (const window of ["TODAY", "YESTERDAY", "THIS WEEK", "THIS MONTH"]) {
+    expect(statisticsText).not.toContain("CODING")
+    for (const window of ["TODAY", "YESTERDAY", "WEEK", "MONTH"]) {
       expect(statisticsText).toContain(window)
     }
   })

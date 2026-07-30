@@ -35,16 +35,44 @@ function member(overrides: Partial<QueueTerminalMemberFact> = {}): QueueTerminal
 }
 
 describe("queueStats calendar buckets", () => {
-  it("projects newest-first local hours followed by fixed calendar periods", () => {
+  it("projects newest-first non-zero local hours, marks day boundaries, and keeps calendar summaries", () => {
     const now = new Date(2026, 6, 16, 13, 30).getTime()
-    const stats = queueStats([], now, new Date(2026, 5, 1).getTime(), 3)
+    const facts = [
+      fact({
+        run: "current-hour",
+        terminalAtMs: new Date(2026, 6, 16, 13, 10).getTime(),
+        outcome: "passed",
+      }),
+      fact({
+        run: "older-active-hour",
+        terminalAtMs: new Date(2026, 6, 16, 11, 10).getTime(),
+        outcome: "passed",
+      }),
+      fact({
+        run: "previous-day",
+        terminalAtMs: new Date(2026, 6, 15, 23, 10).getTime(),
+        outcome: "passed",
+      }),
+    ]
+    const stats = queueStats(facts, now, new Date(2026, 5, 1).getTime(), 3)
 
-    expect(stats.map(({ label }) => label)).toEqual(["13", "12", "11", "TODAY", "YESTERDAY", "THIS WEEK", "THIS MONTH"])
+    expect(stats.map(({ label }) => label)).toEqual(["13", "11", "│23", "TODAY", "YESTERDAY", "WEEK", "MONTH"])
+    expect(stats.filter(({ kind }) => kind === "hour").map(({ runs }) => runs.all)).toEqual([1, 1, 1])
   })
 
   it("keeps every hour bucket one real hour across local DST transitions", () => {
-    const spring = queueStats([], new Date(2026, 2, 8, 3, 30).getTime(), 0, 4).slice(0, 4)
-    const fall = queueStats([], new Date("2026-11-01T01:30:00-08:00").getTime(), 0, 4).slice(0, 4)
+    const springNow = new Date(2026, 2, 8, 3, 30).getTime()
+    const fallNow = new Date("2026-11-01T01:30:00-08:00").getTime()
+    const factsAtOffsets = (prefix: string, nowMs: number) =>
+      [29, 89, 149, 209].map((minutes, index) =>
+        fact({
+          run: `${prefix}-${String(index)}`,
+          terminalAtMs: nowMs - minutes * MINUTE,
+          outcome: "passed",
+        }),
+      )
+    const spring = queueStats(factsAtOffsets("spring", springNow), springNow, 0, 4).slice(0, 4)
+    const fall = queueStats(factsAtOffsets("fall", fallNow), fallNow, 0, 4).slice(0, 4)
 
     for (const buckets of [spring, fall]) {
       expect(new Set(buckets.map(({ key }) => key))).toHaveLength(buckets.length)
@@ -55,8 +83,8 @@ describe("queueStats calendar buckets", () => {
         60 * MINUTE,
       ])
     }
-    expect(spring.map(({ label }) => label)).toEqual(["03", "01", "00", "23"])
-    expect(fall.map(({ label }) => label)).toEqual(["01b", "01a", "00", "23"])
+    expect(spring.map(({ label }) => label)).toEqual(["03", "01", "00", "│23"])
+    expect(fall.map(({ label }) => label)).toEqual(["01b", "01a", "00", "│23"])
   })
 
   it("counts settled Runs but counts integrated PR members", () => {
@@ -140,8 +168,8 @@ describe("queueStats calendar buckets", () => {
 
     expect(byLabel("TODAY")?.runs.all).toBe(1)
     expect(byLabel("YESTERDAY")?.runs.all).toBe(1)
-    expect(byLabel("THIS WEEK")?.runs.all).toBe(3)
-    expect(byLabel("THIS MONTH")?.runs.all).toBe(5)
+    expect(byLabel("WEEK")?.runs.all).toBe(3)
+    expect(byLabel("MONTH")?.runs.all).toBe(5)
   })
 
   it("projects avg/p50/p95, approximation truth, unavailable coding, and retries from member facts", () => {
@@ -211,7 +239,19 @@ describe("queueStats calendar buckets", () => {
   it("marks each calendar bucket covered only when retained history reaches its start", () => {
     const now = new Date(2026, 6, 16, 13, 30).getTime()
     const earliest = new Date(2026, 6, 16, 12, 30).getTime()
-    const [hour, previousHour, today] = queueStats([], now, earliest, 2)
+    const facts = [
+      fact({
+        run: "current",
+        terminalAtMs: new Date(2026, 6, 16, 13, 10).getTime(),
+        outcome: "passed",
+      }),
+      fact({
+        run: "previous",
+        terminalAtMs: new Date(2026, 6, 16, 12, 10).getTime(),
+        outcome: "passed",
+      }),
+    ]
+    const [hour, previousHour, today] = queueStats(facts, now, earliest, 2)
 
     expect(hour?.covered).toBe(true)
     expect(previousHour?.covered).toBe(false)
