@@ -12,7 +12,6 @@ import {
 import {
   command,
   event,
-  Command,
   compareNatural,
   journalEvent,
   raiseFailure,
@@ -103,14 +102,14 @@ export type ContestPlugin = (<State extends object, Commands extends CommandTree
 
 /** Compose immutable runner, evaluator, and exact-promotion definitions. */
 export function withContests(options: WithContestsOptions): ContestPlugin {
-  const runners = definitionMap(options.runners, "harness", "contest runner")
+  const runners = definitionMap(options.runners, "id", "contest runner")
   const evaluators = definitionMap(options.evaluators, "id", "contest evaluator")
   const git = normalizeGit(options.git)
   const defaultBase = options.defaultBase ?? "main"
   const runnerJobs = new Map<string, RunnerJobDef>()
   const evaluatorJobs = new Map<string, EvaluatorJobDef>()
 
-  for (const runner of runners.values()) runnerJobs.set(runner.harness, runnerJobDef(runner))
+  for (const runner of runners.values()) runnerJobs.set(runner.id, runnerJobDef(runner))
   for (const evaluator of evaluators.values()) evaluatorJobs.set(evaluator.id, evaluatorJobDef(evaluator))
   const promotionJob = promotionJobDef(git)
   const jobDefs = Object.freeze(
@@ -185,8 +184,8 @@ function createContestCommands(
       )
       if (duplicate !== undefined) throw new Error(`yrd: duplicate competitor identity '${duplicate.id}'`)
       for (const competitor of competitors) {
-        if (!runners.has(competitor.harness)) {
-          throw new Error(`yrd: no contest runner '${competitor.harness}' is installed`)
+        if (!runners.has(competitor.runner)) {
+          throw new Error(`yrd: no contest runner '${competitor.runner}' is installed`)
         }
       }
 
@@ -252,8 +251,8 @@ function createContestCommands(
         const runnerKey = attemptRunnerKey(record.id, attempt.id)
         const runner = jobByKey(state, runnerKey)
         if (runner === undefined) {
-          const definition = runnerJobs.get(attempt.competitor.harness)
-          if (definition === undefined) throw new Error(`yrd: no contest runner '${attempt.competitor.harness}'`)
+          const definition = runnerJobs.get(attempt.competitor.runner)
+          if (definition === undefined) throw new Error(`yrd: no contest runner '${attempt.competitor.runner}'`)
           events.push(
             definition.request(
               ContestRunnerInputSchema.parse({
@@ -900,15 +899,13 @@ function exactPR(pr: DeepReadonly<PR>, pin: DeepReadonly<z.infer<typeof GitRevis
 }
 
 function competitorOf(definition: CompetitorDef): Competitor {
-  const parsed = CompetitorDefSchema.parse(definition)
-  const id = `cmp-${Command.hash({ op: "contest.competitor", args: parsed })}`
-  return { ...parsed, id }
+  return CompetitorDefSchema.parse(definition)
 }
 
 function runnerJobDef(runner: ContestRunnerDef): RunnerJobDef {
   return createJobDef({
-    name: `contest.runner.${DefIdSchema.parse(runner.harness)}`,
-    title: `Run ${runner.harness} contest attempt`,
+    name: `contest.runner.${DefIdSchema.parse(runner.id)}`,
+    title: `Run ${runner.id} contest attempt`,
     revision: TextSchema.parse(runner.revision),
     input: ContestRunnerInputSchema,
     output: AttemptRunOutputSchema,

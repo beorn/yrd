@@ -76,8 +76,8 @@ function workspace() {
  * never enters a contest, so passing stubs suffice. */
 function contestAdapters() {
   const runner: ContestRunnerDef = {
-    harness: "ag",
-    revision: "ag-runner-v1",
+    id: "fixture",
+    revision: "fixture-runner-v1",
     async run(input): Promise<JobResult<AttemptRunOutput>> {
       return {
         status: "completed",
@@ -92,7 +92,7 @@ function contestAdapters() {
           },
           wallTimeMs: 100,
           tokens: { input: 0, output: 0, cachedInput: 0, cacheWrite: 0, reasoning: 0 },
-          cost: { kind: "reported", usd: 0, source: "ag" },
+          cost: { kind: "reported", usd: 0, source: "fixture" },
           artifacts: [],
         },
       }
@@ -635,7 +635,7 @@ describe("resident merge-into-latest", () => {
         pr: "PR1",
         revision: 2,
         headSha: LIVE_HEAD,
-        code: "request-checks-current-changed",
+        code: "ready-current-changed",
       },
     ])
     expect(broadCancel).not.toHaveBeenCalled()
@@ -843,15 +843,25 @@ describe("resident merge-into-latest", () => {
     expect(app.bays.checksRequested("PR1")).toBe(false)
   })
 
-  it("observes the next push for a tracked PR whose prior checks need author work", async () => {
+  it("observes the next push for a tracked PR whose prior checks failed", async () => {
     const behavior = { failingCheck: true }
     const app = await createCliApp(behavior)
     let head = RECORDED_HEAD
     const submitted = outputIO(() => head)
     expect(
-      await runYrd(app, yrd("pr", "submit", BRANCH, "--issue", "km#22454", "--track", "--json"), submitted.io),
-    ).toBe(1)
-    expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("needs-author")
+      await runYrd(
+        app,
+        yrd("pr", "submit", BRANCH, "--issue", "km#22454", "--track", "--json"),
+        submitted.io,
+        noRequiredChecks,
+      ),
+      submitted.stderr(),
+    ).toBe(0)
+    await expect(app.queue.run({ prs: ["PR1"] }, { runner: "track-test", leaseMs: 60_000 })).resolves.toMatchObject([
+      { status: "completed", conclusion: "failure", error: { code: "authored-failure" } },
+    ])
+    expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
+    expect(app.queue.eligibility("PR1")).toMatchObject({ checks: { status: "failed" } })
 
     behavior.failingCheck = false
     head = LIVE_HEAD

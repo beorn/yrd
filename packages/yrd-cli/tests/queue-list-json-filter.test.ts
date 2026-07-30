@@ -52,8 +52,8 @@ function workspace() {
 /** Contest adapters the composed CLI app requires; this listing never enters a contest. */
 function contestAdapters() {
   const runner: ContestRunnerDef = {
-    harness: "ag",
-    revision: "ag-runner-v1",
+    id: "fixture",
+    revision: "fixture-runner-v1",
     async run(input): Promise<JobResult<AttemptRunOutput>> {
       return {
         status: "completed",
@@ -68,7 +68,7 @@ function contestAdapters() {
           },
           wallTimeMs: 100,
           tokens: { input: 0, output: 0, cachedInput: 0, cacheWrite: 0, reasoning: 0 },
-          cost: { kind: "reported", usd: 0, source: "ag" },
+          cost: { kind: "reported", usd: 0, source: "fixture" },
           artifacts: [],
         },
       }

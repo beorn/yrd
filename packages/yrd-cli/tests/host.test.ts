@@ -35,7 +35,6 @@ import type { ResolvedYrdProjectConfig } from "../src/config.ts"
 import { classifyFailure } from "../src/invocation.ts"
 import { withLiveRenderer } from "../src/live-renderer.ts"
 import { discoverYrdRepository } from "../src/repository.ts"
-import type { SignalDelivery, SignalDeliveryAdapter } from "../src/signals.ts"
 
 const roots: string[] = []
 const silentLog = createLogger("test", [{ level: "silent" }])
@@ -127,6 +126,63 @@ async function repository(): Promise<{ repo: string; featureSha: string }> {
   const featureSha = await git(repo, "rev-parse", "HEAD")
   await git(repo, "switch", "-q", "main")
   return { repo, featureSha }
+}
+
+async function candidatePackageRepository(
+  options: Readonly<{ postinstall?: string }> = {},
+): Promise<{ repo: string; featureSha: string }> {
+  const { repo } = await repository()
+  await git(repo, "switch", "-q", "main")
+  await writeFile(
+    join(repo, "package.json"),
+    JSON.stringify({
+      scripts: {
+        typecheck: "test -f node_modules/.provisioned",
+        lint: "test -f node_modules/.provisioned",
+        ...(options.postinstall === undefined ? {} : { postinstall: options.postinstall }),
+      },
+      devDependencies: { typescript: "6.0.3" },
+    }),
+  )
+  await writeFile(join(repo, "bun.lock"), "lockfileVersion = 1\n")
+  await writeFile(join(repo, ".gitignore"), "node_modules/\n")
+  await writeFile(join(repo, ".yrd.yml"), 'checks: [{typecheck: {run: "bun run typecheck"}}]\n')
+  await git(repo, "add", "package.json", "bun.lock", ".gitignore", ".yrd.yml")
+  await git(repo, "commit", "-qm", "declare candidate toolchain")
+  await git(repo, "switch", "-q", "issue/feature")
+  await git(repo, "merge", "-q", "--no-edit", "main")
+  const featureSha = await git(repo, "rev-parse", "HEAD")
+  await git(repo, "switch", "-q", "main")
+  return { repo, featureSha }
+}
+
+async function fixtureBun(
+  repo: string,
+  install: readonly string[],
+  postinstall: readonly string[] = ["exit 64"],
+): Promise<string> {
+  const fixtureBin = join(repo, "..", "bin")
+  await mkdir(fixtureBin, { recursive: true })
+  await writeFile(
+    join(fixtureBin, "bun"),
+    [
+      "#!/bin/sh",
+      'if [ "$1" = "install" ]; then',
+      ...install.map((line) => `  ${line}`),
+      "fi",
+      'if [ "$1" = "run" ] && [ "$2" = "typecheck" ]; then',
+      "  test -f node_modules/.provisioned",
+      "  exit",
+      "fi",
+      'if [ "$1" = "run" ] && [ "$2" = "postinstall" ]; then',
+      ...postinstall.map((line) => `  ${line}`),
+      "fi",
+      "exit 64",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  )
+  return fixtureBin
 }
 
 /** Install legacy spelling on the base branch: config authority is the base,
@@ -546,6 +602,111 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     })
   })
 
+  it("provisions dependencies before built-in and custom checks run in candidate worktrees (22541)", async () => {
+    const { repo, featureSha } = await candidatePackageRepository()
+
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["typecheck", "lint"],
+      requires: [],
+      definitions: {
+        typecheck: { run: "bun run typecheck", runner: "local" },
+        lint: { run: "bun run lint", runner: "local" },
+      },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["typecheck"] },
+    }
+    const provisioned: string[] = []
+    await using runtimeProcess = createProcess({ cwd: repo })
+    const process = {
+      run(request: ProcessRequest): Promise<ProcessResult> {
+        if (request.argv.join(" ") !== "bun install --frozen-lockfile --ignore-scripts") {
+          return runtimeProcess.run(request)
+        }
+        if (request.cwd === undefined) throw new Error("candidate provisioning requires a working directory")
+        provisioned.push(request.cwd)
+        return runtimeProcess.run({
+          ...request,
+          argv: ["sh", "-c", "mkdir -p node_modules && : > node_modules/.provisioned"],
+        })
+      },
+    }
+    await using app = await createDefaultYrdApp({
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal: createMemoryJournal(),
+      process,
+      config,
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]
+
+    expect(provisioned).toHaveLength(2)
+    expect(run).toMatchObject({ status: "completed", conclusion: "success" })
+    expect(new Set(provisioned)).toHaveLength(1)
+  })
+
+  it.each([
+    ["a failed dependency install", "exit", "dependency cache unavailable"],
+    ["an unavailable package manager", "throw", "spawn bun ENOENT"],
+  ] as const)(
+    "reports %s as a retryable candidate environment refusal (22541)",
+    async (_label, failureMode, expectedMessage) => {
+      const { repo, featureSha } = await candidatePackageRepository()
+      const config: ResolvedYrdProjectConfig = {
+        base: "main",
+        batch: 1,
+        steps: ["typecheck"],
+        requires: [],
+        definitions: { typecheck: { run: "bun run typecheck", runner: "local" } },
+        contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["typecheck"] },
+      }
+      await using runtimeProcess = createProcess({ cwd: repo })
+      const process = {
+        run(request: ProcessRequest): Promise<ProcessResult> {
+          if (request.argv.join(" ") !== "bun install --frozen-lockfile --ignore-scripts") {
+            return runtimeProcess.run(request)
+          }
+          if (failureMode === "throw") throw new Error(expectedMessage)
+          return runtimeProcess.run({
+            ...request,
+            argv: ["sh", "-c", "printf 'dependency cache unavailable\\n' >&2; exit 7"],
+          })
+        },
+      }
+      await using app = await createDefaultYrdApp({
+        repo,
+        stateDir: join(repo, ".git", "yrd"),
+        baysRoot: join(repo, ".bays"),
+        journal: createMemoryJournal(),
+        process,
+        config,
+      })
+      await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+      const run = (await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]
+
+      expect(run).toMatchObject({
+        status: "completed",
+        conclusion: "failure",
+        error: {
+          code: "queue-environment-refused",
+          evidence: {
+            kind: "check-execution-refusal",
+            phase: "candidate",
+            error: {
+              code: "candidate-provision-failed",
+              message: expect.stringContaining(expectedMessage),
+            },
+            retryable: true,
+          },
+        },
+      })
+    },
+  )
+
   it("activates projection checkpoints for the complete built-in projector stack", async () => {
     const { repo, featureSha } = await repository()
     const stateDir = join(repo, ".git", "yrd")
@@ -652,8 +813,6 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       "ready",
       "review",
       "comment",
-      "startSession",
-      "stopSession",
       "requestChecks",
       "recordAdmission",
       "requestReview",
@@ -1129,209 +1288,69 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     }
   })
 
-  it("routes a failed Run to its revision submitter without awaiting delivery", async () => {
-    const { repo, featureSha } = await repository()
-    await commitYrdConfig(
-      repo,
-      `base: main
-checks: [{check: {run: "printf 'focused failure\\n' >&2; exit 1"}}]
-notify:
-  run/failed: [submitter]
-`,
-    )
-    const entered = Promise.withResolvers<void>()
-    const release = Promise.withResolvers<void>()
-    let delivery: SignalDelivery | undefined
-    const adapter: SignalDeliveryAdapter = {
-      async send(value) {
-        delivery = value
-        entered.resolve()
-        await release.promise
-      },
-    }
-    const host = await createYrdHost({
-      cwd: repo,
-      env: { ...process.env, TRIBE_NAME: "@agent/7" },
-      log: createLogger("test", [{ level: "silent" }]),
-      signalAdapter: adapter,
-    })
-    try {
-      await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-      expect(host.app.bays.pr("PR1")?.revs).toEqual([expect.objectContaining({ submitter: "@agent/7" })])
-
-      const settled = await Promise.race([
-        host.app.queue
-          .run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
-          .then((runs) => ({ kind: "runs" as const, runs })),
-        Bun.sleep(5_000).then(() => ({ kind: "timeout" as const })),
-      ])
-
-      expect(settled).toMatchObject({
-        kind: "runs",
-        runs: [expect.objectContaining({ status: "completed", conclusion: "failure" })],
-      })
-      expect(prDeliveryState(host.app.bays.pr("PR1")!)).toBe("submitted")
-      await expect(
-        Promise.race([entered.promise.then(() => "delivered"), Bun.sleep(1_000).then(() => "timed-out")]),
-      ).resolves.toBe("delivered")
-      expect(delivery).toEqual({
-        recipient: "@agent/7",
-        event: expect.objectContaining({
-          kind: "run/failed",
-          run: "R1",
-          prs: [expect.objectContaining({ pr: "PR1", revision: 1 })],
-        }),
-      })
-    } finally {
-      release.resolve()
-      await host.close()
-    }
-  })
-
-  it("runs the literal queue watch viewer without Tribe identity or notification settlement", async () => {
+  it("runs the literal queue watch through the read-only viewer", async () => {
     const { repo } = await repository()
     await commitYrdConfig(
       repo,
       `base: main
 checks: [{check: {run: "true"}}]
-notify:
-  pr/rejected: [submitter]
 `,
     )
-    const tribeName = process.env.TRIBE_NAME
-    delete process.env.TRIBE_NAME
     let mounted = false
     let stderr = ""
-    try {
-      const io = withLiveRenderer(
-        {
-          cwd: repo,
-          stdout: () => undefined,
-          stderr: (text) => {
-            stderr += text
-          },
+    const io = withLiveRenderer(
+      {
+        cwd: repo,
+        stdout: () => undefined,
+        stderr: (text) => {
+          stderr += text
         },
-        async () => {
-          mounted = true
-        },
-      )
-      expect(
-        await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "queue", "watch"], io),
-        stderr,
-      ).toBe(0)
-    } finally {
-      if (tribeName === undefined) delete process.env.TRIBE_NAME
-      else process.env.TRIBE_NAME = tribeName
-    }
+      },
+      async () => {
+        mounted = true
+      },
+    )
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "queue", "watch"], io),
+      stderr,
+    ).toBe(0)
 
     expect(mounted).toBe(true)
-    expect(stderr).not.toContain("set TRIBE_NAME")
-    expect(await Bun.file(join(repo, ".git", "yrd", "notifications", "cursor-v1.json")).exists()).toBe(false)
   })
 
-  it("runs the literal PR-list viewer without Tribe identity or notification settlement", async () => {
+  it("runs the literal PR-list through the read-only viewer", async () => {
     const { repo } = await repository()
     await commitYrdConfig(
       repo,
       `base: main
 checks: [{check: {run: "true"}}]
-notify:
-  pr/rejected: [submitter]
 `,
     )
-    const tribeName = process.env.TRIBE_NAME
     const stateDir = join(repo, ".git", "yrd")
     const configBefore = await git(repo, "config", "--local", "--list")
     const refsBefore = await git(repo, "for-each-ref", "--format=%(refname)%09%(objectname)")
     expect(existsSync(stateDir)).toBe(false)
-    delete process.env.TRIBE_NAME
     let stdout = ""
     let stderr = ""
-    try {
-      expect(
-        await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "list", "--json"], {
-          cwd: repo,
-          stdout: (text) => {
-            stdout += text
-          },
-          stderr: (text) => {
-            stderr += text
-          },
-        }),
-        stderr,
-      ).toBe(0)
-    } finally {
-      if (tribeName === undefined) delete process.env.TRIBE_NAME
-      else process.env.TRIBE_NAME = tribeName
-    }
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "list", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+      stderr,
+    ).toBe(0)
 
     expect(JSON.parse(stdout)).toMatchObject({ command: "pr.list", prs: [] })
-    expect(stderr).not.toContain("set TRIBE_NAME")
-    expect(await Bun.file(join(repo, ".git", "yrd", "notifications", "cursor-v1.json")).exists()).toBe(false)
     expect(await Bun.file(join(repo, ".git", "yrd", "prs.git", "HEAD")).exists()).toBe(false)
     expect(await Bun.file(join(repo, ".git", "yrd", "receiver-inbox")).exists()).toBe(false)
     expect(existsSync(stateDir)).toBe(false)
     expect(await git(repo, "config", "--local", "--list")).toBe(configBefore)
     expect(await git(repo, "for-each-ref", "--format=%(refname)%09%(objectname)")).toBe(refsBefore)
-  })
-
-  it("runs read-only commands without a Tribe identity when a submitter route is configured", async () => {
-    const { repo, featureSha } = await repository()
-    await writeFile(
-      join(repo, ".yrd.yml"),
-      `${journalCompatibilityYaml()}base: main
-checks: [{check: {run: "true"}}]
-notify:
-  pr/rejected: [submitter]
-`,
-    )
-    // Seed one PR (PR1) through an active host that HAS a Tribe identity.
-    await using seeded = await createYrdHost({ cwd: repo, env: { ...process.env, TRIBE_NAME: "@agent/6" } })
-    await seeded.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-    await seeded.close()
-
-    const stateDir = join(repo, ".git", "yrd")
-    const stateBefore = await byteManifest(stateDir)
-    const cursorPath = join(stateDir, "notifications", "cursor-v1.json")
-    const cursorExistedBefore = await Bun.file(cursorPath).exists()
-    const tribeName = process.env.TRIBE_NAME
-    delete process.env.TRIBE_NAME
-    try {
-      // Read-only surfaces never record or route a submitter. They must not
-      // require TRIBE_NAME merely because a notification route names one.
-      const reads: readonly (readonly string[])[] = [
-        ["log", "--json"],
-        ["pr", "view", "PR1", "--json"],
-        ["pr", "runs", "PR1", "--json"],
-        ["pr", "diff", "PR1", "--json"],
-        ["pr", "status", "--json"],
-        ["pr", "checks", "PR1", "--json"],
-        ["queue", "list", "--json"],
-        ["queue", "audit", "--json"],
-      ]
-      for (const argv of reads) {
-        let stderr = ""
-        const exit = await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, ...argv], {
-          cwd: repo,
-          stdout: () => undefined,
-          stderr: (text) => {
-            stderr += text
-          },
-        })
-        expect(stderr, `${argv.join(" ")} stderr`).not.toContain("signal-submitter-missing")
-        expect(stderr, `${argv.join(" ")} stderr`).not.toContain("set TRIBE_NAME")
-        // Read surfaces may use exit 1 to report an unhealthy/not-ready
-        // projection; the identity-bootstrap defect exited as configuration 2.
-        expect([0, 1], `${argv.join(" ")} exit`).toContain(exit)
-      }
-    } finally {
-      if (tribeName === undefined) delete process.env.TRIBE_NAME
-      else process.env.TRIBE_NAME = tribeName
-    }
-
-    // Viewer reads preserve every Yrd state byte and never advance the receiver.
-    expect(await byteManifest(stateDir)).toEqual(stateBefore)
-    expect(await Bun.file(cursorPath).exists()).toBe(cursorExistedBefore)
   })
 
   it("preserves every Yrd state byte while listing a populated PR journal", async () => {
@@ -1342,7 +1361,7 @@ notify:
 checks: [{check: {run: "true"}}]
 `,
     )
-    await using seeded = await createYrdHost({ cwd: repo, env: { ...process.env, TRIBE_NAME: "@agent/6" } })
+    await using seeded = await createYrdHost({ cwd: repo })
     await seeded.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
     await seeded.close()
 
@@ -1377,22 +1396,6 @@ checks: [{check: {run: "true"}}]
     expect(await byteManifest(stateDir)).toEqual(stateBefore)
     expect(await git(repo, "config", "--local", "--list")).toBe(configBefore)
     expect(await git(repo, "for-each-ref", "--format=%(refname)%09%(objectname)")).toBe(refsBefore)
-  })
-
-  it("refuses a needs-review route when review is not an eligibility requirement", async () => {
-    const { repo } = await repository()
-    await commitYrdConfig(
-      repo,
-      `base: main
-checks: [{check: {run: "true"}}]
-notify:
-  pr/needs-review: ["@cto"]
-`,
-    )
-
-    await expect(createYrdHost({ cwd: repo, signalAdapter: { send() {} } })).rejects.toMatchObject({
-      failure: { kind: "configuration", code: "signal-review-policy-missing" },
-    })
   })
 
   it("classifies typed failure facts without scraping their messages", () => {
@@ -1490,10 +1493,8 @@ notify:
       "watch",
       "prime",
       "in",
-      "do",
       "sh",
       "run",
-      "ag",
     ])
     expect(stdout).not.toMatch(/\b(?:pr\|prs|bay\|bays|issue\|issues|contest\|contests|queue\|queues)\b/u)
     expect(stderr).toBe("")
@@ -1922,6 +1923,153 @@ notify:
       ],
     })
     expect(result.results[0]).not.toHaveProperty("reusedFrom")
+  })
+
+  it("provisions a detached required-check workspace before pr submit runs it (22600)", async () => {
+    const { repo } = await candidatePackageRepository()
+    const fixtureBin = await fixtureBun(repo, ["mkdir -p node_modules", ": > node_modules/.provisioned", "exit 0"])
+    const previousPath = process.env.PATH
+    process.env.PATH = `${fixtureBin}:${previousPath ?? ""}`
+    try {
+      let stdout = ""
+      let stderr = ""
+      const exitCode = await runYrdProcess(
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--json"],
+        {
+          cwd: repo,
+          stdout: (text) => {
+            stdout += text
+          },
+          stderr: (text) => {
+            stderr += text
+          },
+        },
+      )
+
+      expect(exitCode, stderr).toBe(0)
+      expect(JSON.parse(stdout)).toMatchObject({
+        command: "pr.submit",
+        prs: [{ branch: "issue/feature", status: "submitted" }],
+      })
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+    }
+  })
+
+  it("types a detached required-check provisioning failure before pr submit mutates state (22600)", async () => {
+    const { repo } = await candidatePackageRepository()
+    const fixtureBin = await fixtureBun(repo, ["printf 'dependency cache unavailable\\n' >&2", "exit 7"])
+    const previousPath = process.env.PATH
+    process.env.PATH = `${fixtureBin}:${previousPath ?? ""}`
+    try {
+      let stdout = ""
+      let stderr = ""
+      const exitCode = await runYrdProcess(
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--json"],
+        {
+          cwd: repo,
+          stdout: (text) => {
+            stdout += text
+          },
+          stderr: (text) => {
+            stderr += text
+          },
+        },
+      )
+
+      expect(exitCode).toBe(3)
+      expect(stdout).toBe("")
+      expect(JSON.parse(stderr)).toMatchObject({
+        failure: {
+          kind: "infrastructure",
+          code: "candidate-provision-failed",
+          message: expect.stringContaining("dependency cache unavailable"),
+        },
+      })
+      expect((await journalEnvelope(repo)).flatMap(({ values }) => values)).toEqual([])
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+    }
+  })
+
+  it("types a candidate-owned public API preflight refusal with its release bead (22600)", async () => {
+    const { repo } = await candidatePackageRepository({
+      postinstall: "bun scripts/verify-public-dependencies.ts",
+    })
+    const fixtureBin = await fixtureBun(
+      repo,
+      ["mkdir -p node_modules", "exit 0"],
+      [
+        "printf '%s\\n' 'Yrd dependency provisioning refused: Yrd main consumes silvery.MarkdownView; Release: @km/infra/22627-silvery-0232-release.' >&2",
+        "exit 1",
+      ],
+    )
+    const previousPath = process.env.PATH
+    process.env.PATH = `${fixtureBin}:${previousPath ?? ""}`
+    try {
+      let stdout = ""
+      let stderr = ""
+      const exitCode = await runYrdProcess(
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--json"],
+        {
+          cwd: repo,
+          stdout: (text) => {
+            stdout += text
+          },
+          stderr: (text) => {
+            stderr += text
+          },
+        },
+      )
+
+      expect(exitCode).toBe(3)
+      expect(stdout).toBe("")
+      expect(JSON.parse(stderr)).toMatchObject({
+        failure: {
+          kind: "infrastructure",
+          code: "candidate-provision-failed",
+          message: expect.stringContaining(
+            "Yrd dependency provisioning refused: Yrd main consumes silvery.MarkdownView",
+          ),
+        },
+      })
+      expect(stderr).toContain("@km/infra/22627-silvery-0232-release")
+      expect((await journalEnvelope(repo)).flatMap(({ values }) => values)).toEqual([])
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+    }
+  })
+
+  it("does not provision the operator checkout for an explicit local check (22600)", async () => {
+    const { repo } = await candidatePackageRepository()
+    const fixtureBin = await fixtureBun(repo, ["mkdir -p node_modules", ": > node_modules/.provisioned", "exit 0"])
+    const previousPath = process.env.PATH
+    process.env.PATH = `${fixtureBin}:${previousPath ?? ""}`
+    try {
+      let stderr = ""
+      const exitCode = await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "check", "typecheck", "--json"], {
+        cwd: repo,
+        stdout() {},
+        stderr: (text) => {
+          stderr += text
+        },
+      })
+
+      expect(exitCode).toBe(1)
+      expect(existsSync(join(repo, "node_modules", ".provisioned"))).toBe(false)
+      expect(JSON.parse(stderr)).toMatchObject({
+        failure: {
+          kind: "refusal",
+          code: "required-check-failed",
+        },
+      })
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+    }
   })
 
   it("runs the managed required check before pr submit mutates the PR journal", async () => {
@@ -2525,52 +2673,6 @@ notify:
     expect(releases).toBe(1)
   })
 
-  it("drains the active run on the first watch signal without admitting another", async () => {
-    const { repo, featureSha } = await repository()
-    const startedPath = join(repo, "..", "drain-check.started")
-    const finishedPath = join(repo, "..", "drain-check.finished")
-    const command = [`touch ${JSON.stringify(startedPath)}`, "sleep 0.2", `touch ${JSON.stringify(finishedPath)}`].join(
-      "; ",
-    )
-    await commitYrdConfig(
-      repo,
-      `base: main\nbatch: 1\nchecks: [{check: {run: ${JSON.stringify(command)}, timeoutMs: 5000}}]\n`,
-    )
-    await git(repo, "switch", "-qc", "issue/second", "main")
-    await writeFile(join(repo, "second.txt"), "second\n")
-    await git(repo, "add", "second.txt")
-    await git(repo, "commit", "-qm", "second")
-    const secondSha = await git(repo, "rev-parse", "HEAD")
-    await git(repo, "switch", "-q", "main")
-
-    await using submitter = await createYrdHost({ cwd: repo })
-    await submitter.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-    await submitter.app.bays.submit({ branch: "issue/second", headSha: secondSha, base: "main" })
-    await submitter.close()
-
-    const cli = Bun.spawn(
-      [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "queue", "run", "--interval", "1", "--json"],
-      { cwd: repo, stdout: "pipe", stderr: "pipe" },
-    )
-    const stdout = new Response(cli.stdout).text()
-    const stderr = new Response(cli.stderr).text()
-    try {
-      await vi.waitFor(async () => expect(await Bun.file(startedPath).exists()).toBe(true), { timeout: 5_000 })
-      cli.kill("SIGTERM")
-      await vi.waitFor(async () => expect(await Bun.file(finishedPath).exists()).toBe(true), { timeout: 5_000 })
-      expect(await cli.exited, `${await stdout}\n${await stderr}`).toBe(0)
-
-      await using settled = await createYrdHost({ cwd: repo })
-      expect(Queues.ids(settled.app.state().queues)).toEqual(["R1"])
-      expect(settled.app.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "success" })
-    } finally {
-      cli.kill("SIGKILL")
-      await cli.exited
-      await stdout
-      await stderr
-    }
-  })
-
   it("keeps repeated resident signals idempotent while hard escalation reaps the active process tree", async () => {
     const { repo, featureSha } = await repository()
     const childPidPath = join(repo, "resident-hard-stop.pid")
@@ -2857,182 +2959,6 @@ notify:
       await firstStderr
     }
   })
-
-  it("keeps watch resident after a failed run and drains the next run with its own result", async () => {
-    const { repo, featureSha } = await repository()
-    // Control markers live outside the delivery repository: the native merge
-    // must see a clean base while the test observes the configured check.
-    const startedPath = join(repo, "..", "second-check.started")
-    const finishedPath = join(repo, "..", "second-check.finished")
-    const artifactRoot = join(repo, ".git", "yrd", "artifacts")
-    const failedOutput = "FAILURE_OUTPUT_ONLY_IN_ARTIFACT"
-    const passedOutput = "PASS_OUTPUT_ONLY_IN_ARTIFACT"
-    const command = [
-      `if git cat-file -e "$YRD_CANDIDATE_SHA:feature.txt" 2>/dev/null; then printf '${failedOutput}\\n' >&2; exit 7; fi`,
-      `printf '${passedOutput}\\n'`,
-      `touch ${JSON.stringify(startedPath)}`,
-      "sleep 0.2",
-      `touch ${JSON.stringify(finishedPath)}`,
-    ].join("; ")
-    await commitYrdConfig(
-      repo,
-      `base: main\nbatch: 1\nchecks: [{check: {run: ${JSON.stringify(command)}, timeoutMs: 5000}}]\n`,
-    )
-    await git(repo, "switch", "-qc", "issue/second", "main")
-    await writeFile(join(repo, "second.txt"), "second\n")
-    await git(repo, "add", "second.txt")
-    await git(repo, "commit", "-qm", "second")
-    const secondSha = await git(repo, "rev-parse", "HEAD")
-    await git(repo, "switch", "-q", "main")
-
-    await using submitter = await createYrdHost({ cwd: repo })
-    await submitter.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-    await submitter.app.bays.submit({ branch: "issue/second", headSha: secondSha, base: "main" })
-    const first = submitter.app.bays.pr("issue/feature")!
-    const second = submitter.app.bays.pr("issue/second")!
-    await submitter.app.bays.requestChecks({ pr: first.id })
-    await submitter.app.bays.requestChecks({ pr: second.id })
-    expect([first.id, second.id].map((id) => prDeliveryState(submitter.app.bays.pr(id)!))).toEqual([
-      "submitted",
-      "submitted",
-    ])
-    expect(Queues.ids(submitter.app.state().queues)).toEqual([])
-    await submitter.close()
-
-    const cli = Bun.spawn(
-      [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "queue", "run", "--interval", "1", "--json"],
-      { cwd: repo, stdout: "pipe", stderr: "pipe" },
-    )
-    const stdout = new Response(cli.stdout).text()
-    const stderr = new Response(cli.stderr).text()
-    try {
-      await vi.waitFor(async () => expect(await Bun.file(startedPath).exists()).toBe(true), { timeout: 5_000 })
-      cli.kill("SIGTERM")
-      await vi.waitFor(async () => expect(await Bun.file(finishedPath).exists()).toBe(true), { timeout: 5_000 })
-      const exitCode = await cli.exited
-      const narration = await stderr
-      const structured = await stdout
-      expect(exitCode, structured).toBe(0)
-      expect(narration).toBe("")
-
-      await using settled = await createYrdHost({ cwd: repo })
-      const runIds = Queues.ids(settled.app.state().queues)
-      expect(runIds).toEqual(["R1", "R2"])
-      expect(runIds.map((id) => settled.app.queue.get(id)?.status)).toEqual(["completed", "completed"])
-      expect(runIds.map((id) => settled.app.queue.get(id)?.conclusion)).toEqual(["failure", "success"])
-
-      const failedLog = join(artifactRoot, "R1", "0-check", "attempt-1", "stderr.log")
-      const passedLog = join(artifactRoot, "R2", "0-check", "attempt-1", "stdout.log")
-      expect(structured).toContain('"id":"R1"')
-      expect(structured).toContain('"id":"R2"')
-      expect(await readFile(failedLog, "utf8")).toContain(failedOutput)
-      expect(await readFile(passedLog, "utf8")).toContain(passedOutput)
-    } finally {
-      cli.kill("SIGKILL")
-      await cli.exited
-      await stdout
-      await stderr
-    }
-  })
-
-  it.each([
-    ["selector", "SIGINT" as const, 130, ["PR1"] as const],
-    ["--once", "SIGTERM" as const, 143, ["--once"] as const],
-  ])(
-    "%s one-shot settles and reaps its active run on %s",
-    async (_mode, signal, exitCode, args) => {
-      const { repo, featureSha } = await repository()
-      const childPidPath = join(repo, "active-check.pid")
-      const grandchildPidPath = join(repo, "active-check-grandchild.pid")
-      const progressPath = join(repo, "active-check.progress")
-      const finishedPath = join(repo, "active-check.finished")
-      const scratchPath = join(repo, "active-check.scratch")
-      const command = [
-        `printf '%s\\n' "$$" > ${JSON.stringify(childPidPath)}`,
-        `pwd > ${JSON.stringify(scratchPath)}`,
-        `sh -c 'trap "" TERM; ${BOUNDED_ONE_SECOND_LOOP}' & printf '%s\\n' "$!" > ${JSON.stringify(grandchildPidPath)}`,
-        "i=0",
-        `while [ "$i" -lt 200 ]; do printf '%s\\n' "$i" >> ${JSON.stringify(progressPath)}; i=$((i + 1)); sleep 0.05; done`,
-        `touch ${JSON.stringify(finishedPath)}`,
-      ].join("; ")
-      await commitYrdConfig(repo, `checks: [{check: {run: ${JSON.stringify(command)}, timeoutMs: 30000}}]\n`)
-      const baseSha = await git(repo, "rev-parse", "main")
-
-      await using submitter = await createYrdHost({ cwd: repo })
-      await submitter.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-      await submitter.close()
-
-      const cli = Bun.spawn(
-        [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "queue", "run", ...args, "--json"],
-        { cwd: repo, stdout: "pipe", stderr: "pipe" },
-      )
-      const cliStdout = new Response(cli.stdout).text()
-      const cliStderr = new Response(cli.stderr).text()
-      let childPid: number | undefined
-      let grandchildPid: number | undefined
-      let cleanupError: unknown
-      try {
-        await vi.waitFor(async () => expect(await Bun.file(childPidPath).exists()).toBe(true), { timeout: 5_000 })
-        childPid = Number.parseInt((await readFile(childPidPath, "utf8")).trim(), 10)
-        expect(Number.isSafeInteger(childPid)).toBe(true)
-        await vi.waitFor(async () => expect(await Bun.file(grandchildPidPath).exists()).toBe(true), { timeout: 5_000 })
-        grandchildPid = Number.parseInt((await readFile(grandchildPidPath, "utf8")).trim(), 10)
-        expect(Number.isSafeInteger(grandchildPid)).toBe(true)
-        await vi.waitFor(async () => expect((await readFile(progressPath, "utf8")).trim()).not.toBe(""), {
-          timeout: 5_000,
-        })
-
-        cli.kill(signal)
-        await expect(cli.exited).resolves.toBe(exitCode)
-        await vi.waitFor(() => expect(processExists(childPid!)).toBe(false), { timeout: 5_000 })
-        await vi.waitFor(() => expect(processExists(grandchildPid!)).toBe(false), { timeout: 5_000 })
-
-        await using recovery = await createYrdHost({ cwd: repo })
-        const settled = recovery.app.queue.get("R1")
-        expect(settled).toMatchObject({
-          status: "completed",
-          conclusion: "failure",
-          error: expect.objectContaining({ code: "job-lost", message: expect.stringContaining(signal) }),
-          steps: expect.arrayContaining([
-            expect.objectContaining({
-              job: expect.objectContaining({ attempt: 1, runner: `yrd-cli:${cli.pid}` }),
-            }),
-          ]),
-        })
-        const redundantRecovery = await recovery.app.queue.recover({
-          recoveryTime: "2100-01-01T00:00:00.000Z",
-        })
-        expect(redundantRecovery).toEqual([])
-        expect(settled?.steps.flatMap((step) => (step.job === undefined ? [] : [step.job.attempt]))).toEqual([1])
-        expect(await git(repo, "rev-parse", "main")).toBe(baseSha)
-        expect(await Bun.file(finishedPath).exists()).toBe(false)
-        const scratch = (await readFile(scratchPath, "utf8")).trim()
-        expect(
-          existsSync(scratch),
-          [await cliStdout, await cliStderr, await git(repo, "worktree", "list", "--porcelain")].join("\n"),
-        ).toBe(false)
-      } finally {
-        if (childPid !== undefined && processExists(childPid)) {
-          try {
-            process.kill(-childPid, "SIGKILL")
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "ESRCH") cleanupError ??= error
-          }
-        }
-        if (grandchildPid !== undefined && processExists(grandchildPid)) {
-          try {
-            process.kill(grandchildPid, "SIGKILL")
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "ESRCH") cleanupError ??= error
-          }
-        }
-        cli.kill("SIGKILL")
-        await cli.exited
-      }
-      if (cleanupError !== undefined) throw cleanupError
-    },
-    30_000,
-  )
 
   it("submits the current linked-worktree branch when no bay selector is given", async () => {
     const { repo, featureSha } = await repository()

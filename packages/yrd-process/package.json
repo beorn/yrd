@@ -7,7 +7,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@silvery/scope": "^0.21.0",
+    "@silvery/scope": "^0.23.0",
     "loggily": "^0.10.2"
   }
 }
