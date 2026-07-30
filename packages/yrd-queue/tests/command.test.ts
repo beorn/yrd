@@ -775,11 +775,11 @@ describe("Queue command adapters", () => {
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
   })
 
-  it("accepts Git's aligned equality rows for a multi-commit range-diff certificate", async () => {
+  it("accepts Git's aligned equality rows for a ten-commit range-diff certificate", async () => {
     const { repo } = await repository()
     const oldBaseSha = await git(repo, ["rev-parse", "main"])
     await git(repo, ["switch", "-qc", "issue/multi"])
-    for (const name of ["one", "two"]) {
+    for (const name of Array.from({ length: 10 }, (_, index) => `change-${String(index + 1).padStart(2, "0")}`)) {
       await writeFile(join(repo, `${name}.txt`), `${name}\n`)
       await git(repo, ["add", `${name}.txt`])
       await git(repo, ["commit", "-qm", `add ${name}`])
@@ -791,22 +791,8 @@ describe("Queue command adapters", () => {
     await git(repo, ["commit", "-qm", "advance authority"])
 
     await using process = createProcess()
-    const alignedRangeDiff: Pick<Process, "run"> = {
-      async run(request) {
-        const result = await process.run(request)
-        if (request.argv[0] !== "git" || !request.argv.includes("range-diff")) return result
-        return {
-          ...result,
-          stdout: result.stdout
-            .split("\n")
-            .map((row) => (row === "" ? row : ` ${row.trimStart()}`))
-            .join("\n"),
-        }
-      },
-    }
-
     await expect(
-      createGitPRRecutter({ inject: { process: alignedRangeDiff }, repo }).recut({
+      createGitPRRecutter({ inject: { process }, repo }).recut({
         id: "PR-MULTI",
         branch: "issue/multi",
         base: "main",
