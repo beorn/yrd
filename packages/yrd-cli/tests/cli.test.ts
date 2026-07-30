@@ -289,11 +289,11 @@ function workspace(
 function contestAdapters(probe?: OverlapProbe, baseResolutions?: string[], waitingEvaluator?: string) {
   const pins = new Map<string, string>()
   const runner: ContestRunnerDef = {
-    harness: "ag",
-    revision: "ag-runner-v1",
+    id: "fixture",
+    revision: "fixture-runner-v1",
     async run(input): Promise<JobResult<AttemptRunOutput>> {
       await probe?.pause("runner")
-      const commit = input.competitor.model === "codex" ? "c".repeat(40) : "d".repeat(40)
+      const commit = input.competitor.id === "fast" ? "c".repeat(40) : "d".repeat(40)
       const ref = `refs/yrd/attempts/${input.contest}/${input.attempt}`
       pins.set(ref, commit)
       return {
@@ -301,9 +301,9 @@ function contestAdapters(probe?: OverlapProbe, baseResolutions?: string[], waiti
         conclusion: "success",
         output: {
           pin: { commit, ref, bay: input.bay.id, branch: input.bay.branch, baseSha: BASE_SHA },
-          wallTimeMs: input.competitor.model === "codex" ? 100 : 120,
+          wallTimeMs: input.competitor.id === "fast" ? 100 : 120,
           tokens: { input: 10, output: 4, cachedInput: 2, cacheWrite: 0, reasoning: 1 },
-          cost: { kind: "reported", usd: 0.01, source: "ag" },
+          cost: { kind: "reported", usd: 0.01, source: "fixture" },
           artifacts: [],
         },
       }
@@ -578,6 +578,13 @@ function finishRemoteEvaluator(...args: string[]): string[] {
     "--token",
     "remote-evaluator-A2",
   )
+}
+
+function contestCompetitors(): string {
+  return JSON.stringify([
+    { id: "fast", runner: "fixture", config: { profile: "fast" } },
+    { id: "thorough", runner: "fixture", config: { profile: "thorough" } },
+  ])
 }
 
 async function openAndSubmit(app: TestApp): Promise<void> {
@@ -891,6 +898,10 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("queue", "run", "--help"), queueRun.io)).toBe(0)
     expect(queueRun.stdout()).not.toContain("--retry")
 
+    const adminInit = outputIO()
+    expect(await runYrd(app, yrd("admin", "init", "--help"), adminInit.io)).toBe(0)
+    expect(adminInit.stdout()).not.toContain("--refresh-comments")
+
     const pr = outputIO()
     expect(await runYrd(app, yrd("pr", "--help"), pr.io)).toBe(0)
     for (const command of ["submit", "view", "runs", "diff", "checkout", "status", "edit", "close"]) {
@@ -904,6 +915,16 @@ describe("runYrd", () => {
     expect(retiredRetry.stdout()).toBe("")
     expect(retiredRetry.stderr()).toContain("unknown command 'retry'")
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(beforeRetiredRetry)
+
+    const retiredDo = outputIO()
+    expect(await runYrd(app, yrd("do", "@tracker/fix-release"), retiredDo.io)).toBe(2)
+    expect(retiredDo.stdout()).toBe("")
+    expect(retiredDo.stderr()).toContain("unknown command 'do'")
+
+    const retiredAg = outputIO()
+    expect(await runYrd(app, yrd("ag", "@tracker/fix-release"), retiredAg.io)).toBe(2)
+    expect(retiredAg.stdout()).toBe("")
+    expect(retiredAg.stderr()).toContain("unknown command 'ag'")
 
     const contest = outputIO()
     expect(await runYrd(app, yrd("contest", "--help"), contest.io)).toBe(0)
@@ -3471,29 +3492,6 @@ describe("runYrd", () => {
     expect(JSON.parse(output.stdout())).toMatchObject({ bays: [] })
   })
 
-  it("joins PR sessions into Bay JSON without widening the human table", async () => {
-    const app = await createApp()
-    await openTestBay(app, { name: "session-link", issue: "@km/test/session-link" })
-    const create = outputIO({ cwd: "/repo/.bays/B1", resolveRevision: () => Promise.resolve(HEAD_SHA) })
-    expect(await runYrd(app, yrd("pr", "create"), create.io), create.stderr()).toBe(0)
-    await app.bays.startSession({ pr: "PR1", launchId: "hab-session-link" })
-
-    const json = outputIO()
-    expect(await runYrd(app, yrd("bay", "list", "--json"), json.io), json.stderr()).toBe(0)
-    expect(JSON.parse(json.stdout())).toMatchObject({
-      bays: [
-        {
-          id: "B1",
-          pr: {
-            id: "PR1",
-            status: "pushed",
-            sessions: [{ launchId: "hab-session-link", startedAt: expect.any(String) }],
-          },
-        },
-      ],
-    })
-  })
-
   it("uses by, submitter, and reviewer throughout CLI help", async () => {
     const app = await createApp()
     for (const args of [
@@ -3927,34 +3925,6 @@ describe("runYrd", () => {
     expect(createEvents).not.toContain("pr/submitted")
     expect(createEvents).not.toContain("pr/checks-requested")
     expect(createEvents.some((name) => name.startsWith("queue/run/"))).toBe(false)
-
-    const sessionStart = outputIO()
-    expect(
-      await runYrd(app, yrd("pr", "session", "start", "PR1", "--launch", "hab-launch-1", "--json"), sessionStart.io),
-      sessionStart.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(sessionStart.stdout())).toMatchObject({
-      command: "pr.session.start",
-      session: { launchId: "hab-launch-1", startedAt: expect.any(String) },
-    })
-
-    const sessionStop = outputIO()
-    expect(
-      await runYrd(
-        app,
-        yrd("pr", "session", "stop", "PR1", "--launch", "hab-launch-1", "--outcome", "completed", "--json"),
-        sessionStop.io,
-      ),
-      sessionStop.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(sessionStop.stdout())).toMatchObject({
-      command: "pr.session.stop",
-      session: {
-        launchId: "hab-launch-1",
-        endedAt: expect.any(String),
-        outcome: "completed",
-      },
-    })
 
     const inbox = outputIO()
     expect(await runYrd(app, yrd("pr", "list", "--needs-review", "--json"), inbox.io), inbox.stderr()).toBe(0)
@@ -5086,8 +5056,8 @@ describe("runYrd", () => {
     await app.dispatch(app.commands.issue.compete, {
       issue: { ref: { source: "km", id: "T1" }, title: "Issue one" },
       competitors: [
-        { model: "codex", harness: "ag", config: { prompt: "Implement it" } },
-        { model: "claude", harness: "ag", config: { prompt: "Implement it" } },
+        { id: "fast", runner: "fixture", config: { profile: "fast" } },
+        { id: "thorough", runner: "fixture", config: { profile: "thorough" } },
       ],
       base: base.base,
       baseSha: base.sha,
@@ -9459,7 +9429,7 @@ describe("runYrd", () => {
     const app = await createApp({ baseResolutions })
     const compete = outputIO()
     expect(
-      await runYrd(app, yrd("contest", "open", "km:T1", "--agents", "ag codex/claude", "--json"), compete.io),
+      await runYrd(app, yrd("contest", "open", "km:T1", "--competitors", contestCompetitors(), "--json"), compete.io),
     ).toBe(0)
     expect(JSON.parse(compete.stdout())).toMatchObject({
       command: "contest.open",
@@ -9470,12 +9440,13 @@ describe("runYrd", () => {
     const human = outputIO({ columns: 96, color: true })
     expect(await runYrd(app, yrd("contest", "view", "C1"), human.io)).toBe(0)
     expect(human.stdout()).toContain("ATTEMPT")
-    expect(human.stdout()).toContain("AGENT")
+    expect(human.stdout()).toContain("COMPETITOR")
+    expect(human.stdout()).toContain("RUNNER")
     expect(human.stdout()).toContain("TIME")
     expect(human.stdout()).toContain("TOKENS")
     expect(human.stdout()).toContain("COST")
-    expect(human.stdout()).toContain("codex")
-    expect(human.stdout()).toContain("claude")
+    expect(human.stdout()).toContain("fast")
+    expect(human.stdout()).toContain("thorough")
 
     const evaluate = outputIO()
     expect(await runYrd(app, yrd("contest", "eval", "C1", "--json"), evaluate.io)).toBe(0)
@@ -9508,7 +9479,7 @@ describe("runYrd", () => {
     const app = await createApp({ waitingEvaluator: "A2" })
     const compete = outputIO()
     expect(
-      await runYrd(app, yrd("contest", "open", "km:T1", "--agents", "ag codex/claude", "--json"), compete.io),
+      await runYrd(app, yrd("contest", "open", "km:T1", "--competitors", contestCompetitors(), "--json"), compete.io),
     ).toBe(0)
     expect(JSON.parse(compete.stdout())).toMatchObject({
       contest: {
@@ -9558,7 +9529,11 @@ describe("runYrd", () => {
   it("records remote evaluator infrastructure failure separately from a failed verdict", async () => {
     const app = await createApp({ waitingEvaluator: "A2" })
     expect(
-      await runYrd(app, yrd("contest", "open", "km:T1", "--agents", "ag codex/claude", "--json"), outputIO().io),
+      await runYrd(
+        app,
+        yrd("contest", "open", "km:T1", "--competitors", contestCompetitors(), "--json"),
+        outputIO().io,
+      ),
     ).toBe(0)
 
     const ambiguous = outputIO()
@@ -9604,7 +9579,9 @@ describe("runYrd", () => {
     const app = await createApp({ probe })
     const compete = outputIO({ concurrency: 2 })
 
-    expect(await runYrd(app, yrd("contest", "open", "km:T1", "--agents", "ag codex/claude"), compete.io)).toBe(0)
+    expect(await runYrd(app, yrd("contest", "open", "km:T1", "--competitors", contestCompetitors()), compete.io)).toBe(
+      0,
+    )
     expect(probe.max("bay")).toBe(2)
     expect(probe.max("runner")).toBe(2)
     expect(probe.max("evaluator")).toBe(2)
@@ -9733,7 +9710,11 @@ describe("runYrd", () => {
 
     const missingIssueSource = outputIO()
     expect(
-      await runYrd(app, yrd("contest", "open", "github:42", "--agents", "ag codex/claude"), missingIssueSource.io),
+      await runYrd(
+        app,
+        yrd("contest", "open", "github:42", "--competitors", contestCompetitors()),
+        missingIssueSource.io,
+      ),
     ).toBe(2)
     expect(missingIssueSource.stderr()).toBe("error: no issue source 'github' is registered\n")
 

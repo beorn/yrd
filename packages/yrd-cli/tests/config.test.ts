@@ -64,7 +64,7 @@ contest: {concurrency: 3, timeoutMs: 60000, evaluators: [lint]}
     })
   })
 
-  it.each(["steps", "journal", "refuse", "do", "merge", "shared-main", "typecheck-admission"])(
+  it.each(["steps", "journal", "refuse", "do", "merge", "notify", "shared-main", "typecheck-admission"])(
     "refuses deleted config key '%s' loudly",
     (key) => {
       const value =
@@ -146,14 +146,7 @@ contest: {concurrency: 3, timeoutMs: 60000, evaluators: [lint]}
     expect(loaded.config.checks).toEqual(["typecheck"])
   })
 
-  it("generates one active line and the schema-owned commented reference block", () => {
-    const scaffold = renderYrdConfigScaffold()
-    expect(scaffold.split("\n").filter((line) => line.trim() !== "" && !line.trimStart().startsWith("#"))).toEqual([
-      "checks: [typecheck]",
-    ])
-    expect(scaffold).toContain("# BEGIN GENERATED YRD CONFIG REFERENCE")
-    expect(scaffold).toContain("# checks: [typecheck]")
-    expect(scaffold).toContain("# Custom one-line escape hatch:")
-    expect(scaffold).toContain("# END GENERATED YRD CONFIG REFERENCE")
+  it("generates the complete minimal config as one active line", () => {
+    expect(renderYrdConfigScaffold()).toBe("checks: [typecheck]\n")
   })
 })

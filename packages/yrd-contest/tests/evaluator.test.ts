@@ -35,7 +35,7 @@ function input(): ContestEvaluatorInput {
       ref: { source: "km", id: "@yrd/core/21012; $(touch /tmp/yrd-evaluator-injection)" },
       title: "Finish Yrd; $(touch /tmp/yrd-evaluator-title)",
     },
-    competitor: { id: "codex", model: "gpt-5.6-sol", harness: "ag", config: {} },
+    competitor: { id: "candidate-a", runner: "fixture", config: {} },
     pin: {
       commit: PINNED_SHA,
       ref: "refs/yrd/attempts/C1/A1",

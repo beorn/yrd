@@ -1,7 +1,13 @@
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { Command } from "@silvery/commander"
 import { describe, expect, it } from "vitest"
-import { canonicalizeYrdCommandAliases, resolveInvocation, resolveYrdContext } from "../src/invocation.ts"
+import {
+  canonicalizeYrdCommandAliases,
+  configureYrdGlobalOptions,
+  resolveInvocation,
+  resolveYrdContext,
+} from "../src/invocation.ts"
 
 describe("canonicalizeYrdCommandAliases", () => {
   it.each(["bay", "pr", "queue"])("canonicalizes every public list alias: %s ls", (command) => {
@@ -68,7 +74,7 @@ describe("resolveYrdContext", () => {
 
   it.each([
     {
-      name: "CLI selector over environment",
+      name: "CLI repository selector over environment",
       options: {
         repo: "../cli-repo",
         config: "delivery/yard.ts",
@@ -85,29 +91,24 @@ describe("resolveYrdContext", () => {
         repo: resolve(ambient, "../cli-repo"),
         configPath: "delivery/yard.ts",
         observability: { level: "warn", spans: false, explicitLevel: false },
-        persona: { name: "cli-work", mailbox: "@dev/cli-work", registration: "ensure" },
-        wire: "file:/tmp/cli-wire.jsonl",
       },
     },
     {
-      name: "environment selector over ambient discovery",
+      name: "repository environment selector over ambient discovery",
       options: {},
       env: { YRD_REPO: "../env-repo", HAB_NAME: "env-work", HAB_WIRE: "fd:3" },
       context: {
         repo: resolve(ambient, "../env-repo"),
         observability: { level: "warn", spans: false, explicitLevel: false },
-        persona: { name: "env-work", mailbox: "@dev/env-work", registration: "ensure" },
-        wire: "fd:3",
       },
     },
     {
-      name: "transitional Tribe identity when Hab has no name",
+      name: "ambient discovery without interpreting orchestration identity",
       options: {},
       env: { TRIBE_NAME: "@agent/7" },
       context: {
         repo: resolve(ambient),
         observability: { level: "warn", spans: false, explicitLevel: false },
-        persona: { name: "7", mailbox: "@agent/7", registration: "existing" },
       },
     },
     {
@@ -118,5 +119,11 @@ describe("resolveYrdContext", () => {
     },
   ])("resolves $name against one captured ambient cwd", ({ options, env, context }) => {
     expect(resolveYrdContext(options, env, ambient)).toEqual(context)
+  })
+
+  it("exposes only product-level global selectors", () => {
+    const help = configureYrdGlobalOptions(new Command("yrd")).helpInformation()
+    expect(help).not.toContain("--name")
+    expect(help).not.toContain("--wire")
   })
 })

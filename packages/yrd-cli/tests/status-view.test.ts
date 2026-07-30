@@ -86,7 +86,7 @@ function attempt(
 ): ContestAttempt {
   return {
     id,
-    competitor: { id: `competitor-${id}`, model: `model-${id}`, harness: "ag", config: {} },
+    competitor: { id: `competitor-${id}`, runner: "fixture", config: {} },
     bayName: `contest-c1-${id.toLowerCase()}`,
     branch: `contest/c1/${id.toLowerCase()}`,
     base: "main",

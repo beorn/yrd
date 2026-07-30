@@ -43,6 +43,64 @@ describe("noun cutover ratchet", () => {
     expect(violations, "agent launch/composition does not belong in Yrd product code").toEqual([])
   })
 
+  it("keeps Hab, Tribe, and default Ag scheduling policy out of the Yrd product runtime", () => {
+    const sources = {
+      invocation: readFileSync(join(root, "packages/yrd-cli/src/invocation.ts"), "utf8"),
+      config: readFileSync(join(root, "packages/yrd-cli/src/config.ts"), "utf8"),
+      host: readFileSync(join(root, "packages/yrd-cli/src/host.ts"), "utf8"),
+      run: readFileSync(join(root, "packages/yrd-cli/src/run.ts"), "utf8"),
+      bayModel: readFileSync(join(root, "packages/yrd-bay/src/model.ts"), "utf8"),
+      bayPlugin: readFileSync(join(root, "packages/yrd-bay/src/plugin.ts"), "utf8"),
+    }
+
+    expect(sources.invocation).not.toMatch(/\bYrdPersona\b|HAB_NAME|HAB_WIRE|TRIBE_NAME|@dev\//u)
+    expect(sources.config).not.toMatch(/\bnotify\b/u)
+    expect(sources.host).not.toMatch(/\bcreateTribeSignalAdapter\b|\bregisterTribeSignalRecipient\b|\bYrdPersona\b/u)
+    expect(sources.run).not.toMatch(/\bprSession\b|\bjoinPRSession\b/u)
+    expect(sources.bayModel).not.toMatch(/\bPRSession\b|\bsessions:/u)
+    expect(sources.bayPlugin).not.toMatch(/\bjoinPRSession\b|\bleavePRSession\b|\bpr\/session\//u)
+    expect(existsSync(join(root, "packages/yrd-cli/src/signals.ts"))).toBe(false)
+    expect(existsSync(join(root, "packages/yrd-contest"))).toBe(true)
+  })
+
+  it("keeps the optional Contest extension agent-blind at every public seam", () => {
+    const contestRoot = join(root, "packages", "yrd-contest")
+    const sources = {
+      types: readFileSync(join(contestRoot, "src", "types.ts"), "utf8"),
+      plugin: readFileSync(join(contestRoot, "src", "plugin.ts"), "utf8"),
+      index: readFileSync(join(contestRoot, "src", "index.ts"), "utf8"),
+      packageReadme: readFileSync(join(contestRoot, "README.md"), "utf8"),
+      config: readFileSync(join(root, "packages", "yrd-cli", "src", "config.ts"), "utf8"),
+      host: readFileSync(join(root, "packages", "yrd-cli", "src", "host.ts"), "utf8"),
+      run: readFileSync(join(root, "packages", "yrd-cli", "src", "run.ts"), "utf8"),
+      status: readFileSync(join(root, "packages", "yrd-cli", "src", "status-view.tsx"), "utf8"),
+      readme: readFileSync(join(root, "README.md"), "utf8"),
+    }
+
+    expect(existsSync(join(contestRoot, "src", "ag.ts"))).toBe(false)
+    expect(existsSync(join(contestRoot, "tests", "ag.test.ts"))).toBe(false)
+    expect(sources.index).not.toContain("./ag.ts")
+    expect(`${sources.types}\n${sources.plugin}`).not.toMatch(
+      /\bcreateAgContestRunner\b|\bcompetitor\.(?:model|harness)\b|\brunner\.harness\b/u,
+    )
+    expect(sources.types).toMatch(
+      /object\(\{\s*id: DefIdSchema,\s*runner: DefIdSchema,\s*config: JsonObjectSchema\s*\}\)/su,
+    )
+    expect(sources.types).toMatch(/ContestRunnerDef\s*=\s*Readonly<\{\s*id:\s*string/su)
+    expect(`${sources.config}\n${sources.host}`).not.toMatch(
+      /\bcreateAgContestRunner\b|\byrd-ag-runner\b|\bAgContestRunner\b/u,
+    )
+    expect(`${sources.run}\n${sources.status}`).not.toMatch(
+      /--agents\b|ag-style competitor|\bcompetitor\.(?:model|harness)\b|header:\s*"AGENT"|header:\s*"HARNESS"/u,
+    )
+    expect(sources.run).not.toMatch(
+      /\bguestAgArgv\b|\bguestContractPrimer\b|exactOperands\([^)]*,\s*\["ag"\]\)|accepts bare `ag`|name === "ag"|\$\{bay\} in [^`\n]*\bag\b/u,
+    )
+    expect(`${sources.packageReadme}\n${sources.readme}`).not.toMatch(
+      /harness-and-models|uses the `ag` harness|provider\/harness evidence|pitch agents\/models|yrd(?: bay)? in [^\n]*\bag\b|exact `ag` operand|in \[<bay>\] \[ag \||Exact `in ag`/u,
+    )
+  })
+
   it("documents persistent open separately from scoped run", () => {
     const readme = readFileSync(join(root, "README.md"), "utf8")
     const prose = readme.replaceAll(/\s+/gu, " ")

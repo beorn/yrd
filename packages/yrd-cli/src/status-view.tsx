@@ -462,8 +462,8 @@ export function ContestStatusView({ contest }: { contest: Contest }) {
     const artifact = attempt.artifacts[0]
     return {
       id,
-      model: attempt.competitor.model,
-      harness: attempt.competitor.harness,
+      competitor: attempt.competitor.id,
+      runner: attempt.competitor.runner,
       status: attempt.status,
       time: attempt.wallTimeMs === undefined ? "-" : formatDuration(attempt.wallTimeMs),
       tokens: tokens === undefined ? "-" : String(tokens),
@@ -505,8 +505,8 @@ export function ContestStatusView({ contest }: { contest: Contest }) {
           padding={1}
           columns={[
             { header: "ATTEMPT", key: "id", minWidth: 8 },
-            { header: "AGENT", key: "model", grow: true },
-            { header: "HARNESS", key: "harness" },
+            { header: "COMPETITOR", key: "competitor", grow: true },
+            { header: "RUNNER", key: "runner" },
             {
               header: "STATE",
               key: "status",

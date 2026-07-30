@@ -34,9 +34,8 @@ import {
   type PRRegression,
   type PRRegressionSeverity,
   type PRRev,
-  type PRSessionOutcome,
 } from "@yrd/bay"
-import type { Contest } from "@yrd/contest"
+import { CompetitorDefSchema, type CompetitorDef, type Contest } from "@yrd/contest"
 import {
   compareNatural,
   createFailure,
@@ -48,7 +47,7 @@ import {
 } from "@yrd/core"
 import { isConcurrentSettlementConflict } from "@yrd/job"
 import type { Job, JobError } from "@yrd/job"
-import { createProcess, pathReapFailure, shellCommand, type Process, type ProcessResult } from "@yrd/process"
+import { createProcess, pathReapFailure, type Process, type ProcessResult } from "@yrd/process"
 import {
   isQueueRunningConflict,
   Queues,
@@ -74,7 +73,6 @@ import {
   stableJson,
   usage,
   type YrdContext,
-  type YrdPersona,
 } from "./invocation.ts"
 import { getLiveRenderer } from "./live-renderer.ts"
 import {
@@ -101,7 +99,6 @@ import {
   queueRunRevisionClocks,
   queueTimelineAdmissionTimes,
   createQueueTimelineProjectionClock,
-  queueTimelineProjection,
   QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
   RUNNER_STALE_MS,
   runRevisionClock,
@@ -1234,26 +1231,10 @@ type RuntimePosture =
   | "bracketed-bay-open"
   | "one-shot-queue-run"
   | "resident-queue-run"
-// Commander binds handlers before bootstrap resolves the invocation, so io carries
-// the selected persona and exact bracket operands into bay open/in/do.
-const RuntimePersona = Symbol("yrd.runtime-persona")
-type RuntimePersonaIO = YrdCliIO & { [RuntimePersona]?: YrdPersona }
 const RuntimeInvocationCwd = Symbol("yrd.runtime-invocation-cwd")
-/** `--name`: the operator naming this session on purpose. */
-const RuntimeSessionName = Symbol("yrd.runtime-session-name")
-/**
- * The identity of whoever is running the command, read from HAB_NAME/TRIBE_NAME.
- *
- * Kept apart from `--name` because the two answer different questions. A guest
- * attaching to someone else's Bay is correctly its ambient self; a seat that
- * `do` dispatches is not the dispatcher, so `do` must not read this.
- */
-const RuntimeAmbientName = Symbol("yrd.runtime-ambient-name")
 const RuntimeChildArgv = Symbol("yrd.runtime-child-argv")
-type RuntimeInvocationIO = RuntimePersonaIO & {
+type RuntimeInvocationIO = YrdCliIO & {
   [RuntimeInvocationCwd]?: string
-  [RuntimeSessionName]?: string
-  [RuntimeAmbientName]?: string
   [RuntimeChildArgv]?: readonly string[]
 }
 
@@ -1559,26 +1540,18 @@ type BayOpenOptions = Readonly<{
 type BayOpenResolution = Readonly<{
   claim: string
   bay: string
-  name: string
   branch: string
   issue?: string
   reattached: boolean
-  via?: "issue" | "pr"
 }>
 
 /** What the caller already knows about the Bay it is asking for. */
 type BayOpenIntent = Readonly<{
   issueResolved?: boolean
-  targetedPr?: PR
-  via?: "issue" | "pr"
-  /** Name for the session this Bay is being opened for; overrides ambient identity. */
-  sessionName?: string
-  /** Walk back into the Bay a previous failed attempt left behind, when it is provably idle. */
-  adopt?: boolean
   /** Reuse the exact clean issue Bay instead of refusing; reserved for idempotent delivery ensure. */
   reuseActive?: boolean
   /** The child this caller would have run, so a refusal can name the command that works. */
-  guestArgv?: (resolved: BayOpenResolution) => readonly string[]
+  guestArgv?: readonly string[]
 }>
 
 function bayOpenIdentity(
@@ -1651,7 +1624,6 @@ async function resolveBayOpen(
   app: YrdCliApp,
   arg: string | undefined,
   options: BayOpenOptions,
-  io: YrdCliIO,
   resolved: BayOpenIntent = {},
 ): Promise<BayOpenResolution> {
   if (arg !== undefined && options.issue !== undefined) {
@@ -1662,16 +1634,9 @@ async function resolveBayOpen(
     await app.issues.resolve(app.issues.ref(issue))
   }
   const targetedPr =
-    resolved.targetedPr ??
-    (options.pr === undefined
+    options.pr === undefined
       ? undefined
-      : (app.bays.pr(options.pr) ?? refusal(`no PR '${options.pr}'; create it explicitly before using --pr`)))
-  const runtime = io as RuntimeInvocationIO
-  // Precedence, strongest first: the caller's own decision (a `do` lane), an
-  // explicit `--name`, then whoever is running the command. `do` supplies the
-  // first so the seat is never named after its dispatcher.
-  const chosenName = resolved.sessionName?.trim() || runtime[RuntimeSessionName]?.trim()
-  const explicitName = chosenName || runtime[RuntimeAmbientName]?.trim()
+      : (app.bays.pr(options.pr) ?? refusal(`no PR '${options.pr}'; create it explicitly before using --pr`))
   const generated = generatedBayName()
   const branchSeed =
     issue === undefined
@@ -1687,8 +1652,7 @@ async function resolveBayOpen(
         : derivedWorkName(targetedPr.branch)
       : derivedWorkName(arg))
   const identity = bayOpenIdentity(app, bay, branchSeed, issue, targetedPr)
-  const name = explicitName === undefined || explicitName === "" ? bay : explicitName
-  return { ...identity, name, ...(resolved.via === undefined ? {} : { via: resolved.via }) }
+  return identity
 }
 
 function openRunBay(app: YrdCliApp, identity: BayOpenResolution): Bay | undefined {
@@ -1707,18 +1671,15 @@ function printBayResolution(
   io: YrdCliIO,
   resolved: Readonly<{
     bay: string
-    name: string
     branch: string
     issue?: string
-    via?: "issue" | "pr"
   }>,
   resolution: string,
   write: (text: string) => unknown = io.stdout,
 ): void {
   write(
     `bay ${resolved.bay} → ${resolution} ${resolved.branch}, ` +
-      `${resolved.issue === undefined ? "no issue linked" : `linked ${resolved.issue}`}, name ${resolved.name}` +
-      `${resolved.via === undefined ? "" : `, via ${resolved.via}`}\n`,
+      `${resolved.issue === undefined ? "no issue linked" : `linked ${resolved.issue}`}\n`,
   )
 }
 
@@ -1731,7 +1692,6 @@ function logBayResolution(app: YrdCliApp, resolved: BayOpenResolution): void {
         issue: resolved.issue ?? null,
         pr: resolved.branch,
         bay: resolved.bay,
-        name: resolved.name,
       },
     })
 }
@@ -1864,9 +1824,6 @@ function bayManifestProvisioning(
  * one evening (2026-07-27). The child exits, Yrd preserves the Bay as an orphan,
  * and the operator is left holding a mystery that was one install away.
  *
- * Managed setup and interactive Bay children share this helper, so both install
- * before launch or child start; managed setup additionally converges first.
- *
  * Third-party lifecycle scripts stay off: provisioning a Bay must not run
  * install hooks nobody reviewed. The repository's OWN `postinstall` does run,
  * because it is first-party codegen, and skipping it leaves a checkout that
@@ -1878,13 +1835,10 @@ async function ensureBayDependencies(
   path: string,
   io: YrdCliIO,
   env: NodeJS.ProcessEnv | undefined,
-  reinstall: boolean,
 ): Promise<void> {
   const manifestPath = join(path, "package.json")
   if (!existsSync(manifestPath)) return
-  // Already provisioned: an adopted or reused Bay pays nothing, unless a
-  // converge just moved the checkout out from under what is installed.
-  if (!reinstall && existsSync(join(path, "node_modules"))) return
+  if (existsSync(join(path, "node_modules"))) return
   const manifest = bayManifestProvisioning(await readFile(manifestPath, "utf8"), manifestPath)
   const chosen = BAY_PACKAGE_MANAGERS.find((candidate) => existsSync(join(path, candidate.lockfile)))
   if (chosen === undefined) {
@@ -1922,71 +1876,6 @@ async function ensureBayDependencies(
   }
 }
 
-/**
- * Walk an owner-controlled Bay's checkout up to its base before launch.
- *
- * A Bay adopted from a failed attempt was cut whenever that attempt started.
- * A freshly opened managed Bay can also skew while its preceding dispatch
- * stages run and the base advances. In both cases, launching superseded code
- * recreates the same failure: B238 held a pre-fix `vendor/yrd`, so the Bay's
- * own Yrd behaved unlike the version string the operator was reading off the
- * screen. Guests still have no lifecycle authority to merge into somebody
- * else's branch; only the owning run and managed composition call this seam.
- *
- * Merge, never rebase: the Bay's branch is pushed work. A conflict is a
- * judgement only the operator can make, so the merge is abandoned rather than
- * left half-applied, and the refusal carries the command that puts them inside
- * the Bay to make it.
- *
- * Returns whether the checkout actually moved, because a merge that moved it
- * can have moved the manifest or the lockfile with it.
- */
-async function convergeBayOntoBase(
-  processService: Pick<Process, "run">,
-  bay: Bay,
-  path: string,
-  io: YrdCliIO,
-  env: NodeJS.ProcessEnv | undefined,
-): Promise<boolean> {
-  const gitEnv = cleanGitEnvironment(env ?? process.env)
-  const git = (argv: readonly string[]): Promise<ProcessResult> =>
-    processService.run({
-      argv: ["git", ...argv],
-      cwd: path,
-      env: gitEnv,
-      timeoutMs: BAY_PROVISION_TIMEOUT_MS,
-      ...(io.drainSignal === undefined ? {} : { signal: io.drainSignal }),
-    })
-  const head = async (): Promise<string> => {
-    const result = await git(["rev-parse", "HEAD"])
-    if (!childSucceeded(result)) {
-      refusal(`bay '${bay.id}' has no readable HEAD; git rev-parse ${childFailureReason(result)}`)
-    }
-    return result.stdout.trim()
-  }
-
-  const before = await head()
-  io.stderr(`yrd: bay '${bay.id}' converging onto ${bay.base}\n`)
-  const fetched = await git(["fetch", "origin", bay.base])
-  if (!childSucceeded(fetched)) {
-    refusal(
-      `bay '${bay.id}' could not fetch its base '${bay.base}'; ` +
-        `git fetch ${childFailureReason(fetched)}\n${commandOutputTail(fetched)}`,
-    )
-  }
-  const merged = await git(["merge", "--no-edit", `origin/${bay.base}`])
-  if (!childSucceeded(merged)) {
-    // Leave the Bay adoptable instead of half-merged: the operator reruns the
-    // exact merge below, in the Bay, and decides it there.
-    await git(["merge", "--abort"])
-    refusal(
-      `bay '${bay.id}' holds work that could not be merged with '${bay.base}'; resolve it in the Bay:\n` +
-        `  yrd in ${bay.id} -- git merge origin/${bay.base}\n${commandOutputTail(merged)}`,
-    )
-  }
-  return (await head()) !== before
-}
-
 async function runBayChild(
   processService: Pick<Process, "run">,
   bay: Bay,
@@ -1995,16 +1884,13 @@ async function runBayChild(
   options: Readonly<{
     env?: NodeJS.ProcessEnv
     onStart?: (pid: number) => void
-    /** Provision even when `node_modules` is present: the checkout just moved
-     * under it, so what is installed there may no longer be what it declares. */
-    reinstall?: boolean
     /** This child owns the Bay bracket, so its settlement also owns every
      * process still holding the Bay path. Guests deliberately leave this off. */
     ownedPath?: boolean
   }> = {},
 ): Promise<ProcessResult> {
   if (bay.path === undefined) refusal(`bay '${bay.id}' has no active workspace path`)
-  await ensureBayDependencies(processService, bay, bay.path, io, options.env, options.reinstall === true)
+  await ensureBayDependencies(processService, bay, bay.path, io, options.env)
   const output = io.interactive === true ? undefined : childOutput(io)
   try {
     return await processService.run({
@@ -2037,29 +1923,6 @@ function defaultRunArgv(services: YrdCliServices): readonly string[] {
   return [shell === undefined || shell === "" ? "/bin/sh" : shell]
 }
 
-function guestSessionBaseName(bay: Bay, explicitName: string | undefined): string {
-  const name = explicitName ?? bay.name
-  if (
-    name.includes(":") ||
-    name.includes("..") ||
-    !/^@?[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/u.test(name)
-  ) {
-    usage("yrd in session names use '/' for chosen roles; ':' is reserved for mechanical instances")
-  }
-  return name
-}
-
-function guestSessionArgv(baseName: string, argv: readonly string[]): readonly string[] {
-  return [
-    "/bin/sh",
-    "-c",
-    'base=$1; shift; HAB_NAME="${base}:$$"; export HAB_NAME; exec "$@"',
-    "yrd-bay-in",
-    baseName,
-    ...argv,
-  ]
-}
-
 function resolveGuestBay(app: YrdCliApp, selector: string | undefined, cwd: string): Bay {
   if (selector === undefined) {
     const bay = currentBay(stateOf(app).bays, cwd)
@@ -2087,29 +1950,8 @@ function resolveGuestBay(app: YrdCliApp, selector: string | undefined, cwd: stri
   return bay
 }
 
-function bayGuestPrimer(bay: Bay): string {
-  return (
-    `You are a guest in Bay ${bay.name} on branch ${bay.branch}. ` +
-    "You have no configuration or lifecycle authority: do not reopen, reconfigure, capture, close, or submit this Bay. " +
-    "Coordinate with the owner; owner close captures the shared worktree."
-  )
-}
-
-/**
- * Launch the coding agent with `primer` as its opening prompt.
- *
- * `ag <text>` is a subcommand lookup, so handing a primer to bare `ag` exits 2
- * before the session starts — the 2026-07-27 dispatch failure. `code` is the
- * verb that starts a coding seat, and `--` keeps a primer that happens to open
- * with a dash from being read as a flag.
- */
-function agentArgv(primer: string): readonly string[] {
-  return ["ag", "code", "--", primer]
-}
-
-function guestArgv(services: YrdCliServices, bay: Bay, argv: readonly string[]): readonly string[] {
-  if (argv.length === 0) return defaultRunArgv(services)
-  return argv.length === 1 && argv[0] === "ag" ? agentArgv(bayGuestPrimer(bay)) : argv
+function guestArgv(services: YrdCliServices, argv: readonly string[]): readonly string[] {
+  return argv.length === 0 ? defaultRunArgv(services) : argv
 }
 
 async function enterBay(
@@ -2123,16 +1965,12 @@ async function enterBay(
   if (processService === undefined) configuration("yrd in requires the process-backed Yrd runtime")
   const runtime = io as RuntimeInvocationIO
   const bay = resolveGuestBay(app, selector, runtime[RuntimeInvocationCwd] ?? io.cwd ?? process.cwd())
-  // A guest attaches as itself: `--name` if given, otherwise its own ambient
-  // identity. Nobody else's session is being created here.
-  const baseName = guestSessionBaseName(bay, runtime[RuntimeSessionName] ?? runtime[RuntimeAmbientName])
-  const child = await runBayChild(processService, bay, guestSessionArgv(baseName, guestArgv(services, bay, argv)), io, {
+  const child = await runBayChild(processService, bay, guestArgv(services, argv), io, {
     env: services.environment ?? process.env,
-    onStart(pid) {
+    onStart() {
       const resolved: BayOpenResolution = {
         claim: bay.issue ?? bay.name,
         bay: bay.name,
-        name: `${baseName}:${pid}`,
         branch: bay.branch,
         ...(bay.issue === undefined ? {} : { issue: bay.issue }),
         reattached: true,
@@ -2178,10 +2016,8 @@ function bayInOperands(
   const parsedCommand = command ?? []
   const explicitChild = (io as RuntimeInvocationIO)[RuntimeChildArgv]
   if (explicitChild === undefined) {
-    if (parsedCommand.length === 0 || exactOperands(parsedCommand, ["ag"])) {
-      return { ...(selector === undefined ? {} : { selector }), argv: parsedCommand }
-    }
-    usage("yrd in accepts bare `ag` only; place every other guest command after --")
+    if (parsedCommand.length === 0) return { ...(selector === undefined ? {} : { selector }), argv: [] }
+    usage("yrd in child commands must follow --")
   }
   if (exactOperands(parsedCommand, explicitChild)) {
     return { ...(selector === undefined ? {} : { selector }), argv: explicitChild }
@@ -2192,7 +2028,7 @@ function bayInOperands(
   usage("yrd in could not separate its Bay selector from the child command; place the command after --")
 }
 
-type PreparedBay = Readonly<{ identity: BayOpenResolution; bay: Bay; adopted?: boolean }>
+type PreparedBay = Readonly<{ identity: BayOpenResolution; bay: Bay }>
 type PreparedIssueBay = Omit<PreparedBay, "bay"> & Readonly<{ bay: Bay & Readonly<{ path: string }> }>
 
 /**
@@ -2202,54 +2038,17 @@ type PreparedIssueBay = Omit<PreparedBay, "bay"> & Readonly<{ bay: Bay & Readonl
  * and they cannot: the guest command carries a primer this code just built.
  * Emit the whole thing, quoted, ready to paste.
  */
-function guestAttachCommand(
-  bay: Bay,
-  guestArgv: ((resolved: BayOpenResolution) => readonly string[]) | undefined,
-  resolved?: BayOpenResolution,
-): string {
-  const argv = guestArgv === undefined || resolved === undefined ? [] : guestArgv(resolved)
+function guestAttachCommand(bay: Bay, guestArgv: readonly string[] | undefined): string {
   // With no child to name, the bare form is already complete: `yrd in` starts
   // the operator's shell in the Bay.
-  return argv.length === 0 ? `yrd in ${bay.id}` : `yrd in ${bay.id} -- ${argv.map(shellArgument).join(" ")}`
+  return guestArgv === undefined || guestArgv.length === 0
+    ? `yrd in ${bay.id}`
+    : `yrd in ${bay.id} -- ${guestArgv.map(shellArgument).join(" ")}`
 }
 
 /** Quote only what a shell would otherwise mangle, so the command stays readable. */
 function shellArgument(value: string): string {
   return /^[A-Za-z0-9_@%+=:,./-]+$/u.test(value) ? value : shellQuote(value)
-}
-
-/**
- * Walk back into a Bay a previous attempt abandoned, when nothing can be lost.
- *
- * Three facts have to hold together. The Bay must carry an orphan record —
- * Yrd writes that only after the child process has exited, so no owner can
- * still be inside. The issue must match exactly, because a Bay that merely
- * shares a branch name is different work. And the worktree must be clean, so
- * adopting cannot bury an edit somebody else left uncommitted. Anything short
- * of all three falls through to the refusal, which now names a command that
- * works.
- */
-async function adoptIdleBay(
-  app: YrdCliApp,
-  existing: Bay,
-  identity: BayOpenResolution,
-  io: YrdCliIO,
-  guestArgv: ((resolved: BayOpenResolution) => readonly string[]) | undefined,
-): Promise<PreparedBay | undefined> {
-  if (existing.orphan === undefined) return undefined
-  if (identity.issue === undefined || existing.issue !== identity.issue) return undefined
-  if (existing.branch !== identity.branch) return undefined
-  const refreshed = await refreshBay(app, existing, io)
-  if (refreshed.dirty === true) {
-    io.stderr(
-      `yrd: bay '${refreshed.id}' holds uncommitted changes and was not adopted; inspect it with:\n` +
-        `  ${guestAttachCommand(refreshed, guestArgv, identity)}\n`,
-    )
-    return undefined
-  }
-  if (refreshed.path === undefined) return undefined
-  logBayResolution(app, identity)
-  return { identity, bay: refreshed, adopted: true }
 }
 
 async function prepareOwnedBay(
@@ -2259,8 +2058,7 @@ async function prepareOwnedBay(
   io: YrdCliIO,
   preResolved: BayOpenIntent = {},
 ): Promise<PreparedBay | undefined> {
-  const persona = (io as RuntimePersonaIO)[RuntimePersona]
-  const identity = await resolveBayOpen(app, arg, options, io, preResolved)
+  const identity = await resolveBayOpen(app, arg, options, preResolved)
   const existing = openRunBay(app, identity)
   if (existing !== undefined) {
     if (preResolved.reuseActive === true && existing.issue === identity.issue && existing.branch === identity.branch) {
@@ -2268,19 +2066,16 @@ async function prepareOwnedBay(
       if (refreshed.dirty === true) {
         refusal(
           `bay '${refreshed.id}' holds uncommitted changes; checkpoint them before ensuring its draft PR; inspect it with:\n` +
-            `  ${guestAttachCommand(refreshed, preResolved.guestArgv, identity)}`,
+            `  ${guestAttachCommand(refreshed, preResolved.guestArgv)}`,
         )
       }
       if (refreshed.path === undefined) refusal(`Bay '${refreshed.id}' has no workspace path`)
       logBayResolution(app, identity)
       return { identity, bay: refreshed }
     }
-    const adopted =
-      preResolved.adopt === true ? await adoptIdleBay(app, existing, identity, io, preResolved.guestArgv) : undefined
-    if (adopted !== undefined) return adopted
     refusal(
       `bay '${identity.bay}' is already open as ${existing.id}; attach with:\n` +
-        `  ${guestAttachCommand(existing, preResolved.guestArgv, identity)}`,
+        `  ${guestAttachCommand(existing, preResolved.guestArgv)}`,
     )
   }
   const existingBayIds = new Set(app.bays.list().map((candidate) => candidate.id))
@@ -2290,7 +2085,6 @@ async function prepareOwnedBay(
       name: identity.bay,
       branch: identity.branch,
       ...(identity.issue === undefined ? {} : { issue: identity.issue }),
-      ...(persona === undefined ? {} : { by: persona.mailbox }),
     })
     assertJobsPassed(await runJobs(app, app.jobs.requested(opened), io), `bay '${identity.bay}' provision`)
     const active = app.bays
@@ -2328,10 +2122,12 @@ async function prepareOwnedBay(
   return { identity, bay }
 }
 
-/** Git-side issue ownership shared by `issue ensure` and today's managed
- * `do`. The caller resolves the tracker reference before entering this seam;
- * `reuseActive` is intentionally opt-in so interactive/managed ownership keeps
- * its existing exclusive-open refusal. */
+/** Git-side issue ownership for `issue ensure`.
+ *
+ * The caller resolves the tracker reference before entering this seam.
+ * `reuseActive` is intentionally opt-in so interactive ownership keeps its
+ * exclusive-open refusal.
+ */
 async function prepareResolvedIssueBay(
   app: YrdCliApp,
   issue: string,
@@ -2340,7 +2136,6 @@ async function prepareResolvedIssueBay(
 ): Promise<PreparedIssueBay> {
   const opened = await prepareOwnedBay(app, issue, {}, io, {
     issueResolved: true,
-    via: "issue",
     ...(options.reuseActive === true ? { reuseActive: true } : {}),
   })
   if (opened === undefined) refusal(`Bay for issue '${issue}' was interrupted before it could be used`)
@@ -2369,46 +2164,35 @@ async function runBaySession(
   app: YrdCliApp,
   services: YrdCliServices,
   arg: string | undefined,
-  childArgv: readonly string[] | ((resolved: BayOpenResolution) => readonly string[]),
+  childArgv: readonly string[],
   options: BayOpenOptions,
   io: YrdCliIO,
   runOptions: Readonly<{ keep?: boolean }> = {},
-  preResolved: BayOpenIntent = {},
 ): Promise<YrdCliExitCode> {
   if (services.process === undefined) configuration("bay run requires the process-backed Yrd runtime")
   // A refusal here should hand back the command this call was about to run, so
   // the operator can attach and run exactly that.
   const provisioned = await prepareOwnedBay(app, arg, options, io, {
-    guestArgv: (resolved) => (typeof childArgv === "function" ? childArgv(resolved) : childArgv),
-    ...preResolved,
+    guestArgv: childArgv,
   })
   if (provisioned === undefined) return 1
   const { identity } = provisioned
   let { bay } = provisioned
   if (bay.path !== undefined) await services.checks?.install(bay.path)
-  printBayResolution(
-    io,
-    identity,
-    provisioned.adopted === true ? "adopted" : identity.reattached ? "reattached" : "new",
-  )
-
-  const env = { ...(services.environment ?? process.env), HAB_NAME: identity.name }
-  // An adopted Bay is as old as the attempt that abandoned it. Converge before
-  // the child exists, so a refusal here leaves the Bay exactly as adoptable as
-  // it was found rather than adding a second orphan on top of the first.
-  const moved =
-    provisioned.adopted === true && bay.path !== undefined
-      ? await convergeBayOntoBase(services.process, bay, bay.path, io, env)
-      : false
+  printBayResolution(io, identity, identity.reattached ? "reattached" : "new")
 
   let child: ProcessResult
   try {
-    const argv = typeof childArgv === "function" ? childArgv(identity) : childArgv
-    child = await runBayChild(services.process, bay, argv.length === 0 ? defaultRunArgv(services) : argv, io, {
-      env,
-      ...(moved ? { reinstall: true } : {}),
-      ownedPath: true,
-    })
+    child = await runBayChild(
+      services.process,
+      bay,
+      childArgv.length === 0 ? defaultRunArgv(services) : childArgv,
+      io,
+      {
+        env: services.environment ?? process.env,
+        ownedPath: true,
+      },
+    )
   } catch (error) {
     await orphanRunBay(app, bay, `child could not settle: ${errorDetail(error)}`)
     throw error
@@ -3303,9 +3087,9 @@ async function executeRecutPr(
   }
   let current = requiredPr(app, pr.id)
   if (options.queue === true) {
+    await requirePublishedSubmodulePins(current, services, io)
     await app.bays.ready({ pr: pr.id, expectedCurrent: queueExpectedCurrent })
     current = requiredPr(app, pr.id)
-    await requirePublishedSubmodulePins(current, services, io)
     if (!unchanged) {
       const by = io.runner ?? "operator"
       const reason = `PR recut superseded revision ${source.n}`
@@ -3436,53 +3220,6 @@ async function commentPr(
     jsonEnabled(options),
     { command: "pr.comment", pr: prFact(pr), comment },
     `${pr.id} revision ${prRevisionNumber(pr)} commented by ${comment.by}`,
-  )
-}
-
-async function startPrSession(
-  app: YrdCliApp,
-  selector: string,
-  options: JsonOption & Readonly<{ launch?: string }>,
-  io: YrdCliIO,
-): Promise<void> {
-  if (options.launch === undefined || options.launch.trim() === "") {
-    usage("pr session start requires --launch <id>")
-  }
-  await app.bays.startSession({ pr: selector, launchId: options.launch })
-  const pr = requiredPr(app, selector)
-  const session = pr.sessions?.find((candidate) => candidate.launchId === options.launch)
-  if (session === undefined) throw new Error(`yrd: PR '${pr.id}' did not retain session '${options.launch}'`)
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "pr.session.start", pr: prFact(pr), session },
-    `${pr.id} session ${session.launchId} started`,
-  )
-}
-
-async function stopPrSession(
-  app: YrdCliApp,
-  selector: string,
-  options: JsonOption & Readonly<{ launch?: string; outcome?: string }>,
-  io: YrdCliIO,
-): Promise<void> {
-  if (options.launch === undefined || options.launch.trim() === "") {
-    usage("pr session stop requires --launch <id>")
-  }
-  const outcomes: readonly PRSessionOutcome[] = ["completed", "withdrawn", "crashed", "superseded"]
-  if (!outcomes.includes(options.outcome as PRSessionOutcome)) {
-    usage("pr session stop requires --outcome completed|withdrawn|crashed|superseded")
-  }
-  const outcome = options.outcome as PRSessionOutcome
-  await app.bays.stopSession({ pr: selector, launchId: options.launch, outcome })
-  const pr = requiredPr(app, selector)
-  const session = pr.sessions?.find((candidate) => candidate.launchId === options.launch)
-  if (session === undefined) throw new Error(`yrd: PR '${pr.id}' did not retain session '${options.launch}'`)
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "pr.session.stop", pr: prFact(pr), session },
-    `${pr.id} session ${session.launchId} stopped (${outcome})`,
   )
 }
 
@@ -3980,7 +3717,7 @@ async function listBays(
       ...bay,
       nativeStatus: bay.status,
       status: statuses.get(bay.id),
-      ...(pr === undefined ? {} : { pr: { id: pr.id, status: prDeliveryState(pr), sessions: pr.sessions ?? [] } }),
+      ...(pr === undefined ? {} : { pr: { id: pr.id, status: prDeliveryState(pr) } }),
     }
   })
   const open = bays.filter((bay) => !isTerminal(bay))
@@ -4591,13 +4328,10 @@ function isBracketedBayCommand(
   if ((name === "open" || name === "run" || name === "in") && (parent === "bay" || parent === "git bay")) {
     return true
   }
-  return (
-    (name === "in" || name === "sh" || name === "run" || name === "ag") &&
-    (parent === "yrd" || parent === "git yrd")
-  )
+  return (name === "in" || name === "sh" || name === "run") && (parent === "yrd" || parent === "git yrd")
 }
 
-/** Read-only invocations never settle PR state or route submitter receipts. */
+/** Read-only invocations never settle PR state. */
 function isReadOnlyInvocation(
   action: Readonly<{ name(): string; parent?: Readonly<{ name(): string }> | null }>,
 ): boolean {
@@ -4627,25 +4361,13 @@ function runtimePosture(
 type RuntimeGlobalOptions = Readonly<{
   repo?: string
   config?: string
-  name?: string
-  wire?: string
   verbose?: number
   quiet?: number
   logLevel?: string
 }>
 
-function resolveRuntimeContext(
-  globals: RuntimeGlobalOptions,
-  bootstrap: RuntimeBootstrap,
-  posture: RuntimePosture,
-): YrdContext {
-  const fallbackName =
-    posture === "bracketed-bay-open" ? `${basename(bootstrap.ambientCwd)}:${String(process.pid)}` : undefined
-  return resolveYrdContext(
-    { ...globals, ...(fallbackName === undefined ? {} : { fallbackName }) },
-    bootstrap.env,
-    bootstrap.ambientCwd,
-  )
+function resolveRuntimeContext(globals: RuntimeGlobalOptions, bootstrap: RuntimeBootstrap): YrdContext {
+  return resolveYrdContext(globals, bootstrap.env, bootstrap.ambientCwd)
 }
 
 async function runQueues(
@@ -5568,7 +5290,7 @@ async function primeYrd(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
     `pause=${briefing.live.pause?.reason ?? "active"}`,
   ].join(" ")
   const human = [
-    "Yrd agent briefing",
+    "Yrd delivery briefing",
     "Pick an issue -> work in a bay -> submit a PR -> the queue runs checks and merges it.",
     "Loop:",
     ...briefing.loop.map((step, index) => `${index + 1}. ${step}`),
@@ -6131,33 +5853,11 @@ async function checkRequired(
   )
 }
 
-function generatedReferenceBlock(): string {
-  const scaffold = renderYrdConfigScaffold()
-  const start = scaffold.indexOf("# BEGIN GENERATED YRD CONFIG REFERENCE")
-  if (start < 0) throw new Error("yrd: generated config reference marker is missing")
-  return scaffold.slice(start).trimEnd()
-}
-
-async function initYrdConfig(
-  services: YrdCliServices,
-  options: JsonOption & Readonly<{ refreshComments?: boolean }>,
-  io: YrdCliIO,
-): Promise<void> {
+async function initYrdConfig(services: YrdCliServices, options: JsonOption, io: YrdCliIO): Promise<void> {
   const cwd = io.cwd ?? process.cwd()
   const path = join(cwd, ".yrd.yml")
-  const exists = existsSync(path)
-  if (exists && options.refreshComments !== true) {
-    refusal(`'${path}' already exists; use 'yrd admin init --refresh-comments' to regenerate only its comments`)
-  }
-  let source = exists ? await readFile(path, "utf8") : renderYrdConfigScaffold()
-  if (exists) {
-    const stripped = source.replace(
-      /(?:\n\n)?# BEGIN GENERATED YRD CONFIG REFERENCE[\s\S]*?# END GENERATED YRD CONFIG REFERENCE\s*/u,
-      "",
-    )
-    source = `${stripped.trimEnd()}\n\n${generatedReferenceBlock()}\n`
-  }
-  await writeFile(path, source, "utf8")
+  if (existsSync(path)) refusal(`'${path}' already exists`)
+  await writeFile(path, renderYrdConfigScaffold(), "utf8")
   const hook = await services.checks?.install(cwd)
   await printResult(
     io,
@@ -7423,25 +7123,18 @@ async function watchQueue(
   }
 }
 
-function competitors(
-  input: string,
-  prompt?: string,
-): readonly { model: string; harness: string; config: { instructions?: string } }[] {
-  const trimmed = input.trim()
-  if (trimmed === "") usage("--agents must name at least one competitor")
-  const firstSpace = trimmed.indexOf(" ")
-  const harness = firstSpace > 0 ? trimmed.slice(0, firstSpace) : "ag"
-  const modelList = firstSpace > 0 ? trimmed.slice(firstSpace + 1) : trimmed
-  const models = modelList
-    .split(/[/,]/u)
-    .map((model) => model.trim())
-    .filter(Boolean)
-  if (models.length === 0) usage("--agents must name at least one competitor")
-  return models.map((model) => ({
-    model,
-    harness,
-    config: prompt === undefined ? {} : { instructions: prompt },
-  }))
+function competitors(input: string): readonly CompetitorDef[] {
+  let value: unknown
+  try {
+    value = JSON.parse(input)
+  } catch {
+    usage("--competitors must be JSON")
+  }
+  const parsed = CompetitorDefSchema.array().min(2).safeParse(value)
+  if (!parsed.success) {
+    usage("--competitors must be a JSON array with at least two {id,runner,config} entries")
+  }
+  return parsed.data
 }
 
 async function advanceContest(app: YrdCliApp, contest: string, io: YrdCliIO, retry = false): Promise<Contest> {
@@ -7453,17 +7146,16 @@ async function advanceContest(app: YrdCliApp, contest: string, io: YrdCliIO, ret
 async function openContest(
   app: YrdCliApp,
   issueInput: string,
-  options: { agents?: string; prompt?: string; evaluators?: unknown; base?: string; queue?: string; json?: boolean },
+  options: { competitors?: string; evaluators?: unknown; base?: string; queue?: string; json?: boolean },
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
-  if (options.agents === undefined) usage("contest open requires --agents <list>")
-  if (options.prompt?.trim() === "") usage("--prompt requires non-empty text")
+  if (options.competitors === undefined) usage("contest open requires --competitors <json>")
   const issue = await app.issues.resolve(app.issues.ref(issueInput))
   const requestedBase = oneOfAliases(options.base, options.queue, "base", "queue")
   const base = await app.contests.resolveBase(requestedBase)
   const opened = await app.contests.compete({
     issue,
-    competitors: competitors(options.agents, options.prompt),
+    competitors: competitors(options.competitors),
     ...(csv(options.evaluators) === undefined ? {} : { evaluators: csv(options.evaluators) }),
     base: base.base,
     baseSha: base.sha,
@@ -7731,8 +7423,8 @@ function addExamples(program: CliCommand, name: string, projection: "root" | "ba
   const bay = projection === "bay" ? name : `${name} bay`
   const examples: [string, string][] = [
     [`$ ${bay} open --bay fix`, "open and keep a scratch Bay"],
-    [`$ ${bay} run @km/test/fix -- ag`, "run one scoped command"],
-    [`$ ${bay} in fix ag`, "join an open Bay as a guest"],
+    [`$ ${bay} run @km/test/fix -- make test`, "run one scoped command"],
+    [`$ ${bay} in fix`, "open a guest shell in one Bay"],
     [`$ ${bay} submit`, "submit the current bay as a PR"],
   ]
   if (projection === "root") {
@@ -7741,7 +7433,7 @@ function addExamples(program: CliCommand, name: string, projection: "root" | "ba
       [`$ ${name} pr create topic/fix`, "create a draft before submission"],
       [`$ ${name} queue run --steps check,merge`, "run selected steps"],
       [`$ ${name} watch --pr PR7`, "monitor PR and queue health"],
-      [`$ ${name} contest open km:T1 -a codex/claude`, "compare implementations"],
+      [`$ ${name} contest open km:T1 --competitors '<json>'`, "compare implementations"],
     )
   }
   program.addHelpSection("Examples:", examples)
@@ -7784,7 +7476,7 @@ function addRootBayCommands(
   if (projection !== "root") return
   program
     .command("in [bay] [command...]")
-    .description("join an open Bay as a guest; pass `ag` for the guest primer (defaults to $SHELL)")
+    .description("join an open Bay as a guest; defaults to $SHELL, or pass opaque argv after --")
     .action(async (bay, command) => {
       const request = bayInOperands(bay, command, io)
       setExit(await enterBay(installed(), installedServices(), request.selector, request.argv, io))
@@ -7817,18 +7509,6 @@ function addRootBayCommands(
     .option("--reason <text>", "human-readable cancellation reason")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => setExit(await cancelQueueRun(installed(), selector, options, io)))
-  program
-    .command("ag [config]")
-    .description("run ag in a scoped Bay")
-    .option("--issue <ref>", "link an issue without a positional")
-    .option("--pr <selector>", "continue an existing PR without creating or submitting a revision")
-    .option("--bay <name>", "choose an issue-less or issue-linked Bay identity")
-    .option("--keep", "leave a successful run open")
-    .action(async (config, options) =>
-      setExit(
-        await runBaySession(installed(), installedServices(), config, ["ag"], options, io, { keep: options.keep }),
-      ),
-    )
 }
 
 function buildProgram(
@@ -7860,22 +7540,18 @@ function buildProgram(
       const globals = action.optsWithGlobals() as RuntimeGlobalOptions
       const posture = runtimePosture(action)
       const runtimeIO = io as RuntimeInvocationIO
-      const selected = resolveRuntimeContext(globals, bootstrap, posture)
+      const selected = resolveRuntimeContext(globals, bootstrap)
       // `queue run` resident detection now derives from the run MODE (Tip B):
       // follow is the default, `--once` opts out, and the deprecated `--watch`
       // alias still selects follow (queueRunIsFollow mirrors resolveQueueRunMode
       // at the pre-action boundary). Read-only commands are viewers regardless
       // of whether they are static or resident: reads must never drain receiver
-      // receipts, settle notifications, or require an active submitter identity.
+      // receipts or mutate delivery state.
       const loaded = await bootstrap.load(selected, posture)
       runtimeApp = loaded.app
       runtimeServices = loaded.services
-      const ambientSessionName = bootstrap.env.HAB_NAME?.trim() || bootstrap.env.TRIBE_NAME?.trim()
       runtimeIO[RuntimeInvocationCwd] = bootstrap.ambientCwd
-      runtimeIO[RuntimeSessionName] = globals.name?.trim() || undefined
-      runtimeIO[RuntimeAmbientName] = ambientSessionName || undefined
       Object.assign(io, loaded.io)
-      runtimeIO[RuntimePersona] = selected.persona
     })
   }
   if (projection === "root") program.version(YRD_VERSION, "-V, --version")
@@ -7955,7 +7631,7 @@ function buildProgram(
     })
   bay
     .command("in [bay] [command...]")
-    .description("join an open Bay as a guest; pass `ag` for the guest primer (defaults to $SHELL)")
+    .description("join an open Bay as a guest; defaults to $SHELL, or pass opaque argv after --")
     .action(async (selector, command) => {
       const request = bayInOperands(selector, command, io)
       setExit(await enterBay(installed(), installedServices(), request.selector, request.argv, io))
@@ -8045,7 +7721,7 @@ function buildProgram(
 
   program
     .command("prime")
-    .description("brief an agent on Yrd and current delivery state")
+    .description("brief the current Yrd delivery state")
     .option("--json", "emit stable JSON")
     .action(async (options) => primeYrd(installed(), options, io))
 
@@ -8302,20 +7978,6 @@ function buildProgram(
     .requiredOption("--note <text>", "comment text")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => commentPr(installed(), selector, options, io))
-  const session = pr.command("session").description("record Hab sessions on a PR")
-  session
-    .command("start <selector>")
-    .description("record a started Hab session")
-    .requiredOption("--launch <id>", "Hab launch identity")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) => startPrSession(installed(), selector, options, io))
-  session
-    .command("stop <selector>")
-    .description("record a terminal Hab session outcome")
-    .requiredOption("--launch <id>", "Hab launch identity")
-    .requiredOption("--outcome <outcome>", "completed, withdrawn, crashed, or superseded")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) => stopPrSession(installed(), selector, options, io))
   pr.command("checks <selector...>")
     .description("show required-check evidence for current PR revisions")
     .option("--follow", "follow active checks to a terminal result")
@@ -8369,7 +8031,6 @@ function buildProgram(
   admin
     .command("init")
     .description("scaffold .yrd.yml and install the managed pre-submit hook")
-    .option("--refresh-comments", "regenerate the schema-owned commented reference block")
     .option("--json", "emit stable JSON")
     .action(async (options) => initYrdConfig(installedServices(), options, io))
   const adminQueue = admin.command("queue").description("administer queue resources")
@@ -8446,8 +8107,7 @@ function buildProgram(
   contest
     .command("open <issue>")
     .description("compare implementations of one real issue")
-    .option("-a, --agents <agents>", "ag-style competitor list")
-    .option("--prompt <text>", "additional implementation instructions")
+    .option("--competitors <json>", "opaque competitor id, runner port, and config entries")
     .option("--evaluators [evaluator...]", "evaluator ids, comma-separated or repeated")
     .option("--base <branch>", "base branch")
     .option("--queue <branch>", "alias for --base")

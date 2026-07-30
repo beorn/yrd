@@ -45,7 +45,6 @@ import {
   PRRecutSourceSchema,
   PRNeedsAuthorFactSchema,
   PRRejectedFactSchema,
-  PRSessionOutcomeSchema,
   PRTerminalAssociationSchema,
   ProvisionBayInputSchema,
   ProvisionedBaySchema,
@@ -96,7 +95,6 @@ import {
   type PRReviewState,
   type PRRev,
   type PRRevClock,
-  type PRSession,
   type ProvisionBayInput,
   type ProvisionedBay,
   type RefreshBayInput,
@@ -333,11 +331,6 @@ const PrCommentArgsSchema = z
   .strict()
 export type PrCommentArgs = z.infer<typeof PrCommentArgsSchema>
 
-const PrSessionStartArgsSchema = z.object({ pr: TextSchema, launchId: TextSchema }).strict()
-export type PrSessionStartArgs = z.infer<typeof PrSessionStartArgsSchema>
-const PrSessionStopArgsSchema = PrSessionStartArgsSchema.extend({ outcome: PRSessionOutcomeSchema }).strict()
-export type PrSessionStopArgs = z.infer<typeof PrSessionStopArgsSchema>
-
 const PRRegressionSeveritySchema = z.enum(["low", "medium", "high", "critical"])
 const PrRegressionArgsSchema = z
   .object({
@@ -567,8 +560,13 @@ const PRCommentFactSchema = z.preprocess(
     })
     .strict(),
 )
-const PRSessionStartedFactSchema = z.object({ pr: PRIdSchema, launchId: TextSchema }).strict()
-const PRSessionEndedFactSchema = PRSessionStartedFactSchema.extend({ outcome: PRSessionOutcomeSchema }).strict()
+/** Read-only decoders for journals written before Hab session ownership left
+ * Yrd. No command can append these facts and projection deliberately ignores
+ * them after validation. */
+const RetiredPRSessionStartedFactSchema = z.object({ pr: PRIdSchema, launchId: TextSchema }).strict()
+const RetiredPRSessionEndedFactSchema = RetiredPRSessionStartedFactSchema.extend({
+  outcome: z.enum(["completed", "withdrawn", "crashed", "superseded"]),
+}).strict()
 const PRCheckRequestFactSchema = PRRevisionIdentitySchema.extend({ baseSha: GitShaSchema.optional() }).strict()
 const PRReviewRequestFactSchema = z
   .object({ pr: PRIdSchema, reviewers: z.array(TextSchema), requestedBy: TextSchema })
@@ -656,8 +654,6 @@ export type BayCommands = Readonly<{
     ready: CommandHandler<PrReadyArgs, BayState>
     review: CommandHandler<PrReviewArgs, BayState>
     comment: CommandHandler<PrCommentArgs, BayState>
-    startSession: CommandHandler<PrSessionStartArgs, BayState>
-    stopSession: CommandHandler<PrSessionStopArgs, BayState>
     requestChecks: CommandHandler<PrRequestChecksArgs, BayState>
     recordAdmission: CommandHandler<PRAdmissionRecordedFact, BayState>
     requestReview: CommandHandler<PrRequestReviewArgs, BayState>
@@ -691,8 +687,6 @@ export type Bays = Readonly<{
   ready(args: PrReadyArgs): Promise<CommandResult>
   review(args: PrReviewArgs): Promise<CommandResult>
   comment(args: PrCommentArgs): Promise<CommandResult>
-  startSession(args: PrSessionStartArgs): Promise<CommandResult>
-  stopSession(args: PrSessionStopArgs): Promise<CommandResult>
   requestChecks(args: PrRequestChecksArgs): Promise<CommandResult>
   recordAdmission(args: PRAdmissionRecordedFact): Promise<CommandResult>
   requestReview(args: PrRequestReviewArgs): Promise<CommandResult>
@@ -718,8 +712,6 @@ type BayActions = Pick<
   | "ready"
   | "review"
   | "comment"
-  | "startSession"
-  | "stopSession"
   | "requestChecks"
   | "recordAdmission"
   | "requestReview"
@@ -1241,8 +1233,6 @@ export function createBays(
     ready: actions.ready,
     review: actions.review,
     comment: actions.comment,
-    startSession: actions.startSession,
-    stopSession: actions.stopSession,
     requestChecks: actions.requestChecks,
     recordAdmission: actions.recordAdmission,
     requestReview: actions.requestReview,
@@ -1289,8 +1279,8 @@ export function withBays(options: WithBaysOptions) {
         "pr/edited": journalEvent(1, PrEditArgsSchema),
         "pr/reviewed": journalEvent(1, PRReviewFactSchema),
         "pr/commented": journalEvent(1, PRCommentFactSchema),
-        "pr/session-started": journalEvent(1, PRSessionStartedFactSchema),
-        "pr/session-ended": journalEvent(1, PRSessionEndedFactSchema),
+        "pr/session-started": journalEvent(1, RetiredPRSessionStartedFactSchema),
+        "pr/session-ended": journalEvent(1, RetiredPRSessionEndedFactSchema),
         "pr/checks-requested": journalEvent(1, PRCheckRequestFactSchema),
         "pr/admission-recorded": journalEvent(2, PRAdmissionRecordedFactSchema),
         "pr/review-requested": journalEvent(1, PRReviewRequestFactSchema),
@@ -1306,7 +1296,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/canceled": z.union([PRCanceledSchema, LegacyPRCanceledSchema]),
         "pr/admission-recorded": PRAdmissionRecordedFactSchema,
       },
-      projectionVersion: "bays-v10-refresh-superseded",
+      projectionVersion: "bays-v11-agent-blind",
       project: projectBays,
       create(yrd) {
         yrd.jobs.requireDefinitions(options.jobs)
@@ -1331,8 +1321,6 @@ export function withBays(options: WithBaysOptions) {
               ready: (args) => yrd.dispatch(commands.pr.ready, args),
               review: (args) => yrd.dispatch(commands.pr.review, args),
               comment: (args) => yrd.dispatch(commands.pr.comment, args),
-              startSession: (args) => yrd.dispatch(commands.pr.startSession, args),
-              stopSession: (args) => yrd.dispatch(commands.pr.stopSession, args),
               requestChecks: (args) => yrd.dispatch(commands.pr.requestChecks, args),
               recordAdmission: (args) => yrd.dispatch(commands.pr.recordAdmission, args),
               requestReview: (args) => yrd.dispatch(commands.pr.requestReview, args),
@@ -1457,18 +1445,6 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultSubmitt
         visibility: "public",
         params: PrCommentArgsSchema,
         apply: (state: BayState, args: PrCommentArgs) => commentPr(state, args),
-      }),
-      startSession: command({
-        title: "Start a PR session",
-        visibility: "public",
-        params: PrSessionStartArgsSchema,
-        apply: (state: BayState, args: PrSessionStartArgs) => startPrSession(state, args),
-      }),
-      stopSession: command({
-        title: "Stop a PR session",
-        visibility: "public",
-        params: PrSessionStopArgsSchema,
-        apply: (state: BayState, args: PrSessionStopArgs) => stopPrSession(state, args),
       }),
       requestChecks: command({
         title: "Request checks for a PR revision",
@@ -2237,31 +2213,6 @@ function commentPr(state: DeepReadonly<BayState>, args: PrCommentArgs) {
   return reviewFact(pr, fact, "comment")
 }
 
-function startPrSession(state: DeepReadonly<BayState>, args: PrSessionStartArgs) {
-  const pr: LivePR = requireLivePR(state.bays, args.pr)
-  const prior = pr.sessions?.find((session) => session.launchId === args.launchId)
-  if (prior !== undefined) {
-    if (prior.endedAt === undefined) return { events: [] }
-    throw new Error(`yrd: PR '${pr.id}' session '${args.launchId}' already ended`)
-  }
-  return { events: [event("pr/session-started", { pr: pr.id, launchId: args.launchId })] }
-}
-
-function stopPrSession(state: DeepReadonly<BayState>, args: PrSessionStopArgs) {
-  const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
-  const session = pr.sessions?.find((candidate) => candidate.launchId === args.launchId)
-  if (session === undefined) throw new Error(`yrd: PR '${pr.id}' has no session '${args.launchId}'`)
-  if (session.endedAt !== undefined) {
-    if (session.outcome === args.outcome) return { events: [] }
-    throw new Error(
-      `yrd: PR '${pr.id}' session '${args.launchId}' ended as ${session.outcome}; it cannot end as ${args.outcome}`,
-    )
-  }
-  return {
-    events: [event("pr/session-ended", { pr: pr.id, launchId: args.launchId, outcome: args.outcome })],
-  }
-}
-
 function requestPrChecks(state: DeepReadonly<BayState>, args: PrRequestChecksArgs) {
   const pr: LivePR =
     args.expectedCurrent === undefined
@@ -2632,7 +2583,6 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               revs: [record],
               reviews: [],
               comments: [],
-              sessions: [],
               checkRequests: [],
               requestedReviewers: [],
               regressions: [],
@@ -3024,28 +2974,12 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       return patchPR(pr, { comments: [...pr.comments, comment] })
     }
     case "pr/session-started": {
-      const started = PRSessionStartedFactSchema.parse(data)
-      const pr = current.prs[started.pr]
-      if (pr === undefined) throw new Error(`yrd: '${applied.name}' names missing PR '${started.pr}'`)
-      if (pr.sessions?.some((session) => session.launchId === started.launchId) === true) return state
-      const session: PRSession = { launchId: started.launchId, startedAt: applied.ts }
-      return patchPR(pr, { sessions: [...(pr.sessions ?? []), session] })
+      RetiredPRSessionStartedFactSchema.parse(data)
+      return state
     }
     case "pr/session-ended": {
-      const ended = PRSessionEndedFactSchema.parse(data)
-      const pr = current.prs[ended.pr]
-      if (pr === undefined) throw new Error(`yrd: '${applied.name}' names missing PR '${ended.pr}'`)
-      const session = pr.sessions?.find((candidate) => candidate.launchId === ended.launchId)
-      if (session === undefined) {
-        throw new Error(`yrd: PR '${pr.id}' has no session '${ended.launchId}' to end`)
-      }
-      return patchPR(pr, {
-        sessions: (pr.sessions ?? []).map((candidate) =>
-          candidate.launchId === ended.launchId
-            ? { ...candidate, endedAt: applied.ts, outcome: ended.outcome }
-            : candidate,
-        ),
-      })
+      RetiredPRSessionEndedFactSchema.parse(data)
+      return state
     }
     case "pr/review-requested": {
       const requested = PRReviewRequestFactSchema.parse(data)
