@@ -10,6 +10,21 @@ import { describe, expect, it } from "vitest"
 const root = resolve(import.meta.dirname, "../../..")
 const scannedExtensions = new Set([".json", ".md", ".ts", ".tsx", ".yml"])
 
+function copyStandaloneWorkspace(prefix: string): string {
+  const standalone = mkdtempSync(join(tmpdir(), prefix))
+  copyFileSync(join(root, "package.json"), join(standalone, "package.json"))
+  copyFileSync(join(root, "bun.lock"), join(standalone, "bun.lock"))
+  for (const entry of readdirSync(join(root, "packages"), { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const manifest = join(root, "packages", entry.name, "package.json")
+    if (!existsSync(manifest)) continue
+    const target = join(standalone, "packages", entry.name)
+    mkdirSync(target, { recursive: true })
+    copyFileSync(manifest, join(target, "package.json"))
+  }
+  return standalone
+}
+
 function scannedFiles(path: string): string[] {
   const files: string[] = []
   for (const entry of readdirSync(path, { withFileTypes: true })) {
@@ -197,18 +212,8 @@ describe("noun cutover ratchet", () => {
   })
 
   it("accepts the checked-in workspace lock in frozen mode", () => {
-    const standalone = mkdtempSync(join(tmpdir(), "yrd-frozen-lock-"))
+    const standalone = copyStandaloneWorkspace("yrd-frozen-lock-")
     try {
-      copyFileSync(join(root, "package.json"), join(standalone, "package.json"))
-      copyFileSync(join(root, "bun.lock"), join(standalone, "bun.lock"))
-      for (const entry of readdirSync(join(root, "packages"), { withFileTypes: true })) {
-        if (!entry.isDirectory()) continue
-        const manifest = join(root, "packages", entry.name, "package.json")
-        if (!existsSync(manifest)) continue
-        const target = join(standalone, "packages", entry.name)
-        mkdirSync(target, { recursive: true })
-        copyFileSync(manifest, join(target, "package.json"))
-      }
       const before = readFileSync(join(standalone, "bun.lock"), "utf8")
       const result = Bun.spawnSync({
         cmd: ["bun", "install", "--frozen-lockfile", "--lockfile-only", "--ignore-scripts"],
@@ -219,6 +224,35 @@ describe("noun cutover ratchet", () => {
       const detail = `${result.stdout.toString()}${result.stderr.toString()}`
       expect(result.exitCode, detail).toBe(0)
       expect(readFileSync(join(standalone, "bun.lock"), "utf8"), detail).toBe(before)
+    } finally {
+      rmSync(standalone, { recursive: true, force: true })
+    }
+  })
+
+  it("installs every public test dependency in a standalone workspace", () => {
+    const standalone = copyStandaloneWorkspace("yrd-standalone-deps-")
+    try {
+      const install = Bun.spawnSync({
+        cmd: ["bun", "install", "--frozen-lockfile", "--ignore-scripts"],
+        cwd: standalone,
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const installDetail = `${install.stdout.toString()}${install.stderr.toString()}`
+      expect(install.exitCode, installDetail).toBe(0)
+
+      const imports = Bun.spawnSync({
+        cmd: [
+          "bun",
+          "-e",
+          '["silvery/test", "silvery/term", "@termless/test"].map((specifier) => import.meta.resolve(specifier))',
+        ],
+        cwd: join(standalone, "packages", "yrd-cli"),
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const importDetail = `${imports.stdout.toString()}${imports.stderr.toString()}`
+      expect(imports.exitCode, importDetail).toBe(0)
     } finally {
       rmSync(standalone, { recursive: true, force: true })
     }
