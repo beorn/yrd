@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process"
 import { createElement } from "react"
 import { currentPRRev, isLivePR, prDeliveryState, type PR } from "@yrd/bay"
 import { raiseFailure } from "@yrd/core"
+import { Queues, type Run } from "@yrd/queue"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import { usage } from "./invocation.ts"
 import { printResult } from "./output.tsx"
@@ -170,6 +171,50 @@ function replaceWithPruneError(row: PruneRow, error: unknown): PruneRow {
   const { verdict: _verdict, reason: _reason, error: _error, detail: _detail, ...identity } = row
   const message = pruneFailureMessage(row.pr, "withdrawn", error)
   return { ...identity, verdict: "error", error: message, detail: message }
+}
+
+/** A merge moves the base before its Job can record `pr/integrated`. During
+ * that side-effect boundary, pruning the exact revision would cancel its own
+ * landing and replace the truthful integration with `pr/withdrawn` (22454). */
+function mergeRunOwningRevision(app: YrdCliApp, pr: PR): Run | undefined {
+  const revision = currentPRRev(pr)
+  return Queues.ids(app.state().queues)
+    .map((id) => app.queue.get(id))
+    .filter((run): run is Run => run !== undefined)
+    .find((run) => {
+      const ownsRevision = run.prs.some(
+        (candidate) =>
+          candidate.id === pr.id && candidate.revision === revision.n && candidate.headSha === revision.head,
+      )
+      if (!ownsRevision) return false
+      const step = run.steps.findLast((candidate) => candidate.kind === "merge")
+      if (step?.kind !== "merge" || step.job === undefined) return false
+      return step.job.status !== "completed" || step.job.conclusion === "success"
+    })
+}
+
+function mergeOwnedPruneRow(pr: PR, run: Run): PruneRow {
+  const revision = currentPRRev(pr)
+  const reason = `merge run '${run.id}' owns the in-flight landing for revision ${revision.n} (${revision.head})`
+  return {
+    pr: pr.id,
+    branch: pr.branch,
+    revision: revision.n,
+    headSha: revision.head,
+    base: pr.base,
+    checks: {},
+    verdict: "keep",
+    reason,
+    detail: `${reason} — kept`,
+  }
+}
+
+function changedPruneRow(row: PruneRow, pr: PR): PruneRow {
+  const revision = currentPRRev(pr)
+  const reason =
+    `PR changed during prune from revision ${row.revision} (${row.headSha}) ` +
+    `to revision ${revision.n} (${revision.head})`
+  return { ...row, verdict: "keep", reason, detail: `${reason} — kept` }
 }
 
 async function contentChecks(headSha: string, baseSha: string, git: PruneGitFacts): Promise<PruneChecks> {
@@ -392,6 +437,11 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
 
   const rows: PruneRow[] = []
   for (const pr of live) {
+    const mergeOwner = mergeRunOwningRevision(app, pr)
+    if (mergeOwner !== undefined) {
+      rows.push(mergeOwnedPruneRow(pr, mergeOwner))
+      continue
+    }
     let baseSha: string | undefined
     try {
       baseSha = (await git.resolveCommit(`origin/${pr.base}`)) ?? (await git.resolveCommit(pr.base))
@@ -411,6 +461,20 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
     for (const [index, row] of rows.entries()) {
       if (row.verdict !== "withdraw") continue
       try {
+        await app.refresh()
+        const current = app.bays.pr(row.pr)
+        if (current !== undefined && isLivePR(current)) {
+          const revision = currentPRRev(current)
+          if (revision.n !== row.revision || revision.head !== row.headSha) {
+            rows[index] = changedPruneRow(row, current)
+            continue
+          }
+          const mergeOwner = mergeRunOwningRevision(app, current)
+          if (mergeOwner !== undefined) {
+            rows[index] = mergeOwnedPruneRow(current, mergeOwner)
+            continue
+          }
+        }
         withdrawn.push(await withdrawOne(app, row.pr, row.reason, io))
       } catch (error) {
         rows[index] = replaceWithPruneError(row, error)
