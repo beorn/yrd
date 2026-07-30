@@ -4,7 +4,7 @@ export default {
     "yrd-runner": {
       command: "yrd queue run --follow",
       env: { TRIBE_NAME: "@chief" },
-      health: { command: "yrd queue list --check --json" },
+      health: { command: '"${HAB_MODULE_ROOT:-$PWD}/tools/installed/yrd" queue list --check --json' },
       restart: "on-failure" as const,
     },
     "yrd-gc": { command: "yrd admin pr prune", every: "1h" },
