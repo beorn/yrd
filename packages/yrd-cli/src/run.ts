@@ -1797,7 +1797,6 @@ async function ensureBayDependencies(
     manifestSubject: "bay",
     ...(env === undefined ? {} : { env }),
     ...(io.drainSignal === undefined ? {} : { signal: io.drainSignal }),
-    reinstall,
     onCommand: (argv) => io.stderr(`yrd: bay '${bay.id}' provisioning: ${argv.join(" ")}\n`),
     writeOutput: io.stderr,
     fail: refusal,
