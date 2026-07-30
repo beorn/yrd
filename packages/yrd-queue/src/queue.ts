@@ -595,12 +595,6 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   readonly shape?: Shape
   state: ReadSignal<DeepReadonly<QueuesState>>
   steps(): readonly InstalledStep[]
-  /**
-   * Execute submit-time admission against the current revision and retain the
-   * verdict on that revision. Unlike legacy `admit`, this never creates a
-   * Queue Run; Queue Runs are reserved for landing attempts.
-   */
-  admitRevision(args: AdmitSelection, options: RunJobOptions): Promise<void>
   /** Legacy Run-shaped admission retained for replay and waiting callers. */
   admit(args: AdmitSelection, options?: RunJobOptions): Promise<readonly Run[]>
   pause(args: PauseQueueArgs): Promise<QueuePause>
@@ -1786,42 +1780,6 @@ function createQueue<Shape extends PRShape>(
             : drainAdmissions(selectors, runOptions, resolveCycleBase, selection)
         },
       )
-    },
-    async admitRevision(args, runOptions) {
-      const resolveCycleBase = createBaseResolutionCycle()
-      const requestedSelectors = args.prs?.length ? args.prs : undefined
-      await actions.refresh()
-      await cleanupSettledRoots()
-      let snapshot = runtime()
-      const selected =
-        requestedSelectors === undefined
-          ? admissionQueue(snapshot, steps)
-          : requestedSelectors.map((selector) => {
-              const pr = resolvePR(snapshot.bays, selector)
-              if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
-              return pr
-            })
-      await refreshCheckIdentities(selected, resolveCycleBase)
-      snapshot = runtime()
-      const prs =
-        requestedSelectors === undefined
-          ? admissionQueue(snapshot, steps)
-          : selected.map((pr) => {
-              const current = resolvePR(snapshot.bays, pr.id)
-              if (current === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${pr.id}'`)
-              return current
-            })
-      for (const pr of prs) {
-        const staleRuns = activeQueueRuns(runtime().queues, runtime().jobs).filter((run) =>
-          run.prs.some(
-            (member) =>
-              member.id === pr.id && (member.revision !== prRevisionNumber(pr) || member.headSha !== prHead(pr)),
-          ),
-        )
-        for (const stale of staleRuns) await settle(stale.id, runOptions)
-        const baseSha = await resolveCandidateBaseSha([pr], resolveCycleBase)
-        await admitPRRevision(pr, baseSha, runOptions)
-      }
     },
     async pause(args) {
       const snapshot = runtime()
