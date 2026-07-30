@@ -288,7 +288,11 @@ async function hardExitMigration(dir: string, phase: string): Promise<Readonly<{
     })
     await Array.fromAsync(journal.read())
   `
-  const child = Bun.spawn([process.execPath, "--eval", source], { stdout: "pipe", stderr: "pipe" })
+  const child = Bun.spawn([process.execPath, "--eval", source], {
+    cwd: join(import.meta.dirname, ".."),
+    stdout: "pipe",
+    stderr: "pipe",
+  })
   const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()])
   return { code, stderr }
 }

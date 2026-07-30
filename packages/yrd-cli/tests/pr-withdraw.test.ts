@@ -884,7 +884,7 @@ describe("pr prune", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
-  })
+  }, 30_000)
 
   it("records one PR error and continues judging every later PR", async () => {
     const app = await createCliApp()

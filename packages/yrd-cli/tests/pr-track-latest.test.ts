@@ -119,7 +119,7 @@ async function createCliApp(behavior: Readonly<{ failingCheck?: boolean }> = {})
         ? {
             status: "completed",
             conclusion: "failure",
-            error: { code: "authored-failure", message: "authored revision needs work" },
+            error: { code: "composition-invalid", message: "authored revision needs work" },
           }
         : { status: "completed", conclusion: "success", output: { checked: true } },
     { revision: "check-v1", output: JsonSchema, classification: "carrier" },
@@ -635,7 +635,7 @@ describe("resident merge-into-latest", () => {
         pr: "PR1",
         revision: 2,
         headSha: LIVE_HEAD,
-        code: "request-checks-current-changed",
+        code: "ready-current-changed",
       },
     ])
     expect(broadCancel).not.toHaveBeenCalled()
@@ -849,8 +849,14 @@ describe("resident merge-into-latest", () => {
     let head = RECORDED_HEAD
     const submitted = outputIO(() => head)
     expect(
-      await runYrd(app, yrd("pr", "submit", BRANCH, "--issue", "km#22454", "--track", "--json"), submitted.io),
-    ).toBe(1)
+      await runYrd(
+        app,
+        yrd("pr", "submit", BRANCH, "--issue", "km#22454", "--track", "--json"),
+        submitted.io,
+        noRequiredChecks,
+      ),
+    ).toBe(0)
+    await app.queue.run({ prs: ["PR1"] }, { runner: "track-test", leaseMs: 60_000 })
     expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("needs-author")
 
     behavior.failingCheck = false

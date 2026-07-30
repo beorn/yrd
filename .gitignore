@@ -1,4 +1,5 @@
 node_modules/
+.yrd-deps/
 dist/
 *.log
 .DS_Store

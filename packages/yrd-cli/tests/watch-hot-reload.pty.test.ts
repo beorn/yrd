@@ -11,7 +11,7 @@
  * `watch-hot-reload.test.ts` (pure supervisor logic) so the latter runs in a
  * bare standalone clone. Skip this file when the installed binary is absent.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { createTestTerminal } from "@termless/test"
@@ -107,7 +107,7 @@ async function expectProcessesGone(pgid: number, pids: readonly number[]): Promi
   )
 }
 
-describe("yrd watch hot reload (installed)", () => {
+describe.skipIf(!existsSync(installedYrd))("yrd watch hot reload (installed)", () => {
   it("restores the terminal and reaps installed watch process groups on startup failure, SIGINT, and SIGTERM", async () => {
     const roots: string[] = []
     try {

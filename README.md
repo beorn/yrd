@@ -1128,9 +1128,29 @@ third-party lifecycle scripts; the repository's own `postinstall` may then run
 for first-party code generation. A missing lockfile or failed install is a
 retryable `queue-environment-refused` with `candidate-provision-failed`
 evidence, never a false failed-check verdict. Work Bays use the same
-provisioner. Local execution is not a security sandbox: candidate code still
-runs with the operator-configured process privileges; use a remote or isolated
-Process adapter for a stronger trust boundary.
+provisioner.
+
+This repository's first-party provisioning checks out the exact pushed Silvery
+and Termless revisions declared in `scripts/component-dependencies.ts`, installs
+each dependency from its own frozen lockfile, and links every declared consumer
+to that source. `verify:component` repeats the frozen candidate install, runs
+that provisioning, and then executes Yrd's full standalone suite with one file
+worker. The bounded worker count prevents process-environment races and
+CPU/SQLite starvation without skipping tests or changing their assertions.
+Checkout or package-map failure is
+`component-dependency-provision-failed` inside the check and
+`candidate-provision-failed` at the Queue boundary, never a false test
+diagnostic. The generated `.yrd-deps/` tree is disposable and never borrows the
+HH workspace.
+
+During the rollout of that provisioned check only, an attended operator could
+compare exact failure identities against the parent and admit a candidate with
+zero candidate-only failures. That parent-delta recovery exception expires as
+soon as `verify:component` is installed; normal Yrd checks require the
+provisioned standalone suite to pass and never compare opaque test output.
+Local execution is not a security sandbox: candidate code still runs with the
+operator-configured process privileges; use a remote or isolated Process
+adapter for a stronger trust boundary.
 
 ### Remote Runners
 

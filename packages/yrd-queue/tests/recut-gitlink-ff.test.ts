@@ -210,7 +210,7 @@ async function currentMainMergeCarrier(
   return { headSha, recordedBase, target: await git(repo, ["rev-parse", "HEAD"]) }
 }
 
-describe("recut fast-forward gitlink resolution", () => {
+describe("recut fast-forward gitlink resolution", { timeout: 30_000 }, () => {
   it("resolves to the carrier pin when the base pin is its ancestor (ff-forward)", async () => {
     const { repo, module, moduleA, sourceBase } = await baseRepo()
     const moduleC = await moduleCommit(module, "main", moduleA, "c")

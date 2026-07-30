@@ -11,5 +11,13 @@
     "skipLibCheck": true,
     "types": ["bun"]
   },
-  "include": ["bin", "packages"]
+  "include": [
+    "bin",
+    "packages",
+    ".yrd-deps/silvery/packages/ag-react/src/jsx.d.ts",
+    ".yrd-deps/silvery/packages/ag-react/src/react-reconciler.d.ts",
+    ".yrd-deps/silvery/packages/ag-react/src/ui/image/upng-js.d.ts",
+    ".yrd-deps/termless/src/view/gifenc.d.ts",
+    ".yrd-deps/termless/src/view/upng.d.ts"
+  ]
 }

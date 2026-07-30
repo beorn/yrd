@@ -3042,7 +3042,12 @@ notify:
       const narration = await stderr
       const structured = await stdout
       expect(exitCode, structured).toBe(0)
-      expect(narration).toBe("")
+      expect(narration).toContain("admitted pr#1.1")
+      expect(narration).toContain("failed duration=")
+      expect(narration).toContain("admitted pr#2.1")
+      expect(narration).toContain("finished duration=")
+      expect(narration).not.toContain(failedOutput)
+      expect(narration).not.toContain(passedOutput)
 
       await using settled = await createYrdHost({ cwd: repo })
       const runIds = Queues.ids(settled.app.state().queues)

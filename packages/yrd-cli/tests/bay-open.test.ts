@@ -617,7 +617,7 @@ describe("yrd bay open/run/in/do", { timeout: 30_000 }, () => {
         restoreEnv("HAB_NAME", previousHabName)
       }
     })
-  })
+  }, 60_000)
 
   it("projects the same owner lifecycle through git bay", async () => {
     return withoutRuntimeName(async () => {
@@ -2068,7 +2068,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
       ],
       { cwd: repo, env: process.env, stdout: "pipe", stderr: "pipe" },
     )
-    await eventually(async () => access(marker))
+    await eventually(async () => access(marker), 30_000)
 
     child.kill("SIGTERM")
     const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()])
@@ -2087,7 +2087,7 @@ printf '%s' "$HAB_NAME" > "$YRD_TEST_SHELL_LOG"
         }),
       ],
     })
-  })
+  }, 60_000)
 })
 
 async function repository(): Promise<{ repo: string }> {

@@ -3277,9 +3277,9 @@ async function executeRecutPr(
   }
   let current = requiredPr(app, pr.id)
   if (options.queue === true) {
+    await requirePublishedSubmodulePins(current, services, io)
     await app.bays.ready({ pr: pr.id, expectedCurrent: queueExpectedCurrent })
     current = requiredPr(app, pr.id)
-    await requirePublishedSubmodulePins(current, services, io)
     if (!unchanged) {
       const by = io.runner ?? "operator"
       const reason = `PR recut superseded revision ${source.n}`
