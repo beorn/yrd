@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 
@@ -66,6 +67,7 @@ async function requiredGitlink(git: SubmoduleGit, repo: string, path: string): P
 }
 
 async function referenceContains(git: SubmoduleGit, reference: string, sha: string): Promise<boolean> {
+  if (!existsSync(reference)) return false
   return (await git.run(reference, ["cat-file", "-e", `${sha}^{commit}`], true)).code === 0
 }
 
