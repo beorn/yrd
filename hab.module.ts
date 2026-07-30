@@ -1,6 +1,5 @@
 export default {
   name: "yrd",
-  source: import.meta.url,
   services: {
     "yrd-runner": {
       command: "yrd queue run --follow",
