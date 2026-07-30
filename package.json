@@ -19,7 +19,8 @@
     "ARCHITECTURE.md",
     "LICENSE",
     "README.md",
-    "dist"
+    "dist",
+    "scripts/verify-public-dependencies.ts"
   ],
   "type": "module",
   "scripts": {
@@ -28,6 +29,7 @@
     "git-bay": "bun ./bin/git-bay",
     "storybook:queue": "bun ./packages/yrd-cli/dev/queue-timeline-storybook.tsx",
     "build": "bun ./scripts/build.ts",
+    "postinstall": "bun ./scripts/verify-public-dependencies.ts",
     "prepack": "bun run build",
     "test": "NODE_ENV=test bun --bun x vitest run",
     "typecheck": "tsc --noEmit",
@@ -36,13 +38,13 @@
     "check:hh": "bun run typecheck:hh && bun run test"
   },
   "dependencies": {
-    "@silvery/command": "^0.21.0",
-    "@silvery/commander": "^0.21.0",
-    "@silvery/scope": "^0.21.0",
-    "@silvery/signals": "^0.21.0",
+    "@silvery/command": "^0.23.0",
+    "@silvery/commander": "^0.23.0",
+    "@silvery/scope": "^0.23.0",
+    "@silvery/signals": "^0.23.0",
     "loggily": "^0.10.2",
     "react": "^19.2.0",
-    "silvery": "^0.21.1",
+    "silvery": "^0.23.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {

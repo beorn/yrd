@@ -240,23 +240,13 @@ function configuredChecks(
       YRD_CANDIDATE_SHA: candidateSha,
       ...(definition.environment === undefined ? {} : { YRD_ENVIRONMENT: definition.environment }),
     }
-    const run = async (workingDirectory: string) => {
-      await ensureWorkspaceDependencies(process, {
-        path: workingDirectory,
-        subject: `required check '${name}' workspace`,
-        manifestSubject: "candidate",
-        env,
-        fail(message) {
-          raiseFailure("infrastructure", "candidate-provision-failed", `yrd: ${message}`)
-        },
-      })
-      return process.run({
+    const run = (workingDirectory: string) =>
+      process.run({
         argv: shellCommand(definition.run ?? ""),
         cwd: workingDirectory,
         env,
         timeoutMs: stepTimeoutMs(definition),
       })
-    }
     if (ref === undefined) return run(cwd)
 
     const parent = join(stateDir, "pre-submit-worktrees")
@@ -277,6 +267,15 @@ function configuredChecks(
       )
     }
     try {
+      await ensureWorkspaceDependencies(process, {
+        path: checkout,
+        subject: `required check '${name}' workspace`,
+        manifestSubject: "candidate",
+        env,
+        fail(message) {
+          raiseFailure("infrastructure", "candidate-provision-failed", `yrd: ${message}`)
+        },
+      })
       return await run(checkout)
     } finally {
       const removed = await process.run({
