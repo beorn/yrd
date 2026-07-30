@@ -775,6 +775,51 @@ describe("Queue command adapters", () => {
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
   })
 
+  it("accepts Git's aligned equality rows for a multi-commit range-diff certificate", async () => {
+    const { repo } = await repository()
+    const oldBaseSha = await git(repo, ["rev-parse", "main"])
+    await git(repo, ["switch", "-qc", "issue/multi"])
+    for (const name of ["one", "two"]) {
+      await writeFile(join(repo, `${name}.txt`), `${name}\n`)
+      await git(repo, ["add", `${name}.txt`])
+      await git(repo, ["commit", "-qm", `add ${name}`])
+    }
+    const featureSha = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "main"])
+    await writeFile(join(repo, "upstream.txt"), "advance authority\n")
+    await git(repo, ["add", "upstream.txt"])
+    await git(repo, ["commit", "-qm", "advance authority"])
+
+    await using process = createProcess()
+    const alignedRangeDiff: Pick<Process, "run"> = {
+      async run(request) {
+        const result = await process.run(request)
+        if (request.argv[0] !== "git" || !request.argv.includes("range-diff")) return result
+        return {
+          ...result,
+          stdout: result.stdout
+            .split("\n")
+            .map((row) => (row === "" ? row : ` ${row.trimStart()}`))
+            .join("\n"),
+        }
+      },
+    }
+
+    await expect(
+      createGitPRRecutter({ inject: { process: alignedRangeDiff }, repo }).recut({
+        id: "PR-MULTI",
+        branch: "issue/multi",
+        base: "main",
+        revision: 1,
+        headSha: featureSha,
+        baseSha: oldBaseSha,
+      }),
+    ).resolves.toMatchObject({
+      patchId: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      unchanged: false,
+    })
+  })
+
   it("recuts a direct payload whose patch certificate exceeds the process output ceiling", async () => {
     const { repo } = await repository()
     const oldBaseSha = await git(repo, ["rev-parse", "main"])
