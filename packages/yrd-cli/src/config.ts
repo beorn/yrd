@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import { defineConfig, withActionStep, withCheckStep, withFlow, withMergeStep, type FlowDef } from "@yrd/config"
 import { asFailure, createFailure } from "@yrd/core"
-import { DIAGNOSTICS_COMPARISON_READY, GateModeSchema, type GateMode } from "@yrd/queue"
+import { DEFAULT_QUEUE_PROGRESS_POLICY, DIAGNOSTICS_COMPARISON_READY, GateModeSchema, type GateMode } from "@yrd/queue"
 import * as z from "zod"
 
 const TextSchema = z.string().trim().min(1)
@@ -313,8 +313,8 @@ export async function loadYrdConfig(options: {
         evaluators: parsed.contest.evaluators ?? checks.slice(0, 1),
       },
       progress: {
-        noLandingMs: parsed.progress.noLandingMs ?? 10 * 60_000,
-        refusalCount: parsed.progress.refusalCount ?? 3,
+        noLandingMs: parsed.progress.noLandingMs ?? DEFAULT_QUEUE_PROGRESS_POLICY.noLandingMs,
+        refusalCount: parsed.progress.refusalCount ?? DEFAULT_QUEUE_PROGRESS_POLICY.refusalCount,
       },
       flows: flows.flows,
     },

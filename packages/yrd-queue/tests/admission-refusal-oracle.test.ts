@@ -231,6 +231,8 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
 
   it("counts one typed refusal streak and resets that streak when the refusal code changes", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
+    const journal = createMemoryJournal()
+    const id = ids()
     let refusalCode = "authored-gitlink"
     const prepare: CandidatePreparer = () => {
       throw createFailure({
@@ -239,36 +241,58 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
         message: `yrd: exact refusal text for ${refusalCode}`,
       })
     }
-    await using app = await createApp(prepare, clock.read)
-    const pr = await submitAndRequestChecks(app, "issue/typed-refusal-streak")
+    let prId = ""
+    {
+      await using app = await createApp(prepare, clock.read, journal, id)
+      const pr = await submitAndRequestChecks(app, "issue/typed-refusal-streak")
+      prId = pr.id
 
-    for (const at of ["2026-01-01T00:00:00.000Z", "2026-01-01T00:01:00.000Z"]) {
-      clock.set(at)
-      await app.queue.run({}, runtime)
-    }
-    refusalCode = "base-moved"
-    for (const at of ["2026-01-01T00:02:00.000Z", "2026-01-01T00:03:00.000Z", "2026-01-01T00:04:00.000Z"]) {
-      clock.set(at)
-      await app.queue.run({}, runtime)
+      for (const at of ["2026-01-01T00:00:00.000Z", "2026-01-01T00:01:00.000Z"]) {
+        clock.set(at)
+        await app.queue.run({}, runtime)
+      }
+      refusalCode = "base-moved"
+      for (const at of ["2026-01-01T00:02:00.000Z", "2026-01-01T00:03:00.000Z", "2026-01-01T00:04:00.000Z"]) {
+        clock.set(at)
+        await app.queue.run({}, runtime)
+      }
+
+      expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({
+        count: 5,
+        sameCodeCount: 3,
+        sameCodeFirstAt: "2026-01-01T00:02:00.000Z",
+        code: "base-moved",
+      })
+      expect(app.queue.audit().findings).toContainEqual({
+        code: "admission-refusal-loop",
+        message: expect.stringContaining("exact refusal text for base-moved"),
+        pr: pr.id,
+        specimen: `pr:${pr.id}:refusal:base-moved`,
+        refusal: "base-moved",
+        count: 3,
+        since: "2026-01-01T00:02:00.000Z",
+        blockedMs: 2 * 60_000,
+      })
+      expect(app.queue.audit({ now: "2026-01-01T00:20:00.000Z" }).findings).toHaveLength(1)
     }
 
-    expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({
+    await using replayed = await createApp(prepare, clock.read, journal, id)
+    expect(replayed.state().queues.admissionRefusals[prId]).toMatchObject({
       count: 5,
       sameCodeCount: 3,
       sameCodeFirstAt: "2026-01-01T00:02:00.000Z",
       code: "base-moved",
     })
-    expect(app.queue.audit().findings).toContainEqual({
+    expect(replayed.queue.audit().findings).toContainEqual({
       code: "admission-refusal-loop",
       message: expect.stringContaining("exact refusal text for base-moved"),
-      pr: pr.id,
-      specimen: `pr:${pr.id}:refusal:base-moved`,
+      pr: prId,
+      specimen: `pr:${prId}:refusal:base-moved`,
       refusal: "base-moved",
       count: 3,
       since: "2026-01-01T00:02:00.000Z",
       blockedMs: 2 * 60_000,
     })
-    expect(app.queue.audit({ now: "2026-01-01T00:20:00.000Z" }).findings).toHaveLength(1)
   })
 
   it("counts consecutive admission refusals and names the PR, code, count, and block span", async () => {
