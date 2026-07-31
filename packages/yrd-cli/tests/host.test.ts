@@ -486,6 +486,37 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(await implementationSourceIdentity(process, sourceRepository)).not.toBe(untrackedIdentity)
   })
 
+  it.fails("maps a linked-worktree runtime source to its authoritative gitlink (22730)", async () => {
+    const { repo } = await repository()
+    const root = join(repo, "..")
+    const source = join(root, "linked-runtime-source")
+    await git(root, "init", "-q", "-b", "main", source)
+    await git(source, "config", "user.name", "Yrd Test")
+    await git(source, "config", "user.email", "yrd@example.invalid")
+    await writeFile(join(source, "version.txt"), "loaded\n")
+    await git(source, "add", "version.txt")
+    await git(source, "commit", "-qm", "loaded source")
+    const sourceSha = await git(source, "rev-parse", "HEAD")
+
+    await git(repo, "config", "protocol.file.allow", "always")
+    await git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", source, "runtime")
+    await git(repo, "commit", "-qam", "add runtime source")
+    const authoritySha = await git(repo, "rev-parse", "HEAD")
+
+    const linked = join(repo, ".worktrees", "wt1")
+    await mkdir(join(repo, ".worktrees"), { recursive: true })
+    await git(repo, "worktree", "add", "-q", "--detach", linked, authoritySha)
+    await git(linked, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "-q", "runtime")
+
+    await using process = createProcess({ cwd: linked })
+    const discovered = await discoverYrdRepository({ cwd: linked, process })
+    expect(
+      await authoritativeImplementationSource(process, discovered.repo, authoritySha, {
+        root: join(linked, "runtime"),
+      }),
+    ).toBe(`git:${sourceSha}`)
+  })
+
   it("does not mistake an untracked installed package for the consumer repository's runtime source", async () => {
     const { repo } = await repository()
     const installedDirectory = join(repo, "node_modules", "@yrd", "cli", "src")
