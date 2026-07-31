@@ -352,8 +352,10 @@ export type RunAuthority = Readonly<{
       | "orphaned-run"
       | "component-main-promotion-failed"
       | "component-main-inspection-failed"
+      | "carrier-inspection"
       | "source-publish"
       | "scratch-cleanup-failed"
+      | "wrapper-generation"
     ref: string
   }>
 }>

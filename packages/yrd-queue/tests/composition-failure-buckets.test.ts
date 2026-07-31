@@ -35,15 +35,17 @@ describe("composition failure buckets — the partition is total and disjoint", 
     // make every assertion below vacuously pass).
     expect(codes.length).toBeGreaterThan(10)
     expect(codes).toContain("authored-gitlink")
+    expect(codes).toContain("merge-tip-carrier")
     expect(codes).toContain("source-publish")
   })
 
   it("classifies every derived candidateFailure code into exactly one bucket", () => {
     for (const code of derivedCandidateFailureCodes()) {
       const owning = BUCKETS.filter(([, set]) => set.has(code)).map(([name]) => name)
-      expect(owning, `code '${code}' must be classified into exactly one bucket, got [${owning.join(", ")}]`).toHaveLength(
-        1,
-      )
+      expect(
+        owning,
+        `code '${code}' must be classified into exactly one bucket, got [${owning.join(", ")}]`,
+      ).toHaveLength(1)
     }
   })
 
@@ -60,4 +62,12 @@ describe("composition failure buckets — the partition is total and disjoint", 
     expect(COMPOSITION_FAILURE_BUCKETS["infra-retry"].has("source-publish")).toBe(true)
     expect(COMPOSITION_FAILURE_BUCKETS["needs-author"].has("source-publish")).toBe(false)
   })
+
+  it.each(["carrier-inspection", "wrapper-generation"])(
+    "routes %s to infra-retry rather than blaming the author",
+    (code) => {
+      expect(COMPOSITION_FAILURE_BUCKETS["infra-retry"].has(code)).toBe(true)
+      expect(COMPOSITION_FAILURE_BUCKETS["needs-author"].has(code)).toBe(false)
+    },
+  )
 })

@@ -644,10 +644,12 @@ land. The Queue receipt retains that immutable ref, patch ID, `rangeDiff: "="`,
 and the old/new base and tip SHAs; ref loss during a remote landing fails closed
 and rolls the root branch back.
 
-Human-authored gitlink commits are refused by default. The normal path is the
-create-to-recut workflow above; `YRD_ALLOW_AUTHORED_GITLINKS=1` is break-glass
-only for a legacy carrier and does not weaken Candidate pinning or exact
-landing.
+Human-authored gitlink commits are refused. The normal path is the
+create-to-recut workflow above; there is no intake bypass. Root carrier tips
+must also be linear: merge inside the component repository, fast-forward its
+main, then rebuild and recut one linear pin-bump carrier. Queue owns the
+generated root merge wrapper and writes it deterministically from the exact
+base and carrier tips.
 
 #### Resolving Divergent Gitlink Pins
 

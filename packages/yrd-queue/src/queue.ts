@@ -6090,6 +6090,7 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     "authored-gitlink",
     "composition-invalid",
     "gitlink-inspection",
+    "merge-tip-carrier",
     "refused-path",
     "refused-path-inspection",
     "wrapper-mismatch",
@@ -6100,14 +6101,23 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     "payload-mismatch",
     "payload-overlap",
   ]),
-  "infra-retry": new Set<string>(["source-publish", "scratch-cleanup-failed"]),
+  "infra-retry": new Set<string>([
+    "carrier-inspection",
+    "source-publish",
+    "scratch-cleanup-failed",
+    "wrapper-generation",
+  ]),
   "recut-lineage": new Set<string>(["recut-certificate", "restack-conflict", "restack-failed"]),
   "plain-rejected": new Set<string>(),
 } as const
 
 const NEEDS_AUTHOR_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKETS["needs-author"]
 
-type InfraRetryCompositionFailure = "source-publish" | "scratch-cleanup-failed"
+type InfraRetryCompositionFailure =
+  | "carrier-inspection"
+  | "source-publish"
+  | "scratch-cleanup-failed"
+  | "wrapper-generation"
 
 function isInfraRetryCompositionFailure(code: string | undefined): code is InfraRetryCompositionFailure {
   return code !== undefined && COMPOSITION_FAILURE_BUCKETS["infra-retry"].has(code)

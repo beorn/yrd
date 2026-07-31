@@ -6158,6 +6158,7 @@ function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefine
       fact.code === "recut-certificate" ||
       fact.code === "authored-gitlink" ||
       fact.code === "composition-invalid" ||
+      fact.code === "merge-tip-carrier" ||
       fact.code === "wrapper-mismatch" ||
       fact.code === "source-missing" ||
       fact.code === "source-lineage" ||
