@@ -10,8 +10,8 @@ import { JobStateConflict } from "@yrd/job"
 import { queueTimelineStories } from "../dev/queue-timeline-fixtures.ts"
 import { followQueueRuns, residentRecoverySweep } from "../src/run.ts"
 import { reduceRunCancelKey } from "../src/watch-cancel.ts"
-import type { YrdCliApp, YrdCliIO } from "../src/types.ts"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
+import { createResponseResidentHarness as residentHarness } from "./support/resident-harness.ts"
 
 const idle = { char: "", escape: false, return: false }
 
@@ -45,31 +45,6 @@ describe("reduceRunCancelKey — watch x-to-cancel affordance", () => {
 const MERGE_JOB_ID = "00000000-0000-7000-8000-00000000cace"
 
 type WarnCall = Readonly<{ message: string; props: Record<string, unknown> }>
-
-function residentHarness(runResponses: readonly (() => Promise<readonly unknown[]>)[]) {
-  const signal = { aborted: false }
-  const warnings: WarnCall[] = []
-  const stderr: string[] = []
-  let runCalls = 0
-  const app = {
-    scope: { signal, sleep: async () => undefined },
-    // Nothing has ever been refused here: the follow loop reads the admission
-    // refusal ledger after each settled cycle for its stall health check.
-    state: () => ({ bays: { prs: {} }, queues: { admissionRefusals: {} } }),
-    log: { warn: (message: string, props: Record<string, unknown>) => warnings.push({ message, props }) },
-    queue: {
-      run: async () => {
-        const responder = runResponses[runCalls] ?? runResponses.at(-1)
-        runCalls += 1
-        if (responder === undefined) throw new Error("no run responder configured")
-        return responder()
-      },
-    },
-  } as unknown as YrdCliApp
-  const io = { stdout: () => undefined, stderr: (text: string) => stderr.push(text) } as unknown as YrdCliIO
-  const gate = async (): Promise<void> => undefined
-  return { app, io, gate, signal, warnings, stderr, runCalls: () => runCalls }
-}
 
 describe("queue cancel of an ACTIVE (merging) run never deadlocks the resident", () => {
   it("observes a peer's cancel of its in-flight merge as a settlement conflict and recovers", async () => {

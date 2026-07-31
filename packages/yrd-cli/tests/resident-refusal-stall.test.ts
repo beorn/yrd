@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest"
 import { foldRefusalStall, RESIDENT_REFUSAL_STALL_CYCLES, type ResidentRefusalStall } from "../src/refusal-remedy.ts"
 import { followQueueRuns } from "../src/run.ts"
-import type { YrdCliApp, YrdCliIO } from "../src/types.ts"
+import { createResidentHarness } from "./support/resident-harness.ts"
 
 const HEAD = "1".repeat(40)
 const OTHER = "2".repeat(40)
@@ -89,12 +89,8 @@ describe("resident refusal stall — an all-candidate refusal loop with an uncha
  * admits anything, against a refusal ledger that keeps advancing — the exact
  * shape of specimen 3. */
 function residentHarness(refusing: boolean, stopAfter = Number.POSITIVE_INFINITY) {
-  const warnings: { message: string; props: Record<string, unknown> }[] = []
-  const signal = { aborted: false }
   let cycles = 0
-  const app = {
-    scope: { signal, sleep: async () => undefined },
-    log: { warn: (message: string, props: Record<string, unknown>) => warnings.push({ message, props }) },
+  const harness = createResidentHarness({
     bays: { pr: (id: string) => ({ id, revs: [{ n: 1, head: HEAD }] }) },
     state: () => ({
       bays: { prs: { PR1800: { id: "PR1800", revs: [{ n: 1, head: HEAD }] } } },
@@ -113,16 +109,13 @@ function residentHarness(refusing: boolean, stopAfter = Number.POSITIVE_INFINITY
           : {},
       },
     }),
-    queue: {
-      run: async () => {
-        cycles += 1
-        if (cycles >= stopAfter) signal.aborted = true
-        return []
-      },
+    run: async ({ signal }) => {
+      cycles += 1
+      if (cycles >= stopAfter) signal.aborted = true
+      return []
     },
-  } as unknown as YrdCliApp
-  const io = { stdout: () => undefined, stderr: () => undefined } as unknown as YrdCliIO
-  return { app, io, warnings, gate: async (): Promise<void> => undefined, cycles: () => cycles }
+  })
+  return { ...harness, cycles: () => cycles }
 }
 
 describe("resident refusal stall — the runner restarts itself instead of looping for hours", () => {

@@ -6,51 +6,9 @@
 import { describe, expect, it } from "vitest"
 import { JobStateConflict } from "@yrd/job"
 import { followQueueRuns } from "../src/run.ts"
-import type { YrdCliApp, YrdCliIO } from "../src/types.ts"
+import { createResponseResidentHarness as harness } from "./support/resident-harness.ts"
 
 const JOB_ID = "00000000-0000-7000-8000-00000000abcd"
-
-type WarnCall = Readonly<{ message: string; props: Record<string, unknown> }>
-
-function harness(runResponses: readonly (() => Promise<readonly unknown[]>)[]) {
-  const signal = { aborted: false }
-  const warnings: WarnCall[] = []
-  const stderr: string[] = []
-  const stdout: string[] = []
-  let runCalls = 0
-  const app = {
-    scope: { signal, sleep: async () => undefined },
-    // Nothing has ever been refused here: the follow loop reads the admission
-    // refusal ledger after each settled cycle for its stall health check.
-    state: () => ({ bays: { prs: {} }, queues: { admissionRefusals: {} } }),
-    log: {
-      warn: (message: string, props: Record<string, unknown>) => warnings.push({ message, props }),
-    },
-    queue: {
-      run: async () => {
-        const responder = runResponses[runCalls] ?? runResponses.at(-1)
-        runCalls += 1
-        if (responder === undefined) throw new Error("no run responder configured")
-        return responder()
-      },
-    },
-  } as unknown as YrdCliApp
-  const io = {
-    stdout: (row: string) => stdout.push(row),
-    stderr: (row: string) => stderr.push(row),
-  } as unknown as YrdCliIO
-  const gate = async (): Promise<void> => undefined
-  return {
-    app,
-    io,
-    gate,
-    signal,
-    warnings,
-    stderr,
-    stdout,
-    runCalls: () => runCalls,
-  }
-}
 
 describe("resident runner — a concurrently-canceled Job never kills the watch loop", () => {
   it("logs a loud skip and processes the NEXT cycle after a peer settles a Job mid-pickup", async () => {
