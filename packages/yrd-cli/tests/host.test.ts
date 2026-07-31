@@ -486,7 +486,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(await implementationSourceIdentity(process, sourceRepository)).not.toBe(untrackedIdentity)
   })
 
-  it.fails("maps a linked-worktree runtime source to its authoritative gitlink (22730)", async () => {
+  it("maps a linked-worktree runtime source to its authoritative gitlink (22730)", async () => {
     const { repo } = await repository()
     const root = join(repo, "..")
     const source = join(root, "linked-runtime-source")
