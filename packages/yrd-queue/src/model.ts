@@ -502,8 +502,13 @@ export type QueueAdmissionRefusal = Readonly<{
   reason: string
   /** Consecutive refusals since the last admission / push / recut. */
   count: number
+  /** Consecutive refusals carrying the current exact `code`. Unlike `count`,
+   * this resets when the typed cause changes. */
+  sameCodeCount?: number
   /** Journal timestamp of the first refusal in this streak. */
   firstAt: string
+  /** Journal timestamp of the first refusal in the current exact-code streak. */
+  sameCodeFirstAt?: string
   /** Journal timestamp of the most recent refusal in this streak. */
   lastAt: string
   /** Durable terminal disposition for this exact revision. A new push/recut
@@ -600,6 +605,8 @@ export type QueueAuditFinding = Readonly<{
   message: string
   run?: RunId
   pr?: string
+  /** Stable affected specimen. Page adapters dedupe on this, never a runner PID. */
+  specimen?: string
   step?: StepName
   /** The upstream refusal code behind the finding; `code` names the finding class. */
   refusal?: string

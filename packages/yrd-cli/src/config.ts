@@ -103,12 +103,21 @@ const ChecksSchema = z
   })
   .default([])
 
+const ProgressSchema = z
+  .object({
+    noLandingMs: z.number().int().min(1).optional(),
+    refusalCount: z.number().int().min(1).optional(),
+  })
+  .strict()
+  .default({})
+
 const ProjectFields = {
   base: TextSchema.optional(),
   batch: z.union([z.literal(false), z.number().int().min(0)]).optional(),
   checks: ChecksSchema,
   requires: RequirementsSchema.optional(),
   contest: ContestSchema,
+  progress: ProgressSchema,
 } as const
 
 const ProjectSchema = z.object(ProjectFields).strict()
@@ -121,6 +130,7 @@ export type YrdProjectConfig = Readonly<{
   checks: readonly z.infer<typeof CheckEntrySchema>[]
   requires?: readonly "review"[]
   contest: Readonly<z.infer<typeof ContestSchema>>
+  progress: Readonly<z.infer<typeof ProgressSchema>>
 }>
 
 export type ResolvedYrdProjectConfig = Readonly<{
@@ -133,6 +143,7 @@ export type ResolvedYrdProjectConfig = Readonly<{
   requires: readonly "review"[]
   definitions: Readonly<Record<string, YrdStepConfig>>
   contest: Readonly<{ concurrency: number; timeoutMs: number; evaluators: readonly string[] }>
+  progress?: Readonly<{ noLandingMs: number; refusalCount: number }>
   /** Programmatic flow authority. Optional only for direct legacy test/app construction. */
   flows?: readonly FlowDef[]
 }>
@@ -155,13 +166,14 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
   }
   const parsed = ProjectSchema.safeParse(value ?? {})
   if (parsed.success) {
-    const { base, batch, checks, requires, contest } = parsed.data
+    const { base, batch, checks, requires, contest, progress } = parsed.data
     return {
       ...(base === undefined ? {} : { base }),
       ...(batch === undefined ? {} : { batch }),
       checks,
       ...(requires === undefined ? {} : { requires }),
       contest,
+      progress,
     }
   }
   const issue = mostSpecificConfigIssue(parsed.error.issues[0])
@@ -193,7 +205,7 @@ function configError(issue: z.core.$ZodIssue): Error {
   if (
     issue.code === "invalid_type" &&
     issue.path.length === 1 &&
-    !["base", "batch", "checks", "requires", "contest"].includes(path)
+    !["base", "batch", "checks", "requires", "contest", "progress"].includes(path)
   ) {
     return new Error(`yrd: config ${path} is not supported`)
   }
@@ -205,6 +217,8 @@ function configError(issue: z.core.$ZodIssue): Error {
     ["batch", "must be an integer >= 0"],
     ["contest.concurrency", "must be an integer >= 1"],
     ["contest.timeoutMs", "must be an integer >= 1"],
+    ["progress.noLandingMs", "must be an integer >= 1"],
+    ["progress.refusalCount", "must be an integer >= 1"],
   ])
   const message =
     known.get(path) ??
@@ -297,6 +311,10 @@ export async function loadYrdConfig(options: {
         concurrency: parsed.contest.concurrency ?? 2,
         timeoutMs: parsed.contest.timeoutMs ?? 30 * 60_000,
         evaluators: parsed.contest.evaluators ?? checks.slice(0, 1),
+      },
+      progress: {
+        noLandingMs: parsed.progress.noLandingMs ?? 10 * 60_000,
+        refusalCount: parsed.progress.refusalCount ?? 3,
       },
       flows: flows.flows,
     },

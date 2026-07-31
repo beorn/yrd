@@ -891,6 +891,7 @@ async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions):
     batch: options.config.batch,
     defaultSteps: options.config.steps,
     requires: options.config.requires,
+    ...(options.config.progress === undefined ? {} : { progress: options.config.progress }),
     ...(flowConfig === undefined ? {} : { flows: flowConfig }),
     resolveBaseSha: async (base) =>
       (

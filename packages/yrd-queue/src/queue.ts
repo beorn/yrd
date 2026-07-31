@@ -488,7 +488,21 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
   runner?: (jobs: Jobs) => Runner
   /** Live base-authority flows used for drift warnings and resume refusal. */
   flows?: YrdConfig
+  /** Progress SLO declaration. Audit emits facts; paging remains a Hab concern. */
+  progress?: QueueProgressPolicy
 }>
+
+export type QueueProgressPolicy = Readonly<{
+  noLandingMs: number
+  refusalCount: number
+}>
+
+export const DEFAULT_QUEUE_PROGRESS_POLICY: QueueProgressPolicy = Object.freeze({
+  noLandingMs: 10 * 60_000,
+  refusalCount: ADMISSION_REFUSAL_LOOP_THRESHOLD,
+})
+
+export type QueueAuditOptions = Readonly<{ now?: string }>
 
 export type CandidatePreparationInput = Readonly<{
   id: string
@@ -607,7 +621,7 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   cancel(args: CancelQueueArgs): Promise<readonly Run[]>
   cancelRun(args: CancelRunArgs): Promise<Run>
   recover(options: RecoverQueueOptions): Promise<readonly Run[]>
-  audit(): QueueAuditResult
+  audit(options?: QueueAuditOptions): QueueAuditResult
   eligibility(selector: string, snapshot?: DeepReadonly<QueueRuntimeState>): PREligibility
   eligibilities(snapshot?: DeepReadonly<QueueRuntimeState>): readonly PREligibility[]
   checks(selectors?: readonly string[]): readonly PRCheckRecord[]
@@ -677,6 +691,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
   options: QueueOptions<Steps> & ValidateStepChain<Steps>,
 ): QueuePlugin<FinalShape<Steps>> {
   const steps = installSteps(options.steps)
+  const progress = validateQueueProgressPolicy(options.progress ?? DEFAULT_QUEUE_PROGRESS_POLICY)
   const byName = new Map(steps.map((step) => [step.name, step] as const))
   const batchSize = normalizeBatch(options.batch ?? 1)
   const defaults = options.defaultSteps === undefined ? undefined : selectSteps(steps, options.defaultSteps)
@@ -714,7 +729,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/run/canceled": QueueRunCanceledFactSchema,
         "queue/run/settled": SettledEventSchema,
       },
-      projectionVersion: "queues-v8-admission-settlement",
+      projectionVersion: "queues-v9-progress-slo",
       project: projectQueues,
       compact: (state, complete) => {
         const runtime = complete as unknown as DeepReadonly<RuntimeState>
@@ -770,6 +785,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
             options.prepareCandidate,
             configuredRunner,
             options.flows,
+            progress,
             yrd.log.child("queue"),
             yrd.history,
             async () => (await yrd.historySnapshot()).state as unknown as DeepReadonly<RuntimeState>,
@@ -985,6 +1001,7 @@ function createQueue<Shape extends PRShape>(
   prepareCandidate: CandidatePreparer | undefined,
   configuredRunner: Runner | undefined,
   flows: YrdConfig | undefined,
+  progress: QueueProgressPolicy,
   log: ConditionalLogger,
   history: JournalHistory<unknown> | undefined,
   historicalState: () => Promise<DeepReadonly<RuntimeState>>,
@@ -2381,7 +2398,7 @@ function createQueue<Shape extends PRShape>(
         },
       )
     },
-    audit: () => auditQueues(runtime(), steps),
+    audit: (options = {}) => auditQueues(runtime(), steps, progress, options),
     eligibility(selector, projected) {
       // Called once per PR by the queue views, and the single largest stage of a
       // cold `queue ls` — resolvePR plus prEligibility together dominate it.
@@ -4068,6 +4085,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
       streak?.revision === undefined ||
       (streak.revision === refusal.revision && streak.headSha === refusal.headSha)
     const prior = sameRevision ? streak : undefined
+    const sameCode = prior?.code === refusal.code
     return {
       queues: {
         ...state.queues,
@@ -4087,7 +4105,9 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
             // refusal codes is still one PR that never got in. The latest code
             // is what an operator needs to act on.
             count: (prior?.count ?? 0) + 1,
+            sameCodeCount: sameCode ? (prior?.sameCodeCount ?? prior?.count ?? 0) + 1 : 1,
             firstAt: prior?.firstAt ?? applied.ts,
+            sameCodeFirstAt: sameCode ? (prior?.sameCodeFirstAt ?? prior?.firstAt ?? applied.ts) : applied.ts,
             lastAt: applied.ts,
             ...(prior?.settlement === undefined ? {} : { settlement: prior.settlement }),
           },
@@ -5149,7 +5169,12 @@ function candidateRevisionMismatches(state: DeepReadonly<RuntimeState>): readonl
   return mismatches
 }
 
-function auditQueues(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): QueueAuditResult {
+function auditQueues(
+  state: DeepReadonly<RuntimeState>,
+  steps: readonly RuntimeStep[],
+  progress: QueueProgressPolicy,
+  options: QueueAuditOptions,
+): QueueAuditResult {
   const findings: QueueAuditFinding[] = []
   const installed = new Map(steps.map((step) => [step.name, step]))
   for (const record of Queues.values(state.queues)) {
@@ -5261,27 +5286,108 @@ function auditQueues(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeS
   // here: `queue audit` reported `findings: []` through a 5h46m block while each
   // cycle logged a loggily-only `compose-candidate-skip`. The refusal ledger is
   // the durable trace of exactly that, so read it (22395).
-  const head = admissionQueue(state, steps)[0]
+  const queued = admissionQueue(state, steps)
+  const refusalFindings = admissionRefusalAuditFindings(state, queued, progress)
+  findings.push(...refusalFindings)
+  findings.push(...queueProgressAuditFindings(state, queued, refusalFindings, progress, options))
+  return { findings }
+}
+
+function admissionRefusalAuditFindings(
+  state: DeepReadonly<RuntimeState>,
+  queued: readonly DeepReadonly<PR>[],
+  progress: QueueProgressPolicy,
+): QueueAuditFinding[] {
+  const findings: QueueAuditFinding[] = []
+  const head = queued[0]
   for (const refusal of Object.values(state.queues.admissionRefusals).toSorted((left, right) =>
     compareNatural(left.pr, right.pr),
   )) {
-    if (refusal.settlement !== undefined || refusal.count < ADMISSION_REFUSAL_LOOP_THRESHOLD) continue
-    const blockedMs = Math.max(0, Date.parse(refusal.lastAt) - Date.parse(refusal.firstAt))
+    const sameCodeCount = refusal.sameCodeCount ?? refusal.count
+    const sameCodeFirstAt = refusal.sameCodeFirstAt ?? refusal.firstAt
+    if (refusal.settlement !== undefined || sameCodeCount < progress.refusalCount) continue
+    const blockedMs = Math.max(0, Date.parse(refusal.lastAt) - Date.parse(sameCodeFirstAt))
     const position = head?.id === refusal.pr ? " at the head of the required-check queue" : ""
     findings.push({
       code: "admission-refusal-loop",
       message:
-        `PR '${refusal.pr}'${position} was refused ${refusal.count} consecutive times ` +
-        `over ${formatRefusalSpan(blockedMs)} (since ${refusal.firstAt}) without ever completing required checks; ` +
+        `PR '${refusal.pr}'${position} was refused ${sameCodeCount} consecutive times ` +
+        `over ${formatRefusalSpan(blockedMs)} (since ${sameCodeFirstAt}) without ever completing required checks; ` +
         `latest refusal '${refusal.code}': ${refusal.reason}`,
       pr: refusal.pr,
+      specimen: `pr:${refusal.pr}:refusal:${refusal.code}`,
       refusal: refusal.code,
-      count: refusal.count,
-      since: refusal.firstAt,
+      count: sameCodeCount,
+      since: sameCodeFirstAt,
       blockedMs,
     })
   }
-  return { findings }
+  return findings
+}
+
+function queueProgressAuditFindings(
+  state: DeepReadonly<RuntimeState>,
+  queued: readonly DeepReadonly<PR>[],
+  refusalFindings: readonly QueueAuditFinding[],
+  progress: QueueProgressPolicy,
+  options: QueueAuditOptions,
+): QueueAuditFinding[] {
+  if (options.now === undefined || queued.length === 0) return []
+  const findings: QueueAuditFinding[] = []
+  const nowMs = parseAuditTime(options.now, "now")
+  const byBase = Map.groupBy(queued, (pr) => baseIdentity(pr.base))
+  for (const [base, prs] of [...byBase.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+    const queuedAtMs = Math.min(...prs.map((pr) => parseAuditTime(checkQueueTime(pr), `queue time for ${pr.id}`)))
+    const latestLandingMs = latestQueueLandingMs(state, base)
+    const sinceMs = Math.max(queuedAtMs, latestLandingMs ?? queuedAtMs)
+    const blockedMs = Math.max(0, nowMs - sinceMs)
+    const first = prs[0]
+    if (
+      blockedMs < progress.noLandingMs ||
+      first === undefined ||
+      refusalFindings.some((finding) => finding.pr === first.id)
+    ) {
+      continue
+    }
+    const since = new Date(sinceMs).toISOString()
+    findings.push({
+      code: "queue-progress-stalled",
+      message:
+        `Queue '${base}' has ${prs.length} required-check ${prs.length === 1 ? "PR" : "PRs"} queued and ` +
+        `no landing for ${formatRefusalSpan(blockedMs)} (since ${since}); head is '${first.id}'.`,
+      pr: first.id,
+      specimen: `queue:${base}`,
+      count: prs.length,
+      since,
+      blockedMs,
+    })
+  }
+  return findings
+}
+
+function latestQueueLandingMs(state: DeepReadonly<RuntimeState>, base: string): number | undefined {
+  return Object.values(state.bays.prs)
+    .filter((pr) => baseIdentity(pr.base) === base)
+    .flatMap((pr) => [pr.integratedAt, pr.alreadyLandedAt])
+    .filter((at): at is string => at !== undefined)
+    .map((at) => parseAuditTime(at, "landing time"))
+    .reduce<number | undefined>((latest, at) => (latest === undefined ? at : Math.max(latest, at)), undefined)
+}
+
+function validateQueueProgressPolicy(policy: QueueProgressPolicy): QueueProgressPolicy {
+  if (!Number.isSafeInteger(policy.noLandingMs) || policy.noLandingMs < 1) {
+    throw new Error("yrd: queue progress noLandingMs must be an integer >= 1")
+  }
+  if (!Number.isSafeInteger(policy.refusalCount) || policy.refusalCount < 1) {
+    throw new Error("yrd: queue progress refusalCount must be an integer >= 1")
+  }
+  return Object.freeze({ ...policy })
+}
+
+function parseAuditTime(value: string, field: string): number {
+  const milliseconds = Date.parse(value)
+  if (!Number.isFinite(milliseconds)) throw new Error(`yrd: queue audit ${field} must be an ISO timestamp`)
+  return milliseconds
 }
 
 /** Compact block span for the audit message. Deliberately derived from the two

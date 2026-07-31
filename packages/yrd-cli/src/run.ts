@@ -4488,8 +4488,9 @@ async function recoverQueue(
 async function queueAuditFindings(
   app: Pick<YrdCliApp, "queue">,
   services: YrdCliServices,
+  now?: string,
 ): Promise<readonly QueueAuditFinding[]> {
-  const core = app.queue.audit()
+  const core = app.queue.audit(now === undefined ? undefined : { now })
   const environment = await services.queue?.auditEnvironment?.()
   return [...core.findings, ...(environment?.findings ?? [])]
 }
@@ -5778,8 +5779,9 @@ async function queueAudit(
   options: JsonOption,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
+  const now = new Date(io.now?.() ?? Date.now()).toISOString()
   const result = {
-    findings: (await queueAuditFindings(app, services)).map((finding) => ({
+    findings: (await queueAuditFindings(app, services, now)).map((finding) => ({
       ...finding,
       ...actionableFailure(finding),
     })),

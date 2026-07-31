@@ -729,7 +729,7 @@ yrd admin journal bump <version> [--json]
 | `resume`             | Optional base                                     | Removes the queue pause                                                                                               |
 | `recover`            | Optional reason or known-dead runner id           | Reconciles abandoned work and releases queued runs whose installed step definition changed                            |
 | `finish`             | One waiting PR/step plus job/runner/attempt/token | Records external-runner evidence and resumes that exact durable run                                                   |
-| `audit`              | Repository                                        | Journal, projection, pinned-plan, and installed-step findings; no state change                                        |
+| `audit`              | Repository                                        | Journal, projection, pinned-plan, installed-step, and queue-progress findings; no state change                        |
 | `admin queue init`   | Optional base                                     | Resolves queue resources and installs the managed pre-submit hook                                                      |
 | `admin queue deinit` | Optional base                                     | Releases resources owned by the installed queue adapter                                                               |
 
@@ -750,6 +750,14 @@ carries a typed error with `cause` and `resolution` steps. In particular,
 submitted work with no resident is `resident-runner-missing`, never a quiet
 absence. `--json` also reports the checkout HEAD and ahead/behind distance from
 each installed base SHA.
+
+`queue audit` is the progress-health affordance. With queued required-check
+work it emits `queue-progress-stalled` after the configured no-landing
+interval. A repeated exact refusal emits the more specific
+`admission-refusal-loop` and inhibits the generic finding for that same queue
+head, so one wedge has one actionable specimen. Findings carry stable
+`specimen`, `since`, `blockedMs`, and count fields; process or lease PIDs never
+participate in their identity. `--json` exits `1` when findings exist.
 
 `--steps` narrows a run. Omitted means the configured default sequence. An
 explicit empty `--steps` runs no steps. Re-entry is PR-owner-authorized: inspect
@@ -966,6 +974,16 @@ list:
 checks: [typecheck]
 ```
 
+Queue progress thresholds share this one strict declaration surface:
+
+```yaml
+progress: {noLandingMs: 600000, refusalCount: 3}
+```
+
+Both fields must be positive integers and default to the values above.
+`noLandingMs` is evaluated only while required-check work is queued; a real
+`integrated` or `already-landed` journal fact resets its clock.
+
 `typecheck` is a built-in check that runs `bun run typecheck`. `check` is the
 other built-in and runs `git diff --check` against the pinned base. A repository
 may define a one-line command inline:
@@ -983,8 +1001,8 @@ landing gate. Run one configured check explicitly with `yrd check <name>`.
 
 `yrd admin init` writes that exact one-liner and the managed pre-submit hook. It
 refuses to overwrite an existing repository config.
-Deleted repository keys—including `steps`, `journal`, `refuse`, `do`, `merge`,
-and named top-level command definitions—fail config load loudly.
+Deleted or unknown repository keys—including unknown keys nested under
+`progress`—fail config load loudly.
 
 The reader's supported journal versions are compiled into Yrd. The journal
 records its own one-way version floor: a fresh journal is born at its creating

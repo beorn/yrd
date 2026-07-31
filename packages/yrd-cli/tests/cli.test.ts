@@ -4798,6 +4798,7 @@ describe("runYrd", () => {
       code: "admission-refusal-loop",
       message: expect.stringContaining("PR1"),
       pr: "PR1",
+      specimen: "pr:PR1:refusal:authored-gitlink",
       refusal: "authored-gitlink",
       count: 3,
       since: "2026-07-09T12:00:00.000Z",
@@ -4811,6 +4812,37 @@ describe("runYrd", () => {
     expect(text).toContain("admission-refusal-loop")
     expect(text).toContain("PR1")
     expect(text).toContain("authored-gitlink")
+  })
+
+  it("evaluates the no-landing clock at queue-audit invocation time", async () => {
+    await using app = await createApp({
+      prepareCandidate: () => {
+        throw createFailure({
+          kind: "refusal",
+          code: "authored-gitlink",
+          message: "yrd: PR 'PR1' authors a gitlink bump; recut it before required checks",
+        })
+      },
+    })
+    await openAndSubmit(app)
+    await app.bays.requestChecks({ pr: "PR1" })
+    await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })
+
+    const audit = outputIO({ now: () => Date.parse("2026-07-09T12:10:00.000Z") })
+    expect(await runYrd(app, yrd("queue", "audit", "--json"), audit.io), audit.stderr()).toBe(1)
+    expect(JSON.parse(audit.stdout())).toMatchObject({
+      command: "queue.audit",
+      findings: [
+        {
+          code: "queue-progress-stalled",
+          specimen: "queue:main",
+          pr: "PR1",
+          count: 1,
+          since: "2026-07-09T12:00:00.000Z",
+          blockedMs: 600_000,
+        },
+      ],
+    })
   })
 
   it("names environment audit blockers instead of reporting queue recovery idle", async () => {

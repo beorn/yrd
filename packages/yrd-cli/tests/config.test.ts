@@ -23,12 +23,32 @@ describe("Yrd v4 config", () => {
         typecheck: { run: "bun run typecheck", runner: "local", kind: "check" },
         merge: { runner: "local", kind: "merge" },
       },
+      progress: { noLandingMs: 600_000, refusalCount: 3 },
       contest: { concurrency: 2, timeoutMs: 1_800_000, evaluators: ["typecheck"] },
     })
     expect(loaded.config.flows?.[0]?.steps.map(({ name, kind }) => ({ name, kind }))).toEqual([
       { name: "typecheck", kind: "check" },
       { name: "merge", kind: "merge" },
     ])
+  })
+
+  it("loads the one strict progress declaration and rejects unknown progress keys", async () => {
+    const loaded = await loadYrdConfig({
+      repo: "/repo",
+      defaultBase: "main",
+      read: async () => "checks: [typecheck]\nprogress: {noLandingMs: 120000, refusalCount: 5}\n",
+    })
+    expect(loaded.config.progress).toEqual({ noLandingMs: 120_000, refusalCount: 5 })
+
+    expect(() =>
+      parseYrdConfig({
+        checks: [],
+        progress: { noLandingMs: 120_000, refusalCount: 5, notify: "@chief" },
+      }),
+    ).toThrow("yrd: config progress.notify is not supported")
+    expect(() => parseYrdConfig({ checks: [], progress: { noLandingMs: 0, refusalCount: 3 } })).toThrow(
+      "yrd: config progress.noLandingMs must be an integer >= 1",
+    )
   })
 
   it("keeps a one-line run escape hatch inside the checks list", async () => {
