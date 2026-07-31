@@ -1548,6 +1548,7 @@ type BayOpenResolution = Readonly<{
   claim: string
   bay: string
   branch: string
+  from?: string
   issue?: string
   reattached: boolean
 }>
@@ -1659,7 +1660,7 @@ async function resolveBayOpen(
         : derivedWorkName(targetedPr.branch)
       : derivedWorkName(arg))
   const identity = bayOpenIdentity(app, bay, branchSeed, issue, targetedPr)
-  return identity
+  return targetedPr === undefined ? identity : { ...identity, from: prHead(targetedPr) }
 }
 
 function openRunBay(app: YrdCliApp, identity: BayOpenResolution): Bay | undefined {
@@ -2080,6 +2081,7 @@ async function prepareOwnedBay(
       name: identity.bay,
       branch: identity.branch,
       by: currentYrdOwnerAddress(),
+      ...(identity.from === undefined ? {} : { from: identity.from }),
       ...(identity.issue === undefined ? {} : { issue: identity.issue }),
     })
     assertJobsPassed(await runJobs(app, app.jobs.requested(opened), io), `bay '${identity.bay}' provision`)
@@ -2308,9 +2310,10 @@ async function certifyBayProcessesStopped(
   processService: Pick<Process, "reapPath"> | undefined,
   bay: Bay,
 ): Promise<void> {
-  if (bay.path === undefined) {
-    throw new Error(`yrd: Bay '${bay.name}' has no workspace path to certify before close`)
-  }
+  // Provision can fail before a workspace exists. There is then no path-owned
+  // process tree to reap; explicit force-close must still be able to drive the
+  // durable Bay record to a terminal state.
+  if (bay.path === undefined) return
   if (processService === undefined) configuration("bay close requires the process-backed Yrd runtime")
   const reaped = await processService.reapPath(bay.path)
   const failure = pathReapFailure(reaped)

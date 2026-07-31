@@ -109,18 +109,40 @@ describe("createGitWorkspace", () => {
     expect(request).toMatchObject({ timeoutMs: 30_000 })
   })
 
-  it("closes a never-materialized Bay without inventing archive proof", async () => {
+  it.each([
+    { state: "without a recorded head", recordHead: false },
+    { state: "with a recorded head", recordHead: true },
+  ])("closes a never-materialized Bay $state", async ({ recordHead }) => {
     const { root, repo } = await repository()
     await using process = createProcess()
     const adapter = await workspace(process, { repo, baysRoot: join(root, "bays") })
+    const headSha = recordHead ? (await git(repo, ["rev-parse", "HEAD"])).stdout : undefined
 
     await expect(
       adapter.deprovision(
-        { bay: "B1", branch: "issue/unmaterialized" },
+        {
+          bay: "B1",
+          branch: "issue/unmaterialized",
+          ...(headSha === undefined ? {} : { headSha }),
+        },
         { id: "deprovision-B1", attempt: 1, runner: "test", signal: new AbortController().signal },
       ),
-    ).resolves.toEqual({ status: "completed", conclusion: "success", output: {} })
-    expect((await git(repo, ["rev-parse", "--verify", "refs/yrd/closed/B1"], true)).code).toBe(128)
+    ).resolves.toEqual({
+      status: "completed",
+      conclusion: "success",
+      output:
+        headSha === undefined
+          ? {}
+          : {
+              headSha,
+              preservedRef: "refs/yrd/closed/B1",
+            },
+    })
+    if (headSha === undefined) {
+      expect((await git(repo, ["rev-parse", "--verify", "refs/yrd/closed/B1"], true)).code).toBe(128)
+    } else {
+      expect((await git(repo, ["rev-parse", "refs/yrd/closed/B1"])).stdout).toBe(headSha)
+    }
   })
 
   it("keeps the repository clean with the default in-repository bays root", async () => {
@@ -617,7 +639,8 @@ describe("createGitWorkspace", () => {
     expect(branchHeld).toMatchObject({ status: "completed", conclusion: "failure" })
     const branchHeldMessage = String((branchHeld as { error?: { message?: string } }).error?.message ?? branchHeld)
     expect(branchHeldMessage).toMatch(/already used by worktree|is already checked out/iu)
-    expect(branchHeldMessage).toContain("--from <commit-sha>")
+    expect(branchHeldMessage).toContain("materialize the recorded commit in detached HEAD")
+    expect(branchHeldMessage).not.toContain("--from")
 
     // Detached HEAD at the recorded SHA succeeds and matches the revision.
     const detached = await adapter.provision(

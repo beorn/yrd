@@ -786,6 +786,7 @@ export const RefreshBayInputSchema = z
     bay: BayIdSchema,
     path: z.string().min(1).optional(),
     branch: GitRefSchema,
+    from: GitRefSchema.optional(),
     base: GitRefSchema,
   })
   .strict()
@@ -806,6 +807,7 @@ export const CheckpointBayInputSchema = z
     bay: BayIdSchema,
     path: z.string().min(1).optional(),
     branch: GitRefSchema,
+    from: GitRefSchema.optional(),
     claim: z.string().trim().min(1),
   })
   .strict()

@@ -501,6 +501,19 @@ success. The PR author's live branch may remain checked out elsewhere. Use
 `bay open --pr <selector>` instead when continuing authored branch work that
 needs refresh or checkpoint operations.
 
+`bay open --pr` also starts from the PR's exact recorded revision. If another
+worktree owns the authored branch, Yrd materializes that revision in detached
+HEAD while retaining the Bay's declared target branch and source head. Refresh
+and checkpoint operations accept only descendants of that source, and
+checkpoint pushes still target the PR branch. The operator never needs an
+internal `--from` flag.
+
+If provisioning fails before a workspace path exists, the durable Bay record
+remains explicitly reapable: `yrd bay close --force <bay>` has no path-owned
+process tree to certify, and it atomically creates or verifies a preservation
+ref for any recorded head before closing. This is the terminal recovery for a
+pathless Bay; creating an extra anonymous Bay is not required.
+
 `pr recut` fetches the authoritative base internally and records a mechanically
 equivalent, certificate-bearing successor on the same PR. `--revision` selects
 an older immutable revision; its correlation and approved-review provenance
@@ -732,7 +745,7 @@ yrd admin journal bump <version> [--json]
 | `recover`            | Optional reason or known-dead runner id           | Reconciles abandoned work and releases queued runs whose installed step definition changed                            |
 | `finish`             | One waiting PR/step plus job/runner/attempt/token | Records external-runner evidence and resumes that exact durable run                                                   |
 | `audit`              | Repository                                        | Journal, projection, pinned-plan, installed-step, and queue-progress findings; no state change                        |
-| `admin queue init`   | Optional base                                     | Resolves queue resources and installs the managed pre-submit hook                                                      |
+| `admin queue init`  | Optional base                                     | Resolves queue resources and installs the managed pre-submit hook                                                     |
 | `admin queue deinit` | Optional base                                     | Releases resources owned by the installed queue adapter                                                               |
 
 `queue list` is the canonical read-only surface. `queue ls` is its spelling

@@ -3560,6 +3560,25 @@ describe("runYrd", () => {
     expect(JSON.parse(output.stdout())).toMatchObject({ bays: [] })
   })
 
+  it("force-closes a failed provision that never acquired a workspace path", async () => {
+    const app = await createApp({ failingBay: "B1" })
+    const failedOpen = await app.bays.open({ name: "pathless" })
+    await app.jobs.runMany(app.jobs.requested(failedOpen), {
+      runner: "cli-test",
+      leaseMs: 60_000,
+    })
+    expect(app.bays.get("B1")).toMatchObject({
+      status: "failed",
+      failure: { code: "provision-failed" },
+    })
+    expect(app.bays.get("B1")).not.toHaveProperty("path")
+
+    const close = outputIO()
+    expect(await runYrd(app, yrd("bay", "close", "--force", "B1"), close.io), close.stderr()).toBe(0)
+    expect(app.bays.get("B1")).toMatchObject({ status: "closed" })
+    expect(app.bays.get("B1")).not.toHaveProperty("path")
+  })
+
   it("uses by, submitter, and reviewer throughout CLI help", async () => {
     const app = await createApp()
     for (const args of [

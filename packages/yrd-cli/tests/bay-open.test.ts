@@ -1169,6 +1169,45 @@ printf ran > "$YRD_TEST_SHELL_LOG"
     })
   })
 
+  it("opens a branch-held PR at its recorded head through --pr", async () => {
+    const { repo } = await repository()
+    const branch = "topic/held-by-author"
+    await git(repo, "switch", "-qc", branch)
+    await writeFile(join(repo, "claim.txt"), "held by author\n")
+    await git(repo, "add", "claim.txt")
+    await git(repo, "commit", "-qm", "held candidate")
+    const originalHead = await git(repo, "rev-parse", "HEAD")
+    await git(repo, "push", "-q", "-u", "origin", branch)
+    await git(repo, "switch", "-q", "main")
+
+    const draft = output(repo)
+    expect(await yrd(repo, draft.io, "pr", "create", branch), draft.stderr()).toBe(0)
+    const authorSlot = join(repo, "..", "author-slot")
+    await git(repo, "worktree", "add", "-q", authorSlot, branch)
+
+    const open = output(repo)
+    expect(await yrd(repo, open.io, "bay", "open", "--pr", branch), open.stderr()).toBe(0)
+
+    const bays = output(repo)
+    expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
+    const bay = (JSON.parse(bays.stdout()) as { bays: Array<{ id: string; headSha?: string; path?: string }> }).bays[0]
+    expect(bay).toMatchObject({ id: "B1", headSha: originalHead, path: expect.any(String) })
+    expect(await git(bay?.path ?? "", "rev-parse", "HEAD")).toBe(originalHead)
+
+    await writeFile(join(bay?.path ?? "", "continued.txt"), "continued in detached Bay\n")
+    await git(bay?.path ?? "", "add", "continued.txt")
+    await git(bay?.path ?? "", "commit", "-qm", "continue held candidate")
+    const continuedHead = await git(bay?.path ?? "", "rev-parse", "HEAD")
+    const refresh = output(bay?.path ?? repo)
+    expect(await yrd(repo, refresh.io, "bay", "refresh", bay?.id ?? ""), refresh.stderr()).toBe(0)
+
+    const refreshed = output(repo)
+    expect(await yrd(repo, refreshed.io, "bay", "list", "--json"), refreshed.stderr()).toBe(0)
+    expect(JSON.parse(refreshed.stdout())).toMatchObject({
+      bays: [{ id: "B1", branch, headSha: continuedHead, status: "open" }],
+    })
+  })
+
   it("repairs a live claim draft whose local branch lost its tracking ref", async () => {
     const { repo } = await repository()
     const branch = "topic/local-claim-without-tracking"
