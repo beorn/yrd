@@ -1482,6 +1482,7 @@ checks: [{check: {run: "true"}}]
     ).toEqual([
       "pr",
       "bay",
+      "intent",
       "issue",
       "contest",
       "queue",

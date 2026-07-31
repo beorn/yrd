@@ -82,6 +82,7 @@ import {
   type MutableJournal,
 } from "@yrd/persistence"
 import { createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
+import { withIntents } from "@yrd/intent"
 import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import type { ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
@@ -939,6 +940,7 @@ async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions):
     withIssues({
       sources: options.issueSources ?? [createKmIssueSource({ process: options.process, cwd: options.repo })],
     }),
+    withIntents(),
     withBays({
       jobs: bayJobs,
       defaultBase: baseIdentity(options.config.base),

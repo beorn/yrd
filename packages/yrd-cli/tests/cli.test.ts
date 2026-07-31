@@ -63,6 +63,7 @@ import {
   type PRShape,
   type StepExecution,
 } from "@yrd/queue"
+import { withIntents } from "@yrd/intent"
 import { withIssues } from "@yrd/issue"
 import { createElement, type ReactElement } from "react"
 import { renderString, stripAnsi } from "silvery"
@@ -478,6 +479,7 @@ async function createApp(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
+    withIntents(),
     withBays({
       jobs: bayJobs,
       defaultBase: "main",
@@ -12179,5 +12181,162 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     } finally {
       await Promise.all([runner.close(), viewer.close()])
     }
+  })
+})
+
+/**
+ * @failure  The `yrd intent` verbs exist in the design but not on the CLI, so a
+ *           pin advance has no way in except a hand-authored gitlink carrier.
+ *           These assertions pin the surface: the verbs, the stable JSON, and —
+ *           the part that matters — that a refusal reaches the operator as a
+ *           TYPED code plus a runnable remedy, not a sentence to re-parse.
+ * @level    l2 (buildProgram over an injected app; git is a stubbed process)
+ * @consumer @yrd/core/21679-integration-model-v2/22668-admit-intents
+ */
+const COMPONENT = "components/alpha"
+const CURRENT_PIN = "a".repeat(40)
+const TARGET_SHA = "b".repeat(40)
+
+/**
+ * Answers the exact git probes admission makes. Anything unasked-for returns a
+ * non-zero exit, so a probe this stub does not model fails loudly instead of
+ * silently reading as "no".
+ */
+function intentGit(
+  overrides: { gitlinks?: readonly [string, string][]; published?: boolean; ancestor?: boolean } = {},
+): NonNullable<YrdCliServices["process"]> {
+  const gitlinks = overrides.gitlinks ?? [[COMPONENT, CURRENT_PIN]]
+  const published = overrides.published ?? true
+  const ancestor = overrides.ancestor ?? true
+  return {
+    async run(request: { argv: readonly string[] }) {
+      const argv = [...request.argv]
+      const ok = (stdout: string) =>
+        ({ stdout, stderr: "", exitCode: 0, signal: null, durationMs: 0, timedOut: false }) as const
+      const no = (code: number) =>
+        ({ stdout: "", stderr: "", exitCode: code, signal: null, durationMs: 0, timedOut: false }) as const
+      if (argv.includes("ls-tree")) {
+        return ok(gitlinks.map(([path, pin]) => `160000 commit ${pin}\t${path}`).join("\0") + "\0")
+      }
+      if (argv.includes("fetch")) return ok("")
+      if (argv.includes("cat-file")) return published ? ok("") : no(1)
+      if (argv.includes("for-each-ref")) return published ? ok("refs/remotes/origin/main\n") : ok("")
+      if (argv.includes("--is-ancestor")) {
+        // The first probe asks "does the pin lead to the target" (advance).
+        return argv.at(-2) === CURRENT_PIN && ancestor ? no(0) : no(1)
+      }
+      if (argv.includes("--get")) return no(1)
+      return no(2)
+    },
+    reapPath: async () => ({ targetedPids: [], survivorPids: [], forcedKill: false, signalFailures: [] }),
+  }
+}
+
+describe("yrd intent — declared pin advances (22668 phase 1)", () => {
+  it("admits an intent and reports the pin it advances from", async () => {
+    await using app = await createApp()
+    const output = outputIO()
+
+    expect(
+      await runYrd(
+        app,
+        yrd("intent", "submit", "--component", COMPONENT, "--target", TARGET_SHA, "--issue", "one", "--json"),
+        output.io,
+        { process: intentGit() },
+      ),
+      output.stderr(),
+    ).toBe(0)
+
+    const result = JSON.parse(output.stdout()) as {
+      command: string
+      intent: { id: string; component: string; target: string; status: string }
+      admission: { relation: string; currentPin: string }
+    }
+    expect(result.command).toBe("intent.submit")
+    expect(result.intent).toMatchObject({ id: "I1", component: COMPONENT, target: TARGET_SHA, status: "open" })
+    expect(result.admission).toMatchObject({ relation: "advance", currentPin: CURRENT_PIN })
+  })
+
+  it("lists, shows, and withdraws the record it admitted", async () => {
+    await using app = await createApp()
+    const submitted = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd("intent", "submit", "--component", COMPONENT, "--target", TARGET_SHA, "--issue", "one", "--json"),
+        submitted.io,
+        { process: intentGit() },
+      ),
+      submitted.stderr(),
+    ).toBe(0)
+
+    const listed = outputIO()
+    expect(await runYrd(app, yrd("intent", "list", "--json"), listed.io), listed.stderr()).toBe(0)
+    expect(JSON.parse(listed.stdout())).toMatchObject({ command: "intent.list", intents: [{ id: "I1" }] })
+
+    const shown = outputIO()
+    expect(await runYrd(app, yrd("intent", "show", "I1", "--json"), shown.io), shown.stderr()).toBe(0)
+    expect(JSON.parse(shown.stdout())).toMatchObject({ command: "intent.show", intent: { id: "I1", status: "open" } })
+
+    const withdrawn = outputIO()
+    expect(
+      await runYrd(app, yrd("intent", "withdraw", "I1", "--reason", "not needed", "--json"), withdrawn.io),
+      withdrawn.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(withdrawn.stdout())).toMatchObject({
+      command: "intent.withdraw",
+      intent: { id: "I1", status: "withdrawn", disposition: { code: "intent-withdrawn", reason: "not needed" } },
+    })
+  })
+
+  it("refuses an unknown component with a typed code and names the declared ones", async () => {
+    await using app = await createApp()
+    const output = outputIO()
+
+    expect(
+      await runYrd(
+        app,
+        yrd("intent", "submit", "--component", "components/typo", "--target", TARGET_SHA, "--issue", "one", "--json"),
+        output.io,
+        { process: intentGit() },
+      ),
+    ).toBe(1)
+
+    const result = JSON.parse(output.stdout()) as {
+      failure: { code: string; evidence: { declared: string[] }; remedy: { argv: string[] }[] }
+    }
+    expect(result.failure.code).toBe("intent-component-unknown")
+    expect(result.failure.evidence.declared).toEqual([COMPONENT])
+    expect(app.intents.list()).toEqual([])
+  })
+
+  it("renders an unpublished-target refusal as a runnable command, not prose to re-parse", async () => {
+    await using app = await createApp()
+    const output = outputIO()
+
+    expect(
+      await runYrd(
+        app,
+        yrd("intent", "submit", "--component", COMPONENT, "--target", TARGET_SHA, "--issue", "one"),
+        output.io,
+        { process: intentGit({ published: false }) },
+      ),
+    ).toBe(1)
+
+    expect(output.stdout()).toContain("cd components/alpha && git push origin")
+    expect(output.stdout()).toContain(`${TARGET_SHA}:refs/heads/main`)
+  })
+
+  it("admits an intent with no target — the component main tip at landing", async () => {
+    await using app = await createApp()
+    const output = outputIO()
+
+    expect(
+      await runYrd(app, yrd("intent", "submit", "--component", COMPONENT, "--issue", "one", "--json"), output.io, {
+        process: intentGit(),
+      }),
+      output.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({ admission: { relation: "deferred" } })
   })
 })

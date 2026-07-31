@@ -177,6 +177,8 @@ import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
 import { ensureWorkspaceDependencies } from "./workspace-provisioning.ts"
 import { artifactLocation, directArtifacts, nestedArtifacts, uniqueArtifacts } from "./artifact-reference.ts"
 import { readInstalledBaselines } from "./installed-baseline.ts"
+import { renderRemedyStep } from "@yrd/intent"
+import { admitPinIntent } from "./intent-admission.ts"
 import { unpublishedChangedSubmodulePins } from "./pr-submodule-publication.ts"
 // The live watch UI is loaded lazily at its single use site in watchQueue(): it is the only
 // module that pulls silvery's SplitPane, and eagerly importing it here would make every CLI
@@ -906,6 +908,15 @@ type QueueListOptions = Readonly<{
 type WatchOptions = QueueListOptions
 
 type JsonOption = { json?: boolean }
+type IntentSubmitOptions = JsonOption & {
+  component?: string
+  target?: string
+  issue?: string
+  expectPin?: string
+  submitter?: string
+  base?: string
+}
+type IntentWithdrawOptions = JsonOption & { reason?: string }
 
 // Flow metrics default to a 24h horizon (median/p90 wait, run durations,
 // rejection rate, throughput) independent of the tighter listing window; an
@@ -7390,6 +7401,129 @@ async function listContests(app: YrdCliApp, options: JsonOption, io: YrdCliIO): 
   await printResult(io, jsonEnabled(options), { command: "contest.list", contests }, human)
 }
 
+/**
+ * Admit a pin-advance intent.
+ *
+ * Admission is advisory: main moves, so merge-time evaluation re-runs every
+ * check and is the only authority. It exists so the submitter fails loud while
+ * their context is warm — and so a typo'd component never becomes a queue row.
+ */
+async function submitIntent(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  options: IntentSubmitOptions,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
+  const component = options.component ?? usage("yrd intent submit requires --component <path>")
+  const issueRef = options.issue ?? usage("yrd intent submit requires --issue <ref>")
+  const issue = await app.issues.resolve(app.issues.ref(issueRef))
+  const repo = io.cwd ?? process.cwd()
+  const host = services.process
+  if (host === undefined) {
+    configuration("yrd intent submit requires a process host to inspect the component")
+  }
+  const admission = await admitPinIntent({
+    process: host,
+    repo,
+    base: options.base ?? services.base ?? "main",
+    component,
+    ...(options.target === undefined ? {} : { target: options.target }),
+  })
+  if (!admission.admitted) {
+    await printResult(
+      io,
+      jsonEnabled(options),
+      {
+        command: "intent.submit",
+        failure: {
+          code: admission.code,
+          message: admission.message,
+          evidence: admission.evidence,
+          remedy: admission.remedy,
+        },
+      },
+      [admission.message, "", ...admission.remedy.map((step) => `  ${renderRemedyStep(step)}`)].join("\n"),
+    )
+    return 1
+  }
+
+  const intent = await app.intents.submit({
+    intentId: randomUUID(),
+    issue: issue.ref,
+    component,
+    submitter: options.submitter ?? "operator",
+    ...(options.target === undefined ? {} : { target: options.target }),
+    ...(options.expectPin === undefined ? {} : { expectedCurrentPin: options.expectPin }),
+  })
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "intent.submit", intent, admission },
+    `${intent.id} ${intent.component} ${intent.target ?? "<component main tip at landing>"} (${admission.relation}; pin ${admission.currentPin})`,
+  )
+  return 0
+}
+
+async function listIntents(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Promise<void> {
+  const intents = app.intents.list()
+  const human =
+    intents.length === 0
+      ? "No intents."
+      : [
+          "INTENT COMPONENT TARGET STATUS ISSUE",
+          ...intents.map((intent) =>
+            [
+              intent.id,
+              intent.component,
+              intent.target ?? "-",
+              intent.status,
+              `${intent.issue.source}:${intent.issue.id}`,
+            ].join(" "),
+          ),
+        ].join("\n")
+  await printResult(io, jsonEnabled(options), { command: "intent.list", intents }, human)
+}
+
+async function showIntent(
+  app: YrdCliApp,
+  selector: string,
+  options: JsonOption,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
+  const intent = app.intents.get(selector)
+  if (intent === undefined) {
+    await printResult(
+      io,
+      jsonEnabled(options),
+      { command: "intent.show", failure: { code: "intent-not-found", message: `yrd: no intent '${selector}'` } },
+      `yrd: no intent '${selector}'`,
+    )
+    return 1
+  }
+  const human = [
+    `${intent.id} ${intent.status}`,
+    `component  ${intent.component}`,
+    `target     ${intent.target ?? "<component main tip at landing>"}`,
+    `issue      ${intent.issue.source}:${intent.issue.id}`,
+    `submitter  ${intent.submitter}`,
+    `submitted  ${intent.submittedAt}`,
+    ...(intent.supersededBy === undefined ? [] : [`superseded ${intent.supersededBy}`]),
+    ...(intent.disposition === undefined ? [] : [`disposition ${intent.disposition.code}`]),
+  ].join("\n")
+  await printResult(io, jsonEnabled(options), { command: "intent.show", intent }, human)
+  return 0
+}
+
+async function withdrawIntent(
+  app: YrdCliApp,
+  selector: string,
+  options: IntentWithdrawOptions,
+  io: YrdCliIO,
+): Promise<void> {
+  const intent = await app.intents.withdraw(selector, options.reason)
+  await printResult(io, jsonEnabled(options), { command: "intent.withdraw", intent }, `${intent.id} ${intent.status}`)
+}
+
 async function refusePrMerge(
   app: YrdCliApp,
   selector: string,
@@ -8238,10 +8372,56 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (contestId, options) => setExit(await promoteContest(installed(), contestId, options, io)))
 
+  const intent = program.command("intent").description("declare and inspect component pin advances")
+  intent.helpCommand(false)
+  intent
+    .command("_list", { isDefault: true, hidden: true })
+    .option("--json", "emit stable JSON")
+    .action(async (options) => listIntents(installed(), options, io))
+  intent
+    .command("submit")
+    .description("declare that a component pin should advance")
+    .option("--component <path>", "root-relative gitlink path, e.g. components/alpha")
+    .option("--target <sha>", "component commit to advance to; omit for the component main tip at landing")
+    .option("--issue <ref>", "tracker-neutral issue reference")
+    .option("--expect-pin <sha>", "refuse unless the current pin is exactly this sha")
+    .option("--submitter <identity>", "attribution recorded on the intent")
+    .option("--base <branch>", "base branch whose pin the target advances")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => setExit(await submitIntent(installed(), installedServices(), options, io)))
+  intent
+    .command("list")
+    .description("live record per (issue, component) key")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => listIntents(installed(), options, io))
+  intent
+    .command("show <intent>")
+    .description("record, preconditions, and disposition")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => setExit(await showIntent(installed(), selector, options, io)))
+  intent
+    .command("withdraw <intent>")
+    .description("terminate an open intent")
+    .option("--reason <text>", "why the intent is withdrawn")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => withdrawIntent(installed(), selector, options, io))
+
   const order = new Map(
-    ["pr", "bay", "issue", "contest", "queue", "check", "doctor", "admin", "migrate", "log", "watch", "prime"].map(
-      (command, index) => [command, index],
-    ),
+    [
+      "pr",
+      "bay",
+      "intent",
+      "issue",
+      "contest",
+      "queue",
+      "check",
+      "doctor",
+      "admin",
+      "migrate",
+      "log",
+      "watch",
+      "prime",
+    ].map((command, index) => [command, index]),
   )
   const orderedCommands = program.commands as unknown as CliCommand[]
   orderedCommands.sort((left, right) => (order.get(left.name()) ?? 99) - (order.get(right.name()) ?? 99))

@@ -45,6 +45,7 @@
         "@yrd/config": "workspace:*",
         "@yrd/contest": "workspace:*",
         "@yrd/core": "workspace:*",
+        "@yrd/intent": "workspace:*",
         "@yrd/issue": "workspace:*",
         "@yrd/job": "workspace:*",
         "@yrd/persistence": "workspace:*",

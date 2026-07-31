@@ -3,6 +3,7 @@ import type { ContestCommands, ContestsState, HasContests } from "@yrd/contest"
 import type { Yrd } from "@yrd/core"
 import type { HasJobs, HasRunner, JobCommands, JobsState } from "@yrd/job"
 import type { GitPRRecutter, HasQueue, QueueAuditResult, QueueCommands, QueuesState } from "@yrd/queue"
+import type { HasIntents, IntentCommands, IntentsState } from "@yrd/intent"
 import type { HasIssues } from "@yrd/issue"
 import type { JournalVersionBumpResult, JournalViewRebuildResult, OrphanJournalImportResult } from "@yrd/persistence"
 import type { Process, ProcessResult } from "@yrd/process"
@@ -49,9 +50,10 @@ export type YrdCliState = Readonly<{
   bays: BaysState
   queues: QueuesState
   contests: ContestsState
+  intents: IntentsState
 }>
 
-export type YrdCliCommands = JobCommands & BayCommands & QueueCommands & ContestCommands
+export type YrdCliCommands = JobCommands & BayCommands & QueueCommands & ContestCommands & IntentCommands
 
 export type YrdCliApp = Yrd<YrdCliState, YrdCliCommands> &
   HasJobs &
@@ -59,7 +61,8 @@ export type YrdCliApp = Yrd<YrdCliState, YrdCliCommands> &
   HasBays &
   HasQueue &
   HasIssues &
-  HasContests
+  HasContests &
+  HasIntents
 
 export type YrdCliServices = Readonly<{
   queue?: YrdCliQueueAdministration

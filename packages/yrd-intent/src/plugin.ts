@@ -33,7 +33,7 @@ const WithdrawnSchema = z.object({ intent: z.string(), reason: z.string().trim()
 
 type IntentState = Readonly<{ intents: IntentsState }>
 type IntentRuntimeState = DeepReadonly<IntentState>
-type IntentCommands = Readonly<{
+export type IntentCommands = Readonly<{
   intent: Readonly<{
     submit: ReturnType<typeof buildSubmitCommand>
     withdraw: ReturnType<typeof buildWithdrawCommand>
