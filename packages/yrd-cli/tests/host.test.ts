@@ -150,7 +150,7 @@ async function candidatePackageRepository(
   await git(repo, "add", "package.json", "bun.lock", ".gitignore", ".yrd.yml")
   await git(repo, "commit", "-qm", "declare candidate toolchain")
   await git(repo, "switch", "-q", "issue/feature")
-  await git(repo, "merge", "-q", "--no-edit", "main")
+  await git(repo, "rebase", "-q", "main")
   const featureSha = await git(repo, "rev-parse", "HEAD")
   await git(repo, "switch", "-q", "main")
   return { repo, featureSha }
@@ -3789,11 +3789,9 @@ describe("pre-submit checkout timeout (22648)", () => {
   async function slowCheckoutRepository(sleepSeconds: number): Promise<{ repo: string }> {
     const { repo } = await repository()
     await mkdir(join(repo, ".git", "hooks"), { recursive: true })
-    await writeFile(
-      join(repo, ".git", "hooks", "post-checkout"),
-      `#!/bin/sh\nsleep ${sleepSeconds}\nexit 0\n`,
-      { mode: 0o755 },
-    )
+    await writeFile(join(repo, ".git", "hooks", "post-checkout"), `#!/bin/sh\nsleep ${sleepSeconds}\nexit 0\n`, {
+      mode: 0o755,
+    })
     return { repo }
   }
 
