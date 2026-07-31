@@ -96,6 +96,15 @@
         "zod": "^4.4.3",
       },
     },
+    "packages/yrd-intent": {
+      "name": "@yrd/intent",
+      "version": "0.0.1",
+      "dependencies": {
+        "@yrd/core": "workspace:*",
+        "@yrd/issue": "workspace:*",
+        "zod": "^4.4.3",
+      },
+    },
     "packages/yrd-issue": {
       "name": "@yrd/issue",
       "version": "0.0.1",
@@ -313,6 +322,8 @@
     "@yrd/contest": ["@yrd/contest@workspace:packages/yrd-contest"],
 
     "@yrd/core": ["@yrd/core@workspace:packages/yrd-core"],
+
+    "@yrd/intent": ["@yrd/intent@workspace:packages/yrd-intent"],
 
     "@yrd/issue": ["@yrd/issue@workspace:packages/yrd-issue"],
 
