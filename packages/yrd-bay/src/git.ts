@@ -528,7 +528,12 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
               `fetch origin '${input.branch}' and reconcile it before checkpointing again`,
           )
         }
-        await git.run(input.path, ["push", "--set-upstream", "origin", `HEAD:refs/heads/${input.branch}`])
+        await git.run(input.path, [
+          "push",
+          ...(posture === "branch" ? ["--set-upstream"] : []),
+          "origin",
+          `HEAD:refs/heads/${input.branch}`,
+        ])
         return { status: "completed", conclusion: "success", output: { headSha, pushed: true, wip } }
       } catch (cause) {
         return failure("checkpoint-failed", cause)

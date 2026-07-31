@@ -604,12 +604,14 @@ describe("createGitWorkspace", () => {
   it("provisions a bay from a commit SHA while another worktree still holds the branch (22358)", async () => {
     // Specimen: yrd pr checkout used the PR branch name; git refuses a second checkout of a
     // branch another worktree holds. Gate bays must materialize the recorded head in detached HEAD.
-    const { root, repo } = await repository()
+    const { root, repo, intake } = await repository()
     await git(repo, ["checkout", "-qb", "topic/held-by-author"])
     await writeFile(join(repo, "feature.txt"), "candidate\n")
     await git(repo, ["add", "feature.txt"])
     await git(repo, ["commit", "-qm", "candidate head"])
     const head = (await git(repo, ["rev-parse", "HEAD"])).stdout
+    await git(repo, ["remote", "add", "origin", intake])
+    await git(repo, ["push", "-q", "-u", "origin", "topic/held-by-author"])
     // Leave the branch free in the primary worktree, then hold it in the author slot —
     // the specimen state when @ci tries to bay a live seat's PR.
     await git(repo, ["checkout", "-q", "main"])
@@ -662,6 +664,29 @@ describe("createGitWorkspace", () => {
     expect((await git(path, ["rev-parse", "HEAD"])).stdout).toBe(head)
     expect((await git(path, ["branch", "--show-current"])).stdout).toBe("")
     expect((await git(path, ["show", "-s", "--format=%s", "HEAD"])).stdout).toBe("candidate head")
+
+    await writeFile(join(path, "continued.txt"), "continued in detached Bay\n")
+    await git(path, ["add", "continued.txt"])
+    await git(path, ["commit", "-qm", "continue held candidate"])
+    const continuedHead = (await git(path, ["rev-parse", "HEAD"])).stdout
+    const checkpoint = await adapter.checkpoint(
+      {
+        bay: "B-detached",
+        path,
+        branch: "topic/held-by-author",
+        from: head,
+        claim: "@yrd/core/21679-integration-model-v2/22646-bay-open-pr-recovery",
+      },
+      { ...jobContext, id: "checkpoint-22358-detached" },
+    )
+    expect(checkpoint, JSON.stringify(checkpoint)).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+      output: { headSha: continuedHead, pushed: true },
+    })
+    expect((await git(repo, ["ls-remote", "origin", "refs/heads/topic/held-by-author"])).stdout).toContain(
+      continuedHead,
+    )
   })
 
   it("provisions intake-enabled bays concurrently without racing the shared remote", async () => {
