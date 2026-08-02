@@ -605,6 +605,9 @@ export type QueueSummary = Readonly<{
 export type QueueAuditFinding = Readonly<{
   code: string
   message: string
+  /** Exact operator steps for this observed finding. Presentation preserves
+   * these as structured resolutions instead of re-deriving them from prose. */
+  resolution?: readonly string[]
   run?: RunId
   pr?: string
   /** Stable affected specimen. Page adapters dedupe on this, never a runner PID. */

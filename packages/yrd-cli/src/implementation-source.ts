@@ -18,6 +18,58 @@ export type ImplementationSourceBridge = Readonly<{
   repository: ImplementationSourceRepository
 }>
 
+export type ImplementationSourceCheckoutRelation =
+  | Readonly<{ kind: "ancestor-lag"; repository: string; pinnedSha: string }>
+  | Readonly<{ kind: "checkout-ahead" }>
+  | Readonly<{ kind: "divergent" }>
+  | Readonly<{ kind: "unprovable" }>
+
+function gitSourceSha(identity: string | undefined): string | undefined {
+  const match = /^git:([0-9a-f]{40,64})$/u.exec(identity ?? "")
+  return match?.[1]
+}
+
+async function isAncestor(
+  process: Pick<Process, "run">,
+  repository: ImplementationSourceRepository,
+  ancestor: string,
+  descendant: string,
+): Promise<boolean | undefined> {
+  const args = ["merge-base", "--is-ancestor", ancestor, descendant]
+  const result = await process.run({
+    argv: ["git", "-C", repository.root, ...args],
+    cwd: repository.root,
+    env: cleanGitEnvironment(globalThis.process.env),
+    timeoutMs: GIT_TIMEOUT_MS,
+  })
+  if (result.timedOut) throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
+  if (result.exitCode === 0) return true
+  if (result.exitCode === 1) return false
+  return undefined
+}
+
+/** Classify a clean implementation checkout against the authoritative pin.
+ * Neither direction is assumed: a stale root checkout can make the gitlink
+ * older than the component checkout, while two independently authored lines
+ * can be genuinely divergent. */
+export async function implementationSourceCheckoutRelation(
+  process: Pick<Process, "run">,
+  repository: ImplementationSourceRepository,
+  workingTree: string | undefined,
+  pinned: string | undefined,
+): Promise<ImplementationSourceCheckoutRelation> {
+  const currentSha = gitSourceSha(workingTree)
+  const pinnedSha = gitSourceSha(pinned)
+  if (currentSha === undefined || pinnedSha === undefined) return { kind: "unprovable" }
+  if (currentSha === pinnedSha) return { kind: "unprovable" }
+  const lags = await isAncestor(process, repository, currentSha, pinnedSha)
+  if (lags === true) return { kind: "ancestor-lag", repository: repository.root, pinnedSha }
+  if (lags === undefined) return { kind: "unprovable" }
+  const ahead = await isAncestor(process, repository, pinnedSha, currentSha)
+  if (ahead === true) return { kind: "checkout-ahead" }
+  return ahead === false ? { kind: "divergent" } : { kind: "unprovable" }
+}
+
 /**
  * Consume the one-process attestation installed by a trusted launcher.
  *

@@ -89,6 +89,7 @@ import { cleanGitEnvironment } from "./git-environment.ts"
 import { CHECKOUT_TIMEOUT_ENV, resolveCheckoutTimeoutMs } from "./git-timeouts.ts"
 import {
   authoritativeImplementationSource,
+  implementationSourceCheckoutRelation,
   implementationSourceIdentity,
   sourceRepositoryFor,
   takeImplementationSourceBridge,
@@ -1016,6 +1017,7 @@ function queueAdministration(
   implementationSource:
     | Readonly<{
         loaded: string
+        repository: ImplementationSourceRepository
         current(): Promise<string | undefined>
       }>
     | undefined,
@@ -1044,10 +1046,24 @@ function queueAdministration(
       ])
       const runtime = runtimeSteps()
       const pinnedSource = current.find((step) => step.kind === "merge")?.implementationSource
+      const sourceRelation =
+        implementationSource === undefined || workingSource !== implementationSource.loaded
+          ? undefined
+          : await implementationSourceCheckoutRelation(
+              process,
+              implementationSource.repository,
+              workingSource,
+              pinnedSource,
+            )
       const sourceDrift =
         implementationSource === undefined
           ? undefined
-          : runtimeImplementationSourceDrift(implementationSource.loaded, workingSource, pinnedSource)
+          : runtimeImplementationSourceDrift(
+              implementationSource.loaded,
+              workingSource,
+              pinnedSource,
+              sourceRelation ?? { kind: "unprovable" },
+            )
       const baselineFindings = Object.values(baselines).flatMap((baseline) => {
         const configDrift = installedBaselineDrift(baseline, current)
         if (configDrift !== undefined) return [configDrift]
@@ -1064,7 +1080,11 @@ function queueAdministration(
         ? baselineFindings.map((finding) =>
             finding.code !== "config-drift" || sourceDrift === undefined
               ? finding
-              : { ...finding, message: `${finding.message} ${sourceDrift.message}` },
+              : {
+                  ...finding,
+                  message: `${finding.message} ${sourceDrift.message}`,
+                  ...(sourceDrift.resolution === undefined ? {} : { resolution: sourceDrift.resolution }),
+                },
           )
         : [...(sourceDrift === undefined ? [] : [sourceDrift]), ...baselineFindings]
       return { findings }
@@ -1549,6 +1569,7 @@ async function createYrdRuntimeHost(
           ? undefined
           : {
               loaded: implementationSource,
+              repository: trackedImplementationSourceRepository,
               current: () => implementationSourceIdentity(process, trackedImplementationSourceRepository),
             },
       ),

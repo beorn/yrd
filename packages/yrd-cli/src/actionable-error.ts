@@ -1,11 +1,11 @@
 import type { PRDeliveryState } from "@yrd/bay"
 import { failureSlug } from "./failure-slug.ts"
 
-export type FailureLike = Readonly<{ code: string; message: string }>
+export type FailureLike = Readonly<{ code: string; message: string; resolution?: readonly string[] }>
 
-/** Human-facing failure contract. Journal/domain facts deliberately remain the
- * minimal `{code,message}` pair; this projection enriches old and new records
- * uniformly at the presentation boundary. */
+/** Human-facing failure contract. Persisted failures remain the minimal
+ * `{code,message}` pair; live audit evidence may additionally carry an exact
+ * resolution that this projection preserves instead of parsing from prose. */
 export type ActionableFailure = Readonly<{
   code: string
   cause: string
@@ -163,7 +163,7 @@ export function actionableFailure(failure: FailureLike, context: ActionableFailu
     const projected = recutGitlinkFailure(failure, cause, context)
     if (projected !== undefined) return projected
   }
-  const commands = embeddedYrdCommands(failure.message)
+  const commands = [...new Set([...(failure.resolution ?? []), ...embeddedYrdCommands(failure.message)])]
   return Object.freeze({
     code: failure.code,
     cause,
