@@ -1,13 +1,6 @@
 import { YRD_LIFECYCLE_LEVELS, observeYrdLifecycle, raiseFailure, type YrdDeliveryIdentity } from "@yrd/core"
-import {
-  createLogger,
-  LOG_LEVEL_PRIORITY,
-  resolveVerbosityLevel,
-  type ConditionalLogger,
-  type ConfigElement,
-  type Event,
-  type LogLevel,
-} from "loggily"
+import { createLogger, type ConditionalLogger, type ConfigElement, type Event, type LogLevel } from "loggily"
+import { LOG_LEVEL_PRIORITY, resolveVerbosityLevel } from "loggily"
 import { enableContextPropagation } from "loggily/context"
 
 export { YRD_LIFECYCLE_LEVELS, observeYrdLifecycle, type YrdDeliveryIdentity }
