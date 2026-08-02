@@ -13,8 +13,9 @@ import {
   event,
   pipe,
   type CommandResult,
+  type JsonValue,
 } from "@yrd/core"
-import { withJobs, type JobResult } from "@yrd/job"
+import { withJobs, type JobContext, type JobResult } from "@yrd/job"
 import { defineConfig, selectFlow, yrd, type FlowPin, type Submission } from "@yrd/config"
 import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
 import {
@@ -116,6 +117,61 @@ function createWorkspaceHarness() {
   return { adapter, workspace }
 }
 
+type BayJobDefinition = keyof ReturnType<typeof createBayJobDefs>
+type FailureTransition = "failure" | "lost"
+
+const BAY_JOB_DEFINITIONS = [
+  "bay.provision",
+  "bay.refresh",
+  "bay.checkpoint",
+  "bay.deprovision",
+] as const satisfies readonly BayJobDefinition[]
+
+function createFailOnceWorkspace(definition: BayJobDefinition, transition: FailureTransition) {
+  const base = createWorkspaceHarness().adapter
+  let failed = false
+  let startedResolve: (() => void) | undefined
+  const started = new Promise<void>((resolve) => {
+    startedResolve = resolve
+  })
+  const intercept = <Output extends JsonValue>(
+    current: BayJobDefinition,
+    context: JobContext,
+    success: () => JobResult<Output> | Promise<JobResult<Output>>,
+  ): JobResult<Output> | Promise<JobResult<Output>> => {
+    if (current !== definition || failed) return success()
+    failed = true
+    if (transition === "failure") {
+      return {
+        status: "completed",
+        conclusion: "failure",
+        error: { code: `fixture-${definition}`, message: `${definition} failed in its fixture state` },
+      }
+    }
+    startedResolve?.()
+    return new Promise((resolve) => {
+      context.signal.addEventListener(
+        "abort",
+        () =>
+          resolve({
+            status: "completed",
+            conclusion: "failure",
+            error: { code: `aborted-${definition}`, message: `${definition} lost its runner` },
+          }),
+        { once: true },
+      )
+    })
+  }
+  const adapter: BayWorkspace = {
+    revision: "failure-path-workspace-v1",
+    provision: (input, context) => intercept("bay.provision", context, () => base.provision(input, context)),
+    refresh: (input, context) => intercept("bay.refresh", context, () => base.refresh(input, context)),
+    checkpoint: (input, context) => intercept("bay.checkpoint", context, () => base.checkpoint(input, context)),
+    deprovision: (input, context) => intercept("bay.deprovision", context, () => base.deprovision(input, context)),
+  }
+  return { adapter, started }
+}
+
 async function createHarness(log?: ConditionalLogger) {
   const harness = createWorkspaceHarness()
   return { ...harness, app: await createApp(harness.adapter, log) }
@@ -169,7 +225,73 @@ async function finishJob(app: TestApp, result: CommandResult): Promise<void> {
   await app.jobs.run(id, { runner: "local", leaseMs: 60_000 })
 }
 
+async function settleFailureTransition(
+  app: TestApp,
+  result: CommandResult,
+  transition: FailureTransition,
+  started: Promise<void>,
+): Promise<void> {
+  const id = app.jobs.requested(result)[0]
+  if (id === undefined) throw new Error("expected one Bay workspace job")
+  if (transition === "failure") {
+    await app.jobs.run(id, runtime)
+    return
+  }
+  const running = app.jobs.run(id, { ...runtime, heartbeatMs: 5 })
+  await started
+  const job = app.jobs.get(id)
+  if (job?.status !== "in_progress") throw new Error(`expected in-progress Bay job '${id}'`)
+  await app.dispatch(app.commands.job.transition, {
+    type: "lose",
+    id,
+    attempt: job.attempt,
+    runner: job.runner,
+    leaseExpiresAt: job.leaseExpiresAt,
+    reason: `${job.definition} fixture runner lost`,
+  })
+  await running
+}
+
 describe("withBays", () => {
+  it("enumerates every Bay job definition in the terminal-reapability property", () => {
+    expect(Object.keys(createBayJobDefs(createWorkspaceHarness().adapter)).sort()).toEqual(
+      [...BAY_JOB_DEFINITIONS].sort(),
+    )
+  })
+
+  it.each(
+    BAY_JOB_DEFINITIONS.flatMap((definition) =>
+      (["failure", "lost"] as const).map((transition) => ({ definition, transition })),
+    ),
+  )("$definition $transition records remain reapable to closed", async ({ definition, transition }) => {
+    const failure = createFailOnceWorkspace(definition, transition)
+    await using app = await createApp(failure.adapter)
+    const opened = await app.bays.open({ name: "terminal-reapability" })
+    let failed: CommandResult
+    if (definition === "bay.provision") {
+      failed = opened
+    } else {
+      await finishJob(app, opened)
+      failed =
+        definition === "bay.refresh"
+          ? await app.bays.refresh({ bay: "B1" })
+          : definition === "bay.checkpoint"
+            ? await app.bays.checkpoint({ bay: "B1", claim: "@yrd/core/22646" })
+            : await app.bays.close({ bay: "B1" })
+    }
+    await settleFailureTransition(app, failed, transition, failure.started)
+
+    expect(app.bays.get("B1")).toMatchObject({
+      status: definition === "bay.provision" ? "failed" : "active",
+      failure: { code: transition === "failure" ? `fixture-${definition}` : "job-lost" },
+    })
+    if (definition === "bay.provision") expect(app.bays.get("B1")).not.toHaveProperty("path")
+
+    await finishJob(app, await app.bays.close({ bay: "B1" }))
+    expect(app.bays.get("B1")).toMatchObject({ status: "closed" })
+    expect(app.bays.get("B1")?.failure).toBeUndefined()
+  })
+
   it("keeps Hab sessions outside Bay while replaying retired session facts as no-ops", async () => {
     const nextId = ids()
     const at = "2026-01-01T00:00:00.000Z"

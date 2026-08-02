@@ -9,7 +9,7 @@ import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
 import { createFailure, createMemoryJournal, createYrd, createYrdDef, pipe, type Journal } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
-import { withStep, withQueue, Queues, type CandidatePreparer, type StepExecution } from "@yrd/queue"
+import { withMerge, withStep, withQueue, Queues, type CandidatePreparer, type StepExecution } from "@yrd/queue"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -58,7 +58,13 @@ function workspace(): BayWorkspace {
 
 /** Check-only plan: every configured step is admission work, so a refusal here
  * lands in `dispatchAdmissions` — the path that never mints a run record. */
-function checkOnlyPlugin(prepareCandidate: CandidatePreparer) {
+function checkOnlyPlugin(
+  prepareCandidate: CandidatePreparer,
+  progress: Readonly<{ noLandingMs: number; refusalCount: number }> = {
+    noLandingMs: 10 * 60_000,
+    refusalCount: 3,
+  },
+) {
   const check = withStep(
     "check",
     (_input: StepExecution): JobResult<{ checked: boolean }> => ({
@@ -68,7 +74,13 @@ function checkOnlyPlugin(prepareCandidate: CandidatePreparer) {
     }),
     { revision: "check-v1", output: CheckResultSchema },
   )
-  return withQueue({ steps: [check] as const, batch: false, defaultSteps: ["check"], prepareCandidate })
+  return withQueue({
+    steps: [check] as const,
+    batch: false,
+    defaultSteps: ["check"],
+    prepareCandidate,
+    progress,
+  })
 }
 
 async function createApp(
@@ -77,19 +89,54 @@ async function createApp(
   journal: Journal<unknown> = createMemoryJournal(),
   id: () => string = ids(),
   log?: ReturnType<typeof createLogger>,
+  progress?: Readonly<{ noLandingMs: number; refusalCount: number }>,
 ) {
   const bayJobs = createBayJobDefs(workspace())
-  const queue = checkOnlyPlugin(prepareCandidate)
+  const queue = checkOnlyPlugin(prepareCandidate, progress)
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   return createYrd(queue(base), {
     inject: { journal, id, clock, log: log ?? createLogger("test", [{ level: "silent" }]) },
   })
 }
 
-async function submitAndRequestChecks(app: Awaited<ReturnType<typeof createApp>>, branch: string) {
-  const digit = (Object.keys(app.state().bays.prs).length + 1).toString(16)
+async function createDeliveryApp(clock: () => string) {
+  const bayJobs = createBayJobDefs(workspace())
+  const check = withStep(
+    "check",
+    (_input: StepExecution): JobResult<{ checked: boolean }> => ({
+      status: "completed",
+      conclusion: "success",
+      output: { checked: true },
+    }),
+    { revision: "check-v1", output: CheckResultSchema },
+  )
+  const merge = withMerge(
+    () => ({
+      status: "completed",
+      conclusion: "success" as const,
+      output: { commit: MERGED, baseSha: BASE },
+    }),
+    { revision: "merge-v1" },
+  )
+  const queue = withQueue({
+    steps: [check, merge] as const,
+    batch: false,
+    progress: { noLandingMs: 10 * 60_000, refusalCount: 3 },
+  })
+  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+  return createYrd(queue(base), {
+    inject: { journal: createMemoryJournal(), id: ids(), clock, log: createLogger("test", [{ level: "silent" }]) },
+  })
+}
+
+type SubmissionApp = Readonly<{
+  bays: Pick<Awaited<ReturnType<typeof createApp>>["bays"], "submit" | "requestChecks" | "prs">
+}>
+
+async function submitAndRequestChecks(app: SubmissionApp, branch: string) {
+  const digit = (app.bays.prs().length + 1).toString(16)
   await app.bays.submit({ branch, headSha: digit.repeat(40), base: "main", baseSha: BASE })
-  const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
+  const pr = app.bays.prs().find((item) => item.branch === branch)
   if (pr === undefined) throw new Error("PR was not recorded")
   await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
   return pr
@@ -114,6 +161,140 @@ function refuseForever(blocked: () => string): CandidatePreparer {
 }
 
 describe("admission refusal oracle — a head-of-line PR refused at admission is visible to queue audit", () => {
+  it("pages queue progress once at T and clears the finding when queued work progresses", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    let blocked = ""
+    await using app = await createApp(
+      refuseForever(() => blocked),
+      clock.read,
+      createMemoryJournal(),
+      ids(),
+      undefined,
+      { noLandingMs: 10 * 60_000, refusalCount: 3 },
+    )
+    const pr = await submitAndRequestChecks(app, "issue/no-landing")
+    blocked = pr.id
+    await app.queue.run({}, runtime)
+
+    expect(app.queue.audit({ now: "2026-01-01T00:09:59.999Z" }).findings).not.toContainEqual(
+      expect.objectContaining({ code: "queue-progress-stalled" }),
+    )
+    expect(app.queue.audit({ now: "2026-01-01T00:10:00.000Z" }).findings).toContainEqual({
+      code: "queue-progress-stalled",
+      message: expect.stringContaining("no landing for 10m00s"),
+      pr: pr.id,
+      specimen: "queue:main",
+      count: 1,
+      since: "2026-01-01T00:00:00.000Z",
+      blockedMs: 10 * 60_000,
+    })
+
+    blocked = ""
+    clock.set("2026-01-01T00:10:01.000Z")
+    await app.queue.run({}, runtime)
+    expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).not.toContainEqual(
+      expect.objectContaining({ code: "queue-progress-stalled" }),
+    )
+  })
+
+  it("uses a real landing as the next progress clock while queued work remains", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createDeliveryApp(clock.read)
+    const first = await submitAndRequestChecks(app, "issue/lands-first")
+    const second = await submitAndRequestChecks(app, "issue/remains-queued")
+
+    expect(app.queue.audit({ now: "2026-01-01T00:10:00.000Z" }).findings).toContainEqual(
+      expect.objectContaining({
+        code: "queue-progress-stalled",
+        specimen: "queue:main",
+        count: 2,
+        since: "2026-01-01T00:00:00.000Z",
+      }),
+    )
+
+    clock.set("2026-01-01T00:10:00.000Z")
+    await app.queue.run({ prs: [first.id] }, runtime)
+    expect(app.bays.pr(first.id)?.integratedAt).toBe("2026-01-01T00:10:00.000Z")
+    expect(app.bays.pr(second.id)?.integratedAt).toBeUndefined()
+    expect(app.queue.audit({ now: "2026-01-01T00:19:59.999Z" }).findings).not.toContainEqual(
+      expect.objectContaining({ code: "queue-progress-stalled" }),
+    )
+    expect(app.queue.audit({ now: "2026-01-01T00:20:00.000Z" }).findings).toContainEqual(
+      expect.objectContaining({
+        code: "queue-progress-stalled",
+        specimen: "queue:main",
+        count: 1,
+        since: "2026-01-01T00:10:00.000Z",
+      }),
+    )
+  })
+
+  it("counts one typed refusal streak and resets that streak when the refusal code changes", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    const journal = createMemoryJournal()
+    const id = ids()
+    let refusalCode = "authored-gitlink"
+    const prepare: CandidatePreparer = () => {
+      throw createFailure({
+        kind: "refusal",
+        code: refusalCode,
+        message: `yrd: exact refusal text for ${refusalCode}`,
+      })
+    }
+    let prId = ""
+    {
+      await using app = await createApp(prepare, clock.read, journal, id)
+      const pr = await submitAndRequestChecks(app, "issue/typed-refusal-streak")
+      prId = pr.id
+
+      for (const at of ["2026-01-01T00:00:00.000Z", "2026-01-01T00:01:00.000Z"]) {
+        clock.set(at)
+        await app.queue.run({}, runtime)
+      }
+      refusalCode = "base-moved"
+      for (const at of ["2026-01-01T00:02:00.000Z", "2026-01-01T00:03:00.000Z", "2026-01-01T00:04:00.000Z"]) {
+        clock.set(at)
+        await app.queue.run({}, runtime)
+      }
+
+      expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({
+        count: 5,
+        sameCodeCount: 3,
+        sameCodeFirstAt: "2026-01-01T00:02:00.000Z",
+        code: "base-moved",
+      })
+      expect(app.queue.audit().findings).toContainEqual({
+        code: "admission-refusal-loop",
+        message: expect.stringContaining("exact refusal text for base-moved"),
+        pr: pr.id,
+        specimen: `pr:${pr.id}:refusal:base-moved`,
+        refusal: "base-moved",
+        count: 3,
+        since: "2026-01-01T00:02:00.000Z",
+        blockedMs: 2 * 60_000,
+      })
+      expect(app.queue.audit({ now: "2026-01-01T00:20:00.000Z" }).findings).toHaveLength(1)
+    }
+
+    await using replayed = await createApp(prepare, clock.read, journal, id)
+    expect(replayed.state().queues.admissionRefusals[prId]).toMatchObject({
+      count: 5,
+      sameCodeCount: 3,
+      sameCodeFirstAt: "2026-01-01T00:02:00.000Z",
+      code: "base-moved",
+    })
+    expect(replayed.queue.audit().findings).toContainEqual({
+      code: "admission-refusal-loop",
+      message: expect.stringContaining("exact refusal text for base-moved"),
+      pr: prId,
+      specimen: `pr:${prId}:refusal:base-moved`,
+      refusal: "base-moved",
+      count: 3,
+      since: "2026-01-01T00:02:00.000Z",
+      blockedMs: 2 * 60_000,
+    })
+  })
+
   it("counts consecutive admission refusals and names the PR, code, count, and block span", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     let blocked = ""
@@ -151,6 +332,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       code: "admission-refusal-loop",
       message: expect.stringContaining(`PR '${pr.id}'`),
       pr: pr.id,
+      specimen: `pr:${pr.id}:refusal:authored-gitlink`,
       refusal: "authored-gitlink",
       count: 3,
       since: "2026-01-01T00:00:00.000Z",

@@ -488,7 +488,21 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
   runner?: (jobs: Jobs) => Runner
   /** Live base-authority flows used for drift warnings and resume refusal. */
   flows?: YrdConfig
+  /** Progress SLO declaration. Audit emits facts; paging remains a Hab concern. */
+  progress?: QueueProgressPolicy
 }>
+
+export type QueueProgressPolicy = Readonly<{
+  noLandingMs: number
+  refusalCount: number
+}>
+
+export const DEFAULT_QUEUE_PROGRESS_POLICY: QueueProgressPolicy = Object.freeze({
+  noLandingMs: 10 * 60_000,
+  refusalCount: ADMISSION_REFUSAL_LOOP_THRESHOLD,
+})
+
+export type QueueAuditOptions = Readonly<{ now?: string }>
 
 export type CandidatePreparationInput = Readonly<{
   id: string
@@ -595,12 +609,6 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   readonly shape?: Shape
   state: ReadSignal<DeepReadonly<QueuesState>>
   steps(): readonly InstalledStep[]
-  /**
-   * Execute submit-time admission against the current revision and retain the
-   * verdict on that revision. Unlike legacy `admit`, this never creates a
-   * Queue Run; Queue Runs are reserved for landing attempts.
-   */
-  admitRevision(args: AdmitSelection, options: RunJobOptions): Promise<void>
   /** Legacy Run-shaped admission retained for replay and waiting callers. */
   admit(args: AdmitSelection, options?: RunJobOptions): Promise<readonly Run[]>
   pause(args: PauseQueueArgs): Promise<QueuePause>
@@ -613,7 +621,7 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   cancel(args: CancelQueueArgs): Promise<readonly Run[]>
   cancelRun(args: CancelRunArgs): Promise<Run>
   recover(options: RecoverQueueOptions): Promise<readonly Run[]>
-  audit(): QueueAuditResult
+  audit(options?: QueueAuditOptions): QueueAuditResult
   eligibility(selector: string, snapshot?: DeepReadonly<QueueRuntimeState>): PREligibility
   eligibilities(snapshot?: DeepReadonly<QueueRuntimeState>): readonly PREligibility[]
   checks(selectors?: readonly string[]): readonly PRCheckRecord[]
@@ -683,6 +691,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
   options: QueueOptions<Steps> & ValidateStepChain<Steps>,
 ): QueuePlugin<FinalShape<Steps>> {
   const steps = installSteps(options.steps)
+  const progress = validateQueueProgressPolicy(options.progress ?? DEFAULT_QUEUE_PROGRESS_POLICY)
   const byName = new Map(steps.map((step) => [step.name, step] as const))
   const batchSize = normalizeBatch(options.batch ?? 1)
   const defaults = options.defaultSteps === undefined ? undefined : selectSteps(steps, options.defaultSteps)
@@ -720,7 +729,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/run/canceled": QueueRunCanceledFactSchema,
         "queue/run/settled": SettledEventSchema,
       },
-      projectionVersion: "queues-v8-admission-settlement",
+      projectionVersion: "queues-v9-progress-slo",
       project: projectQueues,
       compact: (state, complete) => {
         const runtime = complete as unknown as DeepReadonly<RuntimeState>
@@ -776,6 +785,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
             options.prepareCandidate,
             configuredRunner,
             options.flows,
+            progress,
             yrd.log.child("queue"),
             yrd.history,
             async () => (await yrd.historySnapshot()).state as unknown as DeepReadonly<RuntimeState>,
@@ -991,6 +1001,7 @@ function createQueue<Shape extends PRShape>(
   prepareCandidate: CandidatePreparer | undefined,
   configuredRunner: Runner | undefined,
   flows: YrdConfig | undefined,
+  progress: QueueProgressPolicy,
   log: ConditionalLogger,
   history: JournalHistory<unknown> | undefined,
   historicalState: () => Promise<DeepReadonly<RuntimeState>>,
@@ -1787,42 +1798,6 @@ function createQueue<Shape extends PRShape>(
         },
       )
     },
-    async admitRevision(args, runOptions) {
-      const resolveCycleBase = createBaseResolutionCycle()
-      const requestedSelectors = args.prs?.length ? args.prs : undefined
-      await actions.refresh()
-      await cleanupSettledRoots()
-      let snapshot = runtime()
-      const selected =
-        requestedSelectors === undefined
-          ? admissionQueue(snapshot, steps)
-          : requestedSelectors.map((selector) => {
-              const pr = resolvePR(snapshot.bays, selector)
-              if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
-              return pr
-            })
-      await refreshCheckIdentities(selected, resolveCycleBase)
-      snapshot = runtime()
-      const prs =
-        requestedSelectors === undefined
-          ? admissionQueue(snapshot, steps)
-          : selected.map((pr) => {
-              const current = resolvePR(snapshot.bays, pr.id)
-              if (current === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${pr.id}'`)
-              return current
-            })
-      for (const pr of prs) {
-        const staleRuns = activeQueueRuns(runtime().queues, runtime().jobs).filter((run) =>
-          run.prs.some(
-            (member) =>
-              member.id === pr.id && (member.revision !== prRevisionNumber(pr) || member.headSha !== prHead(pr)),
-          ),
-        )
-        for (const stale of staleRuns) await settle(stale.id, runOptions)
-        const baseSha = await resolveCandidateBaseSha([pr], resolveCycleBase)
-        await admitPRRevision(pr, baseSha, runOptions)
-      }
-    },
     async pause(args) {
       const snapshot = runtime()
       const base = queueBase(snapshot, args.base)
@@ -2423,7 +2398,7 @@ function createQueue<Shape extends PRShape>(
         },
       )
     },
-    audit: () => auditQueues(runtime(), steps),
+    audit: (options = {}) => auditQueues(runtime(), steps, progress, options),
     eligibility(selector, projected) {
       // Called once per PR by the queue views, and the single largest stage of a
       // cold `queue ls` — resolvePR plus prEligibility together dominate it.
@@ -4110,6 +4085,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
       streak?.revision === undefined ||
       (streak.revision === refusal.revision && streak.headSha === refusal.headSha)
     const prior = sameRevision ? streak : undefined
+    const sameCode = prior?.code === refusal.code
     return {
       queues: {
         ...state.queues,
@@ -4129,7 +4105,9 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
             // refusal codes is still one PR that never got in. The latest code
             // is what an operator needs to act on.
             count: (prior?.count ?? 0) + 1,
+            sameCodeCount: sameCode ? (prior?.sameCodeCount ?? prior?.count ?? 0) + 1 : 1,
             firstAt: prior?.firstAt ?? applied.ts,
+            sameCodeFirstAt: sameCode ? (prior?.sameCodeFirstAt ?? prior?.firstAt ?? applied.ts) : applied.ts,
             lastAt: applied.ts,
             ...(prior?.settlement === undefined ? {} : { settlement: prior.settlement }),
           },
@@ -4358,11 +4336,19 @@ function requiredCandidateBaseSha(prs: readonly DeepReadonly<PRSnapshot>[]): str
   return baseSha
 }
 
-function candidateContentKey(prs: readonly DeepReadonly<PRSnapshot>[], baseSha: string): string {
+function candidateArtifactKey(prs: readonly DeepReadonly<PRSnapshot>[], baseSha: string): string {
   return JSON.stringify([
     prs[0] === undefined ? "" : queueIdentity(prs[0]),
     baseSha,
     ...prs.map((pr) => [pr.headSha, pr.composition]),
+  ])
+}
+
+function candidateReceiptKey(prs: readonly DeepReadonly<PRSnapshot>[], baseSha: string): string {
+  return JSON.stringify([
+    prs[0] === undefined ? "" : queueIdentity(prs[0]),
+    baseSha,
+    ...prs.map((pr) => [pr.id, pr.revision, pr.headSha, pr.composition]),
   ])
 }
 
@@ -4391,14 +4377,14 @@ function candidateFor(
 ): DeepReadonly<Candidate> | undefined {
   const first = prs[0]
   if (first === undefined) return undefined
-  const key = candidateContentKey(prs, baseSha)
+  const key = candidateReceiptKey(prs, baseSha)
   const records = Queues.values(queues)
   const record = records.find((run) => {
     const candidate = queues.candidates[run.candidateId]
     return (
       candidate !== undefined &&
       candidate.mergeability !== "unknown" &&
-      candidateContentKey(run.prs, candidate.baseSha) === key
+      candidateReceiptKey(run.prs, candidate.baseSha) === key
     )
   })
   if (record !== undefined) return queues.candidates[record.candidateId]
@@ -5115,7 +5101,80 @@ function unisolableStalePlanBatches(
   return batches
 }
 
-function auditQueues(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): QueueAuditResult {
+type CandidateRevisionMismatch = Readonly<{
+  candidate: string
+  run: RunId
+  pr: string
+  recordedRevision: number
+  recordedHead: string
+  currentRevision: number
+  currentHead: string
+}>
+
+/**
+ * Content-equivalent historical Candidates are valid artifacts, but they are
+ * not authority for a newer PR revision. Surface the exact state that used to
+ * make {@link candidateFor} select the old Candidate and then make
+ * {@link startRun} refuse its immutable receipt. Once an exact current receipt
+ * exists, the old Candidate is ordinary history and the finding clears.
+ */
+function candidateRevisionMismatches(state: DeepReadonly<RuntimeState>): readonly CandidateRevisionMismatch[] {
+  const mismatches: CandidateRevisionMismatch[] = []
+  const seen = new Set<string>()
+  for (const record of Queues.values(state.queues)) {
+    const candidate = state.queues.candidates[record.candidateId]
+    if (candidate === undefined || candidate.mergeability === "unknown") continue
+    const current: PRSnapshot[] = []
+    let live = true
+    for (const snapshot of record.prs) {
+      const pr = state.bays.prs[snapshot.id]
+      const delivery = pr === undefined ? undefined : prDeliveryState(pr)
+      if (pr === undefined || (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready")) {
+        live = false
+        break
+      }
+      current.push(Queues.snapshot(pr))
+    }
+    if (!live) continue
+    const currentBaseSha = current[0]?.baseSha
+    if (currentBaseSha === undefined || current.some((snapshot) => snapshot.baseSha !== currentBaseSha)) continue
+    if (candidateArtifactKey(record.prs, candidate.baseSha) !== candidateArtifactKey(current, currentBaseSha)) continue
+    if (candidateReceiptKey(record.prs, candidate.baseSha) === candidateReceiptKey(current, currentBaseSha)) continue
+    if (candidateFor(state.queues, current, currentBaseSha) !== undefined) continue
+    const mismatchIndex = candidate.revs.findIndex((revision, index) => {
+      const snapshot = current[index]
+      return (
+        snapshot === undefined ||
+        revision.pr !== snapshot.id ||
+        revision.n !== snapshot.revision ||
+        revision.head !== snapshot.headSha
+      )
+    })
+    const recorded = candidate.revs[mismatchIndex]
+    const latest = current[mismatchIndex]
+    if (recorded === undefined || latest === undefined) continue
+    const key = candidateReceiptKey(current, currentBaseSha)
+    if (seen.has(key)) continue
+    seen.add(key)
+    mismatches.push({
+      candidate: candidate.id,
+      run: record.id,
+      pr: latest.id,
+      recordedRevision: recorded.n,
+      recordedHead: recorded.head,
+      currentRevision: latest.revision,
+      currentHead: latest.headSha,
+    })
+  }
+  return mismatches
+}
+
+function auditQueues(
+  state: DeepReadonly<RuntimeState>,
+  steps: readonly RuntimeStep[],
+  progress: QueueProgressPolicy,
+  options: QueueAuditOptions,
+): QueueAuditResult {
   const findings: QueueAuditFinding[] = []
   const installed = new Map(steps.map((step) => [step.name, step]))
   for (const record of Queues.values(state.queues)) {
@@ -5191,6 +5250,17 @@ function auditQueues(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeS
       }
     }
   }
+  for (const mismatch of candidateRevisionMismatches(state)) {
+    findings.push({
+      code: "candidate-revision-mismatch",
+      message:
+        `Candidate '${mismatch.candidate}' from queue run '${mismatch.run}' records PR '${mismatch.pr}' ` +
+        `revision ${mismatch.recordedRevision}@${mismatch.recordedHead}, but the content-equivalent current receipt is ` +
+        `revision ${mismatch.currentRevision}@${mismatch.currentHead}; no exact current-revision Candidate exists`,
+      run: mismatch.run,
+      pr: mismatch.pr,
+    })
+  }
   // The record walk above `continue`s past terminal runs and never inspects Jobs
   // whose run record is gone — so a requested Job stranded under a terminal or
   // absent run was invisible ("queue audit clean" printed over it). Surface it.
@@ -5216,27 +5286,108 @@ function auditQueues(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeS
   // here: `queue audit` reported `findings: []` through a 5h46m block while each
   // cycle logged a loggily-only `compose-candidate-skip`. The refusal ledger is
   // the durable trace of exactly that, so read it (22395).
-  const head = admissionQueue(state, steps)[0]
+  const queued = admissionQueue(state, steps)
+  const refusalFindings = admissionRefusalAuditFindings(state, queued, progress)
+  findings.push(...refusalFindings)
+  findings.push(...queueProgressAuditFindings(state, queued, refusalFindings, progress, options))
+  return { findings }
+}
+
+function admissionRefusalAuditFindings(
+  state: DeepReadonly<RuntimeState>,
+  queued: readonly DeepReadonly<PR>[],
+  progress: QueueProgressPolicy,
+): QueueAuditFinding[] {
+  const findings: QueueAuditFinding[] = []
+  const head = queued[0]
   for (const refusal of Object.values(state.queues.admissionRefusals).toSorted((left, right) =>
     compareNatural(left.pr, right.pr),
   )) {
-    if (refusal.settlement !== undefined || refusal.count < ADMISSION_REFUSAL_LOOP_THRESHOLD) continue
-    const blockedMs = Math.max(0, Date.parse(refusal.lastAt) - Date.parse(refusal.firstAt))
+    const sameCodeCount = refusal.sameCodeCount ?? refusal.count
+    const sameCodeFirstAt = refusal.sameCodeFirstAt ?? refusal.firstAt
+    if (refusal.settlement !== undefined || sameCodeCount < progress.refusalCount) continue
+    const blockedMs = Math.max(0, Date.parse(refusal.lastAt) - Date.parse(sameCodeFirstAt))
     const position = head?.id === refusal.pr ? " at the head of the required-check queue" : ""
     findings.push({
       code: "admission-refusal-loop",
       message:
-        `PR '${refusal.pr}'${position} was refused ${refusal.count} consecutive times ` +
-        `over ${formatRefusalSpan(blockedMs)} (since ${refusal.firstAt}) without ever completing required checks; ` +
+        `PR '${refusal.pr}'${position} was refused ${sameCodeCount} consecutive times ` +
+        `over ${formatRefusalSpan(blockedMs)} (since ${sameCodeFirstAt}) without ever completing required checks; ` +
         `latest refusal '${refusal.code}': ${refusal.reason}`,
       pr: refusal.pr,
+      specimen: `pr:${refusal.pr}:refusal:${refusal.code}`,
       refusal: refusal.code,
-      count: refusal.count,
-      since: refusal.firstAt,
+      count: sameCodeCount,
+      since: sameCodeFirstAt,
       blockedMs,
     })
   }
-  return { findings }
+  return findings
+}
+
+function queueProgressAuditFindings(
+  state: DeepReadonly<RuntimeState>,
+  queued: readonly DeepReadonly<PR>[],
+  refusalFindings: readonly QueueAuditFinding[],
+  progress: QueueProgressPolicy,
+  options: QueueAuditOptions,
+): QueueAuditFinding[] {
+  if (options.now === undefined || queued.length === 0) return []
+  const findings: QueueAuditFinding[] = []
+  const nowMs = parseAuditTime(options.now, "now")
+  const byBase = Map.groupBy(queued, (pr) => baseIdentity(pr.base))
+  for (const [base, prs] of [...byBase.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+    const queuedAtMs = Math.min(...prs.map((pr) => parseAuditTime(checkQueueTime(pr), `queue time for ${pr.id}`)))
+    const latestLandingMs = latestQueueLandingMs(state, base)
+    const sinceMs = Math.max(queuedAtMs, latestLandingMs ?? queuedAtMs)
+    const blockedMs = Math.max(0, nowMs - sinceMs)
+    const first = prs[0]
+    if (
+      blockedMs < progress.noLandingMs ||
+      first === undefined ||
+      refusalFindings.some((finding) => finding.pr === first.id)
+    ) {
+      continue
+    }
+    const since = new Date(sinceMs).toISOString()
+    findings.push({
+      code: "queue-progress-stalled",
+      message:
+        `Queue '${base}' has ${prs.length} required-check ${prs.length === 1 ? "PR" : "PRs"} queued and ` +
+        `no landing for ${formatRefusalSpan(blockedMs)} (since ${since}); head is '${first.id}'.`,
+      pr: first.id,
+      specimen: `queue:${base}`,
+      count: prs.length,
+      since,
+      blockedMs,
+    })
+  }
+  return findings
+}
+
+function latestQueueLandingMs(state: DeepReadonly<RuntimeState>, base: string): number | undefined {
+  return Object.values(state.bays.prs)
+    .filter((pr) => baseIdentity(pr.base) === base)
+    .flatMap((pr) => [pr.integratedAt, pr.alreadyLandedAt])
+    .filter((at): at is string => at !== undefined)
+    .map((at) => parseAuditTime(at, "landing time"))
+    .reduce<number | undefined>((latest, at) => (latest === undefined ? at : Math.max(latest, at)), undefined)
+}
+
+function validateQueueProgressPolicy(policy: QueueProgressPolicy): QueueProgressPolicy {
+  if (!Number.isSafeInteger(policy.noLandingMs) || policy.noLandingMs < 1) {
+    throw new Error("yrd: queue progress noLandingMs must be an integer >= 1")
+  }
+  if (!Number.isSafeInteger(policy.refusalCount) || policy.refusalCount < 1) {
+    throw new Error("yrd: queue progress refusalCount must be an integer >= 1")
+  }
+  return Object.freeze({ ...policy })
+}
+
+function parseAuditTime(value: string, field: string): number {
+  const milliseconds = Date.parse(value)
+  if (!Number.isFinite(milliseconds)) throw new Error(`yrd: queue audit ${field} must be an ISO timestamp`)
+  return milliseconds
 }
 
 /** Compact block span for the audit message. Deliberately derived from the two
@@ -5939,6 +6090,7 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     "authored-gitlink",
     "composition-invalid",
     "gitlink-inspection",
+    "merge-tip-carrier",
     "refused-path",
     "refused-path-inspection",
     "wrapper-mismatch",
@@ -5949,14 +6101,23 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     "payload-mismatch",
     "payload-overlap",
   ]),
-  "infra-retry": new Set<string>(["source-publish", "scratch-cleanup-failed"]),
+  "infra-retry": new Set<string>([
+    "carrier-inspection",
+    "source-publish",
+    "scratch-cleanup-failed",
+    "wrapper-generation",
+  ]),
   "recut-lineage": new Set<string>(["recut-certificate", "restack-conflict", "restack-failed"]),
   "plain-rejected": new Set<string>(),
 } as const
 
 const NEEDS_AUTHOR_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKETS["needs-author"]
 
-type InfraRetryCompositionFailure = "source-publish" | "scratch-cleanup-failed"
+type InfraRetryCompositionFailure =
+  | "carrier-inspection"
+  | "source-publish"
+  | "scratch-cleanup-failed"
+  | "wrapper-generation"
 
 function isInfraRetryCompositionFailure(code: string | undefined): code is InfraRetryCompositionFailure {
   return code !== undefined && COMPOSITION_FAILURE_BUCKETS["infra-retry"].has(code)

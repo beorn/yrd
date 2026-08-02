@@ -3560,6 +3560,25 @@ describe("runYrd", () => {
     expect(JSON.parse(output.stdout())).toMatchObject({ bays: [] })
   })
 
+  it("force-closes a failed provision that never acquired a workspace path", async () => {
+    const app = await createApp({ failingBay: "B1" })
+    const failedOpen = await app.bays.open({ name: "pathless" })
+    await app.jobs.runMany(app.jobs.requested(failedOpen), {
+      runner: "cli-test",
+      leaseMs: 60_000,
+    })
+    expect(app.bays.get("B1")).toMatchObject({
+      status: "failed",
+      failure: { code: "provision-failed" },
+    })
+    expect(app.bays.get("B1")).not.toHaveProperty("path")
+
+    const close = outputIO()
+    expect(await runYrd(app, yrd("bay", "close", "--force", "B1"), close.io), close.stderr()).toBe(0)
+    expect(app.bays.get("B1")).toMatchObject({ status: "closed" })
+    expect(app.bays.get("B1")).not.toHaveProperty("path")
+  })
+
   it("uses by, submitter, and reviewer throughout CLI help", async () => {
     const app = await createApp()
     for (const args of [
@@ -4798,6 +4817,7 @@ describe("runYrd", () => {
       code: "admission-refusal-loop",
       message: expect.stringContaining("PR1"),
       pr: "PR1",
+      specimen: "pr:PR1:refusal:authored-gitlink",
       refusal: "authored-gitlink",
       count: 3,
       since: "2026-07-09T12:00:00.000Z",
@@ -4811,6 +4831,37 @@ describe("runYrd", () => {
     expect(text).toContain("admission-refusal-loop")
     expect(text).toContain("PR1")
     expect(text).toContain("authored-gitlink")
+  })
+
+  it("evaluates the no-landing clock at queue-audit invocation time", async () => {
+    await using app = await createApp({
+      prepareCandidate: () => {
+        throw createFailure({
+          kind: "refusal",
+          code: "authored-gitlink",
+          message: "yrd: PR 'PR1' authors a gitlink bump; recut it before required checks",
+        })
+      },
+    })
+    await openAndSubmit(app)
+    await app.bays.requestChecks({ pr: "PR1" })
+    await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })
+
+    const audit = outputIO({ now: () => Date.parse("2026-07-09T12:10:00.000Z") })
+    expect(await runYrd(app, yrd("queue", "audit", "--json"), audit.io), audit.stderr()).toBe(1)
+    expect(JSON.parse(audit.stdout())).toMatchObject({
+      command: "queue.audit",
+      findings: [
+        {
+          code: "queue-progress-stalled",
+          specimen: "queue:main",
+          pr: "PR1",
+          count: 1,
+          since: "2026-07-09T12:00:00.000Z",
+          blockedMs: 600_000,
+        },
+      ],
+    })
   })
 
   it("names environment audit blockers instead of reporting queue recovery idle", async () => {
@@ -5390,8 +5441,8 @@ describe("runYrd", () => {
     const attempts = (label: string) => buckets.find((bucket) => bucket.label === label)!.runs.all
     expect(attempts("TODAY")).toBe(1)
     expect(attempts("YESTERDAY")).toBe(0)
-    expect(attempts("THIS WEEK")).toBe(1)
-    expect(attempts("THIS MONTH")).toBe(2)
+    expect(attempts("WEEK")).toBe(1)
+    expect(attempts("MONTH")).toBe(2)
   })
 
   it("keeps failed-attempt retries on the Run that owned them", () => {
@@ -6675,7 +6726,7 @@ describe("runYrd", () => {
       expect(frame).toContain("Queued at position 1")
       expect(frame).toMatch(/POSITION\s+1/u)
       expect(frame).toContain("AGE")
-      expect(frame).toContain("WAIT")
+      expect(frame).toContain("QUEUING")
       expect(frame).toContain("NO RUNNER - no drained run in window")
       // The bottom keybindings footer row was removed entirely (item h).
       expect(frame).not.toContain("q quit")
@@ -11574,7 +11625,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
         sha: baseSha,
       })
       const services = {
-        [QueueReadBoundary]: { submoduleWarnings: [] },
+        [QueueReadBoundary]: {},
       } as unknown as YrdCliServices
 
       for (const argv of [yrd("queue", "list", "--json"), yrd("--json")]) {
@@ -11611,7 +11662,6 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       const services = {
         [QueueReadBoundary]: {
           readModel: { snapshot: async () => ({ cursor, generation: 1, attempts }) },
-          submoduleWarnings: [],
         },
       } as unknown as YrdCliServices
       const live = withLiveRenderer(output.io, async (element) => {

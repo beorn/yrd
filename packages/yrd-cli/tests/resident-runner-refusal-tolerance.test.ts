@@ -7,49 +7,7 @@ import { describe, expect, it } from "vitest"
 import { PrCheckabilityConflict } from "@yrd/bay"
 import { QueueRunningConflict } from "@yrd/queue"
 import { followQueueRuns } from "../src/run.ts"
-import type { YrdCliApp, YrdCliIO } from "../src/types.ts"
-
-type WarnCall = Readonly<{ message: string; props: Record<string, unknown> }>
-
-function harness(runResponses: readonly (() => Promise<readonly unknown[]>)[]) {
-  const signal = { aborted: false }
-  const warnings: WarnCall[] = []
-  const stderr: string[] = []
-  const stdout: string[] = []
-  let runCalls = 0
-  const app = {
-    scope: { signal, sleep: async () => undefined },
-    // Nothing has ever been refused here: the follow loop reads the admission
-    // refusal ledger after each settled cycle for its stall health check.
-    state: () => ({ bays: { prs: {} }, queues: { admissionRefusals: {} } }),
-    log: {
-      warn: (message: string, props: Record<string, unknown>) => warnings.push({ message, props }),
-    },
-    queue: {
-      run: async () => {
-        const responder = runResponses[runCalls] ?? runResponses.at(-1)
-        runCalls += 1
-        if (responder === undefined) throw new Error("no run responder configured")
-        return responder()
-      },
-    },
-  } as unknown as YrdCliApp
-  const io = {
-    stdout: (text: string) => stdout.push(text),
-    stderr: (text: string) => stderr.push(text),
-  } as unknown as YrdCliIO
-  const gate = async (): Promise<void> => undefined
-  return {
-    app,
-    io,
-    gate,
-    signal,
-    warnings,
-    stderr,
-    stdout,
-    runCalls: () => runCalls,
-  }
-}
+import { createResponseResidentHarness as harness } from "./support/resident-harness.ts"
 
 describe("resident runner — a busy queue never kills the watch loop (Defect 1)", () => {
   it("defers with a loud loggily warn and processes the NEXT cycle when the queue frees", async () => {
@@ -176,34 +134,37 @@ describe("resident runner — a PR withdrawn mid-compose never kills the watch l
     )
   })
 
-  it("skips authored-gitlink (and the broader per-PR refusal class) without dying (22306 class)", async () => {
-    // @ci 2026-07-25: a single PR's authored-gitlink killed the whole resident.
-    // Architectural acceptance: any PR-scoped refusal is a cycle skip, not exit 1.
-    const { createFailure } = await import("@yrd/core")
-    const h = harness([
-      () =>
-        Promise.reject(
-          createFailure({
-            kind: "refusal",
-            code: "authored-gitlink",
-            message:
-              "yrd: PR 'PR1579' changes generated-only gitlinks [km]; authored root carriers use 'yrd pr create <branch>'",
-          }),
-        ),
-      () => {
-        h.signal.aborted = true
-        return Promise.resolve([])
-      },
-    ])
-    await expect(followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).resolves.toBe(0)
-    expect(h.runCalls()).toBe(2)
-    expect(h.warnings).toContainEqual(
-      expect.objectContaining({
-        props: expect.objectContaining({ action: "resident-pr-refusal-skip", code: "authored-gitlink" }),
-      }),
-    )
-    expect(h.stderr.join("")).toBe("")
-  })
+  it.each(["authored-gitlink", "merge-tip-carrier"] as const)(
+    "skips the PR-scoped refusal %s without dying (22306 class)",
+    async (code) => {
+      // @ci 2026-07-25: a single PR's authored-gitlink killed the whole resident.
+      // Architectural acceptance: any PR-scoped refusal is a cycle skip, not exit 1.
+      const { createFailure } = await import("@yrd/core")
+      const h = harness([
+        () =>
+          Promise.reject(
+            createFailure({
+              kind: "refusal",
+              code,
+              message:
+                "yrd: PR 'PR1579' changes generated-only gitlinks [km]; authored root carriers use 'yrd pr create <branch>'",
+            }),
+          ),
+        () => {
+          h.signal.aborted = true
+          return Promise.resolve([])
+        },
+      ])
+      await expect(followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).resolves.toBe(0)
+      expect(h.runCalls()).toBe(2)
+      expect(h.warnings).toContainEqual(
+        expect.objectContaining({
+          props: expect.objectContaining({ action: "resident-pr-refusal-skip", code }),
+        }),
+      )
+      expect(h.stderr.join("")).toBe("")
+    },
+  )
 })
 
 describe("resident runner — tolerated skips are loggily-only (Defect 3)", () => {

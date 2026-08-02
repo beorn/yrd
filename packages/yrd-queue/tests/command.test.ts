@@ -29,6 +29,7 @@ import {
   gitCheckStep,
   gitMergeStep,
   PRSnapshotSchema,
+  Queues,
   validateStateDecommissionException,
   withQueue,
   withMerge,
@@ -52,7 +53,6 @@ const gitFetchTimeout = {
   timedOut: true,
   verdict: "TIMED_OUT",
 } satisfies ProcessResult
-const authoredGitlinksEnv = { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITLINKS: "1" }
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 type Checked = AddStepResult<PRShape, "check", GitCheckResultEvidence>
 
@@ -320,62 +320,6 @@ async function multiComponentMainLandingRepository(): Promise<{
   }
 }
 
-async function divergentSubmoduleRepository(kind: "clean" | "conflict"): Promise<{
-  repo: string
-  module: string
-  moduleBaseSha: string
-  rootBaseSha: string
-  rootCurrentSha: string
-  featureSha: string
-}> {
-  const { repo } = await repository()
-  const module = join(repo, "..", `composition-module-${kind}`)
-  await Bun.$`git init -q -b main ${module}`
-  await git(module, ["config", "user.name", "Yrd Test"])
-  await git(module, ["config", "user.email", "yrd@example.invalid"])
-  await writeFile(join(module, "notes.md"), "top\nmiddle\nbottom\n")
-  await git(module, ["add", "notes.md"])
-  await git(module, ["commit", "-qm", "base"])
-  const baseSha = await git(module, ["rev-parse", "HEAD"])
-
-  await git(module, ["switch", "-qc", "current"])
-  await writeFile(
-    join(module, "notes.md"),
-    kind === "clean" ? "top-current\nmiddle\nbottom\n" : "top\ncurrent\nbottom\n",
-  )
-  await git(module, ["commit", "-qam", "current"])
-  const currentSha = await git(module, ["rev-parse", "HEAD"])
-
-  await git(module, ["switch", "-qc", "incoming", baseSha])
-  await writeFile(
-    join(module, "notes.md"),
-    kind === "clean" ? "top\nmiddle\nbottom-incoming\n" : "top\nincoming\nbottom\n",
-  )
-  await git(module, ["commit", "-qam", "incoming"])
-  const incomingSha = await git(module, ["rev-parse", "HEAD"])
-  await git(module, ["switch", "-q", "main"])
-
-  await git(repo, ["config", "protocol.file.allow", "always"])
-  await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "dep"])
-  await git(repo, ["commit", "-qam", "add dependency"])
-  const rootBaseSha = await git(repo, ["rev-parse", "HEAD"])
-  await git(join(repo, "dep"), ["fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*"])
-
-  await git(join(repo, "dep"), ["checkout", "-q", currentSha])
-  await git(repo, ["add", "dep"])
-  await git(repo, ["commit", "-qm", "advance current dependency"])
-  const rootCurrentSha = await git(repo, ["rev-parse", "HEAD"])
-
-  await git(repo, ["switch", "-qc", "issue/feature", rootBaseSha])
-  await git(join(repo, "dep"), ["checkout", "-q", incomingSha])
-  await git(repo, ["add", "dep"])
-  await git(repo, ["commit", "-qm", "advance incoming dependency"])
-  const featureSha = await git(repo, ["rev-parse", "HEAD"])
-  await git(repo, ["switch", "-q", "main"])
-  await git(repo, ["-c", "protocol.file.allow=always", "submodule", "update", "-q"])
-  return { repo, module, moduleBaseSha: baseSha, rootBaseSha, rootCurrentSha, featureSha }
-}
-
 async function restackSubmoduleRepository(
   options: Readonly<{
     sourcePath?: string
@@ -607,6 +551,64 @@ async function checkedQueue(
   })
 }
 
+type TestQueueApp = Awaited<ReturnType<typeof checkedQueue>>
+type CarrierSubmissionApp = Pick<TestQueueApp, "bays" | "state">
+type CarrierSubmission = Readonly<{
+  branch: string
+  headSha: string
+  base?: string
+  baseSha?: string
+  issue?: string
+}>
+
+/** Exercise the supported authored-root intake path used by tests whose real
+ * subject is downstream candidate checking, reachability, or landing. */
+async function submitCertifiedCarrier(
+  app: CarrierSubmissionApp,
+  repo: string,
+  submission: CarrierSubmission,
+): Promise<PR> {
+  const base = submission.base ?? "main"
+  await app.bays.submit({ ...submission, base, draft: true })
+  const pr = Object.values(app.state().bays.prs).find(({ branch }) => branch === submission.branch)
+  if (pr === undefined) throw new Error(`missing submitted carrier '${submission.branch}'`)
+  const revision = currentPRRev(pr)
+  const baseSha = submission.baseSha ?? revision.baseSha ?? (await git(repo, ["merge-base", base, submission.headSha]))
+  await using delegate = createProcess()
+  const noHooks: Pick<Process, "run"> = {
+    run(request) {
+      const push = request.argv.indexOf("push")
+      return push === -1
+        ? delegate.run(request)
+        : delegate.run({
+            ...request,
+            argv: [...request.argv.slice(0, push + 1), "--no-verify", ...request.argv.slice(push + 1)],
+          })
+    },
+  }
+  const recut = await createGitPRRecutter({ inject: { process: noHooks }, repo }).recut({
+    id: pr.id,
+    branch: submission.branch,
+    base,
+    revision: revision.n,
+    headSha: submission.headSha,
+    baseSha,
+  })
+  await app.bays.recut({
+    pr: pr.id,
+    fromRevision: revision.n,
+    headSha: recut.headSha,
+    baseSha: recut.baseSha,
+    treeSha: recut.treeSha,
+    patchId: recut.patchId,
+    reviewCarried: false,
+  })
+  await app.bays.ready({ pr: pr.id })
+  const certified = app.state().bays.prs[pr.id]
+  if (certified === undefined) throw new Error(`missing certified carrier '${pr.id}'`)
+  return certified
+}
+
 async function expectLanded(repo: string, evidence: GitCheckEvidence): Promise<void> {
   expect(await git(repo, ["rev-parse", "main"])).toBe(evidence.candidateSha)
   expect(await git(repo, ["rev-parse", evidence.candidateRef])).toBe(evidence.candidateSha)
@@ -773,6 +775,37 @@ describe("Queue command adapters", () => {
       failure: { kind: "refusal", code: "recut-conflict", message: expect.stringContaining("candidate.txt") },
     })
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
+  })
+
+  it("accepts Git's aligned equality rows for a ten-commit range-diff certificate", async () => {
+    const { repo } = await repository()
+    const oldBaseSha = await git(repo, ["rev-parse", "main"])
+    await git(repo, ["switch", "-qc", "issue/multi"])
+    for (const name of Array.from({ length: 10 }, (_, index) => `change-${String(index + 1).padStart(2, "0")}`)) {
+      await writeFile(join(repo, `${name}.txt`), `${name}\n`)
+      await git(repo, ["add", `${name}.txt`])
+      await git(repo, ["commit", "-qm", `add ${name}`])
+    }
+    const featureSha = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "main"])
+    await writeFile(join(repo, "upstream.txt"), "advance authority\n")
+    await git(repo, ["add", "upstream.txt"])
+    await git(repo, ["commit", "-qm", "advance authority"])
+
+    await using process = createProcess()
+    await expect(
+      createGitPRRecutter({ inject: { process }, repo }).recut({
+        id: "PR-MULTI",
+        branch: "issue/multi",
+        base: "main",
+        revision: 1,
+        headSha: featureSha,
+        baseSha: oldBaseSha,
+      }),
+    ).resolves.toMatchObject({
+      patchId: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      unchanged: false,
+    })
   })
 
   it("recuts a direct payload whose patch certificate exceeds the process output ceiling", async () => {
@@ -1203,7 +1236,7 @@ describe("Queue command adapters", () => {
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
   }, 30_000)
 
-  it("refuses a recorded base with ambiguous source merge bases", async () => {
+  it("refuses a merge-tip carrier before inspecting ambiguous source merge bases", async () => {
     const { repo } = await repository()
     await git(repo, ["switch", "-qc", "issue/left"])
     await writeFile(join(repo, "left.txt"), "left\n")
@@ -1234,7 +1267,11 @@ describe("Queue command adapters", () => {
         baseSha: leftMerge,
       }),
     ).rejects.toMatchObject({
-      failure: { kind: "refusal", code: "recut-lineage", message: expect.stringContaining("one source merge base") },
+      failure: {
+        kind: "refusal",
+        code: "merge-tip-carrier",
+        message: expect.stringContaining("one linear pin-bump commit"),
+      },
     })
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
   })
@@ -1918,6 +1955,145 @@ describe("Queue command adapters", () => {
     expect(eligibility.reason?.code).toBe("needs-author")
     expect(eligibility.reason?.receipt).toMatchObject({ code: "authored-gitlink" })
   })
+
+  it("admits only certified linear pin carriers and regenerates one byte-stable Queue wrapper (22666)", async () => {
+    const fixture = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    await using process = createProcess()
+    const input = (id: string, pr: ReturnType<typeof PRSnapshotSchema.parse>) => ({
+      id,
+      queueId: "main",
+      baseSha: pr.baseSha!,
+      revs: [{ pr: pr.id, n: pr.revision, head: pr.headSha }],
+      prs: [pr],
+    })
+    const capture = async <Value>(promise: Value | PromiseLike<Value>) => {
+      try {
+        return { value: await promise }
+      } catch (error) {
+        return { error }
+      }
+    }
+
+    // The retired environment bypass must not turn an authored gitlink into
+    // an admissible carrier.
+    const authored = PRSnapshotSchema.parse({
+      id: "PR1",
+      branch: "issue/feature",
+      base: "main",
+      revision: 1,
+      headSha: fixture.featureSha,
+      baseSha: fixture.baseSha,
+    })
+    const authoredOutcome = await capture(
+      gitCandidatePreparer({
+        inject: { process },
+        repo: fixture.repo,
+      })(input("C1", authored)),
+    )
+
+    // A root merge tip is a second unsupported intake shape even when its
+    // payload contains no authored gitlink.
+    await git(fixture.repo, ["switch", "-qc", "issue/merge-left", fixture.baseSha])
+    await writeFile(join(fixture.repo, "left.txt"), "left\n")
+    await git(fixture.repo, ["add", "left.txt"])
+    await git(fixture.repo, ["commit", "-qm", "left"])
+    await git(fixture.repo, ["switch", "-qc", "issue/merge-right", fixture.baseSha])
+    await writeFile(join(fixture.repo, "right.txt"), "right\n")
+    await git(fixture.repo, ["add", "right.txt"])
+    await git(fixture.repo, ["commit", "-qm", "right"])
+    await git(fixture.repo, ["switch", "-q", "issue/merge-left"])
+    await git(fixture.repo, ["merge", "-q", "--no-ff", "issue/merge-right", "-m", "merge root carrier"])
+    const mergeHead = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+    const mergeTip = PRSnapshotSchema.parse({
+      id: "PR2",
+      branch: "issue/merge-left",
+      base: "main",
+      revision: 1,
+      headSha: mergeHead,
+      baseSha: fixture.baseSha,
+    })
+    const mergeTipOutcome = await capture(
+      gitCandidatePreparer({ inject: { process }, repo: fixture.repo })(input("C2", mergeTip)),
+    )
+
+    // The supported linear carrier survives a base move through the normal
+    // recut certificate, then two Queue preparations with different ambient
+    // time zones must write identical wrapper commit bytes.
+    await writeFile(join(fixture.repo, "upstream.txt"), "upstream\n")
+    await git(fixture.repo, ["add", "upstream.txt"])
+    await git(fixture.repo, ["commit", "-qm", "advance root base"])
+    await git(fixture.repo, ["push", "-q", "--no-verify", "origin", "main"])
+    const movedBase = await git(fixture.repo, ["rev-parse", "main"])
+    await rm(join(fixture.repo, ".git", "hooks", "pre-push"))
+    const recut = await createGitPRRecutter({ inject: { process }, repo: fixture.repo }).recut({
+      ...authored,
+      id: "PR3",
+    })
+    await using app = await checkedQueue(process, fixture.repo, ["true"])
+    await app.bays.submit({
+      branch: authored.branch,
+      headSha: authored.headSha,
+      base: authored.base,
+      baseSha: authored.baseSha,
+      draft: true,
+    })
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: recut.headSha,
+      baseSha: recut.baseSha,
+      treeSha: recut.treeSha,
+      patchId: recut.patchId,
+      reviewCarried: false,
+    })
+    await app.bays.ready({ pr: "PR1" })
+    const linearPR = app.state().bays.prs.PR1
+    if (linearPR === undefined) throw new Error("missing certified linear PR")
+    const linear = Queues.snapshot(linearPR)
+    const utc = await gitCandidatePreparer({
+      inject: { process },
+      repo: fixture.repo,
+      env: { ...globalThis.process.env, TZ: "UTC" },
+    })(input("C3", linear))
+    const pacific = await gitCandidatePreparer({
+      inject: { process },
+      repo: fixture.repo,
+      env: { ...globalThis.process.env, TZ: "Pacific/Honolulu" },
+    })(input("C4", linear))
+    const utcBytes = utc.sha === undefined ? undefined : await git(fixture.repo, ["cat-file", "commit", utc.sha])
+    const pacificBytes =
+      pacific.sha === undefined ? undefined : await git(fixture.repo, ["cat-file", "commit", pacific.sha])
+
+    expect(authoredOutcome).toMatchObject({
+      error: {
+        failure: {
+          kind: "refusal",
+          code: "authored-gitlink",
+          message: expect.stringMatching(/yrd pr submit <branch>.*yrd pr recut PR1 --preflight --queue/iu),
+        },
+      },
+    })
+    expect(mergeTipOutcome).toMatchObject({
+      error: {
+        failure: {
+          kind: "refusal",
+          code: "merge-tip-carrier",
+          message: expect.stringMatching(/merge inside.*component.*fast-forward.*main.*linear pin-bump/iu),
+        },
+      },
+    })
+    expect(recut).toMatchObject({ baseSha: movedBase, unchanged: false })
+    expect(await git(fixture.repo, ["rev-parse", `${recut.headSha}^`])).toBe(movedBase)
+    expect(await git(fixture.repo, ["ls-tree", recut.headSha, "dep"])).toContain(fixture.moduleSha)
+    expect(utc).toMatchObject({ mergeability: "mergeable", sha: expect.stringMatching(/^[0-9a-f]{40}$/u) })
+    expect(pacific).toMatchObject({ mergeability: "mergeable", sha: utc.sha })
+    expect(pacificBytes).toBe(utcBytes)
+  }, 30_000)
 
   it("refuses a payload touching configured refuse paths and names them with the configured reason", async () => {
     const { repo } = await repository()
@@ -4192,9 +4368,8 @@ describe("Queue command adapters", () => {
     }
     await using app = await checkedQueue(guarded, repo, ["test", "-f", "feature.txt"], {
       checkoutParent: join(repo, "..", "checkouts"),
-      env: authoredGitlinksEnv,
     })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
     expect(run).toMatchObject({
@@ -4583,8 +4758,8 @@ describe("Queue command adapters", () => {
         return process.run(request)
       },
     }
-    await using app = await checkedQueue(traced, repo, ["true"], { env: authoredGitlinksEnv })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await using app = await checkedQueue(traced, repo, ["true"])
+    await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
@@ -4651,8 +4826,8 @@ describe("Queue command adapters", () => {
         return process.run(request)
       },
     }
-    await using app = await checkedQueue(unsupported, repo, ["true"], { env: authoredGitlinksEnv })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await using app = await checkedQueue(unsupported, repo, ["true"])
+    await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
@@ -4753,8 +4928,8 @@ describe("Queue command adapters", () => {
           return process.run(request)
         },
       }
-      await using app = await checkedQueue(unavailable, fixture.repo, ["true"], { env: authoredGitlinksEnv })
-      await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+      await using app = await checkedQueue(unavailable, fixture.repo, ["true"])
+      await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
 
       const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
@@ -4876,8 +5051,8 @@ describe("Queue command adapters", () => {
           return process.run(request)
         },
       }
-      await using app = await checkedQueue(unavailable, fixture.repo, ["true"], { env: authoredGitlinksEnv })
-      await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+      await using app = await checkedQueue(unavailable, fixture.repo, ["true"])
+      await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
 
       const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
@@ -4927,8 +5102,8 @@ describe("Queue command adapters", () => {
         return process.run(request)
       },
     }
-    await using app = await checkedQueue(noOrigin, fixture.repo, ["true"], { env: authoredGitlinksEnv })
-    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+    await using app = await checkedQueue(noOrigin, fixture.repo, ["true"])
+    await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
@@ -4967,8 +5142,8 @@ describe("Queue command adapters", () => {
         return process.run(request)
       },
     }
-    await using app = await checkedQueue(noOrigin, fixture.repo, ["true"], { env: authoredGitlinksEnv })
-    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+    await using app = await checkedQueue(noOrigin, fixture.repo, ["true"])
+    await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
@@ -5028,8 +5203,8 @@ describe("Queue command adapters", () => {
           return process.run(request)
         },
       }
-      await using app = await checkedQueue(unreachable, repo, ["true"], { env: authoredGitlinksEnv })
-      await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+      await using app = await checkedQueue(unreachable, repo, ["true"])
+      await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: fixture.featureSha })
 
       const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
@@ -5072,8 +5247,8 @@ describe("Queue command adapters", () => {
         return process.run(request)
       },
     }
-    await using app = await checkedQueue(traced, fixture.repo, ["true"], { env: authoredGitlinksEnv })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await using app = await checkedQueue(traced, fixture.repo, ["true"])
+    await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: featureSha })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
@@ -5086,156 +5261,55 @@ describe("Queue command adapters", () => {
     expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
-  it("composes a divergent clean submodule pin into the checked and landed root candidate", async () => {
-    const fixture = await divergentSubmoduleRepository("clean")
+  it("lands the final gitlink after composing the same submodule twice in one batch", async () => {
+    const { repo, module, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
+    await git(module, ["switch", "-qc", "issue/source-two", oldPinSha])
+    await mkdir(join(module, "src"), { recursive: true })
+    await writeFile(join(module, "src", "second.ts"), "export const second = true\n")
+    await git(module, ["add", "src/second.ts"])
+    await git(module, ["commit", "-qm", "second source payload"])
+    const secondSourceTipSha = await git(module, ["rev-parse", "HEAD"])
+    await git(module, ["switch", "-q", "main"])
+    await git(join(repo, "dep"), ["fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+
     await using process = createProcess()
-    await using app = await checkedQueue(process, fixture.repo, ["true"], { env: authoredGitlinksEnv })
-    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
-
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
-    const check = run.steps[0]?.job
-    if (check?.status !== "completed" || check.conclusion !== "success") {
-      throw new Error(`check was ${check?.status ?? "missing"}`)
-    }
-    const evidence = GitCheckEvidenceSchema.parse(check.output)
-
-    expect(run.status).toBe("completed")
-    expect(evidence.submoduleResolutions).toEqual([
-      {
-        kind: "compose",
-        path: "dep",
-        sha: expect.stringMatching(/^[0-9a-f]{40}$/u),
-        ref: expect.stringMatching(/^refs\/yrd\/compositions\/[0-9a-f]{64}$/u),
-        reviewedBlobs: [
+    await using app = await checkedQueue(process, repo, ["true"], { batch: 2 })
+    await app.bays.submit({
+      branch: "issue/source-one",
+      headSha: rootBaseSha,
+      base: "main",
+      baseSha: rootBaseSha,
+      composition: {
+        version: 1,
+        sources: [
           {
-            path: "notes.md",
-            oid: expect.stringMatching(/^[0-9a-f]{40}$/u),
-            content: "top-current\nmiddle\nbottom-incoming\n",
+            repo: "dep",
+            branch: "issue/source",
+            baseSha: oldPinSha,
+            tipSha: sourceTipSha,
+            payload: ["src/candidate.ts"],
           },
         ],
       },
-    ])
-    const resolution = evidence.submoduleResolutions?.[0]
-    if (resolution?.kind !== "compose") throw new Error("missing composed submodule evidence")
-    expect(await git(fixture.repo, ["ls-tree", "main", "dep"])).toContain(resolution.sha)
-    expect(await git(fixture.module, ["rev-parse", resolution.ref])).toBe(resolution.sha)
-  }, 20_000)
-
-  it("refuses a real submodule content conflict without pinning or landing a root candidate", async () => {
-    const fixture = await divergentSubmoduleRepository("conflict")
-    await using process = createProcess()
-    await using app = await checkedQueue(process, fixture.repo, ["true"], { env: authoredGitlinksEnv })
-    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
-
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
-
-    expect(run).toMatchObject({
-      status: "completed",
-      conclusion: "failure",
-      error: { code: "submodule-composition-conflict" },
     })
-    expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.rootCurrentSha)
-    expect(await git(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates"])).toBe("")
-    expect(await git(fixture.module, ["for-each-ref", "--format=%(refname)", "refs/yrd/compositions"])).toBe("")
-  }, 20_000)
-
-  it("keeps a divergent submodule PR submitted when its full local store is unavailable", async () => {
-    const fixture = await divergentSubmoduleRepository("clean")
-    await rm(join(fixture.repo, "dep"), { recursive: true, force: true })
-    await using process = createProcess()
-    await using app = await checkedQueue(process, fixture.repo, ["true"], { env: authoredGitlinksEnv })
-    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
-
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
-
-    expect(run).toMatchObject({
-      status: "completed",
-      conclusion: "failure",
-      error: {
-        code: "queue-environment-refused",
-        evidence: {
-          kind: "submodule-composition-refusal",
-          operation: "compose",
-          path: "dep",
-          retryable: true,
-        },
+    await app.bays.submit({
+      branch: "issue/source-two",
+      headSha: rootBaseSha,
+      base: "main",
+      baseSha: rootBaseSha,
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: "issue/source-two",
+            baseSha: oldPinSha,
+            tipSha: secondSourceTipSha,
+            payload: ["src/second.ts"],
+          },
+        ],
       },
     })
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
-      status: "submitted",
-      headSha: fixture.featureSha,
-    })
-    expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.rootCurrentSha)
-    expect(await git(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates"])).toBe("")
-    expect(await git(fixture.module, ["for-each-ref", "--format=%(refname)", "refs/yrd/compositions"])).toBe("")
-  }, 20_000)
-
-  it("keeps a divergent submodule PR submitted when reading conflict stages times out", async () => {
-    const fixture = await divergentSubmoduleRepository("clean")
-    await using process = createProcess()
-    let injected = false
-    const unavailable: Pick<Process, "run"> = {
-      run(request) {
-        if (request.argv.includes("ls-files") && request.argv.includes("--unmerged")) {
-          injected = true
-          return Promise.resolve({
-            exitCode: 124,
-            signal: "SIGTERM",
-            stdout: "",
-            stderr: "conflict index read timed out",
-            durationMs: 1,
-            timedOut: true,
-            stalled: false,
-            verdict: "TIMED_OUT",
-          })
-        }
-        return process.run(request)
-      },
-    }
-    await using app = await checkedQueue(unavailable, fixture.repo, ["true"], { env: authoredGitlinksEnv })
-    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
-
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
-
-    expect(injected).toBe(true)
-    expect(run).toMatchObject({
-      status: "completed",
-      conclusion: "failure",
-      error: {
-        code: "queue-environment-refused",
-        evidence: { kind: "submodule-composition-refusal", operation: "compose", retryable: true },
-      },
-    })
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
-      status: "submitted",
-      headSha: fixture.featureSha,
-    })
-    expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.rootCurrentSha)
-    expect(await git(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates"])).toBe("")
-    expect(await git(fixture.module, ["for-each-ref", "--format=%(refname)", "refs/yrd/compositions"])).toBe("")
-  }, 20_000)
-
-  it("lands the final gitlink after composing the same submodule twice in one batch", async () => {
-    const fixture = await divergentSubmoduleRepository("clean")
-    await git(fixture.module, ["switch", "-qc", "incoming-two", fixture.moduleBaseSha])
-    await writeFile(join(fixture.module, "second.md"), "second incoming\n")
-    await git(fixture.module, ["add", "second.md"])
-    await git(fixture.module, ["commit", "-qm", "second incoming"])
-    const secondIncomingSha = await git(fixture.module, ["rev-parse", "HEAD"])
-    await git(fixture.module, ["switch", "-q", "main"])
-    await git(fixture.repo, ["switch", "-qc", "issue/feature-two", fixture.rootBaseSha])
-    await git(join(fixture.repo, "dep"), ["fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*"])
-    await git(join(fixture.repo, "dep"), ["checkout", "-q", secondIncomingSha])
-    await git(fixture.repo, ["add", "dep"])
-    await git(fixture.repo, ["commit", "-qm", "advance second incoming dependency"])
-    const secondFeatureSha = await git(fixture.repo, ["rev-parse", "HEAD"])
-    await git(fixture.repo, ["switch", "-q", "main"])
-    await git(fixture.repo, ["-c", "protocol.file.allow=always", "submodule", "update", "-q"])
-
-    await using process = createProcess()
-    await using app = await checkedQueue(process, fixture.repo, ["true"], { batch: 2, env: authoredGitlinksEnv })
-    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
-    await app.bays.submit({ branch: "issue/feature-two", headSha: secondFeatureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1", "PR2"] }, runtime))[0]!
     const check = run.steps[0]?.job
@@ -5243,85 +5317,16 @@ describe("Queue command adapters", () => {
       throw new Error(`check was ${check?.status ?? "missing"}`)
     }
     const evidence = GitCheckEvidenceSchema.parse(check.output)
-    const resolutions = evidence.submoduleResolutions ?? []
+    const rewrites = evidence.sourceRewrites ?? []
 
     expect(run.status, run.error?.message).toBe("completed")
     expect(run.conclusion).toBe("success")
-    expect(resolutions).toHaveLength(2)
-    expect(resolutions.map(({ path }) => path)).toEqual(["dep", "dep"])
-    const final = resolutions.at(-1)
-    if (final === undefined) throw new Error("missing final submodule resolution")
-    expect(await git(fixture.repo, ["ls-tree", "main", "dep"])).toContain(final.sha)
+    expect(rewrites).toHaveLength(2)
+    expect(rewrites.map(({ repo: sourceRepo }) => sourceRepo)).toEqual(["dep", "dep"])
+    const final = rewrites.at(-1)
+    if (final === undefined) throw new Error("missing final source rewrite")
+    expect(await git(repo, ["ls-tree", "main", "dep"])).toContain(final.newTipSha)
   }, 30_000)
-
-  it("refuses a concurrent gitmodules origin change before publishing a composition", async () => {
-    const fixture = await divergentSubmoduleRepository("clean")
-    const unavailableOrigin = join(fixture.repo, "..", "replacement-module.git")
-    await git(fixture.repo, ["switch", "-q", "issue/feature"])
-    await git(fixture.repo, ["config", "-f", ".gitmodules", "submodule.dep.url", unavailableOrigin])
-    await git(fixture.repo, ["add", ".gitmodules"])
-    await git(fixture.repo, ["commit", "-qm", "change dependency origin"])
-    const changedFeatureSha = await git(fixture.repo, ["rev-parse", "HEAD"])
-    await git(fixture.repo, ["switch", "-q", "main"])
-    await git(fixture.repo, ["-c", "protocol.file.allow=always", "submodule", "update", "-q"])
-
-    await using process = createProcess()
-    await using app = await checkedQueue(process, fixture.repo, ["true"], { env: authoredGitlinksEnv })
-    await app.bays.submit({ branch: "issue/feature", headSha: changedFeatureSha, base: "main" })
-
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
-
-    expect(run).toMatchObject({
-      status: "completed",
-      conclusion: "failure",
-      error: { code: "candidate-conflict", message: expect.stringContaining(".gitmodules") },
-    })
-    expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.rootCurrentSha)
-    expect(await git(fixture.module, ["for-each-ref", "--format=%(refname)", "refs/yrd/compositions"])).toBe("")
-  }, 20_000)
-
-  it("preserves reviewed submodule blobs in a merge-only integration proof", async () => {
-    const fixture = await divergentSubmoduleRepository("clean")
-    await using process = createProcess()
-    const bayJobs = createBayJobDefs(unusedWorkspace)
-    const merge = withMerge(
-      gitMergeStep<PRShape>({ inject: { process }, repo: fixture.repo, env: authoredGitlinksEnv }),
-      { revision: "git-merge-v1" },
-    )
-    const queue = withQueue({
-      steps: [merge] as const,
-      resolveBaseSha: (base) => queueBaseSha(fixture.repo, base),
-    })
-    const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
-    await using app = await createYrd(queue(base), {
-      inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
-    })
-    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
-
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
-    const proof = IntegrationProofSchema.parse(run.integration)
-
-    expect(run.status, run.error?.message).toBe("completed")
-    expect(run.conclusion).toBe("success")
-    expect(proof.submoduleResolutions).toEqual([
-      {
-        kind: "compose",
-        path: "dep",
-        sha: expect.stringMatching(/^[0-9a-f]{40}$/u),
-        ref: expect.stringMatching(/^refs\/yrd\/compositions\/[0-9a-f]{64}$/u),
-        reviewedBlobs: [
-          {
-            path: "notes.md",
-            oid: expect.stringMatching(/^[0-9a-f]{40}$/u),
-            content: "top-current\nmiddle\nbottom-incoming\n",
-          },
-        ],
-      },
-    ])
-    const resolution = proof.submoduleResolutions?.[0]
-    if (resolution === undefined) throw new Error("missing durable submodule resolution")
-    expect(await git(fixture.repo, ["ls-tree", "main", "dep"])).toContain(resolution.sha)
-  }, 20_000)
 
   it("runs remote push hooks without inheriting recursive submodule pushes", async () => {
     const { repo, remote, featureSha, moduleSha } = await hookedSubmoduleRepository({
@@ -5343,9 +5348,8 @@ describe("Queue command adapters", () => {
       recordingProcess,
       repo,
       shellCommand('git submodule update --init --recursive && test "$(cat dep/version.txt)" = candidate'),
-      { env: { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITLINKS: "1" } },
     )
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
@@ -5380,13 +5384,19 @@ describe("Queue command adapters", () => {
       expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.componentBaseSha)
 
       await using process = createProcess()
-      await using app = await checkedQueue(process, fixture.repo, ["true"], {
-        env: authoredGitlinksEnv,
-        ...(mode === "configured"
+      await using app = await checkedQueue(
+        process,
+        fixture.repo,
+        ["true"],
+        mode === "configured"
           ? { mergeCommand: shellCommand('git push origin "$YRD_CANDIDATE_SHA":refs/heads/main') }
-          : {}),
+          : {},
+      )
+      await submitCertifiedCarrier(app, fixture.repo, {
+        branch: "issue/feature",
+        headSha: fixture.featureSha,
+        baseSha: fixture.rootBaseSha,
       })
-      await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
 
       const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
@@ -5429,8 +5439,8 @@ describe("Queue command adapters", () => {
         return process.run(request)
       },
     }
-    await using app = await checkedQueue(noOpProcess, fixture.repo, ["true"], { env: authoredGitlinksEnv })
-    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+    await using app = await checkedQueue(noOpProcess, fixture.repo, ["true"])
+    await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
@@ -5458,8 +5468,8 @@ describe("Queue command adapters", () => {
   it("fast-forwards a clean checked-out main at a local non-bare component origin", async () => {
     const fixture = await componentMainLandingRepository({ nonBareComponentOrigin: true })
     await using process = createProcess()
-    await using app = await checkedQueue(process, fixture.repo, ["true"], { env: authoredGitlinksEnv })
-    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+    await using app = await checkedQueue(process, fixture.repo, ["true"])
+    await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
@@ -5475,8 +5485,8 @@ describe("Queue command adapters", () => {
     const fixture = await componentMainLandingRepository({ nonBareComponentOrigin: true })
     await writeFile(join(fixture.component, "version.txt"), "dirty\n")
     await using process = createProcess()
-    await using app = await checkedQueue(process, fixture.repo, ["true"], { env: authoredGitlinksEnv })
-    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+    await using app = await checkedQueue(process, fixture.repo, ["true"])
+    await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
@@ -5524,12 +5534,14 @@ describe("Queue command adapters", () => {
       await git(fixture.repo, ["push", "-q", "origin", "issue/followup"])
 
       await using process = createProcess()
-      await using app = await checkedQueue(process, fixture.repo, ["true"], {
-        env: authoredGitlinksEnv,
-        ...(mode === "configured"
+      await using app = await checkedQueue(
+        process,
+        fixture.repo,
+        ["true"],
+        mode === "configured"
           ? { mergeCommand: shellCommand('git push origin "$YRD_CANDIDATE_SHA":refs/heads/main') }
-          : {}),
-      })
+          : {},
+      )
       await app.bays.submit({ branch: "issue/followup", headSha: followupSha, base: "main" })
 
       const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
@@ -5573,12 +5585,14 @@ describe("Queue command adapters", () => {
       await git(fixture.repo, ["push", "-q", "origin", "issue/followup"])
 
       await using process = createProcess()
-      await using app = await checkedQueue(process, fixture.repo, ["true"], {
-        env: authoredGitlinksEnv,
-        ...(mode === "configured"
+      await using app = await checkedQueue(
+        process,
+        fixture.repo,
+        ["true"],
+        mode === "configured"
           ? { mergeCommand: shellCommand('git push origin "$YRD_CANDIDATE_SHA":refs/heads/main') }
-          : {}),
-      })
+          : {},
+      )
       await app.bays.submit({ branch: "issue/followup", headSha: followupSha, base: "main" })
 
       const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
@@ -5634,8 +5648,8 @@ describe("Queue command adapters", () => {
         return process.run(request)
       },
     }
-    await using app = await checkedQueue(recordingProcess, fixture.repo, ["true"], { env: authoredGitlinksEnv })
-    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+    await using app = await checkedQueue(recordingProcess, fixture.repo, ["true"])
+    await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
@@ -5671,8 +5685,8 @@ describe("Queue command adapters", () => {
         return process.run(request)
       },
     }
-    await using app = await checkedQueue(recordingProcess, fixture.repo, ["true"], { env: authoredGitlinksEnv })
-    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+    await using app = await checkedQueue(recordingProcess, fixture.repo, ["true"])
+    await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
@@ -5726,11 +5740,10 @@ describe("Queue command adapters", () => {
         return process.run(request)
       },
     }
-    await using app = await checkedQueue(flakyProcess, fixture.repo, ["true"], { env: authoredGitlinksEnv })
-    await app.bays.submit({
+    await using app = await checkedQueue(flakyProcess, fixture.repo, ["true"])
+    await submitCertifiedCarrier(app, fixture.repo, {
       branch: "issue/feature",
       headSha: fixture.featureSha,
-      base: "main",
       baseSha: fixture.rootBaseSha,
     })
 
@@ -5760,7 +5773,7 @@ describe("Queue command adapters", () => {
 
     const retried = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(retried).toMatchObject({ status: "completed", conclusion: "success" })
+    expect(retried, JSON.stringify(retried, null, 2)).toMatchObject({ status: "completed", conclusion: "success" })
     expect((retried.integration as unknown as { componentMains?: unknown }).componentMains).toEqual([
       {
         action: "fast-forwarded",
@@ -5811,11 +5824,10 @@ describe("Queue command adapters", () => {
         return process.run(request)
       },
     }
-    await using app = await checkedQueue(flakyProcess, fixture.repo, ["true"], { env: authoredGitlinksEnv })
-    await app.bays.submit({
+    await using app = await checkedQueue(flakyProcess, fixture.repo, ["true"])
+    await submitCertifiedCarrier(app, fixture.repo, {
       branch: "issue/feature",
       headSha: fixture.featureSha,
-      base: "main",
       baseSha: fixture.rootBaseSha,
     })
 
@@ -5854,7 +5866,7 @@ describe("Queue command adapters", () => {
 
     const retried = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(retried).toMatchObject({ status: "completed", conclusion: "success" })
+    expect(retried, JSON.stringify(retried, null, 2)).toMatchObject({ status: "completed", conclusion: "success" })
     expect((retried.integration as unknown as { componentMains?: unknown }).componentMains).toEqual([
       expect.objectContaining({
         action: "verified",
@@ -5880,10 +5892,8 @@ describe("Queue command adapters", () => {
       requiredVersion: "accepted",
     })
     await using process = createProcess()
-    await using app = await checkedQueue(process, repo, shellCommand("git submodule update --init --recursive"), {
-      env: { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITLINKS: "1" },
-    })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await using app = await checkedQueue(process, repo, shellCommand("git submodule update --init --recursive"))
+    await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 

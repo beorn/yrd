@@ -7,6 +7,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
+import { defineConfig, yrd as yrdConfig } from "@yrd/config"
 import { createProcess } from "@yrd/process"
 import { createJournal } from "@yrd/persistence"
 import { resolveSubmoduleOrigin } from "@yrd/queue"
@@ -79,6 +80,9 @@ const config: ResolvedYrdProjectConfig = {
   definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
   contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
 }
+const doctorConfig = defineConfig(
+  yrdConfig.flow({ name: "main", rev: "1", on: () => true, steps: [yrdConfig.check("check")] }),
+)
 
 async function appFor(repo: string): Promise<YrdCliApp> {
   const stateDir = join(repo, ".git", "yrd")
@@ -308,17 +312,28 @@ describe("printResultWithWarnings", () => {
   })
 })
 
-describe("queue list / dashboard warning surface", () => {
-  it("adds a warnings array in --json without touching results", async () => {
+describe("pinned-submodule warning surface", () => {
+  it("reports the pinned-submodule warning through doctor", async () => {
+    const root = await superproject(TWO_SUBMODULES)
+    const app = await appFor(root)
+    const out = outputIO({ cwd: root })
+    expect(await runYrd(app, yrd("doctor", "--json"), out.io, { config: doctorConfig }), out.stderr()).toBe(1)
+    const payload = JSON.parse(out.stdout()) as { command: string; findings: unknown[]; warnings?: string[] }
+    expect(payload).toMatchObject({ command: "doctor", findings: [] })
+    expect(payload.warnings).toEqual([
+      "warn: 1 submodule not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/foo — run 'yrd admin submodule init' to set",
+    ])
+  })
+
+  it("omits the warning from queue list output", async () => {
     const root = await superproject(TWO_SUBMODULES)
     const app = await appFor(root)
     const out = outputIO({ cwd: root })
     expect(await runYrd(app, yrd("queue", "list", "--json"), out.io), out.stderr()).toBe(0)
     const payload = JSON.parse(out.stdout()) as { command: string; warnings?: string[]; results: unknown[] }
     expect(payload.command).toBe("queue.list")
-    expect(payload.warnings).toEqual([
-      "warn: 1 submodule not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/foo — run 'yrd admin submodule init' to set",
-    ])
+    expect(payload).not.toHaveProperty("warnings")
+    expect(out.stderr()).not.toContain("warn:")
   })
 
   it("adds no warnings field when every submodule tracks a branch", async () => {
@@ -338,26 +353,25 @@ describe("queue list / dashboard warning surface", () => {
     expect(out.stderr()).not.toContain("warn:")
   })
 
-  it("surfaces the warning on the bare dashboard too", async () => {
+  it("omits the warning from the bare dashboard too", async () => {
     const root = await superproject(TWO_SUBMODULES)
     const app = await appFor(root)
     const out = outputIO({ cwd: root })
     expect(await runYrd(app, yrd("--json"), out.io), out.stderr()).toBe(0)
     const payload = JSON.parse(out.stdout()) as { command: string; warnings?: string[] }
     expect(payload.command).toBe("dashboard")
-    expect(payload.warnings).toEqual([
-      "warn: 1 submodule not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/foo — run 'yrd admin submodule init' to set",
-    ])
+    expect(payload).not.toHaveProperty("warnings")
+    expect(out.stderr()).not.toContain("warn:")
   })
 
-  it("degrades a corrupt .gitmodules to a warning without failing queue list (exit 0)", async () => {
+  it("degrades a corrupt .gitmodules to one doctor warning instead of crashing", async () => {
     const root = await superproject()
     const app = await appFor(root)
     // Unterminated section header -> git config exits 128 -> readSubmoduleEntries
-    // throws -> the advisory must degrade to a warning, never take down the list.
+    // throws -> the advisory must degrade to a warning, never take down doctor.
     await writeFile(join(root, ".gitmodules"), '[submodule "x"\n\tpath = x\n')
     const out = outputIO({ cwd: root })
-    expect(await runYrd(app, yrd("queue", "list", "--json"), out.io), out.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("doctor", "--json"), out.io, { config: doctorConfig }), out.stderr()).toBe(1)
     const payload = JSON.parse(out.stdout()) as { warnings?: string[] }
     expect(payload.warnings?.[0]).toContain("could not read .gitmodules")
     // The degraded warning is a single row (no raw multi-row git diagnostic).

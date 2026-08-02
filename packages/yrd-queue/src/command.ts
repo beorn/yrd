@@ -953,6 +953,33 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
     const result = await run(repo, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`], true)
     return result.code === 0 ? result.stdout : undefined
   }
+  const commitTree = async (
+    repo: string,
+    tree: string,
+    parents: readonly string[],
+    message: string,
+  ): Promise<string> => {
+    const result = await process.run({
+      argv: ["git", "-C", repo, "commit-tree", tree, ...parents.flatMap((parent) => ["-p", parent])],
+      cwd: repo,
+      env: {
+        ...env,
+        GIT_AUTHOR_NAME: "Yrd Queue",
+        GIT_AUTHOR_EMAIL: "yrd-queue@example.invalid",
+        GIT_AUTHOR_DATE: "946684800 +0000",
+        GIT_COMMITTER_NAME: "Yrd Queue",
+        GIT_COMMITTER_EMAIL: "yrd-queue@example.invalid",
+        GIT_COMMITTER_DATE: "946684800 +0000",
+      },
+      stdin: `${message}\n`,
+      timeoutMs: GIT_TIMEOUT_MS,
+    })
+    if (result.timedOut) throw new Error(`yrd: git commit-tree timed out after ${GIT_TIMEOUT_MS}ms`)
+    if (result.exitCode !== 0) {
+      throw new Error(result.stderr || result.stdout || "yrd: git commit-tree failed")
+    }
+    return result.stdout.trim()
+  }
   const stablePatchId = async (
     repo: string,
     from: string,
@@ -1007,7 +1034,19 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
       ],
       true,
     )
-  return Object.freeze({ run, raw, probe, rawProbe, commit, optionalCommit, stablePatchId, rangeDiff, process, env })
+  return Object.freeze({
+    run,
+    raw,
+    probe,
+    rawProbe,
+    commit,
+    optionalCommit,
+    commitTree,
+    stablePatchId,
+    rangeDiff,
+    process,
+    env,
+  })
 }
 
 export type GitQueueTarget = Readonly<{
@@ -1309,6 +1348,14 @@ async function recutDirectPR(
         message: `yrd: PR '${input.id}' ${label} '${sha}' is missing`,
       })
     }
+  }
+  const mergeTip = await mergeTipCarrierFailure(git, repo, input.id, input.headSha, target.sha)
+  if (mergeTip !== undefined) {
+    throw createFailure({
+      kind: "refusal",
+      code: mergeTip.error.code,
+      message: `yrd: ${mergeTip.error.message}`,
+    })
   }
   if (!(await isAncestor(git, repo, oldBase, target.sha))) {
     throw createFailure({
@@ -1784,7 +1831,6 @@ async function prepareCandidate(
   input: StepExecution,
   attempt: number,
   artifactRoot: string,
-  allowAuthoredGitlinks: boolean,
   refuse?: RefusePathsPolicy,
 ): Promise<
   | Readonly<{
@@ -1800,6 +1846,16 @@ async function prepareCandidate(
   const sourceRewrites: SourceRewrite[] = []
   const submoduleResolutions: QueueSubmoduleResolutionEvidence[] = []
   for (const pr of input.prs) {
+    if (pr.composition === undefined) {
+      const mergeTip = await mergeTipCarrierFailure(git, path, pr.id, pr.headSha, "HEAD")
+      if (mergeTip !== undefined) return mergeTip
+      // A post-landing actuator retry carries the same immutable PR snapshot
+      // against a base that already contains it. Re-checking its recut patch
+      // against itself produces an empty patch and a false certificate drift.
+      // Source-only compositions are excluded: their root head intentionally
+      // equals the base while their component payload still needs applying.
+      if (await isAncestor(git, path, pr.headSha, "HEAD")) continue
+    }
     if (refuse !== undefined && refuse.paths.length > 0) {
       const inspected = await refusedPayloadPaths(git, path, pr.headSha, refuse.paths)
       if (inspected.status === "failed") return inspected
@@ -1837,8 +1893,8 @@ async function prepareCandidate(
     if (pr.recut !== undefined) {
       const certified = await verifyRecutCertificate(git, path, pr)
       if (certified !== undefined) return certified
-    } else if (!allowAuthoredGitlinks) {
-      const inspected = await authoredGitlinkPaths(git, path, pr.headSha)
+    } else {
+      const inspected = await authoredGitlinkPaths(git, path, pr.id, pr.headSha)
       if (inspected.status === "failed") return inspected
       const gitlinks = inspected.output
       if (gitlinks.length > 0) {
@@ -1850,11 +1906,14 @@ async function prepareCandidate(
         )
       }
     }
+    const before = await git.commit(path, "HEAD")
     const merged = await git.run(path, ["merge", "--no-ff", "--no-edit", pr.headSha], true)
     if (merged.code !== 0) {
       const resolved = await resolveCandidateSubmoduleConflict(git, repo, path)
       if (resolved.status === "composed") {
         submoduleResolutions.push(...resolved.output)
+        const wrapper = await stabilizeGeneratedRootWrapper(git, path, before)
+        if (wrapper !== undefined) return wrapper
         continue
       }
       const artifacts = await writeTerminalArtifacts(artifactRoot, input, attempt, merged.stdout, merged.stderr)
@@ -1878,6 +1937,8 @@ async function prepareCandidate(
         }),
       }
     }
+    const wrapper = await stabilizeGeneratedRootWrapper(git, path, before)
+    if (wrapper !== undefined) return wrapper
   }
   return {
     status: "passed",
@@ -1964,7 +2025,6 @@ export function gitCandidatePreparer(options: GitCandidatePreparerOptions): Cand
         execution,
         1,
         resolve(options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")),
-        (options.env ?? globalThis.process.env).YRD_ALLOW_AUTHORED_GITLINKS === "1",
       )
       if (candidate.status === "failed") {
         throw createFailure({
@@ -2200,6 +2260,69 @@ function candidateFailure(
  * quoted commands straight into a machine-readable `resolution[]`. */
 function authoredRootWorkflow(pr: string): string {
   return `authored root carriers use 'yrd pr submit <branch>', then 'yrd pr recut ${pr} --preflight --queue' and run its exact next command on that same PR; no composition manifest or manual triage is needed`
+}
+
+function linearRootCarrierWorkflow(pr: string): string {
+  return (
+    "merge inside the affected component repository, fast-forward that component's main, rebuild the root carrier " +
+    `as one linear pin-bump commit, then run 'yrd pr submit <branch>' and 'yrd pr recut ${pr} --preflight --queue'`
+  )
+}
+
+async function mergeTipCarrierFailure(
+  git: Git,
+  repo: string,
+  pr: string,
+  headSha: string,
+  authoritativeBase: string,
+): Promise<CandidateFailure | undefined> {
+  if (await isAncestor(git, repo, headSha, authoritativeBase)) return undefined
+  const lineage = await git.run(repo, ["rev-list", "--parents", "-n", "1", headSha], true)
+  if (lineage.code !== 0 || lineage.stdout === "") {
+    return candidateFailure(
+      "carrier-inspection",
+      `could not inspect root carrier tip '${headSha}' for PR '${pr}': ${lineage.stderr || lineage.stdout || "no lineage"}`,
+    )
+  }
+  const [commit, ...parents] = lineage.stdout.split(/\s+/u)
+  if (commit !== headSha) {
+    return candidateFailure(
+      "carrier-inspection",
+      `root carrier lineage for PR '${pr}' returned '${commit ?? "no commit"}', expected '${headSha}'`,
+    )
+  }
+  return parents.length > 1
+    ? candidateFailure(
+        "merge-tip-carrier",
+        `PR '${pr}' root carrier tip '${headSha}' is a merge commit with ${parents.length} parents; ${linearRootCarrierWorkflow(pr)}`,
+      )
+    : undefined
+}
+
+async function stabilizeGeneratedRootWrapper(
+  git: Git,
+  path: string,
+  before: string,
+): Promise<CandidateFailure | undefined> {
+  const generated = await git.commit(path, "HEAD")
+  if (generated === before) return undefined
+  const lineage = await git.run(path, ["rev-list", "--parents", "-n", "1", generated], true)
+  const [commit, ...parents] = lineage.stdout.split(/\s+/u)
+  if (lineage.code !== 0 || commit !== generated || parents.length < 2) {
+    return candidateFailure(
+      "wrapper-generation",
+      `generated root wrapper '${generated}' has invalid lineage: ${lineage.stderr || lineage.stdout || "no lineage"}`,
+    )
+  }
+  const tree = (await git.run(path, ["rev-parse", `${generated}^{tree}`])).stdout
+  const stable = await git.commitTree(path, tree, parents, "yrd: generated root wrapper")
+  const updated = await git.run(path, ["update-ref", "HEAD", stable, generated], true)
+  return updated.code === 0
+    ? undefined
+    : candidateFailure(
+        "wrapper-generation",
+        `generated root wrapper '${generated}' could not be stabilized: ${updated.stderr || updated.stdout}`,
+      )
 }
 
 function withAuthoredRootWorkflow(failure: CandidateFailure, pr: string): CandidateFailure {
@@ -3104,7 +3227,9 @@ function samePaths(left: readonly string[], right: readonly string[]): boolean {
 
 function isEqualRangeDiff(output: string): boolean {
   const rows = output.split(/\r?\n/u).filter((row) => row.trim() !== "")
-  return rows.length > 0 && rows.every((row) => /^\d+:\s+[0-9a-f]+ = \d+:\s+[0-9a-f]+(?:\s|$)/iu.test(row))
+  return (
+    rows.length > 0 && rows.every((row) => /^\d+:\s+[0-9a-f]+\s+=\s+\d+:\s+[0-9a-f]+(?:\s|$)/iu.test(row.trimStart()))
+  )
 }
 
 function intersection(left: readonly string[], right: readonly string[]): string[] {
@@ -3125,13 +3250,16 @@ function sourceCandidateRef(newTipSha: string): string {
 async function authoredGitlinkPaths(
   git: Git,
   repo: string,
+  pr: string,
   headSha: string,
 ): Promise<Readonly<{ status: "passed"; output: readonly string[] }> | CandidateFailure> {
   const base = await git.run(repo, ["merge-base", "HEAD", headSha], true)
   if (base.code !== 0 || base.stdout === "") {
     return candidateFailure(
       "gitlink-inspection",
-      `could not inspect authored gitlinks for '${headSha}': ${base.stderr || base.stdout || "no merge base"}`,
+      `could not inspect authored gitlinks for '${headSha}': ${
+        base.stderr || base.stdout || "no merge base"
+      }; ${authoredRootWorkflow(pr)}`,
     )
   }
   const paths = await changedPaths(git, repo, base.stdout, headSha)
@@ -4420,7 +4548,6 @@ async function withPinnedCandidate<Output extends JsonValue>(
   options: Readonly<{
     checkoutParent?: string
     artifactRoot?: string
-    allowAuthoredGitlinks?: boolean
     candidatePool?: CandidatePool
     refuse?: RefusePathsPolicy
   }>,
@@ -4443,7 +4570,6 @@ async function withPinnedCandidate<Output extends JsonValue>(
       input,
       context.attempt,
       resolve(options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")),
-      options.allowAuthoredGitlinks === true,
       options.refuse,
     )
     if (candidate.status === "failed") return onFailure(candidate)
@@ -4486,7 +4612,6 @@ async function withStepCandidate<Output extends JsonValue>(
   options: Readonly<{
     checkoutParent?: string
     artifactRoot?: string
-    allowAuthoredGitlinks?: boolean
     candidatePool?: CandidatePool
   }>,
   onFailure: (failure: PreparedCandidateFailure) => JobResult<Output>,
@@ -4555,7 +4680,6 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
           checkoutParent: options.checkoutParent,
           ...(options.candidatePool === undefined ? {} : { candidatePool: options.candidatePool }),
           artifactRoot: options.artifactRoot,
-          allowAuthoredGitlinks: (options.env ?? globalThis.process.env).YRD_ALLOW_AUTHORED_GITLINKS === "1",
           ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
         },
         (failure) => failed(failure.error.code, failure.error.message, failure.output),
@@ -4924,7 +5048,7 @@ async function mergeCandidate(
   repo: string,
   input: StepExecution,
   context: Readonly<{ id: string; attempt: number }>,
-  options: Readonly<{ artifactRoot?: string; allowAuthoredGitlinks?: boolean; refuse?: RefusePathsPolicy }>,
+  options: Readonly<{ artifactRoot?: string; refuse?: RefusePathsPolicy }>,
 ): Promise<MergeCandidateResult> {
   const prior = checkedCandidate(input.shape)
   const prepared =
@@ -4936,7 +5060,6 @@ async function mergeCandidate(
           context,
           {
             artifactRoot: options.artifactRoot,
-            allowAuthoredGitlinks: options.allowAuthoredGitlinks,
             ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
           },
           (failure) => failedWithEvidence(failure.error.code, failure.error.message, failure.output),
@@ -5226,10 +5349,13 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
   return async (input, context): Promise<JobResult<IntegrationProof>> => {
     try {
       const branch = primaryPR(input).base
-      const candidate = await mergeCandidate(git, repo, input, context, {
-        allowAuthoredGitlinks: (options.env ?? globalThis.process.env).YRD_ALLOW_AUTHORED_GITLINKS === "1",
-        ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
-      })
+      const candidate = await mergeCandidate(
+        git,
+        repo,
+        input,
+        context,
+        options.refuse === undefined ? {} : { refuse: options.refuse },
+      )
       if (candidate.status !== "completed" || candidate.conclusion !== "success") return candidate
       const { base, checked } = candidate
       const baseSha = base.sha
@@ -5450,7 +5576,6 @@ export function configuredMergeStep<Shape extends PRShape>(
       const branch = primaryPR(input).base
       const candidate = await mergeCandidate(git, repo, input, context, {
         artifactRoot: options.artifactRoot,
-        allowAuthoredGitlinks: (options.env ?? globalThis.process.env).YRD_ALLOW_AUTHORED_GITLINKS === "1",
         ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
       })
       if (candidate.status !== "completed" || candidate.conclusion !== "success") return candidate

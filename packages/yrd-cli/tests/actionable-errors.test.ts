@@ -77,6 +77,23 @@ describe("actionable failure projection", () => {
     } satisfies ActionableFailure)
   })
 
+  it("projects a merge-tip carrier's exact linear rebuild commands", () => {
+    const failure = actionableFailure({
+      code: "merge-tip-carrier",
+      message:
+        "yrd: PR 'PR42' root carrier tip 'deadbeef' is a merge commit with 2 parents; " +
+        "merge inside the affected component repository, fast-forward that component's main, rebuild the root " +
+        "carrier as one linear pin-bump commit, then run 'yrd pr submit <branch>' and " +
+        "'yrd pr recut PR42 --preflight --queue'",
+    })
+
+    expect(failure).toMatchObject({
+      code: "merge-tip-carrier",
+      cause: expect.stringMatching(/merge inside.*component.*linear pin-bump/iu),
+      resolution: ["yrd pr submit <branch>", "yrd pr recut PR42 --preflight --queue"],
+    })
+  })
+
   it("names both root commits and pins in a recut divergence", () => {
     const failure = actionableFailure(RECUT_CONFLICT)
 

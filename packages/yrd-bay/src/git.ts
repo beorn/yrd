@@ -78,8 +78,24 @@ function rethrowWorktreeOwnershipConflict(cause: unknown): never {
   if (!/already used by worktree|is already checked out/iu.test(message)) throw cause
   throw new Error(
     `${message}\nThe branch remains owned by its existing worktree; ` +
-      "retry with '--from <commit-sha>' to materialize detached HEAD instead.",
+      "materialize the recorded commit in detached HEAD instead.",
   )
+}
+
+async function worktreePosture(
+  git: Git,
+  input: Readonly<{ bay: string; path: string; branch: string; from?: string }>,
+): Promise<"branch" | "detached"> {
+  const branch = (await git.run(input.path, ["branch", "--show-current"])).stdout.trim()
+  if (branch === input.branch) return "branch"
+  if (branch === "" && input.from !== undefined) {
+    const carriesSource = await git.run(input.path, ["merge-base", "--is-ancestor", input.from, "HEAD"], true)
+    if (carriesSource.code === 0) return "detached"
+    throw new Error(
+      `detached workspace '${input.path}' no longer descends from Bay '${input.bay}' source '${input.from}'`,
+    )
+  }
+  throw new Error(`workspace '${input.path}' is on branch '${branch}', expected '${input.branch}'`)
 }
 
 async function remoteBranchHead(git: Git, repo: string, branch: string): Promise<string | undefined> {
@@ -263,13 +279,6 @@ async function preserveClosedBay(git: Git, repo: string, bay: string, headSha: s
   throw new Error(created.stderr.trim() || created.stdout.trim() || `could not preserve '${preservedRef}'`)
 }
 
-async function requirePreservedBay(git: Git, repo: string, bay: string, headSha: string): Promise<string> {
-  const preservedRef = `refs/yrd/closed/${bay}`
-  const existing = await git.run(repo, ["rev-parse", "--verify", `${preservedRef}^{commit}`], true)
-  if (existing.code === 0 && existing.stdout.trim() === headSha) return preservedRef
-  throw new Error(`workspace is absent but '${preservedRef}' does not preserve '${headSha}'`)
-}
-
 export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<BayWorkspace> {
   const repo = resolve(options.repo)
   const baysRoot = resolve(options.baysRoot ?? `${repo}/.bays`)
@@ -399,10 +408,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
     async refresh(input: RefreshBayInput): Promise<JobResult<RefreshedBay>> {
       if (input.path === undefined) return failure("refresh-failed", `bay '${input.bay}' has no workspace path`)
       try {
-        const branch = (await git.run(input.path, ["branch", "--show-current"])).stdout.trim()
-        if (branch !== input.branch) {
-          throw new Error(`workspace '${input.path}' is on branch '${branch}', expected '${input.branch}'`)
-        }
+        await worktreePosture(git, { ...input, path: input.path })
         const [headSha, baseSha, status] = await Promise.all([
           git.commit(input.path, "HEAD"),
           git.commit(repo, input.base),
@@ -421,10 +427,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
     async checkpoint(input: CheckpointBayInput): Promise<JobResult<CheckpointedBay>> {
       if (input.path === undefined) return failure("checkpoint-failed", `bay '${input.bay}' has no workspace path`)
       try {
-        const branch = (await git.run(input.path, ["branch", "--show-current"])).stdout.trim()
-        if (branch !== input.branch) {
-          throw new Error(`workspace '${input.path}' is on branch '${branch}', expected '${input.branch}'`)
-        }
+        const posture = await worktreePosture(git, { ...input, path: input.path })
         const submodules = await git.run(
           input.path,
           [
@@ -511,7 +514,9 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           // A previous attempt can complete the ordinary push before its process result is observed.
           // Content-addressed equality proves that origin already has this exact authored checkpoint.
           await git.run(input.path, ["update-ref", trackingRef, remoteHead, trackedHead ?? "0".repeat(headSha.length)])
-          await git.run(input.path, ["branch", "--set-upstream-to", `origin/${input.branch}`, input.branch])
+          if (posture === "branch") {
+            await git.run(input.path, ["branch", "--set-upstream-to", `origin/${input.branch}`, input.branch])
+          }
           return { status: "completed", conclusion: "success", output: { headSha, pushed: true, wip } }
         }
         if (
@@ -523,7 +528,12 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
               `fetch origin '${input.branch}' and reconcile it before checkpointing again`,
           )
         }
-        await git.run(input.path, ["push", "--set-upstream", "origin", `HEAD:refs/heads/${input.branch}`])
+        await git.run(input.path, [
+          "push",
+          ...(posture === "branch" ? ["--set-upstream"] : []),
+          "origin",
+          `HEAD:refs/heads/${input.branch}`,
+        ])
         return { status: "completed", conclusion: "success", output: { headSha, pushed: true, wip } }
       } catch (cause) {
         return failure("checkpoint-failed", cause)
@@ -535,15 +545,16 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
         if (input.path === undefined || !existsSync(input.path)) {
           // Provision can fail before either a workspace path or head is
           // recorded. Closing that lifecycle is an idempotent no-op: there is
-          // no authored head to preserve and therefore no archive proof to
-          // invent.
+          // no authored head to preserve and therefore no archive proof to invent.
+          // A recorded head is already durable content, so atomically create
+          // or verify its preservation ref even though no worktree exists.
           if (input.headSha === undefined) return { status: "completed", conclusion: "success", output: {} }
           return {
             status: "completed",
             conclusion: "success",
             output: {
               headSha: input.headSha,
-              preservedRef: await requirePreservedBay(git, repo, input.bay, input.headSha),
+              preservedRef: await preserveClosedBay(git, repo, input.bay, input.headSha),
             },
           }
         }

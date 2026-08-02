@@ -11,7 +11,6 @@ import { afterEach, describe, expect, it } from "vitest"
 import type { InstalledStep } from "@yrd/queue"
 import { createYrdHost } from "../src/host.ts"
 import { requireFreshInstalledBaseline, followQueueRuns } from "../src/run.ts"
-import type { YrdCliApp, YrdCliIO } from "../src/types.ts"
 import {
   installedBaselineDrift,
   installedBaselinePath,
@@ -24,6 +23,7 @@ import {
   type InstalledBaseline,
 } from "../src/installed-baseline.ts"
 import { queueStepRevision } from "../src/host-revision.ts"
+import { createResidentHarness } from "./support/resident-harness.ts"
 
 const roots: string[] = []
 
@@ -382,30 +382,19 @@ describe("run gate", () => {
 
   it("re-proves the installed baseline before every watch cycle", async () => {
     let gateCalls = 0
-    let runCalls = 0
-    const app = {
-      scope: { signal: { aborted: false }, sleep: async () => undefined },
-      // Nothing has ever been refused here: the follow loop reads the admission
-      // refusal ledger after each settled cycle for its stall health check.
-      state: () => ({ bays: { prs: {} }, queues: { admissionRefusals: {} } }),
-      queue: {
-        run: async () => {
-          runCalls += 1
-          return []
-        },
-      },
-    } as unknown as YrdCliApp
-    const io = { stdout: () => undefined, stderr: () => undefined } as unknown as YrdCliIO
+    const harness = createResidentHarness({ run: async () => [] })
     const gate = async (): Promise<void> => {
       gateCalls += 1
       // Simulate a config change detected on the second cycle.
       if (gateCalls >= 2) throw new Error("installed baseline drifted mid-watch")
     }
-    await expect(followQueueRuns(app, [], { json: true, interval: 1 }, io, gate)).rejects.toThrow(/drifted mid-watch/u)
+    await expect(followQueueRuns(harness.app, [], { json: true, interval: 1 }, harness.io, gate)).rejects.toThrow(
+      /drifted mid-watch/u,
+    )
     // Gate ran on cycle 1 (before the run) and again on cycle 2 (which refused
     // before any run started): proves per-cycle re-proof, gate-before-run.
     expect(gateCalls).toBe(2)
-    expect(runCalls).toBe(1)
+    expect(harness.runCalls()).toBe(1)
   })
 })
 

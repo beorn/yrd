@@ -608,6 +608,44 @@ async function submitBranch(app: Awaited<ReturnType<typeof createQueueApp>>, bra
   return prFacts(pr)
 }
 
+async function replaySameHeadCandidateRecut() {
+  const journal = createMemoryJournal()
+  const id = ids()
+  const prepared: string[] = []
+  const prepareCandidate: NonNullable<NonNullable<Parameters<typeof queuePlugin>[0]>["prepareCandidate"]> = (input) => {
+    prepared.push(input.id)
+    const { prs: _prs, ...candidate } = input
+    return {
+      ...candidate,
+      sha: MERGED,
+      ref: `refs/yrd/candidates/${input.id}`,
+      mergeability: "mergeable",
+    }
+  }
+  const original = await createQueueApp({ prepareCandidate }, journal, undefined, id)
+  const pr = await submitBranch(original, "topic/same-head-candidate-recut")
+  await original.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+  await original.bays.recut({
+    pr: pr.id,
+    fromRevision: pr.revision,
+    headSha: pr.headSha,
+    baseSha: BASE,
+    treeSha: "c".repeat(40),
+    patchId: "d".repeat(40),
+    reviewCarried: false,
+  })
+  await original.bays.ready({ pr: pr.id })
+  expect(prFacts(original.state().bays.prs[pr.id])).toMatchObject({
+    revision: 2,
+    headSha: pr.headSha,
+    delivery: "submitted",
+  })
+  await original.close()
+
+  const app = await createQueueApp({ prepareCandidate }, journal, undefined, id)
+  return { app, pr, prepared }
+}
+
 describe("Queue", () => {
   it("materializes the immutable Candidate before admitting its first Job", async () => {
     const prepared: string[] = []
@@ -636,6 +674,37 @@ describe("Queue", () => {
       revs: [{ pr: pr.id, n: 1, head: HEAD }],
     })
     expect(run?.steps[0]?.job).toMatchObject({ status: "completed", conclusion: "success" })
+  })
+
+  it("audits a content-equivalent Candidate whose receipt names the prior PR revision", async () => {
+    const fixture = await replaySameHeadCandidateRecut()
+    await using app = fixture.app
+
+    const finding = app.queue.audit().findings.find(({ code }) => code === "candidate-revision-mismatch")
+    expect(finding).toMatchObject({
+      code: "candidate-revision-mismatch",
+      run: "R1",
+      pr: fixture.pr.id,
+    })
+    expect(finding?.message).toContain("Candidate 'C1'")
+    expect(finding?.message).toContain(`revision 1@${fixture.pr.headSha}`)
+    expect(finding?.message).toContain(`revision 2@${fixture.pr.headSha}`)
+  })
+
+  it("mints a fresh Candidate after a same-head PR recut survives a runtime restart", async () => {
+    const fixture = await replaySameHeadCandidateRecut()
+    await using app = fixture.app
+
+    await expect(app.queue.run({ prs: [fixture.pr.id], steps: ["check"] }, runtime)).resolves.toMatchObject([
+      {
+        candidateId: "C2",
+        prs: [{ id: fixture.pr.id, revision: 2, headSha: fixture.pr.headSha }],
+        status: "completed",
+        conclusion: "success",
+      },
+    ])
+    expect(fixture.prepared).toEqual(["C1", "C2"])
+    expect(app.queue.audit().findings.filter(({ code }) => code === "candidate-revision-mismatch")).toEqual([])
   })
 
   // 22332 C2465 shape: one run, two compose prepares that would produce different

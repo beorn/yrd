@@ -501,6 +501,19 @@ success. The PR author's live branch may remain checked out elsewhere. Use
 `bay open --pr <selector>` instead when continuing authored branch work that
 needs refresh or checkpoint operations.
 
+`bay open --pr` also starts from the PR's exact recorded revision. If another
+worktree owns the authored branch, Yrd materializes that revision in detached
+HEAD while retaining the Bay's declared target branch and source head. Refresh
+and checkpoint operations accept only descendants of that source, and
+checkpoint pushes still target the PR branch. The operator never needs an
+internal `--from` flag.
+
+If provisioning fails before a workspace path exists, the durable Bay record
+remains explicitly reapable: `yrd bay close --force <bay>` has no path-owned
+process tree to certify, and it atomically creates or verifies a preservation
+ref for any recorded head before closing. This is the terminal recovery for a
+pathless Bay; creating an extra anonymous Bay is not required.
+
 `pr recut` fetches the authoritative base internally and records a mechanically
 equivalent, certificate-bearing successor on the same PR. `--revision` selects
 an older immutable revision; its correlation and approved-review provenance
@@ -644,10 +657,12 @@ land. The Queue receipt retains that immutable ref, patch ID, `rangeDiff: "="`,
 and the old/new base and tip SHAs; ref loss during a remote landing fails closed
 and rolls the root branch back.
 
-Human-authored gitlink commits are refused by default. The normal path is the
-create-to-recut workflow above; `YRD_ALLOW_AUTHORED_GITLINKS=1` is break-glass
-only for a legacy carrier and does not weaken Candidate pinning or exact
-landing.
+Human-authored gitlink commits are refused. The normal path is the
+create-to-recut workflow above; there is no intake bypass. Root carrier tips
+must also be linear: merge inside the component repository, fast-forward its
+main, then rebuild and recut one linear pin-bump carrier. Queue owns the
+generated root merge wrapper and writes it deterministically from the exact
+base and carrier tips.
 
 #### Resolving Divergent Gitlink Pins
 
@@ -729,7 +744,7 @@ yrd admin journal bump <version> [--json]
 | `resume`             | Optional base                                     | Removes the queue pause                                                                                               |
 | `recover`            | Optional reason or known-dead runner id           | Reconciles abandoned work and releases queued runs whose installed step definition changed                            |
 | `finish`             | One waiting PR/step plus job/runner/attempt/token | Records external-runner evidence and resumes that exact durable run                                                   |
-| `audit`              | Repository                                        | Journal, projection, pinned-plan, and installed-step findings; no state change                                        |
+| `audit`              | Repository                                        | Journal, projection, pinned-plan, installed-step, and queue-progress findings; no state change                        |
 | `admin queue init`   | Optional base                                     | Resolves queue resources and installs the managed pre-submit hook                                                      |
 | `admin queue deinit` | Optional base                                     | Releases resources owned by the installed queue adapter                                                               |
 
@@ -750,6 +765,14 @@ carries a typed error with `cause` and `resolution` steps. In particular,
 submitted work with no resident is `resident-runner-missing`, never a quiet
 absence. `--json` also reports the checkout HEAD and ahead/behind distance from
 each installed base SHA.
+
+`queue audit` is the progress-health affordance. With queued required-check
+work it emits `queue-progress-stalled` after the configured no-landing
+interval. A repeated exact refusal emits the more specific
+`admission-refusal-loop` and inhibits the generic finding for that same queue
+head, so one wedge has one actionable specimen. Findings carry stable
+`specimen`, `since`, `blockedMs`, and count fields; process or lease PIDs never
+participate in their identity. `--json` exits `1` when findings exist.
 
 `--steps` narrows a run. Omitted means the configured default sequence. An
 explicit empty `--steps` runs no steps. Re-entry is PR-owner-authorized: inspect
@@ -966,6 +989,16 @@ list:
 checks: [typecheck]
 ```
 
+Queue progress thresholds share this one strict declaration surface:
+
+```yaml
+progress: {noLandingMs: 600000, refusalCount: 3}
+```
+
+Both fields must be positive integers and default to the values above.
+`noLandingMs` is evaluated only while required-check work is queued; a real
+`integrated` or `already-landed` journal fact resets its clock.
+
 `typecheck` is a built-in check that runs `bun run typecheck`. `check` is the
 other built-in and runs `git diff --check` against the pinned base. A repository
 may define a one-line command inline:
@@ -983,8 +1016,8 @@ landing gate. Run one configured check explicitly with `yrd check <name>`.
 
 `yrd admin init` writes that exact one-liner and the managed pre-submit hook. It
 refuses to overwrite an existing repository config.
-Deleted repository keys—including `steps`, `journal`, `refuse`, `do`, `merge`,
-and named top-level command definitions—fail config load loudly.
+Deleted or unknown repository keys—including unknown keys nested under
+`progress`—fail config load loudly.
 
 The reader's supported journal versions are compiled into Yrd. The journal
 records its own one-way version floor: a fresh journal is born at its creating

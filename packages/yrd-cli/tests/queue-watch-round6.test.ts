@@ -16,6 +16,7 @@ import {
 } from "../dev/queue-timeline-fixtures.ts"
 import {
   QueueDetailRunPrBlocks,
+  type QueueTerminalFact,
   queueShowData,
   queueTimelineAdmissionTimes,
   queueTimelineDateHeaderAt,
@@ -67,10 +68,49 @@ describe("queue watch user round 6", () => {
       expect(app.text).toContain("╭─ STATS ")
       expect(app.text).toContain("TODAY")
       expect(app.text).toContain("YESTERDAY")
-      expect(app.text).toContain("THIS WEEK")
-      expect(app.text).toContain("THIS MONTH")
+      expect(app.text).toContain("WEEK")
+      expect(app.text).toContain("MONTH")
       expect(app.text).toContain("AVG TIME")
-      expect(app.text).toContain("RETRIES")
+      expect(app.text).toContain("RETRIES/RUN")
+      expect(app.text).not.toContain("CODING")
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("reserves pane padding before budgeting the STATS hour columns", async () => {
+    const snapshot = queueTimelineStories["production-overview"].snapshot
+    const nowMs = Date.parse(snapshot.projection.now)
+    const activeHours: QueueTerminalFact[] = Array.from({ length: 15 }, (_, index) => ({
+      run: `active-hour-${String(index)}`,
+      terminalAtMs: nowMs - (5 + index * 60) * 60_000,
+      outcome: "passed",
+      failureClass: null,
+      activeMs: 60_000,
+      queueWaitMs: [],
+      members: [],
+    }))
+    const app = createRenderer({ cols: 126, rows: 40 })(
+      h(QueueWatchFrame, {
+        snapshot: {
+          ...snapshot,
+          projection: {
+            ...snapshot.projection,
+            timeStatsFacts: activeHours,
+            earliestFactMs: nowMs - 30 * 24 * 60 * 60_000,
+          },
+        },
+      }),
+    )
+    try {
+      await app.press("Escape")
+      await app.waitForLayoutStable()
+      const rows = app.text.split("\n")
+      const header = rows.find((row) => row.includes("TODAY"))
+      const allRuns = rows.find((row) => row.includes("ALL"))
+      if (header === undefined || allRuns === undefined) throw new Error(`missing STATS rows:\n${app.text}`)
+      expect(header).toContain("…")
+      expect(allRuns).toContain("·")
     } finally {
       app.unmount()
     }

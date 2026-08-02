@@ -86,6 +86,7 @@ import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import type { ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
 import { cleanGitEnvironment } from "./git-environment.ts"
+import { CHECKOUT_TIMEOUT_ENV, resolveCheckoutTimeoutMs } from "./git-timeouts.ts"
 import {
   authoritativeImplementationSource,
   implementationSourceIdentity,
@@ -114,7 +115,6 @@ import type {
 } from "./types.ts"
 import { createQueueReadModel } from "./queue-read-model.ts"
 import { QueueReadBoundary, queueReadBases } from "./queue-read-boundary.ts"
-import { submoduleTrackingWarnings } from "./submodule-tracking.ts"
 
 type RuntimeStep = StepDef<PRShape, PRShape>
 
@@ -252,13 +252,25 @@ function configuredChecks(
     const parent = join(stateDir, "pre-submit-worktrees")
     mkdirSync(parent, { recursive: true })
     const checkout = await mkdtemp(join(parent, "check-"))
+    // Materialize-class limit: the repo's own post-checkout hook runs INSIDE
+    // this add (hh's branch-guard materializes submodules there), so the
+    // plumbing timeout must never govern it (22648).
+    const checkoutTimeoutMs = resolveCheckoutTimeoutMs(environment)
     const add = await process.run({
       argv: ["git", "-C", repo, "worktree", "add", "--detach", checkout, candidateSha],
       cwd: repo,
       env: inherited,
-      timeoutMs: GIT_TIMEOUT_MS,
+      timeoutMs: checkoutTimeoutMs,
     })
-    if (add.exitCode !== 0 || add.timedOut) {
+    if (add.timedOut) {
+      await rm(checkout, { recursive: true, force: true })
+      raiseFailure(
+        "infrastructure",
+        "required-check-checkout-timeout",
+        `yrd: pre-submit checkout of '${candidateSha}' killed after ${Math.round(add.durationMs)}ms (limit ${checkoutTimeoutMs}ms) during 'git worktree add' — the repository's post-checkout hook (e.g. branch-guard submodule materialization) runs inside this operation; raise ${CHECKOUT_TIMEOUT_ENV} or retry under lower load`,
+      )
+    }
+    if (add.exitCode !== 0) {
       await rm(checkout, { recursive: true, force: true })
       raiseFailure(
         "infrastructure",
@@ -282,13 +294,17 @@ function configuredChecks(
         argv: ["git", "-C", repo, "worktree", "remove", "--force", checkout],
         cwd: repo,
         env: inherited,
-        timeoutMs: GIT_TIMEOUT_MS,
+        // Same materialize-class limit: removal traverses the tree the add
+        // populated, so a kill here is the same defect one step later (22648).
+        timeoutMs: checkoutTimeoutMs,
       })
       if (removed.exitCode !== 0 || removed.timedOut) {
         raiseFailure(
           "infrastructure",
           "required-check-checkout-cleanup-failed",
-          removed.stderr.trim() || `yrd: could not remove required-check checkout '${checkout}'`,
+          removed.timedOut
+            ? `yrd: required-check checkout removal of '${checkout}' killed after ${Math.round(removed.durationMs)}ms (limit ${checkoutTimeoutMs}ms); raise ${CHECKOUT_TIMEOUT_ENV} or retry under lower load`
+            : removed.stderr.trim() || `yrd: could not remove required-check checkout '${checkout}'`,
         )
       }
       await rm(checkout, { recursive: true, force: true })
@@ -875,6 +891,7 @@ async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions):
     batch: options.config.batch,
     defaultSteps: options.config.steps,
     requires: options.config.requires,
+    ...(options.config.progress === undefined ? {} : { progress: options.config.progress }),
     ...(flowConfig === undefined ? {} : { flows: flowConfig }),
     resolveBaseSha: async (base) =>
       (
@@ -1512,7 +1529,6 @@ async function createYrdRuntimeHost(
     const services = Object.freeze({
       [QueueReadBoundary]: Object.freeze({
         readModel: queueReadModel,
-        submoduleWarnings: mode === "viewer" ? submoduleTrackingWarnings(repository.worktree) : [],
       }),
       ...(loaded.config.flows === undefined ? {} : { config: defineConfig(...loaded.config.flows) }),
       queue: queueAdministration(

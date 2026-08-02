@@ -150,7 +150,7 @@ async function candidatePackageRepository(
   await git(repo, "add", "package.json", "bun.lock", ".gitignore", ".yrd.yml")
   await git(repo, "commit", "-qm", "declare candidate toolchain")
   await git(repo, "switch", "-q", "issue/feature")
-  await git(repo, "merge", "-q", "--no-edit", "main")
+  await git(repo, "rebase", "-q", "main")
   const featureSha = await git(repo, "rev-parse", "HEAD")
   await git(repo, "switch", "-q", "main")
   return { repo, featureSha }
@@ -484,6 +484,37 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(untrackedIdentity).toMatch(/^dirty:[0-9a-f]{64}$/u)
     await writeFile(join(repo, "runtime", "untracked-runtime.ts"), "export const shadow = false\n")
     expect(await implementationSourceIdentity(process, sourceRepository)).not.toBe(untrackedIdentity)
+  })
+
+  it("maps a linked-worktree runtime source to its authoritative gitlink (22730)", async () => {
+    const { repo } = await repository()
+    const root = join(repo, "..")
+    const source = join(root, "linked-runtime-source")
+    await git(root, "init", "-q", "-b", "main", source)
+    await git(source, "config", "user.name", "Yrd Test")
+    await git(source, "config", "user.email", "yrd@example.invalid")
+    await writeFile(join(source, "version.txt"), "loaded\n")
+    await git(source, "add", "version.txt")
+    await git(source, "commit", "-qm", "loaded source")
+    const sourceSha = await git(source, "rev-parse", "HEAD")
+
+    await git(repo, "config", "protocol.file.allow", "always")
+    await git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", source, "runtime")
+    await git(repo, "commit", "-qam", "add runtime source")
+    const authoritySha = await git(repo, "rev-parse", "HEAD")
+
+    const linked = join(repo, ".worktrees", "wt1")
+    await mkdir(join(repo, ".worktrees"), { recursive: true })
+    await git(repo, "worktree", "add", "-q", "--detach", linked, authoritySha)
+    await git(linked, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "-q", "runtime")
+
+    await using process = createProcess({ cwd: linked })
+    const discovered = await discoverYrdRepository({ cwd: linked, process })
+    expect(
+      await authoritativeImplementationSource(process, discovered.repo, authoritySha, {
+        root: join(linked, "runtime"),
+      }),
+    ).toBe(`git:${sourceSha}`)
   })
 
   it("does not mistake an untracked installed package for the consumer repository's runtime source", async () => {
@@ -3779,5 +3810,89 @@ describe("step environment declarations — deterministic check children (merge-
     expect(queueStepRevision({ ...input, config: { ...input.config, environmentPassthrough: ["CI"] } })).not.toBe(
       baseline,
     )
+  })
+})
+
+describe("pre-submit checkout timeout (22648)", () => {
+  /** hh's branch-guard materializes submodules from the repo's post-checkout
+   * hook INSIDE `git worktree add` (measured 34.15s against a 30s kill); a
+   * sleeping hook is that cost, distilled. */
+  async function slowCheckoutRepository(sleepSeconds: number): Promise<{ repo: string }> {
+    const { repo } = await repository()
+    await mkdir(join(repo, ".git", "hooks"), { recursive: true })
+    await writeFile(join(repo, ".git", "hooks", "post-checkout"), `#!/bin/sh\nsleep ${sleepSeconds}\nexit 0\n`, {
+      mode: 0o755,
+    })
+    return { repo }
+  }
+
+  async function submitFeature(repo: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    let stdout = ""
+    let stderr = ""
+    const exitCode = await runYrdProcess(
+      ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--json"],
+      {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      },
+    )
+    return { exitCode, stdout, stderr }
+  }
+
+  it("types a checkout kill with limit, elapsed, phase, and remedy when the hook outlives the limit (22648)", async () => {
+    const { repo } = await slowCheckoutRepository(2.4)
+    const previous = process.env.YRD_CHECKOUT_TIMEOUT_MS
+    process.env.YRD_CHECKOUT_TIMEOUT_MS = "500"
+    try {
+      const { exitCode, stdout, stderr } = await submitFeature(repo)
+      expect(exitCode, stdout).toBe(3)
+      expect(stdout).toBe("")
+      const { failure } = JSON.parse(stderr) as {
+        failure: { kind: string; code: string; message: string }
+      }
+      expect(failure).toMatchObject({ kind: "infrastructure", code: "required-check-checkout-timeout" })
+      expect(failure.message).toContain("500ms")
+      expect(failure.message).toMatch(/after \d+ms/u)
+      expect(failure.message).toContain("post-checkout")
+      expect(failure.message).toContain("YRD_CHECKOUT_TIMEOUT_MS")
+      expect((await journalEnvelope(repo)).flatMap(({ values }) => values)).toEqual([])
+    } finally {
+      if (previous === undefined) delete process.env.YRD_CHECKOUT_TIMEOUT_MS
+      else process.env.YRD_CHECKOUT_TIMEOUT_MS = previous
+    }
+  })
+
+  it("defaults the materializing-checkout limit with real margin over hh's measured 34s cost (22648)", async () => {
+    const { GIT_MATERIALIZE_TIMEOUT_DEFAULT_MS, resolveCheckoutTimeoutMs } = await import("../src/git-timeouts.ts")
+    expect(GIT_MATERIALIZE_TIMEOUT_DEFAULT_MS).toBeGreaterThanOrEqual(90_000)
+    expect(resolveCheckoutTimeoutMs({})).toBe(GIT_MATERIALIZE_TIMEOUT_DEFAULT_MS)
+  })
+
+  it("refuses an invalid YRD_CHECKOUT_TIMEOUT_MS loudly instead of silently falling back (22648)", async () => {
+    const { resolveCheckoutTimeoutMs } = await import("../src/git-timeouts.ts")
+    expect(() => resolveCheckoutTimeoutMs({ YRD_CHECKOUT_TIMEOUT_MS: "soon" })).toThrow(/YRD_CHECKOUT_TIMEOUT_MS/u)
+    expect(() => resolveCheckoutTimeoutMs({ YRD_CHECKOUT_TIMEOUT_MS: "-5" })).toThrow(/YRD_CHECKOUT_TIMEOUT_MS/u)
+  })
+
+  it("lets a progressing post-checkout hook finish inside the limit (22648)", async () => {
+    const { repo } = await slowCheckoutRepository(1.2)
+    const previous = process.env.YRD_CHECKOUT_TIMEOUT_MS
+    process.env.YRD_CHECKOUT_TIMEOUT_MS = "20000"
+    try {
+      const { exitCode, stdout, stderr } = await submitFeature(repo)
+      expect(exitCode, stderr).toBe(0)
+      expect(JSON.parse(stdout)).toMatchObject({
+        command: "pr.submit",
+        prs: [{ branch: "issue/feature", status: "submitted" }],
+      })
+    } finally {
+      if (previous === undefined) delete process.env.YRD_CHECKOUT_TIMEOUT_MS
+      else process.env.YRD_CHECKOUT_TIMEOUT_MS = previous
+    }
   })
 })
