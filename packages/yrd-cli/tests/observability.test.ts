@@ -67,6 +67,7 @@ describe("Yrd observability controls", () => {
       { DEBUG: "yrd:core", LOG_LEVEL: "warn" },
       { level: "warn", debug: "yrd:core", spans: false, explicitLevel: true },
     ],
+    [{}, { LOG_LEVEL: "warn", TRACE: "yrd:*" }, { level: "warn", spans: true, explicitLevel: true }],
     [
       { logLevel: "error" },
       { DEBUG: "yrd:core" },
@@ -531,7 +532,9 @@ describe("observable CLI exemplar", () => {
   })
 
   it("keeps JSON stdout pure while -vvv diagnostics reach stderr and LOGGILY_FILE", async () => {
-    const root = await mkdtemp(join(tmpdir(), "yrd-observable-cli-"))
+    // Keep the random basename below the approved token-shape redaction length;
+    // this test asserts path fidelity, not the redaction matcher covered upstream.
+    const root = await mkdtemp(join(tmpdir(), "yrd-oc-"))
     roots.push(root)
     const logFile = join(root, "yrd.jsonl")
     const stdout: string[] = []

@@ -1,5 +1,13 @@
 import { YRD_LIFECYCLE_LEVELS, observeYrdLifecycle, raiseFailure, type YrdDeliveryIdentity } from "@yrd/core"
-import { createLogger, type ConditionalLogger, type ConfigElement, type Event, type LogLevel } from "loggily"
+import {
+  createLogger,
+  LOG_LEVEL_PRIORITY,
+  resolveVerbosityLevel,
+  type ConditionalLogger,
+  type ConfigElement,
+  type Event,
+  type LogLevel,
+} from "loggily"
 import { enableContextPropagation } from "loggily/context"
 
 export { YRD_LIFECYCLE_LEVELS, observeYrdLifecycle, type YrdDeliveryIdentity }
@@ -20,8 +28,6 @@ export type YrdObservability = Readonly<{
   explicitLevel: boolean
 }>
 
-const LOG_LEVELS = ["trace", "debug", "info", "warn", "error", "silent"] as const
-
 function count(value: number | undefined, flag: string): number {
   const resolved = value ?? 0
   if (!Number.isSafeInteger(resolved) || resolved < 0) {
@@ -33,11 +39,11 @@ function count(value: number | undefined, flag: string): number {
 function level(value: string | undefined, source: "--log-level" | "LOG_LEVEL"): LogLevel | undefined {
   const normalized = value?.trim().toLowerCase()
   if (normalized === undefined || normalized === "") return undefined
-  if ((LOG_LEVELS as readonly string[]).includes(normalized)) return normalized as LogLevel
+  if (normalized in LOG_LEVEL_PRIORITY) return normalized as LogLevel
   raiseFailure(
     source === "--log-level" ? "usage" : "configuration",
     "invalid-log-level",
-    `${source} must be one of ${LOG_LEVELS.join(", ")}; received '${value}'`,
+    `${source} must be one of ${Object.keys(LOG_LEVEL_PRIORITY).join(", ")}; received '${value}'`,
   )
 }
 
@@ -79,27 +85,21 @@ export function resolveYrdObservability(
   const explicit = level(flags.logLevel, "--log-level")
   const configured = level(env.LOG_LEVEL, "LOG_LEVEL")
   const namespaces = setting(env.DEBUG)
+  const trace = setting(env.TRACE)
+  const shifted = verbose > 0 || quiet > 0 ? resolveVerbosityLevel("warn", verbose, quiet) : undefined
   const selected =
     explicit ??
-    (verbose >= 3
-      ? "trace"
-      : verbose === 2
-        ? "debug"
-        : verbose === 1
-          ? "info"
-          : quiet >= 2
-            ? "silent"
-            : quiet === 1
-              ? "error"
-              : // Last resort only: every branch above is an explicit operator
-                // choice and keeps its level. DEBUG= just moves the DEFAULT.
-                (configured ?? (namespaces === undefined ? "warn" : "debug")))
+    shifted ??
+    // Last resort only: every branch above is an explicit operator choice and
+    // keeps its level. DEBUG= just moves the DEFAULT.
+    configured ??
+    (namespaces === undefined ? "warn" : "debug")
 
   return Object.freeze({
     level: selected,
     ...(namespaces === undefined ? {} : { debug: namespaces }),
     ...(setting(env.LOGGILY_FILE) === undefined ? {} : { file: setting(env.LOGGILY_FILE) }),
-    spans: selected === "trace" || selected === "debug",
+    spans: trace !== undefined || selected === "trace" || selected === "debug",
     explicitLevel: explicit !== undefined || configured !== undefined || verbose > 0 || quiet > 0,
   })
 }
