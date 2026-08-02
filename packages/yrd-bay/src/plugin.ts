@@ -308,6 +308,37 @@ const PrRequestReviewArgsSchema = z
   .strict()
 export type PrRequestReviewArgs = z.infer<typeof PrRequestReviewArgsSchema>
 
+const PrPublicationComponentSchema = z.object({ path: TextSchema, pin: GitShaSchema }).strict()
+export const PrPublicationInputSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: RevisionSchema,
+    headSha: GitShaSchema,
+    baseSha: GitShaSchema,
+    branch: GitRefSchema,
+    sourceRoot: TextSchema,
+    components: z.array(PrPublicationComponentSchema).readonly(),
+    continuation: z.enum(["none", "queue"]),
+  })
+  .strict()
+export type PrPublicationInput = z.infer<typeof PrPublicationInputSchema>
+const PublishedRefSchema = z.object({ path: TextSchema, sha: GitShaSchema, ref: GitRefSchema }).strict()
+export const PrPublicationOutputSchema = z
+  .object({ pr: PRIdSchema, revision: RevisionSchema, refs: z.array(PublishedRefSchema).readonly() })
+  .strict()
+export type PrPublicationOutput = z.infer<typeof PrPublicationOutputSchema>
+export type PrPublicationService = Readonly<{
+  revision: string
+  publish(
+    input: PrPublicationInput,
+    context: JobContext,
+  ): JobResult<PrPublicationOutput> | Promise<JobResult<PrPublicationOutput>>
+}>
+
+export function prPublicationJobKey(identity: Pick<PrPublicationInput, "pr" | "revision" | "headSha">): string {
+  return `pr-publication:${identity.pr}:${String(identity.revision)}:${identity.headSha}`
+}
+
 const PRReviewDecisionSchema = z.enum(["approve", "reject"])
 const PrReviewArgsSchema = z
   .object({
@@ -594,9 +625,20 @@ export type BayJobDefs = Readonly<{
   "bay.refresh": JobDef<RefreshBayInput, RefreshedBay>
   "bay.checkpoint": JobDef<CheckpointBayInput, CheckpointedBay>
   "bay.deprovision": JobDef<DeprovisionBayInput, DeprovisionedBay>
+  "pr.publish": JobDef<PrPublicationInput, PrPublicationOutput>
 }>
 
-export function createBayJobDefs(workspace: BayWorkspace): BayJobDefs {
+export function createBayJobDefs(workspace: BayWorkspace, publication?: PrPublicationService): BayJobDefs {
+  const publisher: PrPublicationService =
+    publication ??
+    Object.freeze({
+      revision: "publication-unavailable-v1",
+      publish: (): JobResult<PrPublicationOutput> => ({
+        status: "completed",
+        conclusion: "failure",
+        error: { code: "publication-unavailable", message: "PR publication service is not installed" },
+      }),
+    })
   return Object.freeze({
     "bay.provision": createJobDef({
       name: "bay.provision",
@@ -630,6 +672,19 @@ export function createBayJobDefs(workspace: BayWorkspace): BayJobDefs {
       output: DeprovisionedBaySchema,
       execute: (input, context) => workspace.deprovision(input, context),
     }),
+    "pr.publish": createJobDef({
+      name: "pr.publish",
+      title: "Publish an immutable PR revision",
+      revision: publisher.revision,
+      input: PrPublicationInputSchema,
+      output: PrPublicationOutputSchema,
+      observe: (input) => ({
+        lifecycle: "publication",
+        identity: { pr: input.pr, revision: input.revision, headSha: input.headSha },
+        attributes: { continuation: input.continuation, componentCount: input.components.length },
+      }),
+      execute: (input, context) => publisher.publish(input, context),
+    }),
   })
 }
 
@@ -658,6 +713,7 @@ export type BayCommands = Readonly<{
     recordAdmission: CommandHandler<PRAdmissionRecordedFact, BayState>
     requestReview: CommandHandler<PrRequestReviewArgs, BayState>
     regression: CommandHandler<PrRegressionArgs, BayState>
+    publish: CommandHandler<PrPublicationInput, BayState>
   }>
 }>
 
@@ -691,6 +747,7 @@ export type Bays = Readonly<{
   recordAdmission(args: PRAdmissionRecordedFact): Promise<CommandResult>
   requestReview(args: PrRequestReviewArgs): Promise<CommandResult>
   recordRegression(args: PrRegressionArgs): Promise<CommandResult>
+  requestPublication(args: PrPublicationInput): Promise<CommandResult>
 }>
 
 export type HasBays = Readonly<{ bays: Bays }>
@@ -716,6 +773,7 @@ type BayActions = Pick<
   | "recordAdmission"
   | "requestReview"
   | "recordRegression"
+  | "requestPublication"
 >
 
 export type BayBaseTarget = Readonly<{
@@ -1237,6 +1295,7 @@ export function createBays(
     recordAdmission: actions.recordAdmission,
     requestReview: actions.requestReview,
     recordRegression: actions.recordRegression,
+    requestPublication: actions.requestPublication,
   })
 }
 
@@ -1325,6 +1384,7 @@ export function withBays(options: WithBaysOptions) {
               recordAdmission: (args) => yrd.dispatch(commands.pr.recordAdmission, args),
               requestReview: (args) => yrd.dispatch(commands.pr.requestReview, args),
               recordRegression: (args) => yrd.dispatch(commands.pr.regression, args),
+              requestPublication: (args) => yrd.dispatch(commands.pr.publish, args),
             },
             {
               defaultBase,
@@ -1467,8 +1527,41 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultSubmitt
         params: PrRegressionArgsSchema,
         apply: (state: BayState, args: PrRegressionArgs) => recordPrRegression(state, args),
       }),
+      publish: command({
+        title: "Request immutable PR publication",
+        params: PrPublicationInputSchema,
+        apply: (state: BayState, args: PrPublicationInput) => requestPrPublication(state, args, jobs["pr.publish"]),
+      }),
     },
   }
+}
+
+function requestPrPublication(
+  state: DeepReadonly<BayState>,
+  args: PrPublicationInput,
+  publication: BayJobDefs["pr.publish"],
+) {
+  const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
+  const revision = currentPRRev(pr)
+  if (prDeliveryState(pr) !== "pushed") {
+    raiseFailure("refusal", "publication-pr-not-draft", `yrd: PR '${pr.id}' is ${prDeliveryState(pr)}, not pushed`)
+  }
+  if (revision.n !== args.revision || revision.head !== args.headSha || pr.branch !== args.branch) {
+    raiseFailure(
+      "refusal",
+      "publication-revision-moved",
+      `yrd: PR '${pr.id}' is revision ${revision.n} head '${revision.head}' on '${pr.branch}', not requested ` +
+        `revision ${args.revision} head '${args.headSha}' on '${args.branch}'`,
+    )
+  }
+  if (prBaseSha(pr) !== args.baseSha) {
+    raiseFailure(
+      "refusal",
+      "publication-base-moved",
+      `yrd: PR '${pr.id}' base is '${prBaseSha(pr) ?? "missing"}', not requested '${args.baseSha}'`,
+    )
+  }
+  return { events: [publication.request(args, { key: prPublicationJobKey(args) })] }
 }
 
 function openBay(

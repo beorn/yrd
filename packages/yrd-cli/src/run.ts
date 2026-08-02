@@ -19,6 +19,8 @@ import {
   prNeedsAuthor,
   prRevisionNumber,
   prRevisionLineage,
+  prPublicationJobKey,
+  PrPublicationInputSchema,
   prSourceReadyAt,
   isConcurrentCheckabilityConflict,
   resolveBay,
@@ -34,6 +36,7 @@ import {
   type PRRegression,
   type PRRegressionSeverity,
   type PRRev,
+  type PrPublicationInput,
 } from "@yrd/bay"
 import { CompetitorDefSchema, type CompetitorDef, type Contest } from "@yrd/contest"
 import {
@@ -177,7 +180,7 @@ import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
 import { ensureWorkspaceDependencies } from "./workspace-provisioning.ts"
 import { artifactLocation, directArtifacts, nestedArtifacts, uniqueArtifacts } from "./artifact-reference.ts"
 import { readInstalledBaselines } from "./installed-baseline.ts"
-import { unpublishedChangedSubmodulePins } from "./pr-submodule-publication.ts"
+import { changedSubmodulePins, unpublishedChangedSubmodulePins } from "./pr-submodule-publication.ts"
 // The live watch UI is loaded lazily at its single use site in watchQueue(): it is the only
 // module that pulls silvery's SplitPane, and eagerly importing it here would make every CLI
 // path (yrd --version, submit, one-shot queue) require the interactive TUI dependency at module
@@ -2771,6 +2774,120 @@ async function requirePublishedSubmodulePins(pr: PR, services: YrdCliServices, i
   )
 }
 
+type PublicationProjection = Readonly<{
+  job: string
+  status: "publication-required" | "publishing" | "published" | "publication-failed"
+  continuation: PrPublicationInput["continuation"]
+  detail: string
+  error?: JobError
+}>
+
+function publicationJob(app: YrdCliApp, pr: PR): Job | undefined {
+  const revision = currentPRRev(pr)
+  const current = app.jobs.getByKey(prPublicationJobKey({ pr: pr.id, revision: revision.n, headSha: revision.head }))
+  if (current !== undefined) return current
+  return Object.values(stateOf(app).jobs.byId)
+    .filter((job) => job.definition === "pr.publish" && PrPublicationInputSchema.parse(job.input).pr === pr.id)
+    .toSorted((left, right) => right.requestedAt.localeCompare(left.requestedAt))[0]
+}
+
+function projectPublication(job: Job | undefined): PublicationProjection | undefined {
+  if (job?.definition !== "pr.publish") return undefined
+  const input = PrPublicationInputSchema.parse(job.input)
+  if (job.status === "queued") {
+    return {
+      job: job.id,
+      status: "publication-required",
+      continuation: input.continuation,
+      detail: "waiting for yrd queue run --once or the resident runner",
+    }
+  }
+  if (job.status === "in_progress" || job.status === "waiting") {
+    return {
+      job: job.id,
+      status: "publishing",
+      continuation: input.continuation,
+      detail:
+        job.status === "waiting" ? (job.detail ?? "publisher is waiting") : "credential-bearing publisher is running",
+    }
+  }
+  if (job.conclusion === "success") {
+    return { job: job.id, status: "published", continuation: input.continuation, detail: "immutable refs published" }
+  }
+  const detail =
+    job.conclusion === "failure"
+      ? job.error.message
+      : job.conclusion === "timed_out"
+        ? job.lostReason
+        : job.conclusion === "cancelled"
+          ? job.cancelReason
+          : "publication job did not run"
+  return {
+    job: job.id,
+    status: "publication-failed",
+    continuation: input.continuation,
+    detail,
+    ...(job.conclusion === "failure" ? { error: job.error } : {}),
+  }
+}
+
+async function publishPr(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  selector: string,
+  options: JsonOption & Readonly<{ queue?: boolean }>,
+  io: YrdCliIO,
+): Promise<void> {
+  const process = services.process ?? configuration("pr.publish capability is not installed")
+  const pr = requiredPr(app, selector)
+  const revision = currentPRRev(pr)
+  const baseSha = prBaseSha(pr)
+  if (baseSha === undefined) raiseFailure("refusal", "pr-base-missing", `yrd: PR '${pr.id}' has no immutable base SHA`)
+  const sourceRoot = resolve(io.cwd ?? globalThis.process.cwd())
+  const components = await changedSubmodulePins({
+    process,
+    repo: sourceRoot,
+    baseSha,
+    headSha: revision.head,
+  })
+  const input: PrPublicationInput = {
+    pr: pr.id,
+    revision: revision.n,
+    headSha: revision.head,
+    baseSha,
+    branch: pr.branch,
+    sourceRoot,
+    components: components.map(({ path, pin }) => ({ path, pin })),
+    continuation: options.queue === true ? "queue" : "none",
+  }
+  const key = prPublicationJobKey(input)
+  let job = app.jobs.getByKey(key)
+  if (job === undefined) {
+    const requested = await app.bays.requestPublication(input)
+    const id = app.jobs.requested(requested)[0] ?? app.jobs.getByKey(key)?.id
+    job = id === undefined ? undefined : app.jobs.get(id)
+  } else {
+    if (JSON.stringify(PrPublicationInputSchema.parse(job.input)) !== JSON.stringify(input)) {
+      raiseFailure(
+        "refusal",
+        "publication-request-conflict",
+        `yrd: PR '${pr.id}' revision ${revision.n} already has publication Job '${job.id}' with different request details`,
+      )
+    }
+    if (job.status === "completed" && (job.conclusion === "failure" || job.conclusion === "timed_out")) {
+      job = await app.jobs.retry(job.id)
+    }
+  }
+  const publication = projectPublication(job)
+  if (publication === undefined) throw new Error(`yrd: PR '${pr.id}' publication request produced no Job`)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "pr.publish", pr: projectPRTaskStatus(pr), publication },
+    `${pr.id} ${publication.status}: ${publication.detail}`,
+  )
+}
+
 async function readyPr(
   app: YrdCliApp,
   services: YrdCliServices,
@@ -3831,17 +3948,27 @@ async function listPrs(
     rows.map(({ pr }) => pr),
     io,
   )
+  const publicationWarnings = rows.flatMap(({ pr }) => {
+    const publication = projectPublication(publicationJob(app, pr))
+    return publication === undefined || publication.status === "published"
+      ? []
+      : [`${pr.id} ${publication.status}: ${publication.detail} (Job ${publication.job})`]
+  })
   await printResultWithWarnings(
     io,
     json,
     {
       command: "pr.list",
-      prs: rows.map(({ pr, eligibility, needsReview }) => ({
-        ...projectPrTaskStatusWithEligibility(pr, eligibility, landings.get(pr.id)),
-        eligibility: projectEligibilityTaskStatus(eligibility),
-        requestedReviewers: pr.requestedReviewers ?? [],
-        needsReview,
-      })),
+      prs: rows.map(({ pr, eligibility, needsReview }) => {
+        const publication = projectPublication(publicationJob(app, pr))
+        return {
+          ...projectPrTaskStatusWithEligibility(pr, eligibility, landings.get(pr.id)),
+          eligibility: projectEligibilityTaskStatus(eligibility),
+          requestedReviewers: pr.requestedReviewers ?? [],
+          needsReview,
+          ...(publication === undefined ? {} : { publication }),
+        }
+      }),
       runs: runs.map(projectQueueRunTaskStatus),
     },
     createElement(PRListView, {
@@ -3849,7 +3976,7 @@ async function listPrs(
       columns: io.columns ?? 120,
       window: { hidden: matching.length - listed.length, total: matching.length },
     }),
-    warnings,
+    [...warnings, ...publicationWarnings],
   )
 }
 
@@ -3873,7 +4000,8 @@ async function viewPr(
   const attempts = await queueAttempts(app, services)
   const detail = prDetailData(pr, runs, attempts)
   const eligibility = app.queue.eligibility(pr.id)
-  await printResult(
+  const publication = projectPublication(publicationJob(app, pr))
+  await printResultWithWarnings(
     io,
     jsonEnabled(options),
     {
@@ -3884,6 +4012,7 @@ async function viewPr(
       ...(position === undefined ? {} : { position }),
       results: results.map(projectQueueStatusResultTaskStatus),
       detail,
+      ...(publication === undefined ? {} : { publication }),
     },
     createElement(PRDetailView, {
       pr,
@@ -3893,6 +4022,9 @@ async function viewPr(
       now: io.now?.() ?? Date.now(),
       ...(position === undefined ? {} : { position }),
     }),
+    publication === undefined || publication.status === "published"
+      ? []
+      : [`${pr.id} ${publication.status}: ${publication.detail} (Job ${publication.job})`],
   )
 }
 
@@ -4383,6 +4515,50 @@ async function runQueues(
     },
     runtimeOptions(io),
   )
+}
+
+function queuedPublicationJobs(app: YrdCliApp): readonly Job[] {
+  return Object.values(stateOf(app).jobs.byId).filter(
+    (job) => job.definition === "pr.publish" && job.status === "queued",
+  )
+}
+
+async function preparePublicationQueueCycle(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  io: YrdCliIO,
+): Promise<readonly Job[]> {
+  const queued = queuedPublicationJobs(app)
+  const executed =
+    queued.length === 0
+      ? []
+      : await runJobs(
+          app,
+          queued.map((job) => job.id),
+          io,
+        )
+  const successful = Object.values(stateOf(app).jobs.byId).filter(
+    (job) => job.definition === "pr.publish" && job.status === "completed" && job.conclusion === "success",
+  )
+  for (const job of successful) {
+    const input = PrPublicationInputSchema.parse(job.input)
+    if (input.continuation !== "queue") continue
+    const pr = app.bays.pr(input.pr)
+    if (pr === undefined || prDeliveryState(pr) !== "pushed") continue
+    const revision = currentPRRev(pr)
+    if (revision.n !== input.revision || revision.head !== input.headSha) continue
+    await executeRecutPr(
+      app,
+      services,
+      pr.id,
+      {
+        queue: true,
+        expectedCurrent: { revision: input.revision, headSha: input.headSha, ...(pr.track ? { track: true } : {}) },
+      },
+      io,
+    )
+  }
+  return executed
 }
 
 async function cancelQueueRun(
@@ -6921,11 +7097,15 @@ async function prepareResidentQueueCycle(
   io: YrdCliIO,
   remedied: Set<string>,
 ): Promise<boolean> {
-  if (services.recut === undefined) return false
+  const beforePublication = app.state()
+  const publications = await preparePublicationQueueCycle(app, services, io)
+  const publicationChanged = publications.length > 0 || app.state() !== beforePublication
+  if (services.recut === undefined) return publicationChanged
   const tracking = await refreshTrackedQueueRevisions(app, services, io)
   const freshness = await refreshAdmittedQueueRevisions(app, services, io)
   const remedies = await applyRefusalRemedies(app, services, io, remedied)
   return (
+    publicationChanged ||
     tracking.some((outcome) => outcome.status === "applied") ||
     freshness.length > 0 ||
     remedies.some((outcome) => outcome.status === "applied")
@@ -7893,14 +8073,21 @@ function buildProgram(
         return
       }
       await gate()
+      const publications = await preparePublicationQueueCycle(installed(), installedServices(), io)
+      if (publications.length > 0) await gate()
       const runs = await runQueues(installed(), selectors, options, io)
       await printResult(
         io,
         jsonEnabled(options),
-        { command: "queue.run", results: runs.map(projectQueueRunTaskStatus) },
+        {
+          command: "queue.run",
+          publications: publications.map((job) => ({ ...job, projection: projectPublication(job) })),
+          results: runs.map(projectQueueRunTaskStatus),
+        },
         createElement(QueueRunsView, { runs }),
       )
-      setExit(runs.some(Queues.failed) ? 1 : 0)
+      const publicationFailed = publications.some((job) => job.status !== "completed" || job.conclusion !== "success")
+      setExit(publicationFailed || runs.some(Queues.failed) ? 1 : 0)
     })
   queue
     .command("cancel <run>")
@@ -8037,6 +8224,11 @@ function buildProgram(
       setExit(await recutPr(installed(), installedServices(), selector, options, io)),
     )
   addAuthoredCarrierWorkflow(recut, name)
+  pr.command("publish <selector>")
+    .description("request credential-bearing publication of one immutable PR revision")
+    .option("--queue", "recut and queue the revision after publication succeeds")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => publishPr(installed(), installedServices(), selector, options, io))
   pr.command("ready <selector>")
     .description("submit a pushed PR revision and request configured checks")
     .option("--json", "emit stable JSON")

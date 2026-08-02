@@ -103,6 +103,7 @@ import { withLiveRenderer } from "./live-renderer.ts"
 import { createYrdLogger, residentObservability, resolveYrdObservability } from "./observability.ts"
 import { formatResidentLogLine, residentArtifactHome } from "./runner-timeline.ts"
 import { diagnostic } from "./output.tsx"
+import { createPrPublicationService } from "./pr-publication.ts"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
 import { residentRunnerLeaseHeld, runYrdHelp, runYrdProcessRuntime, yrdJsonOutputRequested } from "./run.ts"
 import { queueStepRevision, type ToolchainFingerprint } from "./host-revision.ts"
@@ -886,7 +887,10 @@ async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions):
       process: options.process,
       ...(options.receiverPath === undefined ? {} : { intakeRemote: options.receiverPath }),
     }))
-  const bayJobs = createBayJobDefs(workspace)
+  const bayJobs = createBayJobDefs(
+    workspace,
+    createPrPublicationService({ repo: options.repo, process: options.process }),
+  )
   const queue = withQueue({
     steps: configuredQueueSteps(options, mergeCommand),
     batch: options.config.batch,

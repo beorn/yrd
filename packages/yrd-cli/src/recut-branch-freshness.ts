@@ -95,10 +95,13 @@ async function liveBranchHead(
   }
   const queueFlag = options.queue === true ? " --queue" : ""
   const remedy =
-    `remedy: publication authority required for branch '${pr.branch}' at recorded head '${recorded.head}'; ` +
-    `from a credential-bearing delivery session run:\n` +
+    `remedy: request credential-bearing Yrd publication for branch '${pr.branch}' on base '${recorded.base}' ` +
+    `at base SHA '${recorded.baseSha ?? "unrecorded"}' and recorded head '${recorded.head}':\n` +
+    `  yrd pr publish ${pr.id}${queueFlag}\n` +
+    `This records a durable publication Job; without a runner it remains visible as publication-required.\n` +
+    `emergency operator fallback:\n` +
     `  git -C ${shellQuote(cwd)} push origin ${shellQuote(`${recorded.head}:refs/heads/${pr.branch}`)}\n` +
-    `then retry:\n  yrd pr recut ${pr.id} --preflight${queueFlag}`
+    (options.queue === true ? "" : `then retry:\n  yrd pr recut ${pr.id} --preflight`)
   return freshRemoteBranch(process, cwd, pr.branch, remedy)
 }
 

@@ -118,6 +118,7 @@ function createWorkspaceHarness() {
 }
 
 type BayJobDefinition = keyof ReturnType<typeof createBayJobDefs>
+type BayWorkspaceJobDefinition = Extract<BayJobDefinition, `bay.${string}`>
 type FailureTransition = "failure" | "lost"
 
 const BAY_JOB_DEFINITIONS = [
@@ -125,9 +126,9 @@ const BAY_JOB_DEFINITIONS = [
   "bay.refresh",
   "bay.checkpoint",
   "bay.deprovision",
-] as const satisfies readonly BayJobDefinition[]
+] as const satisfies readonly BayWorkspaceJobDefinition[]
 
-function createFailOnceWorkspace(definition: BayJobDefinition, transition: FailureTransition) {
+function createFailOnceWorkspace(definition: BayWorkspaceJobDefinition, transition: FailureTransition) {
   const base = createWorkspaceHarness().adapter
   let failed = false
   let startedResolve: (() => void) | undefined
@@ -135,7 +136,7 @@ function createFailOnceWorkspace(definition: BayJobDefinition, transition: Failu
     startedResolve = resolve
   })
   const intercept = <Output extends JsonValue>(
-    current: BayJobDefinition,
+    current: BayWorkspaceJobDefinition,
     context: JobContext,
     success: () => JobResult<Output> | Promise<JobResult<Output>>,
   ): JobResult<Output> | Promise<JobResult<Output>> => {
@@ -253,10 +254,12 @@ async function settleFailureTransition(
 }
 
 describe("withBays", () => {
-  it("enumerates every Bay job definition in the terminal-reapability property", () => {
-    expect(Object.keys(createBayJobDefs(createWorkspaceHarness().adapter)).sort()).toEqual(
-      [...BAY_JOB_DEFINITIONS].sort(),
-    )
+  it("enumerates every Bay workspace job definition in the terminal-reapability property", () => {
+    expect(
+      Object.keys(createBayJobDefs(createWorkspaceHarness().adapter))
+        .filter((definition) => definition.startsWith("bay."))
+        .sort(),
+    ).toEqual([...BAY_JOB_DEFINITIONS].sort())
   })
 
   it.each(

@@ -30,7 +30,7 @@ async function runGit(process: Pick<Process, "run">, cwd: string, args: readonly
   return result.stdout
 }
 
-function changedSubmodulePins(raw: string): readonly Readonly<{ path: string; pin: string }>[] {
+function parseChangedSubmodulePins(raw: string): readonly Readonly<{ path: string; pin: string }>[] {
   const fields = raw.split("\0")
   if (fields.at(-1) === "") fields.pop()
   if (fields.length % 2 !== 0) {
@@ -71,6 +71,30 @@ export async function unpublishedChangedSubmodulePins(options: {
   baseSha: string
   headSha: string
 }): Promise<readonly UnpublishedSubmodulePin[]> {
+  const changed = await changedSubmodulePins(options)
+  const git: Git = (cwd, args) => runGit(options.process, cwd, args)
+  const unpublished: UnpublishedSubmodulePin[] = []
+
+  for (const pin of changed) {
+    await git(pin.repository, ["fetch", "--quiet", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+    const refs = await git(pin.repository, [
+      "for-each-ref",
+      "--format=%(refname)",
+      `--contains=${pin.pin}`,
+      "refs/remotes/origin/",
+    ])
+    if (refs.trim() === "") unpublished.push(pin)
+  }
+
+  return Object.freeze(unpublished)
+}
+
+export async function changedSubmodulePins(options: {
+  process: Pick<Process, "run">
+  repo: string
+  baseSha: string
+  headSha: string
+}): Promise<readonly UnpublishedSubmodulePin[]> {
   const repo = resolve(options.repo)
   const git: Git = (cwd, args) => runGit(options.process, cwd, args)
   const raw = await git(repo, [
@@ -84,21 +108,9 @@ export async function unpublishedChangedSubmodulePins(options: {
     options.headSha,
     "--",
   ])
-  const unpublished: UnpublishedSubmodulePin[] = []
-
-  for (const changed of changedSubmodulePins(raw)) {
-    const repository = componentRepository(repo, changed.path)
-    await git(repository, ["fetch", "--quiet", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"])
-    const refs = await git(repository, [
-      "for-each-ref",
-      "--format=%(refname)",
-      `--contains=${changed.pin}`,
-      "refs/remotes/origin/",
-    ])
-    if (refs.trim() === "") {
-      unpublished.push(Object.freeze({ ...changed, repository }))
-    }
-  }
-
-  return Object.freeze(unpublished.sort((left, right) => left.path.localeCompare(right.path)))
+  return Object.freeze(
+    parseChangedSubmodulePins(raw)
+      .map((changed) => Object.freeze({ ...changed, repository: componentRepository(repo, changed.path) }))
+      .sort((left, right) => left.path.localeCompare(right.path)),
+  )
 }

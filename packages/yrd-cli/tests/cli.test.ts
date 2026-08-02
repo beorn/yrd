@@ -2221,11 +2221,12 @@ describe("runYrd", () => {
         message:
           `yrd: could not refresh live branch '${PR1640_BRANCH}' from origin: ` +
           "fatal: could not read Username for 'https://github.com'\n" +
-          `remedy: publication authority required for branch '${PR1640_BRANCH}' at recorded head ` +
-          `'${PR1640_RECORDED_HEAD}'; from a credential-bearing delivery session run:\n` +
-          `  git -C '/repo' push origin '${PR1640_RECORDED_HEAD}:refs/heads/${PR1640_BRANCH}'\n` +
-          "then retry:\n" +
-          "  yrd pr recut PR1 --preflight --queue",
+          `remedy: request credential-bearing Yrd publication for branch '${PR1640_BRANCH}' on base 'main' ` +
+          `at base SHA '${BASE_SHA}' and recorded head '${PR1640_RECORDED_HEAD}':\n` +
+          "  yrd pr publish PR1 --queue\n" +
+          "This records a durable publication Job; without a runner it remains visible as publication-required.\n" +
+          "emergency operator fallback:\n" +
+          `  git -C '/repo' push origin '${PR1640_RECORDED_HEAD}:refs/heads/${PR1640_BRANCH}'\n`,
       },
     })
   })
