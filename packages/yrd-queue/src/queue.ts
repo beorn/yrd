@@ -6088,6 +6088,7 @@ function runnablePRs(
 export const COMPOSITION_FAILURE_BUCKETS = {
   "needs-author": new Set<string>([
     "authored-gitlink",
+    "carrier-drops-landed",
     "composition-invalid",
     "gitlink-inspection",
     "merge-tip-carrier",
