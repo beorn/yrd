@@ -5554,7 +5554,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
           if (
             attempted.status === "completed" &&
             attempted.conclusion === "failure" &&
-            attempted.error.code.startsWith("component-main-")
+            componentMainEvidence(attempted) !== undefined
           ) {
             return attempted
           }

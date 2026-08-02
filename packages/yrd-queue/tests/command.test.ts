@@ -277,7 +277,9 @@ async function multiComponentMainLandingRepository(): Promise<{
     await git(worktree, ["add", "version.txt"])
     await git(worktree, ["commit", "-qm", `base ${name}`])
     const baseSha = await git(worktree, ["rev-parse", "HEAD"])
-    await Bun.$`git init -q --bare ${remote}`
+    // `git submodule add` follows the bare origin's HEAD, so make the fixture's
+    // intended branch explicit instead of inheriting the host Git default.
+    await Bun.$`git init -q --bare -b main ${remote}`
     await git(worktree, ["remote", "add", "origin", remote])
     await git(worktree, ["push", "-q", "origin", "main"])
     await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", remote, path])
@@ -2794,14 +2796,17 @@ describe("Queue command adapters", () => {
     if (outcome.status !== "completed" || outcome.conclusion !== "failure") return
     const artifacts = (outcome.output as { artifacts?: readonly { name: string; path: string }[] } | undefined)
       ?.artifacts
-    expect(artifacts).toEqual([
-      expect.objectContaining({
-        path: expect.stringMatching(/\/R1\/0-check\/attempt-1\/(?:stdout|stderr)\.log$/u),
-      }),
+    // Check steps preserve both terminal streams. The contract here is that
+    // conflict evidence survives scratch cleanup, not that only one stream exists.
+    expect(artifacts?.map(({ name }) => name)).toEqual(["stdout", "stderr"])
+    if (artifacts === undefined) throw new Error("missing candidate-conflict artifacts")
+    expect(artifacts.map(({ path }) => path)).toEqual([
+      expect.stringMatching(/\/R1\/0-check\/attempt-1\/stdout\.log$/u),
+      expect.stringMatching(/\/R1\/0-check\/attempt-1\/stderr\.log$/u),
     ])
-    const artifact = artifacts?.[0]
-    expect(artifact === undefined ? false : existsSync(artifact.path)).toBe(true)
-    expect(artifact === undefined ? "" : await readFile(artifact.path, "utf8")).toContain("CONFLICT")
+    expect(artifacts.every(({ path }) => existsSync(path))).toBe(true)
+    const artifactContents = await Promise.all(artifacts.map(({ path }) => readFile(path, "utf8")))
+    expect(artifactContents.some((contents) => contents.includes("CONFLICT"))).toBe(true)
   })
 
   it("checks the immutable Candidate already materialized by the Runner Context", async () => {
@@ -5425,13 +5430,21 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(
       recordingProcess,
       repo,
-      shellCommand('git submodule update --init --recursive && test "$(cat dep/version.txt)" = candidate'),
+      // Local paths exist only in this synthetic fixture; allow them explicitly
+      // so the check reaches the remote-push behavior this test specifies.
+      shellCommand(
+        'git -c protocol.file.allow=always submodule update --init --recursive && test "$(cat dep/version.txt)" = candidate',
+      ),
     )
     await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run).toMatchObject({ status: "completed", conclusion: "success", prs: [{ headSha: featureSha }] })
+    expect(run, JSON.stringify(run, null, 2)).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+      prs: [{ headSha: featureSha }],
+    })
     const proof = IntegrationProofSchema.parse(run.integration)
     const rootPush = pushes.find((argv) => argv.includes(`${proof.commit}:refs/heads/main`))
     expect(rootPush).toContain("--recurse-submodules=no")
@@ -5675,10 +5688,12 @@ describe("Queue command adapters", () => {
 
       const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-      expect(run).toMatchObject({
+      // The contains-base guard names the dropped standing-main commit, which
+      // supersedes the older generic non-ancestral classification.
+      expect(run, JSON.stringify(run, null, 2)).toMatchObject({
         status: "completed",
         conclusion: "failure",
-        error: { code: "component-main-non-ancestral" },
+        error: { code: "carrier-drops-landed" },
       })
       expect(run.error?.evidence).toMatchObject({
         kind: "component-main-outcomes",
@@ -5691,7 +5706,7 @@ describe("Queue command adapters", () => {
         ],
         refusals: [
           {
-            code: "component-main-non-ancestral",
+            code: "carrier-drops-landed",
             path: divergentComponent.path,
             pinSha: divergentComponent.pinSha,
           },
@@ -6023,12 +6038,22 @@ describe("Queue command adapters", () => {
       requiredVersion: "accepted",
     })
     await using process = createProcess()
-    await using app = await checkedQueue(process, repo, shellCommand("git submodule update --init --recursive"))
+    // Local paths exist only in this synthetic fixture; allow them explicitly
+    // so the candidate reaches the hook failure this test specifies.
+    await using app = await checkedQueue(
+      process,
+      repo,
+      shellCommand("git -c protocol.file.allow=always submodule update --init --recursive"),
+    )
     await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "merge-push-failed" } })
+    expect(run, JSON.stringify(run, null, 2)).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "merge-push-failed" },
+    })
     expect(await git(remote, ["rev-parse", "main"])).toBe(baseSha)
   })
 
