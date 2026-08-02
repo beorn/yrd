@@ -27,7 +27,16 @@ function gitFailure(result: ProcessResult): string {
   return result.stderr.trim() || result.stdout.trim() || `exit ${String(result.exitCode)}`
 }
 
-async function freshRemoteBranch(process: Pick<Process, "run">, cwd: string, branch: string): Promise<string> {
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`
+}
+
+async function freshRemoteBranch(
+  process: Pick<Process, "run">,
+  cwd: string,
+  branch: string,
+  remedy: string,
+): Promise<string> {
   const source = `refs/heads/${branch}`
   const target = `refs/remotes/origin/${branch}`
   const fetched = await runGit(process, cwd, ["fetch", "--quiet", "--no-tags", "origin", `+${source}:${target}`])
@@ -35,7 +44,7 @@ async function freshRemoteBranch(process: Pick<Process, "run">, cwd: string, bra
     raiseFailure(
       "configuration",
       "recut-branch-refresh-failed",
-      `yrd: could not refresh live branch '${branch}' from origin: ${gitFailure(fetched)}`,
+      `yrd: could not refresh live branch '${branch}' from origin: ${gitFailure(fetched)}\n${remedy}`,
     )
   }
   const resolved = await runGit(process, cwd, [
@@ -56,7 +65,13 @@ async function freshRemoteBranch(process: Pick<Process, "run">, cwd: string, bra
   return head
 }
 
-async function liveBranchHead(pr: PR, services: Pick<YrdCliServices, "process">, io: YrdCliIO): Promise<string> {
+async function liveBranchHead(
+  pr: PR,
+  recorded: PRRev,
+  options: RecutBranchFreshnessOptions,
+  services: Pick<YrdCliServices, "process">,
+  io: YrdCliIO,
+): Promise<string> {
   const cwd = io.cwd ?? globalThis.process.cwd()
   if (io.pruneGit !== undefined) {
     const git = io.pruneGit(cwd)
@@ -78,7 +93,13 @@ async function liveBranchHead(pr: PR, services: Pick<YrdCliServices, "process">,
       `yrd: cannot refresh live branch '${pr.branch}' before recutting PR '${pr.id}'; no Git process is installed`,
     )
   }
-  return freshRemoteBranch(process, cwd, pr.branch)
+  const queueFlag = options.queue === true ? " --queue" : ""
+  const remedy =
+    `remedy: publication authority required for branch '${pr.branch}' at recorded head '${recorded.head}'; ` +
+    `from a credential-bearing delivery session run:\n` +
+    `  git -C ${shellQuote(cwd)} push origin ${shellQuote(`${recorded.head}:refs/heads/${pr.branch}`)}\n` +
+    `then retry:\n  yrd pr recut ${pr.id} --preflight${queueFlag}`
+  return freshRemoteBranch(process, cwd, pr.branch, remedy)
 }
 
 async function commitRangeEvidence(
@@ -143,7 +164,7 @@ export async function requireImplicitRecutBranchFreshness(
   if (recorded === undefined) {
     throw new Error(`yrd: PR '${pr.id}' revision ${selected.n} has no recorded source lineage`)
   }
-  const liveHead = await liveBranchHead(pr, services, io)
+  const liveHead = await liveBranchHead(pr, recorded, options, services, io)
   if (liveHead === recorded.head) return { status: "fresh" }
   if (pr.track === true) return { status: "tracked-drift", recorded, liveHead }
 

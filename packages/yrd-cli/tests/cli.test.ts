@@ -2170,6 +2170,66 @@ describe("runYrd", () => {
     },
   )
 
+  it("names the exact authorized publication remedy when recut cannot refresh the branch", async () => {
+    const app = await createApp()
+    await app.bays.submit({
+      branch: PR1640_BRANCH,
+      headSha: PR1640_RECORDED_HEAD,
+      baseSha: BASE_SHA,
+      draft: true,
+    })
+    const requests: ProcessRequest[] = []
+    const process = {
+      async run(request: ProcessRequest): Promise<ProcessResult> {
+        requests.push(request)
+        return {
+          exitCode: 128,
+          signal: null,
+          stdout: "",
+          stderr: "fatal: could not read Username for 'https://github.com'",
+          durationMs: 6,
+          timedOut: false,
+          verdict: "EXITED",
+        }
+      },
+    }
+    const output = outputIO({ cwd: "/repo" })
+
+    expect(
+      await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--queue", "--json"), output.io, {
+        process,
+      } as YrdCliServices),
+    ).toBe(2)
+    expect(requests).toEqual([
+      expect.objectContaining({
+        argv: [
+          "git",
+          "-C",
+          "/repo",
+          "fetch",
+          "--quiet",
+          "--no-tags",
+          "origin",
+          `+refs/heads/${PR1640_BRANCH}:refs/remotes/origin/${PR1640_BRANCH}`,
+        ],
+      }),
+    ])
+    expect(JSON.parse(output.stderr())).toMatchObject({
+      failure: {
+        kind: "configuration",
+        code: "recut-branch-refresh-failed",
+        message:
+          `yrd: could not refresh live branch '${PR1640_BRANCH}' from origin: ` +
+          "fatal: could not read Username for 'https://github.com'\n" +
+          `remedy: publication authority required for branch '${PR1640_BRANCH}' at recorded head ` +
+          `'${PR1640_RECORDED_HEAD}'; from a credential-bearing delivery session run:\n` +
+          `  git -C '/repo' push origin '${PR1640_RECORDED_HEAD}:refs/heads/${PR1640_BRANCH}'\n` +
+          "then retry:\n" +
+          "  yrd pr recut PR1 --preflight --queue",
+      },
+    })
+  })
+
   it("refreshes a stale tracking ref before comparing the authored branch", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-recut-live-branch-"))
     const remote = join(root, "remote.git")
