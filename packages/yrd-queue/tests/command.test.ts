@@ -628,6 +628,19 @@ function expectedCandidateRef(run: string, step: string, job: string, attempt: n
 }
 
 describe("Queue command adapters", () => {
+  it("does not classify failure outcomes by code prefix", async () => {
+    const sourceRoot = new URL("../src/", import.meta.url)
+    const matches: string[] = []
+    for (const entry of await readdir(sourceRoot)) {
+      if (!entry.endsWith(".ts")) continue
+      const source = await readFile(new URL(entry, sourceRoot), "utf8")
+      for (const match of source.matchAll(/\.code\.(?:startsWith|endsWith|includes|match|search)\s*\(/gu)) {
+        matches.push(`${entry}:${match[0]}`)
+      }
+    }
+    expect(matches).toEqual([])
+  })
+
   it("reports an absent Candidate ref as a write refusal with Git evidence", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     const baseSha = await git(repo, ["rev-parse", "main"])
@@ -6290,6 +6303,89 @@ describe("Queue command adapters", () => {
       expect(landedSha).toBe(baseSha)
     },
   )
+
+  it("preserves canceled authority when another actor lands the same native candidate", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const remote = join(repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "issue/feature"])
+    await using process = createProcess()
+    const checkInput = {
+      run: "R1",
+      step: "check",
+      index: 0,
+      prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
+      shape: { results: {} },
+    } satisfies StepExecution<PRShape>
+    const checked = await gitCheckStep({ inject: { process }, repo, command: ["test", "-f", "feature.txt"] })(
+      checkInput,
+      { id: "J-check", attempt: 1, runner: "test", signal: new AbortController().signal },
+    )
+    if (checked.status !== "completed" || checked.conclusion !== "success") throw new Error("check did not pass")
+
+    const canceled = new AbortController()
+    let concurrentLanding = false
+    const authorityProcess: Pick<Process, "run"> = {
+      async run(request) {
+        if (
+          !concurrentLanding &&
+          request.argv[0] === "git" &&
+          request.argv[3] === "config" &&
+          request.argv.includes("submodule.alternateLocation")
+        ) {
+          concurrentLanding = true
+          await git(repo, ["push", "-q", "origin", `${featureSha}:refs/heads/main`])
+          canceled.abort()
+        }
+        return process.run(request)
+      },
+    }
+    const outcome = await gitMergeStep<Checked>({ inject: { process: authorityProcess }, repo })(
+      {
+        ...checkInput,
+        step: "merge",
+        index: 1,
+        shape: { results: { check: checked.output } },
+      },
+      { id: "J-merge", attempt: 1, runner: "test", signal: canceled.signal },
+    )
+
+    expect(concurrentLanding).toBe(true)
+    expect(await git(remote, ["rev-parse", "main"])).toBe(featureSha)
+    expect(outcome).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "merge-canceled" } })
+  })
+
+  it("reconciles a native root push that landed despite its process reporting failure", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const remote = join(repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "issue/feature"])
+    await using process = createProcess()
+    let landedSha: string | undefined
+    const postPushFailure: Pick<Process, "run"> = {
+      async run(request) {
+        const result = await process.run(request)
+        const refspec = request.argv.find((argument) => argument.endsWith(":refs/heads/main"))
+        if (request.argv[0] !== "git" || request.argv[3] !== "push" || refspec === undefined) return result
+        landedSha = refspec.slice(0, refspec.indexOf(":"))
+        return { ...result, exitCode: 19, stderr: "transport lost the success acknowledgement" }
+      },
+    }
+    await using app = await checkedQueue(postPushFailure, repo, ["true"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(landedSha).toBeDefined()
+    expect(await git(remote, ["rev-parse", "main"])).toBe(landedSha)
+    expect(run, JSON.stringify(run, null, 2)).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+      integration: { commit: landedSha },
+    })
+  })
 
   it("reconciles the authoritative landing after a delegated merge reports a post-push failure", async () => {
     const { repo, feature: featureSha } = await repository("feature")

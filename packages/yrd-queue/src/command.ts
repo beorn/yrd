@@ -4169,6 +4169,19 @@ function componentMainEvidence(result: JobResult<IntegrationProof>): ComponentMa
   return parsed.success ? parsed.data : undefined
 }
 
+const NativeRootPushFailureEvidenceSchema = z
+  .object({
+    kind: z.literal("native-root-push-failure"),
+    branchRef: z.string().min(1),
+    candidateSha: z.string().min(1),
+  })
+  .strict()
+
+function nativeRootPushFailureEvidence(result: JobResult<IntegrationProof>): boolean {
+  if (result.status !== "completed" || result.conclusion !== "failure") return false
+  return NativeRootPushFailureEvidenceSchema.safeParse(result.error.evidence).success
+}
+
 function missingComponentMainOutcomes(
   promotions: readonly ComponentMainPromotion[],
   plannedReceipts: readonly ComponentMainReceipt[],
@@ -5517,7 +5530,15 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
                 true,
               )
               if (pushed.code !== 0) {
-                return failed("merge-push-failed", pushed.stderr || pushed.stdout || `could not update '${branch}'`)
+                return failedWithEvidence(
+                  "merge-push-failed",
+                  pushed.stderr || pushed.stdout || `could not update '${branch}'`,
+                  NativeRootPushFailureEvidenceSchema.parse({
+                    kind: "native-root-push-failure",
+                    branchRef,
+                    candidateSha: checked.candidateSha,
+                  }),
+                )
               }
               // The changed-pin plan above preserves the pre-landing trust
               // boundary for new or changed component origins. Once root is
@@ -5561,7 +5582,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
           if (
             attempted.status === "completed" &&
             attempted.conclusion === "failure" &&
-            attempted.error.code === "merge-push-failed"
+            nativeRootPushFailureEvidence(attempted)
           ) {
             const reconciled = await withComponentMainPromotions(
               git,
@@ -5583,11 +5604,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
             return reconciled
           }
           if (attempted.status === "completed" && attempted.conclusion === "success") return attempted
-          return {
-            status: "completed",
-            conclusion: "success",
-            output: integrationProof(landing.sha, checked),
-          }
+          return attempted
         }
         if (landing.sha !== baseSha) {
           return failed(
