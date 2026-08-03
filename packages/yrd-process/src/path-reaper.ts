@@ -121,7 +121,7 @@ async function linuxPathProcessPids(root: string): Promise<number[]> {
         const pid = Number(entry.name)
         const proc = `/proc/${entry.name}`
         const metadata = await stat(proc).catch((error: unknown) => {
-          if (processGone(error)) return undefined
+          if (processEntryUnavailable(error)) return undefined
           throw error
         })
         if (metadata === undefined || metadata.uid !== uid) return undefined
@@ -131,7 +131,7 @@ async function linuxPathProcessPids(root: string): Promise<number[]> {
           readFile(`${proc}/cmdline`)
             .then((bytes) => bytes.toString("utf8").split("\0").filter(Boolean))
             .catch((error: unknown) => {
-              if (processGone(error)) return []
+              if (processEntryUnavailable(error)) return []
               throw error
             }),
         ])
@@ -143,7 +143,7 @@ async function linuxPathProcessPids(root: string): Promise<number[]> {
           return pid
         }
         const descriptors = await readdir(`${proc}/fd`).catch((error: unknown) => {
-          if (processGone(error)) return []
+          if (processEntryUnavailable(error)) return []
           throw error
         })
         for (const descriptor of descriptors) {
@@ -203,14 +203,19 @@ function uniquePids(values: readonly number[]): number[] {
 
 async function readProcessLink(path: string): Promise<string | undefined> {
   return readlink(path).catch((error: unknown) => {
-    if (processGone(error)) return undefined
+    if (processEntryUnavailable(error)) return undefined
     throw error
   })
 }
 
-function processGone(error: unknown): boolean {
+function processEntryUnavailable(error: unknown): boolean {
   const code = errorCode(error)
-  return code === "ENOENT" || code === "ESRCH"
+  // `/proc` is a live, permission-filtered view. Entries may disappear between
+  // readdir and inspection, and Linux security policy may hide cwd/exe/fd for
+  // an otherwise same-uid process. Treat each hidden source as unavailable and
+  // continue checking the remaining sources; an observable Bay-owned path
+  // still enters the kill/survivor set.
+  return code === "ENOENT" || code === "ESRCH" || code === "EACCES" || code === "EPERM"
 }
 
 function errorCode(error: unknown): string | undefined {
