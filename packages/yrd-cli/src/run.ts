@@ -4,7 +4,7 @@ import { existsSync } from "node:fs"
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { basename, isAbsolute, join, relative, resolve } from "node:path"
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
-import { createElement } from "react"
+import { Fragment, createElement } from "react"
 import {
   CompositionV1Schema,
   CorrelationSchema,
@@ -8077,13 +8077,21 @@ function buildProgram(
       const publications = await preparePublicationQueueCycle(app, installedServices(), io)
       if (publications.length > 0) await gate()
       const runs = await runQueues(app, selectors, options, io)
-      const blocked =
-        runs.length === 0
-          ? Object.values(stateOf(app).bays.prs)
-              .map((pr) => ({ pr, eligibility: app.queue.eligibility(pr.id) }))
-              .filter(({ eligibility }) => eligibility.reason?.code === "admission-refused")
-              .toSorted((left, right) => compareNatural(left.pr.id, right.pr.id))
-          : []
+      const blocked = Object.values(stateOf(app).bays.prs)
+        .filter((pr) => {
+          const delivery = prDeliveryState(pr)
+          return delivery === "submitted" || delivery === "ready"
+        })
+        .map((pr) => ({ pr, eligibility: app.queue.eligibility(pr.id) }))
+        .filter(({ eligibility }) => eligibility.reason?.code === "admission-refused")
+        .toSorted((left, right) => compareNatural(left.pr.id, right.pr.id))
+      const blockerText = blocked.map(({ eligibility }) => eligibility.reason?.message).join("\n")
+      const human =
+        blocked.length === 0
+          ? createElement(QueueRunsView, { runs })
+          : runs.length === 0
+            ? blockerText
+            : createElement(Fragment, null, createElement(QueueRunsView, { runs }), "\n", blockerText)
       await printResult(
         io,
         jsonEnabled(options),
@@ -8100,9 +8108,7 @@ function buildProgram(
                 })),
               }),
         },
-        blocked.length === 0
-          ? createElement(QueueRunsView, { runs })
-          : blocked.map(({ eligibility }) => eligibility.reason?.message).join("\n"),
+        human,
       )
       const publicationFailed = publications.some((job) => job.status !== "completed" || job.conclusion !== "success")
       setExit(publicationFailed || runs.some(Queues.failed) ? 1 : 0)

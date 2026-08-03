@@ -4896,12 +4896,21 @@ describe("runYrd", () => {
 
   it("names a settled admission refusal instead of reporting a one-shot queue idle", async () => {
     await using app = await createApp({
-      prepareCandidate: () => {
-        throw createFailure({
-          kind: "refusal",
-          code: "carrier-drops-landed",
-          message: "carrier does not contain the queue base; recut and requeue the root carrier",
-        })
+      prepareCandidate: (input) => {
+        if (input.prs.some((pr) => pr.id === "PR1")) {
+          throw createFailure({
+            kind: "refusal",
+            code: "carrier-drops-landed",
+            message: "carrier does not contain the queue base; recut and requeue the root carrier",
+          })
+        }
+        const { prs: _prs, ...candidate } = input
+        return {
+          ...candidate,
+          sha: MERGED_SHA,
+          ref: `refs/yrd/candidates/${input.id}`,
+          mergeability: "mergeable",
+        }
       },
     })
     await app.bays.submit({ branch: "topic/base-chase", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
@@ -4939,6 +4948,16 @@ describe("runYrd", () => {
           },
         },
       ],
+    })
+
+    await app.bays.submit({ branch: "topic/progresses", headSha: MERGED_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.requestChecks({ pr: "PR2", baseSha: BASE_SHA })
+    const mixed = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), mixed.io), mixed.stderr()).toBe(0)
+    expect(JSON.parse(mixed.stdout())).toMatchObject({
+      command: "queue.run",
+      results: [{ prs: [{ id: "PR2" }] }],
+      blocked: [{ pr: { id: "PR1" }, eligibility: { reason: { code: "admission-refused" } } }],
     })
   })
 
