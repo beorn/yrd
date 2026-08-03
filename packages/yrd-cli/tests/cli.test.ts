@@ -5152,7 +5152,7 @@ describe("runYrd", () => {
 
     const integrated = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "--once", "--steps", "--json"), integrated.io)).toBe(0)
-    expect(JSON.parse(integrated.stdout())).toEqual({ command: "queue.run", results: [] })
+    expect(JSON.parse(integrated.stdout())).toEqual({ command: "queue.run", publications: [], results: [] })
     expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
 
     const idle = outputIO()
@@ -5172,7 +5172,7 @@ describe("runYrd", () => {
 
     const drained = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), drained.io)).toBe(0)
-    expect(JSON.parse(drained.stdout())).toEqual({ command: "queue.run", results: [] })
+    expect(JSON.parse(drained.stdout())).toEqual({ command: "queue.run", publications: [], results: [] })
   })
 
   it("persists and releases queue pauses through the operator CLI", async () => {
