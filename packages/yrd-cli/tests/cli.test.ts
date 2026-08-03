@@ -4952,11 +4952,22 @@ describe("runYrd", () => {
 
     await app.bays.submit({ branch: "topic/progresses", headSha: MERGED_SHA, base: "main", baseSha: BASE_SHA })
     await app.bays.requestChecks({ pr: "PR2", baseSha: BASE_SHA })
+
+    const targeted = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "PR2", "--json"), targeted.io), targeted.stderr()).toBe(0)
+    expect(JSON.parse(targeted.stdout())).toMatchObject({
+      command: "queue.run",
+      results: [{ prs: [{ id: "PR2" }] }],
+    })
+    expect(JSON.parse(targeted.stdout())).not.toHaveProperty("blocked")
+
+    await app.bays.submit({ branch: "topic/also-progresses", headSha: "c".repeat(40), base: "main", baseSha: BASE_SHA })
+    await app.bays.requestChecks({ pr: "PR3", baseSha: BASE_SHA })
     const mixed = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), mixed.io), mixed.stderr()).toBe(0)
     expect(JSON.parse(mixed.stdout())).toMatchObject({
       command: "queue.run",
-      results: [{ prs: [{ id: "PR2" }] }],
+      results: [{ prs: [{ id: "PR3" }] }],
       blocked: [{ pr: { id: "PR1" }, eligibility: { reason: { code: "admission-refused" } } }],
     })
   })

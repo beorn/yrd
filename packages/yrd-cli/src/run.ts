@@ -8077,10 +8077,15 @@ function buildProgram(
       const publications = await preparePublicationQueueCycle(app, installedServices(), io)
       if (publications.length > 0) await gate()
       const runs = await runQueues(app, selectors, options, io)
+      const selectedPrIds =
+        selectors.length === 0 ? undefined : new Set(selectors.map((selector) => requiredPr(app, selector).id))
       const blocked = Object.values(stateOf(app).bays.prs)
         .filter((pr) => {
           const delivery = prDeliveryState(pr)
-          return delivery === "submitted" || delivery === "ready"
+          return (
+            (selectedPrIds === undefined || selectedPrIds.has(pr.id)) &&
+            (delivery === "submitted" || delivery === "ready")
+          )
         })
         .map((pr) => ({ pr, eligibility: app.queue.eligibility(pr.id) }))
         .filter(({ eligibility }) => eligibility.reason?.code === "admission-refused")
