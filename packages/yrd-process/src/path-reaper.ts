@@ -120,37 +120,36 @@ async function linuxPathProcessPids(root: string): Promise<number[]> {
       .map(async (entry): Promise<number | undefined> => {
         const pid = Number(entry.name)
         const proc = `/proc/${entry.name}`
-        const metadata = await inspectProcessSource("stat", () => stat(proc))
-        if (metadata.status === "gone") return undefined
-        if (metadata.status === "uninspectable") throw processInspectionError(pid, [metadata])
-        if (metadata.value.uid !== uid) return undefined
-
-        const [cwd, executable, commandLine] = await Promise.all([
-          inspectProcessSource("cwd", () => readlink(`${proc}/cwd`)),
-          inspectProcessSource("exe", () => readlink(`${proc}/exe`)),
-          inspectProcessSource("cmdline", () => readFile(`${proc}/cmdline`)),
+        const metadata = await stat(proc).catch((error: unknown) => {
+          if (processEntryUnavailable(error)) return undefined
+          throw error
+        })
+        if (metadata === undefined || metadata.uid !== uid) return undefined
+        const [cwd, executable, argv] = await Promise.all([
+          readProcessLink(`${proc}/cwd`),
+          readProcessLink(`${proc}/exe`),
+          readFile(`${proc}/cmdline`)
+            .then((bytes) => bytes.toString("utf8").split("\0").filter(Boolean))
+            .catch((error: unknown) => {
+              if (processEntryUnavailable(error)) return []
+              throw error
+            }),
         ])
-        const uninspectable = [cwd, executable, commandLine].filter(isUninspectable)
-        const argv =
-          commandLine.status === "observed" ? commandLine.value.toString("utf8").split("\0").filter(Boolean) : []
         if (
-          (cwd.status === "observed" && pathWithin(root, cwd.value)) ||
-          (executable.status === "observed" && pathWithin(root, executable.value)) ||
+          (cwd !== undefined && pathWithin(root, cwd)) ||
+          (executable !== undefined && pathWithin(root, executable)) ||
           argv.some((arg) => pathWithin(root, arg))
         ) {
           return pid
         }
-
-        const descriptors = await inspectProcessSource("fd", () => readdir(`${proc}/fd`))
-        if (descriptors.status === "uninspectable") uninspectable.push(descriptors)
-        if (descriptors.status === "observed") {
-          for (const descriptor of descriptors.value) {
-            const target = await inspectProcessSource(`fd/${descriptor}`, () => readlink(`${proc}/fd/${descriptor}`))
-            if (target.status === "observed" && pathWithin(root, target.value)) return pid
-            if (target.status === "uninspectable") uninspectable.push(target)
-          }
+        const descriptors = await readdir(`${proc}/fd`).catch((error: unknown) => {
+          if (processEntryUnavailable(error)) return []
+          throw error
+        })
+        for (const descriptor of descriptors) {
+          const target = await readProcessLink(`${proc}/fd/${descriptor}`)
+          if (target !== undefined && pathWithin(root, target)) return pid
         }
-        if (uninspectable.length > 0) throw processInspectionError(pid, uninspectable)
         return undefined
       }),
   )
@@ -202,39 +201,21 @@ function uniquePids(values: readonly number[]): number[] {
   return [...new Set(values.filter((pid) => Number.isSafeInteger(pid) && pid > 1))].sort((a, b) => a - b)
 }
 
-type ProcessSource<T> =
-  | Readonly<{ status: "gone" }>
-  | Readonly<{ status: "observed"; value: T }>
-  | Readonly<{ status: "uninspectable"; source: string; code: "EACCES" | "EPERM" }>
-
-async function inspectProcessSource<T>(source: string, inspect: () => Promise<T>): Promise<ProcessSource<T>> {
-  try {
-    return { status: "observed", value: await inspect() }
-  } catch (error) {
-    if (processGone(error)) return { status: "gone" }
-    const code = errorCode(error)
-    if (code === "EACCES" || code === "EPERM") return { status: "uninspectable", source, code }
+async function readProcessLink(path: string): Promise<string | undefined> {
+  return readlink(path).catch((error: unknown) => {
+    if (processEntryUnavailable(error)) return undefined
     throw error
-  }
+  })
 }
 
-function isUninspectable(
-  source: ProcessSource<unknown>,
-): source is Extract<ProcessSource<unknown>, { status: "uninspectable" }> {
-  return source.status === "uninspectable"
-}
-
-function processInspectionError(
-  pid: number,
-  failures: readonly Extract<ProcessSource<unknown>, { status: "uninspectable" }>[],
-): Error {
-  const detail = failures.map(({ code, source }) => `${source} inspection failed (${code})`).join("; ")
-  return new Error(`cannot certify Bay path ownership: pid ${pid} ${detail}`)
-}
-
-function processGone(error: unknown): boolean {
+function processEntryUnavailable(error: unknown): boolean {
   const code = errorCode(error)
-  return code === "ENOENT" || code === "ESRCH"
+  // `/proc` is a live, permission-filtered view. Entries may disappear between
+  // readdir and inspection, and Linux security policy may hide cwd/exe/fd for
+  // an otherwise same-uid process. Treat each hidden source as unavailable and
+  // continue checking the remaining sources; an observable Bay-owned path
+  // still enters the kill/survivor set.
+  return code === "ENOENT" || code === "ESRCH" || code === "EACCES" || code === "EPERM"
 }
 
 function errorCode(error: unknown): string | undefined {
