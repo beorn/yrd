@@ -605,6 +605,13 @@ the journal. A new authored or recut revision clears the settlement and is
 eligible normally. This is Queue state, not a resident retry cache or restart
 budget.
 
+`yrd queue run --once` keeps that settled refusal visible instead of reporting
+`Queue idle`: human output names the refusal and
+`yrd pr recut <PR> --preflight --queue`, while JSON includes the same canonical
+eligibility fact in `blocked`. A targeted one-shot reports blockers only for its
+selected PRs; a selectorless pass reports them alongside any healthy Runs that
+made progress.
+
 For a human-authored root carrier, use the machine-owned path rather than
 attaching a composition manifest:
 
