@@ -371,6 +371,7 @@ async function createApp(
     id?: () => string
     log?: ReturnType<typeof createLogger>
     prepareCandidate?: CandidatePreparer
+    resolveBaseSha?: (base: string) => string | Promise<string>
   } = {},
 ) {
   const contest = contestAdapters(options.probe, options.baseResolutions, options.waitingEvaluator)
@@ -472,6 +473,7 @@ async function createApp(
     batch: options.batch ?? false,
     ...(options.requires === undefined ? {} : { requires: options.requires }),
     ...(options.prepareCandidate === undefined ? {} : { prepareCandidate: options.prepareCandidate }),
+    ...(options.resolveBaseSha === undefined ? {} : { resolveBaseSha: options.resolveBaseSha }),
   })
   const contests = withContests({ runners: [contest.runner], evaluators: [contest.evaluator], git: contest.git })
   const base = pipe(
@@ -4894,8 +4896,11 @@ describe("runYrd", () => {
     expect(text).toContain("authored-gitlink")
   })
 
-  it("names a settled admission refusal instead of reporting a one-shot queue idle", async () => {
+  it("makes a same-head base refresh with zero runs actionable instead of reporting queue idle", async () => {
+    let currentBaseSha = BASE_SHA
+    const advancedBaseSha = "e".repeat(40)
     await using app = await createApp({
+      resolveBaseSha: () => currentBaseSha,
       prepareCandidate: (input) => {
         if (input.prs.some((pr) => pr.id === "PR1")) {
           throw createFailure({
@@ -4916,6 +4921,11 @@ describe("runYrd", () => {
     await app.bays.submit({ branch: "topic/base-chase", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
     await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
     await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })
+    expect(Queues.ids(app.state().queues)).toEqual([])
+    expect(app.queue.eligibility("PR1")).toMatchObject({ reason: { code: "checks-pending" } })
+
+    currentBaseSha = advancedBaseSha
+    await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })
     const revision = currentPRRev(app.bays.pr("PR1")!)
     await app.queue.settleAdmissionRefusal({
       pr: "PR1",
@@ -4924,6 +4934,11 @@ describe("runYrd", () => {
       disposition: "needs-person",
       reason: "the carrier requires human judgment",
     })
+    expect(app.bays.pr("PR1")?.checkRequests).toMatchObject([
+      { revision: 1, headSha: HEAD_SHA, baseSha: BASE_SHA },
+      { revision: 1, headSha: HEAD_SHA, baseSha: advancedBaseSha },
+    ])
+    expect(Queues.ids(app.state().queues)).toEqual([])
 
     const once = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "--once"), once.io), once.stderr()).toBe(0)
