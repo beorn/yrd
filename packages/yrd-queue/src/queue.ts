@@ -6298,6 +6298,20 @@ function prEligibility(
         message: `PR '${pr.id}' revision ${revision.n} conflicts in Candidate '${conflictingCandidate.id}'`,
       })
     }
+    const admissionRefusal = state.queues.admissionRefusals[pr.id]
+    if (
+      admissionRefusal?.settlement !== undefined &&
+      admissionRefusal.revision === revision.n &&
+      admissionRefusal.headSha === revision.head
+    ) {
+      return result({
+        code: "admission-refused",
+        message:
+          `PR '${pr.id}' required checks cannot run after admission refusal '${admissionRefusal.code}': ` +
+          `${admissionRefusal.reason}. ${admissionRefusal.settlement.reason}.\n` +
+          `Next: yrd pr recut ${pr.id} --preflight --queue`,
+      })
+    }
     if (options.ignoreChecks !== true && checks.status === "queued") {
       const position = checks.position === undefined ? "" : ` at position ${checks.position}`
       return result({ code: "checks-pending", message: `PR '${pr.id}' checks are queued${position}` })

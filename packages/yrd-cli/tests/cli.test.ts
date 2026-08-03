@@ -4894,6 +4894,54 @@ describe("runYrd", () => {
     expect(text).toContain("authored-gitlink")
   })
 
+  it("names a settled admission refusal instead of reporting a one-shot queue idle", async () => {
+    await using app = await createApp({
+      prepareCandidate: () => {
+        throw createFailure({
+          kind: "refusal",
+          code: "carrier-drops-landed",
+          message: "carrier does not contain the queue base; recut and requeue the root carrier",
+        })
+      },
+    })
+    await app.bays.submit({ branch: "topic/base-chase", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
+    await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })
+    const revision = currentPRRev(app.bays.pr("PR1")!)
+    await app.queue.settleAdmissionRefusal({
+      pr: "PR1",
+      revision: revision.n,
+      headSha: revision.head,
+      disposition: "needs-person",
+      reason: "the carrier requires human judgment",
+    })
+
+    const once = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "--once"), once.io), once.stderr()).toBe(0)
+
+    expect(once.stdout()).not.toContain("Queue idle")
+    expect(once.stdout()).toContain("carrier-drops-landed")
+    expect(once.stdout()).toContain("yrd pr recut PR1 --preflight --queue")
+
+    const json = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), json.io), json.stderr()).toBe(0)
+    expect(JSON.parse(json.stdout())).toMatchObject({
+      command: "queue.run",
+      results: [],
+      blocked: [
+        {
+          pr: { id: "PR1" },
+          eligibility: {
+            reason: {
+              code: "admission-refused",
+              message: expect.stringContaining("yrd pr recut PR1 --preflight --queue"),
+            },
+          },
+        },
+      ],
+    })
+  })
+
   it("evaluates the no-landing clock at queue-audit invocation time", async () => {
     await using app = await createApp({
       prepareCandidate: () => {

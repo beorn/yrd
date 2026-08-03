@@ -8073,9 +8073,17 @@ function buildProgram(
         return
       }
       await gate()
-      const publications = await preparePublicationQueueCycle(installed(), installedServices(), io)
+      const app = installed()
+      const publications = await preparePublicationQueueCycle(app, installedServices(), io)
       if (publications.length > 0) await gate()
-      const runs = await runQueues(installed(), selectors, options, io)
+      const runs = await runQueues(app, selectors, options, io)
+      const blocked =
+        runs.length === 0
+          ? Object.values(stateOf(app).bays.prs)
+              .map((pr) => ({ pr, eligibility: app.queue.eligibility(pr.id) }))
+              .filter(({ eligibility }) => eligibility.reason?.code === "admission-refused")
+              .toSorted((left, right) => compareNatural(left.pr.id, right.pr.id))
+          : []
       await printResult(
         io,
         jsonEnabled(options),
@@ -8083,8 +8091,18 @@ function buildProgram(
           command: "queue.run",
           publications: publications.map((job) => ({ ...job, projection: projectPublication(job) })),
           results: runs.map(projectQueueRunTaskStatus),
+          ...(blocked.length === 0
+            ? {}
+            : {
+                blocked: blocked.map(({ pr, eligibility }) => ({
+                  pr: projectPrTaskStatusWithEligibility(pr, eligibility),
+                  eligibility: projectEligibilityTaskStatus(eligibility),
+                })),
+              }),
         },
-        createElement(QueueRunsView, { runs }),
+        blocked.length === 0
+          ? createElement(QueueRunsView, { runs })
+          : blocked.map(({ eligibility }) => eligibility.reason?.message).join("\n"),
       )
       const publicationFailed = publications.some((job) => job.status !== "completed" || job.conclusion !== "success")
       setExit(publicationFailed || runs.some(Queues.failed) ? 1 : 0)
