@@ -65,6 +65,12 @@ async function git(repo: string, ...args: string[]): Promise<string> {
   return stdout.trim()
 }
 
+async function initBareMain(cwd: string, remote: string): Promise<void> {
+  await git(cwd, "-c", "init.defaultBranch=host-default", "init", "-q", "--bare", remote)
+  await git(remote, "symbolic-ref", "HEAD", "refs/heads/main")
+  expect(await git(remote, "symbolic-ref", "HEAD")).toBe("refs/heads/main")
+}
+
 async function journalEnvelope(repo: string) {
   return Array.fromAsync(createReadOnlyJournal({ dir: join(repo, ".git", "yrd") }).read())
 }
@@ -262,7 +268,7 @@ async function unpublishedSubmodulePinRepository(): Promise<{
   const repo = join(root, "repo")
   const branch = "issue/unpublished-submodule-pin"
 
-  await git(root, "init", "--bare", "-q", "-b", "main", moduleRemote)
+  await initBareMain(root, moduleRemote)
   await git(root, "init", "-q", "-b", "main", module)
   await git(module, "config", "user.name", "Yrd Test")
   await git(module, "config", "user.email", "yrd@example.invalid")
@@ -272,7 +278,7 @@ async function unpublishedSubmodulePinRepository(): Promise<{
   await git(module, "commit", "-qm", "published module base")
   await git(module, "push", "-qu", "origin", "main")
 
-  await git(root, "init", "--bare", "-q", "-b", "main", rootRemote)
+  await initBareMain(root, rootRemote)
   await git(root, "init", "-q", "-b", "main", repo)
   await git(repo, "config", "user.name", "Yrd Test")
   await git(repo, "config", "user.email", "yrd@example.invalid")
@@ -448,14 +454,14 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     await git(source, "add", "version.txt")
     await git(source, "commit", "-qm", "loaded source")
     const loadedSha = await git(source, "rev-parse", "HEAD")
-    await git(root, "init", "-q", "--bare", sourceRemote)
+    await initBareMain(root, sourceRemote)
     await git(source, "remote", "add", "origin", sourceRemote)
     await git(source, "push", "-q", "origin", "main")
 
     await git(repo, "config", "protocol.file.allow", "always")
     await git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sourceRemote, "runtime")
     await git(repo, "commit", "-qam", "add runtime source")
-    await git(root, "init", "-q", "--bare", rootRemote)
+    await initBareMain(root, rootRemote)
     await git(repo, "remote", "add", "origin", rootRemote)
     await git(repo, "push", "-q", "origin", "main")
 
@@ -968,7 +974,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
   it("coalesces Bay base refresh without pruning a recoverable tracking carrier", async () => {
     const { repo, featureSha } = await repository()
     const remote = join(repo, "..", "origin.git")
-    await git(repo, "init", "-q", "--bare", remote)
+    await initBareMain(repo, remote)
     await git(repo, "remote", "add", "origin", remote)
     await git(repo, "push", "-q", "origin", "main", "issue/feature")
     const config: ResolvedYrdProjectConfig = {
@@ -1091,7 +1097,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     const fourthSha = await addFeature("issue/fourth", "fourth.txt")
 
     const remote = join(repo, "..", "origin.git")
-    await git(repo, "init", "-q", "--bare", remote)
+    await initBareMain(repo, remote)
     await git(repo, "remote", "add", "origin", remote)
     await git(repo, "push", "-q", "origin", "main", "issue/feature", "issue/second", "issue/third", "issue/fourth")
 
@@ -1150,7 +1156,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     const { repo, featureSha } = await repository()
     const localBaseSha = await git(repo, "rev-parse", "main")
     const remote = join(repo, "..", "origin.git")
-    await git(repo, "init", "-q", "--bare", remote)
+    await initBareMain(repo, remote)
     await git(repo, "remote", "add", "origin", remote)
     await git(repo, "push", "-q", "origin", "main", "issue/feature")
     await git(repo, "switch", "-qc", "issue/remote-main")
@@ -3841,7 +3847,7 @@ checks: [{check: {run: "true"}}]
     const { repo, featureSha } = await repository()
     const localSha = await git(repo, "rev-parse", "main")
     const remote = join(repo, "..", "origin.git")
-    await git(repo, "init", "-q", "--bare", remote)
+    await initBareMain(repo, remote)
     await git(repo, "remote", "add", "origin", remote)
     await git(repo, "push", "-q", "origin", "main", "issue/feature")
     await git(repo, "push", "-q", "origin", `${featureSha}:refs/heads/main`)

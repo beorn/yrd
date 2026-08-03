@@ -3,10 +3,56 @@
  * @level l2
  * @consumer @yrd/process createProcess
  */
-import { afterEach, describe, expect, test } from "vitest"
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { afterEach, describe, expect, test, vi } from "vitest"
+import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import type { Dirent } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+
+// This suite owns process-tree mechanics, not host /proc visibility policy.
+// Keep its live census deterministic by including only this Vitest worker and
+// descendants it spawns. path-reaper-permissions.test.ts separately proves
+// that production refuses ambient EACCES/EPERM cases instead of certifying
+// them absent.
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>()
+  return {
+    ...actual,
+    async readdir(path: Parameters<typeof actual.readdir>[0], options?: Parameters<typeof actual.readdir>[1]) {
+      const entries = await actual.readdir(path, options as never)
+      if (path !== "/proc" || !Array.isArray(entries) || entries.some((entry) => typeof entry === "string")) {
+        return entries
+      }
+      const dirEntries = entries as unknown as Dirent[]
+      const parents = new Map<number, number>()
+      await Promise.all(
+        dirEntries.map(async (entry) => {
+          if (!entry.isDirectory() || !/^\d+$/u.test(entry.name)) return
+          try {
+            const status = await actual.readFile(`/proc/${entry.name}/status`, "utf8")
+            const parent = status.match(/^PPid:\s+(\d+)$/mu)
+            if (parent !== null) parents.set(Number(entry.name), Number(parent[1]))
+          } catch {
+            // A process that vanished before census is absent from this fixture.
+          }
+        }),
+      )
+      const owned = new Set([process.pid])
+      let grew = true
+      while (grew) {
+        grew = false
+        for (const [pid, parent] of parents) {
+          if (!owned.has(pid) && owned.has(parent)) {
+            owned.add(pid)
+            grew = true
+          }
+        }
+      }
+      return dirEntries.filter((entry) => !/^\d+$/u.test(entry.name) || owned.has(Number(entry.name)))
+    },
+  }
+})
+
 import { createProcess, pathReapFailure, type Spawn } from "../src/index.ts"
 
 const scratch: string[] = []
@@ -47,33 +93,17 @@ describe("createProcess — full process-tree settlement (21012 S1)", () => {
     async () => {
       const dir = mkdtempSync(join(tmpdir(), "yrd-protected-path-"))
       scratch.push(dir)
-      const moduleUrl = new URL("../src/index.ts", import.meta.url).href
-      const source = [
-        `const { createProcess, pathReapFailure } = await import(${JSON.stringify(moduleUrl)})`,
-        `await using owner = createProcess({ killGraceMs: 25, postKillReapGraceMs: 25 })`,
-        `const result = await owner.reapPath(process.cwd())`,
-        `console.log(JSON.stringify({ self: process.pid, result, failure: pathReapFailure(result) }))`,
-      ].join("\n")
-      const helper = Bun.spawn([bunExe, "-e", source], {
-        cwd: dir,
-        stdin: "ignore",
-        stdout: "pipe",
-        stderr: "pipe",
-      })
-      const [stdout, stderr, exitCode] = await Promise.all([
-        new Response(helper.stdout).text(),
-        new Response(helper.stderr).text(),
-        helper.exited,
-      ])
-
-      expect(exitCode, stderr).toBe(0)
-      const report = JSON.parse(stdout) as {
-        self: number
-        result: { survivorPids: number[] }
-        failure?: string
+      const heldPath = join(dir, "held.txt")
+      writeFileSync(heldPath, "held\n")
+      const descriptor = openSync(heldPath, "r")
+      try {
+        await using owner = createProcess({ killGraceMs: 25, postKillReapGraceMs: 25 })
+        const result = await owner.reapPath(dir)
+        expect(result.survivorPids).toContain(process.pid)
+        expect(pathReapFailure(result)).toContain(`survivor pids: ${process.pid}`)
+      } finally {
+        closeSync(descriptor)
       }
-      expect(report.result.survivorPids).toContain(report.self)
-      expect(report.failure).toContain(`survivor pids: ${report.self}`)
     },
   )
 
