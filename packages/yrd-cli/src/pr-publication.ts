@@ -1,4 +1,5 @@
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp } from "node:fs/promises"
+import { realpathSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
 import type { JobResult } from "@yrd/job"
@@ -6,8 +7,10 @@ import type { PrPublicationInput, PrPublicationOutput, PrPublicationService } fr
 import type { Process, ProcessResult } from "@yrd/process"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import { changedSubmodulePins } from "./pr-submodule-publication.ts"
+import { safeRemove } from "removely"
 
 const GIT_TIMEOUT_MS = 30_000
+const TEST_ROOT = realpathSync(tmpdir())
 
 function gitFailure(result: ProcessResult): string {
   if (result.timedOut) return `timed out after ${GIT_TIMEOUT_MS}ms`
@@ -50,7 +53,7 @@ async function publishRef(
     await runGit(process, staging, ["fetch", "--quiet", "--no-tags", source, sha])
     await runGit(process, staging, ["push", "--porcelain", destination, `FETCH_HEAD:refs/heads/${branch}`])
   } finally {
-    await rm(staging, { recursive: true, force: true })
+    await safeRemove(staging, { within: TEST_ROOT, allowMissing: true })
   }
 }
 
