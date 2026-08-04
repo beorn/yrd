@@ -7199,10 +7199,10 @@ export async function followQueueRuns(
       const maintenanceDue =
         starting || cycleNow < lastMaintenanceAt || cycleNow - lastMaintenanceAt >= RESIDENT_MAINTENANCE_INTERVAL_MS
       if (!starting && !refreshed && !maintenanceDue && !drainRequested()) {
-        if (scope.signal.aborted) return 0
+        if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
         await sleepUntilDrain(scope.sleep(interval), drainSignal)
         heartbeat?.check()
-        if (scope.signal.aborted) return 0
+        if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
         continue
       }
       firstCycle = false
@@ -7237,10 +7237,10 @@ export async function followQueueRuns(
       }
       runRequired ||= app.state() !== beforePreparation
       if (!runRequired && !drainRequested()) {
-        if (scope.signal.aborted) return 0
+        if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
         await sleepUntilDrain(scope.sleep(interval), drainSignal)
         heartbeat?.check()
-        if (scope.signal.aborted) return 0
+        if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
         continue
       }
       let runs: readonly Run[]
@@ -7266,10 +7266,10 @@ export async function followQueueRuns(
           await scope.sleep(interval)
           continue
         }
-        if (scope.signal.aborted) return 0
+        if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
         await sleepUntilDrain(scope.sleep(interval), drainSignal)
         heartbeat?.check()
-        if (scope.signal.aborted) return 0
+        if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
         continue
       }
       recoveryReporter.flush()
@@ -7313,10 +7313,11 @@ export async function followQueueRuns(
         await scope.sleep(interval)
         continue
       }
-      if (selectors.length > 0 || scope.signal.aborted) return exit
+      if (selectors.length > 0) return exit
+      if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
       await sleepUntilDrain(scope.sleep(interval), drainSignal)
       heartbeat?.check()
-      if (scope.signal.aborted) return exit
+      if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
     }
   } finally {
     recoveryReporter.flush()

@@ -2579,7 +2579,7 @@ describe("runYrd", () => {
     expect(app.queue.get("R1")).toMatchObject({ status: "waiting", prs: [{ revision: 3, baseSha: nextBase }] })
   })
 
-  it("skips the expensive compose path on unchanged idle follow ticks", async () => {
+  it("exits non-zero when an internal scope aborts an unchanged idle follow tick", async () => {
     const app = await createApp()
     const controller = new AbortController()
     const sleeps: number[] = []
@@ -2603,7 +2603,7 @@ describe("runYrd", () => {
       } as YrdCliIO["scope"],
     }).io
 
-    await expect(runInternals.followQueueRuns(viewer, [], { json: true, interval: 1 }, io, gate)).resolves.toBe(0)
+    await expect(runInternals.followQueueRuns(viewer, [], { json: true, interval: 1 }, io, gate)).resolves.toBe(3)
     expect(sleeps).toEqual([1_000, 1_000])
     expect(gate, "an unchanged idle tick must not re-run the installed-baseline gate").toHaveBeenCalledTimes(1)
     expect(queueRun, "an unchanged idle tick must not traverse and compose the full queue").toHaveBeenCalledTimes(1)
