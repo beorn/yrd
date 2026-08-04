@@ -7654,11 +7654,7 @@ async function submitIntent(
   return 0
 }
 
-async function tombstoneIntent(
-  app: YrdCliApp,
-  options: IntentTombstoneOptions,
-  io: YrdCliIO,
-): Promise<void> {
+async function tombstoneIntent(app: YrdCliApp, options: IntentTombstoneOptions, io: YrdCliIO): Promise<void> {
   const component = options.component ?? usage("yrd intent tombstone requires --component <path>")
   const sha = options.sha ?? usage("yrd intent tombstone requires --sha <commit>")
   const issueRef = options.issue ?? usage("yrd intent tombstone requires --issue <ref>")
@@ -8658,7 +8654,7 @@ function buildProgram(
     .action(async (options) => tombstoneIntent(installed(), options, io))
   intent
     .command("list")
-    .description("live record per (issue, component) key")
+    .description("all admitted records in submission order")
     .option("--json", "emit stable JSON")
     .action(async (options) => listIntents(installed(), options, io))
   intent

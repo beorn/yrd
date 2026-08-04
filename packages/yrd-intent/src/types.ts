@@ -176,9 +176,9 @@ export type Intents = Readonly<{
 
 export type HasIntents = Readonly<{ intents: Intents }>
 
-/** The (issue, component) supersession key, rendered so it is greppable in the journal. */
+/** The (issue, component) supersession key, separated unambiguously without a NUL source byte. */
 export function intentKey(issue: IssueRef, component: string): string {
-  return `${issue.source}:${issue.id}\\0${component}`
+  return `${issue.source}:${issue.id}\0${component}`
 }
 
 /**
