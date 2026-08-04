@@ -6088,6 +6088,7 @@ function runnablePRs(
 export const COMPOSITION_FAILURE_BUCKETS = {
   "needs-author": new Set<string>([
     "authored-gitlink",
+    "carrier-drops-landed",
     "composition-invalid",
     "gitlink-inspection",
     "merge-tip-carrier",
@@ -6295,6 +6296,20 @@ function prEligibility(
       return result({
         code: "candidate-conflicting",
         message: `PR '${pr.id}' revision ${revision.n} conflicts in Candidate '${conflictingCandidate.id}'`,
+      })
+    }
+    const admissionRefusal = state.queues.admissionRefusals[pr.id]
+    if (
+      admissionRefusal?.settlement !== undefined &&
+      admissionRefusal.revision === revision.n &&
+      admissionRefusal.headSha === revision.head
+    ) {
+      return result({
+        code: "admission-refused",
+        message:
+          `PR '${pr.id}' required checks cannot run after admission refusal '${admissionRefusal.code}': ` +
+          `${admissionRefusal.reason}. ${admissionRefusal.settlement.reason}.\n` +
+          `Next: yrd pr recut ${pr.id} --preflight --queue`,
       })
     }
     if (options.ignoreChecks !== true && checks.status === "queued") {

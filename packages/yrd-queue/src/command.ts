@@ -1828,6 +1828,7 @@ async function prepareCandidate(
   git: Git,
   repo: string,
   path: string,
+  authoritativeBase: string,
   input: StepExecution,
   attempt: number,
   artifactRoot: string,
@@ -1847,6 +1848,10 @@ async function prepareCandidate(
   const submoduleResolutions: QueueSubmoduleResolutionEvidence[] = []
   for (const pr of input.prs) {
     if (pr.composition === undefined) {
+      if (pr.recut !== undefined) {
+        const dropped = await carrierDropsLandedFailure(git, path, pr.id, pr.headSha, authoritativeBase)
+        if (dropped !== undefined) return dropped
+      }
       const mergeTip = await mergeTipCarrierFailure(git, path, pr.id, pr.headSha, "HEAD")
       if (mergeTip !== undefined) return mergeTip
       // A post-landing actuator retry carries the same immutable PR snapshot
@@ -2022,6 +2027,7 @@ export function gitCandidatePreparer(options: GitCandidatePreparerOptions): Cand
         git,
         repo,
         path,
+        input.baseSha,
         execution,
         1,
         resolve(options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")),
@@ -2266,6 +2272,79 @@ function linearRootCarrierWorkflow(pr: string): string {
   return (
     "merge inside the affected component repository, fast-forward that component's main, rebuild the root carrier " +
     `as one linear pin-bump commit, then run 'yrd pr submit <branch>' and 'yrd pr recut ${pr} --preflight --queue'`
+  )
+}
+
+type BaseContainment =
+  | Readonly<{ status: "contained" }>
+  | Readonly<{ status: "drops-landed"; commits: string }>
+  | Readonly<{ status: "inspection-failed"; detail: string }>
+
+/** A stale carrier may merge cleanly while omitting commits already on the
+ * authoritative base. Conflict detection cannot witness that silent revert;
+ * derive the missing commits from Git ancestry before attempting the merge. */
+async function inspectBaseContainment(
+  git: Git,
+  repo: string,
+  authoritativeBase: string,
+  carrierHead: string,
+): Promise<BaseContainment> {
+  const contains = await git.run(repo, ["merge-base", "--is-ancestor", authoritativeBase, carrierHead], true)
+  if (contains.code === 0) return { status: "contained" }
+  if (contains.code !== 1) {
+    return {
+      status: "inspection-failed",
+      detail: contains.stderr || contains.stdout || "git merge-base failed",
+    }
+  }
+
+  // Post-landing actuator retries intentionally carry a head already contained
+  // by current main. They cannot remove current-base commits and remain safe.
+  const alreadyLanded = await git.run(repo, ["merge-base", "--is-ancestor", carrierHead, authoritativeBase], true)
+  if (alreadyLanded.code === 0) return { status: "contained" }
+  if (alreadyLanded.code !== 1) {
+    return {
+      status: "inspection-failed",
+      detail: alreadyLanded.stderr || alreadyLanded.stdout || "git merge-base failed",
+    }
+  }
+
+  const dropped = await git.run(
+    repo,
+    ["log", "--oneline", "--no-decorate", `${carrierHead}..${authoritativeBase}`],
+    true,
+  )
+  if (dropped.code !== 0 || dropped.stdout === "") {
+    return {
+      status: "inspection-failed",
+      detail: dropped.stderr || dropped.stdout || "git log found no base-only commits",
+    }
+  }
+  return { status: "drops-landed", commits: dropped.stdout }
+}
+
+function linearRebuildRemedy(scope: string, base: string): string {
+  return `linear rebuild required: rebuild ${scope} as a one-parent linear branch on current base '${base}', then recut and requeue the root carrier`
+}
+
+async function carrierDropsLandedFailure(
+  git: Git,
+  repo: string,
+  pr: string,
+  headSha: string,
+  authoritativeBase: string,
+): Promise<CandidateFailure | undefined> {
+  const containment = await inspectBaseContainment(git, repo, authoritativeBase, headSha)
+  if (containment.status === "contained") return undefined
+  if (containment.status === "inspection-failed") {
+    return candidateFailure(
+      "carrier-inspection",
+      `could not compare root carrier '${headSha}' for PR '${pr}' with queue base '${authoritativeBase}': ${containment.detail}`,
+    )
+  }
+  return candidateFailure(
+    "carrier-drops-landed",
+    `PR '${pr}' carrier '${headSha}' does not contain queue base '${authoritativeBase}' and would drop landed commits:\n${containment.commits}\nremedy: ${linearRebuildRemedy("the carrier", authoritativeBase)}`,
   )
 }
 
@@ -3832,6 +3911,31 @@ async function planComponentMainPromotionGroup(
         ),
       }
     }
+    const containment = await inspectBaseContainment(git, repository, targetSha, pin.sha)
+    if (containment.status === "inspection-failed") {
+      const message = `could not inspect landed pin '${pin.sha}' for '${pin.path}' against planned component target '${targetSha}': ${containment.detail}`
+      return {
+        status: "failed",
+        error: componentMainFailure(
+          "component-main-inspection-failed",
+          message,
+          receipts,
+          componentMainRefusals(pendingPins, "component-main-inspection-failed", message, componentMain.sha),
+        ),
+      }
+    }
+    if (containment.status === "drops-landed") {
+      const message = `landed pin '${pin.path}' '${pin.sha}' does not contain planned component target '${targetSha}' at '${origin}' and would drop landed commits:\n${containment.commits}\nremedy: ${linearRebuildRemedy(`component work for '${pin.path}'`, targetSha)}`
+      return {
+        status: "failed",
+        error: componentMainFailure(
+          "carrier-drops-landed",
+          message,
+          receipts,
+          componentMainRefusals(pendingPins, "carrier-drops-landed", message, componentMain.sha),
+        ),
+      }
+    }
     const message = `NON-ANCESTRAL component lineage at '${origin}': ${targetPath} '${targetSha}' and landed pin '${pin.path}' '${pin.sha}' diverge; compose the divergent component histories before retrying`
     return {
       status: "failed",
@@ -4063,6 +4167,19 @@ function componentMainEvidence(result: JobResult<IntegrationProof>): ComponentMa
   if (result.status !== "completed" || result.conclusion !== "failure") return undefined
   const parsed = ComponentMainOutcomesSchema.safeParse(result.error.evidence)
   return parsed.success ? parsed.data : undefined
+}
+
+const NativeRootPushFailureEvidenceSchema = z
+  .object({
+    kind: z.literal("native-root-push-failure"),
+    branchRef: z.string().min(1),
+    candidateSha: z.string().min(1),
+  })
+  .strict()
+
+function nativeRootPushFailureEvidence(result: JobResult<IntegrationProof>): boolean {
+  if (result.status !== "completed" || result.conclusion !== "failure") return false
+  return NativeRootPushFailureEvidenceSchema.safeParse(result.error.evidence).success
 }
 
 function missingComponentMainOutcomes(
@@ -4567,6 +4684,7 @@ async function withPinnedCandidate<Output extends JsonValue>(
       git,
       repo,
       path,
+      target.sha,
       input,
       context.attempt,
       resolve(options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")),
@@ -5412,7 +5530,15 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
                 true,
               )
               if (pushed.code !== 0) {
-                return failed("merge-push-failed", pushed.stderr || pushed.stdout || `could not update '${branch}'`)
+                return failedWithEvidence(
+                  "merge-push-failed",
+                  pushed.stderr || pushed.stdout || `could not update '${branch}'`,
+                  NativeRootPushFailureEvidenceSchema.parse({
+                    kind: "native-root-push-failure",
+                    branchRef,
+                    candidateSha: checked.candidateSha,
+                  }),
+                )
               }
               // The changed-pin plan above preserves the pre-landing trust
               // boundary for new or changed component origins. Once root is
@@ -5449,14 +5575,14 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
           if (
             attempted.status === "completed" &&
             attempted.conclusion === "failure" &&
-            attempted.error.code.startsWith("component-main-")
+            componentMainEvidence(attempted) !== undefined
           ) {
             return attempted
           }
           if (
             attempted.status === "completed" &&
             attempted.conclusion === "failure" &&
-            attempted.error.code === "merge-push-failed"
+            nativeRootPushFailureEvidence(attempted)
           ) {
             const reconciled = await withComponentMainPromotions(
               git,
@@ -5478,11 +5604,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
             return reconciled
           }
           if (attempted.status === "completed" && attempted.conclusion === "success") return attempted
-          return {
-            status: "completed",
-            conclusion: "success",
-            output: integrationProof(landing.sha, checked),
-          }
+          return attempted
         }
         if (landing.sha !== baseSha) {
           return failed(

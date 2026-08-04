@@ -933,6 +933,159 @@ describe("pr prune", () => {
     expect(humanText).toContain("checked 3 live PRs — 1 would be withdrawn, 1 kept, 1 error")
   })
 
+  it("keeps the exact revision owned by an active merge run", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/landing", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["merge"] })
+    expect(app.queue.get("R1")).toMatchObject({
+      status: "queued",
+      steps: [{ kind: "merge", job: { status: "queued" } }],
+    })
+    const mergeJob = app.queue.get("R1")?.steps[0]?.job
+    if (mergeJob === undefined) throw new Error("expected queued merge Job")
+
+    const checkedAncestry: string[] = []
+    const output = outputIO({
+      pruneGit: () =>
+        pruneGit({
+          isAncestor: (ancestor, descendant) => {
+            checkedAncestry.push(`${ancestor}..${descendant}`)
+            return true
+          },
+        }),
+    })
+    expect(await runYrd(app, yrd("admin", "pr", "prune", "--json"), output.io), output.stderr()).toBe(0)
+    expect(checkedAncestry).toEqual([])
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      checked: [
+        {
+          pr: "PR1",
+          checks: {},
+          verdict: "keep",
+          reason: "merge run 'R1' owns the in-flight landing for revision 1 (1111111111111111111111111111111111111111)",
+        },
+      ],
+      summary: { checked: 1, withdrawn: 0, kept: 1, errors: 0 },
+      withdrawn: [],
+    })
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    expect(app.queue.get("R1")).toMatchObject({ status: "queued", steps: [{ job: { status: "queued" } }] })
+
+    await app.jobs.run(mergeJob.id, { runner: "cli-test", leaseMs: 60_000 })
+    expect(app.queue.get("R1")).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+      steps: [{ kind: "merge", job: { status: "completed", conclusion: "success" } }],
+    })
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+
+    const completedOutput = outputIO({
+      pruneGit: () => pruneGit({ isAncestor: () => true }),
+    })
+    expect(await runYrd(app, yrd("admin", "pr", "prune", "--json"), completedOutput.io), completedOutput.stderr()).toBe(
+      0,
+    )
+    expect(JSON.parse(completedOutput.stdout())).toMatchObject({
+      checked: [{ pr: "PR1", verdict: "keep" }],
+      summary: { checked: 1, withdrawn: 0, kept: 1, errors: 0 },
+      withdrawn: [],
+    })
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+
+    expect(
+      await app.queue.run({ prs: ["PR1"], steps: ["merge"] }, { runner: "cli-test", leaseMs: 60_000 }),
+    ).toMatchObject([{ id: "R1", status: "completed", conclusion: "success" }])
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("integrated")
+  })
+
+  it("rechecks merge ownership after content proof before withdrawing", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/racing", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+
+    const output = outputIO({
+      pruneGit: () =>
+        pruneGit({
+          isAncestor: async () => {
+            await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["merge"] })
+            return true
+          },
+        }),
+    })
+    expect(await runYrd(app, yrd("admin", "pr", "prune", "--json"), output.io), output.stderr()).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      checked: [{ pr: "PR1", verdict: "keep" }],
+      summary: { checked: 1, withdrawn: 0, kept: 1, errors: 0 },
+      withdrawn: [],
+    })
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    expect(app.queue.get("R1")).toMatchObject({
+      status: "queued",
+      steps: [{ kind: "merge", job: { status: "queued" } }],
+    })
+  })
+
+  it("keeps a newer revision that arrives after content proof", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/revised", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+
+    const output = outputIO({
+      pruneGit: () =>
+        pruneGit({
+          isAncestor: async () => {
+            await app.bays.intake({
+              branch: "topic/revised",
+              headSha: HEAD2_SHA,
+              base: "main",
+              baseSha: BASE_SHA,
+            })
+            return true
+          },
+        }),
+    })
+    expect(await runYrd(app, yrd("admin", "pr", "prune", "--json"), output.io), output.stderr()).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      checked: [
+        {
+          pr: "PR1",
+          verdict: "keep",
+          reason:
+            "PR changed during prune from revision 1 (1111111111111111111111111111111111111111) to revision 2 (2222222222222222222222222222222222222222)",
+        },
+      ],
+      summary: { checked: 1, withdrawn: 0, kept: 1, errors: 0 },
+      withdrawn: [],
+    })
+    expect(app.state().bays.prs.PR1).toMatchObject({
+      state: "open",
+      revs: [
+        { n: 1, head: HEAD_SHA },
+        { n: 2, head: HEAD2_SHA },
+      ],
+    })
+  })
+
+  it("does not let an active check-only run hide independently landed content", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/checked", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["check"] })
+
+    const output = outputIO({
+      pruneGit: () => pruneGit({ isAncestor: () => true }),
+    })
+    expect(await runYrd(app, yrd("admin", "pr", "prune", "--json"), output.io), output.stderr()).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      checked: [{ pr: "PR1", verdict: "withdraw" }],
+      summary: { checked: 1, withdrawn: 1, kept: 0, errors: 0 },
+      withdrawn: [{ id: "PR1", taskStatus: "dropped" }],
+    })
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
+    expect(app.queue.get("R1")).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      steps: [{ job: { status: "completed", conclusion: "cancelled" } }],
+    })
+  })
+
   it("withdraws a PR whose head is already an ancestor of the base tip", async () => {
     const app = await createCliApp()
     await app.bays.submit({ branch: "topic/landed", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })

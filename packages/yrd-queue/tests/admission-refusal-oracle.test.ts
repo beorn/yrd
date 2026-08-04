@@ -457,6 +457,14 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
           reason: "the recut certificate requires human judgment",
         },
       })
+      expect(app.queue.eligibility(pr.id)).toMatchObject({
+        runnable: false,
+        reason: {
+          code: "admission-refused",
+          message: expect.stringContaining(`yrd pr recut ${pr.id} --preflight --queue`),
+        },
+      })
+      expect(app.queue.eligibility(pr.id).reason?.message).toContain("authored-gitlink")
     }
 
     const beforeReplay = await Array.fromAsync(journal.read()).then((events) => events.length)
@@ -464,6 +472,10 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     await expect(replayed.queue.run({}, runtime)).resolves.toEqual([])
     expect(preparations).toBe(3)
     expect(await Array.fromAsync(journal.read()).then((events) => events.length)).toBe(beforeReplay)
+    expect(replayed.queue.eligibility("PR1")).toMatchObject({
+      runnable: false,
+      reason: { code: "admission-refused", message: expect.stringContaining("yrd pr recut PR1 --preflight --queue") },
+    })
 
     // A genuinely new revision is new evidence: the durable settlement applies
     // only to the exact revision/head it named and must not suppress a new push.

@@ -1,6 +1,6 @@
 import { resolve } from "node:path"
 import type { Process, ProcessResult } from "@yrd/process"
-import type { RemedyStepV1 } from "@yrd/intent"
+import type { PinTombstone, RemedyStepV1 } from "@yrd/intent"
 import { cleanGitEnvironment } from "./git-environment.ts"
 
 const GIT_TIMEOUT_MS = 30_000
@@ -21,9 +21,19 @@ export type PinIntentAdmitted = Readonly<{
 
 export type PinIntentRefused = Readonly<{
   admitted: false
-  code: "intent-component-unknown" | "intent-target-unpublished" | "intent-pin-divergent"
+  code:
+    | "intent-component-unknown"
+    | "intent-target-unpublished"
+    | "intent-target-tombstoned"
+    | "intent-pin-divergent"
   message: string
-  evidence: Readonly<{ component: string; target?: string; currentPin?: string; declared?: readonly string[] }>
+  evidence: Readonly<{
+    component: string
+    target?: string
+    currentPin?: string
+    tombstone?: string
+    declared?: readonly string[]
+  }>
   remedy: readonly RemedyStepV1[]
 }>
 
@@ -35,6 +45,7 @@ export type PinIntentAdmissionOptions = Readonly<{
   base: string
   component: string
   target?: string
+  tombstones?: readonly Pick<PinTombstone, "sha">[]
 }>
 
 /**
@@ -82,6 +93,32 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
           argv: ["git", "push", "origin", `${target}:refs/heads/${branch}`],
           cwd: options.component,
           note: "publish the target, then resubmit the intent",
+        },
+      ],
+    }
+  }
+
+  for (const tombstone of options.tombstones ?? []) {
+    if (!(await isAncestor(options.process, componentRepo, tombstone.sha, target))) continue
+    return {
+      admitted: false,
+      code: "intent-target-tombstoned",
+      message: `yrd: target '${target}' descends from rolled-back pin '${tombstone.sha}' of '${options.component}'`,
+      evidence: { component: options.component, target, currentPin, tombstone: tombstone.sha },
+      remedy: [
+        {
+          argv: ["git", "revert", tombstone.sha],
+          cwd: options.component,
+          note: "revert the tombstoned component change on the intended lineage",
+        },
+        {
+          argv: ["git", "push", "origin", `HEAD:refs/heads/${branch}`],
+          cwd: options.component,
+          note: "publish the safe descendant",
+        },
+        {
+          argv: ["yrd", "intent", "submit", "--component", options.component, "--target", "<safe-sha>"],
+          note: "submit a target that does not descend from the rolled-back pin",
         },
       ],
     }

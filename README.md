@@ -180,6 +180,19 @@ recoverable checkpoints. Review and comment facts pin the current revision and
 head SHA; a new head makes old verdicts visibly stale. Reviewer assignment and
 richer policy belong to the calling coordination system.
 
+When an author intentionally has no Git credentials, `yrd pr publish <PR>
+--queue` records one durable `pr.publish` Job instead of lending credentials to
+the author process. The existing Queue runner publishes the immutable component
+pins and root carrier, then performs the requested recut-and-queue continuation.
+`yrd queue run --once` performs this publication work before its ordinary queue
+pass; resident follow mode uses the same path. If neither runner form is active,
+the Job remains `publication-required` and `pr list` / `pr view` identify both
+the waiting Job and the exact `queue run --once` remedy. A terminal push error
+remains visible as `publication-failed`; repeating the identical `pr publish`
+request retries that same Job and preserves its correlation. Publication pushes
+originate in fresh staging repositories so hooks from the author's checkout do
+not inherit runner authority.
+
 During development in this repository:
 
 ```bash
@@ -591,6 +604,13 @@ neither process restart nor another cadence tick can select it again or grow
 the journal. A new authored or recut revision clears the settlement and is
 eligible normally. This is Queue state, not a resident retry cache or restart
 budget.
+
+`yrd queue run --once` keeps that settled refusal visible instead of reporting
+`Queue idle`: human output names the refusal and
+`yrd pr recut <PR> --preflight --queue`, while JSON includes the same canonical
+eligibility fact in `blocked`. A targeted one-shot reports blockers only for its
+selected PRs; a selectorless pass reports them alongside any healthy Runs that
+made progress.
 
 For a human-authored root carrier, use the machine-owned path rather than
 attaching a composition manifest:

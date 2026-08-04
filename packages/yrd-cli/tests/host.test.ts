@@ -5,7 +5,7 @@
  */
 import { existsSync } from "node:fs"
 import { createHash } from "node:crypto"
-import { mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -27,6 +27,7 @@ import {
 import { queueStepRevision } from "../src/host-revision.ts"
 import {
   authoritativeImplementationSource,
+  implementationSourceCheckoutRelation,
   implementationSourceIdentity,
   sourceRepositoryFor,
   takeImplementationSourceBridge,
@@ -62,6 +63,12 @@ async function git(repo: string, ...args: string[]): Promise<string> {
   ])
   if (exitCode !== 0) throw new Error(stderr || stdout)
   return stdout.trim()
+}
+
+async function initBareMain(cwd: string, remote: string): Promise<void> {
+  await git(cwd, "-c", "init.defaultBranch=host-default", "init", "-q", "--bare", remote)
+  await git(remote, "symbolic-ref", "HEAD", "refs/heads/main")
+  expect(await git(remote, "symbolic-ref", "HEAD")).toBe("refs/heads/main")
 }
 
 async function journalEnvelope(repo: string) {
@@ -248,6 +255,8 @@ checks: [{check: {run: "true"}}]
 
 async function unpublishedSubmodulePinRepository(): Promise<{
   repo: string
+  rootRemote: string
+  moduleRemote: string
   branch: string
   pin: string
 }> {
@@ -255,10 +264,11 @@ async function unpublishedSubmodulePinRepository(): Promise<{
   roots.push(root)
   const moduleRemote = join(root, "module.git")
   const module = join(root, "module")
+  const rootRemote = join(root, "root.git")
   const repo = join(root, "repo")
   const branch = "issue/unpublished-submodule-pin"
 
-  await git(root, "init", "--bare", "-q", "-b", "main", moduleRemote)
+  await initBareMain(root, moduleRemote)
   await git(root, "init", "-q", "-b", "main", module)
   await git(module, "config", "user.name", "Yrd Test")
   await git(module, "config", "user.email", "yrd@example.invalid")
@@ -268,10 +278,12 @@ async function unpublishedSubmodulePinRepository(): Promise<{
   await git(module, "commit", "-qm", "published module base")
   await git(module, "push", "-qu", "origin", "main")
 
+  await initBareMain(root, rootRemote)
   await git(root, "init", "-q", "-b", "main", repo)
   await git(repo, "config", "user.name", "Yrd Test")
   await git(repo, "config", "user.email", "yrd@example.invalid")
   await git(repo, "config", "protocol.file.allow", "always")
+  await git(repo, "remote", "add", "origin", rootRemote)
   await writeFile(join(repo, "README.md"), "root\n")
   await writeFile(
     join(repo, ".yrd.yml"),
@@ -283,6 +295,7 @@ checks: [{check: {run: "true"}}]
   await git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", moduleRemote, "dep")
   await git(repo, "add", "README.md", ".yrd.yml", ".gitmodules", "dep")
   await git(repo, "commit", "-qm", "published root base")
+  await git(repo, "push", "-qu", "origin", "main")
   await git(repo, "switch", "-qc", branch)
 
   await writeFile(join(repo, "dep", "local-only.txt"), "not published\n")
@@ -291,7 +304,7 @@ checks: [{check: {run: "true"}}]
   const pin = await git(join(repo, "dep"), "rev-parse", "HEAD")
   await git(repo, "add", "dep")
   await git(repo, "commit", "-qm", "point at local-only submodule work")
-  return { repo, branch, pin }
+  return { repo, rootRemote, moduleRemote, branch, pin }
 }
 
 describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
@@ -441,14 +454,14 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     await git(source, "add", "version.txt")
     await git(source, "commit", "-qm", "loaded source")
     const loadedSha = await git(source, "rev-parse", "HEAD")
-    await git(root, "init", "-q", "--bare", sourceRemote)
+    await initBareMain(root, sourceRemote)
     await git(source, "remote", "add", "origin", sourceRemote)
     await git(source, "push", "-q", "origin", "main")
 
     await git(repo, "config", "protocol.file.allow", "always")
     await git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sourceRemote, "runtime")
     await git(repo, "commit", "-qam", "add runtime source")
-    await git(root, "init", "-q", "--bare", rootRemote)
+    await initBareMain(root, rootRemote)
     await git(repo, "remote", "add", "origin", rootRemote)
     await git(repo, "push", "-q", "origin", "main")
 
@@ -474,7 +487,6 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
         sourceRepository,
       ),
     ).toBe(`git:${authoritativeSha}`)
-
     await writeFile(join(repo, "runtime", "version.txt"), "dirty loaded bytes\n")
     expect(await implementationSourceIdentity(process, sourceRepository)).toMatch(/^dirty:[0-9a-f]{64}$/u)
 
@@ -484,6 +496,67 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(untrackedIdentity).toMatch(/^dirty:[0-9a-f]{64}$/u)
     await writeFile(join(repo, "runtime", "untracked-runtime.ts"), "export const shadow = false\n")
     expect(await implementationSourceIdentity(process, sourceRepository)).not.toBe(untrackedIdentity)
+  })
+
+  it("distinguishes a clean source checkout lag from genuine divergence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yrd-source-relation-"))
+    roots.push(root)
+    const source = join(root, "source")
+    await git(root, "init", "-q", "-b", "main", source)
+    await git(source, "config", "user.name", "Yrd Test")
+    await git(source, "config", "user.email", "yrd@example.invalid")
+    await writeFile(join(source, "version.txt"), "base\n")
+    await git(source, "add", "version.txt")
+    await git(source, "commit", "-qm", "base")
+    const baseSha = await git(source, "rev-parse", "HEAD")
+
+    await writeFile(join(source, "version.txt"), "pinned\n")
+    await git(source, "commit", "-qam", "pinned")
+    const pinnedSha = await git(source, "rev-parse", "HEAD")
+    await using process = createProcess({ cwd: source })
+    const repository = { root: source }
+    expect(
+      await implementationSourceCheckoutRelation(process, repository, `git:${baseSha}`, `git:${pinnedSha}`),
+    ).toEqual({ kind: "ancestor-lag", repository: source, pinnedSha })
+
+    await git(source, "checkout", "-q", baseSha)
+    await writeFile(join(source, "version.txt"), "sibling\n")
+    await git(source, "commit", "-qam", "sibling")
+    const siblingSha = await git(source, "rev-parse", "HEAD")
+    expect(
+      await implementationSourceCheckoutRelation(process, repository, `git:${siblingSha}`, `git:${pinnedSha}`),
+    ).toEqual({ kind: "divergent" })
+  })
+
+  it("maps a linked-worktree runtime source to its authoritative gitlink (22730)", async () => {
+    const { repo } = await repository()
+    const root = join(repo, "..")
+    const source = join(root, "linked-runtime-source")
+    await git(root, "init", "-q", "-b", "main", source)
+    await git(source, "config", "user.name", "Yrd Test")
+    await git(source, "config", "user.email", "yrd@example.invalid")
+    await writeFile(join(source, "version.txt"), "loaded\n")
+    await git(source, "add", "version.txt")
+    await git(source, "commit", "-qm", "loaded source")
+    const sourceSha = await git(source, "rev-parse", "HEAD")
+
+    await git(repo, "config", "protocol.file.allow", "always")
+    await git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", source, "runtime")
+    await git(repo, "commit", "-qam", "add runtime source")
+    const authoritySha = await git(repo, "rev-parse", "HEAD")
+
+    const linked = join(repo, ".worktrees", "wt1")
+    await mkdir(join(repo, ".worktrees"), { recursive: true })
+    await git(repo, "worktree", "add", "-q", "--detach", linked, authoritySha)
+    await git(linked, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "-q", "runtime")
+
+    await using process = createProcess({ cwd: linked })
+    const discovered = await discoverYrdRepository({ cwd: linked, process })
+    expect(
+      await authoritativeImplementationSource(process, discovered.repo, authoritySha, {
+        root: join(linked, "runtime"),
+      }),
+    ).toBe(`git:${sourceSha}`)
   })
 
   it("does not mistake an untracked installed package for the consumer repository's runtime source", async () => {
@@ -817,6 +890,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       "recordAdmission",
       "requestReview",
       "regression",
+      "publish",
     ])
     expect(app.commands.bay.intake.metadata?.visibility).toBe("internal")
     expect(app.commands.bay.open.metadata?.visibility).toBe("public")
@@ -900,7 +974,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
   it("coalesces Bay base refresh without pruning a recoverable tracking carrier", async () => {
     const { repo, featureSha } = await repository()
     const remote = join(repo, "..", "origin.git")
-    await git(repo, "init", "-q", "--bare", remote)
+    await initBareMain(repo, remote)
     await git(repo, "remote", "add", "origin", remote)
     await git(repo, "push", "-q", "origin", "main", "issue/feature")
     const config: ResolvedYrdProjectConfig = {
@@ -1023,7 +1097,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     const fourthSha = await addFeature("issue/fourth", "fourth.txt")
 
     const remote = join(repo, "..", "origin.git")
-    await git(repo, "init", "-q", "--bare", remote)
+    await initBareMain(repo, remote)
     await git(repo, "remote", "add", "origin", remote)
     await git(repo, "push", "-q", "origin", "main", "issue/feature", "issue/second", "issue/third", "issue/fourth")
 
@@ -1082,7 +1156,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     const { repo, featureSha } = await repository()
     const localBaseSha = await git(repo, "rev-parse", "main")
     const remote = join(repo, "..", "origin.git")
-    await git(repo, "init", "-q", "--bare", remote)
+    await initBareMain(repo, remote)
     await git(repo, "remote", "add", "origin", remote)
     await git(repo, "push", "-q", "origin", "main", "issue/feature")
     await git(repo, "switch", "-qc", "issue/remote-main")
@@ -2458,6 +2532,261 @@ checks: [{check: {run: "true"}}]
     })
   })
 
+  it("keeps publication durable and visible until queue run --once publishes and queues it", async () => {
+    const { repo, rootRemote, moduleRemote, branch, pin } = await unpublishedSubmodulePinRepository()
+    const head = await git(repo, "rev-parse", branch)
+    let stdout = ""
+    let stderr = ""
+
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "create", branch, "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+      stderr,
+    ).toBe(0)
+
+    stdout = ""
+    stderr = ""
+    expect(
+      await runYrdProcess(
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "publish", "PR1", "--queue", "--json"],
+        {
+          cwd: repo,
+          stdout: (text) => {
+            stdout += text
+          },
+          stderr: (text) => {
+            stderr += text
+          },
+        },
+      ),
+      stderr,
+    ).toBe(0)
+    const firstPublication = z
+      .object({ publication: z.object({ job: z.string() }).passthrough() })
+      .passthrough()
+      .parse(JSON.parse(stdout))
+    expect(firstPublication).toMatchObject({
+      command: "pr.publish",
+      pr: { id: "PR1", branch },
+      publication: {
+        status: "publication-required",
+        continuation: "queue",
+        detail: "waiting for yrd queue run --once or the resident runner",
+      },
+    })
+    const publicationJob = firstPublication.publication.job
+
+    stdout = ""
+    stderr = ""
+    expect(
+      await runYrdProcess(
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "publish", "PR1", "--queue", "--json"],
+        {
+          cwd: repo,
+          stdout: (text) => {
+            stdout += text
+          },
+          stderr: (text) => {
+            stderr += text
+          },
+        },
+      ),
+      stderr,
+    ).toBe(0)
+    expect(JSON.parse(stdout)).toMatchObject({ publication: { job: publicationJob } })
+    await expect(git(moduleRemote, "rev-parse", `refs/heads/${branch}`)).rejects.toThrow()
+    await expect(git(rootRemote, "rev-parse", `refs/heads/${branch}`)).rejects.toThrow()
+
+    stdout = ""
+    stderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "view", "PR1", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+      stderr,
+    ).toBe(0)
+    expect(JSON.parse(stdout)).toMatchObject({
+      publication: { status: "publication-required", continuation: "queue" },
+    })
+
+    stdout = ""
+    stderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "list"], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+      stderr,
+    ).toBe(0)
+    expect(stderr).toContain("PR1 publication-required")
+    expect(stderr).toContain("waiting for yrd queue run --once or the resident runner")
+    expect(stderr).toContain("(Job ")
+
+    stdout = ""
+    stderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "queue", "run", "--once", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+      stderr,
+    ).toBe(0)
+    expect(await git(moduleRemote, "rev-parse", `refs/heads/${branch}`)).toBe(pin)
+    expect(await git(rootRemote, "rev-parse", `refs/heads/${branch}`)).toBe(head)
+
+    stdout = ""
+    stderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "view", "PR1", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+      stderr,
+    ).toBe(0)
+    expect(JSON.parse(stdout)).toMatchObject({
+      pr: { id: "PR1", status: expect.stringMatching(/submitted|ready|integrated/u) },
+      publication: { status: "published", continuation: "queue" },
+    })
+  })
+
+  it("publishes from trusted staging without running source push hooks", async () => {
+    const { repo, rootRemote, moduleRemote, branch, pin } = await unpublishedSubmodulePinRepository()
+    const head = await git(repo, "rev-parse", branch)
+    const rootHookMarker = join(repo, "root-pre-push-hook-ran")
+    const componentHookMarker = join(repo, "component-pre-push-hook-ran")
+    for (const [repository, marker] of [
+      [repo, rootHookMarker],
+      [join(repo, "dep"), componentHookMarker],
+    ] as const) {
+      const gitDir = await git(repository, "rev-parse", "--absolute-git-dir")
+      await writeFile(join(gitDir, "hooks", "pre-push"), `#!/bin/sh\nprintf ran > '${marker}'\nexit 99\n`, {
+        mode: 0o755,
+      })
+    }
+    let stdout = ""
+    let stderr = ""
+    const invoke = async (args: readonly string[]) =>
+      runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, ...args], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      })
+
+    expect(await invoke(["pr", "create", branch, "--json"]), stderr).toBe(0)
+    stdout = ""
+    stderr = ""
+    expect(await invoke(["pr", "publish", "PR1", "--json"]), stderr).toBe(0)
+    stdout = ""
+    stderr = ""
+    expect(await invoke(["queue", "run", "--once", "--json"]), stderr).toBe(0)
+
+    expect(await git(moduleRemote, "rev-parse", `refs/heads/${branch}`)).toBe(pin)
+    expect(await git(rootRemote, "rev-parse", `refs/heads/${branch}`)).toBe(head)
+    expect(existsSync(rootHookMarker)).toBe(false)
+    expect(existsSync(componentHookMarker)).toBe(false)
+  })
+
+  it("keeps a failed publication visible on the PR after queue run --once exits red", async () => {
+    const { repo, moduleRemote, branch } = await unpublishedSubmodulePinRepository()
+    const offlineRemote = `${moduleRemote}.offline`
+    let stdout = ""
+    let stderr = ""
+    const invoke = async (args: readonly string[]) =>
+      runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, ...args], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      })
+
+    expect(await invoke(["pr", "create", branch, "--json"]), stderr).toBe(0)
+    stdout = ""
+    stderr = ""
+    expect(await invoke(["pr", "publish", "PR1", "--queue", "--json"]), stderr).toBe(0)
+    const publicationJob = z.object({ publication: z.object({ job: z.string() }) }).parse(JSON.parse(stdout))
+      .publication.job
+    await rename(moduleRemote, offlineRemote)
+
+    stdout = ""
+    stderr = ""
+    expect(await invoke(["queue", "run", "--once", "--json"]), stderr).toBe(1)
+    expect(JSON.parse(stdout)).toMatchObject({
+      publications: [
+        {
+          conclusion: "failure",
+          error: { code: "publication-failed" },
+          projection: { status: "publication-failed", continuation: "queue" },
+        },
+      ],
+    })
+
+    stdout = ""
+    stderr = ""
+    expect(await invoke(["pr", "view", "PR1", "--json"]), stderr).toBe(0)
+    expect(JSON.parse(stdout)).toMatchObject({
+      publication: {
+        status: "publication-failed",
+        continuation: "queue",
+        error: { code: "publication-failed" },
+      },
+    })
+
+    stdout = ""
+    stderr = ""
+    expect(await invoke(["pr", "list"]), stderr).toBe(0)
+    expect(stderr).toContain("PR1 publication-failed")
+    expect(stderr).toContain("(Job ")
+
+    await rename(offlineRemote, moduleRemote)
+    stdout = ""
+    stderr = ""
+    expect(await invoke(["pr", "publish", "PR1", "--queue", "--json"]), stderr).toBe(0)
+    expect(JSON.parse(stdout)).toMatchObject({
+      publication: { job: publicationJob, status: "publication-required", continuation: "queue" },
+    })
+    stdout = ""
+    stderr = ""
+    expect(await invoke(["queue", "run", "--once", "--json"]), stderr).toBe(0)
+    expect(JSON.parse(stdout)).toMatchObject({
+      publications: [{ id: publicationJob, conclusion: "success", projection: { status: "published" } }],
+    })
+  })
+
   it("executes every bare read and no-op recovery without creating journal state", async () => {
     const { repo } = await repository()
     const surfaces = [
@@ -3519,7 +3848,7 @@ checks: [{check: {run: "true"}}]
     const { repo, featureSha } = await repository()
     const localSha = await git(repo, "rev-parse", "main")
     const remote = join(repo, "..", "origin.git")
-    await git(repo, "init", "-q", "--bare", remote)
+    await initBareMain(repo, remote)
     await git(repo, "remote", "add", "origin", remote)
     await git(repo, "push", "-q", "origin", "main", "issue/feature")
     await git(repo, "push", "-q", "origin", `${featureSha}:refs/heads/main`)

@@ -194,7 +194,7 @@ async function componentMainLandingRepository(
   await git(component, ["add", "version.txt"])
   await git(component, ["commit", "-qm", "base"])
   const componentBaseSha = await git(component, ["rev-parse", "HEAD"])
-  await Bun.$`git init -q --bare ${bareComponentRemote}`
+  await Bun.$`git init -q --bare -b main ${bareComponentRemote}`
   await git(component, ["remote", "add", "origin", bareComponentRemote])
   await git(component, ["push", "-q", "origin", "main"])
   const componentRemote = options.nonBareComponentOrigin === true ? component : bareComponentRemote
@@ -277,7 +277,9 @@ async function multiComponentMainLandingRepository(): Promise<{
     await git(worktree, ["add", "version.txt"])
     await git(worktree, ["commit", "-qm", `base ${name}`])
     const baseSha = await git(worktree, ["rev-parse", "HEAD"])
-    await Bun.$`git init -q --bare ${remote}`
+    // `git submodule add` follows the bare origin's HEAD, so make the fixture's
+    // intended branch explicit instead of inheriting the host Git default.
+    await Bun.$`git init -q --bare -b main ${remote}`
     await git(worktree, ["remote", "add", "origin", remote])
     await git(worktree, ["push", "-q", "origin", "main"])
     await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", remote, path])
@@ -626,6 +628,19 @@ function expectedCandidateRef(run: string, step: string, job: string, attempt: n
 }
 
 describe("Queue command adapters", () => {
+  it("does not classify failure outcomes by code prefix", async () => {
+    const sourceRoot = new URL("../src/", import.meta.url)
+    const matches: string[] = []
+    for (const entry of await readdir(sourceRoot)) {
+      if (!entry.endsWith(".ts")) continue
+      const source = await readFile(new URL(entry, sourceRoot), "utf8")
+      for (const match of source.matchAll(/\.code\.(?:startsWith|endsWith|includes|match|search)\s*\(/gu)) {
+        matches.push(`${entry}:${match[0]}`)
+      }
+    }
+    expect(matches).toEqual([])
+  })
+
   it("reports an absent Candidate ref as a write refusal with Git evidence", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     const baseSha = await git(repo, ["rev-parse", "main"])
@@ -1499,7 +1514,7 @@ describe("Queue command adapters", () => {
     }
   })
 
-  it("admits a direct recut whose base advanced with a disjoint merge (base-chase re-anchors clean)", async () => {
+  it("refuses a direct recut whose base advanced even when Git could re-anchor it cleanly", async () => {
     const { repo, baseSha, featureSha } = await directRecutBaseChaseRepository()
     await using process = createProcess()
     const recut = await createGitPRRecutter({ inject: { process }, repo }).recut({
@@ -1535,9 +1550,14 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run.status, run.error?.message).toBe("completed")
-    expect(run.conclusion).toBe("success")
-    // The reviewed change re-anchored onto the advanced base and landed alongside it.
-    expect(await git(repo, ["show", "main:payload.txt"])).toContain("FIVE")
+    expect(run).toMatchObject({
+      conclusion: "failure",
+      error: {
+        code: "carrier-drops-landed",
+        message: expect.stringMatching(/advance base disjoint.*linear rebuild.*current base/isu),
+      },
+    })
+    expect(await git(repo, ["show", "main:payload.txt"])).not.toContain("FIVE")
     expect(await git(repo, ["show", "main:other.txt"])).toContain("advanced")
   })
 
@@ -1575,7 +1595,10 @@ describe("Queue command adapters", () => {
     errors.mockRestore()
 
     expect(run.status).toBe("completed")
-    expect(run.error).toMatchObject({ code: "recut-certificate" })
+    expect(run.error).toMatchObject({
+      code: "carrier-drops-landed",
+      message: expect.stringContaining("advance base conflicting"),
+    })
     // The conflicting change never landed.
     expect(await git(repo, ["show", "main:payload.txt"])).not.toContain("FIVE")
   })
@@ -1616,7 +1639,10 @@ describe("Queue command adapters", () => {
     errors.mockRestore()
 
     expect(run.status).toBe("completed")
-    expect(run.error).toMatchObject({ code: "recut-certificate" })
+    expect(run.error).toMatchObject({
+      code: "carrier-drops-landed",
+      message: expect.stringContaining("advance base adjacent drift"),
+    })
     expect(await git(repo, ["show", "main:payload.txt"])).not.toContain("FIVE")
   })
 
@@ -2094,6 +2120,73 @@ describe("Queue command adapters", () => {
     expect(pacific).toMatchObject({ mergeability: "mergeable", sha: utc.sha })
     expect(pacificBytes).toBe(utcBytes)
   }, 30_000)
+
+  it("refuses an already-resolved stale merge tip that would cleanly drop landed commits", async () => {
+    const { repo } = await repository()
+    const originalBase = await git(repo, ["rev-parse", "main"])
+    await git(repo, ["switch", "-qc", "issue/stale-carrier", originalBase])
+    await writeFile(join(repo, "carrier.txt"), "carrier payload\n")
+    await git(repo, ["add", "carrier.txt"])
+    await git(repo, ["commit", "-qm", "carrier payload"])
+    await git(repo, ["switch", "-q", "main"])
+    await writeFile(join(repo, "earlier-landing.txt"), "already resolved\n")
+    await git(repo, ["add", "earlier-landing.txt"])
+    await git(repo, ["commit", "-qm", "landing already resolved into carrier"])
+    const resolvedBase = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "issue/stale-carrier"])
+    await git(repo, ["merge", "-q", "--no-ff", "main", "-m", "resolve carrier against older main"])
+    const carrierHead = await git(repo, ["rev-parse", "HEAD"])
+    const carrierTree = await git(repo, ["rev-parse", "HEAD^{tree}"])
+    await git(repo, ["switch", "-q", "main"])
+    await writeFile(join(repo, "protected-landing.txt"), "must survive\n")
+    await git(repo, ["add", "protected-landing.txt"])
+    await git(repo, ["commit", "-qm", "protected landing after carrier resolution"])
+    await writeFile(join(repo, "second-protected-landing.txt"), "must also survive\n")
+    await git(repo, ["add", "second-protected-landing.txt"])
+    await git(repo, ["commit", "-qm", "second protected landing after carrier resolution"])
+    const queueBaseHead = await git(repo, ["rev-parse", "HEAD"])
+    const dropped = await git(repo, ["log", "--oneline", `${carrierHead}..${queueBaseHead}`])
+
+    // This is the dangerous shape: Git can combine the trees without a
+    // conflict, so candidate-conflicting cannot witness the silent revert.
+    expect(await git(repo, ["merge-tree", "--write-tree", queueBaseHead, carrierHead])).toMatch(/^[0-9a-f]{40}$/u)
+    await using process = createProcess()
+    const pr = PRSnapshotSchema.parse({
+      id: "PR1",
+      branch: "issue/stale-carrier",
+      base: "main",
+      revision: 2,
+      headSha: carrierHead,
+      baseSha: resolvedBase,
+      recut: {
+        fromRevision: 1,
+        patchId: "a".repeat(40),
+        treeSha: carrierTree,
+        reviewCarried: false,
+        baseSha: resolvedBase,
+      },
+    })
+
+    await expect(
+      gitCandidatePreparer({ inject: { process }, repo })({
+        id: "C1",
+        queueId: "main",
+        baseSha: queueBaseHead,
+        revs: [{ pr: pr.id, n: pr.revision, head: pr.headSha }],
+        prs: [pr],
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "carrier-drops-landed",
+        message: expect.stringMatching(
+          /second protected landing after carrier resolution.*protected landing after carrier resolution.*linear.*current base/isu,
+        ),
+      },
+    })
+    expect(dropped).toContain("protected landing after carrier resolution")
+    expect(dropped).toContain("second protected landing after carrier resolution")
+  })
 
   it("refuses a payload touching configured refuse paths and names them with the configured reason", async () => {
     const { repo } = await repository()
@@ -2716,14 +2809,17 @@ describe("Queue command adapters", () => {
     if (outcome.status !== "completed" || outcome.conclusion !== "failure") return
     const artifacts = (outcome.output as { artifacts?: readonly { name: string; path: string }[] } | undefined)
       ?.artifacts
-    expect(artifacts).toEqual([
-      expect.objectContaining({
-        path: expect.stringMatching(/\/R1\/0-check\/attempt-1\/(?:stdout|stderr)\.log$/u),
-      }),
+    // Check steps preserve both terminal streams. The contract here is that
+    // conflict evidence survives scratch cleanup, not that only one stream exists.
+    expect(artifacts?.map(({ name }) => name)).toEqual(["stdout", "stderr"])
+    if (artifacts === undefined) throw new Error("missing candidate-conflict artifacts")
+    expect(artifacts.map(({ path }) => path)).toEqual([
+      expect.stringMatching(/\/R1\/0-check\/attempt-1\/stdout\.log$/u),
+      expect.stringMatching(/\/R1\/0-check\/attempt-1\/stderr\.log$/u),
     ])
-    const artifact = artifacts?.[0]
-    expect(artifact === undefined ? false : existsSync(artifact.path)).toBe(true)
-    expect(artifact === undefined ? "" : await readFile(artifact.path, "utf8")).toContain("CONFLICT")
+    expect(artifacts.every(({ path }) => existsSync(path))).toBe(true)
+    const artifactContents = await Promise.all(artifacts.map(({ path }) => readFile(path, "utf8")))
+    expect(artifactContents.some((contents) => contents.includes("CONFLICT"))).toBe(true)
   })
 
   it("checks the immutable Candidate already materialized by the Runner Context", async () => {
@@ -5347,13 +5443,21 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(
       recordingProcess,
       repo,
-      shellCommand('git submodule update --init --recursive && test "$(cat dep/version.txt)" = candidate'),
+      // Local paths exist only in this synthetic fixture; allow them explicitly
+      // so the check reaches the remote-push behavior this test specifies.
+      shellCommand(
+        'git -c protocol.file.allow=always submodule update --init --recursive && test "$(cat dep/version.txt)" = candidate',
+      ),
     )
     await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run).toMatchObject({ status: "completed", conclusion: "success", prs: [{ headSha: featureSha }] })
+    expect(run, JSON.stringify(run, null, 2)).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+      prs: [{ headSha: featureSha }],
+    })
     const proof = IntegrationProofSchema.parse(run.integration)
     const rootPush = pushes.find((argv) => argv.includes(`${proof.commit}:refs/heads/main`))
     expect(rootPush).toContain("--recurse-submodules=no")
@@ -5597,10 +5701,12 @@ describe("Queue command adapters", () => {
 
       const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-      expect(run).toMatchObject({
+      // The contains-base guard names the dropped standing-main commit, which
+      // supersedes the older generic non-ancestral classification.
+      expect(run, JSON.stringify(run, null, 2)).toMatchObject({
         status: "completed",
         conclusion: "failure",
-        error: { code: "component-main-non-ancestral" },
+        error: { code: "carrier-drops-landed" },
       })
       expect(run.error?.evidence).toMatchObject({
         kind: "component-main-outcomes",
@@ -5613,7 +5719,7 @@ describe("Queue command adapters", () => {
         ],
         refusals: [
           {
-            code: "component-main-non-ancestral",
+            code: "carrier-drops-landed",
             path: divergentComponent.path,
             pinSha: divergentComponent.pinSha,
           },
@@ -5694,14 +5800,14 @@ describe("Queue command adapters", () => {
       status: "completed",
       conclusion: "failure",
       error: {
-        code: "component-main-non-ancestral",
-        message: expect.stringMatching(/NON-ANCESTRAL.*dep.*diverge/u),
+        code: "carrier-drops-landed",
+        message: expect.stringMatching(/divergent main.*linear rebuild.*current base/isu),
         evidence: {
           kind: "component-main-outcomes",
           receipts: [],
           refusals: [
             {
-              code: "component-main-non-ancestral",
+              code: "carrier-drops-landed",
               origin: fixture.componentRemote,
               path: "dep",
               pinSha: fixture.pinSha,
@@ -5713,6 +5819,59 @@ describe("Queue command adapters", () => {
     expect(await git(fixture.rootRemote, ["rev-parse", "main"])).toBe(fixture.rootBaseSha)
     expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(divergentMainSha)
     expect(pushes.flat()).not.toContain("--force")
+  }, 20_000)
+
+  it("refuses a stale resolved component pin and enumerates the component commits it would drop", async () => {
+    const fixture = await componentMainLandingRepository()
+    await git(fixture.component, ["switch", "-q", "main"])
+    await writeFile(join(fixture.component, "earlier-landing.txt"), "already resolved\n")
+    await git(fixture.component, ["add", "earlier-landing.txt"])
+    await git(fixture.component, ["commit", "-qm", "component landing already resolved"])
+    await git(fixture.component, ["switch", "-q", "task/component"])
+    await git(fixture.component, ["merge", "-q", "--no-ff", "main", "-m", "resolve component carrier"])
+    const resolvedPin = await git(fixture.component, ["rev-parse", "HEAD"])
+    await git(fixture.component, ["push", "-q", "origin", "task/component"])
+
+    await git(fixture.repo, ["switch", "-qc", "issue/stale-component", fixture.rootBaseSha])
+    await git(join(fixture.repo, "dep"), ["fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+    await git(join(fixture.repo, "dep"), ["checkout", "-q", resolvedPin])
+    await git(fixture.repo, ["add", "dep"])
+    await git(fixture.repo, ["commit", "-qm", "pin resolved component carrier"])
+    const carrierHead = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["push", "-q", "origin", "issue/stale-component"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+    await git(fixture.repo, ["-c", "protocol.file.allow=always", "submodule", "update", "-q"])
+
+    await git(fixture.component, ["switch", "-q", "main"])
+    await writeFile(join(fixture.component, "protected-component-landing.txt"), "must survive\n")
+    await git(fixture.component, ["add", "protected-component-landing.txt"])
+    await git(fixture.component, ["commit", "-qm", "protected component landing after resolution"])
+    const componentMain = await git(fixture.component, ["rev-parse", "HEAD"])
+    await git(fixture.component, ["push", "-q", "origin", "main"])
+    expect(await git(fixture.component, ["merge-tree", "--write-tree", componentMain, resolvedPin])).toMatch(
+      /^[0-9a-f]{40}$/u,
+    )
+
+    await using process = createProcess()
+    await using app = await checkedQueue(process, fixture.repo, ["true"])
+    await submitCertifiedCarrier(app, fixture.repo, {
+      branch: "issue/stale-component",
+      headSha: carrierHead,
+      baseSha: fixture.rootBaseSha,
+    })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: {
+        code: "carrier-drops-landed",
+        message: expect.stringMatching(/protected component landing after resolution.*linear.*current base/isu),
+      },
+    })
+    expect(await git(fixture.rootRemote, ["rev-parse", "main"])).toBe(fixture.rootBaseSha)
+    expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(componentMain)
   }, 20_000)
 
   it("leaves the root landed and converges component main when a transient promotion failure is retried", async () => {
@@ -5892,12 +6051,22 @@ describe("Queue command adapters", () => {
       requiredVersion: "accepted",
     })
     await using process = createProcess()
-    await using app = await checkedQueue(process, repo, shellCommand("git submodule update --init --recursive"))
+    // Local paths exist only in this synthetic fixture; allow them explicitly
+    // so the candidate reaches the hook failure this test specifies.
+    await using app = await checkedQueue(
+      process,
+      repo,
+      shellCommand("git -c protocol.file.allow=always submodule update --init --recursive"),
+    )
     await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "merge-push-failed" } })
+    expect(run, JSON.stringify(run, null, 2)).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "merge-push-failed" },
+    })
     expect(await git(remote, ["rev-parse", "main"])).toBe(baseSha)
   })
 
@@ -6134,6 +6303,89 @@ describe("Queue command adapters", () => {
       expect(landedSha).toBe(baseSha)
     },
   )
+
+  it("preserves canceled authority when another actor lands the same native candidate", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const remote = join(repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "issue/feature"])
+    await using process = createProcess()
+    const checkInput = {
+      run: "R1",
+      step: "check",
+      index: 0,
+      prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
+      shape: { results: {} },
+    } satisfies StepExecution<PRShape>
+    const checked = await gitCheckStep({ inject: { process }, repo, command: ["test", "-f", "feature.txt"] })(
+      checkInput,
+      { id: "J-check", attempt: 1, runner: "test", signal: new AbortController().signal },
+    )
+    if (checked.status !== "completed" || checked.conclusion !== "success") throw new Error("check did not pass")
+
+    const canceled = new AbortController()
+    let concurrentLanding = false
+    const authorityProcess: Pick<Process, "run"> = {
+      async run(request) {
+        if (
+          !concurrentLanding &&
+          request.argv[0] === "git" &&
+          request.argv[3] === "config" &&
+          request.argv.includes("submodule.alternateLocation")
+        ) {
+          concurrentLanding = true
+          await git(repo, ["push", "-q", "origin", `${featureSha}:refs/heads/main`])
+          canceled.abort()
+        }
+        return process.run(request)
+      },
+    }
+    const outcome = await gitMergeStep<Checked>({ inject: { process: authorityProcess }, repo })(
+      {
+        ...checkInput,
+        step: "merge",
+        index: 1,
+        shape: { results: { check: checked.output } },
+      },
+      { id: "J-merge", attempt: 1, runner: "test", signal: canceled.signal },
+    )
+
+    expect(concurrentLanding).toBe(true)
+    expect(await git(remote, ["rev-parse", "main"])).toBe(featureSha)
+    expect(outcome).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "merge-canceled" } })
+  })
+
+  it("reconciles a native root push that landed despite its process reporting failure", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const remote = join(repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "issue/feature"])
+    await using process = createProcess()
+    let landedSha: string | undefined
+    const postPushFailure: Pick<Process, "run"> = {
+      async run(request) {
+        const result = await process.run(request)
+        const refspec = request.argv.find((argument) => argument.endsWith(":refs/heads/main"))
+        if (request.argv[0] !== "git" || request.argv[3] !== "push" || refspec === undefined) return result
+        landedSha = refspec.slice(0, refspec.indexOf(":"))
+        return { ...result, exitCode: 19, stderr: "transport lost the success acknowledgement" }
+      },
+    }
+    await using app = await checkedQueue(postPushFailure, repo, ["true"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(landedSha).toBeDefined()
+    expect(await git(remote, ["rev-parse", "main"])).toBe(landedSha)
+    expect(run, JSON.stringify(run, null, 2)).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+      integration: { commit: landedSha },
+    })
+  })
 
   it("reconciles the authoritative landing after a delegated merge reports a post-push failure", async () => {
     const { repo, feature: featureSha } = await repository("feature")

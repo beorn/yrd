@@ -372,6 +372,7 @@ async function createApp(
     id?: () => string
     log?: ReturnType<typeof createLogger>
     prepareCandidate?: CandidatePreparer
+    resolveBaseSha?: (base: string) => string | Promise<string>
   } = {},
 ) {
   const contest = contestAdapters(options.probe, options.baseResolutions, options.waitingEvaluator)
@@ -473,6 +474,7 @@ async function createApp(
     batch: options.batch ?? false,
     ...(options.requires === undefined ? {} : { requires: options.requires }),
     ...(options.prepareCandidate === undefined ? {} : { prepareCandidate: options.prepareCandidate }),
+    ...(options.resolveBaseSha === undefined ? {} : { resolveBaseSha: options.resolveBaseSha }),
   })
   const contests = withContests({ runners: [contest.runner], evaluators: [contest.evaluator], git: contest.git })
   const base = pipe(
@@ -2171,6 +2173,67 @@ describe("runYrd", () => {
       expect(app.bays.pr("PR1")?.revs).toHaveLength(1)
     },
   )
+
+  it("names the exact authorized publication remedy when recut cannot refresh the branch", async () => {
+    const app = await createApp()
+    await app.bays.submit({
+      branch: PR1640_BRANCH,
+      headSha: PR1640_RECORDED_HEAD,
+      baseSha: BASE_SHA,
+      draft: true,
+    })
+    const requests: ProcessRequest[] = []
+    const process = {
+      async run(request: ProcessRequest): Promise<ProcessResult> {
+        requests.push(request)
+        return {
+          exitCode: 128,
+          signal: null,
+          stdout: "",
+          stderr: "fatal: could not read Username for 'https://github.com'",
+          durationMs: 6,
+          timedOut: false,
+          verdict: "EXITED",
+        }
+      },
+    }
+    const output = outputIO({ cwd: "/repo" })
+
+    expect(
+      await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--queue", "--json"), output.io, {
+        process,
+      } as YrdCliServices),
+    ).toBe(2)
+    expect(requests).toEqual([
+      expect.objectContaining({
+        argv: [
+          "git",
+          "-C",
+          "/repo",
+          "fetch",
+          "--quiet",
+          "--no-tags",
+          "origin",
+          `+refs/heads/${PR1640_BRANCH}:refs/remotes/origin/${PR1640_BRANCH}`,
+        ],
+      }),
+    ])
+    expect(JSON.parse(output.stderr())).toMatchObject({
+      failure: {
+        kind: "configuration",
+        code: "recut-branch-refresh-failed",
+        message:
+          `yrd: could not refresh live branch '${PR1640_BRANCH}' from origin: ` +
+          "fatal: could not read Username for 'https://github.com'\n" +
+          `remedy: request credential-bearing Yrd publication for branch '${PR1640_BRANCH}' on base 'main' ` +
+          `at base SHA '${BASE_SHA}' and recorded head '${PR1640_RECORDED_HEAD}':\n` +
+          "  yrd pr publish PR1 --queue\n" +
+          "This records a durable publication Job; without a runner it remains visible as publication-required.\n" +
+          "emergency operator fallback:\n" +
+          `  git -C '/repo' push origin '${PR1640_RECORDED_HEAD}:refs/heads/${PR1640_BRANCH}'\n`,
+      },
+    })
+  })
 
   it("refreshes a stale tracking ref before comparing the authored branch", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-recut-live-branch-"))
@@ -4835,6 +4898,97 @@ describe("runYrd", () => {
     expect(text).toContain("authored-gitlink")
   })
 
+  it("makes a same-head base refresh with zero runs actionable instead of reporting queue idle", async () => {
+    let currentBaseSha = BASE_SHA
+    const advancedBaseSha = "e".repeat(40)
+    await using app = await createApp({
+      resolveBaseSha: () => currentBaseSha,
+      prepareCandidate: (input) => {
+        if (input.prs.some((pr) => pr.id === "PR1")) {
+          throw createFailure({
+            kind: "refusal",
+            code: "carrier-drops-landed",
+            message: "carrier does not contain the queue base; recut and requeue the root carrier",
+          })
+        }
+        const { prs: _prs, ...candidate } = input
+        return {
+          ...candidate,
+          sha: MERGED_SHA,
+          ref: `refs/yrd/candidates/${input.id}`,
+          mergeability: "mergeable",
+        }
+      },
+    })
+    await app.bays.submit({ branch: "topic/base-chase", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
+    await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })
+    expect(Queues.ids(app.state().queues)).toEqual([])
+    expect(app.queue.eligibility("PR1")).toMatchObject({ reason: { code: "checks-pending" } })
+
+    currentBaseSha = advancedBaseSha
+    await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })
+    const revision = currentPRRev(app.bays.pr("PR1")!)
+    await app.queue.settleAdmissionRefusal({
+      pr: "PR1",
+      revision: revision.n,
+      headSha: revision.head,
+      disposition: "needs-person",
+      reason: "the carrier requires human judgment",
+    })
+    expect(app.bays.pr("PR1")?.checkRequests).toMatchObject([
+      { revision: 1, headSha: HEAD_SHA, baseSha: BASE_SHA },
+      { revision: 1, headSha: HEAD_SHA, baseSha: advancedBaseSha },
+    ])
+    expect(Queues.ids(app.state().queues)).toEqual([])
+
+    const once = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "--once"), once.io), once.stderr()).toBe(0)
+
+    expect(once.stdout()).not.toContain("Queue idle")
+    expect(once.stdout()).toContain("carrier-drops-landed")
+    expect(once.stdout()).toContain("yrd pr recut PR1 --preflight --queue")
+
+    const json = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), json.io), json.stderr()).toBe(0)
+    expect(JSON.parse(json.stdout())).toMatchObject({
+      command: "queue.run",
+      results: [],
+      blocked: [
+        {
+          pr: { id: "PR1" },
+          eligibility: {
+            reason: {
+              code: "admission-refused",
+              message: expect.stringContaining("yrd pr recut PR1 --preflight --queue"),
+            },
+          },
+        },
+      ],
+    })
+
+    await app.bays.submit({ branch: "topic/progresses", headSha: MERGED_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.requestChecks({ pr: "PR2", baseSha: BASE_SHA })
+
+    const targeted = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "PR2", "--json"), targeted.io), targeted.stderr()).toBe(0)
+    expect(JSON.parse(targeted.stdout())).toMatchObject({
+      command: "queue.run",
+      results: [{ prs: [{ id: "PR2" }] }],
+    })
+    expect(JSON.parse(targeted.stdout())).not.toHaveProperty("blocked")
+
+    await app.bays.submit({ branch: "topic/also-progresses", headSha: "c".repeat(40), base: "main", baseSha: BASE_SHA })
+    await app.bays.requestChecks({ pr: "PR3", baseSha: BASE_SHA })
+    const mixed = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), mixed.io), mixed.stderr()).toBe(0)
+    expect(JSON.parse(mixed.stdout())).toMatchObject({
+      command: "queue.run",
+      results: [{ prs: [{ id: "PR3" }] }],
+      blocked: [{ pr: { id: "PR1" }, eligibility: { reason: { code: "admission-refused" } } }],
+    })
+  })
+
   it("evaluates the no-landing clock at queue-audit invocation time", async () => {
     await using app = await createApp({
       prepareCandidate: () => {
@@ -5000,7 +5154,7 @@ describe("runYrd", () => {
 
     const integrated = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "--once", "--steps", "--json"), integrated.io)).toBe(0)
-    expect(JSON.parse(integrated.stdout())).toEqual({ command: "queue.run", results: [] })
+    expect(JSON.parse(integrated.stdout())).toEqual({ command: "queue.run", publications: [], results: [] })
     expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
 
     const idle = outputIO()
@@ -5020,7 +5174,7 @@ describe("runYrd", () => {
 
     const drained = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), drained.io)).toBe(0)
-    expect(JSON.parse(drained.stdout())).toEqual({ command: "queue.run", results: [] })
+    expect(JSON.parse(drained.stdout())).toEqual({ command: "queue.run", publications: [], results: [] })
   })
 
   it("persists and releases queue pauses through the operator CLI", async () => {
@@ -12338,5 +12492,90 @@ describe("yrd intent — declared pin advances (22668 phase 1)", () => {
       output.stderr(),
     ).toBe(0)
     expect(JSON.parse(output.stdout())).toMatchObject({ admission: { relation: "deferred" } })
+  })
+
+  it("records the rollback tombstone that future admission must honor", async () => {
+    await using app = await createApp()
+    const output = outputIO()
+
+    expect(
+      await runYrd(
+        app,
+        yrd(
+          "intent",
+          "tombstone",
+          "--component",
+          COMPONENT,
+          "--sha",
+          TARGET_SHA,
+          "--issue",
+          "one",
+          "--submitter",
+          "@operator",
+          "--reason",
+          "rolled back",
+          "--json",
+        ),
+        output.io,
+      ),
+      output.stderr(),
+    ).toBe(0)
+
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "intent.tombstone",
+      tombstone: { id: "T1", component: COMPONENT, sha: TARGET_SHA, reason: "rolled back" },
+    })
+    expect(app.intents.tombstones(COMPONENT)).toHaveLength(1)
+  })
+
+  it("requires --force to supersede another submitter's live intent", async () => {
+    await using app = await createApp()
+    const first = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd(
+          "intent",
+          "submit",
+          "--component",
+          COMPONENT,
+          "--target",
+          TARGET_SHA,
+          "--issue",
+          "one",
+          "--submitter",
+          "@dev/1",
+        ),
+        first.io,
+        { process: intentGit() },
+      ),
+    ).toBe(0)
+
+    const forced = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd(
+          "intent",
+          "submit",
+          "--component",
+          COMPONENT,
+          "--target",
+          CURRENT_PIN,
+          "--issue",
+          "one",
+          "--submitter",
+          "@dev/2",
+          "--force",
+          "--json",
+        ),
+        forced.io,
+        { process: intentGit() },
+      ),
+      forced.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(forced.stdout())).toMatchObject({
+      intent: { supersedeConsent: "forced", supersededIntent: "I1" },
+    })
   })
 })

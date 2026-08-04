@@ -52,5 +52,8 @@
     "@types/react": "^19.2.0",
     "typescript": "^6.0.3",
     "vitest": "4.1.9"
+  },
+  "overrides": {
+    "loggily": "github:beorn/loggily#d235700204414687adf6fc1449e73de10419656e"
   }
 }

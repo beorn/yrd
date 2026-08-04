@@ -85,6 +85,26 @@ describe("pin-intent admission (22668 phase 1)", () => {
     expect(verdict.relation).toBe("advance")
   })
 
+  it("refuses a target descended from a rollback tombstone", async () => {
+    const { repo, component } = await fixture()
+    const tombstoned = await publish(component, "regression")
+    const target = await publish(component, "later-work")
+
+    const verdict = await admitPinIntent({
+      process,
+      repo,
+      base: "main",
+      component: "components/alpha",
+      target,
+      tombstones: [{ sha: tombstoned }],
+    })
+
+    expect(verdict.admitted).toBe(false)
+    if (verdict.admitted) throw new Error("unreachable")
+    expect(verdict.code).toBe("intent-target-tombstoned")
+    expect(verdict.evidence).toMatchObject({ target, tombstone: tombstoned })
+  })
+
   it("admits a target already contained by the pin and calls it a noop", async () => {
     const { repo, component, basePin } = await fixture()
     const ahead = await publish(component, "two")

@@ -19,6 +19,7 @@ vi.mock("../src/implementation-source.ts", async (importOriginal) => ({
   sourceRepositoryFor: () => ({ root: "/mock/yrd" }),
   implementationSourceIdentity: async () => source.current,
   authoritativeImplementationSource: async () => source.authoritative,
+  implementationSourceCheckoutRelation: async () => ({ kind: "unprovable" }),
 }))
 
 import { createYrdHost } from "../src/host.ts"
