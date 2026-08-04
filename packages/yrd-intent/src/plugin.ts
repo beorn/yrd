@@ -15,6 +15,9 @@ import {
   IntentSubmitArgsSchema,
   IntentWithdrawArgsSchema,
   PIN_INTENT_SCHEMA,
+  PIN_TOMBSTONE_SCHEMA,
+  PinTombstoneArgsSchema,
+  PinTombstoneSchema,
   PinIntentSchema,
   TERMINAL_INTENT_STATUSES,
   intentFingerprint,
@@ -25,22 +28,26 @@ import {
   type Intents,
   type IntentsState,
   type PinIntent,
+  type PinTombstone,
+  type PinTombstoneArgs,
 } from "./types.ts"
 
 const AdmittedSchema = PinIntentSchema.omit({ submittedAt: true, status: true }).strict()
 const SupersededSchema = z.object({ intent: z.string(), by: z.string() }).strict()
 const WithdrawnSchema = z.object({ intent: z.string(), reason: z.string().trim().min(1).optional() }).strict()
+const TombstonedSchema = PinTombstoneSchema.omit({ recordedAt: true }).strict()
 
 type IntentState = Readonly<{ intents: IntentsState }>
 type IntentRuntimeState = DeepReadonly<IntentState>
 export type IntentCommands = Readonly<{
   intent: Readonly<{
     submit: ReturnType<typeof buildSubmitCommand>
+    tombstone: ReturnType<typeof buildTombstoneCommand>
     withdraw: ReturnType<typeof buildWithdrawCommand>
   }>
 }>
 
-const INITIAL_STATE: IntentsState = { records: {}, order: [] }
+const INITIAL_STATE: IntentsState = { records: {}, order: [], tombstoneRecords: {}, tombstoneOrder: [] }
 
 /**
  * PinIntentV1 records: "advance component X to S for issue I", declared instead
@@ -63,8 +70,9 @@ export function withIntents() {
         "intent/submitted": journalEvent(1, AdmittedSchema),
         "intent/superseded": journalEvent(1, SupersededSchema),
         "intent/withdrawn": journalEvent(1, WithdrawnSchema),
+        "intent/pin-tombstoned": journalEvent(1, TombstonedSchema),
       },
-      projectionVersion: "intents-v1",
+      projectionVersion: "intents-v2",
       project: projectIntents,
       create(yrd) {
         const state = (): IntentsState => (yrd.state() as unknown as IntentState).intents
@@ -78,6 +86,19 @@ export function withIntents() {
                 "infrastructure",
                 "intent-admission-lost",
                 `yrd: intent '${parsed.intentId}' was not admitted`,
+              )
+            }
+            return record
+          },
+          async tombstone(args) {
+            const parsed = PinTombstoneArgsSchema.parse(args)
+            await yrd.dispatch(commands.intent.tombstone, parsed)
+            const record = byTombstoneId(state(), parsed.tombstoneId)
+            if (record === undefined) {
+              raiseFailure(
+                "infrastructure",
+                "intent-tombstone-lost",
+                `yrd: pin tombstone '${parsed.tombstoneId}' was not recorded`,
               )
             }
             return record
@@ -97,6 +118,8 @@ export function withIntents() {
           live: (issue, component) => liveIntent(state(), issue, component),
           list: () => ordered(state()),
           queued: () => ordered(state()).filter((record) => !TERMINAL_INTENT_STATUSES.has(record.status)),
+          tombstones: (component) =>
+            orderedTombstones(state()).filter((record) => component === undefined || record.component === component),
         }
         return { intents } satisfies HasIntents
       },
@@ -104,7 +127,13 @@ export function withIntents() {
 }
 
 function createIntentCommands(): IntentCommands {
-  return { intent: { submit: buildSubmitCommand(), withdraw: buildWithdrawCommand() } }
+  return {
+    intent: {
+      submit: buildSubmitCommand(),
+      tombstone: buildTombstoneCommand(),
+      withdraw: buildWithdrawCommand(),
+    },
+  }
 }
 
 function buildSubmitCommand() {
@@ -132,6 +161,13 @@ function buildSubmitCommand() {
       // Supersession applies to the OPEN record only. A terminal record keeps
       // its disposition — a refusal and its remedy stay on the attention rail.
       const superseded = liveIntent(state.intents, args.issue, args.component)
+      if (superseded !== undefined && superseded.submitter !== args.submitter && args.forceSupersede !== true) {
+        raiseFailure(
+          "refusal",
+          "intent-supersede-consent-required",
+          `yrd: live intent '${superseded.id}' belongs to '${superseded.submitter}'; withdraw it or resubmit with explicit force`,
+        )
+      }
       if (superseded !== undefined) events.push(event("intent/superseded", { intent: superseded.id, by: id }))
       events.push(
         event("intent/submitted", {
@@ -147,9 +183,50 @@ function buildSubmitCommand() {
             ...(args.expectedCurrentPin === undefined ? {} : { expectedCurrentPin: args.expectedCurrentPin }),
           },
           submitter: args.submitter,
+          ...(superseded === undefined
+            ? {}
+            : {
+                supersededIntent: superseded.id,
+                supersedeConsent: superseded.submitter === args.submitter ? "same-submitter" : "forced",
+              }),
         }),
       )
       return { events }
+    },
+  })
+}
+
+function buildTombstoneCommand() {
+  return command({
+    title: "Record a rolled-back component pin",
+    visibility: "public",
+    params: PinTombstoneArgsSchema,
+    apply(state: IntentRuntimeState, args: PinTombstoneArgs) {
+      const existing = byTombstoneId(state.intents, args.tombstoneId)
+      if (existing !== undefined) {
+        if (tombstoneFingerprint(existing) !== tombstoneFingerprint(args)) {
+          raiseFailure(
+            "refusal",
+            "intent-tombstone-fingerprint-conflict",
+            `yrd: pin tombstone '${args.tombstoneId}' already exists with different terms`,
+          )
+        }
+        return { events: [] }
+      }
+      return {
+        events: [
+          event("intent/pin-tombstoned", {
+            schema: PIN_TOMBSTONE_SCHEMA,
+            id: nextTombstoneId(state.intents.tombstoneRecords),
+            tombstoneId: args.tombstoneId,
+            issue: args.issue,
+            component: args.component,
+            sha: args.sha,
+            submitter: args.submitter,
+            ...(args.reason === undefined ? {} : { reason: args.reason }),
+          }),
+        ],
+      }
     },
   })
 }
@@ -194,6 +271,8 @@ function projectIntents(state: DeepReadonly<IntentState>, applied: Event): Inten
       intents: {
         records: { ...(state.intents.records as Record<string, PinIntent>), [record.id]: record },
         order: [...state.intents.order, record.id],
+        tombstoneRecords: { ...(state.intents.tombstoneRecords as Record<string, PinTombstone>) },
+        tombstoneOrder: [...state.intents.tombstoneOrder],
       },
     }
   }
@@ -217,6 +296,24 @@ function projectIntents(state: DeepReadonly<IntentState>, applied: Event): Inten
       },
     })
   }
+  if (applied.name === "intent/pin-tombstoned") {
+    const tombstoned = TombstonedSchema.parse(applied.data)
+    if (state.intents.tombstoneRecords[tombstoned.id] !== undefined) {
+      throw new Error(`yrd: duplicate pin tombstone '${tombstoned.id}'`)
+    }
+    const record = PinTombstoneSchema.parse({ ...tombstoned, recordedAt: applied.ts })
+    return {
+      intents: {
+        records: { ...(state.intents.records as Record<string, PinIntent>) },
+        order: [...state.intents.order],
+        tombstoneRecords: {
+          ...(state.intents.tombstoneRecords as Record<string, PinTombstone>),
+          [record.id]: record,
+        },
+        tombstoneOrder: [...state.intents.tombstoneOrder, record.id],
+      },
+    }
+  }
   return state as IntentState
 }
 
@@ -225,8 +322,17 @@ function replaceIntent(state: DeepReadonly<IntentState>, record: PinIntent): Int
     intents: {
       records: { ...(state.intents.records as Record<string, PinIntent>), [record.id]: PinIntentSchema.parse(record) },
       order: [...state.intents.order],
+      tombstoneRecords: { ...(state.intents.tombstoneRecords as Record<string, PinTombstone>) },
+      tombstoneOrder: [...state.intents.tombstoneOrder],
     },
   }
+}
+
+function orderedTombstones(state: IntentsState): readonly PinTombstone[] {
+  return state.tombstoneOrder.flatMap((id) => {
+    const record = state.tombstoneRecords[id]
+    return record === undefined ? [] : [record]
+  })
 }
 
 function ordered(state: IntentsState): readonly PinIntent[] {
@@ -239,6 +345,16 @@ function ordered(state: IntentsState): readonly PinIntent[] {
 function byIntentId(state: DeepReadonly<IntentsState> | IntentsState, intentId: string): PinIntent | undefined {
   for (const record of Object.values(state.records)) {
     if (record.intentId === intentId) return record as PinIntent
+  }
+  return undefined
+}
+
+function byTombstoneId(
+  state: DeepReadonly<IntentsState> | IntentsState,
+  tombstoneId: string,
+): PinTombstone | undefined {
+  for (const record of Object.values(state.tombstoneRecords)) {
+    if (record.tombstoneId === tombstoneId) return record as PinTombstone
   }
   return undefined
 }
@@ -262,4 +378,26 @@ function nextIntentId(records: DeepReadonly<Record<string, PinIntent>> | Record<
     .filter((id) => /^I\d+$/u.test(id))
     .map((id) => Number(id.slice(1)))
   return `I${Math.max(0, ...values) + 1}`
+}
+
+function nextTombstoneId(
+  records: DeepReadonly<Record<string, PinTombstone>> | Record<string, PinTombstone>,
+): string {
+  const values = Object.keys(records)
+    .filter((id) => /^T\d+$/u.test(id))
+    .map((id) => Number(id.slice(1)))
+  return `T${Math.max(0, ...values) + 1}`
+}
+
+function tombstoneFingerprint(
+  input: Pick<PinTombstone, "issue" | "component" | "sha" | "submitter" | "reason"> | PinTombstoneArgs,
+): string {
+  return JSON.stringify([
+    input.issue.source,
+    input.issue.id,
+    input.component,
+    input.sha,
+    input.submitter,
+    input.reason ?? null,
+  ])
 }

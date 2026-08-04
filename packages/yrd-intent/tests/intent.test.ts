@@ -62,6 +62,7 @@ async function submit(
     issue?: string
     expectPin?: string
     submitter?: string
+    forceSupersede?: boolean
   },
 ) {
   const issue = await app.issues.resolve(app.issues.ref(options.issue ?? "@yrd/core/22668-admit-intents"))
@@ -72,6 +73,7 @@ async function submit(
     submitter: options.submitter ?? "@dev/8",
     ...(options.target === undefined ? {} : { target: options.target }),
     ...(options.expectPin === undefined ? {} : { expectedCurrentPin: options.expectPin }),
+    ...(options.forceSupersede === undefined ? {} : { forceSupersede: options.forceSupersede }),
   })
 }
 
@@ -136,6 +138,26 @@ describe("PinIntentV1 records (22668 phase 1, dark)", () => {
     expect(app.intents.get(first.id)?.supersededBy).toBe(second.id)
     expect(app.intents.get(second.id)?.status).toBe("open")
     expect(app.intents.live(first.issue, SILVERY)?.id).toBe(second.id)
+  })
+
+  it("requires explicit consent before another submitter supersedes a live intent", async () => {
+    await using app = await createApp()
+    const first = await submit(app, { intentId: uuid(1), target: TARGET, submitter: "@dev/1" })
+
+    expect(
+      await refusalCode(submit(app, { intentId: uuid(2), target: OTHER_TARGET, submitter: "@dev/2" })),
+    ).toBe("intent-supersede-consent-required")
+    expect(app.intents.get(first.id)?.status).toBe("open")
+
+    const replacement = await submit(app, {
+      intentId: uuid(2),
+      target: OTHER_TARGET,
+      submitter: "@dev/2",
+      forceSupersede: true,
+    })
+    expect(replacement.supersedeConsent).toBe("forced")
+    expect(replacement.supersededIntent).toBe(first.id)
+    expect(app.intents.get(first.id)?.status).toBe("superseded")
   })
 
   it("keys supersession by component, so a sibling component stays open", async () => {
@@ -254,5 +276,33 @@ describe("PinIntentV1 records (22668 phase 1, dark)", () => {
     ])
     expect(replayed.intents.queued().map((intent) => intent.id)).toEqual(["I3"])
     expect(replayed.intents.get("I2")?.supersededBy).toBe("I3")
+  })
+
+  it("journals and replays the pin tombstone that invalidates stale desired state", async () => {
+    const journal = createMemoryJournal()
+    {
+      await using app = await createApp(journal)
+      const issue = await app.issues.resolve(app.issues.ref("@yrd/rollback/bad-pin"))
+
+      const tombstone = await app.intents.tombstone({
+        tombstoneId: uuid(9),
+        issue: issue.ref,
+        component: SILVERY,
+        sha: TARGET,
+        submitter: "@operator",
+        reason: "rolled back after a production regression",
+      })
+
+      expect(tombstone).toMatchObject({
+        id: "T1",
+        component: SILVERY,
+        sha: TARGET,
+        submitter: "@operator",
+        reason: "rolled back after a production regression",
+      })
+    }
+
+    await using replayed = await createApp(journal)
+    expect(replayed.intents.tombstones(SILVERY)).toMatchObject([{ id: "T1", sha: TARGET }])
   })
 })
