@@ -50,6 +50,7 @@ describe("ensureWorkspaceDependencies", () => {
       ensureWorkspaceDependencies(process, {
         path: root,
         subject: "fixture workspace",
+        runPostinstall: true,
         fail(message): never {
           throw new Error(message)
         },

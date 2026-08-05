@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, rm, rmdir } from "node:fs/promises"
 import { hostname } from "node:os"
 import { join, relative, resolve, sep } from "node:path"
 import { clearLine, cursorTo } from "node:readline"
@@ -261,22 +261,42 @@ function configuredChecks(
     const parent = join(stateDir, "pre-submit-worktrees")
     mkdirSync(parent, { recursive: true })
     const checkout = await mkdtemp(join(parent, "check-"))
-    // Materialize-class limit: the repo's own post-checkout hook runs INSIDE
-    // this add (hh's branch-guard materializes submodules there), so the
-    // plumbing timeout must never govern it (22648).
+    const hooksPath = await mkdtemp(join(parent, "disabled-hooks-"))
+    // Candidate materialization is trusted Yrd plumbing. Repository hooks run
+    // in that process by default, so point this invocation at a fresh empty
+    // directory instead of exposing Yrd's ambient authority to hook code.
     const checkoutTimeoutMs = resolveCheckoutTimeoutMs(environment)
-    const add = await process.run({
-      argv: ["git", "-C", repo, "worktree", "add", "--detach", checkout, candidateSha],
-      cwd: repo,
-      env: inherited,
-      timeoutMs: checkoutTimeoutMs,
-    })
+    const add = await (async () => {
+      try {
+        return await process.run({
+          argv: [
+            "git",
+            "-c",
+            `core.hooksPath=${hooksPath}`,
+            "-C",
+            repo,
+            "worktree",
+            "add",
+            "--detach",
+            checkout,
+            candidateSha,
+          ],
+          cwd: repo,
+          env: inherited,
+          timeoutMs: checkoutTimeoutMs,
+        })
+      } finally {
+        // Non-recursive removal is also the assertion that Git left the
+        // quarantine empty.
+        await rmdir(hooksPath)
+      }
+    })()
     if (add.timedOut) {
       await rm(checkout, { recursive: true, force: true })
       raiseFailure(
         "infrastructure",
         "required-check-checkout-timeout",
-        `yrd: pre-submit checkout of '${candidateSha}' killed after ${Math.round(add.durationMs)}ms (limit ${checkoutTimeoutMs}ms) during 'git worktree add' — the repository's post-checkout hook (e.g. branch-guard submodule materialization) runs inside this operation; raise ${CHECKOUT_TIMEOUT_ENV} or retry under lower load`,
+        `yrd: pre-submit checkout of '${candidateSha}' killed after ${Math.round(add.durationMs)}ms (limit ${checkoutTimeoutMs}ms) during 'git worktree add'; raise ${CHECKOUT_TIMEOUT_ENV} or retry under lower load`,
       )
     }
     if (add.exitCode !== 0) {

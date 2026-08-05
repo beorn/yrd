@@ -2103,21 +2103,45 @@ checks: [{check: {run: "true"}}]
     }
   })
 
-  it("types a candidate-owned public API preflight refusal with its release bead (22600)", async () => {
-    const { repo } = await candidatePackageRepository({
-      postinstall: "bun scripts/verify-public-dependencies.ts",
-    })
+  it("does not execute checkout hooks or candidate postinstall in the trusted submit process", async () => {
+    const { repo } = await candidatePackageRepository()
+    const fakeCredential = "fixture-push-credential"
+    const postCheckoutMarker = join(repo, "..", "post-checkout-observation")
+    const postinstallMarker = join(repo, "..", "postinstall-observation")
+
+    await git(repo, "switch", "-q", "issue/feature")
+    const manifest = JSON.parse(await readFile(join(repo, "package.json"), "utf8")) as {
+      scripts: Record<string, string>
+    }
+    manifest.scripts.postinstall = "sh ./probe-postinstall.sh"
+    await writeFile(join(repo, "package.json"), `${JSON.stringify(manifest)}\n`)
+    await writeFile(
+      join(repo, "probe-postinstall.sh"),
+      `#!/bin/sh\nprintf '%s' "$YRD_TEST_PUSH_TOKEN" > ${JSON.stringify(postinstallMarker)}\n`,
+      { mode: 0o755 },
+    )
+    await git(repo, "add", "package.json", "probe-postinstall.sh")
+    await git(repo, "commit", "-qm", "add candidate execution probes")
+    await git(repo, "switch", "-q", "main")
+    await writeFile(
+      join(repo, ".git", "hooks", "post-checkout"),
+      `#!/bin/sh\nprintf '%s' "$YRD_TEST_PUSH_TOKEN" > ${JSON.stringify(postCheckoutMarker)}\n`,
+      { mode: 0o755 },
+    )
+
     const fixtureBin = await fixtureBun(
       repo,
-      ["mkdir -p node_modules", "exit 0"],
-      [
-        "printf '%s\\n' 'Yrd dependency provisioning refused: Yrd main consumes silvery.MarkdownView; Release: @km/infra/22627-silvery-0232-release.' >&2",
-        "exit 1",
-      ],
+      ["mkdir -p node_modules", ": > node_modules/.provisioned", "exit 0"],
+      ["sh ./probe-postinstall.sh", "exit 0"],
     )
     const previousPath = process.env.PATH
+    const previousCredential = process.env.YRD_TEST_PUSH_TOKEN
     process.env.PATH = `${fixtureBin}:${previousPath ?? ""}`
+    process.env.YRD_TEST_PUSH_TOKEN = fakeCredential
     try {
+      expect(existsSync(postCheckoutMarker)).toBe(false)
+      expect(existsSync(postinstallMarker)).toBe(false)
+
       let stdout = ""
       let stderr = ""
       const exitCode = await runYrdProcess(
@@ -2133,22 +2157,23 @@ checks: [{check: {run: "true"}}]
         },
       )
 
-      expect(exitCode).toBe(3)
-      expect(stdout).toBe("")
-      expect(JSON.parse(stderr)).toMatchObject({
-        failure: {
-          kind: "infrastructure",
-          code: "candidate-provision-failed",
-          message: expect.stringContaining(
-            "Yrd dependency provisioning refused: Yrd main consumes silvery.MarkdownView",
-          ),
-        },
+      expect(exitCode, stderr).toBe(0)
+      expect(JSON.parse(stdout)).toMatchObject({
+        command: "pr.submit",
+        prs: [{ branch: "issue/feature", status: "submitted" }],
       })
-      expect(stderr).toContain("@km/infra/22627-silvery-0232-release")
-      expect((await journalEnvelope(repo)).flatMap(({ values }) => values)).toEqual([])
+      expect({
+        postCheckoutObserved: existsSync(postCheckoutMarker) ? await readFile(postCheckoutMarker, "utf8") : undefined,
+        postinstallObserved: existsSync(postinstallMarker) ? await readFile(postinstallMarker, "utf8") : undefined,
+      }).toEqual({
+        postCheckoutObserved: undefined,
+        postinstallObserved: undefined,
+      })
     } finally {
       if (previousPath === undefined) delete process.env.PATH
       else process.env.PATH = previousPath
+      if (previousCredential === undefined) delete process.env.YRD_TEST_PUSH_TOKEN
+      else process.env.YRD_TEST_PUSH_TOKEN = previousCredential
     }
   })
 
@@ -4146,10 +4171,7 @@ describe("step environment declarations — deterministic check children (merge-
   })
 })
 
-describe("pre-submit checkout timeout (22648)", () => {
-  /** hh's branch-guard materializes submodules from the repo's post-checkout
-   * hook INSIDE `git worktree add` (measured 34.15s against a 30s kill); a
-   * sleeping hook is that cost, distilled. */
+describe("pre-submit checkout isolation and timeout policy (22648)", () => {
   async function slowCheckoutRepository(sleepSeconds: number): Promise<{ repo: string }> {
     const { repo } = await repository()
     await mkdir(join(repo, ".git", "hooks"), { recursive: true })
@@ -4177,45 +4199,10 @@ describe("pre-submit checkout timeout (22648)", () => {
     return { exitCode, stdout, stderr }
   }
 
-  it("types a checkout kill with limit, elapsed, phase, and remedy when the hook outlives the limit (22648)", async () => {
+  it("bypasses a checkout hook that would outlive the materialization limit", async () => {
     const { repo } = await slowCheckoutRepository(2.4)
     const previous = process.env.YRD_CHECKOUT_TIMEOUT_MS
     process.env.YRD_CHECKOUT_TIMEOUT_MS = "500"
-    try {
-      const { exitCode, stdout, stderr } = await submitFeature(repo)
-      expect(exitCode, stdout).toBe(3)
-      expect(stdout).toBe("")
-      const { failure } = JSON.parse(stderr) as {
-        failure: { kind: string; code: string; message: string }
-      }
-      expect(failure).toMatchObject({ kind: "infrastructure", code: "required-check-checkout-timeout" })
-      expect(failure.message).toContain("500ms")
-      expect(failure.message).toMatch(/after \d+ms/u)
-      expect(failure.message).toContain("post-checkout")
-      expect(failure.message).toContain("YRD_CHECKOUT_TIMEOUT_MS")
-      expect((await journalEnvelope(repo)).flatMap(({ values }) => values)).toEqual([])
-    } finally {
-      if (previous === undefined) delete process.env.YRD_CHECKOUT_TIMEOUT_MS
-      else process.env.YRD_CHECKOUT_TIMEOUT_MS = previous
-    }
-  })
-
-  it("defaults the materializing-checkout limit with real margin over hh's measured 34s cost (22648)", async () => {
-    const { GIT_MATERIALIZE_TIMEOUT_DEFAULT_MS, resolveCheckoutTimeoutMs } = await import("../src/git-timeouts.ts")
-    expect(GIT_MATERIALIZE_TIMEOUT_DEFAULT_MS).toBeGreaterThanOrEqual(90_000)
-    expect(resolveCheckoutTimeoutMs({})).toBe(GIT_MATERIALIZE_TIMEOUT_DEFAULT_MS)
-  })
-
-  it("refuses an invalid YRD_CHECKOUT_TIMEOUT_MS loudly instead of silently falling back (22648)", async () => {
-    const { resolveCheckoutTimeoutMs } = await import("../src/git-timeouts.ts")
-    expect(() => resolveCheckoutTimeoutMs({ YRD_CHECKOUT_TIMEOUT_MS: "soon" })).toThrow(/YRD_CHECKOUT_TIMEOUT_MS/u)
-    expect(() => resolveCheckoutTimeoutMs({ YRD_CHECKOUT_TIMEOUT_MS: "-5" })).toThrow(/YRD_CHECKOUT_TIMEOUT_MS/u)
-  })
-
-  it("lets a progressing post-checkout hook finish inside the limit (22648)", async () => {
-    const { repo } = await slowCheckoutRepository(1.2)
-    const previous = process.env.YRD_CHECKOUT_TIMEOUT_MS
-    process.env.YRD_CHECKOUT_TIMEOUT_MS = "20000"
     try {
       const { exitCode, stdout, stderr } = await submitFeature(repo)
       expect(exitCode, stderr).toBe(0)
@@ -4227,5 +4214,17 @@ describe("pre-submit checkout timeout (22648)", () => {
       if (previous === undefined) delete process.env.YRD_CHECKOUT_TIMEOUT_MS
       else process.env.YRD_CHECKOUT_TIMEOUT_MS = previous
     }
+  })
+
+  it("retains a conservative default for materializing the candidate tree", async () => {
+    const { GIT_MATERIALIZE_TIMEOUT_DEFAULT_MS, resolveCheckoutTimeoutMs } = await import("../src/git-timeouts.ts")
+    expect(GIT_MATERIALIZE_TIMEOUT_DEFAULT_MS).toBeGreaterThanOrEqual(90_000)
+    expect(resolveCheckoutTimeoutMs({})).toBe(GIT_MATERIALIZE_TIMEOUT_DEFAULT_MS)
+  })
+
+  it("refuses an invalid YRD_CHECKOUT_TIMEOUT_MS loudly instead of silently falling back (22648)", async () => {
+    const { resolveCheckoutTimeoutMs } = await import("../src/git-timeouts.ts")
+    expect(() => resolveCheckoutTimeoutMs({ YRD_CHECKOUT_TIMEOUT_MS: "soon" })).toThrow(/YRD_CHECKOUT_TIMEOUT_MS/u)
+    expect(() => resolveCheckoutTimeoutMs({ YRD_CHECKOUT_TIMEOUT_MS: "-5" })).toThrow(/YRD_CHECKOUT_TIMEOUT_MS/u)
   })
 })
