@@ -199,7 +199,7 @@ function validateConfig(config: ResolvedYrdProjectConfig): void {
 
 const MANAGED_PRE_SUBMIT_MARKER = "# managed-by-yrd: pre-submit-v1"
 
-function configuredChecks(
+export function configuredChecks(
   process: Pick<Process, "run">,
   stateDir: string,
   config: ResolvedYrdProjectConfig,
@@ -305,6 +305,51 @@ function configuredChecks(
         "infrastructure",
         "required-check-checkout-failed",
         add.stderr.trim() || `yrd: could not materialize required-check candidate '${candidateSha}'`,
+      )
+    }
+    // The hook quarantine above also silences the repository hook that used to
+    // populate submodules on checkout, so a submodule-backed workspace member
+    // would be missing and provisioning would fail with 'workspace:* failed to
+    // resolve'. Populate them here as trusted Yrd plumbing, under the same
+    // quarantine so submodule checkouts cannot run hook code either (22755).
+    const populateHooksPath = await mkdtemp(join(parent, "disabled-hooks-"))
+    const populate = await (async () => {
+      try {
+        return await process.run({
+          argv: [
+            "git",
+            "-c",
+            `core.hooksPath=${populateHooksPath}`,
+            "-C",
+            checkout,
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+          ],
+          cwd: checkout,
+          env: inherited,
+          timeoutMs: checkoutTimeoutMs,
+        })
+      } finally {
+        await rmdir(populateHooksPath)
+      }
+    })()
+    if (populate.timedOut) {
+      await rm(checkout, { recursive: true, force: true })
+      raiseFailure(
+        "infrastructure",
+        "required-check-checkout-timeout",
+        `yrd: pre-submit submodule population of '${candidateSha}' killed after ${Math.round(populate.durationMs)}ms (limit ${checkoutTimeoutMs}ms) during 'git submodule update'; raise ${CHECKOUT_TIMEOUT_ENV} or retry under lower load`,
+      )
+    }
+    if (populate.exitCode !== 0) {
+      await rm(checkout, { recursive: true, force: true })
+      raiseFailure(
+        "infrastructure",
+        "required-check-submodule-populate-failed",
+        populate.stderr.trim() ||
+          `yrd: could not populate submodules for required-check candidate '${candidateSha}' in ${checkout}`,
       )
     }
     try {

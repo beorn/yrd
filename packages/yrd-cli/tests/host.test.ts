@@ -20,6 +20,7 @@ import { createLogger, type ConditionalLogger } from "loggily"
 import * as z from "zod"
 import {
   CURRENT_JOURNAL_COMPATIBILITY,
+  configuredChecks,
   createDefaultYrdApp as createDefaultYrdAppRaw,
   createYrdHost as createYrdHostRaw,
   runYrdProcess,
@@ -719,6 +720,61 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(provisioned).toHaveLength(2)
     expect(run).toMatchObject({ status: "completed", conclusion: "success" })
     expect(new Set(provisioned)).toHaveLength(1)
+  })
+
+  it("populates submodules in the quarantined pre-submit checkout before provisioning (22755)", async () => {
+    const { repo, featureSha } = await candidatePackageRepository()
+
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["typecheck"],
+      requires: [],
+      definitions: { typecheck: { run: "bun run typecheck", runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["typecheck"] },
+    }
+    const calls: string[][] = []
+    await using runtimeProcess = createProcess({ cwd: repo })
+    const process = {
+      run(request: ProcessRequest): Promise<ProcessResult> {
+        calls.push([...request.argv])
+        if (request.argv.join(" ") !== "bun install --frozen-lockfile --ignore-scripts") {
+          return runtimeProcess.run(request)
+        }
+        return runtimeProcess.run({
+          ...request,
+          argv: ["sh", "-c", "mkdir -p node_modules && : > node_modules/.provisioned"],
+        })
+      },
+    }
+    const stateDir = join(repo, ".git", "yrd")
+    await mkdir(stateDir, { recursive: true })
+    const checks = configuredChecks(process, stateDir, config, { PATH: globalThis.process.env.PATH })
+
+    const result = await checks.run("typecheck", repo, { ref: featureSha })
+    expect(result.exitCode).toBe(0)
+
+    // The hook quarantine on 'git worktree add' (4a5419f) also silences the hook
+    // that populated submodules, so the checkout must populate them explicitly —
+    // as quarantined plumbing — or every submodule-backed workspace member is
+    // missing and provisioning fails with 'workspace:* failed to resolve'.
+    const addIndex = calls.findIndex((argv) => argv.includes("worktree") && argv.includes("add"))
+    expect(addIndex).toBeGreaterThanOrEqual(0)
+    const installIndex = calls.findIndex(
+      (argv) => argv.join(" ") === "bun install --frozen-lockfile --ignore-scripts",
+    )
+    expect(installIndex).toBeGreaterThan(addIndex)
+    const populateIndex = calls.findIndex(
+      (argv, index) =>
+        index > addIndex && index < installIndex && argv.includes("submodule") && argv.includes("update"),
+    )
+    expect(populateIndex, "no 'git submodule update' between checkout and provisioning").toBeGreaterThan(addIndex)
+    const populate = calls[populateIndex] ?? []
+    expect(populate).toEqual(expect.arrayContaining(["--init", "--recursive"]))
+    expect(
+      populate.some((argument) => argument.startsWith("core.hooksPath=")),
+      "submodule population must keep the hook quarantine",
+    ).toBe(true)
   })
 
   it.each([
