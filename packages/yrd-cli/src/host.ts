@@ -106,7 +106,13 @@ import { formatResidentLogLine, residentArtifactHome } from "./runner-timeline.t
 import { diagnostic } from "./output.tsx"
 import { createPrPublicationService } from "./pr-publication.ts"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
-import { residentRunnerLeaseHeld, runYrdHelp, runYrdProcessRuntime, yrdJsonOutputRequested } from "./run.ts"
+import {
+  residentRunnerLeaseHeld,
+  runYrdHelp,
+  runYrdProcessRuntime,
+  yrdJsonOutputRequested,
+  yrdQueueRunnerCheckRequested,
+} from "./run.ts"
 import { queueStepRevision, type ToolchainFingerprint } from "./host-revision.ts"
 import type {
   YrdCliApp,
@@ -1019,7 +1025,7 @@ function queueAdministration(
   repository: YrdRepository,
   defaultBase: string,
   deriveConfiguredSteps: () => Promise<readonly InstalledStep[]>,
-  runtimeSteps: () => readonly InstalledStep[],
+  runtimeSteps: (() => readonly InstalledStep[]) | undefined,
   implementationSource:
     | Readonly<{
         loaded: string
@@ -1050,7 +1056,7 @@ function queueAdministration(
         deriveConfiguredSteps(),
         implementationSource?.current(),
       ])
-      const runtime = runtimeSteps()
+      const runtime = runtimeSteps?.()
       const pinnedSource = current.find((step) => step.kind === "merge")?.implementationSource
       const sourceRelation =
         implementationSource === undefined || workingSource !== implementationSource.loaded
@@ -1073,7 +1079,7 @@ function queueAdministration(
       const baselineFindings = Object.values(baselines).flatMap((baseline) => {
         const configDrift = installedBaselineDrift(baseline, current)
         if (configDrift !== undefined) return [configDrift]
-        const runtimeDrift = runtimeBaselineDrift(baseline, runtime)
+        const runtimeDrift = runtime === undefined ? undefined : runtimeBaselineDrift(baseline, runtime)
         return runtimeDrift === undefined ? [] : [runtimeDrift]
       })
       const hasConfigDrift = baselineFindings.some((finding) => finding.code === "config-drift")
@@ -1396,6 +1402,51 @@ type YrdRuntimeHostOptions = YrdHostOptions &
 
 export async function createYrdHost(options: YrdHostOptions = {}): Promise<YrdHost> {
   return createYrdRuntimeHost(options, undefined, "active")
+}
+
+/**
+ * Build only the read-only queue audit needed by the resident health command.
+ * The audit reuses the canonical config/baseline comparison but deliberately
+ * has no app and no journal, so its cost cannot grow with delivery history.
+ */
+function runnerHealthProbeServices(options: YrdRuntimeHostOptions): YrdCliServices {
+  return Object.freeze({
+    queue: Object.freeze({
+      async auditEnvironment(): Promise<QueueAuditResult> {
+        const scope = createScope("yrd-runner-health")
+        const ownsLog = options.log === undefined
+        const log =
+          options.log ??
+          createYrdLogger(resolveYrdObservability({}, options.env ?? globalThis.process.env), (text) =>
+            globalThis.process.stderr.write(text),
+          )
+        const env = cleanGitEnvironment(options.env ?? globalThis.process.env)
+        const process = withGitIndexLockRetry(createProcess({ cwd: options.cwd, env, inject: { scope, log } }))
+        try {
+          const repository = await discoverYrdRepository({ cwd: options.cwd, env, process })
+          const loaded = await loadRepositoryConfig(repository, process, options.configPath)
+          const administration = queueAdministration(
+            process,
+            repository,
+            loaded.config.base,
+            () => reloadConfiguredStepDescriptors(repository, process, options.configPath),
+            undefined,
+            undefined,
+          )
+          if (administration.auditEnvironment === undefined) {
+            throw new Error("yrd: runner health audit is unavailable")
+          }
+          return await administration.auditEnvironment()
+        } finally {
+          try {
+            await closeRuntime(undefined, process, scope)
+          } finally {
+            if (ownsLog) log.end()
+          }
+        }
+      },
+    }),
+  })
 }
 
 function createViewerWorkspace(): BayWorkspace {
@@ -1730,9 +1781,10 @@ function defaultIO(): YrdCliIO {
 }
 
 /** Process entrypoint shared by yrd, git-yrd, and git-bay. */
-export async function runYrdProcess(
-  argv: readonly string[] = process.argv,
-  io: YrdCliIO = defaultIO(),
+async function runYrdProcessHost(
+  argv: readonly string[],
+  io: YrdCliIO,
+  terminateAfterCleanup: boolean,
 ): Promise<YrdCliExitCode> {
   const env = process.env
   const invocation = resolveInvocation(argv)
@@ -1786,6 +1838,7 @@ export async function runYrdProcess(
       }
     })())
   let removeShutdownSignals: () => void = () => undefined
+  let processExit: YrdCliExitCode | undefined
   try {
     const sourceBridge = takeImplementationSourceBridge(env)
     if (
@@ -1795,9 +1848,23 @@ export async function runYrdProcess(
     ) {
       throw new Error("yrd: process-host implementation source conflicts with launcher attestation")
     }
-    return await runYrdProcessRuntime(argv, io, {
+    const exitCode = await runYrdProcessRuntime(argv, io, {
       ambientCwd: io.cwd ?? globalThis.process.cwd(),
       env,
+      ...(yrdQueueRunnerCheckRequested(argv)
+        ? {
+            probe(context) {
+              return Promise.resolve({
+                services: runnerHealthProbeServices({
+                  cwd: context.repo,
+                  env,
+                  ...(context.configPath === undefined ? {} : { configPath: context.configPath }),
+                }),
+                io: { cwd: context.repo },
+              })
+            },
+          }
+        : {}),
       async load(context, posture) {
         const runner =
           posture === "resident-queue-run" || posture === "one-shot-queue-run" ? residentRunnerIdentity(env) : undefined
@@ -1913,9 +1980,12 @@ export async function runYrdProcess(
         }
       },
     })
+    processExit = exitCode
+    return exitCode
   } catch (error) {
     await diagnostic(io, error, { json: yrdJsonOutputRequested(argv) })
-    return classifyFailure(error).exitCode
+    processExit = classifyFailure(error).exitCode
+    return processExit
   } finally {
     try {
       await closeHost()
@@ -1927,8 +1997,29 @@ export async function runYrdProcess(
       // a breakdown that silently omits most of the command reads as coverage,
       // which is how a multi-second stage stayed invisible behind a `totalMs`
       // that described 2% of the work.
+      // Bun 1.3 can spin or fault while disposing an invocation's file-backed
+      // logger. The executable boundary already owns termination; the writer's
+      // process-exit hook flushes its buffer after host cleanup, preserving the
+      // classified code instead of losing it to a hang or SIGILL.
+      if (processExit !== undefined && terminateAfterCleanup) globalThis.process.exit(processExit)
       log?.child("perf").debug?.("command stage breakdown", stageReport())
       log?.end()
     }
   }
+}
+
+/** Process-host seam for embedded callers and focused tests. */
+export function runYrdProcess(
+  argv: readonly string[] = process.argv,
+  io: YrdCliIO = defaultIO(),
+): Promise<YrdCliExitCode> {
+  return runYrdProcessHost(argv, io, false)
+}
+
+/** Real executable boundary: fully close the host, then terminate even when a
+ * file-backed logger would otherwise retain or fault Bun resources. Kept out of
+ * the package index; only bin/yrd.ts owns process lifetime. */
+export async function runYrdExecutable(): Promise<never> {
+  const exitCode = await runYrdProcessHost(globalThis.process.argv, defaultIO(), true)
+  globalThis.process.exit(exitCode)
 }
