@@ -154,14 +154,20 @@ export async function ensureWorkspaceDependencies(
       })
     } catch (error) {
       options.fail(
-        `${options.subject} could not install its dependencies; ${argv.join(" ")} could not start: ${errorDetail(error)}`,
+        `${options.subject} could not install its dependencies in ${options.path}; ` +
+          `${argv.join(" ")} could not start: ${errorDetail(error)}`,
       )
     }
     const tail = decoder.decode()
     if (tail !== "") options.writeOutput?.(tail)
     if (childSucceeded(result)) return
+    // The DIRECTORY is the half of the diagnosis the tail never carries. An
+    // install failing on `@silvery/theme@workspace:*` says the workspace globs
+    // matched nothing; only the path says WHICH checkout was in that state, and
+    // it is right here in options. Without it an operator hunts through every
+    // Bay looking for the cold one (@yrd/submit-check-workspace-cannot-install).
     options.fail(
-      `${options.subject} could not install its dependencies; ` +
+      `${options.subject} could not install its dependencies in ${options.path}; ` +
         `${argv.join(" ")} ${childFailureReason(result)}\n${commandOutputTail(result)}`,
     )
   }

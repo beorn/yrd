@@ -776,6 +776,11 @@ printf '%s' "$$" > cwd-guest.pid
       // The tail is the diagnosis: without it the operator holds an orphaned
       // Bay and no reason.
       expect(stderr).toContain("lockfile had changes, but lockfile is frozen")
+      // …and WHERE it ran, which the tail alone never says. A submit that
+      // reports an unresolvable workspace without naming the directory sends
+      // the operator hunting through eight Bays for the one that was cold
+      // (@yrd/submit-check-workspace-cannot-install).
+      expect(stderr).toContain(await activeBayPath(fixture.repo, "B1"))
 
       // A child must never start in a Bay that could not be provisioned.
       const bayPath = await activeBayPath(fixture.repo, "B1")
