@@ -1427,6 +1427,40 @@ checks: [{check: {run: "true"}}]
     expect(await git(repo, "for-each-ref", "--format=%(refname)%09%(objectname)")).toBe(refsBefore)
   })
 
+  it("runs the literal supervisor probe without opening corrupt journal history", async () => {
+    const { repo } = await repository()
+    const stateDir = join(repo, ".git", "yrd")
+    await mkdir(stateDir, { recursive: true })
+    await writeFile(join(stateDir, "journal.sqlite"), "not a sqlite database")
+    let stdout = ""
+    let stderr = ""
+
+    expect(
+      await runYrdProcess(
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "queue", "list", "--check", "--json"],
+        {
+          cwd: repo,
+          stdout: (text) => {
+            stdout += text
+          },
+          stderr: (text) => {
+            stderr += text
+          },
+        },
+      ),
+      stderr,
+    ).toBe(1)
+    expect(JSON.parse(stdout)).toMatchObject({
+      schema: "hab-service-health/1",
+      service: "yrd-runner",
+      state: "absent",
+      running: false,
+      facts: { lease: "free" },
+    })
+    expect(stderr).not.toContain("sqlite")
+    expect(await readFile(join(stateDir, "journal.sqlite"), "utf8")).toBe("not a sqlite database")
+  })
+
   it("preserves every Yrd state byte while listing a populated PR journal", async () => {
     const { repo, featureSha } = await repository()
     await commitYrdConfig(

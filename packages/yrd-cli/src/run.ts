@@ -299,15 +299,15 @@ const RESIDENT_RECOVERY_SWEEP_MS = 60_000
 const RESIDENT_MAINTENANCE_INTERVAL_MS = 60_000
 
 /** Exit code when a hard signal cuts an unfinished drain short, leaving in-flight
- * work (D3). An operator-requested stop that FINISHES (drain complete) exits 0; a
- * signal-forced interruption exits non-zero so hab `restart=on-failure` resumes
- * draining instead of leaving the queue's live work stranded. */
+ * work (D3). An operator-requested stop that FINISHES (drain complete) exits 0;
+ * a signal-forced interruption exits non-zero so the resident breaker records
+ * the failure instead of mistaking interrupted work for a clean lifetime. */
 const RESIDENT_INTERRUPTED_EXIT: YrdCliExitCode = 3
 /** A resident that restarts itself out of presumptive poisoned-observer state
  * (22474 specimen 3) exits with the same UNCLEAN code as a signal-forced stop:
- * both mean "this runner stopped with queue work outstanding — start another
- * one", which is exactly what `restart: on-failure` does. The distinguishing
- * evidence is the loud `resident-refusal-stall-restart` record, not the code. */
+ * both mean "this runner stopped with queue work outstanding" and must count
+ * against the resident breaker. The distinguishing evidence is the loud
+ * `resident-refusal-stall-restart` record, not the code. */
 const RESIDENT_POISONED_EXIT: YrdCliExitCode = RESIDENT_INTERRUPTED_EXIT
 
 function residentRunnerStatusPath(cwd: string, stateDir?: string): string | undefined {
@@ -1265,6 +1265,8 @@ type RuntimeInvocationIO = YrdCliIO & {
 type RuntimeBootstrap = Readonly<{
   ambientCwd: string
   env: NodeJS.ProcessEnv
+  /** Lightweight supervisor probe; must not instantiate or replay the Yrd app journal. */
+  probe?(context: YrdContext): Promise<Readonly<{ services: YrdCliServices; io?: Partial<YrdCliIO> }>>
   load(
     context: YrdContext,
     posture: RuntimePosture,
@@ -1749,6 +1751,14 @@ function errorDetail(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/** A resident's first signal is a graceful drain: stop admitting work but let
+ * the current child finish. A second signal closes the host and its Process,
+ * which remains the hard-interrupt path. One-shot commands still forward their
+ * drain signal directly to children. */
+function childInterruptionSignal(io: YrdCliIO): AbortSignal | undefined {
+  return io.runner?.startsWith("yrd-cli:") === true ? undefined : io.drainSignal
+}
+
 async function orphanRunBay(app: YrdCliApp, bay: Bay, reason: string, result?: ProcessResult): Promise<void> {
   await app.bays.orphan({
     bay: bay.id,
@@ -1820,7 +1830,7 @@ async function ensureBayDependencies(
     subject: `bay '${bay.id}'`,
     manifestSubject: "bay",
     ...(env === undefined ? {} : { env }),
-    ...(io.drainSignal === undefined ? {} : { signal: io.drainSignal }),
+    ...(childInterruptionSignal(io) === undefined ? {} : { signal: childInterruptionSignal(io) }),
     onCommand: (argv) => io.stderr(`yrd: bay '${bay.id}' provisioning: ${argv.join(" ")}\n`),
     writeOutput: io.stderr,
     fail: refusal,
@@ -1862,7 +1872,7 @@ async function convergeBayOntoBase(
       cwd: path,
       env: gitEnv,
       timeoutMs: BAY_CONVERGE_TIMEOUT_MS,
-      ...(io.drainSignal === undefined ? {} : { signal: io.drainSignal }),
+      ...(childInterruptionSignal(io) === undefined ? {} : { signal: childInterruptionSignal(io) }),
     })
   const head = async (): Promise<string> => {
     const result = await git(["rev-parse", "HEAD"])
@@ -1917,7 +1927,7 @@ async function runBayChild(
       ...(options.ownedPath === true ? { ownedPath: bay.path } : {}),
       ...(options.env === undefined ? {} : { env: options.env }),
       ...(options.onStart === undefined ? {} : { onStart: options.onStart }),
-      ...(io.drainSignal === undefined ? {} : { signal: io.drainSignal }),
+      ...(childInterruptionSignal(io) === undefined ? {} : { signal: childInterruptionSignal(io) }),
       ...(output === undefined ? { interactive: true } : { inheritStdin: true, onOutput: output.write }),
     })
   } finally {
@@ -4506,6 +4516,20 @@ function runtimePosture(
   }
   if (action.name() !== "run" || action.parent?.name() !== "queue") return "active"
   return queueRunIsFollow(action) ? "resident-queue-run" : "one-shot-queue-run"
+}
+
+function isQueueRunnerCheckAction(
+  action: Readonly<{
+    name(): string
+    parent?: Readonly<{ name(): string }> | null
+    opts(): unknown
+  }>,
+): boolean {
+  return (
+    action.parent?.name() === "queue" &&
+    (action.name() === "list" || action.name() === "_list") &&
+    (action.opts() as Readonly<{ check?: boolean }>).check === true
+  )
 }
 
 type RuntimeGlobalOptions = Readonly<{
@@ -7292,8 +7316,8 @@ export async function followQueueRuns(
       // one-shot has no next cycle to break out of.
       const health = residentRefusalHealth(app, stall, runs.length, selectors.length === 0)
       stall = health.stall
-      // Exit UNCLEAN so `restart: on-failure` re-execs a fresh process with
-      // fresh observation state — mechanically the SIGINT + `yrd queue run` an
+      // Exit UNCLEAN so the derived resident lifetime re-execs a fresh process
+      // with fresh observation state — mechanically the SIGINT + `yrd queue run` an
       // operator performed by hand, minus the 2.5h wait. The heartbeat's
       // close(cleanShutdown=false) in the finally releases the lease.
       if (health.restart) return RESIDENT_POISONED_EXIT
@@ -7306,9 +7330,9 @@ export async function followQueueRuns(
         }
         // The drain has NOT finished (a run is still in flight), yet a hard signal
         // is forcing the stop now. That is "exiting with in-flight work due to a
-        // signal": stay unclean and exit non-zero so hab restart=on-failure resumes
-        // draining. A single drain signal (no scope abort) still loops below and
-        // finishes the drain cleanly.
+        // signal": stay unclean and exit non-zero so the resident breaker records
+        // the failed lifetime. A single drain signal (no scope abort) still loops
+        // below and finishes the drain cleanly.
         if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
         await scope.sleep(interval)
         continue
@@ -7974,6 +7998,13 @@ function buildProgram(
       const posture = runtimePosture(action)
       const runtimeIO = io as RuntimeInvocationIO
       const selected = resolveRuntimeContext(globals, bootstrap)
+      if (isQueueRunnerCheckAction(action) && bootstrap.probe !== undefined) {
+        const probed = await bootstrap.probe(selected)
+        runtimeServices = probed.services
+        runtimeIO[RuntimeInvocationCwd] = bootstrap.ambientCwd
+        Object.assign(io, probed.io)
+        return
+      }
       // `queue run` resident detection now derives from the run MODE (Tip B):
       // follow is the default, `--once` opts out, and the deprecated `--watch`
       // alias still selects follow (queueRunIsFollow mirrors resolveQueueRunMode
@@ -8163,7 +8194,7 @@ function buildProgram(
   const listQueue = async (filters: string[], options: QueueListOptions): Promise<void> => {
     if (options.check === true) {
       if (options.watch === true || filters.length > 0) usage("queue list --check does not accept --watch or filters")
-      setExit(await checkQueueRunner(installed(), installedServices(), options, io))
+      setExit(await checkQueueRunner(runtimeApp, installedServices(), options, io))
       return
     }
     if (options.watch === true) {
@@ -8878,6 +8909,12 @@ function queueRunnerCheckRequested(args: readonly string[]): boolean {
   const tail = args.slice(queueIndex + 1)
   const options = tail[0] === "list" ? tail.slice(1) : tail
   return options.includes("--check") && options.every((argument) => argument === "--check" || argument === "--json")
+}
+
+/** Recognize the one process invocation allowed to bypass app/journal bootstrap. */
+export function yrdQueueRunnerCheckRequested(argv: readonly string[]): boolean {
+  const invocation = resolveInvocation(argv)
+  return queueRunnerCheckRequested(canonicalizeYrdCommandAliases(invocation.args, invocation.projection))
 }
 
 /** Render command metadata without creating a repository-backed runtime. */

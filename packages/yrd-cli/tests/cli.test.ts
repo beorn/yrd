@@ -2566,7 +2566,7 @@ describe("runYrd", () => {
     }).io
 
     await expect(runInternals.followQueueRuns(app, [], { json: true, interval: 1 }, io, gate, services)).resolves.toBe(
-      0,
+      3,
     )
     expect(gate).toHaveBeenCalledTimes(2)
     const refreshed = app.bays.pr("PR1")!
@@ -2637,7 +2637,7 @@ describe("runYrd", () => {
     }).io
 
     try {
-      await expect(runInternals.followQueueRuns(viewer, [], { json: true, interval: 1 }, io, gate)).resolves.toBe(0)
+      await expect(runInternals.followQueueRuns(viewer, [], { json: true, interval: 1 }, io, gate)).resolves.toBe(3)
       expect(sleeps).toEqual([1_000, 1_000])
       expect(gate, "new durable work must re-open the installed-baseline gate").toHaveBeenCalledTimes(2)
       expect(queueRun, "new durable work must wake the queue compose path").toHaveBeenCalledTimes(2)
@@ -6145,6 +6145,26 @@ describe("runYrd", () => {
         running: true,
         error: { code: "runner-health-failed", cause: "no event definition for 'bay/handoff-certified'" },
         facts: { lease: "held" },
+      })
+
+      const historyIndependent = outputIO({ cwd: repo })
+      const loadHistory = vi.fn(async () => {
+        throw new Error("journal history must not be loaded by the supervisor probe")
+      })
+      expect(
+        await runInternals.runYrdProcessRuntime(yrd("queue", "list", "--check", "--json"), historyIndependent.io, {
+          ambientCwd: repo,
+          env: process.env,
+          load: loadHistory,
+          probe: async () => ({ services }),
+        }),
+      ).toBe(0)
+      expect(loadHistory).not.toHaveBeenCalled()
+      expect(JSON.parse(historyIndependent.stdout())).toMatchObject({
+        schema: "hab-service-health/1",
+        state: "healthy",
+        running: true,
+        facts: { lease: "held", runnerStatus: "fresh" },
       })
 
       writeFileSync(
@@ -10064,7 +10084,7 @@ describe("runYrd", () => {
         },
       },
     })
-    expect(await runYrd(app, yrd("queue", "run", "--interval", "1"), watch.io)).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--interval", "1"), watch.io)).toBe(3)
     expect(watch.stdout()).toBe("")
     expect(sleeps).toEqual([1_000])
   })
@@ -10093,7 +10113,7 @@ describe("runYrd", () => {
           },
         },
       })
-      expect(await runYrd(app, yrd("queue", "run", "--interval", "1"), human.io), human.stderr()).toBe(0)
+      expect(await runYrd(app, yrd("queue", "run", "--interval", "1"), human.io), human.stderr()).toBe(3)
       expect(human.stdout()).toBe(presence)
       expect(sleeps).toEqual([1_000, 1_000])
 
@@ -10106,7 +10126,7 @@ describe("runYrd", () => {
           sleep: async () => jsonController.abort(),
         },
       })
-      expect(await runYrd(app, yrd("queue", "run", "--interval", "1", "--json"), json.io), json.stderr()).toBe(0)
+      expect(await runYrd(app, yrd("queue", "run", "--interval", "1", "--json"), json.io), json.stderr()).toBe(3)
       expect(json.stdout()).toBe("")
     } finally {
       rmSync(repo, { recursive: true, force: true })
@@ -10157,7 +10177,7 @@ describe("runYrd", () => {
       expect(
         await runYrd(await readyApp(), yrd("queue", "run", "--interval", "1"), automaticHuman.io),
         automaticHuman.stderr(),
-      ).toBe(0)
+      ).toBe(3)
       expect(automaticHuman.stdout()).toBe(presence)
 
       // Follow --json streams one run record per drained run, tagged
@@ -10166,7 +10186,7 @@ describe("runYrd", () => {
       expect(
         await runYrd(await readyApp(), yrd("queue", "run", "--interval", "1", "--json"), automaticJson.io),
         automaticJson.stderr(),
-      ).toBe(0)
+      ).toBe(3)
       expect(automaticJson.stdout().trim().split("\n")).toHaveLength(1)
       expect(JSON.parse(automaticJson.stdout())).toMatchObject({ command: "queue.run", mode: "follow" })
       expect(automaticJson.stdout()).not.toContain("Queue runner ")
@@ -10203,7 +10223,7 @@ describe("queue run — follow-by-default mode selection (#62)", () => {
     await openAndSubmit(app)
     const tracked = trackedScope()
     const run = outputIO({ scope: tracked.scope })
-    expect(await runYrd(app, yrd("queue", "run", "--interval", "1"), run.io), run.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--interval", "1"), run.io), run.stderr()).toBe(3)
     // Followed: the loop slept (and was aborted) rather than exiting one-shot.
     expect(tracked.sleeps).toEqual([1_000])
   })
@@ -10213,7 +10233,7 @@ describe("queue run — follow-by-default mode selection (#62)", () => {
     await openAndSubmit(app)
     const tracked = trackedScope()
     const run = outputIO({ scope: tracked.scope })
-    expect(await runYrd(app, yrd("queue", "run", "--follow", "--interval", "1"), run.io), run.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--follow", "--interval", "1"), run.io), run.stderr()).toBe(3)
     expect(tracked.sleeps).toEqual([1_000])
   })
 
@@ -10249,7 +10269,7 @@ describe("queue run — follow-by-default mode selection (#62)", () => {
     await openAndSubmit(app)
     const tracked = trackedScope()
     const run = outputIO({ scope: tracked.scope })
-    expect(await runYrd(app, yrd("queue", "run", "--watch", "--interval", "1"), run.io), run.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--watch", "--interval", "1"), run.io), run.stderr()).toBe(3)
     expect(tracked.sleeps).toEqual([1_000])
   })
 
@@ -11573,7 +11593,7 @@ describe("queue run — follow-runner output is loggily/JSON only (#undead runne
     const app = await createApp()
     await openAndSubmit(app)
     const runHuman = outputIO({ scope: onePassScope() })
-    expect(await runYrd(app, yrd("queue", "run"), runHuman.io), runHuman.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run"), runHuman.io), runHuman.stderr()).toBe(3)
     expect(runHuman.stdout()).not.toContain("STATE")
     expect(runHuman.stdout()).not.toContain("STEPS")
   })
@@ -11582,7 +11602,7 @@ describe("queue run — follow-runner output is loggily/JSON only (#undead runne
     const app = await createApp()
     await openAndSubmit(app)
     const runJson = outputIO({ scope: onePassScope() })
-    expect(await runYrd(app, yrd("queue", "run", "--json"), runJson.io), runJson.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--json"), runJson.io), runJson.stderr()).toBe(3)
     expect(runJson.stdout()).toContain("queue.run")
   })
 })
