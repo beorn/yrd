@@ -1115,8 +1115,9 @@ Local pre-merge checks and held-out evaluators use detached scratch worktrees
 under the configured bays root. Before a built-in or inline check runs, Yrd
 provisions that worktree from the Candidate's committed Bun, pnpm, or npm
 lockfile instead of borrowing mutable host packages. Frozen installs disable
-third-party lifecycle scripts; the repository's own `postinstall` may then run
-for first-party code generation. A missing lockfile or failed install is a
+all lifecycle scripts, including a Candidate's `postinstall`. Owner-controlled
+Work Bays may opt into the repository's `postinstall` for first-party code
+generation. A missing lockfile or failed install is a
 retryable `queue-environment-refused` with `candidate-provision-failed`
 evidence, never a false failed-check verdict. Work Bays use the same
 provisioner. Local execution is not a security sandbox: candidate code still

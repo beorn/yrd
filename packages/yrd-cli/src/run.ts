@@ -1829,6 +1829,7 @@ async function ensureBayDependencies(
     path,
     subject: `bay '${bay.id}'`,
     manifestSubject: "bay",
+    runPostinstall: true,
     ...(env === undefined ? {} : { env }),
     ...(childInterruptionSignal(io) === undefined ? {} : { signal: childInterruptionSignal(io) }),
     onCommand: (argv) => io.stderr(`yrd: bay '${bay.id}' provisioning: ${argv.join(" ")}\n`),

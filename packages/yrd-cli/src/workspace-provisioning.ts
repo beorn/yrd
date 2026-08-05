@@ -28,6 +28,7 @@ type WorkspaceDependencyOptions = Readonly<{
   path: string
   subject: string
   manifestSubject?: string
+  runPostinstall?: boolean
   env?: NodeJS.ProcessEnv
   signal?: AbortSignal
   onCommand?: (argv: readonly string[]) => void
@@ -98,8 +99,8 @@ function commandOutputTail(result: ProcessResult, limit = 600): string {
  *
  * Git worktrees carry tracked files but no ignored dependency tree. The
  * repository's committed lockfile selects the package manager; Yrd never
- * guesses. Third-party lifecycle scripts stay disabled, while the repository's
- * own postinstall may run because it is first-party code generation.
+ * guesses. Lifecycle scripts stay disabled unless an owner-controlled caller
+ * explicitly opts into the repository's postinstall.
  */
 export async function ensureWorkspaceDependencies(
   processService: Pick<Process, "run">,
@@ -166,7 +167,7 @@ export async function ensureWorkspaceDependencies(
   }
 
   await provision([chosen.manager, ...chosen.install])
-  if (manifest.hasPostinstall) {
+  if (manifest.hasPostinstall && options.runPostinstall === true) {
     await provision([chosen.manager, "run", "postinstall"])
   }
   try {
