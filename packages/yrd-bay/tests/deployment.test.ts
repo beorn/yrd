@@ -157,6 +157,30 @@ describe("createGitDeploymentStore", () => {
     await store.release(second)
   })
 
+  it("models rollback as a fresh deployment of an older SHA", async () => {
+    const { root, repo, sha: olderSha } = await repository()
+    await writeFile(join(repo, "README.md"), "newer\n")
+    await git(repo, "add", "README.md")
+    await git(repo, "commit", "-qm", "newer")
+    const newerSha = await git(repo, "rev-parse", "HEAD")
+    await using process = createProcess()
+    const store = await createGitDeploymentStore({ repo, deploymentsRoot: join(root, "deployments"), process })
+
+    const current = await store.materialize({ deploymentId: "D-current", generation: "G1", sha: newerSha, pin: "tip" })
+    const rollback = await store.materialize({
+      deploymentId: "D-rollback",
+      generation: "G2",
+      sha: olderSha,
+      pin: "tip",
+    })
+
+    expect(rollback.path).not.toBe(current.path)
+    expect(await git(rollback.path, "rev-parse", "HEAD")).toBe(olderSha)
+    expect(await readFile(join(rollback.path, "README.md"), "utf8")).toBe("root\n")
+    await store.release(current)
+    await store.release(rollback)
+  })
+
   it("records the exact recursive submodule closure", async () => {
     const { root, repo, sha, nestedSha } = await repository()
     await using process = createProcess()
