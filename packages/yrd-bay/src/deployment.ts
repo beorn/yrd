@@ -170,7 +170,7 @@ async function writeReceipt(path: string, content: string): Promise<"created" | 
 async function readReceipt(recordsRoot: string, deploymentId: string): Promise<DeploymentSourceReceipt | undefined> {
   const path = join(recordsRoot, `${deploymentId}.json`)
   if (!existsSync(path)) return undefined
-  return JSON.parse(await readFile(path, "utf8")) as DeploymentSourceReceipt
+  return DeploymentSourceReceiptSchema.parse(JSON.parse(await readFile(path, "utf8")))
 }
 
 async function submoduleClosure(

@@ -211,6 +211,20 @@ describe("createGitDeploymentStore", () => {
     await expect(store.release(receipt)).resolves.toEqual({ released: true, path: receipt.path })
   })
 
+  it("refuses cleanup when the durable deployment receipt is invalid", async () => {
+    const { root, repo, sha } = await repository()
+    await using process = createProcess()
+    const deploymentsRoot = join(root, "deployments")
+    const store = await createGitDeploymentStore({ repo, deploymentsRoot, process })
+    const receipt = await store.materialize({ deploymentId: "D1", generation: "G1", sha, pin: "tip" })
+    await writeFile(join(deploymentsRoot, "records", "D1.json"), JSON.stringify({ ...receipt, dirty: true }))
+
+    await expect(store.release(receipt)).rejects.toThrow()
+    expect(existsSync(receipt.path)).toBe(true)
+    await writeFile(join(deploymentsRoot, "records", "D1.json"), JSON.stringify(receipt))
+    await store.release(receipt)
+  })
+
   it("routes authorized release through a keyed Journal Job definition", async () => {
     const { root, repo, sha } = await repository()
     await using process = createProcess()
