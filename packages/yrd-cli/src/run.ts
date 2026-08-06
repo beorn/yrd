@@ -3632,6 +3632,45 @@ function submitRequiredCheckContexts(
   })
 }
 
+/**
+ * A submit into a repository that declares `landing: none` refuses HERE, before
+ * the required-check hook runs, because everything after this point is work
+ * spent on a candidate nothing will ever pick up.
+ *
+ * The gate is the declaration and only the declaration. Refusing on a missing
+ * runner instead was considered and rejected on evidence: a runner is routinely
+ * absent for a moment, and every fixture in this suite runs without one, so
+ * that predicate measures the fixture rather than the defect. The state of a
+ * queue that has never run cannot tell you whether it ever will.
+ */
+async function refuseSubmitWithoutLandingAuthority(
+  options: PrSelectionOptions,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode | undefined> {
+  const repo = io.cwd ?? process.cwd()
+  const { config } = await loadYrdConfig({ repo, defaultBase: options.base ?? options.queue ?? "main" })
+  if (config.landing !== "none") return undefined
+  // Both halves are load-bearing. WHICH repository, because a seat working
+  // across two of them reads this message with no other clue; and that no
+  // runner is coming, because "submit failed" invites a retry and a retry
+  // cannot help.
+  const message =
+    `'${repo}' declares no landing authority (.yrd.yml 'landing: none'), so its queue has no runner and ` +
+    "nothing will ever drain this submission; land the work through whatever authority that repository does " +
+    "have, or set 'landing: expected' once a runner exists"
+  if (jsonEnabled(options)) {
+    io.stderr(
+      stableJson({
+        command: "pr.submit",
+        repo,
+        failure: { kind: "refusal", code: "no-landing-authority", message },
+      }),
+    )
+    return 1
+  }
+  refusal(message)
+}
+
 async function applyPrSelectionVerb(
   app: YrdCliApp,
   services: YrdCliServices,
@@ -3641,6 +3680,8 @@ async function applyPrSelectionVerb(
   command: PrSelectionCommand,
 ): Promise<YrdCliExitCode> {
   if (command === "pr.submit") {
+    const unlandable = await refuseSubmitWithoutLandingAuthority(options, io)
+    if (unlandable !== undefined) return unlandable
     for (const context of submitRequiredCheckContexts(app, selectors, io)) {
       await runRequiredChecks(services, { ...io, cwd: context.cwd }, undefined, context.ref)
     }

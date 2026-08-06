@@ -1064,6 +1064,57 @@ describe("runYrd", () => {
     expect(JSON.parse(dashboard.stdout())).toMatchObject({ command: "dashboard" })
   })
 
+  it("refuses a submit into a repository that declares no landing authority", async () => {
+    // A repository whose queue will never be driven accepted two carriers on
+    // 2026-08-05, printed `submitted`, and passed their checks. They sat ready
+    // for an hour looking byte-identical to work that would land. The failure
+    // was knowable at the call and instead became a mystery an hour later.
+    //
+    // The discriminator has to be DECLARED, and that is not a preference. The
+    // repository in that incident had terminalAttempts=0 and earliestFactMs=null
+    // — it genuinely WAS a brand-new queue, indistinguishable in its own state
+    // from one whose runner is about to be armed. No predicate over queue
+    // history separates them, so `landing:` says out loud what cannot be
+    // inferred. Absent, it is "expected", which is why every other test here
+    // (and every repository that has never heard of the key) is unaffected.
+    const repo = mkdtempSync(join(tmpdir(), "yrd-landing-authority-"))
+    try {
+      const submitInto = async (yml: string | undefined) => {
+        if (yml === undefined) rmSync(join(repo, ".yrd.yml"), { force: true })
+        else writeFileSync(join(repo, ".yrd.yml"), yml)
+        const app = await createApp()
+        const output = outputIO({ cwd: repo, resolveRevision: async () => HEAD_SHA })
+        const code = await runYrd(app, yrd("pr", "submit", "topic/direct", "--base", "main", "--json"), output.io)
+        return { code, ...output }
+      }
+
+      const refused = await submitInto("landing: none\n")
+      expect(refused.code, refused.stderr()).toBe(1)
+      expect(refused.stdout()).toBe("")
+      // The message has to carry BOTH facts or it relocates the mystery instead
+      // of ending it: WHICH repository, and that nothing will ever pick this up.
+      expect(refused.stderr()).toContain(repo)
+      expect(refused.stderr()).toContain("no landing authority")
+      expect(JSON.parse(refused.stderr())).toMatchObject({
+        command: "pr.submit",
+        failure: { kind: "refusal", code: "no-landing-authority" },
+      })
+
+      // Declaring the authority explicitly is the ordinary case and unaffected.
+      const declared = await submitInto("landing: expected\n")
+      expect(declared.code, declared.stderr()).toBe(0)
+      expect(JSON.parse(declared.stdout())).toMatchObject({ command: "pr.submit" })
+
+      // Absent config is the state of every repository that predates this key,
+      // and of every other test in this file. It must remain a plain success.
+      const silent = await submitInto(undefined)
+      expect(silent.code, silent.stderr()).toBe(0)
+      expect(JSON.parse(silent.stdout())).toMatchObject({ command: "pr.submit" })
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
   it("22358: pr checkout provisions from the recorded head SHA, not the branch name", async () => {
     // Acceptance: bay a PR while the author still holds the branch. Branch-name checkout refuses;
     // detached HEAD at the revision head is the immutable candidate @ci needs to gate.

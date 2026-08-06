@@ -111,10 +111,26 @@ const ProgressSchema = z
   .strict()
   .default({})
 
+/**
+ * Whether anything in this repository is ever going to drain its queue.
+ *
+ * This cannot be inferred. A repository whose runner is about to be armed for
+ * the first time and one that will never have a runner have the SAME queue
+ * state: no runner, no drained run, no recorded facts. Absent this declaration,
+ * a submit into the second is byte-identical to a submit into the first, which
+ * is how two carriers came to sit `submitted` for an hour on 2026-08-05 in a
+ * repository whose queue had never once run.
+ *
+ * `expected` when absent — every repository that predates this key keeps
+ * behaving exactly as it did, and only a repository that says `none` refuses.
+ */
+const LandingSchema = z.enum(["expected", "none"]).optional()
+
 const ProjectFields = {
   base: TextSchema.optional(),
   batch: z.union([z.literal(false), z.number().int().min(0)]).optional(),
   checks: ChecksSchema,
+  landing: LandingSchema,
   requires: RequirementsSchema.optional(),
   contest: ContestSchema,
   progress: ProgressSchema,
@@ -128,6 +144,7 @@ export type YrdProjectConfig = Readonly<{
   base?: string
   batch?: false | number
   checks: readonly z.infer<typeof CheckEntrySchema>[]
+  landing?: "expected" | "none"
   requires?: readonly "review"[]
   contest: Readonly<z.infer<typeof ContestSchema>>
   progress: Readonly<z.infer<typeof ProgressSchema>>
@@ -140,6 +157,9 @@ export type ResolvedYrdProjectConfig = Readonly<{
   checks?: readonly string[]
   /** Internal Queue execution plan: configured checks plus built-in merge. */
   steps: readonly string[]
+  /** Declared, never inferred — see LandingSchema. `loadYrdConfig` always sets
+   * it; absent (hand-built configs) reads as "expected", same as an unset key. */
+  landing?: "expected" | "none"
   requires: readonly "review"[]
   definitions: Readonly<Record<string, YrdStepConfig>>
   contest: Readonly<{ concurrency: number; timeoutMs: number; evaluators: readonly string[] }>
@@ -166,11 +186,12 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
   }
   const parsed = ProjectSchema.safeParse(value ?? {})
   if (parsed.success) {
-    const { base, batch, checks, requires, contest, progress } = parsed.data
+    const { base, batch, checks, landing, requires, contest, progress } = parsed.data
     return {
       ...(base === undefined ? {} : { base }),
       ...(batch === undefined ? {} : { batch }),
       checks,
+      ...(landing === undefined ? {} : { landing }),
       ...(requires === undefined ? {} : { requires }),
       contest,
       progress,
@@ -305,6 +326,7 @@ export async function loadYrdConfig(options: {
       batch: parsed.batch ?? 1,
       checks,
       steps,
+      landing: parsed.landing ?? "expected",
       requires: parsed.requires ?? [],
       definitions: resolvedDefinitions,
       contest: {
