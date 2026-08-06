@@ -20,6 +20,7 @@ import { pathToFileURL } from "node:url"
 import { Database } from "bun:sqlite"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import { createLogger, type Event as LoggerEvent, type LogEvent } from "loggily"
+import { safeRemoveSync } from "removely"
 import {
   createBayJobDefs,
   currentPRRev,
@@ -1111,7 +1112,7 @@ describe("runYrd", () => {
       expect(silent.code, silent.stderr()).toBe(0)
       expect(JSON.parse(silent.stdout())).toMatchObject({ command: "pr.submit" })
     } finally {
-      rmSync(repo, { recursive: true, force: true })
+      safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
     }
   })
 
@@ -2348,7 +2349,7 @@ describe("runYrd", () => {
       expect(requests).toEqual([])
       expect(git(observer, "rev-parse", `origin/${branch}`)).toBe(liveHead)
     } finally {
-      rmSync(root, { recursive: true, force: true })
+      safeRemoveSync(root, { within: tmpdir(), allowMissing: true })
     }
   })
 
@@ -4608,7 +4609,7 @@ describe("runYrd", () => {
         ],
       })
     } finally {
-      rmSync(root, { recursive: true, force: true })
+      safeRemoveSync(root, { within: tmpdir(), allowMissing: true })
     }
   })
 
@@ -5196,7 +5197,7 @@ describe("runYrd", () => {
     const status = outputIO({ color: true })
     expect(await runYrd(app, yrd(), status.io)).toBe(0)
     expect(status.stdout()).toContain(pathToFileURL(artifact).href)
-    rmSync(temp, { recursive: true, force: true })
+    safeRemoveSync(temp, { within: tmpdir(), allowMissing: true })
   })
 
   it("preserves zero-selector and explicitly empty step selection semantics", async () => {
@@ -6083,7 +6084,7 @@ describe("runYrd", () => {
       expect(await runYrd(app, yrd("queue", "list"), absent.io), absent.stderr()).toBe(0)
       expect(absent.stdout()).toContain("NO RUNNER - no drained run in window")
     } finally {
-      rmSync(repo, { recursive: true, force: true })
+      safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
     }
   })
 
@@ -6271,7 +6272,7 @@ describe("runYrd", () => {
     } finally {
       lockRelease.resolve()
       await lock
-      rmSync(repo, { recursive: true, force: true })
+      safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
     }
   })
 
@@ -6328,7 +6329,7 @@ describe("runYrd", () => {
         runner: `yrd-cli:${process.pid}`,
       })
     } finally {
-      rmSync(repo, { recursive: true, force: true })
+      safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
     }
   })
 
@@ -6357,7 +6358,7 @@ describe("runYrd", () => {
         },
       })
     } finally {
-      rmSync(repo, { recursive: true, force: true })
+      safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
     }
   })
 
@@ -7229,7 +7230,7 @@ describe("runYrd", () => {
         "checking one\nchecking two\n",
       )
     } finally {
-      rmSync(artifactRoot, { recursive: true, force: true })
+      safeRemoveSync(artifactRoot, { within: tmpdir(), allowMissing: true })
     }
   })
 
@@ -7315,7 +7316,7 @@ describe("runYrd", () => {
         },
       ])
     } finally {
-      rmSync(artifactRoot, { recursive: true, force: true })
+      safeRemoveSync(artifactRoot, { within: tmpdir(), allowMissing: true })
     }
   })
 
@@ -7345,7 +7346,7 @@ describe("runYrd", () => {
         },
       ])
     } finally {
-      rmSync(artifactRoot, { recursive: true, force: true })
+      safeRemoveSync(artifactRoot, { within: tmpdir(), allowMissing: true })
     }
   })
 
@@ -8024,7 +8025,7 @@ describe("runYrd", () => {
     expect(records[0]?.results[0]?.finished[0]?.steps[0]?.job).toMatchObject({
       output: { artifacts: [{ name: "failure", path: artifact }] },
     })
-    rmSync(temp, { recursive: true, force: true })
+    safeRemoveSync(temp, { within: tmpdir(), allowMissing: true })
   })
 
   it("does not derive next-action teaching without typed eligibility facts", () => {
@@ -8321,7 +8322,7 @@ describe("runYrd", () => {
       Date.parse("2026-07-09T12:02:00.000Z"),
     ).recent[0]?.failure
     expect(failure?.evidence).toEqual({ text: causal, href: pathToFileURL(causal).href })
-    rmSync(temp, { recursive: true, force: true })
+    safeRemoveSync(temp, { within: tmpdir(), allowMissing: true })
   })
 
   it("spotlights the active run in bounded status output", async () => {
@@ -9106,7 +9107,7 @@ describe("runYrd", () => {
       duration: "2.0s",
     })
 
-    rmSync(temp, { recursive: true, force: true })
+    safeRemoveSync(temp, { within: tmpdir(), allowMissing: true })
   })
 
   it("fails loud when a legacy journal pointer cannot be read", async () => {
@@ -9120,7 +9121,7 @@ describe("runYrd", () => {
       expect(output.stdout()).toBe("")
       expect(output.stderr()).toMatch(/(?:EISDIR|illegal operation on a directory)/iu)
     } finally {
-      rmSync(temp, { recursive: true, force: true })
+      safeRemoveSync(temp, { within: tmpdir(), allowMissing: true })
     }
   })
 
@@ -9549,7 +9550,7 @@ describe("runYrd", () => {
     expect(visibleTty).not.toContain(stdout)
     expect(visibleTty).not.toContain(stderr)
 
-    rmSync(temp, { recursive: true, force: true })
+    safeRemoveSync(temp, { within: tmpdir(), allowMissing: true })
   })
 
   it("preserves the raw pinned-revision subject and immutable submitted-to-terminal age in machine history", () => {
@@ -10180,7 +10181,7 @@ describe("runYrd", () => {
       expect(await runYrd(app, yrd("queue", "run", "--interval", "1", "--json"), json.io), json.stderr()).toBe(3)
       expect(json.stdout()).toBe("")
     } finally {
-      rmSync(repo, { recursive: true, force: true })
+      safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
     }
   })
 
@@ -10242,7 +10243,7 @@ describe("runYrd", () => {
       expect(JSON.parse(automaticJson.stdout())).toMatchObject({ command: "queue.run", mode: "follow" })
       expect(automaticJson.stdout()).not.toContain("Queue runner ")
     } finally {
-      rmSync(repo, { recursive: true, force: true })
+      safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
     }
   })
 })
@@ -11556,7 +11557,7 @@ describe("journal version skew fail-loud", () => {
       expect(rewriteJournalRows(dir, poison)).toBeGreaterThan(0)
       await read(dir)
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      safeRemoveSync(dir, { within: tmpdir(), allowMissing: true })
     }
   }
 
@@ -11864,7 +11865,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     } finally {
       process.env.PATH = originalPath
       await app.close()
-      rmSync(repo, { recursive: true, force: true })
+      safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
     }
   })
 
@@ -12051,7 +12052,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       expect(replaced.results).not.toBe(reclocked.results)
     } finally {
       await app.close()
-      rmSync(root, { recursive: true, force: true })
+      safeRemoveSync(root, { within: tmpdir(), allowMissing: true })
     }
   })
 
@@ -12138,7 +12139,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       expect(snapshot.outputs).toBeUndefined()
     } finally {
       await app.close()
-      rmSync(artifactRoot, { recursive: true, force: true })
+      safeRemoveSync(artifactRoot, { within: tmpdir(), allowMissing: true })
     }
   })
 
@@ -12214,7 +12215,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       expect(snapshot.commands).toEqual({ check: "bun vitest run" })
     } finally {
       await app.close()
-      rmSync(repo, { recursive: true, force: true })
+      safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
     }
   })
 
