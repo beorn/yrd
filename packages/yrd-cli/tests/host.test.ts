@@ -374,6 +374,41 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     ])
   })
 
+  it("installs immutable deployment requests in the default Journal-backed host", async () => {
+    const { repo, featureSha } = await repository()
+    const journal = createMemoryJournal()
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      requires: [],
+      definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+    await using app = await createDefaultYrdApp({
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal,
+      process: runtimeProcess,
+      config,
+    })
+
+    const requested = await app.deployments?.materialize({
+      deploymentId: "D1",
+      generation: "@dev/1#generation-1.attempt-1",
+      sha: featureSha,
+      pin: "tip",
+    })
+
+    expect(requested).toBeDefined()
+    expect(app.jobs.getByKey("deployment:D1:materialize")).toMatchObject({
+      definition: "deployment.materialize",
+      status: "queued",
+    })
+  })
+
   it("lets a fresh repository's first writer create the journal at its own version", async () => {
     const { repo, featureSha } = await repository()
     const stateDir = join(repo, ".git", "yrd-no-reader-floor")
@@ -1654,6 +1689,7 @@ checks: [{check: {run: "true"}}]
       "log",
       "watch",
       "prime",
+      "deployment",
       "in",
       "sh",
       "run",

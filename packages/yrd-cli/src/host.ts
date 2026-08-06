@@ -7,6 +7,8 @@ import { clearLine, cursorTo } from "node:readline"
 import { createScope, type Scope } from "@silvery/scope"
 import {
   createBayJobDefs,
+  createDeploymentJobDefs,
+  createGitDeploymentStore,
   createGitPushReceiver,
   createGitWorktreeStore,
   createGitWorkspace,
@@ -14,7 +16,9 @@ import {
   loadGitPushReceiver,
   runReceiverHookFromEnvironment,
   withBays,
+  withDeployments,
   type BayWorkspace,
+  type GitDeploymentStore,
   type GitPushReceiver,
   type RemoteBranchSnapshot,
   type ReceiverReceipt,
@@ -938,6 +942,31 @@ async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions):
     workspace,
     createPrPublicationService({ repo: options.repo, process: options.process }),
   )
+  let deploymentStorePromise: ReturnType<typeof createGitDeploymentStore> | undefined
+  const deploymentStore = () => {
+    deploymentStorePromise ??= createGitDeploymentStore({
+      repo: options.repo,
+      deploymentsRoot: join(options.stateDir, "deployments"),
+      process: options.process,
+      prepare: (path) =>
+        ensureWorkspaceDependencies(options.process, {
+          path,
+          subject: "immutable deployment",
+          manifestSubject: "deployment",
+          runPostinstall: true,
+          fail(message) {
+            throw new Error(`yrd: ${message}`)
+          },
+        }),
+    })
+    return deploymentStorePromise
+  }
+  const lazyDeploymentStore: GitDeploymentStore = {
+    materialize: async (input) => (await deploymentStore()).materialize(input),
+    reap: async (input) => (await deploymentStore()).reap(input),
+    release: async (input) => (await deploymentStore()).release(input),
+  }
+  const deploymentJobs = createDeploymentJobDefs(lazyDeploymentStore)
   const queue = withQueue({
     steps: configuredQueueSteps(options, mergeCommand),
     batch: options.config.batch,
@@ -987,7 +1016,8 @@ async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions):
   })
   const base = pipe(
     createYrdDef(),
-    withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
+    withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs, deploymentJobs] }),
+    withDeployments({ jobs: deploymentJobs }),
     withIssues({
       sources: options.issueSources ?? [createKmIssueSource({ process: options.process, cwd: options.repo })],
     }),

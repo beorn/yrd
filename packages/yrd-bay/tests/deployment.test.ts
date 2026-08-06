@@ -200,6 +200,14 @@ describe("createGitDeploymentStore", () => {
       runner: "test",
       signal: new AbortController().signal,
     }
+    const habReleaseReceipt = {
+      schema: "hab-launch-release/2" as const,
+      generation: Number(receipt.generation.slice(1)),
+      writerId: receipt.generation,
+      proof: {
+        habitantSource: { path: receipt.path, sha: receipt.sha, verification: "verified" as const },
+      },
+    }
     const input = {
       deploymentId: receipt.deploymentId,
       generation: receipt.generation,
@@ -210,7 +218,7 @@ describe("createGitDeploymentStore", () => {
         generation: receipt.generation,
         path: receipt.path,
         sha: receipt.sha,
-        receipt: { schema: "hab-launch-release/2", generation: receipt.generation, path: receipt.path },
+        receipt: habReleaseReceipt,
       },
     }
 
@@ -219,6 +227,24 @@ describe("createGitDeploymentStore", () => {
     })
     await expect(
       release.execute({ ...input, authorization: { ...input.authorization, path: join(root, "wrong") } }, context),
+    ).resolves.toMatchObject({ status: "completed", conclusion: "failure" })
+    expect(existsSync(receipt.path)).toBe(true)
+    await expect(
+      release.execute(
+        {
+          ...input,
+          authorization: {
+            ...input.authorization,
+            receipt: {
+              ...habReleaseReceipt,
+              proof: {
+                habitantSource: { path: join(root, "wrong"), sha: receipt.sha, verification: "verified" },
+              },
+            },
+          },
+        },
+        context,
+      ),
     ).resolves.toMatchObject({ status: "completed", conclusion: "failure" })
     expect(existsSync(receipt.path)).toBe(true)
     await expect(release.execute(input, context)).resolves.toMatchObject({

@@ -55,12 +55,13 @@ export type GitDeploymentStoreOptions = Readonly<{
 
 const FULL_OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u
+const GenerationIdSchema = z.string().trim().min(1)
 
 const DeploymentPinSchema = z.enum(["tip", "last-green"])
-const DeploymentInputSchema = z
+export const DeploymentInputSchema = z
   .object({
     deploymentId: z.string().regex(SAFE_ID),
-    generation: z.string().regex(SAFE_ID),
+    generation: GenerationIdSchema,
     sha: z.string().regex(FULL_OBJECT_ID),
     pin: DeploymentPinSchema,
   })
@@ -68,7 +69,7 @@ const DeploymentInputSchema = z
 const DeploymentSubmoduleReceiptSchema = z
   .object({ path: z.string().min(1), sha: z.string().regex(FULL_OBJECT_ID) })
   .strict()
-const DeploymentSourceReceiptSchema = DeploymentInputSchema.extend({
+export const DeploymentSourceReceiptSchema = DeploymentInputSchema.extend({
   path: z.string().min(1),
   verification: z.literal("verified"),
   dirty: z.literal(false),
@@ -81,22 +82,56 @@ const ReleaseDeploymentInputSchema = DeploymentSourceReceiptSchema.pick({
   path: true,
   sha: true,
 }).strict()
-const ReleaseDeploymentJobInputSchema = ReleaseDeploymentInputSchema.extend({
-  authorization: z
-    .object({
-      kind: z.literal("hab-generation-release"),
-      generation: z.string().regex(SAFE_ID),
-      path: z.string().min(1),
-      sha: z.string().regex(FULL_OBJECT_ID),
-      receipt: JsonSchema,
-    })
-    .strict(),
-}).strict()
+const HabGenerationReleaseReceiptSchema = z
+  .object({
+    schema: z.literal("hab-launch-release/2"),
+    writerId: GenerationIdSchema,
+    proof: z
+      .object({
+        habitantSource: z
+          .object({
+            path: z.string().min(1),
+            sha: z.string().regex(FULL_OBJECT_ID),
+            verification: z.literal("verified"),
+          })
+          .catchall(JsonSchema),
+      })
+      .catchall(JsonSchema),
+  })
+  .catchall(JsonSchema)
+export const ReleaseDeploymentJobInputSchema: z.ZodType<ReleaseDeploymentJobInput> =
+  ReleaseDeploymentInputSchema.extend({
+    authorization: z
+      .object({
+        kind: z.literal("hab-generation-release"),
+        generation: GenerationIdSchema,
+        path: z.string().min(1),
+        sha: z.string().regex(FULL_OBJECT_ID),
+        receipt: HabGenerationReleaseReceiptSchema,
+      })
+      .strict(),
+  }).strict()
 const ReleasedDeploymentSchema = z.object({ released: z.literal(true), path: z.string().min(1) }).strict()
 const ReapedDeploymentSchema = z.object({ reaped: z.literal(true), path: z.string().min(1) }).strict()
 
-function validateId(kind: "deployment" | "generation", value: string): void {
+function validateId(kind: "deployment", value: string): void {
   if (!SAFE_ID.test(value)) throw new Error(`${kind} id '${value}' is not a safe path component`)
+}
+
+function assertHabReleaseAuthorization(input: ReleaseDeploymentJobInput): void {
+  const receipt = HabGenerationReleaseReceiptSchema.parse(input.authorization.receipt)
+  const source = receipt.proof.habitantSource
+  if (receipt.writerId !== input.authorization.generation) {
+    throw new Error(
+      `Hab release writer '${receipt.writerId}' does not authorize generation '${input.authorization.generation}'`,
+    )
+  }
+  if (resolve(source.path) !== resolve(input.authorization.path)) {
+    throw new Error(`Hab release path '${source.path}' does not authorize '${input.authorization.path}'`)
+  }
+  if (source.sha !== input.authorization.sha) {
+    throw new Error(`Hab release SHA '${source.sha}' does not authorize '${input.authorization.sha}'`)
+  }
 }
 
 async function syncDirectory(path: string): Promise<void> {
@@ -202,7 +237,6 @@ export async function createGitDeploymentStore(options: GitDeploymentStoreOption
   return Object.freeze({
     async materialize(input: MaterializeDeploymentInput): Promise<DeploymentSourceReceipt> {
       validateId("deployment", input.deploymentId)
-      validateId("generation", input.generation)
       if (!FULL_OBJECT_ID.test(input.sha)) throw new Error(`deployment SHA '${input.sha}' is not a full Git object id`)
       const path = join(rootsRoot, input.deploymentId)
       const existing = await readReceipt(recordsRoot, input.deploymentId)
@@ -301,7 +335,6 @@ export async function createGitDeploymentStore(options: GitDeploymentStoreOption
 
     async reap(input: MaterializeDeploymentInput): Promise<Readonly<{ reaped: true; path: string }>> {
       validateId("deployment", input.deploymentId)
-      validateId("generation", input.generation)
       if ((await readReceipt(recordsRoot, input.deploymentId)) !== undefined) {
         throw new Error(`deployment '${input.deploymentId}' is published and cannot be reaped as failed preparation`)
       }
@@ -388,6 +421,7 @@ export function createDeploymentJobDefs(store: GitDeploymentStore): DeploymentJo
       async execute(input) {
         try {
           assertExactRelease(input, input.authorization)
+          assertHabReleaseAuthorization(input)
           return { status: "completed", conclusion: "success", output: await store.release(input) }
         } catch (cause) {
           return deploymentFailure("deployment-release-failed", cause)

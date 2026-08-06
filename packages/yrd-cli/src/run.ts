@@ -8,6 +8,8 @@ import { Fragment, createElement } from "react"
 import {
   CompositionV1Schema,
   CorrelationSchema,
+  DeploymentInputSchema,
+  DeploymentSourceReceiptSchema,
   baseIdentity,
   currentPRRev,
   prBaseSha,
@@ -22,6 +24,7 @@ import {
   prPublicationJobKey,
   PrPublicationInputSchema,
   prSourceReadyAt,
+  deploymentJobKey,
   isConcurrentCheckabilityConflict,
   resolveBay,
   resolveBase,
@@ -37,6 +40,8 @@ import {
   type PRRegressionSeverity,
   type PRRev,
   type PrPublicationInput,
+  type MaterializeDeploymentInput,
+  type ReleaseDeploymentJobInput,
 } from "@yrd/bay"
 import { CompetitorDefSchema, type CompetitorDef, type Contest } from "@yrd/contest"
 import {
@@ -1330,6 +1335,123 @@ function assertJobsPassed(runs: readonly Job[], action: string): void {
     failure.code,
     `${action} ${unresolved.status}${unresolved.status === "completed" ? `+${unresolved.conclusion}` : ""}: ${failure.message}`,
   )
+}
+
+type DeploymentOperation = "materialize" | "reap" | "release"
+
+async function requestAndRunDeploymentJob(
+  app: YrdCliApp,
+  operation: DeploymentOperation,
+  input: MaterializeDeploymentInput | ReleaseDeploymentJobInput,
+): Promise<Job> {
+  const deployments = app.deployments ?? configuration("deployment capability is not installed")
+  const key = deploymentJobKey(operation, String(input.deploymentId))
+  const definition = `deployment.${operation}`
+  let job = app.jobs.getByKey(key)
+  if (job === undefined) {
+    const requested =
+      operation === "materialize"
+        ? await deployments.materialize(input as MaterializeDeploymentInput)
+        : operation === "reap"
+          ? await deployments.reap(input as MaterializeDeploymentInput)
+          : await deployments.release(input as Parameters<typeof deployments.release>[0])
+    const id = app.jobs.requested(requested)[0] ?? app.jobs.getByKey(key)?.id
+    job = id === undefined ? undefined : app.jobs.get(id)
+  } else if (job.definition !== definition || stableJson(job.input) !== stableJson(input)) {
+    raiseFailure(
+      "refusal",
+      "deployment-request-conflict",
+      `yrd: deployment Job '${job.id}' already owns key '${key}' with different terms`,
+    )
+  } else if (job.status === "completed" && (job.conclusion === "failure" || job.conclusion === "timed_out")) {
+    job = await app.jobs.retry(job.id)
+  }
+  if (job === undefined) throw new Error(`yrd: deployment ${operation} request produced no Job`)
+  if (job.status === "queued") job = await app.runner.submit({ job: job.id })
+  if (job.status === "in_progress" || job.status === "waiting") {
+    raiseFailure(
+      "refusal",
+      "deployment-job-active",
+      `yrd: deployment Job '${job.id}' is already ${job.status}; wait for its current runner`,
+    )
+  }
+  assertJobsPassed([job], `deployment ${operation}`)
+  return job
+}
+
+function successfulJobOutput(job: Job): Job["input"] {
+  if (job.status !== "completed" || job.conclusion !== "success") {
+    throw new Error(`yrd: Job '${job.id}' did not complete successfully`)
+  }
+  return job.output
+}
+
+async function readJson(path: string, subject: string): Promise<unknown> {
+  try {
+    return JSON.parse(await readFile(resolve(path), "utf8")) as unknown
+  } catch (error) {
+    refusal(`${subject} '${path}' is not readable JSON: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+async function materializeDeployment(
+  app: YrdCliApp,
+  deploymentId: string,
+  generation: string,
+  sha: string,
+  options: JsonOption & Readonly<{ pin: string }>,
+  io: YrdCliIO,
+): Promise<void> {
+  const input = DeploymentInputSchema.parse({ deploymentId, generation, sha, pin: options.pin })
+  const job = await requestAndRunDeploymentJob(app, "materialize", input)
+  const receipt = DeploymentSourceReceiptSchema.parse(successfulJobOutput(job))
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "deployment.materialize", job: job.id, receipt },
+    `${receipt.path}\n`,
+  )
+}
+
+async function reapDeployment(
+  app: YrdCliApp,
+  deploymentId: string,
+  generation: string,
+  sha: string,
+  options: JsonOption & Readonly<{ pin: string }>,
+  io: YrdCliIO,
+): Promise<void> {
+  const input = DeploymentInputSchema.parse({ deploymentId, generation, sha, pin: options.pin })
+  const job = await requestAndRunDeploymentJob(app, "reap", input)
+  const output = successfulJobOutput(job)
+  await printResult(io, jsonEnabled(options), { command: "deployment.reap", job: job.id, output }, "reaped\n")
+}
+
+async function releaseDeployment(
+  app: YrdCliApp,
+  deploymentReceiptPath: string,
+  habReleaseReceiptPath: string,
+  options: JsonOption,
+  io: YrdCliIO,
+): Promise<void> {
+  const deployment = DeploymentSourceReceiptSchema.parse(await readJson(deploymentReceiptPath, "deployment receipt"))
+  const habRelease = await readJson(habReleaseReceiptPath, "Hab generation release receipt")
+  const input: ReleaseDeploymentJobInput = {
+    deploymentId: deployment.deploymentId,
+    generation: deployment.generation,
+    path: deployment.path,
+    sha: deployment.sha,
+    authorization: {
+      kind: "hab-generation-release" as const,
+      generation: deployment.generation,
+      path: deployment.path,
+      sha: deployment.sha,
+      receipt: habRelease as ReleaseDeploymentJobInput["authorization"]["receipt"],
+    },
+  }
+  const job = await requestAndRunDeploymentJob(app, "release", input)
+  const output = successfulJobOutput(job)
+  await printResult(io, jsonEnabled(options), { command: "deployment.release", job: job.id, output }, "released\n")
 }
 
 function within(parent: string, child: string): boolean {
@@ -8230,6 +8352,39 @@ function buildProgram(
     .description("brief the current Yrd delivery state")
     .option("--json", "emit stable JSON")
     .action(async (options) => primeYrd(installed(), options, io))
+
+  const deployment = program.command("deployment").description("manage immutable runtime deployments")
+  deployment.helpCommand(false)
+  deployment
+    .command("materialize <deployment> <generation> <sha>")
+    .description("materialize and provision one fresh pinned-SHA runtime path")
+    .requiredOption("--pin <provenance>", "source pin provenance: tip or last-green")
+    .option("--json", "emit stable JSON")
+    .action(async (deploymentId, generation, sha, options) =>
+      materializeDeployment(
+        installed(),
+        deploymentId,
+        generation,
+        sha,
+        options as JsonOption & Readonly<{ pin: string }>,
+        io,
+      ),
+    )
+  deployment
+    .command("reap <deployment> <generation> <sha>")
+    .description("reap an unpublished failed deployment using its exact materialization input")
+    .requiredOption("--pin <provenance>", "source pin provenance: tip or last-green")
+    .option("--json", "emit stable JSON")
+    .action(async (deploymentId, generation, sha, options) =>
+      reapDeployment(installed(), deploymentId, generation, sha, options as JsonOption & Readonly<{ pin: string }>, io),
+    )
+  deployment
+    .command("release <deployment-receipt> <hab-release-receipt>")
+    .description("release an exact deployment after a matching Hab generation-death receipt")
+    .option("--json", "emit stable JSON")
+    .action(async (deploymentReceipt, habReleaseReceipt, options) =>
+      releaseDeployment(installed(), deploymentReceipt, habReleaseReceipt, options, io),
+    )
 
   const queue = program.command("queue").description("manage integration queues")
   queue.helpCommand(false)

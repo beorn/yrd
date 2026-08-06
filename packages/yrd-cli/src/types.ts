@@ -1,4 +1,4 @@
-import type { BayCommands, BaysState, HasBays } from "@yrd/bay"
+import type { BayCommands, BaysState, HasBays, HasDeployments } from "@yrd/bay"
 import type { ContestCommands, ContestsState, HasContests } from "@yrd/contest"
 import type { Yrd } from "@yrd/core"
 import type { HasJobs, HasRunner, JobCommands, JobsState } from "@yrd/job"
@@ -59,6 +59,7 @@ export type YrdCliApp = Yrd<YrdCliState, YrdCliCommands> &
   HasJobs &
   HasRunner &
   HasBays &
+  Partial<HasDeployments> &
   HasQueue &
   HasIssues &
   HasContests &

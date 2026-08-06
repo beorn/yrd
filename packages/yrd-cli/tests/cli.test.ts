@@ -23,11 +23,13 @@ import { createLogger, type Event as LoggerEvent, type LogEvent } from "loggily"
 import { safeRemoveSync } from "removely"
 import {
   createBayJobDefs,
+  createDeploymentJobDefs,
   currentPRRev,
   prBaseSha,
   prDeliveryState,
   prRevisionLineage,
   withBays,
+  withDeployments,
   type BayWorkspace,
   type PR,
   type PRDeliveryState,
@@ -388,6 +390,18 @@ async function createApp(
       provisionedHead: options.provisionedHead,
     }),
   )
+  const deploymentJobs = createDeploymentJobDefs({
+    materialize: async (input) => ({
+      ...input,
+      path: `/repo/.deployments/${input.deploymentId}`,
+      verification: "verified" as const,
+      dirty: false as const,
+      loadedAt: "2026-07-09T12:00:00.000Z",
+      submodules: [],
+    }),
+    reap: async (input) => ({ reaped: true as const, path: `/repo/.deployments/${input.deploymentId}` }),
+    release: async (input) => ({ released: true as const, path: input.path }),
+  })
   const check = withStep(
     "check",
     (input: StepExecution<PRShape>): JobResult<JsonValue> => {
@@ -480,7 +494,8 @@ async function createApp(
   const contests = withContests({ runners: [contest.runner], evaluators: [contest.evaluator], git: contest.git })
   const base = pipe(
     createYrdDef(),
-    withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
+    withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs, deploymentJobs] }),
+    withDeployments({ jobs: deploymentJobs }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
     withIntents(),
     withBays({
@@ -879,12 +894,104 @@ describe("runYrd", () => {
     expect(adminQueue.stdout()).toMatch(/^\s+deinit\b/mu)
   })
 
+  it("materializes immutable deployments through a keyed Journal Job", async () => {
+    const app = await createApp()
+    const output = outputIO()
+    const generation = "@dev/1#generation-1.attempt-1"
+
+    expect(
+      await runYrd(
+        app,
+        yrd("deployment", "materialize", "D1", generation, HEAD_SHA, "--pin", "tip", "--json"),
+        output.io,
+      ),
+      output.stderr(),
+    ).toBe(0)
+
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "deployment.materialize",
+      receipt: {
+        deploymentId: "D1",
+        generation,
+        path: "/repo/.deployments/D1",
+        sha: HEAD_SHA,
+        pin: "tip",
+      },
+    })
+    expect(app.jobs.getByKey("deployment:D1:materialize")).toMatchObject({
+      definition: "deployment.materialize",
+      status: "completed",
+      conclusion: "success",
+    })
+  })
+
+  it("releases only when the Hab v2 receipt names the exact deployment source", async () => {
+    const app = await createApp()
+    const temp = mkdtempSync(join(tmpdir(), "yrd-deployment-release-"))
+    const deploymentReceipt = join(temp, "deployment.json")
+    const habReleaseReceipt = join(temp, "hab-release.json")
+    const generation = "@dev/1#generation-1.attempt-1"
+    const path = "/repo/.deployments/D1"
+    writeFileSync(
+      deploymentReceipt,
+      JSON.stringify({
+        deploymentId: "D1",
+        generation,
+        path,
+        sha: HEAD_SHA,
+        verification: "verified",
+        dirty: false,
+        loadedAt: "2026-07-09T12:00:00.000Z",
+        pin: "tip",
+        submodules: [],
+      }),
+    )
+    writeFileSync(
+      habReleaseReceipt,
+      JSON.stringify({
+        schema: "hab-launch-release/2",
+        writerId: generation,
+        proof: { habitantSource: { path, sha: HEAD_SHA, verification: "verified" } },
+      }),
+    )
+    try {
+      const output = outputIO()
+      expect(
+        await runYrd(app, yrd("deployment", "release", deploymentReceipt, habReleaseReceipt, "--json"), output.io),
+        output.stderr(),
+      ).toBe(0)
+      expect(JSON.parse(output.stdout())).toMatchObject({
+        command: "deployment.release",
+        output: { released: true, path },
+      })
+      expect(app.jobs.getByKey("deployment:D1:release")).toMatchObject({
+        definition: "deployment.release",
+        status: "completed",
+        conclusion: "success",
+      })
+    } finally {
+      safeRemoveSync(temp, { within: tmpdir(), allowMissing: true })
+    }
+  })
+
   it("exposes the locked noun-cutover surface and teaches that only the queue merges", async () => {
     const app = await createApp()
     const root = outputIO({ columns: 100 })
     expect(await runYrd(app, yrd("--help"), root.io)).toBe(0)
     expect(root.stdout()).toContain("Pick an issue")
-    for (const command of ["pr", "bay", "issue", "contest", "queue", "check", "admin", "log", "watch", "prime"]) {
+    for (const command of [
+      "pr",
+      "bay",
+      "issue",
+      "contest",
+      "deployment",
+      "queue",
+      "check",
+      "admin",
+      "log",
+      "watch",
+      "prime",
+    ]) {
       expect(root.stdout()).toMatch(new RegExp(`^\\s+${command}\\b`, "mu"))
     }
     const retiredQueueNoun = ["li", "ne"].join("")
