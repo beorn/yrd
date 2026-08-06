@@ -1193,7 +1193,10 @@ describe("runYrd", () => {
         else writeFileSync(join(repo, ".yrd.yml"), yml)
         const app = await createApp()
         const output = outputIO({ cwd: repo, resolveRevision: async () => HEAD_SHA })
-        const services = authoritativeLanding === undefined ? {} : { [LandingAuthorityBoundary]: authoritativeLanding }
+        const services = {
+          base: "main",
+          ...(authoritativeLanding === undefined ? {} : { [LandingAuthorityBoundary]: authoritativeLanding }),
+        }
         const code = await runYrd(
           app,
           yrd("pr", "submit", "topic/direct", "--base", "main", "--json"),
