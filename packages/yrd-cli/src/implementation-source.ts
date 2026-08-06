@@ -6,16 +6,9 @@ import { cleanGitEnvironment } from "./git-environment.ts"
 import { yrdSourceRoot } from "./version.ts"
 
 const GIT_TIMEOUT_MS = 30_000
-export const YRD_WRAPPER_IMPLEMENTATION_SOURCE_ENV = "YRD_WRAPPER_IMPLEMENTATION_SOURCE"
-export const YRD_WRAPPER_IMPLEMENTATION_REPOSITORY_ENV = "YRD_WRAPPER_IMPLEMENTATION_REPOSITORY"
 
 export type ImplementationSourceRepository = Readonly<{
   root: string
-}>
-
-export type ImplementationSourceBridge = Readonly<{
-  identity: string
-  repository: ImplementationSourceRepository
 }>
 
 export type ImplementationSourceCheckoutRelation =
@@ -68,32 +61,6 @@ export async function implementationSourceCheckoutRelation(
   const ahead = await isAncestor(process, repository, pinnedSha, currentSha)
   if (ahead === true) return { kind: "checkout-ahead" }
   return ahead === false ? { kind: "divergent" } : { kind: "unprovable" }
-}
-
-/**
- * Consume the one-process attestation installed by a trusted launcher.
- *
- * Git-owned source checkouts remain the default. This bridge exists for sealed
- * deployment roots whose launcher has already verified immutable bytes and can
- * attest both the loaded revision and the mutable source checkout used for
- * authoritative gitlink freshness checks.
- */
-export function takeImplementationSourceBridge(env: NodeJS.ProcessEnv): ImplementationSourceBridge | undefined {
-  const identity = env[YRD_WRAPPER_IMPLEMENTATION_SOURCE_ENV]?.trim()
-  const repository = env[YRD_WRAPPER_IMPLEMENTATION_REPOSITORY_ENV]?.trim()
-  delete env[YRD_WRAPPER_IMPLEMENTATION_SOURCE_ENV]
-  delete env[YRD_WRAPPER_IMPLEMENTATION_REPOSITORY_ENV]
-  if (identity === undefined && repository === undefined) return undefined
-  if (identity === undefined || repository === undefined) {
-    throw new Error("yrd: installed implementation-source attestation is incomplete")
-  }
-  if (!/^(?:dirty|git):[0-9a-f]{40,64}$/u.test(identity)) {
-    throw new Error("yrd: installed implementation-source identity is invalid")
-  }
-  if (!isAbsolute(repository) || resolve(repository) !== repository) {
-    throw new Error("yrd: installed implementation-source repository is not an absolute normalized path")
-  }
-  return { identity, repository: { root: repository } }
 }
 
 /** Find the owning Yrd source checkout for one loaded module without doing I/O
@@ -180,7 +147,7 @@ async function commit(process: Pick<Process, "run">, repository: string, ref: st
  *
  * The host calls this once at startup and preserves that result as the loaded
  * identity. Its environment audit calls the same owner again before each
- * admission to detect a mutable module root moving underneath lazy imports. */
+ * admission to detect a mutable source checkout moving underneath lazy imports. */
 export async function implementationSourceIdentity(
   process: Pick<Process, "run">,
   sourceRepository?: ImplementationSourceRepository,

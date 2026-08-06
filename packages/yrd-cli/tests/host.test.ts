@@ -31,7 +31,6 @@ import {
   implementationSourceCheckoutRelation,
   implementationSourceIdentity,
   sourceRepositoryFor,
-  takeImplementationSourceBridge,
 } from "../src/implementation-source.ts"
 import type { ResolvedYrdProjectConfig } from "../src/config.ts"
 import { classifyFailure } from "../src/invocation.ts"
@@ -603,21 +602,6 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     await writeFile(installedModule, "export {}\n")
     const sourceRepository = sourceRepositoryFor(pathToFileURL(installedModule).href)
     expect(sourceRepository).toBeUndefined()
-  })
-
-  it("consumes a launcher-attested implementation source for a gitless sealed runtime", () => {
-    const repository = join(tmpdir(), "certified-yrd-source")
-    const env = {
-      YRD_WRAPPER_IMPLEMENTATION_SOURCE: `git:${"6".repeat(40)}`,
-      YRD_WRAPPER_IMPLEMENTATION_REPOSITORY: repository,
-      PRESERVED: "yes",
-    }
-
-    expect(takeImplementationSourceBridge(env)).toEqual({
-      identity: `git:${"6".repeat(40)}`,
-      repository: { root: repository },
-    })
-    expect(env).toEqual({ PRESERVED: "yes" })
   })
 
   it("threads an explicit diagnostics comparator into the installed runtime step", async () => {
@@ -3343,53 +3327,6 @@ checks: [{check: {run: "true"}}]
       await first.stderr
     }
   }, 60_000)
-
-  it("records a process-host attestation as the resident's loaded implementation", async () => {
-    const { repo } = await repository()
-    const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
-    const implementationSource = `git:${await git(repo, "rev-parse", "HEAD")}`
-    const cli = Bun.spawn(
-      [
-        process.execPath,
-        join(import.meta.dirname, "../../../bin/yrd.ts"),
-        "queue",
-        "run",
-        "--interval",
-        "10",
-        "--json",
-      ],
-      {
-        cwd: repo,
-        env: {
-          ...process.env,
-          HERDR_PANE_ID: "w1:attested",
-          YRD_WRAPPER_IMPLEMENTATION_SOURCE: implementationSource,
-          YRD_WRAPPER_IMPLEMENTATION_REPOSITORY: repo,
-        },
-        stdout: "pipe",
-        stderr: "pipe",
-      },
-    )
-    const stdout = new Response(cli.stdout).text()
-    const stderr = new Response(cli.stderr).text()
-    try {
-      await vi.waitFor(
-        async () =>
-          expect(JSON.parse(await readFile(statusPath, "utf8"))).toMatchObject({
-            pid: cli.pid,
-            implementationSource,
-          }),
-        { timeout: 10_000 },
-      )
-      cli.kill("SIGTERM")
-      await expect(cli.exited).resolves.toBe(0)
-    } finally {
-      cli.kill("SIGKILL")
-      await cli.exited
-      await stdout
-      await stderr
-    }
-  }, 30_000)
 
   it("replaces a dead resident owner after the OS releases its lease", async () => {
     const { repo } = await repository()

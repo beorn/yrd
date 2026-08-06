@@ -18,7 +18,7 @@ async function sourceFiles(root: string): Promise<string[]> {
     entries.map(async (entry) => {
       const path = join(root, entry.name)
       if (entry.isDirectory()) return sourceFiles(path)
-      return entry.isFile() && entry.name.endsWith(".ts") ? [path] : []
+      return entry.isFile() && (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx")) ? [path] : []
     }),
   )
   return nested.flat()
@@ -27,6 +27,7 @@ async function sourceFiles(root: string): Promise<string[]> {
 describe("shared Yrd worktree seam", () => {
   it("is the only production source allowed to invoke git worktree add/remove", async () => {
     const files = await sourceFiles(join(YRD_ROOT, "packages"))
+    expect(files.some((file) => file.endsWith(".tsx"))).toBe(true)
     const offenders: string[] = []
     for (const file of files) {
       const local = relative(YRD_ROOT, file)

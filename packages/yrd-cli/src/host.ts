@@ -98,7 +98,6 @@ import {
   implementationSourceCheckoutRelation,
   implementationSourceIdentity,
   sourceRepositoryFor,
-  takeImplementationSourceBridge,
   type ImplementationSourceRepository,
 } from "./implementation-source.ts"
 import { ensureWorkspaceDependencies } from "./workspace-provisioning.ts"
@@ -1910,14 +1909,6 @@ async function runYrdProcessHost(
   let removeShutdownSignals: () => void = () => undefined
   let processExit: YrdCliExitCode | undefined
   try {
-    const sourceBridge = takeImplementationSourceBridge(env)
-    if (
-      io.implementationSource !== undefined &&
-      sourceBridge !== undefined &&
-      io.implementationSource !== sourceBridge.identity
-    ) {
-      throw new Error("yrd: process-host implementation source conflicts with launcher attestation")
-    }
     const exitCode = await runYrdProcessRuntime(argv, io, {
       ambientCwd: io.cwd ?? globalThis.process.cwd(),
       env,
@@ -1965,17 +1956,13 @@ async function runYrdProcessHost(
               }
         log = createYrdLogger(observability, (text) => io.stderr(text), human)
         const runtimeLog = resident === undefined ? log : residentRunnerLog(log, resident)
-        const selectedImplementationSource = io.implementationSource ?? sourceBridge?.identity
         const activeHost = await createYrdRuntimeHost(
           {
             cwd: context.repo,
             env,
             log: runtimeLog,
             ...(context.configPath === undefined ? {} : { configPath: context.configPath }),
-            ...(selectedImplementationSource === undefined
-              ? {}
-              : { implementationSource: selectedImplementationSource }),
-            ...(sourceBridge === undefined ? {} : { implementationSourceRepository: sourceBridge.repository }),
+            ...(io.implementationSource === undefined ? {} : { implementationSource: io.implementationSource }),
             ...(posture === "journal-view-repair" ? { repairViewsBeforeReplay: true } : {}),
           },
           resident,
