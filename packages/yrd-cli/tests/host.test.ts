@@ -1407,6 +1407,27 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(frames).toEqual([expect.objectContaining({ compatibility: CURRENT_JOURNAL_COMPATIBILITY })])
   })
 
+  it("loads config from the authoritative remote base when local main is stale", async () => {
+    const { repo } = await repository()
+    const remote = join(repo, "..", "origin.git")
+    await initBareMain(repo, remote)
+    await git(repo, "remote", "add", "origin", remote)
+    await git(repo, "push", "-q", "origin", "main")
+    const staleLocalMain = await git(repo, "rev-parse", "main")
+
+    await git(repo, "switch", "-qc", "remote-config")
+    await commitYrdConfig(repo, "landing: none\n")
+    const authoritativeMain = await git(repo, "rev-parse", "HEAD")
+    await git(repo, "push", "-q", "origin", "HEAD:main")
+    await git(repo, "fetch", "-q", "origin", "main:refs/remotes/origin/main")
+    await git(repo, "switch", "-q", "main")
+
+    expect(await git(repo, "rev-parse", "main")).toBe(staleLocalMain)
+    expect(await git(repo, "rev-parse", "origin/main")).toBe(authoritativeMain)
+    await using host = await createYrdHost({ cwd: repo })
+    expect(host.config.landing).toBe("none")
+  })
+
   it("boots doctor --rebuild-views through a stale Journal view registration", async () => {
     const { repo, featureSha } = await repository()
     await commitYrdConfig(repo, 'base: main\nbatch: 1\nchecks: [{check: {run: "true"}}]\n')
