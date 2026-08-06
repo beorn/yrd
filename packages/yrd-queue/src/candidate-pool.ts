@@ -1,10 +1,10 @@
 import { existsSync } from "node:fs"
-import { appendFile, mkdir, mkdtemp, realpath, rm } from "node:fs/promises"
-import { isAbsolute, join, relative, sep } from "node:path"
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises"
+import { join } from "node:path"
 import type { RunnerContextRequest, RunnerContexts, RuntimeContext } from "@yrd/job"
 import type { Process } from "@yrd/process"
 import type { ConditionalLogger } from "loggily"
-import { materializeSubmodules } from "@yrd/bay"
+import { createGitWorktreeStore, materializeSubmodules, type GitWorktreeStore } from "@yrd/bay"
 
 /**
  * Bounded warm candidate-worktree pool (merge-queue R40).
@@ -45,6 +45,7 @@ export type CandidatePoolOptions = Readonly<{
   /** Maximum concurrent warm worktrees held for this repository. */
   capacity?: number
   git: CandidatePoolGit
+  worktrees?: GitWorktreeStore | Promise<GitWorktreeStore>
   log?: ConditionalLogger
 }>
 
@@ -122,6 +123,14 @@ export function createCandidatePoolGit(
 
 export function createCandidatePool(options: CandidatePoolOptions): CandidatePool {
   const { repo, parent, git } = options
+  const worktrees = Promise.resolve(
+    options.worktrees ??
+      createGitWorktreeStore({
+        repo,
+        git,
+        timeouts: { operation: GIT_TIMEOUT_MS, cleanup: GIT_CLEANUP_TIMEOUT_MS },
+      }),
+  )
   const log = options.log
   const capacity = Math.max(1, options.capacity ?? DEFAULT_CAPACITY)
   const entries: PoolEntry[] = []
@@ -202,8 +211,9 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
    * it never claims success while leaving Git worktree-admin residue behind. */
   async function removeWorktree(entry: PoolEntry): Promise<void> {
     if (entry.path !== undefined) {
-      const removed = await git.run(repo, ["worktree", "remove", "--force", entry.path], true, GIT_CLEANUP_TIMEOUT_MS)
-      if (removed.code !== 0) {
+      try {
+        await (await worktrees).remove(entry.path, { operation: `Candidate pool worktree remove ${entry.path}` })
+      } catch (cause) {
         // A worktree DESTROYED mid-removal (its `.git` pointer gone — e.g. a
         // prior removal killed at its timeout) can never satisfy `worktree
         // remove` again: Git refuses with "validation failed … does not exist",
@@ -212,15 +222,9 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
         // not a removable worktree; drop its admin entry via prune and fall
         // through to root cleanup. A still-valid worktree keeps the loud throw.
         if (existsSync(join(entry.path, ".git"))) {
-          throw new Error(
-            removed.stderr || removed.stdout || `yrd: could not remove candidate worktree '${entry.path}'`,
-          )
+          throw cause
         }
-        await git.run(repo, ["worktree", "prune", "--expire=now"], true)
-        const admin = await git.run(repo, ["worktree", "list", "--porcelain"], true)
-        if (admin.code === 0 && admin.stdout.includes(entry.path)) {
-          throw new Error(`yrd: destroyed candidate worktree '${entry.path}' survived a worktree prune`)
-        }
+        await (await worktrees).recoverDestroyed(entry.path, `Candidate pool destroyed-worktree recovery ${entry.path}`)
       }
       // The Git admin removal succeeded; the root directory is the remaining
       // cleanup obligation. Keep entry.root populated until the rm SUCCEEDS —
@@ -309,20 +313,7 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
   let excludeEnsured = false
   async function ensureParentExcluded(): Promise<void> {
     if (excludeEnsured) return
-    const local = relative(repo, parent)
-    if (local === "" || local === ".." || local.startsWith(`..${sep}`) || isAbsolute(local)) {
-      excludeEnsured = true
-      return
-    }
-    const normalized = local.split(sep).join("/")
-    const ignored = await git.run(repo, ["check-ignore", "--quiet", "--no-index", "--", normalized], true)
-    if (ignored.code !== 0) {
-      const exclude = (await git.run(repo, ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"]))
-        .stdout
-      if (exclude === "") throw new Error("yrd: candidate pool could not resolve the repository exclude path")
-      const escaped = normalized.replace(/([\\[\]*?!#])/gu, "\\$1")
-      await appendFile(exclude, `\n/${escaped}/\n`, { encoding: "utf8", mode: 0o600 })
-    }
+    await (await worktrees).prepareRoot(parent)
     excludeEnsured = true
   }
 
@@ -333,25 +324,30 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
     const path = join(root, "worktree")
     let added = false
     try {
-      await git.run(repo, ["worktree", "add", "--detach", path, ref])
+      await (
+        await worktrees
+      ).add({
+        kind: "detached",
+        path,
+        ref,
+        operation: `Candidate pool worktree add ${path}`,
+      })
       added = true
       await materialize(path, ref)
     } catch (cause) {
       if (added) {
-        const removed = await git.run(repo, ["worktree", "remove", "--force", path], true, GIT_CLEANUP_TIMEOUT_MS)
-        if (removed.code !== 0) {
+        try {
+          await (await worktrees).remove(path, { operation: `Candidate pool failed-add cleanup ${path}` })
+        } catch (cleanupCause) {
           // The worktree was created but neither materialized nor removed. RETAIN
           // the entry so a later close()/evict retries the removal (retry-safe,
           // like removeWorktree), and surface the cleanup failure AGGREGATED with
           // the primary cause — never orphan Git worktree-admin residue silently.
           entry.root = root
           entry.path = path
-          const cleanup = new Error(
-            removed.stderr || removed.stdout || `yrd: could not remove candidate worktree '${path}'`,
-          )
           const detail = cause instanceof Error ? cause.message : String(cause)
           throw new AggregateError(
-            [cause, cleanup],
+            [cause, cleanupCause],
             `yrd: candidate creation failed and its worktree could not be cleaned up: ${detail}`,
             { cause },
           )

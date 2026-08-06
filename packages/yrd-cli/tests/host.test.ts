@@ -722,7 +722,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(new Set(provisioned)).toHaveLength(1)
   })
 
-  it("populates submodules in the quarantined pre-submit checkout before provisioning (22755)", async () => {
+  it("inspects submodules in the quarantined pre-submit checkout before provisioning (22755)", async () => {
     const { repo, featureSha } = await candidatePackageRepository()
 
     const config: ResolvedYrdProjectConfig = {
@@ -760,20 +760,17 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // missing and provisioning fails with 'workspace:* failed to resolve'.
     const addIndex = calls.findIndex((argv) => argv.includes("worktree") && argv.includes("add"))
     expect(addIndex).toBeGreaterThanOrEqual(0)
-    const installIndex = calls.findIndex(
-      (argv) => argv.join(" ") === "bun install --frozen-lockfile --ignore-scripts",
-    )
+    const installIndex = calls.findIndex((argv) => argv.join(" ") === "bun install --frozen-lockfile --ignore-scripts")
     expect(installIndex).toBeGreaterThan(addIndex)
-    const populateIndex = calls.findIndex(
+    const inspectIndex = calls.findIndex(
       (argv, index) =>
-        index > addIndex && index < installIndex && argv.includes("submodule") && argv.includes("update"),
+        index > addIndex && index < installIndex && argv.includes("cat-file") && argv.includes("HEAD:.gitmodules"),
     )
-    expect(populateIndex, "no 'git submodule update' between checkout and provisioning").toBeGreaterThan(addIndex)
-    const populate = calls[populateIndex] ?? []
-    expect(populate).toEqual(expect.arrayContaining(["--init", "--recursive"]))
+    expect(inspectIndex, "no submodule inspection between checkout and provisioning").toBeGreaterThan(addIndex)
+    const inspect = calls[inspectIndex] ?? []
     expect(
-      populate.some((argument) => argument.startsWith("core.hooksPath=")),
-      "submodule population must keep the hook quarantine",
+      inspect.some((argument) => argument === "core.hooksPath=/dev/null"),
+      "submodule inspection must keep the hook quarantine",
     ).toBe(true)
   })
 
@@ -1599,7 +1596,7 @@ checks: [{check: {run: "true"}}]
       }
       expect(failure).toBeInstanceOf(Error)
       expect((failure as Error).message).toContain(
-        `writer lock is busy (owner=yrd-cli:${process.pid}; contender=yrd-cli:${process.pid}; ${join(root, "writer.lock")})`,
+        `writer lock is busy (holder=unknown operation; owner=yrd-cli:${process.pid}; contender=yrd-cli:${process.pid}; ${join(root, "writer.lock")})`,
       )
       expect(classifyFailure(failure)).toMatchObject({
         exitCode: 3,
@@ -3251,7 +3248,7 @@ checks: [{check: {run: "true"}}]
       ])
       expect(outcome).toEqual({ exitCode: 1 })
       expect(await second.stderr).toContain(
-        `resident-runner-active: writer lock is busy (owner=yrd-cli:${first.child.pid}; contender=yrd-cli:${second.child.pid}`,
+        `resident-runner-active: writer lock is busy (holder=unknown operation; owner=yrd-cli:${first.child.pid}; contender=yrd-cli:${second.child.pid}`,
       )
       expect((await readFile(executionsPath, "utf8")).trim().split("\n")).toEqual(["run"])
       // A graceful drain (SIGTERM) lets the first exit after finishing PR1's run.

@@ -40,7 +40,7 @@ import {
   type QueueConflictStage,
   type QueueTreeConflict,
 } from "./submodule-composition.ts"
-import { materializeSubmodules } from "@yrd/bay"
+import { createGitWorktreeStore, materializeSubmodules } from "@yrd/bay"
 import {
   CommandDiagnosticSchema as SharedCommandDiagnosticSchema,
   type CommandDiagnostic as SharedCommandDiagnostic,
@@ -1783,6 +1783,11 @@ async function withScratch<Output extends JsonValue>(
   parent: string,
   run: (path: string, root: string) => Promise<JobResult<Output>>,
 ): Promise<JobResult<Output>> {
+  const worktrees = createGitWorktreeStore({
+    repo,
+    git,
+    timeouts: { operation: GIT_TIMEOUT_MS, cleanup: GIT_CLEANUP_TIMEOUT_MS },
+  })
   await mkdir(parent, { recursive: true })
   const root = await mkdtemp(join(await realpath(parent), "yrd-queue-"))
   const path = join(root, "worktree")
@@ -1790,7 +1795,12 @@ async function withScratch<Output extends JsonValue>(
   let outcome: JobResult<Output> | undefined
   let operationFailure: unknown
   try {
-    await git.run(repo, ["worktree", "add", "--detach", path, ref])
+    await worktrees.add({
+      kind: "detached",
+      path,
+      ref,
+      operation: `Queue scratch worktree add ${path}`,
+    })
     added = true
     outcome = await run(path, root)
   } catch (cause) {
@@ -1801,9 +1811,8 @@ async function withScratch<Output extends JsonValue>(
   let removed = !added
   if (added) {
     try {
-      const cleanup = await git.run(repo, ["worktree", "remove", "--force", path], true, GIT_CLEANUP_TIMEOUT_MS)
-      if (cleanup.code === 0) removed = true
-      else cleanupFailure = cleanup.stderr || cleanup.stdout || "could not remove scratch worktree"
+      await worktrees.remove(path, { operation: `Queue scratch worktree remove ${path}` })
+      removed = true
     } catch (cause) {
       cleanupFailure = messageOf(cause)
     }
@@ -2672,13 +2681,23 @@ async function rebaseSource(
   source: NonNullable<StepExecution["prs"][number]["composition"]>["sources"][number],
   currentPin: string,
 ): Promise<Readonly<{ status: "passed"; output: string }> | CandidateFailure> {
+  const worktrees = createGitWorktreeStore({
+    repo: sourceRepo,
+    git,
+    timeouts: { operation: GIT_TIMEOUT_MS, cleanup: GIT_CLEANUP_TIMEOUT_MS },
+  })
   const root = await mkdtemp(join(tmpdir(), "yrd-source-"))
   const path = join(root, "worktree")
   let added = false
   let outcome: Readonly<{ status: "passed"; output: string }> | CandidateFailure | undefined
   let operationFailure: unknown
   try {
-    await git.run(sourceRepo, ["worktree", "add", "--detach", path, source.tipSha])
+    await worktrees.add({
+      kind: "detached",
+      path,
+      ref: source.tipSha,
+      operation: `Queue source ${source.repo} worktree add`,
+    })
     added = true
     const result = await git.run(
       path,
@@ -2721,8 +2740,11 @@ async function rebaseSource(
 
   let cleanupFailure: string | undefined
   if (added) {
-    const removed = await git.run(sourceRepo, ["worktree", "remove", "--force", path], true, GIT_CLEANUP_TIMEOUT_MS)
-    if (removed.code !== 0) cleanupFailure = removed.stderr || removed.stdout || "could not remove source worktree"
+    try {
+      await worktrees.remove(path, { operation: `Queue source ${source.repo} worktree remove` })
+    } catch (cause) {
+      cleanupFailure = messageOf(cause)
+    }
   }
   try {
     await rm(root, { recursive: true, force: true })

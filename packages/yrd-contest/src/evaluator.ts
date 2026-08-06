@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { createGitWorktreeStore } from "@yrd/bay"
 import { parseJobLaunch, type JobContext, type JobResult } from "@yrd/job"
 import type { Process, ProcessResult } from "@yrd/process"
 import type { ContestEvaluatorDef, ContestEvaluatorInput, EvaluatorResult } from "./types.ts"
@@ -311,15 +312,35 @@ export function createHeldOutCommandEvaluator(options: HeldOutCommandEvaluatorOp
       if (!temporary.ok) return failed(temporary.error.code, temporary.error.message)
       const temporaryRoot = temporary.value
       const checkout = join(temporaryRoot, "checkout")
+      const worktrees = await attempt("pin-checkout-create-failed", () =>
+        createGitWorktreeStore({
+          repo: bayPath,
+          process,
+          env,
+          signal: context.signal,
+          timeouts: { cleanup: GIT_CLEANUP_TIMEOUT_MS },
+        }),
+      )
+      if (!worktrees.ok) {
+        await rm(temporaryRoot, { recursive: true, force: true })
+        return failed(worktrees.error.code, worktrees.error.message)
+      }
       let worktreeAdded = false
       let worktreeRemoved = true
       let cleanupFailure: Failure | undefined
       let operation: JobResult<EvaluatorResult> = failed("evaluator-missing-result", "Evaluator produced no evidence")
       try {
-        const add = await git.run(bayPath, ["worktree", "add", "--detach", checkout, input.pin.commit])
-        const addFailure = git.failure(add, "pin-checkout-create-failed", "Could not materialize the pinned checkout")
-        if (addFailure !== undefined) {
-          operation = failed(addFailure.code, addFailure.message)
+        const add = await attempt("pin-checkout-create-failed", () =>
+          worktrees.value.add({
+            kind: "detached",
+            path: checkout,
+            ref: input.pin.commit,
+            hooks: "quarantine",
+            operation: `contest ${input.contest} attempt ${input.attempt} worktree add`,
+          }),
+        )
+        if (!add.ok) {
+          operation = failed(add.error.code, `Could not materialize the pinned checkout: ${add.error.message}`)
         } else {
           worktreeAdded = true
           worktreeRemoved = false
@@ -347,15 +368,17 @@ export function createHeldOutCommandEvaluator(options: HeldOutCommandEvaluatorOp
         }
       } finally {
         if (worktreeAdded) {
-          const removed = await git.run(bayPath, ["worktree", "remove", "--force", checkout], GIT_CLEANUP_TIMEOUT_MS)
-          const removeFailure = git.failure(
-            removed,
-            "pin-checkout-cleanup-failed",
-            "Could not remove evaluator checkout",
-            GIT_CLEANUP_TIMEOUT_MS,
-          )
-          if (removeFailure === undefined) worktreeRemoved = true
-          else cleanupFailure = removeFailure
+          try {
+            await worktrees.value.remove(checkout, {
+              operation: `contest ${input.contest} attempt ${input.attempt} worktree remove`,
+            })
+            worktreeRemoved = true
+          } catch (error) {
+            cleanupFailure = {
+              code: "pin-checkout-cleanup-failed",
+              message: `Could not remove evaluator checkout: ${errorMessage(error)}`,
+            }
+          }
         }
         if (worktreeRemoved) {
           try {

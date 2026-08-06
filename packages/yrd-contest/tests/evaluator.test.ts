@@ -76,7 +76,8 @@ function fakeProcess(options: FakeOptions = {}): {
           return options.command ?? processResult(0, "27 checks passed\n", "", 125)
         }
 
-        const args = request.argv.slice(1)
+        const rawArgs = request.argv.slice(1)
+        const args = rawArgs[0] === "-C" ? rawArgs.slice(2) : rawArgs
         if (args[0] === "worktree" && args[1] === "remove" && options.cleanup !== undefined) {
           return options.cleanup
         }
@@ -85,6 +86,9 @@ function fakeProcess(options: FakeOptions = {}): {
         }
         if (args[0] === "rev-parse" && args.includes("HEAD^{commit}")) {
           return processResult(0, `${options.checkoutSha ?? PINNED_SHA}\n`)
+        }
+        if (args[0] === "rev-parse" && args.includes("--git-common-dir")) {
+          return processResult(0, `${request.cwd}\n`)
         }
         if (args[0] === "symbolic-ref") return options.detached ?? processResult(1)
         return processResult(0)
@@ -152,7 +156,9 @@ describe("held-out command evaluator", () => {
       "--end-of-options",
       "refs/yrd/attempts/C1/A1^{commit}",
     ])
-    const materialize = fake.requests.find((request) => request.argv.slice(0, 3).join(" ") === "git worktree add")
+    const materialize = fake.requests.find(
+      (request) => request.argv.includes("worktree") && request.argv.includes("add"),
+    )
     expect(materialize?.argv.at(-1)).toBe(PINNED_SHA)
     const command = fake.requests.find((request) => request.argv[0] !== "git")
     expect(command?.argv).toEqual(["bun", "run", "test:focused", "--", "literal; $(touch /tmp/nope)"])
@@ -168,7 +174,7 @@ describe("held-out command evaluator", () => {
       fake.requests
         .filter((request) => request.argv[0] === "git")
         .every((request) =>
-          request.argv.slice(1, 3).join(" ") === "worktree remove"
+          request.argv.includes("worktree") && request.argv.includes("remove")
             ? request.timeoutMs === 120_000
             : request.timeoutMs === 30_000,
         ),
@@ -190,7 +196,9 @@ describe("held-out command evaluator", () => {
     const { evaluator, fake } = await fixture({}, { checkoutParent })
 
     expect(await evaluator.evaluate(input(), context)).toMatchObject({ status: "completed", conclusion: "success" })
-    const materialize = fake.requests.find((request) => request.argv.slice(0, 3).join(" ") === "git worktree add")
+    const materialize = fake.requests.find(
+      (request) => request.argv.includes("worktree") && request.argv.includes("add"),
+    )
     expect(materialize?.argv.at(-2)).toMatch(new RegExp(`^${await realpath(checkoutParent)}/yrd-evaluator-`))
   })
 
@@ -289,7 +297,9 @@ describe("held-out command evaluator", () => {
       conclusion: "success",
       output: { verdict: "passed" },
     })
-    const removal = fake.requests.find((request) => request.argv.slice(0, 3).join(" ") === "git worktree remove")
+    const removal = fake.requests.find(
+      (request) => request.argv.includes("worktree") && request.argv.includes("remove"),
+    )
     expect(removal?.timeoutMs).toBe(120_000)
   })
 

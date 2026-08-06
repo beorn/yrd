@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
-import { mkdtemp, rm, rmdir } from "node:fs/promises"
+import { mkdtemp, rm } from "node:fs/promises"
 import { hostname } from "node:os"
 import { join, relative, resolve, sep } from "node:path"
 import { clearLine, cursorTo } from "node:readline"
@@ -8,6 +8,7 @@ import { createScope, type Scope } from "@silvery/scope"
 import {
   createBayJobDefs,
   createGitPushReceiver,
+  createGitWorktreeStore,
   createGitWorkspace,
   baseIdentity,
   loadGitPushReceiver,
@@ -260,51 +261,41 @@ export function configuredChecks(
 
     const parent = join(stateDir, "pre-submit-worktrees")
     mkdirSync(parent, { recursive: true })
-    const checkout = await mkdtemp(join(parent, "check-"))
-    const hooksPath = await mkdtemp(join(parent, "disabled-hooks-"))
+    const checkoutRoot = await mkdtemp(join(parent, "check-"))
+    const checkout = join(checkoutRoot, "worktree")
     // Candidate materialization is trusted Yrd plumbing. Repository hooks run
-    // in that process by default, so point this invocation at a fresh empty
-    // directory instead of exposing Yrd's ambient authority to hook code.
+    // in that process by default, so the shared worktree capability quarantines
+    // hooks instead of exposing Yrd's ambient authority to hook code.
     const checkoutTimeoutMs = resolveCheckoutTimeoutMs(environment)
-    const add = await (async () => {
-      try {
-        return await process.run({
-          argv: [
-            "git",
-            "-c",
-            `core.hooksPath=${hooksPath}`,
-            "-C",
-            repo,
-            "worktree",
-            "add",
-            "--detach",
-            checkout,
-            candidateSha,
-          ],
-          cwd: repo,
-          env: inherited,
-          timeoutMs: checkoutTimeoutMs,
-        })
-      } finally {
-        // Non-recursive removal is also the assertion that Git left the
-        // quarantine empty.
-        await rmdir(hooksPath)
+    let worktrees: Awaited<ReturnType<typeof createGitWorktreeStore>>
+    try {
+      worktrees = createGitWorktreeStore({
+        repo,
+        process,
+        env: inherited,
+        timeouts: { operation: checkoutTimeoutMs, cleanup: checkoutTimeoutMs },
+      })
+      await worktrees.add({
+        kind: "detached",
+        path: checkout,
+        ref: candidateSha,
+        hooks: "quarantine",
+        operation: `CLI pre-submit worktree add ${candidateSha}`,
+      })
+    } catch (cause) {
+      await rm(checkoutRoot, { recursive: true, force: true })
+      const message = cause instanceof Error ? cause.message : String(cause)
+      if (/timed out after/iu.test(message)) {
+        raiseFailure(
+          "infrastructure",
+          "required-check-checkout-timeout",
+          `yrd: pre-submit checkout of '${candidateSha}' exceeded ${checkoutTimeoutMs}ms during 'git worktree add'; raise ${CHECKOUT_TIMEOUT_ENV} or retry under lower load`,
+        )
       }
-    })()
-    if (add.timedOut) {
-      await rm(checkout, { recursive: true, force: true })
-      raiseFailure(
-        "infrastructure",
-        "required-check-checkout-timeout",
-        `yrd: pre-submit checkout of '${candidateSha}' killed after ${Math.round(add.durationMs)}ms (limit ${checkoutTimeoutMs}ms) during 'git worktree add'; raise ${CHECKOUT_TIMEOUT_ENV} or retry under lower load`,
-      )
-    }
-    if (add.exitCode !== 0) {
-      await rm(checkout, { recursive: true, force: true })
       raiseFailure(
         "infrastructure",
         "required-check-checkout-failed",
-        add.stderr.trim() || `yrd: could not materialize required-check candidate '${candidateSha}'`,
+        message || `yrd: could not materialize required-check candidate '${candidateSha}'`,
       )
     }
     // The hook quarantine above also silences the repository hook that used to
@@ -312,44 +303,33 @@ export function configuredChecks(
     // would be missing and provisioning would fail with 'workspace:* failed to
     // resolve'. Populate them here as trusted Yrd plumbing, under the same
     // quarantine so submodule checkouts cannot run hook code either (22755).
-    const populateHooksPath = await mkdtemp(join(parent, "disabled-hooks-"))
-    const populate = await (async () => {
+    try {
+      await worktrees.materializeSubmodules(checkout, { hooks: "quarantine" })
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause)
       try {
-        return await process.run({
-          argv: [
-            "git",
-            "-c",
-            `core.hooksPath=${populateHooksPath}`,
-            "-C",
-            checkout,
-            "submodule",
-            "update",
-            "--init",
-            "--recursive",
-          ],
-          cwd: checkout,
-          env: inherited,
-          timeoutMs: checkoutTimeoutMs,
+        await worktrees.remove(checkout, {
+          operation: `CLI pre-submit failed-materialization cleanup ${candidateSha}`,
         })
-      } finally {
-        await rmdir(populateHooksPath)
+      } catch (cleanupCause) {
+        throw new AggregateError(
+          [cause, cleanupCause],
+          `yrd: pre-submit submodule population failed and checkout cleanup also failed: ${message}`,
+          { cause },
+        )
       }
-    })()
-    if (populate.timedOut) {
-      await rm(checkout, { recursive: true, force: true })
-      raiseFailure(
-        "infrastructure",
-        "required-check-checkout-timeout",
-        `yrd: pre-submit submodule population of '${candidateSha}' killed after ${Math.round(populate.durationMs)}ms (limit ${checkoutTimeoutMs}ms) during 'git submodule update'; raise ${CHECKOUT_TIMEOUT_ENV} or retry under lower load`,
-      )
-    }
-    if (populate.exitCode !== 0) {
-      await rm(checkout, { recursive: true, force: true })
+      await rm(checkoutRoot, { recursive: true, force: true })
+      if (/timed out after/iu.test(message)) {
+        raiseFailure(
+          "infrastructure",
+          "required-check-checkout-timeout",
+          `yrd: pre-submit submodule population of '${candidateSha}' exceeded ${checkoutTimeoutMs}ms during 'git submodule update'; raise ${CHECKOUT_TIMEOUT_ENV} or retry under lower load`,
+        )
+      }
       raiseFailure(
         "infrastructure",
         "required-check-submodule-populate-failed",
-        populate.stderr.trim() ||
-          `yrd: could not populate submodules for required-check candidate '${candidateSha}' in ${checkout}`,
+        message || `yrd: could not populate submodules for required-check candidate '${candidateSha}' in ${checkout}`,
       )
     }
     try {
@@ -364,24 +344,19 @@ export function configuredChecks(
       })
       return await run(checkout)
     } finally {
-      const removed = await process.run({
-        argv: ["git", "-C", repo, "worktree", "remove", "--force", checkout],
-        cwd: repo,
-        env: inherited,
-        // Same materialize-class limit: removal traverses the tree the add
-        // populated, so a kill here is the same defect one step later (22648).
-        timeoutMs: checkoutTimeoutMs,
-      })
-      if (removed.exitCode !== 0 || removed.timedOut) {
+      try {
+        await worktrees.remove(checkout, { operation: `CLI pre-submit worktree remove ${candidateSha}` })
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause)
         raiseFailure(
           "infrastructure",
           "required-check-checkout-cleanup-failed",
-          removed.timedOut
-            ? `yrd: required-check checkout removal of '${checkout}' killed after ${Math.round(removed.durationMs)}ms (limit ${checkoutTimeoutMs}ms); raise ${CHECKOUT_TIMEOUT_ENV} or retry under lower load`
-            : removed.stderr.trim() || `yrd: could not remove required-check checkout '${checkout}'`,
+          /timed out after/iu.test(message)
+            ? `yrd: required-check checkout removal of '${checkout}' exceeded ${checkoutTimeoutMs}ms; raise ${CHECKOUT_TIMEOUT_ENV} or retry under lower load`
+            : message || `yrd: could not remove required-check checkout '${checkout}'`,
         )
       }
-      await rm(checkout, { recursive: true, force: true })
+      await rm(checkoutRoot, { recursive: true, force: true })
     }
   }
   return Object.freeze({

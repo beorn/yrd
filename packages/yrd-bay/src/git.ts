@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
-import { appendFile } from "node:fs/promises"
-import { isAbsolute, relative, resolve, sep } from "node:path"
+import { resolve } from "node:path"
 import type { JobResult } from "@yrd/job"
 import type { Process } from "@yrd/process"
+import { createGitWorktreeStore, type Git } from "./git-worktree-store.ts"
 import type { BayWorkspace } from "./plugin.ts"
 import type {
   CheckpointBayInput,
@@ -15,7 +15,6 @@ import type {
   RefreshBayInput,
   RefreshedBay,
 } from "./model.ts"
-import { materializeSubmodules } from "./submodule-materialization.ts"
 
 export type GitWorkspaceOptions = Readonly<{
   repo: string
@@ -24,46 +23,6 @@ export type GitWorkspaceOptions = Readonly<{
   intakeRemote?: string
   env?: NodeJS.ProcessEnv
 }>
-
-type GitResult = Readonly<{ code: number; stdout: string; stderr: string }>
-type Git = ReturnType<typeof createGit>
-const GIT_TIMEOUT_MS = 30_000
-/** R1680: worktree-remove cleanup is correctness-critical, not latency-critical;
- * under host load it can exceed the interactive window and must not fail work. */
-const GIT_CLEANUP_TIMEOUT_MS = 120_000
-
-function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv) {
-  const env = cleanGitEnvironment(environment)
-  const run = async (
-    repo: string,
-    args: readonly string[],
-    allowFailure = false,
-    timeoutMs = GIT_TIMEOUT_MS,
-  ): Promise<GitResult> => {
-    const result = await process.run({ argv: ["git", "-C", repo, ...args], cwd: repo, env, timeoutMs })
-    if (result.timedOut) throw new Error(`yrd: git ${args.join(" ")} timed out after ${timeoutMs}ms`)
-    if (!allowFailure && result.exitCode !== 0) {
-      throw new Error(result.stderr.trim() || result.stdout.trim() || `git ${args.join(" ")} exited ${result.exitCode}`)
-    }
-    return { code: result.exitCode, stdout: result.stdout, stderr: result.stderr }
-  }
-
-  const mutateConfig = async (repo: string, args: readonly string[]): Promise<GitResult> => {
-    let result: GitResult | undefined
-    for (let attempt = 1; attempt <= 20; attempt += 1) {
-      result = await run(repo, args, true)
-      if (result.code === 0 || !result.stderr.includes("could not lock config file")) return result
-      await Bun.sleep(attempt * 5)
-    }
-    if (result === undefined) throw new Error("yrd: Git config retry did not run")
-    return result
-  }
-
-  const commit = async (repo: string, ref: string): Promise<string> =>
-    (await run(repo, ["rev-parse", "--verify", `${ref}^{commit}`])).stdout.trim()
-
-  return Object.freeze({ run, mutateConfig, commit })
-}
 
 function failure(code: string, cause: unknown): JobResult<never> {
   return {
@@ -169,106 +128,6 @@ async function configureIntake(git: Git, path: string, remote: string): Promise<
   await git.run(path, ["config", "--worktree", "push.default", "current"])
 }
 
-async function localConfig(git: Git, repo: string, key: string): Promise<string | undefined> {
-  const configured = await git.run(repo, ["config", "--local", "--get", key], true)
-  if (configured.code === 1) return undefined
-  if (configured.code !== 0) {
-    throw new Error(configured.stderr.trim() || `could not inspect shared ${key} config`)
-  }
-  return configured.stdout.trim()
-}
-
-async function localBool(git: Git, repo: string, key: string): Promise<boolean | undefined> {
-  const configured = await git.run(repo, ["config", "--local", "--get", "--type=bool", key], true)
-  if (configured.code === 1) return undefined
-  if (configured.code !== 0) {
-    throw new Error(configured.stderr.trim() || `could not inspect shared ${key} config`)
-  }
-  return configured.stdout.trim() === "true"
-}
-
-async function removeLegacySharedPushDefault(git: Git, repo: string): Promise<void> {
-  const configured = await localConfig(git, repo, "remote.pushDefault")
-  if (configured !== "bay") return
-  const removed = await git.mutateConfig(repo, ["config", "--local", "--unset-all", "remote.pushDefault"])
-  if (removed.code === 0) return
-  const remaining = await localConfig(git, repo, "remote.pushDefault")
-  if (remaining !== "bay") return
-  throw new Error(
-    removed.stderr.trim() ||
-      "could not remove legacy shared remote.pushDefault=bay; run 'git config --local --unset-all remote.pushDefault'",
-  )
-}
-
-async function relocateSharedWorktree(git: Git, repo: string, worktree: string): Promise<void> {
-  if (worktree === "") throw new Error("Git core.worktree is empty")
-  const moved = await git.mutateConfig(repo, ["config", "--worktree", "core.worktree", worktree])
-  if (moved.code !== 0) throw new Error(moved.stderr || "could not set primary worktree config")
-  const removed = await git.mutateConfig(repo, ["config", "--local", "--unset-all", "core.worktree"])
-  if (removed.code === 0) return
-  const remaining = await localConfig(git, repo, "core.worktree")
-  if (remaining !== undefined) throw new Error(removed.stderr || "could not remove shared core.worktree config")
-}
-
-async function relocateSharedBare(git: Git, repo: string): Promise<void> {
-  // A shared core.bare=false (or unset) is harmless: linked worktrees are non-bare regardless. Only a
-  // shared core.bare=true is dangerous once extensions.worktreeConfig is enabled.
-  if ((await localBool(git, repo, "core.bare")) !== true) return
-  // git-worktree(1) CONFIGURATION FILE: with extensions.worktreeConfig enabled, a `core.bare=true` in the
-  // SHARED config is inherited by every LINKED worktree, so `git rev-parse --is-bare-repository` reports
-  // true there and the worktree becomes unusable (this is what took the whole worktree fleet down). A Bay
-  // is only ever provisioned on a repository that already has a working tree, so the repository is
-  // non-bare: record the corrected flag in the MAIN worktree's config.worktree, then drop the stray value
-  // from the shared config so no linked worktree can inherit it.
-  const scoped = await git.mutateConfig(repo, ["config", "--worktree", "core.bare", "false"])
-  if (scoped.code !== 0) throw new Error(scoped.stderr || "could not scope core.bare to the main worktree")
-  const removed = await git.mutateConfig(repo, ["config", "--local", "--unset-all", "core.bare"])
-  if (removed.code === 0) return
-  if ((await localBool(git, repo, "core.bare")) !== undefined) {
-    throw new Error(removed.stderr || "could not remove shared core.bare config")
-  }
-}
-
-async function prepareWorktreeConfig(git: Git, repo: string, required: boolean): Promise<void> {
-  const worktree = await localConfig(git, repo, "core.worktree")
-  if (worktree === undefined && !required) return
-
-  const enabled = await git.mutateConfig(repo, ["config", "extensions.worktreeConfig", "true"])
-  if (enabled.code !== 0) throw new Error(enabled.stderr || "could not enable worktree config")
-
-  // Enabling extensions.worktreeConfig exposes the shared config to every linked worktree, so a
-  // `core.bare=true` or `core.worktree` left there makes those worktrees report as bare. git-worktree(1)
-  // requires relocating both into the MAIN worktree's config.worktree.
-  await relocateSharedBare(git, repo)
-  if (worktree !== undefined) await relocateSharedWorktree(git, repo, worktree)
-}
-
-async function healPoisonedWorktreeConfig(git: Git, repo: string): Promise<void> {
-  // A shared core.bare=true set AFTER extensions.worktreeConfig was enabled (by any tool, not just Yrd)
-  // takes every linked worktree down and blocks a fresh provision, because the main worktree then reports
-  // as bare. Repair it on host startup — the config is readable even while the repository reports bare.
-  // Only act when the extension is enabled: without it a shared core.bare=true affects only the main
-  // worktree and may describe an intentionally bare repository, which is not Yrd's to rewrite.
-  if ((await localBool(git, repo, "extensions.worktreeConfig")) !== true) return
-  await relocateSharedBare(git, repo)
-}
-
-async function ignoreInRepositoryBays(git: Git, repo: string, baysRoot: string): Promise<void> {
-  const local = relative(repo, baysRoot)
-  if (local === "" || local === ".." || local.startsWith(`..${sep}`) || isAbsolute(local)) return
-  const normalized = local.split(sep).join("/")
-  if (/\r|\n/u.test(normalized)) throw new Error("configured bays root contains a newline")
-  const ignored = await git.run(repo, ["check-ignore", "--quiet", "--no-index", "--", normalized], true)
-  if (ignored.code === 0) return
-  if (ignored.code !== 1) throw new Error(ignored.stderr || `git check-ignore exited ${ignored.code}`)
-  const exclude = (
-    await git.run(repo, ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"])
-  ).stdout.trim()
-  if (exclude === "") throw new Error("git rev-parse returned an empty exclude path")
-  const escaped = normalized.replace(/([\\[\]*?!#])/gu, "\\$1")
-  await appendFile(exclude, `\n/${escaped}/\n`, { encoding: "utf8", mode: 0o600 })
-}
-
 async function preserveClosedBay(git: Git, repo: string, bay: string, headSha: string): Promise<string> {
   const preservedRef = `refs/yrd/closed/${bay}`
   const created = await git.run(repo, ["update-ref", preservedRef, headSha, "0".repeat(headSha.length)], true)
@@ -282,14 +141,13 @@ async function preserveClosedBay(git: Git, repo: string, bay: string, headSha: s
 export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<BayWorkspace> {
   const repo = resolve(options.repo)
   const baysRoot = resolve(options.baysRoot ?? `${repo}/.bays`)
-  const git = createGit(options.process, options.env ?? process.env)
+  const worktrees = createGitWorktreeStore(options)
+  const { git } = worktrees
   if (options.intakeRemote !== undefined) {
     // Older Yrd versions set this in shared config, making plain `git push` target the Bay receiver.
-    await removeLegacySharedPushDefault(git, repo)
+    await worktrees.removeLegacySharedPushDefault()
   }
-  // Repair a shared config that a previous run (or another tool) left in the fleet-breaking
-  // worktreeConfig + core.bare=true state before provisioning anything on top of it.
-  await healPoisonedWorktreeConfig(git, repo)
+  await worktrees.ready()
   return {
     revision: createHash("sha256")
       .update(
@@ -300,13 +158,8 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
     async provision(input: ProvisionBayInput): Promise<JobResult<ProvisionedBay>> {
       const path = safeBayPath(baysRoot, input.bay)
       try {
-        await git.run(repo, ["rev-parse", "--show-toplevel"])
         const baseSha = await git.commit(repo, input.baseSha ?? input.base)
-        if (existsSync(path)) {
-          throw new Error(`workspace path '${path}' already exists; inspect or remove it explicitly`)
-        }
-        await ignoreInRepositoryBays(git, repo, baysRoot)
-        await prepareWorktreeConfig(git, repo, options.intakeRemote !== undefined)
+        await worktrees.prepareRoot(baysRoot, options.intakeRemote !== undefined)
         if (input.from === undefined) {
           const localRef = `refs/heads/${input.branch}`
           const remoteRef = `refs/remotes/origin/${input.branch}`
@@ -371,14 +224,14 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           }
           if (decision.source === "local") {
             try {
-              await git.run(repo, ["worktree", "add", path, input.branch])
+              await worktrees.add({ kind: "branch", path, branch: input.branch })
             } catch (cause) {
               rethrowWorktreeOwnershipConflict(cause)
             }
           } else if (decision.source === "tracking") {
-            await git.run(repo, ["worktree", "add", "-b", input.branch, path, remoteRef])
+            await worktrees.add({ kind: "new-branch", path, branch: input.branch, ref: remoteRef })
           } else {
-            await git.run(repo, ["worktree", "add", "-b", input.branch, path, baseSha])
+            await worktrees.add({ kind: "new-branch", path, branch: input.branch, ref: baseSha })
           }
           if (decision.carrier !== undefined || decision.source === "tracking") {
             await git.run(path, ["branch", "--set-upstream-to", `origin/${input.branch}`, input.branch])
@@ -386,15 +239,12 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
         } else {
           await git.commit(repo, input.from)
           try {
-            await git.run(repo, ["worktree", "add", path, input.from])
+            await worktrees.add({ kind: "ref", path, ref: input.from })
           } catch (cause) {
             rethrowWorktreeOwnershipConflict(cause)
           }
         }
-        const materialized = await materializeSubmodules(git, { worktree: path, referenceWorktree: repo })
-        if (materialized.code !== 0) {
-          throw new Error(materialized.stderr || materialized.stdout || "could not materialize Bay submodules")
-        }
+        await worktrees.materializeSubmodules(path)
         const headSha = await git.commit(path, "HEAD")
         if (options.intakeRemote !== undefined) {
           await configureIntake(git, path, options.intakeRemote)
@@ -571,20 +421,11 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
         }
         const headSha = await git.commit(input.path, "HEAD")
         const preservedRef = await preserveClosedBay(git, repo, input.bay, headSha)
-        await git.run(repo, ["worktree", "remove", "--force", input.path], false, GIT_CLEANUP_TIMEOUT_MS)
+        await worktrees.remove(input.path)
         return { status: "completed", conclusion: "success", output: { headSha, preservedRef } }
       } catch (cause) {
         return failure("deprovision-failed", cause)
       }
     },
-  }
-}
-
-function cleanGitEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return {
-    ...Object.fromEntries(
-      Object.entries(environment).filter(([key, value]) => value !== undefined && !key.startsWith("GIT_")),
-    ),
-    KM_NO_AUTO_SUBMODULE_UPDATE: "1",
   }
 }

@@ -6,8 +6,10 @@ import { createFailure, observeYrdLifecycle } from "@yrd/core"
 import { createLogger, type ConditionalLogger } from "loggily"
 
 export type Exclusive = Readonly<{
-  run<Result>(operation: () => Promise<Result>): Promise<Result>
+  run<Result>(operation: () => Promise<Result>, options?: ExclusiveRunOptions): Promise<Result>
 }>
+
+export type ExclusiveRunOptions = Readonly<{ holder?: string }>
 
 export type ExclusiveOptions = Readonly<{
   timeoutMs?: number
@@ -30,15 +32,23 @@ export function createExclusive(
 ): Exclusive {
   const log = inject.log ?? createLogger("yrd", [{ level: "warn" }])
   return {
-    async run(operation) {
+    async run(operation, runOptions = {}) {
+      const holder = runOptions.holder?.trim()
+      if (holder !== undefined && (holder === "" || /\r|\n/u.test(holder))) {
+        throw new TypeError("yrd: exclusive holder must be a non-empty single line")
+      }
       const lock = await observeYrdLifecycle(
         log,
         {
           lifecycle: "lock",
-          attributes: { path: join(dir, "writer.lock"), timeoutMs: options.timeoutMs ?? 30_000 },
+          attributes: {
+            path: join(dir, "writer.lock"),
+            timeoutMs: options.timeoutMs ?? 30_000,
+            ...(holder === undefined ? {} : { holder }),
+          },
           now: inject.now,
         },
-        () => acquire(dir, options),
+        () => acquire(dir, options, holder),
       )
       try {
         return await operation()
@@ -49,7 +59,7 @@ export function createExclusive(
   }
 }
 
-async function acquire(dir: string, options: ExclusiveOptions): Promise<WriterLock> {
+async function acquire(dir: string, options: ExclusiveOptions, holder?: string): Promise<WriterLock> {
   await mkdir(dir, { recursive: true })
   const path = join(dir, "writer.lock")
   const timeoutMs = Math.max(0, options.timeoutMs ?? 30_000)
@@ -61,7 +71,7 @@ async function acquire(dir: string, options: ExclusiveOptions): Promise<WriterLo
   const backoff = (): Promise<void> => Bun.sleep(1 + Math.floor(Math.random() * pollMs))
 
   while (held.has(path)) {
-    if (Date.now() >= deadline) throw busy(path)
+    if (Date.now() >= deadline) throw busy(path, holder)
     await backoff()
   }
 
@@ -69,11 +79,15 @@ async function acquire(dir: string, options: ExclusiveOptions): Promise<WriterLo
   let locked = false
   try {
     while (!(locked = flock(fd, LOCK_EX | LOCK_NB) === 0)) {
-      if (Date.now() >= deadline) throw busy(path)
+      if (Date.now() >= deadline) throw busy(path, holder)
       await backoff()
     }
     held.add(path)
-    const body = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })
+    const body = JSON.stringify({
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+      ...(holder === undefined ? {} : { holder }),
+    })
     ftruncateSync(fd, 0)
     writeSync(fd, body, 0, "utf8")
     fsyncSync(fd)
@@ -121,17 +135,21 @@ function loadFlock(): Flock {
   throw new Error(`yrd: failed to load POSIX flock from ${candidates.join(" or ")}`, { cause })
 }
 
-function busy(path: string): Error {
+function busy(path: string, contender?: string): Error {
   let owner = "another process"
+  let holder = "unknown operation"
   try {
-    const value = JSON.parse(readFileSync(path, "utf8")) as { pid?: unknown }
+    const value = JSON.parse(readFileSync(path, "utf8")) as { pid?: unknown; holder?: unknown }
     if (typeof value.pid === "number") owner = `yrd-cli:${value.pid}`
+    if (typeof value.holder === "string" && value.holder.trim() !== "") holder = value.holder
   } catch {
     // silent-fallback-allow: diagnostic metadata never decides authoritative lock ownership.
   }
   return createFailure({
     kind: "infrastructure",
     code: "exclusive-busy",
-    message: `yrd: writer lock is busy (owner=${owner}; contender=yrd-cli:${process.pid}; ${path})`,
+    message:
+      `yrd: writer lock is busy (holder=${holder}; owner=${owner}; contender=yrd-cli:${process.pid}` +
+      `${contender === undefined ? "" : ` operation=${contender}`}; ${path})`,
   })
 }

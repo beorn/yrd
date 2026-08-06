@@ -1,5 +1,7 @@
 export * from "./model.ts"
 export * from "./plugin.ts"
 export * from "./git.ts"
+export * from "./git-worktree-store.ts"
+export * from "./deployment.ts"
 export * from "./receiver.ts"
 export * from "./submodule-materialization.ts"
