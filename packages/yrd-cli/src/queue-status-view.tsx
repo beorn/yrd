@@ -4722,7 +4722,16 @@ function TimelineRunnerBox({
             {runnerRefusal !== undefined
               ? `NO RUNNER - runner refused: stale step contract on ${runnerRefusal.run ?? "unknown run"}`
               : drained === null
-                ? "NO RUNNER - no drained run in window"
+                ? // "no drained run in window" alone reads as a quiet queue. It is
+                  // the same sentence whether nothing was submitted or work has
+                  // been waiting an hour for a driver that does not exist, and on
+                  // 2026-08-05 it was the second. Naming how long the oldest open
+                  // submission has waited turns one ambiguous line into the two
+                  // facts a reader needs: nothing has ever run HERE, and something
+                  // is waiting for it.
+                  `NO RUNNER - no drained run in window${
+                    projection.oldestOpenMs === null ? "" : `; oldest open ${mediaDuration(projection.oldestOpenMs)}`
+                  }`
                 : `NO RUNNER - queue last drained ${mediaDuration(now - drained)} ago`}
           </Text>
         ) : (

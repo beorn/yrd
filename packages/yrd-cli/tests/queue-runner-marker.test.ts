@@ -78,4 +78,37 @@ describe("queue liveness status render (item 4)", () => {
       app.unmount()
     }
   })
+
+  it("says how long the oldest submission has waited when nothing has ever drained here", async () => {
+    // "no drained run in window" is the same sentence for a quiet queue and for
+    // one where work has been waiting an hour on a driver that does not exist.
+    // On 2026-08-05 it was the second, and the line gave a reader no way to
+    // tell. The wait time is the discriminator and the projection already
+    // carries it.
+    const waiting: QueueTimelineProjection = {
+      ...idleProjection(),
+      runner: null,
+      oldestOpenMs: 62 * 60_000,
+    }
+    const render = createRenderer({ cols: 120, rows: 40 })
+    const app = render(createElement(QueueTimelineView, { projection: waiting, nav: false, columns: 120 }))
+    try {
+      await app.waitForLayoutStable()
+      expect(app.text).toContain("NO RUNNER - no drained run in window; oldest open 1:02:00")
+    } finally {
+      app.unmount()
+    }
+
+    // A queue with nothing open keeps the bare line — there is no wait to report.
+    const empty: QueueTimelineProjection = { ...idleProjection(), runner: null, oldestOpenMs: null }
+    const quiet = createRenderer({ cols: 120, rows: 40 })
+    const quietApp = quiet(createElement(QueueTimelineView, { projection: empty, nav: false, columns: 120 }))
+    try {
+      await quietApp.waitForLayoutStable()
+      expect(quietApp.text).toContain("NO RUNNER - no drained run in window")
+      expect(quietApp.text).not.toContain("oldest open")
+    } finally {
+      quietApp.unmount()
+    }
+  })
 })

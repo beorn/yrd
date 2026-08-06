@@ -400,6 +400,7 @@ type ProjectionOptions = Readonly<{
   retainedSinceMs?: number
   attempts?: readonly QueueAttempt[]
   runner?: Readonly<{ pid: number; startedAt: string; lastTickAt: string }> | null
+  oldestOpenMs?: number | null
 }>
 
 function fixtureProjection(result: QueueStatusResult, options: ProjectionOptions = {}): QueueTimelineProjection {
@@ -414,6 +415,7 @@ function fixtureProjection(result: QueueStatusResult, options: ProjectionOptions
     submissionTimes,
     ...(options.attempts === undefined ? {} : { attempts: options.attempts }),
     retainedSinceMs: options.retainedSinceMs ?? Date.parse("2026-07-13T05:00:00.000Z"),
+    ...(options.oldestOpenMs === undefined ? {} : { oldestOpenMs: options.oldestOpenMs }),
     siblingBases: ["release/next"],
     base: "main",
     runner:
