@@ -6,6 +6,7 @@ import { createElement } from "react"
 import { createRenderer } from "silvery/test"
 import { renderString } from "silvery"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { parsePRSelector } from "@yrd/bay"
 import { queueTimelineStories } from "../dev/queue-timeline-fixtures.ts"
 import { FAILURE_SLUGS } from "../src/failure-slug.ts"
 import {
@@ -903,6 +904,10 @@ describe("queue timeline 21106 contract", () => {
     for (const [index, row] of projection.rows.entries()) {
       const continuation = index > 0 && row.run !== undefined && projection.rows[index - 1]?.run === row.run
       const pr = formatQueuePrId(row.pr, row.revision)
+      expect(parsePRSelector(pr), `rendered identity ${pr}`).toEqual({
+        pr: row.pr,
+        revision: Number(row.revision),
+      })
       const run = row.run === undefined ? undefined : `${row.base}#${row.run.replace(/^R/u, "")}`
       const rendered = rows.find(
         (candidate) =>

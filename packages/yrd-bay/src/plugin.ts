@@ -1046,6 +1046,7 @@ export function createBays(
       options.composition === undefined ? undefined : CompositionV1Schema.parse(options.composition)
     let snapshot = state()
     const resolved = resolvePRMatch(snapshot, selector)
+    if (resolved?.revision !== undefined) requireLivePR(snapshot, selector)
     const selectedBay = resolveBay(snapshot, selector)
     let pr = resolved?.value ?? (selectedBay === undefined ? undefined : resolvePR(snapshot, selectedBay.branch))
     // A closed Bay is archive evidence, not permanent ownership of its branch

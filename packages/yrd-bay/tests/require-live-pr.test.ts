@@ -165,4 +165,15 @@ describe("resolvePR live-preference + requireLivePR mutation guard", () => {
     })
     await expect(app.bays.submit({ pr: "PR1" })).rejects.toThrow(/is integrated, not pushed/i)
   })
+
+  it("refuses a historical revision selector at the submit-selection mutation boundary", async () => {
+    await using app = await appWithIntegrated("topic/h", [{ pr: "PR1", headSha: HEAD_1, commit: BASE }])
+    await app.bays.submitSelection("topic/h", mint(HEAD_2))
+    await app.bays.intake({ branch: "topic/h", headSha: HEAD_3, baseSha: BASE })
+    await app.bays.submit({ pr: "PR2" })
+
+    await expect(app.bays.submitSelection("pr#2.1", mint(HEAD_3))).rejects.toMatchObject({
+      failure: { kind: "refusal", code: "historical-pr-revision" },
+    })
+  })
 })

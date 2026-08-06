@@ -644,6 +644,17 @@ export function formatPRRevisionSelector(pr: PRId, revision: number | Pick<PRRev
   return `pr#${value}.${number}`
 }
 
+function prNotFoundMessage(state: BaysState, selector: string): string {
+  if (parsePRSelector(selector) !== undefined || !/^(?:pr#?|\d+\.)/iu.test(selector.trim())) {
+    return `yrd: no PR '${selector}'`
+  }
+  const copiedId = /^(?:pr#?)?([a-z0-9_-]+)/iu.exec(selector.trim())?.[1]
+  const copiedPr = copiedId === undefined ? undefined : state.prs[`PR${copiedId}`]
+  const examplePr = copiedPr ?? Object.values(state.prs).toSorted((left, right) => compareNatural(left.id, right.id))[0]
+  const example = examplePr === undefined ? "pr#1.1" : formatPRRevisionSelector(examplePr.id, currentPRRev(examplePr))
+  return `yrd: no PR '${selector}'; accepted form: ${example}`
+}
+
 export function currentPRRev(pr: Pick<PR, "id" | "revs">): PRRev {
   const revision = pr.revs.at(-1)
   if (revision === undefined) throw new Error(`yrd: PR '${pr.id}' has no revision`)
@@ -1059,7 +1070,7 @@ export type LivePR = PR & { readonly [liveBrand]: true }
 export function requireLivePR(state: BaysState, selector: string): LivePR {
   const resolution = resolvePRMatch(state, selector)
   if (resolution === undefined) {
-    raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
+    raiseFailure("refusal", "pr-not-found", prNotFoundMessage(state, selector))
   }
   const pr = resolution.value
   if (resolution.revision !== undefined) {

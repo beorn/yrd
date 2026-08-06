@@ -60,6 +60,10 @@ describe("displayed PR selector round trip", () => {
     expect(resolvePRMatch(state, "pr#1410.99")).toBeUndefined()
   })
 
+  it("shows a copy-pasteable accepted form when a PR-shaped selector is malformed", () => {
+    expect(() => requireLivePR(state, "pr#1410.bad")).toThrow("accepted form: pr#1410.16")
+  })
+
   it("allows the current qualified revision but refuses historical mutation", () => {
     expect(requireLivePR(state, "pr#1410.16")).toBe(pr)
     expect(() => requireLivePR(state, "pr#1410.1")).toThrow(

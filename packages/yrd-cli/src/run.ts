@@ -29,6 +29,7 @@ import {
   resolveBay,
   resolveBase,
   resolvePR,
+  requireLivePR,
   type Bay,
   type BaysState,
   type CompositionV1,
@@ -3886,9 +3887,7 @@ async function readComposition(path: string | undefined, io: YrdCliIO): Promise<
 }
 
 function requiredPr(app: YrdCliApp, selector: string): PR {
-  const pr = app.bays.pr(selector)
-  if (pr === undefined) refusal(`no PR '${selector}'`)
-  return pr as PR
+  return app.bays.pr(selector) ?? requireLivePR(stateOf(app).bays, selector)
 }
 
 type PRLandingOutcome =
@@ -4230,11 +4229,11 @@ async function viewPrRuns(
 ): Promise<void> {
   for (let read = 0; read < 3; read += 1) {
     const snapshot = await app.journalSnapshot()
-    const pr = resolvePR(snapshot.state.bays, selector)
+    let pr = resolvePR(snapshot.state.bays, selector)
     if (pr === undefined) {
       const confirmed = await app.journalSnapshot()
       if (confirmed.asOf.cursor !== snapshot.asOf.cursor) continue
-      refusal(`no PR '${selector}'`)
+      pr = requireLivePR(snapshot.state.bays, selector)
     }
     const runs = prQueueRuns(app, pr)
     const attempts = await queueAttempts(app, services)

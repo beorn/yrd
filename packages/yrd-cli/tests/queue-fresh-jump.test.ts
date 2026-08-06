@@ -5,7 +5,7 @@
 import { createElement } from "react"
 import { createRenderer, waitFor } from "silvery/test"
 import { describe, expect, it } from "vitest"
-import { currentPRRev } from "@yrd/bay"
+import { currentPRRev, parsePRSelector } from "@yrd/bay"
 import { fixturePr, fixtureResult, fixtureRun, fixtureSnapshot } from "../dev/queue-timeline-fixtures.ts"
 import type { QueueWatchSnapshot } from "../src/watch-pane.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
@@ -282,7 +282,12 @@ describe("QueueWatchFrame live-follow cursor contract", () => {
       await waitFor(() => detailTitle(app.text).includes("pr#12.1"))
 
       expect(detailTitle(app.text), "a missing middle row never falls through to newest row 0").not.toContain("pr#13.1")
-      expect(app.text).toMatch(/selection moved.*pr#11\.1.*pr#12\.1/iu)
+      const notice = app.text.match(/selection moved.*pr#11\.1.*pr#12\.1/iu)?.[0]
+      expect(notice).toBeDefined()
+      expect(notice?.match(/pr#[a-z0-9_-]+\.\d+/giu)?.map((token) => parsePRSelector(token))).toEqual([
+        { pr: "PR11", revision: 1 },
+        { pr: "PR12", revision: 1 },
+      ])
     } finally {
       app.unmount()
     }

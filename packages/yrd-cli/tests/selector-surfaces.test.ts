@@ -277,6 +277,15 @@ describe("case-insensitive CLI selector surfaces", () => {
     expect(output.stderr()).toContain("base selector 'MAIN' is ambiguous: Main, main")
   })
 
+  it("teaches an accepted form when a copied PR-shaped selector is malformed", async () => {
+    const app = await createCliApp()
+    await submitOnePR(app)
+    const output = outputIO()
+
+    expect(await runYrd(app, yrd("pr", "runs", "pr#1.bad", "--json"), output.io)).toBe(1)
+    expect(output.stderr()).toContain("accepted form: pr#1.1")
+  })
+
   it("applies canonical PR and base scopes to log projections", async () => {
     const app = await createCliApp()
     await submitOnePR(app)
