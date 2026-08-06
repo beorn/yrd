@@ -5,7 +5,7 @@ export default {
     // authority requires a verified managed-launch proof; this service is a
     // non-chief actor with its own tribe name for attribution only.
     "yrd-runner": {
-      command: "yrd queue run --follow",
+      command: 'YRD_REPO="$PWD" yrd queue run --follow',
       env: { TRIBE_NAME: "@yrd" },
       health: {
         command: 'tools/installed/yrd --repo "$PWD" queue list --check --json',
