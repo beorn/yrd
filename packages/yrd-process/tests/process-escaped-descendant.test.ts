@@ -3,13 +3,17 @@
  * @level l2
  * @consumer @yrd/process createProcess
  */
-import { afterEach, describe, expect, test } from "vitest"
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createProcess, type Spawn } from "../src/index.ts"
 
 const scratch: string[] = []
+beforeEach(() => {
+  vi.spyOn(console, "warn").mockImplementation(() => undefined)
+})
+
 afterEach(() => {
   for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true })
 })

@@ -444,7 +444,7 @@ describe("yrd admin submodule init", () => {
     expect(text).toContain("SUBMODULE")
     expect(text).toContain("vendor/foo")
     expect(text).toContain("remote HEAD")
-    expect(text).toContain("commit -m 'chore: track submodule branches'")
+    expect(text.replace(/\s+/gu, " ")).toContain("commit -m 'chore: track submodule branches'")
   })
 
   it("takes the documented main fallback and prints a note when the remote HEAD names no branch", async () => {

@@ -109,9 +109,9 @@ function residentHarness(refusing: boolean, stopAfter = Number.POSITIVE_INFINITY
           : {},
       },
     }),
-    run: async ({ signal }) => {
+    run: async () => {
       cycles += 1
-      if (cycles >= stopAfter) signal.aborted = true
+      if (cycles >= stopAfter) harness.drain()
       return []
     },
   })

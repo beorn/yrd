@@ -4,6 +4,7 @@ export type ResidentWarnCall = Readonly<{ message: string; props: Record<string,
 
 type ResidentState = Readonly<{
   bays: Readonly<{ prs: Readonly<Record<string, unknown>> }>
+  jobs?: Readonly<{ byId: Readonly<Record<string, unknown>> }>
   queues: Readonly<{ admissionRefusals: Readonly<Record<string, unknown>> }>
 }>
 
@@ -20,8 +21,13 @@ type ResidentHarnessOptions = Readonly<{
 
 const emptyState = (): ResidentState => ({
   bays: { prs: {} },
+  jobs: { byId: {} },
   queues: { admissionRefusals: {} },
 })
+
+function completeState(state: ResidentState) {
+  return { ...state, jobs: state.jobs ?? { byId: {} } }
+}
 
 /**
  * One structurally complete resident-loop test app.
@@ -33,11 +39,12 @@ const emptyState = (): ResidentState => ({
  */
 export function createResidentHarness(options: ResidentHarnessOptions) {
   const signal = { aborted: false }
+  const drainController = new AbortController()
   const warnings: ResidentWarnCall[] = []
   const stderr: string[] = []
   const stdout: string[] = []
   const stateFactory = options.state ?? emptyState
-  let state = stateFactory()
+  let state = completeState(stateFactory())
   let refreshCalls = 0
   let runCalls = 0
   const app = {
@@ -45,7 +52,7 @@ export function createResidentHarness(options: ResidentHarnessOptions) {
     state: () => state,
     refresh: async () => {
       refreshCalls += 1
-      state = stateFactory()
+      state = completeState(stateFactory())
       return state
     },
     log: {
@@ -60,6 +67,7 @@ export function createResidentHarness(options: ResidentHarnessOptions) {
     },
   } as unknown as YrdCliApp
   const io = {
+    drainSignal: drainController.signal,
     stdout: (text: string) => stdout.push(text),
     stderr: (text: string) => stderr.push(text),
   } as unknown as YrdCliIO
@@ -69,6 +77,7 @@ export function createResidentHarness(options: ResidentHarnessOptions) {
     io,
     gate,
     signal,
+    drain: () => drainController.abort(),
     warnings,
     stderr,
     stdout,

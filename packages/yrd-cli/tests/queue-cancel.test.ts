@@ -60,7 +60,7 @@ describe("queue cancel of an ACTIVE (merging) run never deadlocks the resident",
       () => Promise.reject(new JobStateConflict(MERGE_JOB_ID, "completed", "in_progress or waiting")),
       // Cycle 2: the resident keeps draining what remains, then the watch stops.
       () => {
-        h.signal.aborted = true
+        h.drain()
         return Promise.resolve([])
       },
     ])

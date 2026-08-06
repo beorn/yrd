@@ -1,5 +1,7 @@
 import { createScope, type Scope } from "@silvery/scope"
 import { createLogger, type ConditionalLogger } from "loggily"
+import { accessSync, constants } from "node:fs"
+import { delimiter, isAbsolute, resolve } from "node:path"
 import { pathReapFailure, reapOwnedPath, type PathReapResult } from "./path-reaper.ts"
 
 export { pathReapFailure, type PathReapResult } from "./path-reaper.ts"
@@ -602,8 +604,12 @@ function spawnProcess(argv: readonly string[], options: SpawnOptions): Spawned {
   // lets settlement signal the whole tree via -pid. Interactive mode passes
   // detached:false so the child remains attached to terminal job control.
   // Bun's NATIVE spawn honors this; node:child_process does not.
-  if (options.stdout === "pipe") return Bun.spawn([...argv], options)
-  const child = Bun.spawn([...argv], options)
+  const [command, ...args] = argv
+  if (command === undefined) throw new TypeError("yrd: process argv must contain an executable")
+  const executable = resolveExecutable(command, options.env)
+  const resolvedArgv = [executable, ...args]
+  if (options.stdout === "pipe") return Bun.spawn(resolvedArgv, options)
+  const child = Bun.spawn(resolvedArgv, options)
   return {
     pid: child.pid,
     stdout: null,
@@ -616,6 +622,21 @@ function spawnProcess(argv: readonly string[], options: SpawnOptions): Spawned {
       child.kill(signal)
     },
   }
+}
+
+function resolveExecutable(command: string, env: Readonly<Record<string, string>>): string {
+  if (isAbsolute(command) || command.includes("/")) return command
+  for (const directory of (env.PATH ?? "").split(delimiter)) {
+    if (directory === "") continue
+    const candidate = resolve(directory, command)
+    try {
+      accessSync(candidate, constants.X_OK)
+      return candidate
+    } catch {
+      // Keep searching the child environment's PATH.
+    }
+  }
+  return command
 }
 
 function definedEnv(input: NodeJS.ProcessEnv | undefined): Record<string, string> {

@@ -148,7 +148,7 @@ async function mergeCarrier(repo: string, sourceBase: string, carrierPin: string
 
 /** Advance authoritative main: pin `dep` to `basePin` plus an unrelated file. */
 async function advanceBase(repo: string, basePin: string): Promise<string> {
-  await git(repo, ["switch", "-q", "main"])
+  await git(repo, ["-c", "submodule.recurse=false", "switch", "-q", "main"])
   await git(repo, ["update-index", "--cacheinfo", `160000,${basePin},dep`])
   await writeFile(join(repo, "upstream.txt"), "upstream\n")
   await git(repo, ["add", "upstream.txt"])

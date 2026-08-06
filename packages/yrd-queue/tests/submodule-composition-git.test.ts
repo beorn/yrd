@@ -301,7 +301,7 @@ describe("queue-native submodule composition Git runner", () => {
   it("refuses a shallow store as retryable composition unavailability", async () => {
     const repo = await repository()
     const shallow = join(repo.root, "shallow.git")
-    await Bun.$`git clone -q --bare --depth=1 ${`file://${repo.origin}`} ${shallow}`
+    await Bun.$`git clone -q --bare --depth=1 --branch main ${`file://${repo.origin}`} ${shallow}`
     await using process = createProcess()
 
     const result = await executeQueueSubmoduleComposition(compositionPlan(repo), {

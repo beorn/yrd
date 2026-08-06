@@ -6,7 +6,7 @@
 import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { isAbsolute, join } from "node:path"
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest"
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest"
 import { runYrdProcess } from "../src/host.ts"
 import type { YrdCliIO } from "../src/types.ts"
 
@@ -48,6 +48,11 @@ printf '%s\n' '{"node":{"title":"Fixture issue","name":"fixture","version":1}}'
 `,
   )
   await chmod(join(issueToolRoot, "km"), 0o755)
+  process.env.PATH = `${issueToolRoot}:${originalPath ?? ""}`
+})
+
+beforeEach(() => {
+  if (issueToolRoot === undefined) throw new Error("issue-source fixture was not initialized")
   process.env.PATH = `${issueToolRoot}:${originalPath ?? ""}`
 })
 

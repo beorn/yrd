@@ -4,6 +4,9 @@
  * @consumer @yrd/process
  */
 import { describe, expect, it, vi } from "vitest"
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { createLogger, type Event as LogEvent } from "loggily"
 import { createProcess, shellCommand, type Spawn } from "@yrd/process"
 
@@ -12,6 +15,23 @@ function bytes(value: string): ReadableStream<Uint8Array> {
 }
 
 describe("Process", () => {
+  it("resolves bare executables from the environment supplied to the child", async () => {
+    const bin = await mkdtemp(join(tmpdir(), "yrd-process-path-"))
+    try {
+      const executable = join(bin, "fixture-command")
+      await writeFile(executable, "#!/bin/sh\nprintf fixture-path")
+      await chmod(executable, 0o755)
+      await using process = createProcess({ env: { PATH: bin } })
+
+      await expect(process.run({ argv: ["fixture-command"] })).resolves.toMatchObject({
+        exitCode: 0,
+        stdout: "fixture-path",
+      })
+    } finally {
+      await rm(bin, { recursive: true, force: true })
+    }
+  })
+
   it("closes each process span with terminal outcome and measured duration", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])

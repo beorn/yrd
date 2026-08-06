@@ -16,7 +16,7 @@ describe("queue run --watch — deprecated no-op alias of follow", () => {
     // warn emission. (Closure captures `h`; it runs only after `h` is assigned.)
     const h = harness([
       () => {
-        h.signal.aborted = true
+        h.drain()
         return Promise.resolve([])
       },
     ])
@@ -36,7 +36,7 @@ describe("queue run --watch — deprecated no-op alias of follow", () => {
   it("follow without the --watch alias emits no deprecation warn", async () => {
     const h = harness([
       () => {
-        h.signal.aborted = true
+        h.drain()
         return Promise.resolve([])
       },
     ])

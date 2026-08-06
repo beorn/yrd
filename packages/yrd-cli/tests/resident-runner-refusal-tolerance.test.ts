@@ -17,7 +17,7 @@ describe("resident runner — a busy queue never kills the watch loop (Defect 1)
       () => Promise.reject(new QueueRunningConflict("main", "R551")),
       // Cycle 2: the queue has freed; the runner keeps going and drains normally.
       () => {
-        h.signal.aborted = true
+        h.drain()
         return Promise.resolve([])
       },
     ])
@@ -48,7 +48,7 @@ describe("resident runner — a busy queue never kills the watch loop (Defect 1)
     const h = harness([
       ...Array.from({ length: 61 }, () => () => Promise.reject(new QueueRunningConflict("main", "R551"))),
       () => {
-        h.signal.aborted = true
+        h.drain()
         return Promise.resolve([])
       },
     ])
@@ -74,7 +74,7 @@ describe("resident runner — a busy queue never kills the watch loop (Defect 1)
       },
     ])
 
-    await expect(followQueueRuns(h.app, [], { interval: 10 }, h.io, h.gate)).resolves.toBe(0)
+    await expect(followQueueRuns(h.app, [], { interval: 10 }, h.io, h.gate)).resolves.toBe(3)
 
     expect(h.warnings).toHaveLength(2)
     expect(h.warnings[1]).toMatchObject({
@@ -92,7 +92,7 @@ describe("resident runner — a PR withdrawn mid-compose never kills the watch l
       // Cycle 2: the withdrawn PR is gone from the submitted set; the remaining
       // runnable PRs compose normally, then the watch stops.
       () => {
-        h.signal.aborted = true
+        h.drain()
         return Promise.resolve([])
       },
     ])
@@ -121,7 +121,7 @@ describe("resident runner — a PR withdrawn mid-compose never kills the watch l
     const h = harness([
       () => Promise.reject(new PrCheckabilityConflict("PR1578", "integrated")),
       () => {
-        h.signal.aborted = true
+        h.drain()
         return Promise.resolve([])
       },
     ])
@@ -151,7 +151,7 @@ describe("resident runner — a PR withdrawn mid-compose never kills the watch l
             }),
           ),
         () => {
-          h.signal.aborted = true
+          h.drain()
           return Promise.resolve([])
         },
       ])
@@ -172,7 +172,7 @@ describe("resident runner — tolerated skips are loggily-only (Defect 3)", () =
     const h = harness([
       () => Promise.reject(new QueueRunningConflict("main", "R551")),
       () => {
-        h.signal.aborted = true
+        h.drain()
         return Promise.resolve([])
       },
     ])
@@ -187,7 +187,7 @@ describe("resident runner — tolerated skips are loggily-only (Defect 3)", () =
     const h = harness([
       () => Promise.reject(new PrCheckabilityConflict("PR364", "withdrawn")),
       () => {
-        h.signal.aborted = true
+        h.drain()
         return Promise.resolve([])
       },
     ])

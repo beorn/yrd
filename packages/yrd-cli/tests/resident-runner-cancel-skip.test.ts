@@ -18,7 +18,7 @@ describe("resident runner — a concurrently-canceled Job never kills the watch 
       () => Promise.reject(new JobStateConflict(JOB_ID, "completed", "in_progress or waiting")),
       // Cycle 2: the runner keeps going and drains normally, then the watch stops.
       () => {
-        h.signal.aborted = true
+        h.drain()
         return Promise.resolve([])
       },
     ])

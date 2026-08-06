@@ -364,13 +364,15 @@ describe("resident merge-into-latest", () => {
 
     const output = outputIO(() => head)
     const controller = new AbortController()
+    const drain = new AbortController()
     const io: YrdCliIO = {
       ...output.io,
+      drainSignal: drain.signal,
       resolveQueueTarget: async () => ({ base: "main", sha: TARGET_BASE_SHA }),
       scope: {
         signal: controller.signal,
         sleep: async () => {
-          controller.abort()
+          drain.abort()
         },
       },
     }

@@ -762,6 +762,7 @@ describe("warm candidate pool", () => {
   })
 
   it("measures cold versus warm candidate setup and reports p50/p95", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined)
     const { repo, baseSha, baysRoot } = await repository()
     const cycles = 4
     const check = async (): Promise<JobResult<{ ok: true }>> => passed

@@ -85,7 +85,7 @@ afterEach(async () => {
 })
 
 describe("resident follow-runner lifecycle levels", () => {
-  it("narrates one admission while retaining repeated waiting-run settlement attempts", async () => {
+  it("narrates one admission while a waiting runner retries settlement internally", async () => {
     const { repo } = await queuedRunnerRepo(`base: main
 batch: 1
 checks:
@@ -112,10 +112,10 @@ checks:
       },
     } as unknown as YrdCliIO
 
-    await expect(followQueueRuns(host.app, [], { interval: 1 }, io, async () => undefined)).resolves.toBe(0)
+    await expect(followQueueRuns(host.app, [], { interval: 1 }, io, async () => undefined)).resolves.toBe(3)
 
-    // Both settlement attempts remain structured evidence; only the first may
-    // be narrated as admission, or every resident interval repeats the row.
+    // The waiting runner owns its internal settlement retries. The outer queue
+    // admission remains one structured event and therefore one human row.
     const runStarts = events.filter(
       (event): event is Extract<LogEvent, { kind: "log" }> =>
         event.kind === "log" &&
@@ -123,7 +123,7 @@ checks:
         event.props?.run === "R1" &&
         event.props?.outcome === "started",
     )
-    expect(runStarts).toHaveLength(2)
+    expect(runStarts).toHaveLength(1)
     const admittedRows = runStarts
       .map((event) => formatResidentLogLine(event, { color: false }))
       .filter((line): line is string => line?.includes("[main#1] admitted") === true)
@@ -131,7 +131,7 @@ checks:
     expect(stripAnsi(admittedRows[0]!)).toContain(
       "[main#1] admitted pr#1.1 issue=@yrd/core/21096-cli-ux/21706-runner-log-tag-link",
     )
-    expect(runStarts.map((event) => event.props?.continuation === true)).toEqual([false, true])
+    expect(runStarts.map((event) => event.props?.continuation === true)).toEqual([false])
     log.end()
   }, 15_000)
 
