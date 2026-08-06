@@ -778,17 +778,11 @@ async function readConfigFromBase(
   base: string,
   path: string,
 ): Promise<string | undefined> {
-  let sha: string | undefined
-  try {
-    sha = (await inspectGitQueueTarget({ inject: { process }, repo: repository.repo, branch: baseIdentity(base) })).sha
-  } catch {
-    // Explicit commit selectors do not name a Queue branch. Preserve that
-    // supported config authority after the remote-first branch lookup fails.
-    sha = await resolveCommit(process, repository.repo, base)
-  }
-  if (sha === undefined) {
-    raiseFailure("configuration", "config-base-missing", `yrd: config base '${base}' does not resolve to a commit`)
-  }
+  const { sha } = await inspectGitQueueTarget({
+    inject: { process },
+    repo: repository.repo,
+    branch: baseIdentity(base),
+  })
   const object = `${sha}:${path}`
   const exists = await process.run({
     argv: ["git", "-C", repository.repo, "cat-file", "-e", object],
