@@ -8,8 +8,7 @@ export default {
       command: "yrd queue run --follow",
       env: { TRIBE_NAME: "@yrd" },
       health: {
-        command:
-          '"${HAB_MODULE_ROOT:-$PWD}/tools/installed/yrd" --repo "${HAB_MODULE_SOURCE_ROOT:?}" queue list --check --json',
+        command: 'tools/installed/yrd --repo "$PWD" queue list --check --json',
       },
     },
   },
