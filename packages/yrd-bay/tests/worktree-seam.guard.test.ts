@@ -1,7 +1,7 @@
 /**
  * @failure A Yrd domain can bypass the shared worktree capability and recreate divergent add/remove safety policy.
  * @level l1
- * @consumer Every Yrd production worktree lifecycle
+ * @consumer Root `guards` project and every Yrd production worktree lifecycle
  */
 import { readdir, readFile } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
