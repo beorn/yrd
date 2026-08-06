@@ -76,6 +76,10 @@ export type YrdCliServices = Readonly<{
   config?: YrdConfig
   /** Configured base branch. */
   base?: string
+  /** Landing authority resolved by the process host from the selected base
+   * config. Direct test/app construction may omit it and use the legacy
+   * worktree-backed fallback. */
+  landing?: "expected" | "none"
   /** Exact host environment inherited by Bay child processes. */
   environment?: NodeJS.ProcessEnv
 }>

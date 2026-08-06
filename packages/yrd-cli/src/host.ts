@@ -1702,6 +1702,7 @@ async function createYrdRuntimeHost(
       ),
       recut: createGitPRRecutter({ inject: { process }, repo: repository.repo, env }),
       base: loaded.config.base,
+      landing: loaded.config.landing ?? "expected",
       checks,
       journal: Object.freeze({
         importOrphan: (sourcePath: string) =>

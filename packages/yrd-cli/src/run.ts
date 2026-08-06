@@ -3769,16 +3769,19 @@ function submitRequiredCheckContexts(
 async function refuseSubmitWithoutLandingAuthority(
   options: PrSelectionOptions,
   io: YrdCliIO,
+  services: YrdCliServices,
 ): Promise<YrdCliExitCode | undefined> {
   const repo = io.cwd ?? process.cwd()
-  const { config } = await loadYrdConfig({ repo, defaultBase: options.base ?? options.queue ?? "main" })
-  if (config.landing !== "none") return undefined
+  const landing =
+    services.landing ??
+    (await loadYrdConfig({ repo, defaultBase: options.base ?? options.queue ?? "main" })).config.landing
+  if (landing !== "none") return undefined
   // Both halves are load-bearing. WHICH repository, because a seat working
   // across two of them reads this message with no other clue; and that no
   // runner is coming, because "submit failed" invites a retry and a retry
   // cannot help.
   const message =
-    `'${repo}' declares no landing authority (.yrd.yml 'landing: none'), so its queue has no runner and ` +
+    `'${repo}' declares no landing authority (selected config 'landing: none'), so its queue has no runner and ` +
     "nothing will ever drain this submission; land the work through whatever authority that repository does " +
     "have, or set 'landing: expected' once a runner exists"
   if (jsonEnabled(options)) {
@@ -3803,7 +3806,7 @@ async function applyPrSelectionVerb(
   command: PrSelectionCommand,
 ): Promise<YrdCliExitCode> {
   if (command === "pr.submit") {
-    const unlandable = await refuseSubmitWithoutLandingAuthority(options, io)
+    const unlandable = await refuseSubmitWithoutLandingAuthority(options, io, services)
     if (unlandable !== undefined) return unlandable
     for (const context of submitRequiredCheckContexts(app, selectors, io)) {
       await runRequiredChecks(services, { ...io, cwd: context.cwd }, undefined, context.ref)

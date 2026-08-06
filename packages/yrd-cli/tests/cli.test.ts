@@ -1187,12 +1187,18 @@ describe("runYrd", () => {
     // (and every repository that has never heard of the key) is unaffected.
     const repo = mkdtempSync(join(tmpdir(), "yrd-landing-authority-"))
     try {
-      const submitInto = async (yml: string | undefined) => {
+      const submitInto = async (yml: string | undefined, authoritativeLanding?: "expected" | "none") => {
         if (yml === undefined) rmSync(join(repo, ".yrd.yml"), { force: true })
         else writeFileSync(join(repo, ".yrd.yml"), yml)
         const app = await createApp()
         const output = outputIO({ cwd: repo, resolveRevision: async () => HEAD_SHA })
-        const code = await runYrd(app, yrd("pr", "submit", "topic/direct", "--base", "main", "--json"), output.io)
+        const services: YrdCliServices = authoritativeLanding === undefined ? {} : { landing: authoritativeLanding }
+        const code = await runYrd(
+          app,
+          yrd("pr", "submit", "topic/direct", "--base", "main", "--json"),
+          output.io,
+          services,
+        )
         return { code, ...output }
       }
 
@@ -1204,6 +1210,15 @@ describe("runYrd", () => {
       expect(refused.stderr()).toContain(repo)
       expect(refused.stderr()).toContain("no landing authority")
       expect(JSON.parse(refused.stderr())).toMatchObject({
+        command: "pr.submit",
+        failure: { kind: "refusal", code: "no-landing-authority" },
+      })
+
+      // The process host has already resolved the selected config from the
+      // named base. Mutable worktree bytes cannot override that authority.
+      const baseAuthority = await submitInto("landing: expected\n", "none")
+      expect(baseAuthority.code, baseAuthority.stderr()).toBe(1)
+      expect(JSON.parse(baseAuthority.stderr())).toMatchObject({
         command: "pr.submit",
         failure: { kind: "refusal", code: "no-landing-authority" },
       })

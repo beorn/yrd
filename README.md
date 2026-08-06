@@ -1009,6 +1009,18 @@ list:
 checks: [typecheck]
 ```
 
+Landing authority is declared on the same base-selected config:
+
+```yaml
+landing: expected
+```
+
+`expected` is the backwards-compatible default when the key or config is
+absent. A repository with no landing runner declares `landing: none`; `pr
+submit` then refuses before required checks or queue mutation. `--config`
+selects the same base-relative authority for this gate, so mutable worktree
+bytes cannot override the base declaration.
+
 Queue progress thresholds share this one strict declaration surface:
 
 ```yaml
