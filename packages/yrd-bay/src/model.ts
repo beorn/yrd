@@ -619,6 +619,31 @@ export type PR = Readonly<{
   detail?: string
 }>
 
+export type ParsedPRSelector = Readonly<{
+  pr: PRId
+  revision?: number
+}>
+
+/** Parse the identities Yrd itself renders. Branch/name aliases deliberately
+ * stay outside this grammar and continue through the generic selector path. */
+export function parsePRSelector(selector: string): ParsedPRSelector | undefined {
+  const match = /^pr#?([a-z0-9_-]+)(?:\.(\d+))?$/iu.exec(selector.trim())
+  const id = match?.[1]
+  if (id === undefined) return undefined
+  const revisionText = match?.[2]
+  const revision = revisionText === undefined ? undefined : Number(revisionText)
+  if (revision !== undefined && (!Number.isSafeInteger(revision) || revision <= 0)) return undefined
+  return { pr: `PR${id}`, ...(revision === undefined ? {} : { revision }) }
+}
+
+/** Canonical copy-pasteable PR revision identity used by every text renderer. */
+export function formatPRRevisionSelector(pr: PRId, revision: number | Pick<PRRev, "n">): string {
+  const parsed = parsePRSelector(pr)
+  const value = (parsed?.pr ?? pr).replace(/^PR/iu, "")
+  const number = typeof revision === "number" ? revision : revision.n
+  return `pr#${value}.${number}`
+}
+
 export function currentPRRev(pr: Pick<PR, "id" | "revs">): PRRev {
   const revision = pr.revs.at(-1)
   if (revision === undefined) throw new Error(`yrd: PR '${pr.id}' has no revision`)
@@ -967,29 +992,52 @@ export function resolveBay(state: BaysState, selector: string): Bay | undefined 
  * always addresses that specific PR, terminal or not, ahead of this preference.
  * Mutating verbs enforce the live requirement themselves via requireLivePR —
  * this primitive stays verb-agnostic and read-biased. */
-export function resolvePRMatch(state: BaysState, selector: string): SelectorMatch<PR> | undefined {
-  return resolveSelectorMatch(
-    selector,
-    Object.values(state.prs)
-      .toSorted((left, right) => compareNatural(right.id, left.id))
-      .map((pr) => {
-        const bay = pr.bay === undefined ? undefined : state.byId[pr.bay]
-        return {
-          canonical: pr.id,
-          aliases: [
-            pr.branch,
-            ...(pr.name === undefined ? [] : [pr.name]),
-            ...(bay === undefined ? [] : [bay.id, bay.name, bay.branch]),
-          ],
-          value: pr,
-        }
-      }),
-    { kind: "PR", prefer: isLivePR },
-  )
+export type PRSelectorMatch = SelectorMatch<PR> & Readonly<{ revision?: PRRev }>
+
+export function resolvePRMatch(state: BaysState, selector: string): PRSelectorMatch | undefined {
+  const parsed = parsePRSelector(selector)
+  const candidates = Object.values(state.prs)
+    .toSorted((left, right) => compareNatural(right.id, left.id))
+    .map((pr) => {
+      const bay = pr.bay === undefined ? undefined : state.byId[pr.bay]
+      return {
+        canonical: pr.id,
+        aliases: [
+          pr.branch,
+          ...(pr.name === undefined ? [] : [pr.name]),
+          ...(bay === undefined ? [] : [bay.id, bay.name, bay.branch]),
+        ],
+        value: pr,
+      }
+    })
+  const resolve = (input: string) => resolveSelectorMatch(input, candidates, { kind: "PR", prefer: isLivePR })
+  const matched = parsed === undefined ? resolve(selector) : (resolve(parsed.pr) ?? resolve(selector))
+  if (matched === undefined) return undefined
+  if (parsed?.revision === undefined) return matched
+  const revision = matched.value.revs.find((candidate) => candidate.n === parsed.revision)
+  return revision === undefined ? undefined : { ...matched, revision }
+}
+
+function projectPRRevision(pr: PR, revision: PRRev): PR {
+  if (revision === currentPRRev(pr)) return pr
+  const index = pr.revs.indexOf(revision)
+  if (index < 0) return pr
+  return {
+    ...pr,
+    revs: pr.revs.slice(0, index + 1),
+    reviews: pr.reviews.filter((review) => review.revision <= revision.n),
+    comments: pr.comments.filter((comment) => comment.revision <= revision.n),
+    checkRequests: pr.checkRequests.filter((request) => request.revision <= revision.n),
+    ...(pr.regressions === undefined
+      ? {}
+      : { regressions: pr.regressions.filter((regression) => regression.revision <= revision.n) }),
+  }
 }
 
 export function resolvePR(state: BaysState, selector: string): PR | undefined {
-  return resolvePRMatch(state, selector)?.value
+  const matched = resolvePRMatch(state, selector)
+  if (matched === undefined) return undefined
+  return matched.revision === undefined ? matched.value : projectPRRevision(matched.value, matched.revision)
 }
 
 declare const liveBrand: unique symbol
@@ -1014,6 +1062,16 @@ export function requireLivePR(state: BaysState, selector: string): LivePR {
     raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
   }
   const pr = resolution.value
+  if (resolution.revision !== undefined) {
+    const current = currentPRRev(pr)
+    if (resolution.revision.n !== current.n) {
+      raiseFailure(
+        "refusal",
+        "historical-pr-revision",
+        `yrd: PR '${pr.id}' selector targets historical revision ${resolution.revision.n}; current revision is ${current.n}`,
+      )
+    }
+  }
   // A canonical-id match ('pr1' folds to PR1) passes a terminal PR through to
   // the verb's own state guard; an alias (branch/name) match must name a live
   // delivery. The fold that decides this lives in resolveSelectorMatch, not here.

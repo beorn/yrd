@@ -3,7 +3,9 @@ import { pathToFileURL } from "node:url"
 import type React from "react"
 import {
   currentPRRev,
+  formatPRRevisionSelector,
   isNonCheckablePRState,
+  parsePRSelector,
   prDeliveryState,
   prCorrelation,
   prHead,
@@ -114,7 +116,7 @@ export { TitledBox, timelineMetric } from "./queue-view-primitives.tsx"
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 
 function prIdValue(pr: string): string {
-  return pr.replace(/^pr(?:[-#])?/iu, "")
+  return (parsePRSelector(pr)?.pr ?? pr).replace(/^PR/iu, "")
 }
 
 /**
@@ -132,7 +134,8 @@ function retrySuffix(times: number | undefined): string {
 }
 
 export function formatQueuePrId(pr: string, revision: number | string, times?: number): string {
-  return `${formatNounId("pr", prIdValue(pr), revision)}${retrySuffix(times)}`
+  const parsedRevision = typeof revision === "number" ? revision : Number(revision)
+  return `${formatPRRevisionSelector(pr, parsedRevision)}${retrySuffix(times)}`
 }
 
 type QueueNounIdProps = Omit<React.ComponentProps<typeof NounId>, "noun" | "value" | "revision">

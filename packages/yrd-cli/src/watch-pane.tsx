@@ -22,7 +22,7 @@ import {
   useWindowSize,
   type ListViewHandle,
 } from "silvery"
-import { prRevisionNumber, type BaysState, type PR } from "@yrd/bay"
+import { formatPRRevisionSelector, prRevisionNumber, type BaysState, type PR } from "@yrd/bay"
 import {
   QUEUE_TIMELINE_STATUS_BUCKETS,
   QueueDetailRunHeader,
@@ -950,7 +950,7 @@ type QueueWatchCursorOp =
   | Readonly<{ type: "jump-bottom" }>
 
 function queueWatchCursorLabel(row: QueueWatchCursorRow): string {
-  return `pr#${row.pr.replace(/^pr(?:[-#])?/iu, "")}.${row.revision}`
+  return formatPRRevisionSelector(row.pr, row.revision)
 }
 
 function queueWatchManualCursorMode(row: QueueWatchCursorRow, index: number): QueueWatchCursorMode {

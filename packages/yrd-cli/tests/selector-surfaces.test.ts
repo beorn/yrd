@@ -186,6 +186,11 @@ describe("case-insensitive CLI selector surfaces", () => {
       expected: { command: "pr.runs", pr: { id: "PR1" } },
     },
     {
+      surface: "pr runs (copy-pasted display identity)",
+      args: ["pr", "runs", "pr#1.1", "--json"],
+      expected: { command: "pr.runs", pr: { id: "PR1", revs: [{ n: 1 }] } },
+    },
+    {
       surface: "pr runs (branch alias, folded)",
       args: ["pr", "runs", "topic/one", "--json"],
       expected: { command: "pr.runs", pr: { id: "PR1", branch: "Topic/One" } },

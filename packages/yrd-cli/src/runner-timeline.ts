@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { hyperlink } from "@silvery/ansi"
+import { formatPRRevisionSelector } from "@yrd/bay"
 import type { Event } from "loggily"
 import { artifactHref, artifactLabel, artifactLocation } from "./artifact-reference.ts"
 import { failureSlug } from "./failure-slug.ts"
@@ -217,8 +218,7 @@ function stepToken(props: OutcomeProps): string | undefined {
 
 function prRef(pr: PRProps): string | undefined {
   if (pr.pr === undefined) return undefined
-  const number = /^PR\d+$/iu.test(pr.pr) ? pr.pr.slice(2) : pr.pr
-  return `pr#${number}.${pr.revision ?? 1}`
+  return formatPRRevisionSelector(pr.pr, pr.revision ?? 1)
 }
 
 function admissionTail(props: OutcomeProps, color: boolean): string {
