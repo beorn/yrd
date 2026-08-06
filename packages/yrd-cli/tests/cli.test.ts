@@ -114,6 +114,7 @@ import {
 import { withLiveRenderer } from "../src/live-renderer.ts"
 import * as runInternals from "../src/run.ts"
 import { QueueReadBoundary } from "../src/queue-read-boundary.ts"
+import { LandingAuthorityBoundary } from "../src/landing-authority-boundary.ts"
 import { queueStats } from "../src/time-stats.ts"
 import type { YrdCliState } from "../src/types.ts"
 import { YRD_VERSION } from "../src/version.ts"
@@ -1192,7 +1193,7 @@ describe("runYrd", () => {
         else writeFileSync(join(repo, ".yrd.yml"), yml)
         const app = await createApp()
         const output = outputIO({ cwd: repo, resolveRevision: async () => HEAD_SHA })
-        const services: YrdCliServices = authoritativeLanding === undefined ? {} : { landing: authoritativeLanding }
+        const services = authoritativeLanding === undefined ? {} : { [LandingAuthorityBoundary]: authoritativeLanding }
         const code = await runYrd(
           app,
           yrd("pr", "submit", "topic/direct", "--base", "main", "--json"),

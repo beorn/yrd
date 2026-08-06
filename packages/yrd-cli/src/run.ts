@@ -189,6 +189,7 @@ import { readInstalledBaselines } from "./installed-baseline.ts"
 import { renderRemedyStep } from "@yrd/intent"
 import { admitPinIntent } from "./intent-admission.ts"
 import { changedSubmodulePins, unpublishedChangedSubmodulePins } from "./pr-submodule-publication.ts"
+import { landingAuthorityBoundary } from "./landing-authority-boundary.ts"
 // The live watch UI is loaded lazily at its single use site in watchQueue(): it is the only
 // module that pulls silvery's SplitPane, and eagerly importing it here would make every CLI
 // path (yrd --version, submit, one-shot queue) require the interactive TUI dependency at module
@@ -3773,7 +3774,7 @@ async function refuseSubmitWithoutLandingAuthority(
 ): Promise<YrdCliExitCode | undefined> {
   const repo = io.cwd ?? process.cwd()
   const landing =
-    services.landing ??
+    landingAuthorityBoundary(services) ??
     (await loadYrdConfig({ repo, defaultBase: options.base ?? options.queue ?? "main" })).config.landing
   if (landing !== "none") return undefined
   // Both halves are load-bearing. WHICH repository, because a seat working
