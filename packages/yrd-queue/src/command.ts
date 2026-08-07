@@ -47,6 +47,7 @@ import {
   CommandDiagnosticSchema as SharedCommandDiagnosticSchema,
   type CommandDiagnostic as SharedCommandDiagnostic,
 } from "./check-attribution.ts"
+import { deterministicParentDate } from "./deterministic-parent-date.ts"
 
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 
@@ -968,6 +969,10 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
     parents: readonly string[],
     message: string,
   ): Promise<string> => {
+    const date = await deterministicParentDate(
+      parents,
+      async (parent) => (await run(repo, ["show", "-s", "--format=%ct", parent])).stdout,
+    )
     const result = await process.run({
       argv: ["git", "-C", repo, "commit-tree", tree, ...parents.flatMap((parent) => ["-p", parent])],
       cwd: repo,
@@ -975,10 +980,10 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
         ...env,
         GIT_AUTHOR_NAME: "Yrd Queue",
         GIT_AUTHOR_EMAIL: "yrd-queue@example.invalid",
-        GIT_AUTHOR_DATE: "946684800 +0000",
+        GIT_AUTHOR_DATE: date,
         GIT_COMMITTER_NAME: "Yrd Queue",
         GIT_COMMITTER_EMAIL: "yrd-queue@example.invalid",
-        GIT_COMMITTER_DATE: "946684800 +0000",
+        GIT_COMMITTER_DATE: date,
       },
       stdin: `${message}\n`,
       timeoutMs: GIT_TIMEOUT_MS,
@@ -1977,7 +1982,12 @@ async function prepareCandidate(
       const resolved = await resolveCandidateSubmoduleConflict(git, repo, path)
       if (resolved.status === "composed") {
         submoduleResolutions.push(...resolved.output)
-        const wrapper = await stabilizeGeneratedRootWrapper(git, path, before)
+        const wrapper = await stabilizeGeneratedRootWrapper(
+          git,
+          path,
+          before,
+          `yrd: merge ${pr.id} revision ${String(pr.revision)}`,
+        )
         if (wrapper !== undefined) return wrapper
         continue
       }
@@ -2002,7 +2012,12 @@ async function prepareCandidate(
         }),
       }
     }
-    const wrapper = await stabilizeGeneratedRootWrapper(git, path, before)
+    const wrapper = await stabilizeGeneratedRootWrapper(
+      git,
+      path,
+      before,
+      `yrd: merge ${pr.id} revision ${String(pr.revision)}`,
+    )
     if (wrapper !== undefined) return wrapper
   }
   return {
@@ -2444,6 +2459,7 @@ async function stabilizeGeneratedRootWrapper(
   git: Git,
   path: string,
   before: string,
+  message: string,
 ): Promise<CandidateFailure | undefined> {
   const generated = await git.commit(path, "HEAD")
   if (generated === before) return undefined
@@ -2456,7 +2472,7 @@ async function stabilizeGeneratedRootWrapper(
     )
   }
   const tree = (await git.run(path, ["rev-parse", `${generated}^{tree}`])).stdout
-  const stable = await git.commitTree(path, tree, parents, "yrd: generated root wrapper")
+  const stable = await git.commitTree(path, tree, parents, message)
   const updated = await git.run(path, ["update-ref", "HEAD", stable, generated], true)
   return updated.code === 0
     ? undefined

@@ -4,6 +4,7 @@ import type {
   QueueSubmoduleCompositionPlan,
   QueueSubmodulePinResolution,
 } from "./submodule-composition.ts"
+import { deterministicParentDate } from "./deterministic-parent-date.ts"
 
 const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu
 
@@ -278,9 +279,10 @@ async function createCompositionCommit(
   resolution: QueueSubmoduleCommitResolution,
   tree: string,
 ): Promise<string> {
-  const currentTime = await commitTime(context, store, resolution.currentSha)
-  const incomingTime = await commitTime(context, store, resolution.incomingSha)
-  const date = `${Math.max(currentTime, incomingTime)} +0000`
+  const parents = [resolution.currentSha, resolution.incomingSha]
+  const date = await deterministicParentDate(parents, (parent) =>
+    requiredGit(context, store, ["show", "-s", "--format=%ct", parent], "read parent time"),
+  )
   const env = {
     ...context.env,
     GIT_AUTHOR_NAME: "Yrd Queue",
@@ -294,20 +296,12 @@ async function createCompositionCommit(
     await requiredGit(
       context,
       store,
-      ["commit-tree", tree, "-p", resolution.currentSha, "-p", resolution.incomingSha],
+      ["commit-tree", tree, ...parents.flatMap((parent) => ["-p", parent])],
       "create composition commit",
       { stdin: `${resolution.message}\n`, env },
     ),
     "create composition commit",
   )
-}
-
-async function commitTime(context: GitContext, store: string, sha: string): Promise<number> {
-  const output = await requiredGit(context, store, ["show", "-s", "--format=%ct", sha], "read parent time")
-  if (!/^\d+$/u.test(output)) throw new Error(`parent '${sha}' has invalid commit time '${output}'`)
-  const timestamp = Number(output)
-  if (!Number.isSafeInteger(timestamp)) throw new Error(`parent '${sha}' commit time is outside the safe range`)
-  return timestamp
 }
 
 async function publishComposition(
