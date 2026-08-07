@@ -41,7 +41,8 @@ import {
   type QueueConflictStage,
   type QueueTreeConflict,
 } from "./submodule-composition.ts"
-import { createGitWorktreeStore, materializeSubmodules } from "@yrd/bay"
+import { materializeSubmodules } from "git-super/submodules"
+import { createGitWorktreeStore } from "git-super/worktree"
 import {
   CommandDiagnosticSchema as SharedCommandDiagnosticSchema,
   type CommandDiagnostic as SharedCommandDiagnostic,

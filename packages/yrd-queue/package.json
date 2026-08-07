@@ -14,6 +14,7 @@
     "@yrd/job": "workspace:*",
     "@yrd/intent": "workspace:*",
     "@yrd/process": "workspace:*",
+    "git-super": "github:beorn/git-super#3d3199bc04c9237416da204547a2ccb081b03d58",
     "zod": "^4.4.3"
   }
 }

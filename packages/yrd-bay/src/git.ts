@@ -3,7 +3,7 @@ import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 import type { JobResult } from "@yrd/job"
 import type { Process } from "@yrd/process"
-import { createGitWorktreeStore, type Git } from "./git-worktree-store.ts"
+import { createGitWorktreeStore, type Git } from "git-super/worktree"
 import type { BayWorkspace } from "./plugin.ts"
 import type {
   CheckpointBayInput,

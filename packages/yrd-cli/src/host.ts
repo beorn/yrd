@@ -5,12 +5,12 @@ import { hostname } from "node:os"
 import { join, relative, resolve, sep } from "node:path"
 import { clearLine, cursorTo } from "node:readline"
 import { createScope, type Scope } from "@silvery/scope"
+import { createGitWorktreeStore } from "git-super/worktree"
 import {
   createBayJobDefs,
   createDeploymentJobDefs,
   createGitDeploymentStore,
   createGitPushReceiver,
-  createGitWorktreeStore,
   createGitWorkspace,
   baseIdentity,
   loadGitPushReceiver,

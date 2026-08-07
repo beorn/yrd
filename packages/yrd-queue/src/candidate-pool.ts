@@ -4,7 +4,8 @@ import { join } from "node:path"
 import type { RunnerContextRequest, RunnerContexts, RuntimeContext } from "@yrd/job"
 import type { Process } from "@yrd/process"
 import type { ConditionalLogger } from "loggily"
-import { createGitWorktreeStore, materializeSubmodules, type GitWorktreeStore } from "@yrd/bay"
+import { materializeSubmodules } from "git-super/submodules"
+import { createGitWorktreeStore, type GitWorktreeStore } from "git-super/worktree"
 
 /**
  * Bounded warm candidate-worktree pool (merge-queue R40).

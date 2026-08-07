@@ -1,9 +1,9 @@
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { createGitWorktreeStore } from "@yrd/bay"
 import { parseJobLaunch, type JobContext, type JobResult } from "@yrd/job"
 import type { Process, ProcessResult } from "@yrd/process"
+import { createGitWorktreeStore } from "git-super/worktree"
 import type { ContestEvaluatorDef, ContestEvaluatorInput, EvaluatorResult } from "./types.ts"
 import {
   FULL_SHA,

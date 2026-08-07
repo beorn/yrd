@@ -5,8 +5,8 @@ import { join, resolve } from "node:path"
 import { JsonSchema, type JsonValue } from "@yrd/core"
 import { createJobDef, type JobDef } from "@yrd/job"
 import type { Process } from "@yrd/process"
+import { createGitWorktreeStore, type GitWorktreeStoreOptions } from "git-super/worktree"
 import * as z from "zod"
-import { createGitWorktreeStore, type GitWorktreeStoreOptions } from "./git-worktree-store.ts"
 
 export type DeploymentPin = "tip" | "last-green"
 
