@@ -2544,6 +2544,12 @@ describe("Queue command adapters", () => {
     const utcBytes = utc.sha === undefined ? undefined : await git(fixture.repo, ["cat-file", "commit", utc.sha])
     const pacificBytes =
       pacific.sha === undefined ? undefined : await git(fixture.repo, ["cat-file", "commit", pacific.sha])
+    if (utc.sha === undefined) throw new Error("UTC preparation did not produce a candidate")
+    const parents = (await git(fixture.repo, ["show", "-s", "--format=%P", utc.sha])).split(/\s+/u)
+    const parentTimes = await Promise.all(
+      parents.map(async (parent) => Number(await git(fixture.repo, ["show", "-s", "--format=%ct", parent]))),
+    )
+    const candidateTime = Math.max(...parentTimes)
 
     expect(authoredOutcome).toMatchObject({
       error: {
@@ -2569,6 +2575,15 @@ describe("Queue command adapters", () => {
     expect(utc).toMatchObject({ mergeability: "mergeable", sha: expect.stringMatching(/^[0-9a-f]{40}$/u) })
     expect(pacific).toMatchObject({ mergeability: "mergeable", sha: utc.sha })
     expect(pacificBytes).toBe(utcBytes)
+    expect(await git(fixture.repo, ["show", "-s", "--format=%at:%ct", utc.sha])).toBe(
+      `${candidateTime}:${candidateTime}`,
+    )
+    expect(await git(fixture.repo, ["log", "-1", "--format=%H", `--since=@${candidateTime - 1}`, utc.sha])).toBe(
+      utc.sha,
+    )
+    expect(await git(fixture.repo, ["show", "-s", "--format=%s", utc.sha])).toBe(
+      `yrd: merge ${linear.id} revision ${linear.revision}`,
+    )
   }, 30_000)
 
   it("refuses an already-resolved stale merge tip that would cleanly drop landed commits", async () => {
