@@ -8279,7 +8279,7 @@ function buildProgram(
   const installed = (): YrdCliApp => runtimeApp ?? configuration("command runtime is not initialized")
   const installedServices = (): YrdCliServices => runtimeServices
   const program = new CliCommand(name)
-    .description(projection === "bay" ? "manage isolated Git work bays" : "yrd (shipyard) — agentic software delivery")
+    .description(projection === "bay" ? "manage isolated Git work bays" : "yrd (shipyard) — a local merge queue for agent teams")
     .showSuggestionAfterError()
   program.helpCommand(false)
   program.exitOverride()

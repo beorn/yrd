@@ -4,6 +4,8 @@
 
 **Sovereign software delivery for agent teams.**
 
+**yrd is a merge queue for AI agent teams — and it runs completely locally.** You submit a merge request (a PR) — a branch tied to an issue — and yrd tests it against the latest main and merges it, one at a time, in order; nothing else writes to main. If a merge request fails, you get the reason and the fix. Why a queue at all: two green branches can still break main when combined — **yrd tests the merged result, not your branch.** Pluggable where it meets the world: git mechanics (git-super), workspaces (bays), and issue trackers (GitHub, Linear, Jira, or any local tracker).
+
 **Agents are fast!** Unleash 100 on one machine. What could go wrong?
 
 - **GitHub feels like the DMV.** Agents wait in a remote CI queue you don't control.
