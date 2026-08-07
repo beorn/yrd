@@ -124,6 +124,25 @@ describe("pin-intent admission (22668 phase 1)", () => {
     expect(verdict.relation).toBe("noop")
   })
 
+  it("refuses when the merge-time pin no longer matches the authored CAS guard", async () => {
+    const { repo, component, basePin } = await fixture()
+    const target = await publish(component, "two")
+
+    const verdict = await admitPinIntent({
+      process,
+      repo,
+      base: "main",
+      component: "components/alpha",
+      target,
+      expectedCurrentPin: "f".repeat(40),
+    })
+
+    expect(verdict.admitted).toBe(false)
+    if (verdict.admitted) throw new Error("unreachable")
+    expect(verdict.code).toBe("intent-pin-moved")
+    expect(verdict.evidence).toEqual({ component: "components/alpha", target, currentPin: basePin })
+  })
+
   it("refuses an unknown component and names the declared ones", async () => {
     const { repo, component } = await fixture()
     const target = await publish(component, "two")

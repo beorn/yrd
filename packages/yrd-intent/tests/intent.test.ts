@@ -85,7 +85,7 @@ async function submit(
   })
 }
 
-describe("PinIntentV1 records (22668 phase 1, dark)", () => {
+describe("PinIntentV1 journal records (22668 phase 1)", () => {
   it("admits an intent as an open record with a human counter id", async () => {
     await using app = await createApp()
     const record = await submit(app, { intentId: uuid(1), target: TARGET })

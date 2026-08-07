@@ -185,8 +185,9 @@ async function baseGitlinks(
   for (const entry of raw.split("\0")) {
     if (entry === "") continue
     const [meta, path] = entry.split("\t")
-    if (meta === undefined || path === undefined)
-      {throw new Error(`yrd: git ls-tree returned an invalid entry: ${entry}`)}
+    if (meta === undefined || path === undefined) {
+      throw new Error(`yrd: git ls-tree returned an invalid entry: ${entry}`)
+    }
     const [mode, , sha] = meta.split(" ")
     if (mode === "160000" && sha !== undefined) gitlinks.set(path, sha)
   }

@@ -89,6 +89,7 @@ import {
   CandidateSchema,
   IntegrationProofSchema,
   QueuePauseSchema,
+  QueueMemberIdSchema,
   QueueRecordSchema,
   ReplayQueueRecordSchema,
   Queues,
@@ -172,7 +173,6 @@ export function isQueueRunningConflict(error: unknown): error is QueueRunningCon
 const StepNameSchema = z.string().regex(/^[a-z][a-z0-9_-]*$/iu)
 const QueueRequirementSchema = z.enum(["review"])
 const RunIdSchema = z.string().trim().min(1)
-const QueueMemberIdSchema = z.union([PRIdSchema, z.string().regex(/^I\d+$/u)])
 const CandidateCreatedSchema = CandidateSchema.omit({ createdAt: true })
 const StepExecutionSchema = z
   .object({
@@ -643,7 +643,6 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   pause(args: PauseQueueArgs): Promise<QueuePause>
   resume(base: string): Promise<void>
   run(args: QueueRunArgs, options: QueueRunOptions): Promise<readonly Run[]>
-  runIntent(args: QueueIntentRunArgs, options: QueueRunOptions): Promise<QueueIntentRunResult>
   waiting(selector: string, step?: string): WaitingQueueStep
   waitingAdmission(selector: string, step?: string): WaitingAdmissionStep | undefined
   finish(selector: string, completion: FinishQueueArgs, options: RunJobOptions): Promise<Run>
@@ -672,14 +671,14 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   status(base: string): QueueSummary
 }>
 
-export type QueueIntentRunArgs = Readonly<{
+type QueueIntentRunArgs = Readonly<{
   intent: PinIntent
   base: string
   /** Exact base is optional only when Queue has an injected base resolver. */
   baseSha?: string
   steps?: readonly string[]
 }>
-export type QueueIntentRunResult =
+type QueueIntentRunResult =
   | Readonly<{ outcome: "run"; run: Run }>
   | Readonly<{ outcome: "noop" | "refused"; intent: PinIntent }>
 
@@ -1992,7 +1991,6 @@ function createQueue<Shape extends PRShape>(
       }
       await admitPRRevision(pr, baseSha, options)
     },
-    runIntent,
     async run(args, runOptions) {
       return observeYrdLifecycle(
         log,
@@ -3025,15 +3023,23 @@ function createQueueCommands(
         if (requiresPreparedCandidate && args.candidate === undefined) {
           throw new Error("yrd: intent queue run requires prepared Candidate facts")
         }
+        const reuse = explicitStepAuthority
+          ? undefined
+          : reusableIntentPrefix(state, candidateSnapshots, args.candidate?.treeSha, selected)
+        const remaining = reuse === undefined ? selected : selected.slice(reuse.count)
+        if (remaining.length === 0) return { events: [] }
         return startRun(
           state.queues,
           Queues.nextId(state.queues),
           candidateSnapshots,
           candidateBaseSha,
           args.candidate,
-          selected,
+          remaining,
           selection,
-          prShape(candidateSnapshots),
+          reuse?.shape ?? prShape(candidateSnapshots),
+          undefined,
+          {},
+          reuse === undefined ? undefined : { run: reuse.run, results: reuse.shape.results },
         )
       }
       const prs = runnablePRs(state, args, steps, new Set(), { explicitStepAuthority })
@@ -6376,6 +6382,31 @@ function reusablePrefix(
   if (cached === undefined || !Queues.succeeded(cached)) return undefined
   const record = Queues.record(state.queues, cached.id)
   return { run: cached.id, count: prefix.length, shape: shapeThrough(record, state.jobs) }
+}
+
+function reusableIntentPrefix(
+  state: DeepReadonly<RuntimeState>,
+  snapshots: readonly DeepReadonly<PRSnapshot>[],
+  treeSha: string | undefined,
+  selected: readonly RuntimeStep[],
+): Readonly<{ run: RunId; count: number; shape: PRShape }> | undefined {
+  const first = snapshots[0]
+  if (first?.intent === undefined || treeSha === undefined) return undefined
+  const boundary = selected.findIndex((step) => step.kind === "merge")
+  const prefix = boundary < 0 ? selected : selected.slice(0, boundary)
+  if (prefix.length === 0 || prefix.some((step) => step.classification === "base")) return undefined
+  const record = Queues.values(state.queues).findLast((candidateRun) => {
+    const candidate = state.queues.candidates[candidateRun.candidateId]
+    if (candidate?.treeSha !== treeSha || candidate.queueId !== queueIdentity(first)) return false
+    if (!samePlan(candidateRun.steps.slice(0, prefix.length), prefix)) return false
+    const jobs = queueJobs(candidateRun, state.jobs)
+    return prefix.every((_step, index) => {
+      const job = jobs[index]
+      return job !== undefined && jobSucceeded(job)
+    })
+  })
+  if (record === undefined) return undefined
+  return { run: record.id, count: prefix.length, shape: shapeThrough(record, state.jobs, prefix.length) }
 }
 
 function runnablePRs(

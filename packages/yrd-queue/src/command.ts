@@ -158,6 +158,12 @@ export type GitCheckComparisonEvidence = Readonly<z.infer<typeof GitCheckCompari
 export const GitCheckEvidenceSchema = CommandEvidenceSchema.extend({
   baseSha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
   candidateSha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
+  /** Tree identity makes candidate-class evidence reusable when only the
+   * synthesized commit's parent changed. Optional only for legacy journals. */
+  candidateTreeSha: z
+    .string()
+    .regex(/^[0-9a-f]{40,64}$/iu)
+    .optional(),
   candidateRef: z.string().min(1),
   sourceRewrites: z.array(SourceRewriteSchema).optional(),
   submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),
@@ -169,6 +175,7 @@ export type GitCheckEvidence = Readonly<z.infer<typeof GitCheckEvidenceSchema>>
 const PinnedCandidateSchema = GitCheckEvidenceSchema.pick({
   baseSha: true,
   candidateSha: true,
+  candidateTreeSha: true,
   candidateRef: true,
   sourceRewrites: true,
   submoduleResolutions: true,
@@ -1889,7 +1896,7 @@ async function prepareCandidate(
         currentPin === pr.intent.evaluated.target
           ? []
           : [{ path: pr.intent.authored.component, sha: pr.intent.evaluated.target }],
-        `chore(${pr.intent.authored.component.split("/").at(-1) ?? pr.intent.authored.component}): advance pin to ${pr.intent.evaluated.target.slice(0, 12)} [${pr.intent.authored.issue.id}]`,
+        pinIntentCommitMessage(pr.intent.authored.component, pr.intent.evaluated.target, pr.intent.authored.issue.id),
       )
       if (synthesized.status === "failed") return synthesized
       submoduleResolutions.push({
@@ -2569,7 +2576,7 @@ export async function synthesizePinIntentCarrier(options: {
         path,
         input.baseSha,
         priorPin === input.target ? [] : [{ path: input.component, sha: input.target }],
-        `chore(${input.component.split("/").at(-1) ?? input.component}): advance pin to ${input.target.slice(0, 12)} [${input.issue}]`,
+        pinIntentCommitMessage(input.component, input.target, input.issue),
       )
       if (synthesized.status === "failed") {
         throw createFailure({ kind: "refusal", code: synthesized.error.code, message: synthesized.error.message })
@@ -2589,6 +2596,10 @@ export async function synthesizePinIntentCarrier(options: {
   )
   if (outcome.status === "completed" && outcome.conclusion === "success") return outcome.output
   throw new Error("yrd: pin-intent carrier synthesis did not complete")
+}
+
+function pinIntentCommitMessage(component: string, target: string, issue: string): string {
+  return `chore(${component.split("/").at(-1) ?? component}): advance pin to ${target.slice(0, 12)} [${issue}]`
 }
 
 function withAuthoredRootWorkflow(failure: CandidateFailure, pr: string): CandidateFailure {
@@ -4872,6 +4883,7 @@ async function withPinnedCandidate<Output extends JsonValue>(
       PinnedCandidateSchema.parse({
         baseSha: target.sha,
         candidateSha: candidate.output.sha,
+        candidateTreeSha: (await git.run(path, ["rev-parse", `${candidate.output.sha}^{tree}`])).stdout,
         candidateRef: pinned.ref,
         ...(candidate.output.sourceRewrites.length === 0 ? {} : { sourceRewrites: candidate.output.sourceRewrites }),
         ...(candidate.output.submoduleResolutions.length === 0
@@ -5261,23 +5273,41 @@ async function validatePinnedCandidate(
   baseSha: string,
   checked: PinnedCandidate,
 ): Promise<PinnedCandidateResult> {
+  let pinned = checked
   if (checked.baseSha !== baseSha) {
-    return {
-      error: {
-        code: "stale-check",
-        message: `queue '${primaryPR(input).base}' moved from checked base '${checked.baseSha}' to '${baseSha}'`,
-      },
+    const current = input.candidate
+    const treeEquivalent =
+      primaryPR(input).intent !== undefined &&
+      checked.candidateTreeSha !== undefined &&
+      current?.treeSha === checked.candidateTreeSha &&
+      current.sha !== undefined &&
+      current.ref !== undefined
+    if (!treeEquivalent) {
+      return {
+        error: {
+          code: "stale-check",
+          message: `queue '${primaryPR(input).base}' moved from checked base '${checked.baseSha}' to '${baseSha}'`,
+        },
+      }
     }
+    pinned = PinnedCandidateSchema.parse({
+      baseSha,
+      candidateSha: current.sha,
+      candidateTreeSha: current.treeSha,
+      candidateRef: current.ref,
+      ...(current.sourceRewrites === undefined ? {} : { sourceRewrites: current.sourceRewrites }),
+      ...(current.submoduleResolutions === undefined ? {} : { submoduleResolutions: current.submoduleResolutions }),
+    })
   }
-  if ((await git.commit(repo, checked.candidateRef)) !== checked.candidateSha) {
+  if ((await git.commit(repo, pinned.candidateRef)) !== pinned.candidateSha) {
     return { error: { code: "stale-check", message: "checked candidate ref moved" } }
   }
-  const sourceRefError = await sourceCandidateRefError(git, repo, checked.sourceRewrites ?? [])
+  const sourceRefError = await sourceCandidateRefError(git, repo, pinned.sourceRewrites ?? [])
   if (sourceRefError !== undefined) return { error: { code: "invalid-candidate", message: sourceRefError } }
   const finalSources = new Map<string, SourceRewrite>()
-  for (const source of checked.sourceRewrites ?? []) finalSources.set(source.repo, source)
+  for (const source of pinned.sourceRewrites ?? []) finalSources.set(source.repo, source)
   for (const source of finalSources.values()) {
-    if ((await readGitlink(git, repo, checked.candidateSha, source.repo)) !== source.newTipSha) {
+    if ((await readGitlink(git, repo, pinned.candidateSha, source.repo)) !== source.newTipSha) {
       return {
         error: {
           code: "invalid-candidate",
@@ -5287,9 +5317,9 @@ async function validatePinnedCandidate(
     }
   }
   const finalResolutions = new Map<string, QueueSubmoduleResolutionEvidence>()
-  for (const resolution of checked.submoduleResolutions ?? []) finalResolutions.set(resolution.path, resolution)
+  for (const resolution of pinned.submoduleResolutions ?? []) finalResolutions.set(resolution.path, resolution)
   for (const resolution of finalResolutions.values()) {
-    if ((await readGitlink(git, repo, checked.candidateSha, resolution.path)) !== resolution.sha) {
+    if ((await readGitlink(git, repo, pinned.candidateSha, resolution.path)) !== resolution.sha) {
       return {
         error: {
           code: "invalid-candidate",
@@ -5298,12 +5328,12 @@ async function validatePinnedCandidate(
       }
     }
   }
-  for (const sha of [checked.baseSha, ...input.prs.map((pr) => pr.headSha)]) {
-    if ((await git.run(repo, ["merge-base", "--is-ancestor", sha, checked.candidateSha], true)).code !== 0) {
+  for (const sha of [pinned.baseSha, ...input.prs.map((pr) => pr.headSha)]) {
+    if ((await git.run(repo, ["merge-base", "--is-ancestor", sha, pinned.candidateSha], true)).code !== 0) {
       return { error: { code: "invalid-candidate", message: `checked candidate does not contain '${sha}'` } }
     }
   }
-  return { checked }
+  return { checked: pinned }
 }
 
 type MergeCandidateResult =

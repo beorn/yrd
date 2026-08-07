@@ -54,7 +54,7 @@ const PRSnapshotRecutProofSchema = PRRecutProofSchema.extend({
 }).strict()
 
 const IntentMemberIdSchema = z.string().regex(/^I\d+$/u)
-const QueueMemberIdSchema = z.union([PRIdSchema, IntentMemberIdSchema])
+export const QueueMemberIdSchema = z.union([PRIdSchema, IntentMemberIdSchema])
 export const QueueIntentSnapshotSchema = z
   .object({
     id: IntentMemberIdSchema,

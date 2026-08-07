@@ -2081,10 +2081,17 @@ describe("Queue command adapters", () => {
       target: fixture.moduleSha,
       submitter: "@dev/5",
     })
+    const materialized = await synthesizePinIntentCarrier({
+      inject: { process },
+      repo: fixture.repo,
+      baseSha: fixture.baseSha,
+      component: intent.component,
+      target: fixture.moduleSha,
+      issue: intent.issue.id,
+    })
 
-    const outcome = await app.queue.runIntent({ intent, base: "main" }, runtime)
-    if (outcome.outcome !== "run") throw new Error(`expected run, got ${outcome.outcome}`)
-    const run = outcome.run
+    const run = (await app.queue.run({}, runtime))[0]
+    if (run === undefined) throw new Error("expected intent Queue run")
 
     expect(run.conclusion, JSON.stringify(run, undefined, 2)).toBe("success")
     expect(run).toMatchObject({ status: "completed", prs: [{ id: intent.id }] })
@@ -2098,8 +2105,8 @@ describe("Queue command adapters", () => {
           candidate: run.candidateId,
           run: run.id,
           baseSha: fixture.baseSha,
-          commit: expect.stringMatching(/^[0-9a-f]{40}$/u),
-          treeSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+          commit: materialized.commit,
+          treeSha: materialized.treeSha,
           componentPin: fixture.moduleSha,
         },
       },
@@ -2127,6 +2134,7 @@ describe("Queue command adapters", () => {
 
     const runs = await app.queue.run({}, runtime)
 
+    expect("runIntent" in app.queue).toBe(false)
     expect(runs).toHaveLength(1)
     expect(runs[0]).toMatchObject({ conclusion: "success", prs: [{ id: intent.id }] })
     expect(app.intents.get(intent.id)).toMatchObject({ status: "integrated" })
@@ -2234,9 +2242,9 @@ describe("Queue command adapters", () => {
       target: fixture.moduleSha,
       submitter: "@dev/5",
     })
-    const outcome = await app.queue.runIntent({ intent: original, base: "main" }, runtime)
-    if (outcome.outcome !== "run") throw new Error(`expected run, got ${outcome.outcome}`)
-    const waiting = outcome.run.steps[0]?.job
+    const run = (await app.queue.run({}, runtime))[0]
+    if (run === undefined) throw new Error("expected intent Queue run")
+    const waiting = run.steps[0]?.job
     if (waiting?.status !== "waiting") throw new Error("intent check did not wait")
     const checkpoint = GitCheckEvidenceSchema.parse(waiting.checkpoint)
     const successor = await app.intents.submit({
@@ -2248,7 +2256,7 @@ describe("Queue command adapters", () => {
     })
 
     const finished = await app.queue.finish(
-      outcome.run.id,
+      run.id,
       {
         job: waiting.id,
         attempt: waiting.attempt,
@@ -2267,6 +2275,60 @@ describe("Queue command adapters", () => {
     expect(app.intents.get(original.id)).toMatchObject({ status: "superseded", supersededBy: successor.id })
     expect(app.intents.get(successor.id)).toMatchObject({ status: "open" })
     expect(await git(fixture.remote, ["rev-parse", "main"])).toBe(fixture.baseSha)
+  }, 30_000)
+
+  it("reuses candidate-class checks by synthesized tree after an empty base move", async () => {
+    const fixture = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    await using process = createProcess()
+    await using app = await checkedQueue(
+      process,
+      fixture.repo,
+      shellCommand(
+        `printf '%s\\n' '{"token":"ci-tree","url":"https://ci.invalid/tree","detail":"queued",` +
+          `"artifacts":[{"name":"remote","uri":"artifact://ci-tree"}]}'`,
+      ),
+      { waiting: true, prepareCandidate: true },
+    )
+    const intent = await app.intents.submit({
+      intentId: "00000000-0000-7000-8000-000000000018",
+      issue: { source: "km", id: "@yrd/core/tree-key-reuse" },
+      component: "dep",
+      target: fixture.moduleSha,
+      submitter: "@dev/5",
+    })
+
+    const first = (await app.queue.run({}, runtime))[0]
+    if (first === undefined) throw new Error("expected first intent Queue run")
+    const waiting = first.steps[0]?.job
+    if (waiting?.status !== "waiting") throw new Error("intent check did not wait")
+    const checkpoint = GitCheckEvidenceSchema.parse(waiting.checkpoint)
+    await git(fixture.repo, ["commit", "--allow-empty", "-qm", "move base without changing its tree"])
+    await git(fixture.repo, ["push", "--no-verify", "-q", "origin", "main"])
+
+    const stale = await app.queue.finish(
+      first.id,
+      {
+        job: waiting.id,
+        attempt: waiting.attempt,
+        runner: waiting.runner,
+        token: waiting.token,
+        result: { status: "completed", conclusion: "success", output: checkpoint },
+      },
+      runtime,
+    )
+    expect(stale).toMatchObject({ status: "completed", conclusion: "failure" })
+    expect(app.intents.get(intent.id)).toMatchObject({ status: "open" })
+
+    const second = (await app.queue.run({}, runtime))[0]
+    if (second === undefined) throw new Error("expected retried intent Queue run")
+    expect(second.steps.map((step) => step.name)).toEqual(["merge"])
+    expect(second.conclusion, JSON.stringify(second, undefined, 2)).toBe("success")
+    expect(second.reusedFrom).toBe(first.id)
+    expect(app.intents.get(intent.id)).toMatchObject({ status: "integrated" })
   }, 30_000)
 
   it("retries one red synthesized candidate once, then journals a terminal checks refusal", async () => {
@@ -2314,6 +2376,9 @@ describe("Queue command adapters", () => {
 
     expect(await app.queue.run({}, runtime)).toEqual([])
     expect(Queues.values(app.queue.state())).toHaveLength(2)
+    expect((await Array.fromAsync(app.events())).map(({ name }) => name)).not.toEqual(
+      expect.arrayContaining(["pr/needs-author", "pr/rejected"]),
+    )
   }, 30_000)
 
   it("journals noop and refused merge-time decisions without minting Queue runs", async () => {
@@ -2334,8 +2399,8 @@ describe("Queue command adapters", () => {
       target: priorPin,
       submitter: "@dev/5",
     })
-    const noop = await noopApp.queue.runIntent({ intent: noopIntent, base: "main" }, runtime)
-    expect(noop).toMatchObject({ outcome: "noop", intent: { id: noopIntent.id, status: "noop" } })
+    expect(await noopApp.queue.run({}, runtime)).toEqual([])
+    expect(noopApp.intents.get(noopIntent.id)).toMatchObject({ id: noopIntent.id, status: "noop" })
     expect(noopApp.queue.state().records).toEqual({})
     expect((await Array.fromAsync(noopApp.events())).map(({ name }) => name)).toContain("intent/evaluation-recorded")
 
@@ -2347,14 +2412,11 @@ describe("Queue command adapters", () => {
       target: fixture.moduleSha,
       submitter: "@dev/5",
     })
-    const refused = await refusedApp.queue.runIntent({ intent: refusedIntent, base: "main" }, runtime)
-    expect(refused).toMatchObject({
-      outcome: "refused",
-      intent: {
-        id: refusedIntent.id,
-        status: "refused",
-        disposition: { code: "intent-pin-divergent" },
-      },
+    expect(await refusedApp.queue.run({}, runtime)).toEqual([])
+    expect(refusedApp.intents.get(refusedIntent.id)).toMatchObject({
+      id: refusedIntent.id,
+      status: "refused",
+      disposition: { code: "intent-pin-divergent" },
     })
     expect(refusedApp.queue.state().records).toEqual({})
     expect((await Array.fromAsync(refusedApp.events())).map(({ name }) => name)).toContain("intent/evaluation-recorded")
