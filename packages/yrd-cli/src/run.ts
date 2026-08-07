@@ -795,7 +795,7 @@ export async function startResidentRunnerHeartbeat(
     raiseFailure(
       "refusal",
       "runtime-source-unavailable",
-      "yrd: resident runner startup did not capture an implementation source; refusing to serve",
+      "yrd: resident runner startup did not capture an implementation source; not serving",
     )
   }
   const nowIso = (): string => {
@@ -954,6 +954,18 @@ const QUEUE_TIMELINE_STATUSES: readonly QueueTimelineStatusFilter[] = [
   "other",
 ]
 
+// The STATUS column prints the converged words; --status accepts them too, so
+// anything the CLI shows can be typed straight back into the filter.
+const QUEUE_TIMELINE_STATUS_ALIASES: Readonly<Record<string, QueueTimelineStatusFilter>> = {
+  queued: "pending",
+  checking: "running",
+  failed: "rejected",
+  merged: "integrated",
+}
+
+const QUEUE_TIMELINE_STATUS_HELP =
+  "comma-separated queued|pending, checking|running, failed|rejected, merged|integrated, other"
+
 function queueTimelineRowLimit(io: YrdCliIO): number {
   if (io.rows === undefined) return 20
   // Tabs, metadata, worst-case abnormal STATUS box, filter, columns,
@@ -984,7 +996,7 @@ function queueMetricsWindow(value: string | undefined): number {
 
 function queueTimelineStatuses(value: string | undefined): QueueTimelineStatusFilter[] {
   if (value === undefined) return [...QUEUE_TIMELINE_STATUSES]
-  const statuses = [
+  const written = [
     ...new Set(
       value
         .split(",")
@@ -992,12 +1004,18 @@ function queueTimelineStatuses(value: string | undefined): QueueTimelineStatusFi
         .filter(Boolean),
     ),
   ]
-  if (statuses.length === 0) usage("--status must name at least one timeline status")
-  const invalid = statuses.find((status) => !QUEUE_TIMELINE_STATUSES.includes(status as QueueTimelineStatusFilter))
+  if (written.length === 0) usage("--status must name at least one timeline status")
+  const invalid = written.find(
+    (status) =>
+      !QUEUE_TIMELINE_STATUSES.includes(status as QueueTimelineStatusFilter) &&
+      QUEUE_TIMELINE_STATUS_ALIASES[status] === undefined,
+  )
   if (invalid !== undefined) {
-    usage(`--status '${invalid}' is invalid; expected ${QUEUE_TIMELINE_STATUSES.join(",")}`)
+    usage(`--status '${invalid}' is invalid; expected ${QUEUE_TIMELINE_STATUS_HELP}`)
   }
-  return statuses as QueueTimelineStatusFilter[]
+  return [
+    ...new Set(written.map((status) => QUEUE_TIMELINE_STATUS_ALIASES[status] ?? (status as QueueTimelineStatusFilter))),
+  ]
 }
 
 type TrackerDeliveryIdentity = Readonly<{
@@ -1104,7 +1122,7 @@ function trackerDeliveryV2(
         ? undefined
         : { ...identity, status: "submitted", at: revision.submittedAt }
     case "needs-author":
-      refusal(`trackerBridge v2 cannot project needs-author PR '${pr.id}' without an attributed refusal`)
+      refusal(`trackerBridge v2 cannot project needs-author PR '${pr.id}' without an attributed result`)
     case "rejected":
       if (pr.rejectedAt === undefined) return undefined
       if (pr.terminalRun === undefined) {
@@ -1131,7 +1149,7 @@ function trackerDeliveryV2(
     case "already-landed": {
       const landing = prLandingOutcome(pr)
       if (landing.outcome !== "already-landed") {
-        refusal(`already-landed PR '${pr.id}' has no canonical equivalence proof`)
+        refusal(`PR '${pr.id}' is recorded as already merged but has no canonical equivalence proof`)
       }
       return {
         ...identity,
@@ -2510,12 +2528,12 @@ async function closeBays(
       closed.length === 0
         ? "nothing closed"
         : `closed ${closed.map((bay) => bay.name).join(", ")}; kept ${refused.map((report) => report.name).join(", ")}`
-    await printHuman(io, `bay close refused: ${outcome}\n\n${body}`)
+    await printHuman(io, `bay close stopped: ${outcome}\n\n${body}`)
     if (closed.length === 0) {
       raiseFailure(
         "refusal",
         "request-refused",
-        `bay close refused for ${String(refused.length)} bay(s); re-run bay status or bay close --force <name>`,
+        `could not close ${String(refused.length)} bay(s); run bay status, or bay close --force <name>`,
       )
     }
   }
@@ -3166,7 +3184,11 @@ async function executeRecutPr(
     delivery === "withdrawn" ||
     delivery === "canceled"
   ) {
-    raiseFailure("refusal", "terminal-target", `yrd: PR '${pr.id}' is ${delivery}; terminal PRs cannot be recut`)
+    raiseFailure(
+      "refusal",
+      "terminal-target",
+      `yrd: PR '${pr.id}' is ${delivery}; a finished merge request cannot be recut`,
+    )
   }
   if (options.revision !== undefined && (!Number.isInteger(options.revision) || options.revision < 1)) {
     usage("--revision must be a positive integer")
@@ -3184,7 +3206,7 @@ async function executeRecutPr(
     raiseFailure(
       "refusal",
       "recut-would-discard-green",
-      `yrd: PR '${pr.id}' revision ${currentRevision.n} already holds a passing check; recut would discard it. ` +
+      `yrd: PR '${pr.id}' revision ${currentRevision.n} already passed its checks; recut would discard that result. ` +
         "Re-run with --force to override.",
     )
   }
@@ -3652,7 +3674,7 @@ async function applyPrSelection(
           pr: previous.id,
           revision: priorRevision.n,
           by: io.runner ?? "operator",
-          reason: `PR submission superseded revision ${priorRevision.n}`,
+          reason: `a newer submit superseded revision ${priorRevision.n}`,
         })
       }
     }
@@ -3735,7 +3757,7 @@ async function refuseSubmitWithoutLandingAuthority(
   // cannot help.
   const message =
     `'${repo}' declares no landing authority (selected config 'landing: none'), so its queue has no runner and ` +
-    "nothing will ever drain this submission; land the work through whatever authority that repository does " +
+    "nothing will ever drain this merge request; merge the work through whatever authority that repository does " +
     "have, or set 'landing: expected' once a runner exists"
   if (jsonEnabled(options)) {
     io.stderr(
@@ -3784,7 +3806,7 @@ async function applyPrSelectionVerb(
       )
     } else if (prDeliveryState(pr) === "already-landed") {
       warnings.push(
-        `already landed as PR '${pr.id}'${pr.integration === undefined ? "" : ` (${pr.integration.baseSha})`}`,
+        `already merged as PR '${pr.id}'${pr.integration === undefined ? "" : ` (${pr.integration.baseSha})`}`,
       )
     }
   }
@@ -3878,7 +3900,7 @@ function prLandingOutcome(pr: DeepReadonly<PR>): PRLandingOutcome {
       pr.alreadyLandedAt === undefined ||
       hasRunProof === hasRefreshProof
     ) {
-      refusal(`already-landed PR '${pr.id}' is missing canonical equivalence proof`)
+      refusal(`PR '${pr.id}' is recorded as already merged but is missing its canonical equivalence proof`)
     }
     return {
       outcome: "already-landed",
@@ -4037,6 +4059,27 @@ function pathBay(app: YrdCliApp, selector: string, options: JsonOption, io: YrdC
 
 const PR_LIST_DEFAULT_WINDOW_SIZE = 20
 
+/** Bounded default `pr list` selection: open PRs claim window slots first
+ * (newest open wins when opens alone exceed the window), the remaining budget
+ * goes to the newest terminal rows. Input order (oldest-first by id) is
+ * preserved in the output. */
+function prListRetainedRows<T extends Readonly<{ id: string; state: string }>>(
+  matching: readonly T[],
+  window: number,
+): readonly T[] {
+  if (matching.length <= window) return matching
+  const open = matching.filter((pr) => pr.state === "open")
+  const kept = new Set(open.slice(-window).map((pr) => pr.id))
+  let historyBudget = window - kept.size
+  for (let index = matching.length - 1; index >= 0 && historyBudget > 0; index -= 1) {
+    const pr = matching[index]
+    if (pr === undefined || pr.state === "open") continue
+    kept.add(pr.id)
+    historyBudget -= 1
+  }
+  return matching.filter((pr) => kept.has(pr.id))
+}
+
 async function listPrs(
   app: YrdCliApp,
   options: JsonOption &
@@ -4061,12 +4104,12 @@ async function listPrs(
   // Preserve the bounded human default before deriving eligibility. A state
   // filter must inspect every candidate because `needs-author` is projected
   // from eligibility; an unfiltered human list only needs its final 20 rows.
-  // Open PRs are never hidden by the window: live work outside the newest-20
+  // Open PRs take priority within the window: live work outside the newest-20
   // cut (a days-old draft) must not vanish from the default surface (live
   // specimen 2026-08-07: PR138/PR182, both `pushed`, invisible by default).
-  const windowed = new Set(matching.slice(-PR_LIST_DEFAULT_WINDOW_SIZE).map((pr) => pr.id))
-  const listed =
-    explicitlyFiltered || json ? matching : matching.filter((pr) => pr.state === "open" || windowed.has(pr.id))
+  // The window itself still binds so the human list stays bounded; when open
+  // PRs alone exceed it the newest ones win and the residue line discloses.
+  const listed = explicitlyFiltered || json ? matching : prListRetainedRows(matching, PR_LIST_DEFAULT_WINDOW_SIZE)
   const rows = listed
     .map((pr) => ({
       pr,
@@ -4893,9 +4936,9 @@ async function migrateTerminalAssociations(
           ...rows.map((row) =>
             row.status === "ready"
               ? `READY ${row.terminal.pr} revision ${row.terminal.revision}@${row.terminal.headSha} -> ${row.association.run} (${row.terminal.event})`
-              : `REFUSED ${row.terminal.pr} revision ${row.terminal.revision}\n${formatActionableFailure(row.refusal)}`,
+              : `BLOCKED ${row.terminal.pr} revision ${row.terminal.revision}\n${formatActionableFailure(row.refusal)}`,
           ),
-          `${mode}: ${plan.summary.ready} ready, ${plan.summary.refused} refused, ${plan.summary.appended} appended`,
+          `${mode}: ${plan.summary.ready} ready, ${plan.summary.refused} blocked, ${plan.summary.appended} appended`,
         ].join("\n")
   await printResult(io, jsonEnabled(options), { command: "migrate.terminal-associations", mode, ...plan, rows }, human)
   return plan.summary.refused === 0 ? 0 : 1
@@ -6475,7 +6518,7 @@ function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefine
       fact.code === "restack-failed"
     if (prScoped) {
       return {
-        message: "resident runner skipped a cycle lost to a per-PR refusal",
+        message: "resident runner skipped a cycle lost to a per-PR failure",
         props: { action: "resident-pr-refusal-skip", code: fact.code, reason: fact.message },
       }
     }
@@ -6578,7 +6621,7 @@ export async function refreshTrackedQueueRevisions(
         recorded: freshness.status === "tracked-drift",
       }
       outcomes.push(outcome)
-      app.log.info?.("Prepared the latest tracked PR revision for Queue admission.", {
+      app.log.info?.("Prepared the latest tracked PR revision for the merge queue's entry checks.", {
         action: "queue-track-prepared",
         ...outcome,
       })
@@ -6633,7 +6676,7 @@ export async function refreshTrackedQueueRevisions(
           message: failure.message,
         }
         outcomes.push(outcome)
-        app.log.warn?.(`Tracked PR ${currentPr.id} needs an operator decision before Queue admission.`, {
+        app.log.warn?.(`Tracked PR ${currentPr.id} needs an operator decision before entry checks.`, {
           action: "queue-track-needs-person",
           ...outcome,
         })
@@ -6744,7 +6787,7 @@ export async function refreshAdmittedQueueRevisions(
     await app.queue.cancelRun({
       run,
       by: io.runner ?? "yrd-cli",
-      reason: "recover interrupted admitted-to-refreshed Queue transition",
+      reason: "recover an interrupted accepted-to-refreshed transition",
     })
   }
   for (const pr of interrupted) {
@@ -6755,7 +6798,7 @@ export async function refreshAdmittedQueueRevisions(
           pr: pr.id,
           revision,
           by: io.runner ?? "yrd-cli",
-          reason: "recover interrupted admitted-to-refreshed Queue transition",
+          reason: "recover an interrupted accepted-to-refreshed transition",
         })),
       )
     }
@@ -6797,7 +6840,7 @@ export async function refreshAdmittedQueueRevisions(
       raiseFailure(
         "infrastructure",
         "queue-base-unresolved",
-        `yrd: resident auto-recut could not resolve queue base '${candidate.base}' for PR '${candidate.id}'`,
+        `yrd: automatic recut could not resolve the merge-queue base '${candidate.base}' for PR '${candidate.id}'`,
       )
     }
     if (candidateRevision.baseSha === target.headSha) continue
@@ -7115,7 +7158,7 @@ export async function applyRefusalRemedies(
     if (plan.remedy.kind === "judgment") {
       await settleNeedsPerson(plan.remedy.reason)
       outcomes.push({ status: "escalated", ...identity, reason: plan.remedy.reason, resolution: projected.resolution })
-      app.log.warn?.(`PR ${plan.pr} needs a person: its refusal has no mechanical remedy.`, {
+      app.log.warn?.(`PR ${plan.pr} needs a person: its result has no mechanical remedy.`, {
         action: "queue-refusal-escalated",
         ...identity,
         reason: plan.remedy.reason,
@@ -7128,7 +7171,7 @@ export async function applyRefusalRemedies(
     try {
       const verdict = await applyRefusalRemedy(app, services, plan, plan.remedy.steps, commands, io)
       outcomes.push({ status: "applied", ...identity, commands, verdict })
-      app.log.info?.(`Applied PR ${plan.pr}'s own printed refusal remedy.`, {
+      app.log.info?.(`Applied PR ${plan.pr}'s own printed remedy.`, {
         action: "queue-refusal-remedy-applied",
         ...identity,
         commands,
@@ -7138,7 +7181,7 @@ export async function applyRefusalRemedies(
       const failure = error instanceof Error ? error.message : String(error)
       await settleNeedsPerson(failure)
       outcomes.push({ status: "failed", ...identity, commands, failure, resolution: projected.resolution })
-      app.log.warn?.(`Could not apply PR ${plan.pr}'s printed refusal remedy; it needs a person.`, {
+      app.log.warn?.(`Could not apply PR ${plan.pr}'s printed remedy; it needs a person.`, {
         action: "queue-refusal-remedy-failed",
         ...identity,
         commands,
@@ -7187,7 +7230,7 @@ function residentRefusalHealth(
   const next = foldRefusalStall(stall, observeResidentRefusals(app, runs))
   if (next === undefined || next.cycles < RESIDENT_REFUSAL_STALL_CYCLES) return { stall: next, restart: false }
   app.log.warn?.(
-    `Queue runner refused every candidate for ${next.cycles} consecutive cycles with nothing changing; restarting.`,
+    `Queue runner could not start any candidate for ${next.cycles} consecutive cycles with nothing changing; restarting.`,
     {
       action: "resident-refusal-stall-restart",
       cycles: next.cycles,
@@ -7900,7 +7943,7 @@ async function materializeIntent(
   })
   if (current.timedOut) throw gitTimeoutError(["rev-parse", "--verify", ref])
   if (current.exitCode === 0 && current.stdout.trim() !== carrier.commit) {
-    refusal(`materialized carrier branch '${branch}' already points at ${current.stdout.trim()}`)
+    refusal(`materialized branch '${branch}' already points at ${current.stdout.trim()}`)
   }
   if (current.exitCode !== 0) {
     await runQueueGit(host, repo, ["update-ref", ref, carrier.commit, "0".repeat(40)])
@@ -8066,8 +8109,8 @@ function addAuthoredCarrierWorkflow<
   Arguments extends unknown[],
   ArgumentRecord extends Record<string, unknown>,
 >(command: CliCommand<Options, Arguments, ArgumentRecord>, name: string): void {
-  command.addHelpSection("Authored root carrier:", [
-    [`$ ${name} pr create <branch>`, "record the immutable authored carrier as a draft PR"],
+  command.addHelpSection("Authored root branch:", [
+    [`$ ${name} pr create <branch>`, "record the authored root branch as a draft merge request"],
     [
       `$ ${name} pr recut <PR> --preflight --queue`,
       "classify from pinned evidence, then run the exact next command; no composition manifest or manual triage",
@@ -8171,14 +8214,14 @@ function buildProgram(
   program.version(YRD_VERSION, "-V, --version")
   program.addHelpSection(
     "Model:",
-    "Pick an issue -> work it in a bay -> create a draft -> submit it ->\nPRs queue per base -> a run verifies and merges each one -> integrated,\nor parked for the author with a typed receipt.",
+    "Pick an issue -> work it in a bay -> create a draft -> submit it ->\nmerge requests queue per base -> a run verifies and merges each one ->\nmerged, or parked for the author with a typed receipt.",
   )
   program.addHelpSection("Objects:", [
     ["issue", "tracker-owned intent; delivery lens plus Git-side ensure"],
     ["bay", "isolated Git workspace managed through the yrd bay subtree"],
-    ["pr", "persistent branch delivery; draft until submitted; the queue's unit"],
+    ["pr", "merge request, also called a pull request; draft until submitted; the queue's unit"],
     ["contest", "competing implementations; winner promotes to a PR"],
-    ["queue", "one per base; verifies and merges PRs serially"],
+    ["queue", "the merge queue: one per base; verifies and merges merge requests serially"],
   ])
   program.addHelpSection(
     "Boundaries:",
@@ -8290,7 +8333,7 @@ function buildProgram(
     )
   bay
     .command("close [selector...]")
-    .description("close work bays (consults bay status first; refuses unless --force)")
+    .description("close work bays (checks bay status first; needs --force to override)")
     .option("--withdraw", "withdraw a live PR before closing")
     .option("--force", "bypass bay status (requires explicit bay name; prints what is destroyed)")
     .option("--json", "emit stable JSON")
@@ -8317,7 +8360,7 @@ function buildProgram(
     .description("alias for queue ls --watch")
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope watch to one PR")
-    .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
+    .option("--status <statuses>", QUEUE_TIMELINE_STATUS_HELP)
     .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
     .option("--latest", "show only the latest Run for each PR")
     .option("--json", "emit stable JSON")
@@ -8334,7 +8377,7 @@ function buildProgram(
     .option("--title <text>", "PR subject (defaults to the head commit subject)")
     .option("--description <text>", "PR description body (defaults to the head commit body)")
     .option("--correlation <namespace:id>", "bind an opaque correlation to the submitted revision")
-    .option("--composition <path>", "queue-generated source composition JSON; not for authored root carriers")
+    .option("--composition <path>", "queue-generated source composition JSON; not for authored root branches")
     .option(
       "--reviewer <reviewer>",
       "request a review from <reviewer> right after submit (repeatable)",
@@ -8404,7 +8447,7 @@ function buildProgram(
     .command("_list [filter...]", { isDefault: true, hidden: true })
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope the queue timeline to one PR")
-    .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
+    .option("--status <statuses>", QUEUE_TIMELINE_STATUS_HELP)
     .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
     .option("--latest", "show only the latest Run for each PR")
     .option("--watch", "keep this projection live and interactive")
@@ -8416,7 +8459,7 @@ function buildProgram(
     .description("show the queue timeline")
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope the queue timeline to one PR")
-    .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
+    .option("--status <statuses>", QUEUE_TIMELINE_STATUS_HELP)
     .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
     .option("--latest", "show only the latest Run for each PR")
     .option("--watch", "keep this projection live and interactive")
@@ -8551,7 +8594,7 @@ function buildProgram(
     .option("--title <text>", "PR subject (defaults to the head commit subject)")
     .option("--description <text>", "PR description body (defaults to the head commit body)")
     .option("--correlation <namespace:id>", "bind an opaque correlation to the draft revision")
-    .option("--composition <path>", "queue-generated source composition JSON; not for authored root carriers")
+    .option("--composition <path>", "queue-generated source composition JSON; not for authored root branches")
     .option(
       "--reviewer <reviewer>",
       "request a review from <reviewer> right after create (repeatable)",
@@ -8581,7 +8624,7 @@ function buildProgram(
     .option("--title <text>", "PR subject (defaults to the head commit subject)")
     .option("--description <text>", "PR description body (defaults to the head commit body)")
     .option("--correlation <namespace:id>", "bind an opaque correlation to the submitted revision")
-    .option("--composition <path>", "queue-generated source composition JSON; not for authored root carriers")
+    .option("--composition <path>", "queue-generated source composition JSON; not for authored root branches")
     .option(
       "--reviewer <reviewer>",
       "request a review from <reviewer> right after submit (repeatable)",
@@ -8622,16 +8665,16 @@ function buildProgram(
     .option("--title <text>", "set the PR subject")
     .option("--description <text>", "set the PR description body")
     .option("--track", TRACK_OPTION_DESCRIPTION)
-    .option("--untrack", "stop tracking: restore the stale-head recut refusal")
+    .option("--untrack", "stop tracking: a stale head again blocks the recut")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => editPr(installed(), selector, options, io))
   const recut = pr
     .command("recut <selector>")
-    .description("mechanically recut an immutable PR revision onto authoritative current base")
+    .description("recut a merge request revision onto the current base")
     .option("--revision <number>", "select an older immutable PR revision", int)
-    .option("--preflight", "classify recut, withdrawal, force, or no-op without mutating")
+    .option("--preflight", "classify recut, withdraw, force, or no-op without changing anything")
     .option("--queue", "submit the fresh revision and request its configured checks")
-    .option("--force", "recut even when the current revision already holds a passing check")
+    .option("--force", "recut even when the current revision already passed its checks")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) =>
       setExit(await recutPr(installed(), installedServices(), selector, options, io)),
@@ -8639,7 +8682,7 @@ function buildProgram(
   addAuthoredCarrierWorkflow(recut, name)
   pr.command("publish <selector>")
     .description("request credential-bearing publication of one immutable PR revision")
-    .option("--queue", "recut and queue the revision after publication succeeds")
+    .option("--queue", "recut and queue the revision after publishing succeeds")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => publishPr(installed(), installedServices(), selector, options, io))
   pr.command("ready <selector>")
@@ -8855,7 +8898,7 @@ function buildProgram(
     .option("--component <path>", "root-relative gitlink path, e.g. components/alpha")
     .option("--target <sha>", "component commit to advance to; omit for the component main tip at landing")
     .option("--issue <ref>", "tracker-neutral issue reference")
-    .option("--expect-pin <sha>", "refuse unless the current pin is exactly this sha")
+    .option("--expect-pin <sha>", "stop unless the current pin is exactly this sha")
     .option("--submitter <identity>", "attribution recorded on the intent")
     .option("--base <branch>", "base branch whose pin the target advances")
     .option("--force", "explicitly supersede another submitter's live intent")
@@ -8873,7 +8916,7 @@ function buildProgram(
     .action(async (options) => tombstoneIntent(installed(), options, io))
   intent
     .command("list")
-    .description("all admitted records in submission order")
+    .description("all accepted records, in the order they were submitted")
     .option("--json", "emit stable JSON")
     .action(async (options) => listIntents(installed(), options, io))
   intent
@@ -8882,14 +8925,17 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => setExit(await showIntent(installed(), selector, options, io)))
   intent
-    .command("withdraw <intent>")
-    .description("terminate an open intent")
-    .option("--reason <text>", "why the intent is withdrawn")
+    // `close` is the printed spelling; `withdraw` keeps working for anyone who
+    // learned it, the same way the retired status words still parse.
+    .command("close <intent>")
+    .silentAlias("withdraw")
+    .description("close an open intent")
+    .option("--reason <text>", "why the intent is closed")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => withdrawIntent(installed(), selector, options, io))
   intent
     .command("materialize <component>")
-    .description("materialize the queue's deterministic pin carrier on a new local branch")
+    .description("materialize the queue's deterministic pin branch on a new local branch")
     .option("--target <sha>", "component commit to advance to")
     .option("--issue <ref>", "issue identity embedded in the deterministic commit")
     .option("--base <branch>", "base branch to materialize against")

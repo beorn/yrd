@@ -138,7 +138,7 @@ describe("queue timeline 21106 contract", () => {
       })
     ).join("\n")
 
-    expect(frame).toContain("NO RUNNER - runner refused: stale step contract on R2670")
+    expect(frame).toContain("NO RUNNER - runner stopped: stale step contract on R2670")
     expect(frame).toContain(
       "step-revision-drift: queue run 'R2670' requires step 'check' revision 'v1', installed 'v2'",
     )
@@ -325,15 +325,15 @@ describe("queue timeline 21106 contract", () => {
       /^16:40:00 ○ ready\s+-\s+pr#1\.1 @yrd\/core\/21120-pr-state-notifications\s+@cto\s+50:00$/u,
     )
     expect(lead?.trim()).toMatch(
-      /^17:10:00 ◉ run\s+main#42 pr#42\.1 @hab\/super\/21135-herdr-keybindings\s+@agent\/3\s+36:00 20:00$/u,
+      /^17:10:00 ◉ checking\s+main#42 pr#42\.1 @hab\/super\/21135-herdr-keybindings\s+@agent\/3\s+36:00 20:00$/u,
     )
     expect(partner?.trim()).toMatch(/^-\s+-\s+-\s+pr#43\.1 @si\/ui\/21119-split-pane\s+@agent\/5\s+34:00\s+-$/u)
     expect(revised?.trim()).toMatch(/^16:15:00 × rev\s+-\s+pr#5\.1\s+\S topic\/pr5\s+@agent\/2\s+1:15:00$/u)
     expect(rejected?.trim()).toMatch(
-      /^16:42:00 × fail\s+main#5\s+pr#5\.1\s+\S topic\/pr5 \(err=typecheck-failed\)\s+@agent\/2\s+27:00 12:00$/u,
+      /^16:42:00 × failed\s+main#5\s+pr#5\.1\s+\S topic\/pr5 \(err=typecheck-failed\)\s+@agent\/2\s+27:00 12:00$/u,
     )
     expect(integrated?.trim()).toMatch(
-      /^16:25:00 ✓ done\s+main#4\s+pr#4\.1\s+\S topic\/pr4\s+@agent\/7\s+25:00 15:00$/u,
+      /^16:25:00 ✓ merged\s+main#4\s+pr#4\.1\s+\S topic\/pr4\s+@agent\/7\s+25:00 15:00$/u,
     )
 
     // No row carries the removed clock glyph, and a not-yet-started run shows a
@@ -399,10 +399,10 @@ describe("queue timeline 21106 contract", () => {
     const integrated = rows[rowIndex(rows, "pr#4.1")]
 
     expect(pending).toContain("○ ready")
-    expect(running).toContain("◉ run")
+    expect(running).toContain("◉ checking")
     expect(revised).toContain("× rev")
-    expect(rejected).toContain("× fail")
-    expect(integrated).toContain("✓ done")
+    expect(rejected).toContain("× failed")
+    expect(integrated).toContain("✓ merged")
     for (const row of [revised, pending, running, rejected, integrated]) expect(row).not.toContain("task/")
 
     const production = queueTimelineStories["production-overview"].snapshot.projection
@@ -498,7 +498,7 @@ describe("queue timeline 21106 contract", () => {
     for (const row of rows) expect(Array.from(row).length).toBeLessThanOrEqual(80)
     const lead = rows[rowIndex(rows, "pr#42.1")]
     expect(lead).toContain("main#42")
-    expect(lead).toContain("@hab/super/21135-herdr-keybindin…")
+    expect(lead).toContain("@hab/super/21135-herdr-keybin…")
     expect(lead).not.toContain(" for ")
     expect(lead).not.toContain("2:check")
     expect(lead).toContain("36:00")
@@ -506,7 +506,7 @@ describe("queue timeline 21106 contract", () => {
     expect(lead).not.toContain("◷")
     // The BY column is the first casualty on narrow tiers — dropped before
     // any identity, clock, or measurement column.
-    expect(lead?.trimStart().startsWith("17:10:00 ◉ run")).toBe(true)
+    expect(lead?.trimStart().startsWith("17:10:00 ◉ checking")).toBe(true)
     expect(lead).not.toContain("@agent/3")
     expect(rows.some((row) => row.includes("BY"))).toBe(false)
     const rejected = rows[rowIndex(rows, "main#5")]
@@ -532,7 +532,7 @@ describe("queue timeline 21106 contract", () => {
       // run id — the blue (info) reference is now the running km task glyph.
       const runningMarker = cell("◉", "pr#42.1").fg
       const successMarker = cell("✓", "pr#4.1").fg
-      const successText = cell("done", "pr#4.1").fg
+      const successText = cell("merged", "pr#4.1").fg
       const failureText = cell("typecheck-failed", "main#5").fg
       const mutedTime = cell("16:40:00", "pr#1.1").fg
       const mutedAge = cell("50:00", "pr#1.1").fg
@@ -704,7 +704,7 @@ describe("queue timeline 21106 contract", () => {
     const canceled = rows[rowIndex(rows, "pr#7.1")]
     expect(canceled).toContain("queue-canceled")
     const integrated = rows[rowIndex(rows, "pr#4.1")]
-    expect(integrated).toContain("✓ done")
+    expect(integrated).toContain("✓ merged")
   })
 
   it("keeps every shared failure slug intact through the fixed-width queue projection", async () => {

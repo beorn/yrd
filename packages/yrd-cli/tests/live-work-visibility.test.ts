@@ -211,6 +211,16 @@ describe("queue timeline display cap never evicts live rows", () => {
     expect(retained.at(-1)?.id).toBe("main:pr:PR1:1:aaa")
   })
 
+  it("still binds the cap when live rows alone exceed it — the print path stays bounded", () => {
+    const liveRows = Array.from({ length: 24 }, (_, index) =>
+      displayRow({ id: `main:pr:PR${index}:1:aaa`, status: "ready", group: "pending", pr: `PR${index}` }),
+    )
+    const retained = timelineRetainedRows(liveRows, 20)
+    expect(retained).toHaveLength(20)
+    // Newest-first order wins: the first 20 live rows are kept, order preserved.
+    expect(retained.map((row) => row.id)).toEqual(liveRows.slice(0, 20).map((row) => row.id))
+  })
+
   it("applies the plain cap when nothing live is present", () => {
     const history = Array.from({ length: 24 }, (_, index) =>
       displayRow({ id: `main:run:${index}`, status: "integrated" }),

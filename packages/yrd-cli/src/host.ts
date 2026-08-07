@@ -389,7 +389,7 @@ export function configuredChecks(
         raiseFailure(
           "refusal",
           "pre-submit-hook-unmanaged",
-          `yrd: refusing to replace unmanaged pre-submit hook at '${hook}'`,
+          `yrd: will not replace the unmanaged pre-submit hook at '${hook}'`,
         )
       }
       const command = names.length === 0 ? "exit 0" : `exec yrd check ${names.join(" ")}`
@@ -1578,7 +1578,7 @@ async function createYrdRuntimeHost(
       raiseFailure(
         "refusal",
         "runtime-source-unavailable",
-        "yrd: resident runner cannot determine the implementation source it loaded; refusing to start",
+        "yrd: resident runner cannot determine the implementation source it loaded; not starting",
       )
     }
     app = await createDefaultYrdRuntimeApp({

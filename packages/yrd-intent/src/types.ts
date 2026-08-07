@@ -204,7 +204,7 @@ export const PinIntentIntegrationSchema = z
       context.addIssue({
         code: "custom",
         path: ["landing", "componentPin"],
-        message: "landed component pin must equal the evaluated target",
+        message: "the merged component pin must equal the evaluated target",
       })
     }
   })
@@ -217,7 +217,7 @@ export const PinIntentIntegratedFactSchema = z
       context.addIssue({
         code: "custom",
         path: ["landing", "componentPin"],
-        message: "landed component pin must equal the evaluated target",
+        message: "the merged component pin must equal the evaluated target",
       })
     }
   })

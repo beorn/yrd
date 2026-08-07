@@ -93,7 +93,11 @@ describe("orphan journal import", () => {
       },
     }
     try {
-      const liveJournal = createJournal({ dir: f.dir, views: [view] })
+      const liveJournal = createJournal({
+        dir: f.dir,
+        views: [view],
+        inject: { sqliteVersion: "3.53.0" },
+      } as unknown as Parameters<typeof createJournal>[0])
       const firstCursor = await accepted(liveJournal, frame("view-live-first"), 0)
       await writeFile(f.sourcePath, v3Line(frame("view-orphan")))
 

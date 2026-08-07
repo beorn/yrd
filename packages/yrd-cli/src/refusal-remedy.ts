@@ -117,13 +117,15 @@ export function classifyRefusalRemedy(failure: FailureLike, context: RefusalReme
   if (steps.some((step) => step.verb === "recut") && recutRefusedByDelivery(context.delivery)) {
     return Object.freeze({
       kind: "judgment",
-      reason: `PR delivery state '${context.delivery ?? "unknown"}' refuses recut`,
+      reason: `a merge request in delivery state '${context.delivery ?? "unknown"}' cannot be recut`,
     })
   }
   if (!steps.some((step) => step.verb === "recut" && step.queue)) {
     return Object.freeze({
       kind: "judgment",
-      reason: "the printed remedy never re-enters the PR into the queue, so applying it would not clear the refusal",
+      reason:
+        "the printed remedy never re-enters the merge request into the merge queue, " +
+        "so applying it would not clear the failure",
     })
   }
   return Object.freeze({ kind: "self-applicable", steps: Object.freeze(steps) })

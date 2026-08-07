@@ -500,7 +500,7 @@ describe("queue timeline storybook", () => {
           })
           // Run identity + STATUS/OUTCOME live in the title row now (item a).
           expect(term.screen.getText(), name).toContain("RUN main#4")
-          expect(term.screen.getText(), name).toContain("passed, integrated")
+          expect(term.screen.getText(), name).toContain("passed, merged")
           // The integration proof (COMMIT/PARENTS) lives in the merge-step tab
           // panel now. At the 24-row full tier the PR-scoped header + run region
           // fill the pane, leaving one content row in the tab panel, so the

@@ -213,14 +213,14 @@ export function selectFlow(config: YrdConfig, submission: Submission): SelectedF
       .map((flow) => flow.name)
       .toSorted()
       .join(", ")
-    configuration("flow-selection-zero", `yrd: submission matched no flows; available flows: ${available}`)
+    configuration("flow-selection-zero", `yrd: this submit matched no flows; available flows: ${available}`)
   }
   if (matches.length !== 1) {
     const names = matches
       .map((flow) => flow.name)
       .toSorted()
       .join(", ")
-    configuration("flow-selection-ambiguous", `yrd: submission matched multiple flows: ${names}`)
+    configuration("flow-selection-ambiguous", `yrd: this submit matched multiple flows: ${names}`)
   }
   const selected = matches[0]
   if (selected === undefined) throw new Error("yrd: exact-one flow selection lost its match")

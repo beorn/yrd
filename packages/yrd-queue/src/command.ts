@@ -1777,7 +1777,7 @@ async function inspectQueueBase(git: Git, repo: string, branch: string): Promise
       diverged: false,
     }
   }
-  throw new Error(`yrd: queue base '${branch}' does not resolve as '${branchRef}' or '${sourceRef}'`)
+  throw new Error(`yrd: merge-queue base '${branch}' does not resolve as '${branchRef}' or '${sourceRef}'`)
 }
 
 export async function inspectGitQueueTarget(options: {
@@ -2342,12 +2342,12 @@ function candidateFailure(
  * including the generic `embeddedYrdCommands` projection that lifts these
  * quoted commands straight into a machine-readable `resolution[]`. */
 function authoredRootWorkflow(pr: string): string {
-  return `authored root carriers use 'yrd pr submit <branch>', then 'yrd pr recut ${pr} --preflight --queue' and run its exact next command on that same PR; no composition manifest or manual triage is needed`
+  return `authored root branches use 'yrd pr submit <branch>', then 'yrd pr recut ${pr} --preflight --queue' and run its exact next command on that same merge request; no composition manifest or manual triage is needed`
 }
 
 function linearRootCarrierWorkflow(pr: string): string {
   return (
-    "merge inside the affected component repository, fast-forward that component's main, rebuild the root carrier " +
+    "merge inside the affected component repository, fast-forward that component's main, rebuild the root branch " +
     `as one linear pin-bump commit, then run 'yrd pr submit <branch>' and 'yrd pr recut ${pr} --preflight --queue'`
   )
 }
@@ -2401,7 +2401,7 @@ async function inspectBaseContainment(
 }
 
 function linearRebuildRemedy(scope: string, base: string): string {
-  return `linear rebuild required: rebuild ${scope} as a one-parent linear branch on current base '${base}', then recut and requeue the root carrier`
+  return `linear rebuild required: rebuild ${scope} as a one-parent linear branch on current base '${base}', then recut and requeue the root branch`
 }
 
 async function carrierDropsLandedFailure(
@@ -2416,12 +2416,12 @@ async function carrierDropsLandedFailure(
   if (containment.status === "inspection-failed") {
     return candidateFailure(
       "carrier-inspection",
-      `could not compare root carrier '${headSha}' for PR '${pr}' with queue base '${authoritativeBase}': ${containment.detail}`,
+      `could not compare root branch '${headSha}' for merge request '${pr}' with the merge-queue base '${authoritativeBase}': ${containment.detail}`,
     )
   }
   return candidateFailure(
     "carrier-drops-landed",
-    `PR '${pr}' carrier '${headSha}' does not contain queue base '${authoritativeBase}' and would drop landed commits:\n${containment.commits}\nremedy: ${linearRebuildRemedy("the carrier", authoritativeBase)}`,
+    `merge request '${pr}' branch '${headSha}' does not contain the merge-queue base '${authoritativeBase}' and would drop merged commits:\n${containment.commits}\nremedy: ${linearRebuildRemedy("the branch", authoritativeBase)}`,
   )
 }
 
@@ -2437,20 +2437,20 @@ async function mergeTipCarrierFailure(
   if (lineage.code !== 0 || lineage.stdout === "") {
     return candidateFailure(
       "carrier-inspection",
-      `could not inspect root carrier tip '${headSha}' for PR '${pr}': ${lineage.stderr || lineage.stdout || "no lineage"}`,
+      `could not inspect the root branch tip '${headSha}' for merge request '${pr}': ${lineage.stderr || lineage.stdout || "no lineage"}`,
     )
   }
   const [commit, ...parents] = lineage.stdout.split(/\s+/u)
   if (commit !== headSha) {
     return candidateFailure(
       "carrier-inspection",
-      `root carrier lineage for PR '${pr}' returned '${commit ?? "no commit"}', expected '${headSha}'`,
+      `root branch history for merge request '${pr}' returned '${commit ?? "no commit"}', expected '${headSha}'`,
     )
   }
   return parents.length > 1
     ? candidateFailure(
         "merge-tip-carrier",
-        `PR '${pr}' root carrier tip '${headSha}' is a merge commit with ${parents.length} parents; ${linearRootCarrierWorkflow(pr)}`,
+        `merge request '${pr}' root branch tip '${headSha}' is a merge commit with ${parents.length} parents; ${linearRootCarrierWorkflow(pr)}`,
       )
     : undefined
 }
@@ -2612,7 +2612,7 @@ export async function synthesizePinIntentCarrier(options: {
     },
   )
   if (outcome.status === "completed" && outcome.conclusion === "success") return outcome.output
-  throw new Error("yrd: pin-intent carrier synthesis did not complete")
+  throw new Error("yrd: pin-intent branch synthesis did not complete")
 }
 
 function pinIntentCommitMessage(component: string, target: string, issue: string): string {
@@ -3963,7 +3963,7 @@ async function fetchComponentPin(
   if (fetched.code === 0 && (await git.optionalCommit(repository, pin.sha)) === pin.sha) return undefined
   return componentMainFailure(
     "component-main-inspection-failed",
-    `could not load landed pin '${pin.sha}' for '${pin.path}' from '${pin.origin}': ${
+    `could not load merged pin '${pin.sha}' for '${pin.path}' from '${pin.origin}': ${
       fetched.stderr || fetched.stdout || "git fetch failed"
     }`,
   )
@@ -4043,7 +4043,7 @@ async function planComponentMainPromotionGroup(
       continue
     }
     if (reached.code !== 1) {
-      const message = `could not compare landed pin '${pin.sha}' for '${pin.path}' with component main '${
+      const message = `could not compare merged pin '${pin.sha}' for '${pin.path}' with component main '${
         componentMain.sha
       }': ${reached.stderr || reached.stdout || "git merge-base failed"}`
       const unresolved = orderedPins.filter((candidate) => !receipts.some((receipt) => receipt.path === candidate.path))
@@ -4066,7 +4066,7 @@ async function planComponentMainPromotionGroup(
     const covered = await git.run(repository, ["merge-base", "--is-ancestor", pin.sha, targetSha], true)
     if (covered.code === 0) continue
     if (covered.code !== 1) {
-      const message = `could not compare landed pin '${pin.sha}' for '${pin.path}' with planned target '${targetSha}': ${
+      const message = `could not compare merged pin '${pin.sha}' for '${pin.path}' with planned target '${targetSha}': ${
         covered.stderr || covered.stdout || "git merge-base failed"
       }`
       return {
@@ -4086,7 +4086,7 @@ async function planComponentMainPromotionGroup(
       continue
     }
     if (fastForward.code !== 1) {
-      const message = `could not compare '${targetSha}' with landed pin '${pin.sha}' for '${pin.path}': ${
+      const message = `could not compare '${targetSha}' with merged pin '${pin.sha}' for '${pin.path}': ${
         fastForward.stderr || fastForward.stdout || "git merge-base failed"
       }`
       return {
@@ -4101,7 +4101,7 @@ async function planComponentMainPromotionGroup(
     }
     const containment = await inspectBaseContainment(git, repository, targetSha, pin.sha)
     if (containment.status === "inspection-failed") {
-      const message = `could not inspect landed pin '${pin.sha}' for '${pin.path}' against planned component target '${targetSha}': ${containment.detail}`
+      const message = `could not inspect merged pin '${pin.sha}' for '${pin.path}' against planned component target '${targetSha}': ${containment.detail}`
       return {
         status: "failed",
         error: componentMainFailure(
@@ -4113,7 +4113,7 @@ async function planComponentMainPromotionGroup(
       }
     }
     if (containment.status === "drops-landed") {
-      const message = `landed pin '${pin.path}' '${pin.sha}' does not contain planned component target '${targetSha}' at '${origin}' and would drop landed commits:\n${containment.commits}\nremedy: ${linearRebuildRemedy(`component work for '${pin.path}'`, targetSha)}`
+      const message = `merged pin '${pin.path}' '${pin.sha}' does not contain planned component target '${targetSha}' at '${origin}' and would drop merged commits:\n${containment.commits}\nremedy: ${linearRebuildRemedy(`component work for '${pin.path}'`, targetSha)}`
       return {
         status: "failed",
         error: componentMainFailure(
@@ -4124,7 +4124,7 @@ async function planComponentMainPromotionGroup(
         ),
       }
     }
-    const message = `NON-ANCESTRAL component lineage at '${origin}': ${targetPath} '${targetSha}' and landed pin '${pin.path}' '${pin.sha}' diverge; compose the divergent component histories before retrying`
+    const message = `NON-ANCESTRAL component lineage at '${origin}': ${targetPath} '${targetSha}' and merged pin '${pin.path}' '${pin.sha}' diverge; compose the divergent component histories before retrying`
     return {
       status: "failed",
       error: componentMainFailure(
@@ -4312,7 +4312,7 @@ async function applyComponentMainPromotions(
     if (stillFastForward.code === 1) {
       const message = `NON-ANCESTRAL component lineage at '${promotion.origin}': component main '${
         refreshed.sha
-      }' diverged from landed pin '${promotion.targetSha}' for [${promotion.pins
+      }' diverged from merged pin '${promotion.targetSha}' for [${promotion.pins
         .map((pin) => pin.path)
         .join(", ")}]; compose the divergent histories`
       failure ??= componentMainFailure("component-main-diverged-after-landing", message)
@@ -4490,7 +4490,8 @@ async function resolveCandidateSubmoduleConflict(
     return {
       status: "refused",
       code: "candidate-conflict",
-      message: "queue-native composition refuses a concurrent .gitmodules change before publishing a composition",
+      message:
+        "queue-native composition does not allow a concurrent .gitmodules change before publishing a composition",
     }
   }
 
@@ -5821,7 +5822,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
         }
         if (attempted.status === "completed" && attempted.conclusion === "failure") return attempted
         if (attempted.status === "waiting") throw new Error("native merge cannot wait")
-        return failed("merge-verification-failed", `landed '${branch}' does not contain '${missing}'`)
+        return failed("merge-verification-failed", `merged '${branch}' does not contain '${missing}'`)
       }
       return await withComponentMainPromotions(git, repo, checked.baseSha, checked.candidateSha, async () => {
         const checkedOut = await checkedOutWorktree(git, repo, base.branchRef)
@@ -5845,7 +5846,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
             }
             return failed(
               "candidate-submodules-failed",
-              aligned.stderr || aligned.stdout || "could not align landed candidate submodules",
+              aligned.stderr || aligned.stdout || "could not align merged candidate submodules",
             )
           }
           const sourceRefError = await sourceCandidateRefError(git, repo, checked.sourceRewrites ?? [])

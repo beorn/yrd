@@ -109,9 +109,9 @@ function refuseAuthoredGitlink(refused: ReadonlySet<string>): CandidatePreparer 
         kind: "refusal",
         code: "authored-gitlink",
         message:
-          `yrd: PR '${poisoned.id}' changes generated-only gitlinks [km]; authored root carriers use ` +
+          `yrd: PR '${poisoned.id}' changes generated-only gitlinks [km]; authored root branches use ` +
           `'yrd pr submit <branch>', then 'yrd pr recut ${poisoned.id} --preflight --queue' and run its exact ` +
-          "next command on that same PR",
+          "next command on that same merge request",
       })
     }
     const { prs: _prs, ...candidate } = input

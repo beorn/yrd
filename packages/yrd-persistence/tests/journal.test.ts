@@ -1732,12 +1732,12 @@ describe("SQLite Journal", () => {
   it("refuses unsupported mutable platforms before creating SQLite authority", async () => {
     const appendDir = await directory()
     const appendJournal = testJournal(appendDir, { platform: "win32" })
-    await expect(appendJournal.append(frame("windows"), 0)).rejects.toThrow("unsupported platform win32")
+    await expect(appendJournal.append(frame("windows"), 0)).rejects.toThrow("journal writes are not supported on win32")
     expect(await missing(join(appendDir, SQLITE))).toBe(true)
 
     const readDir = await directory()
     const readJournal = testJournal(readDir, { platform: "win32" })
-    await expect(Array.fromAsync(readJournal.read())).rejects.toThrow("unsupported platform win32")
+    await expect(Array.fromAsync(readJournal.read())).rejects.toThrow("journal writes are not supported on win32")
     expect(await missing(join(readDir, SQLITE))).toBe(true)
   })
 })

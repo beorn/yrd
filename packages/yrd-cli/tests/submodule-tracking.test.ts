@@ -11,7 +11,8 @@ import { defineConfig, yrd as yrdConfig } from "@yrd/config"
 import { createProcess } from "@yrd/process"
 import { createJournal } from "@yrd/persistence"
 import { resolveSubmoduleOrigin } from "@yrd/queue"
-import { createDefaultYrdApp, runYrd, type YrdCliApp, type YrdCliIO } from "@yrd/cli"
+import { createDefaultYrdApp, runYrd as runYrdRaw, type YrdCliApp, type YrdCliIO } from "@yrd/cli"
+import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
 import type { ResolvedYrdProjectConfig } from "../src/config.ts"
 import { printResultWithWarnings } from "../src/output.tsx"
 import {
@@ -27,6 +28,15 @@ import {
   type SubmoduleBranchResolution,
   type SubmoduleEntry,
 } from "../src/submodule-tracking.ts"
+
+function runYrd(
+  app: Parameters<typeof runYrdRaw>[0],
+  argv: readonly string[],
+  io: YrdCliIO,
+  services: Parameters<typeof runYrdRaw>[3] = {},
+) {
+  return runYrdRaw(app, argv, io, { queueReadModel: testQueueReadModel(app), ...services })
+}
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => {

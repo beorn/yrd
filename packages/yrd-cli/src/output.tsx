@@ -73,7 +73,7 @@ export async function diagnostic(io: YrdCliIO, error: unknown, options: Diagnost
           code: "journal-version-skew",
           cause:
             `This Yrd cannot read the repository journal because rows contain newer fields ` +
-            `(${skew.keys.join(", ")}); refusing a stale or partial view with ${formatYrdRuntimeVersion()}.`,
+            `(${skew.keys.join(", ")}); it will not show a stale or partial view with ${formatYrdRuntimeVersion()}.`,
           resolution: [
             "Run yrd from the checkout this repository pins (for example, its vendored copy in a current-main worktree).",
             "Update this checkout, then retry the same Yrd command.",

@@ -29,7 +29,7 @@ function refusal(id: string, overrides: Partial<QueueAdmissionRefusal> = {}): Qu
     code: "authored-gitlink",
     kind: "refusal",
     reason:
-      `yrd: PR '${id}' changes generated-only gitlinks [km]; authored root carriers use 'yrd pr submit <branch>', ` +
+      `yrd: PR '${id}' changes generated-only gitlinks [km]; authored root branches use 'yrd pr submit <branch>', ` +
       `then 'yrd pr recut ${id} --preflight --queue' and run its exact next command on that same PR`,
     count: 3,
     firstAt: "2026-07-27T15:00:00.000Z",

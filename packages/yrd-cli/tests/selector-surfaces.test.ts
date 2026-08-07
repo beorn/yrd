@@ -16,7 +16,8 @@ import { describe, expect, it } from "vitest"
 import { createBayJobDefs, withBays } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
-import { runYrd, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
+import { runYrd as runYrdRaw, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
+import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
 import { withMerge, withQueue, withStep, type PRShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
 import { withIntents } from "@yrd/intent"
 import { withIssues } from "@yrd/issue"
@@ -32,6 +33,15 @@ import { createLogger } from "loggily"
 const HEAD_SHA = "1".repeat(40)
 const BASE_SHA = "a".repeat(40)
 const MERGED_SHA = "b".repeat(40)
+
+function runYrd(
+  app: Parameters<typeof runYrdRaw>[0],
+  argv: readonly string[],
+  io: YrdCliIO,
+  services: YrdCliServices = {},
+) {
+  return runYrdRaw(app, argv, io, { queueReadModel: testQueueReadModel(app), ...services })
+}
 
 function ids(initial = 0): () => string {
   let value = initial

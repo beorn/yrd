@@ -89,7 +89,7 @@ export function withIntents() {
               raiseFailure(
                 "infrastructure",
                 "intent-admission-lost",
-                `yrd: intent '${parsed.intentId}' was not admitted`,
+                `yrd: intent '${parsed.intentId}' was not accepted`,
               )
             }
             return record
@@ -114,7 +114,7 @@ export function withIntents() {
             })
             const record = state().records[intent]
             if (record === undefined) {
-              raiseFailure("infrastructure", "intent-withdrawal-lost", `yrd: intent '${intent}' was not withdrawn`)
+              raiseFailure("infrastructure", "intent-withdrawal-lost", `yrd: intent '${intent}' was not closed`)
             }
             return record
           },
@@ -154,7 +154,7 @@ function buildSubmitCommand() {
           raiseFailure(
             "refusal",
             "intent-fingerprint-conflict",
-            `yrd: intent '${args.intentId}' was already admitted as '${existing.id}' with different terms`,
+            `yrd: intent '${args.intentId}' was already accepted as '${existing.id}' with different terms`,
           )
         }
         return { events: [] }
@@ -169,7 +169,7 @@ function buildSubmitCommand() {
         raiseFailure(
           "refusal",
           "intent-supersede-consent-required",
-          `yrd: live intent '${superseded.id}' belongs to '${superseded.submitter}'; withdraw it or resubmit with explicit force`,
+          `yrd: live intent '${superseded.id}' belongs to '${superseded.submitter}'; close it or resubmit with --force`,
         )
       }
       if (superseded !== undefined) events.push(event("intent/superseded", { intent: superseded.id, by: id }))
@@ -249,7 +249,7 @@ function buildWithdrawCommand() {
         raiseFailure(
           "refusal",
           "intent-terminal",
-          `yrd: intent '${record.id}' is already ${record.status}; nothing to withdraw`,
+          `yrd: intent '${record.id}' is already ${record.status}; nothing to close`,
         )
       }
       return {

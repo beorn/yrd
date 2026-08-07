@@ -141,7 +141,7 @@ export async function createGitPushReceiver(options: ReceiverOptions): Promise<G
   const exclusive = createExclusive(join(stateDir, "receiver-init"), { timeoutMs: 30_000, pollIntervalMs: 10 })
   return exclusive.run(async () => {
     const current = await entry(receiverPath)
-    check(!current?.isSymbolicLink(), `refusing symlinked prs.git at '${receiverPath}'`)
+    check(!current?.isSymbolicLink(), `will not use a symlinked prs.git at '${receiverPath}'`)
     check(current === undefined || current.isDirectory(), `'${receiverPath}' exists and is not a directory`)
     if (current === undefined) {
       await mkdir(dirname(receiverPath), { recursive: true, mode: 0o700 })
@@ -518,7 +518,7 @@ async function preflightHooks(receiverPath: string, entry: string): Promise<void
     const body = await text(path)
     check(
       body === undefined || body === receiverHookSource(mode, entry) || body.startsWith(MANAGED_HOOK_PREFIX),
-      `refusing to replace unmanaged ${mode} hook at '${path}'`,
+      `will not replace the unmanaged ${mode} hook at '${path}'`,
     )
   }
 }

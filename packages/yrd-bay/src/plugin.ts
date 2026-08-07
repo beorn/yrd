@@ -981,7 +981,7 @@ export function createBays(
       raiseFailure(
         "refusal",
         "issue-conflict",
-        `yrd: PR '${pr.id}' is already linked to issue '${pr.issue}'; withdraw it before linking another issue`,
+        `yrd: PR '${pr.id}' is already linked to issue '${pr.issue}'; close it before linking another issue`,
       )
     }
     const delivery = prDeliveryState(pr)
@@ -1015,7 +1015,7 @@ export function createBays(
     if (trackChanged && !trackable) {
       const warning =
         `PR '${pr.id}' is ${prDeliveryState(pr)}; --track was NOT recorded. ` +
-        "Tracking governs future recuts, and this PR has none."
+        "Tracking governs future rebuilds, and this merge request has none."
       metadata.warnings?.push(warning)
       log?.warn?.(warning, { action: "submit-track-terminal", pr: pr.id })
     }
@@ -1663,16 +1663,16 @@ function certifyBayHandoff(state: DeepReadonly<BayState>, args: CertifyHandoffAr
   const bay = required(resolveBay(state.bays, args.bay), "bay", args.bay)
   if (bay.status !== "active") throw new Error(`yrd: bay '${bay.id}' is ${bay.status}, not active`)
   if (bay.branch !== args.branch) {
-    throw new Error(`yrd: handoff branch '${args.branch}' does not match current branch '${bay.branch}'`)
+    throw new Error(`yrd: certified branch '${args.branch}' does not match current branch '${bay.branch}'`)
   }
   if (bay.headSha !== args.headSha) {
     throw new Error(
-      `yrd: handoff head '${args.headSha}' does not match current head '${bay.headSha ?? "unknown"}' for bay '${bay.id}'`,
+      `yrd: certified head '${args.headSha}' does not match current head '${bay.headSha ?? "unknown"}' for bay '${bay.id}'`,
     )
   }
   if (bay.handoff?.evidence === args.evidence) {
     if (bay.handoff.headSha === args.headSha) return { events: [] }
-    throw new Error(`yrd: handoff evidence '${args.evidence}' already certifies a different Bay head`)
+    throw new Error(`yrd: certificate '${args.evidence}' already certifies a different bay head`)
   }
   return {
     events: [
@@ -1997,7 +1997,7 @@ function attachedIssue(
     raiseFailure(
       "refusal",
       "issue-conflict",
-      `yrd: PR '${existing.id}' is already linked to issue '${existing.issue}'; withdraw it before linking another issue`,
+      `yrd: PR '${existing.id}' is already linked to issue '${existing.issue}'; close it before linking another issue`,
     )
   }
   return requested ?? existing?.issue ?? fallback
@@ -2097,7 +2097,7 @@ function settleSupersededPr(state: DeepReadonly<BayState>, args: PrSettleSuperse
     raiseFailure(
       "refusal",
       "recut-transition-not-admitted",
-      `yrd: PR '${pr.id}' revision ${current.n} is not the admitted revision selected for refresh`,
+      `yrd: PR '${pr.id}' revision ${current.n} is not the accepted revision selected for refresh`,
     )
   }
   if (current.recut !== undefined && current.recut.patchId !== args.patchId) {
@@ -2136,7 +2136,7 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
     raiseFailure(
       "refusal",
       "terminal-target",
-      `yrd: PR '${pr.id}' is ${prDeliveryState(pr)}; terminal PRs cannot be recut`,
+      `yrd: PR '${pr.id}' is ${prDeliveryState(pr)}; a finished merge request cannot be rebuilt`,
     )
   }
   const predecessor = pr.revs.find((revision) => revision.n === args.fromRevision)
@@ -2160,7 +2160,7 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
       "refusal",
       "recut-current-changed",
       `yrd: PR '${pr.id}' tracking changed from ${String(args.expectedCurrent.track)} ` +
-        `to ${String(pr.track ?? false)} while the recut was computed`,
+        `to ${String(pr.track ?? false)} while the rebuild was being computed`,
     )
   }
   if (unchanged) return { events: [] }
@@ -2173,7 +2173,7 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
       "refusal",
       "recut-current-changed",
       `yrd: PR '${pr.id}' current revision changed from ${args.expectedCurrent.revision}@${args.expectedCurrent.headSha}` +
-        ` to ${prRevisionNumber(pr)}@${prHead(pr)} while the recut was computed`,
+        ` to ${prRevisionNumber(pr)}@${prHead(pr)} while the rebuild was being computed`,
     )
   }
   if (args.transition !== undefined) {
@@ -2192,7 +2192,7 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
       raiseFailure(
         "refusal",
         "recut-transition-not-admitted",
-        `yrd: PR '${pr.id}' revision ${prRevisionNumber(pr)} is not the admitted revision selected for refresh`,
+        `yrd: PR '${pr.id}' revision ${prRevisionNumber(pr)} is not the accepted revision selected for refresh`,
       )
     }
     if (predecessor.recut !== undefined && predecessor.recut.patchId !== args.patchId) {
@@ -2343,7 +2343,7 @@ function recordPrAdmission(state: DeepReadonly<BayState>, args: PRAdmissionRecor
     raiseFailure(
       "refusal",
       "stale-pr",
-      `yrd: admission targets stale revision ${args.revision} (${args.headSha}) of PR '${pr.id}'`,
+      `yrd: entry checks target stale revision ${args.revision} (${args.headSha}) of PR '${pr.id}'`,
     )
   }
   const delivery = prDeliveryState(pr)
@@ -2510,7 +2510,7 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
   const pr = prForBay(current, bay.id) ?? resolvePR(current, bay.branch)
   if (pr !== undefined && prDeliveryState(pr) !== "pushed" && isLivePR(pr) && args.withdraw !== true) {
     throw new Error(
-      `yrd: PR '${pr.id}' is ${prDeliveryState(pr)}; run it through the queue or withdraw it before closing`,
+      `yrd: PR '${pr.id}' is ${prDeliveryState(pr)}; run it through the merge queue before closing, or pass --withdraw`,
     )
   }
   return {
@@ -2552,7 +2552,7 @@ function editPr(state: DeepReadonly<BayState>, args: PrEditArgs) {
     raiseFailure(
       "refusal",
       "issue-conflict",
-      `yrd: PR '${pr.id}' is already linked to issue '${pr.issue}'; withdraw it before linking another issue`,
+      `yrd: PR '${pr.id}' is already linked to issue '${pr.issue}'; close it before linking another issue`,
     )
   }
   const delivery = prDeliveryState(pr)
@@ -2645,7 +2645,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       const bay = current.byId[certified.bay]
       if (bay === undefined) return state
       if (bay.branch !== certified.branch || bay.headSha !== certified.headSha) {
-        throw new Error(`yrd: handoff certification does not match Bay '${certified.bay}' current branch and head`)
+        throw new Error(`yrd: certification does not match bay '${certified.bay}' current branch and head`)
       }
       return patchBay(bay, {
         handoff: {
@@ -2735,7 +2735,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
     case "pr/recut": {
       const recut = PRRecutFactSchema.parse(data)
       const pr = current.prs[recut.pr]
-      if (pr === undefined) throw new Error(`yrd: no PR '${recut.pr}' for recut`)
+      if (pr === undefined) throw new Error(`yrd: no merge request '${recut.pr}' to rebuild`)
       const predecessor = pr.revs.find(
         (revision) => revision.n === recut.predecessor.revision && revision.head === recut.predecessor.headSha,
       )
@@ -2745,7 +2745,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         predecessor.baseSha !== recut.predecessor.baseSha ||
         recut.successor.revision !== prRevisionNumber(pr) + 1
       ) {
-        throw new Error(`yrd: recut lineage does not match PR '${pr.id}'`)
+        throw new Error(`yrd: rebuild history does not match merge request '${pr.id}'`)
       }
       const proof: PRRecutProof = {
         fromRevision: recut.fromRevision,
@@ -2771,7 +2771,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
           review.revision === predecessor.n && review.headSha === predecessor.head && review.decision === "approve",
       )
       if (recut.reviewCarried && approval === undefined) {
-        throw new Error(`yrd: PR '${pr.id}' recut carries a missing approval`)
+        throw new Error(`yrd: PR '${pr.id}' rebuild carries a missing approval`)
       }
       const carriedReview: PRReview | undefined =
         recut.reviewCarried && approval !== undefined

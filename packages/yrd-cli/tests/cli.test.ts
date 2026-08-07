@@ -37,6 +37,7 @@ import {
   type PRRev,
 } from "@yrd/bay"
 import { runYrd as runYrdRaw, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
+import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
 import {
   Command,
   createFailure,
@@ -596,27 +597,6 @@ function runYrd(
     },
     ...services,
   })
-}
-
-/** Explicit adapter for in-memory test Journals; production reads are supplied
- * by createYrdHost's SQLite-backed capability. */
-function testQueueReadModel(app: Parameters<typeof runYrdRaw>[0]) {
-  let cachedCursor: number | undefined
-  let cachedAttempts: readonly QueueAttempt[] = []
-  return {
-    async snapshot() {
-      const journal = await app.journalSnapshot()
-      if (journal.asOf.cursor !== cachedCursor) {
-        cachedAttempts = await queueLogAttempts(app.events())
-        cachedCursor = journal.asOf.cursor
-      }
-      return {
-        cursor: journal.asOf.cursor,
-        generation: 0,
-        attempts: cachedAttempts,
-      }
-    },
-  }
 }
 
 function yrdBay(...args: string[]): string[] {
@@ -1719,13 +1699,13 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("pr", "create", "--help"), createHelp.io), createHelp.stderr()).toBe(0)
     expect(createHelp.stdout()).toContain("Usage: yrd pr create [options] [selector]")
     expect(createHelp.stdout()).toContain("--issue <ref>")
-    expect(createHelp.stdout()).toContain("Authored root carrier")
+    expect(createHelp.stdout()).toContain("Authored root branch")
     expect(createHelp.stdout()).toContain("$ yrd pr create <branch>")
     expect(createHelp.stdout()).not.toContain("--draft")
 
     expect(await runYrd(app, yrd("pr", "submit", "--help"), submitHelp.io), submitHelp.stderr()).toBe(0)
     expect(submitHelp.stdout()).not.toContain("--draft")
-    expect(submitHelp.stdout()).not.toContain("Authored root carrier")
+    expect(submitHelp.stdout()).not.toContain("Authored root branch")
 
     expect(await runYrd(app, yrd("pr", "recut", "--help"), help.io), help.stderr()).toBe(0)
     expect(help.stdout()).toContain("Usage: yrd pr recut [options] <selector>")
@@ -1733,7 +1713,7 @@ describe("runYrd", () => {
     expect(help.stdout()).toContain("--preflight")
     expect(help.stdout()).toContain("--queue")
     expect(help.stdout()).toContain("--json")
-    expect(help.stdout()).toContain("Authored root carrier")
+    expect(help.stdout()).toContain("Authored root branch")
     expect(help.stdout()).toContain("$ yrd pr create <branch>")
     expect(help.stdout()).toContain("$ yrd pr recut <PR> --preflight --queue")
     expect(help.stdout()).toMatch(/no\s+composition\s+manifest or manual triage/u)
@@ -3106,7 +3086,7 @@ describe("runYrd", () => {
     // Without --force the recut is refused so nobody mechanically discards the green check.
     const refused = recutIO(app)
     expect(await runYrd(app, yrd("pr", "recut", "PR1"), refused.io, services)).toBe(1)
-    expect(refused.stderr()).toContain("passing check")
+    expect(refused.stderr()).toContain("passed its checks")
     expect(refused.stderr()).toContain("--force")
     expect(recutCalls).toBe(0)
     // The passing check survives and the current revision is untouched.
@@ -5058,7 +5038,7 @@ describe("runYrd", () => {
           throw createFailure({
             kind: "refusal",
             code: "carrier-drops-landed",
-            message: "carrier does not contain the queue base; recut and requeue the root carrier",
+            message: "the branch does not contain the merge-queue base; recut and requeue the root branch",
           })
         }
         const { prs: _prs, ...candidate } = input
@@ -6889,7 +6869,7 @@ describe("runYrd", () => {
       // Local wall clock (suite pins Asia/Kolkata): 10:10Z renders 15:40:00,
       // date-qualified but never truncated below seconds.
       expect(integratedLine).toContain("2026-07-13T15:40:00")
-      expect(integratedLine).toContain("✓ done")
+      expect(integratedLine).toContain("✓ merged")
       expect(integratedLine?.trimEnd()).toMatch(/15:00 10:00$/u)
     }
     // Height fits the calendar STATS panel so the list rows are not clipped
@@ -12591,6 +12571,46 @@ describe("yrd intent — declared pin advances (22668 phase 1)", () => {
     expect(JSON.parse(withdrawn.stdout())).toMatchObject({
       command: "intent.withdraw",
       intent: { id: "I1", status: "withdrawn", disposition: { code: "intent-withdrawn", reason: "not needed" } },
+    })
+  })
+
+  it("prints `close` as the intent-ending spelling and still accepts `withdraw`", async () => {
+    await using app = await createApp()
+
+    const intentHelp = outputIO()
+    expect(await runYrd(app, yrd("intent", "--help"), intentHelp.io), intentHelp.stderr()).toBe(0)
+    expect(intentHelp.stdout()).toContain("close [options] <intent>")
+    expect(intentHelp.stdout()).toContain("close an open intent")
+    expect(intentHelp.stdout()).not.toContain("withdraw")
+
+    const closeHelp = outputIO()
+    expect(await runYrd(app, yrd("intent", "close", "--help"), closeHelp.io), closeHelp.stderr()).toBe(0)
+    expect(closeHelp.stdout()).toContain("why the intent is closed")
+
+    // The retired spelling resolves to the same command, help and all.
+    const aliasHelp = outputIO()
+    expect(await runYrd(app, yrd("intent", "withdraw", "--help"), aliasHelp.io), aliasHelp.stderr()).toBe(0)
+    expect(aliasHelp.stdout()).toBe(closeHelp.stdout())
+
+    const submitted = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd("intent", "submit", "--component", COMPONENT, "--target", TARGET_SHA, "--issue", "one", "--json"),
+        submitted.io,
+        { process: intentGit() },
+      ),
+      submitted.stderr(),
+    ).toBe(0)
+
+    const closed = outputIO()
+    expect(
+      await runYrd(app, yrd("intent", "close", "I1", "--reason", "superseded", "--json"), closed.io),
+      closed.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(closed.stdout())).toMatchObject({
+      command: "intent.withdraw",
+      intent: { id: "I1", status: "withdrawn", disposition: { code: "intent-withdrawn", reason: "superseded" } },
     })
   })
 

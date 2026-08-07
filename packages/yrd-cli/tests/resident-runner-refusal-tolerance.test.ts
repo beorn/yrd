@@ -147,7 +147,7 @@ describe("resident runner — a PR withdrawn mid-compose never kills the watch l
               kind: "refusal",
               code,
               message:
-                "yrd: PR 'PR1579' changes generated-only gitlinks [km]; authored root carriers use 'yrd pr create <branch>'",
+                "yrd: PR 'PR1579' changes generated-only gitlinks [km]; authored root branches use 'yrd pr create <branch>'",
             }),
           ),
         () => {

@@ -730,7 +730,7 @@ function openMutable(runtime: Context, verifyViews = true): Database {
     database.run("PRAGMA wal_autocheckpoint = 0")
     database.fileControl(constants.SQLITE_FCNTL_PERSIST_WAL, 1)
     const row = database.query<{ journal_mode: string }, []>("PRAGMA journal_mode = WAL").get()
-    if (row?.journal_mode.toLowerCase() !== "wal") throw new Error("yrd: SQLite refused WAL journal mode")
+    if (row?.journal_mode.toLowerCase() !== "wal") throw new Error("yrd: SQLite would not enable WAL journal mode")
     const { head } = assertComplete(database, runtime.path)
     if (verifyViews) assertJournalViews(database, runtime.views, head)
     return database
@@ -922,7 +922,7 @@ async function finishSchemaMaintenance(runtime: Context): Promise<void> {
 
 function assertMutablePlatform(runtime: Context): void {
   if (runtime.platform === "win32") {
-    throw new Error("yrd: journal SQLite mutation refused: unsupported platform win32")
+    throw new Error("yrd: journal writes are not supported on win32")
   }
 }
 

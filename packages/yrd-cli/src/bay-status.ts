@@ -226,14 +226,14 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
       verdict: "PASS",
       evidence:
         unique === undefined
-          ? `tip is pushed to ${facts.tipDurableAt} — unlanded but durable`
-          : `tip has ${unique} unique commit(s) pushed to ${facts.tipDurableAt} — unlanded but durable`,
+          ? `tip is pushed to ${facts.tipDurableAt} — not merged, but durable`
+          : `tip has ${unique} unique commit(s) pushed to ${facts.tipDurableAt} — not merged, but durable`,
     })
   } else if (facts.tipLandedUnknown === true || (facts.tipLanded === undefined && facts.aheadOfOrigin === undefined)) {
     lines.push({
       class: "commits",
       verdict: "UNKNOWN",
-      evidence: "could not prove tip is landed on origin/main (ancestry/patch-id unavailable)",
+      evidence: "could not prove the tip is merged into origin/main (ancestry/patch-id unavailable)",
     })
   } else if (facts.tipLanded === true || facts.aheadOfOrigin === 0) {
     lines.push({
@@ -244,7 +244,7 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
           ? `tip is durable at ${facts.tipDurableAt}`
           : facts.aheadOfOrigin === 0
             ? "tip is not ahead of origin/main"
-            : "tip is landed (ancestor or patch-id equivalent of origin/main)",
+            : "tip is merged (ancestor or patch-id equivalent of origin/main)",
     })
   } else {
     lines.push({
@@ -253,7 +253,7 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
       evidence:
         unique !== undefined
           ? `tip has ${unique} unique commit(s) on no advertised origin ref — at risk`
-          : "tip is not landed and is on no advertised origin ref — at risk",
+          : "tip is not merged and is on no advertised origin ref — at risk",
     })
   }
 

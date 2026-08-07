@@ -86,7 +86,7 @@ export async function reconcilePrLandings(prs: readonly PR[], io: YrdCliIO): Pro
         landings.set(pr.id, { recorded, baseSha, headSha, code: `${recorded}-after-landing` })
       }
     } catch (error) {
-      warnings.push(`yrd: could not check base '${base}' for already-landed content: ${failureText(error)}`)
+      warnings.push(`yrd: could not check base '${base}' for already-merged content: ${failureText(error)}`)
     }
   }
   return { landings, warnings }

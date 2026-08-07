@@ -302,11 +302,13 @@ export type QueueTimelineRepeat = Readonly<{
 export type QueueTimelineDisplayRow = QueueTimelineProjectedRow & Readonly<{ repeat?: QueueTimelineRepeat }>
 
 /** Select the rows the one-shot view draws. Live rows — draft/rev/ready, the
- * current state of open PRs — are never evicted by the display cap, no matter
- * how old their clock anchor is; the cap spends its whole budget on history
- * rows instead. Display order is preserved. (Live specimen 2026-08-07: two
- * days-old drafts sorted below the cap and vanished from the human timeline
- * while `--json` carried them.) */
+ * current state of open PRs — take priority over history within the display
+ * cap, no matter how old their clock anchor is; history fills only the budget
+ * live rows leave. The cap itself still binds (the print path must stay
+ * bounded), so when live rows alone exceed it the newest `shown` live rows win
+ * and the residue line discloses the rest. Display order is preserved. (Live
+ * specimen 2026-08-07: two days-old drafts sorted below the cap and vanished
+ * from the human timeline while `--json` carried them.) */
 export function timelineRetainedRows(
   displayRows: readonly QueueTimelineDisplayRow[],
   shown: number,
@@ -315,9 +317,16 @@ export function timelineRetainedRows(
   const live = (row: QueueTimelineDisplayRow): boolean =>
     row.status === "draft" || row.status === "rev" || row.status === "ready"
   const liveCount = displayRows.reduce((count, row) => (live(row) ? count + 1 : count), 0)
-  let historyBudget = Math.max(0, shown - liveCount)
+  let liveBudget = Math.min(shown, liveCount)
+  let historyBudget = shown - liveBudget
   return displayRows.filter((row) => {
-    if (live(row)) return true
+    if (live(row)) {
+      if (liveBudget > 0) {
+        liveBudget -= 1
+        return true
+      }
+      return false
+    }
     if (historyBudget > 0) {
       historyBudget -= 1
       return true
@@ -830,7 +839,7 @@ export function latestRunForCurrentRevision(pr: PR, summary: QueueSummary): Run 
       (run) =>
         currentSubmission === undefined ||
         timestamp(run.startedAt, `run '${run.id}' start`) >=
-          timestamp(currentSubmission, `PR '${pr.id}' current revision submission`),
+          timestamp(currentSubmission, `PR '${pr.id}' current revision submit time`),
     )
     .toSorted((left, right) => left.startedAt.localeCompare(right.startedAt))
     .at(-1)
@@ -1141,7 +1150,7 @@ export function runRevisionClock(pr: PR, run: Run): PRRunRevisionClock {
   const startedAt = timestamp(run.startedAt, `run '${run.id}' start`)
   if (
     revision.submittedAt !== undefined &&
-    timestamp(revision.submittedAt, `PR '${pr.id}' revision ${pinned.revision}@${pinned.headSha} submission`) <=
+    timestamp(revision.submittedAt, `PR '${pr.id}' revision ${pinned.revision}@${pinned.headSha} submit time`) <=
       startedAt
   ) {
     const clock = validateRevisionClock(pr, historyClock)
@@ -2091,7 +2100,7 @@ function timelineNonIntegratedRows(
     if (status === undefined) return []
     if (status === "ready" && activeRevisions.has(revisionKey)) return []
     const timestamp = submissionTimes.get(revisionKey) ?? revision.submittedAt ?? pr.submittedAt ?? null
-    const timestampMs = parsedTimelineTimestamp(timestamp ?? undefined, `PR '${pr.id}' submission`)
+    const timestampMs = parsedTimelineTimestamp(timestamp ?? undefined, `PR '${pr.id}' submit time`)
     const position = positions.get(pr.id)
     const bayPath = pr.bay === undefined ? undefined : state?.byId[pr.bay]?.path
     const revisionLineage = [timelineRevisionLineage(pr)]
@@ -2251,7 +2260,7 @@ export function queueTimelineAdmissionTimes(results: readonly QueueStatusResult[
         submissionTimes.set(
           runKey,
           submittedAt !== undefined &&
-            timestamp(submittedAt, `PR '${pr.id}' submission`) <= timestamp(run.startedAt, `run '${run.id}' start`)
+            timestamp(submittedAt, `PR '${pr.id}' submit time`) <= timestamp(run.startedAt, `run '${run.id}' start`)
             ? submittedAt
             : null,
         )
@@ -3978,9 +3987,15 @@ function noticeHeadline(
     }
     return state === "failed" ? "failed" : `failed, ${state}`
   }
-  if (data?.status === "completed" && data.conclusion === "success" && state === "integrated") {
-    return "passed, integrated"
+  // `integrated` and `already-landed` both print as "merged"; the parenthetical
+  // keeps the already-on-main case distinguishable without a second state word.
+  if (state === "integrated") {
+    const label =
+      data?.outcome === "already-landed" || row?.status === "already-landed" ? "merged (already on main)" : "merged"
+    return data?.status === "completed" && data.conclusion === "success" ? `passed, ${label}` : label
   }
+  if (state === "running") return "checking"
+  if (state === "rejected") return "failed"
   if (state === "needs-author") return "needs author"
   return state
 }
@@ -4092,7 +4107,7 @@ function noticeExplanation(
   }
   if (state === "draft") return "Registered, not queued. The author must submit this revision when it is ready."
   if (state === "rejected") {
-    return `${failureSummary === undefined ? "The submission was rejected." : `${failureSummary}.`} The author must fix the branch and resubmit; this is not retried automatically.`
+    return `${failureSummary === undefined ? "The merge request failed." : `${failureSummary}.`} The author must fix the branch and resubmit; this is not retried automatically.`
   }
   const artifact = noticeArtifact(data)
   return `${failureSummary === undefined ? "The run failed." : `${failureSummary}.`} This failure is not retried automatically; the author must fix the branch and resubmit.${
@@ -4210,19 +4225,19 @@ const TIMELINE_STATUS_WORDS = {
   draft: "draft",
   rev: "rev",
   ready: "ready",
-  pending: "todo",
-  running: "run",
-  integrated: "done",
-  "already-landed": "done",
-  // Non-landing success — never the word "done" (21801 / 22323).
-  passed: "pass",
-  rejected: "fail",
+  pending: "queued",
+  running: "checking",
+  integrated: "merged",
+  "already-landed": "merged",
+  // Non-landing success — never the word "merged" (21801 / 22323).
+  passed: "passed",
+  rejected: "failed",
   "environment-refused": "env",
   stale: "stale",
   lost: "lost",
   legacy: "legacy",
-  refused: "refused",
-  canceled: "can",
+  refused: "failed",
+  canceled: "canceled",
 } as const satisfies Readonly<Record<QueueTimelineStatus, string>>
 
 // 15e is later than 15c/15d: STATUS remains a fixed column between TIME
@@ -4762,7 +4777,7 @@ function TimelineRunnerBox({
         {runner === null ? (
           <Text color="$fg-error" bold wrap="truncate" minWidth={0}>
             {runnerRefusal !== undefined
-              ? `NO RUNNER - runner refused: stale step contract on ${runnerRefusal.run ?? "unknown run"}`
+              ? `NO RUNNER - runner stopped: stale step contract on ${runnerRefusal.run ?? "unknown run"}`
               : drained === null
                 ? // "no drained run in window" alone reads as a quiet queue. It is
                   // the same sentence whether nothing was submitted or work has
@@ -6941,7 +6956,7 @@ function RevisionClockView({
 
 function RunAdmissionClockView({ run }: { run: QueueShowData }) {
   const clock = run.revisionClock
-  if (clock === undefined) throw new Error(`yrd: run '${run.run}' has no projected admission clock`)
+  if (clock === undefined) throw new Error(`yrd: run '${run.run}' has no projected entry-check clock`)
   const at = clock.admittedBy === "submission" ? clock.submittedAt : clock.checkRequestedAt
   return (
     <Text wrap="wrap">

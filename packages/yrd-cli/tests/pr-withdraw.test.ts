@@ -19,7 +19,8 @@ import { createBayJobDefs, currentPRRev, prDeliveryState, withBays } from "@yrd/
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type Journal, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { createJournal } from "@yrd/persistence"
-import { runYrd, type PruneGitFacts, type RecutPreflightResult, type YrdCliIO } from "@yrd/cli"
+import { runYrd as runYrdRaw, type PruneGitFacts, type RecutPreflightResult, type YrdCliIO } from "@yrd/cli"
+import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
 import { withMerge, withQueue, withStep, type PRShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
 import { withIntents } from "@yrd/intent"
 import { withIssues } from "@yrd/issue"
@@ -31,6 +32,15 @@ import {
   type ContestRunnerDef,
 } from "@yrd/contest"
 import { createPruneGitFacts } from "../src/pr-withdraw.ts"
+
+function runYrd(
+  app: Parameters<typeof runYrdRaw>[0],
+  argv: readonly string[],
+  io: YrdCliIO,
+  services: Parameters<typeof runYrdRaw>[3] = {},
+) {
+  return runYrdRaw(app, argv, io, { queueReadModel: testQueueReadModel(app), ...services })
+}
 
 const HEAD_SHA = "1".repeat(40)
 const HEAD2_SHA = "2".repeat(40)

@@ -58,14 +58,19 @@ const LIFECYCLE_PRESENTATIONS = {
   fail: { glyph: "×", color: "$fg-error" },
 } as const satisfies Readonly<Record<LifecycleStatus, StatusPresentation>>
 
+// Every word the CLI has ever PRINTED must still parse here: the converged
+// display labels (queued/checking/merged/failed) and the words they replaced.
 const LIFECYCLE_ALIASES: Readonly<Record<string, LifecycleStatus>> = {
   active: "open",
   queued: "open",
+  pending: "open",
   opening: "working",
   closing: "working",
   running: "working",
+  checking: "working",
   closed: "done",
   integrated: "done",
+  merged: "done",
   failed: "fail",
   rejected: "fail",
 }
@@ -116,7 +121,9 @@ const STATUS_ALIASES: Readonly<Record<string, StatusPresentationState>> = {
   // "passed" is a first-class presentation state (non-landing), not an alias of done.
   success: "done",
   succeeded: "done",
+  merged: "integrated",
   "already-landed": "integrated",
+  "already merged": "integrated",
   "environment-refused": "env",
   "queue-environment-refused": "env",
   lost: "timeout",

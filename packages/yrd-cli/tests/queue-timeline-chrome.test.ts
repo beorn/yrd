@@ -28,6 +28,12 @@ function rowIndexOf(text: string, needle: string): number {
   return text.split("\n").findIndex((row) => row.includes(needle))
 }
 
+// The converged status words also appear in the STATUS notice above the
+// timeline, so a cursor-row lookup must be scoped to timestamped timeline rows.
+function timelineRowIndexOf(text: string, needle: string): number {
+  return text.split("\n").findIndex((row) => row.includes(needle) && /^\s*\d{2}:\d{2}:\d{2}/u.test(row))
+}
+
 function rowAt(text: string, index: number): string {
   const row = text.split("\n")[index]
   if (row === undefined) throw new Error(`no rendered row ${index}`)
@@ -192,12 +198,12 @@ describe("queue timeline chrome 21106", () => {
     try {
       await app.waitForLayoutStable()
       const integratedRow = rowAt(app.text, rowIndexOf(app.text, "pr#4.1"))
-      expect(integratedRow).toContain(" done ")
+      expect(integratedRow).toContain(" merged ")
       expect(integratedRow).not.toContain(" ok ")
       const revisedRow = rowAt(app.text, rowIndexOf(app.text, "pr#5.1"))
       expect(revisedRow).toContain(" rev ")
       const rejectedRow = rowAt(app.text, rowIndexOf(app.text, "main#5"))
-      expect(rejectedRow).toContain(" fail ")
+      expect(rejectedRow).toContain(" failed ")
       expect(rejectedRow).not.toContain(" rej ")
     } finally {
       app.unmount()
@@ -460,12 +466,12 @@ describe("queue timeline chrome 21106", () => {
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      await waitFor(() => rowIndexOf(app.text, " run ") >= 0)
+      await waitFor(() => timelineRowIndexOf(app.text, " checking ") >= 0)
       const text = app.text
       // Default cursor = first RUNNING row.
-      const cursorY = rowIndexOf(text, " run ")
+      const cursorY = timelineRowIndexOf(text, " checking ")
       const cursorLine = rowAt(text, cursorY)
-      const statusX = cursorLine.indexOf(" run ") + 1
+      const statusX = cursorLine.indexOf(" checking ") + 1
       const timeX = cursorLine.search(/\d{2}:\d{2}:\d{2}/u)
       // Sample the selection fg/bg from a NON-activity cell (TIME).
       const cursorFg = app.cell(timeX, cursorY).fg
@@ -496,10 +502,10 @@ describe("queue timeline chrome 21106", () => {
       expect(app.cell(durX - 1, cursorY).bg, "selection bg across cell gaps").toEqual(cursorBg)
       // Unselected rejected row keeps its own colorization: status fg differs
       // from muted TIME fg.
-      const rejectedY = rowIndexOf(text, " fail ")
+      const rejectedY = timelineRowIndexOf(text, " failed ")
       expect(rejectedY).not.toBe(cursorY)
       const rejectedLine = rowAt(text, rejectedY)
-      const failX = rejectedLine.indexOf(" fail ") + 1
+      const failX = rejectedLine.indexOf(" failed ") + 1
       const rejectedTimeX = rejectedLine.search(/\d{2}:\d{2}:\d{2}/u)
       expect(app.cell(failX, rejectedY).fg).not.toEqual(app.cell(rejectedTimeX, rejectedY).fg)
       expect(app.cell(failX, rejectedY).bg).not.toEqual(cursorBg)

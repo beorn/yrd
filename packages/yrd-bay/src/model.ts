@@ -388,8 +388,8 @@ export const PRAdmissionStepSchema = z
         code: "custom",
         message:
           step.status === "passed"
-            ? "passed admission step cannot carry a receipt"
-            : "refused admission step requires a receipt",
+            ? "a passed entry-check step cannot carry a receipt"
+            : "a failed entry-check step requires a receipt",
         path: ["receipt"],
       })
     }
@@ -742,14 +742,16 @@ export function prRevisionLineage(pr: PR, revision = currentPRRev(pr).n): readon
   const lineage: PRRev[] = []
   const seen = new Set<number>()
   while (current !== undefined) {
-    if (seen.has(current.n)) throw new Error(`yrd: PR '${pr.id}' has cyclic recut lineage`)
+    if (seen.has(current.n)) throw new Error(`yrd: PR '${pr.id}' has a cyclic rebuild history`)
     seen.add(current.n)
     lineage.unshift(current)
     const predecessor = current.recut?.fromRevision
     if (predecessor === undefined) break
     current = byRevision.get(predecessor)
     if (current === undefined) {
-      throw new Error(`yrd: PR '${pr.id}' recut revision ${lineage[0]?.n ?? revision} lost predecessor ${predecessor}`)
+      throw new Error(
+        `yrd: PR '${pr.id}' rebuilt revision ${lineage[0]?.n ?? revision} lost its predecessor ${predecessor}`,
+      )
     }
   }
   return lineage

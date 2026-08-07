@@ -18,7 +18,7 @@ type LogCall = Readonly<{ message: string; props: Record<string, unknown> }>
 
 function authoredGitlinkReason(pr: string): string {
   return (
-    `yrd: PR '${pr}' changes generated-only gitlinks [km]; authored root carriers use 'yrd pr submit <branch>', ` +
+    `yrd: PR '${pr}' changes generated-only gitlinks [km]; authored root branches use 'yrd pr submit <branch>', ` +
     `then 'yrd pr recut ${pr} --preflight --queue' and run its exact next command on that same PR; ` +
     "no composition manifest or manual triage is needed"
   )

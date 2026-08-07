@@ -12,7 +12,7 @@ function authoredGitlink(pr = PR): { code: string; message: string } {
   return {
     code: "authored-gitlink",
     message:
-      `yrd: PR '${pr}' changes generated-only gitlinks [km, ag]; authored root carriers use ` +
+      `yrd: PR '${pr}' changes generated-only gitlinks [km, ag]; authored root branches use ` +
       `'yrd pr submit <branch>', then 'yrd pr recut ${pr} --preflight --queue' and run its exact next command ` +
       "on that same PR; no composition manifest or manual triage is needed",
   }
@@ -50,7 +50,7 @@ describe("refusal remedy classification — self-applicable vs judgment-required
       {
         code: "composition-invalid",
         message:
-          `yrd: PR '${PR}' composition manifest names no source; authored root carriers use ` +
+          `yrd: PR '${PR}' composition manifest names no source; authored root branches use ` +
           `'yrd pr submit <branch>', then 'yrd pr recut ${PR} --preflight --queue' and run its exact next command`,
       },
       { branch: "task/22474", delivery: "submitted" },

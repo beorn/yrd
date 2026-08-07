@@ -201,7 +201,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           }
           if (decision.kind === "refuse") {
             throw new Error(
-              `live claim branch '${input.branch}' has no remote or tracking carrier; ` +
+              `live claim branch '${input.branch}' has no remote or tracking branch; ` +
                 "restore the draft PR head before reopening with bay open",
             )
           }
