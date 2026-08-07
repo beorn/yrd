@@ -3207,6 +3207,21 @@ async function cancelSupersededRevisionRuns(
   }
 }
 
+async function cancelSupersededRevisionAdmissionJobs(
+  app: YrdCliApp,
+  identity: Readonly<{ pr: string; revision: number }>,
+  by: string,
+  reason: string,
+): Promise<void> {
+  const keyPrefix = `admission:${identity.pr}:${identity.revision}:`
+  const jobs = Object.values(stateOf(app).jobs.byId).filter(
+    (job) => job.status !== "completed" && job.key?.startsWith(keyPrefix) === true,
+  )
+  for (const job of jobs) {
+    await app.jobs.cancel({ id: job.id, attempt: job.attempt, by, reason })
+  }
+}
+
 async function executeRecutPr(
   app: YrdCliApp,
   services: Pick<YrdCliServices, "process" | "recut">,
@@ -3370,6 +3385,7 @@ async function executeRecutPr(
     if (!unchanged) {
       const by = io.runner ?? "operator"
       const reason = `PR recut superseded revision ${source.n}`
+      await cancelSupersededRevisionAdmissionJobs(app, { pr: pr.id, revision: expectedCurrent.revision }, by, reason)
       if (expectedCurrent.track === true) {
         await cancelSupersededRevisionRuns(
           app,
@@ -3687,12 +3703,12 @@ async function applyPrSelection(
   }
   const reviewers = options.reviewer ?? []
   for (const selector of inferred) {
+    const selectedBay = app.bays.get(selector)
+    const previous = app.bays.pr(selectedBay?.branch ?? selector)
     if (createOnly) {
-      const bay = app.bays.get(selector)
-      const existing = app.bays.pr(bay?.branch ?? selector)
-      const delivery = existing === undefined ? undefined : prDeliveryState(existing)
-      if (existing !== undefined && delivery !== "pushed" && delivery !== "rejected") {
-        refusal(`PR '${existing.id}' is already ${delivery}; create is only for a draft PR`)
+      const delivery = previous === undefined ? undefined : prDeliveryState(previous)
+      if (previous !== undefined && delivery !== "pushed" && delivery !== "rejected") {
+        refusal(`PR '${previous.id}' is already ${delivery}; create is only for a draft PR`)
       }
     }
     const metadata = await resolveSubmitMetadata(app, selector, options, io)
@@ -3711,6 +3727,18 @@ async function applyPrSelection(
       run: runtimeOptions(io),
       warnings,
     })
+    if (previous !== undefined) {
+      const priorRevision = currentPRRev(previous)
+      const currentRevision = currentPRRev(pr)
+      if (priorRevision.n !== currentRevision.n || priorRevision.head !== currentRevision.head) {
+        await cancelSupersededRevisionAdmissionJobs(
+          app,
+          { pr: previous.id, revision: priorRevision.n },
+          io.runner ?? "operator",
+          `PR submission superseded revision ${priorRevision.n}`,
+        )
+      }
+    }
     const delivery = prDeliveryState(pr)
     if (createOnly && delivery !== "pushed") {
       refusal(`PR '${pr.id}' is already ${delivery}; create is only for a draft PR`)
@@ -6796,6 +6824,7 @@ type ResidentQueueFreshnessTransition =
       pr: string
       revision: number
       runs: readonly string[]
+      jobs: readonly string[]
     }>
 
 /**
@@ -6816,7 +6845,23 @@ export async function refreshAdmittedQueueRevisions(
   )
   const staleRunsByPr = new Map<string, Run[]>()
   const staleRunIds = new Set<string>()
+  const staleJobsByPr = new Map<string, string[]>()
+  const staleJobIds = new Set<string>()
   for (const pr of interrupted) {
+    const currentPrefix = `admission:${pr.id}:${prRevisionNumber(pr)}:`
+    const prPrefix = `admission:${pr.id}:`
+    const staleJobs = Object.values(snapshot.jobs.byId).filter(
+      (job) =>
+        job.status !== "completed" && job.key?.startsWith(prPrefix) === true && !job.key.startsWith(currentPrefix),
+    )
+    if (staleJobs.length > 0) {
+      staleJobsByPr.set(
+        pr.id,
+        staleJobs.map(({ id }) => id),
+      )
+      for (const job of staleJobs) staleJobIds.add(job.id)
+    }
+
     const claim = snapshot.queues.authority.claims[pr.id]
     const revision = currentPRRev(pr)
     if (claim?.consumedBy === undefined || (claim.revision === revision.n && claim.headSha === revision.head)) {
@@ -6834,17 +6879,28 @@ export async function refreshAdmittedQueueRevisions(
       reason: "recover interrupted admitted-to-refreshed Queue transition",
     })
   }
+  for (const jobId of [...staleJobIds].toSorted(compareNatural)) {
+    const job = app.jobs.get(jobId)
+    if (job === undefined || job.status === "completed") continue
+    await app.jobs.cancel({
+      id: job.id,
+      attempt: job.attempt,
+      by: io.runner ?? "yrd-cli",
+      reason: "recover interrupted admitted-to-refreshed Queue transition",
+    })
+  }
   for (const pr of interrupted) {
-    const runs = staleRunsByPr.get(pr.id)
-    if (runs === undefined) continue
-    const ids = runs.map(({ id }) => id)
+    const runIds = staleRunsByPr.get(pr.id)?.map(({ id }) => id) ?? []
+    const jobIds = staleJobsByPr.get(pr.id) ?? []
+    if (runIds.length === 0 && jobIds.length === 0) continue
     const revision = prRevisionNumber(pr)
-    outcomes.push({ status: "recovered", pr: pr.id, revision, runs: ids })
+    outcomes.push({ status: "recovered", pr: pr.id, revision, runs: runIds, jobs: jobIds })
     app.log.info?.("Recovered an interrupted PR update.", {
       action: "queue-freshness-recovered",
       pr: pr.id,
       revision,
-      runs: ids,
+      runs: runIds,
+      jobs: jobIds,
     })
   }
   const candidates = Object.values(snapshot.bays.prs)
@@ -8540,7 +8596,7 @@ function buildProgram(
           const delivery = prDeliveryState(pr)
           return (
             (selectedPrIds === undefined || selectedPrIds.has(pr.id)) &&
-            (delivery === "submitted" || delivery === "ready")
+            (delivery === "submitted" || delivery === "ready" || delivery === "needs-author")
           )
         })
         .map((pr) => ({ pr, eligibility: app.queue.eligibility(pr.id) }))

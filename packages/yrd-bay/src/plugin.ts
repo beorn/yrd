@@ -2315,7 +2315,13 @@ function requestPrChecks(state: DeepReadonly<BayState>, args: PrRequestChecksArg
       ? requireLivePR(state.bays, args.pr)
       : requireExpectedPRTargetCurrent(state.bays, args.pr, args.expectedCurrent, "request-checks")
   const delivery = prDeliveryState(pr)
-  if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready" && delivery !== "rejected") {
+  if (
+    delivery !== "pushed" &&
+    delivery !== "submitted" &&
+    delivery !== "ready" &&
+    delivery !== "rejected" &&
+    delivery !== "needs-author"
+  ) {
     throw new PrCheckabilityConflict(pr.id, delivery)
   }
   const baseSha = args.baseSha ?? prBaseSha(pr)
@@ -2341,7 +2347,7 @@ function recordPrAdmission(state: DeepReadonly<BayState>, args: PRAdmissionRecor
     )
   }
   const delivery = prDeliveryState(pr)
-  if (delivery !== "submitted" && delivery !== "ready" && delivery !== "needs-author") {
+  if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready" && delivery !== "needs-author") {
     throw new PrCheckabilityConflict(pr.id, delivery)
   }
   const prior = currentPRRev(pr).admission
