@@ -10,7 +10,7 @@ const root = resolve(import.meta.dirname, "../../..")
 type GitProbe = (args: readonly string[]) => { status: number; stdout: string }
 
 async function run(
-  executable: "yrd" | "git-yrd" | "git-bay",
+  executable: "yrd" | "git-yrd",
   flag: "--version" | "-V",
   cwd: string,
   environment: NodeJS.ProcessEnv = {},
@@ -88,8 +88,6 @@ describe("version CLI", () => {
     ["yrd", "-V"],
     ["git-yrd", "--version"],
     ["git-yrd", "-V"],
-    ["git-bay", "--version"],
-    ["git-bay", "-V"],
   ] as const)("prints Yrd source version + SHA for %s %s without entering a UI", async (executable, flag) => {
     const outside = mkdtempSync(resolve(tmpdir(), "yrd-version-caller-"))
     try {

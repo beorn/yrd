@@ -11,7 +11,7 @@ import {
 
 describe("canonicalizeYrdCommandAliases", () => {
   it.each(["bay", "pr", "queue"])("canonicalizes every public list alias: %s ls", (command) => {
-    expect(canonicalizeYrdCommandAliases([command, "ls", "--json"], "root")).toEqual([command, "list", "--json"])
+    expect(canonicalizeYrdCommandAliases([command, "ls", "--json"])).toEqual([command, "list", "--json"])
   })
 
   it.each([
@@ -36,13 +36,8 @@ describe("canonicalizeYrdCommandAliases", () => {
     { args: ["--log-level=debug", "contests"], expected: ["--log-level=debug", "contest"] },
     { args: ["bay", "open", "prs"], expected: ["bay", "open", "prs"] },
   ])("canonicalizes parse-only command aliases in $args", ({ args, expected }) => {
-    expect(canonicalizeYrdCommandAliases(args, "root")).toEqual(expected)
+    expect(canonicalizeYrdCommandAliases(args)).toEqual(expected)
     expect(args).not.toBe(expected)
-  })
-
-  it("does not project root aliases onto git-bay", () => {
-    expect(canonicalizeYrdCommandAliases(["bays"], "bay")).toEqual(["bays"])
-    expect(canonicalizeYrdCommandAliases(["ls", "--json"], "bay")).toEqual(["list", "--json"])
   })
 })
 
@@ -50,22 +45,23 @@ describe("resolveInvocation", () => {
   it.each([
     {
       argv: ["/usr/bin/bun", "/repo/bin/yrd", "--version"],
-      invocation: { name: "yrd", args: ["--version"], projection: "root" },
+      invocation: { name: "yrd", args: ["--version"] },
     },
     {
       argv: ["/usr/bin/bun", "/repo/bin/git-yrd", "-V"],
-      invocation: { name: "git yrd", args: ["-V"], projection: "root" },
+      invocation: { name: "git yrd", args: ["-V"] },
     },
     {
       argv: ["git", "yrd", "--version"],
-      invocation: { name: "git yrd", args: ["--version"], projection: "root" },
-    },
-    {
-      argv: ["/usr/bin/bun", "/repo/bin/git-bay", "status"],
-      invocation: { name: "git bay", args: ["status"], projection: "bay" },
+      invocation: { name: "git yrd", args: ["--version"] },
     },
   ])("projects $argv", ({ argv, invocation }) => {
     expect(resolveInvocation(argv)).toEqual(invocation)
+  })
+
+  it("does not retain the retired git-bay compatibility mode", () => {
+    const argv = ["/usr/bin/bun", "/repo/bin/git-bay", "status"]
+    expect(resolveInvocation(argv)).toEqual({ name: "yrd", args: argv })
   })
 })
 

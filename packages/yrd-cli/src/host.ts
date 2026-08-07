@@ -1784,7 +1784,7 @@ function defaultIO(): YrdCliIO {
   })
 }
 
-/** Process entrypoint shared by yrd, git-yrd, and git-bay. */
+/** Process entrypoint shared by yrd and git-yrd. */
 async function runYrdProcessHost(
   argv: readonly string[],
   io: YrdCliIO,
@@ -1792,7 +1792,7 @@ async function runYrdProcessHost(
 ): Promise<YrdCliExitCode> {
   const env = process.env
   const invocation = resolveInvocation(argv)
-  if (invocation.projection === "root" && invocation.args[0] === "receiver-hook") {
+  if (invocation.args[0] === "receiver-hook") {
     const json = yrdJsonOutputRequested(argv)
     const mode = invocation.args[1]
     if (mode !== "pre-receive" && mode !== "post-receive") {
@@ -1816,7 +1816,7 @@ async function runYrdProcessHost(
     }
   }
 
-  const wantsRootHelp = invocation.projection === "root" && invocation.args.length === 0
+  const wantsRootHelp = invocation.args.length === 0
   if (
     wantsRootHelp ||
     invocation.args.some(

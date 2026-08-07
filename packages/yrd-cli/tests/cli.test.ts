@@ -619,8 +619,8 @@ function testQueueReadModel(app: Parameters<typeof runYrdRaw>[0]) {
   }
 }
 
-function gitBay(...args: string[]): string[] {
-  return ["git", "bay", ...args]
+function yrdBay(...args: string[]): string[] {
+  return yrd("bay", ...args)
 }
 
 function finishRemoteEvaluator(...args: string[]): string[] {
@@ -835,11 +835,11 @@ describe("runYrd", () => {
     else process.env.TZ = priorTZ
   })
 
-  it("projects git bay onto the public bay subtree and exposes no internal operations", async () => {
+  it("keeps the canonical bay subtree free of internal operations", async () => {
     const app = await createApp()
     const gitHelp = outputIO()
-    expect(await runYrd(app, gitBay("--help"), gitHelp.io)).toBe(0)
-    expect(gitHelp.stdout()).toContain("Usage: git bay")
+    expect(await runYrd(app, yrdBay("--help"), gitHelp.io)).toBe(0)
+    expect(gitHelp.stdout()).toContain("Usage: yrd bay")
     expect(gitHelp.stdout()).toContain("list")
     expect(gitHelp.stdout()).toContain("open")
     expect(gitHelp.stdout()).toContain("in")
@@ -869,7 +869,7 @@ describe("runYrd", () => {
   it.each([
     { name: "yrd pr", argv: yrd("pr", "submit", "topic/draft", "--draft", "--json") },
     { name: "yrd bay", argv: yrd("bay", "submit", "topic/draft", "--draft", "--json") },
-    { name: "git bay", argv: gitBay("submit", "topic/draft", "--draft", "--json") },
+    { name: "yrd bay", argv: yrdBay("submit", "topic/draft", "--draft", "--json") },
   ])("rejects the deleted --draft flag through $name and teaches pr create", async ({ argv }) => {
     const app = await createApp()
     const output = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
@@ -3788,7 +3788,7 @@ describe("runYrd", () => {
 
   it.each([
     ["yrd bay", yrd("bay", "ls", "--json")],
-    ["git bay", gitBay("ls", "--json")],
+    ["yrd bay", yrdBay("list", "--json")],
   ] as const)("accepts %s ls as the bay list alias", async (_surface, argv) => {
     const app = await createApp()
     const output = outputIO()
@@ -4027,7 +4027,7 @@ describe("runYrd", () => {
 
   it.each([
     { surface: "yrd bay", command: (...args: string[]) => yrd("bay", ...args) },
-    { surface: "git bay", command: (...args: string[]) => gitBay(...args) },
+    { surface: "yrd bay", command: (...args: string[]) => yrdBay(...args) },
   ])("projects one active Bay path through canonical selectors on $surface", async ({ command }) => {
     const app = await createApp()
     await openTestBay(app, { name: "fix-readme", branch: "topic/readme" })

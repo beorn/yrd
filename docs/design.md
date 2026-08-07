@@ -354,7 +354,7 @@ receive-hook intake, bisection, waiting/finish/recover).
 | Job results `passed/failed/waiting`                           | GitHub status+conclusion at the boundary; machine unchanged                                 | vocabulary (yrd-job)                                        |
 | injected `checkRunner`/`mergeRunner` capabilities             | `Runner` seam + `localRunner` + `worktreeContexts` leases                                   | generalization (yrd-job/yrd-process)                        |
 | programmatic composition only                                 | `@yrd/config`: `defineConfig` + `with*` + `yrd.*`; repository config remains YAML-only       | new package                                                 |
-| `git bay submit`                                              | `yrd pr submit` (bay keeps workspace verbs only; deprecation alias window for `bay submit`) | CLI move (yrd-cli)                                          |
+| standalone bay projection                                    | `yrd bay` subtree; no compatibility projection                                             | CLI surface deletion (yrd-cli)                              |
 | `parent`/`isolationPart` bisection fields                     | child Candidates + `Run.parent` provenance                                                  | refit (yrd-queue)                                           |
 
 Package set stays: core, bay, queue (landing domain: PR/PRRev/Candidate/Run/

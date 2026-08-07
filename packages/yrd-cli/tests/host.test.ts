@@ -1592,7 +1592,7 @@ checks: [{check: {run: "true"}}]
 
     stdout = ""
     expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/git-bay", "--repo", root, "--help"], {
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", root, "bay", "--help"], {
         cwd: root,
         stdout: (text) => {
           stdout += text
@@ -1602,8 +1602,8 @@ checks: [{check: {run: "true"}}]
         },
       }),
     ).toBe(0)
-    expect(stdout).toContain("Usage: git bay")
-    expect(stdout).toContain("--repo <path>")
+    expect(stdout).toContain("Usage: yrd bay")
+    expect(stdout).not.toContain("--repo <path>")
     expect(stdout).not.toContain("--cwd")
     expect(stderr).toBe("")
   })
@@ -1710,7 +1710,7 @@ checks: [{check: {run: "true"}}]
     let projected = ""
     stderr = ""
     expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/git-bay", "--repo", repo, "path", "selected", "--json"], {
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "bay", "path", "selected", "--json"], {
         cwd: ambient,
         stdout: (text) => {
           projected += text
@@ -3425,7 +3425,6 @@ checks: [{check: {run: "true"}}]
     await git(wrong.repo, "switch", "-q", "main")
     const relativeRepo = relative(ambient, linked)
     const yrdBin = join(import.meta.dirname, "../../../bin/yrd.ts")
-    const gitBayBin = join(import.meta.dirname, "../../../bin/git-bay")
     const run = async (args: readonly string[], env: NodeJS.ProcessEnv = process.env, executable = yrdBin) => {
       const child = Bun.spawn([process.execPath, executable, ...args], {
         cwd: ambient,
@@ -3447,7 +3446,7 @@ checks: [{check: {run: "true"}}]
       GIT_DIR: join(wrong.repo, ".git"),
       GIT_WORK_TREE: wrong.repo,
     }
-    const selected = await run(["submit", "--repo", relativeRepo, "--json"], poisoned, gitBayBin)
+    const selected = await run(["bay", "submit", "--repo", relativeRepo, "--json"], poisoned)
     expect(selected.exitCode, selected.stderr).toBe(0)
     expect(JSON.parse(selected.stdout)).toMatchObject({
       command: "bay.submit",

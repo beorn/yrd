@@ -7,7 +7,6 @@ import type { YrdCliExitCode } from "./types.ts"
 export type Invocation = Readonly<{
   name: string
   args: string[]
-  projection: "root" | "bay"
 }>
 
 export type FailureVerdict = Readonly<{ exitCode: YrdCliExitCode; failure: FailureFact }>
@@ -72,13 +71,8 @@ function rootCommandIndex(args: readonly string[]): number | undefined {
 
 /** Translate parse-only legacy spellings before Commander sees them. This keeps
  * help and suggestions canonical without requiring a newer Commander API. */
-export function canonicalizeYrdCommandAliases(args: readonly string[], projection: Invocation["projection"]): string[] {
+export function canonicalizeYrdCommandAliases(args: readonly string[]): string[] {
   const canonical = [...args]
-  if (projection === "bay") {
-    if (canonical[0] === "ls") canonical[0] = "list"
-    return canonical
-  }
-
   const commandIndex = rootCommandIndex(canonical)
   if (commandIndex === undefined) return canonical
   const command = canonical[commandIndex]
@@ -136,21 +130,18 @@ function executableName(value: string | undefined): string {
   return basename(value).replace(/\.(?:[cm]?[jt]s)$/u, "")
 }
 
-function presentation(executable: string): Pick<Invocation, "name" | "projection"> | undefined {
-  if (executable === "git-bay") return { name: "git bay", projection: "bay" }
-  if (executable === "git-yrd") return { name: "git yrd", projection: "root" }
-  if (executable === "yrd") return { name: "yrd", projection: "root" }
+function presentation(executable: string): Pick<Invocation, "name"> | undefined {
+  if (executable === "git-yrd") return { name: "git yrd" }
+  if (executable === "yrd") return { name: "yrd" }
   return undefined
 }
 
-/** Resolve process.argv, direct argv, and Git's two-token spelling. git-bay is
- * a projection of the canonical bay subtree, not a separately defined CLI. */
+/** Resolve process.argv, direct argv, and Git's two-token spelling. */
 export function resolveInvocation(argvInput: readonly string[]): Invocation {
   const argv = [...argvInput]
   const first = executableName(argv[0])
   const second = executableName(argv[1])
-  if (first === "git" && argv[1] === "bay") return { name: "git bay", args: argv.slice(2), projection: "bay" }
-  if (first === "git" && argv[1] === "yrd") return { name: "git yrd", args: argv.slice(2), projection: "root" }
+  if (first === "git" && argv[1] === "yrd") return { name: "git yrd", args: argv.slice(2) }
 
   const direct = presentation(first)
   if (direct !== undefined) return { ...direct, args: argv.slice(1) }
@@ -158,7 +149,7 @@ export function resolveInvocation(argvInput: readonly string[]): Invocation {
   const script = presentation(second)
   if (script !== undefined) return { ...script, args: argv.slice(2) }
 
-  return { name: "yrd", args: argv, projection: "root" }
+  return { name: "yrd", args: argv }
 }
 
 export function stableJson(value: unknown): string {

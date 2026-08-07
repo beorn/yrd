@@ -571,15 +571,15 @@ describe("yrd bay open/run/in", { timeout: 30_000 }, () => {
     }
   })
 
-  it("projects the same owner lifecycle through git bay", async () => {
+  it("projects the same owner lifecycle through the canonical bay subtree", async () => {
     const { repo } = await repository()
     const opened = output(repo)
     expect(
-      await gitBay(repo, opened.io, "run", "--bay", "projected", "--", "sh", "-c", "printf git-bay > projected"),
+      await yrd(repo, opened.io, "bay", "run", "--bay", "projected", "--", "sh", "-c", "printf yrd-bay > projected"),
       opened.stderr(),
     ).toBe(0)
     expect(opened.stdout()).toContain("bay projected → new task/projected, no issue linked")
-    expect(await git(repo, "show", "refs/remotes/origin/task/projected:projected")).toBe("git-bay")
+    expect(await git(repo, "show", "refs/remotes/origin/task/projected:projected")).toBe("yrd-bay")
   })
 
   it("rejects ambiguous open config and requires every positional to resolve as an issue", async () => {
@@ -1723,10 +1723,6 @@ function output(cwd: string): {
 
 function yrd(repo: string, io: YrdCliIO, ...args: string[]): Promise<0 | 1 | 2 | 3> {
   return runYrdProcess([process.execPath, "/usr/local/bin/yrd", "--repo", repo, ...args], io)
-}
-
-function gitBay(repo: string, io: YrdCliIO, ...args: string[]): Promise<0 | 1 | 2 | 3> {
-  return runYrdProcess([process.execPath, "/usr/local/bin/git-bay", "--repo", repo, ...args], io)
 }
 
 function spawnYrd(repo: string, ...args: string[]) {

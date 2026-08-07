@@ -35,12 +35,12 @@ import type {
   StepRunner,
 } from "./queue.ts"
 import { resolveRelativeSubmoduleOrigin } from "./submodule-origin.ts"
-import { executeQueueSubmoduleComposition } from "./submodule-composition-git.ts"
 import {
+  executeQueueSubmoduleComposition,
   planQueueSubmoduleComposition,
   type QueueConflictStage,
   type QueueTreeConflict,
-} from "./submodule-composition.ts"
+} from "./submodule-composition-policy.ts"
 import { materializeSubmodules } from "git-super/submodules"
 import { createGitWorktreeStore } from "git-super/worktree"
 import {

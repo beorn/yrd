@@ -1968,73 +1968,6 @@ async function ensureBayDependencies(
   })
 }
 
-const BAY_CONVERGE_TIMEOUT_MS = 900_000
-
-/**
- * Walk an owner-controlled Bay's checkout up to its base before launch.
- *
- * A Bay adopted from a failed attempt was cut whenever that attempt started.
- * A freshly opened managed Bay can also skew while its preceding dispatch
- * stages run and the base advances. In both cases, launching superseded code
- * recreates the same failure: B238 held a pre-fix `vendor/yrd`, so the Bay's
- * own Yrd behaved unlike the version string the operator was reading off the
- * screen. Guests still have no lifecycle authority to merge into somebody
- * else's branch; only the owning run and managed composition call this seam.
- *
- * Merge, never rebase: the Bay's branch is pushed work. A conflict is a
- * judgement only the operator can make, so the merge is abandoned rather than
- * left half-applied, and the refusal carries the command that puts them inside
- * the Bay to make it.
- *
- * Returns whether the checkout actually moved, because a merge that moved it
- * can have moved the manifest or the lockfile with it.
- */
-async function convergeBayOntoBase(
-  processService: Pick<Process, "run">,
-  bay: Bay,
-  path: string,
-  io: YrdCliIO,
-  env: NodeJS.ProcessEnv | undefined,
-): Promise<boolean> {
-  const gitEnv = cleanGitEnvironment(env ?? process.env)
-  const git = (argv: readonly string[]): Promise<ProcessResult> =>
-    processService.run({
-      argv: ["git", ...argv],
-      cwd: path,
-      env: gitEnv,
-      timeoutMs: BAY_CONVERGE_TIMEOUT_MS,
-      ...(childInterruptionSignal(io) === undefined ? {} : { signal: childInterruptionSignal(io) }),
-    })
-  const head = async (): Promise<string> => {
-    const result = await git(["rev-parse", "HEAD"])
-    if (!childSucceeded(result)) {
-      refusal(`bay '${bay.id}' has no readable HEAD; git rev-parse ${childFailureReason(result)}`)
-    }
-    return result.stdout.trim()
-  }
-
-  const before = await head()
-  io.stderr(`yrd: bay '${bay.id}' converging onto ${bay.base}\n`)
-  const fetched = await git(["fetch", "origin", bay.base])
-  if (!childSucceeded(fetched)) {
-    refusal(
-      `bay '${bay.id}' could not fetch its base '${bay.base}'; ` +
-        `git fetch ${childFailureReason(fetched)}\n${commandOutputTail(fetched)}`,
-    )
-  }
-  const merged = await git(["merge", "--no-edit", `origin/${bay.base}`])
-  if (!childSucceeded(merged)) {
-    // Leave the Bay adoptable instead of half-merged: the operator reruns the
-    // exact merge below, in the Bay, and decides it there.
-    await git(["merge", "--abort"])
-    refusal(
-      `bay '${bay.id}' holds work that could not be merged with '${bay.base}'; resolve it in the Bay:\n` +
-        `  yrd in ${bay.id} -- git merge origin/${bay.base}\n${commandOutputTail(merged)}`,
-    )
-  }
-  return (await head()) !== before
-}
-
 async function runBayChild(
   processService: Pick<Process, "run">,
   bay: Bay,
@@ -2380,12 +2313,6 @@ async function runBaySession(
     await orphanRunBay(app, bay, `post-child checkpoint or close failed: ${errorDetail(error)}`)
     throw error
   }
-}
-
-function commandOutputTail(result: ProcessResult, limit = 600): string {
-  const text = (result.stderr.trim() === "" ? result.stdout : result.stderr).trim()
-  if (text === "") return "(no output)"
-  return text.length <= limit ? text : `…${text.slice(-limit)}`
 }
 
 /** Record or reuse the one draft PR for an issue branch. The issue ensure
@@ -4677,7 +4604,7 @@ function isBracketedBayCommand(
 ): boolean {
   const name = action.name()
   const parent = action.parent?.name()
-  if ((name === "open" || name === "run" || name === "in") && (parent === "bay" || parent === "git bay")) {
+  if ((name === "open" || name === "run" || name === "in") && parent === "bay") {
     return true
   }
   return (name === "in" || name === "sh" || name === "run") && (parent === "yrd" || parent === "git yrd")
@@ -8098,23 +8025,21 @@ function configureOutput(command: CliCommand, io: YrdCliIO, output: CommanderOut
   for (const child of command.commands) configureOutput(child as unknown as CliCommand, io, output)
 }
 
-function addExamples(program: CliCommand, name: string, projection: "root" | "bay"): void {
-  const bay = projection === "bay" ? name : `${name} bay`
+function addExamples(program: CliCommand, name: string): void {
+  const bay = `${name} bay`
   const examples: [string, string][] = [
     [`$ ${bay} open --bay fix`, "open and keep a scratch Bay"],
     [`$ ${bay} run @km/test/fix -- make test`, "run one scoped command"],
     [`$ ${bay} in fix`, "open a guest shell in one Bay"],
     [`$ ${bay} submit`, "submit the current bay as a PR"],
   ]
-  if (projection === "root") {
-    examples.push(
-      [`$ ${name} pr list`, "inspect active PRs"],
-      [`$ ${name} pr create topic/fix`, "create a draft before submission"],
-      [`$ ${name} queue run --steps check,merge`, "run selected steps"],
-      [`$ ${name} watch --pr PR7`, "monitor PR and queue health"],
-      [`$ ${name} contest open km:T1 --competitors '<json>'`, "compare implementations"],
-    )
-  }
+  examples.push(
+    [`$ ${name} pr list`, "inspect active PRs"],
+    [`$ ${name} pr create topic/fix`, "create a draft before submission"],
+    [`$ ${name} queue run --steps check,merge`, "run selected steps"],
+    [`$ ${name} watch --pr PR7`, "monitor PR and queue health"],
+    [`$ ${name} contest open km:T1 --competitors '<json>'`, "compare implementations"],
+  )
   program.addHelpSection("Examples:", examples)
 }
 
@@ -8146,13 +8071,11 @@ function addAuthoredCarrierWorkflow<
 
 function addRootBayCommands(
   program: CliCommand,
-  projection: "root" | "bay",
   installed: () => YrdCliApp,
   installedServices: () => YrdCliServices,
   io: YrdCliIO,
   setExit: (code: YrdCliExitCode) => void,
 ): void {
-  if (projection !== "root") return
   program
     .command("in [bay] [command...]")
     .description("join an open Bay as a guest; defaults to $SHELL, or pass opaque argv after --")
@@ -8194,7 +8117,6 @@ function buildProgram(
   app: YrdCliApp | undefined,
   services: YrdCliServices,
   name: string,
-  projection: "root" | "bay",
   io: YrdCliIO,
   setExit: (code: YrdCliExitCode) => void,
   commanderOutput: CommanderOutput,
@@ -8205,7 +8127,7 @@ function buildProgram(
   const installed = (): YrdCliApp => runtimeApp ?? configuration("command runtime is not initialized")
   const installedServices = (): YrdCliServices => runtimeServices
   const program = new CliCommand(name)
-    .description(projection === "bay" ? "manage isolated Git work bays" : "yrd (shipyard) — agentic software delivery")
+    .description("yrd (shipyard) — agentic software delivery")
     .showSuggestionAfterError()
   program.helpCommand(false)
   program.exitOverride()
@@ -8240,37 +8162,35 @@ function buildProgram(
       Object.assign(io, loaded.io)
     })
   }
-  if (projection === "root") program.version(YRD_VERSION, "-V, --version")
-  if (projection === "root") {
-    program.addHelpSection(
-      "Model:",
-      "Pick an issue -> work it in a bay -> create a draft -> submit it ->\nPRs queue per base -> a run verifies and merges each one -> integrated,\nor parked for the author with a typed receipt.",
-    )
-    program.addHelpSection("Objects:", [
-      ["issue", "tracker-owned intent; delivery lens plus Git-side ensure"],
-      ["bay", "isolated Git workspace; also standalone as git-bay"],
-      ["pr", "persistent branch delivery; draft until submitted; the queue's unit"],
-      ["contest", "competing implementations; winner promotes to a PR"],
-      ["queue", "one per base; verifies and merges PRs serially"],
-    ])
-    program.addHelpSection(
-      "Boundaries:",
-      "Runs, steps, jobs, attempts, and runners are records inside PRs and the log.\nThe queue is the only merger; pr merge is a teaching refusal.\nThe tracker holds the pen; yrd never creates or edits issues.",
-    )
-    program
-      .command("_dashboard", { isDefault: true, hidden: true })
-      .option("--base <branch>", "scope the dashboard to one base")
-      .option("--json", "emit stable JSON")
-      .action(async (options) => dashboard(installed(), options, io))
-    program
-      .command("doctor")
-      .description("diagnose Flow drift and repository configuration warnings")
-      .option("--rebuild-views", "atomically rebuild registered query views from immutable Journal history")
-      .option("--json", "emit stable JSON")
-      .action(async (options) => setExit(await configDoctor(installed(), installedServices(), options, io)))
-  }
+  program.version(YRD_VERSION, "-V, --version")
+  program.addHelpSection(
+    "Model:",
+    "Pick an issue -> work it in a bay -> create a draft -> submit it ->\nPRs queue per base -> a run verifies and merges each one -> integrated,\nor parked for the author with a typed receipt.",
+  )
+  program.addHelpSection("Objects:", [
+    ["issue", "tracker-owned intent; delivery lens plus Git-side ensure"],
+    ["bay", "isolated Git workspace managed through the yrd bay subtree"],
+    ["pr", "persistent branch delivery; draft until submitted; the queue's unit"],
+    ["contest", "competing implementations; winner promotes to a PR"],
+    ["queue", "one per base; verifies and merges PRs serially"],
+  ])
+  program.addHelpSection(
+    "Boundaries:",
+    "Runs, steps, jobs, attempts, and runners are records inside PRs and the log.\nThe queue is the only merger; pr merge is a teaching refusal.\nThe tracker holds the pen; yrd never creates or edits issues.",
+  )
+  program
+    .command("_dashboard", { isDefault: true, hidden: true })
+    .option("--base <branch>", "scope the dashboard to one base")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => dashboard(installed(), options, io))
+  program
+    .command("doctor")
+    .description("diagnose Flow drift and repository configuration warnings")
+    .option("--rebuild-views", "atomically rebuild registered query views from immutable Journal history")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => setExit(await configDoctor(installed(), installedServices(), options, io)))
 
-  const bay = projection === "bay" ? program : program.command("bay").description("manage isolated Git work bays")
+  const bay = program.command("bay").description("manage isolated Git work bays")
   bay.helpCommand(false)
   bay
     .command("_list", { isDefault: true, hidden: true })
@@ -8374,12 +8294,6 @@ function buildProgram(
     .description("safety oracle: is this bay safe to remove? (exit 0=safe 1=not-safe 2=unknown)")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await bayStatusCommand(installed(), selectors, options, io)))
-  if (projection === "bay") {
-    addExamples(program, name, projection)
-    configureOutput(program, io, commanderOutput)
-    return program
-  }
-
   program
     .command("log")
     .description("show queue history, newest first")
@@ -8585,7 +8499,7 @@ function buildProgram(
     .action(async (selector, options) => finishQueue(installed(), selector, options, io))
   addQueueExamples(queue, name)
 
-  addRootBayCommands(program, projection, installed, installedServices, io, setExit)
+  addRootBayCommands(program, installed, installedServices, io, setExit)
 
   const pr = program
     .command("pr")
@@ -8974,7 +8888,7 @@ function buildProgram(
   )
   const orderedCommands = program.commands as unknown as CliCommand[]
   orderedCommands.sort((left, right) => (order.get(left.name()) ?? 99) - (order.get(right.name()) ?? 99))
-  addExamples(program, name, projection)
+  addExamples(program, name)
   configureOutput(program, io, commanderOutput)
   return program
 }
@@ -9068,12 +8982,11 @@ function jsonOutputRequested(program: CliCommand, args: readonly string[]): bool
 export function yrdJsonOutputRequested(argv: readonly string[]): boolean {
   const invocation = resolveInvocation(argv)
   const io: YrdCliIO = { stdout() {}, stderr() {} }
-  const program = buildProgram(undefined, {}, invocation.name, invocation.projection, io, () => undefined, {})
-  return jsonOutputRequested(program, canonicalizeYrdCommandAliases(invocation.args, invocation.projection))
+  const program = buildProgram(undefined, {}, invocation.name, io, () => undefined, {})
+  return jsonOutputRequested(program, canonicalizeYrdCommandAliases(invocation.args))
 }
 
-/** Run the one Yrd command surface. git-bay projects its canonical bay subtree;
- * every mutation still resolves through the composed app's command registry. */
+/** Run the one Yrd command surface. */
 async function executeYrd(
   app: YrdCliApp | undefined,
   argv: readonly string[],
@@ -9096,21 +9009,9 @@ async function executeYrd(
     ;(runtimeIO as RuntimeInvocationIO)[RuntimeChildArgv] = invocation.args.slice(separator + 1)
   }
   const commanderOutput: CommanderOutput = {}
-  const program = buildProgram(
-    app,
-    services,
-    invocation.name,
-    invocation.projection,
-    runtimeIO,
-    setExit,
-    commanderOutput,
-    bootstrap,
-  )
-  const canonicalArgs = canonicalizeYrdCommandAliases(invocation.args, invocation.projection)
-  const args =
-    invocation.projection === "root" && canonicalArgs.length === 1 && canonicalArgs[0] === "pr"
-      ? ["pr", "--help"]
-      : canonicalArgs
+  const program = buildProgram(app, services, invocation.name, runtimeIO, setExit, commanderOutput, bootstrap)
+  const canonicalArgs = canonicalizeYrdCommandAliases(invocation.args)
+  const args = canonicalArgs.length === 1 && canonicalArgs[0] === "pr" ? ["pr", "--help"] : canonicalArgs
   try {
     await program.parseAsync(args, { from: "user" })
     return exit
@@ -9168,7 +9069,7 @@ function queueRunnerCheckRequested(args: readonly string[]): boolean {
 /** Recognize the one process invocation allowed to bypass app/journal bootstrap. */
 export function yrdQueueRunnerCheckRequested(argv: readonly string[]): boolean {
   const invocation = resolveInvocation(argv)
-  return queueRunnerCheckRequested(canonicalizeYrdCommandAliases(invocation.args, invocation.projection))
+  return queueRunnerCheckRequested(canonicalizeYrdCommandAliases(invocation.args))
 }
 
 /** Render command metadata without creating a repository-backed runtime. */
@@ -9185,8 +9086,7 @@ export function runYrdProcessRuntime(
   return executeYrd(undefined, argv, io, {}, bootstrap)
 }
 
-/** Run the one Yrd command surface. git-bay projects its canonical bay subtree;
- * every mutation still resolves through the composed app's command registry. */
+/** Run the one Yrd command surface. */
 export function runYrd(
   app: YrdCliApp,
   argv: readonly string[],
