@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from "vitest"
-import { planQueueSubmoduleComposition, type QueueTreeConflict } from "../src/submodule-composition.ts"
+import { planQueueSubmoduleComposition, type QueueTreeConflict } from "../src/submodule-composition-policy.ts"
 
 const oid = (digit: string) => digit.repeat(40)
 

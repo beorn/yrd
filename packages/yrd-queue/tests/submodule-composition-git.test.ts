@@ -9,8 +9,11 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createProcess, type ProcessRequest } from "@yrd/process"
 import { afterEach, describe, expect, it } from "vitest"
-import { executeQueueSubmoduleComposition } from "../src/submodule-composition-git.ts"
-import { planQueueSubmoduleComposition, type QueueSubmoduleCompositionPlan } from "../src/submodule-composition.ts"
+import {
+  executeQueueSubmoduleComposition,
+  planQueueSubmoduleComposition,
+  type QueueSubmoduleCompositionPlan,
+} from "../src/submodule-composition-policy.ts"
 
 const roots: string[] = []
 
