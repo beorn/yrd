@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { CauseSchema, Command, EventSchema, type Event } from "@yrd/core"
 import { parseJobTransitionForReplay } from "@yrd/job"
 import { createJournal } from "@yrd/persistence"
-import { createQueueReadModel } from "../src/queue-read-model.ts"
+import { createQueueReadModel, QUEUE_ATTEMPTS_SQL } from "../src/queue-read-model.ts"
 import { queueLogAttempts } from "../src/queue-status-view.tsx"
 
 const roots: string[] = []
@@ -212,7 +212,7 @@ describe("queue read model", () => {
     expect(rebuilt.attempts).not.toBe(first.attempts)
   })
 
-  it("uses the run/sequence index for scoped attempt reads", async () => {
+  it("keeps the production attempt read as a rowid scan without secondary indexes", async () => {
     const dir = await directory()
     const model = createQueueReadModel({ dir })
     const journal = createJournal({
@@ -223,17 +223,18 @@ describe("queue read model", () => {
 
     using database = new Database(join(dir, "journal.sqlite"), { readonly: true, strict: true })
     database.run("PRAGMA automatic_index = OFF")
+    const indexes = database
+      .query<{ name: string }, []>("SELECT name FROM pragma_index_list('queue_attempts') ORDER BY name")
+      .all()
+      .map(({ name }) => name)
     const plan = database
-      .query<{ detail: string }, [string]>(
-        `EXPLAIN QUERY PLAN
-         SELECT * FROM queue_attempts
-         WHERE run_id = ?
-         ORDER BY sequence_id`,
-      )
-      .all("R1")
+      .query<{ detail: string }, []>(`EXPLAIN QUERY PLAN ${QUEUE_ATTEMPTS_SQL}`)
+      .all()
       .map(({ detail }) => detail)
       .join("\n")
-    expect(plan).toContain("queue_attempts_run_sequence")
+    expect(indexes).toEqual([])
+    expect(plan).toContain("SCAN queue_attempts")
+    expect(plan).not.toContain("USE TEMP B-TREE")
   })
 
   it("refuses a derived attempt row whose result no longer matches the domain shape", async () => {

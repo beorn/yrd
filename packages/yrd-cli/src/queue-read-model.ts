@@ -63,29 +63,7 @@ export function createQueueReadModel(options: Readonly<{ dir: string }>): Versio
           database.run("COMMIT")
           return Object.freeze({ cursor, generation, attempts: cachedAttempts })
         }
-        const attempts = Object.freeze(
-          database
-            .query<QueueAttemptRow, []>(
-              `SELECT
-                 job_id,
-                 run_id,
-                 step_name,
-                 step_index,
-                 revision,
-                 attempt,
-                 runner,
-                 outcome,
-                 requested_at,
-                 started_at,
-                 finished_at,
-                 duration_ms,
-                 result_json
-               FROM queue_attempts
-               ORDER BY sequence_id`,
-            )
-            .all()
-            .map(queueAttempt),
-        )
+        const attempts = Object.freeze(database.query<QueueAttemptRow, []>(QUEUE_ATTEMPTS_SQL).all().map(queueAttempt))
         database.run("COMMIT")
         cachedCursor = cursor
         cachedGeneration = generation
@@ -107,8 +85,24 @@ export function createQueueReadModel(options: Readonly<{ dir: string }>): Versio
 }
 
 const VIEW_ID = "yrd.queue-attempts"
-const VIEW_VERSION = 1
+const VIEW_VERSION = 2
 const ATTEMPT_SEQUENCE_SCALE = 1_000_000
+export const QUEUE_ATTEMPTS_SQL = `SELECT
+  job_id,
+  run_id,
+  step_name,
+  step_index,
+  revision,
+  attempt,
+  runner,
+  outcome,
+  requested_at,
+  started_at,
+  finished_at,
+  duration_ms,
+  result_json
+FROM queue_attempts
+ORDER BY sequence_id`
 const SCHEMA = `
 CREATE TABLE queue_job_requests (
   job_id TEXT PRIMARY KEY NOT NULL,
@@ -158,12 +152,9 @@ CREATE TABLE queue_attempts (
     ), 0)
   )
 ) STRICT;
-CREATE INDEX queue_attempts_run_sequence ON queue_attempts(run_id, sequence_id);
-CREATE INDEX queue_attempts_finished_sequence ON queue_attempts(finished_at, sequence_id);
-CREATE INDEX queue_attempts_outcome_sequence ON queue_attempts(outcome, sequence_id);
 `
 const VIEW_FINGERPRINT = createHash("sha256")
-  .update(JSON.stringify({ id: VIEW_ID, version: VIEW_VERSION, schema: SCHEMA, projection: "queue-attempts-v1" }))
+  .update(JSON.stringify({ id: VIEW_ID, version: VIEW_VERSION, schema: SCHEMA, projection: "queue-attempts-v2" }))
   .digest("hex")
 
 type QueueRequestRow = Readonly<{
