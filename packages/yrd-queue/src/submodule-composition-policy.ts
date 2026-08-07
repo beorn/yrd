@@ -5,10 +5,10 @@ import {
   planSubmoduleComposition,
   type SubmoduleCommitResolution,
   type SubmoduleCompositionGit,
-  type SubmoduleCompositionGitRequest,
   type SubmoduleCompositionPlan,
   type SubmoduleConflictStage,
   type SubmodulePinResolution,
+  type SubmoduleReviewedBlob,
   type SubmoduleTreeConflict,
 } from "git-super/composition"
 
@@ -16,11 +16,7 @@ export type QueueConflictStage = SubmoduleConflictStage
 export type QueueTreeConflict = SubmoduleTreeConflict
 export type QueueSubmodulePinResolution = SubmodulePinResolution
 
-export type QueueSubmoduleCommitResolution = SubmoduleCommitResolution &
-  Readonly<{
-    ref: string
-    message: string
-  }>
+export type QueueSubmoduleCommitResolution = SubmoduleCommitResolution & Readonly<{ ref: string; message: string }>
 
 export type QueueSubmoduleResolution = QueueSubmodulePinResolution | QueueSubmoduleCommitResolution
 
@@ -28,7 +24,7 @@ export type QueueSubmoduleCompositionPlan =
   | Readonly<{ status: "planned"; resolutions: readonly QueueSubmoduleResolution[] }>
   | Readonly<{ status: "refused"; code: "candidate-conflict"; paths: readonly string[]; message: string }>
 
-export type QueueSubmoduleReviewedBlob = Readonly<{ path: string; oid: string; content: string }>
+export type QueueSubmoduleReviewedBlob = SubmoduleReviewedBlob
 
 export type QueueSubmoduleExecutedResolution =
   | QueueSubmodulePinResolution
@@ -62,7 +58,7 @@ export type QueueSubmoduleCompositionExecutionOptions = Readonly<{
 /** Add queue-authored refs/messages to git-super's workflow-neutral plan. */
 export function planQueueSubmoduleComposition(conflicts: readonly QueueTreeConflict[]): QueueSubmoduleCompositionPlan {
   const plan = planSubmoduleComposition(conflicts)
-  if (plan.status === "refused") return queueRefusal(plan, conflicts)
+  if (plan.status === "refused") return queueRefusal(plan)
   return {
     status: "planned",
     resolutions: plan.resolutions.map((resolution): QueueSubmoduleResolution => {
@@ -82,18 +78,20 @@ export async function executeQueueSubmoduleComposition(
   options: QueueSubmoduleCompositionExecutionOptions,
 ): Promise<QueueSubmoduleCompositionExecution> {
   const git = adaptGit(options.inject.process)
-  const genericPlan = plan satisfies Extract<SubmoduleCompositionPlan, { status: "planned" }>
-  const executed = await composeSubmoduleCommits(genericPlan, {
-    inject: { git, storeForOrigin: options.inject.storeForOrigin },
-    commit: {
-      author: { name: "Yrd Queue", email: "queue@yrd.dev" },
-      message: compositionMessage,
+  const executed = await composeSubmoduleCommits(
+    plan satisfies Extract<SubmoduleCompositionPlan, { status: "planned" }>,
+    {
+      inject: { git, storeForOrigin: options.inject.storeForOrigin },
+      commit: {
+        author: { name: "Yrd Queue", email: "queue@yrd.dev" },
+        message: compositionMessage,
+      },
+      reviewPath: (path) => path.toLowerCase().endsWith(".md"),
+      ...(options.env === undefined ? {} : { env: options.env }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     },
-    reviewPath: (path) => path.toLowerCase().endsWith(".md"),
-    ...(options.env === undefined ? {} : { env: options.env }),
-    ...(options.signal === undefined ? {} : { signal: options.signal }),
-    ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
-  })
+  )
   if (executed.status === "refused") return queueExecutionRefusal(executed.failure)
 
   const resolutions: QueueSubmoduleExecutedResolution[] = []
@@ -102,13 +100,7 @@ export async function executeQueueSubmoduleComposition(
       resolutions.push(resolution)
       continue
     }
-    const planned = plan.resolutions.find(
-      (candidate): candidate is QueueSubmoduleCommitResolution =>
-        candidate.kind === "compose" && candidate.path === resolution.path,
-    )
-    if (planned === undefined) {
-      return unavailable(resolution.path, `composition produced no queue policy for '${resolution.path}'`)
-    }
+    const planned = { ...resolution, ref: compositionRef(resolution), message: compositionMessage(resolution) }
     try {
       const store = options.inject.storeForOrigin(planned.origin)
       await publishComposition(git, store, planned, resolution.sha, options)
@@ -126,7 +118,6 @@ export async function executeQueueSubmoduleComposition(
 
 function queueRefusal(
   plan: Extract<SubmoduleCompositionPlan, { status: "refused" }>,
-  conflicts: readonly QueueTreeConflict[],
 ): Extract<QueueSubmoduleCompositionPlan, { status: "refused" }> {
   const paths = plan.conflicts.map(({ path }) => path)
   const contentPaths = plan.conflicts.filter(({ kind }) => kind === "content").map(({ path }) => path)
@@ -146,9 +137,6 @@ function queueRefusal(
         "; resolve these conflicts or supply the missing submodule origin, then retry",
     )
   }
-  // Retain the argument in this policy boundary so callers cannot accidentally
-  // author remedies from a different conflict snapshot.
-  if (conflicts.length === 0) throw new Error("yrd: cannot author an empty composition refusal")
   return { status: "refused", code: "candidate-conflict", paths, message: clauses.join("; ") }
 }
 
@@ -235,25 +223,17 @@ function queueGit(
   args: readonly string[],
   options: QueueSubmoduleCompositionExecutionOptions,
 ): Promise<Awaited<ReturnType<SubmoduleCompositionGit["run"]>>> {
-  return git.run(queueGitRequest(repo, args, options))
-}
-
-function queueGitRequest(
-  repo: string,
-  args: readonly string[],
-  options: QueueSubmoduleCompositionExecutionOptions,
-): SubmoduleCompositionGitRequest {
   const source = options.env ?? globalThis.process.env
   const env = Object.fromEntries(
     Object.entries(source).filter(([key, value]) => value !== undefined && !key.startsWith("GIT_")),
   ) as NodeJS.ProcessEnv
-  return {
+  return git.run({
     repo,
     args,
     env: { ...env, GIT_TERMINAL_PROMPT: "0", LC_ALL: "C", TZ: "UTC" },
     timeoutMs: options.timeoutMs ?? 30_000,
     ...(options.signal === undefined ? {} : { signal: options.signal }),
-  }
+  })
 }
 
 function settled(result: Awaited<ReturnType<SubmoduleCompositionGit["run"]>>): boolean {

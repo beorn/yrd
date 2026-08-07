@@ -48,8 +48,8 @@ issue -> bay -> pr -> queue -> merged
 
 - **issue** — what you deliver. It lives in your tracker; yrd stores only the
   reference. The tracker holds the pen; yrd owns the lens.
-- **bay** — where you work: an isolated Git workspace. It also ships standalone
-  as `git-bay`; that surface works verbatim under `yrd bay`.
+- **bay** — where you work: an isolated Git workspace reached through the
+  `yrd bay` subtree. Bay lifecycle is not a standalone product surface.
 - **pr** — the submitted change: a branch@head with numbered revisions. Review
   happens upstream; a yrd PR is the queue's unit.
 - **queue** — one per base branch. It verifies and merges PRs serially and can
@@ -62,8 +62,8 @@ inside PRs and the log, not top-level objects to manage.
 
 yrd is gh-shaped, not gh-scoped: its noun and aspect-verb grammar makes `gh`
 muscle memory transfer, while its scope is deliberately one slice of the forge:
-delivery. It composes two independently useful products—`git-bay` workspaces
-and the merge queue. Two deliberate absences define the boundary: `yrd pr
+delivery. It composes reusable `git-super` mechanics with the merge queue while
+Hab owns bay lifecycle. Two deliberate absences define the boundary: `yrd pr
 merge` never merges because the queue is the only merger, and yrd never creates
 or edits issues because the tracker remains authoritative.
 
@@ -200,9 +200,6 @@ bun yrd --help
 bun yrd
 bun yrd pr runs PR1
 
-# Installed projection for `yrd bay open --bay example`:
-git bay open --bay example
-
 # Open a persistent Bay, enter it, then close it explicitly:
 yrd bay open --bay example
 cd "$(yrd bay path example)"
@@ -225,8 +222,7 @@ yrd issue ensure @tracker/fix-release
 yrd sh --bay scratch
 ```
 
-Installed binaries are `yrd`, `git-yrd`, and `git-bay`. Git resolves
-`git bay ...` through `git-bay` automatically.
+Installed binaries are `yrd` and `git-yrd`. Bay commands live under `yrd bay`.
 
 On a clean child exit, `bay run` commits root-worktree changes as
 `wip: <issue-or-bay>`, pushes the same task branch, and removes the Bay before
@@ -366,7 +362,6 @@ Queue-run records remain a separate object:
 yrd run cancel <selector> [--reason <text>] [--json]
 ```
 
-The same commands are available through the standalone `git bay` projection.
 `bay submit` is permanent cross-product vocabulary and delegates to the same
 submission core as `pr submit`; `bay submit` remains a handoff, while new
 callers use the PR-native required-check surface below.
@@ -1368,7 +1363,7 @@ The low-level packages remain usable by a single developer with no agent fleet.
 | `@yrd/bay`         | Work bays, PR intake, Git workspace, and receive hooks           |
 | `@yrd/queue`       | Typed steps, merge proof, waiting jobs, batching, and status     |
 | `@yrd/contest`     | Competitors, evaluators, selection, metrics, exact promotion     |
-| `@yrd/cli`         | `yrd`, `git-yrd`, and `git-bay` command projections              |
+| `@yrd/cli`         | `yrd` and `git-yrd` command projections                          |
 
 The app is composed from `with*` plugins. Consumers can replace issue sources,
 Git workspace adapters, step runners, evaluators, Git resolution, and queue

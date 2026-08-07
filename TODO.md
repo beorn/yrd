@@ -23,7 +23,7 @@ public repository.
       withdraw, and close against real Git repositories.
 - [x] Verify `prs.git` receive hooks recover a crash between receive and event
       intake without duplicating a PR revision.
-- [x] Keep `git bay` and `yrd bay` as argv projections of the same commands.
+- [x] Keep bay commands under the canonical `yrd bay` subtree.
 
 ### Queue
 
@@ -49,7 +49,7 @@ public repository.
 
 - [ ] Finish Silvery output for bay, queue, and contest result views; keep JSON
       raw and deterministic.
-- [ ] Make standalone `bun yrd`, `yrd`, `git-yrd`, and `git-bay` work from a
+- [ ] Make standalone `bun yrd`, `yrd`, and `git-yrd` work from a
       clean clone with only declared dependencies.
 - [ ] Run focused tests, typecheck, scoped formatting/lint, pack/install smoke,
       and the complete acceptance flows.
@@ -62,8 +62,7 @@ public repository.
 The README is written as spec; these boxes close the gap between it and the
 shipped surface:
 
-- [ ] `git super pr | worktree | ci | merge` argv projections of the same core
-      (`git bay` is the shipped slice of the family).
+- [ ] `git super pr | worktree | ci | merge` argv projections of the same core.
 - [ ] Tracked submodules (roll): `branch = <name>` in `.gitmodules` refreshes
       the tracked super PR as upstream advances; landing stays queue-gated.
 - [ ] Grouped super-PR review: one feature's branches across repos as a single

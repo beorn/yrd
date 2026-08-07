@@ -19,7 +19,7 @@ if (!result.success) throw new AggregateError(result.logs, "Could not build Yrd"
 
 const bin = resolve(dist, "bin")
 await mkdir(bin, { recursive: true })
-for (const name of ["yrd", "git-yrd", "git-bay"]) {
+for (const name of ["yrd", "git-yrd"]) {
   const path = resolve(bin, name)
   await Bun.write(path, '#!/usr/bin/env bun\nimport "../yrd.js"\n')
   await chmod(path, 0o755)

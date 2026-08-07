@@ -8,7 +8,6 @@
   "author": "Bjørn Stabell <bjorn@stabell.org>",
   "repository": "github:beorn/yrd",
   "bin": {
-    "git-bay": "dist/bin/git-bay",
     "git-yrd": "dist/bin/git-yrd",
     "yrd": "dist/bin/yrd"
   },
@@ -26,7 +25,6 @@
   "scripts": {
     "yrd": "bun ./bin/yrd",
     "git-yrd": "bun ./bin/git-yrd",
-    "git-bay": "bun ./bin/git-bay",
     "storybook:queue": "bun ./packages/yrd-cli/dev/queue-timeline-storybook.tsx",
     "build": "bun ./scripts/build.ts",
     "postinstall": "bun ./scripts/verify-public-dependencies.ts",
