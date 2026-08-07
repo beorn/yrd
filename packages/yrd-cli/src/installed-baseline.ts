@@ -4,7 +4,6 @@ import * as z from "zod"
 import { raiseFailure } from "@yrd/core"
 import { createExclusive } from "@yrd/persistence"
 import { ReplayInstalledStepSchema, type InstalledStep, type QueueAuditFinding } from "@yrd/queue"
-import type { ImplementationSourceCheckoutRelation } from "./implementation-source.ts"
 
 /** The installed baseline: the queue installation baseline written by `yrd
  * admin queue init` (provision). It pins the check-definition revisions the
@@ -240,47 +239,4 @@ export function runtimeBaselineDrift(
 
 function shellWord(value: string): string {
   return `'${value.replaceAll("'", `'\"'\"'`)}'`
-}
-
-/** Refuse a mutable source root before required checks. A startup capture can
- * prove what eager imports loaded, but lazy imports would observe a later
- * checkout. The authoritative pin is included so an operator can compare all
- * three raw identities without translating an internal step hash. */
-export function runtimeImplementationSourceDrift(
-  loaded: string,
-  workingTree: string | undefined,
-  pinned: string | undefined,
-  relation: ImplementationSourceCheckoutRelation = { kind: "unprovable" },
-): QueueAuditFinding | undefined {
-  const current = workingTree ?? "unknown"
-  const authority = pinned ?? "unknown"
-  // A queue with no in-process native merge has no pinned implementation
-  // authority to compare. Undefined therefore means "not applicable", while
-  // an unavailable working-tree probe remains a fail-loud unknown.
-  if (current === loaded && (pinned === undefined || authority === loaded)) return undefined
-  if (current === loaded && relation.kind === "ancestor-lag") {
-    const repository = shellWord(relation.repository)
-    return {
-      code: "runtime-drift",
-      message:
-        `clean implementation checkout lags the pinned source: loaded '${loaded}', working tree '${current}', ` +
-        `pinned '${authority}'. The loaded checkout is a strict ancestor of the pinned source.`,
-      resolution: [`git -C ${repository} fetch origin && git -C ${repository} checkout --detach ${relation.pinnedSha}`],
-    }
-  }
-  if (current === loaded && relation.kind === "checkout-ahead") {
-    return {
-      code: "runtime-drift",
-      message:
-        `local implementation checkout is ahead of the pinned source: loaded '${loaded}', working tree '${current}', ` +
-        `pinned '${authority}'. Refusing to move the checkout backwards; inspect the root base and pin before retrying.`,
-    }
-  }
-  const divergence = current === loaded && relation.kind === "divergent" ? " The checkout and pin are divergent." : ""
-  return {
-    code: "runtime-drift",
-    message:
-      `resident implementation source changed or is unprovable: loaded '${loaded}', working tree '${current}', pinned '${authority}'. ` +
-      `${divergence} Stop and restart this queue runner from the pinned immutable source before starting runs.`,
-  }
 }

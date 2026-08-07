@@ -76,7 +76,6 @@ import {
   readInstalledBaselines,
   removeInstalledBaseline,
   runtimeBaselineDrift,
-  runtimeImplementationSourceDrift,
   writeInstalledBaseline,
 } from "./installed-baseline.ts"
 import {
@@ -96,7 +95,6 @@ import { cleanGitEnvironment } from "./git-environment.ts"
 import { CHECKOUT_TIMEOUT_ENV, resolveCheckoutTimeoutMs } from "./git-timeouts.ts"
 import {
   authoritativeImplementationSource,
-  implementationSourceCheckoutRelation,
   implementationSourceIdentity,
   sourceRepositoryFor,
   takeImplementationSourceBridge,
@@ -1145,48 +1143,17 @@ function queueAdministration(
       ])
       const runtime = runtimeSteps?.()
       const pinnedSource = current.find((step) => step.kind === "merge")?.implementationSource
-      const sourceRelation =
-        implementationSource === undefined || workingSource !== implementationSource.loaded
-          ? undefined
-          : await implementationSourceCheckoutRelation(
-              process,
-              implementationSource.repository,
-              workingSource,
-              pinnedSource,
-            )
-      const sourceDrift =
-        implementationSource === undefined
-          ? undefined
-          : runtimeImplementationSourceDrift(
-              implementationSource.loaded,
-              workingSource,
-              pinnedSource,
-              sourceRelation ?? { kind: "unprovable" },
-            )
       const baselineFindings = Object.values(baselines).flatMap((baseline) => {
         const configDrift = installedBaselineDrift(baseline, current)
         if (configDrift !== undefined) return [configDrift]
         const runtimeDrift = runtime === undefined ? undefined : runtimeBaselineDrift(baseline, runtime)
         return runtimeDrift === undefined ? [] : [runtimeDrift]
       })
-      const hasConfigDrift = baselineFindings.some((finding) => finding.code === "config-drift")
-      // Preserve the existing migration-before-restart remedy ordering. A
-      // pinned-source advance first migrates the durable baseline, then the
-      // next audit refuses the still-loaded resident. Both stages still name
-      // the raw three-way identities so an operator never has to infer which
-      // observer is stale from an opaque step hash.
-      const findings = hasConfigDrift
-        ? baselineFindings.map((finding) =>
-            finding.code !== "config-drift" || sourceDrift === undefined
-              ? finding
-              : {
-                  ...finding,
-                  message: `${finding.message} ${sourceDrift.message}`,
-                  ...(sourceDrift.resolution === undefined ? {} : { resolution: sourceDrift.resolution }),
-                },
-          )
-        : [...(sourceDrift === undefined ? [] : [sourceDrift]), ...baselineFindings]
-      return { findings }
+      // How the runner is LAUNCHED decides what may change under it: an
+      // immutable artifact cannot change, and a hot-reloading dev run is
+      // meant to. The runtime does not second-guess that choice by
+      // comparing its own checkout to a pin.
+      return { findings: baselineFindings }
     },
     async provision(base) {
       const [inspected, current] = await Promise.all([inspect(base), deriveConfiguredSteps()])

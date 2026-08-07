@@ -28,7 +28,6 @@ import {
 import { queueStepRevision } from "../src/host-revision.ts"
 import {
   authoritativeImplementationSource,
-  implementationSourceCheckoutRelation,
   implementationSourceIdentity,
   sourceRepositoryFor,
   takeImplementationSourceBridge,
@@ -532,36 +531,6 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(untrackedIdentity).toMatch(/^dirty:[0-9a-f]{64}$/u)
     await writeFile(join(repo, "runtime", "untracked-runtime.ts"), "export const shadow = false\n")
     expect(await implementationSourceIdentity(process, sourceRepository)).not.toBe(untrackedIdentity)
-  })
-
-  it("distinguishes a clean source checkout lag from genuine divergence", async () => {
-    const root = await mkdtemp(join(tmpdir(), "yrd-source-relation-"))
-    roots.push(root)
-    const source = join(root, "source")
-    await git(root, "init", "-q", "-b", "main", source)
-    await git(source, "config", "user.name", "Yrd Test")
-    await git(source, "config", "user.email", "yrd@example.invalid")
-    await writeFile(join(source, "version.txt"), "base\n")
-    await git(source, "add", "version.txt")
-    await git(source, "commit", "-qm", "base")
-    const baseSha = await git(source, "rev-parse", "HEAD")
-
-    await writeFile(join(source, "version.txt"), "pinned\n")
-    await git(source, "commit", "-qam", "pinned")
-    const pinnedSha = await git(source, "rev-parse", "HEAD")
-    await using process = createProcess({ cwd: source })
-    const repository = { root: source }
-    expect(
-      await implementationSourceCheckoutRelation(process, repository, `git:${baseSha}`, `git:${pinnedSha}`),
-    ).toEqual({ kind: "ancestor-lag", repository: source, pinnedSha })
-
-    await git(source, "checkout", "-q", baseSha)
-    await writeFile(join(source, "version.txt"), "sibling\n")
-    await git(source, "commit", "-qam", "sibling")
-    const siblingSha = await git(source, "rev-parse", "HEAD")
-    expect(
-      await implementationSourceCheckoutRelation(process, repository, `git:${siblingSha}`, `git:${pinnedSha}`),
-    ).toEqual({ kind: "divergent" })
   })
 
   it("maps a linked-worktree runtime source to its authoritative gitlink (22730)", async () => {

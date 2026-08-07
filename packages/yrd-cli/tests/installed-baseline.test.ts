@@ -19,7 +19,6 @@ import {
   readInstalledBaselines,
   removeInstalledBaseline,
   runtimeBaselineDrift,
-  runtimeImplementationSourceDrift,
   writeInstalledBaseline,
   type InstalledBaseline,
 } from "../src/installed-baseline.ts"
@@ -161,47 +160,6 @@ describe("installed baseline drift", () => {
     expect(finding?.message).toContain(staleRuntimeRevision.slice(0, 8))
     expect(finding?.message).toContain(pinnedSource)
     expect(finding?.message).toContain(loadedSource)
-  })
-
-  it("gives a clean ancestor-lag checkout the exact safe fast-forward remedy", () => {
-    const loadedSource = "git:35562d1579f140669a453b310340582b8cc1b42f"
-    const pinnedSource = "git:748dbd87dd6a30a5d4f41de4459b01d8014d791f"
-    const repository = "/hh/current slot/vendor/yrd"
-
-    const finding = runtimeImplementationSourceDrift(loadedSource, loadedSource, pinnedSource, {
-      kind: "ancestor-lag",
-      repository,
-      pinnedSha: pinnedSource.slice(4),
-    })
-
-    expect(finding).toMatchObject({ code: "runtime-drift" })
-    expect(finding?.message).toContain(`loaded '${loadedSource}'`)
-    expect(finding?.message).toContain(`working tree '${loadedSource}'`)
-    expect(finding?.message).toContain(`pinned '${pinnedSource}'`)
-    expect(finding?.message).toContain("clean implementation checkout lags the pinned source")
-    expect(finding?.message).not.toContain("Stop and restart this queue runner")
-    const actionable = actionableFailure(finding!)
-    expect(actionable).toMatchObject({
-      resolution: [
-        `git -C '/hh/current slot/vendor/yrd' fetch origin && git -C '/hh/current slot/vendor/yrd' checkout --detach ${pinnedSource.slice(4)}`,
-      ],
-    })
-    expect(formatActionableFailure(actionable)).toContain(`resolve: ${actionable.resolution[0]}`)
-  })
-
-  it("keeps a genuinely divergent implementation checkout loud and non-mechanical", () => {
-    const loadedSource = "git:35562d1579f140669a453b310340582b8cc1b42f"
-    const pinnedSource = "git:748dbd87dd6a30a5d4f41de4459b01d8014d791f"
-
-    const finding = runtimeImplementationSourceDrift(loadedSource, loadedSource, pinnedSource, {
-      kind: "divergent",
-    })
-
-    expect(finding?.message).toContain("resident implementation source changed or is unprovable")
-    expect(finding?.message).toContain("divergent")
-    expect(actionableFailure(finding!).resolution).toEqual([
-      "Correct the cause above, then retry the same Yrd command.",
-    ])
   })
 
   it("keeps the one-time config epoch observable to pre-source-identity v3 residents (22366)", () => {
