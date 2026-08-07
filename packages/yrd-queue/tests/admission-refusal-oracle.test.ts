@@ -161,7 +161,7 @@ function refuseForever(blocked: () => string): CandidatePreparer {
 }
 
 describe("admission refusal oracle — a head-of-line PR refused at admission is visible to queue audit", () => {
-  it("pages queue progress once at T and clears the finding when queued work progresses", async () => {
+  it("makes one exact refusal loud without inventing a stalled live queue", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     let blocked = ""
     await using app = await createApp(
@@ -176,21 +176,20 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     blocked = pr.id
     await app.queue.run({}, runtime)
 
-    expect(app.queue.audit({ now: "2026-01-01T00:09:59.999Z" }).findings).not.toContainEqual(
+    expect(app.queue.audit({ now: "2026-01-01T00:10:00.000Z" }).findings).not.toContainEqual(
       expect.objectContaining({ code: "queue-progress-stalled" }),
     )
-    expect(app.queue.audit({ now: "2026-01-01T00:10:00.000Z" }).findings).toContainEqual({
-      code: "queue-progress-stalled",
-      message: expect.stringContaining("no landing for 10m00s"),
-      pr: pr.id,
-      specimen: "queue:main",
-      count: 1,
-      since: "2026-01-01T00:00:00.000Z",
-      blockedMs: 10 * 60_000,
+    expect(app.queue.eligibility(pr.id)).toMatchObject({
+      runnable: false,
+      reason: {
+        code: "admission-refused",
+        message: expect.stringContaining("authored-gitlink"),
+      },
     })
 
     blocked = ""
     clock.set("2026-01-01T00:10:01.000Z")
+    await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
     await app.queue.run({}, runtime)
     expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).not.toContainEqual(
       expect.objectContaining({ code: "queue-progress-stalled" }),
@@ -247,13 +246,15 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       const pr = await submitAndRequestChecks(app, "issue/typed-refusal-streak")
       prId = pr.id
 
-      for (const at of ["2026-01-01T00:00:00.000Z", "2026-01-01T00:01:00.000Z"]) {
+      for (const [index, at] of ["2026-01-01T00:00:00.000Z", "2026-01-01T00:01:00.000Z"].entries()) {
         clock.set(at)
+        if (index > 0) await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
         await app.queue.run({}, runtime)
       }
       refusalCode = "base-moved"
       for (const at of ["2026-01-01T00:02:00.000Z", "2026-01-01T00:03:00.000Z", "2026-01-01T00:04:00.000Z"]) {
         clock.set(at)
+        await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
         await app.queue.run({}, runtime)
       }
 
@@ -314,8 +315,10 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     // refuses the same PR at admission, so no queue run record ever exists.
     await expect(app.queue.run({}, runtime)).resolves.toEqual([])
     clock.set("2026-01-01T02:00:00.000Z")
+    await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
     await expect(app.queue.run({}, runtime)).resolves.toEqual([])
     clock.set("2026-01-01T05:46:00.000Z")
+    await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
     await expect(app.queue.run({}, runtime)).resolves.toEqual([])
 
     // The record walk really is blind: no run record was ever minted, so every
@@ -340,7 +343,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     })
     const finding = app.queue.audit().findings.find((item) => item.code === "admission-refusal-loop")
     expect(finding?.message).toBe(
-      `PR '${pr.id}' at the head of the required-check queue was refused 3 consecutive times over 5h46m ` +
+      `PR '${pr.id}' was refused 3 consecutive times over 5h46m ` +
         `(since 2026-01-01T00:00:00.000Z) without ever completing required checks; latest refusal 'authored-gitlink': ` +
         `yrd: PR '${pr.id}' authors a gitlink bump; recut it before required checks`,
     )
@@ -365,9 +368,11 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       await app.queue.run({}, runtime)
       expect(app.queue.audit().findings).toEqual([])
       clock.set("2026-01-01T00:10:00.000Z")
+      await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
       await app.queue.run({}, runtime)
       expect(app.queue.audit().findings).toEqual([])
       clock.set("2026-01-01T00:20:00.000Z")
+      await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
       await app.queue.run({}, runtime)
       expect(app.queue.audit().findings).toContainEqual(
         expect.objectContaining({ code: "admission-refusal-loop", count: 3 }),
@@ -404,8 +409,13 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     const pr = await submitAndRequestChecks(app, "issue/transient-wedge")
     blocked = pr.id
 
-    for (const at of ["2026-01-01T00:00:00.000Z", "2026-01-01T00:05:00.000Z", "2026-01-01T00:10:00.000Z"]) {
+    for (const [index, at] of [
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:05:00.000Z",
+      "2026-01-01T00:10:00.000Z",
+    ].entries()) {
       clock.set(at)
+      if (index > 0) await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
       await app.queue.run({}, runtime)
     }
     expect(app.queue.audit().findings).toContainEqual(
@@ -414,9 +424,10 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
 
     blocked = ""
     clock.set("2026-01-01T00:15:00.000Z")
+    await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
     await app.queue.run({}, runtime)
-    expect(Queues.ids(app.state().queues)).toEqual(["R1"])
-    expect(app.queue.eligibility(pr.id)).toMatchObject({ checks: { status: "passed", run: "R1" } })
+    expect(Queues.ids(app.state().queues)).toEqual([])
+    expect(app.queue.eligibility(pr.id)).toMatchObject({ checks: { status: "passed" } })
     expect(app.state().queues.admissionRefusals).toEqual({})
     expect(app.queue.audit().findings).toEqual([])
   })
@@ -436,8 +447,13 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       await using app = await createApp(prepare, clock.read, journal, id)
       const pr = await submitAndRequestChecks(app, "issue/needs-person")
       blocked = pr.id
-      for (const at of ["2026-01-01T00:00:00.000Z", "2026-01-01T00:05:00.000Z", "2026-01-01T00:10:00.000Z"]) {
+      for (const [index, at] of [
+        "2026-01-01T00:00:00.000Z",
+        "2026-01-01T00:05:00.000Z",
+        "2026-01-01T00:10:00.000Z",
+      ].entries()) {
         clock.set(at)
+        if (index > 0) await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
         await app.queue.run({}, runtime)
       }
       const current = app.bays.pr(pr.id)!.revs.at(-1)!

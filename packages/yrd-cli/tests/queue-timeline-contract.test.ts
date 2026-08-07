@@ -149,6 +149,7 @@ describe("queue timeline 21106 contract", () => {
     const frame = await renderString(
       createElement(QueueRecoveryView, {
         runs: [],
+        blocked: [],
         findings: [
           {
             code: "step-revision-drift",

@@ -984,7 +984,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(app.commands.bay.open.metadata?.visibility).toBe("public")
     expect(app.commands.pr.close.metadata?.visibility).toBe("public")
     expect(app.commands.pr.review.metadata?.visibility).toBe("public")
-    expect(app.commands.queue.admit.metadata?.visibility).toBe("internal")
+    expect("admit" in app.commands.queue).toBe(false)
     expect(app.commands.queue.run.metadata?.visibility).toBe("public")
 
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })

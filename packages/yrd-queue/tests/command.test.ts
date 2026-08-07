@@ -10,7 +10,15 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { resolveRelativeSubmoduleOrigin } from "../src/submodule-origin.ts"
-import { createBayJobDefs, currentPRRev, prDeliveryState, withBays, type BayWorkspace, type PR } from "@yrd/bay"
+import {
+  createBayJobDefs,
+  currentPRRev,
+  prAdmission,
+  prDeliveryState,
+  withBays,
+  type BayWorkspace,
+  type PR,
+} from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs } from "@yrd/job"
 import { withIntents } from "@yrd/intent"
@@ -1590,12 +1598,14 @@ describe("Queue command adapters", () => {
     expect(advancedBaseSha).not.toBe(baseSha)
     await app.bays.requestChecks({ pr: "PR1", baseSha: advancedBaseSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    expect(await app.queue.run({ prs: ["PR1"] }, runtime)).toEqual([])
 
-    expect(run.status, run.error?.message).toBe("completed")
-    expect(run).toMatchObject({
-      conclusion: "failure",
-      error: {
+    const current = app.bays.pr("PR1")
+    if (current === undefined) throw new Error("expected PR1")
+    expect(prAdmission(current)).toMatchObject({
+      status: "refused",
+      baseSha: advancedBaseSha,
+      receipt: {
         code: "carrier-drops-landed",
         message: expect.stringMatching(/advance base disjoint.*linear rebuild.*current base/isu),
       },

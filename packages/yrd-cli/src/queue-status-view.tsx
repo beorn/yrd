@@ -2878,23 +2878,37 @@ export function QueueRunsView({ runs }: { runs: readonly Run[] }) {
 export function QueueRecoveryView({
   runs,
   findings,
+  blocked,
 }: {
   runs: readonly Run[]
   findings: readonly QueueAuditFinding[]
+  blocked: readonly Readonly<{ pr: PR; eligibility: PREligibility }>[]
 }) {
-  if (findings.length === 0) return <QueueRunsView runs={runs} />
+  if (findings.length === 0 && blocked.length === 0) return <QueueRunsView runs={runs} />
   return (
     <Box flexDirection="column">
       {runs.length === 0 ? null : <QueueRunsView runs={runs} />}
-      <Text color="$fg-error" bold>
-        Recovery left blocking queue findings:
-      </Text>
-      {findings.map((finding) => (
-        <Text key={`${finding.code}:${finding.run ?? ""}:${finding.step ?? ""}:${finding.message}`} color="$fg-error">
-          {finding.run === undefined ? "" : `${finding.run} `}
-          {finding.code}: {finding.message}
+      {blocked.map(({ pr, eligibility }) => (
+        <Text key={`blocked:${pr.id}`} color="$fg-warning">
+          {eligibility.reason?.message}
         </Text>
       ))}
+      {findings.length === 0 ? null : (
+        <>
+          <Text color="$fg-error" bold>
+            Recovery left blocking queue findings:
+          </Text>
+          {findings.map((finding) => (
+            <Text
+              key={`${finding.code}:${finding.run ?? ""}:${finding.step ?? ""}:${finding.message}`}
+              color="$fg-error"
+            >
+              {finding.run === undefined ? "" : `${finding.run} `}
+              {finding.code}: {finding.message}
+            </Text>
+          ))}
+        </>
+      )}
     </Box>
   )
 }

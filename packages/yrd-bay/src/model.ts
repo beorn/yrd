@@ -397,6 +397,9 @@ export const PRAdmissionStepSchema = z
 
 const PRAdmissionBaseSchema = z.object({
   baseSha: GitShaSchema,
+  /** Exact-revision/base check authorities consumed by this verdict.
+   * Optional only for replaying admission facts written before this counter. */
+  requestCount: z.number().int().positive().optional(),
   candidate: TextSchema.optional(),
   steps: z.array(PRAdmissionStepSchema),
 })
@@ -405,13 +408,15 @@ export type PRAdmissionRecord =
   | Readonly<{
       status: "passed"
       baseSha: string
+      requestCount?: number
       candidate?: string
       steps: readonly PRAdmissionStep[]
     }>
   | Readonly<{
       status: "refused"
-      kind: "refusal" | "infrastructure"
+      kind: "refusal" | "failure" | "infrastructure"
       baseSha: string
+      requestCount?: number
       candidate?: string
       steps: readonly PRAdmissionStep[]
       step: string
@@ -422,7 +427,7 @@ export const PRAdmissionRecordSchema = z.discriminatedUnion("status", [
   PRAdmissionBaseSchema.extend({ status: z.literal("passed") }).strict(),
   PRAdmissionBaseSchema.extend({
     status: z.literal("refused"),
-    kind: z.enum(["refusal", "infrastructure"]),
+    kind: z.enum(["refusal", "failure", "infrastructure"]),
     step: TextSchema,
     receipt: JobErrorSchema,
   }).strict(),

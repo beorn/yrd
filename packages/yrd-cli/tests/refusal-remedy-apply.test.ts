@@ -122,6 +122,10 @@ function harness(
     queue: {
       eligibility: () => ({ checks: { status: verdict === "RECUT-FORCE" ? "passed" : "queued" } }),
       cancel: async () => guard("queue.cancel"),
+      cancelAdmissionJobs: async () => {
+        guard("queue.cancelAdmissionJobs")
+        return []
+      },
       settleAdmissionRefusal: async () => {
         guard("queue.settleAdmissionRefusal")
         settled = true

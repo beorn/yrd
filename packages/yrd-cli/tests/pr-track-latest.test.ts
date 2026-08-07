@@ -11,7 +11,7 @@
  * "the branch moved" is a deterministic fact rather than a Git race.
  */
 import { describe, expect, it, vi } from "vitest"
-import { createBayJobDefs, currentPRRev, prDeliveryState, withBays } from "@yrd/bay"
+import { createBayJobDefs, currentPRRev, prAdmission, prDeliveryState, withBays } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { runYrd, type PruneGitFacts, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
@@ -861,9 +861,14 @@ describe("resident merge-into-latest", () => {
       ),
       submitted.stderr(),
     ).toBe(0)
-    await expect(app.queue.run({ prs: ["PR1"] }, { runner: "track-test", leaseMs: 60_000 })).resolves.toMatchObject([
-      { status: "completed", conclusion: "failure", error: { code: "authored-failure" } },
-    ])
+    await expect(app.queue.run({ prs: ["PR1"] }, { runner: "track-test", leaseMs: 60_000 })).resolves.toEqual([])
+    const failed = app.bays.pr("PR1")
+    if (failed === undefined) throw new Error("expected PR1")
+    expect(prAdmission(failed)).toMatchObject({
+      status: "refused",
+      kind: "failure",
+      receipt: { code: "authored-failure" },
+    })
     expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
     expect(app.queue.eligibility("PR1")).toMatchObject({ checks: { status: "failed" } })
 

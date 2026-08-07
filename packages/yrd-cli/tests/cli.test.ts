@@ -358,7 +358,7 @@ function contestAdapters(probe?: OverlapProbe, baseResolutions?: string[], waiti
 
 async function createApp(
   options: {
-    waitingCheck?: boolean
+    waitingCheck?: boolean | ((input: StepExecution<PRShape>) => boolean)
     dirtyBay?: boolean
     bayPath?: string
     failingBay?: string
@@ -422,7 +422,9 @@ async function createApp(
     (input: StepExecution<PRShape>): JobResult<JsonValue> => {
       options.checkRuns?.push("check")
       options.checkedRevisions?.push(...input.prs.map((pr) => `${pr.id}@${pr.revision}`))
-      return options.waitingCheck
+      const waiting =
+        typeof options.waitingCheck === "function" ? options.waitingCheck(input) : options.waitingCheck === true
+      return waiting
         ? {
             status: "waiting",
             token: "remote-check",
@@ -2589,7 +2591,7 @@ describe("runYrd", () => {
     const baseTree = "c".repeat(40)
     const patchId = "d".repeat(40)
     const recutInputs: unknown[] = []
-    const app = await createApp()
+    const app = await createApp({ waitingCheck: (input) => input.prs.some((pr) => pr.id === "PR1") })
     const services = {
       recut: {
         recut(input: unknown) {
@@ -2621,6 +2623,9 @@ describe("runYrd", () => {
     })
     await app.bays.ready({ pr: "PR1" })
     await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
+    expect(await app.queue.run({ prs: ["PR1"] }, { runner: "yrd-cli", leaseMs: 60_000 })).toEqual([])
+    const admissionJob = revisionAdmissionJob(app, "PR1")
+    expect(admissionJob).toMatchObject({ status: "waiting" })
 
     const before = await Array.fromAsync(app.events()).then((events) => events.length)
     await expect(refresh(app, services, io)).resolves.toEqual([
@@ -2629,6 +2634,7 @@ describe("runYrd", () => {
 
     expect(recutInputs).toHaveLength(1)
     expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("already-landed")
+    expect(app.jobs.get(admissionJob!.id)).toMatchObject({ status: "completed", conclusion: "cancelled" })
     expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: absorbedHead })
     const appended = (await Array.fromAsync(app.events())).slice(before)
     expect(appended.filter(({ name }) => name === "pr/already-landed")).toEqual([
@@ -4397,7 +4403,7 @@ describe("runYrd", () => {
     const first = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
     expect(await runYrd(app, yrd("pr", "submit", "topic/retry", "--json"), first.io)).toBe(0)
     await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
-    expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("needs-author")
+    expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
     expect(app.queue.eligibility("PR1")).toMatchObject({ checks: { status: "failed" } })
     expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 1, head: HEAD_SHA })
 
@@ -4532,7 +4538,7 @@ describe("runYrd", () => {
 
     expect(await runYrd(app, yrd("pr", "submit", "topic/red", "--json"), submit.io), submit.stderr()).toBe(0)
     await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("needs-author")
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
     expect(app.queue.eligibility("PR1")).toMatchObject({ checks: { status: "failed" } })
     expect(currentPRRev(app.state().bays.prs.PR1!).terminal).toBeUndefined()
     expect(app.state().bays.prs.PR1).not.toHaveProperty("detail")
@@ -5016,7 +5022,9 @@ describe("runYrd", () => {
     const recovery = outputIO({ now: () => Date.parse("2026-07-09T17:46:30.000Z") })
     expect(await runYrd(app, yrd("queue", "recover"), recovery.io), recovery.stderr()).toBe(0)
     const text = stripAnsi(recovery.stdout())
-    expect(text).toContain("Queue idle")
+    expect(text).not.toContain("Queue idle")
+    expect(text).toContain("authored-gitlink")
+    expect(text).toContain("yrd pr recut PR1 --preflight --queue")
   })
 
   it("makes a same-head base refresh with zero runs actionable instead of reporting queue idle", async () => {
@@ -8768,6 +8776,7 @@ describe("runYrd", () => {
     expect(await app.queue.admit({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })).toEqual(["PR1"])
     expect(prAdmission(app.bays.pr("PR1")!)).toMatchObject({
       status: "refused",
+      kind: "failure",
       baseSha: BASE_SHA,
       step: "check",
     })
@@ -8777,12 +8786,13 @@ describe("runYrd", () => {
     expect(await app.queue.admit({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })).toEqual(["PR1"])
     expect(prAdmission(app.bays.pr("PR1")!)).toMatchObject({
       status: "refused",
+      kind: "failure",
       baseSha: BASE_SHA,
       step: "check",
       at: "2026-07-09T12:11:00.000Z",
     })
     expect(Queues.ids(app.state().queues)).toEqual([])
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("needs-author")
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("pushed")
     expect(app.state().bays.prs.PR1).not.toHaveProperty("submittedAt")
 
     const human = outputIO({ columns: 80 })
@@ -8799,12 +8809,8 @@ describe("runYrd", () => {
 
     now = "2026-07-09T12:20:00.000Z"
     const fixedHead = "2".repeat(40)
-    await app.bays.submit({
-      branch: "topic/draft-check",
-      headSha: fixedHead,
-      base: "main",
-      baseSha: BASE_SHA,
-    })
+    const fixed = outputIO({ resolveRevision: () => Promise.resolve(fixedHead) })
+    expect(await runYrd(app, yrd("pr", "submit", "topic/draft-check"), fixed.io), fixed.stderr()).toBe(0)
     expect(app.state().bays.prs.PR1).toMatchObject({
       state: "open",
       merged: false,
@@ -11082,12 +11088,8 @@ describe("typed issue landing bridge", () => {
         pr: "PR1",
         revision: 1,
         headSha: HEAD_SHA,
-        status: "rejected",
+        status: "submitted",
         runs: [],
-        bounce: {
-          run: expect.any(String),
-          detail: "shipping config rejects candidate",
-        },
       }),
     ])
   })

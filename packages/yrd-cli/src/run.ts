@@ -3301,6 +3301,12 @@ async function executeRecutPr(
       baseTreeSha: result.treeSha,
       patchId: result.patchId,
     })
+    await app.queue.cancelAdmissionJobs({
+      pr: pr.id,
+      revision: currentRevision.n,
+      by: io.runner ?? "operator",
+      reason: `PR revision ${currentRevision.n} settled because its payload is already contained`,
+    })
     const current = requiredPr(app, pr.id)
     return {
       current,
@@ -4886,11 +4892,23 @@ async function recoverQueue(
     ...(options.runner === undefined ? {} : { runner: options.runner }),
   })
   const findings = await queueAuditFindings(app, services)
+  const blocked = admissionBlockedPrs(app)
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "queue.recover", results: runs.map(projectQueueRunTaskStatus) },
-    createElement(QueueRecoveryView, { runs, findings }),
+    {
+      command: "queue.recover",
+      results: runs.map(projectQueueRunTaskStatus),
+      ...(blocked.length === 0
+        ? {}
+        : {
+            blocked: blocked.map(({ pr, eligibility }) => ({
+              pr: projectPrTaskStatusWithEligibility(pr, eligibility),
+              eligibility: projectEligibilityTaskStatus(eligibility),
+            })),
+          }),
+    },
+    createElement(QueueRecoveryView, { runs, findings, blocked }),
   )
 }
 
@@ -4902,6 +4920,23 @@ async function queueAuditFindings(
   const core = app.queue.audit(now === undefined ? undefined : { now })
   const environment = await services.queue?.auditEnvironment?.()
   return [...core.findings, ...(environment?.findings ?? [])]
+}
+
+function admissionBlockedPrs(
+  app: YrdCliApp,
+  selectedPrIds?: ReadonlySet<string>,
+): Array<Readonly<{ pr: PR; eligibility: PREligibility }>> {
+  return Object.values(stateOf(app).bays.prs)
+    .filter((pr) => {
+      const delivery = prDeliveryState(pr)
+      return (
+        (selectedPrIds === undefined || selectedPrIds.has(pr.id)) &&
+        (delivery === "submitted" || delivery === "ready" || delivery === "needs-author")
+      )
+    })
+    .map((pr) => ({ pr, eligibility: app.queue.eligibility(pr.id) }))
+    .filter(({ eligibility }) => eligibility.reason?.code === "admission-refused")
+    .toSorted((left, right) => compareNatural(left.pr.id, right.pr.id))
 }
 
 async function migrateTerminalAssociations(
@@ -8570,17 +8605,7 @@ function buildProgram(
       const runs = await runQueues(app, selectors, options, io)
       const selectedPrIds =
         selectors.length === 0 ? undefined : new Set(selectors.map((selector) => requiredPr(app, selector).id))
-      const blocked = Object.values(stateOf(app).bays.prs)
-        .filter((pr) => {
-          const delivery = prDeliveryState(pr)
-          return (
-            (selectedPrIds === undefined || selectedPrIds.has(pr.id)) &&
-            (delivery === "submitted" || delivery === "ready" || delivery === "needs-author")
-          )
-        })
-        .map((pr) => ({ pr, eligibility: app.queue.eligibility(pr.id) }))
-        .filter(({ eligibility }) => eligibility.reason?.code === "admission-refused")
-        .toSorted((left, right) => compareNatural(left.pr.id, right.pr.id))
+      const blocked = admissionBlockedPrs(app, selectedPrIds)
       const blockerText = blocked.map(({ eligibility }) => eligibility.reason?.message).join("\n")
       const human =
         blocked.length === 0

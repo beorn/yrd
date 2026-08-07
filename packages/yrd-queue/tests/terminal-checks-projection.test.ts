@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
-import { createBayJobDefs, prDeliveryState, withBays, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, prAdmission, prDeliveryState, withBays, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
@@ -106,19 +106,22 @@ describe("terminal PRs never project a live check status", () => {
     expect(eligibility.checks.queuedAt).toBe("2026-01-01T00:00:00.000Z")
   })
 
-  it("keeps a materialized run's real verdict on a terminal PR", async () => {
-    // Gating must not erase facts. A run that actually executed is history, not
-    // a claim about a live queue slot, so its verdict survives withdrawal.
+  it("keeps an immutable revision verdict on a terminal PR", async () => {
+    // Gating must not erase facts. The revision verdict is history, not a claim
+    // about a live queue slot, so it survives withdrawal without a Queue Run.
     await using app = await createQueueApp()
     const pr = await submitWithChecks(app, "topic/passed-then-withdrawn")
     await app.queue.run({}, runtime)
     expect(app.queue.eligibility(pr).checks.status).toBe("passed")
+    const current = app.bays.pr(pr)
+    if (current === undefined) throw new Error("expected PR")
+    expect(prAdmission(current)).toMatchObject({ status: "passed", baseSha: BASE })
 
     await app.bays.closePr({ pr })
 
     const eligibility = app.queue.eligibility(pr)
     expect(eligibility.reason?.code).toBe("terminal")
     expect(eligibility.checks.status).toBe("passed")
-    expect(eligibility.checks.run).toBeDefined()
+    expect(eligibility.checks.run).toBeUndefined()
   })
 })

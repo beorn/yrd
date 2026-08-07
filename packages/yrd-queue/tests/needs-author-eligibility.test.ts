@@ -8,12 +8,21 @@
  */
 import { describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
-import { createBayJobDefs, currentPRRev, prDeliveryState, withBays, type BayWorkspace, type PR } from "@yrd/bay"
+import {
+  createBayJobDefs,
+  currentPRRev,
+  prAdmission,
+  prDeliveryState,
+  prNeedsAuthor,
+  withBays,
+  type BayWorkspace,
+  type PR,
+} from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
 import {
-  authorAttributionReceipt,
+  Queues,
   withMerge,
   withQueue,
   withStep,
@@ -149,24 +158,37 @@ describe("native needs-author lifecycle", () => {
     }))
     const pr = await submitWithChecks(app, "topic/authored-root")
 
-    await expect(app.queue.run({}, runtime)).resolves.toMatchObject([{ status: "completed", conclusion: "failure" }])
+    await expect(app.queue.run({}, runtime)).resolves.toEqual([])
+
+    const current = app.bays.pr(pr)
+    if (current === undefined) throw new Error("expected refused PR")
+    const refused = prAdmission(current)
+    expect(refused).toMatchObject({
+      status: "refused",
+      kind: "refusal",
+      step: "check",
+      receipt: {
+        code: "composition-invalid",
+        message: "PR 'PR1' composition head contains root changes",
+      },
+    })
 
     expect(prFacts(app.bays.pr(pr))).toMatchObject({
       id: pr,
       status: "needs-author",
-      needsAuthor: {
-        run: "R1",
-        step: "check",
-        receipt: {
-          code: "composition-invalid",
-          message: "PR 'PR1' composition head contains root changes",
-        },
+    })
+    expect(prNeedsAuthor(current)).toMatchObject({
+      run: refused?.status === "refused" ? refused.steps[0]?.job : undefined,
+      step: "check",
+      receipt: {
+        code: "composition-invalid",
+        message: "PR 'PR1' composition head contains root changes",
       },
     })
     expect(prFacts(app.bays.pr(pr)).revisions[0]).toMatchObject({ submittedAt: "2026-01-01T00:00:00.000Z" })
     expect(prFacts(app.bays.pr(pr)).revisions[0]?.terminal).toBeUndefined()
     const events = await Array.fromAsync(app.events())
-    expect(events.map(({ name }) => name)).toContain("pr/needs-author")
+    expect(events.map(({ name }) => name)).toContain("pr/admission-recorded")
     expect(events.map(({ name }) => name)).not.toContain("pr/rejected")
     expect(app.state().queues.authority).toMatchObject({
       statuses: { PR1: "needs-author" },
@@ -192,17 +214,11 @@ describe("native needs-author lifecycle", () => {
 
     const eligibility = app.queue.eligibility(pr)
     expect(eligibility.runnable).toBe(false)
-    expect(eligibility.reason?.code).toBe("needs-author")
-    expect(eligibility.reason?.receipt).toMatchObject({
-      code: "composition-invalid",
-      message: "PR 'PR1' composition head contains root changes",
-    })
-    expect(eligibility.reason?.message).toContain("cannot be composed as submitted")
-    const rejectedRun = app.queue.get("R1")
-    expect(authorAttributionReceipt(rejectedRun, { pr, revision: 1, headSha: HEAD })).toMatchObject({
-      code: "composition-invalid",
-    })
-    expect(authorAttributionReceipt(rejectedRun, { pr: "PR-other", revision: 1, headSha: HEAD })).toBeUndefined()
+    expect(eligibility.reason?.code).toBe("admission-refused")
+    expect(eligibility.reason?.receipt).toBeUndefined()
+    expect(eligibility.reason?.message).toContain("composition-invalid")
+    expect(eligibility.reason?.message).toContain("yrd pr recut PR1 --preflight --queue")
+    expect(Queues.ids(app.state().queues)).toEqual([])
 
     // Receiver/refresh replay of the unchanged rejected head is idempotent:
     // only new authored content may reopen and resume this PR.
@@ -224,8 +240,9 @@ describe("native needs-author lifecycle", () => {
     expect(prFacts(app.bays.pr(pr))).toMatchObject({ id: pr, revision: 2, headSha: fixedHead, status: "submitted" })
     expect(app.bays.checksRequested(pr)).toBe(true)
     expect(app.queue.eligibility(pr).checks.status).toBe("queued")
-    expect(authorAttributionReceipt(app.queue.get("R1"), { pr, revision: 1, headSha: HEAD })).toMatchObject({
-      code: "composition-invalid",
+    expect(app.bays.pr(pr)?.revs[0]?.admission).toMatchObject({
+      status: "refused",
+      receipt: { code: "composition-invalid" },
     })
   })
 
@@ -366,7 +383,7 @@ describe("native needs-author lifecycle", () => {
     }))
     const pr = await submitWithChecks(app, "topic/red-tests")
 
-    await expect(app.queue.run({}, runtime)).resolves.toMatchObject([{ status: "completed", conclusion: "failure" }])
+    await expect(app.queue.run({}, runtime)).resolves.toEqual([])
 
     const eligibility = app.queue.eligibility(pr)
     expect(eligibility.runnable).toBe(false)

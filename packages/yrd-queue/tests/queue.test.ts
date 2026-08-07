@@ -254,8 +254,7 @@ function indexedJournal(initial: readonly JournalFrame[] = []): Journal<unknown>
   }
 }
 
-function queueHistoryFrames(count: number, failedRun?: number): readonly JournalFrame[] {
-  const nextId = ids()
+function queueHistoryFrames(count: number, failedRun?: number, nextId: () => string = ids()): readonly JournalFrame[] {
   return Array.from({ length: count }, (_, index) => {
     const number = index + 1
     const run = `R${number}`
@@ -413,6 +412,28 @@ function legacyQueueHistoryFrames(count: number): readonly JournalFrame[] {
       ...legacy,
       events: legacy.events.filter(({ name }) => name !== "queue/run/settled"),
     })
+  })
+}
+
+/** Replay-only fixture for the admission Runs written before revision verdicts
+ * replaced that aggregate. Fresh code must never mint this shape. */
+function legacyAdmissionRunFrame(frame: JournalFrame): JournalFrame {
+  const legacy = structuredClone(frame)
+  const started = legacy.events.find(({ name }) => name === "queue/run/started")
+  if (started === undefined) throw new Error("expected Queue start fixture")
+  const data = started.data as {
+    run?: { settlement?: unknown; steps?: Array<{ name?: unknown }>; stepSelection?: unknown }
+  }
+  if (data.run?.steps === undefined) throw new Error("expected Queue steps fixture")
+  const names = data.run.steps.map(({ name }) => {
+    if (typeof name !== "string") throw new Error("expected named Queue step fixture")
+    return name
+  })
+  delete data.run.settlement
+  data.run.stepSelection = { authority: "admission", steps: names }
+  return parseJournalFrame({
+    ...legacy,
+    events: legacy.events.filter(({ name }) => name !== "queue/run/settled"),
   })
 }
 
@@ -3990,11 +4011,12 @@ describe("Queue", () => {
       expect(checks).toBe(1)
       expect(app.queue.eligibility(pr.id)).toMatchObject({
         runnable: false,
-        reason: { code: "admission-refused" },
+        reason: { code: "required-check-failed" },
         checks: { status: "failed" },
       })
       expect(prAdmission(app.bays.pr(pr.id)!)).toMatchObject({
         status: "refused",
+        kind: "failure",
         step: "check",
         receipt: { code: "queue-environment-refused" },
       })
@@ -4004,7 +4026,7 @@ describe("Queue", () => {
     await using replayed = await createQueueApp(options, journal, undefined, id)
     expect(replayed.queue.eligibility("PR1")).toMatchObject({
       runnable: false,
-      reason: { code: "admission-refused" },
+      reason: { code: "required-check-failed" },
       checks: { status: "failed" },
     })
 
@@ -4061,7 +4083,7 @@ describe("Queue", () => {
     expect(Queues.ids(runner.state().queues)).toEqual([])
     expect(runner.queue.eligibility(pr.id)).toMatchObject({
       runnable: false,
-      reason: { code: "admission-refused" },
+      reason: { code: "required-check-failed" },
       checks: { status: "failed" },
     })
     expect(await runner.queue.admit({ prs: [pr.id] }, runtime)).toEqual([])
@@ -4070,7 +4092,7 @@ describe("Queue", () => {
     await operator.queue.resume("main")
     await runner.refresh()
     expect(await runner.queue.admit({ prs: [pr.id] }, runtime)).toEqual([])
-    expect(prAdmission(runner.bays.pr(pr.id)!)).toMatchObject({ status: "refused", step: "check" })
+    expect(prAdmission(runner.bays.pr(pr.id)!)).toMatchObject({ status: "refused", kind: "failure", step: "check" })
     expect(checks).toBe(1)
   })
 
@@ -4214,6 +4236,7 @@ describe("Queue", () => {
       classification: "base",
       job: { status: "completed", conclusion: "failure", error: { code: "base-red" } },
     })
+    expect(refused[0]).not.toHaveProperty("reusedFrom")
     expect(prAdmission(app.bays.pr(pr.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
     expect(checks).toBe(2)
     expect(merges).toBe(0)
@@ -4229,7 +4252,7 @@ describe("Queue", () => {
     ])
   })
 
-  it("cancels an unstarted revision admission Job when its PR closes", async () => {
+  it("recovery cancels an unstarted revision admission Job after its PR closes", async () => {
     await using app = await createQueueApp()
     const pr = await submitBranch(app, "issue/stale-before-job")
     await app.bays.requestChecks({ pr: pr.id })
@@ -4238,7 +4261,8 @@ describe("Queue", () => {
     if (job === undefined) throw new Error("expected requested revision admission Job")
     await app.bays.closePr({ pr: pr.id })
 
-    expect(await app.queue.admit({ prs: [pr.id] }, runtime)).toEqual([])
+    expect(app.jobs.get(job.id)).toMatchObject({ status: "queued" })
+    expect(await app.queue.recover({ recoveryTime: "2026-01-01T00:01:00.000Z" })).toEqual([])
     expect(app.jobs.get(job.id)).toMatchObject({ status: "completed", conclusion: "cancelled" })
     expect(prAdmission(app.bays.pr(pr.id)!)).toBeUndefined()
     expect(app.queue.checks([pr.id])).toEqual(
@@ -4247,40 +4271,61 @@ describe("Queue", () => {
   })
 
   it("replays a legacy pinned-run failure before its requested Job starts", async () => {
-    const inner = createMemoryJournal()
-    const journal: typeof inner = {
-      read: (after, before) => inner.read(after, before),
-      append: (value, cursor) => {
-        const frame = structuredClone(value) as {
-          events?: { name?: string; data?: { run?: { settlement?: unknown } } }[]
-        }
-        for (const event of frame.events ?? []) {
-          if (event.name === "queue/run/started" && event.data?.run !== undefined) {
-            delete event.data.run.settlement
-          }
-        }
-        if (frame.events !== undefined) {
-          frame.events = frame.events.filter(({ name }) => name !== "queue/run/settled")
-        }
-        return inner.append(frame, cursor)
-      },
-    }
+    const journal = createMemoryJournal<unknown>()
     const id = ids()
+    let prId = ""
 
     {
-      await using app = await createQueueApp({}, journal, undefined, id)
+      await using app = await createQueueApp({ defaultSteps: ["check"] }, journal, undefined, id)
       const pr = await submitBranch(app, "issue/legacy-stale-before-job")
+      prId = pr.id
       await app.bays.requestChecks({ pr: pr.id })
-      await app.dispatch(app.commands.queue.admit, { pr: pr.id, baseSha: BASE })
-      expect(app.queue.get("R1")).toMatchObject({ status: "queued", prs: [{ id: pr.id }] })
-      await app.bays.closePr({ pr: pr.id })
-      expect(await app.queue.admit({ prs: [pr.id] }, runtime)).toEqual([pr.id])
+    }
+
+    let cursor = 0
+    for await (const batch of journal.read()) cursor = batch.cursor
+    const history = queueHistoryFrames(1, undefined, ids(1_000_000))[0]
+    if (history === undefined) throw new Error("expected historical Queue fixture")
+    const admission = structuredClone(legacyAdmissionRunFrame(history))
+    const snapshot = {
+      id: prId,
+      branch: "issue/legacy-stale-before-job",
+      base: "main",
+      revision: 1,
+      headSha: HEAD,
+      baseSha: BASE,
+    }
+    for (const applied of admission.events) {
+      if (applied.name === "queue/run/started") {
+        const data = applied.data as { run?: { prs?: unknown } }
+        if (data.run === undefined) throw new Error("expected historical Queue start")
+        data.run.prs = [snapshot]
+      }
+      if (applied.name === "job/requested") {
+        const data = applied.data as { input?: { prs?: unknown } }
+        if (data.input === undefined) throw new Error("expected historical Queue Job")
+        data.input.prs = [snapshot]
+      }
+    }
+    admission.events = admission.events.filter(({ name }) => name !== "job/transitioned")
+    expect(await journal.append(parseJournalFrame(admission), cursor)).toMatchObject({ appended: true })
+
+    {
+      await using app = await createQueueApp({ defaultSteps: ["check"] }, journal, undefined, id)
+      expect(app.queue.get("R1")).toMatchObject({
+        status: "queued",
+        prs: [{ id: prId }],
+        stepSelection: { authority: "admission" },
+      })
+      await app.bays.closePr({ pr: prId })
+      const admitted = await app.queue.admit({ prs: [prId] }, runtime)
       expect(app.queue.get("R1")).toMatchObject({
         id: "R1",
         status: "completed",
         conclusion: "failure",
         error: { code: "stale-pr" },
       })
+      expect(admitted).toEqual([prId])
     }
 
     const frames: JournalFrame[] = []
@@ -4293,7 +4338,7 @@ describe("Queue", () => {
       .map(({ name }) => name)
     expect(lifecycle).toEqual(["queue/run/started", "job/requested", "pr/withdrawn", "queue/run/failed"])
 
-    await using replayed = await createQueueApp({}, indexedJournal(frames), undefined, id)
+    await using replayed = await createQueueApp({ defaultSteps: ["check"] }, indexedJournal(frames), undefined, id)
     expect(replayed.queue.get("R1")).toMatchObject({
       id: "R1",
       status: "completed",
@@ -4877,7 +4922,7 @@ describe("Queue", () => {
     })
     await app.bays.requestChecks({ pr: "PR3" })
     const draftCheck = (await app.queue.admit({ prs: ["PR3"] }, runtime))[0]
-    if (draftCheck === undefined) throw new Error("expected pushed draft-check control run")
+    if (draftCheck === undefined) throw new Error("expected pushed draft-check admitted PR id")
     expect(deliveryOf(app.state().bays.prs.PR3)).toBe("pushed")
 
     expect(app.queue.audit().findings).toEqual([
@@ -4970,17 +5015,18 @@ describe("Queue", () => {
     expect(await app.queue.admit({ prs: ["PR1"] }, runtime)).toEqual(["PR1"])
     expect(prAdmission(app.bays.pr("PR1")!)).toMatchObject({
       status: "refused",
+      kind: "failure",
       step: "check",
       receipt: { code: "typecheck-failed" },
     })
-    expect(deliveryOf(app.state().bays.prs.PR1)).toBe("needs-author")
+    expect(deliveryOf(app.state().bays.prs.PR1)).toBe("pushed")
 
     expect(app.queue.eligibility("PR1")).toMatchObject({
       runnable: false,
-      reason: { code: "admission-refused" },
+      reason: { code: "draft" },
       checks: { status: "failed" },
     })
-    await expect(app.queue.run({ prs: ["PR1"] }, runtime)).rejects.toThrow("admission refusal 'typecheck-failed'")
+    await expect(app.queue.run({ prs: ["PR1"] }, runtime)).rejects.toThrow("PR 'PR1' is pushed, not ready")
 
     fail = false
     const reauthorization = await app.bays.requestChecks({ pr: "PR1" })
@@ -5005,11 +5051,45 @@ describe("Queue", () => {
     })
   })
 
-  it("indexes a released canceled admission exactly like the former terminal scan", async () => {
-    await using app = await createQueueApp()
-    const pr = await submitBranch(app, "issue/canceled-admission-index")
+  it("spends each exact check request once on a pre-Job admission refusal", async () => {
+    let prepares = 0
+    await using app = await createQueueApp({
+      prepareCandidate: () => {
+        prepares += 1
+        throw createFailure({
+          kind: "refusal",
+          code: "authored-gitlink",
+          message: "recut the carrier before required checks",
+        })
+      },
+    })
+    const pr = await submitBranch(app, "issue/candidate-refusal-authority")
     await app.bays.requestChecks({ pr: pr.id })
-    await app.dispatch(app.commands.queue.admit, { pr: pr.id, baseSha: BASE })
+
+    expect(await app.queue.run({}, runtime)).toEqual([])
+    expect(prepares).toBe(1)
+    await app.bays.requestChecks({ pr: pr.id })
+    expect(await app.queue.run({}, runtime)).toEqual([])
+    expect(prepares).toBe(2)
+
+    expect(await app.queue.run({}, runtime)).toEqual([])
+    expect(prepares).toBe(2)
+  })
+
+  it("indexes a released canceled admission exactly like the former terminal scan", async () => {
+    const history = queueHistoryFrames(1)[0]
+    if (history === undefined) throw new Error("expected historical Queue fixture")
+    const admission = legacyAdmissionRunFrame(history)
+    const queued = parseJournalFrame({
+      ...admission,
+      events: admission.events.filter(({ name }) => name !== "job/transitioned"),
+    })
+    await using app = await createQueueApp(
+      { defaultSteps: ["check"] },
+      indexedJournal([queued]),
+      undefined,
+      ids(1_000_000),
+    )
     const admitted = app.queue.get("R1")
     if (admitted?.prs[0] === undefined) throw new Error("expected admission run")
     expect(releasedAdmissionFailures(app.state().queues.index, admitted.prs[0], admitted.steps)).toBe(0)
