@@ -11,7 +11,7 @@
  * `watch-hot-reload.test.ts` (pure supervisor logic) so the latter runs in a
  * bare standalone clone. Skip this file when the installed binary is absent.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { createTestTerminal } from "@termless/test"
@@ -71,12 +71,12 @@ function processExists(pid: number): boolean {
   }
 }
 
-async function launchInstalledWatch(repo: string) {
+async function launchInstalledWatch(repo: string, env: Record<string, string> = {}) {
   const pidPath = join(repo, "watch.pid")
   const terminal = createTestTerminal({ cols: 100, rows: 30 })
   await terminal.spawn(
     ["/bin/sh", "-c", 'printf "%s\\n" "$$" > "$1"; exec "$2" watch', "yrd-watch", pidPath, installedYrd],
-    { cwd: repo, env: { FORCE_COLOR: "1", TERM: "xterm-256color" } },
+    { cwd: repo, env: { FORCE_COLOR: "1", TERM: "xterm-256color", ...env } },
   )
   const pid = await waitFor(
     () => (Bun.file(pidPath).size > 0 ? Number.parseInt(readFileSync(pidPath, "utf8").trim(), 10) : 0),
@@ -108,6 +108,55 @@ async function expectProcessesGone(pgid: number, pids: readonly number[]): Promi
 }
 
 describe("yrd watch hot reload (installed)", () => {
+  it("keeps Yrd's test-mode JSX transforms out of an inherited production cache", () => {
+    const manifest = JSON.parse(readFileSync(resolve(yrdRoot, "package.json"), "utf8")) as {
+      scripts?: Record<string, string>
+    }
+    const testScript = manifest.scripts?.test
+    expect(testScript).toContain("NODE_ENV=test")
+    expect(testScript).toContain("BUN_RUNTIME_TRANSPILER_CACHE_PATH=")
+    expect(testScript).toContain("bun-transpiler-yrd-test")
+  })
+
+  it("recovers a test-mode JSX transform persisted in its production cache before rendering", async () => {
+    const repo = createRepository("yrd-installed-watch-poisoned-")
+    const home = mkdtempSync(join(tmpdir(), "yrd-installed-watch-home-"))
+    const cache = join(home, ".cache", "silvercode", "bun-transpiler-yrd-production")
+    const watchPane = resolve(yrdRoot, "packages/yrd-cli/src/watch-pane.tsx")
+    const poison = Bun.spawnSync([process.execPath, "-e", `await import(${JSON.stringify(watchPane)})`], {
+      cwd: yrdRoot,
+      env: {
+        ...process.env,
+        HOME: home,
+        NODE_ENV: "test",
+        BUN_RUNTIME_TRANSPILER_CACHE_PATH: cache,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    expect(poison.exitCode, poison.stderr.toString()).toBe(0)
+    expect(
+      readdirSync(cache).some((name) => readFileSync(join(cache, name)).includes("jsxDEV")),
+      "the test-mode child must reproduce persisted dev JSX in the installed production bucket",
+    ).toBe(true)
+
+    const running = await launchInstalledWatch(repo, { HOME: home, NODE_ENV: "production" })
+    try {
+      await running.terminal.waitFor("QUEUE main", 10_000).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error)
+        throw new Error(`${message}; exit=${running.terminal.exitInfo ?? "pending"}\n${running.terminal.getText()}`)
+      })
+      expect(running.terminal.alive).toBe(true)
+      running.terminal.press("q")
+      await expectBoundedExit(running.terminal, 0)
+    } finally {
+      if (processExists(running.pid)) process.kill(-running.pid, "SIGKILL")
+      await running.terminal.close()
+      rmSync(repo, { recursive: true, force: true })
+      rmSync(home, { recursive: true, force: true })
+    }
+  }, 20_000)
+
   it("restores the terminal and reaps installed watch process groups on startup failure, SIGINT, and SIGTERM", async () => {
     const roots: string[] = []
     try {
