@@ -12585,6 +12585,69 @@ function intentGit(
 }
 
 describe("yrd intent — declared pin advances (22668 phase 1)", () => {
+  it("materializes the same deterministic carrier on an idempotent local branch", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-intent-materialize-"))
+    const repo = join(root, "root")
+    const component = join(root, "component")
+    const git = (cwd: string, ...args: string[]): string =>
+      execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim()
+    try {
+      mkdirSync(repo)
+      mkdirSync(component)
+      execFileSync("git", ["init", "-q", "-b", "main", repo])
+      execFileSync("git", ["init", "-q", "-b", "main", component])
+      for (const cwd of [repo, component]) {
+        git(cwd, "config", "user.name", "Yrd Test")
+        git(cwd, "config", "user.email", "yrd@example.invalid")
+      }
+      writeFileSync(join(component, "version.txt"), "base\n")
+      git(component, "add", "version.txt")
+      git(component, "commit", "-qm", "base")
+      git(repo, "config", "protocol.file.allow", "always")
+      git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", component, "dep")
+      git(repo, "commit", "-qam", "add dependency")
+      const baseSha = git(repo, "rev-parse", "main")
+      writeFileSync(join(component, "version.txt"), "target\n")
+      git(component, "commit", "-qam", "target")
+      const target = git(component, "rev-parse", "HEAD")
+      await using process = createProcess()
+      await using app = await createApp()
+      const first = outputIO({ cwd: repo })
+
+      expect(
+        await runYrd(
+          app,
+          yrd("intent", "materialize", "dep", "--target", target, "--issue", "@yrd/core/materialize", "--json"),
+          first.io,
+          { process },
+        ),
+        first.stderr(),
+      ).toBe(0)
+      const materialized = JSON.parse(first.stdout()) as {
+        branch: string
+        carrier: { baseSha: string; commit: string; treeSha: string }
+      }
+      expect(materialized.carrier).toMatchObject({ baseSha })
+      expect(git(repo, "rev-parse", materialized.branch)).toBe(materialized.carrier.commit)
+      expect(git(repo, "ls-tree", materialized.branch, "dep")).toContain(target)
+      expect(git(repo, "rev-parse", "main")).toBe(baseSha)
+
+      const replay = outputIO({ cwd: repo })
+      expect(
+        await runYrd(
+          app,
+          yrd("intent", "materialize", "dep", "--target", target, "--issue", "@yrd/core/materialize", "--json"),
+          replay.io,
+          { process },
+        ),
+        replay.stderr(),
+      ).toBe(0)
+      expect(JSON.parse(replay.stdout())).toMatchObject(materialized)
+    } finally {
+      safeRemoveSync(root, { within: tmpdir(), allowMissing: true })
+    }
+  }, 30_000)
+
   it("admits an intent and reports the pin it advances from", async () => {
     await using app = await createApp()
     const output = outputIO()

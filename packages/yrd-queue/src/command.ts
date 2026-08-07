@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { isAbsolute, join, resolve, sep } from "node:path"
 import { createFailure, failureFact, type JsonValue, type YrdFailure } from "@yrd/core"
 import { JobErrorSchema, parseJobLaunch, type JobContext, type JobError, type JobResult } from "@yrd/job"
+import { ComponentPathSchema } from "@yrd/intent"
 import type { Process, ProcessResult } from "@yrd/process"
 import * as z from "zod"
 import type {
@@ -1856,6 +1857,48 @@ async function prepareCandidate(
   const sourceRewrites: SourceRewrite[] = []
   const submoduleResolutions: QueueSubmoduleResolutionEvidence[] = []
   for (const pr of input.prs) {
+    if (pr.intent !== undefined) {
+      if (input.prs.length !== 1) {
+        return candidateFailure("intent-batch-refused", "yrd: pin intents are serial Queue members, never a batch")
+      }
+      if (pr.headSha !== authoritativeBase) {
+        return candidateFailure(
+          "intent-base-moved",
+          `yrd: intent '${pr.id}' was evaluated at '${pr.headSha}', not authoritative base '${authoritativeBase}'`,
+        )
+      }
+      const currentPin = await readGitlink(git, path, "HEAD", pr.intent.authored.component)
+      if (currentPin === undefined) {
+        return candidateFailure(
+          "intent-component-unknown",
+          `yrd: intent component '${pr.intent.authored.component}' is not a gitlink at '${authoritativeBase}'`,
+          pr.intent.authored.component,
+          [pr.intent.authored.component],
+        )
+      }
+      if (currentPin !== pr.intent.evaluated.priorPin) {
+        return candidateFailure(
+          "intent-base-moved",
+          `yrd: intent '${pr.id}' evaluated pin '${pr.intent.evaluated.priorPin}', but '${authoritativeBase}' carries '${currentPin}'`,
+        )
+      }
+      const synthesized = await synthesizeGitlinkWrapper(
+        git,
+        path,
+        authoritativeBase,
+        currentPin === pr.intent.evaluated.target
+          ? []
+          : [{ path: pr.intent.authored.component, sha: pr.intent.evaluated.target }],
+        `chore(${pr.intent.authored.component.split("/").at(-1) ?? pr.intent.authored.component}): advance pin to ${pr.intent.evaluated.target.slice(0, 12)} [${pr.intent.authored.issue.id}]`,
+      )
+      if (synthesized.status === "failed") return synthesized
+      submoduleResolutions.push({
+        kind: "pin",
+        path: pr.intent.authored.component,
+        sha: pr.intent.evaluated.target,
+      })
+      continue
+    }
     if (pr.composition === undefined) {
       if (pr.recut !== undefined) {
         const dropped = await carrierDropsLandedFailure(git, path, pr.id, pr.headSha, authoritativeBase)
@@ -1965,6 +2008,7 @@ async function mergeTreeCandidate(
   repo: string,
   input: CandidatePreparationInput,
 ): Promise<"mergeable" | "conflicting"> {
+  if (input.prs.some((pr) => pr.intent !== undefined)) return "mergeable"
   let current = input.baseSha
   for (const revision of input.revs) {
     const merged = await git.run(repo, ["merge-tree", "--write-tree", current, revision.head], true)
@@ -2090,6 +2134,7 @@ export function gitCandidatePreparer(options: GitCandidatePreparerOptions): Cand
         baseSha: input.baseSha,
         revs: input.revs,
         sha: candidate.output.sha,
+        treeSha: (await git.run(path, ["rev-parse", `${candidate.output.sha}^{tree}`])).stdout,
         ref,
         ...(candidate.output.sourceRewrites.length === 0 ? {} : { sourceRewrites: candidate.output.sourceRewrites }),
         ...(candidate.output.submoduleResolutions.length === 0
@@ -2413,6 +2458,139 @@ async function stabilizeGeneratedRootWrapper(
       )
 }
 
+type GitlinkUpdate = Readonly<{ path: string; sha: string }>
+type SynthesizedGitlinkWrapper = Readonly<{ commit: string; treeSha: string }>
+
+/**
+ * The ONE generated-root implementation shared by composed PRs, pin intents,
+ * and the materialize escape hatch. It stages only gitlink entries and writes
+ * a byte-stable commit through Git.commitTree's pinned identity and timestamp.
+ */
+async function synthesizeGitlinkWrapper(
+  git: Git,
+  path: string,
+  parent: string,
+  updates: readonly GitlinkUpdate[],
+  message: string,
+): Promise<Readonly<{ status: "passed"; output: SynthesizedGitlinkWrapper }> | CandidateFailure> {
+  const expectedPaths = updates.map((update) => update.path)
+  for (const update of updates) {
+    const staged = await git.run(path, ["update-index", "--cacheinfo", `160000,${update.sha},${update.path}`], true)
+    if (staged.code !== 0) {
+      return candidateFailure(
+        "wrapper-mismatch",
+        `generated wrapper could not stage gitlink '${update.path}': ${staged.stderr || staged.stdout}`,
+        update.path,
+        [update.path],
+      )
+    }
+  }
+  const materialized = await stagedPaths(git, path)
+  if (!samePaths(materialized, expectedPaths)) {
+    return candidateFailure(
+      "wrapper-mismatch",
+      `generated wrapper paths differ: expected [${expectedPaths.join(", ")}], got [${materialized.join(", ")}]`,
+      ".",
+      symmetricDifference(materialized, expectedPaths),
+    )
+  }
+  const treeSha = (await git.run(path, ["write-tree"])).stdout
+  const commit = expectedPaths.length === 0 ? parent : await git.commitTree(path, treeSha, [parent], message)
+  if (commit !== parent) {
+    const updated = await git.run(path, ["update-ref", "HEAD", commit, parent], true)
+    if (updated.code !== 0) {
+      return candidateFailure(
+        "wrapper-generation",
+        `generated wrapper '${commit}' could not replace '${parent}': ${updated.stderr || updated.stdout}`,
+      )
+    }
+  }
+  return { status: "passed", output: { commit, treeSha } }
+}
+
+const PinIntentCarrierSynthesisInputSchema = z
+  .object({
+    baseSha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
+    component: ComponentPathSchema,
+    target: z.string().regex(/^[0-9a-f]{40,64}$/iu),
+    issue: z
+      .string()
+      .trim()
+      .min(1)
+      .refine((value) => !/[\r\n]/u.test(value), "issue must occupy one line"),
+  })
+  .strict()
+
+export type PinIntentCarrierSynthesis = Readonly<{
+  component: string
+  priorPin: string
+  target: string
+  baseSha: string
+  commit: string
+  treeSha: string
+}>
+
+/** Materialize a PinIntent against one exact root base without moving any
+ * authoritative ref. Queue and `yrd intent materialize` both call this. */
+export async function synthesizePinIntentCarrier(options: {
+  inject: Readonly<{ process: Pick<Process, "run"> }>
+  repo: string
+  baseSha: string
+  component: string
+  target: string
+  issue: string
+  checkoutParent?: string
+  env?: NodeJS.ProcessEnv
+}): Promise<PinIntentCarrierSynthesis> {
+  const input = PinIntentCarrierSynthesisInputSchema.parse({
+    baseSha: options.baseSha,
+    component: options.component,
+    target: options.target,
+    issue: options.issue,
+  })
+  const repo = resolve(options.repo)
+  const git = createGit(options.inject.process, options.env)
+  const outcome = await withScratch<PinIntentCarrierSynthesis>(
+    git,
+    repo,
+    input.baseSha,
+    options.checkoutParent ?? tmpdir(),
+    async (path) => {
+      const priorPin = await readGitlink(git, path, "HEAD", input.component)
+      if (priorPin === undefined) {
+        throw createFailure({
+          kind: "refusal",
+          code: "intent-component-unknown",
+          message: `yrd: intent component '${input.component}' is not a gitlink at root base '${input.baseSha}'`,
+        })
+      }
+      const synthesized = await synthesizeGitlinkWrapper(
+        git,
+        path,
+        input.baseSha,
+        priorPin === input.target ? [] : [{ path: input.component, sha: input.target }],
+        `chore(${input.component.split("/").at(-1) ?? input.component}): advance pin to ${input.target.slice(0, 12)} [${input.issue}]`,
+      )
+      if (synthesized.status === "failed") {
+        throw createFailure({ kind: "refusal", code: synthesized.error.code, message: synthesized.error.message })
+      }
+      return {
+        status: "completed",
+        conclusion: "success",
+        output: {
+          component: input.component,
+          priorPin,
+          target: input.target,
+          baseSha: input.baseSha,
+          ...synthesized.output,
+        },
+      }
+    },
+  )
+  if (outcome.status === "completed" && outcome.conclusion === "success") return outcome.output
+  throw new Error("yrd: pin-intent carrier synthesis did not complete")
+}
+
 function withAuthoredRootWorkflow(failure: CandidateFailure, pr: string): CandidateFailure {
   if (failure.error.code !== "composition-invalid") return failure
   return {
@@ -2435,7 +2613,7 @@ async function composePR(
   }
 
   const rewrites: SourceRewrite[] = []
-  const expectedWrapperPaths: string[] = []
+  const updates: GitlinkUpdate[] = []
   for (const source of pr.composition?.sources ?? []) {
     const currentPin = await readGitlink(git, path, "HEAD", source.repo)
     if (currentPin === undefined) {
@@ -2450,52 +2628,12 @@ async function composePR(
     if (prepared.status === "failed") return withAuthoredRootWorkflow(prepared, pr.id)
     rewrites.push(prepared.output)
     if (prepared.output.newTipSha === currentPin) continue
-    expectedWrapperPaths.push(source.repo)
-    const staged = await git.run(
-      path,
-      ["update-index", "--cacheinfo", `160000,${prepared.output.newTipSha},${source.repo}`],
-      true,
-    )
-    if (staged.code !== 0) {
-      return candidateFailure(
-        "wrapper-mismatch",
-        `PR '${pr.id}' could not stage generated gitlink '${source.repo}': ${staged.stderr || staged.stdout}`,
-        source.repo,
-        [source.repo],
-      )
-    }
+    updates.push({ path: source.repo, sha: prepared.output.newTipSha })
   }
 
-  const materialized = await stagedPaths(git, path)
-  if (!samePaths(materialized, expectedWrapperPaths)) {
-    return candidateFailure(
-      "wrapper-mismatch",
-      `PR '${pr.id}' generated wrapper paths differ: expected [${expectedWrapperPaths.join(", ")}], got [${materialized.join(", ")}]`,
-      ".",
-      symmetricDifference(materialized, expectedWrapperPaths),
-    )
-  }
-  if (materialized.length > 0) {
-    const committed = await git.run(
-      path,
-      [
-        "-c",
-        "user.name=Yrd Queue",
-        "-c",
-        "user.email=yrd-queue@example.invalid",
-        "commit",
-        "-qm",
-        `yrd: compose ${pr.id}`,
-      ],
-      true,
-    )
-    if (committed.code !== 0) {
-      return candidateFailure(
-        "wrapper-mismatch",
-        `PR '${pr.id}' generated wrapper could not be committed: ${committed.stderr || committed.stdout}`,
-      )
-    }
-  }
+  const parent = await git.commit(path, "HEAD")
+  const synthesized = await synthesizeGitlinkWrapper(git, path, parent, updates, `yrd: compose ${pr.id}`)
+  if (synthesized.status === "failed") return synthesized
   for (const rewrite of rewrites) {
     if ((await readGitlink(git, path, "HEAD", rewrite.repo)) !== rewrite.newTipSha) {
       return candidateFailure(

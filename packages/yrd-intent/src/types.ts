@@ -54,7 +54,7 @@ export type PinIntentPreconditions = z.infer<typeof PinIntentPreconditionsSchema
  */
 export const RemedyStepSchema = z
   .object({
-    argv: z.array(TextSchema).min(1),
+    argv: z.array(TextSchema).min(1).readonly(),
     cwd: TextSchema.optional(),
     note: TextSchema.optional(),
   })
@@ -84,29 +84,116 @@ export type IntentDisposition = z.infer<typeof IntentDispositionSchema>
  * authored tuple is repeated deliberately: a lossless journal consumer can
  * prove what was declared and what landed without consulting a side store.
  */
-const pinIntentIntegrationShape = {
-  authored: z
+export const PinIntentAuthoredSchema = z
+  .object({
+    intentId: IntentIdSchema,
+    issue: IssueRefSchema,
+    component: ComponentPathSchema,
+    target: CommitShaSchema.optional(),
+  })
+  .strict()
+export type PinIntentAuthored = z.infer<typeof PinIntentAuthoredSchema>
+export const PinIntentEvaluationSchema = z.object({ priorPin: CommitShaSchema, target: CommitShaSchema }).strict()
+export type PinIntentEvaluation = z.infer<typeof PinIntentEvaluationSchema>
+export const PinIntentLandingSchema = z
+  .object({
+    candidate: CandidateIdSchema,
+    run: RunIdSchema,
+    /** Authoritative root tip from which the synthesized commit was built. */
+    baseSha: CommitShaSchema,
+    /** Synthesized root commit that was fast-forwarded after checks passed. */
+    commit: CommitShaSchema,
+    /** Tree identity used for check reuse; never substitute the commit SHA. */
+    treeSha: CommitShaSchema,
+    componentPin: CommitShaSchema,
+  })
+  .strict()
+export type PinIntentLanding = z.infer<typeof PinIntentLandingSchema>
+
+export type PinIntentRelation = "advance" | "noop" | "deferred"
+export type PinIntentAdmitted = Readonly<{
+  admitted: true
+  currentPin: string
+  target?: string
+  relation: PinIntentRelation
+}>
+export type PinIntentRefused = Readonly<{
+  admitted: false
+  code:
+    | "intent-component-unknown"
+    | "intent-target-unpublished"
+    | "intent-target-tombstoned"
+    | "intent-pin-divergent"
+    | "intent-pin-moved"
+    | "intent-checks-failed"
+  message: string
+  evidence: Readonly<{
+    component: string
+    target?: string
+    currentPin?: string
+    tombstone?: string
+    declared?: readonly string[]
+    candidate?: string
+    run?: string
+    step?: string
+    attempts?: number
+  }>
+  remedy: readonly RemedyStepV1[]
+}>
+export type PinIntentAdmission = PinIntentAdmitted | PinIntentRefused
+
+export const PinIntentRefusalSchema = z
+  .object({
+    code: z.enum([
+      "intent-component-unknown",
+      "intent-target-unpublished",
+      "intent-target-tombstoned",
+      "intent-pin-divergent",
+      "intent-pin-moved",
+      "intent-checks-failed",
+    ]),
+    message: TextSchema,
+    evidence: z
+      .object({
+        component: ComponentPathSchema,
+        target: CommitShaSchema.optional(),
+        currentPin: CommitShaSchema.optional(),
+        tombstone: CommitShaSchema.optional(),
+        declared: z.array(ComponentPathSchema).readonly().optional(),
+        candidate: CommitShaSchema.optional(),
+        run: RunIdSchema.optional(),
+        step: TextSchema.optional(),
+        attempts: z.number().int().positive().optional(),
+      })
+      .strict(),
+    remedy: z.array(RemedyStepSchema).readonly(),
+  })
+  .strict()
+
+export const PinIntentEvaluationFactSchema = z.discriminatedUnion("outcome", [
+  z
     .object({
-      intentId: IntentIdSchema,
-      issue: IssueRefSchema,
-      component: ComponentPathSchema,
-      target: CommitShaSchema.optional(),
-    })
-    .strict(),
-  evaluated: z.object({ priorPin: CommitShaSchema, target: CommitShaSchema }).strict(),
-  landing: z
-    .object({
-      candidate: CandidateIdSchema,
-      run: RunIdSchema,
-      /** Authoritative root tip from which the synthesized commit was built. */
+      intent: TextSchema,
       baseSha: CommitShaSchema,
-      /** Synthesized root commit that was fast-forwarded after checks passed. */
-      commit: CommitShaSchema,
-      /** Tree identity used for check reuse; never substitute the commit SHA. */
-      treeSha: CommitShaSchema,
-      componentPin: CommitShaSchema,
+      outcome: z.enum(["advance", "noop"]),
+      evaluated: PinIntentEvaluationSchema,
     })
     .strict(),
+  z
+    .object({
+      intent: TextSchema,
+      baseSha: CommitShaSchema,
+      outcome: z.literal("refused"),
+      refusal: PinIntentRefusalSchema,
+    })
+    .strict(),
+])
+export type PinIntentEvaluationFact = z.infer<typeof PinIntentEvaluationFactSchema>
+
+const pinIntentIntegrationShape = {
+  authored: PinIntentAuthoredSchema,
+  evaluated: PinIntentEvaluationSchema,
+  landing: PinIntentLandingSchema,
 } as const
 
 export const PinIntentIntegrationSchema = z
@@ -137,16 +224,17 @@ export const PinIntentIntegratedFactSchema = z
 export type PinIntentIntegratedFact = z.infer<typeof PinIntentIntegratedFactSchema>
 
 /**
- * `submitted` is the only non-terminal status in phase 1. Evaluation outcomes
- * (`noop`, `integrated`, `refused`) join the union when the evaluator lands;
- * every one of them is terminal, which is what makes design 6.1 invariant 1
+ * `open` is the only non-terminal status. Every evaluation disposition is
+ * terminal, which is what makes design 6.1 invariant 1
  * ("a terminal record holds no queue position") mechanical rather than a rule.
  */
-export const IntentStatusSchema = z.enum(["open", "integrated", "superseded", "withdrawn"])
+export const IntentStatusSchema = z.enum(["open", "integrated", "noop", "refused", "superseded", "withdrawn"])
 export type IntentStatus = z.infer<typeof IntentStatusSchema>
 
 export const TERMINAL_INTENT_STATUSES: ReadonlySet<IntentStatus> = new Set<IntentStatus>([
   "integrated",
+  "noop",
+  "refused",
   "superseded",
   "withdrawn",
 ])
@@ -176,6 +264,7 @@ export const PinIntentSchema = z
     supersedeConsent: z.enum(["same-submitter", "forced"]).optional(),
     disposition: IntentDispositionSchema.optional(),
     integration: PinIntentIntegrationSchema.optional(),
+    evaluation: PinIntentEvaluationFactSchema.optional(),
   })
   .strict()
 export type PinIntent = z.infer<typeof PinIntentSchema>

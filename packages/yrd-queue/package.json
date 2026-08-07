@@ -12,6 +12,7 @@
     "@yrd/core": "workspace:*",
     "@yrd/config": "workspace:*",
     "@yrd/job": "workspace:*",
+    "@yrd/intent": "workspace:*",
     "@yrd/process": "workspace:*",
     "zod": "^4.4.3"
   }

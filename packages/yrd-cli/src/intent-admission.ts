@@ -1,7 +1,9 @@
 import { resolve } from "node:path"
 import type { Process, ProcessResult } from "@yrd/process"
-import type { PinTombstone, RemedyStepV1 } from "@yrd/intent"
+import type { PinIntentAdmission, PinTombstone } from "@yrd/intent"
 import { cleanGitEnvironment } from "./git-environment.ts"
+
+export type { PinIntentAdmission, PinIntentAdmitted, PinIntentRefused, PinIntentRelation } from "@yrd/intent"
 
 const GIT_TIMEOUT_MS = 30_000
 
@@ -11,41 +13,16 @@ const GIT_TIMEOUT_MS = 30_000
  * `deferred` is the no-target form: the queue derives the component's main tip
  * at landing, so there is nothing to relate yet.
  */
-export type PinIntentRelation = "advance" | "noop" | "deferred"
-
-export type PinIntentAdmitted = Readonly<{
-  admitted: true
-  currentPin: string
-  relation: PinIntentRelation
-}>
-
-export type PinIntentRefused = Readonly<{
-  admitted: false
-  code:
-    | "intent-component-unknown"
-    | "intent-target-unpublished"
-    | "intent-target-tombstoned"
-    | "intent-pin-divergent"
-  message: string
-  evidence: Readonly<{
-    component: string
-    target?: string
-    currentPin?: string
-    tombstone?: string
-    declared?: readonly string[]
-  }>
-  remedy: readonly RemedyStepV1[]
-}>
-
-export type PinIntentAdmission = PinIntentAdmitted | PinIntentRefused
-
 export type PinIntentAdmissionOptions = Readonly<{
   process: Pick<Process, "run">
   repo: string
   base: string
   component: string
   target?: string
+  expectedCurrentPin?: string
   tombstones?: readonly Pick<PinTombstone, "sha">[]
+  /** Merge-time authority derives an omitted target from component main. */
+  deriveTarget?: boolean
 }>
 
 /**
@@ -76,12 +53,52 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
     }
   }
 
-  const target = options.target
-  if (target === undefined) return { admitted: true, currentPin, relation: "deferred" }
-
   const componentRepo = resolve(repo, options.component)
   const branch = await componentBranch(options.process, repo, options.component)
   await tryGit(options.process, componentRepo, ["fetch", "--quiet", "--prune", "origin"])
+  const derivedTarget =
+    options.deriveTarget === true
+      ? (
+          await tryGit(options.process, componentRepo, [
+            "rev-parse",
+            "--verify",
+            `refs/remotes/origin/${branch}^{commit}`,
+          ])
+        )?.trim()
+      : undefined
+  const target = options.target ?? derivedTarget
+  if (target === undefined && options.deriveTarget !== true) {
+    return { admitted: true, currentPin, relation: "deferred" }
+  }
+  if (target === undefined) {
+    return {
+      admitted: false,
+      code: "intent-target-unpublished",
+      message: `yrd: component '${options.component}' has no published origin/${branch} tip to derive`,
+      evidence: { component: options.component, currentPin },
+      remedy: [
+        {
+          argv: ["git", "push", "origin", `HEAD:refs/heads/${branch}`],
+          cwd: options.component,
+          note: "publish component main, then retry the intent",
+        },
+      ],
+    }
+  }
+  if (options.expectedCurrentPin !== undefined && options.expectedCurrentPin !== currentPin) {
+    return {
+      admitted: false,
+      code: "intent-pin-moved",
+      message: `yrd: intent expected pin '${options.expectedCurrentPin}', but '${options.component}' is pinned at '${currentPin}'`,
+      evidence: { component: options.component, target, currentPin },
+      remedy: [
+        {
+          argv: ["yrd", "intent", "submit", "--component", options.component, "--target", target],
+          note: "resubmit against the current pin or omit the expected-pin guard",
+        },
+      ],
+    }
+  }
   if (!(await isPublished(options.process, componentRepo, target))) {
     return {
       admitted: false,
@@ -125,12 +142,12 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
   }
 
   if (await isAncestor(options.process, componentRepo, currentPin, target)) {
-    return { admitted: true, currentPin, relation: "advance" }
+    return { admitted: true, currentPin, target, relation: "advance" }
   }
   if (await isAncestor(options.process, componentRepo, target, currentPin)) {
     // Already contained. Admitted, not refused: evaluation concludes `noop`,
     // which is terminal SUCCESS with a receipt, not a failure.
-    return { admitted: true, currentPin, relation: "noop" }
+    return { admitted: true, currentPin, target, relation: "noop" }
   }
 
   return {
@@ -169,7 +186,7 @@ async function baseGitlinks(
     if (entry === "") continue
     const [meta, path] = entry.split("\t")
     if (meta === undefined || path === undefined)
-      throw new Error(`yrd: git ls-tree returned an invalid entry: ${entry}`)
+      {throw new Error(`yrd: git ls-tree returned an invalid entry: ${entry}`)}
     const [mode, , sha] = meta.split(" ")
     if (mode === "160000" && sha !== undefined) gitlinks.set(path, sha)
   }

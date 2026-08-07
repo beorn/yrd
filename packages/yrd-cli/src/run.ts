@@ -61,6 +61,7 @@ import {
   isQueueRunningConflict,
   Queues,
   resolveSubmoduleOrigin,
+  synthesizePinIntentCarrier,
   type PREligibility,
   type QueueAuditFinding,
   type QueueSummary,
@@ -935,6 +936,12 @@ type IntentTombstoneOptions = JsonOption & {
   reason?: string
 }
 type IntentWithdrawOptions = JsonOption & { reason?: string }
+type IntentMaterializeOptions = JsonOption & {
+  target?: string
+  issue?: string
+  base?: string
+  branch?: string
+}
 
 // Flow metrics default to a 24h horizon (median/p90 wait, run durations,
 // rejection rate, throughput) independent of the tighter listing window; an
@@ -7808,6 +7815,7 @@ async function submitIntent(
     base: options.base ?? services.base ?? "main",
     component,
     ...(options.target === undefined ? {} : { target: options.target }),
+    ...(options.expectPin === undefined ? {} : { expectedCurrentPin: options.expectPin }),
     tombstones: app.intents.tombstones(component),
   })
   if (!admission.admitted) {
@@ -7925,6 +7933,57 @@ async function withdrawIntent(
 ): Promise<void> {
   const intent = await app.intents.withdraw(selector, options.reason)
   await printResult(io, jsonEnabled(options), { command: "intent.withdraw", intent }, `${intent.id} ${intent.status}`)
+}
+
+async function materializeIntent(
+  component: string,
+  services: YrdCliServices,
+  options: IntentMaterializeOptions,
+  io: YrdCliIO,
+): Promise<void> {
+  const target = options.target ?? usage("yrd intent materialize requires --target <sha>")
+  const issue = options.issue ?? usage("yrd intent materialize requires --issue <ref>")
+  const host = services.process
+  if (host === undefined) configuration("yrd intent materialize requires a process host")
+  const repo = io.cwd ?? globalThis.process.cwd()
+  const base = options.base ?? services.base ?? "main"
+  const baseSha = (await runQueueGit(host, repo, ["rev-parse", base])).trim()
+  const carrier = await synthesizePinIntentCarrier({
+    inject: { process: host },
+    repo,
+    baseSha,
+    component,
+    target,
+    issue,
+  })
+  const leaf =
+    component
+      .split("/")
+      .at(-1)
+      ?.replaceAll(/[^A-Za-z0-9._-]/gu, "-") || "component"
+  const branch = options.branch ?? `yrd/intent/${leaf}-${carrier.commit.slice(0, 12)}`
+  await runQueueGit(host, repo, ["check-ref-format", "--branch", branch])
+  const ref = `refs/heads/${branch}`
+  const current = await host.run({
+    argv: ["git", "-C", repo, "rev-parse", "--verify", ref],
+    cwd: repo,
+    env: cleanGitEnvironment(globalThis.process.env),
+    timeoutMs: GIT_TIMEOUT_MS,
+  })
+  if (current.timedOut) throw gitTimeoutError(["rev-parse", "--verify", ref])
+  if (current.exitCode === 0 && current.stdout.trim() !== carrier.commit) {
+    refusal(`materialized carrier branch '${branch}' already points at ${current.stdout.trim()}`)
+  }
+  if (current.exitCode !== 0) {
+    await runQueueGit(host, repo, ["update-ref", ref, carrier.commit, "0".repeat(40)])
+  }
+  const next = `yrd pr submit ${branch} --issue ${issue}`
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "intent.materialize", branch, carrier, next },
+    `${branch} ${carrier.commit}\nnext: ${next}`,
+  )
 }
 
 async function refusePrMerge(
@@ -8900,6 +8959,15 @@ function buildProgram(
     .option("--reason <text>", "why the intent is withdrawn")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => withdrawIntent(installed(), selector, options, io))
+  intent
+    .command("materialize <component>")
+    .description("materialize the queue's deterministic pin carrier on a new local branch")
+    .option("--target <sha>", "component commit to advance to")
+    .option("--issue <ref>", "issue identity embedded in the deterministic commit")
+    .option("--base <branch>", "base branch to materialize against")
+    .option("--branch <branch>", "local branch to create; defaults to a deterministic yrd/intent name")
+    .option("--json", "emit stable JSON")
+    .action(async (component, options) => materializeIntent(component, installedServices(), options, io))
 
   const order = new Map(
     [

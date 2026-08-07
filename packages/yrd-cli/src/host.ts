@@ -88,6 +88,7 @@ import {
 } from "@yrd/persistence"
 import { createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
 import { withIntents } from "@yrd/intent"
+import { admitPinIntent } from "./intent-admission.ts"
 import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import type { ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
@@ -973,6 +974,7 @@ async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions):
     steps: configuredQueueSteps(options, mergeCommand),
     batch: options.config.batch,
     defaultSteps: options.config.steps,
+    defaultBase: options.config.base,
     requires: options.config.requires,
     ...(options.config.progress === undefined ? {} : { progress: options.config.progress }),
     ...(flowConfig === undefined ? {} : { flows: flowConfig }),
@@ -991,6 +993,19 @@ async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions):
       artifactRoot: join(options.stateDir, "artifacts"),
       ...(options.candidatePool === undefined ? {} : { candidatePool: options.candidatePool }),
     }),
+    evaluateIntent: ({ intent, baseSha, tombstones }) =>
+      admitPinIntent({
+        process: options.process,
+        repo: options.repo,
+        base: baseSha,
+        component: intent.component,
+        ...(intent.target === undefined ? {} : { target: intent.target }),
+        ...(intent.preconditions.expectedCurrentPin === undefined
+          ? {}
+          : { expectedCurrentPin: intent.preconditions.expectedCurrentPin }),
+        tombstones,
+        deriveTarget: true,
+      }),
     runner: (jobs) => {
       const contexts = worktreeContexts({
         repo: options.repo,

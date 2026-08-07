@@ -16,6 +16,7 @@ import {
   IntentWithdrawArgsSchema,
   PIN_INTENT_SCHEMA,
   PIN_TOMBSTONE_SCHEMA,
+  PinIntentEvaluationFactSchema,
   PinIntentIntegratedFactSchema,
   PinTombstoneArgsSchema,
   PinTombstoneSchema,
@@ -54,9 +55,9 @@ const INITIAL_STATE: IntentsState = { records: {}, order: [], tombstoneRecords: 
  * PinIntentV1 records: "advance component X to S for issue I", declared instead
  * of hand-authored as a gitlink carrier commit.
  *
- * Phase 1 is DARK — the records are admitted, superseded, and withdrawn, but
- * nothing consumes them yet. Evaluation, synthesis, and queue admission arrive
- * in later phases against this same record.
+ * Queue consumes open records in the same submission-time FIFO as code PRs.
+ * Evaluation and every terminal disposition remain journal events projected
+ * through this one record model; there is no side status store.
  */
 export function withIntents() {
   const commands = createIntentCommands()
@@ -73,6 +74,7 @@ export function withIntents() {
         "intent/withdrawn": journalEvent(1, WithdrawnSchema),
         "intent/pin-tombstoned": journalEvent(1, TombstonedSchema),
         "intent/integrated": journalEvent(1, PinIntentIntegratedFactSchema),
+        "intent/evaluation-recorded": journalEvent(1, PinIntentEvaluationFactSchema),
       },
       projectionVersion: "intents-v2",
       project: projectIntents,
@@ -341,6 +343,35 @@ function projectIntents(state: DeepReadonly<IntentState>, applied: Event): Inten
       status: "integrated",
       disposition: { code: "intent-integrated", at: applied.ts },
       integration,
+    })
+  }
+  if (applied.name === "intent/evaluation-recorded") {
+    const evaluation = PinIntentEvaluationFactSchema.parse(applied.data)
+    const record = state.intents.records[evaluation.intent]
+    if (record === undefined) throw new Error(`yrd: evaluation names missing intent '${evaluation.intent}'`)
+    if (TERMINAL_INTENT_STATUSES.has(record.status)) {
+      if (JSON.stringify(record.evaluation) === JSON.stringify(evaluation)) return state as IntentState
+      throw new Error(`yrd: evaluation names terminal intent '${record.id}' (${record.status})`)
+    }
+    if (
+      evaluation.outcome !== "refused" &&
+      record.target !== undefined &&
+      evaluation.evaluated.target !== record.target
+    ) {
+      throw new Error(`yrd: evaluation target does not match authored intent '${record.id}'`)
+    }
+    const status = evaluation.outcome === "advance" ? "open" : evaluation.outcome
+    let disposition: PinIntent["disposition"]
+    if (evaluation.outcome === "noop") {
+      disposition = { code: "intent-noop", at: applied.ts }
+    } else if (evaluation.outcome === "refused") {
+      disposition = { code: evaluation.refusal.code, at: applied.ts, reason: evaluation.refusal.message }
+    }
+    return replaceIntent(state, {
+      ...(record as PinIntent),
+      status,
+      evaluation,
+      ...(disposition === undefined ? {} : { disposition }),
     })
   }
   return state as IntentState

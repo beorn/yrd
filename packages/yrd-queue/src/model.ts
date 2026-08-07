@@ -20,6 +20,7 @@ import {
 import { compareNatural, JsonSchema, resolveSelector, type JsonValue } from "@yrd/core"
 import type { FlowPin, StepKind } from "@yrd/config"
 import { JobErrorSchema, type Job, type JobError } from "@yrd/job"
+import { PinIntentAuthoredSchema, PinIntentEvaluationSchema } from "@yrd/intent"
 import * as z from "zod"
 import {
   projectionLookupGet,
@@ -52,9 +53,20 @@ const PRSnapshotRecutProofSchema = PRRecutProofSchema.extend({
   baseSha: GitShaSchema.optional(),
 }).strict()
 
+const IntentMemberIdSchema = z.string().regex(/^I\d+$/u)
+const QueueMemberIdSchema = z.union([PRIdSchema, IntentMemberIdSchema])
+export const QueueIntentSnapshotSchema = z
+  .object({
+    id: IntentMemberIdSchema,
+    authored: PinIntentAuthoredSchema,
+    evaluated: PinIntentEvaluationSchema,
+  })
+  .strict()
+export type QueueIntentSnapshot = Readonly<z.infer<typeof QueueIntentSnapshotSchema>>
+
 export const PRSnapshotSchema = z
   .object({
-    id: PRIdSchema,
+    id: QueueMemberIdSchema,
     bay: z.string().trim().min(1).optional(),
     name: z.string().trim().min(1).optional(),
     branch: GitRefSchema,
@@ -67,8 +79,18 @@ export const PRSnapshotSchema = z
     composition: CompositionV1Schema.optional(),
     recut: PRSnapshotRecutProofSchema.optional(),
     flow: FlowPinSchema.optional(),
+    /** Present only for a carrier-free pin intent materialized by Queue. */
+    intent: QueueIntentSnapshotSchema.optional(),
   })
   .strict()
+  .superRefine((snapshot, context) => {
+    if (snapshot.intent === undefined && !PRIdSchema.safeParse(snapshot.id).success) {
+      context.addIssue({ code: "custom", path: ["id"], message: "a PR snapshot requires a PR id" })
+    }
+    if (snapshot.intent !== undefined && snapshot.id !== snapshot.intent.id) {
+      context.addIssue({ code: "custom", path: ["intent", "id"], message: "intent member id must match snapshot id" })
+    }
+  })
 export type PRSnapshot = Readonly<z.infer<typeof PRSnapshotSchema>>
 
 export type SourceRewrite = Readonly<{
@@ -98,6 +120,7 @@ export type Candidate = Readonly<{
   baseSha: string
   revs: readonly CandidateRev[]
   sha?: string
+  treeSha?: string
   ref?: string
   sourceRewrites?: readonly SourceRewrite[]
   submoduleResolutions?: readonly QueueSubmoduleResolutionEvidence[]
@@ -174,7 +197,7 @@ export const CandidateSchema = z
       .array(
         z
           .object({
-            pr: PRIdSchema,
+            pr: QueueMemberIdSchema,
             n: z.number().int().positive(),
             head: GitShaSchema,
           })
@@ -182,6 +205,8 @@ export const CandidateSchema = z
       )
       .min(1),
     sha: GitShaSchema.optional(),
+    /** Tree checked for this Candidate; current facts always carry it. */
+    treeSha: GitShaSchema.optional(),
     ref: GitRefSchema.optional(),
     sourceRewrites: z.array(SourceRewriteSchema).optional(),
     submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),

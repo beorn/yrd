@@ -13,6 +13,7 @@ import { resolveRelativeSubmoduleOrigin } from "../src/submodule-origin.ts"
 import { createBayJobDefs, currentPRRev, prDeliveryState, withBays, type BayWorkspace, type PR } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs } from "@yrd/job"
+import { withIntents } from "@yrd/intent"
 import { createProcess, shellCommand, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createLogger } from "loggily"
 import * as z from "zod"
@@ -28,6 +29,7 @@ import {
   gitCandidatePreparer,
   gitCheckStep,
   gitMergeStep,
+  synthesizePinIntentCarrier,
   PRSnapshotSchema,
   Queues,
   validateStateDecommissionException,
@@ -497,6 +499,9 @@ async function checkedQueue(
     environmentPassthrough?: readonly string[]
     refuse?: RefusePathsPolicy
     mergeCommand?: readonly string[]
+    prepareCandidate?: boolean
+    intentEvaluation?: "advance" | "noop" | "refused"
+    refusedIntentIssues?: readonly string[]
   }> = {},
 ) {
   const bayJobs = createBayJobDefs(unusedWorkspace)
@@ -545,9 +550,47 @@ async function checkedQueue(
   const queue = withQueue({
     steps: [check, merge] as const,
     batch: options.batch ?? 1,
+    defaultBase: "main",
     resolveBaseSha: (base) => queueBaseSha(repo, base),
+    ...(options.prepareCandidate === true
+      ? { prepareCandidate: gitCandidatePreparer({ inject: { process }, repo }) }
+      : {}),
+    evaluateIntent: async ({ intent, baseSha }) => {
+      const row = (await git(repo, ["ls-tree", baseSha, intent.component])).split(/\s+/u)
+      const currentPin = row[2]
+      if (currentPin === undefined) {
+        return {
+          admitted: false as const,
+          code: "intent-component-unknown" as const,
+          message: `missing ${intent.component}`,
+          evidence: { component: intent.component },
+          remedy: [],
+        }
+      }
+      if (intent.target === undefined) throw new Error("test evaluator requires an authored target")
+      if (options.intentEvaluation === "refused" || options.refusedIntentIssues?.includes(intent.issue.id) === true) {
+        return {
+          admitted: false as const,
+          code: "intent-pin-divergent" as const,
+          message: "target and current pin diverge",
+          evidence: { component: intent.component, currentPin, target: intent.target },
+          remedy: [{ argv: ["git", "merge", currentPin], cwd: intent.component }],
+        }
+      }
+      return {
+        admitted: true as const,
+        currentPin,
+        target: intent.target,
+        relation: options.intentEvaluation === "noop" ? ("noop" as const) : ("advance" as const),
+      }
+    },
   })
-  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+  const base = pipe(
+    createYrdDef(),
+    withJobs({ definitions: [bayJobs, queue.jobDefs] }),
+    withIntents(),
+    withBays({ jobs: bayJobs }),
+  )
   return createYrd(queue(base), {
     inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
   })
@@ -1980,6 +2023,341 @@ describe("Queue command adapters", () => {
     const eligibility = app.queue.eligibility("PR1")
     expect(eligibility.reason?.code).toBe("needs-author")
     expect(eligibility.reason?.receipt).toMatchObject({ code: "authored-gitlink" })
+  })
+
+  it("synthesizes one byte-stable pin carrier from current base without moving a ref", async () => {
+    const fixture = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    await using process = createProcess()
+    const input = {
+      inject: { process },
+      repo: fixture.repo,
+      baseSha: fixture.baseSha,
+      component: "dep",
+      target: fixture.moduleSha,
+      issue: "@yrd/core/21679-integration-model-v2/22668-admit-intents",
+    } as const
+
+    const utc = await synthesizePinIntentCarrier({
+      ...input,
+      env: { ...globalThis.process.env, TZ: "UTC" },
+    })
+    const pacific = await synthesizePinIntentCarrier({
+      ...input,
+      env: { ...globalThis.process.env, TZ: "Pacific/Honolulu" },
+    })
+
+    expect(pacific).toEqual(utc)
+    expect(utc).toMatchObject({
+      component: "dep",
+      priorPin: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      target: fixture.moduleSha,
+      baseSha: fixture.baseSha,
+      commit: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      treeSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+    })
+    expect(await git(fixture.repo, ["rev-parse", `${utc.commit}^`])).toBe(fixture.baseSha)
+    expect(await git(fixture.repo, ["ls-tree", utc.commit, "dep"])).toContain(fixture.moduleSha)
+    expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.baseSha)
+  })
+
+  it("lands an intent through the ordinary Queue and journals lineage in the settlement frame", async () => {
+    const fixture = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    await using process = createProcess()
+    await using app = await checkedQueue(process, fixture.repo, ["true"], { prepareCandidate: true })
+    const priorPin = (await git(fixture.repo, ["ls-tree", fixture.baseSha, "dep"])).split(/\s+/u)[2]
+    if (priorPin === undefined) throw new Error("fixture has no prior gitlink pin")
+    const intent = await app.intents.submit({
+      intentId: "00000000-0000-7000-8000-000000000001",
+      issue: { source: "km", id: "@yrd/core/21679-integration-model-v2/22668-admit-intents" },
+      component: "dep",
+      target: fixture.moduleSha,
+      submitter: "@dev/5",
+    })
+
+    const outcome = await app.queue.runIntent({ intent, base: "main" }, runtime)
+    if (outcome.outcome !== "run") throw new Error(`expected run, got ${outcome.outcome}`)
+    const run = outcome.run
+
+    expect(run.conclusion, JSON.stringify(run, undefined, 2)).toBe("success")
+    expect(run).toMatchObject({ status: "completed", prs: [{ id: intent.id }] })
+    expect(Object.keys(app.state().bays.prs)).toEqual([])
+    expect(app.intents.get(intent.id)).toMatchObject({
+      status: "integrated",
+      integration: {
+        authored: { intentId: intent.intentId, component: "dep", target: fixture.moduleSha },
+        evaluated: { priorPin, target: fixture.moduleSha },
+        landing: {
+          candidate: run.candidateId,
+          run: run.id,
+          baseSha: fixture.baseSha,
+          commit: expect.stringMatching(/^[0-9a-f]{40}$/u),
+          treeSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+          componentPin: fixture.moduleSha,
+        },
+      },
+    })
+    const integrated = (await Array.fromAsync(app.events())).find((applied) => applied.name === "intent/integrated")
+    expect(integrated?.data).toMatchObject({ intent: intent.id })
+    expect(await git(fixture.remote, ["ls-tree", "main", "dep"])).toContain(fixture.moduleSha)
+  }, 30_000)
+
+  it("drains an open intent through the selectorless Queue surface used by the resident", async () => {
+    const fixture = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    await using process = createProcess()
+    await using app = await checkedQueue(process, fixture.repo, ["true"], { prepareCandidate: true })
+    const intent = await app.intents.submit({
+      intentId: "00000000-0000-7000-8000-000000000011",
+      issue: { source: "km", id: "@yrd/core/resident-drain" },
+      component: "dep",
+      target: fixture.moduleSha,
+      submitter: "@dev/5",
+    })
+
+    const runs = await app.queue.run({}, runtime)
+
+    expect(runs).toHaveLength(1)
+    expect(runs[0]).toMatchObject({ conclusion: "success", prs: [{ id: intent.id }] })
+    expect(app.intents.get(intent.id)).toMatchObject({ status: "integrated" })
+    expect(await git(fixture.remote, ["ls-tree", "main", "dep"])).toContain(fixture.moduleSha)
+  }, 30_000)
+
+  it("releases a refused intent head and evaluates the next intent in the same drain turn", async () => {
+    const fixture = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    await using process = createProcess()
+    await using app = await checkedQueue(process, fixture.repo, ["true"], {
+      prepareCandidate: true,
+      refusedIntentIssues: ["@yrd/core/refused-head"],
+    })
+    const refused = await app.intents.submit({
+      intentId: "00000000-0000-7000-8000-000000000012",
+      issue: { source: "km", id: "@yrd/core/refused-head" },
+      component: "dep",
+      target: fixture.moduleSha,
+      submitter: "@dev/5",
+    })
+    const successor = await app.intents.submit({
+      intentId: "00000000-0000-7000-8000-000000000013",
+      issue: { source: "km", id: "@yrd/core/successor" },
+      component: "dep",
+      target: fixture.moduleSha,
+      submitter: "@dev/5",
+    })
+
+    const runs = await app.queue.run({}, runtime)
+
+    expect(runs).toHaveLength(1)
+    expect(runs[0]).toMatchObject({ conclusion: "success", prs: [{ id: successor.id }] })
+    expect(app.intents.get(refused.id)).toMatchObject({
+      status: "refused",
+      disposition: { code: "intent-pin-divergent" },
+    })
+    expect(app.intents.get(successor.id)).toMatchObject({ status: "integrated" })
+  }, 30_000)
+
+  it("shares one submission-time FIFO between code PRs and intents", async () => {
+    const fixture = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    await writeFile(join(fixture.repo, ".git", "hooks", "pre-push"), "#!/bin/sh\nexit 0\n")
+    await git(fixture.repo, ["switch", "-qc", "issue/code", "main"])
+    await writeFile(join(fixture.repo, "code.txt"), "code\n")
+    await git(fixture.repo, ["add", "code.txt"])
+    await git(fixture.repo, ["commit", "-qm", "code before intent"])
+    const codeHead = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+    await using process = createProcess()
+    await using app = await checkedQueue(process, fixture.repo, ["true"], { prepareCandidate: true })
+    const code = await submitCertifiedCarrier(app, fixture.repo, {
+      branch: "issue/code",
+      headSha: codeHead,
+      baseSha: fixture.baseSha,
+    })
+    const intent = await app.intents.submit({
+      intentId: "00000000-0000-7000-8000-000000000014",
+      issue: { source: "km", id: "@yrd/core/after-code" },
+      component: "dep",
+      target: fixture.moduleSha,
+      submitter: "@dev/5",
+    })
+
+    const first = await app.queue.run({}, runtime)
+
+    expect(first).toHaveLength(1)
+    expect(first[0]).toMatchObject({ conclusion: "success", prs: [{ id: code.id }] })
+    expect(app.intents.get(intent.id)).toMatchObject({ status: "open" })
+
+    const second = await app.queue.run({}, runtime)
+
+    expect(second).toHaveLength(1)
+    expect(second[0]).toMatchObject({ conclusion: "success", prs: [{ id: intent.id }] })
+    expect(app.intents.get(intent.id)).toMatchObject({ status: "integrated" })
+  }, 30_000)
+
+  it("refuses a claimed intent that is superseded before its merge step starts", async () => {
+    const fixture = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    await using process = createProcess()
+    await using app = await checkedQueue(
+      process,
+      fixture.repo,
+      shellCommand(
+        `printf '%s\\n' '{"token":"ci-intent","url":"https://ci.invalid/intent","detail":"queued",` +
+          `"artifacts":[{"name":"remote","uri":"artifact://ci-intent"}]}'`,
+      ),
+      { waiting: true, prepareCandidate: true },
+    )
+    const original = await app.intents.submit({
+      intentId: "00000000-0000-7000-8000-000000000015",
+      issue: { source: "km", id: "@yrd/core/supersede-race" },
+      component: "dep",
+      target: fixture.moduleSha,
+      submitter: "@dev/5",
+    })
+    const outcome = await app.queue.runIntent({ intent: original, base: "main" }, runtime)
+    if (outcome.outcome !== "run") throw new Error(`expected run, got ${outcome.outcome}`)
+    const waiting = outcome.run.steps[0]?.job
+    if (waiting?.status !== "waiting") throw new Error("intent check did not wait")
+    const checkpoint = GitCheckEvidenceSchema.parse(waiting.checkpoint)
+    const successor = await app.intents.submit({
+      intentId: "00000000-0000-7000-8000-000000000016",
+      issue: original.issue,
+      component: original.component,
+      target: fixture.moduleSha,
+      submitter: "@dev/5",
+    })
+
+    const finished = await app.queue.finish(
+      outcome.run.id,
+      {
+        job: waiting.id,
+        attempt: waiting.attempt,
+        runner: waiting.runner,
+        token: waiting.token,
+        result: { status: "completed", conclusion: "success", output: checkpoint },
+      },
+      runtime,
+    )
+
+    expect(finished).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "intent-superseded" },
+    })
+    expect(app.intents.get(original.id)).toMatchObject({ status: "superseded", supersededBy: successor.id })
+    expect(app.intents.get(successor.id)).toMatchObject({ status: "open" })
+    expect(await git(fixture.remote, ["rev-parse", "main"])).toBe(fixture.baseSha)
+  }, 30_000)
+
+  it("retries one red synthesized candidate once, then journals a terminal checks refusal", async () => {
+    const fixture = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    await using process = createProcess()
+    await using app = await checkedQueue(process, fixture.repo, ["false"], { prepareCandidate: true })
+    const intent = await app.intents.submit({
+      intentId: "00000000-0000-7000-8000-000000000017",
+      issue: { source: "km", id: "@yrd/core/checks-red" },
+      component: "dep",
+      target: fixture.moduleSha,
+      submitter: "@dev/5",
+    })
+
+    const first = await app.queue.run({}, runtime)
+    expect(first).toHaveLength(1)
+    expect(first[0]).toMatchObject({ conclusion: "failure" })
+    expect(app.intents.get(intent.id)).toMatchObject({ status: "open" })
+
+    const second = await app.queue.run({}, runtime)
+    expect(second).toHaveLength(1)
+    expect(second[0]).toMatchObject({ conclusion: "failure" })
+    expect(app.intents.get(intent.id)).toMatchObject({
+      status: "refused",
+      disposition: { code: "intent-checks-failed" },
+      evaluation: {
+        outcome: "refused",
+        refusal: {
+          code: "intent-checks-failed",
+          evidence: {
+            component: "dep",
+            target: fixture.moduleSha,
+            run: second[0]?.id,
+            step: "check",
+            attempts: 2,
+            candidate: expect.stringMatching(/^[0-9a-f]{40}$/u),
+          },
+        },
+      },
+    })
+
+    expect(await app.queue.run({}, runtime)).toEqual([])
+    expect(Queues.values(app.queue.state())).toHaveLength(2)
+  }, 30_000)
+
+  it("journals noop and refused merge-time decisions without minting Queue runs", async () => {
+    const fixture = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    const priorPin = (await git(fixture.repo, ["ls-tree", fixture.baseSha, "dep"])).split(/\s+/u)[2]
+    if (priorPin === undefined) throw new Error("fixture has no prior gitlink pin")
+    await using process = createProcess()
+
+    await using noopApp = await checkedQueue(process, fixture.repo, ["true"], { intentEvaluation: "noop" })
+    const noopIntent = await noopApp.intents.submit({
+      intentId: "00000000-0000-7000-8000-000000000002",
+      issue: { source: "km", id: "@yrd/core/noop" },
+      component: "dep",
+      target: priorPin,
+      submitter: "@dev/5",
+    })
+    const noop = await noopApp.queue.runIntent({ intent: noopIntent, base: "main" }, runtime)
+    expect(noop).toMatchObject({ outcome: "noop", intent: { id: noopIntent.id, status: "noop" } })
+    expect(noopApp.queue.state().records).toEqual({})
+    expect((await Array.fromAsync(noopApp.events())).map(({ name }) => name)).toContain("intent/evaluation-recorded")
+
+    await using refusedApp = await checkedQueue(process, fixture.repo, ["true"], { intentEvaluation: "refused" })
+    const refusedIntent = await refusedApp.intents.submit({
+      intentId: "00000000-0000-7000-8000-000000000003",
+      issue: { source: "km", id: "@yrd/core/refused" },
+      component: "dep",
+      target: fixture.moduleSha,
+      submitter: "@dev/5",
+    })
+    const refused = await refusedApp.queue.runIntent({ intent: refusedIntent, base: "main" }, runtime)
+    expect(refused).toMatchObject({
+      outcome: "refused",
+      intent: {
+        id: refusedIntent.id,
+        status: "refused",
+        disposition: { code: "intent-pin-divergent" },
+      },
+    })
+    expect(refusedApp.queue.state().records).toEqual({})
+    expect((await Array.fromAsync(refusedApp.events())).map(({ name }) => name)).toContain("intent/evaluation-recorded")
   })
 
   it("admits only certified linear pin carriers and regenerates one byte-stable Queue wrapper (22666)", async () => {
