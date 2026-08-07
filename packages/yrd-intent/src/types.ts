@@ -10,6 +10,8 @@ const CommitShaSchema = z.string().regex(/^[0-9a-f]{40}$/u, "expected a full 40-
 const IntentIdSchema = z
   .string()
   .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u, "expected a lowercase UUID")
+const CandidateIdSchema = z.string().regex(/^C\d+$/u, "expected a Candidate id")
+const RunIdSchema = z.string().regex(/^R\d+$/u, "expected a Run id")
 
 /**
  * Root-relative gitlink path of the component whose pin advances.
@@ -76,15 +78,78 @@ export const IntentDispositionSchema = z
 export type IntentDisposition = z.infer<typeof IntentDispositionSchema>
 
 /**
+ * One self-contained authored-to-landed lineage fact.
+ *
+ * Queue settlement emits this in the SAME journal frame as the landing. The
+ * authored tuple is repeated deliberately: a lossless journal consumer can
+ * prove what was declared and what landed without consulting a side store.
+ */
+const pinIntentIntegrationShape = {
+  authored: z
+    .object({
+      intentId: IntentIdSchema,
+      issue: IssueRefSchema,
+      component: ComponentPathSchema,
+      target: CommitShaSchema.optional(),
+    })
+    .strict(),
+  evaluated: z.object({ priorPin: CommitShaSchema, target: CommitShaSchema }).strict(),
+  landing: z
+    .object({
+      candidate: CandidateIdSchema,
+      run: RunIdSchema,
+      /** Authoritative root tip from which the synthesized commit was built. */
+      baseSha: CommitShaSchema,
+      /** Synthesized root commit that was fast-forwarded after checks passed. */
+      commit: CommitShaSchema,
+      /** Tree identity used for check reuse; never substitute the commit SHA. */
+      treeSha: CommitShaSchema,
+      componentPin: CommitShaSchema,
+    })
+    .strict(),
+} as const
+
+export const PinIntentIntegrationSchema = z
+  .object(pinIntentIntegrationShape)
+  .strict()
+  .superRefine((fact, context) => {
+    if (fact.landing.componentPin !== fact.evaluated.target) {
+      context.addIssue({
+        code: "custom",
+        path: ["landing", "componentPin"],
+        message: "landed component pin must equal the evaluated target",
+      })
+    }
+  })
+export type PinIntentIntegration = z.infer<typeof PinIntentIntegrationSchema>
+export const PinIntentIntegratedFactSchema = z
+  .object({ intent: TextSchema, ...pinIntentIntegrationShape })
+  .strict()
+  .superRefine((fact, context) => {
+    if (fact.landing.componentPin !== fact.evaluated.target) {
+      context.addIssue({
+        code: "custom",
+        path: ["landing", "componentPin"],
+        message: "landed component pin must equal the evaluated target",
+      })
+    }
+  })
+export type PinIntentIntegratedFact = z.infer<typeof PinIntentIntegratedFactSchema>
+
+/**
  * `submitted` is the only non-terminal status in phase 1. Evaluation outcomes
  * (`noop`, `integrated`, `refused`) join the union when the evaluator lands;
  * every one of them is terminal, which is what makes design 6.1 invariant 1
  * ("a terminal record holds no queue position") mechanical rather than a rule.
  */
-export const IntentStatusSchema = z.enum(["open", "superseded", "withdrawn"])
+export const IntentStatusSchema = z.enum(["open", "integrated", "superseded", "withdrawn"])
 export type IntentStatus = z.infer<typeof IntentStatusSchema>
 
-export const TERMINAL_INTENT_STATUSES: ReadonlySet<IntentStatus> = new Set<IntentStatus>(["superseded", "withdrawn"])
+export const TERMINAL_INTENT_STATUSES: ReadonlySet<IntentStatus> = new Set<IntentStatus>([
+  "integrated",
+  "superseded",
+  "withdrawn",
+])
 
 export const PinIntentSchema = z
   .object({
@@ -110,6 +175,7 @@ export const PinIntentSchema = z
     supersededIntent: TextSchema.optional(),
     supersedeConsent: z.enum(["same-submitter", "forced"]).optional(),
     disposition: IntentDispositionSchema.optional(),
+    integration: PinIntentIntegrationSchema.optional(),
   })
   .strict()
 export type PinIntent = z.infer<typeof PinIntentSchema>

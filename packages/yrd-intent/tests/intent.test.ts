@@ -8,17 +8,20 @@
  * @level    l3 (journal-backed plugin over an in-memory journal)
  * @consumer @yrd/core/21679-integration-model-v2/22668-admit-intents
  */
-import { createMemoryJournal, createYrd, createYrdDef, failureFact, pipe } from "@yrd/core"
+import { command, createMemoryJournal, createYrd, createYrdDef, event, failureFact, pipe } from "@yrd/core"
 import { withIssues } from "@yrd/issue"
 import { describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
-import { withIntents, PIN_INTENT_SCHEMA } from "../src/index.ts"
+import { PIN_INTENT_SCHEMA, PinIntentIntegratedFactSchema, withIntents } from "../src/index.ts"
 
 const SILVERY = "components/alpha"
 const FLEXILY = "components/beta"
 const TARGET = "a".repeat(40)
 const OTHER_TARGET = "b".repeat(40)
 const CURRENT_PIN = "c".repeat(40)
+const ROOT_BASE = "d".repeat(40)
+const LANDING = "e".repeat(40)
+const LANDING_TREE = "f".repeat(40)
 
 function uuid(n: number): string {
   return `00000000-0000-7000-8000-${n.toString(16).padStart(12, "0")}`
@@ -39,13 +42,18 @@ async function refusalCode(work: Promise<unknown>): Promise<string | undefined> 
 }
 
 async function createApp(journal: ReturnType<typeof createMemoryJournal> = createMemoryJournal()) {
+  const integrate = command({
+    title: "Emit an intent landing fixture",
+    params: PinIntentIntegratedFactSchema,
+    apply: (_state, args) => ({ events: [event("intent/integrated", args)] }),
+  })
   const definition = pipe(
     createYrdDef(),
     withIssues({
       sources: [{ id: "km", resolve: (ref) => (ref.id.startsWith("@") ? { ref, title: "Bump" } : undefined) }],
     }),
     withIntents(),
-  )
+  ).extend({ commands: { fixture: { integrate } } })
   return createYrd(definition, {
     inject: { journal, clock: () => "2026-07-31T12:00:00.000Z", log: createLogger("test", [{ level: "silent" }]) },
   })
@@ -144,9 +152,9 @@ describe("PinIntentV1 records (22668 phase 1, dark)", () => {
     await using app = await createApp()
     const first = await submit(app, { intentId: uuid(1), target: TARGET, submitter: "@dev/1" })
 
-    expect(
-      await refusalCode(submit(app, { intentId: uuid(2), target: OTHER_TARGET, submitter: "@dev/2" })),
-    ).toBe("intent-supersede-consent-required")
+    expect(await refusalCode(submit(app, { intentId: uuid(2), target: OTHER_TARGET, submitter: "@dev/2" }))).toBe(
+      "intent-supersede-consent-required",
+    )
     expect(app.intents.get(first.id)?.status).toBe("open")
 
     const replacement = await submit(app, {
@@ -225,6 +233,55 @@ describe("PinIntentV1 records (22668 phase 1, dark)", () => {
 
     expect(app.intents.queued().map((intent) => intent.id)).toEqual([second.id])
     expect(app.intents.list()).toHaveLength(2)
+  })
+
+  it("journals the complete authored-to-landed lineage and releases the queue position", async () => {
+    const journal = createMemoryJournal()
+    {
+      await using app = await createApp(journal)
+      const record = await submit(app, { intentId: uuid(1), target: TARGET })
+
+      await app.dispatch(app.commands.fixture.integrate, {
+        intent: record.id,
+        authored: {
+          intentId: record.intentId,
+          issue: record.issue,
+          component: record.component,
+          target: TARGET,
+        },
+        evaluated: { priorPin: CURRENT_PIN, target: TARGET },
+        landing: {
+          candidate: "C7",
+          run: "R11",
+          baseSha: ROOT_BASE,
+          commit: LANDING,
+          treeSha: LANDING_TREE,
+          componentPin: TARGET,
+        },
+      })
+
+      expect(app.intents.get(record.id)).toMatchObject({
+        status: "integrated",
+        disposition: { code: "intent-integrated", at: "2026-07-31T12:00:00.000Z" },
+        integration: {
+          authored: { intentId: uuid(1), issue: record.issue, component: SILVERY, target: TARGET },
+          evaluated: { priorPin: CURRENT_PIN, target: TARGET },
+          landing: {
+            candidate: "C7",
+            run: "R11",
+            baseSha: ROOT_BASE,
+            commit: LANDING,
+            treeSha: LANDING_TREE,
+            componentPin: TARGET,
+          },
+        },
+      })
+      expect(app.intents.queued()).toEqual([])
+    }
+
+    await using replayed = await createApp(journal)
+    expect(replayed.intents.get("I1")?.integration?.landing.commit).toBe(LANDING)
+    expect(replayed.intents.queued()).toEqual([])
   })
 
   it("keeps queued intents in submission FIFO order", async () => {

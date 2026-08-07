@@ -16,6 +16,7 @@ import {
   IntentWithdrawArgsSchema,
   PIN_INTENT_SCHEMA,
   PIN_TOMBSTONE_SCHEMA,
+  PinIntentIntegratedFactSchema,
   PinTombstoneArgsSchema,
   PinTombstoneSchema,
   PinIntentSchema,
@@ -71,6 +72,7 @@ export function withIntents() {
         "intent/superseded": journalEvent(1, SupersededSchema),
         "intent/withdrawn": journalEvent(1, WithdrawnSchema),
         "intent/pin-tombstoned": journalEvent(1, TombstonedSchema),
+        "intent/integrated": journalEvent(1, PinIntentIntegratedFactSchema),
       },
       projectionVersion: "intents-v2",
       project: projectIntents,
@@ -314,6 +316,33 @@ function projectIntents(state: DeepReadonly<IntentState>, applied: Event): Inten
       },
     }
   }
+  if (applied.name === "intent/integrated") {
+    const integrated = PinIntentIntegratedFactSchema.parse(applied.data)
+    const record = state.intents.records[integrated.intent]
+    if (record === undefined) throw new Error(`yrd: integration names missing intent '${integrated.intent}'`)
+    if (TERMINAL_INTENT_STATUSES.has(record.status)) {
+      throw new Error(`yrd: integration names terminal intent '${record.id}' (${record.status})`)
+    }
+    if (
+      integrated.authored.intentId !== record.intentId ||
+      integrated.authored.issue.source !== record.issue.source ||
+      integrated.authored.issue.id !== record.issue.id ||
+      integrated.authored.component !== record.component ||
+      integrated.authored.target !== record.target
+    ) {
+      throw new Error(`yrd: integration lineage does not match authored intent '${record.id}'`)
+    }
+    if (record.target !== undefined && integrated.evaluated.target !== record.target) {
+      throw new Error(`yrd: integration evaluated a different target for authored intent '${record.id}'`)
+    }
+    const { intent: _intent, ...integration } = integrated
+    return replaceIntent(state, {
+      ...(record as PinIntent),
+      status: "integrated",
+      disposition: { code: "intent-integrated", at: applied.ts },
+      integration,
+    })
+  }
   return state as IntentState
 }
 
@@ -380,9 +409,7 @@ function nextIntentId(records: DeepReadonly<Record<string, PinIntent>> | Record<
   return `I${Math.max(0, ...values) + 1}`
 }
 
-function nextTombstoneId(
-  records: DeepReadonly<Record<string, PinTombstone>> | Record<string, PinTombstone>,
-): string {
+function nextTombstoneId(records: DeepReadonly<Record<string, PinTombstone>> | Record<string, PinTombstone>): string {
   const values = Object.keys(records)
     .filter((id) => /^T\d+$/u.test(id))
     .map((id) => Number(id.slice(1)))
