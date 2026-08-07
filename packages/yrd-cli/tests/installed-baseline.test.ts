@@ -11,7 +11,6 @@ import { afterEach, describe, expect, it } from "vitest"
 import type { InstalledStep } from "@yrd/queue"
 import { createYrdHost } from "../src/host.ts"
 import { requireFreshInstalledBaseline, followQueueRuns } from "../src/run.ts"
-import { actionableFailure, formatActionableFailure } from "../src/actionable-error.ts"
 import {
   installedBaselineDrift,
   installedBaselinePath,
@@ -112,7 +111,7 @@ describe("installed baseline drift", () => {
     expect(finding?.message).toContain("Restart this queue runner process")
   })
 
-  it("fences a resident when the authoritative native-merge source advances after startup (22366)", () => {
+  it("does not treat the runner source pin as part of the native merge contract", () => {
     const input = {
       repo: "/repo",
       stateDir: "/repo/.git/yrd",
@@ -124,45 +123,15 @@ describe("installed baseline drift", () => {
     } as const
     const loadedSource = "git:35562d1579f140669a453b310340582b8cc1b42f"
     const pinnedSource = "git:748dbd87dd6a30a5d4f41de4459b01d8014d791f"
-    const staleRuntimeRevision = queueStepRevision({
-      ...input,
-      implementationSource: loadedSource,
-    })
-    const currentRevision = queueStepRevision({
-      ...input,
-      implementationSource: pinnedSource,
-    })
-    expect(
-      queueStepRevision({
-        ...input,
-        resolvedCommand: ["true"],
-        implementationSource: loadedSource,
-      }),
-    ).toBe(
-      queueStepRevision({
-        ...input,
-        resolvedCommand: ["true"],
-        implementationSource: pinnedSource,
-      }),
-    )
-    const installed = [step("merge", currentRevision, { kind: "merge", implementationSource: pinnedSource })]
-    const staleRuntime = [step("merge", staleRuntimeRevision, { kind: "merge", implementationSource: loadedSource })]
+    const revision = queueStepRevision(input)
+    const installed = [step("merge", revision, { kind: "merge", implementationSource: pinnedSource })]
+    const staleRuntime = [step("merge", revision, { kind: "merge", implementationSource: loadedSource })]
 
-    // R2715 ran under a resident loaded from the prior Yrd pin. The runtime
-    // identity must stay bound to that startup source while fresh derivation
-    // observes the authoritative pin advance.
-    const finding = runtimeBaselineDrift(baseline(installed), staleRuntime)
-    expect(finding).toMatchObject({
-      code: "runtime-drift",
-      message: expect.stringContaining("Restart this queue runner process"),
-    })
-    expect(finding?.message).toContain(currentRevision.slice(0, 8))
-    expect(finding?.message).toContain(staleRuntimeRevision.slice(0, 8))
-    expect(finding?.message).toContain(pinnedSource)
-    expect(finding?.message).toContain(loadedSource)
+    expect(installedBaselineDrift(baseline(staleRuntime), installed)).toBeUndefined()
+    expect(runtimeBaselineDrift(baseline(installed), staleRuntime)).toBeUndefined()
   })
 
-  it("keeps the one-time config epoch observable to pre-source-identity v3 residents (22366)", () => {
+  it("keeps the native merge generation transition observable to older residents", () => {
     const staleRuntime = [
       step("merge", historicalV3NativeMergeRevision(), {
         kind: "merge",

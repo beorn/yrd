@@ -168,18 +168,10 @@ function stepPlanDeltas(
       )
       continue
     }
-    const installedSource = installed.implementationSource ?? "unknown"
-    const liveSource = liveStep.implementationSource ?? "unknown"
-    const sourceDelta =
-      installedSource === liveSource
-        ? ""
-        : `; implementation source installed '${installedSource}', ${vocabulary.live} '${liveSource}'`
     if (liveStep.revision !== installed.revision) {
       deltas.push(
-        `step '${installed.name}' revision '${shortRevision(installed.revision)}' installed, ${vocabulary.live} '${shortRevision(liveStep.revision)}'${sourceDelta}`,
+        `step '${installed.name}' revision '${shortRevision(installed.revision)}' installed, ${vocabulary.live} '${shortRevision(liveStep.revision)}'`,
       )
-    } else if (sourceDelta !== "") {
-      deltas.push(`step '${installed.name}'${sourceDelta}`)
     } else if (liveStep.kind !== installed.kind || liveStep.classification !== installed.classification) {
       deltas.push(`step '${installed.name}' integration contract changed`)
     }
@@ -235,8 +227,4 @@ export function runtimeBaselineDrift(
     code: "runtime-drift",
     message: `queue base '${baseline.base}' resident runtime diverges from the installed baseline: ${deltas.join("; ")}. Restart this queue runner process so it loads the installed baseline before starting runs.`,
   }
-}
-
-function shellWord(value: string): string {
-  return `'${value.replaceAll("'", `'\"'\"'`)}'`
 }

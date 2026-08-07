@@ -19,8 +19,6 @@ export type QueueStepRevisionInput = Readonly<{
   toolchain: ToolchainFingerprint
   checkoutParent?: string
   resolvedCommand?: readonly string[]
-  /** Startup/runtime source identity for an in-process native implementation. */
-  implementationSource?: string
 }>
 
 /**
@@ -72,9 +70,6 @@ export function queueStepRevision(input: QueueStepRevisionInput): string {
           : input.checkoutParent === undefined
             ? "yrd-queue-command-v3"
             : "yrd-queue-command-v4",
-        ...(nativeMerge && input.implementationSource !== undefined
-          ? { implementationSource: input.implementationSource }
-          : {}),
         repo: stablePath(input.repo),
         stateDir: stablePath(input.stateDir),
         ...(input.checkoutParent === undefined ? {} : { checkoutParent: stablePath(input.checkoutParent) }),

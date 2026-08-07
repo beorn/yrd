@@ -26,12 +26,7 @@ import {
   runYrdProcess,
 } from "../src/host.ts"
 import { queueStepRevision } from "../src/host-revision.ts"
-import {
-  authoritativeImplementationSource,
-  implementationSourceIdentity,
-  sourceRepositoryFor,
-  takeImplementationSourceBridge,
-} from "../src/implementation-source.ts"
+import { sourceRepositoryFor, takeImplementationSourceBridge } from "../src/implementation-source.ts"
 import type { ResolvedYrdProjectConfig } from "../src/config.ts"
 import { classifyFailure } from "../src/invocation.ts"
 import { withLiveRenderer } from "../src/live-renderer.ts"
@@ -474,94 +469,6 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       },
     )
     await expect(Array.fromAsync(journal.read())).resolves.toEqual([])
-  })
-
-  it("distinguishes loaded native source from the freshly fetched authoritative gitlink", async () => {
-    const { repo } = await repository()
-    const root = join(repo, "..")
-    const source = join(root, "source")
-    const sourceRemote = join(root, "source-origin.git")
-    const rootRemote = join(root, "root-origin.git")
-    await git(root, "init", "-q", "-b", "main", source)
-    await git(source, "config", "user.name", "Yrd Test")
-    await git(source, "config", "user.email", "yrd@example.invalid")
-    await writeFile(join(source, "version.txt"), "loaded\n")
-    await git(source, "add", "version.txt")
-    await git(source, "commit", "-qm", "loaded source")
-    const loadedSha = await git(source, "rev-parse", "HEAD")
-    await initBareMain(root, sourceRemote)
-    await git(source, "remote", "add", "origin", sourceRemote)
-    await git(source, "push", "-q", "origin", "main")
-
-    await git(repo, "config", "protocol.file.allow", "always")
-    await git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sourceRemote, "runtime")
-    await git(repo, "commit", "-qam", "add runtime source")
-    await initBareMain(root, rootRemote)
-    await git(repo, "remote", "add", "origin", rootRemote)
-    await git(repo, "push", "-q", "origin", "main")
-
-    await writeFile(join(repo, "runtime", "version.txt"), "authoritative\n")
-    await git(join(repo, "runtime"), "commit", "-qam", "authoritative source")
-    const authoritativeSha = await git(join(repo, "runtime"), "rev-parse", "HEAD")
-    await git(join(repo, "runtime"), "push", "-q", "origin", "main")
-    await git(repo, "add", "runtime")
-    await git(repo, "commit", "-qm", "advance runtime source")
-    await git(repo, "push", "-q", "origin", "main")
-    await git(join(repo, "runtime"), "checkout", "-q", loadedSha)
-
-    await using process = createProcess({ cwd: repo })
-    const discovered = await discoverYrdRepository({ cwd: repo, process })
-
-    const sourceRepository = { root: join(repo, "runtime") }
-    expect(await implementationSourceIdentity(process, sourceRepository)).toBe(`git:${loadedSha}`)
-    expect(
-      await authoritativeImplementationSource(
-        process,
-        discovered.repo,
-        await git(repo, "rev-parse", "main"),
-        sourceRepository,
-      ),
-    ).toBe(`git:${authoritativeSha}`)
-    await writeFile(join(repo, "runtime", "version.txt"), "dirty loaded bytes\n")
-    expect(await implementationSourceIdentity(process, sourceRepository)).toMatch(/^dirty:[0-9a-f]{64}$/u)
-
-    await writeFile(join(repo, "runtime", "version.txt"), "loaded\n")
-    await writeFile(join(repo, "runtime", "untracked-runtime.ts"), "export const shadow = true\n")
-    const untrackedIdentity = await implementationSourceIdentity(process, sourceRepository)
-    expect(untrackedIdentity).toMatch(/^dirty:[0-9a-f]{64}$/u)
-    await writeFile(join(repo, "runtime", "untracked-runtime.ts"), "export const shadow = false\n")
-    expect(await implementationSourceIdentity(process, sourceRepository)).not.toBe(untrackedIdentity)
-  })
-
-  it("maps a linked-worktree runtime source to its authoritative gitlink (22730)", async () => {
-    const { repo } = await repository()
-    const root = join(repo, "..")
-    const source = join(root, "linked-runtime-source")
-    await git(root, "init", "-q", "-b", "main", source)
-    await git(source, "config", "user.name", "Yrd Test")
-    await git(source, "config", "user.email", "yrd@example.invalid")
-    await writeFile(join(source, "version.txt"), "loaded\n")
-    await git(source, "add", "version.txt")
-    await git(source, "commit", "-qm", "loaded source")
-    const sourceSha = await git(source, "rev-parse", "HEAD")
-
-    await git(repo, "config", "protocol.file.allow", "always")
-    await git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", source, "runtime")
-    await git(repo, "commit", "-qam", "add runtime source")
-    const authoritySha = await git(repo, "rev-parse", "HEAD")
-
-    const linked = join(repo, ".worktrees", "wt1")
-    await mkdir(join(repo, ".worktrees"), { recursive: true })
-    await git(repo, "worktree", "add", "-q", "--detach", linked, authoritySha)
-    await git(linked, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "-q", "runtime")
-
-    await using process = createProcess({ cwd: linked })
-    const discovered = await discoverYrdRepository({ cwd: linked, process })
-    expect(
-      await authoritativeImplementationSource(process, discovered.repo, authoritySha, {
-        root: join(linked, "runtime"),
-      }),
-    ).toBe(`git:${sourceSha}`)
   })
 
   it("does not mistake an untracked installed package for the consumer repository's runtime source", async () => {

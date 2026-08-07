@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path"
+import { dirname, isAbsolute, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import type { Process } from "@yrd/process"
 import { cleanGitEnvironment } from "./git-environment.ts"
@@ -18,37 +18,11 @@ export type ImplementationSourceBridge = Readonly<{
   repository: ImplementationSourceRepository
 }>
 
-function gitSourceSha(identity: string | undefined): string | undefined {
-  const match = /^git:([0-9a-f]{40,64})$/u.exec(identity ?? "")
-  return match?.[1]
-}
-
-async function isAncestor(
-  process: Pick<Process, "run">,
-  repository: ImplementationSourceRepository,
-  ancestor: string,
-  descendant: string,
-): Promise<boolean | undefined> {
-  const args = ["merge-base", "--is-ancestor", ancestor, descendant]
-  const result = await process.run({
-    argv: ["git", "-C", repository.root, ...args],
-    cwd: repository.root,
-    env: cleanGitEnvironment(globalThis.process.env),
-    timeoutMs: GIT_TIMEOUT_MS,
-  })
-  if (result.timedOut) throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
-  if (result.exitCode === 0) return true
-  if (result.exitCode === 1) return false
-  return undefined
-}
-
 /**
  * Consume the one-process attestation installed by a trusted launcher.
  *
- * Git-owned source checkouts remain the default. This bridge exists for sealed
- * deployment roots whose launcher has already verified immutable bytes and can
- * attest both the loaded revision and the mutable source checkout used for
- * authoritative gitlink freshness checks.
+ * Git-owned source checkouts remain the default. A launcher may provide the
+ * same operator-visible identity when the runtime itself is not a Git checkout.
  */
 export function takeImplementationSourceBridge(env: NodeJS.ProcessEnv): ImplementationSourceBridge | undefined {
   const identity = env[YRD_WRAPPER_IMPLEMENTATION_SOURCE_ENV]?.trim()
@@ -81,59 +55,6 @@ function sourceIdentity(sha: string): string {
   return `git:${sha.toLowerCase()}`
 }
 
-async function superprojectSourcePath(
-  process: Pick<Process, "run">,
-  repository: string,
-  sourceRepository: ImplementationSourceRepository,
-): Promise<string | undefined> {
-  const args = ["rev-parse", "--path-format=absolute", "--show-superproject-working-tree"]
-  const result = await process.run({
-    argv: ["git", "-C", sourceRepository.root, ...args],
-    cwd: sourceRepository.root,
-    env: cleanGitEnvironment(globalThis.process.env),
-    timeoutMs: GIT_TIMEOUT_MS,
-  })
-  if (result.timedOut) throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
-  if (result.exitCode !== 0) {
-    throw new Error(result.stderr.trim() || `yrd: could not inspect the runtime source superproject`)
-  }
-
-  const superproject = result.stdout.trim()
-  if (superproject === "") return undefined
-  if (!isAbsolute(superproject)) {
-    throw new Error(`yrd: runtime source superproject is not an absolute path`)
-  }
-  const sourceCommon = await process.run({
-    argv: ["git", "-C", superproject, "rev-parse", "--path-format=absolute", "--git-common-dir"],
-    cwd: superproject,
-    env: cleanGitEnvironment(globalThis.process.env),
-    timeoutMs: GIT_TIMEOUT_MS,
-  })
-  const authorityCommon = await process.run({
-    argv: ["git", "-C", repository, "rev-parse", "--path-format=absolute", "--git-common-dir"],
-    cwd: repository,
-    env: cleanGitEnvironment(globalThis.process.env),
-    timeoutMs: GIT_TIMEOUT_MS,
-  })
-  if (sourceCommon.timedOut || authorityCommon.timedOut) {
-    throw new Error(`yrd: runtime source repository-identity probe timed out after ${GIT_TIMEOUT_MS}ms`)
-  }
-  if (sourceCommon.exitCode !== 0 || authorityCommon.exitCode !== 0) {
-    throw new Error(
-      sourceCommon.stderr.trim() ||
-        authorityCommon.stderr.trim() ||
-        `yrd: could not compare runtime source and queue authority repositories`,
-    )
-  }
-  if (resolve(sourceCommon.stdout.trim()) !== resolve(authorityCommon.stdout.trim())) return undefined
-
-  const sourcePath = relative(resolve(superproject), resolve(sourceRepository.root))
-  if (sourcePath === "" || sourcePath === "." || sourcePath === ".." || sourcePath.startsWith(`..${sep}`)) {
-    throw new Error(`yrd: runtime source is not contained by its reported superproject`)
-  }
-  return sourcePath
-}
-
 async function commit(process: Pick<Process, "run">, repository: string, ref: string): Promise<string | undefined> {
   const args = ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`]
   const result = await process.run({
@@ -148,11 +69,9 @@ async function commit(process: Pick<Process, "run">, repository: string, ref: st
   return /^[0-9a-f]{40,64}$/iu.test(sha) ? sha.toLowerCase() : undefined
 }
 
-/** Identity of the Yrd source checkout at the instant this probe runs.
- *
- * The host calls this once at startup and preserves that result as the loaded
- * identity. Its environment audit calls the same owner again before each
- * admission to detect a mutable module root moving underneath lazy imports. */
+/** Identity of the Yrd source checkout at process startup, preserved for
+ * operator-visible runner status only. Launch policy—not queue admission—owns
+ * whether that source may change while the process is alive. */
 export async function implementationSourceIdentity(
   process: Pick<Process, "run">,
   sourceRepository?: ImplementationSourceRepository,
@@ -215,41 +134,4 @@ export async function implementationSourceIdentity(
       .digest("hex")}`
   }
   return sourceIdentity(sha)
-}
-
-/** Identity of the Yrd source authorized by one freshly fetched queue-base
- * commit. Comparing this with the startup-captured identity makes a root gitlink
- * advance observable even when a dirty shared checkout still contains old code. */
-export async function authoritativeImplementationSource(
-  process: Pick<Process, "run">,
-  repository: string,
-  authoritySha: string,
-  sourceRepository?: ImplementationSourceRepository,
-): Promise<string | undefined> {
-  if (sourceRepository === undefined) return undefined
-  const sourcePath =
-    (await superprojectSourcePath(process, repository, sourceRepository)) ??
-    relative(resolve(repository), resolve(sourceRepository.root))
-  if (sourcePath === "" || sourcePath === ".") return sourceIdentity(authoritySha)
-  if (sourcePath === ".." || sourcePath.startsWith(`..${sep}`)) {
-    return implementationSourceIdentity(process, sourceRepository)
-  }
-
-  const gitPath = sourcePath.split(sep).join("/")
-  const args = ["ls-tree", "--full-tree", authoritySha, "--", gitPath]
-  const tree = await process.run({
-    argv: ["git", "-C", repository, ...args],
-    cwd: repository,
-    env: cleanGitEnvironment(globalThis.process.env),
-    timeoutMs: GIT_TIMEOUT_MS,
-  })
-  if (tree.timedOut) throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
-  if (tree.exitCode !== 0) {
-    throw new Error(tree.stderr.trim() || `yrd: could not inspect runtime source '${gitPath}' at '${authoritySha}'`)
-  }
-  const match = /^160000 commit ([0-9a-f]{40,64})\t/u.exec(tree.stdout.trim())
-  if (match?.[1] === undefined) {
-    throw new Error(`yrd: loaded runtime source '${gitPath}' is not a gitlink in authoritative base '${authoritySha}'`)
-  }
-  return sourceIdentity(match[1])
 }
