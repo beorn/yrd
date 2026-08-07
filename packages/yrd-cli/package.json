@@ -20,7 +20,7 @@
     "@yrd/persistence": "workspace:*",
     "@yrd/process": "workspace:*",
     "@yrd/queue": "workspace:*",
-    "git-super": "github:beorn/git-super#ef064568b021bf7cd8eabc7edc04198636ebdc41",
+    "git-super": "github:beorn/git-super#ec6f760629f505d08cd5bee07200d5fe5652ac49",
     "loggily": "^0.10.2",
     "react": "^19.2.0",
     "silvery": "^0.23.2",
