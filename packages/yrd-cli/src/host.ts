@@ -96,7 +96,7 @@ import { CHECKOUT_TIMEOUT_ENV, resolveCheckoutTimeoutMs } from "./git-timeouts.t
 import {
   implementationSourceIdentity,
   sourceRepositoryFor,
-  takeImplementationSourceBridge,
+  takeImplementationSourceAttestation,
 } from "./implementation-source.ts"
 import { ensureWorkspaceDependencies } from "./workspace-provisioning.ts"
 import { withGitIndexLockRetry } from "./git-index-lock-retry.ts"
@@ -1419,7 +1419,6 @@ type YrdRuntimeHostOptions = YrdHostOptions &
   Readonly<{
     /** Loaded identity attested by the process host for a gitless sealed root. */
     implementationSource?: string
-    /** Mutable checkout used only for current/authoritative source comparison. */
     /** Repair a stale view registry before the runtime replays Journal history. */
     repairViewsBeforeReplay?: boolean
   }>
@@ -1848,11 +1847,11 @@ async function runYrdProcessHost(
   let removeShutdownSignals: () => void = () => undefined
   let processExit: YrdCliExitCode | undefined
   try {
-    const sourceBridge = takeImplementationSourceBridge(env)
+    const sourceAttestation = takeImplementationSourceAttestation(env)
     if (
       io.implementationSource !== undefined &&
-      sourceBridge !== undefined &&
-      io.implementationSource !== sourceBridge.identity
+      sourceAttestation !== undefined &&
+      io.implementationSource !== sourceAttestation
     ) {
       throw new Error("yrd: process-host implementation source conflicts with launcher attestation")
     }
@@ -1903,7 +1902,7 @@ async function runYrdProcessHost(
               }
         log = createYrdLogger(observability, (text) => io.stderr(text), human)
         const runtimeLog = resident === undefined ? log : residentRunnerLog(log, resident)
-        const selectedImplementationSource = io.implementationSource ?? sourceBridge?.identity
+        const selectedImplementationSource = io.implementationSource ?? sourceAttestation
         const activeHost = await createYrdRuntimeHost(
           {
             cwd: context.repo,

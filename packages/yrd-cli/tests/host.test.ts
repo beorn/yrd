@@ -26,7 +26,7 @@ import {
   runYrdProcess,
 } from "../src/host.ts"
 import { queueStepRevision } from "../src/host-revision.ts"
-import { sourceRepositoryFor, takeImplementationSourceBridge } from "../src/implementation-source.ts"
+import { sourceRepositoryFor, takeImplementationSourceAttestation } from "../src/implementation-source.ts"
 import type { ResolvedYrdProjectConfig } from "../src/config.ts"
 import { classifyFailure } from "../src/invocation.ts"
 import { withLiveRenderer } from "../src/live-renderer.ts"
@@ -482,17 +482,12 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
   })
 
   it("consumes a launcher-attested implementation source for a gitless sealed runtime", () => {
-    const repository = join(tmpdir(), "certified-yrd-source")
     const env = {
       YRD_WRAPPER_IMPLEMENTATION_SOURCE: `git:${"6".repeat(40)}`,
-      YRD_WRAPPER_IMPLEMENTATION_REPOSITORY: repository,
       PRESERVED: "yes",
     }
 
-    expect(takeImplementationSourceBridge(env)).toEqual({
-      identity: `git:${"6".repeat(40)}`,
-      repository: { root: repository },
-    })
+    expect(takeImplementationSourceAttestation(env)).toBe(`git:${"6".repeat(40)}`)
     expect(env).toEqual({ PRESERVED: "yes" })
   })
 
@@ -3261,7 +3256,6 @@ checks: [{check: {run: "true"}}]
           ...process.env,
           HERDR_PANE_ID: "w1:attested",
           YRD_WRAPPER_IMPLEMENTATION_SOURCE: implementationSource,
-          YRD_WRAPPER_IMPLEMENTATION_REPOSITORY: repo,
         },
         stdout: "pipe",
         stderr: "pipe",
