@@ -228,6 +228,11 @@ describe("pr list bounded-window disclosure (22376)", () => {
         baseSha: BASE_SHA,
       })
     }
+    // The six oldest go terminal: open PRs are never windowed out (see
+    // live-work-visibility.test.ts), so only terminal rows exercise the cut.
+    for (const index of Array.from({ length: 6 }, (_, offset) => offset + 1)) {
+      await app.bays.closePr({ pr: `PR${index}`, reason: "window specimen" })
+    }
 
     const human = outputIO()
     expect(await runYrd(app as CliApp, yrd("pr", "list"), human.io), human.stderr()).toBe(0)

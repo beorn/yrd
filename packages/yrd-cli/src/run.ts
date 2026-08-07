@@ -4061,7 +4061,12 @@ async function listPrs(
   // Preserve the bounded human default before deriving eligibility. A state
   // filter must inspect every candidate because `needs-author` is projected
   // from eligibility; an unfiltered human list only needs its final 20 rows.
-  const listed = explicitlyFiltered || json ? matching : matching.slice(-PR_LIST_DEFAULT_WINDOW_SIZE)
+  // Open PRs are never hidden by the window: live work outside the newest-20
+  // cut (a days-old draft) must not vanish from the default surface (live
+  // specimen 2026-08-07: PR138/PR182, both `pushed`, invisible by default).
+  const windowed = new Set(matching.slice(-PR_LIST_DEFAULT_WINDOW_SIZE).map((pr) => pr.id))
+  const listed =
+    explicitlyFiltered || json ? matching : matching.filter((pr) => pr.state === "open" || windowed.has(pr.id))
   const rows = listed
     .map((pr) => ({
       pr,
@@ -8035,7 +8040,8 @@ function addExamples(program: CliCommand, name: string): void {
   ]
   examples.push(
     [`$ ${name} pr list`, "inspect active PRs"],
-    [`$ ${name} pr create topic/fix`, "create a draft before submission"],
+    [`$ ${name} submit`, "submit the current branch as a merge request"],
+    [`$ ${name} pr create topic/fix`, "create a draft before you submit"],
     [`$ ${name} queue run --steps check,merge`, "run selected steps"],
     [`$ ${name} watch --pr PR7`, "monitor PR and queue health"],
     [`$ ${name} contest open km:T1 --competitors '<json>'`, "compare implementations"],
@@ -8176,7 +8182,7 @@ function buildProgram(
   ])
   program.addHelpSection(
     "Boundaries:",
-    "Runs, steps, jobs, attempts, and runners are records inside PRs and the log.\nThe queue is the only merger; pr merge is a teaching refusal.\nThe tracker holds the pen; yrd never creates or edits issues.",
+    "Runs, steps, jobs, attempts, and runners are records inside PRs and the log.\nThe queue is the only merger; pr merge only teaches the correct next command.\nThe tracker holds the pen; yrd never creates or edits issues.",
   )
   program
     .command("_dashboard", { isDefault: true, hidden: true })
@@ -8318,6 +8324,28 @@ function buildProgram(
     .action(async (filters, options) => {
       setExit(await watchQueue(installed(), filters, options, io, installedServices()))
     })
+
+  program
+    .command("submit [selector...]")
+    .description("submit a merge request (also called a pull request or PR) into the merge queue")
+    .option("--base <branch>", "base branch for a direct branch submit")
+    .option("--queue <branch>", "alias for --base")
+    .option("--issue <ref>", "link a tracker-neutral issue reference")
+    .option("--title <text>", "PR subject (defaults to the head commit subject)")
+    .option("--description <text>", "PR description body (defaults to the head commit body)")
+    .option("--correlation <namespace:id>", "bind an opaque correlation to the submitted revision")
+    .option("--composition <path>", "queue-generated source composition JSON; not for authored root carriers")
+    .option(
+      "--reviewer <reviewer>",
+      "request a review from <reviewer> right after submit (repeatable)",
+      (value: string, previous: readonly string[]) => [...previous, value],
+      [] as readonly string[],
+    )
+    .option("--track", TRACK_OPTION_DESCRIPTION)
+    .option("--json", "emit stable JSON")
+    .action(async (selectors, options) =>
+      setExit(await applyPrSelectionVerb(installed(), installedServices(), selectors, options, io, "pr.submit")),
+    )
 
   program
     .command("prime")

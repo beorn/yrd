@@ -301,6 +301,31 @@ export type QueueTimelineRepeat = Readonly<{
 
 export type QueueTimelineDisplayRow = QueueTimelineProjectedRow & Readonly<{ repeat?: QueueTimelineRepeat }>
 
+/** Select the rows the one-shot view draws. Live rows — draft/rev/ready, the
+ * current state of open PRs — are never evicted by the display cap, no matter
+ * how old their clock anchor is; the cap spends its whole budget on history
+ * rows instead. Display order is preserved. (Live specimen 2026-08-07: two
+ * days-old drafts sorted below the cap and vanished from the human timeline
+ * while `--json` carried them.) */
+export function timelineRetainedRows(
+  displayRows: readonly QueueTimelineDisplayRow[],
+  shown: number,
+): QueueTimelineDisplayRow[] {
+  if (displayRows.length <= shown) return [...displayRows]
+  const live = (row: QueueTimelineDisplayRow): boolean =>
+    row.status === "draft" || row.status === "rev" || row.status === "ready"
+  const liveCount = displayRows.reduce((count, row) => (live(row) ? count + 1 : count), 0)
+  let historyBudget = Math.max(0, shown - liveCount)
+  return displayRows.filter((row) => {
+    if (live(row)) return true
+    if (historyBudget > 0) {
+      historyBudget -= 1
+      return true
+    }
+    return false
+  })
+}
+
 export type QueueTimelineRunner = Readonly<{
   pid: number
   startedAt: string
@@ -5103,7 +5128,7 @@ function ProjectedQueueTimeline({
     queueTimelineVisibleRows(projection, visibleBuckets, true),
     expandedStorms,
   )
-  const rows = fillHeight ? displayRows : displayRows.slice(0, projection.display.shown)
+  const rows = fillHeight ? displayRows : timelineRetainedRows(displayRows, projection.display.shown)
   const hiddenDisplayRows = Math.max(0, displayRows.length - rows.length)
   const buckets = visibleBuckets ?? queueTimelineFilterBuckets(projection.filters.statuses)
   // In the fill pane the TIME cell is time-of-day only (item 1) and the day is
