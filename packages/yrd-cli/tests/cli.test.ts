@@ -5048,11 +5048,10 @@ describe("runYrd", () => {
     expect(app.queue.eligibility("PR1")).toMatchObject({ reason: { code: "admission-refused" } })
 
     currentBaseSha = advancedBaseSha
-    await app.bays.requestChecks({ pr: "PR1", baseSha: advancedBaseSha })
     await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })
     expect(prAdmission(app.bays.pr("PR1")!)).toMatchObject({
       status: "refused",
-      baseSha: BASE_SHA,
+      baseSha: advancedBaseSha,
       receipt: { code: "carrier-drops-landed" },
     })
     expect(app.bays.pr("PR1")?.checkRequests).toMatchObject([

@@ -3207,21 +3207,6 @@ async function cancelSupersededRevisionRuns(
   }
 }
 
-async function cancelSupersededRevisionAdmissionJobs(
-  app: YrdCliApp,
-  identity: Readonly<{ pr: string; revision: number }>,
-  by: string,
-  reason: string,
-): Promise<void> {
-  const keyPrefix = `admission:${identity.pr}:${identity.revision}:`
-  const jobs = Object.values(stateOf(app).jobs.byId).filter(
-    (job) => job.status !== "completed" && job.key?.startsWith(keyPrefix) === true,
-  )
-  for (const job of jobs) {
-    await app.jobs.cancel({ id: job.id, attempt: job.attempt, by, reason })
-  }
-}
-
 async function executeRecutPr(
   app: YrdCliApp,
   services: Pick<YrdCliServices, "process" | "recut">,
@@ -3385,7 +3370,7 @@ async function executeRecutPr(
     if (!unchanged) {
       const by = io.runner ?? "operator"
       const reason = `PR recut superseded revision ${source.n}`
-      await cancelSupersededRevisionAdmissionJobs(app, { pr: pr.id, revision: expectedCurrent.revision }, by, reason)
+      await app.queue.cancelAdmissionJobs({ pr: pr.id, revision: expectedCurrent.revision, by, reason })
       if (expectedCurrent.track === true) {
         await cancelSupersededRevisionRuns(
           app,
@@ -3731,12 +3716,12 @@ async function applyPrSelection(
       const priorRevision = currentPRRev(previous)
       const currentRevision = currentPRRev(pr)
       if (priorRevision.n !== currentRevision.n || priorRevision.head !== currentRevision.head) {
-        await cancelSupersededRevisionAdmissionJobs(
-          app,
-          { pr: previous.id, revision: priorRevision.n },
-          io.runner ?? "operator",
-          `PR submission superseded revision ${priorRevision.n}`,
-        )
+        await app.queue.cancelAdmissionJobs({
+          pr: previous.id,
+          revision: priorRevision.n,
+          by: io.runner ?? "operator",
+          reason: `PR submission superseded revision ${priorRevision.n}`,
+        })
       }
     }
     const delivery = prDeliveryState(pr)
@@ -6845,25 +6830,15 @@ export async function refreshAdmittedQueueRevisions(
   )
   const staleRunsByPr = new Map<string, Run[]>()
   const staleRunIds = new Set<string>()
+  const staleAdmissionRevisionsByPr = new Map<string, number[]>()
   const staleJobsByPr = new Map<string, string[]>()
-  const staleJobIds = new Set<string>()
   for (const pr of interrupted) {
-    const currentPrefix = `admission:${pr.id}:${prRevisionNumber(pr)}:`
-    const prPrefix = `admission:${pr.id}:`
-    const staleJobs = Object.values(snapshot.jobs.byId).filter(
-      (job) =>
-        job.status !== "completed" && job.key?.startsWith(prPrefix) === true && !job.key.startsWith(currentPrefix),
-    )
-    if (staleJobs.length > 0) {
-      staleJobsByPr.set(
-        pr.id,
-        staleJobs.map(({ id }) => id),
-      )
-      for (const job of staleJobs) staleJobIds.add(job.id)
-    }
-
     const claim = snapshot.queues.authority.claims[pr.id]
     const revision = currentPRRev(pr)
+    const staleAdmissionRevisions = pr.revs
+      .map(({ n }) => n)
+      .filter((candidateRevision) => candidateRevision !== revision.n)
+    if (staleAdmissionRevisions.length > 0) staleAdmissionRevisionsByPr.set(pr.id, staleAdmissionRevisions)
     if (claim?.consumedBy === undefined || (claim.revision === revision.n && claim.headSha === revision.head)) {
       continue
     }
@@ -6879,15 +6854,19 @@ export async function refreshAdmittedQueueRevisions(
       reason: "recover interrupted admitted-to-refreshed Queue transition",
     })
   }
-  for (const jobId of [...staleJobIds].toSorted(compareNatural)) {
-    const job = app.jobs.get(jobId)
-    if (job === undefined || job.status === "completed") continue
-    await app.jobs.cancel({
-      id: job.id,
-      attempt: job.attempt,
-      by: io.runner ?? "yrd-cli",
-      reason: "recover interrupted admitted-to-refreshed Queue transition",
-    })
+  for (const pr of interrupted) {
+    const jobIds: string[] = []
+    for (const revision of staleAdmissionRevisionsByPr.get(pr.id) ?? []) {
+      jobIds.push(
+        ...(await app.queue.cancelAdmissionJobs({
+          pr: pr.id,
+          revision,
+          by: io.runner ?? "yrd-cli",
+          reason: "recover interrupted admitted-to-refreshed Queue transition",
+        })),
+      )
+    }
+    if (jobIds.length > 0) staleJobsByPr.set(pr.id, jobIds)
   }
   for (const pr of interrupted) {
     const runIds = staleRunsByPr.get(pr.id)?.map(({ id }) => id) ?? []

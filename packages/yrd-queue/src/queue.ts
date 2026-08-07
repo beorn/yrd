@@ -648,6 +648,8 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   finish(selector: string, completion: FinishQueueArgs, options: RunJobOptions): Promise<Run>
   finishAdmission(selector: string, completion: FinishQueueArgs, options: RunJobOptions): Promise<void>
   cancel(args: CancelQueueArgs): Promise<readonly Run[]>
+  /** Cancel every unfinished standalone admission Job for one exact PR revision. */
+  cancelAdmissionJobs(args: CancelAdmissionJobsArgs): Promise<readonly string[]>
   cancelRun(args: CancelRunArgs): Promise<Run>
   recover(options: RecoverQueueOptions): Promise<readonly Run[]>
   audit(options?: QueueAuditOptions): QueueAuditResult
@@ -712,6 +714,13 @@ export type FinishQueueArgs = Omit<JobCompletion, "token"> & Readonly<{ job: Job
 
 export type CancelQueueArgs = Readonly<{
   prs: readonly string[]
+  by: string
+  reason: string
+}>
+
+export type CancelAdmissionJobsArgs = Readonly<{
+  pr: string
+  revision: number
   by: string
   reason: string
 }>
@@ -1337,12 +1346,6 @@ function createQueue<Shape extends PRShape>(
     return result
   }
 
-  const startedRun = (result: CommandResult): Run | undefined => {
-    const started = result.events.find((applied) => applied.name === "queue/run/started")
-    if (started === undefined) return undefined
-    return current(QueueStartSchema.parse((started.data as { run?: unknown }).run).id)
-  }
-
   const refreshCheckIdentities = async (
     prs: readonly DeepReadonly<PR>[],
     resolveCycleBase: CycleBaseResolver | undefined,
@@ -1662,11 +1665,29 @@ function createQueue<Shape extends PRShape>(
     return undefined
   }
 
-  const cancelRevisionAdmissionJobs = async (pr: DeepReadonly<PR>, reason: string): Promise<void> => {
-    for (const job of currentRevisionAdmissionJobs(runtime(), pr, steps) ?? []) {
-      if (job === undefined || job.status === "completed") continue
-      await jobs.cancel({ id: job.id, attempt: job.attempt, by: "yrd/queue", reason })
+  const cancelAdmissionJobsForRevision = async (args: CancelAdmissionJobsArgs): Promise<readonly string[]> => {
+    const pr = resolvePR(runtime().bays, args.pr)
+    if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${args.pr}'`)
+    if (!pr.revs.some((revision) => revision.n === args.revision)) {
+      raiseFailure("refusal", "pr-revision-not-found", `yrd: PR '${pr.id}' has no revision ${args.revision}`)
     }
+    const prefix = admissionRevisionKeyPrefix(pr.id, args.revision)
+    const selected = Object.values(runtime().jobs.byId)
+      .filter((job) => job.status !== "completed" && job.key?.startsWith(prefix) === true)
+      .toSorted((left, right) => compareNatural(left.id, right.id))
+    for (const job of selected) {
+      await jobs.cancel({ id: job.id, attempt: job.attempt, by: args.by, reason: args.reason })
+    }
+    return selected.map((job) => job.id)
+  }
+
+  const cancelRevisionAdmissionJobs = async (pr: DeepReadonly<PR>, reason: string): Promise<void> => {
+    await cancelAdmissionJobsForRevision({
+      pr: pr.id,
+      revision: prRevisionNumber(pr),
+      by: "yrd/queue",
+      reason,
+    })
   }
 
   /**
@@ -1958,7 +1979,11 @@ function createQueue<Shape extends PRShape>(
           lifecycle: "admit",
           attributes: { selectors: args.prs },
           outcome: (prs) =>
-            prs.some((selector) => prAdmission(resolvePR(runtime().bays, selector)!) === undefined)
+            prs.some((selector) => {
+              const pr = resolvePR(runtime().bays, selector)
+              if (pr === undefined) throw new Error(`yrd: admitted PR '${selector}' disappeared from Bay state`)
+              return prAdmission(pr) === undefined
+            })
               ? "progress"
               : "succeeded",
           resultAttributes: (prs) => ({ prs }),
@@ -2206,9 +2231,10 @@ function createQueue<Shape extends PRShape>(
           }
           const authorityGapIds = new Set(authorityGaps.map((gap) => gap.pr))
           snapshot = runtime()
+          const refusedAdmissions = selectorless ? refusedRevisionAdmissions(snapshot) : []
           const checked = explicitStepAuthority
             ? []
-            : requested.filter((pr) => !authorityGapIds.has(pr.id) && checksRequested(pr))
+            : [...requested, ...refusedAdmissions].filter((pr) => !authorityGapIds.has(pr.id) && checksRequested(pr))
           const before = new Map(checked.map((pr) => [pr.id, checkEligibility(snapshot, pr, steps).status]))
           // Admission is revision-owned evidence, not a Queue Run. Revalidate
           // each requested revision against this cycle's base before selecting
@@ -2418,6 +2444,7 @@ function createQueue<Shape extends PRShape>(
       }
       return affected.map(current)
     },
+    cancelAdmissionJobs: cancelAdmissionJobsForRevision,
     async cancelRun(args) {
       const record = Queues.resolve(runtime().queues, args.run)
       if (record === undefined) raiseFailure("refusal", "run-not-found", `yrd: no queue run '${args.run}'`)
@@ -5245,7 +5272,11 @@ function jobKey(run: RunId, index: number): string {
 }
 
 function admissionExecutionId(pr: DeepReadonly<PRSnapshot>, baseSha: string): string {
-  return `admission:${pr.id}:${pr.revision}:${baseSha}`
+  return `${admissionRevisionKeyPrefix(pr.id, pr.revision)}${baseSha}`
+}
+
+function admissionRevisionKeyPrefix(pr: string, revision: number): string {
+  return `admission:${pr}:${revision}:`
 }
 
 function admissionJobKey(pr: DeepReadonly<PRSnapshot>, baseSha: string, index: number, stepRevision?: string): string {
@@ -6069,6 +6100,14 @@ function admissionQueue(
       const rightAt = checkQueueTime(right)
       return leftAt.localeCompare(rightAt) || compareNatural(left.id, right.id)
     })
+}
+
+function refusedRevisionAdmissions(state: DeepReadonly<RuntimeState>): PR[] {
+  return Object.values(state.bays.prs)
+    .filter((pr) => prDeliveryState(pr) === "needs-author" && prAdmission(pr)?.status === "refused")
+    .toSorted(
+      (left, right) => checkQueueTime(left).localeCompare(checkQueueTime(right)) || compareNatural(left.id, right.id),
+    )
 }
 
 /**
