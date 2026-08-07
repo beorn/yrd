@@ -1523,7 +1523,7 @@ checks: [{check: {run: "true"}}]
       }
       expect(failure).toBeInstanceOf(Error)
       expect((failure as Error).message).toContain(
-        `writer lock is busy (holder=unknown operation; owner=yrd-cli:${process.pid}; contender=yrd-cli:${process.pid}; ${join(root, "writer.lock")})`,
+        `writer lock is busy (holder=unknown operation; owner=pid:${process.pid}; contender=pid:${process.pid}; ${join(root, "writer.lock")})`,
       )
       expect(classifyFailure(failure)).toMatchObject({
         exitCode: 3,
@@ -3176,7 +3176,7 @@ checks: [{check: {run: "true"}}]
       ])
       expect(outcome).toEqual({ exitCode: 1 })
       expect(await second.stderr).toContain(
-        `resident-runner-active: writer lock is busy (holder=unknown operation; owner=yrd-cli:${first.child.pid}; contender=yrd-cli:${second.child.pid}`,
+        `resident-runner-active: writer lock is busy (holder=unknown operation; owner=pid:${first.child.pid}; contender=pid:${second.child.pid}`,
       )
       expect((await readFile(executionsPath, "utf8")).trim().split("\n")).toEqual(["run"])
       // A graceful drain (SIGTERM) lets the first exit after finishing PR1's run.
