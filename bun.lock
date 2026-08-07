@@ -31,7 +31,7 @@
         "@yrd/job": "workspace:*",
         "@yrd/persistence": "workspace:*",
         "@yrd/process": "workspace:*",
-        "git-super": "github:beorn/git-super#ed5423afb21e554aa559181c5cadb6d0b07f0f65",
+        "git-super": "github:beorn/git-super#4e1743634f86b19899c9e13004d6eaa9a72e97a2",
         "zod": "^4.4.3",
       },
     },
@@ -52,7 +52,7 @@
         "@yrd/persistence": "workspace:*",
         "@yrd/process": "workspace:*",
         "@yrd/queue": "workspace:*",
-        "git-super": "github:beorn/git-super#ed5423afb21e554aa559181c5cadb6d0b07f0f65",
+        "git-super": "github:beorn/git-super#4e1743634f86b19899c9e13004d6eaa9a72e97a2",
         "loggily": "^0.10.2",
         "react": "^19.2.0",
         "silvery": "^0.23.2",
@@ -83,7 +83,7 @@
         "@yrd/issue": "workspace:*",
         "@yrd/job": "workspace:*",
         "@yrd/process": "workspace:*",
-        "git-super": "github:beorn/git-super#ed5423afb21e554aa559181c5cadb6d0b07f0f65",
+        "git-super": "github:beorn/git-super#4e1743634f86b19899c9e13004d6eaa9a72e97a2",
         "zod": "^4.4.3",
       },
     },
@@ -134,7 +134,7 @@
       "dependencies": {
         "@yrd/core": "workspace:*",
         "canonicalize": "^3.0.0",
-        "git-super": "github:beorn/git-super#ed5423afb21e554aa559181c5cadb6d0b07f0f65",
+        "git-super": "github:beorn/git-super#4e1743634f86b19899c9e13004d6eaa9a72e97a2",
         "loggily": "^0.10.2",
       },
       "devDependencies": {
@@ -160,7 +160,7 @@
         "@yrd/intent": "workspace:*",
         "@yrd/job": "workspace:*",
         "@yrd/process": "workspace:*",
-        "git-super": "github:beorn/git-super#ed5423afb21e554aa559181c5cadb6d0b07f0f65",
+        "git-super": "github:beorn/git-super#4e1743634f86b19899c9e13004d6eaa9a72e97a2",
         "zod": "^4.4.3",
       },
     },
@@ -401,7 +401,7 @@
 
     "gifenc": ["gifenc@1.0.3", "", {}, "sha512-xdr6AdrfGBcfzncONUOlXMBuc5wJDtOueE3c5rdG0oNgtINLD+f2iFZltrBRZYzACRbKr+mSVU/x98zv2u3jmw=="],
 
-    "git-super": ["git-super@github:beorn/git-super#ed5423a", { "dependencies": { "@silvery/command": "0.23.2", "@silvery/commander": "0.23.2", "react": "19.2.0", "silvery": "0.23.2" }, "bin": { "git-super": "bin/git-super" } }, "beorn-git-super-ed5423a", "sha512-hPAb+zNNOCjSeK0ZtIXAebtJdnoJ6cpOVv8IYToTbXs5TlGQV3xV0XygdzgL8tUQrYk2GoQJZQcSVvhRw4yyJA=="],
+    "git-super": ["git-super@github:beorn/git-super#4e17436", { "dependencies": { "@silvery/command": "0.23.2", "@silvery/commander": "0.23.2", "react": "19.2.0", "silvery": "0.23.2" }, "bin": { "git-super": "bin/git-super" } }, "beorn-git-super-4e17436", "sha512-PhyD+HS66QP2ueyOmMpFQZXPLpnyx2b1sSLO5bbVtnN+tuHg5lpOGMAMVbGF5ypt21EiGwVXfM1q+h1C7TzyCw=="],
 
     "is-fullwidth-code-point": ["is-fullwidth-code-point@5.1.0", "", { "dependencies": { "get-east-asian-width": "^1.3.1" } }, "sha512-5XHYaSyiqADb4RnZ1Bdad6cPp8Toise4TzEjcOYDHZkTCbKgiUl7WTUCpNWHuxmDt91wnsZBc9xinNzopv3JMQ=="],
 
