@@ -99,7 +99,6 @@ import {
   type QueueLogCoverage,
   type QueueLogRow,
   PRResultView,
-  queueLogAttempts,
   queueLogRows,
   latestRunForCurrentRevision,
   prListRows,
@@ -120,7 +119,7 @@ import {
   type QueueTimelineStatusFilter,
   type QueueStatusResult,
 } from "./queue-status-view.tsx"
-import { queueReadBoundary } from "./queue-read-boundary.ts"
+import type { QueueReadModel } from "./queue-read-model.ts"
 import { submittedPrPositions } from "./queue-position.ts"
 import {
   preflightRecut,
@@ -4219,7 +4218,7 @@ async function viewPr(
     delivery === "submitted" || delivery === "ready" ? await queuedPrPositions(state, pr.base, io) : undefined
   const position = positions?.get(pr.id)
   const runs = prQueueRuns(app, pr)
-  const attempts = await queueAttempts(app, services)
+  const attempts = await queueAttempts(services)
   const detail = prDetailData(pr, runs, attempts)
   const eligibility = app.queue.eligibility(pr.id)
   const publication = projectPublication(publicationJob(app, pr))
@@ -4266,7 +4265,7 @@ async function viewPrRuns(
       pr = requireLivePR(snapshot.state.bays, selector)
     }
     const runs = prQueueRuns(app, pr)
-    const attempts = await queueAttempts(app, services)
+    const attempts = await queueAttempts(services)
     const confirmed = await app.journalSnapshot()
     if (confirmed.asOf.cursor !== snapshot.asOf.cursor) continue
     const eligibility = app.queue.eligibility(pr.id, snapshot.state)
@@ -5250,71 +5249,15 @@ type QueuePrDiffResolver = Readonly<{
   resolve(cwd: string, pr: PR, revision: number, now?: number): Promise<QueuePrDiff>
 }>
 
-type QueueAttemptResolver = Readonly<{
-  resolve(state: YrdCliState): Promise<readonly QueueAttempt[]>
-}>
-
-function queueAttempts(
-  app: Pick<YrdCliApp, "events">,
-  services: Pick<YrdCliServices, "queueReadModel">,
-): Promise<readonly QueueAttempt[]> {
-  return services.queueReadModel?.attempts() ?? queueLogAttempts(app.events())
+function requiredQueueReadModel(services: Pick<YrdCliServices, "queueReadModel">): QueueReadModel {
+  if (services.queueReadModel !== undefined) return services.queueReadModel
+  throw new Error(
+    "yrd: missing required YrdCliServices.queueReadModel.snapshot capability; createYrdHost must wire createQueueReadModel",
+  )
 }
 
-function queueAttemptFingerprint(state: YrdCliState): string {
-  return Object.values(state.jobs.byId)
-    .map((job) =>
-      JSON.stringify([
-        job.id,
-        job.definition,
-        job.revision,
-        job.status,
-        job.attempt,
-        "startedAt" in job ? job.startedAt : null,
-        "finishedAt" in job ? job.finishedAt : null,
-      ]),
-    )
-    .toSorted()
-    .join("\n")
-}
-
-/**
- * Production hosts consult the SQLite read model on every watch tick and let
- * its durable cursor/generation cache decide whether to reload. Custom Journal
- * runtimes retain a state-fingerprinted history-fold fallback so runner
- * heartbeat/lease timestamps do not trigger another full replay.
- */
-export function createQueueAttemptResolver(
-  source: Pick<YrdCliApp, "events"> | NonNullable<YrdCliServices["queueReadModel"]>,
-): QueueAttemptResolver {
-  if ("attempts" in source) {
-    return {
-      resolve() {
-        return source.attempts()
-      },
-    }
-  }
-  let fingerprint: string | undefined
-  let cached: readonly QueueAttempt[] = []
-  let pending: Promise<readonly QueueAttempt[]> | undefined
-  return {
-    async resolve(state) {
-      const next = queueAttemptFingerprint(state)
-      if (next === fingerprint) return cached
-      if (pending !== undefined) return pending
-      const attempts = queueLogAttempts(source.events())
-      pending = attempts.then((attempts) => {
-        cached = Object.freeze(attempts)
-        fingerprint = next
-        return cached
-      })
-      try {
-        return await pending
-      } finally {
-        pending = undefined
-      }
-    },
-  }
+async function queueAttempts(services: Pick<YrdCliServices, "queueReadModel">): Promise<readonly QueueAttempt[]> {
+  return (await requiredQueueReadModel(services).snapshot()).attempts
 }
 
 /** Async, focus-scoped diff resolver. Missing immutable objects are retried only
@@ -5401,49 +5344,33 @@ function queueRunnerStateToken(runner: QueueTimelineRunner | null): string {
 async function observeQueueList(
   app: YrdCliApp,
   io: YrdCliIO,
-  services: YrdCliServices,
-  attemptResolver: QueueAttemptResolver,
+  readModel: QueueReadModel,
   previous?: QueueListObservation,
 ): Promise<QueueListObservation> {
-  const durable = queueReadBoundary(services)?.readModel
+  const read = await readModel.snapshot()
   let state: YrdCliState
   let stateSource: QueueListObservation["stateSource"]
-  let cursor: number
-  let generation = 0
-  let attempts: readonly QueueAttempt[]
-  if (durable === undefined) {
-    const journal = await app.journalSnapshot()
+  if (previous !== undefined && read.cursor === previous.cursor) {
+    state = previous.state
+    stateSource = "memory"
+  } else {
+    let journal = await app.journalSnapshot()
+    if (read.cursor > journal.asOf.cursor) journal = await app.journalSnapshot()
+    if (read.cursor !== journal.asOf.cursor) {
+      throw new Error(
+        `yrd: queue read boundary cursor ${String(read.cursor)} does not match Journal cursor ${String(journal.asOf.cursor)}`,
+      )
+    }
     state = journal.state as YrdCliState
     stateSource = "journal"
-    cursor = journal.asOf.cursor
-    attempts = await attemptResolver.resolve(state)
-  } else {
-    const read = await durable.snapshot()
-    cursor = read.cursor
-    if (previous !== undefined && read.cursor === previous.cursor) {
-      state = previous.state
-      stateSource = "memory"
-    } else {
-      let journal = await app.journalSnapshot()
-      if (read.cursor > journal.asOf.cursor) journal = await app.journalSnapshot()
-      if (read.cursor !== journal.asOf.cursor) {
-        throw new Error(
-          `yrd: queue read boundary cursor ${String(read.cursor)} does not match Journal cursor ${String(journal.asOf.cursor)}`,
-        )
-      }
-      state = journal.state as YrdCliState
-      stateSource = "journal"
-    }
-    generation = read.generation
-    attempts = read.attempts
   }
   const runner = activeResidentRunner(await residentRunnerStatus(io.cwd ?? process.cwd(), io.stateDir))
   return {
     state,
     stateSource,
-    cursor,
-    generation,
-    attempts,
+    cursor: read.cursor,
+    generation: read.generation,
+    attempts: read.attempts,
     runner,
     runnerToken: queueRunnerToken(runner),
     runnerStateToken: queueRunnerStateToken(runner),
@@ -5584,12 +5511,11 @@ export async function queueListSnapshot(
     includeOutputs?: boolean
     focus?: QueueWatchFocus
     diffResolver?: QueuePrDiffResolver
-    attemptResolver?: QueueAttemptResolver
+    queueReadModel?: QueueReadModel
   }> = {},
 ): Promise<QueueListSnapshot> {
-  const { includeOutputs = false, focus, diffResolver, attemptResolver } = details
-  const resolver = attemptResolver ?? createQueueAttemptResolver(app)
-  const observed = await observeQueueList(app, io, {}, resolver)
+  const { includeOutputs = false, focus, diffResolver } = details
+  const observed = await observeQueueList(app, io, requiredQueueReadModel(details))
   const { snapshot } = await buildQueueListSnapshot(app, filters, options, io, observed)
   return includeOutputs
     ? attachQueueListDetails(snapshot, observed.attempts, io, focus, diffResolver ?? createQueuePrDiffResolver())
@@ -5614,7 +5540,7 @@ export function createQueueListSnapshotLoader(
   services: YrdCliServices,
   includeOutputs: boolean,
 ): QueueListSnapshotLoader {
-  const attemptResolver = createQueueAttemptResolver(services.queueReadModel ?? app)
+  const queueReadModel = requiredQueueReadModel(services)
   const diffResolver = createQueuePrDiffResolver()
   const log = app.log.child("queue-read")
   let cached:
@@ -5630,7 +5556,7 @@ export function createQueueListSnapshotLoader(
     | undefined
   return {
     async load(focus) {
-      const observed = await observeQueueList(app, io, services, attemptResolver, cached?.observed)
+      const observed = await observeQueueList(app, io, queueReadModel, cached?.observed)
       const unchanged =
         cached !== undefined &&
         cached.observed.cursor === observed.cursor &&
@@ -6123,7 +6049,7 @@ async function logRuns(
   const runIds = new Set(
     summaries.flatMap((summary) => [...summary.running, ...summary.waiting, ...summary.finished].map((run) => run.id)),
   )
-  const attempts = (await queueAttempts(app, services)).filter((attempt) => runIds.has(attempt.run))
+  const attempts = (await queueAttempts(services)).filter((attempt) => runIds.has(attempt.run))
   const revisionClocks = queueRunRevisionClocks(
     Object.values(state.bays.prs),
     summaries.flatMap((summary) => summary.finished),

@@ -67,7 +67,7 @@ export type YrdCliApp = Yrd<YrdCliState, YrdCliCommands> &
 
 export type YrdCliServices = Readonly<{
   queue?: YrdCliQueueAdministration
-  queueReadModel?: Pick<QueueReadModel, "attempts">
+  queueReadModel?: QueueReadModel
   recut?: GitPRRecutter
   journal?: YrdCliJournalAdministration
   checks?: YrdCliChecks

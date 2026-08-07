@@ -7,23 +7,21 @@ import { JobRequestSchema, parseJobTransitionForReplay, type JobTransition } fro
 import type { JournalView, JournalViewEntry } from "@yrd/persistence"
 import type { QueueAttempt } from "./queue-status-view.tsx"
 
-export type QueueReadModel = Readonly<{
-  view: JournalView
-  attempts(): Promise<readonly QueueAttempt[]>
-}>
-
-type QueueReadModelSnapshot = Readonly<{
+export type QueueReadModelSnapshot = Readonly<{
   cursor: number
   generation: number
   attempts: readonly QueueAttempt[]
 }>
 
-export type VersionedQueueReadModel = QueueReadModel &
-  Readonly<{
-    snapshot(): Promise<QueueReadModelSnapshot>
-  }>
+export type QueueReadModel = Readonly<{
+  /** Snapshot at the journal position current when read; cursor and generation
+   * are the caller's staleness anchors. */
+  snapshot(): Promise<QueueReadModelSnapshot>
+}>
 
-export function createQueueReadModel(options: Readonly<{ dir: string }>): VersionedQueueReadModel {
+type RegisteredQueueReadModel = QueueReadModel & Readonly<{ view: JournalView }>
+
+export function createQueueReadModel(options: Readonly<{ dir: string }>): RegisteredQueueReadModel {
   const path = join(options.dir, "journal.sqlite")
   let cachedCursor: number | undefined
   let cachedGeneration: number | undefined
@@ -78,9 +76,6 @@ export function createQueueReadModel(options: Readonly<{ dir: string }>): Versio
   return Object.freeze({
     view,
     snapshot,
-    async attempts() {
-      return (await snapshot()).attempts
-    },
   })
 }
 

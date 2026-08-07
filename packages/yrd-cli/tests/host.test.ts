@@ -2937,7 +2937,7 @@ checks: [{check: {run: "true"}}]
 
     await using host = await createYrdHost({ cwd: repo })
     expect(host.services.recut).toBeDefined()
-    await expect(host.services.queueReadModel?.attempts()).resolves.toEqual([])
+    await expect(host.services.queueReadModel?.snapshot()).resolves.toMatchObject({ attempts: [] })
     const headSha = await git(repo, "rev-parse", "issue/feature")
     await host.app.bays.submit({ branch: "issue/feature", headSha, base: "main" })
 

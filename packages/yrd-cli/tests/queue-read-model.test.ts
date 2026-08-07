@@ -138,7 +138,7 @@ describe("queue read model", () => {
     const dir = await directory()
     const model = createQueueReadModel({ dir })
 
-    await expect(model.attempts()).resolves.toEqual([])
+    await expect(model.snapshot()).resolves.toMatchObject({ attempts: [] })
     await expect(stat(join(dir, "journal.sqlite"))).rejects.toMatchObject({ code: "ENOENT" })
   })
 
@@ -156,7 +156,7 @@ describe("queue read model", () => {
       cursor: 1,
     })
 
-    await expect(model.attempts()).resolves.toEqual(await queueLogAttempts(events))
+    await expect(model.snapshot()).resolves.toMatchObject({ attempts: await queueLogAttempts(events) })
   })
 
   it("normalizes legacy Job finish results while rebuilding real Journal history", async () => {
@@ -180,12 +180,14 @@ describe("queue read model", () => {
     await expect(journal.append(journalFrame("legacy", events), 0)).resolves.toMatchObject({
       appended: true,
     })
-    await expect(model.attempts()).resolves.toMatchObject([
-      {
-        outcome: "failed",
-        result: { status: "failed", error: { code: "check-failed" } },
-      },
-    ])
+    await expect(model.snapshot()).resolves.toMatchObject({
+      attempts: [
+        {
+          outcome: "failed",
+          result: { status: "failed", error: { code: "check-failed" } },
+        },
+      ],
+    })
   })
 
   it("caches an unchanged cursor and invalidates the cache after an explicit rebuild", async () => {

@@ -125,7 +125,7 @@ import type {
   YrdCliServices,
 } from "./types.ts"
 import { createQueueReadModel } from "./queue-read-model.ts"
-import { QueueReadBoundary, queueReadBases } from "./queue-read-boundary.ts"
+import { queueReadBases } from "./queue-read-boundary.ts"
 import { LandingAuthorityBoundary } from "./landing-authority-boundary.ts"
 
 type RuntimeStep = StepDef<PRShape, PRShape>
@@ -1623,9 +1623,6 @@ async function createYrdRuntimeHost(
     if (mode === "active") await drain()
     const checks = configuredChecks(process, repository.stateDir, loaded.config, env)
     const services = Object.freeze({
-      [QueueReadBoundary]: Object.freeze({
-        readModel: queueReadModel,
-      }),
       ...(loaded.config.flows === undefined ? {} : { config: defineConfig(...loaded.config.flows) }),
       queue: queueAdministration(
         process,
@@ -1659,7 +1656,7 @@ async function createYrdRuntimeHost(
           return (journal as MutableJournal).administration.bump(version)
         },
       }),
-      queueReadModel,
+      queueReadModel: Object.freeze({ snapshot: queueReadModel.snapshot }),
       process,
       environment: env,
     })

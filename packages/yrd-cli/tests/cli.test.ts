@@ -114,7 +114,6 @@ import {
 } from "../src/queue-status-view.tsx"
 import { withLiveRenderer } from "../src/live-renderer.ts"
 import * as runInternals from "../src/run.ts"
-import { QueueReadBoundary } from "../src/queue-read-boundary.ts"
 import { LandingAuthorityBoundary } from "../src/landing-authority-boundary.ts"
 import { queueStats } from "../src/time-stats.ts"
 import type { YrdCliState } from "../src/types.ts"
@@ -585,6 +584,7 @@ function runYrd(
   services: YrdCliServices = {},
 ) {
   return runYrdRaw(app, argv, io, {
+    queueReadModel: testQueueReadModel(app),
     checks: {
       names: [],
       run: async () => ({ stdout: "", stderr: "", exitCode: 0, signal: null, durationMs: 0, timedOut: false }),
@@ -596,6 +596,27 @@ function runYrd(
     },
     ...services,
   })
+}
+
+/** Explicit adapter for in-memory test Journals; production reads are supplied
+ * by createYrdHost's SQLite-backed capability. */
+function testQueueReadModel(app: Parameters<typeof runYrdRaw>[0]) {
+  let cachedCursor: number | undefined
+  let cachedAttempts: readonly QueueAttempt[] = []
+  return {
+    async snapshot() {
+      const journal = await app.journalSnapshot()
+      if (journal.asOf.cursor !== cachedCursor) {
+        cachedAttempts = await queueLogAttempts(app.events())
+        cachedCursor = journal.asOf.cursor
+      }
+      return {
+        cursor: journal.asOf.cursor,
+        generation: 0,
+        attempts: cachedAttempts,
+      }
+    },
+  }
 }
 
 function gitBay(...args: string[]): string[] {
@@ -11460,7 +11481,7 @@ describe("typed issue landing bridge", () => {
     }
     const exhausted = outputIO()
     expect(await runYrd(exhaustingApp, yrd("pr", "runs", "PR1", "--json"), exhausted.io)).toBe(1)
-    expect({ snapshots, advances }).toEqual({ snapshots: 6, advances: 3 })
+    expect({ snapshots, advances }).toEqual({ snapshots: 9, advances: 5 })
     expect(exhausted.stdout()).toBe("")
     expect(JSON.parse(exhausted.stderr())).toEqual({
       failure: {
@@ -11870,6 +11891,19 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     checkRequests: [],
   } satisfies PR
 
+  it("fails loudly when a hot queue command lacks the queue attempt read capability", async () => {
+    const app = await createApp()
+    try {
+      const output = outputIO()
+
+      expect(await runYrdRaw(app, yrd("queue", "list", "--json"), output.io, {})).toBe(3)
+      expect(output.stderr()).toContain("missing required YrdCliServices.queueReadModel.snapshot capability")
+      expect(output.stderr()).toContain("createYrdHost")
+    } finally {
+      await app.close()
+    }
+  })
+
   it("keeps literal one-shot queue reads fork-free", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-queue-read-forks-"))
     const bin = join(repo, "bin")
@@ -11895,9 +11929,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
         base: ref,
         sha: baseSha,
       })
-      const services = {
-        [QueueReadBoundary]: {},
-      } as unknown as YrdCliServices
+      const services = { queueReadModel: testQueueReadModel(app) }
 
       for (const argv of [yrd("queue", "list", "--json"), yrd("--json")]) {
         const output = outputIO({ cwd: repo, stateDir: join(repo, ".git", "yrd"), resolveQueueTarget })
@@ -11931,10 +11963,8 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       const journalSnapshot = vi.fn(app.journalSnapshot.bind(app))
       const viewer = { ...app, journalSnapshot } as TestApp
       const services = {
-        [QueueReadBoundary]: {
-          readModel: { snapshot: async () => ({ cursor, generation: 1, attempts }) },
-        },
-      } as unknown as YrdCliServices
+        queueReadModel: { snapshot: async () => ({ cursor, generation: 1, attempts }) },
+      }
       const live = withLiveRenderer(output.io, async (element) => {
         mounted = element
       })
@@ -11995,7 +12025,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
           return { base: "main", sha: BASE_SHA }
         },
       }).io,
-      {},
+      { queueReadModel: testQueueReadModel(viewer) },
       false,
     )
     try {
@@ -12026,7 +12056,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       expect(spans[1]?.props?.cursor).toBe(spans[2]?.props?.cursor)
       expect(spans[2]?.props).toMatchObject({
         generation: 0,
-        state: "journal",
+        state: "memory",
         runner: "unchanged",
         results: changed.results.length,
         rows: changed.projection.rows.length,
@@ -12068,7 +12098,15 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
             return { base: "main", sha: BASE_SHA }
           },
         }).io,
-        { queueReadModel: { attempts: async () => attempts } },
+        {
+          queueReadModel: {
+            snapshot: async () => ({
+              cursor: (await app.journalSnapshot()).asOf.cursor,
+              generation: 0,
+              attempts,
+            }),
+          },
+        },
         false,
       )
 
@@ -12178,6 +12216,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       const snapshot = await runInternals.queueListSnapshot(app, [], {}, outputIO({ artifactRoot }).io, {
         includeOutputs: true,
         focus: { pr: "PR1", revision: 1 },
+        queueReadModel: testQueueReadModel(app),
       })
       expect(snapshot.outputs).toBeUndefined()
     } finally {
@@ -12197,7 +12236,9 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       expect(await runYrd(app, yrd("bay", "submit"), submit.io)).toBe(0)
       await app.queue.run({ prs: ["PR1", "PR2"] }, { runner: "test", leaseMs: 60_000 })
 
-      const snapshot = await runInternals.queueListSnapshot(app, [], { pr: "PR2" }, outputIO().io)
+      const snapshot = await runInternals.queueListSnapshot(app, [], { pr: "PR2" }, outputIO().io, {
+        queueReadModel: testQueueReadModel(app),
+      })
       expect(new Set(snapshot.projection.rows.map((row) => row.pr))).toEqual(new Set(["PR2"]))
     } finally {
       await app.close()
@@ -12254,6 +12295,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     try {
       const snapshot = await runInternals.queueListSnapshot(app, [], {}, outputIO({ cwd: repo }).io, {
         includeOutputs: true,
+        queueReadModel: testQueueReadModel(app),
       })
       expect(snapshot.commands).toEqual({ check: "bun vitest run" })
     } finally {
@@ -12268,7 +12310,9 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       await openAndSubmit(app)
       await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
 
-      const snapshot = await runInternals.queueListSnapshot(app, [], {}, outputIO().io)
+      const snapshot = await runInternals.queueListSnapshot(app, [], {}, outputIO().io, {
+        queueReadModel: testQueueReadModel(app),
+      })
       expect(snapshot.projection.timeStatsFacts).toMatchObject([
         {
           run: "R1",
@@ -12299,12 +12343,12 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       })
       const services = {
         queueReadModel: {
-          async attempts() {
+          async snapshot() {
             reads += 1
-            return attempts
+            return { cursor: (await app.journalSnapshot()).asOf.cursor, generation: 0, attempts }
           },
         },
-      } as unknown as YrdCliServices
+      }
 
       await expect(runYrd(noJournalScan, yrd("queue", "list", "--json"), outputIO().io, services)).resolves.toBe(0)
       expect(reads).toBe(1)
@@ -12350,79 +12394,6 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     }
   })
 
-  it("reuses the attempt projection across heartbeat-only watch ticks and invalidates on a Job transition", async () => {
-    const app = await createApp({ failingCheck: true })
-    try {
-      await openAndSubmit(app)
-      await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
-      let journalReads = 0
-      const resolver = runInternals.createQueueAttemptResolver({
-        events() {
-          journalReads++
-          return app.events()
-        },
-      })
-      const state = app.state() as YrdCliState
-      const [jobId, job] = Object.entries(state.jobs.byId)[0] ?? []
-      if (jobId === undefined || job === undefined) throw new Error("missing retained test Job")
-
-      await resolver.resolve(state)
-      await resolver.resolve(state)
-      const heartbeat = {
-        ...state,
-        jobs: {
-          ...state.jobs,
-          byId: {
-            ...state.jobs.byId,
-            [jobId]: {
-              ...job,
-              changedAt: "2026-07-24T12:00:01.000Z",
-              ...("leaseExpiresAt" in job ? { leaseExpiresAt: "2026-07-24T12:01:01.000Z" } : {}),
-            },
-          },
-        },
-      } as YrdCliState
-      await resolver.resolve(heartbeat)
-      expect(journalReads).toBe(1)
-
-      const transitioned = {
-        ...heartbeat,
-        jobs: {
-          ...heartbeat.jobs,
-          byId: {
-            ...heartbeat.jobs.byId,
-            [jobId]: { ...job, attempt: job.attempt + 1 },
-          },
-        },
-      } as YrdCliState
-      await resolver.resolve(transitioned)
-      expect(journalReads).toBe(2)
-    } finally {
-      await app.close()
-    }
-  })
-
-  it("lets the durable read-model cursor decide whether watch ticks need a new projection", async () => {
-    const app = await createApp()
-    try {
-      let reads = 0
-      const attempts: readonly QueueAttempt[] = []
-      const resolver = runInternals.createQueueAttemptResolver({
-        attempts() {
-          reads += 1
-          return Promise.resolve(attempts)
-        },
-      })
-      const state = app.state() as YrdCliState
-
-      await expect(resolver.resolve(state)).resolves.toBe(attempts)
-      await expect(resolver.resolve(state)).resolves.toBe(attempts)
-      expect(reads).toBe(2)
-    } finally {
-      await app.close()
-    }
-  })
-
   it("queueListSnapshot tails out-of-process journal appends instead of serving the mount-time projection", async () => {
     // `queue watch` builds ONE long-lived app and reloads on a timer, while a
     // separate resident-runner process appends to the shared journal. The viewer
@@ -12442,7 +12413,9 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
 
       // queueListSnapshot refreshes before reading, so its rows reflect the
       // out-of-process submission (stale WITHOUT refresh, fresh WITH it):
-      const snapshot = await runInternals.queueListSnapshot(viewer, [], {}, outputIO().io)
+      const snapshot = await runInternals.queueListSnapshot(viewer, [], {}, outputIO().io, {
+        queueReadModel: testQueueReadModel(viewer),
+      })
       expect(snapshot.results.flatMap((result) => result.prs.map((pr) => pr.id))).toContain("PR1")
 
       // The refresh also published, so subsequent plain reads are fresh too:
