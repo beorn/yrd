@@ -540,7 +540,7 @@ export type QueueAttempt = QueueLogAttempt &
 type RequestedJob = Readonly<{ run: string; step: string; index: number; requestedAt: string; revision: string }>
 type StartedAttempt = Readonly<{ attempt: number; runner: string; startedAt: string }>
 
-type PinnedPRRevision = Readonly<{ id: string; revision: number; headSha: string }>
+type PinnedPRRevision = Readonly<{ id: string; revision: number; headSha: string; intent?: unknown }>
 
 export function queueRevisionKey(revision: PinnedPRRevision): string {
   return JSON.stringify([revision.id, revision.revision, revision.headSha])
@@ -556,7 +556,13 @@ export function queueRunRevisionClocks(prs: Iterable<PR>, runs: Iterable<Run>): 
   for (const run of runs) {
     for (const revision of run.prs) {
       const pr = byId.get(revision.id)
-      if (pr === undefined) throw new Error(`yrd: run '${run.id}' has no retained PR '${revision.id}'`)
+      if (pr === undefined) {
+        // A carrier-free pin intent's member id is an intent id: the snapshot
+        // is the whole record and no revision clock exists. A PR member with
+        // no retained PR is journal corruption and stays loud.
+        if (revision.intent !== undefined) continue
+        throw new Error(`yrd: run '${run.id}' has no retained PR '${revision.id}'`)
+      }
       clocks.set(queueRunRevisionKey(run, revision), runRevisionClock(pr, run))
     }
   }
@@ -1978,8 +1984,15 @@ function timelineRunMemberRows(
   const landingVerdict = running ? ("running" as const) : landingVerdictOfOutcome(status)
   return run.prs.map((member, index) => {
     const current = result.prs.find((candidate) => candidate.id === member.id)
-    if (current === undefined) throw new Error(`yrd: run '${run.id}' has no retained PR '${member.id}'`)
-    const lineage = timelineRevisionLineage(current, member.revision)
+    // An intent member's snapshot is its complete record: render from it and
+    // skip the PR-only enrichments (lineage history, admission clock,
+    // submitter). A PR member with no retained PR stays loud.
+    if (current === undefined && member.intent === undefined)
+      throw new Error(`yrd: run '${run.id}' has no retained PR '${member.id}'`)
+    const lineage =
+      current === undefined
+        ? { pr: member.id, revisions: [member.revision] }
+        : timelineRevisionLineage(current, member.revision)
     const runKey = queueRunRevisionKey(run, member)
     const submittedAt = submissionTimes.has(runKey)
       ? (submissionTimes.get(runKey) ?? undefined)
@@ -1987,15 +2000,15 @@ function timelineRunMemberRows(
     // Member AGE anchors on the causal admission clock of THIS run, so a
     // later resubmission of the same revision can never postdate an earlier
     // run's finish (the 21106 timestamp-crash class).
-    const admission = current.revs.length > 0 ? runRevisionClock(current, run) : undefined
+    const admission = current !== undefined && current.revs.length > 0 ? runRevisionClock(current, run) : undefined
     const sourceReadyAt =
       admission === undefined
         ? (lineage.sourceReadyAt ?? submittedAt)
         : admission.admittedBy === "submission"
           ? (lineage.sourceReadyAt ?? admission.submittedAt)
           : (admission.checkRequestedAt ?? admission.pushedAt)
-    const submitter = revisionSubmitter(current, member.revision, member.headSha)
-    const issue = presentFact(current.issue)
+    const submitter = current === undefined ? undefined : revisionSubmitter(current, member.revision, member.headSha)
+    const issue = presentFact(current?.issue ?? member.issue)
     return {
       id: `${run.base}:run:${run.id}:${member.id}:${member.revision}`,
       base: run.base,
@@ -2249,7 +2262,14 @@ export function queueTimelineAdmissionTimes(results: readonly QueueStatusResult[
     for (const run of [...result.running, ...result.waiting, ...result.finished]) {
       for (const member of run.prs) {
         const pr = byId.get(member.id)
-        if (pr === undefined) throw new Error(`yrd: run '${run.id}' has no retained PR '${member.id}'`)
+        if (pr === undefined) {
+          // Intent members have no submission: the run itself is the admission.
+          if (member.intent !== undefined) {
+            submissionTimes.set(queueRunRevisionKey(run, member), null)
+            continue
+          }
+          throw new Error(`yrd: run '${run.id}' has no retained PR '${member.id}'`)
+        }
         const runKey = queueRunRevisionKey(run, member)
         if (pr.revs.length > 0) {
           const clock = runRevisionClock(pr, run)
@@ -3782,6 +3802,9 @@ function queueLogSubmissionTime(
   if (revisionClocks === undefined) return undefined
   const clock = revisionClocks.get(queueRunRevisionKey(run, pr))
   if (clock === undefined) {
+    // Intent members never mint a revision clock (no submission precedes the
+    // run); every PR member must have one.
+    if (pr.intent !== undefined) return undefined
     throw new Error(
       `yrd: run '${run.id}' has no causal submit/check-request clock for PR '${pr.id}' revision ${pr.revision}@${pr.headSha}`,
     )
