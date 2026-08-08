@@ -1676,7 +1676,7 @@ describe("runYrd", () => {
 
     const help = outputIO({ columns: 80 })
     expect(await runYrd(app, yrd("pr"), help.io), help.stderr()).toBe(0)
-    expect(help.stdout()).toContain("Usage: yrd pr [options] [command]")
+    expect(help.stdout()).toContain("Usage: yrd mr|pr [options] [command]")
     expect(help.stdout()).toContain("list [options]")
     expect(help.stdout()).not.toMatch(/^PR\s+BRANCH/mu)
 
@@ -1690,6 +1690,29 @@ describe("runYrd", () => {
     }
   })
 
+  it("I23: mr is the printed family name, pr the ruled alias, and recut/publish/ready leave the help surface", async () => {
+    const app = await createApp()
+
+    const mrHelp = outputIO({ columns: 100 })
+    expect(await runYrd(app, yrd("mr"), mrHelp.io), mrHelp.stderr()).toBe(0)
+    expect(mrHelp.stdout()).toContain("Usage: yrd mr|pr [options] [command]")
+    expect(mrHelp.stdout()).not.toMatch(/^\s{2}recut/mu)
+    expect(mrHelp.stdout()).not.toMatch(/^\s{2}publish/mu)
+    expect(mrHelp.stdout()).not.toMatch(/^\s{2}ready/mu)
+
+    // Hidden is not removed: every retired-from-help verb still answers.
+    for (const verb of ["recut", "publish", "ready"]) {
+      const hidden = outputIO({ columns: 100 })
+      expect(await runYrd(app, yrd("mr", verb, "--help"), hidden.io), hidden.stderr()).toBe(0)
+      expect(hidden.stdout()).toContain(`Usage: yrd mr ${verb}`)
+    }
+
+    // The ruled alias routes the family; envelopes keep their stable names.
+    const aliasJson = outputIO()
+    expect(await runYrd(app, yrd("mr", "list", "--json"), aliasJson.io), aliasJson.stderr()).toBe(0)
+    expect(JSON.parse(aliasJson.stdout())).toMatchObject({ command: "pr.list" })
+  })
+
   it("exposes the canonical same-PR recut command", async () => {
     const app = await createApp()
     const createHelp = outputIO({ columns: 100 })
@@ -1697,7 +1720,7 @@ describe("runYrd", () => {
     const help = outputIO({ columns: 100 })
 
     expect(await runYrd(app, yrd("pr", "create", "--help"), createHelp.io), createHelp.stderr()).toBe(0)
-    expect(createHelp.stdout()).toContain("Usage: yrd pr create [options] [selector]")
+    expect(createHelp.stdout()).toContain("Usage: yrd mr create [options] [selector]")
     expect(createHelp.stdout()).toContain("--issue <ref>")
     expect(createHelp.stdout()).toContain("Authored root branch")
     expect(createHelp.stdout()).toContain("$ yrd pr create <branch>")
@@ -1708,7 +1731,7 @@ describe("runYrd", () => {
     expect(submitHelp.stdout()).not.toContain("Authored root branch")
 
     expect(await runYrd(app, yrd("pr", "recut", "--help"), help.io), help.stderr()).toBe(0)
-    expect(help.stdout()).toContain("Usage: yrd pr recut [options] <selector>")
+    expect(help.stdout()).toContain("Usage: yrd mr recut [options] <selector>")
     expect(help.stdout()).toContain("--revision <number>")
     expect(help.stdout()).toContain("--preflight")
     expect(help.stdout()).toContain("--queue")
@@ -9993,11 +10016,11 @@ describe("runYrd", () => {
     const unsuggested = outputIO()
 
     expect(await runYrd(app, yrd("pr", "xyzzy"), unsuggested.io)).toBe(2)
-    expect(unsuggested.stderr()).toBe("error: unknown command 'xyzzy' (Run 'yrd pr --help' for available commands.)\n")
+    expect(unsuggested.stderr()).toBe("error: unknown command 'xyzzy' (Run 'yrd mr --help' for available commands.)\n")
 
     const repoScoped = outputIO()
     expect(await runInternals.runYrdHelp(yrd("--repo", "/tmp/project", "pr", "xyzzy"), repoScoped.io)).toBe(2)
-    expect(repoScoped.stderr()).toBe("error: unknown command 'xyzzy' (Run 'yrd pr --help' for available commands.)\n")
+    expect(repoScoped.stderr()).toBe("error: unknown command 'xyzzy' (Run 'yrd mr --help' for available commands.)\n")
 
     for (const operand of ["foo.bar", "foo,bar"]) {
       const punctuated = outputIO()

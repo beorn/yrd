@@ -4640,10 +4640,14 @@ function queueRunIsFollow(action: Readonly<{ opts(): unknown; args: readonly str
   return action.args.length === 0
 }
 
+const READ_ONLY_MR_COMMANDS = ["list", "view", "runs", "diff", "status", "checks"] as const
 const READ_ONLY_COMMANDS: Readonly<Record<string, readonly string[]>> = {
   bay: ["_list", "list", "path", "log"],
   queue: ["_list", "list", "audit"],
-  pr: ["list", "view", "runs", "diff", "status", "checks"],
+  // Keyed by the command's canonical name; "pr" stays as insurance for any
+  // runtime that still registers the group under its ruled alias.
+  mr: READ_ONLY_MR_COMMANDS,
+  pr: READ_ONLY_MR_COMMANDS,
   issue: ["_list", "view"],
   contest: ["_list", "view"],
 }
@@ -8572,9 +8576,14 @@ function buildProgram(
 
   addRootBayCommands(program, installed, installedServices, io, setExit)
 
+  // `mr` is the printed name; `pr` is the permanent ruled alias (I23: "the
+  // `yrd mr` family becomes primary; `yrd pr *` continues working forever").
   const pr = program
-    .command("pr")
-    .description("manage pull requests (a branch selector targets the live delivery; address a terminal PR by its id)")
+    .command("mr")
+    .alias("pr")
+    .description(
+      "manage merge requests, also called pull requests or PRs (a branch selector targets the live delivery; address a terminal merge request by its id)",
+    )
   pr.helpCommand(false)
   pr.command("list")
     .description("list pull requests")
@@ -8668,8 +8677,10 @@ function buildProgram(
     .option("--untrack", "stop tracking: a stale head again blocks the recut")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => editPr(installed(), selector, options, io))
+  // Off the help surface (I23: "recut disappears — resubmitting is submit
+  // again"); the verb keeps working for the flows that learned it.
   const recut = pr
-    .command("recut <selector>")
+    .command("recut <selector>", { hidden: true })
     .description("recut a merge request revision onto the current base")
     .option("--revision <number>", "select an older immutable PR revision", int)
     .option("--preflight", "classify recut, withdraw, force, or no-op without changing anything")
@@ -8680,12 +8691,13 @@ function buildProgram(
       setExit(await recutPr(installed(), installedServices(), selector, options, io)),
     )
   addAuthoredCarrierWorkflow(recut, name)
-  pr.command("publish <selector>")
+  // Hidden with recut: the draft story is `create` = draft, `submit` = ready.
+  pr.command("publish <selector>", { hidden: true })
     .description("request credential-bearing publication of one immutable PR revision")
     .option("--queue", "recut and queue the revision after publishing succeeds")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => publishPr(installed(), installedServices(), selector, options, io))
-  pr.command("ready <selector>")
+  pr.command("ready <selector>", { hidden: true })
     .description("submit a pushed PR revision and request configured checks")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) =>
@@ -8945,7 +8957,7 @@ function buildProgram(
 
   const order = new Map(
     [
-      "pr",
+      "mr",
       "bay",
       "intent",
       "issue",
@@ -9085,7 +9097,10 @@ async function executeYrd(
   const commanderOutput: CommanderOutput = {}
   const program = buildProgram(app, services, invocation.name, runtimeIO, setExit, commanderOutput, bootstrap)
   const canonicalArgs = canonicalizeYrdCommandAliases(invocation.args)
-  const args = canonicalArgs.length === 1 && canonicalArgs[0] === "pr" ? ["pr", "--help"] : canonicalArgs
+  const args =
+    canonicalArgs.length === 1 && (canonicalArgs[0] === "pr" || canonicalArgs[0] === "mr")
+      ? [canonicalArgs[0], "--help"]
+      : canonicalArgs
   try {
     await program.parseAsync(args, { from: "user" })
     return exit

@@ -1565,10 +1565,12 @@ checks: [{check: {run: "true"}}]
       commandBlock
         .split("\n")
         .flatMap(
-          (text) => text.match(/^\s{2}(?<command>[a-z]+)(?:\s+(?:\[[^\]]+\]|<[^>]+>))*\s{2,}/u)?.groups?.command ?? [],
+          (text) =>
+            text.match(/^\s{2}(?<command>[a-z]+(?:\|[a-z]+)?)(?:\s+(?:\[[^\]]+\]|<[^>]+>))*\s{2,}/u)?.groups
+              ?.command ?? [],
         ),
     ).toEqual([
-      "pr",
+      "mr|pr",
       "bay",
       "intent",
       "issue",
