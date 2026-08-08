@@ -1525,6 +1525,16 @@ describe("Queue", () => {
     expect(activeQueueRootIds(app.state().queues.authority)).toEqual([])
   })
 
+  it("accepts the printed `<base>#<number>` run reference the timeline and queue views teach", async () => {
+    await using app = await createQueueApp()
+    await submitBranch(app, "topic/printed-run-ref")
+
+    await app.queue.run({ prs: ["PR1"], steps: ["check"] }, runtime)
+    expect(app.queue.get("main#1")).toMatchObject({ id: "R1" })
+    expect(app.queue.get("MAIN#1")).toMatchObject({ id: "R1" })
+    expect(app.queue.get("other#1")).toBeUndefined()
+  })
+
   it("resolves a canonical Queue run without enumerating history while preserving selector fallback", async () => {
     await using app = await createQueueApp()
     const pr = await submitBranch(app, "issue/bounded-run-resolution")

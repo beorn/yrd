@@ -820,9 +820,22 @@ function resolveQueueRecord(state: QueuesState, id: RunId): QueueRecord | undefi
   if (direct !== undefined) return direct
   return resolveSelector(
     id,
-    queueRecordValues(state).map((record) => ({ canonical: record.id, value: record })),
+    queueRecordValues(state).map((record) => ({
+      canonical: record.id,
+      aliases: printedRunRefAliases(record),
+      value: record,
+    })),
     { kind: "queue run" },
   )
+}
+
+/** The timeline and queue views print a run as `<base>#<number>` (`main#324`
+ * for run `R324`); the resolver must accept what those surfaces teach the
+ * operator to copy. Bare numbers stay PR selectors — `yrd cancel 324` already
+ * means PR324 — so only the full printed form aliases here. */
+function printedRunRefAliases(record: QueueRecord): readonly string[] {
+  const number = /^R(\d+)$/u.exec(record.id)?.[1]
+  return number === undefined ? [] : [`${record.base}#${number}`]
 }
 
 function compareRunIds(left: RunId, right: RunId): number {
