@@ -12541,6 +12541,99 @@ describe("yrd intent — declared pin advances (22668 phase 1)", () => {
     }
   }, 30_000)
 
+  it("suppresses the manual-submit hint under a resident runner and names the condition without one (@i/23-yrd-vocabulary/intent-rail-hint)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-intent-materialize-runner-"))
+    const repo = join(root, "root")
+    const component = join(root, "component")
+    const git = (cwd: string, ...args: string[]): string =>
+      execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim()
+    try {
+      mkdirSync(repo)
+      mkdirSync(component)
+      execFileSync("git", ["init", "-q", "-b", "main", repo])
+      execFileSync("git", ["init", "-q", "-b", "main", component])
+      for (const cwd of [repo, component]) {
+        git(cwd, "config", "user.name", "Yrd Test")
+        git(cwd, "config", "user.email", "yrd@example.invalid")
+      }
+      writeFileSync(join(component, "version.txt"), "base\n")
+      git(component, "add", "version.txt")
+      git(component, "commit", "-qm", "base")
+      git(repo, "config", "protocol.file.allow", "always")
+      git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", component, "dep")
+      git(repo, "commit", "-qam", "add dependency")
+      writeFileSync(join(component, "version.txt"), "target\n")
+      git(component, "commit", "-qam", "target")
+      const target = git(component, "rev-parse", "HEAD")
+      await using process = createProcess()
+      await using app = await createApp()
+
+      // No resident runner: the hint prints AND names the condition it assumes.
+      const absent = outputIO({ cwd: repo })
+      expect(
+        await runYrd(
+          app,
+          yrd("intent", "materialize", "dep", "--target", target, "--issue", "@yrd/core/materialize"),
+          absent.io,
+          { process },
+        ),
+        absent.stderr(),
+      ).toBe(0)
+      expect(absent.stdout()).toContain("next (no resident runner): yrd pr submit")
+      const absentJson = outputIO({ cwd: repo })
+      expect(
+        await runYrd(
+          app,
+          yrd("intent", "materialize", "dep", "--target", target, "--issue", "@yrd/core/materialize", "--json"),
+          absentJson.io,
+          { process },
+        ),
+        absentJson.stderr(),
+      ).toBe(0)
+      const absentEnvelope = JSON.parse(absentJson.stdout()) as { runner: string; next?: string }
+      expect(absentEnvelope.runner).toBe("none")
+      expect(absentEnvelope.next).toContain("yrd pr submit")
+
+      // Resident runner (live pid, no exit marker): the manual-submit hint is
+      // suppressed entirely — a hint that is right only half the time costs more
+      // to read than it saves — and the output states the runner-present path.
+      const statusDir = join(repo, ".git", "yrd", "resident-runner")
+      mkdirSync(statusDir, { recursive: true })
+      const now = new Date().toISOString()
+      writeFileSync(
+        join(statusDir, "status.json"),
+        JSON.stringify({ pid: globalThis.process.pid, startedAt: now, lastTickAt: now }),
+      )
+      const resident = outputIO({ cwd: repo })
+      expect(
+        await runYrd(
+          app,
+          yrd("intent", "materialize", "dep", "--target", target, "--issue", "@yrd/core/materialize"),
+          resident.io,
+          { process },
+        ),
+        resident.stderr(),
+      ).toBe(0)
+      expect(resident.stdout()).not.toContain("yrd pr submit")
+      expect(resident.stdout()).toContain("resident runner")
+      const residentJson = outputIO({ cwd: repo })
+      expect(
+        await runYrd(
+          app,
+          yrd("intent", "materialize", "dep", "--target", target, "--issue", "@yrd/core/materialize", "--json"),
+          residentJson.io,
+          { process },
+        ),
+        residentJson.stderr(),
+      ).toBe(0)
+      const residentEnvelope = JSON.parse(residentJson.stdout()) as { runner: string; next?: string }
+      expect(residentEnvelope.runner).toBe("resident")
+      expect(residentEnvelope.next).toBeUndefined()
+    } finally {
+      safeRemoveSync(root, { within: tmpdir(), allowMissing: true })
+    }
+  }, 30_000)
+
   it("admits an intent and reports the pin it advances from", async () => {
     await using app = await createApp()
     const output = outputIO()

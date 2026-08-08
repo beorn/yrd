@@ -7958,12 +7958,26 @@ async function materializeIntent(
   if (current.exitCode !== 0) {
     await runQueueGit(host, repo, ["update-ref", ref, carrier.commit, "0".repeat(40)])
   }
+  // A resident runner lands open intents itself — printing the manual-submit
+  // step under one teaches the reader to create a duplicate carrier that gets
+  // terminated as already-landed (@i/23-yrd-vocabulary/intent-rail-hint). The
+  // hint survives only in the no-runner state, and then it names that state.
+  const runner = activeResidentRunner(await residentRunnerStatus(repo))
+  if (runner !== null) {
+    await printResult(
+      io,
+      jsonEnabled(options),
+      { command: "intent.materialize", branch, carrier, runner: "resident" },
+      `${branch} ${carrier.commit}\nresident runner (pid ${runner.pid}) lands open intents — no manual submit needed`,
+    )
+    return
+  }
   const next = `yrd pr submit ${branch} --issue ${issue}`
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "intent.materialize", branch, carrier, next },
-    `${branch} ${carrier.commit}\nnext: ${next}`,
+    { command: "intent.materialize", branch, carrier, runner: "none", next },
+    `${branch} ${carrier.commit}\nnext (no resident runner): ${next}`,
   )
 }
 
