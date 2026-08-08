@@ -629,10 +629,15 @@ export type ParsedPRSelector = Readonly<{
   revision?: number
 }>
 
-/** Parse the identities Yrd itself renders. Branch/name aliases deliberately
- * stay outside this grammar and continue through the generic selector path. */
+/** Parse the identities Yrd itself renders, plus the bare numeric id an
+ * operator types after reading one (`182` for `pr#182.1` — I23 selector
+ * uniformity). Only digits qualify for the bare form; any other bare token
+ * stays outside this grammar and continues through the generic selector path,
+ * so branch/name aliases remain reachable. A bare numeric that names no PR
+ * also falls back to the alias path in {@link resolvePRMatch}. */
 export function parsePRSelector(selector: string): ParsedPRSelector | undefined {
-  const match = /^pr#?([a-z0-9_-]+)(?:\.(\d+))?$/iu.exec(selector.trim())
+  const match =
+    /^pr#?([a-z0-9_-]+)(?:\.(\d+))?$/iu.exec(selector.trim()) ?? /^(\d+)(?:\.(\d+))?$/u.exec(selector.trim())
   const id = match?.[1]
   if (id === undefined) return undefined
   const revisionText = match?.[2]

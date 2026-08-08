@@ -42,8 +42,27 @@ describe("displayed PR selector round trip", () => {
     ["pr#1410", { pr: "PR1410" }],
     ["PR1410", { pr: "PR1410" }],
     ["pr1410", { pr: "PR1410" }],
+    ["1410", { pr: "PR1410" }],
+    ["1410.16", { pr: "PR1410", revision: 16 }],
   ] as const)("parses %s without guessing", (selector, expected) => {
     expect(parsePRSelector(selector)).toEqual(expected)
+  })
+
+  it("keeps a bare non-numeric token out of the PR grammar (branch/name aliases stay reachable)", () => {
+    expect(parsePRSelector("topic/round-trip")).toBeUndefined()
+    expect(parsePRSelector("fix-thing")).toBeUndefined()
+  })
+
+  it("accepts the bare numeric id every operator types after reading pr#1410.16 (I23 selector uniformity)", () => {
+    expect(resolvePRMatch(state, "1410")?.value).toBe(pr)
+    expect(resolvePRMatch(state, "1410.16")?.revision).toBe(revisions[1])
+    expect(requireLivePR(state, "1410")).toBe(pr)
+  })
+
+  it("falls back to branch/name aliases when a bare numeric names no PR", () => {
+    const branchNumeric: PR = { ...pr, id: "PR7", branch: "9999" }
+    const numericState: BaysState = { byId: {}, prs: { [branchNumeric.id]: branchNumeric }, receipts: {} }
+    expect(resolvePRMatch(numericState, "9999")?.value).toBe(branchNumeric)
   })
 
   it("feeds the canonical renderer output back to the exact retained revision", () => {
