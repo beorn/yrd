@@ -369,6 +369,71 @@ describe("pr withdraw", () => {
   })
 })
 
+describe("I23 close merger + root cancel (chief ruling b9bf30f2)", () => {
+  it("mr close does both records — withdrawn-with-reason first, then queue terminalization", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["check"] })
+
+    const output = outputIO()
+    expect(
+      await runYrd(app, yrd("mr", "close", "PR1", "--reason", "superseded by rework", "--json"), output.io),
+      output.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "pr.close",
+      reason: "superseded by rework",
+      prs: [{ id: "PR1", state: "closed", merged: false }],
+    })
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
+    expect(await journaledEvents(app, "pr/withdrawn")).toEqual([
+      expect.objectContaining({ pr: "PR1", reason: "superseded by rework" }),
+    ])
+    expect(app.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "failure" })
+  })
+
+  it("withdraw answers as a hidden alias with its stable envelope name", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+
+    const help = outputIO({ columns: 100 })
+    expect(await runYrd(app, yrd("mr"), help.io), help.stderr()).toBe(0)
+    expect(help.stdout()).not.toMatch(/^\s{2}withdraw/mu)
+    expect(help.stdout()).toMatch(/^\s{2}close.*--reason|close \[options\]/mu)
+
+    const output = outputIO()
+    expect(await runYrd(app, yrd("pr", "withdraw", "PR1", "--reason", "old spelling", "--json"), output.io)).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({ command: "pr.withdraw", reason: "old spelling" })
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
+  })
+
+  it("root cancel stops the attempt and leaves the merge request open", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["check"] })
+
+    const output = outputIO()
+    expect(
+      await runYrd(app, yrd("cancel", "PR1", "--reason", "bad attempt", "--json"), output.io),
+      output.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({ command: "queue.cancel" })
+    // Attempt-scoped: the run is canceled, the merge request is NOT withdrawn.
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    expect(await journaledEvents(app, "pr/withdrawn")).toHaveLength(0)
+  })
+
+  it("root cancel with no active attempt fails loud and teaches close --reason", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+
+    const output = outputIO()
+    expect(await runYrd(app, yrd("cancel", "PR1"), output.io)).toBe(1)
+    expect(output.stderr()).toContain("no running or waiting attempt")
+    expect(output.stderr()).toContain("mr close --reason")
+  })
+})
+
 describe("pr withdraw journal replay", () => {
   it("replays reason-bearing and reason-less withdrawals through a fresh session", async () => {
     // A second yrd invocation in a real repository is a FRESH app replaying the

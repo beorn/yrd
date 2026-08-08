@@ -2825,29 +2825,6 @@ async function bayPruneCommand(
   return 0
 }
 
-async function closePrs(
-  app: YrdCliApp,
-  selectors: readonly string[],
-  options: JsonOption,
-  io: YrdCliIO,
-): Promise<void> {
-  if (selectors.length === 0) usage("pr close requires at least one PR selector")
-  const prs: PR[] = []
-  for (const selector of selectors) {
-    await app.bays.closePr({ pr: selector })
-    const pr = app.bays.pr(selector)
-    if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after close`)
-    await app.queue.cancel({ prs: [pr.id], by: io.runner ?? "operator", reason: "PR withdrawn" })
-    prs.push(pr)
-  }
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "pr.close", prs: prs.map(projectPRTaskStatus) },
-    createElement(PRResultView, { prs, runs: [] }),
-  )
-}
-
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`
 }
@@ -4773,6 +4750,35 @@ async function preparePublicationQueueCycle(
     )
   }
   return executed
+}
+
+/** Root `yrd cancel <selector>` — stop the CURRENT ATTEMPT (chief ruling,
+ * I23): resolve a merge-request selector to its running or waiting run and
+ * cancel that run; members re-queue and the merge request stays open. Cancel
+ * never withdraws — "stop delivering this" is `mr close --reason`; run both
+ * for both effects. A run selector passes through unchanged. */
+async function cancelAttempt(
+  app: YrdCliApp,
+  selector: string,
+  options: JsonOption & Readonly<{ reason?: string }>,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
+  const pr = app.bays.pr(selector)
+  if (pr !== undefined) {
+    const summary = app.queue.status(pr.base)
+    const active = [...summary.running, ...summary.waiting].find((run) =>
+      run.prs.some((member) => member.id === pr.id),
+    )
+    if (active === undefined) {
+      raiseFailure(
+        "refusal",
+        "no-active-attempt",
+        `yrd: merge request '${pr.id}' has no running or waiting attempt to cancel; to stop delivering it, use 'yrd mr close --reason'`,
+      )
+    }
+    return cancelQueueRun(app, active.id, options, io)
+  }
+  return cancelQueueRun(app, selector, options, io)
 }
 
 async function cancelQueueRun(
@@ -8395,6 +8401,15 @@ function buildProgram(
     )
 
   program
+    .command("cancel <selector>")
+    .description(
+      "stop the current attempt for a merge request or run — members re-queue and the merge request stays open; to stop delivering it, use `yrd mr close --reason` (run both for both effects)",
+    )
+    .option("--reason <text>", "human-readable cancellation reason")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => setExit(await cancelAttempt(installed(), selector, options, io)))
+
+  program
     .command("prime")
     .description("brief the current Yrd delivery state")
     .option("--json", "emit stable JSON")
@@ -8745,10 +8760,13 @@ function buildProgram(
       recordPrRegression(installed(), selector, options as unknown as PrRegressionOptions, io),
     )
   pr.command("close [selector...]")
-    .description("close a live PR without merging (leaves it out of the queue)")
+    .description("close a live merge request without merging — records why, leaves the queue")
+    .option("--reason <text>", "close rationale recorded on each pr/withdrawn event")
     .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => closePrs(installed(), selectors, options, io))
-  pr.command("withdraw <selector...>")
+    .action(async (selectors, options) => withdrawPrs(installed(), selectors, options, io, "pr.close"))
+  // Hidden ruled alias of `close` — one act, two spellings (I23); the envelope
+  // keeps its stable pr.withdraw name for journal consumers.
+  pr.command("withdraw <selector...>", { hidden: true })
     .description("withdraw live PRs from delivery, recording the reason")
     .option("--reason <text>", "withdrawal rationale recorded on each pr/withdrawn event")
     .option("--json", "emit stable JSON")

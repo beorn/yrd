@@ -56,14 +56,21 @@ export type WithdrawPrsOptions = JsonOption & Readonly<{ reason?: string }>
 
 /** `yrd pr withdraw <selector...> [--reason <text>]` — withdraw live PRs,
  * recording the operator's reason on each pr/withdrawn event. Every selector is
- * validated before the first event is emitted so a mixed batch refuses whole. */
+ * validated before the first event is emitted so a mixed batch refuses whole.
+ *
+ * `mr close` and the hidden `withdraw` alias are ONE act (I23: two words, one
+ * act): the withdrawn record with its reason is written FIRST, then queue work
+ * terminalizes — a close that fails partway still leaves the reason behind.
+ * Only the printed envelope name follows the invoked spelling. */
 export async function withdrawPrs(
   app: YrdCliApp,
   selectors: readonly string[],
   options: WithdrawPrsOptions,
   io: YrdCliIO,
+  command: "pr.close" | "pr.withdraw" = "pr.withdraw",
 ): Promise<void> {
-  if (selectors.length === 0) usage("pr withdraw requires at least one PR selector")
+  const verb = command === "pr.close" ? "mr close" : "pr withdraw"
+  if (selectors.length === 0) usage(`${verb} requires at least one PR selector`)
   const reason = options.reason?.trim()
   if (options.reason !== undefined && (reason === undefined || reason === "")) {
     usage("--reason requires non-empty text")
@@ -72,7 +79,7 @@ export async function withdrawPrs(
   const seen = new Set<string>()
   for (const selector of selectors) {
     const pr = requiredLivePr(app, selector)
-    if (seen.has(pr.id)) usage(`pr withdraw selectors resolve to PR '${pr.id}' more than once`)
+    if (seen.has(pr.id)) usage(`${verb} selectors resolve to PR '${pr.id}' more than once`)
     seen.add(pr.id)
     targets.push(pr)
   }
@@ -84,7 +91,7 @@ export async function withdrawPrs(
     io,
     jsonEnabled(options),
     {
-      command: "pr.withdraw",
+      command,
       ...(reason === undefined ? {} : { reason }),
       prs: withdrawn.map(projectPRTaskStatus),
     },

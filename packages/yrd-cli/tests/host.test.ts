@@ -1584,6 +1584,7 @@ checks: [{check: {run: "true"}}]
       "watch",
       "prime",
       "submit",
+      "cancel",
       "deployment",
       "in",
       "sh",
