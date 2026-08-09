@@ -783,6 +783,22 @@ describe("withBays", () => {
               reason: "superseded",
             },
           },
+          pushed("PR7", "topic/legacy-recut", HEAD_1),
+          {
+            id: nextId(),
+            name: "pr/recut",
+            ts: at,
+            data: {
+              pr: "PR7",
+              fromRevision: 1,
+              patchId: "d".repeat(40),
+              baseSha: BASE,
+              treeSha: "c".repeat(40),
+              reviewCarried: false,
+              predecessor: { revision: 1, headSha: HEAD_1 },
+              successor: { revision: 2, headSha: HEAD_2, baseSha: BASE },
+            },
+          },
         ],
       },
     ])
@@ -877,6 +893,11 @@ describe("withBays", () => {
       canceledBy: "@ci",
       cancelReason: "superseded",
     })
+    expect(prFacts(app.bays.pr("PR7"))).toMatchObject({
+      delivery: "pushed",
+      current: { n: 2, head: HEAD_2, recut: { fromRevision: 1 } },
+    })
+    expect(currentPRRev(app.bays.pr("PR7")!)).not.toHaveProperty("submitter")
     await expect(app.dispatch(app.commands.fixture.legacyWithdraw, undefined)).rejects.toThrow()
     await expect(app.dispatch(app.commands.fixture.legacyReject, undefined)).rejects.toThrow()
     await expect(app.dispatch(app.commands.fixture.transitionalReject, undefined)).rejects.toThrow()
@@ -1610,6 +1631,7 @@ describe("withBays", () => {
       headSha: HEAD_1,
       baseSha: BASE,
       correlation,
+      submitter: "@dev/3",
       draft: true,
     })
     await app.bays.review({
@@ -1641,6 +1663,7 @@ describe("withBays", () => {
           baseSha: nextBase,
           treeSha,
           reviewCarried: true,
+          submitter: "@dev/3",
           predecessor: { revision: 1, headSha: HEAD_1, baseSha: BASE },
           successor: { revision: 2, headSha: HEAD_2, baseSha: nextBase },
         },
@@ -1655,15 +1678,17 @@ describe("withBays", () => {
         head: HEAD_2,
         baseSha: nextBase,
         correlation,
+        submitter: "@dev/3",
         recut: { fromRevision: 1, patchId, treeSha, reviewCarried: true },
       },
       revs: [
-        { n: 1, head: HEAD_1, correlation },
+        { n: 1, head: HEAD_1, correlation, submitter: "@dev/3" },
         {
           n: 2,
           head: HEAD_2,
           baseSha: nextBase,
           correlation,
+          submitter: "@dev/3",
           recut: { fromRevision: 1, patchId, treeSha, reviewCarried: true },
         },
       ],
