@@ -221,6 +221,12 @@ export type BayArchive = Readonly<{
   eventId: string
 }>
 
+export type BayClosure = Readonly<{
+  kind: "closed-degenerate"
+  at: string
+  eventId: string
+}>
+
 export type Bay = Readonly<{
   id: BayId
   name: string
@@ -243,6 +249,7 @@ export type Bay = Readonly<{
   orphan?: BayOrphan
   handoff?: BayHandoff
   archive?: BayArchive
+  closure?: BayClosure
 }>
 
 type BranchLifecycleBase = Readonly<{

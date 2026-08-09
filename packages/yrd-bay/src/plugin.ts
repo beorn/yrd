@@ -3149,14 +3149,34 @@ function projectBayJob(state: DeepReadonly<BayState>, applied: Event, change: Jo
     bays: { ...state.bays, byId: { ...state.bays.byId, [bay.id]: { ...bay, ...patch } } },
   })
   if (change.type === "lose") {
+    if (bay.jobDef === "bay.provision") {
+      return save({
+        status: "closed",
+        closure: { kind: "closed-degenerate", at: applied.ts, eventId: applied.id },
+        closedAt: applied.ts,
+        failure: { code: "job-lost", message: change.reason },
+        jobId: undefined,
+        jobDef: undefined,
+      })
+    }
     return save({
-      status: bay.jobDef === "bay.provision" ? "failed" : "active",
+      status: "active",
       failure: { code: "job-lost", message: change.reason },
     })
   }
   if (change.result.conclusion === "failure") {
+    if (bay.jobDef === "bay.provision") {
+      return save({
+        status: "closed",
+        closure: { kind: "closed-degenerate", at: applied.ts, eventId: applied.id },
+        closedAt: applied.ts,
+        failure: change.result.error,
+        jobId: undefined,
+        jobDef: undefined,
+      })
+    }
     return save({
-      status: bay.jobDef === "bay.provision" ? "failed" : "active",
+      status: "active",
       failure: change.result.error,
     })
   }

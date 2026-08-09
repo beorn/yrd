@@ -3945,23 +3945,22 @@ describe("runYrd", () => {
     expect(JSON.parse(output.stdout())).toMatchObject({ bays: [] })
   })
 
-  it("force-closes a failed provision that never acquired a workspace path", async () => {
+  it("closes a failed provision without a workspace as closed-degenerate and releases its branch", async () => {
     const app = await createApp({ failingBay: "B1" })
-    const failedOpen = await app.bays.open({ name: "pathless" })
+    const failedOpen = await app.bays.open({ name: "pathless", branch: "task/reusable" })
     await app.jobs.runMany(app.jobs.requested(failedOpen), {
       runner: "cli-test",
       leaseMs: 60_000,
     })
     expect(app.bays.get("B1")).toMatchObject({
-      status: "failed",
+      status: "closed",
+      closure: { kind: "closed-degenerate" },
       failure: { code: "provision-failed" },
     })
     expect(app.bays.get("B1")).not.toHaveProperty("path")
 
-    const close = outputIO()
-    expect(await runYrd(app, yrd("bay", "close", "--force", "B1"), close.io), close.stderr()).toBe(0)
-    expect(app.bays.get("B1")).toMatchObject({ status: "closed" })
-    expect(app.bays.get("B1")).not.toHaveProperty("path")
+    await app.bays.open({ name: "replacement", branch: "task/reusable" })
+    expect(app.bays.get("B2")).toMatchObject({ branch: "task/reusable", status: "opening" })
   })
 
   it("uses by, submitter, and reviewer throughout CLI help", async () => {
