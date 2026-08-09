@@ -1242,6 +1242,14 @@ describe("withBays", () => {
       submitter: "operator",
     })
     expect(app.bays.branchLifecycles()[0]).not.toMatchObject({ submitter: "yrd:4242" })
+
+    await app.bays.intake({ branch: "issue/unknown-submitter", headSha: HEAD_2 })
+    expect(app.bays.branchLifecycles()[0]).toMatchObject({
+      status: "open",
+      headSha: HEAD_1,
+      by: "yrd:4242",
+    })
+    expect(app.bays.branchLifecycles()[0]).not.toHaveProperty("submitter")
   })
 
   it("keeps a replay-compatible close without archive proof explicitly unmanaged", async () => {
