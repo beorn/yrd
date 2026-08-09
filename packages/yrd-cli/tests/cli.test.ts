@@ -6202,6 +6202,24 @@ describe("runYrd", () => {
         facts: { lease: "free", git: { dirty: true, baselines: [{ base: "main", ahead: 1, behind: 0 }] } },
       })
 
+      const missingCensus = outputIO({ cwd: repo })
+      expect(
+        await runInternals.runYrdProcessRuntime(yrd("queue", "list", "--check", "--json"), missingCensus.io, {
+          ambientCwd: repo,
+          env: process.env,
+          load: async () => {
+            throw new Error("journal history must not be loaded by the supervisor probe")
+          },
+          probe: async () => ({ services }),
+        }),
+      ).toBe(2)
+      expect(JSON.parse(missingCensus.stdout())).toMatchObject({
+        state: "unhealthy",
+        running: false,
+        error: { code: "queue-work-census-unavailable" },
+        facts: { lease: "free" },
+      })
+
       await openAndSubmit(app)
       const stranded = outputIO({ cwd: repo })
       expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), stranded.io, services)).toBe(2)

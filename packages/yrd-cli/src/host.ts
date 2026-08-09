@@ -1460,21 +1460,31 @@ export async function createYrdHost(options: YrdHostOptions = {}): Promise<YrdHo
   return createYrdRuntimeHost(options, undefined, "active")
 }
 
-/**
- * Build only the read-only queue audit needed by the resident health command.
- * The audit reuses the canonical config/baseline comparison but deliberately
- * has no app and no journal, so its cost cannot grow with delivery history.
- */
+/** Build resident health services without retaining an app. Environment audit
+ * stays history-free; the current-work census opens a read-only viewer only
+ * when the runner lease is absent. */
 function runnerHealthProbeServices(options: YrdRuntimeHostOptions): YrdCliServices {
   return Object.freeze({
     queue: Object.freeze({
       async hasQueuedWork(): Promise<boolean> {
-        if (!(await runnerHealthJournalIsSqlite(options))) return false
-        await using host = await createYrdRuntimeHost(options, undefined, "viewer")
-        return Object.values(host.app.state().bays.prs).some((pr) => {
-          const delivery = prDeliveryState(pr)
-          return delivery === "submitted" || delivery === "ready"
-        })
+        try {
+          if (!(await runnerHealthJournalIsSqlite(options))) return false
+          await using host = await createYrdRuntimeHost(options, undefined, "viewer")
+          return Object.values(host.app.state().bays.prs).some((pr) => {
+            const delivery = prDeliveryState(pr)
+            return delivery === "submitted" || delivery === "ready"
+          })
+        } catch (error) {
+          if (failureFact(error)?.code === "queue-work-census-invalid") throw error
+          throw createFailure(
+            {
+              kind: "infrastructure",
+              code: "queue-work-census-invalid",
+              message: "yrd: queue work census storage is invalid",
+            },
+            error,
+          )
+        }
       },
       async auditEnvironment(): Promise<QueueAuditResult> {
         const scope = createScope("yrd-runner-health")
@@ -1512,9 +1522,9 @@ function runnerHealthProbeServices(options: YrdRuntimeHostOptions): YrdCliServic
   })
 }
 
-/** Reject an obviously absent/non-SQLite journal before the read-only viewer is
- * opened. The supervisor's liveness-only fallback must keep working even when
- * delivery history is the broken component operators are trying to inspect. */
+/** Distinguish an absent journal from invalid storage before opening the
+ * read-only viewer. Absence means no queued work; present invalid storage must
+ * stay loud without replaying journal history in the supervisor process. */
 async function runnerHealthJournalIsSqlite(options: YrdRuntimeHostOptions): Promise<boolean> {
   const scope = createScope("yrd-runner-health-census")
   const ownsLog = options.log === undefined
@@ -1530,15 +1540,19 @@ async function runnerHealthJournalIsSqlite(options: YrdRuntimeHostOptions): Prom
     const path = join(repository.stateDir, "journal.sqlite")
     if (!existsSync(path)) return false
     const descriptor = openSync(path, "r")
+    let valid: boolean
     try {
       const header = Buffer.alloc(16)
-      return (
+      valid =
         readSync(descriptor, header, 0, header.length, 0) === header.length &&
         header.toString("utf8") === "SQLite format 3\0"
-      )
     } finally {
       closeSync(descriptor)
     }
+    if (!valid) {
+      raiseFailure("infrastructure", "queue-work-census-invalid", "yrd: queue work census storage is invalid")
+    }
+    return true
   } finally {
     try {
       await closeRuntime(undefined, process, scope)

@@ -1428,11 +1428,14 @@ checks: [{check: {run: "true"}}]
     expect(await git(repo, "for-each-ref", "--format=%(refname)%09%(objectname)")).toBe(refsBefore)
   })
 
-  it("runs the literal supervisor probe without opening corrupt journal history", async () => {
+  it.each([
+    { label: "non-SQLite", content: Buffer.from("not a sqlite database") },
+    { label: "truncated SQLite", content: Buffer.from("SQLite format 3\0") },
+  ])("fails loud without replaying $label journal history", async ({ content }) => {
     const { repo } = await repository()
     const stateDir = join(repo, ".git", "yrd")
     await mkdir(stateDir, { recursive: true })
-    await writeFile(join(stateDir, "journal.sqlite"), "not a sqlite database")
+    await writeFile(join(stateDir, "journal.sqlite"), content)
     let stdout = ""
     let stderr = ""
 
@@ -1450,16 +1453,17 @@ checks: [{check: {run: "true"}}]
         },
       ),
       stderr,
-    ).toBe(1)
+    ).toBe(2)
     expect(JSON.parse(stdout)).toMatchObject({
       schema: "hab-service-health/1",
       service: "yrd-runner",
-      state: "absent",
+      state: "unhealthy",
       running: false,
+      error: { code: "queue-work-census-invalid" },
       facts: { lease: "free" },
     })
     expect(stderr).not.toContain("sqlite")
-    expect(await readFile(join(stateDir, "journal.sqlite"), "utf8")).toBe("not a sqlite database")
+    expect(await readFile(join(stateDir, "journal.sqlite"))).toEqual(content)
   })
 
   it("reports a missing resident as unhealthy when the production probe finds queued work", async () => {

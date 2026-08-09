@@ -703,8 +703,20 @@ async function queueRunnerHealth(
       }
     }
     if (!leaseHeld) {
-      const hasQueuedWork =
-        app === undefined ? ((await services.queue?.hasQueuedWork?.()) ?? false) : queuedDeliveryCount(app) > 0
+      let hasQueuedWork: boolean
+      if (app !== undefined) {
+        hasQueuedWork = queuedDeliveryCount(app) > 0
+      } else {
+        const census = services.queue?.hasQueuedWork
+        if (census === undefined) {
+          raiseFailure(
+            "configuration",
+            "queue-work-census-unavailable",
+            "yrd: runner health cannot determine whether the queue has work",
+          )
+        }
+        hasQueuedWork = await census()
+      }
       if (hasQueuedWork) {
         return {
           exitCode: 2,
