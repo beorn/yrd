@@ -150,6 +150,7 @@ import {
   parseOwnerPid,
   parseYrdBayProtections,
   protectionEvidenceForBay,
+  freshOriginBranchMissing,
   YRD_BAY_PROTECTIONS_ENV,
   type BayStatusClass,
   type BayStatusFacts,
@@ -2721,8 +2722,12 @@ function originBranchMissing(repoRoot: string, branch: string, remoteTrackingFre
   try {
     gitSync(repoRoot, ["show-ref", "--verify", "--quiet", `refs/remotes/origin/${branch}`])
     return false
-  } catch {
-    return true
+  } catch (error) {
+    const status =
+      typeof error === "object" && error !== null && "status" in error && typeof error.status === "number"
+        ? error.status
+        : null
+    return freshOriginBranchMissing(status)
   }
 }
 
@@ -2941,9 +2946,7 @@ async function bayPruneCommand(
   const preserved: string[] = []
   if (!dryRun) {
     for (const report of reports) {
-      const dirty = report.lines.some(
-        (line) => line.class === "worktree" && line.verdict === "BLOCK" && line.evidence.startsWith("dirty worktree"),
-      )
+      const dirty = report.lines.some((line) => line.class === "worktree" && line.verdict === "BLOCK")
       const otherRefusal = report.lines.some(
         (line) => line.class !== "worktree" && line.class !== "pr" && line.verdict !== "PASS",
       )
@@ -2974,7 +2977,7 @@ async function bayPruneCommand(
     )
   } else {
     const lines = [
-      `bay prune ${dryRun ? "(dry-run DEFAULT — pass --apply to close safe bays)" : "(APPLY)"}`,
+      `bay prune ${dryRun ? "(dry-run DEFAULT — pass --apply to close PRUNE bays)" : "(APPLY)"}`,
       `examined ${String(reports.length)} open bay(s); prune=${String(outcomes.rows.pruned.length)}; keep=${String(outcomes.rows.kept.length)}; page=${String(outcomes.rows.paged.length)}`,
       "",
       ...reports.map((report) => {
@@ -9088,8 +9091,8 @@ function buildProgram(
   const adminBay = admin.command("bay").description("administer work bays")
   adminBay
     .command("prune")
-    .description("report (default) or close every bay that bay status says is safe")
-    .option("--apply", "actually close safe bays (default is dry-run)")
+    .description("report (default) or close every bay classified PRUNE")
+    .option("--apply", "actually close PRUNE bays (default is dry-run)")
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await bayPruneCommand(installed(), installedServices(), options, io)))
   const adminPr = admin.command("pr").description("administer pull requests")

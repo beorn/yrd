@@ -14,6 +14,12 @@ export const YRD_BAY_PROTECTIONS_ENV = "YRD_BAY_PROTECTIONS" as const
 export const YRD_BAY_PROTECTIONS_SCHEMA = "yrd-bay-protections/1" as const
 export const HISTORICAL_BAY_OWNER_AGE_FLOOR_MS = 48 * 60 * 60 * 1_000
 
+export function freshOriginBranchMissing(exitCode: number | null): boolean | undefined {
+  if (exitCode === 0) return false
+  if (exitCode === 1) return true
+  return undefined
+}
+
 export type BayStatusClass = "owner" | "consumer" | "worktree" | "commits" | "stash" | "pr"
 
 export type BayStatusVerdict = "PASS" | "BLOCK" | "UNKNOWN"

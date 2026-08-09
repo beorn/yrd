@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest"
 import {
   classifyBayStatus,
   formatBayStatusHuman,
+  freshOriginBranchMissing,
   parseOwnerPid,
   parseYrdBayProtections,
   protectionEvidenceForBay,
@@ -30,6 +31,15 @@ describe("parseOwnerPid", () => {
     expect(parseOwnerPid("bay:12345")).toBe(12345)
     expect(parseOwnerPid(undefined, "@agent/3:9988")).toBe(9988)
     expect(parseOwnerPid("plain", "@agent/3")).toBeUndefined()
+  })
+})
+
+describe("freshOriginBranchMissing", () => {
+  it("recognizes only Git's exact missing-ref exit and keeps every other failure unknown", () => {
+    expect(freshOriginBranchMissing(0)).toBe(false)
+    expect(freshOriginBranchMissing(1)).toBe(true)
+    expect(freshOriginBranchMissing(2)).toBeUndefined()
+    expect(freshOriginBranchMissing(null)).toBeUndefined()
   })
 })
 

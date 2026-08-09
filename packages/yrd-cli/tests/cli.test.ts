@@ -4025,7 +4025,20 @@ describe("runYrd", () => {
     })
 
     expect(await runYrd(app, yrd("admin", "bay", "prune", "--apply", "--json"), output.io), output.stderr()).toBe(1)
-    expect(JSON.parse(output.stdout())).toMatchObject({
+    const result = JSON.parse(output.stdout()) as {
+      examined: number
+      outcomes: {
+        pruned: readonly string[]
+        kept: readonly unknown[]
+        paged: readonly unknown[]
+      }
+      histogram: {
+        pruned: number
+        keptByReason: Readonly<Record<string, number>>
+        pagedByReason: Readonly<Record<string, number>>
+      }
+    }
+    expect(result).toMatchObject({
       command: "bay.prune",
       dryRun: false,
       examined: 1,
@@ -4041,6 +4054,14 @@ describe("runYrd", () => {
         pagedByReason: {},
       },
     })
+    expect(result.outcomes.pruned.length + result.outcomes.kept.length + result.outcomes.paged.length).toBe(
+      result.examined,
+    )
+    expect(
+      result.histogram.pruned +
+        Object.values(result.histogram.keptByReason).reduce((sum, count) => sum + count, 0) +
+        Object.values(result.histogram.pagedByReason).reduce((sum, count) => sum + count, 0),
+    ).toBe(result.examined)
     expect(app.state().bays.byId.B1?.status).toBe("active")
   })
 
