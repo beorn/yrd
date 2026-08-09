@@ -164,6 +164,36 @@ function refuseForever(blocked: () => string): CandidatePreparer {
 }
 
 describe("admission refusal oracle — a head-of-line PR refused at admission is visible to queue audit", () => {
+  it.fails("records a refusal reported by an external queue preparation robot", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createApp(
+      refuseForever(() => ""),
+      clock.read,
+    )
+    const pr = await submitAndRequestChecks(app, "issue/external-refusal")
+    const queue = app.queue as typeof app.queue & {
+      recordAdmissionRefusal(args: { pr: string; code: string; kind?: string; reason: string }): Promise<void>
+    }
+
+    await queue.recordAdmissionRefusal({
+      pr: pr.id,
+      code: "submodule-pin-unpublished",
+      kind: "refusal",
+      reason: "the refreshed revision contains an unpublished submodule pin",
+    })
+
+    expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({
+      pr: pr.id,
+      revision: 1,
+      headSha: HEAD,
+      code: "submodule-pin-unpublished",
+      kind: "refusal",
+      reason: "the refreshed revision contains an unpublished submodule pin",
+      count: 1,
+      sameCodeCount: 1,
+    })
+  })
+
   it("does not call a pushed draft stalled when preflight checks were requested before submission", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     await using app = await createDeliveryApp(clock.read, true)
