@@ -2816,6 +2816,74 @@ describe("runYrd", () => {
     expect(queueRun, "a refused operation is not progress and must not reopen compose").toHaveBeenCalledTimes(1)
   })
 
+  it.fails("re-proves the baseline when freshness mutates the PR before refusing it", async () => {
+    const nextBase = "b".repeat(40)
+    const nextHead = "3".repeat(40)
+    const unpublishedPin = "4".repeat(40)
+    const app = await createApp()
+    await app.bays.submit({ branch: "issue/post-recut-refusal", headSha: HEAD_SHA, baseSha: BASE_SHA, draft: true })
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: "2".repeat(40),
+      baseSha: BASE_SHA,
+      treeSha: "c".repeat(40),
+      patchId: "d".repeat(40),
+      reviewCarried: false,
+    })
+    await app.bays.ready({ pr: "PR1" })
+    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
+
+    const processRun = vi.fn(
+      async (request: ProcessRequest): Promise<ProcessResult> => ({
+        exitCode: 0,
+        signal: null,
+        stdout:
+          request.argv.includes("diff-tree") && request.argv.includes(nextHead)
+            ? `:160000 160000 ${"0".repeat(40)} ${unpublishedPin} M\0dep\0`
+            : "",
+        stderr: "",
+        durationMs: 0,
+        timedOut: false,
+      }),
+    )
+    const recut = vi.fn(async () => ({
+      headSha: nextHead,
+      baseSha: nextBase,
+      treeSha: "e".repeat(40),
+      patchId: "d".repeat(40),
+      unchanged: false,
+    }))
+    const services = {
+      process: { run: processRun },
+      recut: { recut },
+    } as unknown as YrdCliServices
+    const queueRun = vi.fn(async () => [])
+    const viewer = { ...app, queue: { ...app.queue, run: queueRun } } as TestApp
+    const controller = new AbortController()
+    const gate = vi.fn(async () => undefined)
+    let sleeps = 0
+    const io = outputIO({
+      cwd: "/repo",
+      resolveQueueTarget: async () => ({ base: "main", sha: nextBase }),
+      scope: {
+        signal: controller.signal,
+        sleep: async () => {
+          sleeps += 1
+          if (sleeps === 2) controller.abort()
+        },
+      } as YrdCliIO["scope"],
+    }).io
+
+    await expect(
+      runInternals.followQueueRuns(viewer, [], { json: true, interval: 1 }, io, gate, services),
+    ).resolves.toBe(3)
+
+    expect(recut).toHaveBeenCalled()
+    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 3, head: nextHead })
+    expect(gate, "a post-mutation refusal must re-prove the installed baseline").toHaveBeenCalledTimes(2)
+  })
+
   it("exits non-zero when an internal scope aborts an unchanged idle follow tick", async () => {
     const app = await createApp()
     const controller = new AbortController()
