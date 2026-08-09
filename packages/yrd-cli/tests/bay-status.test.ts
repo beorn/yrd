@@ -146,6 +146,52 @@ describe("classifyBayStatus", () => {
     expect(report.lines.find((line) => line.class === "owner")?.verdict).toBe("UNKNOWN")
   })
 
+  it("accepts an old no-token Bay after the host census proves no live consumer", () => {
+    const report = classifyBayStatus({
+      ...base,
+      ageMs: 48 * 60 * 60 * 1_000 + 1,
+      protectedBy: [],
+    })
+
+    expect(report.exit).toBe(0)
+    expect(report.lines.find((line) => line.class === "owner")).toMatchObject({
+      verdict: "PASS",
+      evidence: expect.stringMatching(/48h migration floor/u),
+    })
+  })
+
+  it("treats a historical failed Bay with no workspace as closed-degenerate", () => {
+    const report = classifyBayStatus({
+      bayId: "B280",
+      name: "pathless",
+      branch: "task/pathless",
+      closedDegenerate: true,
+    })
+
+    expect(report.exit).toBe(0)
+    expect(report.lines.every((line) => line.verdict === "PASS")).toBe(true)
+    expect(report.lines.find((line) => line.class === "worktree")?.evidence).toMatch(/closed-degenerate/u)
+  })
+
+  it("accepts a missing workspace when a fresh origin census proves its branch is gone", () => {
+    const report = classifyBayStatus({
+      ...base,
+      ownerPid: 9,
+      ownerAlive: false,
+      worktreeMissing: true,
+      branchMissingFromOrigin: true,
+      remoteTrackingFresh: true,
+      tipLanded: undefined,
+      aheadOfOrigin: undefined,
+    })
+
+    expect(report.exit).toBe(0)
+    expect(report.lines.find((line) => line.class === "commits")).toMatchObject({
+      verdict: "PASS",
+      evidence: expect.stringMatching(/branch is absent from origin/u),
+    })
+  })
+
   it("open PR does not block (informational PASS)", () => {
     const report = classifyBayStatus({
       ...base,

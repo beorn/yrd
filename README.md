@@ -234,6 +234,14 @@ durable `orphan` fact visible through `yrd bay list --json`. Dirty submodules
 are never guessed into a publication: checkpointing fails loudly and preserves
 the Bay.
 
+A provision failure that never records a workspace path ends immediately as
+`closed-degenerate`: there is no workspace to deprovision, and the branch name
+is reusable. `yrd admin bay prune` is dry-run by default; `--apply` closes only
+the `PRUNE` set. Its JSON conservation report puts every examined Bay in
+exactly one of `outcomes.pruned`, `outcomes.kept`, or `outcomes.paged` and
+counts the same population in `histogram`. An apply that examines Bays but
+prunes none exits non-zero, as does any report with missing-evidence pages.
+
 `bay in` (also spelled root `yrd in`) attaches a guest process without opening,
 checkpointing, closing, or otherwise taking ownership of the Bay lifecycle.
 `bay open` takes no command; `bay run` and `bay in` default to `$SHELL`.
@@ -366,16 +374,16 @@ yrd run cancel <selector> [--reason <text>] [--json]
 submission core as `pr submit`; `bay submit` remains a handoff, while new
 callers use the PR-native required-check surface below.
 
-| Command   | Input                                              | Output and state                                                                                                                                                      |
-| --------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `list`    | None                                               | Lists `BAY STATUS ISSUE BY BASE BRANCH`, including durable failure and orphan facts                                                                                   |
-| `open`    | Issue, `--issue`, `--pr`, or `--bay`               | Provisions a persistent Bay and returns; never runs a command or creates a PR                                                                                         |
-| `run`     | Opener configuration plus exact argv               | Owns the scoped bracket, checkpoints, and closes; `--keep` preserves a clean success                                                                                  |
-| `in`      | Bay selector; optional exact argv after `--`       | Attaches a PID-addressed lifecycle guest; never owns configuration or closure                                                                                         |
-| `path`    | One Bay ID, name, or branch selector               | Prints the exact absolute path of one active Bay; read-only and never refreshes it                                                                                    |
-| `refresh` | Zero or more bays                                  | Re-reads Git head, base, dirty, path, and workspace status                                                                                                            |
-| `submit`  | Bays, PRs, or source branches                      | Creates or advances PRs to `submitted`; never executes Queue work                                                                                                     |
-| `close`   | Zero or more bays                                  | Reaps and verifies processes holding each Bay, then checkpoints and deprovisions it; survivor PIDs fail loudly. `--withdraw` explicitly cancels an associated live PR |
+| Command   | Input                                        | Output and state                                                                                                                                                      |
+| --------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list`    | None                                         | Lists `BAY STATUS ISSUE BY BASE BRANCH`, including durable failure and orphan facts                                                                                   |
+| `open`    | Issue, `--issue`, `--pr`, or `--bay`         | Provisions a persistent Bay and returns; never runs a command or creates a PR                                                                                         |
+| `run`     | Opener configuration plus exact argv         | Owns the scoped bracket, checkpoints, and closes; `--keep` preserves a clean success                                                                                  |
+| `in`      | Bay selector; optional exact argv after `--` | Attaches a PID-addressed lifecycle guest; never owns configuration or closure                                                                                         |
+| `path`    | One Bay ID, name, or branch selector         | Prints the exact absolute path of one active Bay; read-only and never refreshes it                                                                                    |
+| `refresh` | Zero or more bays                            | Re-reads Git head, base, dirty, path, and workspace status                                                                                                            |
+| `submit`  | Bays, PRs, or source branches                | Creates or advances PRs to `submitted`; never executes Queue work                                                                                                     |
+| `close`   | Zero or more bays                            | Reaps and verifies processes holding each Bay, then checkpoints and deprovisions it; survivor PIDs fail loudly. `--withdraw` explicitly cancels an associated live PR |
 
 #### Process launch boundary
 
@@ -760,7 +768,7 @@ yrd admin journal bump <version> [--json]
 | `recover`            | Optional reason or known-dead runner id           | Reconciles abandoned work and releases queued runs whose installed step definition changed                            |
 | `finish`             | One waiting PR/step plus job/runner/attempt/token | Records external-runner evidence and resumes that exact durable run                                                   |
 | `audit`              | Repository                                        | Journal, projection, pinned-plan, installed-step, and queue-progress findings; no state change                        |
-| `admin queue init`   | Optional base                                     | Resolves queue resources and installs the managed pre-submit hook                                                      |
+| `admin queue init`   | Optional base                                     | Resolves queue resources and installs the managed pre-submit hook                                                     |
 | `admin queue deinit` | Optional base                                     | Releases resources owned by the installed queue adapter                                                               |
 
 `queue list` is the canonical read-only surface. `queue ls` is its spelling
@@ -1019,7 +1027,7 @@ bytes cannot override the base declaration.
 Queue progress thresholds share this one strict declaration surface:
 
 ```yaml
-progress: {noLandingMs: 600000, refusalCount: 3}
+progress: { noLandingMs: 600000, refusalCount: 3 }
 ```
 
 Both fields must be positive integers and default to the values above.
@@ -1031,7 +1039,7 @@ other built-in and runs `git diff --check` against the pinned base. A repository
 may define a one-line command inline:
 
 ```yaml
-checks: [{lint: {run: bun run lint, mode: strict}}]
+checks: [{ lint: { run: bun run lint, mode: strict } }]
 ```
 
 Merge is not a configurable check. It is Yrd's built-in landing transition, and

@@ -266,7 +266,7 @@ describe("withBays", () => {
     BAY_JOB_DEFINITIONS.flatMap((definition) =>
       (["failure", "lost"] as const).map((transition) => ({ definition, transition })),
     ),
-  )("$definition $transition records remain reapable to closed", async ({ definition, transition }) => {
+  )("$definition $transition records do not strand a workspace", async ({ definition, transition }) => {
     const failure = createFailOnceWorkspace(definition, transition)
     await using app = await createApp(failure.adapter)
     const opened = await app.bays.open({ name: "terminal-reapability" })
@@ -284,15 +284,22 @@ describe("withBays", () => {
     }
     await settleFailureTransition(app, failed, transition, failure.started)
 
-    expect(app.bays.get("B1")).toMatchObject({
-      status: definition === "bay.provision" ? "failed" : "active",
-      failure: { code: transition === "failure" ? `fixture-${definition}` : "job-lost" },
-    })
-    if (definition === "bay.provision") expect(app.bays.get("B1")).not.toHaveProperty("path")
-
-    await finishJob(app, await app.bays.close({ bay: "B1" }))
-    expect(app.bays.get("B1")).toMatchObject({ status: "closed" })
-    expect(app.bays.get("B1")?.failure).toBeUndefined()
+    if (definition === "bay.provision") {
+      expect(app.bays.get("B1")).toMatchObject({
+        status: "closed",
+        closure: { kind: "closed-degenerate" },
+        failure: { code: transition === "failure" ? `fixture-${definition}` : "job-lost" },
+      })
+      expect(app.bays.get("B1")).not.toHaveProperty("path")
+    } else {
+      expect(app.bays.get("B1")).toMatchObject({
+        status: "active",
+        failure: { code: transition === "failure" ? `fixture-${definition}` : "job-lost" },
+      })
+      await finishJob(app, await app.bays.close({ bay: "B1" }))
+      expect(app.bays.get("B1")).toMatchObject({ status: "closed" })
+      expect(app.bays.get("B1")?.failure).toBeUndefined()
+    }
   })
 
   it("keeps Hab sessions outside Bay while replaying retired session facts as no-ops", async () => {

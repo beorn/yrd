@@ -151,6 +151,7 @@ import {
   parseYrdBayProtections,
   protectionEvidenceForBay,
   YRD_BAY_PROTECTIONS_ENV,
+  type BayStatusClass,
   type BayStatusFacts,
   type BayStatusReport,
 } from "./bay-status.ts"
@@ -2615,7 +2616,9 @@ async function closeBays(
   const remoteTrackingFresh = refreshBayStatusOrigin(cwd)
   const protections = activeBayProtections(io)
   for (const bay of bays) {
-    const report = classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections))
+    const report = classifyBayStatus(
+      gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections, io.now?.() ?? Date.now()),
+    )
     if (options.force !== true && report.exit !== 0) {
       refused.push(report)
       continue
@@ -2713,6 +2716,16 @@ function refreshBayStatusOrigin(repoRoot: string): boolean {
   }
 }
 
+function originBranchMissing(repoRoot: string, branch: string, remoteTrackingFresh: boolean): boolean | undefined {
+  if (!remoteTrackingFresh) return undefined
+  try {
+    gitSync(repoRoot, ["show-ref", "--verify", "--quiet", `refs/remotes/origin/${branch}`])
+    return false
+  } catch {
+    return true
+  }
+}
+
 /** Gather live facts for one bay; classification stays pure in bay-status.ts (22290). */
 function gatherBayStatusFacts(
   app: YrdCliApp,
@@ -2720,6 +2733,7 @@ function gatherBayStatusFacts(
   repoRoot: string,
   remoteTrackingFresh: boolean,
   protections: readonly YrdBayProtection[],
+  now: number,
 ): BayStatusFacts {
   const ownerPid = parseOwnerPid(bay.name, bay.by)
   const ownerIsCaller = ownerPid === process.pid
@@ -2745,6 +2759,7 @@ function gatherBayStatusFacts(
   let tipLandedUnknown: boolean | undefined
   let aheadOfOrigin: number | undefined
   let uniquePatches: number | undefined
+  const branchMissingFromOrigin = originBranchMissing(repoRoot, bay.branch, remoteTrackingFresh)
   let stashAttributed = 0
   let stashUnknown: boolean | undefined
 
@@ -2840,16 +2855,20 @@ function gatherBayStatusFacts(
     .prs()
     .filter((pr) => (pr.bay === bay.id || pr.branch === bay.branch) && isLivePR(pr))
     .map((pr) => pr.id)
+  const openedAt = Date.parse(bay.openedAt)
+  const ageMs = Number.isFinite(openedAt) ? Math.max(0, now - openedAt) : undefined
 
   return {
     bayId: bay.id,
     name: bay.name,
     branch: bay.branch,
+    ...(bay.status === "failed" && path === undefined ? { closedDegenerate: true } : {}),
     ...(path === undefined ? {} : { path }),
     protectedBy: protectionEvidenceForBay(protections, { id: bay.id, ...(path === undefined ? {} : { path }) }),
     ...(ownerPid === undefined ? {} : { ownerPid }),
     ...(ownerPid === undefined ? {} : { ownerIsCaller }),
     ...(ownerAlive === undefined ? {} : { ownerAlive }),
+    ...(ageMs === undefined ? {} : { ageMs }),
     ...(worktreeDirty === undefined ? {} : { worktreeDirty }),
     ...(worktreeMissing === undefined ? {} : { worktreeMissing }),
     ...(tipLanded === undefined ? {} : { tipLanded }),
@@ -2858,6 +2877,7 @@ function gatherBayStatusFacts(
     ...(aheadOfOrigin === undefined ? {} : { aheadOfOrigin }),
     ...(uniquePatches === undefined ? {} : { uniquePatches }),
     remoteTrackingFresh,
+    ...(branchMissingFromOrigin === undefined ? {} : { branchMissingFromOrigin }),
     stashAttributed,
     ...(stashUnknown === undefined ? {} : { stashUnknown }),
     openPrIds,
@@ -2884,7 +2904,7 @@ async function bayStatusCommand(
   const remoteTrackingFresh = refreshBayStatusOrigin(cwd)
   const protections = activeBayProtections(io)
   const reports: BayStatusReport[] = bays.map((bay) =>
-    classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections)),
+    classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections, io.now?.() ?? Date.now())),
   )
   // Aggregate exit: any BLOCK → 1; else any UNKNOWN → 2; else 0.
   // YrdCliExitCode is 0|1|2|3; bay status uses the 0/1/2 subset (2 = unknown).
@@ -2915,11 +2935,27 @@ async function bayPruneCommand(
   const remoteTrackingFresh = refreshBayStatusOrigin(cwd)
   const protections = activeBayProtections(io)
   const reports = open.map((bay) =>
-    classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections)),
+    classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections, io.now?.() ?? Date.now())),
   )
-  const safe = reports.filter((report) => report.exit === 0)
-  const survivors = reports.filter((report) => report.exit !== 0)
   const dryRun = options.apply !== true
+  const preserved: string[] = []
+  if (!dryRun) {
+    for (const report of reports) {
+      const dirty = report.lines.some(
+        (line) => line.class === "worktree" && line.verdict === "BLOCK" && line.evidence.startsWith("dirty worktree"),
+      )
+      const otherRefusal = report.lines.some(
+        (line) => line.class !== "worktree" && line.class !== "pr" && line.verdict !== "PASS",
+      )
+      if (!dirty || otherRefusal) continue
+      const bay = open.find((candidate) => candidate.id === report.bay)
+      if (bay === undefined) throw new Error(`yrd: prune report refers to missing Bay '${report.bay}'`)
+      await checkpointRunBay(app, bay, `yrd admin bay prune preserve ${bay.id}`, io)
+      preserved.push(bay.id)
+    }
+  }
+  const preservedSet = new Set(preserved)
+  const outcomes = bayPruneOutcomes(reports, preservedSet)
 
   if (jsonEnabled(options)) {
     await printResult(
@@ -2929,44 +2965,84 @@ async function bayPruneCommand(
         command: "bay.prune",
         dryRun,
         examined: reports.length,
-        safe: safe.map((report) => report.bay),
-        survivors: survivors.map((report) => ({
-          bay: report.bay,
-          exit: report.exit,
-          lines: report.lines,
-        })),
-        closed: dryRun ? [] : safe.map((report) => report.bay),
+        preserved,
+        outcomes: outcomes.rows,
+        histogram: outcomes.histogram,
+        closed: dryRun ? [] : outcomes.rows.pruned,
       },
       null,
     )
   } else {
     const lines = [
       `bay prune ${dryRun ? "(dry-run DEFAULT — pass --apply to close safe bays)" : "(APPLY)"}`,
-      `examined ${String(reports.length)} open bay(s); safe=${String(safe.length)}; survivors=${String(survivors.length)}`,
+      `examined ${String(reports.length)} open bay(s); prune=${String(outcomes.rows.pruned.length)}; keep=${String(outcomes.rows.kept.length)}; page=${String(outcomes.rows.paged.length)}`,
       "",
-      ...safe.map((report) => `SAFE  ${report.bay} ${report.name}  ${report.branch}`),
-      ...survivors.map(
-        (report) =>
-          `KEEP  ${report.bay} ${report.name}  exit=${String(report.exit)}\n${report.lines
-            .filter((line) => line.verdict !== "PASS")
-            .map((line) => `      ${line.class} ${line.verdict} ${line.evidence}`)
-            .join("\n")}`,
-      ),
+      ...reports.map((report) => {
+        const disposition = preservedSet.has(report.bay)
+          ? "PAGE"
+          : report.exit === 0
+            ? "PRUNE"
+            : report.exit === 1
+              ? "KEEP"
+              : "PAGE"
+        const evidenceLines = report.lines
+          .filter((line) => line.verdict !== "PASS")
+          .map((line) => `      ${line.class} ${line.verdict} ${line.evidence}`)
+        if (preservedSet.has(report.bay)) {
+          evidenceLines.push("      worktree PRESERVED checkpoint pushed; reevaluate on the next pass")
+        }
+        const evidence = evidenceLines.join("\n")
+        return `${disposition}  ${report.bay} ${report.name}  ${report.branch}${evidence === "" ? "" : `\n${evidence}`}`
+      }),
     ]
     await printHuman(io, lines.join("\n"))
   }
 
-  if (!dryRun && safe.length > 0) {
-    await closeBays(
-      app,
-      services,
-      safe.map((report) => report.bay),
-      { json: options.json },
-      io,
-    )
+  if (!dryRun && outcomes.rows.pruned.length > 0) {
+    await closeBays(app, services, outcomes.rows.pruned, { json: options.json }, io)
   }
-  // Exit 0 if nothing unsafe blocked an apply; dry-run always 0 after report.
-  return 0
+  if (dryRun || reports.length === 0) return 0
+  return outcomes.rows.paged.length > 0 || outcomes.rows.pruned.length === 0 ? 1 : 0
+}
+
+type BayPruneOutcome = Readonly<{ bay: string; reasons: readonly BayStatusClass[] }>
+
+function bayPruneOutcomes(reports: readonly BayStatusReport[], preserved: ReadonlySet<string>) {
+  const rows: {
+    pruned: string[]
+    kept: BayPruneOutcome[]
+    paged: BayPruneOutcome[]
+  } = { pruned: [], kept: [], paged: [] }
+  const keptByReason: Partial<Record<BayStatusClass, number>> = {}
+  const pagedByReason: Partial<Record<BayStatusClass, number>> = {}
+
+  const increment = (histogram: Partial<Record<BayStatusClass, number>>, reason: BayStatusClass) => {
+    histogram[reason] = (histogram[reason] ?? 0) + 1
+  }
+  for (const report of reports) {
+    if (report.exit === 0) {
+      rows.pruned.push(report.bay)
+      continue
+    }
+    const verdict = report.exit === 1 ? "BLOCK" : "UNKNOWN"
+    const reasons = report.lines.filter((line) => line.verdict === verdict).map((line) => line.class)
+    if (preserved.has(report.bay)) {
+      rows.paged.push({ bay: report.bay, reasons: ["worktree"] })
+      increment(pagedByReason, "worktree")
+      continue
+    }
+    if (report.exit === 1) {
+      rows.kept.push({ bay: report.bay, reasons })
+      for (const reason of reasons) increment(keptByReason, reason)
+    } else {
+      rows.paged.push({ bay: report.bay, reasons })
+      for (const reason of reasons) increment(pagedByReason, reason)
+    }
+  }
+  return {
+    rows,
+    histogram: { pruned: rows.pruned.length, keptByReason, pagedByReason },
+  }
 }
 
 function shellQuote(value: string): string {
@@ -4103,7 +4179,12 @@ async function listBays(
 ): Promise<void> {
   if (options.all === true && options.closed === true) usage("--all and --closed are mutually exclusive")
   const allBays = app.bays.list()
-  const statuses = new Map(allBays.map((bay) => [bay.id, lifecycleStatus(bay.status)]))
+  const statuses = new Map(
+    allBays.map((bay) => [
+      bay.id,
+      bay.closure?.kind === "closed-degenerate" ? ("fail" as const) : lifecycleStatus(bay.status),
+    ]),
+  )
   const isTerminal = (bay: DeepReadonly<Bay>): boolean => {
     const status = statuses.get(bay.id)
     return status === "done" || status === "fail"
@@ -4134,7 +4215,9 @@ async function listBays(
     const remoteTrackingFresh = refreshBayStatusOrigin(cwd)
     const protections = activeBayProtections(io)
     reports = open.map((bay) =>
-      classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections)),
+      classifyBayStatus(
+        gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections, io.now?.() ?? Date.now()),
+      ),
     )
   }
   const safety =

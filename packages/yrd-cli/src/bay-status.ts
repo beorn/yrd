@@ -12,6 +12,7 @@ import type { YrdBayProtection } from "./types.ts"
 
 export const YRD_BAY_PROTECTIONS_ENV = "YRD_BAY_PROTECTIONS" as const
 export const YRD_BAY_PROTECTIONS_SCHEMA = "yrd-bay-protections/1" as const
+export const HISTORICAL_BAY_OWNER_AGE_FLOOR_MS = 48 * 60 * 60 * 1_000
 
 export type BayStatusClass = "owner" | "consumer" | "worktree" | "commits" | "stash" | "pr"
 
@@ -42,12 +43,16 @@ export type BayStatusFacts = Readonly<{
   name: string
   branch: string
   path?: string
+  /** Historical provision failure that never recorded a workspace path. */
+  closedDegenerate?: boolean
   /** Parsed PID from `:<PID>` address when present; undefined if no handle. */
   ownerPid?: number
   /** The command checking status is the process that owns this Bay. */
   ownerIsCaller?: boolean
   /** Result of `kill -0` when ownerPid is set; undefined if not checked. */
   ownerAlive?: boolean
+  /** Elapsed time since this Bay was opened. */
+  ageMs?: number
   /** Host-owned live consumers that still reference this Bay. */
   protectedBy?: readonly string[]
   /** `git status --porcelain` empty when path exists. */
@@ -64,6 +69,8 @@ export type BayStatusFacts = Readonly<{
   uniquePatches?: number
   /** Whether origin remote-tracking refs were refreshed and pruned for this report. */
   remoteTrackingFresh?: boolean
+  /** A fresh origin census found no remote-tracking ref for this Bay branch. */
+  branchMissingFromOrigin?: boolean
   /** Repo-global stash entries attributed to this bay (best-effort). */
   stashAttributed?: number
   stashUnknown?: boolean
@@ -132,14 +139,44 @@ function protectionText(value: unknown, index: number, field: string): string {
 }
 
 export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
+  if (facts.closedDegenerate === true) {
+    const lines: readonly BayStatusLine[] = [
+      { class: "owner", verdict: "PASS", evidence: "closed-degenerate Bay has no workspace owner" },
+      { class: "consumer", verdict: "PASS", evidence: "closed-degenerate Bay has no workspace consumer" },
+      { class: "worktree", verdict: "PASS", evidence: "closed-degenerate: no workspace path was ever recorded" },
+      { class: "commits", verdict: "PASS", evidence: "closed-degenerate Bay has no workspace tip to preserve" },
+      { class: "stash", verdict: "PASS", evidence: "closed-degenerate Bay has no workspace stash" },
+      { class: "pr", verdict: "PASS", evidence: "closed-degenerate Bay can release its branch identity" },
+    ]
+    return {
+      bay: facts.bayId,
+      name: facts.name,
+      branch: facts.branch,
+      wrapper: "git",
+      lines,
+      exit: 0,
+      safe: true,
+    }
+  }
   const lines: BayStatusLine[] = []
 
   // owner
-  if (facts.ownerPid === undefined) {
+  if (
+    facts.ownerPid === undefined &&
+    facts.ageMs !== undefined &&
+    facts.ageMs >= HISTORICAL_BAY_OWNER_AGE_FLOOR_MS &&
+    (facts.protectedBy?.length ?? 0) === 0
+  ) {
+    lines.push({
+      class: "owner",
+      verdict: "PASS",
+      evidence: "no owner token or live host consumer after the 48h migration floor",
+    })
+  } else if (facts.ownerPid === undefined) {
     lines.push({
       class: "owner",
       verdict: "UNKNOWN",
-      evidence: "no :<PID> address on bay name/BY — cannot prove owner liveness",
+      evidence: "no :<PID> address on bay name/BY and the 48h migration floor is not proven",
     })
   } else if (facts.ownerIsCaller === true) {
     lines.push({
@@ -172,7 +209,7 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
     lines.push({
       class: "consumer",
       verdict: "BLOCK",
-      evidence: facts.protectedBy!.join("; "),
+      evidence: (facts.protectedBy ?? []).join("; "),
     })
   } else {
     lines.push({
@@ -219,6 +256,12 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
       class: "commits",
       verdict: "UNKNOWN",
       evidence: "could not refresh and prune origin refs — commit durability is unknown",
+    })
+  } else if (facts.branchMissingFromOrigin === true) {
+    lines.push({
+      class: "commits",
+      verdict: "PASS",
+      evidence: "branch is absent from origin after a fresh pruned fetch",
     })
   } else if (facts.tipDurableAt !== undefined && facts.tipLanded !== true) {
     lines.push({

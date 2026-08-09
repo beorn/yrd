@@ -3903,7 +3903,7 @@ describe("runYrd", () => {
         error: expect.objectContaining({ code: "provision-failed" }),
       }),
     ])
-    expect(Object.values(app.state().bays.byId).map((bay) => bay.status)).toEqual(["active", "closed", "failed"])
+    expect(Object.values(app.state().bays.byId).map((bay) => bay.status)).toEqual(["active", "closed", "closed"])
 
     const open = outputIO()
     expect(await runYrd(app, yrd("bay", "list", "--json"), open.io), open.stderr()).toBe(0)
@@ -3917,7 +3917,7 @@ describe("runYrd", () => {
     expect(JSON.parse(closed.stdout())).toMatchObject({
       bays: [
         { id: "B2", status: "done", nativeStatus: "closed" },
-        { id: "B3", status: "fail", nativeStatus: "failed" },
+        { id: "B3", status: "fail", nativeStatus: "closed" },
       ],
     })
 
@@ -4024,27 +4024,62 @@ describe("runYrd", () => {
       ],
     })
 
-    expect(await runYrd(app, yrd("admin", "bay", "prune", "--apply", "--json"), output.io), output.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("admin", "bay", "prune", "--apply", "--json"), output.io), output.stderr()).toBe(1)
     expect(JSON.parse(output.stdout())).toMatchObject({
       command: "bay.prune",
       dryRun: false,
-      safe: [],
+      examined: 1,
       closed: [],
-      survivors: [
-        {
-          bay: "B1",
-          exit: 1,
-          lines: expect.arrayContaining([
-            {
-              class: "consumer",
-              verdict: "BLOCK",
-              evidence: expect.stringContaining("@dev.1"),
-            },
-          ]),
-        },
-      ],
+      outcomes: {
+        pruned: [],
+        kept: [{ bay: "B1", reasons: ["consumer"] }],
+        paged: [],
+      },
+      histogram: {
+        pruned: 0,
+        keptByReason: { consumer: 1 },
+        pagedByReason: {},
+      },
     })
     expect(app.state().bays.byId.B1?.status).toBe("active")
+  })
+
+  it("admin bay prune preserves a dirty Bay and pages it for the next pass", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-bay-prune-dirty-"))
+    const remote = join(root, "remote.git")
+    const repo = join(root, "repo")
+    const bay = join(root, "bay")
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim()
+    try {
+      execFileSync("git", ["init", "--bare", remote], { stdio: "ignore" })
+      execFileSync("git", ["init", "-q", "-b", "main", repo], { stdio: "ignore" })
+      git(repo, "config", "user.name", "Yrd Test")
+      git(repo, "config", "user.email", "yrd@example.invalid")
+      writeFileSync(join(repo, "README.md"), "base\n")
+      git(repo, "add", "README.md")
+      git(repo, "commit", "-qm", "base")
+      git(repo, "remote", "add", "origin", remote)
+      git(repo, "push", "-u", "origin", "main")
+      execFileSync("git", ["clone", "-q", remote, bay], { stdio: "ignore" })
+      writeFileSync(join(bay, "dirty.txt"), "preserve me\n")
+
+      const app = await createApp({ bayPath: bay, dirtyBay: true })
+      await openTestBay(app, { name: "dirty", branch: "task/dirty" })
+      const output = outputIO({ cwd: repo, now: () => Date.parse("2026-07-11T12:01:00.000Z") })
+
+      expect(await runYrd(app, yrd("admin", "bay", "prune", "--apply", "--json"), output.io), output.stderr()).toBe(1)
+      expect(JSON.parse(output.stdout())).toMatchObject({
+        command: "bay.prune",
+        preserved: ["B1"],
+        outcomes: { pruned: [], kept: [], paged: [{ bay: "B1", reasons: ["worktree"] }] },
+        histogram: { pruned: 0, keptByReason: {}, pagedByReason: { worktree: 1 } },
+      })
+      expect(app.bays.get("B1")).toMatchObject({ status: "active", dirty: false })
+      expect(readFileSync(join(bay, "dirty.txt"), "utf8")).toBe("preserve me\n")
+    } finally {
+      safeRemoveSync(root, { within: tmpdir(), allowMissing: true })
+    }
   })
 
   it("closes a draft-backed Bay without withdrawing its PR", async () => {
