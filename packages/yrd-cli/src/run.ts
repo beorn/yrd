@@ -1279,7 +1279,7 @@ function issueDeliveryRows(bridge: TrackerBridgeV2): IssueDeliveryRow[] {
   })
 }
 
-type RuntimePosture =
+export type RuntimePosture =
   | "active"
   | "viewer"
   | "journal-view-repair"
@@ -4766,9 +4766,7 @@ async function cancelAttempt(
   const pr = app.bays.pr(selector)
   if (pr !== undefined) {
     const summary = app.queue.status(pr.base)
-    const active = [...summary.running, ...summary.waiting].find((run) =>
-      run.prs.some((member) => member.id === pr.id),
-    )
+    const active = [...summary.running, ...summary.waiting].find((run) => run.prs.some((member) => member.id === pr.id))
     if (active === undefined) {
       raiseFailure(
         "refusal",

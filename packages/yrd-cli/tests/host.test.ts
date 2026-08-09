@@ -22,6 +22,7 @@ import {
   CURRENT_JOURNAL_COMPATIBILITY,
   configuredChecks,
   createDefaultYrdApp as createDefaultYrdAppRaw,
+  createPostureQueueTargetResolver,
   createYrdHost as createYrdHostRaw,
   runYrdProcess,
 } from "../src/host.ts"
@@ -1267,6 +1268,26 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 })
 
 describe("createYrdHost", { timeout: 20_000 }, () => {
+  it("caches viewer queue targets but re-resolves them for a resident runner", async () => {
+    const mutableResolver = () => {
+      let reads = 0
+      return {
+        reads: () => reads,
+        resolve: async (base: string) => ({ base, sha: ["first", "second"][reads++]! }),
+      }
+    }
+
+    const viewerBacking = mutableResolver()
+    const viewer = createPostureQueueTargetResolver("viewer", viewerBacking.resolve)
+    expect([(await viewer("main", "/repo")).sha, (await viewer("main", "/repo")).sha]).toEqual(["first", "first"])
+    expect(viewerBacking.reads()).toBe(1)
+
+    const residentBacking = mutableResolver()
+    const resident = createPostureQueueTargetResolver("resident-queue-run", residentBacking.resolve)
+    expect([(await resident("main", "/repo")).sha, (await resident("main", "/repo")).sha]).toEqual(["first", "second"])
+    expect(residentBacking.reads()).toBe(2)
+  })
+
   it("loads the base-authoritative reader floor and persists current versioned frames", async () => {
     const { repo, featureSha } = await repository()
     await commitYrdConfig(repo, 'base: main\nbatch: 1\nchecks: [{check: {run: "true"}}]\n')

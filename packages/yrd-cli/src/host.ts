@@ -113,6 +113,7 @@ import {
   residentRunnerLeaseHeld,
   runYrdHelp,
   runYrdProcessRuntime,
+  type RuntimePosture,
   yrdJsonOutputRequested,
   yrdQueueRunnerCheckRequested,
 } from "./run.ts"
@@ -128,6 +129,31 @@ import type {
 import { createQueueReadModel } from "./queue-read-model.ts"
 import { queueReadBases } from "./queue-read-boundary.ts"
 import { LandingAuthorityBoundary } from "./landing-authority-boundary.ts"
+
+type QueueTargetResolver = NonNullable<YrdCliIO["resolveQueueTarget"]>
+
+/** Viewer projections are immutable for one invocation, so they may share one
+ * queue-target read. Active postures observe a changing queue and must resolve
+ * the target on every cycle; caching it for a resident turns every later base
+ * advance into an endless same-base recut loop. */
+export function createPostureQueueTargetResolver(
+  posture: RuntimePosture,
+  resolveTarget: QueueTargetResolver,
+): QueueTargetResolver {
+  if (posture !== "viewer") return resolveTarget
+  const targets = new Map<string, Promise<Readonly<{ base: string; sha: string }>>>()
+  return (ref, cwd) => {
+    const key = `${cwd}\0${ref}`
+    const cached = targets.get(key)
+    if (cached !== undefined) return cached
+    const recoverable = resolveTarget(ref, cwd).catch((error: unknown) => {
+      targets.delete(key)
+      throw error
+    })
+    targets.set(key, recoverable)
+    return recoverable
+  }
+}
 
 type RuntimeStep = StepDef<PRShape, PRShape>
 
@@ -1928,22 +1954,11 @@ async function runYrdProcessHost(
           resident,
           posture === "viewer" ? "viewer" : "active",
         )
-        const queueTargets = new Map<string, Promise<Readonly<{ base: string; sha: string }>>>()
-        const resolveReadQueueTarget = (ref: string, cwd: string): Promise<Readonly<{ base: string; sha: string }>> => {
-          const key = `${cwd}\0${ref}`
-          const cached = queueTargets.get(key)
-          if (cached !== undefined) return cached
-          const pending =
-            io.resolveQueueTarget === undefined
-              ? resolveQueueTarget(activeHost.process, activeHost.repository.repo, activeHost.config.base, ref)
-              : io.resolveQueueTarget(ref, cwd)
-          const recoverable = pending.catch((error: unknown) => {
-            queueTargets.delete(key)
-            throw error
-          })
-          queueTargets.set(key, recoverable)
-          return recoverable
-        }
+        const resolveReadQueueTarget = createPostureQueueTargetResolver(posture, (ref, cwd) =>
+          io.resolveQueueTarget === undefined
+            ? resolveQueueTarget(activeHost.process, activeHost.repository.repo, activeHost.config.base, ref)
+            : io.resolveQueueTarget(ref, cwd),
+        )
         if (posture === "viewer") {
           await Promise.all(
             queueReadBases(activeHost.app.state(), activeHost.config.base).map((base) =>
