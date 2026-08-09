@@ -269,7 +269,7 @@ describe("withBays", () => {
   )("$definition $transition records do not strand a workspace", async ({ definition, transition }) => {
     const failure = createFailOnceWorkspace(definition, transition)
     await using app = await createApp(failure.adapter)
-    const opened = await app.bays.open({ name: "terminal-reapability" })
+    const opened = await app.bays.open({ name: "terminal-reapability", by: "test" })
     let failed: CommandResult
     if (definition === "bay.provision") {
       failed = opened
@@ -442,7 +442,7 @@ describe("withBays", () => {
     expect(app.bays.pr("pr1")).toMatchObject({ id: "PR1", branch: "Topic/One" })
     expect(app.bays.pr("topic/one")).toMatchObject({ id: "PR1", branch: "Topic/One" })
 
-    const opened = await app.bays.open({ name: "Case-Bay" })
+    const opened = await app.bays.open({ name: "Case-Bay", by: "test" })
     await finishJob(app, opened)
     expect(app.bays.get("case-bay")).toMatchObject({ id: "B1", name: "Case-Bay" })
 
@@ -507,7 +507,7 @@ describe("withBays", () => {
     const { app } = await createHarness()
     const explicitIssue = "@km/all/21091-explicit-pr-issue"
     const bayDefault = "@km/all/21091-bay-default"
-    await finishJob(app, await app.bays.open({ name: "issue-default", issue: bayDefault }))
+    await finishJob(app, await app.bays.open({ name: "issue-default", issue: bayDefault, by: "test" }))
     await app.bays.intake({ bay: "B1", headSha: HEAD_1, baseSha: BASE, issue: explicitIssue })
     await app.bays.submit({ pr: "PR1" })
 
@@ -554,7 +554,7 @@ describe("withBays", () => {
     // like the bay-less path — never re-present the recorded head at exit 0.
     const HEAD_3 = "3".repeat(40)
     await using app = (await createHarness()).app
-    await finishJob(app, await app.bays.open({ name: "retired-draft" }))
+    await finishJob(app, await app.bays.open({ name: "retired-draft", by: "test" }))
     await app.bays.intake({ bay: "B1", headSha: HEAD_1, baseSha: BASE })
     await finishJob(app, await app.bays.close({ bay: "B1" }))
     expect(app.bays.get("B1")?.status).toBe("closed")
@@ -1065,7 +1065,7 @@ describe("withBays", () => {
   it("runs a pinned bay through refresh, PR revisions, withdrawal, and close", async () => {
     const { app, workspace } = await createHarness(createLogger("test", [{ level: "silent" }]))
 
-    const opened = await app.bays.open({ name: "fix-release", baseSha: BASE })
+    const opened = await app.bays.open({ name: "fix-release", baseSha: BASE, by: "test" })
     expect(app.bays.state().byId.B1?.status).toBe("opening")
     await finishJob(app, opened)
     expect(app.bays.get("fix-release")).toMatchObject({
@@ -1163,7 +1163,7 @@ describe("withBays", () => {
 
   it("certifies handoff readiness for the exact current Bay branch and head", async () => {
     await using app = (await createHarness()).app
-    const opened = await app.bays.open({ name: "handoff-ready" })
+    const opened = await app.bays.open({ name: "handoff-ready", by: "test" })
     await finishJob(app, opened)
 
     expect(app.bays.branchLifecycles()).toEqual([
@@ -1279,6 +1279,12 @@ describe("withBays", () => {
     })
   })
 
+  it("refuses to open a Bay without explicit process ownership", async () => {
+    await using app = (await createHarness()).app
+
+    await expect(app.bays.open({ name: "missing-owner" })).rejects.toThrow("Bay open requires non-empty 'by'")
+  })
+
   it("does not infer a lifecycle submitter from Bay process ownership", async () => {
     await using app = (await createHarness()).app
     const opened = await app.bays.open({ name: "unknown-submitter", by: "yrd:4242" })
@@ -1322,7 +1328,7 @@ describe("withBays", () => {
       },
     }
     await using app = await createApp(adapter)
-    await finishJob(app, await app.bays.open({ name: "legacy-close" }))
+    await finishJob(app, await app.bays.open({ name: "legacy-close", by: "test" }))
 
     await finishJob(app, await app.bays.close({ bay: "B1" }))
 
@@ -1361,7 +1367,7 @@ describe("withBays", () => {
     await using app = await createYrd(definition, {
       inject: { journal: createMemoryJournal(), clock: () => "2026-01-01T00:00:00.000Z", id: ids() },
     })
-    const opened = await app.bays.open({ name: "landed-lifecycle" })
+    const opened = await app.bays.open({ name: "landed-lifecycle", by: "test" })
     await finishJob(app, opened)
     await app.bays.intake({ bay: "B1", headSha: HEAD_1 })
     await app.bays.submit({ pr: "PR1" })
@@ -2200,7 +2206,7 @@ describe("withBays", () => {
 
   it("owns the complete bay and direct-branch submission flow", async () => {
     const { app, workspace } = await createHarness()
-    await finishJob(app, await app.bays.open({ name: "domain-submit" }))
+    await finishJob(app, await app.bays.open({ name: "domain-submit", by: "test" }))
     const resolved: string[] = []
     const resolveRevision = async (ref: string): Promise<string | undefined> => {
       resolved.push(ref)
@@ -2371,7 +2377,7 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
 
   it("routes a closed Bay branch through direct draft creation", async () => {
     await using app = (await createHarness()).app
-    await finishJob(app, await app.bays.open({ name: "retired" }))
+    await finishJob(app, await app.bays.open({ name: "retired", by: "test" }))
     const branch = app.bays.get("B1")?.branch
     if (branch === undefined) throw new Error("expected opened Bay branch")
     await finishJob(app, await app.bays.close({ bay: "B1" }))
@@ -2473,7 +2479,7 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     const { app, workspace } = await createHarness(log)
-    await finishJob(app, await app.bays.open({ name: "dirty" }))
+    await finishJob(app, await app.bays.open({ name: "dirty", by: "test" }))
     workspace.dirty = true
 
     const warnings: string[] = []

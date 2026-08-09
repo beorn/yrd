@@ -150,7 +150,7 @@ describe("createGitWorkspace", () => {
     await using process = createProcess()
     await using app = await createApp(await workspace(process, { repo }))
 
-    await runRequested(app, await app.bays.open({ name: "clean-main" }))
+    await runRequested(app, await app.bays.open({ name: "clean-main", by: "test" }))
 
     expect(app.bays.get("B1")).toMatchObject({ status: "active" })
     expect(await git(repo, ["status", "--porcelain"])).toMatchObject({ stdout: "" })
@@ -167,7 +167,7 @@ describe("createGitWorkspace", () => {
     })
     await using app = await createApp(await workspace(runner, { repo, baysRoot: join(root, "bays") }))
 
-    await runRequested(app, await app.bays.open({ name: "clean-git-env" }))
+    await runRequested(app, await app.bays.open({ name: "clean-git-env", by: "test" }))
 
     expect(app.bays.get("B1")).toMatchObject({ status: "active" })
   })
@@ -179,7 +179,7 @@ describe("createGitWorkspace", () => {
       await workspace(process, { repo, baysRoot: join(root, "bays"), intakeRemote: intake }),
     )
 
-    await runRequested(app, await app.bays.open({ name: "safe-push" }))
+    await runRequested(app, await app.bays.open({ name: "safe-push", by: "test" }))
     const bay = app.bays.get("B1")
     if (bay?.path === undefined || bay.headSha === undefined) throw new Error("expected active Bay head and path")
     expect(await git(bay.path, ["config", "--worktree", "--get", "remote.pushDefault"])).toMatchObject({
@@ -225,7 +225,7 @@ describe("createGitWorkspace", () => {
     await using process = createProcess()
     await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
 
-    await runRequested(app, await app.bays.open({ name: "submodule-close" }))
+    await runRequested(app, await app.bays.open({ name: "submodule-close", by: "test" }))
     const bay = app.bays.get("B1")
     if (bay?.path === undefined) throw new Error("expected active Bay path")
     expect(await git(bay.path, ["config", "--local", "--get", "submodule.alternateLocation"])).toMatchObject({
@@ -260,7 +260,7 @@ describe("createGitWorkspace", () => {
     await using process = createProcess()
     await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
 
-    await runRequested(app, await app.bays.open({ name: "dirty-submodule" }))
+    await runRequested(app, await app.bays.open({ name: "dirty-submodule", by: "test" }))
     const bay = app.bays.get("B1")
     if (bay?.path === undefined) throw new Error("expected active Bay path")
     await git(bay.path, ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"])
@@ -281,7 +281,7 @@ describe("createGitWorkspace", () => {
     await using process = createProcess()
     await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
 
-    await runRequested(app, await app.bays.open({ name: "checkpoint-dirty-submodule" }))
+    await runRequested(app, await app.bays.open({ name: "checkpoint-dirty-submodule", by: "test" }))
     const bay = app.bays.get("B1")
     if (bay?.path === undefined || bay.headSha === undefined) throw new Error("expected active Bay head and path")
     const dirtyPath = join(bay.path, "vendor", "dependency", "dependency.txt")
@@ -306,6 +306,7 @@ describe("createGitWorkspace", () => {
       app,
       await app.bays.open({
         name: "lease-race",
+        by: "test",
         issue: "@km/test/lease-race",
         branch: "task/lease-race",
       }),
@@ -333,6 +334,7 @@ describe("createGitWorkspace", () => {
       app,
       await app.bays.open({
         name: "divergent-lease",
+        by: "test",
         issue: "@km/test/divergent-lease",
         branch: "task/divergent-lease",
       }),
@@ -407,6 +409,7 @@ describe("createGitWorkspace", () => {
       app,
       await app.bays.open({
         name: "lease-replay",
+        by: "test",
         issue: "@km/test/lease-replay",
         branch: "task/lease-replay",
       }),
@@ -453,7 +456,7 @@ describe("createGitWorkspace", () => {
     }
     await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
 
-    await runRequested(app, await app.bays.open({ name: "resume-close" }))
+    await runRequested(app, await app.bays.open({ name: "resume-close", by: "test" }))
     const bay = app.bays.get("B1")
     if (bay?.path === undefined || bay.headSha === undefined) throw new Error("expected active Bay head and path")
 
@@ -488,7 +491,7 @@ describe("createGitWorkspace", () => {
     }
     await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
 
-    await runRequested(app, await app.bays.open({ name: "resume-removed-close" }))
+    await runRequested(app, await app.bays.open({ name: "resume-removed-close", by: "test" }))
     const bay = app.bays.get("B1")
     if (bay?.path === undefined || bay.headSha === undefined) throw new Error("expected active Bay head and path")
 
@@ -656,7 +659,7 @@ describe("createGitWorkspace", () => {
     await using process = createProcess()
     await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
 
-    await runRequested(app, await app.bays.open({ name: "preserve-ref" }))
+    await runRequested(app, await app.bays.open({ name: "preserve-ref", by: "test" }))
     const bay = app.bays.get("B1")
     if (bay?.path === undefined) throw new Error("expected active Bay path")
 
@@ -769,8 +772,8 @@ describe("createGitWorkspace", () => {
     )
 
     const [first, second] = await Promise.all([
-      app.bays.open({ name: "parallel-one" }),
-      app.bays.open({ name: "parallel-two" }),
+      app.bays.open({ name: "parallel-one", by: "test" }),
+      app.bays.open({ name: "parallel-two", by: "test" }),
     ])
     await Promise.all([first, second].map((result) => runRequested(app, result)))
 
@@ -806,7 +809,7 @@ describe("createGitWorkspace", () => {
       await workspace(process, { repo, baysRoot: join(root, "bays"), intakeRemote: intake }),
     )
 
-    await runRequested(app, await app.bays.open({ name: "separate-worktree" }))
+    await runRequested(app, await app.bays.open({ name: "separate-worktree", by: "test" }))
 
     expect(app.bays.get("B1")).toMatchObject({ status: "active", path: join(root, "bays", "B1") })
     expect((await git(repo, ["config", "--get", "extensions.worktreeConfig"])).stdout).toBe("true")
@@ -824,7 +827,7 @@ describe("createGitWorkspace", () => {
       await workspace(process, { repo, baysRoot: join(root, "bays"), intakeRemote: intake }),
     )
 
-    await runRequested(app, await app.bays.open({ name: "bare-guard" }))
+    await runRequested(app, await app.bays.open({ name: "bare-guard", by: "test" }))
     const bay = app.bays.get("B1")
     if (bay?.path === undefined) throw new Error("expected active Bay path")
 
@@ -857,7 +860,7 @@ describe("createGitWorkspace", () => {
     expect((await git(pool, ["rev-parse", "--is-bare-repository"])).stdout).toBe("false")
 
     // A Bay provisioned after the repair is also non-bare and usable.
-    await runRequested(app, await app.bays.open({ name: "healed" }))
+    await runRequested(app, await app.bays.open({ name: "healed", by: "test" }))
     const bay = app.bays.get("B1")
     if (bay?.path === undefined) throw new Error("expected active Bay path")
     expect((await git(bay.path, ["rev-parse", "--is-bare-repository"])).stdout).toBe("false")
@@ -869,7 +872,7 @@ describe("createGitWorkspace", () => {
     await using process = createProcess()
     await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
 
-    await runRequested(app, await app.bays.open({ name: "repair-release", from: "release-fix" }))
+    await runRequested(app, await app.bays.open({ name: "repair-release", from: "release-fix", by: "test" }))
     const bay = app.bays.get("B1")
     if (bay?.path === undefined) throw new Error("expected active Bay path")
     expect(bay).toMatchObject({ status: "active", branch: "release-fix", from: "release-fix" })
@@ -882,7 +885,7 @@ describe("createGitWorkspace", () => {
     await using process = createProcess()
     await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
 
-    await runRequested(app, await app.bays.open({ name: "reopen" }))
+    await runRequested(app, await app.bays.open({ name: "reopen", by: "test" }))
 
     const bay = app.bays.get("B1")
     if (bay?.path === undefined) throw new Error("expected active Bay path")
@@ -905,7 +908,7 @@ describe("createGitWorkspace", () => {
     await using process = createProcess()
     await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
 
-    await runRequested(app, await app.bays.open({ name: "tracked-remote" }))
+    await runRequested(app, await app.bays.open({ name: "tracked-remote", by: "test" }))
 
     const bay = app.bays.get("B1")
     if (bay?.path === undefined) throw new Error("expected active Bay path")
@@ -959,7 +962,7 @@ describe("createGitWorkspace", () => {
     const { root, repo } = await repository()
     await using process = createProcess()
     await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
-    await runRequested(app, await app.bays.open({ name: "refresh-head" }))
+    await runRequested(app, await app.bays.open({ name: "refresh-head", by: "test" }))
     const bay = app.bays.get("B1")
     if (bay?.path === undefined) throw new Error("expected active Bay path")
 
@@ -978,7 +981,7 @@ describe("createGitWorkspace", () => {
     const pinned = (await git(repo, ["rev-parse", "main"])).stdout
     await using process = createProcess()
     await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
-    const opened = await app.bays.open({ name: "pinned-base", base: "main", baseSha: pinned })
+    const opened = await app.bays.open({ name: "pinned-base", base: "main", baseSha: pinned, by: "test" })
 
     await writeFile(join(repo, "later.txt"), "base moved\n")
     await git(repo, ["add", "later.txt"])

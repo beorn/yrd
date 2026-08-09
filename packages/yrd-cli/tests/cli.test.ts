@@ -632,7 +632,7 @@ async function openAndSubmit(app: TestApp): Promise<void> {
 }
 
 async function openTestBay(app: TestApp, input: Parameters<TestApp["bays"]["open"]>[0]): Promise<void> {
-  const opened = await app.bays.open(input)
+  const opened = await app.bays.open({ ...input, by: input.by ?? "test" })
   const jobs = await app.jobs.runMany(app.jobs.requested(opened), {
     runner: "cli-test",
     leaseMs: 60_000,
@@ -3891,7 +3891,7 @@ describe("runYrd", () => {
     const close = outputIO()
     expect(await runYrd(app, yrd("bay", "close", "--force", "B2"), close.io), close.stderr()).toBe(0)
 
-    const failedOpen = await app.bays.open({ name: "fail" })
+    const failedOpen = await app.bays.open({ name: "fail", by: "test" })
     const failedJobs = await app.jobs.runMany(app.jobs.requested(failedOpen), {
       runner: "cli-test",
       leaseMs: 60_000,
@@ -3947,7 +3947,7 @@ describe("runYrd", () => {
 
   it("closes a failed provision without a workspace as closed-degenerate and releases its branch", async () => {
     const app = await createApp({ failingBay: "B1" })
-    const failedOpen = await app.bays.open({ name: "pathless", branch: "task/reusable" })
+    const failedOpen = await app.bays.open({ name: "pathless", branch: "task/reusable", by: "test" })
     await app.jobs.runMany(app.jobs.requested(failedOpen), {
       runner: "cli-test",
       leaseMs: 60_000,
@@ -3959,7 +3959,7 @@ describe("runYrd", () => {
     })
     expect(app.bays.get("B1")).not.toHaveProperty("path")
 
-    await app.bays.open({ name: "replacement", branch: "task/reusable" })
+    await app.bays.open({ name: "replacement", branch: "task/reusable", by: "test" })
     expect(app.bays.get("B2")).toMatchObject({ branch: "task/reusable", status: "opening" })
   })
 

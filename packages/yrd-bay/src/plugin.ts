@@ -1574,6 +1574,7 @@ function openBay(
   defaultBase: string,
   provision: BayJobDefs["bay.provision"],
 ) {
+  if (args.by === undefined) throw new Error("yrd: Bay open requires non-empty 'by'")
   const current = state.bays
   if (Object.values(current.byId).some((bay) => bay.status !== "closed" && bay.name === args.name)) {
     throw new Error(`yrd: bay '${args.name}' is already open`)

@@ -972,6 +972,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 
     const opened = await app.bays.open({
       name: "feature",
+      by: "test",
       branch: "issue/feature",
       issue: "@issue/feature",
     })
@@ -1017,6 +1018,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 
     const recoverable = await app.bays.open({
       name: "recoverable",
+      by: "test",
       branch: "issue/recoverable",
       issue: "@issue/recoverable",
     })
@@ -1733,7 +1735,7 @@ checks: [{check: {run: "true"}}]
     const ambient = join(repo, "..", "bay-path-ambient")
     await mkdir(ambient)
     await using owner = await createYrdHost({ cwd: repo })
-    const opened = await owner.app.bays.open({ name: "selected" })
+    const opened = await owner.app.bays.open({ name: "selected", by: "test" })
     const jobs = await owner.app.jobs.runMany(owner.app.jobs.requested(opened), {
       runner: "test",
       leaseMs: 60_000,
@@ -1773,7 +1775,7 @@ checks: [{check: {run: "true"}}]
         },
       },
     })
-    const opened = await host.app.bays.open({ name: "hooked" })
+    const opened = await host.app.bays.open({ name: "hooked", by: "test" })
     const jobs = await host.app.jobs.runMany(host.app.jobs.requested(opened), {
       runner: "test",
       leaseMs: 60_000,
@@ -3391,7 +3393,7 @@ checks: [{check: {run: "true"}}]
     const { repo, featureSha } = await repository()
     const linked = join(repo, "..", "current")
     await using setup = await createYrdHost({ cwd: repo })
-    const opened = await setup.app.bays.open({ name: "stale" })
+    const opened = await setup.app.bays.open({ name: "stale", by: "test" })
     const jobs = await setup.app.jobs.runMany(setup.app.jobs.requested(opened), {
       runner: "test",
       leaseMs: 60_000,
