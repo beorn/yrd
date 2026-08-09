@@ -120,6 +120,7 @@ import {
 import { queueStepRevision, type ToolchainFingerprint } from "./host-revision.ts"
 import type {
   YrdCliApp,
+  YrdCliCheckResult,
   YrdCliChecks,
   YrdCliExitCode,
   YrdCliIO,
@@ -236,10 +237,11 @@ function retainedWorkspaceNote(path: string): string {
 
 function annotateRetainedWorkspace(cause: unknown, path: string): Error {
   const note = retainedWorkspaceNote(path)
-  if (cause instanceof Error) {
-    cause.message = `${cause.message}; ${note}`
-    return cause
+  const failure = failureFact(cause)
+  if (failure !== undefined) {
+    return createFailure({ ...failure, message: `${failure.message}; ${note}` }, cause)
   }
+  if (cause instanceof Error) return new Error(`${cause.message}; ${note}`, { cause })
   return new Error(`${String(cause)}; ${note}`, { cause })
 }
 
@@ -262,7 +264,7 @@ export function configuredChecks(
     cwd: string,
     ref: string | undefined,
     keepOnFailure: boolean,
-  ): Promise<ProcessResult> => {
+  ): Promise<YrdCliCheckResult> => {
     const baseSha = await resolveCommit(process, repo, config.base)
     if (baseSha === undefined) {
       raiseFailure(
@@ -394,11 +396,7 @@ export function configuredChecks(
       const result = await run(checkout)
       failed = result.exitCode !== 0 || result.timedOut
       if (!failed || !keepOnFailure) return result
-      const separator = result.stderr === "" || result.stderr.endsWith("\n") ? "" : "\n"
-      return {
-        ...result,
-        stderr: `${result.stderr}${separator}yrd: ${retainedWorkspaceNote(checkout)}\n`,
-      }
+      return { ...result, retainedWorkspaceNote: retainedWorkspaceNote(checkout) }
     } catch (cause) {
       if (keepOnFailure) throw annotateRetainedWorkspace(cause, checkout)
       throw cause

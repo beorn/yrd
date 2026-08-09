@@ -470,6 +470,9 @@ push, and the same PR resumes automatically as its next revision.
 yrd pr create [selector] [--base <branch>] [--issue <ref>] [--track]
   [--title <text>] [--description <text>]
   [--correlation <namespace:id>] [--json]
+yrd submit [selector...] [--base <branch>] [--track] [--keep-on-failure]
+  [--issue <ref>] [--title <text>] [--description <text>]
+  [--correlation <namespace:id>] [--json]
 yrd pr submit [selector...] [--follow] [--base <branch>] [--track] [--keep-on-failure]
   [--issue <ref>] [--title <text>] [--description <text>]
   [--correlation <namespace:id>] [--json]
@@ -505,6 +508,10 @@ and prints its path so the exact candidate and dependency state can be
 inspected. Checkout, submodule population, dependency provisioning, and check
 command failures are retained; successful checks keep the normal cleanup.
 The flag changes evidence lifetime only—it does not skip or weaken a check.
+The caller owns the retained evidence after inspection. For a printed worktree
+path, run `git worktree remove --force <path>`; if checkout creation itself
+failed, the printed path is only its parent directory and can be removed after
+confirming it contains no wanted evidence.
 
 `--track` opts a live PR into resident “merge into latest.” Before every Queue
 cycle, the resident observes the branch from `origin`; when its tip moved, Yrd

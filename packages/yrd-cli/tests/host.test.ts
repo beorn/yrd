@@ -682,48 +682,59 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     ).toBe(true)
   })
 
-  it("retains and names a failed pre-submit workspace when requested", async () => {
-    const { repo, featureSha } = await candidatePackageRepository()
-    const config: ResolvedYrdProjectConfig = {
-      base: "main",
-      batch: 1,
-      steps: ["typecheck"],
-      requires: [],
-      definitions: { typecheck: { run: "bun run typecheck", runner: "local" } },
-      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["typecheck"] },
-    }
-    await using runtimeProcess = createProcess({ cwd: repo })
-    const process = {
-      run(request: ProcessRequest): Promise<ProcessResult> {
-        if (request.argv.join(" ") !== "bun install --frozen-lockfile --ignore-scripts") {
-          return runtimeProcess.run(request)
-        }
-        return runtimeProcess.run({
-          ...request,
-          argv: ["sh", "-c", "printf 'dependency cache unavailable\\n' >&2; exit 7"],
-        })
-      },
-    }
-    const checks = configuredChecks(process, join(repo, ".git", "yrd"), config, {
-      PATH: globalThis.process.env.PATH,
-    })
+  it.each(["checkout", "submodule"] as const)(
+    "retains and names the candidate workspace when %s materialization fails",
+    async (phase) => {
+      const { repo, featureSha } = await candidatePackageRepository()
+      const config: ResolvedYrdProjectConfig = {
+        base: "main",
+        batch: 1,
+        steps: ["typecheck"],
+        requires: [],
+        definitions: { typecheck: { run: "bun run typecheck", runner: "local" } },
+        contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["typecheck"] },
+      }
+      await using runtimeProcess = createProcess({ cwd: repo })
+      const process = {
+        run(request: ProcessRequest): Promise<ProcessResult> {
+          const checkoutFailure =
+            phase === "checkout" && request.argv.includes("worktree") && request.argv.includes("add")
+          const submoduleFailure =
+            phase === "submodule" &&
+            request.cwd?.includes("pre-submit-worktrees") === true &&
+            request.argv.includes("submodule.alternateLocation")
+          if (!checkoutFailure && !submoduleFailure) return runtimeProcess.run(request)
+          return runtimeProcess.run({
+            ...request,
+            argv: ["sh", "-c", `printf '${phase} materialization failed\\n' >&2; exit 9`],
+          })
+        },
+      }
+      const checks = configuredChecks(process, join(repo, ".git", "yrd"), config, {
+        PATH: globalThis.process.env.PATH,
+      })
 
-    let failure: unknown
-    try {
-      await checks.run("typecheck", repo, { ref: featureSha, keepOnFailure: true })
-    } catch (cause) {
-      failure = cause
-    }
+      let failure: unknown
+      try {
+        await checks.run("typecheck", repo, { ref: featureSha, keepOnFailure: true })
+      } catch (cause) {
+        failure = cause
+      }
 
-    expect(failure).toBeInstanceOf(Error)
-    const message = (failure as Error).message
-    const retained = /workspace retained at '([^']+)'/u.exec(message)?.[1]
-    expect(retained, message).toBeDefined()
-    expect(existsSync(retained!)).toBe(true)
-    expect(existsSync(join(retained!, "package.json"))).toBe(true)
-  })
+      expect(failure).toBeInstanceOf(Error)
+      const message = (failure as Error).message
+      expect(message).toContain(`${phase} materialization failed`)
+      const retained = /workspace retained at '([^']+)'/u.exec(message)?.[1]
+      expect(retained, message).toBeDefined()
+      expect(existsSync(retained!)).toBe(true)
+      if (phase === "submodule") expect(existsSync(join(retained!, "package.json"))).toBe(true)
+    },
+  )
 
-  it("retains a required-check workspace after the check command fails", async () => {
+  it.each([
+    ["exits nonzero", 3, false],
+    ["times out", 0, true],
+  ] as const)("retains a required-check workspace when the check command %s", async (_label, exitCode, timedOut) => {
     const { repo, featureSha } = await candidatePackageRepository()
     const config: ResolvedYrdProjectConfig = {
       base: "main",
@@ -741,7 +752,20 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
           return runtimeProcess.run({ ...request, argv: ["sh", "-c", "mkdir -p node_modules"] })
         }
         if (command === "sh -c bun run typecheck") {
-          return runtimeProcess.run({ ...request, argv: ["sh", "-c", "printf 'typecheck failed\\n' >&2; exit 3"] })
+          if (timedOut) {
+            return Promise.resolve({
+              stdout: "",
+              stderr: "typecheck timed out\n",
+              exitCode,
+              signal: null,
+              durationMs: 1,
+              timedOut,
+            })
+          }
+          return runtimeProcess.run({
+            ...request,
+            argv: ["sh", "-c", `printf 'typecheck failed\\n' >&2; exit ${String(exitCode)}`],
+          })
         }
         return runtimeProcess.run(request)
       },
@@ -752,10 +776,10 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 
     const result = await checks.run("typecheck", repo, { ref: featureSha, keepOnFailure: true })
 
-    expect(result.exitCode).toBe(3)
-    expect(result.stderr).toContain("typecheck failed")
-    const retained = /workspace retained at '([^']+)'/u.exec(result.stderr)?.[1]
-    expect(retained, result.stderr).toBeDefined()
+    expect(result).toMatchObject({ exitCode, timedOut })
+    expect(result.stderr).toContain(timedOut ? "typecheck timed out" : "typecheck failed")
+    const retained = /workspace retained at '([^']+)'/u.exec(result.retainedWorkspaceNote ?? "")?.[1]
+    expect(retained, result.retainedWorkspaceNote).toBeDefined()
     expect(existsSync(join(retained!, "package.json"))).toBe(true)
   })
 
@@ -2162,7 +2186,7 @@ checks: [{check: {run: "true"}}]
       let stdout = ""
       let stderr = ""
       const exitCode = await runYrdProcess(
-        ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--json"],
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--keep-on-failure", "--json"],
         {
           cwd: repo,
           stdout: (text) => {
@@ -2194,7 +2218,7 @@ checks: [{check: {run: "true"}}]
       let stdout = ""
       let stderr = ""
       const exitCode = await runYrdProcess(
-        ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--json"],
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--keep-on-failure", "--json"],
         {
           cwd: repo,
           stdout: (text) => {
@@ -2208,13 +2232,17 @@ checks: [{check: {run: "true"}}]
 
       expect(exitCode).toBe(3)
       expect(stdout).toBe("")
-      expect(JSON.parse(stderr)).toMatchObject({
+      const failure = JSON.parse(stderr) as { failure: { message: string } }
+      expect(failure).toMatchObject({
         failure: {
           kind: "infrastructure",
           code: "candidate-provision-failed",
           message: expect.stringContaining("dependency cache unavailable"),
         },
       })
+      const retained = /workspace retained at '([^']+)'/u.exec(failure.failure.message)?.[1]
+      expect(retained, failure.failure.message).toBeDefined()
+      expect(existsSync(join(retained!, "package.json"))).toBe(true)
       expect((await journalEnvelope(repo)).flatMap(({ values }) => values)).toEqual([])
     } finally {
       if (previousPath === undefined) delete process.env.PATH
@@ -2351,25 +2379,32 @@ checks: [{check: {run: "true"}}]
     let submitStdout = ""
     let submitStderr = ""
     expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--json"], {
-        cwd: repo,
-        stdout: (text) => {
-          submitStdout += text
+      await runYrdProcess(
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--keep-on-failure", "--json"],
+        {
+          cwd: repo,
+          stdout: (text) => {
+            submitStdout += text
+          },
+          stderr: (text) => {
+            submitStderr += text
+          },
         },
-        stderr: (text) => {
-          submitStderr += text
-        },
-      }),
+      ),
       submitStderr,
     ).toBe(1)
     expect(submitStdout).toContain(`[yrd-base-health] base ${baseSha.slice(0, 12)} is red: test:fast failed`)
-    expect(JSON.parse(submitStderr)).toMatchObject({
+    const failure = JSON.parse(submitStderr) as { failure: { message: string } }
+    expect(failure).toMatchObject({
       failure: {
         kind: "refusal",
         code: "required-check-failed",
         message: expect.stringContaining("yrd check main-health"),
       },
     })
+    const retained = /workspace retained at '([^']+)'/u.exec(failure.failure.message)?.[1]
+    expect(retained, failure.failure.message).toBeDefined()
+    expect(existsSync(retained!)).toBe(true)
     expect((await journalEnvelope(repo)).flatMap(({ values }) => values)).toEqual([])
     await using host = await createYrdHost({ cwd: repo })
     expect(host.app.bays.list()).toEqual([])

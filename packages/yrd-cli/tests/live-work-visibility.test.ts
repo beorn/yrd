@@ -239,7 +239,12 @@ describe("root yrd submit", () => {
     const app = await createCliApp()
     const out = outputIO()
     expect(
-      await runYrd(app as CliApp, yrd("submit", "topic/root-verb", "--base", "main"), out.io, noRequiredChecks),
+      await runYrd(
+        app as CliApp,
+        yrd("submit", "topic/root-verb", "--base", "main", "--keep-on-failure"),
+        out.io,
+        noRequiredChecks,
+      ),
       out.stderr(),
     ).toBe(0)
     const pr = app.bays.pr("topic/root-verb")
@@ -255,6 +260,7 @@ describe("root yrd submit", () => {
     await runYrd(app as CliApp, yrd("submit", "--help"), out.io)
     const help = out.stdout() + out.stderr()
     expect(help.toLowerCase()).toContain("merge request")
+    expect(help).toContain("--keep-on-failure")
     expect(help.toLowerCase()).not.toContain("submission")
   })
 })

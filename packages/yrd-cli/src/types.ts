@@ -39,9 +39,15 @@ export type YrdCliJournalAdministration = Readonly<{
   bump?(version: number): Promise<JournalVersionBumpResult>
 }>
 
+export type YrdCliCheckResult = ProcessResult & Readonly<{ retainedWorkspaceNote?: string }>
+
 export type YrdCliChecks = Readonly<{
   names: readonly string[]
-  run(name: string, cwd: string, context?: Readonly<{ ref?: string; keepOnFailure?: boolean }>): Promise<ProcessResult>
+  run(
+    name: string,
+    cwd: string,
+    context?: Readonly<{ ref?: string; keepOnFailure?: boolean }>,
+  ): Promise<YrdCliCheckResult>
   install(cwd: string): Promise<string>
 }>
 

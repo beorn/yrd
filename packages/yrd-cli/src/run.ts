@@ -6494,10 +6494,11 @@ async function runRequiredChecks(
     if (result.stderr !== "") io.stderr(result.stderr)
     if (result.exitCode !== 0 || result.timedOut) {
       const outcome = result.timedOut ? "timed out" : `exited ${String(result.exitCode)}`
+      const retained = result.retainedWorkspaceNote === undefined ? "" : `; ${result.retainedWorkspaceNote}`
       raiseFailure(
         "refusal",
         "required-check-failed",
-        `yrd: required check failed: '${name}' ${outcome}; fix the working tree and run 'yrd check ${name}'`,
+        `yrd: required check failed: '${name}' ${outcome}${retained}; fix the working tree and run 'yrd check ${name}'`,
       )
     }
     results.push({ name, exitCode: result.exitCode })

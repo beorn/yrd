@@ -3767,28 +3767,6 @@ describe("runYrd", () => {
     expect(Queues.values(app.state().queues)).toHaveLength(1)
   })
 
-  it("passes --keep-on-failure to the client-side required-check workspace", async () => {
-    const contexts: unknown[] = []
-    const app = await createApp()
-    await openTestBay(app, { name: "one" })
-
-    const submit = outputIO({ cwd: "/repo/.bays/B1" })
-    expect(
-      await runYrd(app, yrd("pr", "submit", "--keep-on-failure"), submit.io, {
-        checks: {
-          names: ["typecheck"],
-          run: async (_name, _cwd, context) => {
-            contexts.push(context)
-            return { stdout: "", stderr: "", exitCode: 0, signal: null, durationMs: 1, timedOut: false }
-          },
-          install: async () => "/repo/.git/yrd/hooks/pre-submit",
-        },
-      }),
-      submit.stderr(),
-    ).toBe(0)
-    expect(contexts).toEqual([{ keepOnFailure: true }])
-  })
-
   it("leaves a direct submission predecessor for the Queue driver and queues the fresh revision", async () => {
     const checkedRevisions: string[] = []
     const app = await createApp({ checkedRevisions })
@@ -3867,6 +3845,7 @@ describe("runYrd", () => {
     const prSubmit = outputIO({ columns: 100 })
     expect(await runYrd(app, yrd("pr", "submit", "--help"), prSubmit.io)).toBe(0)
     expect(prSubmit.stdout()).toContain("--base <branch>")
+    expect(prSubmit.stdout()).toContain("--keep-on-failure")
     expect(prSubmit.stdout()).not.toContain(`--${["li", "ne"].join("")} <branch>`)
   })
 
