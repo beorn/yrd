@@ -1501,7 +1501,7 @@ async function recutDirectPR(
           await git.run(path, ["rebase", "--abort"], true)
           throw createFailure({
             kind: "refusal",
-            code: "recut-gitlink-conflict",
+            code: resolution.code,
             message:
               `yrd: PR '${input.id}' could not recut: target root '${target.sha}' pins submodule ` +
               `'${resolution.path}' to '${resolution.basePin}'; replayed authored root '${replayedRoot}' pins it to ` +
@@ -2933,9 +2933,18 @@ async function readGitlink(git: Git, repo: string, ref: string, path: string): P
   return recordPath === path ? header[1] : undefined
 }
 
+type GitlinkRefusalCode = "recut-gitlink-conflict" | "recut-gitlink-object-missing" | "recut-gitlink-uninitialized"
+
 type GitlinkFastForward =
   | Readonly<{ kind: "resolved"; side: "carrier" | "base"; sha: string }>
-  | Readonly<{ kind: "refuse"; path: string; basePin: string; authoredPin: string; message: string }>
+  | Readonly<{
+      kind: "refuse"
+      code: GitlinkRefusalCode
+      path: string
+      basePin: string
+      authoredPin: string
+      message: string
+    }>
   | Readonly<{ kind: "unresolved" }>
 
 /**
@@ -2965,6 +2974,7 @@ async function resolveGitlinkFastForward(
   } catch {
     return {
       kind: "refuse",
+      code: "recut-gitlink-uninitialized",
       path,
       basePin: ours,
       authoredPin: theirs,
@@ -2976,6 +2986,7 @@ async function resolveGitlinkFastForward(
     if (present.code !== 0) {
       return {
         kind: "refuse",
+        code: "recut-gitlink-object-missing",
         path,
         basePin: ours,
         authoredPin: theirs,
@@ -2987,6 +2998,7 @@ async function resolveGitlinkFastForward(
   if (await isAncestor(git, submodule, theirs, ours)) return { kind: "resolved", side: "base", sha: ours }
   return {
     kind: "refuse",
+    code: "recut-gitlink-conflict",
     path,
     basePin: ours,
     authoredPin: theirs,

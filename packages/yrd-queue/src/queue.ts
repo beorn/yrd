@@ -5648,25 +5648,37 @@ function auditQueues(
   return { findings }
 }
 
+/** Fixed non-ancestral gitlink commits cannot become ancestral on a later retry. */
+const STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS = new Set(["recut-gitlink-conflict"])
+
 function admissionRefusalAuditFindings(
   state: DeepReadonly<RuntimeState>,
   queued: readonly DeepReadonly<PR>[],
   progress: QueueProgressPolicy,
 ): QueueAuditFinding[] {
   const findings: QueueAuditFinding[] = []
-  const head = queued[0]
+  const refused = Object.entries(state.queues.admissionRefusals).flatMap(([id, refusal]) => {
+    if (refusal.settlement !== undefined) return []
+    const pr = state.bays.prs[id]
+    return pr === undefined ? [] : [pr]
+  })
+  const head = [...new Map([...queued, ...refused].map((pr) => [pr.id, pr])).values()].toSorted(
+    (left, right) => checkQueueTime(left).localeCompare(checkQueueTime(right)) || compareNatural(left.id, right.id),
+  )[0]
   for (const refusal of Object.values(state.queues.admissionRefusals).toSorted((left, right) =>
     compareNatural(left.pr, right.pr),
   )) {
     const sameCodeCount = refusal.sameCodeCount ?? refusal.count
     const sameCodeFirstAt = refusal.sameCodeFirstAt ?? refusal.firstAt
-    if (refusal.settlement !== undefined || sameCodeCount < progress.refusalCount) continue
+    if (refusal.settlement !== undefined || head?.id !== refusal.pr) continue
+    const threshold = STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS.has(refusal.code) ? 1 : progress.refusalCount
+    if (sameCodeCount < threshold) continue
     const blockedMs = Math.max(0, Date.parse(refusal.lastAt) - Date.parse(sameCodeFirstAt))
-    const position = head?.id === refusal.pr ? " at the head of the required-check queue" : ""
     findings.push({
       code: "admission-refusal-loop",
       message:
-        `merge request '${refusal.pr}'${position} failed its entry checks ${sameCodeCount} consecutive times ` +
+        `merge request '${refusal.pr}' at the head of the required-check queue failed its entry checks ` +
+        `${sameCodeCount} consecutive times ` +
         `over ${formatRefusalSpan(blockedMs)} (since ${sameCodeFirstAt}) without ever completing required checks; ` +
         `latest failure '${refusal.code}': ${refusal.reason}`,
       pr: refusal.pr,

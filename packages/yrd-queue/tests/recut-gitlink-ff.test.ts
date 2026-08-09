@@ -744,10 +744,37 @@ describe("recut fast-forward gitlink resolution", () => {
     ).rejects.toMatchObject({
       failure: {
         kind: "refusal",
-        code: "recut-gitlink-conflict",
+        code: "recut-gitlink-object-missing",
         message: expect.stringContaining(`commit '${absentPin}' is not present`),
       },
     })
     expect(await git(repo, ["status", "--porcelain"])).toBe(dirtyBefore)
+  })
+
+  it("classifies an uninitialized local submodule as recoverable", async () => {
+    const { repo, module, moduleA, sourceBase } = await baseRepo()
+    const moduleB = await moduleCommit(module, "carrier-row", moduleA, "b")
+    const moduleC = await moduleCommit(module, "base-row", moduleA, "c")
+    const headSha = await carrier(repo, sourceBase, moduleB)
+    await advanceBase(repo, moduleC)
+    await rm(join(repo, "dep"), { recursive: true, force: true })
+
+    await using process = createProcess()
+    await expect(
+      createGitPRRecutter({ inject: { process }, repo }).recut({
+        id: "PR1",
+        branch: "issue/feature",
+        base: "main",
+        revision: 1,
+        headSha,
+        baseSha: sourceBase,
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "recut-gitlink-uninitialized",
+        message: expect.stringContaining("is not initialized locally"),
+      },
+    })
   })
 })

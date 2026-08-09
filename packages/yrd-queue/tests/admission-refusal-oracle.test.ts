@@ -189,6 +189,70 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       sameCodeCount: 1,
     })
   })
+
+  it("reports a structurally permanent refusal at the required-check head on its first occurrence", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createApp(
+      refuseForever(() => ""),
+      clock.read,
+    )
+    const pr = await submitAndRequestChecks(app, "issue/permanent-head-refusal")
+
+    await app.queue.recordAdmissionRefusal({
+      pr: pr.id,
+      code: "recut-gitlink-conflict",
+      kind: "refusal",
+      reason: "two fixed gitlink commits are non-ancestral",
+    })
+
+    expect(app.queue.audit().findings).toContainEqual(
+      expect.objectContaining({
+        code: "admission-refusal-loop",
+        pr: pr.id,
+        refusal: "recut-gitlink-conflict",
+        count: 1,
+      }),
+    )
+  })
+
+  it("keeps a recoverable gitlink object gap on the ordinary retry threshold", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createApp(
+      refuseForever(() => ""),
+      clock.read,
+    )
+    const pr = await submitAndRequestChecks(app, "issue/recoverable-gitlink-object-gap")
+
+    await app.queue.recordAdmissionRefusal({
+      pr: pr.id,
+      code: "recut-gitlink-object-missing",
+      kind: "refusal",
+      reason: "the pinned commit is not present locally; fetch it and retry",
+    })
+
+    expect(app.queue.audit().findings).not.toContainEqual(expect.objectContaining({ pr: pr.id }))
+  })
+
+  it("does not promote a structurally permanent refusal away from the queue head", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createApp(
+      refuseForever(() => ""),
+      clock.read,
+    )
+    const head = await submitAndRequestChecks(app, "issue/queue-head")
+    const behind = await submitAndRequestChecks(app, "issue/permanent-refusal-behind-head")
+
+    await app.queue.recordAdmissionRefusal({
+      pr: behind.id,
+      code: "recut-gitlink-conflict",
+      kind: "refusal",
+      reason: "two fixed gitlink commits are non-ancestral",
+    })
+
+    expect(app.queue.audit().findings).not.toContainEqual(expect.objectContaining({ pr: behind.id }))
+    expect(app.queue.eligibility(head.id).checks.position).toBe(1)
+  })
+
   it("keeps a passed admission in the no-landing progress population until delivery", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     await using app = await createDeliveryApp(clock.read, true)
@@ -389,7 +453,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     })
     const finding = app.queue.audit().findings.find((item) => item.code === "admission-refusal-loop")
     expect(finding?.message).toBe(
-      `merge request '${pr.id}' failed its entry checks 3 consecutive times over 5h46m ` +
+      `merge request '${pr.id}' at the head of the required-check queue failed its entry checks 3 consecutive times over 5h46m ` +
         `(since 2026-01-01T00:00:00.000Z) without ever completing required checks; latest failure 'authored-gitlink': ` +
         `yrd: PR '${pr.id}' authors a gitlink bump; recut it before required checks`,
     )
