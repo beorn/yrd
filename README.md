@@ -470,7 +470,7 @@ push, and the same PR resumes automatically as its next revision.
 yrd pr create [selector] [--base <branch>] [--issue <ref>] [--track]
   [--title <text>] [--description <text>]
   [--correlation <namespace:id>] [--json]
-yrd pr submit [selector...] [--follow] [--base <branch>] [--track]
+yrd pr submit [selector...] [--follow] [--base <branch>] [--track] [--keep-on-failure]
   [--issue <ref>] [--title <text>] [--description <text>]
   [--correlation <namespace:id>] [--json]
 yrd pr checkout <selector> [--bay <name>] [--json]
@@ -499,6 +499,12 @@ request, and return without driving Queue execution. `pr checks --follow`
 observes the later Queue-owned check result. It renders the typed evidence in
 human or newline-delimited JSON output, including command argv, concise
 diagnostics, base-versus-carrier classification, and artifact paths.
+
+`pr submit --keep-on-failure` retains a failed local required-check workspace
+and prints its path so the exact candidate and dependency state can be
+inspected. Checkout, submodule population, dependency provisioning, and check
+command failures are retained; successful checks keep the normal cleanup.
+The flag changes evidence lifetime only—it does not skip or weaken a check.
 
 `--track` opts a live PR into resident “merge into latest.” Before every Queue
 cycle, the resident observes the branch from `origin`; when its tip moved, Yrd
