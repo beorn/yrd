@@ -249,7 +249,10 @@ type BranchLifecycleBase = Readonly<{
   bay: BayId
   name: string
   issue?: string
+  /** Bay/runtime ownership: the process or actor that owns the workspace lifecycle. */
   by?: string
+  /** Logical owner of the exact immutable PR revision projected by this lifecycle. */
+  submitter?: string
   branch: string
   openedAt: string
 }>
@@ -900,16 +903,19 @@ export function emptyBaysState(): BaysState {
 export function projectBranchLifecycles(state: BaysState): readonly BranchLifecycle[] {
   return Object.values(state.byId)
     .map((bay): BranchLifecycle => {
+      const pr = prForBay(state, bay.id)
+      const current = pr === undefined ? undefined : currentPRRev(pr)
+      const lifecycleHead = bay.archive?.headSha ?? bay.headSha
+      const submitter = lifecycleHead !== undefined && current?.head === lifecycleHead ? current.submitter : undefined
       const base = {
         bay: bay.id,
         name: bay.name,
         ...(bay.issue === undefined ? {} : { issue: bay.issue }),
         ...(bay.by === undefined ? {} : { by: bay.by }),
+        ...(submitter === undefined ? {} : { submitter }),
         branch: bay.branch,
         openedAt: bay.openedAt,
       }
-      const pr = prForBay(state, bay.id)
-      const current = pr === undefined ? undefined : currentPRRev(pr)
       const landedAt = pr?.alreadyLandedAt ?? pr?.integratedAt
       if (
         bay.headSha !== undefined &&

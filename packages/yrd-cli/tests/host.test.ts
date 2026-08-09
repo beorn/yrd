@@ -1267,6 +1267,18 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 })
 
 describe("createYrdHost", { timeout: 20_000 }, () => {
+  it("uses an explicit default submitter while generic Yrd stays operator-owned", async () => {
+    const explicit = await repository()
+    await using explicitHost = await createYrdHost({ cwd: explicit.repo, defaultSubmitter: "@dev/3" })
+    await explicitHost.app.bays.submit({ branch: "issue/feature", headSha: explicit.featureSha, base: "main" })
+    expect(explicitHost.app.bays.pr("PR1")).toMatchObject({ revs: [{ submitter: "@dev/3" }] })
+
+    const generic = await repository()
+    await using genericHost = await createYrdHost({ cwd: generic.repo })
+    await genericHost.app.bays.submit({ branch: "issue/feature", headSha: generic.featureSha, base: "main" })
+    expect(genericHost.app.bays.pr("PR1")).toMatchObject({ revs: [{ submitter: "operator" }] })
+  })
+
   it("loads the base-authoritative reader floor and persists current versioned frames", async () => {
     const { repo, featureSha } = await repository()
     await commitYrdConfig(repo, 'base: main\nbatch: 1\nchecks: [{check: {run: "true"}}]\n')

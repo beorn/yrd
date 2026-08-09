@@ -1417,9 +1417,11 @@ export type YrdHostOptions = Readonly<{
   env?: NodeJS.ProcessEnv
   log?: ConditionalLogger
   workspaceLifecycle?: GitWorkspaceLifecycleHooks
+  /** Opaque logical submitter supplied by an embedding host; standalone Yrd defaults to operator. */
+  defaultSubmitter?: string
 }>
 
-export type YrdProcessHostOptions = Pick<YrdHostOptions, "workspaceLifecycle">
+export type YrdProcessHostOptions = Pick<YrdHostOptions, "workspaceLifecycle" | "defaultSubmitter">
 
 type YrdRuntimeHostOptions = YrdHostOptions &
   Readonly<{
@@ -1569,7 +1571,7 @@ async function createYrdRuntimeHost(
     if (options.repairViewsBeforeReplay === true) {
       await (journal as MutableJournal).views.rebuild()
     }
-    const defaultSubmitter = "operator"
+    const defaultSubmitter = options.defaultSubmitter ?? "operator"
     if (mode === "active") {
       candidatePool = createCandidatePool({
         repo: repository.repo,
@@ -1924,6 +1926,7 @@ async function runYrdProcessHost(
               : { implementationSource: selectedImplementationSource }),
             ...(posture === "journal-view-repair" ? { repairViewsBeforeReplay: true } : {}),
             ...(options.workspaceLifecycle === undefined ? {} : { workspaceLifecycle: options.workspaceLifecycle }),
+            ...(options.defaultSubmitter === undefined ? {} : { defaultSubmitter: options.defaultSubmitter }),
           },
           resident,
           posture === "viewer" ? "viewer" : "active",

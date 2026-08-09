@@ -1177,8 +1177,9 @@ describe("withBays", () => {
   })
 
   it("projects pushed, submitted, and proof-bearing archived branch states", async () => {
-    await using app = (await createHarness()).app
-    const opened = await app.bays.open({ name: "branch-lifecycle" })
+    const harness = createWorkspaceHarness()
+    await using app = await createApp(harness.adapter, undefined, "@dev/3")
+    const opened = await app.bays.open({ name: "branch-lifecycle", by: "yrd:4242" })
     await finishJob(app, opened)
     await app.bays.certifyHandoff({
       bay: "B1",
@@ -1188,13 +1189,19 @@ describe("withBays", () => {
     })
 
     await app.bays.intake({ bay: "B1", headSha: HEAD_1 })
-    expect(app.bays.branchLifecycles()[0]).toMatchObject({ status: "handoff-ready" })
+    expect(app.bays.branchLifecycles()[0]).toMatchObject({
+      status: "handoff-ready",
+      by: "yrd:4242",
+      submitter: "@dev/3",
+    })
 
     await app.bays.submit({ pr: "PR1" })
     expect(app.bays.branchLifecycles()[0]).toMatchObject({
       bay: "B1",
       branch: "issue/branch-lifecycle",
       headSha: HEAD_1,
+      by: "yrd:4242",
+      submitter: "@dev/3",
       status: "submitted",
       submitted: { pr: "PR1", revision: 1, at: "2026-01-01T00:00:00.000Z" },
     })
@@ -1205,6 +1212,8 @@ describe("withBays", () => {
       bay: "B1",
       branch: "issue/branch-lifecycle",
       headSha: HEAD_1,
+      by: "yrd:4242",
+      submitter: "@dev/3",
       status: "archived",
       archived: {
         at: "2026-01-01T00:00:00.000Z",
@@ -1212,6 +1221,27 @@ describe("withBays", () => {
         preservedRef: "refs/yrd/closed/B1",
       },
     })
+  })
+
+  it("does not infer a lifecycle submitter from Bay process ownership", async () => {
+    await using app = (await createHarness()).app
+    const opened = await app.bays.open({ name: "unknown-submitter", by: "yrd:4242" })
+    await finishJob(app, opened)
+    await app.bays.certifyHandoff({
+      bay: "B1",
+      branch: "issue/unknown-submitter",
+      headSha: HEAD_1,
+      evidence: "@km/handoff/unknown-submitter.md",
+    })
+
+    await app.bays.intake({ bay: "B1", headSha: HEAD_1 })
+
+    expect(app.bays.branchLifecycles()[0]).toMatchObject({
+      status: "handoff-ready",
+      by: "yrd:4242",
+      submitter: "operator",
+    })
+    expect(app.bays.branchLifecycles()[0]).not.toMatchObject({ submitter: "yrd:4242" })
   })
 
   it("keeps a replay-compatible close without archive proof explicitly unmanaged", async () => {
