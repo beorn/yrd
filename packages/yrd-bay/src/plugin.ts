@@ -424,6 +424,8 @@ const PRRecutFactSchema = z
     baseSha: GitShaSchema,
     treeSha: GitShaSchema,
     reviewCarried: z.boolean(),
+    /** Missing only while replaying recuts written before submitter provenance was carried. */
+    submitter: TextSchema.optional(),
     sources: z.array(PRRecutSourceSchema).min(1).readonly().optional(),
     predecessor: PRRecutLineageSchema,
     successor: PRRecutLineageSchema.extend({ baseSha: GitShaSchema }).strict(),
@@ -2226,6 +2228,7 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
         baseSha: args.baseSha,
         treeSha: args.treeSha,
         reviewCarried: args.reviewCarried,
+        submitter: successorSubmitter,
         ...(args.sources === undefined ? {} : { sources: args.sources }),
         predecessor: {
           revision: predecessor.n,
@@ -2761,6 +2764,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         head: recut.successor.headSha,
         base: pr.base,
         baseSha: recut.successor.baseSha,
+        ...(recut.submitter === undefined ? {} : { submitter: recut.submitter }),
         ...(correlation === undefined ? {} : { correlation: { ...correlation } }),
         ...(recut.composition === undefined ? {} : { composition: recut.composition }),
         recut: proof,
