@@ -1787,7 +1787,7 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
     return { events: [] }
   }
   const id = existing?.id ?? nextId("PR", current.prs)
-  const submitter = args.submitter ?? bay?.by ?? defaultSubmitter
+  const submitter = args.submitter ?? defaultSubmitter
   const revision = (existing === undefined ? 0 : prRevisionNumber(existing)) + 1
   const pushed = {
     pr: id,
