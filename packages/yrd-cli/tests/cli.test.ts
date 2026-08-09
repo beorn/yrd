@@ -2816,7 +2816,7 @@ describe("runYrd", () => {
     expect(queueRun, "a refused operation is not progress and must not reopen compose").toHaveBeenCalledTimes(1)
   })
 
-  it.fails("re-proves the baseline when freshness mutates the PR before refusing it", async () => {
+  it("re-proves the baseline when freshness mutates the PR before refusing it", async () => {
     const nextBase = "b".repeat(40)
     const nextHead = "3".repeat(40)
     const unpublishedPin = "4".repeat(40)

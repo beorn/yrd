@@ -7446,6 +7446,7 @@ async function prepareResidentQueueCycle(
   const remedies = await applyRefusalRemedies(app, services, io, remedied)
   return (
     publicationChanged ||
+    app.state() !== beforePublication ||
     tracking.some((outcome) => outcome.status === "applied") ||
     freshness.some(({ status }) => status === "refreshed" || status === "settled" || status === "recovered") ||
     remedies.some((outcome) => outcome.status === "applied")
