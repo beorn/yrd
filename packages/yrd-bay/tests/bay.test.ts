@@ -688,11 +688,19 @@ describe("withBays", () => {
     const seededCommand = { id: nextId(), op: "fixture.legacy-pr-terminals" }
     const issueRef = "@km/all/21063-steering-laser"
     const at = "2026-01-01T00:00:00.000Z"
-    const pushed = (pr: string, branch: string, headSha: string) => ({
+    const pushed = (pr: string, branch: string, headSha: string, submitter?: string) => ({
       id: nextId(),
       name: "pr/pushed",
       ts: at,
-      data: { pr, branch, base: "main", headSha, issue: issueRef, revision: 1 },
+      data: {
+        pr,
+        branch,
+        base: "main",
+        headSha,
+        issue: issueRef,
+        revision: 1,
+        ...(submitter === undefined ? {} : { submitter }),
+      },
     })
     const journal = createMemoryJournal([
       {
@@ -783,7 +791,7 @@ describe("withBays", () => {
               reason: "superseded",
             },
           },
-          pushed("PR7", "topic/legacy-recut", HEAD_1),
+          pushed("PR7", "topic/legacy-recut-with-provenance", HEAD_1, "@dev/3"),
           {
             id: nextId(),
             name: "pr/recut",
@@ -794,6 +802,22 @@ describe("withBays", () => {
               patchId: "d".repeat(40),
               baseSha: BASE,
               treeSha: "c".repeat(40),
+              reviewCarried: false,
+              predecessor: { revision: 1, headSha: HEAD_1 },
+              successor: { revision: 2, headSha: HEAD_2, baseSha: BASE },
+            },
+          },
+          pushed("PR8", "topic/legacy-recut-without-provenance", HEAD_1),
+          {
+            id: nextId(),
+            name: "pr/recut",
+            ts: at,
+            data: {
+              pr: "PR8",
+              fromRevision: 1,
+              patchId: "e".repeat(40),
+              baseSha: BASE,
+              treeSha: "f".repeat(40),
               reviewCarried: false,
               predecessor: { revision: 1, headSha: HEAD_1 },
               successor: { revision: 2, headSha: HEAD_2, baseSha: BASE },
@@ -895,9 +919,13 @@ describe("withBays", () => {
     })
     expect(prFacts(app.bays.pr("PR7"))).toMatchObject({
       delivery: "pushed",
+      current: { n: 2, head: HEAD_2, submitter: "@dev/3", recut: { fromRevision: 1 } },
+    })
+    expect(prFacts(app.bays.pr("PR8"))).toMatchObject({
+      delivery: "pushed",
       current: { n: 2, head: HEAD_2, recut: { fromRevision: 1 } },
     })
-    expect(currentPRRev(app.bays.pr("PR7")!)).not.toHaveProperty("submitter")
+    expect(currentPRRev(app.bays.pr("PR8")!)).not.toHaveProperty("submitter")
     await expect(app.dispatch(app.commands.fixture.legacyWithdraw, undefined)).rejects.toThrow()
     await expect(app.dispatch(app.commands.fixture.legacyReject, undefined)).rejects.toThrow()
     await expect(app.dispatch(app.commands.fixture.transitionalReject, undefined)).rejects.toThrow()
