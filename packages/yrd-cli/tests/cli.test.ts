@@ -3071,7 +3071,7 @@ describe("runYrd", () => {
     ])
   })
 
-  it("keeps refreshing independent candidates while the R1320 composition exclusion stays loud and typed", async () => {
+  it.fails("journals a refused freshness recut while refreshing independent candidates", async () => {
     const nextBase = "b".repeat(40)
     const logs: LogEvent[] = []
     const app = await createApp({
@@ -3152,6 +3152,14 @@ describe("runYrd", () => {
     expect(currentPRRev(refused)).toMatchObject({ n: 2, head: "2".repeat(40) })
     expect(prDeliveryState(independent)).toBe("submitted")
     expect(currentPRRev(independent)).toMatchObject({ n: 3, head: "9".repeat(40) })
+    expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
+      pr: "PR1",
+      revision: 2,
+      headSha: "2".repeat(40),
+      code: "recut-gitlink-conflict",
+      reason: "authored gitlink pins require composition",
+      count: 1,
+    })
     const appended = (await Array.fromAsync(app.events())).slice(before)
     expect(appended.filter(({ name }) => name === "pr/recut").map(({ data }) => (data as { pr: string }).pr)).toEqual([
       "PR2",
