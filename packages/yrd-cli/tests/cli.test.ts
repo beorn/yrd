@@ -6265,6 +6265,26 @@ describe("runYrd", () => {
         },
       })
 
+      writeFileSync(
+        join(stateDir, "resident-runner", "status.json"),
+        JSON.stringify({
+          pid: process.pid,
+          startedAt: "2026-07-09T12:00:00.000Z",
+          lastTickAt: "2026-07-09T12:00:58.000Z",
+          command: "yrd queue run --follow",
+          queueProgress: {
+            state: "healthy",
+            findings: [{ code: "queue-progress-stalled", message: "contradictory stalled evidence" }],
+          },
+        }),
+      )
+      const contradictory = outputIO({ cwd: repo })
+      expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), contradictory.io, services)).toBe(2)
+      expect(JSON.parse(contradictory.stdout())).toMatchObject({
+        state: "unhealthy",
+        error: { code: "resident-runner-status-invalid" },
+      })
+
       const refusalFinding = {
         code: "admission-refusal-loop",
         message: "merge request 'PR1' failed its entry checks 160 consecutive times",

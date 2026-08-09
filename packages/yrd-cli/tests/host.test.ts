@@ -1462,6 +1462,45 @@ checks: [{check: {run: "true"}}]
     expect(await readFile(join(stateDir, "journal.sqlite"), "utf8")).toBe("not a sqlite database")
   })
 
+  it("reports a missing resident as unhealthy when the production probe finds queued work", async () => {
+    const { repo, featureSha } = await repository()
+    {
+      await using seeded = await createYrdHost({ cwd: repo })
+      await seeded.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+      expect(prDeliveryState(seeded.app.state().bays.prs.PR1!)).toBe("submitted")
+      await seeded.close()
+    }
+    let stdout = ""
+    let stderr = ""
+
+    expect(
+      await runYrdProcess(
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "queue", "list", "--check", "--json"],
+        {
+          cwd: repo,
+          stdout: (text) => {
+            stdout += text
+          },
+          stderr: (text) => {
+            stderr += text
+          },
+        },
+      ),
+      stderr,
+    ).toBe(2)
+    expect(JSON.parse(stdout)).toMatchObject({
+      schema: "hab-service-health/1",
+      service: "yrd-runner",
+      state: "unhealthy",
+      running: false,
+      error: {
+        code: "resident-runner-missing",
+        resolution: ["Start or restart the resident queue runner."],
+      },
+      facts: { lease: "free", runnerStatus: "missing" },
+    })
+  })
+
   it("preserves every Yrd state byte while listing a populated PR journal", async () => {
     const { repo, featureSha } = await repository()
     await commitYrdConfig(
@@ -3088,6 +3127,76 @@ checks: [{check: {run: "true"}}]
 
     expect(releases).toBe(1)
   })
+
+  it("advances the resident base between cycles without re-admitting the next passed revision", async () => {
+    const { repo } = await repository()
+    const invoke = async (args: readonly string[]) => {
+      let stdout = ""
+      let stderr = ""
+      const exitCode = await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, ...args], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      })
+      return { exitCode, stdout, stderr }
+    }
+
+    const admitted = await invoke(["pr", "submit", "issue/feature", "--json"])
+    expect(admitted.exitCode, admitted.stderr).toBe(0)
+
+    const abort = new AbortController()
+    let sleeps = 0
+    let advancedBaseSha: string | undefined
+    let residentStdout = ""
+    let residentStderr = ""
+    const resident = runYrdProcess(
+      ["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "queue", "run", "--interval", "1", "--json"],
+      {
+        cwd: repo,
+        stdout: (text) => {
+          residentStdout += text
+        },
+        stderr: (text) => {
+          residentStderr += text
+        },
+        scope: {
+          signal: abort.signal,
+          sleep: async () => {
+            sleeps += 1
+            if (sleeps === 1) {
+              advancedBaseSha = await git(repo, "rev-parse", "main")
+              await git(repo, "switch", "-qc", "issue/second", "main")
+              await writeFile(join(repo, "second.txt"), "second\n")
+              await git(repo, "add", "second.txt")
+              await git(repo, "commit", "-qm", "second feature after first integration")
+              await git(repo, "switch", "-q", "main")
+              const second = await invoke(["pr", "submit", "issue/second", "--json"])
+              expect(second.exitCode, second.stderr).toBe(0)
+              return
+            }
+            abort.abort()
+          },
+        },
+      },
+    )
+    expect(await resident, `${residentStdout}\n${residentStderr}`).toBe(3)
+    expect(sleeps).toBe(2)
+    expect(advancedBaseSha).toMatch(/^[0-9a-f]{40}$/u)
+
+    await using settled = await createYrdHost({ cwd: repo })
+    const first = settled.app.state().bays.prs.PR1!
+    const second = settled.app.state().bays.prs.PR2!
+    expect([prDeliveryState(first), prDeliveryState(second)]).toEqual(["integrated", "integrated"])
+    expect(currentPRRev(second)).toMatchObject({ n: 1, baseSha: advancedBaseSha })
+    expect(first.revs).toHaveLength(1)
+    expect(second.revs).toHaveLength(1)
+    const runs = Queues.ids(settled.app.state().queues).map((id) => settled.app.queue.get(id)!)
+    expect(runs.flatMap((run) => run.steps).filter((step) => step.name === "merge")).toHaveLength(2)
+  }, 30_000)
 
   it("keeps repeated resident signals idempotent while hard escalation reaps the active process tree", async () => {
     const { repo, featureSha } = await repository()

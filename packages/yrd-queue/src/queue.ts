@@ -6088,11 +6088,13 @@ function queueProgressQueue(state: DeepReadonly<RuntimeState>, steps: readonly R
   return Object.values(state.bays.prs)
     .filter((pr) => {
       const delivery = prDeliveryState(pr)
-      return delivery === "pushed" || delivery === "submitted" || delivery === "ready"
+      return delivery === "submitted" || delivery === "ready"
     })
     .filter((pr) => blockingQueuePause(state, pr) === undefined)
     .filter((pr) => checksRequested(pr))
-    .toSorted((left, right) => checkQueueTime(left).localeCompare(checkQueueTime(right)))
+    .toSorted(
+      (left, right) => checkQueueTime(left).localeCompare(checkQueueTime(right)) || compareNatural(left.id, right.id),
+    )
 }
 
 function refusedRevisionAdmissions(state: DeepReadonly<RuntimeState>): PR[] {

@@ -164,6 +164,23 @@ function refuseForever(blocked: () => string): CandidatePreparer {
 }
 
 describe("admission refusal oracle — a head-of-line PR refused at admission is visible to queue audit", () => {
+  it("does not call a pushed draft stalled when preflight checks were requested before submission", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createDeliveryApp(clock.read, true)
+    await app.bays.submit({
+      branch: "issue/preflight-draft",
+      headSha: HEAD,
+      base: "main",
+      baseSha: BASE,
+      draft: true,
+    })
+    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE })
+
+    expect(app.queue.audit({ now: "2026-01-01T01:00:00.000Z" }).findings).not.toContainEqual(
+      expect.objectContaining({ code: "queue-progress-stalled" }),
+    )
+  })
+
   it("keeps a passed admission in the no-landing progress population until delivery", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     await using app = await createDeliveryApp(clock.read, true)

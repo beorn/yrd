@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from "node:fs"
 import { mkdtemp, rm } from "node:fs/promises"
 import { hostname } from "node:os"
 import { join, relative, resolve, sep } from "node:path"
@@ -13,6 +13,7 @@ import {
   createGitPushReceiver,
   createGitWorkspace,
   baseIdentity,
+  prDeliveryState,
   loadGitPushReceiver,
   runReceiverHookFromEnvironment,
   withBays,
@@ -1467,6 +1468,14 @@ export async function createYrdHost(options: YrdHostOptions = {}): Promise<YrdHo
 function runnerHealthProbeServices(options: YrdRuntimeHostOptions): YrdCliServices {
   return Object.freeze({
     queue: Object.freeze({
+      async hasQueuedWork(): Promise<boolean> {
+        if (!(await runnerHealthJournalIsSqlite(options))) return false
+        await using host = await createYrdRuntimeHost(options, undefined, "viewer")
+        return Object.values(host.app.state().bays.prs).some((pr) => {
+          const delivery = prDeliveryState(pr)
+          return delivery === "submitted" || delivery === "ready"
+        })
+      },
       async auditEnvironment(): Promise<QueueAuditResult> {
         const scope = createScope("yrd-runner-health")
         const ownsLog = options.log === undefined
@@ -1501,6 +1510,42 @@ function runnerHealthProbeServices(options: YrdRuntimeHostOptions): YrdCliServic
       },
     }),
   })
+}
+
+/** Reject an obviously absent/non-SQLite journal before the read-only viewer is
+ * opened. The supervisor's liveness-only fallback must keep working even when
+ * delivery history is the broken component operators are trying to inspect. */
+async function runnerHealthJournalIsSqlite(options: YrdRuntimeHostOptions): Promise<boolean> {
+  const scope = createScope("yrd-runner-health-census")
+  const ownsLog = options.log === undefined
+  const log =
+    options.log ??
+    createYrdLogger(resolveYrdObservability({}, options.env ?? globalThis.process.env), (text) =>
+      globalThis.process.stderr.write(text),
+    )
+  const env = cleanGitEnvironment(options.env ?? globalThis.process.env)
+  const process = withGitIndexLockRetry(createProcess({ cwd: options.cwd, env, inject: { scope, log } }))
+  try {
+    const repository = await discoverYrdRepository({ cwd: options.cwd, env, process })
+    const path = join(repository.stateDir, "journal.sqlite")
+    if (!existsSync(path)) return false
+    const descriptor = openSync(path, "r")
+    try {
+      const header = Buffer.alloc(16)
+      return (
+        readSync(descriptor, header, 0, header.length, 0) === header.length &&
+        header.toString("utf8") === "SQLite format 3\0"
+      )
+    } finally {
+      closeSync(descriptor)
+    }
+  } finally {
+    try {
+      await closeRuntime(undefined, process, scope)
+    } finally {
+      if (ownsLog) log.end()
+    }
+  }
 }
 
 function createViewerWorkspace(): BayWorkspace {

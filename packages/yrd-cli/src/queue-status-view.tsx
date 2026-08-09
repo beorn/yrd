@@ -4704,7 +4704,7 @@ function timelineLastDrainedMs(projection: QueueTimelineProjection): number | nu
 }
 
 /** The RUNNER liveness reflected by the leading marker. */
-export type QueueHealthKind = "down" | "stalled" | "processing" | "idle"
+export type QueueHealthKind = "down" | "unknown" | "stalled" | "processing" | "idle"
 
 export type QueueHealthMarker = Readonly<{
   kind: QueueHealthKind
@@ -4717,6 +4717,9 @@ export function queueHealthMarker(projection: QueueTimelineProjection): QueueHea
   const timing = runnerTiming(projection)
   if (projection.runner === null || (timing !== null && timing.ageMs > RUNNER_STALE_MS)) {
     return { kind: "down", color: "$fg-error", pulse: null }
+  }
+  if (projection.runner.queueProgress === undefined) {
+    return { kind: "unknown", color: "$fg-error", pulse: null }
   }
   if (projection.runner.queueProgress?.state === "stalled") {
     return { kind: "stalled", color: "$fg-error", pulse: null }
@@ -4798,7 +4801,11 @@ function TimelineRunnerBox({
         : `downtime ${runnerClock(downMs)}`
       : `uptime ${runnerClock(timing?.uptimeMs ?? 0)}`
   const borderColor =
-    marker.kind === "down" || marker.kind === "stalled" ? "$fg-error" : pause !== undefined ? "$fg-warning" : undefined
+    marker.kind === "down" || marker.kind === "unknown" || marker.kind === "stalled"
+      ? "$fg-error"
+      : pause !== undefined
+        ? "$fg-warning"
+        : undefined
   return (
     <TitledBox
       title="RUNNER"
@@ -4845,6 +4852,11 @@ function TimelineRunnerBox({
       {runnerStale && timing !== null ? (
         <Text color="$fg-error" bold wrap="truncate">
           RUNNER STALE — last tick {mediaDuration(timing.ageMs)} ago
+        </Text>
+      ) : null}
+      {runner !== null && runner.queueProgress === undefined ? (
+        <Text color="$fg-error" bold wrap="truncate">
+          PROGRESS UNKNOWN — restart the resident runner with the installed Yrd source
         </Text>
       ) : null}
       {runner?.queueProgress?.state === "stalled" ? (

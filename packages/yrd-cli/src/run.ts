@@ -337,8 +337,15 @@ function parseResidentRunnerProgress(value: unknown): QueueRunnerProgress | unde
     raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner queueProgress is invalid")
   }
   const progress = value as Record<string, unknown>
-  if (progress.state === "healthy") return { state: "healthy" }
-  if (progress.state === "stalled" && Array.isArray(progress.findings) && progress.findings.length > 0) {
+  if (progress.state === "healthy" && Object.keys(progress).every((field) => field === "state")) {
+    return { state: "healthy" }
+  }
+  if (
+    progress.state === "stalled" &&
+    Object.keys(progress).every((field) => field === "state" || field === "findings") &&
+    Array.isArray(progress.findings) &&
+    progress.findings.length > 0
+  ) {
     const findings = progress.findings.map((finding): QueueAuditFinding => {
       if (typeof finding !== "object" || finding === null) {
         raiseFailure(
@@ -696,7 +703,8 @@ async function queueRunnerHealth(
       }
     }
     if (!leaseHeld) {
-      const hasQueuedWork = app !== undefined && queuedDeliveryCount(app) > 0
+      const hasQueuedWork =
+        app === undefined ? ((await services.queue?.hasQueuedWork?.()) ?? false) : queuedDeliveryCount(app) > 0
       if (hasQueuedWork) {
         return {
           exitCode: 2,

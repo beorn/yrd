@@ -220,6 +220,7 @@ describe("queue timeline chrome 21106", () => {
         startedAt: new Date(NOW - (3 * 60 + 45) * 60_000).toISOString(),
         lastTickAt: new Date(NOW - 2_000).toISOString(),
         command: "bun vendor/yrd/bin/yrd.ts --resident",
+        queueProgress: { state: "healthy" },
       },
     }
     const render = createRenderer({ cols: 120, rows: 40 })
@@ -232,6 +233,31 @@ describe("queue timeline chrome 21106", () => {
       // The RUNNER border timer uses the adaptive clock (H:MM:SS above an hour):
       // 3h45m of uptime renders `uptime 3:45:00` (user directive 2026-07-21).
       expect(app.text).toContain("uptime 3:45:00")
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("renders a fresh runner with an old unknown-progress heartbeat as unhealthy", async () => {
+    const story = queueTimelineStories["contract-overview"].snapshot.projection
+    const projection: QueueTimelineProjection = {
+      ...story,
+      runner: {
+        pid: 342,
+        startedAt: new Date(NOW - 60 * 60_000).toISOString(),
+        lastTickAt: new Date(NOW - 2_000).toISOString(),
+        command: "old resident runner",
+      },
+    }
+
+    expect(queueHealthMarker(projection).kind).toBe("unknown")
+
+    const app = createRenderer({ cols: 120, rows: 40 })(
+      createElement(QueueTimelineView, { projection, nav: false, columns: 120 }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      expect(app.text).toContain("PROGRESS UNKNOWN")
     } finally {
       app.unmount()
     }

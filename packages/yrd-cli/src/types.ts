@@ -29,6 +29,9 @@ export type YrdBayProtection = Readonly<{
  * CLI never simulates these lifecycle operations when no plugin owns them. */
 export type YrdCliQueueAdministration = Readonly<{
   auditEnvironment?(): Promise<QueueAuditResult>
+  /** One-shot current-state census for a supervisor probe that deliberately
+   * does not retain a full CLI app. */
+  hasQueuedWork?(): Promise<boolean>
   provision?(base?: string): Promise<unknown>
   deprovision?(base?: string): Promise<unknown>
 }>
