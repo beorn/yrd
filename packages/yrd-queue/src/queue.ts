@@ -273,6 +273,7 @@ const AdmissionRefusedSchema = z
   })
   .strict()
 type AdmissionRefusedArgs = Readonly<z.infer<typeof AdmissionRefusedSchema>>
+export type RecordAdmissionRefusalArgs = AdmissionRefusedArgs
 const AdmissionRefusedFactSchema = AdmissionRefusedSchema.extend({
   /** Optional only for replaying facts written before exact-revision refusal
    * identity was introduced by 22528. New commands always populate both. */
@@ -647,6 +648,9 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   terminalAssociationPlan(): TerminalAssociationPlan
   migrateTerminalAssociations(): Promise<TerminalAssociationPlan>
   quiesceLegacyRoots(options: QuiesceLegacyRootsOptions): Promise<QuiesceLegacyRootsReceipt>
+  /** Journal a preparation refusal that happened outside Queue's own admission
+   * dispatcher, so the same durable wedge oracle sees every compose robot. */
+  recordAdmissionRefusal(args: RecordAdmissionRefusalArgs): Promise<void>
   /** Stop selecting one exact refused revision after its automated remedy has
    * reached a durable needs-person outcome. A new revision clears the fact. */
   settleAdmissionRefusal(args: SettleAdmissionRefusalArgs): Promise<void>
@@ -1704,6 +1708,10 @@ function createQueue<Shape extends PRShape>(
    * ADMISSION never becomes a run record — so without this the whole class of
    * head-of-line wedge is invisible to `queue audit` (22395).
    */
+  const appendAdmissionRefusal = async (args: RecordAdmissionRefusalArgs): Promise<void> => {
+    await actions.admissionRefused(args)
+  }
+
   const noteCandidateRefusal = async (
     selectors: readonly (string | undefined)[],
     refusal: Readonly<{ code?: string; kind?: string; reason: string }>,
@@ -1716,7 +1724,7 @@ function createQueue<Shape extends PRShape>(
       // loud. Anything else would invent a wedge against a phantom id.
       if (pr === undefined) continue
       try {
-        await actions.admissionRefused({
+        await appendAdmissionRefusal({
           pr: pr.id,
           // A losable skip always carries a fact code; name the gap rather than
           // dropping the cycle silently if one ever does not.
@@ -2064,6 +2072,9 @@ function createQueue<Shape extends PRShape>(
     },
     async resume(base) {
       await actions.resume(queueBase(runtime(), base))
+    },
+    async recordAdmissionRefusal(args) {
+      await appendAdmissionRefusal(args)
     },
     async settleAdmissionRefusal(args) {
       await actions.settleAdmissionRefusal(args)

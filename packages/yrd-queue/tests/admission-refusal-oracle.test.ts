@@ -164,18 +164,14 @@ function refuseForever(blocked: () => string): CandidatePreparer {
 }
 
 describe("admission refusal oracle — a head-of-line PR refused at admission is visible to queue audit", () => {
-  it.fails("records a refusal reported by an external queue preparation robot", async () => {
+  it("records a refusal reported by an external queue preparation robot", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     await using app = await createApp(
       refuseForever(() => ""),
       clock.read,
     )
     const pr = await submitAndRequestChecks(app, "issue/external-refusal")
-    const queue = app.queue as typeof app.queue & {
-      recordAdmissionRefusal(args: { pr: string; code: string; kind?: string; reason: string }): Promise<void>
-    }
-
-    await queue.recordAdmissionRefusal({
+    await app.queue.recordAdmissionRefusal({
       pr: pr.id,
       code: "submodule-pin-unpublished",
       kind: "refusal",

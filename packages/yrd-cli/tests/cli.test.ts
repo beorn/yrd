@@ -2881,6 +2881,13 @@ describe("runYrd", () => {
 
     expect(recut).toHaveBeenCalled()
     expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 3, head: nextHead })
+    expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
+      pr: "PR1",
+      revision: 3,
+      headSha: nextHead,
+      code: "submodule-pin-unpublished",
+      count: 1,
+    })
     expect(gate, "a post-mutation refusal must re-prove the installed baseline").toHaveBeenCalledTimes(2)
   })
 
@@ -3071,7 +3078,7 @@ describe("runYrd", () => {
     ])
   })
 
-  it.fails("journals a refused freshness recut while refreshing independent candidates", async () => {
+  it("journals a refused freshness recut while refreshing independent candidates", async () => {
     const nextBase = "b".repeat(40)
     const logs: LogEvent[] = []
     const app = await createApp({
