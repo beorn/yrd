@@ -1,14 +1,7 @@
 import { join } from "node:path"
-import {
-  acquireExclusive,
-  posixLibcCandidates,
-  type ExclusiveOptions as GitExclusiveOptions,
-  type WriterLock,
-} from "git-super/exclusive"
+import { acquireExclusive, type ExclusiveOptions as GitExclusiveOptions, type WriterLock } from "git-super/exclusive"
 import { createFailure, observeYrdLifecycle } from "@yrd/core"
 import { createLogger, type ConditionalLogger } from "loggily"
-
-export { posixLibcCandidates }
 
 export type Exclusive = Readonly<{
   run<Result>(operation: () => Promise<Result>, options?: ExclusiveRunOptions): Promise<Result>
