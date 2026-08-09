@@ -73,7 +73,7 @@ describe("createProcess — full process-tree settlement (21012 S1)", () => {
         failure?: string
       }
       expect(report.result.survivorPids).toContain(report.self)
-      expect(report.failure).toContain(`survivor pids: ${report.self}`)
+      expect(report.failure).toContain(`pid ${report.self} via cwd (${dir})`)
     },
   )
 

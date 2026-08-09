@@ -20,6 +20,8 @@ export type PathHolder = Readonly<{
 export type PathReapResult = Readonly<{
   targetedPids: readonly number[]
   survivorPids: readonly number[]
+  /** Exact read-only holder evidence from the final post-signal census. */
+  survivorHolders?: readonly PathHolder[]
   forcedKill: boolean
   signalFailures: readonly string[]
 }>
@@ -29,8 +31,9 @@ export async function reapOwnedPath(path: string, gracefulMs: number, killMs: nu
   const protectedPids = await currentProcessAncestry()
   const signalFailures: string[] = []
   const targeted = new Set<number>()
-  const census = async () => uniquePids((await pathProcessHolders(root)).map(({ pid }) => pid))
-  const killable = async (): Promise<number[]> => (await census()).filter((pid) => pid > 1 && !protectedPids.has(pid))
+  const census = async () => pathProcessHolders(root)
+  const killable = async (): Promise<number[]> =>
+    uniquePids((await census()).map(({ pid }) => pid)).filter((pid) => pid > 1 && !protectedPids.has(pid))
   const signal = (pids: readonly number[], value: "SIGTERM" | "SIGKILL"): void => {
     for (const pid of pids) {
       targeted.add(pid)
@@ -56,10 +59,12 @@ export async function reapOwnedPath(path: string, gracefulMs: number, killMs: nu
   // deliberately never signalled, but they remain survivor evidence: closing a
   // Bay from a shell inside that Bay must fail loudly instead of deleting the
   // workspace beneath a still-live process.
-  const survivorPids = await census()
+  const survivorHolders = await census()
+  const survivorPids = uniquePids(survivorHolders.map(({ pid }) => pid))
   return {
     targetedPids: [...targeted].sort((a, b) => a - b),
     survivorPids,
+    survivorHolders,
     forcedKill,
     signalFailures,
   }
@@ -68,10 +73,21 @@ export async function reapOwnedPath(path: string, gracefulMs: number, killMs: nu
 export function pathReapFailure(result: PathReapResult): string | undefined {
   const parts: string[] = []
   if (result.signalFailures.length > 0) parts.push(result.signalFailures.join("; "))
-  if (result.survivorPids.length > 0) {
+  const holderFailure = pathHolderRefusal(result.survivorHolders ?? [])
+  if (holderFailure !== undefined) parts.push(holderFailure)
+  else if (result.survivorPids.length > 0) {
     parts.push(`process-tree reap failed; survivor pids: ${result.survivorPids.join(", ")}`)
   }
   return parts.length === 0 ? undefined : parts.join("; ")
+}
+
+/** Render read-only holder evidence into an actionable destructive-operation refusal. */
+export function pathHolderRefusal(holders: readonly PathHolder[]): string | undefined {
+  const evidence = uniquePathHolders(holders)
+  if (evidence.length === 0) return undefined
+  return `path remains held by ${evidence
+    .map(({ pid, source, target }) => `pid ${pid} via ${source} (${target})`)
+    .join("; ")}`
 }
 
 const PATH_REAP_POLL_MS = 50

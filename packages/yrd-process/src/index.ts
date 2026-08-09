@@ -4,7 +4,13 @@ import { accessSync, constants } from "node:fs"
 import { delimiter, isAbsolute, resolve } from "node:path"
 import { pathReapFailure, reapOwnedPath, type PathReapResult } from "./path-reaper.ts"
 
-export { pathReapFailure, type PathReapResult } from "./path-reaper.ts"
+export {
+  inspectPathHolders,
+  pathHolderRefusal,
+  pathReapFailure,
+  type PathHolder,
+  type PathReapResult,
+} from "./path-reaper.ts"
 
 export type ProcessRequest = Readonly<{
   argv: readonly string[]
