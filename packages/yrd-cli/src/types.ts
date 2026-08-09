@@ -41,7 +41,7 @@ export type YrdCliJournalAdministration = Readonly<{
 
 export type YrdCliChecks = Readonly<{
   names: readonly string[]
-  run(name: string, cwd: string, context?: Readonly<{ ref?: string }>): Promise<ProcessResult>
+  run(name: string, cwd: string, context?: Readonly<{ ref?: string; keepOnFailure?: boolean }>): Promise<ProcessResult>
   install(cwd: string): Promise<string>
 }>
 

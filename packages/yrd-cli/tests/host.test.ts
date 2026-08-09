@@ -658,8 +658,9 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     await mkdir(stateDir, { recursive: true })
     const checks = configuredChecks(process, stateDir, config, { PATH: globalThis.process.env.PATH })
 
-    const result = await checks.run("typecheck", repo, { ref: featureSha })
+    const result = await checks.run("typecheck", repo, { ref: featureSha, keepOnFailure: true })
     expect(result.exitCode).toBe(0)
+    expect(await readdir(join(stateDir, "pre-submit-worktrees"))).toEqual([])
 
     // The hook quarantine on 'git worktree add' (4a5419f) also silences the hook
     // that populated submodules, so the checkout must populate them explicitly —
@@ -679,6 +680,83 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       inspect.some((argument) => argument === "core.hooksPath=/dev/null"),
       "submodule inspection must keep the hook quarantine",
     ).toBe(true)
+  })
+
+  it("retains and names a failed pre-submit workspace when requested", async () => {
+    const { repo, featureSha } = await candidatePackageRepository()
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["typecheck"],
+      requires: [],
+      definitions: { typecheck: { run: "bun run typecheck", runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["typecheck"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+    const process = {
+      run(request: ProcessRequest): Promise<ProcessResult> {
+        if (request.argv.join(" ") !== "bun install --frozen-lockfile --ignore-scripts") {
+          return runtimeProcess.run(request)
+        }
+        return runtimeProcess.run({
+          ...request,
+          argv: ["sh", "-c", "printf 'dependency cache unavailable\\n' >&2; exit 7"],
+        })
+      },
+    }
+    const checks = configuredChecks(process, join(repo, ".git", "yrd"), config, {
+      PATH: globalThis.process.env.PATH,
+    })
+
+    let failure: unknown
+    try {
+      await checks.run("typecheck", repo, { ref: featureSha, keepOnFailure: true })
+    } catch (cause) {
+      failure = cause
+    }
+
+    expect(failure).toBeInstanceOf(Error)
+    const message = (failure as Error).message
+    const retained = /workspace retained at '([^']+)'/u.exec(message)?.[1]
+    expect(retained, message).toBeDefined()
+    expect(existsSync(retained!)).toBe(true)
+    expect(existsSync(join(retained!, "package.json"))).toBe(true)
+  })
+
+  it("retains a required-check workspace after the check command fails", async () => {
+    const { repo, featureSha } = await candidatePackageRepository()
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["typecheck"],
+      requires: [],
+      definitions: { typecheck: { run: "bun run typecheck", runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["typecheck"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+    const process = {
+      run(request: ProcessRequest): Promise<ProcessResult> {
+        const command = request.argv.join(" ")
+        if (command === "bun install --frozen-lockfile --ignore-scripts") {
+          return runtimeProcess.run({ ...request, argv: ["sh", "-c", "mkdir -p node_modules"] })
+        }
+        if (command === "sh -c bun run typecheck") {
+          return runtimeProcess.run({ ...request, argv: ["sh", "-c", "printf 'typecheck failed\\n' >&2; exit 3"] })
+        }
+        return runtimeProcess.run(request)
+      },
+    }
+    const checks = configuredChecks(process, join(repo, ".git", "yrd"), config, {
+      PATH: globalThis.process.env.PATH,
+    })
+
+    const result = await checks.run("typecheck", repo, { ref: featureSha, keepOnFailure: true })
+
+    expect(result.exitCode).toBe(3)
+    expect(result.stderr).toContain("typecheck failed")
+    const retained = /workspace retained at '([^']+)'/u.exec(result.stderr)?.[1]
+    expect(retained, result.stderr).toBeDefined()
+    expect(existsSync(join(retained!, "package.json"))).toBe(true)
   })
 
   it.each([

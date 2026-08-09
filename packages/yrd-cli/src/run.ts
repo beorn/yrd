@@ -3820,6 +3820,7 @@ type PrSelectionOptions = {
   composition?: string
   reviewer?: readonly string[]
   track?: boolean
+  keepOnFailure?: boolean
   json?: boolean
 }
 
@@ -3993,7 +3994,13 @@ async function applyPrSelectionVerb(
     const unlandable = await refuseSubmitWithoutLandingAuthority(options, io, services)
     if (unlandable !== undefined) return unlandable
     for (const context of submitRequiredCheckContexts(app, selectors, io)) {
-      await runRequiredChecks(services, { ...io, cwd: context.cwd }, undefined, context.ref)
+      await runRequiredChecks(
+        services,
+        { ...io, cwd: context.cwd },
+        undefined,
+        context.ref,
+        options.keepOnFailure === true,
+      )
     }
   }
   const result = await applyPrSelection(app, selectors, options, io, command)
@@ -6466,6 +6473,7 @@ async function runRequiredChecks(
   io: YrdCliIO,
   selected?: readonly string[],
   ref?: string,
+  keepOnFailure = false,
 ): Promise<readonly Readonly<{ name: string; exitCode: number }>[]> {
   const checks = services.checks
   if (checks === undefined) configuration("required-check capability is not installed")
@@ -6474,7 +6482,14 @@ async function runRequiredChecks(
   await checks.install(io.cwd ?? process.cwd())
   const results: Array<Readonly<{ name: string; exitCode: number }>> = []
   for (const name of names) {
-    const result = await checks.run(name, io.cwd ?? process.cwd(), ref === undefined ? undefined : { ref })
+    const context =
+      ref === undefined && !keepOnFailure
+        ? undefined
+        : {
+            ...(ref === undefined ? {} : { ref }),
+            ...(keepOnFailure ? { keepOnFailure: true } : {}),
+          }
+    const result = await checks.run(name, io.cwd ?? process.cwd(), context)
     if (result.stdout !== "") io.stdout(result.stdout)
     if (result.stderr !== "") io.stderr(result.stderr)
     if (result.exitCode !== 0 || result.timedOut) {
@@ -8697,6 +8712,7 @@ function buildProgram(
       [] as readonly string[],
     )
     .option("--track", TRACK_OPTION_DESCRIPTION)
+    .option("--keep-on-failure", "retain a failed client-side required-check workspace for inspection")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) =>
       setExit(await applyPrSelectionVerb(installed(), installedServices(), selectors, options, io, "pr.submit")),
@@ -8958,6 +8974,7 @@ function buildProgram(
       [] as readonly string[],
     )
     .option("--track", TRACK_OPTION_DESCRIPTION)
+    .option("--keep-on-failure", "retain a failed client-side required-check workspace for inspection")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) =>
       setExit(await applyPrSelectionVerb(installed(), installedServices(), selectors, options, io, "pr.submit")),

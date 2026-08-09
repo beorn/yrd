@@ -230,6 +230,19 @@ function validateConfig(config: ResolvedYrdProjectConfig): void {
 
 const MANAGED_PRE_SUBMIT_MARKER = "# managed-by-yrd: pre-submit-v1"
 
+function retainedWorkspaceNote(path: string): string {
+  return `workspace retained at '${path}' (--keep-on-failure)`
+}
+
+function annotateRetainedWorkspace(cause: unknown, path: string): Error {
+  const note = retainedWorkspaceNote(path)
+  if (cause instanceof Error) {
+    cause.message = `${cause.message}; ${note}`
+    return cause
+  }
+  return new Error(`${String(cause)}; ${note}`, { cause })
+}
+
 export function configuredChecks(
   process: Pick<Process, "run">,
   stateDir: string,
@@ -248,6 +261,7 @@ export function configuredChecks(
     definition: YrdStepConfig,
     cwd: string,
     ref: string | undefined,
+    keepOnFailure: boolean,
   ): Promise<ProcessResult> => {
     const baseSha = await resolveCommit(process, repo, config.base)
     if (baseSha === undefined) {
@@ -313,19 +327,20 @@ export function configuredChecks(
         operation: `CLI pre-submit worktree add ${candidateSha}`,
       })
     } catch (cause) {
-      await rm(checkoutRoot, { recursive: true, force: true })
+      if (!keepOnFailure) await rm(checkoutRoot, { recursive: true, force: true })
       const message = cause instanceof Error ? cause.message : String(cause)
+      const retained = keepOnFailure ? `; ${retainedWorkspaceNote(checkoutRoot)}` : ""
       if (/timed out after/iu.test(message)) {
         raiseFailure(
           "infrastructure",
           "required-check-checkout-timeout",
-          `yrd: pre-submit checkout of '${candidateSha}' exceeded ${checkoutTimeoutMs}ms during 'git worktree add'; raise ${CHECKOUT_TIMEOUT_ENV} or retry under lower load`,
+          `yrd: pre-submit checkout of '${candidateSha}' exceeded ${checkoutTimeoutMs}ms during 'git worktree add'; raise ${CHECKOUT_TIMEOUT_ENV} or retry under lower load${retained}`,
         )
       }
       raiseFailure(
         "infrastructure",
         "required-check-checkout-failed",
-        message || `yrd: could not materialize required-check candidate '${candidateSha}'`,
+        `${message || `yrd: could not materialize required-check candidate '${candidateSha}'`}${retained}`,
       )
     }
     // The hook quarantine above also silences the repository hook that used to
@@ -337,31 +352,35 @@ export function configuredChecks(
       await worktrees.materializeSubmodules(checkout, { hooks: "quarantine" })
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause)
-      try {
-        await worktrees.remove(checkout, {
-          operation: `CLI pre-submit failed-materialization cleanup ${candidateSha}`,
-        })
-      } catch (cleanupCause) {
-        throw new AggregateError(
-          [cause, cleanupCause],
-          `yrd: pre-submit submodule population failed and checkout cleanup also failed: ${message}`,
-          { cause },
-        )
+      if (!keepOnFailure) {
+        try {
+          await worktrees.remove(checkout, {
+            operation: `CLI pre-submit failed-materialization cleanup ${candidateSha}`,
+          })
+        } catch (cleanupCause) {
+          throw new AggregateError(
+            [cause, cleanupCause],
+            `yrd: pre-submit submodule population failed and checkout cleanup also failed: ${message}`,
+            { cause },
+          )
+        }
+        await rm(checkoutRoot, { recursive: true, force: true })
       }
-      await rm(checkoutRoot, { recursive: true, force: true })
+      const retained = keepOnFailure ? `; ${retainedWorkspaceNote(checkout)}` : ""
       if (/timed out after/iu.test(message)) {
         raiseFailure(
           "infrastructure",
           "required-check-checkout-timeout",
-          `yrd: pre-submit submodule population of '${candidateSha}' exceeded ${checkoutTimeoutMs}ms during 'git submodule update'; raise ${CHECKOUT_TIMEOUT_ENV} or retry under lower load`,
+          `yrd: pre-submit submodule population of '${candidateSha}' exceeded ${checkoutTimeoutMs}ms during 'git submodule update'; raise ${CHECKOUT_TIMEOUT_ENV} or retry under lower load${retained}`,
         )
       }
       raiseFailure(
         "infrastructure",
         "required-check-submodule-populate-failed",
-        message || `yrd: could not populate submodules for required-check candidate '${candidateSha}' in ${checkout}`,
+        `${message || `yrd: could not populate submodules for required-check candidate '${candidateSha}' in ${checkout}`}${retained}`,
       )
     }
+    let failed = true
     try {
       await ensureWorkspaceDependencies(process, {
         path: checkout,
@@ -372,21 +391,33 @@ export function configuredChecks(
           raiseFailure("infrastructure", "candidate-provision-failed", `yrd: ${message}`)
         },
       })
-      return await run(checkout)
-    } finally {
-      try {
-        await worktrees.remove(checkout, { operation: `CLI pre-submit worktree remove ${candidateSha}` })
-      } catch (cause) {
-        const message = cause instanceof Error ? cause.message : String(cause)
-        raiseFailure(
-          "infrastructure",
-          "required-check-checkout-cleanup-failed",
-          /timed out after/iu.test(message)
-            ? `yrd: required-check checkout removal of '${checkout}' exceeded ${checkoutTimeoutMs}ms; raise ${CHECKOUT_TIMEOUT_ENV} or retry under lower load`
-            : message || `yrd: could not remove required-check checkout '${checkout}'`,
-        )
+      const result = await run(checkout)
+      failed = result.exitCode !== 0 || result.timedOut
+      if (!failed || !keepOnFailure) return result
+      const separator = result.stderr === "" || result.stderr.endsWith("\n") ? "" : "\n"
+      return {
+        ...result,
+        stderr: `${result.stderr}${separator}yrd: ${retainedWorkspaceNote(checkout)}\n`,
       }
-      await rm(checkoutRoot, { recursive: true, force: true })
+    } catch (cause) {
+      if (keepOnFailure) throw annotateRetainedWorkspace(cause, checkout)
+      throw cause
+    } finally {
+      if (!keepOnFailure || !failed) {
+        try {
+          await worktrees.remove(checkout, { operation: `CLI pre-submit worktree remove ${candidateSha}` })
+        } catch (cause) {
+          const message = cause instanceof Error ? cause.message : String(cause)
+          raiseFailure(
+            "infrastructure",
+            "required-check-checkout-cleanup-failed",
+            /timed out after/iu.test(message)
+              ? `yrd: required-check checkout removal of '${checkout}' exceeded ${checkoutTimeoutMs}ms; raise ${CHECKOUT_TIMEOUT_ENV} or retry under lower load`
+              : message || `yrd: could not remove required-check checkout '${checkout}'`,
+          )
+        }
+        await rm(checkoutRoot, { recursive: true, force: true })
+      }
     }
   }
   return Object.freeze({
@@ -403,7 +434,7 @@ export function configuredChecks(
       if (definition?.run === undefined) {
         raiseFailure("configuration", "required-check-command-missing", `yrd: required check '${name}' has no command`)
       }
-      return runInCheckout(name, definition, cwd, context?.ref)
+      return runInCheckout(name, definition, cwd, context?.ref, context?.keepOnFailure === true)
     },
     install(_cwd) {
       mkdirSync(join(stateDir, "hooks"), { recursive: true })
