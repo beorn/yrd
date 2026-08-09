@@ -1,6 +1,6 @@
 /**
- * Bay path process ownership — reap and certify every process still holding an
- * exclusive filesystem box.
+ * Path process ownership — inspect, reap, and certify every process still
+ * holding an exclusive filesystem box.
  *
  * Process groups are the fast settlement path, but a descendant can create a
  * new session and leave its parent's group. The Bay path remains the durable
@@ -8,8 +8,14 @@
  * process in the Bay lifecycle even after reparenting.
  */
 
-import { readFile, readdir, readlink, realpath, stat } from "node:fs/promises"
+import { readdir, readlink, realpath, stat } from "node:fs/promises"
 import { resolve, sep } from "node:path"
+
+export type PathHolder = Readonly<{
+  pid: number
+  source: "cwd" | "exe" | "root" | `fd/${string}`
+  target: string
+}>
 
 export type PathReapResult = Readonly<{
   targetedPids: readonly number[]
@@ -23,7 +29,7 @@ export async function reapOwnedPath(path: string, gracefulMs: number, killMs: nu
   const protectedPids = await currentProcessAncestry()
   const signalFailures: string[] = []
   const targeted = new Set<number>()
-  const census = () => pathProcessPids(root)
+  const census = async () => uniquePids((await pathProcessHolders(root)).map(({ pid }) => pid))
   const killable = async (): Promise<number[]> => (await census()).filter((pid) => pid > 1 && !protectedPids.has(pid))
   const signal = (pids: readonly number[], value: "SIGTERM" | "SIGKILL"): void => {
     for (const pid of pids) {
@@ -80,14 +86,23 @@ async function waitForPathProcesses(read: () => Promise<number[]>, timeoutMs: nu
   return live
 }
 
-async function pathProcessPids(root: string): Promise<number[]> {
-  if (process.platform === "linux") return linuxPathProcessPids(root)
-  if (process.platform === "darwin") return darwinPathProcessPids(root)
-  throw new Error(`unsupported platform ${process.platform}; cannot certify process-tree death`)
+export async function inspectPathHolders(path: string): Promise<PathHolder[]> {
+  return pathProcessHolders(await canonicalPath(path))
 }
 
-async function darwinPathProcessPids(root: string): Promise<number[]> {
-  const child = Bun.spawn(["/usr/sbin/lsof", "+D", root, "-Fpn"], {
+/** @internal Deterministic Linux seam for a synthetic proc tree. */
+export async function inspectPathHoldersInProc(path: string, procRoot: string): Promise<PathHolder[]> {
+  return pathProcessHolders(await canonicalPath(path), { procRoot })
+}
+
+async function pathProcessHolders(root: string, options: Readonly<{ procRoot?: string }> = {}): Promise<PathHolder[]> {
+  if (process.platform === "linux") return linuxPathProcessHolders(root, options.procRoot ?? "/proc")
+  if (process.platform === "darwin") return darwinPathProcessHolders(root)
+  throw new Error(`unsupported platform ${process.platform}; cannot certify path ownership`)
+}
+
+async function darwinPathProcessHolders(root: string): Promise<PathHolder[]> {
+  const child = Bun.spawn(["/usr/sbin/lsof", "+D", root, "-Fpfn"], {
     cwd: "/",
     stdin: "ignore",
     stdout: "pipe",
@@ -102,45 +117,60 @@ async function darwinPathProcessPids(root: string): Promise<number[]> {
   if (exitCode !== 0 && (exitCode !== 1 || stderr.trim() !== "")) {
     throw new Error(`lsof exited ${exitCode}: ${stderr.trim() || "no diagnostic"}`)
   }
-  return uniquePids(
-    stdout
-      .split("\n")
-      .filter((line) => line.startsWith("p"))
-      .map((line) => Number(line.slice(1))),
-  )
+  const holders: PathHolder[] = []
+  let pid: number | undefined
+  let source: PathHolder["source"] | undefined
+  for (const line of stdout.split("\n")) {
+    if (line.startsWith("p")) {
+      pid = Number(line.slice(1))
+      source = undefined
+      continue
+    }
+    if (line.startsWith("f")) {
+      source = darwinHolderSource(line.slice(1))
+      continue
+    }
+    if (
+      line.startsWith("n") &&
+      pid !== undefined &&
+      Number.isSafeInteger(pid) &&
+      pid > 1 &&
+      source !== undefined &&
+      pathWithin(root, line.slice(1))
+    ) {
+      holders.push({ pid, source, target: line.slice(1) })
+    }
+  }
+  return uniquePathHolders(holders)
 }
 
-async function linuxPathProcessPids(root: string): Promise<number[]> {
-  const entries = await readdir("/proc", { withFileTypes: true })
+async function linuxPathProcessHolders(root: string, procRoot: string): Promise<PathHolder[]> {
+  const entries = await readdir(procRoot, { withFileTypes: true })
   const uid = process.getuid?.()
   if (uid === undefined) throw new Error("Linux process census requires the current uid")
   const matches = await Promise.all(
     entries
       .filter((entry) => entry.isDirectory() && /^\d+$/u.test(entry.name))
-      .map(async (entry): Promise<number | undefined> => {
+      .map(async (entry): Promise<PathHolder[]> => {
         const pid = Number(entry.name)
-        const proc = `/proc/${entry.name}`
+        const proc = `${procRoot}/${entry.name}`
         const metadata = await stat(proc).catch((error: unknown) => {
           if (processEntryUnavailable(error)) return undefined
           throw error
         })
-        if (metadata === undefined || metadata.uid !== uid) return undefined
-        const [cwd, executable, argv] = await Promise.all([
+        if (metadata === undefined || metadata.uid !== uid) return []
+        const [cwd, executable, processRoot] = await Promise.all([
           readProcessLink(`${proc}/cwd`),
           readProcessLink(`${proc}/exe`),
-          readFile(`${proc}/cmdline`)
-            .then((bytes) => bytes.toString("utf8").split("\0").filter(Boolean))
-            .catch((error: unknown) => {
-              if (processEntryUnavailable(error)) return []
-              throw error
-            }),
+          readProcessLink(`${proc}/root`),
         ])
-        if (
-          (cwd !== undefined && pathWithin(root, cwd)) ||
-          (executable !== undefined && pathWithin(root, executable)) ||
-          argv.some((arg) => pathWithin(root, arg))
-        ) {
-          return pid
+        const holders: PathHolder[] = []
+        if (cwd !== undefined && pathWithin(root, cwd)) holders.push({ pid, source: "cwd", target: cwd })
+        if (executable !== undefined && pathWithin(root, executable)) {
+          holders.push({ pid, source: "exe", target: executable })
+        }
+        if (processRoot !== undefined && pathWithin(root, processRoot)) {
+          holders.push({ pid, source: "root", target: processRoot })
         }
         const descriptors = await readdir(`${proc}/fd`).catch((error: unknown) => {
           if (processEntryUnavailable(error)) return []
@@ -148,12 +178,14 @@ async function linuxPathProcessPids(root: string): Promise<number[]> {
         })
         for (const descriptor of descriptors) {
           const target = await readProcessLink(`${proc}/fd/${descriptor}`)
-          if (target !== undefined && pathWithin(root, target)) return pid
+          if (target !== undefined && pathWithin(root, target)) {
+            holders.push({ pid, source: `fd/${descriptor}`, target })
+          }
         }
-        return undefined
+        return holders
       }),
   )
-  return uniquePids(matches.filter((pid): pid is number => pid !== undefined))
+  return uniquePathHolders(matches.flat())
 }
 
 async function currentProcessAncestry(): Promise<Set<number>> {
@@ -199,6 +231,22 @@ function pathWithin(root: string, candidate: string): boolean {
 
 function uniquePids(values: readonly number[]): number[] {
   return [...new Set(values.filter((pid) => Number.isSafeInteger(pid) && pid > 1))].sort((a, b) => a - b)
+}
+
+function uniquePathHolders(values: readonly PathHolder[]): PathHolder[] {
+  const unique = new Map<string, PathHolder>()
+  for (const holder of values) unique.set(`${holder.pid}\0${holder.source}\0${holder.target}`, holder)
+  return [...unique.values()].sort(
+    (left, right) =>
+      left.pid - right.pid || left.source.localeCompare(right.source) || left.target.localeCompare(right.target),
+  )
+}
+
+function darwinHolderSource(field: string): PathHolder["source"] {
+  if (field === "cwd") return "cwd"
+  if (field === "txt") return "exe"
+  if (field === "rtd") return "root"
+  return `fd/${field}`
 }
 
 async function readProcessLink(path: string): Promise<string | undefined> {
