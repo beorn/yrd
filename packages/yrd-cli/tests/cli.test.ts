@@ -2753,6 +2753,69 @@ describe("runYrd", () => {
     expect(Queues.ids(app.state().queues)).toEqual([])
   })
 
+  it.fails("does not count a refused freshness pass as resident cycle progress", async () => {
+    const nextBase = "b".repeat(40)
+    const app = await createApp()
+    await app.bays.submit({
+      branch: "issue/permanent-refresh-refusal",
+      headSha: HEAD_SHA,
+      baseSha: BASE_SHA,
+      draft: true,
+    })
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: "2".repeat(40),
+      baseSha: BASE_SHA,
+      treeSha: "c".repeat(40),
+      patchId: "d".repeat(40),
+      reviewCarried: false,
+    })
+    await app.bays.ready({ pr: "PR1" })
+    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
+
+    const recut = vi.fn(() =>
+      Promise.reject(
+        createFailure({
+          kind: "refusal",
+          code: "recut-gitlink-conflict",
+          message: "authored gitlink pins require composition",
+        }),
+      ),
+    )
+    const services = { recut: { recut } } as unknown as YrdCliServices
+    const queueRun = vi.fn(async () => [])
+    const viewer = {
+      ...app,
+      queue: {
+        ...app.queue,
+        run: queueRun,
+      },
+    } as TestApp
+    const controller = new AbortController()
+    const sleeps: number[] = []
+    let now = 0
+    const io = outputIO({
+      now: () => now,
+      resolveQueueTarget: async () => ({ base: "main", sha: nextBase }),
+      scope: {
+        signal: controller.signal,
+        sleep: async (milliseconds: number) => {
+          sleeps.push(milliseconds)
+          now += 60_000
+          if (sleeps.length === 2) controller.abort()
+        },
+      } as YrdCliIO["scope"],
+    }).io
+
+    await expect(
+      runInternals.followQueueRuns(viewer, [], { json: true, interval: 1 }, io, async () => undefined, services),
+    ).resolves.toBe(3)
+
+    expect(recut, "maintenance must still retry the refused freshness operation").toHaveBeenCalledTimes(2)
+    expect(queueRun, "a refused operation is not progress and must not reopen compose").toHaveBeenCalledTimes(1)
+  })
+
   it("exits non-zero when an internal scope aborts an unchanged idle follow tick", async () => {
     const app = await createApp()
     const controller = new AbortController()
