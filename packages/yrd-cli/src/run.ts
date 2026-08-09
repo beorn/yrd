@@ -7073,6 +7073,21 @@ export async function refreshAdmittedQueueRevisions(
         })
         continue
       }
+      try {
+        await app.queue.recordAdmissionRefusal({
+          pr: candidate.id,
+          code: failure.code,
+          kind: failure.kind,
+          reason: failure.message,
+        })
+      } catch (ledgerError) {
+        app.log.error?.("Could not journal a queued PR freshness refusal; the wedge oracle will under-count.", {
+          action: "queue-freshness-refusal-unrecorded",
+          pr: candidate.id,
+          code: failure.code,
+          reason: ledgerError instanceof Error ? ledgerError.message : String(ledgerError),
+        })
+      }
       outcomes.push({
         status: "refused",
         pr: candidate.id,
@@ -7431,22 +7446,43 @@ export async function residentRecoverySweep(
  * refusals. The return value tells the caller whether to re-prove its installed
  * baseline before composing.
  */
+function preparationBaselineChanged(before: YrdCliState, after: YrdCliState): boolean {
+  if (
+    before.bays !== after.bays ||
+    before.jobs !== after.jobs ||
+    before.contests !== after.contests ||
+    before.intents !== after.intents
+  ) {
+    return true
+  }
+  const keys = Object.keys(before.queues) as (keyof YrdCliState["queues"])[]
+  return keys.some((key) => key !== "admissionRefusals" && before.queues[key] !== after.queues[key])
+}
+
 async function prepareResidentQueueCycle(
   app: YrdCliApp,
   services: YrdCliServices,
   io: YrdCliIO,
   remedied: Set<string>,
 ): Promise<boolean> {
-  const beforePublication = app.state()
+  const beforePublication = stateOf(app)
   const publications = await preparePublicationQueueCycle(app, services, io)
-  const publicationChanged = publications.length > 0 || app.state() !== beforePublication
+  const publicationChanged = publications.length > 0 || preparationBaselineChanged(beforePublication, stateOf(app))
   if (services.recut === undefined) return publicationChanged
+  const beforeTracking = stateOf(app)
   const tracking = await refreshTrackedQueueRevisions(app, services, io)
+  const trackingChanged = preparationBaselineChanged(beforeTracking, stateOf(app))
+  const beforeFreshness = stateOf(app)
   const freshness = await refreshAdmittedQueueRevisions(app, services, io)
+  const freshnessChanged = preparationBaselineChanged(beforeFreshness, stateOf(app))
+  const beforeRemedies = stateOf(app)
   const remedies = await applyRefusalRemedies(app, services, io, remedied)
+  const remediesChanged = preparationBaselineChanged(beforeRemedies, stateOf(app))
   return (
     publicationChanged ||
-    app.state() !== beforePublication ||
+    trackingChanged ||
+    freshnessChanged ||
+    remediesChanged ||
     tracking.some((outcome) => outcome.status === "applied") ||
     freshness.some(({ status }) => status === "refreshed" || status === "settled" || status === "recovered") ||
     remedies.some((outcome) => outcome.status === "applied")
@@ -7554,12 +7590,10 @@ export async function followQueueRuns(
       // A mechanical recut may itself take long enough for installed Queue
       // definitions to move. Re-prove the baseline before admitting its fresh
       // revision; never start a Run under the pre-recut gate snapshot.
-      const beforePreparation = app.state()
       if (await prepareResidentQueueCycle(app, services, io, remedied)) {
         runRequired = true
         await gate()
       }
-      runRequired ||= app.state() !== beforePreparation
       if (!runRequired && !drainRequested()) {
         if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
         await sleepUntilDrain(scope.sleep(interval), drainSignal)
