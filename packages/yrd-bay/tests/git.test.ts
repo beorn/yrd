@@ -579,6 +579,78 @@ describe("createGitWorkspace", () => {
     })
   })
 
+  it("rolls back a post-provision hook failure so the next provision can reuse the slot and branch", async () => {
+    const { root, repo } = await repository()
+    await using process = createProcess()
+    const baysRoot = join(root, "bays")
+    const branch = "issue/hook-rollback"
+    const failed = await createGitWorkspace({
+      repo,
+      baysRoot,
+      process,
+      postProvision: ({ bay, path }) => {
+        expect(bay).toBe("B1")
+        expect(path).toBe(join(baysRoot, "B1"))
+        throw new Error("pointer write refused")
+      },
+    })
+
+    await expect(
+      failed.provision(
+        { bay: "B1", name: "hook-rollback", branch, base: "main" },
+        { id: "provision-B1", attempt: 1, runner: "test", signal: new AbortController().signal },
+      ),
+    ).resolves.toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "provision-failed", message: expect.stringContaining("pointer write refused") },
+    })
+    expect(existsSync(join(baysRoot, "B1"))).toBe(false)
+    expect((await git(repo, ["show-ref", "--verify", `refs/heads/${branch}`], true)).code).not.toBe(0)
+
+    const retried = await createGitWorkspace({ repo, baysRoot, process, postProvision: () => undefined })
+    await expect(
+      retried.provision(
+        { bay: "B1", name: "hook-rollback", branch, base: "main" },
+        { id: "provision-B1-retry", attempt: 1, runner: "test", signal: new AbortController().signal },
+      ),
+    ).resolves.toMatchObject({ status: "completed", conclusion: "success" })
+  })
+
+  it("invokes the post-deprovision hook only after the workspace is gone", async () => {
+    const { root, repo } = await repository()
+    await using process = createProcess()
+    const calls: Array<{ bay: string; path: string; absent: boolean }> = []
+    const adapter = await createGitWorkspace({
+      repo,
+      baysRoot: join(root, "bays"),
+      process,
+      postDeprovision: ({ bay, path }) => {
+        calls.push({ bay, path, absent: !existsSync(path) })
+      },
+    })
+    const provisioned = await adapter.provision(
+      { bay: "B1", name: "hook-symmetry", branch: "issue/hook-symmetry", base: "main" },
+      { id: "provision-B1", attempt: 1, runner: "test", signal: new AbortController().signal },
+    )
+    if (provisioned.status !== "completed" || provisioned.conclusion !== "success") {
+      throw new Error("workspace provision failed")
+    }
+
+    await expect(
+      adapter.deprovision(
+        {
+          bay: "B1",
+          path: provisioned.output.path,
+          branch: "issue/hook-symmetry",
+          headSha: provisioned.output.headSha,
+        },
+        { id: "deprovision-B1", attempt: 1, runner: "test", signal: new AbortController().signal },
+      ),
+    ).resolves.toMatchObject({ status: "completed", conclusion: "success" })
+    expect(calls).toEqual([{ bay: "B1", path: provisioned.output.path, absent: true }])
+  })
+
   it("does not overwrite an existing closed-bay preservation ref", async () => {
     const { root, repo } = await repository()
     await using process = createProcess()

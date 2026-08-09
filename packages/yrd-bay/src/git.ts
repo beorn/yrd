@@ -16,13 +16,21 @@ import type {
   RefreshedBay,
 } from "./model.ts"
 
+export type GitWorkspaceLifecycle = Readonly<{ bay: string; path: string }>
+export type GitWorkspaceLifecycleHook = (workspace: GitWorkspaceLifecycle) => void | Promise<void>
+export type GitWorkspaceLifecycleHooks = Readonly<{
+  postProvision?: GitWorkspaceLifecycleHook
+  postDeprovision?: GitWorkspaceLifecycleHook
+}>
+
 export type GitWorkspaceOptions = Readonly<{
   repo: string
   process: Pick<Process, "run">
   baysRoot?: string
   intakeRemote?: string
   env?: NodeJS.ProcessEnv
-}>
+}> &
+  GitWorkspaceLifecycleHooks
 
 function failure(code: string, cause: unknown): JobResult<never> {
   return {
@@ -138,6 +146,37 @@ async function preserveClosedBay(git: Git, repo: string, bay: string, headSha: s
   throw new Error(created.stderr.trim() || created.stdout.trim() || `could not preserve '${preservedRef}'`)
 }
 
+async function rollbackProvisionHookFailure(
+  worktrees: ReturnType<typeof createGitWorktreeStore>,
+  git: Git,
+  repo: string,
+  workspace: GitWorkspaceLifecycle,
+  branch: string,
+  createdWorkspace: boolean,
+  createdLocalBranch: boolean,
+  cause: unknown,
+): Promise<never> {
+  const failures: string[] = []
+  try {
+    if (createdWorkspace && existsSync(workspace.path)) await worktrees.remove(workspace.path)
+  } catch (error) {
+    failures.push(error instanceof Error ? error.message : String(error))
+  }
+  if (createdLocalBranch) {
+    const deleted = await git.run(repo, ["branch", "-D", branch], true)
+    if (deleted.code !== 0) {
+      failures.push(deleted.stderr.trim() || deleted.stdout.trim() || `could not delete ${branch}`)
+    }
+  }
+  const detail = cause instanceof Error ? cause.message : String(cause)
+  if (failures.length > 0) {
+    throw new Error(
+      `post-provision hook failed for Bay '${workspace.bay}': ${detail}; rollback failed: ${failures.join("; ")}`,
+    )
+  }
+  throw cause
+}
+
 export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<BayWorkspace> {
   const repo = resolve(options.repo)
   const baysRoot = resolve(options.baysRoot ?? `${repo}/.bays`)
@@ -151,12 +190,21 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
   return {
     revision: createHash("sha256")
       .update(
-        JSON.stringify({ implementation: "yrd-git-workspace-v6", repo, baysRoot, intakeRemote: options.intakeRemote }),
+        JSON.stringify({
+          implementation: "yrd-git-workspace-v6",
+          repo,
+          baysRoot,
+          intakeRemote: options.intakeRemote,
+          postProvision: options.postProvision !== undefined,
+          postDeprovision: options.postDeprovision !== undefined,
+        }),
       )
       .digest("hex"),
 
     async provision(input: ProvisionBayInput): Promise<JobResult<ProvisionedBay>> {
       const path = safeBayPath(baysRoot, input.bay)
+      let createdWorkspace = false
+      let createdLocalBranch = false
       try {
         const baseSha = await git.commit(repo, input.baseSha ?? input.base)
         await worktrees.prepareRoot(baysRoot, options.intakeRemote !== undefined)
@@ -225,13 +273,18 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           if (decision.source === "local") {
             try {
               await worktrees.add({ kind: "branch", path, branch: input.branch })
+              createdWorkspace = true
             } catch (cause) {
               rethrowWorktreeOwnershipConflict(cause)
             }
           } else if (decision.source === "tracking") {
             await worktrees.add({ kind: "new-branch", path, branch: input.branch, ref: remoteRef })
+            createdWorkspace = true
+            createdLocalBranch = true
           } else {
             await worktrees.add({ kind: "new-branch", path, branch: input.branch, ref: baseSha })
+            createdWorkspace = true
+            createdLocalBranch = true
           }
           if (decision.carrier !== undefined || decision.source === "tracking") {
             await git.run(path, ["branch", "--set-upstream-to", `origin/${input.branch}`, input.branch])
@@ -240,6 +293,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           await git.commit(repo, input.from)
           try {
             await worktrees.add({ kind: "ref", path, ref: input.from })
+            createdWorkspace = true
           } catch (cause) {
             rethrowWorktreeOwnershipConflict(cause)
           }
@@ -248,6 +302,22 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
         const headSha = await git.commit(path, "HEAD")
         if (options.intakeRemote !== undefined) {
           await configureIntake(git, path, options.intakeRemote)
+        }
+        if (options.postProvision !== undefined) {
+          try {
+            await options.postProvision({ bay: input.bay, path })
+          } catch (cause) {
+            await rollbackProvisionHookFailure(
+              worktrees,
+              git,
+              repo,
+              { bay: input.bay, path },
+              input.branch,
+              createdWorkspace,
+              createdLocalBranch,
+              cause,
+            )
+          }
         }
         return { status: "completed", conclusion: "success", output: { path, headSha, baseSha } }
       } catch (cause) {
@@ -422,6 +492,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
         const headSha = await git.commit(input.path, "HEAD")
         const preservedRef = await preserveClosedBay(git, repo, input.bay, headSha)
         await worktrees.remove(input.path)
+        await options.postDeprovision?.({ bay: input.bay, path: input.path })
         return { status: "completed", conclusion: "success", output: { headSha, preservedRef } }
       } catch (cause) {
         return failure("deprovision-failed", cause)

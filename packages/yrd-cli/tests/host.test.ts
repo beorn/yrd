@@ -1566,8 +1566,8 @@ checks: [{check: {run: "true"}}]
         .split("\n")
         .flatMap(
           (text) =>
-            text.match(/^\s{2}(?<command>[a-z]+(?:\|[a-z]+)?)(?:\s+(?:\[[^\]]+\]|<[^>]+>))*\s{2,}/u)?.groups
-              ?.command ?? [],
+            text.match(/^\s{2}(?<command>[a-z]+(?:\|[a-z]+)?)(?:\s+(?:\[[^\]]+\]|<[^>]+>))*\s{2,}/u)?.groups?.command ??
+            [],
         ),
     ).toEqual([
       "mr|pr",
@@ -1727,6 +1727,27 @@ checks: [{check: {run: "true"}}]
     ).toBe(0)
     expect(projected).toBe(`${JSON.stringify({ bay: "B1", command: "bay.path", path })}\n`)
     expect(await realpath(path)).toBe(path)
+  })
+
+  it("forwards host-owned lifecycle hooks to the mutable Bay workspace", async () => {
+    const { repo } = await repository()
+    const observed: Array<{ bay: string; path: string }> = []
+    await using host = await createYrdHost({
+      cwd: repo,
+      workspaceLifecycle: {
+        postProvision: (workspace) => {
+          observed.push(workspace)
+        },
+      },
+    })
+    const opened = await host.app.bays.open({ name: "hooked" })
+    const jobs = await host.app.jobs.runMany(host.app.jobs.requested(opened), {
+      runner: "test",
+      leaseMs: 60_000,
+    })
+
+    expect(jobs.every((job) => job.status === "completed" && job.conclusion === "success")).toBe(true)
+    expect(observed).toEqual([{ bay: "B1", path: join(repo, ".bays", "B1") }])
   })
 
   it("preserves native Commander styling in a fresh color-forced process", async () => {

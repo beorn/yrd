@@ -20,6 +20,7 @@ import {
   type BayWorkspace,
   type GitDeploymentStore,
   type GitPushReceiver,
+  type GitWorkspaceLifecycleHooks,
   type RemoteBranchSnapshot,
   type ReceiverReceipt,
   type ReceiverTarget,
@@ -145,6 +146,7 @@ export type DefaultYrdAppOptions = Readonly<{
   config: ResolvedYrdProjectConfig
   receiverPath?: string
   workspace?: BayWorkspace
+  workspaceLifecycle?: GitWorkspaceLifecycleHooks
   issueSources?: readonly IssueSource[]
   contestRunners?: readonly ContestRunnerDef[]
   contestEvaluators?: readonly ContestEvaluatorDef[]
@@ -918,6 +920,7 @@ async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions):
       baysRoot: options.baysRoot,
       process: options.process,
       ...(options.receiverPath === undefined ? {} : { intakeRemote: options.receiverPath }),
+      ...options.workspaceLifecycle,
     }))
   const bayJobs = createBayJobDefs(
     workspace,
@@ -1413,7 +1416,10 @@ export type YrdHostOptions = Readonly<{
   configPath?: string
   env?: NodeJS.ProcessEnv
   log?: ConditionalLogger
+  workspaceLifecycle?: GitWorkspaceLifecycleHooks
 }>
+
+export type YrdProcessHostOptions = Pick<YrdHostOptions, "workspaceLifecycle">
 
 type YrdRuntimeHostOptions = YrdHostOptions &
   Readonly<{
@@ -1586,6 +1592,7 @@ async function createYrdRuntimeHost(
       stateDir: repository.stateDir,
       baysRoot: repository.baysRoot,
       ...(mode === "active" ? { receiverPath: receiver.receiverPath } : { workspace: createViewerWorkspace() }),
+      ...(options.workspaceLifecycle === undefined ? {} : { workspaceLifecycle: options.workspaceLifecycle }),
       journal,
       process,
       config: loaded.config,
@@ -1684,7 +1691,11 @@ async function createYrdRuntimeHost(
   }
 }
 
-async function runReceiverHook(mode: "pre-receive" | "post-receive", env: NodeJS.ProcessEnv): Promise<void> {
+async function runReceiverHook(
+  mode: "pre-receive" | "post-receive",
+  env: NodeJS.ProcessEnv,
+  workspaceLifecycle?: GitWorkspaceLifecycleHooks,
+): Promise<void> {
   const gitDir = env.GIT_DIR
   if (gitDir === undefined || gitDir === "") throw new Error("yrd: receiver hook requires GIT_DIR")
   const scope = createScope("yrd-receiver-hook")
@@ -1715,6 +1726,7 @@ async function runReceiverHook(mode: "pre-receive" | "post-receive", env: NodeJS
       }),
       process: runtimeProcess,
       config: loaded.config,
+      ...(workspaceLifecycle === undefined ? {} : { workspaceLifecycle }),
       scope,
       log,
       ...(implementationSource === undefined ? {} : { implementationSource }),
@@ -1789,6 +1801,7 @@ async function runYrdProcessHost(
   argv: readonly string[],
   io: YrdCliIO,
   terminateAfterCleanup: boolean,
+  options: YrdProcessHostOptions,
 ): Promise<YrdCliExitCode> {
   const env = process.env
   const invocation = resolveInvocation(argv)
@@ -1808,7 +1821,7 @@ async function runYrdProcessHost(
       return 2
     }
     try {
-      await runReceiverHook(mode, env)
+      await runReceiverHook(mode, env, options.workspaceLifecycle)
       return 0
     } catch (error) {
       await diagnostic(io, error, { json })
@@ -1910,6 +1923,7 @@ async function runYrdProcessHost(
               ? {}
               : { implementationSource: selectedImplementationSource }),
             ...(posture === "journal-view-repair" ? { repairViewsBeforeReplay: true } : {}),
+            ...(options.workspaceLifecycle === undefined ? {} : { workspaceLifecycle: options.workspaceLifecycle }),
           },
           resident,
           posture === "viewer" ? "viewer" : "active",
@@ -2015,14 +2029,15 @@ async function runYrdProcessHost(
 export function runYrdProcess(
   argv: readonly string[] = process.argv,
   io: YrdCliIO = defaultIO(),
+  options: YrdProcessHostOptions = {},
 ): Promise<YrdCliExitCode> {
-  return runYrdProcessHost(argv, io, false)
+  return runYrdProcessHost(argv, io, false, options)
 }
 
 /** Real executable boundary: fully close the host, then terminate even when a
  * file-backed logger would otherwise retain or fault Bun resources. Kept out of
  * the package index; only bin/yrd.ts owns process lifetime. */
 export async function runYrdExecutable(): Promise<never> {
-  const exitCode = await runYrdProcessHost(globalThis.process.argv, defaultIO(), true)
+  const exitCode = await runYrdProcessHost(globalThis.process.argv, defaultIO(), true, {})
   globalThis.process.exit(exitCode)
 }
