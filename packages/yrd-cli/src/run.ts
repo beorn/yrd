@@ -7467,7 +7467,7 @@ async function prepareResidentQueueCycle(
   return (
     publicationChanged ||
     tracking.some((outcome) => outcome.status === "applied") ||
-    freshness.length > 0 ||
+    freshness.some(({ status }) => status === "refreshed" || status === "settled" || status === "recovered") ||
     remedies.some((outcome) => outcome.status === "applied")
   )
 }
