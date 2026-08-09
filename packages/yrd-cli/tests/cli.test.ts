@@ -6232,13 +6232,48 @@ describe("runYrd", () => {
         }),
       )
 
-      const healthy = outputIO({ cwd: repo })
-      expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), healthy.io, services)).toBe(0)
-      expect(JSON.parse(healthy.stdout())).toMatchObject({
+      const progressUnknown = outputIO({ cwd: repo })
+      expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), progressUnknown.io, services)).toBe(2)
+      expect(JSON.parse(progressUnknown.stdout())).toMatchObject({
         schema: "hab-service-health/1",
-        state: "healthy",
+        state: "unhealthy",
         running: true,
+        error: { code: "resident-runner-progress-unknown" },
         facts: { lease: "held", runnerStatus: "fresh" },
+      })
+
+      writeFileSync(
+        join(stateDir, "resident-runner", "status.json"),
+        JSON.stringify({
+          pid: process.pid,
+          startedAt: "2026-07-09T12:00:00.000Z",
+          lastTickAt: "2026-07-09T12:00:58.000Z",
+          command: "yrd queue run --follow",
+          queueProgress: {
+            state: "stalled",
+            ready: 9,
+            since: "2026-07-09T11:00:00.000Z",
+            blockedMs: 3_600_000,
+          },
+        }),
+      )
+      const stalled = outputIO({ cwd: repo })
+      expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), stalled.io, services)).toBe(2)
+      expect(JSON.parse(stalled.stdout())).toMatchObject({
+        schema: "hab-service-health/1",
+        state: "unhealthy",
+        running: true,
+        error: { code: "resident-runner-no-progress" },
+        facts: {
+          lease: "held",
+          runnerStatus: "fresh",
+          queueProgress: {
+            state: "stalled",
+            ready: 9,
+            since: "2026-07-09T11:00:00.000Z",
+            blockedMs: 3_600_000,
+          },
+        },
       })
 
       const failedAudit = outputIO({ cwd: repo })
@@ -6275,6 +6310,16 @@ describe("runYrd", () => {
         facts: { lease: "held" },
       })
 
+      writeFileSync(
+        join(stateDir, "resident-runner", "status.json"),
+        JSON.stringify({
+          pid: process.pid,
+          startedAt: "2026-07-09T12:00:00.000Z",
+          lastTickAt: "2026-07-09T12:00:58.000Z",
+          command: "yrd queue run --follow",
+        }),
+      )
+
       const historyIndependent = outputIO({ cwd: repo })
       const loadHistory = vi.fn(async () => {
         throw new Error("journal history must not be loaded by the supervisor probe")
@@ -6286,12 +6331,13 @@ describe("runYrd", () => {
           load: loadHistory,
           probe: async () => ({ services }),
         }),
-      ).toBe(0)
+      ).toBe(2)
       expect(loadHistory).not.toHaveBeenCalled()
       expect(JSON.parse(historyIndependent.stdout())).toMatchObject({
         schema: "hab-service-health/1",
-        state: "healthy",
+        state: "unhealthy",
         running: true,
+        error: { code: "resident-runner-progress-unknown" },
         facts: { lease: "held", runnerStatus: "fresh" },
       })
 
@@ -6352,6 +6398,26 @@ describe("runYrd", () => {
     }
   })
 
+  it("projects canonical no-landing audit state into the resident heartbeat", async () => {
+    const app = await createApp()
+    const project = (
+      runInternals as typeof runInternals & {
+        residentQueueProgress(app: TestApp, now: string): unknown
+      }
+    ).residentQueueProgress
+
+    expect(project(app, "2026-07-09T12:10:00.000Z")).toEqual({ state: "idle", ready: 0 })
+    await openAndSubmit(app)
+    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
+    expect(project(app, "2026-07-09T12:09:59.999Z")).toEqual({ state: "active", ready: 1 })
+    expect(project(app, "2026-07-09T12:10:00.000Z")).toEqual({
+      state: "stalled",
+      ready: 1,
+      since: "2026-07-09T12:00:00.000Z",
+      blockedMs: 600_000,
+    })
+  })
+
   it("writes atomic resident runner heartbeats and leaves a reclaimable exit marker on close", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-heartbeat-"))
     execFileSync("git", ["init", "-q", repo])
@@ -6363,7 +6429,7 @@ describe("runYrd", () => {
         Object.assign(outputIO({ cwd: repo, runner: `yrd-cli:${process.pid}`, now: () => now }).io, {
           implementationSource,
         }),
-        { intervalMs: 5 },
+        { intervalMs: 5, queueProgress: () => ({ state: "active", ready: 2 }) },
       )
       try {
         expect(JSON.parse(readFileSync(statusPath, "utf8"))).toEqual({
@@ -6374,6 +6440,7 @@ describe("runYrd", () => {
           // The dedicated RUNNER box renders stale-runner details as `[pid] <command>`.
           command: expect.any(String),
           implementationSource,
+          queueProgress: { state: "active", ready: 2 },
         })
         now += 1_000
         await vi.waitFor(

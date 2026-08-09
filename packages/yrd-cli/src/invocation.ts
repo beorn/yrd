@@ -92,6 +92,12 @@ export function canonicalizeYrdCommandAliases(args: readonly string[]): string[]
   if (canonical[commandIndex] === "queue" && canonical[commandIndex + 1] === "watch") {
     canonical.splice(commandIndex + 1, 1, "list", "--watch")
   }
+  // `queue status` is the static spelling of the queue timeline. Consume the
+  // alias before the bare-operand fallback below; otherwise `status` becomes a
+  // literal search term and can hide the newest merge from the timeline.
+  if (canonical[commandIndex] === "queue" && canonical[commandIndex + 1] === "status") {
+    canonical[commandIndex + 1] = "list"
+  }
   const queueOperand = canonical[commandIndex + 1]
   if (
     canonical[commandIndex] === "queue" &&

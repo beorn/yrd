@@ -335,10 +335,18 @@ export function timelineRetainedRows(
   })
 }
 
+export type QueueRunnerProgress =
+  | Readonly<{ state: "idle"; ready: 0 }>
+  | Readonly<{ state: "active"; ready: number }>
+  | Readonly<{ state: "stalled"; ready: number; since: string; blockedMs: number }>
+
 export type QueueTimelineRunner = Readonly<{
   pid: number
   startedAt: string
   lastTickAt: string
+  /** Queue-outcome progress captured by the resident from the canonical audit.
+   * Absent only for status records written before progress-aware heartbeats. */
+  queueProgress?: QueueRunnerProgress
   /** The resident runner's launch command; absent for status records written before it was captured. */
   command?: string
   /** Exact Yrd source captured by the resident heartbeat at startup. */

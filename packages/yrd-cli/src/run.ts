@@ -114,6 +114,7 @@ import {
   queueShowData,
   type QueueAttempt,
   type QueueRunnerRefusal,
+  type QueueRunnerProgress,
   type QueueTimelineProjection,
   type QueueTimelineRunner,
   type QueueTimelineStatusFilter,
@@ -330,6 +331,42 @@ function residentRunnerTimestamp(value: unknown, field: string): string {
   return value
 }
 
+function parseResidentRunnerProgress(value: unknown): QueueRunnerProgress | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== "object" || value === null) {
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner queueProgress is invalid")
+  }
+  const progress = value as Record<string, unknown>
+  const ready = progress.ready
+  if (!Number.isSafeInteger(ready) || (ready as number) < 0) {
+    raiseFailure(
+      "infrastructure",
+      "resident-runner-status-invalid",
+      "yrd: resident runner queueProgress.ready is invalid",
+    )
+  }
+  if (progress.state === "idle" && ready === 0) return { state: "idle", ready: 0 }
+  if (progress.state === "active" && (ready as number) > 0) {
+    return { state: "active", ready: ready as number }
+  }
+  if (
+    progress.state === "stalled" &&
+    (ready as number) > 0 &&
+    typeof progress.since === "string" &&
+    Number.isFinite(Date.parse(progress.since)) &&
+    Number.isSafeInteger(progress.blockedMs) &&
+    (progress.blockedMs as number) >= 0
+  ) {
+    return {
+      state: "stalled",
+      ready: ready as number,
+      since: progress.since,
+      blockedMs: progress.blockedMs as number,
+    }
+  }
+  raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner queueProgress is invalid")
+}
+
 function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
   let value: unknown
   try {
@@ -346,6 +383,7 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
   }
   const startedAt = residentRunnerTimestamp(record.startedAt, "startedAt")
   const lastTickAt = residentRunnerTimestamp(record.lastTickAt, "lastTickAt")
+  const queueProgress = parseResidentRunnerProgress(record.queueProgress)
   if (Date.parse(lastTickAt) < Date.parse(startedAt)) {
     raiseFailure(
       "infrastructure",
@@ -381,6 +419,7 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
     pid: record.pid as number,
     startedAt,
     lastTickAt,
+    ...(queueProgress === undefined ? {} : { queueProgress }),
     ...(record.command === undefined ? {} : { command: record.command as string }),
     ...(record.exitedAt === undefined ? {} : { exitedAt: residentRunnerTimestamp(record.exitedAt, "exitedAt") }),
     ...(record.clean === undefined ? {} : { clean: record.clean }),
@@ -472,6 +511,7 @@ type RunnerHealthFacts = Readonly<{
   runnerStatus: "fresh" | "stale" | "missing"
   runnerAgeMs?: number
   runner?: QueueTimelineRunner
+  queueProgress: QueueRunnerProgress | Readonly<{ state: "unknown" }>
   launcher: RunnerLauncherFacts
   git: RunnerGitHealth
 }>
@@ -539,6 +579,27 @@ function runnerHealthError(code: string, cause: string, resolution: readonly str
   return Object.freeze({ code, cause, resolution: Object.freeze([...resolution]) })
 }
 
+function queuedDeliveryCount(app: YrdCliApp): number {
+  return Object.values(stateOf(app).bays.prs).filter((pr) => {
+    const delivery = prDeliveryState(pr)
+    return delivery === "submitted" || delivery === "ready"
+  }).length
+}
+
+/** Project the resident's canonical no-landing audit into its lightweight
+ * status record. The supervisor can then prove outcome progress without
+ * replaying Journal history in its health probe. */
+export function residentQueueProgress(app: YrdCliApp, now: string): QueueRunnerProgress {
+  const ready = queuedDeliveryCount(app)
+  if (ready === 0) return { state: "idle", ready: 0 }
+  const stalled = app.queue.audit({ now }).findings.find((finding) => finding.code === "queue-progress-stalled")
+  if (stalled === undefined) return { state: "active", ready }
+  if (stalled.since === undefined || stalled.blockedMs === undefined) {
+    throw new Error("yrd: queue-progress-stalled finding is missing its progress clock")
+  }
+  return { state: "stalled", ready, since: stalled.since, blockedMs: stalled.blockedMs }
+}
+
 async function queueRunnerHealth(
   app: YrdCliApp | undefined,
   services: YrdCliServices,
@@ -566,11 +627,13 @@ async function queueRunnerHealth(
     const now = io.now?.() ?? Date.now()
     const runnerAgeMs = runner === null ? undefined : Math.max(0, now - Date.parse(runner.lastTickAt))
     const runnerStatus = runnerAgeMs === undefined ? "missing" : runnerAgeMs > RUNNER_STALE_MS ? "stale" : "fresh"
+    const queueProgress = runner?.queueProgress ?? { state: "unknown" as const }
     const facts: RunnerHealthFacts = {
       lease: leaseHeld ? "held" : "free",
       runnerStatus,
       ...(runnerAgeMs === undefined ? {} : { runnerAgeMs }),
       ...(runner === null ? {} : { runner }),
+      queueProgress,
       launcher: runnerLauncherFacts(),
       git,
     }
@@ -594,13 +657,7 @@ async function queueRunnerHealth(
       }
     }
     if (!leaseHeld) {
-      const state = app === undefined ? undefined : stateOf(app)
-      const hasQueuedWork =
-        state !== undefined &&
-        Object.values(state.bays.prs).some((pr) => {
-          const delivery = prDeliveryState(pr)
-          return delivery === "submitted" || delivery === "ready"
-        })
+      const hasQueuedWork = app !== undefined && queuedDeliveryCount(app) > 0
       if (hasQueuedWork) {
         return {
           exitCode: 2,
@@ -648,6 +705,42 @@ async function queueRunnerHealth(
         },
       }
     }
+    if (queueProgress.state === "unknown") {
+      return {
+        exitCode: 2,
+        payload: {
+          schema: "hab-service-health/1",
+          command: "queue.list.check",
+          service: "yrd-runner",
+          state: "unhealthy",
+          running: true,
+          error: runnerHealthError(
+            "resident-runner-progress-unknown",
+            "resident runner heartbeat is fresh but reports no queue outcome progress",
+            ["Restart the resident queue runner with the installed Yrd source."],
+          ),
+          facts,
+        },
+      }
+    }
+    if (queueProgress.state === "stalled") {
+      return {
+        exitCode: 2,
+        payload: {
+          schema: "hab-service-health/1",
+          command: "queue.list.check",
+          service: "yrd-runner",
+          state: "unhealthy",
+          running: true,
+          error: runnerHealthError(
+            "resident-runner-no-progress",
+            `resident runner is ticking with ${queueProgress.ready} ready merge requests but no landing for ${queueProgress.blockedMs}ms (since ${queueProgress.since})`,
+            ["Inspect queue audit and the resident log before restarting the runner."],
+          ),
+          facts,
+        },
+      }
+    }
     return {
       exitCode: 0,
       payload: {
@@ -674,7 +767,13 @@ async function queueRunnerHealth(
         state: "unhealthy",
         running: leaseHeld === true,
         error: actionableFailure(fact),
-        facts: { lease, runnerStatus: "missing", launcher: runnerLauncherFacts(), git },
+        facts: {
+          lease,
+          runnerStatus: "missing",
+          queueProgress: { state: "unknown" },
+          launcher: runnerLauncherFacts(),
+          git,
+        },
       },
     }
   }
@@ -773,7 +872,10 @@ function heartbeatDelay(intervalMs: number, signal: AbortSignal): Promise<boolea
 
 export async function startResidentRunnerHeartbeat(
   io: YrdCliIO,
-  options: Readonly<{ intervalMs?: number }> = {},
+  options: Readonly<{
+    intervalMs?: number
+    queueProgress?: (now: string) => QueueRunnerProgress
+  }> = {},
 ): Promise<ResidentRunnerHeartbeat> {
   const cwd = io.cwd ?? process.cwd()
   const path = residentRunnerStatusPath(cwd)
@@ -808,10 +910,13 @@ export async function startResidentRunnerHeartbeat(
   const command = [basename(process.argv[0] ?? "bun"), ...process.argv.slice(1)].join(" ")
   const writeStatus = async (exit?: Readonly<{ exitedAt: string; clean: boolean }>): Promise<void> => {
     await mkdir(directory, { recursive: true })
+    const lastTickAt = nowIso()
+    const queueProgress = options.queueProgress?.(lastTickAt)
     const status: QueueTimelineRunner = {
       pid: process.pid,
       startedAt,
-      lastTickAt: nowIso(),
+      lastTickAt,
+      ...(queueProgress === undefined ? {} : { queueProgress }),
       command,
       implementationSource,
       journalVersions: SUPPORTED_VERSIONS,
@@ -7340,7 +7445,9 @@ export async function followQueueRuns(
   // once it writes, the departed pid is lost. The exclusive resident lock guarantees
   // that prior resident is not concurrently running as a resident.
   if (resident) await reclaimDeadResidentRunner(app, io)
-  const heartbeat = resident ? await startResidentRunnerHeartbeat(io) : undefined
+  const heartbeat = resident
+    ? await startResidentRunnerHeartbeat(io, { queueProgress: (now) => residentQueueProgress(app, now) })
+    : undefined
   // A clean shutdown is an operator drain that finished (no in-flight work left);
   // any other exit — a signal-forced abort or a thrown fault — is unclean. This
   // feeds the exit marker close() writes (D1a) and the process exit code (D3).

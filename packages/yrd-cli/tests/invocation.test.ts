@@ -21,6 +21,8 @@ describe("canonicalizeYrdCommandAliases", () => {
     { args: ["watch", "--pr", "PR1", "--json"], expected: ["queue", "list", "--watch", "--pr", "PR1", "--json"] },
     { args: ["queue", "--status", "pending"], expected: ["queue", "list", "--status", "pending"] },
     { args: ["queue", "topic/alpha", "--latest"], expected: ["queue", "list", "topic/alpha", "--latest"] },
+    { args: ["queue", "status"], expected: ["queue", "list"] },
+    { args: ["queue", "status", "--since", "24h"], expected: ["queue", "list", "--since", "24h"] },
     { args: ["queue", "watch"], expected: ["queue", "list", "--watch"] },
     { args: ["queue", "watch", "topic/alpha"], expected: ["queue", "list", "--watch", "topic/alpha"] },
     { args: ["queue", "watch", "--status", "running"], expected: ["queue", "list", "--watch", "--status", "running"] },
