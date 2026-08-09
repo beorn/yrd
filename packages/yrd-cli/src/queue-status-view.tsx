@@ -336,9 +336,8 @@ export function timelineRetainedRows(
 }
 
 export type QueueRunnerProgress =
-  | Readonly<{ state: "idle"; ready: 0 }>
-  | Readonly<{ state: "active"; ready: number }>
-  | Readonly<{ state: "stalled"; ready: number; since: string; blockedMs: number }>
+  | Readonly<{ state: "healthy" }>
+  | Readonly<{ state: "stalled"; findings: readonly QueueAuditFinding[] }>
 
 export type QueueTimelineRunner = Readonly<{
   pid: number
@@ -1995,8 +1994,9 @@ function timelineRunMemberRows(
     // An intent member's snapshot is its complete record: render from it and
     // skip the PR-only enrichments (lineage history, admission clock,
     // submitter). A PR member with no retained PR stays loud.
-    if (current === undefined && member.intent === undefined)
+    if (current === undefined && member.intent === undefined) {
       throw new Error(`yrd: run '${run.id}' has no retained PR '${member.id}'`)
+    }
     const lineage =
       current === undefined
         ? { pr: member.id, revisions: [member.revision] }
@@ -4704,7 +4704,7 @@ function timelineLastDrainedMs(projection: QueueTimelineProjection): number | nu
 }
 
 /** The RUNNER liveness reflected by the leading marker. */
-export type QueueHealthKind = "down" | "processing" | "idle"
+export type QueueHealthKind = "down" | "stalled" | "processing" | "idle"
 
 export type QueueHealthMarker = Readonly<{
   kind: QueueHealthKind
@@ -4712,11 +4712,14 @@ export type QueueHealthMarker = Readonly<{
   pulse: readonly [string, string] | null
 }>
 
-/** Missing/stale is solid red; active is pulsing blue; idle is pulsing grey. */
+/** Missing, stale, or outcome-stalled is solid red; active is pulsing blue; idle is pulsing grey. */
 export function queueHealthMarker(projection: QueueTimelineProjection): QueueHealthMarker {
   const timing = runnerTiming(projection)
   if (projection.runner === null || (timing !== null && timing.ageMs > RUNNER_STALE_MS)) {
     return { kind: "down", color: "$fg-error", pulse: null }
+  }
+  if (projection.runner.queueProgress?.state === "stalled") {
+    return { kind: "stalled", color: "$fg-error", pulse: null }
   }
   if (projection.rows.some((row) => row.status === "running")) {
     return { kind: "processing", color: "$fg-info", pulse: ["$fg-info", "$fg-muted"] }
@@ -4794,7 +4797,8 @@ function TimelineRunnerBox({
         ? undefined
         : `downtime ${runnerClock(downMs)}`
       : `uptime ${runnerClock(timing?.uptimeMs ?? 0)}`
-  const borderColor = marker.kind === "down" ? "$fg-error" : pause !== undefined ? "$fg-warning" : undefined
+  const borderColor =
+    marker.kind === "down" || marker.kind === "stalled" ? "$fg-error" : pause !== undefined ? "$fg-warning" : undefined
   return (
     <TitledBox
       title="RUNNER"
@@ -4841,6 +4845,11 @@ function TimelineRunnerBox({
       {runnerStale && timing !== null ? (
         <Text color="$fg-error" bold wrap="truncate">
           RUNNER STALE — last tick {mediaDuration(timing.ageMs)} ago
+        </Text>
+      ) : null}
+      {runner?.queueProgress?.state === "stalled" ? (
+        <Text color="$fg-error" bold wrap="truncate">
+          NO PROGRESS — {runner.queueProgress.findings.map((finding) => finding.message).join(" · ")}
         </Text>
       ) : null}
       {pause === undefined ? null : (

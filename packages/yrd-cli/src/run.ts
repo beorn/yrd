@@ -337,32 +337,73 @@ function parseResidentRunnerProgress(value: unknown): QueueRunnerProgress | unde
     raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner queueProgress is invalid")
   }
   const progress = value as Record<string, unknown>
-  const ready = progress.ready
-  if (!Number.isSafeInteger(ready) || (ready as number) < 0) {
-    raiseFailure(
-      "infrastructure",
-      "resident-runner-status-invalid",
-      "yrd: resident runner queueProgress.ready is invalid",
-    )
-  }
-  if (progress.state === "idle" && ready === 0) return { state: "idle", ready: 0 }
-  if (progress.state === "active" && (ready as number) > 0) {
-    return { state: "active", ready: ready as number }
-  }
-  if (
-    progress.state === "stalled" &&
-    (ready as number) > 0 &&
-    typeof progress.since === "string" &&
-    Number.isFinite(Date.parse(progress.since)) &&
-    Number.isSafeInteger(progress.blockedMs) &&
-    (progress.blockedMs as number) >= 0
-  ) {
-    return {
-      state: "stalled",
-      ready: ready as number,
-      since: progress.since,
-      blockedMs: progress.blockedMs as number,
-    }
+  if (progress.state === "healthy") return { state: "healthy" }
+  if (progress.state === "stalled" && Array.isArray(progress.findings) && progress.findings.length > 0) {
+    const findings = progress.findings.map((finding): QueueAuditFinding => {
+      if (typeof finding !== "object" || finding === null) {
+        raiseFailure(
+          "infrastructure",
+          "resident-runner-status-invalid",
+          "yrd: resident runner queueProgress finding is invalid",
+        )
+      }
+      const record = finding as Record<string, unknown>
+      if (typeof record.code !== "string" || typeof record.message !== "string") {
+        raiseFailure(
+          "infrastructure",
+          "resident-runner-status-invalid",
+          "yrd: resident runner queueProgress finding identity is invalid",
+        )
+      }
+      for (const field of ["run", "pr", "specimen", "step", "refusal"] as const) {
+        if (record[field] !== undefined && typeof record[field] !== "string") {
+          raiseFailure(
+            "infrastructure",
+            "resident-runner-status-invalid",
+            `yrd: resident runner queueProgress finding ${field} is invalid`,
+          )
+        }
+      }
+      if (
+        record.resolution !== undefined &&
+        (!Array.isArray(record.resolution) || record.resolution.some((step) => typeof step !== "string"))
+      ) {
+        raiseFailure(
+          "infrastructure",
+          "resident-runner-status-invalid",
+          "yrd: resident runner queueProgress finding resolution is invalid",
+        )
+      }
+      if (record.count !== undefined && (!Number.isSafeInteger(record.count) || (record.count as number) < 0)) {
+        raiseFailure(
+          "infrastructure",
+          "resident-runner-status-invalid",
+          "yrd: resident runner queueProgress finding count is invalid",
+        )
+      }
+      if (
+        record.since !== undefined &&
+        (typeof record.since !== "string" || !Number.isFinite(Date.parse(record.since)))
+      ) {
+        raiseFailure(
+          "infrastructure",
+          "resident-runner-status-invalid",
+          "yrd: resident runner queueProgress finding since is invalid",
+        )
+      }
+      if (
+        record.blockedMs !== undefined &&
+        (!Number.isSafeInteger(record.blockedMs) || (record.blockedMs as number) < 0)
+      ) {
+        raiseFailure(
+          "infrastructure",
+          "resident-runner-status-invalid",
+          "yrd: resident runner queueProgress finding blockedMs is invalid",
+        )
+      }
+      return record as QueueAuditFinding
+    })
+    return { state: "stalled", findings }
   }
   raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner queueProgress is invalid")
 }
@@ -586,18 +627,16 @@ function queuedDeliveryCount(app: YrdCliApp): number {
   }).length
 }
 
-/** Project the resident's canonical no-landing audit into its lightweight
+/** Project the resident's canonical progress findings into its lightweight
  * status record. The supervisor can then prove outcome progress without
  * replaying Journal history in its health probe. */
 export function residentQueueProgress(app: YrdCliApp, now: string): QueueRunnerProgress {
-  const ready = queuedDeliveryCount(app)
-  if (ready === 0) return { state: "idle", ready: 0 }
-  const stalled = app.queue.audit({ now }).findings.find((finding) => finding.code === "queue-progress-stalled")
-  if (stalled === undefined) return { state: "active", ready }
-  if (stalled.since === undefined || stalled.blockedMs === undefined) {
-    throw new Error("yrd: queue-progress-stalled finding is missing its progress clock")
-  }
-  return { state: "stalled", ready, since: stalled.since, blockedMs: stalled.blockedMs }
+  const findings = app.queue
+    .audit({ now })
+    .findings.filter(
+      (finding) => finding.code === "queue-progress-stalled" || finding.code === "admission-refusal-loop",
+    )
+  return findings.length === 0 ? { state: "healthy" } : { state: "stalled", findings }
 }
 
 async function queueRunnerHealth(
@@ -734,7 +773,7 @@ async function queueRunnerHealth(
           running: true,
           error: runnerHealthError(
             "resident-runner-no-progress",
-            `resident runner is ticking with ${queueProgress.ready} ready merge requests but no landing for ${queueProgress.blockedMs}ms (since ${queueProgress.since})`,
+            queueProgress.findings.map((finding) => finding.message).join("\n"),
             ["Inspect queue audit and the resident log before restarting the runner."],
           ),
           facts,

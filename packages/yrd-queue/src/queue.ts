@@ -2013,8 +2013,9 @@ function createQueue<Shape extends PRShape>(
           outcome: (prs) =>
             prs.some((selector) => {
               const pr = resolvePR(runtime().bays, selector)
-              if (pr === undefined)
+              if (pr === undefined) {
                 throw new Error(`yrd: accepted merge request '${selector}' disappeared from bay state`)
+              }
               return prAdmission(pr) === undefined
             })
               ? "progress"
@@ -5630,7 +5631,9 @@ function auditQueues(
   const queued = admissionQueue(state, steps)
   const refusalFindings = admissionRefusalAuditFindings(state, queued, progress)
   findings.push(...refusalFindings)
-  findings.push(...queueProgressAuditFindings(state, queued, refusalFindings, progress, options))
+  findings.push(
+    ...queueProgressAuditFindings(state, queueProgressQueue(state, steps), refusalFindings, progress, options),
+  )
   return { findings }
 }
 
@@ -6069,6 +6072,27 @@ function admissionQueue(
       const rightAt = checkQueueTime(right)
       return leftAt.localeCompare(rightAt) || compareNatural(left.id, right.id)
     })
+}
+
+/** Work that has entered the queue but has not produced a delivery outcome yet.
+ *
+ * This is deliberately broader than `admissionQueue`: a successful admission
+ * removes a PR from the next admission pass, but it remains outstanding until a
+ * Queue run lands (or otherwise changes its delivery state). Progress auditing
+ * must span that gap or the exact "admission passes, nothing merges" failure is
+ * invisible.
+ */
+function queueProgressQueue(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): PR[] {
+  const selected = selectSteps(steps, state.queues.defaultSteps)
+  if (!selected.some((step) => step.kind === "merge")) return []
+  return Object.values(state.bays.prs)
+    .filter((pr) => {
+      const delivery = prDeliveryState(pr)
+      return delivery === "pushed" || delivery === "submitted" || delivery === "ready"
+    })
+    .filter((pr) => blockingQueuePause(state, pr) === undefined)
+    .filter((pr) => checksRequested(pr))
+    .toSorted((left, right) => checkQueueTime(left).localeCompare(checkQueueTime(right)))
 }
 
 function refusedRevisionAdmissions(state: DeepReadonly<RuntimeState>): PR[] {

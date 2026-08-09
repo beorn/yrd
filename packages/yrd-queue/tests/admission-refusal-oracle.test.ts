@@ -99,7 +99,7 @@ async function createApp(
   })
 }
 
-async function createDeliveryApp(clock: () => string) {
+async function createDeliveryApp(clock: () => string, waitForMerge = false) {
   const bayJobs = createBayJobDefs(workspace())
   const check = withStep(
     "check",
@@ -111,11 +111,14 @@ async function createDeliveryApp(clock: () => string) {
     { revision: "check-v1", output: CheckResultSchema },
   )
   const merge = withMerge(
-    () => ({
-      status: "completed",
-      conclusion: "success" as const,
-      output: { commit: MERGED, baseSha: BASE },
-    }),
+    (): JobResult<{ commit: string; baseSha: string }> =>
+      waitForMerge
+        ? { status: "waiting", token: "merge-pending" }
+        : {
+            status: "completed",
+            conclusion: "success",
+            output: { commit: MERGED, baseSha: BASE },
+          },
     { revision: "merge-v1" },
   )
   const queue = withQueue({
@@ -161,6 +164,24 @@ function refuseForever(blocked: () => string): CandidatePreparer {
 }
 
 describe("admission refusal oracle — a head-of-line PR refused at admission is visible to queue audit", () => {
+  it("keeps a passed admission in the no-landing progress population until delivery", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createDeliveryApp(clock.read, true)
+    const pr = await submitAndRequestChecks(app, "issue/admitted-without-landing")
+
+    await app.queue.run({}, runtime)
+    expect(app.queue.eligibility(pr.id).checks.status).toBe("passed")
+    expect(app.bays.pr(pr.id)?.integratedAt).toBeUndefined()
+    expect(app.queue.audit({ now: "2026-01-01T00:10:00.000Z" }).findings).toContainEqual(
+      expect.objectContaining({
+        code: "queue-progress-stalled",
+        specimen: "queue:main",
+        count: 1,
+        since: "2026-01-01T00:00:00.000Z",
+      }),
+    )
+  })
+
   it("makes one exact refusal loud without inventing a stalled live queue", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     let blocked = ""

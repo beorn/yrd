@@ -18,6 +18,7 @@ import { queueTimelineStories } from "../dev/queue-timeline-fixtures.ts"
 import {
   QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
   QueueTimelineView,
+  queueHealthMarker,
   type QueueTimelineProjection,
 } from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
@@ -231,6 +232,52 @@ describe("queue timeline chrome 21106", () => {
       // The RUNNER border timer uses the adaptive clock (H:MM:SS above an hour):
       // 3h45m of uptime renders `uptime 3:45:00` (user directive 2026-07-21).
       expect(app.text).toContain("uptime 3:45:00")
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("renders a fresh but stalled runner as loud no-progress failure chrome", async () => {
+    const story = queueTimelineStories["contract-overview"].snapshot.projection
+    const projection: QueueTimelineProjection = {
+      ...story,
+      runner: {
+        pid: 342,
+        startedAt: new Date(NOW - 60 * 60_000).toISOString(),
+        lastTickAt: new Date(NOW - 2_000).toISOString(),
+        command: "resident runner",
+        queueProgress: {
+          state: "stalled",
+          findings: [
+            {
+              code: "queue-progress-stalled",
+              message: "Queue main has ready work and no landing",
+              since: "2026-07-13T10:00:00.000Z",
+              blockedMs: 7_200_000,
+            },
+          ],
+        },
+      },
+    }
+
+    expect(queueHealthMarker(projection).kind).toBe("stalled")
+
+    const app = createRenderer({ cols: 120, rows: 40 })(
+      createElement(QueueTimelineView, { projection, nav: false, columns: 120 }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      const titleY = rowIndexOf(app.text, "╭─ RUNNER ")
+      const titleLine = rowAt(app.text, titleY)
+      const titleX = titleLine.indexOf("RUNNER")
+      const borderX = titleLine.indexOf("─", titleX + "RUNNER".length + 1)
+      const failedY = rowIndexOf(app.text, "main#5")
+      const failedLine = rowAt(app.text, failedY)
+      const errorX = failedLine.indexOf("fail")
+
+      expect(app.cell(borderX, titleY).fg, "stalled RUNNER border uses error fg").toEqual(app.cell(errorX, failedY).fg)
+      expect(app.text).toContain("NO PROGRESS")
+      expect(app.text).toContain("Queue main has ready work and no landing")
     } finally {
       app.unmount()
     }

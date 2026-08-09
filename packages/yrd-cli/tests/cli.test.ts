@@ -6249,12 +6249,40 @@ describe("runYrd", () => {
           startedAt: "2026-07-09T12:00:00.000Z",
           lastTickAt: "2026-07-09T12:00:58.000Z",
           command: "yrd queue run --follow",
-          queueProgress: {
-            state: "stalled",
-            ready: 9,
-            since: "2026-07-09T11:00:00.000Z",
-            blockedMs: 3_600_000,
-          },
+          queueProgress: { state: "healthy" },
+        }),
+      )
+      const progressing = outputIO({ cwd: repo })
+      expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), progressing.io, services)).toBe(0)
+      expect(JSON.parse(progressing.stdout())).toMatchObject({
+        schema: "hab-service-health/1",
+        state: "healthy",
+        running: true,
+        facts: {
+          lease: "held",
+          runnerStatus: "fresh",
+          queueProgress: { state: "healthy" },
+        },
+      })
+
+      const refusalFinding = {
+        code: "admission-refusal-loop",
+        message: "merge request 'PR1' failed its entry checks 160 consecutive times",
+        pr: "PR1",
+        specimen: "pr:PR1:refusal:base-moved",
+        refusal: "base-moved",
+        count: 160,
+        since: "2026-07-09T11:00:00.000Z",
+        blockedMs: 3_600_000,
+      }
+      writeFileSync(
+        join(stateDir, "resident-runner", "status.json"),
+        JSON.stringify({
+          pid: process.pid,
+          startedAt: "2026-07-09T12:00:00.000Z",
+          lastTickAt: "2026-07-09T12:00:58.000Z",
+          command: "yrd queue run --follow",
+          queueProgress: { state: "stalled", findings: [refusalFinding] },
         }),
       )
       const stalled = outputIO({ cwd: repo })
@@ -6269,9 +6297,7 @@ describe("runYrd", () => {
           runnerStatus: "fresh",
           queueProgress: {
             state: "stalled",
-            ready: 9,
-            since: "2026-07-09T11:00:00.000Z",
-            blockedMs: 3_600_000,
+            findings: [refusalFinding],
           },
         },
       })
@@ -6398,24 +6424,47 @@ describe("runYrd", () => {
     }
   })
 
-  it("projects canonical no-landing audit state into the resident heartbeat", async () => {
+  it("projects canonical queue-progress findings into the resident heartbeat without re-deriving readiness", async () => {
     const app = await createApp()
     const project = (
       runInternals as typeof runInternals & {
         residentQueueProgress(app: TestApp, now: string): unknown
       }
     ).residentQueueProgress
-
-    expect(project(app, "2026-07-09T12:10:00.000Z")).toEqual({ state: "idle", ready: 0 })
-    await openAndSubmit(app)
-    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
-    expect(project(app, "2026-07-09T12:09:59.999Z")).toEqual({ state: "active", ready: 1 })
-    expect(project(app, "2026-07-09T12:10:00.000Z")).toEqual({
-      state: "stalled",
-      ready: 1,
+    const noLanding = {
+      code: "queue-progress-stalled",
+      message: "Queue 'main' has one required-check PR queued and no landing for 10m",
+      pr: "PR1",
+      specimen: "queue:main",
+      count: 1,
       since: "2026-07-09T12:00:00.000Z",
       blockedMs: 600_000,
-    })
+    }
+    const refusalLoop = {
+      code: "admission-refusal-loop",
+      message: "merge request 'PR1' failed its entry checks 160 consecutive times",
+      pr: "PR1",
+      specimen: "pr:PR1:refusal:base-moved",
+      refusal: "base-moved",
+      count: 160,
+      since: "2026-07-09T11:00:00.000Z",
+      blockedMs: 3_600_000,
+    }
+    let findings: Array<typeof noLanding | typeof refusalLoop> = []
+    const progressApp = {
+      state: () => app.state(),
+      queue: { audit: () => ({ findings }) },
+    } as unknown as TestApp
+
+    expect(project(progressApp, "2026-07-09T12:10:00.000Z")).toEqual({ state: "healthy" })
+
+    for (const finding of [noLanding, refusalLoop]) {
+      findings = [finding]
+      expect(project(progressApp, "2026-07-09T12:10:00.000Z")).toEqual({
+        state: "stalled",
+        findings: [finding],
+      })
+    }
   })
 
   it("writes atomic resident runner heartbeats and leaves a reclaimable exit marker on close", async () => {
@@ -6429,7 +6478,7 @@ describe("runYrd", () => {
         Object.assign(outputIO({ cwd: repo, runner: `yrd-cli:${process.pid}`, now: () => now }).io, {
           implementationSource,
         }),
-        { intervalMs: 5, queueProgress: () => ({ state: "active", ready: 2 }) },
+        { intervalMs: 5, queueProgress: () => ({ state: "healthy" }) },
       )
       try {
         expect(JSON.parse(readFileSync(statusPath, "utf8"))).toEqual({
@@ -6440,7 +6489,7 @@ describe("runYrd", () => {
           // The dedicated RUNNER box renders stale-runner details as `[pid] <command>`.
           command: expect.any(String),
           implementationSource,
-          queueProgress: { state: "active", ready: 2 },
+          queueProgress: { state: "healthy" },
         })
         now += 1_000
         await vi.waitFor(
@@ -7678,6 +7727,38 @@ describe("runYrd", () => {
     })
     expect(frame).toContain("pr#1.1")
     expect(frame).not.toContain("pr#2.1")
+  })
+
+  it("makes queue status the exact unfiltered 24h timeline, including the newest integration", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+    const integrated = outputIO()
+    expect(
+      await runYrd(app, yrd("queue", "run", "PR1", "--steps", "check,merge", "--json"), integrated.io),
+      integrated.stderr(),
+    ).toBe(0)
+
+    const now = () => Date.parse("2026-07-09T13:00:00.000Z")
+    const resolveQueueTarget = async () => ({ base: "main", sha: MERGED_SHA })
+    const list = outputIO({ now, resolveQueueTarget })
+    const status = outputIO({ now, resolveQueueTarget })
+    expect(await runYrd(app, yrd("queue", "list", "--since", "24h", "--json"), list.io), list.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("queue", "status", "--since", "24h", "--json"), status.io), status.stderr()).toBe(0)
+
+    const expected = JSON.parse(list.stdout()) as {
+      projection: {
+        filters: { terms: readonly string[]; windowMs: number }
+        rows: readonly Readonly<{ run?: string; pr: string; status: string }>[]
+      }
+    }
+    const actual = JSON.parse(status.stdout()) as typeof expected
+    expect(actual).toEqual(expected)
+    expect(actual.projection.filters).toMatchObject({ terms: [], windowMs: 24 * 60 * 60_000 })
+    expect(actual.projection.rows.find((row) => row.status === "integrated")).toMatchObject({
+      run: "R1",
+      pr: "PR1",
+      status: "integrated",
+    })
   })
 
   it("renders pause and drain health in watch output", async () => {
