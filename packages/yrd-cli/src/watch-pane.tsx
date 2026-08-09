@@ -1476,6 +1476,7 @@ export function QueueWatchFrame({
       <QueueTimelineView
         projection={snapshot.projection}
         runnerRefusal={snapshot.runnerRefusal}
+        results={snapshot.results}
         state={snapshot.state}
         columns={timelineColumns}
         nav={!helpOpen}

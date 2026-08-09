@@ -638,6 +638,15 @@ export function residentQueueProgress(app: YrdCliApp, now: string): QueueRunnerP
     .findings.filter(
       (finding) => finding.code === "queue-progress-stalled" || finding.code === "admission-refusal-loop",
     )
+    .map((finding) => {
+      if (finding.code !== "admission-refusal-loop") return finding
+      const failure = actionableFailure({
+        code: finding.refusal ?? finding.code,
+        message: finding.message,
+        ...(finding.resolution === undefined ? {} : { resolution: finding.resolution }),
+      })
+      return { ...finding, resolution: failure.resolution }
+    })
   return findings.length === 0 ? { state: "healthy" } : { state: "stalled", findings }
 }
 
@@ -5524,6 +5533,7 @@ type QueueListObservation = Readonly<{
   runner: QueueTimelineRunner | null
   runnerToken: string
   runnerStateToken: string
+  runnerProjectionToken: string
   now: number
 }>
 
@@ -5552,6 +5562,12 @@ function queueRunnerStateToken(runner: QueueTimelineRunner | null): string {
         runner.exitedAt ?? null,
         runner.clean ?? null,
       ])
+}
+
+/** Runner facts that change chrome without invalidating durable queue facts.
+ * Heartbeat time is deliberately excluded; queueProgress is not. */
+function queueRunnerProjectionToken(runner: QueueTimelineRunner | null): string {
+  return JSON.stringify([queueRunnerStateToken(runner), runner?.queueProgress ?? null])
 }
 
 async function observeQueueList(
@@ -5587,6 +5603,7 @@ async function observeQueueList(
     runner,
     runnerToken: queueRunnerToken(runner),
     runnerStateToken: queueRunnerStateToken(runner),
+    runnerProjectionToken: queueRunnerProjectionToken(runner),
     now: io.now?.() ?? Date.now(),
   }
 }
@@ -5779,7 +5796,9 @@ export function createQueueListSnapshotLoader(
       const clockDue =
         unchanged &&
         cached !== undefined &&
-        (observed.now < cached.snapshot.now || observed.now - cached.snapshot.now >= QUEUE_WATCH_CLOCK_INTERVAL_MS)
+        (observed.runnerProjectionToken !== cached.observed.runnerProjectionToken ||
+          observed.now < cached.snapshot.now ||
+          observed.now - cached.snapshot.now >= QUEUE_WATCH_CLOCK_INTERVAL_MS)
       const stable = unchanged && !clockDue && cached !== undefined
       using span = log.span?.("snapshot", {
         cursor: observed.cursor,
@@ -5790,9 +5809,11 @@ export function createQueueListSnapshotLoader(
         runner:
           cached?.observed.runnerStateToken !== observed.runnerStateToken
             ? "changed"
-            : cached.observed.runnerToken === observed.runnerToken
-              ? "unchanged"
-              : "heartbeat",
+            : cached.observed.runnerProjectionToken !== observed.runnerProjectionToken
+              ? "progress"
+              : cached.observed.runnerToken === observed.runnerToken
+                ? "unchanged"
+                : "heartbeat",
       })
       if (stable && cached !== undefined && sameQueueListFocus(cached.displayed.focus, focus)) {
         const current = cached
@@ -5862,6 +5883,7 @@ async function listQueues(
     createElement(QueueTimelineView, {
       projection: snapshot.projection,
       runnerRefusal: snapshot.runnerRefusal,
+      results: snapshot.results,
       state: snapshot.state,
       columns: io.columns ?? 120,
     }),
@@ -7843,6 +7865,7 @@ async function watchQueue(
       createElement(QueueTimelineView, {
         projection: snapshot.projection,
         runnerRefusal: snapshot.runnerRefusal,
+        results: snapshot.results,
         state: snapshot.state,
         columns: io.columns ?? 120,
       }),

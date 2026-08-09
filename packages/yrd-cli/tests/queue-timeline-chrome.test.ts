@@ -19,6 +19,7 @@ import {
   QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
   QueueTimelineView,
   queueHealthMarker,
+  type QueueStatusResult,
   type QueueTimelineProjection,
 } from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
@@ -57,6 +58,16 @@ function clockDuration(milliseconds: number): string {
   const minutes = Math.floor((seconds % 3_600) / 60)
   const remainder = String(seconds % 60).padStart(2, "0")
   return hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${remainder}` : `${minutes}:${remainder}`
+}
+
+function queuedEligibility(pr: string, position: number) {
+  return {
+    pr,
+    revision: 1,
+    runnable: false,
+    review: { required: false, approved: true, stale: false },
+    checks: { status: "queued" as const, position, queuedAt: "2026-07-13T11:16:00.000Z" },
+  }
 }
 
 describe("queue timeline chrome 21106", () => {
@@ -237,8 +248,184 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
+  it("shows elapsed uptime when a fresh runner has never merged", async () => {
+    const story = queueTimelineStories.idle.snapshot.projection
+    const projection: QueueTimelineProjection = {
+      ...story,
+      runner: {
+        pid: 342,
+        startedAt: new Date(NOW - 60 * 60_000).toISOString(),
+        lastTickAt: new Date(NOW - 2_000).toISOString(),
+        command: "resident runner",
+      },
+    }
+    const app = createRenderer({ cols: 120, rows: 40 })(
+      createElement(QueueTimelineView, { projection, state: { byId: {}, prs: {}, receipts: {} }, columns: 120 }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      expect(app.text).toContain("uptime 1:00:00 · no merge for 1:00:00")
+      expect(app.text).not.toContain("no merge recorded")
+    } finally {
+      app.unmount()
+    }
+  })
+
   it("renders a fresh but stalled runner as loud no-progress failure chrome", async () => {
-    const story = queueTimelineStories["contract-overview"].snapshot.projection
+    const snapshot = queueTimelineStories["contract-overview"].snapshot
+    const story = snapshot.projection
+    const prs = snapshot.results[0]?.prs ?? []
+    const siblingPr = prs[0] === undefined ? undefined : { ...prs[0], id: "PR99", base: "release/next" }
+    const queuedTwo = prs[0] === undefined ? undefined : { ...prs[0], id: "PR8", name: "Second eligible PR" }
+    const queuedThree = prs[0] === undefined ? undefined : { ...prs[0], id: "PR9", name: "Third eligible PR" }
+    const integratedPr = prs.find((pr) => pr.integratedAt !== undefined)
+    const siblingIntegrated =
+      integratedPr === undefined
+        ? undefined
+        : {
+            ...integratedPr,
+            id: "PR100",
+            base: "release/next",
+            integratedAt: "2026-07-13T11:55:00.000Z",
+            revs: integratedPr.revs.map((revision, index) =>
+              index === integratedPr.revs.length - 1
+                ? {
+                    ...revision,
+                    base: "release/next",
+                    terminal: { kind: "integrated" as const, at: "2026-07-13T11:55:00.000Z", run: "R100" },
+                  }
+                : revision,
+            ),
+          }
+    const mainPrs = [
+      ...prs,
+      ...(queuedTwo === undefined ? [] : [queuedTwo]),
+      ...(queuedThree === undefined ? [] : [queuedThree]),
+    ]
+    const mainResult: QueueStatusResult = {
+      ...(snapshot.results[0] as QueueStatusResult),
+      prs: mainPrs,
+      eligibilities: [queuedEligibility("PR1", 1), queuedEligibility("PR8", 2), queuedEligibility("PR9", 3)],
+    }
+    const siblingResult: QueueStatusResult = {
+      base: "release/next",
+      prs: siblingPr === undefined ? [] : [siblingPr],
+      running: [],
+      waiting: [],
+      finished: [],
+      eligibilities: siblingPr === undefined ? [] : [queuedEligibility("PR99", 1)],
+    }
+    const results = [mainResult, siblingResult]
+    const state = {
+      byId: {},
+      prs: Object.fromEntries(
+        [
+          ...mainPrs,
+          ...(siblingPr === undefined ? [] : [siblingPr]),
+          ...(siblingIntegrated === undefined ? [] : [siblingIntegrated]),
+        ].map((pr) => [pr.id, pr]),
+      ),
+      receipts: {},
+    }
+    const projection: QueueTimelineProjection = {
+      ...story,
+      rows: story.rows.filter((row) => row.status !== "integrated"),
+      timeStatsFacts: story.timeStatsFacts.filter((fact) => fact.outcome !== "integrated"),
+      runner: {
+        pid: 342,
+        startedAt: new Date(NOW - 60 * 60_000).toISOString(),
+        lastTickAt: new Date(NOW - 2_000).toISOString(),
+        command: "resident runner",
+        queueProgress: {
+          state: "stalled",
+          findings: [
+            {
+              code: "admission-refusal-loop",
+              message: "release queue head is blocked",
+              pr: "PR99",
+              refusal: "recut-gitlink-conflict",
+              count: 1,
+              since: "2026-07-13T10:00:00.000Z",
+              blockedMs: 0,
+            },
+            {
+              code: "admission-refusal-loop",
+              message: "opaque producer finding whose remedy cannot be recovered from prose",
+              pr: "PR1",
+              refusal: "recut-gitlink-conflict",
+              count: 1,
+              since: "2026-07-13T11:00:00.000Z",
+              blockedMs: 0,
+              resolution: ["Preserve this exact producer-authored remedy."],
+            },
+          ],
+        },
+      },
+    }
+
+    expect(queueHealthMarker(projection).kind).toBe("stalled")
+
+    const app = createRenderer({ cols: 120, rows: 40 })(
+      createElement(QueueTimelineView, { projection, results, state, nav: false, columns: 120 }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      const titleY = rowIndexOf(app.text, "╭─ RUNNER ")
+      const titleLine = rowAt(app.text, titleY)
+      const titleX = titleLine.indexOf("RUNNER")
+      const borderX = titleLine.indexOf("─", titleX + "RUNNER".length + 1)
+      const failedY = rowIndexOf(app.text, "main#5")
+      const failedLine = rowAt(app.text, failedY)
+      const errorX = failedLine.indexOf("fail")
+
+      expect(app.cell(borderX, titleY).fg, "stalled RUNNER border uses error fg").toEqual(app.cell(errorX, failedY).fg)
+      expect(titleLine).toContain("uptime 1:00:00 · no merge for 1:05:00")
+      expect(app.text).toContain("NO PROGRESS")
+      expect(app.text).toContain("BLOCKED PR1 · Prepare release notes")
+      expect(app.text).toContain("position 1 · recut-gitlink-conflict")
+      expect(app.text).toContain("blocked 1:00:00 · retry 1 · 2 queued behind")
+      expect(app.text).toContain("REMEDY — Preserve this exact producer-authored remedy.")
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("uses the latest actual merge outside the visible rows and ignores newer non-landing terminals", async () => {
+    const snapshot = queueTimelineStories["contract-overview"].snapshot
+    const newestMerge = snapshot.projection.timeStatsFacts.find((fact) => fact.outcome === "integrated")
+    if (newestMerge === undefined) throw new Error("fixture must retain an integrated fact")
+    const projection: QueueTimelineProjection = {
+      ...snapshot.projection,
+      rows: snapshot.projection.rows.filter((row) => row.status !== "integrated"),
+      runner: {
+        pid: 342,
+        startedAt: new Date(NOW - 2 * 60 * 60_000).toISOString(),
+        lastTickAt: new Date(NOW - 2_000).toISOString(),
+        command: "resident runner",
+      },
+    }
+    const state = {
+      byId: {},
+      prs: Object.fromEntries((snapshot.results[0]?.prs ?? []).map((pr) => [pr.id, pr])),
+      receipts: {},
+    }
+    const app = createRenderer({ cols: 120, rows: 40 })(
+      createElement(QueueTimelineView, { projection, state, nav: false, columns: 120 }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      expect(projection.rows.some((row) => row.status === "integrated")).toBe(false)
+      expect(Math.max(...projection.timeStatsFacts.map((fact) => fact.terminalAtMs))).toBeGreaterThan(
+        newestMerge.terminalAtMs,
+      )
+      expect(app.text).toContain("no merge for 1:05:00")
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("preserves generic stalled findings when no structured head refusal is available", async () => {
+    const story = queueTimelineStories.idle.snapshot.projection
     const projection: QueueTimelineProjection = {
       ...story,
       runner: {
@@ -252,32 +439,19 @@ describe("queue timeline chrome 21106", () => {
             {
               code: "queue-progress-stalled",
               message: "Queue main has ready work and no landing",
-              since: "2026-07-13T10:00:00.000Z",
-              blockedMs: 7_200_000,
+              since: "2026-07-13T11:00:00.000Z",
+              blockedMs: 60 * 60_000,
             },
           ],
         },
       },
     }
-
-    expect(queueHealthMarker(projection).kind).toBe("stalled")
-
     const app = createRenderer({ cols: 120, rows: 40 })(
       createElement(QueueTimelineView, { projection, nav: false, columns: 120 }),
     )
     try {
       await app.waitForLayoutStable()
-      const titleY = rowIndexOf(app.text, "╭─ RUNNER ")
-      const titleLine = rowAt(app.text, titleY)
-      const titleX = titleLine.indexOf("RUNNER")
-      const borderX = titleLine.indexOf("─", titleX + "RUNNER".length + 1)
-      const failedY = rowIndexOf(app.text, "main#5")
-      const failedLine = rowAt(app.text, failedY)
-      const errorX = failedLine.indexOf("fail")
-
-      expect(app.cell(borderX, titleY).fg, "stalled RUNNER border uses error fg").toEqual(app.cell(errorX, failedY).fg)
-      expect(app.text).toContain("NO PROGRESS")
-      expect(app.text).toContain("Queue main has ready work and no landing")
+      expect(app.text).toContain("NO PROGRESS — Queue main has ready work and no landing")
     } finally {
       app.unmount()
     }

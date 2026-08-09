@@ -6503,6 +6503,11 @@ describe("runYrd", () => {
         },
       })
 
+      await app.bays.requestChecks({ pr: "PR1", baseSha })
+      const stalledHuman = outputIO({ cwd: repo })
+      expect(await runYrd(app, yrd("queue", "list"), stalledHuman.io, services)).toBe(0)
+      expect(stalledHuman.stdout()).toContain("position 1 · base-moved")
+
       const failedAudit = outputIO({ cwd: repo })
       const failedAuditServices: YrdCliServices = {
         queue: {
@@ -6643,10 +6648,17 @@ describe("runYrd", () => {
     }
     const refusalLoop = {
       code: "admission-refusal-loop",
-      message: "merge request 'PR1' failed its entry checks 160 consecutive times",
+      message:
+        "merge request 'PR1' failed its entry checks 160 consecutive times; latest failure " +
+        "'recut-gitlink-conflict': yrd: PR 'PR1' could not recut: target root " +
+        "'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' pins submodule 'dep' to " +
+        "'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'; replayed authored root " +
+        "'cccccccccccccccccccccccccccccccccccccccc' pins it to " +
+        "'dddddddddddddddddddddddddddddddddddddddd'; ancestry walk failed because neither submodule commit is " +
+        "an ancestor of the other",
       pr: "PR1",
       specimen: "pr:PR1:refusal:base-moved",
-      refusal: "base-moved",
+      refusal: "recut-gitlink-conflict",
       count: 160,
       since: "2026-07-09T11:00:00.000Z",
       blockedMs: 3_600_000,
@@ -6659,13 +6671,27 @@ describe("runYrd", () => {
 
     expect(project(progressApp, "2026-07-09T12:10:00.000Z")).toEqual({ state: "healthy" })
 
-    for (const finding of [noLanding, refusalLoop]) {
-      findings = [finding]
-      expect(project(progressApp, "2026-07-09T12:10:00.000Z")).toEqual({
-        state: "stalled",
-        findings: [finding],
-      })
-    }
+    findings = [noLanding]
+    expect(project(progressApp, "2026-07-09T12:10:00.000Z")).toEqual({
+      state: "stalled",
+      findings: [noLanding],
+    })
+
+    findings = [refusalLoop]
+    expect(project(progressApp, "2026-07-09T12:10:00.000Z")).toEqual({
+      state: "stalled",
+      findings: [
+        {
+          ...refusalLoop,
+          resolution: [
+            "Escalate to a human: composing 'dep' from authored pin " +
+              "'dddddddddddddddddddddddddddddddddddddddd' onto base pin " +
+              "'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' needs merge-conflict judgment; do not run the recipe " +
+              "mechanically.",
+          ],
+        },
+      ],
+    })
   })
 
   it("writes atomic resident runner heartbeats and leaves a reclaimable exit marker on close", async () => {
@@ -12433,6 +12459,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       startedAt: "2026-07-09T12:00:00.000Z",
       lastTickAt: "2026-07-09T12:00:58.000Z",
       implementationSource: `git:${"1".repeat(40)}`,
+      queueProgress: { state: "healthy" as const },
     }
     const writeRunner = (lastTickAt: string) => writeFileSync(statusPath, JSON.stringify({ ...runner, lastTickAt }))
     writeRunner(runner.lastTickAt)
@@ -12473,10 +12500,48 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       expect(targetResolutions, "a heartbeat alone must not rebuild durable queue facts").toBe(1)
       expect(heartbeat).toBe(first)
 
-      now += 59_000
+      const stalledProgress = {
+        state: "stalled" as const,
+        findings: [
+          {
+            code: "admission-refusal-loop",
+            message: "PR1 is blocked",
+            pr: "PR1",
+            refusal: "recut-gitlink-conflict",
+            count: 1,
+            since: "2026-07-09T12:00:00.000Z",
+            blockedMs: 0,
+          },
+        ],
+      }
+      writeFileSync(
+        statusPath,
+        JSON.stringify({ ...runner, lastTickAt: "2026-07-09T12:00:59.000Z", queueProgress: stalledProgress }),
+      )
+      const stalled = await loader.load()
+      expect(targetResolutions, "progress changes must reuse durable queue facts").toBe(1)
+      expect(stalled.results).toBe(first.results)
+      expect(stalled.projection.runner?.queueProgress).toEqual(stalledProgress)
+
+      const retriedProgress = {
+        ...stalledProgress,
+        findings: [{ ...stalledProgress.findings[0], count: 2, blockedMs: 1_000 }],
+      }
+      writeFileSync(
+        statusPath,
+        JSON.stringify({ ...runner, lastTickAt: "2026-07-09T12:00:59.000Z", queueProgress: retriedProgress }),
+      )
+      const retried = await loader.load()
+      expect(targetResolutions, "refusal detail changes must reuse durable queue facts").toBe(1)
+      expect(retried.results).toBe(first.results)
+      expect(retried.projection.runner?.queueProgress).toEqual(retriedProgress)
+
+      now += 60_000
       const reclocked = await loader.load()
       expect(targetResolutions).toBe(1)
+      expect(reclocked).not.toBe(retried)
       expect(reclocked.results).toBe(first.results)
+      expect(reclocked.projection.now).toBe(new Date(now).toISOString())
       expect(reclocked.projection.runner?.lastTickAt).toBe("2026-07-09T12:00:59.000Z")
 
       writeFileSync(statusPath, JSON.stringify({ ...runner, command: "yrd queue run --follow" }))

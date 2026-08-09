@@ -2,6 +2,7 @@ import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import type React from "react"
 import {
+  baseIdentity,
   currentPRRev,
   formatPRRevisionSelector,
   isNonCheckablePRState,
@@ -4703,6 +4704,86 @@ function timelineLastDrainedMs(projection: QueueTimelineProjection): number | nu
   return newest
 }
 
+/** Newest proven merge from authoritative Bays state, falling back to the
+ * retained fact horizon when state is unavailable. Unlike the last-drained
+ * clock, this ignores refusals/rejections and display filters. */
+function timelineLastMergeMs(projection: QueueTimelineProjection, state: BaysState | undefined): number | null {
+  if (state !== undefined) {
+    return Object.values(state.prs).reduce<number | null>((latest, pr) => {
+      if (baseIdentity(pr.base) !== baseIdentity(projection.base)) return latest
+      const terminal = currentPRRev(pr).terminal
+      if (terminal?.kind !== "integrated") return latest
+      const at = Date.parse(terminal.at)
+      if (!Number.isFinite(at)) return latest
+      return latest === null ? at : Math.max(latest, at)
+    }, null)
+  }
+  return projection.timeStatsFacts.reduce<number | null>(
+    (latest, fact) =>
+      fact.outcome !== "integrated"
+        ? latest
+        : latest === null
+          ? fact.terminalAtMs
+          : Math.max(latest, fact.terminalAtMs),
+    null,
+  )
+}
+
+type QueueHeadBlockDetails = Readonly<{
+  pr: string
+  subject: string
+  position?: number
+  queuedBehind?: number
+  blockedMs: number
+  retryCount?: number
+  refusal: string
+  resolution: readonly string[]
+}>
+
+function queueHeadBlockDetails(
+  projection: QueueTimelineProjection,
+  state: BaysState | undefined,
+  results: readonly QueueStatusResult[] | undefined,
+): QueueHeadBlockDetails | undefined {
+  const runner = projection.runner
+  if (runner?.queueProgress?.state !== "stalled") return undefined
+  const result = results?.find((candidate) => baseIdentity(candidate.base) === baseIdentity(projection.base))
+  const resultPrs = result === undefined ? undefined : new Set(result.prs.map((pr) => pr.id))
+  const finding = runner.queueProgress.findings.find((candidate) => {
+    if (candidate.code !== "admission-refusal-loop" || candidate.pr === undefined) return false
+    if (resultPrs !== undefined) return resultPrs.has(candidate.pr)
+    const blocked = state === undefined ? undefined : resolvePR(state, candidate.pr)
+    if (blocked !== undefined) return baseIdentity(blocked.base) === baseIdentity(projection.base)
+    return projection.rows.some(
+      (row) => row.pr === candidate.pr && baseIdentity(row.base) === baseIdentity(projection.base),
+    )
+  })
+  if (finding?.pr === undefined) return undefined
+  const blocked = state === undefined ? undefined : resolvePR(state, finding.pr)
+  const positions = new Map(
+    (result?.eligibilities ?? []).flatMap((eligibility) =>
+      eligibility.checks.position === undefined ? [] : [[eligibility.pr, eligibility.checks.position] as const],
+    ),
+  )
+  const position = positions.get(finding.pr)
+  const queuedBehind =
+    position === undefined ? undefined : [...positions.values()].filter((candidate) => candidate > position).length
+  const since = finding.since === undefined ? Number.NaN : Date.parse(finding.since)
+  const now = Date.parse(projection.now)
+  const blockedMs = Number.isFinite(since) && Number.isFinite(now) ? Math.max(0, now - since) : (finding.blockedMs ?? 0)
+  const row = projection.rows.find((candidate) => candidate.pr === finding.pr)
+  return {
+    pr: finding.pr,
+    subject: blocked?.title ?? blocked?.name ?? blocked?.branch ?? row?.subject ?? finding.pr,
+    ...(position === undefined ? {} : { position }),
+    ...(queuedBehind === undefined ? {} : { queuedBehind }),
+    blockedMs,
+    ...(finding.count === undefined ? {} : { retryCount: finding.count }),
+    refusal: finding.refusal ?? finding.code,
+    resolution: finding.resolution ?? [],
+  }
+}
+
 /** The RUNNER liveness reflected by the leading marker. */
 export type QueueHealthKind = "down" | "stalled" | "processing" | "idle"
 
@@ -4755,6 +4836,51 @@ function RunnerActivity({
   )
 }
 
+function runnerBoxTimer(marker: QueueHealthMarker, downMs: number | null, uptimeMs: number): string | undefined {
+  if (marker.kind !== "down") return `uptime ${runnerClock(uptimeMs)}`
+  return downMs === null ? undefined : `downtime ${runnerClock(downMs)}`
+}
+
+function runnerMergeTimer(lastMerge: number | null, now: number, uptimeMs: number, hasRunner: boolean): string {
+  if (lastMerge !== null) return `no merge for ${runnerClock(Math.max(0, now - lastMerge))}`
+  return hasRunner ? `no merge for ${runnerClock(uptimeMs)}` : "no merge recorded"
+}
+
+function RunnerProgressStatus({
+  progress,
+  headBlock,
+}: {
+  progress: QueueRunnerProgress | undefined
+  headBlock: QueueHeadBlockDetails | undefined
+}) {
+  if (progress?.state !== "stalled") return null
+  if (headBlock === undefined) {
+    return (
+      <Text color="$fg-error" bold wrap="truncate">
+        NO PROGRESS — {progress.findings.map((finding) => finding.message).join(" · ")}
+      </Text>
+    )
+  }
+  return (
+    <>
+      <Text color="$fg-error" bold wrap="wrap">
+        NO PROGRESS — BLOCKED {headBlock.pr} · {headBlock.subject}
+      </Text>
+      <Text color="$fg-error" bold wrap="wrap">
+        {headBlock.position === undefined ? "" : `position ${headBlock.position} · `}
+        {headBlock.refusal} · blocked {runnerClock(headBlock.blockedMs)}
+        {headBlock.retryCount === undefined ? "" : ` · retry ${headBlock.retryCount}`}
+        {headBlock.queuedBehind === undefined ? "" : ` · ${headBlock.queuedBehind} queued behind`}
+      </Text>
+      {headBlock.resolution.map((step) => (
+        <Text key={step} color="$fg-error" wrap="wrap">
+          REMEDY — {step}
+        </Text>
+      ))}
+    </>
+  )
+}
+
 /**
  * Resident runner status is always visible in its own RUNNER frame. The
  * queue-pause STATUS line lives INSIDE this frame (user directive 2026-07-21,
@@ -4766,11 +4892,13 @@ function RunnerActivity({
 function TimelineRunnerBox({
   projection,
   runnerRefusal,
+  results,
   state,
   live = false,
 }: {
   projection: QueueTimelineProjection
   runnerRefusal?: QueueRunnerRefusal
+  results?: readonly QueueStatusResult[]
   state?: BaysState
   live?: boolean
 }) {
@@ -4783,6 +4911,7 @@ function TimelineRunnerBox({
   const pauseAllowed = pause === undefined ? "none" : queuePauseAllowedText(pause, pauseHealth)
   const now = Date.parse(projection.now)
   const drained = timelineLastDrainedMs(projection)
+  const lastMerge = timelineLastMergeMs(projection, state)
   const downMs =
     runner === null
       ? drained === null
@@ -4791,12 +4920,11 @@ function TimelineRunnerBox({
       : runnerStale
         ? (timing?.ageMs ?? null)
         : null
-  const timer =
-    marker.kind === "down"
-      ? downMs === null
-        ? undefined
-        : `downtime ${runnerClock(downMs)}`
-      : `uptime ${runnerClock(timing?.uptimeMs ?? 0)}`
+  const uptimeMs = timing?.uptimeMs ?? 0
+  const runnerTimer = runnerBoxTimer(marker, downMs, uptimeMs)
+  const mergeTimer = runnerMergeTimer(lastMerge, now, uptimeMs, runner !== null)
+  const timer = runnerTimer === undefined ? mergeTimer : `${runnerTimer} · ${mergeTimer}`
+  const headBlock = queueHeadBlockDetails(projection, state, results)
   const borderColor =
     marker.kind === "down" || marker.kind === "stalled" ? "$fg-error" : pause !== undefined ? "$fg-warning" : undefined
   return (
@@ -4847,11 +4975,7 @@ function TimelineRunnerBox({
           RUNNER STALE — last tick {mediaDuration(timing.ageMs)} ago
         </Text>
       ) : null}
-      {runner?.queueProgress?.state === "stalled" ? (
-        <Text color="$fg-error" bold wrap="truncate">
-          NO PROGRESS — {runner.queueProgress.findings.map((finding) => finding.message).join(" · ")}
-        </Text>
-      ) : null}
+      <RunnerProgressStatus progress={runner?.queueProgress} headBlock={headBlock} />
       {pause === undefined ? null : (
         <>
           <Box height={1} flexShrink={0} />
@@ -5143,6 +5267,7 @@ const QUEUE_STATS_MIN_PANE_ROWS = 24
 function ProjectedQueueTimeline({
   projection,
   runnerRefusal,
+  results,
   state,
   nav,
   cursorKey,
@@ -5160,6 +5285,7 @@ function ProjectedQueueTimeline({
 }: {
   projection: QueueTimelineProjection
   runnerRefusal?: QueueRunnerRefusal
+  results?: readonly QueueStatusResult[]
   state?: BaysState
   nav: boolean
   cursorKey?: number
@@ -5218,7 +5344,13 @@ function ProjectedQueueTimeline({
             </Box>
           </>
         )}
-        <TimelineRunnerBox projection={projection} runnerRefusal={runnerRefusal} state={state} live={nav} />
+        <TimelineRunnerBox
+          projection={projection}
+          runnerRefusal={runnerRefusal}
+          results={results}
+          state={state}
+          live={nav}
+        />
         {/* No blank row above the table header (item 5): the header sits flush
             under the boxes above it. The pills + coverage row moved BELOW the
             list (item 2), rendered after the rows block. */}
@@ -5375,6 +5507,7 @@ export function QueueTimelineView({
       <ProjectedQueueTimeline
         projection={projection}
         runnerRefusal={runnerRefusal}
+        results={results}
         state={state}
         nav={nav}
         cursorKey={cursorKey}
