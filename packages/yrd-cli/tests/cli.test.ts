@@ -2753,7 +2753,7 @@ describe("runYrd", () => {
     expect(Queues.ids(app.state().queues)).toEqual([])
   })
 
-  it.fails("does not count a refused freshness pass as resident cycle progress", async () => {
+  it("does not count a refused freshness pass as resident cycle progress", async () => {
     const nextBase = "b".repeat(40)
     const app = await createApp()
     await app.bays.submit({
