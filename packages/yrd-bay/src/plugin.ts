@@ -416,7 +416,7 @@ const LegacyPRPushedSchema = z
 const PRRecutLineageSchema = z
   .object({ revision: RevisionSchema, headSha: GitShaSchema, baseSha: GitShaSchema.optional() })
   .strict()
-const PRRecutFactSchema = z
+const PRRecutReplaySchema = z
   .object({
     pr: PRIdSchema,
     fromRevision: RevisionSchema,
@@ -424,7 +424,6 @@ const PRRecutFactSchema = z
     baseSha: GitShaSchema,
     treeSha: GitShaSchema,
     reviewCarried: z.boolean(),
-    /** Missing only while replaying recuts written before submitter provenance was carried. */
     submitter: TextSchema.optional(),
     sources: z.array(PRRecutSourceSchema).min(1).readonly().optional(),
     predecessor: PRRecutLineageSchema,
@@ -433,6 +432,7 @@ const PRRecutFactSchema = z
     transition: PRFreshnessTransitionSchema.optional(),
   })
   .strict()
+const PRRecutFactSchema = PRRecutReplaySchema.extend({ submitter: TextSchema }).strict()
 const PRPushedSchema = z.preprocess(
   normalizeV2Submitter,
   LegacyPRPushedSchema.extend({ submitter: TextSchema }).strict(),
@@ -1327,7 +1327,7 @@ export function withBays(options: WithBaysOptions) {
         "bay/orphaned": journalEvent(1, BayOrphanedSchema),
         "bay/handoff-certified": journalEvent(1, BayHandoffCertifiedSchema),
         "pr/pushed": journalEvent(1, PRPushedSchema),
-        "pr/recut": journalEvent(1, PRRecutFactSchema),
+        "pr/recut": journalEvent(2, PRRecutFactSchema),
         "pr/submitted": journalEvent(1, PRRevisionSchema),
         "pr/correlation-bound": journalEvent(1, PRCorrelationBoundSchema),
         "pr/withdrawn": journalEvent(1, PRWithdrawnSchema),
@@ -1349,6 +1349,7 @@ export function withBays(options: WithBaysOptions) {
       },
       replayEvents: {
         "pr/pushed": LegacyPRPushedSchema,
+        "pr/recut": PRRecutReplaySchema,
         "pr/submitted": LegacyPRRevisionSchema,
         "pr/withdrawn": z.union([PRWithdrawnSchema, LegacyPRWithdrawnSchema]),
         "pr/needs-author": PRNeedsAuthorFactSchema,
@@ -1358,7 +1359,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/canceled": z.union([PRCanceledSchema, LegacyPRCanceledSchema]),
         "pr/admission-recorded": PRAdmissionRecordedFactSchema,
       },
-      projectionVersion: "bays-v11-agent-blind",
+      projectionVersion: "bays-v12-recut-submitter",
       project: projectBays,
       create(yrd) {
         yrd.jobs.requireDefinitions(options.jobs)
@@ -2736,7 +2737,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       )
     }
     case "pr/recut": {
-      const recut = PRRecutFactSchema.parse(data)
+      const recut = PRRecutReplaySchema.parse(data)
       const pr = current.prs[recut.pr]
       if (pr === undefined) throw new Error(`yrd: no merge request '${recut.pr}' to rebuild`)
       const predecessor = pr.revs.find(
@@ -2759,12 +2760,13 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         ...(recut.transition === undefined ? {} : { transition: recut.transition }),
       }
       const correlation = predecessor.correlation
+      const submitter = recut.submitter ?? predecessor.submitter
       const revision: PRRev = {
         n: recut.successor.revision,
         head: recut.successor.headSha,
         base: pr.base,
         baseSha: recut.successor.baseSha,
-        ...(recut.submitter === undefined ? {} : { submitter: recut.submitter }),
+        ...(submitter === undefined ? {} : { submitter }),
         ...(correlation === undefined ? {} : { correlation: { ...correlation } }),
         ...(recut.composition === undefined ? {} : { composition: recut.composition }),
         recut: proof,
