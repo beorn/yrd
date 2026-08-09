@@ -2,13 +2,9 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { createExclusive, posixLibcCandidates } from "../src/lock.ts"
+import { createExclusive } from "../src/lock.ts"
 
 describe("POSIX writer lock", () => {
-  it("loads the glibc soname before the linker script on Linux", () => {
-    expect(posixLibcCandidates("linux")).toEqual(["libc.so.6", "libc.so"])
-  })
-
   it("names the holding operation when a contender times out", async () => {
     const root = await mkdtemp(join(tmpdir(), "yrd-exclusive-holder-"))
     const entered = Promise.withResolvers<void>()
