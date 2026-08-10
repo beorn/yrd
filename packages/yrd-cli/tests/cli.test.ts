@@ -3311,28 +3311,25 @@ describe("runYrd", () => {
     await app.bays.ready({ pr: "PR2" })
     await app.bays.requestChecks({ pr: "PR2", baseSha: BASE_SHA })
 
-    const services = {
-      recut: {
-        recut(input: { id: string }) {
-          if (input.id === "PR1") {
-            return Promise.reject(
-              createFailure({
-                kind: "refusal",
-                code: "recut-gitlink-conflict",
-                message: "authored gitlink pins require composition",
-              }),
-            )
-          }
-          return Promise.resolve({
-            headSha: "9".repeat(40),
-            baseSha: nextBase,
-            treeSha: "c".repeat(40),
-            patchId: "8".repeat(40),
-            unchanged: false,
-          })
-        },
-      },
-    } as unknown as YrdCliServices
+    const recut = vi.fn((input: { id: string }) => {
+      if (input.id === "PR1") {
+        return Promise.reject(
+          createFailure({
+            kind: "refusal",
+            code: "recut-gitlink-conflict",
+            message: "authored gitlink pins require composition",
+          }),
+        )
+      }
+      return Promise.resolve({
+        headSha: "9".repeat(40),
+        baseSha: nextBase,
+        treeSha: "c".repeat(40),
+        patchId: "8".repeat(40),
+        unchanged: false,
+      })
+    })
+    const services = { recut: { recut } } as unknown as YrdCliServices
     const resolveQueueTarget = vi.fn(async () => ({ base: "main", sha: nextBase }))
     const before = await Array.fromAsync(app.events()).then((events) => events.length)
 
@@ -3365,11 +3362,15 @@ describe("runYrd", () => {
       code: "recut-gitlink-conflict",
       reason: "authored gitlink pins require composition",
       count: 1,
+      settlement: {
+        disposition: "needs-person",
+        reason: "authored gitlink pins require composition",
+      },
     })
+    expect(app.queue.eligibility("PR1").reason?.code).toBe("admission-refused")
 
-    await expect(refresh(app, services, outputIO({ resolveQueueTarget }).io)).resolves.toEqual([
-      expect.objectContaining({ status: "refused", pr: "PR1", code: "recut-gitlink-conflict" }),
-    ])
+    await expect(refresh(app, services, outputIO({ resolveQueueTarget }).io)).resolves.toEqual([])
+    expect(recut).toHaveBeenCalledTimes(2)
     expect(
       logs.filter(
         (event) => event.kind === "log" && event.level === "warn" && event.props?.action === "queue-freshness-refused",
@@ -3377,7 +3378,8 @@ describe("runYrd", () => {
     ).toHaveLength(1)
     expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
       code: "recut-gitlink-conflict",
-      count: 2,
+      count: 1,
+      settlement: { disposition: "needs-person" },
     })
     const appended = (await Array.fromAsync(app.events())).slice(before)
     expect(appended.filter(({ name }) => name === "pr/recut").map(({ data }) => (data as { pr: string }).pr)).toEqual([
