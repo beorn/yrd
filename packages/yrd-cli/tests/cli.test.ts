@@ -2609,7 +2609,7 @@ describe("runYrd", () => {
   })
 
   it("refreshes only the next queue candidate batch after a base advance", async () => {
-    const nextBase = "f".repeat(40)
+    let targetBase = "f".repeat(40)
     const oldHeads = ["2", "3", "4", "5", "6"].map((digit) => digit.repeat(40))
     const refreshedHeads = ["7", "8", "9", "a", "b"].map((digit) => digit.repeat(40))
     const recutInputs: Array<{ id: string }> = []
@@ -2622,7 +2622,7 @@ describe("runYrd", () => {
           const index = Number(recut.id.slice(2)) - 1
           return Promise.resolve({
             headSha: refreshedHeads[index]!,
-            baseSha: nextBase,
+            baseSha: targetBase,
             treeSha: "c".repeat(40),
             patchId: "d".repeat(40),
             unchanged: false,
@@ -2631,7 +2631,7 @@ describe("runYrd", () => {
       },
     } as unknown as YrdCliServices
     const refresh = runInternals.refreshAdmittedQueueRevisions
-    const io = outputIO({ resolveQueueTarget: async () => ({ base: "main", sha: nextBase }) }).io
+    const io = outputIO({ resolveQueueTarget: async () => ({ base: "main", sha: targetBase }) }).io
 
     for (const [index, oldHead] of oldHeads.entries()) {
       const pr = `PR${index + 1}`
@@ -2660,11 +2660,13 @@ describe("runYrd", () => {
 
     await app.bays.closePr({ pr: "PR1", reason: "candidate landed" })
     await app.bays.closePr({ pr: "PR2", reason: "candidate landed" })
+    targetBase = "e".repeat(40)
     await refresh(app, services, io)
     expect(recutInputs.map(({ id }) => id)).toEqual(["PR1", "PR2", "PR3", "PR4"])
 
     await app.bays.closePr({ pr: "PR3", reason: "candidate landed" })
     await app.bays.closePr({ pr: "PR4", reason: "candidate landed" })
+    targetBase = "d".repeat(40)
     await refresh(app, services, io)
     expect(recutInputs.map(({ id }) => id)).toEqual(["PR1", "PR2", "PR3", "PR4", "PR5"])
     expect(currentPRRev(app.bays.pr("PR5")!).n).toBe(3)
