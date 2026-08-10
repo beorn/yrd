@@ -513,11 +513,21 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
 export type QueueProgressPolicy = Readonly<{
   noLandingMs: number
   refusalCount: number
+  /**
+   * Admission checks required inside the no-landing window before quiet reads
+   * as stuck. A duration alone fires 37 times across this journal's history,
+   * and an alarm that fires 37 times is an alarm somebody mutes: gaps between
+   * merges reach 53 minutes at the 90th percentile. The conjunct separates *a
+   * queue that is trying and failing* from *a queue nobody has asked to do
+   * anything*, which a clock cannot tell apart.
+   */
+  minAdmissionChecks: number
 }>
 
 export const DEFAULT_QUEUE_PROGRESS_POLICY: QueueProgressPolicy = Object.freeze({
   noLandingMs: 10 * 60_000,
   refusalCount: ADMISSION_REFUSAL_LOOP_THRESHOLD,
+  minAdmissionChecks: 10,
 })
 
 export type QueueAuditOptions = Readonly<{ now?: string }>
@@ -5724,8 +5734,16 @@ function queueProgressAuditFindings(
     const sinceMs = Math.max(queuedAtMs, latestLandingMs ?? queuedAtMs)
     const blockedMs = Math.max(0, nowMs - sinceMs)
     const first = prs[0]
+    const admissionChecks = prs.reduce(
+      (total, pr) =>
+        total +
+        pr.checkRequests.filter((request) => parseAuditTime(request.at, `check request for ${pr.id}`) >= sinceMs)
+          .length,
+      0,
+    )
     if (
       blockedMs < progress.noLandingMs ||
+      admissionChecks < progress.minAdmissionChecks ||
       first === undefined ||
       refusalFindings.some((finding) => finding.pr === first.id)
     ) {
@@ -5736,7 +5754,8 @@ function queueProgressAuditFindings(
       code: "queue-progress-stalled",
       message:
         `Queue '${base}' has ${prs.length} required-check ${prs.length === 1 ? "PR" : "PRs"} queued and ` +
-        `no landing for ${formatRefusalSpan(blockedMs)} (since ${since}); head is '${first.id}'.`,
+        `no landing for ${formatRefusalSpan(blockedMs)} (since ${since}) across ${admissionChecks} admission ` +
+        `${admissionChecks === 1 ? "check" : "checks"}; head is '${first.id}'.`,
       pr: first.id,
       specimen: `queue:${base}`,
       count: prs.length,
@@ -5762,6 +5781,9 @@ function validateQueueProgressPolicy(policy: QueueProgressPolicy): QueueProgress
   }
   if (!Number.isSafeInteger(policy.refusalCount) || policy.refusalCount < 1) {
     throw new Error("yrd: queue progress refusalCount must be an integer >= 1")
+  }
+  if (!Number.isSafeInteger(policy.minAdmissionChecks) || policy.minAdmissionChecks < 1) {
+    throw new Error("yrd: queue progress minAdmissionChecks must be an integer >= 1")
   }
   return Object.freeze({ ...policy })
 }

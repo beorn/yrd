@@ -9,7 +9,16 @@ import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
 import { createFailure, createMemoryJournal, createYrd, createYrdDef, pipe, type Journal } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
-import { withMerge, withStep, withQueue, Queues, type CandidatePreparer, type StepExecution } from "@yrd/queue"
+import {
+  withMerge,
+  withStep,
+  withQueue,
+  Queues,
+  DEFAULT_QUEUE_PROGRESS_POLICY,
+  type CandidatePreparer,
+  type QueueProgressPolicy,
+  type StepExecution,
+} from "@yrd/queue"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -60,10 +69,9 @@ function workspace(): BayWorkspace {
  * lands in `dispatchAdmissions` — the path that never mints a run record. */
 function checkOnlyPlugin(
   prepareCandidate: CandidatePreparer,
-  progress: Readonly<{ noLandingMs: number; refusalCount: number }> = {
-    noLandingMs: 10 * 60_000,
-    refusalCount: 3,
-  },
+  /** Derived from the shipped default so a new policy field cannot silently
+   * diverge here — this literal previously carried its own copy of every knob. */
+  progress: QueueProgressPolicy = { ...DEFAULT_QUEUE_PROGRESS_POLICY, refusalCount: 3 },
 ) {
   const check = withStep(
     "check",
@@ -89,7 +97,7 @@ async function createApp(
   journal: Journal<unknown> = createMemoryJournal(),
   id: () => string = ids(),
   log?: ReturnType<typeof createLogger>,
-  progress?: Readonly<{ noLandingMs: number; refusalCount: number }>,
+  progress?: QueueProgressPolicy,
 ) {
   const bayJobs = createBayJobDefs(workspace())
   const queue = checkOnlyPlugin(prepareCandidate, progress)
@@ -124,7 +132,7 @@ async function createDeliveryApp(clock: () => string, waitForMerge = false) {
   const queue = withQueue({
     steps: [check, merge] as const,
     batch: false,
-    progress: { noLandingMs: 10 * 60_000, refusalCount: 3 },
+    progress: { ...DEFAULT_QUEUE_PROGRESS_POLICY, refusalCount: 3 },
   })
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   return createYrd(queue(base), {
@@ -143,6 +151,18 @@ async function submitAndRequestChecks(app: SubmissionApp, branch: string) {
   if (pr === undefined) throw new Error("PR was not recorded")
   await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
   return pr
+}
+
+/**
+ * Admission attempts inside the current progress window. The stall predicate
+ * asks whether the queue has been TRIED and still not moved, not merely whether
+ * it has waited, so any fixture that probes the stalled finding has to supply
+ * the attempts a real stalled queue accumulates. Timing matters: the window
+ * restarts at the last landing, so attempts must be issued on the clock the
+ * assertion is about.
+ */
+async function requestChecksTimes(app: SubmissionApp, pr: string, times: number): Promise<void> {
+  for (let index = 0; index < times; index++) await app.bays.requestChecks({ pr, baseSha: BASE })
 }
 
 /** A Candidate preparer that refuses for one PR forever — the shape of every
@@ -257,6 +277,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     await using app = await createDeliveryApp(clock.read, true)
     const pr = await submitAndRequestChecks(app, "issue/admitted-without-landing")
+    await requestChecksTimes(app, pr.id, DEFAULT_QUEUE_PROGRESS_POLICY.minAdmissionChecks - 1)
 
     await app.queue.run({}, runtime)
     expect(app.queue.eligibility(pr.id).checks.status).toBe("passed")
@@ -312,7 +333,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       createMemoryJournal(),
       ids(),
       undefined,
-      { noLandingMs: 10 * 60_000, refusalCount: 3 },
+      { ...DEFAULT_QUEUE_PROGRESS_POLICY, refusalCount: 3 },
     )
     const pr = await submitAndRequestChecks(app, "issue/no-landing")
     blocked = pr.id
@@ -343,6 +364,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     await using app = await createDeliveryApp(clock.read)
     const first = await submitAndRequestChecks(app, "issue/lands-first")
     const second = await submitAndRequestChecks(app, "issue/remains-queued")
+    await requestChecksTimes(app, second.id, DEFAULT_QUEUE_PROGRESS_POLICY.minAdmissionChecks - 2)
 
     expect(app.queue.audit({ now: "2026-01-01T00:10:00.000Z" }).findings).toContainEqual(
       expect.objectContaining({
@@ -357,6 +379,8 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     await app.queue.run({ prs: [first.id] }, runtime)
     expect(app.bays.pr(first.id)?.integratedAt).toBe("2026-01-01T00:10:00.000Z")
     expect(app.bays.pr(second.id)?.integratedAt).toBeUndefined()
+    // The landing restarts the window, so the earlier attempts fall outside it.
+    await requestChecksTimes(app, second.id, DEFAULT_QUEUE_PROGRESS_POLICY.minAdmissionChecks)
     expect(app.queue.audit({ now: "2026-01-01T00:19:59.999Z" }).findings).not.toContainEqual(
       expect.objectContaining({ code: "queue-progress-stalled" }),
     )
