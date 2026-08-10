@@ -515,12 +515,24 @@ export type QueueProgressPolicy = Readonly<{
   noLandingMs: number
   refusalCount: number
   /**
-   * Admission checks required inside the no-landing window before quiet reads
-   * as stuck. A duration alone fires 37 times across this journal's history,
-   * and an alarm that fires 37 times is an alarm somebody mutes: gaps between
-   * merges reach 53 minutes at the 90th percentile. The conjunct separates *a
-   * queue that is trying and failing* from *a queue nobody has asked to do
-   * anything*, which a clock cannot tell apart.
+   * Admission checks required inside the no-landing window before a TRIED queue
+   * reads as stuck. A duration alone fires 37 times across this journal's
+   * history, and an alarm that fires 37 times is an alarm somebody mutes: gaps
+   * between merges reach 53 minutes at the 90th percentile.
+   *
+   * ZERO checks is deliberately NOT quiet, and that asymmetry is the whole
+   * point. Two different failures both look like "no landing":
+   *
+   *   - tried and failing — many attempts, nothing lands. Needs this floor.
+   *   - never tried at all — work is ready, the runner is alive, and NOTHING
+   *     has attempted it. PR685 sat ready at position 1 for 65 minutes over a
+   *     live runner while `queue audit` stayed empty (@cto, 2026-08-10).
+   *
+   * A landing restarts the window, so a candidate whose only check request
+   * predates that landing has zero checks inside it. Treating zero as "too
+   * quiet to alarm" would hide precisely the queue that is asleep over ready
+   * work. Only the middle band — tried recently, but not much — stays silent,
+   * because that is ordinary retry cadence.
    */
   minAdmissionChecks: number
 }>
@@ -5745,7 +5757,7 @@ function queueProgressAuditFindings(
     )
     if (
       blockedMs < progress.noLandingMs ||
-      admissionChecks < progress.minAdmissionChecks ||
+      (admissionChecks > 0 && admissionChecks < progress.minAdmissionChecks) ||
       first === undefined ||
       refusalFindings.some((finding) => finding.pr === first.id)
     ) {
