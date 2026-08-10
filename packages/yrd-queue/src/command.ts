@@ -2342,13 +2342,13 @@ function candidateFailure(
  * including the generic `embeddedYrdCommands` projection that lifts these
  * quoted commands straight into a machine-readable `resolution[]`. */
 function authoredRootWorkflow(pr: string): string {
-  return `authored root branches use 'yrd pr submit <branch>', then 'yrd pr recut ${pr} --preflight --queue' and run its exact next command on that same merge request; no composition manifest or manual triage is needed`
+  return `authored root branches use 'yrd pr submit <branch>', then 'yrd pr recut ${pr} --preflight --queue --apply'; no composition manifest or manual triage is needed`
 }
 
 function linearRootCarrierWorkflow(pr: string): string {
   return (
     "merge inside the affected component repository, fast-forward that component's main, rebuild the root branch " +
-    `as one linear pin-bump commit, then run 'yrd pr submit <branch>' and 'yrd pr recut ${pr} --preflight --queue'`
+    `as one linear pin-bump commit, then run 'yrd pr submit <branch>' and 'yrd pr recut ${pr} --preflight --queue --apply'`
   )
 }
 

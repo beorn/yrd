@@ -695,7 +695,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
         runnable: false,
         reason: {
           code: "admission-refused",
-          message: expect.stringContaining(`yrd pr recut ${pr.id} --preflight --queue`),
+          message: expect.stringContaining(`yrd pr recut ${pr.id} --preflight --queue --apply`),
         },
       })
       expect(app.queue.eligibility(pr.id).reason?.message).toContain("authored-gitlink")
@@ -708,7 +708,10 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(await Array.fromAsync(journal.read()).then((events) => events.length)).toBe(beforeReplay)
     expect(replayed.queue.eligibility("PR1")).toMatchObject({
       runnable: false,
-      reason: { code: "admission-refused", message: expect.stringContaining("yrd pr recut PR1 --preflight --queue") },
+      reason: {
+        code: "admission-refused",
+        message: expect.stringContaining("yrd pr recut PR1 --preflight --queue --apply"),
+      },
     })
 
     // A genuinely new revision is new evidence: the durable settlement applies

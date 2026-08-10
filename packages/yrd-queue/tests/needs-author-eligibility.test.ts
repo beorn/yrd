@@ -217,7 +217,7 @@ describe("native needs-author lifecycle", () => {
     expect(eligibility.reason?.code).toBe("admission-refused")
     expect(eligibility.reason?.receipt).toBeUndefined()
     expect(eligibility.reason?.message).toContain("composition-invalid")
-    expect(eligibility.reason?.message).toContain("yrd pr recut PR1 --preflight --queue")
+    expect(eligibility.reason?.message).toContain("yrd pr recut PR1 --preflight --queue --apply")
     expect(Queues.ids(app.state().queues)).toEqual([])
 
     // Receiver/refresh replay of the unchanged rejected head is idempotent:

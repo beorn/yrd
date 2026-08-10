@@ -3332,9 +3332,17 @@ async function recutPr(
   app: YrdCliApp,
   services: YrdCliServices,
   selector: string,
-  options: JsonOption & Readonly<{ revision?: number; queue?: boolean; force?: boolean; preflight?: boolean }>,
+  options: JsonOption &
+    Readonly<{ revision?: number; queue?: boolean; force?: boolean; preflight?: boolean; apply?: boolean }>,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
+  if (options.apply === true) {
+    if (options.preflight !== true || options.queue !== true) usage("--apply requires --preflight and --queue")
+    if (options.revision !== undefined) {
+      usage("--apply computes the current revision; it cannot combine with --revision")
+    }
+    if (options.force === true) usage("--apply computes whether force is safe; it cannot combine with --force")
+  }
   const pr = requiredPr(app, selector)
   const selectedRevision = options.revision ?? currentPRRev(pr).n
   const selected = pr.revs.find((revision) => revision.n === selectedRevision)
@@ -3343,8 +3351,34 @@ async function recutPr(
     if (freshness.status === "tracked-drift") await recordTrackedRevision(app, pr, freshness, io)
   }
   if (options.preflight === true) {
-    await preflightRecut(app, selector, options, io)
-    return 0
+    const preflight = await preflightRecut(
+      app,
+      selector,
+      options,
+      options.apply === true ? { ...io, stdout: () => undefined } : io,
+    )
+    if (options.apply !== true) return 0
+    await applyPreflightVerdict(app, services, preflight, io)
+    const current = requiredPr(app, selector)
+    const revision = currentPRRev(current)
+    const delivery = prDeliveryState(current)
+    await printResult(
+      io,
+      jsonEnabled(options),
+      {
+        command: "pr.recut.apply",
+        pr: current.id,
+        verdict: preflight.verdict,
+        executed: preflight.next,
+        result: { revision: revision.n, headSha: revision.head, delivery },
+      },
+      [
+        `${preflight.verdict} ${current.id} r${preflight.revision}`,
+        `executed: ${preflight.next}`,
+        `result: ${current.id} r${revision.n} ${revision.head} (${delivery})`,
+      ].join("\n"),
+    )
+    return delivery === "needs-author" ? 1 : 0
   }
   const outcome = await executeRecutPr(app, services, selector, options, io)
   const revision = prRevisionNumber(outcome.current)
@@ -7437,8 +7471,8 @@ async function applyRefusalRemedy(
       await executeRecutPr(app, services, step.pr, { queue: step.queue, force: step.force, admit: false }, io)
       continue
     }
-    // "…and run its exact next command on that same PR" — the third command of
-    // the printed drill, the one a human had to read off the terminal.
+    // The printed `--apply` command executes this exact verdict in-process, so
+    // a human and the resident both consume the same preflight decision.
     const preflight = await preflightRecut(app, step.pr, { queue: step.queue }, io)
     commands.push(preflight.next)
     await applyPreflightVerdict(app, services, preflight, io)
@@ -8512,8 +8546,8 @@ function addAuthoredCarrierWorkflow<
   command.addHelpSection("Authored root branch:", [
     [`$ ${name} pr create <branch>`, "record the authored root branch as a draft merge request"],
     [
-      `$ ${name} pr recut <PR> --preflight --queue`,
-      "classify from pinned evidence, then run the exact next command; no composition manifest or manual triage",
+      `$ ${name} pr recut <PR> --preflight --queue --apply`,
+      "classify from pinned evidence and execute its queue-safe verdict; no composition manifest or manual triage",
     ],
   ])
 }
@@ -9091,6 +9125,7 @@ function buildProgram(
     .description("recut a merge request revision onto the current base")
     .option("--revision <number>", "select an older immutable PR revision", int)
     .option("--preflight", "classify recut, withdraw, force, or no-op without changing anything")
+    .option("--apply", "execute the regenerative verdict computed by --preflight")
     .option("--queue", "submit the fresh revision and request its configured checks")
     .option("--force", "recut even when the current revision already passed its checks")
     .option("--json", "emit stable JSON")

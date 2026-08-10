@@ -239,7 +239,7 @@ describe("compose candidate isolation — one poisoned candidate never aborts th
       pr: poisoned.id,
       receipt: {
         code: "queue-submit-authority-consumed",
-        message: expect.stringContaining(`yrd pr recut ${poisoned.id} --preflight --queue`),
+        message: expect.stringContaining(`yrd pr recut ${poisoned.id} --preflight --queue --apply`),
       },
     })
     expect(app.state().bays.prs[poisoned.id]).toMatchObject({

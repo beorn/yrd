@@ -72,7 +72,7 @@ describe("actionable failure projection", () => {
     expect(actionableFailure(AUTHORED_GITLINK, { delivery: "pushed" })).toEqual({
       code: "authored-gitlink",
       cause: "PR 'PR42' changes generated-only gitlinks [vendor/yrd]",
-      resolution: ["yrd pr create <branch>", "yrd pr recut PR42 --preflight --queue"],
+      resolution: ["yrd pr create <branch>", "yrd pr recut PR42 --preflight --queue --apply"],
       reference: "README.md#pr-eligibility-and-checks",
     } satisfies ActionableFailure)
   })
@@ -84,13 +84,13 @@ describe("actionable failure projection", () => {
         "yrd: merge request 'PR42' root branch tip 'deadbeef' is a merge commit with 2 parents; " +
         "merge inside the affected component repository, fast-forward that component's main, rebuild the root " +
         "carrier as one linear pin-bump commit, then run 'yrd pr submit <branch>' and " +
-        "'yrd pr recut PR42 --preflight --queue'",
+        "'yrd pr recut PR42 --preflight --queue --apply'",
     })
 
     expect(failure).toMatchObject({
       code: "merge-tip-carrier",
       cause: expect.stringMatching(/merge inside.*component.*linear pin-bump/iu),
-      resolution: ["yrd pr submit <branch>", "yrd pr recut PR42 --preflight --queue"],
+      resolution: ["yrd pr submit <branch>", "yrd pr recut PR42 --preflight --queue --apply"],
     })
   })
 
@@ -170,7 +170,7 @@ describe("22396 — state-aware remedies", () => {
   it("sends an already-submitted authored-gitlink PR directly to recut", () => {
     const failure = actionableFailure(AUTHORED_GITLINK, { delivery: "submitted" })
 
-    expect(failure.resolution).toEqual(["yrd pr recut PR42 --preflight --queue"])
+    expect(failure.resolution).toEqual(["yrd pr recut PR42 --preflight --queue --apply"])
   })
 
   it("drops the recut step for a terminal PR that cannot be recut", () => {
@@ -184,7 +184,7 @@ describe("22396 — state-aware remedies", () => {
     // commands every state accepts — `create` is not one of them.
     expect(actionableFailure(AUTHORED_GITLINK).resolution).toEqual([
       "yrd pr submit <branch>",
-      "yrd pr recut PR42 --preflight --queue",
+      "yrd pr recut PR42 --preflight --queue --apply",
     ])
   })
 
@@ -204,7 +204,7 @@ describe("22396 — state-aware remedies", () => {
       "git -C vendor/yrd push -u origin HEAD",
       'git add vendor/yrd && git commit -m "fix(yrd): compose vendor/yrd pins"',
       "yrd pr submit <branch>",
-      "yrd pr recut PR77 --preflight --queue",
+      "yrd pr recut PR77 --preflight --queue --apply",
     ])
     expect(failure.reference).toBe("README.md#resolving-divergent-gitlink-pins")
   })
@@ -234,11 +234,14 @@ describe("22396 — state-aware remedies", () => {
 
     const detail = prDetailData(pr, [run])
     const projected = detail.runs[0]
-    expect(projected?.failure?.resolution).toEqual(["yrd pr recut PR42 --preflight --queue"])
+    expect(projected?.failure?.resolution).toEqual(["yrd pr recut PR42 --preflight --queue --apply"])
     expect(projected?.steps[0]?.failure?.resolution).toEqual(projected?.failure?.resolution)
 
     const draft = queueShowData(run, [], [], undefined, "pushed")
-    expect(draft.failure?.resolution).toEqual(["yrd pr create <branch>", "yrd pr recut PR42 --preflight --queue"])
+    expect(draft.failure?.resolution).toEqual([
+      "yrd pr create <branch>",
+      "yrd pr recut PR42 --preflight --queue --apply",
+    ])
   })
 })
 
@@ -265,7 +268,7 @@ describe("actionable failure output", () => {
       [
         "error: PR 'PR42' changes generated-only gitlinks [vendor/yrd]",
         "resolve: yrd pr submit <branch>",
-        "resolve: yrd pr recut PR42 --preflight --queue",
+        "resolve: yrd pr recut PR42 --preflight --queue --apply",
         "reference: README.md#pr-eligibility-and-checks",
         "",
       ].join("\n"),
@@ -338,7 +341,7 @@ describe("actionable failure output", () => {
     expect(data.failure).toMatchObject({
       code: "authored-gitlink",
       cause: "PR 'PR42' changes generated-only gitlinks [vendor/yrd]",
-      resolution: ["yrd pr submit <branch>", "yrd pr recut PR42 --preflight --queue"],
+      resolution: ["yrd pr submit <branch>", "yrd pr recut PR42 --preflight --queue --apply"],
     })
     expect(data.steps[0]?.failure).toEqual(data.failure)
 
@@ -352,7 +355,7 @@ describe("actionable failure output", () => {
       expect(output).toContain("CAUSE")
       expect(output).toContain("PR 'PR42' changes generated-only gitlinks [vendor/yrd]")
       expect(output).toContain("RESOLVE")
-      expect(output).toContain("yrd pr recut PR42 --preflight --queue")
+      expect(output).toContain("yrd pr recut PR42 --preflight --queue --apply")
       expect(output).toContain("REFERENCE README.md#pr-eligibility-and-checks")
       if (!compact) {
         expect(output.split("\n").find((row) => row.trimStart().startsWith("merge"))).toContain("err=authored-gitlink")

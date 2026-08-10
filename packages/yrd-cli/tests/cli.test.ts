@@ -1735,12 +1735,13 @@ describe("runYrd", () => {
     expect(help.stdout()).toContain("Usage: yrd mr recut [options] <selector>")
     expect(help.stdout()).toContain("--revision <number>")
     expect(help.stdout()).toContain("--preflight")
+    expect(help.stdout()).toContain("--apply")
     expect(help.stdout()).toContain("--queue")
     expect(help.stdout()).toContain("--json")
     expect(help.stdout()).toContain("Authored root branch")
     expect(help.stdout()).toContain("$ yrd pr create <branch>")
-    expect(help.stdout()).toContain("$ yrd pr recut <PR> --preflight --queue")
-    expect(help.stdout()).toMatch(/no\s+composition\s+manifest or manual triage/u)
+    expect(help.stdout()).toContain("$ yrd pr recut <PR> --preflight --queue --apply")
+    expect(help.stdout()).toMatch(/no\s+composition\s+manifest\s+or\s+manual\s+triage/u)
   })
 
   it("creates an authored carrier draft and queues a recut revision on the same PR", async () => {
@@ -5453,7 +5454,7 @@ describe("runYrd", () => {
     const text = stripAnsi(recovery.stdout())
     expect(text).not.toContain("Queue idle")
     expect(text).toContain("authored-gitlink")
-    expect(text).toContain("yrd pr recut PR1 --preflight --queue")
+    expect(text).toContain("yrd pr recut PR1 --preflight --queue --apply")
   })
 
   it("makes a same-head base refresh with zero runs actionable instead of reporting queue idle", async () => {
@@ -5502,7 +5503,7 @@ describe("runYrd", () => {
 
     expect(once.stdout()).not.toContain("Queue idle")
     expect(once.stdout()).toContain("carrier-drops-landed")
-    expect(once.stdout()).toContain("yrd pr recut PR1 --preflight --queue")
+    expect(once.stdout()).toContain("yrd pr recut PR1 --preflight --queue --apply")
 
     const json = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), json.io), json.stderr()).toBe(0)
@@ -5515,7 +5516,7 @@ describe("runYrd", () => {
           eligibility: {
             reason: {
               code: "admission-refused",
-              message: expect.stringContaining("yrd pr recut PR1 --preflight --queue"),
+              message: expect.stringContaining("yrd pr recut PR1 --preflight --queue --apply"),
             },
           },
         },
