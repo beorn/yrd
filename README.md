@@ -481,8 +481,8 @@ yrd pr list [--base <branch>] [--state <state>] [--issue <ref>]
   [--needs-review [--reviewer <reviewer>]] [--json]
 yrd pr edit <selector> [--issue <ref>] [--note <text>]
   [--title <text>] [--description <text>] [--track | --untrack] [--json]
-yrd pr recut <selector> [--revision <number>] [--preflight] [--apply] [--queue]
-  [--force] [--json]
+yrd pr recut <selector> [--revision <number> | --ref <candidate>] [--preflight]
+  [--apply] [--queue] [--force] [--json]
 yrd pr ready <selector> [--json]
 yrd pr review <selector> (--approve | --reject)
   [--by <identity>] [--ref <id>] [--note <text>] [--json]
@@ -544,16 +544,25 @@ process tree to certify, and it atomically creates or verifies a preservation
 ref for any recorded head before closing. This is the terminal recovery for a
 pathless Bay; creating an extra anonymous Bay is not required.
 
-`pr recut` fetches the authoritative base internally and records a mechanically
-equivalent, certificate-bearing successor on the same PR. `--revision` selects
-an older immutable revision; its correlation and approved-review provenance
-follow that selected payload. When submission recorded authority newer than
-the source branch, recut derives exactly one source merge base and refuses
-ambiguous lineage. A pin-only carrier that already has the authoritative parent
-still receives a successor revision with the derived patch/tree certificate.
-`--queue` readies only that certified revision and requests fresh checks. List,
-detail, and watch output retain the recut lineage and cumulative source-ready
-age while reporting the successor revision's queue wait separately.
+`pr recut --ref <candidate>` is certification, not replay. The CLI resolves the
+ref once, passes only that immutable SHA to Queue, and records it directly as
+revision N+1 when its non-gitlink tree delta is identical to the approved
+change-set. The exact current revision must still be approved. Missing commits,
+dropped or extra paths, changed blob/mode/status identity, and added, modified,
+or deleted gitlinks are typed per-candidate refusals before any journal or Git
+mutation. A changed gitlink is an intent submission, never a code-carrier
+recut. `--ref` cannot combine with `--revision`.
+
+Without `--ref`, `pr recut` retains the ordinary mechanical base-refresh path:
+it fetches the authoritative base and records an equivalent,
+certificate-bearing successor on the same PR. `--revision` selects an older
+immutable revision; its correlation and approved-review provenance follow that
+selected payload. When submission recorded authority newer than the source
+branch, recut derives exactly one source merge base and refuses ambiguous
+lineage. `--queue` readies only the certified revision and requests fresh
+checks. List, detail, and watch output retain the recut lineage and cumulative
+source-ready age while reporting the successor revision's queue wait
+separately.
 
 An implicit PR-id recut is reproducible, not "whatever is on the branch now."
 Before either preflight or mutation, Yrd refreshes that exact branch from

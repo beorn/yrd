@@ -477,12 +477,17 @@ export const PRRecutSourceSchema = z
   .readonly()
 export type PRRecutSource = Readonly<z.infer<typeof PRRecutSourceSchema>>
 
+export const PRRecutCertificateSchema = z.literal("frozen-code-carrier-v1")
+
 export const PRRecutProofSchema = z
   .object({
     fromRevision: z.number().int().positive(),
     patchId: GitShaSchema,
     treeSha: GitShaSchema,
     reviewCarried: z.boolean(),
+    /** Explicit proof contract for a frozen proposed code carrier. Mechanical
+     * base-refresh recuts and legacy journal rows use their existing proof. */
+    certificate: PRRecutCertificateSchema.optional(),
     /** Durable non-ancestral identity mapping for the root and any rewritten
      * component heads. Missing only while replaying pre-provenance journals. */
     sources: z.array(PRRecutSourceSchema).min(1).readonly().optional(),
@@ -507,18 +512,26 @@ export type PRRev = Readonly<{
 }> &
   PRRevClock
 
-export type PRReviewDecision = "approve" | "reject"
+export const PRReviewDecisionSchema = z.enum(["approve", "reject"])
+export type PRReviewDecision = z.infer<typeof PRReviewDecisionSchema>
 
-export type PRReview = Readonly<{
-  revision: number
-  headSha: string
-  by: string
-  decision: PRReviewDecision
-  at: string
-  ref?: string
-  note?: string
-  carriedFrom?: Readonly<{ revision: number; headSha: string }>
-}>
+export const PRReviewSchema = z
+  .object({
+    revision: z.number().int().positive(),
+    headSha: GitShaSchema,
+    by: TextSchema,
+    decision: PRReviewDecisionSchema,
+    at: z.iso.datetime({ offset: true }),
+    ref: TextSchema.optional(),
+    note: TextSchema.optional(),
+    carriedFrom: z
+      .object({ revision: z.number().int().positive(), headSha: GitShaSchema })
+      .strict()
+      .readonly()
+      .optional(),
+  })
+  .strict()
+export type PRReview = Readonly<z.infer<typeof PRReviewSchema>>
 
 export type PRComment = Readonly<{
   revision: number

@@ -896,11 +896,16 @@ const GIT_TIMEOUT_MS = 120_000
  * sites (worktree remove) stay self-documenting and independently tunable. */
 const GIT_CLEANUP_TIMEOUT_MS = 120_000
 
-function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv = globalThis.process.env) {
+function createGit(
+  process: Pick<Process, "run">,
+  environment: NodeJS.ProcessEnv = globalThis.process.env,
+  options: Readonly<{ noLazyFetch?: boolean }> = {},
+) {
   const env = Object.fromEntries(
     Object.entries(environment).filter(([key, value]) => value !== undefined && !key.startsWith("GIT_")),
   ) as Record<string, string>
   env.GIT_NO_REPLACE_OBJECTS = "1"
+  if (options.noLazyFetch === true) env.GIT_NO_LAZY_FETCH = "1"
   env.KM_NO_AUTO_SUBMODULE_UPDATE = "1"
   const execute = async (
     repo: string,
@@ -1077,6 +1082,8 @@ export type GitQueueTarget = Readonly<{
 
 export type PRRecutInput = PRSnapshot &
   Readonly<{
+    /** CLI-resolved immutable code-carrier candidate. Queue never resolves a symbolic proposal ref. */
+    proposedHeadSha?: string
     /** Same-issue source integrations already present on the authoritative root history, newest first. */
     currentCompositions?: readonly NonNullable<PRSnapshot["composition"]>[]
     current?: Readonly<{
@@ -1132,6 +1139,17 @@ export function createGitPRRecutter(options: {
 }
 
 async function recutPR(git: Git, repo: string, input: PRRecutInput): Promise<PRRecutResult> {
+  if (input.proposedHeadSha !== undefined) {
+    const certificateGit = createGit(git.process, git.env, { noLazyFetch: true })
+    const target = await inspectLiveQueueBase(certificateGit, repo, input.base)
+    if (target.diverged) {
+      throw codeCarrierRefusal(
+        "queue-environment-refused",
+        `local '${target.branchRef}' and authoritative 'refs/remotes/origin/${target.branch}' differ; refresh or reconcile the target before certifying PR '${input.id}'`,
+      )
+    }
+    return certifyProposedCodeCarrier(certificateGit, repo, target, input, input.proposedHeadSha)
+  }
   const target = await authoritativeQueueBase(git, repo, input.base)
   const current = input.current
   // An already-landed direct revision delivers nothing beyond the base, so its
@@ -1223,6 +1241,162 @@ async function recutPR(git: Git, repo: string, input: PRRecutInput): Promise<PRR
       ? outcome.error.message
       : (outcome.detail ?? outcome.token)
   throw createFailure({ kind: "infrastructure", code: "recut-scratch-failed", message: `yrd: ${message}` })
+}
+
+type RawPayload = Readonly<{ identity: string; paths: readonly string[]; gitlinks: readonly string[] }>
+
+async function rawPayload(git: Git, repo: string, from: string, to: string): Promise<RawPayload> {
+  const identity = await changedPayloadIdentity(git, repo, from, to)
+  const fields = identity.split("\0")
+  const paths: string[] = []
+  const gitlinks: string[] = []
+  for (let index = 0; index + 1 < fields.length; index += 2) {
+    const header = fields[index]
+    const path = fields[index + 1]
+    if (header === undefined || header === "" || path === undefined || path === "") continue
+    const match = /^:([0-7]{6}) ([0-7]{6}) [0-9a-f]{40,64} [0-9a-f]{40,64} [A-Z]$/u.exec(header)
+    if (match?.[1] === undefined || match[2] === undefined) {
+      throw new Error(`yrd: git diff --raw emitted an invalid record '${header}'`)
+    }
+    paths.push(path)
+    if (match[1] === "160000" || match[2] === "160000") gitlinks.push(path)
+  }
+  return { identity, paths: paths.toSorted(), gitlinks: gitlinks.toSorted() }
+}
+
+type FrozenCarrierRange = Readonly<{ baseSha: string; headSha: string }>
+type FrozenCarrierFailure = Readonly<{
+  kind: "commit-missing" | "lineage" | "gitlinks" | "drop" | "extra" | "identity" | "patch-id" | "tree"
+  range?: "source" | "candidate"
+  endpoint?: "base" | "head"
+  sha?: string
+  paths?: readonly string[]
+}>
+type FrozenCarrierProof = Readonly<{ treeSha: string; patchId: string }>
+
+async function deriveFrozenCodeCarrier(
+  git: Git,
+  repo: string,
+  source: FrozenCarrierRange,
+  candidate: FrozenCarrierRange,
+): Promise<FrozenCarrierProof | FrozenCarrierFailure> {
+  for (const [range, endpoint, sha] of [
+    ["source", "base", source.baseSha],
+    ["source", "head", source.headSha],
+    ["candidate", "base", candidate.baseSha],
+    ["candidate", "head", candidate.headSha],
+  ] as const) {
+    if ((await git.optionalCommit(repo, sha)) !== sha) return { kind: "commit-missing", range, endpoint, sha }
+  }
+  for (const [range, { baseSha, headSha }] of [
+    ["source", source],
+    ["candidate", candidate],
+  ] as const) {
+    if (!(await isAncestor(git, repo, baseSha, headSha))) return { kind: "lineage", range }
+  }
+  const [sourcePayload, candidatePayload] = await Promise.all([
+    rawPayload(git, repo, source.baseSha, source.headSha),
+    rawPayload(git, repo, candidate.baseSha, candidate.headSha),
+  ])
+  const gitlinks = [...new Set([...sourcePayload.gitlinks, ...candidatePayload.gitlinks])].toSorted()
+  if (gitlinks.length > 0) return { kind: "gitlinks", paths: gitlinks }
+  const candidatePaths = new Set(candidatePayload.paths)
+  const sourcePaths = new Set(sourcePayload.paths)
+  const dropped = sourcePayload.paths.filter((path) => !candidatePaths.has(path))
+  if (dropped.length > 0) return { kind: "drop", paths: dropped }
+  const extra = candidatePayload.paths.filter((path) => !sourcePaths.has(path))
+  if (extra.length > 0) return { kind: "extra", paths: extra }
+  if (sourcePayload.identity !== candidatePayload.identity) return { kind: "identity" }
+  const patchId = await git.stablePatchId(repo, source.baseSha, source.headSha)
+  if (patchId === undefined) return { kind: "patch-id" }
+  const tree = await git.run(repo, ["rev-parse", `${candidate.headSha}^{tree}`], true)
+  return tree.code === 0 ? { treeSha: tree.stdout, patchId } : { kind: "tree" }
+}
+
+function codeCarrierRefusal(code: string, message: string): YrdFailure {
+  return createFailure({ kind: "refusal", code, message: `yrd: ${message}` })
+}
+
+async function certifyProposedCodeCarrier(
+  git: Git,
+  repo: string,
+  target: GitQueueTarget,
+  input: PRRecutInput,
+  proposedHeadSha: string,
+): Promise<PRRecutResult> {
+  const sourceBaseSha = input.baseSha
+  if (sourceBaseSha === undefined) {
+    throw codeCarrierRefusal(
+      "recut-base-missing",
+      `PR '${input.id}' revision ${input.revision} has no immutable source base SHA`,
+    )
+  }
+  const proof = await deriveFrozenCodeCarrier(
+    git,
+    repo,
+    { baseSha: sourceBaseSha, headSha: input.headSha },
+    { baseSha: target.sha, headSha: proposedHeadSha },
+  )
+  if ("kind" in proof) {
+    const paths = proof.paths ?? []
+    if (proof.kind === "commit-missing") {
+      if (proof.range === "candidate") {
+        throw codeCarrierRefusal(
+          "proposed-commit-missing",
+          `PR '${input.id}' proposed commit '${proposedHeadSha}' is missing`,
+        )
+      }
+      throw codeCarrierRefusal(
+        "recut-source-missing",
+        `PR '${input.id}' source ${String(proof.endpoint)} '${String(proof.sha)}' is missing`,
+      )
+    }
+    if (proof.kind === "lineage") {
+      throw proof.range === "candidate"
+        ? codeCarrierRefusal(
+            "carrier-drops-landed",
+            `PR '${input.id}' proposed commit '${proposedHeadSha}' does not contain authoritative target '${target.sha}'`,
+          )
+        : codeCarrierRefusal(
+            "recut-lineage",
+            `PR '${input.id}' source base '${sourceBaseSha}' is not an ancestor of source head '${input.headSha}'`,
+          )
+    }
+    if (proof.kind === "gitlinks") {
+      throw codeCarrierRefusal(
+        "authored-gitlink",
+        `PR '${input.id}' proposed commit '${proposedHeadSha}' changes generated-only gitlinks [${paths.join(", ")}]`,
+      )
+    }
+    if (proof.kind === "drop" || proof.kind === "extra") {
+      throw codeCarrierRefusal(
+        `recut-certification-${proof.kind}`,
+        `PR '${input.id}' proposed commit '${proposedHeadSha}' ${proof.kind === "drop" ? "drops approved" : "adds unapproved"} paths [${paths.join(", ")}]`,
+      )
+    }
+    if (proof.kind === "identity") {
+      throw codeCarrierRefusal(
+        "recut-certification-corrupt",
+        `PR '${input.id}' proposed commit '${proposedHeadSha}' changes approved path, mode, blob, or status identity`,
+      )
+    }
+    if (proof.kind === "patch-id") {
+      throw codeCarrierRefusal(
+        "payload-certificate",
+        `PR '${input.id}' revision ${input.revision} has no stable patch identity`,
+      )
+    }
+    throw new Error(`yrd: proposed commit '${proposedHeadSha}' has no readable tree`)
+  }
+  const current = input.current
+  const unchanged =
+    current !== undefined &&
+    (current.revision === input.revision || current.fromRevision === input.revision) &&
+    current.headSha === proposedHeadSha &&
+    current.baseSha === target.sha &&
+    current.treeSha === proof.treeSha &&
+    current.patchId === proof.patchId
+  return { headSha: proposedHeadSha, baseSha: target.sha, ...proof, unchanged }
 }
 
 type SourceOnlyCarrierComposition = Readonly<{
@@ -1882,6 +2056,29 @@ async function inspectQueueBase(git: Git, repo: string, branch: string): Promise
   throw new Error(`yrd: merge-queue base '${branch}' does not resolve as '${branchRef}' or '${sourceRef}'`)
 }
 
+async function inspectLiveQueueBase(git: Git, repo: string, branch: string): Promise<GitQueueTarget> {
+  const cached = await inspectQueueBase(git, repo, branch)
+  const configuredRemote = await git.run(repo, ["config", "--get", "remote.origin.url"], true)
+  if (configuredRemote.code !== 0 || configuredRemote.stdout === "") return cached
+
+  const sourceRef = `refs/heads/${branch}`
+  const inspected = await git.run(repo, ["ls-remote", "--exit-code", "origin", sourceRef], true)
+  const live = /^([0-9a-f]{40,64})\s+refs\/heads\/.+$/iu.exec(inspected.stdout)?.[1]
+  if (inspected.code !== 0 || live === undefined) {
+    throw codeCarrierRefusal(
+      "queue-environment-refused",
+      `live 'origin/${branch}' could not be proved without mutating the repository`,
+    )
+  }
+  if (cached.remoteSha !== live || (cached.localSha !== undefined && cached.localSha !== live)) {
+    throw codeCarrierRefusal(
+      "queue-environment-refused",
+      `live 'origin/${branch}' is '${live}', but local/cached target refs do not both resolve to that SHA; refresh or reconcile the target before certifying`,
+    )
+  }
+  return { ...cached, sha: live, remote: "origin", remoteSha: live, diverged: false }
+}
+
 export async function inspectGitQueueTarget(options: {
   inject: Readonly<{ process: Pick<Process, "run"> }>
   repo: string
@@ -2021,31 +2218,30 @@ async function prepareCandidate(
       }
       const mergeTip = await mergeTipCarrierFailure(git, path, pr.id, pr.headSha, "HEAD")
       if (mergeTip !== undefined) return mergeTip
+      if (pr.recut?.certificate === "frozen-code-carrier-v1") {
+        const certified = await verifyRecutCertificate(git, path, pr)
+        if (certified !== undefined) return certified
+      }
       // A post-landing actuator retry carries the same immutable PR snapshot
       // against a base that already contains it. Re-checking its recut patch
       // against itself produces an empty patch and a false certificate drift.
       // Source-only compositions are excluded: their root head intentionally
       // equals the base while their component payload still needs applying.
-      if (await isAncestor(git, path, pr.headSha, "HEAD")) continue
+      if (await isAncestor(git, path, pr.headSha, "HEAD")) {
+        continue
+      }
     }
     if (refuse !== undefined && refuse.paths.length > 0) {
       const inspected = await refusedPayloadPaths(git, path, pr.headSha, refuse.paths)
       if (inspected.status === "failed") return inspected
       if (inspected.output.length > 0) {
-        const exception = await stateDecommissionException(git, path, pr.issue, pr.headSha, inspected.output, refuse)
-        if (exception.status !== "passed") {
-          const shown = inspected.output.slice(0, 8).join(", ") + (inspected.output.length > 8 ? ", …" : "")
-          return candidateFailure(
-            "refused-path",
-            exception.status === "failed"
-              ? `PR '${pr.id}' state-decommission-v1 refusal: ${exception.message}`
-              : `PR '${pr.id}' touches refused path(s) [${shown}]${
-                  refuse.reason === undefined ? "" : `; ${refuse.reason}`
-                }`,
-            ".",
-            inspected.output,
-          )
-        }
+        const shown = inspected.output.slice(0, 8).join(", ") + (inspected.output.length > 8 ? ", …" : "")
+        return candidateFailure(
+          "refused-path",
+          `PR '${pr.id}' touches refused path(s) [${shown}]${refuse.reason === undefined ? "" : `; ${refuse.reason}`}`,
+          ".",
+          inspected.output,
+        )
       }
     }
     if (pr.composition !== undefined) {
@@ -2062,7 +2258,7 @@ async function prepareCandidate(
       sourceRewrites.push(...composed.output)
       continue
     }
-    if (pr.recut !== undefined) {
+    if (pr.recut !== undefined && pr.recut.certificate !== "frozen-code-carrier-v1") {
       const certified = await verifyRecutCertificate(git, path, pr)
       if (certified !== undefined) return certified
     } else {
@@ -2319,31 +2515,38 @@ async function recutBaseMovement(git: Git, repo: string, pr: StepExecution["prs"
   return { status: "moved", moved: true, baseSha, head }
 }
 
-/**
- * Re-derive the reviewed change onto the current candidate HEAD without mutating the
- * worktree, and return its stable patch identity. `merge-tree --write-tree HEAD headSha`
- * performs the three-way merge whose merge base is the reviewed base — this IS the
- * mechanical rebase of the reviewed revision onto the advanced base. On a clean merge we
- * hash the diff HEAD..<recomposed tree>, mirroring how the fast path hashes baseSha..headSha.
- * A merge conflict (the base move touched the reviewed rows) or an unresolvable tree yields
- * `undefined`, which the caller treats as genuine drift requiring a human recut.
- */
-async function rederiveRecutPatchId(git: Git, repo: string, headSha: string): Promise<string | undefined> {
-  const merged = await git.run(repo, ["merge-tree", "--write-tree", "HEAD", headSha], true)
-  if (merged.code !== 0) return undefined
-  const tree = merged.stdout.split("\n")[0]?.trim()
-  if (tree === undefined || !/^[0-9a-f]{40,64}$/iu.test(tree)) return undefined
-  return git.stablePatchId(repo, "HEAD", tree)
-}
-
 async function verifyRecutCertificate(
   git: Git,
   repo: string,
   pr: StepExecution["prs"][number],
 ): Promise<CandidateFailure | undefined> {
   if (pr.recut === undefined) return undefined
-  // The reviewed head is immutable: its tree must be the tree that was recut, independent
-  // of where the base sits. A mismatch is genuine certificate corruption, not a base move.
+  const sourceBaseSha = pr.recut.sourceBaseSha
+  const sourceHeadSha = pr.recut.sourceHeadSha
+  if (pr.recut.certificate === undefined && sourceBaseSha === undefined && sourceHeadSha === undefined) {
+    return verifyLegacyRecutCertificate(git, repo, pr)
+  }
+  if (pr.recut.certificate !== "frozen-code-carrier-v1" || sourceBaseSha === undefined || sourceHeadSha === undefined) {
+    return candidateFailure(
+      "recut-certificate",
+      `PR '${pr.id}' recut revision ${pr.revision} has no complete immutable source range`,
+    )
+  }
+  return verifyFrozenCodeCarrierCertificate(
+    createGit(git.process, git.env, { noLazyFetch: true }),
+    repo,
+    pr,
+    sourceBaseSha,
+    sourceHeadSha,
+  )
+}
+
+async function verifyLegacyRecutCertificate(
+  git: Git,
+  repo: string,
+  pr: StepExecution["prs"][number],
+): Promise<CandidateFailure | undefined> {
+  if (pr.recut === undefined) return undefined
   const treeSha = (await git.run(repo, ["rev-parse", `${pr.headSha}^{tree}`], true)).stdout
   if (treeSha !== pr.recut.treeSha) {
     return candidateFailure(
@@ -2354,20 +2557,14 @@ async function verifyRecutCertificate(
   const movement = await recutBaseMovement(git, repo, pr)
   if (movement.status === "failed") return movement
   if (!movement.moved) {
-    // Fast path: base unchanged — the reviewed diff must hash to the recorded patch id.
     const patchId = await git.stablePatchId(repo, movement.baseSha, pr.headSha)
-    if (patchId !== pr.recut.patchId) {
-      return candidateFailure(
-        "recut-certificate",
-        `PR '${pr.id}' recut patch certificate does not match revision ${pr.revision}`,
-      )
-    }
-    return undefined
+    return patchId === pr.recut.patchId
+      ? undefined
+      : candidateFailure(
+          "recut-certificate",
+          `PR '${pr.id}' recut patch certificate does not match revision ${pr.revision}`,
+        )
   }
-  // Base advanced: mechanically re-anchor the reviewed change onto the current base and
-  // accept iff its patch identity is unchanged — the reviewed change survived byte-identical,
-  // just re-based. Any difference (conflict or content drift) is a genuine change needing a
-  // human recut, and stays a recut-certificate refusal exactly as before.
   const rederived = await rederiveRecutPatchId(git, repo, pr.headSha)
   if (rederived === undefined) {
     return candidateFailure(
@@ -2375,13 +2572,98 @@ async function verifyRecutCertificate(
       `PR '${pr.id}' recut could not be mechanically re-anchored onto the advanced base for revision ${pr.revision}`,
     )
   }
-  if (rederived !== pr.recut.patchId) {
+  return rederived === pr.recut.patchId
+    ? undefined
+    : candidateFailure(
+        "recut-certificate",
+        `PR '${pr.id}' recut change did not survive the advanced base for revision ${pr.revision}`,
+      )
+}
+
+async function rederiveRecutPatchId(git: Git, repo: string, headSha: string): Promise<string | undefined> {
+  const merged = await git.run(repo, ["merge-tree", "--write-tree", "HEAD", headSha], true)
+  if (merged.code !== 0) return undefined
+  const tree = merged.stdout.split("\n")[0]?.trim()
+  if (tree === undefined || !/^[0-9a-f]{40,64}$/iu.test(tree)) return undefined
+  return git.stablePatchId(repo, "HEAD", tree)
+}
+
+async function verifyFrozenCodeCarrierCertificate(
+  git: Git,
+  repo: string,
+  pr: StepExecution["prs"][number],
+  sourceBaseSha: string,
+  sourceHeadSha: string,
+): Promise<CandidateFailure | undefined> {
+  const recut = pr.recut
+  if (recut === undefined) return undefined
+  const candidateBaseSha = recut.baseSha
+  if (candidateBaseSha === undefined) {
     return candidateFailure(
       "recut-certificate",
-      `PR '${pr.id}' recut change did not survive the advanced base for revision ${pr.revision}`,
+      `PR '${pr.id}' recut revision ${pr.revision} has no immutable candidate base`,
     )
   }
-  return undefined
+  const proof = await deriveFrozenCodeCarrier(
+    git,
+    repo,
+    { baseSha: sourceBaseSha, headSha: sourceHeadSha },
+    { baseSha: candidateBaseSha, headSha: pr.headSha },
+  )
+  if ("kind" in proof) {
+    if (proof.kind === "commit-missing") {
+      return candidateFailure(
+        "recut-certificate",
+        `PR '${pr.id}' recut ${String(proof.range)} ${String(proof.endpoint)} '${String(proof.sha)}' is missing for revision ${pr.revision}`,
+      )
+    }
+    if (proof.kind === "lineage") {
+      const range =
+        proof.range === "source"
+          ? { baseSha: sourceBaseSha, headSha: sourceHeadSha }
+          : { baseSha: candidateBaseSha, headSha: pr.headSha }
+      return candidateFailure(
+        "recut-certificate",
+        `PR '${pr.id}' recut ${String(proof.range)} base '${range.baseSha}' is not an ancestor of ${String(proof.range)} head '${range.headSha}'`,
+      )
+    }
+    if (proof.kind === "gitlinks") {
+      return candidateFailure(
+        "authored-gitlink",
+        `PR '${pr.id}' changes generated-only gitlinks [${(proof.paths ?? []).join(", ")}]`,
+        ".",
+        proof.paths,
+      )
+    }
+    if (proof.kind === "tree") {
+      return candidateFailure(
+        "recut-certificate",
+        `PR '${pr.id}' recut tree certificate does not match candidate revision ${pr.revision}`,
+      )
+    }
+    if (proof.kind === "patch-id") {
+      return candidateFailure(
+        "recut-certificate",
+        `PR '${pr.id}' recut patch certificate does not match immutable source revision ${pr.revision}`,
+      )
+    }
+    return candidateFailure(
+      "recut-certificate",
+      `PR '${pr.id}' recut source and candidate path, mode, blob, or status identities differ for revision ${pr.revision}`,
+    )
+  }
+  if (proof.treeSha !== recut.treeSha) {
+    return candidateFailure(
+      "recut-certificate",
+      `PR '${pr.id}' recut tree certificate does not match candidate revision ${pr.revision}`,
+    )
+  }
+  return proof.patchId === recut.patchId
+    ? undefined
+    : candidateFailure(
+        "recut-certificate",
+        `PR '${pr.id}' recut patch certificate does not match immutable source revision ${pr.revision}`,
+      )
 }
 
 async function verifyComposedRecutCertificate(
@@ -3681,170 +3963,15 @@ async function authoredGitlinkPaths(
   return { status: "passed", output: gitlinks }
 }
 
-export type StateDecommissionException = Readonly<{
-  kind: "state-decommission-v1"
-  issue: string
-  roots: readonly string[]
-  tombstone: string
-}>
-
 /** Refusal boundary for split-out path roots (e.g. pm state moved to a sibling
  * repo): a payload path is refused when it starts with any configured entry.
  * Entries are plain prefixes — "@" covers every top-level sigil root, "hub/"
  * covers that tree. Policy comes from trusted base config; absent config
- * disables. The sole exception is an exact, issue-bound tombstone migration
- * whose final shape is verified from Git objects and self-expires after landing. */
+ * disables. */
 export type RefusePathsPolicy = Readonly<{
   paths: readonly string[]
   reason?: string
-  exception?: StateDecommissionException
 }>
-
-export type StateDecommissionDisposition =
-  | Readonly<{ status: "not-applicable" }>
-  | Readonly<{ status: "passed" }>
-  | Readonly<{ status: "failed"; message: string }>
-
-export type StateDecommissionSnapshot = Readonly<{
-  paths: Readonly<Record<string, readonly string[]>>
-  contents: Readonly<Record<string, string | undefined>>
-  errors?: readonly string[]
-}>
-
-function containsRepoPath(root: string, path: string): boolean {
-  return root.endsWith(".md") ? path === root : path === root || path.startsWith(`${root}/`)
-}
-
-function validStateDecommissionRoot(root: string): boolean {
-  return (
-    root !== "" &&
-    !root.startsWith("/") &&
-    !root.includes("\\") &&
-    root.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..")
-  )
-}
-
-export function stateDecommissionTombstonePath(root: string): string {
-  return root.endsWith(".md") ? root : `${root}/README.md`
-}
-
-function exactStateDecommissionShape(
-  snapshot: StateDecommissionSnapshot,
-  exception: StateDecommissionException,
-): Readonly<{ exact: boolean; detail?: string }> {
-  if ((snapshot.errors?.length ?? 0) > 0) {
-    return { exact: false, detail: snapshot.errors?.join("; ") }
-  }
-  for (const root of exception.roots) {
-    const expected = stateDecommissionTombstonePath(root)
-    const paths = snapshot.paths[root] ?? []
-    if (!samePaths(paths, [expected])) {
-      return {
-        exact: false,
-        detail: `'${root}' must contain only '${expected}' (found ${paths.length === 0 ? "nothing" : paths.join(", ")})`,
-      }
-    }
-    if (snapshot.contents[expected] !== exception.tombstone) {
-      return { exact: false, detail: `tombstone '${expected}' does not match the trusted exact body` }
-    }
-  }
-  return { exact: true }
-}
-
-/** Shared pure validator used by both Queue admission and Tent handoff.
- * Callers collect base/candidate Git objects independently; the policy itself
- * must always come from trusted base authority. */
-export function validateStateDecommissionException(
-  input: Readonly<{
-    issue: string | undefined
-    refusedPaths: readonly string[]
-    policy: RefusePathsPolicy
-    base: StateDecommissionSnapshot
-    candidate: StateDecommissionSnapshot
-  }>,
-): StateDecommissionDisposition {
-  const { issue, refusedPaths, policy } = input
-  const exception = policy.exception
-  if (exception === undefined || issue !== exception.issue) return { status: "not-applicable" }
-  if (
-    exception.kind !== "state-decommission-v1" ||
-    exception.roots.length === 0 ||
-    new Set(exception.roots).size !== exception.roots.length ||
-    exception.roots.some((root) => !validStateDecommissionRoot(root))
-  ) {
-    return { status: "failed", message: "trusted exception has an invalid or duplicate root" }
-  }
-  const uncovered = exception.roots.filter(
-    (root) => !policy.paths.some((prefix) => stateDecommissionTombstonePath(root).startsWith(prefix)),
-  )
-  if (uncovered.length > 0) {
-    return {
-      status: "failed",
-      message: `trusted exception roots are outside refuse.paths: ${uncovered.join(", ")}`,
-    }
-  }
-  const unexpected = refusedPaths.filter((path) => !exception.roots.some((root) => containsRepoPath(root, path)))
-  if (unexpected.length > 0) {
-    return {
-      status: "failed",
-      message: `payload touches refused paths outside the trusted root set: ${unexpected.join(", ")}`,
-    }
-  }
-  const candidate = exactStateDecommissionShape(input.candidate, exception)
-  if (!candidate.exact) return { status: "failed", message: candidate.detail ?? "candidate tombstones are invalid" }
-  const base = exactStateDecommissionShape(input.base, exception)
-  if (base.exact) {
-    return {
-      status: "failed",
-      message: "the authoritative base is already tombstoned; this one-shot exception is expired",
-    }
-  }
-  return { status: "passed" }
-}
-
-async function collectStateDecommissionSnapshot(
-  git: Git,
-  repo: string,
-  ref: string,
-  exception: StateDecommissionException,
-): Promise<StateDecommissionSnapshot> {
-  const paths: Record<string, readonly string[]> = {}
-  const contents: Record<string, string | undefined> = {}
-  const errors: string[] = []
-  for (const root of exception.roots) {
-    const expected = stateDecommissionTombstonePath(root)
-    const listing = await git.run(repo, ["ls-tree", "-r", "--name-only", "-z", ref, "--", root], true)
-    if (listing.code !== 0) {
-      errors.push(`cannot inspect '${root}' at '${ref}': ${listing.stderr || listing.stdout}`)
-      continue
-    }
-    paths[root] = nulPaths(listing.stdout)
-    const content = await git.raw(repo, ["show", `${ref}:${expected}`], true)
-    contents[expected] = content.code === 0 ? content.stdout : undefined
-  }
-  return {
-    paths,
-    contents,
-    ...(errors.length === 0 ? {} : { errors }),
-  }
-}
-
-async function stateDecommissionException(
-  git: Git,
-  repo: string,
-  issue: string | undefined,
-  headSha: string,
-  refusedPaths: readonly string[],
-  policy: RefusePathsPolicy,
-): Promise<StateDecommissionDisposition> {
-  const exception = policy.exception
-  if (exception === undefined || issue !== exception.issue) return { status: "not-applicable" }
-  const [base, candidate] = await Promise.all([
-    collectStateDecommissionSnapshot(git, repo, "HEAD", exception),
-    collectStateDecommissionSnapshot(git, repo, headSha, exception),
-  ])
-  return validateStateDecommissionException({ issue, refusedPaths, policy, base, candidate })
-}
 
 async function refusedPayloadPaths(
   git: Git,

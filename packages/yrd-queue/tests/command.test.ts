@@ -5,7 +5,7 @@
  */
 import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
-import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -19,7 +19,7 @@ import {
   type BayWorkspace,
   type PR,
 } from "@yrd/bay"
-import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
+import { createMemoryJournal, createYrd, createYrdDef, failureFact, pipe } from "@yrd/core"
 import { withJobs } from "@yrd/job"
 import { withIntents } from "@yrd/intent"
 import { createProcess, shellCommand, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
@@ -37,10 +37,10 @@ import {
   gitCandidatePreparer,
   gitCheckStep,
   gitMergeStep,
+  inspectGitQueueTarget,
   synthesizePinIntentCarrier,
   PRSnapshotSchema,
   Queues,
-  validateStateDecommissionException,
   withQueue,
   withMerge,
   withStep,
@@ -100,6 +100,14 @@ async function git(repo: string, args: string[]): Promise<string> {
   ])
   if (code !== 0) throw new Error(stderr || stdout)
   return stdout.trim()
+}
+
+async function stablePatchId(repo: string, from: string, to: string): Promise<string> {
+  const output =
+    await Bun.$`git -C ${repo} diff --no-ext-diff --no-textconv --ignore-submodules=none --no-renames --full-index --binary ${from} ${to} | git -C ${repo} patch-id --stable`.text()
+  const patchId = /^([0-9a-f]{40,64})\s+[0-9a-f]{40,64}$/iu.exec(output.trim())?.[1]
+  if (patchId === undefined) throw new Error(`expected stable patch id for ${from}..${to}`)
+  return patchId
 }
 
 async function queueBaseSha(repo: string, base: string): Promise<string> {
@@ -478,6 +486,236 @@ async function directRecutBaseChaseRepository(): Promise<{ repo: string; baseSha
   return { repo, baseSha, featureSha }
 }
 
+type CodeCarrierProposalFixture = Readonly<{
+  repo: string
+  approvedBaseSha: string
+  approvedSha: string
+  currentBaseSha: string
+  exact: Readonly<{ ref: string; sha: string }>
+  drop: Readonly<{ ref: string; sha: string }>
+  extra: Readonly<{ ref: string; sha: string }>
+  corrupt: Readonly<{ ref: string; sha: string }>
+  whitespace: Readonly<{ ref: string; sha: string }>
+  mode: Readonly<{ ref: string; sha: string }>
+  symlink: Readonly<{ ref: string; sha: string }>
+  uncontained: Readonly<{ ref: string; sha: string }>
+  sibling: Readonly<{ ref: string; sha: string }>
+  repaired: Readonly<{ ref: string; sha: string }>
+  gitlinkAdd: Readonly<{ ref: string; sha: string }>
+  gitlinkModify: Readonly<{ ref: string; sha: string }>
+  gitlinkDelete: Readonly<{ ref: string; sha: string }>
+}>
+
+/** P1a proposals are independently authored carrier refs, not queue-generated
+ * replays. The approved range has two commits; every proposal has one. */
+async function codeCarrierProposalRepository(): Promise<CodeCarrierProposalFixture> {
+  const { repo } = await repository()
+  const initialSha = await git(repo, ["rev-parse", "main"])
+  await writeFile(
+    join(repo, ".gitmodules"),
+    [
+      '[submodule "dep"]',
+      "\tpath = dep",
+      `\turl = ${repo}`,
+      '[submodule "dep-added"]',
+      "\tpath = dep-added",
+      `\turl = ${repo}`,
+      "",
+    ].join("\n"),
+  )
+  await git(repo, ["add", ".gitmodules"])
+  await git(repo, ["update-index", "--add", "--cacheinfo", `160000,${initialSha},dep`])
+  await git(repo, ["commit", "-qm", "baseline gitlink"])
+  const approvedBaseSha = await git(repo, ["rev-parse", "main"])
+  await git(repo, ["switch", "-qc", "issue/approved"])
+  await writeFile(join(repo, "approved-a.txt"), "approved a\n")
+  await git(repo, ["add", "approved-a.txt"])
+  await git(repo, ["commit", "-qm", "approved part a"])
+  await writeFile(join(repo, "approved-b.txt"), "approved b\n")
+  await git(repo, ["add", "approved-b.txt"])
+  await git(repo, ["commit", "-qm", "approved part b"])
+  const approvedSha = await git(repo, ["rev-parse", "HEAD"])
+
+  await git(repo, ["switch", "-q", "main"])
+  await writeFile(join(repo, "authority.txt"), "current authority\n")
+  await git(repo, ["add", "authority.txt"])
+  await git(repo, ["commit", "-qm", "advance authority"])
+  const currentBaseSha = await git(repo, ["rev-parse", "HEAD"])
+
+  const proposal = async (
+    name: string,
+    files: Readonly<Record<string, string>>,
+    options: Readonly<{
+      baseSha?: string
+      executable?: string
+      symlink?: Readonly<{ path: string; target: string }>
+      gitlink?: Readonly<{ action: "add" | "modify" | "delete"; path: string; sha?: string }>
+    }> = {},
+  ): Promise<Readonly<{ ref: string; sha: string }>> => {
+    const branch = `proposal/${name}`
+    await git(repo, ["switch", "-qc", branch, options.baseSha ?? currentBaseSha])
+    for (const [path, content] of Object.entries(files)) await writeFile(join(repo, path), content)
+    if (options.executable !== undefined) await chmod(join(repo, options.executable), 0o755)
+    if (options.symlink !== undefined) {
+      await rm(join(repo, options.symlink.path))
+      await symlink(options.symlink.target, join(repo, options.symlink.path))
+    }
+    await git(repo, ["add", "."])
+    if (options.gitlink?.action !== "delete") {
+      await git(repo, ["update-index", "--add", "--cacheinfo", `160000,${initialSha},dep`])
+    }
+    if (options.gitlink?.action === "delete") {
+      await git(repo, ["update-index", "--force-remove", options.gitlink.path])
+    } else if (options.gitlink !== undefined) {
+      await git(repo, [
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        `160000,${options.gitlink.sha ?? approvedSha},${options.gitlink.path}`,
+      ])
+    }
+    await git(repo, ["commit", "-qm", `independently authored ${name}`])
+    const sha = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "main"])
+    return { ref: `refs/heads/${branch}`, sha }
+  }
+  const approved = { "approved-a.txt": "approved a\n", "approved-b.txt": "approved b\n" }
+  return {
+    repo,
+    approvedBaseSha,
+    approvedSha,
+    currentBaseSha,
+    exact: await proposal("exact", approved),
+    drop: await proposal("drop", { "approved-a.txt": "approved a\n" }),
+    extra: await proposal("extra", { ...approved, "unapproved-extra.txt": "extra\n" }),
+    corrupt: await proposal("corrupt", { ...approved, "approved-a.txt": "corrupt a\n" }),
+    whitespace: await proposal("whitespace", { ...approved, "approved-a.txt": "approved a  \n" }),
+    mode: await proposal("mode", approved, { executable: "approved-a.txt" }),
+    symlink: await proposal("symlink", approved, {
+      symlink: { path: "approved-a.txt", target: "approved a" },
+    }),
+    uncontained: await proposal("uncontained", approved, { baseSha: approvedBaseSha }),
+    sibling: await proposal("sibling", approved),
+    repaired: await proposal("repaired", approved),
+    gitlinkAdd: await proposal("gitlink-add", approved, {
+      gitlink: { action: "add", path: "dep-added" },
+    }),
+    gitlinkModify: await proposal("gitlink-modify", approved, {
+      gitlink: { action: "modify", path: "dep" },
+    }),
+    gitlinkDelete: await proposal("gitlink-delete", approved, {
+      gitlink: { action: "delete", path: "dep" },
+    }),
+  }
+}
+
+function recutProposedCodeCarrier(
+  recutter: ReturnType<typeof createGitPRRecutter>,
+  input: Parameters<ReturnType<typeof createGitPRRecutter>["recut"]>[0],
+  proposedHeadSha: string,
+) {
+  // The production input has not grown this P1a seam yet. Keep the RED at
+  // runtime so the failure proves replay rather than stopping at transpilation.
+  return recutter.recut({ ...input, proposedHeadSha } as Parameters<ReturnType<typeof createGitPRRecutter>["recut"]>[0])
+}
+
+function observeGitMutations(process: Pick<Process, "run">): {
+  process: Pick<Process, "run">
+  mutations: string[][]
+} {
+  const mutations: string[][] = []
+  return {
+    mutations,
+    process: {
+      run(request) {
+        if (gitInvocationMutates(request.argv)) mutations.push([...request.argv])
+        return process.run(request)
+      },
+    },
+  }
+}
+
+function gitInvocationMutates(argv: readonly string[]): boolean {
+  if (argv[0] !== "git") return false
+  let index = 1
+  while (index < argv.length) {
+    const argument = argv[index]
+    if (["-C", "-c", "--config-env", "--git-dir", "--namespace", "--work-tree"].includes(argument ?? "")) {
+      index += 2
+      continue
+    }
+    if (argument?.startsWith("-") === true) {
+      index += 1
+      continue
+    }
+    break
+  }
+  const command = argv[index]
+  const args = argv.slice(index + 1)
+  if (command === undefined) return false
+  if (
+    [
+      "add",
+      "am",
+      "checkout",
+      "checkout-index",
+      "cherry-pick",
+      "clean",
+      "clone",
+      "commit",
+      "commit-tree",
+      "fetch",
+      "gc",
+      "init",
+      "merge",
+      "mktree",
+      "mv",
+      "pack-refs",
+      "prune",
+      "push",
+      "read-tree",
+      "rebase",
+      "repack",
+      "reset",
+      "revert",
+      "rm",
+      "switch",
+      "update-index",
+      "update-ref",
+      "write-tree",
+    ].includes(command)
+  ) {
+    return true
+  }
+  if (command === "apply") return !args.includes("--check")
+  if (command === "hash-object") return args.includes("-w") || args.includes("--literally")
+  if (command === "merge-tree") return args.includes("--write-tree")
+  if (command === "worktree") {
+    return args.some((argument) => ["add", "lock", "move", "prune", "remove", "repair", "unlock"].includes(argument))
+  }
+  if (command === "notes") {
+    return args.some((argument) => ["add", "append", "copy", "edit", "merge", "prune", "remove"].includes(argument))
+  }
+  if (command === "branch") {
+    if (args.length === 0 || args.some((argument) => ["--list", "--show-current"].includes(argument))) return false
+    return true
+  }
+  if (command === "tag") {
+    if (args.length === 0 || args.some((argument) => ["-l", "--list", "--verify"].includes(argument))) return false
+    return true
+  }
+  if (command === "replace") return args.length > 0 && !args.includes("--list")
+  if (command === "symbolic-ref") {
+    return args.includes("--delete") || args.filter((argument) => !argument.startsWith("-")).length > 1
+  }
+  if (command === "config") {
+    return !args.some((argument) =>
+      ["--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l"].includes(argument),
+    )
+  }
+  return false
+}
+
 const unusedWorkspace: BayWorkspace = {
   revision: "unused-workspace-v1",
   provision: () => ({ status: "completed", conclusion: "failure", error: { code: "unused", message: "not used" } }),
@@ -679,6 +917,45 @@ function expectedCandidateRef(run: string, step: string, job: string, attempt: n
 }
 
 describe("Queue command adapters", () => {
+  it("classifies the actual Git subcommand when proving certification is mutation-free", () => {
+    const mutating = [
+      ["git", "-C", "/repo", "fetch", "origin"],
+      ["git", "-C", "/repo", "-c", "user.name=Queue", "commit", "-m", "candidate"],
+      ["git", "-C", "/repo", "add", "."],
+      ["git", "-C", "/repo", "rm", "payload"],
+      ["git", "-C", "/repo", "mv", "before", "after"],
+      ["git", "-C", "/repo", "update-index", "--cacheinfo", "100644,abc,payload"],
+      ["git", "-C", "/repo", "read-tree", "HEAD"],
+      ["git", "-C", "/repo", "write-tree"],
+      ["git", "-C", "/repo", "checkout-index", "-a"],
+      ["git", "-C", "/repo", "hash-object", "-w", "payload"],
+      ["git", "-C", "/repo", "mktree"],
+      ["git", "-C", "/repo", "branch", "candidate"],
+      ["git", "-C", "/repo", "tag", "candidate"],
+      ["git", "-C", "/repo", "notes", "add", "-m", "proof"],
+      ["git", "-C", "/repo", "replace", "old", "new"],
+      ["git", "-C", "/repo", "worktree", "add", "/tmp/worktree", "HEAD"],
+      ["git", "-C", "/repo", "update-ref", "refs/heads/main", "abc"],
+      ["git", "-C", "/repo", "symbolic-ref", "HEAD", "refs/heads/main"],
+      ["git", "-C", "/repo", "merge-tree", "--write-tree", "base", "head"],
+    ] as const
+    const readOnly = [
+      ["git", "-C", "/repo/merge", "diff", "--", "merge"],
+      ["git", "-C", "/repo", "-c", "alias.branch=log", "rev-parse", "branch"],
+      ["git", "-C", "/repo", "worktree", "list", "--porcelain"],
+      ["git", "-C", "/repo", "branch", "--show-current"],
+      ["git", "-C", "/repo", "tag", "--list"],
+      ["git", "-C", "/repo", "notes", "show", "HEAD"],
+      ["git", "-C", "/repo", "replace", "--list"],
+      ["git", "-C", "/repo", "hash-object", "payload"],
+      ["git", "-C", "/repo", "apply", "--check", "payload.diff"],
+      ["git", "-C", "/repo", "config", "--get", "remote.origin.url"],
+    ] as const
+
+    expect(mutating.map(gitInvocationMutates)).toEqual(mutating.map(() => true))
+    expect(readOnly.map(gitInvocationMutates)).toEqual(readOnly.map(() => false))
+  })
+
   it("does not classify failure outcomes by code prefix", async () => {
     const sourceRoot = new URL("../src/", import.meta.url)
     const matches: string[] = []
@@ -841,6 +1118,685 @@ describe("Queue command adapters", () => {
       failure: { kind: "refusal", code: "recut-conflict", message: expect.stringContaining("candidate.txt") },
     })
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
+  })
+
+  it("certifies an independently authored code proposal as its exact SHA without replay or publication", async () => {
+    const fixture = await codeCarrierProposalRepository()
+    expect(await git(fixture.repo, ["rev-list", "--count", `${fixture.approvedBaseSha}..${fixture.approvedSha}`])).toBe(
+      "2",
+    )
+    expect(await git(fixture.repo, ["rev-list", "--count", `${fixture.currentBaseSha}..${fixture.exact.sha}`])).toBe(
+      "1",
+    )
+    await using process = createProcess()
+    const observed = observeGitMutations(process)
+
+    const result = await recutProposedCodeCarrier(
+      createGitPRRecutter({ inject: { process: observed.process }, repo: fixture.repo }),
+      {
+        id: "PR1",
+        branch: "issue/approved",
+        base: "main",
+        revision: 1,
+        headSha: fixture.approvedSha,
+        baseSha: fixture.approvedBaseSha,
+      },
+      fixture.exact.sha,
+    )
+
+    expect({ headSha: result.headSha, mutations: observed.mutations }).toEqual({
+      headSha: fixture.exact.sha,
+      mutations: [],
+    })
+    expect(await git(fixture.repo, ["rev-parse", fixture.exact.ref])).toBe(fixture.exact.sha)
+  })
+
+  it("scopes lazy-fetch refusal to immutable certification instead of ordinary Queue Git", async () => {
+    const fixture = await codeCarrierProposalRepository()
+    await using process = createProcess()
+    const noLazyFetch: Array<string | undefined> = []
+    const recordingProcess: Pick<Process, "run"> = {
+      run(request) {
+        noLazyFetch.push(request.env?.GIT_NO_LAZY_FETCH)
+        return process.run(request)
+      },
+    }
+
+    await inspectGitQueueTarget({ inject: { process: recordingProcess }, repo: fixture.repo, branch: "main" })
+    expect(noLazyFetch).not.toContain("1")
+    noLazyFetch.length = 0
+
+    await recutProposedCodeCarrier(
+      createGitPRRecutter({ inject: { process: recordingProcess }, repo: fixture.repo }),
+      {
+        id: "PR1",
+        branch: "issue/approved",
+        base: "main",
+        revision: 1,
+        headSha: fixture.approvedSha,
+        baseSha: fixture.approvedBaseSha,
+      },
+      fixture.exact.sha,
+    )
+    expect(noLazyFetch.length).toBeGreaterThan(0)
+    expect(new Set(noLazyFetch)).toEqual(new Set(["1"]))
+  })
+
+  it("refuses a locally divergent target without fetching or certifying an arbitrary side", async () => {
+    const fixture = await codeCarrierProposalRepository()
+    const remote = join(fixture.repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(fixture.repo, ["remote", "add", "origin", remote])
+    await git(fixture.repo, ["push", "-q", "origin", "main"])
+    await writeFile(join(fixture.repo, "local-only.txt"), "local divergence\n")
+    await git(fixture.repo, ["add", "local-only.txt"])
+    await git(fixture.repo, ["commit", "-qm", "local divergence"])
+    await using process = createProcess()
+    const observed = observeGitMutations(process)
+
+    await expect(
+      recutProposedCodeCarrier(
+        createGitPRRecutter({ inject: { process: observed.process }, repo: fixture.repo }),
+        {
+          id: "PR1",
+          branch: "issue/approved",
+          base: "main",
+          revision: 1,
+          headSha: fixture.approvedSha,
+          baseSha: fixture.approvedBaseSha,
+        },
+        fixture.exact.sha,
+      ),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "queue-environment-refused",
+        message: expect.stringContaining("local/cached target refs"),
+      },
+    })
+    expect(observed.mutations).toEqual([])
+  })
+
+  it("refuses a stale cached target after proving live origin authority without mutating Git", async () => {
+    const fixture = await codeCarrierProposalRepository()
+    const remote = join(fixture.repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(fixture.repo, ["remote", "add", "origin", remote])
+    await git(fixture.repo, ["push", "-q", "origin", "main"])
+    await git(fixture.repo, ["switch", "-qc", "remote-advance", fixture.currentBaseSha])
+    await writeFile(join(fixture.repo, "remote-only.txt"), "live authority advanced\n")
+    await git(fixture.repo, ["add", "remote-only.txt"])
+    await git(fixture.repo, ["commit", "-qm", "advance live authority"])
+    await git(fixture.repo, ["push", "-q", "origin", "HEAD:main"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+    await git(fixture.repo, ["update-ref", "refs/remotes/origin/main", fixture.currentBaseSha])
+    expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.currentBaseSha)
+    expect(await git(fixture.repo, ["rev-parse", "origin/main"])).toBe(fixture.currentBaseSha)
+    await using process = createProcess()
+    const observed = observeGitMutations(process)
+
+    await expect(
+      recutProposedCodeCarrier(
+        createGitPRRecutter({ inject: { process: observed.process }, repo: fixture.repo }),
+        {
+          id: "PR1",
+          branch: "issue/approved",
+          base: "main",
+          revision: 1,
+          headSha: fixture.approvedSha,
+          baseSha: fixture.approvedBaseSha,
+        },
+        fixture.exact.sha,
+      ),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "queue-environment-refused",
+        message: expect.stringContaining("live 'origin/main'"),
+      },
+    })
+    expect(observed.mutations).toEqual([])
+  })
+
+  it("types invalid code proposals by frozen candidate SHA without mutating Git", async () => {
+    const fixture = await codeCarrierProposalRepository()
+    await expect(
+      git(fixture.repo, ["merge-base", "--is-ancestor", fixture.currentBaseSha, fixture.uncontained.sha]),
+    ).rejects.toThrow()
+    await using process = createProcess()
+    const input = {
+      id: "PR1",
+      branch: "issue/approved",
+      base: "main",
+      revision: 1,
+      headSha: fixture.approvedSha,
+      baseSha: fixture.approvedBaseSha,
+    } as const
+    const missingSha = "f".repeat(40)
+    const outcomes: unknown[] = []
+    for (const candidate of [
+      fixture.drop,
+      fixture.extra,
+      fixture.corrupt,
+      fixture.whitespace,
+      fixture.mode,
+      fixture.symlink,
+      fixture.uncontained,
+      { sha: missingSha },
+    ]) {
+      const observed = observeGitMutations(process)
+      try {
+        const result = await recutProposedCodeCarrier(
+          createGitPRRecutter({ inject: { process: observed.process }, repo: fixture.repo }),
+          input,
+          candidate.sha,
+        )
+        outcomes.push({ status: "accepted", headSha: result.headSha, mutations: observed.mutations })
+      } catch (error) {
+        outcomes.push({ status: "refused", failure: failureFact(error), mutations: observed.mutations })
+      }
+    }
+
+    expect(outcomes).toEqual([
+      {
+        status: "refused",
+        failure: {
+          kind: "refusal",
+          code: "recut-certification-drop",
+          message: expect.stringContaining(fixture.drop.sha),
+        },
+        mutations: [],
+      },
+      {
+        status: "refused",
+        failure: {
+          kind: "refusal",
+          code: "recut-certification-extra",
+          message: expect.stringContaining(fixture.extra.sha),
+        },
+        mutations: [],
+      },
+      {
+        status: "refused",
+        failure: {
+          kind: "refusal",
+          code: "recut-certification-corrupt",
+          message: expect.stringContaining(fixture.corrupt.sha),
+        },
+        mutations: [],
+      },
+      {
+        status: "refused",
+        failure: {
+          kind: "refusal",
+          code: "recut-certification-corrupt",
+          message: expect.stringContaining(fixture.whitespace.sha),
+        },
+        mutations: [],
+      },
+      {
+        status: "refused",
+        failure: {
+          kind: "refusal",
+          code: "recut-certification-corrupt",
+          message: expect.stringContaining(fixture.mode.sha),
+        },
+        mutations: [],
+      },
+      {
+        status: "refused",
+        failure: {
+          kind: "refusal",
+          code: "recut-certification-corrupt",
+          message: expect.stringContaining(fixture.symlink.sha),
+        },
+        mutations: [],
+      },
+      {
+        status: "refused",
+        failure: {
+          kind: "refusal",
+          code: "carrier-drops-landed",
+          message: expect.stringContaining(fixture.uncontained.sha),
+        },
+        mutations: [],
+      },
+      {
+        status: "refused",
+        failure: {
+          kind: "refusal",
+          code: "proposed-commit-missing",
+          message: expect.stringContaining(missingSha),
+        },
+        mutations: [],
+      },
+    ])
+  })
+
+  it("isolates a refused proposal from sibling and repaired candidates by distinct frozen SHA", async () => {
+    const fixture = await codeCarrierProposalRepository()
+    expect(new Set([fixture.corrupt.sha, fixture.sibling.sha, fixture.repaired.sha]).size).toBe(3)
+    await using process = createProcess()
+    const input = {
+      id: "PR1",
+      branch: "issue/approved",
+      base: "main",
+      revision: 1,
+      headSha: fixture.approvedSha,
+      baseSha: fixture.approvedBaseSha,
+    } as const
+    const refusedGit = observeGitMutations(process)
+    const refused = await recutProposedCodeCarrier(
+      createGitPRRecutter({ inject: { process: refusedGit.process }, repo: fixture.repo }),
+      input,
+      fixture.corrupt.sha,
+    ).then(
+      (result) => ({ status: "accepted" as const, headSha: result.headSha, mutations: refusedGit.mutations }),
+      (error: unknown) => ({
+        status: "refused" as const,
+        failure: failureFact(error),
+        mutations: refusedGit.mutations,
+      }),
+    )
+    const siblingGit = observeGitMutations(process)
+    const sibling = await recutProposedCodeCarrier(
+      createGitPRRecutter({ inject: { process: siblingGit.process }, repo: fixture.repo }),
+      { ...input, id: "PR2" },
+      fixture.sibling.sha,
+    )
+    const repairedGit = observeGitMutations(process)
+    const repaired = await recutProposedCodeCarrier(
+      createGitPRRecutter({ inject: { process: repairedGit.process }, repo: fixture.repo }),
+      input,
+      fixture.repaired.sha,
+    )
+
+    expect({
+      refused,
+      accepted: [sibling.headSha, repaired.headSha],
+      acceptedMutations: [siblingGit.mutations, repairedGit.mutations],
+    }).toEqual({
+      refused: {
+        status: "refused",
+        failure: {
+          kind: "refusal",
+          code: "recut-certification-corrupt",
+          message: expect.stringContaining(fixture.corrupt.sha),
+        },
+        mutations: [],
+      },
+      accepted: [fixture.sibling.sha, fixture.repaired.sha],
+      acceptedMutations: [[], []],
+    })
+  })
+
+  it("refuses added, modified, and deleted gitlinks without mutating Git", async () => {
+    const fixture = await codeCarrierProposalRepository()
+    await using process = createProcess()
+    const outcomes: unknown[] = []
+
+    for (const candidate of [fixture.gitlinkAdd, fixture.gitlinkModify, fixture.gitlinkDelete]) {
+      const observed = observeGitMutations(process)
+      try {
+        const result = await recutProposedCodeCarrier(
+          createGitPRRecutter({ inject: { process: observed.process }, repo: fixture.repo }),
+          {
+            id: "PR1",
+            branch: "issue/approved",
+            base: "main",
+            revision: 1,
+            headSha: fixture.approvedSha,
+            baseSha: fixture.approvedBaseSha,
+          },
+          candidate.sha,
+        )
+        outcomes.push({ status: "accepted", headSha: result.headSha, mutations: observed.mutations })
+      } catch (error) {
+        outcomes.push({ status: "refused", failure: failureFact(error), mutations: observed.mutations })
+      }
+    }
+
+    expect(outcomes).toEqual(
+      [fixture.gitlinkAdd, fixture.gitlinkModify, fixture.gitlinkDelete].map((candidate) => ({
+        status: "refused",
+        failure: {
+          kind: "refusal",
+          code: "authored-gitlink",
+          message: expect.stringContaining(candidate.sha),
+        },
+        mutations: [],
+      })),
+    )
+  })
+
+  it("admits an exact frozen code carrier after independently rederiving its durable endpoints", async () => {
+    const { repo, baseSha, featureSha } = await directRecutBaseChaseRepository()
+    await writeFile(join(repo, "authority.txt"), "current authority\n")
+    await git(repo, ["add", "authority.txt"])
+    await git(repo, ["commit", "-qm", "advance authority"])
+    const currentBaseSha = await git(repo, ["rev-parse", "main"])
+    await git(repo, ["switch", "-qc", "proposal/exact", currentBaseSha])
+    await writeFile(join(repo, "payload.txt"), payloadLines("FIVE"))
+    await git(repo, ["commit", "-qam", "independently authored proposal"])
+    const proposedSha = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "main"])
+    await using process = createProcess()
+    const recut = await recutProposedCodeCarrier(
+      createGitPRRecutter({ inject: { process }, repo }),
+      {
+        id: "PR1",
+        branch: "issue/feature",
+        base: "main",
+        revision: 1,
+        headSha: featureSha,
+        baseSha,
+      },
+      proposedSha,
+    )
+    await using app = await checkedQueue(process, repo, ["true"])
+    await app.bays.submit({
+      branch: "issue/feature",
+      headSha: featureSha,
+      base: "main",
+      baseSha,
+      draft: true,
+    })
+    await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: "carrier-review" })
+    const approved = app
+      .state()
+      .bays.prs.PR1?.reviews.findLast((review) => review.revision === 1 && review.headSha === featureSha)
+    if (approved === undefined) throw new Error("expected approved carrier source")
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: recut.headSha,
+      baseSha: recut.baseSha,
+      treeSha: recut.treeSha,
+      patchId: recut.patchId,
+      reviewCarried: true,
+      certificate: "frozen-code-carrier-v1",
+      sources: [
+        {
+          repo: ".",
+          fromHeadSha: featureSha,
+          toHeadSha: proposedSha,
+          patchId: recut.patchId,
+          rangeDiff: "=",
+        },
+      ],
+      expectedCurrent: {
+        revision: 1,
+        headSha: featureSha,
+        effectiveReview: approved,
+        checksPassed: false,
+      },
+    })
+    await app.bays.ready({ pr: "PR1" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run.status, run.error?.message).toBe("completed")
+    expect(run.conclusion, run.error?.message).toBe("success")
+  })
+
+  it("reverifies a frozen certificate before skipping an already-landed actuator retry", async () => {
+    const fixture = await codeCarrierProposalRepository()
+    await using process = createProcess()
+    const recut = await recutProposedCodeCarrier(
+      createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
+      {
+        id: "PR1",
+        branch: "issue/approved",
+        base: "main",
+        revision: 1,
+        headSha: fixture.approvedSha,
+        baseSha: fixture.approvedBaseSha,
+      },
+      fixture.exact.sha,
+    )
+    const pr = {
+      id: "PR1",
+      branch: "issue/approved",
+      base: "main",
+      revision: 2,
+      headSha: fixture.exact.sha,
+      baseSha: fixture.currentBaseSha,
+      recut: {
+        certificate: "frozen-code-carrier-v1",
+        fromRevision: 1,
+        patchId: recut.patchId,
+        treeSha: recut.treeSha,
+        reviewCarried: false,
+        sources: [
+          {
+            repo: ".",
+            fromHeadSha: fixture.corrupt.sha,
+            toHeadSha: fixture.exact.sha,
+            patchId: recut.patchId,
+            rangeDiff: "=" as const,
+          },
+        ],
+        baseSha: fixture.currentBaseSha,
+        sourceBaseSha: fixture.approvedBaseSha,
+        sourceHeadSha: fixture.corrupt.sha,
+      },
+    } as unknown as StepExecution["prs"][number]
+
+    await expect(
+      gitCandidatePreparer({ inject: { process }, repo: fixture.repo })({
+        id: "C-RETRY",
+        queueId: "main",
+        baseSha: fixture.exact.sha,
+        revs: [{ pr: pr.id, n: pr.revision, head: pr.headSha }],
+        prs: [pr],
+      }),
+    ).rejects.toMatchObject({
+      failure: { kind: "refusal", code: "recut-certificate" },
+    })
+  })
+
+  it.each(["gitlinkAdd", "gitlinkModify", "gitlinkDelete"] as const)(
+    "independently refuses a certified %s payload during admission",
+    async (candidateName) => {
+      const fixture = await codeCarrierProposalRepository()
+      const candidate = fixture[candidateName]
+      const patchId = await stablePatchId(fixture.repo, fixture.currentBaseSha, candidate.sha)
+      const treeSha = await git(fixture.repo, ["rev-parse", `${candidate.sha}^{tree}`])
+      const pr = {
+        id: "PR1",
+        branch: "issue/approved",
+        base: "main",
+        revision: 2,
+        headSha: candidate.sha,
+        baseSha: fixture.currentBaseSha,
+        recut: {
+          certificate: "frozen-code-carrier-v1",
+          fromRevision: 1,
+          patchId,
+          treeSha,
+          reviewCarried: false,
+          sources: [
+            {
+              repo: ".",
+              fromHeadSha: candidate.sha,
+              toHeadSha: candidate.sha,
+              patchId,
+              rangeDiff: "=" as const,
+            },
+          ],
+          baseSha: fixture.currentBaseSha,
+          sourceBaseSha: fixture.currentBaseSha,
+          sourceHeadSha: candidate.sha,
+        },
+      } as unknown as StepExecution["prs"][number]
+      await using process = createProcess()
+
+      await expect(
+        gitCandidatePreparer({ inject: { process }, repo: fixture.repo })({
+          id: `C-${candidateName}`,
+          queueId: "main",
+          baseSha: fixture.currentBaseSha,
+          revs: [{ pr: pr.id, n: pr.revision, head: pr.headSha }],
+          prs: [pr],
+        }),
+      ).rejects.toMatchObject({
+        failure: {
+          kind: "refusal",
+          code: "authored-gitlink",
+          message: expect.stringContaining("dep"),
+        },
+      })
+    },
+  )
+
+  it("refuses altered or missing frozen code-carrier endpoints without landing them", async () => {
+    const fixture = await codeCarrierProposalRepository()
+    await using process = createProcess()
+    const recut = await recutProposedCodeCarrier(
+      createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
+      {
+        id: "PR1",
+        branch: "issue/approved",
+        base: "main",
+        revision: 1,
+        headSha: fixture.approvedSha,
+        baseSha: fixture.approvedBaseSha,
+      },
+      fixture.exact.sha,
+    )
+    const rootSource = {
+      repo: ".",
+      fromHeadSha: fixture.approvedSha,
+      toHeadSha: fixture.exact.sha,
+      patchId: recut.patchId,
+      rangeDiff: "=" as const,
+    }
+    const exactRecut = {
+      certificate: "frozen-code-carrier-v1" as const,
+      fromRevision: 1,
+      patchId: recut.patchId,
+      treeSha: recut.treeSha,
+      reviewCarried: false,
+      sources: [rootSource],
+      baseSha: fixture.currentBaseSha,
+      sourceBaseSha: fixture.approvedBaseSha,
+      sourceHeadSha: fixture.approvedSha,
+    }
+    const withoutSourceBase = (({ sourceBaseSha: _sourceBaseSha, ...rest }) => rest)(exactRecut)
+    const withoutSourceHead = (({ sourceHeadSha: _sourceHeadSha, ...rest }) => rest)(exactRecut)
+    const alteredSourceBaseSha = await git(fixture.repo, ["rev-parse", `${fixture.approvedBaseSha}^`])
+    const cases = [
+      { name: "missing source base", headSha: fixture.exact.sha, recut: withoutSourceBase },
+      { name: "missing source head", headSha: fixture.exact.sha, recut: withoutSourceHead },
+      {
+        name: "altered source base",
+        headSha: fixture.exact.sha,
+        recut: { ...exactRecut, sourceBaseSha: alteredSourceBaseSha },
+      },
+      {
+        name: "altered source head",
+        headSha: fixture.exact.sha,
+        recut: {
+          ...exactRecut,
+          sourceHeadSha: fixture.corrupt.sha,
+          sources: [{ ...rootSource, fromHeadSha: fixture.corrupt.sha }],
+        },
+      },
+      {
+        name: "altered candidate base",
+        headSha: fixture.exact.sha,
+        recut: { ...exactRecut, baseSha: fixture.approvedBaseSha },
+      },
+      {
+        name: "altered candidate head",
+        headSha: fixture.corrupt.sha,
+        recut: { ...exactRecut, sources: [{ ...rootSource, toHeadSha: fixture.corrupt.sha }] },
+      },
+    ] as const
+    const mainBefore = await git(fixture.repo, ["rev-parse", "main"])
+
+    for (const [index, candidate] of cases.entries()) {
+      const id = `C${index + 1}`
+      const parsed = PRSnapshotSchema.safeParse({
+        id: "PR1",
+        branch: "issue/approved",
+        base: "main",
+        revision: 2,
+        headSha: candidate.headSha,
+        baseSha: fixture.currentBaseSha,
+        recut: candidate.recut,
+      })
+      if (!parsed.success) {
+        expect(candidate.name.startsWith("missing source"), candidate.name).toBe(true)
+        continue
+      }
+      expect(candidate.name.startsWith("missing source"), candidate.name).toBe(false)
+      const pr = parsed.data
+      await expect(
+        gitCandidatePreparer({ inject: { process }, repo: fixture.repo })({
+          id,
+          queueId: "main",
+          baseSha: fixture.currentBaseSha,
+          revs: [{ pr: pr.id, n: pr.revision, head: pr.headSha }],
+          prs: [pr],
+        }),
+        candidate.name,
+      ).rejects.toMatchObject({
+        failure: {
+          kind: "refusal",
+          code: candidate.name === "altered source base" ? "authored-gitlink" : "recut-certificate",
+        },
+      })
+      expect(await git(fixture.repo, ["rev-parse", "main"]), candidate.name).toBe(mainBefore)
+      expect(
+        await git(fixture.repo, ["for-each-ref", "--format=%(refname)", `refs/yrd/candidates/${id}`]),
+        candidate.name,
+      ).toBe("")
+    }
+  })
+
+  it("rejects altered frozen root provenance before admission can mutate Git", async () => {
+    const fixture = await codeCarrierProposalRepository()
+    const mainBefore = await git(fixture.repo, ["rev-parse", "main"])
+    const proof = {
+      certificate: "frozen-code-carrier-v1" as const,
+      fromRevision: 1,
+      patchId: "a".repeat(40),
+      treeSha: "b".repeat(40),
+      reviewCarried: false,
+      baseSha: fixture.currentBaseSha,
+      sourceBaseSha: fixture.approvedBaseSha,
+      sourceHeadSha: fixture.approvedSha,
+    }
+    for (const source of [
+      {
+        repo: ".",
+        fromHeadSha: fixture.corrupt.sha,
+        toHeadSha: fixture.exact.sha,
+        patchId: "a".repeat(40),
+        rangeDiff: "=",
+      },
+      {
+        repo: ".",
+        fromHeadSha: fixture.approvedSha,
+        toHeadSha: fixture.corrupt.sha,
+        patchId: "a".repeat(40),
+        rangeDiff: "=",
+      },
+    ]) {
+      expect(() =>
+        PRSnapshotSchema.parse({
+          id: "PR1",
+          branch: "issue/approved",
+          base: "main",
+          revision: 2,
+          headSha: fixture.exact.sha,
+          baseSha: fixture.currentBaseSha,
+          recut: { ...proof, sources: [source] },
+        }),
+      ).toThrow(/root source mapping/u)
+    }
+    expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(mainBefore)
   })
 
   it("accepts Git's aligned equality rows for a ten-commit range-diff certificate", async () => {
@@ -2687,154 +3643,6 @@ describe("Queue command adapters", () => {
       status: "completed",
       conclusion: "failure",
       output: { conflicts: [{ repo: ".", paths: ["@km/note.md", "hub/plan.md"] }] },
-    })
-    expect(await git(repo, ["rev-parse", "main"])).toBe(baseSha)
-  })
-
-  it("keeps the decommission waiver bound to its issue and exact root set", () => {
-    const issue = "@pm/infra/21489-pm-state-repo-split/22386-decommission-hh-state-roots"
-    const tombstone = "# moved\n"
-    const policy = {
-      paths: ["@", "+"],
-      exception: {
-        kind: "state-decommission-v1" as const,
-        issue,
-        roots: ["+kanban.md", "@km"],
-        tombstone,
-      },
-    }
-    const base = {
-      paths: { "+kanban.md": ["+kanban.md"], "@km": ["@km/old.md"] },
-      contents: { "+kanban.md": "old\n", "@km/README.md": undefined },
-    }
-    const candidate = {
-      paths: { "+kanban.md": ["+kanban.md"], "@km": ["@km/README.md"] },
-      contents: { "+kanban.md": tombstone, "@km/README.md": tombstone },
-    }
-
-    expect(
-      validateStateDecommissionException({
-        issue: "@pm/infra/other",
-        refusedPaths: ["+kanban.md", "@km/old.md", "@km/README.md"],
-        policy,
-        base,
-        candidate,
-      }),
-    ).toEqual({ status: "not-applicable" })
-    expect(
-      validateStateDecommissionException({
-        issue,
-        refusedPaths: ["+kanban.md", "@km/old.md", "@other/escape.md"],
-        policy,
-        base,
-        candidate,
-      }),
-    ).toEqual({
-      status: "failed",
-      message: "payload touches refused paths outside the trusted root set: @other/escape.md",
-    })
-  })
-
-  it("admits only the issue-bound exact tombstone set for one state decommission", async () => {
-    const issue = "@pm/infra/21489-pm-state-repo-split/22386-decommission-hh-state-roots"
-    const tombstone = [
-      "# PM state moved",
-      "",
-      "Authoritative PM state moved to hh-pm.",
-      "Do not read, write, or edit PM state here.",
-      "Resolve with `bun tent state-repo root`; read logical nodes with `bun km show <logical-path>`.",
-      "",
-    ].join("\n")
-    const { repo } = await repository()
-    await git(repo, ["switch", "-qc", "state-baseline"])
-    await mkdir(join(repo, "@km"), { recursive: true })
-    await mkdir(join(repo, "hub", "pm"), { recursive: true })
-    await writeFile(join(repo, "@km", "bead.md"), "state\n")
-    await writeFile(join(repo, "hub", "pm", "plan.md"), "state\n")
-    await writeFile(join(repo, "+kanban.md"), "state\n")
-    await git(repo, ["add", "."])
-    await git(repo, ["commit", "-qm", "state baseline"])
-    const stateBase = await git(repo, ["rev-parse", "HEAD"])
-    await git(repo, ["branch", "-f", "main", stateBase])
-    await git(repo, ["switch", "-qc", "issue/decommission"])
-    await rm(join(repo, "@km"), { recursive: true })
-    await rm(join(repo, "hub", "pm"), { recursive: true })
-    await mkdir(join(repo, "@km"), { recursive: true })
-    await mkdir(join(repo, "hub", "pm"), { recursive: true })
-    await writeFile(join(repo, "@km", "README.md"), tombstone)
-    await writeFile(join(repo, "hub", "pm", "README.md"), tombstone)
-    await writeFile(join(repo, "+kanban.md"), tombstone)
-    await git(repo, ["add", "-A"])
-    await git(repo, ["commit", "-qm", "decommission state roots"])
-    const headSha = await git(repo, ["rev-parse", "HEAD"])
-    await git(repo, ["switch", "-q", "main"])
-    await using process = createProcess()
-    await using app = await checkedQueue(process, repo, ["true"], {
-      refuse: {
-        paths: ["@", "+", "hub/pm/"],
-        reason: "pm state lives in the sibling state repo",
-        exception: {
-          kind: "state-decommission-v1",
-          issue,
-          roots: ["+kanban.md", "@km", "hub/pm"],
-          tombstone,
-        },
-      },
-    })
-    await app.bays.submit({
-      branch: "issue/decommission",
-      headSha,
-      base: "main",
-      baseSha: stateBase,
-      issue,
-    })
-
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
-
-    expect(run, JSON.stringify(run, null, 2)).toMatchObject({ status: "completed", conclusion: "success" })
-    expect(await git(repo, ["rev-parse", "main^{tree}"])).toBe(await git(repo, ["rev-parse", `${headSha}^{tree}`]))
-  })
-
-  it("self-expires the state-decommission exception once the base is already tombstoned", async () => {
-    const issue = "@pm/infra/21489-pm-state-repo-split/22386-decommission-hh-state-roots"
-    const tombstone = "# PM state moved\n\nAuthoritative PM state moved to hh-pm.\n"
-    const { repo } = await repository()
-    await git(repo, ["switch", "-qc", "state-baseline"])
-    await mkdir(join(repo, "@km"), { recursive: true })
-    await writeFile(join(repo, "@km", "README.md"), tombstone)
-    await git(repo, ["add", "."])
-    await git(repo, ["commit", "-qm", "already decommissioned"])
-    const baseSha = await git(repo, ["rev-parse", "HEAD"])
-    await git(repo, ["branch", "-f", "main", baseSha])
-    await git(repo, ["switch", "-qc", "issue/reuse"])
-    await chmod(join(repo, "@km", "README.md"), 0o755)
-    await git(repo, ["add", "@km/README.md"])
-    await git(repo, ["commit", "-qm", "try to reuse expired exception"])
-    const headSha = await git(repo, ["rev-parse", "HEAD"])
-    await git(repo, ["switch", "-q", "main"])
-    await using process = createProcess()
-    await using app = await checkedQueue(process, repo, ["true"], {
-      refuse: {
-        paths: ["@"],
-        exception: {
-          kind: "state-decommission-v1",
-          issue,
-          roots: ["@km"],
-          tombstone,
-        },
-      },
-    })
-    await app.bays.submit({ branch: "issue/reuse", headSha, base: "main", baseSha, issue })
-
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
-
-    expect(run).toMatchObject({
-      status: "completed",
-      conclusion: "failure",
-      error: {
-        code: "refused-path",
-        message: expect.stringMatching(/state-decommission-v1.*base is already.*expired/iu),
-      },
     })
     expect(await git(repo, ["rev-parse", "main"])).toBe(baseSha)
   })

@@ -132,6 +132,8 @@ export type RecutPreflightResult = Readonly<{
   verdict: RecutPreflightVerdict
   evidence: Readonly<{
     headSha: string
+    proposedHeadSha?: string
+    expectedCurrent?: Readonly<{ revision: number; headSha: string; track?: boolean }>
     sourceBaseSha: string
     targetBase: string
     targetBaseSha: string
@@ -277,7 +279,13 @@ async function pruneVerdict(pr: PR, baseSha: string, git: PruneGitFacts, dryRun:
   }
 }
 
-export type RecutPreflightOptions = JsonOption & Readonly<{ revision?: number; queue?: boolean }>
+export type RecutPreflightOptions = JsonOption &
+  Readonly<{
+    revision?: number
+    queue?: boolean
+    proposedHeadSha?: string
+    expectedCurrent?: Readonly<{ revision: number; headSha: string; track?: boolean }>
+  }>
 
 /** Classify one immutable PR revision against one resolved target without
  * creating refs, appending journal events, or calling the recutter. Exact
@@ -328,12 +336,13 @@ export async function preflightRecut(
       `yrd: PR '${pr.id}' targets base '${pr.base}' but neither 'origin/${pr.base}' nor '${pr.base}' resolves to a commit here`,
     )
   }
-  const checks = await contentChecks(source.head, targetBaseSha, git)
+  const candidateHeadSha = options.proposedHeadSha ?? source.head
+  const checks = await contentChecks(candidateHeadSha, targetBaseSha, git)
   if (!checks.headPresent) {
     raiseFailure(
       "configuration",
       "recut-preflight-head-missing",
-      `yrd: PR '${pr.id}' revision ${source.n} head '${source.head}' is not present in this repository`,
+      `yrd: PR '${pr.id}' proposed head '${candidateHeadSha}' is not present in this repository`,
     )
   }
   if (checks.ancestorOfBase === undefined || checks.mergeTree === undefined) {
@@ -362,10 +371,11 @@ export async function preflightRecut(
         `(source-only=${distance.sourceOnly}, target-only=${distance.targetOnly})`,
     )
   }
-  const patch = await patchMatch(source.baseSha, source.head, targetBaseSha)
+  const patch = await patchMatch(source.baseSha, candidateHeadSha, targetBaseSha)
   const subsumed = checks.ancestorOfBase === true || checks.mergeTree === "identical"
   const requiresForce = app.queue.eligibility(pr.id).checks.status === "passed"
-  const certifiedCurrentBase = distance.targetOnly === 0 && source.recut !== undefined
+  const certifiedCurrentBase =
+    options.proposedHeadSha === undefined && distance.targetOnly === 0 && source.recut !== undefined
   const verdict: RecutPreflightVerdict = subsumed
     ? "SUBSUMED-WITHDRAW"
     : certifiedCurrentBase
@@ -373,9 +383,11 @@ export async function preflightRecut(
       : requiresForce
         ? "RECUT-FORCE"
         : "RECUT"
-  const revisionFlag = options.revision === undefined ? "" : ` --revision ${source.n}`
+  const revisionFlag =
+    options.revision === undefined || options.proposedHeadSha !== undefined ? "" : ` --revision ${source.n}`
   const queueFlag = options.queue === true ? " --queue" : ""
-  const recutCommand = `yrd pr recut ${pr.id}${revisionFlag}${queueFlag}`
+  const candidateFlag = options.proposedHeadSha === undefined ? "" : ` --ref ${options.proposedHeadSha}`
+  const recutCommand = `yrd pr recut ${pr.id}${revisionFlag}${candidateFlag}${queueFlag}`
   const next =
     verdict === "SUBSUMED-WITHDRAW"
       ? `yrd pr withdraw ${pr.id} --reason "superseded: content already in ${targetBaseSha}"`
@@ -388,6 +400,8 @@ export async function preflightRecut(
             : `yrd pr view ${pr.id}`
   const evidence: RecutPreflightResult["evidence"] = {
     headSha: source.head,
+    ...(options.proposedHeadSha === undefined ? {} : { proposedHeadSha: options.proposedHeadSha }),
+    ...(options.expectedCurrent === undefined ? {} : { expectedCurrent: options.expectedCurrent }),
     sourceBaseSha: source.baseSha,
     targetBase: pr.base,
     targetBaseSha,

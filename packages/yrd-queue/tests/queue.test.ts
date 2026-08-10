@@ -36,6 +36,7 @@ import {
   withStep,
   Queues,
   QueueRecordSchema,
+  PRSnapshotSchema,
   ReplayQueueRecordSchema,
   type AddStepResult,
   type IntegratedShape,
@@ -744,6 +745,94 @@ describe("Queue", () => {
     ])
     expect(fixture.prepared).toEqual(["C1", "C2"])
     expect(app.queue.audit().findings.filter(({ code }) => code === "candidate-revision-mismatch")).toEqual([])
+  })
+
+  it("projects immutable recut source endpoints and rejects a mismatched root source mapping", async () => {
+    await using app = await createQueueApp()
+    const pr = await submitBranch(app, "topic/durable-recut-source")
+    const patchId = "d".repeat(40)
+    await app.bays.review({ pr: pr.id, by: "@cto", decision: "approve", ref: "durable-source-review" })
+    const reviewed = app.state().bays.prs[pr.id]
+    const effectiveReview = reviewed?.reviews.findLast(
+      (review) => review.revision === pr.revision && review.headSha === pr.headSha,
+    )
+    if (effectiveReview === undefined) throw new Error("expected approved source review")
+    await app.bays.recut({
+      pr: pr.id,
+      fromRevision: pr.revision,
+      headSha: UPDATED,
+      baseSha: MERGED,
+      treeSha: "c".repeat(40),
+      patchId,
+      reviewCarried: true,
+      certificate: "frozen-code-carrier-v1",
+      sources: [{ repo: ".", fromHeadSha: pr.headSha, toHeadSha: UPDATED, patchId, rangeDiff: "=" }],
+      expectedCurrent: {
+        revision: pr.revision,
+        headSha: pr.headSha,
+        effectiveReview,
+        checksPassed: false,
+      },
+    })
+    const current = app.state().bays.prs[pr.id]
+    if (current === undefined) throw new Error("expected recut PR")
+
+    const snapshot = Queues.snapshot(current)
+    expect(snapshot).toMatchObject({
+      headSha: UPDATED,
+      recut: {
+        certificate: "frozen-code-carrier-v1",
+        baseSha: MERGED,
+        sourceBaseSha: BASE,
+        sourceHeadSha: pr.headSha,
+        sources: [{ repo: ".", fromHeadSha: pr.headSha, toHeadSha: UPDATED }],
+      },
+    })
+    expect(
+      PRSnapshotSchema.safeParse({
+        ...snapshot,
+        recut: {
+          ...snapshot.recut,
+          sources: [{ repo: ".", fromHeadSha: "f".repeat(40), toHeadSha: UPDATED, patchId, rangeDiff: "=" }],
+        },
+      }).success,
+    ).toBe(false)
+    expect(
+      PRSnapshotSchema.safeParse({
+        ...snapshot,
+        recut: {
+          ...snapshot.recut,
+          sources: [{ repo: ".", fromHeadSha: pr.headSha, toHeadSha: "e".repeat(40), patchId, rangeDiff: "=" }],
+        },
+      }).success,
+    ).toBe(false)
+    const certified = snapshot.recut!
+    const withoutSourceBase = (({ sourceBaseSha: _sourceBaseSha, ...rest }) => rest)(certified)
+    const withoutSourceHead = (({ sourceHeadSha: _sourceHeadSha, ...rest }) => rest)(certified)
+    const withoutCertificate = (({ certificate: _certificate, ...rest }) => rest)(certified)
+    for (const recut of [
+      withoutSourceBase,
+      withoutSourceHead,
+      withoutCertificate,
+      { ...certified, sources: undefined },
+      {
+        ...certified,
+        sources: [{ repo: "dep", fromHeadSha: pr.headSha, toHeadSha: UPDATED, patchId, rangeDiff: "=" as const }],
+      },
+    ]) {
+      expect(PRSnapshotSchema.safeParse({ ...snapshot, recut }).success).toBe(false)
+    }
+    expect(
+      PRSnapshotSchema.safeParse({
+        ...snapshot,
+        recut: {
+          fromRevision: pr.revision,
+          patchId,
+          treeSha: "c".repeat(40),
+          reviewCarried: false,
+        },
+      }).success,
+    ).toBe(true)
   })
 
   // 22332 C2465 shape: one run, two compose prepares that would produce different

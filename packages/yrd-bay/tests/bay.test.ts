@@ -1519,6 +1519,7 @@ describe("withBays", () => {
       current: { revision: 1, headSha: HEAD_1, by: "@cto", decision: "approve", ref: "verdict-1" },
       stale: [],
     })
+    expect(app.bays.reviewState("PR1").current).not.toHaveProperty("pr")
     expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
       delivery: "pushed",
       reviews: [{ revision: 1, headSha: HEAD_1, decision: "approve", by: "@cto", ref: "verdict-1" }],
@@ -1801,6 +1802,290 @@ describe("withBays", () => {
     await expect(app.bays.recut(args)).rejects.toMatchObject({
       failure: { kind: "refusal", code: "terminal-target" },
     })
+  })
+
+  it("refuses to carry an approval superseded by the effective exact-current rejection", async () => {
+    await using app = (await createHarness()).app
+    await app.bays.submit({ branch: "issue/rejected-recut", headSha: HEAD_1, baseSha: BASE, draft: true })
+    await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: "approved-r1" })
+    await app.bays.review({ pr: "PR1", by: "@cto", decision: "reject", ref: "rejected-r1" })
+    const beforeEvents = await Array.fromAsync(app.events())
+
+    await expect(
+      app.bays.recut({
+        pr: "PR1",
+        fromRevision: 1,
+        headSha: HEAD_2,
+        baseSha: "b".repeat(40),
+        treeSha: "c".repeat(40),
+        patchId: "d".repeat(40),
+        reviewCarried: true,
+      }),
+    ).rejects.toMatchObject({ failure: { kind: "refusal", code: "review-carry-invalid" } })
+    expect(await Array.fromAsync(app.events())).toEqual(beforeEvents)
+    expect(app.bays.pr("PR1")?.revs).toHaveLength(1)
+  })
+
+  it("refuses replay when a recut carries an approval superseded by an exact-current rejection", async () => {
+    const nextId = ids()
+    const seededCommand = { id: nextId(), op: "fixture.recut-rejected-review" }
+    const at = "2026-01-01T00:00:00.000Z"
+    const journal = createMemoryJournal([
+      {
+        command: seededCommand,
+        cause: {
+          id: nextId(),
+          commandId: seededCommand.id,
+          op: seededCommand.op,
+          commandHash: Command.hash(seededCommand),
+        },
+        events: [
+          {
+            id: nextId(),
+            name: "pr/pushed",
+            ts: at,
+            data: {
+              pr: "PR1",
+              branch: "issue/rejected-recut",
+              base: "main",
+              headSha: HEAD_1,
+              baseSha: BASE,
+              revision: 1,
+            },
+          },
+          {
+            id: nextId(),
+            name: "pr/reviewed",
+            ts: at,
+            data: {
+              pr: "PR1",
+              revision: 1,
+              headSha: HEAD_1,
+              [["act", "or"].join("")]: "@cto",
+              decision: "approve",
+              ref: "approved-r1",
+            },
+          },
+          {
+            id: nextId(),
+            name: "pr/reviewed",
+            ts: at,
+            data: { pr: "PR1", revision: 1, headSha: HEAD_1, by: "@cto", decision: "reject", ref: "rejected-r1" },
+          },
+          {
+            id: nextId(),
+            name: "pr/recut",
+            ts: at,
+            data: {
+              pr: "PR1",
+              fromRevision: 1,
+              patchId: "d".repeat(40),
+              baseSha: "b".repeat(40),
+              treeSha: "c".repeat(40),
+              reviewCarried: true,
+              predecessor: { revision: 1, headSha: HEAD_1, baseSha: BASE },
+              successor: { revision: 2, headSha: HEAD_2, baseSha: "b".repeat(40) },
+            },
+          },
+        ],
+      },
+    ])
+    const jobs = createBayJobDefs(createWorkspaceHarness().adapter)
+    const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
+
+    await expect(createYrd(definition, { inject: { journal, clock: () => at, id: nextId } })).rejects.toThrow(
+      "rebuild carries a missing approval",
+    )
+  })
+
+  it.each(["rejected", "missing"] as const)(
+    "atomically refuses a certified recut when its expected current approval is %s",
+    async (race) => {
+      await using app = (await createHarness()).app
+      await app.bays.submit({ branch: `issue/certified-review-${race}`, headSha: HEAD_1, baseSha: BASE, draft: true })
+      if (race === "rejected") {
+        await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: `approved-${race}` })
+        const approval = app.bays.reviewState("PR1").current
+        if (approval === undefined) throw new Error("expected current approval")
+        await app.bays.review({ pr: "PR1", by: "@cto", decision: "reject", ref: "intervening-rejection" })
+      }
+      const approval =
+        race === "rejected"
+          ? {
+              revision: 1,
+              headSha: HEAD_1,
+              by: "@cto",
+              decision: "approve" as const,
+              at: "2026-01-01T00:00:00.000Z",
+              ref: `approved-${race}`,
+            }
+          : {
+              revision: 1,
+              headSha: HEAD_1,
+              by: "@cto",
+              decision: "approve" as const,
+              at: "2026-01-01T00:00:00.000Z",
+              ref: "approval-never-recorded",
+            }
+      const before = await Array.fromAsync(app.events())
+
+      await expect(
+        app.bays.recut({
+          pr: "PR1",
+          fromRevision: 1,
+          headSha: HEAD_2,
+          baseSha: "b".repeat(40),
+          treeSha: "c".repeat(40),
+          patchId: "d".repeat(40),
+          reviewCarried: true,
+          certificate: "frozen-code-carrier-v1",
+          sources: [
+            {
+              repo: ".",
+              fromHeadSha: HEAD_1,
+              toHeadSha: HEAD_2,
+              patchId: "d".repeat(40),
+              rangeDiff: "=",
+            },
+          ],
+          expectedCurrent: { revision: 1, headSha: HEAD_1, effectiveReview: approval, checksPassed: false },
+        }),
+      ).rejects.toMatchObject({ failure: { kind: "refusal", code: "recut-review-changed" } })
+      expect(await Array.fromAsync(app.events())).toEqual(before)
+      expect(app.bays.pr("PR1")?.revs).toHaveLength(1)
+    },
+  )
+
+  it("does not let an idempotent certified recut bypass an intervening current rejection", async () => {
+    await using app = (await createHarness()).app
+    const patchId = "d".repeat(40)
+    await app.bays.submit({ branch: "issue/certified-idempotent", headSha: HEAD_1, baseSha: BASE, draft: true })
+    await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: "approved-r1" })
+    const sourceApproval = app.bays.reviewState("PR1").current
+    if (sourceApproval === undefined) throw new Error("expected source approval")
+    const recut = {
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: HEAD_2,
+      baseSha: "b".repeat(40),
+      treeSha: "c".repeat(40),
+      patchId,
+      reviewCarried: true,
+      certificate: "frozen-code-carrier-v1",
+      sources: [{ repo: ".", fromHeadSha: HEAD_1, toHeadSha: HEAD_2, patchId, rangeDiff: "=" }],
+    } as const
+    await app.bays.recut({
+      ...recut,
+      expectedCurrent: { revision: 1, headSha: HEAD_1, effectiveReview: sourceApproval, checksPassed: false },
+    })
+    expect(currentPRRev(app.bays.pr("PR1")!).recut).toMatchObject({ certificate: "frozen-code-carrier-v1" })
+    const carriedApproval = app.bays.reviewState("PR1").current
+    if (carriedApproval === undefined) throw new Error("expected carried approval")
+    await app.bays.review({ pr: "PR1", by: "@cto", decision: "reject", ref: "rejected-r2" })
+    const before = await Array.fromAsync(app.events())
+
+    await expect(
+      app.bays.recut({
+        ...recut,
+        expectedCurrent: { revision: 2, headSha: HEAD_2, effectiveReview: carriedApproval, checksPassed: false },
+      }),
+    ).rejects.toMatchObject({ failure: { kind: "refusal", code: "recut-review-changed" } })
+    expect(await Array.fromAsync(app.events())).toEqual(before)
+    expect(app.bays.pr("PR1")?.revs).toHaveLength(2)
+  })
+
+  it("atomically refuses a non-force certified recut when current checks become passing", async () => {
+    await using app = (await createHarness()).app
+    const patchId = "d".repeat(40)
+    await app.bays.submit({ branch: "issue/certified-green-race", headSha: HEAD_1, baseSha: BASE, draft: true })
+    await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: "approved-green-race" })
+    const approval = app.bays.reviewState("PR1").current
+    if (approval === undefined) throw new Error("expected current approval")
+    await app.bays.recordAdmission({
+      pr: "PR1",
+      revision: 1,
+      headSha: HEAD_1,
+      admission: { status: "passed", baseSha: BASE, steps: [] },
+    })
+    const before = await Array.fromAsync(app.events())
+
+    await expect(
+      app.bays.recut({
+        pr: "PR1",
+        fromRevision: 1,
+        headSha: HEAD_2,
+        baseSha: "b".repeat(40),
+        treeSha: "c".repeat(40),
+        patchId,
+        reviewCarried: true,
+        certificate: "frozen-code-carrier-v1",
+        sources: [{ repo: ".", fromHeadSha: HEAD_1, toHeadSha: HEAD_2, patchId, rangeDiff: "=" }],
+        expectedCurrent: { revision: 1, headSha: HEAD_1, effectiveReview: approval, checksPassed: false },
+      }),
+    ).rejects.toMatchObject({ failure: { kind: "refusal", code: "recut-would-discard-green" } })
+    expect(await Array.fromAsync(app.events())).toEqual(before)
+    expect(app.bays.pr("PR1")?.revs).toHaveLength(1)
+  })
+
+  it.each([
+    {
+      name: "missing",
+      reviewCarried: true,
+      sources: [
+        {
+          repo: "vendor/component",
+          fromHeadSha: HEAD_1,
+          toHeadSha: HEAD_2,
+          patchId: "d".repeat(40),
+          rangeDiff: "=",
+        },
+      ],
+    },
+    {
+      name: "duplicate",
+      reviewCarried: true,
+      sources: [
+        { repo: ".", fromHeadSha: HEAD_1, toHeadSha: HEAD_2, patchId: "d".repeat(40), rangeDiff: "=" },
+        { repo: ".", fromHeadSha: HEAD_1, toHeadSha: HEAD_2, patchId: "d".repeat(40), rangeDiff: "=" },
+      ],
+    },
+    {
+      name: "wrong source head",
+      reviewCarried: true,
+      sources: [{ repo: ".", fromHeadSha: "f".repeat(40), toHeadSha: HEAD_2, patchId: "d".repeat(40), rangeDiff: "=" }],
+    },
+    {
+      name: "wrong candidate head",
+      reviewCarried: true,
+      sources: [{ repo: ".", fromHeadSha: HEAD_1, toHeadSha: "f".repeat(40), patchId: "d".repeat(40), rangeDiff: "=" }],
+    },
+    {
+      name: "uncarried review",
+      reviewCarried: false,
+      sources: [{ repo: ".", fromHeadSha: HEAD_1, toHeadSha: HEAD_2, patchId: "d".repeat(40), rangeDiff: "=" }],
+    },
+  ] as const)("refuses a certified recut with a $name root source mapping", async ({ reviewCarried, sources }) => {
+    await using app = (await createHarness()).app
+    await app.bays.submit({ branch: "issue/certified-root", headSha: HEAD_1, baseSha: BASE, draft: true })
+    await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: "approved-root" })
+    const approval = app.bays.reviewState("PR1").current
+    if (approval === undefined) throw new Error("expected current approval")
+
+    await expect(
+      app.bays.recut({
+        pr: "PR1",
+        fromRevision: 1,
+        headSha: HEAD_2,
+        baseSha: "b".repeat(40),
+        treeSha: "c".repeat(40),
+        patchId: "d".repeat(40),
+        reviewCarried,
+        certificate: "frozen-code-carrier-v1",
+        sources,
+        expectedCurrent: { revision: 1, headSha: HEAD_1, effectiveReview: approval, checksPassed: false },
+      }),
+    ).rejects.toMatchObject({ failure: { kind: "refusal", code: "recut-certificate-invalid" } })
+    expect(app.bays.pr("PR1")?.revs).toHaveLength(1)
   })
 
   it("atomically records admitted-to-refreshed recuts without overwriting a newer authored revision", async () => {
