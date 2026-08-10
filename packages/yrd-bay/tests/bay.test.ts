@@ -25,6 +25,7 @@ import {
   normalizeV2By,
   normalizeV2Submitter,
   prDeliveryState,
+  projectBranchLifecycles,
   resolveBase,
   type DeprovisionedBay,
   type PR,
@@ -1279,6 +1280,81 @@ describe("withBays", () => {
     })
   })
 
+  it("keeps the exact historical revision submitter after the PR is recut", async () => {
+    const harness = createWorkspaceHarness()
+    await using app = await createApp(harness.adapter, undefined, "@dev/3")
+    const opened = await app.bays.open({ name: "recut-lifecycle", by: "yrd:4242" })
+    await finishJob(app, opened)
+    await app.bays.certifyHandoff({
+      bay: "B1",
+      branch: "issue/recut-lifecycle",
+      headSha: HEAD_1,
+      evidence: "@km/handoff/recut-lifecycle.md",
+    })
+    await app.bays.intake({ bay: "B1", headSha: HEAD_1 })
+
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: HEAD_2,
+      baseSha: "b".repeat(40),
+      treeSha: "c".repeat(40),
+      patchId: "d".repeat(40),
+      reviewCarried: false,
+    })
+
+    const snapshot = app.state().bays
+    const recorded = snapshot.prs.PR1
+    if (recorded === undefined) throw new Error("expected PR1")
+    const { bay: _bay, ...branchRecorded } = recorded
+    const [lifecycle] = projectBranchLifecycles({
+      ...snapshot,
+      prs: { ...snapshot.prs, PR1: branchRecorded },
+    })
+
+    expect(lifecycle).toMatchObject({
+      bay: "B1",
+      branch: "issue/recut-lifecycle",
+      headSha: HEAD_1,
+      by: "yrd:4242",
+      submitter: "@dev/3",
+      status: "handoff-ready",
+    })
+
+    const firstRevision = branchRecorded.revs[0]
+    if (firstRevision === undefined) throw new Error("expected revision 1")
+    const [ambiguous] = projectBranchLifecycles({
+      ...snapshot,
+      prs: {
+        ...snapshot.prs,
+        PR1: branchRecorded,
+        PR2: {
+          ...branchRecorded,
+          id: "PR2",
+          revs: [{ ...firstRevision, submitter: "@dev/4" }],
+        },
+      },
+    })
+    expect(ambiguous).not.toHaveProperty("submitter")
+
+    const closing = await app.bays.close({ bay: "B1", withdraw: true })
+    await finishJob(app, closing)
+    const archivedSnapshot = app.state().bays
+    const archivedPr = archivedSnapshot.prs.PR1
+    if (archivedPr === undefined) throw new Error("expected archived PR1")
+    const { bay: _archivedBay, ...archivedBranchPr } = archivedPr
+    expect(
+      projectBranchLifecycles({
+        ...archivedSnapshot,
+        prs: { ...archivedSnapshot.prs, PR1: archivedBranchPr },
+      })[0],
+    ).toMatchObject({
+      headSha: HEAD_1,
+      status: "archived",
+      submitter: "@dev/3",
+    })
+  })
+
   it("refuses to open a Bay without explicit process ownership", async () => {
     await using app = (await createHarness()).app
 
@@ -1310,8 +1386,9 @@ describe("withBays", () => {
       status: "open",
       headSha: HEAD_1,
       by: "yrd:4242",
+      submitter: "operator",
     })
-    expect(app.bays.branchLifecycles()[0]).not.toHaveProperty("submitter")
+    expect(app.bays.branchLifecycles()[0]).not.toMatchObject({ submitter: "yrd:4242" })
   })
 
   it("keeps a replay-compatible close without archive proof explicitly unmanaged", async () => {

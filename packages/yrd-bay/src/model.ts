@@ -905,6 +905,17 @@ export function emptyBaysState(): BaysState {
   return { byId: {}, prs: {}, receipts: {} }
 }
 
+function submitterForLifecycleHead(state: BaysState, bay: Bay, headSha: string | undefined): string | undefined {
+  if (headSha === undefined) return undefined
+  const associated = prForBay(state, bay.id)
+  const candidates =
+    associated === undefined ? Object.values(state.prs).filter((pr) => pr.branch === bay.branch) : [associated]
+  const revisions = candidates.flatMap((pr) => pr.revs.filter((revision) => revision.head === headSha))
+  if (revisions.length === 0 || revisions.some((revision) => revision.submitter === undefined)) return undefined
+  const submitters = new Set(revisions.map((revision) => revision.submitter))
+  return submitters.size === 1 ? revisions[0]?.submitter : undefined
+}
+
 /** Projects the current lifecycle of every Bay-registered work branch from the
  * same journal-backed aggregate used by the Bay and PR APIs. */
 export function projectBranchLifecycles(state: BaysState): readonly BranchLifecycle[] {
@@ -913,7 +924,7 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
       const pr = prForBay(state, bay.id)
       const current = pr === undefined ? undefined : currentPRRev(pr)
       const lifecycleHead = bay.archive?.headSha ?? bay.headSha
-      const submitter = lifecycleHead !== undefined && current?.head === lifecycleHead ? current.submitter : undefined
+      const submitter = submitterForLifecycleHead(state, bay, lifecycleHead)
       const base = {
         bay: bay.id,
         name: bay.name,
