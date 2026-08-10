@@ -179,8 +179,8 @@ export async function requireImplicitRecutBranchFreshness(
     `yrd: PR '${pr.id}' recorded revision ${recorded.n} head '${recorded.head}', but live branch ` +
       `'${pr.branch}' is '${liveHead}'. Recut-by-PR is reproducible and will not silently replay stale work.\n` +
       `${await commitRangeEvidence(services, io, recorded.head, liveHead)}\n` +
-      `To record the live head for fresh review:\n  yrd pr ${recordVerb} ${pr.branch}\n` +
-      `  yrd pr recut ${pr.id} --preflight${queueFlag}\n` +
+      `To record the live head and finish the requested recut:\n  yrd pr ${recordVerb} ${pr.branch}\n` +
+      `  yrd pr recut ${pr.id}${queueFlag}\n` +
       `To deliberately replay the recorded revision:\n` +
       `  yrd pr recut ${pr.id} --revision ${recorded.n} --preflight${queueFlag}`,
   )

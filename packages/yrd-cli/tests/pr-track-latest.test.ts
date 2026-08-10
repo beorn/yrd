@@ -235,9 +235,9 @@ function staleHeadRefusal(revision: number, recordedHead: string): string {
     `'${BRANCH}' is '${LIVE_HEAD}'. Recut-by-PR is reproducible and will not silently replay stale work.\n` +
     "commits between: supplied observer did not enumerate the range\n" +
     `inspect: git log --oneline ${recordedHead}..${LIVE_HEAD}\n` +
-    "To record the live head for fresh review:\n" +
+    "To record the live head and finish the requested recut:\n" +
     `  yrd pr submit ${BRANCH}\n` +
-    "  yrd pr recut PR1 --preflight --queue\n" +
+    "  yrd pr recut PR1 --queue\n" +
     "To deliberately replay the recorded revision:\n" +
     `  yrd pr recut PR1 --revision ${String(revision)} --preflight --queue`
   )
@@ -288,6 +288,53 @@ describe("implicit recut of a moved branch", () => {
     expect(failureMessage(refused.stderr())).toBe(staleHeadRefusal(1, RECORDED_HEAD))
     expect((await Array.fromAsync(app.events())).length).toBe(before)
     expect(currentPRRev(app.bays.pr("PR1")!).n).toBe(1)
+  })
+
+  it("prints a complete recovery that records and queues a moved draft without another remedy", async () => {
+    const app = await createCliApp()
+    let head = RECORDED_HEAD
+    const created = outputIO(() => head)
+    expect(
+      await runYrd(app, yrd("pr", "create", BRANCH, "--issue", "km#22454", "--json"), created.io, noRequiredChecks),
+      created.stderr(),
+    ).toBe(0)
+
+    head = LIVE_HEAD
+    const refused = outputIO(() => head)
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), refused.io)).toBe(1)
+    expect(failureMessage(refused.stderr())).toContain(
+      "To record the live head and finish the requested recut:\n" +
+        `  yrd pr create ${BRANCH}\n` +
+        "  yrd pr recut PR1 --queue",
+    )
+    expect(failureMessage(refused.stderr())).not.toContain("yrd pr recut PR1 --preflight --queue")
+
+    const refreshed = outputIO(() => head)
+    expect(
+      await runYrd(app, yrd("pr", "create", BRANCH, "--json"), refreshed.io, noRequiredChecks),
+      refreshed.stderr(),
+    ).toBe(0)
+    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: LIVE_HEAD })
+
+    const recut = vi.fn(async () => ({
+      headSha: RECUT_HEAD,
+      baseSha: TARGET_BASE_SHA,
+      treeSha: RECUT_TREE,
+      patchId: OTHER_PATCH_ID,
+      unchanged: false,
+    }))
+    const queued = outputIO(() => head)
+    expect(
+      await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), queued.io, {
+        ...noRequiredChecks,
+        recut: { recut },
+      }),
+      queued.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(queued.stdout())).toMatchObject({ pr: "PR1", revision: 3 })
+    expect(recut).toHaveBeenCalledWith(expect.objectContaining({ id: "PR1", revision: 2, headSha: LIVE_HEAD }))
+    expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
+    expect(app.bays.checksRequested("PR1")).toBe(true)
   })
 
   it("re-records the live head for a TRACKED PR and recuts the fresh revision", async () => {
