@@ -32,6 +32,7 @@ import { withJobs, type JobResult } from "@yrd/job"
 import { withMerge, withQueue, withStep, type PRShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
 import { runYrd, type PruneGitFacts, type YrdCliIO } from "@yrd/cli"
 import { createLogger } from "loggily"
+import { provePrLandings } from "../src/pr-landing.ts"
 import { createPruneGitFacts } from "../src/pr-withdraw.ts"
 import { PRListView, type PRListRow } from "../src/queue-status-view.tsx"
 
@@ -278,6 +279,70 @@ describe("pr list bounded-window disclosure (22376)", () => {
 })
 
 describe("pr list landing reconciliation (22376)", () => {
+  it("proves a regenerated carrier from the journal landing commit, not the absent authored head", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/regenerated", headSha: LANDED_HEAD, base: "main", baseSha: BASE_SHA })
+    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
+    await app.queue.run({ prs: ["PR1"] }, { runner: "pr-list-test", leaseMs: 60_000 })
+
+    const result = await provePrLandings(app.bays.prs(), {
+      ...outputIO().io,
+      pruneGit: () =>
+        landingGit({
+          resolveCommit: (ref) =>
+            ref === "origin/main" || ref === "main" ? BASE_SHA : ref === MERGED_SHA ? MERGED_SHA : undefined,
+          isAncestor: (ancestor, descendant) => ancestor === MERGED_SHA && descendant === BASE_SHA,
+        }),
+    })
+
+    expect(result.verdicts.get("PR1")).toEqual({
+      status: "proven",
+      baseSha: BASE_SHA,
+      landingSha: MERGED_SHA,
+    })
+    expect(result.warnings).toEqual([])
+  })
+
+  it("returns typed non-proof and unknown verdicts without ancestry fallback", async () => {
+    const direct = await createCliApp()
+    await direct.bays.submit({ branch: "topic/direct", headSha: LANDED_HEAD, base: "main", baseSha: BASE_SHA })
+    const noJournal = await provePrLandings(direct.bays.prs(), {
+      ...outputIO().io,
+      pruneGit: () =>
+        landingGit({
+          resolveCommit: () => {
+            throw new Error("a PR without a journal landing must not probe Git")
+          },
+        }),
+    })
+    expect(noJournal.verdicts.get("PR1")).toEqual({ status: "not-proven", reason: "journal-missing" })
+
+    const integrated = await createCliApp()
+    await integrated.bays.submit({ branch: "topic/integrated", headSha: LANDED_HEAD, base: "main", baseSha: BASE_SHA })
+    await integrated.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
+    await integrated.queue.run({ prs: ["PR1"] }, { runner: "pr-list-test", leaseMs: 60_000 })
+
+    const offBase = await provePrLandings(integrated.bays.prs(), {
+      ...outputIO().io,
+      pruneGit: () => landingGit({ isAncestor: () => false }),
+    })
+    expect(offBase.verdicts.get("PR1")).toEqual({
+      status: "not-proven",
+      reason: "landing-not-on-base",
+      baseSha: BASE_SHA,
+      landingSha: MERGED_SHA,
+    })
+
+    const unknown = await provePrLandings(integrated.bays.prs(), {
+      ...outputIO().io,
+      pruneGit: () => landingGit({ resolveCommit: () => undefined }),
+    })
+    expect(unknown.verdicts.get("PR1")).toEqual({ status: "unknown", reason: "base-unresolved", base: "main" })
+    expect(unknown.warnings).toEqual([
+      "yrd: base 'main' did not resolve here, so 1 journal landing could not be checked against it",
+    ])
+  })
+
   it("does not call a directly pushed withdrawal landed without a queue journal row", async () => {
     const app = await createCliApp()
     await app.bays.submit({ branch: "topic/landed", headSha: LANDED_HEAD, base: "main", baseSha: BASE_SHA })
