@@ -484,6 +484,186 @@ describe("pr withdraw journal replay", () => {
 })
 
 describe("pr recut --preflight", () => {
+  it("refuses --apply on SUBSUMED-WITHDRAW with the exact withdrawal decision", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({
+      branch: "specimen/subsumed-apply",
+      headSha: HEAD_SHA,
+      base: "main",
+      baseSha: BASE_SHA,
+    })
+    const before = (await Array.fromAsync(app.events())).length
+    const output = outputIO({
+      pruneGit: () =>
+        recutPreflightGit({
+          patchMatch: () => ({ patchId: PR380_PATCH_ID, targetSha: PR380_LANDING_SHA }),
+        }),
+    })
+
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--queue", "--apply", "--json"), output.io)).toBe(
+      1,
+    )
+    expect(JSON.parse(output.stderr())).toMatchObject({
+      failure: {
+        cause:
+          `PR 'PR1' preflight verdict SUBSUMED-WITHDRAW is an operator decision; ` +
+          `run: yrd pr withdraw PR1 --reason "superseded: content already in ${TARGET_BASE_SHA}"`,
+      },
+    })
+    expect((await Array.fromAsync(app.events())).length).toBe(before)
+  })
+
+  it("applies RECUT and records a re-derivable receipt", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/apply", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    const recutInputs: unknown[] = []
+    const output = outputIO({
+      pruneGit: () =>
+        recutPreflightGit({
+          mergeTree: () => OTHER_TREE,
+          patchMatch: () => ({ patchId: PR476_PATCH_ID }),
+        }),
+    })
+
+    expect(
+      await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--queue", "--apply", "--json"), output.io, {
+        recut: {
+          recut: (input) => {
+            recutInputs.push(input)
+            return Promise.resolve({
+              headSha: HEAD2_SHA,
+              baseSha: TARGET_BASE_SHA,
+              treeSha: OTHER_TREE,
+              patchId: PR476_PATCH_ID,
+              unchanged: false,
+            })
+          },
+        },
+      }),
+      output.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(output.stdout())).toEqual({
+      command: "pr.recut.apply",
+      pr: "PR1",
+      verdict: "RECUT",
+      executed: "yrd pr recut PR1 --queue",
+      result: { revision: 2, headSha: HEAD2_SHA, delivery: "submitted" },
+    })
+    expect(recutInputs).toEqual([expect.objectContaining({ id: "PR1", revision: 1, headSha: HEAD_SHA })])
+    expect(currentPRRev(app.state().bays.prs.PR1!)).toMatchObject({ n: 2, head: HEAD2_SHA })
+    expect(app.bays.checksRequested("PR1")).toBe(true)
+  })
+
+  it("applies only the computed RECUT-FORCE verdict", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/apply-force", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.requestChecks({ pr: "PR1" })
+    await app.queue.admit({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
+    expect(app.queue.eligibility("PR1").checks.status).toBe("passed")
+    const output = outputIO({
+      pruneGit: () =>
+        recutPreflightGit({
+          mergeTree: () => OTHER_TREE,
+          patchMatch: () => ({ patchId: PR476_PATCH_ID }),
+        }),
+    })
+
+    expect(
+      await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--queue", "--apply", "--json"), output.io, {
+        recut: {
+          recut: () =>
+            Promise.resolve({
+              headSha: HEAD2_SHA,
+              baseSha: TARGET_BASE_SHA,
+              treeSha: OTHER_TREE,
+              patchId: PR476_PATCH_ID,
+              unchanged: false,
+            }),
+        },
+      }),
+      output.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      verdict: "RECUT-FORCE",
+      executed: "yrd pr recut PR1 --queue --force",
+      result: { revision: 2, headSha: HEAD2_SHA, delivery: "submitted" },
+    })
+  })
+
+  it("is idempotent: a second --apply records FRESH-NOOP without recutting", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/apply-twice", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    let recutCalls = 0
+    const services = {
+      recut: {
+        recut: () => {
+          recutCalls += 1
+          return Promise.resolve({
+            headSha: HEAD2_SHA,
+            baseSha: TARGET_BASE_SHA,
+            treeSha: OTHER_TREE,
+            patchId: PR476_PATCH_ID,
+            unchanged: false,
+          })
+        },
+      },
+    }
+    const first = outputIO({
+      pruneGit: () =>
+        recutPreflightGit({
+          mergeTree: () => OTHER_TREE,
+          patchMatch: () => ({ patchId: PR476_PATCH_ID }),
+        }),
+    })
+    expect(
+      await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--queue", "--apply", "--json"), first.io, services),
+      first.stderr(),
+    ).toBe(0)
+
+    const repeated = outputIO({
+      pruneGit: () =>
+        recutPreflightGit({
+          pinDistance: () => ({ sourceOnly: 0, targetOnly: 0 }),
+          mergeTree: () => OTHER_TREE,
+          patchMatch: () => ({ patchId: PR476_PATCH_ID }),
+        }),
+    })
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "recut", "PR1", "--preflight", "--queue", "--apply", "--json"),
+        repeated.io,
+        services,
+      ),
+      repeated.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(repeated.stdout())).toMatchObject({
+      verdict: "FRESH-NOOP",
+      executed: "yrd pr ready PR1",
+      result: { revision: 2, headSha: HEAD2_SHA, delivery: "submitted" },
+    })
+    expect(recutCalls).toBe(1)
+  })
+
+  it.each([
+    { flags: ["--apply", "--queue"], reason: "--apply requires --preflight and --queue" },
+    { flags: ["--apply", "--preflight"], reason: "--apply requires --preflight and --queue" },
+    {
+      flags: ["--apply", "--preflight", "--queue", "--revision", "1"],
+      reason: "--apply computes the current revision; it cannot combine with --revision",
+    },
+    {
+      flags: ["--apply", "--preflight", "--queue", "--force"],
+      reason: "--apply computes whether force is safe; it cannot combine with --force",
+    },
+  ])("refuses unsafe --apply combination $flags", async ({ flags, reason }) => {
+    const app = await createCliApp()
+    const output = outputIO()
+
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", ...flags), output.io)).toBe(2)
+    expect(output.stderr()).toContain(reason)
+  })
+
   it("refuses PR1640's recorded revision after its reviewed branch moves unless replay is explicit", async () => {
     const app = await createCliApp()
     await app.bays.submit({
@@ -502,6 +682,11 @@ describe("pr recut --preflight", () => {
             : ref === BASE_SHA || ref === PR1640_RECORDED_HEAD
               ? ref
               : undefined,
+      treeOf: (sha) => {
+        if (sha === TARGET_BASE_SHA) return BASE_TREE
+        if (sha === PR1640_RECORDED_HEAD || sha === PR1640_LIVE_HEAD) return OTHER_TREE
+        throw new Error(`unexpected tree lookup for ${sha}`)
+      },
       mergeTree: () => OTHER_TREE,
       patchMatch: () => ({ patchId: PR476_PATCH_ID }),
     })

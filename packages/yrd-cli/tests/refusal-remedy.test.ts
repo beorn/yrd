@@ -13,8 +13,8 @@ function authoredGitlink(pr = PR): { code: string; message: string } {
     code: "authored-gitlink",
     message:
       `yrd: PR '${pr}' changes generated-only gitlinks [km, ag]; authored root branches use ` +
-      `'yrd pr submit <branch>', then 'yrd pr recut ${pr} --preflight --queue' and run its exact next command ` +
-      "on that same PR; no composition manifest or manual triage is needed",
+      `'yrd pr submit <branch>', then 'yrd pr recut ${pr} --preflight --queue --apply'; ` +
+      "no composition manifest or manual triage is needed",
   }
 }
 
@@ -24,16 +24,10 @@ describe("refusal remedy classification — self-applicable vs judgment-required
 
     expect(remedy.kind).toBe("self-applicable")
     if (remedy.kind !== "self-applicable") return
-    expect(remedy.steps).toEqual([
-      { verb: "submit", branch: "task/22474" },
-      { verb: "recut", pr: PR, preflight: true, queue: true, force: false },
-    ])
+    expect(remedy.steps).toEqual([{ verb: "recut", pr: PR, preflight: true, apply: true, queue: true, force: false }])
     // The applied command is logged VERBATIM, with the branch placeholder the
     // printed remedy carries resolved to the PR's real branch.
-    expect(remedy.steps.map(formatRemedyCommand)).toEqual([
-      "yrd pr submit task/22474",
-      `yrd pr recut ${PR} --preflight --queue`,
-    ])
+    expect(remedy.steps.map(formatRemedyCommand)).toEqual([`yrd pr recut ${PR} --preflight --queue --apply`])
   })
 
   it("keeps a draft carrier on the create path the printed remedy names for it", () => {
@@ -51,7 +45,7 @@ describe("refusal remedy classification — self-applicable vs judgment-required
         code: "composition-invalid",
         message:
           `yrd: PR '${PR}' composition manifest names no source; authored root branches use ` +
-          `'yrd pr submit <branch>', then 'yrd pr recut ${PR} --preflight --queue' and run its exact next command`,
+          `'yrd pr submit <branch>', then 'yrd pr recut ${PR} --preflight --queue --apply'`,
       },
       { branch: "task/22474", delivery: "submitted" },
     )

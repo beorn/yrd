@@ -110,8 +110,7 @@ function refuseAuthoredGitlink(refused: ReadonlySet<string>): CandidatePreparer 
         code: "authored-gitlink",
         message:
           `yrd: PR '${poisoned.id}' changes generated-only gitlinks [km]; authored root branches use ` +
-          `'yrd pr submit <branch>', then 'yrd pr recut ${poisoned.id} --preflight --queue' and run its exact ` +
-          "next command on that same merge request",
+          `'yrd pr submit <branch>', then 'yrd pr recut ${poisoned.id} --preflight --queue --apply'`,
       })
     }
     const { prs: _prs, ...candidate } = input

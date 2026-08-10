@@ -4585,7 +4585,7 @@ describe("Queue", () => {
           run: "R1",
           receipt: {
             code: "queue-submit-authority-consumed",
-            message: expect.stringContaining(`yrd pr recut ${pr.id} --preflight --queue`),
+            message: expect.stringContaining(`yrd pr recut ${pr.id} --preflight --queue --apply`),
           },
         },
       },

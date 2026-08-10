@@ -14,7 +14,7 @@ export type RemedyStep =
   /** Re-record the branch's corrected head onto the PR. `create` keeps a draft a
    * draft; `submit` is the state-agnostic spelling. */
   | Readonly<{ verb: "submit" | "create"; branch: string }>
-  | Readonly<{ verb: "recut"; pr: string; preflight: boolean; queue: boolean; force: boolean }>
+  | Readonly<{ verb: "recut"; pr: string; preflight: boolean; apply: boolean; queue: boolean; force: boolean }>
 
 export type RefusalRemedy =
   | Readonly<{ kind: "self-applicable"; steps: readonly RemedyStep[] }>
@@ -34,9 +34,10 @@ const BRANCH_PLACEHOLDER = "<branch>"
 function parseRecut(argv: readonly string[]): RemedyStep | undefined {
   const [pr, ...flags] = argv
   if (pr === undefined || pr.startsWith("-")) return undefined
-  const parsed = { verb: "recut" as const, pr, preflight: false, queue: false, force: false }
+  const parsed = { verb: "recut" as const, pr, preflight: false, apply: false, queue: false, force: false }
   for (const flag of flags) {
     if (flag === "--preflight") parsed.preflight = true
+    else if (flag === "--apply") parsed.apply = true
     else if (flag === "--queue") parsed.queue = true
     else if (flag === "--force") parsed.force = true
     // An unrecognised flag makes the command something other than the drill this
@@ -69,8 +70,9 @@ export function formatRemedyCommand(step: RemedyStep): string {
     return [
       `yrd pr recut ${step.pr}`,
       ...(step.preflight ? ["--preflight"] : []),
-      ...(step.force ? ["--force"] : []),
       ...(step.queue ? ["--queue"] : []),
+      ...(step.apply ? ["--apply"] : []),
+      ...(step.force ? ["--force"] : []),
     ].join(" ")
   }
   return `yrd pr ${step.verb} ${step.branch}`

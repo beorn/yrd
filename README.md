@@ -481,7 +481,7 @@ yrd pr list [--base <branch>] [--state <state>] [--issue <ref>]
   [--needs-review [--reviewer <reviewer>]] [--json]
 yrd pr edit <selector> [--issue <ref>] [--note <text>]
   [--title <text>] [--description <text>] [--track | --untrack] [--json]
-yrd pr recut <selector> [--revision <number>] [--preflight] [--queue]
+yrd pr recut <selector> [--revision <number>] [--preflight] [--apply] [--queue]
   [--force] [--json]
 yrd pr ready <selector> [--json]
 yrd pr review <selector> (--approve | --reject)
@@ -565,7 +565,7 @@ both explicit paths:
 ```bash
 # Current intent: register the new head, reopening revision-bound review.
 yrd pr submit <branch>
-yrd pr recut <PR> --preflight --queue
+yrd pr recut <PR> --preflight --queue --apply
 
 # Historical intent: deliberately replay the recorded immutable revision.
 yrd pr recut <PR> --revision <number> --preflight --queue
@@ -588,6 +588,16 @@ whitespace. Missing objects, diverged bases, and composed source payloads fail
 closed instead of producing a guessed verdict. Pass `--queue` to include the
 authoritative check request in the recommended next command.
 
+`pr recut --preflight --queue --apply` executes that same pinned decision
+without a second command or a second read. `RECUT`, `RECUT-FORCE`, and
+`FRESH-NOOP` apply their queue-safe action and return a receipt containing the
+verdict, executed command, and resulting revision/head. `SUBSUMED-WITHDRAW`
+still refuses with the exact withdrawal decision because retiring a delivery
+requires operator judgment. `--apply` cannot combine with `--revision` or
+caller-supplied `--force`; both authority choices come only from the preflight
+computed for the current revision. Repeating the command after a successful
+recut returns `FRESH-NOOP` without another recut.
+
 The resident Queue owns both tracked-source and base freshness. It first
 records and preflights branch movement for opted-in PRs, then, before each run
 snapshot, compares every requested revision's immutable base with the
@@ -609,7 +619,7 @@ decides; later resident cycles do not repeat the same warning, while a new
 branch push creates a new revision and is evaluated normally.
 Separately, selectorless composition ejects a PR whose exact submit/check
 authority was already consumed, records `pr/needs-author` with the refusal code
-and an executable `pr recut --preflight --queue` remedy, and keeps draining its
+and an executable `pr recut --preflight --queue --apply` remedy, and keeps draining its
 healthy peers. An explicitly targeted run still fails loud after recording the
 same author receipt.
 
@@ -624,7 +634,7 @@ budget.
 
 `yrd queue run --once` keeps that settled refusal visible instead of reporting
 `Queue idle`: human output names the refusal and
-`yrd pr recut <PR> --preflight --queue`, while JSON includes the same canonical
+`yrd pr recut <PR> --preflight --queue --apply`, while JSON includes the same canonical
 eligibility fact in `blocked`. A targeted one-shot reports blockers only for its
 selected PRs; a selectorless pass reports them alongside any healthy Runs that
 made progress.
@@ -638,8 +648,7 @@ attaching a composition manifest:
 # `submit`, which no state refuses.
 yrd pr create <branch>   # draft (pushed) PR
 yrd pr submit <branch>   # submitted, needs-author, rejected, reopened
-yrd pr recut <PR> --preflight --queue
-# Run the exact `next:` command printed by preflight.
+yrd pr recut <PR> --preflight --queue --apply
 ```
 
 A terminal PR (integrated, already-landed, withdrawn, canceled) cannot be
@@ -716,8 +725,7 @@ git -C <submodule> merge <authoritative-pin>
 git -C <submodule> push -u origin HEAD
 git add <submodule> && git commit -m "fix(yrd): compose <submodule> pins"
 yrd pr submit <branch>   # or `yrd pr create <branch>` while the PR is a draft
-yrd pr recut <PR> --preflight --queue
-# Run the exact `next:` command printed by preflight.
+yrd pr recut <PR> --preflight --queue --apply
 ```
 
 This recipe is deliberately NOT a machine remedy. Its merge composes two

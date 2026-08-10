@@ -123,7 +123,7 @@ function recordCommand(delivery: PRDeliveryState | undefined): string {
 
 function recutSteps(pr: string, delivery: PRDeliveryState | undefined): readonly string[] {
   if (recutRefusedByDelivery(delivery)) return []
-  return [`yrd pr recut ${pr} --preflight --queue`]
+  return [`yrd pr recut ${pr} --preflight --queue --apply`]
 }
 
 function redeliverySteps(pr: string, delivery: PRDeliveryState | undefined): readonly string[] {

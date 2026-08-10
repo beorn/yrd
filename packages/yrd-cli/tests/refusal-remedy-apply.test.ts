@@ -19,7 +19,7 @@ type LogCall = Readonly<{ message: string; props: Record<string, unknown> }>
 function authoredGitlinkReason(pr: string): string {
   return (
     `yrd: PR '${pr}' changes generated-only gitlinks [km]; authored root branches use 'yrd pr submit <branch>', ` +
-    `then 'yrd pr recut ${pr} --preflight --queue' and run its exact next command on that same PR; ` +
+    `then 'yrd pr recut ${pr} --preflight --queue --apply' on that same PR; ` +
     "no composition manifest or manual triage is needed"
   )
 }
@@ -171,15 +171,11 @@ describe("resident self-applied refusal remedy — the robot presses the button 
         revision: 1,
         code: "authored-gitlink",
         count: 3,
-        commands: [
-          "yrd pr submit task/22474-carrier",
-          "yrd pr recut PR1791 --preflight --queue",
-          "yrd pr recut PR1791 --queue",
-        ],
+        commands: ["yrd pr recut PR1791 --preflight --queue --apply", "yrd pr recut PR1791 --queue"],
         verdict: "RECUT",
       },
     ])
-    expect(h.ops()).toContain("submitSelection")
+    expect(h.ops()).not.toContain("submitSelection")
     expect(h.ops()).toContain("services.recut")
     expect(h.infos).toContainEqual(
       expect.objectContaining({
@@ -187,11 +183,7 @@ describe("resident self-applied refusal remedy — the robot presses the button 
           action: "queue-refusal-remedy-applied",
           pr: "PR1791",
           verdict: "RECUT",
-          commands: [
-            "yrd pr submit task/22474-carrier",
-            "yrd pr recut PR1791 --preflight --queue",
-            "yrd pr recut PR1791 --queue",
-          ],
+          commands: ["yrd pr recut PR1791 --preflight --queue --apply", "yrd pr recut PR1791 --queue"],
         }),
       }),
     )
@@ -242,7 +234,7 @@ describe("resident self-applied refusal remedy — the robot presses the button 
       status: "failed",
       pr: "PR1791",
       code: "authored-gitlink",
-      resolution: ["yrd pr submit <branch>", "yrd pr recut PR1791 --preflight --queue"],
+      resolution: ["yrd pr recut PR1791 --preflight --queue --apply"],
     })
     expect(h.warns).toContainEqual(
       expect.objectContaining({ props: expect.objectContaining({ action: "queue-refusal-remedy-failed" }) }),

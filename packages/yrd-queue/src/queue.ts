@@ -2275,7 +2275,7 @@ function createQueue<Shape extends PRShape>(
                 pr: gap.pr,
                 code: `queue-${gap.kind}-authority-${gap.reason}`,
                 reason: gapReason,
-                remedy: `yrd pr recut ${gap.pr} --preflight --queue`,
+                remedy: `yrd pr recut ${gap.pr} --preflight --queue --apply`,
               })
               // A `consumed` gap ejects with a durable `pr/needs-author` receipt,
               // so it leaves a trace and stops repeating. A `missing` gap leaves
@@ -2420,7 +2420,7 @@ function createQueue<Shape extends PRShape>(
                   pr: refusal.pr,
                   code: refusal.receipt.code,
                   reason: refusal.receipt.message,
-                  remedy: `yrd pr recut ${refusal.pr} --preflight --queue`,
+                  remedy: `yrd pr recut ${refusal.pr} --preflight --queue --apply`,
                 })
                 continue
               }
@@ -3594,7 +3594,7 @@ function queueAuthorityNeedsAuthorEvent(
   const revision = pr.revs.find((candidate) => candidate.n === gap.revision && candidate.head === gap.headSha)
   if (revision === undefined) return undefined
   const code = `queue-${gap.kind}-authority-consumed`
-  const remedy = `yrd pr recut ${gap.pr} --preflight --queue`
+  const remedy = `yrd pr recut ${gap.pr} --preflight --queue --apply`
   const message =
     `yrd: PR '${gap.pr}' revision ${gap.revision} (${gap.headSha}) cannot start a queue run: ` +
     `${gap.kind} authority was consumed by queue run '${gap.consumedBy}'\nresolve: ${remedy}`
@@ -6860,7 +6860,7 @@ function prEligibility(
           code: "admission-refused",
           message:
             `merge request '${pr.id}' required checks cannot run after the entry-check failure '${admission.receipt.code}': ` +
-            `${admission.receipt.message}.\nNext: yrd pr recut ${pr.id} --preflight --queue`,
+            `${admission.receipt.message}.\nNext: yrd pr recut ${pr.id} --preflight --queue --apply`,
         })
       }
       const receipt = prNeedsAuthor(pr)?.receipt
@@ -6928,7 +6928,7 @@ function prEligibility(
         message:
           `merge request '${pr.id}' required checks cannot run after the entry-check failure '${admissionRefusal.code}': ` +
           `${admissionRefusal.reason}. ${admissionRefusal.settlement.reason}.\n` +
-          `Next: yrd pr recut ${pr.id} --preflight --queue`,
+          `Next: yrd pr recut ${pr.id} --preflight --queue --apply`,
       })
     }
     if (options.ignoreChecks !== true && checks.status === "queued") {
