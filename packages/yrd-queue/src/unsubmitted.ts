@@ -52,6 +52,22 @@ export type PayloadKind = "content" | "gitlink-only"
  * Direction is immune to whether loss shows up as an added, deleted or MODIFIED
  * file, which is why it beats counting files: a pin walked backwards usually
  * modifies content back to an older state and deletes nothing at all.
+ *
+ * CONTRACT FOR WHOEVER GATHERS THIS, and getting it wrong produces confident
+ * false alarms — two of us raised one on the same evening. **Compare pins ONLY
+ * for gitlinks the branch actually MODIFIES relative to the merge base.** The
+ * pin `git ls-tree <branch> <path>` reports is what the branch's tree records,
+ * which is NOT what a merge produces: where the branch never touched that path,
+ * git's three-way merge keeps trunk's side and the stale recorded pin is
+ * irrelevant. Verified with `merge-tree --write-tree` on a branch whose
+ * recorded pin was four commits behind trunk's — the merged tree carried
+ * TRUNK's pin.
+ *
+ * Where the branch does modify it divergently, a merge CONFLICTS rather than
+ * silently reverting ("Recursive merging with submodules currently only
+ * supports trivial cases"), which is loud and recoverable. The silent
+ * regression this field exists to catch belongs to a third case: a composer
+ * that takes the branch's TREE as authored instead of merging it.
  */
 export type PinDirection = "forward" | "aligned" | "backward" | "diverged" | "none"
 
