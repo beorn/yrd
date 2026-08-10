@@ -302,6 +302,13 @@ export type SettleAdmissionRefusalArgs = Readonly<z.infer<typeof SettleAdmission
  * exactly the PRs the queue itself calls wedged — one number, one home, so the
  * remedy can never fire earlier than the finding that justifies it. */
 export const ADMISSION_REFUSAL_LOOP_THRESHOLD = 3
+/** Fixed non-ancestral gitlink commits cannot become ancestral on a later retry. */
+const STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS = new Set(["recut-gitlink-conflict"])
+
+function structurallyPermanentAdmissionRefusal(code: string): boolean {
+  return STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS.has(code)
+}
+
 const QueueStartSchema = QueueRecordSchema.omit({ startedAt: true, failure: true })
 const ReplayQueueStartSchema = ReplayQueueRecordSchema.omit({ startedAt: true, failure: true })
 const QueueFailedPRSchema = z.preprocess(
@@ -2070,7 +2077,7 @@ function createQueue<Shape extends PRShape>(
               : requestedSelectors.map((selector) => {
                   const pr = resolvePR(snapshot.bays, selector)
                   if (pr === undefined)
-                    raiseFailure("refusal", "pr-not-found", prNotFoundMessage(snapshot.bays, selector))
+                    {raiseFailure("refusal", "pr-not-found", prNotFoundMessage(snapshot.bays, selector))}
                   return pr
                 })
           await refreshCheckIdentities(selected, resolveCycleBase)
@@ -3481,14 +3488,24 @@ function createQueueCommands(
       const pr = state.bays.prs[args.pr]
       if (pr === undefined) raiseFailure("refusal", "pr-not-found", prNotFoundMessage(state.bays, args.pr))
       const revision = currentPRRev(pr)
+      const refused = event("queue/admission/refused", {
+        ...args,
+        revision: revision.n,
+        headSha: revision.head,
+      })
       return {
-        events: [
-          event("queue/admission/refused", {
-            ...args,
-            revision: revision.n,
-            headSha: revision.head,
-          }),
-        ],
+        events: structurallyPermanentAdmissionRefusal(args.code)
+          ? [
+              refused,
+              event("queue/admission/settled", {
+                pr: args.pr,
+                revision: revision.n,
+                headSha: revision.head,
+                disposition: "needs-person",
+                reason: args.reason,
+              }),
+            ]
+          : [refused],
       }
     },
   })
@@ -5687,9 +5704,6 @@ function auditQueues(
   return { findings }
 }
 
-/** Fixed non-ancestral gitlink commits cannot become ancestral on a later retry. */
-const STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS = new Set(["recut-gitlink-conflict"])
-
 function admissionRefusalAuditFindings(
   state: DeepReadonly<RuntimeState>,
   queued: readonly DeepReadonly<PR>[],
@@ -5710,7 +5724,7 @@ function admissionRefusalAuditFindings(
     const sameCodeCount = refusal.sameCodeCount ?? refusal.count
     const sameCodeFirstAt = refusal.sameCodeFirstAt ?? refusal.firstAt
     if (refusal.settlement !== undefined || head?.id !== refusal.pr) continue
-    const threshold = STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS.has(refusal.code) ? 1 : progress.refusalCount
+    const threshold = structurallyPermanentAdmissionRefusal(refusal.code) ? 1 : progress.refusalCount
     if (sameCodeCount < threshold) continue
     const blockedMs = Math.max(0, Date.parse(refusal.lastAt) - Date.parse(sameCodeFirstAt))
     findings.push({
