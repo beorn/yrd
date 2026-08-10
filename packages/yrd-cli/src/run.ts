@@ -192,7 +192,7 @@ import { artifactLocation, directArtifacts, nestedArtifacts, uniqueArtifacts } f
 import { readInstalledBaselines } from "./installed-baseline.ts"
 import { renderRemedyStep } from "@yrd/intent"
 import { admitPinIntent } from "./intent-admission.ts"
-import { changedSubmodulePins, unpublishedChangedSubmodulePins } from "./pr-submodule-publication.ts"
+import { changedSubmodulePins, unpublishedSubmodulePins } from "./pr-submodule-publication.ts"
 import { landingAuthorityBoundary } from "./landing-authority-boundary.ts"
 // The live watch UI is loaded lazily at its single use site in watchQueue(): it is the only
 // module that pulls silvery's SplitPane, and eagerly importing it here would make every CLI
@@ -3062,30 +3062,39 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`
 }
 
-async function requirePublishedSubmodulePins(pr: PR, services: YrdCliServices, io: YrdCliIO): Promise<void> {
+async function requireQueueableSubmodulePins(pr: PR, services: YrdCliServices, io: YrdCliIO): Promise<void> {
   if (services.process === undefined) return
   const baseSha = prBaseSha(pr)
   if (baseSha === undefined) {
     raiseFailure("refusal", "pr-base-missing", `yrd: PR '${pr.id}' has no immutable base SHA`)
   }
-  const unpublished = await unpublishedChangedSubmodulePins({
+  const changed = await changedSubmodulePins({
     process: services.process,
     repo: io.cwd ?? process.cwd(),
     baseSha,
     headSha: prHead(pr),
   })
-  if (unpublished.length === 0) return
-  const detail = unpublished
-    .map(
-      ({ path, pin, repository }) =>
-        `submodule '${path}' pin '${pin}' is on zero refs fetched from origin; publish it before submitting:\n` +
-        `cd ${shellQuote(repository)} && git push origin ${shellQuote(`${pin}:refs/heads/${pr.branch}`)}`,
+  const unpublished = await unpublishedSubmodulePins({ process: services.process, pins: changed })
+  if (unpublished.length > 0) {
+    const detail = unpublished
+      .map(
+        ({ path, pin, repository }) =>
+          `submodule '${path}' pin '${pin}' is on zero refs fetched from origin; publish it before submitting:\n` +
+          `cd ${shellQuote(repository)} && git push origin ${shellQuote(`${pin}:refs/heads/${pr.branch}`)}`,
+      )
+      .join("\n")
+    raiseFailure(
+      "refusal",
+      "submodule-pin-unpublished",
+      `yrd: PR '${pr.id}' changes unpublished submodule pins:\n${detail}`,
     )
-    .join("\n")
+  }
+  if (changed.length === 0 || prComposition(pr) !== undefined || currentPRRev(pr).recut !== undefined) return
   raiseFailure(
     "refusal",
-    "submodule-pin-unpublished",
-    `yrd: PR '${pr.id}' changes unpublished submodule pins:\n${detail}`,
+    "authored-gitlink",
+    `yrd: PR '${pr.id}' changes generated-only gitlinks [${changed.map(({ path }) => path).join(", ")}]; ` +
+      "recut it before required checks",
   )
 }
 
@@ -3211,7 +3220,7 @@ async function readyPr(
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
   await runRequiredChecks(services, io)
-  await requirePublishedSubmodulePins(requiredPr(app, selector), services, io)
+  await requireQueueableSubmodulePins(requiredPr(app, selector), services, io)
   await app.bays.ready({ pr: selector })
   let pr = app.bays.pr(selector)
   if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after ready`)
@@ -3528,7 +3537,7 @@ async function executeRecutPr(
   }
   let current = requiredPr(app, pr.id)
   if (options.queue === true) {
-    await requirePublishedSubmodulePins(current, services, io)
+    await requireQueueableSubmodulePins(current, services, io)
     await app.bays.ready({ pr: pr.id, expectedCurrent: queueExpectedCurrent })
     current = requiredPr(app, pr.id)
     if (!unchanged) {
@@ -4031,7 +4040,7 @@ async function applyPrSelectionVerb(
     const delivery = prDeliveryState(pr)
     return delivery === "pushed" || delivery === "submitted" || delivery === "ready"
   })
-  for (const pr of checkable) await requirePublishedSubmodulePins(pr, services, io)
+  for (const pr of checkable) await requireQueueableSubmodulePins(pr, services, io)
   for (const pr of checkable) await app.bays.requestChecks({ pr: pr.id })
   const selected = checkable.map((pr) => pr.id)
   if (selected.length === 0) {
@@ -7307,7 +7316,7 @@ async function applyRedeliveryStep(
   })
   const delivery = prDeliveryState(submitted)
   if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready") return
-  await requirePublishedSubmodulePins(submitted, services, io)
+  await requireQueueableSubmodulePins(submitted, services, io)
   if (!app.bays.checksRequested(submitted.id)) await app.bays.requestChecks({ pr: submitted.id })
 }
 
@@ -7340,7 +7349,7 @@ async function applyPreflightVerdict(
   if (preflight.verdict === "FRESH-NOOP") {
     await app.bays.ready({ pr: preflight.pr, expectedCurrent })
     const pr = requiredPr(app, preflight.pr)
-    await requirePublishedSubmodulePins(pr, services, io)
+    await requireQueueableSubmodulePins(pr, services, io)
     if (!app.bays.checksRequested(pr.id)) {
       await app.bays.requestChecks({ pr: pr.id, expectedCurrent })
     }

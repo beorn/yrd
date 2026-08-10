@@ -72,10 +72,17 @@ export async function unpublishedChangedSubmodulePins(options: {
   headSha: string
 }): Promise<readonly UnpublishedSubmodulePin[]> {
   const changed = await changedSubmodulePins(options)
+  return unpublishedSubmodulePins({ process: options.process, pins: changed })
+}
+
+export async function unpublishedSubmodulePins(options: {
+  process: Pick<Process, "run">
+  pins: readonly UnpublishedSubmodulePin[]
+}): Promise<readonly UnpublishedSubmodulePin[]> {
   const git: Git = (cwd, args) => runGit(options.process, cwd, args)
   const unpublished: UnpublishedSubmodulePin[] = []
 
-  for (const pin of changed) {
+  for (const pin of options.pins) {
     await git(pin.repository, ["fetch", "--quiet", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"])
     const refs = await git(pin.repository, [
       "for-each-ref",

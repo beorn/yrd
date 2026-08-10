@@ -2615,9 +2615,12 @@ checks: [{check: {run: "true"}}]
     expect(await journalEnvelope(repo)).toEqual(before)
   })
 
-  it("refuses pr submit when a changed submodule pin is on zero origin refs", async () => {
+  it("refuses a docs submission before queuing its incidental changed submodule pin", async () => {
     const { repo, branch, pin } = await unpublishedSubmodulePinRepository()
     const component = await realpath(join(repo, "dep"))
+    await writeFile(join(repo, "README.md"), "root documentation\n")
+    await git(repo, "add", "README.md")
+    await git(repo, "commit", "-qm", "document the root project")
     let stdout = ""
     let stderr = ""
 
@@ -2673,12 +2676,16 @@ checks: [{check: {run: "true"}}]
         },
       },
     )
-    expect(publishedExit, stderr).toBe(0)
-    expect(stderr).toBe("")
-    expect(JSON.parse(stdout)).toMatchObject({
-      command: "pr.submit",
-      prs: [{ branch, status: "submitted" }],
+    expect(publishedExit, stderr).toBe(1)
+    expect(stdout).toBe("")
+    expect(JSON.parse(stderr)).toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "authored-gitlink",
+        resolution: ["yrd pr submit <branch>", "yrd pr recut PR1 --preflight --queue"],
+      },
     })
+    expect(stderr).toContain("dep")
 
     listed = ""
     expect(
@@ -2690,8 +2697,9 @@ checks: [{check: {run: "true"}}]
         stderr: () => undefined,
       }),
     ).toBe(0)
-    const listedPrs = JSON.parse(listed) as { prs: Array<{ checkRequests: readonly unknown[] }> }
-    expect(listedPrs.prs[0]?.checkRequests).toHaveLength(1)
+    expect(JSON.parse(listed)).toMatchObject({
+      prs: [{ branch, checkRequests: [] }],
+    })
   })
 
   it("keeps a draft pushed when pr ready refuses an unpublished changed submodule pin", async () => {
@@ -2742,6 +2750,44 @@ checks: [{check: {run: "true"}}]
     expect(stderr).toContain(`cd '${component}' && git push origin '${pin}:refs/heads/${branch}'`)
 
     let listed = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "list", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          listed += text
+        },
+        stderr: () => undefined,
+      }),
+    ).toBe(0)
+    expect(JSON.parse(listed)).toMatchObject({
+      prs: [{ id: "PR1", branch, status: "pushed", checkRequests: [] }],
+    })
+
+    await git(component, "push", "-q", "origin", `${pin}:refs/heads/${branch}`)
+    stdout = ""
+    stderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "ready", "PR1", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+      stderr,
+    ).toBe(1)
+    expect(stdout).toBe("")
+    expect(JSON.parse(stderr)).toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "authored-gitlink",
+        resolution: ["yrd pr submit <branch>", "yrd pr recut PR1 --preflight --queue"],
+      },
+    })
+
+    listed = ""
     expect(
       await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "list", "--json"], {
         cwd: repo,
