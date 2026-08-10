@@ -72,13 +72,20 @@ describe("classifyPushedRef", () => {
   })
 
   it("carries the unique/equivalent SPLIT rather than a bare verdict", () => {
-    // Measured specimen task/ag-lock-survives-crash-dev5: nine commits, two of
-    // them already equivalent. Reporting only "unfinished" invites its author
-    // to redo the two that shipped.
-    const finding = classifyPushedRef(fact({ uniqueCommits: 9, equivalentCommits: 2 }), OPTIONS)
-    expect(finding?.uniqueCommits).toBe(9)
+    // Measured specimen task/ag-lock-survives-crash-dev5: NINE commits ahead of
+    // the base, of which `git cherry` marks 7 unique (+) and 2 already applied
+    // (-). Reporting only "unfinished" invites its author to redo the two that
+    // shipped.
+    //
+    // The first version of this fixture said 9 unique / 2 equivalent, because
+    // the measurement script fed `rev-list --count` — the AHEAD count — into
+    // the unique field. Ahead is unique PLUS equivalent, so the two numbers can
+    // never both be read off the same command. @chief caught it by re-deriving
+    // with `git cherry` before acting on the row.
+    const finding = classifyPushedRef(fact({ uniqueCommits: 7, equivalentCommits: 2 }), OPTIONS)
+    expect(finding?.uniqueCommits).toBe(7)
     expect(finding?.equivalentCommits).toBe(2)
-    expect(finding?.message).toContain("2 of 11 already applied")
+    expect(finding?.message).toContain("2 of 9 already applied")
   })
 
   it("names the ref and its age in the message, because a code alone is not actionable", () => {
