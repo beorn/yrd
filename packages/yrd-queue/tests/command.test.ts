@@ -2106,6 +2106,7 @@ describe("Queue command adapters", () => {
     expect(run.conclusion, JSON.stringify(run, undefined, 2)).toBe("success")
     expect(run).toMatchObject({ status: "completed", prs: [{ id: intent.id }] })
     expect(Object.keys(app.state().bays.prs)).toEqual([])
+    expect(app.queue.audit().findings).toEqual([])
     expect(app.intents.get(intent.id)).toMatchObject({
       status: "integrated",
       integration: {

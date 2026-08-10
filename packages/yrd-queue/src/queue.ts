@@ -3623,6 +3623,7 @@ function authorityRequirement(
   steps: readonly DeepReadonly<InstalledStep>[],
   alreadyIntegrated = false,
 ): QueueAuthorityKind | undefined {
+  if (pr.intent !== undefined) return undefined
   if (steps.some((step) => step.kind === "merge")) return "submit"
   if (alreadyIntegrated) return undefined
   if (availableAuthorityToken(authority.checks[pr.id], pr)) return "checks"
@@ -5532,7 +5533,7 @@ function auditQueues(
   const installed = new Map(steps.map((step) => [step.name, step]))
   for (const record of Queues.values(state.queues)) {
     for (const pr of record.prs) {
-      if (state.bays.prs[pr.id] !== undefined) continue
+      if (pr.intent !== undefined || state.bays.prs[pr.id] !== undefined) continue
       findings.push({
         code: "missing-pr",
         message: `queue run '${record.id}' references missing PR '${pr.id}'`,
@@ -5542,7 +5543,9 @@ function auditQueues(
     }
     const authority = projectionLookupGet(state.queues.authority.runs, record.id)
     if (record.parent === undefined && authority !== undefined) {
+      const intentMembers = new Set(record.prs.filter((pr) => pr.intent !== undefined).map((pr) => pr.id))
       for (const pr of authority.missingSubmits) {
+        if (intentMembers.has(pr)) continue
         findings.push({
           code: "run-without-submit-ancestry",
           message: `queue run '${record.id}' started PR '${pr}' without an unconsumed matching submit fact`,
@@ -5551,6 +5554,7 @@ function auditQueues(
         })
       }
       for (const pr of authority.missingChecks) {
+        if (intentMembers.has(pr)) continue
         findings.push({
           code: "run-without-check-ancestry",
           message: `queue run '${record.id}' started pushed PR '${pr}' without an unconsumed matching checks fact`,
