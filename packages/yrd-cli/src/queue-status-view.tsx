@@ -3503,14 +3503,12 @@ export function queueStatusRows(
 
 function SummaryQueue({ projection, repositoryRoot }: { projection: HumanQueueProjection; repositoryRoot?: string }) {
   return (
-    <Box height={1}>
+    <Box flexDirection="row" flexWrap="wrap" columnGap={1} minWidth={0}>
       <Text wrap="truncate">
-        <Text bold>QUEUE</Text> {projection.target}{" "}
-        {repositoryRoot === undefined ? null : (
-          <>
-            <QueueRepositoryRoot root={repositoryRoot} />{" "}
-          </>
-        )}
+        <Text bold>QUEUE</Text> {projection.target}
+      </Text>
+      <QueueRepositoryRoot root={repositoryRoot} />
+      <Text wrap="truncate">
         <Text bold>OPEN</Text> {projection.open} <Text bold>ACTIVE</Text> {projection.activeCount}{" "}
         <Text bold>INTEGRATED</Text> {projection.integrated} <Text bold>REJECTED</Text> {projection.rejected}
         {projection.alreadyLanded === 0 ? null : (
@@ -4701,9 +4699,9 @@ function TimelineProjectedRow({
 }
 
 // The QUEUE pane is headed by one TAB, not a titled box (user directive
-// 2026-07-16, item L). Sibling branch names are queue data, not navigation;
-// putting arbitrary-length names into this one-row header made Tab text wrap
-// through the TIME/STATUS table header in the live pane.
+// 2026-07-16, item L). Wide headers keep that tab and the resolved root on one
+// row; narrow viewports may wrap the root to a second row so provenance remains
+// visible without wrapping the Tab text through the TIME/STATUS table header.
 function QueueTabsLine({ base, showLabel = true }: { base: string; showLabel?: boolean }) {
   return (
     <Tabs value={base} isActive={false}>
@@ -4716,7 +4714,7 @@ function QueueTabsLine({ base, showLabel = true }: { base: string; showLabel?: b
 
 function QueueRepositoryRoot({ root }: { root: string | undefined }) {
   return root === undefined ? null : (
-    <Text color="$fg-muted" wrap="truncate">
+    <Text color="$fg-muted" wrap="truncate" flexShrink={0}>
       ROOT {root}
     </Text>
   )
@@ -5384,9 +5382,10 @@ function ProjectedQueueTimeline({
       <Box flexGrow={1} flexBasis={0} maxWidth={TIMELINE_CONTENT_CAP} flexDirection="column" minWidth={0} minHeight={0}>
         {paneChrome ? (
           // Pane chrome (item L, 2026-07-16): the QUEUE pane is headed by its
-          // tab-style label (no surrounding box); the `updated` clock rides the
-          // right of that same tab row (item C — flush with the QUEUE tab).
-          <Box height={1} flexDirection="row" gap={1} minWidth={0}>
+          // tab-style label (no surrounding box). Wide headers keep the resolved
+          // root on that row; narrow viewports wrap it to a second row so the
+          // provenance stays visible.
+          <Box flexDirection="row" flexWrap="wrap" columnGap={1} minWidth={0}>
             <QueueTabsLine base={projection.base} />
             <QueueRepositoryRoot root={repositoryRoot} />
             <Box flexGrow={1} flexBasis={0} minWidth={0} />
@@ -5397,7 +5396,7 @@ function ProjectedQueueTimeline({
           </Box>
         ) : (
           <>
-            <Box height={1} flexDirection="row" gap={1} minWidth={0}>
+            <Box flexDirection="row" flexWrap="wrap" columnGap={1} minWidth={0}>
               <QueueTabsLine base={projection.base} />
               <QueueRepositoryRoot root={repositoryRoot} />
             </Box>
