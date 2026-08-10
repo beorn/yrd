@@ -3351,6 +3351,19 @@ describe("runYrd", () => {
       reason: "authored gitlink pins require composition",
       count: 1,
     })
+
+    await expect(refresh(app, services, outputIO({ resolveQueueTarget }).io)).resolves.toEqual([
+      expect.objectContaining({ status: "refused", pr: "PR1", code: "recut-gitlink-conflict" }),
+    ])
+    expect(
+      logs.filter(
+        (event) => event.kind === "log" && event.level === "warn" && event.props?.action === "queue-freshness-refused",
+      ),
+    ).toHaveLength(1)
+    expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
+      code: "recut-gitlink-conflict",
+      count: 2,
+    })
     const appended = (await Array.fromAsync(app.events())).slice(before)
     expect(appended.filter(({ name }) => name === "pr/recut").map(({ data }) => (data as { pr: string }).pr)).toEqual([
       "PR2",

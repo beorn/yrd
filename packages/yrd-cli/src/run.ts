@@ -7227,6 +7227,13 @@ export async function refreshAdmittedQueueRevisions(
         finishBatch()
         continue
       }
+      const priorRefusal = stateOf(app).queues.admissionRefusals[candidate.id]
+      const repeatedRefusal =
+        priorRefusal?.settlement === undefined &&
+        priorRefusal?.revision === candidateRevision.n &&
+        priorRefusal.headSha === candidateRevision.head &&
+        priorRefusal.code === failure.code &&
+        priorRefusal.reason === failure.message
       try {
         await app.queue.recordAdmissionRefusal({
           pr: candidate.id,
@@ -7251,15 +7258,17 @@ export async function refreshAdmittedQueueRevisions(
         code: failure.code,
         message: failure.message,
       })
-      app.log.warn?.(`Could not update PR ${candidate.id} to the latest base; it remains queued.`, {
-        action: "queue-freshness-refused",
-        pr: candidate.id,
-        revision: candidateRevision.n,
-        fromBase: candidateRevision.baseSha,
-        toBase: target.headSha,
-        code: failure.code,
-        reason: failure.message,
-      })
+      if (!repeatedRefusal) {
+        app.log.warn?.(`Could not update PR ${candidate.id} to the latest base; it remains queued.`, {
+          action: "queue-freshness-refused",
+          pr: candidate.id,
+          revision: candidateRevision.n,
+          fromBase: candidateRevision.baseSha,
+          toBase: target.headSha,
+          code: failure.code,
+          reason: failure.message,
+        })
+      }
     }
     finishBatch()
   }
