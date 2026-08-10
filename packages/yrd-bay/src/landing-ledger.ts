@@ -5,9 +5,9 @@ const OneLineSchema = z
   .string()
   .trim()
   .min(1)
-  .refine((value) => !/[\r\n]/u.test(value), { message: "must fit in one Git trailer line" })
+  .refine((value) => !/[\u0000-\u001f\u007f]/u.test(value), { message: "must fit in one Git trailer line" })
 
-export const LandingIdentitySchema = z
+const LandingIdentityObjectSchema = z
   .object({
     changeId: z.uuidv7(),
     pr: OneLineSchema,
@@ -17,9 +17,58 @@ export const LandingIdentitySchema = z
     run: OneLineSchema,
   })
   .strict()
-  .readonly()
+
+export const LandingIdentitySchema = LandingIdentityObjectSchema.readonly()
 
 export type LandingIdentity = Readonly<z.infer<typeof LandingIdentitySchema>>
+
+export const RepositoryLandingSchema = LandingIdentityObjectSchema.extend({ landingSha: GitShaSchema })
+  .strict()
+  .readonly()
+export type RepositoryLanding = Readonly<z.infer<typeof RepositoryLandingSchema>>
+
+const FIELD_SEPARATOR = "\u001f"
+const RECORD_SEPARATOR = "\u001e"
+
+/** One Git-owned parse for repository rebuilds. Values are separated with
+ * control bytes forbidden by LandingIdentitySchema, so no authored value can
+ * manufacture another field or record. */
+export const LANDING_LOG_FORMAT =
+  [
+    "%H",
+    "%(trailers:key=Yrd-Change-Id,valueonly,separator=%x1d)",
+    "%(trailers:key=Yrd-PR,valueonly,separator=%x1d)",
+    "%(trailers:key=Yrd-Revision,valueonly,separator=%x1d)",
+    "%(trailers:key=Yrd-Submitted-Head,valueonly,separator=%x1d)",
+    "%(trailers:key=Yrd-Base,valueonly,separator=%x1d)",
+    "%(trailers:key=Yrd-Run,valueonly,separator=%x1d)",
+  ].join("%x1f") + "%x1e"
+
+/** Decode only Git's `%(trailers)` output. An unstamped commit is ignored;
+ * any partial or duplicated Yrd identity fails the whole read. */
+export function parseLandingLog(raw: string): readonly RepositoryLanding[] {
+  const landings: RepositoryLanding[] = []
+  for (const untrimmed of raw.split(RECORD_SEPARATOR)) {
+    const record = untrimmed.replace(/^(?:\r?\n)+/u, "").trimEnd()
+    if (record === "") continue
+    const fields = record.split(FIELD_SEPARATOR)
+    if (fields.length !== 7) throw new Error("yrd: Git landing trailer record has the wrong field count")
+    const [landingSha, changeId, pr, revision, headSha, base, run] = fields
+    if ([changeId, pr, revision, headSha, base, run].every((value) => value === "")) continue
+    landings.push(
+      RepositoryLandingSchema.parse({
+        landingSha,
+        changeId,
+        pr,
+        revision: Number(revision),
+        headSha,
+        base,
+        run,
+      }),
+    )
+  }
+  return landings
+}
 
 const MANAGED_TRAILER = /^Yrd-(?:Change-Id|PR|Revision|Submitted-Head|Base|Run):/mu
 
