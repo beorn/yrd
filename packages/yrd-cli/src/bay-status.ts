@@ -264,11 +264,28 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
       evidence: "could not refresh and prune origin refs — commit durability is unknown",
     })
   } else if (facts.branchMissingFromOrigin === true) {
-    lines.push({
-      class: "commits",
-      verdict: "PASS",
-      evidence: "branch is absent from origin after a fresh pruned fetch",
-    })
+    // A missing origin ref is only safe when the tip carries nothing unique.
+    // Absent + unique commits is the clean-but-ahead class this ladder exists
+    // to catch: the work exists in exactly one place and nothing advertises it.
+    if (unique === undefined) {
+      lines.push({
+        class: "commits",
+        verdict: "UNKNOWN",
+        evidence: "branch is absent from origin after a fresh pruned fetch — unique commits unmeasurable",
+      })
+    } else if (unique > 0) {
+      lines.push({
+        class: "commits",
+        verdict: "BLOCK",
+        evidence: `no advertised origin ref after a fresh pruned fetch — ${String(unique)} unique commit(s) at risk`,
+      })
+    } else {
+      lines.push({
+        class: "commits",
+        verdict: "PASS",
+        evidence: "branch is absent from origin after a fresh pruned fetch and the tip has no unique commits",
+      })
+    }
   } else if (facts.tipDurableAt !== undefined && facts.tipLanded !== true) {
     lines.push({
       class: "commits",
