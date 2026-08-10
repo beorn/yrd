@@ -167,10 +167,10 @@ describe("22396 — state-aware remedies", () => {
     }
   })
 
-  it("gives a submitted PR the submit record verb, never create", () => {
+  it("sends an already-submitted authored-gitlink PR directly to recut", () => {
     const failure = actionableFailure(AUTHORED_GITLINK, { delivery: "submitted" })
 
-    expect(failure.resolution).toEqual(["yrd pr submit <branch>", "yrd pr recut PR42 --preflight --queue"])
+    expect(failure.resolution).toEqual(["yrd pr recut PR42 --preflight --queue"])
   })
 
   it("drops the recut step for a terminal PR that cannot be recut", () => {
@@ -234,7 +234,7 @@ describe("22396 — state-aware remedies", () => {
 
     const detail = prDetailData(pr, [run])
     const projected = detail.runs[0]
-    expect(projected?.failure?.resolution).toEqual(["yrd pr submit <branch>", "yrd pr recut PR42 --preflight --queue"])
+    expect(projected?.failure?.resolution).toEqual(["yrd pr recut PR42 --preflight --queue"])
     expect(projected?.steps[0]?.failure?.resolution).toEqual(projected?.failure?.resolution)
 
     const draft = queueShowData(run, [], [], undefined, "pushed")

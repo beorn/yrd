@@ -3098,6 +3098,25 @@ async function requireQueueableSubmodulePins(pr: PR, services: YrdCliServices, i
   )
 }
 
+async function requireQueueableSubmodulePinsForCommand(
+  pr: PR,
+  services: YrdCliServices,
+  options: JsonOption,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode | undefined> {
+  try {
+    await requireQueueableSubmodulePins(pr, services, io)
+    return undefined
+  } catch (error) {
+    if (failureFact(error) === undefined) throw error
+    await diagnostic(io, error, {
+      json: jsonEnabled(options),
+      actionableContext: { delivery: prDeliveryState(pr) },
+    })
+    return classifyFailure(error).exitCode
+  }
+}
+
 type PublicationProjection = Readonly<{
   job: string
   status: "publication-required" | "publishing" | "published" | "publication-failed"
@@ -3219,8 +3238,10 @@ async function readyPr(
   options: JsonOption,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
+  const selected = requiredPr(app, selector)
+  const refusalExit = await requireQueueableSubmodulePinsForCommand(selected, services, options, io)
+  if (refusalExit !== undefined) return refusalExit
   await runRequiredChecks(services, io)
-  await requireQueueableSubmodulePins(requiredPr(app, selector), services, io)
   await app.bays.ready({ pr: selector })
   let pr = app.bays.pr(selector)
   if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after ready`)
@@ -3843,6 +3864,7 @@ async function applyPrSelection(
   options: PrSelectionOptions,
   io: YrdCliIO,
   command: PrSelectionCommand,
+  stageAsDraft = command === "pr.create",
 ): Promise<PrSelectionResult> {
   const createOnly = command === "pr.create"
   const correlation = parseCorrelation(options.correlation)
@@ -3879,7 +3901,7 @@ async function applyPrSelection(
       ...(metadata.title === undefined ? {} : { title: metadata.title }),
       ...(metadata.description === undefined ? {} : { description: metadata.description }),
       ...(options.track === true ? { track: true } : {}),
-      ...(createOnly ? { draft: true } : {}),
+      ...(stageAsDraft ? { draft: true } : {}),
       ...(correlation === undefined ? {} : { correlation }),
       ...(composition === undefined ? {} : { composition }),
       resolveRevision: (ref) => optionalRevision(ref, io),
@@ -4012,6 +4034,11 @@ async function applyPrSelectionVerb(
         options.keepOnFailure === true,
       )
     }
+    const staged = await applyPrSelection(app, selectors, options, io, command, true)
+    for (const pr of staged.prs) {
+      const refusalExit = await requireQueueableSubmodulePinsForCommand(pr, services, options, io)
+      if (refusalExit !== undefined) return refusalExit
+    }
   }
   const result = await applyPrSelection(app, selectors, options, io, command)
   const prs = [...result.prs]
@@ -4040,7 +4067,10 @@ async function applyPrSelectionVerb(
     const delivery = prDeliveryState(pr)
     return delivery === "pushed" || delivery === "submitted" || delivery === "ready"
   })
-  for (const pr of checkable) await requireQueueableSubmodulePins(pr, services, io)
+  for (const pr of checkable) {
+    const refusalExit = await requireQueueableSubmodulePinsForCommand(pr, services, options, io)
+    if (refusalExit !== undefined) return refusalExit
+  }
   for (const pr of checkable) await app.bays.requestChecks({ pr: pr.id })
   const selected = checkable.map((pr) => pr.id)
   if (selected.length === 0) {

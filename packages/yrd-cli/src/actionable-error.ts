@@ -136,10 +136,14 @@ function authoredGitlinkFailure(
   context: ActionableFailureContext,
 ): ActionableFailure {
   const pr = prId(failure.message) ?? "<PR>"
+  const alreadyRecorded =
+    context.delivery === "submitted" || context.delivery === "ready" || context.delivery === "needs-author"
   return Object.freeze({
     code: failure.code,
     cause,
-    resolution: Object.freeze(redeliverySteps(pr, context.delivery)),
+    resolution: Object.freeze(
+      alreadyRecorded ? recutSteps(pr, context.delivery) : redeliverySteps(pr, context.delivery),
+    ),
     reference: "README.md#pr-eligibility-and-checks",
   })
 }

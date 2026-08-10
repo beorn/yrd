@@ -2,7 +2,12 @@ import type { ReactNode } from "react"
 import { displayLength } from "@silvery/ansi"
 import { stageAsync } from "@yrd/core"
 import { Text, renderString } from "silvery"
-import { actionableFailure, formatHumanFailure, type ActionableFailure } from "./actionable-error.ts"
+import {
+  actionableFailure,
+  formatHumanFailure,
+  type ActionableFailure,
+  type ActionableFailureContext,
+} from "./actionable-error.ts"
 import { classifyFailure, stableJson, unrecognizedKeyFailure } from "./invocation.ts"
 import type { YrdCliIO } from "./types.ts"
 import { formatYrdRuntimeVersion } from "./version.ts"
@@ -57,6 +62,7 @@ export async function printResultWithWarnings(
 export type DiagnosticOptions = Readonly<{
   verbose?: boolean
   json?: boolean
+  actionableContext?: ActionableFailureContext
   /** Commander owns parse wording; this replaces only its human projection. */
   humanCause?: string
 }>
@@ -68,7 +74,7 @@ export async function diagnostic(io: YrdCliIO, error: unknown, options: Diagnost
   const verdict = classifyFailure(error)
   const failure: ActionableFailure =
     skew === undefined
-      ? actionableFailure(verdict.failure)
+      ? actionableFailure(verdict.failure, options.actionableContext)
       : {
           code: "journal-version-skew",
           cause:

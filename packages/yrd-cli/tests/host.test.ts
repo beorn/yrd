@@ -2682,7 +2682,7 @@ checks: [{check: {run: "true"}}]
       failure: {
         kind: "refusal",
         code: "authored-gitlink",
-        resolution: ["yrd pr submit <branch>", "yrd pr recut PR1 --preflight --queue"],
+        resolution: ["yrd pr create <branch>", "yrd pr recut PR1 --preflight --queue"],
       },
     })
     expect(stderr).toContain("dep")
@@ -2698,8 +2698,34 @@ checks: [{check: {run: "true"}}]
       }),
     ).toBe(0)
     expect(JSON.parse(listed)).toMatchObject({
-      prs: [{ branch, checkRequests: [] }],
+      prs: [{ branch, status: "pushed", checkRequests: [] }],
     })
+    expect(
+      (await journalEnvelope(repo))
+        .flatMap(({ values }) => values)
+        .filter((value) => (value as { name?: unknown }).name === "pr/submitted"),
+    ).toEqual([])
+
+    await git(repo, "push", "-q", "origin", `${branch}:${branch}`)
+    for (const remedy of [
+      ["pr", "create", branch, "--json"],
+      ["pr", "recut", "PR1", "--preflight", "--queue", "--json"],
+    ]) {
+      stdout = ""
+      stderr = ""
+      expect(
+        await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, ...remedy], {
+          cwd: repo,
+          stdout: (text) => {
+            stdout += text
+          },
+          stderr: (text) => {
+            stderr += text
+          },
+        }),
+        stderr,
+      ).toBe(0)
+    }
   })
 
   it("keeps a draft pushed when pr ready refuses an unpublished changed submodule pin", async () => {
@@ -2783,7 +2809,7 @@ checks: [{check: {run: "true"}}]
       failure: {
         kind: "refusal",
         code: "authored-gitlink",
-        resolution: ["yrd pr submit <branch>", "yrd pr recut PR1 --preflight --queue"],
+        resolution: ["yrd pr create <branch>", "yrd pr recut PR1 --preflight --queue"],
       },
     })
 
