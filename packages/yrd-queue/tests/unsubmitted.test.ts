@@ -34,6 +34,8 @@ function fact(overrides: Partial<PushedRefFact> = {}): PushedRefFact {
     carried: false,
     uniqueCommits: 2,
     equivalentCommits: 0,
+    payloadKind: "content",
+    pinDirection: "none",
     ...overrides,
   }
 }
@@ -99,5 +101,82 @@ describe("classifyPushedRef", () => {
     // age that silently fails the TTL comparison.
     const finding = classifyPushedRef(fact({ pushedAtMs: NOW + 5 * 60_000 }), OPTIONS)
     expect(finding).toBeUndefined()
+  })
+})
+
+/**
+ * Direction is the second, orthogonal verdict — established with @fable/0 on
+ * 2026-08-10 by correcting each other in turn.
+ *
+ * I had DIRECTION blindness: `git cherry` counts patch-equivalence, and for a
+ * gitlink bump the patch IS the pointer, so pointer values are never equivalent
+ * even when the content behind them already landed. Cherry counts pointers, not
+ * payload, and it reported four "unique commits" on a branch that would have
+ * deleted five modules from trunk.
+ *
+ * @fable/0 had LANDEDNESS blindness: a branch whose work landed under a
+ * regenerated head has a non-ancestral tip and a pin trunk has moved past, so it
+ * reads as a revert risk when it is merely SPENT. Two such rows in their table
+ * were carriers of mine that had already integrated.
+ *
+ * Neither verdict implies the other. Direction says which way the pin walks;
+ * landedness says whether there is anything to walk it for.
+ */
+describe("classifyPushedRef — pin direction", () => {
+  it("REFUSES to call a diverged pin a rescue, whatever the commit count says", () => {
+    // i10-status-root-narrow-linear-dev3: adds 2, drops 1, and the one it drops
+    // is on trunk. Neither side contains the other, so carrying it as-is loses
+    // trunk's half however many commits ride along.
+    const finding = classifyPushedRef(
+      fact({ payloadKind: "gitlink-only", pinDirection: "diverged", uniqueCommits: 4 }),
+      OPTIONS,
+    )
+    expect(finding?.verdict).toBe("rebase-required")
+    expect(finding?.message).toContain("DIVERGED")
+  })
+
+  it("stays SILENT on a backward gitlink-only ref — trunk already contains it", () => {
+    // This is the false-alarm case, and getting it wrong is how the rail dies.
+    // `backward` means trunk CONTAINS the branch's pin: nothing to carry and
+    // nothing to rebase, the work is already home. @fable/0's file-count scan
+    // labelled two of my own integrated carriers "pure revert" for this reason.
+    expect(classifyPushedRef(fact({ payloadKind: "gitlink-only", pinDirection: "backward" }), OPTIONS)).toBeUndefined()
+    expect(
+      classifyPushedRef(fact({ payloadKind: "gitlink-only", pinDirection: "backward", uniqueCommits: 9 }), OPTIONS),
+    ).toBeUndefined()
+  })
+
+  it("warns on a backward pin when there IS unlanded content — rebase, do not carry", () => {
+    // ag-lock-survives-crash-dev5 shape: real unlanded files riding beside pins
+    // that would drop 40 ag commits. The content is worth rescuing; this branch
+    // is not the way to do it.
+    const finding = classifyPushedRef(
+      fact({ payloadKind: "content", pinDirection: "backward", uniqueCommits: 7, equivalentCommits: 2 }),
+      OPTIONS,
+    )
+    expect(finding?.verdict).toBe("rebase-required")
+    expect(finding?.message).toContain("BACKWARD")
+  })
+
+  it("a forward pin on a gitlink-only ref is a genuine bump worth carrying", () => {
+    const finding = classifyPushedRef(fact({ payloadKind: "gitlink-only", pinDirection: "forward" }), OPTIONS)
+    expect(finding?.verdict).toBe("rescue")
+  })
+
+  it("says NOTHING about a gitlink-only ref whose pin already matches trunk", () => {
+    // Spent: the bump landed and trunk now carries it. Cherry still calls its
+    // commits unique, which is exactly the trap — so the count is not consulted
+    // for a gitlink-only payload.
+    expect(classifyPushedRef(fact({ payloadKind: "gitlink-only", pinDirection: "aligned" }), OPTIONS)).toBeUndefined()
+    expect(
+      classifyPushedRef(fact({ payloadKind: "gitlink-only", pinDirection: "aligned", uniqueCommits: 9 }), OPTIONS),
+    ).toBeUndefined()
+  })
+
+  it("still says nothing about a SPENT content branch even when its pin is forward", () => {
+    // PR705/PR706 shape: integrated, tip non-ancestral because the queue
+    // regenerated the carrier, zero unlanded commits. Landedness decides here,
+    // not direction.
+    expect(classifyPushedRef(fact({ uniqueCommits: 0, pinDirection: "forward" }), OPTIONS)).toBeUndefined()
   })
 })

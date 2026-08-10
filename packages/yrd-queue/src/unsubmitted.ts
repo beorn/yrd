@@ -26,15 +26,52 @@ export type PushedRefFact = Readonly<{
   /** Commits already applied to the base under a different sha — a regenerated
    * carrier's contribution. Ancestry cannot see these; patch-equivalence can. */
   equivalentCommits: number
+  payloadKind: PayloadKind
+  pinDirection: PinDirection
 }>
+
+/**
+ * What the ref's diff against the base actually consists of.
+ *
+ * `gitlink-only` matters because commit counts are MEANINGLESS for it: at the
+ * superproject level a submodule pointer bump is a unique patch by
+ * construction, even when the content behind the pointer already landed or is
+ * older than trunk's. Cherry counts pointers, not payload.
+ */
+export type PayloadKind = "content" | "gitlink-only"
+
+/**
+ * Which way this ref's submodule pins move relative to the base.
+ *
+ * `forward` — the branch pin contains trunk's, a real advance.
+ * `aligned` — pins are equal; nothing to carry.
+ * `backward` — trunk's pin contains the branch's, so landing it rolls back.
+ * `diverged` — neither contains the other; unsafe for the same reason.
+ * `none` — the ref touches no gitlinks.
+ *
+ * Direction is immune to whether loss shows up as an added, deleted or MODIFIED
+ * file, which is why it beats counting files: a pin walked backwards usually
+ * modifies content back to an older state and deletes nothing at all.
+ */
+export type PinDirection = "forward" | "aligned" | "backward" | "diverged" | "none"
+
+/**
+ * `rescue` — real unlanded work that trunk can safely take.
+ * `rebase-required` — carrying this as-is would revert trunk; its author must
+ * rebase. Emphatically NOT a rescue: a finding that says "carry this" about a
+ * backward pin causes the exact loss the rail exists to prevent.
+ */
+export type UnsubmittedVerdict = "rescue" | "rebase-required"
 
 export type UnsubmittedFinding = Readonly<{
   code: "pushed-not-submitted"
+  verdict: UnsubmittedVerdict
   ref: string
   tipSha: string
   ageMs: number
   uniqueCommits: number
   equivalentCommits: number
+  pinDirection: PinDirection
   message: string
 }>
 
@@ -76,21 +113,61 @@ export function classifyPushedRef(fact: PushedRefFact, options: UnsubmittedOptio
   const ageMs = options.nowMs - fact.pushedAtMs
   if (ageMs < options.ttlMs) return undefined
   if (ageMs > options.ageBoundMs) return undefined
-  if (fact.uniqueCommits === 0) return undefined
 
-  const total = fact.uniqueCommits + fact.equivalentCommits
-  // The split, never a bare verdict: a partially landed branch told only that
-  // it is "unfinished" invites its author to redo the commits that shipped.
-  const applied = fact.equivalentCommits === 0 ? "" : `, ${fact.equivalentCommits} of ${total} already applied`
-  return {
+  const build = (verdict: UnsubmittedVerdict, detail: string): UnsubmittedFinding => ({
     code: "pushed-not-submitted",
+    verdict,
     ref: fact.ref,
     tipSha: fact.tipSha,
     ageMs,
     uniqueCommits: fact.uniqueCommits,
     equivalentCommits: fact.equivalentCommits,
-    message:
-      `ref '${fact.ref}' was pushed ${formatAge(ageMs)} ago and no merge request carries it; ` +
-      `${fact.uniqueCommits} unlanded ${fact.uniqueCommits === 1 ? "commit" : "commits"}${applied}`,
+    pinDirection: fact.pinDirection,
+    message: `ref '${fact.ref}' was pushed ${formatAge(ageMs)} ago and no merge request carries it; ${detail}`,
+  })
+
+  // DIVERGED outranks every commit count. Each side holds something the other
+  // lacks, so carrying it as-is drops trunk's half however much unlanded work
+  // rides along. Reporting "N unlanded commits" about such a ref invites exactly
+  // the carry that loses trunk's work.
+  if (fact.pinDirection === "diverged") {
+    return build(
+      "rebase-required",
+      "its submodule pin has DIVERGED from trunk's — its author must rebase; carrying it as-is reverts trunk",
+    )
   }
+
+  // A pointer bump is a unique patch by construction, so the commit count says
+  // nothing here. Only direction distinguishes a real advance from one trunk has
+  // already absorbed.
+  //
+  // `backward` is silence, not a warning, and getting that wrong is how this
+  // rail generates its own false alarms: backward means trunk CONTAINS the
+  // branch's pin, so there is nothing to carry and nothing to rebase — the work
+  // is already home. A sweep that flags every spent carrier as a revert risk
+  // reports the whole fleet's history as danger.
+  if (fact.payloadKind === "gitlink-only") {
+    if (fact.pinDirection !== "forward") return undefined
+    return build("rescue", "it advances a submodule pin that trunk does not yet carry")
+  }
+
+  // Content payload: landedness decides first. Zero unlanded commits means SPENT
+  // — the work integrated, and the queue regenerating the carrier is why the tip
+  // is not ancestral. That is not a stranded branch.
+  if (fact.uniqueCommits === 0) return undefined
+
+  // Real unlanded content, but the pins would roll back. The content is worth
+  // rescuing; THIS BRANCH is not the way to do it.
+  if (fact.pinDirection === "backward") {
+    return build(
+      "rebase-required",
+      `${fact.uniqueCommits} unlanded ${fact.uniqueCommits === 1 ? "commit" : "commits"}, but its submodule pin would move BACKWARD — rebase before carrying`,
+    )
+  }
+
+  const total = fact.uniqueCommits + fact.equivalentCommits
+  // The split, never a bare verdict: a partially landed branch told only that
+  // it is "unfinished" invites its author to redo the commits that shipped.
+  const applied = fact.equivalentCommits === 0 ? "" : `, ${fact.equivalentCommits} of ${total} already applied`
+  return build("rescue", `${fact.uniqueCommits} unlanded ${fact.uniqueCommits === 1 ? "commit" : "commits"}${applied}`)
 }
