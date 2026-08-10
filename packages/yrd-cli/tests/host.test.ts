@@ -1954,6 +1954,43 @@ checks: [{check: {run: "true"}}]
     expect(jsonError).toBe("")
   })
 
+  it("names the canonical queue root across nested repositories and linked worktrees", async () => {
+    const { repo } = await repository()
+    const nested = join(repo, "pm")
+    const linked = join(repo, "..", "linked-status")
+    await git(repo, "init", "-q", "-b", "main", nested)
+    await git(nested, "config", "user.name", "Yrd Test")
+    await git(nested, "config", "user.email", "yrd@example.invalid")
+    await writeFile(join(nested, ".yrd.yml"), 'checks: [{check: {run: "true"}}]\n')
+    await git(nested, "add", ".yrd.yml")
+    await git(nested, "commit", "-qm", "nested queue")
+    await git(repo, "worktree", "add", "-q", linked, "issue/feature")
+
+    const statusFrom = async (cwd: string, options: readonly string[] = []): Promise<string> => {
+      let stdout = ""
+      let stderr = ""
+      expect(
+        await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", ...options, "queue", "status"], {
+          cwd,
+          columns: 160,
+          stdout: (text) => {
+            stdout += text
+          },
+          stderr: (text) => {
+            stderr += text
+          },
+        }),
+        stderr,
+      ).toBe(0)
+      return stdout
+    }
+
+    expect((await statusFrom(repo)).split("\n", 1)[0]).toContain(`ROOT ${repo}`)
+    expect((await statusFrom(nested)).split("\n", 1)[0]).toContain(`ROOT ${nested}`)
+    expect((await statusFrom(linked)).split("\n", 1)[0]).toContain(`ROOT ${repo}`)
+    expect((await statusFrom(nested, ["--repo", repo])).split("\n", 1)[0]).toContain(`ROOT ${repo}`)
+  })
+
   it("runs the literal --steps merge CLI without starting the configured check process", async () => {
     const { repo, featureSha } = await repository()
     const checkMarker = join(repo, "configured-check-started.marker")

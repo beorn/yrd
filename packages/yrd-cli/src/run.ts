@@ -5671,6 +5671,7 @@ async function buildQueueListSnapshot(
   const filteredResults = filtered ? narrowQueueResults(results, (run) => projectedRuns.has(run.id)) : results
   return {
     snapshot: {
+      repositoryRoot: io.repositoryRoot,
       results: filteredResults,
       state: state.bays,
       now,
@@ -5889,6 +5890,7 @@ async function listQueues(
       results: snapshot.results.map(projectQueueStatusResultTaskStatus),
     },
     createElement(QueueTimelineView, {
+      repositoryRoot: snapshot.repositoryRoot,
       projection: snapshot.projection,
       runnerRefusal: snapshot.runnerRefusal,
       results: snapshot.results,
@@ -7899,6 +7901,7 @@ async function watchQueue(
         results: snapshot.results.map(projectQueueStatusResultTaskStatus),
       },
       createElement(QueueTimelineView, {
+        repositoryRoot: snapshot.repositoryRoot,
         projection: snapshot.projection,
         runnerRefusal: snapshot.runnerRefusal,
         results: snapshot.results,

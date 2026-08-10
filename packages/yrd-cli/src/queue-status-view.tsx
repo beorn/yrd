@@ -4666,6 +4666,14 @@ function QueueTabsLine({ base, showLabel = true }: { base: string; showLabel?: b
   )
 }
 
+function QueueRepositoryRoot({ root }: { root: string | undefined }) {
+  return root === undefined ? null : (
+    <Text color="$fg-muted" wrap="truncate">
+      ROOT {root}
+    </Text>
+  )
+}
+
 export const RUNNER_STALE_MS = 15_000
 
 function runnerTiming(projection: QueueTimelineProjection): Readonly<{ ageMs: number; uptimeMs: number }> | null {
@@ -5265,6 +5273,7 @@ function QueueUpdatedClock({ now }: { now: string }) {
 const QUEUE_STATS_MIN_PANE_ROWS = 24
 
 function ProjectedQueueTimeline({
+  repositoryRoot,
   projection,
   runnerRefusal,
   results,
@@ -5283,6 +5292,7 @@ function ProjectedQueueTimeline({
   onShowAll,
   listRef,
 }: {
+  repositoryRoot?: string
   projection: QueueTimelineProjection
   runnerRefusal?: QueueRunnerRefusal
   results?: readonly QueueStatusResult[]
@@ -5330,6 +5340,7 @@ function ProjectedQueueTimeline({
           // right of that same tab row (item C — flush with the QUEUE tab).
           <Box height={1} flexDirection="row" gap={1} minWidth={0}>
             <QueueTabsLine base={projection.base} />
+            <QueueRepositoryRoot root={repositoryRoot} />
             <Box flexGrow={1} flexBasis={0} minWidth={0} />
             {/* The `updated HH:MM:SS` clock is gone from the live pane (user
                 directive 2026-07-21): the RUNNER box's always-on border timer
@@ -5338,7 +5349,10 @@ function ProjectedQueueTimeline({
           </Box>
         ) : (
           <>
-            <QueueTabsLine base={projection.base} />
+            <Box height={1} flexDirection="row" gap={1} minWidth={0}>
+              <QueueTabsLine base={projection.base} />
+              <QueueRepositoryRoot root={repositoryRoot} />
+            </Box>
             <Box height={1} flexDirection="row" justifyContent="flex-end" gap={1} minWidth={0}>
               <QueueUpdatedClock now={projection.now} />
             </Box>
@@ -5459,6 +5473,7 @@ function ProjectedQueueTimeline({
 }
 
 export function QueueTimelineView({
+  repositoryRoot,
   projection,
   runnerRefusal,
   results,
@@ -5479,6 +5494,7 @@ export function QueueTimelineView({
   onShowAll,
   listRef,
 }: {
+  repositoryRoot?: string
   projection?: QueueTimelineProjection
   runnerRefusal?: QueueRunnerRefusal
   results?: readonly QueueStatusResult[]
@@ -5505,6 +5521,7 @@ export function QueueTimelineView({
     const surfaceWidth = Math.max(1, Math.min(columns, TIMELINE_CONTENT_CAP))
     return (
       <ProjectedQueueTimeline
+        repositoryRoot={repositoryRoot}
         projection={projection}
         runnerRefusal={runnerRefusal}
         results={results}
