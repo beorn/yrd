@@ -379,8 +379,9 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     await app.queue.run({ prs: [first.id] }, runtime)
     expect(app.bays.pr(first.id)?.integratedAt).toBe("2026-01-01T00:10:00.000Z")
     expect(app.bays.pr(second.id)?.integratedAt).toBeUndefined()
-    // The landing restarts the window, so the earlier attempts fall outside it.
-    await requestChecksTimes(app, second.id, DEFAULT_QUEUE_PROGRESS_POLICY.minAdmissionChecks)
+    // No further attempts follow the landing on purpose. The landing restarts
+    // the window, so `second` now carries ZERO checks inside it — the shape of a
+    // runner asleep over ready work, which must stay loud.
     expect(app.queue.audit({ now: "2026-01-01T00:19:59.999Z" }).findings).not.toContainEqual(
       expect.objectContaining({ code: "queue-progress-stalled" }),
     )
