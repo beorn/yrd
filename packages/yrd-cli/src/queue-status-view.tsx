@@ -3327,6 +3327,50 @@ function diagnosticBlocker(pr: PR, run: Run | undefined, step: QueueStep | undef
   return undefined
 }
 
+/**
+ * Collapse a run of rebuilds that changed nothing into the fact the run already
+ * encodes (@i/10-merge-queue/a-counter-that-means-two-things).
+ *
+ * A recut whose source fingerprint is unchanged did no work. PR537 printed
+ * `0d7566e4e3ae→0d7566e4e3ae` about forty times before changing once, and two
+ * readers watched that carrier climb during an 89-minute stall and both called
+ * it futile churn — while the revision named in the counter was merging. The
+ * information needed to tell those apart was on screen the whole time. Forty
+ * identical hashes are not a record a person can read.
+ *
+ * So this adds no field and drops no data. It states the run instead of
+ * repeating its members, and it is self-limiting: a healthy carrier whose
+ * content changes every recut has no run to collapse and renders as before
+ * (PR645 and PR673, measured).
+ */
+export function collapseRecomposedSources(
+  sources: readonly { repo: string; fromHeadSha: string; toHeadSha: string }[],
+): string[] {
+  const short = (sha: string): string => sha.slice(0, 12)
+  const out: string[] = []
+  let index = 0
+  while (index < sources.length) {
+    const entry = sources[index]!
+    if (entry.fromHeadSha !== entry.toHeadSha) {
+      out.push(`${entry.repo} ${short(entry.fromHeadSha)}→${short(entry.toHeadSha)}`)
+      index += 1
+      continue
+    }
+    let run = 0
+    while (index + run < sources.length) {
+      const next = sources[index + run]!
+      if (next.repo !== entry.repo || next.fromHeadSha !== entry.fromHeadSha || next.toHeadSha !== entry.fromHeadSha) {
+        break
+      }
+      run += 1
+    }
+    const times = run === 1 ? "" : ` ×${run}`
+    out.push(`${entry.repo} ${short(entry.fromHeadSha)}${times} unchanged`)
+    index += run
+  }
+  return out
+}
+
 export function PRDetailView({
   pr,
   eligibility,
@@ -3402,9 +3446,7 @@ export function PRDetailView({
       {recomposedSources.length === 0 ? null : (
         <Text wrap="wrap">
           <Text bold>RECOMPOSED</Text>{" "}
-          {recomposedSources
-            .map(({ repo, fromHeadSha, toHeadSha }) => `${repo} ${fromHeadSha.slice(0, 12)}→${toHeadSha.slice(0, 12)}`)
-            .join(" · ")}
+          {collapseRecomposedSources(recomposedSources).join(" · ")}
         </Text>
       )}
       {pr.description === undefined ? null : (

@@ -106,6 +106,7 @@ import {
   queueTimelineProjection,
   queueTimelineRows,
   QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
+  collapseRecomposedSources,
   watchQueueRows,
   type QueueLogCoverage,
   type QueueAttempt,
@@ -2313,6 +2314,125 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--revision", "1", "--json"), repeated.io, services)).toBe(0)
     expect(JSON.parse(repeated.stdout())).toMatchObject({ revision: 2, unchanged: true })
     expect(app.bays.pr("PR1")?.revs).toHaveLength(2)
+  })
+
+  /**
+   * @i/10-merge-queue/a-counter-that-means-two-things.
+   *
+   * The revision counter increments both when a candidate is recut and when the
+   * recut that finally lands is built, so `43 → 45` cannot be told apart from
+   * `43 → 44 → landed`. Two readers watched PR537 climb during an 89-minute
+   * stall and both called it futile churn, while revision 45 was the merge.
+   *
+   * The fact that separates the two is ALREADY RECORDED and ALREADY RENDERED.
+   * `pr recut` returns `unchanged: true` for a rebuild that changed nothing, and
+   * the RECOMPOSED line prints a content fingerprint per recut. On the real
+   * PR537 that line reads `0d7566e4e3ae→0d7566e4e3ae` about forty times before
+   * changing once — a wall of identical hashes that says something precise and
+   * that no reader can read. PR645 and PR673 change on every recut, so the
+   * healthy and the pathological carrier are already distinguishable in the data.
+   *
+   * So this asks for no new field. It asks the surface to collapse a run of
+   * unchanged rebuilds into what the run already means. The assertions below
+   * pin the PROPERTY and not a layout, because a test that pins the exact
+   * spelling of a display string fails on the next wording change and teaches
+   * nobody anything.
+   */
+  it("collapses a run of unchanged recuts instead of printing one fingerprint per attempt", async () => {
+    let clockTick = 0
+    const app = await createApp({
+      requires: ["review"],
+      waitingCheck: true,
+      clock: () => new Date(Date.parse("2026-07-09T10:00:00.000Z") + clockTick++ * 60_000).toISOString(),
+    })
+    // Every recut returns the SAME head. That is the pathological carrier: the
+    // mechanical rebuild lands on byte-identical content over and over, which is
+    // how PR537 printed `0d7566e4e3ae→0d7566e4e3ae` about forty times.
+    //
+    // Note `unchanged: false` rather than true. A recut that reports itself
+    // unchanged records no source transition at all, so it produces no
+    // RECOMPOSED entry and cannot reproduce the wall. The real specimen has
+    // entries whose from and to are EQUAL — the recut ran and moved nothing.
+    // A fixture that skips the entry tests a different thing than the bug.
+    const frozenHead = "3".repeat(40)
+    const services = {
+      recut: {
+        recut() {
+          return Promise.resolve({
+            headSha: frozenHead,
+            baseSha: "b".repeat(40),
+            treeSha: "c".repeat(40),
+            patchId: "d".repeat(40),
+            unchanged: false,
+          })
+        },
+      },
+    } as unknown as YrdCliServices
+
+    await app.bays.submit({ branch: "issue/churn", headSha: HEAD_SHA, baseSha: BASE_SHA })
+    await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: "review-r1" })
+    await app.bays.requestChecks({ pr: "PR1" })
+
+    const RECUTS = 6
+    for (let i = 0; i < RECUTS; i += 1) {
+      const io = recutIO(app)
+      expect(await runYrd(app, yrd("pr", "recut", "PR1", "--json"), io.io, services)).toBe(0)
+    }
+
+    const detail = outputIO({ now: () => Date.parse("2026-07-09T12:00:00.000Z") })
+    expect(await runYrd(app, yrd("pr", "view", "PR1"), detail.io, services)).toBe(0)
+    const view = detail.stdout()
+
+    // The state is NAMED on the live surface, not left to be inferred from
+    // repetition. This is the wiring half: a collapse nobody renders is a
+    // capability with no consumer.
+    const fingerprint = frozenHead.slice(0, 12)
+    expect(view).toContain(fingerprint) // nothing is lost
+    expect(view.toLowerCase()).toContain("unchanged")
+
+    // The wall itself is a property of the pure collapse, so it is asserted
+    // there rather than counted across a wrapped render. Counting a fingerprint
+    // across the WHOLE view answers a different question than "does the
+    // RECOMPOSED line repeat itself" — the same scope error this bead is about.
+    expect(view).not.toContain(`${fingerprint}→${fingerprint}`)
+  })
+
+  it("collapseRecomposedSources states a run of unchanged rebuilds and leaves a healthy carrier alone", () => {
+    const frozen = "3".repeat(40)
+    const other = "4".repeat(40)
+
+    // PR537 in miniature: one real change, then a run that changed nothing.
+    expect(
+      collapseRecomposedSources([
+        { repo: ".", fromHeadSha: other, toHeadSha: frozen },
+        ...Array.from({ length: 5 }, () => ({ repo: ".", fromHeadSha: frozen, toHeadSha: frozen })),
+      ]),
+    ).toEqual([`. ${other.slice(0, 12)}→${frozen.slice(0, 12)}`, `. ${frozen.slice(0, 12)} ×5 unchanged`])
+
+    // PR645 and PR673 in miniature: content moves every recut, so there is no
+    // run to collapse and the line renders exactly as it did before.
+    const a = "a".repeat(40)
+    const b = "b".repeat(40)
+    const c = "c".repeat(40)
+    expect(
+      collapseRecomposedSources([
+        { repo: ".", fromHeadSha: a, toHeadSha: b },
+        { repo: ".", fromHeadSha: b, toHeadSha: c },
+      ]),
+    ).toEqual([`. ${a.slice(0, 12)}→${b.slice(0, 12)}`, `. ${b.slice(0, 12)}→${c.slice(0, 12)}`])
+
+    // A single unchanged rebuild is still named, without a misleading "×1".
+    expect(collapseRecomposedSources([{ repo: ".", fromHeadSha: frozen, toHeadSha: frozen }])).toEqual([
+      `. ${frozen.slice(0, 12)} unchanged`,
+    ])
+
+    // Two repos never merge into one run, even with identical fingerprints.
+    expect(
+      collapseRecomposedSources([
+        { repo: ".", fromHeadSha: frozen, toHeadSha: frozen },
+        { repo: "vendor/x", fromHeadSha: frozen, toHeadSha: frozen },
+      ]),
+    ).toEqual([`. ${frozen.slice(0, 12)} unchanged`, `vendor/x ${frozen.slice(0, 12)} unchanged`])
   })
 
   it.each([
