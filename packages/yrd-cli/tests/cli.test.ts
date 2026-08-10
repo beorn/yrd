@@ -2608,6 +2608,68 @@ describe("runYrd", () => {
     expect(thirdAdmissionJob?.id).not.toBe(secondAdmissionJob?.id)
   })
 
+  it("refreshes only the next queue candidate batch after a base advance", async () => {
+    const nextBase = "f".repeat(40)
+    const oldHeads = ["2", "3", "4", "5", "6"].map((digit) => digit.repeat(40))
+    const refreshedHeads = ["7", "8", "9", "a", "b"].map((digit) => digit.repeat(40))
+    const recutInputs: Array<{ id: string }> = []
+    const app = await createApp({ batch: 2 })
+    const services = {
+      recut: {
+        recut(input: unknown) {
+          const recut = input as { id: string }
+          recutInputs.push(recut)
+          const index = Number(recut.id.slice(2)) - 1
+          return Promise.resolve({
+            headSha: refreshedHeads[index]!,
+            baseSha: nextBase,
+            treeSha: "c".repeat(40),
+            patchId: "d".repeat(40),
+            unchanged: false,
+          })
+        },
+      },
+    } as unknown as YrdCliServices
+    const refresh = runInternals.refreshAdmittedQueueRevisions
+    const io = outputIO({ resolveQueueTarget: async () => ({ base: "main", sha: nextBase }) }).io
+
+    for (const [index, oldHead] of oldHeads.entries()) {
+      const pr = `PR${index + 1}`
+      await app.bays.submit({
+        branch: `issue/convoy-${index + 1}`,
+        headSha: oldHead,
+        baseSha: BASE_SHA,
+        draft: true,
+      })
+      await app.bays.recut({
+        pr,
+        fromRevision: 1,
+        headSha: oldHead,
+        baseSha: BASE_SHA,
+        treeSha: "c".repeat(40),
+        patchId: "d".repeat(40),
+        reviewCarried: false,
+      })
+      await app.bays.ready({ pr })
+      await app.bays.requestChecks({ pr, baseSha: BASE_SHA })
+    }
+
+    await refresh(app, services, io)
+    expect(recutInputs.map(({ id }) => id)).toEqual(["PR1", "PR2"])
+    expect(["PR1", "PR2", "PR3", "PR4", "PR5"].map((pr) => currentPRRev(app.bays.pr(pr)!).n)).toEqual([3, 3, 2, 2, 2])
+
+    await app.bays.closePr({ pr: "PR1", reason: "candidate landed" })
+    await app.bays.closePr({ pr: "PR2", reason: "candidate landed" })
+    await refresh(app, services, io)
+    expect(recutInputs.map(({ id }) => id)).toEqual(["PR1", "PR2", "PR3", "PR4"])
+
+    await app.bays.closePr({ pr: "PR3", reason: "candidate landed" })
+    await app.bays.closePr({ pr: "PR4", reason: "candidate landed" })
+    await refresh(app, services, io)
+    expect(recutInputs.map(({ id }) => id)).toEqual(["PR1", "PR2", "PR3", "PR4", "PR5"])
+    expect(currentPRRev(app.bays.pr("PR5")!).n).toBe(3)
+  })
+
   it("settles an admitted revision whose payload current main already contains, then drains the next PR (22528)", async () => {
     const absorbedHead = "2".repeat(40)
     const nextHead = "3".repeat(40)

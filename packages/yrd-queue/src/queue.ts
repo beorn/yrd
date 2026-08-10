@@ -644,6 +644,10 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   audit(options?: QueueAuditOptions): QueueAuditResult
   eligibility(selector: string, snapshot?: DeepReadonly<QueueRuntimeState>): PREligibility
   eligibilities(snapshot?: DeepReadonly<QueueRuntimeState>): readonly PREligibility[]
+  /** PR batches whose revisions may be refreshed before the next selectorless drain.
+   * Queue owns this projection because it must preserve the same candidate
+   * partitioning, batch size, and FIFO order as compose. */
+  freshnessCandidateBatches(): readonly (readonly string[])[]
   checks(selectors?: readonly string[]): readonly PRCheckRecord[]
   terminalAssociationPlan(): TerminalAssociationPlan
   migrateTerminalAssociations(): Promise<TerminalAssociationPlan>
@@ -2708,6 +2712,13 @@ function createQueue<Shape extends PRShape>(
     eligibilities(projected) {
       const snapshot = projected ?? runtime()
       return Object.values(snapshot.bays.prs).map((pr) => prEligibility(snapshot, pr, steps))
+    },
+    freshnessCandidateBatches() {
+      const snapshot = runtime()
+      const candidates = runnablePRs(snapshot, {}, steps, new Set(), { explicitStepAuthority: true }).filter((pr) =>
+        checksRequested(pr),
+      )
+      return partitionCandidates(candidates, snapshot.queues.batchSize).map((candidate) => candidate.map((pr) => pr.id))
     },
     checks(selectors) {
       const snapshot = runtime()

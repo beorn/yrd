@@ -7098,19 +7098,27 @@ export async function refreshAdmittedQueueRevisions(
       jobs: jobIds,
     })
   }
-  const candidates = Object.values(snapshot.bays.prs)
-    .filter((pr) => {
-      const delivery = prDeliveryState(pr)
-      return (delivery === "submitted" || delivery === "ready") && app.bays.checksRequested(pr.id)
-    })
-    .toSorted(
-      (left, right) =>
-        baseIdentity(left.base).localeCompare(baseIdentity(right.base)) || compareNatural(left.id, right.id),
-    )
+  const batches = app.queue.freshnessCandidateBatches()
+  const candidatesById = new Map(Object.values(snapshot.bays.prs).map((pr) => [pr.id, pr] as const))
+  const candidates = batches.flatMap((batch, batchIndex) =>
+    batch.flatMap((id, index) => {
+      const candidate = candidatesById.get(id)
+      return candidate === undefined
+        ? []
+        : [{ candidate, batch: batchIndex, base: baseIdentity(candidate.base), last: index === batch.length - 1 }]
+    }),
+  )
   if (candidates.length === 0) return outcomes
 
-  const groups = await queueTargetGroups(new Set(candidates.map((pr) => pr.base)), io)
-  for (const candidate of candidates) {
+  const groups = await queueTargetGroups(new Set(candidates.map(({ candidate }) => candidate.base)), io)
+  const preparedBatches = new Set<number>()
+  const preparedBases = new Set<string>()
+  for (const plan of candidates) {
+    if (preparedBases.has(plan.base)) continue
+    const candidate = plan.candidate
+    const finishBatch = (): void => {
+      if (plan.last && preparedBatches.has(plan.batch)) preparedBases.add(plan.base)
+    }
     const candidateRevision = currentPRRev(candidate)
     if (io.drainSignal?.aborted === true) break
     const target = groups.find(
@@ -7123,7 +7131,11 @@ export async function refreshAdmittedQueueRevisions(
         `yrd: automatic recut could not resolve the merge-queue base '${candidate.base}' for PR '${candidate.id}'`,
       )
     }
-    if (candidateRevision.baseSha === target.headSha) continue
+    if (candidateRevision.baseSha === target.headSha) {
+      preparedBatches.add(plan.batch)
+      finishBatch()
+      continue
+    }
 
     try {
       const recut = await executeRecutPr(
@@ -7158,6 +7170,7 @@ export async function refreshAdmittedQueueRevisions(
           proof: recut.settlement,
           patchId: recut.result.patchId,
         })
+        finishBatch()
         continue
       }
       outcomes.push({
@@ -7169,6 +7182,7 @@ export async function refreshAdmittedQueueRevisions(
         headSha: refreshedRevision.head,
         patchId: recut.result.patchId,
       })
+      preparedBatches.add(plan.batch)
       app.log.info?.("Updated a queued PR to the latest base.", {
         action: "queue-freshness-refreshed",
         pr: recut.current.id,
@@ -7199,6 +7213,7 @@ export async function refreshAdmittedQueueRevisions(
           code: failure.code,
           reason: failure.message,
         })
+        finishBatch()
         continue
       }
       try {
@@ -7235,6 +7250,7 @@ export async function refreshAdmittedQueueRevisions(
         reason: failure.message,
       })
     }
+    finishBatch()
   }
   return outcomes
 }
