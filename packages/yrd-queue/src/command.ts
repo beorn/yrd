@@ -38,6 +38,7 @@ import { resolveRelativeSubmoduleOrigin } from "./submodule-origin.ts"
 import {
   executeQueueSubmoduleComposition,
   planQueueSubmoduleComposition,
+  publishImmutableRemoteRef,
   type QueueConflictStage,
   type QueueTreeConflict,
 } from "./submodule-composition-policy.ts"
@@ -1159,12 +1160,22 @@ async function recutPR(git: Git, repo: string, input: PRRecutInput): Promise<PRR
         : { composition: current.composition ?? input.composition }),
     }
   }
-  if (input.composition === undefined) {
-    return recutDirectPR(git, repo, target, input)
+  let recutInput = input
+  let localSourceTips: ReadonlySet<string> | undefined
+  if (recutInput.composition === undefined) {
+    const converted = await sourceOnlyCarrierComposition(git, repo, target, recutInput)
+    if (converted === undefined) return recutDirectPR(git, repo, target, recutInput)
+    recutInput = {
+      ...recutInput,
+      headSha: converted.sourceBase,
+      composition: converted.composition,
+    }
+    localSourceTips = new Set(converted.composition.sources.map((source) => source.repo))
   }
-  const declared = input.composition
+  const declared = recutInput.composition
+  if (declared === undefined) throw new Error("source-only carrier conversion produced no composition")
   const outcome = await withScratch<PRRecutResult>(git, repo, target.sha, tmpdir(), async (path) => {
-    const composed = await composePR(git, repo, path, input)
+    const composed = await composePR(git, repo, path, recutInput, localSourceTips)
     if (composed.status === "failed") {
       throw createFailure({ kind: "refusal", code: composed.error.code, message: composed.error.message })
     }
@@ -1212,6 +1223,90 @@ async function recutPR(git: Git, repo: string, input: PRRecutInput): Promise<PRR
       ? outcome.error.message
       : (outcome.detail ?? outcome.token)
   throw createFailure({ kind: "infrastructure", code: "recut-scratch-failed", message: `yrd: ${message}` })
+}
+
+type SourceOnlyCarrierComposition = Readonly<{
+  sourceBase: string
+  composition: NonNullable<PRSnapshot["composition"]>
+}>
+
+/**
+ * Recognize the one-source root carrier shape that can be represented as an
+ * internal composition manifest. This is eligibility only: prepareSource and
+ * rebaseSource still own restacking and every payload/certificate proof. Mixed,
+ * multi-source, overlapping, or unproven carriers fall through so the direct
+ * recutter's existing refusal remains authoritative.
+ */
+async function sourceOnlyCarrierComposition(
+  git: Git,
+  repo: string,
+  target: GitQueueTarget,
+  input: PRRecutInput,
+): Promise<SourceOnlyCarrierComposition | undefined> {
+  const oldBase = input.baseSha
+  if (
+    oldBase === undefined ||
+    (await git.optionalCommit(repo, oldBase)) !== oldBase ||
+    (await git.optionalCommit(repo, input.headSha)) !== input.headSha ||
+    !(await isAncestor(git, repo, oldBase, target.sha))
+  ) {
+    return undefined
+  }
+  const sourceBase = await directRecutSourceBase(git, repo, oldBase, input.headSha)
+  if (sourceBase === undefined) return undefined
+  const rootPayload = await changedPaths(git, repo, sourceBase, input.headSha)
+  if (rootPayload.length !== 1) return undefined
+
+  const mergeTipFailure = await mergeTipCarrierFailure(git, repo, input.id, input.headSha, target.sha)
+  if (mergeTipFailure !== undefined && mergeTipFailure.error.code !== "merge-tip-carrier") return undefined
+  const mergeTip = mergeTipFailure?.error.code === "merge-tip-carrier"
+  let hasDivergentPin = false
+  const sources: NonNullable<PRSnapshot["composition"]>["sources"][number][] = []
+  for (const path of rootPayload) {
+    const basePin = await readGitlink(git, repo, sourceBase, path)
+    const authoredPin = await readGitlink(git, repo, input.headSha, path)
+    const currentPin = await readGitlink(git, repo, target.sha, path)
+    if (basePin === undefined || authoredPin === undefined || currentPin === undefined) return undefined
+
+    const sourceRepo = join(repo, path)
+    try {
+      await realpath(sourceRepo)
+    } catch {
+      return undefined
+    }
+    if (
+      (await git.optionalCommit(sourceRepo, basePin)) !== basePin ||
+      (await git.optionalCommit(sourceRepo, authoredPin)) !== authoredPin ||
+      (await git.optionalCommit(sourceRepo, currentPin)) !== currentPin ||
+      !(await isAncestor(git, sourceRepo, basePin, authoredPin)) ||
+      !(await isAncestor(git, sourceRepo, basePin, currentPin))
+    ) {
+      return undefined
+    }
+
+    const payload = await changedPaths(git, sourceRepo, basePin, authoredPin)
+    const currentPayload = await changedPaths(git, sourceRepo, basePin, currentPin)
+    if (payload.length === 0 || intersection(payload, currentPayload).length > 0) return undefined
+    if (
+      !(await isAncestor(git, sourceRepo, authoredPin, currentPin)) &&
+      !(await isAncestor(git, sourceRepo, currentPin, authoredPin))
+    ) {
+      hasDivergentPin = true
+    }
+    sources.push({
+      repo: path,
+      branch: sourceCandidateRef(authoredPin),
+      baseSha: basePin,
+      tipSha: authoredPin,
+      payload,
+    })
+  }
+  if (!mergeTip && !hasDivergentPin) return undefined
+
+  return {
+    sourceBase,
+    composition: { version: 1, sources },
+  }
 }
 
 async function assertCurrentRecutCertificate(
@@ -1378,9 +1473,7 @@ async function recutDirectPR(
       message: `yrd: PR '${input.id}' recorded base '${oldBase}' is not an ancestor of '${target.sha}'`,
     })
   }
-  const sourceBase = (await isAncestor(git, repo, oldBase, input.headSha))
-    ? oldBase
-    : await uniqueMergeBase(git, repo, oldBase, input.headSha)
+  const sourceBase = await directRecutSourceBase(git, repo, oldBase, input.headSha)
   if (sourceBase === undefined) {
     throw createFailure({
       kind: "refusal",
@@ -1734,6 +1827,15 @@ async function recutDirectPR(
       ? outcome.error.message
       : (outcome.detail ?? outcome.token)
   throw createFailure({ kind: "infrastructure", code: "recut-scratch-failed", message: `yrd: ${message}` })
+}
+
+async function directRecutSourceBase(
+  git: Git,
+  repo: string,
+  oldBase: string,
+  headSha: string,
+): Promise<string | undefined> {
+  return (await isAncestor(git, repo, oldBase, headSha)) ? oldBase : uniqueMergeBase(git, repo, oldBase, headSha)
 }
 
 async function inspectQueueBase(git: Git, repo: string, branch: string): Promise<GitQueueTarget> {
@@ -2632,6 +2734,7 @@ async function composePR(
   repo: string,
   path: string,
   pr: StepExecution["prs"][number],
+  localSourceTips?: ReadonlySet<string>,
 ): Promise<Readonly<{ status: "passed"; output: readonly SourceRewrite[] }> | CandidateFailure> {
   if (!(await isAncestor(git, path, pr.headSha, "HEAD"))) {
     return candidateFailure(
@@ -2652,7 +2755,7 @@ async function composePR(
         [source.repo],
       )
     }
-    const prepared = await prepareSource(git, repo, source, currentPin)
+    const prepared = await prepareSource(git, repo, source, currentPin, localSourceTips?.has(source.repo) === true)
     if (prepared.status === "failed") return withAuthoredRootWorkflow(prepared, pr.id)
     rewrites.push(prepared.output)
     if (prepared.output.newTipSha === currentPin) continue
@@ -2680,6 +2783,7 @@ async function prepareSource(
   repo: string,
   source: NonNullable<StepExecution["prs"][number]["composition"]>["sources"][number],
   currentPin: string,
+  allowLocalTip = false,
 ): Promise<Readonly<{ status: "passed"; output: SourceRewrite }> | CandidateFailure> {
   const sourceRepo = join(repo, source.repo)
   try {
@@ -2696,23 +2800,25 @@ async function prepareSource(
   if (validBranch.code !== 0) {
     return candidateFailure("composition-invalid", `source '${source.repo}' has invalid branch '${source.branch}'`)
   }
-  const fetched = await git.run(
-    sourceRepo,
-    ["-c", "protocol.file.allow=always", "fetch", "--no-recurse-submodules", "--quiet", "origin", source.branch],
-    true,
-  )
-  if (fetched.code !== 0) {
-    return candidateFailure(
-      "source-missing",
-      `source '${source.repo}' branch '${source.branch}' could not be fetched: ${fetched.stderr || fetched.stdout}`,
+  if (!allowLocalTip) {
+    const fetched = await git.run(
+      sourceRepo,
+      ["-c", "protocol.file.allow=always", "fetch", "--no-recurse-submodules", "--quiet", "origin", source.branch],
+      true,
     )
-  }
-  const fetchedTip = await git.optionalCommit(sourceRepo, "FETCH_HEAD")
-  if (fetchedTip === undefined || !(await isAncestor(git, sourceRepo, source.tipSha, fetchedTip))) {
-    return candidateFailure(
-      "source-lineage",
-      `source '${source.repo}' branch '${source.branch}' no longer contains declared tip '${source.tipSha}' (resolved '${fetchedTip ?? "missing"}')`,
-    )
+    if (fetched.code !== 0) {
+      return candidateFailure(
+        "source-missing",
+        `source '${source.repo}' branch '${source.branch}' could not be fetched: ${fetched.stderr || fetched.stdout}`,
+      )
+    }
+    const fetchedTip = await git.optionalCommit(sourceRepo, "FETCH_HEAD")
+    if (fetchedTip === undefined || !(await isAncestor(git, sourceRepo, source.tipSha, fetchedTip))) {
+      return candidateFailure(
+        "source-lineage",
+        `source '${source.repo}' branch '${source.branch}' no longer contains declared tip '${source.tipSha}' (resolved '${fetchedTip ?? "missing"}')`,
+      )
+    }
   }
   for (const sha of [source.baseSha, source.tipSha, currentPin]) {
     if ((await git.optionalCommit(sourceRepo, sha)) !== sha) {
@@ -2805,25 +2911,9 @@ async function prepareSource(
       source.payload,
     )
   }
-  const candidateRef = sourceCandidateRef(newTipSha)
-  const pinned = await git.run(
-    sourceRepo,
-    ["update-ref", "--create-reflog", candidateRef, newTipSha, "0".repeat(newTipSha.length)],
-    true,
-  )
-  if (pinned.code !== 0 && (await git.optionalCommit(sourceRepo, candidateRef)) !== newTipSha) {
-    return candidateFailure(
-      "source-publish",
-      `source '${source.repo}' candidate ref could not be pinned: ${pinned.stderr}`,
-    )
-  }
-  const published = await git.run(sourceRepo, ["push", "--porcelain", "origin", `${newTipSha}:${candidateRef}`], true)
-  if (published.code !== 0) {
-    return candidateFailure(
-      "source-publish",
-      `source '${source.repo}' candidate '${newTipSha}' could not be published: ${published.stderr || published.stdout}`,
-    )
-  }
+  const published = await publishSourceCandidate(git, sourceRepo, source.repo, newTipSha)
+  if (published.status === "failed") return published
+  const candidateRef = published.output
   return {
     status: "passed",
     output: SourceRewriteSchema.parse({
@@ -2839,6 +2929,32 @@ async function prepareSource(
       rangeDiff: "=",
     }),
   }
+}
+
+async function publishSourceCandidate(
+  git: Git,
+  sourceRepo: string,
+  repoPath: string,
+  tipSha: string,
+): Promise<Readonly<{ status: "passed"; output: string }> | CandidateFailure> {
+  const candidateRef = sourceCandidateRef(tipSha)
+  try {
+    await publishImmutableRemoteRef({
+      inject: { process: git.process },
+      repo: sourceRepo,
+      origin: "origin",
+      ref: candidateRef,
+      sha: tipSha,
+      env: git.env,
+      timeoutMs: GIT_TIMEOUT_MS,
+    })
+  } catch (cause) {
+    return candidateFailure(
+      "source-publish",
+      `source '${repoPath}' candidate '${tipSha}' could not be published: ${messageOf(cause)}`,
+    )
+  }
+  return { status: "passed", output: candidateRef }
 }
 
 async function rebaseSource(

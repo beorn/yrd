@@ -103,7 +103,16 @@ export async function executeQueueSubmoduleComposition(
     const planned = { ...resolution, ref: compositionRef(resolution), message: compositionMessage(resolution) }
     try {
       const store = options.inject.storeForOrigin(planned.origin)
-      await publishComposition(git, store, planned, resolution.sha, options)
+      await publishImmutableRemoteRef({
+        inject: { process: options.inject.process },
+        repo: store,
+        origin: planned.origin,
+        ref: planned.ref,
+        sha: resolution.sha,
+        ...(options.env === undefined ? {} : { env: options.env }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      })
     } catch (cause) {
       return unavailable(
         resolution.path,
@@ -166,53 +175,59 @@ function adaptGit(process: Pick<Process, "run">): SubmoduleCompositionGit {
   }
 }
 
-async function publishComposition(
-  git: SubmoduleCompositionGit,
-  store: string,
-  resolution: QueueSubmoduleCommitResolution,
-  sha: string,
-  options: QueueSubmoduleCompositionExecutionOptions,
-): Promise<void> {
-  const existing = await remoteRef(git, store, resolution, options)
+/** @internal Publish one immutable remote ref with create-only CAS semantics. */
+export async function publishImmutableRemoteRef(request: {
+  inject: Readonly<{ process: Pick<Process, "run"> }>
+  repo: string
+  origin: string
+  ref: string
+  sha: string
+  env?: NodeJS.ProcessEnv
+  signal?: AbortSignal
+  timeoutMs?: number
+}): Promise<void> {
+  const git = adaptGit(request.inject.process)
+  const existing = await remoteRef(git, request.repo, request.origin, request.ref, request)
   if (existing !== undefined) {
-    if (existing === sha) return
-    throw new Error(`remote composition ref '${resolution.ref}' already names '${existing}' and will not be moved`)
+    if (existing === request.sha) return
+    throw new Error(`remote immutable ref '${request.ref}' already names '${existing}' and will not be moved`)
   }
   const pushed = await queueGit(
     git,
-    store,
+    request.repo,
     [
       "push",
       "--porcelain",
       "--no-verify",
-      `--force-with-lease=${resolution.ref}:`,
-      resolution.origin,
-      `${sha}:${resolution.ref}`,
+      `--force-with-lease=${request.ref}:`,
+      request.origin,
+      `${request.sha}:${request.ref}`,
     ],
-    options,
+    request,
   )
-  const published = await remoteRef(git, store, resolution, options)
-  if (published === sha) return
+  const published = await remoteRef(git, request.repo, request.origin, request.ref, request)
+  if (published === request.sha) return
   if (published !== undefined) {
-    throw new Error(`remote composition ref '${resolution.ref}' already names '${published}' and will not be moved`)
+    throw new Error(`remote immutable ref '${request.ref}' already names '${published}' and will not be moved`)
   }
   if (!settled(pushed) || pushed.code !== 0) throw new Error(gitDetail(pushed))
-  throw new Error(`published composition ref '${resolution.ref}' is missing`)
+  throw new Error(`published immutable ref '${request.ref}' is missing`)
 }
 
 async function remoteRef(
   git: SubmoduleCompositionGit,
-  store: string,
-  resolution: QueueSubmoduleCommitResolution,
-  options: QueueSubmoduleCompositionExecutionOptions,
+  repo: string,
+  origin: string,
+  ref: string,
+  options: Readonly<{ env?: NodeJS.ProcessEnv; signal?: AbortSignal; timeoutMs?: number }>,
 ): Promise<string | undefined> {
-  const result = await queueGit(git, store, ["ls-remote", "--refs", resolution.origin, resolution.ref], options)
+  const result = await queueGit(git, repo, ["ls-remote", "--refs", origin, ref], options)
   if (!settled(result) || result.code !== 0) throw new Error(gitDetail(result))
   const output = result.stdout.trim()
   if (output === "") return undefined
-  const [sha, ref] = output.split(/\s+/u)
-  if (ref !== resolution.ref || sha === undefined || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(sha)) {
-    throw new Error(`remote composition ref '${resolution.ref}' is missing or malformed`)
+  const [sha, resolvedRef] = output.split(/\s+/u)
+  if (resolvedRef !== ref || sha === undefined || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(sha)) {
+    throw new Error(`remote immutable ref '${ref}' is missing or malformed`)
   }
   return sha
 }
@@ -221,7 +236,7 @@ function queueGit(
   git: SubmoduleCompositionGit,
   repo: string,
   args: readonly string[],
-  options: QueueSubmoduleCompositionExecutionOptions,
+  options: Readonly<{ env?: NodeJS.ProcessEnv; signal?: AbortSignal; timeoutMs?: number }>,
 ): Promise<Awaited<ReturnType<SubmoduleCompositionGit["run"]>>> {
   const source = options.env ?? globalThis.process.env
   const env = Object.fromEntries(

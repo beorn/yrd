@@ -79,6 +79,19 @@ async function moduleCommit(module: string, branch: string, from: string, value:
   return git(module, ["rev-parse", "HEAD"])
 }
 
+async function disjointModulePins(module: string, moduleA: string): Promise<{ moduleB: string; moduleC: string }> {
+  await git(module, ["checkout", "-q", "-B", "carrier-row", moduleA])
+  await writeFile(join(module, "carrier.txt"), "carrier\n")
+  await git(module, ["add", "carrier.txt"])
+  await git(module, ["commit", "-qm", "carrier payload"])
+  const moduleB = await git(module, ["rev-parse", "HEAD"])
+  await git(module, ["checkout", "-q", "-B", "base-row", moduleA])
+  await writeFile(join(module, "current.txt"), "current\n")
+  await git(module, ["add", "current.txt"])
+  await git(module, ["commit", "-qm", "current payload"])
+  return { moduleB, moduleC: await git(module, ["rev-parse", "HEAD"]) }
+}
+
 /** Author a carrier commit that pins `dep` to `carrierPin` plus an unrelated file. */
 async function carrier(repo: string, sourceBase: string, carrierPin: string): Promise<string> {
   await git(repo, ["switch", "-qc", "issue/feature", sourceBase])
@@ -86,6 +99,24 @@ async function carrier(repo: string, sourceBase: string, carrierPin: string): Pr
   await writeFile(join(repo, "feature.txt"), "feature\n")
   await git(repo, ["add", "feature.txt"])
   await git(repo, ["commit", "-qm", "carrier: bump dep + feature"])
+  return git(repo, ["rev-parse", "HEAD"])
+}
+
+async function sourceOnlyCarrier(
+  repo: string,
+  sourceBase: string,
+  carrierPin: string,
+  mergeTip = false,
+): Promise<string> {
+  await git(repo, ["switch", "-qc", "issue/source", sourceBase])
+  await git(repo, ["update-index", "--cacheinfo", `160000,${carrierPin},dep`])
+  await git(repo, ["commit", "-qm", "carrier: bump dep only"])
+  if (mergeTip) {
+    await git(repo, ["switch", "-qc", "issue/side", sourceBase])
+    await git(repo, ["commit", "--allow-empty", "-qm", "carrier: empty side"])
+    await git(repo, ["switch", "-q", "issue/source"])
+    await git(repo, ["merge", "-q", "--no-ff", "issue/side", "-m", "carrier: merge source"])
+  }
   return git(repo, ["rev-parse", "HEAD"])
 }
 
@@ -528,25 +559,14 @@ describe("recut fast-forward gitlink resolution", () => {
 
   it("patch-extracts a source-only carrier onto a disjoint current component pin", async () => {
     const { repo, module, moduleA, sourceBase } = await baseRepo()
-    await git(module, ["checkout", "-q", "-B", "carrier-row", moduleA])
-    await writeFile(join(module, "carrier.txt"), "carrier\n")
-    await git(module, ["add", "carrier.txt"])
-    await git(module, ["commit", "-qm", "carrier payload"])
-    const moduleB = await git(module, ["rev-parse", "HEAD"])
-    await git(module, ["checkout", "-q", "-B", "base-row", moduleA])
-    await writeFile(join(module, "current.txt"), "current\n")
-    await git(module, ["add", "current.txt"])
-    await git(module, ["commit", "-qm", "current payload"])
-    const moduleC = await git(module, ["rev-parse", "HEAD"])
+    const { moduleB, moduleC } = await disjointModulePins(module, moduleA)
     await git(join(repo, "dep"), ["fetch", "-q", "origin", "carrier-row", "base-row"])
     expect(await git(module, ["merge-base", moduleB, moduleC])).toBe(moduleA)
     expect(await isAncestor(module, moduleB, moduleC)).toBe(false)
     expect(await isAncestor(module, moduleC, moduleB)).toBe(false)
 
-    await git(repo, ["switch", "-qc", "issue/source", sourceBase])
-    await git(repo, ["update-index", "--cacheinfo", `160000,${moduleB},dep`])
-    await git(repo, ["commit", "-qm", "carrier: bump dep only"])
-    const headSha = await git(repo, ["rev-parse", "HEAD"])
+    const headSha = await sourceOnlyCarrier(repo, sourceBase, moduleB)
+    expect(await git(repo, ["rev-list", "--parents", "-n", "1", headSha])).toBe(`${headSha} ${sourceBase}`)
     expect(await git(repo, ["diff", "--name-only", sourceBase, headSha])).toBe("dep")
     const targetSha = await advanceBase(repo, moduleC)
 
@@ -584,6 +604,52 @@ describe("recut fast-forward gitlink resolution", () => {
     )
     expect(await git(module, ["show", `${rewritten!.tipSha}:carrier.txt`])).toBe("carrier")
     expect(await git(module, ["show", `${rewritten!.tipSha}:current.txt`])).toBe("current")
+    expect(await git(repo, ["show", `${result.treeSha}:upstream.txt`])).toBe("upstream")
+  })
+
+  it("patch-extracts a source-only merge-tip carrier onto a disjoint current component pin", async () => {
+    const { repo, module, moduleA, sourceBase } = await baseRepo()
+    const { moduleB, moduleC } = await disjointModulePins(module, moduleA)
+    expect(await git(module, ["merge-base", moduleB, moduleC])).toBe(moduleA)
+    await git(join(repo, "dep"), ["fetch", "-q", "origin", "carrier-row", "base-row"])
+    const headSha = await sourceOnlyCarrier(repo, sourceBase, moduleB, true)
+    expect((await git(repo, ["rev-list", "--parents", "-n", "1", headSha])).split(" ")).toHaveLength(3)
+    expect(await git(repo, ["diff", "--name-only", sourceBase, headSha])).toBe("dep")
+    const targetSha = await advanceBase(repo, moduleC)
+
+    await using process = createProcess()
+    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      id: "PR1",
+      branch: "issue/source",
+      base: "main",
+      revision: 1,
+      headSha,
+      baseSha: sourceBase,
+    })
+
+    expect(result).toMatchObject({
+      headSha: targetSha,
+      baseSha: targetSha,
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            baseSha: moduleC,
+            tipSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+            payload: ["carrier.txt"],
+          },
+        ],
+      },
+    })
+    const rewritten = result.composition?.sources[0]
+    expect(rewritten).toBeDefined()
+    expect(await git(module, ["rev-list", "--parents", "-n", "1", rewritten!.tipSha])).toBe(
+      `${rewritten!.tipSha} ${moduleC}`,
+    )
+    expect(await git(module, ["show", `${rewritten!.tipSha}:carrier.txt`])).toBe("carrier")
+    expect(await git(module, ["show", `${rewritten!.tipSha}:current.txt`])).toBe("current")
+    expect(await git(repo, ["show", `${result.treeSha}:upstream.txt`])).toBe("upstream")
   })
 
   it("refuses loudly when the carrier and base pins have truly diverged", async () => {
