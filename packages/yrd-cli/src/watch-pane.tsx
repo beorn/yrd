@@ -131,6 +131,8 @@ function queueTimelineHeight(rows: number, tier: QueueDetailTier, detailOpen: bo
 }
 
 export type QueueWatchSnapshot = Readonly<{
+  /** Absolute repository authority whose Journal this snapshot projects. */
+  repositoryRoot?: string
   results: readonly QueueStatusResult[]
   state?: BaysState
   now: number
@@ -1462,6 +1464,7 @@ export function QueueWatchFrame({
   const timeline =
     snapshot.projection === undefined ? (
       <QueueTimelineView
+        repositoryRoot={snapshot.repositoryRoot}
         results={snapshot.results}
         state={snapshot.state}
         now={snapshot.now}
@@ -1474,6 +1477,7 @@ export function QueueWatchFrame({
       />
     ) : (
       <QueueTimelineView
+        repositoryRoot={snapshot.repositoryRoot}
         projection={snapshot.projection}
         runnerRefusal={snapshot.runnerRefusal}
         results={snapshot.results}

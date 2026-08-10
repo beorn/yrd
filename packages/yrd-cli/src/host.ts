@@ -2020,6 +2020,7 @@ async function runYrdProcessHost(
           services: activeHost.services,
           io: {
             cwd: activeHost.repository.worktree,
+            repositoryRoot: activeHost.repository.repo,
             artifactRoot: join(activeHost.repository.stateDir, "artifacts"),
             stateDir: activeHost.repository.stateDir,
             ...(runner === undefined ? {} : { runner: runner.id }),

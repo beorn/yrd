@@ -139,6 +139,8 @@ export type YrdCliIO = {
   columns?: number
   rows?: number
   cwd?: string
+  /** Host-resolved primary repository whose shared Journal this command projects. */
+  repositoryRoot?: string
   /** Probe whether a resident runner holds the drain lease in `cwd`. When it
    * reports true, `pr recut --queue` dispatches admission enqueue-only for the
    * resident to settle instead of becoming a second driver. */
