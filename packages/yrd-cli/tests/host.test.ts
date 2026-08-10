@@ -2247,6 +2247,7 @@ checks: [{check: {run: "true"}}]
         `Inspect the retained workspace at '${retained!}'.`,
         `git worktree remove --force '${retained!}'`,
         `rmdir '${dirname(retained!)}'`,
+        "yrd pr submit <branch>",
       ])
       expect((await journalEnvelope(repo)).flatMap(({ values }) => values)).toEqual([])
     } finally {

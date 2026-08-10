@@ -73,7 +73,7 @@ function retainedWorkspaceFailure(
               ]
             : [`rmdir ${shellQuote(workspace.path)}`]),
         ]),
-    ...(check === undefined ? [] : [`yrd check ${shellQuote(check)}`]),
+    ...(check === undefined ? ["yrd pr submit <branch>"] : [`yrd check ${shellQuote(check)}`]),
   ]
   return Object.freeze({
     code: failure.code,

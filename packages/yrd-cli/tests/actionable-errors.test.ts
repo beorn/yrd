@@ -130,6 +130,7 @@ describe("actionable failure projection", () => {
       `Inspect the retained workspace at '${worktree}'.`,
       `git worktree remove --force '${worktree}'`,
       "rmdir '/tmp/repo/.git/yrd/pre-submit-worktrees/check-one'",
+      "yrd pr submit <branch>",
     ])
     expect(formatHumanFailure(provision)).toContain(`resolve: Inspect the retained workspace at '${worktree}'.`)
     expect(formatHumanFailure(provision)).toContain(`resolve: git worktree remove --force '${worktree}'`)
@@ -141,7 +142,11 @@ describe("actionable failure projection", () => {
         `yrd: checkout materialization failed; workspace retained at '${directory}' ` +
         "(cleanup: directory; --keep-on-failure)",
     })
-    expect(checkout.resolution).toEqual([`Inspect the retained workspace at '${directory}'.`, `rmdir '${directory}'`])
+    expect(checkout.resolution).toEqual([
+      `Inspect the retained workspace at '${directory}'.`,
+      `rmdir '${directory}'`,
+      "yrd pr submit <branch>",
+    ])
     expect(formatHumanFailure(checkout)).toContain(`resolve: rmdir '${directory}'`)
   })
 })
