@@ -1303,52 +1303,29 @@ describe("withBays", () => {
       reviewCarried: false,
     })
 
-    const snapshot = app.state().bays
-    const recorded = snapshot.prs.PR1
-    if (recorded === undefined) throw new Error("expected PR1")
-    const { bay: _bay, ...branchRecorded } = recorded
-    const [lifecycle] = projectBranchLifecycles({
-      ...snapshot,
-      prs: { ...snapshot.prs, PR1: branchRecorded },
-    })
-
-    expect(lifecycle).toMatchObject({
+    expect(app.bays.branchLifecycles()[0]).toMatchObject({
       bay: "B1",
       branch: "issue/recut-lifecycle",
       headSha: HEAD_1,
       by: "yrd:4242",
       submitter: "@dev/3",
-      status: "handoff-ready",
+      status: "open",
     })
 
-    const firstRevision = branchRecorded.revs[0]
-    if (firstRevision === undefined) throw new Error("expected revision 1")
-    const [ambiguous] = projectBranchLifecycles({
-      ...snapshot,
-      prs: {
-        ...snapshot.prs,
-        PR1: branchRecorded,
-        PR2: {
-          ...branchRecorded,
-          id: "PR2",
-          revs: [{ ...firstRevision, submitter: "@dev/4" }],
-        },
-      },
-    })
-    expect(ambiguous).not.toHaveProperty("submitter")
+    const snapshot = app.state().bays
+    const recorded = snapshot.prs.PR1
+    if (recorded === undefined) throw new Error("expected PR1")
+    const { bay: _bay, ...unassociated } = recorded
+    expect(
+      projectBranchLifecycles({
+        ...snapshot,
+        prs: { ...snapshot.prs, PR1: unassociated },
+      })[0],
+    ).not.toHaveProperty("submitter")
 
     const closing = await app.bays.close({ bay: "B1", withdraw: true })
     await finishJob(app, closing)
-    const archivedSnapshot = app.state().bays
-    const archivedPr = archivedSnapshot.prs.PR1
-    if (archivedPr === undefined) throw new Error("expected archived PR1")
-    const { bay: _archivedBay, ...archivedBranchPr } = archivedPr
-    expect(
-      projectBranchLifecycles({
-        ...archivedSnapshot,
-        prs: { ...archivedSnapshot.prs, PR1: archivedBranchPr },
-      })[0],
-    ).toMatchObject({
+    expect(app.bays.branchLifecycles()[0]).toMatchObject({
       headSha: HEAD_1,
       status: "archived",
       submitter: "@dev/3",

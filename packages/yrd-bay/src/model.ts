@@ -908,9 +908,8 @@ export function emptyBaysState(): BaysState {
 function submitterForLifecycleHead(state: BaysState, bay: Bay, headSha: string | undefined): string | undefined {
   if (headSha === undefined) return undefined
   const associated = prForBay(state, bay.id)
-  const candidates =
-    associated === undefined ? Object.values(state.prs).filter((pr) => pr.branch === bay.branch) : [associated]
-  const revisions = candidates.flatMap((pr) => pr.revs.filter((revision) => revision.head === headSha))
+  if (associated === undefined) return undefined
+  const revisions = associated.revs.filter((revision) => revision.head === headSha)
   if (revisions.length === 0 || revisions.some((revision) => revision.submitter === undefined)) return undefined
   const submitters = new Set(revisions.map((revision) => revision.submitter))
   return submitters.size === 1 ? revisions[0]?.submitter : undefined
