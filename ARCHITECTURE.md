@@ -112,6 +112,51 @@ scheduler, Candidate builder, integration queue, receipt store, or landing
 path. The generated root wrapper is the Queue Candidate; it has no parallel
 identity or composition lifecycle.
 
+### Landing identity and the rebuildable index
+
+Repository history is the authority for physical landedness. The Journal is
+the queryable delivery index; losing an index row must not make landed work
+look stranded, and an index row contradicted by Git must not make missing work
+look delivered.
+
+One change identity is minted when the first `pr/pushed` command is accepted:
+the command's UUIDv7 id. It remains fixed across every revision and recut of
+that PR. Candidate preparation stamps each physical change commit before any
+check runs, so the exact commit that passes the gate is also the commit that
+lands. The commit trailers carry the stable change id and the exact PR,
+revision, submitted head, base, and Queue run that produced it. A batch has one
+such commit per physical change; later batch commits retain earlier identities
+in their ancestry.
+
+The `pr/integrated` fact is the indexed receipt for that same identity and
+landing commit. Bay projections remain pure descriptions of journal-recorded
+delivery state; they never perform Git I/O and their `integrated` vocabulary is
+not itself a landedness proof. User-facing CLI boundaries join the index with
+the live repository and return one typed result:
+
+- **proven** — the indexed landing commit is reachable from the live base and
+  its trailers match the exact change identity and revision;
+- **index-gap** — no current row exists, but exactly one matching trailer is
+  reachable from the base; report the gap and rebuild the row;
+- **index-corrupt** — a row points off the base, its commit trailers disagree,
+  or multiple commits claim the same exact identity; fail loudly and rebuild;
+- **unknown** — the base, commit, or repository history cannot be read; never
+  rewrite this as landed or not landed.
+
+The rebuild procedure scans the selected base with Git's trailer parser for
+the exact change id, validates the companion PR/revision/head/base trailers,
+requires exactly one reachable landing commit, derives pin movements by
+comparing that commit with its first parent, and appends a validated
+compensating receipt through the Bay command boundary. It never rewrites a
+historical frame or mutates a read projection. A complete rebuild repeats that
+procedure for every stamped change on the base and then reports orphaned rows
+whose indexed landing commit is not reachable.
+
+`already-landed` remains a different statement: it records content containment
+without a new physical landing. Gitlink-only work uses component-DAG
+containment at the superproject's current pin; it never uses patch identity or
+the landing journal as a substitute for containment.
+
 ## Command Flow
 
 ```text

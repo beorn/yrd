@@ -132,11 +132,11 @@ export async function provePrLandings(prs: readonly PR[], io: YrdCliIO): Promise
   return { verdicts, warnings }
 }
 
-/** Prove, for every PR whose recorded state claims its content never landed,
- * whether the exact landing commit recorded by `pr/integrated` is reachable
- * from its base tip. Neither side is sufficient alone: ancestry without the
- * journal row is an indistinguishable direct push, while a journal row whose
- * landing commit is absent from the base does not prove delivery.
+/** Reconcile every PR whose recorded state claims its content never landed.
+ * The repository is authoritative: an indexed landing commit reachable from
+ * the base proves delivery. A missing index row remains typed non-proof until
+ * the landing ledger can locate the change by its durable trailer; an indexed
+ * commit absent from the base is typed corruption, never a quiet fallback.
  *
  * The live specimen (22376): an author withdrawal arrived on top of a completed
  * merge, and `pr list` printed only the later write. An author who trusts
