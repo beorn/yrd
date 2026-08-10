@@ -664,15 +664,36 @@ export function formatPRRevisionSelector(pr: PRId, revision: number | Pick<PRRev
   return `pr#${value}.${number}`
 }
 
+/**
+ * A lookup that finds nothing must say WHAT IT SEARCHED, so that "no such PR"
+ * and "the index returned nothing" stop reading alike.
+ *
+ * Without the denominator both cases print the same sentence, and the reader
+ * with no way to tell them apart concludes they mistyped. That is not
+ * hypothetical: @i/10-merge-queue records three seats hitting this class, the
+ * first two writing it off as their own incompetence, which is how the defect
+ * stayed hidden. The count is the cheapest thing that makes an empty answer
+ * falsifiable — `searched 686` is absence, `searched 0` is an index that
+ * returned nothing.
+ *
+ * Deliberately NOT hard-coding a verdict at 0: in a fresh repository zero PRs
+ * is genuine absence, so asserting "that is a lookup failure" would over-claim
+ * in exactly the case nobody can check. The number is reported; the reader
+ * judges it.
+ *
+ * The `no PR '<selector>'` prefix is preserved so any matcher on the old text
+ * keeps matching. The noun is `pr list`'s own ("list pull requests").
+ */
 function prNotFoundMessage(state: BaysState, selector: string): string {
+  const searched = `searched ${Object.keys(state.prs).length} pull request(s)`
   if (parsePRSelector(selector) !== undefined || !/^(?:pr#?|\d+\.)/iu.test(selector.trim())) {
-    return `yrd: no PR '${selector}'`
+    return `yrd: no PR '${selector}' — ${searched}`
   }
   const copiedId = /^(?:pr#?)?([a-z0-9_-]+)/iu.exec(selector.trim())?.[1]
   const copiedPr = copiedId === undefined ? undefined : state.prs[`PR${copiedId}`]
   const examplePr = copiedPr ?? Object.values(state.prs).toSorted((left, right) => compareNatural(left.id, right.id))[0]
   const example = examplePr === undefined ? "pr#1.1" : formatPRRevisionSelector(examplePr.id, currentPRRev(examplePr))
-  return `yrd: no PR '${selector}'; accepted form: ${example}`
+  return `yrd: no PR '${selector}'; accepted form: ${example} — ${searched}`
 }
 
 export function currentPRRev(pr: Pick<PR, "id" | "revs">): PRRev {

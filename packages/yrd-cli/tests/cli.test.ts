@@ -10638,7 +10638,11 @@ describe("runYrd", () => {
 
     expect(await runYrd(app, yrd("pr", "edit", "PR404", "--title", "--json"), optionValue.io)).toBe(1)
     expect(optionValue.stdout()).toBe("")
-    expect(optionValue.stderr()).toBe("error: no PR 'PR404'\n")
+    // The denominator is load-bearing, not decoration: it is what separates
+    // "no such PR" from "the index returned nothing". This app has no PRs, so
+    // `searched 0` here is HONEST ABSENCE — which is why the message reports
+    // the count and does not assert a verdict at zero.
+    expect(optionValue.stderr()).toBe("error: no PR 'PR404' — searched 0 pull request(s)\n")
 
     const afterTerminator = outputIO()
     expect(await runYrd(app, yrd("pr", "crate", "--", "--json"), afterTerminator.io)).toBe(2)
@@ -10661,6 +10665,12 @@ describe("runYrd", () => {
 
     const missingPR = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "PR404"), missingPR.io)).toBe(1)
+    // NOT YET WIDENED: `queue run <unknown>` still emits the bare message from
+    // a path distinct from the bay model's builder. Ruled out as its source:
+    // requireLivePR/prNotFoundMessage (widened), selectedCheckPRs and
+    // resolveQueueTargets' filterPr (both consolidated onto it), and
+    // pr-withdraw (raises code `pr-missing`, while this failure carries
+    // `pr-not-found`). Left asserting current behaviour rather than guessed at.
     expect(missingPR.stderr()).toBe("error: no PR 'PR404'\n")
 
     const missingPRJson = outputIO()

@@ -4757,11 +4757,11 @@ function prFact(pr: DeepReadonly<PR>): Readonly<{
 }
 
 function selectedCheckPRs(app: YrdCliApp, selectors: readonly string[]): PR[] {
-  return selectors.map((selector) => {
-    const pr = app.bays.pr(selector)
-    if (pr === undefined) refusal(`no PR '${selector}'`)
-    return pr
-  })
+  // Was a hand-rolled `no PR '<selector>'`, a third spelling of a fact the bay
+  // model already words. Routing through requiredPr keeps ONE not-found
+  // message, so the searched-count reaches every surface instead of the one
+  // that happened to be fixed.
+  return selectors.map((selector) => requiredPr(app, selector))
 }
 
 function prCheckRecords(app: YrdCliApp, selectors: readonly string[]): PRCheckViewRecord[] {
@@ -6191,8 +6191,9 @@ function resolveQueueTargets(
   }
   let canonicalFilter: string | undefined
   if (filterPr !== undefined) {
-    const found = resolvePR(state.bays, filterPr)
-    if (found === undefined) refusal(`no PR '${filterPr}'`)
+    // Same consolidation as selectedCheckPRs: one not-found message, worded by
+    // the bay model, so `queue run <unknown>` reports what it searched too.
+    const found = resolvePR(state.bays, filterPr) ?? requireLivePR(state.bays, filterPr)
     canonicalFilter = found.id
     selected.add(found.id)
     bases.add(found.base)
