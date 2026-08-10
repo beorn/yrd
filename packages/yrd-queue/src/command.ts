@@ -2938,6 +2938,17 @@ async function publishSourceCandidate(
   tipSha: string,
 ): Promise<Readonly<{ status: "passed"; output: string }> | CandidateFailure> {
   const candidateRef = sourceCandidateRef(tipSha)
+  const pinned = await git.run(
+    sourceRepo,
+    ["update-ref", "--create-reflog", candidateRef, tipSha, "0".repeat(tipSha.length)],
+    true,
+  )
+  if (pinned.code !== 0 && (await git.optionalCommit(sourceRepo, candidateRef)) !== tipSha) {
+    return candidateFailure(
+      "source-publish",
+      `source '${repoPath}' candidate ref could not be pinned: ${pinned.stderr || pinned.stdout}`,
+    )
+  }
   try {
     await publishImmutableRemoteRef({
       inject: { process: git.process },
