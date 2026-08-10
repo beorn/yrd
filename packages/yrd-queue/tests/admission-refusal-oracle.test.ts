@@ -107,7 +107,7 @@ async function createApp(
   })
 }
 
-async function createDeliveryApp(clock: () => string, waitForMerge = false) {
+async function createDeliveryApp(clock: () => string, waitForMerge = false, defaultSteps?: readonly string[]) {
   const bayJobs = createBayJobDefs(workspace())
   const check = withStep(
     "check",
@@ -133,6 +133,7 @@ async function createDeliveryApp(clock: () => string, waitForMerge = false) {
     steps: [check, merge] as const,
     batch: false,
     progress: { ...DEFAULT_QUEUE_PROGRESS_POLICY, refusalCount: 3 },
+    ...(defaultSteps === undefined ? {} : { defaultSteps }),
   })
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   return createYrd(queue(base), {
@@ -320,6 +321,56 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
 
     expect(app.bays.pr(pr.id)?.checkRequests.length).toBe(1)
     expect(app.queue.audit({ now: "2026-01-01T00:10:00.000Z" }).findings).not.toContainEqual(
+      expect.objectContaining({ code: "queue-progress-stalled" }),
+    )
+  })
+
+  /**
+   * The CLI shape. `host.ts` passes `config.steps` as `defaultSteps`, and
+   * `config.ts` builds that array as `[...checks, "merge"]`, so a real
+   * invocation always selects a merge step. Pinned here because the next test
+   * pins what happens when it does not, and the pair is only meaningful
+   * together.
+   */
+  it("puts a ready candidate in the progress population under the CLI's own step selection", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createDeliveryApp(clock.read, true, ["check", "merge"])
+    const pr = await submitAndRequestChecks(app, "issue/cli-shaped-selection")
+    await requestChecksTimes(app, pr.id, DEFAULT_QUEUE_PROGRESS_POLICY.minAdmissionChecks - 1)
+
+    await app.queue.run({}, runtime)
+
+    expect(app.queue.audit({ now: "2026-01-01T00:10:00.000Z" }).findings).toContainEqual(
+      expect.objectContaining({ code: "queue-progress-stalled", specimen: "queue:main" }),
+    )
+  })
+
+  /**
+   * `queueProgressQueue` opens with a guard that returns an EMPTY population
+   * when the selection carries no merge step, and it says nothing when it does.
+   *
+   * This matters because the guard reads `state.queues.defaultSteps` — PERSISTED
+   * state frozen at queue-install time — and not the config the CLI would
+   * compute today. Nothing reconciles the two. A queue installed with a
+   * merge-less selection therefore reports a clean audit forever, however long
+   * it is blocked, and `selectSteps` does not throw because every named step is
+   * still installed.
+   *
+   * Pinned as the CURRENT behaviour, not endorsed. A queue that cannot merge
+   * arguably cannot stall, but a queue whose PERSISTED selection has drifted
+   * from its installed steps is exactly the silent-empty class this file's
+   * header incident is about, one layer down.
+   */
+  it("reports nothing at all when the persisted step selection carries no merge step", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createDeliveryApp(clock.read, true, ["check"])
+    const pr = await submitAndRequestChecks(app, "issue/merge-less-selection")
+    await requestChecksTimes(app, pr.id, DEFAULT_QUEUE_PROGRESS_POLICY.minAdmissionChecks - 1)
+
+    await app.queue.run({}, runtime)
+
+    // Blocked for an hour, six times the default threshold, and silent.
+    expect(app.queue.audit({ now: "2026-01-01T01:00:00.000Z" }).findings).not.toContainEqual(
       expect.objectContaining({ code: "queue-progress-stalled" }),
     )
   })
