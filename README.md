@@ -20,7 +20,7 @@ The **yard** — hence the name — is the **queue runner** that builds and inte
 - Work flows from tracker issues — issues in, proven merges out — so any agentic system can drive Yrd. Trackers, forges, and judges are pluggable — bring your own.
 - **Contests** compare independently produced implementations of real issues,
   retain their evidence, and promote an explicitly selected result.
-- Every merge is proven — tested in a clean worktree, on the exact commit that ships, with a permanent receipt. Under load, merges batch optimistically and a red batch **bisects** to the culprit. Merges span repos, too — see [Superprojects](#superprojects).
+- Every merge is proven — tested in a clean worktree, on the exact commit that ships, with a permanent receipt — written as standard git trailers and refs, so plain `git log` can read it. Under load, merges batch optimistically and a red batch **bisects** to the culprit. Merges span repos, too — see [Superprojects](#superprojects).
 - **Git-compatible at the git layer.** Change identity is a standard commit trailer, submission is a plain ref push, queue metadata lives in git refs, and the repo itself is the durable record — any tool that reads git finds nothing surprising, plain `git log` answers “did this land?”, and moving to hosted review someday is a mechanical import, not a rewrite. Compatibility ends at the git layer: Yrd speaks no forge’s API and imports no forge’s review process.
 - Agents drive everything from a scriptable CLI; humans get a live TUI. Checks are your own commands, not a workflow DSL — Yrd encodes no process, so who reviews, and when, stays yours.
 
