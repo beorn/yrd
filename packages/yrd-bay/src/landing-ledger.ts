@@ -7,17 +7,20 @@ const OneLineSchema = z
   .min(1)
   .refine((value) => !/[\u0000-\u001f\u007f]/u.test(value), { message: "must fit in one Git trailer line" })
 
-const LandingIdentityObjectSchema = z
+const SubmittedChangeIdentityObjectSchema = z
   .object({
     changeId: z.uuidv7(),
     pr: OneLineSchema,
     revision: z.number().int().positive(),
     headSha: GitShaSchema,
     base: OneLineSchema,
-    run: OneLineSchema,
   })
   .strict()
 
+export const SubmittedChangeIdentitySchema = SubmittedChangeIdentityObjectSchema.readonly()
+export type SubmittedChangeIdentity = Readonly<z.infer<typeof SubmittedChangeIdentitySchema>>
+
+const LandingIdentityObjectSchema = SubmittedChangeIdentityObjectSchema.extend({ run: OneLineSchema }).strict()
 export const LandingIdentitySchema = LandingIdentityObjectSchema.readonly()
 
 export type LandingIdentity = Readonly<z.infer<typeof LandingIdentitySchema>>
@@ -26,6 +29,86 @@ export const RepositoryLandingSchema = LandingIdentityObjectSchema.extend({ land
   .strict()
   .readonly()
 export type RepositoryLanding = Readonly<z.infer<typeof RepositoryLandingSchema>>
+
+export type LandingIndexVerdict =
+  | Readonly<{ status: "proven"; source: "index"; landing: RepositoryLanding }>
+  | Readonly<{
+      status: "proven"
+      source: "repository"
+      landing: RepositoryLanding
+      indexGap: true
+    }>
+  | Readonly<{ status: "not-proven"; reason: "repository-identity-absent" }>
+  | Readonly<{
+      status: "corrupt"
+      reason: "duplicate-repository-identity"
+      landings: readonly RepositoryLanding[]
+    }>
+  | Readonly<{
+      status: "corrupt"
+      reason: "repository-identity-mismatch"
+      landing: RepositoryLanding
+    }>
+  | Readonly<{
+      status: "corrupt"
+      reason: "index-identity-mismatch" | "index-landing-not-on-base"
+      indexed: RepositoryLanding
+    }>
+  | Readonly<{
+      status: "corrupt"
+      reason: "index-landing-mismatch"
+      indexed: RepositoryLanding
+      repository: RepositoryLanding
+    }>
+
+function sameSubmittedIdentity(left: SubmittedChangeIdentity, right: SubmittedChangeIdentity): boolean {
+  return (
+    left.changeId === right.changeId &&
+    left.pr === right.pr &&
+    left.revision === right.revision &&
+    left.headSha === right.headSha &&
+    left.base === right.base
+  )
+}
+
+/** Join the rebuildable index to repository truth. `repositoryLandings` must
+ * come from the already-resolved live base; an unreadable scan throws before
+ * this pure decision and therefore remains UNKNOWN at the caller boundary. */
+export function reconcileLandingIndex(
+  expectedValue: SubmittedChangeIdentity,
+  indexedValue: RepositoryLanding | undefined,
+  repositoryLandings: readonly RepositoryLanding[],
+): LandingIndexVerdict {
+  const expected = SubmittedChangeIdentitySchema.parse(expectedValue)
+  const matching = repositoryLandings
+    .map((landing) => RepositoryLandingSchema.parse(landing))
+    .filter((landing) => landing.changeId === expected.changeId)
+  if (matching.length > 1) {
+    return { status: "corrupt", reason: "duplicate-repository-identity", landings: matching }
+  }
+  const repository = matching[0]
+  if (repository !== undefined && !sameSubmittedIdentity(repository, expected)) {
+    return { status: "corrupt", reason: "repository-identity-mismatch", landing: repository }
+  }
+
+  if (indexedValue === undefined) {
+    return repository === undefined
+      ? { status: "not-proven", reason: "repository-identity-absent" }
+      : { status: "proven", source: "repository", landing: repository, indexGap: true }
+  }
+
+  const indexed = RepositoryLandingSchema.parse(indexedValue)
+  if (!sameSubmittedIdentity(indexed, expected)) {
+    return { status: "corrupt", reason: "index-identity-mismatch", indexed }
+  }
+  if (repository === undefined) {
+    return { status: "corrupt", reason: "index-landing-not-on-base", indexed }
+  }
+  if (indexed.landingSha !== repository.landingSha || indexed.run !== repository.run) {
+    return { status: "corrupt", reason: "index-landing-mismatch", indexed, repository }
+  }
+  return { status: "proven", source: "index", landing: repository }
+}
 
 const FIELD_SEPARATOR = "\u001f"
 const RECORD_SEPARATOR = "\u001e"

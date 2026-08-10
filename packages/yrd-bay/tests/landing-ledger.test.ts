@@ -7,6 +7,7 @@ import {
   LANDING_LOG_FORMAT,
   LandingIdentitySchema,
   parseLandingLog,
+  reconcileLandingIndex,
   renderLandingCommitMessage,
 } from "../src/landing-ledger.ts"
 
@@ -99,5 +100,55 @@ describe("landing ledger identity", () => {
     expect(() =>
       parseLandingLog(`${HEAD_SHA}\u001f${CHANGE_ID}\u001fPR7\u001f3\u001f${HEAD_SHA}\u001f\u001fR9\u001e`),
     ).toThrow()
+  })
+
+  it("treats a repository match as proof and a missing journal row as an index gap", () => {
+    const landing = {
+      changeId: CHANGE_ID,
+      pr: "PR7",
+      revision: 3,
+      headSha: HEAD_SHA,
+      base: "main",
+      run: "R9",
+      landingSha: "b".repeat(40),
+    } as const
+    const { run: _run, landingSha: _landingSha, ...submitted } = landing
+
+    expect(reconcileLandingIndex(submitted, landing, [landing])).toEqual({
+      status: "proven",
+      source: "index",
+      landing,
+    })
+    expect(reconcileLandingIndex(submitted, undefined, [landing])).toEqual({
+      status: "proven",
+      source: "repository",
+      landing,
+      indexGap: true,
+    })
+  })
+
+  it("makes repository/index disagreement typed and loud", () => {
+    const expected = {
+      changeId: CHANGE_ID,
+      pr: "PR7",
+      revision: 3,
+      headSha: HEAD_SHA,
+      base: "main",
+      run: "R9",
+      landingSha: "b".repeat(40),
+    } as const
+    const otherLanding = { ...expected, landingSha: "c".repeat(40) }
+    const { run: _run, landingSha: _landingSha, ...submitted } = expected
+
+    expect(reconcileLandingIndex(submitted, expected, [])).toEqual({
+      status: "corrupt",
+      reason: "index-landing-not-on-base",
+      indexed: expected,
+    })
+    expect(reconcileLandingIndex(submitted, expected, [expected, otherLanding])).toEqual({
+      status: "corrupt",
+      reason: "duplicate-repository-identity",
+      landings: [expected, otherLanding],
+    })
   })
 })
