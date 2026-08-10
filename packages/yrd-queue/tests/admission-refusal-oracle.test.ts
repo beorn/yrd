@@ -271,6 +271,38 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     )
   })
 
+  /**
+   * Box 2 of @i/10-merge-queue/uptime-is-not-health. The bead's predicate is a
+   * CONJUNCTION validated over the whole journal — runner heartbeat fresh AND
+   * ready-set non-empty AND no merge request for the window AND at least ten
+   * admission checks in it — which fired exactly 3 times, all genuine. The
+   * duration test alone fires 37 times, and an alarm that fires 37 times is an
+   * alarm somebody mutes.
+   *
+   * `queueProgressAuditFindings` implements the middle two conjuncts and neither
+   * outer one. This pins the cheaper half: ONE admission check is a queue barely
+   * tried, not a queue trying and failing, so it must not read as stalled. The
+   * count is computable from state today — `PRCheckRequest` already carries `at`
+   * — so this needs no new recording, only the predicate.
+   *
+   * The heartbeat conjunct has no gate yet on purpose: `QueueAuditOptions` is
+   * `{ now?: string }`, and yrd-cli depends on @yrd/queue and not the reverse,
+   * so the heartbeat must arrive INJECTED alongside `now` before it can be
+   * asserted. Adding that field is the other half of box 2.
+   */
+  it("does not call a queue stalled on a single admission check", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createDeliveryApp(clock.read, true)
+    const pr = await submitAndRequestChecks(app, "issue/one-admission-check")
+
+    await app.queue.run({}, runtime)
+
+    expect(app.bays.pr(pr.id)?.checkRequests.length).toBe(1)
+    expect(app.queue.audit({ now: "2026-01-01T00:10:00.000Z" }).findings).not.toContainEqual(
+      expect.objectContaining({ code: "queue-progress-stalled" }),
+    )
+  })
+
   it("makes one exact refusal loud without inventing a stalled live queue", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     let blocked = ""
