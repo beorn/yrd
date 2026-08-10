@@ -8,14 +8,14 @@ import type { PruneGitFacts, YrdCliIO } from "./types.ts"
  * PROCESS (queued, checking, awaiting an author) and needs no ancestry proof. */
 const NOT_LANDED_CLAIMS = new Set(["withdrawn", "canceled"])
 
-type LandingCandidate = PR &
+type JournalLandingCandidate = PR &
   Readonly<{
     integratedAt: string
     integration: NonNullable<PR["integration"]>
   }>
 
-function isLandingCandidate(pr: PR): pr is LandingCandidate {
-  return NOT_LANDED_CLAIMS.has(prDeliveryState(pr)) && pr.integratedAt !== undefined && pr.integration !== undefined
+function hasJournalLanding(pr: PR): pr is JournalLandingCandidate {
+  return pr.integratedAt !== undefined && pr.integration !== undefined
 }
 
 export type PrLanding = Readonly<{
@@ -36,6 +36,23 @@ export type PrLandingReconciliation = Readonly<{
   warnings: readonly string[]
 }>
 
+export type PrLandingVerdict =
+  | Readonly<{ status: "proven"; baseSha: string; landingSha: string }>
+  | Readonly<{ status: "not-proven"; reason: "journal-missing" }>
+  | Readonly<{
+      status: "not-proven"
+      reason: "landing-not-on-base"
+      baseSha: string
+      landingSha: string
+    }>
+  | Readonly<{ status: "unknown"; reason: "base-unresolved"; base: string }>
+  | Readonly<{ status: "unknown"; reason: "git-failed"; base: string; detail: string }>
+
+export type PrLandingProofs = Readonly<{
+  verdicts: ReadonlyMap<string, PrLandingVerdict>
+  warnings: readonly string[]
+}>
+
 const EMPTY: PrLandingReconciliation = { landings: new Map(), warnings: [] }
 
 async function landedCommits(git: PruneGitFacts, baseSha: string, commits: readonly string[]): Promise<Set<string>> {
@@ -52,6 +69,65 @@ function failureText(error: unknown): string {
   return error instanceof Error && error.message.trim() !== "" ? error.message.trim() : String(error)
 }
 
+/** Resolve the one canonical physical-landing proof for each PR: a projected
+ * `pr/integrated` journal row AND reachability of that row's exact landing
+ * commit from the live base. The authored revision is deliberately irrelevant:
+ * a regenerated carrier may never appear on the base even though the queue's
+ * landing commit does.
+ *
+ * Every input receives a typed verdict. Missing journal evidence never probes
+ * Git, and an unresolvable base remains UNKNOWN rather than collapsing to
+ * landed or not-landed. */
+export async function provePrLandings(prs: readonly PR[], io: YrdCliIO): Promise<PrLandingProofs> {
+  const verdicts = new Map<string, PrLandingVerdict>()
+  const candidates: JournalLandingCandidate[] = []
+  for (const pr of prs) {
+    if (hasJournalLanding(pr)) candidates.push(pr)
+    else verdicts.set(pr.id, { status: "not-proven", reason: "journal-missing" })
+  }
+  if (candidates.length === 0) return { verdicts, warnings: [] }
+
+  const cwd = io.cwd ?? process.cwd()
+  const git = io.pruneGit === undefined ? createPruneGitFacts(cwd) : io.pruneGit(cwd)
+  const byBase = new Map<string, JournalLandingCandidate[]>()
+  for (const pr of candidates) {
+    const grouped = byBase.get(pr.base)
+    if (grouped === undefined) byBase.set(pr.base, [pr])
+    else grouped.push(pr)
+  }
+
+  const warnings: string[] = []
+  for (const [base, members] of byBase) {
+    try {
+      const baseSha = (await git.resolveCommit(`origin/${base}`)) ?? (await git.resolveCommit(base))
+      if (baseSha === undefined) {
+        for (const pr of members) verdicts.set(pr.id, { status: "unknown", reason: "base-unresolved", base })
+        warnings.push(
+          `yrd: base '${base}' did not resolve here, so ${members.length} journal landing` +
+            `${members.length === 1 ? "" : "s"} could not be checked against it`,
+        )
+        continue
+      }
+      const commits = members.map((pr) => pr.integration.commit)
+      const landed = await landedCommits(git, baseSha, commits)
+      for (const pr of members) {
+        const landingSha = pr.integration.commit
+        verdicts.set(
+          pr.id,
+          landed.has(landingSha)
+            ? { status: "proven", baseSha, landingSha }
+            : { status: "not-proven", reason: "landing-not-on-base", baseSha, landingSha },
+        )
+      }
+    } catch (error) {
+      const detail = failureText(error)
+      for (const pr of members) verdicts.set(pr.id, { status: "unknown", reason: "git-failed", base, detail })
+      warnings.push(`yrd: could not prove journal landings against base '${base}': ${detail}`)
+    }
+  }
+  return { verdicts, warnings }
+}
+
 /** Prove, for every PR whose recorded state claims its content never landed,
  * whether the exact landing commit recorded by `pr/integrated` is reachable
  * from its base tip. Neither side is sufficient alone: ancestry without the
@@ -66,41 +142,20 @@ function failureText(error: unknown): string {
  * Git is consulted only when there is such a claim to check, and at most twice
  * per distinct base regardless of how many rows the projection carries. */
 export async function reconcilePrLandings(prs: readonly PR[], io: YrdCliIO): Promise<PrLandingReconciliation> {
-  const candidates = prs.filter(isLandingCandidate)
+  const candidates = prs.filter((pr) => NOT_LANDED_CLAIMS.has(prDeliveryState(pr)))
   if (candidates.length === 0) return EMPTY
-
-  const cwd = io.cwd ?? process.cwd()
-  const git = io.pruneGit === undefined ? createPruneGitFacts(cwd) : io.pruneGit(cwd)
-  const byBase = new Map<string, LandingCandidate[]>()
-  for (const pr of candidates) {
-    const grouped = byBase.get(pr.base)
-    if (grouped === undefined) byBase.set(pr.base, [pr])
-    else grouped.push(pr)
-  }
-
+  const proof = await provePrLandings(candidates, io)
   const landings = new Map<string, PrLanding>()
-  const warnings: string[] = []
-  for (const [base, members] of byBase) {
-    try {
-      const baseSha = (await git.resolveCommit(`origin/${base}`)) ?? (await git.resolveCommit(base))
-      if (baseSha === undefined) {
-        warnings.push(
-          `yrd: base '${base}' did not resolve here, so ${members.length} withdrawn or canceled PR` +
-            `${members.length === 1 ? "" : "s"} could not be checked against it — their state is the record, not a proof`,
-        )
-        continue
-      }
-      const landingCommits = members.map((pr) => pr.integration.commit)
-      const landed = await landedCommits(git, baseSha, landingCommits)
-      for (const pr of members) {
-        const landingSha = pr.integration.commit
-        if (!landed.has(landingSha)) continue
-        const recorded = prDeliveryState(pr)
-        landings.set(pr.id, { recorded, baseSha, headSha: landingSha, code: `${recorded}-after-landing` })
-      }
-    } catch (error) {
-      warnings.push(`yrd: could not check base '${base}' for already-merged content: ${failureText(error)}`)
-    }
+  for (const pr of candidates) {
+    const verdict = proof.verdicts.get(pr.id)
+    if (verdict?.status !== "proven") continue
+    const recorded = prDeliveryState(pr)
+    landings.set(pr.id, {
+      recorded,
+      baseSha: verdict.baseSha,
+      headSha: verdict.landingSha,
+      code: `${recorded}-after-landing`,
+    })
   }
-  return { landings, warnings }
+  return { landings, warnings: proof.warnings }
 }
