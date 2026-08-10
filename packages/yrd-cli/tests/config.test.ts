@@ -5,6 +5,7 @@
  * @consumer @yrd/cli configuration
  */
 import { describe, expect, it } from "vitest"
+import { DEFAULT_QUEUE_PROGRESS_POLICY } from "@yrd/queue"
 import { loadYrdConfig, parseYrdConfig, renderYrdConfigScaffold, stepGateMode } from "../src/config.ts"
 
 describe("Yrd v4 config", () => {
@@ -38,7 +39,22 @@ describe("Yrd v4 config", () => {
       defaultBase: "main",
       read: async () => "checks: [typecheck]\nprogress: {noLandingMs: 120000, refusalCount: 5}\n",
     })
-    expect(loaded.config.progress).toEqual({ noLandingMs: 120_000, refusalCount: 5 })
+    // The two declared knobs are honoured and the undeclared one falls back to
+    // the shipped default, which is the whole contract for an optional knob.
+    expect(loaded.config.progress).toEqual({
+      noLandingMs: 120_000,
+      refusalCount: 5,
+      minAdmissionChecks: DEFAULT_QUEUE_PROGRESS_POLICY.minAdmissionChecks,
+    })
+    const declared = await loadYrdConfig({
+      repo: "/repo",
+      defaultBase: "main",
+      read: async () => "checks: [typecheck]\nprogress: {minAdmissionChecks: 4}\n",
+    })
+    expect(declared.config.progress?.minAdmissionChecks).toBe(4)
+    expect(() => parseYrdConfig({ checks: [], progress: { minAdmissionChecks: 0 } })).toThrow(
+      "yrd: config progress.minAdmissionChecks must be an integer >= 1",
+    )
 
     expect(() =>
       parseYrdConfig({

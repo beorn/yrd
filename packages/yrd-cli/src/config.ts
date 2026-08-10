@@ -2,7 +2,13 @@ import { readFile } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import { defineConfig, withActionStep, withCheckStep, withFlow, withMergeStep, type FlowDef } from "@yrd/config"
 import { asFailure, createFailure } from "@yrd/core"
-import { DEFAULT_QUEUE_PROGRESS_POLICY, DIAGNOSTICS_COMPARISON_READY, GateModeSchema, type GateMode } from "@yrd/queue"
+import {
+  DEFAULT_QUEUE_PROGRESS_POLICY,
+  DIAGNOSTICS_COMPARISON_READY,
+  GateModeSchema,
+  type GateMode,
+  type QueueProgressPolicy,
+} from "@yrd/queue"
 import * as z from "zod"
 
 const TextSchema = z.string().trim().min(1)
@@ -107,6 +113,7 @@ const ProgressSchema = z
   .object({
     noLandingMs: z.number().int().min(1).optional(),
     refusalCount: z.number().int().min(1).optional(),
+    minAdmissionChecks: z.number().int().min(1).optional(),
   })
   .strict()
   .default({})
@@ -163,7 +170,7 @@ export type ResolvedYrdProjectConfig = Readonly<{
   requires: readonly "review"[]
   definitions: Readonly<Record<string, YrdStepConfig>>
   contest: Readonly<{ concurrency: number; timeoutMs: number; evaluators: readonly string[] }>
-  progress?: Readonly<{ noLandingMs: number; refusalCount: number }>
+  progress?: QueueProgressPolicy
   /** Programmatic flow authority. Optional only for direct legacy test/app construction. */
   flows?: readonly FlowDef[]
 }>
@@ -240,6 +247,7 @@ function configError(issue: z.core.$ZodIssue): Error {
     ["contest.timeoutMs", "must be an integer >= 1"],
     ["progress.noLandingMs", "must be an integer >= 1"],
     ["progress.refusalCount", "must be an integer >= 1"],
+    ["progress.minAdmissionChecks", "must be an integer >= 1"],
   ])
   const message =
     known.get(path) ??
@@ -337,6 +345,7 @@ export async function loadYrdConfig(options: {
       progress: {
         noLandingMs: parsed.progress.noLandingMs ?? DEFAULT_QUEUE_PROGRESS_POLICY.noLandingMs,
         refusalCount: parsed.progress.refusalCount ?? DEFAULT_QUEUE_PROGRESS_POLICY.refusalCount,
+        minAdmissionChecks: parsed.progress.minAdmissionChecks ?? DEFAULT_QUEUE_PROGRESS_POLICY.minAdmissionChecks,
       },
       flows: flows.flows,
     },
