@@ -327,11 +327,14 @@ describe("pr list landing reconciliation (22376)", () => {
       pruneGit: () => landingGit({ isAncestor: () => false }),
     })
     expect(offBase.verdicts.get("PR1")).toEqual({
-      status: "not-proven",
-      reason: "landing-not-on-base",
+      status: "corrupt",
+      reason: "journal-landing-not-on-base",
       baseSha: BASE_SHA,
       landingSha: MERGED_SHA,
     })
+    expect(offBase.warnings).toEqual([
+      `yrd: journal records PR 'PR1' landing ${MERGED_SHA}, but base ${BASE_SHA} does not contain it — rebuild the landing index and inspect repository integrity`,
+    ])
 
     const unknown = await provePrLandings(integrated.bays.prs(), {
       ...outputIO().io,
