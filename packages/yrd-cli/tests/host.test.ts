@@ -12,7 +12,7 @@ import { pathToFileURL } from "node:url"
 import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { currentPRRev, prBaseSha, prDeliveryState } from "@yrd/bay"
-import { createFailure, createMemoryJournal } from "@yrd/core"
+import { createFailure, createMemoryJournal, parseJournalFrame } from "@yrd/core"
 import { DIAGNOSTICS_COMPARISON_READY, GitCheckEvidenceSchema, IntegrationProofSchema, Queues } from "@yrd/queue"
 import { createExclusive, createJournal, createReadOnlyJournal } from "@yrd/persistence"
 import { createProcess, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
@@ -2703,7 +2703,8 @@ checks: [{check: {run: "true"}}]
     expect(
       (await journalEnvelope(repo))
         .flatMap(({ values }) => values)
-        .filter((value) => (value as { name?: unknown }).name === "pr/submitted"),
+        .flatMap((value) => parseJournalFrame(value).events)
+        .filter(({ name }) => name === "pr/submitted"),
     ).toEqual([])
 
     await git(repo, "push", "-q", "origin", `${branch}:${branch}`)
