@@ -117,6 +117,28 @@ async function commitRangeEvidence(
     return `commits between: supplied observer did not enumerate the range\ninspect: ${command}`
   }
   const cwd = io.cwd ?? globalThis.process.cwd()
+  const distance = await runGit(process, cwd, ["rev-list", "--left-right", "--count", `${recordedHead}...${liveHead}`])
+  if (distance.timedOut || distance.exitCode !== 0) {
+    return `commits between: unavailable (${gitFailure(distance)})\ninspect: ${command}`
+  }
+  const counts = /^(\d+)\s+(\d+)$/u.exec(distance.stdout.trim())
+  if (counts === null) {
+    return `commits between: unavailable (invalid symmetric distance '${distance.stdout.trim()}')\ninspect: ${command}`
+  }
+  const recordedOnly = Number(counts[1])
+  const liveOnly = Number(counts[2])
+  if (recordedOnly > 0 && liveOnly > 0) {
+    return (
+      `commits divergent: recorded-only=${String(recordedOnly)}, live-only=${String(liveOnly)}\n` +
+      `inspect: git log --oneline --left-right ${recordedHead}...${liveHead}`
+    )
+  }
+  if (recordedOnly > 0) {
+    return (
+      `commits between: live branch is behind the recorded revision by ${String(recordedOnly)} commit(s)\n` +
+      `inspect: git log --oneline ${liveHead}..${recordedHead}`
+    )
+  }
   const result = await runGit(process, cwd, [
     "log",
     "--reverse",
@@ -135,6 +157,25 @@ async function commitRangeEvidence(
         .split("\n")
         .map((line) => `  ${line}`)
         .join("\n")}\ninspect: ${command}`
+}
+
+async function commitTree(services: Pick<YrdCliServices, "process">, io: YrdCliIO, head: string): Promise<string> {
+  const cwd = io.cwd ?? globalThis.process.cwd()
+  if (io.pruneGit !== undefined) return io.pruneGit(cwd).treeOf(head)
+  const process = services.process
+  if (process === undefined) {
+    raiseFailure("configuration", "recut-tree-observer-missing", `yrd: cannot compare commit tree '${head}'`)
+  }
+  const result = await runGit(process, cwd, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${head}^{tree}`])
+  const tree = result.stdout.trim()
+  if (result.timedOut || result.exitCode !== 0 || tree === "") {
+    raiseFailure(
+      "configuration",
+      "recut-tree-missing",
+      `yrd: commit '${head}' did not resolve to a tree: ${gitFailure(result)}`,
+    )
+  }
+  return tree
 }
 
 /** Either the recut may proceed on its recorded source, or the PR opted into
@@ -162,13 +203,26 @@ export async function requireImplicitRecutBranchFreshness(
   services: Pick<YrdCliServices, "process">,
   io: YrdCliIO,
 ): Promise<RecutBranchFreshness> {
-  if (options.revision !== undefined || options.transition !== undefined) return { status: "fresh" }
+  if (options.transition !== undefined) return { status: "fresh" }
   const recorded = prRevisionLineage(pr, selected.n)[0]
   if (recorded === undefined) {
     throw new Error(`yrd: PR '${pr.id}' revision ${selected.n} has no recorded source lineage`)
   }
   const liveHead = await liveBranchHead(pr, recorded, options, services, io)
   if (liveHead === recorded.head) return { status: "fresh" }
+  if (options.revision !== undefined) {
+    const [recordedTree, liveTree] = await Promise.all([
+      commitTree(services, io, recorded.head),
+      commitTree(services, io, liveHead),
+    ])
+    if (recordedTree === liveTree) return { status: "fresh" }
+    raiseFailure(
+      "refusal",
+      "recut-recorded-tree-mismatch",
+      `yrd: PR '${pr.id}' recorded revision ${recorded.n} tree '${recordedTree}' differs from live branch ` +
+        `'${pr.branch}' tree '${liveTree}'; --revision cannot replay different content`,
+    )
+  }
   if (pr.track === true) return { status: "tracked-drift", recorded, liveHead }
 
   const queueFlag = options.queue === true ? " --queue" : ""

@@ -2310,7 +2310,7 @@ describe("runYrd", () => {
     expect(detail.stdout()).toContain("HISTORY rev1→rev2")
     expect(detail.stdout()).toContain(`RECOMPOSED . ${HEAD_SHA.slice(0, 12)}→${nextHead.slice(0, 12)}`)
 
-    const repeated = outputIO()
+    const repeated = recutIO(app)
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--revision", "1", "--json"), repeated.io, services)).toBe(0)
     expect(JSON.parse(repeated.stdout())).toMatchObject({ revision: 2, unchanged: true })
     expect(app.bays.pr("PR1")?.revs).toHaveLength(2)
@@ -2548,7 +2548,7 @@ describe("runYrd", () => {
     })
   })
 
-  it("refreshes a stale tracking ref before comparing the authored branch", async () => {
+  it("refreshes and reports both sides of a divergent authored branch", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-recut-live-branch-"))
     const remote = join(root, "remote.git")
     const author = join(root, "author")
@@ -2576,10 +2576,11 @@ describe("runYrd", () => {
       git(observer, "fetch", "--quiet", "origin", `${branch}:refs/remotes/origin/${branch}`)
       expect(git(observer, "rev-parse", `origin/${branch}`)).toBe(recordedHead)
 
-      writeFileSync(join(author, "specimen.txt"), "base\nrecorded\nlive\n")
-      git(author, "commit", "-am", "advance live branch")
+      git(author, "switch", "-C", branch, "main")
+      writeFileSync(join(author, "specimen.txt"), "base\nlive\n")
+      git(author, "commit", "-am", "divergent live branch")
       const liveHead = git(author, "rev-parse", "HEAD")
-      git(author, "push", "origin", branch)
+      git(author, "push", "--force", "origin", branch)
       expect(git(observer, "rev-parse", `origin/${branch}`)).toBe(recordedHead)
 
       const app = await createApp()
@@ -2606,7 +2607,8 @@ describe("runYrd", () => {
       expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), output.io, services)).toBe(1)
       expect(output.stderr()).toContain(`recorded revision 1 head '${recordedHead}'`)
       expect(output.stderr()).toContain(`live branch '${branch}' is '${liveHead}'`)
-      expect(output.stderr()).toContain("advance live branch")
+      expect(output.stderr()).toContain("divergent: recorded-only=1, live-only=1")
+      expect(output.stderr()).not.toContain("commits between: none")
       expect(requests).toEqual([])
       expect(git(observer, "rev-parse", `origin/${branch}`)).toBe(liveHead)
     } finally {

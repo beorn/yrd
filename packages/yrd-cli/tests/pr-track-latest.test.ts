@@ -40,6 +40,8 @@ const OTHER_TREE = "f".repeat(40)
 const OTHER_PATCH_ID = "172a29302878f4f7fd0dcfad917ddbf434e78d04"
 const RECUT_HEAD = "9".repeat(40)
 const RECUT_TREE = "8".repeat(40)
+const RECORDED_TREE = "1".repeat(40)
+const LIVE_TREE = "2".repeat(40)
 
 function ids(initial = 0): () => string {
   let value = initial
@@ -178,8 +180,10 @@ function trackGit(branchHead: () => string): PruneGitFacts {
     // genuinely unlanded: the preflight verdict is RECUT, not SUBSUMED.
     mergeTree: () => OTHER_TREE,
     treeOf: (sha) => {
-      if (sha !== TARGET_BASE_SHA) throw new Error(`treeOf must only inspect the target tip, got ${sha}`)
-      return BASE_TREE
+      if (sha === TARGET_BASE_SHA) return BASE_TREE
+      if (sha === RECORDED_HEAD) return RECORDED_TREE
+      if (sha === LIVE_HEAD || sha === NEXT_LIVE_HEAD) return LIVE_TREE
+      throw new Error(`unexpected tree lookup for ${sha}`)
     },
     pinDistance: () => ({ sourceOnly: 0, targetOnly: 3 }),
     patchMatch: () => ({ patchId: OTHER_PATCH_ID }),
@@ -382,7 +386,7 @@ describe("implicit recut of a moved branch", () => {
     expect(failureMessage(refused.stderr())).toBe(staleHeadRefusal(1, RECORDED_HEAD))
   })
 
-  it("keeps the explicit --revision replay spelling exempt for a tracked PR", async () => {
+  it("refuses explicit --revision replay when the recorded and live trees differ", async () => {
     const app = await createCliApp()
     let head = RECORDED_HEAD
     await submitBranch(app, () => head, "--track")
@@ -390,15 +394,13 @@ describe("implicit recut of a moved branch", () => {
     head = LIVE_HEAD
     const replay = outputIO(() => head)
 
-    expect(
-      await runYrd(app, yrd("pr", "recut", "PR1", "--revision", "1", "--preflight", "--queue", "--json"), replay.io),
-      replay.stderr(),
-    ).toBe(0)
-    // An explicit replay is a deliberate operator choice: no auto-record, and the
-    // recorded revision stays the one classified.
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--revision", "1", "--queue", "--json"), replay.io)).toBe(1)
+    expect(failureMessage(replay.stderr())).toContain(
+      `recorded revision 1 tree '${RECORDED_TREE}' differs from live branch '${BRANCH}' tree '${LIVE_TREE}'`,
+    )
     expect(replay.stderr()).not.toContain("tracks")
     expect(currentPRRev(app.bays.pr("PR1")!).n).toBe(1)
-    expect(JSON.parse(replay.stdout())).toMatchObject({ pr: "PR1", revision: 1 })
+    expect(replay.stdout()).toBe("")
   })
 })
 

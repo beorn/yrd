@@ -2729,6 +2729,38 @@ checks: [{check: {run: "true"}}]
     }
   })
 
+  it("records the remote branch tip that recut freshness later observes", async () => {
+    const { repo, featureSha: localHead } = await repository()
+    const branch = "issue/feature"
+    await git(repo, "switch", "-qc", "issue/remote", "main")
+    await writeFile(join(repo, "remote.txt"), "remote branch\n")
+    await git(repo, "add", "remote.txt")
+    await git(repo, "commit", "-qm", "remote branch")
+    const remoteHead = await git(repo, "rev-parse", "HEAD")
+    await git(repo, "switch", "-q", "main")
+    await git(repo, "update-ref", `refs/remotes/origin/${branch}`, remoteHead)
+    expect(localHead).not.toBe(remoteHead)
+
+    let stdout = ""
+    let stderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "create", branch, "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+      stderr,
+    ).toBe(0)
+    expect(stderr).toBe("")
+    expect(JSON.parse(stdout)).toMatchObject({
+      prs: [{ branch, revs: [{ n: 1, head: remoteHead }] }],
+    })
+  })
+
   it("keeps a draft pushed when pr ready refuses an unpublished changed submodule pin", async () => {
     const { repo, branch, pin } = await unpublishedSubmodulePinRepository()
     const component = await realpath(join(repo, "dep"))
@@ -2847,6 +2879,7 @@ checks: [{check: {run: "true"}}]
       }),
       stderr,
     ).toBe(0)
+    await git(repo, "-c", "push.recurseSubmodules=no", "push", "-q", "origin", `HEAD:refs/heads/${branch}`)
 
     stdout = ""
     stderr = ""

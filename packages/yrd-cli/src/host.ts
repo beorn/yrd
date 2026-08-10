@@ -791,7 +791,7 @@ function configuredQueueSteps(
 }
 
 async function resolveCommit(process: Pick<Process, "run">, repo: string, ref: string): Promise<string | undefined> {
-  const candidates = ref.startsWith("refs/") ? [ref] : [ref, `refs/remotes/origin/${ref}`]
+  const candidates = ref.startsWith("refs/") ? [ref] : [`refs/remotes/origin/${ref}`, ref]
   for (const candidate of candidates) {
     const args = ["rev-parse", "--verify", "--end-of-options", `${candidate}^{commit}`]
     const result = await process.run({
