@@ -805,6 +805,30 @@ async function resolveCommit(process: Pick<Process, "run">, repo: string, ref: s
   return undefined
 }
 
+/** Does origin advertise this branch? A failed local ref resolve cannot tell
+ * "origin has no such branch" from "we could not establish one", and the two
+ * must not share a spelling — the first is a finding a consumer may act on,
+ * the second is a failure it must not mistake for one. `--exit-code` gives
+ * git's own discriminator: 0 advertised, 2 no matching ref, anything else
+ * means the question could not be asked. */
+async function originAdvertisesBranch(
+  process: Pick<Process, "run">,
+  repo: string,
+  branch: string,
+): Promise<boolean | undefined> {
+  const args = ["ls-remote", "--heads", "--exit-code", "origin", `refs/heads/${branch}`]
+  const result = await process.run({
+    argv: ["git", "-C", repo, ...args],
+    cwd: repo,
+    env: cleanGitEnvironment(globalThis.process.env),
+    timeoutMs: GIT_TIMEOUT_MS,
+  })
+  assertGitDidNotTimeOut(result, args)
+  if (result.exitCode === 0) return true
+  if (result.exitCode === 2) return false
+  return undefined
+}
+
 async function readConfigFromBase(
   process: Pick<Process, "run">,
   repository: YrdRepository,
@@ -898,11 +922,21 @@ async function resolveQueueTarget(
       : await inspectGitQueueTarget({ inject: { process }, repo, branch: base })
   if (options.remoteBranch === undefined || target.remote !== "origin") return { base, sha: target.sha }
   const headSha = await resolveCommit(process, repo, `refs/remotes/origin/${options.remoteBranch}`)
+  // Say WHICH fact an absent headSha is. Only a positive "origin does not
+  // advertise it" earns `absent`; origin advertising a branch whose head we
+  // cannot resolve locally is `unknown`, because we still have no head to give.
+  const headState =
+    headSha !== undefined
+      ? "resolved"
+      : (await originAdvertisesBranch(process, repo, options.remoteBranch)) === false
+        ? "absent"
+        : "unknown"
   return {
     base,
     sha: target.sha,
     remoteBranch: {
       branch: options.remoteBranch,
+      headState,
       ...(headSha === undefined ? {} : { headSha }),
     },
   }

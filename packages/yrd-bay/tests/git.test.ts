@@ -13,6 +13,7 @@ import { withJobs } from "@yrd/job"
 import { createProcess, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createLogger } from "loggily"
 import { createGitWorkspace, type GitWorkspaceOptions } from "../src/git.ts"
+import type { RemoteBranchSnapshot } from "../src/model.ts"
 import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
 
 const roots: string[] = []
@@ -538,6 +539,39 @@ describe("createGitWorkspace", () => {
     expect(await git(provisioned.output.path, ["config", "--worktree", "--get", "remote.pushDefault"])).toMatchObject({
       stdout: "bay",
     })
+  })
+
+  it("answers the same for a headless snapshot as for no snapshot when origin has no such branch", async () => {
+    // The defect this pins: a snapshot carrying no headSha SUPPRESSED the
+    // lookup that an absent snapshot performs, so "does origin have this
+    // branch" was answered by whether a snapshot happened to be threaded here
+    // rather than by origin. Equivalence is the assertion, not the message —
+    // if these two ever diverge again, the ambiguity is back.
+    const outcome = async (remoteBranch?: RemoteBranchSnapshot) => {
+      const { root, repo, intake } = await repository()
+      await using process = createProcess()
+      const adapter = await workspace(process, { repo, baysRoot: join(root, "bays"), intakeRemote: intake })
+      const result = await adapter.provision(
+        {
+          bay: "B1",
+          name: "no-origin-head",
+          branch: "issue/no-origin-head",
+          base: "main",
+          issue: "@km/test/no-origin-head",
+          ...(remoteBranch === undefined ? {} : { remoteBranch }),
+        },
+        { id: "provision-B1", attempt: 1, runner: "test", signal: new AbortController().signal },
+      )
+      if (result.status !== "completed") return { status: result.status }
+      return result.conclusion === "failure"
+        ? { conclusion: result.conclusion, message: result.error.message }
+        : { conclusion: result.conclusion }
+    }
+
+    const absent = await outcome(undefined)
+    const headless = await outcome({ branch: "issue/no-origin-head", headState: "unknown" })
+
+    expect(headless).toEqual(absent)
   })
 
   it("fails loud when the shared push default cannot be inspected", async () => {

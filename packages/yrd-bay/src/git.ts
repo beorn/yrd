@@ -227,12 +227,21 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
                 "retry Bay provisioning against one fresh queue/branch snapshot",
             )
           }
+          // A headless snapshot behaves exactly like an ABSENT one unless it
+          // positively says origin has no such branch. Otherwise a snapshot's
+          // mere presence suppresses the lookup its absence would have
+          // performed, and "does this branch exist on origin" gets answered by
+          // whether a snapshot happened to be threaded here.
           const remoteHead =
             input.issue === undefined
               ? undefined
               : input.remoteBranch === undefined
                 ? await remoteBranchHead(git, repo, input.branch)
-                : input.remoteBranch.headSha
+                : input.remoteBranch.headSha !== undefined
+                  ? input.remoteBranch.headSha
+                  : input.remoteBranch.headState === "absent"
+                    ? undefined
+                    : await remoteBranchHead(git, repo, input.branch)
           const remoteExists = remoteHead !== undefined
           const decision = decideBranchProvision({
             claim: input.issue !== undefined,

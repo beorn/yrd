@@ -839,10 +839,16 @@ export type BaysState = Readonly<{
   >
 }>
 
+/** `headSha` absent used to mean two different facts — "origin has no such
+ * branch" and "we could not establish one" — so a consumer could not tell a
+ * finding from a failure. `headState` names which, and a snapshot that omits
+ * it (any record written before this field existed) is treated as `unknown`,
+ * the conservative reading. */
 export const RemoteBranchSnapshotSchema = z
   .object({
     branch: GitRefSchema,
     headSha: GitShaSchema.optional(),
+    headState: z.enum(["resolved", "absent", "unknown"]).optional(),
   })
   .strict()
 export type RemoteBranchSnapshot = z.infer<typeof RemoteBranchSnapshotSchema>
