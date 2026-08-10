@@ -122,6 +122,154 @@ describe("classifyPushedRef", () => {
  * Neither verdict implies the other. Direction says which way the pin walks;
  * landedness says whether there is anything to walk it for.
  */
+/**
+ * P0(f), the union-validation gate. Assigned by @chief because I earned it:
+ * I reported the predicate "validated against all six real branches" when I
+ * meant MY six. @fable/0's six differed, the union was eight, and the one
+ * branch the fleet then acted on was in neither set.
+ *
+ * THE RULE: a verdict is not trusted until the predicate has seen the union of
+ * every specimen any seat has measured. This table IS that gate. Adding a
+ * specimen is a code change with an expected verdict, not a discipline note —
+ * the only form that survives a tired seat at 3am.
+ *
+ * THE FIXTURE RECORDS FACTS, NOT BRANCH NAMES, and that choice is the whole
+ * design. A branch→verdict table would rot the instant trunk moved, which is
+ * precisely the defect this predicate exists to catch: one specimen below went
+ * FORWARD → DIVERGED in six minutes because another seat landed a commit, with
+ * no act by its author. Facts→verdict is stable; branch→verdict is a table with
+ * a shelf life, and we published four of those in one evening, three wrong.
+ */
+describe("union validation gate — every specimen any seat measured", () => {
+  const HOUR_MS = HOUR
+
+  // Facts as measured on 2026-08-10 by @adhoc/0 and @fable/0. The moment is
+  // recorded because a pin verdict is only valid at the instant it was taken.
+  const SPECIMENS = [
+    // --- @adhoc/0's six ---
+    {
+      ref: "task/i21-finishing-needs-one-seat-dev8",
+      payloadKind: "content",
+      pinDirection: "aligned",
+      uniqueCommits: 2,
+      equivalentCommits: 0,
+      expect: "rescue",
+      note: "tribe pins identical; the only one safely landed",
+    },
+    {
+      ref: "task/i10-status-root-narrow-linear-dev3",
+      payloadKind: "gitlink-only",
+      pinDirection: "diverged",
+      uniqueCommits: 1,
+      equivalentCommits: 0,
+      expect: "rebase-required",
+      note: "adds 2, drops 1 that is on trunk",
+    },
+    {
+      ref: "task/ag-lock-survives-crash-dev5",
+      payloadKind: "content",
+      pinDirection: "diverged",
+      uniqueCommits: 7,
+      equivalentCommits: 2,
+      expect: "rebase-required",
+      note: "ag would lose 40, bearly 6; partially landed",
+    },
+    {
+      ref: "task/maddoc-top-bar-r2",
+      payloadKind: "gitlink-only",
+      pinDirection: "diverged",
+      uniqueCommits: 4,
+      equivalentCommits: 0,
+      expect: "rebase-required",
+      note: "cherry said 4 unique; would delete five silvery modules",
+    },
+    {
+      ref: "task/pushed-not-submitted-predicate",
+      payloadKind: "gitlink-only",
+      pinDirection: "backward",
+      uniqueCommits: 0,
+      equivalentCommits: 1,
+      expect: undefined,
+      note: "SPENT, PR705 integrated — @fable/0's scan called this a pure revert",
+    },
+    {
+      ref: "task/unsubmitted-fixture-fix",
+      payloadKind: "gitlink-only",
+      pinDirection: "aligned",
+      uniqueCommits: 0,
+      equivalentCommits: 2,
+      expect: undefined,
+      note: "SPENT, PR706 integrated",
+    },
+    // --- @fable/0's, not in mine ---
+    {
+      ref: "task/22716-p1a-certification-dev3",
+      payloadKind: "gitlink-only",
+      pinDirection: "diverged",
+      uniqueCommits: 2,
+      equivalentCommits: 0,
+      expect: "rebase-required",
+      note: "THE BRANCH THE FLEET ACTED ON, in neither original set; went FORWARD->DIVERGED in six minutes",
+    },
+    {
+      ref: "task/22333-divergent-gitlinks-remedy-dev3",
+      payloadKind: "gitlink-only",
+      pinDirection: "backward",
+      uniqueCommits: 0,
+      equivalentCommits: 4,
+      expect: undefined,
+      note: "contained: trunk already has it",
+    },
+    {
+      ref: "task/i10-status-root-all-paths-dev3",
+      payloadKind: "gitlink-only",
+      pinDirection: "diverged",
+      uniqueCommits: 1,
+      equivalentCommits: 0,
+      expect: "rebase-required",
+      note: "duplicate carrier of the same i10 fix",
+    },
+    // --- the seventh, @fable/0's own, found while submitting it ---
+    {
+      ref: "task/rescue-breadcrumb-compact",
+      payloadKind: "gitlink-only",
+      pinDirection: "backward",
+      uniqueCommits: 0,
+      equivalentCommits: 1,
+      expect: undefined,
+      note: "recorded pin behind, but MERGES CLEAN — merge keeps trunk's pin",
+    },
+  ] as const
+
+  it.each(SPECIMENS)(
+    "$ref -> $expect",
+    ({ ref, payloadKind, pinDirection, uniqueCommits, equivalentCommits, expect: want }) => {
+      const finding = classifyPushedRef(
+        {
+          ref,
+          tipSha: "a".repeat(40),
+          pushedAtMs: NOW - 3 * HOUR_MS,
+          carried: false,
+          uniqueCommits,
+          equivalentCommits,
+          payloadKind,
+          pinDirection,
+        },
+        OPTIONS,
+      )
+      expect(finding?.verdict).toBe(want)
+    },
+  )
+
+  it("covers the UNION, not either seat's own set — the gap that caused P0(f)", () => {
+    // Six were mine, three more were @fable/0's, one was found separately.
+    // Neither seat's original set contained 22716-p1a, which is the branch the
+    // fleet acted on. If this count drops, someone narrowed the gate.
+    expect(SPECIMENS.length).toBe(10)
+    expect(SPECIMENS.some((s) => s.ref === "task/22716-p1a-certification-dev3")).toBe(true)
+  })
+})
+
 describe("classifyPushedRef — pin direction", () => {
   it("REFUSES to call a diverged pin a rescue, whatever the commit count says", () => {
     // i10-status-root-narrow-linear-dev3: adds 2, drops 1, and the one it drops
