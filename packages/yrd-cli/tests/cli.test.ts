@@ -3382,9 +3382,16 @@ describe("runYrd", () => {
       settlement: { disposition: "needs-person" },
     })
     const appended = (await Array.fromAsync(app.events())).slice(before)
+    expect(appended.filter(({ name }) => name === "queue/admission/settled")).toHaveLength(1)
     expect(appended.filter(({ name }) => name === "pr/recut").map(({ data }) => (data as { pr: string }).pr)).toEqual([
       "PR2",
     ])
+
+    const visible = outputIO()
+    expect(await runYrd(app, yrd("queue", "recover", "--json"), visible.io), visible.stderr()).toBe(0)
+    expect(JSON.parse(visible.stdout())).toMatchObject({
+      blocked: [{ pr: { id: "PR1" }, eligibility: { reason: { code: "admission-refused" } } }],
+    })
   })
 
   it("recomputes the certificate after an authored revision supersedes a recut head", async () => {
