@@ -2433,6 +2433,10 @@ describe("runYrd", () => {
         { repo: "vendor/x", fromHeadSha: frozen, toHeadSha: frozen },
       ]),
     ).toEqual([`. ${frozen.slice(0, 12)} unchanged`, `vendor/x ${frozen.slice(0, 12)} unchanged`])
+
+    const sparse: { repo: string; fromHeadSha: string; toHeadSha: string }[] = []
+    sparse.length = 1
+    expect(() => collapseRecomposedSources(sparse)).toThrow("yrd: recomposed source 0 is missing")
   })
 
   it.each([

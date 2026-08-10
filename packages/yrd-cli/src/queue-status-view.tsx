@@ -3350,7 +3350,8 @@ export function collapseRecomposedSources(
   const out: string[] = []
   let index = 0
   while (index < sources.length) {
-    const entry = sources[index]!
+    const entry = sources[index]
+    if (entry === undefined) throw new Error(`yrd: recomposed source ${index} is missing`)
     if (entry.fromHeadSha !== entry.toHeadSha) {
       out.push(`${entry.repo} ${short(entry.fromHeadSha)}→${short(entry.toHeadSha)}`)
       index += 1
@@ -3358,7 +3359,8 @@ export function collapseRecomposedSources(
     }
     let run = 0
     while (index + run < sources.length) {
-      const next = sources[index + run]!
+      const next = sources[index + run]
+      if (next === undefined) throw new Error(`yrd: recomposed source ${index + run} is missing`)
       if (next.repo !== entry.repo || next.fromHeadSha !== entry.fromHeadSha || next.toHeadSha !== entry.fromHeadSha) {
         break
       }
@@ -3445,8 +3447,7 @@ export function PRDetailView({
       </Text>
       {recomposedSources.length === 0 ? null : (
         <Text wrap="wrap">
-          <Text bold>RECOMPOSED</Text>{" "}
-          {collapseRecomposedSources(recomposedSources).join(" · ")}
+          <Text bold>RECOMPOSED</Text> {collapseRecomposedSources(recomposedSources).join(" · ")}
         </Text>
       )}
       {pr.description === undefined ? null : (
@@ -3500,13 +3501,18 @@ export function queueStatusRows(
   )
 }
 
-function SummaryQueue({ projection }: { projection: HumanQueueProjection }) {
+function SummaryQueue({ projection, repositoryRoot }: { projection: HumanQueueProjection; repositoryRoot?: string }) {
   return (
     <Box height={1}>
       <Text wrap="truncate">
-        <Text bold>QUEUE</Text> {projection.target} <Text bold>OPEN</Text> {projection.open} <Text bold>ACTIVE</Text>{" "}
-        {projection.activeCount} <Text bold>INTEGRATED</Text> {projection.integrated} <Text bold>REJECTED</Text>{" "}
-        {projection.rejected}
+        <Text bold>QUEUE</Text> {projection.target}{" "}
+        {repositoryRoot === undefined ? null : (
+          <>
+            <QueueRepositoryRoot root={repositoryRoot} />{" "}
+          </>
+        )}
+        <Text bold>OPEN</Text> {projection.open} <Text bold>ACTIVE</Text> {projection.activeCount}{" "}
+        <Text bold>INTEGRATED</Text> {projection.integrated} <Text bold>REJECTED</Text> {projection.rejected}
         {projection.alreadyLanded === 0 ? null : (
           <>
             {" "}
@@ -5591,7 +5597,11 @@ export function QueueTimelineView({
   return (
     <Box flexDirection="column">
       {results.map((result) => (
-        <SummaryQueue key={result.base} projection={humanQueueProjection(result, now)} />
+        <SummaryQueue
+          key={result.base}
+          projection={humanQueueProjection(result, now)}
+          repositoryRoot={repositoryRoot}
+        />
       ))}
       {rows.length === 0 ? (
         <Text color="$fg-muted">No matching queue rows.</Text>

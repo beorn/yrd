@@ -71,6 +71,23 @@ function queuedEligibility(pr: string, position: number) {
 }
 
 describe("queue timeline chrome 21106", () => {
+  it("names the repository root in the unprojected queue header", async () => {
+    const source = queueTimelineStories["production-overview"].snapshot
+    const snapshot = {
+      repositoryRoot: "/hh",
+      results: source.results,
+      state: source.state,
+      now: source.now,
+    }
+    const app = createRenderer({ cols: 160, rows: 40 })(createElement(QueueWatchFrame, { snapshot }))
+    try {
+      await app.waitForLayoutStable()
+      expect(rowAt(app.text, rowIndexOf(app.text, "QUEUE main"))).toContain("ROOT /hh")
+    } finally {
+      app.unmount()
+    }
+  })
+
   it("header and row cells share one column geometry with nav on at 120 cols", async () => {
     const projection = queueTimelineStories["contract-overview"].snapshot.projection
     const render = createRenderer({ cols: 120, rows: 40 })
