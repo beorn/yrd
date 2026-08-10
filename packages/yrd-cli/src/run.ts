@@ -7484,13 +7484,13 @@ async function applyRefusalRemedy(
 
 /**
  * 22474 — apply the refusal remedy the queue itself printed, instead of
- * printing it and waiting for a human to press the button.
+ * printing it and waiting for a human to apply the verdict.
  *
  * The admission/compose path refuses an authored-gitlink carrier (and its
  * siblings) with a message that names the exact deterministic drill: re-record
- * the branch, preflight the recut, run its next command. Because a refusal used
+ * the branch, then compute and apply the recut verdict. Because a refusal used
  * to hold the head of the line, one such PR wedged the whole queue until an
- * operator typed those three commands — PR1791 through 44 consecutive refusal
+ * operator typed those commands — PR1791 through 44 consecutive refusal
  * cycles, PR1787 through 30, both cleared by hand on 2026-07-27.
  *
  * Runs inside the existing serialized resident cycle beside
