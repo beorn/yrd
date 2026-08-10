@@ -1,6 +1,7 @@
 import { dirname } from "node:path"
 import type { PRDeliveryState } from "@yrd/bay"
 import { failureSlug } from "./failure-slug.ts"
+import { retainedWorkspaceFromMessage, type RetainedWorkspace } from "./workspace-retention.ts"
 
 export type FailureLike = Readonly<{ code: string; message: string; resolution?: readonly string[] }>
 
@@ -54,16 +55,23 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`
 }
 
-function requiredCheckFailure(failure: FailureLike, cause: string): ActionableFailure {
+function retainedWorkspaceFailure(
+  failure: FailureLike,
+  cause: string,
+  workspace: RetainedWorkspace | undefined,
+): ActionableFailure {
   const check = quotedValue(failure.message, /required check failed:\s*'([^']+)'/iu)
-  const workspace = quotedValue(failure.message, /workspace retained at '([^']+)'/iu)
   const resolution = [
     ...(workspace === undefined
       ? []
       : [
-          `Inspect the retained workspace at ${shellQuote(workspace)}.`,
-          `git worktree remove --force ${shellQuote(workspace)}`,
-          `rmdir ${shellQuote(dirname(workspace))}`,
+          `Inspect the retained workspace at ${shellQuote(workspace.path)}.`,
+          ...(workspace.cleanup === "worktree"
+            ? [
+                `git worktree remove --force ${shellQuote(workspace.path)}`,
+                `rmdir ${shellQuote(dirname(workspace.path))}`,
+              ]
+            : [`rmdir ${shellQuote(workspace.path)}`]),
         ]),
     ...(check === undefined ? [] : [`yrd check ${shellQuote(check)}`]),
   ]
@@ -183,7 +191,10 @@ function recutGitlinkFailure(
 
 export function actionableFailure(failure: FailureLike, context: ActionableFailureContext = {}): ActionableFailure {
   const cause = oneLineCause(failure.message)
-  if (failure.code === "required-check-failed") return requiredCheckFailure(failure, cause)
+  const retainedWorkspace = retainedWorkspaceFromMessage(failure.message)
+  if (retainedWorkspace !== undefined || failure.code === "required-check-failed") {
+    return retainedWorkspaceFailure(failure, cause, retainedWorkspace)
+  }
   if (failure.code === "authored-gitlink") return authoredGitlinkFailure(failure, cause, context)
   if (failure.code === "recut-gitlink-conflict") {
     const projected = recutGitlinkFailure(failure, cause, context)

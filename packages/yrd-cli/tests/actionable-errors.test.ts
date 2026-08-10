@@ -117,6 +117,33 @@ describe("actionable failure projection", () => {
     expect(formatActionableFailure(failure)).toContain("cause: queue base 'main' installed baseline is stale")
     expect(formatActionableFailure(failure)).toContain("resolve: yrd admin queue deinit main")
   })
+
+  it("projects retained-evidence cleanup from its shape, independent of failure code", () => {
+    const worktree = "/tmp/repo/.git/yrd/pre-submit-worktrees/check-one/worktree"
+    const provision = actionableFailure({
+      code: "candidate-provision-failed",
+      message:
+        `yrd: dependency cache unavailable; workspace retained at '${worktree}' ` +
+        "(cleanup: worktree; --keep-on-failure)",
+    })
+    expect(provision.resolution).toEqual([
+      `Inspect the retained workspace at '${worktree}'.`,
+      `git worktree remove --force '${worktree}'`,
+      "rmdir '/tmp/repo/.git/yrd/pre-submit-worktrees/check-one'",
+    ])
+    expect(formatHumanFailure(provision)).toContain(`resolve: Inspect the retained workspace at '${worktree}'.`)
+    expect(formatHumanFailure(provision)).toContain(`resolve: git worktree remove --force '${worktree}'`)
+
+    const directory = "/tmp/repo/.git/yrd/pre-submit-worktrees/check-two"
+    const checkout = actionableFailure({
+      code: "required-check-checkout-failed",
+      message:
+        `yrd: checkout materialization failed; workspace retained at '${directory}' ` +
+        "(cleanup: directory; --keep-on-failure)",
+    })
+    expect(checkout.resolution).toEqual([`Inspect the retained workspace at '${directory}'.`, `rmdir '${directory}'`])
+    expect(formatHumanFailure(checkout)).toContain(`resolve: rmdir '${directory}'`)
+  })
 })
 
 /**

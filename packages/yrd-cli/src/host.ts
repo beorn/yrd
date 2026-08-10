@@ -118,7 +118,7 @@ import {
   yrdQueueRunnerCheckRequested,
 } from "./run.ts"
 import { queueStepRevision, type ToolchainFingerprint } from "./host-revision.ts"
-import { retainedWorkspaceNote } from "./workspace-retention.ts"
+import { retainedWorkspaceNote, type RetainedWorkspace } from "./workspace-retention.ts"
 import type {
   YrdCliApp,
   YrdCliCheckResult,
@@ -232,8 +232,8 @@ function validateConfig(config: ResolvedYrdProjectConfig): void {
 
 const MANAGED_PRE_SUBMIT_MARKER = "# managed-by-yrd: pre-submit-v1"
 
-function annotateRetainedWorkspace(cause: unknown, path: string): Error {
-  const note = retainedWorkspaceNote(path)
+function annotateRetainedWorkspace(cause: unknown, workspace: RetainedWorkspace): Error {
+  const note = retainedWorkspaceNote(workspace)
   const failure = failureFact(cause)
   if (failure !== undefined) {
     return createFailure({ ...failure, message: `${failure.message}; ${note}` }, cause)
@@ -328,7 +328,7 @@ export function configuredChecks(
     } catch (cause) {
       if (!keepOnFailure) await rm(checkoutRoot, { recursive: true, force: true })
       const message = cause instanceof Error ? cause.message : String(cause)
-      const retained = keepOnFailure ? `; ${retainedWorkspaceNote(checkoutRoot)}` : ""
+      const retained = keepOnFailure ? `; ${retainedWorkspaceNote({ path: checkoutRoot, cleanup: "directory" })}` : ""
       if (/timed out after/iu.test(message)) {
         raiseFailure(
           "infrastructure",
@@ -365,7 +365,7 @@ export function configuredChecks(
         }
         await rm(checkoutRoot, { recursive: true, force: true })
       }
-      const retained = keepOnFailure ? `; ${retainedWorkspaceNote(checkout)}` : ""
+      const retained = keepOnFailure ? `; ${retainedWorkspaceNote({ path: checkout, cleanup: "worktree" })}` : ""
       if (/timed out after/iu.test(message)) {
         raiseFailure(
           "infrastructure",
@@ -393,9 +393,9 @@ export function configuredChecks(
       const result = await run(checkout)
       failed = result.exitCode !== 0 || result.timedOut
       if (!failed || !keepOnFailure) return result
-      return { ...result, retainedWorkspace: checkout }
+      return { ...result, retainedWorkspace: { path: checkout, cleanup: "worktree" } }
     } catch (cause) {
-      if (keepOnFailure) throw annotateRetainedWorkspace(cause, checkout)
+      if (keepOnFailure) throw annotateRetainedWorkspace(cause, { path: checkout, cleanup: "worktree" })
       throw cause
     } finally {
       if (!keepOnFailure || !failed) {

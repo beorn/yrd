@@ -778,7 +778,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 
     expect(result).toMatchObject({ exitCode, timedOut })
     expect(result.stderr).toContain(timedOut ? "typecheck timed out" : "typecheck failed")
-    const retained = result.retainedWorkspace
+    const retained = result.retainedWorkspace?.path
     expect(retained).toBeDefined()
     expect(existsSync(join(retained!, "package.json"))).toBe(true)
   })
@@ -2232,7 +2232,7 @@ checks: [{check: {run: "true"}}]
 
       expect(exitCode).toBe(3)
       expect(stdout).toBe("")
-      const failure = JSON.parse(stderr) as { failure: { message: string } }
+      const failure = JSON.parse(stderr) as { failure: { message: string; resolution: string[] } }
       expect(failure).toMatchObject({
         failure: {
           kind: "infrastructure",
@@ -2243,6 +2243,11 @@ checks: [{check: {run: "true"}}]
       const retained = /workspace retained at '([^']+)'/u.exec(failure.failure.message)?.[1]
       expect(retained, failure.failure.message).toBeDefined()
       expect(existsSync(join(retained!, "package.json"))).toBe(true)
+      expect(failure.failure.resolution).toEqual([
+        `Inspect the retained workspace at '${retained!}'.`,
+        `git worktree remove --force '${retained!}'`,
+        `rmdir '${dirname(retained!)}'`,
+      ])
       expect((await journalEnvelope(repo)).flatMap(({ values }) => values)).toEqual([])
     } finally {
       if (previousPath === undefined) delete process.env.PATH

@@ -10,6 +10,7 @@ import type { Process, ProcessResult } from "@yrd/process"
 import type { Scope } from "@silvery/scope"
 import type { QueueReadModel } from "./queue-read-model.ts"
 import type { SubmoduleBranchResolver } from "./submodule-tracking.ts"
+import type { RetainedWorkspace } from "./workspace-retention.ts"
 import type { YrdConfig } from "@yrd/config"
 
 export type YrdCliExitCode = 0 | 1 | 2 | 3
@@ -39,7 +40,7 @@ export type YrdCliJournalAdministration = Readonly<{
   bump?(version: number): Promise<JournalVersionBumpResult>
 }>
 
-export type YrdCliCheckResult = ProcessResult & Readonly<{ retainedWorkspace?: string }>
+export type YrdCliCheckResult = ProcessResult & Readonly<{ retainedWorkspace?: RetainedWorkspace }>
 
 export type YrdCliChecks = Readonly<{
   names: readonly string[]
