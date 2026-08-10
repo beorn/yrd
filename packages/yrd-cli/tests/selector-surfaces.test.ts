@@ -319,6 +319,35 @@ describe("case-insensitive CLI selector surfaces", () => {
     expect(missing.stderr()).toContain("no PR 'missing'")
   })
 
+  /**
+   * Every selector surface that refuses with "no PR" states what it searched.
+   *
+   * `pr view` was widened first and read as the whole job. It was one of
+   * twelve emitters: nine in the queue package, plus `pr withdraw` and the
+   * `--pr` create guard. Counting the population instead of the one surface in
+   * front of me is the difference between a fix and an anecdote — an operator
+   * who hit any of the other eleven still got an empty answer that reads like
+   * their own mistake, which is the self-blame mechanism this bead is about.
+   *
+   * `--pr` on the create flow keeps its own sentence: `refusal()` adds no
+   * prefix, so the shared builder's `yrd: ` would double up, and that site
+   * already names a remedy rather than leaving the operator to guess.
+   */
+  it.each([
+    { surface: "queue run", args: ["queue", "run", "nope", "--json"] },
+    { surface: "pr withdraw", args: ["pr", "withdraw", "nope", "--json"] },
+    { surface: "log --pr", args: ["log", "--pr", "nope", "--json"] },
+    { surface: "pr view", args: ["pr", "view", "nope", "--json"] },
+  ])("$surface says what it searched when a selector finds nothing", async ({ args }) => {
+    const app = await createCliApp()
+    await submitOnePR(app)
+    const output = outputIO()
+
+    expect(await runYrd(app, yrd(...args), output.io)).toBe(1)
+    expect(output.stderr()).toContain("no PR 'nope'")
+    expect(output.stderr()).toContain("searched 1 pull request(s)")
+  })
+
   /** A recutter whose output never depends on selector casing. */
   function stubRecutter(): { recut: YrdCliServices["recut"] } {
     return {

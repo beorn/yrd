@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process"
 import { createElement } from "react"
-import { currentPRRev, isLivePR, prDeliveryState, type PR } from "@yrd/bay"
+import { currentPRRev, isLivePR, prDeliveryState, prNotFoundMessage, type PR } from "@yrd/bay"
 import { raiseFailure } from "@yrd/core"
 import { Queues, type Run } from "@yrd/queue"
 import { cleanGitEnvironment } from "./git-environment.ts"
@@ -33,7 +33,7 @@ function short(sha: string): string {
 function requiredLivePr(app: YrdCliApp, selector: string): PR {
   const pr = app.bays.pr(selector)
   if (pr === undefined) {
-    raiseFailure("refusal", "pr-missing", `yrd: no PR '${selector}'`)
+    raiseFailure("refusal", "pr-missing", prNotFoundMessage(app.state().bays, selector))
   }
   const delivery = prDeliveryState(pr)
   if (!isLivePR(pr)) {

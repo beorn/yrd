@@ -683,8 +683,19 @@ export function formatPRRevisionSelector(pr: PRId, revision: number | Pick<PRRev
  *
  * The `no PR '<selector>'` prefix is preserved so any matcher on the old text
  * keeps matching. The noun is `pr list`'s own ("list pull requests").
+ *
+ * Exported because this message had ELEVEN hand-rolled spellings beside this
+ * one: nine in the queue package, plus `pr withdraw` and the `--pr` create
+ * guard. Widening `pr view` alone read as the whole job and reached one of
+ * twelve emitters. Every caller passes its own failure code (`pr-not-found`,
+ * `pr-missing`); only the sentence is shared, so the next widening cannot
+ * miss a surface.
+ *
+ * Two lookalikes are deliberately NOT routed here — `plugin.ts`'s terminal
+ * association and the queue's legacy-terminal invariant are internal `throw`s
+ * about a corrupt journal, not an operator whose selector found nothing.
  */
-function prNotFoundMessage(state: BaysState, selector: string): string {
+export function prNotFoundMessage(state: BaysState, selector: string): string {
   const searched = `searched ${Object.keys(state.prs).length} pull request(s)`
   if (parsePRSelector(selector) !== undefined || !/^(?:pr#?|\d+\.)/iu.test(selector.trim())) {
     return `yrd: no PR '${selector}' — ${searched}`

@@ -353,7 +353,9 @@ describe("pr withdraw", () => {
 
     const unknown = outputIO()
     expect(await runYrd(app, yrd("pr", "withdraw", "nope"), unknown.io)).toBe(1)
-    expect(unknown.stderr()).toBe("error: no PR 'nope'\n")
+    // Two PRs exist here, so `searched 2` proves the index was populated and
+    // still did not match — the discrimination an empty answer cannot make.
+    expect(unknown.stderr()).toBe("error: no PR 'nope' — searched 2 pull request(s)\n")
 
     expect(await runYrd(app, yrd("pr", "withdraw", "PR2"), outputIO().io)).toBe(0)
     const terminal = outputIO()

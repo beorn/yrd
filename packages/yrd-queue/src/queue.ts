@@ -21,6 +21,7 @@ import {
   prNeedsAuthor,
   prRevisionNumber,
   resolveBase,
+  prNotFoundMessage,
   resolvePR,
   reviewState,
   type BaysState,
@@ -1666,7 +1667,7 @@ function createQueue<Shape extends PRShape>(
 
   const cancelAdmissionJobsForRevision = async (args: CancelAdmissionJobsArgs): Promise<readonly string[]> => {
     const pr = resolvePR(runtime().bays, args.pr)
-    if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${args.pr}'`)
+    if (pr === undefined) raiseFailure("refusal", "pr-not-found", prNotFoundMessage(runtime().bays, args.pr))
     if (!pr.revs.some((revision) => revision.n === args.revision)) {
       raiseFailure("refusal", "pr-revision-not-found", `yrd: PR '${pr.id}' has no revision ${args.revision}`)
     }
@@ -1781,7 +1782,7 @@ function createQueue<Shape extends PRShape>(
     for (const selector of selectors) {
       try {
         const pr = resolvePR(runtime().bays, selector)
-        if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
+        if (pr === undefined) raiseFailure("refusal", "pr-not-found", prNotFoundMessage(runtime().bays, selector))
         const snapshot = runtime()
         const delivery = prDeliveryState(pr)
         if (delivery === "integrated" || delivery === "already-landed") {
@@ -2046,7 +2047,8 @@ function createQueue<Shape extends PRShape>(
               ? admissionQueue(snapshot, steps)
               : requestedSelectors.map((selector) => {
                   const pr = resolvePR(snapshot.bays, selector)
-                  if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
+                  if (pr === undefined)
+                    raiseFailure("refusal", "pr-not-found", prNotFoundMessage(snapshot.bays, selector))
                   return pr
                 })
           await refreshCheckIdentities(selected, resolveCycleBase)
@@ -2066,7 +2068,7 @@ function createQueue<Shape extends PRShape>(
       const base = queueBase(snapshot, args.base)
       const allowedPRs = args.allowedPRs.map((selector) => {
         const pr = resolvePR(snapshot.bays, selector)
-        if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
+        if (pr === undefined) raiseFailure("refusal", "pr-not-found", prNotFoundMessage(snapshot.bays, selector))
         return pr.id
       })
       await actions.pause({ ...args, base, allowedPRs })
@@ -2705,7 +2707,7 @@ function createQueue<Shape extends PRShape>(
       return stage("eligibility", () => {
         const snapshot = projected ?? runtime()
         const pr = resolvePR(snapshot.bays, selector)
-        if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
+        if (pr === undefined) raiseFailure("refusal", "pr-not-found", prNotFoundMessage(snapshot.bays, selector))
         return prEligibility(snapshot, pr, steps)
       })
     },
@@ -2727,7 +2729,7 @@ function createQueue<Shape extends PRShape>(
           ? Object.values(snapshot.bays.prs)
           : selectors.map((selector) => {
               const pr = resolvePR(snapshot.bays, selector)
-              if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
+              if (pr === undefined) raiseFailure("refusal", "pr-not-found", prNotFoundMessage(snapshot.bays, selector))
               return pr
             })
       return prs.flatMap((pr) => projectPRChecks(snapshot, pr, steps))
@@ -3455,7 +3457,7 @@ function createQueueCommands(
       // Fail loud on an unattributable refusal: the ledger's whole job is to name
       // the wedged PR, so a phantom id must never become a phantom finding.
       const pr = state.bays.prs[args.pr]
-      if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${args.pr}'`)
+      if (pr === undefined) raiseFailure("refusal", "pr-not-found", prNotFoundMessage(state.bays, args.pr))
       const revision = currentPRRev(pr)
       return {
         events: [
@@ -3474,7 +3476,7 @@ function createQueueCommands(
     params: SettleAdmissionRefusalSchema,
     apply(state: DeepReadonly<RuntimeState>, args: SettleAdmissionRefusalArgs) {
       const pr = state.bays.prs[args.pr]
-      if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${args.pr}'`)
+      if (pr === undefined) raiseFailure("refusal", "pr-not-found", prNotFoundMessage(state.bays, args.pr))
       const current = currentPRRev(pr)
       if (current.n !== args.revision || current.head !== args.headSha) {
         raiseFailure(
@@ -5829,7 +5831,7 @@ function explicitPRs(state: DeepReadonly<BaysState>, args: QueueRunArgs): PR[] |
   if (selectors === undefined) return undefined
   const prs = selectors.map((selector) => {
     const pr = resolvePR(state, selector)
-    if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
+    if (pr === undefined) raiseFailure("refusal", "pr-not-found", prNotFoundMessage(state, selector))
     return pr
   })
   const ids = new Set<string>()

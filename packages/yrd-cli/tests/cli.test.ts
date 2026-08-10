@@ -10665,13 +10665,11 @@ describe("runYrd", () => {
 
     const missingPR = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "PR404"), missingPR.io)).toBe(1)
-    // NOT YET WIDENED: `queue run <unknown>` still emits the bare message from
-    // a path distinct from the bay model's builder. Ruled out as its source:
-    // requireLivePR/prNotFoundMessage (widened), selectedCheckPRs and
-    // resolveQueueTargets' filterPr (both consolidated onto it), and
-    // pr-withdraw (raises code `pr-missing`, while this failure carries
-    // `pr-not-found`). Left asserting current behaviour rather than guessed at.
-    expect(missingPR.stderr()).toBe("error: no PR 'PR404'\n")
+    // WIDENED: `queue run` was one of nine raw emissions inside the queue
+    // package, none of which could reach the bay model's builder while it was
+    // private. Exporting it collapsed eleven hand-rolled spellings onto one
+    // sentence. `searched 0` is honest here — this app has no PRs.
+    expect(missingPR.stderr()).toBe("error: no PR 'PR404' — searched 0 pull request(s)\n")
 
     const missingPRJson = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "PR404", "--json"), missingPRJson.io)).toBe(1)
@@ -10679,8 +10677,8 @@ describe("runYrd", () => {
       failure: {
         kind: "refusal",
         code: "pr-not-found",
-        message: "yrd: no PR 'PR404'",
-        cause: "no PR 'PR404'",
+        message: "yrd: no PR 'PR404' — searched 0 pull request(s)",
+        cause: "no PR 'PR404' — searched 0 pull request(s)",
         resolution: ["Correct the cause above, then retry the same Yrd command."],
       },
     })
