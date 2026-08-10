@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest"
 import {
   canonicalizeYrdCommandAliases,
   configureYrdGlobalOptions,
+  normalizeYrdInvocation,
+  normalizeYrdRepositoryAliasInvocation,
   resolveInvocation,
   resolveYrdContext,
 } from "../src/invocation.ts"
@@ -64,6 +66,107 @@ describe("resolveInvocation", () => {
   it("does not retain the retired git-bay compatibility mode", () => {
     const argv = ["/usr/bin/bun", "/repo/bin/git-bay", "status"]
     expect(resolveInvocation(argv)).toEqual({ name: "yrd", args: argv })
+  })
+})
+
+describe("normalizeYrdInvocation", () => {
+  it.each([
+    {
+      argv: ["/usr/bin/bun", "/repo/bin/yrd", "queue", "run"],
+      expected: { args: ["queue", "run"], posture: "resident-queue-run", queueRunMode: "follow" },
+    },
+    {
+      argv: ["yrd", "queue", "run", "PR7"],
+      expected: { args: ["queue", "run", "PR7"], posture: "one-shot-queue-run", queueRunMode: "once" },
+    },
+    {
+      argv: ["yrd", "queue", "run", "--once"],
+      expected: { args: ["queue", "run", "--once"], posture: "one-shot-queue-run", queueRunMode: "once" },
+    },
+    {
+      argv: ["yrd", "queue", "list", "--check", "--json"],
+      expected: { args: ["queue", "list", "--check", "--json"], posture: "viewer", queueRunnerCheck: true },
+    },
+    {
+      argv: ["yrd", "queue"],
+      expected: { args: ["queue", "list"], posture: "viewer", queueRunnerCheck: false },
+    },
+    {
+      argv: ["yrd", "--repo", "/repo", "sh"],
+      expected: { args: ["--repo", "/repo", "sh"], posture: "bracketed-bay-open", queueRunnerCheck: false },
+    },
+    {
+      argv: ["yrd", "mr", "view", "PR1"],
+      expected: { args: ["mr", "view", "PR1"], posture: "viewer", queueRunnerCheck: false },
+    },
+  ])("classifies $argv once", ({ argv, expected }) => {
+    expect(normalizeYrdInvocation(argv)).toMatchObject(expected)
+  })
+})
+
+describe("repository aliases supplied by a composition host", () => {
+  const repositories = [
+    { repository: { name: "alpha", path: "/srv/alpha" }, queue: { base: "main" } },
+    { repository: { name: "beta", path: "/srv/beta" }, queue: { base: "release" } },
+  ] as const
+
+  it.each([
+    {
+      args: ["queue"],
+      expected: { kind: "all-repositories-read", args: ["queue", "list"] },
+    },
+    {
+      args: ["queue", "alpha", "--json"],
+      expected: {
+        kind: "repository-read",
+        repository: { name: "alpha", path: "/srv/alpha" },
+        queue: { base: "main" },
+        args: ["--repo", "/srv/alpha", "queue", "list", "--base", "main", "--json"],
+      },
+    },
+    {
+      args: ["queue", "run", "beta", "--once"],
+      expected: {
+        kind: "repository-write",
+        repository: { name: "beta", path: "/srv/beta" },
+        queue: { base: "release" },
+        args: ["--repo", "/srv/beta", "queue", "run", "--once"],
+      },
+    },
+    {
+      args: ["queue", "pause", "beta", "--reason", "schema cutover"],
+      expected: {
+        kind: "repository-write",
+        repository: { name: "beta", path: "/srv/beta" },
+        queue: { base: "release" },
+        args: ["--repo", "/srv/beta", "queue", "pause", "release", "--reason", "schema cutover"],
+      },
+    },
+    {
+      args: ["queue", "resume", "alpha"],
+      expected: {
+        kind: "repository-write",
+        repository: { name: "alpha", path: "/srv/alpha" },
+        queue: { base: "main" },
+        args: ["--repo", "/srv/alpha", "queue", "resume", "main"],
+      },
+    },
+    {
+      args: ["pr", "view", "PR1"],
+      expected: { kind: "bypass", args: ["pr", "view", "PR1"] },
+    },
+    {
+      args: ["--repo=/srv/alpha", "queue"],
+      expected: { kind: "bypass", args: ["--repo=/srv/alpha", "queue"] },
+    },
+  ])("classifies and rewrites $args", ({ args, expected }) => {
+    expect(normalizeYrdRepositoryAliasInvocation(args, repositories)).toEqual(expected)
+  })
+
+  it("refuses an undeclared repository alias and names the valid set", () => {
+    expect(() => normalizeYrdRepositoryAliasInvocation(["queue", "run", "docs"], repositories)).toThrow(
+      "unknown Yrd repository 'docs'; expected alpha or beta",
+    )
   })
 })
 

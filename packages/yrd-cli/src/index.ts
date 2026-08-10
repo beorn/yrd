@@ -1,5 +1,10 @@
 export * from "./config.ts"
 export * from "./host.ts"
+export {
+  normalizeYrdRepositoryAliasInvocation,
+  type YrdRepositoryAlias,
+  type YrdRepositoryAliasInvocation,
+} from "./invocation.ts"
 export * from "./repository.ts"
 export * from "./submodule-tracking.ts"
 export { runYrd } from "./run.ts"

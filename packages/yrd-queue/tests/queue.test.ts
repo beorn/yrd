@@ -3671,6 +3671,7 @@ describe("Queue", () => {
     await app.bays.submit({ pr: "PR2" })
     await app.bays.submit({ pr: "PR1" })
 
+    expect(app.queue.admissionOrder()).toEqual(["PR2", "PR1"])
     const runs = await app.queue.run({}, runtime)
 
     expect(runs.map((run) => run.prs.map((pr) => pr.id))).toEqual([["PR2"], ["PR1"]])
