@@ -15,7 +15,16 @@ import { createElement } from "react"
 import { renderString } from "silvery"
 import { describe, expect, it } from "vitest"
 import { createBayJobDefs, withBays } from "@yrd/bay"
-import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
+import {
+  command,
+  createMemoryJournal,
+  createYrd,
+  createYrdDef,
+  event,
+  JsonSchema,
+  pipe,
+  type JsonValue,
+} from "@yrd/core"
 import { withContests, type ContestGit } from "@yrd/contest"
 import { withIntents } from "@yrd/intent"
 import { withIssues } from "@yrd/issue"
@@ -163,7 +172,21 @@ async function createCliApp() {
     withIntents(),
     withBays({ jobs: bayJobs, defaultBase: "main", resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }) }),
   )
-  return createYrd(contests(queue(base)), {
+  const withdrawAfterLanding = command({
+    title: "Reproduce an author withdrawal that races a completed landing",
+    apply: () => ({
+      events: [
+        event("pr/withdrawn", {
+          pr: "PR1",
+          revision: 1,
+          headSha: LANDED_HEAD,
+          reason: "author changed their mind",
+        }),
+      ],
+    }),
+  })
+  const definition = contests(queue(base)).extend({ commands: { fixture: { withdrawAfterLanding } } })
+  return createYrd(definition, {
     inject: {
       journal: createMemoryJournal(),
       clock: () => "2026-07-15T12:00:00.000Z",
@@ -255,15 +278,7 @@ describe("pr list bounded-window disclosure (22376)", () => {
 })
 
 describe("pr list landing reconciliation (22376)", () => {
-  /**
-   * The live specimen: `pr list` reported `pr#1658.5 − withdrawn` while
-   * `git merge-base --is-ancestor 5ac4f5a219dc origin/main` said LANDED — the
-   * resident runner had merged rev5 an hour earlier and the author's withdrawal
-   * arrived on top of the completed merge. An author who trusts `withdrawn`
-   * re-cuts a branch already on main, and duplicate landings of the same
-   * content are exactly what the ancestry model cannot clean up afterwards.
-   */
-  it("reports the landing when a withdrawal arrives on top of it", async () => {
+  it("does not call a directly pushed withdrawal landed without a queue journal row", async () => {
     const app = await createCliApp()
     await app.bays.submit({ branch: "topic/landed", headSha: LANDED_HEAD, base: "main", baseSha: BASE_SHA })
     await app.bays.closePr({ pr: "PR1", reason: "author changed their mind" })
@@ -274,16 +289,54 @@ describe("pr list landing reconciliation (22376)", () => {
       prs: readonly Readonly<{ id: string; status: string; nativeStatus?: string }>[]
     }
     expect(listed.prs).toHaveLength(1)
-    expect(listed.prs[0]).toMatchObject({
-      id: "PR1",
-      status: "already-landed",
-      nativeStatus: "withdrawn",
-    })
+    expect(listed.prs[0]).toMatchObject({ id: "PR1", status: "withdrawn" })
 
     const human = outputIO({ pruneGit: () => landingGit(), columns: 200 })
     expect(await runYrd(app as CliApp, yrd("pr", "list"), human.io), human.stderr()).toBe(0)
-    expect(human.stdout()).toContain("already-landed")
-    expect(human.stdout()).toContain("withdrawn-after-landing")
+    expect(human.stdout()).not.toContain("already-landed")
+    expect(human.stdout()).not.toContain("withdrawn-after-landing")
+  })
+
+  it("reports a withdrawn integration only when its journal landing commit is on the base", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/landed", headSha: LANDED_HEAD, base: "main", baseSha: BASE_SHA })
+    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
+    await app.queue.run({ prs: ["PR1"] }, { runner: "pr-list-test", leaseMs: 60_000 })
+    await app.dispatch(app.commands.fixture.withdrawAfterLanding, undefined)
+
+    const json = outputIO({
+      pruneGit: () =>
+        landingGit({
+          resolveCommit: (ref) =>
+            ref === "origin/main" || ref === "main" ? BASE_SHA : ref === MERGED_SHA ? MERGED_SHA : undefined,
+          isAncestor: (ancestor, descendant) => ancestor === MERGED_SHA && descendant === BASE_SHA,
+        }),
+    })
+    expect(await runYrd(app as CliApp, yrd("pr", "list", "--json"), json.io), json.stderr()).toBe(0)
+    expect(
+      (JSON.parse(json.stdout()) as { prs: readonly Readonly<{ id: string; status: string }>[] }).prs[0],
+    ).toMatchObject({ id: "PR1", status: "already-landed" })
+  })
+
+  it("does not call a journal integration landed when its landing commit is absent from the base", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/missing-landing", headSha: LANDED_HEAD, base: "main", baseSha: BASE_SHA })
+    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
+    await app.queue.run({ prs: ["PR1"] }, { runner: "pr-list-test", leaseMs: 60_000 })
+    await app.dispatch(app.commands.fixture.withdrawAfterLanding, undefined)
+
+    const json = outputIO({
+      pruneGit: () =>
+        landingGit({
+          resolveCommit: (ref) =>
+            ref === "origin/main" || ref === "main" ? BASE_SHA : ref === MERGED_SHA ? MERGED_SHA : undefined,
+          isAncestor: () => false,
+        }),
+    })
+    expect(await runYrd(app as CliApp, yrd("pr", "list", "--json"), json.io), json.stderr()).toBe(0)
+    expect(
+      (JSON.parse(json.stdout()) as { prs: readonly Readonly<{ id: string; status: string }>[] }).prs[0],
+    ).toMatchObject({ id: "PR1", status: "withdrawn" })
   })
 
   it("leaves a withdrawal whose content is not on the base alone", async () => {

@@ -1,4 +1,4 @@
-import { currentPRRev, prDeliveryState, type PR } from "@yrd/bay"
+import { prDeliveryState, type PR } from "@yrd/bay"
 import { createPruneGitFacts } from "./pr-withdraw.ts"
 import type { PruneGitFacts, YrdCliIO } from "./types.ts"
 
@@ -7,6 +7,16 @@ import type { PruneGitFacts, YrdCliIO } from "./types.ts"
  * surface checks it before printing it. Every other state is a claim about
  * PROCESS (queued, checking, awaiting an author) and needs no ancestry proof. */
 const NOT_LANDED_CLAIMS = new Set(["withdrawn", "canceled"])
+
+type LandingCandidate = PR &
+  Readonly<{
+    integratedAt: string
+    integration: NonNullable<PR["integration"]>
+  }>
+
+function isLandingCandidate(pr: PR): pr is LandingCandidate {
+  return NOT_LANDED_CLAIMS.has(prDeliveryState(pr)) && pr.integratedAt !== undefined && pr.integration !== undefined
+}
 
 export type PrLanding = Readonly<{
   /** The recorded delivery state the ancestry proof contradicts. */
@@ -28,12 +38,12 @@ export type PrLandingReconciliation = Readonly<{
 
 const EMPTY: PrLandingReconciliation = { landings: new Map(), warnings: [] }
 
-async function landedHeads(git: PruneGitFacts, baseSha: string, heads: readonly string[]): Promise<Set<string>> {
-  if (git.landedOnBase !== undefined) return new Set(await git.landedOnBase(baseSha, heads))
+async function landedCommits(git: PruneGitFacts, baseSha: string, commits: readonly string[]): Promise<Set<string>> {
+  if (git.landedOnBase !== undefined) return new Set(await git.landedOnBase(baseSha, commits))
   const landed = new Set<string>()
-  for (const head of heads) {
-    if ((await git.resolveCommit(head)) === undefined) continue
-    if (await git.isAncestor(head, baseSha)) landed.add(head)
+  for (const commit of commits) {
+    if ((await git.resolveCommit(commit)) === undefined) continue
+    if (await git.isAncestor(commit, baseSha)) landed.add(commit)
   }
   return landed
 }
@@ -43,7 +53,10 @@ function failureText(error: unknown): string {
 }
 
 /** Prove, for every PR whose recorded state claims its content never landed,
- * whether that revision's head is already reachable from its base tip.
+ * whether the exact landing commit recorded by `pr/integrated` is reachable
+ * from its base tip. Neither side is sufficient alone: ancestry without the
+ * journal row is an indistinguishable direct push, while a journal row whose
+ * landing commit is absent from the base does not prove delivery.
  *
  * The live specimen (22376): an author withdrawal arrived on top of a completed
  * merge, and `pr list` printed only the later write. An author who trusts
@@ -53,12 +66,12 @@ function failureText(error: unknown): string {
  * Git is consulted only when there is such a claim to check, and at most twice
  * per distinct base regardless of how many rows the projection carries. */
 export async function reconcilePrLandings(prs: readonly PR[], io: YrdCliIO): Promise<PrLandingReconciliation> {
-  const candidates = prs.filter((pr) => NOT_LANDED_CLAIMS.has(prDeliveryState(pr)))
+  const candidates = prs.filter(isLandingCandidate)
   if (candidates.length === 0) return EMPTY
 
   const cwd = io.cwd ?? process.cwd()
   const git = io.pruneGit === undefined ? createPruneGitFacts(cwd) : io.pruneGit(cwd)
-  const byBase = new Map<string, PR[]>()
+  const byBase = new Map<string, LandingCandidate[]>()
   for (const pr of candidates) {
     const grouped = byBase.get(pr.base)
     if (grouped === undefined) byBase.set(pr.base, [pr])
@@ -77,13 +90,13 @@ export async function reconcilePrLandings(prs: readonly PR[], io: YrdCliIO): Pro
         )
         continue
       }
-      const heads = members.map((pr) => currentPRRev(pr).head)
-      const landed = await landedHeads(git, baseSha, heads)
+      const landingCommits = members.map((pr) => pr.integration.commit)
+      const landed = await landedCommits(git, baseSha, landingCommits)
       for (const pr of members) {
-        const headSha = currentPRRev(pr).head
-        if (!landed.has(headSha)) continue
+        const landingSha = pr.integration.commit
+        if (!landed.has(landingSha)) continue
         const recorded = prDeliveryState(pr)
-        landings.set(pr.id, { recorded, baseSha, headSha, code: `${recorded}-after-landing` })
+        landings.set(pr.id, { recorded, baseSha, headSha: landingSha, code: `${recorded}-after-landing` })
       }
     } catch (error) {
       warnings.push(`yrd: could not check base '${base}' for already-merged content: ${failureText(error)}`)
