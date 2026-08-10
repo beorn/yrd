@@ -105,6 +105,36 @@ That replaces ambiguous `wip-preserved-*` branches with inspectable state:
 Yrd does not invent commits or silently discard work. It prevents ambiguous WIP
 by making the normal workflow create named bays and durable PRs from the start.
 
+## Prior art
+
+Yrd stands on conventions proven at scale, and adopts them at the git layer
+rather than reimplementing the systems around them:
+
+- **[Gerrit](https://www.gerritcodereview.com/)** — change identity as a
+  commit trailer (`Change-Id:`), submission as a plain push to a
+  `refs/for/`-style namespace, patch-set versioning so a moved branch never
+  goes stale, and [NoteDb](https://gerrit-review.googlesource.com/Documentation/note-db.html)'s
+  doctrine that review metadata lives in git refs — backup is repo backup, and
+  every index is rebuildable. Yrd adopts these as wire conventions; it does not
+  speak Gerrit's API or import its review process.
+- **[Bors](https://bors.tech) / merge queues** — the queue is the only merger:
+  candidates are tested on the exact commit that ships, batched optimistically,
+  and bisected on failure. [Zuul](https://zuul-ci.org/) and GitLab merge trains
+  prove the speculative form: gate against the projected post-merge state, not
+  live trunk.
+- **[git-appraise](https://github.com/google/git-appraise)** — Google's
+  distributed review system with no server at all: reviews, robot comments, and
+  CI results live as JSON in `refs/notes/devtools/*`. Independent proof that a
+  delivery system's records can live entirely inside the repository — the same
+  shape as Yrd's receipts.
+- **Lockfile ecosystems** (Cargo, npm, Android's repo manifest) — the
+  coordinating pointer is an *output* synthesized from declared inputs, never
+  hand-authored; conflicts resolve by regeneration. Yrd's superproject pins
+  follow the same rule.
+
+The test this buys: **a tool that only reads git — log, trailers, refs — finds
+nothing surprising in a Yrd repo.**
+
 ## Quick Start
 
 The CLI initializes `.git/yrd/` on the first repository-backed command. Help is
