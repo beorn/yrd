@@ -277,6 +277,48 @@ concluded success`. Reviews participate as asynchronous required checks
   `refs/yrd/candidates/`).
 - Event names are namespaced by owning plugin (`pr/…`, `queue/…`, `job/…`).
 
+### B9. Status vocabularies — which question each one answers
+
+Several unions in this system are all called "status" and none of them is a
+spelling variant of another. Each answers a different question, so a value from
+one is never comparable to a value from another. Naming the question is the
+whole point of this section: a vocabulary that cannot say what it answers is
+how a count gets compared to a different count.
+
+- **`PRDeliveryState`** (`yrd-bay/src/model.ts`) — *how far along the delivery
+  path is this change, and whose move is it?* `pushed · submitted · ready ·
+  needs-author · rejected · integrated · already-landed · withdrawn · canceled`.
+- **`PR.state`** (`yrd-bay/src/model.ts`) — *is this PR record still an active
+  object, or retired?* `open · closed`. Record lifetime, not delivery progress:
+  a PR can be `closed` having reached any delivery state at all.
+- **`Candidate.mergeability`** (`yrd-queue/src/model.ts`) — *can this composed
+  candidate be built onto its base?* `unknown · mergeable · conflicting`. A
+  property of the candidate, not of the PR, and `unknown` means not yet
+  evaluated rather than evaluated-and-uncertain.
+- **Job/Run `status` + `conclusion`** (§A6, GitHub verbatim) — *is this unit of
+  work still going* (`queued · in_progress · waiting · completed`) and, once it
+  is not, *how did it end* (`success · failure · cancelled · skipped ·
+  timed_out`). Two questions deliberately kept in two fields; collapsing them
+  is what makes "did it pass?" unanswerable for anything still running.
+- **`StatusPresentationState` / `LifecycleStatus`** (`yrd-cli/src/status-presentation.ts`)
+  — *what glyph and colour should a human see in this row?* Deliberately lossy
+  and derived; never persisted, never an input to a decision.
+
+Readiness is not in this list on purpose: per §B7 it is a projection over
+mergeability, base currency, and Job conclusions, and nothing stores it.
+
+**The collisions are the hazard, and they are real.** `PRDeliveryState` and
+`StatusPresentationState` share four spellings — `needs-author`, `rejected`,
+`integrated`, `canceled` — with different scopes, so a presentation word can be
+read as a delivery fact. `LifecycleStatus` and `PR.state` both contain `open`,
+meaning near-opposite things: not-yet-started versus not-yet-retired.
+`mergeability` is the only union disjoint from every other, which is why it is
+the only one that can be quoted without naming its vocabulary.
+
+Rule: any surface printing or storing a status names which vocabulary it is
+from. Any comparison between two statuses is a bug unless both come from the
+same union.
+
 ## C. Decisions the packet left implicit (now explicit)
 
 **C1. Contest placement.** Contest is an orchestration _above_ the landing
