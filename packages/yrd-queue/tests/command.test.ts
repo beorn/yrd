@@ -5,7 +5,7 @@
  */
 import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
-import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -487,16 +487,24 @@ type CodeCarrierProposalFixture = Readonly<{
   drop: Readonly<{ ref: string; sha: string }>
   extra: Readonly<{ ref: string; sha: string }>
   corrupt: Readonly<{ ref: string; sha: string }>
+  whitespace: Readonly<{ ref: string; sha: string }>
+  mode: Readonly<{ ref: string; sha: string }>
+  symlink: Readonly<{ ref: string; sha: string }>
   uncontained: Readonly<{ ref: string; sha: string }>
   sibling: Readonly<{ ref: string; sha: string }>
   repaired: Readonly<{ ref: string; sha: string }>
-  gitlink: Readonly<{ ref: string; sha: string }>
+  gitlinkAdd: Readonly<{ ref: string; sha: string }>
+  gitlinkModify: Readonly<{ ref: string; sha: string }>
+  gitlinkDelete: Readonly<{ ref: string; sha: string }>
 }>
 
 /** P1a proposals are independently authored carrier refs, not queue-generated
  * replays. The approved range has two commits; every proposal has one. */
 async function codeCarrierProposalRepository(): Promise<CodeCarrierProposalFixture> {
   const { repo } = await repository()
+  const initialSha = await git(repo, ["rev-parse", "main"])
+  await git(repo, ["update-index", "--add", "--cacheinfo", `160000,${initialSha},dep`])
+  await git(repo, ["commit", "-qm", "baseline gitlink"])
   const approvedBaseSha = await git(repo, ["rev-parse", "main"])
   await git(repo, ["switch", "-qc", "issue/approved"])
   await writeFile(join(repo, "approved-a.txt"), "approved a\n")
@@ -516,14 +524,32 @@ async function codeCarrierProposalRepository(): Promise<CodeCarrierProposalFixtu
   const proposal = async (
     name: string,
     files: Readonly<Record<string, string>>,
-    gitlink = false,
-    baseSha = currentBaseSha,
+    options: Readonly<{
+      baseSha?: string
+      executable?: string
+      symlink?: Readonly<{ path: string; target: string }>
+      gitlink?: Readonly<{ action: "add" | "modify" | "delete"; path: string; sha?: string }>
+    }> = {},
   ): Promise<Readonly<{ ref: string; sha: string }>> => {
     const branch = `proposal/${name}`
-    await git(repo, ["switch", "-qc", branch, baseSha])
+    await git(repo, ["switch", "-qc", branch, options.baseSha ?? currentBaseSha])
     for (const [path, content] of Object.entries(files)) await writeFile(join(repo, path), content)
+    if (options.executable !== undefined) await chmod(join(repo, options.executable), 0o755)
+    if (options.symlink !== undefined) {
+      await rm(join(repo, options.symlink.path))
+      await symlink(options.symlink.target, join(repo, options.symlink.path))
+    }
     await git(repo, ["add", "."])
-    if (gitlink) await git(repo, ["update-index", "--add", "--cacheinfo", `160000,${approvedSha},dep`])
+    if (options.gitlink?.action === "delete") {
+      await git(repo, ["update-index", "--force-remove", options.gitlink.path])
+    } else if (options.gitlink !== undefined) {
+      await git(repo, [
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        `160000,${options.gitlink.sha ?? approvedSha},${options.gitlink.path}`,
+      ])
+    }
     await git(repo, ["commit", "-qm", `independently authored ${name}`])
     const sha = await git(repo, ["rev-parse", "HEAD"])
     await git(repo, ["switch", "-q", "main"])
@@ -539,21 +565,71 @@ async function codeCarrierProposalRepository(): Promise<CodeCarrierProposalFixtu
     drop: await proposal("drop", { "approved-a.txt": "approved a\n" }),
     extra: await proposal("extra", { ...approved, "unapproved-extra.txt": "extra\n" }),
     corrupt: await proposal("corrupt", { ...approved, "approved-a.txt": "corrupt a\n" }),
-    uncontained: await proposal("uncontained", approved, false, approvedBaseSha),
+    whitespace: await proposal("whitespace", { ...approved, "approved-a.txt": "approved a  \n" }),
+    mode: await proposal("mode", approved, { executable: "approved-a.txt" }),
+    symlink: await proposal("symlink", approved, {
+      symlink: { path: "approved-a.txt", target: "approved a" },
+    }),
+    uncontained: await proposal("uncontained", approved, { baseSha: approvedBaseSha }),
     sibling: await proposal("sibling", approved),
     repaired: await proposal("repaired", approved),
-    gitlink: await proposal("gitlink", approved, true),
+    gitlinkAdd: await proposal("gitlink-add", approved, {
+      gitlink: { action: "add", path: "dep-added" },
+    }),
+    gitlinkModify: await proposal("gitlink-modify", approved, {
+      gitlink: { action: "modify", path: "dep" },
+    }),
+    gitlinkDelete: await proposal("gitlink-delete", approved, {
+      gitlink: { action: "delete", path: "dep" },
+    }),
   }
 }
 
 function recutProposedCodeCarrier(
   recutter: ReturnType<typeof createGitPRRecutter>,
   input: Parameters<ReturnType<typeof createGitPRRecutter>["recut"]>[0],
-  proposedRef: string,
+  proposedHeadSha: string,
 ) {
   // The production input has not grown this P1a seam yet. Keep the RED at
   // runtime so the failure proves replay rather than stopping at transpilation.
-  return recutter.recut({ ...input, proposedRef } as Parameters<ReturnType<typeof createGitPRRecutter>["recut"]>[0])
+  return recutter.recut({ ...input, proposedHeadSha } as Parameters<ReturnType<typeof createGitPRRecutter>["recut"]>[0])
+}
+
+function observeGitMutations(process: Pick<Process, "run">): {
+  process: Pick<Process, "run">
+  mutations: string[][]
+} {
+  const mutations: string[][] = []
+  return {
+    mutations,
+    process: {
+      run(request) {
+        const mutatingCommand = request.argv.some((argument) =>
+          [
+            "apply",
+            "checkout",
+            "cherry-pick",
+            "commit-tree",
+            "merge",
+            "push",
+            "rebase",
+            "reset",
+            "switch",
+            "update-ref",
+          ].includes(argument),
+        )
+        const mutatingWorktree =
+          request.argv.includes("worktree") &&
+          request.argv.some((argument) =>
+            ["add", "lock", "move", "prune", "remove", "repair", "unlock"].includes(argument),
+          )
+        if (mutatingCommand || mutatingWorktree) {
+          mutations.push([...request.argv])
+        }
+        return process.run(request)
+      },
+    },
+  }
 }
 
 const unusedWorkspace: BayWorkspace = {
@@ -930,22 +1006,10 @@ describe("Queue command adapters", () => {
       "1",
     )
     await using process = createProcess()
-    const mutations: string[][] = []
-    const observed: Pick<Process, "run"> = {
-      run(request) {
-        if (
-          request.argv.some((argument) =>
-            ["rebase", "commit-tree", "cherry-pick", "merge", "apply", "update-ref", "push"].includes(argument),
-          )
-        ) {
-          mutations.push([...request.argv])
-        }
-        return process.run(request)
-      },
-    }
+    const observed = observeGitMutations(process)
 
     const result = await recutProposedCodeCarrier(
-      createGitPRRecutter({ inject: { process: observed }, repo: fixture.repo }),
+      createGitPRRecutter({ inject: { process: observed.process }, repo: fixture.repo }),
       {
         id: "PR1",
         branch: "issue/approved",
@@ -954,17 +1018,22 @@ describe("Queue command adapters", () => {
         headSha: fixture.approvedSha,
         baseSha: fixture.approvedBaseSha,
       },
-      fixture.exact.ref,
+      fixture.exact.sha,
     )
 
-    expect({ headSha: result.headSha, mutations }).toEqual({ headSha: fixture.exact.sha, mutations: [] })
+    expect({ headSha: result.headSha, mutations: observed.mutations }).toEqual({
+      headSha: fixture.exact.sha,
+      mutations: [],
+    })
     expect(await git(fixture.repo, ["rev-parse", fixture.exact.ref])).toBe(fixture.exact.sha)
   })
 
-  it("types invalid code proposals by resolved candidate SHA and missing ref", async () => {
+  it("types invalid code proposals by frozen candidate SHA without mutating Git", async () => {
     const fixture = await codeCarrierProposalRepository()
+    await expect(
+      git(fixture.repo, ["merge-base", "--is-ancestor", fixture.currentBaseSha, fixture.uncontained.sha]),
+    ).rejects.toThrow()
     await using process = createProcess()
-    const recutter = createGitPRRecutter({ inject: { process }, repo: fixture.repo })
     const input = {
       id: "PR1",
       branch: "issue/approved",
@@ -973,14 +1042,28 @@ describe("Queue command adapters", () => {
       headSha: fixture.approvedSha,
       baseSha: fixture.approvedBaseSha,
     } as const
-    const missingRef = "refs/heads/proposal/missing"
+    const missingSha = "f".repeat(40)
     const outcomes: unknown[] = []
-    for (const candidate of [fixture.drop, fixture.extra, fixture.corrupt, fixture.uncontained, { ref: missingRef }]) {
+    for (const candidate of [
+      fixture.drop,
+      fixture.extra,
+      fixture.corrupt,
+      fixture.whitespace,
+      fixture.mode,
+      fixture.symlink,
+      fixture.uncontained,
+      { sha: missingSha },
+    ]) {
+      const observed = observeGitMutations(process)
       try {
-        const result = await recutProposedCodeCarrier(recutter, input, candidate.ref)
-        outcomes.push({ status: "accepted", headSha: result.headSha })
+        const result = await recutProposedCodeCarrier(
+          createGitPRRecutter({ inject: { process: observed.process }, repo: fixture.repo }),
+          input,
+          candidate.sha,
+        )
+        outcomes.push({ status: "accepted", headSha: result.headSha, mutations: observed.mutations })
       } catch (error) {
-        outcomes.push({ status: "refused", failure: failureFact(error) })
+        outcomes.push({ status: "refused", failure: failureFact(error), mutations: observed.mutations })
       }
     }
 
@@ -992,6 +1075,7 @@ describe("Queue command adapters", () => {
           code: "recut-certification-drop",
           message: expect.stringContaining(fixture.drop.sha),
         },
+        mutations: [],
       },
       {
         status: "refused",
@@ -1000,6 +1084,7 @@ describe("Queue command adapters", () => {
           code: "recut-certification-extra",
           message: expect.stringContaining(fixture.extra.sha),
         },
+        mutations: [],
       },
       {
         status: "refused",
@@ -1008,6 +1093,34 @@ describe("Queue command adapters", () => {
           code: "recut-certification-corrupt",
           message: expect.stringContaining(fixture.corrupt.sha),
         },
+        mutations: [],
+      },
+      {
+        status: "refused",
+        failure: {
+          kind: "refusal",
+          code: "recut-certification-corrupt",
+          message: expect.stringContaining(fixture.whitespace.sha),
+        },
+        mutations: [],
+      },
+      {
+        status: "refused",
+        failure: {
+          kind: "refusal",
+          code: "recut-certification-corrupt",
+          message: expect.stringContaining(fixture.mode.sha),
+        },
+        mutations: [],
+      },
+      {
+        status: "refused",
+        failure: {
+          kind: "refusal",
+          code: "recut-certification-corrupt",
+          message: expect.stringContaining(fixture.symlink.sha),
+        },
+        mutations: [],
       },
       {
         status: "refused",
@@ -1016,22 +1129,24 @@ describe("Queue command adapters", () => {
           code: "carrier-drops-landed",
           message: expect.stringContaining(fixture.uncontained.sha),
         },
+        mutations: [],
       },
       {
         status: "refused",
         failure: {
           kind: "refusal",
-          code: "proposed-ref-missing",
-          message: expect.stringContaining(missingRef),
+          code: "proposed-commit-missing",
+          message: expect.stringContaining(missingSha),
         },
+        mutations: [],
       },
     ])
   })
 
-  it("does not let a refused proposal poison a sibling or a repaired candidate at the same ref", async () => {
+  it("isolates a refused proposal from sibling and repaired candidates by distinct frozen SHA", async () => {
     const fixture = await codeCarrierProposalRepository()
+    expect(new Set([fixture.corrupt.sha, fixture.sibling.sha, fixture.repaired.sha]).size).toBe(3)
     await using process = createProcess()
-    const recutter = createGitPRRecutter({ inject: { process }, repo: fixture.repo })
     const input = {
       id: "PR1",
       branch: "issue/approved",
@@ -1040,15 +1155,37 @@ describe("Queue command adapters", () => {
       headSha: fixture.approvedSha,
       baseSha: fixture.approvedBaseSha,
     } as const
-    const refused = await recutProposedCodeCarrier(recutter, input, fixture.corrupt.ref).then(
-      (result) => ({ status: "accepted" as const, headSha: result.headSha }),
-      (error: unknown) => ({ status: "refused" as const, failure: failureFact(error) }),
+    const refusedGit = observeGitMutations(process)
+    const refused = await recutProposedCodeCarrier(
+      createGitPRRecutter({ inject: { process: refusedGit.process }, repo: fixture.repo }),
+      input,
+      fixture.corrupt.sha,
+    ).then(
+      (result) => ({ status: "accepted" as const, headSha: result.headSha, mutations: refusedGit.mutations }),
+      (error: unknown) => ({
+        status: "refused" as const,
+        failure: failureFact(error),
+        mutations: refusedGit.mutations,
+      }),
     )
-    const sibling = await recutProposedCodeCarrier(recutter, { ...input, id: "PR2" }, fixture.sibling.ref)
-    await git(fixture.repo, ["update-ref", fixture.corrupt.ref, fixture.repaired.sha, fixture.corrupt.sha])
-    const repaired = await recutProposedCodeCarrier(recutter, input, fixture.corrupt.ref)
+    const siblingGit = observeGitMutations(process)
+    const sibling = await recutProposedCodeCarrier(
+      createGitPRRecutter({ inject: { process: siblingGit.process }, repo: fixture.repo }),
+      { ...input, id: "PR2" },
+      fixture.sibling.sha,
+    )
+    const repairedGit = observeGitMutations(process)
+    const repaired = await recutProposedCodeCarrier(
+      createGitPRRecutter({ inject: { process: repairedGit.process }, repo: fixture.repo }),
+      input,
+      fixture.repaired.sha,
+    )
 
-    expect({ refused, accepted: [sibling.headSha, repaired.headSha] }).toEqual({
+    expect({
+      refused,
+      accepted: [sibling.headSha, repaired.headSha],
+      acceptedMutations: [siblingGit.mutations, repairedGit.mutations],
+    }).toEqual({
       refused: {
         status: "refused",
         failure: {
@@ -1056,35 +1193,50 @@ describe("Queue command adapters", () => {
           code: "recut-certification-corrupt",
           message: expect.stringContaining(fixture.corrupt.sha),
         },
+        mutations: [],
       },
       accepted: [fixture.sibling.sha, fixture.repaired.sha],
+      acceptedMutations: [[], []],
     })
   })
 
-  it("keeps a changed-gitlink proposal on the authored-gitlink refusal path", async () => {
+  it("refuses added, modified, and deleted gitlinks without mutating Git", async () => {
     const fixture = await codeCarrierProposalRepository()
     await using process = createProcess()
+    const outcomes: unknown[] = []
 
-    await expect(
-      recutProposedCodeCarrier(
-        createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
-        {
-          id: "PR1",
-          branch: "issue/approved",
-          base: "main",
-          revision: 1,
-          headSha: fixture.approvedSha,
-          baseSha: fixture.approvedBaseSha,
+    for (const candidate of [fixture.gitlinkAdd, fixture.gitlinkModify, fixture.gitlinkDelete]) {
+      const observed = observeGitMutations(process)
+      try {
+        const result = await recutProposedCodeCarrier(
+          createGitPRRecutter({ inject: { process: observed.process }, repo: fixture.repo }),
+          {
+            id: "PR1",
+            branch: "issue/approved",
+            base: "main",
+            revision: 1,
+            headSha: fixture.approvedSha,
+            baseSha: fixture.approvedBaseSha,
+          },
+          candidate.sha,
+        )
+        outcomes.push({ status: "accepted", headSha: result.headSha, mutations: observed.mutations })
+      } catch (error) {
+        outcomes.push({ status: "refused", failure: failureFact(error), mutations: observed.mutations })
+      }
+    }
+
+    expect(outcomes).toEqual(
+      [fixture.gitlinkAdd, fixture.gitlinkModify, fixture.gitlinkDelete].map((candidate) => ({
+        status: "refused",
+        failure: {
+          kind: "refusal",
+          code: "authored-gitlink",
+          message: expect.stringContaining(candidate.sha),
         },
-        fixture.gitlink.ref,
-      ),
-    ).rejects.toMatchObject({
-      failure: {
-        kind: "refusal",
-        code: "authored-gitlink",
-        message: expect.stringContaining(fixture.gitlink.sha),
-      },
-    })
+        mutations: [],
+      })),
+    )
   })
 
   it("accepts Git's aligned equality rows for a ten-commit range-diff certificate", async () => {
