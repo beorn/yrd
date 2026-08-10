@@ -509,9 +509,10 @@ inspected. Checkout, submodule population, dependency provisioning, and check
 command failures are retained; successful checks keep the normal cleanup.
 The flag changes evidence lifetime only—it does not skip or weaken a check.
 The caller owns the retained evidence after inspection. For a printed worktree
-path, run `git worktree remove --force <path>`; if checkout creation itself
-failed, the printed path is only its parent directory and can be removed after
-confirming it contains no wanted evidence.
+path, run `git worktree remove --force <path>`, then remove its now-empty
+container with `rmdir <parent-of-path>`. If checkout creation itself failed,
+the printed path is that container; inspect it, then use `rmdir <path>` once it
+is empty.
 
 `--track` opts a live PR into resident “merge into latest.” Before every Queue
 cycle, the resident observes the branch from `origin`; when its tip moved, Yrd

@@ -7,7 +7,7 @@ import { existsSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join, relative } from "node:path"
+import { dirname, join, relative } from "node:path"
 import { pathToFileURL } from "node:url"
 import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -778,8 +778,8 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 
     expect(result).toMatchObject({ exitCode, timedOut })
     expect(result.stderr).toContain(timedOut ? "typecheck timed out" : "typecheck failed")
-    const retained = /workspace retained at '([^']+)'/u.exec(result.retainedWorkspaceNote ?? "")?.[1]
-    expect(retained, result.retainedWorkspaceNote).toBeDefined()
+    const retained = result.retainedWorkspace
+    expect(retained).toBeDefined()
     expect(existsSync(join(retained!, "package.json"))).toBe(true)
   })
 
@@ -2367,7 +2367,7 @@ checks: [{check: {run: "true"}}]
         "      classification: base",
         "      run: |",
         "        test -f feature.txt &&",
-        '        printf "[yrd-base-health] base %.12s is red: test:fast failed\\n" "$YRD_BASE_SHA" &&',
+        '        printf "[yrd-base-health] base %.12s is red: test:fast failed\\n" "$YRD_BASE_SHA" >&2 &&',
         "        exit 1",
         "",
       ].join("\n"),
@@ -2393,18 +2393,58 @@ checks: [{check: {run: "true"}}]
       ),
       submitStderr,
     ).toBe(1)
-    expect(submitStdout).toContain(`[yrd-base-health] base ${baseSha.slice(0, 12)} is red: test:fast failed`)
-    const failure = JSON.parse(submitStderr) as { failure: { message: string } }
+    expect(submitStdout).toBe("")
+    const failure = JSON.parse(submitStderr) as {
+      failure: { message: string; cause: string; resolution: string[] }
+    }
     expect(failure).toMatchObject({
       failure: {
         kind: "refusal",
         code: "required-check-failed",
-        message: expect.stringContaining("yrd check main-health"),
+        message: expect.stringContaining("check stderr:"),
       },
     })
     const retained = /workspace retained at '([^']+)'/u.exec(failure.failure.message)?.[1]
     expect(retained, failure.failure.message).toBeDefined()
     expect(existsSync(retained!)).toBe(true)
+    expect(failure.failure.cause).toContain(`required check failed: 'main-health' exited 1`)
+    expect(failure.failure.cause).toContain("check stderr:")
+    expect(failure.failure.cause).toContain(`[yrd-base-health] base ${baseSha.slice(0, 12)} is red: test:fast failed`)
+    expect(failure.failure.cause).toContain(`workspace retained at '${retained!}'`)
+    expect(failure.failure.cause).not.toMatch(/\band$/u)
+    expect(failure.failure.resolution).toEqual([
+      `Inspect the retained workspace at '${retained!}'.`,
+      `git worktree remove --force '${retained!}'`,
+      `rmdir '${dirname(retained!)}'`,
+      "yrd check 'main-health'",
+    ])
+
+    let humanStdout = ""
+    let humanStderr = ""
+    expect(
+      await runYrdProcess(
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--keep-on-failure"],
+        {
+          cwd: repo,
+          stdout: (text) => {
+            humanStdout += text
+          },
+          stderr: (text) => {
+            humanStderr += text
+          },
+        },
+      ),
+      humanStderr,
+    ).toBe(1)
+    expect(humanStdout).toBe("")
+    const humanRetained = /workspace retained at '([^']+)'/u.exec(humanStderr)?.[1]
+    expect(humanRetained, humanStderr).toBeDefined()
+    expect(humanStderr).toContain("error: required check failed: 'main-health' exited 1; check stderr:")
+    expect(humanStderr).not.toMatch(/\band\s*\nresolve:/u)
+    expect(humanStderr).toContain(`resolve: Inspect the retained workspace at '${humanRetained!}'.`)
+    expect(humanStderr).toContain(`resolve: git worktree remove --force '${humanRetained!}'`)
+    expect(humanStderr).toContain(`resolve: rmdir '${dirname(humanRetained!)}'`)
+    expect(humanStderr).toContain("resolve: yrd check 'main-health'")
     expect((await journalEnvelope(repo)).flatMap(({ values }) => values)).toEqual([])
     await using host = await createYrdHost({ cwd: repo })
     expect(host.app.bays.list()).toEqual([])

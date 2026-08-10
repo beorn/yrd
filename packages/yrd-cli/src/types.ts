@@ -39,7 +39,7 @@ export type YrdCliJournalAdministration = Readonly<{
   bump?(version: number): Promise<JournalVersionBumpResult>
 }>
 
-export type YrdCliCheckResult = ProcessResult & Readonly<{ retainedWorkspaceNote?: string }>
+export type YrdCliCheckResult = ProcessResult & Readonly<{ retainedWorkspace?: string }>
 
 export type YrdCliChecks = Readonly<{
   names: readonly string[]

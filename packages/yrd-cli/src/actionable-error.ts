@@ -1,3 +1,4 @@
+import { dirname } from "node:path"
 import type { PRDeliveryState } from "@yrd/bay"
 import { failureSlug } from "./failure-slug.ts"
 
@@ -47,6 +48,30 @@ function embeddedYrdCommands(message: string): string[] {
     if (command !== undefined && !commands.includes(command)) commands.push(command)
   }
   return commands
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`
+}
+
+function requiredCheckFailure(failure: FailureLike, cause: string): ActionableFailure {
+  const check = quotedValue(failure.message, /required check failed:\s*'([^']+)'/iu)
+  const workspace = quotedValue(failure.message, /workspace retained at '([^']+)'/iu)
+  const resolution = [
+    ...(workspace === undefined
+      ? []
+      : [
+          `Inspect the retained workspace at ${shellQuote(workspace)}.`,
+          `git worktree remove --force ${shellQuote(workspace)}`,
+          `rmdir ${shellQuote(dirname(workspace))}`,
+        ]),
+    ...(check === undefined ? [] : [`yrd check ${shellQuote(check)}`]),
+  ]
+  return Object.freeze({
+    code: failure.code,
+    cause,
+    resolution: Object.freeze(resolution.length === 0 ? [GENERIC_RESOLUTION] : resolution),
+  })
 }
 
 function quotedValue(message: string, pattern: RegExp): string | undefined {
@@ -158,6 +183,7 @@ function recutGitlinkFailure(
 
 export function actionableFailure(failure: FailureLike, context: ActionableFailureContext = {}): ActionableFailure {
   const cause = oneLineCause(failure.message)
+  if (failure.code === "required-check-failed") return requiredCheckFailure(failure, cause)
   if (failure.code === "authored-gitlink") return authoredGitlinkFailure(failure, cause, context)
   if (failure.code === "recut-gitlink-conflict") {
     const projected = recutGitlinkFailure(failure, cause, context)
@@ -202,7 +228,7 @@ export function formatActionableFailure(failure: ActionableFailure, prefix = "")
 export function formatHumanFailure(failure: ActionableFailure): string {
   const remedies =
     failure.escalation === undefined
-      ? failure.resolution.filter((step) => /^(?:git|yrd)\s/u.test(step))
+      ? failure.resolution.filter((step) => /^(?:Inspect\b|git\s|rmdir\s|yrd\s)/u.test(step))
       : failure.resolution
   return [
     `error: ${failure.cause}`,

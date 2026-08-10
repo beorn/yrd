@@ -187,6 +187,7 @@ import {
 import type { YrdBayProtection, YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState } from "./types.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
 import { ensureWorkspaceDependencies } from "./workspace-provisioning.ts"
+import { retainedWorkspaceNote } from "./workspace-retention.ts"
 import { artifactLocation, directArtifacts, nestedArtifacts, uniqueArtifacts } from "./artifact-reference.ts"
 import { readInstalledBaselines } from "./installed-baseline.ts"
 import { renderRemedyStep } from "@yrd/intent"
@@ -6491,16 +6492,19 @@ async function runRequiredChecks(
           }
     const result = await checks.run(name, io.cwd ?? process.cwd(), context)
     if (result.stdout !== "") io.stdout(result.stdout)
-    if (result.stderr !== "") io.stderr(result.stderr)
     if (result.exitCode !== 0 || result.timedOut) {
       const outcome = result.timedOut ? "timed out" : `exited ${String(result.exitCode)}`
-      const retained = result.retainedWorkspaceNote === undefined ? "" : `; ${result.retainedWorkspaceNote}`
+      const checkDiagnostic = result.stderr.trim()
+      const diagnostic = checkDiagnostic === "" ? "" : `; check stderr: ${checkDiagnostic}`
+      const retained =
+        result.retainedWorkspace === undefined ? "" : `; ${retainedWorkspaceNote(result.retainedWorkspace)}`
       raiseFailure(
         "refusal",
         "required-check-failed",
-        `yrd: required check failed: '${name}' ${outcome}${retained}; fix the working tree and run 'yrd check ${name}'`,
+        `yrd: required check failed: '${name}' ${outcome}${diagnostic}${retained}`,
       )
     }
+    if (result.stderr !== "") io.stderr(result.stderr)
     results.push({ name, exitCode: result.exitCode })
   }
   return results

@@ -118,6 +118,7 @@ import {
   yrdQueueRunnerCheckRequested,
 } from "./run.ts"
 import { queueStepRevision, type ToolchainFingerprint } from "./host-revision.ts"
+import { retainedWorkspaceNote } from "./workspace-retention.ts"
 import type {
   YrdCliApp,
   YrdCliCheckResult,
@@ -230,10 +231,6 @@ function validateConfig(config: ResolvedYrdProjectConfig): void {
 }
 
 const MANAGED_PRE_SUBMIT_MARKER = "# managed-by-yrd: pre-submit-v1"
-
-function retainedWorkspaceNote(path: string): string {
-  return `workspace retained at '${path}' (--keep-on-failure)`
-}
 
 function annotateRetainedWorkspace(cause: unknown, path: string): Error {
   const note = retainedWorkspaceNote(path)
@@ -396,7 +393,7 @@ export function configuredChecks(
       const result = await run(checkout)
       failed = result.exitCode !== 0 || result.timedOut
       if (!failed || !keepOnFailure) return result
-      return { ...result, retainedWorkspaceNote: retainedWorkspaceNote(checkout) }
+      return { ...result, retainedWorkspace: checkout }
     } catch (cause) {
       if (keepOnFailure) throw annotateRetainedWorkspace(cause, checkout)
       throw cause
