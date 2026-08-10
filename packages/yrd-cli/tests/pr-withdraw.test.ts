@@ -19,9 +19,18 @@ import { createBayJobDefs, currentPRRev, prDeliveryState, withBays } from "@yrd/
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type Journal, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { createJournal } from "@yrd/persistence"
+import { createProcess } from "@yrd/process"
 import { runYrd as runYrdRaw, type PruneGitFacts, type RecutPreflightResult, type YrdCliIO } from "@yrd/cli"
 import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
-import { withMerge, withQueue, withStep, type PRShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
+import {
+  createGitPRRecutter,
+  withMerge,
+  withQueue,
+  withStep,
+  type PRShape,
+  type SourceRewrite,
+  type StepExecution,
+} from "@yrd/queue"
 import { withIntents } from "@yrd/intent"
 import { withIssues } from "@yrd/issue"
 import {
@@ -131,7 +140,12 @@ function contestAdapters() {
   return { runner, evaluator, git }
 }
 
-async function createCliApp(options: { journal?: Journal<unknown> } = {}) {
+async function createCliApp(
+  options: {
+    journal?: Journal<unknown>
+    resolveBase?: (ref: string) => Readonly<{ base: string; baseSha: string }>
+  } = {},
+) {
   const bayJobs = createBayJobDefs(workspace())
   const check = withStep(
     "check",
@@ -160,7 +174,11 @@ async function createCliApp(options: { journal?: Journal<unknown> } = {}) {
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
     withIntents(),
-    withBays({ jobs: bayJobs, defaultBase: "main", resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }) }),
+    withBays({
+      jobs: bayJobs,
+      defaultBase: "main",
+      resolveBase: options.resolveBase ?? ((ref) => ({ base: ref, baseSha: BASE_SHA })),
+    }),
   )
   return createYrd(contests(queue(base)), {
     inject: { journal: options.journal ?? createMemoryJournal(), clock: () => "2026-07-15T12:00:00.000Z", id: ids() },
@@ -219,6 +237,67 @@ function gitResult(cwd: string, ...args: string[]): Readonly<{ code: number; std
           : ""
     return { code: failed.status, stdout }
   }
+}
+
+function sourceOnlyDivergentRecutRepository(): {
+  root: string
+  repo: string
+  module: string
+  sourceBase: string
+  headSha: string
+  targetSha: string
+  moduleC: string
+} {
+  const root = mkdtempSync(join(tmpdir(), "yrd-recut-apply-"))
+  const repo = join(root, "repo")
+  const module = join(root, "module")
+  execFileSync("git", ["init", "-q", "-b", "main", module])
+  git(module, "config", "user.name", "Yrd Test")
+  git(module, "config", "user.email", "yrd@example.invalid")
+  git(module, "config", "uploadpack.allowAnySHA1InWant", "true")
+  writeFileSync(join(module, "version.txt"), "a\n")
+  git(module, "add", "version.txt")
+  git(module, "commit", "-qm", "module a")
+  const moduleA = git(module, "rev-parse", "HEAD")
+
+  execFileSync("git", ["init", "-q", "-b", "main", repo])
+  git(repo, "config", "user.name", "Yrd Test")
+  git(repo, "config", "user.email", "yrd@example.invalid")
+  git(repo, "config", "protocol.file.allow", "always")
+  writeFileSync(join(repo, "README.md"), "main\n")
+  git(repo, "add", "README.md")
+  git(repo, "commit", "-qm", "root")
+  git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "dep")
+  git(repo, "commit", "-qam", "add dep at a")
+  const sourceBase = git(repo, "rev-parse", "HEAD")
+
+  git(module, "checkout", "-q", "-B", "carrier-row", moduleA)
+  writeFileSync(join(module, "carrier.txt"), "carrier\n")
+  git(module, "add", "carrier.txt")
+  git(module, "commit", "-qm", "carrier payload")
+  const moduleB = git(module, "rev-parse", "HEAD")
+  git(module, "checkout", "-q", "-B", "base-row", moduleA)
+  writeFileSync(join(module, "current.txt"), "current\n")
+  git(module, "add", "current.txt")
+  git(module, "commit", "-qm", "current payload")
+  const moduleC = git(module, "rev-parse", "HEAD")
+  git(join(repo, "dep"), "fetch", "-q", "origin", "carrier-row", "base-row")
+
+  git(repo, "switch", "-qc", "issue/source", sourceBase)
+  git(repo, "update-index", "--cacheinfo", `160000,${moduleB},dep`)
+  git(repo, "commit", "-qm", "carrier: bump dep only")
+  const headSha = git(repo, "rev-parse", "HEAD")
+  git(repo, "switch", "-q", "main")
+  git(repo, "update-index", "--cacheinfo", `160000,${moduleC},dep`)
+  writeFileSync(join(repo, "upstream.txt"), "upstream\n")
+  git(repo, "add", "upstream.txt")
+  git(repo, "commit", "-qm", "base: bump dep + upstream")
+  const targetSha = git(repo, "rev-parse", "HEAD")
+  const rootOrigin = join(root, "origin.git")
+  execFileSync("git", ["init", "-q", "--bare", rootOrigin])
+  git(repo, "remote", "add", "origin", rootOrigin)
+  git(repo, "push", "-q", "origin", "main", "issue/source")
+  return { root, repo, module, sourceBase, headSha, targetSha, moduleC }
 }
 
 async function journaledEvents(app: CliApp, name: string): Promise<Record<string, unknown>[]> {
@@ -552,6 +631,66 @@ describe("pr recut --preflight", () => {
     expect(recutInputs).toEqual([expect.objectContaining({ id: "PR1", revision: 1, headSha: HEAD_SHA })])
     expect(currentPRRev(app.state().bays.prs.PR1!)).toMatchObject({ n: 2, head: HEAD2_SHA })
     expect(app.bays.checksRequested("PR1")).toBe(true)
+  })
+
+  it("applies a source-only divergent recut and persists its generated composition", async () => {
+    const fixture = sourceOnlyDivergentRecutRepository()
+    try {
+      git(fixture.repo, "switch", "-q", "issue/source")
+      git(fixture.repo, "branch", "-f", "main", fixture.sourceBase)
+      const app = await createCliApp({
+        resolveBase: (ref) => ({ base: ref, baseSha: git(fixture.repo, "rev-parse", ref) }),
+      })
+      await app.bays.submit({
+        branch: "issue/source",
+        headSha: fixture.headSha,
+        base: "main",
+        baseSha: fixture.sourceBase,
+      })
+      git(fixture.repo, "branch", "-f", "main", fixture.targetSha)
+      const output = outputIO({ cwd: fixture.repo })
+      await using process = createProcess({ cwd: fixture.repo })
+
+      expect(
+        await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--queue", "--apply", "--json"), output.io, {
+          process,
+          recut: createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
+        }),
+        output.stderr(),
+      ).toBe(0)
+      expect(JSON.parse(output.stdout())).toMatchObject({
+        command: "pr.recut.apply",
+        pr: "PR1",
+        verdict: "RECUT",
+        result: { revision: 2, headSha: fixture.targetSha, delivery: "submitted" },
+      })
+
+      const revision = currentPRRev(app.state().bays.prs.PR1!)
+      expect(revision).toMatchObject({
+        n: 2,
+        head: fixture.targetSha,
+        composition: {
+          version: 1,
+          sources: [
+            {
+              repo: "dep",
+              branch: expect.stringMatching(/^refs\/heads\/yrd\/candidates\/[0-9a-f]{40}$/u),
+              baseSha: fixture.moduleC,
+              tipSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+              payload: ["carrier.txt"],
+            },
+          ],
+        },
+      })
+      const source = revision.composition?.sources[0]
+      expect(source).toBeDefined()
+      expect(git(join(fixture.repo, "dep"), "rev-parse", source!.branch)).toBe(source!.tipSha)
+      expect(git(fixture.module, "rev-parse", source!.branch)).toBe(source!.tipSha)
+      expect(git(fixture.repo, "show", `${revision.recut!.treeSha}:upstream.txt`)).toBe("upstream")
+      expect(app.bays.checksRequested("PR1")).toBe(true)
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
   })
 
   it("applies only the computed RECUT-FORCE verdict", async () => {

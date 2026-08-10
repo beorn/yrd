@@ -607,6 +607,51 @@ describe("recut fast-forward gitlink resolution", () => {
     expect(await git(repo, ["show", `${result.treeSha}:upstream.txt`])).toBe("upstream")
   })
 
+  it("refuses to move an occupied local source candidate ref after proving the payload", async () => {
+    const { repo, module, moduleA, sourceBase } = await baseRepo()
+    const { moduleB, moduleC } = await disjointModulePins(module, moduleA)
+    await git(join(repo, "dep"), ["fetch", "-q", "origin", "carrier-row", "base-row"])
+    const headSha = await sourceOnlyCarrier(repo, sourceBase, moduleB)
+    await advanceBase(repo, moduleC)
+
+    await using delegate = createProcess()
+    let occupiedRef: string | undefined
+    const process = {
+      async run(request: ProcessRequest): Promise<ProcessResult> {
+        const candidateRef = request.argv.find((argument) => argument.startsWith("refs/heads/yrd/candidates/"))
+        if (
+          occupiedRef === undefined &&
+          request.argv.includes("update-ref") &&
+          request.argv.includes("--create-reflog") &&
+          candidateRef !== undefined
+        ) {
+          occupiedRef = candidateRef
+          await git(join(repo, "dep"), ["update-ref", candidateRef, moduleC])
+        }
+        return delegate.run(request)
+      },
+    }
+
+    await expect(
+      createGitPRRecutter({ inject: { process }, repo }).recut({
+        id: "PR1",
+        branch: "issue/source",
+        base: "main",
+        revision: 1,
+        headSha,
+        baseSha: sourceBase,
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "source-publish",
+        message: expect.stringContaining("candidate ref could not be pinned"),
+      },
+    })
+    expect(occupiedRef).toBeDefined()
+    expect(await git(join(repo, "dep"), ["rev-parse", occupiedRef!])).toBe(moduleC)
+  })
+
   it("patch-extracts a source-only merge-tip carrier onto a disjoint current component pin", async () => {
     const { repo, module, moduleA, sourceBase } = await baseRepo()
     const { moduleB, moduleC } = await disjointModulePins(module, moduleA)

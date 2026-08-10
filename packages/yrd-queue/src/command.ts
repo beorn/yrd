@@ -38,10 +38,10 @@ import { resolveRelativeSubmoduleOrigin } from "./submodule-origin.ts"
 import {
   executeQueueSubmoduleComposition,
   planQueueSubmoduleComposition,
-  publishImmutableRemoteRef,
   type QueueConflictStage,
   type QueueTreeConflict,
 } from "./submodule-composition-policy.ts"
+import { publishImmutableRemoteRef } from "./git-transport-internal.ts"
 import { materializeSubmodules } from "git-super/submodules"
 import { createGitWorktreeStore } from "git-super/worktree"
 import {
