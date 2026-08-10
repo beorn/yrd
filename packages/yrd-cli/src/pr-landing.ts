@@ -40,8 +40,8 @@ export type PrLandingVerdict =
   | Readonly<{ status: "proven"; baseSha: string; landingSha: string }>
   | Readonly<{ status: "not-proven"; reason: "journal-missing" }>
   | Readonly<{
-      status: "not-proven"
-      reason: "landing-not-on-base"
+      status: "corrupt"
+      reason: "journal-landing-not-on-base"
       baseSha: string
       landingSha: string
     }>
@@ -69,15 +69,17 @@ function failureText(error: unknown): string {
   return error instanceof Error && error.message.trim() !== "" ? error.message.trim() : String(error)
 }
 
-/** Resolve the one canonical physical-landing proof for each PR: a projected
- * `pr/integrated` journal row AND reachability of that row's exact landing
- * commit from the live base. The authored revision is deliberately irrelevant:
+/** Resolve physical landedness at the CLI boundary. The repository decides:
+ * the journal projection locates the exact landing commit, then reachability
+ * from the live base proves it. The journal is a rebuildable index, never the
+ * second half of an AND gate. The authored revision is deliberately irrelevant:
  * a regenerated carrier may never appear on the base even though the queue's
  * landing commit does.
  *
  * Every input receives a typed verdict. Missing journal evidence never probes
- * Git, and an unresolvable base remains UNKNOWN rather than collapsing to
- * landed or not-landed. */
+ * Git until a durable change-id can identify what to search for; the landing
+ * ledger fills that index gap. A journal row disproved by Git is CORRUPT and
+ * loud, while an unresolvable base remains UNKNOWN. */
 export async function provePrLandings(prs: readonly PR[], io: YrdCliIO): Promise<PrLandingProofs> {
   const verdicts = new Map<string, PrLandingVerdict>()
   const candidates: JournalLandingCandidate[] = []
@@ -112,11 +114,13 @@ export async function provePrLandings(prs: readonly PR[], io: YrdCliIO): Promise
       const landed = await landedCommits(git, baseSha, commits)
       for (const pr of members) {
         const landingSha = pr.integration.commit
-        verdicts.set(
-          pr.id,
-          landed.has(landingSha)
-            ? { status: "proven", baseSha, landingSha }
-            : { status: "not-proven", reason: "landing-not-on-base", baseSha, landingSha },
+        if (landed.has(landingSha)) {
+          verdicts.set(pr.id, { status: "proven", baseSha, landingSha })
+          continue
+        }
+        verdicts.set(pr.id, { status: "corrupt", reason: "journal-landing-not-on-base", baseSha, landingSha })
+        warnings.push(
+          `yrd: journal records PR '${pr.id}' landing ${landingSha}, but base ${baseSha} does not contain it — rebuild the landing index and inspect repository integrity`,
         )
       }
     } catch (error) {
