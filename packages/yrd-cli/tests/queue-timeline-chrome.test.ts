@@ -379,11 +379,13 @@ describe("queue timeline chrome 21106", () => {
     const mainResult: QueueStatusResult = {
       ...(snapshot.results[0] as QueueStatusResult),
       prs: mainPrs,
+      admissionOrder: ["PR1", "PR8", "PR9"],
       eligibilities: [queuedEligibility("PR1", 1), queuedEligibility("PR8", 2), queuedEligibility("PR9", 3)],
     }
     const siblingResult: QueueStatusResult = {
       base: "release/next",
       prs: siblingPr === undefined ? [] : [siblingPr],
+      admissionOrder: siblingPr === undefined ? [] : ["PR99"],
       running: [],
       waiting: [],
       finished: [],

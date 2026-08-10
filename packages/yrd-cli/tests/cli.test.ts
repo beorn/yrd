@@ -118,7 +118,6 @@ import { withLiveRenderer } from "../src/live-renderer.ts"
 import * as runInternals from "../src/run.ts"
 import { LandingAuthorityBoundary } from "../src/landing-authority-boundary.ts"
 import { queueStats } from "../src/time-stats.ts"
-import type { YrdCliState } from "../src/types.ts"
 import { YRD_VERSION } from "../src/version.ts"
 import { writeInstalledBaseline } from "../src/installed-baseline.ts"
 import {
@@ -557,6 +556,15 @@ function outputIO(overrides: Partial<YrdCliIO> = {}) {
     ...overrides,
   }
   return { io, stdout: () => stdout, stderr: () => stderr }
+}
+
+function fixtureAdmissionOrder(prs: readonly PR[]): string[] {
+  return prs
+    .filter((pr) => {
+      const state = prDeliveryState(pr)
+      return state === "submitted" || state === "ready"
+    })
+    .map((pr) => pr.id)
 }
 
 function recutIO(app: TestApp, selector = "PR1", overrides: Partial<YrdCliIO> = {}) {
@@ -5837,6 +5845,27 @@ describe("runYrd", () => {
     })
   })
 
+  it("prints public queue positions in Queue admission order", async () => {
+    let tick = 0
+    const app = await createApp({
+      batch: 1,
+      clock: () => new Date(Date.UTC(2026, 0, 1, 0, 0, 0, tick++)).toISOString(),
+    })
+    await app.bays.intake({ branch: "issue/created-first", headSha: "1".repeat(40), base: "main" })
+    await app.bays.intake({ branch: "issue/submitted-first", headSha: "2".repeat(40), base: "main" })
+    await app.bays.submit({ pr: "PR2" })
+    await app.bays.submit({ pr: "PR1" })
+    expect(app.queue.admissionOrder()).toEqual(["PR2", "PR1"])
+
+    const output = outputIO({
+      columns: 120,
+      resolveQueueTarget: async () => ({ base: "main", sha: BASE_SHA }),
+    })
+    expect(await runYrd(app, yrd("queue", "list"), output.io), output.stderr()).toBe(0)
+    const frame = output.stdout()
+    expect(frame.indexOf("pr#2.1")).toBeLessThan(frame.indexOf("pr#1.1"))
+  })
+
   it("uses read capabilities for the dashboard and contest view without appending events", async () => {
     const app = await createApp()
     await openAndSubmit(app)
@@ -6029,7 +6058,14 @@ describe("runYrd", () => {
         headSha: "5".repeat(40),
       }),
     ]
-    const result: QueueStatusResult = { base: "main", prs, running: [], waiting: [], finished: [landed] }
+    const result: QueueStatusResult = {
+      base: "main",
+      prs,
+      admissionOrder: fixtureAdmissionOrder(prs),
+      running: [],
+      waiting: [],
+      finished: [landed],
+    }
     const submissionTimes = new Map(prs.map((pr) => [queueRevisionKey(currentPRSnapshot(pr)), pr.submittedAt!]))
     const base = {
       now,
@@ -6091,7 +6127,14 @@ describe("runYrd", () => {
         integratedAt: "2026-07-10T12:00:00.000Z",
       }),
     ]
-    const result: QueueStatusResult = { base: "main", prs, running: [], waiting: [], finished: [recent, older] }
+    const result: QueueStatusResult = {
+      base: "main",
+      prs,
+      admissionOrder: fixtureAdmissionOrder(prs),
+      running: [],
+      waiting: [],
+      finished: [recent, older],
+    }
     const projection = queueTimelineProjection([result], {
       now,
       windowMs: 6 * hour,
@@ -6137,6 +6180,7 @@ describe("runYrd", () => {
     const result: QueueStatusResult = {
       base: "main",
       prs: [pr],
+      admissionOrder: fixtureAdmissionOrder([pr]),
       running: [],
       waiting: [],
       finished: [newer, older],
@@ -6216,6 +6260,7 @@ describe("runYrd", () => {
     const result: QueueStatusResult = {
       base: "main",
       prs: [pr],
+      admissionOrder: fixtureAdmissionOrder([pr]),
       running: [],
       waiting: [],
       finished: [],
@@ -6399,6 +6444,7 @@ describe("runYrd", () => {
     const result: QueueStatusResult = {
       base: "main",
       prs,
+      admissionOrder: fixtureAdmissionOrder(prs),
       running: [],
       waiting: [],
       finished: [run],
@@ -7028,7 +7074,14 @@ describe("runYrd", () => {
         error: { code: entry.code, message: `${entry.code} specimen` },
       }),
     )
-    const result: QueueStatusResult = { base: "main", prs, running: [], waiting: [], finished }
+    const result: QueueStatusResult = {
+      base: "main",
+      prs,
+      admissionOrder: fixtureAdmissionOrder(prs),
+      running: [],
+      waiting: [],
+      finished,
+    }
     const projection = queueTimelineProjection([result], {
       now,
       windowMs: 60 * 60_000,
@@ -7179,6 +7232,7 @@ describe("runYrd", () => {
     const result: QueueStatusResult = {
       base: "main",
       prs,
+      admissionOrder: fixtureAdmissionOrder(prs),
       running: [running],
       waiting: [],
       finished: [integrated, rejected, environment, canceled],
@@ -7582,6 +7636,7 @@ describe("runYrd", () => {
           headSha: "2".repeat(40),
         }),
       ],
+      admissionOrder: ["PR1", "PR2"],
       running: [],
       waiting: [],
       finished: [],
@@ -7663,6 +7718,7 @@ describe("runYrd", () => {
           submittedAt: "2026-07-09T12:01:00.000Z",
         },
       ],
+      admissionOrder: ["PR1", "PR2"],
       running: [],
       waiting: [],
       finished: [],
@@ -7816,7 +7872,7 @@ describe("runYrd", () => {
         ),
       ],
     })
-    const result = { ...fakeSummary([run]), prs: [] } as QueueStatusResult
+    const result = { ...fakeSummary([run]), prs: [], admissionOrder: [] } as QueueStatusResult
     try {
       writeFileSync(outputPath, "checking one\n")
       expect(await runInternals.queueArtifactOutputs([result], artifactRoot)).toEqual([
@@ -7863,7 +7919,7 @@ describe("runYrd", () => {
         ),
       ],
     })
-    const result = { ...fakeSummary([run]), prs: [] } as QueueStatusResult
+    const result = { ...fakeSummary([run]), prs: [], admissionOrder: [] } as QueueStatusResult
     const attempts: readonly QueueAttempt[] = [
       {
         job: JOB_CHECK_FAILED_ID,
@@ -7938,7 +7994,9 @@ describe("runYrd", () => {
       steps: [fakeStep("check", "running", fakeJob({ id: JOB_CHECK_PASS_ID, status: "running" }))],
     })
     try {
-      expect(await runInternals.queueArtifactOutputs([{ ...fakeSummary([run]), prs: [] }], artifactRoot)).toEqual([
+      expect(
+        await runInternals.queueArtifactOutputs([{ ...fakeSummary([run]), prs: [], admissionOrder: [] }], artifactRoot),
+      ).toEqual([
         {
           source: "recorded",
           run: "R-bounded",
@@ -8201,6 +8259,7 @@ describe("runYrd", () => {
           headSha: HEAD_SHA,
         }),
       ],
+      admissionOrder: ["PR1"],
       running: [
         fakeRun({
           id: "R1",
@@ -8258,6 +8317,7 @@ describe("runYrd", () => {
           headSha: HEAD_SHA,
         }),
       ],
+      admissionOrder: ["PR1"],
       running: [run],
       waiting: [],
       finished: [],
@@ -8297,6 +8357,7 @@ describe("runYrd", () => {
           integration: { commit: MERGED_SHA, baseSha: BASE_SHA },
         }),
       ],
+      admissionOrder: ["PR1", "PR2", "PR3", "PR4"],
       running: [
         fakeRun({
           id: "R1",
@@ -8360,6 +8421,7 @@ describe("runYrd", () => {
           ],
         }),
       ],
+      admissionOrder: ["PR1"],
       running: [],
       waiting: [],
       finished: [
@@ -8387,6 +8449,7 @@ describe("runYrd", () => {
           headSha: HEAD_SHA,
         }),
       ],
+      admissionOrder: ["PR1"],
       running: [],
       waiting: [
         {
@@ -8415,6 +8478,7 @@ describe("runYrd", () => {
           rejectedAt: "2026-07-09T12:03:00.000Z",
         }),
       ],
+      admissionOrder: [],
       running: [],
       waiting: [],
       finished: [
@@ -8467,6 +8531,7 @@ describe("runYrd", () => {
           base: "main",
           headSha: "a".repeat(40),
           prs: [],
+          admissionOrder: [],
           running: [],
           waiting: [],
           finished: [],
@@ -8729,7 +8794,15 @@ describe("runYrd", () => {
       })
       const selected = item.status === "rejected" ? new Set<string>() : new Set([pr.id])
       const projection = humanQueueProjection(
-        { base: "main", headSha: BASE_SHA, prs: [pr], running: [], waiting: [], finished: item.runs },
+        {
+          base: "main",
+          headSha: BASE_SHA,
+          prs: [pr],
+          admissionOrder: [],
+          running: [],
+          waiting: [],
+          finished: item.runs,
+        },
         Date.parse("2026-07-09T12:10:00.000Z"),
         { selected },
       )
@@ -8781,6 +8854,7 @@ describe("runYrd", () => {
       base: "main",
       headSha: BASE_SHA,
       prs: [pr],
+      admissionOrder: [],
       running: [],
       waiting: [],
       finished: [prior, current],
@@ -8798,7 +8872,7 @@ describe("runYrd", () => {
       rejectedAt: undefined,
     } satisfies PR
     const pending = humanQueueProjection(
-      { ...result, prs: [awaitingCurrentRun], finished: [prior] },
+      { ...result, prs: [awaitingCurrentRun], admissionOrder: ["PR1"], finished: [prior] },
       Date.parse("2026-07-09T12:13:00.000Z"),
     )
     expect(pending.queue).toHaveLength(1)
@@ -8902,6 +8976,7 @@ describe("runYrd", () => {
       base: "main",
       headSha: BASE_SHA,
       prs: [pr],
+      admissionOrder: [],
       running: [],
       waiting: [],
       finished: [run],
@@ -8954,7 +9029,15 @@ describe("runYrd", () => {
     })
 
     const failure = humanQueueProjection(
-      { base: "main", headSha: BASE_SHA, prs: [pr], running: [], waiting: [], finished: [run] },
+      {
+        base: "main",
+        headSha: BASE_SHA,
+        prs: [pr],
+        admissionOrder: [],
+        running: [],
+        waiting: [],
+        finished: [run],
+      },
       Date.parse("2026-07-09T12:02:00.000Z"),
     ).recent[0]?.failure
     expect(failure?.evidence).toEqual({ text: causal, href: pathToFileURL(causal).href })
@@ -9003,6 +9086,7 @@ describe("runYrd", () => {
     const result = {
       base: "main",
       prs,
+      admissionOrder: ["PR1", "PR2"],
       running: [
         fakeRun({
           id: "R1",
@@ -9070,6 +9154,7 @@ describe("runYrd", () => {
       base: "main",
       headSha: BASE_SHA,
       prs: [...submitted, ...rejected],
+      admissionOrder: submitted.map((pr) => pr.id),
       running: [],
       waiting: [],
       finished,
@@ -9569,7 +9654,7 @@ describe("runYrd", () => {
     })
     const statusRows = queueStatusRows(
       { byId: {}, prs: { PR1: statusPr }, receipts: {} },
-      { ...fakeSummary([runMissingLocation]), prs: [statusPr] },
+      { ...fakeSummary([runMissingLocation]), prs: [statusPr], admissionOrder: ["PR1"] },
       new Set(),
       Date.parse("2026-07-10T12:01:00.000Z"),
     )
@@ -10319,6 +10404,7 @@ describe("runYrd", () => {
     const futureResult = {
       base: "main",
       prs: [future],
+      admissionOrder: ["PR94"],
       running: [],
       waiting: [],
       finished: [],
@@ -10341,6 +10427,7 @@ describe("runYrd", () => {
     const backwardsResult = {
       base: "main",
       prs: [rejected],
+      admissionOrder: [],
       running: [],
       waiting: [],
       finished: [backwards],
@@ -11470,7 +11557,14 @@ describe("typed issue landing bridge", () => {
     expect(prDeliveryState(landedPr)).toBe("already-landed")
     expect(
       humanQueueProjection(
-        { base: "main", prs: [...app.bays.prs()], running: [], waiting: [], finished: [run] },
+        {
+          base: "main",
+          prs: [...app.bays.prs()],
+          admissionOrder: [],
+          running: [],
+          waiting: [],
+          finished: [run],
+        },
         Date.parse("2026-07-09T12:01:00.000Z"),
         { state: app.state().bays },
       ),

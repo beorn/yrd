@@ -5173,6 +5173,7 @@ async function queueStatusSnapshots(
     if (target.bases.size === 0) target.bases.add("main")
   }
   const results: QueueStatusResult[] = []
+  const admissionOrder = app.queue.admissionOrder()
   for (const group of await queueTargetGroups(target.bases, io)) {
     const canonical = app.queue.status(group.base)
     const aliases = [...group.aliases].filter((base) => base !== group.base).map((base) => app.queue.status(base))
@@ -5187,16 +5188,17 @@ async function queueStatusSnapshots(
       waiting: runs.waiting.flatMap(scopeRun),
       finished: runs.finished.flatMap(scopeRun),
     }
-    const prs = Object.values(state.bays.prs).filter(
-      (pr) => group.aliases.has(pr.base) && (target.selected.size === 0 || target.selected.has(pr.id)),
-    )
+    const groupPrs = Object.values(state.bays.prs).filter((pr) => group.aliases.has(pr.base))
+    const prs = groupPrs.filter((pr) => target.selected.size === 0 || target.selected.has(pr.id))
     const prIds = new Set(prs.map((pr) => pr.id))
+    const groupPrIds = new Set(groupPrs.map((pr) => pr.id))
     results.push({
       base: group.base,
       ...scopedRuns,
       ...(canonical.pause === undefined ? {} : { pause: canonical.pause }),
       ...(group.headSha === undefined ? {} : { headSha: group.headSha }),
       prs,
+      admissionOrder: admissionOrder.filter((pr) => groupPrIds.has(pr)),
       candidates: Object.values(state.queues.candidates).filter((candidate) =>
         candidate.revs.some((revision) => prIds.has(revision.pr)),
       ),
@@ -6194,6 +6196,7 @@ async function logRuns(
     for (const run of history) target.bases.add(run.base)
   }
   const summaries: QueueStatusResult[] = []
+  const admissionOrder = app.queue.admissionOrder()
   for (const group of await queueTargetGroups(target.bases, io)) {
     const merged =
       history === undefined
@@ -6208,13 +6211,14 @@ async function logRuns(
       waiting: merged.waiting.filter(inScope),
       finished: merged.finished.filter(inScope),
     }
+    const groupPrs = Object.values(state.bays.prs).filter((pr) => group.aliases.has(pr.base))
+    const groupPrIds = new Set(groupPrs.map((pr) => pr.id))
     summaries.push({
       base: group.base,
       ...runs,
       ...(group.headSha === undefined ? {} : { headSha: group.headSha }),
-      prs: Object.values(state.bays.prs).filter(
-        (pr) => group.aliases.has(pr.base) && (target.selected.size === 0 || target.selected.has(pr.id)),
-      ),
+      prs: groupPrs.filter((pr) => target.selected.size === 0 || target.selected.has(pr.id)),
+      admissionOrder: admissionOrder.filter((pr) => groupPrIds.has(pr)),
     })
   }
   const prStatusById = new Map<string, PRDeliveryState>(

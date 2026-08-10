@@ -1,4 +1,4 @@
-import { currentPRRev, type PR } from "@yrd/bay"
+import { currentPRRev, prDeliveryState, type PR } from "@yrd/bay"
 import type { JsonValue } from "@yrd/core"
 import type { Job } from "@yrd/job"
 import type { Run } from "@yrd/queue"
@@ -385,6 +385,9 @@ export function fixtureResult(
     base: "main",
     headSha: BASE_SHA,
     prs: [...prs],
+    admissionOrder: prs
+      .filter((pr) => prDeliveryState(pr) === "submitted" || prDeliveryState(pr) === "ready")
+      .map((pr) => pr.id),
     running: runs.filter((run) => run.status === "queued" || run.status === "in_progress"),
     waiting: runs.filter((run) => run.status === "waiting"),
     finished: runs.filter((run) => run.status === "completed"),

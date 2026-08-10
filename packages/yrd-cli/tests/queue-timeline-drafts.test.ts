@@ -2,7 +2,7 @@
 // @level l2
 // @consumer @yrd/cli
 
-import type { PR } from "@yrd/bay"
+import { prDeliveryState, type PR } from "@yrd/bay"
 import type { Run } from "@yrd/queue"
 import { createElement } from "react"
 import { createRenderer } from "silvery/test"
@@ -120,7 +120,19 @@ function submittedPr(): PR {
 }
 
 function result(prs: readonly PR[], finished: readonly Run[] = []): QueueStatusResult {
-  return { base: "main", running: [], waiting: [], finished: [...finished], prs: [...prs] }
+  return {
+    base: "main",
+    running: [],
+    waiting: [],
+    finished: [...finished],
+    prs: [...prs],
+    admissionOrder: prs
+      .filter((pr) => {
+        const state = prDeliveryState(pr)
+        return state === "submitted" || state === "ready"
+      })
+      .map((pr) => pr.id),
+  }
 }
 
 function project(prs: readonly PR[], finished: readonly Run[] = []) {

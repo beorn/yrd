@@ -55,7 +55,7 @@ import {
   type TextProps,
   useWindowSize,
 } from "silvery"
-import { queueTimelineIndices } from "./queue-timeline-index.ts"
+import { queueAdmissionPositions } from "./queue-admission-index.ts"
 import {
   artifactHref as locationHref,
   artifactLabel,
@@ -168,6 +168,7 @@ export type QueueStatusResult = QueueSummary &
   Readonly<{
     headSha?: string
     prs: PR[]
+    admissionOrder: readonly string[]
     candidates?: readonly Candidate[]
     eligibilities?: readonly PREligibility[]
   }>
@@ -2113,7 +2114,7 @@ function timelineNonIntegratedRows(
   const activeRevisions = new Set(
     [...result.running, ...result.waiting].flatMap((run) => run.prs.map((member) => queueRevisionKey(member))),
   )
-  const positions = queueTimelineIndices(result.prs)
+  const positions = queueAdmissionPositions(result.admissionOrder)
   const runs = [...result.running, ...result.waiting, ...result.finished]
   return result.prs.flatMap((pr): QueueTimelineProjectedRow[] => {
     const revision = currentPRRev(pr)
@@ -2856,12 +2857,11 @@ export function humanQueueProjection(
   options: Readonly<{
     selected?: ReadonlySet<string>
     state?: BaysState
-    positions?: ReadonlyMap<string, number>
   }> = {},
 ): HumanQueueProjection {
   const selected = options.selected ?? new Set<string>()
   const rows = projectedPRRows(options.state, result, now)
-  const positions = options.positions ?? queueTimelineIndices(result.prs)
+  const positions = queueAdmissionPositions(result.admissionOrder)
   const queueRows = rows
     .filter((row) => row.nativeStatus === "submitted" || row.nativeStatus === "ready")
     .toSorted((left, right) => requiredQueuePosition(positions, left.pr) - requiredQueuePosition(positions, right.pr))
@@ -3686,19 +3686,17 @@ export function QueueStatusView({
   state,
   results,
   selected,
-  positions,
   now,
 }: {
   state: BaysState
   results: readonly QueueStatusResult[]
   selected: ReadonlySet<string>
-  positions?: ReadonlyMap<string, number>
   now: number
 }) {
   return (
     <Box flexDirection="column">
       {results.map((result, index) => {
-        const projection = humanQueueProjection(result, now, { selected, state, positions })
+        const projection = humanQueueProjection(result, now, { selected, state })
         const pauseHealth = projection.pause === undefined ? undefined : queuePauseHealth(state, projection.pause)
         const allowed = projection.pause === undefined ? "none" : queuePauseAllowedText(projection.pause, pauseHealth)
         return (
