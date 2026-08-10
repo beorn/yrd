@@ -526,6 +526,66 @@ describe("recut fast-forward gitlink resolution", () => {
     expect(await git(repo, ["show", `${result.headSha}:feature.txt`])).toBe("feature")
   })
 
+  it("patch-extracts a source-only carrier onto a disjoint current component pin", async () => {
+    const { repo, module, moduleA, sourceBase } = await baseRepo()
+    await git(module, ["checkout", "-q", "-B", "carrier-row", moduleA])
+    await writeFile(join(module, "carrier.txt"), "carrier\n")
+    await git(module, ["add", "carrier.txt"])
+    await git(module, ["commit", "-qm", "carrier payload"])
+    const moduleB = await git(module, ["rev-parse", "HEAD"])
+    await git(module, ["checkout", "-q", "-B", "base-row", moduleA])
+    await writeFile(join(module, "current.txt"), "current\n")
+    await git(module, ["add", "current.txt"])
+    await git(module, ["commit", "-qm", "current payload"])
+    const moduleC = await git(module, ["rev-parse", "HEAD"])
+    await git(join(repo, "dep"), ["fetch", "-q", "origin", "carrier-row", "base-row"])
+    expect(await git(module, ["merge-base", moduleB, moduleC])).toBe(moduleA)
+    expect(await isAncestor(module, moduleB, moduleC)).toBe(false)
+    expect(await isAncestor(module, moduleC, moduleB)).toBe(false)
+
+    await git(repo, ["switch", "-qc", "issue/source", sourceBase])
+    await git(repo, ["update-index", "--cacheinfo", `160000,${moduleB},dep`])
+    await git(repo, ["commit", "-qm", "carrier: bump dep only"])
+    const headSha = await git(repo, ["rev-parse", "HEAD"])
+    expect(await git(repo, ["diff", "--name-only", sourceBase, headSha])).toBe("dep")
+    const targetSha = await advanceBase(repo, moduleC)
+
+    await using process = createProcess()
+    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      id: "PR1",
+      branch: "issue/source",
+      base: "main",
+      revision: 1,
+      headSha,
+      baseSha: sourceBase,
+    })
+
+    expect(result).toMatchObject({
+      headSha: targetSha,
+      baseSha: targetSha,
+      unchanged: false,
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: expect.stringMatching(/^refs\/heads\/yrd\/candidates\/[0-9a-f]{40}$/u),
+            baseSha: moduleC,
+            tipSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+            payload: ["carrier.txt"],
+          },
+        ],
+      },
+    })
+    const rewritten = result.composition?.sources[0]
+    expect(rewritten).toBeDefined()
+    expect(await git(module, ["rev-list", "--parents", "-n", "1", rewritten!.tipSha])).toBe(
+      `${rewritten!.tipSha} ${moduleC}`,
+    )
+    expect(await git(module, ["show", `${rewritten!.tipSha}:carrier.txt`])).toBe("carrier")
+    expect(await git(module, ["show", `${rewritten!.tipSha}:current.txt`])).toBe("current")
+  })
+
   it("refuses loudly when the carrier and base pins have truly diverged", async () => {
     const { repo, module, moduleA, sourceBase } = await baseRepo()
     const moduleB = await moduleCommit(module, "carrier-row", moduleA, "b")
