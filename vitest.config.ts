@@ -5,7 +5,7 @@ import { defineConfig } from "vitest/config"
 // Externalizing it lets vite-node fall through to Bun's own `import()`.
 export default defineConfig({
   test: {
-    include: ["packages/*/tests/**/*.test.{ts,tsx}"],
+    include: ["packages/*/tests/**/*.test.{ts,tsx}", "tests/**/*.test.{ts,tsx}"],
     server: {
       deps: {
         external: [/^bun:/],

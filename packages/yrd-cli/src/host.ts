@@ -102,7 +102,7 @@ import {
 import { ensureWorkspaceDependencies } from "./workspace-provisioning.ts"
 import { withGitIndexLockRetry } from "./git-index-lock-retry.ts"
 import { loadYrdConfig, stepGateMode, type ResolvedYrdProjectConfig, type YrdStepConfig } from "./config.ts"
-import { classifyFailure, resolveInvocation } from "./invocation.ts"
+import { classifyFailure, resolveInvocation, type RuntimePosture } from "./invocation.ts"
 import { withLiveRenderer } from "./live-renderer.ts"
 import { createYrdLogger, residentObservability, resolveYrdObservability } from "./observability.ts"
 import { formatResidentLogLine, residentArtifactHome } from "./runner-timeline.ts"
@@ -113,7 +113,6 @@ import {
   residentRunnerLeaseHeld,
   runYrdHelp,
   runYrdProcessRuntime,
-  type RuntimePosture,
   yrdJsonOutputRequested,
   yrdQueueRunnerCheckRequested,
 } from "./run.ts"

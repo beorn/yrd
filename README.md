@@ -756,9 +756,8 @@ yrd queue list [filter...] [--base <branch>]
 yrd queue ls [filter...] [the same options]
 yrd queue [filter...] [the same options]
 yrd watch [filter...] [the same options except --watch is implied]
-yrd queue run [selector...] [--steps [step...]] [--follow | --once] [--interval <seconds>] [--json]
+yrd queue run [selector...] [--steps [step...]] [--once] [--interval <seconds>] [--json]
 yrd queue cancel <run> [--reason <text>] [--json]
-yrd queue pause [base] [--json]
 yrd queue pause [base] --reason <text> [--allow [pr...]] [--json]
 yrd queue resume [base] [--json]
 yrd queue recover [--reason <text>] [--runner <id>] [--json]
@@ -772,18 +771,18 @@ yrd admin pr prune [--dry-run] [--json]
 yrd admin journal bump <version> [--json]
 ```
 
-| Command              | Input                                             | Output and state                                                                                                      |
-| -------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `list` / `ls` / bare | Optional OR filters, base, status, window, latest | One base's pending/running/completed timeline; sibling queues stay named in the header                                |
-| `list --check`       | Repository                                        | Typed resident lease/heartbeat/baseline health plus installed-base Git distance                                       |
-| `run`                | Zero or more eligible PRs                         | Sole drain imperative; resident follow-runner by default (was `--watch`), a single pass with `--once` or PR selectors |
-| `pause`              | Optional base; reason and allowlist to mutate     | Bare reads current pauses; with a reason, pauses new runs (including retries) while active work settles               |
-| `resume`             | Optional base                                     | Removes the queue pause                                                                                               |
-| `recover`            | Optional reason or known-dead runner id           | Reconciles abandoned work and releases queued runs whose installed step definition changed                            |
-| `finish`             | One waiting PR/step plus job/runner/attempt/token | Records external-runner evidence and resumes that exact durable run                                                   |
-| `audit`              | Repository                                        | Journal, projection, pinned-plan, installed-step, and queue-progress findings; no state change                        |
-| `admin queue init`   | Optional base                                     | Resolves queue resources and installs the managed pre-submit hook                                                     |
-| `admin queue deinit` | Optional base                                     | Releases resources owned by the installed queue adapter                                                               |
+| Command              | Input                                              | Output and state                                                                                                      |
+| -------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `list` / `ls` / bare | Optional OR filters, base, status, window, latest  | One base's pending/running/completed timeline; sibling queues stay named in the header                                |
+| `list --check`       | Repository                                         | Typed resident lease/heartbeat/baseline health plus installed-base Git distance                                       |
+| `run`                | Zero or more eligible PRs                          | Sole drain imperative; resident follow-runner by default (was `--watch`), a single pass with `--once` or PR selectors |
+| `pause`              | Optional base, required reason, optional allowlist | Pauses new runs (including retries) while active work settles; the default queue read shows the pause                 |
+| `resume`             | Optional base                                      | Removes the queue pause                                                                                               |
+| `recover`            | Optional reason or known-dead runner id            | Reconciles abandoned work and releases queued runs whose installed step definition changed                            |
+| `finish`             | One waiting PR/step plus job/runner/attempt/token  | Records external-runner evidence and resumes that exact durable run                                                   |
+| `audit`              | Repository                                         | Journal, projection, pinned-plan, installed-step, and queue-progress findings; no state change                        |
+| `admin queue init`   | Optional base                                      | Resolves queue resources and installs the managed pre-submit hook                                                     |
+| `admin queue deinit` | Optional base                                      | Releases resources owned by the installed queue adapter                                                               |
 
 `queue list` is the canonical read-only surface. `queue ls` is its spelling
 alias, bare `queue` defaults to it, and top-level `watch` is the same command

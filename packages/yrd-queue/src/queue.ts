@@ -648,6 +648,8 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
    * Queue owns this projection because it must preserve the same candidate
    * partitioning, batch size, and FIFO order as compose. */
   freshnessCandidateBatches(): readonly (readonly string[])[]
+  /** Live PR ids in the exact admission order used by a selectorless drain. */
+  admissionOrder(): readonly string[]
   checks(selectors?: readonly string[]): readonly PRCheckRecord[]
   terminalAssociationPlan(): TerminalAssociationPlan
   migrateTerminalAssociations(): Promise<TerminalAssociationPlan>
@@ -2016,6 +2018,7 @@ function createQueue<Shape extends PRShape>(
   return Object.freeze({
     state,
     steps: () => steps.map(descriptor),
+    admissionOrder: () => requestedPRs(runtime().bays, {}).map((pr) => pr.id),
     async admit(args, runOptions) {
       return observeYrdLifecycle(
         log,

@@ -73,15 +73,16 @@ import { diagnoseYrdFlows } from "./config-doctor.ts"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import { actionableFailure, formatActionableFailure } from "./actionable-error.ts"
 import {
-  canonicalizeYrdCommandAliases,
   classifyFailure,
   configureYrdGlobalOptions,
   configuration,
+  normalizeYrdInvocation,
   refusal,
-  resolveInvocation,
   resolveYrdContext,
   stableJson,
   usage,
+  type NormalizedYrdInvocation,
+  type RuntimePosture,
   type YrdContext,
 } from "./invocation.ts"
 import { getLiveRenderer } from "./live-renderer.ts"
@@ -121,7 +122,6 @@ import {
   type QueueStatusResult,
 } from "./queue-status-view.tsx"
 import type { QueueReadModel } from "./queue-read-model.ts"
-import { submittedPrPositions } from "./queue-position.ts"
 import {
   preflightRecut,
   prunePrs,
@@ -1435,13 +1435,7 @@ function issueDeliveryRows(bridge: TrackerBridgeV2): IssueDeliveryRow[] {
   })
 }
 
-export type RuntimePosture =
-  | "active"
-  | "viewer"
-  | "journal-view-repair"
-  | "bracketed-bay-open"
-  | "one-shot-queue-run"
-  | "resident-queue-run"
+export type { RuntimePosture } from "./invocation.ts"
 const RuntimeInvocationCwd = Symbol("yrd.runtime-invocation-cwd")
 const RuntimeChildArgv = Symbol("yrd.runtime-child-argv")
 type RuntimeInvocationIO = YrdCliIO & {
@@ -4453,7 +4447,7 @@ async function viewPr(
   const { results } = await queueStatusSnapshots(app, state, target, io)
   const delivery = prDeliveryState(pr)
   const positions =
-    delivery === "submitted" || delivery === "ready" ? await queuedPrPositions(state, pr.base, io) : undefined
+    delivery === "submitted" || delivery === "ready" ? await queuedPrPositions(app, pr.base, io) : undefined
   const position = positions?.get(pr.id)
   const runs = prQueueRuns(app, pr)
   const attempts = await queueAttempts(services)
@@ -4626,19 +4620,23 @@ function currentPr(app: YrdCliApp, io: YrdCliIO): PR {
   return pr as PR
 }
 
-async function queuedPrPosition(state: YrdCliState, pr: PR, io: YrdCliIO): Promise<number | undefined> {
+async function queuedPrPosition(app: YrdCliApp, pr: PR, io: YrdCliIO): Promise<number | undefined> {
   const delivery = prDeliveryState(pr)
   if (delivery !== "submitted" && delivery !== "ready") return undefined
-  return (await queuedPrPositions(state, pr.base, io)).get(pr.id)
+  return (await queuedPrPositions(app, pr.base, io)).get(pr.id)
 }
 
-async function queuedPrPositions(state: YrdCliState, base: string, io: YrdCliIO): Promise<ReadonlyMap<string, number>> {
+async function queuedPrPositions(app: YrdCliApp, base: string, io: YrdCliIO): Promise<ReadonlyMap<string, number>> {
+  const state = stateOf(app)
   const prs = Object.values(state.bays.prs)
   const groups = await queueTargetGroups(new Set(prs.map((candidate) => candidate.base)), io)
   const group = groups.find((candidate) => candidate.aliases.has(base))
   if (group === undefined) throw new Error(`yrd: queue target group for base '${base}' disappeared`)
-  const candidates = prs.filter((candidate) => group.aliases.has(candidate.base))
-  return submittedPrPositions(candidates)
+  const candidates = new Set(
+    prs.filter((candidate) => group.aliases.has(candidate.base)).map((candidate) => candidate.id),
+  )
+  const ordered = app.queue.admissionOrder().filter((id) => candidates.has(id))
+  return new Map(ordered.map((id, index) => [id, index + 1]))
 }
 
 async function statusPr(app: YrdCliApp, options: JsonOption, io: YrdCliIO, services: YrdCliServices): Promise<void> {
@@ -4855,117 +4853,6 @@ async function listIssues(app: YrdCliApp, options: JsonOption, io: YrdCliIO, sel
   )
 }
 
-type QueueRunMode = "follow" | "once"
-
-/**
- * `queue run` is follow-by-default (user respec 2026-07-15: "by default it
- * should be follow"; "not confused with the watch command"). With no PR
- * selector and no `--once`, it IS the resident follow-runner — the long-lived
- * loop that keeps draining the default queue (the old `--watch` behavior, now
- * the default and renamed to avoid confusion with the `queue watch` viewer).
- *
- * A single pass is requested explicitly: by naming PR selectors
- * (`queue run PR7`) or with `--once` (drain the whole default queue once).
- * `--follow` is the explicit spelling of the default; it may not combine with
- * `--once`, nor with selectors (follow drains the default queue as a whole, it
- * never targets a chosen PR).
- *
- * `--watch` is a DEPRECATED no-op alias of `--follow`, kept one release so the
- * live resident runner + relaunch recipes survive the cutover (#62 removed it
- * outright, which would have broken them). It carries no semantics of its own
- * beyond selecting follow mode — every follow guard below applies to it
- * identically — and followQueueRuns emits the single deprecation warn.
- */
-function resolveQueueRunMode(
-  selectors: readonly string[],
-  options: Readonly<{ follow?: boolean; once?: boolean; watch?: boolean }>,
-): QueueRunMode {
-  const follow = options.follow === true || options.watch === true
-  if (follow && options.once === true) {
-    usage("queue run: --follow and --once are mutually exclusive")
-  }
-  if (follow && selectors.length > 0) {
-    usage("queue run: --follow drains the default queue; it cannot target PR selectors")
-  }
-  return selectors.length > 0 || options.once === true ? "once" : "follow"
-}
-
-/**
- * True when a `queue run` invocation is resident follow mode, mirroring
- * {@link resolveQueueRunMode} at the pre-action boundary where only the parsed
- * Commander action is available. Both modes receive a PID-scoped runner
- * identity; only follow mode receives the exclusive resident lease, so the two
- * posture decisions must agree.
- */
-function queueRunIsFollow(action: Readonly<{ opts(): unknown; args: readonly string[] }>): boolean {
-  const opts = action.opts() as Readonly<{ once?: boolean }>
-  if (opts.once === true) return false
-  return action.args.length === 0
-}
-
-const READ_ONLY_MR_COMMANDS = ["list", "view", "runs", "diff", "status", "checks"] as const
-const READ_ONLY_COMMANDS: Readonly<Record<string, readonly string[]>> = {
-  bay: ["_list", "list", "path", "log"],
-  queue: ["_list", "list", "audit"],
-  // Keyed by the command's canonical name; "pr" stays as insurance for any
-  // runtime that still registers the group under its ruled alias.
-  mr: READ_ONLY_MR_COMMANDS,
-  pr: READ_ONLY_MR_COMMANDS,
-  issue: ["_list", "view"],
-  contest: ["_list", "view"],
-}
-function isBracketedBayCommand(
-  action: Readonly<{ name(): string; parent?: Readonly<{ name(): string }> | null }>,
-): boolean {
-  const name = action.name()
-  const parent = action.parent?.name()
-  if ((name === "open" || name === "run" || name === "in") && parent === "bay") {
-    return true
-  }
-  return (name === "in" || name === "sh" || name === "run") && (parent === "yrd" || parent === "git yrd")
-}
-
-/** Read-only invocations never settle PR state. */
-function isReadOnlyInvocation(
-  action: Readonly<{ name(): string; parent?: Readonly<{ name(): string }> | null }>,
-): boolean {
-  if (action.name() === "_dashboard" || action.name() === "log") return true
-  const parent = action.parent?.name()
-  if (parent === undefined) return false
-  return READ_ONLY_COMMANDS[parent]?.includes(action.name()) === true
-}
-
-function runtimePosture(
-  action: Readonly<{
-    name(): string
-    parent?: Readonly<{ name(): string }> | null
-    opts(): unknown
-    args: readonly string[]
-  }>,
-): RuntimePosture {
-  if (isReadOnlyInvocation(action)) return "viewer"
-  if (isBracketedBayCommand(action)) return "bracketed-bay-open"
-  if (action.name() === "doctor" && (action.opts() as Readonly<{ rebuildViews?: boolean }>).rebuildViews === true) {
-    return "journal-view-repair"
-  }
-  if (action.name() !== "run" || action.parent?.name() !== "queue") return "active"
-  return queueRunIsFollow(action) ? "resident-queue-run" : "one-shot-queue-run"
-}
-
-function isQueueRunnerCheckAction(
-  action: Readonly<{
-    name(): string
-    parent?: Readonly<{ name(): string }> | null
-    opts(): unknown
-  }>,
-): boolean {
-  return (
-    action.parent?.name() === "queue" &&
-    (action.name() === "list" || action.name() === "_list") &&
-    (action.opts() as Readonly<{ check?: boolean }>).check === true
-  )
-}
-
 type RuntimeGlobalOptions = Readonly<{
   repo?: string
   config?: string
@@ -5094,29 +4981,6 @@ async function pauseQueue(
   options: JsonOption & Readonly<{ reason?: unknown; allow?: unknown }>,
   io: YrdCliIO,
 ): Promise<void> {
-  if (options.reason === undefined) {
-    if (csv(options.allow) !== undefined) usage("--allow requires --reason")
-    // Naming a base is an unambiguous intent to pause THAT queue, so it must
-    // never fall back to the listing read: that printed "No paused queues."
-    // and exited 0, which an operator reads as a successful pause. It happened
-    // during a state-repo cutover — the queue was believed frozen, kept
-    // landing, and the landings invalidated the sync. Bare `queue pause` with
-    // no base stays a read; the sibling `--allow requires --reason` refusal
-    // above already treats a reason-less pause as not a pause.
-    if (base !== undefined) usage("pausing a queue requires --reason; `yrd queue pause` with no base lists pauses")
-    const pauses = await queuePauses(app, base, io)
-    const human =
-      pauses.length === 0
-        ? "No paused queues."
-        : pauses
-            .map((pause) => {
-              const allowed = pause.allowedPRs.length === 0 ? "none" : pause.allowedPRs.join(", ")
-              return `Queue ${pause.base} paused: ${pause.reason} (allowed: ${allowed})`
-            })
-            .join("\n")
-    await printResult(io, jsonEnabled(options), { command: "queue.pause", pauses }, human)
-    return
-  }
   if (typeof options.reason !== "string" || options.reason.trim() === "") usage("--reason requires text")
   const target = await resolvedQueueTarget(selectedBase(stateOf(app), base ?? "main"), io)
   const pause = await app.queue.pause({
@@ -5131,15 +4995,6 @@ async function pauseQueue(
     { command: "queue.pause", pause },
     `Queue ${pause.base} paused: ${pause.reason} (allowed: ${allowed})`,
   )
-}
-
-async function queuePauses(app: YrdCliApp, base: string | undefined, io: YrdCliIO) {
-  if (base === undefined) {
-    return Object.values(stateOf(app).queues.pauses).toSorted((left, right) => left.base.localeCompare(right.base))
-  }
-  const target = await resolvedQueueTarget(selectedBase(stateOf(app), base), io)
-  const pause = stateOf(app).queues.pauses[target.base]
-  return pause === undefined ? [] : [pause]
 }
 
 async function recoverQueue(
@@ -5969,7 +5824,7 @@ async function primeYrd(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
       bay: bay?.id,
       pr: pr?.id,
       base: pr?.base ?? bay?.base,
-      position: pr === undefined ? undefined : await queuedPrPosition(state, pr, io),
+      position: pr === undefined ? undefined : await queuedPrPosition(app, pr, io),
       pause: queue?.pause,
     },
     boundaries: [
@@ -7687,21 +7542,11 @@ async function prepareResidentQueueCycle(
 export async function followQueueRuns(
   app: YrdCliApp,
   selectors: readonly string[],
-  options: { steps?: unknown; json?: boolean; interval?: number; watch?: boolean },
+  options: { steps?: unknown; json?: boolean; interval?: number },
   io: YrdCliIO,
   gate: () => Promise<void>,
   services: YrdCliServices = {},
 ): Promise<YrdCliExitCode> {
-  if (options.watch === true) {
-    // `--watch` is a DEPRECATED no-op alias of follow (the default). Reaching
-    // here means it already resolved to follow mode; announce the one-time
-    // deprecation as a structured loggily warn — never a bare 'yrd:' stderr write,
-    // since the resident's stdout is a log stream — then behave identically to
-    // follow. Emitted exactly once, before the drain loop.
-    app.log.warn?.("--watch is no longer needed; queue run already follows by default.", {
-      action: "queue-run-watch-deprecated",
-    })
-  }
   const intervalSeconds = options.interval ?? 15
   if (!Number.isSafeInteger(intervalSeconds) || intervalSeconds <= 0) {
     usage("--interval must be a positive number of seconds")
@@ -8382,7 +8227,7 @@ async function refusePrMerge(
     refusal(message)
   }
 
-  const position = await queuedPrPosition(stateOf(app), pr, io)
+  const position = await queuedPrPosition(app, pr, io)
   const detail = prMergeRefusalDetail(pr, position, latestRunForCurrentRevision(pr, app.queue.status(pr.base)))
   const message = `the queue is the only merger; ${detail.message}`
   const guidance = {
@@ -8569,6 +8414,7 @@ function buildProgram(
   io: YrdCliIO,
   setExit: (code: YrdCliExitCode) => void,
   commanderOutput: CommanderOutput,
+  invocation: NormalizedYrdInvocation,
   bootstrap?: RuntimeBootstrap,
 ): CliCommand {
   let runtimeApp = app
@@ -8588,23 +8434,16 @@ function buildProgram(
     program.hook("preAction", async (_root, action) => {
       if (runtimeApp !== undefined) return
       const globals = action.optsWithGlobals() as RuntimeGlobalOptions
-      const posture = runtimePosture(action)
       const runtimeIO = io as RuntimeInvocationIO
       const selected = resolveRuntimeContext(globals, bootstrap)
-      if (isQueueRunnerCheckAction(action) && bootstrap.probe !== undefined) {
+      if (invocation.queueRunnerCheck && bootstrap.probe !== undefined) {
         const probed = await bootstrap.probe(selected)
         runtimeServices = probed.services
         runtimeIO[RuntimeInvocationCwd] = bootstrap.ambientCwd
         Object.assign(io, probed.io)
         return
       }
-      // `queue run` resident detection now derives from the run MODE (Tip B):
-      // follow is the default, `--once` opts out, and the deprecated `--watch`
-      // alias still selects follow (queueRunIsFollow mirrors resolveQueueRunMode
-      // at the pre-action boundary). Read-only commands are viewers regardless
-      // of whether they are static or resident: reads must never drain receiver
-      // receipts or mutate delivery state.
-      const loaded = await bootstrap.load(selected, posture)
+      const loaded = await bootstrap.load(selected, invocation.posture)
       runtimeApp = loaded.app
       runtimeServices = loaded.services
       runtimeIO[RuntimeInvocationCwd] = bootstrap.ambientCwd
@@ -8906,13 +8745,12 @@ function buildProgram(
     .command("run [selector...]")
     .description("drain the queue — resident follow by default; --once or PR selectors for a single pass")
     .option("--steps [step...]", "registered step names, comma-separated or repeated")
-    .option("--follow", "resident follow mode: keep draining the default queue (the default with no selector)")
-    .option("--watch", "deprecated no-op alias of --follow; removed next release")
     .option("--once", "drain the default queue exactly once, then exit")
     .option("--interval <seconds>", "follow-mode poll interval in seconds", int)
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => {
-      const mode = resolveQueueRunMode(selectors, options)
+      const mode = invocation.queueRunMode
+      if (mode === undefined) throw new Error("yrd: normalized queue run mode is missing")
       const gate = () =>
         requireFreshInstalledBaseline(installedServices(), mode === "follow" ? { reloadInPlace: {} } : {})
       if (mode === "follow") {
@@ -9476,10 +9314,10 @@ function jsonOutputRequested(program: CliCommand, args: readonly string[]): bool
 /** Cold-path fallback for host failures outside the normal command catcher.
  * It still uses the canonical Commander definition rather than reparsing argv. */
 export function yrdJsonOutputRequested(argv: readonly string[]): boolean {
-  const invocation = resolveInvocation(argv)
+  const invocation = normalizeYrdInvocation(argv)
   const io: YrdCliIO = { stdout() {}, stderr() {} }
-  const program = buildProgram(undefined, {}, invocation.name, io, () => undefined, {})
-  return jsonOutputRequested(program, canonicalizeYrdCommandAliases(invocation.args))
+  const program = buildProgram(undefined, {}, invocation.name, io, () => undefined, {}, invocation)
+  return jsonOutputRequested(program, invocation.args)
 }
 
 /** Run the one Yrd command surface. */
@@ -9490,7 +9328,7 @@ async function executeYrd(
   services: YrdCliServices = {},
   bootstrap?: RuntimeBootstrap,
 ): Promise<YrdCliExitCode> {
-  const invocation = resolveInvocation(argv)
+  const invocation = normalizeYrdInvocation(argv)
   if (invocation.args.length === 1 && (invocation.args[0] === "--version" || invocation.args[0] === "-V")) {
     io.stdout(`${formatYrdRuntimeVersion()}\n`)
     return 0
@@ -9505,8 +9343,17 @@ async function executeYrd(
     ;(runtimeIO as RuntimeInvocationIO)[RuntimeChildArgv] = invocation.args.slice(separator + 1)
   }
   const commanderOutput: CommanderOutput = {}
-  const program = buildProgram(app, services, invocation.name, runtimeIO, setExit, commanderOutput, bootstrap)
-  const canonicalArgs = canonicalizeYrdCommandAliases(invocation.args)
+  const program = buildProgram(
+    app,
+    services,
+    invocation.name,
+    runtimeIO,
+    setExit,
+    commanderOutput,
+    invocation,
+    bootstrap,
+  )
+  const canonicalArgs = invocation.args
   const args =
     canonicalArgs.length === 1 && (canonicalArgs[0] === "pr" || canonicalArgs[0] === "mr")
       ? [canonicalArgs[0], "--help"]
@@ -9515,7 +9362,7 @@ async function executeYrd(
     await program.parseAsync(args, { from: "user" })
     return exit
   } catch (error) {
-    if (queueRunnerCheckRequested(args)) {
+    if (invocation.queueRunnerCheck) {
       return checkQueueRunner(
         undefined,
         {
@@ -9557,18 +9404,9 @@ async function executeYrd(
   }
 }
 
-function queueRunnerCheckRequested(args: readonly string[]): boolean {
-  const queueIndex = args.indexOf("queue")
-  if (queueIndex < 0) return false
-  const tail = args.slice(queueIndex + 1)
-  const options = tail[0] === "list" ? tail.slice(1) : tail
-  return options.includes("--check") && options.every((argument) => argument === "--check" || argument === "--json")
-}
-
 /** Recognize the one process invocation allowed to bypass app/journal bootstrap. */
 export function yrdQueueRunnerCheckRequested(argv: readonly string[]): boolean {
-  const invocation = resolveInvocation(argv)
-  return queueRunnerCheckRequested(canonicalizeYrdCommandAliases(invocation.args))
+  return normalizeYrdInvocation(argv).queueRunnerCheck
 }
 
 /** Render command metadata without creating a repository-backed runtime. */
