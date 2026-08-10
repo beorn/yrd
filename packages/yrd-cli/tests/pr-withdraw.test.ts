@@ -300,6 +300,55 @@ function sourceOnlyDivergentRecutRepository(): {
   return { root, repo, module, sourceBase, headSha, targetSha, moduleC }
 }
 
+function codeCarrierProposalCliRepository(): {
+  root: string
+  repo: string
+  approvedBaseSha: string
+  approvedSha: string
+  currentBaseSha: string
+  proposedRef: string
+  proposedSha: string
+} {
+  const root = mkdtempSync(join(tmpdir(), "yrd-recut-certification-"))
+  const repo = join(root, "repo")
+  execFileSync("git", ["init", "-q", "-b", "main", repo])
+  git(repo, "config", "user.name", "Yrd Test")
+  git(repo, "config", "user.email", "yrd@example.invalid")
+  writeFileSync(join(repo, "README.md"), "main\n")
+  git(repo, "add", "README.md")
+  git(repo, "commit", "-qm", "base")
+  const approvedBaseSha = git(repo, "rev-parse", "HEAD")
+
+  git(repo, "switch", "-qc", "issue/approved")
+  writeFileSync(join(repo, "approved-a.txt"), "approved a\n")
+  git(repo, "add", "approved-a.txt")
+  git(repo, "commit", "-qm", "approved a")
+  writeFileSync(join(repo, "approved-b.txt"), "approved b\n")
+  git(repo, "add", "approved-b.txt")
+  git(repo, "commit", "-qm", "approved b")
+  const approvedSha = git(repo, "rev-parse", "HEAD")
+
+  git(repo, "switch", "-q", "main")
+  writeFileSync(join(repo, "authority.txt"), "current authority\n")
+  git(repo, "add", "authority.txt")
+  git(repo, "commit", "-qm", "advance authority")
+  const currentBaseSha = git(repo, "rev-parse", "HEAD")
+  git(repo, "switch", "-qc", "proposal/human-composed", currentBaseSha)
+  writeFileSync(join(repo, "approved-a.txt"), "approved a\n")
+  writeFileSync(join(repo, "approved-b.txt"), "approved b\n")
+  git(repo, "add", ".")
+  git(repo, "commit", "-qm", "independently authored proposal")
+  const proposedSha = git(repo, "rev-parse", "HEAD")
+  const proposedRef = "refs/heads/proposal/human-composed"
+
+  git(repo, "switch", "-q", "main")
+  const origin = join(root, "origin.git")
+  execFileSync("git", ["init", "-q", "--bare", origin])
+  git(repo, "remote", "add", "origin", origin)
+  git(repo, "push", "-q", "origin", "main", "issue/approved", "proposal/human-composed")
+  return { root, repo, approvedBaseSha, approvedSha, currentBaseSha, proposedRef, proposedSha }
+}
+
 async function journaledEvents(app: CliApp, name: string): Promise<Record<string, unknown>[]> {
   const events = await Array.fromAsync(app.events())
   return events.filter((event) => event.name === name).map((event) => event.data as Record<string, unknown>)
@@ -631,6 +680,213 @@ describe("pr recut --preflight", () => {
     expect(recutInputs).toEqual([expect.objectContaining({ id: "PR1", revision: 1, headSha: HEAD_SHA })])
     expect(currentPRRev(app.state().bays.prs.PR1!)).toMatchObject({ n: 2, head: HEAD2_SHA })
     expect(app.bays.checksRequested("PR1")).toBe(true)
+  })
+
+  it("certifies --ref exactly as r2 with the r1 approval carried and no generated r3", async () => {
+    const fixture = codeCarrierProposalCliRepository()
+    git(fixture.repo, "switch", "-q", "issue/approved")
+    git(fixture.repo, "branch", "-f", "main", fixture.approvedBaseSha)
+    const app = await createCliApp({
+      resolveBase: (ref) => ({ base: ref, baseSha: git(fixture.repo, "rev-parse", ref) }),
+    })
+    try {
+      await app.bays.submit({
+        branch: "issue/approved",
+        headSha: fixture.approvedSha,
+        base: "main",
+        baseSha: fixture.approvedBaseSha,
+      })
+      await app.bays.review({ pr: "PR1", by: "@reviewer", decision: "approve", ref: "approved-r1" })
+      git(fixture.repo, "branch", "-f", "main", fixture.currentBaseSha)
+      const recutInputs: unknown[] = []
+      let proposalResolutions = 0
+      await using process = createProcess({ cwd: fixture.repo })
+      const realRecutter = createGitPRRecutter({ inject: { process }, repo: fixture.repo })
+      const services = {
+        process,
+        recut: {
+          recut: (input: Parameters<typeof realRecutter.recut>[0]) => {
+            recutInputs.push(input)
+            return realRecutter.recut(input)
+          },
+        },
+      }
+      const run = () => {
+        const output = outputIO({
+          cwd: fixture.repo,
+          resolveRevision: async (ref) => {
+            if (ref !== fixture.proposedRef) return undefined
+            proposalResolutions += 1
+            return fixture.proposedSha
+          },
+        })
+        return {
+          output,
+          result: runYrd(
+            app,
+            yrd("pr", "recut", "PR1", "--ref", fixture.proposedRef, "--queue", "--json"),
+            output.io,
+            services,
+          ),
+        }
+      }
+
+      const first = run()
+      expect(await first.result, first.output.stderr()).toBe(0)
+      const repeated = run()
+      expect(await repeated.result, repeated.output.stderr()).toBe(0)
+
+      const pr = app.state().bays.prs.PR1!
+      expect(proposalResolutions).toBe(2)
+      expect(recutInputs).toEqual([
+        expect.objectContaining({ revision: 1, headSha: fixture.approvedSha, proposedRef: fixture.proposedSha }),
+        expect.objectContaining({ revision: 1, headSha: fixture.approvedSha, proposedRef: fixture.proposedSha }),
+      ])
+      expect(pr.revs.map((revision) => [revision.n, revision.head])).toEqual([
+        [1, fixture.approvedSha],
+        [2, fixture.proposedSha],
+      ])
+      expect(currentPRRev(pr)).toMatchObject({
+        n: 2,
+        head: fixture.proposedSha,
+        recut: { fromRevision: 1, reviewCarried: true },
+      })
+      expect(pr.reviews).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            revision: 2,
+            headSha: fixture.proposedSha,
+            decision: "approve",
+            carriedFrom: { revision: 1, headSha: fixture.approvedSha },
+          }),
+        ]),
+      )
+      expect(pr.revs).toHaveLength(2)
+    } finally {
+      await app.close()
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it("certifies tracked live drift directly as r2 instead of recording a provisional r2 and generated r3", async () => {
+    const app = await createCliApp()
+    const branch = "topic/tracked-proposal"
+    await app.bays.submit({ branch, headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.editPr({ pr: "PR1", track: true })
+    await app.bays.review({ pr: "PR1", by: "@reviewer", decision: "approve", ref: "approved-tracked-r1" })
+    const recutInputs: unknown[] = []
+    const output = outputIO({
+      pruneGit: () =>
+        recutPreflightGit({
+          resolveCommit: (ref) =>
+            ref === `origin/${branch}` || ref === branch
+              ? HEAD2_SHA
+              : ref === "origin/main"
+                ? TARGET_BASE_SHA
+                : ref === BASE_SHA || ref === HEAD_SHA || ref === HEAD2_SHA
+                  ? ref
+                  : undefined,
+        }),
+    })
+
+    expect(
+      await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), output.io, {
+        recut: {
+          recut: (input) => {
+            recutInputs.push(input)
+            return Promise.resolve({
+              headSha: HEAD2_SHA,
+              baseSha: TARGET_BASE_SHA,
+              treeSha: OTHER_TREE,
+              patchId: PR476_PATCH_ID,
+              unchanged: false,
+            })
+          },
+        },
+      }),
+      output.stderr(),
+    ).toBe(0)
+
+    const pr = app.state().bays.prs.PR1!
+    expect(recutInputs).toEqual([expect.objectContaining({ revision: 1, headSha: HEAD_SHA, proposedRef: HEAD2_SHA })])
+    expect(pr.revs.map((revision) => [revision.n, revision.head])).toEqual([
+      [1, HEAD_SHA],
+      [2, HEAD2_SHA],
+    ])
+    expect(currentPRRev(pr)).toMatchObject({
+      n: 2,
+      head: HEAD2_SHA,
+      recut: { fromRevision: 1, reviewCarried: true },
+    })
+    expect(pr.revs).toHaveLength(2)
+  })
+
+  it("freezes --preflight --queue --apply --ref once and records that candidate as the sole r2", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/preflight-ref", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.review({ pr: "PR1", by: "@reviewer", decision: "approve", ref: "approved-preflight-r1" })
+    const proposedRef = "refs/heads/human-preflight-proposal"
+    let proposalResolutions = 0
+    const recutInputs: unknown[] = []
+    const output = outputIO({
+      resolveRevision: async (ref) => {
+        if (ref !== proposedRef) return undefined
+        proposalResolutions += 1
+        return proposalResolutions === 1 ? HEAD2_SHA : HEAD3_SHA
+      },
+      pruneGit: () =>
+        recutPreflightGit({
+          resolveCommit: (ref) =>
+            ref === proposedRef
+              ? HEAD2_SHA
+              : ref === "origin/main"
+                ? TARGET_BASE_SHA
+                : ref.includes("preflight-ref")
+                  ? HEAD_SHA
+                  : ref === BASE_SHA || ref === HEAD_SHA || ref === HEAD2_SHA
+                    ? ref
+                    : undefined,
+          mergeTree: () => OTHER_TREE,
+          patchMatch: () => ({ patchId: PR476_PATCH_ID }),
+        }),
+    })
+
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "recut", "PR1", "--preflight", "--queue", "--apply", "--ref", proposedRef, "--json"),
+        output.io,
+        {
+          recut: {
+            recut: (input) => {
+              recutInputs.push(input)
+              return Promise.resolve({
+                headSha: HEAD2_SHA,
+                baseSha: TARGET_BASE_SHA,
+                treeSha: OTHER_TREE,
+                patchId: PR476_PATCH_ID,
+                unchanged: false,
+              })
+            },
+          },
+        },
+      ),
+      output.stderr(),
+    ).toBe(0)
+
+    const pr = app.state().bays.prs.PR1!
+    expect(proposalResolutions).toBe(1)
+    expect(recutInputs).toEqual([expect.objectContaining({ proposedRef: HEAD2_SHA })])
+    expect(pr.revs.map((revision) => [revision.n, revision.head])).toEqual([
+      [1, HEAD_SHA],
+      [2, HEAD2_SHA],
+    ])
+    expect(currentPRRev(pr)).toMatchObject({
+      n: 2,
+      head: HEAD2_SHA,
+      recut: { fromRevision: 1, reviewCarried: true },
+    })
+    expect(pr.revs).toHaveLength(2)
   })
 
   it("applies a source-only divergent recut and persists its generated composition", async () => {
