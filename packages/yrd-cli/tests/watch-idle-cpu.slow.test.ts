@@ -157,7 +157,7 @@ describe.skipIf(!existsSync(installedYrd))("yrd idle CPU (installed)", () => {
         [
           "/bin/sh",
           "-c",
-          'printf "%s\\n" "$$" > "$1"; exec "$2" queue run --follow --interval 15',
+          'printf "%s\\n" "$$" > "$1"; exec "$2" queue run --interval 15',
           "yrd-follow",
           pidPath,
           installedYrd,

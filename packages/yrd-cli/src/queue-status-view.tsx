@@ -55,7 +55,7 @@ import {
   type TextProps,
   useWindowSize,
 } from "silvery"
-import { submittedPrPositions } from "./queue-position.ts"
+import { queueTimelineIndices } from "./queue-timeline-index.ts"
 import {
   artifactHref as locationHref,
   artifactLabel,
@@ -2113,7 +2113,7 @@ function timelineNonIntegratedRows(
   const activeRevisions = new Set(
     [...result.running, ...result.waiting].flatMap((run) => run.prs.map((member) => queueRevisionKey(member))),
   )
-  const positions = submittedPrPositions(result.prs)
+  const positions = queueTimelineIndices(result.prs)
   const runs = [...result.running, ...result.waiting, ...result.finished]
   return result.prs.flatMap((pr): QueueTimelineProjectedRow[] => {
     const revision = currentPRRev(pr)
@@ -2861,7 +2861,7 @@ export function humanQueueProjection(
 ): HumanQueueProjection {
   const selected = options.selected ?? new Set<string>()
   const rows = projectedPRRows(options.state, result, now)
-  const positions = options.positions ?? submittedPrPositions(result.prs)
+  const positions = options.positions ?? queueTimelineIndices(result.prs)
   const queueRows = rows
     .filter((row) => row.nativeStatus === "submitted" || row.nativeStatus === "ready")
     .toSorted((left, right) => requiredQueuePosition(positions, left.pr) - requiredQueuePosition(positions, right.pr))

@@ -5716,12 +5716,6 @@ describe("runYrd", () => {
     await app.bays.submit({ branch: "issue/blocked", headSha: "1".repeat(40), base: "main" })
     await app.bays.submit({ branch: "issue/allowed", headSha: "2".repeat(40), base: "main" })
     await app.bays.submit({ branch: "issue/also-allowed", headSha: "3".repeat(40), base: "main" })
-    const beforeRead = await Array.fromAsync(app.events()).then((events) => events.length)
-    const unpaused = outputIO()
-    expect(await runYrd(app, yrd("queue", "pause", "--json"), unpaused.io)).toBe(0)
-    expect(JSON.parse(unpaused.stdout())).toEqual({ command: "queue.pause", pauses: [] })
-    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(beforeRead)
-
     const pause = outputIO()
 
     expect(
@@ -5735,15 +5729,6 @@ describe("runYrd", () => {
       command: "queue.pause",
       pause: { base: "main", reason: "operator freeze", allowedPRs: ["PR2", "PR3"] },
     })
-    const afterPause = await Array.fromAsync(app.events()).then((events) => events.length)
-    const paused = outputIO()
-    expect(await runYrd(app, yrd("queue", "pause", "--json"), paused.io)).toBe(0)
-    expect(JSON.parse(paused.stdout())).toMatchObject({
-      command: "queue.pause",
-      pauses: [{ base: "main", reason: "operator freeze", allowedPRs: ["PR2", "PR3"] }],
-    })
-    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(afterPause)
-
     const blocked = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), blocked.io)).toBe(1)
     expect(blocked.stderr()).toContain("queue 'main' is paused: operator freeze")
@@ -5818,23 +5803,18 @@ describe("runYrd", () => {
     expect(app.queue.status("main").pause).toBeUndefined()
   })
 
-  it("refuses to read-fall-back when a base is named without --reason", async () => {
-    // Naming a base is an unambiguous intent to pause THAT queue. Falling back
-    // to the listing read printed "No paused queues." and exited 0, which reads
-    // as success — an operator froze the queue for a state cutover, believed it
-    // was paused, and landings invalidated the sync underneath them. The bare
-    // `queue pause` listing (no base) stays a read; naming a base must not.
+  it("requires a nonempty reason for every public queue pause", async () => {
     const app = await createApp()
-    const named = outputIO()
-    expect(await runYrd(app, yrd("queue", "pause", "main"), named.io)).toBe(2)
-    expect(named.stderr()).toContain("--reason")
-    expect(named.stdout()).not.toContain("No paused queues.")
-    expect(app.queue.status("main").pause).toBeUndefined()
-
-    // The no-base listing read is unchanged.
-    const listing = outputIO()
-    expect(await runYrd(app, yrd("queue", "pause", "--json"), listing.io)).toBe(0)
-    expect(JSON.parse(listing.stdout())).toEqual({ command: "queue.pause", pauses: [] })
+    for (const argv of [
+      yrd("queue", "pause", "main"),
+      yrd("queue", "pause", "--json"),
+      yrd("queue", "pause", "main", "--reason", ""),
+    ]) {
+      const output = outputIO()
+      expect(await runYrd(app, argv, output.io)).toBe(2)
+      expect(output.stderr()).toContain("--reason requires text")
+      expect(app.queue.status("main").pause).toBeUndefined()
+    }
   })
 
   it("passes zero-or-more selectors to the queue as one batch-capable candidate set", async () => {
@@ -6634,7 +6614,7 @@ describe("runYrd", () => {
           pid: process.pid,
           startedAt: "2026-07-09T12:00:00.000Z",
           lastTickAt: "2026-07-09T12:00:58.000Z",
-          command: "yrd queue run --follow",
+          command: "yrd queue run",
         }),
       )
 
@@ -6654,7 +6634,7 @@ describe("runYrd", () => {
           pid: process.pid,
           startedAt: "2026-07-09T12:00:00.000Z",
           lastTickAt: "2026-07-09T12:00:58.000Z",
-          command: "yrd queue run --follow",
+          command: "yrd queue run",
           queueProgress: { state: "healthy" },
         }),
       )
@@ -6687,7 +6667,7 @@ describe("runYrd", () => {
           pid: process.pid,
           startedAt: "2026-07-09T12:00:00.000Z",
           lastTickAt: "2026-07-09T12:00:58.000Z",
-          command: "yrd queue run --follow",
+          command: "yrd queue run",
           queueProgress: { state: "stalled", findings: [refusalFinding] },
         }),
       )
@@ -6753,7 +6733,7 @@ describe("runYrd", () => {
           pid: process.pid,
           startedAt: "2026-07-09T12:00:00.000Z",
           lastTickAt: "2026-07-09T12:00:58.000Z",
-          command: "yrd queue run --follow",
+          command: "yrd queue run",
         }),
       )
 
@@ -10905,12 +10885,10 @@ describe("runYrd", () => {
 })
 
 describe("queue run — follow-by-default mode selection (#62)", () => {
-  // user respec 2026-07-15: "instead of --watch use --follow"; "not confused
-  // with the watch command"; "by default it should be follow". `queue run` with
-  // no selector and no --once IS the resident follow-runner (the old --watch
-  // loop); a single pass is explicit — via a PR selector or --once. --watch is
-  // gone. The follow loop calls scope.sleep after each cycle; a one-shot pass
-  // never sleeps — that is the observable follow-vs-once discriminator here.
+  // `queue run` with no selector and no --once IS the resident follow-runner;
+  // a single pass is explicit via a PR selector or --once. The retired
+  // --follow/--watch flags are rejected. The loop calls scope.sleep after each
+  // cycle; a one-shot pass never sleeps — the observable mode discriminator.
   const trackedScope = () => {
     const controller = new AbortController()
     const sleeps: number[] = []
@@ -10936,13 +10914,12 @@ describe("queue run — follow-by-default mode selection (#62)", () => {
     expect(tracked.sleeps).toEqual([1_000])
   })
 
-  it("treats explicit --follow as the same resident follow mode", async () => {
+  it("rejects the removed --follow spelling", async () => {
     const app = await createApp()
     await openAndSubmit(app)
-    const tracked = trackedScope()
-    const run = outputIO({ scope: tracked.scope })
-    expect(await runYrd(app, yrd("queue", "run", "--follow", "--interval", "1"), run.io), run.stderr()).toBe(3)
-    expect(tracked.sleeps).toEqual([1_000])
+    const run = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "--follow"), run.io)).toBe(2)
+    expect(run.stderr()).toContain("unknown option '--follow'")
   })
 
   it("--once drains the default queue exactly once and exits without looping", async () => {
@@ -10966,35 +10943,12 @@ describe("queue run — follow-by-default mode selection (#62)", () => {
     expect(run.stdout()).toContain("STATE")
   })
 
-  it("accepts --watch as a deprecated no-op alias that enters follow mode", async () => {
-    // #62 removed --watch outright; the alias amendment keeps it one release so
-    // the live resident runner + relaunch recipes survive the cutover. The parser
-    // must ACCEPT --watch (exit 0, never the exit-2 unknown-option refusal) and
-    // route it to the same resident follow loop as --follow: the loop sleeps once,
-    // then the tracked scope aborts it. The single deprecation warn is a loggily
-    // warn asserted at the followQueueRuns unit level (queue-run-watch-alias.test).
-    const app = await createApp()
-    await openAndSubmit(app)
-    const tracked = trackedScope()
-    const run = outputIO({ scope: tracked.scope })
-    expect(await runYrd(app, yrd("queue", "run", "--watch", "--interval", "1"), run.io), run.stderr()).toBe(3)
-    expect(tracked.sleeps).toEqual([1_000])
-  })
-
-  it("refuses --follow combined with --once", async () => {
+  it("rejects the removed --watch spelling", async () => {
     const app = await createApp()
     await openAndSubmit(app)
     const run = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "--follow", "--once"), run.io)).toBe(2)
-    expect(run.stderr()).toContain("mutually exclusive")
-  })
-
-  it("refuses --follow combined with a PR selector", async () => {
-    const app = await createApp()
-    await openAndSubmit(app)
-    const run = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "--follow", "PR1"), run.io)).toBe(2)
-    expect(run.stderr()).toContain("cannot target")
+    expect(await runYrd(app, yrd("queue", "run", "--watch"), run.io)).toBe(2)
+    expect(run.stderr()).toContain("unknown option '--watch'")
   })
 })
 
@@ -12757,7 +12711,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       expect(reclocked.projection.now).toBe(new Date(now).toISOString())
       expect(reclocked.projection.runner?.lastTickAt).toBe("2026-07-09T12:00:59.000Z")
 
-      writeFileSync(statusPath, JSON.stringify({ ...runner, command: "yrd queue run --follow" }))
+      writeFileSync(statusPath, JSON.stringify({ ...runner, command: "yrd queue run" }))
       const replaced = await loader.load()
       expect(targetResolutions, "runner identity changes must invalidate immediately").toBe(2)
       expect(replaced.results).not.toBe(reclocked.results)

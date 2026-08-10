@@ -9,6 +9,33 @@ export type Invocation = Readonly<{
   args: string[]
 }>
 
+export type QueueRunMode = "follow" | "once"
+
+export type RuntimePosture =
+  | "active"
+  | "viewer"
+  | "journal-view-repair"
+  | "bracketed-bay-open"
+  | "one-shot-queue-run"
+  | "resident-queue-run"
+
+export type NormalizedYrdInvocation = Invocation &
+  Readonly<{
+    posture: RuntimePosture
+    queueRunMode?: QueueRunMode
+    queueRunnerCheck: boolean
+  }>
+
+export type YrdRepositoryAlias = Readonly<{
+  repository: Readonly<{ name: string; path: string }>
+  queue: Readonly<{ base: string }>
+}>
+
+export type YrdRepositoryAliasInvocation =
+  | Readonly<{ kind: "all-repositories-read"; args: string[] }>
+  | (YrdRepositoryAlias & Readonly<{ kind: "repository-read" | "repository-write"; args: string[] }>)
+  | Readonly<{ kind: "bypass"; args: string[] }>
+
 export type FailureVerdict = Readonly<{ exitCode: YrdCliExitCode; failure: FailureFact }>
 
 export type YrdContext = Readonly<{
@@ -108,6 +135,139 @@ export function canonicalizeYrdCommandAliases(args: readonly string[]): string[]
     canonical.splice(commandIndex + 1, 0, "list")
   }
   return canonical
+}
+
+const READ_ONLY_SUBCOMMANDS: Readonly<Record<string, ReadonlySet<string>>> = {
+  bay: new Set(["_list", "list", "path", "log"]),
+  queue: new Set(["_list", "list", "audit"]),
+  pr: new Set(["list", "view", "runs", "diff", "status", "checks"]),
+  mr: new Set(["list", "view", "runs", "diff", "status", "checks"]),
+  issue: new Set(["_list", "list", "view"]),
+  contest: new Set(["_list", "list", "view"]),
+}
+
+function queueRunMode(args: readonly string[], queueIndex: number): QueueRunMode {
+  const tail = args.slice(queueIndex + 2)
+  if (tail.includes("--once")) return "once"
+  const stepsIndex = tail.indexOf("--steps")
+  const selectorRegion = stepsIndex < 0 ? tail : tail.slice(0, stepsIndex)
+  for (let index = 0; index < selectorRegion.length; index += 1) {
+    const argument = selectorRegion[index]
+    if (argument === "--interval") {
+      index += 1
+      continue
+    }
+    if (argument?.startsWith("-")) continue
+    return "once"
+  }
+  return "follow"
+}
+
+function invocationPosture(args: readonly string[], commandIndex: number | undefined): RuntimePosture {
+  if (commandIndex === undefined) return "viewer"
+  const command = args[commandIndex]
+  const subcommand = args[commandIndex + 1]
+  if (command === "_dashboard" || command === "log") return "viewer"
+  if (command !== undefined && subcommand !== undefined && READ_ONLY_SUBCOMMANDS[command]?.has(subcommand) === true) {
+    return "viewer"
+  }
+  if (
+    (command === "bay" && (subcommand === "open" || subcommand === "run" || subcommand === "in")) ||
+    command === "open" ||
+    command === "run" ||
+    command === "in" ||
+    command === "sh"
+  ) {
+    return "bracketed-bay-open"
+  }
+  if (command === "doctor" && args.includes("--rebuild-views")) return "journal-view-repair"
+  if (command === "queue" && subcommand === "run") {
+    return queueRunMode(args, commandIndex) === "follow" ? "resident-queue-run" : "one-shot-queue-run"
+  }
+  return "active"
+}
+
+function queueRunnerCheck(args: readonly string[], commandIndex: number | undefined): boolean {
+  if (commandIndex === undefined || args[commandIndex] !== "queue" || args[commandIndex + 1] !== "list") return false
+  const options = args.slice(commandIndex + 2)
+  return options.includes("--check") && options.every((argument) => argument === "--check" || argument === "--json")
+}
+
+/** Resolve executable spelling, canonical aliases, runtime posture, run mode,
+ * and bootstrap-health eligibility exactly once for one process invocation. */
+export function normalizeYrdInvocation(argv: readonly string[]): NormalizedYrdInvocation {
+  const invocation = resolveInvocation(argv)
+  const args = canonicalizeYrdCommandAliases(invocation.args)
+  const commandIndex = rootCommandIndex(args)
+  const mode =
+    commandIndex !== undefined && args[commandIndex] === "queue" && args[commandIndex + 1] === "run"
+      ? queueRunMode(args, commandIndex)
+      : undefined
+  return Object.freeze({
+    name: invocation.name,
+    args,
+    posture: invocationPosture(args, commandIndex),
+    ...(mode === undefined ? {} : { queueRunMode: mode }),
+    queueRunnerCheck: queueRunnerCheck(args, commandIndex),
+  })
+}
+
+function namedAlternatives(names: readonly string[]): string {
+  if (names.length <= 1) return names[0] ?? "a declared repository"
+  return `${names.slice(0, -1).join(", ")} or ${names.at(-1)}`
+}
+
+/** Optional composition-host adapter for named repositories. Standalone Yrd
+ * deliberately never calls this: aliases are injected by the installed host. */
+export function normalizeYrdRepositoryAliasInvocation(
+  input: readonly string[],
+  declarations: readonly YrdRepositoryAlias[],
+): YrdRepositoryAliasInvocation {
+  const args = [...input]
+  if (args.some((argument) => argument === "--repo" || argument.startsWith("--repo="))) {
+    return { kind: "bypass", args }
+  }
+  const queueIndex = rootCommandIndex(args)
+  if (queueIndex === undefined || args[queueIndex] !== "queue") return { kind: "bypass", args }
+  const byName = new Map(declarations.map((declaration) => [declaration.repository.name, declaration] as const))
+  const requiredRepository = (name: string | undefined): YrdRepositoryAlias => {
+    const declaration = name === undefined ? undefined : byName.get(name)
+    if (declaration !== undefined) return declaration
+    const expected = namedAlternatives([...byName.keys()])
+    usage(`unknown Yrd repository '${name ?? ""}'; expected ${expected}`)
+  }
+  const prefix = args.slice(0, queueIndex)
+  const operand = args[queueIndex + 1]
+  if (operand === undefined || operand.startsWith("-") || operand === "list" || operand === "_list") {
+    const tail = operand === "list" || operand === "_list" ? args.slice(queueIndex + 2) : args.slice(queueIndex + 1)
+    return { kind: "all-repositories-read", args: [...prefix, "queue", "list", ...tail] }
+  }
+  if (operand === "run" || operand === "pause" || operand === "resume") {
+    const declaration = requiredRepository(args[queueIndex + 2])
+    const tail = args.slice(queueIndex + 3)
+    const base = operand === "run" ? [] : [declaration.queue.base]
+    return {
+      kind: "repository-write",
+      ...declaration,
+      args: [...prefix, "--repo", declaration.repository.path, "queue", operand, ...base, ...tail],
+    }
+  }
+  if (QUEUE_SUBCOMMANDS.has(operand)) return { kind: "bypass", args }
+  const declaration = requiredRepository(operand)
+  return {
+    kind: "repository-read",
+    ...declaration,
+    args: [
+      ...prefix,
+      "--repo",
+      declaration.repository.path,
+      "queue",
+      "list",
+      "--base",
+      declaration.queue.base,
+      ...args.slice(queueIndex + 2),
+    ],
+  }
 }
 
 /** Resolve the command operand with Commander's canonical global-option rules. */
