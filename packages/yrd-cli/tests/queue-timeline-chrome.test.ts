@@ -11,8 +11,9 @@
  * vocabulary, and the non-default-only FILTER row.
  */
 
-import { createElement } from "react"
-import { createRenderer, waitFor } from "silvery/test"
+import { act, createElement } from "react"
+import { run } from "silvery/runtime"
+import { createRenderer, createTermless, waitFor } from "silvery/test"
 import { describe, expect, it } from "vitest"
 import { queueTimelineStories } from "../dev/queue-timeline-fixtures.ts"
 import {
@@ -71,22 +72,78 @@ function queuedEligibility(pr: string, position: number) {
 }
 
 describe("queue timeline chrome 21106", () => {
-  it("names the repository root in the unprojected queue header", async () => {
-    const source = queueTimelineStories["production-overview"].snapshot
-    const snapshot = {
-      repositoryRoot: "/hh",
-      results: source.results,
-      state: source.state,
-      now: source.now,
-    }
-    const app = createRenderer({ cols: 160, rows: 40 })(createElement(QueueWatchFrame, { snapshot }))
-    try {
-      await app.waitForLayoutStable()
-      expect(rowAt(app.text, rowIndexOf(app.text, "QUEUE main"))).toContain("ROOT /hh")
-    } finally {
-      app.unmount()
-    }
-  })
+  it.each([
+    {
+      path: "unprojected",
+      rows: 40,
+      downstream: [] as const,
+      element: (root: string) => {
+        const source = queueTimelineStories["production-overview"].snapshot
+        return createElement(QueueWatchFrame, {
+          snapshot: { repositoryRoot: root, results: source.results, state: source.state, now: source.now },
+        })
+      },
+    },
+    {
+      path: "projected",
+      rows: 40,
+      downstream: [] as const,
+      element: (root: string) =>
+        createElement(QueueTimelineView, {
+          repositoryRoot: root,
+          projection: queueTimelineStories["contract-overview"].snapshot.projection,
+          columns: 12,
+        }),
+    },
+    {
+      path: "projected-live",
+      rows: 24,
+      downstream: ["RUNNER", "TIME", "│ $"] as const,
+      element: (root: string) => {
+        const source = queueTimelineStories.paused.snapshot
+        return createElement(QueueTimelineView, {
+          repositoryRoot: root,
+          projection: source.projection,
+          results: source.results,
+          state: source.state,
+          columns: 12,
+          paneChrome: true,
+          fillHeight: true,
+          nav: true,
+          availableRows: 24,
+        })
+      },
+    },
+  ])(
+    "keeps the exact resolved repository path visible in a 12-column $path header",
+    async ({ path, rows, downstream, element }) => {
+      const headers: string[] = []
+      for (const root of ["/hh", "/hh/pm"] as const) {
+        using term = createTermless({ cols: 12, rows })
+        const handle = await act(async () => {
+          const mounted = await run(element(root), term, { mouse: false, selection: false })
+          await mounted.waitForLayoutStable()
+          return mounted
+        })
+        try {
+          const frame = term.screen.getText()
+          const renderedRows = frame.split("\n")
+          expect.soft(renderedRows[0], `${path} ${root} queue row`).toContain("QUEUE")
+          expect.soft(renderedRows[1]?.trim(), `${path} ${root} root row`).toBe(`ROOT ${root}`)
+          expect.soft(renderedRows.slice(2).join("\n"), `${path} ${root} unique root row`).not.toContain(`ROOT ${root}`)
+          for (const witness of downstream) {
+            expect.soft(frame, `${path} ${root} ${witness} witness`).toContain(witness)
+          }
+          headers.push(renderedRows.slice(0, 2).join("\n"))
+        } finally {
+          await act(async () => {
+            handle.unmount()
+          })
+        }
+      }
+      expect(headers[0]).not.toBe(headers[1])
+    },
+  )
 
   it("header and row cells share one column geometry with nav on at 120 cols", async () => {
     const projection = queueTimelineStories["contract-overview"].snapshot.projection
