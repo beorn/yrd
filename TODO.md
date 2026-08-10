@@ -25,6 +25,15 @@ public repository.
       intake without duplicating a PR revision.
 - [x] Keep bay commands under the canonical `yrd bay` subtree.
 
+### Git-layer compatibility
+
+- [ ] Mint a Change-Id-format trailer at change creation and stamp it into
+      every landed commit, so the journal is re-derivable by log scan.
+- [ ] Accept submission as a plain push to a `refs/for/`-shaped namespace, so
+      a pushed-but-unsubmitted change is unrepresentable.
+- [ ] Keep queue metadata in git refs with a written rebuild-from-repo
+      procedure; the repo is truth and every index is disposable.
+
 ### Queue
 
 - [x] Derive step lifecycle and evidence from the shared Job authority; Queue
