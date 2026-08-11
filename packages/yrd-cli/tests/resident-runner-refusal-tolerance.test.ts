@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest"
 import { PrCheckabilityConflict } from "@yrd/bay"
 import { QueueRunningConflict } from "@yrd/queue"
 import { followQueueRuns } from "../src/run.ts"
-import { createResidentHarness, createResponseResidentHarness as harness } from "./support/resident-harness.ts"
+import { createResponseResidentHarness as harness } from "./support/resident-harness.ts"
 
 describe("resident runner — a busy queue never kills the watch loop (Defect 1)", () => {
   it("defers with a loud loggily warn and processes the NEXT cycle when the queue frees", async () => {
@@ -84,55 +84,6 @@ describe("resident runner — a busy queue never kills the watch loop (Defect 1)
 })
 
 describe("resident runner — a PR withdrawn mid-compose never kills the watch loop (Defect 2)", () => {
-  it("parks a judgment-required refusal produced by a one-shot before returning", async () => {
-    const head = "1".repeat(40)
-    const pr = {
-      id: "PR1",
-      state: "open",
-      merged: false,
-      branch: "task/judgment-required",
-      base: "main",
-      revs: [{ n: 1, head, at: "2026-08-10T00:00:00.000Z", submittedAt: "2026-08-10T00:00:00.000Z" }],
-      reviews: [],
-      checkRequests: [{ revision: 1, headSha: head, at: "2026-08-10T00:00:00.000Z" }],
-    }
-    const refusal = {
-      pr: "PR1",
-      revision: 1,
-      headSha: head,
-      code: "authored-gitlink",
-      kind: "refusal",
-      reason:
-        "yrd: PR 'PR1' changes generated-only gitlinks [km]; use " +
-        "'yrd intent submit --component km --target 1111111111111111111111111111111111111111 --issue one'",
-      count: 1,
-      firstAt: "2026-08-10T00:00:00.000Z",
-      lastAt: "2026-08-10T00:00:00.000Z",
-      settlement: undefined as undefined | Readonly<{ disposition: "needs-person"; reason: string; settledAt: string }>,
-    }
-    const h = createResidentHarness({
-      state: () => ({ bays: { prs: { PR1: pr } }, queues: { admissionRefusals: { PR1: refusal } } }),
-      bays: { pr: () => pr },
-      queue: {
-        settleAdmissionRefusal: async ({ reason }: { reason: string }) => {
-          refusal.settlement = {
-            disposition: "needs-person",
-            reason,
-            settledAt: "2026-08-10T00:00:01.000Z",
-          }
-        },
-      },
-      run: async () => [],
-    })
-
-    await expect(followQueueRuns(h.app, ["PR1"], { interval: 1 }, h.io, h.gate)).resolves.toBe(0)
-
-    expect(refusal.settlement).toMatchObject({ disposition: "needs-person" })
-    expect(h.warnings).toContainEqual(
-      expect.objectContaining({ props: expect.objectContaining({ action: "queue-refusal-escalated", pr: "PR1" }) }),
-    )
-  })
-
   it("skips with a loud loggily warn and processes the NEXT cycle with the remaining PRs", async () => {
     const h = harness([
       // Cycle 1: a peer withdrew a candidate PR between this runner's compose

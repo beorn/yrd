@@ -3022,7 +3022,7 @@ describe("runYrd", () => {
     expect(recut, "maintenance must not retry a settled permanent refusal").toHaveBeenCalledTimes(1)
     expect(app.state().queues.admissionRefusals.PR1?.settlement).toMatchObject({
       disposition: "needs-person",
-      reason: expect.stringContaining("can conflict"),
+      reason: expect.stringContaining("neither submodule commit is an ancestor"),
     })
     expect(queueRun, "a refused operation is not progress and must not reopen compose").toHaveBeenCalledTimes(1)
   })
@@ -3376,13 +3376,11 @@ describe("runYrd", () => {
       reason: recutGitlinkConflictReason("PR1", nextBase),
       count: 1,
     })
-    await expect(runInternals.applyRefusalRemedies(app, services, io, new Set())).resolves.toEqual([
-      expect.objectContaining({ status: "escalated", pr: "PR1", code: "recut-gitlink-conflict" }),
-    ])
+    await expect(runInternals.applyRefusalRemedies(app, services, io, new Set())).resolves.toEqual([])
     expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
       settlement: {
         disposition: "needs-person",
-        reason: expect.stringContaining("can conflict"),
+        reason: expect.stringContaining("neither submodule commit is an ancestor"),
       },
     })
     expect(app.queue.eligibility("PR1").reason?.code).toBe("admission-refused")
@@ -11040,6 +11038,31 @@ describe("queue run — follow-by-default mode selection (#62)", () => {
     // One-shot: never entered the follow loop, so it never slept.
     expect(tracked.sleeps).toEqual([])
     expect(run.stdout()).toContain("STATE")
+  })
+
+  it("--once parks a structurally permanent refusal born during its only pass", async () => {
+    const app = await createApp({
+      prepareCandidate: async () => {
+        throw createFailure({
+          kind: "refusal",
+          code: "recut-gitlink-conflict",
+          message: "two fixed gitlink commits are non-ancestral",
+        })
+      },
+    })
+    await openAndSubmit(app)
+    const run = outputIO()
+
+    expect(await runYrd(app, yrd("queue", "run", "--once"), run.io), run.stderr()).toBe(0)
+    expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
+      code: "recut-gitlink-conflict",
+      count: 1,
+      settlement: {
+        disposition: "needs-person",
+        reason: "two fixed gitlink commits are non-ancestral",
+      },
+    })
+    expect(app.queue.eligibility("PR1").reason?.code).toBe("admission-refused")
   })
 
   it("a PR selector is a single pass, not a follow loop", async () => {
