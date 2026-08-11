@@ -8609,6 +8609,44 @@ async function explainLanding(
     ...(revision.changeId === undefined ? {} : { changeId: revision.changeId }),
   })
   if (proof.status === "not-proven") {
+    const admissionRefusal = app.state().queues.admissionRefusals[pr.id]
+    if (
+      admissionRefusal !== undefined &&
+      admissionRefusal.revision === revision.n &&
+      admissionRefusal.headSha === revision.head
+    ) {
+      const failure = {
+        source: "queue-admission",
+        code: admissionRefusal.code,
+        reason: admissionRefusal.reason,
+        count: admissionRefusal.count,
+        ...(admissionRefusal.settlement === undefined ? {} : { settlement: admissionRefusal.settlement }),
+      } as const
+      await printResult(
+        io,
+        jsonEnabled(options),
+        { command: "why", pr: pr.id, verdict: "failed", repaired: false, failure },
+        `FAILED — ${pr.id}: ${failure.code} — ${failure.reason}`,
+      )
+      return 1
+    }
+    if (revision.admission?.status === "refused") {
+      const failure = {
+        source: "revision-admission",
+        kind: revision.admission.kind,
+        step: revision.admission.step,
+        baseSha: revision.admission.baseSha,
+        receipt: revision.admission.receipt,
+        at: revision.admission.at,
+      } as const
+      await printResult(
+        io,
+        jsonEnabled(options),
+        { command: "why", pr: pr.id, verdict: "failed", repaired: false, failure },
+        `FAILED — ${pr.id}: ${failure.receipt.code} at ${failure.step} — ${failure.receipt.message}`,
+      )
+      return 1
+    }
     const indexed = prDeliveryState(pr) === "integrated"
     await printResult(
       io,
