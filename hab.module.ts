@@ -1,8 +1,8 @@
 // Mechanical queue runners — never ambient @chief (22728). State-write
 // authority requires a verified managed-launch proof; each service is a
 // non-chief actor with its own tribe name for attribution only. Supervision
-// and WATCH consume this one repository registry so another queue cannot be
-// declared on only one side of the liveness contract.
+// and installed multi-repository queue reads consume this registry so another
+// queue cannot be declared on only one side of the liveness contract.
 
 export type YrdQueueRunnerDeclaration = Readonly<{
   serviceName: string
