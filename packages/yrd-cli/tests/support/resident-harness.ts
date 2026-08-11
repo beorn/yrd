@@ -60,6 +60,7 @@ export function createResidentHarness(options: ResidentHarnessOptions) {
     },
     ...(options.bays === undefined ? {} : { bays: options.bays }),
     queue: {
+      expirePauses: async () => [],
       run: async () => {
         runCalls += 1
         return options.run({ signal, call: runCalls })

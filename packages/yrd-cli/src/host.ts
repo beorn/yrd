@@ -111,6 +111,7 @@ import { diagnostic } from "./output.tsx"
 import { createPrPublicationService } from "./pr-publication.ts"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
 import {
+  isYrdRuntimeReloadRequest,
   residentRunnerLeaseHeld,
   runYrdHelp,
   runYrdProcessRuntime,
@@ -131,6 +132,7 @@ import type {
 import { createQueueReadModel } from "./queue-read-model.ts"
 import { queueReadBases } from "./queue-read-boundary.ts"
 import { LandingAuthorityBoundary } from "./landing-authority-boundary.ts"
+import { execYrdProcessInPlace } from "./runtime-reload.ts"
 
 type QueueTargetResolver = NonNullable<YrdCliIO["resolveQueueTarget"]>
 
@@ -2124,6 +2126,21 @@ async function runYrdProcessHost(
     processExit = exitCode
     return exitCode
   } catch (error) {
+    if (isYrdRuntimeReloadRequest(error)) {
+      return await execYrdProcessInPlace({
+        closeRuntime: closeHost,
+        removeShutdownSignals,
+        closeLog: () => log?.end(),
+        execPath: globalThis.process.execPath,
+        argv,
+        env,
+        execve: (execPath, execArgv, execEnv) => {
+          const execve = globalThis.process.execve
+          if (execve === undefined) throw new Error("yrd: this Bun runtime cannot reload a resident with execve")
+          return execve(execPath, [...execArgv], execEnv)
+        },
+      })
+    }
     await diagnostic(io, error, { json: yrdJsonOutputRequested(argv) })
     processExit = classifyFailure(error).exitCode
     return processExit

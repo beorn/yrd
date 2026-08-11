@@ -23,6 +23,7 @@ import {
 } from "../src/installed-baseline.ts"
 import { queueStepRevision } from "../src/host-revision.ts"
 import { createResidentHarness } from "./support/resident-harness.ts"
+import { execYrdProcessInPlace } from "../src/runtime-reload.ts"
 
 const roots: string[] = []
 
@@ -252,6 +253,37 @@ describe("installed baseline persistence", () => {
 })
 
 describe("run gate", () => {
+  it("closes the resident runtime before replacing the exact process image", async () => {
+    const calls: string[] = []
+    const replacement = new Error("execve replaced the process")
+    const execPath = "/usr/bin/bun"
+    const argv = [execPath, "/immutable/yrd.ts", "queue", "run"]
+    const env = { PATH: "/usr/bin", YRD_REPO: "/repo" }
+
+    await expect(
+      execYrdProcessInPlace({
+        closeRuntime: async () => {
+          calls.push("close-runtime")
+        },
+        removeShutdownSignals: () => {
+          calls.push("remove-signals")
+        },
+        closeLog: () => {
+          calls.push("close-log")
+        },
+        execPath,
+        argv,
+        env,
+        execve: (execPath, execArgv, execEnv) => {
+          calls.push("execve")
+          expect({ execPath, execArgv, execEnv }).toEqual({ execPath, execArgv: argv, execEnv: env })
+          throw replacement
+        },
+      }),
+    ).rejects.toBe(replacement)
+    expect(calls).toEqual(["close-runtime", "remove-signals", "close-log", "execve"])
+  })
+
   it("follow-mode re-provisions on config-drift via provision() and continues (22306)", async () => {
     // The resident must not exit on config-drift — re-install through the same
     // provision path as `queue init` (one descriptor recipe; 22334) and continue.
@@ -300,8 +332,9 @@ describe("run gate", () => {
     })
   })
 
-  it("runtime-drift is never auto-healed even in follow mode", async () => {
+  it("runtime-drift requests an in-place process reload in follow mode", async () => {
     const lifecycle: string[] = []
+    const reloadRequested = new Error("reload requested")
     await expect(
       requireFreshInstalledBaseline(
         {
@@ -315,12 +348,18 @@ describe("run gate", () => {
             },
           },
         },
-        { reloadInPlace: { base: "main" } },
+        {
+          reloadInPlace: {
+            base: "main",
+            request: () => {
+              lifecycle.push("reload")
+              throw reloadRequested
+            },
+          },
+        },
       ),
-    ).rejects.toMatchObject({
-      failure: { kind: "refusal", code: "runtime-drift" },
-    })
-    expect(lifecycle).toEqual([])
+    ).rejects.toBe(reloadRequested)
+    expect(lifecycle).toEqual(["reload"])
   })
 
   it("fails loud when queue administration is wired without an audit capability", async () => {
