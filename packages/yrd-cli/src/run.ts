@@ -3141,7 +3141,7 @@ function projectPublication(job: Job | undefined): PublicationProjection | undef
       job: job.id,
       status: "publication-required",
       continuation: input.continuation,
-      detail: "waiting for yrd queue run --once or the resident runner",
+      detail: "waiting for the one-shot or resident queue runner",
     }
   }
   if (job.status === "in_progress" || job.status === "waiting") {

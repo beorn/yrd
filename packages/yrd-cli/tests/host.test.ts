@@ -3017,7 +3017,7 @@ checks: [{check: {run: "true"}}]
       publication: {
         status: "publication-required",
         continuation: "queue",
-        detail: "waiting for yrd queue run --once or the resident runner",
+        detail: "waiting for the one-shot or resident queue runner",
       },
     })
     const publicationJob = firstPublication.publication.job
@@ -3076,7 +3076,7 @@ checks: [{check: {run: "true"}}]
       stderr,
     ).toBe(0)
     expect(stderr).toContain("PR1 publication-required")
-    expect(stderr).toContain("waiting for yrd queue run --once or the resident runner")
+    expect(stderr).toContain("waiting for the one-shot or resident queue runner")
     expect(stderr).toContain("(Job ")
 
     stdout = ""
