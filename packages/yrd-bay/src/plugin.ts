@@ -526,6 +526,33 @@ export const PRIntegratedSchema = z.preprocess(
       return commit === landingSha && receipt.target === commit && /^I[0-9a-f]{40}$/u.test(changeId)
     }, "integration commit, landing SHA, Change-Id, and receipt target must agree"),
 )
+export const PRLandingReceiptReplayMissingFieldSchema = z.enum([
+  "changeId",
+  "run",
+  "candidate",
+  "gates",
+  "refusals",
+  "timestamps",
+  "driver",
+])
+export const PRLandingReceiptReplayedSchema = PRRevisionIdentitySchema.extend({
+  commit: GitShaSchema,
+  baseSha: GitShaSchema,
+  provenance: z.literal("legacy-journal"),
+  coverage: z.enum(["receipt", "tombstone"]),
+  missing: z.array(PRLandingReceiptReplayMissingFieldSchema),
+  receipt: PRLandingReceiptPointerSchema,
+})
+  .strict()
+  .superRefine(({ commit, coverage, receipt }, context) => {
+    if (coverage === "receipt" && receipt.target !== commit) {
+      context.addIssue({
+        code: "custom",
+        path: ["receipt", "target"],
+        message: "a replayed receipt must target its historical landing commit",
+      })
+    }
+  })
 const PRAlreadyLandedSettlementSchema = z
   .object({
     kind: z.literal("refresh-superseded"),
@@ -1362,6 +1389,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/rejected": journalEvent(1, PRRejectedFactSchema),
         "pr/terminal-associated": journalEvent(1, PRTerminalAssociationSchema),
         "pr/integrated": journalEvent(2, PRIntegratedSchema),
+        "pr/landing-receipt-replayed": journalEvent(1, PRLandingReceiptReplayedSchema),
         "pr/already-landed": journalEvent(1, PRAlreadyLandedSchema),
         "pr/canceled": journalEvent(1, PRCanceledSchema),
         "pr/regression-recorded": journalEvent(1, PRRegressionSchema),
@@ -1382,6 +1410,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/needs-author": PRNeedsAuthorFactSchema,
         "pr/rejected": PRReplayRejectedSchema,
         "pr/integrated": z.union([PRIntegratedSchema, PRIntegratedV1Schema, LegacyPRIntegratedSchema]),
+        "pr/landing-receipt-replayed": PRLandingReceiptReplayedSchema,
         "pr/already-landed": PRAlreadyLandedSchema,
         "pr/canceled": z.union([PRCanceledSchema, LegacyPRCanceledSchema]),
         "pr/admission-recorded": PRAdmissionRecordedFactSchema,
@@ -3099,6 +3128,40 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         revs: patchRevisionClock(pr, {
           terminal: { kind: "integrated", at: applied.ts, ...(run === undefined ? {} : { run }) },
         }),
+      })
+    }
+    case "pr/landing-receipt-replayed": {
+      const changed = PRLandingReceiptReplayedSchema.parse(data)
+      const pr = current.prs[changed.pr]
+      if (pr === undefined) throw new Error(`yrd: receipt replay names missing PR '${changed.pr}'`)
+      assertTerminalApplies(pr, changed, applied.name)
+      if (
+        prDeliveryState(pr) !== "integrated" ||
+        pr.integration?.commit !== changed.commit ||
+        pr.integration.baseSha !== changed.baseSha
+      ) {
+        throw new Error(`yrd: receipt replay disagrees with legacy integration '${changed.pr}'`)
+      }
+      if (pr.integration.receipt !== undefined) {
+        const exact =
+          pr.integration.receipt.ref === changed.receipt.ref &&
+          pr.integration.receipt.target === changed.receipt.target &&
+          pr.integration.receipt.note === changed.receipt.note &&
+          pr.integration.receipt.checksum === changed.receipt.checksum &&
+          pr.integration.receiptProvenance === changed.provenance &&
+          pr.integration.receiptCoverage === changed.coverage &&
+          JSON.stringify(pr.integration.receiptMissing ?? []) === JSON.stringify(changed.missing)
+        if (!exact) throw new Error(`yrd: receipt replay conflicts with existing receipt for '${changed.pr}'`)
+        return state
+      }
+      return patchPR(pr, {
+        integration: {
+          ...pr.integration,
+          receipt: changed.receipt,
+          receiptProvenance: changed.provenance,
+          receiptCoverage: changed.coverage,
+          receiptMissing: changed.missing,
+        },
       })
     }
     case "pr/already-landed": {

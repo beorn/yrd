@@ -55,10 +55,11 @@ import {
   LANDING_RECEIPT_REF,
   LandingReceiptPointerSchema,
   createLandingReceipt,
+  createLegacyLandingReceipt,
   parseLandingReceipt,
   type CandidateChangeReceipt,
   type LandingReceiptBody,
-  type LandingReceiptEnvelope,
+  type RepositoryLandingReceiptEnvelope,
   type LandingReceiptPointer,
 } from "./landing-receipt.ts"
 
@@ -6794,7 +6795,8 @@ async function readLandingReceipt(
   repo: string,
   target: string,
 ): Promise<
-  Readonly<{ envelope: LandingReceiptEnvelope; pointer: LandingReceiptPointer; canonical: string }> | undefined
+  | Readonly<{ envelope: RepositoryLandingReceiptEnvelope; pointer: LandingReceiptPointer; canonical: string }>
+  | undefined
 > {
   const listed = await git.run(repo, ["notes", `--ref=${LANDING_RECEIPT_NOTES_NAME}`, "list", target], true)
   if (listed.code !== 0 || listed.stdout === "") return undefined
@@ -6812,7 +6814,7 @@ async function readLandingReceipt(
       `yrd: receipt note object '${note}' for '${target}' is unreadable: ${object.stderr || object.stdout}`,
     )
   }
-  let envelope: LandingReceiptEnvelope
+  let envelope: RepositoryLandingReceiptEnvelope
   try {
     envelope = parseLandingReceipt(object.stdout)
   } catch (cause) {
@@ -6823,7 +6825,10 @@ async function readLandingReceipt(
   }
   return {
     envelope,
-    canonical: createLandingReceipt(envelope.receipt).canonical,
+    canonical:
+      envelope.schema === "yrd/landing-receipt/v1"
+        ? createLandingReceipt(envelope.receipt).canonical
+        : createLegacyLandingReceipt(envelope.receipt).canonical,
     pointer: LandingReceiptPointerSchema.parse({
       ref: LANDING_RECEIPT_REF,
       target,
@@ -6837,8 +6842,113 @@ export type RepositoryLandingIdentity = Readonly<{
   pr: string
   revision: number
   headSha: string
-  changeId: string
+  changeId?: string
 }>
+
+export type LegacyJournalLanding = Readonly<{
+  pr: string
+  revision: number
+  headSha: string
+  commit: string
+  baseSha: string
+}>
+
+export type LegacyLandingReceiptMissingField =
+  | "changeId"
+  | "run"
+  | "candidate"
+  | "gates"
+  | "refusals"
+  | "timestamps"
+  | "driver"
+
+export type LegacyLandingReceiptReplay = Readonly<{
+  pr: string
+  revision: number
+  headSha: string
+  commit: string
+  baseSha: string
+  provenance: "legacy-journal"
+  coverage: "receipt" | "tombstone"
+  missing: readonly LegacyLandingReceiptMissingField[]
+  receipt: LandingReceiptPointer
+}>
+
+const LEGACY_LANDING_RECEIPT_MISSING = [
+  "changeId",
+  "run",
+  "candidate",
+  "gates",
+  "refusals",
+  "timestamps",
+  "driver",
+] as const
+
+/** One-shot cutover from typed historical `pr/integrated` rows to the managed
+ * repository receipt namespace. The Queue writer emits thin proof when the
+ * historical landing is still on the configured base; otherwise it emits a
+ * content-addressed tombstone that preserves the exact unavailable claim. */
+export async function replayLegacyLandingReceipts(
+  options: Readonly<{
+    inject: Readonly<{ process: Pick<Process, "run"> }>
+    repo: string
+    baseSha: string
+    landings: readonly LegacyJournalLanding[]
+  }>,
+): Promise<readonly LegacyLandingReceiptReplay[]> {
+  const git = createGit(options.inject.process)
+  const groups = Map.groupBy(options.landings, ({ commit, baseSha }) => `${commit}:${baseSha}`)
+  const replayed: LegacyLandingReceiptReplay[] = []
+  let index = 0
+  for (const [, group] of [...groups].toSorted(([left], [right]) => left.localeCompare(right))) {
+    const first = group[0]
+    if (first === undefined) continue
+    const materialized = await git.run(options.repo, ["rev-parse", "--verify", `${first.commit}^{commit}`], true)
+    const reachable =
+      materialized.code === 0
+        ? await git.run(options.repo, ["merge-base", "--is-ancestor", first.commit, options.baseSha], true)
+        : undefined
+    const coverage = materialized.code === 0 && reachable?.code === 0 ? "receipt" : "tombstone"
+    const tombstoneReason =
+      coverage === "receipt"
+        ? undefined
+        : materialized.code === 0
+          ? `historical landing '${first.commit}' is not reachable from configured base '${options.baseSha}'`
+          : `historical landing '${first.commit}' is not materialized in this repository`
+    const receipt = createLegacyLandingReceipt({
+      provenance: "legacy-journal",
+      coverage,
+      landing: { commit: first.commit, baseAfter: first.baseSha },
+      changes: group
+        .map(({ pr, revision, headSha }) => ({ pr, revision, submittedHead: headSha }))
+        .toSorted((left, right) => left.pr.localeCompare(right.pr) || left.revision - right.revision),
+      missing: [...LEGACY_LANDING_RECEIPT_MISSING],
+      ...(tombstoneReason === undefined ? {} : { tombstoneReason }),
+    })
+    const target =
+      coverage === "receipt"
+        ? first.commit
+        : (await git.input(options.repo, ["hash-object", "-w", "--stdin"], receipt.canonical)).stdout
+    const pointer = await storeLandingReceipt(
+      git,
+      options.repo,
+      { run: "legacy-replay", job: `landing-${index}`, attempt: 1 },
+      target,
+      receipt,
+    )
+    index += 1
+    for (const landing of group) {
+      replayed.push({
+        ...landing,
+        provenance: "legacy-journal",
+        coverage,
+        missing: LEGACY_LANDING_RECEIPT_MISSING,
+        receipt: pointer,
+      })
+    }
+  }
+  return replayed
+}
 
 export type RepositoryLandingSearchResult =
   | Readonly<{
@@ -6852,6 +6962,21 @@ export type RepositoryLandingSearchResult =
         landingSha: string
         baseSha: string
         changeId: string
+        receipt: LandingReceiptPointer
+      }>
+    }>
+  | Readonly<{
+      status: "legacy-proven"
+      fact: Readonly<{
+        pr: string
+        revision: number
+        headSha: string
+        commit: string
+        landingSha: string
+        baseSha: string
+        provenance: "legacy-journal"
+        coverage: "receipt" | "tombstone"
+        missing: LegacyLandingReceiptReplay["missing"]
         receipt: LandingReceiptPointer
       }>
     }>
@@ -6879,7 +7004,7 @@ export async function findRepositoryLandingReceipt(
       `yrd: repository receipt ref '${LANDING_RECEIPT_REF}' is unreadable: ${listed.stderr || listed.stdout}`,
     )
   }
-  const matches: Array<Extract<RepositoryLandingSearchResult, { status: "proven" }>> = []
+  const matches: Array<Extract<RepositoryLandingSearchResult, { status: "proven" | "legacy-proven" }>> = []
   let offBase = false
   for (const line of listed.stdout === "" ? [] : listed.stdout.split("\n")) {
     const [listedNote, target, extra] = line.split(/\s+/u)
@@ -6892,6 +7017,48 @@ export async function findRepositoryLandingReceipt(
         "repository-corrupt",
         `yrd: repository receipt listing for '${target}' disagrees with its note object`,
       )
+    }
+    if (stored.envelope.schema === "yrd/landing-receipt-legacy/v1") {
+      const receipt = stored.envelope.receipt
+      const change = receipt.changes.find(
+        (candidate) =>
+          candidate.pr === options.identity.pr &&
+          candidate.revision === options.identity.revision &&
+          candidate.submittedHead === options.identity.headSha,
+      )
+      if (change === undefined) continue
+      if (receipt.coverage === "receipt") {
+        if (receipt.landing.commit !== target || receipt.landing.baseAfter !== target) {
+          return repositoryReceiptFailure(
+            "repository-corrupt",
+            `yrd: legacy receipt '${listedNote}' does not prove its landing target '${target}'`,
+          )
+        }
+        const onBase = await git.run(options.repo, ["merge-base", "--is-ancestor", target, options.baseSha], true)
+        if (onBase.code !== 0) {
+          offBase = true
+          continue
+        }
+      } else if (stored.pointer.target !== stored.pointer.note) {
+        return repositoryReceiptFailure(
+          "repository-corrupt",
+          `yrd: legacy tombstone '${listedNote}' is not content-addressed by its note target`,
+        )
+      }
+      matches.push({
+        status: "legacy-proven",
+        fact: {
+          ...options.identity,
+          commit: receipt.landing.commit,
+          landingSha: receipt.landing.commit,
+          baseSha: receipt.landing.baseAfter,
+          provenance: receipt.provenance,
+          coverage: receipt.coverage,
+          missing: receipt.missing,
+          receipt: stored.pointer,
+        },
+      })
+      continue
     }
     const receipt = stored.envelope.receipt
     if (
@@ -6943,10 +7110,14 @@ export async function findRepositoryLandingReceipt(
       offBase = true
       continue
     }
+    if (options.identity.changeId === undefined) continue
     matches.push({
       status: "proven",
       fact: {
-        ...options.identity,
+        pr: options.identity.pr,
+        revision: options.identity.revision,
+        headSha: options.identity.headSha,
+        changeId: options.identity.changeId,
         run: receipt.run.id,
         commit: target,
         landingSha: target,
@@ -6969,7 +7140,7 @@ type LandingReceiptRemote = Readonly<{ remote: "origin"; tip?: string }>
 async function synchronizeLandingReceiptRef(
   git: Git,
   repo: string,
-  input: StepExecution,
+  input: Readonly<{ run: string }>,
 ): Promise<LandingReceiptRemote | undefined> {
   const configured = await git.run(repo, ["config", "--get", "remote.origin.url"], true)
   if (configured.code !== 0 || configured.stdout === "") return undefined
@@ -7040,7 +7211,7 @@ async function synchronizeLandingReceiptRef(
 async function publishLandingReceiptRef(
   git: Git,
   repo: string,
-  input: StepExecution,
+  input: Readonly<{ run: string }>,
   remote: LandingReceiptRemote | undefined,
 ): Promise<void> {
   if (remote === undefined) return
@@ -7071,34 +7242,32 @@ async function publishLandingReceiptRef(
   }
 }
 
-async function confirmLandingReceipt(
+async function storeLandingReceipt(
   git: Git,
   repo: string,
-  input: StepExecution,
-  context: JobContext,
-  commit: string,
-  checked: PinnedCandidate,
+  writer: Readonly<{ run: string; job: string; attempt: number }>,
+  target: string,
+  receipt: Readonly<{ canonical: string; envelope: Readonly<{ checksum: string }> }>,
   publicationRepo = repo,
 ): Promise<LandingReceiptPointer> {
-  const remote = await synchronizeLandingReceiptRef(git, publicationRepo, input)
-  const receipt = createLandingReceipt(await landingReceiptBody(git, repo, input, commit, checked))
-  const existing = await readLandingReceipt(git, repo, commit)
+  const remote = await synchronizeLandingReceiptRef(git, publicationRepo, writer)
+  const existing = await readLandingReceipt(git, repo, target)
   if (existing !== undefined) {
     if (existing.canonical !== receipt.canonical) {
       return repositoryReceiptFailure(
         "repository-corrupt",
-        `yrd: landing '${commit}' already has a different receipt note '${existing.pointer.note}'`,
+        `yrd: receipt target '${target}' already has a different note '${existing.pointer.note}'`,
       )
     }
-    await publishLandingReceiptRef(git, publicationRepo, input, remote)
+    await publishLandingReceiptRef(git, publicationRepo, writer, remote)
     return existing.pointer
   }
 
   const blob = (await git.input(repo, ["hash-object", "-w", "--stdin"], receipt.canonical)).stdout
   const oldReceiptTip = await git.optionalCommit(repo, LANDING_RECEIPT_REF)
-  const zero = "0".repeat(commit.length)
-  const safeJob = context.id.replace(/[^a-zA-Z0-9._-]/gu, "-")
-  const stagingName = `yrd/receipt-staging/${input.run}/${safeJob}/attempt-${context.attempt}-${blob}`
+  const zero = "0".repeat(target.length)
+  const safeJob = writer.job.replace(/[^a-zA-Z0-9._-]/gu, "-")
+  const stagingName = `yrd/receipt-staging/${writer.run}/${safeJob}/attempt-${writer.attempt}-${blob}`
   const stagingRef = `refs/notes/${stagingName}`
   const staleStaging = await git.optionalCommit(repo, stagingRef)
   if (staleStaging !== undefined) {
@@ -7131,7 +7300,7 @@ async function confirmLandingReceipt(
       "add",
       "-C",
       blob,
-      commit,
+      target,
     ],
     true,
   )
@@ -7140,29 +7309,49 @@ async function confirmLandingReceipt(
     if (staged !== undefined) await git.run(repo, ["update-ref", "-d", stagingRef, staged], true)
     return repositoryReceiptFailure(
       "repository-incomplete",
-      `yrd: receipt note for '${commit}' could not be staged: ${noted.stderr || noted.stdout}`,
+      `yrd: receipt note for '${target}' could not be staged: ${noted.stderr || noted.stdout}`,
     )
   }
   const stagedTip = await git.commit(repo, stagingRef)
   const published = await git.run(repo, ["update-ref", LANDING_RECEIPT_REF, stagedTip, oldReceiptTip ?? zero], true)
   await git.run(repo, ["update-ref", "-d", stagingRef, stagedTip], true)
   if (published.code !== 0) {
-    const raced = await readLandingReceipt(git, repo, commit)
+    const raced = await readLandingReceipt(git, repo, target)
     if (raced !== undefined && raced.canonical === receipt.canonical) return raced.pointer
     return repositoryReceiptFailure(
       "repository-corrupt",
-      `yrd: receipt ref '${LANDING_RECEIPT_REF}' changed while publishing '${commit}'`,
+      `yrd: receipt ref '${LANDING_RECEIPT_REF}' changed while publishing '${target}'`,
     )
   }
-  const confirmed = await readLandingReceipt(git, repo, commit)
+  const confirmed = await readLandingReceipt(git, repo, target)
   if (confirmed === undefined || confirmed.canonical !== receipt.canonical) {
     return repositoryReceiptFailure(
       "repository-corrupt",
-      `yrd: receipt for '${commit}' was not byte-identical after publication`,
+      `yrd: receipt for '${target}' was not byte-identical after publication`,
     )
   }
-  await publishLandingReceiptRef(git, publicationRepo, input, remote)
+  await publishLandingReceiptRef(git, publicationRepo, writer, remote)
   return confirmed.pointer
+}
+
+async function confirmLandingReceipt(
+  git: Git,
+  repo: string,
+  input: StepExecution,
+  context: JobContext,
+  commit: string,
+  checked: PinnedCandidate,
+  publicationRepo = repo,
+): Promise<LandingReceiptPointer> {
+  const receipt = createLandingReceipt(await landingReceiptBody(git, repo, input, commit, checked))
+  return storeLandingReceipt(
+    git,
+    repo,
+    { run: input.run, job: context.id, attempt: context.attempt },
+    commit,
+    receipt,
+    publicationRepo,
+  )
 }
 
 async function physicalIntegrationProof(

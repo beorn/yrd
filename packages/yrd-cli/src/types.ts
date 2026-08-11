@@ -5,6 +5,8 @@ import type { HasJobs, HasRunner, JobCommands, JobsState } from "@yrd/job"
 import type {
   GitPRRecutter,
   HasQueue,
+  LegacyJournalLanding,
+  LegacyLandingReceiptReplay,
   QueueAuditResult,
   QueueCommands,
   QueuesState,
@@ -86,6 +88,7 @@ export type YrdCliServices = Readonly<{
   recut?: GitPRRecutter
   landingReceipts?: Readonly<{
     find(identity: RepositoryLandingIdentity): Promise<RepositoryLandingSearchResult>
+    replayLegacy(landings: readonly LegacyJournalLanding[]): Promise<readonly LegacyLandingReceiptReplay[]>
   }>
   journal?: YrdCliJournalAdministration
   checks?: YrdCliChecks

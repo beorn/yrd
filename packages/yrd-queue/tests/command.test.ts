@@ -38,6 +38,7 @@ import {
   gitCheckStep,
   gitMergeStep,
   findRepositoryLandingReceipt,
+  replayLegacyLandingReceipts,
   inspectGitQueueTarget,
   synthesizePinIntentCarrier,
   PRSnapshotSchema,
@@ -6356,6 +6357,70 @@ describe("Queue command adapters", () => {
         changeId,
         receipt: integration.receipt,
       },
+    })
+  })
+
+  it("replays legacy journal landings into thin receipts and explicit tombstones exactly once", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const landingSha = await git(repo, ["rev-parse", "main"])
+    const missingLanding = "f".repeat(40)
+    await using process = createProcess()
+    const landings = [
+      { pr: "PR1", revision: 1, headSha: featureSha, commit: landingSha, baseSha: landingSha },
+      { pr: "PR2", revision: 1, headSha: "e".repeat(40), commit: missingLanding, baseSha: missingLanding },
+    ] as const
+
+    const first = await replayLegacyLandingReceipts({
+      inject: { process },
+      repo,
+      baseSha: landingSha,
+      landings,
+    })
+    const second = await replayLegacyLandingReceipts({
+      inject: { process },
+      repo,
+      baseSha: landingSha,
+      landings,
+    })
+
+    expect(second).toEqual(first)
+    expect(first).toMatchObject([
+      {
+        pr: "PR1",
+        provenance: "legacy-journal",
+        coverage: "receipt",
+        receipt: { target: landingSha },
+      },
+      {
+        pr: "PR2",
+        provenance: "legacy-journal",
+        coverage: "tombstone",
+        receipt: { target: expect.stringMatching(/^[0-9a-f]{40}$/u) },
+      },
+    ])
+    expect(first[1]?.receipt.target).toBe(first[1]?.receipt.note)
+    expect((await git(repo, ["notes", "--ref=yrd/receipts", "list"])).split("\n")).toHaveLength(2)
+    await expect(
+      findRepositoryLandingReceipt({
+        inject: { process },
+        repo,
+        baseSha: landingSha,
+        identity: { pr: "PR1", revision: 1, headSha: featureSha },
+      }),
+    ).resolves.toMatchObject({
+      status: "legacy-proven",
+      fact: { pr: "PR1", coverage: "receipt", provenance: "legacy-journal", commit: landingSha },
+    })
+    await expect(
+      findRepositoryLandingReceipt({
+        inject: { process },
+        repo,
+        baseSha: landingSha,
+        identity: { pr: "PR2", revision: 1, headSha: "e".repeat(40) },
+      }),
+    ).resolves.toMatchObject({
+      status: "legacy-proven",
+      fact: { pr: "PR2", coverage: "tombstone", provenance: "legacy-journal", commit: missingLanding },
     })
   })
 

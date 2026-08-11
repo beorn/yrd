@@ -7718,8 +7718,9 @@ export async function followQueueRuns(
       // watching must stop the watch, never let a fresh cycle start expensive
       // Runs on a stale baseline.
       await gate()
+      const replayedLegacyLandings = starting ? await replayLegacyLandingReceiptCutover(app, services) : 0
       if (maintenanceDue) lastMaintenanceAt = cycleNow
-      let runRequired = starting || refreshed
+      let runRequired = starting || refreshed || replayedLegacyLandings > 0
       // D1b — bounded maintenance lease-expiry recovery sweep. ONLY the resident
       // runs it: it holds the exclusive lease, so its unscoped `recover` write is
       // single-writer safe. (A one-shot or a bare programmatic followQueueRuns
@@ -7829,6 +7830,88 @@ export async function followQueueRuns(
     recoveryReporter.flush()
     await heartbeat?.close(cleanShutdown)
   }
+}
+
+/** One-shot receipt cutover owned by the Queue writer. Every historical
+ * integration either receives a thin repository proof or an explicit
+ * tombstone before this function returns. There is no lasting legacy epoch:
+ * any integrated row left without a receipt is corruption. */
+export async function replayLegacyLandingReceiptCutover(app: YrdCliApp, services: YrdCliServices): Promise<number> {
+  const uncovered = Object.values(app.state().bays.prs).filter(
+    (pr) => prDeliveryState(pr) === "integrated" && pr.integration?.receipt === undefined,
+  )
+  if (uncovered.length === 0) return 0
+  const nonLegacy = uncovered.filter((pr) => currentPRRev(pr).changeId !== undefined)
+  if (nonLegacy.length > 0) {
+    raiseFailure(
+      "infrastructure",
+      "landing-receipt-missing",
+      `yrd: current integration row(s) lack repository receipts: ${nonLegacy.map(({ id }) => id).join(", ")}`,
+    )
+  }
+  if (services.landingReceipts?.replayLegacy === undefined) {
+    configuration("legacy landing receipt replay is unavailable in this Queue environment")
+  }
+  const landings = uncovered.map((pr) => {
+    const revision = currentPRRev(pr)
+    const integration = pr.integration
+    if (integration === undefined) {
+      return raiseFailure(
+        "infrastructure",
+        "landing-index-corrupt",
+        `yrd: integrated PR '${pr.id}' has no landing tuple`,
+      )
+    }
+    return {
+      pr: pr.id,
+      revision: revision.n,
+      headSha: revision.head,
+      commit: integration.commit,
+      baseSha: integration.baseSha,
+    }
+  })
+  const replayed = await services.landingReceipts.replayLegacy(landings)
+  const expected = new Map(landings.map((landing) => [`${landing.pr}:${landing.revision}:${landing.headSha}`, landing]))
+  if (replayed.length !== expected.size) {
+    raiseFailure(
+      "infrastructure",
+      "legacy-receipt-incomplete",
+      `yrd: legacy receipt writer covered ${replayed.length} of ${expected.size} journal integration row(s)`,
+    )
+  }
+  for (const receipt of replayed) {
+    const key = `${receipt.pr}:${receipt.revision}:${receipt.headSha}`
+    const landing = expected.get(key)
+    if (landing === undefined || landing.commit !== receipt.commit || landing.baseSha !== receipt.baseSha) {
+      raiseFailure(
+        "infrastructure",
+        "legacy-receipt-mismatch",
+        `yrd: legacy receipt writer returned an unrequested landing tuple '${key}'`,
+      )
+    }
+    expected.delete(key)
+    await app.queue.replayLegacyLandingReceipt({ ...receipt, missing: [...receipt.missing] })
+  }
+  if (expected.size > 0) {
+    raiseFailure(
+      "infrastructure",
+      "legacy-receipt-incomplete",
+      `yrd: legacy receipt writer omitted ${[...expected.keys()].join(", ")}`,
+    )
+  }
+  const stillUncovered = Object.values(app.state().bays.prs).filter(
+    (pr) => prDeliveryState(pr) === "integrated" && pr.integration?.receipt === undefined,
+  )
+  if (stillUncovered.length > 0) {
+    raiseFailure(
+      "infrastructure",
+      "landing-receipt-missing",
+      `yrd: journal integration row(s) remain without repository receipts: ${stillUncovered
+        .map(({ id }) => id)
+        .join(", ")}`,
+    )
+  }
+  return replayed.length
 }
 
 async function sleepUntilDrain(sleep: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
@@ -8418,21 +8501,12 @@ async function explainLanding(
   const pr = app.bays.pr(selector)
   if (pr === undefined) refusal(`yrd: no PR matches '${selector}'`)
   const revision = currentPRRev(pr)
-  if (revision.changeId === undefined) {
-    await printResult(
-      io,
-      jsonEnabled(options),
-      { command: "why", pr: pr.id, verdict: "legacy-unprovable", repaired: false },
-      `LEGACY-UNPROVABLE — ${pr.id} predates stable Change-Id identity`,
-    )
-    return 1
-  }
   if (services.landingReceipts === undefined) configuration("repository landing receipts are not available")
   const proof = await services.landingReceipts.find({
     pr: pr.id,
     revision: revision.n,
     headSha: revision.head,
-    changeId: revision.changeId,
+    ...(revision.changeId === undefined ? {} : { changeId: revision.changeId }),
   })
   if (proof.status === "not-proven") {
     const indexed = prDeliveryState(pr) === "integrated"
@@ -8449,6 +8523,29 @@ async function explainLanding(
       `${indexed ? "INDEX-CORRUPT" : "NOT-PROVEN"} — ${pr.id}: ${proof.reason}`,
     )
     return indexed ? 2 : 1
+  }
+  if (proof.status === "legacy-proven") {
+    const indexed =
+      prDeliveryState(pr) === "integrated" &&
+      pr.integration?.commit === proof.fact.commit &&
+      pr.integration.receipt?.note === proof.fact.receipt.note &&
+      pr.integration.receipt.checksum === proof.fact.receipt.checksum &&
+      pr.integration.receiptProvenance === proof.fact.provenance &&
+      pr.integration.receiptCoverage === proof.fact.coverage
+    let repaired = false
+    if (!indexed && options.repair === true) {
+      await app.queue.replayLegacyLandingReceipt({ ...proof.fact, missing: [...proof.fact.missing] })
+      repaired = true
+    }
+    const verdict =
+      proof.fact.coverage === "tombstone" ? "legacy-tombstone" : indexed || repaired ? "landed" : "index-gap"
+    await printResult(
+      io,
+      jsonEnabled(options),
+      { command: "why", pr: pr.id, verdict, repaired, receipt: proof.fact.receipt, fact: proof.fact },
+      `${verdict.toUpperCase()} — ${pr.id} at ${proof.fact.commit} (${proof.fact.provenance})`,
+    )
+    return verdict === "landed" ? 0 : 1
   }
   const indexed =
     prDeliveryState(pr) === "integrated" &&
@@ -8937,6 +9034,7 @@ function buildProgram(
       }
       await gate()
       const app = installed()
+      await replayLegacyLandingReceiptCutover(app, installedServices())
       const publications = await preparePublicationQueueCycle(app, installedServices(), io)
       if (publications.length > 0) await gate()
       const runs = await runQueues(app, selectors, options, io)

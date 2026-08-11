@@ -11061,7 +11061,7 @@ describe("runYrd", () => {
             },
           }),
         },
-      } as YrdCliServices),
+      } as unknown as YrdCliServices),
       output.stderr(),
     ).toBe(0)
     expect(JSON.parse(output.stdout())).toMatchObject({
@@ -11071,6 +11071,72 @@ describe("runYrd", () => {
       receipt,
     })
     expect(app.bays.pr("PR1")?.integration).toMatchObject({ commit: MERGED_SHA, receipt })
+  })
+
+  it("replays legacy landing receipts once before the queue accepts new work", async () => {
+    const command = { id: "00000000-0000-7000-8000-000000000201", op: "fixture.legacy-landing" }
+    const journal = createMemoryJournal([
+      {
+        command,
+        cause: {
+          id: "00000000-0000-7000-8000-000000000202",
+          commandId: command.id,
+          op: command.op,
+          commandHash: Command.hash(command),
+        },
+        events: [
+          {
+            id: "00000000-0000-7000-8000-000000000203",
+            name: "pr/pushed",
+            ts: "2026-01-01T00:00:00.000Z",
+            data: { pr: "PR1", branch: "legacy/one", base: "main", headSha: HEAD_SHA, revision: 1 },
+          },
+          {
+            id: "00000000-0000-7000-8000-000000000204",
+            name: "pr/submitted",
+            ts: "2026-01-01T00:00:01.000Z",
+            data: { pr: "PR1", revision: 1, headSha: HEAD_SHA },
+          },
+          {
+            id: "00000000-0000-7000-8000-000000000205",
+            name: "pr/integrated",
+            ts: "2026-01-01T00:00:02.000Z",
+            data: { pr: "PR1", revision: 1, headSha: HEAD_SHA, commit: MERGED_SHA, baseSha: MERGED_SHA },
+          },
+        ],
+      },
+    ])
+    await using app = await createApp({ journal })
+    const receipt = {
+      ref: "refs/notes/yrd/receipts",
+      target: MERGED_SHA,
+      note: "c".repeat(40),
+      checksum: "d".repeat(64),
+    } as const
+    const replayLegacy = vi.fn(async () => [
+      {
+        pr: "PR1",
+        revision: 1,
+        headSha: HEAD_SHA,
+        commit: MERGED_SHA,
+        baseSha: MERGED_SHA,
+        provenance: "legacy-journal" as const,
+        coverage: "receipt" as const,
+        missing: ["changeId", "run", "candidate", "gates", "refusals", "timestamps", "driver"] as const,
+        receipt,
+      },
+    ])
+    const services = { landingReceipts: { find: vi.fn(), replayLegacy } } as unknown as YrdCliServices
+
+    await expect(runInternals.replayLegacyLandingReceiptCutover(app, services)).resolves.toBe(1)
+    await expect(runInternals.replayLegacyLandingReceiptCutover(app, services)).resolves.toBe(0)
+
+    expect(replayLegacy).toHaveBeenCalledTimes(1)
+    expect(app.bays.pr("PR1")?.integration).toMatchObject({
+      receipt,
+      receiptProvenance: "legacy-journal",
+      receiptCoverage: "receipt",
+    })
   })
 })
 

@@ -4,6 +4,7 @@ import {
   PRAlreadyLandedSchema,
   PRAdmissionRecordedFactSchema,
   PRIntegratedSchema,
+  PRLandingReceiptReplayedSchema,
   PRIdSchema,
   PRNeedsAuthorFactSchema,
   PRTerminalAssociationSchema,
@@ -601,6 +602,7 @@ export type QueueCommands = Readonly<{
     settleAdmissionRefusal: CommandHandler<SettleAdmissionRefusalArgs, RuntimeState>
     recordIntentEvaluation: CommandHandler<z.infer<typeof PinIntentEvaluationFactSchema>, RuntimeState>
     reconcileLanding: CommandHandler<z.infer<typeof PRIntegratedSchema>, RuntimeState>
+    replayLegacyLandingReceipt: CommandHandler<z.infer<typeof PRLandingReceiptReplayedSchema>, RuntimeState>
   }>
 }>
 
@@ -682,6 +684,8 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   freshnessCandidateBatches(): readonly (readonly string[])[]
   /** Append the missing journal index row for one repository-proven physical landing. */
   reconcileLanding(args: z.infer<typeof PRIntegratedSchema>): Promise<void>
+  /** Cover one historical journal integration with its Queue-written legacy receipt or tombstone. */
+  replayLegacyLandingReceipt(args: z.infer<typeof PRLandingReceiptReplayedSchema>): Promise<void>
   /** Live PR ids in the exact admission order used by a selectorless drain. */
   admissionOrder(): readonly string[]
   checks(selectors?: readonly string[]): readonly PRCheckRecord[]
@@ -858,6 +862,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               settleAdmissionRefusal: (args) => yrd.dispatch(commands.queue.settleAdmissionRefusal, args),
               recordIntentEvaluation: (args) => yrd.dispatch(commands.queue.recordIntentEvaluation, args),
               reconcileLanding: (args) => yrd.dispatch(commands.queue.reconcileLanding, args),
+              replayLegacyLandingReceipt: (args) => yrd.dispatch(commands.queue.replayLegacyLandingReceipt, args),
               recordAdmission: (args) => yrd.bays.recordAdmission(args),
               requestChecks: (pr, baseSha) =>
                 yrd.bays.requestChecks({ pr, ...(baseSha === undefined ? {} : { baseSha }) }),
@@ -903,6 +908,7 @@ type QueueActions = Readonly<{
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
   recordIntentEvaluation(args: z.infer<typeof PinIntentEvaluationFactSchema>): Promise<CommandResult>
   reconcileLanding(args: z.infer<typeof PRIntegratedSchema>): Promise<CommandResult>
+  replayLegacyLandingReceipt(args: z.infer<typeof PRLandingReceiptReplayedSchema>): Promise<CommandResult>
 }>
 
 function terminalIdentity(
@@ -2058,6 +2064,9 @@ function createQueue<Shape extends PRShape>(
     async reconcileLanding(args) {
       await actions.reconcileLanding(args)
     },
+    async replayLegacyLandingReceipt(args) {
+      await actions.replayLegacyLandingReceipt(args)
+    },
     async admit(args, runOptions) {
       return observeYrdLifecycle(
         log,
@@ -2263,6 +2272,7 @@ function createQueue<Shape extends PRShape>(
             ),
           )
           const requested = requestedPRs(snapshot.bays, args, consumed, intentCutoff)
+          requireStableChangeIds(requested)
           const authoritySteps = selectSteps(steps, args.steps ?? snapshot.queues.defaultSteps)
           const authorityGaps = selectorless
             ? requested.flatMap((pr) => {
@@ -3163,6 +3173,7 @@ function createQueueCommands(
           reuse === undefined ? undefined : { run: reuse.run, results: reuse.shape.results },
         )
       }
+      requireStableChangeIds(requestedPRs(state.bays, args))
       const prs = runnablePRs(state, args, steps, new Set(), { explicitStepAuthority })
       if (prs.length === 0) return { events: [] }
       for (const pr of prs) assertCurrentFlow(pr.flow, flows)
@@ -3634,6 +3645,46 @@ function createQueueCommands(
     },
   })
 
+  const replayLegacyLandingReceipt = command({
+    title: "Record one Queue-written receipt for a legacy journal integration",
+    params: PRLandingReceiptReplayedSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: z.infer<typeof PRLandingReceiptReplayedSchema>) {
+      const pr = state.bays.prs[args.pr]
+      if (pr === undefined) raiseFailure("refusal", "pr-not-found", prNotFoundMessage(state.bays, args.pr))
+      const revision = currentPRRev(pr)
+      if (
+        prDeliveryState(pr) !== "integrated" ||
+        revision.n !== args.revision ||
+        revision.head !== args.headSha ||
+        pr.integration?.commit !== args.commit ||
+        pr.integration.baseSha !== args.baseSha
+      ) {
+        raiseFailure(
+          "infrastructure",
+          "legacy-receipt-mismatch",
+          `yrd: legacy receipt for '${args.pr}' disagrees with its terminal journal integration`,
+        )
+      }
+      if (pr.integration.receipt !== undefined) {
+        const exact =
+          pr.integration.receipt.ref === args.receipt.ref &&
+          pr.integration.receipt.target === args.receipt.target &&
+          pr.integration.receipt.note === args.receipt.note &&
+          pr.integration.receipt.checksum === args.receipt.checksum &&
+          pr.integration.receiptProvenance === args.provenance &&
+          pr.integration.receiptCoverage === args.coverage &&
+          JSON.stringify(pr.integration.receiptMissing ?? []) === JSON.stringify(args.missing)
+        if (exact) return { events: [] }
+        raiseFailure(
+          "infrastructure",
+          "legacy-receipt-conflict",
+          `yrd: legacy integration '${args.pr}' already carries a different receipt`,
+        )
+      }
+      return { events: [event("pr/landing-receipt-replayed", args)] }
+    },
+  })
+
   return {
     queue: {
       admissionStep,
@@ -3652,6 +3703,7 @@ function createQueueCommands(
       settleAdmissionRefusal,
       recordIntentEvaluation,
       reconcileLanding,
+      replayLegacyLandingReceipt,
     },
   }
 }
@@ -5106,7 +5158,9 @@ function advanceQueue(
       }
       const revision = currentPRRev(current)
       if (revision.changeId === undefined) {
-        throw new Error(`yrd: PR '${current.id}' requires the landing-receipt migration before integration`)
+        throw new Error(
+          `yrd: PR '${current.id}' predates stable Change-Id identity; run the landing-receipt migration before integration`,
+        )
       }
       if (shape.integration.receipt === undefined) {
         throw new Error(
@@ -6048,6 +6102,18 @@ function requestedPRs(
     }
   }
   return prs
+}
+
+function requireStableChangeIds(prs: readonly DeepReadonly<PR>[]): void {
+  for (const pr of prs) {
+    if (currentPRRev(pr).changeId === undefined) {
+      raiseFailure(
+        "refusal",
+        "legacy-change-id-missing",
+        `yrd: PR '${pr.id}' predates stable Change-Id identity; run the landing-receipt migration before rebuilding it`,
+      )
+    }
+  }
 }
 
 function resumableQueueRoots(
