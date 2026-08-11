@@ -980,21 +980,19 @@ function terminalAssociationPlan(state: DeepReadonly<RuntimeState>, appended = 0
         )
         .map((record) => materializeRun(record, state.jobs))
         .toSorted((left, right) => left.startedAt.localeCompare(right.startedAt) || compareNatural(left.id, right.id))
-      const candidates = runs.map(
-        (run): TerminalAssociationCandidate => ({
-          run: run.id,
-          status: run.status,
-          ...(run.conclusion === undefined ? {} : { conclusion: run.conclusion }),
-          startedAt: run.startedAt,
-          ...(run.finishedAt === undefined ? {} : { finishedAt: run.finishedAt }),
-          eligible:
-            Queues.failed(run) &&
-            run.finishedAt !== undefined &&
-            run.startedAt <= run.finishedAt &&
-            run.finishedAt <= terminal.at,
-          ...(run.error === undefined ? {} : { error: { ...run.error } }),
-        }),
-      )
+      const candidates = runs.map((run): TerminalAssociationCandidate => ({
+        run: run.id,
+        status: run.status,
+        ...(run.conclusion === undefined ? {} : { conclusion: run.conclusion }),
+        startedAt: run.startedAt,
+        ...(run.finishedAt === undefined ? {} : { finishedAt: run.finishedAt }),
+        eligible:
+          Queues.failed(run) &&
+          run.finishedAt !== undefined &&
+          run.startedAt <= run.finishedAt &&
+          run.finishedAt <= terminal.at,
+        ...(run.error === undefined ? {} : { error: { ...run.error } }),
+      }))
       const eligible = candidates.filter((candidate) => candidate.eligible)
       if (eligible.length === 0) {
         const failed = candidates.filter(({ status, conclusion }) => status === "completed" && conclusion === "failure")
@@ -2079,8 +2077,9 @@ function createQueue<Shape extends PRShape>(
               ? admissionQueue(snapshot, steps)
               : requestedSelectors.map((selector) => {
                   const pr = resolvePR(snapshot.bays, selector)
-                  if (pr === undefined)
-                    {raiseFailure("refusal", "pr-not-found", prNotFoundMessage(snapshot.bays, selector))}
+                  if (pr === undefined) {
+                    raiseFailure("refusal", "pr-not-found", prNotFoundMessage(snapshot.bays, selector))
+                  }
                   return pr
                 })
           await refreshCheckIdentities(selected, resolveCycleBase)
@@ -5184,12 +5183,10 @@ function materializeArchivedRun(
 
 function materializeRun(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<JobsState>): Run {
   const jobList = queueJobs(record, jobs)
-  const steps = record.steps.map(
-    (step, index): QueueStep => ({
-      ...step,
-      ...(jobList[index] === undefined ? {} : { job: jobList[index] }),
-    }),
-  )
+  const steps = record.steps.map((step, index): QueueStep => ({
+    ...step,
+    ...(jobList[index] === undefined ? {} : { job: jobList[index] }),
+  }))
   const cursor = steps.findIndex((step) => step.job === undefined || !Job.terminal(step.job))
   const failed = steps.find((step) => step.job !== undefined && jobFailed(step.job))?.job
   const waiting = steps.some((step) => step.job?.status === "waiting")

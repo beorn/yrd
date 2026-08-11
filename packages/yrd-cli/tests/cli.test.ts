@@ -3045,19 +3045,17 @@ describe("runYrd", () => {
     await app.bays.ready({ pr: "PR1" })
     await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
 
-    const processRun = vi.fn(
-      async (request: ProcessRequest): Promise<ProcessResult> => ({
-        exitCode: 0,
-        signal: null,
-        stdout:
-          request.argv.includes("diff-tree") && request.argv.includes(nextHead)
-            ? `:160000 160000 ${"0".repeat(40)} ${unpublishedPin} M\0dep\0`
-            : "",
-        stderr: "",
-        durationMs: 0,
-        timedOut: false,
-      }),
-    )
+    const processRun = vi.fn(async (request: ProcessRequest): Promise<ProcessResult> => ({
+      exitCode: 0,
+      signal: null,
+      stdout:
+        request.argv.includes("diff-tree") && request.argv.includes(nextHead)
+          ? `:160000 160000 ${"0".repeat(40)} ${unpublishedPin} M\0dep\0`
+          : "",
+      stderr: "",
+      durationMs: 0,
+      timedOut: false,
+    }))
     const recut = vi.fn(async () => ({
       headSha: nextHead,
       baseSha: nextBase,
