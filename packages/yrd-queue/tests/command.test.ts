@@ -6268,7 +6268,17 @@ describe("Queue command adapters", () => {
           commit: checked.candidateSha,
           tree: checked.candidateTreeSha,
         },
-        run: { id: run.id },
+        run: {
+          id: run.id,
+          startedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/u),
+          landedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/u),
+          driver: {
+            identity: "local",
+            epoch: expect.any(String),
+            job: expect.any(String),
+            attempt: 1,
+          },
+        },
         changes: [
           {
             changeId,
@@ -6438,6 +6448,7 @@ describe("Queue command adapters", () => {
         id: firstMerge.id,
         attempt: 2,
         runner: "local",
+        startedAt: firstMerge.startedAt,
         signal: new AbortController().signal,
       },
     )

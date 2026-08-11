@@ -3039,7 +3039,7 @@ export function prListRows(
   entries: readonly Readonly<{ pr: PR; eligibility: PREligibility }>[],
   runs: readonly Run[],
   now: number,
-  landings: ReadonlyMap<string, Readonly<{ code: string }>> = new Map(),
+  landings: ReadonlyMap<string, Readonly<{ verdict: string; recorded: string; code: string }>> = new Map(),
 ): PRListRow[] {
   const summary: QueueSummary = {
     base: "*",
@@ -3063,8 +3063,13 @@ export function prListRows(
     // Showing the later write as the whole truth sends the author back to
     // re-cut a branch that is already on the base branch (22376).
     const landing = landings.get(pr.id)
-    const state = landing === undefined ? projectedPrStatus(pr, eligibility) : "already-landed"
-    const glyph = landing === undefined ? projected.glyph : "✓"
+    const state =
+      landing === undefined || (landing.verdict === "proven" && landing.recorded === "integrated")
+        ? projectedPrStatus(pr, eligibility)
+        : landing.verdict === "proven"
+          ? "already-landed"
+          : landing.verdict
+    const glyph = landing === undefined ? projected.glyph : landing.verdict === "proven" ? "✓" : "!"
     return {
       pr: projected.pr,
       state,

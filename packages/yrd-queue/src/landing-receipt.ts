@@ -61,7 +61,21 @@ export const LandingReceiptBodySchema = z
         tree: GitShaSchema,
       })
       .strict(),
-    run: z.object({ id: z.string().trim().min(1) }).strict(),
+    run: z
+      .object({
+        id: z.string().trim().min(1),
+        startedAt: z.iso.datetime({ offset: true }),
+        landedAt: z.iso.datetime({ offset: true }),
+        driver: z
+          .object({
+            identity: z.string().trim().min(1),
+            epoch: z.string().trim().min(1),
+            job: z.string().trim().min(1),
+            attempt: z.number().int().positive(),
+          })
+          .strict(),
+      })
+      .strict(),
     changes: z.array(CandidateChangeReceiptSchema),
     pins: z.array(LandingReceiptPinSchema),
     gates: z.array(LandingReceiptGateSchema),

@@ -6648,6 +6648,7 @@ async function landingReceiptBody(
   git: Git,
   repo: string,
   input: StepExecution,
+  context: JobContext,
   commit: string,
   checked: PinnedCandidate,
 ): Promise<LandingReceiptBody> {
@@ -6668,6 +6669,12 @@ async function landingReceiptBody(
     return repositoryReceiptFailure(
       "repository-incomplete",
       `yrd: Queue run '${input.run}' has no generated per-change commits for landing receipt`,
+    )
+  }
+  if (context.startedAt === undefined) {
+    return repositoryReceiptFailure(
+      "repository-incomplete",
+      `yrd: Queue run '${input.run}' merge Job has no durable start timestamp for landing receipt`,
     )
   }
   const gates = Object.entries(input.shape.results).flatMap(([identity, value]) => {
@@ -6709,7 +6716,17 @@ async function landingReceiptBody(
       commit: checked.candidateSha,
       tree: checked.candidateTreeSha,
     },
-    run: { id: input.run },
+    run: {
+      id: input.run,
+      startedAt: context.startedAt,
+      landedAt: new Date().toISOString(),
+      driver: {
+        identity: context.runner,
+        epoch: context.context?.id ?? context.id,
+        job: context.id,
+        attempt: context.attempt,
+      },
+    },
     changes: checked.changes,
     pins,
     gates,
@@ -6885,6 +6902,7 @@ export type RepositoryLandingSearchResult =
         revision: number
         headSha: string
         run: string
+        landedAt: string
         commit: string
         landingSha: string
         baseSha: string
@@ -7046,6 +7064,7 @@ export async function findRepositoryLandingReceipt(
         headSha: options.identity.headSha,
         changeId: options.identity.changeId,
         run: receipt.run.id,
+        landedAt: receipt.run.landedAt,
         commit: target,
         landingSha: target,
         baseSha: receipt.landing.baseAfter,
@@ -7270,7 +7289,23 @@ async function confirmLandingReceipt(
   checked: PinnedCandidate,
   publicationRepo = repo,
 ): Promise<LandingReceiptPointer> {
-  const receipt = createLandingReceipt(await landingReceiptBody(git, repo, input, commit, checked))
+  const existing = await readLandingReceipt(git, repo, commit)
+  if (existing !== undefined) {
+    if (
+      existing.envelope.schema !== "yrd/landing-receipt/v1" ||
+      existing.envelope.receipt.landing.commit !== commit ||
+      existing.envelope.receipt.run.id !== input.run ||
+      existing.envelope.receipt.candidate.id !== input.candidate?.id ||
+      existing.envelope.receipt.candidate.commit !== checked.candidateSha
+    ) {
+      return repositoryReceiptFailure(
+        "repository-corrupt",
+        `yrd: landing '${commit}' already carries a receipt for different Queue evidence`,
+      )
+    }
+    return existing.pointer
+  }
+  const receipt = createLandingReceipt(await landingReceiptBody(git, repo, input, context, commit, checked))
   return storeLandingReceipt(
     git,
     repo,

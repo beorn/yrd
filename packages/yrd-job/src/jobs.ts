@@ -934,6 +934,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
         })
         const started = current(id)
         if (!Job.owns(started, attempt, parsed.runner, "in_progress")) return started
+        if (!("startedAt" in started)) throw new Error(`yrd: started job '${id}' has no durable start timestamp`)
 
         const scope = options.scope.child(`job:${id}:${attempt}`)
         activeScopes.set(id, { attempt, scope })
@@ -946,6 +947,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
                 id,
                 attempt,
                 runner: parsed.runner,
+                startedAt: started.startedAt,
                 signal: progress.signal,
                 ...(executionContext === undefined ? {} : { context: executionContext }),
                 observeProgress: progress.observe,

@@ -562,6 +562,43 @@ async function createApp(
 
 type TestApp = Awaited<ReturnType<typeof createApp>>
 
+function repositoryLandingServices(app: TestApp): YrdCliServices {
+  return {
+    landingReceipts: {
+      async find(identity) {
+        const pr = app.bays.pr(identity.pr)
+        const revision = pr === undefined ? undefined : currentPRRev(pr)
+        const integration = pr?.integration
+        if (
+          revision === undefined ||
+          integration?.receipt === undefined ||
+          revision.n !== identity.revision ||
+          revision.head !== identity.headSha
+        ) {
+          return { status: "not-proven", reason: "receipt-missing" }
+        }
+        if (pr === undefined) throw new Error("repository receipt fixture lost its PR")
+        return {
+          status: "proven",
+          fact: {
+            pr: pr.id,
+            revision: revision.n,
+            headSha: revision.head,
+            changeId: revision.changeId!,
+            run: pr.terminalRun!,
+            landedAt: pr.integratedAt!,
+            commit: integration.commit,
+            landingSha: integration.commit,
+            baseSha: integration.baseSha,
+            receipt: integration.receipt,
+          },
+        }
+      },
+      replayLegacy: async () => [],
+    },
+  }
+}
+
 function outputIO(overrides: Partial<YrdCliIO> = {}) {
   let stdout = ""
   let stderr = ""
@@ -1342,7 +1379,10 @@ describe("runYrd", () => {
 
     // Same landed head → informational "already merged", exit 0, no new PR, no event.
     const merged = outputIO({ resolveRevision: async () => HEAD_SHA })
-    expect(await runYrd(app, yrd("pr", "submit", "topic/landed", "--json"), merged.io), merged.stderr()).toBe(0)
+    expect(
+      await runYrd(app, yrd("pr", "submit", "topic/landed", "--json"), merged.io, repositoryLandingServices(app)),
+      merged.stderr(),
+    ).toBe(0)
     const mergedOut = JSON.parse(merged.stdout()) as Readonly<{
       prs: readonly { id: string; status: string }[]
       warnings?: readonly string[]
@@ -4586,7 +4626,10 @@ describe("runYrd", () => {
     })
 
     const landed = outputIO()
-    expect(await runYrd(app, yrd("pr", "view", "PR1", "--json"), landed.io), landed.stderr()).toBe(0)
+    expect(
+      await runYrd(app, yrd("pr", "view", "PR1", "--json"), landed.io, repositoryLandingServices(app)),
+      landed.stderr(),
+    ).toBe(0)
     expect(JSON.parse(landed.stdout())).toMatchObject({
       command: "pr.view",
       pr: { id: "PR1", state: "closed", merged: true, taskStatus: "done" },
@@ -11029,6 +11072,7 @@ describe("runYrd", () => {
               revision: 1,
               headSha: HEAD_SHA,
               run: "R-recovered",
+              landedAt: "2026-07-09T12:00:30.000Z",
               commit: MERGED_SHA,
               landingSha: MERGED_SHA,
               baseSha: MERGED_SHA,
@@ -11655,7 +11699,10 @@ describe("typed issue landing bridge", () => {
         }
 
         const output = outputIO()
-        expect(await runYrd(app, yrd("issue", "view", issueRef, "--json"), output.io), output.stderr()).toBe(0)
+        expect(
+          await runYrd(app, yrd("issue", "view", issueRef, "--json"), output.io, repositoryLandingServices(app)),
+          output.stderr(),
+        ).toBe(0)
         const bridge = trackerBridge(output.stdout())
         const projectedStatus = status === "rejected" || status === "canceled" ? "submitted" : status
         expect(bridge).toMatchObject({
@@ -11679,7 +11726,10 @@ describe("typed issue landing bridge", () => {
         if (status === "rejected") expect(delivery).not.toHaveProperty("bounce")
 
         const human = outputIO()
-        expect(await runYrd(app, yrd("issue", "view", issueRef), human.io), human.stderr()).toBe(0)
+        expect(
+          await runYrd(app, yrd("issue", "view", issueRef), human.io, repositoryLandingServices(app)),
+          human.stderr(),
+        ).toBe(0)
         expect(human.stdout()).toContain(issueRef)
         expect(human.stdout()).toContain("DELIVERIES")
         expect(human.stdout()).toContain(`PR1 rev1 ${projectedStatus}`)
@@ -12220,8 +12270,12 @@ describe("typed issue landing bridge", () => {
 
     const issue = outputIO()
     const runs = outputIO()
-    expect(await runYrd(app, yrd("issue", "view", originalIssue, "--json"), issue.io), issue.stderr()).toBe(0)
-    expect(await runYrd(app, yrd("pr", "runs", "PR1", "--json"), runs.io), runs.stderr()).toBe(0)
+    const receiptServices = repositoryLandingServices(app)
+    expect(
+      await runYrd(app, yrd("issue", "view", originalIssue, "--json"), issue.io, receiptServices),
+      issue.stderr(),
+    ).toBe(0)
+    expect(await runYrd(app, yrd("pr", "runs", "PR1", "--json"), runs.io, receiptServices), runs.stderr()).toBe(0)
     expect(trackerBridge(issue.stdout())).toEqual(trackerBridge(runs.stdout()))
     expect(trackerBridge(issue.stdout()).deliveries).toEqual([
       expect.objectContaining({
@@ -12234,7 +12288,7 @@ describe("typed issue landing bridge", () => {
     ])
 
     const human = outputIO()
-    expect(await runYrd(app, yrd("issue", "view", originalIssue), human.io), human.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("issue", "view", originalIssue), human.io, receiptServices), human.stderr()).toBe(0)
     for (const visibleFact of [
       "REGRESSION high DETECTED 2026-07-09T13:00:00.000Z RECORDED 2026-07-09T15:00:00.000Z",
       `ORIGINAL ${originalIssue} PR1 R1 LANDING ${originalLanding}`,
@@ -12265,7 +12319,14 @@ describe("typed issue landing bridge", () => {
       },
     }
     const racedOutput = outputIO()
-    expect(await runYrd(racingApp, yrd("pr", "runs", "PR1", "--json"), racedOutput.io)).toBe(0)
+    expect(
+      await runYrd(
+        racingApp,
+        yrd("pr", "runs", "PR1", "--json"),
+        racedOutput.io,
+        repositoryLandingServices(app),
+      ),
+    ).toBe(0)
     expect(trackerBridge(racedOutput.stdout())).toMatchObject({
       asOf: (await app.journalSnapshot()).asOf,
       deliveries: [{ issueRef, pr: "PR1", status: "integrated", landingSha: MERGED_SHA, runs: ["R1"] }],
@@ -12289,7 +12350,14 @@ describe("typed issue landing bridge", () => {
       },
     }
     const exhausted = outputIO()
-    expect(await runYrd(exhaustingApp, yrd("pr", "runs", "PR1", "--json"), exhausted.io)).toBe(1)
+    expect(
+      await runYrd(
+        exhaustingApp,
+        yrd("pr", "runs", "PR1", "--json"),
+        exhausted.io,
+        repositoryLandingServices(app),
+      ),
+    ).toBe(1)
     expect({ snapshots, advances }).toEqual({ snapshots: 9, advances: 5 })
     expect(exhausted.stdout()).toBe("")
     expect(JSON.parse(exhausted.stderr())).toEqual({
