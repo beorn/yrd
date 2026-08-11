@@ -49,6 +49,7 @@ import {
   PRReviewDecisionSchema,
   PRReviewSchema,
   PRNeedsAuthorFactSchema,
+  PRLandingReceiptPointerSchema,
   PRRejectedFactSchema,
   PRTerminalAssociationSchema,
   ProvisionBayInputSchema,
@@ -495,7 +496,7 @@ const TransitionalPRRejectedSchema = PRQueueTerminalIdentitySchema.extend({
   detail: z.string().optional(),
 }).strict()
 const PRReplayRejectedSchema = z.union([PRRejectedFactSchema, TransitionalPRRejectedSchema, LegacyPRRejectedSchema])
-const PRIntegratedSchema = z.preprocess(
+const PRIntegratedV1Schema = z.preprocess(
   normalizeV2Submitter,
   PRQueueTerminalIdentitySchema.extend({
     commit: GitShaSchema,
@@ -509,6 +510,21 @@ const PRIntegratedSchema = z.preprocess(
       message: "landingSha must equal the integration proof commit",
       path: ["landingSha"],
     }),
+)
+export const PRIntegratedSchema = z.preprocess(
+  normalizeV2Submitter,
+  PRQueueTerminalIdentitySchema.extend({
+    commit: GitShaSchema,
+    landingSha: GitShaSchema,
+    baseSha: GitShaSchema,
+    changeId: ChangeIdSchema,
+    receipt: PRLandingReceiptPointerSchema,
+    submitter: TextSchema.optional(),
+  })
+    .strict()
+    .refine(({ commit, landingSha, changeId, receipt }) => {
+      return commit === landingSha && receipt.target === commit && /^I[0-9a-f]{40}$/u.test(changeId)
+    }, "integration commit, landing SHA, Change-Id, and receipt target must agree"),
 )
 const PRAlreadyLandedSettlementSchema = z
   .object({
@@ -1341,7 +1357,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/needs-author": journalEvent(1, PRNeedsAuthorFactSchema),
         "pr/rejected": journalEvent(1, PRRejectedFactSchema),
         "pr/terminal-associated": journalEvent(1, PRTerminalAssociationSchema),
-        "pr/integrated": journalEvent(1, PRIntegratedSchema),
+        "pr/integrated": journalEvent(2, PRIntegratedSchema),
         "pr/already-landed": journalEvent(1, PRAlreadyLandedSchema),
         "pr/canceled": journalEvent(1, PRCanceledSchema),
         "pr/regression-recorded": journalEvent(1, PRRegressionSchema),
@@ -1361,7 +1377,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/withdrawn": z.union([PRWithdrawnSchema, LegacyPRWithdrawnSchema]),
         "pr/needs-author": PRNeedsAuthorFactSchema,
         "pr/rejected": PRReplayRejectedSchema,
-        "pr/integrated": z.union([PRIntegratedSchema, LegacyPRIntegratedSchema]),
+        "pr/integrated": z.union([PRIntegratedSchema, PRIntegratedV1Schema, LegacyPRIntegratedSchema]),
         "pr/already-landed": PRAlreadyLandedSchema,
         "pr/canceled": z.union([PRCanceledSchema, LegacyPRCanceledSchema]),
         "pr/admission-recorded": PRAdmissionRecordedFactSchema,
@@ -3054,11 +3070,16 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
     }
     case "pr/integrated": {
       const parsed = PRIntegratedSchema.safeParse(data)
-      const changed = parsed.success ? parsed.data : LegacyPRIntegratedSchema.parse(data)
+      const v1 = parsed.success ? undefined : PRIntegratedV1Schema.safeParse(data)
+      const changed = parsed.success
+        ? parsed.data
+        : v1?.success === true
+          ? v1.data
+          : LegacyPRIntegratedSchema.parse(data)
       const pr = current.prs[changed.pr]
       if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing PR '${changed.pr}'`)
       assertTerminalApplies(pr, changed, applied.name)
-      const run = parsed.success ? parsed.data.run : undefined
+      const run = parsed.success ? parsed.data.run : v1?.success === true ? v1.data.run : undefined
       return patchPR(pr, {
         state: "closed",
         merged: true,
@@ -3066,7 +3087,11 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         alreadyLandedAt: undefined,
         alreadyLanded: undefined,
         terminalRun: run,
-        integration: { commit: changed.commit, baseSha: changed.baseSha },
+        integration: {
+          commit: changed.commit,
+          baseSha: changed.baseSha,
+          ...(parsed.success ? { changeId: parsed.data.changeId, receipt: parsed.data.receipt } : {}),
+        },
         revs: patchRevisionClock(pr, {
           terminal: { kind: "integrated", at: applied.ts, ...(run === undefined ? {} : { run }) },
         }),
