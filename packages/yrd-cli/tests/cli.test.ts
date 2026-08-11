@@ -5438,7 +5438,8 @@ describe("runYrd", () => {
         throw createFailure({
           kind: "refusal",
           code: "authored-gitlink",
-          message: "yrd: PR 'PR1' authors a gitlink bump; recut it before required checks",
+          message:
+            "yrd: PR 'PR1' authors a gitlink bump; use yrd intent submit --component vendor/yrd --issue <issue-ref>",
         })
       },
     })
@@ -5559,7 +5560,8 @@ describe("runYrd", () => {
         throw createFailure({
           kind: "refusal",
           code: "authored-gitlink",
-          message: "yrd: PR 'PR1' authors a gitlink bump; recut it before required checks",
+          message:
+            "yrd: PR 'PR1' authors a gitlink bump; use yrd intent submit --component vendor/yrd --issue <issue-ref>",
         })
       },
     })

@@ -3085,11 +3085,15 @@ async function requireQueueableSubmodulePins(pr: PR, services: YrdCliServices, i
     )
   }
   if (changed.length === 0 || prComposition(pr) !== undefined || currentPRRev(pr).recut !== undefined) return
+  const issue = pr.issue ?? "<issue-ref>"
+  const intents = changed
+    .map(({ path, pin }) => `'yrd intent submit --component ${path} --target ${pin} --issue ${issue}'`)
+    .join(", then ")
   raiseFailure(
     "refusal",
     "authored-gitlink",
     `yrd: PR '${pr.id}' changes generated-only gitlinks [${changed.map(({ path }) => path).join(", ")}]; ` +
-      "recut it before required checks",
+      `authored gitlinks are never admitted; submit ${intents}`,
   )
 }
 
@@ -3257,80 +3261,24 @@ async function readyPr(
   return prDeliveryState(pr) === "needs-author" ? 1 : 0
 }
 
-/** The tracked "merge into latest" step. A tracked PR whose branch moved records
- * the observed live head as its next revision — the same ledger write
- * `yrd pr submit <branch>` performs — so the recut continues on a FRESH frozen
- * revision instead of refusing. The head recorded is exactly the one the
- * freshness observer just proved live, never a second, racier resolution. */
-async function recordTrackedRevision(
-  app: YrdCliApp,
-  pr: PR,
-  drift: Readonly<{ recorded: PRRev; liveHead: string }>,
-  io: YrdCliIO,
-  narration: "command" | "resident" = "command",
-): Promise<PRRev> {
-  const expected = currentPRRev(pr)
-  await app.bays.intake({
-    branch: pr.branch,
-    headSha: drift.liveHead,
-    base: pr.base,
-    expectedCurrent: {
-      pr: pr.id,
-      revision: expected.n,
-      headSha: expected.head,
-      track: true,
-    },
-  })
-  const ingested = requiredPr(app, pr.id)
-  const ingestedRevision = currentPRRev(ingested)
-  if (prDeliveryState(ingested) === "pushed") {
-    await app.bays.submit({
-      pr: ingested.id,
-      expectedCurrent: {
-        pr: ingested.id,
-        revision: ingestedRevision.n,
-        headSha: ingestedRevision.head,
-        track: true,
-      },
-    })
-  }
-  const recorded = requiredPr(app, pr.id)
-  const revision = currentPRRev(recorded)
-  if (revision.head !== drift.liveHead) {
-    raiseFailure(
-      "refusal",
-      "track-current-changed",
-      `yrd: PR '${pr.id}' is tracked, but recording live branch '${pr.branch}' head '${drift.liveHead}' left ` +
-        `revision ${revision.n} on '${revision.head}'`,
-    )
-  }
-  if (narration === "resident") {
-    app.log.info?.("Recorded a tracked PR branch update.", {
-      action: "queue-track-recorded",
-      pr: pr.id,
-      branch: pr.branch,
-      fromHead: drift.recorded.head,
-      toHead: drift.liveHead,
-      fromRevision: drift.recorded.n,
-      toRevision: revision.n,
-    })
-  } else {
-    io.stderr(
-      `yrd: PR '${pr.id}' tracks '${pr.branch}'; recorded ${drift.recorded.head} -> ${drift.liveHead} ` +
-        `(revision ${drift.recorded.n} -> ${revision.n})\n`,
-    )
-  }
-  return revision
-}
-
 async function recutPr(
   app: YrdCliApp,
   services: YrdCliServices,
   selector: string,
   options: JsonOption &
-    Readonly<{ revision?: number; queue?: boolean; force?: boolean; preflight?: boolean; apply?: boolean }>,
+    Readonly<{
+      revision?: number
+      ref?: string
+      queue?: boolean
+      force?: boolean
+      preflight?: boolean
+      apply?: boolean
+    }>,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
+  if (options.ref !== undefined && options.revision !== undefined) {
+    usage("--ref cannot combine with --revision")
+  }
   if (options.apply === true) {
     if (options.preflight !== true || options.queue !== true) usage("--apply requires --preflight and --queue")
     if (options.revision !== undefined) {
@@ -3339,17 +3287,49 @@ async function recutPr(
     if (options.force === true) usage("--apply computes whether force is safe; it cannot combine with --force")
   }
   const pr = requiredPr(app, selector)
-  const selectedRevision = options.revision ?? currentPRRev(pr).n
+  const commandCurrent = currentPRRev(pr)
+  const explicitProposedHeadSha =
+    options.ref === undefined
+      ? undefined
+      : ((await optionalRevision(options.ref, io)) ??
+        raiseFailure(
+          "refusal",
+          "proposed-commit-missing",
+          `yrd: proposed ref '${options.ref}' does not resolve to a commit`,
+        ))
+  const selectedRevision = options.revision ?? commandCurrent.n
   const selected = pr.revs.find((revision) => revision.n === selectedRevision)
-  if (isLivePR(pr) && selected !== undefined) {
+  let proposedHeadSha = explicitProposedHeadSha
+  if (explicitProposedHeadSha === undefined && isLivePR(pr) && selected !== undefined) {
     const freshness = await requireImplicitRecutBranchFreshness(pr, selected, options, services, io)
-    if (freshness.status === "tracked-drift") await recordTrackedRevision(app, pr, freshness, io)
+    if (freshness.status === "tracked-drift") proposedHeadSha = freshness.liveHead
+  }
+  const currentRevisionAtStart = currentPRRev(pr)
+  const sourceRevision =
+    proposedHeadSha !== undefined &&
+    options.revision === undefined &&
+    currentRevisionAtStart.head === proposedHeadSha &&
+    currentRevisionAtStart.recut?.fromRevision !== undefined
+      ? currentRevisionAtStart.recut.fromRevision
+      : selectedRevision
+  const expectedCurrent = {
+    revision: currentRevisionAtStart.n,
+    headSha: currentRevisionAtStart.head,
+    ...(pr.track === true ? { track: true } : {}),
   }
   if (options.preflight === true) {
     const preflight = await preflightRecut(
       app,
       selector,
-      options,
+      {
+        ...(options.json === undefined ? {} : { json: options.json }),
+        ...(options.queue === undefined ? {} : { queue: options.queue }),
+        ...(options.revision !== undefined ||
+        (proposedHeadSha !== undefined && sourceRevision !== currentRevisionAtStart.n)
+          ? { revision: sourceRevision }
+          : {}),
+        ...(proposedHeadSha === undefined ? {} : { proposedHeadSha, expectedCurrent }),
+      },
       options.apply === true ? { ...io, stdout: () => undefined } : io,
     )
     if (options.apply !== true) return 0
@@ -3375,7 +3355,21 @@ async function recutPr(
     )
     return delivery === "needs-author" ? 1 : 0
   }
-  const outcome = await executeRecutPr(app, services, selector, options, io)
+  const outcome = await executeRecutPr(
+    app,
+    services,
+    selector,
+    {
+      ...(options.queue === undefined ? {} : { queue: options.queue }),
+      ...(options.force === undefined ? {} : { force: options.force }),
+      ...(proposedHeadSha === undefined
+        ? options.revision === undefined
+          ? {}
+          : { revision: options.revision }
+        : { revision: sourceRevision, proposedHeadSha, expectedCurrent }),
+    },
+    io,
+  )
   const revision = prRevisionNumber(outcome.current)
   await printResult(
     io,
@@ -3388,6 +3382,7 @@ async function recutPr(
 
 type ExecuteRecutPrOptions = Readonly<{
   revision?: number
+  proposedHeadSha?: string
   queue?: boolean
   force?: boolean
   admit?: boolean
@@ -3431,6 +3426,7 @@ async function executeRecutPr(
   const pr = requiredPr(app, selector)
   const delivery = prDeliveryState(pr)
   const currentRevision = currentPRRev(pr)
+  const proposedHeadSha = options.proposedHeadSha
   const expectedCurrent = options.expectedCurrent ?? {
     revision: currentRevision.n,
     headSha: currentRevision.head,
@@ -3467,11 +3463,27 @@ async function executeRecutPr(
   if (source === undefined) {
     raiseFailure("refusal", "revision-missing", `yrd: PR '${pr.id}' has no revision ${fromRevision}`)
   }
+  const certificate = proposedHeadSha === undefined ? undefined : ("frozen-code-carrier-v1" as const)
+  const currentReview = app.bays.reviewState(pr.id).current
+  const approvedCurrentReview = currentReview?.decision === "approve" ? currentReview : undefined
+  if (certificate !== undefined) {
+    if (currentReview?.decision === "reject") {
+      raiseFailure(
+        "refusal",
+        "review-rejected",
+        `yrd: PR '${pr.id}' was rejected by ${currentReview.by} for revision ${currentRevision.n}`,
+      )
+    }
+    if (approvedCurrentReview === undefined) {
+      raiseFailure("refusal", "review-required", `yrd: PR '${pr.id}' needs approval for revision ${currentRevision.n}`)
+    }
+  }
   // Refuse to silently discard a green check: if the PR's current head already
   // holds a passing check for its current revision, recutting supersedes that
   // revision and throws the passing result away. Require an explicit --force so
   // the discard is a deliberate operator choice, never a mechanical accident.
-  if (options.force !== true && app.queue.eligibility(pr.id).checks.status === "passed") {
+  const checksPassed = app.queue.eligibility(pr.id).checks.status === "passed"
+  if (options.force !== true && checksPassed) {
     raiseFailure(
       "refusal",
       "recut-would-discard-green",
@@ -3479,11 +3491,30 @@ async function executeRecutPr(
         "Re-run with --force to override.",
     )
   }
-  const approval = pr.reviews.findLast(
-    (review) => review.revision === source.n && review.headSha === source.head && review.decision === "approve",
-  )
+  const sourceReview = pr.reviews.findLast((review) => review.revision === source.n && review.headSha === source.head)
+  const approval = sourceReview?.decision === "approve" ? sourceReview : undefined
+  const recutExpectedCurrent = {
+    ...expectedCurrent,
+    ...(certificate === undefined || approvedCurrentReview === undefined
+      ? {}
+      : {
+          effectiveReview: {
+            revision: approvedCurrentReview.revision,
+            headSha: approvedCurrentReview.headSha,
+            by: approvedCurrentReview.by,
+            decision: approvedCurrentReview.decision,
+            at: approvedCurrentReview.at,
+            ...(approvedCurrentReview.ref === undefined ? {} : { ref: approvedCurrentReview.ref }),
+            ...(approvedCurrentReview.note === undefined ? {} : { note: approvedCurrentReview.note }),
+            ...(approvedCurrentReview.carriedFrom === undefined
+              ? {}
+              : { carriedFrom: approvedCurrentReview.carriedFrom }),
+          },
+          ...(options.force === true ? {} : { checksPassed: false as const }),
+        }),
+  }
   const currentCompositions = source.composition === undefined ? sameIssueIntegratedCompositions(app, pr) : undefined
-  const result = await service.recut({
+  const recutInput: Parameters<typeof service.recut>[0] = {
     id: pr.id,
     ...(pr.bay === undefined ? {} : { bay: pr.bay }),
     ...(pr.name === undefined ? {} : { name: pr.name }),
@@ -3495,6 +3526,7 @@ async function executeRecutPr(
     ...(source.correlation === undefined ? {} : { correlation: source.correlation }),
     ...(source.composition === undefined ? {} : { composition: source.composition }),
     ...(currentCompositions === undefined ? {} : { currentCompositions }),
+    ...(proposedHeadSha === undefined ? {} : { proposedHeadSha }),
     ...(currentRevision.recut === undefined
       ? {}
       : {
@@ -3508,7 +3540,8 @@ async function executeRecutPr(
             ...(currentRevision.composition === undefined ? {} : { composition: currentRevision.composition }),
           },
         }),
-  })
+  }
+  const result = await service.recut(recutInput)
   if (options.transition !== undefined && result.headSha === result.baseSha) {
     await app.bays.settleSuperseded({
       pr: pr.id,
@@ -3572,9 +3605,10 @@ async function executeRecutPr(
     treeSha: result.treeSha,
     patchId: result.patchId,
     reviewCarried: approval !== undefined,
+    ...(certificate === undefined ? {} : { certificate }),
     sources,
     ...(result.composition === undefined ? {} : { composition: result.composition }),
-    expectedCurrent,
+    expectedCurrent: recutExpectedCurrent,
     ...(options.transition === undefined ? {} : { transition: options.transition }),
   })
   const unchanged = recorded.events.length === 0
@@ -6787,10 +6821,10 @@ function trackedPreflightNeedsPerson(pr: PR, revision: PRRev): boolean {
 
 /**
  * Observe opted-in PR branches before the resident's normal base-freshness
- * pass. When a branch moved, record the exact observed SHA as an immutable
- * revision and execute the existing preflight verdict on that revision. A
- * crash after recording but before preflight leaves checks unrequested; the
- * next cycle recognizes and resumes that durable intermediate state.
+ * pass. When a branch moved, certify the exact observed SHA directly as the
+ * successor revision. The frozen SHA and expected-current fact flow through
+ * preflight together, so an interrupted cycle never leaves a provisional
+ * authored revision behind.
  */
 export async function refreshTrackedQueueRevisions(
   app: YrdCliApp,
@@ -6817,11 +6851,22 @@ export async function refreshTrackedQueueRevisions(
       const interrupted = !app.bays.checksRequested(candidate.id) && !trackedPreflightNeedsPerson(candidate, before)
       if (freshness.status === "fresh" && !interrupted) continue
 
-      const source =
-        freshness.status === "tracked-drift"
-          ? await recordTrackedRevision(app, candidate, freshness, io, "resident")
-          : currentPRRev(requiredPr(app, candidate.id))
-      classified = await preflightRecut(app, candidate.id, { queue: true }, io)
+      const source = freshness.status === "tracked-drift" ? before : currentPRRev(requiredPr(app, candidate.id))
+      classified = await preflightRecut(
+        app,
+        candidate.id,
+        {
+          queue: true,
+          ...(freshness.status === "tracked-drift"
+            ? {
+                revision: before.n,
+                proposedHeadSha: freshness.liveHead,
+                expectedCurrent: { revision: before.n, headSha: before.head, track: true },
+              }
+            : {}),
+        },
+        io,
+      )
       await applyPreflightVerdict(app, services, classified, io, { track: true })
       const current = currentPRRev(requiredPr(app, candidate.id))
       const outcome: ResidentTrackedRevisionTransition = {
@@ -7264,12 +7309,15 @@ async function applyPreflightVerdict(
   io: YrdCliIO,
   requirements: Readonly<{ track?: true }> = {},
 ): Promise<void> {
-  const expectedCurrent = {
-    pr: preflight.pr,
-    revision: preflight.revision,
-    headSha: preflight.evidence.headSha,
+  const recutExpectedCurrent = {
+    revision: preflight.evidence.expectedCurrent?.revision ?? preflight.revision,
+    headSha: preflight.evidence.expectedCurrent?.headSha ?? preflight.evidence.headSha,
+    ...(preflight.evidence.expectedCurrent?.track === undefined
+      ? {}
+      : { track: preflight.evidence.expectedCurrent.track }),
     ...requirements,
   }
+  const expectedCurrent = { pr: preflight.pr, ...recutExpectedCurrent }
   if (preflight.verdict === "SUBSUMED-WITHDRAW") {
     // Withdrawal ENDS a delivery, and `yrd admin pr prune` already owns unattended
     // subsumption on its own schedule. The runner's job is to unwedge the line,
@@ -7299,13 +7347,12 @@ async function applyPreflightVerdict(
     preflight.pr,
     {
       revision: preflight.revision,
+      ...(preflight.evidence.proposedHeadSha === undefined
+        ? {}
+        : { proposedHeadSha: preflight.evidence.proposedHeadSha }),
+      expectedCurrent: recutExpectedCurrent,
       queue: true,
       admit: false,
-      expectedCurrent: {
-        revision: preflight.revision,
-        headSha: preflight.evidence.headSha,
-        ...requirements,
-      },
       ...(preflight.verdict === "RECUT-FORCE" ? { force: true } : {}),
     },
     io,
@@ -7346,16 +7393,15 @@ async function applyRefusalRemedy(
  * 22474 — apply the refusal remedy the queue itself printed, instead of
  * printing it and waiting for a human to apply the verdict.
  *
- * The admission/compose path refuses an authored-gitlink carrier (and its
- * siblings) with a message that names the exact deterministic drill: re-record
- * the branch, then compute and apply the recut verdict. Because a refusal used
- * to hold the head of the line, one such PR wedged the whole queue until an
- * operator typed those commands — PR1791 through 44 consecutive refusal
- * cycles, PR1787 through 30, both cleared by hand on 2026-07-27.
+ * The admission/compose path refuses an authored-gitlink carrier with a message
+ * that names exact intent submission. Intent declarations are an author-owned
+ * judgment, not a PR mutation, so this loop settles that refusal as
+ * needs-person. Mechanical code-carrier remedies still run here because a
+ * successful recut produces a new revision and makes progress.
  *
  * Runs inside the existing serialized resident cycle beside
  * {@link refreshAdmittedQueueRevisions}: same installed recutter, same journal,
- * no second writer or scheduler. Applies at most one remedy per PR REVISION, so
+ * no second writer or scheduler. Applies at most one remedy per PR revision, so
  * a remedy that fails degrades to the printed refusal rather than becoming its
  * own loop; a remedy that succeeds produces a new revision, which is what makes
  * progress instead of repetition.
@@ -8967,6 +9013,7 @@ function buildProgram(
     .command("recut <selector>", { hidden: true })
     .description("recut a merge request revision onto the current base")
     .option("--revision <number>", "select an older immutable PR revision", int)
+    .option("--ref <ref>", "certify an independently authored candidate commit")
     .option("--preflight", "classify recut, withdraw, force, or no-op without changing anything")
     .option("--apply", "execute the regenerative verdict computed by --preflight")
     .option("--queue", "submit the fresh revision and request its configured checks")

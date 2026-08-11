@@ -130,19 +130,33 @@ function redeliverySteps(pr: string, delivery: PRDeliveryState | undefined): rea
   return [recordCommand(delivery), ...recutSteps(pr, delivery)]
 }
 
-function authoredGitlinkFailure(
-  failure: FailureLike,
-  cause: string,
-  context: ActionableFailureContext,
-): ActionableFailure {
-  const pr = prId(failure.message) ?? "<PR>"
-  const alreadyRecorded =
-    context.delivery === "submitted" || context.delivery === "ready" || context.delivery === "needs-author"
+function authoredGitlinkComponents(message: string): readonly string[] {
+  const raw = /generated-only gitlinks \[([^\]]*)\]/iu.exec(message)?.[1]
+  return raw === undefined
+    ? []
+    : raw
+        .split(",")
+        .map((path) => path.trim())
+        .filter(Boolean)
+}
+
+function authoredGitlinkFailure(failure: FailureLike, cause: string): ActionableFailure {
+  const embedded = embeddedYrdCommands(failure.message).filter((command) => command.startsWith("yrd intent submit "))
+  const generated = authoredGitlinkComponents(failure.message).map(
+    (component) => `yrd intent submit --component ${component} --issue <issue-ref>`,
+  )
+  const componentModelChange = failure.message.includes("pin intents advance existing components only")
   return Object.freeze({
     code: failure.code,
     cause,
     resolution: Object.freeze(
-      alreadyRecorded ? recutSteps(pr, context.delivery) : redeliverySteps(pr, context.delivery),
+      componentModelChange
+        ? ["Escalate the component-model addition or deletion; yrd intent submit only advances an existing gitlink."]
+        : embedded.length > 0
+          ? embedded
+          : generated.length > 0
+            ? generated
+            : [GENERIC_RESOLUTION],
     ),
     reference: "README.md#pr-eligibility-and-checks",
   })
@@ -199,7 +213,7 @@ export function actionableFailure(failure: FailureLike, context: ActionableFailu
   if (retainedWorkspace !== undefined || failure.code === "required-check-failed") {
     return retainedWorkspaceFailure(failure, cause, retainedWorkspace)
   }
-  if (failure.code === "authored-gitlink") return authoredGitlinkFailure(failure, cause, context)
+  if (failure.code === "authored-gitlink") return authoredGitlinkFailure(failure, cause)
   if (failure.code === "recut-gitlink-conflict") {
     const projected = recutGitlinkFailure(failure, cause, context)
     if (projected !== undefined) return projected

@@ -27,6 +27,7 @@ import {
 } from "@yrd/job"
 import { computed, type ReadSignal } from "@silvery/signals"
 import type { FlowPin, Submission } from "@yrd/config"
+import { isDeepStrictEqual } from "node:util"
 import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
 import {
@@ -42,7 +43,10 @@ import {
   PRIdSchema,
   PRFreshnessTransitionSchema,
   PRAdmissionRecordedFactSchema,
+  PRRecutCertificateSchema,
   PRRecutSourceSchema,
+  PRReviewDecisionSchema,
+  PRReviewSchema,
   PRNeedsAuthorFactSchema,
   PRRejectedFactSchema,
   PRTerminalAssociationSchema,
@@ -270,7 +274,13 @@ export type PrEditArgs = z.infer<typeof PrEditArgsSchema>
 const PrReadyArgsSchema = z.object({ pr: TextSchema, expectedCurrent: PRExpectedCurrentSchema.optional() }).strict()
 export type PrReadyArgs = z.infer<typeof PrReadyArgsSchema>
 const PrRecutExpectedCurrentSchema = z
-  .object({ revision: RevisionSchema, headSha: GitShaSchema, track: z.boolean().optional() })
+  .object({
+    revision: RevisionSchema,
+    headSha: GitShaSchema,
+    track: z.boolean().optional(),
+    effectiveReview: PRReviewSchema.optional(),
+    checksPassed: z.boolean().optional(),
+  })
   .strict()
 const PrRecutArgsSchema = z
   .object({
@@ -281,6 +291,7 @@ const PrRecutArgsSchema = z
     treeSha: GitShaSchema,
     patchId: GitShaSchema,
     reviewCarried: z.boolean(),
+    certificate: PRRecutCertificateSchema.optional(),
     sources: z.array(PRRecutSourceSchema).min(1).readonly().optional(),
     composition: CompositionV1Schema.optional(),
     expectedCurrent: PrRecutExpectedCurrentSchema.optional(),
@@ -339,7 +350,6 @@ export function prPublicationJobKey(identity: Pick<PrPublicationInput, "pr" | "r
   return `pr-publication:${identity.pr}:${String(identity.revision)}:${identity.headSha}`
 }
 
-const PRReviewDecisionSchema = z.enum(["approve", "reject"])
 const PrReviewArgsSchema = z
   .object({
     pr: TextSchema,
@@ -424,6 +434,7 @@ const PRRecutReplaySchema = z
     baseSha: GitShaSchema,
     treeSha: GitShaSchema,
     reviewCarried: z.boolean(),
+    certificate: PRRecutCertificateSchema.optional(),
     submitter: TextSchema.optional(),
     sources: z.array(PRRecutSourceSchema).min(1).readonly().optional(),
     predecessor: PRRecutLineageSchema,
@@ -568,17 +579,7 @@ const PRRegressionSchema: z.ZodType<PRRegressionFact> = z
   .strict()
 const PRReviewFactSchema = z.preprocess(
   normalizeV2By,
-  z
-    .object({
-      pr: PRIdSchema,
-      revision: RevisionSchema,
-      headSha: GitShaSchema,
-      by: TextSchema,
-      decision: PRReviewDecisionSchema,
-      ref: TextSchema.optional(),
-      note: TextSchema.optional(),
-    })
-    .strict(),
+  PRReviewSchema.omit({ at: true, carriedFrom: true }).extend({ pr: PRIdSchema }).strict(),
 )
 const PRCommentFactSchema = z.preprocess(
   normalizeV2By,
@@ -1359,7 +1360,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/canceled": z.union([PRCanceledSchema, LegacyPRCanceledSchema]),
         "pr/admission-recorded": PRAdmissionRecordedFactSchema,
       },
-      projectionVersion: "bays-v12-recut-submitter",
+      projectionVersion: "bays-v13-recut-certificate",
       project: projectBays,
       create(yrd) {
         yrd.jobs.requireDefinitions(options.jobs)
@@ -2147,6 +2148,26 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
   if (predecessor === undefined) {
     raiseFailure("refusal", "revision-missing", `yrd: PR '${pr.id}' has no revision ${args.fromRevision}`)
   }
+  if (args.certificate !== undefined) {
+    const expectedReview = args.expectedCurrent?.effectiveReview
+    const rootSources = args.sources?.filter((source) => source.repo === ".") ?? []
+    const rootSource = rootSources[0]
+    if (
+      args.expectedCurrent === undefined ||
+      expectedReview?.decision !== "approve" ||
+      !args.reviewCarried ||
+      rootSources.length !== 1 ||
+      rootSource?.fromHeadSha !== predecessor.head ||
+      rootSource.toHeadSha !== args.headSha ||
+      rootSource.patchId !== args.patchId
+    ) {
+      raiseFailure(
+        "refusal",
+        "recut-certificate-invalid",
+        `yrd: PR '${pr.id}' certified rebuild requires an approved expected-current review and exactly one matching root source`,
+      )
+    }
+  }
   const recut = prRecut(pr)
   const unchanged =
     prHead(pr) === args.headSha &&
@@ -2155,6 +2176,7 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
     recut.patchId === args.patchId &&
     recut.treeSha === args.treeSha &&
     recut.reviewCarried === args.reviewCarried &&
+    recut.certificate === args.certificate &&
     JSON.stringify(recut.sources) === JSON.stringify(args.sources) &&
     recut.transition?.from === args.transition?.from &&
     recut.transition?.to === args.transition?.to &&
@@ -2167,11 +2189,10 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
         `to ${String(pr.track ?? false)} while the rebuild was being computed`,
     )
   }
-  if (unchanged) return { events: [] }
-
   if (
     args.expectedCurrent !== undefined &&
-    (prRevisionNumber(pr) !== args.expectedCurrent.revision || prHead(pr) !== args.expectedCurrent.headSha)
+    (prRevisionNumber(pr) !== args.expectedCurrent.revision || prHead(pr) !== args.expectedCurrent.headSha) &&
+    !(unchanged && args.certificate === undefined)
   ) {
     raiseFailure(
       "refusal",
@@ -2180,6 +2201,35 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
         ` to ${prRevisionNumber(pr)}@${prHead(pr)} while the rebuild was being computed`,
     )
   }
+  if (
+    args.expectedCurrent?.effectiveReview !== undefined &&
+    !isDeepStrictEqual(reviewState(pr).current, args.expectedCurrent.effectiveReview)
+  ) {
+    raiseFailure(
+      "refusal",
+      "recut-review-changed",
+      `yrd: PR '${pr.id}' effective review changed while the rebuild was being computed`,
+    )
+  }
+  if (args.expectedCurrent?.checksPassed !== undefined) {
+    const checksPassed = currentPRRev(pr).admission?.status === "passed"
+    if (checksPassed !== args.expectedCurrent.checksPassed) {
+      if (checksPassed) {
+        raiseFailure(
+          "refusal",
+          "recut-would-discard-green",
+          `yrd: PR '${pr.id}' checks passed while the rebuild was being computed; re-run with --force to replace green evidence`,
+        )
+      }
+      raiseFailure(
+        "refusal",
+        "recut-current-changed",
+        `yrd: PR '${pr.id}' check status changed while the rebuild was being computed`,
+      )
+    }
+  }
+  if (unchanged) return { events: [] }
+
   if (args.transition !== undefined) {
     if (args.expectedCurrent === undefined) {
       raiseFailure(
@@ -2208,10 +2258,10 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
     }
   }
 
-  const approved = pr.reviews.findLast(
-    (review) =>
-      review.revision === predecessor.n && review.headSha === predecessor.head && review.decision === "approve",
+  const effectiveReview = pr.reviews.findLast(
+    (review) => review.revision === predecessor.n && review.headSha === predecessor.head,
   )
+  const approved = effectiveReview?.decision === "approve" ? effectiveReview : undefined
   if (args.reviewCarried && approved === undefined) {
     raiseFailure(
       "refusal",
@@ -2231,6 +2281,7 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
         treeSha: args.treeSha,
         reviewCarried: args.reviewCarried,
         submitter: successorSubmitter,
+        ...(args.certificate === undefined ? {} : { certificate: args.certificate }),
         ...(args.sources === undefined ? {} : { sources: args.sources }),
         predecessor: {
           revision: predecessor.n,
@@ -2757,6 +2808,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         patchId: recut.patchId,
         treeSha: recut.treeSha,
         reviewCarried: recut.reviewCarried,
+        ...(recut.certificate === undefined ? {} : { certificate: recut.certificate }),
         ...(recut.sources === undefined ? {} : { sources: recut.sources }),
         ...(recut.transition === undefined ? {} : { transition: recut.transition }),
       }
@@ -2773,10 +2825,10 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         recut: proof,
         pushedAt: applied.ts,
       }
-      const approval = pr.reviews.findLast(
-        (review) =>
-          review.revision === predecessor.n && review.headSha === predecessor.head && review.decision === "approve",
+      const effectiveReview = pr.reviews.findLast(
+        (review) => review.revision === predecessor.n && review.headSha === predecessor.head,
       )
+      const approval = effectiveReview?.decision === "approve" ? effectiveReview : undefined
       if (recut.reviewCarried && approval === undefined) {
         throw new Error(`yrd: PR '${pr.id}' rebuild carries a missing approval`)
       }
@@ -3070,9 +3122,10 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
     }
     case "pr/reviewed": {
       const reviewed = PRReviewFactSchema.parse(data)
-      const pr = current.prs[reviewed.pr]
+      const { pr: prId, ...fact } = reviewed
+      const pr = current.prs[prId]
       if (pr === undefined) return state
-      const review: PRReview = { ...reviewed, at: applied.ts }
+      const review: PRReview = { ...fact, at: applied.ts }
       return patchPR(pr, { reviews: [...pr.reviews, review] })
     }
     case "pr/commented": {
