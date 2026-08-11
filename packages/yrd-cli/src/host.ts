@@ -1417,8 +1417,8 @@ async function closeRuntime(
 type ShutdownSignal = "SIGINT" | "SIGTERM"
 const ONE_SHOT_RECOVERY_CUTOFF = "1970-01-01T00:00:00.000Z"
 
-function queueRecoveryCommand(repositoryRoot: string): string {
-  return `yrd --repo ${JSON.stringify(repositoryRoot)} queue recover`
+function queueRecoveryArgv(repositoryRoot: string): readonly string[] {
+  return ["yrd", "--repo", repositoryRoot, "queue", "recover"]
 }
 
 /** Announce a graceful drain as ONE structured loggily record — never a bare
@@ -1430,7 +1430,7 @@ export function reportGracefulShutdown(log: ConditionalLogger, signal: ShutdownS
     signal,
     mode: "drain",
     forceStop: "press Ctrl-C again to stop immediately",
-    recovery: queueRecoveryCommand(repositoryRoot),
+    recovery: queueRecoveryArgv(repositoryRoot),
   })
 }
 
@@ -1453,12 +1453,10 @@ async function settleOneShotQueueRun(
       log.warn?.(`Stopped queue run ${runs.map((run) => run.id).join(", ")} safely after ${signal}.`)
     }
   } catch (error) {
-    log.error?.(
-      `Could not stop the queue run safely after ${signal}; run '${queueRecoveryCommand(host.repository.repo)}'.`,
-      {
-        error: error instanceof Error ? error.message : String(error),
-      },
-    )
+    log.error?.(`Could not stop the queue run safely after ${signal}; run the recovery argv attached.`, {
+      error: error instanceof Error ? error.message : String(error),
+      recovery: queueRecoveryArgv(host.repository.repo),
+    })
     throw error
   }
 }
