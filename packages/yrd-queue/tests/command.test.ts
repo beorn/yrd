@@ -2827,6 +2827,13 @@ describe("Queue command adapters", () => {
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
     expect(await git(join(repo, "dep"), ["rev-parse", "HEAD"])).toBe(landedPinSha)
     expect(run.integration?.sourceRewrites).toEqual(evidence.sourceRewrites)
+    const receipt = run.integration?.receipt
+    if (receipt === undefined) throw new Error("composition landing has no repository receipt")
+    expect(JSON.parse(await git(repo, ["notes", "--ref=yrd/receipts", "show", receipt.target]))).toMatchObject({
+      receipt: {
+        pins: [{ path: "dep", before: newPinSha, after: landedPinSha }],
+      },
+    })
   })
 
   it.each([
@@ -6328,7 +6335,15 @@ describe("Queue command adapters", () => {
           },
         ],
         pins: [],
-        gates: expect.any(Array),
+        gates: [
+          {
+            identity: "check",
+            attempt: 1,
+            configHash: expect.stringMatching(/^[0-9a-f]{64}$/u),
+            environmentHash: expect.stringMatching(/^[0-9a-f]{64}$/u),
+            durationMs: expect.any(Number),
+          },
+        ],
         refusals: [],
       },
       checksum: expect.stringMatching(/^[0-9a-f]{64}$/u),

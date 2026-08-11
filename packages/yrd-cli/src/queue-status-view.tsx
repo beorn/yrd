@@ -56,6 +56,7 @@ import {
   useWindowSize,
 } from "silvery"
 import { queueAdmissionPositions } from "./queue-admission-index.ts"
+import type { PrLanding } from "./pr-landing.ts"
 import {
   artifactHref as locationHref,
   artifactLabel,
@@ -3392,6 +3393,7 @@ export function PRDetailView({
   attempts = [],
   now,
   position,
+  landingProof,
 }: {
   pr: PR
   eligibility?: PREligibility
@@ -3399,6 +3401,7 @@ export function PRDetailView({
   attempts?: readonly QueueAttempt[]
   now: number
   position?: number
+  landingProof?: PrLanding
 }) {
   const run = latestPRRun(pr, runs)
   const runMember = run?.prs.find((member) => member.id === pr.id)
@@ -3410,18 +3413,32 @@ export function PRDetailView({
   // 2026-07-16). A superseded run implies the current revision has no run yet:
   // any run against it would sort newer and be selected here instead.
   const revision = currentPRRev(pr)
-  const delivery = prDeliveryState(pr)
+  const recordedDelivery = prDeliveryState(pr)
+  const delivery =
+    landingProof === undefined
+      ? recordedDelivery
+      : landingProof.verdict === "proven"
+        ? recordedDelivery === "integrated"
+          ? "integrated"
+          : "already-landed"
+        : landingProof.verdict
   const supersededRunRevision =
     run !== undefined && runMember !== undefined && runMember.revision !== revision.n ? runMember.revision : undefined
   const currentStateWord = delivery === "submitted" ? "pending" : delivery
   const activeStep = relevantStep(run)
   const blocker = diagnosticBlocker(pr, run, activeStep, now)
-  const landing = pr.integration ?? (run === undefined ? undefined : queueIntegration(run))
+  const landing =
+    recordedDelivery === "integrated"
+      ? landingProof?.verdict === "proven"
+        ? { commit: landingProof.landingSha, baseSha: landingProof.baseSha }
+        : undefined
+      : (pr.integration ?? (run === undefined ? undefined : queueIntegration(run)))
+  const landingProofFailure = landingProof?.verdict === "proven" ? undefined : landingProof
   const detail = prDetailData(pr, runs, attempts)
   const lineage = timelineRevisionLineage(pr)
   const revisionLineage = lineage.revisions.map((revision) => `rev${revision}`).join("→")
   const recomposedSources = prRevisionLineage(pr).flatMap((candidate) => candidate.recut?.sources ?? [])
-  const taskStatus = prTaskStatusOf(pr)
+  const taskStatus = landingProofFailure === undefined ? prTaskStatusOf(pr) : "blocked"
   const projectionFields = taskStatusFields(taskStatus)
 
   return (
@@ -3436,6 +3453,11 @@ export function PRDetailView({
           <Text bold>NEEDS AUTHOR</Text> {eligibility.reason.message}
         </Text>
       ) : null}
+      {landingProofFailure === undefined ? null : (
+        <Text color="$fg-warning" wrap="wrap">
+          <Text bold>LANDING PROOF</Text> {landingProofFailure.code}: {landingProofFailure.reason}
+        </Text>
+      )}
       {pr.title === undefined ? null : (
         <Text wrap="truncate" bgConflict="ignore">
           <Text bold>TITLE</Text> {pr.title}

@@ -347,6 +347,7 @@ describe("pr list landing reconciliation (22376)", () => {
       receipt,
     })
     const services = {
+      queueReadModel: { snapshot: async () => ({ cursor: 0, generation: 1, attempts: [] }) },
       landingReceipts: {
         find: async () => ({ status: "not-proven" as const, reason: "receipt-missing" as const }),
         replayLegacy: async () => [],
@@ -363,6 +364,13 @@ describe("pr list landing reconciliation (22376)", () => {
       status: "index-corrupt",
       landingProof: { code: "landing-index-corrupt", reason: "receipt-missing" },
     })
+
+    const human = outputIO({ columns: 160 })
+    expect(await runYrd(app as CliApp, yrd("pr", "view", "PR1"), human.io, services), human.stderr()).toBe(0)
+    expect(human.stdout()).toContain("STATUS index-corrupt")
+    expect(human.stdout()).toContain("LANDING PROOF landing-index-corrupt: receipt-missing")
+    expect(human.stdout()).not.toContain("STATUS integrated")
+    expect(human.stdout()).not.toContain(`LANDING ${MERGED_SHA}`)
   })
 
   it("never probes git for a PR whose recorded state already claims a landing", async () => {

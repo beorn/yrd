@@ -4695,6 +4695,7 @@ async function viewPr(
       runs,
       attempts,
       now: io.now?.() ?? Date.now(),
+      landingProof: landing,
       ...(position === undefined ? {} : { position }),
     }),
     [

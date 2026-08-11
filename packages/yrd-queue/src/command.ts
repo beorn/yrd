@@ -6779,7 +6779,7 @@ async function landingReceiptBody(
       },
     ]
   })
-  const paths = [...new Set((checked.submoduleResolutions ?? []).map(({ path }) => path))].toSorted()
+  const paths = (await rawPayload(git, repo, checked.baseSha, commit)).gitlinks
   const pins = await Promise.all(
     paths.map(async (path) => ({
       path,
