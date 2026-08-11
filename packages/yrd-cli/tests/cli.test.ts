@@ -11093,6 +11093,44 @@ describe("runYrd", () => {
     expect(app.bays.pr("PR1")?.integration).toMatchObject({ commit: MERGED_SHA, receipt })
   })
 
+  it("yrd why reports the exact durable refusal for a failed landing attempt", async () => {
+    await using app = await createApp({
+      prepareCandidate: async () => {
+        throw createFailure({
+          kind: "refusal",
+          code: "recut-gitlink-conflict",
+          message: "two fixed gitlink commits are non-ancestral",
+        })
+      },
+    })
+    await openAndSubmit(app)
+    const drain = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "--once"), drain.io), drain.stderr()).toBe(0)
+    const output = outputIO()
+
+    expect(
+      await runYrd(app, yrd("why", "PR1", "--json"), output.io, {
+        landingReceipts: {
+          find: async () => ({ status: "not-proven" as const, reason: "no physical landing receipt" }),
+        },
+      } as unknown as YrdCliServices),
+      output.stderr(),
+    ).toBe(1)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "why",
+      pr: "PR1",
+      verdict: "failed",
+      repaired: false,
+      failure: {
+        source: "queue-admission",
+        code: "recut-gitlink-conflict",
+        reason: "two fixed gitlink commits are non-ancestral",
+        count: 1,
+        settlement: { disposition: "needs-person" },
+      },
+    })
+  })
+
   it("replays legacy landing receipts once before the queue accepts new work", async () => {
     const command = { id: "00000000-0000-7000-8000-000000000201", op: "fixture.legacy-landing" }
     const journal = createMemoryJournal([
@@ -12320,12 +12358,7 @@ describe("typed issue landing bridge", () => {
     }
     const racedOutput = outputIO()
     expect(
-      await runYrd(
-        racingApp,
-        yrd("pr", "runs", "PR1", "--json"),
-        racedOutput.io,
-        repositoryLandingServices(app),
-      ),
+      await runYrd(racingApp, yrd("pr", "runs", "PR1", "--json"), racedOutput.io, repositoryLandingServices(app)),
     ).toBe(0)
     expect(trackerBridge(racedOutput.stdout())).toMatchObject({
       asOf: (await app.journalSnapshot()).asOf,
@@ -12351,12 +12384,7 @@ describe("typed issue landing bridge", () => {
     }
     const exhausted = outputIO()
     expect(
-      await runYrd(
-        exhaustingApp,
-        yrd("pr", "runs", "PR1", "--json"),
-        exhausted.io,
-        repositoryLandingServices(app),
-      ),
+      await runYrd(exhaustingApp, yrd("pr", "runs", "PR1", "--json"), exhausted.io, repositoryLandingServices(app)),
     ).toBe(1)
     expect({ snapshots, advances }).toEqual({ snapshots: 9, advances: 5 })
     expect(exhausted.stdout()).toBe("")
