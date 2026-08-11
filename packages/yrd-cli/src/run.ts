@@ -2851,7 +2851,7 @@ async function gatherBayStatusFacts(
           try {
             managedChange = gitSync(path, ["show", "-s", "--format=%(trailers:key=Change-Id,valueonly)", head]) !== ""
           } catch {
-            if (tipLanded !== true) tipLandedUnknown = true
+            tipLandedUnknown = true
           }
           if (managedChange && services.landingReceipts?.findByHead === undefined) tipLandedUnknown = true
           if (services.landingReceipts?.findByHead !== undefined) {

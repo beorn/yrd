@@ -4418,7 +4418,8 @@ describe("runYrd", () => {
 
       await runYrd(app, yrd("bay", "status", "B1", "--json"), output.io, services)
       expect(findByHead).toHaveBeenCalledWith(authoredHead)
-      expect(JSON.parse(output.stdout()).reports[0].lines).toContainEqual({
+      const result = JSON.parse(output.stdout()) as { reports: Array<{ lines: unknown[] }> }
+      expect(result.reports[0]?.lines).toContainEqual({
         class: "commits",
         verdict: "PASS",
         evidence: `tip is durable at origin/main (receipt ${receipt.note.slice(0, 12)})`,
