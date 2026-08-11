@@ -121,6 +121,13 @@ function formatAge(ms: number): string {
  * landed — six ancestral and one regenerated with all six commits applied.
  * Reporting those is not a smaller problem than missing a stranded branch; it
  * is the problem that kills the rail.
+ *
+ * Population rule: no verdict from this classifier is actionable unless its
+ * validation report names the union of every seat's measured branch set plus
+ * every branch authorized for action. A report that omits that population is
+ * review-refusable. The one-time P0 proof is the ten-specimen union in
+ * `tests/unsubmitted.test.ts`, including the separately authorized
+ * `task/22716-p1a-certification-dev3` branch.
  */
 export function classifyPushedRef(fact: PushedRefFact, options: UnsubmittedOptions): UnsubmittedFinding | undefined {
   if (fact.carried) return undefined
