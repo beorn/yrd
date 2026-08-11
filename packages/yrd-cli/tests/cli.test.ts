@@ -4376,6 +4376,82 @@ describe("runYrd", () => {
     expect(app.state().bays.byId.B1?.status).toBe("active")
   })
 
+  it("bay status trusts a managed receipt for a Queue-rewritten landing", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-bay-receipt-"))
+    const remote = join(root, "remote.git")
+    const repo = join(root, "repo")
+    const bay = join(root, "bay")
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim()
+    try {
+      execFileSync("git", ["init", "--bare", remote], { stdio: "ignore" })
+      execFileSync("git", ["init", "-q", "-b", "main", repo], { stdio: "ignore" })
+      git(repo, "config", "user.name", "Yrd Test")
+      git(repo, "config", "user.email", "yrd@example.invalid")
+      writeFileSync(join(repo, "README.md"), "base\n")
+      git(repo, "add", "README.md")
+      git(repo, "commit", "-qm", "base")
+      git(repo, "remote", "add", "origin", remote)
+      git(repo, "push", "-u", "origin", "main")
+      execFileSync("git", ["clone", "-q", remote, bay], { stdio: "ignore" })
+      git(bay, "config", "user.name", "Yrd Test")
+      git(bay, "config", "user.email", "yrd@example.invalid")
+      git(bay, "switch", "-qc", "task/receipt")
+      writeFileSync(join(bay, "README.md"), "authored\n")
+      git(bay, "add", "README.md")
+      git(bay, "commit", "-qm", "authored change")
+      const authoredHead = git(bay, "rev-parse", "HEAD")
+      git(bay, "push", "-u", "origin", "task/receipt")
+
+      writeFileSync(join(repo, "README.md"), "authored\n")
+      writeFileSync(join(repo, "wrapper.txt"), "generated wrapper\n")
+      git(repo, "add", "README.md", "wrapper.txt")
+      git(repo, "commit", "-qm", "generated landing")
+      const landing = git(repo, "rev-parse", "HEAD")
+      git(repo, "push", "origin", "main")
+
+      const app = await createApp({ bayPath: bay })
+      await openTestBay(app, { name: "receipt", branch: "task/receipt" })
+      const output = outputIO({ cwd: repo })
+      const receipt = {
+        ref: "refs/notes/yrd/receipts",
+        target: landing,
+        note: "c".repeat(40),
+        checksum: "d".repeat(64),
+      } as const
+      const findByHead = vi.fn(async (headSha: string) => ({
+        status: "proven" as const,
+        fact: {
+          pr: "PR1",
+          revision: 1,
+          headSha,
+          run: "R1",
+          landedAt: "2026-07-09T12:00:00.000Z",
+          commit: landing,
+          landingSha: landing,
+          baseSha: landing,
+          changeId: `I${"1".repeat(40)}`,
+          receipt,
+        },
+      }))
+      const services = {
+        landingReceipts: {
+          findByHead,
+        },
+      } as unknown as YrdCliServices
+
+      await runYrd(app, yrd("bay", "status", "B1", "--json"), output.io, services)
+      expect(findByHead).toHaveBeenCalledWith(authoredHead)
+      expect(JSON.parse(output.stdout()).reports[0].lines).toContainEqual({
+        class: "commits",
+        verdict: "PASS",
+        evidence: `tip is durable at origin/main (receipt ${receipt.note.slice(0, 12)})`,
+      })
+    } finally {
+      safeRemoveSync(root, { within: tmpdir(), allowMissing: true })
+    }
+  })
+
   it("admin bay prune preserves a dirty Bay and pages it for the next pass", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-bay-prune-dirty-"))
     const remote = join(root, "remote.git")

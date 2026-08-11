@@ -88,6 +88,7 @@ export type YrdCliServices = Readonly<{
   recut?: GitPRRecutter
   landingReceipts?: Readonly<{
     find(identity: RepositoryLandingIdentity): Promise<RepositoryLandingSearchResult>
+    findByHead?(headSha: string): Promise<RepositoryLandingSearchResult>
     replayLegacy(landings: readonly LegacyJournalLanding[]): Promise<readonly LegacyLandingReceiptReplay[]>
   }>
   journal?: YrdCliJournalAdministration

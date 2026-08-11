@@ -2679,7 +2679,7 @@ async function closeBays(
   const protections = activeBayProtections(io)
   for (const bay of bays) {
     const report = classifyBayStatus(
-      gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections, io.now?.() ?? Date.now()),
+      await gatherBayStatusFacts(app, services, bay, cwd, remoteTrackingFresh, protections, io.now?.() ?? Date.now()),
     )
     if (options.force !== true && report.exit !== 0) {
       refused.push(report)
@@ -2793,14 +2793,15 @@ function originBranchMissing(repoRoot: string, branch: string, remoteTrackingFre
 }
 
 /** Gather live facts for one bay; classification stays pure in bay-status.ts (22290). */
-function gatherBayStatusFacts(
+async function gatherBayStatusFacts(
   app: YrdCliApp,
+  services: YrdCliServices,
   bay: Bay,
   repoRoot: string,
   remoteTrackingFresh: boolean,
   protections: readonly YrdBayProtection[],
   now: number,
-): BayStatusFacts {
+): Promise<BayStatusFacts> {
   const ownerPid = parseOwnerPid(bay.name, bay.by)
   const ownerIsCaller = ownerPid === process.pid
   let ownerAlive: boolean | undefined
@@ -2860,6 +2861,32 @@ function gatherBayStatusFacts(
           uniquePatches = 0
         } catch {
           tipLanded = false
+          let managedChange = false
+          try {
+            managedChange = gitSync(path, ["show", "-s", "--format=%(trailers:key=Change-Id,valueonly)", head]) !== ""
+          } catch {
+            if (tipLanded !== true) tipLandedUnknown = true
+          }
+          if (managedChange && services.landingReceipts?.findByHead === undefined) tipLandedUnknown = true
+          if (services.landingReceipts?.findByHead !== undefined) {
+            try {
+              const proof = await services.landingReceipts.findByHead(head)
+              if (
+                proof.status === "proven" ||
+                (proof.status === "legacy-proven" && proof.fact.coverage === "receipt")
+              ) {
+                tipLanded = true
+                tipDurableAt = `origin/main (receipt ${proof.fact.receipt.note.slice(0, 12)})`
+                tipLandedUnknown = undefined
+                aheadOfOrigin = 0
+                uniquePatches = 0
+              } else if (proof.status === "legacy-proven") {
+                tipLandedUnknown = true
+              }
+            } catch {
+              tipLandedUnknown = true
+            }
+          }
           try {
             const counts = gitSync(path, ["rev-list", "--left-right", "--count", `${originMain}...${head}`])
               .trim()
@@ -2868,36 +2895,38 @@ function gatherBayStatusFacts(
             const ahead = counts[1]
             if (Number.isSafeInteger(ahead)) aheadOfOrigin = ahead
           } catch {
-            tipLandedUnknown = true
+            if (tipLanded !== true) tipLandedUnknown = true
           }
-          try {
-            uniquePatches = gitSync(path, ["cherry", originMain, head])
-              .split("\n")
-              .filter((line) => line.startsWith("+ ")).length
-            if (uniquePatches === 0) {
-              tipLanded = true
-              tipDurableAt = "origin/main (same changes)"
-              tipLandedUnknown = undefined
-            } else if (remoteTrackingFresh) {
-              const remoteRef = gitSync(path, [
-                "for-each-ref",
-                "--format=%(refname:short)",
-                "--contains",
-                head,
-                "refs/remotes/origin/",
-              ])
+          if (tipLanded !== true) {
+            try {
+              uniquePatches = gitSync(path, ["cherry", originMain, head])
                 .split("\n")
-                .map((ref) => ref.trim())
-                .find((ref) => ref !== "" && ref !== "origin")
-              if (remoteRef !== undefined) {
-                tipDurableAt = remoteRef
+                .filter((line) => line.startsWith("+ ")).length
+              if (uniquePatches === 0 && !managedChange && tipLandedUnknown !== true) {
+                tipLanded = true
+                tipDurableAt = "origin/main (same changes)"
                 tipLandedUnknown = undefined
+              } else if (remoteTrackingFresh) {
+                const remoteRef = gitSync(path, [
+                  "for-each-ref",
+                  "--format=%(refname:short)",
+                  "--contains",
+                  head,
+                  "refs/remotes/origin/",
+                ])
+                  .split("\n")
+                  .map((ref) => ref.trim())
+                  .find((ref) => ref !== "" && ref !== "origin")
+                if (remoteRef !== undefined) {
+                  tipDurableAt = remoteRef
+                  tipLandedUnknown = undefined
+                }
+              } else {
+                tipLandedUnknown = true
               }
-            } else {
+            } catch {
               tipLandedUnknown = true
             }
-          } catch {
-            tipLandedUnknown = true
           }
         }
       } catch {
@@ -2956,6 +2985,7 @@ function activeBayProtections(io: YrdCliIO): readonly YrdBayProtection[] {
 
 async function bayStatusCommand(
   app: YrdCliApp,
+  services: YrdCliServices,
   selectors: readonly string[],
   options: { json?: boolean },
   io: YrdCliIO,
@@ -2969,8 +2999,12 @@ async function bayStatusCommand(
 
   const remoteTrackingFresh = refreshBayStatusOrigin(cwd)
   const protections = activeBayProtections(io)
-  const reports: BayStatusReport[] = bays.map((bay) =>
-    classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections, io.now?.() ?? Date.now())),
+  const reports: BayStatusReport[] = await Promise.all(
+    bays.map(async (bay) =>
+      classifyBayStatus(
+        await gatherBayStatusFacts(app, services, bay, cwd, remoteTrackingFresh, protections, io.now?.() ?? Date.now()),
+      ),
+    ),
   )
   // Aggregate exit: any BLOCK → 1; else any UNKNOWN → 2; else 0.
   // YrdCliExitCode is 0|1|2|3; bay status uses the 0/1/2 subset (2 = unknown).
@@ -3000,8 +3034,12 @@ async function bayPruneCommand(
   const open = app.bays.list().filter((bay) => bay.status !== "closed")
   const remoteTrackingFresh = refreshBayStatusOrigin(cwd)
   const protections = activeBayProtections(io)
-  const reports = open.map((bay) =>
-    classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections, io.now?.() ?? Date.now())),
+  const reports = await Promise.all(
+    open.map(async (bay) =>
+      classifyBayStatus(
+        await gatherBayStatusFacts(app, services, bay, cwd, remoteTrackingFresh, protections, io.now?.() ?? Date.now()),
+      ),
+    ),
   )
   const dryRun = options.apply !== true
   const preserved: string[] = []
@@ -4391,6 +4429,7 @@ function sameIssueIntegratedCompositions(app: YrdCliApp, pr: PR): readonly Compo
 
 async function listBays(
   app: YrdCliApp,
+  services: YrdCliServices,
   options: JsonOption & Readonly<{ all?: boolean; check?: boolean; closed?: boolean }>,
   io: YrdCliIO,
 ): Promise<void> {
@@ -4431,9 +4470,19 @@ async function listBays(
   if (options.check === true) {
     const remoteTrackingFresh = refreshBayStatusOrigin(cwd)
     const protections = activeBayProtections(io)
-    reports = open.map((bay) =>
-      classifyBayStatus(
-        gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections, io.now?.() ?? Date.now()),
+    reports = await Promise.all(
+      open.map(async (bay) =>
+        classifyBayStatus(
+          await gatherBayStatusFacts(
+            app,
+            services,
+            bay,
+            cwd,
+            remoteTrackingFresh,
+            protections,
+            io.now?.() ?? Date.now(),
+          ),
+        ),
       ),
     )
   }
@@ -8900,7 +8949,7 @@ function buildProgram(
     .option("--all", "include open and terminal Bays")
     .option("--closed", "show terminal Bays only")
     .option("--check", "compute live destroy-safety status (fetches origin; may be slow)")
-    .action(async (options) => listBays(installed(), options, io))
+    .action(async (options) => listBays(installed(), installedServices(), options, io))
   bay
     .command("list")
     .description("list work bays")
@@ -8908,7 +8957,7 @@ function buildProgram(
     .option("--all", "include open and terminal Bays")
     .option("--closed", "show terminal Bays only")
     .option("--check", "compute live destroy-safety status (fetches origin; may be slow)")
-    .action(async (options) => listBays(installed(), options, io))
+    .action(async (options) => listBays(installed(), installedServices(), options, io))
   bay
     .command("open")
     .argument("[config]", "issue to link; omit for an anonymous Bay")
@@ -8995,7 +9044,9 @@ function buildProgram(
     .command("status [selector...]")
     .description("safety oracle: is this bay safe to remove? (exit 0=safe 1=not-safe 2=unknown)")
     .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => setExit(await bayStatusCommand(installed(), selectors, options, io)))
+    .action(async (selectors, options) =>
+      setExit(await bayStatusCommand(installed(), installedServices(), selectors, options, io)),
+    )
   program
     .command("log")
     .description("show queue history, newest first")
