@@ -25,6 +25,8 @@ import {
   PrPublicationInputSchema,
   prSourceReadyAt,
   deploymentJobKey,
+  HabGenerationReleaseReceiptSchema,
+  ReleaseDeploymentJobInputSchema,
   isConcurrentCheckabilityConflict,
   resolveBay,
   resolveBase,
@@ -1775,7 +1777,7 @@ async function requestAndRunDeploymentJob(
           : await deployments.release(input as Parameters<typeof deployments.release>[0])
     const id = app.jobs.requested(requested)[0] ?? app.jobs.getByKey(key)?.id
     job = id === undefined ? undefined : app.jobs.get(id)
-  } else if (job.definition !== definition || stableJson(job.input) !== stableJson(input)) {
+  } else if (job.definition !== definition || !sameDeploymentJobRequest(operation, job.input, input)) {
     raiseFailure(
       "refusal",
       "deployment-request-conflict",
@@ -1795,6 +1797,39 @@ async function requestAndRunDeploymentJob(
   }
   assertJobsPassed([job], `deployment ${operation}`)
   return job
+}
+
+function sameDeploymentJobRequest(
+  operation: DeploymentOperation,
+  stored: Job["input"],
+  requested: MaterializeDeploymentInput | ReleaseDeploymentJobInput,
+): boolean {
+  if (operation !== "release") return stableJson(stored) === stableJson(requested)
+  const left = ReleaseDeploymentJobInputSchema.parse(stored)
+  const right = ReleaseDeploymentJobInputSchema.parse(requested)
+  return stableJson(stableReleaseAuthority(left)) === stableJson(stableReleaseAuthority(right))
+}
+
+function stableReleaseAuthority(input: ReleaseDeploymentJobInput): unknown {
+  const receipt = HabGenerationReleaseReceiptSchema.parse(input.authorization.receipt)
+  return {
+    deploymentId: input.deploymentId,
+    generation: input.generation,
+    path: input.path,
+    sha: input.sha,
+    authorization: {
+      kind: input.authorization.kind,
+      generation: input.authorization.generation,
+      path: input.authorization.path,
+      sha: input.authorization.sha,
+      receipt: {
+        schema: receipt.schema,
+        jurisdiction: receipt.jurisdiction,
+        habitatRoot: receipt.habitatRoot,
+        retiredSource: receipt.retiredSource,
+      },
+    },
+  }
 }
 
 function successfulJobOutput(job: Job): Job["input"] {
