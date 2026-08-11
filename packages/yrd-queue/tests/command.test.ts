@@ -3689,13 +3689,17 @@ describe("Queue command adapters", () => {
       },
     })
 
-    const refusedCode = await gitCandidatePreparer({ inject: { process }, repo })({
-      id: "C1",
-      queueId: "main",
-      baseSha: queueBaseHead,
-      revs: [{ pr: pr.id, n: pr.revision, head: pr.headSha }],
-      prs: [pr],
-    }).then(
+    // `CandidatePreparer` is declared sync-or-async (queue.ts), so the returned
+    // union has no `.then` to call directly.
+    const refusedCode = await Promise.resolve(
+      gitCandidatePreparer({ inject: { process }, repo })({
+        id: "C1",
+        queueId: "main",
+        baseSha: queueBaseHead,
+        revs: [{ pr: pr.id, n: pr.revision, head: pr.headSha }],
+        prs: [pr],
+      }),
+    ).then(
       () => undefined,
       (error: unknown) => (error as { failure?: { code?: string } }).failure?.code,
     )
@@ -7213,12 +7217,14 @@ describe("Queue command adapters", () => {
    * than a branch carrier's authored tree, so if this merged it would silently
    * revert the component.
    *
-   * It is refused, but not by an ancestry check: a code carrier may not author a
-   * gitlink at all (`authoredGitlinkPaths`, command.ts:2266 -> `authored-gitlink`
-   * at :2272), so direction never gets a chance to matter. The blanket refusal is
-   * the stronger guard, and gitlink movement is routed to the intent path instead.
+   * It is NOT refused — it merges. The guard is monotonicity, not refusal: the
+   * promotion target only ever advances (command.ts:4361), so the merge writes
+   * the forward pin and the authored backward gitlink loses to it. That is
+   * invisible from either end on its own — read admission and the carrier looks
+   * unguarded, read the promotion loop and it looks unreachable — so the
+   * assertion below reads the pin the run actually wrote.
    */
-  it("refuses a clean-headed carrier that moves the gitlink backward", async () => {
+  it("does not roll the component back for a clean-headed carrier that moves the gitlink backward", async () => {
     const fixture = await componentMainLandingRepository()
 
     // Component main absorbs the pinned work, and the root advances its gitlink
@@ -7310,6 +7316,112 @@ describe("Queue command adapters", () => {
 
     expect(run).not.toMatchObject({ error: { code: "carrier-drops-landed" } })
   })
+
+  /**
+   * The misclassification the head-shaped check produces, and its boundary. The
+   * two tests below are a matched pair and must be read together: they differ in
+   * one fact and take opposite cures, and reading the wrong one of the two shas
+   * inverts the verdict on both.
+   *
+   * SPENT (this one): the pin the carrier authors is already contained in the pin
+   * the AUTHORITATIVE BASE carries — another carrier performed the promotion
+   * first. Rebuilding delivers nothing, so "linear rebuild required" is advice
+   * that cannot succeed: the rebuild is empty and is refused again on the same
+   * ground. That is the loop PR562 rode to revision 43.
+   *
+   * LIVE (the sibling below): component main holds the work, but root main's
+   * gitlink still points before it — so this carrier is the one that would
+   * perform the promotion, and telling its author to close would DROP the
+   * advance. Measured directly: with root's gitlink behind, the rebuild still
+   * delivers the gitlink; with root's gitlink containing the pin, it delivers
+   * nothing.
+   */
+  it("tells a stale-headed gitlink-only carrier to close when the base already carries its pin", async () => {
+    const fixture = await componentMainLandingRepository({ pushSuccessor: true })
+
+    await using process = createProcess()
+    await using app = await checkedQueue(process, fixture.repo, ["true"])
+    await submitCertifiedCarrier(app, fixture.repo, {
+      branch: "issue/feature",
+      headSha: fixture.featureSha,
+      baseSha: fixture.rootBaseSha,
+    })
+
+    // Another carrier promotes the component past this one's pin, and root main
+    // moves on, so the head goes stale and the pin goes spent in one step.
+    await git(fixture.component, ["switch", "-q", "main"])
+    await git(fixture.component, ["merge", "-q", "--ff-only", fixture.successorSha])
+    await git(fixture.component, ["push", "-q", "origin", "main"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+    await git(join(fixture.repo, "dep"), ["fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+    await git(join(fixture.repo, "dep"), ["checkout", "-q", fixture.successorSha])
+    await git(fixture.repo, ["add", "dep"])
+    await writeFile(join(fixture.repo, "unrelated.txt"), "root moved on\n")
+    await git(fixture.repo, ["add", "unrelated.txt"])
+    await git(fixture.repo, ["commit", "-qm", "promote dependency and land unrelated work"])
+    const movedBase = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["push", "-q", "origin", "main"])
+
+    // Strict containment, not equality — `git()` throws on non-zero, so these
+    // two calls are the precondition that this is the absorbed case.
+    await git(fixture.component, ["merge-base", "--is-ancestor", fixture.pinSha, fixture.successorSha])
+    expect(fixture.pinSha).not.toBe(fixture.successorSha)
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: {
+        code: "carrier-pin-already-landed",
+        message: expect.stringContaining(fixture.pinSha),
+      },
+    })
+    const message = (run as unknown as { error: { message: string } }).error.message
+    expect(message).toContain(fixture.successorSha)
+    expect(message).toMatch(/close/iu)
+    expect(message).not.toMatch(/linear rebuild/iu)
+    expect(await git(fixture.rootRemote, ["rev-parse", "main"])).toBe(movedBase)
+  }, 20_000)
+
+  it("keeps the rebuild remedy when component main has the work but the base's pin does not", async () => {
+    const fixture = await componentMainLandingRepository()
+
+    // The component lands the pinned work, but nothing promotes root's gitlink —
+    // so this carrier is still the one that would deliver it.
+    await git(fixture.component, ["switch", "-q", "main"])
+    await git(fixture.component, ["merge", "-q", "--ff-only", fixture.pinSha])
+    await git(fixture.component, ["push", "-q", "origin", "main"])
+
+    await using process = createProcess()
+    await using app = await checkedQueue(process, fixture.repo, ["true"])
+    await submitCertifiedCarrier(app, fixture.repo, {
+      branch: "issue/feature",
+      headSha: fixture.featureSha,
+      baseSha: fixture.rootBaseSha,
+    })
+
+    await git(fixture.repo, ["switch", "-q", "main"])
+    await writeFile(join(fixture.repo, "unrelated.txt"), "root moved on\n")
+    await git(fixture.repo, ["add", "unrelated.txt"])
+    await git(fixture.repo, ["commit", "-qm", "unrelated root landing"])
+    await git(fixture.repo, ["push", "-q", "origin", "main"])
+
+    // The base's gitlink is still behind the carrier's pin: there is real work in
+    // this branch, and closing it would drop the promotion.
+    expect(await git(fixture.repo, ["ls-tree", "HEAD", "dep"])).toContain(fixture.componentBaseSha)
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: {
+        code: "carrier-drops-landed",
+        message: expect.stringMatching(/linear rebuild/iu),
+      },
+    })
+  }, 20_000)
 
   it("refuses a stale resolved component pin and enumerates the component commits it would drop", async () => {
     const fixture = await componentMainLandingRepository()
