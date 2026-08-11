@@ -211,7 +211,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     })
   })
 
-  it("parks a structurally permanent refusal as queue state on its first occurrence", async () => {
+  it("records a first refusal without duplicating the CLI remedy classifier", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     await using app = await createApp(
       refuseForever(() => ""),
@@ -226,15 +226,8 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       reason: "two fixed gitlink commits are non-ancestral",
     })
 
-    expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({
-      code: "recut-gitlink-conflict",
-      count: 1,
-      settlement: {
-        disposition: "needs-person",
-        reason: "two fixed gitlink commits are non-ancestral",
-      },
-    })
-    expect(app.queue.eligibility(pr.id).reason).toMatchObject({ code: "admission-refused" })
+    expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({ code: "recut-gitlink-conflict", count: 1 })
+    expect(app.state().queues.admissionRefusals[pr.id]?.settlement).toBeUndefined()
     expect(app.queue.audit().findings).not.toContainEqual(expect.objectContaining({ pr: pr.id }))
   })
 

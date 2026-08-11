@@ -17,6 +17,7 @@ type ResidentHarnessOptions = Readonly<{
   run(context: ResidentRunContext): Promise<readonly unknown[]>
   state?: () => ResidentState
   bays?: Readonly<Record<string, unknown>>
+  queue?: Readonly<Record<string, unknown>>
 }>
 
 const emptyState = (): ResidentState => ({
@@ -60,6 +61,7 @@ export function createResidentHarness(options: ResidentHarnessOptions) {
     },
     ...(options.bays === undefined ? {} : { bays: options.bays }),
     queue: {
+      ...options.queue,
       run: async () => {
         runCalls += 1
         return options.run({ signal, call: runCalls })

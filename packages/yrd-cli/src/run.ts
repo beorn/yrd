@@ -7757,6 +7757,10 @@ export async function followQueueRuns(
       }
       recoveryReporter.flush()
       heartbeat?.check()
+      // A refusal can be born during this compose pass. Classify it before the
+      // command returns or sleeps so a judgment-required revision is durably
+      // parked after its first attempt, including on the one-shot path.
+      await applyRefusalRemedies(app, services, io, remedied)
       // The runner is a service; its stdout is a log stream. Human output is
       // loggily-only (--json still streams the structured record). The
       // QueueRunsView table (RUN/PRS/STATE/STEPS) is the interactive
