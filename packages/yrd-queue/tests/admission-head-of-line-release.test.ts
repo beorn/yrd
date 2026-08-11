@@ -101,13 +101,16 @@ async function submitBranch(app: Awaited<ReturnType<typeof createApp>>, branch: 
 
 /** Refuse exactly the named PRs the way an authored-gitlink carrier is refused:
  * a per-PR refusal that prints its own deterministic remedy. */
-function refuseAuthoredGitlink(refused: ReadonlySet<string>): CandidatePreparer {
+function refuseAuthoredGitlink(
+  refused: ReadonlySet<string>,
+  code: "authored-gitlink" | "recut-gitlink-conflict" = "authored-gitlink",
+): CandidatePreparer {
   return (input) => {
     const poisoned = input.prs.find((pr) => refused.has(pr.id))
     if (poisoned !== undefined) {
       throw createFailure({
         kind: "refusal",
-        code: "authored-gitlink",
+        code,
         message:
           `yrd: PR '${poisoned.id}' changes generated-only gitlinks [km]; authored root branches use ` +
           `'yrd pr submit <branch>', then 'yrd pr recut ${poisoned.id} --preflight --queue --apply'`,
@@ -130,7 +133,7 @@ describe("admission head-of-line release — a refused PR never blocks the ready
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     const refused = new Set<string>()
-    await using app = await createApp(refuseAuthoredGitlink(refused), log)
+    await using app = await createApp(refuseAuthoredGitlink(refused, "recut-gitlink-conflict"), log)
     const head = await submitBranch(app, "issue/authored-gitlink-carrier")
     refused.add(head.id)
     const trailing = [
@@ -143,6 +146,7 @@ describe("admission head-of-line release — a refused PR never blocks the ready
 
     const state = app.state()
     expect(state.bays.prs[head.id]?.integration).toBeUndefined()
+    expect(state.queues.admissionRefusals[head.id]?.settlement).toMatchObject({ disposition: "needs-person" })
     for (const pr of trailing) {
       expect(state.bays.prs[pr.id]?.integration, `expected PR '${pr.id}' to integrate behind the refused head`).toEqual(
         expect.objectContaining({ commit: MERGED }),
