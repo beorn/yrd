@@ -2229,6 +2229,12 @@ async function prepareCandidate(
       })
       continue
     }
+    if (pr.changeId === undefined) {
+      return candidateFailure(
+        "change-id-missing",
+        `yrd: PR '${pr.id}' predates stable Change-Id identity; run the landing-receipt migration before preparing it`,
+      )
+    }
     if (pr.composition === undefined) {
       if (pr.recut !== undefined) {
         const dropped = await carrierDropsLandedFailure(git, repo, path, pr.id, pr.headSha, authoritativeBase)
@@ -2294,17 +2300,13 @@ async function prepareCandidate(
       }
     }
     const before = await git.commit(path, "HEAD")
-    const merged = await git.run(path, ["merge", "--no-ff", "--no-edit", pr.headSha], true)
+    const message = candidateChangeCommitMessage("merge", pr)
+    const merged = await git.run(path, ["merge", "--no-ff", "-m", message, pr.headSha], true)
     if (merged.code !== 0) {
       const resolved = await resolveCandidateSubmoduleConflict(git, repo, path)
       if (resolved.status === "composed") {
         submoduleResolutions.push(...resolved.output)
-        const wrapper = await stabilizeGeneratedRootWrapper(
-          git,
-          path,
-          before,
-          `yrd: merge ${pr.id} revision ${String(pr.revision)}`,
-        )
+        const wrapper = await stabilizeGeneratedRootWrapper(git, path, before, message)
         if (wrapper !== undefined) return wrapper
         continue
       }
@@ -2329,12 +2331,7 @@ async function prepareCandidate(
         }),
       }
     }
-    const wrapper = await stabilizeGeneratedRootWrapper(
-      git,
-      path,
-      before,
-      `yrd: merge ${pr.id} revision ${String(pr.revision)}`,
-    )
+    const wrapper = await stabilizeGeneratedRootWrapper(git, path, before, message)
     if (wrapper !== undefined) return wrapper
   }
   return {
@@ -3127,6 +3124,11 @@ function pinIntentCommitMessage(component: string, target: string, issue: string
   return `chore(${component.split("/").at(-1) ?? component}): advance pin to ${target.slice(0, 12)} [${issue}]`
 }
 
+function candidateChangeCommitMessage(operation: "compose" | "merge", pr: StepExecution["prs"][number]): string {
+  if (pr.changeId === undefined) throw new Error(`yrd: PR '${pr.id}' has no Change-Id`)
+  return `yrd: ${operation} ${pr.id} revision ${String(pr.revision)}\n\nChange-Id: ${pr.changeId}`
+}
+
 async function composePR(
   git: Git,
   repo: string,
@@ -3161,7 +3163,13 @@ async function composePR(
   }
 
   const parent = await git.commit(path, "HEAD")
-  const synthesized = await synthesizeGitlinkWrapper(git, path, parent, updates, `yrd: compose ${pr.id}`)
+  const synthesized = await synthesizeGitlinkWrapper(
+    git,
+    path,
+    parent,
+    updates,
+    candidateChangeCommitMessage("compose", pr),
+  )
   if (synthesized.status === "failed") return synthesized
   for (const rewrite of rewrites) {
     if ((await readGitlink(git, path, "HEAD", rewrite.repo)) !== rewrite.newTipSha) {

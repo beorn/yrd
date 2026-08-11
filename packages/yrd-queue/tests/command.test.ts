@@ -6253,6 +6253,30 @@ describe("Queue command adapters", () => {
     expect(await Bun.file(join(repo, "operator-wip.txt")).text()).toBe("preserve me\n")
   })
 
+  it("checks and lands the exact Change-Id-stamped Candidate", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"], {
+      prepareCandidate: true,
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = app.state().bays.prs.PR1
+    if (pr === undefined) throw new Error("expected PR1")
+    const changeId = currentPRRev(pr).changeId
+    if (changeId === undefined) throw new Error("expected PR1 Change-Id")
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    if (run === undefined) throw new Error("expected Queue run")
+    const checkJob = run.steps[0]?.job
+    if (checkJob?.status !== "completed" || checkJob.conclusion !== "success") {
+      throw new Error("check did not pass")
+    }
+    const checked = GitCheckEvidenceSchema.parse(checkJob.output)
+
+    expect(await git(repo, ["show", "-s", "--format=%B", checked.candidateSha])).toContain(`Change-Id: ${changeId}`)
+    expect(run.integration).toMatchObject({ commit: checked.candidateSha, baseSha: checked.candidateSha })
+  })
+
   it("groups reachable non-tip candidate pins by origin in fresh exact-SHA proof stores", async () => {
     const { repo, featureSha, origin, pins } = await groupedSubmoduleRepository()
     await using process = createProcess()
