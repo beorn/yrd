@@ -6624,11 +6624,11 @@ describe("runYrd", () => {
     const lockAcquired = Promise.withResolvers<void>()
     let lock: Promise<void> | undefined
     try {
-      const absent = outputIO({ cwd: repo })
+      const absent = outputIO({ cwd: repo, healthServiceName: "yrd-runner-pm" })
       expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), absent.io, services)).toBe(1)
       expect(JSON.parse(absent.stdout())).toMatchObject({
         schema: "hab-service-health/1",
-        service: "yrd-runner",
+        service: "yrd-runner-pm",
         state: "absent",
         running: false,
         facts: { lease: "free", git: { dirty: true, baselines: [{ base: "main", ahead: 1, behind: 0 }] } },

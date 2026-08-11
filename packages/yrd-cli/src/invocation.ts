@@ -217,6 +217,8 @@ function namedAlternatives(names: readonly string[]): string {
   return `${names.slice(0, -1).join(", ")} or ${names.at(-1)}`
 }
 
+const COMPOSITION_QUEUE_WRITES = new Set(["run", "pause", "resume", "recover", "cancel", "finish"])
+
 /** Optional composition-host adapter for named repositories. Standalone Yrd
  * deliberately never calls this: aliases are injected by the installed host. */
 export function normalizeYrdRepositoryAliasInvocation(
@@ -242,10 +244,10 @@ export function normalizeYrdRepositoryAliasInvocation(
     const tail = operand === "list" || operand === "_list" ? args.slice(queueIndex + 2) : args.slice(queueIndex + 1)
     return { kind: "all-repositories-read", args: [...prefix, "queue", "list", ...tail] }
   }
-  if (operand === "run" || operand === "pause" || operand === "resume") {
+  if (COMPOSITION_QUEUE_WRITES.has(operand)) {
     const declaration = requiredRepository(args[queueIndex + 2])
     const tail = args.slice(queueIndex + 3)
-    const base = operand === "run" ? [] : [declaration.queue.base]
+    const base = operand === "pause" || operand === "resume" ? [declaration.queue.base] : []
     return {
       kind: "repository-write",
       ...declaration,

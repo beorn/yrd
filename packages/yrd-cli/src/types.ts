@@ -139,6 +139,8 @@ export type YrdCliIO = {
   columns?: number
   rows?: number
   cwd?: string
+  /** Composition-owned Hab service identity for a queue runner health probe. */
+  healthServiceName?: string
   /** Host-resolved primary repository whose shared Journal this command projects. */
   repositoryRoot?: string
   /** Probe whether a resident runner holds the drain lease in `cwd`. When it

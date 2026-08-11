@@ -1874,6 +1874,7 @@ function defaultIO(): YrdCliIO {
     columns: process.stdout.columns,
     rows: process.stdout.rows,
     cwd: process.cwd(),
+    ...(process.env.HAB_SERVICE_NAME?.trim() ? { healthServiceName: process.env.HAB_SERVICE_NAME.trim() } : {}),
     residentLeaseHeld: (cwd) => residentRunnerLeaseHeld(cwd),
   }
   if (!interactive) return io

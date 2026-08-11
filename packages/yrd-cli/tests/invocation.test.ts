@@ -152,6 +152,33 @@ describe("repository aliases supplied by a composition host", () => {
       },
     },
     {
+      args: ["queue", "recover", "beta", "--reason", "expired worker"],
+      expected: {
+        kind: "repository-write",
+        repository: { name: "beta", path: "/srv/beta" },
+        queue: { base: "release" },
+        args: ["--repo", "/srv/beta", "queue", "recover", "--reason", "expired worker"],
+      },
+    },
+    {
+      args: ["queue", "cancel", "alpha", "R7", "--reason", "superseded"],
+      expected: {
+        kind: "repository-write",
+        repository: { name: "alpha", path: "/srv/alpha" },
+        queue: { base: "main" },
+        args: ["--repo", "/srv/alpha", "queue", "cancel", "R7", "--reason", "superseded"],
+      },
+    },
+    {
+      args: ["queue", "finish", "beta", "PR9", "--step", "verify", "--ok"],
+      expected: {
+        kind: "repository-write",
+        repository: { name: "beta", path: "/srv/beta" },
+        queue: { base: "release" },
+        args: ["--repo", "/srv/beta", "queue", "finish", "PR9", "--step", "verify", "--ok"],
+      },
+    },
+    {
       args: ["pr", "view", "PR1"],
       expected: { kind: "bypass", args: ["pr", "view", "PR1"] },
     },
@@ -166,6 +193,12 @@ describe("repository aliases supplied by a composition host", () => {
   it("refuses an undeclared repository alias and names the valid set", () => {
     expect(() => normalizeYrdRepositoryAliasInvocation(["queue", "run", "docs"], repositories)).toThrow(
       "unknown Yrd repository 'docs'; expected alpha or beta",
+    )
+  })
+
+  it.each(["recover", "cancel", "finish"])("refuses a missing repository alias for queue %s", (command) => {
+    expect(() => normalizeYrdRepositoryAliasInvocation(["queue", command], repositories)).toThrow(
+      "unknown Yrd repository ''; expected alpha or beta",
     )
   })
 })

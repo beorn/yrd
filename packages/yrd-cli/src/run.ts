@@ -563,7 +563,7 @@ type RunnerHealthFacts = Readonly<{
 type RunnerHealthPayload = Readonly<{
   schema: "hab-service-health/1"
   command: "queue.list.check"
-  service: "yrd-runner"
+  service: string
   state: "healthy" | "absent" | "unhealthy"
   running: boolean
   error?: ReturnType<typeof actionableFailure>
@@ -660,6 +660,7 @@ async function queueRunnerHealth(
   exitCode: YrdCliExitCode
 }> {
   const cwd = io.cwd ?? process.cwd()
+  const service = io.healthServiceName?.trim() || "yrd-runner"
   const audit = services.queue?.auditEnvironment
   let leaseHeld: boolean | undefined
   let git: RunnerGitHealth = { cwd, headSha: "unknown", dirty: false, baselines: [] }
@@ -699,7 +700,7 @@ async function queueRunnerHealth(
         payload: {
           schema: "hab-service-health/1",
           command: "queue.list.check",
-          service: "yrd-runner",
+          service,
           state: "unhealthy",
           running: leaseHeld,
           error: actionableFailure({ code: first.code, message: drift.map((finding) => finding.message).join("\n") }),
@@ -715,7 +716,7 @@ async function queueRunnerHealth(
           payload: {
             schema: "hab-service-health/1",
             command: "queue.list.check",
-            service: "yrd-runner",
+            service,
             state: "unhealthy",
             running: false,
             error: runnerHealthError(
@@ -732,7 +733,7 @@ async function queueRunnerHealth(
         payload: {
           schema: "hab-service-health/1",
           command: "queue.list.check",
-          service: "yrd-runner",
+          service,
           state: "absent",
           running: false,
           facts,
@@ -746,7 +747,7 @@ async function queueRunnerHealth(
         payload: {
           schema: "hab-service-health/1",
           command: "queue.list.check",
-          service: "yrd-runner",
+          service,
           state: "unhealthy",
           running: true,
           error: runnerHealthError("resident-runner-unhealthy", `resident runner lease is held but ${detail}`, [
@@ -762,7 +763,7 @@ async function queueRunnerHealth(
         payload: {
           schema: "hab-service-health/1",
           command: "queue.list.check",
-          service: "yrd-runner",
+          service,
           state: "unhealthy",
           running: true,
           error: runnerHealthError(
@@ -780,7 +781,7 @@ async function queueRunnerHealth(
         payload: {
           schema: "hab-service-health/1",
           command: "queue.list.check",
-          service: "yrd-runner",
+          service,
           state: "unhealthy",
           running: true,
           error: runnerHealthError(
@@ -797,7 +798,7 @@ async function queueRunnerHealth(
       payload: {
         schema: "hab-service-health/1",
         command: "queue.list.check",
-        service: "yrd-runner",
+        service,
         state: "healthy",
         running: true,
         facts,
@@ -814,7 +815,7 @@ async function queueRunnerHealth(
       payload: {
         schema: "hab-service-health/1",
         command: "queue.list.check",
-        service: "yrd-runner",
+        service,
         state: "unhealthy",
         running: leaseHeld === true,
         error: actionableFailure(fact),
