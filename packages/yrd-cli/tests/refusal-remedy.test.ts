@@ -4,7 +4,7 @@
  * @consumer @yrd/cli resident runner
  */
 import { describe, expect, it } from "vitest"
-import { classifyRefusalRemedy, formatRemedyCommand } from "../src/refusal-remedy.ts"
+import { classifyRefusalRemedy } from "../src/refusal-remedy.ts"
 
 const PR = "PR1791"
 
@@ -12,45 +12,39 @@ function authoredGitlink(pr = PR): { code: string; message: string } {
   return {
     code: "authored-gitlink",
     message:
-      `yrd: PR '${pr}' changes generated-only gitlinks [km, ag]; authored root branches use ` +
-      `'yrd pr submit <branch>', then 'yrd pr recut ${pr} --preflight --queue --apply'; ` +
-      "no composition manifest or manual triage is needed",
+      `yrd: PR '${pr}' changes generated-only gitlinks [km, ag]; run ` +
+      "'yrd intent submit --component km --issue <issue-ref>' and " +
+      "'yrd intent submit --component ag --issue <issue-ref>'",
   }
 }
 
 describe("refusal remedy classification — self-applicable vs judgment-required", () => {
-  it("classifies an authored-gitlink carrier as the deterministic resubmit + recut drill", () => {
+  it("leaves authored-gitlink intent submission to the author instead of auto-recutting", () => {
     const remedy = classifyRefusalRemedy(authoredGitlink(), { branch: "task/22474", delivery: "submitted" })
 
-    expect(remedy.kind).toBe("self-applicable")
-    if (remedy.kind !== "self-applicable") return
-    expect(remedy.steps).toEqual([{ verb: "recut", pr: PR, preflight: true, apply: true, queue: true, force: false }])
-    // The applied command is logged VERBATIM, with the branch placeholder the
-    // printed remedy carries resolved to the PR's real branch.
-    expect(remedy.steps.map(formatRemedyCommand)).toEqual([`yrd pr recut ${PR} --preflight --queue --apply`])
+    expect(remedy.kind).toBe("judgment")
+    if (remedy.kind !== "judgment") return
+    expect(remedy.reason).toContain("yrd intent submit --component km")
   })
 
-  it("keeps a draft carrier on the create path the printed remedy names for it", () => {
+  it("does not resurrect the draft create path for an intent remedy", () => {
     const remedy = classifyRefusalRemedy(authoredGitlink(), { branch: "task/22474", delivery: "pushed" })
 
-    expect(remedy.kind).toBe("self-applicable")
-    if (remedy.kind !== "self-applicable") return
-    expect(remedy.steps[0]).toEqual({ verb: "create", branch: "task/22474" })
-    expect(remedy.steps.map(formatRemedyCommand)[0]).toBe("yrd pr create task/22474")
+    expect(remedy.kind).toBe("judgment")
   })
 
-  it("applies the same drill to a composition-invalid carrier, which prints the identical remedy", () => {
+  it("does not mechanise a composition-invalid carrier routed to intent", () => {
     const remedy = classifyRefusalRemedy(
       {
         code: "composition-invalid",
         message:
-          `yrd: PR '${PR}' composition manifest names no source; authored root branches use ` +
-          `'yrd pr submit <branch>', then 'yrd pr recut ${PR} --preflight --queue --apply'`,
+          `yrd: PR '${PR}' composition manifest names no source; use ` +
+          "'yrd intent submit --component km --issue <issue-ref>'",
       },
       { branch: "task/22474", delivery: "submitted" },
     )
 
-    expect(remedy.kind).toBe("self-applicable")
+    expect(remedy.kind).toBe("judgment")
   })
 
   it("refuses to mechanise a divergent-gitlink compose, whose recipe can conflict", () => {

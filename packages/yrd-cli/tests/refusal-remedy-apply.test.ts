@@ -1,5 +1,5 @@
 /**
- * @failure The resident prints an authored-gitlink carrier's exact deterministic remedy every cycle and waits for a human to type it, so the PR wedges the queue for hours; or it re-applies a failed remedy every cycle instead of degrading to the printed refusal.
+ * @failure The resident can mistake an author-owned intent remedy for a safe PR rewrite, or re-apply a failed mechanical remedy every cycle instead of degrading to the printed refusal.
  * @level l2
  * @consumer @yrd/cli resident runner
  */
@@ -16,12 +16,8 @@ const TARGET = "b".repeat(40)
 type Call = Readonly<{ op: string; detail?: string }>
 type LogCall = Readonly<{ message: string; props: Record<string, unknown> }>
 
-function authoredGitlinkReason(pr: string): string {
-  return (
-    `yrd: PR '${pr}' changes generated-only gitlinks [km]; authored root branches use 'yrd pr submit <branch>', ` +
-    `then 'yrd pr recut ${pr} --preflight --queue --apply' on that same PR; ` +
-    "no composition manifest or manual triage is needed"
-  )
+function mechanicalRecutReason(pr: string): string {
+  return `yrd: PR '${pr}' needs a certified refresh; run 'yrd pr recut ${pr} --preflight --queue --apply'`
 }
 
 function harness(
@@ -78,9 +74,9 @@ function harness(
         admissionRefusals: {
           PR1791: {
             pr: "PR1791",
-            code: options.code ?? "authored-gitlink",
+            code: options.code ?? "composition-invalid",
             kind: "refusal",
-            reason: options.reason ?? authoredGitlinkReason("PR1791"),
+            reason: options.reason ?? mechanicalRecutReason("PR1791"),
             count: options.count ?? 3,
             firstAt: "2026-07-27T15:00:00.000Z",
             lastAt: "2026-07-27T15:51:00.000Z",
@@ -105,6 +101,7 @@ function harness(
     },
     bays: {
       pr: () => pr(),
+      reviewState: () => ({ current: undefined }),
       checksRequested: () => true,
       ready: async () => guard("ready"),
       requestChecks: async () => guard("requestChecks"),
@@ -158,7 +155,21 @@ function harness(
   return { app, io, services, calls, infos, warns, ops: () => calls.map((call) => call.op) }
 }
 
-describe("resident self-applied refusal remedy — the robot presses the button it printed", () => {
+describe("resident refusal remedies — only PR-local drills are self-applied", () => {
+  it("settles authored-gitlink as needs-person without mutating the PR", async () => {
+    const h = harness({
+      code: "authored-gitlink",
+      reason:
+        "yrd: PR 'PR1791' changes generated-only gitlinks [km]; use " +
+        "'yrd intent submit --component km --target 1111111111111111111111111111111111111111 --issue one'",
+    })
+
+    const outcomes = await applyRefusalRemedies(h.app, h.services, h.io, new Set())
+
+    expect(outcomes).toEqual([expect.objectContaining({ status: "escalated", pr: "PR1791", code: "authored-gitlink" })])
+    expect(h.ops()).toEqual(["queue.settleAdmissionRefusal"])
+  })
+
   it("runs the printed drill end to end and logs every applied command verbatim", async () => {
     const h = harness()
 
@@ -169,7 +180,7 @@ describe("resident self-applied refusal remedy — the robot presses the button 
         status: "applied",
         pr: "PR1791",
         revision: 1,
-        code: "authored-gitlink",
+        code: "composition-invalid",
         count: 3,
         commands: ["yrd pr recut PR1791 --preflight --queue --apply", "yrd pr recut PR1791 --queue"],
         verdict: "RECUT",
@@ -233,7 +244,7 @@ describe("resident self-applied refusal remedy — the robot presses the button 
     expect(outcome).toMatchObject({
       status: "failed",
       pr: "PR1791",
-      code: "authored-gitlink",
+      code: "composition-invalid",
       resolution: ["yrd pr recut PR1791 --preflight --queue --apply"],
     })
     expect(h.warns).toContainEqual(

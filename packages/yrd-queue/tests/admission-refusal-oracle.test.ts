@@ -176,7 +176,7 @@ function refuseForever(blocked: () => string): CandidatePreparer {
       throw createFailure({
         kind: "refusal",
         code: "authored-gitlink",
-        message: `yrd: PR '${blocked()}' authors a gitlink bump; recut it before required checks`,
+        message: `yrd: PR '${blocked()}' authors a gitlink bump; use yrd intent submit --component vendor/yrd --issue <issue-ref>`,
       })
     }
     const { prs: _prs, ...candidate } = input
@@ -563,7 +563,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(finding?.message).toBe(
       `merge request '${pr.id}' at the head of the required-check queue failed its entry checks 3 consecutive times over 5h46m ` +
         `(since 2026-01-01T00:00:00.000Z) without ever completing required checks; latest failure 'authored-gitlink': ` +
-        `yrd: PR '${pr.id}' authors a gitlink bump; recut it before required checks`,
+        `yrd: PR '${pr.id}' authors a gitlink bump; use yrd intent submit --component vendor/yrd --issue <issue-ref>`,
     )
     log.end()
   })

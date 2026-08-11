@@ -29,8 +29,8 @@ function refusal(id: string, overrides: Partial<QueueAdmissionRefusal> = {}): Qu
     code: "authored-gitlink",
     kind: "refusal",
     reason:
-      `yrd: PR '${id}' changes generated-only gitlinks [km]; authored root branches use 'yrd pr submit <branch>', ` +
-      `then 'yrd pr recut ${id} --preflight --queue --apply' on that same PR`,
+      `yrd: PR '${id}' changes generated-only gitlinks [km]; use ` +
+      "'yrd intent submit --component km --target 1111111111111111111111111111111111111111 --issue one'",
     count: 3,
     firstAt: "2026-07-27T15:00:00.000Z",
     lastAt: "2026-07-27T15:51:00.000Z",
@@ -39,7 +39,7 @@ function refusal(id: string, overrides: Partial<QueueAdmissionRefusal> = {}): Qu
 }
 
 describe("refusal remedy plan — the runner acts on exactly the PRs the queue calls wedged", () => {
-  it("plans the deterministic drill for a wedged authored-gitlink carrier", () => {
+  it("plans one needs-person settlement for a wedged authored-gitlink carrier", () => {
     const plans = planRefusalRemedies({ PR1791: refusal("PR1791") }, { PR1791: pr("PR1791") }, new Set())
 
     expect(plans).toHaveLength(1)
@@ -49,7 +49,7 @@ describe("refusal remedy plan — the runner acts on exactly the PRs the queue c
       revision: 1,
       count: 3,
       key: refusalRemedyKey("PR1791", 1, HEAD),
-      remedy: { kind: "self-applicable" },
+      remedy: { kind: "judgment" },
     })
   })
 

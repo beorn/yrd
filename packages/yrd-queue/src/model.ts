@@ -4,6 +4,7 @@ import {
   GitRefSchema,
   GitShaSchema,
   PRIdSchema,
+  PRRecutCertificateSchema,
   PRRecutProofSchema,
   type PRTerminalAssociation,
   baseIdentity,
@@ -49,8 +50,13 @@ const FlowPinSchema = z
   .strict()
 
 const PRSnapshotRecutProofSchema = PRRecutProofSchema.extend({
+  /** Current exact carrier certificate. Absence is accepted only for replaying legacy queue records. */
+  certificate: PRRecutCertificateSchema.optional(),
   /** Immutable base certified by this recut revision. Optional only for replaying legacy queue records. */
   baseSha: GitShaSchema.optional(),
+  /** Immutable approved-source endpoints. Both are absent only for legacy queue records. */
+  sourceBaseSha: GitShaSchema.optional(),
+  sourceHeadSha: GitShaSchema.optional(),
 }).strict()
 
 const IntentMemberIdSchema = z.string().regex(/^I\d+$/u)
@@ -89,6 +95,36 @@ export const PRSnapshotSchema = z
     }
     if (snapshot.intent !== undefined && snapshot.id !== snapshot.intent.id) {
       context.addIssue({ code: "custom", path: ["intent", "id"], message: "intent member id must match snapshot id" })
+    }
+    const recutIssue = (path: string[], message: string) =>
+      context.addIssue({ code: "custom", path: ["recut", ...path], message })
+    const rootSources = snapshot.recut?.sources?.filter(({ repo }) => repo === ".") ?? []
+    const rootSource = rootSources[0]
+    const frozen = snapshot.recut?.certificate === "frozen-code-carrier-v1"
+    if (frozen && snapshot.recut?.baseSha === undefined) {
+      recutIssue(["baseSha"], "a frozen code-carrier certificate requires an immutable candidate base")
+    }
+    if (frozen && (snapshot.recut?.sourceBaseSha === undefined || snapshot.recut.sourceHeadSha === undefined)) {
+      recutIssue([], "a frozen code-carrier certificate requires a complete immutable source range")
+    }
+    if (!frozen && (snapshot.recut?.sourceBaseSha !== undefined || snapshot.recut?.sourceHeadSha !== undefined)) {
+      recutIssue([], "immutable source endpoints require a frozen code-carrier certificate")
+    }
+    if (rootSources.length > 1) {
+      recutIssue(["sources"], "a recut snapshot may carry at most one root source mapping")
+    }
+    if (frozen && rootSources.length !== 1) {
+      recutIssue(["sources"], "a frozen code-carrier certificate requires exactly one root source mapping")
+    }
+    if (
+      rootSource !== undefined &&
+      snapshot.recut?.sourceHeadSha !== undefined &&
+      rootSource.fromHeadSha !== snapshot.recut.sourceHeadSha
+    ) {
+      recutIssue(["sources"], "root source mapping must start at the certified source head")
+    }
+    if (rootSource !== undefined && rootSource.toHeadSha !== snapshot.headSha) {
+      recutIssue(["sources"], "root source mapping must end at the current candidate head")
     }
   })
 export type PRSnapshot = Readonly<z.infer<typeof PRSnapshotSchema>>
@@ -924,6 +960,12 @@ export const Queues = Object.freeze({
   snapshot(pr: PR): PRSnapshot {
     const baseSha = checkRequest(pr)?.baseSha ?? prBaseSha(pr)
     const recut = prRecut(pr)
+    const frozen = recut?.certificate === "frozen-code-carrier-v1"
+    const sourceRevision = recut === undefined ? undefined : pr.revs.find(({ n }) => n === recut.fromRevision)
+    const sourceEndpoints =
+      !frozen || sourceRevision?.baseSha === undefined
+        ? {}
+        : { sourceBaseSha: sourceRevision.baseSha, sourceHeadSha: sourceRevision.head }
     return PRSnapshotSchema.parse({
       id: pr.id,
       ...(pr.bay === undefined ? {} : { bay: pr.bay }),
@@ -938,7 +980,13 @@ export const Queues = Object.freeze({
       ...(prComposition(pr) === undefined ? {} : { composition: prComposition(pr) }),
       ...(recut === undefined
         ? {}
-        : { recut: { ...recut, ...(prBaseSha(pr) === undefined ? {} : { baseSha: prBaseSha(pr) }) } }),
+        : {
+            recut: {
+              ...recut,
+              ...(prBaseSha(pr) === undefined ? {} : { baseSha: prBaseSha(pr) }),
+              ...sourceEndpoints,
+            },
+          }),
       ...(pr.flow === undefined ? {} : { flow: pr.flow }),
     })
   },

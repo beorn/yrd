@@ -2682,7 +2682,7 @@ checks: [{check: {run: "true"}}]
       failure: {
         kind: "refusal",
         code: "authored-gitlink",
-        resolution: ["yrd pr create <branch>", "yrd pr recut PR1 --preflight --queue --apply"],
+        resolution: [`yrd intent submit --component dep --target ${pin} --issue <issue-ref>`],
       },
     })
     expect(stderr).toContain("dep")
@@ -2842,7 +2842,7 @@ checks: [{check: {run: "true"}}]
       failure: {
         kind: "refusal",
         code: "authored-gitlink",
-        resolution: ["yrd pr create <branch>", "yrd pr recut PR1 --preflight --queue --apply"],
+        resolution: [`yrd intent submit --component dep --target ${pin} --issue <issue-ref>`],
       },
     })
 
