@@ -2073,7 +2073,7 @@ function createQueue<Shape extends PRShape>(
               : requestedSelectors.map((selector) => {
                   const pr = resolvePR(snapshot.bays, selector)
                   if (pr === undefined)
-                    raiseFailure("refusal", "pr-not-found", prNotFoundMessage(snapshot.bays, selector))
+                    {raiseFailure("refusal", "pr-not-found", prNotFoundMessage(snapshot.bays, selector))}
                   return pr
                 })
           await refreshCheckIdentities(selected, resolveCycleBase)
@@ -6694,6 +6694,10 @@ export const COMPOSITION_FAILURE_BUCKETS = {
   "needs-author": new Set<string>([
     "authored-gitlink",
     "carrier-drops-landed",
+    // Author-actionable like its siblings, but the action is "close", not
+    // "re-author": the carrier's pins already landed, so there is nothing to
+    // rebuild.
+    "carrier-pin-already-landed",
     "composition-invalid",
     "gitlink-inspection",
     "merge-tip-carrier",

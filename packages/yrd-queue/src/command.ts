@@ -2214,7 +2214,7 @@ async function prepareCandidate(
     }
     if (pr.composition === undefined) {
       if (pr.recut !== undefined) {
-        const dropped = await carrierDropsLandedFailure(git, path, pr.id, pr.headSha, authoritativeBase)
+        const dropped = await carrierDropsLandedFailure(git, repo, path, pr.id, pr.headSha, authoritativeBase)
         if (dropped !== undefined) return dropped
       }
       const mergeTip = await mergeTipCarrierFailure(git, path, pr.id, pr.headSha, "HEAD")
@@ -2809,19 +2809,99 @@ function linearRebuildRemedy(scope: string, base: string): string {
   return `linear rebuild required: rebuild ${scope} as a one-parent linear branch on current base '${base}', then recut and requeue the root branch`
 }
 
+/** Resolve the component checkout that can answer ancestry for a gitlink path.
+ *
+ * `join(root, path)` alone is not enough, and failing silently here is how this
+ * check first went wrong: an uninitialized submodule directory still exists, so
+ * every `git -C` against it walks UP and is answered by the superproject, which
+ * knows none of the component's shas. It reports "not an ancestor" for a pin
+ * that plainly is one. The toplevel comparison is what makes the wrong repo
+ * loud instead of merely wrong. */
+async function componentCheckout(git: Git, root: string, path: string): Promise<string | undefined> {
+  const component = join(root, path)
+  const toplevel = await git.run(component, ["rev-parse", "--show-toplevel"], true)
+  if (toplevel.code !== 0 || toplevel.stdout === "") return undefined
+  try {
+    return (await realpath(toplevel.stdout)) === (await realpath(component)) ? component : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Head staleness and payload spentness are different facts about a carrier, and
+ * a gitlink-only carrier can carry both at once: root main moved on beneath it
+ * (stale head) while the pin it authors was already promoted into that same
+ * main by some other carrier.
+ *
+ * The head check can only witness the first, so on its own it prescribes a
+ * linear rebuild — advice that cannot succeed here, because rebuilding a spent
+ * pin onto current base regenerates an empty carrier that is refused again on
+ * the same ground. That is the loop PR562 rode to revision 43.
+ *
+ * The pair is authored pin against THE PIN THE AUTHORITATIVE BASE CARRIES, which
+ * is the containment `absorbedAuthoredGitlinks` already calls absorbed. Reading
+ * it against component main instead answers a different question and gets this
+ * exactly backwards: component main can hold the work while root main's gitlink
+ * still points before it, and that carrier is the one that would perform the
+ * promotion. Measured — with root's gitlink behind, a rebuild still delivers the
+ * gitlink; with root's gitlink containing the pin, it delivers nothing. Only the
+ * second is safe to close. */
+async function spentGitlinkCarrier(
+  git: Git,
+  repo: string,
+  candidate: string,
+  headSha: string,
+  authoritativeBase: string,
+): Promise<Readonly<{ landings: readonly string[] }> | undefined> {
+  const forkPoint = await git.run(candidate, ["merge-base", authoritativeBase, headSha], true)
+  if (forkPoint.code !== 0 || forkPoint.stdout === "") return undefined
+  const authored = await changedPaths(git, candidate, forkPoint.stdout, headSha)
+  if (authored.length === 0) return undefined
+
+  const landings: string[] = []
+  for (const path of authored) {
+    // A path that is not a gitlink on both sides carries payload this verdict
+    // cannot speak for, so the carrier is not pins-only.
+    const carrierPin = await readGitlink(git, candidate, headSha, path)
+    const basePin = await readGitlink(git, candidate, authoritativeBase, path)
+    if (carrierPin === undefined || basePin === undefined) return undefined
+    if (carrierPin === basePin) {
+      landings.push(`pin '${carrierPin}' for '${path}' is the pin the base already carries`)
+      continue
+    }
+    // Below this line every failure keeps the existing refusal rather than
+    // upgrading the verdict: an unprovable claim of spentness is not a reason to
+    // tell an author their work landed. Only the component can answer ancestry
+    // between two component shas.
+    const component = await componentCheckout(git, repo, path)
+    if (component === undefined) return undefined
+    if (!(await isAncestor(git, component, carrierPin, basePin))) return undefined
+    landings.push(`pin '${carrierPin}' for '${path}' is already contained in the base's pin '${basePin}'`)
+  }
+  return { landings }
+}
+
 async function carrierDropsLandedFailure(
   git: Git,
   repo: string,
+  candidate: string,
   pr: string,
   headSha: string,
   authoritativeBase: string,
 ): Promise<CandidateFailure | undefined> {
-  const containment = await inspectBaseContainment(git, repo, authoritativeBase, headSha)
+  const containment = await inspectBaseContainment(git, candidate, authoritativeBase, headSha)
   if (containment.status === "contained") return undefined
   if (containment.status === "inspection-failed") {
     return candidateFailure(
       "carrier-inspection",
       `could not compare root branch '${headSha}' for merge request '${pr}' with the merge-queue base '${authoritativeBase}': ${containment.detail}`,
+    )
+  }
+  const spent = await spentGitlinkCarrier(git, repo, candidate, headSha, authoritativeBase)
+  if (spent !== undefined) {
+    return candidateFailure(
+      "carrier-pin-already-landed",
+      `merge request '${pr}' branch '${headSha}' authors component pins only, and every one of them already landed: ${spent.landings.join("; ")}\nremedy: the branch has nothing left to deliver; close it, do not rebuild or requeue it`,
     )
   }
   return candidateFailure(
