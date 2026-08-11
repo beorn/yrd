@@ -8296,7 +8296,7 @@ describe("Queue command adapters", () => {
     })
   })
 
-  it("reconciles the authoritative landing after a delegated merge reports a post-push failure", async () => {
+  it("refuses and rolls back a delegated merge that mutates the checked Candidate", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     const remote = join(repo, "..", "origin.git")
     await Bun.$`git init -q --bare ${remote}`
@@ -8332,21 +8332,61 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
     const landing = await git(repo, ["rev-parse", "refs/remotes/origin/main"])
+    const mutated = await git(repo, ["rev-parse", "HEAD"])
     const checkJob = run.steps[0]?.job
     if (checkJob?.status !== "completed" || checkJob.conclusion !== "success") throw new Error("check did not pass")
+    const checked = GitCheckEvidenceSchema.parse(checkJob.output)
+    expect(mutated).not.toBe(checked.candidateSha)
+
+    expect(run).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: {
+        code: "checked-candidate-mutated",
+        message: expect.stringContaining(`landed '${mutated}' instead of checked Candidate '${checked.candidateSha}'`),
+      },
+    })
+    expect(run.error?.message).toContain(
+      "configure the merge command to update 'main' to YRD_CANDIDATE_SHA without creating or amending a commit",
+    )
+    expect(landing).toBe(checked.baseSha)
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+      status: "submitted",
+      integration: undefined,
+    })
+    expect(await git(repo, ["notes", "--ref=yrd/receipts", "list"])).toBe("")
+  })
+
+  it("records the same receipt-bearing proof for an exact configured merge", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const remote = join(repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "issue/feature"])
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"], {
+      mergeCommand: shellCommand('git push origin "$YRD_CANDIDATE_SHA":refs/heads/main'),
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const checkJob = run.steps[0]?.job
+    if (checkJob?.status !== "completed" || checkJob.conclusion !== "success") throw new Error("check did not pass")
+    const checked = GitCheckEvidenceSchema.parse(checkJob.output)
 
     expect(run).toMatchObject({
       status: "completed",
       conclusion: "success",
-      integration: { commit: landing, baseSha: landing },
+      integration: {
+        commit: checked.candidateSha,
+        baseSha: checked.candidateSha,
+        receipt: { ref: "refs/notes/yrd/receipts", target: checked.candidateSha },
+      },
     })
-    expect(await git(repo, ["merge-base", "--is-ancestor", run.integration!.commit, "refs/remotes/origin/main"])).toBe(
-      "",
-    )
-    expect(landing).not.toBe(GitCheckEvidenceSchema.parse(checkJob.output).candidateSha)
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
-      status: "integrated",
-      integration: { commit: landing, baseSha: landing },
+    expect(await git(remote, ["rev-parse", "main"])).toBe(checked.candidateSha)
+    expect(JSON.parse(await git(remote, ["notes", "--ref=yrd/receipts", "show", checked.candidateSha]))).toMatchObject({
+      schema: "yrd/landing-receipt/v1",
+      receipt: { landing: { commit: checked.candidateSha } },
     })
   })
 

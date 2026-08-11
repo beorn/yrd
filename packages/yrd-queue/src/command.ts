@@ -6558,6 +6558,16 @@ export function configuredMergeStep<Shape extends PRShape>(
           }
           const missing = await landingError(git, repo, input, candidate.checked, landing.sha)
           if (missing === undefined) {
+            if (landing.sha !== candidate.checked.candidateSha) {
+              const mutatedLanding = landing.sha
+              const rollbackError = await rollbackQueueBase(git, repo, candidate.base, landing)
+              if (rollbackError !== undefined) return failed("merge-rollback-failed", rollbackError)
+              return failed(
+                "checked-candidate-mutated",
+                `configured merge landed '${mutatedLanding}' instead of checked Candidate '${candidate.checked.candidateSha}'; ` +
+                  `configure the merge command to update '${branch}' to YRD_CANDIDATE_SHA without creating or amending a commit, then retry`,
+              )
+            }
             const sourceRefError = await sourceCandidateRefError(git, repo, candidate.checked.sourceRewrites ?? [])
             if (sourceRefError !== undefined) {
               const rollbackError = await rollbackQueueBase(git, repo, candidate.base, landing)
