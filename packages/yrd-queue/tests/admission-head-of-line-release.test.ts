@@ -10,6 +10,7 @@ import { createFailure, createMemoryJournal, createYrd, createYrdDef, pipe } fro
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
 import { withMerge, withQueue, withStep, type CandidatePreparer } from "@yrd/queue"
+import { testLandingReceipt } from "./receipt-test-helper.ts"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -62,7 +63,11 @@ function checkMergePlugin(prepareCandidate: CandidatePreparer) {
     { revision: "check-v1", output: CheckResultSchema },
   )
   const merge = withMerge(
-    () => ({ status: "completed", conclusion: "success", output: { commit: MERGED, baseSha: BASE } }),
+    () => ({
+      status: "completed",
+      conclusion: "success",
+      output: { commit: MERGED, baseSha: BASE, receipt: testLandingReceipt(MERGED) },
+    }),
     { revision: "merge-v1" },
   )
   return withQueue({

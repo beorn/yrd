@@ -9,7 +9,15 @@ import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
 import { createFailure, createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
-import { withMerge, withStep, withQueue, type CandidatePreparer, type StepExecution } from "@yrd/queue"
+import {
+  withMerge,
+  withStep,
+  withQueue,
+  type CandidatePreparer,
+  type IntegrationProof,
+  type StepExecution,
+} from "@yrd/queue"
+import { testLandingReceipt } from "./receipt-test-helper.ts"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -50,10 +58,10 @@ function workspace(): BayWorkspace {
  * (not fatal) in a selectorless compose. */
 function mergeDeployPlugin(
   deployRevision: string,
-  mergeRun: () => JobResult<{ commit: string; baseSha: string }> = () => ({
+  mergeRun: () => JobResult<IntegrationProof> = () => ({
     status: "completed",
     conclusion: "success",
-    output: { commit: MERGED, baseSha: BASE },
+    output: { commit: MERGED, baseSha: BASE, receipt: testLandingReceipt(MERGED) },
   }),
   prepareCandidate?: CandidatePreparer,
 ) {
@@ -80,7 +88,7 @@ async function createApp(
   journal = createMemoryJournal(),
   id: () => string = ids(),
   log?: ReturnType<typeof createLogger>,
-  mergeRun?: () => JobResult<{ commit: string; baseSha: string }>,
+  mergeRun?: () => JobResult<IntegrationProof>,
   prepareCandidate?: CandidatePreparer,
 ) {
   const bayJobs = createBayJobDefs(workspace())
@@ -200,7 +208,11 @@ describe("compose candidate isolation — one poisoned candidate never aborts th
             conclusion: "failure",
             error: { code: "merge-conflict", message: "poisoned Candidate does not merge" },
           }
-        : { status: "completed", conclusion: "success", output: { commit: MERGED, baseSha: BASE } }
+        : {
+            status: "completed",
+            conclusion: "success",
+            output: { commit: MERGED, baseSha: BASE, receipt: testLandingReceipt(MERGED) },
+          }
     })
     const poisoned = await submitBranch(app, "issue/consumed-authority")
     const first = await app.queue.run({ prs: [poisoned.id], steps: ["merge"] }, runtime)

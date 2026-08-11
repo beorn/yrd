@@ -113,6 +113,68 @@ export const LegacyLandingReceiptBodySchema = z
   })
 export type LegacyLandingReceiptBody = Readonly<z.infer<typeof LegacyLandingReceiptBodySchema>>
 
+const FailedAttemptChangeSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: z.number().int().positive(),
+    submittedHead: GitShaSchema,
+    changeId: ChangeIdSchema,
+  })
+  .strict()
+
+const FailedAttemptRecordedAtSchema = z.iso.datetime({ offset: true })
+
+export const FailedAttemptReceiptBodySchema = z
+  .object({
+    kind: z.literal("failed-attempt"),
+    change: FailedAttemptChangeSchema,
+    attempt: z.discriminatedUnion("source", [
+      z
+        .object({
+          source: z.literal("queue-admission"),
+          step: z.string().trim().min(1).optional(),
+          count: z.number().int().positive(),
+          recordedAt: FailedAttemptRecordedAtSchema,
+        })
+        .strict(),
+      z
+        .object({
+          source: z.literal("revision-admission"),
+          step: z.string().trim().min(1),
+          baseSha: GitShaSchema,
+          recordedAt: FailedAttemptRecordedAtSchema,
+        })
+        .strict(),
+      z
+        .object({
+          source: z.literal("run-step"),
+          run: z.string().trim().min(1),
+          candidate: z.string().trim().min(1),
+          step: z.string().trim().min(1),
+          job: z.string().trim().min(1),
+          attempt: z.number().int().positive(),
+          recordedAt: FailedAttemptRecordedAtSchema,
+        })
+        .strict(),
+    ]),
+    failure: z
+      .object({
+        code: z.string().trim().min(1),
+        message: z.string().trim().min(1),
+      })
+      .strict(),
+    settlement: z
+      .object({
+        disposition: z.literal("needs-person"),
+        reason: z.string().trim().min(1),
+        settledAt: FailedAttemptRecordedAtSchema,
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+export type FailedAttemptReceiptBody = Readonly<z.infer<typeof FailedAttemptReceiptBodySchema>>
+
 export const LandingReceiptEnvelopeSchema = z
   .object({
     schema: z.literal("yrd/landing-receipt/v1"),
@@ -142,9 +204,24 @@ export const LegacyLandingReceiptEnvelopeSchema = z
     }
   })
 export type LegacyLandingReceiptEnvelope = Readonly<z.infer<typeof LegacyLandingReceiptEnvelopeSchema>>
+export const FailedAttemptReceiptEnvelopeSchema = z
+  .object({
+    schema: z.literal("yrd/failed-attempt-receipt/v1"),
+    receipt: FailedAttemptReceiptBodySchema,
+    checksum: z.string().regex(/^[0-9a-f]{64}$/u),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const expected = createHash("sha256").update(canonicalJson(value.receipt)).digest("hex")
+    if (value.checksum !== expected) {
+      context.addIssue({ code: "custom", path: ["checksum"], message: `expected ${expected}` })
+    }
+  })
+export type FailedAttemptReceiptEnvelope = Readonly<z.infer<typeof FailedAttemptReceiptEnvelopeSchema>>
 export const RepositoryLandingReceiptEnvelopeSchema = z.union([
   LandingReceiptEnvelopeSchema,
   LegacyLandingReceiptEnvelopeSchema,
+  FailedAttemptReceiptEnvelopeSchema,
 ])
 export type RepositoryLandingReceiptEnvelope = Readonly<z.infer<typeof RepositoryLandingReceiptEnvelopeSchema>>
 
@@ -183,6 +260,19 @@ export function createLegacyLandingReceipt(receipt: LegacyLandingReceiptBody): R
   const parsed = LegacyLandingReceiptBodySchema.parse(receipt)
   const envelope = LegacyLandingReceiptEnvelopeSchema.parse({
     schema: "yrd/landing-receipt-legacy/v1",
+    receipt: parsed,
+    checksum: createHash("sha256").update(canonicalJson(parsed)).digest("hex"),
+  })
+  return { envelope, canonical: canonicalJson(envelope) }
+}
+
+export function createFailedAttemptReceipt(receipt: FailedAttemptReceiptBody): Readonly<{
+  envelope: FailedAttemptReceiptEnvelope
+  canonical: string
+}> {
+  const parsed = FailedAttemptReceiptBodySchema.parse(receipt)
+  const envelope = FailedAttemptReceiptEnvelopeSchema.parse({
+    schema: "yrd/failed-attempt-receipt/v1",
     receipt: parsed,
     checksum: createHash("sha256").update(canonicalJson(parsed)).digest("hex"),
   })

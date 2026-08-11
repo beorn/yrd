@@ -54,10 +54,12 @@ import {
   LANDING_RECEIPT_NOTES_NAME,
   LANDING_RECEIPT_REF,
   LandingReceiptPointerSchema,
+  createFailedAttemptReceipt,
   createLandingReceipt,
   createLegacyLandingReceipt,
   parseLandingReceipt,
   type CandidateChangeReceipt,
+  type FailedAttemptReceiptBody,
   type LandingReceiptBody,
   type RepositoryLandingReceiptEnvelope,
   type LandingReceiptPointer,
@@ -5417,6 +5419,7 @@ async function withStepCandidate<Output extends JsonValue>(
     PinnedCandidateSchema.parse({
       baseSha: candidate.baseSha,
       candidateSha: candidate.sha,
+      ...(candidate.treeSha === undefined ? {} : { candidateTreeSha: candidate.treeSha }),
       candidateRef: candidate.ref,
       ...(candidate.changes === undefined ? {} : { changes: candidate.changes }),
       ...(candidate.sourceRewrites === undefined ? {} : { sourceRewrites: candidate.sourceRewrites }),
@@ -6855,7 +6858,9 @@ async function readLandingReceipt(
     canonical:
       envelope.schema === "yrd/landing-receipt/v1"
         ? createLandingReceipt(envelope.receipt).canonical
-        : createLegacyLandingReceipt(envelope.receipt).canonical,
+        : envelope.schema === "yrd/landing-receipt-legacy/v1"
+          ? createLegacyLandingReceipt(envelope.receipt).canonical
+          : createFailedAttemptReceipt(envelope.receipt).canonical,
     pointer: LandingReceiptPointerSchema.parse({
       ref: LANDING_RECEIPT_REF,
       target,
@@ -6871,6 +6876,100 @@ export type RepositoryLandingIdentity = Readonly<{
   headSha: string
   changeId?: string
 }>
+
+export type RepositoryFailedAttemptReceipt = Readonly<{
+  change: FailedAttemptReceiptBody["change"]
+  attempt: FailedAttemptReceiptBody["attempt"]
+  failure: FailedAttemptReceiptBody["failure"]
+  settlement?: FailedAttemptReceiptBody["settlement"]
+  receipt: LandingReceiptPointer
+}>
+
+/** Persist one failed Queue attempt in the same managed notes namespace as
+ * physical landings. The target is a content-addressed object derived only
+ * from the recorded fact; no branch/keep ref keeps it artificially alive. */
+export async function recordRepositoryFailedAttemptReceipt(
+  options: Readonly<{
+    inject: Readonly<{ process: Pick<Process, "run"> }>
+    repo: string
+    failure: FailedAttemptReceiptBody
+  }>,
+): Promise<LandingReceiptPointer> {
+  const git = createGit(options.inject.process)
+  const receipt = createFailedAttemptReceipt(options.failure)
+  const targetPayload = `yrd-failed-attempt-target/v1\n${receipt.envelope.checksum}\n`
+  const target = (await git.input(options.repo, ["hash-object", "-w", "--stdin"], targetPayload)).stdout
+  const attempt = options.failure.attempt
+  return storeLandingReceipt(
+    git,
+    options.repo,
+    {
+      run: attempt.source === "run-step" ? attempt.run : `${options.failure.change.pr}-admission`,
+      job: attempt.source === "run-step" ? attempt.job : attempt.source,
+      attempt:
+        attempt.source === "queue-admission" ? attempt.count : attempt.source === "run-step" ? attempt.attempt : 1,
+    },
+    target,
+    receipt,
+  )
+}
+
+/** Locate every typed failure receipt for one logical revision. Landing proof
+ * deliberately ignores these notes; `yrd why` joins them to the journal's
+ * queryable refusal/run index. */
+export async function findRepositoryFailedAttemptReceipts(
+  options: Readonly<{
+    inject: Readonly<{ process: Pick<Process, "run"> }>
+    repo: string
+    identity: RepositoryLandingIdentity
+  }>,
+): Promise<readonly RepositoryFailedAttemptReceipt[]> {
+  const git = createGit(options.inject.process)
+  const listed = await git.run(options.repo, ["notes", `--ref=${LANDING_RECEIPT_NOTES_NAME}`, "list"], true)
+  if (listed.code !== 0) {
+    return repositoryReceiptFailure(
+      "unknown",
+      `yrd: repository receipt ref '${LANDING_RECEIPT_REF}' is unreadable: ${listed.stderr || listed.stdout}`,
+    )
+  }
+  const matches: RepositoryFailedAttemptReceipt[] = []
+  for (const line of listed.stdout === "" ? [] : listed.stdout.split("\n")) {
+    const [listedNote, target, extra] = line.split(/\s+/u)
+    if (listedNote === undefined || target === undefined || extra !== undefined) {
+      return repositoryReceiptFailure("repository-corrupt", `yrd: repository receipt listing is malformed: ${line}`)
+    }
+    const stored = await readLandingReceipt(git, options.repo, target)
+    if (stored === undefined || stored.pointer.note !== listedNote) {
+      return repositoryReceiptFailure(
+        "repository-corrupt",
+        `yrd: repository receipt listing for '${target}' disagrees with its note object`,
+      )
+    }
+    if (stored.envelope.schema !== "yrd/failed-attempt-receipt/v1") continue
+    const failure = stored.envelope.receipt
+    if (
+      failure.change.pr !== options.identity.pr ||
+      failure.change.revision !== options.identity.revision ||
+      failure.change.submittedHead !== options.identity.headSha ||
+      (options.identity.changeId !== undefined && failure.change.changeId !== options.identity.changeId)
+    ) {
+      continue
+    }
+    matches.push({
+      change: failure.change,
+      attempt: failure.attempt,
+      failure: failure.failure,
+      ...(failure.settlement === undefined ? {} : { settlement: failure.settlement }),
+      receipt: stored.pointer,
+    })
+  }
+  return matches.toSorted(
+    (left, right) =>
+      left.attempt.recordedAt.localeCompare(right.attempt.recordedAt) ||
+      left.failure.code.localeCompare(right.failure.code) ||
+      left.receipt.target.localeCompare(right.receipt.target),
+  )
+}
 
 export type LegacyJournalLanding = Readonly<{
   pr: string
@@ -7046,6 +7145,7 @@ export async function findRepositoryLandingReceipt(
         `yrd: repository receipt listing for '${target}' disagrees with its note object`,
       )
     }
+    if (stored.envelope.schema === "yrd/failed-attempt-receipt/v1") continue
     if (stored.envelope.schema === "yrd/landing-receipt-legacy/v1") {
       const receipt = stored.envelope.receipt
       const change = receipt.changes.find(

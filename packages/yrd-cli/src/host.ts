@@ -57,7 +57,9 @@ import {
   gitCandidatePreparer,
   gitCheckStep,
   gitMergeStep,
+  findRepositoryFailedAttemptReceipts,
   findRepositoryLandingReceipt,
+  recordRepositoryFailedAttemptReceipt,
   replayLegacyLandingReceipts,
   type LegacyJournalLanding,
   inspectGitQueueTarget,
@@ -68,6 +70,7 @@ import {
   withStep,
   type CandidatePool,
   type CommandEvidence,
+  type FailedAttemptReceiptBody,
   type InstalledStep,
   type IntegratedShape,
   type PRShape,
@@ -1777,6 +1780,12 @@ async function createYrdRuntimeHost(
             })
           ).sha
           return findRepositoryLandingReceipt({ inject: { process }, repo: repository.repo, baseSha, identity })
+        },
+        async findFailures(identity: RepositoryLandingIdentity) {
+          return findRepositoryFailedAttemptReceipts({ inject: { process }, repo: repository.repo, identity })
+        },
+        async recordFailure(failure: FailedAttemptReceiptBody) {
+          return recordRepositoryFailedAttemptReceipt({ inject: { process }, repo: repository.repo, failure })
         },
         async findByHead(headSha: string) {
           const baseSha = (

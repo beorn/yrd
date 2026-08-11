@@ -503,7 +503,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
         failure: {
           kind: "refusal",
           code: "journal-write-version-floor",
-          message: expect.stringContaining("yrd admin journal bump 2"),
+          message: expect.stringContaining("yrd admin journal bump 3"),
         },
       },
     )
@@ -1350,7 +1350,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       definitions: {
         check: { run: "test -f feature.txt", runner: "local" },
         merge: {
-          run: 'touch delegated-merge.marker && git merge --no-ff --no-edit "$YRD_SHA"',
+          run: 'touch delegated-merge.marker && git merge --ff-only "$YRD_CANDIDATE_SHA"',
           runner: "local",
         },
       },
@@ -1785,6 +1785,7 @@ checks: [{check: {run: "true"}}]
       "queue",
       "check",
       "doctor",
+      "why",
       "admin",
       "migrate",
       "log",

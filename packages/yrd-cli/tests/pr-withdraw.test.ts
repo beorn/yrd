@@ -15,6 +15,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
+import { testLandingReceipt } from "../../yrd-queue/tests/receipt-test-helper.ts"
 import { createBayJobDefs, currentPRRev, prDeliveryState, withBays } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type Journal, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
@@ -27,6 +28,7 @@ import {
   withMerge,
   withQueue,
   withStep,
+  type IntegrationProof,
   type PRShape,
   type SourceRewrite,
   type StepExecution,
@@ -158,12 +160,10 @@ async function createCliApp(
     },
   )
   const merge = withMerge(
-    async (
-      _input: StepExecution<PRShape>,
-    ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => ({
+    async (_input: StepExecution<PRShape>): Promise<JobResult<IntegrationProof>> => ({
       status: "completed",
       conclusion: "success",
-      output: { commit: MERGED_SHA, baseSha: MERGED_SHA },
+      output: { commit: MERGED_SHA, baseSha: MERGED_SHA, receipt: testLandingReceipt(MERGED_SHA) },
     }),
     { revision: "merge-v1" },
   )

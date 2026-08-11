@@ -38,6 +38,8 @@ import {
   gitCheckStep,
   gitMergeStep,
   findRepositoryLandingReceipt,
+  findRepositoryFailedAttemptReceipts,
+  recordRepositoryFailedAttemptReceipt,
   replayLegacyLandingReceipts,
   inspectGitQueueTarget,
   synthesizePinIntentCarrier,
@@ -6447,6 +6449,56 @@ describe("Queue command adapters", () => {
       status: "legacy-proven",
       fact: { pr: "PR2", coverage: "tombstone", provenance: "legacy-journal", commit: missingLanding },
     })
+  })
+
+  it("stores failed attempts as typed content-addressed notes without a keep ref", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    const failure = {
+      kind: "failed-attempt",
+      change: {
+        pr: "PR1",
+        revision: 1,
+        submittedHead: featureSha,
+        changeId: `I${"1".repeat(40)}`,
+      },
+      attempt: {
+        source: "queue-admission",
+        step: "candidate",
+        count: 1,
+        recordedAt: "2026-08-11T16:00:00.000Z",
+      },
+      failure: {
+        code: "recut-gitlink-conflict",
+        message: "two fixed gitlink commits are non-ancestral",
+      },
+      settlement: {
+        disposition: "needs-person",
+        reason: "rebuild the carrier on current component main",
+        settledAt: "2026-08-11T16:00:00.000Z",
+      },
+    } as const
+
+    const first = await recordRepositoryFailedAttemptReceipt({ inject: { process }, repo, failure })
+    const second = await recordRepositoryFailedAttemptReceipt({ inject: { process }, repo, failure })
+
+    expect(second).toEqual(first)
+    expect(first).toMatchObject({ ref: "refs/notes/yrd/receipts", target: expect.stringMatching(/^[0-9a-f]{40}$/u) })
+    expect(await git(repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/landing-attempts"])).toBe("")
+    expect(JSON.parse(await git(repo, ["notes", "--ref=yrd/receipts", "show", first.target]))).toMatchObject({
+      schema: "yrd/failed-attempt-receipt/v1",
+      receipt: { kind: "failed-attempt", attempt: { source: "queue-admission" } },
+    })
+    const gitDir = await git(repo, ["rev-parse", "--git-dir"])
+    await rm(join(repo, gitDir, "objects", first.target.slice(0, 2), first.target.slice(2)))
+    await expect(git(repo, ["cat-file", "-e", first.target])).rejects.toThrow()
+    await expect(
+      findRepositoryFailedAttemptReceipts({
+        inject: { process },
+        repo,
+        identity: { pr: "PR1", revision: 1, headSha: featureSha, changeId: failure.change.changeId },
+      }),
+    ).resolves.toMatchObject([{ failure: failure.failure, receipt: first }])
   })
 
   it("recovers a landing-before-receipt crash without reclassifying the Queue landing as already-contained", async () => {

@@ -4,14 +4,17 @@ import type { Yrd } from "@yrd/core"
 import type { HasJobs, HasRunner, JobCommands, JobsState } from "@yrd/job"
 import type {
   GitPRRecutter,
+  FailedAttemptReceiptBody,
   HasQueue,
   LegacyJournalLanding,
   LegacyLandingReceiptReplay,
+  LandingReceiptPointer,
   QueueAuditResult,
   QueueCommands,
   QueuesState,
   RepositoryLandingIdentity,
   RepositoryLandingSearchResult,
+  RepositoryFailedAttemptReceipt,
 } from "@yrd/queue"
 import type { HasIntents, IntentCommands, IntentsState } from "@yrd/intent"
 import type { HasIssues } from "@yrd/issue"
@@ -88,6 +91,8 @@ export type YrdCliServices = Readonly<{
   recut?: GitPRRecutter
   landingReceipts?: Readonly<{
     find(identity: RepositoryLandingIdentity): Promise<RepositoryLandingSearchResult>
+    findFailures?(identity: RepositoryLandingIdentity): Promise<readonly RepositoryFailedAttemptReceipt[]>
+    recordFailure?(failure: FailedAttemptReceiptBody): Promise<LandingReceiptPointer>
     findByHead?(headSha: string): Promise<RepositoryLandingSearchResult>
     replayLegacy(landings: readonly LegacyJournalLanding[]): Promise<readonly LegacyLandingReceiptReplay[]>
   }>

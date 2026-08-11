@@ -63,6 +63,7 @@ import {
   resolveSubmoduleOrigin,
   synthesizePinIntentCarrier,
   type PREligibility,
+  type FailedAttemptReceiptBody,
   type QueueAuditFinding,
   type QueueSummary,
   type Run,
@@ -2868,7 +2869,8 @@ async function gatherBayStatusFacts(
           tipLanded = false
           let managedChange = false
           try {
-            managedChange = gitSync(path, ["show", "-s", "--format=%(trailers:key=Change-Id,valueonly)", head]) !== ""
+            managedChange =
+              gitSync(path, ["show", "-s", "--format=%(trailers:key=Change-Id,valueonly)", head]).trim() !== ""
           } catch {
             tipLandedUnknown = true
           }
@@ -7802,6 +7804,90 @@ async function prepareResidentQueueCycle(
   )
 }
 
+function failedAttemptReceiptBodies(app: YrdCliApp, runs: readonly Run[]): readonly FailedAttemptReceiptBody[] {
+  const state = stateOf(app)
+  const receipts: FailedAttemptReceiptBody[] = []
+  for (const refusal of Object.values(state.queues.admissionRefusals)) {
+    const pr = state.bays.prs[refusal.pr]
+    if (pr === undefined) continue
+    const revision = currentPRRev(pr)
+    if (
+      revision.changeId === undefined ||
+      (refusal.revision !== undefined && refusal.revision !== revision.n) ||
+      (refusal.headSha !== undefined && refusal.headSha !== revision.head)
+    ) {
+      continue
+    }
+    receipts.push({
+      kind: "failed-attempt",
+      change: { pr: pr.id, revision: revision.n, submittedHead: revision.head, changeId: revision.changeId },
+      attempt: {
+        source: "queue-admission",
+        count: refusal.count,
+        recordedAt: refusal.lastAt,
+      },
+      failure: { code: refusal.code, message: refusal.reason },
+      ...(refusal.settlement === undefined ? {} : { settlement: refusal.settlement }),
+    })
+  }
+  for (const pr of Object.values(state.bays.prs)) {
+    const revision = currentPRRev(pr)
+    const admission = revision.admission
+    if (revision.changeId === undefined || admission?.status !== "refused") continue
+    receipts.push({
+      kind: "failed-attempt",
+      change: { pr: pr.id, revision: revision.n, submittedHead: revision.head, changeId: revision.changeId },
+      attempt: {
+        source: "revision-admission",
+        step: admission.step,
+        baseSha: admission.baseSha,
+        recordedAt: admission.at,
+      },
+      failure: { code: admission.receipt.code, message: admission.receipt.message },
+    })
+  }
+  for (const run of runs) {
+    for (const step of run.steps) {
+      const job = step.job
+      if (job?.status !== "completed" || job.conclusion !== "failure") continue
+      for (const pr of run.prs) {
+        if (pr.changeId === undefined) continue
+        receipts.push({
+          kind: "failed-attempt",
+          change: { pr: pr.id, revision: pr.revision, submittedHead: pr.headSha, changeId: pr.changeId },
+          attempt: {
+            source: "run-step",
+            run: run.id,
+            candidate: run.candidateId,
+            step: step.name,
+            job: job.id,
+            attempt: job.attempt,
+            recordedAt: job.finishedAt ?? job.changedAt,
+          },
+          failure: { code: job.error.code, message: job.error.message },
+        })
+      }
+    }
+  }
+  return receipts
+}
+
+async function recordFailedAttemptReceipts(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  runs: readonly Run[],
+  recorded: Set<string>,
+): Promise<void> {
+  const writer = services.landingReceipts?.recordFailure
+  if (writer === undefined) return
+  for (const receipt of failedAttemptReceiptBodies(app, runs)) {
+    const key = stableJson(receipt)
+    if (recorded.has(key)) continue
+    await writer(receipt)
+    recorded.add(key)
+  }
+}
+
 export async function followQueueRuns(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -7840,6 +7926,9 @@ export async function followQueueRuns(
   // across restarts; this Set only prevents a partially applied mechanical drill
   // from repeating inside the same process before its journal transition clears.
   const remedied = new Set<string>()
+  // Content-addressed repository receipts already dedupe across processes; this
+  // set avoids re-reading/publishing the same note on every idle resident tick.
+  const recordedFailureReceipts = new Set<string>()
   // Consecutive all-candidate-refusal cycles against an unchanged world (22474
   // specimen 3). Also process-scoped: it is a claim about THIS process.
   let stall: ResidentRefusalStall | undefined
@@ -7909,6 +7998,7 @@ export async function followQueueRuns(
       try {
         runs = await runQueues(app, selectors, options, io)
       } catch (error) {
+        await recordFailedAttemptReceipts(app, services, [], recordedFailureReceipts)
         // A narrow, typed set of mid-compose conditions is a normal multi-tenant
         // race for the long-lived selectorless watch loop: a peer settled a Job,
         // a peer already holds the queue, or a peer withdrew/canceled/integrated
@@ -7934,6 +8024,7 @@ export async function followQueueRuns(
         if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
         continue
       }
+      await recordFailedAttemptReceipts(app, services, runs, recordedFailureReceipts)
       recoveryReporter.flush()
       heartbeat?.check()
       // The runner is a service; its stdout is a log stream. Human output is
@@ -8664,18 +8755,30 @@ async function explainLanding(
     ...(revision.changeId === undefined ? {} : { changeId: revision.changeId }),
   })
   if (proof.status === "not-proven") {
+    const repositoryFailures =
+      (await services.landingReceipts.findFailures?.({
+        pr: pr.id,
+        revision: revision.n,
+        headSha: revision.head,
+        ...(revision.changeId === undefined ? {} : { changeId: revision.changeId }),
+      })) ?? []
     const admissionRefusal = app.state().queues.admissionRefusals[pr.id]
     if (
       admissionRefusal !== undefined &&
       admissionRefusal.revision === revision.n &&
       admissionRefusal.headSha === revision.head
     ) {
+      const repositoryReceipt = repositoryFailures.find(
+        (candidate) =>
+          candidate.attempt.source === "queue-admission" && candidate.failure.code === admissionRefusal.code,
+      )?.receipt
       const failure = {
         source: "queue-admission",
         code: admissionRefusal.code,
         reason: admissionRefusal.reason,
         count: admissionRefusal.count,
         ...(admissionRefusal.settlement === undefined ? {} : { settlement: admissionRefusal.settlement }),
+        ...(repositoryReceipt === undefined ? {} : { repositoryReceipt }),
       } as const
       await printResult(
         io,
@@ -8685,20 +8788,43 @@ async function explainLanding(
       )
       return 1
     }
-    if (revision.admission?.status === "refused") {
+    const admission = revision.admission
+    if (admission?.status === "refused") {
+      const repositoryReceipt = repositoryFailures.find(
+        (candidate) =>
+          candidate.attempt.source === "revision-admission" && candidate.failure.code === admission.receipt.code,
+      )?.receipt
       const failure = {
         source: "revision-admission",
-        kind: revision.admission.kind,
-        step: revision.admission.step,
-        baseSha: revision.admission.baseSha,
-        receipt: revision.admission.receipt,
-        at: revision.admission.at,
+        kind: admission.kind,
+        step: admission.step,
+        baseSha: admission.baseSha,
+        receipt: admission.receipt,
+        at: admission.at,
+        ...(repositoryReceipt === undefined ? {} : { repositoryReceipt }),
       } as const
       await printResult(
         io,
         jsonEnabled(options),
         { command: "why", pr: pr.id, verdict: "failed", repaired: false, failure },
         `FAILED — ${pr.id}: ${failure.receipt.code} at ${failure.step} — ${failure.receipt.message}`,
+      )
+      return 1
+    }
+    const repositoryFailure = repositoryFailures.at(-1)
+    if (repositoryFailure !== undefined) {
+      const failure = {
+        source: repositoryFailure.attempt.source,
+        ...repositoryFailure.failure,
+        attempt: repositoryFailure.attempt,
+        ...(repositoryFailure.settlement === undefined ? {} : { settlement: repositoryFailure.settlement }),
+        repositoryReceipt: repositoryFailure.receipt,
+      } as const
+      await printResult(
+        io,
+        jsonEnabled(options),
+        { command: "why", pr: pr.id, verdict: "failed", repaired: false, failure },
+        `FAILED — ${pr.id}: ${failure.code} — ${failure.message}`,
       )
       return 1
     }
@@ -9233,7 +9359,15 @@ function buildProgram(
       await replayLegacyLandingReceiptCutover(app, installedServices())
       const publications = await preparePublicationQueueCycle(app, installedServices(), io)
       if (publications.length > 0) await gate()
-      const runs = await runQueues(app, selectors, options, io)
+      const recordedFailureReceipts = new Set<string>()
+      let runs: readonly Run[]
+      try {
+        runs = await runQueues(app, selectors, options, io)
+      } catch (error) {
+        await recordFailedAttemptReceipts(app, installedServices(), [], recordedFailureReceipts)
+        throw error
+      }
+      await recordFailedAttemptReceipts(app, installedServices(), runs, recordedFailureReceipts)
       const selectedPrIds =
         selectors.length === 0 ? undefined : new Set(selectors.map((selector) => requiredPr(app, selector).id))
       const blocked = admissionBlockedPrs(app, selectedPrIds)
@@ -9700,6 +9834,7 @@ function buildProgram(
       "queue",
       "check",
       "doctor",
+      "why",
       "admin",
       "migrate",
       "log",

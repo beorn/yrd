@@ -11205,18 +11205,56 @@ describe("runYrd", () => {
       },
     })
     await openAndSubmit(app)
+    const revision = currentPRRev(app.bays.pr("PR1")!)
+    const changeId = revision.changeId
+    if (changeId === undefined) throw new Error("expected current Change-Id")
+    const repositoryReceipt = {
+      ref: "refs/notes/yrd/receipts",
+      target: "e".repeat(40),
+      note: "f".repeat(40),
+      checksum: "a".repeat(64),
+    } as const
+    const recordFailure = vi.fn(async () => repositoryReceipt)
+    const services = {
+      landingReceipts: {
+        find: async () => ({ status: "not-proven" as const, reason: "receipt-missing" as const }),
+        findFailures: async () => [
+          {
+            change: { pr: "PR1", revision: 1, submittedHead: HEAD_SHA, changeId },
+            attempt: {
+              source: "queue-admission" as const,
+              count: 1,
+              recordedAt: "2026-07-09T12:00:00.000Z",
+            },
+            failure: {
+              code: "recut-gitlink-conflict",
+              message: "two fixed gitlink commits are non-ancestral",
+            },
+            settlement: {
+              disposition: "needs-person" as const,
+              reason: "two fixed gitlink commits are non-ancestral",
+              settledAt: "2026-07-09T12:00:00.000Z",
+            },
+            receipt: repositoryReceipt,
+          },
+        ],
+        recordFailure,
+        replayLegacy: async () => [],
+      },
+    } satisfies YrdCliServices
     const drain = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "--once"), drain.io), drain.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--once"), drain.io, services), drain.stderr()).toBe(0)
+    expect(recordFailure).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "failed-attempt",
+        change: expect.objectContaining({ pr: "PR1", changeId }),
+        attempt: expect.objectContaining({ source: "queue-admission", count: 1 }),
+        failure: { code: "recut-gitlink-conflict", message: "two fixed gitlink commits are non-ancestral" },
+      }),
+    )
     const output = outputIO()
 
-    expect(
-      await runYrd(app, yrd("why", "PR1", "--json"), output.io, {
-        landingReceipts: {
-          find: async () => ({ status: "not-proven" as const, reason: "no physical landing receipt" }),
-        },
-      } as unknown as YrdCliServices),
-      output.stderr(),
-    ).toBe(1)
+    expect(await runYrd(app, yrd("why", "PR1", "--json"), output.io, services), output.stderr()).toBe(1)
     expect(JSON.parse(output.stdout())).toMatchObject({
       command: "why",
       pr: "PR1",
@@ -11228,6 +11266,7 @@ describe("runYrd", () => {
         reason: "two fixed gitlink commits are non-ancestral",
         count: 1,
         settlement: { disposition: "needs-person" },
+        repositoryReceipt,
       },
     })
   })

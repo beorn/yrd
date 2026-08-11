@@ -18,7 +18,7 @@ import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type Js
 import { withJobs, type JobResult } from "@yrd/job"
 import { runYrd as runYrdRaw, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
 import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
-import { withMerge, withQueue, withStep, type PRShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
+import { withMerge, withQueue, withStep, type IntegrationProof, type PRShape, type StepExecution } from "@yrd/queue"
 import { withIntents } from "@yrd/intent"
 import { withIssues } from "@yrd/issue"
 import {
@@ -29,6 +29,7 @@ import {
   type ContestRunnerDef,
 } from "@yrd/contest"
 import { createLogger } from "loggily"
+import { testLandingReceipt } from "../../yrd-queue/tests/receipt-test-helper.ts"
 
 const HEAD_SHA = "1".repeat(40)
 const BASE_SHA = "a".repeat(40)
@@ -117,12 +118,10 @@ async function createCliApp(overrides: { check?: () => JobResult<JsonValue> } = 
     { revision: "check-v1", output: JsonSchema, classification: "carrier" },
   )
   const merge = withMerge(
-    async (
-      _input: StepExecution<PRShape>,
-    ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => ({
+    async (_input: StepExecution<PRShape>): Promise<JobResult<IntegrationProof>> => ({
       status: "completed",
       conclusion: "success",
-      output: { commit: MERGED_SHA, baseSha: MERGED_SHA },
+      output: { commit: MERGED_SHA, baseSha: MERGED_SHA, receipt: testLandingReceipt(MERGED_SHA) },
     }),
     { revision: "merge-v1" },
   )

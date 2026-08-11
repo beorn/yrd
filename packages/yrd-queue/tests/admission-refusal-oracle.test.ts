@@ -16,9 +16,11 @@ import {
   Queues,
   DEFAULT_QUEUE_PROGRESS_POLICY,
   type CandidatePreparer,
+  type IntegrationProof,
   type QueueProgressPolicy,
   type StepExecution,
 } from "@yrd/queue"
+import { testLandingReceipt } from "./receipt-test-helper.ts"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -119,13 +121,13 @@ async function createDeliveryApp(clock: () => string, waitForMerge = false, defa
     { revision: "check-v1", output: CheckResultSchema },
   )
   const merge = withMerge(
-    (): JobResult<{ commit: string; baseSha: string }> =>
+    (): JobResult<IntegrationProof> =>
       waitForMerge
         ? { status: "waiting", token: "merge-pending" }
         : {
             status: "completed",
             conclusion: "success",
-            output: { commit: MERGED, baseSha: BASE },
+            output: { commit: MERGED, baseSha: BASE, receipt: testLandingReceipt(MERGED) },
           },
     { revision: "merge-v1" },
   )

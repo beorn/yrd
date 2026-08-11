@@ -1314,11 +1314,20 @@ landing-index row from Git, while a journal-only landing is corruption. Typed
 legacy integrations are replayed once into thin receipts or explicit
 tombstones, after which there is no legacy exception.
 
+Failed attempts use the same managed notes ref, with a distinct typed
+`yrd/failed-attempt-receipt/v1` payload. Its synthetic target is derived only
+from the recorded PR revision and attempt facts; no keep ref makes that target
+look like shipped code. Queue's one-shot and resident runners are the only
+writers. The note is collision-checked and idempotent, and `yrd why` joins it to
+the journal's refusal/run index so a failed attempt survives either process
+exit or log rotation without becoming a second landing path.
+
 `journal.sqlite` is the transactional command history and queryable index. Each
 command appends one checksummed transaction containing the Command, its cause,
 domain events, optional result value, and Job requests. Refusal rows remain
 first-class: when no landing receipt exists, `yrd why` reports the exact current
-revision/queue refusal rather than collapsing it into “not found.”
+revision/queue refusal and its repository failure receipt rather than collapsing
+it into “not found.”
 `journal_events` is the bounded append tail;
 `journal_history` keeps every covered frame as immutable, cursor-addressable
 rows. Startup restores the validated Core checkpoint and folds only the tail
