@@ -2138,19 +2138,25 @@ async function runYrdProcessHost(
     return exitCode
   } catch (error) {
     if (isYrdRuntimeReloadRequest(error)) {
-      return await execYrdProcessInPlace({
-        closeRuntime: closeHost,
-        removeShutdownSignals,
-        closeLog: () => log?.end(),
-        execPath: globalThis.process.execPath,
-        argv,
-        env,
-        execve: (execPath, execArgv, execEnv) => {
-          const execve = globalThis.process.execve
-          if (execve === undefined) throw new Error("yrd: this Bun runtime cannot reload a resident with execve")
-          return execve(execPath, [...execArgv], execEnv)
-        },
-      })
+      try {
+        return await execYrdProcessInPlace({
+          closeRuntime: closeHost,
+          removeShutdownSignals,
+          closeLog: () => log?.end(),
+          execPath: globalThis.process.execPath,
+          argv,
+          env,
+          execve: (execPath, execArgv, execEnv) => {
+            const execve = globalThis.process.execve
+            if (execve === undefined) throw new Error("this Bun runtime cannot reload a resident with execve")
+            return execve(execPath, [...execArgv], execEnv)
+          },
+        })
+      } catch (reloadError) {
+        await diagnostic(io, reloadError, { json: yrdJsonOutputRequested(argv) })
+        processExit = classifyFailure(reloadError).exitCode
+        return processExit
+      }
     }
     await diagnostic(io, error, { json: yrdJsonOutputRequested(argv) })
     processExit = classifyFailure(error).exitCode

@@ -1,3 +1,5 @@
+import { createFailure } from "@yrd/core"
+
 type YrdProcessExecve = (execPath: string, argv: readonly string[], env: NodeJS.ProcessEnv) => never
 
 /** Close every process-owned resource before replacing the resident image.
@@ -16,5 +18,16 @@ export async function execYrdProcessInPlace(
   await input.closeRuntime()
   input.removeShutdownSignals()
   input.closeLog()
-  return input.execve(input.execPath, input.argv, input.env)
+  try {
+    return input.execve(input.execPath, input.argv, input.env)
+  } catch (error) {
+    throw createFailure(
+      {
+        kind: "infrastructure",
+        code: "runtime-reload-exec-failed",
+        message: `yrd: resident runtime reload failed: ${error instanceof Error ? error.message : String(error)}`,
+      },
+      error,
+    )
+  }
 }

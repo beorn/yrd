@@ -9,8 +9,14 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import type { InstalledStep } from "@yrd/queue"
+import { failureFact } from "@yrd/core"
 import { createYrdHost } from "../src/host.ts"
-import { requireFreshInstalledBaseline, followQueueRuns } from "../src/run.ts"
+import {
+  followQueueRuns,
+  requestYrdRuntimeReload,
+  requireFreshInstalledBaseline,
+  residentRunnerStatus,
+} from "../src/run.ts"
 import {
   installedBaselineDrift,
   installedBaselinePath,
@@ -260,28 +266,89 @@ describe("run gate", () => {
     const argv = [execPath, "/immutable/yrd.ts", "queue", "run"]
     const env = { PATH: "/usr/bin", YRD_REPO: "/repo" }
 
-    await expect(
-      execYrdProcessInPlace({
-        closeRuntime: async () => {
-          calls.push("close-runtime")
-        },
-        removeShutdownSignals: () => {
-          calls.push("remove-signals")
-        },
-        closeLog: () => {
-          calls.push("close-log")
-        },
-        execPath,
-        argv,
-        env,
-        execve: (execPath, execArgv, execEnv) => {
-          calls.push("execve")
-          expect({ execPath, execArgv, execEnv }).toEqual({ execPath, execArgv: argv, execEnv: env })
-          throw replacement
-        },
-      }),
-    ).rejects.toBe(replacement)
+    const failure = await execYrdProcessInPlace({
+      closeRuntime: async () => {
+        calls.push("close-runtime")
+      },
+      removeShutdownSignals: () => {
+        calls.push("remove-signals")
+      },
+      closeLog: () => {
+        calls.push("close-log")
+      },
+      execPath,
+      argv,
+      env,
+      execve: (execPath, execArgv, execEnv) => {
+        calls.push("execve")
+        expect({ execPath, execArgv, execEnv }).toEqual({ execPath, execArgv: argv, execEnv: env })
+        throw replacement
+      },
+    }).catch((error: unknown) => error)
+    expect(failureFact(failure)).toMatchObject({
+      kind: "infrastructure",
+      code: "runtime-reload-exec-failed",
+    })
+    expect(failure).toMatchObject({ cause: replacement })
     expect(calls).toEqual(["close-runtime", "remove-signals", "close-log", "execve"])
+  })
+
+  it("classifies a failed execve as a loud infrastructure failure", async () => {
+    const failure = await execYrdProcessInPlace({
+      closeRuntime: async () => undefined,
+      removeShutdownSignals: () => undefined,
+      closeLog: () => undefined,
+      execPath: "/missing/bun",
+      argv: ["/missing/bun", "/immutable/yrd.ts", "queue", "run"],
+      env: {},
+      execve: () => {
+        throw new Error("ENOENT: immutable entry disappeared")
+      },
+    }).catch((error: unknown) => error)
+
+    expect(failureFact(failure)).toEqual({
+      kind: "infrastructure",
+      code: "runtime-reload-exec-failed",
+      message: "yrd: resident runtime reload failed: ENOENT: immutable entry disappeared",
+    })
+  })
+
+  it("a failed exec leaves the exact resident argv restartable by its supervisor", async () => {
+    const root = await tempDir("yrd-reload-restart-")
+    const marker = join(root, "attempts.log")
+    const worker = join(root, "resident.ts")
+    const runtimeReloadUrl = new URL("../src/runtime-reload.ts", import.meta.url).href
+    await writeFile(
+      worker,
+      `import { appendFileSync, existsSync, readFileSync } from "node:fs"
+import { execYrdProcessInPlace } from ${JSON.stringify(runtimeReloadUrl)}
+const marker = ${JSON.stringify(marker)}
+const prior = existsSync(marker) ? readFileSync(marker, "utf8").trim().split("\\n").filter(Boolean).length : 0
+appendFileSync(marker, "started\\n")
+if (prior === 0) {
+  await execYrdProcessInPlace({
+    closeRuntime: async () => undefined,
+    removeShutdownSignals: () => undefined,
+    closeLog: () => undefined,
+    execPath: process.execPath,
+    argv: process.argv,
+    env: process.env,
+    execve: () => { throw new Error("simulated execve ENOENT") },
+  })
+}
+appendFileSync(marker, "ready\\n")
+`,
+      "utf8",
+    )
+    const argv = [process.execPath, worker]
+
+    const first = Bun.spawn(argv, { stdout: "ignore", stderr: "pipe" })
+    expect(await first.exited).not.toBe(0)
+    expect(await new Response(first.stderr).text()).toContain("runtime-reload-exec-failed")
+
+    const replacement = Bun.spawn(argv, { stdout: "ignore", stderr: "pipe" })
+    expect(await replacement.exited, await new Response(replacement.stderr).text()).toBe(0)
+    expect(await readFile(marker, "utf8")).toBe("started\nstarted\nready\n")
   })
 
   it("follow-mode re-provisions on config-drift via provision() and continues (22306)", async () => {
@@ -351,8 +418,9 @@ describe("run gate", () => {
         {
           reloadInPlace: {
             base: "main",
-            request: () => {
+            request: (finding) => {
               lifecycle.push("reload")
+              expect(finding).toEqual({ code: "runtime-drift", message: "runtime steps diverge" })
               throw reloadRequested
             },
           },
@@ -391,6 +459,29 @@ describe("run gate", () => {
     // before any run started): proves per-cycle re-proof, gate-before-run.
     expect(gateCalls).toBe(2)
     expect(harness.runCalls()).toBe(1)
+  })
+
+  it("records runtime drift in the resident heartbeat before unwinding for reload", async () => {
+    const repo = await queueRepository("true")
+    const headSha = await git(repo, "rev-parse", "HEAD")
+    const harness = createResidentHarness({ run: async () => [] })
+    Object.assign(harness.io, {
+      cwd: repo,
+      repositoryRoot: repo,
+      runner: "yrd-cli:reload-evidence",
+      implementationSource: `git:${headSha}`,
+    })
+    const finding = { code: "runtime-drift", message: "loaded runtime no longer matches the baseline" } as const
+
+    await expect(
+      followQueueRuns(harness.app, [], { json: true, interval: 1 }, harness.io, async () => {
+        requestYrdRuntimeReload(finding)
+      }),
+    ).rejects.toMatchObject({ name: "YrdRuntimeReloadRequest" })
+    await expect(residentRunnerStatus(repo)).resolves.toMatchObject({
+      clean: false,
+      queueProgress: { state: "stalled", findings: [finding] },
+    })
   })
 })
 
