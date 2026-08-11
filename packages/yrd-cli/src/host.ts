@@ -13,6 +13,7 @@ import {
   createGitPushReceiver,
   createGitWorkspace,
   baseIdentity,
+  currentPRRev,
   loadGitPushReceiver,
   runReceiverHookFromEnvironment,
   withBays,
@@ -72,6 +73,7 @@ import {
   type PRShape,
   type QueueAuditResult,
   type RepositoryLandingIdentity,
+  type RepositoryLandingSearchResult,
   type StepDef,
   type StepExecution,
   type StepRunner,
@@ -1747,6 +1749,43 @@ async function createYrdRuntimeHost(
             })
           ).sha
           return findRepositoryLandingReceipt({ inject: { process }, repo: repository.repo, baseSha, identity })
+        },
+        async findByHead(headSha: string) {
+          const baseSha = (
+            await resolveGitQueueTarget({
+              inject: { process },
+              repo: repository.repo,
+              branch: baseIdentity(loaded.config.base),
+            })
+          ).sha
+          const revisions = runtimeApp.bays
+            .prs()
+            .map((pr) => ({ pr, revision: currentPRRev(pr) }))
+            .filter(({ revision }) => revision.head === headSha)
+          const proven: Array<Extract<RepositoryLandingSearchResult, { status: "proven" | "legacy-proven" }>> = []
+          for (const { pr, revision } of revisions) {
+            const result = await findRepositoryLandingReceipt({
+              inject: { process },
+              repo: repository.repo,
+              baseSha,
+              identity: {
+                pr: pr.id,
+                revision: revision.n,
+                headSha: revision.head,
+                ...(revision.changeId === undefined ? {} : { changeId: revision.changeId }),
+              },
+            })
+            if (result.status !== "not-proven") proven.push(result)
+          }
+          const landings = new Set(proven.map(({ fact }) => fact.landingSha))
+          if (landings.size > 1) {
+            throw createFailure({
+              kind: "infrastructure",
+              code: "repository-corrupt",
+              message: `yrd: authored head '${headSha}' has multiple repository landing receipts`,
+            })
+          }
+          return proven[0] ?? { status: "not-proven" as const, reason: "receipt-missing" as const }
         },
         async replayLegacy(landings: readonly LegacyJournalLanding[]) {
           const baseSha = (
