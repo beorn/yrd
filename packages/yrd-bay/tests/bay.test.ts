@@ -871,6 +871,29 @@ describe("withBays", () => {
         ],
       }),
     })
+    const replayLegacyLandingReceipt = command({
+      title: "Record the one-shot repository receipt for a legacy integration",
+      apply: () => ({
+        events: [
+          event("pr/landing-receipt-replayed", {
+            pr: "PR2",
+            revision: 1,
+            headSha: HEAD_2,
+            commit: BASE,
+            baseSha: BASE,
+            provenance: "legacy-journal",
+            coverage: "receipt",
+            missing: ["changeId", "run", "candidate", "gates", "refusals", "timestamps", "driver"],
+            receipt: {
+              ref: "refs/notes/yrd/receipts",
+              target: BASE,
+              note: "c".repeat(40),
+              checksum: "d".repeat(64),
+            },
+          }),
+        ],
+      }),
+    })
     const legacyPush = command({
       title: "Emit a legacy PR push",
       apply: () => ({
@@ -896,7 +919,15 @@ describe("withBays", () => {
       withBays({ jobs, defaultBase: "main" }),
     ).extend({
       commands: {
-        fixture: { legacyWithdraw, legacyReject, transitionalReject, legacyIntegrate, legacyPush, legacySubmit },
+        fixture: {
+          legacyWithdraw,
+          legacyReject,
+          transitionalReject,
+          legacyIntegrate,
+          replayLegacyLandingReceipt,
+          legacyPush,
+          legacySubmit,
+        },
       },
     })
     await using app = await createYrd(definition, {
@@ -934,6 +965,20 @@ describe("withBays", () => {
       current: { n: 2, head: HEAD_2, recut: { fromRevision: 1 } },
     })
     expect(currentPRRev(app.bays.pr("PR8")!)).not.toHaveProperty("submitter")
+    await app.dispatch(app.commands.fixture.replayLegacyLandingReceipt, undefined)
+    expect(prFacts(app.bays.pr("PR2"))).toMatchObject({
+      integration: {
+        receiptProvenance: "legacy-journal",
+        receiptCoverage: "receipt",
+        receiptMissing: ["changeId", "run", "candidate", "gates", "refusals", "timestamps", "driver"],
+        receipt: {
+          ref: "refs/notes/yrd/receipts",
+          target: BASE,
+          note: "c".repeat(40),
+          checksum: "d".repeat(64),
+        },
+      },
+    })
     await expect(app.dispatch(app.commands.fixture.legacyWithdraw, undefined)).rejects.toThrow()
     await expect(app.dispatch(app.commands.fixture.legacyReject, undefined)).rejects.toThrow()
     await expect(app.dispatch(app.commands.fixture.transitionalReject, undefined)).rejects.toThrow()

@@ -654,6 +654,9 @@ export type PR = Readonly<{
     baseSha: string
     changeId?: ChangeId
     receipt?: PRLandingReceiptPointer
+    receiptProvenance?: "queue" | "legacy-journal"
+    receiptCoverage?: "receipt" | "tombstone"
+    receiptMissing?: readonly string[]
   }>
   alreadyLandedAt?: string
   alreadyLanded?: PRAlreadyLandedEvidence

@@ -57,6 +57,8 @@ import {
   gitCheckStep,
   gitMergeStep,
   findRepositoryLandingReceipt,
+  replayLegacyLandingReceipts,
+  type LegacyJournalLanding,
   inspectGitQueueTarget,
   resolveGitQueueTarget,
   worktreeContexts,
@@ -1745,6 +1747,21 @@ async function createYrdRuntimeHost(
             })
           ).sha
           return findRepositoryLandingReceipt({ inject: { process }, repo: repository.repo, baseSha, identity })
+        },
+        async replayLegacy(landings: readonly LegacyJournalLanding[]) {
+          const baseSha = (
+            await resolveGitQueueTarget({
+              inject: { process },
+              repo: repository.repo,
+              branch: baseIdentity(loaded.config.base),
+            })
+          ).sha
+          return replayLegacyLandingReceipts({
+            inject: { process },
+            repo: repository.repo,
+            baseSha,
+            landings,
+          })
         },
       }),
       base: loaded.config.base,
