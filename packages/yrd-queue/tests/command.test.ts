@@ -7197,7 +7197,89 @@ describe("Queue command adapters", () => {
    * nothing left to deliver, so "linear rebuild required" is advice that cannot
    * succeed: the author rebuilds, the rebuild is empty, and the carrier is
    * refused again on the same ground. That is the loop PR562 rode to revision 43.
+   *
+   * The guard here is the promotion loop's covered-skip (command.ts:4345):
+   * `pin ⊆ targetSha` continues past the pin entirely, so `inspectBaseContainment`
+   * at :4381 is never reached for a spent pin and its head-in-base direction is
+   * unreachable on this path. The same skip is why the promotion target is
+   * monotonic — it only ever advances, at :4361 — so a spent pin cannot write
+   * anything backward.
    */
+  /**
+   * The rollback edge the backward-pin lore actually guards: a carrier whose HEAD
+   * is clean — it contains the current base, so nothing about it looks stale —
+   * but whose TREE moves the gitlink to an OLDER component sha. Nothing in the
+   * promotion loop sees this, because that loop reads merged pin intents rather
+   * than a branch carrier's authored tree, so if this merged it would silently
+   * revert the component.
+   *
+   * It is refused, but not by an ancestry check: a code carrier may not author a
+   * gitlink at all (`authoredGitlinkPaths`, command.ts:2266 -> `authored-gitlink`
+   * at :2272), so direction never gets a chance to matter. The blanket refusal is
+   * the stronger guard, and gitlink movement is routed to the intent path instead.
+   */
+  it("refuses a clean-headed carrier that moves the gitlink backward", async () => {
+    const fixture = await componentMainLandingRepository()
+
+    // Component main absorbs the pinned work, and the root advances its gitlink
+    // to match, so the carrier below branches from a base that is fully current.
+    await git(fixture.component, ["switch", "-q", "main"])
+    await git(fixture.component, ["merge", "-q", "--ff-only", fixture.pinSha])
+    await git(fixture.component, ["push", "-q", "origin", "main"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+    await git(join(fixture.repo, "dep"), ["fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+    await git(join(fixture.repo, "dep"), ["checkout", "-q", fixture.pinSha])
+    await git(fixture.repo, ["add", "dep"])
+    await git(fixture.repo, ["commit", "-qm", "advance dependency to component main"])
+    const currentBase = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["push", "-q", "origin", "main"])
+
+    // The carrier branches from that current base — its head is clean — and
+    // walks the gitlink back to the component's earlier commit.
+    await git(fixture.repo, ["switch", "-qc", "issue/backward-gitlink", currentBase])
+    await git(join(fixture.repo, "dep"), ["checkout", "-q", fixture.componentBaseSha])
+    await git(fixture.repo, ["add", "dep"])
+    await git(fixture.repo, ["commit", "-qm", "walk the dependency back"])
+    const carrierHead = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["push", "-q", "origin", "issue/backward-gitlink"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+
+    // Clean head: the carrier contains the current base. `git()` throws on a
+    // non-zero exit, so this call is the precondition.
+    await git(fixture.repo, ["merge-base", "--is-ancestor", currentBase, carrierHead])
+
+    await using process = createProcess()
+    await using app = await checkedQueue(process, fixture.repo, ["true"])
+    await submitCertifiedCarrier(app, fixture.repo, {
+      branch: "issue/backward-gitlink",
+      headSha: carrierHead,
+      baseSha: currentBase,
+    })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+
+    // The property under test is not "it refused" but "it did not roll the
+    // component back", so read the pin the run actually wrote.
+    await git(fixture.repo, ["switch", "-q", "main"])
+    const writtenPin = (await git(fixture.repo, ["ls-tree", "HEAD", "dep"])).split(/\s+/u)[2] ?? "none"
+    const walkedBack =
+      writtenPin !== "none" &&
+      writtenPin !== fixture.pinSha &&
+      (await git(fixture.component, ["merge-base", "--is-ancestor", writtenPin, fixture.pinSha])
+        .then(() => true)
+        .catch(() => false))
+
+    // It MERGES — the carrier is admitted, which is the surprising half. What
+    // protects the component is that the merge writes the forward pin anyway:
+    // the promotion target only ever advances (:4361), so the authored backward
+    // gitlink loses to it. Refusal is not the guard here; monotonicity is.
+    expect({ conclusion: run?.conclusion, writtenPin, walkedBack }).toEqual({
+      conclusion: "success",
+      writtenPin: fixture.pinSha,
+      walkedBack: false,
+    })
+  })
+
   it("does not tell a spent component pin to rebuild when component main already contains it", async () => {
     const fixture = await componentMainLandingRepository()
 
