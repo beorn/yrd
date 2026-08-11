@@ -831,7 +831,7 @@ yrd queue [filter...] [the same options]
 yrd watch [filter...] [the same options except --watch is implied]
 yrd queue run [selector...] [--steps [step...]] [--once] [--interval <seconds>] [--json]
 yrd queue cancel <run> [--reason <text>] [--json]
-yrd queue pause [base] --reason <text> [--allow [pr...]] [--json]
+yrd queue pause [base] --reason <text> --for <duration> [--allow [pr...]] [--json]
 yrd queue resume [base] [--json]
 yrd queue recover [--reason <text>] [--runner <id>] [--json]
 yrd queue finish <selector> [--step <name>] --job <id> --runner <runner>

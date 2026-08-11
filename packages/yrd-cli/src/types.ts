@@ -154,6 +154,8 @@ export type YrdCliIO = {
   /** Fresh host-owned Bay destroy protections for this invocation. */
   bayProtections?: readonly YrdBayProtection[]
   runner?: string
+  /** Host-minted driver lease identity for a resident queue epoch. */
+  driver?: Readonly<{ queueId: string; epoch: string }>
   /** Host-owned implementation identity captured before a resident starts serving. */
   implementationSource?: string
   leaseMs?: number

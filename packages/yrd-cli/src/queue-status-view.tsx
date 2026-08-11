@@ -341,6 +341,15 @@ export type QueueRunnerProgress =
   | Readonly<{ state: "healthy" }>
   | Readonly<{ state: "stalled"; findings: readonly QueueAuditFinding[] }>
 
+export type QueueDriverEpoch = Readonly<{
+  /** Repository-scoped queue identity; a service name is never a driver identity. */
+  queueId: string
+  /** One resident lifetime. A same-PID exec reload mints a successor epoch. */
+  epoch: string
+  /** Latest proven queue landing, or null before this queue has landed anything. */
+  lastLanded: Readonly<{ commit: string; at: string }> | null
+}>
+
 export type QueueTimelineRunner = Readonly<{
   pid: number
   startedAt: string
@@ -354,6 +363,8 @@ export type QueueTimelineRunner = Readonly<{
   implementationSource?: string
   /** Compiled-in journal versions this resident can read. */
   journalVersions?: readonly number[]
+  /** Content of the driver lease. Probes assert this, never a process/service suffix. */
+  driver?: QueueDriverEpoch
   /** ISO time the resident wrote its exit marker on shutdown. The status file is
    * NEVER deleted on close — it is left with this marker so a successor can still
    * reclaim this pid's leases (idempotently). Absent while the runner is live. */

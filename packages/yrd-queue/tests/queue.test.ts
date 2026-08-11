@@ -2960,7 +2960,12 @@ describe("Queue", () => {
           await app.dispatch(app.commands.queue.advance, { run: "R1" })
           expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("integrated")
           expect(app.queue.get("R1")?.steps[1]?.job?.status).toBe("queued")
-          await app.queue.pause({ base: "main", reason: "maintenance", allowedPRs: [] })
+          await app.queue.pause({
+            base: "main",
+            reason: "maintenance",
+            allowedPRs: [],
+            expiresAt: "2026-01-01T01:00:00.000Z",
+          })
         }
       }
 
@@ -4175,7 +4180,12 @@ describe("Queue", () => {
     let drainTurns = 0
     const draining = runner.queue.run({ prs: [pr.id] }, { ...runtime, continueAdmissions: () => ++drainTurns <= 6 })
     await checkStarted.promise
-    await operator.queue.pause({ base: "main", reason: "operator freeze", allowedPRs: [] })
+    await operator.queue.pause({
+      base: "main",
+      reason: "operator freeze",
+      allowedPRs: [],
+      expiresAt: "2026-01-01T01:00:00.000Z",
+    })
     finishCheck.resolve()
 
     expect(await draining).toEqual([])
@@ -5208,7 +5218,12 @@ describe("Queue", () => {
     const allowed = await submitBranch(first, "issue/allowed")
     const blocked = await submitBranch(first, "issue/blocked")
 
-    await first.queue.pause({ base: "main", reason: "operator freeze", allowedPRs: [allowed.id] })
+    await first.queue.pause({
+      base: "main",
+      reason: "operator freeze",
+      allowedPRs: [allowed.id],
+      expiresAt: "2026-01-01T01:00:00.000Z",
+    })
 
     expect(first.queue.status("main").pause).toMatchObject({
       base: "main",
@@ -5226,17 +5241,67 @@ describe("Queue", () => {
     await first.queue.resume("main")
     await expect(first.queue.run({ prs: [blocked.id] }, runtime)).resolves.toHaveLength(1)
     expect(first.queue.status("main").pause).toBeUndefined()
-    await first.queue.pause({ base: "main", reason: "operator freeze", allowedPRs: [allowed.id] })
+    await first.queue.pause({
+      base: "main",
+      reason: "operator freeze",
+      allowedPRs: [allowed.id],
+      expiresAt: "2026-01-01T01:00:00.000Z",
+    })
     await first.close()
 
     await using replay = await createQueueApp({}, journal)
     expect(replay.queue.status("main").pause).toMatchObject({ allowedPRs: [allowed.id] })
   })
 
+  it("expires a TTL'd queue hold without stopping the resident that clears it", async () => {
+    const journal = createMemoryJournal()
+    let now = "2026-01-01T00:00:00.000Z"
+    const app = await createQueueApp({}, journal, () => now)
+    const blocked = await submitBranch(app, "issue/ttl-hold")
+
+    await app.queue.pause({
+      base: "main",
+      reason: "operator freeze",
+      allowedPRs: [],
+      expiresAt: "2026-01-01T00:05:00.000Z",
+    })
+
+    expect(app.queue.status("main").pause).toMatchObject({
+      base: "main",
+      pausedAt: "2026-01-01T00:00:00.000Z",
+      expiresAt: "2026-01-01T00:05:00.000Z",
+    })
+    now = "2026-01-01T00:04:59.999Z"
+    await expect(app.queue.expirePauses(now)).resolves.toEqual([])
+    expect(app.queue.audit({ now }).findings).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "queue-hold-expired" })]),
+    )
+    await expect(app.queue.run({ prs: [blocked.id] }, runtime)).rejects.toThrow(
+      `queue 'main' is paused: operator freeze`,
+    )
+
+    now = "2026-01-01T00:05:00.000Z"
+    expect(app.queue.audit({ now }).findings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "queue-hold-expired", specimen: "queue:main" })]),
+    )
+    await expect(app.queue.expirePauses(now)).resolves.toMatchObject([{ base: "main" }])
+    expect(app.queue.status("main").pause).toBeUndefined()
+    await expect(app.queue.run({ prs: [blocked.id] }, runtime)).resolves.toHaveLength(1)
+    await app.close()
+
+    await using replay = await createQueueApp({}, journal)
+    expect(replay.queue.status("main").pause).toBeUndefined()
+  })
+
   it("does not bypass a canonical pause through a base alias", async () => {
     await using app = await createQueueApp()
     const pr = await submitBranch(app, "issue/alias-paused", "origin/main")
-    await app.queue.pause({ base: "main", reason: "operator freeze", allowedPRs: [] })
+    await app.queue.pause({
+      base: "main",
+      reason: "operator freeze",
+      allowedPRs: [],
+      expiresAt: "2026-01-01T01:00:00.000Z",
+    })
 
     await expect(app.queue.run({ prs: [pr.id] }, runtime)).rejects.toThrow(`queue 'main' is paused: operator freeze`)
     await expect(app.dispatch(app.commands.queue.run, { prs: [pr.id] })).rejects.toThrow(
@@ -5336,6 +5401,9 @@ describe("Queue", () => {
       base: "main",
       pause: { base: "main", allowedPRs: ["PR1", "PR2"] },
     })
+    expect(app.queue.audit({ now: "2026-01-01T00:01:00.000Z" }).findings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "queue-hold-ttl-missing", specimen: "queue:main" })]),
+    )
 
     const runs = await app.queue.run({}, runtime)
     expect(runs.map((run) => [run.base, run.prs.map((pr) => pr.id)])).toEqual([["main", ["PR1", "PR2"]]])
@@ -5371,7 +5439,12 @@ describe("Queue", () => {
     )
     expect(deliveryOf(app.state().bays.prs.PR11)).toBe("submitted")
     expect(deliveryOf(app.state().bays.prs.PR23)).toBe("submitted")
-    await app.queue.pause({ base: "main", reason: "operator freeze", allowedPRs: ["PR23"] })
+    await app.queue.pause({
+      base: "main",
+      reason: "operator freeze",
+      allowedPRs: ["PR23"],
+      expiresAt: "2026-01-01T01:00:00.000Z",
+    })
 
     const runs = await app.queue.run({}, runtime)
 

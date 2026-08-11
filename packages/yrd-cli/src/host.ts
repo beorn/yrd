@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { mkdtemp, rm } from "node:fs/promises"
 import { hostname } from "node:os"
@@ -1268,18 +1268,22 @@ function queueAdministration(
 
 type ResidentRunnerIdentity = Readonly<{
   id: string
+  queueId: string
+  epoch: string
   host: string
   pane?: string
 }>
 
 type ResidentRunnerLease = Readonly<{ close(): Promise<void> }>
 
-function residentRunnerIdentity(env: NodeJS.ProcessEnv): ResidentRunnerIdentity {
+function residentRunnerIdentity(env: NodeJS.ProcessEnv, repo: string): ResidentRunnerIdentity {
   const pane = [env.HERDR_PANE_ID, env.CMUX_SURFACE_ID]
     .map((value) => value?.trim())
     .find((value): value is string => value !== undefined && value !== "")
   return Object.freeze({
     id: `yrd-cli:${globalThis.process.pid}`,
+    queueId: `${resolve(repo)}#main`,
+    epoch: randomUUID(),
     host: hostname(),
     ...(pane === undefined ? {} : { pane }),
   })
@@ -1288,6 +1292,8 @@ function residentRunnerIdentity(env: NodeJS.ProcessEnv): ResidentRunnerIdentity 
 function residentRunnerLog(log: ConditionalLogger, identity: ResidentRunnerIdentity): ConditionalLogger {
   return log.child({
     runner: identity.id,
+    driverQueue: identity.queueId,
+    driverEpoch: identity.epoch,
     host: identity.host,
     ...(identity.pane === undefined ? {} : { pane: identity.pane }),
   })
@@ -1367,10 +1373,13 @@ async function acquireResidentRunner(
   for (let attempt = 0; attempt < attempts; attempt++) {
     const released = Promise.withResolvers<void>()
     const acquired = Promise.withResolvers<void>()
-    const held = createExclusive(join(stateDir, "resident-runner"), { timeoutMs: 0 }).run(async () => {
-      acquired.resolve()
-      await released.promise
-    })
+    const held = createExclusive(join(stateDir, "resident-runner"), { timeoutMs: 0 }).run(
+      async () => {
+        acquired.resolve()
+        await released.promise
+      },
+      { holder: `queue=${identity.queueId} epoch=${identity.epoch}` },
+    )
     try {
       await Promise.race([acquired.promise, held])
       runnerLog.info?.("Resident runner lease acquired", { runner: identity.id, stateDir })
@@ -2005,7 +2014,9 @@ async function runYrdProcessHost(
         : {}),
       async load(context, posture) {
         const runner =
-          posture === "resident-queue-run" || posture === "one-shot-queue-run" ? residentRunnerIdentity(env) : undefined
+          posture === "resident-queue-run" || posture === "one-shot-queue-run"
+            ? residentRunnerIdentity(env, context.repo)
+            : undefined
         const resident = posture === "resident-queue-run" ? runner : undefined
         // The resident follow-runner logs at DEBUG-by-default (see
         // residentObservability) so run/step starts and successful completions
@@ -2091,6 +2102,7 @@ async function runYrdProcessHost(
             artifactRoot: join(activeHost.repository.stateDir, "artifacts"),
             stateDir: activeHost.repository.stateDir,
             ...(runner === undefined ? {} : { runner: runner.id }),
+            ...(resident === undefined ? {} : { driver: { queueId: resident.queueId, epoch: resident.epoch } }),
             ...(runner === undefined || activeHost.implementationSource === undefined
               ? {}
               : { implementationSource: activeHost.implementationSource }),

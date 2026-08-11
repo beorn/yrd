@@ -159,12 +159,12 @@ describe("repository aliases supplied by a composition host", () => {
       },
     },
     {
-      args: ["queue", "pause", "beta", "--reason", "schema cutover"],
+      args: ["queue", "pause", "beta", "--reason", "schema cutover", "--for", "30m"],
       expected: {
         kind: "repository-write",
         repository: { name: "beta", path: "/srv/beta" },
         queue: { base: "release" },
-        args: ["--repo", "/srv/beta", "queue", "pause", "release", "--reason", "schema cutover"],
+        args: ["--repo", "/srv/beta", "queue", "pause", "release", "--reason", "schema cutover", "--for", "30m"],
       },
     },
     {
