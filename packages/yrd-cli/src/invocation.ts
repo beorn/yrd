@@ -69,19 +69,7 @@ const ROOT_COMMAND_ALIASES = {
 
 const LIST_COMMAND_PARENTS = new Set(["bay", "pr", "queue"])
 
-const QUEUE_SUBCOMMANDS = new Set([
-  "_list",
-  "list",
-  "audit",
-  "init",
-  "deinit",
-  "pause",
-  "resume",
-  "recover",
-  "run",
-  "cancel",
-  "finish",
-])
+const QUEUE_SUBCOMMANDS = new Set(["_list", "list", "audit", "pause", "resume", "recover", "run", "cancel", "finish"])
 
 function rootCommandIndex(args: readonly string[]): number | undefined {
   for (let index = 0; index < args.length; index += 1) {
@@ -217,8 +205,6 @@ function namedAlternatives(names: readonly string[]): string {
   return `${names.slice(0, -1).join(", ")} or ${names.at(-1)}`
 }
 
-const COMPOSITION_QUEUE_WRITES = new Set(["run", "pause", "resume", "recover", "cancel", "finish"])
-
 /** Optional composition-host adapter for named repositories. Standalone Yrd
  * deliberately never calls this: aliases are injected by the installed host. */
 export function normalizeYrdRepositoryAliasInvocation(
@@ -244,7 +230,7 @@ export function normalizeYrdRepositoryAliasInvocation(
     const tail = operand === "list" || operand === "_list" ? args.slice(queueIndex + 2) : args.slice(queueIndex + 1)
     return { kind: "all-repositories-read", args: [...prefix, "queue", "list", ...tail] }
   }
-  if (COMPOSITION_QUEUE_WRITES.has(operand)) {
+  if (QUEUE_SUBCOMMANDS.has(operand) && READ_ONLY_SUBCOMMANDS.queue?.has(operand) !== true) {
     const declaration = requiredRepository(args[queueIndex + 2])
     const tail = args.slice(queueIndex + 3)
     const base = operand === "pause" || operand === "resume" ? [declaration.queue.base] : []

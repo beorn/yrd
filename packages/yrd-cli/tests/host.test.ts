@@ -1372,6 +1372,38 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 })
 
 describe("createYrdHost", { timeout: 20_000 }, () => {
+  it("uses the Hab service identity at the shipping process host", async () => {
+    const { repo } = await repository()
+    const previousServiceName = process.env.HAB_SERVICE_NAME
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+    process.env.HAB_SERVICE_NAME = "yrd-runner-pm"
+    try {
+      expect(
+        await runYrdProcess([
+          "/usr/bin/bun",
+          "/usr/local/bin/yrd",
+          "--repo",
+          repo,
+          "queue",
+          "list",
+          "--check",
+          "--json",
+        ]),
+      ).toBe(1)
+      expect(JSON.parse(stdout.mock.calls.map(([chunk]) => String(chunk)).join(""))).toMatchObject({
+        schema: "hab-service-health/1",
+        service: "yrd-runner-pm",
+      })
+      expect(stderr.mock.calls).toEqual([])
+    } finally {
+      if (previousServiceName === undefined) delete process.env.HAB_SERVICE_NAME
+      else process.env.HAB_SERVICE_NAME = previousServiceName
+      stdout.mockRestore()
+      stderr.mockRestore()
+    }
+  })
+
   it("caches viewer queue targets but re-resolves them for a resident runner", async () => {
     const mutableResolver = () => {
       let reads = 0

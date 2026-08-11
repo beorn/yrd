@@ -201,6 +201,12 @@ describe("repository aliases supplied by a composition host", () => {
       "unknown Yrd repository ''; expected alpha or beta",
     )
   })
+
+  it.each(["init", "deinit"])("does not preserve the retired direct queue %s spelling", (command) => {
+    expect(() => normalizeYrdRepositoryAliasInvocation(["queue", command], repositories)).toThrow(
+      `unknown Yrd repository '${command}'; expected alpha or beta`,
+    )
+  })
 })
 
 describe("resolveYrdContext", () => {
