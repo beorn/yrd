@@ -6555,7 +6555,13 @@ async function logRuns(
  * baseline) with the restart remedy. */
 export async function requireFreshInstalledBaseline(
   services: YrdCliServices,
-  options: Readonly<{ reloadInPlace?: Readonly<{ base?: string }> }> = {},
+  options: Readonly<{
+    reloadInPlace?: Readonly<{
+      base?: string
+      /** Unwind the resident completely, then replace this process image. */
+      request?: () => never
+    }>
+  }> = {},
 ): Promise<void> {
   const administration = services.queue
   // No queue administration is wired (embedded / no-administration host) → the
@@ -6591,13 +6597,33 @@ export async function requireFreshInstalledBaseline(
     await administration.provision(reload.base)
     const after = await auditDrift()
     if (after.length === 0) return
+    if (after.some((finding) => finding.code === "runtime-drift") && reload.request !== undefined) {
+      reload.request()
+    }
     const firstAfter = after[0]
     if (firstAfter === undefined) return
     raiseFailure("refusal", firstAfter.code, after.map((finding) => finding.message).join("\n"))
   }
+  if (reload?.request !== undefined && drift.some((finding) => finding.code === "runtime-drift")) {
+    reload.request()
+  }
   const first = drift[0]
   if (first === undefined) return
   raiseFailure("refusal", first.code, drift.map((finding) => finding.message).join("\n"))
+}
+
+class YrdRuntimeReloadRequest extends Error {
+  override readonly name = "YrdRuntimeReloadRequest"
+}
+
+/** Typed control transfer: unwind the resident heartbeat before the process
+ * host closes leases/resources and performs the same-PID exec. */
+export function requestYrdRuntimeReload(): never {
+  throw new YrdRuntimeReloadRequest("resident runtime baseline changed")
+}
+
+export function isYrdRuntimeReloadRequest(error: unknown): boolean {
+  return error instanceof YrdRuntimeReloadRequest
 }
 
 async function queueAudit(
@@ -9104,7 +9130,12 @@ function buildProgram(
       const mode = invocation.queueRunMode
       if (mode === undefined) throw new Error("yrd: normalized queue run mode is missing")
       const gate = () =>
-        requireFreshInstalledBaseline(installedServices(), mode === "follow" ? { reloadInPlace: {} } : {})
+        requireFreshInstalledBaseline(
+          installedServices(),
+          mode === "follow"
+            ? { reloadInPlace: bootstrap === undefined ? {} : { request: requestYrdRuntimeReload } }
+            : {},
+        )
       if (mode === "follow") {
         setExit(await followQueueRuns(installed(), selectors, options, io, gate, installedServices()))
         return

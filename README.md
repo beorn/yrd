@@ -898,7 +898,11 @@ The resident re-proves the installed baseline before every cycle. A
 `config-drift` finding first executes the same in-place `admin queue deinit` /
 `admin queue init` migration printed by the health surface, then re-audits
 before starting work. If either capability is absent or the post-migration audit remains red
-(including true runtime drift), the process exits loudly for its supervisor.
+on configuration drift, the cycle refuses loudly. True runtime drift asks the
+resident host to unwind its heartbeat and leases, close its runtime, and
+`execve` the exact same argv and source in place. The OS PID stays stable while
+the reconstructed host loads the current repository configuration and mints a
+new driver epoch; a one-shot run still refuses instead of reloading itself.
 
 To stop a resident `queue run` (its follow-by-default form), send `SIGINT` (Ctrl-C) or `SIGTERM`.
 The first signal stops new Queue work, lets the active run finish, and exits with
