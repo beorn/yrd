@@ -2433,6 +2433,31 @@ checks: [{check: {run: "true"}}]
     }
   })
 
+  it("reports a SIGKILLed explicit required check as infrastructure", async () => {
+    const { repo } = await repository()
+    await writeFile(join(repo, ".yrd.yml"), 'checks: [{check: {run: "kill -9 $$"}}]\n')
+    await git(repo, "add", ".yrd.yml")
+    await git(repo, "commit", "-qm", "kill required check")
+    let stderr = ""
+
+    const exitCode = await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "check", "check", "--json"], {
+      cwd: repo,
+      stdout() {},
+      stderr: (text) => {
+        stderr += text
+      },
+    })
+
+    expect(exitCode).toBe(3)
+    expect(JSON.parse(stderr)).toMatchObject({
+      failure: {
+        kind: "infrastructure",
+        code: "required-check-infrastructure-signal",
+        message: expect.stringContaining("SIGKILL"),
+      },
+    })
+  })
+
   it("runs the managed required check before pr submit mutates the PR journal", async () => {
     const { repo } = await repository()
     await writeFile(

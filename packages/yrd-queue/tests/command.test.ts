@@ -5103,6 +5103,45 @@ describe("Queue command adapters", () => {
     expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
+  it.each([false, true])(
+    "classifies a SIGKILLed candidate check as retryable infrastructure, never a task verdict (waiting=%s)",
+    async (waiting) => {
+      const { repo, feature: featureSha } = await repository("feature")
+      await using process = createProcess()
+      const killed: Pick<Process, "run"> = {
+        run(request) {
+          if (request.argv[0] !== "sh") return process.run(request)
+          return Promise.resolve({
+            exitCode: 1,
+            signal: "SIGKILL",
+            stdout: "",
+            stderr: "",
+            durationMs: 100,
+            timedOut: false,
+          })
+        },
+      }
+      await using app = await checkedQueue(killed, repo, shellCommand("exit 0"), { waiting })
+      await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+      expect(run).toMatchObject({
+        status: "completed",
+        conclusion: "failure",
+        error: {
+          code: "queue-environment-refused",
+          evidence: {
+            kind: "check-execution-refusal",
+            phase: "candidate",
+            error: { code: "check-infrastructure-signal", message: expect.stringContaining("SIGKILL") },
+            retryable: true,
+          },
+        },
+      })
+      expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
+    },
+  )
+
   it("treats Vitest-shaped nonzero output as a terminal failure under the plain exit-code contract", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()

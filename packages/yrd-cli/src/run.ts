@@ -6462,6 +6462,15 @@ async function runRequiredChecks(
           }
     const result = await checks.run(name, io.cwd ?? process.cwd(), context)
     if (result.stdout !== "") io.stdout(result.stdout)
+    if (result.signal === "SIGKILL" || (result.signal === null && result.exitCode === 137)) {
+      const retained =
+        result.retainedWorkspace === undefined ? "" : `; ${retainedWorkspaceNote(result.retainedWorkspace)}`
+      raiseFailure(
+        "infrastructure",
+        "required-check-infrastructure-signal",
+        `yrd: required check infrastructure failed: '${name}' ended by SIGKILL (exit ${result.exitCode}) before it produced a verdict${retained}`,
+      )
+    }
     if (result.exitCode !== 0 || result.timedOut) {
       const outcome = result.timedOut ? "timed out" : `exited ${String(result.exitCode)}`
       const checkDiagnostic = result.stderr.trim()

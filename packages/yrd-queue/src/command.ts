@@ -455,6 +455,17 @@ function configuredCommand<Shape extends PRShape>(
         evidence,
       )
     }
+    // SIGKILL has no task-level meaning: the kernel, an operator, or a memory
+    // supervisor ended the process before it could return a verdict. Keeping
+    // this distinct prevents exit-code normalization from turning missing
+    // evidence into a terminal check failure.
+    if (result.signal === "SIGKILL" || (result.signal === null && result.exitCode === 137)) {
+      return failed(
+        `${options.purpose}-infrastructure-signal`,
+        `${options.purpose} command ended by SIGKILL (exit ${result.exitCode}) before it produced a verdict`,
+        evidence,
+      )
+    }
     if (gateReports.error !== undefined) {
       return failed(`${options.purpose}-gate-report-invalid`, gateReports.error, evidence)
     }
@@ -5406,6 +5417,21 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
                 }),
               }
             }
+            if (outcome.error.code === `${purpose}-infrastructure-signal`) {
+              const refusal = GitCheckExecutionRefusalEvidenceSchema.parse({
+                ...candidate,
+                kind: "check-execution-refusal",
+                phase: "candidate",
+                error: outcome.error,
+                ...(outcome.output === undefined ? {} : { candidateEvidence: outcome.output }),
+                retryable: true,
+              })
+              return failedWithEvidence(
+                "queue-environment-refused",
+                `${purpose} candidate launcher ended before it produced a verdict: ${outcome.error.message}`,
+                refusal,
+              )
+            }
             return {
               status: "completed",
               conclusion: "failure",
@@ -5457,6 +5483,22 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             return failedWithEvidence(
               "queue-environment-refused",
               `${purpose} candidate evidence could not be evaluated: ${error.message}`,
+              refusal,
+            )
+          }
+
+          if (outcome.error.code === `${purpose}-infrastructure-signal`) {
+            const refusal = GitCheckExecutionRefusalEvidenceSchema.parse({
+              ...candidate,
+              kind: "check-execution-refusal",
+              phase: "candidate",
+              error: outcome.error,
+              ...(outcome.output === undefined ? {} : { candidateEvidence: outcome.output }),
+              retryable: true,
+            })
+            return failedWithEvidence(
+              "queue-environment-refused",
+              `${purpose} candidate command ended before it produced a verdict: ${outcome.error.message}`,
               refusal,
             )
           }
@@ -5526,6 +5568,25 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
           }
 
           const parentEvidence = comparableCommandEvidence(parentOutcome, purpose)
+          if (
+            parentOutcome.status === "completed" &&
+            parentOutcome.conclusion === "failure" &&
+            parentOutcome.error.code === `${purpose}-infrastructure-signal`
+          ) {
+            const refusal = GitCheckExecutionRefusalEvidenceSchema.parse({
+              ...candidate,
+              kind: "check-execution-refusal",
+              phase: "parent",
+              error: parentOutcome.error,
+              ...(candidateEvidence === undefined ? {} : { candidateEvidence }),
+              retryable: true,
+            })
+            return failedWithEvidence(
+              "queue-environment-refused",
+              `${purpose} parent command ended before it produced a verdict: ${parentOutcome.error.message}`,
+              refusal,
+            )
+          }
           if (parentEvidence === undefined) {
             // An ordinary nonzero parent exit genuinely ran and cannot become
             // an infrastructure alias just because its diagnostics are opaque.
