@@ -4995,7 +4995,9 @@ function advanceQueue(
       )
     }
     const prSnapshots = record.prs.filter((member) => member.intent === undefined)
-    for (const current of samePayloadPRs(state.bays, prSnapshots)) {
+    for (const snapshot of prSnapshots) {
+      const current = state.bays.prs[snapshot.id]
+      if (current === undefined) throw new Error(`yrd: Queue run '${record.id}' names missing PR '${snapshot.id}'`)
       const alreadyLanded = shape.integration.alreadyLanded
       if (alreadyLanded !== undefined) {
         const existingEvidence = current.alreadyLanded
@@ -7066,9 +7068,15 @@ function integratedPRShape(prs: readonly PR[]): IntegratedShape | undefined {
     ...prShape(prs.map(Queues.snapshot)),
     integration:
       alreadyLanded === undefined
-        ? proof
+        ? {
+            commit: proof.commit,
+            baseSha: proof.baseSha,
+            ...(proof.receipt === undefined ? {} : { receipt: proof.receipt }),
+          }
         : {
-            ...proof,
+            commit: proof.commit,
+            baseSha: proof.baseSha,
+            ...(proof.receipt === undefined ? {} : { receipt: proof.receipt }),
             alreadyLanded: {
               candidateSha: alreadyLanded.candidateSha,
               candidateTreeSha: alreadyLanded.candidateTreeSha,

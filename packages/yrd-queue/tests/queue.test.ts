@@ -66,6 +66,12 @@ import { compactQueuesState } from "../src/retention.ts"
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
 const MERGED = "b".repeat(40)
+const RECEIPT = {
+  ref: "refs/notes/yrd/receipts",
+  target: MERGED,
+  note: "c".repeat(40),
+  checksum: "d".repeat(64),
+} as const
 const UPDATED = "3".repeat(40)
 const runtime = { runner: "local", leaseMs: 60_000 }
 const CheckResultSchema = z.object({ checked: z.boolean() }).strict()
@@ -520,7 +526,9 @@ function queuePlugin(
     check?: StepRunner<PRShape, CheckResult>
     merge?: (
       input: StepExecution<ReviewedShape>,
-    ) => JobResult<{ commit: string; baseSha: string }> | Promise<JobResult<{ commit: string; baseSha: string }>>
+    ) =>
+      | JobResult<{ commit: string; baseSha: string; receipt?: typeof RECEIPT }>
+      | Promise<JobResult<{ commit: string; baseSha: string; receipt?: typeof RECEIPT }>>
     deploy?: (input: StepExecution<MergedShape>) => JobResult<DeployResult>
     checkRevision?: string
     checkClassification?: "base" | "carrier"
@@ -582,14 +590,16 @@ function queuePlugin(
     { revision: "review-v1", output: ReviewResultSchema },
   )
   const merge = withMerge(
-    (
-      input: StepExecution<ReviewedShape>,
-    ): JobResult<{ commit: string; baseSha: string }> | Promise<JobResult<{ commit: string; baseSha: string }>> =>
-      options.merge?.(input) ?? {
-        status: "completed",
-        conclusion: "success",
+    async (input: StepExecution<ReviewedShape>) => {
+      const result = (await options.merge?.(input)) ?? {
+        status: "completed" as const,
+        conclusion: "success" as const,
         output: { commit: MERGED, baseSha: BASE },
-      },
+      }
+      return result.status === "completed" && result.conclusion === "success" && result.output.receipt === undefined
+        ? { ...result, output: { ...result.output, receipt: RECEIPT } }
+        : result
+    },
     { revision: "merge-v1" },
   )
   const deploy = withStep(
@@ -2504,6 +2514,8 @@ describe("Queue", () => {
       correlation,
     })
     await integratedApp.queue.run({ prs: ["PR1"] }, runtime)
+    const changeId = currentPRRev(integratedApp.bays.pr("PR1")!).changeId
+    if (changeId === undefined) throw new Error("expected current PR Change-Id")
 
     expect(await Array.fromAsync(integratedApp.events())).toContainEqual(
       expect.objectContaining({
@@ -2517,6 +2529,8 @@ describe("Queue", () => {
           commit: MERGED,
           landingSha: MERGED,
           baseSha: BASE,
+          changeId,
+          receipt: RECEIPT,
           correlation,
           submitter: "operator",
         },
@@ -3575,7 +3589,7 @@ describe("Queue", () => {
       expect(record).not.toHaveProperty("jobIds")
       expect(record).not.toHaveProperty("shape")
     }
-    expect(Object.values(app.state().bays.prs).map((pr) => pr.integration)).toEqual([
+    expect(Object.values(app.state().bays.prs).map((pr) => pr.integration)).toMatchObject([
       { commit: MERGED, baseSha: BASE },
       { commit: MERGED, baseSha: BASE },
       { commit: MERGED, baseSha: BASE },
@@ -3584,7 +3598,7 @@ describe("Queue", () => {
     expect(app.queue.status("release/2.0").finished).toHaveLength(1)
   })
 
-  it("reconciles historical same-payload PRs from one integration proof", async () => {
+  it("does not attach a receipt to a historical same-payload PR absent from the checked Candidate", async () => {
     const journal = createMemoryJournal<unknown>()
     await using app = await createQueueApp({}, journal)
     const canonical = await submitBranch(app, "issue/one")
@@ -3630,17 +3644,12 @@ describe("Queue", () => {
     const reconciled = await app.dispatch(app.commands.queue.advance, { run: run?.id ?? "missing" })
 
     expect(run).toMatchObject({ status: "completed", conclusion: "success", integration: { commit: MERGED } })
-    expect(reconciled.events).toEqual([
-      expect.objectContaining({ name: "pr/integrated", data: expect.objectContaining({ pr: "PR2" }) }),
-    ])
+    expect(reconciled.events).toEqual([])
     expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
       delivery: "integrated",
       integration: run?.integration,
     })
-    expect(prFacts(app.state().bays.prs.PR2)).toMatchObject({
-      delivery: "integrated",
-      integration: run?.integration,
-    })
+    expect(prFacts(app.state().bays.prs.PR2)).toMatchObject({ delivery: "submitted" })
   })
 
   it("does not integrate canceled historical PRs that share the current payload", async () => {
@@ -5337,8 +5346,7 @@ describe("Queue", () => {
       pause: { base: "main", allowedPRs: ["PR1", "PR2"] },
     })
 
-    const runs = await app.queue.run({}, runtime)
-    expect(runs.map((run) => [run.base, run.prs.map((pr) => pr.id)])).toEqual([["main", ["PR1", "PR2"]]])
+    await expect(app.queue.run({}, runtime)).rejects.toThrow("predates stable Change-Id identity")
   })
 
   it("selects the first queue-ordered eligible submitted PR under a pause", async () => {
