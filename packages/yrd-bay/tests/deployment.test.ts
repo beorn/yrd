@@ -9,7 +9,12 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createProcess } from "@yrd/process"
-import { createDeploymentJobDefs, createGitDeploymentStore, deploymentJobKey } from "../src/deployment.ts"
+import {
+  createDeploymentJobDefs,
+  createGitDeploymentStore,
+  deploymentJobKey,
+  readDeploymentBySource,
+} from "../src/deployment.ts"
 
 const roots: string[] = []
 
@@ -153,6 +158,10 @@ describe("createGitDeploymentStore", () => {
     expect(await git(first.path, "rev-parse", "HEAD")).toBe(sha)
     expect(await git(second.path, "rev-parse", "HEAD")).toBe(sha)
     expect(await git(repo, "worktree", "list", "--porcelain")).toContain("locked immutable Yrd deployment D1")
+    await expect(readDeploymentBySource(join(root, "deployments"), first.path, first.sha)).resolves.toEqual(first)
+    await expect(readDeploymentBySource(join(root, "deployments"), join(root, "missing"), first.sha)).resolves.toBe(
+      undefined,
+    )
     await store.release(first)
     await store.release(second)
   })
@@ -225,12 +234,16 @@ describe("createGitDeploymentStore", () => {
       signal: new AbortController().signal,
     }
     const habReleaseReceipt = {
-      schema: "hab-launch-release/2" as const,
-      generation: Number(receipt.generation.slice(1)),
-      writerId: receipt.generation,
-      proof: {
-        habitantSource: { path: receipt.path, sha: receipt.sha, verification: "verified" as const },
+      schema: "hab-service-generation-release/1" as const,
+      jurisdiction: "single-habitat" as const,
+      habitatRoot: join(root, "habitat"),
+      retiredSource: { path: receipt.path, sha: receipt.sha, verification: "verified" as const },
+      replacementSource: {
+        path: join(root, "deployments", "roots", "D2"),
+        sha: "2".repeat(40),
+        verification: "verified" as const,
       },
+      releasedAt: "2026-08-11T20:00:00.000Z",
     }
     const input = {
       deploymentId: receipt.deploymentId,
@@ -261,15 +274,26 @@ describe("createGitDeploymentStore", () => {
             ...input.authorization,
             receipt: {
               ...habReleaseReceipt,
-              proof: {
-                habitantSource: { path: join(root, "wrong"), sha: receipt.sha, verification: "verified" },
-              },
+              retiredSource: { path: join(root, "wrong"), sha: receipt.sha, verification: "verified" },
             },
           },
         },
         context,
       ),
     ).resolves.toMatchObject({ status: "completed", conclusion: "failure" })
+    expect(existsSync(receipt.path)).toBe(true)
+    await expect(
+      release.execute(
+        {
+          ...input,
+          authorization: {
+            ...input.authorization,
+            receipt: { ...habReleaseReceipt, nonce: "strict-same-user-schema-has-no-nonce" },
+          },
+        },
+        context,
+      ),
+    ).rejects.toThrow(/unrecognized key.*nonce/iu)
     expect(existsSync(receipt.path)).toBe(true)
     await expect(release.execute(input, context)).resolves.toMatchObject({
       status: "completed",
