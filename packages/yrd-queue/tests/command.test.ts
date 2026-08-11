@@ -7187,6 +7187,48 @@ describe("Queue command adapters", () => {
     expect(pushes.flat()).not.toContain("--force")
   }, 20_000)
 
+  /**
+   * The sibling below covers a DIVERGENT component pin: the carrier resolved
+   * against an older main, so pin and component main share no ancestry line and
+   * the work genuinely still needs re-deriving. This covers the other half —
+   * a SPENT pin, a strict ancestor of component main.
+   *
+   * The two are the same ancestry test and opposite cures. A spent pin has
+   * nothing left to deliver, so "linear rebuild required" is advice that cannot
+   * succeed: the author rebuilds, the rebuild is empty, and the carrier is
+   * refused again on the same ground. That is the loop PR562 rode to revision 43.
+   */
+  it("does not tell a spent component pin to rebuild when component main already contains it", async () => {
+    const fixture = await componentMainLandingRepository()
+
+    // The component lands the pinned work and moves on.
+    await git(fixture.component, ["switch", "-q", "main"])
+    await git(fixture.component, ["merge", "-q", "--no-ff", fixture.pinSha, "-m", "land the pinned component work"])
+    await writeFile(join(fixture.component, "later.txt"), "later\n")
+    await git(fixture.component, ["add", "later.txt"])
+    await git(fixture.component, ["commit", "-qm", "later component landing"])
+    const componentMain = await git(fixture.component, ["rev-parse", "HEAD"])
+    await git(fixture.component, ["push", "-q", "origin", "main"])
+
+    // `git()` throws on a non-zero exit, so the ancestry call is itself the
+    // precondition: the pin is contained, and component main has moved past it,
+    // which is what separates spent from a no-op.
+    await git(fixture.component, ["merge-base", "--is-ancestor", fixture.pinSha, componentMain])
+    expect(await git(fixture.component, ["log", "--oneline", `${fixture.pinSha}..${componentMain}`])).not.toBe("")
+
+    await using process = createProcess()
+    await using app = await checkedQueue(process, fixture.repo, ["true"])
+    await submitCertifiedCarrier(app, fixture.repo, {
+      branch: "issue/feature",
+      headSha: fixture.featureSha,
+      baseSha: fixture.rootBaseSha,
+    })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+
+    expect(run).not.toMatchObject({ error: { code: "carrier-drops-landed" } })
+  })
+
   it("refuses a stale resolved component pin and enumerates the component commits it would drop", async () => {
     const fixture = await componentMainLandingRepository()
     await git(fixture.component, ["switch", "-q", "main"])
