@@ -9,7 +9,7 @@ export type Invocation = Readonly<{
   args: string[]
 }>
 
-export type QueueRunMode = "follow" | "once"
+type QueueRunMode = "follow" | "once"
 
 export type RuntimePosture =
   | "active"
