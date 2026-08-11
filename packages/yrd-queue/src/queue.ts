@@ -3,6 +3,7 @@ import {
   GitShaSchema,
   PRAlreadyLandedSchema,
   PRAdmissionRecordedFactSchema,
+  PRIntegratedSchema,
   PRIdSchema,
   PRNeedsAuthorFactSchema,
   PRTerminalAssociationSchema,
@@ -599,6 +600,7 @@ export type QueueCommands = Readonly<{
     admissionRefused: CommandHandler<AdmissionRefusedArgs, RuntimeState>
     settleAdmissionRefusal: CommandHandler<SettleAdmissionRefusalArgs, RuntimeState>
     recordIntentEvaluation: CommandHandler<z.infer<typeof PinIntentEvaluationFactSchema>, RuntimeState>
+    reconcileLanding: CommandHandler<z.infer<typeof PRIntegratedSchema>, RuntimeState>
   }>
 }>
 
@@ -678,6 +680,8 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
    * Queue owns this projection because it must preserve the same candidate
    * partitioning, batch size, and FIFO order as compose. */
   freshnessCandidateBatches(): readonly (readonly string[])[]
+  /** Append the missing journal index row for one repository-proven physical landing. */
+  reconcileLanding(args: z.infer<typeof PRIntegratedSchema>): Promise<void>
   /** Live PR ids in the exact admission order used by a selectorless drain. */
   admissionOrder(): readonly string[]
   checks(selectors?: readonly string[]): readonly PRCheckRecord[]
@@ -853,6 +857,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               admissionRefused: (args) => yrd.dispatch(commands.queue.admissionRefused, args),
               settleAdmissionRefusal: (args) => yrd.dispatch(commands.queue.settleAdmissionRefusal, args),
               recordIntentEvaluation: (args) => yrd.dispatch(commands.queue.recordIntentEvaluation, args),
+              reconcileLanding: (args) => yrd.dispatch(commands.queue.reconcileLanding, args),
               recordAdmission: (args) => yrd.bays.recordAdmission(args),
               requestChecks: (pr, baseSha) =>
                 yrd.bays.requestChecks({ pr, ...(baseSha === undefined ? {} : { baseSha }) }),
@@ -897,6 +902,7 @@ type QueueActions = Readonly<{
   recordAdmission(args: PRAdmissionRecordedFact): Promise<CommandResult>
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
   recordIntentEvaluation(args: z.infer<typeof PinIntentEvaluationFactSchema>): Promise<CommandResult>
+  reconcileLanding(args: z.infer<typeof PRIntegratedSchema>): Promise<CommandResult>
 }>
 
 function terminalIdentity(
@@ -2049,6 +2055,9 @@ function createQueue<Shape extends PRShape>(
     state,
     steps: () => steps.map(descriptor),
     admissionOrder: () => requestedPRs(runtime().bays, {}).map((pr) => pr.id),
+    async reconcileLanding(args) {
+      await actions.reconcileLanding(args)
+    },
     async admit(args, runOptions) {
       return observeYrdLifecycle(
         log,
@@ -3567,6 +3576,64 @@ function createQueueCommands(
     },
   })
 
+  const reconcileLanding = command({
+    title: "Reconcile one repository-proven landing into the journal index",
+    params: PRIntegratedSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: z.infer<typeof PRIntegratedSchema>) {
+      const pr = state.bays.prs[args.pr]
+      if (pr === undefined) raiseFailure("refusal", "pr-not-found", prNotFoundMessage(state.bays, args.pr))
+      const revision = currentPRRev(pr)
+      const exact =
+        prDeliveryState(pr) === "integrated" &&
+        revision.n === args.revision &&
+        revision.head === args.headSha &&
+        revision.changeId === args.changeId &&
+        pr.terminalRun === args.run &&
+        pr.integration?.commit === args.commit &&
+        pr.integration.baseSha === args.baseSha &&
+        pr.integration.receipt?.ref === args.receipt.ref &&
+        pr.integration.receipt.target === args.receipt.target &&
+        pr.integration.receipt.note === args.receipt.note &&
+        pr.integration.receipt.checksum === args.receipt.checksum
+      if (exact) return { events: [] }
+      if (prDeliveryState(pr) === "integrated" || prDeliveryState(pr) === "already-landed") {
+        raiseFailure(
+          "infrastructure",
+          "index-corrupt",
+          `yrd: repository receipt for '${args.pr}' disagrees with its terminal journal index`,
+        )
+      }
+      if (prDeliveryState(pr) !== "submitted" && prDeliveryState(pr) !== "ready") {
+        raiseFailure(
+          "refusal",
+          "index-not-reconcilable",
+          `yrd: repository receipt names PR '${args.pr}' while its journal state is ${prDeliveryState(pr)}`,
+        )
+      }
+      if (revision.n !== args.revision || revision.head !== args.headSha || revision.changeId !== args.changeId) {
+        raiseFailure(
+          "infrastructure",
+          "repository-corrupt",
+          `yrd: repository receipt does not match current ${args.pr} revision ${revision.n}@${revision.head}`,
+        )
+      }
+      return {
+        events: [
+          event("pr/integrated", {
+            ...args,
+            ...(args.issueRef !== undefined || pr.issue === undefined ? {} : { issueRef: pr.issue }),
+            ...(args.correlation !== undefined || revision.correlation === undefined
+              ? {}
+              : { correlation: revision.correlation }),
+            ...(args.submitter !== undefined || revision.submitter === undefined
+              ? {}
+              : { submitter: revision.submitter }),
+          }),
+        ],
+      }
+    },
+  })
+
   return {
     queue: {
       admissionStep,
@@ -3584,6 +3651,7 @@ function createQueueCommands(
       admissionRefused,
       settleAdmissionRefusal,
       recordIntentEvaluation,
+      reconcileLanding,
     },
   }
 }

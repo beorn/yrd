@@ -6634,7 +6634,10 @@ function primaryPR(input: StepExecution): StepExecution["prs"][number] {
   return primary
 }
 
-function repositoryReceiptFailure(code: "repository-corrupt" | "repository-incomplete", message: string): never {
+function repositoryReceiptFailure(
+  code: "repository-corrupt" | "repository-incomplete" | "unknown",
+  message: string,
+): never {
   throw createFailure({ kind: "infrastructure", code, message })
 }
 
@@ -6828,6 +6831,137 @@ async function readLandingReceipt(
       checksum: envelope.checksum,
     }),
   }
+}
+
+export type RepositoryLandingIdentity = Readonly<{
+  pr: string
+  revision: number
+  headSha: string
+  changeId: string
+}>
+
+export type RepositoryLandingSearchResult =
+  | Readonly<{
+      status: "proven"
+      fact: Readonly<{
+        pr: string
+        revision: number
+        headSha: string
+        run: string
+        commit: string
+        landingSha: string
+        baseSha: string
+        changeId: string
+        receipt: LandingReceiptPointer
+      }>
+    }>
+  | Readonly<{ status: "not-proven"; reason: "receipt-missing" | "landing-not-on-base" }>
+
+/**
+ * Resolve one logical PR revision through the Queue-owned Git receipt namespace.
+ * The repository is authoritative: every note is checksum-validated, every
+ * generated change commit must carry its exact Change-Id, and the landing tip
+ * must be reachable from the selected base before this returns proof.
+ */
+export async function findRepositoryLandingReceipt(
+  options: Readonly<{
+    inject: Readonly<{ process: Pick<Process, "run"> }>
+    repo: string
+    baseSha: string
+    identity: RepositoryLandingIdentity
+  }>,
+): Promise<RepositoryLandingSearchResult> {
+  const git = createGit(options.inject.process)
+  const listed = await git.run(options.repo, ["notes", `--ref=${LANDING_RECEIPT_NOTES_NAME}`, "list"], true)
+  if (listed.code !== 0) {
+    return repositoryReceiptFailure(
+      "unknown",
+      `yrd: repository receipt ref '${LANDING_RECEIPT_REF}' is unreadable: ${listed.stderr || listed.stdout}`,
+    )
+  }
+  const matches: Array<Extract<RepositoryLandingSearchResult, { status: "proven" }>> = []
+  let offBase = false
+  for (const line of listed.stdout === "" ? [] : listed.stdout.split("\n")) {
+    const [listedNote, target, extra] = line.split(/\s+/u)
+    if (listedNote === undefined || target === undefined || extra !== undefined) {
+      return repositoryReceiptFailure("repository-corrupt", `yrd: repository receipt listing is malformed: ${line}`)
+    }
+    const stored = await readLandingReceipt(git, options.repo, target)
+    if (stored === undefined || stored.pointer.note !== listedNote) {
+      return repositoryReceiptFailure(
+        "repository-corrupt",
+        `yrd: repository receipt listing for '${target}' disagrees with its note object`,
+      )
+    }
+    const receipt = stored.envelope.receipt
+    if (
+      receipt.landing.commit !== target ||
+      receipt.landing.baseAfter !== target ||
+      (receipt.candidate.commit !== target &&
+        (await git.run(options.repo, ["merge-base", "--is-ancestor", receipt.candidate.commit, target], true)).code !==
+          0)
+    ) {
+      return repositoryReceiptFailure(
+        "repository-corrupt",
+        `yrd: repository receipt '${listedNote}' does not prove its landing target '${target}'`,
+      )
+    }
+    for (const change of receipt.changes) {
+      const reachable = await git.run(
+        options.repo,
+        ["merge-base", "--is-ancestor", change.generatedCommit, target],
+        true,
+      )
+      const trailers = await git.run(
+        options.repo,
+        ["show", "-s", "--format=%(trailers:key=Change-Id,valueonly)", change.generatedCommit],
+        true,
+      )
+      if (reachable.code !== 0 || trailers.code !== 0 || trailers.stdout.split("\n").filter(Boolean).length !== 1) {
+        return repositoryReceiptFailure(
+          "repository-corrupt",
+          `yrd: repository receipt '${listedNote}' cannot prove generated change '${change.generatedCommit}'`,
+        )
+      }
+      if (trailers.stdout !== change.changeId) {
+        return repositoryReceiptFailure(
+          "repository-corrupt",
+          `yrd: generated change '${change.generatedCommit}' carries '${trailers.stdout}', expected '${change.changeId}'`,
+        )
+      }
+    }
+    const change = receipt.changes.find(
+      (candidate) =>
+        candidate.pr === options.identity.pr &&
+        candidate.revision === options.identity.revision &&
+        candidate.submittedHead === options.identity.headSha &&
+        candidate.changeId === options.identity.changeId,
+    )
+    if (change === undefined) continue
+    const onBase = await git.run(options.repo, ["merge-base", "--is-ancestor", target, options.baseSha], true)
+    if (onBase.code !== 0) {
+      offBase = true
+      continue
+    }
+    matches.push({
+      status: "proven",
+      fact: {
+        ...options.identity,
+        run: receipt.run.id,
+        commit: target,
+        landingSha: target,
+        baseSha: receipt.landing.baseAfter,
+        receipt: stored.pointer,
+      },
+    })
+  }
+  if (matches.length > 1) {
+    return repositoryReceiptFailure(
+      "repository-corrupt",
+      `yrd: ${options.identity.pr} revision ${options.identity.revision}@${options.identity.headSha} has multiple repository landing receipts`,
+    )
+  }
+  return matches[0] ?? { status: "not-proven", reason: offBase ? "landing-not-on-base" : "receipt-missing" }
 }
 
 type LandingReceiptRemote = Readonly<{ remote: "origin"; tip?: string }>

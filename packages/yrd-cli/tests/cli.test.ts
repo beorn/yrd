@@ -490,6 +490,12 @@ async function createApp(
         baseSha: string
         alreadyLanded?: Readonly<{ candidateSha: string; candidateTreeSha: string; baseTreeSha: string }>
         sourceRewrites?: readonly SourceRewrite[]
+        receipt?: Readonly<{
+          ref: "refs/notes/yrd/receipts"
+          target: string
+          note: string
+          checksum: string
+        }>
       }>
     > => {
       options.mergeRuns?.push("merge")
@@ -503,6 +509,16 @@ async function createApp(
           commit,
           baseSha: commit,
           ...(options.mergeAlreadyLanded === undefined ? {} : { alreadyLanded: options.mergeAlreadyLanded }),
+          ...(options.mergeAlreadyLanded === undefined
+            ? {
+                receipt: {
+                  ref: "refs/notes/yrd/receipts" as const,
+                  target: commit,
+                  note: "c".repeat(40),
+                  checksum: "d".repeat(64),
+                },
+              }
+            : {}),
           ...(options.sourceRewrites === undefined ? {} : { sourceRewrites: options.sourceRewrites }),
         },
       }
@@ -6987,7 +7003,7 @@ describe("runYrd", () => {
           pid: process.pid,
           startedAt: "2026-07-13T12:00:00.000Z",
           lastTickAt: "2026-07-13T12:00:00.000Z",
-          journalVersions: [1, 2],
+          journalVersions: [1, 2, 3],
           // The dedicated RUNNER box renders stale-runner details as `[pid] <command>`.
           command: expect.any(String),
           implementationSource,
@@ -11012,6 +11028,49 @@ describe("runYrd", () => {
     } finally {
       safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
     }
+  })
+
+  it("repairs a repository-proven landing whose journal index row is missing", async () => {
+    await using app = await createApp()
+    await app.bays.submit({ branch: "issue/index-gap", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    const revision = currentPRRev(app.bays.pr("PR1")!)
+    if (revision.changeId === undefined) throw new Error("expected current PR Change-Id")
+    const receipt = {
+      ref: "refs/notes/yrd/receipts",
+      target: MERGED_SHA,
+      note: "c".repeat(40),
+      checksum: "d".repeat(64),
+    } as const
+    const output = outputIO()
+
+    expect(
+      await runYrd(app, yrd("why", "PR1", "--repair", "--json"), output.io, {
+        landingReceipts: {
+          find: async () => ({
+            status: "proven" as const,
+            fact: {
+              pr: "PR1",
+              revision: 1,
+              headSha: HEAD_SHA,
+              run: "R-recovered",
+              commit: MERGED_SHA,
+              landingSha: MERGED_SHA,
+              baseSha: MERGED_SHA,
+              changeId: revision.changeId,
+              receipt,
+            },
+          }),
+        },
+      } as YrdCliServices),
+      output.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "why",
+      verdict: "landed",
+      repaired: true,
+      receipt,
+    })
+    expect(app.bays.pr("PR1")?.integration).toMatchObject({ commit: MERGED_SHA, receipt })
   })
 })
 
