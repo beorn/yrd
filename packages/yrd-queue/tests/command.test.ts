@@ -37,6 +37,7 @@ import {
   gitCandidatePreparer,
   gitCheckStep,
   gitMergeStep,
+  findRepositoryLandingReceipt,
   inspectGitQueueTarget,
   synthesizePinIntentCarrier,
   PRSnapshotSchema,
@@ -6295,6 +6296,27 @@ describe("Queue command adapters", () => {
       baseSha: checked.candidateSha,
       changeId,
       receipt: integration.receipt,
+    })
+    await expect(
+      findRepositoryLandingReceipt({
+        inject: { process },
+        repo,
+        baseSha: checked.candidateSha,
+        identity: { pr: "PR1", revision: 1, headSha: featureSha, changeId },
+      }),
+    ).resolves.toMatchObject({
+      status: "proven",
+      fact: {
+        pr: "PR1",
+        revision: 1,
+        headSha: featureSha,
+        run: run.id,
+        commit: checked.candidateSha,
+        landingSha: checked.candidateSha,
+        baseSha: checked.candidateSha,
+        changeId,
+        receipt: integration.receipt,
+      },
     })
   })
 

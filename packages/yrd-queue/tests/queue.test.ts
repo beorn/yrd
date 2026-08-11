@@ -3652,6 +3652,48 @@ describe("Queue", () => {
     expect(prFacts(app.state().bays.prs.PR2)).toMatchObject({ delivery: "submitted" })
   })
 
+  it("repairs a repository receipt whose pr/integrated index row is missing exactly once", async () => {
+    await using app = await createQueueApp()
+    const pr = await submitBranch(app, "issue/receipt-index-gap")
+    const changeId = currentPRRev(app.bays.pr(pr.id)!).changeId
+    if (changeId === undefined) throw new Error("expected current PR Change-Id")
+    const reconcile = (
+      app.queue as typeof app.queue & {
+        reconcileLanding(args: {
+          pr: string
+          revision: number
+          headSha: string
+          run: string
+          commit: string
+          landingSha: string
+          baseSha: string
+          changeId: string
+          receipt: typeof RECEIPT
+        }): Promise<unknown>
+      }
+    ).reconcileLanding
+    const fact = {
+      pr: pr.id,
+      revision: pr.revision,
+      headSha: pr.headSha,
+      run: "R-recovered",
+      commit: MERGED,
+      landingSha: MERGED,
+      baseSha: BASE,
+      changeId,
+      receipt: RECEIPT,
+    }
+
+    await reconcile(fact)
+    await reconcile(fact)
+
+    expect(prFacts(app.bays.pr(pr.id))).toMatchObject({
+      delivery: "integrated",
+      integration: { commit: MERGED, baseSha: BASE, changeId, receipt: RECEIPT },
+    })
+    expect((await Array.fromAsync(app.events())).filter(({ name }) => name === "pr/integrated")).toHaveLength(1)
+  })
+
   it("does not integrate canceled historical PRs that share the current payload", async () => {
     const journal = createMemoryJournal<unknown>()
     const original = await createQueueApp({}, journal)

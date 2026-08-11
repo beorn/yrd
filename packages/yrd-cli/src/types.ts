@@ -2,7 +2,15 @@ import type { BayCommands, BaysState, HasBays, HasDeployments } from "@yrd/bay"
 import type { ContestCommands, ContestsState, HasContests } from "@yrd/contest"
 import type { Yrd } from "@yrd/core"
 import type { HasJobs, HasRunner, JobCommands, JobsState } from "@yrd/job"
-import type { GitPRRecutter, HasQueue, QueueAuditResult, QueueCommands, QueuesState } from "@yrd/queue"
+import type {
+  GitPRRecutter,
+  HasQueue,
+  QueueAuditResult,
+  QueueCommands,
+  QueuesState,
+  RepositoryLandingIdentity,
+  RepositoryLandingSearchResult,
+} from "@yrd/queue"
 import type { HasIntents, IntentCommands, IntentsState } from "@yrd/intent"
 import type { HasIssues } from "@yrd/issue"
 import type { JournalVersionBumpResult, JournalViewRebuildResult, OrphanJournalImportResult } from "@yrd/persistence"
@@ -76,6 +84,9 @@ export type YrdCliServices = Readonly<{
   queue?: YrdCliQueueAdministration
   queueReadModel?: QueueReadModel
   recut?: GitPRRecutter
+  landingReceipts?: Readonly<{
+    find(identity: RepositoryLandingIdentity): Promise<RepositoryLandingSearchResult>
+  }>
   journal?: YrdCliJournalAdministration
   checks?: YrdCliChecks
   process?: Pick<Process, "run" | "reapPath">
