@@ -663,14 +663,15 @@ and an executable `pr recut --preflight --queue --apply` remedy, and keeps drain
 healthy peers. An explicitly targeted run still fails loud after recording the
 same author receipt.
 
-Required-check refusals are revision-scoped durable facts. Once the resident's
-existing remedy classifier reaches a judgment-required or failed/no-remedy
-outcome, Queue records a `needs-person` settlement for that exact revision and
-head. Selectorless one-shot and resident drains share the same selector, so
-neither process restart nor another cadence tick can select it again or grow
-the journal. A new authored or recut revision clears the settlement and is
-eligible normally. This is Queue state, not a resident retry cache or restart
-budget.
+Required-check refusals are revision-scoped durable facts. Queue immediately
+records a `needs-person` settlement for a structurally permanent
+`recut-gitlink-conflict`; recoverable refusals still wait for the resident's
+remedy classifier to reach a judgment-required or failed/no-remedy outcome.
+The settlement names the exact revision and head. Selectorless one-shot and
+resident drains share the same selector, so neither process restart nor
+another cadence tick can select it again or grow the journal. A new authored
+or recut revision clears the settlement and is eligible normally. This is
+Queue state, not a resident retry cache or restart budget.
 
 `yrd queue run --once` keeps that settled refusal visible instead of reporting
 `Queue idle`: human output names the refusal and
