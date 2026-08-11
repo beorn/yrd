@@ -3633,6 +3633,76 @@ describe("Queue command adapters", () => {
     expect(dropped).toContain("second protected landing after carrier resolution")
   })
 
+  /**
+   * REGRESSION PIN, not a red-then-green: the guard this asserts already works.
+   * `inspectBaseContainment` tests containment in BOTH directions — base ⊆ head
+   * (up to date) and head ⊆ base (already landed, command.ts:2783-2786) — so a
+   * SPENT carrier is not refused today. That second direction had no direct test,
+   * which is what this closes.
+   *
+   * It is worth pinning because the branch reads like a redundant second
+   * merge-base call, and deleting it would silently reintroduce the loop it
+   * prevents: a spent carrier told to rebuild has nothing to rebuild, so each
+   * recut is refused again. The convergence that would otherwise settle such a
+   * carrier lives in `recut-absorbed-payload` (22373, "reaches an already-landed
+   * head when the base absorbed the whole payload").
+   */
+  it("does not refuse a spent carrier whose head the base already contains", async () => {
+    const { repo } = await repository()
+    const originalBase = await git(repo, ["rev-parse", "main"])
+    await git(repo, ["switch", "-qc", "issue/spent-carrier", originalBase])
+    await writeFile(join(repo, "carrier.txt"), "carrier payload\n")
+    await git(repo, ["add", "carrier.txt"])
+    await git(repo, ["commit", "-qm", "carrier payload"])
+    const carrierHead = await git(repo, ["rev-parse", "HEAD"])
+    const carrierTree = await git(repo, ["rev-parse", "HEAD^{tree}"])
+    await git(repo, ["switch", "-q", "main"])
+    // The carrier's own head lands on main by another route, then main moves on.
+    await git(repo, ["merge", "-q", "--no-ff", carrierHead, "-m", "land the carrier payload"])
+    await writeFile(join(repo, "later.txt"), "later work\n")
+    await git(repo, ["add", "later.txt"])
+    await git(repo, ["commit", "-qm", "later landing"])
+    const queueBaseHead = await git(repo, ["rev-parse", "HEAD"])
+
+    // The two facts that together define SPENT. `git()` throws on a non-zero
+    // exit, so the ancestry call is itself the assertion.
+    await git(repo, ["merge-base", "--is-ancestor", carrierHead, queueBaseHead])
+    expect(await git(repo, ["log", "--oneline", `${carrierHead}..${queueBaseHead}`])).not.toBe("")
+
+    await using process = createProcess()
+    const pr = PRSnapshotSchema.parse({
+      id: "PR1",
+      branch: "issue/spent-carrier",
+      base: "main",
+      revision: 2,
+      headSha: carrierHead,
+      baseSha: originalBase,
+      // The containment check only runs for a carrier bearing a recut snapshot
+      // (command.ts:2216), which is exactly the shape that loops: each hand-run
+      // recut produces one of these and is refused again.
+      recut: {
+        fromRevision: 1,
+        patchId: "a".repeat(40),
+        treeSha: carrierTree,
+        reviewCarried: false,
+        baseSha: originalBase,
+      },
+    })
+
+    const refusedCode = await gitCandidatePreparer({ inject: { process }, repo })({
+      id: "C1",
+      queueId: "main",
+      baseSha: queueBaseHead,
+      revs: [{ pr: pr.id, n: pr.revision, head: pr.headSha }],
+      prs: [pr],
+    }).then(
+      () => undefined,
+      (error: unknown) => (error as { failure?: { code?: string } }).failure?.code,
+    )
+
+    expect(refusedCode).not.toBe("carrier-drops-landed")
+  })
+
   it("refuses a payload touching configured refuse paths and names them with the configured reason", async () => {
     const { repo } = await repository()
     const baseSha = await git(repo, ["rev-parse", "main"])
