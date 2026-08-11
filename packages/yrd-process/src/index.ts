@@ -639,6 +639,11 @@ function resolveExecutable(command: string, env: Readonly<Record<string, string>
       accessSync(candidate, constants.X_OK)
       return candidate
     } catch {
+      // silent-fallback-allow: this is the loop's control flow, not a swallowed
+      // failure. accessSync THROWS to say "not executable here", which is the
+      // ordinary answer for most PATH entries, and the loop's whole job is to
+      // keep looking. A throw would make the first non-match fatal; a log would
+      // emit a line per PATH entry per spawn.
       // Keep searching the child environment's PATH.
     }
   }

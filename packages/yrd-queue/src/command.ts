@@ -1458,6 +1458,12 @@ async function sourceOnlyCarrierComposition(
     try {
       await realpath(sourceRepo)
     } catch {
+      // silent-fallback-allow: undefined is this function's "cannot certify a
+      // source-only composition", and it is the FAIL-SAFE direction — six
+      // sibling bail-outs above return it for ordinary non-qualifying inputs,
+      // and the caller then takes the normal, more conservative recut path.
+      // An unresolvable component path means we cannot certify, so declining is
+      // correct; throwing would turn a non-qualifying candidate into an error.
       return undefined
     }
     if (
@@ -2835,6 +2841,12 @@ async function componentCheckout(git: Git, root: string, path: string): Promise<
   try {
     return (await realpath(toplevel.stdout)) === (await realpath(component)) ? component : undefined
   } catch {
+    // silent-fallback-allow: the declared contract is `string | undefined`, and
+    // undefined means "this path is not its own component checkout". The line
+    // above already returns undefined for the resolvable-but-not-a-checkout
+    // case, so the catch is the same answer for the unresolvable one. Declining
+    // to name a checkout is the safe direction; the caller treats absence as
+    // "no component here" rather than assuming one.
     return undefined
   }
 }
