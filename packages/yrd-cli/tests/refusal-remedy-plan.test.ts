@@ -39,31 +39,37 @@ function refusal(id: string, overrides: Partial<QueueAdmissionRefusal> = {}): Qu
 }
 
 describe("refusal remedy plan — the runner acts on exactly the PRs the queue calls wedged", () => {
-  it("plans one needs-person settlement on the first judgment-required refusal", () => {
-    const plans = planRefusalRemedies({ PR1791: refusal("PR1791", { count: 1 }) }, { PR1791: pr("PR1791") }, new Set())
+  it("plans one needs-person settlement for a wedged authored-gitlink carrier", () => {
+    const plans = planRefusalRemedies({ PR1791: refusal("PR1791") }, { PR1791: pr("PR1791") }, new Set())
 
     expect(plans).toHaveLength(1)
     expect(plans[0]).toMatchObject({
       pr: "PR1791",
       branch: "task/pr1791",
       revision: 1,
-      count: 1,
+      count: 3,
       key: refusalRemedyKey("PR1791", 1, HEAD),
       remedy: { kind: "judgment" },
     })
   })
 
-  it("keeps a mechanically retryable refusal below the queue's own wedge threshold", () => {
-    const mechanical = (count: number) =>
+  it("stays quiet below the queue's own wedge threshold — one losable race is not a wedge", () => {
+    expect(planRefusalRemedies({ PR1: refusal("PR1", { count: 1 }) }, { PR1: pr("PR1") }, new Set())).toEqual([])
+    expect(planRefusalRemedies({ PR1: refusal("PR1", { count: 2 }) }, { PR1: pr("PR1") }, new Set())).toEqual([])
+    expect(planRefusalRemedies({ PR1: refusal("PR1", { count: 3 }) }, { PR1: pr("PR1") }, new Set())).toHaveLength(1)
+  })
+
+  it("keeps a judgment-required environment refusal below the queue's wedge threshold", () => {
+    const missingObject = (count: number) =>
       refusal("PR1", {
-        code: "composition-invalid",
-        reason: "yrd: refresh needed; run 'yrd pr recut PR1 --preflight --queue --apply'",
+        code: "recut-gitlink-object-missing",
+        reason: "submodule 'km' commit 'abc123' is not present in its local store; fetch it and retry",
         count,
       })
 
-    expect(planRefusalRemedies({ PR1: mechanical(1) }, { PR1: pr("PR1") }, new Set())).toEqual([])
-    expect(planRefusalRemedies({ PR1: mechanical(2) }, { PR1: pr("PR1") }, new Set())).toEqual([])
-    expect(planRefusalRemedies({ PR1: mechanical(3) }, { PR1: pr("PR1") }, new Set())).toHaveLength(1)
+    expect(planRefusalRemedies({ PR1: missingObject(1) }, { PR1: pr("PR1") }, new Set())).toEqual([])
+    expect(planRefusalRemedies({ PR1: missingObject(2) }, { PR1: pr("PR1") }, new Set())).toEqual([])
+    expect(planRefusalRemedies({ PR1: missingObject(3) }, { PR1: pr("PR1") }, new Set())).toHaveLength(1)
   })
 
   it("plans a wedged PR at most once per revision, so a failed remedy is not a retry loop", () => {

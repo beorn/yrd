@@ -223,10 +223,9 @@ export function foldRefusalStall(
  * Decide, purely, what the runner should do about the live admission-refusal
  * ledger — the 22474 "apply the button you printed" pass.
  *
- * Judgment-required refusals are permanent by construction, so they settle on
- * their first occurrence. Mechanical remedies retain the queue's ordinary
- * wedge threshold ({@link ADMISSION_REFUSAL_LOOP_THRESHOLD}), so one losable
- * race is never remediated. A revision already attempted is skipped, so a
+ * Acts only on streaks the queue itself already calls wedged
+ * ({@link ADMISSION_REFUSAL_LOOP_THRESHOLD}), so a single losable race is never
+ * remediated, and skips any PR whose revision has already been attempted, so a
  * failed remedy degrades to the printed refusal instead of becoming its own
  * retry loop.
  */
@@ -237,7 +236,7 @@ export function planRefusalRemedies(
 ): readonly RefusalRemedyPlan[] {
   const plans: RefusalRemedyPlan[] = []
   for (const refusal of Object.values(refusals).toSorted((left, right) => compareNatural(left.pr, right.pr))) {
-    if (refusal.settlement !== undefined) continue
+    if (refusal.settlement !== undefined || refusal.count < ADMISSION_REFUSAL_LOOP_THRESHOLD) continue
     const pr = prs[refusal.pr]
     // The ledger is retained past its PR (compaction drops streaks for PRs the
     // state no longer holds); a streak with no PR names nothing to remedy.
@@ -245,19 +244,19 @@ export function planRefusalRemedies(
     const revision = currentPRRev(pr)
     const key = refusalRemedyKey(pr.id, revision.n, revision.head)
     if (attempted.has(key)) continue
-    const failure = Object.freeze({ code: refusal.code, message: refusal.reason })
-    const remedy = classifyRefusalRemedy(failure, { branch: pr.branch, delivery: prDeliveryState(pr) })
-    if (remedy.kind === "self-applicable" && refusal.count < ADMISSION_REFUSAL_LOOP_THRESHOLD) continue
     plans.push(
       Object.freeze({
         pr: pr.id,
         branch: pr.branch,
         revision: revision.n,
         headSha: revision.head,
-        failure,
+        failure: Object.freeze({ code: refusal.code, message: refusal.reason }),
         count: refusal.count,
         key,
-        remedy,
+        remedy: classifyRefusalRemedy(
+          { code: refusal.code, message: refusal.reason },
+          { branch: pr.branch, delivery: prDeliveryState(pr) },
+        ),
       }),
     )
   }

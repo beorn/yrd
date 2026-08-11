@@ -302,6 +302,13 @@ export type SettleAdmissionRefusalArgs = Readonly<z.infer<typeof SettleAdmission
  * exactly the PRs the queue itself calls wedged — one number, one home, so the
  * remedy can never fire earlier than the finding that justifies it. */
 export const ADMISSION_REFUSAL_LOOP_THRESHOLD = 3
+/** Fixed non-ancestral gitlink commits cannot become ancestral on a later retry. */
+const STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS = new Set(["recut-gitlink-conflict"])
+
+function structurallyPermanentAdmissionRefusal(code: string): boolean {
+  return STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS.has(code)
+}
+
 const QueueStartSchema = QueueRecordSchema.omit({ startedAt: true, failure: true })
 const ReplayQueueStartSchema = ReplayQueueRecordSchema.omit({ startedAt: true, failure: true })
 const QueueFailedPRSchema = z.preprocess(
@@ -2072,9 +2079,8 @@ function createQueue<Shape extends PRShape>(
               ? admissionQueue(snapshot, steps)
               : requestedSelectors.map((selector) => {
                   const pr = resolvePR(snapshot.bays, selector)
-                  if (pr === undefined) {
-                    raiseFailure("refusal", "pr-not-found", prNotFoundMessage(snapshot.bays, selector))
-                  }
+                  if (pr === undefined)
+                    {raiseFailure("refusal", "pr-not-found", prNotFoundMessage(snapshot.bays, selector))}
                   return pr
                 })
           await refreshCheckIdentities(selected, resolveCycleBase)
@@ -3490,7 +3496,20 @@ function createQueueCommands(
         revision: revision.n,
         headSha: revision.head,
       })
-      return { events: [refused] }
+      return {
+        events: structurallyPermanentAdmissionRefusal(args.code)
+          ? [
+              refused,
+              event("queue/admission/settled", {
+                pr: args.pr,
+                revision: revision.n,
+                headSha: revision.head,
+                disposition: "needs-person",
+                reason: args.reason,
+              }),
+            ]
+          : [refused],
+      }
     },
   })
 
@@ -5708,7 +5727,8 @@ function admissionRefusalAuditFindings(
     const sameCodeCount = refusal.sameCodeCount ?? refusal.count
     const sameCodeFirstAt = refusal.sameCodeFirstAt ?? refusal.firstAt
     if (refusal.settlement !== undefined || head?.id !== refusal.pr) continue
-    if (sameCodeCount < progress.refusalCount) continue
+    const threshold = structurallyPermanentAdmissionRefusal(refusal.code) ? 1 : progress.refusalCount
+    if (sameCodeCount < threshold) continue
     const blockedMs = Math.max(0, Date.parse(refusal.lastAt) - Date.parse(sameCodeFirstAt))
     findings.push({
       code: "admission-refusal-loop",
