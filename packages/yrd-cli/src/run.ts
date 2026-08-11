@@ -1222,6 +1222,7 @@ function trackerDeliveryV2(
   pr: DeepReadonly<PR>,
   state: DeepReadonly<YrdCliState>,
   eligibility: PREligibility,
+  landing?: PrLanding,
 ): TrackerDeliveryV2 | undefined {
   if (pr.issue === undefined) return undefined
   const revision = currentPRRev(pr)
@@ -1293,13 +1294,18 @@ function trackerDeliveryV2(
         bounce,
       }
     case "integrated": {
-      const landing = prLandingOutcome(pr)
-      if (landing.outcome !== "landed") refusal(`integrated PR '${pr.id}' has no canonical landing outcome`)
+      const outcome = prLandingOutcome(pr, landing)
+      if (outcome.outcome !== "landed") {
+        refusal(
+          `integrated PR '${pr.id}' has no repository landing proof: ` +
+            (outcome.outcome === "unverified" ? `${outcome.code}: ${outcome.reason}` : outcome.status),
+        )
+      }
       return {
         ...identity,
         status: "integrated",
-        at: landing.at,
-        landingSha: landing.landingSha,
+        at: outcome.at,
+        landingSha: outcome.landingSha,
         ...(pr.regressions === undefined || pr.regressions.length === 0 ? {} : { regressions: pr.regressions }),
       }
     }
@@ -1319,8 +1325,20 @@ function trackerDeliveryV2(
       }
     }
     case "withdrawn":
+      if (landing?.verdict === "proven") {
+        if (landing.landedAt === undefined) {
+          refusal(`withdrawn PR '${pr.id}' has legacy repository proof without a landing timestamp`)
+        }
+        return { ...identity, status: "integrated", at: landing.landedAt, landingSha: landing.landingSha }
+      }
       return pr.withdrawnAt === undefined ? undefined : { ...identity, status: "withdrawn", at: pr.withdrawnAt }
     case "canceled":
+      if (landing?.verdict === "proven") {
+        if (landing.landedAt === undefined) {
+          refusal(`canceled PR '${pr.id}' has legacy repository proof without a landing timestamp`)
+        }
+        return { ...identity, status: "integrated", at: landing.landedAt, landingSha: landing.landingSha }
+      }
       return pr.canceledAt === undefined ? undefined : { ...identity, status: "canceled", at: pr.canceledAt }
     default: {
       const unhandled: never = delivery
@@ -1384,13 +1402,21 @@ function trackerDeliveryV1(delivery: TrackerDeliveryV2): TrackerDeliveryV1 {
   return { ...identity, status }
 }
 
-function trackerBridges(
+async function trackerBridges(
   app: YrdCliApp,
   snapshot: JournalSnapshot<YrdCliState>,
   include: (delivery: TrackerDeliveryV2) => boolean,
-): Readonly<{ trackerBridge: TrackerBridgeV1; trackerBridgeV2: TrackerBridgeV2 }> {
+  services: YrdCliServices,
+  io: YrdCliIO,
+): Promise<
+  Readonly<{ trackerBridge: TrackerBridgeV1; trackerBridgeV2: TrackerBridgeV2; warnings: readonly string[] }>
+> {
+  const prs = Object.values(snapshot.state.bays.prs)
+  const proof = await reconcilePrLandings(prs, services, io)
   const deliveries = Object.values(snapshot.state.bays.prs)
-    .map((pr) => trackerDeliveryV2(pr, snapshot.state, app.queue.eligibility(pr.id, snapshot.state)))
+    .map((pr) =>
+      trackerDeliveryV2(pr, snapshot.state, app.queue.eligibility(pr.id, snapshot.state), proof.landings.get(pr.id)),
+    )
     .filter((delivery): delivery is TrackerDeliveryV2 => delivery !== undefined && include(delivery))
     .toSorted((left, right) => compareNatural(left.pr, right.pr))
   const trackerBridgeV2 = { version: 2 as const, asOf: snapshot.asOf, deliveries }
@@ -1401,6 +1427,7 @@ function trackerBridges(
       deliveries: trackerBridgeV2.deliveries.map(trackerDeliveryV1),
     },
     trackerBridgeV2,
+    warnings: proof.warnings,
   }
 }
 
@@ -1798,15 +1825,30 @@ function projectPrTaskStatusWithEligibility(
   landing?: PrLanding,
 ): PrListStatusProjection {
   const projected = projectPRTaskStatus(pr)
-  // A proven landing is the strongest projection there is: it contradicts the
-  // recorded state with content, so it wins over both the native state and the
-  // eligibility projection. `nativeStatus` keeps the record readable (22376).
-  if (landing !== undefined) {
+  if (landing?.verdict === "proven") {
+    const repositoryLanding = {
+      landingSha: landing.landingSha,
+      baseSha: landing.baseSha,
+      receipt: landing.receipt,
+      code: landing.code,
+    }
+    if (landing.recorded === "integrated") return { ...projected, repositoryLanding }
+    // A proven landing is the strongest projection there is: it contradicts
+    // the recorded state with repository evidence, so it wins over both the
+    // native state and eligibility. The native write remains inspectable.
     return {
       ...projected,
       nativeStatus: landing.recorded,
       status: "already-landed" as const,
-      landedOnBase: { baseSha: landing.baseSha, headSha: landing.headSha, code: landing.code },
+      repositoryLanding,
+    }
+  }
+  if (landing !== undefined) {
+    return {
+      ...projected,
+      nativeStatus: landing.recorded,
+      status: landing.verdict,
+      landingProof: { code: landing.code, reason: landing.reason },
     }
   }
   const status = projectedPrStatus(pr, eligibility)
@@ -4129,11 +4171,17 @@ async function applyPrSelectionVerb(
   // (integrated or equivalence-proven already-landed, exit 0). It is not checkable and must not be admitted;
   // surface the informational note in the result envelope and drain only the
   // live submissions.
+  const landingProof = await reconcilePrLandings(prs, services, io)
   for (const pr of prs) {
     if (prDeliveryState(pr) === "integrated") {
-      warnings.push(
-        `already merged as PR '${pr.id}'${pr.integration === undefined ? "" : ` (${pr.integration.commit})`}`,
-      )
+      const proof = landingProof.landings.get(pr.id)
+      if (proof?.verdict !== "proven") {
+        refusal(
+          `PR '${pr.id}' is indexed as integrated without repository proof: ` +
+            (proof === undefined ? "landing proof unavailable" : `${proof.code}: ${proof.reason}`),
+        )
+      }
+      warnings.push(`already merged as PR '${pr.id}' (${proof.landingSha})`)
     } else if (prDeliveryState(pr) === "already-landed") {
       warnings.push(
         `already merged as PR '${pr.id}'${pr.integration === undefined ? "" : ` (${pr.integration.baseSha})`}`,
@@ -4151,10 +4199,13 @@ async function applyPrSelectionVerb(
   for (const pr of checkable) await app.bays.requestChecks({ pr: pr.id })
   const selected = checkable.map((pr) => pr.id)
   if (selected.length === 0) {
+    const projected = prs.map((pr) =>
+      projectPrTaskStatusWithEligibility(pr, app.queue.eligibility(pr.id), landingProof.landings.get(pr.id)),
+    )
     await printResult(
       io,
       jsonEnabled(options),
-      { command, prs: prs.map(projectPRTaskStatus), ...(warnings.length > 0 ? { warnings } : {}) },
+      { command, prs: projected, ...(warnings.length > 0 ? { warnings } : {}) },
       createElement(PRResultView, { prs, runs: [] }),
     )
     return 0
@@ -4207,6 +4258,7 @@ type PRLandingOutcome =
       status: "integrated"
       landingSha: string
       baseSha: string
+      receipt?: Readonly<{ ref: string; target: string; note: string; checksum: string }>
       at: string
       run?: string
     }>
@@ -4221,8 +4273,14 @@ type PRLandingOutcome =
       run?: string
     }>
   | Readonly<{ outcome: "not-landed"; status: Exclude<PRDeliveryState, "integrated" | "already-landed"> }>
+  | Readonly<{
+      outcome: "unverified"
+      status: "index-corrupt" | "landing-unknown" | "legacy-tombstone"
+      code: string
+      reason: string
+    }>
 
-function prLandingOutcome(pr: DeepReadonly<PR>): PRLandingOutcome {
+function prLandingOutcome(pr: DeepReadonly<PR>, proof?: PrLanding): PRLandingOutcome {
   const delivery = prDeliveryState(pr)
   if (delivery === "already-landed") {
     const hasRunProof = pr.terminalRun !== undefined
@@ -4246,16 +4304,39 @@ function prLandingOutcome(pr: DeepReadonly<PR>): PRLandingOutcome {
       ...(pr.terminalRun === undefined ? {} : { run: pr.terminalRun }),
     }
   }
-  if (delivery !== "integrated") return { outcome: "not-landed", status: delivery }
+  if (delivery !== "integrated") {
+    if (proof?.verdict === "proven") {
+      return {
+        outcome: "landed",
+        status: "integrated",
+        landingSha: proof.landingSha,
+        baseSha: proof.baseSha,
+        receipt: proof.receipt,
+        at: proof.landedAt ?? currentPRRev(pr).pushedAt,
+      }
+    }
+    return { outcome: "not-landed", status: delivery }
+  }
+  if (proof?.verdict !== "proven") {
+    return proof === undefined
+      ? {
+          outcome: "unverified",
+          status: "landing-unknown",
+          code: "landing-proof-unavailable",
+          reason: "repository landing proof was not resolved",
+        }
+      : { outcome: "unverified", status: proof.verdict, code: proof.code, reason: proof.reason }
+  }
   if (pr.integration === undefined || pr.integratedAt === undefined) {
     refusal(`integrated PR '${pr.id}' is missing canonical landing proof`)
   }
   return {
     outcome: "landed",
     status: "integrated",
-    landingSha: pr.integration.commit,
-    baseSha: pr.integration.baseSha,
-    at: pr.integratedAt,
+    landingSha: proof.landingSha,
+    baseSha: proof.baseSha,
+    receipt: proof.receipt,
+    at: proof.landedAt ?? pr.integratedAt,
     ...(pr.terminalRun === undefined ? {} : { run: pr.terminalRun }),
   }
 }
@@ -4425,6 +4506,7 @@ async function listPrs(
   options: JsonOption &
     Readonly<{ base?: string; state?: string; issue?: string; needsReview?: boolean; reviewer?: string }>,
   io: YrdCliIO,
+  services: YrdCliServices,
 ): Promise<void> {
   if (options.reviewer !== undefined && options.needsReview !== true) usage("--reviewer requires --needs-review")
   const state = stateOf(app)
@@ -4482,6 +4564,7 @@ async function listPrs(
   const runs = allQueueRuns(app).filter((run) => run.prs.some((member) => selected.has(member.id)))
   const { landings, warnings } = await reconcilePrLandings(
     rows.map(({ pr }) => pr),
+    services,
     io,
   )
   const publicationWarnings = rows.flatMap(({ pr }) => {
@@ -4537,14 +4620,16 @@ async function viewPr(
   const detail = prDetailData(pr, runs, attempts)
   const eligibility = app.queue.eligibility(pr.id)
   const publication = projectPublication(publicationJob(app, pr))
+  const landingProof = await reconcilePrLandings([pr], services, io)
+  const landing = landingProof.landings.get(pr.id)
   await printResultWithWarnings(
     io,
     jsonEnabled(options),
     {
       command,
-      pr: projectPrTaskStatusWithEligibility(pr, eligibility),
+      pr: projectPrTaskStatusWithEligibility(pr, eligibility, landing),
       eligibility: projectEligibilityTaskStatus(eligibility),
-      landing: prLandingOutcome(pr),
+      landing: prLandingOutcome(pr, landing),
       ...(position === undefined ? {} : { position }),
       results: results.map(projectQueueStatusResultTaskStatus),
       detail,
@@ -4558,9 +4643,12 @@ async function viewPr(
       now: io.now?.() ?? Date.now(),
       ...(position === undefined ? {} : { position }),
     }),
-    publication === undefined || publication.status === "published"
-      ? []
-      : [`${pr.id} ${publication.status}: ${publication.detail} (Job ${publication.job})`],
+    [
+      ...landingProof.warnings,
+      ...(publication === undefined || publication.status === "published"
+        ? []
+        : [`${pr.id} ${publication.status}: ${publication.detail} (Job ${publication.job})`]),
+    ],
   )
 }
 
@@ -4597,7 +4685,7 @@ async function viewPrRuns(
         pr: projectPrTaskStatusWithEligibility(pr, eligibility),
         eligibility: projectEligibilityTaskStatus(eligibility),
         runs: data.runs,
-        ...trackerBridges(app, snapshot, ({ pr: id }) => id === pr.id),
+        ...(await trackerBridges(app, snapshot, ({ pr: id }) => id === pr.id, services, io)),
       },
       createElement(PRRunsView, { data }),
     )
@@ -4909,11 +4997,23 @@ async function ensureIssueDelivery(
   return 0
 }
 
-async function listIssues(app: YrdCliApp, options: JsonOption, io: YrdCliIO, selected?: string): Promise<void> {
+async function listIssues(
+  app: YrdCliApp,
+  options: JsonOption,
+  io: YrdCliIO,
+  services: YrdCliServices,
+  selected?: string,
+): Promise<void> {
   for (let read = 0; read < 3; read += 1) {
     const snapshot = await app.journalSnapshot()
     const issues = issueRows(app, snapshot.state, selected)
-    const bridges = trackerBridges(app, snapshot, ({ issueRef }) => selected === undefined || issueRef === selected)
+    const bridges = await trackerBridges(
+      app,
+      snapshot,
+      ({ issueRef }) => selected === undefined || issueRef === selected,
+      services,
+      io,
+    )
     const confirmed = await app.journalSnapshot()
     if (confirmed.asOf.cursor !== snapshot.asOf.cursor) continue
     await printResult(
@@ -8554,7 +8654,8 @@ async function explainLanding(
     pr.integration.receipt.checksum === proof.fact.receipt.checksum
   let repaired = false
   if (!indexed && options.repair === true) {
-    await app.queue.reconcileLanding(proof.fact)
+    const { landedAt: _landedAt, ...indexedFact } = proof.fact
+    await app.queue.reconcileLanding(indexedFact)
     repaired = true
   }
   const verdict = indexed || repaired ? "landed" : "index-gap"
@@ -9114,7 +9215,7 @@ function buildProgram(
     .option("--needs-review", "show revisions needing approval")
     .option("--reviewer <reviewer>", "scope --needs-review to one requested reviewer")
     .option("--json", "emit stable JSON")
-    .action(async (options) => listPrs(installed(), options, io))
+    .action(async (options) => listPrs(installed(), options, io, installedServices()))
   list.addHelpSection(
     "Status fields:",
     [
@@ -9372,12 +9473,12 @@ function buildProgram(
   issue
     .command("_list", { isDefault: true, hidden: true })
     .option("--json", "emit stable JSON")
-    .action(async (options) => listIssues(installed(), options, io))
+    .action(async (options) => listIssues(installed(), options, io, installedServices()))
   issue
     .command("view <issue>")
     .description("show Yrd delivery records joined to an issue")
     .option("--json", "emit stable JSON")
-    .action(async (issueId, options) => listIssues(installed(), options, io, issueId))
+    .action(async (issueId, options) => listIssues(installed(), options, io, installedServices(), issueId))
   issue
     .command("ensure <issue>")
     .description("ensure one issue-owned Bay and one tracked draft PR")

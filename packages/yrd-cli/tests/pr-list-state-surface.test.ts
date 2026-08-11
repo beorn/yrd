@@ -7,23 +7,18 @@
  * answering "what is outstanding?" with something false in opposite
  * directions: the first hid live work, the second hid landed work.
  */
-import { execFileSync } from "node:child_process"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
 import { createElement } from "react"
 import { renderString } from "silvery"
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays } from "@yrd/bay"
+import { createBayJobDefs, currentPRRev, withBays } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withContests, type ContestGit } from "@yrd/contest"
 import { withIntents } from "@yrd/intent"
 import { withIssues } from "@yrd/issue"
 import { withJobs, type JobResult } from "@yrd/job"
 import { withMerge, withQueue, withStep, type PRShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
-import { runYrd, type PruneGitFacts, type YrdCliIO } from "@yrd/cli"
+import { runYrd, type PruneGitFacts, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
 import { createLogger } from "loggily"
-import { createPruneGitFacts } from "../src/pr-withdraw.ts"
 import { PRListView, type PRListRow } from "../src/queue-status-view.tsx"
 
 const WIDTH = 120
@@ -263,13 +258,40 @@ describe("pr list landing reconciliation (22376)", () => {
    * re-cuts a branch already on main, and duplicate landings of the same
    * content are exactly what the ancestry model cannot clean up afterwards.
    */
-  it("reports the landing when a withdrawal arrives on top of it", async () => {
+  it("reports a Queue-managed repository receipt even when the authored head is not the landing commit", async () => {
     const app = await createCliApp()
     await app.bays.submit({ branch: "topic/landed", headSha: LANDED_HEAD, base: "main", baseSha: BASE_SHA })
     await app.bays.closePr({ pr: "PR1", reason: "author changed their mind" })
+    const revision = currentPRRev(app.bays.pr("PR1")!)
+    const receipt = {
+      ref: "refs/notes/yrd/receipts",
+      target: MERGED_SHA,
+      note: "e".repeat(40),
+      checksum: "f".repeat(64),
+    } as const
+    const services = {
+      landingReceipts: {
+        find: async () => ({
+          status: "proven" as const,
+          fact: {
+            pr: "PR1",
+            revision: revision.n,
+            headSha: revision.head,
+            changeId: revision.changeId!,
+            run: "R1",
+            landedAt: "2026-07-15T12:00:30.000Z",
+            commit: MERGED_SHA,
+            landingSha: MERGED_SHA,
+            baseSha: BASE_SHA,
+            receipt,
+          },
+        }),
+        replayLegacy: async () => [],
+      },
+    } satisfies YrdCliServices
 
-    const json = outputIO({ pruneGit: () => landingGit() })
-    expect(await runYrd(app as CliApp, yrd("pr", "list", "--json"), json.io), json.stderr()).toBe(0)
+    const json = outputIO()
+    expect(await runYrd(app as CliApp, yrd("pr", "list", "--json"), json.io, services), json.stderr()).toBe(0)
     const listed = JSON.parse(json.stdout()) as {
       prs: readonly Readonly<{ id: string; status: string; nativeStatus?: string }>[]
     }
@@ -280,64 +302,67 @@ describe("pr list landing reconciliation (22376)", () => {
       nativeStatus: "withdrawn",
     })
 
-    const human = outputIO({ pruneGit: () => landingGit(), columns: 200 })
-    expect(await runYrd(app as CliApp, yrd("pr", "list"), human.io), human.stderr()).toBe(0)
+    const human = outputIO({ columns: 200 })
+    expect(await runYrd(app as CliApp, yrd("pr", "list"), human.io, services), human.stderr()).toBe(0)
     expect(human.stdout()).toContain("already-landed")
     expect(human.stdout()).toContain("withdrawn-after-landing")
   })
 
-  it("leaves a withdrawal whose content is not on the base alone", async () => {
+  it("does not call a direct push landed without the managed repository receipt", async () => {
     const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/live", headSha: LIVE_HEAD, base: "main", baseSha: BASE_SHA })
+    await app.bays.submit({ branch: "topic/live", headSha: LANDED_HEAD, base: "main", baseSha: BASE_SHA })
     await app.bays.closePr({ pr: "PR1", reason: "superseded by a different design" })
+    const services = {
+      landingReceipts: {
+        find: async () => ({ status: "not-proven" as const, reason: "receipt-missing" as const }),
+        replayLegacy: async () => [],
+      },
+    } satisfies YrdCliServices
 
     const json = outputIO({ pruneGit: () => landingGit() })
-    expect(await runYrd(app as CliApp, yrd("pr", "list", "--json"), json.io), json.stderr()).toBe(0)
+    expect(await runYrd(app as CliApp, yrd("pr", "list", "--json"), json.io, services), json.stderr()).toBe(0)
     const listed = JSON.parse(json.stdout()) as { prs: readonly Readonly<{ id: string; status: string }>[] }
     expect(listed.prs[0]).toMatchObject({ id: "PR1", status: "withdrawn" })
   })
 
-  /** The fake above proves the projection; this proves the plumbing under it —
-   * real Git, one batched answer, against a landed head, an unlanded head, and
-   * a head this repository has never seen. */
-  it("answers landed / unlanded / absent from one real batched Git query", () => {
-    const dir = mkdtempSync(join(tmpdir(), "yrd-pr-list-landing-"))
-    const git = (...args: string[]) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" }).trim()
-    try {
-      git("init", "-q", "-b", "main")
-      git("config", "user.name", "Yrd Test")
-      git("config", "user.email", "yrd@example.invalid")
-      writeFileSync(join(dir, "base.md"), "base\n")
-      git("add", ".")
-      git("commit", "-qm", "base")
+  it("surfaces an integrated journal row without repository proof as corrupt", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/index-only", headSha: LIVE_HEAD, base: "main", baseSha: BASE_SHA })
+    const revision = currentPRRev(app.bays.pr("PR1")!)
+    const receipt = {
+      ref: "refs/notes/yrd/receipts",
+      target: MERGED_SHA,
+      note: "e".repeat(40),
+      checksum: "f".repeat(64),
+    } as const
+    await app.queue.reconcileLanding({
+      pr: "PR1",
+      revision: revision.n,
+      headSha: revision.head,
+      changeId: revision.changeId!,
+      run: "R1",
+      commit: MERGED_SHA,
+      landingSha: MERGED_SHA,
+      baseSha: BASE_SHA,
+      receipt,
+    })
+    const services = {
+      landingReceipts: {
+        find: async () => ({ status: "not-proven" as const, reason: "receipt-missing" as const }),
+        replayLegacy: async () => [],
+      },
+    } satisfies YrdCliServices
 
-      git("switch", "-q", "-c", "topic/landed")
-      writeFileSync(join(dir, "landed.md"), "landed\n")
-      git("add", ".")
-      git("commit", "-qm", "landed")
-      const landedHead = git("rev-parse", "HEAD")
-
-      git("switch", "-q", "-c", "topic/live", "main")
-      writeFileSync(join(dir, "live.md"), "live\n")
-      git("add", ".")
-      git("commit", "-qm", "live")
-      const liveHead = git("rev-parse", "HEAD")
-
-      git("switch", "-q", "main")
-      git("merge", "-q", "--no-ff", "-m", "merge landed", landedHead)
-      const baseSha = git("rev-parse", "HEAD")
-
-      const facts = createPruneGitFacts(dir)
-      const absent = "9".repeat(40)
-      expect(facts.landedOnBase?.(baseSha, [landedHead, liveHead, absent])).toEqual([landedHead])
-      // The fallback path every implementation without the batch fact takes
-      // must reach the same verdict, or the two rails could disagree silently.
-      expect(facts.isAncestor(landedHead, baseSha)).toBe(true)
-      expect(facts.isAncestor(liveHead, baseSha)).toBe(false)
-      expect(facts.resolveCommit(absent)).toBeUndefined()
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
+    const json = outputIO()
+    expect(await runYrd(app as CliApp, yrd("pr", "list", "--json"), json.io, services), json.stderr()).toBe(0)
+    expect(
+      (JSON.parse(json.stdout()) as { prs: readonly Readonly<{ status: string; landingProof: unknown }>[] }).prs[0],
+    ).toMatchObject({
+      id: "PR1",
+      nativeStatus: "integrated",
+      status: "index-corrupt",
+      landingProof: { code: "landing-index-corrupt", reason: "receipt-missing" },
+    })
   })
 
   it("never probes git for a PR whose recorded state already claims a landing", async () => {
