@@ -146,7 +146,7 @@ describe("admission head-of-line release — a refused PR never blocks the ready
 
     const state = app.state()
     expect(state.bays.prs[head.id]?.integration).toBeUndefined()
-    expect(state.queues.admissionRefusals[head.id]?.settlement).toMatchObject({ disposition: "needs-person" })
+    expect(state.queues.admissionRefusals[head.id]).toMatchObject({ code: "recut-gitlink-conflict", count: 1 })
     for (const pr of trailing) {
       expect(state.bays.prs[pr.id]?.integration, `expected PR '${pr.id}' to integrate behind the refused head`).toEqual(
         expect.objectContaining({ commit: MERGED }),
