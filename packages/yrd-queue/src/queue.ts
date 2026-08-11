@@ -2072,8 +2072,9 @@ function createQueue<Shape extends PRShape>(
               ? admissionQueue(snapshot, steps)
               : requestedSelectors.map((selector) => {
                   const pr = resolvePR(snapshot.bays, selector)
-                  if (pr === undefined)
-                    {raiseFailure("refusal", "pr-not-found", prNotFoundMessage(snapshot.bays, selector))}
+                  if (pr === undefined) {
+                    raiseFailure("refusal", "pr-not-found", prNotFoundMessage(snapshot.bays, selector))
+                  }
                   return pr
                 })
           await refreshCheckIdentities(selected, resolveCycleBase)
