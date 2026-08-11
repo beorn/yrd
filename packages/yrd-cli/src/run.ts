@@ -1782,7 +1782,21 @@ function projectEligibilityTaskStatus(eligibility: PREligibility) {
   }
 }
 
-function projectPrTaskStatusWithEligibility(pr: PR, eligibility: PREligibility, landing?: PrLanding) {
+type PrListStatusProjection = Omit<ReturnType<typeof projectPRTaskStatus>, "status"> &
+  Readonly<{
+    /** answers: What delivery result should a reader act on? tense: current. */
+    status: PRDeliveryState | "needs-author"
+    /** answers: What delivery status did the rebuildable index record? tense: historical. */
+    nativeStatus?: PRDeliveryState
+    /** answers: Why did repository proof override nativeStatus? tense: current. */
+    landedOnBase?: Readonly<Pick<PrLanding, "baseSha" | "headSha" | "code">>
+  }>
+
+function projectPrTaskStatusWithEligibility(
+  pr: PR,
+  eligibility: PREligibility,
+  landing?: PrLanding,
+): PrListStatusProjection {
   const projected = projectPRTaskStatus(pr)
   // A proven landing is the strongest projection there is: it contradicts the
   // recorded state with content, so it wins over both the native state and the
@@ -8923,7 +8937,8 @@ function buildProgram(
       "manage merge requests, also called pull requests or PRs (a branch selector targets the live delivery; address a terminal merge request by its id)",
     )
   pr.helpCommand(false)
-  pr.command("list")
+  const list = pr
+    .command("list")
     .description("list pull requests")
     .option("--base <branch>", "scope PRs to one base")
     .option("--state <state>", "scope PRs to one native or projected state")
@@ -8932,6 +8947,18 @@ function buildProgram(
     .option("--reviewer <reviewer>", "scope --needs-review to one requested reviewer")
     .option("--json", "emit stable JSON")
     .action(async (options) => listPrs(installed(), options, io))
+  list.addHelpSection(
+    "Status fields:",
+    [
+      "state — answers: is the PR record open or closed? tense: current",
+      "status — answers: what delivery result should a reader act on? tense: current",
+      "nativeStatus — answers: what delivery status did the rebuildable index record? tense: historical",
+      "taskStatus — answers: how does this delivery map to the shared work-state vocabulary? tense: current",
+      "eligibility.reason.code — answers: why can the current revision not run now? tense: current",
+      "landedOnBase.code — answers: why did repository proof override nativeStatus? tense: current",
+      "--state needs-author — answers: has this PR ever needed author action? tense: historical",
+    ].join("\n"),
+  )
   const create = pr
     .command("create [selector]")
     .description("create a draft PR without requesting required checks")

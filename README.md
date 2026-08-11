@@ -339,6 +339,15 @@ state, JSON also names it as `nativeStatus`; consumers act on canonical
 `status`. The additive cross-domain fields are `taskStatus` and `glyph`;
 changing the domain vocabulary does not change this five-state contract:
 
+- `state` — answers: is the PR record open or closed? tense: current.
+- `status` — answers: what delivery result should a reader act on? tense: current.
+- `nativeStatus` — answers: what delivery status did the rebuildable index record? tense: historical.
+- `taskStatus` — answers: how does this delivery map to the shared work-state vocabulary? tense: current.
+- `eligibility.reason.code` — answers: why can the current revision not run now? tense: current.
+- `landedOnBase.code` — answers: why did repository proof override `nativeStatus`? tense: current.
+- `--state needs-author` — answers: has this PR ever needed author action? tense: historical. It is a sticky
+  fact, not a claim that a closed delivery currently awaits its author.
+
 | `taskStatus` | Glyph | PR                        | Run                 | Job attempt            | Step    |
 | ------------ | ----- | ------------------------- | ------------------- | ---------------------- | ------- |
 | `todo`       | `[ ]` | pushed                    | queued              | requested              | pending |

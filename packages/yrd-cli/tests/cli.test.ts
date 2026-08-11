@@ -929,6 +929,30 @@ describe("runYrd", () => {
     expect(adminQueue.stdout()).toMatch(/^\s+deinit\b/mu)
   })
 
+  it("names the question and tense of every pr list status vocabulary", async () => {
+    const app = await createApp()
+    const help = outputIO({ columns: 120 })
+
+    expect(await runYrd(app, yrd("pr", "list", "--help"), help.io), help.stderr()).toBe(0)
+    expect(help.stdout()).toContain("state — answers: is the PR record open or closed? tense: current")
+    expect(help.stdout()).toContain("status — answers: what delivery result should a reader act on? tense: current")
+    expect(help.stdout()).toContain(
+      "nativeStatus — answers: what delivery status did the rebuildable index record? tense: historical",
+    )
+    expect(help.stdout()).toContain(
+      "taskStatus — answers: how does this delivery map to the shared work-state vocabulary? tense: current",
+    )
+    expect(help.stdout()).toContain(
+      "eligibility.reason.code — answers: why can the current revision not run now? tense: current",
+    )
+    expect(help.stdout()).toContain(
+      "landedOnBase.code — answers: why did repository proof override nativeStatus? tense: current",
+    )
+    expect(help.stdout()).toContain(
+      "--state needs-author — answers: has this PR ever needed author action? tense: historical",
+    )
+  })
+
   it("materializes immutable deployments through a keyed Journal Job", async () => {
     const app = await createApp()
     const output = outputIO()
@@ -3045,17 +3069,19 @@ describe("runYrd", () => {
     await app.bays.ready({ pr: "PR1" })
     await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
 
-    const processRun = vi.fn(async (request: ProcessRequest): Promise<ProcessResult> => ({
-      exitCode: 0,
-      signal: null,
-      stdout:
-        request.argv.includes("diff-tree") && request.argv.includes(nextHead)
-          ? `:160000 160000 ${"0".repeat(40)} ${unpublishedPin} M\0dep\0`
-          : "",
-      stderr: "",
-      durationMs: 0,
-      timedOut: false,
-    }))
+    const processRun = vi.fn(
+      async (request: ProcessRequest): Promise<ProcessResult> => ({
+        exitCode: 0,
+        signal: null,
+        stdout:
+          request.argv.includes("diff-tree") && request.argv.includes(nextHead)
+            ? `:160000 160000 ${"0".repeat(40)} ${unpublishedPin} M\0dep\0`
+            : "",
+        stderr: "",
+        durationMs: 0,
+        timedOut: false,
+      }),
+    )
     const recut = vi.fn(async () => ({
       headSha: nextHead,
       baseSha: nextBase,

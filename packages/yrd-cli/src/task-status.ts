@@ -24,6 +24,7 @@ const WORK_FOLD_GLYPHS = {
 export type StatusGlyph = (typeof WORK_STATUS_GLYPHS)[TaskStatus]
 
 export type TaskStatusFields = Readonly<{
+  /** answers: How does this object map to the shared work-state vocabulary? tense: current. */
   taskStatus: TaskStatus
   glyph: StatusGlyph
 }>
@@ -198,7 +199,12 @@ export function issueTaskStatusOf(
   return "dropped"
 }
 
-export type ProjectedPR = PR & TaskStatusFields & Readonly<{ status: PRDeliveryState }>
+export type ProjectedPR = PR &
+  TaskStatusFields &
+  Readonly<{
+    /** answers: What delivery result should a reader act on? tense: current. */
+    status: PRDeliveryState
+  }>
 
 export function projectPRTaskStatus(pr: PR): ProjectedPR {
   return { ...pr, status: prDeliveryState(pr), ...taskStatusFields(prTaskStatusOf(pr)) }

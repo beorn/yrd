@@ -1,4 +1,4 @@
-import { currentPRRev, prDeliveryState, type PR } from "@yrd/bay"
+import { currentPRRev, prDeliveryState, type PR, type PRDeliveryState } from "@yrd/bay"
 import { createPruneGitFacts } from "./pr-withdraw.ts"
 import type { PruneGitFacts, YrdCliIO } from "./types.ts"
 
@@ -9,12 +9,12 @@ import type { PruneGitFacts, YrdCliIO } from "./types.ts"
 const NOT_LANDED_CLAIMS = new Set(["withdrawn", "canceled"])
 
 export type PrLanding = Readonly<{
-  /** The recorded delivery state the ancestry proof contradicts. */
-  recorded: string
+  /** answers: Which rebuildable-index status did repository proof contradict? tense: historical. */
+  recorded: PRDeliveryState
   /** Base tip the head was proven to be reachable from. */
   baseSha: string
   headSha: string
-  /** Typed code for the WHY column and the JSON row. */
+  /** answers: Why did repository proof override nativeStatus? tense: current. */
   code: string
 }>
 

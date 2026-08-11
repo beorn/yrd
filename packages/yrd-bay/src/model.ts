@@ -602,7 +602,9 @@ export type PR = Readonly<{
   description?: string
   branch: string
   base: string
+  /** answers: Is the PR record open or closed? tense: current. */
   state: "open" | "closed"
+  /** answers: Has the rebuildable index recorded this PR as merged? tense: historical. */
   merged: boolean
   /** Opt-in "merge into latest": when true, the resident observes the live
    * branch before each Queue cycle. A moved head is recorded as a revision,
@@ -622,8 +624,9 @@ export type PR = Readonly<{
    * identical in meaning to the empty set. */
   requestedReviewers?: readonly string[]
   regressions?: readonly PRRegression[]
-  /** Legacy pre-revision-admission projection. New refusal evidence lives on
-   * `currentPRRev(pr).admission`; retained so old journals remain readable. */
+  /** answers: Has this PR ever recorded author-owned refusal evidence? tense: historical.
+   * Legacy pre-revision-admission projection. New refusal evidence lives on
+   * `currentPRRev(pr).admission`; retained so old indexes remain readable. */
   needsAuthor?: Readonly<{
     at: string
     run: string

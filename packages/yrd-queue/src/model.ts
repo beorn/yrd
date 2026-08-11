@@ -127,6 +127,8 @@ export const PRSnapshotSchema = z
       recutIssue(["sources"], "root source mapping must end at the current candidate head")
     }
   })
+/** answers: Which immutable PR revision did this Queue record select? tense: historical.
+ * A snapshot deliberately carries identity and content, never mutable delivery status. */
 export type PRSnapshot = Readonly<z.infer<typeof PRSnapshotSchema>>
 
 export type SourceRewrite = Readonly<{
@@ -160,6 +162,7 @@ export type Candidate = Readonly<{
   ref?: string
   sourceRewrites?: readonly SourceRewrite[]
   submoduleResolutions?: readonly QueueSubmoduleResolutionEvidence[]
+  /** answers: Did preparation find this immutable Candidate mergeable? tense: historical. */
   mergeability: "unknown" | "mergeable" | "conflicting"
   createdAt: string
 }>
@@ -518,14 +521,19 @@ export type RunConclusion = "success" | "failure" | "cancelled" | "skipped" | "t
 export type Run = Omit<QueueRecord, "initialIntegration" | "initialResults" | "steps" | "failure"> &
   Readonly<{
     cursor: number
+    /** answers: Did this Run produce a proven landing commit? tense: historical. */
     integration?: IntegrationProof
+    /** answers: Which execution phase is this Run in now? tense: current. */
     status: RunStatus
+    /** answers: How did this Run finish? tense: historical. */
     conclusion?: RunConclusion
     /** Durable Job identities in literal Flow order. */
     jobs: readonly string[]
     steps: readonly QueueStep[]
     shape: PRShape | IntegratedShape
+    /** answers: When did this Run enter a terminal status? tense: historical. */
     finishedAt?: string
+    /** answers: Why did this Run finish without success? tense: historical. */
     error?: JobError
   }>
 
@@ -598,6 +606,7 @@ export type QueuesState = Readonly<{
 }>
 
 export type PREligibilityReason = Readonly<{
+  /** answers: Why can the current PR revision not run now? tense: current. */
   code:
     | "draft"
     | "checks-pending"
@@ -622,6 +631,7 @@ export type PREligibilityReason = Readonly<{
 export type PREligibility = Readonly<{
   pr: string
   revision: number
+  /** answers: Can this exact PR revision enter a Queue run now? tense: current. */
   runnable: boolean
   reason?: PREligibilityReason
   review: Readonly<{
@@ -633,6 +643,7 @@ export type PREligibility = Readonly<{
     ref?: string
   }>
   checks: Readonly<{
+    /** answers: What required-check phase applies to this revision now? tense: current. */
     status: "not-requested" | "queued" | "checking" | "passed" | "failed"
     queuedAt?: string
     position?: number
