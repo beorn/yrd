@@ -94,6 +94,7 @@ import type { ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import { CHECKOUT_TIMEOUT_ENV, resolveCheckoutTimeoutMs } from "./git-timeouts.ts"
+import { observeFreshRemoteBranch, observeOriginBranchAdvertisement, observeOriginRemote } from "./remote-branch.ts"
 import {
   implementationSourceIdentity,
   sourceRepositoryFor,
@@ -805,28 +806,52 @@ async function resolveCommit(process: Pick<Process, "run">, repo: string, ref: s
   return undefined
 }
 
-/** Does origin advertise this branch? A failed local ref resolve cannot tell
- * "origin has no such branch" from "we could not establish one", and the two
- * must not share a spelling — the first is a finding a consumer may act on,
- * the second is a failure it must not mistake for one. `--exit-code` gives
- * git's own discriminator: 0 advertised, 2 no matching ref, anything else
- * means the question could not be asked. */
-async function originAdvertisesBranch(
+/** Submission asks whether this is unpublished local work or "what commit does
+ * the authored branch name on origin now?" Once origin advertises the branch,
+ * stale remote-tracking refs are never accepted as live. */
+async function resolveSubmitCommit(
   process: Pick<Process, "run">,
   repo: string,
   branch: string,
-): Promise<boolean | undefined> {
-  const args = ["ls-remote", "--heads", "--exit-code", "origin", `refs/heads/${branch}`]
-  const result = await process.run({
-    argv: ["git", "-C", repo, ...args],
-    cwd: repo,
-    env: cleanGitEnvironment(globalThis.process.env),
-    timeoutMs: GIT_TIMEOUT_MS,
-  })
-  assertGitDidNotTimeOut(result, args)
-  if (result.exitCode === 0) return true
-  if (result.exitCode === 2) return false
-  return undefined
+): Promise<string | undefined> {
+  const origin = await observeOriginRemote(process, repo)
+  if (!origin.ok) {
+    raiseFailure(
+      "configuration",
+      "submit-origin-inspection-failed",
+      `yrd: could not inspect origin before resolving submitted branch '${branch}': ${origin.detail}`,
+    )
+  }
+  if (!origin.configured) return resolveCommit(process, repo, branch)
+  const advertisement = await observeOriginBranchAdvertisement(process, repo, branch)
+  if (!advertisement.ok) {
+    raiseFailure(
+      "configuration",
+      "submit-branch-refresh-failed",
+      `yrd: could not refresh live branch '${branch}' from origin: ${advertisement.detail}\n` +
+        "remedy: restore access to origin and retry; Yrd did not submit the stale local ref",
+    )
+  }
+  // Origin absence is a fact, not a fetch failure: this is an unpublished
+  // authored branch and its local commit is the only candidate available.
+  if (!advertisement.advertised) return resolveCommit(process, repo, branch)
+  const observed = await observeFreshRemoteBranch(process, repo, branch)
+  if (!observed.ok && observed.phase === "fetch") {
+    raiseFailure(
+      "configuration",
+      "submit-branch-refresh-failed",
+      `yrd: could not refresh live branch '${branch}' from origin: ${observed.detail}\n` +
+        "remedy: restore access to origin and retry; Yrd did not submit the stale local ref",
+    )
+  }
+  if (!observed.ok) {
+    raiseFailure(
+      "configuration",
+      "submit-branch-head-missing",
+      `yrd: refreshed live branch '${branch}' but '${observed.target}' did not resolve to a commit: ${observed.detail}`,
+    )
+  }
+  return observed.head
 }
 
 async function readConfigFromBase(
@@ -925,12 +950,15 @@ async function resolveQueueTarget(
   // Say WHICH fact an absent headSha is. Only a positive "origin does not
   // advertise it" earns `absent`; origin advertising a branch whose head we
   // cannot resolve locally is `unknown`, because we still have no head to give.
+  const advertisement =
+    headSha === undefined ? await observeOriginBranchAdvertisement(process, repo, options.remoteBranch) : undefined
+  if (advertisement?.ok === false && advertisement.timedOut) {
+    throw new Error(
+      `yrd: git ls-remote --heads --exit-code origin refs/heads/${options.remoteBranch} timed out after ${GIT_TIMEOUT_MS}ms`,
+    )
+  }
   const headState =
-    headSha !== undefined
-      ? "resolved"
-      : (await originAdvertisesBranch(process, repo, options.remoteBranch)) === false
-        ? "absent"
-        : "unknown"
+    headSha !== undefined ? "resolved" : advertisement?.ok === true && !advertisement.advertised ? "absent" : "unknown"
   return {
     base,
     sha: target.sha,
@@ -2069,7 +2097,7 @@ async function runYrdProcessHost(
             concurrency: io.concurrency ?? activeHost.config.contest.concurrency,
             resolveRevision: (ref, cwd) =>
               io.resolveRevision === undefined
-                ? resolveCommit(activeHost.process, cwd, ref)
+                ? resolveSubmitCommit(activeHost.process, cwd, ref)
                 : io.resolveRevision(ref, cwd),
             resolveCommitMeta: (ref, cwd) =>
               io.resolveCommitMeta === undefined

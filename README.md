@@ -534,6 +534,22 @@ observes the later Queue-owned check result. It renders the typed evidence in
 human or newline-delimited JSON output, including command argv, concise
 diagnostics, base-versus-carrier classification, and artifact paths.
 
+Submission has two deliberately different head questions. An active Bay asks
+which commit is checked out in its managed workspace after refresh, because
+that workspace is the authored source being submitted. A direct branch or a PR
+without an active Bay first asks whether `origin` advertises that branch. If it
+does, Yrd fetches that exact branch and records its live tip; if it does not,
+the branch is still local authored work. Failure to establish either remote
+fact is typed and never falls back to a possibly stale ref. A repository with
+no `origin` remains explicitly local-only.
+
+After submission, Queue asks neither question again. It verifies and merges the
+recorded immutable PR revision; branch movement creates a new submission
+revision and never changes an admitted Candidate. All branch-head protections
+therefore run at submission time. Merge time is intentionally blind to the
+moving branch name and operates only on the frozen revision and authoritative
+base.
+
 `pr submit --keep-on-failure` retains a failed local required-check workspace
 and prints its path so the exact candidate and dependency state can be
 inspected. Checkout, submodule population, dependency provisioning, and check

@@ -2,6 +2,7 @@ import { prDeliveryState, prRevisionLineage, type PR, type PRRev } from "@yrd/ba
 import { raiseFailure } from "@yrd/core"
 import type { Process, ProcessResult } from "@yrd/process"
 import { cleanGitEnvironment } from "./git-environment.ts"
+import { observeFreshRemoteBranch } from "./remote-branch.ts"
 import type { YrdCliIO, YrdCliServices } from "./types.ts"
 
 const GIT_TIMEOUT_MS = 30_000
@@ -37,32 +38,22 @@ async function freshRemoteBranch(
   branch: string,
   remedy: string,
 ): Promise<string> {
-  const source = `refs/heads/${branch}`
-  const target = `refs/remotes/origin/${branch}`
-  const fetched = await runGit(process, cwd, ["fetch", "--quiet", "--no-tags", "origin", `+${source}:${target}`])
-  if (fetched.timedOut || fetched.exitCode !== 0) {
+  const observed = await observeFreshRemoteBranch(process, cwd, branch)
+  if (!observed.ok && observed.phase === "fetch") {
     raiseFailure(
       "configuration",
       "recut-branch-refresh-failed",
-      `yrd: could not refresh live branch '${branch}' from origin: ${gitFailure(fetched)}\n${remedy}`,
+      `yrd: could not refresh live branch '${branch}' from origin: ${observed.detail}\n${remedy}`,
     )
   }
-  const resolved = await runGit(process, cwd, [
-    "rev-parse",
-    "--verify",
-    "--quiet",
-    "--end-of-options",
-    `${target}^{commit}`,
-  ])
-  const head = resolved.stdout.trim()
-  if (resolved.timedOut || resolved.exitCode !== 0 || head === "") {
+  if (!observed.ok) {
     raiseFailure(
       "configuration",
       "recut-branch-head-missing",
-      `yrd: refreshed live branch '${branch}' but '${target}' did not resolve to a commit: ${gitFailure(resolved)}`,
+      `yrd: refreshed live branch '${branch}' but '${observed.target}' did not resolve to a commit: ${observed.detail}`,
     )
   }
-  return head
+  return observed.head
 }
 
 async function liveBranchHead(

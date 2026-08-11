@@ -1087,6 +1087,10 @@ export function createBays(
     }
 
     if (bay?.status === "active") {
+      // An active Bay asks "which commit is checked out in the managed authored
+      // workspace after refresh?" It does not ask what the same branch name
+      // currently means on origin; direct/non-active submission asks that
+      // remote question through resolveRevision below.
       const refreshed = await actions.refresh({ bay: bay.id })
       await execute(refreshed, options.run, `bay '${bay.id}' refresh`)
       snapshot = state()
@@ -1126,7 +1130,7 @@ export function createBays(
     // Re-submitting a PR that has no LIVE workspace must re-resolve the branch's current tip
     // rather than reuse the recorded revision's head: a pushed (e.g. draft) or submitted PR
     // whose branch has since moved would otherwise re-register the stale head. Only an ACTIVE
-    // bay reads its head from the workspace (handled above); every other shape — bay-less
+    // bay asks for the managed workspace's committed HEAD (handled above); every other shape — bay-less
     // direct branch, and a PR whose bay is closing/closed/failed (reachable by PR id or by the
     // retired bay's id, where the closedBranchAlias escape above does not apply) — resolves the
     // branch tip here. Without this, an idempotent retry re-presented the recorded head at

@@ -131,6 +131,44 @@ async function repository(): Promise<{ repo: string; featureSha: string }> {
   return { repo, featureSha }
 }
 
+async function staleRemoteBranchRepository(): Promise<{
+  observer: string
+  branch: string
+  staleHead: string
+  liveHead: string
+}> {
+  const root = await mkdtemp(join(tmpdir(), "yrd-submit-live-branch-"))
+  roots.push(root)
+  const remote = join(root, "origin.git")
+  const author = join(root, "author")
+  const observer = join(root, "observer")
+  const branch = "issue/feature"
+  await git(root, "init", "-q", "-b", "main", author)
+  await git(author, "config", "user.name", "Yrd Test")
+  await git(author, "config", "user.email", "yrd@example.invalid")
+  await writeFile(join(author, "README.md"), "main\n")
+  await writeFile(join(author, ".yrd.yml"), 'checks: [{check: {run: "true"}}]\n')
+  await git(author, "add", "README.md", ".yrd.yml")
+  await git(author, "commit", "-qm", "main")
+  await initBareMain(author, remote)
+  await git(author, "remote", "add", "origin", remote)
+  await git(author, "push", "-qu", "origin", "main")
+  await git(author, "switch", "-qc", branch)
+  await writeFile(join(author, "feature.txt"), "first\n")
+  await git(author, "add", "feature.txt")
+  await git(author, "commit", "-qm", "first branch head")
+  await git(author, "push", "-qu", "origin", branch)
+  await git(root, "clone", "-q", remote, observer)
+  const staleHead = await git(observer, "rev-parse", `refs/remotes/origin/${branch}`)
+  await writeFile(join(author, "feature.txt"), "second\n")
+  await git(author, "add", "feature.txt")
+  await git(author, "commit", "-qm", "live branch head")
+  const liveHead = await git(author, "rev-parse", "HEAD")
+  await git(author, "push", "-q", "origin", branch)
+  expect(staleHead).not.toBe(liveHead)
+  return { observer, branch, staleHead, liveHead }
+}
+
 async function candidatePackageRepository(
   options: Readonly<{ postinstall?: string }> = {},
 ): Promise<{ repo: string; featureSha: string }> {
@@ -2791,36 +2829,63 @@ checks: [{check: {run: "true"}}]
     }
   })
 
-  it("records the remote branch tip that recut freshness later observes", async () => {
-    const { repo, featureSha: localHead } = await repository()
-    const branch = "issue/feature"
-    await git(repo, "switch", "-qc", "issue/remote", "main")
-    await writeFile(join(repo, "remote.txt"), "remote branch\n")
-    await git(repo, "add", "remote.txt")
-    await git(repo, "commit", "-qm", "remote branch")
-    const remoteHead = await git(repo, "rev-parse", "HEAD")
-    await git(repo, "switch", "-q", "main")
-    await git(repo, "update-ref", `refs/remotes/origin/${branch}`, remoteHead)
-    expect(localHead).not.toBe(remoteHead)
+  it("fetches the live remote branch before submitting from a separate stale clone", async () => {
+    const { observer, branch, liveHead } = await staleRemoteBranchRepository()
 
     let stdout = ""
     let stderr = ""
     expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "create", branch, "--json"], {
-        cwd: repo,
-        stdout: (text) => {
-          stdout += text
+      await runYrdProcess(
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", observer, "pr", "submit", branch, "--json"],
+        {
+          cwd: observer,
+          stdout: (text) => {
+            stdout += text
+          },
+          stderr: (text) => {
+            stderr += text
+          },
         },
-        stderr: (text) => {
-          stderr += text
-        },
-      }),
+      ),
       stderr,
     ).toBe(0)
     expect(stderr).toBe("")
     expect(JSON.parse(stdout)).toMatchObject({
-      prs: [{ branch, revs: [{ n: 1, head: remoteHead }] }],
+      prs: [{ branch, revs: [{ n: 1, head: liveHead }] }],
     })
+    expect(await git(observer, "rev-parse", `refs/remotes/origin/${branch}`)).toBe(liveHead)
+  })
+
+  it("fails typed instead of submitting a stale branch when origin cannot be fetched", async () => {
+    const { observer, branch, staleHead } = await staleRemoteBranchRepository()
+    await git(observer, "remote", "set-url", "origin", join(observer, "missing-origin.git"))
+    let stdout = ""
+    let stderr = ""
+
+    expect(
+      await runYrdProcess(
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", observer, "pr", "create", branch, "--json"],
+        {
+          cwd: observer,
+          stdout: (text) => {
+            stdout += text
+          },
+          stderr: (text) => {
+            stderr += text
+          },
+        },
+      ),
+    ).toBe(2)
+    expect(stdout).toBe("")
+    expect(JSON.parse(stderr)).toMatchObject({
+      failure: {
+        kind: "configuration",
+        code: "submit-branch-refresh-failed",
+      },
+    })
+    expect(stderr).toContain(`could not refresh live branch '${branch}' from origin`)
+    expect(await git(observer, "rev-parse", `refs/remotes/origin/${branch}`)).toBe(staleHead)
+    expect(await journalEnvelope(observer)).toEqual([])
   })
 
   it("keeps a draft pushed when pr ready refuses an unpublished changed submodule pin", async () => {
