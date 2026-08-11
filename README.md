@@ -902,7 +902,11 @@ on configuration drift, the cycle refuses loudly. True runtime drift asks the
 resident host to unwind its heartbeat and leases, close its runtime, and
 `execve` the exact same argv and source in place. The OS PID stays stable while
 the reconstructed host loads the current repository configuration and mints a
-new driver epoch; a one-shot run still refuses instead of reloading itself.
+new driver epoch; before unwinding, the resident writes the `runtime-drift`
+finding into its durable heartbeat so the cause survives the control transfer.
+If `execve` itself fails, Yrd reports `runtime-reload-exec-failed`, exits with
+the infrastructure code `3`, and Hab restarts the unchanged argv. A one-shot
+run still refuses instead of reloading itself.
 
 To stop a resident `queue run` (its follow-by-default form), send `SIGINT` (Ctrl-C) or `SIGTERM`.
 The first signal stops new Queue work, lets the active run finish, and exits with

@@ -1119,6 +1119,8 @@ async function reclaimDeadResidentRunner(app: YrdCliApp, io: YrdCliIO): Promise<
 
 type ResidentRunnerHeartbeat = Readonly<{
   check(): void
+  /** Publish terminal progress evidence before a typed resident control transfer. */
+  recordProgress(progress: QueueRunnerProgress): Promise<void>
   /** Stop the heartbeat and leave an exit marker in status.json (never delete it).
    * `clean` = true for an operator/drain stop, false for a signal-forced/crash exit. */
   close(clean: boolean): Promise<void>
@@ -1183,13 +1185,14 @@ export async function startResidentRunnerHeartbeat(
     return new Date(now).toISOString()
   }
   const startedAt = nowIso()
+  let recordedProgress: QueueRunnerProgress | undefined
   const driverEpoch = options.driver === undefined ? undefined : (options.driver.epoch ?? randomUUID())
   // The dedicated RUNNER box renders this verbatim: `[pid] <command>`.
   const command = [basename(process.argv[0] ?? "bun"), ...process.argv.slice(1)].join(" ")
   const writeStatus = async (exit?: Readonly<{ exitedAt: string; clean: boolean }>): Promise<void> => {
     await mkdir(directory, { recursive: true })
     const lastTickAt = nowIso()
-    const queueProgress = options.queueProgress?.(lastTickAt)
+    const queueProgress = recordedProgress ?? options.queueProgress?.(lastTickAt)
     const status: QueueTimelineRunner = {
       pid: process.pid,
       startedAt,
@@ -1230,6 +1233,13 @@ export async function startResidentRunnerHeartbeat(
   return {
     check() {
       if (failure !== undefined) throw failure
+    },
+    async recordProgress(progress) {
+      stop.abort()
+      await loop
+      if (failure !== undefined) throw failure
+      recordedProgress = progress
+      await write()
     },
     close: (clean: boolean) =>
       (closePromise ??= (async () => {
@@ -6601,7 +6611,7 @@ export async function requireFreshInstalledBaseline(
     reloadInPlace?: Readonly<{
       base?: string
       /** Unwind the resident completely, then replace this process image. */
-      request?: () => never
+      request?: (finding: Readonly<{ code: "runtime-drift"; message: string }>) => never
     }>
   }> = {},
 ): Promise<void> {
@@ -6639,15 +6649,21 @@ export async function requireFreshInstalledBaseline(
     await administration.provision(reload.base)
     const after = await auditDrift()
     if (after.length === 0) return
-    if (after.some((finding) => finding.code === "runtime-drift") && reload.request !== undefined) {
-      reload.request()
+    const runtimeDrift = after.find(
+      (finding): finding is Readonly<{ code: "runtime-drift"; message: string }> => finding.code === "runtime-drift",
+    )
+    if (runtimeDrift !== undefined && reload.request !== undefined) {
+      reload.request(runtimeDrift)
     }
     const firstAfter = after[0]
     if (firstAfter === undefined) return
     raiseFailure("refusal", firstAfter.code, after.map((finding) => finding.message).join("\n"))
   }
-  if (reload?.request !== undefined && drift.some((finding) => finding.code === "runtime-drift")) {
-    reload.request()
+  const runtimeDrift = drift.find(
+    (finding): finding is Readonly<{ code: "runtime-drift"; message: string }> => finding.code === "runtime-drift",
+  )
+  if (reload?.request !== undefined && runtimeDrift !== undefined) {
+    reload.request(runtimeDrift)
   }
   const first = drift[0]
   if (first === undefined) return
@@ -6656,15 +6672,19 @@ export async function requireFreshInstalledBaseline(
 
 class YrdRuntimeReloadRequest extends Error {
   override readonly name = "YrdRuntimeReloadRequest"
+
+  constructor(readonly finding: Readonly<{ code: "runtime-drift"; message: string }>) {
+    super(finding.message)
+  }
 }
 
 /** Typed control transfer: unwind the resident heartbeat before the process
  * host closes leases/resources and performs the same-PID exec. */
-export function requestYrdRuntimeReload(): never {
-  throw new YrdRuntimeReloadRequest("resident runtime baseline changed")
+export function requestYrdRuntimeReload(finding: Readonly<{ code: "runtime-drift"; message: string }>): never {
+  throw new YrdRuntimeReloadRequest(finding)
 }
 
-export function isYrdRuntimeReloadRequest(error: unknown): boolean {
+export function isYrdRuntimeReloadRequest(error: unknown): error is YrdRuntimeReloadRequest {
   return error instanceof YrdRuntimeReloadRequest
 }
 
@@ -8136,6 +8156,11 @@ export async function followQueueRuns(
       const exit = await runCycle()
       if (exit !== null) return exit
     }
+  } catch (error) {
+    if (heartbeat !== undefined && isYrdRuntimeReloadRequest(error)) {
+      await heartbeat.recordProgress({ state: "stalled", findings: [error.finding] })
+    }
+    throw error
   } finally {
     recoveryReporter.flush()
     await heartbeat?.close(cleanShutdown)
