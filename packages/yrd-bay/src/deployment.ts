@@ -82,7 +82,7 @@ const ReleaseDeploymentInputSchema = DeploymentSourceReceiptSchema.pick({
   path: true,
   sha: true,
 }).strict()
-const HabGenerationReleaseReceiptSchema = z
+export const HabGenerationReleaseReceiptSchema = z
   .object({
     schema: z.literal("hab-service-generation-release/1"),
     jurisdiction: z.literal("single-habitat"),
@@ -196,6 +196,24 @@ export async function readDeploymentBySource(
     throw new Error(`multiple Yrd deployments claim exact source '${resolve(path)}@${sha}'`)
   }
   return matches[0]
+}
+
+/** Read every published deployment whose immutable physical path still exists. */
+export async function readLiveDeployments(deploymentsRoot: string): Promise<DeploymentSourceReceipt[]> {
+  const recordsRoot = join(resolve(deploymentsRoot), "records")
+  let names: string[]
+  try {
+    names = (await readdir(recordsRoot)).filter((name) => name.endsWith(".json")).sort()
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return []
+    throw error
+  }
+  const matches: DeploymentSourceReceipt[] = []
+  for (const name of names) {
+    const receipt = DeploymentSourceReceiptSchema.parse(JSON.parse(await readFile(join(recordsRoot, name), "utf8")))
+    if (existsSync(receipt.path)) matches.push(receipt)
+  }
+  return matches.sort((left, right) => left.deploymentId.localeCompare(right.deploymentId))
 }
 
 async function submoduleClosure(

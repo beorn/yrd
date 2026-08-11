@@ -1031,6 +1031,27 @@ describe("runYrd", () => {
         status: "completed",
         conclusion: "success",
       })
+
+      writeFileSync(
+        habReleaseReceipt,
+        JSON.stringify({
+          schema: "hab-service-generation-release/1",
+          jurisdiction: "single-habitat",
+          habitatRoot: "/hab",
+          retiredSource: { path, sha: HEAD_SHA, verification: "verified" },
+          replacementSource: { path: "/repo/.deployments/D3", sha: "3".repeat(40), verification: "verified" },
+          releasedAt: "2026-08-11T20:01:00.000Z",
+        }),
+      )
+      const retry = outputIO()
+      expect(
+        await runYrd(app, yrd("deployment", "release", deploymentReceipt, habReleaseReceipt, "--json"), retry.io),
+        retry.stderr(),
+      ).toBe(0)
+      expect(JSON.parse(retry.stdout())).toMatchObject({
+        command: "deployment.release",
+        output: { released: true, path },
+      })
     } finally {
       safeRemoveSync(temp, { within: tmpdir(), allowMissing: true })
     }

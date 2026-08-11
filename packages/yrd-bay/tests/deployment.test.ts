@@ -14,6 +14,7 @@ import {
   createGitDeploymentStore,
   deploymentJobKey,
   readDeploymentBySource,
+  readLiveDeployments,
 } from "../src/deployment.ts"
 
 const roots: string[] = []
@@ -162,7 +163,9 @@ describe("createGitDeploymentStore", () => {
     await expect(readDeploymentBySource(join(root, "deployments"), join(root, "missing"), first.sha)).resolves.toBe(
       undefined,
     )
+    await expect(readLiveDeployments(join(root, "deployments"))).resolves.toEqual([first, second])
     await store.release(first)
+    await expect(readLiveDeployments(join(root, "deployments"))).resolves.toEqual([second])
     await store.release(second)
   })
 
