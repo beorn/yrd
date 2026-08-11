@@ -999,7 +999,7 @@ describe("runYrd", () => {
       "eligibility.reason.code — answers: why can the current revision not run now? tense: current",
     )
     expect(help.stdout()).toContain(
-      "landedOnBase.code — answers: why did repository proof override nativeStatus? tense: current",
+      "repositoryLanding.code — answers: why did managed repository proof override nativeStatus? tense: current",
     )
     expect(help.stdout()).toContain(
       "--state needs-author — answers: has this PR ever needed author action? tense: historical",

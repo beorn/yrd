@@ -1809,14 +1809,19 @@ function projectEligibilityTaskStatus(eligibility: PREligibility) {
   }
 }
 
+type ProvenPrLanding = Extract<PrLanding, { verdict: "proven" }>
+type FailedPrLanding = Exclude<PrLanding, ProvenPrLanding>
+
 type PrListStatusProjection = Omit<ReturnType<typeof projectPRTaskStatus>, "status"> &
   Readonly<{
     /** answers: What delivery result should a reader act on? tense: current. */
-    status: PRDeliveryState | "needs-author"
+    status: PRDeliveryState | "needs-author" | FailedPrLanding["verdict"]
     /** answers: What delivery status did the rebuildable index record? tense: historical. */
     nativeStatus?: PRDeliveryState
-    /** answers: Why did repository proof override nativeStatus? tense: current. */
-    landedOnBase?: Readonly<Pick<PrLanding, "baseSha" | "headSha" | "code">>
+    /** answers: Which managed repository receipt proves the physical landing? tense: current. */
+    repositoryLanding?: Readonly<Pick<ProvenPrLanding, "landingSha" | "baseSha" | "receipt" | "code">>
+    /** answers: Why could repository proof not establish the indexed landing? tense: current. */
+    landingProof?: Readonly<Pick<FailedPrLanding, "code" | "reason">>
   }>
 
 function projectPrTaskStatusWithEligibility(
@@ -9313,7 +9318,7 @@ function buildProgram(
       "nativeStatus — answers: what delivery status did the rebuildable index record? tense: historical",
       "taskStatus — answers: how does this delivery map to the shared work-state vocabulary? tense: current",
       "eligibility.reason.code — answers: why can the current revision not run now? tense: current",
-      "landedOnBase.code — answers: why did repository proof override nativeStatus? tense: current",
+      "repositoryLanding.code — answers: why did managed repository proof override nativeStatus? tense: current",
       "--state needs-author — answers: has this PR ever needed author action? tense: historical",
     ].join("\n"),
   )
