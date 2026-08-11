@@ -142,6 +142,55 @@ describe("queue read model", () => {
     await expect(stat(join(dir, "journal.sqlite"))).rejects.toMatchObject({ code: "ENOENT" })
   })
 
+  it("waits for a held SQLite writer instead of failing the queue reader", async () => {
+    const dir = await directory()
+    const model = createQueueReadModel({ dir })
+    const path = join(dir, "journal.sqlite")
+    {
+      using database = new Database(path, { create: true, strict: true })
+      database.run(`
+        CREATE TABLE journal_metadata (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) STRICT;
+        CREATE TABLE journal_views (
+          view_id TEXT PRIMARY KEY NOT NULL,
+          version INTEGER NOT NULL,
+          fingerprint TEXT NOT NULL,
+          cursor INTEGER NOT NULL
+        ) STRICT;
+        INSERT INTO journal_metadata(key, value) VALUES
+          ('head_cursor', '0'),
+          ('journal_views_generation', '1');
+      `)
+      model.view.install(database)
+      database
+        .query("INSERT INTO journal_views(view_id, version, fingerprint, cursor) VALUES (?, ?, ?, 0)")
+        .run(model.view.id, model.view.version, model.view.fingerprint)
+    }
+    const source = `
+      import { Database } from "bun:sqlite"
+      using database = new Database(${JSON.stringify(path)}, { readwrite: true, strict: true })
+      database.run("BEGIN EXCLUSIVE")
+      database.run("UPDATE journal_metadata SET value = value WHERE key = 'head_cursor'")
+      console.log("locked")
+      await Bun.sleep(250)
+      database.run("COMMIT")
+    `
+    const bun = Bun.which("bun")
+    if (!bun) throw new Error("bun executable not found")
+    const writer = Bun.spawn([bun, "--eval", source], { stdout: "pipe", stderr: "pipe" })
+    const stderr = new Response(writer.stderr).text()
+    const reader = writer.stdout.getReader()
+    const ready = await reader.read()
+    if (!ready.value) throw new Error(`writer exited before locking: ${await stderr}`)
+    expect(new TextDecoder().decode(ready.value)).toContain("locked")
+
+    try {
+      await expect(model.snapshot()).resolves.toMatchObject({ attempts: [] })
+    } finally {
+      const [exitCode, writerError] = await Promise.all([writer.exited, stderr])
+      expect(exitCode, writerError).toBe(0)
+    }
+  })
+
   it("projects the same attempt facts as the historical Journal scan", async () => {
     const dir = await directory()
     const model = createQueueReadModel({ dir })

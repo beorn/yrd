@@ -54,6 +54,7 @@ export function createQueueReadModel(options: Readonly<{ dir: string }>): Regist
     Promise.resolve().then(() => {
       if (!existsSync(path)) return empty
       using database = new Database(path, { readonly: true, strict: true })
+      database.run("PRAGMA busy_timeout = 5000")
       database.run("BEGIN")
       try {
         const { cursor, generation } = assertCurrentQueueView(database, view)
