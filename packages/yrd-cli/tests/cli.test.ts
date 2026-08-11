@@ -1490,11 +1490,11 @@ describe("runYrd", () => {
     const app = await createApp()
     await openAndSubmit(app)
 
-    const pause = outputIO()
+    const pause = outputIO({ now: () => Date.parse("2026-07-09T12:00:00.000Z") })
     expect(
       await runYrd(
         app,
-        yrd("queue", "pause", "MAIN", "--reason", "selector proof", "--allow", "pr1", "--json"),
+        yrd("queue", "pause", "MAIN", "--reason", "selector proof", "--for", "30m", "--allow", "pr1", "--json"),
         pause.io,
       ),
       pause.stderr(),
@@ -3154,6 +3154,38 @@ describe("runYrd", () => {
     expect(sleeps).toEqual([1_000, 1_000])
     expect(gate, "an unchanged idle tick must not re-run the installed-baseline gate").toHaveBeenCalledTimes(1)
     expect(queueRun, "an unchanged idle tick must not traverse and compose the full queue").toHaveBeenCalledTimes(1)
+  })
+
+  it("expires a hold on an otherwise idle follow tick without exiting the runner", async () => {
+    let now = Date.parse("2026-07-09T12:00:00.000Z")
+    const app = await createApp()
+    await app.queue.pause({
+      base: "main",
+      reason: "operator freeze",
+      allowedPRs: [],
+      expiresAt: "2026-07-09T12:00:01.500Z",
+    })
+    const controller = new AbortController()
+    const queueRun = vi.fn(app.queue.run.bind(app.queue))
+    const viewer = { ...app, queue: { ...app.queue, run: queueRun } } as TestApp
+    const sleeps: number[] = []
+    const io = outputIO({
+      now: () => now,
+      scope: {
+        signal: controller.signal,
+        sleep: async (milliseconds: number) => {
+          sleeps.push(milliseconds)
+          now += milliseconds
+          if (sleeps.length === 3) controller.abort()
+        },
+      } as YrdCliIO["scope"],
+    }).io
+
+    await expect(
+      runInternals.followQueueRuns(viewer, [], { json: true, interval: 1 }, io, async () => undefined),
+    ).resolves.toBe(3)
+    expect(app.queue.status("main").pause).toBeUndefined()
+    expect(queueRun, "deadline expiry must wake exactly one additional drain cycle").toHaveBeenCalledTimes(2)
   })
 
   it("wakes an idle follow loop when the Journal advances", async () => {
@@ -5768,18 +5800,23 @@ describe("runYrd", () => {
     await app.bays.submit({ branch: "issue/blocked", headSha: "1".repeat(40), base: "main" })
     await app.bays.submit({ branch: "issue/allowed", headSha: "2".repeat(40), base: "main" })
     await app.bays.submit({ branch: "issue/also-allowed", headSha: "3".repeat(40), base: "main" })
-    const pause = outputIO()
+    const pause = outputIO({ now: () => Date.parse("2026-07-09T12:00:00.000Z") })
 
     expect(
       await runYrd(
         app,
-        yrd("queue", "pause", "main", "--reason", "operator freeze", "--allow", "PR2", "PR3", "--json"),
+        yrd("queue", "pause", "main", "--reason", "operator freeze", "--for", "30m", "--allow", "PR2", "PR3", "--json"),
         pause.io,
       ),
     ).toBe(0)
     expect(JSON.parse(pause.stdout())).toMatchObject({
       command: "queue.pause",
-      pause: { base: "main", reason: "operator freeze", allowedPRs: ["PR2", "PR3"] },
+      pause: {
+        base: "main",
+        reason: "operator freeze",
+        allowedPRs: ["PR2", "PR3"],
+        expiresAt: "2026-07-09T12:30:00.000Z",
+      },
     })
     const blocked = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), blocked.io)).toBe(1)
@@ -5865,6 +5902,20 @@ describe("runYrd", () => {
       const output = outputIO()
       expect(await runYrd(app, argv, output.io)).toBe(2)
       expect(output.stderr()).toContain("--reason requires text")
+      expect(app.queue.status("main").pause).toBeUndefined()
+    }
+  })
+
+  it("requires a finite positive TTL for every public queue pause", async () => {
+    const app = await createApp()
+    for (const argv of [
+      yrd("queue", "pause", "main", "--reason", "operator freeze"),
+      yrd("queue", "pause", "main", "--reason", "operator freeze", "--for", "0s"),
+      yrd("queue", "pause", "main", "--reason", "operator freeze", "--for", "forever"),
+    ]) {
+      const output = outputIO()
+      expect(await runYrd(app, argv, output.io)).toBe(2)
+      expect(output.stderr()).toContain("--for must be a positive duration")
       expect(app.queue.status("main").pause).toBeUndefined()
     }
   })
@@ -6662,6 +6713,11 @@ describe("runYrd", () => {
     writeFileSync(join(repo, "untracked-divergence.txt"), "local\n")
 
     const app = await createApp()
+    const driver = {
+      queueId: `${repo}#main`,
+      epoch: "11111111-1111-4111-8111-111111111111",
+      lastLanded: null,
+    }
     let findings: Array<{ code: string; message: string }> = []
     const services: YrdCliServices = { queue: { auditEnvironment: async () => ({ findings }) } }
     const lockRelease = Promise.withResolvers<void>()
@@ -6692,10 +6748,13 @@ describe("runYrd", () => {
         facts: { lease: "free", runnerStatus: "missing" },
       })
 
-      lock = createExclusive(join(stateDir, "resident-runner"), { timeoutMs: 0 }).run(async () => {
-        lockAcquired.resolve()
-        await lockRelease.promise
-      })
+      lock = createExclusive(join(stateDir, "resident-runner"), { timeoutMs: 0 }).run(
+        async () => {
+          lockAcquired.resolve()
+          await lockRelease.promise
+        },
+        { holder: `queue=${driver.queueId} epoch=${driver.epoch}` },
+      )
       await lockAcquired.promise
       mkdirSync(join(stateDir, "resident-runner"), { recursive: true })
       writeFileSync(
@@ -6714,7 +6773,7 @@ describe("runYrd", () => {
         schema: "hab-service-health/1",
         state: "unhealthy",
         running: true,
-        error: { code: "resident-runner-progress-unknown" },
+        error: { code: "resident-runner-driver-unknown" },
         facts: { lease: "held", runnerStatus: "fresh" },
       })
 
@@ -6726,6 +6785,27 @@ describe("runYrd", () => {
           lastTickAt: "2026-07-09T12:00:58.000Z",
           command: "yrd queue run",
           queueProgress: { state: "healthy" },
+          driver: { ...driver, queueId: `${repo}#release` },
+        }),
+      )
+      const wrongDriver = outputIO({ cwd: repo })
+      expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), wrongDriver.io, services)).toBe(2)
+      expect(JSON.parse(wrongDriver.stdout())).toMatchObject({
+        schema: "hab-service-health/1",
+        state: "unhealthy",
+        running: true,
+        error: { code: "resident-runner-driver-mismatch" },
+      })
+
+      writeFileSync(
+        join(stateDir, "resident-runner", "status.json"),
+        JSON.stringify({
+          pid: process.pid,
+          startedAt: "2026-07-09T12:00:00.000Z",
+          lastTickAt: "2026-07-09T12:00:58.000Z",
+          command: "yrd queue run",
+          queueProgress: { state: "healthy" },
+          driver,
         }),
       )
       const progressing = outputIO({ cwd: repo })
@@ -6736,6 +6816,7 @@ describe("runYrd", () => {
         running: true,
         facts: {
           lease: "held",
+          leaseDriver: { queueId: driver.queueId, epoch: driver.epoch },
           runnerStatus: "fresh",
           queueProgress: { state: "healthy" },
         },
@@ -6759,6 +6840,7 @@ describe("runYrd", () => {
           lastTickAt: "2026-07-09T12:00:58.000Z",
           command: "yrd queue run",
           queueProgress: { state: "stalled", findings: [refusalFinding] },
+          driver,
         }),
       )
       const stalled = outputIO({ cwd: repo })
@@ -6824,6 +6906,7 @@ describe("runYrd", () => {
           startedAt: "2026-07-09T12:00:00.000Z",
           lastTickAt: "2026-07-09T12:00:58.000Z",
           command: "yrd queue run",
+          driver,
         }),
       )
 
@@ -6854,6 +6937,7 @@ describe("runYrd", () => {
           pid: process.pid,
           startedAt: "2026-07-09T12:00:00.000Z",
           lastTickAt: "2026-07-09T12:00:40.000Z",
+          driver,
         }),
       )
       const stale = outputIO({ cwd: repo })
@@ -6871,6 +6955,7 @@ describe("runYrd", () => {
           pid: process.pid,
           startedAt: "2026-07-09T12:00:00.000Z",
           lastTickAt: "2026-07-09T12:00:58.000Z",
+          driver,
         }),
       )
 
@@ -6938,7 +7023,14 @@ describe("runYrd", () => {
       since: "2026-07-09T11:00:00.000Z",
       blockedMs: 3_600_000,
     }
-    let findings: Array<typeof noLanding | typeof refusalLoop> = []
+    const expiredHold = {
+      code: "queue-hold-expired",
+      message: "Queue 'main' hold expired 10m ago but still blocks admission",
+      specimen: "queue:main",
+      since: "2026-07-09T12:00:00.000Z",
+      blockedMs: 600_000,
+    }
+    let findings: Array<typeof noLanding | typeof refusalLoop | typeof expiredHold> = []
     const progressApp = {
       state: () => app.state(),
       queue: { audit: () => ({ findings }) },
@@ -6967,6 +7059,39 @@ describe("runYrd", () => {
         },
       ],
     })
+
+    findings = [expiredHold]
+    expect(project(progressApp, "2026-07-09T12:10:00.000Z")).toEqual({
+      state: "stalled",
+      findings: [expiredHold],
+    })
+  })
+
+  it("runs an independent dead-man check before a normal process-runtime command", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "yrd-client-dead-man-"))
+    execFileSync("git", ["init", "-q", "-b", "main", repo])
+    execFileSync("git", ["-C", repo, "config", "user.name", "Yrd Test"])
+    execFileSync("git", ["-C", repo, "config", "user.email", "yrd@example.invalid"])
+    writeFileSync(join(repo, "README.md"), "base\n")
+    execFileSync("git", ["-C", repo, "add", "README.md"])
+    execFileSync("git", ["-C", repo, "commit", "-qm", "base"])
+    const app = await createApp()
+    await openAndSubmit(app)
+    const output = outputIO({ cwd: repo, now: () => Date.parse("2026-07-13T12:30:00.000Z") })
+    try {
+      expect(
+        await runInternals.runYrdProcessRuntime(yrd("pr", "list"), output.io, {
+          ambientCwd: repo,
+          env: process.env,
+          load: async () => ({ app, services: {}, io: { cwd: repo, now: output.io.now } }),
+        }),
+      ).toBe(0)
+      expect(output.stderr()).toContain("yrd: dead-man:")
+      expect(output.stderr()).toContain("no resident runner owns the drain lease")
+    } finally {
+      await app.close()
+      safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
+    }
   })
 
   it("writes atomic resident runner heartbeats and leaves a reclaimable exit marker on close", async () => {
@@ -6974,13 +7099,21 @@ describe("runYrd", () => {
     execFileSync("git", ["init", "-q", repo])
     const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
     const implementationSource = "git:35562d1579f140669a453b310340582b8cc1b42f"
+    const landed = {
+      commit: "a".repeat(40),
+      at: "2026-07-13T11:59:00.000Z",
+    }
     let now = Date.parse("2026-07-13T12:00:00.000Z")
     try {
       const heartbeat = await runInternals.startResidentRunnerHeartbeat(
         Object.assign(outputIO({ cwd: repo, runner: `yrd-cli:${process.pid}`, now: () => now }).io, {
           implementationSource,
         }),
-        { intervalMs: 5, queueProgress: () => ({ state: "healthy" }) },
+        {
+          intervalMs: 5,
+          queueProgress: () => ({ state: "healthy" }),
+          driver: { queueId: `${repo}#main`, lastLanded: () => landed },
+        },
       )
       try {
         expect(JSON.parse(readFileSync(statusPath, "utf8"))).toEqual({
@@ -6992,13 +7125,20 @@ describe("runYrd", () => {
           command: expect.any(String),
           implementationSource,
           queueProgress: { state: "healthy" },
+          driver: {
+            queueId: `${repo}#main`,
+            epoch: expect.stringMatching(/^[0-9a-f-]{36}$/u),
+            lastLanded: landed,
+          },
         })
+        const epoch = (JSON.parse(readFileSync(statusPath, "utf8")) as { driver: { epoch: string } }).driver.epoch
         now += 1_000
         await vi.waitFor(
           () =>
             expect(JSON.parse(readFileSync(statusPath, "utf8"))).toMatchObject({
               pid: process.pid,
               lastTickAt: "2026-07-13T12:00:01.000Z",
+              driver: { queueId: `${repo}#main`, epoch, lastLanded: landed },
             }),
           { timeout: 5_000, interval: 5 },
         )
@@ -8278,7 +8418,12 @@ describe("runYrd", () => {
   it("renders pause and drain health in watch output", async () => {
     const app = await createApp()
     await openAndSubmit(app)
-    await app.queue.pause({ base: "main", reason: "operator freeze", allowedPRs: [] })
+    await app.queue.pause({
+      base: "main",
+      reason: "operator freeze",
+      allowedPRs: [],
+      expiresAt: "2026-07-13T12:00:00.000Z",
+    })
 
     let mounted: ReactElement | undefined
     const watch = outputIO({
@@ -8694,7 +8839,12 @@ describe("runYrd", () => {
     })
 
     // Historical aliases can retain a pause after the canonical queue was resumed.
-    await app.queue.pause({ base: "origin/main", reason: "released maintenance", allowedPRs: [] })
+    await app.queue.pause({
+      base: "origin/main",
+      reason: "released maintenance",
+      allowedPRs: [],
+      expiresAt: "2026-07-13T12:00:00.000Z",
+    })
     await app.queue.resume("main")
 
     for (const columns of [80, 120]) {
@@ -12790,6 +12940,11 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       lastTickAt: "2026-07-09T12:00:58.000Z",
       implementationSource: `git:${"1".repeat(40)}`,
       queueProgress: { state: "healthy" as const },
+      driver: {
+        queueId: `${root}#main`,
+        epoch: "11111111-1111-4111-8111-111111111111",
+        lastLanded: null,
+      },
     }
     const writeRunner = (lastTickAt: string) => writeFileSync(statusPath, JSON.stringify({ ...runner, lastTickAt }))
     writeRunner(runner.lastTickAt)
@@ -12866,10 +13021,24 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       expect(retried.results).toBe(first.results)
       expect(retried.projection.runner?.queueProgress).toEqual(retriedProgress)
 
+      const successorEpoch = "22222222-2222-4222-8222-222222222222"
+      writeFileSync(
+        statusPath,
+        JSON.stringify({
+          ...runner,
+          lastTickAt: "2026-07-09T12:00:59.000Z",
+          driver: { ...runner.driver, epoch: successorEpoch },
+        }),
+      )
+      const successor = await loader.load()
+      expect(targetResolutions, "driver epoch changes must reuse durable queue facts").toBe(1)
+      expect(successor.results).toBe(first.results)
+      expect(successor.projection.runner?.driver?.epoch).toBe(successorEpoch)
+
       now += 60_000
       const reclocked = await loader.load()
       expect(targetResolutions).toBe(1)
-      expect(reclocked).not.toBe(retried)
+      expect(reclocked).not.toBe(successor)
       expect(reclocked.results).toBe(first.results)
       expect(reclocked.projection.now).toBe(new Date(now).toISOString())
       expect(reclocked.projection.runner?.lastTickAt).toBe("2026-07-09T12:00:59.000Z")
