@@ -1185,6 +1185,19 @@ export type YrdHost = Readonly<{
   [Symbol.asyncDispose](): Promise<void>
 }>
 
+/**
+ * What `receiverTarget` below actually requires, in one sentence, rendered into
+ * the receiver's refusal. It lives beside the resolver rather than at the call
+ * sites so the rule and the explanation of the rule cannot drift apart.
+ *
+ * Note what the rule is NOT: there is no branch-name pattern anywhere in intake.
+ * A branch is authorized because an ACTIVE BAY tracks it, which is both stricter
+ * than a name prefix and indifferent to what the branch is called — `cto/…` and
+ * `chief/…` are admitted on the same terms as `task/…`.
+ */
+const INTAKE_POLICY =
+  "no active bay tracks this branch — open one with `yrd bay open --bay <name>`, or push a branch an active bay already tracks"
+
 function receiverTarget(app: YrdCliApp) {
   return (branch: string): ReceiverTarget | null => {
     const bay = Object.values(app.state().bays.byId).find(
@@ -1760,6 +1773,7 @@ async function createYrdRuntimeHost(
       using _span = receiverLog.span?.("drain")
       const result = await receiver.drain({
         resolveTarget,
+        intakePolicy: INTAKE_POLICY,
         intake: (receipt) => intakeReceipt(runtimeApp, receipt),
         lockTimeoutMs: 30_000,
       })
@@ -1879,6 +1893,7 @@ async function runReceiverHook(
       env,
       process: runtimeProcess,
       resolveTarget: receiverTarget(runtimeApp),
+      intakePolicy: INTAKE_POLICY,
       intake: (receipt) => intakeReceipt(runtimeApp, receipt),
     })
   } finally {

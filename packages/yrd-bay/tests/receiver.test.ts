@@ -98,7 +98,11 @@ function target(baseSha: string, overrides: Partial<ReceiverTarget> = {}): Recei
   return { bay: "B1", name: "receiver-test", base: "main", baseSha, ...overrides }
 }
 
-async function installHookHost(root: string, targets: Record<string, ReceiverTarget>): Promise<Env> {
+async function installHookHost(
+  root: string,
+  targets: Record<string, ReceiverTarget>,
+  intakePolicy?: string,
+): Promise<Env> {
   const bin = join(root, "bin")
   const targetFile = join(root, "targets.json")
   const executable = join(bin, "yrd")
@@ -114,12 +118,17 @@ async function installHookHost(root: string, targets: Record<string, ReceiverTar
       "const [, mode] = Bun.argv.slice(2)",
       'const targets = JSON.parse(await readFile(process.env.YRD_TEST_TARGETS, "utf8"))',
       "await using runner = createProcess({ env: process.env })",
-      "await runReceiverHookFromEnvironment(mode, { process: runner, resolveTarget: async branch => targets[branch] ?? null })",
+      "await runReceiverHookFromEnvironment(mode, { process: runner, resolveTarget: async branch => targets[branch] ?? null, intakePolicy: process.env.YRD_TEST_INTAKE_POLICY })",
       "",
     ].join("\n"),
   )
   await chmod(executable, 0o755)
-  return { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, YRD_TEST_TARGETS: targetFile }
+  return {
+    ...process.env,
+    PATH: `${bin}:${process.env.PATH ?? ""}`,
+    YRD_TEST_TARGETS: targetFile,
+    ...(intakePolicy === undefined ? {} : { YRD_TEST_INTAKE_POLICY: intakePolicy }),
+  }
 }
 
 async function push(f: Fixture, spec: string, env: Env): Promise<Result> {
@@ -303,6 +312,35 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(deletion.code).not.toBe(0)
     expect(deletion.stderr).toContain("ref deletion is not accepted")
     expect(await git(f.receiver.receiverPath, "rev-parse", "refs/heads/main")).toBe(f.baseSha)
+  })
+
+  it("tells an unauthorized push what the intake actually requires, not just that it was refused", async () => {
+    // P2 acceptance: "refused AT PUSH TIME, naming why". The refusal already
+    // fired; what it said was 'branch X is not authorized for Yrd intake',
+    // which names the verdict and neither the cause nor the remedy. The seat
+    // reads that as a permissions problem and has nowhere to go.
+    //
+    // The receiver deliberately does NOT know why — authorization is
+    // resolveTarget's to define, and its one production implementation admits
+    // a branch iff an ACTIVE BAY tracks it. So the policy sentence travels
+    // from whoever owns the policy, and the receiver only renders it.
+    const f = await fixture("policy")
+    await git(f.mainRepo, "switch", "-qc", "issue/no-bay")
+    await commit(f.mainRepo, "no-bay.txt")
+
+    const policy = "no active bay tracks it; open one with 'yrd bay open --bay <name>'"
+    const withPolicy = await push(f, "issue/no-bay:refs/heads/issue/no-bay", await installHookHost(f.root, {}, policy))
+    expect(withPolicy.code).not.toBe(0)
+    expect(withPolicy.stderr).toContain("is not authorized for Yrd intake")
+    expect(withPolicy.stderr).toContain(policy)
+
+    // Absent a policy the refusal must stay exactly as it was — an optional
+    // field that changes the no-policy message would be a silent behaviour
+    // change for every other caller.
+    const without = await push(f, "issue/no-bay:refs/heads/issue/no-bay", await installHookHost(f.root, {}))
+    expect(without.code).not.toBe(0)
+    expect(without.stderr).toContain("is not authorized for Yrd intake")
+    expect(without.stderr).not.toContain("open one with")
   })
 
   it("recovers prepared receipts by ref and retries the same receipt id after ambiguous intake", async () => {

@@ -70,6 +70,13 @@ export type ReceiverHookOptions = {
   intake?: DurableReceiverIntake
   clock?: () => string
   env?: Environment
+  /**
+   * One sentence naming what intake requires, rendered into the refusal when
+   * `resolveTarget` declines a branch. The receiver cannot know the reason —
+   * authorization is the resolver's to define — so the policy travels from
+   * whoever owns it. Omit and the refusal is unchanged.
+   */
+  intakePolicy?: string
 }
 export type ReceiverDrainResult = {
   delivered: string[]
@@ -585,6 +592,15 @@ async function refValue(receiver: GitPushReceiver, ref: string, env?: Environmen
   return null
 }
 
+/**
+ * Appends the caller-supplied intake policy to an authorization refusal. Both
+ * refusal sites go through here so the sentence a seat is told can never drift
+ * between the push-time check and the drain-time recheck.
+ */
+function withIntakePolicy(message: string, options: ReceiverHookOptions): string {
+  return options.intakePolicy === undefined ? message : `${message}: ${options.intakePolicy}`
+}
+
 async function validBranch(receiver: GitPushReceiver, branch: string, label: string): Promise<void> {
   const result = await receiverGit(receiver, ["check-ref-format", "--branch", branch], { allowFailure: true })
   check(result.code === 0, `invalid ${label} '${branch}'`)
@@ -646,7 +662,7 @@ async function authorize(
   const branch = update.ref.slice(11)
   await validBranch(receiver, branch, "intake branch")
   const resolved = await options.resolveTarget(branch, update)
-  check(resolved, `branch '${branch}' is not authorized for Yrd intake`)
+  check(resolved, withIntakePolicy(`branch '${branch}' is not authorized for Yrd intake`, options))
   const target = normalizeTarget(resolved, receiver)
   await validBranch(receiver, target.base, "base branch")
   const current = await refValue(receiver, update.ref, options.env)
@@ -774,7 +790,7 @@ async function validateStored(
   validSha(receipt.headSha, receiver.shaLength, "receipt head commit id")
   const update = updateOf(receipt)
   const resolved = await options.resolveTarget(receipt.branch, update)
-  check(resolved, `branch '${receipt.branch}' is no longer authorized for Yrd intake`)
+  check(resolved, withIntakePolicy(`branch '${receipt.branch}' is no longer authorized for Yrd intake`, options))
   const target = normalizeTarget(resolved, receiver)
   const stored = receipt.intake
   check(
