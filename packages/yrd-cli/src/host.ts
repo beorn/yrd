@@ -1268,33 +1268,33 @@ function queueAdministration(
   })
 }
 
-type ResidentRunnerIdentity = Readonly<{
+type ResidentRunnerSeed = Readonly<{
   id: string
-  queueId: string
   epoch: string
   host: string
   pane?: string
 }>
 
+type ResidentRunnerIdentity = ResidentRunnerSeed & Readonly<{ queueId: string }>
+
 type ResidentRunnerLease = Readonly<{ close(): Promise<void> }>
 
-function residentRunnerIdentity(env: NodeJS.ProcessEnv, repo: string): ResidentRunnerIdentity {
+function residentRunnerSeed(env: NodeJS.ProcessEnv): ResidentRunnerSeed {
   const pane = [env.HERDR_PANE_ID, env.CMUX_SURFACE_ID]
     .map((value) => value?.trim())
     .find((value): value is string => value !== undefined && value !== "")
   return Object.freeze({
     id: `yrd-cli:${globalThis.process.pid}`,
-    queueId: `${resolve(repo)}#main`,
     epoch: randomUUID(),
     host: hostname(),
     ...(pane === undefined ? {} : { pane }),
   })
 }
 
-function residentRunnerLog(log: ConditionalLogger, identity: ResidentRunnerIdentity): ConditionalLogger {
+function residentRunnerLog(log: ConditionalLogger, identity: ResidentRunnerSeed, queueId?: string): ConditionalLogger {
   return log.child({
     runner: identity.id,
-    driverQueue: identity.queueId,
+    ...(queueId === undefined ? {} : { driverQueue: queueId }),
     driverEpoch: identity.epoch,
     host: identity.host,
     ...(identity.pane === undefined ? {} : { pane: identity.pane }),
@@ -1569,43 +1569,41 @@ export async function createYrdHost(options: YrdHostOptions = {}): Promise<YrdHo
  * The audit reuses the canonical config/baseline comparison but deliberately
  * has no app and no journal, so its cost cannot grow with delivery history.
  */
-function runnerHealthProbeServices(options: YrdRuntimeHostOptions): YrdCliServices {
-  return Object.freeze({
-    queue: Object.freeze({
-      async auditEnvironment(): Promise<QueueAuditResult> {
-        const scope = createScope("yrd-runner-health")
-        const ownsLog = options.log === undefined
-        const log =
-          options.log ??
-          createYrdLogger(resolveYrdObservability({}, options.env ?? globalThis.process.env), (text) =>
-            globalThis.process.stderr.write(text),
-          )
-        const env = cleanGitEnvironment(options.env ?? globalThis.process.env)
-        const process = withGitIndexLockRetry(createProcess({ cwd: options.cwd, env, inject: { scope, log } }))
-        try {
-          const repository = await discoverYrdRepository({ cwd: options.cwd, env, process })
-          const loaded = await loadRepositoryConfig(repository, process, options.configPath)
-          const administration = queueAdministration(
-            process,
-            repository,
-            loaded.config.base,
-            () => reloadConfiguredStepDescriptors(repository, process, options.configPath),
-            undefined,
-          )
-          if (administration.auditEnvironment === undefined) {
-            throw new Error("yrd: runner health audit is unavailable")
-          }
-          return await administration.auditEnvironment()
-        } finally {
-          try {
-            await closeRuntime(undefined, process, scope)
-          } finally {
-            if (ownsLog) log.end()
-          }
-        }
-      },
-    }),
-  })
+async function runnerHealthProbeServices(options: YrdRuntimeHostOptions): Promise<YrdCliServices> {
+  const scope = createScope("yrd-runner-health")
+  const ownsLog = options.log === undefined
+  const log =
+    options.log ??
+    createYrdLogger(resolveYrdObservability({}, options.env ?? globalThis.process.env), (text) =>
+      globalThis.process.stderr.write(text),
+    )
+  const env = cleanGitEnvironment(options.env ?? globalThis.process.env)
+  const process = withGitIndexLockRetry(createProcess({ cwd: options.cwd, env, inject: { scope, log } }))
+  try {
+    const repository = await discoverYrdRepository({ cwd: options.cwd, env, process })
+    const loaded = await loadRepositoryConfig(repository, process, options.configPath)
+    const administration = queueAdministration(
+      process,
+      repository,
+      loaded.config.base,
+      () => reloadConfiguredStepDescriptors(repository, process, options.configPath),
+      undefined,
+    )
+    if (administration.auditEnvironment === undefined) {
+      throw new Error("yrd: runner health audit is unavailable")
+    }
+    const audit = await administration.auditEnvironment()
+    return Object.freeze({
+      base: loaded.config.base,
+      queue: Object.freeze({ auditEnvironment: () => Promise.resolve(audit) }),
+    })
+  } finally {
+    try {
+      await closeRuntime(undefined, process, scope)
+    } finally {
+      if (ownsLog) log.end()
+    }
+  }
 }
 
 function createViewerWorkspace(): BayWorkspace {
@@ -1655,9 +1653,9 @@ async function createViewerReceiver(repository: YrdRepository, process: Process)
 
 async function createYrdRuntimeHost(
   options: YrdRuntimeHostOptions,
-  resident: ResidentRunnerIdentity | undefined,
+  residentSeed: ResidentRunnerSeed | undefined,
   mode: "active" | "viewer",
-): Promise<YrdHost> {
+): Promise<YrdHost & Readonly<{ resident?: ResidentRunnerIdentity }>> {
   const scope = createScope("yrd-host")
   const ownsLog = options.log === undefined
   const log =
@@ -1672,9 +1670,22 @@ async function createYrdRuntimeHost(
   let candidatePool: CandidatePool | undefined
   try {
     const repository = await discoverYrdRepository({ cwd: options.cwd, env, process })
-    if (resident !== undefined) residentLease = await acquireResidentRunner(repository.stateDir, resident, log)
-    using _setupSpan = log.span?.("setup", { phase: "pre-worktree", repo: repository.repo })
     const loaded = await loadRepositoryConfig(repository, process, options.configPath)
+    const resident =
+      residentSeed === undefined
+        ? undefined
+        : Object.freeze({
+            ...residentSeed,
+            queueId: `${resolve(repository.repo)}#${baseIdentity(loaded.config.base)}`,
+          })
+    if (resident !== undefined) {
+      residentLease = await acquireResidentRunner(
+        repository.stateDir,
+        resident,
+        residentRunnerLog(log, resident, resident.queueId),
+      )
+    }
+    using _setupSpan = log.span?.("setup", { phase: "pre-worktree", repo: repository.repo })
     const discoveredImplementationSource = sourceRepositoryFor(import.meta.url)
     const receiver =
       mode === "active"
@@ -1809,6 +1820,7 @@ async function createYrdRuntimeHost(
       config: loaded.config,
       receiver,
       process,
+      ...(resident === undefined ? {} : { resident }),
       ...(implementationSource === undefined ? {} : { implementationSource }),
       services,
       drain,
@@ -2002,35 +2014,33 @@ async function runYrdProcessHost(
       env,
       ...(yrdQueueRunnerCheckRequested(argv)
         ? {
-            probe(context) {
-              return Promise.resolve({
-                services: runnerHealthProbeServices({
+            async probe(context) {
+              return {
+                services: await runnerHealthProbeServices({
                   cwd: context.repo,
                   env,
                   ...(context.configPath === undefined ? {} : { configPath: context.configPath }),
                 }),
                 io: { cwd: context.repo },
-              })
+              }
             },
           }
         : {}),
       async load(context, posture) {
         const runner =
-          posture === "resident-queue-run" || posture === "one-shot-queue-run"
-            ? residentRunnerIdentity(env, context.repo)
-            : undefined
-        const resident = posture === "resident-queue-run" ? runner : undefined
+          posture === "resident-queue-run" || posture === "one-shot-queue-run" ? residentRunnerSeed(env) : undefined
+        const residentSeed = posture === "resident-queue-run" ? runner : undefined
         // The resident follow-runner logs at DEBUG-by-default (see
         // residentObservability) so run/step starts and successful completions
         // reach its concise human formatter; one-shot commands keep WARN.
         const observability =
-          resident === undefined ? context.observability : residentObservability(context.observability)
+          residentSeed === undefined ? context.observability : residentObservability(context.observability)
         // For the resident, the stderr log stream renders as scannable
         // watch-timeline rows (JSON stays in the JSONL file sink); one-shot
         // commands keep the default console format.
         const residentArtifacts: { root: string | undefined } = { root: undefined }
         const human =
-          resident === undefined
+          residentSeed === undefined
             ? undefined
             : (event: Parameters<typeof formatResidentLogLine>[0]) => {
                 const artifactRoot = residentArtifacts.root
@@ -2045,7 +2055,7 @@ async function runYrdProcessHost(
                 })
               }
         log = createYrdLogger(observability, (text) => io.stderr(text), human)
-        const runtimeLog = resident === undefined ? log : residentRunnerLog(log, resident)
+        const runtimeLog = runner === undefined ? log : residentRunnerLog(log, runner)
         const selectedImplementationSource = io.implementationSource ?? sourceAttestation
         const activeHost = await createYrdRuntimeHost(
           {
@@ -2060,9 +2070,10 @@ async function runYrdProcessHost(
             ...(options.workspaceLifecycle === undefined ? {} : { workspaceLifecycle: options.workspaceLifecycle }),
             ...(options.defaultSubmitter === undefined ? {} : { defaultSubmitter: options.defaultSubmitter }),
           },
-          resident,
+          residentSeed,
           posture === "viewer" ? "viewer" : "active",
         )
+        const resident = activeHost.resident
         const resolveReadQueueTarget = createPostureQueueTargetResolver(posture, (ref, cwd) =>
           io.resolveQueueTarget === undefined
             ? resolveQueueTarget(activeHost.process, activeHost.repository.repo, activeHost.config.base, ref)

@@ -7094,6 +7094,45 @@ describe("runYrd", () => {
     }
   })
 
+  it("checks the configured queue identity in the client dead-man", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "yrd-client-dead-man-base-"))
+    execFileSync("git", ["init", "-q", "-b", "main", repo])
+    const app = await createApp()
+    const stateDir = join(repo, ".git", "yrd", "resident-runner")
+    mkdirSync(stateDir, { recursive: true })
+    writeFileSync(
+      join(stateDir, "status.json"),
+      JSON.stringify({
+        pid: process.pid,
+        startedAt: "2026-07-13T12:00:00.000Z",
+        lastTickAt: "2026-07-13T12:29:59.000Z",
+        driver: {
+          queueId: `${repo}#release/2.0`,
+          epoch: "11111111-1111-4111-8111-111111111111",
+          lastLanded: null,
+        },
+      }),
+    )
+    const output = outputIO({ cwd: repo, now: () => Date.parse("2026-07-13T12:30:00.000Z") })
+    try {
+      expect(
+        await runInternals.runYrdProcessRuntime(yrd("pr", "list"), output.io, {
+          ambientCwd: repo,
+          env: process.env,
+          load: async () => ({
+            app,
+            services: { base: "release/2.0" },
+            io: { cwd: repo, now: output.io.now },
+          }),
+        }),
+      ).toBe(0)
+      expect(output.stderr()).not.toContain("dead-man")
+    } finally {
+      await app.close()
+      safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
+    }
+  })
+
   it("writes atomic resident runner heartbeats and leaves a reclaimable exit marker on close", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-heartbeat-"))
     execFileSync("git", ["init", "-q", repo])

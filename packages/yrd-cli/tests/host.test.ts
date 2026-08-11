@@ -3778,6 +3778,62 @@ checks: [{check: {run: "true"}}]
     }
   }, 30_000)
 
+  it("keys the resident driver epoch to the configured queue base", async () => {
+    const { repo } = await repository()
+    await git(repo, "branch", "release/2.0", "HEAD")
+    await writeFile(join(repo, ".yrd.yml"), 'base: release/2.0\nchecks: [{check: {run: "true"}}]\n')
+    await git(repo, "add", ".yrd.yml")
+    await git(repo, "commit", "-qm", "select release queue")
+    const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
+    const cli = Bun.spawn(
+      [
+        process.execPath,
+        join(import.meta.dirname, "../../../bin/yrd.ts"),
+        "queue",
+        "run",
+        "--interval",
+        "10",
+        "--json",
+      ],
+      { cwd: repo, stdout: "pipe", stderr: "pipe" },
+    )
+    const stdout = new Response(cli.stdout).text()
+    const stderr = new Response(cli.stderr).text()
+    try {
+      await vi.waitFor(
+        async () =>
+          expect(JSON.parse(await readFile(statusPath, "utf8"))).toMatchObject({
+            pid: cli.pid,
+            driver: {
+              queueId: `${repo}#release/2.0`,
+              epoch: expect.stringMatching(/^[0-9a-f-]{36}$/u),
+              lastLanded: null,
+            },
+          }),
+        { timeout: 10_000 },
+      )
+      const health = Bun.spawn(
+        [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "queue", "list", "--check", "--json"],
+        { cwd: repo, stdout: "pipe", stderr: "pipe" },
+      )
+      const [healthStdout, healthStderr, healthExit] = await Promise.all([
+        new Response(health.stdout).text(),
+        new Response(health.stderr).text(),
+        health.exited,
+      ])
+      expect(healthExit, `${healthStderr}\n${healthStdout}`).toBe(0)
+      expect(JSON.parse(healthStdout)).toMatchObject({
+        state: "healthy",
+        facts: { leaseDriver: { queueId: `${repo}#release/2.0` } },
+      })
+    } finally {
+      cli.kill("SIGTERM")
+      await cli.exited
+      await stdout
+      await stderr
+    }
+  }, 30_000)
+
   it("replaces a dead resident owner after the OS releases its lease", async () => {
     const { repo } = await repository()
     const argv = [

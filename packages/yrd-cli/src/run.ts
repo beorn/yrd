@@ -884,9 +884,10 @@ async function queueRunnerHealth(
         },
       }
     }
-    const expectedLastLanded = app === undefined ? undefined : residentDriverLastLanded(app, "main")
+    const base = baseIdentity(services.base ?? "main")
+    const expectedLastLanded = app === undefined ? undefined : residentDriverLastLanded(app, base)
     const driverError =
-      runner === null ? undefined : runnerDriverHealthError(runner, `${resolve(cwd)}#main`, expectedLastLanded)
+      runner === null ? undefined : runnerDriverHealthError(runner, `${resolve(cwd)}#${base}`, expectedLastLanded)
     if (driverError !== undefined) {
       return {
         exitCode: 2,
@@ -1010,8 +1011,14 @@ async function queueRunnerHealth(
  * requested command still runs. Human invocations report the observation on
  * stderr; machine-readable invocations keep their one-document contract while
  * still executing the read-only check. */
-async function runClientDeadMan(app: YrdCliApp, io: YrdCliIO, emitHuman: boolean): Promise<void> {
+async function runClientDeadMan(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  io: YrdCliIO,
+  emitHuman: boolean,
+): Promise<void> {
   const cwd = io.cwd ?? process.cwd()
+  const base = baseIdentity(services.base ?? "main")
   const nowMs = io.now?.() ?? Date.now()
   const queueProgress = residentQueueProgress(app, new Date(nowMs).toISOString())
   const runner = activeResidentRunner(await residentRunnerStatus(cwd))
@@ -1029,7 +1036,7 @@ async function runClientDeadMan(app: YrdCliApp, io: YrdCliIO, emitHuman: boolean
         ? runnerHealthError("resident-runner-unhealthy", `resident runner heartbeat is stale by ${runnerAgeMs}ms`, [
             "Inspect the resident runner log, then restart it.",
           ])
-        : runnerDriverHealthError(runner, `${resolve(cwd)}#main`, residentDriverLastLanded(app, "main"))
+        : runnerDriverHealthError(runner, `${resolve(cwd)}#${base}`, residentDriverLastLanded(app, base))
   const observations = [
     ...(queueProgress.state === "stalled"
       ? queueProgress.findings.map((finding) => ({ code: finding.code, cause: finding.message }))
@@ -7926,6 +7933,7 @@ export async function followQueueRuns(
   const drainSignal = io.drainSignal
   const drainRequested = () => drainSignal?.aborted === true
   const resident = io.runner?.startsWith("yrd-cli:") === true
+  const base = baseIdentity(services.base ?? "main")
   const recoveryReporter = createResidentRecoveryReporter(app.log)
   // Reclaim a prior resident's leases BEFORE the heartbeat overwrites status.json —
   // once it writes, the departed pid is lost. The exclusive resident lock guarantees
@@ -7935,9 +7943,9 @@ export async function followQueueRuns(
     ? await startResidentRunnerHeartbeat(io, {
         queueProgress: (now) => residentQueueProgress(app, now),
         driver: {
-          queueId: io.driver?.queueId ?? `${resolve(io.repositoryRoot ?? io.cwd ?? process.cwd())}#main`,
+          queueId: io.driver?.queueId ?? `${resolve(io.repositoryRoot ?? io.cwd ?? process.cwd())}#${base}`,
           ...(io.driver === undefined ? {} : { epoch: io.driver.epoch }),
-          lastLanded: () => residentDriverLastLanded(app, "main"),
+          lastLanded: () => residentDriverLastLanded(app, base),
         },
       })
     : undefined
@@ -8825,7 +8833,7 @@ function buildProgram(
       runtimeIO[RuntimeInvocationCwd] = bootstrap.ambientCwd
       Object.assign(io, loaded.io)
       if (invocation.posture !== "resident-queue-run" && invocation.posture !== "one-shot-queue-run") {
-        await runClientDeadMan(runtimeApp, io, !jsonOutputRequested(program, invocation.args))
+        await runClientDeadMan(runtimeApp, runtimeServices, io, !jsonOutputRequested(program, invocation.args))
       }
     })
   }
