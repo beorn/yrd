@@ -5,6 +5,7 @@
  */
 import { describe, expect, it } from "vitest"
 import { PrCheckabilityConflict } from "@yrd/bay"
+import { createFailure } from "@yrd/core"
 import { QueueRunningConflict } from "@yrd/queue"
 import { followQueueRuns } from "../src/run.ts"
 import { createResponseResidentHarness as harness } from "./support/resident-harness.ts"
@@ -80,6 +81,50 @@ describe("resident runner — a busy queue never kills the watch loop (Defect 1)
     expect(h.warnings[1]).toMatchObject({
       props: { action: "resident-busy-summary", base: "main", run: "R551", suppressed: 1 },
     })
+  })
+})
+
+describe("resident runner — a busy journal never kills the watch loop", () => {
+  it("logs a transient lock anywhere in the cycle and processes the next cycle", async () => {
+    const h = harness([
+      () => {
+        h.drain()
+        return Promise.resolve([])
+      },
+    ])
+    let gateCalls = 0
+    const gate = async (): Promise<void> => {
+      gateCalls += 1
+      if (gateCalls === 1) {
+        throw createFailure({
+          kind: "infrastructure",
+          code: "journal-busy",
+          message: "yrd: journal is busy: database is locked",
+        })
+      }
+    }
+
+    await expect(followQueueRuns(h.app, [], { interval: 1 }, h.io, gate)).resolves.toBe(0)
+    expect(gateCalls).toBe(2)
+    expect(h.runCalls()).toBe(1)
+    expect(h.warnings).toContainEqual(
+      expect.objectContaining({
+        props: expect.objectContaining({ action: "resident-journal-busy-skip", code: "journal-busy" }),
+      }),
+    )
+  })
+
+  it("still fails a targeted one-shot because it has no next cycle", async () => {
+    const h = harness([() => Promise.resolve([])])
+    const gate = async (): Promise<void> => {
+      throw createFailure({
+        kind: "infrastructure",
+        code: "journal-busy",
+        message: "yrd: journal is busy: database is locked",
+      })
+    }
+
+    await expect(followQueueRuns(h.app, ["PR1"], { interval: 1 }, h.io, gate)).rejects.toThrow("database is locked")
   })
 })
 

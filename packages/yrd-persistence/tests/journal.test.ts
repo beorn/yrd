@@ -12,6 +12,7 @@ import {
   CauseSchema,
   Command,
   EventSchema,
+  failureFact,
   type Cause,
   type Cursor,
   type Event,
@@ -1129,6 +1130,64 @@ describe("SQLite Journal", () => {
     await expect(Array.fromAsync(testReadOnlyJournal(dir).read())).resolves.toEqual([
       { cursor: 1, values: [frame("checkpoint-warning")] },
     ])
+  })
+
+  it("types SQLite busy failures so a resident can retry the journal operation", async () => {
+    const dir = await directory()
+    const journal = testJournal(dir)
+    await accepted(journal, frame("before-busy"), 0)
+    const original = Database.prototype.run
+    const run = vi.spyOn(Database.prototype, "run").mockImplementation(function (this: Database, sql: string) {
+      if (sql === "BEGIN IMMEDIATE") {
+        throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY", errno: 5 })
+      }
+      return original.call(this, sql)
+    } as typeof Database.prototype.run)
+
+    let caught: unknown
+    try {
+      await journal.append(frame("busy"), 1)
+    } catch (error) {
+      caught = error
+    } finally {
+      run.mockRestore()
+    }
+
+    expect(failureFact(caught)).toMatchObject({
+      kind: "infrastructure",
+      code: "journal-busy",
+      message: expect.stringContaining("database is locked"),
+    })
+  })
+
+  it("types SQLite busy failures while reading the next durable snapshot", async () => {
+    const dir = await directory()
+    const journal = testJournal(dir)
+    await accepted(journal, frame("before-busy-read"), 0)
+    const original = Database.prototype.run
+    const run = vi.spyOn(Database.prototype, "run").mockImplementation(function (this: Database, sql: string) {
+      if (sql === "BEGIN") {
+        throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY", errno: 5 })
+      }
+      return original.call(this, sql)
+    } as typeof Database.prototype.run)
+
+    let caught: unknown
+    try {
+      for await (const _batch of journal.read()) {
+        // The transaction refuses before yielding the first batch.
+      }
+    } catch (error) {
+      caught = error
+    } finally {
+      run.mockRestore()
+    }
+
+    expect(failureFact(caught)).toMatchObject({
+      kind: "infrastructure",
+      code: "journal-busy",
+      message: expect.stringContaining("database is locked"),
+    })
   })
 
   it("reports WAL frames deferred by a pinned reader with checkpoint counts", async () => {

@@ -6766,6 +6766,12 @@ function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefine
   // authored-gitlink / recut-certificate / pr-not-admissible and the rest of
   // the needs-author + recut-lineage composition buckets if they bubble out.
   const fact = failureFact(error)
+  if (fact?.kind === "infrastructure" && fact.code === "journal-busy") {
+    return {
+      message: "resident runner skipped a cycle because the journal was temporarily locked",
+      props: { action: "resident-journal-busy-skip", code: fact.code, reason: fact.message },
+    }
+  }
   if (fact !== undefined && (fact.kind === "refusal" || fact.kind === "infrastructure")) {
     const prScoped =
       fact.code === "pr-not-admissible" ||
@@ -7690,14 +7696,9 @@ export async function followQueueRuns(
   let stall: ResidentRefusalStall | undefined
   let firstCycle = true
   let lastMaintenanceAt = 0
-  try {
-    heartbeat?.check()
-    if (heartbeat !== undefined && selectors.length === 0 && !jsonEnabled(options)) {
-      io.stdout(
-        `Queue runner ${io.runner} active; following the default queue every ${intervalSeconds}s (Ctrl-C drains).\n`,
-      )
-    }
-    while (true) {
+
+  const runCycle = async (): Promise<YrdCliExitCode | null> => {
+    try {
       heartbeat?.check()
       const starting = firstCycle
       const beforeRefresh = app.state()
@@ -7710,8 +7711,7 @@ export async function followQueueRuns(
         if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
         await sleepUntilDrain(scope.sleep(interval), drainSignal)
         heartbeat?.check()
-        if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
-        continue
+        return scope.signal.aborted ? RESIDENT_INTERRUPTED_EXIT : null
       }
       firstCycle = false
       // Re-prove the installed baseline before EACH cycle: a config change while
@@ -7746,38 +7746,9 @@ export async function followQueueRuns(
         if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
         await sleepUntilDrain(scope.sleep(interval), drainSignal)
         heartbeat?.check()
-        if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
-        continue
+        return scope.signal.aborted ? RESIDENT_INTERRUPTED_EXIT : null
       }
-      let runs: readonly Run[]
-      try {
-        runs = await runQueues(app, selectors, options, io)
-      } catch (error) {
-        // A narrow, typed set of mid-compose conditions is a normal multi-tenant
-        // race for the long-lived selectorless watch loop: a peer settled a Job,
-        // a peer already holds the queue, or a peer withdrew/canceled/integrated
-        // a candidate PR — all between this runner's snapshot and its action. For
-        // the resident that is losable: log LOUD (loggily-only — the runner's
-        // stdout is a log stream, so NO bare 'yrd: ' stderr echo), skip this
-        // cycle, and stay alive for the next interval. Anything else — including
-        // a conflict against a still-live Job, which signals a real single-writer
-        // bug — propagates and still stops the runner (fail-loud). A one-shot
-        // targeted run (selectors present) also propagates every one of them: it
-        // has no next interval to skip to.
-        const recovery = selectors.length === 0 ? residentCycleRecovery(error) : undefined
-        if (recovery === undefined) throw error
-        recoveryReporter.report(recovery)
-        heartbeat?.check()
-        if (drainRequested()) {
-          await scope.sleep(interval)
-          continue
-        }
-        if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
-        await sleepUntilDrain(scope.sleep(interval), drainSignal)
-        heartbeat?.check()
-        if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
-        continue
-      }
+      const runs = await runQueues(app, selectors, options, io)
       recoveryReporter.flush()
       heartbeat?.check()
       // The runner is a service; its stdout is a log stream. Human output is
@@ -7817,13 +7788,44 @@ export async function followQueueRuns(
         // below and finishes the drain cleanly.
         if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
         await scope.sleep(interval)
-        continue
+        return null
       }
       if (selectors.length > 0) return exit
       if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
       await sleepUntilDrain(scope.sleep(interval), drainSignal)
       heartbeat?.check()
+      return scope.signal.aborted ? RESIDENT_INTERRUPTED_EXIT : null
+    } catch (error) {
+      // One typed recovery boundary owns the complete selectorless cycle. A
+      // journal lock can surface while refreshing, preparing, or committing
+      // the run. Multi-tenant races can surface at the same boundaries. All
+      // recognized cases are losable for a resident and fatal for a one-shot;
+      // unknown failures still propagate and stop the runner (fail-loud).
+      const recovery = selectors.length === 0 ? residentCycleRecovery(error) : undefined
+      if (recovery === undefined) throw error
+      recoveryReporter.report(recovery)
+      heartbeat?.check()
+      if (drainRequested()) {
+        await scope.sleep(interval)
+        return null
+      }
       if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
+      await sleepUntilDrain(scope.sleep(interval), drainSignal)
+      heartbeat?.check()
+      return scope.signal.aborted ? RESIDENT_INTERRUPTED_EXIT : null
+    }
+  }
+
+  try {
+    heartbeat?.check()
+    if (heartbeat !== undefined && selectors.length === 0 && !jsonEnabled(options)) {
+      io.stdout(
+        `Queue runner ${io.runner} active; following the default queue every ${intervalSeconds}s (Ctrl-C drains).\n`,
+      )
+    }
+    while (true) {
+      const exit = await runCycle()
+      if (exit !== null) return exit
     }
   } finally {
     recoveryReporter.flush()

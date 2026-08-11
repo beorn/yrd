@@ -6,6 +6,7 @@ import { gunzipSync } from "node:zlib"
 import { constants, Database } from "bun:sqlite"
 import {
   JOURNAL_READER_VERSION,
+  createFailure,
   journalFrameCompatibility,
   observeYrdLifecycle,
   parseJournalFrame,
@@ -703,21 +704,40 @@ function openReadOnly(path: string): Database {
   return database
 }
 
+function rethrowSqliteBusy(error: unknown): never {
+  const fact =
+    typeof error === "object" && error !== null ? (error as Readonly<{ code?: unknown; errno?: unknown }>) : undefined
+  if (fact?.code !== "SQLITE_BUSY" && fact?.errno !== 5) throw error
+  const reason = error instanceof Error ? error.message : String(error)
+  throw createFailure(
+    {
+      kind: "infrastructure",
+      code: "journal-busy",
+      message: `yrd: journal is busy: ${reason}`,
+    },
+    error,
+  )
+}
+
 async function withMutableDatabase<Result>(
   runtime: Context,
   operation: (database: Database) => Result,
 ): Promise<Result> {
   assertMutablePlatform(runtime)
-  return runtime.exclusive.run(async () => {
-    await ensureDatabase(runtime)
-    const database = openMutable(runtime)
-    try {
-      return operation(database)
-    } finally {
-      checkpointWal(runtime, database)
-      database.close()
-    }
-  })
+  try {
+    return await runtime.exclusive.run(async () => {
+      await ensureDatabase(runtime)
+      const database = openMutable(runtime)
+      try {
+        return operation(database)
+      } finally {
+        checkpointWal(runtime, database)
+        database.close()
+      }
+    })
+  } catch (error) {
+    rethrowSqliteBusy(error)
+  }
 }
 
 function openMutable(runtime: Context, verifyViews = true): Database {
@@ -760,7 +780,7 @@ async function ensureDatabase(runtime: Context, verifyViews = true): Promise<voi
       assertComplete(database, runtime.path)
       if (!hasJournalViewRegistry(database)) await installJournalViews(runtime)
     }
-    await ensureJournalVersionFloor(runtime)
+    ensureJournalVersionFloor(runtime)
     using complete = openReadOnly(runtime.path)
     const { head } = assertComplete(complete, runtime.path)
     if (verifyViews) assertJournalViews(complete, runtime.views, head)
@@ -1136,7 +1156,7 @@ function readJournalVersionFloor(database: Database): number {
   return version
 }
 
-async function ensureJournalVersionFloor(runtime: Context): Promise<void> {
+function ensureJournalVersionFloor(runtime: Context): void {
   let observed = 0
   {
     using read = openReadOnly(runtime.path)
@@ -1767,14 +1787,14 @@ function incrementalVacuum(runtime: Context, database: Database): void {
 }
 
 function readTransaction<Result>(database: Database, operation: () => Result): Result {
-  database.run("BEGIN")
   try {
+    database.run("BEGIN")
     const result = operation()
     database.run("COMMIT")
     return result
   } catch (error) {
     rollback(database)
-    throw error
+    rethrowSqliteBusy(error)
   }
 }
 
