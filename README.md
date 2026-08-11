@@ -1306,9 +1306,20 @@ Yrd stores local authority under the primary worktree's common Git directory:
   artifacts/         command, evaluator, and contest evidence
 ```
 
-`journal.sqlite` is the source of truth. Each command appends one checksummed
-transaction containing the Command, its cause, domain events, optional result
-value, and Job requests. `journal_events` is the bounded append tail;
+The Git repository is the durable truth for landing identity. Queue stamps a
+stable `Change-Id:` before checks, then writes one checksummed receipt under
+`refs/notes/yrd/receipts` for the exact checked commit that lands. `yrd why
+<selector>` joins that receipt to the current PR; `--repair` recreates a missing
+landing-index row from Git, while a journal-only landing is corruption. Typed
+legacy integrations are replayed once into thin receipts or explicit
+tombstones, after which there is no legacy exception.
+
+`journal.sqlite` is the transactional command history and queryable index. Each
+command appends one checksummed transaction containing the Command, its cause,
+domain events, optional result value, and Job requests. Refusal rows remain
+first-class: when no landing receipt exists, `yrd why` reports the exact current
+revision/queue refusal rather than collapsing it into “not found.”
+`journal_events` is the bounded append tail;
 `journal_history` keeps every covered frame as immutable, cursor-addressable
 rows. Startup restores the validated Core checkpoint and folds only the tail
 into Bay, PR, Queue, Job, and Contest state. Snapshot publication moves covered
