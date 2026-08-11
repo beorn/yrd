@@ -96,35 +96,32 @@ function rootCommandIndex(args: readonly string[]): number | undefined {
   return undefined
 }
 
+function canonicalizeYrdCommandSpellings(args: string[], commandIndex: number): void {
+  const command = args[commandIndex]
+  const alias = command === undefined ? undefined : ROOT_COMMAND_ALIASES[command as keyof typeof ROOT_COMMAND_ALIASES]
+  if (alias !== undefined) args[commandIndex] = alias
+  if (args[commandIndex] === "watch") {
+    args.splice(commandIndex, 1, "queue", "list", "--watch")
+  }
+  if (LIST_COMMAND_PARENTS.has(args[commandIndex] ?? "") && args[commandIndex + 1] === "ls") {
+    args[commandIndex + 1] = "list"
+  }
+  if (args[commandIndex] !== "queue") return
+  if (args[commandIndex + 1] === "watch") {
+    args.splice(commandIndex + 1, 1, "list", "--watch")
+  }
+  if (args[commandIndex + 1] === "status") {
+    args[commandIndex + 1] = "list"
+  }
+}
+
 /** Translate parse-only legacy spellings before Commander sees them. This keeps
  * help and suggestions canonical without requiring a newer Commander API. */
 export function canonicalizeYrdCommandAliases(args: readonly string[]): string[] {
   const canonical = [...args]
   const commandIndex = rootCommandIndex(canonical)
   if (commandIndex === undefined) return canonical
-  const command = canonical[commandIndex]
-  const alias = command === undefined ? undefined : ROOT_COMMAND_ALIASES[command as keyof typeof ROOT_COMMAND_ALIASES]
-  if (alias !== undefined) canonical[commandIndex] = alias
-
-  if (canonical[commandIndex] === "watch") {
-    canonical.splice(commandIndex, 1, "queue", "list", "--watch")
-  }
-
-  if (LIST_COMMAND_PARENTS.has(canonical[commandIndex] ?? "") && canonical[commandIndex + 1] === "ls") {
-    canonical[commandIndex + 1] = "list"
-  }
-  // `queue watch [filter...]` is the live projection of `queue list --watch`;
-  // rewrite the operand so `watch` is consumed as the flag, never spliced into
-  // the positional filter terms by the bare-operand rule below.
-  if (canonical[commandIndex] === "queue" && canonical[commandIndex + 1] === "watch") {
-    canonical.splice(commandIndex + 1, 1, "list", "--watch")
-  }
-  // `queue status` is the static spelling of the queue timeline. Consume the
-  // alias before the bare-operand fallback below; otherwise `status` becomes a
-  // literal search term and can hide the newest merge from the timeline.
-  if (canonical[commandIndex] === "queue" && canonical[commandIndex + 1] === "status") {
-    canonical[commandIndex + 1] = "list"
-  }
+  canonicalizeYrdCommandSpellings(canonical, commandIndex)
   const queueOperand = canonical[commandIndex + 1]
   if (
     canonical[commandIndex] === "queue" &&
@@ -228,7 +225,9 @@ export function normalizeYrdRepositoryAliasInvocation(
     return { kind: "bypass", args }
   }
   const queueIndex = rootCommandIndex(args)
-  if (queueIndex === undefined || args[queueIndex] !== "queue") return { kind: "bypass", args }
+  if (queueIndex === undefined) return { kind: "bypass", args }
+  canonicalizeYrdCommandSpellings(args, queueIndex)
+  if (args[queueIndex] !== "queue") return { kind: "bypass", args }
   const byName = new Map(declarations.map((declaration) => [declaration.repository.name, declaration] as const))
   const requiredRepository = (name: string | undefined): YrdRepositoryAlias => {
     const declaration = name === undefined ? undefined : byName.get(name)
@@ -240,6 +239,10 @@ export function normalizeYrdRepositoryAliasInvocation(
   const operand = args[queueIndex + 1]
   if (operand === undefined || operand.startsWith("-") || operand === "list" || operand === "_list") {
     const tail = operand === "list" || operand === "_list" ? args.slice(queueIndex + 2) : args.slice(queueIndex + 1)
+    if (tail.includes("--watch")) {
+      const remedies = namedAlternatives([...byName.keys()].map((name) => `'yrd queue ${name} --watch'`))
+      usage(`all-repository queue watch is unsupported; use ${remedies}`)
+    }
     return { kind: "all-repositories-read", args: [...prefix, "queue", "list", ...tail] }
   }
   if (operand === "run" || operand === "pause" || operand === "resume") {

@@ -116,12 +116,37 @@ describe("repository aliases supplied by a composition host", () => {
       expected: { kind: "all-repositories-read", args: ["queue", "list"] },
     },
     {
+      args: ["queue", "status", "--since", "24h"],
+      expected: { kind: "all-repositories-read", args: ["queue", "list", "--since", "24h"] },
+    },
+    {
+      args: ["queue", "ls", "--latest"],
+      expected: { kind: "all-repositories-read", args: ["queue", "list", "--latest"] },
+    },
+    {
+      args: ["--log-level", "warn", "queue", "status"],
+      expected: { kind: "all-repositories-read", args: ["--log-level", "warn", "queue", "list"] },
+    },
+    {
+      args: ["queues", "status"],
+      expected: { kind: "all-repositories-read", args: ["queue", "list"] },
+    },
+    {
       args: ["queue", "alpha", "--json"],
       expected: {
         kind: "repository-read",
         repository: { name: "alpha", path: "/srv/alpha" },
         queue: { base: "main" },
         args: ["--repo", "/srv/alpha", "queue", "list", "--base", "main", "--json"],
+      },
+    },
+    {
+      args: ["queue", "alpha", "--watch"],
+      expected: {
+        kind: "repository-read",
+        repository: { name: "alpha", path: "/srv/alpha" },
+        queue: { base: "main" },
+        args: ["--repo", "/srv/alpha", "queue", "list", "--base", "main", "--watch"],
       },
     },
     {
@@ -167,6 +192,11 @@ describe("repository aliases supplied by a composition host", () => {
     expect(() => normalizeYrdRepositoryAliasInvocation(["queue", "run", "docs"], repositories)).toThrow(
       "unknown Yrd repository 'docs'; expected alpha or beta",
     )
+    for (const args of [["watch"], ["queue", "watch"], ["queue", "list", "--watch"], ["queue", "--watch"]]) {
+      expect(() => normalizeYrdRepositoryAliasInvocation(args, repositories)).toThrow(
+        "all-repository queue watch is unsupported; use 'yrd queue alpha --watch' or 'yrd queue beta --watch'",
+      )
+    }
   })
 })
 
