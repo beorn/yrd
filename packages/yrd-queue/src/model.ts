@@ -542,6 +542,8 @@ export type QueuePause = Readonly<{
   reason: string
   allowedPRs: readonly string[]
   pausedAt: string
+  /** Absolute hold deadline. Missing only while replaying pre-TTL journals. */
+  expiresAt?: string
 }>
 export const QueuePauseSchema = z
   .object({
@@ -549,6 +551,7 @@ export const QueuePauseSchema = z
     reason: z.string().trim().min(1),
     allowedPRs: z.array(PRIdSchema),
     pausedAt: z.iso.datetime({ offset: true }),
+    expiresAt: z.iso.datetime({ offset: true }).optional(),
   })
   .strict() as z.ZodType<QueuePause>
 

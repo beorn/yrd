@@ -247,21 +247,34 @@ const BatchIsolatedSchema = z
     prs: z.array(z.string().trim().min(1)).min(1),
   })
   .strict()
-export type PauseQueueArgs = Readonly<{ base: string; reason: string; allowedPRs: readonly string[] }>
+export type PauseQueueArgs = Readonly<{
+  base: string
+  reason: string
+  allowedPRs: readonly string[]
+  expiresAt: string
+}>
 export type RecoverQueueOptions = Readonly<{ recoveryTime: string; reason?: string; runner?: string }>
-const PauseQueueArgsSchema = z
+const LegacyPauseQueueArgsSchema = z
   .object({
     base: GitRefSchema,
     reason: z.string().trim().min(1),
     allowedPRs: z.array(PRIdSchema),
   })
   .strict()
+const PauseQueueArgsSchema = LegacyPauseQueueArgsSchema.extend({
+  expiresAt: z.iso.datetime({ offset: true }),
+})
+  .strict()
   .superRefine((args, context) => {
     if (new Set(args.allowedPRs).size !== args.allowedPRs.length) {
       context.addIssue({ code: "custom", message: "duplicate allowed PR", path: ["allowedPRs"] })
     }
   }) as z.ZodType<PauseQueueArgs>
+const ReplayPauseQueueArgsSchema = z.union([PauseQueueArgsSchema, LegacyPauseQueueArgsSchema])
 const ResumeQueueArgsSchema = z.object({ base: GitRefSchema }).strict()
+const ExpireQueuePauseArgsSchema = z
+  .object({ base: GitRefSchema, expiresAt: z.iso.datetime({ offset: true }) })
+  .strict()
 /** One compose/admission cycle that skipped a PR without producing a queue run.
  * The `compose-candidate-skip` warns that accompany it are loggily-only, so this
  * is the fact that makes a head-of-line refusal loop survive the process. */
@@ -587,6 +600,7 @@ export type QueueCommands = Readonly<{
     admissionStep: CommandHandler<AdmissionStepArgs, RuntimeState>
     run: CommandHandler<QueueRunArgs, RuntimeState>
     pause: CommandHandler<PauseQueueArgs, RuntimeState>
+    expirePause: CommandHandler<Readonly<{ base: string; expiresAt: string }>, RuntimeState>
     resume: CommandHandler<Readonly<{ base: string }>, RuntimeState>
     advance: CommandHandler<Readonly<{ run: RunId }>, RuntimeState>
     settled: CommandHandler<Readonly<{ run: RunId }>, RuntimeState>
@@ -660,6 +674,9 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   /** Admit immutable PR revisions and return the admitted PR ids. */
   admit(args: AdmitSelection, options?: RunJobOptions): Promise<readonly string[]>
   pause(args: PauseQueueArgs): Promise<QueuePause>
+  /** Clear holds whose exact recorded deadline has passed. The deadline fence
+   * prevents a stale timer from clearing a renewed hold. */
+  expirePauses(now: string): Promise<readonly QueuePause[]>
   resume(base: string): Promise<void>
   run(args: QueueRunArgs, options: QueueRunOptions): Promise<readonly Run[]>
   waiting(selector: string, step?: string): WaitingQueueStep
@@ -793,20 +810,22 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/run/failed": journalEvent(1, QueueFailedSchema),
         "queue/run/canceled": journalEvent(1, QueueRunCanceledFactSchema),
         "queue/run/settled": journalEvent(1, SettledEventSchema),
-        "queue/paused": journalEvent(1, PauseQueueArgsSchema),
+        "queue/paused": journalEvent(2, PauseQueueArgsSchema),
+        "queue/pause/expired": journalEvent(1, ExpireQueuePauseArgsSchema),
         "queue/resumed": journalEvent(1, ResumeQueueArgsSchema),
         "queue/batch/isolated": journalEvent(1, BatchIsolatedSchema),
         "queue/admission/refused": journalEvent(1, AdmissionRefusedFactSchema),
         "queue/admission/settled": journalEvent(1, SettleAdmissionRefusalSchema),
       },
       replayEvents: {
+        "queue/paused": ReplayPauseQueueArgsSchema,
         "queue/candidate/created": CandidateCreatedSchema,
         "queue/run/started": z.object({ run: ReplayQueueStartSchema }).strict(),
         "queue/run/failed": ReplayQueueFailedSchema,
         "queue/run/canceled": QueueRunCanceledFactSchema,
         "queue/run/settled": SettledEventSchema,
       },
-      projectionVersion: "queues-v9-progress-slo",
+      projectionVersion: "queues-v10-ttl-holds",
       project: projectQueues,
       compact: (state, complete) => {
         const runtime = complete as unknown as DeepReadonly<RuntimeState>
@@ -836,6 +855,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               admissionStep: (args) => yrd.dispatch(commands.queue.admissionStep, args),
               run: (args) => yrd.dispatch(commands.queue.run, args),
               pause: (args) => yrd.dispatch(commands.queue.pause, args),
+              expirePause: (args) => yrd.dispatch(commands.queue.expirePause, args),
               resume: (base) => yrd.dispatch(commands.queue.resume, { base }),
               advance: (run) => yrd.dispatch(commands.queue.advance, { run }),
               settled: (run) => yrd.dispatch(commands.queue.settled, { run }),
@@ -883,6 +903,7 @@ type QueueActions = Readonly<{
   admissionStep(args: AdmissionStepArgs): Promise<CommandResult>
   run(args: QueueRunArgs): Promise<CommandResult>
   pause(args: PauseQueueArgs): Promise<CommandResult>
+  expirePause(args: Readonly<{ base: string; expiresAt: string }>): Promise<CommandResult>
   resume(base: string): Promise<CommandResult>
   advance(run: RunId): Promise<CommandResult>
   settled(run: RunId): Promise<CommandResult>
@@ -980,19 +1001,21 @@ function terminalAssociationPlan(state: DeepReadonly<RuntimeState>, appended = 0
         )
         .map((record) => materializeRun(record, state.jobs))
         .toSorted((left, right) => left.startedAt.localeCompare(right.startedAt) || compareNatural(left.id, right.id))
-      const candidates = runs.map((run): TerminalAssociationCandidate => ({
-        run: run.id,
-        status: run.status,
-        ...(run.conclusion === undefined ? {} : { conclusion: run.conclusion }),
-        startedAt: run.startedAt,
-        ...(run.finishedAt === undefined ? {} : { finishedAt: run.finishedAt }),
-        eligible:
-          Queues.failed(run) &&
-          run.finishedAt !== undefined &&
-          run.startedAt <= run.finishedAt &&
-          run.finishedAt <= terminal.at,
-        ...(run.error === undefined ? {} : { error: { ...run.error } }),
-      }))
+      const candidates = runs.map(
+        (run): TerminalAssociationCandidate => ({
+          run: run.id,
+          status: run.status,
+          ...(run.conclusion === undefined ? {} : { conclusion: run.conclusion }),
+          startedAt: run.startedAt,
+          ...(run.finishedAt === undefined ? {} : { finishedAt: run.finishedAt }),
+          eligible:
+            Queues.failed(run) &&
+            run.finishedAt !== undefined &&
+            run.startedAt <= run.finishedAt &&
+            run.finishedAt <= terminal.at,
+          ...(run.error === undefined ? {} : { error: { ...run.error } }),
+        }),
+      )
       const eligible = candidates.filter((candidate) => candidate.eligible)
       if (eligible.length === 0) {
         const failed = candidates.filter(({ status, conclusion }) => status === "completed" && conclusion === "failure")
@@ -2107,6 +2130,18 @@ function createQueue<Shape extends PRShape>(
       if (pause === undefined) throw new Error(`yrd: queue '${base}' did not retain its pause`)
       return pause
     },
+    async expirePauses(now) {
+      const nowMs = Date.parse(now)
+      if (Number.isNaN(nowMs)) throw new Error(`yrd: expirePauses requires an ISO timestamp; got '${now}'`)
+      const expired = Object.values(state().pauses).filter(
+        (pause): pause is DeepReadonly<QueuePause & Required<Pick<QueuePause, "expiresAt">>> =>
+          pause.expiresAt !== undefined && Date.parse(pause.expiresAt) <= nowMs,
+      )
+      for (const pause of expired) {
+        await actions.expirePause({ base: pause.base, expiresAt: pause.expiresAt })
+      }
+      return expired
+    },
     async resume(base) {
       await actions.resume(queueBase(runtime(), base))
     },
@@ -3089,12 +3124,29 @@ function createQueueCommands(
       const current = state.queues.pauses[base]
       if (
         current?.reason === paused.reason &&
+        current.expiresAt === paused.expiresAt &&
         current.allowedPRs.length === paused.allowedPRs.length &&
         current.allowedPRs.every((pr, index) => pr === paused.allowedPRs[index])
       ) {
         return { events: [] }
       }
       return { events: [event("queue/paused", paused)] }
+    },
+  })
+
+  const expirePause = command({
+    title: "Expire queue hold",
+    visibility: "internal",
+    params: ExpireQueuePauseArgsSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: Readonly<{ base: string; expiresAt: string }>) {
+      const base = baseIdentity(args.base)
+      const current = state.queues.pauses[base]
+      return {
+        events:
+          current?.expiresAt === args.expiresAt
+            ? [event("queue/pause/expired", { base, expiresAt: args.expiresAt })]
+            : [],
+      }
     },
   })
 
@@ -3570,6 +3622,7 @@ function createQueueCommands(
       admissionStep,
       run,
       pause,
+      expirePause,
       resume,
       advance,
       settled,
@@ -4245,9 +4298,20 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     }
   }
   if (applied.name === "queue/paused") {
-    const parsed = PauseQueueArgsSchema.parse(applied.data)
+    const parsed = ReplayPauseQueueArgsSchema.parse(applied.data)
     const paused = QueuePauseSchema.parse({ ...parsed, base: baseIdentity(parsed.base), pausedAt: applied.ts })
     return { queues: { ...state.queues, pauses: { ...state.queues.pauses, [paused.base]: paused } } }
+  }
+  if (applied.name === "queue/pause/expired") {
+    const expired = ExpireQueuePauseArgsSchema.parse(applied.data)
+    const base = baseIdentity(expired.base)
+    if (state.queues.pauses[base]?.expiresAt !== expired.expiresAt) return state
+    return {
+      queues: {
+        ...state.queues,
+        pauses: Object.fromEntries(Object.entries(state.queues.pauses).filter(([candidate]) => candidate !== base)),
+      },
+    }
   }
   if (applied.name === "queue/resumed") {
     const base = baseIdentity(ResumeQueueArgsSchema.parse(applied.data).base)
@@ -5183,10 +5247,12 @@ function materializeArchivedRun(
 
 function materializeRun(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<JobsState>): Run {
   const jobList = queueJobs(record, jobs)
-  const steps = record.steps.map((step, index): QueueStep => ({
-    ...step,
-    ...(jobList[index] === undefined ? {} : { job: jobList[index] }),
-  }))
+  const steps = record.steps.map(
+    (step, index): QueueStep => ({
+      ...step,
+      ...(jobList[index] === undefined ? {} : { job: jobList[index] }),
+    }),
+  )
   const cursor = steps.findIndex((step) => step.job === undefined || !Job.terminal(step.job))
   const failed = steps.find((step) => step.job !== undefined && jobFailed(step.job))?.job
   const waiting = steps.some((step) => step.job?.status === "waiting")
@@ -5583,6 +5649,29 @@ function auditQueues(
 ): QueueAuditResult {
   const findings: QueueAuditFinding[] = []
   const installed = new Map(steps.map((step) => [step.name, step]))
+  const auditNowMs = options.now === undefined ? undefined : parseAuditTime(options.now, "now")
+  for (const pause of Object.values(state.queues.pauses)) {
+    const specimen = `queue:${baseIdentity(pause.base)}`
+    if (pause.expiresAt === undefined) {
+      findings.push({
+        code: "queue-hold-ttl-missing",
+        message: `Queue '${baseIdentity(pause.base)}' has a legacy hold with no TTL: ${pause.reason}`,
+        specimen,
+        since: pause.pausedAt,
+      })
+      continue
+    }
+    const expiresAtMs = parseAuditTime(pause.expiresAt, "queue hold expiry")
+    if (auditNowMs !== undefined && expiresAtMs <= auditNowMs) {
+      findings.push({
+        code: "queue-hold-expired",
+        message: `Queue '${baseIdentity(pause.base)}' hold expired at ${pause.expiresAt} but remains active: ${pause.reason}`,
+        specimen,
+        since: pause.pausedAt,
+        blockedMs: Math.max(0, auditNowMs - expiresAtMs),
+      })
+    }
+  }
   for (const record of Queues.values(state.queues)) {
     for (const pr of record.prs) {
       if (pr.intent !== undefined || state.bays.prs[pr.id] !== undefined) continue

@@ -1899,7 +1899,7 @@ checks: [{check: {run: "true"}}]
     ).toBe(0)
     expect(stdout).toContain("Usage: yrd queue")
     expect(stdout).toContain("yrd --repo <repository> queue run PR7 --steps check,merge")
-    expect(stdout).toContain("yrd --repo <repository> queue pause --reason maintenance --allow PR7")
+    expect(stdout).toContain("yrd --repo <repository> queue pause --reason maintenance --for 30m --allow PR7")
     expect(stdout).toContain("yrd --repo <repository> queue recover --json")
     expect(stdout).toContain("yrd --repo <repository> queue run")
     expect(stdout).not.toMatch(/\$ yrd queue (?:run|pause|recover)(?:\s|$)/u)
@@ -3663,8 +3663,11 @@ checks: [{check: {run: "true"}}]
         Bun.sleep(2_000).then(() => ({ exitCode: "still-running" as const })),
       ])
       expect(outcome).toEqual({ exitCode: 1 })
-      expect(await second.stderr).toContain(
-        `resident-runner-active: writer lock is busy (holder=unknown operation; owner=pid:${first.child.pid}; contender=pid:${second.child.pid}`,
+      expect(await second.stderr).toMatch(
+        new RegExp(
+          `resident-runner-active: writer lock is busy \\(holder=queue=.*#main epoch=[0-9a-f-]{36}; owner=pid:${first.child.pid}; contender=pid:${second.child.pid}`,
+          "u",
+        ),
       )
       expect((await readFile(executionsPath, "utf8")).trim().split("\n")).toEqual(["run"])
       // A graceful drain (SIGTERM) lets the first exit after finishing PR1's run.
@@ -3757,6 +3760,11 @@ checks: [{check: {run: "true"}}]
           expect(JSON.parse(await readFile(statusPath, "utf8"))).toMatchObject({
             pid: cli.pid,
             implementationSource,
+            driver: {
+              queueId: `${repo}#main`,
+              epoch: expect.stringMatching(/^[0-9a-f-]{36}$/u),
+              lastLanded: null,
+            },
           }),
         { timeout: 10_000 },
       )
@@ -4200,7 +4208,7 @@ checks: [{check: {run: "true"}}]
     expect(stdout).toContain("OPEN 1")
     expect(stdout).toContain("REJECTED 0")
     expect(stdout).not.toContain(featureSha.slice(0, 12))
-    expect(stderr).toBe("")
+    expect(stderr).toBe("yrd: dead-man: the queue has work but no resident runner owns the drain lease\n")
 
     stdout = ""
     stderr = ""
@@ -4305,7 +4313,7 @@ checks: [{check: {run: "true"}}]
     ])
 
     expect(exitCode, stderr).toBe(0)
-    expect(stderr).toBe("")
+    expect(stderr).toBe("yrd: dead-man: the queue has work but no resident runner owns the drain lease\n")
     expect(stdout).toContain("Recent failures")
     expect(stdout.match(/pr#1/giu)).toHaveLength(3)
     expect(`${stdout}\n${stderr}`).not.toMatch(/precedes/u)

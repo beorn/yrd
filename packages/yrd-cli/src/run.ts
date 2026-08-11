@@ -116,6 +116,7 @@ import {
   type QueueAttempt,
   type QueueRunnerRefusal,
   type QueueRunnerProgress,
+  type QueueDriverEpoch,
   type QueueTimelineProjection,
   type QueueTimelineRunner,
   type QueueTimelineStatusFilter,
@@ -411,6 +412,46 @@ function parseResidentRunnerProgress(value: unknown): QueueRunnerProgress | unde
   raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner queueProgress is invalid")
 }
 
+function parseQueueDriverEpoch(value: unknown): QueueDriverEpoch | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== "object" || value === null) {
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner driver is invalid")
+  }
+  const driver = value as Record<string, unknown>
+  if (typeof driver.queueId !== "string" || driver.queueId.trim() === "") {
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner driver queueId is invalid")
+  }
+  if (typeof driver.epoch !== "string" || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu.test(driver.epoch)) {
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner driver epoch is invalid")
+  }
+  let lastLanded: QueueDriverEpoch["lastLanded"]
+  if (driver.lastLanded === null) {
+    lastLanded = null
+  } else if (typeof driver.lastLanded === "object" && driver.lastLanded !== null) {
+    const landed = driver.lastLanded as Record<string, unknown>
+    if (
+      typeof landed.commit !== "string" ||
+      !/^[0-9a-f]{40,64}$/u.test(landed.commit) ||
+      typeof landed.at !== "string" ||
+      !Number.isFinite(Date.parse(landed.at))
+    ) {
+      raiseFailure(
+        "infrastructure",
+        "resident-runner-status-invalid",
+        "yrd: resident runner driver lastLanded is invalid",
+      )
+    }
+    lastLanded = { commit: landed.commit, at: landed.at }
+  } else {
+    raiseFailure(
+      "infrastructure",
+      "resident-runner-status-invalid",
+      "yrd: resident runner driver lastLanded is invalid",
+    )
+  }
+  return { queueId: driver.queueId, epoch: driver.epoch, lastLanded }
+}
+
 function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
   let value: unknown
   try {
@@ -428,6 +469,7 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
   const startedAt = residentRunnerTimestamp(record.startedAt, "startedAt")
   const lastTickAt = residentRunnerTimestamp(record.lastTickAt, "lastTickAt")
   const queueProgress = parseResidentRunnerProgress(record.queueProgress)
+  const driver = parseQueueDriverEpoch(record.driver)
   if (Date.parse(lastTickAt) < Date.parse(startedAt)) {
     raiseFailure(
       "infrastructure",
@@ -464,6 +506,7 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
     startedAt,
     lastTickAt,
     ...(queueProgress === undefined ? {} : { queueProgress }),
+    ...(driver === undefined ? {} : { driver }),
     ...(record.command === undefined ? {} : { command: record.command as string }),
     ...(record.exitedAt === undefined ? {} : { exitedAt: residentRunnerTimestamp(record.exitedAt, "exitedAt") }),
     ...(record.clean === undefined ? {} : { clean: record.clean }),
@@ -552,6 +595,7 @@ function runnerLauncherFacts(): RunnerLauncherFacts {
 
 type RunnerHealthFacts = Readonly<{
   lease: "held" | "free" | "unknown"
+  leaseDriver?: Readonly<{ queueId: string; epoch: string }>
   runnerStatus: "fresh" | "stale" | "missing"
   runnerAgeMs?: number
   runner?: QueueTimelineRunner
@@ -570,18 +614,38 @@ type RunnerHealthPayload = Readonly<{
   facts: RunnerHealthFacts
 }>
 
-export async function residentRunnerLeaseHeld(cwd: string): Promise<boolean> {
+type ResidentRunnerLeaseObservation = Readonly<{
+  held: boolean
+  driver?: Readonly<{ queueId: string; epoch: string }>
+}>
+
+function residentRunnerLeaseDriver(message: string): ResidentRunnerLeaseObservation["driver"] {
+  const match = /holder=queue=(.*?) epoch=([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})(?:;|\))/iu.exec(message)
+  const queueId = match?.[1]
+  const epoch = match?.[2]
+  return queueId === undefined || epoch === undefined ? undefined : { queueId, epoch }
+}
+
+async function residentRunnerLeaseObservation(cwd: string): Promise<ResidentRunnerLeaseObservation> {
   const gitDir = queueGitDir(cwd)
   if (gitDir === undefined) {
     raiseFailure("infrastructure", "runner-health-unavailable", `yrd: '${cwd}' is not a Git queue repository`)
   }
   try {
     await createExclusive(join(gitDir, "yrd", "resident-runner"), { timeoutMs: 0 }).run(() => Promise.resolve())
-    return false
+    return { held: false }
   } catch (error) {
-    if (failureFact(error)?.code === "exclusive-busy") return true
+    const fact = failureFact(error)
+    if (fact?.code === "exclusive-busy") {
+      const driver = residentRunnerLeaseDriver(fact.message)
+      return { held: true, ...(driver === undefined ? {} : { driver }) }
+    }
     throw error
   }
+}
+
+export async function residentRunnerLeaseHeld(cwd: string): Promise<boolean> {
+  return (await residentRunnerLeaseObservation(cwd)).held
 }
 
 function gitDistance(cwd: string, baseSha: string, headSha: string): Omit<RunnerGitDistance, "base" | "baseSha"> {
@@ -630,6 +694,39 @@ function queuedDeliveryCount(app: YrdCliApp): number {
   }).length
 }
 
+function sameDriverLanding(left: QueueDriverEpoch["lastLanded"], right: QueueDriverEpoch["lastLanded"]): boolean {
+  return left === null ? right === null : right !== null && left.commit === right.commit && left.at === right.at
+}
+
+function runnerDriverHealthError(
+  runner: QueueTimelineRunner,
+  expectedQueueId: string,
+  expectedLastLanded: QueueDriverEpoch["lastLanded"] | undefined,
+): ReturnType<typeof runnerHealthError> | undefined {
+  if (runner.driver === undefined) {
+    return runnerHealthError(
+      "resident-runner-driver-unknown",
+      "resident runner heartbeat is fresh but does not identify its queue driver epoch",
+      ["Restart the resident queue runner with the installed Yrd source."],
+    )
+  }
+  if (runner.driver.queueId !== expectedQueueId) {
+    return runnerHealthError(
+      "resident-runner-driver-mismatch",
+      `resident runner owns '${runner.driver.queueId}', not expected queue '${expectedQueueId}'`,
+      ["Stop the mismatched resident and start the runner from the expected repository."],
+    )
+  }
+  if (expectedLastLanded !== undefined && !sameDriverLanding(runner.driver.lastLanded, expectedLastLanded)) {
+    return runnerHealthError(
+      "resident-runner-driver-stale",
+      "resident runner heartbeat does not report the queue's latest landed commit",
+      ["Inspect the resident runner log and restart it if its driver epoch is no longer advancing."],
+    )
+  }
+  return undefined
+}
+
 /** Project the resident's canonical progress findings into its lightweight
  * status record. The supervisor can then prove outcome progress without
  * replaying Journal history in its health probe. */
@@ -637,7 +734,11 @@ export function residentQueueProgress(app: YrdCliApp, now: string): QueueRunnerP
   const findings = app.queue
     .audit({ now })
     .findings.filter(
-      (finding) => finding.code === "queue-progress-stalled" || finding.code === "admission-refusal-loop",
+      (finding) =>
+        finding.code === "queue-progress-stalled" ||
+        finding.code === "admission-refusal-loop" ||
+        finding.code === "queue-hold-ttl-missing" ||
+        finding.code === "queue-hold-expired",
     )
     .map((finding) => {
       if (finding.code !== "admission-refusal-loop") return finding
@@ -651,10 +752,32 @@ export function residentQueueProgress(app: YrdCliApp, now: string): QueueRunnerP
   return findings.length === 0 ? { state: "healthy" } : { state: "stalled", findings }
 }
 
+/** Exact latest landing driven for one queue. The epoch heartbeat publishes
+ * this content so a probe can distinguish the right driver from an unrelated
+ * resident process with the same service name. */
+export function residentDriverLastLanded(app: YrdCliApp, base: string): QueueDriverEpoch["lastLanded"] {
+  return (
+    Object.values(stateOf(app).bays.prs)
+      .flatMap((pr) => {
+        if (
+          baseIdentity(pr.base) !== baseIdentity(base) ||
+          pr.integratedAt === undefined ||
+          pr.integration === undefined
+        ) {
+          return []
+        }
+        return [{ commit: pr.integration.commit, at: pr.integratedAt }]
+      })
+      .toSorted((left, right) => left.at.localeCompare(right.at))
+      .at(-1) ?? null
+  )
+}
+
 async function queueRunnerHealth(
   app: YrdCliApp | undefined,
   services: YrdCliServices,
   io: YrdCliIO,
+  options: Readonly<{ queueProgress?: QueueRunnerProgress }> = {},
 ): Promise<{
   payload: RunnerHealthPayload
   exitCode: YrdCliExitCode
@@ -663,9 +786,12 @@ async function queueRunnerHealth(
   const service = io.healthServiceName?.trim() || "yrd-runner"
   const audit = services.queue?.auditEnvironment
   let leaseHeld: boolean | undefined
+  let leaseDriver: ResidentRunnerLeaseObservation["driver"]
   let git: RunnerGitHealth = { cwd, headSha: "unknown", dirty: false, baselines: [] }
   try {
-    leaseHeld = await residentRunnerLeaseHeld(cwd)
+    const lease = await residentRunnerLeaseObservation(cwd)
+    leaseHeld = lease.held
+    leaseDriver = lease.driver
     if (audit === undefined) {
       raiseFailure(
         "configuration",
@@ -679,9 +805,10 @@ async function queueRunnerHealth(
     const now = io.now?.() ?? Date.now()
     const runnerAgeMs = runner === null ? undefined : Math.max(0, now - Date.parse(runner.lastTickAt))
     const runnerStatus = runnerAgeMs === undefined ? "missing" : runnerAgeMs > RUNNER_STALE_MS ? "stale" : "fresh"
-    const queueProgress = runner?.queueProgress ?? { state: "unknown" as const }
+    const queueProgress = options.queueProgress ?? runner?.queueProgress ?? { state: "unknown" as const }
     const facts: RunnerHealthFacts = {
       lease: leaseHeld ? "held" : "free",
+      ...(leaseDriver === undefined ? {} : { leaseDriver }),
       runnerStatus,
       ...(runnerAgeMs === undefined ? {} : { runnerAgeMs }),
       ...(runner === null ? {} : { runner }),
@@ -757,6 +884,52 @@ async function queueRunnerHealth(
         },
       }
     }
+    const expectedLastLanded = app === undefined ? undefined : residentDriverLastLanded(app, "main")
+    const driverError =
+      runner === null ? undefined : runnerDriverHealthError(runner, `${resolve(cwd)}#main`, expectedLastLanded)
+    if (driverError !== undefined) {
+      return {
+        exitCode: 2,
+        payload: {
+          schema: "hab-service-health/1",
+          command: "queue.list.check",
+          service,
+          state: "unhealthy",
+          running: true,
+          error: driverError,
+          facts,
+        },
+      }
+    }
+    const leaseContentError =
+      leaseDriver === undefined
+        ? runnerHealthError(
+            "resident-runner-lease-content-unknown",
+            "resident runner lease is held but does not name its queue driver epoch",
+            ["Restart the resident queue runner with the installed Yrd source."],
+          )
+        : runner?.driver !== undefined &&
+            (leaseDriver.queueId !== runner.driver.queueId || leaseDriver.epoch !== runner.driver.epoch)
+          ? runnerHealthError(
+              "resident-runner-lease-content-mismatch",
+              "resident runner lease content does not match its heartbeat driver epoch",
+              ["Stop the mismatched resident and start one replacement for the expected queue."],
+            )
+          : undefined
+    if (leaseContentError !== undefined) {
+      return {
+        exitCode: 2,
+        payload: {
+          schema: "hab-service-health/1",
+          command: "queue.list.check",
+          service,
+          state: "unhealthy",
+          running: true,
+          error: leaseContentError,
+          facts,
+        },
+      }
+    }
     if (queueProgress.state === "unknown") {
       return {
         exitCode: 2,
@@ -828,6 +1001,44 @@ async function queueRunnerHealth(
         },
       },
     }
+  }
+}
+
+/** Second liveness clock for active seats. Unlike the resident heartbeat, this
+ * invocation reconstructs queue progress from the loaded state and then uses
+ * the same runner-health decision as the Hab timer probe. It is advisory: the
+ * requested command still runs. Human invocations report the observation on
+ * stderr; machine-readable invocations keep their one-document contract while
+ * still executing the read-only check. */
+async function runClientDeadMan(app: YrdCliApp, io: YrdCliIO, emitHuman: boolean): Promise<void> {
+  const cwd = io.cwd ?? process.cwd()
+  const nowMs = io.now?.() ?? Date.now()
+  const queueProgress = residentQueueProgress(app, new Date(nowMs).toISOString())
+  const runner = activeResidentRunner(await residentRunnerStatus(cwd))
+  const runnerAgeMs = runner === null ? undefined : Math.max(0, nowMs - Date.parse(runner.lastTickAt))
+  const runnerError =
+    runner === null
+      ? queuedDeliveryCount(app) > 0
+        ? runnerHealthError(
+            "resident-runner-missing",
+            "the queue has work but no resident runner owns the drain lease",
+            ["Start or restart the resident queue runner."],
+          )
+        : undefined
+      : runnerAgeMs !== undefined && runnerAgeMs > RUNNER_STALE_MS
+        ? runnerHealthError("resident-runner-unhealthy", `resident runner heartbeat is stale by ${runnerAgeMs}ms`, [
+            "Inspect the resident runner log, then restart it.",
+          ])
+        : runnerDriverHealthError(runner, `${resolve(cwd)}#main`, residentDriverLastLanded(app, "main"))
+  const observations = [
+    ...(queueProgress.state === "stalled"
+      ? queueProgress.findings.map((finding) => ({ code: finding.code, cause: finding.message }))
+      : []),
+    ...(runnerError === undefined ? [] : [{ code: runnerError.code, cause: runnerError.cause }]),
+  ]
+  if (!emitHuman) return
+  for (const observation of observations) {
+    io.stderr(`yrd: dead-man: ${observation.cause}\n`)
   }
 }
 
@@ -927,6 +1138,11 @@ export async function startResidentRunnerHeartbeat(
   options: Readonly<{
     intervalMs?: number
     queueProgress?: (now: string) => QueueRunnerProgress
+    driver?: Readonly<{
+      queueId: string
+      epoch?: string
+      lastLanded: () => QueueDriverEpoch["lastLanded"]
+    }>
   }> = {},
 ): Promise<ResidentRunnerHeartbeat> {
   const cwd = io.cwd ?? process.cwd()
@@ -958,6 +1174,7 @@ export async function startResidentRunnerHeartbeat(
     return new Date(now).toISOString()
   }
   const startedAt = nowIso()
+  const driverEpoch = options.driver === undefined ? undefined : (options.driver.epoch ?? randomUUID())
   // The dedicated RUNNER box renders this verbatim: `[pid] <command>`.
   const command = [basename(process.argv[0] ?? "bun"), ...process.argv.slice(1)].join(" ")
   const writeStatus = async (exit?: Readonly<{ exitedAt: string; clean: boolean }>): Promise<void> => {
@@ -969,6 +1186,15 @@ export async function startResidentRunnerHeartbeat(
       startedAt,
       lastTickAt,
       ...(queueProgress === undefined ? {} : { queueProgress }),
+      ...(options.driver === undefined || driverEpoch === undefined
+        ? {}
+        : {
+            driver: {
+              queueId: options.driver.queueId,
+              epoch: driverEpoch,
+              lastLanded: options.driver.lastLanded(),
+            },
+          }),
       command,
       implementationSource,
       journalVersions: SUPPORTED_VERSIONS,
@@ -1130,19 +1356,27 @@ function queueTimelineRowLimit(io: YrdCliIO): number {
   return Math.max(1, io.rows - 14)
 }
 
-function queueTimelineWindow(value: string | undefined): number {
-  if (value === undefined) return QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS
+function parseDurationMs(value: string, option: string, positive = false): number {
   const match = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/iu.exec(value.trim())
-  if (match === null) usage("--since must be a duration such as 30m, 6h, or 1d")
+  const expectation = positive ? "a positive duration" : "a duration"
+  if (match === null) usage(`${option} must be ${expectation} such as 30m, 6h, or 1d`)
   const amount = Number(match?.[1])
   const unit = match?.[2]?.toLocaleLowerCase()
   const multiplier =
     unit === "ms" ? 1 : unit === "s" ? 1_000 : unit === "m" ? 60_000 : unit === "h" ? 3_600_000 : 86_400_000
   const milliseconds = amount * multiplier
-  if (!Number.isFinite(milliseconds) || milliseconds < 0) {
-    usage("--since must be a finite non-negative duration")
+  if (!Number.isFinite(milliseconds) || (positive ? milliseconds <= 0 : milliseconds < 0)) {
+    usage(
+      positive
+        ? `${option} must be a positive duration such as 30m, 6h, or 1d`
+        : `${option} must be a finite non-negative duration`,
+    )
   }
   return milliseconds
+}
+
+function queueTimelineWindow(value: string | undefined): number {
+  return value === undefined ? QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS : parseDurationMs(value, "--since")
 }
 
 // The flow-metrics window: 24h by default, but an explicit --since wins so the
@@ -4955,6 +5189,7 @@ async function runQueues(
   io: YrdCliIO,
 ): Promise<readonly Run[]> {
   const steps = csv(options.steps)
+  await app.queue.expirePauses(new Date(io.now?.() ?? Date.now()).toISOString())
   return app.queue.run(
     {
       prs: [...selectors],
@@ -5061,15 +5296,18 @@ async function cancelQueueRun(
 async function pauseQueue(
   app: YrdCliApp,
   base: string | undefined,
-  options: JsonOption & Readonly<{ reason?: unknown; allow?: unknown }>,
+  options: JsonOption & Readonly<{ reason?: unknown; allow?: unknown; for?: unknown }>,
   io: YrdCliIO,
 ): Promise<void> {
   if (typeof options.reason !== "string" || options.reason.trim() === "") usage("--reason requires text")
+  if (typeof options.for !== "string") usage("--for must be a positive duration such as 30m, 6h, or 1d")
+  const ttlMs = parseDurationMs(options.for, "--for", true)
   const target = await resolvedQueueTarget(selectedBase(stateOf(app), base ?? "main"), io)
   const pause = await app.queue.pause({
     base: target.base,
     reason: options.reason,
     allowedPRs: csv(options.allow) ?? [],
+    expiresAt: new Date((io.now?.() ?? Date.now()) + ttlMs).toISOString(),
   })
   const allowed = pause.allowedPRs.length === 0 ? "none" : pause.allowedPRs.join(", ")
   await printResult(
@@ -5554,7 +5792,7 @@ function queueRunnerStateToken(runner: QueueTimelineRunner | null): string {
 /** Runner facts that change chrome without invalidating durable queue facts.
  * Heartbeat time is deliberately excluded; queueProgress is not. */
 function queueRunnerProjectionToken(runner: QueueTimelineRunner | null): string {
-  return JSON.stringify([queueRunnerStateToken(runner), runner?.queueProgress ?? null])
+  return JSON.stringify([queueRunnerStateToken(runner), runner?.queueProgress ?? null, runner?.driver ?? null])
 }
 
 async function observeQueueList(
@@ -6174,15 +6412,7 @@ type QueueLogFilterRow = Readonly<{
 }>
 
 function queueLogSinceMs(value: string): number {
-  const match = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/u.exec(value.trim())
-  if (match === null) usage("--since must be a duration such as 30m, 6h, or 1d")
-  const amount = Number(match[1] ?? "")
-  const unit = match[2] ?? ""
-  const unitMs = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[unit as "ms" | "s" | "m" | "h" | "d"]
-  if (unitMs === undefined) usage("--since must use ms, s, m, h, or d")
-  const durationMs = amount * unitMs
-  if (!Number.isFinite(durationMs) || durationMs < 0) usage("--since must be a finite non-negative duration")
-  return durationMs
+  return parseDurationMs(value, "--since")
 }
 
 function filterQueueLogRows<T extends QueueLogFilterRow>(
@@ -7676,7 +7906,14 @@ export async function followQueueRuns(
   // that prior resident is not concurrently running as a resident.
   if (resident) await reclaimDeadResidentRunner(app, io)
   const heartbeat = resident
-    ? await startResidentRunnerHeartbeat(io, { queueProgress: (now) => residentQueueProgress(app, now) })
+    ? await startResidentRunnerHeartbeat(io, {
+        queueProgress: (now) => residentQueueProgress(app, now),
+        driver: {
+          queueId: io.driver?.queueId ?? `${resolve(io.repositoryRoot ?? io.cwd ?? process.cwd())}#main`,
+          ...(io.driver === undefined ? {} : { epoch: io.driver.epoch }),
+          lastLanded: () => residentDriverLastLanded(app, "main"),
+        },
+      })
     : undefined
   // A clean shutdown is an operator drain that finished (no in-flight work left);
   // any other exit — a signal-forced abort or a thrown fault — is unclean. This
@@ -7705,9 +7942,12 @@ export async function followQueueRuns(
       if (!starting) await app.refresh()
       const refreshed = app.state() !== beforeRefresh
       const cycleNow = io.now?.() ?? Date.now()
+      const beforeHoldExpiry = app.state()
+      await app.queue.expirePauses(new Date(cycleNow).toISOString())
+      const holdExpired = app.state() !== beforeHoldExpiry
       const maintenanceDue =
         starting || cycleNow < lastMaintenanceAt || cycleNow - lastMaintenanceAt >= RESIDENT_MAINTENANCE_INTERVAL_MS
-      if (!starting && !refreshed && !maintenanceDue && !drainRequested()) {
+      if (!starting && !refreshed && !holdExpired && !maintenanceDue && !drainRequested()) {
         if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
         await sleepUntilDrain(scope.sleep(interval), drainSignal)
         heartbeat?.check()
@@ -7719,7 +7959,7 @@ export async function followQueueRuns(
       // Runs on a stale baseline.
       await gate()
       if (maintenanceDue) lastMaintenanceAt = cycleNow
-      let runRequired = starting || refreshed
+      let runRequired = starting || refreshed || holdExpired
       // D1b — bounded maintenance lease-expiry recovery sweep. ONLY the resident
       // runs it: it holds the exclusive lease, so its unscoped `recover` write is
       // single-writer safe. (A one-shot or a bare programmatic followQueueRuns
@@ -8453,7 +8693,7 @@ function addQueueExamples(queue: CliCommand, name: string): void {
     [`$ ${repository} queue run PR7 --steps check,merge`, "run selected steps for one PR"],
     [`$ ${name} log --base release/2.0`, "show completed work for a base"],
     [`$ ${name} pr runs PR7`, "show step-level run evidence and proofs"],
-    [`$ ${repository} queue pause --reason maintenance --allow PR7`, "pause all but selected PRs"],
+    [`$ ${repository} queue pause --reason maintenance --for 30m --allow PR7`, "pause all but selected PRs"],
     [`$ ${repository} queue recover --json`, "recover expired runner leases"],
     [`$ ${repository} queue run`, "resident follow-runner: keep the default queue moving"],
   ])
@@ -8558,6 +8798,9 @@ function buildProgram(
       runtimeServices = loaded.services
       runtimeIO[RuntimeInvocationCwd] = bootstrap.ambientCwd
       Object.assign(io, loaded.io)
+      if (invocation.posture !== "resident-queue-run" && invocation.posture !== "one-shot-queue-run") {
+        await runClientDeadMan(runtimeApp, io, !jsonOutputRequested(program, invocation.args))
+      }
     })
   }
   program.version(YRD_VERSION, "-V, --version")
@@ -8834,6 +9077,7 @@ function buildProgram(
     .command("pause [base]")
     .description("pause new queue runs")
     .option("--reason <text>", "record the pause reason")
+    .option("--for <duration>", "required hold TTL, such as 30m, 6h, or 1d")
     .option("--allow [pr...]", "PR ids allowed through the pause")
     .option("--json", "emit stable JSON")
     .action(async (base, options) => pauseQueue(installed(), base, options, io))

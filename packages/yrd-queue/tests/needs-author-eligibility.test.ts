@@ -428,7 +428,12 @@ describe("native needs-author lifecycle", () => {
     release.resolve()
     await running
 
-    await app.queue.pause({ base: "main", reason: "operator freeze", allowedPRs: [] })
+    await app.queue.pause({
+      base: "main",
+      reason: "operator freeze",
+      allowedPRs: [],
+      expiresAt: "2026-01-01T01:00:00.000Z",
+    })
     const duringPause = await submitWithChecks(app, "topic/during-pause", "3".repeat(40))
     expect(prFacts(app.bays.pr(duringPause))).toMatchObject({ status: "submitted", branch: "topic/during-pause" })
     expect(app.bays.checksRequested(duringPause)).toBe(true)
