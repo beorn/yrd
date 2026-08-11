@@ -1548,6 +1548,13 @@ function queueState(pr: PR, run: Run | undefined): string {
 }
 
 export function projectedPrStatus(pr: PR, eligibility?: PREligibility): PRDeliveryState | "needs-author" {
+  // A closed record's delivery state is settled, and `needs-author` is an
+  // open-only value — `prDeliveryState` maps closed to exactly integrated /
+  // already-landed / canceled / withdrawn. `PR.needsAuthor` is cleared by recut,
+  // submitted, admission-recorded and already-landed, but never by withdrawn,
+  // integrated or canceled, so the stored refusal outlives every closing path.
+  // Consulting it first therefore reported a value the model calls impossible.
+  if (pr.state === "closed") return prDeliveryState(pr)
   return prNeedsAuthor(pr) !== undefined || eligibility?.reason?.code === "needs-author"
     ? "needs-author"
     : prDeliveryState(pr)
