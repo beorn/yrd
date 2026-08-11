@@ -3011,7 +3011,11 @@ describe("runYrd", () => {
       runInternals.followQueueRuns(viewer, [], { json: true, interval: 1 }, io, async () => undefined, services),
     ).resolves.toBe(3)
 
-    expect(recut, "maintenance must still retry the refused freshness operation").toHaveBeenCalledTimes(2)
+    expect(recut, "maintenance must not retry a settled permanent refusal").toHaveBeenCalledTimes(1)
+    expect(app.state().queues.admissionRefusals.PR1?.settlement).toMatchObject({
+      disposition: "needs-person",
+      reason: "authored gitlink pins require composition",
+    })
     expect(queueRun, "a refused operation is not progress and must not reopen compose").toHaveBeenCalledTimes(1)
   })
 
