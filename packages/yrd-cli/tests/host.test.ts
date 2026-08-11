@@ -1860,6 +1860,11 @@ checks: [{check: {run: "true"}}]
       }),
     ).toBe(0)
     expect(stdout).toContain("Usage: yrd queue")
+    expect(stdout).toContain("yrd --repo <repository> queue run PR7 --steps check,merge")
+    expect(stdout).toContain("yrd --repo <repository> queue pause --reason maintenance --allow PR7")
+    expect(stdout).toContain("yrd --repo <repository> queue recover --json")
+    expect(stdout).toContain("yrd --repo <repository> queue run")
+    expect(stdout).not.toMatch(/\$ yrd queue (?:run|pause|recover)(?:\s|$)/u)
     expect(stderr).toBe("")
     expect(await Bun.file(join(root, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(false)
   })
@@ -3230,7 +3235,6 @@ checks: [{check: {run: "true"}}]
       { args: ["issue", "--json"], command: "issue.list" },
       { args: ["log", "--all", "--json"], command: "log" },
       { args: ["prime", "--json"], command: "prime" },
-      { args: ["queue", "pause", "--json"], command: "queue.pause" },
       { args: ["queue", "recover", "--json"], command: "queue.recover" },
     ] as const
 

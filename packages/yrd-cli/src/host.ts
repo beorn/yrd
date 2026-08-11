@@ -1417,16 +1417,20 @@ async function closeRuntime(
 type ShutdownSignal = "SIGINT" | "SIGTERM"
 const ONE_SHOT_RECOVERY_CUTOFF = "1970-01-01T00:00:00.000Z"
 
+function queueRecoveryCommand(repositoryRoot: string): string {
+  return `yrd --repo ${JSON.stringify(repositoryRoot)} queue recover`
+}
+
 /** Announce a graceful drain as ONE structured loggily record — never a bare
  * wrapped stderr paragraph, since the resident runner's stderr IS its log
  * stream. The force-stop hint and its consequences are structured FIELDS, so a
  * viewer can surface them without parsing prose. */
-export function reportGracefulShutdown(log: ConditionalLogger, signal: ShutdownSignal): void {
+export function reportGracefulShutdown(log: ConditionalLogger, signal: ShutdownSignal, repositoryRoot: string): void {
   log.warn?.(`Stopping after the current run finishes (${signal}); press Ctrl-C again to stop immediately.`, {
     signal,
     mode: "drain",
     forceStop: "press Ctrl-C again to stop immediately",
-    recovery: "yrd queue recover",
+    recovery: queueRecoveryCommand(repositoryRoot),
   })
 }
 
@@ -1449,9 +1453,12 @@ async function settleOneShotQueueRun(
       log.warn?.(`Stopped queue run ${runs.map((run) => run.id).join(", ")} safely after ${signal}.`)
     }
   } catch (error) {
-    log.error?.(`Could not stop the queue run safely after ${signal}; run 'yrd queue recover'.`, {
-      error: error instanceof Error ? error.message : String(error),
-    })
+    log.error?.(
+      `Could not stop the queue run safely after ${signal}; run '${queueRecoveryCommand(host.repository.repo)}'.`,
+      {
+        error: error instanceof Error ? error.message : String(error),
+      },
+    )
     throw error
   }
 }
@@ -2043,7 +2050,7 @@ async function runYrdProcessHost(
             : (signal) => {
                 drain.abort(signal)
                 if (posture === "resident-queue-run") {
-                  reportGracefulShutdown(runnerLog, signal)
+                  reportGracefulShutdown(runnerLog, signal, activeHost.repository.repo)
                 } else {
                   runtimeLog.warn?.(`Bay work was interrupted by ${signal}; preserving the Bay instead of closing it.`)
                 }

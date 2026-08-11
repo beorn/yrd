@@ -8415,7 +8415,6 @@ function addExamples(program: CliCommand, name: string): void {
     [`$ ${name} pr list`, "inspect active PRs"],
     [`$ ${name} submit`, "submit the current branch as a merge request"],
     [`$ ${name} pr create topic/fix`, "create a draft before you submit"],
-    [`$ ${name} queue run --steps check,merge`, "run selected steps"],
     [`$ ${name} watch --pr PR7`, "monitor PR and queue health"],
     [`$ ${name} contest open km:T1 --competitors '<json>'`, "compare implementations"],
   )
@@ -8423,14 +8422,15 @@ function addExamples(program: CliCommand, name: string): void {
 }
 
 function addQueueExamples(queue: CliCommand, name: string): void {
+  const repository = `${name} --repo <repository>`
   queue.addHelpSection("Examples:", [
     [`$ ${name} queue`, "list active queues"],
-    [`$ ${name} queue run PR7 --steps check,merge`, "run selected steps for one PR"],
+    [`$ ${repository} queue run PR7 --steps check,merge`, "run selected steps for one PR"],
     [`$ ${name} log --base release/2.0`, "show completed work for a base"],
     [`$ ${name} pr runs PR7`, "show step-level run evidence and proofs"],
-    [`$ ${name} queue pause --reason maintenance --allow PR7`, "pause all but selected PRs"],
-    [`$ ${name} queue recover --json`, "recover expired runner leases"],
-    [`$ ${name} queue run`, "resident follow-runner: keep the default queue moving"],
+    [`$ ${repository} queue pause --reason maintenance --allow PR7`, "pause all but selected PRs"],
+    [`$ ${repository} queue recover --json`, "recover expired runner leases"],
+    [`$ ${repository} queue run`, "resident follow-runner: keep the default queue moving"],
   ])
 }
 

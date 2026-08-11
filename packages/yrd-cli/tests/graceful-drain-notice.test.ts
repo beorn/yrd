@@ -23,7 +23,7 @@ describe("graceful-drain notice", () => {
     ])
     const log = root.child("runner")
 
-    reportGracefulShutdown(log, "SIGINT")
+    reportGracefulShutdown(log, "SIGINT", "/srv/code repo")
     log.end()
 
     // No bare wrapped paragraph — the resident's stdout/stderr IS a log stream;
@@ -43,7 +43,7 @@ describe("graceful-drain notice", () => {
         signal: "SIGINT",
         mode: "drain",
         forceStop: expect.stringContaining("Ctrl-C"),
-        recovery: "yrd queue recover",
+        recovery: 'yrd --repo "/srv/code repo" queue recover',
       }),
     })
     expect(String(drain[0]?.message)).not.toContain("\n")
