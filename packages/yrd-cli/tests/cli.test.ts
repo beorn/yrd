@@ -984,7 +984,7 @@ describe("runYrd", () => {
     })
   })
 
-  it("releases only when the Hab v2 receipt names the exact deployment source", async () => {
+  it("releases only when the strict Hab service-generation receipt names the exact deployment source", async () => {
     const app = await createApp()
     const temp = mkdtempSync(join(tmpdir(), "yrd-deployment-release-"))
     const deploymentReceipt = join(temp, "deployment.json")
@@ -1008,9 +1008,12 @@ describe("runYrd", () => {
     writeFileSync(
       habReleaseReceipt,
       JSON.stringify({
-        schema: "hab-launch-release/2",
-        writerId: generation,
-        proof: { habitantSource: { path, sha: HEAD_SHA, verification: "verified" } },
+        schema: "hab-service-generation-release/1",
+        jurisdiction: "single-habitat",
+        habitatRoot: "/hab",
+        retiredSource: { path, sha: HEAD_SHA, verification: "verified" },
+        replacementSource: { path: "/repo/.deployments/D2", sha: "2".repeat(40), verification: "verified" },
+        releasedAt: "2026-08-11T20:00:00.000Z",
       }),
     )
     try {

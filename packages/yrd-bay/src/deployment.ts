@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
 import { chmod, link, mkdir, open, readFile, readdir, realpath, stat, unlink } from "node:fs/promises"
 import { join, resolve } from "node:path"
-import { JsonSchema, type JsonValue } from "@yrd/core"
+import type { JsonValue } from "@yrd/core"
 import { createJobDef, type JobDef } from "@yrd/job"
 import type { Process } from "@yrd/process"
 import { createGitWorktreeStore, type GitWorktreeStoreOptions } from "git-super/worktree"
@@ -84,21 +84,26 @@ const ReleaseDeploymentInputSchema = DeploymentSourceReceiptSchema.pick({
 }).strict()
 const HabGenerationReleaseReceiptSchema = z
   .object({
-    schema: z.literal("hab-launch-release/2"),
-    writerId: GenerationIdSchema,
-    proof: z
+    schema: z.literal("hab-service-generation-release/1"),
+    jurisdiction: z.literal("single-habitat"),
+    habitatRoot: z.string().min(1),
+    retiredSource: z
       .object({
-        habitantSource: z
-          .object({
-            path: z.string().min(1),
-            sha: z.string().regex(FULL_OBJECT_ID),
-            verification: z.literal("verified"),
-          })
-          .catchall(JsonSchema),
+        path: z.string().min(1),
+        sha: z.string().regex(FULL_OBJECT_ID),
+        verification: z.literal("verified"),
       })
-      .catchall(JsonSchema),
+      .strict(),
+    replacementSource: z
+      .object({
+        path: z.string().min(1),
+        sha: z.string().regex(FULL_OBJECT_ID),
+        verification: z.literal("verified"),
+      })
+      .strict(),
+    releasedAt: z.iso.datetime({ offset: true }),
   })
-  .catchall(JsonSchema)
+  .strict()
 export const ReleaseDeploymentJobInputSchema: z.ZodType<ReleaseDeploymentJobInput> =
   ReleaseDeploymentInputSchema.extend({
     authorization: z
@@ -120,12 +125,7 @@ function validateId(kind: "deployment", value: string): void {
 
 function assertHabReleaseAuthorization(input: ReleaseDeploymentJobInput): void {
   const receipt = HabGenerationReleaseReceiptSchema.parse(input.authorization.receipt)
-  const source = receipt.proof.habitantSource
-  if (receipt.writerId !== input.authorization.generation) {
-    throw new Error(
-      `Hab release writer '${receipt.writerId}' does not authorize generation '${input.authorization.generation}'`,
-    )
-  }
+  const source = receipt.retiredSource
   if (resolve(source.path) !== resolve(input.authorization.path)) {
     throw new Error(`Hab release path '${source.path}' does not authorize '${input.authorization.path}'`)
   }
@@ -171,6 +171,31 @@ async function readReceipt(recordsRoot: string, deploymentId: string): Promise<D
   const path = join(recordsRoot, `${deploymentId}.json`)
   if (!existsSync(path)) return undefined
   return JSON.parse(await readFile(path, "utf8")) as DeploymentSourceReceipt
+}
+
+/** Resolve Yrd's opaque deployment identity from Hab's exact path+SHA join. */
+export async function readDeploymentBySource(
+  deploymentsRoot: string,
+  path: string,
+  sha: string,
+): Promise<DeploymentSourceReceipt | undefined> {
+  const recordsRoot = join(resolve(deploymentsRoot), "records")
+  let names: string[]
+  try {
+    names = (await readdir(recordsRoot)).filter((name) => name.endsWith(".json")).sort()
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
+    throw error
+  }
+  const matches: DeploymentSourceReceipt[] = []
+  for (const name of names) {
+    const receipt = DeploymentSourceReceiptSchema.parse(JSON.parse(await readFile(join(recordsRoot, name), "utf8")))
+    if (resolve(receipt.path) === resolve(path) && receipt.sha === sha) matches.push(receipt)
+  }
+  if (matches.length > 1) {
+    throw new Error(`multiple Yrd deployments claim exact source '${resolve(path)}@${sha}'`)
+  }
+  return matches[0]
 }
 
 async function submoduleClosure(
