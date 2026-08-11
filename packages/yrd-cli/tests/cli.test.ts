@@ -143,6 +143,14 @@ const JOB_CHECK_MISSING_ID = "00000000-0000-7000-8000-000000000105"
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 const retiredRoleNoun = ["act", "or"].join("")
 
+function recutGitlinkConflictReason(pr: string, targetRoot: string): string {
+  return (
+    `yrd: PR '${pr}' could not recut: target root '${targetRoot}' pins submodule 'km' to '${"c".repeat(40)}'; ` +
+    `replayed authored root '${"e".repeat(40)}' pins it to '${"d".repeat(40)}'; ancestry walk failed because ` +
+    "neither submodule commit is an ancestor of the other"
+  )
+}
+
 function revisionAdmissionJob(
   app: Awaited<ReturnType<typeof createApp>>,
   prId: string,
@@ -2978,7 +2986,7 @@ describe("runYrd", () => {
         createFailure({
           kind: "refusal",
           code: "recut-gitlink-conflict",
-          message: "authored gitlink pins require composition",
+          message: recutGitlinkConflictReason("PR1", nextBase),
         }),
       ),
     )
@@ -3014,7 +3022,7 @@ describe("runYrd", () => {
     expect(recut, "maintenance must not retry a settled permanent refusal").toHaveBeenCalledTimes(1)
     expect(app.state().queues.admissionRefusals.PR1?.settlement).toMatchObject({
       disposition: "needs-person",
-      reason: "authored gitlink pins require composition",
+      reason: expect.stringContaining("can conflict"),
     })
     expect(queueRun, "a refused operation is not progress and must not reopen compose").toHaveBeenCalledTimes(1)
   })
@@ -3321,7 +3329,7 @@ describe("runYrd", () => {
           createFailure({
             kind: "refusal",
             code: "recut-gitlink-conflict",
-            message: "authored gitlink pins require composition",
+            message: recutGitlinkConflictReason("PR1", nextBase),
           }),
         )
       }
@@ -3335,9 +3343,10 @@ describe("runYrd", () => {
     })
     const services = { recut: { recut } } as unknown as YrdCliServices
     const resolveQueueTarget = vi.fn(async () => ({ base: "main", sha: nextBase }))
+    const io = outputIO({ resolveQueueTarget }).io
     const before = await Array.fromAsync(app.events()).then((events) => events.length)
 
-    await expect(refresh(app, services, outputIO({ resolveQueueTarget }).io)).resolves.toEqual([
+    await expect(refresh(app, services, io)).resolves.toEqual([
       expect.objectContaining({ status: "refused", pr: "PR1", code: "recut-gitlink-conflict" }),
       expect.objectContaining({ status: "refreshed", pr: "PR2" }),
     ])
@@ -3364,16 +3373,21 @@ describe("runYrd", () => {
       revision: 2,
       headSha: "2".repeat(40),
       code: "recut-gitlink-conflict",
-      reason: "authored gitlink pins require composition",
+      reason: recutGitlinkConflictReason("PR1", nextBase),
       count: 1,
+    })
+    await expect(runInternals.applyRefusalRemedies(app, services, io, new Set())).resolves.toEqual([
+      expect.objectContaining({ status: "escalated", pr: "PR1", code: "recut-gitlink-conflict" }),
+    ])
+    expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
       settlement: {
         disposition: "needs-person",
-        reason: "authored gitlink pins require composition",
+        reason: expect.stringContaining("can conflict"),
       },
     })
     expect(app.queue.eligibility("PR1").reason?.code).toBe("admission-refused")
 
-    await expect(refresh(app, services, outputIO({ resolveQueueTarget }).io)).resolves.toEqual([])
+    await expect(refresh(app, services, io)).resolves.toEqual([])
     expect(recut).toHaveBeenCalledTimes(2)
     expect(
       logs.filter(
