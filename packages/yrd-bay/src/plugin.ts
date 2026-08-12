@@ -2818,6 +2818,22 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       }
       const correlation = predecessor.correlation
       const submitter = recut.submitter ?? predecessor.submitter
+      // An admission is a verdict about a tree merged into a base. A rebuild
+      // that lands on the identical head AND the identical certified base has
+      // not changed either, so the verdict is still about this revision's
+      // content and carries — exactly as an approved review does below.
+      //
+      // Without this a byte-identical rebuild discards its own green: the
+      // carrier drops out of the queue, the runner re-requests, admission
+      // passes, the next rebuild discards it again, and nothing merges while
+      // every instrument reads healthy
+      // (@i/10-merge-queue/admission-passes-nothing-merges; one carrier reached
+      // revision 66). Any real change moves the head or the base and correctly
+      // leaves the new revision unadmitted.
+      const carriedAdmission =
+        recut.successor.headSha === predecessor.head && recut.successor.baseSha === predecessor.baseSha
+          ? predecessor.admission
+          : undefined
       const revision: PRRev = {
         n: recut.successor.revision,
         head: recut.successor.headSha,
@@ -2826,6 +2842,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         ...(submitter === undefined ? {} : { submitter }),
         ...(correlation === undefined ? {} : { correlation: { ...correlation } }),
         ...(recut.composition === undefined ? {} : { composition: recut.composition }),
+        ...(carriedAdmission === undefined ? {} : { admission: carriedAdmission }),
         recut: proof,
         pushedAt: applied.ts,
       }

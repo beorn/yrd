@@ -832,9 +832,30 @@ export function checksRequested(pr: PR): boolean {
   return checkRequest(pr) !== undefined
 }
 
+/**
+ * The live check request for the current revision, identified by CONTENT.
+ *
+ * A request asks "check this tree". The tree is `headSha`, and nothing else
+ * here identifies it. The revision ordinal does not: a mechanical rebuild that
+ * lands on byte-identical content mints a new ordinal while the head — and so
+ * the meaning of the request — is unchanged. Keying on the ordinal made such a
+ * rebuild discard the request, so the carrier fell out of the queue, the runner
+ * re-requested, admission passed, and the next rebuild discarded it again.
+ * Nothing merged for three hours with every instrument reading green
+ * (@i/10-merge-queue/admission-passes-nothing-merges; one carrier reached
+ * revision 66). New content moves `headSha` and still invalidates.
+ *
+ * `baseSha` is deliberately NOT part of the match. It is a parameter of the
+ * request, not an identity: a request's base tracks the queue's base and is
+ * meant to move while the base certified by the revision stays put, which is
+ * how production refreshes the check identity after main advances. Requiring
+ * them to agree would have selected an older request and admitted the change
+ * against a base that is no longer main. `findLast` therefore returns the
+ * newest request for this tree, which is the one whose base is current.
+ */
 export function checkRequest(pr: PR): PRCheckRequest | undefined {
   const revision = currentPRRev(pr)
-  return pr.checkRequests.findLast((request) => request.revision === revision.n && request.headSha === revision.head)
+  return pr.checkRequests.findLast((request) => request.headSha === revision.head)
 }
 
 export type BaysState = Readonly<{
