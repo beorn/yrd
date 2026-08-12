@@ -6266,6 +6266,7 @@ describe("Queue command adapters", () => {
 
   it("checks and lands the exact Change-Id-stamped Candidate", async () => {
     const { repo, feature: featureSha } = await repository("feature")
+    const baseBefore = await git(repo, ["rev-parse", "main"])
     await using process = createProcess()
     await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"], {
       prepareCandidate: true,
@@ -6285,7 +6286,44 @@ describe("Queue command adapters", () => {
     const checked = GitCheckEvidenceSchema.parse(checkJob.output)
 
     expect(await git(repo, ["show", "-s", "--format=%B", checked.candidateSha])).toContain(`Change-Id: ${changeId}`)
-    expect(run.integration).toMatchObject({ commit: checked.candidateSha, baseSha: checked.candidateSha })
+    if (run.integration === undefined) throw new Error(`merge produced no IntegrationProof: ${JSON.stringify(run.error)}`)
+    const integration = IntegrationProofSchema.parse(run.integration)
+    expect(integration).toMatchObject({ commit: checked.candidateSha, baseSha: checked.candidateSha })
+
+    const listed = await git(repo, ["notes", "--ref=yrd/receipts", "list", checked.candidateSha])
+    const [noteObject, extraNoteField] = listed.split(" ")
+    expect(extraNoteField).toBeUndefined()
+    const note = JSON.parse(await git(repo, ["notes", "--ref=yrd/receipts", "show", checked.candidateSha])) as {
+      checksum: string
+    }
+    expect(note).toMatchObject({
+      schema: "yrd/landing-receipt/v1",
+      receipt: {
+        landing: { commit: checked.candidateSha, baseBefore, baseAfter: checked.candidateSha },
+        changes: [
+          {
+            changeId,
+            pr: "PR1",
+            revision: 1,
+            submittedHead: featureSha,
+            generatedCommit: checked.candidateSha,
+          },
+        ],
+      },
+      checksum: expect.stringMatching(/^[0-9a-f]{64}$/u),
+    })
+    expect(integration.receipt).toEqual({
+      ref: "refs/notes/yrd/receipts",
+      target: checked.candidateSha,
+      note: noteObject,
+      checksum: note.checksum,
+    })
+    expect(app.state().bays.prs.PR1?.integration).toEqual({
+      commit: checked.candidateSha,
+      baseSha: checked.candidateSha,
+      changeId,
+      receipt: integration.receipt,
+    })
   })
 
   it("lands the checked candidate through origin without touching a dirty local base checkout", async () => {
