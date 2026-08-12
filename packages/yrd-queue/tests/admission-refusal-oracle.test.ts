@@ -285,7 +285,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     await app.queue.run({}, runtime)
     expect(app.queue.eligibility(pr.id).checks.status).toBe("passed")
     expect(app.bays.pr(pr.id)?.integratedAt).toBeUndefined()
-    expect(app.queue.audit({ now: "2026-01-01T00:10:00.000Z" }).findings).toContainEqual(
+    expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).toContainEqual(
       expect.objectContaining({
         code: "queue-progress-stalled",
         specimen: "queue:main",
@@ -303,16 +303,16 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
    * duration test alone fires 37 times, and an alarm that fires 37 times is an
    * alarm somebody mutes.
    *
-   * `queueProgressAuditFindings` implements the middle two conjuncts and neither
-   * outer one. This pins the cheaper half: ONE admission check is a queue barely
+   * `queueProgressAuditFindings` implements the middle two conjuncts. The CLI
+   * composes its result with the resident heartbeat rather than pushing runtime
+   * liveness into the queue package. This pins the audit half: ONE admission check is a queue barely
    * tried, not a queue trying and failing, so it must not read as stalled. The
    * count is computable from state today — `PRCheckRequest` already carries `at`
    * — so this needs no new recording, only the predicate.
    *
-   * The heartbeat conjunct has no gate yet on purpose: `QueueAuditOptions` is
-   * `{ now?: string }`, and yrd-cli depends on @yrd/queue and not the reverse,
-   * so the heartbeat must arrive INJECTED alongside `now` before it can be
-   * asserted. Adding that field is the other half of box 2.
+   * The clocks deliberately stay separate: `QueueAuditOptions` is `{ now?: string }`,
+   * and yrd-cli depends on @yrd/queue and not the reverse. The resident status
+   * carries both a heartbeat time and a timestamped projection of this audit.
    */
   it("does not call a queue stalled on a single admission check", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
@@ -322,7 +322,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     await app.queue.run({}, runtime)
 
     expect(app.bays.pr(pr.id)?.checkRequests.length).toBe(1)
-    expect(app.queue.audit({ now: "2026-01-01T00:10:00.000Z" }).findings).not.toContainEqual(
+    expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).not.toContainEqual(
       expect.objectContaining({ code: "queue-progress-stalled" }),
     )
   })
@@ -342,7 +342,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
 
     await app.queue.run({}, runtime)
 
-    expect(app.queue.audit({ now: "2026-01-01T00:10:00.000Z" }).findings).toContainEqual(
+    expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).toContainEqual(
       expect.objectContaining({ code: "queue-progress-stalled", specimen: "queue:main" }),
     )
   })
@@ -371,7 +371,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
 
     await app.queue.run({}, runtime)
 
-    // Blocked for an hour, six times the default threshold, and silent.
+    // Blocked for an hour, twice the default threshold, and silent.
     expect(app.queue.audit({ now: "2026-01-01T01:00:00.000Z" }).findings).not.toContainEqual(
       expect.objectContaining({ code: "queue-progress-stalled" }),
     )
@@ -419,7 +419,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     const second = await submitAndRequestChecks(app, "issue/remains-queued")
     await requestChecksTimes(app, second.id, DEFAULT_QUEUE_PROGRESS_POLICY.minAdmissionChecks - 2)
 
-    expect(app.queue.audit({ now: "2026-01-01T00:10:00.000Z" }).findings).toContainEqual(
+    expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).toContainEqual(
       expect.objectContaining({
         code: "queue-progress-stalled",
         specimen: "queue:main",
@@ -428,22 +428,22 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       }),
     )
 
-    clock.set("2026-01-01T00:10:00.000Z")
+    clock.set("2026-01-01T00:30:00.000Z")
     await app.queue.run({ prs: [first.id] }, runtime)
-    expect(app.bays.pr(first.id)?.integratedAt).toBe("2026-01-01T00:10:00.000Z")
+    expect(app.bays.pr(first.id)?.integratedAt).toBe("2026-01-01T00:30:00.000Z")
     expect(app.bays.pr(second.id)?.integratedAt).toBeUndefined()
     // No further attempts follow the landing on purpose. The landing restarts
     // the window, so `second` now carries ZERO checks inside it — the shape of a
     // runner asleep over ready work, which must stay loud.
-    expect(app.queue.audit({ now: "2026-01-01T00:19:59.999Z" }).findings).not.toContainEqual(
+    expect(app.queue.audit({ now: "2026-01-01T00:59:59.999Z" }).findings).not.toContainEqual(
       expect.objectContaining({ code: "queue-progress-stalled" }),
     )
-    expect(app.queue.audit({ now: "2026-01-01T00:20:00.000Z" }).findings).toContainEqual(
+    expect(app.queue.audit({ now: "2026-01-01T01:00:00.000Z" }).findings).toContainEqual(
       expect.objectContaining({
         code: "queue-progress-stalled",
         specimen: "queue:main",
         count: 1,
-        since: "2026-01-01T00:10:00.000Z",
+        since: "2026-01-01T00:30:00.000Z",
       }),
     )
   })

@@ -6808,7 +6808,7 @@ describe("runYrd", () => {
           startedAt: "2026-07-09T12:00:00.000Z",
           lastTickAt: "2026-07-09T12:00:58.000Z",
           command: "yrd queue run",
-          queueProgress: { state: "healthy" },
+          queueProgress: { state: "healthy", observedAt: "2026-07-09T12:00:58.000Z" },
           driver: { ...driver, queueId: `${repo}#release` },
         }),
       )
@@ -6828,7 +6828,7 @@ describe("runYrd", () => {
           startedAt: "2026-07-09T12:00:00.000Z",
           lastTickAt: "2026-07-09T12:00:58.000Z",
           command: "yrd queue run",
-          queueProgress: { state: "healthy" },
+          queueProgress: { state: "healthy", observedAt: "2026-07-09T12:00:58.000Z" },
           driver,
         }),
       )
@@ -6842,7 +6842,31 @@ describe("runYrd", () => {
           lease: "held",
           leaseDriver: { queueId: driver.queueId, epoch: driver.epoch },
           runnerStatus: "fresh",
-          queueProgress: { state: "healthy" },
+          queueProgress: { state: "healthy", observedAt: "2026-07-09T12:00:58.000Z" },
+        },
+      })
+
+      writeFileSync(
+        join(stateDir, "resident-runner", "status.json"),
+        JSON.stringify({
+          pid: process.pid,
+          startedAt: "2026-07-09T12:00:00.000Z",
+          lastTickAt: "2026-07-09T12:00:58.000Z",
+          command: "yrd queue run",
+          queueProgress: { state: "healthy", observedAt: "2026-07-09T12:00:00.000Z" },
+          driver,
+        }),
+      )
+      const staleProgress = outputIO({ cwd: repo })
+      expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), staleProgress.io, services)).toBe(2)
+      expect(JSON.parse(staleProgress.stdout())).toMatchObject({
+        schema: "hab-service-health/1",
+        state: "unhealthy",
+        running: true,
+        error: { code: "resident-runner-progress-stale" },
+        facts: {
+          runnerStatus: "fresh",
+          queueProgress: { state: "healthy", observedAt: "2026-07-09T12:00:00.000Z" },
         },
       })
 
@@ -6863,7 +6887,7 @@ describe("runYrd", () => {
           startedAt: "2026-07-09T12:00:00.000Z",
           lastTickAt: "2026-07-09T12:00:58.000Z",
           command: "yrd queue run",
-          queueProgress: { state: "stalled", findings: [refusalFinding] },
+          queueProgress: { state: "stalled", observedAt: "2026-07-09T12:00:58.000Z", findings: [refusalFinding] },
           driver,
         }),
       )
@@ -6879,6 +6903,7 @@ describe("runYrd", () => {
           runnerStatus: "fresh",
           queueProgress: {
             state: "stalled",
+            observedAt: "2026-07-09T12:00:58.000Z",
             findings: [refusalFinding],
           },
         },
@@ -7023,12 +7048,12 @@ describe("runYrd", () => {
     ).residentQueueProgress
     const noLanding = {
       code: "queue-progress-stalled",
-      message: "Queue 'main' has one required-check PR queued and no landing for 10m",
+      message: "Queue 'main' has one required-check PR queued and no landing for 30m",
       pr: "PR1",
       specimen: "queue:main",
       count: 1,
       since: "2026-07-09T12:00:00.000Z",
-      blockedMs: 600_000,
+      blockedMs: 1_800_000,
     }
     const refusalLoop = {
       code: "admission-refusal-loop",
@@ -7060,17 +7085,22 @@ describe("runYrd", () => {
       queue: { audit: () => ({ findings }) },
     } as unknown as TestApp
 
-    expect(project(progressApp, "2026-07-09T12:10:00.000Z")).toEqual({ state: "healthy" })
+    expect(project(progressApp, "2026-07-09T12:10:00.000Z")).toEqual({
+      state: "healthy",
+      observedAt: "2026-07-09T12:10:00.000Z",
+    })
 
     findings = [noLanding]
     expect(project(progressApp, "2026-07-09T12:10:00.000Z")).toEqual({
       state: "stalled",
+      observedAt: "2026-07-09T12:10:00.000Z",
       findings: [noLanding],
     })
 
     findings = [refusalLoop]
     expect(project(progressApp, "2026-07-09T12:10:00.000Z")).toEqual({
       state: "stalled",
+      observedAt: "2026-07-09T12:10:00.000Z",
       findings: [
         {
           ...refusalLoop,
@@ -7087,6 +7117,7 @@ describe("runYrd", () => {
     findings = [expiredHold]
     expect(project(progressApp, "2026-07-09T12:10:00.000Z")).toEqual({
       state: "stalled",
+      observedAt: "2026-07-09T12:10:00.000Z",
       findings: [expiredHold],
     })
   })
@@ -7174,7 +7205,7 @@ describe("runYrd", () => {
         }),
         {
           intervalMs: 5,
-          queueProgress: () => ({ state: "healthy" }),
+          queueProgress: (observedAt) => ({ state: "healthy", observedAt }),
           driver: { queueId: `${repo}#main`, lastLanded: () => landed },
         },
       )
@@ -7187,7 +7218,7 @@ describe("runYrd", () => {
           // The dedicated RUNNER box renders stale-runner details as `[pid] <command>`.
           command: expect.any(String),
           implementationSource,
-          queueProgress: { state: "healthy" },
+          queueProgress: { state: "healthy", observedAt: "2026-07-13T12:00:00.000Z" },
           driver: {
             queueId: `${repo}#main`,
             epoch: expect.stringMatching(/^[0-9a-f-]{36}$/u),
@@ -13002,7 +13033,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       startedAt: "2026-07-09T12:00:00.000Z",
       lastTickAt: "2026-07-09T12:00:58.000Z",
       implementationSource: `git:${"1".repeat(40)}`,
-      queueProgress: { state: "healthy" as const },
+      queueProgress: { state: "healthy" as const, observedAt: "2026-07-09T12:00:58.000Z" },
       driver: {
         queueId: `${root}#main`,
         epoch: "11111111-1111-4111-8111-111111111111",
@@ -13050,6 +13081,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
 
       const stalledProgress = {
         state: "stalled" as const,
+        observedAt: "2026-07-09T12:00:59.000Z",
         findings: [
           {
             code: "admission-refusal-loop",

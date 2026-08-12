@@ -119,7 +119,7 @@ import {
   queueShowData,
   type QueueAttempt,
   type QueueRunnerRefusal,
-  type QueueRunnerProgress,
+  QueueRunnerProgress,
   type QueueDriverEpoch,
   type QueueTimelineProjection,
   type QueueTimelineRunner,
@@ -346,7 +346,13 @@ function parseResidentRunnerProgress(value: unknown): QueueRunnerProgress | unde
     raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner queueProgress is invalid")
   }
   const progress = value as Record<string, unknown>
-  if (progress.state === "healthy") return { state: "healthy" }
+  const observedAt =
+    progress.observedAt === undefined
+      ? undefined
+      : residentRunnerTimestamp(progress.observedAt, "queueProgress observedAt")
+  // Status records from progress-aware runners before the observation-time
+  // contract remain readable, but their un-timestamped belief is not health.
+  if (progress.state === "healthy") return observedAt === undefined ? undefined : { state: "healthy", observedAt }
   if (progress.state === "stalled" && Array.isArray(progress.findings) && progress.findings.length > 0) {
     const findings = progress.findings.map((finding): QueueAuditFinding => {
       if (typeof finding !== "object" || finding === null) {
@@ -412,7 +418,7 @@ function parseResidentRunnerProgress(value: unknown): QueueRunnerProgress | unde
       }
       return record as QueueAuditFinding
     })
-    return { state: "stalled", findings }
+    return observedAt === undefined ? undefined : { state: "stalled", observedAt, findings }
   }
   raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner queueProgress is invalid")
 }
@@ -605,6 +611,7 @@ type RunnerHealthFacts = Readonly<{
   runnerAgeMs?: number
   runner?: QueueTimelineRunner
   queueProgress: QueueRunnerProgress | Readonly<{ state: "unknown" }>
+  queueProgressAgeMs?: number
   launcher: RunnerLauncherFacts
   git: RunnerGitHealth
 }>
@@ -754,7 +761,7 @@ export function residentQueueProgress(app: YrdCliApp, now: string): QueueRunnerP
       })
       return { ...finding, resolution: failure.resolution }
     })
-  return findings.length === 0 ? { state: "healthy" } : { state: "stalled", findings }
+  return findings.length === 0 ? { state: "healthy", observedAt: now } : { state: "stalled", observedAt: now, findings }
 }
 
 /** Exact latest landing driven for one queue. The epoch heartbeat publishes
@@ -811,6 +818,7 @@ async function queueRunnerHealth(
     const runnerAgeMs = runner === null ? undefined : Math.max(0, now - Date.parse(runner.lastTickAt))
     const runnerStatus = runnerAgeMs === undefined ? "missing" : runnerAgeMs > RUNNER_STALE_MS ? "stale" : "fresh"
     const queueProgress = options.queueProgress ?? runner?.queueProgress ?? { state: "unknown" as const }
+    const progressAgeMs = queueProgress.state === "unknown" ? undefined : QueueRunnerProgress.ageMs(queueProgress, now)
     const facts: RunnerHealthFacts = {
       lease: leaseHeld ? "held" : "free",
       ...(leaseDriver === undefined ? {} : { leaseDriver }),
@@ -818,6 +826,7 @@ async function queueRunnerHealth(
       ...(runnerAgeMs === undefined ? {} : { runnerAgeMs }),
       ...(runner === null ? {} : { runner }),
       queueProgress,
+      ...(progressAgeMs === undefined ? {} : { queueProgressAgeMs: progressAgeMs }),
       launcher: runnerLauncherFacts(),
       git,
     }
@@ -948,6 +957,26 @@ async function queueRunnerHealth(
           error: runnerHealthError(
             "resident-runner-progress-unknown",
             "resident runner heartbeat is fresh but reports no queue outcome progress",
+            ["Restart the resident queue runner with the installed Yrd source."],
+          ),
+          facts,
+        },
+      }
+    }
+    if (progressAgeMs === undefined || progressAgeMs > RUNNER_STALE_MS) {
+      return {
+        exitCode: 2,
+        payload: {
+          schema: "hab-service-health/1",
+          command: "queue.list.check",
+          service,
+          state: "unhealthy",
+          running: true,
+          error: runnerHealthError(
+            "resident-runner-progress-stale",
+            `resident runner heartbeat is fresh but its queue outcome observation is ${
+              progressAgeMs === undefined ? "invalid" : `stale by ${String(progressAgeMs)}ms`
+            }`,
             ["Restart the resident queue runner with the installed Yrd source."],
           ),
           facts,
@@ -6850,16 +6879,12 @@ async function queueUncarried(
   const denominator =
     `scanned ${String(result.scanned)} · ${String(result.carried)} carried · ` +
     `${String(result.outsideAgeBound)} outside the age bound · ${String(result.examined)} examined`
-  const lines = result.findings.map(
-    (finding) => `${finding.ref}  ${finding.message}`,
-  )
+  const lines = result.findings.map((finding) => `${finding.ref}  ${finding.message}`)
   await printResult(
     io,
     jsonEnabled(options),
     { command: "queue.uncarried", ...result },
-    result.findings.length === 0
-      ? `no uncarried refs — ${denominator}`
-      : [...lines, "", denominator].join("\n"),
+    result.findings.length === 0 ? `no uncarried refs — ${denominator}` : [...lines, "", denominator].join("\n"),
   )
   return result.findings.length === 0 ? 0 : 1
 }
@@ -8311,7 +8336,11 @@ export async function followQueueRuns(
     }
   } catch (error) {
     if (heartbeat !== undefined && isYrdRuntimeReloadRequest(error)) {
-      await heartbeat.recordProgress({ state: "stalled", findings: [error.finding] })
+      await heartbeat.recordProgress({
+        state: "stalled",
+        observedAt: new Date(io.now?.() ?? Date.now()).toISOString(),
+        findings: [error.finding],
+      })
     }
     throw error
   } finally {

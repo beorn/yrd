@@ -230,6 +230,7 @@ describe("queue timeline 21106 contract", () => {
       pid: 84042,
       startedAt: "2026-07-13T11:00:00.000Z",
       lastTickAt: "2026-07-13T11:59:58.000Z",
+      queueProgress: { state: "healthy", observedAt: "2026-07-13T11:59:58.000Z" },
     })
     expect(projection.rows[2]?.headSha).toBe("c".repeat(40))
     expect(projection.rows.map((row) => row.subject)).toEqual([

@@ -558,7 +558,7 @@ export type QueueProgressPolicy = Readonly<{
 }>
 
 export const DEFAULT_QUEUE_PROGRESS_POLICY: QueueProgressPolicy = Object.freeze({
-  noLandingMs: 10 * 60_000,
+  noLandingMs: 30 * 60_000,
   refusalCount: ADMISSION_REFUSAL_LOOP_THRESHOLD,
   minAdmissionChecks: 10,
 })

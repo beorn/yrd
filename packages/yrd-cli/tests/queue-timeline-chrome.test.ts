@@ -317,6 +317,7 @@ describe("queue timeline chrome 21106", () => {
       // The RUNNER border timer uses the adaptive clock (H:MM:SS above an hour):
       // 3h45m of uptime renders `uptime 3:45:00` (user directive 2026-07-21).
       expect(app.text).toContain("uptime 3:45:00")
+      expect(app.text).toContain("PROGRESS NOT MEASURED")
     } finally {
       app.unmount()
     }
@@ -331,6 +332,7 @@ describe("queue timeline chrome 21106", () => {
         startedAt: new Date(NOW - 60 * 60_000).toISOString(),
         lastTickAt: new Date(NOW - 2_000).toISOString(),
         command: "resident runner",
+        queueProgress: { state: "healthy", observedAt: new Date(NOW - 2_000).toISOString() },
       },
     }
     const app = createRenderer({ cols: 120, rows: 40 })(
@@ -340,6 +342,7 @@ describe("queue timeline chrome 21106", () => {
       await app.waitForLayoutStable()
       expect(app.text).toContain("uptime 1:00:00 · no merge for 1:00:00")
       expect(app.text).not.toContain("no merge recorded")
+      expect(app.text).toContain("progress measured 0:02 ago")
     } finally {
       app.unmount()
     }
@@ -414,6 +417,7 @@ describe("queue timeline chrome 21106", () => {
         command: "resident runner",
         queueProgress: {
           state: "stalled",
+          observedAt: new Date(NOW - 2_000).toISOString(),
           findings: [
             {
               code: "admission-refusal-loop",
@@ -478,6 +482,7 @@ describe("queue timeline chrome 21106", () => {
         startedAt: new Date(NOW - 2 * 60 * 60_000).toISOString(),
         lastTickAt: new Date(NOW - 2_000).toISOString(),
         command: "resident runner",
+        queueProgress: { state: "healthy", observedAt: new Date(NOW - 60_000).toISOString() },
       },
     }
     const state = {
@@ -495,6 +500,7 @@ describe("queue timeline chrome 21106", () => {
         newestMerge.terminalAtMs,
       )
       expect(app.text).toContain("no merge for 1:05:00")
+      expect(app.text).toContain("PROGRESS STALE — last measured 1:00 ago")
     } finally {
       app.unmount()
     }
@@ -511,6 +517,7 @@ describe("queue timeline chrome 21106", () => {
         command: "resident runner",
         queueProgress: {
           state: "stalled",
+          observedAt: new Date(NOW - 2_000).toISOString(),
           findings: [
             {
               code: "queue-progress-stalled",

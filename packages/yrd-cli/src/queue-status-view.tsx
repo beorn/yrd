@@ -337,9 +337,18 @@ export function timelineRetainedRows(
   })
 }
 
-export type QueueRunnerProgress =
-  | Readonly<{ state: "healthy" }>
-  | Readonly<{ state: "stalled"; findings: readonly QueueAuditFinding[] }>
+/** One canonical queue audit observation. Its time is independent from the
+ * resident heartbeat: ticking and measuring outcome progress are different facts. */
+export type QueueRunnerProgress = Readonly<{ observedAt: string }> &
+  (Readonly<{ state: "healthy" }> | Readonly<{ state: "stalled"; findings: readonly QueueAuditFinding[] }>)
+
+export const QueueRunnerProgress = Object.freeze({
+  ageMs(progress: QueueRunnerProgress, nowMs: number): number | undefined {
+    const observedAt = Date.parse(progress.observedAt)
+    const ageMs = Math.max(0, nowMs - observedAt)
+    return Number.isFinite(ageMs) ? ageMs : undefined
+  },
+})
 
 export type QueueDriverEpoch = Readonly<{
   /** Repository-scoped queue identity; a service name is never a driver identity. */
@@ -4917,7 +4926,15 @@ export function queueHealthMarker(projection: QueueTimelineProjection): QueueHea
   if (projection.runner === null || (timing !== null && timing.ageMs > RUNNER_STALE_MS)) {
     return { kind: "down", color: "$fg-error", pulse: null }
   }
-  if (projection.runner.queueProgress?.state === "stalled") {
+  const progress = projection.runner.queueProgress
+  const progressAgeMs =
+    progress === undefined ? undefined : QueueRunnerProgress.ageMs(progress, Date.parse(projection.now))
+  if (
+    progress === undefined ||
+    progressAgeMs === undefined ||
+    progressAgeMs > RUNNER_STALE_MS ||
+    progress.state === "stalled"
+  ) {
     return { kind: "stalled", color: "$fg-error", pulse: null }
   }
   if (projection.rows.some((row) => row.status === "running")) {
@@ -4999,13 +5016,39 @@ function RunnerProgressStatus({
   )
 }
 
+function RunnerProgressObservation({ progress, now }: { progress: QueueRunnerProgress | undefined; now: number }) {
+  if (progress === undefined) {
+    return (
+      <Text color="$fg-error" bold wrap="truncate">
+        PROGRESS NOT MEASURED — heartbeat proves ticking only
+      </Text>
+    )
+  }
+  const ageMs = QueueRunnerProgress.ageMs(progress, now)
+  if (ageMs === undefined) {
+    return (
+      <Text color="$fg-error" bold wrap="truncate">
+        PROGRESS INVALID — measurement time is not readable
+      </Text>
+    )
+  }
+  if (ageMs > RUNNER_STALE_MS) {
+    return (
+      <Text color="$fg-error" bold wrap="truncate">
+        PROGRESS STALE — last measured {mediaDuration(ageMs)} ago
+      </Text>
+    )
+  }
+  return <Text color="$fg-muted">progress measured {mediaDuration(ageMs)} ago</Text>
+}
+
 /**
  * Resident runner status is always visible in its own RUNNER frame. The
  * queue-pause STATUS line lives INSIDE this frame (user directive 2026-07-21,
  * supersedes the separate STATUS box), the uptime/downtime timer rides the
  * top border right-aligned opposite the RUNNER title, and the health marker
- * is a pulsing `$` shell prompt. Border severity: down/stale red, paused
- * warning, healthy default.
+ * is a pulsing `$` shell prompt. Border severity: down/stale/unmeasured red,
+ * paused warning, measured healthy default.
  */
 function TimelineRunnerBox({
   projection,
@@ -5107,6 +5150,7 @@ function TimelineRunnerBox({
           RUNNER STALE — last tick {mediaDuration(timing.ageMs)} ago
         </Text>
       ) : null}
+      {runner === null ? null : <RunnerProgressObservation progress={runner.queueProgress} now={now} />}
       <RunnerProgressStatus progress={runner?.queueProgress} headBlock={headBlock} />
       {pause === undefined ? null : (
         <>

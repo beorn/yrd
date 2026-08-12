@@ -8,6 +8,7 @@ import {
   type QueueAttempt,
   type QueueStatusResult,
   type QueueTimelineProjection,
+  type QueueTimelineRunner,
   type QueueTimelineStatus,
   type QueueTimelineStatusFilter,
 } from "../src/queue-status-view.tsx"
@@ -402,7 +403,7 @@ type ProjectionOptions = Readonly<{
   rowLimit?: number
   retainedSinceMs?: number
   attempts?: readonly QueueAttempt[]
-  runner?: Readonly<{ pid: number; startedAt: string; lastTickAt: string }> | null
+  runner?: QueueTimelineRunner | null
   oldestOpenMs?: number | null
 }>
 
@@ -423,7 +424,12 @@ function fixtureProjection(result: QueueStatusResult, options: ProjectionOptions
     base: "main",
     runner:
       options.runner === undefined
-        ? { pid: 84042, startedAt: "2026-07-13T11:00:00.000Z", lastTickAt: "2026-07-13T11:59:58.000Z" }
+        ? {
+            pid: 84042,
+            startedAt: "2026-07-13T11:00:00.000Z",
+            lastTickAt: "2026-07-13T11:59:58.000Z",
+            queueProgress: { state: "healthy", observedAt: "2026-07-13T11:59:58.000Z" },
+          }
         : options.runner,
   })
 }

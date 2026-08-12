@@ -1121,7 +1121,7 @@ bytes cannot override the base declaration.
 Queue progress thresholds share this one strict declaration surface:
 
 ```yaml
-progress: { noLandingMs: 600000, refusalCount: 3 }
+progress: { noLandingMs: 1800000, refusalCount: 3 }
 ```
 
 Both fields must be positive integers and default to the values above.

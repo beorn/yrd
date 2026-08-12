@@ -480,7 +480,7 @@ appendFileSync(marker, "ready\\n")
     ).rejects.toMatchObject({ name: "YrdRuntimeReloadRequest" })
     await expect(residentRunnerStatus(repo)).resolves.toMatchObject({
       clean: false,
-      queueProgress: { state: "stalled", findings: [finding] },
+      queueProgress: { state: "stalled", observedAt: expect.any(String), findings: [finding] },
     })
   })
 })

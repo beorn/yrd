@@ -24,7 +24,7 @@ describe("Yrd v4 config", () => {
         typecheck: { run: "bun run typecheck", runner: "local", kind: "check" },
         merge: { runner: "local", kind: "merge" },
       },
-      progress: { noLandingMs: 600_000, refusalCount: 3 },
+      progress: { noLandingMs: 1_800_000, refusalCount: 3 },
       contest: { concurrency: 2, timeoutMs: 1_800_000, evaluators: ["typecheck"] },
     })
     expect(loaded.config.flows?.[0]?.steps.map(({ name, kind }) => ({ name, kind }))).toEqual([
