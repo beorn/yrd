@@ -6264,6 +6264,30 @@ describe("Queue command adapters", () => {
     ).resolves.toEqual({ status: "not-proven", reason: "change-id-not-on-base" })
   })
 
+  it("checks and lands the exact Change-Id-stamped Candidate", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"], {
+      prepareCandidate: true,
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = app.state().bays.prs.PR1
+    if (pr === undefined) throw new Error("expected PR1")
+    const changeId = currentPRRev(pr).changeId
+    if (changeId === undefined) throw new Error("expected PR1 Change-Id")
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    if (run === undefined) throw new Error("expected Queue run")
+    const checkJob = run.steps[0]?.job
+    if (checkJob?.status !== "completed" || checkJob.conclusion !== "success") {
+      throw new Error("check did not pass")
+    }
+    const checked = GitCheckEvidenceSchema.parse(checkJob.output)
+
+    expect(await git(repo, ["show", "-s", "--format=%B", checked.candidateSha])).toContain(`Change-Id: ${changeId}`)
+    expect(run.integration).toMatchObject({ commit: checked.candidateSha, baseSha: checked.candidateSha })
+  })
+
   it("lands the checked candidate through origin without touching a dirty local base checkout", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     const remote = join(repo, "..", "origin.git")
