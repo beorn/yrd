@@ -35,6 +35,12 @@ const ReceiverTargetSchema = z
   .object({
     bay: TextSchema.optional(),
     name: TextSchema.optional(),
+    /**
+     * The issue this change belongs to. A `refs/for/<base>/<change>` push names
+     * one in the ref itself, and dropping it here would mean yrd forgot the
+     * only thing the push carried beyond its commits.
+     */
+    issue: TextSchema.optional(),
     base: GitRefSchema,
     baseSha: GitShaSchema,
     /**
@@ -919,11 +925,17 @@ async function validateStored(
   check(resolved, withIntakePolicy(`branch '${receipt.branch}' is no longer authorized for Yrd intake`, options))
   const target = normalizeTarget(resolved, receiver)
   const stored = receipt.intake
+  // Every field the receipt carries forward into intake is compared, including
+  // the carrier branch: a submit resolver derives that branch rather than
+  // reading it off the ref, so it is exactly the field that can move between
+  // the push and the drain, and an unchecked field is an unauthorized one.
   check(
     stored.bay === target.bay &&
       stored.name === target.name &&
+      stored.issue === target.issue &&
       stored.base === target.base &&
-      stored.baseSha === target.baseSha,
+      stored.baseSha === target.baseSha &&
+      stored.branch === (target.branch ?? receipt.branch),
     `authorization changed for receipt '${receipt.id}'`,
   )
   await validBranch(receiver, receipt.branch, "intake branch")

@@ -459,7 +459,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     // could only answer branch questions would refuse this push, which is the
     // regression this case exists to catch.
     const env = await installHookHost(f.root, {
-      "for:main/my-change": target(f.baseSha, { branch: "issue/my-change" }),
+      "for:main/my-change": target(f.baseSha, { branch: "issue/my-change", issue: "my-change" }),
     })
     const result = await push(f, "work:refs/for/main/my-change", env)
     expect(result.stderr).not.toContain("only branch refs")
@@ -472,7 +472,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     const delivered: ReceiverReceipt[] = []
     const drained = await f.receiver.drain({
       resolveTarget: async (_branch, _update, intent) =>
-        intent === undefined ? null : target(f.baseSha, { branch: "issue/my-change" }),
+        intent === undefined ? null : target(f.baseSha, { branch: "issue/my-change", issue: "my-change" }),
       intake: async (receipt) => void delivered.push(receipt),
     })
     expect(drained).toMatchObject({ delivered: [expect.any(String)], failed: [], ambiguous: [] })
@@ -484,10 +484,38 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
         change: "my-change",
         oldSha: zero,
         headSha,
-        intake: expect.objectContaining({ base: "main", branch: "issue/my-change", headSha }),
+        // The issue rides through to intake. A push that carries an issue
+        // reference and lands a PR with no issue has forgotten the only thing
+        // the ref said beyond its commits.
+        intake: expect.objectContaining({ base: "main", branch: "issue/my-change", issue: "my-change", headSha }),
       }),
     ])
     expect(await inboxFiles(f.receiver)).toEqual([])
+  })
+
+  it("refuses at drain when the carrier branch moved since the push", async () => {
+    const f = await fixture("submit-drift")
+    await git(f.mainRepo, "switch", "-qc", "work")
+    await commit(f.mainRepo, "drift.txt")
+    const env = await installHookHost(f.root, {
+      "for:main/my-change": target(f.baseSha, { branch: "issue/my-change" }),
+    })
+    expect((await push(f, "work:refs/for/main/my-change", env)).code).toBe(0)
+
+    // A submit resolver DERIVES the carrier rather than reading it off the ref,
+    // so the carrier is exactly the field that can move between the push and the
+    // drain — and it was the one field the drift check never compared. Intake
+    // would then have run against a branch nobody re-authorized. Everything else
+    // here is deliberately identical, so only the branch can fail this.
+    const result = await f.receiver.drain({
+      resolveTarget: async (_branch, _update, intent) =>
+        intent === undefined ? null : target(f.baseSha, { branch: "issue/somewhere-else" }),
+      intake: async () => {
+        throw new Error("must not run")
+      },
+    })
+    expect(result.delivered).toEqual([])
+    expect(result.failed).toEqual([{ id: expect.any(String), error: expect.stringContaining("authorization changed") }])
   })
 
   it("resolves the base by longest existing branch, so a slashed change name is not read as a base", async () => {

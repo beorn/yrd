@@ -13,6 +13,7 @@ import {
   createGitPushReceiver,
   createGitWorkspace,
   baseIdentity,
+  defaultBayBranch,
   loadGitPushReceiver,
   runReceiverHookFromEnvironment,
   withBays,
@@ -23,6 +24,8 @@ import {
   type GitWorkspaceLifecycleHooks,
   type RemoteBranchSnapshot,
   type ReceiverReceipt,
+  type ReceiverRefUpdate,
+  type ReceiverSubmitIntent,
   type ReceiverTarget,
 } from "@yrd/bay"
 import {
@@ -1186,25 +1189,92 @@ export type YrdHost = Readonly<{
 }>
 
 /**
- * What `receiverTarget` below actually requires, in one sentence, rendered into
- * the receiver's refusal. It lives beside the resolver rather than at the call
- * sites so the rule and the explanation of the rule cannot drift apart.
+ * What `receiverTarget` below requires of a `refs/heads/` push, in one sentence,
+ * rendered into the receiver's refusal. It lives beside the resolver rather than
+ * at the call sites so the rule and the explanation of the rule cannot drift
+ * apart.
  *
  * Note what the rule is NOT: there is no branch-name pattern anywhere in intake.
  * A branch is authorized because an ACTIVE BAY tracks it, which is both stricter
  * than a name prefix and indifferent to what the branch is called — `cto/…` and
  * `chief/…` are admitted on the same terms as `task/…`.
+ *
+ * It also does not describe a `refs/for/` push, which carries its authorization
+ * in the ref and so can never fail this way. That path refuses by throwing the
+ * reason it actually hit — this sentence would name a bay the pusher was never
+ * asked for.
  */
 const INTAKE_POLICY =
   "no active bay tracks this branch — open one with `yrd bay open --bay <name>`, or push a branch an active bay already tracks"
 
-function receiverTarget(app: YrdCliApp) {
-  return (branch: string): ReceiverTarget | null => {
+/**
+ * Resolves what a pushed ref lands on: a branch push must find an active bay,
+ * a submit push carries its own answer.
+ *
+ * The asymmetry is the point. A `refs/for/<base>/<change>` push predates its bay
+ * by construction — that is what "push IS submit" means — so it cannot be
+ * authorized by "an active bay tracks this branch", and asking it to be is how
+ * the whole namespace stayed unreachable. Intake does not need a bay either:
+ * `bay.intake` takes `bay` as optional and mints a PR from branch/name/base
+ * alone. The PR is the unit of intake; a bay is a workspace that usually
+ * happens to exist.
+ */
+/**
+ * Exactly the bay fields the resolver reads. Narrow on purpose: it is what lets
+ * the rule be tested against a literal instead of a booted runtime, and it says
+ * in the type that intake authorization looks at nothing else.
+ */
+export type ReceiverBayView = Readonly<{
+  id: string
+  name: string
+  issue?: string
+  branch: string
+  base: string
+  baseSha?: string
+  status: string
+}>
+export type ReceiverBayIndex = Readonly<{
+  state: () => Readonly<{ bays: Readonly<{ byId: Readonly<Record<string, ReceiverBayView>> }> }>
+}>
+
+export function receiverTarget(app: ReceiverBayIndex, process: Pick<Process, "run">, repo: string) {
+  return async (
+    branch: string,
+    _update: Readonly<ReceiverRefUpdate>,
+    intent?: ReceiverSubmitIntent,
+  ): Promise<ReceiverTarget | null> => {
+    // One rule for what a change is called: the branch a bay for this issue
+    // would already have. So a bay opened later for the same issue converges on
+    // the carrier the submit already created rather than forking a second one.
+    const carrier = intent === undefined ? branch : defaultBayBranch(intent.name)
     const bay = Object.values(app.state().bays.byId).find(
-      (candidate) => candidate.status === "active" && candidate.branch === branch,
+      (candidate) =>
+        candidate.status === "active" &&
+        (candidate.branch === carrier || (intent !== undefined && candidate.issue === intent.name)),
     )
-    if (bay?.baseSha === undefined) return null
-    return { bay: bay.id, name: bay.name, base: bay.base, baseSha: bay.baseSha }
+    if (bay !== undefined) {
+      if (bay.baseSha === undefined) return null
+      return {
+        bay: bay.id,
+        name: bay.name,
+        ...(bay.issue === undefined ? {} : { issue: bay.issue }),
+        base: bay.base,
+        baseSha: bay.baseSha,
+        // A branch push names its branch in the ref and the receiver reads it
+        // there; only a submit push needs to be told.
+        ...(intent === undefined ? {} : { branch: bay.branch }),
+      }
+    }
+    if (intent === undefined) return null
+    const baseSha = await resolveCommit(process, repo, `refs/heads/${intent.base}`)
+    // Never `return null` here: null renders INTAKE_POLICY, which would answer a
+    // vanished base branch with instructions to open a bay. The push already
+    // proved this base existed a moment ago, so its disappearance is a race
+    // worth naming, not an authorization verdict.
+    if (baseSha === undefined) {
+      throw new Error(`yrd: base branch '${intent.base}' disappeared between admission and resolution`)
+    }
+    return { name: intent.name, issue: intent.name, base: intent.base, baseSha, branch: carrier }
   }
 }
 
@@ -1766,7 +1836,7 @@ async function createYrdRuntimeHost(
       await app.queue.quiesceLegacyRoots({ now: new Date().toISOString(), by: "yrd/migration" })
     }
     const runtimeApp = app
-    const resolveTarget = receiverTarget(runtimeApp)
+    const resolveTarget = receiverTarget(runtimeApp, process, repository.repo)
     const receiverLog = log.child("receiver")
     const drain = async (): Promise<void> => {
       if (mode === "viewer") throw new Error("yrd: viewer runtime cannot drain the push receiver")
@@ -1892,7 +1962,7 @@ async function runReceiverHook(
     await runReceiverHookFromEnvironment(mode, {
       env,
       process: runtimeProcess,
-      resolveTarget: receiverTarget(runtimeApp),
+      resolveTarget: receiverTarget(runtimeApp, runtimeProcess, repository.repo),
       intakePolicy: INTAKE_POLICY,
       intake: (receipt) => intakeReceipt(runtimeApp, receipt),
     })
