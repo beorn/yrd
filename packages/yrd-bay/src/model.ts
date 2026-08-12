@@ -832,9 +832,35 @@ export function checksRequested(pr: PR): boolean {
   return checkRequest(pr) !== undefined
 }
 
+/**
+ * The live check request for the current revision, matched on CONTENT.
+ *
+ * A request is about a specific tree being merged into a specific base, and
+ * `headSha` + `baseSha` say exactly that. The revision ordinal does not: a
+ * mechanical rebuild that lands on byte-identical content mints a new ordinal
+ * while the head, the base and therefore the meaning of the request are
+ * unchanged. Keying on the ordinal made such a rebuild discard the request —
+ * the carrier fell out of the queue, the runner re-requested, admission passed,
+ * the next rebuild discarded it again, and nothing merged for three hours with
+ * every instrument reading green (@i/10-merge-queue/admission-passes-nothing-merges,
+ * where one carrier reached revision 66).
+ *
+ * A real change still invalidates: new content moves `headSha`, and a rebase
+ * moves `baseSha`.
+ *
+ * `baseSha` is absent on requests from journals written before it was recorded.
+ * Those keep the original ordinal rule rather than being widened by a
+ * comparison neither side can make — a legacy request means what it meant when
+ * it was written, and silently matching `undefined` to `undefined` would admit
+ * exactly the rebase this predicate exists to catch.
+ */
 export function checkRequest(pr: PR): PRCheckRequest | undefined {
   const revision = currentPRRev(pr)
-  return pr.checkRequests.findLast((request) => request.revision === revision.n && request.headSha === revision.head)
+  return pr.checkRequests.findLast((request) =>
+    request.baseSha === undefined
+      ? request.revision === revision.n && request.headSha === revision.head
+      : request.headSha === revision.head && request.baseSha === revision.baseSha,
+  )
 }
 
 export type BaysState = Readonly<{
