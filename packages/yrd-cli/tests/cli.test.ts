@@ -4376,6 +4376,71 @@ describe("runYrd", () => {
     expect(app.state().bays.byId.B1?.status).toBe("active")
   })
 
+  it("counts a multi-reason Bay once in the conservation histogram", () => {
+    const result = runInternals.bayPruneOutcomes(
+      [
+        {
+          bay: "B1",
+          name: "multiply-blocked",
+          branch: "task/multiply-blocked",
+          wrapper: "git",
+          lines: [
+            { class: "consumer", verdict: "BLOCK", evidence: "live consumer" },
+            { class: "worktree", verdict: "BLOCK", evidence: "dirty worktree" },
+          ],
+          exit: 1,
+          safe: false,
+        },
+      ],
+      new Set(),
+    )
+
+    expect(result.rows.kept).toEqual([{ bay: "B1", reasons: ["consumer", "worktree"] }])
+    expect(result.histogram).toEqual({ pruned: 0, keptByReason: { consumer: 1 }, pagedByReason: {} })
+    expect(
+      result.histogram.pruned +
+        Object.values(result.histogram.keptByReason).reduce((sum, count) => sum + count, 0) +
+        Object.values(result.histogram.pagedByReason).reduce((sum, count) => sum + count, 0),
+    ).toBe(1)
+  })
+
+  it("pages with conservation JSON when the host process-CWD census is unavailable", async () => {
+    const app = await createApp()
+    await openTestBay(app, { name: "census-gap", branch: "task/census-gap" })
+    const output = outputIO({
+      bayProtections: [
+        {
+          bay: "*",
+          path: "/repo/.bays",
+          source: "live-process-cwd-unavailable",
+          evidence: "process CWD census unavailable: permission denied",
+        },
+      ],
+    })
+
+    expect(await runYrd(app, yrd("admin", "bay", "prune", "--json"), output.io), output.stderr()).toBe(1)
+    const result = JSON.parse(output.stdout()) as {
+      examined: number
+      outcomes: { pruned: readonly string[]; kept: readonly unknown[]; paged: readonly { reasons: string[] }[] }
+      histogram: {
+        pruned: number
+        keptByReason: Readonly<Record<string, number>>
+        pagedByReason: Readonly<Record<string, number>>
+      }
+    }
+    expect(result).toMatchObject({
+      command: "bay.prune",
+      dryRun: true,
+      examined: 1,
+      outcomes: { pruned: [], kept: [], paged: [{ bay: "B1", reasons: expect.arrayContaining(["consumer"]) }] },
+    })
+    expect(
+      result.histogram.pruned +
+        Object.values(result.histogram.keptByReason).reduce((sum, count) => sum + count, 0) +
+        Object.values(result.histogram.pagedByReason).reduce((sum, count) => sum + count, 0),
+    ).toBe(result.examined)
+  })
+
   it("admin bay prune preserves a dirty Bay and pages it for the next pass", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-bay-prune-dirty-"))
     const remote = join(root, "remote.git")
@@ -4398,7 +4463,32 @@ describe("runYrd", () => {
 
       const app = await createApp({ bayPath: bay, dirtyBay: true })
       await openTestBay(app, { name: "dirty", branch: "task/dirty" })
-      const output = outputIO({ cwd: repo, now: () => Date.parse("2026-07-11T12:01:00.000Z") })
+      const now = () => Date.parse("2026-07-11T12:01:00.000Z")
+      const protectedOutput = outputIO({
+        cwd: repo,
+        now,
+        bayProtections: [
+          {
+            bay: "B1",
+            path: bay,
+            source: "inhab-status",
+            evidence: "Inhab status home @dev.1 last state is ready",
+          },
+        ],
+      })
+
+      expect(
+        await runYrd(app, yrd("admin", "bay", "prune", "--apply", "--json"), protectedOutput.io),
+        protectedOutput.stderr(),
+      ).toBe(1)
+      expect(JSON.parse(protectedOutput.stdout())).toMatchObject({
+        preserved: [],
+        outcomes: { kept: [{ bay: "B1", reasons: expect.arrayContaining(["consumer", "worktree"]) }] },
+      })
+      expect(Object.values(app.state().jobs.byId).filter((job) => job.definition === "bay.checkpoint")).toHaveLength(0)
+      expect(app.bays.get("B1")).toMatchObject({ status: "active" })
+
+      const output = outputIO({ cwd: repo, now })
 
       expect(await runYrd(app, yrd("admin", "bay", "prune", "--apply", "--json"), output.io), output.stderr()).toBe(1)
       expect(JSON.parse(output.stdout())).toMatchObject({

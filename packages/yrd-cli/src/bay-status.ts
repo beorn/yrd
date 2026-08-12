@@ -12,6 +12,7 @@ import type { YrdBayProtection } from "./types.ts"
 
 export const YRD_BAY_PROTECTIONS_ENV = "YRD_BAY_PROTECTIONS" as const
 export const YRD_BAY_PROTECTIONS_SCHEMA = "yrd-bay-protections/1" as const
+export const YRD_BAY_PROTECTION_UNKNOWN_SOURCE = "live-process-cwd-unavailable" as const
 export const HISTORICAL_BAY_OWNER_AGE_FLOOR_MS = 48 * 60 * 60 * 1_000
 
 export function freshOriginBranchMissing(exitCode: number | null): boolean | undefined {
@@ -61,6 +62,8 @@ export type BayStatusFacts = Readonly<{
   ageMs?: number
   /** Host-owned live consumers that still reference this Bay. */
   protectedBy?: readonly string[]
+  /** Host-owned consumer probes that could not establish absence. */
+  protectionGaps?: readonly string[]
   /** `git status --porcelain` empty when path exists. */
   worktreeDirty?: boolean
   worktreeMissing?: boolean
@@ -133,7 +136,26 @@ export function protectionEvidenceForBay(
   bay: Readonly<{ id: string; path?: string }>,
 ): string[] {
   return protections
-    .filter((protection) => protection.bay === bay.id || (bay.path !== undefined && protection.path === bay.path))
+    .filter(
+      (protection) =>
+        protection.source !== YRD_BAY_PROTECTION_UNKNOWN_SOURCE &&
+        (protection.bay === bay.id || (bay.path !== undefined && protection.path === bay.path)),
+    )
+    .map((protection) => protection.evidence)
+}
+
+export function protectionGapEvidenceForBay(
+  protections: readonly YrdBayProtection[],
+  bay: Readonly<{ id: string; path?: string }>,
+): string[] {
+  return protections
+    .filter(
+      (protection) =>
+        protection.source === YRD_BAY_PROTECTION_UNKNOWN_SOURCE &&
+        (protection.bay === "*" ||
+          protection.bay === bay.id ||
+          (bay.path !== undefined && protection.path === bay.path)),
+    )
     .map((protection) => protection.evidence)
 }
 
@@ -216,6 +238,12 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
       class: "consumer",
       verdict: "BLOCK",
       evidence: (facts.protectedBy ?? []).join("; "),
+    })
+  } else if ((facts.protectionGaps?.length ?? 0) > 0) {
+    lines.push({
+      class: "consumer",
+      verdict: "UNKNOWN",
+      evidence: (facts.protectionGaps ?? []).join("; "),
     })
   } else {
     lines.push({
