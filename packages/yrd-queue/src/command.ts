@@ -5884,6 +5884,9 @@ async function validatePinnedCandidate(
 ): Promise<PinnedCandidateResult> {
   let pinned = checked
   if (checked.baseSha !== baseSha) {
+    const attemptedLanding =
+      (await landingAttemptRefs(git, repo, input, checked)).length > 0 &&
+      (await git.run(repo, ["merge-base", "--is-ancestor", checked.candidateSha, baseSha], true)).code === 0
     const current = input.candidate
     const treeEquivalent =
       primaryPR(input).intent !== undefined &&
@@ -5891,7 +5894,7 @@ async function validatePinnedCandidate(
       current?.treeSha === checked.candidateTreeSha &&
       current.sha !== undefined &&
       current.ref !== undefined
-    if (!treeEquivalent) {
+    if (!treeEquivalent && !attemptedLanding) {
       return {
         error: {
           code: "stale-check",
@@ -5899,15 +5902,25 @@ async function validatePinnedCandidate(
         },
       }
     }
-    pinned = PinnedCandidateSchema.parse({
-      baseSha,
-      candidateSha: current.sha,
-      candidateTreeSha: current.treeSha,
-      candidateRef: current.ref,
-      ...(current.changes === undefined ? {} : { changes: current.changes }),
-      ...(current.sourceRewrites === undefined ? {} : { sourceRewrites: current.sourceRewrites }),
-      ...(current.submoduleResolutions === undefined ? {} : { submoduleResolutions: current.submoduleResolutions }),
-    })
+    if (!attemptedLanding) {
+      if (current?.sha === undefined || current.treeSha === undefined || current.ref === undefined) {
+        return {
+          error: {
+            code: "stale-check",
+            message: `queue '${primaryPR(input).base}' has no replacement Candidate for moved base '${baseSha}'`,
+          },
+        }
+      }
+      pinned = PinnedCandidateSchema.parse({
+        baseSha,
+        candidateSha: current.sha,
+        candidateTreeSha: current.treeSha,
+        candidateRef: current.ref,
+        ...(current.changes === undefined ? {} : { changes: current.changes }),
+        ...(current.sourceRewrites === undefined ? {} : { sourceRewrites: current.sourceRewrites }),
+        ...(current.submoduleResolutions === undefined ? {} : { submoduleResolutions: current.submoduleResolutions }),
+      })
+    }
   }
   if ((await git.commit(repo, pinned.candidateRef)) !== pinned.candidateSha) {
     return { error: { code: "stale-check", message: "checked candidate ref moved" } }
@@ -6281,6 +6294,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
       if (alreadyLanded !== undefined) {
         const cancellation = mergeAuthorityCancellation(context)
         if (cancellation !== undefined) return cancellation
+        const recovering = (await landingAttemptRefs(git, repo, input, checked)).length > 0
         return await withComponentMainPromotions(
           git,
           repo,
@@ -6292,7 +6306,9 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
             return {
               status: "completed",
               conclusion: "success",
-              output: integrationProof(baseSha, checked, alreadyLanded, settlement.receipts),
+              output: recovering
+                ? await physicalIntegrationProof(git, repo, input, context, baseSha, checked, settlement.receipts)
+                : integrationProof(baseSha, checked, alreadyLanded, settlement.receipts),
             }
           },
           { settleSafePromotions: true },
@@ -6321,6 +6337,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
             if (sourceRefError !== undefined) return failed("invalid-candidate", sourceRefError)
             const cancellation = mergeAuthorityCancellation(context)
             if (cancellation !== undefined) return cancellation
+            await recordLandingAttempt(git, repo, input, context, checked)
             return withComponentMainPromotions(git, repo, checked.baseSha, checked.candidateSha, async () => {
               // Component mains are promoted explicitly around this root push.
               // A caller's recursive-push config would replay the root-only SHA refspec inside each component.
@@ -6440,8 +6457,12 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
           if ((await git.commit(checkedOut, "HEAD")) !== baseSha) return failed("stale-base", `${branch} moved`)
           const cancellation = mergeAuthorityCancellation(context)
           if (cancellation !== undefined) return cancellation
+          await recordLandingAttempt(git, repo, input, context, checked)
           const moved = await git.run(checkedOut, ["merge", "--ff-only", checked.candidateSha], true)
-          if (moved.code !== 0) return failed("stale-base", moved.stderr || "base branch moved")
+          if (moved.code !== 0) {
+            await clearLandingAttempts(git, repo, input, checked)
+            return failed("stale-base", moved.stderr || "base branch moved")
+          }
           const aligned = await materializeSubmodules(git, { worktree: checkedOut, referenceWorktree: repo })
           if (aligned.code !== 0) {
             const rolledBack = await git.run(checkedOut, ["reset", "--merge", baseSha], true)
@@ -6452,6 +6473,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
                 [aligned.stderr, rolledBack.stderr, restored.stderr].filter((detail) => detail !== "").join("\n"),
               )
             }
+            await clearLandingAttempts(git, repo, input, checked)
             return failed(
               "candidate-submodules-failed",
               aligned.stderr || aligned.stdout || "could not align merged candidate submodules",
@@ -6467,14 +6489,19 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
                 [rolledBack.stderr, restored.stderr].filter((detail) => detail !== "").join("\n"),
               )
             }
+            await clearLandingAttempts(git, repo, input, checked)
             return failed("invalid-candidate", sourceRefError)
           }
         } else {
           const cancellation = mergeAuthorityCancellation(context)
           if (cancellation !== undefined) return cancellation
+          await recordLandingAttempt(git, repo, input, context, checked)
           const expected = base.local ? baseSha : "0".repeat(baseSha.length)
           const moved = await git.run(repo, ["update-ref", base.branchRef, checked.candidateSha, expected], true)
-          if (moved.code !== 0) return failed("stale-base", moved.stderr || "base branch moved")
+          if (moved.code !== 0) {
+            await clearLandingAttempts(git, repo, input, checked)
+            return failed("stale-base", moved.stderr || "base branch moved")
+          }
         }
         return withComponentMainPromotions(
           git,
@@ -6529,6 +6556,7 @@ export function configuredMergeStep<Shape extends PRShape>(
       if (alreadyLanded !== undefined) {
         const cancellation = mergeAuthorityCancellation(context)
         if (cancellation !== undefined) return cancellation
+        const recovering = (await landingAttemptRefs(git, repo, input, candidate.checked)).length > 0
         return await withComponentMainPromotions(
           git,
           repo,
@@ -6540,7 +6568,17 @@ export function configuredMergeStep<Shape extends PRShape>(
             return {
               status: "completed",
               conclusion: "success",
-              output: integrationProof(candidate.base.sha, candidate.checked, alreadyLanded, settlement.receipts),
+              output: recovering
+                ? await physicalIntegrationProof(
+                    git,
+                    repo,
+                    input,
+                    context,
+                    candidate.base.sha,
+                    candidate.checked,
+                    settlement.receipts,
+                  )
+                : integrationProof(candidate.base.sha, candidate.checked, alreadyLanded, settlement.receipts),
             }
           },
           { settleSafePromotions: true },
@@ -6573,6 +6611,7 @@ export function configuredMergeStep<Shape extends PRShape>(
         async () => {
           const cancellation = mergeAuthorityCancellation(context)
           if (cancellation !== undefined) return cancellation
+          await recordLandingAttempt(git, repo, input, context, candidate.checked)
           const outcome = await command(input, context)
           let landing: GitQueueTarget
           try {
@@ -6596,6 +6635,7 @@ export function configuredMergeStep<Shape extends PRShape>(
             if (sourceRefError !== undefined) {
               const rollbackError = await rollbackQueueBase(git, repo, candidate.base, landing)
               if (rollbackError !== undefined) return failed("merge-rollback-failed", rollbackError)
+              await clearLandingAttempts(git, repo, input, candidate.checked)
               return failed("invalid-candidate", sourceRefError)
             }
             return withComponentMainPromotions(
@@ -6623,6 +6663,7 @@ export function configuredMergeStep<Shape extends PRShape>(
               { settleSafePromotions: true },
             )
           }
+          await clearLandingAttempts(git, repo, input, candidate.checked)
           if (outcome.status === "completed" && outcome.conclusion === "failure") {
             return failed(outcome.error.code, outcome.error.message)
           }
@@ -6667,8 +6708,86 @@ function primaryPR(input: StepExecution): StepExecution["prs"][number] {
   return primary
 }
 
-function repositoryReceiptFailure(code: "repository-corrupt" | "repository-incomplete", message: string): never {
+function repositoryReceiptFailure(
+  code: "repository-corrupt" | "repository-incomplete" | "unknown",
+  message: string,
+): never {
   throw createFailure({ kind: "infrastructure", code, message })
+}
+
+const LANDING_ATTEMPT_REF_ROOT = "refs/yrd/landing-attempts"
+
+function landingAttemptRef(input: StepExecution, context: JobContext): string {
+  const safeJob = context.id.replace(/[^a-zA-Z0-9._-]/gu, "-")
+  return `${LANDING_ATTEMPT_REF_ROOT}/${input.run}/${safeJob}/attempt-${context.attempt}`
+}
+
+async function recordLandingAttempt(
+  git: Git,
+  repo: string,
+  input: StepExecution,
+  context: JobContext,
+  checked: PinnedCandidate,
+): Promise<void> {
+  const ref = landingAttemptRef(input, context)
+  const zero = "0".repeat(checked.candidateSha.length)
+  const recorded = await git.run(repo, ["update-ref", "--create-reflog", ref, checked.candidateSha, zero], true)
+  if (recorded.code === 0 || (await git.optionalCommit(repo, ref)) === checked.candidateSha) return
+  return repositoryReceiptFailure(
+    "repository-corrupt",
+    `yrd: landing attempt ref '${ref}' is already occupied by different evidence`,
+  )
+}
+
+async function landingAttemptRefs(
+  git: Git,
+  repo: string,
+  input: StepExecution,
+  checked: PinnedCandidate,
+): Promise<readonly string[]> {
+  const prefix = `${LANDING_ATTEMPT_REF_ROOT}/${input.run}/`
+  const listed = await git.run(repo, ["for-each-ref", "--format=%(objectname) %(refname)", prefix], true)
+  if (listed.code !== 0) {
+    return repositoryReceiptFailure(
+      "repository-incomplete",
+      `yrd: Queue run '${input.run}' landing attempts are unreadable: ${listed.stderr || listed.stdout}`,
+    )
+  }
+  return listed.stdout === ""
+    ? []
+    : listed.stdout.split("\n").flatMap((line) => {
+        const [sha, ref, extra] = line.split(/\s+/u)
+        if (sha === undefined || ref === undefined || extra !== undefined) {
+          return repositoryReceiptFailure(
+            "repository-corrupt",
+            `yrd: Queue run '${input.run}' landing attempt is malformed: ${line}`,
+          )
+        }
+        if (sha !== checked.candidateSha) {
+          return repositoryReceiptFailure(
+            "repository-corrupt",
+            `yrd: Queue run '${input.run}' landing attempt '${ref}' targets '${sha}', expected '${checked.candidateSha}'`,
+          )
+        }
+        return [ref]
+      })
+}
+
+async function clearLandingAttempts(
+  git: Git,
+  repo: string,
+  input: StepExecution,
+  checked: PinnedCandidate,
+): Promise<void> {
+  for (const ref of await landingAttemptRefs(git, repo, input, checked)) {
+    const deleted = await git.run(repo, ["update-ref", "-d", ref, checked.candidateSha], true)
+    if (deleted.code !== 0) {
+      return repositoryReceiptFailure(
+        "repository-corrupt",
+        `yrd: confirmed receipt could not retire landing attempt '${ref}'`,
+      )
+    }
+  }
 }
 
 async function landingReceiptBody(
@@ -6723,12 +6842,6 @@ async function landingReceiptBody(
       },
     ]
   })
-  if (gates.length === 0) {
-    return repositoryReceiptFailure(
-      "repository-incomplete",
-      `yrd: Queue run '${input.run}' has no checked gate evidence for landing receipt`,
-    )
-  }
   const paths = [...new Set((checked.submoduleResolutions ?? []).map(({ path }) => path))].toSorted()
   const pins = await Promise.all(
     paths.map(async (path) => ({
@@ -6807,6 +6920,246 @@ async function readLandingReceipt(
   }
 }
 
+export type RepositoryLandingIdentity = Readonly<{
+  pr: string
+  revision: number
+  headSha: string
+  changeId: string
+}>
+
+export type RepositoryLandingSearchResult =
+  | Readonly<{
+      status: "proven"
+      fact: Readonly<{
+        pr: string
+        revision: number
+        headSha: string
+        run: string
+        commit: string
+        landingSha: string
+        baseSha: string
+        changeId: string
+        receipt: LandingReceiptPointer
+      }>
+    }>
+  | Readonly<{ status: "not-proven"; reason: "receipt-missing" | "landing-not-on-base" }>
+
+/** Resolve one logical revision from repository truth and its Queue receipt index. */
+export async function findRepositoryLandingReceipt(
+  options: Readonly<{
+    inject: Readonly<{ process: Pick<Process, "run"> }>
+    repo: string
+    baseSha: string
+    identity: RepositoryLandingIdentity
+  }>,
+): Promise<RepositoryLandingSearchResult> {
+  const git = createGit(options.inject.process)
+  const listed = await git.run(options.repo, ["notes", `--ref=${LANDING_RECEIPT_NOTES_NAME}`, "list"], true)
+  if (listed.code !== 0) {
+    return repositoryReceiptFailure(
+      "unknown",
+      `yrd: repository receipt ref '${LANDING_RECEIPT_REF}' is unreadable: ${listed.stderr || listed.stdout}`,
+    )
+  }
+  const matches: Array<Extract<RepositoryLandingSearchResult, { status: "proven" }>> = []
+  let offBase = false
+  for (const line of listed.stdout === "" ? [] : listed.stdout.split("\n")) {
+    const [listedNote, target, extra] = line.split(/\s+/u)
+    if (listedNote === undefined || target === undefined || extra !== undefined) {
+      return repositoryReceiptFailure("repository-corrupt", `yrd: repository receipt listing is malformed: ${line}`)
+    }
+    const stored = await readLandingReceipt(git, options.repo, target)
+    if (stored === undefined || stored.pointer.note !== listedNote) {
+      return repositoryReceiptFailure(
+        "repository-corrupt",
+        `yrd: repository receipt listing for '${target}' disagrees with its note object`,
+      )
+    }
+    const receipt = stored.envelope.receipt
+    if (
+      receipt.landing.commit !== target ||
+      receipt.landing.baseAfter !== target ||
+      (receipt.candidate.commit !== target &&
+        (await git.run(options.repo, ["merge-base", "--is-ancestor", receipt.candidate.commit, target], true)).code !==
+          0)
+    ) {
+      return repositoryReceiptFailure(
+        "repository-corrupt",
+        `yrd: repository receipt '${listedNote}' does not prove its landing target '${target}'`,
+      )
+    }
+    for (const change of receipt.changes) {
+      const reachable = await git.run(
+        options.repo,
+        ["merge-base", "--is-ancestor", change.generatedCommit, target],
+        true,
+      )
+      const trailers = await git.run(
+        options.repo,
+        ["show", "-s", "--format=%(trailers:key=Change-Id,valueonly)", change.generatedCommit],
+        true,
+      )
+      if (reachable.code !== 0 || trailers.code !== 0 || trailers.stdout.split("\n").filter(Boolean).length !== 1) {
+        return repositoryReceiptFailure(
+          "repository-corrupt",
+          `yrd: repository receipt '${listedNote}' cannot prove generated change '${change.generatedCommit}'`,
+        )
+      }
+      if (trailers.stdout !== change.changeId) {
+        return repositoryReceiptFailure(
+          "repository-corrupt",
+          `yrd: generated change '${change.generatedCommit}' carries '${trailers.stdout}', expected '${change.changeId}'`,
+        )
+      }
+    }
+    const change = receipt.changes.find(
+      (candidate) =>
+        candidate.pr === options.identity.pr &&
+        candidate.revision === options.identity.revision &&
+        candidate.submittedHead === options.identity.headSha &&
+        candidate.changeId === options.identity.changeId,
+    )
+    if (change === undefined) continue
+    const onBase = await git.run(options.repo, ["merge-base", "--is-ancestor", target, options.baseSha], true)
+    if (onBase.code !== 0) {
+      offBase = true
+      continue
+    }
+    matches.push({
+      status: "proven",
+      fact: {
+        ...options.identity,
+        run: receipt.run.id,
+        commit: target,
+        landingSha: target,
+        baseSha: receipt.landing.baseAfter,
+        receipt: stored.pointer,
+      },
+    })
+  }
+  if (matches.length > 1) {
+    return repositoryReceiptFailure(
+      "repository-corrupt",
+      `yrd: ${options.identity.pr} revision ${options.identity.revision}@${options.identity.headSha} has multiple repository landing receipts`,
+    )
+  }
+  return matches[0] ?? { status: "not-proven", reason: offBase ? "landing-not-on-base" : "receipt-missing" }
+}
+
+type LandingReceiptRemote = Readonly<{ remote: "origin"; tip?: string }>
+
+async function synchronizeLandingReceiptRef(
+  git: Git,
+  repo: string,
+  input: StepExecution,
+): Promise<LandingReceiptRemote | undefined> {
+  const configured = await git.run(repo, ["config", "--get", "remote.origin.url"], true)
+  if (configured.code !== 0 || configured.stdout === "") return undefined
+  const advertised = await git.run(repo, ["ls-remote", "--refs", "origin", LANDING_RECEIPT_REF], true)
+  if (advertised.code !== 0) {
+    return repositoryReceiptFailure(
+      "repository-incomplete",
+      `yrd: Queue run '${input.run}' could not read remote receipt ref '${LANDING_RECEIPT_REF}': ${advertised.stderr || advertised.stdout}`,
+    )
+  }
+  if (advertised.stdout === "") return { remote: "origin" }
+  const [remoteTip, advertisedRef, extra] = advertised.stdout.split(/\s+/u)
+  if (remoteTip === undefined || advertisedRef !== LANDING_RECEIPT_REF || extra !== undefined) {
+    return repositoryReceiptFailure(
+      "repository-corrupt",
+      `yrd: remote receipt ref advertisement is malformed: ${advertised.stdout}`,
+    )
+  }
+  const stagingRef = `refs/notes/yrd/receipt-upstream/${remoteTip}`
+  const fetched = await git.run(
+    repo,
+    ["fetch", "--no-recurse-submodules", "--quiet", "origin", `+${LANDING_RECEIPT_REF}:${stagingRef}`],
+    true,
+  )
+  if (fetched.code !== 0 || (await git.optionalCommit(repo, stagingRef)) !== remoteTip) {
+    return repositoryReceiptFailure(
+      "repository-incomplete",
+      `yrd: remote receipt ref '${remoteTip}' could not be materialized: ${fetched.stderr || fetched.stdout}`,
+    )
+  }
+  const localTip = await git.optionalCommit(repo, LANDING_RECEIPT_REF)
+  if (localTip === undefined) {
+    const aligned = await git.run(
+      repo,
+      ["update-ref", LANDING_RECEIPT_REF, remoteTip, "0".repeat(remoteTip.length)],
+      true,
+    )
+    if (aligned.code !== 0) {
+      return repositoryReceiptFailure(
+        "repository-corrupt",
+        `yrd: local receipt ref changed while aligning to remote '${remoteTip}'`,
+      )
+    }
+  } else if (localTip !== remoteTip) {
+    const remoteContainsLocal = await git.run(repo, ["merge-base", "--is-ancestor", localTip, remoteTip], true)
+    if (remoteContainsLocal.code === 0) {
+      const aligned = await git.run(repo, ["update-ref", LANDING_RECEIPT_REF, remoteTip, localTip], true)
+      if (aligned.code !== 0) {
+        return repositoryReceiptFailure(
+          "repository-corrupt",
+          `yrd: local receipt ref changed while fast-forwarding '${localTip}' to '${remoteTip}'`,
+        )
+      }
+    } else {
+      const localContainsRemote = await git.run(repo, ["merge-base", "--is-ancestor", remoteTip, localTip], true)
+      if (localContainsRemote.code !== 0) {
+        return repositoryReceiptFailure(
+          "repository-corrupt",
+          `yrd: local receipt ref '${localTip}' diverges from remote '${remoteTip}'`,
+        )
+      }
+    }
+  }
+  await git.run(repo, ["update-ref", "-d", stagingRef, remoteTip], true)
+  return { remote: "origin", tip: remoteTip }
+}
+
+async function publishLandingReceiptRef(
+  git: Git,
+  repo: string,
+  input: StepExecution,
+  remote: LandingReceiptRemote | undefined,
+): Promise<void> {
+  if (remote === undefined) return
+  const localTip = await git.commit(repo, LANDING_RECEIPT_REF)
+  const pushed = await git.run(
+    repo,
+    [
+      "push",
+      "--porcelain",
+      "--no-verify",
+      "--recurse-submodules=no",
+      remote.remote,
+      `${LANDING_RECEIPT_REF}:${LANDING_RECEIPT_REF}`,
+    ],
+    true,
+  )
+  if (pushed.code !== 0) {
+    return repositoryReceiptFailure(
+      "repository-corrupt",
+      `yrd: Queue run '${input.run}' could not publish receipt ref without rewriting remote history: ${pushed.stderr || pushed.stdout}`,
+    )
+  }
+  const advertised = await git.run(repo, ["ls-remote", "--refs", remote.remote, LANDING_RECEIPT_REF], true)
+  const [publishedTip, publishedRef, extra] = advertised.stdout.split(/\s+/u)
+  if (
+    advertised.code !== 0 ||
+    publishedTip !== localTip ||
+    publishedRef !== LANDING_RECEIPT_REF ||
+    extra !== undefined
+  ) {
+    return repositoryReceiptFailure(
+      "repository-corrupt",
+      `yrd: remote receipt ref did not confirm local '${localTip}' after publication`,
+    )
+  }
+}
+
 async function confirmLandingReceipt(
   git: Git,
   repo: string,
@@ -6815,6 +7168,7 @@ async function confirmLandingReceipt(
   commit: string,
   checked: PinnedCandidate,
 ): Promise<LandingReceiptPointer> {
+  const remote = await synchronizeLandingReceiptRef(git, repo, input)
   const receipt = createLandingReceipt(await landingReceiptBody(git, repo, input, context, commit, checked))
   const existing = await readLandingReceipt(git, repo, commit)
   if (existing !== undefined) {
@@ -6824,6 +7178,7 @@ async function confirmLandingReceipt(
         `yrd: landing '${commit}' already has a different receipt note '${existing.pointer.note}'`,
       )
     }
+    await publishLandingReceiptRef(git, repo, input, remote)
     return existing.pointer
   }
   const blob = (await git.input(repo, ["hash-object", "-w", "--stdin"], receipt.canonical)).stdout
@@ -6858,6 +7213,7 @@ async function confirmLandingReceipt(
       `yrd: receipt for '${commit}' was not byte-identical after publication`,
     )
   }
+  await publishLandingReceiptRef(git, repo, input, remote)
   return confirmed.pointer
 }
 
@@ -6872,9 +7228,11 @@ async function physicalIntegrationProof(
 ): Promise<IntegrationProof> {
   const code = input.prs.filter((pr) => pr.intent === undefined)
   if (code.length === 0 || code.every((pr) => pr.changeId === undefined)) {
+    await clearLandingAttempts(git, repo, input, checked)
     return integrationProof(commit, checked, undefined, componentMains)
   }
   const receipt = await confirmLandingReceipt(git, repo, input, context, commit, checked)
+  await clearLandingAttempts(git, repo, input, checked)
   return integrationProof(commit, checked, undefined, componentMains, receipt)
 }
 
