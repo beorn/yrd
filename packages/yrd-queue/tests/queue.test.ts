@@ -4039,6 +4039,49 @@ describe("Queue", () => {
     })
   })
 
+  it("keeps a passing admission when a no-delta recut mints a new revision", async () => {
+    // @i/10-merge-queue/admission-passes-nothing-merges. Admission records
+    // against revision N; a mechanical rebuild lands on byte-identical content
+    // and mints revision N+1; eligibility asks whether the CURRENT revision has
+    // a passing admission and the answer is never yes. Each admission triggers
+    // the next recut and each recut invalidates the admission before it, so the
+    // queue admits forever and merges nothing. PR560 reached revision 66.
+    //
+    // The recut here is the real specimen, not a self-reported no-op: SAME head,
+    // and `bays.recut` still mints revision 2. cli.test.ts's own fixture note
+    // says the pathological recutter reports `unchanged: false` precisely
+    // because it "ran and moved nothing", so the unchanged short-circuit in
+    // plugin.ts never fires for it.
+    await using app = await createQueueApp({
+      check: () => ({ status: "completed", conclusion: "success", output: { checked: true } }),
+    })
+    const pr = await submitBranch(app, "issue/no-delta-recut")
+    // Identity of a byte-identical rebuild: same head, same tree, same patch.
+    const rebuilt = { headSha: pr.headSha, baseSha: BASE, treeSha: "c".repeat(40), patchId: "d".repeat(40) }
+
+    // First mechanical rebuild. This one legitimately mints a revision — the PR
+    // had no recut proof before it — and is only here so the SECOND rebuild is
+    // a true repeat rather than a first.
+    await app.bays.recut({ pr: pr.id, fromRevision: pr.revision, ...rebuilt, reviewCarried: false })
+    await app.bays.requestChecks({ pr: pr.id })
+    await app.queue.admit({ prs: [pr.branch] }, runtime)
+    expect(app.queue.eligibility(pr.id)).toMatchObject({ checks: { status: "passed" } })
+
+    // The specimen. Byte-identical to the rebuild that just passed, and it still
+    // mints revision 3: `unchanged` (plugin.ts) additionally requires the STORED
+    // recut's fromRevision to equal the incoming one, and the stored one lags by
+    // exactly one cycle, so the no-op short-circuit cannot fire in a loop.
+    await app.bays.recut({ pr: pr.id, fromRevision: 2, ...rebuilt, reviewCarried: false })
+    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({ revision: 3, headSha: pr.headSha })
+
+    // The claim: a rebuild that moved nothing did not stop the code from
+    // passing, so it must not discard the evidence that it passes. Admission is
+    // keyed to the revision ordinal (`admission:<pr>:<revision>:<baseSha>`,
+    // queue.ts admissionExecutionId), so revision 3 cannot see revision 2's
+    // passing job — and the recut drops the check request with it.
+    expect(app.queue.eligibility(pr.id)).toMatchObject({ checks: { status: "passed" } })
+  })
+
   it("integrates a checks-passed PR while another admission's check is still in flight", async () => {
     await using app = await createQueueApp({
       check: () => ({ status: "completed", conclusion: "success", output: { checked: true } }),
