@@ -154,7 +154,6 @@ describe("queue timeline 21106 contract", () => {
           ...snapshot,
           readFailure: {
             code: "queue-read-boundary-moved",
-            message: "queue changed while reading",
             readCursor: 25255,
             journalCursor: 25256,
             showing: "last-complete",

@@ -5946,7 +5946,6 @@ async function observeQueueList(
     stateSource = "journal"
     readFailure = {
       code: "queue-read-boundary-moved",
-      message: `queue changed while reading (derived cursor ${String(read.cursor)}, Journal cursor ${String(journalCursor)})`,
       readCursor: read.cursor,
       journalCursor,
       showing: previous === undefined ? "bounded-partial" : "last-complete",
