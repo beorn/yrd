@@ -1080,6 +1080,76 @@ function createGit(
   })
 }
 
+export const RepositoryChangeIdentitySchema = z
+  .object({
+    changeId: z.string().regex(/^I[0-9a-f]{40}$/u),
+    submittedHead: z.string().regex(/^[0-9a-f]{40,64}$/u),
+  })
+  .strict()
+export type RepositoryChangeIdentity = Readonly<z.infer<typeof RepositoryChangeIdentitySchema>>
+
+export type RepositoryChangeLandingResult =
+  | Readonly<{
+      status: "proven"
+      fact: RepositoryChangeIdentity & Readonly<{ landingSha: string; baseSha: string }>
+    }>
+  | Readonly<{ status: "not-proven"; reason: "change-id-not-on-base" }>
+
+/** Resolve a logical code change from repository truth alone.
+ *
+ * The submitted commit is deliberately not part of the ancestry predicate:
+ * Queue may regenerate a carrier while preserving its stable Change-Id. The
+ * selected base's history is the population, so a match is already ancestry
+ * proof and no subject, branch name, patch-id, or Journal row participates.
+ */
+export async function findRepositoryChangeLanding(
+  options: Readonly<{
+    inject: Readonly<{ process: Pick<Process, "run"> }>
+    repo: string
+    baseSha: string
+    identity: RepositoryChangeIdentity
+  }>,
+): Promise<RepositoryChangeLandingResult> {
+  const identity = RepositoryChangeIdentitySchema.parse(options.identity)
+  const baseSha = z.string().regex(/^[0-9a-f]{40,64}$/u).parse(options.baseSha)
+  const git = createGit(options.inject.process)
+  await git.commit(options.repo, baseSha)
+  const history = await git.run(options.repo, [
+    "log",
+    "--no-show-signature",
+    "--format=%H%x09%(trailers:key=Change-Id,valueonly,separator=%x2c)",
+    baseSha,
+    "--",
+  ])
+  const matches: string[] = []
+  for (const row of history.stdout === "" ? [] : history.stdout.split("\n")) {
+    const separator = row.indexOf("\t")
+    const commit = separator === -1 ? row : row.slice(0, separator)
+    if (!/^[0-9a-f]{40,64}$/u.test(commit)) {
+      throw new Error(`yrd: malformed repository Change-Id row '${row}'`)
+    }
+    const changeIds = (separator === -1 ? "" : row.slice(separator + 1))
+      .split(",")
+      .filter((value) => value !== "")
+    if (!changeIds.includes(identity.changeId)) continue
+    if (changeIds.length !== 1) {
+      throw new Error(`yrd: landed commit '${commit}' carries multiple Change-Id trailers`)
+    }
+    matches.push(commit)
+  }
+  if (matches.length > 1) {
+    throw new Error(
+      `yrd: Change-Id '${identity.changeId}' appears in multiple commits on selected base '${baseSha}': ${matches.join(
+        ", ",
+      )}`,
+    )
+  }
+  const landingSha = matches[0]
+  return landingSha === undefined
+    ? { status: "not-proven", reason: "change-id-not-on-base" }
+    : { status: "proven", fact: { ...identity, landingSha, baseSha } }
+}
+
 export type GitQueueTarget = Readonly<{
   branch: string
   branchRef: string
