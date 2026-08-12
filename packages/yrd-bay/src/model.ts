@@ -961,9 +961,15 @@ export function emptyBaysState(): BaysState {
 
 function submitterForLifecycleHead(state: BaysState, bay: Bay, headSha: string | undefined): string | undefined {
   if (headSha === undefined) return undefined
+  // Branch-submitted carriers (refs/for, `bay.submit` of a bare branch) never
+  // record an explicit bay pointer, and journal history cannot gain one, so a
+  // missing association falls back to branch-ref equality. This joins to the
+  // submitter RECORDED on the exact-head revision — it never derives a seat
+  // from the branch name, and any ambiguity stays unknown below.
   const associated = prForBay(state, bay.id)
-  if (associated === undefined) return undefined
-  const revisions = associated.revs.filter((revision) => revision.head === headSha)
+  const candidates =
+    associated === undefined ? Object.values(state.prs).filter((pr) => pr.branch === bay.branch) : [associated]
+  const revisions = candidates.flatMap((pr) => pr.revs.filter((revision) => revision.head === headSha))
   if (revisions.length === 0 || revisions.some((revision) => revision.submitter === undefined)) return undefined
   const submitters = new Set(revisions.map((revision) => revision.submitter))
   return submitters.size === 1 ? revisions[0]?.submitter : undefined

@@ -1316,10 +1316,33 @@ describe("withBays", () => {
     const recorded = snapshot.prs.PR1
     if (recorded === undefined) throw new Error("expected PR1")
     const { bay: _bay, ...unassociated } = recorded
+    // A carrier submitted as a bare branch (refs/for, `bay.submit` of a branch)
+    // never gets an explicit bay pointer, and old journal rows can never gain
+    // one. The recorded exact-head submitter must still reach the lifecycle
+    // through the branch association.
     expect(
       projectBranchLifecycles({
         ...snapshot,
         prs: { ...snapshot.prs, PR1: unassociated },
+      })[0],
+    ).toMatchObject({ submitter: "@dev/3" })
+
+    const firstRevision = unassociated.revs[0]
+    if (firstRevision === undefined) throw new Error("expected revision 1")
+    // Two branch-matched PRs disagreeing at the same head is the one shape a
+    // branch association cannot attribute — it must stay unknown, not guess.
+    expect(
+      projectBranchLifecycles({
+        ...snapshot,
+        prs: {
+          ...snapshot.prs,
+          PR1: unassociated,
+          PR2: {
+            ...unassociated,
+            id: "PR2",
+            revs: [{ ...firstRevision, submitter: "@dev/4" }],
+          },
+        },
       })[0],
     ).not.toHaveProperty("submitter")
 
