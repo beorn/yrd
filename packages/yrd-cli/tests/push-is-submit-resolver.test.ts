@@ -13,7 +13,8 @@ import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { createProcess } from "@yrd/process"
 import type { ReceiverRefUpdate, ReceiverSubmitIntent } from "@yrd/bay"
-import { receiverTarget, type ReceiverBayView } from "../src/host.ts"
+import type { ReceiverReceipt } from "@yrd/bay"
+import { materializeCarrier, receiverTarget, type ReceiverBayView } from "../src/host.ts"
 
 const process = createProcess()
 const zero = "0".repeat(40)
@@ -143,5 +144,71 @@ describe("push-is-submit target resolution", () => {
       baseSha: "b".repeat(40),
     })
     await expect(resolve("task/untracked", branchUpdate)).resolves.toBeNull()
+  })
+})
+
+describe("push-is-submit carrier materialization", () => {
+  /** A receipt shaped exactly as the receiver writes one for a submit push. */
+  function receipt(headSha: string, overrides: Partial<ReceiverReceipt> = {}): ReceiverReceipt {
+    return {
+      version: 1,
+      id: "a".repeat(64),
+      receivedAt: "2026-08-12T00:00:00.000Z",
+      ref: "refs/for/main/my-change",
+      branch: "issue/my-change",
+      change: "my-change",
+      oldSha: zero,
+      headSha,
+      intake: { name: "my-change", base: "main", baseSha: zero, branch: "issue/my-change", headSha },
+      ...overrides,
+    } as ReceiverReceipt
+  }
+
+  it("creates the carrier the submit push named, at the head it pushed", async () => {
+    const { repo, mainSha } = await repository()
+    // The whole point: this ref does not exist, and nothing else would create
+    // it. Without it the PR is admitted and then refused forever by the
+    // pre-submit gate with `required-check candidate '<branch>' is missing`.
+    await expect(git(repo, "rev-parse", "--verify", "refs/heads/issue/my-change")).rejects.toThrow()
+
+    await materializeCarrier(process, repo, receipt(mainSha))
+    expect(await git(repo, "rev-parse", "refs/heads/issue/my-change")).toBe(mainSha)
+  })
+
+  it("fast-forwards an existing carrier, and is a no-op on replay", async () => {
+    const { repo, mainSha, releaseSha } = await repository()
+    // `release/2` is one behind `main`, so this is a genuine fast-forward.
+    await git(repo, "update-ref", "refs/heads/issue/my-change", releaseSha)
+    await materializeCarrier(process, repo, receipt(mainSha))
+    expect(await git(repo, "rev-parse", "refs/heads/issue/my-change")).toBe(mainSha)
+
+    // Draining the same receipt twice must not fail — the carrier is already
+    // where it belongs, which is success, not a collision.
+    await materializeCarrier(process, repo, receipt(mainSha))
+    expect(await git(repo, "rev-parse", "refs/heads/issue/my-change")).toBe(mainSha)
+  })
+
+  it("refuses to move a carrier the pushed head does not descend from", async () => {
+    const { repo, mainSha } = await repository()
+    // A sibling commit: neither head contains the other, so overwriting would
+    // silently drop whatever the carrier already carried.
+    await git(repo, "checkout", "-q", "-b", "sibling", "release/2")
+    await writeFile(join(repo, "sibling.txt"), "sibling\n")
+    await git(repo, "add", "-A")
+    await git(repo, "-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit", "-qm", "sibling")
+    const siblingSha = await git(repo, "rev-parse", "HEAD")
+    await git(repo, "update-ref", "refs/heads/issue/my-change", siblingSha)
+
+    await expect(materializeCarrier(process, repo, receipt(mainSha))).rejects.toThrow(/does not descend from/u)
+    // And it left the carrier exactly where it was.
+    expect(await git(repo, "rev-parse", "refs/heads/issue/my-change")).toBe(siblingSha)
+  })
+
+  it("does nothing for a branch push, which already is its own branch", async () => {
+    const { repo, mainSha } = await repository()
+    const branchPush = receipt(mainSha, { ref: "refs/heads/task/one", branch: "task/one", change: undefined })
+    await materializeCarrier(process, repo, branchPush)
+    // No ref invented: a refs/heads push created its branch by pushing it.
+    await expect(git(repo, "rev-parse", "--verify", "refs/heads/task/one")).rejects.toThrow()
   })
 })

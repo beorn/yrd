@@ -1278,7 +1278,85 @@ export function receiverTarget(app: ReceiverBayIndex, process: Pick<Process, "ru
   }
 }
 
-async function intakeReceipt(app: YrdCliApp, receipt: Readonly<ReceiverReceipt>): Promise<void> {
+/**
+ * Creates the carrier branch a submit push named, at the head it pushed.
+ *
+ * A `refs/heads/` push already IS its branch, so this is a no-op there. A
+ * `refs/for/<base>/<change>` push names a CHANGE, and the carrier is derived —
+ * which means nothing creates it unless intake does. Without this the PR is
+ * admitted and then permanently undeliverable: the pre-submit gate resolves the
+ * PR's branch and finds no such ref, so it refuses with
+ * `required-check candidate '<branch>' is missing` and the change can never
+ * leave draft. An intake path must not validate against a thing it does not
+ * materialize.
+ *
+ * It also gives the pushed head an anchor of its own. Until now it was
+ * reachable only through whatever branch the pusher happened to hold, so moving
+ * that branch orphaned the PR.
+ *
+ * Fast-forward only, under a compare-and-swap: `update-ref <ref> <new> <old>`
+ * fails if anyone moved the carrier in between, so a concurrent writer is a
+ * loud refusal rather than a silently lost revision.
+ */
+export async function materializeCarrier(
+  process: Pick<Process, "run">,
+  repo: string,
+  receipt: Readonly<ReceiverReceipt>,
+): Promise<void> {
+  if (receipt.change === undefined) return
+  const ref = `refs/heads/${receipt.branch}`
+  const current = await resolveCommit(process, repo, ref)
+  // Replaying a receipt must not fail; the carrier is already where it belongs.
+  if (current === receipt.headSha) return
+  if (current !== undefined && !(await isAncestorCommit(process, repo, current, receipt.headSha))) {
+    throw new Error(
+      `yrd: carrier '${receipt.branch}' is at ${current.slice(0, 12)}, which the pushed head ` +
+        `${receipt.headSha.slice(0, 12)} does not descend from; rebase the change onto it and push again`,
+    )
+  }
+  const previous = current ?? "0".repeat(receipt.headSha.length)
+  const args = ["update-ref", ref, receipt.headSha, previous]
+  const result = await process.run({
+    argv: ["git", "-C", repo, ...args],
+    cwd: repo,
+    env: cleanGitEnvironment(globalThis.process.env),
+    timeoutMs: GIT_TIMEOUT_MS,
+  })
+  assertGitDidNotTimeOut(result, args)
+  if (result.exitCode !== 0) {
+    throw new Error(
+      result.stderr.trim() || `yrd: could not create carrier '${receipt.branch}' at ${receipt.headSha.slice(0, 12)}`,
+    )
+  }
+}
+
+async function isAncestorCommit(
+  process: Pick<Process, "run">,
+  repo: string,
+  ancestor: string,
+  descendant: string,
+): Promise<boolean> {
+  const args = ["merge-base", "--is-ancestor", ancestor, descendant]
+  const result = await process.run({
+    argv: ["git", "-C", repo, ...args],
+    cwd: repo,
+    env: cleanGitEnvironment(globalThis.process.env),
+    timeoutMs: GIT_TIMEOUT_MS,
+  })
+  assertGitDidNotTimeOut(result, args)
+  return result.exitCode === 0
+}
+
+async function intakeReceipt(
+  app: YrdCliApp,
+  receipt: Readonly<ReceiverReceipt>,
+  process: Pick<Process, "run">,
+  repo: string,
+): Promise<void> {
+  // Before the dispatch, never after: a PR that exists without its carrier is
+  // exactly the undeliverable state this exists to prevent, and a failure here
+  // leaves the receipt for the next drain to retry.
+  await materializeCarrier(process, repo, receipt)
   await app.dispatch(
     app.commands.bay.intake,
     { ...receipt.intake, receipt: receipt.id },
@@ -1844,7 +1922,7 @@ async function createYrdRuntimeHost(
       const result = await receiver.drain({
         resolveTarget,
         intakePolicy: INTAKE_POLICY,
-        intake: (receipt) => intakeReceipt(runtimeApp, receipt),
+        intake: (receipt) => intakeReceipt(runtimeApp, receipt, process, repository.repo),
         lockTimeoutMs: 30_000,
       })
       if (result.failed.length > 0 || result.ambiguous.length > 0) {
@@ -1964,7 +2042,7 @@ async function runReceiverHook(
       process: runtimeProcess,
       resolveTarget: receiverTarget(runtimeApp, runtimeProcess, repository.repo),
       intakePolicy: INTAKE_POLICY,
-      intake: (receipt) => intakeReceipt(runtimeApp, receipt),
+      intake: (receipt) => intakeReceipt(runtimeApp, receipt, runtimeProcess, repository.repo),
     })
   } finally {
     await closeRuntime(app, runtimeProcess, scope)
