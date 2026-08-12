@@ -1,6 +1,14 @@
 /**
- * Pushed-not-submitted: deciding whether a ref that reached the remote and
- * never became a carrier is genuinely stranded.
+ * UNCARRIED refs: deciding whether a ref that reached the remote and never
+ * became a carrier is genuinely stranded.
+ *
+ * The name is deliberate, and not the one the bead uses. "Unsubmitted" is
+ * already taken on the status view, where it means a REGISTERED PR sitting at
+ * bay status `pushed` — a merge request that exists and has not been submitted.
+ * This module's population is the opposite end: a ref with NO merge request at
+ * all, which by construction has no candidate and so cannot be found by looking
+ * at candidates. Two populations under one word would have put two disagreeing
+ * counts on one dashboard, both correct.
  *
  * P2 of the hardening program. Under push-IS-submit this rail is the backstop —
  * the first version of any admission path will miss cases, and a state nobody
@@ -77,11 +85,11 @@ export type PinDirection = "forward" | "aligned" | "backward" | "diverged" | "no
  * rebase. Emphatically NOT a rescue: a finding that says "carry this" about a
  * backward pin causes the exact loss the rail exists to prevent.
  */
-export type UnsubmittedVerdict = "rescue" | "rebase-required"
+export type UncarriedVerdict = "rescue" | "rebase-required"
 
-export type UnsubmittedFinding = Readonly<{
+export type UncarriedFinding = Readonly<{
   code: "pushed-not-submitted"
-  verdict: UnsubmittedVerdict
+  verdict: UncarriedVerdict
   ref: string
   tipSha: string
   ageMs: number
@@ -91,7 +99,7 @@ export type UnsubmittedFinding = Readonly<{
   message: string
 }>
 
-export type UnsubmittedOptions = Readonly<{
+export type UncarriedOptions = Readonly<{
   nowMs: number
   /** Grace period before a pushed ref is considered stranded rather than
    * mid-flight. Admission is meant to happen ON the push, so this is small. */
@@ -126,10 +134,10 @@ function formatAge(ms: number): string {
  * validation report names the union of every seat's measured branch set plus
  * every branch authorized for action. A report that omits that population is
  * review-refusable. The one-time P0 proof is the ten-specimen union in
- * `tests/unsubmitted.test.ts`, including the separately authorized
+ * `tests/uncarried.test.ts`, including the separately authorized
  * `task/22716-p1a-certification-dev3` branch.
  */
-export function classifyPushedRef(fact: PushedRefFact, options: UnsubmittedOptions): UnsubmittedFinding | undefined {
+export function classifyPushedRef(fact: PushedRefFact, options: UncarriedOptions): UncarriedFinding | undefined {
   if (fact.carried) return undefined
   // Clock skew between pusher and sweeper must not produce a negative age that
   // silently passes a TTL comparison; a future timestamp is simply not yet due.
@@ -137,7 +145,7 @@ export function classifyPushedRef(fact: PushedRefFact, options: UnsubmittedOptio
   if (ageMs < options.ttlMs) return undefined
   if (ageMs > options.ageBoundMs) return undefined
 
-  const build = (verdict: UnsubmittedVerdict, detail: string): UnsubmittedFinding => ({
+  const build = (verdict: UncarriedVerdict, detail: string): UncarriedFinding => ({
     code: "pushed-not-submitted",
     verdict,
     ref: fact.ref,

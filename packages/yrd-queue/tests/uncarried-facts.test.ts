@@ -10,7 +10,7 @@
  * mistakes that cannot be caught by testing the predicate.
  */
 import { describe, expect, it } from "vitest"
-import { gatherPushedRefFact, type RefGit } from "../src/unsubmitted-facts.ts"
+import { gatherPushedRefFact, type RefGit } from "../src/uncarried-facts.ts"
 
 const BASE = "origin/main"
 const REPO = "/repo"

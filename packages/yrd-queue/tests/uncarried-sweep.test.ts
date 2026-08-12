@@ -1,0 +1,133 @@
+/**
+ * @failure The uncarried sweep stops enumerating, reports an empty result it
+ *          cannot justify, or pays per-ref git cost for refs it will discard.
+ * @level   l1
+ * @consumer @yrd/core/22716-yrd-hardening-program/p2-push-is-submit
+ */
+import { describe, expect, it } from "vitest"
+import { sweepUncarriedRefs, type SweepOptions } from "../src/uncarried-sweep.ts"
+import type { RefGit } from "../src/uncarried-facts.ts"
+
+const HOUR = 60 * 60 * 1000
+const NOW = Date.parse("2026-08-11T22:00:00.000Z")
+
+const OPTIONS = {
+  repo: "/repo",
+  base: "main",
+  namespace: "refs/remotes/origin",
+  nowMs: NOW,
+  ttlMs: 10 * 60 * 1000,
+  ageBoundMs: 24 * HOUR,
+  carriedBranches: new Set<string>(),
+} as const satisfies SweepOptions
+
+/** Records every git invocation so the test can assert what was NOT run —
+ * the cheap-disqualifier ordering is only observable that way. */
+function fakeGit(responses: Record<string, string>): RefGit & { calls: string[][] } {
+  const calls: string[][] = []
+  const answer = (args: readonly string[]): string | undefined => {
+    calls.push([...args])
+    for (const [prefix, value] of Object.entries(responses)) {
+      if (args.join(" ").startsWith(prefix)) return value
+    }
+    return undefined
+  }
+  return {
+    calls,
+    async run(_repo, args) {
+      const value = answer(args)
+      if (value === undefined) throw new Error(`unexpected git call: ${args.join(" ")}`)
+      return value
+    },
+    async optional(_repo, args) {
+      return answer(args)
+    },
+  }
+}
+
+function refLine(ref: string, agoMs: number): string {
+  return `${ref}\0${Math.floor((NOW - agoMs) / 1000)}`
+}
+
+describe("sweepUncarriedRefs", () => {
+  it("refuses to call an empty enumeration a clean sweep", async () => {
+    const git = fakeGit({ "for-each-ref": "" })
+    // A namespace that yields nothing is a broken sweep, and a rail that
+    // reports it as "nothing stranded" is worse than one that is switched off:
+    // it actively asserts health it never measured.
+    await expect(sweepUncarriedRefs(git, OPTIONS)).rejects.toThrow(/enumerated no refs under 'refs\/remotes\/origin'/u)
+  })
+
+  it("reports the denominator alongside the findings", async () => {
+    const git = fakeGit({
+      "for-each-ref": [
+        refLine("origin/task/carried", 2 * HOUR),
+        refLine("origin/task/ancient", 40 * HOUR),
+        refLine("origin/task/just-pushed", 60 * 1000),
+      ].join("\n"),
+    })
+
+    const result = await sweepUncarriedRefs(git, {
+      ...OPTIONS,
+      carriedBranches: new Set(["origin/task/carried"]),
+    })
+
+    // Zero findings is only readable next to what produced it.
+    expect(result.findings).toEqual([])
+    expect(result.scanned).toBe(3)
+    expect(result.carried).toBe(1)
+    expect(result.outsideAgeBound).toBe(2) // too old, and inside the TTL grace
+    expect(result.examined).toBe(0)
+  })
+
+  it("pays no per-ref git cost for refs the cheap filters already discarded", async () => {
+    const git = fakeGit({
+      "for-each-ref": [refLine("origin/task/carried", 2 * HOUR), refLine("origin/task/ancient", 40 * HOUR)].join("\n"),
+    })
+
+    await sweepUncarriedRefs(git, { ...OPTIONS, carriedBranches: new Set(["origin/task/carried"]) })
+
+    // One process total. Not ls-tree, not rev-parse, not diff — the ordering
+    // is the whole reason a 2,000-ref sweep is affordable, and it is invisible
+    // unless the test asserts the absence.
+    expect(git.calls).toHaveLength(1)
+    expect(git.calls[0]?.[0]).toBe("for-each-ref")
+  })
+
+  it("actually examines a surviving ref and returns its finding", async () => {
+    // The positive control, and it is not optional: every other case here
+    // asserts a DISQUALIFY path, so a sweep that gathered nothing at all would
+    // pass all of them. This is the only test that proves the sweep reaches
+    // the gatherer and the predicate it exists to call.
+    const git = fakeGit({
+      "for-each-ref": refLine("origin/task/stranded", 3 * HOUR),
+      "ls-tree": "160000 commit abc\tvendor/yrd",
+      "rev-parse origin/task/stranded^{commit}": "deadbeefcafe",
+      "log -1": String(Math.floor((NOW - 3 * HOUR) / 1000)),
+      "diff --name-only": "src/thing.ts",
+      cherry: "+ 1111111111111111111111111111111111111111\n- 2222222222222222222222222222222222222222",
+    })
+
+    const result = await sweepUncarriedRefs(git, OPTIONS)
+
+    expect(result.examined).toBe(1)
+    expect(result.findings).toHaveLength(1)
+    const [finding] = result.findings
+    expect(finding?.ref).toBe("origin/task/stranded")
+    expect(finding?.uniqueCommits).toBe(1)
+    expect(finding?.equivalentCommits).toBe(1)
+    // The split is reported rather than collapsed to a verdict: a ref that is
+    // partly landed must not tell its author "unfinished" about work already
+    // on trunk.
+    expect(finding?.message).toContain("already applied")
+  })
+
+  it("survives a branch name containing a space", async () => {
+    // %00 rather than a space separator: a space-split silently truncates such
+    // a ref to its first word and then judges a branch that does not exist.
+    const git = fakeGit({ "for-each-ref": refLine("origin/task/two words", 40 * HOUR) })
+    const result = await sweepUncarriedRefs(git, OPTIONS)
+    expect(result.scanned).toBe(1)
+    expect(result.outsideAgeBound).toBe(1)
+  })
+})

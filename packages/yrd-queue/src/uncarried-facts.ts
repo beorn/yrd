@@ -5,7 +5,7 @@
  * the split that makes the judgement testable without a repository. Everything
  * here is a deliberate answer to a way one of us got it wrong in one evening.
  */
-import type { PayloadKind, PinDirection, PushedRefFact } from "./unsubmitted.ts"
+import type { PayloadKind, PinDirection, PushedRefFact } from "./uncarried.ts"
 
 /** The git reads this gatherer needs, injected so the caller owns process
  * spawning and tests need no repository. Each returns raw stdout. */

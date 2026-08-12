@@ -19,7 +19,7 @@
  * window it cares about.
  */
 import { describe, expect, it } from "vitest"
-import { classifyPushedRef, type PushedRefFact } from "../src/unsubmitted.ts"
+import { classifyPushedRef, type PushedRefFact } from "../src/uncarried.ts"
 
 const HOUR = 60 * 60 * 1000
 const NOW = Date.parse("2026-08-10T12:00:00.000Z")
