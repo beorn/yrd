@@ -9004,6 +9004,68 @@ function maxExit(left: YrdCliExitCode, right: YrdCliExitCode): YrdCliExitCode {
   return Math.max(left, right) as YrdCliExitCode
 }
 
+async function explainLanding(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  selector: string,
+  options: JsonOption & Readonly<{ repair?: boolean }>,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
+  const pr = app.bays.pr(selector)
+  if (pr === undefined) refusal(`yrd: no PR matches '${selector}'`)
+  const revision = currentPRRev(pr)
+  if (revision.changeId === undefined) {
+    await printResult(
+      io,
+      jsonEnabled(options),
+      { command: "why", pr: pr.id, verdict: "legacy-unprovable", repaired: false },
+      `LEGACY-UNPROVABLE — ${pr.id} predates stable Change-Id identity`,
+    )
+    return 1
+  }
+  if (services.landingReceipts === undefined) configuration("repository landing receipts are not available")
+  const proof = await services.landingReceipts.find({
+    pr: pr.id,
+    revision: revision.n,
+    headSha: revision.head,
+    changeId: revision.changeId,
+  })
+  if (proof.status === "not-proven") {
+    const indexed = prDeliveryState(pr) === "integrated"
+    await printResult(
+      io,
+      jsonEnabled(options),
+      {
+        command: "why",
+        pr: pr.id,
+        verdict: indexed ? "index-corrupt" : "not-proven",
+        reason: proof.reason,
+        repaired: false,
+      },
+      `${indexed ? "INDEX-CORRUPT" : "NOT-PROVEN"} — ${pr.id}: ${proof.reason}`,
+    )
+    return indexed ? 2 : 1
+  }
+  const indexed =
+    prDeliveryState(pr) === "integrated" &&
+    pr.integration?.commit === proof.fact.commit &&
+    pr.integration.receipt?.note === proof.fact.receipt.note &&
+    pr.integration.receipt.checksum === proof.fact.receipt.checksum
+  let repaired = false
+  if (!indexed && options.repair === true) {
+    await app.queue.reconcileLanding(proof.fact)
+    repaired = true
+  }
+  const verdict = indexed || repaired ? "landed" : "index-gap"
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "why", pr: pr.id, verdict, repaired, receipt: proof.fact.receipt, fact: proof.fact },
+    `${verdict.toUpperCase()} — ${pr.id} ${proof.fact.changeId} at ${proof.fact.commit}`,
+  )
+  return verdict === "landed" ? 0 : 1
+}
+
 type CommanderOutput = { errorCommand?: CliCommand }
 
 function configureOutput(command: CliCommand, io: YrdCliIO, output: CommanderOutput): void {
@@ -9184,6 +9246,14 @@ function buildProgram(
     .option("--rebuild-views", "atomically rebuild registered query views from immutable Journal history")
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await configDoctor(installed(), installedServices(), options, io)))
+  program
+    .command("why <selector>")
+    .description("prove one PR landing from repository truth and its journal index")
+    .option("--repair", "append a missing pr/integrated index row from repository proof")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) =>
+      setExit(await explainLanding(installed(), installedServices(), selector, options, io)),
+    )
 
   const bay = program.command("bay").description("manage isolated Git work bays")
   bay.helpCommand(false)
@@ -9948,6 +10018,7 @@ function buildProgram(
       "queue",
       "check",
       "doctor",
+      "why",
       "admin",
       "migrate",
       "log",

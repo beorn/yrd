@@ -59,6 +59,7 @@ import {
   gitCandidatePreparer,
   gitCheckStep,
   gitMergeStep,
+  findRepositoryLandingReceipt,
   inspectGitQueueTarget,
   resolveGitQueueTarget,
   worktreeContexts,
@@ -71,6 +72,7 @@ import {
   type IntegratedShape,
   type PRShape,
   type QueueAuditResult,
+  type RepositoryLandingIdentity,
   type StepDef,
   type StepExecution,
   type StepRunner,
@@ -1945,6 +1947,18 @@ async function createYrdRuntimeHost(
         () => runtimeApp.queue.steps(),
       ),
       recut: createGitPRRecutter({ inject: { process }, repo: repository.repo, env }),
+      landingReceipts: Object.freeze({
+        async find(identity: RepositoryLandingIdentity) {
+          const baseSha = (
+            await resolveGitQueueTarget({
+              inject: { process },
+              repo: repository.repo,
+              branch: baseIdentity(loaded.config.base),
+            })
+          ).sha
+          return findRepositoryLandingReceipt({ inject: { process }, repo: repository.repo, baseSha, identity })
+        },
+      }),
       base: loaded.config.base,
       [LandingAuthorityBoundary]: loaded.config.landing ?? "expected",
       checks,

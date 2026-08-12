@@ -28,7 +28,10 @@ export const LandingReceiptGateSchema = z
     identity: z.string().trim().min(1),
     attempt: z.number().int().positive(),
     configHash: z.string().regex(/^[0-9a-f]{64}$/u),
-    environmentHash: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
+    environmentHash: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/u)
+      .optional(),
     durationMs: z.number().nonnegative(),
   })
   .strict()
@@ -58,7 +61,7 @@ export const LandingReceiptBodySchema = z
       .strict(),
     changes: z.array(CandidateChangeReceiptSchema).min(1),
     pins: z.array(LandingReceiptPinSchema),
-    gates: z.array(LandingReceiptGateSchema).min(1),
+    gates: z.array(LandingReceiptGateSchema),
     refusals: z.array(z.record(z.string(), z.unknown())),
   })
   .strict()
@@ -73,7 +76,9 @@ export const LandingReceiptEnvelopeSchema = z
   .strict()
   .superRefine((value, context) => {
     const expected = landingReceiptChecksum(value.receipt)
-    if (value.checksum !== expected) context.addIssue({ code: "custom", path: ["checksum"], message: `expected ${expected}` })
+    if (value.checksum !== expected) {
+      context.addIssue({ code: "custom", path: ["checksum"], message: `expected ${expected}` })
+    }
   })
 export type LandingReceiptEnvelope = Readonly<z.infer<typeof LandingReceiptEnvelopeSchema>>
 
@@ -87,7 +92,9 @@ function canonicalJson(value: unknown): string {
 }
 
 export function landingReceiptChecksum(receipt: LandingReceiptBody): string {
-  return createHash("sha256").update(canonicalJson(LandingReceiptBodySchema.parse(receipt))).digest("hex")
+  return createHash("sha256")
+    .update(canonicalJson(LandingReceiptBodySchema.parse(receipt)))
+    .digest("hex")
 }
 
 export function createLandingReceipt(receipt: LandingReceiptBody): Readonly<{

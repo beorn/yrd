@@ -987,9 +987,6 @@ export const Queues = Object.freeze({
 
   snapshot(pr: PR): PRSnapshot {
     const revision = currentPRRev(pr)
-    if (revision.changeId === undefined) {
-      throw new Error(`yrd: PR '${pr.id}' predates stable Change-Id identity`)
-    }
     const baseSha = checkRequest(pr)?.baseSha ?? prBaseSha(pr)
     const recut = prRecut(pr)
     const frozen = recut?.certificate === "frozen-code-carrier-v1"
@@ -1000,7 +997,7 @@ export const Queues = Object.freeze({
         : { sourceBaseSha: sourceRevision.baseSha, sourceHeadSha: sourceRevision.head }
     return PRSnapshotSchema.parse({
       id: pr.id,
-      changeId: revision.changeId,
+      ...(revision.changeId === undefined ? {} : { changeId: revision.changeId }),
       ...(pr.bay === undefined ? {} : { bay: pr.bay }),
       ...(pr.name === undefined ? {} : { name: pr.name }),
       branch: pr.branch,

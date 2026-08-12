@@ -39,6 +39,7 @@ import {
   PRSnapshotSchema,
   ReplayQueueRecordSchema,
   type AddStepResult,
+  type IntegrationProof,
   type IntegratedShape,
   type Queue,
   type QueueProjectionLookup,
@@ -67,6 +68,13 @@ const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
 const MERGED = "b".repeat(40)
 const UPDATED = "3".repeat(40)
+const RECEIPT = {
+  ref: "refs/notes/yrd/receipts" as const,
+  target: MERGED,
+  note: "c".repeat(40),
+  checksum: "d".repeat(64),
+}
+const receiptFor = (target: string) => ({ ...RECEIPT, target })
 const runtime = { runner: "local", leaseMs: 60_000 }
 const CheckResultSchema = z.object({ checked: z.boolean() }).strict()
 const ReviewResultSchema = z.object({ approved: z.boolean() }).strict()
@@ -518,9 +526,7 @@ function queuePlugin(
   options: Readonly<{
     batch?: false | number
     check?: StepRunner<PRShape, CheckResult>
-    merge?: (
-      input: StepExecution<ReviewedShape>,
-    ) => JobResult<{ commit: string; baseSha: string }> | Promise<JobResult<{ commit: string; baseSha: string }>>
+    merge?: (input: StepExecution<ReviewedShape>) => JobResult<IntegrationProof> | Promise<JobResult<IntegrationProof>>
     deploy?: (input: StepExecution<MergedShape>) => JobResult<DeployResult>
     checkRevision?: string
     checkClassification?: "base" | "carrier"
@@ -582,14 +588,22 @@ function queuePlugin(
     { revision: "review-v1", output: ReviewResultSchema },
   )
   const merge = withMerge(
-    (
-      input: StepExecution<ReviewedShape>,
-    ): JobResult<{ commit: string; baseSha: string }> | Promise<JobResult<{ commit: string; baseSha: string }>> =>
-      options.merge?.(input) ?? {
+    async (input: StepExecution<ReviewedShape>): Promise<JobResult<IntegrationProof>> => {
+      const result = await (options.merge?.(input) ?? {
         status: "completed",
         conclusion: "success",
         output: { commit: MERGED, baseSha: BASE },
-      },
+      })
+      if (
+        result.status !== "completed" ||
+        result.conclusion !== "success" ||
+        result.output.alreadyLanded !== undefined ||
+        result.output.receipt !== undefined
+      ) {
+        return result
+      }
+      return { ...result, output: { ...result.output, receipt: receiptFor(result.output.commit) } }
+    },
     { revision: "merge-v1" },
   )
   const deploy = withStep(
@@ -2517,6 +2531,8 @@ describe("Queue", () => {
           commit: MERGED,
           landingSha: MERGED,
           baseSha: BASE,
+          changeId: expect.stringMatching(/^I[0-9a-f]{40}$/u),
+          receipt: RECEIPT,
           correlation,
           submitter: "operator",
         },
@@ -3581,15 +3597,15 @@ describe("Queue", () => {
       expect(record).not.toHaveProperty("shape")
     }
     expect(Object.values(app.state().bays.prs).map((pr) => pr.integration)).toEqual([
-      { commit: MERGED, baseSha: BASE },
-      { commit: MERGED, baseSha: BASE },
-      { commit: MERGED, baseSha: BASE },
+      expect.objectContaining({ commit: MERGED, baseSha: BASE, receipt: RECEIPT }),
+      expect.objectContaining({ commit: MERGED, baseSha: BASE, receipt: RECEIPT }),
+      expect.objectContaining({ commit: MERGED, baseSha: BASE, receipt: RECEIPT }),
     ])
     expect(app.queue.status("main").finished).toHaveLength(1)
     expect(app.queue.status("release/2.0").finished).toHaveLength(1)
   })
 
-  it("reconciles historical same-payload PRs from one integration proof", async () => {
+  it("does not infer a landing for a pre-identity same-payload PR", async () => {
     const journal = createMemoryJournal<unknown>()
     await using app = await createQueueApp({}, journal)
     const canonical = await submitBranch(app, "issue/one")
@@ -3635,17 +3651,42 @@ describe("Queue", () => {
     const reconciled = await app.dispatch(app.commands.queue.advance, { run: run?.id ?? "missing" })
 
     expect(run).toMatchObject({ status: "completed", conclusion: "success", integration: { commit: MERGED } })
-    expect(reconciled.events).toEqual([
-      expect.objectContaining({ name: "pr/integrated", data: expect.objectContaining({ pr: "PR2" }) }),
-    ])
+    expect(reconciled.events).toEqual([])
     expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
       delivery: "integrated",
       integration: run?.integration,
     })
     expect(prFacts(app.state().bays.prs.PR2)).toMatchObject({
-      delivery: "integrated",
-      integration: run?.integration,
+      delivery: "submitted",
+      integration: undefined,
     })
+  })
+
+  it("repairs a repository receipt whose pr/integrated index row is missing exactly once", async () => {
+    await using app = await createQueueApp()
+    const pr = await submitBranch(app, "issue/receipt-index-gap")
+    const changeId = currentPRRev(app.bays.pr(pr.id)!).changeId
+    if (changeId === undefined) throw new Error("expected current PR Change-Id")
+    const fact = {
+      pr: pr.id,
+      revision: pr.revision,
+      headSha: pr.headSha,
+      run: "R-recovered",
+      commit: MERGED,
+      landingSha: MERGED,
+      baseSha: BASE,
+      changeId,
+      receipt: RECEIPT,
+    }
+
+    await app.queue.reconcileLanding(fact)
+    await app.queue.reconcileLanding(fact)
+
+    expect(prFacts(app.bays.pr(pr.id))).toMatchObject({
+      delivery: "integrated",
+      integration: { commit: MERGED, baseSha: BASE, changeId, receipt: RECEIPT },
+    })
+    expect((await Array.fromAsync(app.events())).filter(({ name }) => name === "pr/integrated")).toHaveLength(1)
   })
 
   it("does not integrate canceled historical PRs that share the current payload", async () => {

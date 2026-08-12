@@ -503,7 +503,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
         failure: {
           kind: "refusal",
           code: "journal-write-version-floor",
-          message: expect.stringContaining("yrd admin journal bump 2"),
+          message: expect.stringContaining("yrd admin journal bump 3"),
         },
       },
     )
@@ -1785,6 +1785,7 @@ checks: [{check: {run: "true"}}]
       "queue",
       "check",
       "doctor",
+      "why",
       "admin",
       "migrate",
       "log",
