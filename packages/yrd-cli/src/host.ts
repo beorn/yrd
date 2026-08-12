@@ -811,6 +811,47 @@ async function resolveCommit(process: Pick<Process, "run">, repo: string, ref: s
   return undefined
 }
 
+async function requireSubmitLinearTip(
+  process: Pick<Process, "run">,
+  repo: string,
+  branch: string,
+  head: string | undefined,
+  source: "local" | "origin",
+  localHead?: string,
+): Promise<string | undefined> {
+  if (head === undefined) return undefined
+  const args = ["rev-list", "--parents", "-n", "1", head]
+  const lineage = await process.run({
+    argv: ["git", "-C", repo, ...args],
+    cwd: repo,
+    env: cleanGitEnvironment(globalThis.process.env),
+    timeoutMs: GIT_TIMEOUT_MS,
+  })
+  assertGitDidNotTimeOut(lineage, args)
+  const [commit, ...parents] = lineage.stdout.trim().toLowerCase().split(/\s+/u)
+  if (lineage.exitCode !== 0 || commit !== head) {
+    raiseFailure(
+      "configuration",
+      "submit-branch-lineage-inspection-failed",
+      `yrd: could not inspect submitted ${source === "origin" ? `branch 'origin/${branch}'` : `local branch '${branch}'`} ` +
+        `at '${head}': ${lineage.stderr.trim() || lineage.stdout.trim() || `exit ${String(lineage.exitCode)}`}`,
+    )
+  }
+  if (parents.length <= 1) return head
+  const identity =
+    source === "origin"
+      ? `live 'origin/${branch}' is '${head}'; local '${branch}' is '${localHead ?? "missing"}'`
+      : `local '${branch}' is '${head}'`
+  raiseFailure(
+    "refusal",
+    "merge-tip-carrier",
+    `yrd: ${identity}. The submitted branch tip is a merge commit with ${parents.length} parents; ` +
+      `Yrd requires a linear root carrier. linear rebuild required: merge inside the affected component repository, ` +
+      `fast-forward that component's main, rebuild '${branch}' as one linear pin-bump commit, push it to origin, ` +
+      `then run 'yrd pr submit ${branch}'`,
+  )
+}
+
 /** Submission asks whether this is unpublished local work or "what commit does
  * the authored branch name on origin now?" Once origin advertises the branch,
  * stale remote-tracking refs are never accepted as live. */
@@ -827,7 +868,10 @@ async function resolveSubmitCommit(
       `yrd: could not inspect origin before resolving submitted branch '${branch}': ${origin.detail}`,
     )
   }
-  if (!origin.configured) return resolveCommit(process, repo, branch)
+  if (!origin.configured) {
+    const localHead = await resolveCommit(process, repo, `refs/heads/${branch}`)
+    return requireSubmitLinearTip(process, repo, branch, localHead, "local")
+  }
   const advertisement = await observeOriginBranchAdvertisement(process, repo, branch)
   if (!advertisement.ok) {
     raiseFailure(
@@ -839,7 +883,10 @@ async function resolveSubmitCommit(
   }
   // Origin absence is a fact, not a fetch failure: this is an unpublished
   // authored branch and its local commit is the only candidate available.
-  if (!advertisement.advertised) return resolveCommit(process, repo, branch)
+  if (!advertisement.advertised) {
+    const localHead = await resolveCommit(process, repo, `refs/heads/${branch}`)
+    return requireSubmitLinearTip(process, repo, branch, localHead, "local")
+  }
   const observed = await observeFreshRemoteBranch(process, repo, branch)
   if (!observed.ok && observed.phase === "fetch") {
     raiseFailure(
@@ -856,7 +903,8 @@ async function resolveSubmitCommit(
       `yrd: refreshed live branch '${branch}' but '${observed.target}' did not resolve to a commit: ${observed.detail}`,
     )
   }
-  return observed.head
+  const localHead = await resolveCommit(process, repo, `refs/heads/${branch}`)
+  return requireSubmitLinearTip(process, repo, branch, observed.head, "origin", localHead)
 }
 
 async function readConfigFromBase(

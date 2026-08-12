@@ -132,6 +132,7 @@ async function repository(): Promise<{ repo: string; featureSha: string }> {
 }
 
 async function staleRemoteBranchRepository(): Promise<{
+  author: string
   observer: string
   branch: string
   staleHead: string
@@ -166,7 +167,7 @@ async function staleRemoteBranchRepository(): Promise<{
   const liveHead = await git(author, "rev-parse", "HEAD")
   await git(author, "push", "-q", "origin", branch)
   expect(staleHead).not.toBe(liveHead)
-  return { observer, branch, staleHead, liveHead }
+  return { author, observer, branch, staleHead, liveHead }
 }
 
 async function candidatePackageRepository(
@@ -2854,6 +2855,49 @@ checks: [{check: {run: "true"}}]
       prs: [{ branch, revs: [{ n: 1, head: liveHead }] }],
     })
     expect(await git(observer, "rev-parse", `refs/remotes/origin/${branch}`)).toBe(liveHead)
+  })
+
+  it("refuses the live remote merge tip at submit and names the divergent local ref", async () => {
+    const { author, observer, branch, staleHead } = await staleRemoteBranchRepository()
+    await git(author, "switch", "-qc", "issue/side", staleHead)
+    await writeFile(join(author, "side.txt"), "side\n")
+    await git(author, "add", "side.txt")
+    await git(author, "commit", "-qm", "side commit")
+    await git(author, "switch", "-q", branch)
+    await git(author, "merge", "--no-ff", "-qm", "merge side", "issue/side")
+    const remoteHead = await git(author, "rev-parse", "HEAD")
+    await git(author, "push", "-q", "origin", branch)
+
+    await git(observer, "switch", "-qc", branch, staleHead)
+    await writeFile(join(observer, "local.txt"), "local\n")
+    await git(observer, "add", "local.txt")
+    await git(observer, "commit", "-qm", "divergent local commit")
+    const localHead = await git(observer, "rev-parse", "HEAD")
+    let stdout = ""
+    let stderr = ""
+
+    const exitCode = await runYrdProcess(
+      ["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", observer, "pr", "submit", branch, "--json"],
+      {
+        cwd: observer,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      },
+    )
+    expect(exitCode, stderr).toBe(1)
+    expect(stdout).toBe("")
+    expect(JSON.parse(stderr)).toMatchObject({
+      failure: { kind: "refusal", code: "merge-tip-carrier" },
+    })
+    expect(stderr).toContain(`local '${branch}' is '${localHead}'`)
+    expect(stderr).toContain(`live 'origin/${branch}' is '${remoteHead}'`)
+    expect(stderr).toContain("merge commit with 2 parents")
+    expect(stderr).toContain("linear rebuild required")
+    expect(await journalEnvelope(observer)).toEqual([])
   })
 
   it("fails typed instead of submitting a stale branch when origin cannot be fetched", async () => {
