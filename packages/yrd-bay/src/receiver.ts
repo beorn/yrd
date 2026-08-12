@@ -11,6 +11,13 @@ const RECEIVER_VERSION = 1 as const
 const RECEIPT_VERSION = 1 as const
 const MANAGED_HOOK_MARKER = "// yrd-managed-receiver-hook:1"
 const MANAGED_HOOK_PREFIX = "#!/usr/bin/env bun\n// yrd-managed-receiver-hook:"
+const BRANCH_PREFIX = "refs/heads/"
+/**
+ * Gerrit's submit namespace, adopted verbatim per the git-layer compatibility
+ * ruling: a push to `refs/for/<base>/<change>` IS the submission, so a change
+ * that is pushed but unsubmitted has no representation at all.
+ */
+const SUBMIT_PREFIX = "refs/for/"
 const ZERO_SHA = /^0+$/u
 const HEX_SHA = /^[0-9a-f]+$/u
 const REPOSITORY_ENV =
@@ -25,7 +32,19 @@ const ReceiverRefUpdateSchema = z
   .object({ oldSha: z.string().regex(HEX_SHA), newSha: z.string().regex(HEX_SHA), ref: TextSchema })
   .strict()
 const ReceiverTargetSchema = z
-  .object({ bay: TextSchema.optional(), name: TextSchema.optional(), base: GitRefSchema, baseSha: GitShaSchema })
+  .object({
+    bay: TextSchema.optional(),
+    name: TextSchema.optional(),
+    base: GitRefSchema,
+    baseSha: GitShaSchema,
+    /**
+     * The carrier branch this change lands on. A `refs/heads/` push already
+     * names its branch in the ref, so this stays absent there. A `refs/for/`
+     * push does NOT — the ref names the change — so the resolver, which is
+     * what opens the bay, is the only party that knows it.
+     */
+    branch: GitRefSchema.optional(),
+  })
   .strict()
 const ReceiverReceiptSchema = z
   .object({
@@ -34,6 +53,13 @@ const ReceiverReceiptSchema = z
     receivedAt: z.iso.datetime({ offset: true }),
     ref: TextSchema,
     branch: GitRefSchema,
+    /**
+     * The change name parsed out of a `refs/for/<base>/<change>` push. Stored
+     * so the receipt's identity check stays a pure function of the receipt:
+     * without it, a submit receipt could only be checked against its base, and
+     * a receipt that cannot fully check its own ref is a receipt that can lie.
+     */
+    change: TextSchema.optional(),
     oldSha: GitShaSchema,
     headSha: GitShaSchema,
     intake: ReceiverTargetSchema.extend({ branch: GitRefSchema, headSha: GitShaSchema }).strict(),
@@ -58,9 +84,19 @@ export type GitPushReceiver = Readonly<{
     options: ReceiverHookOptions & { intake: DurableReceiverIntake; lockTimeoutMs?: number },
   ): Promise<ReceiverDrainResult>
 }>
+/**
+ * What a `refs/for/<base>/<change>` push asks for, parsed out of the ref.
+ *
+ * Present only for submit pushes. Its absence is the signal that the resolver
+ * is being asked the OLD question — "does an active bay track this branch?" —
+ * and its presence is the signal that no bay exists yet and admission is what
+ * creates one.
+ */
+export type ReceiverSubmitIntent = Readonly<{ base: string; name: string }>
 export type ResolveReceiverTarget = (
   branch: string,
   update: Readonly<ReceiverRefUpdate>,
+  intent?: ReceiverSubmitIntent,
 ) => ReceiverTarget | null | undefined | Promise<ReceiverTarget | null | undefined>
 
 /** Intake must atomically deduplicate receipt.id with its own durable event. */
@@ -252,8 +288,7 @@ async function prepareReceiverUpdates(
   try {
     for (const value of typeof input === "string" ? parseReceiverUpdates(input) : input) {
       const update = ReceiverRefUpdateSchema.parse(value)
-      const { branch, target } = await authorize(receiver, update, options, "before")
-      const receipt = makeReceipt(update, branch, target, clock)
+      const receipt = makeReceipt(update, await authorize(receiver, update, options, "before"), clock)
       const stored = await storeReceipt(receiver, "prepared", receipt)
       if (stored.created) created.push(stored.path)
       receipts.push(receipt)
@@ -292,8 +327,7 @@ async function finalizeReceiverUpdates(
       )
       await validateStored(receiver, receipt, options)
     } else {
-      const authorized = await authorize(receiver, update, options, "after")
-      receipt = makeReceipt(update, authorized.branch, authorized.target, clock)
+      receipt = makeReceipt(update, await authorize(receiver, update, options, "after"), clock)
       await storeReceipt(receiver, "prepared", receipt)
     }
     await moveReceipt(receiver, receipt, "prepared", "pending")
@@ -601,6 +635,57 @@ function withIntakePolicy(message: string, options: ReceiverHookOptions): string
   return options.intakePolicy === undefined ? message : `${message}: ${options.intakePolicy}`
 }
 
+/**
+ * Every `<base>/<change>` reading of a `refs/for/…` ref, longest base first.
+ *
+ * Both halves can contain slashes, so the split is genuinely ambiguous and the
+ * ref alone cannot resolve it — `refs/for/main/@yrd/core/p2` reads four ways.
+ * Gerrit disambiguates by taking the longest base that is an existing branch,
+ * and so do we: this returns the candidates in that order and the caller,
+ * which can reach a repository, picks the first that resolves.
+ *
+ * Empty on anything outside the namespace, and on a ref that names a base but
+ * no change — `refs/for/main` is not a submit, it is a mistake, and it must be
+ * refused rather than silently read as a branch push.
+ */
+export function submitRefSplits(ref: string): Array<{ base: string; name: string }> {
+  if (!ref.startsWith(SUBMIT_PREFIX)) return []
+  const rest = ref.slice(SUBMIT_PREFIX.length)
+  const splits: Array<{ base: string; name: string }> = []
+  for (let cut = rest.lastIndexOf("/"); cut > 0; cut = rest.lastIndexOf("/", cut - 1)) {
+    splits.push({ base: rest.slice(0, cut), name: rest.slice(cut + 1) })
+  }
+  return splits
+}
+
+/**
+ * Resolves a submit ref against the base branches that actually exist.
+ *
+ * Base existence is asked of the MAIN repository, which is where `validatePin`
+ * already resolves `target.base` — one source of truth for "what is a base",
+ * so a ref cannot be admitted against a base the pin check would then reject.
+ */
+async function submitIntent(receiver: GitPushReceiver, ref: string, env?: Environment): Promise<ReceiverSubmitIntent> {
+  const splits = submitRefSplits(ref)
+  check(
+    splits.length > 0,
+    `submit ref '${ref}' names no change; push to 'refs/for/<base>/<change>' where <change> is the issue reference`,
+  )
+  for (const split of splits) {
+    const found = await mainGit(
+      receiver.process,
+      receiver.mainRepo,
+      ["rev-parse", "--verify", `refs/heads/${split.base}^{commit}`],
+      { env, allowFailure: true },
+    )
+    if (found.code === 0) return { base: split.base, name: split.name }
+  }
+  check(
+    false,
+    `submit ref '${ref}' names no base branch that exists; tried ${splits.map((split) => `'${split.base}'`).join(", ")}`,
+  )
+}
+
 async function validBranch(receiver: GitPushReceiver, branch: string, label: string): Promise<void> {
   const result = await receiverGit(receiver, ["check-ref-format", "--branch", branch], { allowFailure: true })
   check(result.code === 0, `invalid ${label} '${branch}'`)
@@ -651,20 +736,42 @@ async function authorize(
   update: ReceiverRefUpdate,
   options: ReceiverHookOptions,
   stage: "before" | "after",
-): Promise<{ branch: string; target: ReceiverTarget }> {
+): Promise<{ branch: string; target: ReceiverTarget; intent?: ReceiverSubmitIntent }> {
   validSha(update.oldSha, receiver.shaLength, "old commit id", true)
   validSha(update.newSha, receiver.shaLength, "new commit id", true)
   check(!ZERO_SHA.test(update.newSha), `ref deletion is not accepted for '${update.ref}'`)
+  const isSubmit = update.ref.startsWith(SUBMIT_PREFIX)
   check(
-    update.ref.startsWith("refs/heads/") && update.ref.length > 11,
-    `only branch refs under refs/heads/ are accepted, got '${update.ref}'`,
+    isSubmit || (update.ref.startsWith(BRANCH_PREFIX) && update.ref.length > BRANCH_PREFIX.length),
+    `only branch refs under ${BRANCH_PREFIX} and submit refs under ${SUBMIT_PREFIX} are accepted, got '${update.ref}'`,
   )
-  const branch = update.ref.slice(11)
+  // A submit push predates its bay by construction, so it cannot be authorized
+  // by "an active bay tracks this branch" — the ref carries the intent instead,
+  // and the resolver's job becomes opening the bay rather than finding one.
+  const intent = isSubmit ? await submitIntent(receiver, update.ref, options.env) : undefined
+  const resolved = await options.resolveTarget(
+    intent === undefined ? update.ref.slice(BRANCH_PREFIX.length) : intent.name,
+    update,
+    intent,
+  )
+  const subject =
+    intent === undefined ? `branch '${update.ref.slice(BRANCH_PREFIX.length)}'` : `change '${intent.name}'`
+  check(resolved, withIntakePolicy(`${subject} is not authorized for Yrd intake`, options))
+  const branch = intent === undefined ? update.ref.slice(BRANCH_PREFIX.length) : resolved.branch
+  check(
+    branch !== undefined,
+    `submit ref '${update.ref}' was admitted without a carrier branch; the resolver must name the branch the change lands on`,
+  )
   await validBranch(receiver, branch, "intake branch")
-  const resolved = await options.resolveTarget(branch, update)
-  check(resolved, withIntakePolicy(`branch '${branch}' is not authorized for Yrd intake`, options))
   const target = normalizeTarget(resolved, receiver)
   await validBranch(receiver, target.base, "base branch")
+  // The ref and the resolver must agree about where this lands. They are two
+  // independent statements of the same fact, and a disagreement means the
+  // change would gate against a base its author never named.
+  check(
+    intent === undefined || target.base === intent.base,
+    `submit ref '${update.ref}' targets base '${intent?.base ?? ""}' but intake resolved base '${target.base}'`,
+  )
   const current = await refValue(receiver, update.ref, options.env)
   const expected = stage === "after" ? update.newSha : ZERO_SHA.test(update.oldSha) ? null : update.oldSha
   check(
@@ -672,7 +779,7 @@ async function authorize(
     `stale ${stage === "before" ? "push" : "post-receive"} for '${update.ref}': expected ${expected ?? "no ref"}, found ${current ?? "no ref"}`,
   )
   await validatePin(receiver, update, target, options.env)
-  return { branch, target }
+  return intent === undefined ? { branch, target } : { branch, target, intent }
 }
 
 function receiptId(update: ReceiverRefUpdate): string {
@@ -681,16 +788,17 @@ function receiptId(update: ReceiverRefUpdate): string {
 
 function makeReceipt(
   update: ReceiverRefUpdate,
-  branch: string,
-  target: ReceiverTarget,
+  authorized: { branch: string; target: ReceiverTarget; intent?: ReceiverSubmitIntent },
   clock: () => string,
 ): ReceiverReceipt {
+  const { branch, target, intent } = authorized
   return {
     version: RECEIPT_VERSION,
     id: receiptId(update),
     receivedAt: clock(),
     ref: update.ref,
     branch,
+    ...(intent === undefined ? {} : { change: intent.name }),
     oldSha: update.oldSha,
     headSha: update.newSha,
     intake: { ...target, branch, headSha: update.newSha },
@@ -753,10 +861,23 @@ function validateReceipt(value: unknown, id: string, path: string): ReceiverRece
     `receipt identity mismatch at '${path}'`,
   )
   check(
-    receipt.headSha === receipt.intake.headSha && receipt.ref === `refs/heads/${receipt.branch}`,
+    receipt.headSha === receipt.intake.headSha && receiptRef(receipt) === receipt.ref,
     `receipt intake mismatch at '${path}'`,
   )
   return receipt
+}
+
+/**
+ * The one ref a receipt's own contents could have come from.
+ *
+ * A branch push names its branch in the ref; a submit push names its base and
+ * its change. Either way the ref is fully determined by fields the receipt
+ * already carries, so this stays an equality — a receipt that cannot rebuild
+ * its own ref is a receipt that has been edited.
+ */
+function receiptRef(receipt: ReceiverReceipt): string {
+  if (receipt.change === undefined) return `${BRANCH_PREFIX}${receipt.branch}`
+  return `${SUBMIT_PREFIX}${receipt.intake.base}/${receipt.change}`
 }
 
 async function readReceipt(path: string, id: string): Promise<ReceiverReceipt> {
@@ -789,7 +910,12 @@ async function validateStored(
   validSha(receipt.oldSha, receiver.shaLength, "receipt old commit id", true)
   validSha(receipt.headSha, receiver.shaLength, "receipt head commit id")
   const update = updateOf(receipt)
-  const resolved = await options.resolveTarget(receipt.branch, update)
+  // The recheck must ask the SAME question the push asked. By now the bay a
+  // submit opened exists, so a branch lookup would also answer — but only by
+  // accident, and a resolver that answers only the intent would start failing
+  // here for reasons that have nothing to do with authorization.
+  const intent = receipt.change === undefined ? undefined : { base: receipt.intake.base, name: receipt.change }
+  const resolved = await options.resolveTarget(receipt.branch, update, intent)
   check(resolved, withIntakePolicy(`branch '${receipt.branch}' is no longer authorized for Yrd intake`, options))
   const target = normalizeTarget(resolved, receiver)
   const stored = receipt.intake

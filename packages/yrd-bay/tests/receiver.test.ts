@@ -14,6 +14,7 @@ import {
   createGitPushReceiver,
   loadGitPushReceiver,
   receiverHookSource,
+  submitRefSplits,
   type GitPushReceiver,
   type ReceiverReceipt,
   type ReceiverTarget,
@@ -118,7 +119,11 @@ async function installHookHost(
       "const [, mode] = Bun.argv.slice(2)",
       'const targets = JSON.parse(await readFile(process.env.YRD_TEST_TARGETS, "utf8"))',
       "await using runner = createProcess({ env: process.env })",
-      "await runReceiverHookFromEnvironment(mode, { process: runner, resolveTarget: async branch => targets[branch] ?? null, intakePolicy: process.env.YRD_TEST_INTAKE_POLICY })",
+      // A `refs/for` push has no branch to key on — the change is identified by
+      // the ref itself — so the fake resolver keys those on the parsed intent,
+      // exactly as the production resolver keys them on the bay it opens.
+      "const resolveTarget = async (branch, update, intent) => targets[intent === undefined ? branch : `for:${intent.base}/${intent.name}`] ?? null",
+      "await runReceiverHookFromEnvironment(mode, { process: runner, resolveTarget, intakePolicy: process.env.YRD_TEST_INTAKE_POLICY })",
       "",
     ].join("\n"),
   )
@@ -430,5 +435,138 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     })
     expect(result.failed).toEqual([{ id, error: expect.stringContaining("invalid JSON") }])
     expect(await readFile(corrupt, "utf8")).toBe("{not-json\n")
+  })
+
+  // ── push IS submit ────────────────────────────────────────────────────────
+  //
+  // P2 criterion 1. Intake authorization is "an active bay tracks this branch",
+  // and a push-is-submit push PREDATES its bay by construction, so under the
+  // branch-only rule it can never be authorized — the "unrepresentability
+  // clause" the deep-dive verdict names. `refs/for/<base>/<name>` makes a
+  // bayless push representable: the namespace carries the intent, and admission
+  // creates the bay instead of requiring one.
+  //
+  // The shape is Gerrit's own wire format (`refs/for/<branch>[/<topic>]`), per
+  // the operator's git-layer compatibility ruling: a tool that only reads git
+  // must find nothing surprising in a Yrd repo.
+
+  it("admits a push to refs/for/<base>/<name> with no bay tracking the branch", async () => {
+    const f = await fixture("submit-ref")
+    await git(f.mainRepo, "switch", "-qc", "work")
+    const headSha = await commit(f.mainRepo, "submitted.txt")
+
+    // No entry keyed by any BRANCH — only by the parsed intent. A resolver that
+    // could only answer branch questions would refuse this push, which is the
+    // regression this case exists to catch.
+    const env = await installHookHost(f.root, {
+      "for:main/my-change": target(f.baseSha, { branch: "issue/my-change" }),
+    })
+    const result = await push(f, "work:refs/for/main/my-change", env)
+    expect(result.stderr).not.toContain("only branch refs")
+    expect(result.code).toBe(0)
+
+    const [pending] = await inboxFiles(f.receiver)
+    const receipt: ReceiverReceipt = JSON.parse(await readFile(join(f.receiver.inboxDir, pending ?? ""), "utf8"))
+    expect(receipt.ref).toBe("refs/for/main/my-change")
+    // The carrier branch comes from the resolver (the bay names it); the ref
+    // names the CHANGE, never the branch.
+    expect(receipt.branch).toBe("issue/my-change")
+    expect(receipt.headSha).toBe(headSha)
+    expect(receipt.intake.base).toBe("main")
+  })
+
+  it("resolves the base by longest existing branch, so a slashed change name is not read as a base", async () => {
+    const f = await fixture("submit-split")
+    await git(f.mainRepo, "switch", "-qc", "work")
+    await commit(f.mainRepo, "split.txt")
+
+    // `main/@yrd/core/p2` splits four ways. Only `main` exists, so `main` is the
+    // base and the whole remainder is the change name. A greedy first-slash
+    // parse would read the base as `main` too — this passes only because the
+    // NAME survives intact, which is what a bead-path issue reference needs.
+    const env = await installHookHost(f.root, {
+      "for:main/@yrd/core/p2": target(f.baseSha, { branch: "issue/p2" }),
+    })
+    const result = await push(f, "work:refs/for/main/@yrd/core/p2", env)
+    expect(result.code).toBe(0)
+  })
+
+  it("refuses a refs/for push whose base is not a branch, naming the ref and the base it tried", async () => {
+    const f = await fixture("submit-nobase")
+    await git(f.mainRepo, "switch", "-qc", "work")
+    await commit(f.mainRepo, "nobase.txt")
+
+    const env = await installHookHost(f.root, { "for:nosuch/change": target(f.baseSha, { branch: "issue/c" }) })
+    const result = await push(f, "work:refs/for/nosuch/change", env)
+    expect(result.code).not.toBe(0)
+    // Silent acceptance into an invisible state is the failure this whole phase
+    // deletes, so the refusal must be at push time AND must name what it read.
+    expect(result.stderr).toContain("refs/for/nosuch/change")
+    expect(result.stderr).toContain("no base branch")
+  })
+
+  it("refuses a refs/for push that names a base but no change", async () => {
+    const f = await fixture("submit-nochange")
+    await git(f.mainRepo, "switch", "-qc", "work")
+    await commit(f.mainRepo, "nochange.txt")
+
+    const env = await installHookHost(f.root, {})
+    const result = await push(f, "work:refs/for/main", env)
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain("refs/for/main")
+    // Asserting the SPECIFIC refusal, not merely that one happened: a bare
+    // 'refs/for/main' is refused by the namespace check too, so a test that
+    // only checked the exit code would pass without this path existing at all.
+    expect(result.stderr).toContain("names no change")
+    expect(result.stderr).toContain("refs/for/<base>/<change>")
+  })
+
+  it("refuses a refs/for push whose resolver returns no carrier branch", async () => {
+    const f = await fixture("submit-nobranch")
+    await git(f.mainRepo, "switch", "-qc", "work")
+    await commit(f.mainRepo, "nobranch.txt")
+
+    // A resolver that admits the change but names no branch would otherwise
+    // produce a receipt whose `branch` is undefined — an invisible state one
+    // layer down. It must fail loudly here instead.
+    const env = await installHookHost(f.root, { "for:main/orphan": target(f.baseSha) })
+    const result = await push(f, "work:refs/for/main/orphan", env)
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain("carrier branch")
+  })
+
+  // Passes before this change as well as after, deliberately: opening one
+  // namespace must not open the rest, and the only way to know that is a case
+  // that was already green and has to stay green.
+  it("keeps every other ref namespace refused", async () => {
+    const f = await fixture("submit-other")
+    await git(f.mainRepo, "switch", "-qc", "work")
+    await commit(f.mainRepo, "other.txt")
+
+    const env = await installHookHost(f.root, {})
+    const tag = await push(f, "work:refs/tags/v1", env)
+    expect(tag.code).not.toBe(0)
+    expect(tag.stderr).toContain("refs/tags/v1")
+  })
+})
+
+describe("submit ref parsing", () => {
+  it("offers every base/name split, longest base first", () => {
+    expect(submitRefSplits("refs/for/main/@yrd/core/p2")).toEqual([
+      { base: "main/@yrd/core", name: "p2" },
+      { base: "main/@yrd", name: "core/p2" },
+      { base: "main", name: "@yrd/core/p2" },
+    ])
+  })
+
+  it("offers nothing for a ref that names no change", () => {
+    expect(submitRefSplits("refs/for/main")).toEqual([])
+    expect(submitRefSplits("refs/for/")).toEqual([])
+    expect(submitRefSplits("refs/for")).toEqual([])
+  })
+
+  it("offers nothing for a ref outside the submit namespace", () => {
+    expect(submitRefSplits("refs/heads/main")).toEqual([])
+    expect(submitRefSplits("refs/tags/v1")).toEqual([])
   })
 })
