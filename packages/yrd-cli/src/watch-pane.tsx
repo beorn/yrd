@@ -1272,7 +1272,7 @@ function QueueWatchFooter({
       </Box>
     )
   }
-  const notice = readFailure === undefined ? cursorNotice : queueReadFailureMessage(readFailure)
+  const notice = readFailure === undefined ? cursorNotice : queueReadFailureMessage(readFailure, true)
   if (notice === undefined) return null
   return (
     <Box height={1} flexShrink={0}>

@@ -5946,7 +5946,7 @@ async function observeQueueList(
     stateSource = "journal"
     readFailure = {
       code: "queue-read-boundary-moved",
-      message: `queue changed while reading (attempts cursor ${String(read.cursor)}, Journal cursor ${String(journalCursor)})`,
+      message: `queue changed while reading (derived cursor ${String(read.cursor)}, Journal cursor ${String(journalCursor)})`,
       readCursor: read.cursor,
       journalCursor,
       showing: previous === undefined ? "bounded-partial" : "last-complete",
@@ -8495,7 +8495,7 @@ async function watchQueue(
       }),
       [
         ...queuePauseWarnings(snapshot.state, snapshot.results),
-        ...(snapshot.readFailure === undefined ? [] : [queueReadFailureMessage(snapshot.readFailure)]),
+        ...(snapshot.readFailure === undefined ? [] : [queueReadFailureMessage(snapshot.readFailure, true)]),
       ],
     )
     if (scope.signal.aborted) return 0

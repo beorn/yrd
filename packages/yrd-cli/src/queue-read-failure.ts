@@ -6,7 +6,7 @@ export type QueueReadFailure = Readonly<{
   showing: "last-complete" | "bounded-partial"
 }>
 
-export function queueReadFailureMessage(failure: QueueReadFailure): string {
+export function queueReadFailureMessage(failure: QueueReadFailure, retrying = false): string {
   const snapshot = failure.showing === "last-complete" ? "last complete" : "bounded partial"
-  return `${failure.message}; showing ${snapshot} snapshot; retrying`
+  return `${failure.message}; showing ${snapshot} snapshot${retrying ? "; retrying" : ""}`
 }
