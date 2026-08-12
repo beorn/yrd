@@ -3,12 +3,13 @@ import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "n
 import { tmpdir } from "node:os"
 import { isAbsolute, join, resolve, sep } from "node:path"
 import { createFailure, failureFact, type JsonValue, type YrdFailure } from "@yrd/core"
-import { JobErrorSchema, parseJobLaunch, type JobContext, type JobError, type JobResult } from "@yrd/job"
+import { JobErrorSchema, parseJobLaunch, type Job, type JobContext, type JobError, type JobResult } from "@yrd/job"
 import { ComponentPathSchema } from "@yrd/intent"
 import type { Process, ProcessResult } from "@yrd/process"
 import * as z from "zod"
 import type {
   AlreadyLandedEvidence,
+  Candidate,
   ComponentMainOutcomes,
   ComponentMainReceipt,
   ComponentMainRefusal,
@@ -17,6 +18,7 @@ import type {
   PRShape,
   PRSnapshot,
   QueueSubmoduleResolutionEvidence,
+  Run,
   SourceRewrite,
 } from "./model.ts"
 import {
@@ -61,6 +63,7 @@ import {
   type LandingReceiptEnvelope,
   type LandingReceiptPointer,
 } from "./landing-receipt.ts"
+import { MERGE_RECORD_NOTES_NAME, createMergeRecord, parseMergeRecord, type MergeRecordBody } from "./merge-record.ts"
 
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 
@@ -1123,6 +1126,108 @@ function createGit(
     process,
     env,
   })
+}
+
+function mergeRecordJob(job: Job, step: string): MergeRecordBody["evidence"]["jobs"][number] | undefined {
+  if (job.status !== "completed") return undefined
+  const command = GitCheckResultEvidenceSchema.safeParse("output" in job ? job.output : undefined)
+  const evidence = command.success && "configHash" in command.data ? command.data : undefined
+  return {
+    id: job.id,
+    step,
+    attempt: job.attempt,
+    ...(!("startedAt" in job) || job.startedAt === undefined ? {} : { startedAt: job.startedAt }),
+    finishedAt: job.finishedAt,
+    result: job.conclusion,
+    ...(evidence?.configHash === undefined ? {} : { configHash: evidence.configHash }),
+    ...(evidence?.environmentHash === undefined ? {} : { environmentHash: evidence.environmentHash }),
+  }
+}
+
+function mergeRecordBody(run: Run, candidate: Candidate): MergeRecordBody | undefined {
+  if (run.status !== "completed" || run.finishedAt === undefined) return undefined
+  if (!run.steps.some((step) => step.kind === "merge")) return undefined
+  const result = run.conclusion === "success" ? "merged" : run.conclusion === "cancelled" ? "canceled" : "failed"
+  const reason =
+    result === "merged"
+      ? undefined
+      : (run.error ??
+        (result === "canceled"
+          ? { code: "run-canceled", message: run.cancelReason ?? "Merge canceled" }
+          : { code: "merge-failed", message: "Merge failed without a more specific reason" }))
+  return {
+    merge: {
+      id: run.id,
+      base: run.base,
+      baseSha: candidate.baseSha,
+      candidate: run.candidateId,
+      result,
+      ...(run.integration?.commit === undefined ? {} : { mergedCommit: run.integration.commit }),
+      startedAt: run.startedAt,
+      finishedAt: run.finishedAt,
+    },
+    changes: run.prs.map((change) => ({
+      ...(change.changeId === undefined ? {} : { changeId: change.changeId }),
+      pr: change.id,
+      revision: change.revision,
+      submittedHead: change.headSha,
+    })),
+    ...(reason === undefined ? {} : { reason }),
+    evidence: {
+      jobs: run.steps.flatMap((step) => {
+        const job = step.job === undefined ? undefined : mergeRecordJob(step.job, step.name)
+        return job === undefined ? [] : [job]
+      }),
+    },
+    ...(result === "merged"
+      ? {}
+      : {
+          fix:
+            result === "canceled"
+              ? "Submit the revision again when this merge should resume."
+              : `Resolve ${reason?.code ?? "merge-failed"} and submit a new revision.`,
+        }),
+  }
+}
+
+export type MergeRecorder = (input: Readonly<{ run: Run; candidate: Candidate }>) => Promise<void>
+
+/** Persist the immutable terminal account for one merge attempt.
+ *
+ * The note target is a content-addressed attempt anchor, not a merged commit:
+ * failed and canceled merges deliberately have no merged commit to attach to.
+ */
+export function gitMergeRecorder(options: {
+  inject: Readonly<{ process: Pick<Process, "run"> }>
+  repo: string
+}): MergeRecorder {
+  const git = createGit(options.inject.process)
+  return async ({ run, candidate }) => {
+    const body = mergeRecordBody(run, candidate)
+    if (body === undefined) return
+    const record = createMergeRecord(body)
+    const target = (await git.input(options.repo, ["hash-object", "-w", "--stdin"], `yrd merge ${run.id}\n`)).stdout
+    const existing = await git.run(options.repo, ["notes", `--ref=${MERGE_RECORD_NOTES_NAME}`, "show", target], true)
+    if (existing.code === 0) {
+      const parsed = parseMergeRecord(existing.stdout)
+      if (createMergeRecord(parsed.record).canonical !== record.canonical) {
+        throw new Error(`yrd: merge '${run.id}' already has a different immutable merge record`)
+      }
+      return
+    }
+    const blob = (await git.input(options.repo, ["hash-object", "-w", "--stdin"], record.canonical)).stdout
+    const added = await git.run(
+      options.repo,
+      ["notes", `--ref=${MERGE_RECORD_NOTES_NAME}`, "add", "-C", blob, target],
+      true,
+    )
+    if (added.code !== 0) {
+      const raced = await git.run(options.repo, ["notes", `--ref=${MERGE_RECORD_NOTES_NAME}`, "show", target], true)
+      if (raced.code === 0 && createMergeRecord(parseMergeRecord(raced.stdout).record).canonical === record.canonical)
+        return
+      throw new Error(`yrd: merge record for '${run.id}' could not be published: ${added.stderr || added.stdout}`)
+    }
+  }
 }
 
 export const RepositoryChangeIdentitySchema = z

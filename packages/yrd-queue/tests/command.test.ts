@@ -38,6 +38,7 @@ import {
   gitCandidatePreparer,
   gitCheckStep,
   gitMergeStep,
+  gitMergeRecorder,
   findRepositoryLandingReceipt,
   inspectGitQueueTarget,
   synthesizePinIntentCarrier,
@@ -803,6 +804,7 @@ async function checkedQueue(
     ...(options.prepareCandidate === true
       ? { prepareCandidate: gitCandidatePreparer({ inject: { process }, repo }) }
       : {}),
+    recordMerge: gitMergeRecorder({ inject: { process }, repo }),
     evaluateIntent: async ({ intent, baseSha }) => {
       const row = (await git(repo, ["ls-tree", baseSha, intent.component])).split(/\s+/u)
       const currentPin = row[2]
@@ -6356,6 +6358,38 @@ describe("Queue command adapters", () => {
         baseSha: checked.candidateSha,
         changeId,
         receipt: integration.receipt,
+      },
+    })
+  })
+
+  it("persists one failed merge record with the reason, evidence, and fix", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    await using app = await checkedQueue(
+      process,
+      repo,
+      shellCommand("printf 'candidate contract failed\\n' >&2; exit 17"),
+      { prepareCandidate: true },
+    )
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    if (run === undefined) throw new Error("expected Queue run")
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure" })
+
+    const listed = await git(repo, ["notes", "--ref=yrd/merge-records", "list"])
+    const [noteObject, target, extra] = listed.split(" ")
+    expect(noteObject).toMatch(/^[0-9a-f]{40,64}$/u)
+    expect(target).toMatch(/^[0-9a-f]{40,64}$/u)
+    expect(extra).toBeUndefined()
+    expect(JSON.parse(await git(repo, ["notes", "--ref=yrd/merge-records", "show", target!]))).toMatchObject({
+      schema: "yrd/merge-record/v1",
+      record: {
+        merge: { id: run.id, result: "failed" },
+        changes: [{ pr: "PR1", revision: 1, submittedHead: featureSha }],
+        reason: { code: run.error?.code },
+        evidence: { jobs: expect.arrayContaining([expect.objectContaining({ result: "failure" })]) },
+        fix: expect.any(String),
       },
     })
   })

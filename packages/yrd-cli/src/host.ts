@@ -59,6 +59,7 @@ import {
   gitCandidatePreparer,
   gitCheckStep,
   gitMergeStep,
+  gitMergeRecorder,
   findRepositoryLandingReceipt,
   inspectGitQueueTarget,
   resolveGitQueueTarget,
@@ -1142,6 +1143,7 @@ async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions):
       artifactRoot: join(options.stateDir, "artifacts"),
       ...(options.candidatePool === undefined ? {} : { candidatePool: options.candidatePool }),
     }),
+    recordMerge: gitMergeRecorder({ inject: { process: options.process }, repo: options.repo }),
     evaluateIntent: ({ intent, baseSha, tombstones }) =>
       admitPinIntent({
         process: options.process,

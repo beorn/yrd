@@ -518,6 +518,8 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
   requires?: readonly QueueRequirement[]
   resolveBaseSha?(base: string): string | Promise<string>
   prepareCandidate?: CandidatePreparer
+  /** Repository-truth sink for one immutable terminal merge record. */
+  recordMerge?: (input: Readonly<{ run: Run; candidate: Candidate }>) => Promise<void>
   evaluateIntent?: (
     input: Readonly<{
       intent: PinIntent
@@ -886,6 +888,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
             options.defaultBase,
             options.resolveBaseSha,
             options.prepareCandidate,
+            options.recordMerge,
             options.evaluateIntent,
             configuredRunner,
             options.flows,
@@ -1106,6 +1109,7 @@ function createQueue<Shape extends PRShape>(
   defaultBase: string | undefined,
   resolveBaseSha: QueueOptions<readonly AnyStepDef[]>["resolveBaseSha"],
   prepareCandidate: CandidatePreparer | undefined,
+  recordMerge: QueueOptions<readonly AnyStepDef[]>["recordMerge"],
   evaluateIntent: QueueOptions<readonly AnyStepDef[]>["evaluateIntent"],
   configuredRunner: Runner | undefined,
   flows: YrdConfig | undefined,
@@ -1116,6 +1120,14 @@ function createQueue<Shape extends PRShape>(
 ): Queue<Shape> {
   const current = (id: RunId): Run => materializeRun(Queues.record(state(), id), runtime().jobs)
   const byName = new Map(steps.map((step) => [step.name, step] as const))
+
+  const persistMergeRecord = async (run: Run): Promise<void> => {
+    if (recordMerge === undefined || !Queues.terminal(run)) return
+    const candidate = runtime().queues.candidates[run.candidateId]
+    if (candidate === undefined)
+      throw new Error(`yrd: queue run '${run.id}' names missing Candidate '${run.candidateId}'`)
+    await recordMerge({ run, candidate: candidate as Candidate })
+  }
 
   type CycleBaseResolver = (base: string) => Promise<string>
   const createBaseResolutionCycle = (): CycleBaseResolver | undefined => {
@@ -1354,7 +1366,11 @@ function createQueue<Shape extends PRShape>(
     // Stale re-report guard #1: a run with nothing left to settle has ALREADY
     // emitted its one run lifecycle at its real settlement. Return it untouched —
     // no drive, no re-emit.
-    if (!needsSettlement(runtime(), observed)) return markSettledRoot(id)
+    if (!needsSettlement(runtime(), observed)) {
+      const settled = await markSettledRoot(id)
+      await persistMergeRecord(settled)
+      return settled
+    }
 
     const settleTree = async (): Promise<Run> => {
       const settled = await drive(id, options)
@@ -1391,10 +1407,13 @@ function createQueue<Shape extends PRShape>(
     // artifact). The child runs observe their own settlements.
     if (Queues.terminal(observed)) {
       await settleTree()
-      return markSettledRoot(id)
+      const settled = await markSettledRoot(id)
+      await persistMergeRecord(settled)
+      return settled
     }
 
     const result = await observeRunLifecycle(observed, settleTree, { continuation })
+    await persistMergeRecord(result)
     await markSettledRoot(id)
     return result
   }
@@ -2603,7 +2622,9 @@ function createQueue<Shape extends PRShape>(
           await configuredRunner.cancel(active.id, { by: args.by, reason: args.reason })
         }
       }
-      return current(args.run)
+      const canceled = current(args.run)
+      await persistMergeRecord(canceled)
+      return canceled
     },
     async recover(recoverOptions) {
       // Capture ownership at the synchronous API boundary. A resident runner can
