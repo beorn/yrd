@@ -34,6 +34,7 @@ import {
   configuredCommandStep,
   configuredMergeStep,
   createGitPRRecutter,
+  findRepositoryChangeLanding,
   gitCandidatePreparer,
   gitCheckStep,
   gitMergeStep,
@@ -6221,6 +6222,46 @@ describe("Queue command adapters", () => {
     const job = runs[0]!.steps[0]!.job
     if (job?.status !== "completed" || job.conclusion !== "success") throw new Error("check did not pass")
     await expectLanded(repo, GitCheckEvidenceSchema.parse(job.output))
+  })
+
+  it("proves a regenerated code landing by Change-Id when the submitted SHA is absent from base ancestry", async () => {
+    const { repo } = await repository()
+    const changeId = `I${"1".repeat(40)}`
+    const otherChangeId = `I${"2".repeat(40)}`
+
+    await git(repo, ["switch", "-qc", "issue/authored"])
+    await writeFile(join(repo, "payload.txt"), "same logical change\n")
+    await git(repo, ["add", "payload.txt"])
+    await git(repo, ["commit", "-qm", `authored change\n\nChange-Id: ${changeId}`])
+    const submittedHead = await git(repo, ["rev-parse", "HEAD"])
+
+    await git(repo, ["switch", "-q", "main"])
+    await writeFile(join(repo, "payload.txt"), "same logical change\n")
+    await git(repo, ["add", "payload.txt"])
+    await git(repo, ["commit", "-qm", `queue-regenerated change\n\nChange-Id: ${changeId}`])
+    const landingSha = await git(repo, ["rev-parse", "HEAD"])
+
+    await expect(git(repo, ["merge-base", "--is-ancestor", submittedHead, landingSha])).rejects.toThrow()
+    await using process = createProcess()
+    await expect(
+      findRepositoryChangeLanding({
+        inject: { process },
+        repo,
+        baseSha: landingSha,
+        identity: { changeId, submittedHead },
+      }),
+    ).resolves.toEqual({
+      status: "proven",
+      fact: { changeId, submittedHead, landingSha, baseSha: landingSha },
+    })
+    await expect(
+      findRepositoryChangeLanding({
+        inject: { process },
+        repo,
+        baseSha: landingSha,
+        identity: { changeId: otherChangeId, submittedHead },
+      }),
+    ).resolves.toEqual({ status: "not-proven", reason: "change-id-not-on-base" })
   })
 
   it("lands the checked candidate through origin without touching a dirty local base checkout", async () => {
