@@ -13107,15 +13107,16 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
         },
       })
 
+      const staleReadModel = {
+        snapshot: async () => ({ cursor: staleCursor, generation: 0, attempts }),
+      }
       const exhausted = runInternals.createQueueListSnapshotLoader(
         app,
         [],
         {},
         outputIO().io,
         {
-          queueReadModel: {
-            snapshot: async () => ({ cursor: staleCursor, generation: 0, attempts }),
-          },
+          queueReadModel: staleReadModel,
         },
         false,
       )
@@ -13124,6 +13125,19 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
           code: "queue-read-boundary-moved",
           readCursor: staleCursor,
           journalCursor: currentCursor,
+          showing: "bounded-partial",
+        },
+      })
+
+      const output = outputIO()
+      expect(
+        await runYrd(app, yrd("queue", "list", "--json"), output.io, { queueReadModel: staleReadModel }),
+        output.stderr(),
+      ).toBe(0)
+      expect(JSON.parse(output.stdout())).toMatchObject({
+        command: "queue.list",
+        readFailure: {
+          code: "queue-read-boundary-moved",
           showing: "bounded-partial",
         },
       })
