@@ -1,4 +1,5 @@
 import {
+  ChangeIdSchema,
   CompositionV1Schema,
   CorrelationSchema,
   GitRefSchema,
@@ -9,6 +10,7 @@ import {
   type PRTerminalAssociation,
   baseIdentity,
   checkRequest,
+  currentPRRev,
   prBaseSha,
   prComposition,
   prCorrelation,
@@ -73,6 +75,8 @@ export type QueueIntentSnapshot = Readonly<z.infer<typeof QueueIntentSnapshotSch
 export const PRSnapshotSchema = z
   .object({
     id: QueueMemberIdSchema,
+    /** Missing only while replaying pre-receipt Queue records and for pin intents. */
+    changeId: ChangeIdSchema.optional(),
     bay: z.string().trim().min(1).optional(),
     name: z.string().trim().min(1).optional(),
     branch: GitRefSchema,
@@ -972,6 +976,10 @@ export const Queues = Object.freeze({
   },
 
   snapshot(pr: PR): PRSnapshot {
+    const revision = currentPRRev(pr)
+    if (revision.changeId === undefined) {
+      throw new Error(`yrd: PR '${pr.id}' predates stable Change-Id identity`)
+    }
     const baseSha = checkRequest(pr)?.baseSha ?? prBaseSha(pr)
     const recut = prRecut(pr)
     const frozen = recut?.certificate === "frozen-code-carrier-v1"
@@ -982,6 +990,7 @@ export const Queues = Object.freeze({
         : { sourceBaseSha: sourceRevision.baseSha, sourceHeadSha: sourceRevision.head }
     return PRSnapshotSchema.parse({
       id: pr.id,
+      changeId: revision.changeId,
       ...(pr.bay === undefined ? {} : { bay: pr.bay }),
       ...(pr.name === undefined ? {} : { name: pr.name }),
       branch: pr.branch,
