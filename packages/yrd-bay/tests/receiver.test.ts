@@ -465,14 +465,29 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(result.stderr).not.toContain("only branch refs")
     expect(result.code).toBe(0)
 
-    const [pending] = await inboxFiles(f.receiver)
-    const receipt: ReceiverReceipt = JSON.parse(await readFile(join(f.receiver.inboxDir, pending ?? ""), "utf8"))
-    expect(receipt.ref).toBe("refs/for/main/my-change")
-    // The carrier branch comes from the resolver (the bay names it); the ref
-    // names the CHANGE, never the branch.
-    expect(receipt.branch).toBe("issue/my-change")
-    expect(receipt.headSha).toBe(headSha)
-    expect(receipt.intake.base).toBe("main")
+    // Read the receipt by DRAINING rather than by parsing the inbox file: drain
+    // re-validates it, so this also proves the stored receipt passes its own
+    // identity check. A submit receipt used to fail that check outright, since
+    // the invariant hardcoded refs/heads/<branch>.
+    const delivered: ReceiverReceipt[] = []
+    const drained = await f.receiver.drain({
+      resolveTarget: async (_branch, _update, intent) =>
+        intent === undefined ? null : target(f.baseSha, { branch: "issue/my-change" }),
+      intake: async (receipt) => void delivered.push(receipt),
+    })
+    expect(drained).toMatchObject({ delivered: [expect.any(String)], failed: [], ambiguous: [] })
+    expect(delivered).toEqual([
+      expect.objectContaining({
+        ref: "refs/for/main/my-change",
+        // The carrier branch comes from the resolver; the ref names the CHANGE.
+        branch: "issue/my-change",
+        change: "my-change",
+        oldSha: zero,
+        headSha,
+        intake: expect.objectContaining({ base: "main", branch: "issue/my-change", headSha }),
+      }),
+    ])
+    expect(await inboxFiles(f.receiver)).toEqual([])
   })
 
   it("resolves the base by longest existing branch, so a slashed change name is not read as a base", async () => {
