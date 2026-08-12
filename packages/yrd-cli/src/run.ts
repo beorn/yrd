@@ -124,6 +124,7 @@ import {
   type QueueTimelineProjection,
   type QueueTimelineRunner,
   type QueueTimelineStatusFilter,
+  type UncarriedObservation,
   type QueueStatusResult,
 } from "./queue-status-view.tsx"
 import type { QueueReadModel } from "./queue-read-model.ts"
@@ -1151,6 +1152,9 @@ export async function startResidentRunnerHeartbeat(
   options: Readonly<{
     intervalMs?: number
     queueProgress?: (now: string) => QueueRunnerProgress
+    /** Last uncarried sweep, if one has completed. Returning undefined is a
+     * real answer — the rail says "not swept" rather than 0. */
+    uncarried?: () => UncarriedObservation | undefined
     driver?: Readonly<{
       queueId: string
       epoch?: string
@@ -1195,11 +1199,15 @@ export async function startResidentRunnerHeartbeat(
     await mkdir(directory, { recursive: true })
     const lastTickAt = nowIso()
     const queueProgress = recordedProgress ?? options.queueProgress?.(lastTickAt)
+    const uncarried = options.uncarried?.()
     const status: QueueTimelineRunner = {
       pid: process.pid,
       startedAt,
       lastTickAt,
       ...(queueProgress === undefined ? {} : { queueProgress }),
+      // Omitted, never zeroed: absent means not measured, and the rail must be
+      // able to tell that from a swept-and-clean queue.
+      ...(uncarried === undefined ? {} : { uncarried }),
       ...(options.driver === undefined || driverEpoch === undefined
         ? {}
         : {
@@ -6745,6 +6753,75 @@ function sweepGit(process: Pick<Process, "run">): RefGit {
 const UNCARRIED_TTL_MS = 10 * 60 * 1000
 const UNCARRIED_AGE_BOUND_MS = 24 * 60 * 60 * 1000
 
+/** How often the resident recomputes the sweep. It costs seconds, so it cannot
+ * ride the heartbeat; stranded work is a minutes-to-hours concern, not a
+ * per-tick one. */
+const UNCARRIED_SWEEP_INTERVAL_MS = 10 * 60 * 1000
+
+/**
+ * The resident's uncarried sweeper.
+ *
+ * The heartbeat writer is synchronous and the sweep is seconds of git I/O, so
+ * this keeps the last OBSERVATION and refreshes it out of band. `observe()`
+ * never blocks a tick and never invents a value: before the first sweep lands
+ * it returns undefined, which the rail renders as "not swept" rather than 0.
+ *
+ * A failing sweep is deliberately NOT swallowed into a fresh-looking number —
+ * the previous observation keeps its original observedAt, so a sweeper that has
+ * been broken for an hour renders "as of 1h ago" and the staleness is the
+ * signal. The failure is logged as well, because a rail that only degrades
+ * quietly still needs someone to know why.
+ */
+function createUncarriedSweeper(
+  app: YrdCliApp,
+  io: YrdCliIO,
+  base: string,
+  log: Pick<YrdCliApp["log"], "warn">,
+): Readonly<{ observe: () => UncarriedObservation | undefined }> {
+  const cwd = io.repositoryRoot ?? io.cwd ?? globalThis.process.cwd()
+  let latest: UncarriedObservation | undefined
+  let inFlight = false
+  let lastAttemptMs = 0
+
+  const refresh = async (startedMs: number): Promise<void> => {
+    await using sweepProcess = createProcess()
+    const result = await sweepUncarriedRefs(sweepGit(sweepProcess), {
+      repo: cwd,
+      base,
+      namespace: "refs/remotes/origin",
+      carriedBranches: new Set(Object.values(stateOf(app).bays.prs).map((pr) => pr.branch)),
+      nowMs: startedMs,
+      ttlMs: UNCARRIED_TTL_MS,
+      ageBoundMs: UNCARRIED_AGE_BOUND_MS,
+    })
+    latest = {
+      count: result.findings.length,
+      scanned: result.scanned,
+      // Stamped when the sweep STARTED. Stamping on completion would make a
+      // slow sweep look fresher than the facts it read.
+      observedAt: new Date(startedMs).toISOString(),
+    }
+  }
+
+  return {
+    observe: () => {
+      const nowMs = new Date(io.now?.() ?? Date.now()).getTime()
+      if (!inFlight && nowMs - lastAttemptMs >= UNCARRIED_SWEEP_INTERVAL_MS) {
+        lastAttemptMs = nowMs
+        inFlight = true
+        void refresh(nowMs)
+          .catch((error: unknown) => {
+            log.warn?.("uncarried sweep failed; the rail will show its previous observation aging", { error })
+          })
+          .finally(() => {
+            inFlight = false
+          })
+      }
+      return latest
+    },
+  }
+}
+
 async function queueUncarried(
   app: YrdCliApp,
   options: JsonOption & Readonly<{ base?: string; namespace?: string }>,
@@ -8072,6 +8149,7 @@ export async function followQueueRuns(
   const heartbeat = resident
     ? await startResidentRunnerHeartbeat(io, {
         queueProgress: (now) => residentQueueProgress(app, now),
+        uncarried: createUncarriedSweeper(app, io, base, app.log).observe,
         driver: {
           queueId: io.driver?.queueId ?? `${resolve(io.repositoryRoot ?? io.cwd ?? process.cwd())}#${base}`,
           ...(io.driver === undefined ? {} : { epoch: io.driver.epoch }),

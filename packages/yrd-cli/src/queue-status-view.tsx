@@ -350,6 +350,39 @@ export type QueueDriverEpoch = Readonly<{
   lastLanded: Readonly<{ commit: string; at: string }> | null
 }>
 
+/** One uncarried sweep: what it found AND when it looked. The two travel
+ * together because either alone is misleading. */
+export type UncarriedObservation = Readonly<{
+  /** Stranded refs the sweep confirmed — already past the landedness filter. */
+  count: number
+  /** Refs enumerated, so a zero is readable rather than merely small. */
+  scanned: number
+  observedAt: string
+}>
+
+/**
+ * How a rail must say what it measured, or that it did not measure.
+ *
+ * Exported and used by the renderer so the rule is one function rather than a
+ * convention: there is no code path that can produce a bare count. An absent
+ * observation says so in words — a missing measurement rendering as "0" would
+ * claim a healthy queue that nobody looked at.
+ */
+export function uncarriedLine(observation: UncarriedObservation | undefined, nowMs: number): string {
+  if (observation === undefined) return "uncarried not swept"
+  const ageMs = Math.max(0, nowMs - Date.parse(observation.observedAt))
+  return `uncarried ${String(observation.count)} of ${String(observation.scanned)} refs, as of ${humanAge(ageMs)} ago`
+}
+
+function humanAge(ageMs: number): string {
+  const minutes = Math.floor(ageMs / 60_000)
+  if (minutes < 1) return "under a minute"
+  if (minutes < 60) return `${String(minutes)}m`
+  const hours = Math.floor(minutes / 60)
+  const rest = minutes % 60
+  return rest === 0 ? `${String(hours)}h` : `${String(hours)}h${String(rest)}m`
+}
+
 export type QueueTimelineRunner = Readonly<{
   pid: number
   startedAt: string
@@ -365,6 +398,21 @@ export type QueueTimelineRunner = Readonly<{
   journalVersions?: readonly number[]
   /** Content of the driver lease. Probes assert this, never a process/service suffix. */
   driver?: QueueDriverEpoch
+  /**
+   * Last uncarried sweep, carried as a MEASUREMENT rather than a number.
+   *
+   * The sweep costs seconds, so it runs on its own cadence and cannot be
+   * recomputed per render. That makes the count a stored belief, and a stored
+   * belief rendered as if it were current is the shape that cost this fleet
+   * most: a value derived in truth, authored in practice, with nothing
+   * asserting the two agree. `observedAt` is what keeps it honest — the rail
+   * renders "N uncarried, as of 4m ago" and a dead runner reads "as of 3h ago"
+   * instead of a confident zero.
+   *
+   * Absent means NOT MEASURED, which must never render as 0. A queue with no
+   * stranded refs and a queue nobody has swept are different facts.
+   */
+  uncarried?: UncarriedObservation
   /** ISO time the resident wrote its exit marker on shutdown. The status file is
    * NEVER deleted on close — it is left with this marker so a successor can still
    * reclaim this pid's leases (idempotently). Absent while the runner is live. */
@@ -5033,6 +5081,20 @@ function TimelineRunnerBox({
       {runner === null ? null : (
         <Text color="$fg-muted" wrap="truncate" minWidth={0}>
           source {runner.implementationSource ?? "unknown"}
+        </Text>
+      )}
+      {/* Its own rail, per acceptance: pushed-and-uncarried is invisible from
+          every other surface here, because a ref with no merge request has no
+          candidate and so appears in no row. Muted when it is clean or unswept
+          — only genuine stranded work earns attention, or the rail becomes
+          noise and gets ignored, which is how the last one died. */}
+      {runner === null ? null : (
+        <Text
+          color={runner.uncarried !== undefined && runner.uncarried.count > 0 ? "$fg-warning" : "$fg-muted"}
+          wrap="truncate"
+          minWidth={0}
+        >
+          {uncarriedLine(runner.uncarried, now)}
         </Text>
       )}
       {runner === null && runnerRefusal !== undefined ? (
