@@ -193,6 +193,7 @@ describe("classifyBayStatus", () => {
       remoteTrackingFresh: true,
       tipLanded: undefined,
       aheadOfOrigin: undefined,
+      uniquePatches: 0,
     })
 
     expect(report.exit).toBe(0)

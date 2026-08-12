@@ -155,6 +155,7 @@ import {
   formatBayStatusHuman,
   parseOwnerPid,
   parseYrdBayProtections,
+  protectionGapEvidenceForBay,
   protectionEvidenceForBay,
   freshOriginBranchMissing,
   YRD_BAY_PROTECTIONS_ENV,
@@ -3241,6 +3242,10 @@ function gatherBayStatusFacts(
     ...(bay.status === "failed" && path === undefined ? { closedDegenerate: true } : {}),
     ...(path === undefined ? {} : { path }),
     protectedBy: protectionEvidenceForBay(protections, { id: bay.id, ...(path === undefined ? {} : { path }) }),
+    protectionGaps: protectionGapEvidenceForBay(protections, {
+      id: bay.id,
+      ...(path === undefined ? {} : { path }),
+    }),
     ...(ownerPid === undefined ? {} : { ownerPid }),
     ...(ownerPid === undefined ? {} : { ownerIsCaller }),
     ...(ownerAlive === undefined ? {} : { ownerAlive }),
@@ -3318,10 +3323,11 @@ async function bayPruneCommand(
   if (!dryRun) {
     for (const report of reports) {
       const dirty = report.lines.some((line) => line.class === "worktree" && line.verdict === "BLOCK")
-      const otherRefusal = report.lines.some(
-        (line) => line.class !== "worktree" && line.class !== "pr" && line.verdict !== "PASS",
+      const unsafeToPreserve = report.lines.some(
+        (line) =>
+          line.class !== "worktree" && line.class !== "commits" && line.class !== "pr" && line.verdict !== "PASS",
       )
-      if (!dirty || otherRefusal) continue
+      if (!dirty || unsafeToPreserve) continue
       const bay = open.find((candidate) => candidate.id === report.bay)
       if (bay === undefined) throw new Error(`yrd: prune report refers to missing Bay '${report.bay}'`)
       await checkpointRunBay(app, bay, `yrd admin bay prune preserve ${bay.id}`, io)
@@ -3375,13 +3381,14 @@ async function bayPruneCommand(
   if (!dryRun && outcomes.rows.pruned.length > 0) {
     await closeBays(app, services, outcomes.rows.pruned, { json: options.json }, io)
   }
-  if (dryRun || reports.length === 0) return 0
+  if (reports.length === 0) return 0
   return outcomes.rows.paged.length > 0 || outcomes.rows.pruned.length === 0 ? 1 : 0
 }
 
 type BayPruneOutcome = Readonly<{ bay: string; reasons: readonly BayStatusClass[] }>
 
-function bayPruneOutcomes(reports: readonly BayStatusReport[], preserved: ReadonlySet<string>) {
+/** Pure conservation reducer; exported for the multi-reason histogram contract test. */
+export function bayPruneOutcomes(reports: readonly BayStatusReport[], preserved: ReadonlySet<string>) {
   const rows: {
     pruned: string[]
     kept: BayPruneOutcome[]
@@ -3407,10 +3414,14 @@ function bayPruneOutcomes(reports: readonly BayStatusReport[], preserved: Readon
     }
     if (report.exit === 1) {
       rows.kept.push({ bay: report.bay, reasons })
-      for (const reason of reasons) increment(keptByReason, reason)
+      const primaryReason = reasons[0]
+      if (primaryReason === undefined) throw new Error(`yrd: blocked Bay '${report.bay}' has no blocking reason`)
+      increment(keptByReason, primaryReason)
     } else {
       rows.paged.push({ bay: report.bay, reasons })
-      for (const reason of reasons) increment(pagedByReason, reason)
+      const primaryReason = reasons[0]
+      if (primaryReason === undefined) throw new Error(`yrd: unknown Bay '${report.bay}' has no unknown reason`)
+      increment(pagedByReason, primaryReason)
     }
   }
   return {
