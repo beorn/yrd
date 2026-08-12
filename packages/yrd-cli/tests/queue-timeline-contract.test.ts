@@ -145,6 +145,33 @@ describe("queue timeline 21106 contract", () => {
     expect(frame).not.toContain("NO RUNNER - no drained run in window")
   })
 
+  it("keeps the queue frame visible while naming a read boundary that could not settle", async () => {
+    const snapshot = queueTimelineStories["contract-overview"].snapshot
+    const render = createRenderer({ cols: 120, rows: 45 })
+    const app = render(
+      createElement(QueueWatchFrame, {
+        snapshot: {
+          ...snapshot,
+          readFailure: {
+            code: "queue-read-boundary-moved",
+            message: "queue changed while reading",
+            readCursor: 25255,
+            journalCursor: 25256,
+            showing: "last-complete",
+          },
+        },
+      }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      expect(app.text, "the last complete queue remains mounted").toContain("RUNNER")
+      expect(app.text).toContain("queue changed while reading")
+      expect(app.text).toContain("showing last complete snapshot; retrying")
+    } finally {
+      app.unmount()
+    }
+  })
+
   it("does not call recovery idle while audit still names a blocking run", async () => {
     const frame = await renderString(
       createElement(QueueRecoveryView, {

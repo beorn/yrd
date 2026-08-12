@@ -13053,6 +13053,85 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     }
   })
 
+  it("retries an append race and returns a named partial instead of throwing when the boundary keeps moving", async () => {
+    const app = await createApp()
+    const attempts: readonly QueueAttempt[] = Object.freeze([])
+    try {
+      const staleCursor = (await app.journalSnapshot()).asOf.cursor
+      await openAndSubmit(app)
+      const currentCursor = (await app.journalSnapshot()).asOf.cursor
+      let reads = 0
+      const racing = runInternals.createQueueListSnapshotLoader(
+        app,
+        [],
+        {},
+        outputIO().io,
+        {
+          queueReadModel: {
+            snapshot: async () => ({
+              cursor: reads++ === 0 ? staleCursor : currentCursor,
+              generation: 0,
+              attempts,
+            }),
+          },
+        },
+        false,
+      )
+
+      const recovered = await racing.load()
+      expect(reads, "the read boundary must resample both moving inputs").toBe(2)
+      expect(recovered.results.flatMap((result) => result.prs.map((pr) => pr.id))).toContain("PR1")
+      expect(recovered).not.toHaveProperty("readFailure")
+
+      let keepMoving = false
+      const retaining = runInternals.createQueueListSnapshotLoader(
+        app,
+        [],
+        {},
+        outputIO().io,
+        {
+          queueReadModel: {
+            snapshot: async () => ({ cursor: keepMoving ? staleCursor : currentCursor, generation: 0, attempts }),
+          },
+        },
+        false,
+      )
+      const complete = await retaining.load()
+      keepMoving = true
+      const retained = await retaining.load()
+      expect(retained.results, "a failed refresh keeps the last complete durable projection").toBe(complete.results)
+      expect(retained).toMatchObject({
+        readFailure: {
+          code: "queue-read-boundary-moved",
+          showing: "last-complete",
+        },
+      })
+
+      const exhausted = runInternals.createQueueListSnapshotLoader(
+        app,
+        [],
+        {},
+        outputIO().io,
+        {
+          queueReadModel: {
+            snapshot: async () => ({ cursor: staleCursor, generation: 0, attempts }),
+          },
+        },
+        false,
+      )
+      await expect(exhausted.load()).resolves.toMatchObject({
+        readFailure: {
+          code: "queue-read-boundary-moved",
+          readCursor: staleCursor,
+          journalCursor: currentCursor,
+          showing: "bounded-partial",
+        },
+      })
+    } finally {
+      await app.close()
+    }
+  })
+
   it("coalesces resident heartbeats until a clock pulse but rebuilds on runner identity changes", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-watch-runner-token-"))
     const stateDir = join(root, "yrd")

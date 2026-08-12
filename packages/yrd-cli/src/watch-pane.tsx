@@ -47,6 +47,7 @@ import {
 import { timelineStatusGlyph } from "./runner-timeline.ts"
 import { statusPresentation } from "./status-presentation.ts"
 import { reduceRunCancelKey } from "./watch-cancel.ts"
+import { queueReadFailureMessage, type QueueReadFailure } from "./queue-read-failure.ts"
 
 const LIST_NATURAL_WIDTH = 80
 const DETAIL_NATURAL_WIDTH = 72
@@ -138,6 +139,9 @@ export type QueueWatchSnapshot = Readonly<{
   now: number
   projection?: QueueTimelineProjection
   runnerRefusal?: QueueRunnerRefusal
+  /** A bounded read could not make the Journal and derived attempt view agree.
+   * The frame remains usable on named partial or last-complete data. */
+  readFailure?: QueueReadFailure
   outputs?: readonly QueueArtifactOutput[]
   /** Revision-bound source deltas shown in the PR-scoped detail header. */
   diffs?: readonly QueuePrDiff[]
@@ -1248,6 +1252,37 @@ function QueueWatchHelp({ onClose }: { onClose: () => void }) {
   )
 }
 
+function QueueWatchFooter({
+  cancelArmed,
+  selectedRun,
+  readFailure,
+  cursorNotice,
+}: Readonly<{
+  cancelArmed: boolean
+  selectedRun?: string
+  readFailure?: QueueReadFailure
+  cursorNotice?: string
+}>) {
+  if (cancelArmed && selectedRun !== undefined) {
+    return (
+      <Box height={1} flexShrink={0}>
+        <Text color="$fg-warning" bold>
+          Cancel run {selectedRun}? Its PRs re-queue, not rejected. y/Enter to confirm, any other key to abort.
+        </Text>
+      </Box>
+    )
+  }
+  const notice = readFailure === undefined ? cursorNotice : queueReadFailureMessage(readFailure)
+  if (notice === undefined) return null
+  return (
+    <Box height={1} flexShrink={0}>
+      <Text color="$fg-warning" wrap="truncate">
+        ⚠ {notice}
+      </Text>
+    </Box>
+  )
+}
+
 export function QueueWatchFrame({
   snapshot,
   pr,
@@ -1613,19 +1648,12 @@ export function QueueWatchFrame({
       {/* The keybinding footer was removed (user directive 2026-07-15). Bottom
           chrome is reserved for explicit state changes: run cancellation and
           a loud cursor recovery when the selected row disappears. */}
-      {cancelArmed && selectedRow?.run !== undefined ? (
-        <Box height={1} flexShrink={0}>
-          <Text color="$fg-warning" bold>
-            Cancel run {selectedRow.run}? Its PRs re-queue, not rejected. y/Enter to confirm, any other key to abort.
-          </Text>
-        </Box>
-      ) : resolvedCursorState.notice === undefined ? null : (
-        <Box height={1} flexShrink={0}>
-          <Text color="$fg-warning" wrap="truncate">
-            ⚠ {resolvedCursorState.notice}
-          </Text>
-        </Box>
-      )}
+      <QueueWatchFooter
+        cancelArmed={cancelArmed}
+        {...(selectedRow?.run === undefined ? {} : { selectedRun: selectedRow.run })}
+        {...(snapshot.readFailure === undefined ? {} : { readFailure: snapshot.readFailure })}
+        {...(resolvedCursorState.notice === undefined ? {} : { cursorNotice: resolvedCursorState.notice })}
+      />
       {helpOpen ? <QueueWatchHelp onClose={() => setHelpOpen(false)} /> : null}
     </Box>
   )

@@ -200,6 +200,7 @@ import { renderRemedyStep } from "@yrd/intent"
 import { admitPinIntent } from "./intent-admission.ts"
 import { changedSubmodulePins, unpublishedSubmodulePins } from "./pr-submodule-publication.ts"
 import { landingAuthorityBoundary } from "./landing-authority-boundary.ts"
+import { queueReadFailureMessage, type QueueReadFailure } from "./queue-read-failure.ts"
 // The live watch UI is loaded lazily at its single use site in watchQueue(): it is the only
 // module that pulls silvery's SplitPane, and eagerly importing it here would make every CLI
 // path (yrd --version, submit, one-shot queue) require the interactive TUI dependency at module
@@ -5877,6 +5878,7 @@ type QueueListObservation = Readonly<{
   runnerStateToken: string
   runnerProjectionToken: string
   now: number
+  readFailure?: QueueReadFailure
 }>
 
 function queueRunnerToken(runner: QueueTimelineRunner | null): string {
@@ -5918,28 +5920,46 @@ async function observeQueueList(
   readModel: QueueReadModel,
   previous?: QueueListObservation,
 ): Promise<QueueListObservation> {
-  const read = await readModel.snapshot()
-  let state: YrdCliState
-  let stateSource: QueueListObservation["stateSource"]
-  if (previous !== undefined && read.cursor === previous.cursor) {
-    state = previous.state
-    stateSource = "memory"
-  } else {
-    let journal = await app.journalSnapshot()
-    if (read.cursor > journal.asOf.cursor) journal = await app.journalSnapshot()
-    if (read.cursor !== journal.asOf.cursor) {
-      throw new Error(
-        `yrd: queue read boundary cursor ${String(read.cursor)} does not match Journal cursor ${String(journal.asOf.cursor)}`,
-      )
+  let read = await readModel.snapshot()
+  let state: YrdCliState | undefined
+  let stateSource: QueueListObservation["stateSource"] | undefined
+  let readFailure: QueueReadFailure | undefined
+  let journalCursor = read.cursor
+  for (let sample = 0; sample < 3; sample += 1) {
+    if (previous !== undefined && read.cursor === previous.cursor) {
+      state = previous.state
+      stateSource = "memory"
+      break
+    }
+    const journal = await app.journalSnapshot()
+    journalCursor = journal.asOf.cursor
+    if (read.cursor === journalCursor) {
+      state = journal.state as YrdCliState
+      stateSource = "journal"
+      break
+    }
+    if (sample < 2) {
+      read = await readModel.snapshot()
+      continue
     }
     state = journal.state as YrdCliState
     stateSource = "journal"
+    readFailure = {
+      code: "queue-read-boundary-moved",
+      message: `queue changed while reading (attempts cursor ${String(read.cursor)}, Journal cursor ${String(journalCursor)})`,
+      readCursor: read.cursor,
+      journalCursor,
+      showing: previous === undefined ? "bounded-partial" : "last-complete",
+    }
+  }
+  if (state === undefined || stateSource === undefined) {
+    throw new Error("yrd: queue read boundary produced no observation")
   }
   const runner = activeResidentRunner(await residentRunnerStatus(io.cwd ?? process.cwd(), io.stateDir))
   return {
     state,
     stateSource,
-    cursor: read.cursor,
+    cursor: readFailure === undefined ? read.cursor : journalCursor,
     generation: read.generation,
     attempts: read.attempts,
     runner,
@@ -5947,6 +5967,7 @@ async function observeQueueList(
     runnerStateToken: queueRunnerStateToken(runner),
     runnerProjectionToken: queueRunnerProjectionToken(runner),
     now: io.now?.() ?? Date.now(),
+    ...(readFailure === undefined ? {} : { readFailure }),
   }
 }
 
@@ -6089,7 +6110,9 @@ export async function queueListSnapshot(
 ): Promise<QueueListSnapshot> {
   const { includeOutputs = false, focus, diffResolver } = details
   const observed = await observeQueueList(app, io, requiredQueueReadModel(details))
-  const { snapshot } = await buildQueueListSnapshot(app, filters, options, io, observed)
+  const built = await buildQueueListSnapshot(app, filters, options, io, observed)
+  const snapshot =
+    observed.readFailure === undefined ? built.snapshot : { ...built.snapshot, readFailure: observed.readFailure }
   return includeOutputs
     ? attachQueueListDetails(snapshot, observed.attempts, io, focus, diffResolver ?? createQueuePrDiffResolver())
     : snapshot
@@ -6130,6 +6153,12 @@ export function createQueueListSnapshotLoader(
   return {
     async load(focus) {
       const observed = await observeQueueList(app, io, queueReadModel, cached?.observed)
+      if (observed.readFailure !== undefined && cached !== undefined) {
+        return {
+          ...cached.displayed.snapshot,
+          readFailure: { ...observed.readFailure, showing: "last-complete" },
+        }
+      }
       const unchanged =
         cached !== undefined &&
         cached.observed.cursor === observed.cursor &&
@@ -6171,7 +6200,7 @@ export function createQueueListSnapshotLoader(
         }
         return snapshot
       }
-      const built: QueueListSnapshotBuild =
+      const baseBuilt: QueueListSnapshotBuild =
         unchanged && cached !== undefined
           ? {
               snapshot: {
@@ -6185,11 +6214,16 @@ export function createQueueListSnapshotLoader(
               reclock: cached.reclock,
             }
           : await buildQueueListSnapshot(app, filters, options, io, observed)
+      const built: QueueListSnapshotBuild =
+        observed.readFailure === undefined
+          ? baseBuilt
+          : { ...baseBuilt, snapshot: { ...baseBuilt.snapshot, readFailure: observed.readFailure } }
       const { snapshot } = built
       const displayed =
         includeOutputs && focus !== undefined
           ? await attachQueueListDetails(snapshot, observed.attempts, io, focus, diffResolver)
           : snapshot
+      if (observed.readFailure !== undefined) return displayed
       cached = {
         observed,
         ...built,
@@ -6222,6 +6256,7 @@ async function listQueues(
       command: "queue.list",
       projection: snapshot.projection,
       results: snapshot.results.map(projectQueueStatusResultTaskStatus),
+      ...(snapshot.readFailure === undefined ? {} : { readFailure: snapshot.readFailure }),
     },
     createElement(QueueTimelineView, {
       repositoryRoot: snapshot.repositoryRoot,
@@ -6231,7 +6266,10 @@ async function listQueues(
       state: snapshot.state,
       columns: io.columns ?? 120,
     }),
-    queuePauseWarnings(snapshot.state, snapshot.results),
+    [
+      ...queuePauseWarnings(snapshot.state, snapshot.results),
+      ...(snapshot.readFailure === undefined ? [] : [queueReadFailureMessage(snapshot.readFailure)]),
+    ],
   )
 }
 
@@ -8445,6 +8483,7 @@ async function watchQueue(
         command: "queue.list",
         projection: snapshot.projection,
         results: snapshot.results.map(projectQueueStatusResultTaskStatus),
+        ...(snapshot.readFailure === undefined ? {} : { readFailure: snapshot.readFailure }),
       },
       createElement(QueueTimelineView, {
         repositoryRoot: snapshot.repositoryRoot,
@@ -8454,7 +8493,10 @@ async function watchQueue(
         state: snapshot.state,
         columns: io.columns ?? 120,
       }),
-      queuePauseWarnings(snapshot.state, snapshot.results),
+      [
+        ...queuePauseWarnings(snapshot.state, snapshot.results),
+        ...(snapshot.readFailure === undefined ? [] : [queueReadFailureMessage(snapshot.readFailure)]),
+      ],
     )
     if (scope.signal.aborted) return 0
     await scope.sleep(interval)
