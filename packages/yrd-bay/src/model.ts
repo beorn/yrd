@@ -10,6 +10,7 @@ import {
 } from "@yrd/core"
 import type { FlowPin } from "@yrd/config"
 import { JobErrorSchema, type JobError } from "@yrd/job"
+import type { ChangeId } from "./change-identity.ts"
 
 export const BayIdSchema = z.string().trim().min(1)
 export const PRIdSchema = z.string().trim().min(1)
@@ -498,6 +499,8 @@ export type PRRecutProof = Readonly<z.infer<typeof PRRecutProofSchema>>
 
 export type PRRev = Readonly<{
   n: number
+  /** Missing only while replaying journals written before stable change identity. */
+  changeId?: ChangeId
   head: string
   base: string
   baseSha?: string

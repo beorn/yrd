@@ -1738,14 +1738,15 @@ describe("withBays", () => {
     expect(app.bays.needsReview("PR1", "@stranger")).toBe(false)
   })
 
-  it("recuts one immutable payload as a new revision of the same PR and carries exact approval", async () => {
+  it("recuts one Change-Id lineage as a new immutable revision and carries exact approval", async () => {
     await using app = (await createHarness()).app
     const nextBase = "b".repeat(40)
     const treeSha = "c".repeat(40)
     const patchId = "d".repeat(40)
+    const changeId = "I10db26abe7d1f6cae0a29e37b3d6b9b5d0e9a3da"
 
     const correlation = { namespace: "tribe-request", id: "recut-identity" }
-    await app.bays.submit({
+    const pushed = await app.bays.submit({
       branch: "issue/recut",
       headSha: HEAD_1,
       baseSha: BASE,
@@ -1753,6 +1754,12 @@ describe("withBays", () => {
       submitter: "@dev/3",
       draft: true,
     })
+    expect(pushed.events).toContainEqual(
+      expect.objectContaining({
+        name: "pr/pushed",
+        data: expect.objectContaining({ changeId }),
+      }),
+    )
     await app.bays.review({
       pr: "PR1",
       by: "@cto",
@@ -1777,6 +1784,7 @@ describe("withBays", () => {
         name: "pr/recut",
         data: {
           pr: "PR1",
+          changeId,
           fromRevision: 1,
           patchId,
           baseSha: nextBase,
@@ -1794,6 +1802,7 @@ describe("withBays", () => {
       delivery: "pushed",
       current: {
         n: 2,
+        changeId,
         head: HEAD_2,
         baseSha: nextBase,
         correlation,
@@ -1801,9 +1810,10 @@ describe("withBays", () => {
         recut: { fromRevision: 1, patchId, treeSha, reviewCarried: true },
       },
       revs: [
-        { n: 1, head: HEAD_1, correlation, submitter: "@dev/3" },
+        { n: 1, changeId, head: HEAD_1, correlation, submitter: "@dev/3" },
         {
           n: 2,
+          changeId,
           head: HEAD_2,
           baseSha: nextBase,
           correlation,
