@@ -67,6 +67,8 @@ export type JobContext = Readonly<{
   id: string
   attempt: number
   runner: string
+  /** Durable start timestamp of this exact execution attempt. */
+  startedAt?: string
   context?: RuntimeContext
   /** Aborts when this execution loses ownership or its runtime closes. */
   signal: AbortSignal

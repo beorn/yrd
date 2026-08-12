@@ -49,6 +49,18 @@ import {
   type CommandDiagnostic as SharedCommandDiagnostic,
 } from "./check-attribution.ts"
 import { deterministicParentDate } from "./deterministic-parent-date.ts"
+import {
+  CandidateChangeReceiptSchema,
+  LANDING_RECEIPT_NOTES_NAME,
+  LANDING_RECEIPT_REF,
+  LandingReceiptPointerSchema,
+  createLandingReceipt,
+  parseLandingReceipt,
+  type CandidateChangeReceipt,
+  type LandingReceiptBody,
+  type LandingReceiptEnvelope,
+  type LandingReceiptPointer,
+} from "./landing-receipt.ts"
 
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 
@@ -168,10 +180,13 @@ export const GitCheckEvidenceSchema = CommandEvidenceSchema.extend({
     .regex(/^[0-9a-f]{40,64}$/iu)
     .optional(),
   candidateRef: z.string().min(1),
+  changes: z.array(CandidateChangeReceiptSchema).min(1).optional(),
   sourceRewrites: z.array(SourceRewriteSchema).optional(),
   submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),
   comparison: GitCheckComparisonEvidenceSchema.optional(),
   certificate: GateCertificateSchema.optional(),
+  /** Current check attempt; absent only in replay-era Job output. */
+  attempt: z.number().int().positive().optional(),
 }).strict()
 export type GitCheckEvidence = Readonly<z.infer<typeof GitCheckEvidenceSchema>>
 
@@ -180,6 +195,7 @@ const PinnedCandidateSchema = GitCheckEvidenceSchema.pick({
   candidateSha: true,
   candidateTreeSha: true,
   candidateRef: true,
+  changes: true,
   sourceRewrites: true,
   submoduleResolutions: true,
 }).strict()
@@ -974,6 +990,34 @@ function createGit(
     execute(repo, args, true, true, undefined, true)
   const rawProbe = (repo: string, args: readonly string[]): Promise<GitResult> =>
     execute(repo, args, true, false, undefined, true)
+  const input = async (
+    repo: string,
+    args: readonly string[],
+    stdin: string | Uint8Array,
+    allowFailure = false,
+  ): Promise<GitResult> => {
+    const result = await process.run({
+      argv: ["git", "-C", repo, ...args],
+      cwd: repo,
+      env,
+      stdin,
+      timeoutMs: GIT_TIMEOUT_MS,
+    })
+    const completed: GitResult = {
+      code: result.exitCode,
+      stdout: result.stdout.trim(),
+      stderr: result.stderr.trim(),
+      durationMs: result.durationMs,
+      signal: result.signal,
+      timedOut: result.timedOut,
+      ...(result.timedOut ? { verdict: "TIMED_OUT" as const } : {}),
+    }
+    if (completed.timedOut) throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
+    if (!allowFailure && completed.code !== 0) {
+      throw new Error(completed.stderr || completed.stdout || `git ${args.join(" ")} failed`)
+    }
+    return completed
+  }
   const commit = async (repo: string, ref: string): Promise<string> =>
     (await run(repo, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`])).stdout
   const optionalCommit = async (repo: string, ref: string): Promise<string | undefined> => {
@@ -1070,6 +1114,7 @@ function createGit(
     raw,
     probe,
     rawProbe,
+    input,
     commit,
     optionalCommit,
     commitTree,
@@ -1111,7 +1156,10 @@ export async function findRepositoryChangeLanding(
   }>,
 ): Promise<RepositoryChangeLandingResult> {
   const identity = RepositoryChangeIdentitySchema.parse(options.identity)
-  const baseSha = z.string().regex(/^[0-9a-f]{40,64}$/u).parse(options.baseSha)
+  const baseSha = z
+    .string()
+    .regex(/^[0-9a-f]{40,64}$/u)
+    .parse(options.baseSha)
   const git = createGit(options.inject.process)
   await git.commit(options.repo, baseSha)
   const history = await git.run(options.repo, [
@@ -1128,9 +1176,7 @@ export async function findRepositoryChangeLanding(
     if (!/^[0-9a-f]{40,64}$/u.test(commit)) {
       throw new Error(`yrd: malformed repository Change-Id row '${row}'`)
     }
-    const changeIds = (separator === -1 ? "" : row.slice(separator + 1))
-      .split(",")
-      .filter((value) => value !== "")
+    const changeIds = (separator === -1 ? "" : row.slice(separator + 1)).split(",").filter((value) => value !== "")
     if (!changeIds.includes(identity.changeId)) continue
     if (changeIds.length !== 1) {
       throw new Error(`yrd: landed commit '${commit}' carries multiple Change-Id trailers`)
@@ -2248,6 +2294,7 @@ async function prepareCandidate(
       status: "passed"
       output: Readonly<{
         sha: string
+        changes: readonly CandidateChangeReceipt[]
         sourceRewrites: readonly SourceRewrite[]
         submoduleResolutions: readonly QueueSubmoduleResolutionEvidence[]
       }>
@@ -2256,6 +2303,19 @@ async function prepareCandidate(
 > {
   const sourceRewrites: SourceRewrite[] = []
   const submoduleResolutions: QueueSubmoduleResolutionEvidence[] = []
+  const changes: CandidateChangeReceipt[] = []
+  const recordChange = (pr: StepExecution["prs"][number], generatedCommit: string): void => {
+    if (pr.intent !== undefined || pr.changeId === undefined) return
+    changes.push(
+      CandidateChangeReceiptSchema.parse({
+        changeId: pr.changeId,
+        pr: pr.id,
+        revision: pr.revision,
+        submittedHead: pr.headSha,
+        generatedCommit,
+      }),
+    )
+  }
   for (const pr of input.prs) {
     if (pr.intent !== undefined) {
       if (input.prs.length !== 1) {
@@ -2316,6 +2376,7 @@ async function prepareCandidate(
       // Source-only compositions are excluded: their root head intentionally
       // equals the base while their component payload still needs applying.
       if (await isAncestor(git, path, pr.headSha, "HEAD")) {
+        recordChange(pr, pr.headSha)
         continue
       }
     }
@@ -2344,6 +2405,7 @@ async function prepareCandidate(
       const certificate = await verifyComposedRecutCertificate(git, path, pr, composed.output, baseMoved)
       if (certificate !== undefined) return certificate
       sourceRewrites.push(...composed.output)
+      recordChange(pr, await git.commit(path, "HEAD"))
       continue
     }
     if (pr.recut !== undefined && pr.recut.certificate !== "frozen-code-carrier-v1") {
@@ -2372,6 +2434,7 @@ async function prepareCandidate(
         submoduleResolutions.push(...resolved.output)
         const wrapper = await stabilizeGeneratedRootWrapper(git, path, before, message)
         if (wrapper !== undefined) return wrapper
+        recordChange(pr, await git.commit(path, "HEAD"))
         continue
       }
       const artifacts = await writeTerminalArtifacts(artifactRoot, input, attempt, merged.stdout, merged.stderr)
@@ -2397,10 +2460,11 @@ async function prepareCandidate(
     }
     const wrapper = await stabilizeGeneratedRootWrapper(git, path, before, message)
     if (wrapper !== undefined) return wrapper
+    recordChange(pr, await git.commit(path, "HEAD"))
   }
   return {
     status: "passed",
-    output: { sha: await git.commit(path, "HEAD"), sourceRewrites, submoduleResolutions },
+    output: { sha: await git.commit(path, "HEAD"), changes, sourceRewrites, submoduleResolutions },
   }
 }
 
@@ -2537,6 +2601,7 @@ export function gitCandidatePreparer(options: GitCandidatePreparerOptions): Cand
         sha: candidate.output.sha,
         treeSha: (await git.run(path, ["rev-parse", `${candidate.output.sha}^{tree}`])).stdout,
         ref,
+        ...(candidate.output.changes.length === 0 ? {} : { changes: candidate.output.changes }),
         ...(candidate.output.sourceRewrites.length === 0 ? {} : { sourceRewrites: candidate.output.sourceRewrites }),
         ...(candidate.output.submoduleResolutions.length === 0
           ? {}
@@ -5267,6 +5332,7 @@ function certifyPassingCommand(
   mode: GateMode,
   classification: "base" | "carrier",
   purpose: string,
+  attempt: number,
   comparisonReady?: string,
 ): JobResult<GitCheckResultEvidence> {
   const reports = outcome.output.gateReports ?? [createGateReport("exit-code", [])]
@@ -5275,6 +5341,7 @@ function certifyPassingCommand(
     ...candidate,
     mode,
     classification,
+    attempt,
   })
   if (comparisonReady !== undefined && !reports.some((report) => report.comparator.id === comparisonReady)) {
     return failed(
@@ -5357,6 +5424,7 @@ async function withPinnedCandidate<Output extends JsonValue>(
         candidateSha: candidate.output.sha,
         candidateTreeSha: (await git.run(path, ["rev-parse", `${candidate.output.sha}^{tree}`])).stdout,
         candidateRef: pinned.ref,
+        ...(candidate.output.changes.length === 0 ? {} : { changes: candidate.output.changes }),
         ...(candidate.output.sourceRewrites.length === 0 ? {} : { sourceRewrites: candidate.output.sourceRewrites }),
         ...(candidate.output.submoduleResolutions.length === 0
           ? {}
@@ -5419,7 +5487,9 @@ async function withStepCandidate<Output extends JsonValue>(
     PinnedCandidateSchema.parse({
       baseSha: candidate.baseSha,
       candidateSha: candidate.sha,
+      ...(candidate.treeSha === undefined ? {} : { candidateTreeSha: candidate.treeSha }),
       candidateRef: candidate.ref,
+      ...(candidate.changes === undefined ? {} : { changes: candidate.changes }),
       ...(candidate.sourceRewrites === undefined ? {} : { sourceRewrites: candidate.sourceRewrites }),
       ...(candidate.submoduleResolutions === undefined ? {} : { submoduleResolutions: candidate.submoduleResolutions }),
     }),
@@ -5482,6 +5552,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             ...candidate,
             mode,
             classification,
+            attempt: context.attempt,
           }
 
           if (options.runner === "waiting") {
@@ -5490,7 +5561,15 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
               context,
             )
             if (outcome.status === "completed" && outcome.conclusion === "success") {
-              return certifyPassingCommand(outcome, candidate, mode, classification, purpose, options.comparisonReady)
+              return certifyPassingCommand(
+                outcome,
+                candidate,
+                mode,
+                classification,
+                purpose,
+                context.attempt,
+                options.comparisonReady,
+              )
             }
             if (outcome.status === "waiting") {
               return {
@@ -5553,7 +5632,15 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
           }
 
           if (outcome.status === "completed" && outcome.conclusion === "success") {
-            return certifyPassingCommand(outcome, candidate, mode, classification, purpose, options.comparisonReady)
+            return certifyPassingCommand(
+              outcome,
+              candidate,
+              mode,
+              classification,
+              purpose,
+              context.attempt,
+              options.comparisonReady,
+            )
           }
           if (outcome.status !== "completed" || outcome.conclusion !== "failure") {
             const error = comparisonOutcomeError(outcome, purpose, "candidate")
@@ -5817,6 +5904,7 @@ async function validatePinnedCandidate(
       candidateSha: current.sha,
       candidateTreeSha: current.treeSha,
       candidateRef: current.ref,
+      ...(current.changes === undefined ? {} : { changes: current.changes }),
       ...(current.sourceRewrites === undefined ? {} : { sourceRewrites: current.sourceRewrites }),
       ...(current.submoduleResolutions === undefined ? {} : { submoduleResolutions: current.submoduleResolutions }),
     })
@@ -6267,7 +6355,15 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
                   return {
                     status: "completed",
                     conclusion: "success",
-                    output: integrationProof(checked.candidateSha, checked, undefined, settlement.receipts),
+                    output: await physicalIntegrationProof(
+                      git,
+                      repo,
+                      input,
+                      context,
+                      checked.candidateSha,
+                      checked,
+                      settlement.receipts,
+                    ),
                   }
                 },
                 { settleSafePromotions: true },
@@ -6307,7 +6403,15 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
                   ? {
                       status: "completed" as const,
                       conclusion: "success" as const,
-                      output: integrationProof(landing.sha, checked, undefined, settlement.receipts),
+                      output: await physicalIntegrationProof(
+                        git,
+                        repo,
+                        input,
+                        context,
+                        landing.sha,
+                        checked,
+                        settlement.receipts,
+                      ),
                     }
                   : componentMainFailureResult(settlement.error)
               },
@@ -6383,7 +6487,15 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
             return {
               status: "completed",
               conclusion: "success",
-              output: integrationProof(checked.candidateSha, checked, undefined, settlement.receipts),
+              output: await physicalIntegrationProof(
+                git,
+                repo,
+                input,
+                context,
+                checked.candidateSha,
+                checked,
+                settlement.receipts,
+              ),
             }
           },
           { settleSafePromotions: true },
@@ -6497,7 +6609,15 @@ export function configuredMergeStep<Shape extends PRShape>(
                 return {
                   status: "completed",
                   conclusion: "success",
-                  output: integrationProof(landing.sha, candidate.checked, undefined, settlement.receipts),
+                  output: await physicalIntegrationProof(
+                    git,
+                    repo,
+                    input,
+                    context,
+                    landing.sha,
+                    candidate.checked,
+                    settlement.receipts,
+                  ),
                 }
               },
               { settleSafePromotions: true },
@@ -6547,11 +6667,223 @@ function primaryPR(input: StepExecution): StepExecution["prs"][number] {
   return primary
 }
 
+function repositoryReceiptFailure(code: "repository-corrupt" | "repository-incomplete", message: string): never {
+  throw createFailure({ kind: "infrastructure", code, message })
+}
+
+async function landingReceiptBody(
+  git: Git,
+  repo: string,
+  input: StepExecution,
+  context: JobContext,
+  commit: string,
+  checked: PinnedCandidate,
+): Promise<LandingReceiptBody> {
+  const candidate = input.candidate
+  if (candidate === undefined) {
+    return repositoryReceiptFailure(
+      "repository-incomplete",
+      `yrd: Queue run '${input.run}' has no immutable Candidate identity for landing receipt`,
+    )
+  }
+  if (checked.candidateTreeSha === undefined) {
+    return repositoryReceiptFailure(
+      "repository-incomplete",
+      `yrd: Queue run '${input.run}' has no checked Candidate tree for landing receipt`,
+    )
+  }
+  if (checked.changes === undefined) {
+    return repositoryReceiptFailure(
+      "repository-incomplete",
+      `yrd: Queue run '${input.run}' has no generated per-change commits for landing receipt`,
+    )
+  }
+  if (context.startedAt === undefined) {
+    return repositoryReceiptFailure(
+      "repository-incomplete",
+      `yrd: Queue run '${input.run}' merge Job has no durable start timestamp for landing receipt`,
+    )
+  }
+  const gates = Object.entries(input.shape.results).flatMap(([identity, value]) => {
+    const evidence = GitCheckEvidenceSchema.safeParse(value)
+    if (!evidence.success) return []
+    if (evidence.data.attempt === undefined) {
+      return repositoryReceiptFailure(
+        "repository-incomplete",
+        `yrd: Queue run '${input.run}' gate '${identity}' has no execution attempt for landing receipt`,
+      )
+    }
+    return [
+      {
+        identity,
+        attempt: evidence.data.attempt,
+        configHash: evidence.data.configHash,
+        ...(evidence.data.environmentHash === undefined ? {} : { environmentHash: evidence.data.environmentHash }),
+        durationMs: evidence.data.durationMs,
+      },
+    ]
+  })
+  if (gates.length === 0) {
+    return repositoryReceiptFailure(
+      "repository-incomplete",
+      `yrd: Queue run '${input.run}' has no checked gate evidence for landing receipt`,
+    )
+  }
+  const paths = [...new Set((checked.submoduleResolutions ?? []).map(({ path }) => path))].toSorted()
+  const pins = await Promise.all(
+    paths.map(async (path) => ({
+      path,
+      before: (await readGitlink(git, repo, checked.baseSha, path)) ?? null,
+      after:
+        (await readGitlink(git, repo, commit, path)) ??
+        repositoryReceiptFailure(
+          "repository-corrupt",
+          `yrd: landing '${commit}' lost receipt pin '${path}' from checked Candidate`,
+        ),
+    })),
+  )
+  return {
+    landing: { commit, baseBefore: checked.baseSha, baseAfter: commit },
+    candidate: { id: candidate.id, commit: checked.candidateSha, tree: checked.candidateTreeSha },
+    run: {
+      id: input.run,
+      startedAt: context.startedAt,
+      landedAt: new Date().toISOString(),
+      driver: {
+        identity: context.runner,
+        epoch: context.context?.id ?? context.id,
+        job: context.id,
+        attempt: context.attempt,
+      },
+    },
+    changes: checked.changes,
+    pins,
+    gates,
+    refusals: [],
+  }
+}
+
+async function readLandingReceipt(
+  git: Git,
+  repo: string,
+  target: string,
+): Promise<
+  Readonly<{ envelope: LandingReceiptEnvelope; pointer: LandingReceiptPointer; canonical: string }> | undefined
+> {
+  const listed = await git.run(repo, ["notes", `--ref=${LANDING_RECEIPT_NOTES_NAME}`, "list", target], true)
+  if (listed.code !== 0 || listed.stdout === "") return undefined
+  const [note, extra] = listed.stdout.split(/\s+/u)
+  if (note === undefined || extra !== undefined) {
+    return repositoryReceiptFailure(
+      "repository-corrupt",
+      `yrd: receipt note listing for '${target}' is malformed: ${listed.stdout}`,
+    )
+  }
+  const object = await git.run(repo, ["cat-file", "blob", note], true)
+  if (object.code !== 0) {
+    return repositoryReceiptFailure(
+      "repository-corrupt",
+      `yrd: receipt note object '${note}' for '${target}' is unreadable: ${object.stderr || object.stdout}`,
+    )
+  }
+  let envelope: LandingReceiptEnvelope
+  try {
+    envelope = parseLandingReceipt(object.stdout)
+  } catch (cause) {
+    return repositoryReceiptFailure(
+      "repository-corrupt",
+      `yrd: receipt note object '${note}' for '${target}' is invalid: ${messageOf(cause)}`,
+    )
+  }
+  return {
+    envelope,
+    canonical: createLandingReceipt(envelope.receipt).canonical,
+    pointer: LandingReceiptPointerSchema.parse({
+      ref: LANDING_RECEIPT_REF,
+      target,
+      note,
+      checksum: envelope.checksum,
+    }),
+  }
+}
+
+async function confirmLandingReceipt(
+  git: Git,
+  repo: string,
+  input: StepExecution,
+  context: JobContext,
+  commit: string,
+  checked: PinnedCandidate,
+): Promise<LandingReceiptPointer> {
+  const receipt = createLandingReceipt(await landingReceiptBody(git, repo, input, context, commit, checked))
+  const existing = await readLandingReceipt(git, repo, commit)
+  if (existing !== undefined) {
+    if (existing.canonical !== receipt.canonical) {
+      return repositoryReceiptFailure(
+        "repository-corrupt",
+        `yrd: landing '${commit}' already has a different receipt note '${existing.pointer.note}'`,
+      )
+    }
+    return existing.pointer
+  }
+  const blob = (await git.input(repo, ["hash-object", "-w", "--stdin"], receipt.canonical)).stdout
+  const noted = await git.run(
+    repo,
+    [
+      "-c",
+      "user.name=Yrd Queue",
+      "-c",
+      "user.email=yrd-queue@example.invalid",
+      "notes",
+      `--ref=${LANDING_RECEIPT_NOTES_NAME}`,
+      "add",
+      "-C",
+      blob,
+      commit,
+    ],
+    true,
+  )
+  if (noted.code !== 0) {
+    const raced = await readLandingReceipt(git, repo, commit)
+    if (raced !== undefined && raced.canonical === receipt.canonical) return raced.pointer
+    return repositoryReceiptFailure(
+      "repository-corrupt",
+      `yrd: receipt note for '${commit}' could not be published: ${noted.stderr || noted.stdout}`,
+    )
+  }
+  const confirmed = await readLandingReceipt(git, repo, commit)
+  if (confirmed === undefined || confirmed.canonical !== receipt.canonical) {
+    return repositoryReceiptFailure(
+      "repository-corrupt",
+      `yrd: receipt for '${commit}' was not byte-identical after publication`,
+    )
+  }
+  return confirmed.pointer
+}
+
+async function physicalIntegrationProof(
+  git: Git,
+  repo: string,
+  input: StepExecution,
+  context: JobContext,
+  commit: string,
+  checked: PinnedCandidate,
+  componentMains: readonly ComponentMainReceipt[] = [],
+): Promise<IntegrationProof> {
+  const code = input.prs.filter((pr) => pr.intent === undefined)
+  if (code.length === 0 || code.every((pr) => pr.changeId === undefined)) {
+    return integrationProof(commit, checked, undefined, componentMains)
+  }
+  const receipt = await confirmLandingReceipt(git, repo, input, context, commit, checked)
+  return integrationProof(commit, checked, undefined, componentMains, receipt)
+}
+
 function integrationProof(
   commit: string,
   checked: PinnedCandidate,
   alreadyLanded?: AlreadyLandedEvidence,
   componentMains: readonly ComponentMainReceipt[] = [],
+  receipt?: LandingReceiptPointer,
 ): IntegrationProof {
   return IntegrationProofSchema.parse({
     commit,
@@ -6560,6 +6892,7 @@ function integrationProof(
     ...(checked.sourceRewrites === undefined ? {} : { sourceRewrites: checked.sourceRewrites }),
     ...(checked.submoduleResolutions === undefined ? {} : { submoduleResolutions: checked.submoduleResolutions }),
     ...(componentMains.length === 0 ? {} : { componentMains }),
+    ...(receipt === undefined ? {} : { receipt }),
   })
 }
 

@@ -5097,6 +5097,14 @@ function advanceQueue(
         continue
       }
       const revision = currentPRRev(current)
+      if (revision.changeId === undefined) {
+        throw new Error(`yrd: PR '${current.id}' requires the landing-receipt migration before integration`)
+      }
+      if (shape.integration.receipt === undefined) {
+        throw new Error(
+          `yrd: PR '${current.id}' has no repository receipt for integration '${shape.integration.commit}'`,
+        )
+      }
       events.push(
         event("pr/integrated", {
           pr: current.id,
@@ -5107,6 +5115,8 @@ function advanceQueue(
           commit: shape.integration.commit,
           landingSha: shape.integration.commit,
           baseSha: shape.integration.baseSha,
+          changeId: revision.changeId,
+          receipt: shape.integration.receipt,
           ...(revision.correlation === undefined ? {} : { correlation: revision.correlation }),
           ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
         }),

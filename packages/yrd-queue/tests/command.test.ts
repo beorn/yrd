@@ -4054,10 +4054,20 @@ describe("Queue command adapters", () => {
       const merge = withMerge(
         (_input: StepExecution<CheckedCommand>) => {
           mergeRuns.push("merge")
+          const commit = "b".repeat(40)
           return {
             status: "completed",
             conclusion: "success" as const,
-            output: { commit: "b".repeat(40), baseSha: "b".repeat(40) },
+            output: {
+              commit,
+              baseSha: commit,
+              receipt: {
+                ref: "refs/notes/yrd/receipts" as const,
+                target: commit,
+                note: "d".repeat(40),
+                checksum: "e".repeat(64),
+              },
+            },
           }
         },
         { revision: "merge-v1" },
@@ -6286,7 +6296,8 @@ describe("Queue command adapters", () => {
     const checked = GitCheckEvidenceSchema.parse(checkJob.output)
 
     expect(await git(repo, ["show", "-s", "--format=%B", checked.candidateSha])).toContain(`Change-Id: ${changeId}`)
-    if (run.integration === undefined) throw new Error(`merge produced no IntegrationProof: ${JSON.stringify(run.error)}`)
+    if (run.integration === undefined)
+      {throw new Error(`merge produced no IntegrationProof: ${JSON.stringify(run.error)}`)}
     const integration = IntegrationProofSchema.parse(run.integration)
     expect(integration).toMatchObject({ commit: checked.candidateSha, baseSha: checked.candidateSha })
 

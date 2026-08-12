@@ -1419,21 +1419,32 @@ describe("withBays", () => {
   })
 
   it("projects an exact integrated revision as landed even after its Bay closes", async () => {
+    const identity: { changeId?: string } = {}
     const integrate = command({
       title: "Integrate the lifecycle fixture",
-      apply: () => ({
-        events: [
-          event("pr/integrated", {
-            pr: "PR1",
-            revision: 1,
-            headSha: HEAD_1,
-            run: "R1",
-            commit: BASE,
-            landingSha: BASE,
-            baseSha: BASE,
-          }),
-        ],
-      }),
+      apply: () => {
+        if (identity.changeId === undefined) throw new Error("missing fixture Change-Id")
+        return {
+          events: [
+            event("pr/integrated", {
+              pr: "PR1",
+              revision: 1,
+              headSha: HEAD_1,
+              run: "R1",
+              commit: BASE,
+              landingSha: BASE,
+              baseSha: BASE,
+              changeId: identity.changeId,
+              receipt: {
+                ref: "refs/notes/yrd/receipts",
+                target: BASE,
+                note: HEAD_2,
+                checksum: "3".repeat(64),
+              },
+            }),
+          ],
+        }
+      },
     })
     const jobs = createBayJobDefs(createWorkspaceHarness().adapter)
     const definition = pipe(
@@ -1448,6 +1459,7 @@ describe("withBays", () => {
     await finishJob(app, opened)
     await app.bays.intake({ bay: "B1", headSha: HEAD_1 })
     await app.bays.submit({ pr: "PR1" })
+    identity.changeId = currentPRRev(app.bays.pr("PR1")!).changeId
 
     await app.dispatch(app.commands.fixture.integrate, undefined)
     expect(app.bays.branchLifecycles()[0]).toMatchObject({
