@@ -2875,7 +2875,33 @@ async function certifyBayHandoff(
   io: YrdCliIO,
 ): Promise<void> {
   let bay = app.bays.get(selector)
-  if (bay === undefined) throw new Error(`yrd: no bay '${selector}'`)
+  // Name the missing STEP, not the failed lookup. `no bay 'X'` is true and
+  // useless: it reads as a broken tool to an author who has a branch, a head
+  // and a packet and no idea a Bay was ever involved, and it cost one seat
+  // three escalations and most of a day.
+  //
+  // The Bay is not bookkeeping this command could mint for itself — it is the
+  // independent witness being certified. `certifyBayHandoff` reads that a live
+  // workspace exists, sits on the branch the packet names, and stands at the
+  // head the packet names. Creating one here to satisfy that check would be
+  // creating the witness to pass its own witness test, so the remedy is a step
+  // the author takes, and this message's whole job is to say which one.
+  if (bay === undefined) {
+    // A REFUSAL, not a bare Error. `throw new Error("yrd: no bay 'X'")` carries
+    // no failure fact, so classifyFailure files it as infrastructure/unexpected
+    // and exits 3 — the CLI was telling an author who merely skipped a step
+    // that Yrd had failed internally. host.test.ts pins that exact shape as
+    // "message-shaped-but-untyped", which is what this was.
+    raiseFailure(
+      "refusal",
+      "handoff-bay-missing",
+      `yrd: no active bay tracks '${selector}', and 'bay handoff' certifies a bay's materialized workspace — ` +
+        `its live branch and head are the evidence, which is why this command cannot open one for you. ` +
+        `Open it first:\n` +
+        `  yrd bay open --bay <name> --branch ${options.branch}\n` +
+        `then re-run this command. A branch or a bay name both select it.`,
+    )
+  }
   // The Bay projection records the last observed workspace head, while the
   // packet is cut after the agent's final commit. Refresh only when needed so
   // retries stay fact-idempotent but a newly committed exact head can certify.

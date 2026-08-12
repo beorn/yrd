@@ -4434,6 +4434,40 @@ describe("runYrd", () => {
     expect(app.jobs.get(checkJob!.id)).toMatchObject({ status: "queued" })
   })
 
+  it("tells a bayless author which step is missing instead of that a lookup failed", async () => {
+    const app = await createApp()
+
+    // The author has a branch, a head and a packet, and no reason to know a Bay
+    // was ever involved. `no bay 'X'` is true and useless — it reads as a broken
+    // tool, and it cost one seat three escalations and most of a day.
+    const refusal = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd(
+          "bay",
+          "handoff",
+          "task/22716-runner-supervision",
+          "--branch",
+          "task/22716-runner-supervision",
+          "--head",
+          HEAD_SHA,
+          "--evidence",
+          "@km/handoff/bayless.md",
+        ),
+        refusal.io,
+      ),
+    ).toBe(1)
+    const stderr = refusal.stderr()
+    // The remedy, runnable as printed, carrying the author's own branch.
+    expect(stderr).toContain("yrd bay open --bay <name> --branch task/22716-runner-supervision")
+    // And WHY a Bay, so the step reads as a requirement rather than a ritual:
+    // the workspace is the evidence being certified, which is also why this
+    // command must not open one for you.
+    expect(stderr).toContain("materialized workspace")
+    expect(refusal.stdout()).toBe("")
+  })
+
   it("certifies exact-head handoff readiness and exposes the shared lifecycle projection", async () => {
     const app = await createApp()
     await openTestBay(app, { name: "handoff-cli" })
