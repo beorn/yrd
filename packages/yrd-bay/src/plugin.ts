@@ -30,6 +30,7 @@ import type { FlowPin, Submission } from "@yrd/config"
 import { isDeepStrictEqual } from "node:util"
 import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
+import { ChangeIdSchema, changeIdForCommand, type ChangeId } from "./change-identity.ts"
 import {
   BayIdSchema,
   CheckpointBayInputSchema,
@@ -443,11 +444,16 @@ const PRRecutReplaySchema = z
     transition: PRFreshnessTransitionSchema.optional(),
   })
   .strict()
-const PRRecutFactSchema = PRRecutReplaySchema.extend({ submitter: TextSchema }).strict()
-const PRPushedSchema = z.preprocess(
+const PRRecutFactSchema = PRRecutReplaySchema.extend({ changeId: ChangeIdSchema, submitter: TextSchema }).strict()
+const PRPushedV1Schema = z.preprocess(
   normalizeV2Submitter,
   LegacyPRPushedSchema.extend({ submitter: TextSchema }).strict(),
 )
+const PRPushedSchema = z.preprocess(
+  normalizeV2Submitter,
+  LegacyPRPushedSchema.extend({ changeId: ChangeIdSchema, submitter: TextSchema }).strict(),
+)
+const PRPushedReplaySchema = z.union([PRPushedV1Schema, LegacyPRPushedSchema])
 const PRRevisionIdentitySchema = z.object({ pr: PRIdSchema, revision: RevisionSchema, headSha: GitShaSchema }).strict()
 const LegacyPRRevisionSchema = PRRevisionIdentitySchema.extend({ correlation: CorrelationSchema.optional() }).strict()
 const PRRevisionSchema = z.preprocess(
@@ -1331,8 +1337,8 @@ export function withBays(options: WithBaysOptions) {
         "bay/closing": journalEvent(1, BayClosingSchema),
         "bay/orphaned": journalEvent(1, BayOrphanedSchema),
         "bay/handoff-certified": journalEvent(1, BayHandoffCertifiedSchema),
-        "pr/pushed": journalEvent(1, PRPushedSchema),
-        "pr/recut": journalEvent(2, PRRecutFactSchema),
+        "pr/pushed": journalEvent(2, PRPushedSchema),
+        "pr/recut": journalEvent(3, PRRecutFactSchema),
         "pr/submitted": journalEvent(1, PRRevisionSchema),
         "pr/correlation-bound": journalEvent(1, PRCorrelationBoundSchema),
         "pr/withdrawn": journalEvent(1, PRWithdrawnSchema),
@@ -1353,7 +1359,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/review-requested": journalEvent(1, PRReviewRequestFactSchema),
       },
       replayEvents: {
-        "pr/pushed": LegacyPRPushedSchema,
+        "pr/pushed": PRPushedReplaySchema,
         "pr/recut": PRRecutReplaySchema,
         "pr/submitted": LegacyPRRevisionSchema,
         "pr/withdrawn": z.union([PRWithdrawnSchema, LegacyPRWithdrawnSchema]),
@@ -1458,13 +1464,15 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultSubmitt
       intake: command({
         title: "Record pushed revision",
         params: IntakePRArgsSchema,
-        apply: (state: BayState, args: IntakePRArgs) => intakePR(state, args, defaultBase, defaultSubmitter),
+        apply: (state: BayState, args: IntakePRArgs, context) =>
+          intakePR(state, args, defaultBase, defaultSubmitter, context.command.id),
       }),
       submit: command({
         title: "Submit work",
         visibility: "public",
         params: SubmitArgsSchema,
-        apply: (state: BayState, args: SubmitArgs) => submitWork(state, args, defaultBase, defaultSubmitter),
+        apply: (state: BayState, args: SubmitArgs, context) =>
+          submitWork(state, args, defaultBase, defaultSubmitter, context.command.id),
       }),
       close: command({
         title: "Close bay",
@@ -1737,7 +1745,24 @@ function requireExpectedPRTargetCurrent(
   )
 }
 
-function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase: string, defaultSubmitter: string) {
+function changeIdForRevision(existing: DeepReadonly<PR> | undefined, commandId: string): ChangeId {
+  if (existing === undefined) return changeIdForCommand(commandId)
+  const changeId = currentPRRev(existing).changeId
+  if (changeId !== undefined) return changeId
+  raiseFailure(
+    "refusal",
+    "legacy-change-id-missing",
+    `yrd: PR '${existing.id}' predates stable Change-Id identity; run the landing-receipt migration before rebuilding it`,
+  )
+}
+
+function intakePR(
+  state: DeepReadonly<BayState>,
+  args: IntakePRArgs,
+  defaultBase: string,
+  defaultSubmitter: string,
+  commandId: string,
+) {
   const current = state.bays
   const bay = args.bay === undefined ? undefined : required(resolveBay(current, args.bay), "bay", args.bay)
   if (bay !== undefined && bay.status !== "active") throw new Error(`yrd: bay '${bay.id}' is ${bay.status}, not active`)
@@ -1796,10 +1821,12 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
     return { events: [] }
   }
   const id = existing?.id ?? nextId("PR", current.prs)
+  const changeId = changeIdForRevision(existing, commandId)
   const submitter = args.submitter ?? defaultSubmitter
   const revision = (existing === undefined ? 0 : prRevisionNumber(existing)) + 1
   const pushed = {
     pr: id,
+    changeId,
     ...(bay === undefined ? {} : { bay: bay.id }),
     ...(name === undefined ? {} : { name }),
     ...(issue === undefined ? {} : { issue }),
@@ -1830,7 +1857,13 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
   }
 }
 
-function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase: string, defaultSubmitter: string) {
+function submitWork(
+  state: DeepReadonly<BayState>,
+  args: SubmitArgs,
+  defaultBase: string,
+  defaultSubmitter: string,
+  commandId?: string,
+) {
   const current = state.bays
   if ("pr" in args) {
     // Submit-by-id routes through the same live guard as the other 9 mutating
@@ -1900,11 +1933,16 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
       ? existing
       : undefined
   const id = resubmitted?.id ?? nextId("PR", current.prs)
+  if (commandId === undefined) {
+    raiseFailure("infrastructure", "change-id-command-missing", "yrd: change creation requires its durable command id")
+  }
+  const changeId = changeIdForRevision(resubmitted, commandId)
   const revision = (resubmitted === undefined ? 0 : prRevisionNumber(resubmitted)) + 1
   const issue = attachedIssue(resubmitted, args.issue)
   const submitter = args.submitter ?? defaultSubmitter
   const pushed = {
     pr: id,
+    changeId,
     ...(args.name === undefined ? {} : { name: args.name }),
     ...(issue === undefined ? {} : { issue }),
     branch: args.branch,
@@ -2274,11 +2312,20 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
     )
   }
   const successor = { revision: prRevisionNumber(pr) + 1, headSha: args.headSha, baseSha: args.baseSha }
+  const changeId = predecessor.changeId
+  if (changeId === undefined) {
+    raiseFailure(
+      "refusal",
+      "legacy-change-id-missing",
+      `yrd: PR '${pr.id}' predates stable Change-Id identity; run the landing-receipt migration before rebuilding it`,
+    )
+  }
   const successorSubmitter = predecessor.submitter ?? defaultSubmitter
   return {
     events: [
       event("pr/recut", {
         pr: pr.id,
+        changeId,
         fromRevision: predecessor.n,
         patchId: args.patchId,
         baseSha: args.baseSha,
@@ -2718,16 +2765,22 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
     }
     case "pr/pushed": {
       const parsed = PRPushedSchema.safeParse(data)
-      const pushed = parsed.success ? parsed.data : LegacyPRPushedSchema.parse(data)
+      const previous = PRPushedV1Schema.safeParse(data)
+      const pushed = parsed.success ? parsed.data : previous.success ? previous.data : LegacyPRPushedSchema.parse(data)
       const base = baseIdentity(pushed.base)
       const existing = current.prs[pushed.pr]
       const record: PRRev = {
         n: pushed.revision,
+        ...(parsed.success ? { changeId: parsed.data.changeId } : {}),
         head: pushed.headSha,
         base,
         ...(pushed.baseSha === undefined ? {} : { baseSha: pushed.baseSha }),
         ...(pushed.composition === undefined ? {} : { composition: pushed.composition }),
-        ...(parsed.success ? { submitter: parsed.data.submitter } : {}),
+        ...(parsed.success
+          ? { submitter: parsed.data.submitter }
+          : previous.success
+            ? { submitter: previous.data.submitter }
+            : {}),
         pushedAt: applied.ts,
         ...(pushed.correlation === undefined ? {} : { correlation: pushed.correlation }),
       }
@@ -2793,7 +2846,8 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       )
     }
     case "pr/recut": {
-      const recut = PRRecutReplaySchema.parse(data)
+      const parsed = PRRecutFactSchema.safeParse(data)
+      const recut = parsed.success ? parsed.data : PRRecutReplaySchema.parse(data)
       const pr = current.prs[recut.pr]
       if (pr === undefined) throw new Error(`yrd: no merge request '${recut.pr}' to rebuild`)
       const predecessor = pr.revs.find(
@@ -2836,6 +2890,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
           : undefined
       const revision: PRRev = {
         n: recut.successor.revision,
+        ...(parsed.success ? { changeId: parsed.data.changeId } : {}),
         head: recut.successor.headSha,
         base: pr.base,
         baseSha: recut.successor.baseSha,
