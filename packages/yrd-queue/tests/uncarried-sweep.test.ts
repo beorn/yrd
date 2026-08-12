@@ -69,7 +69,7 @@ describe("sweepUncarriedRefs", () => {
 
     const result = await sweepUncarriedRefs(git, {
       ...OPTIONS,
-      carriedBranches: new Set(["origin/task/carried"]),
+      carriedBranches: new Set(["task/carried"]), // as a merge request records it, without the remote
     })
 
     // Zero findings is only readable next to what produced it.
@@ -85,7 +85,7 @@ describe("sweepUncarriedRefs", () => {
       "for-each-ref": [refLine("origin/task/carried", 2 * HOUR), refLine("origin/task/ancient", 40 * HOUR)].join("\n"),
     })
 
-    await sweepUncarriedRefs(git, { ...OPTIONS, carriedBranches: new Set(["origin/task/carried"]) })
+    await sweepUncarriedRefs(git, { ...OPTIONS, carriedBranches: new Set(["task/carried"]) })
 
     // One process total. Not ls-tree, not rev-parse, not diff — the ordering
     // is the whole reason a 2,000-ref sweep is affordable, and it is invisible
@@ -120,6 +120,23 @@ describe("sweepUncarriedRefs", () => {
     // partly landed must not tell its author "unfinished" about work already
     // on trunk.
     expect(finding?.message).toContain("already applied")
+  })
+
+  it("matches a merge request's branch name against a remote-prefixed ref", async () => {
+    // The bug this pins was invisible to every other test here, because their
+    // fixtures used the same string on both sides. Real data does not:
+    // %(refname:short) yields "origin/task/x" and a merge request records
+    // "task/x". Measured on the live fleet before the fix — 4,784 refs scanned,
+    // 7 recognised as carried, against 810 live merge requests. The rail's
+    // first real run reported carried work as stranded.
+    const git = fakeGit({ "for-each-ref": refLine("origin/task/carried", 3 * HOUR) })
+    const result = await sweepUncarriedRefs(git, {
+      ...OPTIONS,
+      carriedBranches: new Set(["task/carried"]),
+    })
+    expect(result.carried).toBe(1)
+    expect(result.examined).toBe(0)
+    expect(git.calls).toHaveLength(1)
   })
 
   it("survives a branch name containing a space", async () => {

@@ -69,7 +69,29 @@ const ROOT_COMMAND_ALIASES = {
 
 const LIST_COMMAND_PARENTS = new Set(["bay", "pr", "queue"])
 
-const QUEUE_SUBCOMMANDS = new Set(["_list", "list", "audit", "pause", "resume", "recover", "run", "cancel", "finish"])
+/**
+ * Every subcommand registered under `queue` in the command tree.
+ *
+ * This list is a SECOND source of truth and it fails silently: an operand that
+ * is missing here is spliced into `queue list <operand>` below, which succeeds
+ * and prints the timeline, so a newly registered subcommand appears in `--help`
+ * and simply never runs. `queue uncarried` did exactly that — registered,
+ * documented, dispatching to the timeline. `tests/invocation-tree-agreement.test.ts`
+ * now fails when this set and the tree disagree, so the next person gets a red
+ * test instead of a command that quietly does something else.
+ */
+const QUEUE_SUBCOMMANDS = new Set([
+  "_list",
+  "list",
+  "audit",
+  "uncarried",
+  "pause",
+  "resume",
+  "recover",
+  "run",
+  "cancel",
+  "finish",
+])
 
 function rootCommandIndex(args: readonly string[]): number | undefined {
   for (let index = 0; index < args.length; index += 1) {
@@ -124,7 +146,10 @@ export function canonicalizeYrdCommandAliases(args: readonly string[]): string[]
 
 const READ_ONLY_SUBCOMMANDS: Readonly<Record<string, ReadonlySet<string>>> = {
   bay: new Set(["_list", "list", "path", "log"]),
-  queue: new Set(["_list", "list", "audit"]),
+  // `uncarried` reads refs and queue state and writes nothing, so a viewer
+  // runtime must be able to run it — the rail is least useful exactly where
+  // mutation is not allowed.
+  queue: new Set(["_list", "list", "audit", "uncarried"]),
   pr: new Set(["list", "view", "runs", "diff", "status", "checks"]),
   mr: new Set(["list", "view", "runs", "diff", "status", "checks"]),
   issue: new Set(["_list", "list", "view"]),

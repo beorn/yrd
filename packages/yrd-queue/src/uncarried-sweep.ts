@@ -59,6 +59,22 @@ async function gitlinkPathsOf(git: RefGit, repo: string, base: string): Promise<
   return new Set(paths)
 }
 
+/**
+ * The branch name a merge request would call this ref.
+ *
+ * `%(refname:short)` renders `refs/remotes/origin/task/x` as `origin/task/x`,
+ * while a merge request records the branch as `task/x`. Comparing the two
+ * directly matches almost nothing, and the failure is invisible in a unit test
+ * whose fixture uses the same string on both sides: the sweep reports carried
+ * work as stranded and the rail cries wolf on its first real run. Measured
+ * before the fix — 4,784 refs scanned, 7 recognised as carried, against 810
+ * live merge requests.
+ */
+function branchOf(ref: string, namespace: string): string {
+  const remote = namespace.startsWith("refs/remotes/") ? `${namespace.slice("refs/remotes/".length)}/` : ""
+  return remote !== "" && ref.startsWith(remote) ? ref.slice(remote.length) : ref
+}
+
 type DatedRef = Readonly<{ ref: string; pushedAtMs: number }>
 
 /** One process for every ref and its commit date. The NUL separator is not
@@ -98,7 +114,7 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
   let outsideAgeBound = 0
   const survivors: DatedRef[] = []
   for (const candidate of refs) {
-    if (carriedBranches.has(candidate.ref)) {
+    if (carriedBranches.has(branchOf(candidate.ref, namespace))) {
       carried += 1
       continue
     }

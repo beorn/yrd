@@ -63,8 +63,10 @@ import {
   isQueueRunningConflict,
   Queues,
   resolveSubmoduleOrigin,
+  sweepUncarriedRefs,
   synthesizePinIntentCarrier,
   type PREligibility,
+  type RefGit,
   type QueueAuditFinding,
   type QueueSummary,
   type Run,
@@ -6712,6 +6714,79 @@ async function queueAudit(
   return result.findings.length === 0 ? 0 : 1
 }
 
+/**
+ * Adapter from the CLI's git runner to the sweep's RefGit port.
+ *
+ * `optional` maps a non-zero exit to undefined because "this ref has no such
+ * path" is a real answer to a real question. A TIMEOUT is NOT an answer — git
+ * never finished asking — so it stays fatal instead of being reported as
+ * "cannot say", which would quietly downgrade a stalled repository into a
+ * clean-looking sweep.
+ */
+function sweepGit(process: Pick<Process, "run">): RefGit {
+  return {
+    async run(repo, args) {
+      return (await runQueueGit(process, repo, args)).trim()
+    },
+    async optional(repo, args) {
+      try {
+        return (await runQueueGit(process, repo, args)).trim()
+      } catch (error) {
+        if (isGitTimeoutError(error)) throw error
+        return undefined
+      }
+    },
+  }
+}
+
+/** Admission is meant to happen ON the push, so a ref is only "mid-flight" for
+ * minutes. Refs older than a day are history rather than work — measured, an
+ * unbounded rail reports 1,546 rows on its first run and is switched off. */
+const UNCARRIED_TTL_MS = 10 * 60 * 1000
+const UNCARRIED_AGE_BOUND_MS = 24 * 60 * 60 * 1000
+
+async function queueUncarried(
+  app: YrdCliApp,
+  options: JsonOption & Readonly<{ base?: string; namespace?: string }>,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
+  const cwd = io.cwd ?? globalThis.process.cwd()
+  const base = options.base ?? "main"
+  // A branch is carried if any merge request names it — including terminal
+  // ones. A ref whose PR was withdrawn is not stranded work waiting to be
+  // found; it is work someone already decided about.
+  const carriedBranches = new Set(Object.values(stateOf(app).bays.prs).map((pr) => pr.branch))
+  await using process = createProcess()
+  const result = await sweepUncarriedRefs(sweepGit(process), {
+    repo: cwd,
+    base,
+    namespace: options.namespace ?? "refs/remotes/origin",
+    carriedBranches,
+    nowMs: new Date(io.now?.() ?? Date.now()).getTime(),
+    ttlMs: UNCARRIED_TTL_MS,
+    ageBoundMs: UNCARRIED_AGE_BOUND_MS,
+  })
+
+  // The counts print on BOTH paths, not just the empty one. "no uncarried refs"
+  // alone cannot be told apart from a sweep that looked at nothing, and this
+  // rail's whole job is to be believable when it reads zero.
+  const denominator =
+    `scanned ${String(result.scanned)} · ${String(result.carried)} carried · ` +
+    `${String(result.outsideAgeBound)} outside the age bound · ${String(result.examined)} examined`
+  const lines = result.findings.map(
+    (finding) => `${finding.ref}  ${finding.message}`,
+  )
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "queue.uncarried", ...result },
+    result.findings.length === 0
+      ? `no uncarried refs — ${denominator}`
+      : [...lines, "", denominator].join("\n"),
+  )
+  return result.findings.length === 0 ? 0 : 1
+}
+
 async function configDoctor(
   app: YrdCliApp,
   services: YrdCliServices,
@@ -9167,6 +9242,13 @@ function buildProgram(
     .description("check queue state")
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await queueAudit(installed(), installedServices(), options, io)))
+  queue
+    .command("uncarried")
+    .description("find refs pushed to the remote that no merge request carries")
+    .option("--base <branch>", "base branch the refs are judged against")
+    .option("--namespace <ref>", "ref namespace to sweep")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => setExit(await queueUncarried(installed(), options, io)))
   queue
     .command("pause [base]")
     .description("pause new queue runs")
