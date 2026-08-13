@@ -80,6 +80,7 @@ import { diagnoseFlowPin, type FlowPin, type StepKind, type YrdConfig } from "@y
 import {
   PinIntentEvaluationFactSchema,
   PinIntentRefusalSchema,
+  TERMINAL_INTENT_STATUSES,
   type IntentsState,
   type PinIntent,
   type PinIntentAdmission,
@@ -1125,8 +1126,9 @@ function createQueue<Shape extends PRShape>(
   const persistMergeRecord = async (run: Run): Promise<void> => {
     if (recordMerge === undefined || !Queues.terminal(run)) return
     const candidate = runtime().queues.candidates[run.candidateId]
-    if (candidate === undefined)
+    if (candidate === undefined) {
       throw new Error(`yrd: queue run '${run.id}' names missing Candidate '${run.candidateId}'`)
+    }
     await recordMerge({ run, candidate: candidate as Candidate })
   }
 
@@ -3643,6 +3645,13 @@ function createQueueCommands(
       const record = state.intents?.records[args.intent]
       if (record === undefined) {
         raiseFailure("refusal", "intent-not-found", `yrd: no intent '${args.intent}' to evaluate`)
+      }
+      if (TERMINAL_INTENT_STATUSES.has(record.status)) {
+        raiseFailure(
+          "refusal",
+          "intent-terminal",
+          `yrd: intent '${record.id}' became ${record.status} while its merge-time evaluation was in flight`,
+        )
       }
       return { events: [event("intent/evaluation-recorded", args)] }
     },

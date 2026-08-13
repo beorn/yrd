@@ -751,6 +751,7 @@ async function checkedQueue(
     prepareCandidate?: boolean
     intentEvaluation?: "advance" | "noop" | "refused"
     refusedIntentIssues?: readonly string[]
+    beforeIntentEvaluationReturn?: (intent: string) => Promise<void>
   }> = {},
 ) {
   const bayJobs = createBayJobDefs(unusedWorkspace)
@@ -827,6 +828,7 @@ async function checkedQueue(
           remedy: [{ argv: ["git", "merge", currentPin], cwd: intent.component }],
         }
       }
+      await options.beforeIntentEvaluationReturn?.(intent.id)
       return {
         admitted: true as const,
         currentPin,
@@ -3132,6 +3134,48 @@ describe("Queue command adapters", () => {
     expect(runs).toHaveLength(1)
     expect(runs[0]).toMatchObject({ conclusion: "success", prs: [{ id: intent.id }] })
     expect(app.intents.get(intent.id)).toMatchObject({ status: "integrated" })
+    expect(await git(fixture.remote, ["ls-tree", "main", "dep"])).toContain(fixture.moduleSha)
+  }, 30_000)
+
+  it("classifies a concurrent intent landing between evaluation and dispatch as a losable race", async () => {
+    const fixture = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    const firstEvaluation = Promise.withResolvers<void>()
+    const releaseFirstEvaluation = Promise.withResolvers<void>()
+    let evaluations = 0
+    await using process = createProcess()
+    await using app = await checkedQueue(process, fixture.repo, ["true"], {
+      prepareCandidate: true,
+      beforeIntentEvaluationReturn: async () => {
+        evaluations += 1
+        if (evaluations !== 1) return
+        firstEvaluation.resolve()
+        await releaseFirstEvaluation.promise
+      },
+    })
+    const intent = await app.intents.submit({
+      intentId: "00000000-0000-7000-8000-000000000019",
+      issue: { source: "km", id: "@yrd/core/resident-terminal-intent-race" },
+      component: "dep",
+      target: fixture.moduleSha,
+      submitter: "@dev/5",
+    })
+
+    const losingRun = app.queue.run({}, runtime)
+    await firstEvaluation.promise
+    const winningRuns = await app.queue.run({}, runtime)
+    expect(winningRuns).toHaveLength(1)
+    expect(app.intents.get(intent.id)).toMatchObject({ status: "integrated" })
+    releaseFirstEvaluation.resolve()
+
+    const outcome = await losingRun.then(
+      () => undefined,
+      (error: unknown) => failureFact(error),
+    )
+    expect(outcome).toMatchObject({ kind: "refusal", code: "intent-terminal" })
     expect(await git(fixture.remote, ["ls-tree", "main", "dep"])).toContain(fixture.moduleSha)
   }, 30_000)
 
