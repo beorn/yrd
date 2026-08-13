@@ -1216,8 +1216,14 @@ async function synchronizeMergeRecordRef(git: Git, repo: string, run: string): P
     ["fetch", "--no-recurse-submodules", "--quiet", "origin", `+${MERGE_RECORD_REF}:${stagingRef}`],
     true,
   )
-  if (fetched.code !== 0 || (await git.optionalCommit(repo, stagingRef)) !== remoteTip) {
-    throw new Error(`yrd: remote merge-record ref '${remoteTip}' could not be materialized`)
+  if (fetched.code !== 0) {
+    throw new Error(`yrd: remote merge-record ref '${remoteTip}' could not be fetched: ${fetchDetail(fetched)}`)
+  }
+  const materializedTip = await git.optionalCommit(repo, stagingRef)
+  if (materializedTip !== remoteTip) {
+    throw new Error(
+      `yrd: remote merge-record ref '${remoteTip}' fetched into '${stagingRef}' but resolved to '${materializedTip ?? "missing"}'`,
+    )
   }
   const localTip = await git.optionalCommit(repo, MERGE_RECORD_REF)
   if (localTip === undefined) {
@@ -6535,7 +6541,10 @@ async function landingError(
   landingSha: string,
 ): Promise<string | undefined> {
   for (const sha of [checked.baseSha, ...input.prs.map((pr) => pr.headSha)]) {
-    if ((await git.run(repo, ["merge-base", "--is-ancestor", sha, landingSha], true)).code !== 0) return sha
+    const ancestry = await git.run(repo, ["merge-base", "--is-ancestor", sha, landingSha], true)
+    if (ancestry.code === 0) continue
+    if (ancestry.code === 1) return sha
+    throw new Error(`yrd: could not verify landing '${landingSha}' contains '${sha}': ${fetchDetail(ancestry)}`)
   }
   return undefined
 }
