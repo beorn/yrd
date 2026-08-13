@@ -233,6 +233,18 @@ describe("native needs-author lifecycle", () => {
     expect(prFacts(app.bays.pr(pr))).toMatchObject({ id: pr, revision: 1, headSha: HEAD, status: "needs-author" })
     expect(await Array.fromAsync(app.events())).toEqual(beforeReplay)
 
+    const recutReplay = await app.bays.recut({
+      pr,
+      fromRevision: 1,
+      headSha: HEAD,
+      baseSha: BASE,
+      treeSha: "3".repeat(40),
+      patchId: "4".repeat(40),
+      reviewCarried: false,
+    })
+    expect(recutReplay.events).toEqual([])
+    expect(prFacts(app.bays.pr(pr))).toMatchObject({ id: pr, revision: 1, headSha: HEAD, status: "needs-author" })
+
     // A fix push advances this already-submitted PR in place and re-requests
     // checks. There is no withdraw/new-PR or submit-again ceremony.
     const fixedHead = "2".repeat(40)
