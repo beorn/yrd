@@ -45,11 +45,46 @@ function fakeGit(responses: Record<string, string>): RefGit & { calls: string[][
   }
 }
 
-function refLine(ref: string, agoMs: number): string {
-  return `${ref}\0${Math.floor((NOW - agoMs) / 1000)}`
+function refLine(ref: string, agoMs: number, symref?: string): string {
+  return `${ref}\0${Math.floor((NOW - agoMs) / 1000)}\0${symref ?? ""}`
 }
 
 describe("sweepUncarriedRefs", () => {
+  it("refuses a malformed enumeration row instead of undercounting it", async () => {
+    const git = fakeGit({
+      "for-each-ref": [refLine("origin/task/valid", 40 * HOUR), "origin/task/broken\0not-a-date"].join("\n"),
+    })
+
+    await expect(sweepUncarriedRefs(git, OPTIONS)).rejects.toThrow(/malformed for-each-ref row.*broken/u)
+  })
+
+  it("limits the default population to authored refs", async () => {
+    const git = fakeGit({
+      "for-each-ref": [
+        refLine("origin/HEAD", 40 * HOUR),
+        refLine("origin/default", 40 * HOUR, "refs/remotes/origin/main"),
+        refLine("origin/main", 40 * HOUR),
+        refLine("origin/yrd/candidates/R123", 40 * HOUR),
+        refLine("origin/task/authored", 40 * HOUR),
+      ].join("\n"),
+    })
+    const authored: SweepOptions = {
+      ...OPTIONS,
+      authoredOnly: true,
+    }
+
+    const result = await sweepUncarriedRefs(git, authored)
+
+    // This is the dashboard denominator. Counting the default branch, its
+    // symbolic alias, or Queue's own candidates makes the rail describe Git
+    // storage rather than author work.
+    expect(result.scanned).toBe(1)
+    expect(result.outsideAgeBound).toBe(1)
+
+    const diagnostic = await sweepUncarriedRefs(git, OPTIONS)
+    expect(diagnostic.scanned).toBe(5)
+  })
+
   it("refuses to call an empty enumeration a clean sweep", async () => {
     const git = fakeGit({ "for-each-ref": "" })
     // A namespace that yields nothing is a broken sweep, and a rail that

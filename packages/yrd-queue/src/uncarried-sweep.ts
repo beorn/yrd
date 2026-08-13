@@ -25,6 +25,12 @@ export type SweepOptions = UncarriedOptions &
     carriedBranches: ReadonlySet<string>
     /** Ref namespace to sweep, e.g. "refs/remotes/origin". */
     namespace: string
+    /**
+     * Limit the namespace to refs authored as changes. The resident and the
+     * command's implicit default enable this; an explicit diagnostic
+     * namespace leaves it off so the caller sees exactly what they selected.
+     */
+    authoredOnly?: boolean
   }>
 
 /**
@@ -38,7 +44,7 @@ export type SweepOptions = UncarriedOptions &
  */
 export type SweepResult = Readonly<{
   findings: readonly UncarriedFinding[]
-  /** Refs the namespace yielded. Zero here is a broken sweep, not a clean one. */
+  /** Refs in the selected population. Zero is valid after authored-only exclusions. */
   scanned: number
   /** Disqualified by the carried set, before any per-ref git work. */
   carried: number
@@ -75,23 +81,43 @@ function branchOf(ref: string, namespace: string): string {
   return remote !== "" && ref.startsWith(remote) ? ref.slice(remote.length) : ref
 }
 
-type DatedRef = Readonly<{ ref: string; pushedAtMs: number }>
+type DatedRef = Readonly<{ ref: string; pushedAtMs: number; symbolic: boolean }>
 
 /** One process for every ref and its commit date. The NUL separator is not
  * decoration — branch names may contain anything a ref format allows, and a
  * space-split would silently truncate them. */
 async function datedRefs(git: RefGit, repo: string, namespace: string): Promise<readonly DatedRef[]> {
-  const listing = await git.run(repo, ["for-each-ref", "--format=%(refname:short)%00%(committerdate:unix)", namespace])
+  const listing = await git.run(repo, [
+    "for-each-ref",
+    "--format=%(refname:short)%00%(committerdate:unix)%00%(symref)",
+    namespace,
+  ])
   return listing
     .split("\n")
     .filter((line) => line !== "")
-    .flatMap((line) => {
-      const separator = line.lastIndexOf("\0")
-      if (separator < 0) return []
-      const seconds = Number(line.slice(separator + 1))
-      if (!Number.isFinite(seconds)) return []
-      return [{ ref: line.slice(0, separator), pushedAtMs: seconds * 1000 }]
+    .map((line) => {
+      const [ref, rawSeconds, symref, ...extra] = line.split("\0")
+      const seconds = Number(rawSeconds)
+      if (
+        ref === undefined ||
+        ref === "" ||
+        rawSeconds === undefined ||
+        symref === undefined ||
+        extra.length > 0 ||
+        !Number.isFinite(seconds)
+      ) {
+        throw new Error(
+          `yrd: uncarried sweep received malformed for-each-ref row under '${namespace}': ${JSON.stringify(line)}`,
+        )
+      }
+      return { ref, pushedAtMs: seconds * 1000, symbolic: symref !== "" }
     })
+}
+
+function isAuthoredRef(candidate: DatedRef, namespace: string, base: string): boolean {
+  if (candidate.symbolic) return false
+  const branch = branchOf(candidate.ref, namespace)
+  return branch !== "HEAD" && branch !== base && !branch.startsWith("yrd/candidates/")
 }
 
 /**
@@ -100,8 +126,8 @@ async function datedRefs(git: RefGit, repo: string, namespace: string): Promise<
  */
 export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Promise<SweepResult> {
   const { repo, base, carriedBranches, namespace } = options
-  const refs = await datedRefs(git, repo, namespace)
-  if (refs.length === 0) {
+  const enumerated = await datedRefs(git, repo, namespace)
+  if (enumerated.length === 0) {
     // Loud on purpose. Every other zero in this result is a fact about the
     // fleet; this one is a fact about the sweep, and reporting it as "nothing
     // stranded" is the silent failure that kills monitoring rails.
@@ -109,6 +135,9 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
       `yrd: uncarried sweep enumerated no refs under '${namespace}' in '${repo}' — the namespace is wrong or the repo has no remote refs`,
     )
   }
+  const refs = options.authoredOnly
+    ? enumerated.filter((candidate) => isAuthoredRef(candidate, namespace, base))
+    : enumerated
 
   let carried = 0
   let outsideAgeBound = 0

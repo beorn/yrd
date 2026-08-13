@@ -543,6 +543,11 @@ observes the later Queue-owned check result. It renders the typed evidence in
 human or newline-delimited JSON output, including command argv, concise
 diagnostics, base-versus-carrier classification, and artifact paths.
 
+A push to the managed receiver at `refs/for/<base>/<issue>` is the submit act:
+the receiver refuses an inadmissible change before accepting the ref, then one
+Bay transaction records the pushed revision, submission, and check request.
+Ordinary `refs/heads/*` pushes remain draft intake.
+
 Submission has two deliberately different head questions. An active Bay asks
 which commit is checked out in its managed workspace after refresh, because
 that workspace is the authored source being submitted. A direct branch or a PR
