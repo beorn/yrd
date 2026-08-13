@@ -1004,6 +1004,37 @@ async function queueRunnerHealth(
         },
       }
     }
+
+    const hasQueuedWork = app !== undefined && queuedDeliveryCount(app) > 0
+    if (runnerStatus === "fresh" && hasQueuedWork && runnerAgeMs !== undefined && runner !== null) {
+      const runnerUptimeMs = now - Date.parse(runner.startedAt)
+      if (runnerUptimeMs >= 3 * 60 * 60_000) {
+        const expectedLastLanded = app === undefined ? undefined : residentDriverLastLanded(app, base)
+        const lastLandedMs = expectedLastLanded ? Date.parse(expectedLastLanded.at) : 0
+        const noMergeMs = now - lastLandedMs
+        if (noMergeMs >= 3 * 60 * 60_000) {
+          const uptimeFormatted = Math.floor(runnerUptimeMs / 3600000)
+          const noMergeFormatted = Math.floor(noMergeMs / 3600000)
+          return {
+            exitCode: 2,
+            payload: {
+              schema: "hab-service-health/1",
+              command: "queue.list.check",
+              service,
+              state: "unhealthy",
+              running: true,
+              error: runnerHealthError(
+                "resident-runner-stalled-no-merge",
+                `resident runner has cycled for >${uptimeFormatted} hours with a non-empty ready set and no merge for >${noMergeFormatted} hours`,
+                ["Inspect the queue audit and restore delivery progress; process presence alone is not progress."],
+              ),
+              facts,
+            },
+          }
+        }
+      }
+    }
+
     return {
       exitCode: 0,
       payload: {
