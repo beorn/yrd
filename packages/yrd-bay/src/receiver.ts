@@ -748,20 +748,25 @@ async function validateSubmitCarrier(
   branch: string,
   env?: Environment,
 ): Promise<void> {
-  const current = await mainGit(
+  const exact = `refs/heads/${branch}`
+  const output = await mainGit(
     receiver.process,
     receiver.mainRepo,
-    ["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`],
+    ["for-each-ref", "--format=%(refname)%00%(objectname)", exact],
   )
-  if (current.stdout === "") return
-  const descends = await receiverGit(receiver, ["merge-base", "--is-ancestor", current.stdout, update.newSha], {
+  const current = output.stdout
+    .split("\n")
+    .map((line) => line.split("\0"))
+    .find(([ref]) => ref === exact)?.[1]
+  if (current === undefined) return
+  const descends = await receiverGit(receiver, ["merge-base", "--is-ancestor", current, update.newSha], {
     env,
     allowFailure: true,
     includeMainObjects: true,
   })
   check(
     descends.code === 0,
-    `carrier '${branch}' is at ${current.stdout.slice(0, 12)}, which the pushed head ` +
+    `carrier '${branch}' is at ${current.slice(0, 12)}, which the pushed head ` +
       `${update.newSha.slice(0, 12)} does not descend from; rebase the change onto it and push again`,
   )
 }
