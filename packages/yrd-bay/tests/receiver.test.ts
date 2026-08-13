@@ -532,6 +532,20 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(rewrittenHead).not.toBe(firstHead)
   })
 
+  it("does not mistake a descendant ref for the exact submit carrier", async () => {
+    const f = await fixture("submit-prefix")
+    await git(f.mainRepo, "switch", "-qc", "work")
+    const headSha = await commit(f.mainRepo, "prefix.txt")
+    await git(f.mainRepo, "update-ref", "refs/heads/issue/my-change/child", f.baseSha)
+    const env = await installHookHost(f.root, {
+      "for:main/my-change": target(f.baseSha, { branch: "issue/my-change", issue: "my-change" }),
+    })
+
+    const result = await push(f, "work:refs/for/main/my-change", env)
+    expect(result.code).toBe(0)
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/for/main/my-change")).toBe(headSha)
+  })
+
   it("refuses at drain when the carrier branch moved since the push", async () => {
     const f = await fixture("submit-drift")
     await git(f.mainRepo, "switch", "-qc", "work")
