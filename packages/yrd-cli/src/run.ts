@@ -465,6 +465,41 @@ function parseQueueDriverEpoch(value: unknown): QueueDriverEpoch | undefined {
   return { queueId: driver.queueId, epoch: driver.epoch, lastLanded }
 }
 
+function parseUncarriedObservation(value: unknown): UncarriedObservation | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== "object" || value === null) {
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner uncarried is invalid")
+  }
+  const observation = value as Record<string, unknown>
+  if (!Number.isSafeInteger(observation.count) || (observation.count as number) < 0) {
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner uncarried count is invalid")
+  }
+  if (!Number.isSafeInteger(observation.scanned) || (observation.scanned as number) < 0) {
+    raiseFailure(
+      "infrastructure",
+      "resident-runner-status-invalid",
+      "yrd: resident runner uncarried scanned count is invalid",
+    )
+  }
+  if (
+    observation.clockFallbacks !== undefined &&
+    (!Number.isSafeInteger(observation.clockFallbacks) || (observation.clockFallbacks as number) < 0)
+  ) {
+    raiseFailure(
+      "infrastructure",
+      "resident-runner-status-invalid",
+      "yrd: resident runner uncarried clock fallback count is invalid",
+    )
+  }
+  const observedAt = residentRunnerTimestamp(observation.observedAt, "uncarried observedAt")
+  return {
+    count: observation.count as number,
+    scanned: observation.scanned as number,
+    ...(observation.clockFallbacks === undefined ? {} : { clockFallbacks: observation.clockFallbacks as number }),
+    observedAt,
+  }
+}
+
 function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
   let value: unknown
   try {
@@ -483,6 +518,7 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
   const lastTickAt = residentRunnerTimestamp(record.lastTickAt, "lastTickAt")
   const queueProgress = parseResidentRunnerProgress(record.queueProgress)
   const driver = parseQueueDriverEpoch(record.driver)
+  const uncarried = parseUncarriedObservation(record.uncarried)
   if (Date.parse(lastTickAt) < Date.parse(startedAt)) {
     raiseFailure(
       "infrastructure",
@@ -520,6 +556,7 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
     lastTickAt,
     ...(queueProgress === undefined ? {} : { queueProgress }),
     ...(driver === undefined ? {} : { driver }),
+    ...(uncarried === undefined ? {} : { uncarried }),
     ...(record.command === undefined ? {} : { command: record.command as string }),
     ...(record.exitedAt === undefined ? {} : { exitedAt: residentRunnerTimestamp(record.exitedAt, "exitedAt") }),
     ...(record.clean === undefined ? {} : { clean: record.clean }),
@@ -7022,7 +7059,7 @@ async function queueUncarried(
   const denominator =
     `scanned ${String(result.scanned)} · ${String(result.carried)} carried · ` +
     `${String(result.outsideAgeBound)} outside the age bound · ${String(result.examined)} examined · ` +
-    `${String(result.clockFallbacks)} legacy commit clocks`
+    `${String(result.clockFallbacks)} refs without retained update clocks`
   const lines = result.findings.map((finding) => `${finding.ref}  ${finding.message}`)
   await printResult(
     io,

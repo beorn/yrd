@@ -39,7 +39,7 @@ const BASELINE = {
 const OPTIONS = {
   repo: REPO,
   base: BASE,
-  pushedAtMs: 1_786_000_000_000,
+  observedAtMs: 1_786_000_000_000,
   carriedBranches: new Set<string>(),
   gitlinkPaths: new Set(["vendor/yrd", "km"]),
 }

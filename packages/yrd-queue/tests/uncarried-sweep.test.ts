@@ -39,8 +39,9 @@ function fakeGit(responses: Record<string, string>): RefGit & { calls: string[][
         .split("\n")
         .filter((line) => line !== "")
         .flatMap((line) => {
-          const [fullRef, , rawSeconds] = line.split("\0")
-          return fullRef !== undefined && rawSeconds !== undefined ? [`${fullRef}@{${rawSeconds}}`] : []
+          const [fullRef, ref] = line.split("\0")
+          const agoMs = ref === undefined ? undefined : REF_AGES.get(ref)
+          return fullRef !== undefined && agoMs !== undefined ? [reflogLine(fullRef, agoMs)] : []
         })
         .join("\n")
     }
@@ -59,9 +60,12 @@ function fakeGit(responses: Record<string, string>): RefGit & { calls: string[][
   }
 }
 
+const REF_AGES = new Map<string, number>()
+
 function refLine(ref: string, agoMs: number, symref?: string): string {
+  REF_AGES.set(ref, agoMs)
   const fullRef = ref.startsWith("origin/") ? `refs/remotes/${ref}` : ref
-  return `${fullRef}\0${ref}\0${Math.floor((NOW - agoMs) / 1000)}\0${symref ?? ""}`
+  return `${fullRef}\0${ref}\0${symref ?? ""}`
 }
 
 function reflogLine(fullRef: string, agoMs: number): string {
@@ -104,7 +108,7 @@ describe("sweepUncarriedRefs", () => {
     const git = fakeGit({
       "for-each-ref": [
         refLine("origin/task/valid", 40 * HOUR),
-        "refs/remotes/origin/task/broken\0origin/task/broken\0not-a-date\0",
+        "refs/remotes/origin/task/broken\0origin/task/broken",
       ].join("\n"),
     })
 
@@ -247,7 +251,9 @@ describe("sweepUncarriedRefs", () => {
 
     const result = await sweepUncarriedRefs(git, OPTIONS)
 
-    expect(result.findings[0]?.ageMs).toBe(3 * HOUR)
+    // A commit clock cannot prove when this clone observed the ref. Keep the
+    // coverage gap loud, but never mint an actionable TTL finding from it.
+    expect(result.findings).toEqual([])
     expect(result.clockFallbacks).toBe(1)
   })
 
@@ -258,6 +264,14 @@ describe("sweepUncarriedRefs", () => {
     })
 
     await expect(sweepUncarriedRefs(git, OPTIONS)).rejects.toThrow(/malformed reflog row/u)
+  })
+
+  it("refuses an empty reflog timestamp instead of treating it as epoch zero", async () => {
+    const emptyReflogClock = fakeGit({
+      "for-each-ref": refLine("origin/task/stranded", 3 * HOUR),
+      "reflog show": "refs/remotes/origin/task/stranded@{}",
+    })
+    await expect(sweepUncarriedRefs(emptyReflogClock, OPTIONS)).rejects.toThrow(/malformed reflog row/u)
   })
 
   it("reads Git's real full-ref reflog selector format", async () => {
@@ -303,6 +317,7 @@ describe("sweepUncarriedRefs", () => {
       const result = await sweepUncarriedRefs(realGit, { ...OPTIONS, repo })
 
       expect(result.findings).toMatchObject([{ ref: "origin/task/clock", ageMs: 11 * 60_000 }])
+      expect(result.findings[0]?.message).toContain("observed locally 11m ago")
       expect(result.clockFallbacks).toBe(0)
     } finally {
       await rm(repo, { recursive: true, force: true })

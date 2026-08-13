@@ -30,7 +30,7 @@ function fact(overrides: Partial<PushedRefFact> = {}): PushedRefFact {
   return {
     ref: "task/example",
     tipSha: "a".repeat(40),
-    pushedAtMs: NOW - HOUR,
+    observedAtMs: NOW - HOUR,
     carried: false,
     uniqueCommits: 2,
     equivalentCommits: 0,
@@ -55,13 +55,13 @@ describe("classifyPushedRef", () => {
   it("holds its tongue until the TTL has passed, so a normal push is not a finding", () => {
     // The whole point of push-IS-submit is that admission happens on push; a
     // ref seen one minute old is mid-flight, not stranded.
-    expect(classifyPushedRef(fact({ pushedAtMs: NOW - 60_000 }), OPTIONS)).toBeUndefined()
+    expect(classifyPushedRef(fact({ observedAtMs: NOW - 60_000 }), OPTIONS)).toBeUndefined()
   })
 
   // 1,502 of 1,546 measured refs are older than seven days. Without this bound
   // the rail's first run is 1,546 rows and its second run is never.
   it("ignores refs older than the age bound — abandoned history is not a to-do list", () => {
-    expect(classifyPushedRef(fact({ pushedAtMs: NOW - 8 * 24 * HOUR }), OPTIONS)).toBeUndefined()
+    expect(classifyPushedRef(fact({ observedAtMs: NOW - 8 * 24 * HOUR }), OPTIONS)).toBeUndefined()
   })
 
   it("ignores a ref whose commits all landed, however they landed", () => {
@@ -91,7 +91,7 @@ describe("classifyPushedRef", () => {
   })
 
   it("names the ref and its age in the message, because a code alone is not actionable", () => {
-    const finding = classifyPushedRef(fact({ ref: "task/maddoc-top-bar-r2", pushedAtMs: NOW - 3 * HOUR }), OPTIONS)
+    const finding = classifyPushedRef(fact({ ref: "task/maddoc-top-bar-r2", observedAtMs: NOW - 3 * HOUR }), OPTIONS)
     expect(finding?.message).toContain("task/maddoc-top-bar-r2")
     expect(finding?.message).toContain("3h")
   })
@@ -99,7 +99,7 @@ describe("classifyPushedRef", () => {
   it("treats a ref pushed in the future as due now rather than negative", () => {
     // Clock skew between the pusher and the sweeper must not produce a negative
     // age that silently fails the TTL comparison.
-    const finding = classifyPushedRef(fact({ pushedAtMs: NOW + 5 * 60_000 }), OPTIONS)
+    const finding = classifyPushedRef(fact({ observedAtMs: NOW + 5 * 60_000 }), OPTIONS)
     expect(finding).toBeUndefined()
   })
 })
@@ -248,7 +248,7 @@ describe("union validation gate — every specimen any seat measured", () => {
         {
           ref,
           tipSha: "a".repeat(40),
-          pushedAtMs: NOW - 3 * HOUR_MS,
+          observedAtMs: NOW - 3 * HOUR_MS,
           carried: false,
           uniqueCommits,
           equivalentCommits,

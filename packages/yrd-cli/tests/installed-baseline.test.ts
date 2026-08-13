@@ -3,7 +3,7 @@
  * @level l2
  * @consumer @yrd/cli host
  */
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import type { InstalledStep } from "@yrd/queue"
 import { failureFact } from "@yrd/core"
 import { createYrdHost } from "../src/host.ts"
+import { uncarriedLine } from "../src/queue-status-view.tsx"
 import {
   followQueueRuns,
   requestYrdRuntimeReload,
@@ -509,6 +510,48 @@ async function queueRepository(check: string): Promise<string> {
 }
 
 describe("host installed baseline", () => {
+  it("round-trips old and current uncarried observations through resident status", async () => {
+    const repo = await queueRepository("true")
+    const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
+    await mkdir(join(statusPath, ".."), { recursive: true })
+    const baseStatus = {
+      pid: process.pid,
+      startedAt: "2026-08-13T20:00:00.000Z",
+      lastTickAt: "2026-08-13T20:01:00.000Z",
+      implementationSource: `git:${"a".repeat(40)}`,
+    }
+
+    await writeFile(
+      statusPath,
+      `${JSON.stringify({
+        ...baseStatus,
+        uncarried: { count: 2, scanned: 50, clockFallbacks: 7, observedAt: "2026-08-13T20:00:30.000Z" },
+      })}\n`,
+      "utf8",
+    )
+    const current = await residentRunnerStatus(repo)
+    expect(current?.uncarried).toEqual({
+      count: 2,
+      scanned: 50,
+      clockFallbacks: 7,
+      observedAt: "2026-08-13T20:00:30.000Z",
+    })
+    expect(uncarriedLine(current?.uncarried, Date.parse(baseStatus.lastTickAt))).toContain(
+      "7 refs without retained update clocks",
+    )
+
+    await writeFile(
+      statusPath,
+      `${JSON.stringify({
+        ...baseStatus,
+        uncarried: { count: 0, scanned: 50, observedAt: "2026-08-13T20:00:30.000Z" },
+      })}\n`,
+      "utf8",
+    )
+    const legacy = await residentRunnerStatus(repo)
+    expect(uncarriedLine(legacy?.uncarried, Date.parse(baseStatus.lastTickAt))).toContain("push-clock coverage unknown")
+  })
+
   it("follow-mode heals foreign baseline drift via the same provision path as queue init (22306/22334)", async () => {
     const repo = await queueRepository("true")
     const resident = await createYrdHost({ cwd: repo })

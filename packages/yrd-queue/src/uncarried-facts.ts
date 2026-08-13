@@ -21,7 +21,7 @@ export type GatherOptions = Readonly<{
   repo: string
   base: string
   /** Ref-local observation/update clock selected once by the enumerator. */
-  pushedAtMs: number
+  observedAtMs: number
   /** Refs already carried by a merge request, so the sweep can skip them. */
   carriedBranches: ReadonlySet<string>
   /** Gitlink paths standing on the base, discovered from tree mode 160000 —
@@ -67,7 +67,7 @@ async function pinDirection(
  * bound before any git object is read.
  */
 export async function gatherPushedRefFact(git: RefGit, ref: string, options: GatherOptions): Promise<PushedRefFact> {
-  const { repo, base, pushedAtMs, carriedBranches, gitlinkPaths } = options
+  const { repo, base, observedAtMs, carriedBranches, gitlinkPaths } = options
   const tipSha = await git.run(repo, ["rev-parse", `${ref}^{commit}`])
 
   // Three-dot: what this ref CHANGED relative to the merge base. Two-dot would
@@ -111,7 +111,7 @@ export async function gatherPushedRefFact(git: RefGit, ref: string, options: Gat
   return {
     ref,
     tipSha,
-    pushedAtMs,
+    observedAtMs,
     carried: carriedBranches.has(ref),
     uniqueCommits: lines.filter((line) => line.startsWith("+")).length,
     equivalentCommits: lines.filter((line) => line.startsWith("-")).length,

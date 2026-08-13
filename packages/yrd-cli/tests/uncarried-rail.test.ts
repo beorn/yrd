@@ -41,7 +41,7 @@ describe("uncarriedLine", () => {
   })
 
   it("reports legacy commit-clock fallbacks on the resident rail", () => {
-    expect(uncarriedLine(observed(3, 60_000, 4784, 12), NOW)).toContain("12 legacy commit clocks")
+    expect(uncarriedLine(observed(3, 60_000, 4784, 12), NOW)).toContain("12 refs without retained update clocks")
   })
 
   it("does not interpret an old resident's missing clock field as complete coverage", () => {

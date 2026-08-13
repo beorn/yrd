@@ -388,7 +388,7 @@ export function uncarriedLine(observation: UncarriedObservation | undefined, now
       ? ", push-clock coverage unknown"
       : observation.clockFallbacks === 0
         ? ""
-        : `, ${String(observation.clockFallbacks)} legacy commit clocks`
+        : `, ${String(observation.clockFallbacks)} refs without retained update clocks`
   return (
     `uncarried ${String(observation.count)} of ${String(observation.scanned)} refs${clocks}, ` +
     `as of ${humanAge(ageMs)} ago`

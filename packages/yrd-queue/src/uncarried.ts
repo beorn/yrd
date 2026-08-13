@@ -26,7 +26,7 @@ export type PushedRefFact = Readonly<{
   ref: string
   tipSha: string
   /** Clone-local observation/update time of the ref, epoch ms. */
-  pushedAtMs: number
+  observedAtMs: number
   /** A carrier (PR) already exists for this ref. */
   carried: boolean
   /** Commits on this ref with no patch-equivalent counterpart on the base. */
@@ -141,7 +141,7 @@ export function classifyPushedRef(fact: PushedRefFact, options: UncarriedOptions
   if (fact.carried) return undefined
   // Clock skew between pusher and sweeper must not produce a negative age that
   // silently passes a TTL comparison; a future timestamp is simply not yet due.
-  const ageMs = options.nowMs - fact.pushedAtMs
+  const ageMs = options.nowMs - fact.observedAtMs
   if (ageMs < options.ttlMs) return undefined
   if (ageMs > options.ageBoundMs) return undefined
 
@@ -154,7 +154,7 @@ export function classifyPushedRef(fact: PushedRefFact, options: UncarriedOptions
     uniqueCommits: fact.uniqueCommits,
     equivalentCommits: fact.equivalentCommits,
     pinDirection: fact.pinDirection,
-    message: `ref '${fact.ref}' was pushed ${formatAge(ageMs)} ago and no merge request carries it; ${detail}`,
+    message: `ref '${fact.ref}' was observed locally ${formatAge(ageMs)} ago and no merge request carries it; ${detail}`,
   })
 
   // DIVERGED outranks every commit count. Each side holds something the other

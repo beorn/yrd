@@ -51,8 +51,8 @@ export type SweepResult = Readonly<{
   outsideAgeBound: number
   /** Facts gathered — the refs that actually cost git object reads. */
   examined: number
-  /** Legacy refs whose local update reflog is no longer retained. These use
-   * their tip commit clock, and the fallback is always surfaced to operators. */
+  /** Legacy refs whose local update reflog is no longer retained. They cannot
+   * mint TTL findings, and the coverage gap is always surfaced to operators. */
   clockFallbacks: number
 }>
 
@@ -83,45 +83,37 @@ function branchOf(ref: string, namespace: string): string {
   return remote !== "" && ref.startsWith(remote) ? ref.slice(remote.length) : ref
 }
 
-type DatedRef = Readonly<{
+type EnumeratedRef = Readonly<{
   /** Full storage identity used to match exact reflog selectors. */
   fullRef: string
   /** Stable short identity exposed by findings and matched to carrier branches. */
   ref: string
-  committedAtMs: number
   symbolic: boolean
 }>
 
-/** One process for every ref and its commit date. The NUL separator is not
+/** One process for every ref identity. The NUL separator is not
  * decoration — branch names may contain anything a ref format allows, and a
  * space-split would silently truncate them. */
-async function datedRefs(git: RefGit, repo: string, namespace: string): Promise<readonly DatedRef[]> {
-  const listing = await git.run(repo, [
-    "for-each-ref",
-    "--format=%(refname)%00%(refname:short)%00%(committerdate:unix)%00%(symref)",
-    namespace,
-  ])
+async function enumeratedRefs(git: RefGit, repo: string, namespace: string): Promise<readonly EnumeratedRef[]> {
+  const listing = await git.run(repo, ["for-each-ref", "--format=%(refname)%00%(refname:short)%00%(symref)", namespace])
   return listing
     .split("\n")
     .filter((line) => line !== "")
     .map((line) => {
-      const [fullRef, ref, rawSeconds, symref, ...extra] = line.split("\0")
-      const seconds = Number(rawSeconds)
+      const [fullRef, ref, symref, ...extra] = line.split("\0")
       if (
         fullRef === undefined ||
         fullRef === "" ||
         ref === undefined ||
         ref === "" ||
-        rawSeconds === undefined ||
         symref === undefined ||
-        extra.length > 0 ||
-        !Number.isFinite(seconds)
+        extra.length > 0
       ) {
         throw new Error(
           `yrd: uncarried sweep received malformed for-each-ref row under '${namespace}': ${JSON.stringify(line)}`,
         )
       }
-      return { fullRef, ref, committedAtMs: seconds * 1000, symbolic: symref !== "" }
+      return { fullRef, ref, symbolic: symref !== "" }
     })
 }
 
@@ -143,8 +135,9 @@ async function latestRefUpdates(
       throw new Error(`yrd: uncarried sweep received malformed reflog row: ${JSON.stringify(line)}`)
     }
     const ref = line.slice(0, marker)
-    const seconds = Number(line.slice(marker + 2, -1))
-    if (!Number.isFinite(seconds)) {
+    const rawSeconds = line.slice(marker + 2, -1)
+    const seconds = Number(rawSeconds)
+    if (rawSeconds === "" || !Number.isFinite(seconds)) {
       throw new Error(`yrd: uncarried sweep received malformed reflog row: ${JSON.stringify(line)}`)
     }
     if (!refs.has(ref)) continue
@@ -155,7 +148,7 @@ async function latestRefUpdates(
   return updates
 }
 
-function isAuthoredRef(candidate: DatedRef, namespace: string, base: string): boolean {
+function isAuthoredRef(candidate: EnumeratedRef, namespace: string, base: string): boolean {
   if (candidate.symbolic) return false
   const branch = branchOf(candidate.ref, namespace)
   return branch !== "HEAD" && branch !== base && !branch.startsWith("yrd/candidates/")
@@ -167,7 +160,7 @@ function isAuthoredRef(candidate: DatedRef, namespace: string, base: string): bo
  */
 export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Promise<SweepResult> {
   const { repo, base, carriedBranches, namespace } = options
-  const enumerated = await datedRefs(git, repo, namespace)
+  const enumerated = await enumeratedRefs(git, repo, namespace)
   if (enumerated.length === 0) {
     // Loud on purpose. Every other zero in this result is a fact about the
     // fleet; this one is a fact about the sweep, and reporting it as "nothing
@@ -183,7 +176,7 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
   let carried = 0
   let outsideAgeBound = 0
   let clockFallbacks = 0
-  const uncarried: DatedRef[] = []
+  const uncarried: EnumeratedRef[] = []
   for (const candidate of refs) {
     if (carriedBranches.has(branchOf(candidate.ref, namespace))) {
       carried += 1
@@ -196,17 +189,22 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
     uncarried.length === 0
       ? new Map<string, number>()
       : await latestRefUpdates(git, repo, new Set(uncarried.map(({ fullRef }) => fullRef)))
-  const survivors: Array<Readonly<{ ref: string; pushedAtMs: number }>> = []
+  const survivors: Array<Readonly<{ ref: string; observedAtMs: number }>> = []
   for (const candidate of uncarried) {
     const updatedAtMs = refUpdates.get(candidate.fullRef)
-    if (updatedAtMs === undefined) clockFallbacks += 1
-    const pushedAtMs = updatedAtMs ?? candidate.committedAtMs
-    const ageMs = options.nowMs - pushedAtMs
+    if (updatedAtMs === undefined) {
+      // A commit timestamp cannot prove when this clone observed the ref. Keep
+      // the coverage gap loud, but never mint a TTL finding from an unrelated
+      // author clock that could be older or newer than the actual ref update.
+      clockFallbacks += 1
+      continue
+    }
+    const ageMs = options.nowMs - updatedAtMs
     if (ageMs < options.ttlMs || ageMs > options.ageBoundMs) {
       outsideAgeBound += 1
       continue
     }
-    survivors.push({ ref: candidate.ref, pushedAtMs })
+    survivors.push({ ref: candidate.ref, observedAtMs: updatedAtMs })
   }
 
   const gitlinkPaths = survivors.length === 0 ? new Set<string>() : await gitlinkPathsOf(git, repo, base)
@@ -215,7 +213,7 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
     const fact = await gatherPushedRefFact(git, survivor.ref, {
       repo,
       base,
-      pushedAtMs: survivor.pushedAtMs,
+      observedAtMs: survivor.observedAtMs,
       carriedBranches,
       gitlinkPaths,
     })
