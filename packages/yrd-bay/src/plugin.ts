@@ -1774,6 +1774,18 @@ function changeIdForRevision(existing: DeepReadonly<PR> | undefined, commandId: 
   )
 }
 
+function submittedRevisionEvents(pr: string, revision: number, headSha: string, submitter: string, baseSha?: string) {
+  return [
+    event("pr/submitted", { pr, revision, headSha, submitter }),
+    event("pr/checks-requested", {
+      pr,
+      revision,
+      headSha,
+      ...(baseSha === undefined ? {} : { baseSha }),
+    }),
+  ]
+}
+
 function intakePR(
   state: DeepReadonly<BayState>,
   args: IntakePRArgs,
@@ -1837,6 +1849,17 @@ function intakePR(
     sameComposition(prComposition(existing), replayComposition) &&
     existing.issue === issue
   ) {
+    if (args.submit === true && prDeliveryState(existing) === "pushed") {
+      return {
+        events: submittedRevisionEvents(
+          existing.id,
+          prRevisionNumber(existing),
+          args.headSha,
+          args.submitter ?? defaultSubmitter,
+          replayBaseSha,
+        ),
+      }
+    }
     return { events: [] }
   }
   const id = existing?.id ?? nextId("PR", current.prs)
@@ -1861,17 +1884,7 @@ function intakePR(
   return {
     events: [
       event("pr/pushed", pushed),
-      ...(submitsRevision
-        ? [
-            event("pr/submitted", { pr: id, revision, headSha: args.headSha, submitter }),
-            event("pr/checks-requested", {
-              pr: id,
-              revision,
-              headSha: args.headSha,
-              ...(replayBaseSha === undefined ? {} : { baseSha: replayBaseSha }),
-            }),
-          ]
-        : []),
+      ...(submitsRevision ? submittedRevisionEvents(id, revision, args.headSha, submitter, replayBaseSha) : []),
     ],
   }
 }

@@ -453,6 +453,25 @@ describe("withBays", () => {
     expect(app.bays.checksRequested("PR1")).toBe(true)
   })
 
+  it("promotes an identical pushed carrier when refs/for supplies submission intent", async () => {
+    await using app = await createApp(createWorkspaceHarness().adapter, undefined, "@dev/3")
+    const payload = {
+      branch: "issue/from-ref",
+      headSha: HEAD_1,
+      base: "main",
+      baseSha: BASE,
+    } as const
+    await app.bays.intake(payload)
+    expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("pushed")
+
+    const submitted = await app.bays.intake({ ...payload, receipt: "b".repeat(64), submit: true })
+
+    expect(submitted.events.map(({ name }) => name)).toEqual(["pr/submitted", "pr/checks-requested"])
+    expect(app.bays.pr("PR1")?.revs).toHaveLength(1)
+    expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
+    expect(app.bays.checksRequested("PR1")).toBe(true)
+  })
+
   it("resolves Bay, PR, and base selectors without changing canonical identity", async () => {
     await using app = (await createHarness()).app
     await app.bays.submit({ branch: "Topic/One", headSha: HEAD_1 })
