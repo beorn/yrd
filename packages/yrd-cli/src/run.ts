@@ -4516,6 +4516,9 @@ async function applyPrSelectionVerb(
   const prs = [...result.prs]
   const warnings = [...result.warnings]
   const createOnly = command === "pr.create"
+  // `pr.create` is the only record-only selection verb. `bay.submit` is a
+  // synchronous handoff: it must continue into the check-request loop below,
+  // so a submitted carrier never waits for unrelated Queue activity to start.
   if (createOnly) {
     await printPrSelectionResult(io, options, command, result)
     return 0
