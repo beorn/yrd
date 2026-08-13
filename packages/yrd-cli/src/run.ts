@@ -5839,14 +5839,39 @@ async function queueAttempts(services: Pick<YrdCliServices, "queueReadModel">): 
 
 /** Async, focus-scoped diff resolver. Missing immutable objects are retried only
  * after a bounded window, while successful revision deltas remain stable. */
+/** Entries retained by the focused-diff cache before the oldest is evicted.
+ *
+ * The watch pane is LONG-LIVED and every entry pins a full `git diff` patch, so
+ * an uncapped cache grows for the life of the process rather than with the work
+ * on screen. Measured on a live pane at 11h uptime (@yrd/cli/22258): ~1 GB RSS
+ * against 149 MB for a fresh process on identical inputs, burning 17-22.7% CPU
+ * with ZERO journal events — retention is the defect and the CPU is the garbage
+ * collector walking the live set. The cap is generous because re-fetching a
+ * diff the operator scrolls back to is cheap and correctness never depends on a
+ * hit; a bounded cache that occasionally misses beats an unbounded one that
+ * never does.
+ */
+const QUEUE_PR_DIFF_CACHE_MAX = 256
+
 export function createQueuePrDiffResolver(
-  options: Readonly<{ runGit?: QueueGitRunner; negativeTtlMs?: number }> = {},
+  options: Readonly<{ runGit?: QueueGitRunner; negativeTtlMs?: number; maxEntries?: number }> = {},
 ): QueuePrDiffResolver {
   const runGit = options.runGit ?? gitAsync
   const negativeTtlMs = options.negativeTtlMs ?? 30_000
+  const maxEntries = Math.max(1, options.maxEntries ?? QUEUE_PR_DIFF_CACHE_MAX)
   const resolved = new Map<string, QueuePrDiff>()
   const retryAt = new Map<string, number>()
   const inFlight = new Map<string, Promise<QueuePrDiff>>()
+  /** Evict least-recently-used keys. Map iterates in insertion order, and every
+   * hit re-inserts, so the first key is always the coldest. */
+  const evictOverflow = (): void => {
+    while (resolved.size > maxEntries) {
+      const coldest = resolved.keys().next()
+      if (coldest.done === true) return
+      resolved.delete(coldest.value)
+      retryAt.delete(coldest.value)
+    }
+  }
 
   return {
     async resolve(cwd, pr, revision, now = Date.now()) {
@@ -5855,7 +5880,12 @@ export function createQueuePrDiffResolver(
       const key = `${cwd}\0${pr.id}\0${String(revision)}\0${source.base}\0${source.headSha}`
       const cached = resolved.get(key)
       const retry = retryAt.get(key)
-      if (cached !== undefined && (retry === undefined || now < retry)) return cached
+      if (cached !== undefined && (retry === undefined || now < retry)) {
+        // Re-insert so recency, not first-seen order, decides what is evicted.
+        resolved.delete(key)
+        resolved.set(key, cached)
+        return cached
+      }
       const running = inFlight.get(key)
       if (running !== undefined) return running
 
@@ -5869,6 +5899,7 @@ export function createQueuePrDiffResolver(
             resolved.set(key, diff)
             if ("unavailable" in diff) retryAt.set(key, now + negativeTtlMs)
             else retryAt.delete(key)
+            evictOverflow()
           }
           return diff
         })

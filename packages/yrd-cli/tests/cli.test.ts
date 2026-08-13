@@ -13778,6 +13778,43 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     expect(calls).toHaveLength(5)
   })
 
+  it("bounds the diff cache instead of retaining every revision for the life of the process", async () => {
+    // @yrd/cli/22258: the watch pane is long-lived, and this cache was written but
+    // never evicted or capped, pinning a FULL git patch per (PR, revision) forever.
+    // Measured on a live pane at 11h uptime: ~1 GB RSS against 149 MB for a fresh
+    // process on identical inputs, burning 17-22.7% CPU with zero journal events —
+    // retention is the defect and the CPU is its GC signature. The cap is what makes
+    // that fail in milliseconds here instead of after hours of uptime.
+    const calls: string[][] = []
+    const resolver = runInternals.createQueuePrDiffResolver({
+      maxEntries: 3,
+      runGit: async (_cwd, args) => {
+        calls.push([...args])
+        if (args.includes("--numstat")) return "1\t0\tsrc/a.ts\0"
+        if (args[0] === "diff") return "patch\n"
+        return ""
+      },
+    })
+    // Four revisions with distinct heads, so each yields a distinct cache key.
+    const multiPR = {
+      ...focusedPR,
+      revs: [1, 2, 3, 4].map((n) => submittedRevision(n, String(n).repeat(40), "2026-07-09T12:00:00.000Z")),
+    } satisfies PR
+
+    // Fill past the cap of three.
+    for (const revision of [1, 2, 3, 4]) await resolver.resolve("/repo", multiPR, revision, 1_000)
+    const afterFill = calls.length
+    expect(afterFill, "each distinct revision must actually reach git, or this proves nothing").toBeGreaterThan(4)
+
+    // The newest key must still be served from cache...
+    await resolver.resolve("/repo", multiPR, 4, 2_000)
+    expect(calls.length, "the most recent revision must stay cached").toBe(afterFill)
+
+    // ...and the oldest must have been evicted rather than retained forever.
+    await resolver.resolve("/repo", multiPR, 1, 3_000)
+    expect(calls.length, "the oldest revision must be evicted once the cap is exceeded").toBeGreaterThan(afterFill)
+  })
+
   it("negative-caches a missing focused diff until its retry window expires", async () => {
     const calls: string[][] = []
     const resolver = runInternals.createQueuePrDiffResolver({
