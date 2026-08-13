@@ -609,7 +609,18 @@ function runYrd(
       install: async () => "/repo/.git/yrd/hooks/pre-submit",
     },
     process: {
-      run: async () => ({ stdout: "", stderr: "", exitCode: 0, signal: null, durationMs: 0, timedOut: false }),
+      // The pre-admission gitlink gate asks Git where the branch diverged from
+      // its base. Answering that with silence, as this stub answers everything
+      // else, claims the repository has no shared history — which the gate
+      // refuses rather than guess at. Give it one plausible merge base.
+      run: async (request) => ({
+        stdout: request.argv.includes("merge-base") ? `${"0".repeat(39)}1\n` : "",
+        stderr: "",
+        exitCode: 0,
+        signal: null,
+        durationMs: 0,
+        timedOut: false,
+      }),
       reapPath: async () => ({ targetedPids: [], survivorPids: [], forcedKill: false, signalFailures: [] }),
     },
     ...services,
@@ -3239,8 +3250,9 @@ describe("runYrd", () => {
       async (request: ProcessRequest): Promise<ProcessResult> => ({
         exitCode: 0,
         signal: null,
-        stdout:
-          request.argv.includes("diff-tree") && request.argv.includes(nextHead)
+        stdout: request.argv.includes("merge-base")
+          ? `${BASE_SHA}\n`
+          : request.argv.includes("diff-tree") && request.argv.includes(nextHead)
             ? `:160000 160000 ${"0".repeat(40)} ${unpublishedPin} M\0dep\0`
             : "",
         stderr: "",

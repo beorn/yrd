@@ -1,4 +1,5 @@
 import { isAbsolute, relative, resolve, sep } from "node:path"
+import { authoredDeltaBase, type GitlinkAuthorshipGit } from "@yrd/bay"
 import type { Process, ProcessResult } from "@yrd/process"
 import { cleanGitEnvironment } from "./git-environment.ts"
 
@@ -94,6 +95,43 @@ export async function unpublishedSubmodulePins(options: {
   }
 
   return Object.freeze(unpublished)
+}
+
+/**
+ * The commit a PR's own changes are measured from in a client checkout: the
+ * live merge base of its base branch and its head, resolved through the same
+ * `origin/<base>` then `<base>` order every other client-side base lookup uses.
+ *
+ * Returns undefined when no ref for the base resolves locally. The caller must
+ * refuse on that rather than fall back to the PR's recorded base — measuring
+ * from a stored, independently-advancing field is exactly the misattribution
+ * this replaces.
+ */
+export async function authoredSubmodulePinBase(options: {
+  process: Pick<Process, "run">
+  repo: string
+  base: string
+  headSha: string
+}): Promise<string | undefined> {
+  const repo = resolve(options.repo)
+  const run: GitlinkAuthorshipGit = async (cwd, args) => {
+    const result: ProcessResult = await options.process.run({
+      argv: ["git", "-C", cwd, ...args],
+      cwd,
+      env: cleanGitEnvironment(globalThis.process.env),
+      timeoutMs: GIT_TIMEOUT_MS,
+    })
+    if (result.timedOut) {
+      throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
+    }
+    return { code: result.exitCode, stdout: result.stdout, stderr: result.stderr }
+  }
+  const refs = options.base.startsWith("refs/") ? [options.base] : [`refs/remotes/origin/${options.base}`, options.base]
+  for (const ref of refs) {
+    const base = await authoredDeltaBase(run, repo, ref, options.headSha)
+    if (base.status === "resolved") return base.sha
+  }
+  return undefined
 }
 
 export async function changedSubmodulePins(options: {

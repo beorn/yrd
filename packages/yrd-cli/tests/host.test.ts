@@ -7,7 +7,7 @@ import { existsSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { dirname, join, relative } from "node:path"
+import { dirname, join, relative, sep } from "node:path"
 import { pathToFileURL } from "node:url"
 import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -170,6 +170,20 @@ async function staleRemoteBranchRepository(): Promise<{
   return { author, observer, branch, staleHead, liveHead }
 }
 
+/** A branch that never rebased after its base moved on: `main` carries a commit
+ * the branch has never seen, and the branch's own delta does not touch it. This
+ * is the ordinary shape of any pushed branch whose base advanced, and the queue
+ * absorbs it by composing before it judges. */
+async function staleBaseCandidateRepository(): Promise<{ repo: string; featureSha: string; baseSha: string }> {
+  const { repo, featureSha } = await repository()
+  await git(repo, "switch", "-q", "main")
+  await writeFile(join(repo, "landed-after-branch.txt"), "landed on main after the branch diverged\n")
+  await git(repo, "add", "landed-after-branch.txt")
+  await git(repo, "commit", "-qm", "land unrelated work on main")
+  const baseSha = await git(repo, "rev-parse", "HEAD")
+  return { repo, featureSha, baseSha }
+}
+
 async function candidatePackageRepository(
   options: Readonly<{ postinstall?: string }> = {},
 ): Promise<{ repo: string; featureSha: string }> {
@@ -286,6 +300,78 @@ checks: [{check: {run: "true"}}]
   const rootBaseSha = await git(repo, "rev-parse", "HEAD")
   await git(repo, "branch", "issue/source", rootBaseSha)
   return { repo, oldPinSha, newPinSha, sourceTipSha, rootBaseSha }
+}
+
+/** A branch whose own delta touches no gitlink, submitted after main bumped an
+ * unrelated component pin. The PR's recorded base is current main, so a two-dot
+ * diff from it reports main's pin move as this branch reverting the pin — while
+ * the branch's authored delta, measured from where it actually diverged, has no
+ * gitlink in it at all. */
+async function staleBaseUnrelatedPinRepository(): Promise<{
+  repo: string
+  branch: string
+  basePin: string
+  advancedPin: string
+}> {
+  const root = await mkdtemp(join(tmpdir(), "yrd-stale-base-unrelated-pin-"))
+  roots.push(root)
+  const moduleRemote = join(root, "module.git")
+  const module = join(root, "module")
+  const rootRemote = join(root, "root.git")
+  const repo = join(root, "repo")
+  const branch = "issue/tent-scripts"
+
+  await initBareMain(root, moduleRemote)
+  await git(root, "init", "-q", "-b", "main", module)
+  await git(module, "config", "user.name", "Yrd Test")
+  await git(module, "config", "user.email", "yrd@example.invalid")
+  await git(module, "remote", "add", "origin", moduleRemote)
+  await writeFile(join(module, "README.md"), "component base\n")
+  await git(module, "add", "README.md")
+  await git(module, "commit", "-qm", "component base")
+  await git(module, "push", "-qu", "origin", "main")
+  const basePin = await git(module, "rev-parse", "HEAD")
+
+  await initBareMain(root, rootRemote)
+  await git(root, "init", "-q", "-b", "main", repo)
+  await git(repo, "config", "user.name", "Yrd Test")
+  await git(repo, "config", "user.email", "yrd@example.invalid")
+  await git(repo, "config", "protocol.file.allow", "always")
+  await git(repo, "remote", "add", "origin", rootRemote)
+  await writeFile(join(repo, "README.md"), "root\n")
+  await writeFile(
+    join(repo, ".yrd.yml"),
+    `base: main
+batch: 1
+checks: [{check: {run: "true"}}]
+`,
+  )
+  await git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", moduleRemote, "dep")
+  await git(repo, "add", "README.md", ".yrd.yml", ".gitmodules", "dep")
+  await git(repo, "commit", "-qm", "published root base")
+  await git(repo, "push", "-qu", "origin", "main")
+
+  await git(repo, "switch", "-qc", branch)
+  await mkdir(join(repo, "tools"), { recursive: true })
+  await writeFile(join(repo, "tools", "watch.ts"), "export const watch = true\n")
+  await git(repo, "add", "tools/watch.ts")
+  await git(repo, "commit", "-qm", "wire the watcher script")
+  await git(repo, "push", "-qu", "origin", branch)
+  await git(repo, "switch", "-q", "main")
+
+  // Main moves on under the branch: an unrelated component pin advances and
+  // lands, with no involvement from the branch.
+  await writeFile(join(module, "README.md"), "component advanced\n")
+  await git(module, "add", "README.md")
+  await git(module, "commit", "-qm", "advance the component")
+  await git(module, "push", "-q", "origin", "main")
+  const advancedPin = await git(module, "rev-parse", "HEAD")
+  await git(join(repo, "dep"), "fetch", "-q", "origin", "main")
+  await git(join(repo, "dep"), "checkout", "-q", advancedPin)
+  await git(repo, "add", "dep")
+  await git(repo, "commit", "-qm", "advance the dep pin on main")
+  await git(repo, "push", "-q", "origin", "main")
+  return { repo, branch, basePin, advancedPin }
 }
 
 async function unpublishedSubmodulePinRepository(): Promise<{
@@ -719,6 +805,74 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       inspect.some((argument) => argument === "core.hooksPath=/dev/null"),
       "submodule inspection must keep the hook quarantine",
     ).toBe(true)
+  })
+
+  it("composes a stale candidate onto current base before a required check judges ancestry", async () => {
+    const { repo, featureSha, baseSha } = await staleBaseCandidateRepository()
+    // The literal assertion tools/manifest-co-change.ts makes, and the one that
+    // refused PR908: correct against a composed candidate, false against a raw
+    // branch tip whose base merely moved.
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["manifest-co-change"],
+      requires: [],
+      definitions: {
+        "manifest-co-change": {
+          run:
+            'printf "candidate %s\\n" "$YRD_CANDIDATE_SHA"; ' +
+            'git merge-base --is-ancestor "$YRD_BASE_SHA" "$YRD_CANDIDATE_SHA" || { ' +
+            'printf "manifest-co-change: YRD_BASE_SHA %s is not an ancestor of candidate %s\\n" ' +
+            '"$YRD_BASE_SHA" "$YRD_CANDIDATE_SHA" >&2; exit 1; }',
+          runner: "local",
+        },
+      },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["manifest-co-change"] },
+    }
+    await using process = createProcess({ cwd: repo })
+    const checks = configuredChecks(process, join(repo, ".git", "yrd"), config, {
+      PATH: globalThis.process.env.PATH,
+    })
+
+    const result = await checks.run("manifest-co-change", repo, { ref: featureSha })
+
+    expect(result.stderr).toBe("")
+    expect(result.exitCode).toBe(0)
+    const composed = /candidate ([0-9a-f]{40})/u.exec(result.stdout)?.[1]
+    expect(composed, result.stdout).toBeDefined()
+    // The check judged a composition, not the branch tip: base is an ancestor of
+    // it and the branch tip is not it.
+    expect(composed).not.toBe(featureSha)
+    await git(repo, "merge-base", "--is-ancestor", baseSha, composed!)
+    await git(repo, "merge-base", "--is-ancestor", featureSha, composed!)
+  })
+
+  it("composes the operator's own stale branch before an explicit local check reads the tree", async () => {
+    const { repo } = await staleBaseCandidateRepository()
+    await git(repo, "switch", "-q", "issue/feature")
+    // The watcher-wire shape: the branch's own files are fine, but the check
+    // reads a tree the base has since moved under. Only composition supplies it.
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["typecheck"],
+      requires: [],
+      definitions: { typecheck: { run: "test -f feature.txt && test -f landed-after-branch.txt", runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["typecheck"] },
+    }
+    await using process = createProcess({ cwd: repo })
+    const checks = configuredChecks(process, join(repo, ".git", "yrd"), config, {
+      PATH: globalThis.process.env.PATH,
+    })
+
+    // No ref: the managed pre-submit hook, and `pr submit` while sitting on the
+    // branch, both land here with the operator's own checkout as cwd.
+    const result = await checks.run("typecheck", repo)
+
+    expect(result.exitCode).toBe(0)
+    // Composition never writes through the operator's checkout.
+    expect(await git(repo, "status", "--porcelain")).toBe("")
+    expect(await git(repo, "rev-parse", "--abbrev-ref", "HEAD")).toBe("issue/feature")
   })
 
   it.each(["checkout", "submodule"] as const)(
@@ -2860,6 +3014,45 @@ checks: [{check: {run: "true"}}]
     }
   })
 
+  it("admits a branch whose only gitlink drift is base movement it never authored", async () => {
+    const { repo, branch, basePin, advancedPin } = await staleBaseUnrelatedPinRepository()
+    expect(basePin).not.toBe(advancedPin)
+    let stdout = ""
+    let stderr = ""
+
+    const exit = await runYrdProcess(
+      ["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "submit", branch, "--json"],
+      {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      },
+    )
+
+    // Measured from the PR's recorded base, main's own pin move reads as this
+    // branch reverting 'dep'. Measured from where the branch actually diverged,
+    // its authored delta is one script file and no gitlink at all.
+    expect(stderr).not.toContain("authored-gitlink")
+    expect(exit, stderr).toBe(0)
+
+    let listed = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "list", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          listed += text
+        },
+        stderr: () => undefined,
+      }),
+    ).toBe(0)
+    expect(JSON.parse(listed)).toMatchObject({ prs: [{ branch, status: "submitted" }] })
+    expect(stdout).not.toBe("")
+  })
+
   it("fetches the live remote branch before submitting from a separate stale clone", async () => {
     const { observer, branch, liveHead } = await staleRemoteBranchRepository()
 
@@ -4156,8 +4349,13 @@ checks: [{check: {run: "true"}}]
     expect(status.stderr).toBe("")
 
     const managedCwd = (await readFile(checkCwd, "utf8")).trim()
-    expect(managedCwd).toBe(linked)
+    // The config commit advanced main after the selected revision diverged, so
+    // the check judges that repository's composed candidate rather than its
+    // checkout. Which repository owns the workspace is the authority claim, and
+    // it is still exactly one: the selected one, never ambient, never wrong.
+    expect(managedCwd.startsWith(join(repo, ".git", "yrd", "pre-submit-worktrees") + sep)).toBe(true)
     expect(managedCwd).not.toBe(ambient)
+    expect(managedCwd.startsWith(wrong.repo + sep)).toBe(false)
   })
 
   it("submits and lands one composed source packet through the public CLI", async () => {

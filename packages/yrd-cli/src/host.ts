@@ -291,24 +291,39 @@ export function configuredChecks(
         environment[name] === undefined ? [] : [[name, environment[name]]],
       ),
     )
-    const env = {
+    const environmentFor = (candidate: string) => ({
       ...inherited,
       ...declared,
       ...definition.env,
       YRD_REPO: repo,
       YRD_BASE_SHA: baseSha,
-      YRD_CANDIDATE_SHA: candidateSha,
+      YRD_CANDIDATE_SHA: candidate,
       ...(definition.environment === undefined ? {} : { YRD_ENVIRONMENT: definition.environment }),
-    }
-    const run = (workingDirectory: string) =>
+    })
+    const run = (workingDirectory: string, candidate: string) =>
       process.run({
         argv: shellCommand(definition.run ?? ""),
         cwd: workingDirectory,
-        env,
+        env: environmentFor(candidate),
         timeoutMs: stepTimeoutMs(definition),
       })
-    if (ref === undefined) return run(cwd)
+    // A required check has to judge what the queue will judge: the candidate
+    // composed onto current base, which is what gitCheckStep receives once
+    // prepareCandidate has merged. Judging the raw branch tip instead refuses
+    // ordinary staleness the queue absorbs — an ancestry-shaped check reads its
+    // own base as unreachable, and a tree-reading check misses whatever main
+    // fixed after the branch diverged.
+    //
+    // When base is already an ancestor the composition IS the candidate, so an
+    // up-to-date branch keeps the old path and pays one ancestry probe. Only a
+    // stale candidate composes. That diverts a stale in-place run into a
+    // checkout, which stops the check from seeing uncommitted work — and
+    // YRD_CANDIDATE_SHA has always named a commit, never the working tree, so
+    // the composed checkout is the honest materialization of what was declared.
+    const composes = !(await isAncestorCommit(process, repo, baseSha, candidateSha))
+    if (ref === undefined && !composes) return run(cwd, candidateSha)
 
+    const checkoutSha = composes ? baseSha : candidateSha
     const parent = join(stateDir, "pre-submit-worktrees")
     mkdirSync(parent, { recursive: true })
     const checkoutRoot = await mkdtemp(join(parent, "check-"))
@@ -328,9 +343,9 @@ export function configuredChecks(
       await worktrees.add({
         kind: "detached",
         path: checkout,
-        ref: candidateSha,
+        ref: checkoutSha,
         hooks: "quarantine",
-        operation: `CLI pre-submit worktree add ${candidateSha}`,
+        operation: `CLI pre-submit worktree add ${checkoutSha}`,
       })
     } catch (cause) {
       if (!keepOnFailure) await rm(checkoutRoot, { recursive: true, force: true })
@@ -348,6 +363,42 @@ export function configuredChecks(
         "required-check-checkout-failed",
         `${message || `yrd: could not materialize required-check candidate '${candidateSha}'`}${retained}`,
       )
+    }
+    let candidate = candidateSha
+    if (composes) {
+      const merged = await worktrees.git.run(
+        checkout,
+        ["merge", "--no-ff", "-m", `pre-submit: compose ${candidateSha} onto ${baseSha}`, candidateSha],
+        true,
+      )
+      if (merged.code !== 0) {
+        await worktrees.git.run(checkout, ["merge", "--abort"], true)
+        const detail = merged.stderr.trim() || merged.stdout.trim() || `git merge exited ${String(merged.code)}`
+        if (!keepOnFailure) {
+          await worktrees.remove(checkout, {
+            operation: `CLI pre-submit failed-composition cleanup ${candidateSha}`,
+          })
+          await rm(checkoutRoot, { recursive: true, force: true })
+        }
+        const retained = keepOnFailure ? `; ${retainedWorkspaceNote({ path: checkout, cleanup: "worktree" })}` : ""
+        // Only a real conflict reaches here. Ordinary staleness composed above,
+        // so this names the one thing the author still has to do by hand.
+        raiseFailure(
+          "refusal",
+          "required-check-composition-conflict",
+          `yrd: required-check candidate '${candidateSha}' conflicts with base '${baseSha}': ${detail}; ` +
+            `merge '${config.base}' into the branch and resolve the conflict, then re-run${retained}`,
+        )
+      }
+      const composed = await resolveCommit(process, checkout, "HEAD")
+      if (composed === undefined) {
+        raiseFailure(
+          "infrastructure",
+          "required-check-composition-missing",
+          `yrd: composing required-check candidate '${candidateSha}' onto base '${baseSha}' left no commit in '${checkout}'`,
+        )
+      }
+      candidate = composed
     }
     // The hook quarantine above also silences the repository hook that used to
     // populate submodules on checkout, so a submodule-backed workspace member
@@ -392,12 +443,12 @@ export function configuredChecks(
         path: checkout,
         subject: `required check '${name}' workspace`,
         manifestSubject: "candidate",
-        env,
+        env: environmentFor(candidate),
         fail(message) {
           raiseFailure("infrastructure", "candidate-provision-failed", `yrd: ${message}`)
         },
       })
-      const result = await run(checkout)
+      const result = await run(checkout, candidate)
       failed = result.exitCode !== 0 || result.timedOut
       if (!failed || !keepOnFailure) return result
       return { ...result, retainedWorkspace: { path: checkout, cleanup: "worktree" } }

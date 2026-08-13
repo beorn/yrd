@@ -1,5 +1,6 @@
 export * from "./model.ts"
 export * from "./change-identity.ts"
+export * from "./gitlink-authorship.ts"
 export * from "./plugin.ts"
 export * from "./git.ts"
 export * from "./deployment.ts"

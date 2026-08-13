@@ -199,7 +199,7 @@ import { artifactLocation, directArtifacts, nestedArtifacts, uniqueArtifacts } f
 import { readInstalledBaselines } from "./installed-baseline.ts"
 import { renderRemedyStep } from "@yrd/intent"
 import { admitPinIntent } from "./intent-admission.ts"
-import { changedSubmodulePins, unpublishedSubmodulePins } from "./pr-submodule-publication.ts"
+import { authoredSubmodulePinBase, changedSubmodulePins, unpublishedSubmodulePins } from "./pr-submodule-publication.ts"
 import { landingAuthorityBoundary } from "./landing-authority-boundary.ts"
 import { queueReadFailureMessage, type QueueReadFailure } from "./queue-read-failure.ts"
 // The live watch UI is loaded lazily at its single use site in watchQueue(): it is the only
@@ -3516,15 +3516,27 @@ function shellQuote(value: string): string {
 
 async function requireQueueableSubmodulePins(pr: PR, services: YrdCliServices, io: YrdCliIO): Promise<void> {
   if (services.process === undefined) return
-  const baseSha = prBaseSha(pr)
+  const repo = io.cwd ?? process.cwd()
+  const headSha = prHead(pr)
+  // Not prBaseSha(pr). That field is set at create, re-set at recut, and chased
+  // forward to track current main while the author's head stays exactly where
+  // they left it, so a two-dot diff from it reports every pin that moved on
+  // main as this PR's authorship and refuses a branch for a gitlink it never
+  // touched. The queue's own composition gate has always measured from a live
+  // merge base; this pre-admission gate now asks the question the same way.
+  const baseSha = await authoredSubmodulePinBase({ process: services.process, repo, base: pr.base, headSha })
   if (baseSha === undefined) {
-    raiseFailure("refusal", "pr-base-missing", `yrd: PR '${pr.id}' has no immutable base SHA`)
+    raiseFailure(
+      "refusal",
+      "pr-base-unresolved",
+      `yrd: PR '${pr.id}' base '${pr.base}' resolves to no ref in '${repo}'; ` + "fetch the base branch, then retry",
+    )
   }
   const changed = await changedSubmodulePins({
     process: services.process,
-    repo: io.cwd ?? process.cwd(),
+    repo,
     baseSha,
-    headSha: prHead(pr),
+    headSha,
   })
   const unpublished = await unpublishedSubmodulePins({ process: services.process, pins: changed })
   if (unpublished.length > 0) {

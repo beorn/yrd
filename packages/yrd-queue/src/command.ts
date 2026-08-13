@@ -2,6 +2,7 @@ import { createHash } from "node:crypto"
 import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { isAbsolute, join, resolve, sep } from "node:path"
+import { authoredDeltaBase } from "@yrd/bay"
 import { createFailure, failureFact, type JsonValue, type YrdFailure } from "@yrd/core"
 import { JobErrorSchema, parseJobLaunch, type Job, type JobContext, type JobError, type JobResult } from "@yrd/job"
 import { ComponentPathSchema } from "@yrd/intent"
@@ -4513,20 +4514,20 @@ async function authoredGitlinkPaths(
   pr: string,
   headSha: string,
 ): Promise<Readonly<{ status: "passed"; output: readonly string[] }> | CandidateFailure> {
-  const base = await git.run(repo, ["merge-base", "HEAD", headSha], true)
-  if (base.code !== 0 || base.stdout === "") {
+  // HEAD is the composing branch, i.e. the authoritative current base.
+  const base = await authoredDeltaBase((cwd, args) => git.run(cwd, args, true), repo, "HEAD", headSha)
+  if (base.status === "unreadable") {
     return candidateFailure(
       "gitlink-inspection",
-      `could not inspect authored gitlinks for '${headSha}': ${
-        base.stderr || base.stdout || "no merge base"
-      }; restore readable history before declaring component pin intents`,
+      `could not inspect authored gitlinks for '${headSha}': ${base.detail}; ` +
+        "restore readable history before declaring component pin intents",
     )
   }
-  const paths = await changedPaths(git, repo, base.stdout, headSha)
+  const paths = await changedPaths(git, repo, base.sha, headSha)
   const gitlinks: string[] = []
   for (const path of paths) {
     if (
-      (await readGitlink(git, repo, base.stdout, path)) !== undefined ||
+      (await readGitlink(git, repo, base.sha, path)) !== undefined ||
       (await readGitlink(git, repo, headSha, path)) !== undefined
     ) {
       gitlinks.push(path)
