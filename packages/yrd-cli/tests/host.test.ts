@@ -3466,7 +3466,22 @@ checks: [{check: {run: "true"}}]
         stdout: () => undefined,
         stderr: () => undefined,
       }),
-    ).toBe(1)
+    ).toBe(0)
+    {
+      await using checkHost = await createYrdHost({ cwd: repo })
+      expect(checkHost.app.queue.eligibility("PR1")).toMatchObject({
+        checks: { status: "failed" },
+        reason: { code: "required-check-failed" },
+      })
+      expect(Object.values(checkHost.app.jobs.state().byId)).toEqual([
+        expect.objectContaining({
+          definition: "queue.step.check",
+          status: "completed",
+          conclusion: "failure",
+          error: { code: "check-failed", message: "check command exited 1" },
+        }),
+      ])
+    }
 
     const before = await journalEnvelope(repo)
     let refusal = ""
@@ -3485,11 +3500,28 @@ checks: [{check: {run: "true"}}]
     expect(rejected).toMatchObject({
       command: "pr.merge",
       status: "submitted",
-      next: "yrd pr runs PR1",
+      next: "yrd pr checks PR1",
     })
     expect(rejected.guidance).toEqual({
-      inspect: "yrd pr runs PR1",
+      inspect: "yrd pr checks PR1",
       resubmit: "fix the branch and run yrd pr submit again",
+    })
+    let checkOutput = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "checks", "PR1", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          checkOutput += text
+        },
+        stderr: () => undefined,
+      }),
+    ).toBe(1)
+    expect(JSON.parse(checkOutput)).toMatchObject({
+      kind: "pr.check",
+      pr: "PR1",
+      revision: 1,
+      status: "failed",
+      error: { code: "check-failed", message: "check command exited 1" },
     })
     expect(await journalEnvelope(repo)).toEqual(before)
   })
