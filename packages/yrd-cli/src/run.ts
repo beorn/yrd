@@ -488,7 +488,7 @@ function parseUncarriedObservation(value: unknown): UncarriedObservation | undef
     raiseFailure(
       "infrastructure",
       "resident-runner-status-invalid",
-      "yrd: resident runner uncarried clock fallback count is invalid",
+      "yrd: resident runner uncarried missing update-clock count is invalid",
     )
   }
   const count = observation.count as number
