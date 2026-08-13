@@ -536,7 +536,10 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     const f = await fixture("submit-prefix")
     await git(f.mainRepo, "switch", "-qc", "work")
     const headSha = await commit(f.mainRepo, "prefix.txt")
-    await git(f.mainRepo, "update-ref", "refs/heads/issue/my-change/child", f.baseSha)
+    await git(f.mainRepo, "switch", "-qc", "descendant-ref", f.baseSha)
+    const descendantHead = await commit(f.mainRepo, "descendant-only.txt")
+    await git(f.mainRepo, "update-ref", "refs/heads/issue/my-change/child", descendantHead)
+    await git(f.mainRepo, "switch", "work")
     const env = await installHookHost(f.root, {
       "for:main/my-change": target(f.baseSha, { branch: "issue/my-change", issue: "my-change" }),
     })
