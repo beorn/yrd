@@ -152,6 +152,19 @@ original caller directory.
 $ yrd --repo /work/my-repository/.bays/B1 pr status --json
 ```
 
+A managed `refs/for/<base>/<issue>` push is the no-draft submission path. The
+receiver validates the base, ancestry, carrier, and issue before accepting the
+ref; its durable receipt then records the pushed revision, submission, and
+check request in one journal transaction. There is no following `yrd pr submit`
+or `yrd pr ready` command:
+
+```console
+$ git push bay 'HEAD:refs/for/main/@yrd/core/my-change'
+```
+
+Ordinary `refs/heads/*` pushes remain branch publication, not submission. Use
+the explicit `pr create` workflow below when a reviewable draft is intentional.
+
 The selector is global and may also follow a subcommand. Repository config is
 the base branch's `.yrd.yml`. `--config <path>` selects another base-relative
 `.yml` or `.yaml` authority; candidate content can never override it. There is
