@@ -742,6 +742,31 @@ async function validatePin(
   )
 }
 
+async function validateSubmitCarrier(
+  receiver: GitPushReceiver,
+  update: ReceiverRefUpdate,
+  branch: string,
+  env?: Environment,
+): Promise<void> {
+  const current = await mainGit(
+    receiver.process,
+    receiver.mainRepo,
+    ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`],
+    { allowFailure: true },
+  )
+  if (current.code !== 0) return
+  const descends = await receiverGit(receiver, ["merge-base", "--is-ancestor", current.stdout, update.newSha], {
+    env,
+    allowFailure: true,
+    includeMainObjects: true,
+  })
+  check(
+    descends.code === 0,
+    `carrier '${branch}' is at ${current.stdout.slice(0, 12)}, which the pushed head ` +
+      `${update.newSha.slice(0, 12)} does not descend from; rebase the change onto it and push again`,
+  )
+}
+
 async function authorize(
   receiver: GitPushReceiver,
   update: ReceiverRefUpdate,
@@ -790,6 +815,7 @@ async function authorize(
     `stale ${stage === "before" ? "push" : "post-receive"} for '${update.ref}': expected ${expected ?? "no ref"}, found ${current ?? "no ref"}`,
   )
   await validatePin(receiver, update, target, options.env)
+  if (intent !== undefined) await validateSubmitCarrier(receiver, update, branch, options.env)
   return intent === undefined ? { branch, target } : { branch, target, intent }
 }
 
