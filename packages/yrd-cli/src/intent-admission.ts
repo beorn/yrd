@@ -23,6 +23,12 @@ export type PinIntentAdmissionOptions = Readonly<{
   tombstones?: readonly Pick<PinTombstone, "sha">[]
   /** Merge-time authority derives an omitted target from component main. */
   deriveTarget?: boolean
+  /**
+   * Waive the trunk-reachability gate for a deliberate off-trunk pin. The
+   * submitter declares it and the intent record carries the declaration; this
+   * flag is the only way past {@link admitPinIntent}'s trunk check.
+   */
+  allowOffTrunk?: boolean
 }>
 
 /**
@@ -56,16 +62,19 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
   const componentRepo = resolve(repo, options.component)
   const branch = await componentBranch(options.process, repo, options.component)
   await tryGit(options.process, componentRepo, ["fetch", "--quiet", "--prune", "origin"])
-  const derivedTarget =
-    options.deriveTarget === true
-      ? (
-          await tryGit(options.process, componentRepo, [
-            "rev-parse",
-            "--verify",
-            `refs/remotes/origin/${branch}^{commit}`,
-          ])
-        )?.trim()
-      : undefined
+  /**
+   * The component's trunk tip, read from the remote-tracking ref the fetch
+   * above just refreshed — the same snapshot the derived target comes from, so
+   * the two can never disagree about what trunk is.
+   *
+   * Freshness caveat: trunk moves. This read is as advisory as the rest of
+   * admission, which is why merge-time evaluation re-runs it (`deriveTarget`)
+   * and is the only authority.
+   */
+  const trunk = (
+    await tryGit(options.process, componentRepo, ["rev-parse", "--verify", `refs/remotes/origin/${branch}^{commit}`])
+  )?.trim()
+  const derivedTarget = options.deriveTarget === true ? trunk : undefined
   const target = options.target ?? derivedTarget
   if (target === undefined && options.deriveTarget !== true) {
     return { admitted: true, currentPin, relation: "deferred" }
@@ -142,6 +151,14 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
   }
 
   if (await isAncestor(options.process, componentRepo, currentPin, target)) {
+    // Descending from the pin is not the same as being on the component's own
+    // line. A target can descend, be published, and still sit on a branch trunk
+    // never took — and because a pin advance is a pointer move, everything only
+    // on the line trunk DID take vanishes with no diff for anyone to read. The
+    // waiver is declared, never inferred.
+    if (options.allowOffTrunk !== true && !(await isTrunkReachable(options.process, componentRepo, trunk, target))) {
+      return offTrunkRefusal(options.component, target, currentPin, trunk)
+    }
     return { admitted: true, currentPin, target, relation: "advance" }
   }
   if (await isAncestor(options.process, componentRepo, target, currentPin)) {
@@ -169,6 +186,62 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
       {
         argv: ["yrd", "intent", "submit", "--component", options.component, "--target", "<merge-sha>"],
         note: "submit a NEW intent with the merge sha; it supersedes this one by key",
+      },
+    ],
+  }
+}
+
+/**
+ * Is the target an ancestor-or-equal of the component's trunk tip?
+ *
+ * An absent trunk answers NO, never yes: a component with no published trunk
+ * has nothing for the target to be reachable from, and admitting on a read that
+ * failed is the silent-error shape this check exists to close.
+ */
+async function isTrunkReachable(
+  process: Pick<Process, "run">,
+  componentRepo: string,
+  trunk: string | undefined,
+  target: string,
+): Promise<boolean> {
+  if (trunk === undefined) return false
+  return trunk === target || (await isAncestor(process, componentRepo, target, trunk))
+}
+
+/**
+ * The refusal, with a remedy that stays on the pipeline.
+ *
+ * Neither step is a hand-write to a component ref: landing the off-trunk line
+ * on trunk is the component's own landing path, and the remedy a submitter can
+ * execute is choosing a trunk-reachable target or declaring the pin deliberate.
+ */
+function offTrunkRefusal(
+  component: string,
+  target: string,
+  currentPin: string,
+  trunk: string | undefined,
+): PinIntentAdmission {
+  const trunkClause =
+    trunk === undefined
+      ? `'${component}' has no published trunk tip to be reachable from`
+      : `the trunk tip of '${component}' is '${trunk}'`
+  return {
+    admitted: false,
+    code: "intent-target-off-trunk",
+    message: `yrd: target '${target}' is not on the trunk of '${component}'; ${trunkClause}`,
+    evidence: { component, target, currentPin, ...(trunk === undefined ? {} : { trunk }) },
+    remedy: [
+      ...(trunk === undefined
+        ? []
+        : [
+            {
+              argv: ["yrd", "intent", "submit", "--component", component, "--target", trunk],
+              note: "advance to the trunk tip; land the off-trunk line on trunk through the component's own landing path first if its content is wanted",
+            },
+          ]),
+      {
+        argv: ["yrd", "intent", "submit", "--component", component, "--target", target, "--allow-off-trunk"],
+        note: "declare a deliberate off-trunk pin; the declaration is recorded on the intent",
       },
     ],
   }

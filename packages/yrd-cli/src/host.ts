@@ -1153,6 +1153,7 @@ async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions):
         ...(intent.preconditions.expectedCurrentPin === undefined
           ? {}
           : { expectedCurrentPin: intent.preconditions.expectedCurrentPin }),
+        ...(intent.preconditions.allowOffTrunk === true ? { allowOffTrunk: true } : {}),
         tombstones,
         deriveTarget: true,
       }),

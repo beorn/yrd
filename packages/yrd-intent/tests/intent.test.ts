@@ -69,6 +69,7 @@ async function submit(
     target?: string
     issue?: string
     expectPin?: string
+    allowOffTrunk?: boolean
     submitter?: string
     forceSupersede?: boolean
   },
@@ -81,6 +82,7 @@ async function submit(
     submitter: options.submitter ?? "@dev/8",
     ...(options.target === undefined ? {} : { target: options.target }),
     ...(options.expectPin === undefined ? {} : { expectedCurrentPin: options.expectPin }),
+    ...(options.allowOffTrunk === undefined ? {} : { allowOffTrunk: options.allowOffTrunk }),
     ...(options.forceSupersede === undefined ? {} : { forceSupersede: options.forceSupersede }),
   })
 }
@@ -116,6 +118,26 @@ describe("PinIntentV1 journal records (22668 phase 1)", () => {
     const record = await submit(app, { intentId: uuid(1), target: TARGET, expectPin: CURRENT_PIN })
 
     expect(record.preconditions.expectedCurrentPin).toBe(CURRENT_PIN)
+  })
+
+  it("records the off-trunk waiver on the intent, and enforces the gate when it is absent", async () => {
+    await using app = await createApp()
+    const declared = await submit(app, { intentId: uuid(1), target: TARGET, allowOffTrunk: true })
+    const ordinary = await submit(app, { intentId: uuid(2), target: TARGET, component: FLEXILY })
+
+    expect(declared.preconditions.allowOffTrunk).toBe(true)
+    // Absent, not `false`: the enforced shape is the one a pre-waiver journal
+    // already holds, so replay of old records stays byte-identical.
+    expect(ordinary.preconditions.allowOffTrunk).toBeUndefined()
+  })
+
+  it("refuses a replay that adds the off-trunk waiver to an already-admitted intent", async () => {
+    await using app = await createApp()
+    await submit(app, { intentId: uuid(1), target: TARGET })
+
+    expect(await refusalCode(submit(app, { intentId: uuid(1), target: TARGET, allowOffTrunk: true }))).toBe(
+      "intent-fingerprint-conflict",
+    )
   })
 
   it("replays an identical intentId instead of minting a second record", async () => {

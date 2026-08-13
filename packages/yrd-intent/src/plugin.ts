@@ -184,6 +184,7 @@ function buildSubmitCommand() {
           preconditions: {
             targetPublished: true,
             targetDescendsFromCurrentPin: true,
+            ...(args.allowOffTrunk === true ? { allowOffTrunk: true } : {}),
             ...(args.expectedCurrentPin === undefined ? {} : { expectedCurrentPin: args.expectedCurrentPin }),
           },
           submitter: args.submitter,

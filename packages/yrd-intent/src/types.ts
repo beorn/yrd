@@ -33,11 +33,20 @@ export const ComponentPathSchema = TextSchema.refine(
  * Preconditions are declared, not negotiated: both ancestry gates are TRUE and
  * not disableable in v1. `expectedCurrentPin` is the optional CAS guard, and a
  * violated guard outranks the noop outcome at evaluation time (design 4).
+ *
+ * `allowOffTrunk` is the one waiver, and it waives exactly one gate: the target
+ * must be reachable from the component's own trunk. Absent — the only shape a
+ * pre-waiver journal can hold — means the gate is ENFORCED; present means the
+ * submitter declared a deliberate off-trunk pin, and the declaration is the
+ * audit trail. A pin advance is a pointer move, so content only on the line the
+ * trunk abandoned disappears without a diff anyone reads; the waiver has to be
+ * something a reader can find on the record afterwards.
  */
 export const PinIntentPreconditionsSchema = z
   .object({
     targetPublished: z.literal(true),
     targetDescendsFromCurrentPin: z.literal(true),
+    allowOffTrunk: z.literal(true).optional(),
     expectedCurrentPin: CommitShaSchema.optional(),
   })
   .strict()
@@ -123,6 +132,7 @@ export type PinIntentRefused = Readonly<{
     | "intent-component-unknown"
     | "intent-target-unpublished"
     | "intent-target-tombstoned"
+    | "intent-target-off-trunk"
     | "intent-pin-divergent"
     | "intent-pin-moved"
     | "intent-checks-failed"
@@ -131,6 +141,7 @@ export type PinIntentRefused = Readonly<{
     component: string
     target?: string
     currentPin?: string
+    trunk?: string
     tombstone?: string
     declared?: readonly string[]
     candidate?: string
@@ -148,6 +159,7 @@ export const PinIntentRefusalSchema = z
       "intent-component-unknown",
       "intent-target-unpublished",
       "intent-target-tombstoned",
+      "intent-target-off-trunk",
       "intent-pin-divergent",
       "intent-pin-moved",
       "intent-checks-failed",
@@ -158,6 +170,8 @@ export const PinIntentRefusalSchema = z
         component: ComponentPathSchema,
         target: CommitShaSchema.optional(),
         currentPin: CommitShaSchema.optional(),
+        /** The component trunk tip the target failed to be reachable from. */
+        trunk: CommitShaSchema.optional(),
         tombstone: CommitShaSchema.optional(),
         declared: z.array(ComponentPathSchema).readonly().optional(),
         candidate: CommitShaSchema.optional(),
@@ -276,6 +290,7 @@ export const IntentSubmitArgsSchema = z
     component: ComponentPathSchema,
     target: CommitShaSchema.optional(),
     expectedCurrentPin: CommitShaSchema.optional(),
+    allowOffTrunk: z.boolean().optional(),
     submitter: TextSchema,
     forceSupersede: z.boolean().optional(),
   })
@@ -347,6 +362,7 @@ export function intentFingerprint(
     component: string
     target?: string | undefined
     expectedCurrentPin?: string | undefined
+    allowOffTrunk?: boolean | undefined
     submitter: string
   }>,
 ): string {
@@ -357,6 +373,7 @@ export function intentFingerprint(
     input.target ?? null,
     input.expectedCurrentPin ?? null,
     input.submitter,
+    input.allowOffTrunk === true,
   ])
 }
 
@@ -370,5 +387,6 @@ export function recordFingerprint(record: PinIntent): string {
     ...(record.preconditions.expectedCurrentPin === undefined
       ? {}
       : { expectedCurrentPin: record.preconditions.expectedCurrentPin }),
+    ...(record.preconditions.allowOffTrunk === undefined ? {} : { allowOffTrunk: record.preconditions.allowOffTrunk }),
   })
 }

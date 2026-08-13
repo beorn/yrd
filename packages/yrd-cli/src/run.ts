@@ -1445,6 +1445,7 @@ type IntentSubmitOptions = JsonOption & {
   target?: string
   issue?: string
   expectPin?: string
+  allowOffTrunk?: boolean
   submitter?: string
   base?: string
   force?: boolean
@@ -8839,6 +8840,7 @@ async function submitIntent(
     component,
     ...(options.target === undefined ? {} : { target: options.target }),
     ...(options.expectPin === undefined ? {} : { expectedCurrentPin: options.expectPin }),
+    ...(options.allowOffTrunk === true ? { allowOffTrunk: true } : {}),
     tombstones: app.intents.tombstones(component),
   })
   if (!admission.admitted) {
@@ -8866,6 +8868,7 @@ async function submitIntent(
     submitter: options.submitter ?? "operator",
     ...(options.target === undefined ? {} : { target: options.target }),
     ...(options.expectPin === undefined ? {} : { expectedCurrentPin: options.expectPin }),
+    ...(options.allowOffTrunk === true ? { allowOffTrunk: true } : {}),
     ...(options.force === true ? { forceSupersede: true } : {}),
   })
   await printResult(
@@ -10129,6 +10132,7 @@ function buildProgram(
     .option("--target <sha>", "component commit to advance to; omit for the component main tip at landing")
     .option("--issue <ref>", "tracker-neutral issue reference")
     .option("--expect-pin <sha>", "stop unless the current pin is exactly this sha")
+    .option("--allow-off-trunk", "declare a deliberate pin onto a target the component trunk does not contain")
     .option("--submitter <identity>", "attribution recorded on the intent")
     .option("--base <branch>", "base branch whose pin the target advances")
     .option("--force", "explicitly supersede another submitter's live intent")

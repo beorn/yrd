@@ -73,6 +73,22 @@ async function local(component: string, name: string): Promise<string> {
   return commit(component, name)
 }
 
+/**
+ * Advance on a side line and publish it to a NON-trunk ref.
+ *
+ * The off-trunk shape: a real commit, really published, really descended from
+ * the pin — every existing precondition says yes — that the component's own
+ * `main` never took.
+ */
+async function publishSideline(component: string, name: string, from: string): Promise<string> {
+  await git(component, "checkout", "--quiet", "-b", name, from)
+  await writeFile(join(component, `${name}.txt`), `${name}\n`)
+  const sha = await commit(component, name)
+  await git(component, "push", "--quiet", "origin", name)
+  await git(component, "checkout", "--quiet", "main")
+  return sha
+}
+
 describe("pin-intent admission (22668 phase 1)", () => {
   it("admits an advance and reports the current pin plus the relation", async () => {
     const { repo, component, basePin } = await fixture()
@@ -208,6 +224,106 @@ describe("pin-intent admission (22668 phase 1)", () => {
     if (!verdict.admitted) throw new Error(`unexpected refusal: ${verdict.code}`)
     expect(verdict.currentPin).toBe(basePin)
     expect(verdict.relation).toBe("deferred")
+  })
+
+  it("refuses a published target that descends from the pin but is off the component trunk", async () => {
+    const { repo, component, basePin } = await fixture()
+    const target = await publishSideline(component, "sideline", basePin)
+
+    const verdict = await admitPinIntent({ process, repo, base: "main", component: "components/alpha", target })
+
+    expect(verdict.admitted).toBe(false)
+    if (verdict.admitted) throw new Error("unreachable")
+    expect(verdict.code).toBe("intent-target-off-trunk")
+    expect(verdict.evidence).toMatchObject({ target, currentPin: basePin, trunk: basePin })
+    // The trunk tip is the fact the submitter is missing, so the refusal states it.
+    expect(verdict.message).toContain(basePin)
+    // Pipeline-routed: no remedy may instruct a hand-write to a component ref.
+    for (const step of verdict.remedy) {
+      expect(step.argv.some((argument) => argument.includes("refs/heads/"))).toBe(false)
+    }
+    expect(verdict.remedy[0]?.argv).toEqual([
+      "yrd",
+      "intent",
+      "submit",
+      "--component",
+      "components/alpha",
+      "--target",
+      basePin,
+    ])
+  })
+
+  it("admits a deliberate off-trunk pin when the submitter declares it", async () => {
+    const { repo, component, basePin } = await fixture()
+    const target = await publishSideline(component, "sideline", basePin)
+
+    const verdict = await admitPinIntent({
+      process,
+      repo,
+      base: "main",
+      component: "components/alpha",
+      target,
+      allowOffTrunk: true,
+    })
+
+    if (!verdict.admitted) throw new Error(`unexpected refusal: ${verdict.code}`)
+    expect(verdict.relation).toBe("advance")
+    expect(verdict.currentPin).toBe(basePin)
+  })
+
+  it("replays the I137 shape: trunk took one line, the pin took the other", async () => {
+    const { repo, component, basePin } = await fixture()
+    // Both lines fork from the pin. Trunk takes `trunkTip`; the intent names the
+    // other. Every existing precondition passes and the advance still drops the
+    // trunk's line, because a pin advance is a pointer move nobody diffs.
+    const target = await publishSideline(component, "sideline", basePin)
+    const trunkTip = await publish(component, "trunk-line")
+
+    const verdict = await admitPinIntent({ process, repo, base: "main", component: "components/alpha", target })
+
+    expect(verdict.admitted).toBe(false)
+    if (verdict.admitted) throw new Error("unreachable")
+    expect(verdict.code).toBe("intent-target-off-trunk")
+    expect(verdict.evidence).toMatchObject({ target, currentPin: basePin, trunk: trunkTip })
+    expect(verdict.message).toContain(trunkTip)
+  })
+
+  it("derives the trunk tip at merge time and admits it — the derived target IS trunk", async () => {
+    const { repo, component } = await fixture()
+    const trunkTip = await publish(component, "trunk-line")
+    await publishSideline(component, "sideline", trunkTip)
+
+    const verdict = await admitPinIntent({
+      process,
+      repo,
+      base: "main",
+      component: "components/alpha",
+      deriveTarget: true,
+    })
+
+    if (!verdict.admitted) throw new Error(`unexpected refusal: ${verdict.code}`)
+    expect(verdict.target).toBe(trunkTip)
+    expect(verdict.relation).toBe("advance")
+  })
+
+  it("refuses an off-trunk target at merge time, where evaluation is the authority", async () => {
+    const { repo, component, basePin } = await fixture()
+    const target = await publishSideline(component, "sideline", basePin)
+    const trunkTip = await publish(component, "trunk-line")
+
+    const verdict = await admitPinIntent({
+      process,
+      repo,
+      base: "main",
+      component: "components/alpha",
+      target,
+      deriveTarget: true,
+    })
+
+    expect(verdict.admitted).toBe(false)
+    if (verdict.admitted) throw new Error("unreachable")
+    expect(verdict.code).toBe("intent-target-off-trunk")
+    expect(verdict.evidence.trunk).toBe(trunkTip)
   })
 
   it("refuses a component path that is a tracked FILE, not a gitlink", async () => {
