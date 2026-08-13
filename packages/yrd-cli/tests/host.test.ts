@@ -2640,6 +2640,41 @@ checks: [{check: {run: "true"}}]
     await reopened.close()
   })
 
+  it("drains one refs/for receipt directly into submitted check-requested state", async () => {
+    const { repo, featureSha } = await repository()
+    await using host = await createYrdHost({ cwd: repo })
+    const baseSha = await git(repo, "rev-parse", "main")
+    const zero = "0".repeat(40)
+    const update = {
+      oldSha: zero,
+      newSha: featureSha,
+      ref: "refs/for/main/feature",
+    }
+    const resolveTarget = async () => ({
+      name: "feature",
+      issue: "feature",
+      branch: "issue/feature",
+      base: "main",
+      baseSha,
+    })
+
+    await host.receiver.prepare([update], { resolveTarget })
+    await git(host.receiver.receiverPath, "fetch", "-q", repo, `${featureSha}:refs/yrd/test/feature`)
+    await git(host.receiver.receiverPath, "update-ref", update.ref, featureSha, zero)
+    await host.receiver.finalize([update], { resolveTarget })
+    await host.drain()
+
+    const pr = host.app.bays.pr("PR1")!
+    expect(prDeliveryState(pr)).toBe("submitted")
+    expect(host.app.bays.checksRequested("PR1")).toBe(true)
+    const prEvents = (await journalEnvelope(repo))
+      .flatMap(({ values }) => values)
+      .flatMap((value) => parseJournalFrame(value).events)
+      .map(({ name }) => name)
+      .filter((name) => name.startsWith("pr/"))
+    expect(prEvents).toEqual(["pr/pushed", "pr/submitted", "pr/checks-requested"])
+  })
+
   it("finds a direct-branch PR for status and refuses pr merge without appending", async () => {
     const { repo } = await repository()
     await git(repo, "switch", "-q", "issue/feature")

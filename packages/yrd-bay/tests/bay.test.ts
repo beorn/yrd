@@ -436,6 +436,23 @@ describe("withBays", () => {
     expect(app.bays.pr("PR1")?.revs).toEqual([expect.objectContaining({ n: 1, head: HEAD_1, submitter: "@agent/7" })])
   })
 
+  it("makes receiver submission intake one pushed, submitted, check-requested transaction", async () => {
+    await using app = await createApp(createWorkspaceHarness().adapter, undefined, "@dev/3")
+
+    const submitted = await app.bays.intake({
+      branch: "issue/from-ref",
+      headSha: HEAD_1,
+      base: "main",
+      baseSha: BASE,
+      receipt: "a".repeat(64),
+      submit: true,
+    })
+
+    expect(submitted.events.map(({ name }) => name)).toEqual(["pr/pushed", "pr/submitted", "pr/checks-requested"])
+    expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
+    expect(app.bays.checksRequested("PR1")).toBe(true)
+  })
+
   it("resolves Bay, PR, and base selectors without changing canonical identity", async () => {
     await using app = (await createHarness()).app
     await app.bays.submit({ branch: "Topic/One", headSha: HEAD_1 })

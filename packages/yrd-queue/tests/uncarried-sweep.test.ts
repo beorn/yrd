@@ -94,6 +94,27 @@ describe("sweepUncarriedRefs", () => {
     expect(git.calls[0]?.[0]).toBe("for-each-ref")
   })
 
+  it("limits the default rail to authored refs without hiding the excluded denominator", async () => {
+    const git = fakeGit({
+      "for-each-ref": [
+        refLine("refs/remotes/origin/HEAD", 3 * HOUR),
+        refLine("refs/remotes/origin/main", 3 * HOUR),
+        refLine("refs/remotes/origin/yrd/candidates/C1", 3 * HOUR),
+        refLine("refs/remotes/origin/task/carried", 3 * HOUR),
+      ].join("\n"),
+    })
+
+    const result = await sweepUncarriedRefs(git, {
+      ...OPTIONS,
+      population: "authored",
+      carriedBranches: new Set(["task/carried"]),
+    })
+
+    expect(result).toMatchObject({ scanned: 4, excluded: 3, carried: 1, examined: 0 })
+    expect(git.calls).toHaveLength(1)
+    expect(git.calls[0]).toContain("--format=%(refname)%00%(committerdate:unix)")
+  })
+
   it("actually examines a surviving ref and returns its finding", async () => {
     // The positive control, and it is not optional: every other case here
     // asserts a DISQUALIFY path, so a sweep that gathered nothing at all would

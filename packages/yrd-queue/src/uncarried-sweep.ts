@@ -25,6 +25,9 @@ export type SweepOptions = UncarriedOptions &
     carriedBranches: ReadonlySet<string>
     /** Ref namespace to sweep, e.g. "refs/remotes/origin". */
     namespace: string
+    /** Restrict the normal operator rail to authored branches. Explicit
+     * diagnostic namespaces omit this and inspect every ref they selected. */
+    population?: "authored"
   }>
 
 /**
@@ -42,6 +45,8 @@ export type SweepResult = Readonly<{
   scanned: number
   /** Disqualified by the carried set, before any per-ref git work. */
   carried: number
+  /** Non-authored refs excluded from the normal operator population. */
+  excluded: number
   /** Disqualified by the age bound, before any per-ref git work. */
   outsideAgeBound: number
   /** Facts gathered — the refs that actually cost git object reads. */
@@ -71,8 +76,17 @@ async function gitlinkPathsOf(git: RefGit, repo: string, base: string): Promise<
  * live merge requests.
  */
 function branchOf(ref: string, namespace: string): string {
-  const remote = namespace.startsWith("refs/remotes/") ? `${namespace.slice("refs/remotes/".length)}/` : ""
-  return remote !== "" && ref.startsWith(remote) ? ref.slice(remote.length) : ref
+  if (!namespace.startsWith("refs/remotes/")) return ref
+  const remote = namespace.slice("refs/remotes/".length).split("/", 1)[0]
+  if (remote === undefined || remote === "") return ref
+  const fullPrefix = `refs/remotes/${remote}/`
+  if (ref.startsWith(fullPrefix)) return ref.slice(fullPrefix.length)
+  const shortPrefix = `${remote}/`
+  return ref.startsWith(shortPrefix) ? ref.slice(shortPrefix.length) : ref
+}
+
+function isAuthoredBranch(branch: string, base: string): boolean {
+  return branch !== "HEAD" && branch !== base && !branch.startsWith("yrd/candidates/")
 }
 
 type DatedRef = Readonly<{ ref: string; pushedAtMs: number }>
@@ -81,7 +95,7 @@ type DatedRef = Readonly<{ ref: string; pushedAtMs: number }>
  * decoration — branch names may contain anything a ref format allows, and a
  * space-split would silently truncate them. */
 async function datedRefs(git: RefGit, repo: string, namespace: string): Promise<readonly DatedRef[]> {
-  const listing = await git.run(repo, ["for-each-ref", "--format=%(refname:short)%00%(committerdate:unix)", namespace])
+  const listing = await git.run(repo, ["for-each-ref", "--format=%(refname)%00%(committerdate:unix)", namespace])
   return listing
     .split("\n")
     .filter((line) => line !== "")
@@ -111,10 +125,16 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
   }
 
   let carried = 0
+  let excluded = 0
   let outsideAgeBound = 0
   const survivors: DatedRef[] = []
   for (const candidate of refs) {
-    if (carriedBranches.has(branchOf(candidate.ref, namespace))) {
+    const branch = branchOf(candidate.ref, namespace)
+    if (options.population === "authored" && !isAuthoredBranch(branch, base)) {
+      excluded += 1
+      continue
+    }
+    if (carriedBranches.has(branch)) {
       carried += 1
       continue
     }
@@ -138,6 +158,7 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
     findings: findings.toSorted((left, right) => right.ageMs - left.ageMs),
     scanned: refs.length,
     carried,
+    excluded,
     outsideAgeBound,
     examined: survivors.length,
   }

@@ -1410,7 +1410,14 @@ async function intakeReceipt(
   await materializeCarrier(process, repo, receipt)
   await app.dispatch(
     app.commands.bay.intake,
-    { ...receipt.intake, receipt: receipt.id },
+    {
+      ...receipt.intake,
+      receipt: receipt.id,
+      // `change` exists only on the managed refs/for submit namespace. Carry
+      // that already-authorized intent into the same journal command so no
+      // accepted receipt can stop in pushed-only state.
+      ...(receipt.change === undefined ? {} : { submit: true as const }),
+    },
     { key: `receiver:${receipt.id}` },
   )
 }

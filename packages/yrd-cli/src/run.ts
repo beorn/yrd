@@ -6893,6 +6893,7 @@ function createUncarriedSweeper(
       repo: cwd,
       base,
       namespace: "refs/remotes/origin",
+      population: "authored",
       carriedBranches: new Set(Object.values(stateOf(app).bays.prs).map((pr) => pr.branch)),
       nowMs: startedMs,
       ttlMs: UNCARRIED_TTL_MS,
@@ -6942,6 +6943,7 @@ async function queueUncarried(
     repo: cwd,
     base,
     namespace: options.namespace ?? "refs/remotes/origin",
+    ...(options.namespace === undefined ? { population: "authored" as const } : {}),
     carriedBranches,
     nowMs: new Date(io.now?.() ?? Date.now()).getTime(),
     ttlMs: UNCARRIED_TTL_MS,
@@ -6952,7 +6954,8 @@ async function queueUncarried(
   // alone cannot be told apart from a sweep that looked at nothing, and this
   // rail's whole job is to be believable when it reads zero.
   const denominator =
-    `scanned ${String(result.scanned)} · ${String(result.carried)} carried · ` +
+    `scanned ${String(result.scanned)} · ${String(result.excluded)} non-authored · ` +
+    `${String(result.carried)} carried · ` +
     `${String(result.outsideAgeBound)} outside the age bound · ${String(result.examined)} examined`
   const lines = result.findings.map((finding) => `${finding.ref}  ${finding.message}`)
   await printResult(
