@@ -128,6 +128,49 @@ describe("resident runner — a busy journal never kills the watch loop", () => 
   })
 })
 
+describe("resident runner — a concurrently completed intent never kills the watch loop", () => {
+  it("skips the losing evaluation and processes the next cycle", async () => {
+    const h = harness([
+      () =>
+        Promise.reject(
+          createFailure({
+            kind: "refusal",
+            code: "intent-terminal",
+            message: "yrd: intent 'I88' became integrated while its merge-time evaluation was in flight",
+          }),
+        ),
+      () => {
+        h.drain()
+        return Promise.resolve([])
+      },
+    ])
+
+    await expect(followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).resolves.toBe(0)
+    expect(h.runCalls()).toBe(2)
+    expect(h.warnings).toContainEqual(
+      expect.objectContaining({
+        props: expect.objectContaining({ action: "resident-intent-terminal-skip", code: "intent-terminal" }),
+      }),
+    )
+  })
+
+  it("still fails a targeted one-shot because it has no next cycle", async () => {
+    const h = harness([
+      () =>
+        Promise.reject(
+          createFailure({
+            kind: "refusal",
+            code: "intent-terminal",
+            message: "yrd: intent 'I88' became integrated while its merge-time evaluation was in flight",
+          }),
+        ),
+    ])
+
+    await expect(followQueueRuns(h.app, ["I88"], { interval: 1 }, h.io, h.gate)).rejects.toThrow("became integrated")
+    expect(h.warnings).toEqual([])
+  })
+})
+
 describe("resident runner — a PR withdrawn mid-compose never kills the watch loop (Defect 2)", () => {
   it("skips with a loud loggily warn and processes the NEXT cycle with the remaining PRs", async () => {
     const h = harness([

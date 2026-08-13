@@ -7338,6 +7338,12 @@ function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefine
   // authored-gitlink / recut-certificate / pr-not-admissible and the rest of
   // the needs-author + recut-lineage composition buckets if they bubble out.
   const fact = failureFact(error)
+  if (fact?.kind === "refusal" && fact.code === "intent-terminal") {
+    return {
+      message: "resident runner skipped an intent evaluation lost to a concurrent terminal transition",
+      props: { action: "resident-intent-terminal-skip", code: fact.code, reason: fact.message },
+    }
+  }
   if (fact?.kind === "infrastructure" && fact.code === "journal-busy") {
     return {
       message: "resident runner skipped a cycle because the journal was temporarily locked",

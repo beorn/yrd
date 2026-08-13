@@ -80,6 +80,7 @@ import { diagnoseFlowPin, type FlowPin, type StepKind, type YrdConfig } from "@y
 import {
   PinIntentEvaluationFactSchema,
   PinIntentRefusalSchema,
+  TERMINAL_INTENT_STATUSES,
   type IntentsState,
   type PinIntent,
   type PinIntentAdmission,
@@ -3643,6 +3644,13 @@ function createQueueCommands(
       const record = state.intents?.records[args.intent]
       if (record === undefined) {
         raiseFailure("refusal", "intent-not-found", `yrd: no intent '${args.intent}' to evaluate`)
+      }
+      if (TERMINAL_INTENT_STATUSES.has(record.status)) {
+        raiseFailure(
+          "refusal",
+          "intent-terminal",
+          `yrd: intent '${record.id}' became ${record.status} while its merge-time evaluation was in flight`,
+        )
       }
       return { events: [event("intent/evaluation-recorded", args)] }
     },
