@@ -750,6 +750,7 @@ export function residentQueueProgress(app: YrdCliApp, now: string): QueueRunnerP
     .findings.filter(
       (finding) =>
         finding.code === "queue-progress-stalled" ||
+        finding.code === "queue-never-started" ||
         finding.code === "admission-refusal-loop" ||
         finding.code === "queue-hold-ttl-missing" ||
         finding.code === "queue-hold-expired",

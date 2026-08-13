@@ -295,6 +295,38 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     )
   })
 
+  it("reports submitted work that never started required checks", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createDeliveryApp(clock.read, true)
+    await app.bays.submit({
+      branch: "issue/never-started",
+      headSha: HEAD,
+      base: "main",
+      baseSha: BASE,
+    })
+    const pr = app.bays.prs().find((candidate) => candidate.branch === "issue/never-started")
+    if (pr === undefined) throw new Error("submitted PR was not recorded")
+
+    expect(app.bays.checksRequested(pr.id)).toBe(false)
+    expect(app.queue.audit({ now: "2026-01-01T00:29:59.999Z" }).findings).not.toContainEqual(
+      expect.objectContaining({ code: "queue-never-started" }),
+    )
+    expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).toContainEqual({
+      code: "queue-never-started",
+      message:
+        `Queue 'main' has 1 submitted PR that never started required checks for 30m00s ` +
+        `(since 2026-01-01T00:00:00.000Z); head is '${pr.id}'.`,
+      resolution: [
+        `Start or restart the resident queue runner, then verify it requests required checks for '${pr.id}'.`,
+      ],
+      pr: pr.id,
+      specimen: "queue:main:never-started",
+      count: 1,
+      since: "2026-01-01T00:00:00.000Z",
+      blockedMs: 30 * 60_000,
+    })
+  })
+
   /**
    * Box 2 of @i/10-merge-queue/uptime-is-not-health. The bead's predicate is a
    * CONJUNCTION validated over the whole journal — runner heartbeat fresh AND

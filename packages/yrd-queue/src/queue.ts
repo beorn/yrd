@@ -21,6 +21,7 @@ import {
   prHead,
   prNeedsAuthor,
   prRevisionNumber,
+  prSourceReadyAt,
   resolveBase,
   prNotFoundMessage,
   resolvePR,
@@ -5937,12 +5938,42 @@ function queueProgressAuditFindings(
   const nowMs = parseAuditTime(options.now, "now")
   const byBase = Map.groupBy(queued, (pr) => baseIdentity(pr.base))
   for (const [base, prs] of [...byBase.entries()].sort(([left], [right]) => left.localeCompare(right))) {
-    const queuedAtMs = Math.min(...prs.map((pr) => parseAuditTime(checkQueueTime(pr), `queue time for ${pr.id}`)))
     const latestLandingMs = latestQueueLandingMs(state, base)
+    const neverStarted = prs.filter((pr) => !checksRequested(pr))
+    if (neverStarted.length > 0) {
+      const readyAtMs = Math.min(
+        ...neverStarted.map((pr) => parseAuditTime(prSourceReadyAt(pr), `source-ready time for ${pr.id}`)),
+      )
+      const sinceMs = Math.max(readyAtMs, latestLandingMs ?? readyAtMs)
+      const blockedMs = Math.max(0, nowMs - sinceMs)
+      const first = neverStarted[0]
+      if (blockedMs >= progress.noLandingMs && first !== undefined) {
+        const since = new Date(sinceMs).toISOString()
+        findings.push({
+          code: "queue-never-started",
+          message:
+            `Queue '${base}' has ${neverStarted.length} submitted ` +
+            `${neverStarted.length === 1 ? "PR" : "PRs"} that never started required checks for ` +
+            `${formatRefusalSpan(blockedMs)} (since ${since}); head is '${first.id}'.`,
+          resolution: [
+            `Start or restart the resident queue runner, then verify it requests required checks for '${first.id}'.`,
+          ],
+          pr: first.id,
+          specimen: `queue:${base}:never-started`,
+          count: neverStarted.length,
+          since,
+          blockedMs,
+        })
+      }
+    }
+
+    const started = prs.filter((pr) => checksRequested(pr))
+    if (started.length === 0) continue
+    const queuedAtMs = Math.min(...started.map((pr) => parseAuditTime(checkQueueTime(pr), `queue time for ${pr.id}`)))
     const sinceMs = Math.max(queuedAtMs, latestLandingMs ?? queuedAtMs)
     const blockedMs = Math.max(0, nowMs - sinceMs)
-    const first = prs[0]
-    const admissionChecks = prs.reduce(
+    const first = started[0]
+    const admissionChecks = started.reduce(
       (total, pr) =>
         total +
         pr.checkRequests.filter((request) => parseAuditTime(request.at, `check request for ${pr.id}`) >= sinceMs)
@@ -5961,12 +5992,12 @@ function queueProgressAuditFindings(
     findings.push({
       code: "queue-progress-stalled",
       message:
-        `Queue '${base}' has ${prs.length} required-check ${prs.length === 1 ? "PR" : "PRs"} queued and ` +
+        `Queue '${base}' has ${started.length} required-check ${started.length === 1 ? "PR" : "PRs"} queued and ` +
         `no landing for ${formatRefusalSpan(blockedMs)} (since ${since}) across ${admissionChecks} admission ` +
         `${admissionChecks === 1 ? "check" : "checks"}; head is '${first.id}'.`,
       pr: first.id,
       specimen: `queue:${base}`,
-      count: prs.length,
+      count: started.length,
       since,
       blockedMs,
     })
@@ -6356,11 +6387,17 @@ function queueProgressQueue(state: DeepReadonly<RuntimeState>, steps: readonly R
   return Object.values(state.bays.prs)
     .filter((pr) => {
       const delivery = prDeliveryState(pr)
-      return delivery === "pushed" || delivery === "submitted" || delivery === "ready"
+      return delivery === "submitted" || delivery === "ready" || (delivery === "pushed" && checksRequested(pr))
     })
     .filter((pr) => blockingQueuePause(state, pr) === undefined)
-    .filter((pr) => checksRequested(pr))
-    .toSorted((left, right) => checkQueueTime(left).localeCompare(checkQueueTime(right)))
+    .toSorted(
+      (left, right) =>
+        queueProgressTime(left).localeCompare(queueProgressTime(right)) || compareNatural(left.id, right.id),
+    )
+}
+
+function queueProgressTime(pr: DeepReadonly<PR>): string {
+  return checkRequest(pr)?.at ?? prSourceReadyAt(pr)
 }
 
 function refusedRevisionAdmissions(state: DeepReadonly<RuntimeState>): PR[] {

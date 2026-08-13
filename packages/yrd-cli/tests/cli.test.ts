@@ -7308,6 +7308,16 @@ describe("runYrd", () => {
       since: "2026-07-09T12:00:00.000Z",
       blockedMs: 1_800_000,
     }
+    const neverStarted = {
+      code: "queue-never-started",
+      message: "Queue 'main' has one submitted PR that never started required checks for 30m",
+      resolution: ["Start the resident queue runner and verify it requests checks for PR1."],
+      pr: "PR1",
+      specimen: "queue:main:never-started",
+      count: 1,
+      since: "2026-07-09T12:00:00.000Z",
+      blockedMs: 1_800_000,
+    }
     const refusalLoop = {
       code: "admission-refusal-loop",
       message:
@@ -7332,7 +7342,7 @@ describe("runYrd", () => {
       since: "2026-07-09T12:00:00.000Z",
       blockedMs: 600_000,
     }
-    let findings: Array<typeof noLanding | typeof refusalLoop | typeof expiredHold> = []
+    let findings: Array<typeof noLanding | typeof neverStarted | typeof refusalLoop | typeof expiredHold> = []
     const progressApp = {
       state: () => app.state(),
       queue: { audit: () => ({ findings }) },
@@ -7348,6 +7358,13 @@ describe("runYrd", () => {
       state: "stalled",
       observedAt: "2026-07-09T12:10:00.000Z",
       findings: [noLanding],
+    })
+
+    findings = [neverStarted]
+    expect(project(progressApp, "2026-07-09T12:10:00.000Z")).toEqual({
+      state: "stalled",
+      observedAt: "2026-07-09T12:10:00.000Z",
+      findings: [neverStarted],
     })
 
     findings = [refusalLoop]
