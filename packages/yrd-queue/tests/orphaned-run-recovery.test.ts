@@ -208,3 +208,59 @@ describe("a finished run stays terminal after its Jobs are pruned", () => {
     expect(pruned.queue.audit().findings.some((item) => item.code === "orphaned-run")).toBe(false)
   })
 })
+
+/**
+ * The read side of the lease seam (@yrd/core/21085-target-model/21094, #undead).
+ * The sibling defect above is a run with NO Job. This one has a Job, still
+ * `in_progress`, whose executor is gone — so it projects as healthily running
+ * for as long as nobody sweeps it. Live R1740: the lease expired 20:35:03.925Z
+ * and the `lose` transition was not written until 20:45:27.620Z; for 10m24s
+ * `queue status` showed a live run and `queue audit` reported nothing at all.
+ */
+describe("lapsed executor lease — a Job-backed run projects as running with nothing renewing it", () => {
+  const LEASE_EXPIRES = "2026-01-01T00:00:30.000Z"
+
+  async function leasedRun() {
+    const app = await createApp()
+    const pr = await submitBranch(app, "issue/lease-lapsed")
+    await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["first"] })
+    const job = app.queue.get("R1")?.steps[0]?.job
+    if (job === undefined) throw new Error("the run must be Job-backed for a lease to exist at all")
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: job.id,
+      attempt: 1,
+      runner: "yrd-cli:404",
+      leaseExpiresAt: LEASE_EXPIRES,
+    })
+    expect(app.queue.get("R1")?.steps[0]?.job?.status, "the run must read as running for the gap to exist").toBe(
+      "in_progress",
+    )
+    return app
+  }
+
+  it("flags the lapse and how long it has stood", async () => {
+    await using app = await leasedRun()
+
+    const finding = app.queue.audit({ now: STALE }).findings.find((item) => item.code === "run-lease-expired")
+    expect(finding, "a lapsed lease must not read as a healthy run").toBeDefined()
+    expect(finding?.run).toBe("R1")
+    expect(finding?.step).toBe("first")
+    expect(finding?.since).toBe(LEASE_EXPIRES)
+    expect(finding?.blockedMs, "the operator needs the age of the gap, not just its existence").toBe(
+      Date.parse(STALE) - Date.parse(LEASE_EXPIRES),
+    )
+  })
+
+  it("stays silent while the lease is still live", async () => {
+    await using app = await leasedRun()
+
+    // The control that keeps the check honest. It must sit INSIDE the lease
+    // window — note FRESH does not, it is 00:01:00 against a 00:00:30 expiry, so
+    // using it here asserted the opposite of what it read. Without a control the
+    // check above could pass while flagging every healthy run too.
+    const live = "2026-01-01T00:00:10.000Z"
+    expect(Date.parse(live)).toBeLessThan(Date.parse(LEASE_EXPIRES))
+    expect(app.queue.audit({ now: live }).findings.some((item) => item.code === "run-lease-expired")).toBe(false)
+  })
+})

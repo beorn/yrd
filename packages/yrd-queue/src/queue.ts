@@ -1126,7 +1126,7 @@ function createQueue<Shape extends PRShape>(
     if (recordMerge === undefined || !Queues.terminal(run)) return
     const candidate = runtime().queues.candidates[run.candidateId]
     if (candidate === undefined)
-      throw new Error(`yrd: queue run '${run.id}' names missing Candidate '${run.candidateId}'`)
+      {throw new Error(`yrd: queue run '${run.id}' names missing Candidate '${run.candidateId}'`)}
     await recordMerge({ run, candidate: candidate as Candidate })
   }
 
@@ -5820,6 +5820,33 @@ function auditQueues(
         run: record.id,
         ...(record.steps[0] === undefined ? {} : { step: record.steps[0].name }),
       })
+    }
+    // The read side of the lease seam (21094). A step whose Job is still
+    // `in_progress` PROJECTS as running no matter how long ago its lease lapsed,
+    // so `queue status` showed a healthy run and audit said nothing while
+    // nothing was left to renew it. R1740's lease expired at 20:35:03.925Z and
+    // the `lose` transition was not written until 20:45:27.620Z — 10m24s in
+    // which every reader was told the run was fine. `recover` is the writer that
+    // settles this; the audit's job is to stop the gap being invisible, so it
+    // reports the lapse and how long it has stood. Clock-gated like the hold
+    // checks above: with no `now`, an expiry cannot be judged at all.
+    if (auditNowMs !== undefined) {
+      for (const step of run.steps) {
+        const job = step.job
+        if (job === undefined || job.status !== "in_progress") continue
+        const leaseExpiresAtMs = parseAuditTime(job.leaseExpiresAt, "job lease expiry")
+        if (leaseExpiresAtMs > auditNowMs) continue
+        findings.push({
+          code: "run-lease-expired",
+          message:
+            `queue run '${record.id}' step '${step.name}' still reports job '${job.id}' running, but its ` +
+            `executor lease expired at ${job.leaseExpiresAt} and nothing is renewing it; 'recover' settles it`,
+          run: record.id,
+          step: step.name,
+          since: job.leaseExpiresAt,
+          blockedMs: Math.max(0, auditNowMs - leaseExpiresAtMs),
+        })
+      }
     }
     for (const planned of record.steps) {
       const current = installed.get(planned.name)
