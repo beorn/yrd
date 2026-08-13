@@ -171,7 +171,7 @@ describe("pin-intent admission (22668 phase 1)", () => {
     expect(verdict.evidence.declared).toEqual(["components/alpha"])
   })
 
-  it("refuses an unpublished target and its remedy is the push that fixes it", async () => {
+  it("refuses an unpublished target and names the actor who must publish it, never a hand-write", async () => {
     const { repo, component } = await fixture()
     const target = await local(component, "two")
 
@@ -180,10 +180,20 @@ describe("pin-intent admission (22668 phase 1)", () => {
     expect(verdict.admitted).toBe(false)
     if (verdict.admitted) throw new Error("unreachable")
     expect(verdict.code).toBe("intent-target-unpublished")
-    expect(verdict.remedy[0]?.argv).toEqual(["git", "push", "origin", `${target}:refs/heads/main`])
-    expect(verdict.remedy[0]?.cwd).toBe("components/alpha")
+    // Pipeline-routed: no remedy step may instruct a hand-write to a component ref.
+    for (const step of verdict.remedy) {
+      if ("humanRequired" in step) continue
+      expect(step.argv.some((argument) => argument.includes("refs/heads/"))).toBe(false)
+    }
+    const [publish, resubmit] = verdict.remedy
+    expect(publish).toMatchObject({ humanRequired: true })
+    if (publish === undefined || !("humanRequired" in publish)) throw new Error("unreachable")
+    expect(publish.note).toContain("components/alpha")
+    if (resubmit === undefined || "humanRequired" in resubmit) throw new Error("unreachable")
+    expect(resubmit.argv).toEqual(["yrd", "intent", "submit", "--component", "components/alpha", "--target", target])
 
-    // The remedy is not decoration: running it clears the refusal.
+    // The remedy names the action; running the ACTUAL publish (never the
+    // remedy step, since it carries no argv) clears the refusal.
     await git(component, "push", "--quiet", "origin", `${target}:refs/heads/main`)
     const retry = await admitPinIntent({ process, repo, base: "main", component: "components/alpha", target })
     expect(retry.admitted).toBe(true)
@@ -240,17 +250,12 @@ describe("pin-intent admission (22668 phase 1)", () => {
     expect(verdict.message).toContain(basePin)
     // Pipeline-routed: no remedy may instruct a hand-write to a component ref.
     for (const step of verdict.remedy) {
+      if ("humanRequired" in step) continue
       expect(step.argv.some((argument) => argument.includes("refs/heads/"))).toBe(false)
     }
-    expect(verdict.remedy[0]?.argv).toEqual([
-      "yrd",
-      "intent",
-      "submit",
-      "--component",
-      "components/alpha",
-      "--target",
-      basePin,
-    ])
+    const [firstStep] = verdict.remedy
+    if (firstStep === undefined || "humanRequired" in firstStep) throw new Error("unreachable")
+    expect(firstStep.argv).toEqual(["yrd", "intent", "submit", "--component", "components/alpha", "--target", basePin])
   })
 
   it("admits a deliberate off-trunk pin when the submitter declares it", async () => {

@@ -2620,8 +2620,8 @@ describe("runYrd", () => {
           `at base SHA '${BASE_SHA}' and recorded head '${PR1640_RECORDED_HEAD}':\n` +
           "  yrd pr publish PR1 --queue\n" +
           "This records a durable publication Job; without a runner it remains visible as publication-required.\n" +
-          "emergency operator fallback:\n" +
-          `  git -C '/repo' push origin '${PR1640_RECORDED_HEAD}:refs/heads/${PR1640_BRANCH}'\n`,
+          "if the publication Job cannot run: escalate to @chief for a credential-bearing publish — this branch " +
+          "is never pushed by hand, not even as an emergency fallback.\n",
       },
     })
   })
@@ -14349,7 +14349,7 @@ describe("yrd intent — declared pin advances (22668 phase 1)", () => {
     expect(app.intents.list()).toEqual([])
   })
 
-  it("renders an unpublished-target refusal as a runnable command, not prose to re-parse", async () => {
+  it("renders an unpublished-target refusal as a named-actor statement, never a hand-write", async () => {
     await using app = await createApp()
     const output = outputIO()
 
@@ -14362,8 +14362,12 @@ describe("yrd intent — declared pin advances (22668 phase 1)", () => {
       ),
     ).toBe(1)
 
-    expect(output.stdout()).toContain("cd components/alpha && git push origin")
-    expect(output.stdout()).toContain(`${TARGET_SHA}:refs/heads/main`)
+    // Pipeline-routed: no rendered remedy line is a hand-write to a component ref.
+    expect(output.stdout()).not.toContain("git push")
+    expect(output.stdout()).toContain(`target '${TARGET_SHA}' is unpublished`)
+    expect(output.stdout()).toContain("whoever holds it must publish it through")
+    expect(output.stdout()).toContain(`'${COMPONENT}''s own git workflow`)
+    expect(output.stdout()).toContain(`yrd intent submit --component ${COMPONENT} --target ${TARGET_SHA}`)
   })
 
   it("admits an intent with no target — the component main tip at landing", async () => {

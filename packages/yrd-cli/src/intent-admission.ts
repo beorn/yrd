@@ -87,9 +87,10 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
       evidence: { component: options.component, currentPin },
       remedy: [
         {
-          argv: ["git", "push", "origin", `HEAD:refs/heads/${branch}`],
-          cwd: options.component,
-          note: "publish component main, then retry the intent",
+          humanRequired: true,
+          note:
+            `'${options.component}' has no published origin/${branch} tip; whoever holds the local commit must ` +
+            `publish it through that component's own git workflow — never as this admission's remedy — then retry the intent`,
         },
       ],
     }
@@ -116,9 +117,14 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
       evidence: { component: options.component, target, currentPin },
       remedy: [
         {
-          argv: ["git", "push", "origin", `${target}:refs/heads/${branch}`],
-          cwd: options.component,
-          note: "publish the target, then resubmit the intent",
+          humanRequired: true,
+          note:
+            `target '${target}' is unpublished; whoever holds it must publish it through '${options.component}''s ` +
+            `own git workflow — never as this admission's remedy — before it can be admitted`,
+        },
+        {
+          argv: ["yrd", "intent", "submit", "--component", options.component, "--target", target],
+          note: "resubmit once the target is published",
         },
       ],
     }
@@ -138,9 +144,10 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
           note: "revert the tombstoned component change on the intended lineage",
         },
         {
-          argv: ["git", "push", "origin", `HEAD:refs/heads/${branch}`],
-          cwd: options.component,
-          note: "publish the safe descendant",
+          humanRequired: true,
+          note:
+            `publish the safe descendant through '${options.component}''s own git workflow — never as this ` +
+            `admission's remedy`,
         },
         {
           argv: ["yrd", "intent", "submit", "--component", options.component, "--target", "<safe-sha>"],
@@ -179,9 +186,10 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
         note: "merge inside the component, where merges belong",
       },
       {
-        argv: ["git", "push", "origin", `HEAD:refs/heads/${branch}`],
-        cwd: options.component,
-        note: "land the merge on component main",
+        humanRequired: true,
+        note:
+          `land the merge on '${options.component}' main through the component's own git workflow — never as ` +
+          `this admission's remedy`,
       },
       {
         argv: ["yrd", "intent", "submit", "--component", options.component, "--target", "<merge-sha>"],

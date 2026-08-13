@@ -28,10 +28,6 @@ function gitFailure(result: ProcessResult): string {
   return result.stderr.trim() || result.stdout.trim() || `exit ${String(result.exitCode)}`
 }
 
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`
-}
-
 async function freshRemoteBranch(
   process: Pick<Process, "run">,
   cwd: string,
@@ -90,8 +86,8 @@ async function liveBranchHead(
     `at base SHA '${recorded.baseSha ?? "unrecorded"}' and recorded head '${recorded.head}':\n` +
     `  yrd pr publish ${pr.id}${queueFlag}\n` +
     `This records a durable publication Job; without a runner it remains visible as publication-required.\n` +
-    `emergency operator fallback:\n` +
-    `  git -C ${shellQuote(cwd)} push origin ${shellQuote(`${recorded.head}:refs/heads/${pr.branch}`)}\n` +
+    `if the publication Job cannot run: escalate to @chief for a credential-bearing publish — this branch is ` +
+    `never pushed by hand, not even as an emergency fallback.\n` +
     (options.queue === true ? "" : `then retry:\n  yrd pr recut ${pr.id} --preflight`)
   return freshRemoteBranch(process, cwd, pr.branch, remedy)
 }
