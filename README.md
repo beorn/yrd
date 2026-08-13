@@ -875,8 +875,10 @@ submitted work with no resident is `resident-runner-missing`, never a quiet
 absence. `--json` also reports the checkout HEAD and ahead/behind distance from
 each installed base SHA.
 
-`queue audit` is the progress-health affordance. With queued required-check
-work it emits `queue-progress-stalled` after the configured no-landing
+`queue audit` is the progress-health affordance. Submitted work that never
+starts required checks emits `queue-never-started` after the configured
+interval, measured from that carrier's own ready time. Work that did start
+required checks emits `queue-progress-stalled` after the configured no-landing
 interval. A repeated exact refusal emits the more specific
 `admission-refusal-loop` and inhibits the generic finding for that same queue
 head, so one wedge has one actionable specimen. Findings carry stable
