@@ -751,10 +751,9 @@ async function validateSubmitCarrier(
   const current = await mainGit(
     receiver.process,
     receiver.mainRepo,
-    ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`],
-    { allowFailure: true },
+    ["for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`],
   )
-  if (current.code !== 0) return
+  if (current.stdout === "") return
   const descends = await receiverGit(receiver, ["merge-base", "--is-ancestor", current.stdout, update.newSha], {
     env,
     allowFailure: true,
