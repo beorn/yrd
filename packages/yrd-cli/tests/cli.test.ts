@@ -644,8 +644,21 @@ function contestCompetitors(): string {
 
 async function openAndSubmit(app: TestApp): Promise<void> {
   await openTestBay(app, { name: "one" })
-  const submit = outputIO({ cwd: "/repo/.bays/B1" })
-  expect(await runYrd(app, yrd("bay", "submit"), submit.io)).toBe(0)
+  await submitBayFixture(app, "B1")
+}
+
+async function submitBayFixture(app: TestApp, bay: string): Promise<void> {
+  // Domain fixture: callers below explicitly control check-request and Queue
+  // timing. Public `bay submit` owns the synchronous handoff behavior proved
+  // by its focused regression instead of silently changing these fixtures.
+  expect(
+    prDeliveryState(
+      await app.bays.submitSelection(bay, {
+        resolveRevision: async () => undefined,
+        run: { runner: "cli-test", leaseMs: 60_000 },
+      }),
+    ),
+  ).toBe("submitted")
 }
 
 async function openTestBay(app: TestApp, input: Parameters<TestApp["bays"]["open"]>[0]): Promise<void> {
@@ -2107,7 +2120,7 @@ describe("runYrd", () => {
     const app = await createApp({ batch: 2, waitingCheck: true })
     await openAndSubmit(app)
     await openTestBay(app, { name: "two" })
-    expect(await runYrd(app, yrd("bay", "submit"), outputIO({ cwd: "/repo/.bays/B2" }).io)).toBe(0)
+    await submitBayFixture(app, "B2")
     expect(await app.queue.run({ prs: ["PR1", "PR2"] }, { runner: "cli-test", leaseMs: 60_000 })).toMatchObject([
       {
         id: "R1",
@@ -4939,6 +4952,20 @@ describe("runYrd", () => {
       warnings: [expect.any(String)],
     })
     expect(dirty.state().bays.prs.PR1).toMatchObject({ revs: [{ head: HEAD_SHA }] })
+  })
+
+  it("requests checks when bay submit hands off a carrier", async () => {
+    const app = await createApp()
+    await openTestBay(app, { name: "handoff" })
+
+    const submit = outputIO({ cwd: "/repo/.bays/B1" })
+    expect(await runYrd(app, yrd("bay", "submit", "--json"), submit.io), submit.stderr()).toBe(0)
+
+    // PR685/PR687/PR688 waited 100m/24m/2m because the handoff depended on
+    // unrelated runner activity. Submission must create authority now.
+    expect(app.bays.checksRequested("PR1")).toBe(true)
+    expect(app.state().bays.prs.PR1?.checkRequests).toHaveLength(1)
+    expect(Queues.ids(app.state().queues)).toEqual([])
   })
 
   it("submits and revises an existing source branch through the injected Git revision boundary", async () => {

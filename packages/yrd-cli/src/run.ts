@@ -4485,7 +4485,7 @@ async function applyPrSelectionVerb(
   const prs = [...result.prs]
   const warnings = [...result.warnings]
   const createOnly = command === "pr.create"
-  if (command === "bay.submit" || createOnly) {
+  if (createOnly) {
     await printPrSelectionResult(io, options, command, result)
     return 0
   }
@@ -9048,7 +9048,7 @@ async function explainLanding(
           prDeliveryState(pr) === "integrated" &&
           pr.terminalRun === latest.record.merge.id &&
           pr.integration?.commit === commit
-        if (!indexed && change !== undefined && change.changeId !== undefined && commit !== undefined) {
+        if (!indexed && change?.changeId !== undefined && commit !== undefined) {
           await app.queue.reconcileLanding({
             pr: change.pr,
             revision: change.revision,
