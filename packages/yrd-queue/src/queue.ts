@@ -1125,8 +1125,9 @@ function createQueue<Shape extends PRShape>(
   const persistMergeRecord = async (run: Run): Promise<void> => {
     if (recordMerge === undefined || !Queues.terminal(run)) return
     const candidate = runtime().queues.candidates[run.candidateId]
-    if (candidate === undefined)
-      {throw new Error(`yrd: queue run '${run.id}' names missing Candidate '${run.candidateId}'`)}
+    if (candidate === undefined) {
+      throw new Error(`yrd: queue run '${run.id}' names missing Candidate '${run.candidateId}'`)
+    }
     await recordMerge({ run, candidate: candidate as Candidate })
   }
 
@@ -5833,7 +5834,7 @@ function auditQueues(
     if (auditNowMs !== undefined) {
       for (const step of run.steps) {
         const job = step.job
-        if (job === undefined || job.status !== "in_progress") continue
+        if (job?.status !== "in_progress") continue
         const leaseExpiresAtMs = parseAuditTime(job.leaseExpiresAt, "job lease expiry")
         if (leaseExpiresAtMs > auditNowMs) continue
         findings.push({
