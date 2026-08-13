@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process"
 import { createElement } from "react"
-import { currentPRRev, isLivePR, prDeliveryState, prNotFoundMessage, type PR } from "@yrd/bay"
+import { currentPRRev, isLivePR, prDeliveryState, prNeedsAuthor, prNotFoundMessage, type PR } from "@yrd/bay"
 import { raiseFailure } from "@yrd/core"
 import { Queues, type Run } from "@yrd/queue"
 import { cleanGitEnvironment } from "./git-environment.ts"
@@ -18,6 +18,10 @@ const GIT_OUTPUT_MAX_BYTES = 64 * 1024 * 1024
 /** Commits per `rev-list` invocation, so a listing with thousands of candidate
  * heads cannot overflow the argument vector. */
 const REV_LIST_BATCH = 400
+const CONSUMED_QUEUE_AUTHORITY_RECEIPTS = new Set([
+  "queue-submit-authority-consumed",
+  "queue-checks-authority-consumed",
+])
 
 function jsonEnabled(options: JsonOption): boolean {
   return options.json === true
@@ -374,7 +378,24 @@ export async function preflightRecut(
   const patch = await patchMatch(source.baseSha, candidateHeadSha, targetBaseSha)
   const subsumed = checks.ancestorOfBase === true || checks.mergeTree === "identical"
   const requiresForce = app.queue.eligibility(pr.id).checks.status === "passed"
-  const reauthorizing = prDeliveryState(pr) === "needs-author" && source.n === currentPRRev(pr).n
+  const needsAuthor = prNeedsAuthor(pr)
+  const reauthorizing =
+    needsAuthor !== undefined &&
+    CONSUMED_QUEUE_AUTHORITY_RECEIPTS.has(needsAuthor.receipt.code) &&
+    source.n === currentPRRev(pr).n
+  if (
+    needsAuthor !== undefined &&
+    !reauthorizing &&
+    options.proposedHeadSha === undefined &&
+    source.n === currentPRRev(pr).n
+  ) {
+    raiseFailure(
+      "refusal",
+      "recut-needs-authored-change",
+      `yrd: PR '${pr.id}' needs author changes after '${needsAuthor.receipt.code}'; ` +
+        "an unchanged recut cannot resolve it — push new authored content, then retry the printed remedy",
+    )
+  }
   const certifiedCurrentBase =
     options.proposedHeadSha === undefined && distance.targetOnly === 0 && source.recut !== undefined
   const verdict: RecutPreflightVerdict = subsumed
