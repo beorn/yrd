@@ -1321,7 +1321,10 @@ export function QueueWatchFrame({
     })
   }
   // The interactive pane renders fill-height (below), so the cursor set is the
-  // uncapped fill set — the ListView shows every retained row and virtualizes.
+  // uncapped fill set — the ListView receives every retained row and mounts a
+  // bounded index window of them (virtualization="index"; the mount-all
+  // DEFAULT silently applied here after the 15332 W7 threshold raise and cost
+  // ~260 KB RSS + ~2 idle-CPU points per 100 retained rows — @yrd/cli/22258).
   // Cursor indices index THIS array, so it must match the ListView's items.
   const visibleProjectedRows = useMemo(
     () =>

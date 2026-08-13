@@ -5558,6 +5558,15 @@ function ProjectedQueueTimeline({
               // default hover→cursor (which fires onCursor and switches the
               // detail); CLICK still selects via the default onSelect path.
               onItemHover={NO_HOVER_SELECT}
+              // Explicit, because the DEFAULT is mount-all for lists up to
+              // 10,000 items (threshold raised 100 → 10,000 in 15332 W3/W7 for
+              // silvercode chat) and timeline rows are EXPENSIVE: a ~1,000-row
+              // production timeline mounted every row, and the render pipeline
+              // walked all of them on every frame — ~260 KB RSS and ~2 idle-CPU
+              // points per 100 rows on a live pane, with ~40 rows visible
+              // (@yrd/cli/22258). Index-window mode bounds the mounted set to
+              // ~100 rows around the cursor/viewport regardless of retention.
+              virtualization="index"
               active={true}
               getKey={(row) => row.id}
               // A date-header entry grows one cell to two: the separator sits
@@ -5736,6 +5745,9 @@ export function QueueTimelineView({
           onSelect={onSelect}
           active={true}
           getKey={(row) => row.key}
+          // Same mount-all default hazard as the projection timeline above
+          // (@yrd/cli/22258): this legacy path can also carry hundreds of rows.
+          virtualization="index"
           estimateHeight={1}
           renderItem={(row, _index, meta) => (
             <Box height={1}>
