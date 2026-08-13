@@ -364,7 +364,6 @@ function configuredCommand<Shape extends PRShape>(
     .update(mode)
     .digest("hex")
   return async (input, context): Promise<JobResult<CommandEvidence>> => {
-    context.observeProgress?.()
     const { process } = options.inject
     const primary = primaryPR(input)
     const cwd = resolve(typeof options.cwd === "function" ? await options.cwd(input) : options.cwd)
@@ -401,7 +400,6 @@ function configuredCommand<Shape extends PRShape>(
         ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
         onOutput: (output) => {
           artifactSink.write(output)
-          context.reportProgress?.()
         },
       })
     } catch (cause) {
@@ -1324,7 +1322,7 @@ export function gitMergeRecorder(options: {
     if (added.code !== 0) {
       const raced = await git.run(options.repo, ["notes", `--ref=${MERGE_RECORD_NOTES_NAME}`, "show", target], true)
       if (raced.code === 0 && createMergeRecord(parseMergeRecord(raced.stdout).record).canonical === record.canonical)
-        return
+        {return}
       throw new Error(`yrd: merge record for '${run.id}' could not be published: ${added.stderr || added.stdout}`)
     }
     await publishMergeRecordRef(git, options.repo, run.id, remote)

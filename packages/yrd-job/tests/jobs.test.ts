@@ -1333,62 +1333,20 @@ describe("Jobs", () => {
     await app.close()
   })
 
-  it("settles a progress-gated runner even when its handler never returns after abort", async () => {
-    const started = Promise.withResolvers<void>()
-    const release = Promise.withResolvers<void>()
-    let aborted = false
-    const app = await jobsApp(
-      delivery(async (_input, context) => {
-        context.reportProgress?.()
-        context.signal.addEventListener("abort", () => (aborted = true), { once: true })
-        started.resolve()
-        await release.promise
-        return { status: "completed", conclusion: "success", output: { receipt: "too-late" } }
-      }),
-      { id: ids("send", "C-send", JOB_ID) },
-    )
-    await app.dispatch(app.commands.sender.send, { message: "stranded" })
-
-    let running: ReturnType<typeof app.jobs.run> | undefined
-    let settled: Awaited<ReturnType<typeof app.jobs.run>> | undefined
-    try {
-      running = app.jobs.run(JOB_ID, {
-        runner: "worker-1",
-        leaseMs: 20,
-        heartbeatMs: 5,
-      })
-      void running.then((job) => (settled = job))
-      await started.promise
-      await Bun.sleep(40)
-      await Promise.resolve()
-
-      expect(aborted).toBe(true)
-      expect(settled).toMatchObject({
-        status: "completed",
-        conclusion: "failure",
-        error: { code: "progress-stalled", message: expect.stringContaining("progress lease expired") },
-      })
-    } finally {
-      release.resolve()
-      if (running !== undefined) await running
-      await app.close()
-    }
-  })
-  it("keeps the lease while a silent execution and its executor are both still alive", async () => {
-    // Live specimen R944 / PR165 rev7 (2026-08-04): started 18:00:59.800, settled
-    // `progress-stalled` at 18:01:59.832 — exactly 60.03s, zero heartbeat transitions.
-    // Progress is DEFINED as child output (yrd-queue command.ts onOutput -> reportProgress),
-    // so a check that prints nothing for one lease interval reads as dead. It was not: a
-    // quiet child is not a dead child, and the lease is an EXECUTOR-liveness signal, not a
-    // child-productivity one. Stall detection belongs to the process supervisor, which holds
-    // the child handle (DEFAULT_STEP_NO_PROGRESS_MS, 10 min) and is unreachable today because
-    // the 60s lease always fires first.
+  // The lease/stall seam (@yrd/core/21085-target-model/21094, #undead). These three
+  // replace one assertion that certified the defect: it required a silent-but-alive
+  // execution to be settled `progress-stalled` at its lease. Renewal used to be gated
+  // on child stdout, so silence read as death — live specimen R944 / PR165 rev7
+  // (2026-08-04) started 18:00:59.800 and was killed 18:01:59.832, exactly 60.03s,
+  // with zero heartbeat transitions. A lease protects against a LOST EXECUTOR; a
+  // stall verdict judges a SILENT CHILD, and only the process supervisor holding the
+  // child handle can tell those apart.
+  it("renews the lease across multiple windows while a silent execution stays alive", async () => {
     const started = Promise.withResolvers<void>()
     const finish = Promise.withResolvers<void>()
     let advanced = 0
     const app = await jobsApp(
-      delivery(async (_input, context) => {
-        context.observeProgress?.()
+      delivery(async () => {
         const working = setInterval(() => (advanced += 1), 2)
         started.resolve()
         try {
@@ -1405,15 +1363,72 @@ describe("Jobs", () => {
     const running = app.jobs.run(JOB_ID, { runner: "worker-1", leaseMs: 20, heartbeatMs: 5 })
     try {
       await started.promise
-      await Bun.sleep(40)
+      // Outlive FOUR lease windows without a single byte of output.
+      await Bun.sleep(80)
       expect(advanced).toBeGreaterThan(0)
       finish.resolve()
       await expect(running).resolves.toMatchObject({ status: "completed", conclusion: "success" })
     } finally {
       finish.resolve()
       await running.catch(() => undefined)
-      await app.close()
     }
+
+    const heartbeats = (await recorded(app))
+      .filter(({ name }) => name === "job/transitioned")
+      .map(({ data }) => data as { type: string })
+      .filter(({ type }) => type === "heartbeat")
+    expect(heartbeats.length).toBeGreaterThanOrEqual(3)
+    await app.close()
+  })
+
+  it("lapses a lease within one window when the executor is gone", async () => {
+    const app = await jobsApp(delivery(), { id: ids("send", "C-send", JOB_ID) })
+    await app.dispatch(app.commands.sender.send, { message: "orphan" })
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: JOB_ID,
+      attempt: 1,
+      runner: "yrd-cli:404",
+      leaseExpiresAt: "2026-01-01T00:00:01.000Z",
+    })
+
+    // Recovery must NOT name the runner here. Naming one settles on identity and
+    // fires even against a live lease (jobs.ts: `named` short-circuits the expiry
+    // check), so the lease would do no work and the test could not fail for the
+    // reason it claims. Unnamed, the settlement is driven purely by the lapsed
+    // lease — which is what still has to protect us now that renewal is
+    // unconditional — and it lands without retry and without merge.
+    await expect(app.jobs.recover({ now: "2026-01-01T00:00:02.000Z" })).resolves.toEqual([JOB_ID])
+    expect(app.jobs.state().byId[JOB_ID]).toMatchObject({
+      status: "completed",
+      conclusion: "timed_out",
+      lostReason: "runner lease expired",
+    })
+    await app.close()
+  })
+
+  it("surfaces the supervisor's stall verdict instead of inventing a lease verdict", async () => {
+    // A genuinely stalled child is settled by the process supervisor, which owns the
+    // child handle and names the bound it broke (yrd-queue command.ts -> `<purpose>-stalled`).
+    // The Job layer must carry that verdict verbatim, never overwrite it with one of its own.
+    const stallVerdict = {
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "merge-stalled", message: "merge stalled after 600000ms without progress" },
+    } as const
+    const app = await jobsApp(
+      delivery(async () => {
+        await Bun.sleep(60)
+        return stallVerdict
+      }),
+      { id: ids("send", "C-send", JOB_ID) },
+    )
+    await app.dispatch(app.commands.sender.send, { message: "stalled" })
+
+    const settled = await app.jobs.run(JOB_ID, { runner: "worker-1", leaseMs: 20, heartbeatMs: 5 })
+    expect(settled).toMatchObject(stallVerdict)
+    expect((settled as { error?: { code?: string } }).error?.code).not.toBe("progress-stalled")
+    await app.close()
   })
   it("aborts and awaits active runner cleanup when the runtime closes", async () => {
     const started = Promise.withResolvers<void>()

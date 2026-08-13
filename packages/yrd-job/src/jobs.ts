@@ -942,28 +942,20 @@ export function createJobs(options: CreateJobsOptions): Jobs {
         try {
           outcome = await executeWithHeartbeat(
             scope,
-            (progress) =>
+            (execution) =>
               installed.execute(requested.input, {
                 id,
                 attempt,
                 runner: parsed.runner,
                 startedAt: started.startedAt,
-                signal: progress.signal,
+                signal: execution.signal,
                 ...(executionContext === undefined ? {} : { context: executionContext }),
-                observeProgress: progress.observe,
-                reportProgress: progress.report,
               }),
             heartbeatMs,
-            async (renew) => {
+            async () => {
               const active = current(id)
               if (active.status !== "in_progress" || !Job.owns(active, attempt, parsed.runner, "in_progress")) {
                 throw new Error(`yrd: job '${id}' lost execution ownership`)
-              }
-              if (!renew) {
-                if (Date.parse(active.leaseExpiresAt) <= now()) {
-                  throw new ProgressLeaseExpiredError(id, active.leaseExpiresAt)
-                }
-                return
               }
               await commit({
                 type: "heartbeat",
@@ -982,12 +974,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
         const active = current(id)
         if (!Job.owns(active, attempt, parsed.runner, "in_progress")) return active
         const result =
-          outcome.heartbeatError === undefined
-            ? outcome.result
-            : failed(
-                outcome.heartbeatError instanceof ProgressLeaseExpiredError ? "progress-stalled" : "heartbeat-failed",
-                outcome.heartbeatError,
-              )
+          outcome.heartbeatError === undefined ? outcome.result : failed("heartbeat-failed", outcome.heartbeatError)
         await commit(settlement(id, attempt, parsed.runner, result))
         observedResult = result
         return current(id)
@@ -1380,33 +1367,31 @@ function projectJobs(state: DeepReadonly<{ jobs: JobsState }>, applied: Event): 
   }
 }
 
-class ProgressLeaseExpiredError extends Error {
-  constructor(job: string, leaseExpiresAt: string) {
-    super(`yrd: job '${job}' progress lease expired at ${leaseExpiresAt}`)
-  }
-}
-
+/**
+ * The lease is an EXECUTOR-liveness signal, so the heartbeat renews it for as
+ * long as this executor still owns a live execution. It deliberately does not
+ * consult the child's output: a check that prints nothing for a lease interval
+ * is quiet, not dead, and gating renewal on bytes printed put a productivity
+ * signal where a liveness signal belongs (@yrd/core/21085-target-model/21094).
+ * Judging a silent child is the process supervisor's job — it holds the child
+ * handle and settles a stall as `<purpose>-stalled` (yrd-queue command.ts).
+ */
 async function executeWithHeartbeat(
   scope: JobScope,
-  execute: (progress: Readonly<{ signal: AbortSignal; observe(): void; report(): void }>) => Promise<JobResult>,
+  execute: (execution: Readonly<{ signal: AbortSignal }>) => Promise<JobResult>,
   heartbeatMs: number,
-  heartbeat: (renew: boolean) => Promise<void>,
+  heartbeat: () => Promise<void>,
 ): Promise<{ result: JobResult; heartbeatError?: unknown }> {
   let heartbeatError: unknown
   let heartbeats = Promise.resolve()
-  let observesProgress = false
-  let progressRevision = 0
-  let renewedRevision = 0
   let detachExecution = false
   const executionScope = scope.child("execute")
   const heartbeatFailure = Promise.withResolvers<void>()
   const cancelHeartbeat = scope.interval(() => {
-    const renew = !observesProgress || progressRevision !== renewedRevision
-    if (renew) renewedRevision = progressRevision
     heartbeats = heartbeats.then(async () => {
       if (heartbeatError === undefined) {
         try {
-          await heartbeat(renew)
+          await heartbeat()
         } catch (error) {
           heartbeatError = error
           detachExecution = true
@@ -1417,16 +1402,7 @@ async function executeWithHeartbeat(
       return undefined
     })
   }, heartbeatMs)
-  const execution = execute({
-    signal: executionScope.signal,
-    observe() {
-      observesProgress = true
-    },
-    report() {
-      observesProgress = true
-      progressRevision += 1
-    },
-  })
+  const execution = execute({ signal: executionScope.signal })
   scope.use({
     async [Symbol.asyncDispose]() {
       cancelHeartbeat()
