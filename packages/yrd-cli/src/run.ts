@@ -8976,6 +8976,15 @@ function prMergeRefusalDetail(
       outcome: "rejected",
     }
   }
+  if (currentPRRev(pr).admission?.status === "refused") {
+    const inspect = `yrd pr checks ${pr.id}`
+    const resubmit = "fix the branch and run yrd pr submit again"
+    return {
+      next: inspect,
+      guidance: { inspect, resubmit },
+      message: `PR '${pr.id}' current revision failed required checks; see: ${inspect}; then ${resubmit}`,
+    }
+  }
   if (delivery === "submitted" || delivery === "ready") {
     const watch = `yrd watch --pr ${pr.id}`
     return {
