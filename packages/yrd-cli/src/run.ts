@@ -6967,6 +6967,7 @@ function createUncarriedSweeper(
     latest = {
       count: result.findings.length,
       scanned: result.scanned,
+      clockFallbacks: result.clockFallbacks,
       // Stamped when the sweep STARTED. Stamping on completion would make a
       // slow sweep look fresher than the facts it read.
       observedAt: new Date(startedMs).toISOString(),
@@ -7020,7 +7021,8 @@ async function queueUncarried(
   // rail's whole job is to be believable when it reads zero.
   const denominator =
     `scanned ${String(result.scanned)} · ${String(result.carried)} carried · ` +
-    `${String(result.outsideAgeBound)} outside the age bound · ${String(result.examined)} examined`
+    `${String(result.outsideAgeBound)} outside the age bound · ${String(result.examined)} examined · ` +
+    `${String(result.clockFallbacks)} legacy commit clocks`
   const lines = result.findings.map((finding) => `${finding.ref}  ${finding.message}`)
   await printResult(
     io,

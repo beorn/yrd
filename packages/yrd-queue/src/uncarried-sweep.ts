@@ -6,12 +6,11 @@
  * existed the predicate had no caller and the rail it was built for could not
  * report anything. That is the whole gap this closes.
  *
- * ORDERING IS THE DESIGN, not an optimisation. One `for-each-ref` yields every
- * ref with its commit date in a single process, so the carried set and the age
- * bound disqualify the overwhelming majority before any per-ref git object is
- * read. Measured on this fleet: 1,502 of 1,546 uncarried refs are older than a
- * week. Gathering facts first would mean thousands of `diff` invocations to
- * discard almost all of them.
+ * ORDERING IS THE DESIGN, not an optimisation. One `for-each-ref` enumerates
+ * every ref and one aggregate reflog scan supplies its local update clock, so
+ * the carried set and the age bound disqualify the overwhelming majority
+ * before any per-ref git object is read. Gathering facts first would mean
+ * thousands of `diff` invocations to discard almost all of them.
  */
 import { classifyPushedRef, type UncarriedFinding, type UncarriedOptions } from "./uncarried.ts"
 import { gatherPushedRefFact, type RefGit } from "./uncarried-facts.ts"
@@ -52,6 +51,9 @@ export type SweepResult = Readonly<{
   outsideAgeBound: number
   /** Facts gathered — the refs that actually cost git object reads. */
   examined: number
+  /** Legacy refs whose local update reflog is no longer retained. These use
+   * their tip commit clock, and the fallback is always surfaced to operators. */
+  clockFallbacks: number
 }>
 
 /** Gitlink paths standing on the base, read from tree mode 160000. Never
@@ -81,7 +83,14 @@ function branchOf(ref: string, namespace: string): string {
   return remote !== "" && ref.startsWith(remote) ? ref.slice(remote.length) : ref
 }
 
-type DatedRef = Readonly<{ ref: string; pushedAtMs: number; symbolic: boolean }>
+type DatedRef = Readonly<{
+  /** Full storage identity used to match exact reflog selectors. */
+  fullRef: string
+  /** Stable short identity exposed by findings and matched to carrier branches. */
+  ref: string
+  committedAtMs: number
+  symbolic: boolean
+}>
 
 /** One process for every ref and its commit date. The NUL separator is not
  * decoration — branch names may contain anything a ref format allows, and a
@@ -89,16 +98,18 @@ type DatedRef = Readonly<{ ref: string; pushedAtMs: number; symbolic: boolean }>
 async function datedRefs(git: RefGit, repo: string, namespace: string): Promise<readonly DatedRef[]> {
   const listing = await git.run(repo, [
     "for-each-ref",
-    "--format=%(refname:short)%00%(committerdate:unix)%00%(symref)",
+    "--format=%(refname)%00%(refname:short)%00%(committerdate:unix)%00%(symref)",
     namespace,
   ])
   return listing
     .split("\n")
     .filter((line) => line !== "")
     .map((line) => {
-      const [ref, rawSeconds, symref, ...extra] = line.split("\0")
+      const [fullRef, ref, rawSeconds, symref, ...extra] = line.split("\0")
       const seconds = Number(rawSeconds)
       if (
+        fullRef === undefined ||
+        fullRef === "" ||
         ref === undefined ||
         ref === "" ||
         rawSeconds === undefined ||
@@ -110,8 +121,38 @@ async function datedRefs(git: RefGit, repo: string, namespace: string): Promise<
           `yrd: uncarried sweep received malformed for-each-ref row under '${namespace}': ${JSON.stringify(line)}`,
         )
       }
-      return { ref, pushedAtMs: seconds * 1000, symbolic: symref !== "" }
+      return { fullRef, ref, committedAtMs: seconds * 1000, symbolic: symref !== "" }
     })
+}
+
+/** Latest local observation of each selected ref update. Reflogs are
+ * clone-local, so this is intentionally not described as server push time.
+ * One aggregate scan avoids a process per ref, and taking the maximum makes
+ * correctness independent of Git's output ordering. */
+async function latestRefUpdates(
+  git: RefGit,
+  repo: string,
+  refs: ReadonlySet<string>,
+): Promise<ReadonlyMap<string, number>> {
+  const listing = await git.run(repo, ["reflog", "show", "--all", "--date=unix", "--format=%gD"])
+  const updates = new Map<string, number>()
+  for (const line of listing.split("\n")) {
+    if (line === "") continue
+    const marker = line.lastIndexOf("@{")
+    if (marker < 1 || !line.endsWith("}")) {
+      throw new Error(`yrd: uncarried sweep received malformed reflog row: ${JSON.stringify(line)}`)
+    }
+    const ref = line.slice(0, marker)
+    const seconds = Number(line.slice(marker + 2, -1))
+    if (!Number.isFinite(seconds)) {
+      throw new Error(`yrd: uncarried sweep received malformed reflog row: ${JSON.stringify(line)}`)
+    }
+    if (!refs.has(ref)) continue
+    const updatedAtMs = seconds * 1000
+    const current = updates.get(ref)
+    if (current === undefined || updatedAtMs > current) updates.set(ref, updatedAtMs)
+  }
+  return updates
 }
 
 function isAuthoredRef(candidate: DatedRef, namespace: string, base: string): boolean {
@@ -141,24 +182,43 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
 
   let carried = 0
   let outsideAgeBound = 0
-  const survivors: DatedRef[] = []
+  let clockFallbacks = 0
+  const uncarried: DatedRef[] = []
   for (const candidate of refs) {
     if (carriedBranches.has(branchOf(candidate.ref, namespace))) {
       carried += 1
       continue
     }
-    const ageMs = options.nowMs - candidate.pushedAtMs
+    uncarried.push(candidate)
+  }
+
+  const refUpdates =
+    uncarried.length === 0
+      ? new Map<string, number>()
+      : await latestRefUpdates(git, repo, new Set(uncarried.map(({ fullRef }) => fullRef)))
+  const survivors: Array<Readonly<{ ref: string; pushedAtMs: number }>> = []
+  for (const candidate of uncarried) {
+    const updatedAtMs = refUpdates.get(candidate.fullRef)
+    if (updatedAtMs === undefined) clockFallbacks += 1
+    const pushedAtMs = updatedAtMs ?? candidate.committedAtMs
+    const ageMs = options.nowMs - pushedAtMs
     if (ageMs < options.ttlMs || ageMs > options.ageBoundMs) {
       outsideAgeBound += 1
       continue
     }
-    survivors.push(candidate)
+    survivors.push({ ref: candidate.ref, pushedAtMs })
   }
 
   const gitlinkPaths = survivors.length === 0 ? new Set<string>() : await gitlinkPathsOf(git, repo, base)
   const findings: UncarriedFinding[] = []
   for (const survivor of survivors) {
-    const fact = await gatherPushedRefFact(git, survivor.ref, { repo, base, carriedBranches, gitlinkPaths })
+    const fact = await gatherPushedRefFact(git, survivor.ref, {
+      repo,
+      base,
+      pushedAtMs: survivor.pushedAtMs,
+      carriedBranches,
+      gitlinkPaths,
+    })
     const finding = classifyPushedRef(fact, options)
     if (finding !== undefined) findings.push(finding)
   }
@@ -169,5 +229,6 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
     carried,
     outsideAgeBound,
     examined: survivors.length,
+    clockFallbacks,
   }
 }

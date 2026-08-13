@@ -25,7 +25,7 @@
 export type PushedRefFact = Readonly<{
   ref: string
   tipSha: string
-  /** Commit time of the ref tip, epoch ms. */
+  /** Clone-local observation/update time of the ref, epoch ms. */
   pushedAtMs: number
   /** A carrier (PR) already exists for this ref. */
   carried: boolean

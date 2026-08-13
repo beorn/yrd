@@ -4,6 +4,9 @@
  * @level   l1
  * @consumer @yrd/core/22716-yrd-hardening-program/p2-push-is-submit
  */
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { sweepUncarriedRefs, type SweepOptions } from "../src/uncarried-sweep.ts"
 import type { RefGit } from "../src/uncarried-facts.ts"
@@ -30,6 +33,17 @@ function fakeGit(responses: Record<string, string>): RefGit & { calls: string[][
     for (const [prefix, value] of Object.entries(responses)) {
       if (args.join(" ").startsWith(prefix)) return value
     }
+    if (args[0] === "reflog" && args[1] === "show") {
+      const refs = responses["for-each-ref"] ?? ""
+      return refs
+        .split("\n")
+        .filter((line) => line !== "")
+        .flatMap((line) => {
+          const [fullRef, , rawSeconds] = line.split("\0")
+          return fullRef !== undefined && rawSeconds !== undefined ? [`${fullRef}@{${rawSeconds}}`] : []
+        })
+        .join("\n")
+    }
     return undefined
   }
   return {
@@ -46,13 +60,52 @@ function fakeGit(responses: Record<string, string>): RefGit & { calls: string[][
 }
 
 function refLine(ref: string, agoMs: number, symref?: string): string {
-  return `${ref}\0${Math.floor((NOW - agoMs) / 1000)}\0${symref ?? ""}`
+  const fullRef = ref.startsWith("origin/") ? `refs/remotes/${ref}` : ref
+  return `${fullRef}\0${ref}\0${Math.floor((NOW - agoMs) / 1000)}\0${symref ?? ""}`
+}
+
+function reflogLine(fullRef: string, agoMs: number): string {
+  return `${fullRef}@{${String(Math.floor((NOW - agoMs) / 1000))}}`
+}
+
+async function gitCommand(
+  repo: string,
+  args: readonly string[],
+  env?: Readonly<Record<string, string>>,
+): Promise<Readonly<{ stdout: string; success: boolean }>> {
+  const child = Bun.spawn(["git", "-C", repo, ...args], {
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, ...env },
+  })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ])
+  if (exitCode !== 0) return { stdout: stderr.trim(), success: false }
+  return { stdout: stdout.trim(), success: true }
+}
+
+const realGit: RefGit = {
+  async run(repo, args) {
+    const result = await gitCommand(repo, args)
+    if (!result.success) throw new Error(`git ${args.join(" ")} failed: ${result.stdout}`)
+    return result.stdout
+  },
+  async optional(repo, args) {
+    const result = await gitCommand(repo, args)
+    return result.success ? result.stdout : undefined
+  },
 }
 
 describe("sweepUncarriedRefs", () => {
   it("refuses a malformed enumeration row instead of undercounting it", async () => {
     const git = fakeGit({
-      "for-each-ref": [refLine("origin/task/valid", 40 * HOUR), "origin/task/broken\0not-a-date"].join("\n"),
+      "for-each-ref": [
+        refLine("origin/task/valid", 40 * HOUR),
+        "refs/remotes/origin/task/broken\0origin/task/broken\0not-a-date\0",
+      ].join("\n"),
     })
 
     await expect(sweepUncarriedRefs(git, OPTIONS)).rejects.toThrow(/malformed for-each-ref row.*broken/u)
@@ -122,11 +175,12 @@ describe("sweepUncarriedRefs", () => {
 
     await sweepUncarriedRefs(git, { ...OPTIONS, carriedBranches: new Set(["task/carried"]) })
 
-    // One process total. Not ls-tree, not rev-parse, not diff — the ordering
-    // is the whole reason a 2,000-ref sweep is affordable, and it is invisible
-    // unless the test asserts the absence.
-    expect(git.calls).toHaveLength(1)
+    // One enumeration plus one aggregate reflog scan. Not ls-tree, rev-parse,
+    // diff, or a clock process per ref — the ordering is the whole reason a
+    // 2,000-ref sweep is affordable.
+    expect(git.calls).toHaveLength(2)
     expect(git.calls[0]?.[0]).toBe("for-each-ref")
+    expect(git.calls[1]?.slice(0, 2)).toEqual(["reflog", "show"])
   })
 
   it("actually examines a surviving ref and returns its finding", async () => {
@@ -138,7 +192,6 @@ describe("sweepUncarriedRefs", () => {
       "for-each-ref": refLine("origin/task/stranded", 3 * HOUR),
       "ls-tree": "160000 commit abc\tvendor/yrd",
       "rev-parse origin/task/stranded^{commit}": "deadbeefcafe",
-      "log -1": String(Math.floor((NOW - 3 * HOUR) / 1000)),
       "diff --name-only": "src/thing.ts",
       cherry: "+ 1111111111111111111111111111111111111111\n- 2222222222222222222222222222222222222222",
     })
@@ -155,6 +208,105 @@ describe("sweepUncarriedRefs", () => {
     // partly landed must not tell its author "unfinished" about work already
     // on trunk.
     expect(finding?.message).toContain("already applied")
+  })
+
+  it("ages a newly observed ref from its reflog update rather than its old commit", async () => {
+    const git = fakeGit({
+      "for-each-ref": refLine("origin/task/old-commit-new-push", 40 * HOUR),
+      "reflog show": [
+        reflogLine("refs/remotes/origin/task/old-commit-new-push", 30 * 60_000),
+        reflogLine("refs/remotes/origin/task/old-commit-new-pusher", 5 * 60_000),
+        reflogLine("refs/remotes/origin/task/old-commit-new-push", 11 * 60_000),
+      ].join("\n"),
+      "ls-tree": "",
+      "rev-parse origin/task/old-commit-new-push^{commit}": "deadbeefcafe",
+      "diff --name-only": "src/thing.ts",
+      cherry: "+ 1111111111111111111111111111111111111111",
+    })
+
+    const result = await sweepUncarriedRefs(git, OPTIONS)
+
+    expect(result.findings).toMatchObject([
+      {
+        ref: "origin/task/old-commit-new-push",
+        ageMs: 11 * 60_000,
+      },
+    ])
+    expect(result.clockFallbacks).toBe(0)
+  })
+
+  it("surfaces a missing retained reflog and falls back to the commit clock", async () => {
+    const git = fakeGit({
+      "for-each-ref": refLine("origin/task/legacy", 3 * HOUR),
+      "reflog show": "",
+      "ls-tree": "",
+      "rev-parse origin/task/legacy^{commit}": "deadbeefcafe",
+      "diff --name-only": "src/thing.ts",
+      cherry: "+ 1111111111111111111111111111111111111111",
+    })
+
+    const result = await sweepUncarriedRefs(git, OPTIONS)
+
+    expect(result.findings[0]?.ageMs).toBe(3 * HOUR)
+    expect(result.clockFallbacks).toBe(1)
+  })
+
+  it("refuses malformed reflog output instead of silently losing clock coverage", async () => {
+    const git = fakeGit({
+      "for-each-ref": refLine("origin/task/stranded", 3 * HOUR),
+      "reflog show": "refs/remotes/origin/task/stranded@{not-a-date}",
+    })
+
+    await expect(sweepUncarriedRefs(git, OPTIONS)).rejects.toThrow(/malformed reflog row/u)
+  })
+
+  it("reads Git's real full-ref reflog selector format", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "yrd-uncarried-clock-"))
+    try {
+      expect((await gitCommand(repo, ["init", "-b", "main"])).success).toBe(true)
+      expect((await gitCommand(repo, ["config", "user.name", "Yrd Test"])).success).toBe(true)
+      expect((await gitCommand(repo, ["config", "user.email", "yrd@example.test"])).success).toBe(true)
+      expect((await gitCommand(repo, ["config", "core.logAllRefUpdates", "true"])).success).toBe(true)
+      await writeFile(join(repo, "base.txt"), "base\n", "utf8")
+      expect((await gitCommand(repo, ["add", "base.txt"])).success).toBe(true)
+      const oldClock = `${String(Math.floor((NOW - 40 * HOUR) / 1000))} +0000`
+      expect(
+        (
+          await gitCommand(repo, ["commit", "-m", "base"], {
+            GIT_AUTHOR_DATE: oldClock,
+            GIT_COMMITTER_DATE: oldClock,
+          })
+        ).success,
+      ).toBe(true)
+      const base = (await gitCommand(repo, ["rev-parse", "HEAD"])).stdout
+      await writeFile(join(repo, "change.txt"), "change\n", "utf8")
+      expect((await gitCommand(repo, ["add", "change.txt"])).success).toBe(true)
+      expect(
+        (
+          await gitCommand(repo, ["commit", "-m", "change"], {
+            GIT_AUTHOR_DATE: oldClock,
+            GIT_COMMITTER_DATE: oldClock,
+          })
+        ).success,
+      ).toBe(true)
+      const tip = (await gitCommand(repo, ["rev-parse", "HEAD"])).stdout
+      expect((await gitCommand(repo, ["update-ref", "refs/heads/main", base, tip])).success).toBe(true)
+      const observedClock = `${String(Math.floor((NOW - 11 * 60_000) / 1000))} +0000`
+      expect(
+        (
+          await gitCommand(repo, ["update-ref", "--create-reflog", "refs/remotes/origin/task/clock", tip], {
+            GIT_COMMITTER_DATE: observedClock,
+          })
+        ).success,
+      ).toBe(true)
+
+      const result = await sweepUncarriedRefs(realGit, { ...OPTIONS, repo })
+
+      expect(result.findings).toMatchObject([{ ref: "origin/task/clock", ageMs: 11 * 60_000 }])
+      expect(result.clockFallbacks).toBe(0)
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
   })
 
   it("matches a merge request's branch name against a remote-prefixed ref", async () => {
