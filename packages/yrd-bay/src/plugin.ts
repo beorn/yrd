@@ -2229,9 +2229,12 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
     }
   }
   const recut = prRecut(pr)
-  const unchanged =
+  const payloadUnchanged =
     prHead(pr) === args.headSha &&
     prBaseSha(pr) === args.baseSha &&
+    sameComposition(prComposition(pr), args.composition)
+  const unchanged =
+    payloadUnchanged &&
     recut?.fromRevision === args.fromRevision &&
     recut.patchId === args.patchId &&
     recut.treeSha === args.treeSha &&
@@ -2239,8 +2242,7 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
     recut.certificate === args.certificate &&
     JSON.stringify(recut.sources) === JSON.stringify(args.sources) &&
     recut.transition?.from === args.transition?.from &&
-    recut.transition?.to === args.transition?.to &&
-    sameComposition(prComposition(pr), args.composition)
+    recut.transition?.to === args.transition?.to
   if (args.expectedCurrent?.track !== undefined && (pr.track ?? false) !== args.expectedCurrent.track) {
     raiseFailure(
       "refusal",
@@ -2288,11 +2290,15 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
       )
     }
   }
-  // A needs-author receipt consumed this revision's submission authority. An
-  // explicit recut is the author's reauthorization act, so it must mint one
-  // successor even when the rebuilt bytes are identical. Once that successor
-  // is submitted, an identical retry is a no-op again.
-  if (unchanged && prDeliveryState(pr) !== "needs-author") return { events: [] }
+  // Only Queue authority-consumption receipts make an identical recut an
+  // author reauthorization act. Authored-content failures need new bytes;
+  // minting the same bytes would manufacture the same refusal at revision N+1.
+  const needsAuthorCode = prNeedsAuthor(pr)?.receipt.code
+  const reauthorizesConsumedQueueAuthority =
+    needsAuthorCode === "queue-submit-authority-consumed" || needsAuthorCode === "queue-checks-authority-consumed"
+  if (!reauthorizesConsumedQueueAuthority && (unchanged || (needsAuthorCode !== undefined && payloadUnchanged))) {
+    return { events: [] }
+  }
 
   if (args.transition !== undefined) {
     if (args.expectedCurrent === undefined) {

@@ -16,7 +16,16 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { createBayJobDefs, currentPRRev, prDeliveryState, withBays } from "@yrd/bay"
-import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type Journal, type JsonValue } from "@yrd/core"
+import {
+  createFailure,
+  createMemoryJournal,
+  createYrd,
+  createYrdDef,
+  JsonSchema,
+  pipe,
+  type Journal,
+  type JsonValue,
+} from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { createJournal } from "@yrd/persistence"
 import { createProcess } from "@yrd/process"
@@ -27,6 +36,7 @@ import {
   withMerge,
   withQueue,
   withStep,
+  type CandidatePreparer,
   type PRShape,
   type SourceRewrite,
   type StepExecution,
@@ -148,6 +158,7 @@ async function createCliApp(
     merge?: (
       input: StepExecution<PRShape>,
     ) => Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>>
+    prepareCandidate?: CandidatePreparer
   } = {},
 ) {
   const bayJobs = createBayJobDefs(workspace())
@@ -171,7 +182,11 @@ async function createCliApp(
       })),
     { revision: "merge-v1" },
   )
-  const queue = withQueue({ steps: [check, merge] as const, batch: false })
+  const queue = withQueue({
+    steps: [check, merge] as const,
+    batch: false,
+    ...(options.prepareCandidate === undefined ? {} : { prepareCandidate: options.prepareCandidate }),
+  })
   const contest = contestAdapters()
   const contests = withContests({ runners: [contest.runner], evaluators: [contest.evaluator], git: contest.git })
   const base = pipe(
@@ -778,6 +793,62 @@ describe("pr recut --preflight", () => {
       result: { revision: 3, delivery: "ready" },
     })
     expect(app.state().bays.prs.PR1?.revs).toHaveLength(3)
+  })
+
+  it("does not turn an unchanged authored-content refusal into another identical revision", async () => {
+    const app = await createCliApp({
+      prepareCandidate: () => {
+        throw createFailure({
+          kind: "refusal",
+          code: "composition-invalid",
+          message: "submitted composition cannot be built",
+        })
+      },
+    })
+    await app.bays.submit({ branch: "topic/invalid-composition", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.requestChecks({ pr: "PR1" })
+    await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })
+    expect(app.state().bays.prs.PR1).toMatchObject({
+      revs: [{ admission: { status: "refused", receipt: { code: "composition-invalid" } } }],
+    })
+
+    const gitFacts = () =>
+      recutPreflightGit({
+        resolveCommit: (ref) =>
+          ref === "origin/main"
+            ? BASE_SHA
+            : ref === "origin/topic/invalid-composition" || ref === "topic/invalid-composition"
+              ? HEAD_SHA
+              : ref === BASE_SHA || ref === HEAD_SHA
+                ? ref
+                : undefined,
+        pinDistance: () => ({ sourceOnly: 0, targetOnly: 0 }),
+        mergeTree: () => OTHER_TREE,
+        treeOf: (sha) => (sha === BASE_SHA ? BASE_TREE : OTHER_TREE),
+        patchMatch: () => ({ patchId: PR476_PATCH_ID }),
+      })
+    const remedy = outputIO({ pruneGit: gitFacts, resolveRevision: async () => HEAD_SHA })
+    const code = await runYrd(
+      app,
+      yrd("pr", "recut", "PR1", "--preflight", "--queue", "--apply", "--json"),
+      remedy.io,
+      {
+        recut: {
+          recut: () =>
+            Promise.resolve({
+              headSha: HEAD_SHA,
+              baseSha: BASE_SHA,
+              treeSha: OTHER_TREE,
+              patchId: PR476_PATCH_ID,
+              unchanged: true,
+            }),
+        },
+      },
+    )
+    expect(code, remedy.stderr()).toBe(1)
+    expect(remedy.stderr()).toContain("composition-invalid")
+    expect(remedy.stderr()).toContain("push new authored content")
+    expect(app.state().bays.prs.PR1?.revs).toHaveLength(1)
   })
 
   it("refuses --ref with --revision before resolving or mutating anything", async () => {
