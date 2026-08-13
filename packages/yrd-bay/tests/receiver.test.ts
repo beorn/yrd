@@ -499,6 +499,39 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(await inboxFiles(f.receiver)).toEqual([])
   })
 
+  it("refuses a rewritten submit patchset before it can strand a receiver receipt", async () => {
+    const f = await fixture("submit-rewrite")
+    await git(f.mainRepo, "switch", "-qc", "work")
+    const firstHead = await commit(f.mainRepo, "first.txt")
+    const env = await installHookHost(f.root, {
+      "for:main/my-change": target(f.baseSha, { branch: "issue/my-change", issue: "my-change" }),
+    })
+    expect((await push(f, "work:refs/for/main/my-change", env)).code).toBe(0)
+
+    const firstDrain = await f.receiver.drain({
+      resolveTarget: async (_branch, _update, intent) =>
+        intent === undefined ? null : target(f.baseSha, { branch: "issue/my-change", issue: "my-change" }),
+      intake: async () => {},
+    })
+    expect(firstDrain.failed).toEqual([])
+
+    // Model the successful first receipt's carrier materialization. A later
+    // patchset must contain this carrier; otherwise accepting the Git ref and
+    // discovering the conflict during post-receive leaves an undrainable
+    // receipt after the pusher has already seen success.
+    await git(f.mainRepo, "update-ref", "refs/heads/issue/my-change", firstHead)
+    await git(f.mainRepo, "switch", "-qc", "rewritten", f.baseSha)
+    const rewrittenHead = await commit(f.mainRepo, "rewritten.txt")
+
+    const result = await push(f, "+rewritten:refs/for/main/my-change", env)
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain("carrier 'issue/my-change'")
+    expect(result.stderr).toContain("does not descend")
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/for/main/my-change")).toBe(firstHead)
+    expect(await inboxFiles(f.receiver)).toEqual([])
+    expect(rewrittenHead).not.toBe(firstHead)
+  })
+
   it("refuses at drain when the carrier branch moved since the push", async () => {
     const f = await fixture("submit-drift")
     await git(f.mainRepo, "switch", "-qc", "work")
