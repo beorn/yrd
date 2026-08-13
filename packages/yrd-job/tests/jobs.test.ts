@@ -1374,6 +1374,47 @@ describe("Jobs", () => {
       await app.close()
     }
   })
+  it("keeps the lease while a silent execution and its executor are both still alive", async () => {
+    // Live specimen R944 / PR165 rev7 (2026-08-04): started 18:00:59.800, settled
+    // `progress-stalled` at 18:01:59.832 — exactly 60.03s, zero heartbeat transitions.
+    // Progress is DEFINED as child output (yrd-queue command.ts onOutput -> reportProgress),
+    // so a check that prints nothing for one lease interval reads as dead. It was not: a
+    // quiet child is not a dead child, and the lease is an EXECUTOR-liveness signal, not a
+    // child-productivity one. Stall detection belongs to the process supervisor, which holds
+    // the child handle (DEFAULT_STEP_NO_PROGRESS_MS, 10 min) and is unreachable today because
+    // the 60s lease always fires first.
+    const started = Promise.withResolvers<void>()
+    const finish = Promise.withResolvers<void>()
+    let advanced = 0
+    const app = await jobsApp(
+      delivery(async (_input, context) => {
+        context.observeProgress?.()
+        const working = setInterval(() => (advanced += 1), 2)
+        started.resolve()
+        try {
+          await finish.promise
+        } finally {
+          clearInterval(working)
+        }
+        return { status: "completed", conclusion: "success", output: { receipt: "quiet-ok" } }
+      }),
+      { id: ids("send", "C-send", JOB_ID) },
+    )
+    await app.dispatch(app.commands.sender.send, { message: "quiet" })
+
+    const running = app.jobs.run(JOB_ID, { runner: "worker-1", leaseMs: 20, heartbeatMs: 5 })
+    try {
+      await started.promise
+      await Bun.sleep(40)
+      expect(advanced).toBeGreaterThan(0)
+      finish.resolve()
+      await expect(running).resolves.toMatchObject({ status: "completed", conclusion: "success" })
+    } finally {
+      finish.resolve()
+      await running.catch(() => undefined)
+      await app.close()
+    }
+  })
   it("aborts and awaits active runner cleanup when the runtime closes", async () => {
     const started = Promise.withResolvers<void>()
     let cleaned = false
