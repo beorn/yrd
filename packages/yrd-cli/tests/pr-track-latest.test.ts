@@ -17,6 +17,7 @@ import { withJobs, type JobResult } from "@yrd/job"
 import { runYrd, type PruneGitFacts, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
 import { withMerge, withQueue, withStep, type PRShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
 import { withIntents } from "@yrd/intent"
+import type { ProcessRequest } from "@yrd/process"
 import { withIssues } from "@yrd/issue"
 import { createLogger } from "loggily"
 import {
@@ -700,7 +701,11 @@ describe("resident merge-into-latest", () => {
 
     let advanced = false
     const process = {
-      run: async () => {
+      // Pin inspection opens by asking Git where the branch diverged from its
+      // base; answering that with silence would say this repository has no
+      // shared history, and inspection would refuse before it reaches the
+      // successor race this test is about.
+      run: async (request: ProcessRequest) => {
         if (!advanced) {
           advanced = true
           head = NEXT_LIVE_HEAD
@@ -709,7 +714,14 @@ describe("resident merge-into-latest", () => {
             run: { runner: "track-test", leaseMs: 60_000 },
           })
         }
-        return { exitCode: 0, signal: null, stdout: "", stderr: "", durationMs: 1, timedOut: false as const }
+        return {
+          exitCode: 0,
+          signal: null,
+          stdout: request.argv.includes("merge-base") ? `${BASE_SHA}\n` : "",
+          stderr: "",
+          durationMs: 1,
+          timedOut: false as const,
+        }
       },
       reapPath: async () => ({ targetedPids: [], survivorPids: [], forcedKill: false, signalFailures: [] }),
     }
