@@ -327,6 +327,35 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     })
   })
 
+  it("does not let unrelated landings reset one never-started carrier's readiness clock", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createDeliveryApp(clock.read)
+    await app.bays.submit({
+      branch: "issue/never-started",
+      headSha: HEAD,
+      base: "main",
+      baseSha: BASE,
+    })
+    const ignored = app.bays.prs().find((candidate) => candidate.branch === "issue/never-started")
+    if (ignored === undefined) throw new Error("submitted PR was not recorded")
+
+    clock.set("2026-01-01T00:20:00.000Z")
+    const landed = await submitAndRequestChecks(app, "issue/unrelated-landing")
+    await app.queue.run({ prs: [landed.id] }, runtime)
+    expect(app.bays.pr(landed.id)?.integratedAt).toBe("2026-01-01T00:20:00.000Z")
+    expect(app.bays.pr(ignored.id)?.integratedAt).toBeUndefined()
+    expect(app.bays.checksRequested(ignored.id)).toBe(false)
+
+    expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).toContainEqual(
+      expect.objectContaining({
+        code: "queue-never-started",
+        pr: ignored.id,
+        since: "2026-01-01T00:00:00.000Z",
+        blockedMs: 30 * 60_000,
+      }),
+    )
+  })
+
   /**
    * Box 2 of @i/10-merge-queue/uptime-is-not-health. The bead's predicate is a
    * CONJUNCTION validated over the whole journal — runner heartbeat fresh AND

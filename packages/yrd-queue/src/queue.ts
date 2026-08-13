@@ -5938,13 +5938,12 @@ function queueProgressAuditFindings(
   const nowMs = parseAuditTime(options.now, "now")
   const byBase = Map.groupBy(queued, (pr) => baseIdentity(pr.base))
   for (const [base, prs] of [...byBase.entries()].sort(([left], [right]) => left.localeCompare(right))) {
-    const latestLandingMs = latestQueueLandingMs(state, base)
     const neverStarted = prs.filter((pr) => !checksRequested(pr))
     if (neverStarted.length > 0) {
       const readyAtMs = Math.min(
         ...neverStarted.map((pr) => parseAuditTime(prSourceReadyAt(pr), `source-ready time for ${pr.id}`)),
       )
-      const sinceMs = Math.max(readyAtMs, latestLandingMs ?? readyAtMs)
+      const sinceMs = readyAtMs
       const blockedMs = Math.max(0, nowMs - sinceMs)
       const first = neverStarted[0]
       if (blockedMs >= progress.noLandingMs && first !== undefined) {
@@ -5969,6 +5968,7 @@ function queueProgressAuditFindings(
 
     const started = prs.filter((pr) => checksRequested(pr))
     if (started.length === 0) continue
+    const latestLandingMs = latestQueueLandingMs(state, base)
     const queuedAtMs = Math.min(...started.map((pr) => parseAuditTime(checkQueueTime(pr), `queue time for ${pr.id}`)))
     const sinceMs = Math.max(queuedAtMs, latestLandingMs ?? queuedAtMs)
     const blockedMs = Math.max(0, nowMs - sinceMs)
