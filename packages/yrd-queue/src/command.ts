@@ -1321,8 +1321,9 @@ export function gitMergeRecorder(options: {
     )
     if (added.code !== 0) {
       const raced = await git.run(options.repo, ["notes", `--ref=${MERGE_RECORD_NOTES_NAME}`, "show", target], true)
-      if (raced.code === 0 && createMergeRecord(parseMergeRecord(raced.stdout).record).canonical === record.canonical)
-        {return}
+      if (raced.code === 0 && createMergeRecord(parseMergeRecord(raced.stdout).record).canonical === record.canonical) {
+        return
+      }
       throw new Error(`yrd: merge record for '${run.id}' could not be published: ${added.stderr || added.stdout}`)
     }
     await publishMergeRecordRef(git, options.repo, run.id, remote)
