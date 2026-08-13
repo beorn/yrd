@@ -53,7 +53,7 @@ export type SweepResult = Readonly<{
   examined: number
   /** Legacy refs whose local update reflog is no longer retained. They cannot
    * mint TTL findings, and the coverage gap is always surfaced to operators. */
-  clockFallbacks: number
+  missingUpdateClocks: number
 }>
 
 /** Gitlink paths standing on the base, read from tree mode 160000. Never
@@ -175,7 +175,7 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
 
   let carried = 0
   let outsideAgeBound = 0
-  let clockFallbacks = 0
+  let missingUpdateClocks = 0
   const uncarried: EnumeratedRef[] = []
   for (const candidate of refs) {
     if (carriedBranches.has(branchOf(candidate.ref, namespace))) {
@@ -196,7 +196,7 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
       // A commit timestamp cannot prove when this clone observed the ref. Keep
       // the coverage gap loud, but never mint a TTL finding from an unrelated
       // author clock that could be older or newer than the actual ref update.
-      clockFallbacks += 1
+      missingUpdateClocks += 1
       continue
     }
     const ageMs = options.nowMs - updatedAtMs
@@ -227,6 +227,6 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
     carried,
     outsideAgeBound,
     examined: survivors.length,
-    clockFallbacks,
+    missingUpdateClocks,
   }
 }

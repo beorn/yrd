@@ -9,8 +9,8 @@ import { uncarriedLine, type UncarriedObservation } from "../src/queue-status-vi
 
 const NOW = Date.parse("2026-08-12T02:00:00.000Z")
 
-function observed(count: number, agoMs: number, scanned = 4784, clockFallbacks = 0): UncarriedObservation {
-  return { count, scanned, clockFallbacks, observedAt: new Date(NOW - agoMs).toISOString() }
+function observed(count: number, agoMs: number, scanned = 4784, missingUpdateClocks = 0): UncarriedObservation {
+  return { count, scanned, missingUpdateClocks, observedAt: new Date(NOW - agoMs).toISOString() }
 }
 
 describe("uncarriedLine", () => {
@@ -40,7 +40,7 @@ describe("uncarriedLine", () => {
     expect(uncarriedLine(observed(3, 60_000, 4784), NOW)).toContain("3 of 4784 refs")
   })
 
-  it("reports legacy commit-clock fallbacks on the resident rail", () => {
+  it("reports refs without retained update clocks on the resident rail", () => {
     expect(uncarriedLine(observed(3, 60_000, 4784, 12), NOW)).toContain("12 refs without retained update clocks")
   })
 

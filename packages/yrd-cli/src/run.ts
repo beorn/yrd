@@ -482,8 +482,8 @@ function parseUncarriedObservation(value: unknown): UncarriedObservation | undef
     )
   }
   if (
-    observation.clockFallbacks !== undefined &&
-    (!Number.isSafeInteger(observation.clockFallbacks) || (observation.clockFallbacks as number) < 0)
+    observation.missingUpdateClocks !== undefined &&
+    (!Number.isSafeInteger(observation.missingUpdateClocks) || (observation.missingUpdateClocks as number) < 0)
   ) {
     raiseFailure(
       "infrastructure",
@@ -491,11 +491,21 @@ function parseUncarriedObservation(value: unknown): UncarriedObservation | undef
       "yrd: resident runner uncarried clock fallback count is invalid",
     )
   }
+  const count = observation.count as number
+  const scanned = observation.scanned as number
+  const missingUpdateClocks = observation.missingUpdateClocks as number | undefined
+  if (count > scanned || (missingUpdateClocks !== undefined && count + missingUpdateClocks > scanned)) {
+    raiseFailure(
+      "infrastructure",
+      "resident-runner-status-invalid",
+      "yrd: resident runner uncarried counts exceed its scanned population",
+    )
+  }
   const observedAt = residentRunnerTimestamp(observation.observedAt, "uncarried observedAt")
   return {
-    count: observation.count as number,
-    scanned: observation.scanned as number,
-    ...(observation.clockFallbacks === undefined ? {} : { clockFallbacks: observation.clockFallbacks as number }),
+    count,
+    scanned,
+    ...(missingUpdateClocks === undefined ? {} : { missingUpdateClocks }),
     observedAt,
   }
 }
@@ -7004,7 +7014,7 @@ function createUncarriedSweeper(
     latest = {
       count: result.findings.length,
       scanned: result.scanned,
-      clockFallbacks: result.clockFallbacks,
+      missingUpdateClocks: result.missingUpdateClocks,
       // Stamped when the sweep STARTED. Stamping on completion would make a
       // slow sweep look fresher than the facts it read.
       observedAt: new Date(startedMs).toISOString(),
@@ -7059,7 +7069,7 @@ async function queueUncarried(
   const denominator =
     `scanned ${String(result.scanned)} · ${String(result.carried)} carried · ` +
     `${String(result.outsideAgeBound)} outside the age bound · ${String(result.examined)} examined · ` +
-    `${String(result.clockFallbacks)} refs without retained update clocks`
+    `${String(result.missingUpdateClocks)} refs without retained update clocks`
   const lines = result.findings.map((finding) => `${finding.ref}  ${finding.message}`)
   await printResult(
     io,

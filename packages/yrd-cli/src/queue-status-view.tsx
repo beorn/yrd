@@ -368,7 +368,7 @@ export type UncarriedObservation = Readonly<{
   scanned: number
   /** Legacy refs whose reflog clock was not retained. Optional for status
    * written by older residents; absence is unknown coverage, never zero. */
-  clockFallbacks?: number
+  missingUpdateClocks?: number
   observedAt: string
 }>
 
@@ -384,11 +384,11 @@ export function uncarriedLine(observation: UncarriedObservation | undefined, now
   if (observation === undefined) return "uncarried not swept"
   const ageMs = Math.max(0, nowMs - Date.parse(observation.observedAt))
   const clocks =
-    observation.clockFallbacks === undefined
+    observation.missingUpdateClocks === undefined
       ? ", push-clock coverage unknown"
-      : observation.clockFallbacks === 0
+      : observation.missingUpdateClocks === 0
         ? ""
-        : `, ${String(observation.clockFallbacks)} refs without retained update clocks`
+        : `, ${String(observation.missingUpdateClocks)} refs without retained update clocks`
   return (
     `uncarried ${String(observation.count)} of ${String(observation.scanned)} refs${clocks}, ` +
     `as of ${humanAge(ageMs)} ago`

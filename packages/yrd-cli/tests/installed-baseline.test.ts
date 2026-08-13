@@ -525,7 +525,7 @@ describe("host installed baseline", () => {
       statusPath,
       `${JSON.stringify({
         ...baseStatus,
-        uncarried: { count: 2, scanned: 50, clockFallbacks: 7, observedAt: "2026-08-13T20:00:30.000Z" },
+        uncarried: { count: 2, scanned: 50, missingUpdateClocks: 7, observedAt: "2026-08-13T20:00:30.000Z" },
       })}\n`,
       "utf8",
     )
@@ -533,7 +533,7 @@ describe("host installed baseline", () => {
     expect(current?.uncarried).toEqual({
       count: 2,
       scanned: 50,
-      clockFallbacks: 7,
+      missingUpdateClocks: 7,
       observedAt: "2026-08-13T20:00:30.000Z",
     })
     expect(uncarriedLine(current?.uncarried, Date.parse(baseStatus.lastTickAt))).toContain(
@@ -550,6 +550,16 @@ describe("host installed baseline", () => {
     )
     const legacy = await residentRunnerStatus(repo)
     expect(uncarriedLine(legacy?.uncarried, Date.parse(baseStatus.lastTickAt))).toContain("push-clock coverage unknown")
+
+    for (const uncarried of [
+      { count: 51, scanned: 50, missingUpdateClocks: 0, observedAt: "2026-08-13T20:00:30.000Z" },
+      { count: 40, scanned: 50, missingUpdateClocks: 20, observedAt: "2026-08-13T20:00:30.000Z" },
+    ]) {
+      await writeFile(statusPath, `${JSON.stringify({ ...baseStatus, uncarried })}\n`, "utf8")
+      await expect(residentRunnerStatus(repo)).rejects.toMatchObject({
+        failure: { code: "resident-runner-status-invalid" },
+      })
+    }
   })
 
   it("follow-mode heals foreign baseline drift via the same provision path as queue init (22306/22334)", async () => {

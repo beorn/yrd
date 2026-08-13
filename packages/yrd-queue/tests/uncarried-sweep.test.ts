@@ -236,10 +236,10 @@ describe("sweepUncarriedRefs", () => {
         ageMs: 11 * 60_000,
       },
     ])
-    expect(result.clockFallbacks).toBe(0)
+    expect(result.missingUpdateClocks).toBe(0)
   })
 
-  it("surfaces a missing retained reflog and falls back to the commit clock", async () => {
+  it("surfaces a missing retained reflog without minting a TTL finding", async () => {
     const git = fakeGit({
       "for-each-ref": refLine("origin/task/legacy", 3 * HOUR),
       "reflog show": "",
@@ -254,7 +254,7 @@ describe("sweepUncarriedRefs", () => {
     // A commit clock cannot prove when this clone observed the ref. Keep the
     // coverage gap loud, but never mint an actionable TTL finding from it.
     expect(result.findings).toEqual([])
-    expect(result.clockFallbacks).toBe(1)
+    expect(result.missingUpdateClocks).toBe(1)
   })
 
   it("refuses malformed reflog output instead of silently losing clock coverage", async () => {
@@ -318,7 +318,7 @@ describe("sweepUncarriedRefs", () => {
 
       expect(result.findings).toMatchObject([{ ref: "origin/task/clock", ageMs: 11 * 60_000 }])
       expect(result.findings[0]?.message).toContain("observed locally 11m ago")
-      expect(result.clockFallbacks).toBe(0)
+      expect(result.missingUpdateClocks).toBe(0)
     } finally {
       await rm(repo, { recursive: true, force: true })
     }
