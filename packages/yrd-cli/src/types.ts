@@ -8,8 +8,7 @@ import type {
   QueueAuditResult,
   QueueCommands,
   QueuesState,
-  RepositoryLandingIdentity,
-  RepositoryLandingSearchResult,
+  RepositoryMergeRecordSearchResult,
 } from "@yrd/queue"
 import type { HasIntents, IntentCommands, IntentsState } from "@yrd/intent"
 import type { HasIssues } from "@yrd/issue"
@@ -84,8 +83,8 @@ export type YrdCliServices = Readonly<{
   queue?: YrdCliQueueAdministration
   queueReadModel?: QueueReadModel
   recut?: GitPRRecutter
-  landingReceipts?: Readonly<{
-    find(identity: RepositoryLandingIdentity): Promise<RepositoryLandingSearchResult>
+  mergeRecords?: Readonly<{
+    find(selector: string): Promise<RepositoryMergeRecordSearchResult>
   }>
   journal?: YrdCliJournalAdministration
   checks?: YrdCliChecks

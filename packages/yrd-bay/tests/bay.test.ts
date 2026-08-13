@@ -1435,12 +1435,6 @@ describe("withBays", () => {
               landingSha: BASE,
               baseSha: BASE,
               changeId: identity.changeId,
-              receipt: {
-                ref: "refs/notes/yrd/receipts",
-                target: BASE,
-                note: HEAD_2,
-                checksum: "3".repeat(64),
-              },
             }),
           ],
         }

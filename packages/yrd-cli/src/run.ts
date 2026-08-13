@@ -9011,8 +9011,79 @@ async function explainLanding(
   options: JsonOption & Readonly<{ repair?: boolean }>,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
+  if (services.mergeRecords !== undefined) {
+    const proof = await services.mergeRecords.find(selector)
+    if (proof.status === "repository-corrupt" || proof.status === "repository-incomplete") {
+      await printResult(
+        io,
+        jsonEnabled(options),
+        { command: "why", selector, verdict: proof.status, reason: proof.reason, repaired: false },
+        `${proof.status.toUpperCase()} — ${selector}: ${proof.reason}`,
+      )
+      return 2
+    }
+    if (proof.status === "proven") {
+      const attempts = [...proof.records].sort((left, right) =>
+        left.record.merge.finishedAt.localeCompare(right.record.merge.finishedAt),
+      )
+      const latest = attempts.at(-1)
+      if (latest === undefined) configuration("repository merge-record query returned no proven records")
+      const verdict = latest.record.merge.result
+      const reason = latest.record.reason
+      const fix = latest.record.fix
+      let repaired = false
+      const pr = app.bays.pr(selector)
+      if (verdict === "merged" && options.repair === true && pr !== undefined) {
+        const revision = currentPRRev(pr)
+        const change = latest.record.changes.find(
+          (candidate) =>
+            candidate.pr === pr.id &&
+            candidate.revision === revision.n &&
+            candidate.submittedHead === revision.head &&
+            candidate.changeId === revision.changeId,
+        )
+        const commit = latest.record.merge.mergedCommit
+        const indexed =
+          prDeliveryState(pr) === "integrated" &&
+          pr.terminalRun === latest.record.merge.id &&
+          pr.integration?.commit === commit
+        if (!indexed && change !== undefined && change.changeId !== undefined && commit !== undefined) {
+          await app.queue.reconcileLanding({
+            pr: change.pr,
+            revision: change.revision,
+            headSha: change.submittedHead,
+            run: latest.record.merge.id,
+            commit,
+            landingSha: commit,
+            baseSha: commit,
+            changeId: change.changeId,
+          })
+          repaired = true
+        }
+      }
+      const human =
+        verdict === "merged"
+          ? `MERGED — ${selector} via ${latest.record.merge.id} at ${latest.record.merge.mergedCommit}`
+          : `${verdict.toUpperCase()} — ${latest.record.merge.id}: ${reason?.code ?? "unknown"}: ${reason?.message ?? "no reason recorded"}${fix === undefined ? "" : ` — fix: ${fix}`}`
+      await printResult(
+        io,
+        jsonEnabled(options),
+        { command: "why", selector, verdict, repaired, record: latest.record, pointer: latest.pointer, attempts },
+        human,
+      )
+      return verdict === "merged" ? 0 : 1
+    }
+  }
   const pr = app.bays.pr(selector)
-  if (pr === undefined) refusal(`yrd: no PR matches '${selector}'`)
+  if (pr === undefined) {
+    await printResult(
+      io,
+      jsonEnabled(options),
+      { command: "why", selector, verdict: "not-proven", reason: "merge-record-missing", repaired: false },
+      `NOT-PROVEN — ${selector}: merge-record-missing`,
+    )
+    return 1
+  }
   const revision = currentPRRev(pr)
   if (revision.changeId === undefined) {
     await printResult(
@@ -9023,47 +9094,15 @@ async function explainLanding(
     )
     return 1
   }
-  if (services.landingReceipts === undefined) configuration("repository landing receipts are not available")
-  const proof = await services.landingReceipts.find({
-    pr: pr.id,
-    revision: revision.n,
-    headSha: revision.head,
-    changeId: revision.changeId,
-  })
-  if (proof.status === "not-proven") {
-    const indexed = prDeliveryState(pr) === "integrated"
-    await printResult(
-      io,
-      jsonEnabled(options),
-      {
-        command: "why",
-        pr: pr.id,
-        verdict: indexed ? "index-corrupt" : "not-proven",
-        reason: proof.reason,
-        repaired: false,
-      },
-      `${indexed ? "INDEX-CORRUPT" : "NOT-PROVEN"} — ${pr.id}: ${proof.reason}`,
-    )
-    return indexed ? 2 : 1
-  }
-  const indexed =
-    prDeliveryState(pr) === "integrated" &&
-    pr.integration?.commit === proof.fact.commit &&
-    pr.integration.receipt?.note === proof.fact.receipt.note &&
-    pr.integration.receipt.checksum === proof.fact.receipt.checksum
-  let repaired = false
-  if (!indexed && options.repair === true) {
-    await app.queue.reconcileLanding(proof.fact)
-    repaired = true
-  }
-  const verdict = indexed || repaired ? "landed" : "index-gap"
+  const indexed = prDeliveryState(pr) === "integrated"
+  const verdict = indexed ? "index-corrupt" : "not-proven"
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "why", pr: pr.id, verdict, repaired, receipt: proof.fact.receipt, fact: proof.fact },
-    `${verdict.toUpperCase()} — ${pr.id} ${proof.fact.changeId} at ${proof.fact.commit}`,
+    { command: "why", selector, verdict, reason: "merge-record-missing", repaired: false },
+    `${verdict.toUpperCase()} — ${pr.id}: merge-record-missing`,
   )
-  return verdict === "landed" ? 0 : 1
+  return indexed ? 2 : 1
 }
 
 type CommanderOutput = { errorCommand?: CliCommand }

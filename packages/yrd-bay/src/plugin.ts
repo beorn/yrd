@@ -49,7 +49,6 @@ import {
   PRReviewDecisionSchema,
   PRReviewSchema,
   PRNeedsAuthorFactSchema,
-  PRLandingReceiptPointerSchema,
   PRRejectedFactSchema,
   PRTerminalAssociationSchema,
   ProvisionBayInputSchema,
@@ -518,15 +517,13 @@ export const PRIntegratedSchema = z.preprocess(
     landingSha: GitShaSchema,
     baseSha: GitShaSchema,
     changeId: ChangeIdSchema,
-    receipt: PRLandingReceiptPointerSchema,
     submitter: TextSchema.optional(),
   })
     .strict()
-    .refine(
-      ({ commit, landingSha, changeId, receipt }) =>
-        commit === landingSha && receipt.target === commit && /^I[0-9a-f]{40}$/u.test(changeId),
-      "integration commit, landing SHA, Change-Id, and receipt target must agree",
-    ),
+    .refine(({ commit, landingSha }) => commit === landingSha, {
+      message: "landingSha must equal the integration proof commit",
+      path: ["landingSha"],
+    }),
 )
 const PRAlreadyLandedSettlementSchema = z
   .object({
@@ -1770,7 +1767,7 @@ function changeIdForRevision(existing: DeepReadonly<PR> | undefined, commandId: 
   raiseFailure(
     "refusal",
     "legacy-change-id-missing",
-    `yrd: PR '${existing.id}' predates stable Change-Id identity; run the landing-receipt migration before rebuilding it`,
+    `yrd: PR '${existing.id}' predates stable Change-Id identity; migrate it before rebuilding`,
   )
 }
 
@@ -2335,7 +2332,7 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
     raiseFailure(
       "refusal",
       "legacy-change-id-missing",
-      `yrd: PR '${pr.id}' predates stable Change-Id identity; run the landing-receipt migration before rebuilding it`,
+      `yrd: PR '${pr.id}' predates stable Change-Id identity; migrate it before rebuilding`,
     )
   }
   const successorSubmitter = predecessor.submitter ?? defaultSubmitter
@@ -3113,7 +3110,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         integration: {
           commit: changed.commit,
           baseSha: changed.baseSha,
-          ...(parsed.success ? { changeId: parsed.data.changeId, receipt: parsed.data.receipt } : {}),
+          ...(parsed.success ? { changeId: parsed.data.changeId } : {}),
         },
         revs: patchRevisionClock(pr, {
           terminal: { kind: "integrated", at: applied.ts, ...(run === undefined ? {} : { run }) },

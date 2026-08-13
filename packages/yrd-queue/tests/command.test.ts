@@ -35,11 +35,11 @@ import {
   configuredMergeStep,
   createGitPRRecutter,
   findRepositoryChangeLanding,
+  findRepositoryMergeRecords,
   gitCandidatePreparer,
   gitCheckStep,
   gitMergeStep,
   gitMergeRecorder,
-  findRepositoryLandingReceipt,
   inspectGitQueueTarget,
   synthesizePinIntentCarrier,
   PRSnapshotSchema,
@@ -4064,12 +4064,6 @@ describe("Queue command adapters", () => {
             output: {
               commit,
               baseSha: commit,
-              receipt: {
-                ref: "refs/notes/yrd/receipts" as const,
-                target: commit,
-                note: "d".repeat(40),
-                checksum: "e".repeat(64),
-              },
             },
           }
         },
@@ -6279,7 +6273,6 @@ describe("Queue command adapters", () => {
 
   it("checks and lands the exact Change-Id-stamped Candidate", async () => {
     const { repo, feature: featureSha } = await repository("feature")
-    const baseBefore = await git(repo, ["rev-parse", "main"])
     await using process = createProcess()
     await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"], {
       prepareCandidate: true,
@@ -6305,60 +6298,36 @@ describe("Queue command adapters", () => {
     const integration = IntegrationProofSchema.parse(run.integration)
     expect(integration).toMatchObject({ commit: checked.candidateSha, baseSha: checked.candidateSha })
 
-    const listed = await git(repo, ["notes", "--ref=yrd/receipts", "list", checked.candidateSha])
-    const [noteObject, extraNoteField] = listed.split(" ")
-    expect(extraNoteField).toBeUndefined()
-    const note = JSON.parse(await git(repo, ["notes", "--ref=yrd/receipts", "show", checked.candidateSha])) as {
-      checksum: string
-    }
-    expect(note).toMatchObject({
-      schema: "yrd/landing-receipt/v1",
-      receipt: {
-        landing: { commit: checked.candidateSha, baseBefore, baseAfter: checked.candidateSha },
-        changes: [
-          {
-            changeId,
-            pr: "PR1",
-            revision: 1,
-            submittedHead: featureSha,
-            generatedCommit: checked.candidateSha,
-          },
-        ],
-      },
-      checksum: expect.stringMatching(/^[0-9a-f]{64}$/u),
-    })
-    expect(integration.receipt).toEqual({
-      ref: "refs/notes/yrd/receipts",
-      target: checked.candidateSha,
-      note: noteObject,
-      checksum: note.checksum,
-    })
     expect(app.state().bays.prs.PR1?.integration).toEqual({
       commit: checked.candidateSha,
       baseSha: checked.candidateSha,
       changeId,
-      receipt: integration.receipt,
     })
     await expect(
-      findRepositoryLandingReceipt({
+      findRepositoryMergeRecords({
         inject: { process },
         repo,
         baseSha: checked.candidateSha,
-        identity: { pr: "PR1", revision: 1, headSha: featureSha, changeId },
+        selector: "PR1",
       }),
     ).resolves.toMatchObject({
       status: "proven",
-      fact: {
-        pr: "PR1",
-        revision: 1,
-        headSha: featureSha,
-        run: run.id,
-        commit: checked.candidateSha,
-        landingSha: checked.candidateSha,
-        baseSha: checked.candidateSha,
-        changeId,
-        receipt: integration.receipt,
-      },
+      records: [
+        {
+          record: {
+            merge: { id: run.id, result: "merged", mergedCommit: checked.candidateSha },
+            changes: [
+              {
+                changeId,
+                pr: "PR1",
+                revision: 1,
+                submittedHead: featureSha,
+                generatedCommit: checked.candidateSha,
+              },
+            ],
+          },
+        },
+      ],
     })
   })
 
@@ -6392,6 +6361,51 @@ describe("Queue command adapters", () => {
         fix: expect.any(String),
       },
     })
+    await expect(
+      findRepositoryMergeRecords({
+        inject: { process },
+        repo,
+        baseSha: await git(repo, ["rev-parse", "main"]),
+        selector: "PR1",
+      }),
+    ).resolves.toMatchObject({
+      status: "proven",
+      records: [
+        {
+          record: { merge: { id: run.id, result: "failed" }, reason: { code: run.error?.code } },
+          pointer: { ref: "refs/notes/yrd/merge-records", target, note: noteObject },
+        },
+      ],
+    })
+  })
+
+  it("persists one canceled merge record when an active attempt is canceled", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    await using app = await checkedQueue(
+      process,
+      repo,
+      shellCommand(`printf '%s\\n' '{"token":"cancel-me","detail":"queued"}'`),
+      { waiting: true },
+    )
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const active = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    if (active === undefined) throw new Error("expected active Queue run")
+    await app.queue.cancelRun({ run: active.id, by: "operator", reason: "superseded by a newer attempt" })
+
+    const listed = await git(repo, ["notes", "--ref=yrd/merge-records", "list"])
+    const target = listed.split(" ")[1]
+    expect(target).toMatch(/^[0-9a-f]{40,64}$/u)
+    expect(JSON.parse(await git(repo, ["notes", "--ref=yrd/merge-records", "show", target!]))).toMatchObject({
+      schema: "yrd/merge-record/v1",
+      record: {
+        merge: { id: active.id, result: "canceled" },
+        changes: [{ pr: "PR1", revision: 1, submittedHead: featureSha }],
+        reason: { code: "run-canceled", message: "Queue run canceled by operator: superseded by a newer attempt" },
+        fix: expect.any(String),
+      },
+    })
   })
 
   it("lands the checked candidate through origin without touching a dirty local base checkout", async () => {
@@ -6420,145 +6434,17 @@ describe("Queue command adapters", () => {
     })
     expect(mergeJob).toMatchObject({ status: "completed", conclusion: "success", attempt: 1, output: run.integration })
     expect(await git(remote, ["rev-parse", "main"])).toBe(checked.candidateSha)
-    expect(JSON.parse(await git(remote, ["notes", "--ref=yrd/receipts", "show", checked.candidateSha]))).toMatchObject({
-      schema: "yrd/landing-receipt/v1",
-      receipt: { landing: { commit: checked.candidateSha } },
+    const mergeRecordRows = await git(remote, ["notes", "--ref=yrd/merge-records", "list"])
+    const mergeRecordTarget = mergeRecordRows.split(" ")[1]
+    expect(mergeRecordTarget).toMatch(/^[0-9a-f]{40,64}$/u)
+    expect(
+      JSON.parse(await git(remote, ["notes", "--ref=yrd/merge-records", "show", mergeRecordTarget!])),
+    ).toMatchObject({
+      schema: "yrd/merge-record/v1",
+      record: { merge: { id: run.id, result: "merged", mergedCommit: checked.candidateSha } },
     })
     expect(await git(repo, ["rev-parse", "main"])).toBe(localMain)
     expect(await Bun.file(join(repo, "operator-wip.txt")).text()).toBe("preserve me\n")
-  })
-
-  it("recovers a landing-before-receipt crash without reclassifying the Queue landing as already-contained", async () => {
-    const { repo, feature: featureSha } = await repository("feature")
-    const remote = join(repo, "..", "origin.git")
-    await Bun.$`git init -q --bare ${remote}`
-    await git(repo, ["remote", "add", "origin", remote])
-    await git(repo, ["push", "-q", "origin", "main", "issue/feature"])
-    await using process = createProcess()
-    let failReceipt = true
-    const crashAfterLanding: Pick<Process, "run"> = {
-      run(request) {
-        if (failReceipt && request.argv.includes("notes") && request.argv.includes("add")) {
-          failReceipt = false
-          return Promise.resolve({
-            exitCode: 73,
-            signal: null,
-            stdout: "",
-            stderr: "injected landing-before-receipt crash",
-            durationMs: 1,
-            timedOut: false,
-          })
-        }
-        return process.run(request)
-      },
-    }
-    await using app = await checkedQueue(crashAfterLanding, repo, ["test", "-f", "feature.txt"], {
-      prepareCandidate: true,
-    })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-
-    const first = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
-    const firstCheck = first.steps[0]?.job
-    const firstMerge = first.steps[1]?.job
-    if (firstCheck?.status !== "completed" || firstCheck.conclusion !== "success") {
-      throw new Error("first check did not pass")
-    }
-    if (firstMerge?.status !== "completed" || firstMerge.conclusion !== "failure") {
-      throw new Error("first merge did not fail at the injected receipt boundary")
-    }
-    const landed = GitCheckEvidenceSchema.parse(firstCheck.output).candidateSha
-    expect(await git(remote, ["rev-parse", "main"])).toBe(landed)
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted" })
-
-    const recovered = await gitMergeStep<Checked>({ inject: { process: crashAfterLanding }, repo })(
-      firstMerge.input as StepExecution<Checked>,
-      {
-        id: firstMerge.id,
-        attempt: 2,
-        runner: "local",
-        startedAt: firstMerge.startedAt,
-        signal: new AbortController().signal,
-      },
-    )
-
-    if (recovered.status !== "completed" || recovered.conclusion !== "success") {
-      throw new Error(`receipt recovery failed: ${JSON.stringify(recovered)}`)
-    }
-    expect(recovered).toMatchObject({
-      status: "completed",
-      conclusion: "success",
-      output: {
-        commit: landed,
-        receipt: { ref: "refs/notes/yrd/receipts", target: landed },
-      },
-    })
-    expect(recovered.output).not.toHaveProperty("alreadyLanded")
-    expect(JSON.parse(await git(remote, ["notes", "--ref=yrd/receipts", "show", landed]))).toMatchObject({
-      schema: "yrd/landing-receipt/v1",
-    })
-    expect(await git(repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/landing-attempts"])).toBe("")
-  })
-
-  it("recovers a local landing-before-receipt crash from its durable attempt marker", async () => {
-    const { repo, feature: featureSha } = await repository("feature")
-    await using process = createProcess()
-    let failReceipt = true
-    const crashAfterLanding: Pick<Process, "run"> = {
-      run(request) {
-        if (failReceipt && request.argv.includes("notes") && request.argv.includes("add")) {
-          failReceipt = false
-          return Promise.resolve({
-            exitCode: 73,
-            signal: null,
-            stdout: "",
-            stderr: "injected local landing-before-receipt crash",
-            durationMs: 1,
-            timedOut: false,
-          })
-        }
-        return process.run(request)
-      },
-    }
-    await using app = await checkedQueue(crashAfterLanding, repo, ["test", "-f", "feature.txt"], {
-      prepareCandidate: true,
-    })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-
-    const first = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
-    const firstCheck = first.steps[0]?.job
-    const firstMerge = first.steps[1]?.job
-    if (firstCheck?.status !== "completed" || firstCheck.conclusion !== "success") {
-      throw new Error("first local check did not pass")
-    }
-    if (firstMerge?.status !== "completed" || firstMerge.conclusion !== "failure") {
-      throw new Error("first local merge did not fail at the injected receipt boundary")
-    }
-    const landed = GitCheckEvidenceSchema.parse(firstCheck.output).candidateSha
-    expect(await git(repo, ["rev-parse", "main"])).toBe(landed)
-
-    const recovered = await gitMergeStep<Checked>({ inject: { process: crashAfterLanding }, repo })(
-      firstMerge.input as StepExecution<Checked>,
-      {
-        id: firstMerge.id,
-        attempt: 2,
-        runner: "local",
-        startedAt: firstMerge.startedAt,
-        signal: new AbortController().signal,
-      },
-    )
-
-    if (recovered.status !== "completed" || recovered.conclusion !== "success") {
-      throw new Error(`local receipt recovery failed: ${JSON.stringify(recovered)}`)
-    }
-    expect(recovered.output).toMatchObject({
-      commit: landed,
-      receipt: { ref: "refs/notes/yrd/receipts", target: landed },
-    })
-    expect(recovered.output).not.toHaveProperty("alreadyLanded")
-    expect(JSON.parse(await git(repo, ["notes", "--ref=yrd/receipts", "show", landed]))).toMatchObject({
-      schema: "yrd/landing-receipt/v1",
-    })
-    expect(await git(repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/landing-attempts"])).toBe("")
   })
 
   it("groups reachable non-tip candidate pins by origin in fresh exact-SHA proof stores", async () => {
@@ -7178,8 +7064,8 @@ describe("Queue command adapters", () => {
     const proof = IntegrationProofSchema.parse(run.integration)
     const rootPush = pushes.find((argv) => argv.includes(`${proof.commit}:refs/heads/main`))
     expect(rootPush).toContain("--recurse-submodules=no")
-    const receiptPush = pushes.find((argv) => argv.includes("refs/notes/yrd/receipts:refs/notes/yrd/receipts"))
-    expect(receiptPush).toEqual(expect.arrayContaining(["--no-verify", "--recurse-submodules=no"]))
+    const recordPush = pushes.find((argv) => argv.includes("refs/notes/yrd/merge-records:refs/notes/yrd/merge-records"))
+    expect(recordPush).toEqual(expect.arrayContaining(["--no-verify", "--recurse-submodules=no"]))
     expect(await git(remote, ["ls-tree", "main", "dep"])).toContain(moduleSha)
   })
 
@@ -7236,6 +7122,34 @@ describe("Queue command adapters", () => {
       ])
       expect(await git(fixture.rootRemote, ["ls-tree", "main", "dep"])).toContain(fixture.pinSha)
       expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.pinSha)
+      if (mode === "native") {
+        const merged = IntegrationProofSchema.parse(run.integration).commit
+        await git(fixture.repo, ["branch", "query-base", merged])
+        await git(fixture.repo, ["switch", "-q", "query-base"])
+        await git(join(fixture.repo, "dep"), ["checkout", "-q", fixture.successorSha])
+        await git(fixture.repo, ["add", "dep"])
+        await git(fixture.repo, ["commit", "-qm", "advance contained component pin"])
+        const currentBase = await git(fixture.repo, ["rev-parse", "HEAD"])
+
+        await expect(
+          findRepositoryMergeRecords({
+            inject: { process },
+            repo: fixture.repo,
+            baseSha: currentBase,
+            selector: "PR1",
+          }),
+        ).resolves.toMatchObject({
+          status: "proven",
+          records: [
+            {
+              record: {
+                merge: { id: run.id, result: "merged", mergedCommit: merged },
+                pins: [{ path: "dep", before: fixture.componentBaseSha, after: fixture.pinSha }],
+              },
+            },
+          ],
+        })
+      }
     },
     20_000,
   )

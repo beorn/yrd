@@ -572,16 +572,6 @@ export type PRAlreadyLandedEvidence = Readonly<{
 
 export type PRRegressionSeverity = "low" | "medium" | "high" | "critical"
 
-export const PRLandingReceiptPointerSchema = z
-  .object({
-    ref: z.literal("refs/notes/yrd/receipts"),
-    target: GitShaSchema,
-    note: GitShaSchema,
-    checksum: z.string().regex(/^[0-9a-f]{64}$/u),
-  })
-  .strict()
-export type PRLandingReceiptPointer = Readonly<z.infer<typeof PRLandingReceiptPointerSchema>>
-
 /** One completed escaped-regression outcome. Implementation and review
  * provenance stay opaque; Yrd owns only their exact delivery join. */
 export type PRRegression = Readonly<{
@@ -656,7 +646,6 @@ export type PR = Readonly<{
     commit: string
     baseSha: string
     changeId?: ChangeId
-    receipt?: PRLandingReceiptPointer
   }>
   alreadyLandedAt?: string
   alreadyLanded?: PRAlreadyLandedEvidence

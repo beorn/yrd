@@ -3661,31 +3661,27 @@ function createQueueCommands(
         revision.changeId === args.changeId &&
         pr.terminalRun === args.run &&
         pr.integration?.commit === args.commit &&
-        pr.integration.baseSha === args.baseSha &&
-        pr.integration.receipt?.ref === args.receipt.ref &&
-        pr.integration.receipt.target === args.receipt.target &&
-        pr.integration.receipt.note === args.receipt.note &&
-        pr.integration.receipt.checksum === args.receipt.checksum
+        pr.integration.baseSha === args.baseSha
       if (exact) return { events: [] }
       if (prDeliveryState(pr) === "integrated" || prDeliveryState(pr) === "already-landed") {
         raiseFailure(
           "infrastructure",
           "index-corrupt",
-          `yrd: repository receipt for '${args.pr}' disagrees with its terminal journal index`,
+          `yrd: repository merge record for '${args.pr}' disagrees with its terminal journal index`,
         )
       }
       if (prDeliveryState(pr) !== "submitted" && prDeliveryState(pr) !== "ready") {
         raiseFailure(
           "refusal",
           "index-not-reconcilable",
-          `yrd: repository receipt names PR '${args.pr}' while its journal state is ${prDeliveryState(pr)}`,
+          `yrd: repository merge record names PR '${args.pr}' while its journal state is ${prDeliveryState(pr)}`,
         )
       }
       if (revision.n !== args.revision || revision.head !== args.headSha || revision.changeId !== args.changeId) {
         raiseFailure(
           "infrastructure",
           "repository-corrupt",
-          `yrd: repository receipt does not match current ${args.pr} revision ${revision.n}@${revision.head}`,
+          `yrd: repository merge record does not match current ${args.pr} revision ${revision.n}@${revision.head}`,
         )
       }
       return {
@@ -5187,14 +5183,9 @@ function advanceQueue(
       }
       const revision = currentPRRev(current)
       if (revision.changeId === undefined) {
-        // A current receipt proves only the stable identity it names. Keep a
+        // A current merge record proves only the stable identity it names. Keep a
         // pre-identity same-payload record readable, but never infer that it landed.
         continue
-      }
-      if (shape.integration.receipt === undefined) {
-        throw new Error(
-          `yrd: PR '${current.id}' has no repository receipt for integration '${shape.integration.commit}'`,
-        )
       }
       events.push(
         event("pr/integrated", {
@@ -5207,7 +5198,6 @@ function advanceQueue(
           landingSha: shape.integration.commit,
           baseSha: shape.integration.baseSha,
           changeId: revision.changeId,
-          receipt: shape.integration.receipt,
           ...(revision.correlation === undefined ? {} : { correlation: revision.correlation }),
           ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
         }),

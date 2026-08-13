@@ -128,7 +128,7 @@ rather than reimplementing the systems around them:
   delivery system's records can live entirely inside the repository — the same
   shape as Yrd's receipts.
 - **Lockfile ecosystems** (Cargo, npm, Android's repo manifest) — the
-  coordinating pointer is an *output* synthesized from declared inputs, never
+  coordinating pointer is an _output_ synthesized from declared inputs, never
   hand-authored; conflicts resolve by regeneration. Yrd's superproject pins
   follow the same rule.
 
@@ -1315,12 +1315,12 @@ Yrd stores local authority under the primary worktree's common Git directory:
 ```
 
 The Git repository is the durable truth for landing identity. Yrd stamps the
-stable `Change-Id:` before checks, writes a checksummed note under
-`refs/notes/yrd/receipts` for the exact checked commit, and publishes that notes
-ref beside the base branch. `yrd why <selector>` verifies the trailer and base
-ancestry from Git. If the corresponding `pr/integrated` index row is missing,
-`yrd why <selector> --repair` appends it exactly once from that repository proof;
-without `--repair`, the command reports `index-gap` and changes nothing.
+stable `Change-Id:` before checks and writes one checksummed merge record under
+`refs/notes/yrd/merge-records` for every merged, failed, or canceled attempt.
+`yrd why <selector>` verifies merged Change-Ids against base ancestry and reports
+failed/canceled reasons, evidence, and fixes directly from Git. If the
+corresponding `pr/integrated` index row is missing, `yrd why <selector> --repair`
+appends it exactly once from that repository proof.
 
 `journal.sqlite` is the source of truth for transactional command history, not
 for whether code exists on the base. Each command appends one checksummed

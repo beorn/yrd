@@ -13,6 +13,7 @@ export const MergeRecordChangeSchema = z
     pr: PRIdSchema,
     revision: z.number().int().positive(),
     submittedHead: GitShaSchema,
+    generatedCommit: GitShaSchema.optional(),
   })
   .strict()
 
@@ -35,6 +36,10 @@ export const MergeRecordJobSchema = z
   })
   .strict()
 
+export const MergeRecordPinSchema = z
+  .object({ path: z.string().trim().min(1), before: GitShaSchema.nullable(), after: GitShaSchema })
+  .strict()
+
 export const MergeRecordBodySchema = z
   .object({
     merge: z
@@ -52,6 +57,7 @@ export const MergeRecordBodySchema = z
     changes: z.array(MergeRecordChangeSchema).min(1),
     reason: JobErrorSchema.optional(),
     evidence: z.object({ jobs: z.array(MergeRecordJobSchema) }).strict(),
+    pins: z.array(MergeRecordPinSchema),
     fix: z.string().trim().min(1).optional(),
   })
   .strict()
@@ -79,6 +85,16 @@ export const MergeRecordEnvelopeSchema = z
     }
   })
 export type MergeRecordEnvelope = Readonly<z.infer<typeof MergeRecordEnvelopeSchema>>
+
+export const MergeRecordPointerSchema = z
+  .object({
+    ref: z.literal(MERGE_RECORD_REF),
+    target: GitShaSchema,
+    note: GitShaSchema,
+    checksum: z.string().regex(/^[0-9a-f]{64}$/u),
+  })
+  .strict()
+export type MergeRecordPointer = Readonly<z.infer<typeof MergeRecordPointerSchema>>
 
 function canonicalJson(value: unknown): string {
   const encoded = canonicalize(value)

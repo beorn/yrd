@@ -31,12 +31,6 @@ import {
   projectionLookupValues,
   type QueueProjectionLookup,
 } from "./projection-lookup.ts"
-import {
-  CandidateChangeReceiptSchema,
-  LandingReceiptPointerSchema,
-  type CandidateChangeReceipt,
-  type LandingReceiptPointer,
-} from "./landing-receipt.ts"
 export type {
   QueueProjectionLookup,
   QueueProjectionLookupEntry,
@@ -81,7 +75,7 @@ export type QueueIntentSnapshot = Readonly<z.infer<typeof QueueIntentSnapshotSch
 export const PRSnapshotSchema = z
   .object({
     id: QueueMemberIdSchema,
-    /** Missing only while replaying pre-receipt Queue records and for pin intents. */
+    /** Missing only while replaying pre-identity Queue records and for pin intents. */
     changeId: ChangeIdSchema.optional(),
     bay: z.string().trim().min(1).optional(),
     name: z.string().trim().min(1).optional(),
@@ -160,6 +154,17 @@ export type CandidateRev = Readonly<{
   head: string
 }>
 
+export const CandidateChangeSchema = z
+  .object({
+    changeId: ChangeIdSchema,
+    pr: PRIdSchema,
+    revision: z.number().int().positive(),
+    submittedHead: GitShaSchema,
+    generatedCommit: GitShaSchema,
+  })
+  .strict()
+export type CandidateChange = Readonly<z.infer<typeof CandidateChangeSchema>>
+
 /** Immutable attempted integration. Its content identity is derived from the
  * queue/base plus ordered revision heads and their immutable compositions. */
 export type Candidate = Readonly<{
@@ -170,7 +175,7 @@ export type Candidate = Readonly<{
   sha?: string
   treeSha?: string
   ref?: string
-  changes?: readonly CandidateChangeReceipt[]
+  changes?: readonly CandidateChange[]
   sourceRewrites?: readonly SourceRewrite[]
   submoduleResolutions?: readonly QueueSubmoduleResolutionEvidence[]
   /** answers: Did preparation find this immutable Candidate mergeable? tense: historical. */
@@ -258,7 +263,7 @@ export const CandidateSchema = z
     /** Tree checked for this Candidate; current facts always carry it. */
     treeSha: GitShaSchema.optional(),
     ref: GitRefSchema.optional(),
-    changes: z.array(CandidateChangeReceiptSchema).min(1).optional(),
+    changes: z.array(CandidateChangeSchema).min(1).optional(),
     sourceRewrites: z.array(SourceRewriteSchema).optional(),
     submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),
     mergeability: z.enum(["unknown", "mergeable", "conflicting"]),
@@ -345,7 +350,6 @@ export type IntegrationProof = Readonly<{
   sourceRewrites?: readonly SourceRewrite[]
   submoduleResolutions?: readonly QueueSubmoduleResolutionEvidence[]
   componentMains?: readonly ComponentMainReceipt[]
-  receipt?: LandingReceiptPointer
 }>
 
 export const IntegrationProofSchema = z
@@ -357,7 +361,6 @@ export const IntegrationProofSchema = z
     sourceRewrites: z.array(SourceRewriteSchema).optional(),
     submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),
     componentMains: z.array(ComponentMainReceiptSchema).min(1).optional(),
-    receipt: LandingReceiptPointerSchema.optional(),
   })
   .strict() as z.ZodType<IntegrationProof>
 

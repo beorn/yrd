@@ -60,7 +60,7 @@ import {
   gitCheckStep,
   gitMergeStep,
   gitMergeRecorder,
-  findRepositoryLandingReceipt,
+  findRepositoryMergeRecords,
   inspectGitQueueTarget,
   resolveGitQueueTarget,
   worktreeContexts,
@@ -73,7 +73,6 @@ import {
   type IntegratedShape,
   type PRShape,
   type QueueAuditResult,
-  type RepositoryLandingIdentity,
   type StepDef,
   type StepExecution,
   type StepRunner,
@@ -1997,8 +1996,8 @@ async function createYrdRuntimeHost(
         () => runtimeApp.queue.steps(),
       ),
       recut: createGitPRRecutter({ inject: { process }, repo: repository.repo, env }),
-      landingReceipts: Object.freeze({
-        async find(identity: RepositoryLandingIdentity) {
+      mergeRecords: Object.freeze({
+        async find(selector: string) {
           const baseSha = (
             await resolveGitQueueTarget({
               inject: { process },
@@ -2006,7 +2005,7 @@ async function createYrdRuntimeHost(
               branch: baseIdentity(loaded.config.base),
             })
           ).sha
-          return findRepositoryLandingReceipt({ inject: { process }, repo: repository.repo, baseSha, identity })
+          return findRepositoryMergeRecords({ inject: { process }, repo: repository.repo, baseSha, selector })
         },
       }),
       base: loaded.config.base,

@@ -490,12 +490,6 @@ async function createApp(
         baseSha: string
         alreadyLanded?: Readonly<{ candidateSha: string; candidateTreeSha: string; baseTreeSha: string }>
         sourceRewrites?: readonly SourceRewrite[]
-        receipt?: Readonly<{
-          ref: "refs/notes/yrd/receipts"
-          target: string
-          note: string
-          checksum: string
-        }>
       }>
     > => {
       options.mergeRuns?.push("merge")
@@ -509,16 +503,6 @@ async function createApp(
           commit,
           baseSha: commit,
           ...(options.mergeAlreadyLanded === undefined ? {} : { alreadyLanded: options.mergeAlreadyLanded }),
-          ...(options.mergeAlreadyLanded === undefined
-            ? {
-                receipt: {
-                  ref: "refs/notes/yrd/receipts" as const,
-                  target: commit,
-                  note: "c".repeat(40),
-                  checksum: "d".repeat(64),
-                },
-              }
-            : {}),
           ...(options.sourceRewrites === undefined ? {} : { sourceRewrites: options.sourceRewrites }),
         },
       }
@@ -11398,47 +11382,113 @@ describe("runYrd", () => {
     }
   })
 
-  it("repairs a repository-proven landing whose journal index row is missing", async () => {
+  it("explains a failed merge from repository records after the Journal is lost", async () => {
+    await using app = await createApp()
+    const output = outputIO()
+    const changeId = `I${"e".repeat(40)}`
+    const record = {
+      merge: {
+        id: "R-failed",
+        base: "main",
+        baseSha: BASE_SHA,
+        candidate: "candidate:R-failed",
+        result: "failed" as const,
+        startedAt: "2026-08-12T20:00:00.000Z",
+        finishedAt: "2026-08-12T20:01:00.000Z",
+      },
+      changes: [{ changeId, pr: "PR1", revision: 1, submittedHead: HEAD_SHA }],
+      reason: { code: "merge-conflict", message: "candidate no longer applies to main" },
+      evidence: {
+        jobs: [
+          {
+            id: "J-merge",
+            step: "merge",
+            attempt: 1,
+            result: "failure" as const,
+            startedAt: "2026-08-12T20:00:00.000Z",
+            finishedAt: "2026-08-12T20:01:00.000Z",
+          },
+        ],
+      },
+      pins: [],
+      fix: "refresh the candidate on current main and retry",
+    }
+    const pointer = {
+      ref: "refs/notes/yrd/merge-records" as const,
+      target: "2".repeat(40),
+      note: "3".repeat(40),
+      checksum: "4".repeat(64),
+    }
+
+    expect(
+      await runYrd(app, yrd("why", "PR1", "--json"), output.io, {
+        mergeRecords: { find: async () => ({ status: "proven" as const, records: [{ record, pointer }] }) },
+      } as YrdCliServices),
+      output.stderr(),
+    ).toBe(1)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "why",
+      selector: "PR1",
+      verdict: "failed",
+      repaired: false,
+      record: {
+        merge: { id: "R-failed", result: "failed" },
+        reason: { code: "merge-conflict" },
+        fix: "refresh the candidate on current main and retry",
+      },
+      pointer,
+    })
+  })
+
+  it("repairs a repository-proven merge whose Journal index row is missing", async () => {
     await using app = await createApp()
     await app.bays.submit({ branch: "issue/index-gap", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
     const revision = currentPRRev(app.bays.pr("PR1")!)
     if (revision.changeId === undefined) throw new Error("expected current PR Change-Id")
-    const receipt = {
-      ref: "refs/notes/yrd/receipts",
-      target: MERGED_SHA,
+    const pointer = {
+      ref: "refs/notes/yrd/merge-records" as const,
+      target: "2".repeat(40),
       note: "c".repeat(40),
       checksum: "d".repeat(64),
-    } as const
+    }
+    const record = {
+      merge: {
+        id: "R-recovered",
+        base: "main",
+        baseSha: BASE_SHA,
+        candidate: "C1",
+        result: "merged" as const,
+        mergedCommit: MERGED_SHA,
+        startedAt: "2026-08-12T20:00:00.000Z",
+        finishedAt: "2026-08-12T20:01:00.000Z",
+      },
+      changes: [
+        {
+          pr: "PR1",
+          revision: 1,
+          submittedHead: HEAD_SHA,
+          changeId: revision.changeId,
+          generatedCommit: MERGED_SHA,
+        },
+      ],
+      evidence: { jobs: [] },
+      pins: [],
+    }
     const output = outputIO()
 
     expect(
       await runYrd(app, yrd("why", "PR1", "--repair", "--json"), output.io, {
-        landingReceipts: {
-          find: async () => ({
-            status: "proven" as const,
-            fact: {
-              pr: "PR1",
-              revision: 1,
-              headSha: HEAD_SHA,
-              run: "R-recovered",
-              commit: MERGED_SHA,
-              landingSha: MERGED_SHA,
-              baseSha: MERGED_SHA,
-              changeId: revision.changeId,
-              receipt,
-            },
-          }),
-        },
+        mergeRecords: { find: async () => ({ status: "proven" as const, records: [{ record, pointer }] }) },
       } as YrdCliServices),
       output.stderr(),
     ).toBe(0)
     expect(JSON.parse(output.stdout())).toMatchObject({
       command: "why",
-      verdict: "landed",
+      verdict: "merged",
       repaired: true,
-      receipt,
+      pointer,
     })
-    expect(app.bays.pr("PR1")?.integration).toMatchObject({ commit: MERGED_SHA, receipt })
+    expect(app.bays.pr("PR1")?.integration).toMatchObject({ commit: MERGED_SHA, changeId: revision.changeId })
   })
 })
 
@@ -12635,7 +12685,7 @@ describe("journal version skew fail-loud", () => {
   // carry fields this build's domain schemas do not recognize.
   const newerWriterFields = Object.freeze({
     forwardCompatProbe: "vNext",
-    landingReceipt: "9".repeat(40),
+    mergeRecord: "9".repeat(40),
   })
 
   /** RFC 8785-shaped JSON for journal frame data (strings, ints, arrays,
@@ -12778,7 +12828,7 @@ describe("journal version skew fail-loud", () => {
       const stderr = out.stderr()
       expect(stderr).toContain("newer")
       expect(stderr).toContain("forwardCompatProbe")
-      expect(stderr).toContain("landingReceipt")
+      expect(stderr).toContain("mergeRecord")
       expect(stderr).toContain(`${YRD_VERSION}+`)
       expect(stderr).not.toContain("resolve:")
       expect(stderr).not.toContain("-v")
