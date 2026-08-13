@@ -3008,6 +3008,135 @@ describe("runYrd", () => {
     expect(Queues.ids(app.state().queues)).toEqual([])
   })
 
+  it("keeps a five-carrier convoy tail flat until each resident candidate batch reaches the front", async () => {
+    let targetBase = "f".repeat(40)
+    let now = 0
+    const oldHeads = ["2", "3", "4", "5", "6"].map((digit) => digit.repeat(40))
+    const refreshedHeads = ["7", "8", "9", "a", "b"].map((digit) => digit.repeat(40))
+    const recutIds: string[] = []
+    const checkedRevisions: string[] = []
+    const app = await createApp({ batch: 2, waitingCheck: true, checkedRevisions })
+
+    for (const [index, oldHead] of oldHeads.entries()) {
+      const pr = `PR${index + 1}`
+      await app.bays.submit({
+        branch: `issue/resident-convoy-${index + 1}`,
+        headSha: oldHead,
+        baseSha: BASE_SHA,
+        draft: true,
+      })
+      await app.bays.recut({
+        pr,
+        fromRevision: 1,
+        headSha: oldHead,
+        baseSha: BASE_SHA,
+        treeSha: "c".repeat(40),
+        patchId: "d".repeat(40),
+        reviewCarried: false,
+      })
+      await app.bays.ready({ pr })
+      await app.bays.requestChecks({ pr, baseSha: BASE_SHA })
+    }
+
+    const recut = vi.fn((input: unknown) => {
+      const candidate = input as { id: string }
+      recutIds.push(candidate.id)
+      const index = Number(candidate.id.slice(2)) - 1
+      return Promise.resolve({
+        headSha: refreshedHeads[index]!,
+        baseSha: targetBase,
+        treeSha: "e".repeat(40),
+        patchId: "d".repeat(40),
+        unchanged: false,
+      })
+    })
+    const services = { recut: { recut } } as unknown as YrdCliServices
+    const controller = new AbortController()
+    const beforeResident = await Array.fromAsync(app.events()).then((events) => events.length)
+    const snapshots: Array<{
+      recuts: string[]
+      revisions: number[]
+      admissions: string[]
+      jobs: string[]
+      checks: string[]
+    }> = []
+    let sleeps = 0
+    const io = outputIO({
+      now: () => now,
+      resolveQueueTarget: async () => ({ base: "main", sha: targetBase }),
+      scope: {
+        signal: controller.signal,
+        sleep: async () => {
+          const residentEvents = (await Array.fromAsync(app.events())).slice(beforeResident)
+          snapshots.push({
+            recuts: [...recutIds],
+            revisions: ["PR1", "PR2", "PR3", "PR4", "PR5"].map((pr) => currentPRRev(app.bays.pr(pr)!).n),
+            admissions: ["PR1", "PR2", "PR3", "PR4", "PR5"].flatMap((pr) =>
+              app.bays
+                .pr(pr)!
+                .checkRequests.filter(({ revision }) => revision === 3)
+                .map(({ revision }) => `${pr}@${revision}`),
+            ),
+            jobs: residentEvents.flatMap(({ name, data }) => {
+              if (name !== "job/requested") return []
+              const match = /^admission:(PR\d+):(\d+):/.exec((data as { key?: string }).key ?? "")
+              return match === null ? [] : [`${match[1]}@${match[2]}`]
+            }),
+            checks: [...checkedRevisions],
+          })
+          sleeps += 1
+          if (sleeps === 1) {
+            await app.bays.closePr({ pr: "PR1", reason: "candidate landed" })
+            await app.bays.closePr({ pr: "PR2", reason: "candidate landed" })
+            targetBase = "e".repeat(40)
+            now += 60_000
+            return
+          }
+          if (sleeps === 2) {
+            await app.bays.closePr({ pr: "PR3", reason: "candidate landed" })
+            await app.bays.closePr({ pr: "PR4", reason: "candidate landed" })
+            targetBase = "d".repeat(40)
+            now += 60_000
+            return
+          }
+          controller.abort()
+        },
+      } as YrdCliIO["scope"],
+    }).io
+
+    await expect(
+      runInternals.followQueueRuns(app, [], { json: true, interval: 1 }, io, async () => undefined, services),
+    ).resolves.toBe(3)
+
+    // Each snapshot is taken after the resident's refresh + admission pass and
+    // before the simulated base move. The tail therefore proves zero work until
+    // its candidate batch reaches the front, followed by exactly one recut/check.
+    expect(snapshots).toEqual([
+      {
+        recuts: ["PR1", "PR2"],
+        revisions: [3, 3, 2, 2, 2],
+        admissions: ["PR1@3", "PR2@3"],
+        jobs: ["PR1@3"],
+        checks: ["PR1@3"],
+      },
+      {
+        recuts: ["PR1", "PR2", "PR3", "PR4"],
+        revisions: [3, 3, 3, 3, 2],
+        admissions: ["PR1@3", "PR2@3", "PR3@3", "PR4@3"],
+        jobs: ["PR1@3", "PR3@3"],
+        checks: ["PR1@3", "PR3@3"],
+      },
+      {
+        recuts: ["PR1", "PR2", "PR3", "PR4", "PR5"],
+        revisions: [3, 3, 3, 3, 3],
+        admissions: ["PR1@3", "PR2@3", "PR3@3", "PR4@3", "PR5@3"],
+        jobs: ["PR1@3", "PR3@3", "PR5@3"],
+        checks: ["PR1@3", "PR3@3", "PR5@3"],
+      },
+    ])
+    expect(recut).toHaveBeenCalledTimes(5)
+  })
+
   it("does not count a refused freshness pass as resident cycle progress", async () => {
     const nextBase = "b".repeat(40)
     const app = await createApp()
