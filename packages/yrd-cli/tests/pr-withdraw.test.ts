@@ -145,6 +145,9 @@ async function createCliApp(
   options: {
     journal?: Journal<unknown>
     resolveBase?: (ref: string) => Readonly<{ base: string; baseSha: string }>
+    merge?: (
+      input: StepExecution<PRShape>,
+    ) => Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>>
   } = {},
 ) {
   const bayJobs = createBayJobDefs(workspace())
@@ -158,13 +161,14 @@ async function createCliApp(
     },
   )
   const merge = withMerge(
-    async (
-      _input: StepExecution<PRShape>,
-    ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => ({
-      status: "completed",
-      conclusion: "success",
-      output: { commit: MERGED_SHA, baseSha: MERGED_SHA },
-    }),
+    options.merge ??
+      (async (
+        _input: StepExecution<PRShape>,
+      ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => ({
+        status: "completed",
+        conclusion: "success",
+        output: { commit: MERGED_SHA, baseSha: MERGED_SHA },
+      })),
     { revision: "merge-v1" },
   )
   const queue = withQueue({ steps: [check, merge] as const, batch: false })
@@ -681,6 +685,99 @@ describe("pr recut --preflight", () => {
     expect(recutInputs).toEqual([expect.objectContaining({ id: "PR1", revision: 1, headSha: HEAD_SHA })])
     expect(currentPRRev(app.state().bays.prs.PR1!)).toMatchObject({ n: 2, head: HEAD2_SHA })
     expect(app.bays.checksRequested("PR1")).toBe(true)
+  })
+
+  it("re-authorizes a certified current-base revision after the Queue consumes its submit authority", async () => {
+    const app = await createCliApp({
+      merge: async () => ({
+        status: "completed",
+        conclusion: "failure",
+        error: { code: "merge-failed", message: "fixture merge worktree is unavailable" },
+      }),
+    })
+    const runtime = { runner: "cli-test", leaseMs: 60_000 }
+    await app.bays.submit({ branch: "topic/consumed-authority", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.requestChecks({ pr: "PR1" })
+    await app.queue.run({ prs: ["PR1"] }, runtime)
+
+    const recutService = {
+      recut: {
+        recut: () =>
+          Promise.resolve({
+            headSha: HEAD_SHA,
+            baseSha: BASE_SHA,
+            treeSha: OTHER_TREE,
+            patchId: PR476_PATCH_ID,
+            unchanged: true,
+          }),
+      },
+    }
+    const gitFacts = () =>
+      recutPreflightGit({
+        resolveCommit: (ref) =>
+          ref === "origin/main"
+            ? BASE_SHA
+            : ref === "origin/topic/consumed-authority" || ref === "topic/consumed-authority"
+              ? HEAD_SHA
+              : ref === BASE_SHA || ref === HEAD_SHA
+                ? ref
+                : undefined,
+        pinDistance: () => ({ sourceOnly: 0, targetOnly: 0 }),
+        mergeTree: () => OTHER_TREE,
+        treeOf: (sha) => (sha === BASE_SHA ? BASE_TREE : OTHER_TREE),
+        patchMatch: () => ({ patchId: PR476_PATCH_ID }),
+      })
+    const initialRecut = outputIO({ pruneGit: gitFacts, resolveRevision: async () => HEAD_SHA })
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "recut", "PR1", "--preflight", "--queue", "--apply", "--json"),
+        initialRecut.io,
+        recutService,
+      ),
+      initialRecut.stderr(),
+    ).toBe(0)
+    expect(currentPRRev(app.state().bays.prs.PR1!)).toMatchObject({ n: 2, head: HEAD_SHA })
+
+    await app.queue.run({ prs: ["PR1"] }, runtime)
+    await app.queue.run({}, runtime)
+    expect(app.state().bays.prs.PR1).toMatchObject({
+      needsAuthor: { receipt: { code: "queue-submit-authority-consumed" } },
+    })
+
+    const remedy = outputIO({ pruneGit: gitFacts, resolveRevision: async () => HEAD_SHA })
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "recut", "PR1", "--preflight", "--queue", "--apply", "--json"),
+        remedy.io,
+        recutService,
+      ),
+      remedy.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(remedy.stdout())).toMatchObject({
+      command: "pr.recut.apply",
+      pr: "PR1",
+      verdict: "RECUT-FORCE",
+      result: { revision: 3, delivery: "ready" },
+    })
+    expect(app.state().bays.prs.PR1?.needsAuthor).toBeUndefined()
+
+    const replay = outputIO({ pruneGit: gitFacts, resolveRevision: async () => HEAD_SHA })
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "recut", "PR1", "--preflight", "--queue", "--apply", "--json"),
+        replay.io,
+        recutService,
+      ),
+      replay.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(replay.stdout())).toMatchObject({
+      verdict: "FRESH-NOOP",
+      result: { revision: 3, delivery: "ready" },
+    })
+    expect(app.state().bays.prs.PR1?.revs).toHaveLength(3)
   })
 
   it("refuses --ref with --revision before resolving or mutating anything", async () => {

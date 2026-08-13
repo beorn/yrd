@@ -374,15 +374,20 @@ export async function preflightRecut(
   const patch = await patchMatch(source.baseSha, candidateHeadSha, targetBaseSha)
   const subsumed = checks.ancestorOfBase === true || checks.mergeTree === "identical"
   const requiresForce = app.queue.eligibility(pr.id).checks.status === "passed"
+  const reauthorizing = prDeliveryState(pr) === "needs-author" && source.n === currentPRRev(pr).n
   const certifiedCurrentBase =
     options.proposedHeadSha === undefined && distance.targetOnly === 0 && source.recut !== undefined
   const verdict: RecutPreflightVerdict = subsumed
     ? "SUBSUMED-WITHDRAW"
-    : certifiedCurrentBase
-      ? "FRESH-NOOP"
-      : requiresForce
+    : reauthorizing
+      ? requiresForce
         ? "RECUT-FORCE"
         : "RECUT"
+      : certifiedCurrentBase
+        ? "FRESH-NOOP"
+        : requiresForce
+          ? "RECUT-FORCE"
+          : "RECUT"
   const revisionFlag =
     options.revision === undefined || options.proposedHeadSha !== undefined ? "" : ` --revision ${source.n}`
   const queueFlag = options.queue === true ? " --queue" : ""

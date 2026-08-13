@@ -2285,7 +2285,11 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
       )
     }
   }
-  if (unchanged) return { events: [] }
+  // A needs-author receipt consumed this revision's submission authority. An
+  // explicit recut is the author's reauthorization act, so it must mint one
+  // successor even when the rebuilt bytes are identical. Once that successor
+  // is submitted, an identical retry is a no-op again.
+  if (unchanged && prDeliveryState(pr) !== "needs-author") return { events: [] }
 
   if (args.transition !== undefined) {
     if (args.expectedCurrent === undefined) {
