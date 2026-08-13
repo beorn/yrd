@@ -30,6 +30,16 @@ function fakeGit(responses: Record<string, string>): RefGit & { calls: string[][
     for (const [prefix, value] of Object.entries(responses)) {
       if (args.join(" ").startsWith(prefix)) return value
     }
+    if (args.join(" ").startsWith("reflog show")) {
+      return (responses["for-each-ref"] ?? "")
+        .split("\n")
+        .filter((line) => line !== "")
+        .map((line) => {
+          const separator = line.lastIndexOf("\0")
+          return `${line.slice(0, separator)}@{${line.slice(separator + 1)}}`
+        })
+        .join("\n")
+    }
     return undefined
   }
   return {
@@ -47,6 +57,10 @@ function fakeGit(responses: Record<string, string>): RefGit & { calls: string[][
 
 function refLine(ref: string, agoMs: number): string {
   return `${ref}\0${Math.floor((NOW - agoMs) / 1000)}`
+}
+
+function reflogLine(ref: string, agoMs: number): string {
+  return `${ref}@{${Math.floor((NOW - agoMs) / 1000)}}`
 }
 
 describe("sweepUncarriedRefs", () => {
@@ -87,11 +101,12 @@ describe("sweepUncarriedRefs", () => {
 
     await sweepUncarriedRefs(git, { ...OPTIONS, carriedBranches: new Set(["task/carried"]) })
 
-    // One process total. Not ls-tree, not rev-parse, not diff — the ordering
-    // is the whole reason a 2,000-ref sweep is affordable, and it is invisible
-    // unless the test asserts the absence.
-    expect(git.calls).toHaveLength(1)
+    // Two aggregate processes total: enumeration plus one reflog scan. Not
+    // ls-tree, rev-parse, or diff per ref — the ordering is the whole reason a
+    // 2,000-ref sweep remains affordable.
+    expect(git.calls).toHaveLength(2)
     expect(git.calls[0]?.[0]).toBe("for-each-ref")
+    expect(git.calls[1]?.[0]).toBe("reflog")
   })
 
   it("limits the default rail to authored refs without hiding the excluded denominator", async () => {
@@ -141,6 +156,27 @@ describe("sweepUncarriedRefs", () => {
     // partly landed must not tell its author "unfinished" about work already
     // on trunk.
     expect(finding?.message).toContain("already applied")
+  })
+
+  it("ages a newly observed ref from its reflog update rather than its old commit", async () => {
+    const git = fakeGit({
+      "for-each-ref": refLine("refs/remotes/origin/task/old-commit-new-push", 40 * HOUR),
+      "reflog show": reflogLine("refs/remotes/origin/task/old-commit-new-push", 11 * 60_000),
+      "ls-tree": "",
+      "rev-parse refs/remotes/origin/task/old-commit-new-push^{commit}": "deadbeefcafe",
+      "log -1": String(Math.floor((NOW - 40 * HOUR) / 1000)),
+      "diff --name-only": "src/thing.ts",
+      cherry: "+ 1111111111111111111111111111111111111111",
+    })
+
+    const result = await sweepUncarriedRefs(git, OPTIONS)
+
+    expect(result.findings).toMatchObject([
+      {
+        ref: "refs/remotes/origin/task/old-commit-new-push",
+        ageMs: 11 * 60_000,
+      },
+    ])
   })
 
   it("matches a merge request's branch name against a remote-prefixed ref", async () => {

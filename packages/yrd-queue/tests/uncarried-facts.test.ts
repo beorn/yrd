@@ -33,13 +33,13 @@ function scriptedGit(responses: Record<string, string | undefined>): RefGit {
 
 const BASELINE = {
   [`${REPO} rev-parse task/x^{commit}`]: "a".repeat(40),
-  [`${REPO} log -1 --format=%ct task/x`]: "1786000000",
   [`${REPO} cherry ${BASE} task/x`]: "+ 1111111",
 } as const
 
 const OPTIONS = {
   repo: REPO,
   base: BASE,
+  pushedAtMs: 1_786_000_000_000,
   carriedBranches: new Set<string>(),
   gitlinkPaths: new Set(["vendor/yrd", "km"]),
 }

@@ -6,12 +6,10 @@
  * existed the predicate had no caller and the rail it was built for could not
  * report anything. That is the whole gap this closes.
  *
- * ORDERING IS THE DESIGN, not an optimisation. One `for-each-ref` yields every
- * ref with its commit date in a single process, so the carried set and the age
- * bound disqualify the overwhelming majority before any per-ref git object is
- * read. Measured on this fleet: 1,502 of 1,546 uncarried refs are older than a
- * week. Gathering facts first would mean thousands of `diff` invocations to
- * discard almost all of them.
+ * ORDERING IS THE DESIGN, not an optimisation. One `for-each-ref` enumerates
+ * the population, then one reflog scan supplies ref-local update clocks. The
+ * carried set and age bound still disqualify the overwhelming majority before
+ * any per-ref object read. Commit dates are payload metadata, not push clocks.
  */
 import { classifyPushedRef, type UncarriedFinding, type UncarriedOptions } from "./uncarried.ts"
 import { gatherPushedRefFact, type RefGit } from "./uncarried-facts.ts"
@@ -51,6 +49,9 @@ export type SweepResult = Readonly<{
   outsideAgeBound: number
   /** Facts gathered — the refs that actually cost git object reads. */
   examined: number
+  /** Legacy refs with no retained reflog entry, aged conservatively from their
+   * tip commit and reported so a fallback can never masquerade as full proof. */
+  clockFallbacks: number
 }>
 
 /** Gitlink paths standing on the base, read from tree mode 160000. Never
@@ -89,7 +90,7 @@ function isAuthoredBranch(branch: string, base: string): boolean {
   return branch !== "HEAD" && branch !== base && !branch.startsWith("yrd/candidates/")
 }
 
-type DatedRef = Readonly<{ ref: string; pushedAtMs: number }>
+type DatedRef = Readonly<{ ref: string; committedAtMs: number }>
 
 /** One process for every ref and its commit date. The NUL separator is not
  * decoration — branch names may contain anything a ref format allows, and a
@@ -104,8 +105,29 @@ async function datedRefs(git: RefGit, repo: string, namespace: string): Promise<
       if (separator < 0) return []
       const seconds = Number(line.slice(separator + 1))
       if (!Number.isFinite(seconds)) return []
-      return [{ ref: line.slice(0, separator), pushedAtMs: seconds * 1000 }]
+      return [{ ref: line.slice(0, separator), committedAtMs: seconds * 1000 }]
     })
+}
+
+/** Latest local observation of each ref update. `--date=unix` makes `%gD`
+ * render `refs/...@{<epoch>}`; the first row for a ref is its newest entry.
+ * One aggregate scan avoids a process per ref. */
+async function latestRefUpdates(
+  git: RefGit,
+  repo: string,
+  refs: ReadonlySet<string>,
+): Promise<ReadonlyMap<string, number>> {
+  const listing = await git.run(repo, ["reflog", "show", "--all", "--date=unix", "--format=%gD"])
+  const updates = new Map<string, number>()
+  for (const line of listing.split("\n")) {
+    const marker = line.lastIndexOf("@{")
+    if (marker < 0 || !line.endsWith("}")) continue
+    const ref = line.slice(0, marker)
+    if (!refs.has(ref) || updates.has(ref)) continue
+    const seconds = Number(line.slice(marker + 2, -1))
+    if (Number.isFinite(seconds)) updates.set(ref, seconds * 1000)
+  }
+  return updates
 }
 
 /**
@@ -127,7 +149,8 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
   let carried = 0
   let excluded = 0
   let outsideAgeBound = 0
-  const survivors: DatedRef[] = []
+  let clockFallbacks = 0
+  const uncarried: DatedRef[] = []
   for (const candidate of refs) {
     const branch = branchOf(candidate.ref, namespace)
     if (options.population === "authored" && !isAuthoredBranch(branch, base)) {
@@ -138,18 +161,38 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
       carried += 1
       continue
     }
-    const ageMs = options.nowMs - candidate.pushedAtMs
+    uncarried.push(candidate)
+  }
+
+  const refUpdates =
+    uncarried.length === 0
+      ? new Map<string, number>()
+      : await latestRefUpdates(git, repo, new Set(uncarried.map(({ ref }) => ref)))
+  const survivors: Array<Readonly<{ ref: string; pushedAtMs: number }>> = []
+  for (const candidate of uncarried) {
+    const updatedAtMs = refUpdates.get(candidate.ref)
+    if (updatedAtMs === undefined) clockFallbacks += 1
+    // Old refs can predate retained reflogs. The fallback is counted in the
+    // result and surfaced by both operator views; it is never a silent clock.
+    const pushedAtMs = updatedAtMs ?? candidate.committedAtMs
+    const ageMs = options.nowMs - pushedAtMs
     if (ageMs < options.ttlMs || ageMs > options.ageBoundMs) {
       outsideAgeBound += 1
       continue
     }
-    survivors.push(candidate)
+    survivors.push({ ref: candidate.ref, pushedAtMs })
   }
 
   const gitlinkPaths = survivors.length === 0 ? new Set<string>() : await gitlinkPathsOf(git, repo, base)
   const findings: UncarriedFinding[] = []
   for (const survivor of survivors) {
-    const fact = await gatherPushedRefFact(git, survivor.ref, { repo, base, carriedBranches, gitlinkPaths })
+    const fact = await gatherPushedRefFact(git, survivor.ref, {
+      repo,
+      base,
+      pushedAtMs: survivor.pushedAtMs,
+      carriedBranches,
+      gitlinkPaths,
+    })
     const finding = classifyPushedRef(fact, options)
     if (finding !== undefined) findings.push(finding)
   }
@@ -161,5 +204,6 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
     excluded,
     outsideAgeBound,
     examined: survivors.length,
+    clockFallbacks,
   }
 }

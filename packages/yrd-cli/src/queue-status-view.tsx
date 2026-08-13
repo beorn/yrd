@@ -364,8 +364,10 @@ export type QueueDriverEpoch = Readonly<{
 export type UncarriedObservation = Readonly<{
   /** Stranded refs the sweep confirmed — already past the landedness filter. */
   count: number
-  /** Refs enumerated, so a zero is readable rather than merely small. */
-  scanned: number
+  /** Authored refs in the selected population, after non-author refs leave. */
+  population: number
+  /** Authored legacy refs whose reflog update clock is no longer retained. */
+  clockFallbacks: number
   observedAt: string
 }>
 
@@ -380,7 +382,11 @@ export type UncarriedObservation = Readonly<{
 export function uncarriedLine(observation: UncarriedObservation | undefined, nowMs: number): string {
   if (observation === undefined) return "uncarried not swept"
   const ageMs = Math.max(0, nowMs - Date.parse(observation.observedAt))
-  return `uncarried ${String(observation.count)} of ${String(observation.scanned)} refs, as of ${humanAge(ageMs)} ago`
+  const clocks = observation.clockFallbacks === 0 ? "" : `, ${String(observation.clockFallbacks)} legacy commit clocks`
+  return (
+    `uncarried ${String(observation.count)} of ${String(observation.population)} authored refs${clocks}, ` +
+    `as of ${humanAge(ageMs)} ago`
+  )
 }
 
 function humanAge(ageMs: number): string {

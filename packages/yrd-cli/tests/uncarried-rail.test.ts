@@ -9,8 +9,8 @@ import { uncarriedLine, type UncarriedObservation } from "../src/queue-status-vi
 
 const NOW = Date.parse("2026-08-12T02:00:00.000Z")
 
-function observed(count: number, agoMs: number, scanned = 4784): UncarriedObservation {
-  return { count, scanned, observedAt: new Date(NOW - agoMs).toISOString() }
+function observed(count: number, agoMs: number, population = 3293): UncarriedObservation {
+  return { count, population, clockFallbacks: 0, observedAt: new Date(NOW - agoMs).toISOString() }
 }
 
 describe("uncarriedLine", () => {
@@ -33,11 +33,15 @@ describe("uncarriedLine", () => {
   it("says how long ago a dead runner last looked, rather than going quiet", () => {
     const line = uncarriedLine(observed(0, 3 * 60 * 60_000), NOW)
     expect(line).toContain("as of 3h ago")
-    expect(line).toContain("0 of 4784 refs")
+    expect(line).toContain("0 of 3293 authored refs")
   })
 
-  it("reports the denominator so a small number is readable", () => {
-    expect(uncarriedLine(observed(3, 60_000, 4784), NOW)).toContain("3 of 4784 refs")
+  it("reports the authored denominator so a small number is readable", () => {
+    expect(uncarriedLine(observed(3, 60_000, 3293), NOW)).toContain("3 of 3293 authored refs")
+  })
+
+  it("keeps legacy clock fallbacks loud beside the denominator", () => {
+    expect(uncarriedLine({ ...observed(0, 60_000), clockFallbacks: 12 }, NOW)).toContain("12 legacy commit clocks")
   })
 
   it("does not render a future observation as a negative age", () => {
