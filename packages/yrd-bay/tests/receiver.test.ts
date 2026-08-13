@@ -487,7 +487,13 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
         // The issue rides through to intake. A push that carries an issue
         // reference and lands a PR with no issue has forgotten the only thing
         // the ref said beyond its commits.
-        intake: expect.objectContaining({ base: "main", branch: "issue/my-change", issue: "my-change", headSha }),
+        intake: expect.objectContaining({
+          base: "main",
+          branch: "issue/my-change",
+          issue: "my-change",
+          headSha,
+          submit: true,
+        }),
       }),
     ])
     expect(await inboxFiles(f.receiver)).toEqual([])

@@ -68,7 +68,12 @@ const ReceiverReceiptSchema = z
     change: TextSchema.optional(),
     oldSha: GitShaSchema,
     headSha: GitShaSchema,
-    intake: ReceiverTargetSchema.extend({ branch: GitRefSchema, headSha: GitShaSchema }).strict(),
+    intake: ReceiverTargetSchema.extend({
+      branch: GitRefSchema,
+      headSha: GitShaSchema,
+      /** Present only when the accepted ref itself was the submission act. */
+      submit: z.literal(true).optional(),
+    }).strict(),
   })
   .strict()
 
@@ -807,7 +812,12 @@ function makeReceipt(
     ...(intent === undefined ? {} : { change: intent.name }),
     oldSha: update.oldSha,
     headSha: update.newSha,
-    intake: { ...target, branch, headSha: update.newSha },
+    intake: {
+      ...target,
+      branch,
+      headSha: update.newSha,
+      ...(intent === undefined ? {} : { submit: true as const }),
+    },
   }
 }
 

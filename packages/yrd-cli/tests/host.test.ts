@@ -1411,6 +1411,32 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 })
 
 describe("createYrdHost", { timeout: 20_000 }, () => {
+  it("turns one refs/for push into an atomically submitted checked PR", async () => {
+    const { repo, featureSha } = await repository()
+    const initialized = await createYrdHost({ cwd: repo, defaultSubmitter: "@dev/3" })
+    const receiverPath = initialized.receiver.receiverPath
+    await initialized.close()
+
+    // This is the only author action. The managed receiver must carry the
+    // submit intent all the way through intake; a later `yrd pr submit` would
+    // recreate the exact second act P2 removes.
+    await git(repo, "push", receiverPath, `${featureSha}:refs/for/main/@yrd/core/atomic-submit`)
+
+    await using reopened = await createYrdHost({ cwd: repo, defaultSubmitter: "@dev/3" })
+    const [pr] = Object.values(reopened.app.state().bays.prs)
+    expect(pr).toMatchObject({
+      issue: "@yrd/core/atomic-submit",
+      branch: "issue/@yrd/core/atomic-submit",
+    })
+    expect(prDeliveryState(pr!)).toBe("submitted")
+    expect(reopened.app.bays.checksRequested(pr!.id)).toBe(true)
+
+    const transactions = (await journalEnvelope(repo))
+      .flatMap(({ values }) => values)
+      .map((value) => parseJournalFrame(value).events.map(({ name }) => name))
+    expect(transactions).toContainEqual(["pr/pushed", "pr/submitted", "pr/checks-requested"])
+  })
+
   it("uses the Hab service identity at the shipping process host", async () => {
     const { repo } = await repository()
     const previousServiceName = process.env.HAB_SERVICE_NAME

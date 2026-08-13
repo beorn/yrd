@@ -182,6 +182,8 @@ const IntakePRArgsSchema = z
     headSha: GitShaSchema,
     baseSha: GitShaSchema.optional(),
     submitter: TextSchema.optional(),
+    /** The accepted ref was refs/for, so intake and submission are one act. */
+    submit: z.literal(true).optional(),
     composition: CompositionV1Schema.optional(),
     receipt: z
       .string()
@@ -1825,6 +1827,7 @@ function intakePR(
   refuseDuplicatePayload(current, args.headSha, base, replayComposition, existing?.id)
   const resumesSubmission =
     existing !== undefined && (prNeedsAuthor(existing) !== undefined || prDeliveryState(existing) === "rejected")
+  const submitsRevision = args.submit === true || resumesSubmission
   if (
     existing !== undefined &&
     prHead(existing) === args.headSha &&
@@ -1857,7 +1860,7 @@ function intakePR(
   return {
     events: [
       event("pr/pushed", pushed),
-      ...(resumesSubmission
+      ...(submitsRevision
         ? [
             event("pr/submitted", { pr: id, revision, headSha: args.headSha, submitter }),
             event("pr/checks-requested", {
