@@ -436,7 +436,8 @@ export async function createYrd<State extends object, Commands extends CommandTr
     }
     const parsed = ProjectionCheckpointSchema.parse(checkpoint.value)
     const envelopeParsedAt = performance.now()
-    const state = projectionCheckpointState(parsed.state)
+    const state: unknown = parsed.state
+    assertCheckpointState(state)
     if (typeof state !== "object" || state === null || Array.isArray(state)) {
       throw new Error("checkpoint state must be a JSON object")
     }
@@ -1026,6 +1027,85 @@ function projectionCheckpointState(value: unknown, path = "$state"): JsonValue {
   // Define dynamic keys as own data properties. Assignment into `{}` would
   // invoke the inherited __proto__ setter and silently drop valid JSON state.
   return Object.fromEntries(entries)
+}
+
+/** Diagnostic path for `assertCheckpointState`, built only on the failing node. */
+function checkpointStatePath(trail: readonly (string | number)[]): string {
+  let path = "$state"
+  for (const segment of trail) path += typeof segment === "number" ? `[${segment}]` : `.${segment}`
+  return path
+}
+
+/**
+ * Restore's counterpart to `projectionCheckpointState`: the same JSON-shape
+ * contract, asserted over the graph a checkpoint store already handed us
+ * instead of rebuilt into a second one. Restored state always arrives freshly
+ * materialized — `JSON.parse` in the SQLite store, `structuredClone` in an
+ * in-memory one — so the rebuild produced a structurally identical graph and
+ * only doubled restore's peak allocation. Receipts in the same envelope already
+ * take this route through `parseCheckpointFrame`.
+ *
+ * Every allocation on the success path is load-bearing, because Bun's allocator
+ * never returns freed pages to the OS: a walk's transient garbage raises the
+ * process high-water mark exactly as durably as a retained graph does. Hence
+ * the index loops over `Object.keys` rather than `Object.entries`/`.entries()`,
+ * which materialize a pair array per node, and the `trail` of raw segments
+ * rather than a per-node concatenated path string. Measured on a 26.73 MB
+ * checkpoint (18.67 MB state graph): rebuild +101.8 MB, in-place walk building
+ * per-node path strings +102.2 MB — no gain at all — in-place walk with this
+ * deferred path +33.9 MB.
+ *
+ * Divergence from the rebuild, deliberate: an `undefined` object value is
+ * refused here rather than dropped. The save path strips those before the
+ * checkpoint is written, so a stored one cannot carry any; refusing routes the
+ * unreachable case to `loadProjection`'s journal rebuild instead of silently
+ * reshaping restored state, and matches `checkpointJson` on the receipt half.
+ */
+function assertCheckpointState(value: unknown, trail: (string | number)[] = []): asserts value is JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || Object.is(value, -0)) {
+      throw new TypeError(
+        `yrd: projection checkpoint state '${checkpointStatePath(trail)}' must be a finite JSON number`,
+      )
+    }
+    return
+  }
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      const entry: unknown = value[index]
+      trail.push(index)
+      if (entry === undefined) {
+        throw new TypeError(`yrd: projection checkpoint state '${checkpointStatePath(trail)}' must not be undefined`)
+      }
+      assertCheckpointState(entry, trail)
+      trail.pop()
+    }
+    return
+  }
+  if (typeof value !== "object") {
+    throw new TypeError(`yrd: projection checkpoint state '${checkpointStatePath(trail)}' is not JSON-compatible`)
+  }
+  const prototype = Reflect.getPrototypeOf(value)
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError(`yrd: projection checkpoint state '${checkpointStatePath(trail)}' must be a plain object`)
+  }
+  const symbols = Object.getOwnPropertySymbols(value)
+  if (symbols.length > 0 && symbols.some((key) => Object.prototype.propertyIsEnumerable.call(value, key))) {
+    throw new TypeError(
+      `yrd: projection checkpoint state '${checkpointStatePath(trail)}' must not contain enumerable symbol keys`,
+    )
+  }
+  const record = value as Record<string, unknown>
+  for (const key of Object.keys(record)) {
+    const entry: unknown = record[key]
+    trail.push(key)
+    if (entry === undefined) {
+      throw new TypeError(`yrd: projection checkpoint state '${checkpointStatePath(trail)}' must not be undefined`)
+    }
+    assertCheckpointState(entry, trail)
+    trail.pop()
+  }
 }
 
 /**

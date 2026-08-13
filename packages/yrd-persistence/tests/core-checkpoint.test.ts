@@ -133,6 +133,57 @@ function withoutCheckpoint<Value>(journal: Journal<Value>): Journal<Value> {
   return { read: journal.read, append: journal.append }
 }
 
+/**
+ * One row covering every shape restore's in-place JSON walk branches on: nested
+ * objects, arrays of objects, arrays of arrays, an empty object, an empty array,
+ * null, booleans, and negative/zero/fractional/large-integer numbers.
+ */
+const NESTED_ROW = {
+  id: "row-1",
+  tags: ["alpha", ""],
+  meta: { depth: 0, ratio: -1.5, span: 9007199254740991, flag: false, none: null, blank: {} },
+  grid: [[1, -2], [], [0]],
+} as const
+
+type NestedRow = {
+  id: string
+  tags: string[]
+  meta: { depth: number; ratio: number; span: number; flag: boolean; none: null; blank: Record<string, never> }
+  grid: number[][]
+}
+type NestedState = { rows: NestedRow[] }
+
+function nestedDefinition() {
+  const rowSchema = z.object({
+    id: z.string(),
+    tags: z.array(z.string()),
+    meta: z.object({
+      depth: z.number().int(),
+      ratio: z.number(),
+      span: z.number(),
+      flag: z.boolean(),
+      none: z.null(),
+      blank: z.object({}),
+    }),
+    grid: z.array(z.array(z.number().int())),
+  })
+  const add = command({
+    title: "Add a nested row",
+    visibility: "public",
+    params: rowSchema,
+    apply: (_state: NestedState, args: NestedRow) => ({ events: [event("rows/added", args)] }),
+  })
+  return createYrdDef().extend({
+    initialState: { rows: [] as NestedRow[] },
+    commands: { rows: { add } },
+    events: { "rows/added": journalEvent(1, rowSchema) },
+    projectionVersion: "nested-json-shapes-v1",
+    project(state: NestedState, applied: { name: string; data: unknown }) {
+      return { rows: [...state.rows, applied.data as NestedRow] }
+    },
+  }) as YrdDef<NestedState, CommandTree, object>
+}
+
 function indexedCheckpointJournal(): Readonly<{
   journal: Journal<unknown>
   checkpoint(): JournalCheckpoint | undefined
@@ -787,6 +838,63 @@ describe("persistent Core projection checkpoint", () => {
     await using warm = await createYrd(definition, { inject: { journal: createJournal({ dir }), id: ids() } })
     expect(Object.hasOwn(warm.state().values, "__proto__")).toBe(true)
     expect(warm.state().values.__proto__).toBe("preserved")
+  })
+
+  // Restore validates the parsed checkpoint graph in place instead of rebuilding
+  // it into a second one. These two pin the contract that survives that: every
+  // JSON shape round-trips unchanged and stays deeply frozen, and a state the
+  // walk refuses falls back to a journal rebuild rather than a reshaped state.
+  it("round-trips every JSON shape through warm restore and freezes the restored graph", async () => {
+    const dir = await stateDir()
+    const definition = nestedDefinition()
+    const first = await createYrd(definition, { inject: { journal: createJournal({ dir }), id: ids() } })
+    await first.dispatch({ op: "rows.add", args: NESTED_ROW })
+    const before = structuredClone(first.state().rows)
+    await first.close()
+
+    await using warm = await createYrd(definition, { inject: { journal: createJournal({ dir }), id: ids() } })
+    expect(warm.state().rows).toEqual(before)
+
+    const restored = warm.state().rows[0]
+    if (restored === undefined) throw new Error("expected the restored row")
+    expect(Object.isFrozen(restored)).toBe(true)
+    expect(Object.isFrozen(restored.meta)).toBe(true)
+    expect(Object.isFrozen(restored.grid[0])).toBe(true)
+    expect(() => {
+      ;(restored.meta as { depth: number }).depth = 99
+    }).toThrow(TypeError)
+  })
+
+  it("rebuilds from the journal when a stored state carries a value the JSON contract refuses", async () => {
+    const definition = nestedDefinition()
+    const indexed = indexedCheckpointJournal()
+    const seed = await createYrd(definition, { inject: { journal: indexed.journal, id: ids() } })
+    await seed.dispatch({ op: "rows.add", args: NESTED_ROW })
+    const truth = structuredClone(seed.state().rows)
+    await seed.close()
+
+    const stored = indexed.checkpoint()
+    if (stored === undefined) throw new Error("expected a stored checkpoint")
+    // A plain `JSON.parse` can never produce this, so only a custom store can:
+    // the rebuild used to drop the key silently, restore now refuses the state.
+    const poisoned = stored.value as { state: { rows: { meta: Record<string, unknown> }[] } }
+    const meta = poisoned.state.rows[0]?.meta
+    if (meta === undefined) throw new Error("expected the stored row meta")
+    meta.depth = undefined
+
+    const events: LogEvent[] = []
+    const log = createLogger("test", [
+      { level: "trace" },
+      { write: (value: unknown) => events.push(value as LogEvent) },
+    ])
+    await using warm = await createYrd(definition, {
+      inject: { journal: { ...indexed.journal, checkpoint: { load: () => Promise.resolve(stored) } }, log, id: ids() },
+    })
+
+    expect(warm.state().rows).toEqual(truth)
+    expect(events.find((entry) => entry.kind === "span" && entry.namespace === "test:core:replay")).toMatchObject({
+      props: { fromCursor: 0 },
+    })
   })
 
   it("stays checkpoint-warm on the invocation after an identity-mismatch replay rewrites the checkpoint", async () => {
