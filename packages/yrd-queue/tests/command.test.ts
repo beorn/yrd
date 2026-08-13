@@ -6447,6 +6447,86 @@ describe("Queue command adapters", () => {
     expect(await Bun.file(join(repo, "operator-wip.txt")).text()).toBe("preserve me\n")
   })
 
+  it("reports the Git cause when a remote merge-record ref cannot be materialized", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const remote = join(repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "issue/feature"])
+    await git(repo, ["notes", "--ref=yrd/merge-records", "add", "-m", "seed remote record", "main"])
+    await git(repo, ["push", "-q", "origin", "refs/notes/yrd/merge-records"])
+
+    await using process = createProcess()
+    let failedFetches = 0
+    const unavailableRecordRef: Pick<Process, "run"> = {
+      run(request) {
+        if (
+          request.argv[0] === "git" &&
+          request.argv[3] === "fetch" &&
+          request.argv.some((argument) => argument.includes("refs/notes/yrd/merge-record-upstream/"))
+        ) {
+          failedFetches += 1
+          return Promise.resolve({
+            exitCode: 41,
+            signal: null,
+            stdout: "",
+            stderr: "fatal: merge-record transport unavailable",
+            durationMs: 1,
+            timedOut: false,
+          })
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(unavailableRecordRef, repo, ["true"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    await expect(app.queue.run({ prs: ["PR1"] }, runtime)).rejects.toThrow("fatal: merge-record transport unavailable")
+    expect(failedFetches).toBe(1)
+  })
+
+  it("distinguishes a successful merge-record fetch whose staging ref is missing", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const remote = join(repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "issue/feature"])
+    await git(repo, ["notes", "--ref=yrd/merge-records", "add", "-m", "seed remote record", "main"])
+    await git(repo, ["push", "-q", "origin", "refs/notes/yrd/merge-records"])
+    const remoteTip = await git(remote, ["rev-parse", "refs/notes/yrd/merge-records"])
+
+    await using process = createProcess()
+    let incompleteFetches = 0
+    const missingStagingRef: Pick<Process, "run"> = {
+      run(request) {
+        if (
+          request.argv[0] === "git" &&
+          request.argv[3] === "fetch" &&
+          request.argv.some((argument) => argument.includes("refs/notes/yrd/merge-record-upstream/"))
+        ) {
+          incompleteFetches += 1
+          return Promise.resolve({
+            exitCode: 0,
+            signal: null,
+            stdout: "",
+            stderr: "",
+            durationMs: 1,
+            timedOut: false,
+          })
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(missingStagingRef, repo, ["true"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    await expect(app.queue.run({ prs: ["PR1"] }, runtime)).rejects.toThrow(
+      `yrd: remote merge-record ref '${remoteTip}' fetched into ` +
+        `'refs/notes/yrd/merge-record-upstream/${remoteTip}' but resolved to 'missing'`,
+    )
+    expect(incompleteFetches).toBe(1)
+  })
+
   it("groups reachable non-tip candidate pins by origin in fresh exact-SHA proof stores", async () => {
     const { repo, featureSha, origin, pins } = await groupedSubmoduleRepository()
     await using process = createProcess()
@@ -8304,6 +8384,52 @@ describe("Queue command adapters", () => {
       status: "integrated",
       integration: { commit: landing, baseSha: landing },
     })
+  })
+
+  it("reports a broken post-merge ancestry probe instead of claiming the candidate did not land", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    let commandRuns = 0
+    let brokenProbes = 0
+    const brokenAncestryProbe: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "true") commandRuns += 1
+        if (
+          commandRuns >= 2 &&
+          request.argv[0] === "git" &&
+          request.argv[3] === "merge-base" &&
+          request.argv[4] === "--is-ancestor" &&
+          request.argv[5] === featureSha
+        ) {
+          brokenProbes += 1
+          return Promise.resolve({
+            exitCode: 128,
+            signal: null,
+            stdout: "",
+            stderr: "fatal: corrupt commit graph during landing verification",
+            durationMs: 1,
+            timedOut: false,
+          })
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(brokenAncestryProbe, repo, ["true"], { mergeCommand: ["true"] })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(commandRuns).toBe(2)
+    expect(brokenProbes).toBe(1)
+    expect(run).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: {
+        code: "merge-failed",
+        message: expect.stringContaining("fatal: corrupt commit graph during landing verification"),
+      },
+    })
+    expect(run.error?.message).not.toContain("does not contain")
   })
 
   it("keeps the submitted payload when configured merge cannot refresh post-command authority", async () => {
