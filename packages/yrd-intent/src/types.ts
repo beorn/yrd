@@ -61,36 +61,17 @@ export type PinIntentPreconditions = z.infer<typeof PinIntentPreconditionsSchema
  * self-applicable to judgment. A step is the argv plus the directory it runs
  * in; `note` is for the reader, never for the parser.
  */
-export const RunnableRemedyStepSchema = z
+export const RemedyStepSchema = z
   .object({
     argv: z.array(TextSchema).min(1).readonly(),
     cwd: TextSchema.optional(),
     note: TextSchema.optional(),
   })
   .strict()
-
-/**
- * A remedy step whose action belongs to a different actor than whoever is
- * reading the refusal — the pipeline's own credential-bearing Job, a
- * component's maintaining developer, `@chief` — so it carries no `argv` and
- * must never be rendered as a shell line. Mirrors {@link RefusalRemedy}'s
- * `judgment` split (self-applicable steps vs. a reason a human must weigh):
- * a `judgment` remedy has no mechanical step at all, while this is one step
- * inside an otherwise-mechanical remedy that names the actor instead of a
- * command.
- */
-export const NamedActorRemedyStepSchema = z.object({ humanRequired: z.literal(true), note: TextSchema }).strict()
-
-export const RemedyStepSchema = z.union([RunnableRemedyStepSchema, NamedActorRemedyStepSchema])
 export type RemedyStepV1 = z.infer<typeof RemedyStepSchema>
 
-/**
- * Render a remedy step as the shell line a human would type — or, for a
- * {@link NamedActorRemedyStepSchema} step, the actor statement in `note`. A
- * `humanRequired` step is never turned into a runnable command.
- */
+/** Render a remedy step as the shell line a human would type. */
 export function renderRemedyStep(step: RemedyStepV1): string {
-  if ("humanRequired" in step) return step.note
   const command = step.argv.map(shellQuote).join(" ")
   return step.cwd === undefined ? command : `cd ${shellQuote(step.cwd)} && ${command}`
 }

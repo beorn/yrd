@@ -14349,7 +14349,7 @@ describe("yrd intent — declared pin advances (22668 phase 1)", () => {
     expect(app.intents.list()).toEqual([])
   })
 
-  it("renders an unpublished-target refusal as a named-actor statement, never a hand-write", async () => {
+  it("renders an unpublished-target refusal as a runnable resubmit, and names the actor in the message", async () => {
     await using app = await createApp()
     const output = outputIO()
 
@@ -14364,9 +14364,9 @@ describe("yrd intent — declared pin advances (22668 phase 1)", () => {
 
     // Pipeline-routed: no rendered remedy line is a hand-write to a component ref.
     expect(output.stdout()).not.toContain("git push")
-    expect(output.stdout()).toContain(`target '${TARGET_SHA}' is unpublished`)
+    expect(output.stdout()).toContain(`target '${TARGET_SHA}' is not reachable from any published branch`)
     expect(output.stdout()).toContain("whoever holds it must publish it through")
-    expect(output.stdout()).toContain(`'${COMPONENT}''s own git workflow`)
+    expect(output.stdout()).toContain("that component's own git workflow before it can be admitted")
     expect(output.stdout()).toContain(`yrd intent submit --component ${COMPONENT} --target ${TARGET_SHA}`)
   })
 

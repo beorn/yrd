@@ -136,8 +136,9 @@ function surfaceFiles(): readonly string[] {
   // A sweep that silently scanned zero files would pass every check below
   // without proving anything — the same failure class this guard exists to
   // prevent in the surface it watches.
-  if (files.length === 0)
-    {throw new Error("remedy-banned-actions-guard: enumerated no source files under packages/*/src")}
+  if (files.length === 0) {
+    throw new Error("remedy-banned-actions-guard: enumerated no source files under packages/*/src")
+  }
   return files
 }
 

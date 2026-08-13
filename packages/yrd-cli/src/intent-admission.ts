@@ -83,14 +83,14 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
     return {
       admitted: false,
       code: "intent-target-unpublished",
-      message: `yrd: component '${options.component}' has no published origin/${branch} tip to derive`,
+      message:
+        `yrd: component '${options.component}' has no published origin/${branch} tip to derive; whoever holds ` +
+        `the local commit must publish it through that component's own git workflow before an intent can be evaluated`,
       evidence: { component: options.component, currentPin },
       remedy: [
         {
-          humanRequired: true,
-          note:
-            `'${options.component}' has no published origin/${branch} tip; whoever holds the local commit must ` +
-            `publish it through that component's own git workflow — never as this admission's remedy — then retry the intent`,
+          argv: ["yrd", "intent", "submit", "--component", options.component],
+          note: "resubmit once the component's local commit is published; the queue re-derives the trunk tip at merge time",
         },
       ],
     }
@@ -113,15 +113,11 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
     return {
       admitted: false,
       code: "intent-target-unpublished",
-      message: `yrd: target '${target}' is not reachable from any published branch of '${options.component}'`,
+      message:
+        `yrd: target '${target}' is not reachable from any published branch of '${options.component}'; whoever ` +
+        `holds it must publish it through that component's own git workflow before it can be admitted`,
       evidence: { component: options.component, target, currentPin },
       remedy: [
-        {
-          humanRequired: true,
-          note:
-            `target '${target}' is unpublished; whoever holds it must publish it through '${options.component}''s ` +
-            `own git workflow — never as this admission's remedy — before it can be admitted`,
-        },
         {
           argv: ["yrd", "intent", "submit", "--component", options.component, "--target", target],
           note: "resubmit once the target is published",
@@ -135,7 +131,10 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
     return {
       admitted: false,
       code: "intent-target-tombstoned",
-      message: `yrd: target '${target}' descends from rolled-back pin '${tombstone.sha}' of '${options.component}'`,
+      message:
+        `yrd: target '${target}' descends from rolled-back pin '${tombstone.sha}' of '${options.component}'; ` +
+        `revert the tombstoned change and publish the safe descendant through the component's own git workflow ` +
+        `before submitting a new intent`,
       evidence: { component: options.component, target, currentPin, tombstone: tombstone.sha },
       remedy: [
         {
@@ -144,14 +143,8 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
           note: "revert the tombstoned component change on the intended lineage",
         },
         {
-          humanRequired: true,
-          note:
-            `publish the safe descendant through '${options.component}''s own git workflow — never as this ` +
-            `admission's remedy`,
-        },
-        {
           argv: ["yrd", "intent", "submit", "--component", options.component, "--target", "<safe-sha>"],
-          note: "submit a target that does not descend from the rolled-back pin",
+          note: "submit a target that does not descend from the rolled-back pin, once it is published",
         },
       ],
     }
@@ -177,7 +170,10 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
   return {
     admitted: false,
     code: "intent-pin-divergent",
-    message: `yrd: target '${target}' and the current pin '${currentPin}' of '${options.component}' have no ancestry`,
+    message:
+      `yrd: target '${target}' and the current pin '${currentPin}' of '${options.component}' have no ancestry; ` +
+      `merge inside the component and publish the merge through the component's own git workflow before ` +
+      `submitting a new intent`,
     evidence: { component: options.component, target, currentPin },
     remedy: [
       {
@@ -186,14 +182,8 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
         note: "merge inside the component, where merges belong",
       },
       {
-        humanRequired: true,
-        note:
-          `land the merge on '${options.component}' main through the component's own git workflow — never as ` +
-          `this admission's remedy`,
-      },
-      {
         argv: ["yrd", "intent", "submit", "--component", options.component, "--target", "<merge-sha>"],
-        note: "submit a NEW intent with the merge sha; it supersedes this one by key",
+        note: "submit a NEW intent with the merge sha, once it is published; it supersedes this one by key",
       },
     ],
   }
