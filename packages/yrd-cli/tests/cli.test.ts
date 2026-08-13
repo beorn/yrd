@@ -14046,11 +14046,12 @@ const TARGET_SHA = "b".repeat(40)
  * silently reading as "no".
  */
 function intentGit(
-  overrides: { gitlinks?: readonly [string, string][]; published?: boolean; ancestor?: boolean } = {},
+  overrides: { gitlinks?: readonly [string, string][]; published?: boolean; ancestor?: boolean; trunk?: string } = {},
 ): NonNullable<YrdCliServices["process"]> {
   const gitlinks = overrides.gitlinks ?? [[COMPONENT, CURRENT_PIN]]
   const published = overrides.published ?? true
   const ancestor = overrides.ancestor ?? true
+  const trunk = overrides.trunk ?? TARGET_SHA
   return {
     async run(request: { argv: readonly string[] }) {
       const argv = [...request.argv]
@@ -14062,6 +14063,7 @@ function intentGit(
         return ok(gitlinks.map(([path, pin]) => `160000 commit ${pin}\t${path}`).join("\0") + "\0")
       }
       if (argv.includes("fetch")) return ok("")
+      if (argv.includes("rev-parse")) return published ? ok(`${trunk}\n`) : no(1)
       if (argv.includes("cat-file")) return published ? ok("") : no(1)
       if (argv.includes("for-each-ref")) return published ? ok("refs/remotes/origin/main\n") : ok("")
       if (argv.includes("--is-ancestor")) {
@@ -14254,6 +14256,50 @@ describe("yrd intent — declared pin advances (22668 phase 1)", () => {
     expect(result.command).toBe("intent.submit")
     expect(result.intent).toMatchObject({ id: "I1", component: COMPONENT, target: TARGET_SHA, status: "open" })
     expect(result.admission).toMatchObject({ relation: "advance", currentPin: CURRENT_PIN })
+  })
+
+  it("prints a pin-moved remedy that can be replayed verbatim", async () => {
+    await using app = await createApp()
+    const refused = outputIO()
+
+    expect(
+      await runYrd(
+        app,
+        yrd(
+          "intent",
+          "submit",
+          "--component",
+          COMPONENT,
+          "--target",
+          TARGET_SHA,
+          "--issue",
+          "one",
+          "--expect-pin",
+          "f".repeat(40),
+          "--json",
+        ),
+        refused.io,
+        { process: intentGit() },
+      ),
+    ).toBe(1)
+
+    const failure = JSON.parse(refused.stdout()) as {
+      failure: { code: string; remedy: readonly { argv: readonly string[] }[] }
+    }
+    expect(failure.failure.code).toBe("intent-pin-moved")
+    expect(failure.failure.remedy).toEqual([
+      {
+        argv: ["yrd", "intent", "submit", "--component", COMPONENT, "--target", TARGET_SHA, "--issue", "one"],
+        note: "resubmit against the current pin or omit the expected-pin guard",
+      },
+    ])
+
+    const replay = outputIO()
+    expect(
+      await runYrd(app, yrd(...failure.failure.remedy[0]!.argv.slice(1)), replay.io, { process: intentGit() }),
+      replay.stderr(),
+    ).toBe(0)
+    expect(app.intents.list()).toHaveLength(1)
   })
 
   it("lists, shows, and withdraws the record it admitted", async () => {

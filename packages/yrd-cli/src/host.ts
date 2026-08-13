@@ -1149,6 +1149,7 @@ async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions):
         repo: options.repo,
         base: baseSha,
         component: intent.component,
+        issue: `${intent.issue.source}:${intent.issue.id}`,
         ...(intent.target === undefined ? {} : { target: intent.target }),
         ...(intent.preconditions.expectedCurrentPin === undefined
           ? {}

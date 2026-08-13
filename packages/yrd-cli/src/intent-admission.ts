@@ -18,6 +18,8 @@ export type PinIntentAdmissionOptions = Readonly<{
   repo: string
   base: string
   component: string
+  /** Runnable issue argument preserved in every intent resubmission remedy. */
+  issue: string
   target?: string
   expectedCurrentPin?: string
   tombstones?: readonly Pick<PinTombstone, "sha">[]
@@ -53,7 +55,16 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
       message: `yrd: '${options.component}' is not a declared component on '${options.base}'`,
       evidence: { component: options.component, declared: [...gitlinks.keys()] },
       remedy: [...gitlinks.keys()].map((declared) => ({
-        argv: ["yrd", "intent", "submit", "--component", declared],
+        argv: [
+          "yrd",
+          "intent",
+          "submit",
+          "--component",
+          declared,
+          ...(options.target === undefined ? [] : ["--target", options.target]),
+          "--issue",
+          options.issue,
+        ],
         note: `declared component on ${options.base}`,
       })),
     }
@@ -102,7 +113,17 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
       evidence: { component: options.component, target, currentPin },
       remedy: [
         {
-          argv: ["yrd", "intent", "submit", "--component", options.component, "--target", target],
+          argv: [
+            "yrd",
+            "intent",
+            "submit",
+            "--component",
+            options.component,
+            "--target",
+            target,
+            "--issue",
+            options.issue,
+          ],
           note: "resubmit against the current pin or omit the expected-pin guard",
         },
       ],
@@ -118,7 +139,21 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
         {
           argv: ["git", "push", "origin", `${target}:refs/heads/${branch}`],
           cwd: options.component,
-          note: "publish the target, then resubmit the intent",
+          note: "publish the target",
+        },
+        {
+          argv: [
+            "yrd",
+            "intent",
+            "submit",
+            "--component",
+            options.component,
+            "--target",
+            target,
+            "--issue",
+            options.issue,
+          ],
+          note: "resubmit the published target",
         },
       ],
     }
@@ -143,7 +178,17 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
           note: "publish the safe descendant",
         },
         {
-          argv: ["yrd", "intent", "submit", "--component", options.component, "--target", "<safe-sha>"],
+          argv: [
+            "yrd",
+            "intent",
+            "submit",
+            "--component",
+            options.component,
+            "--target",
+            "<safe-sha>",
+            "--issue",
+            options.issue,
+          ],
           note: "submit a target that does not descend from the rolled-back pin",
         },
       ],
@@ -157,7 +202,7 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
     // on the line trunk DID take vanishes with no diff for anyone to read. The
     // waiver is declared, never inferred.
     if (options.allowOffTrunk !== true && !(await isTrunkReachable(options.process, componentRepo, trunk, target))) {
-      return offTrunkRefusal(options.component, target, currentPin, trunk)
+      return offTrunkRefusal(options.component, target, currentPin, trunk, options.issue)
     }
     return { admitted: true, currentPin, target, relation: "advance" }
   }
@@ -184,7 +229,17 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
         note: "land the merge on component main",
       },
       {
-        argv: ["yrd", "intent", "submit", "--component", options.component, "--target", "<merge-sha>"],
+        argv: [
+          "yrd",
+          "intent",
+          "submit",
+          "--component",
+          options.component,
+          "--target",
+          "<merge-sha>",
+          "--issue",
+          options.issue,
+        ],
         note: "submit a NEW intent with the merge sha; it supersedes this one by key",
       },
     ],
@@ -220,6 +275,7 @@ function offTrunkRefusal(
   target: string,
   currentPin: string,
   trunk: string | undefined,
+  issue: string,
 ): PinIntentAdmission {
   const trunkClause =
     trunk === undefined
@@ -235,12 +291,23 @@ function offTrunkRefusal(
         ? []
         : [
             {
-              argv: ["yrd", "intent", "submit", "--component", component, "--target", trunk],
+              argv: ["yrd", "intent", "submit", "--component", component, "--target", trunk, "--issue", issue],
               note: "advance to the trunk tip; land the off-trunk line on trunk through the component's own landing path first if its content is wanted",
             },
           ]),
       {
-        argv: ["yrd", "intent", "submit", "--component", component, "--target", target, "--allow-off-trunk"],
+        argv: [
+          "yrd",
+          "intent",
+          "submit",
+          "--component",
+          component,
+          "--target",
+          target,
+          "--issue",
+          issue,
+          "--allow-off-trunk",
+        ],
         note: "declare a deliberate off-trunk pin; the declaration is recorded on the intent",
       },
     ],

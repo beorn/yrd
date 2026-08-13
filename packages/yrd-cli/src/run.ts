@@ -8838,6 +8838,7 @@ async function submitIntent(
     repo,
     base: options.base ?? services.base ?? "main",
     component,
+    issue: issueRef,
     ...(options.target === undefined ? {} : { target: options.target }),
     ...(options.expectPin === undefined ? {} : { expectedCurrentPin: options.expectPin }),
     ...(options.allowOffTrunk === true ? { allowOffTrunk: true } : {}),

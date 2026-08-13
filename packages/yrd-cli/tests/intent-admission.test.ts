@@ -16,6 +16,7 @@ import { createProcess } from "@yrd/process"
 import { admitPinIntent } from "../src/intent-admission.ts"
 
 const process = createProcess()
+const ISSUE = "km:@yrd/core/22668-admit-intents"
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
   const result = await process.run({
@@ -94,7 +95,14 @@ describe("pin-intent admission (22668 phase 1)", () => {
     const { repo, component, basePin } = await fixture()
     const target = await publish(component, "two")
 
-    const verdict = await admitPinIntent({ process, repo, base: "main", component: "components/alpha", target })
+    const verdict = await admitPinIntent({
+      process,
+      repo,
+      base: "main",
+      component: "components/alpha",
+      issue: ISSUE,
+      target,
+    })
 
     if (!verdict.admitted) throw new Error(`unexpected refusal: ${verdict.code}`)
     expect(verdict.currentPin).toBe(basePin)
@@ -111,6 +119,7 @@ describe("pin-intent admission (22668 phase 1)", () => {
       repo,
       base: "main",
       component: "components/alpha",
+      issue: ISSUE,
       target,
       tombstones: [{ sha: tombstoned }],
     })
@@ -119,6 +128,17 @@ describe("pin-intent admission (22668 phase 1)", () => {
     if (verdict.admitted) throw new Error("unreachable")
     expect(verdict.code).toBe("intent-target-tombstoned")
     expect(verdict.evidence).toMatchObject({ target, tombstone: tombstoned })
+    expect(verdict.remedy.at(-1)?.argv).toEqual([
+      "yrd",
+      "intent",
+      "submit",
+      "--component",
+      "components/alpha",
+      "--target",
+      "<safe-sha>",
+      "--issue",
+      ISSUE,
+    ])
   })
 
   it("admits a target already contained by the pin and calls it a noop", async () => {
@@ -133,6 +153,7 @@ describe("pin-intent admission (22668 phase 1)", () => {
       repo,
       base: "main",
       component: "components/alpha",
+      issue: ISSUE,
       target: basePin,
     })
 
@@ -149,6 +170,7 @@ describe("pin-intent admission (22668 phase 1)", () => {
       repo,
       base: "main",
       component: "components/alpha",
+      issue: ISSUE,
       target,
       expectedCurrentPin: "f".repeat(40),
     })
@@ -157,35 +179,89 @@ describe("pin-intent admission (22668 phase 1)", () => {
     if (verdict.admitted) throw new Error("unreachable")
     expect(verdict.code).toBe("intent-pin-moved")
     expect(verdict.evidence).toEqual({ component: "components/alpha", target, currentPin: basePin })
+    expect(verdict.remedy[0]?.argv).toEqual([
+      "yrd",
+      "intent",
+      "submit",
+      "--component",
+      "components/alpha",
+      "--target",
+      target,
+      "--issue",
+      ISSUE,
+    ])
   })
 
   it("refuses an unknown component and names the declared ones", async () => {
     const { repo, component } = await fixture()
     const target = await publish(component, "two")
 
-    const verdict = await admitPinIntent({ process, repo, base: "main", component: "components/typo", target })
+    const verdict = await admitPinIntent({
+      process,
+      repo,
+      base: "main",
+      component: "components/typo",
+      issue: ISSUE,
+      target,
+    })
 
     expect(verdict.admitted).toBe(false)
     if (verdict.admitted) throw new Error("unreachable")
     expect(verdict.code).toBe("intent-component-unknown")
     expect(verdict.evidence.declared).toEqual(["components/alpha"])
+    expect(verdict.remedy[0]?.argv).toEqual([
+      "yrd",
+      "intent",
+      "submit",
+      "--component",
+      "components/alpha",
+      "--target",
+      target,
+      "--issue",
+      ISSUE,
+    ])
   })
 
   it("refuses an unpublished target and its remedy is the push that fixes it", async () => {
     const { repo, component } = await fixture()
     const target = await local(component, "two")
 
-    const verdict = await admitPinIntent({ process, repo, base: "main", component: "components/alpha", target })
+    const verdict = await admitPinIntent({
+      process,
+      repo,
+      base: "main",
+      component: "components/alpha",
+      issue: ISSUE,
+      target,
+    })
 
     expect(verdict.admitted).toBe(false)
     if (verdict.admitted) throw new Error("unreachable")
     expect(verdict.code).toBe("intent-target-unpublished")
     expect(verdict.remedy[0]?.argv).toEqual(["git", "push", "origin", `${target}:refs/heads/main`])
     expect(verdict.remedy[0]?.cwd).toBe("components/alpha")
+    expect(verdict.remedy[1]?.argv).toEqual([
+      "yrd",
+      "intent",
+      "submit",
+      "--component",
+      "components/alpha",
+      "--target",
+      target,
+      "--issue",
+      ISSUE,
+    ])
 
     // The remedy is not decoration: running it clears the refusal.
     await git(component, "push", "--quiet", "origin", `${target}:refs/heads/main`)
-    const retry = await admitPinIntent({ process, repo, base: "main", component: "components/alpha", target })
+    const retry = await admitPinIntent({
+      process,
+      repo,
+      base: "main",
+      component: "components/alpha",
+      issue: ISSUE,
+      target,
+    })
     expect(retry.admitted).toBe(true)
   })
 
@@ -208,18 +284,42 @@ describe("pin-intent admission (22668 phase 1)", () => {
     const target = await commit(component, "unrelated")
     await git(component, "push", "--quiet", "origin", "unrelated")
 
-    const verdict = await admitPinIntent({ process, repo, base: "main", component: "components/alpha", target })
+    const verdict = await admitPinIntent({
+      process,
+      repo,
+      base: "main",
+      component: "components/alpha",
+      issue: ISSUE,
+      target,
+    })
 
     expect(verdict.admitted).toBe(false)
     if (verdict.admitted) throw new Error("unreachable")
     expect(verdict.code).toBe("intent-pin-divergent")
     expect(verdict.evidence.currentPin).toBe(basePin)
+    expect(verdict.remedy.at(-1)?.argv).toEqual([
+      "yrd",
+      "intent",
+      "submit",
+      "--component",
+      "components/alpha",
+      "--target",
+      "<merge-sha>",
+      "--issue",
+      ISSUE,
+    ])
   })
 
   it("admits an intent with NO target without touching the component at all", async () => {
     const { repo, basePin } = await fixture()
 
-    const verdict = await admitPinIntent({ process, repo, base: "main", component: "components/alpha" })
+    const verdict = await admitPinIntent({
+      process,
+      repo,
+      base: "main",
+      component: "components/alpha",
+      issue: ISSUE,
+    })
 
     if (!verdict.admitted) throw new Error(`unexpected refusal: ${verdict.code}`)
     expect(verdict.currentPin).toBe(basePin)
@@ -230,7 +330,14 @@ describe("pin-intent admission (22668 phase 1)", () => {
     const { repo, component, basePin } = await fixture()
     const target = await publishSideline(component, "sideline", basePin)
 
-    const verdict = await admitPinIntent({ process, repo, base: "main", component: "components/alpha", target })
+    const verdict = await admitPinIntent({
+      process,
+      repo,
+      base: "main",
+      component: "components/alpha",
+      issue: ISSUE,
+      target,
+    })
 
     expect(verdict.admitted).toBe(false)
     if (verdict.admitted) throw new Error("unreachable")
@@ -250,6 +357,20 @@ describe("pin-intent admission (22668 phase 1)", () => {
       "components/alpha",
       "--target",
       basePin,
+      "--issue",
+      ISSUE,
+    ])
+    expect(verdict.remedy[1]?.argv).toEqual([
+      "yrd",
+      "intent",
+      "submit",
+      "--component",
+      "components/alpha",
+      "--target",
+      target,
+      "--issue",
+      ISSUE,
+      "--allow-off-trunk",
     ])
   })
 
@@ -262,6 +383,7 @@ describe("pin-intent admission (22668 phase 1)", () => {
       repo,
       base: "main",
       component: "components/alpha",
+      issue: ISSUE,
       target,
       allowOffTrunk: true,
     })
@@ -279,7 +401,14 @@ describe("pin-intent admission (22668 phase 1)", () => {
     const target = await publishSideline(component, "sideline", basePin)
     const trunkTip = await publish(component, "trunk-line")
 
-    const verdict = await admitPinIntent({ process, repo, base: "main", component: "components/alpha", target })
+    const verdict = await admitPinIntent({
+      process,
+      repo,
+      base: "main",
+      component: "components/alpha",
+      issue: ISSUE,
+      target,
+    })
 
     expect(verdict.admitted).toBe(false)
     if (verdict.admitted) throw new Error("unreachable")
@@ -298,6 +427,7 @@ describe("pin-intent admission (22668 phase 1)", () => {
       repo,
       base: "main",
       component: "components/alpha",
+      issue: ISSUE,
       deriveTarget: true,
     })
 
@@ -316,6 +446,7 @@ describe("pin-intent admission (22668 phase 1)", () => {
       repo,
       base: "main",
       component: "components/alpha",
+      issue: ISSUE,
       target,
       deriveTarget: true,
     })
@@ -330,7 +461,14 @@ describe("pin-intent admission (22668 phase 1)", () => {
     const { repo, component } = await fixture()
     const target = await publish(component, "two")
 
-    const verdict = await admitPinIntent({ process, repo, base: "main", component: "README.md", target })
+    const verdict = await admitPinIntent({
+      process,
+      repo,
+      base: "main",
+      component: "README.md",
+      issue: ISSUE,
+      target,
+    })
 
     expect(verdict.admitted).toBe(false)
     if (verdict.admitted) throw new Error("unreachable")
