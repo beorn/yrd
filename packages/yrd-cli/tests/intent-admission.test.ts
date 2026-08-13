@@ -222,7 +222,7 @@ describe("pin-intent admission (22668 phase 1)", () => {
     ])
   })
 
-  it("refuses an unpublished target and its remedy is the push that fixes it", async () => {
+  it("refuses an unpublished target, names the actor in the message, and remedies with a resubmit", async () => {
     const { repo, component } = await fixture()
     const target = await local(component, "two")
 
@@ -238,9 +238,14 @@ describe("pin-intent admission (22668 phase 1)", () => {
     expect(verdict.admitted).toBe(false)
     if (verdict.admitted) throw new Error("unreachable")
     expect(verdict.code).toBe("intent-target-unpublished")
-    expect(verdict.remedy[0]?.argv).toEqual(["git", "push", "origin", `${target}:refs/heads/main`])
-    expect(verdict.remedy[0]?.cwd).toBe("components/alpha")
-    expect(verdict.remedy[1]?.argv).toEqual([
+    // Pipeline-routed: no remedy step may instruct a hand-write to a component ref.
+    for (const step of verdict.remedy) {
+      expect(step.argv.some((argument) => argument.includes("refs/heads/"))).toBe(false)
+    }
+    // The actor who must publish is named in the MESSAGE (the only field a
+    // reader sees) — never a `note`, which is never rendered.
+    expect(verdict.message).toContain("whoever holds it must publish it through")
+    expect(verdict.remedy[0]?.argv).toEqual([
       "yrd",
       "intent",
       "submit",
@@ -252,7 +257,7 @@ describe("pin-intent admission (22668 phase 1)", () => {
       ISSUE,
     ])
 
-    // The remedy is not decoration: running it clears the refusal.
+    // The remedy is not decoration: running the publish it describes clears the refusal.
     await git(component, "push", "--quiet", "origin", `${target}:refs/heads/main`)
     const retry = await admitPinIntent({
       process,

@@ -3528,11 +3528,13 @@ async function requireQueueableSubmodulePins(pr: PR, services: YrdCliServices, i
   })
   const unpublished = await unpublishedSubmodulePins({ process: services.process, pins: changed })
   if (unpublished.length > 0) {
+    const issue = pr.issue ?? "<issue-ref>"
     const detail = unpublished
       .map(
         ({ path, pin, repository }) =>
-          `submodule '${path}' pin '${pin}' is on zero refs fetched from origin; publish it before submitting:\n` +
-          `cd ${shellQuote(repository)} && git push origin ${shellQuote(`${pin}:refs/heads/${pr.branch}`)}`,
+          `submodule '${path}' pin '${pin}' is on zero refs fetched from origin; whoever holds this commit in ` +
+          `'${repository}' must publish it through that component's own git workflow — never as this refusal's ` +
+          `remedy — then submit: 'yrd intent submit --component ${path} --target ${pin} --issue ${issue}'`,
       )
       .join("\n")
     raiseFailure(

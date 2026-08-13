@@ -2773,7 +2773,10 @@ checks: [{check: {run: "true"}}]
     })
     expect(stderr).toContain("dep")
     expect(stderr).toContain(pin)
-    expect(stderr).toContain(`cd '${component}' && git push origin '${pin}:refs/heads/${branch}'`)
+    // Pipeline-routed: the remedy names the actor who must publish, never a hand-write.
+    expect(stderr).not.toContain("git push")
+    expect(stderr).toContain(`whoever holds this commit in '${component}' must publish it`)
+    expect(stderr).toContain(`yrd intent submit --component dep --target ${pin} --issue <issue-ref>`)
 
     let listed = ""
     expect(
@@ -3004,7 +3007,10 @@ checks: [{check: {run: "true"}}]
         code: "submodule-pin-unpublished",
       },
     })
-    expect(stderr).toContain(`cd '${component}' && git push origin '${pin}:refs/heads/${branch}'`)
+    // Pipeline-routed: the remedy names the actor who must publish, never a hand-write.
+    expect(stderr).not.toContain("git push")
+    expect(stderr).toContain(`whoever holds this commit in '${component}' must publish it`)
+    expect(stderr).toContain(`yrd intent submit --component dep --target ${pin} --issue <issue-ref>`)
 
     let listed = ""
     expect(
@@ -3115,7 +3121,10 @@ checks: [{check: {run: "true"}}]
         code: "submodule-pin-unpublished",
       },
     })
-    expect(stderr).toContain(`cd '${component}' && git push origin '${pin}:refs/heads/${branch}'`)
+    // Pipeline-routed: the remedy names the actor who must publish, never a hand-write.
+    expect(stderr).not.toContain("git push")
+    expect(stderr).toContain(`whoever holds this commit in '${component}' must publish it`)
+    expect(stderr).toContain(`yrd intent submit --component dep --target ${pin} --issue <issue-ref>`)
 
     let listed = ""
     expect(

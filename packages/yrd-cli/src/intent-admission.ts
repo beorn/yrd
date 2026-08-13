@@ -94,13 +94,14 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
     return {
       admitted: false,
       code: "intent-target-unpublished",
-      message: `yrd: component '${options.component}' has no published origin/${branch} tip to derive`,
+      message:
+        `yrd: component '${options.component}' has no published origin/${branch} tip to derive; whoever holds ` +
+        `the local commit must publish it through that component's own git workflow before an intent can be evaluated`,
       evidence: { component: options.component, currentPin },
       remedy: [
         {
-          argv: ["git", "push", "origin", `HEAD:refs/heads/${branch}`],
-          cwd: options.component,
-          note: "publish component main, then retry the intent",
+          argv: ["yrd", "intent", "submit", "--component", options.component, "--issue", options.issue],
+          note: "resubmit once the component's local commit is published; the queue re-derives the trunk tip at merge time",
         },
       ],
     }
@@ -133,14 +134,11 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
     return {
       admitted: false,
       code: "intent-target-unpublished",
-      message: `yrd: target '${target}' is not reachable from any published branch of '${options.component}'`,
+      message:
+        `yrd: target '${target}' is not reachable from any published branch of '${options.component}'; whoever ` +
+        `holds it must publish it through that component's own git workflow before it can be admitted`,
       evidence: { component: options.component, target, currentPin },
       remedy: [
-        {
-          argv: ["git", "push", "origin", `${target}:refs/heads/${branch}`],
-          cwd: options.component,
-          note: "publish the target",
-        },
         {
           argv: [
             "yrd",
@@ -153,7 +151,7 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
             "--issue",
             options.issue,
           ],
-          note: "resubmit the published target",
+          note: "resubmit once the target is published",
         },
       ],
     }
@@ -164,18 +162,16 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
     return {
       admitted: false,
       code: "intent-target-tombstoned",
-      message: `yrd: target '${target}' descends from rolled-back pin '${tombstone.sha}' of '${options.component}'`,
+      message:
+        `yrd: target '${target}' descends from rolled-back pin '${tombstone.sha}' of '${options.component}'; ` +
+        `revert the tombstoned change and publish the safe descendant through the component's own git workflow ` +
+        `before submitting a new intent`,
       evidence: { component: options.component, target, currentPin, tombstone: tombstone.sha },
       remedy: [
         {
           argv: ["git", "revert", tombstone.sha],
           cwd: options.component,
           note: "revert the tombstoned component change on the intended lineage",
-        },
-        {
-          argv: ["git", "push", "origin", `HEAD:refs/heads/${branch}`],
-          cwd: options.component,
-          note: "publish the safe descendant",
         },
         {
           argv: [
@@ -215,18 +211,16 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
   return {
     admitted: false,
     code: "intent-pin-divergent",
-    message: `yrd: target '${target}' and the current pin '${currentPin}' of '${options.component}' have no ancestry`,
+    message:
+      `yrd: target '${target}' and the current pin '${currentPin}' of '${options.component}' have no ancestry; ` +
+      `merge inside the component and publish the merge through the component's own git workflow before ` +
+      `submitting a new intent`,
     evidence: { component: options.component, target, currentPin },
     remedy: [
       {
         argv: ["git", "merge", currentPin],
         cwd: options.component,
         note: "merge inside the component, where merges belong",
-      },
-      {
-        argv: ["git", "push", "origin", `HEAD:refs/heads/${branch}`],
-        cwd: options.component,
-        note: "land the merge on component main",
       },
       {
         argv: [
