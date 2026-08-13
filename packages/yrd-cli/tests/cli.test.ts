@@ -7485,6 +7485,60 @@ describe("runYrd", () => {
     }
   })
 
+  it("writes never-started queue progress into a live resident heartbeat", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "yrd-runner-never-started-"))
+    execFileSync("git", ["init", "-q", repo])
+    const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
+    let now = Date.parse("2026-07-13T12:00:00.000Z")
+    const app = await createApp({ clock: () => new Date(now).toISOString() })
+    try {
+      await openAndSubmit(app)
+      const pr = app.bays.pr("PR1")
+      if (pr === undefined) throw new Error("submitted PR was not recorded")
+      expect(prDeliveryState(pr)).toBe("submitted")
+      expect(app.bays.checksRequested("PR1")).toBe(false)
+
+      now += 30 * 60_000
+      const heartbeat = await runInternals.startResidentRunnerHeartbeat(
+        outputIO({ cwd: repo, runner: `yrd-cli:${process.pid}`, now: () => now }).io,
+        {
+          intervalMs: 60_000,
+          queueProgress: (observedAt) => runInternals.residentQueueProgress(app, observedAt),
+          driver: { queueId: `${repo}#main`, lastLanded: () => null },
+        },
+      )
+      try {
+        expect(JSON.parse(readFileSync(statusPath, "utf8"))).toMatchObject({
+          pid: process.pid,
+          startedAt: "2026-07-13T12:30:00.000Z",
+          lastTickAt: "2026-07-13T12:30:00.000Z",
+          queueProgress: {
+            state: "stalled",
+            observedAt: "2026-07-13T12:30:00.000Z",
+            findings: [
+              {
+                code: "queue-never-started",
+                pr: "PR1",
+                specimen: "queue:main:never-started",
+                since: "2026-07-13T12:00:00.000Z",
+                blockedMs: 30 * 60_000,
+                resolution: [
+                  "Start or restart the resident queue runner, then verify it requests required checks for 'PR1'.",
+                ],
+              },
+            ],
+          },
+        })
+        heartbeat.check()
+      } finally {
+        await heartbeat.close(true)
+      }
+    } finally {
+      await app.close()
+      safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
+    }
+  })
+
   it("writes atomic resident runner heartbeats and leaves a reclaimable exit marker on close", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-heartbeat-"))
     execFileSync("git", ["init", "-q", repo])
