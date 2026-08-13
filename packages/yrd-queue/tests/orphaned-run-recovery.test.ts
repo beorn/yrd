@@ -210,6 +210,70 @@ describe("a finished run stays terminal after its Jobs are pruned", () => {
 })
 
 /**
+ * A pushed-but-never-submitted PR is invisible to the audit
+ * (@i/10-merge-queue/drafts-strand-silently, #undead). The siblings above are
+ * RUN-shaped gaps; this one never becomes a run at all: `pr/pushed` lands, no
+ * `pr/submitted` follows, and the draft sits outside every projection the audit
+ * walks — it ages nothing and pages nobody until outage forensics find it.
+ * Live specimens 2026-08-13: PR846/849/856/886 stranded 9-22 HOURS, each
+ * discovered by a pager CRITICAL rather than by the audit.
+ */
+describe("draft stranded — a pushed PR that nobody submitted must age loudly, not silently", () => {
+  async function pushedDraft() {
+    const app = await createApp()
+    // bays.intake without `submit: true` records pr/pushed ONLY — no
+    // pr/submitted follows, so delivery stays "pushed". That IS the specimen
+    // shape. (submitBranch would be wrong here: its {branch} submit path
+    // emits pr/submitted immediately — this fixture's first draft proved it
+    // by flagging nothing.)
+    await app.bays.intake({ branch: "issue/stranded-draft", headSha: "3".repeat(40), base: "main", baseSha: BASE })
+    const pr = Object.values(app.state().bays.prs).find((item) => item.branch === "issue/stranded-draft")
+    if (pr === undefined) throw new Error("intake did not record the PR")
+    expect(app.state().bays.prs[pr.id]?.revs.at(-1)?.submittedAt, "the fixture must be a true draft").toBeUndefined()
+    return { app, pr }
+  }
+
+  it("flags a draft past the threshold with its age", async () => {
+    const { app, pr } = await pushedDraft()
+    try {
+      const finding = app.queue.audit({ now: STALE }).findings.find((item) => item.code === "draft-stranded")
+      expect(finding, "a draft stranded for an hour must not read as a clean queue").toBeDefined()
+      expect(finding?.pr).toBe(pr.id)
+      expect(finding?.since).toBe(START)
+      expect(finding?.blockedMs, "the operator needs the age, not just the existence").toBe(
+        Date.parse(STALE) - Date.parse(START),
+      )
+    } finally {
+      await app[Symbol.asyncDispose]()
+    }
+  })
+
+  it("stays silent inside the grace window", async () => {
+    const { app } = await pushedDraft()
+    try {
+      // FRESH is 60s after the push against a 15m grace — genuinely inside the
+      // window (checked below so this control cannot silently invert).
+      expect(Date.parse(FRESH) - Date.parse(START)).toBeLessThan(15 * 60 * 1000)
+      expect(app.queue.audit({ now: FRESH }).findings.some((item) => item.code === "draft-stranded")).toBe(false)
+    } finally {
+      await app[Symbol.asyncDispose]()
+    }
+  })
+
+  it("never flags a submitted PR, however old", async () => {
+    const { app, pr } = await pushedDraft()
+    try {
+      // Submit-by-id turns the pushed draft into a submitted revision — the
+      // queue's world owns it from here; only true drafts may flag.
+      await app.bays.submit({ pr: pr.id })
+      expect(app.queue.audit({ now: STALE }).findings.some((item) => item.code === "draft-stranded")).toBe(false)
+    } finally {
+      await app[Symbol.asyncDispose]()
+    }
+  })
+})
+
+/**
  * The read side of the lease seam (@yrd/core/21085-target-model/21094, #undead).
  * The sibling defect above is a run with NO Job. This one has a Job, still
  * `in_progress`, whose executor is gone — so it projects as healthily running

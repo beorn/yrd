@@ -320,6 +320,15 @@ export const ADMISSION_REFUSAL_LOOP_THRESHOLD = 3
 /** Fixed non-ancestral gitlink commits cannot become ancestral on a later retry. */
 const STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS = new Set(["recut-gitlink-conflict"])
 
+/** How long a pushed-but-unsubmitted PR may sit before `queue audit` flags it
+ * `draft-stranded`. Mirrors the 15m orphaned-run grace: long enough for a
+ * deliberate push-review-submit pause, short enough that a forgotten draft
+ * surfaces within the same operator session that pushed it — the live
+ * specimens this covers sat 9-22 HOURS reported only by pager forensics
+ * (@i/10-merge-queue/drafts-strand-silently). A re-push resets the clock:
+ * age is measured from the LATEST revision's push. */
+const DRAFT_STRANDED_GRACE_MS = 15 * 60 * 1000
+
 function structurallyPermanentAdmissionRefusal(code: string): boolean {
   return STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS.has(code)
 }
@@ -5762,6 +5771,32 @@ function auditQueues(
         specimen,
         since: pause.pausedAt,
         blockedMs: Math.max(0, auditNowMs - expiresAtMs),
+      })
+    }
+  }
+  // A pushed-but-never-submitted PR is invisible to every projection this
+  // audit walks — it never becomes a run, so it ages nothing and pages nobody
+  // until outage forensics find it (@i/10-merge-queue/drafts-strand-silently,
+  // #undead; live specimens PR846/849/856/886 sat 9-22 HOURS). The watcher
+  // layer must CONSUME this finding, never re-derive draft state itself.
+  // Clock-gated like the hold checks above: with no `now`, age is unjudgeable.
+  if (auditNowMs !== undefined) {
+    for (const pr of Object.values(state.bays.prs)) {
+      if (prDeliveryState(pr) !== "pushed") continue
+      const revision = pr.revs.at(-1)
+      if (revision === undefined) continue
+      const pushedAtMs = parseAuditTime(revision.pushedAt, "pr pushed clock")
+      if (auditNowMs - pushedAtMs <= DRAFT_STRANDED_GRACE_MS) continue
+      findings.push({
+        code: "draft-stranded",
+        message:
+          `PR '${pr.id}' (${pr.branch}) was pushed at ${revision.pushedAt} and nothing has submitted it; ` +
+          `it is invisible to the queue until someone does`,
+        pr: pr.id,
+        specimen: `pr:${pr.id}`,
+        since: revision.pushedAt,
+        blockedMs: Math.max(0, auditNowMs - pushedAtMs),
+        resolution: [`yrd pr submit ${pr.branch} --issue <ref>`, `or withdraw it: yrd pr withdraw ${pr.id}`],
       })
     }
   }
