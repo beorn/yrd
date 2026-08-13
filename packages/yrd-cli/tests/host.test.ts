@@ -2893,6 +2893,50 @@ checks: [{check: {run: "true"}}]
     expect(await git(observer, "rev-parse", `refs/remotes/origin/${branch}`)).toBe(liveHead)
   })
 
+  it("submits the linear origin tip when the same local branch is a divergent merge tip", async () => {
+    const { observer, branch, staleHead, liveHead } = await staleRemoteBranchRepository()
+    await git(observer, "switch", "-qc", branch, staleHead)
+    await git(observer, "switch", "-qc", "issue/local-side", staleHead)
+    await writeFile(join(observer, "local-side.txt"), "local side\n")
+    await git(observer, "add", "local-side.txt")
+    await git(observer, "commit", "-qm", "local side commit")
+    await git(observer, "switch", "-q", branch)
+    await git(observer, "merge", "--no-ff", "-qm", "local merge tip", "issue/local-side")
+    const localHead = await git(observer, "rev-parse", "HEAD")
+    expect((await git(observer, "rev-list", "--parents", "-n", "1", localHead)).split(" ")).toHaveLength(3)
+
+    let stdout = ""
+    let stderr = ""
+    expect(
+      await runYrdProcess(
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", observer, "pr", "submit", branch, "--json"],
+        {
+          cwd: observer,
+          stdout: (text) => {
+            stdout += text
+          },
+          stderr: (text) => {
+            stderr += text
+          },
+        },
+      ),
+      stderr,
+    ).toBe(0)
+    expect(stderr).toBe("")
+    expect(JSON.parse(stdout)).toMatchObject({
+      prs: [{ branch, revs: [{ n: 1, head: liveHead }] }],
+    })
+    expect(localHead).not.toBe(liveHead)
+    expect(await git(observer, "rev-parse", branch)).toBe(localHead)
+    expect(await git(observer, "rev-parse", `refs/remotes/origin/${branch}`)).toBe(liveHead)
+    expect(
+      (await journalEnvelope(observer))
+        .flatMap(({ values }) => values)
+        .flatMap((value) => parseJournalFrame(value).events)
+        .filter(({ name }) => name === "pr/submitted"),
+    ).toHaveLength(1)
+  })
+
   it("refuses the live remote merge tip at submit and names the divergent local ref", async () => {
     const { author, observer, branch, staleHead } = await staleRemoteBranchRepository()
     await git(author, "switch", "-qc", "issue/side", staleHead)
