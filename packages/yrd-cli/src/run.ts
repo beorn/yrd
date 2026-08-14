@@ -846,11 +846,7 @@ export function runnerSourceBehind(
   const runnerSha = residentBootedSha(implementationSource)
   if (runnerSha === undefined) return undefined
   const cached = runnerSourceBehindCache.get(sourceRoot)
-  if (
-    cached !== undefined &&
-    cached.runnerSha === runnerSha &&
-    now - cached.computedAt < RUNNER_SOURCE_BEHIND_TTL_MS
-  ) {
+  if (cached !== undefined && cached.runnerSha === runnerSha && now - cached.computedAt < RUNNER_SOURCE_BEHIND_TTL_MS) {
     return cached.behind
   }
   const behind = readSourceAdvance(sourceRoot, runnerSha)?.behind
@@ -6257,7 +6253,8 @@ async function observeQueueList(
     observedRunner === null || sourceCheckout === undefined
       ? undefined
       : runnerSourceBehind(sourceCheckout, observedRunner.implementationSource, now)
-  const runner = observedRunner === null || sourceBehind === undefined ? observedRunner : { ...observedRunner, sourceBehind }
+  const runner =
+    observedRunner === null || sourceBehind === undefined ? observedRunner : { ...observedRunner, sourceBehind }
   return {
     state,
     stateSource,
@@ -7300,7 +7297,10 @@ type IndexRebuildSkip = Readonly<{
 }>
 
 /** Skips that leave nothing for the operator to do. */
-const HEALTHY_SKIP_REASONS: ReadonlySet<IndexRebuildSkip["reason"]> = new Set<IndexRebuildSkip["reason"]>(["already-indexed", "intent-carrier"])
+const HEALTHY_SKIP_REASONS: ReadonlySet<IndexRebuildSkip["reason"]> = new Set<IndexRebuildSkip["reason"]>([
+  "already-indexed",
+  "intent-carrier",
+])
 
 type IndexRebuildReport = Readonly<{
   ref: string
@@ -8777,7 +8777,7 @@ async function writeResidentSourceRecycle(
  * the poll interval, so routing through it would let one git read satisfy both
  * of the two observations that are supposed to be independent.
  */
-async function residentSourceHealth(
+export async function residentSourceHealth(
   app: YrdCliApp,
   io: YrdCliIO,
   stall: ResidentSourceStall | undefined,
@@ -8786,13 +8786,10 @@ async function residentSourceHealth(
 ): Promise<Readonly<{ stall: ResidentSourceStall | undefined; recycle: boolean }>> {
   if (!resident || threshold === 0) return { stall: undefined, recycle: false }
   const bootedSha = residentBootedSha(io.implementationSource)
-  const sourceRoot = yrdSourceCheckout()
-  const advance = bootedSha === undefined || sourceRoot === undefined ? undefined : readSourceAdvance(sourceRoot, bootedSha)
-  const next = foldSourceStaleness(
-    stall,
-    { bootedSha, headSha: advance?.headSha, behind: advance?.behind },
-    threshold,
-  )
+  const sourceRoot = io.sourceCheckout ?? yrdSourceCheckout()
+  const advance =
+    bootedSha === undefined || sourceRoot === undefined ? undefined : readSourceAdvance(sourceRoot, bootedSha)
+  const next = foldSourceStaleness(stall, { bootedSha, headSha: advance?.headSha, behind: advance?.behind }, threshold)
   const cwd = io.cwd ?? process.cwd()
   const action = decideResidentSource(next, await readResidentSourceRecycle(cwd, io.stateDir))
   if (action.kind === "serve") return { stall: next, recycle: false }
