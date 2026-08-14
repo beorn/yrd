@@ -3231,7 +3231,10 @@ describe("Queue command adapters", () => {
     await drain()
     await drain()
     expect(passes.every((pass) => pass.startsWith(`${deadIntent.id}:failure:`)), passes.join(" | ")).toBe(true)
-    expect(passes.filter((pass) => pass.includes(`${deadIntent.id}:failure:`)), passes.join(" | ")).toHaveLength(3)
+    expect(
+      passes.filter((pass) => pass.includes(`${deadIntent.id}:failure:`)),
+      passes.join(" | "),
+    ).toHaveLength(3)
 
     // The stall is visible to the audit BEFORE the lane clears it, which is the
     // half of this the paging pipeline had no code for.

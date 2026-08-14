@@ -64,7 +64,7 @@ function intentPlugin(deadComponents: ReadonlySet<string>, evaluated: string[]) 
     { revision: "check-v1", output: CheckResultSchema },
   )
   const merge = withMerge(
-    (input): JobResult => {
+    (input): JobResult<{ commit: string; baseSha: string }> => {
       const component = input.prs[0]?.intent?.authored.component
       if (component !== undefined && deadComponents.has(component)) {
         return {
