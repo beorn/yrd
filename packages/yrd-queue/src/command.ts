@@ -6560,6 +6560,7 @@ async function rollbackQueueBase(
             source: base.sha,
             destination: base.branchRef,
             expectedDestination: { state: "oid", oid: landing.sha },
+            allowNonFastForward: true,
           },
         ],
       })

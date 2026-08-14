@@ -15,7 +15,7 @@
     "@yrd/job": "workspace:*",
     "@yrd/process": "workspace:*",
     "canonicalize": "^3.0.0",
-    "git-super": "github:beorn/git-super#16e2ff8e3b5596e33b75867a2a8c9347cf35094a",
+    "git-super": "github:beorn/git-super#09e4828f0bb205df7e717f41254af06319ca3f7a",
     "zod": "^4.4.3"
   }
 }
