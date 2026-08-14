@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import type { Process } from "@yrd/process"
+import { adaptProcessGit, gitSuperFailureDetail, type Process } from "@yrd/process"
 import {
   composeSubmoduleCommits,
   planSubmoduleComposition,
@@ -12,7 +12,6 @@ import {
 } from "git-super/composition"
 import { pushRefUpdates } from "git-super/push"
 import type { GitSuperResult } from "git-super/result"
-import { adaptProcessGit, gitSuperFailureDetail } from "./git-process-adapter.ts"
 
 export type QueueConflictStage = SubmoduleConflictStage
 export type QueueTreeConflict = SubmoduleTreeConflict

@@ -6,7 +6,7 @@ import { authoredDeltaBase } from "@yrd/bay"
 import { createFailure, failureFact, type JsonValue, type YrdFailure } from "@yrd/core"
 import { JobErrorSchema, parseJobLaunch, type Job, type JobContext, type JobError, type JobResult } from "@yrd/job"
 import { ComponentPathSchema } from "@yrd/intent"
-import type { Process, ProcessResult } from "@yrd/process"
+import { adaptProcessGit, gitSuperFailureDetail, type Process, type ProcessResult } from "@yrd/process"
 import { readCommitSubmodules } from "git-super/commit-graph"
 import { ensureCommitObject } from "git-super/objects"
 import { pushRefUpdates } from "git-super/push"
@@ -49,7 +49,6 @@ import {
   type QueueConflictStage,
   type QueueTreeConflict,
 } from "./submodule-composition-policy.ts"
-import { adaptProcessGit, gitSuperFailureDetail } from "./git-process-adapter.ts"
 import { materializeSubmodules } from "git-super/submodules"
 import { createGitWorktreeStore } from "git-super/worktree"
 import {

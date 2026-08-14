@@ -357,7 +357,7 @@ describe("createGitWorkspace", () => {
     expect((await git(repo, ["rev-parse", "refs/remotes/origin/task/divergent-lease"])).stdout).toBe(divergentHead)
   })
 
-  it("replays a completed claim push after its process result is interrupted without force-pushing", async () => {
+  it("observes a completed claim push after its process result is interrupted without force-pushing", async () => {
     const { root, repo, intake } = await repository()
     await git(repo, ["remote", "add", "origin", intake])
     await git(repo, ["push", "-qu", "origin", "main"])
@@ -375,28 +375,14 @@ describe("createGitWorkspace", () => {
     await using actual = createProcess()
     const pushes: string[][] = []
     let interruptPushResult = true
-    let replayingPush = false
     const process: Pick<Process, "run"> = {
       async run(request) {
         const args = request.argv.slice(3)
-        if (replayingPush && args[0] === "fetch") {
-          return {
-            exitCode: 124,
-            signal: "SIGTERM",
-            stdout: "",
-            stderr: "",
-            durationMs: 1,
-            timedOut: true,
-            verdict: "TIMED_OUT",
-            stalled: false,
-          }
-        }
         if (args.includes("push")) {
           pushes.push(args)
           const result = await actual.run(request)
           if (result.exitCode === 0 && interruptPushResult) {
             interruptPushResult = false
-            replayingPush = true
             return processResult(1, "simulated push completion interruption")
           }
           return result
@@ -420,7 +406,7 @@ describe("createGitWorkspace", () => {
     await writeFile(join(bay.path, "claimed.txt"), "ours\n")
 
     await runRequested(app, await app.bays.checkpoint({ bay: bay.id, claim: "@km/test/lease-replay" }))
-    expect(app.bays.get("B1")).toMatchObject({ status: "active", failure: { code: "checkpoint-failed" } })
+    expect(app.bays.get("B1")).toMatchObject({ status: "active", failure: undefined })
     const pushedHead = (await git(intake, ["rev-parse", "refs/heads/task/lease-replay"])).stdout
     await git(bay.path, ["update-ref", "-d", "refs/remotes/origin/task/lease-replay"])
 
@@ -433,8 +419,9 @@ describe("createGitWorkspace", () => {
 
     expect((await git(intake, ["show", "refs/heads/task/lease-replay:continued.txt"])).stdout).toBe("continued")
     expect(pushes).toHaveLength(2)
-    expect(pushes[0]?.some((argument) => argument.startsWith("--force"))).toBe(false)
-    expect(pushes[1]?.some((argument) => argument.startsWith("--force"))).toBe(false)
+    expect(pushes[0]).toContain("--force-with-lease=refs/heads/task/lease-replay:")
+    expect(pushes[1]).toContain(`--force-with-lease=refs/heads/task/lease-replay:${pushedHead}`)
+    expect(pushes.flat().some((argument) => argument === "--force" || argument.startsWith("+"))).toBe(false)
     expect(await readFile(join(repo, ".git", "yrd-pre-push-ran"), "utf8")).toBe("chained")
   })
 

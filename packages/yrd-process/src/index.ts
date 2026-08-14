@@ -4,6 +4,8 @@ import { accessSync, constants } from "node:fs"
 import { delimiter, isAbsolute, resolve } from "node:path"
 import { pathReapFailure, reapOwnedPath, type PathReapResult } from "./path-reaper.ts"
 
+export { adaptProcessGit, gitSuperFailureDetail, type GitProcessDefaults } from "./git-super.ts"
+
 export {
   inspectPathHolders,
   pathHolderRefusal,

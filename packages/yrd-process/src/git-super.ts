@@ -1,6 +1,6 @@
-import type { Process } from "@yrd/process"
 import type { GitProcess } from "git-super/process"
 import type { GitResultDetail, GitSuperResult } from "git-super/result"
+import type { Process } from "./index.ts"
 
 export type GitProcessDefaults = Readonly<{
   env?: NodeJS.ProcessEnv

@@ -1,7 +1,6 @@
 import { isAbsolute, relative, resolve, sep } from "node:path"
 import { authoredDeltaBase, type GitlinkAuthorshipGit } from "@yrd/bay"
-import type { Process, ProcessResult } from "@yrd/process"
-import { adaptProcessGit } from "@yrd/queue"
+import { adaptProcessGit, type Process, type ProcessResult } from "@yrd/process"
 import { changedCommitGitlinks } from "git-super/commit-graph"
 import { remoteContainsCommit } from "git-super/push"
 import { cleanGitEnvironment } from "./git-environment.ts"
