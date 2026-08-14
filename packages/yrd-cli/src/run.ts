@@ -84,6 +84,7 @@ import {
   configuration,
   normalizeYrdInvocation,
   refusal,
+  refuseShadowedQueueFilterTerms,
   resolveYrdContext,
   stableJson,
   usage,
@@ -1438,6 +1439,7 @@ type QueueListOptions = Readonly<{
   watch?: boolean
   check?: boolean
   json?: boolean
+  term?: readonly string[]
 }>
 
 type WatchOptions = QueueListOptions
@@ -9787,7 +9789,12 @@ function buildProgram(
 
   const queue = program.command("queue").description("manage integration queues")
   queue.helpCommand(false)
-  const listQueue = async (filters: string[], options: QueueListOptions): Promise<void> => {
+  const listQueue = async (positional: string[], options: QueueListOptions): Promise<void> => {
+    // A positional term spelled like a subcommand is the one shape this surface
+    // cannot read: `queue list list` could be either. `--term` is the reading
+    // that has to be asked for; everything else refuses rather than searching.
+    refuseShadowedQueueFilterTerms(positional)
+    const filters = [...positional, ...(options.term ?? [])]
     if (options.check === true) {
       if (options.watch === true || filters.length > 0) usage("queue list --check does not accept --watch or filters")
       setExit(await checkQueueRunner(runtimeApp, installedServices(), options, io))
@@ -9799,8 +9806,11 @@ function buildProgram(
     }
     await listQueues(installed(), filters, options, io, installedServices())
   }
+  const TERM_OPTION_HELP = "filter the timeline by a literal word, including one spelled like a subcommand (repeatable)"
+  const collectTerm = (value: string, previous: readonly string[]): readonly string[] => [...previous, value]
   queue
     .command("_list [filter...]", { isDefault: true, hidden: true })
+    .option("--term <word>", TERM_OPTION_HELP, collectTerm, [] as readonly string[])
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope the queue timeline to one PR")
     .option("--status <statuses>", QUEUE_TIMELINE_STATUS_HELP)
@@ -9813,6 +9823,7 @@ function buildProgram(
   queue
     .command("list [filter...]")
     .description("show the queue timeline")
+    .option("--term <word>", TERM_OPTION_HELP, collectTerm, [] as readonly string[])
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope the queue timeline to one PR")
     .option("--status <statuses>", QUEUE_TIMELINE_STATUS_HELP)

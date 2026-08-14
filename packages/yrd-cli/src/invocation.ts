@@ -94,6 +94,49 @@ const QUEUE_SUBCOMMANDS = new Set([
   "finish",
 ])
 
+/**
+ * Every spelling that names a queue subcommand, mapped to the canonical argv it
+ * stands for.
+ *
+ * ONE table, because these names must be recognized in TWO operand positions —
+ * `queue <spelling>` and `queue <repository> <spelling>` — and a name recognized
+ * in only one of them does not fail in the other, it silently becomes a
+ * positional FILTER TERM. `yrd queue code list` did exactly that: measured live
+ * 2026-08-14 it answered 8 rows where `yrd queue code` answered 1,091, with no
+ * note; `yrd queue code run` quietly listed the timeline instead of running the
+ * queue. One table is also why `ls`, `status` and `watch` cannot be handled in
+ * only one of the two positions again.
+ */
+const QUEUE_SUBCOMMAND_SPELLINGS: ReadonlyMap<string, readonly string[]> = new Map<string, readonly string[]>([
+  ...[...QUEUE_SUBCOMMANDS].map((name) => [name, [name]] as const),
+  ["ls", ["list"]],
+  ["status", ["list"]],
+  ["watch", ["list", "--watch"]],
+])
+
+/** The canonical argv an operand stands for, or undefined when it is a filter term. */
+function queueSubcommandSpelling(operand: string | undefined): readonly string[] | undefined {
+  return operand === undefined ? undefined : QUEUE_SUBCOMMAND_SPELLINGS.get(operand)
+}
+
+/**
+ * Refuse a filter term spelled exactly like a queue subcommand.
+ *
+ * Resolving the two operands after `queue` removes the ambiguity where it can
+ * be resolved; this is the residue — `yrd queue list list`, or any term a
+ * standalone repository (which has no declared repository names) leaves in
+ * filter position. Answering it as a search is the prohibited outcome, so the
+ * command refuses and names both readings plus the explicit escape hatch.
+ */
+export function refuseShadowedQueueFilterTerms(terms: readonly string[]): void {
+  for (const term of terms) {
+    if (!QUEUE_SUBCOMMAND_SPELLINGS.has(term)) continue
+    usage(
+      `'${term}' is a queue subcommand, not a filter term; run 'yrd queue ${term}' for the command, or pass --term ${term} to filter the timeline by that word`,
+    )
+  }
+}
+
 function rootCommandIndex(args: readonly string[]): number | undefined {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]
@@ -118,12 +161,8 @@ function canonicalizeYrdCommandSpellings(args: string[], commandIndex: number): 
     args[commandIndex + 1] = "list"
   }
   if (args[commandIndex] !== "queue") return
-  if (args[commandIndex + 1] === "watch") {
-    args.splice(commandIndex + 1, 1, "list", "--watch")
-  }
-  if (args[commandIndex + 1] === "status") {
-    args[commandIndex + 1] = "list"
-  }
+  const spelling = queueSubcommandSpelling(args[commandIndex + 1])
+  if (spelling !== undefined) args.splice(commandIndex + 1, 1, ...spelling)
 }
 
 /** Translate parse-only legacy spellings before Commander sees them. This keeps
@@ -275,41 +314,90 @@ export function normalizeYrdRepositoryAliasInvocation(
     usage(`unknown Yrd repository '${name ?? ""}'; expected ${expected}`)
   }
   const prefix = args.slice(0, queueIndex)
-  const operand = args[queueIndex + 1]
-  if (operand === undefined || operand.startsWith("-") || operand === "list" || operand === "_list") {
-    const tail = operand === "list" || operand === "_list" ? args.slice(queueIndex + 2) : args.slice(queueIndex + 1)
+  const readOnly = (command: string): boolean => READ_ONLY_SUBCOMMANDS.queue?.has(command) === true
+  const resolved = resolveQueueOperands(args, queueIndex, byName, requiredRepository, readOnly)
+  const [command = "list", ...commandFlags] = resolved.command
+  if (resolved.declaration === undefined) {
+    // Reads with no repository named span every declared repository; the other
+    // read rails have no all-repository projection, so they stay ambient.
+    if (command !== "list" && command !== "_list") return { kind: "bypass", args }
+    const tail = [...commandFlags, ...resolved.tail]
     if (tail.includes("--watch")) {
       const remedies = namedAlternatives([...byName.keys()].map((name) => `'yrd queue ${name} --watch'`))
       usage(`all-repository queue watch is unsupported; use ${remedies}`)
     }
     return { kind: "all-repositories-read", args: [...prefix, "queue", "list", ...tail] }
   }
-  if (QUEUE_SUBCOMMANDS.has(operand) && READ_ONLY_SUBCOMMANDS.queue?.has(operand) !== true) {
-    const declaration = requiredRepository(args[queueIndex + 2])
-    const tail = localRunReferences(args.slice(queueIndex + 3), declaration.repository.name, byName)
-    const base = operand === "pause" || operand === "resume" ? [declaration.queue.base] : []
-    return {
-      kind: "repository-write",
-      ...declaration,
-      args: [...prefix, "--repo", declaration.repository.path, "queue", operand, ...base, ...tail],
-    }
-  }
-  if (QUEUE_SUBCOMMANDS.has(operand)) return { kind: "bypass", args }
-  const declaration = requiredRepository(operand)
+  const declaration = resolved.declaration
+  const scope =
+    command === "list" || command === "_list"
+      ? ["--base", declaration.queue.base]
+      : command === "pause" || command === "resume"
+        ? [declaration.queue.base]
+        : []
   return {
-    kind: "repository-read",
+    kind: readOnly(command) ? "repository-read" : "repository-write",
     ...declaration,
     args: [
       ...prefix,
       "--repo",
       declaration.repository.path,
       "queue",
-      "list",
-      "--base",
-      declaration.queue.base,
-      ...localRunReferences(args.slice(queueIndex + 2), declaration.repository.name, byName),
+      command,
+      ...scope,
+      ...commandFlags,
+      ...localRunReferences(resolved.tail, declaration.repository.name, byName),
     ],
   }
+}
+
+type ResolvedQueueOperands = Readonly<{
+  command: readonly string[]
+  declaration?: YrdRepositoryAlias
+  tail: string[]
+}>
+
+/**
+ * Split the operands after `queue` into one subcommand and one repository, in
+ * EITHER order: both `yrd queue run alpha` and `yrd queue alpha run` read
+ * naturally, and an order this does not recognize does not refuse — it falls
+ * through to a positional filter term and answers a different question.
+ *
+ * The two positions are not symmetric in what they require. A WRITE names its
+ * repository, because there is no all-repository write; a READ spans every
+ * repository by default and scopes to one only when the operand is a DECLARED
+ * name, which keeps `yrd queue list topic/alpha` the cross-repository term
+ * search it has always been.
+ */
+function resolveQueueOperands(
+  args: readonly string[],
+  queueIndex: number,
+  byName: ReadonlyMap<string, YrdRepositoryAlias>,
+  requiredRepository: (name: string | undefined) => YrdRepositoryAlias,
+  readOnly: (command: string) => boolean,
+): ResolvedQueueOperands {
+  const first = args[queueIndex + 1]
+  if (first === undefined || first.startsWith("-")) {
+    return { command: ["list"], tail: args.slice(queueIndex + 1) }
+  }
+  const spelling = queueSubcommandSpelling(first)
+  if (spelling === undefined) {
+    const declaration = requiredRepository(first)
+    const next = queueSubcommandSpelling(args[queueIndex + 2])
+    if (next === undefined) return { command: ["list"], declaration, tail: args.slice(queueIndex + 2) }
+    return { command: next, declaration, tail: args.slice(queueIndex + 3) }
+  }
+  if (!readOnly(spelling[0] ?? "list")) {
+    return {
+      command: spelling,
+      declaration: requiredRepository(args[queueIndex + 2]),
+      tail: args.slice(queueIndex + 3),
+    }
+  }
+  const named = args[queueIndex + 2]
+  const declaration = named === undefined ? undefined : byName.get(named)
+  if (declaration === undefined) return { command: spelling, tail: args.slice(queueIndex + 2) }
+  return { command: spelling, declaration, tail: args.slice(queueIndex + 3) }
 }
 
 /** Resolve the command operand with Commander's canonical global-option rules. */
