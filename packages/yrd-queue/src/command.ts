@@ -880,6 +880,71 @@ async function createArtifactSink(root: string, input: StepExecution, attempt: n
   return Object.freeze({ drain, finish, write })
 }
 
+const COMMAND_OUTPUT_LOGS = ["output.log", "stdout.log", "stderr.log"] as const
+
+async function hasCommandOutput(dir: string): Promise<boolean> {
+  for (const name of COMMAND_OUTPUT_LOGS) {
+    const contents = await readFile(join(dir, name), "utf8").catch(() => "")
+    if (contents !== "") return true
+  }
+  return false
+}
+
+/** Human-readable rendering of a typed step failure, for operators reading the
+ * attempt directory rather than the journal. */
+function renderStepFailure(error: JobError): string {
+  const lines = [`yrd: step failed with '${error.code}'`, "", error.message]
+  const cause = jsonRecord(jsonRecord(error.evidence)?.error)
+  if (typeof cause?.code === "string") {
+    lines.push("", `cause: ${cause.code}`, typeof cause.message === "string" ? cause.message : "")
+  }
+  lines.push("", "The full typed error, including its evidence, is in error.json.")
+  return `${lines.join("\n").trimEnd()}\n`
+}
+
+function jsonRecord(value: JsonValue | undefined): Readonly<Record<string, JsonValue>> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined
+  return value as Readonly<Record<string, JsonValue>>
+}
+
+/**
+ * The attempt directory is the disclosure surface for a failed step. A step
+ * that refuses before its command ever runs — a candidate workspace that could
+ * not be provisioned, a checkout that could not be prepared — writes no stream
+ * artifacts, so without this its directory is created and left empty and the
+ * typed error survives only in the journal, which no CLI surfaces.
+ */
+async function discloseStepFailure<Output extends JsonValue>(
+  root: string,
+  input: StepExecution,
+  attempt: number,
+  result: JobResult<Output>,
+): Promise<JobResult<Output>> {
+  if (result.status !== "completed" || result.conclusion !== "failure") return result
+  const dir = join(root, input.run, `${input.index}-${input.step}`, `attempt-${attempt}`)
+  try {
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, "error.json"), `${JSON.stringify(result.error, undefined, 2)}\n`)
+    // Never clobber the command's own streams: they are the richer evidence,
+    // and error.json already carries the typed verdict alongside them.
+    if (!(await hasCommandOutput(dir))) {
+      await writeFile(join(dir, "output.log"), renderStepFailure(result.error))
+    }
+    return result
+  } catch (cause) {
+    // Losing the disclosure must not silently degrade to no disclosure at all.
+    // The verdict survives unchanged — its code drives retry and parking — and
+    // the message names the directory that refused the write.
+    return {
+      ...result,
+      error: {
+        ...result.error,
+        message: `${result.error.message}\nyrd: could not disclose this failure in ${dir}: ${messageOf(cause)}`,
+      },
+    }
+  }
+}
+
 async function failureEvidence(
   options: Readonly<{
     command: readonly string[]
@@ -6108,7 +6173,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
   const mode = options.mode ?? "delta"
-  return async (input, context): Promise<JobResult<GitCheckResultEvidence>> => {
+  const check = async (input: StepExecution, context: JobContext): Promise<JobResult<GitCheckResultEvidence>> => {
     try {
       const purpose = options.purpose ?? "check"
       return await withStepCandidate(
@@ -6439,6 +6504,13 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
       }
     }
   }
+  return async (input, context): Promise<JobResult<GitCheckResultEvidence>> =>
+    discloseStepFailure(
+      options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts"),
+      input,
+      context.attempt,
+      await check(input, context),
+    )
 }
 
 export type GitMergeOptions = ProcessDependency &
@@ -7158,7 +7230,7 @@ export function configuredMergeStep<Shape extends PRShape>(
 ): StepRunner<Shape, IntegrationProof> {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
-  return async (input, context): Promise<JobResult<IntegrationProof>> => {
+  const merge = async (input: StepExecution<Shape>, context: JobContext): Promise<JobResult<IntegrationProof>> => {
     try {
       const branch = primaryPR(input).base
       const candidate = await mergeCandidate(git, repo, input, context, {
@@ -7296,6 +7368,13 @@ export function configuredMergeStep<Shape extends PRShape>(
       return failed("merge-failed", messageOf(cause))
     }
   }
+  return async (input, context): Promise<JobResult<IntegrationProof>> =>
+    discloseStepFailure(
+      options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts"),
+      input,
+      context.attempt,
+      await merge(input, context),
+    )
 }
 
 export function deployCommandStep(
