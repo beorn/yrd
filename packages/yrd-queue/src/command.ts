@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto"
 import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
 import { isAbsolute, join, resolve, sep } from "node:path"
 import { authoredDeltaBase } from "@yrd/bay"
 import { createFailure, failureFact, type JsonValue, type YrdFailure } from "@yrd/core"
@@ -31,6 +30,7 @@ import {
   SourceRewriteSchema,
 } from "./model.ts"
 import { componentMainScratchCleanupFailure } from "./component-main-outcome.ts"
+import { isStorageExhaustion, queueScratchParent, storageExhaustionError } from "./scratch-storage.ts"
 import type { CandidatePool } from "./candidate-pool.ts"
 import type {
   CandidatePreparationInput,
@@ -1060,7 +1060,9 @@ function createGit(
     to: string,
     paths?: readonly string[],
   ): Promise<string | undefined> => {
-    const scratch = await mkdtemp(join(await realpath(tmpdir()), "yrd-patch-id-"))
+    const parent = await queueScratchParent({ run }, repo)
+    await mkdir(parent, { recursive: true })
+    const scratch = await mkdtemp(join(await realpath(parent), "yrd-patch-id-"))
     const diffPath = join(scratch, "payload.diff")
     try {
       const diff = await execute(
@@ -1643,7 +1645,7 @@ async function recutPR(git: Git, repo: string, input: PRRecutInput): Promise<PRR
   }
   const declared = recutInput.composition
   if (declared === undefined) throw new Error("source-only carrier conversion produced no composition")
-  const outcome = await withScratch<PRRecutResult>(git, repo, target.sha, tmpdir(), async (path) => {
+  const outcome = await withScratch<PRRecutResult>(git, repo, target.sha, undefined, async (path) => {
     const composed = await composePR(git, repo, path, recutInput, localSourceTips)
     if (composed.status === "failed") {
       throw createFailure({ kind: "refusal", code: composed.error.code, message: composed.error.message })
@@ -1990,7 +1992,7 @@ async function assertCurrentRecutCertificate(
     git,
     repo,
     target.sha,
-    tmpdir(),
+    undefined,
     async (path) => {
       const receipts: Readonly<{ repo: string; patchId: string }>[] = []
       for (const source of composition.sources) {
@@ -2178,7 +2180,7 @@ async function recutDirectPR(
       message: `yrd: PR '${input.id}' revision ${input.revision} has no current-composition patch identity`,
     })
   }
-  const outcome = await withScratch<PRRecutResult>(git, repo, input.headSha, tmpdir(), async (path) => {
+  const outcome = await withScratch<PRRecutResult>(git, repo, input.headSha, undefined, async (path) => {
     let rebased = await git.run(
       path,
       [
@@ -2547,11 +2549,39 @@ export async function inspectGitQueueTarget(options: {
   return inspectQueueBase(createGit(options.inject.process, options.env), repo, options.branch)
 }
 
+/**
+ * Create a scratch directory for `repo` under `parent`, defaulting to the
+ * queue's own state dir on the repository filesystem. Callers pass `parent`
+ * only when the host has configured one (the bays root); nobody gets the
+ * system temp dir, which on a tmpfs host is an inode budget shared with every
+ * unrelated process. See `queueScratchParent`.
+ */
+async function scratchIn(git: Git, repo: string, prefix: string, parent?: string): Promise<string> {
+  const root = parent ?? (await queueScratchParent(git, repo))
+  await mkdir(root, { recursive: true })
+  return mkdtemp(join(await realpath(root), prefix))
+}
+
+/**
+ * Storage exhaustion while preparing scratch is infrastructure, never a bad
+ * candidate: nothing about the composition is wrong, no author can act on it,
+ * and the very same candidate merges first try once the filesystem has room.
+ * On 2026-08-14 R2224-R2235 all failed on an inode-exhausted tmpfs and
+ * R2236/R2237 merged untouched minutes later. Reporting that as `merge-failed`
+ * sent readers hunting a content conflict that did not exist, so classify it
+ * into its own code carrying the filesystem's inode/byte split.
+ */
+async function storageExhaustionResult(git: Git, repo: string, cause: unknown): Promise<JobResult<never> | undefined> {
+  if (!isStorageExhaustion(cause)) return undefined
+  const parent = await queueScratchParent(git, repo).catch(() => repo)
+  return { status: "completed", conclusion: "failure", error: await storageExhaustionError(parent, cause) }
+}
+
 async function withScratch<Output extends JsonValue>(
   git: Git,
   repo: string,
   ref: string,
-  parent: string,
+  parent: string | undefined,
   run: (path: string, root: string) => Promise<JobResult<Output>>,
 ): Promise<JobResult<Output>> {
   const worktrees = createGitWorktreeStore({
@@ -2559,8 +2589,7 @@ async function withScratch<Output extends JsonValue>(
     git,
     timeouts: { operation: GIT_TIMEOUT_MS, cleanup: GIT_CLEANUP_TIMEOUT_MS },
   })
-  await mkdir(parent, { recursive: true })
-  const root = await mkdtemp(join(await realpath(parent), "yrd-queue-"))
+  const root = await scratchIn(git, repo, "yrd-queue-", parent)
   const path = join(root, "worktree")
   let added = false
   let outcome: JobResult<Output> | undefined
@@ -2940,7 +2969,7 @@ export function gitCandidatePreparer(options: GitCandidatePreparerOptions): Cand
       git,
       repo,
       input.baseSha,
-      options.checkoutParent ?? tmpdir(),
+      options.checkoutParent,
       async (path, scratchRoot) => ({
         status: "completed",
         conclusion: "success",
@@ -3536,7 +3565,7 @@ export async function synthesizePinIntentCarrier(options: {
     git,
     repo,
     input.baseSha,
-    options.checkoutParent ?? tmpdir(),
+    options.checkoutParent,
     async (path) => {
       const priorPin = await readGitlink(git, path, "HEAD", input.component)
       if (priorPin === undefined) {
@@ -3849,7 +3878,7 @@ async function rebaseSource(
     git,
     timeouts: { operation: GIT_TIMEOUT_MS, cleanup: GIT_CLEANUP_TIMEOUT_MS },
   })
-  const root = await mkdtemp(join(tmpdir(), "yrd-source-"))
+  const root = await scratchIn(git, sourceRepo, "yrd-source-")
   const path = join(root, "worktree")
   let added = false
   let outcome: Readonly<{ status: "passed"; output: string }> | CandidateFailure | undefined
@@ -4435,7 +4464,7 @@ async function matchesExpectedUnionMerge(
   recutRef: string,
   paths: readonly string[],
 ): Promise<boolean> {
-  const root = await mkdtemp(join(tmpdir(), "yrd-union-proof-"))
+  const root = await scratchIn(git, repo, "yrd-union-proof-")
   try {
     for (const [index, path] of paths.entries()) {
       const base = await readUnionBlob(git, repo, baseRef, path)
@@ -5248,7 +5277,7 @@ async function withComponentMainPromotions(
   ) => Promise<JobResult<IntegrationProof>>,
   options: Readonly<{ settleSafePromotions?: boolean }> = {},
 ): Promise<JobResult<IntegrationProof>> {
-  const root = await mkdtemp(join(await realpath(tmpdir()), "yrd-component-main-"))
+  const root = await scratchIn(git, repo, "yrd-component-main-")
   let outcome: JobResult<IntegrationProof> | undefined
   let operationFailure: unknown
   try {
@@ -5722,7 +5751,7 @@ async function withPinnedCandidate<Output extends JsonValue>(
     run: (path: string, scratchRoot: string) => Promise<JobResult<Output>>,
   ): Promise<JobResult<Output>> =>
     options.candidatePool === undefined
-      ? withScratch(git, repo, target.sha, options.checkoutParent ?? tmpdir(), run)
+      ? withScratch(git, repo, target.sha, options.checkoutParent, run)
       : options.candidatePool.withCandidate(target.sha, run)
   return withCandidateWorktree(async (path, scratchRoot) => {
     const candidate = await prepareCandidate(
@@ -6044,7 +6073,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
               git,
               repo,
               candidate.baseSha,
-              options.checkoutParent ?? tmpdir(),
+              options.checkoutParent,
               async (scratchPath) => {
                 parentPath = scratchPath
                 return configuredCommandStep(
@@ -6659,14 +6688,14 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
           git,
           repo,
           checked.candidateSha,
-          tmpdir(),
+          undefined,
           async (path): Promise<JobResult<IntegrationProof>> => {
             const submodules = await materializeSubmodules(git, { worktree: path, referenceWorktree: repo })
             if (submodules.code !== 0) {
-              return failed(
-                "candidate-submodules-failed",
-                submodules.stderr || submodules.stdout || "could not materialize candidate submodules",
-              )
+              const detail = submodules.stderr || submodules.stdout || "could not materialize candidate submodules"
+              const exhausted = await storageExhaustionResult(git, repo, detail)
+              if (exhausted !== undefined) return exhausted
+              return failed("candidate-submodules-failed", detail)
             }
             if ((await git.commit(path, "HEAD")) !== checked.candidateSha) {
               return failed("invalid-candidate", "candidate checkout does not match its pinned commit")
@@ -6812,10 +6841,10 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
               )
             }
             await clearLandingAttempts(git, repo, input, checked)
-            return failed(
-              "candidate-submodules-failed",
-              aligned.stderr || aligned.stdout || "could not align merged candidate submodules",
-            )
+            const detail = aligned.stderr || aligned.stdout || "could not align merged candidate submodules"
+            const exhausted = await storageExhaustionResult(git, repo, detail)
+            if (exhausted !== undefined) return exhausted
+            return failed("candidate-submodules-failed", detail)
           }
           const sourceRefError = await sourceCandidateRefError(git, repo, checked.sourceRewrites ?? [])
           if (sourceRefError !== undefined) {
@@ -6872,6 +6901,8 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
       if (refusal !== undefined) {
         return failedWithEvidence(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
       }
+      const exhausted = await storageExhaustionResult(git, repo, cause)
+      if (exhausted !== undefined) return exhausted
       return failed("merge-failed", messageOf(cause))
     }
   }
@@ -7020,6 +7051,8 @@ export function configuredMergeStep<Shape extends PRShape>(
       if (refusal !== undefined) {
         return failedWithEvidence(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
       }
+      const exhausted = await storageExhaustionResult(git, repo, cause)
+      if (exhausted !== undefined) return exhausted
       return failed("merge-failed", messageOf(cause))
     }
   }
