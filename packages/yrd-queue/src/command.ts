@@ -896,7 +896,10 @@ function renderStepFailure(error: JobError): string {
   const lines = [`yrd: step failed with '${error.code}'`, "", error.message]
   const cause = jsonRecord(jsonRecord(error.evidence)?.error)
   if (typeof cause?.code === "string") {
-    lines.push("", `cause: ${cause.code}`, typeof cause.message === "string" ? cause.message : "")
+    lines.push("", `cause: ${cause.code}`)
+    // A refusal usually quotes its cause verbatim; do not print the transcript twice.
+    const detail = typeof cause.message === "string" ? cause.message : ""
+    if (detail !== "" && !error.message.includes(detail)) lines.push(detail)
   }
   lines.push("", "The full typed error, including its evidence, is in error.json.")
   return `${lines.join("\n").trimEnd()}\n`
