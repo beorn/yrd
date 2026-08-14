@@ -5003,7 +5003,7 @@ function RunnerProgressStatus({
   if (progress?.state !== "stalled") return null
   if (headBlock === undefined) {
     return (
-      <Text color="$fg-error" bold wrap="truncate">
+      <Text color="$fg-error" bold wrap="wrap">
         NO PROGRESS — {progress.findings.map((finding) => finding.message).join(" · ")}
       </Text>
     )
@@ -5031,7 +5031,7 @@ function RunnerProgressStatus({
 function RunnerProgressObservation({ progress, now }: { progress: QueueRunnerProgress | undefined; now: number }) {
   if (progress === undefined) {
     return (
-      <Text color="$fg-error" bold wrap="truncate">
+      <Text color="$fg-error" bold wrap="wrap">
         PROGRESS NOT MEASURED — heartbeat proves ticking only
       </Text>
     )
@@ -5039,14 +5039,14 @@ function RunnerProgressObservation({ progress, now }: { progress: QueueRunnerPro
   const ageMs = QueueRunnerProgress.ageMs(progress, now)
   if (ageMs === undefined) {
     return (
-      <Text color="$fg-error" bold wrap="truncate">
+      <Text color="$fg-error" bold wrap="wrap">
         PROGRESS INVALID — measurement time is not readable
       </Text>
     )
   }
   if (ageMs > RUNNER_STALE_MS) {
     return (
-      <Text color="$fg-error" bold wrap="truncate">
+      <Text color="$fg-error" bold wrap="wrap">
         PROGRESS STALE — last measured {mediaDuration(ageMs)} ago
       </Text>
     )
@@ -5106,6 +5106,16 @@ function TimelineRunnerBox({
       {...(timer === undefined ? {} : { titleRight: timer })}
       {...(borderColor === undefined ? {} : { borderColor })}
     >
+      {/* The prose rails below wrap; these two glyph-led header rows do not.
+          A `wrap="truncate"` Text that is a direct COLUMN child of the box
+          paints straight over the right border and is clipped by the TERMINAL,
+          not the frame (operator report 2026-08-13: the uncarried rail ate the
+          `│` and lost its "as of …" clause) — so every rail became `wrap`.
+          Inside THIS flex row the same mode shrinks correctly and stays in the
+          frame, and wrapping here would instead starve the timeline: a paused
+          12-column pane spends 16 of its 24 rows on a wrapped NO RUNNER +
+          STATUS pair and the run list falls off screen entirely
+          (queue-timeline-chrome, "12-column projected-live header"). */}
       <Box height={1} flexDirection="row" gap={1} minWidth={0}>
         <RunnerActivity marker={marker} live={live} bold flexShrink={0}>
           {QUEUE_HEALTH_GLYPH}
@@ -5134,7 +5144,7 @@ function TimelineRunnerBox({
         )}
       </Box>
       {runner === null ? null : (
-        <Text color="$fg-muted" wrap="truncate" minWidth={0}>
+        <Text color="$fg-muted" wrap="wrap" minWidth={0}>
           source {runner.implementationSource ?? "unknown"}
         </Text>
       )}
@@ -5146,19 +5156,19 @@ function TimelineRunnerBox({
       {runner === null ? null : (
         <Text
           color={runner.uncarried !== undefined && runner.uncarried.count > 0 ? "$fg-warning" : "$fg-muted"}
-          wrap="truncate"
+          wrap="wrap"
           minWidth={0}
         >
           {uncarriedLine(runner.uncarried, now)}
         </Text>
       )}
       {runner === null && runnerRefusal !== undefined ? (
-        <Text color="$fg-error" wrap="truncate" minWidth={0}>
+        <Text color="$fg-error" wrap="wrap" minWidth={0}>
           {runnerRefusal.code}: {runnerRefusal.message}
         </Text>
       ) : null}
       {runnerStale && timing !== null ? (
-        <Text color="$fg-error" bold wrap="truncate">
+        <Text color="$fg-error" bold wrap="wrap">
           RUNNER STALE — last tick {mediaDuration(timing.ageMs)} ago
         </Text>
       ) : null}
