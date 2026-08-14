@@ -7318,17 +7318,38 @@ async function runRequiredChecks(
           }
     const result = await checks.run(name, io.cwd ?? process.cwd(), context)
     if (result.stdout !== "") io.stdout(result.stdout)
-    if (result.signal === "SIGKILL" || (result.signal === null && result.exitCode === 137)) {
+    if (result.sweepFailure !== undefined) {
+      const retained =
+        result.retainedWorkspace === undefined ? "" : `; ${retainedWorkspaceNote(result.retainedWorkspace)}`
+      raiseFailure(
+        "infrastructure",
+        "required-check-infrastructure-sweep",
+        `yrd: required check infrastructure failed: '${name}' process tree could not be swept after settlement: ${result.sweepFailure}${retained}`,
+      )
+    }
+    if (result.timedOut) {
+      const checkDiagnostic = result.stderr.trim()
+      const diagnostic = checkDiagnostic === "" ? "" : `; check stderr: ${checkDiagnostic}`
+      const retained =
+        result.retainedWorkspace === undefined ? "" : `; ${retainedWorkspaceNote(result.retainedWorkspace)}`
+      raiseFailure(
+        "refusal",
+        "required-check-failed",
+        `yrd: required check failed: '${name}' timed out${diagnostic}${retained}`,
+      )
+    }
+    if (result.signal !== null || result.exitCode === 137) {
+      const signal = result.signal ?? "SIGKILL"
       const retained =
         result.retainedWorkspace === undefined ? "" : `; ${retainedWorkspaceNote(result.retainedWorkspace)}`
       raiseFailure(
         "infrastructure",
         "required-check-infrastructure-signal",
-        `yrd: required check infrastructure failed: '${name}' ended by SIGKILL (exit ${result.exitCode}) before it produced a verdict${retained}`,
+        `yrd: required check infrastructure failed: '${name}' ended by ${signal} (exit ${result.exitCode}) before it produced a verdict${retained}`,
       )
     }
-    if (result.exitCode !== 0 || result.timedOut) {
-      const outcome = result.timedOut ? "timed out" : `exited ${String(result.exitCode)}`
+    if (result.exitCode !== 0) {
+      const outcome = `exited ${String(result.exitCode)}`
       const checkDiagnostic = result.stderr.trim()
       const diagnostic = checkDiagnostic === "" ? "" : `; check stderr: ${checkDiagnostic}`
       const retained =

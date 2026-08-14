@@ -856,6 +856,65 @@ describe("runYrd", () => {
     else process.env.TZ = priorTZ
   })
 
+  it("reports an unswept explicit required check as infrastructure, never success", async () => {
+    const app = await createApp()
+    const output = outputIO()
+
+    expect(
+      await runYrd(app, yrd("check", "check", "--json"), output.io, {
+        checks: {
+          names: ["check"],
+          install: async () => "/repo/.git/yrd/hooks/pre-submit",
+          run: async () => ({
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+            signal: null,
+            durationMs: 100,
+            timedOut: false,
+            sweepFailure: "process tree remained alive",
+          }),
+        },
+      }),
+    ).toBe(3)
+    expect(JSON.parse(output.stderr())).toMatchObject({
+      failure: {
+        kind: "infrastructure",
+        code: "required-check-infrastructure-sweep",
+        message: expect.stringContaining("process tree remained alive"),
+      },
+    })
+  })
+
+  it("reports a signalled explicit required check as infrastructure, never a task failure", async () => {
+    const app = await createApp()
+    const output = outputIO()
+
+    expect(
+      await runYrd(app, yrd("check", "check", "--json"), output.io, {
+        checks: {
+          names: ["check"],
+          install: async () => "/repo/.git/yrd/hooks/pre-submit",
+          run: async () => ({
+            stdout: "",
+            stderr: "",
+            exitCode: 1,
+            signal: "SIGTERM",
+            durationMs: 100,
+            timedOut: false,
+          }),
+        },
+      }),
+    ).toBe(3)
+    expect(JSON.parse(output.stderr())).toMatchObject({
+      failure: {
+        kind: "infrastructure",
+        code: "required-check-infrastructure-signal",
+        message: expect.stringContaining("SIGTERM"),
+      },
+    })
+  })
+
   it("keeps the canonical bay subtree free of internal operations", async () => {
     const app = await createApp()
     const gitHelp = outputIO()

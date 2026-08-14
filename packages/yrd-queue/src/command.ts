@@ -153,6 +153,7 @@ export const CommandEvidenceSchema = z
     stageVerdict: z.enum(["EXITED", "TIMED_OUT", "STALLED"]).optional(),
     lastProgressAtMs: z.number().nonnegative().optional(),
     lastProgressBytes: z.number().int().nonnegative().optional(),
+    signal: z.string().min(1).optional(),
     sweepFailure: z.string().min(1).optional(),
     /** The direct child exited but a descendant held its output pipe open past
      * the post-exit drain grace (a process-group escapee); run() abandoned the
@@ -434,6 +435,7 @@ function configuredCommand<Shape extends PRShape>(
       ...(progress.verdict === undefined ? {} : { stageVerdict: progress.verdict }),
       ...(progress.lastProgressAtMs === undefined ? {} : { lastProgressAtMs: progress.lastProgressAtMs }),
       ...(progress.lastProgressBytes === undefined ? {} : { lastProgressBytes: progress.lastProgressBytes }),
+      ...(result.signal === null ? {} : { signal: result.signal }),
       ...(result.sweepFailure === undefined ? {} : { sweepFailure: result.sweepFailure }),
       ...(progress.escapedDescendant === true ? { escapedDescendant: true } : {}),
     })
@@ -459,6 +461,13 @@ function configuredCommand<Shape extends PRShape>(
         evidence,
       )
     }
+    if (result.sweepFailure !== undefined) {
+      return failed(
+        `${options.purpose}-infrastructure-sweep`,
+        `${options.purpose} process tree could not be swept after settlement: ${result.sweepFailure}`,
+        evidence,
+      )
+    }
     // 21012 S1: a wall-clock settlement is a NAMED failure class, never a
     // generic exit red — the journal evidence must say the bound fired (and
     // whether the tree sweep itself failed), so a wedged step self-diagnoses.
@@ -470,14 +479,16 @@ function configuredCommand<Shape extends PRShape>(
         evidence,
       )
     }
-    // SIGKILL has no task-level meaning: the kernel, an operator, or a memory
-    // supervisor ended the process before it could return a verdict. Keeping
+    // A signal has no task-level meaning: the kernel, an operator, or a process
+    // supervisor ended the command before it could return a verdict. Keeping
     // this distinct prevents exit-code normalization from turning missing
-    // evidence into a terminal check failure.
-    if (result.signal === "SIGKILL" || (result.signal === null && result.exitCode === 137)) {
+    // evidence into a terminal check failure. Exit 137 is the shell-normalized
+    // SIGKILL fallback when the launcher cannot report the signal directly.
+    if (result.signal !== null || result.exitCode === 137) {
+      const signal = result.signal ?? "SIGKILL"
       return failed(
         `${options.purpose}-infrastructure-signal`,
-        `${options.purpose} command ended by SIGKILL (exit ${result.exitCode}) before it produced a verdict`,
+        `${options.purpose} command ended by ${signal} (exit ${result.exitCode}) before it produced a verdict`,
         evidence,
       )
     }
@@ -664,6 +675,10 @@ function comparableCommandEvidence(outcome: JobResult<CommandEvidence>, purpose:
     return outcome.output
   }
   return undefined
+}
+
+function isCommandInfrastructureFailure(code: string, purpose: string): boolean {
+  return code === `${purpose}-infrastructure-signal` || code === `${purpose}-infrastructure-sweep`
 }
 
 function comparisonOutcomeError(
@@ -5915,7 +5930,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
                 }),
               }
             }
-            if (outcome.error.code === `${purpose}-infrastructure-signal`) {
+            if (isCommandInfrastructureFailure(outcome.error.code, purpose)) {
               const refusal = GitCheckExecutionRefusalEvidenceSchema.parse({
                 ...candidate,
                 kind: "check-execution-refusal",
@@ -5993,7 +6008,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             )
           }
 
-          if (outcome.error.code === `${purpose}-infrastructure-signal`) {
+          if (isCommandInfrastructureFailure(outcome.error.code, purpose)) {
             const refusal = GitCheckExecutionRefusalEvidenceSchema.parse({
               ...candidate,
               kind: "check-execution-refusal",
@@ -6077,7 +6092,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
           if (
             parentOutcome.status === "completed" &&
             parentOutcome.conclusion === "failure" &&
-            parentOutcome.error.code === `${purpose}-infrastructure-signal`
+            isCommandInfrastructureFailure(parentOutcome.error.code, purpose)
           ) {
             const refusal = GitCheckExecutionRefusalEvidenceSchema.parse({
               ...candidate,

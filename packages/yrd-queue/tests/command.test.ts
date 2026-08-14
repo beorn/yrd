@@ -5111,9 +5111,14 @@ describe("Queue command adapters", () => {
     expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
-  it.each([false, true])(
-    "classifies a SIGKILLed candidate check as retryable infrastructure, never a task verdict (waiting=%s)",
-    async (waiting) => {
+  it.each([
+    { signal: "SIGKILL", waiting: false },
+    { signal: "SIGKILL", waiting: true },
+    { signal: "SIGTERM", waiting: false },
+    { signal: "SIGTERM", waiting: true },
+  ] as const)(
+    "classifies a $signal candidate check as retryable infrastructure, never a task verdict (waiting=$waiting)",
+    async ({ signal, waiting }) => {
       const { repo, feature: featureSha } = await repository("feature")
       await using process = createProcess()
       const killed: Pick<Process, "run"> = {
@@ -5121,7 +5126,7 @@ describe("Queue command adapters", () => {
           if (request.argv[0] !== "sh") return process.run(request)
           return Promise.resolve({
             exitCode: 1,
-            signal: "SIGKILL",
+            signal,
             stdout: "",
             stderr: "",
             durationMs: 100,
@@ -5141,7 +5146,52 @@ describe("Queue command adapters", () => {
           evidence: {
             kind: "check-execution-refusal",
             phase: "candidate",
-            error: { code: "check-infrastructure-signal", message: expect.stringContaining("SIGKILL") },
+            error: { code: "check-infrastructure-signal", message: expect.stringContaining(signal) },
+            candidateEvidence: { signal },
+            retryable: true,
+          },
+        },
+      })
+      expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
+    },
+  )
+
+  it.each([false, true])(
+    "classifies an unswept candidate process tree as retryable infrastructure, never success (waiting=%s)",
+    async (waiting) => {
+      const { repo, feature: featureSha } = await repository("feature")
+      await using process = createProcess()
+      const unswept: Pick<Process, "run"> = {
+        run(request) {
+          if (request.argv[0] !== "sh") return process.run(request)
+          return Promise.resolve({
+            exitCode: 0,
+            signal: null,
+            stdout: "",
+            stderr: "",
+            durationMs: 100,
+            timedOut: false,
+            sweepFailure: "process tree remained alive",
+          })
+        },
+      }
+      await using app = await checkedQueue(unswept, repo, shellCommand("exit 0"), { waiting })
+      await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+      expect(run).toMatchObject({
+        status: "completed",
+        conclusion: "failure",
+        error: {
+          code: "queue-environment-refused",
+          evidence: {
+            kind: "check-execution-refusal",
+            phase: "candidate",
+            error: {
+              code: "check-infrastructure-sweep",
+              message: expect.stringContaining("process tree remained alive"),
+            },
+            candidateEvidence: { exitCode: 0, sweepFailure: "process tree remained alive" },
             retryable: true,
           },
         },
