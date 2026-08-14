@@ -48,13 +48,6 @@ type Allowed = Readonly<{ file: string; reason: string }>
  * sweep — re-derive, never assume, before adding to this list. */
 const ALLOWLIST: readonly Allowed[] = [
   {
-    file: "yrd-queue/src/command.ts",
-    reason:
-      "applyComponentMainPromotions pushes an admitted root-PR gitlink change to component refs/heads/main as " +
-      "the queue's OWN write; rollbackQueueBase force-with-lease-rolls-back the queue's OWN base ref on its own " +
-      "failure path. Neither is printed to an operator.",
-  },
-  {
     file: "yrd-queue/src/candidate-pool.ts",
     reason:
       "reset --hard / clean -fdx run only against the pipeline's own ephemeral candidate-pool worktree to prove " +
