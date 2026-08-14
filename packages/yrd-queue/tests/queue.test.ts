@@ -4172,6 +4172,71 @@ describe("Queue", () => {
     })
   })
 
+  it("counts the check requests a byte-identical rebuild carried into a new ordinal", async () => {
+    // @yrd/core/rebuilt-carrier-denied-retry. `303e7845` removed the revision
+    // ordinal from `checkRequest` because a request asks "check this tree" and
+    // the ordinal identifies nothing about the tree. The counter behind
+    // `hasFreshRevisionCheckAuthority` kept it, so the two disagreed about what
+    // a request IS: after a byte-identical rebuild minted a new ordinal, the
+    // counter saw only the request filed AFTER the rebuild and read one
+    // authority against the one the refusal had already spent. One is not more
+    // than one, so the carrier held no fresh authority and was refused a retry
+    // it had demonstrably earned — silently, and for as long as it kept
+    // rebuilding to the same tree.
+    let failing = true
+    let checks = 0
+    await using app = await createQueueApp({
+      resolveBaseSha: () => BASE,
+      check: () => {
+        checks += 1
+        return failing
+          ? { status: "completed", conclusion: "failure", error: { code: "check-failed", message: "tests failed" } }
+          : { status: "completed", conclusion: "success", output: { checked: true } }
+      },
+    })
+
+    const specimen = await submitBranch(app, "issue/rebuilt-at-a-new-ordinal")
+    await app.bays.requestChecks({ pr: specimen.id, baseSha: BASE })
+    await app.queue.run({ prs: [specimen.id] }, runtime)
+    expect(prAdmission(app.bays.pr(specimen.id)!)).toMatchObject({
+      status: "refused",
+      baseSha: BASE,
+      requestCount: 1,
+    })
+
+    // The specimen: a rebuild that moved neither the head nor the base, so the
+    // refused verdict carries onto revision 2 (plugin.ts, `carriedAdmission`)
+    // and the request filed at revision 1 still describes this exact tree.
+    await app.bays.recut({
+      pr: specimen.id,
+      fromRevision: specimen.revision,
+      headSha: specimen.headSha,
+      baseSha: BASE,
+      treeSha: "c".repeat(40),
+      patchId: "d".repeat(40),
+      reviewCarried: false,
+    })
+    await app.bays.requestChecks({ pr: specimen.id, baseSha: BASE })
+    expect(prFacts(app.bays.pr(specimen.id))).toMatchObject({ revision: 2, delivery: "pushed" })
+
+    // A second carrier so the selectorless drain has a submitted PR to enter
+    // on; the specimen is reached from the admission queue, as in production.
+    failing = false
+    const peer = await submitBranch(app, "issue/keeps-the-drain-open")
+    await app.bays.requestChecks({ pr: peer.id, baseSha: BASE })
+
+    await app.queue.run({}, runtime)
+
+    // The claim, stated as the retry rather than as a tally: two requests name
+    // this tree against this base and only one authority has been spent, so the
+    // carrier is admitted again. Under the ordinal it read one against one and
+    // stayed refused for good.
+    expect(prAdmission(app.bays.pr(specimen.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
+    expect(app.queue.eligibility(specimen.id)).toMatchObject({ checks: { status: "passed" } })
+    expect(prAdmission(app.bays.pr(specimen.id)!)).toMatchObject({ requestCount: 2 })
+    expect(checks).toBe(3)
+  })
+
   it("integrates a checks-passed PR while another admission's check is still in flight", async () => {
     await using app = await createQueueApp({
       check: () => ({ status: "completed", conclusion: "success", output: { checked: true } }),

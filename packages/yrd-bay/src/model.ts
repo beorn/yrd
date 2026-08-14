@@ -432,8 +432,19 @@ const PRAdmissionBaseSchema = z.object({
    * Zero must also stay distinct from absent. `requestCount ?? 1` reads absent
    * as one legacy authority, so recording zero by OMITTING the field would
    * assert an authority nobody granted and suppress the retry that a real,
-   * later request earns. */
-  requestCount: z.number().int().nonnegative().optional(),
+   * later request earns.
+   *
+   * `"unresolved"` is the third state, and it exists because zero was carrying
+   * two meanings. A check request may record no base of its own, and the
+   * revision it names may record none either; that request's base cannot be
+   * determined, so it can neither be counted against this verdict's base nor
+   * ruled out of it. Storing the resulting shortfall as a number would say "no
+   * authority was granted" about requests nobody could read, and a later reader
+   * would deny a retry on the strength of it. The counter therefore reports
+   * that it could not resolve the identity, and this field carries that fact
+   * verbatim instead of a zero that means something else
+   * (@yrd/core/rebuilt-carrier-denied-retry). */
+  requestCount: z.union([z.number().int().nonnegative(), z.literal("unresolved")]).optional(),
   candidate: TextSchema.optional(),
   steps: z.array(PRAdmissionStepSchema),
 })
@@ -442,7 +453,7 @@ export type PRAdmissionRecord =
   | Readonly<{
       status: "passed"
       baseSha: string
-      requestCount?: number
+      requestCount?: number | "unresolved"
       candidate?: string
       steps: readonly PRAdmissionStep[]
     }>
@@ -450,7 +461,7 @@ export type PRAdmissionRecord =
       status: "refused"
       kind: "refusal" | "failure" | "infrastructure"
       baseSha: string
-      requestCount?: number
+      requestCount?: number | "unresolved"
       candidate?: string
       steps: readonly PRAdmissionStep[]
       step: string

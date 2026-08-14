@@ -20,6 +20,7 @@ import { defineConfig, selectFlow, yrd, type FlowPin, type Submission } from "@y
 import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
 import {
   GitShaSchema,
+  PRAdmissionRecordedFactSchema,
   PRRejectedFactSchema,
   currentPRRev,
   normalizeV2By,
@@ -2877,5 +2878,38 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     await expect(
       app.bays.submitSelection("topic/ghost", { base: "main", resolveRevision: async () => undefined, run: runtime }),
     ).rejects.toMatchObject({ failure: { kind: "refusal", code: "git-commit-missing" } })
+  })
+})
+
+describe("admission request-count fact", () => {
+  const record = (requestCount: unknown) => ({
+    pr: "PR1",
+    revision: 1,
+    headSha: "1".repeat(40),
+    admission: {
+      status: "passed",
+      baseSha: "a".repeat(40),
+      ...(requestCount === undefined ? {} : { requestCount }),
+      steps: [],
+    },
+  })
+
+  // Three states, three meanings, and no producer may coerce one into another.
+  // Absent is the legacy shape and reads as one authority (`requestCount ?? 1`);
+  // zero says a verdict consumed none, which is ordinary once a request's base
+  // is allowed to lag the queue's; "unresolved" says the counter could not read
+  // some request's base at all, which is neither of the first two and must not
+  // be spent as if it were (@yrd/core/rebuilt-carrier-denied-retry).
+  it("keeps absent, zero and unresolved as three distinct facts", () => {
+    expect(PRAdmissionRecordedFactSchema.parse(record(undefined)).admission.requestCount).toBeUndefined()
+    expect(PRAdmissionRecordedFactSchema.parse(record(0)).admission.requestCount).toBe(0)
+    expect(PRAdmissionRecordedFactSchema.parse(record(3)).admission.requestCount).toBe(3)
+    expect(PRAdmissionRecordedFactSchema.parse(record("unresolved")).admission.requestCount).toBe("unresolved")
+  })
+
+  it("refuses a count that is neither a whole number of authorities nor the unresolved fact", () => {
+    expect(() => PRAdmissionRecordedFactSchema.parse(record(-1))).toThrow()
+    expect(() => PRAdmissionRecordedFactSchema.parse(record(1.5))).toThrow()
+    expect(() => PRAdmissionRecordedFactSchema.parse(record("unknown"))).toThrow()
   })
 })

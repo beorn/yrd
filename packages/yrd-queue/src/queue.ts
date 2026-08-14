@@ -29,6 +29,7 @@ import {
   type BaysState,
   type HasBays,
   type PR,
+  type PRAdmission,
   type PRAdmissionRecord,
   type PRAdmissionRecordedFact,
   type PRAdmissionStep,
@@ -1558,6 +1559,30 @@ function createQueue<Shape extends PRShape>(
       admission,
     })
 
+  /** The authority count this verdict may record, announcing an unresolved one.
+   *
+   * An unresolved tally is a durable data defect: some check request of this
+   * tree records no base and neither does the revision it names, so nothing can
+   * say whether it was granted against this verdict's base. That must not be
+   * quietly written as a number — a reader would spend it as "no authority was
+   * granted" and deny the carrier its next retry — so the fact is recorded
+   * verbatim AND said out loud here, which is the only place holding both the
+   * carrier and the logger (@yrd/core/rebuilt-carrier-denied-retry). */
+  const verdictRequestCount = (pr: DeepReadonly<PR>, baseSha: string): number | "unresolved" => {
+    const tally = revisionCheckRequestTally(pr, baseSha)
+    if (tally.status === "unresolved") {
+      log.warn?.("queue admission could not resolve the base of every check request for this tree", {
+        action: "admission-request-count-unresolved",
+        pr: pr.id,
+        revision: prRevisionNumber(pr),
+        headSha: prHead(pr),
+        baseSha,
+        unreadableRequests: tally.unreadable,
+      })
+    }
+    return recordedRequestCount(tally)
+  }
+
   const refuseRevisionAdmission = async (
     pr: DeepReadonly<PR>,
     baseSha: string,
@@ -1576,7 +1601,7 @@ function createQueue<Shape extends PRShape>(
       status: "refused",
       kind,
       baseSha,
-      requestCount: revisionCheckRequestCount(pr, baseSha),
+      requestCount: verdictRequestCount(pr, baseSha),
       ...(options.candidate === undefined ? {} : { candidate: options.candidate }),
       steps: [...(options.steps ?? [])],
       step,
@@ -1729,7 +1754,7 @@ function createQueue<Shape extends PRShape>(
     await recordRevisionAdmission(pr, {
       status: "passed",
       baseSha,
-      requestCount: revisionCheckRequestCount(pr, baseSha),
+      requestCount: verdictRequestCount(pr, baseSha),
       candidate: candidate.id,
       steps: evidence,
     })
@@ -6565,23 +6590,80 @@ function hasFreshRevisionCheckAuthority(
   const request = checkRequest(pr)
   const baseSha = request?.baseSha ?? prBaseSha(pr)
   if (baseSha === undefined) return false
-  const requests = revisionCheckRequestCount(pr, baseSha)
-  const admission = prAdmission(pr)
+  const tally = revisionCheckRequestTally(pr, baseSha)
+  const consumed = consumedCheckAuthorities(prAdmission(pr), baseSha)
+  // Neither side of the comparison may be invented. An unresolved tally means
+  // some request's base is unreadable, and an unresolved record means the
+  // verdict was written from such a tally: in both cases the number of
+  // authorities this tree holds against this base is unknown, and "unknown" is
+  // not "more than were spent". Granting a retry here would let an unreadable
+  // request re-run the queue on every pass; refusing one leaves the carrier
+  // exactly where its last verdict put it, with the unresolved fact recorded on
+  // that verdict for whoever reads it next
+  // (@yrd/core/rebuilt-carrier-denied-retry).
+  if (tally.status === "unresolved" || consumed === "unresolved") return false
   const attempts = Math.max(
-    admission?.baseSha === baseSha ? (admission.requestCount ?? 1) : 0,
+    consumed,
     ...(currentRevisionAdmissionJobs(state, pr, steps) ?? []).map((job) => job?.attempt ?? 0),
   )
-  return requests > attempts
+  return tally.count > attempts
 }
 
-function revisionCheckRequestCount(pr: DeepReadonly<PR>, baseSha: string): number {
+/** Check authorities a recorded verdict already spent against `baseSha`. */
+function consumedCheckAuthorities(
+  admission: DeepReadonly<PRAdmission> | undefined,
+  baseSha: string,
+): number | "unresolved" {
+  if (admission?.baseSha !== baseSha) return 0
+  // Absent is the legacy shape, written before the counter existed; such a
+  // verdict spent exactly one authority. Zero and "unresolved" are both facts a
+  // producer wrote deliberately and neither may be read as the other.
+  return admission.requestCount ?? 1
+}
+
+type RevisionCheckRequestTally =
+  | Readonly<{ status: "counted"; count: number }>
+  | Readonly<{ status: "unresolved"; unreadable: number }>
+
+/**
+ * How many check authorities this PR's CURRENT TREE holds against `baseSha`.
+ *
+ * Identity is the head, matching {@link checkRequest}, and deliberately NOT the
+ * revision ordinal. `303e7845` removed the ordinal from `checkRequest` because a
+ * request asks "check this tree" and the ordinal identifies nothing about the
+ * tree: a mechanical rebuild lands on byte-identical content and mints a new
+ * ordinal while the head, and so the meaning of every request already recorded,
+ * is unchanged. This counter kept the ordinal, so the two disagreed about what
+ * a request IS. A byte-identical rebuild then read zero authorities for work
+ * that demonstrably ran, and the carrier it belonged to was denied the retry it
+ * had just earned (@yrd/core/rebuilt-carrier-denied-retry).
+ *
+ * `baseSha` stays in the match for the opposite reason: it is a PARAMETER being
+ * counted over rather than part of the identity. The question this answers is
+ * "against THIS base", and a request whose base differs answers it with no.
+ *
+ * A request that records no base, on a revision that records none either, is
+ * the one candidate whose base cannot be determined — it can neither be counted
+ * nor ruled out. That is reported as `unresolved` rather than quietly dropped
+ * from the total, because a shortfall indistinguishable from "no authority was
+ * granted" is exactly what denies a carrier its retry.
+ */
+function revisionCheckRequestTally(pr: DeepReadonly<PR>, baseSha: string): RevisionCheckRequestTally {
   const revision = currentPRRev(pr)
-  return pr.checkRequests.filter(
-    (candidate) =>
-      candidate.revision === revision.n &&
-      candidate.headSha === revision.head &&
-      (candidate.baseSha ?? prBaseSha(pr)) === baseSha,
+  const forThisTree = pr.checkRequests.filter((candidate) => candidate.headSha === revision.head)
+  const unreadable = forThisTree.filter(
+    (candidate) => candidate.baseSha === undefined && prBaseSha(pr) === undefined,
   ).length
+  if (unreadable > 0) return { status: "unresolved", unreadable }
+  return {
+    status: "counted",
+    count: forThisTree.filter((candidate) => (candidate.baseSha ?? prBaseSha(pr)) === baseSha).length,
+  }
+}
+
+/** The tally as a recordable fact, keeping `unresolved` distinct from zero. */
+function recordedRequestCount(tally: RevisionCheckRequestTally): number | "unresolved" {
+  return tally.status === "counted" ? tally.count : "unresolved"
 }
 
 function checkEligibility(
