@@ -171,19 +171,27 @@ async function requestChecksTimes(app: SubmissionApp, pr: string, times: number)
  * real head-of-line admission wedge (authored gitlink, stale recut certificate,
  * unresolvable base): typed `refusal`, so the selectorless drain survives it and
  * retries the identical PR on the next cycle, forever. */
-function refuseForever(blocked: () => string): CandidatePreparer {
+function refuseForever(
+  blocked: () => string,
+  failure: Readonly<{ code: string; message: (pr: string) => string }> = {
+    code: "authored-gitlink",
+    message: (pr) =>
+      `yrd: PR '${pr}' authors a gitlink bump; use yrd intent submit --component vendor/yrd --issue <issue-ref>`,
+  },
+): CandidatePreparer {
   return (input) => {
     if (input.prs.some((pr) => pr.id === blocked())) {
-      throw createFailure({
-        kind: "refusal",
-        code: "authored-gitlink",
-        message: `yrd: PR '${blocked()}' authors a gitlink bump; use yrd intent submit --component vendor/yrd --issue <issue-ref>`,
-      })
+      throw createFailure({ kind: "refusal", code: failure.code, message: failure.message(blocked()) })
     }
     const { prs: _prs, ...candidate } = input
     return { ...candidate, sha: MERGED, ref: candidateRefFor(MERGED), mergeability: "mergeable" }
   }
 }
+
+/** The resident's own drain shape: `continueAdmissions` is how a drain signal
+ * interrupts the loop, and it is also what makes admissions one PR per turn —
+ * the only shape in which a refused head can hold the line. */
+const RESIDENT = { ...runtime, continueAdmissions: () => true }
 
 describe("admission refusal oracle — a head-of-line PR refused at admission is visible to queue audit", () => {
   it("records a refusal reported by an external queue preparation robot", async () => {
@@ -237,6 +245,62 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     })
     expect(app.queue.eligibility(pr.id).reason).toMatchObject({ code: "admission-refused" })
     expect(app.queue.audit().findings).not.toContainEqual(expect.objectContaining({ pr: pr.id }))
+  })
+
+  it("parks a deterministically stale recut base on its FIRST refusal and drains the PR behind it", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    const blocked = { id: "" }
+    const DIVERGED = "d".repeat(40)
+    await using app = await createApp(
+      refuseForever(() => blocked.id, {
+        code: "recut-base-diverged",
+        message: (pr) =>
+          `yrd: PR '${pr}' certifies base '${DIVERGED}', but the authoritative candidate base is '${BASE}'`,
+      }),
+      clock.read,
+    )
+    const head = await submitAndRequestChecks(app, "issue/stale-recut-base")
+    blocked.id = head.id
+    const behind = await submitAndRequestChecks(app, "issue/ready-behind-the-stale-head")
+
+    await app.queue.run({}, RESIDENT)
+
+    const refusal = app.state().queues.admissionRefusals[head.id]
+    expect(refusal).toMatchObject({
+      code: "recut-base-diverged",
+      count: 1,
+      settlement: { disposition: "needs-person" },
+    })
+    // The receipt carries the discriminating fact: which base the revision
+    // certifies and which one the queue actually holds.
+    expect(refusal?.settlement?.reason).toContain(DIVERGED)
+    expect(refusal?.settlement?.reason).toContain(BASE)
+    expect(app.queue.eligibility(head.id).reason).toMatchObject({ code: "admission-refused" })
+    // Parked, not wedged: `queue audit` has nothing left to report and no human
+    // had to pause the queue to stop the storm.
+    expect(app.queue.audit().findings).not.toContainEqual(expect.objectContaining({ pr: head.id }))
+    expect(app.queue.eligibility(behind.id).checks.status).toBe("passed")
+  })
+
+  it("keeps an I/O-flavored recut certificate refusal on the ordinary retry threshold", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createApp(
+      refuseForever(() => ""),
+      clock.read,
+    )
+    const pr = await submitAndRequestChecks(app, "issue/unfetched-certified-base")
+
+    // The 2026-07-27 partition specimen: a certificate that could not be READ,
+    // refused 106 consecutive cycles and cured by nothing but a retry.
+    await app.queue.recordAdmissionRefusal({
+      pr: pr.id,
+      code: "recut-certificate",
+      kind: "refusal",
+      reason: "the certified base is not present in the candidate repository",
+    })
+
+    expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({ code: "recut-certificate", count: 1 })
+    expect(app.state().queues.admissionRefusals[pr.id]?.settlement).toBeUndefined()
   })
 
   it("keeps a recoverable gitlink object gap on the ordinary retry threshold", async () => {

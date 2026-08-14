@@ -38,6 +38,13 @@ const RECUT_CONFLICT = {
     "submodule commit is an ancestor of the other",
 } as const
 
+const DIVERGED_RECUT_BASE = {
+  code: "recut-base-diverged",
+  message:
+    `PR 'PR1986' revision 34 certifies base '${BASE_PIN}', but the authoritative candidate base is '${BASE_ROOT}', ` +
+    "which never descended from it; the certificate cannot become valid without a fresh revision",
+} as const
+
 const ALL_DELIVERY_STATES: readonly PRDeliveryState[] = [
   "pushed",
   "submitted",
@@ -122,6 +129,20 @@ describe("actionable failure projection", () => {
     expect(failure.cause).toContain(`'${BASE_PIN}'`)
     expect(failure.cause).toContain(`'${AUTHORED_PIN}'`)
     expect(failure.reference).toBe("README.md#resolving-divergent-gitlink-pins")
+  })
+
+  it("prescribes a fresh revision, never a retry, for a diverged recut base", () => {
+    const failure = actionableFailure(DIVERGED_RECUT_BASE, { delivery: "submitted" })
+
+    expect(failure.code).toBe("recut-base-diverged")
+    // Both bases stay in the receipt: the operator checks the fresh revision
+    // against the base the queue actually holds, not the one it certified.
+    expect(failure.cause).toContain(BASE_PIN)
+    expect(failure.cause).toContain(BASE_ROOT)
+    expect(failure.resolution).toEqual(["yrd pr submit <branch>", "yrd pr recut PR1986 --preflight --queue --apply"])
+    // The parked PR must never be told to run the command that parked it.
+    expect(failure.resolution).not.toContain("Correct the cause above, then retry the same Yrd command.")
+    expect(failure.reference).toBe("README.md#pr-eligibility-and-checks")
   })
 
   it("extracts exact commands already embedded in a mechanical remedy", () => {

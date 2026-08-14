@@ -328,8 +328,20 @@ export type SettleAdmissionRefusalArgs = Readonly<z.infer<typeof SettleAdmission
  * exactly the PRs the queue itself calls wedged — one number, one home, so the
  * remedy can never fire earlier than the finding that justifies it. */
 export const ADMISSION_REFUSAL_LOOP_THRESHOLD = 3
-/** Fixed non-ancestral gitlink commits cannot become ancestral on a later retry. */
-const STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS = new Set(["recut-gitlink-conflict"])
+/**
+ * Refusals a retry cannot change, because the fact they report is fixed for the
+ * revision that carries it: non-ancestral gitlink commits do not become
+ * ancestral, and a certified recut base the authoritative base never descended
+ * from does not become ancestral either. Both need a NEW revision, so the queue
+ * parks them on the first refusal rather than re-refusing them at the head.
+ *
+ * Membership is by exact code, and the code is the discrimination: the sibling
+ * `recut-certificate` / `recut-gitlink-object-missing` refusals report an
+ * unreadable repository, which a fetch cures, and stay on the ordinary retry
+ * threshold. See `recutBaseMovement` in command.ts for where the two are told
+ * apart.
+ */
+const STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS = new Set(["recut-gitlink-conflict", "recut-base-diverged"])
 
 /** How long a pushed-but-unsubmitted PR may sit before `queue audit` flags it
  * `draft-stranded`. Mirrors the 15m orphaned-run grace: long enough for a
@@ -7425,7 +7437,7 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     "scratch-cleanup-failed",
     "wrapper-generation",
   ]),
-  "recut-lineage": new Set<string>(["recut-certificate", "restack-conflict", "restack-failed"]),
+  "recut-lineage": new Set<string>(["recut-certificate", "recut-base-diverged", "restack-conflict", "restack-failed"]),
   "plain-rejected": new Set<string>(["intent-base-moved", "intent-batch-refused", "intent-component-unknown"]),
 } as const
 

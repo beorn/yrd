@@ -694,9 +694,13 @@ healthy peers. An explicitly targeted run still fails loud after recording the
 same author receipt.
 
 Required-check refusals are revision-scoped durable facts. Queue immediately
-records a `needs-person` settlement for a structurally permanent
-`recut-gitlink-conflict`; recoverable refusals still wait for the resident's
-remedy classifier to reach a judgment-required or failed/no-remedy outcome.
+records a `needs-person` settlement for a structurally permanent refusal —
+`recut-gitlink-conflict`, and `recut-base-diverged` for a revision certifying a
+base the authoritative base never descended from; recoverable refusals still
+wait for the resident's remedy classifier to reach a judgment-required or
+failed/no-remedy outcome. The distinction is the code, not the cause text: a
+certified base that is merely absent from the local repository is refused
+`recut-certificate` and retried, because a fetch cures it.
 The settlement names the exact revision and head. Selectorless one-shot and
 resident drains share the same selector, so neither process restart nor
 another cadence tick can select it again or grow the journal. A new authored

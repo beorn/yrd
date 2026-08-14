@@ -207,6 +207,30 @@ function recutGitlinkFailure(
   })
 }
 
+/**
+ * A recut whose certified base the authoritative base never descended from is
+ * cured by exactly one thing: a fresh revision recorded at the base the queue
+ * actually holds. The generic "retry the same Yrd command" line is a wrong
+ * instruction here — the queue already parked the PR precisely because retrying
+ * re-derives the same stale certificate — so this prints the redelivery pair
+ * every delivery state accepts instead. No merge judgment is involved, so the
+ * remedy stays machine-readable rather than an escalation.
+ */
+function divergedRecutBaseFailure(
+  failure: FailureLike,
+  cause: string,
+  context: ActionableFailureContext,
+): ActionableFailure | undefined {
+  const pr = prId(failure.message)
+  if (pr === undefined) return undefined
+  return Object.freeze({
+    code: failure.code,
+    cause,
+    resolution: Object.freeze(redeliverySteps(pr, context.delivery)),
+    reference: "README.md#pr-eligibility-and-checks",
+  })
+}
+
 export function actionableFailure(failure: FailureLike, context: ActionableFailureContext = {}): ActionableFailure {
   const cause = oneLineCause(failure.message)
   const retainedWorkspace = retainedWorkspaceFromMessage(failure.message)
@@ -216,6 +240,10 @@ export function actionableFailure(failure: FailureLike, context: ActionableFailu
   if (failure.code === "authored-gitlink") return authoredGitlinkFailure(failure, cause)
   if (failure.code === "recut-gitlink-conflict") {
     const projected = recutGitlinkFailure(failure, cause, context)
+    if (projected !== undefined) return projected
+  }
+  if (failure.code === "recut-base-diverged") {
+    const projected = divergedRecutBaseFailure(failure, cause, context)
     if (projected !== undefined) return projected
   }
   const commands = [...new Set([...(failure.resolution ?? []), ...embeddedYrdCommands(failure.message)])]

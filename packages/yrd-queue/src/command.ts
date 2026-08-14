@@ -3306,7 +3306,16 @@ type RecutBaseMovement = CandidateFailure | Readonly<{ status: "moved"; moved: b
  * must be an *ancestor* of the candidate base:
  * either the same commit (no movement) or a forward advance the reviewed change can be
  * re-anchored onto. A missing or non-ancestor base cannot be mechanically re-anchored
- * and stays a hard recut-certificate refusal.
+ * and stays a hard refusal.
+ *
+ * The two ways that fails are NOT the same failure, and the queue acts on the
+ * difference (22647). An absent base OBJECT is an unfetched repository — the
+ * 2026-07-27 partition refused 106 consecutive cycles on it and a retry cured
+ * it — so it keeps the retryable `recut-certificate` code. A base that is
+ * present and still not an ancestor is a lineage the authoritative base never
+ * took: no retry can make it ancestral, only a fresh revision can, so it gets
+ * its own `recut-base-diverged` code that parks the PR on the first refusal
+ * instead of storming the queue head.
  */
 async function recutBaseMovement(git: Git, repo: string, pr: StepExecution["prs"][number]): Promise<RecutBaseMovement> {
   const baseSha = pr.recut?.baseSha
@@ -3319,9 +3328,16 @@ async function recutBaseMovement(git: Git, repo: string, pr: StepExecution["prs"
   const head = await git.commit(repo, "HEAD")
   if (head === baseSha) return { status: "moved", moved: false, baseSha, head }
   if (!(await isAncestor(git, repo, baseSha, head))) {
+    if ((await git.optionalCommit(repo, baseSha)) !== baseSha) {
+      return candidateFailure(
+        "recut-certificate",
+        `PR '${pr.id}' recut base '${baseSha}' is not present in the candidate repository; fetch it and retry`,
+      )
+    }
     return candidateFailure(
-      "recut-certificate",
-      `PR '${pr.id}' recut base '${baseSha}' is not an ancestor of the authoritative candidate base`,
+      "recut-base-diverged",
+      `PR '${pr.id}' revision ${pr.revision} certifies base '${baseSha}', but the authoritative candidate base is ` +
+        `'${head}', which never descended from it; the certificate cannot become valid without a fresh revision`,
     )
   }
   return { status: "moved", moved: true, baseSha, head }
