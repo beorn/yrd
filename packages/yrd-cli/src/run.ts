@@ -7211,7 +7211,10 @@ type IndexRebuildSkip = Readonly<{
 }>
 
 /** Skips that leave nothing for the operator to do. */
-const HEALTHY_SKIP_REASONS: ReadonlySet<IndexRebuildSkip["reason"]> = new Set<IndexRebuildSkip["reason"]>(["already-indexed", "intent-carrier"])
+const HEALTHY_SKIP_REASONS: ReadonlySet<IndexRebuildSkip["reason"]> = new Set<IndexRebuildSkip["reason"]>([
+  "already-indexed",
+  "intent-carrier",
+])
 
 type IndexRebuildReport = Readonly<{
   ref: string
