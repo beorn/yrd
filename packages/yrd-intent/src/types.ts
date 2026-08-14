@@ -454,7 +454,7 @@ export type IntentParkArgs = z.infer<typeof IntentParkArgsSchema>
  * or fallen behind its own component main — the shape of both observed
  * specimens.
  */
-export function intentParkRemedy(
+function intentParkRemedy(
   intent: Readonly<{ id: string; issue: IssueRef }>,
   failure: IntentAttemptFailure,
   attempts: number,
@@ -589,5 +589,42 @@ export function recordFingerprint(record: PinIntent): string {
       ? {}
       : { expectedCurrentPin: record.preconditions.expectedCurrentPin }),
     ...(record.preconditions.allowOffTrunk === undefined ? {} : { allowOffTrunk: record.preconditions.allowOffTrunk }),
+  })
+}
+
+/**
+ * The park verdict for one intent's attempt history, oldest attempt first, or
+ * `undefined` while another attempt could still change the answer.
+ *
+ * This is the whole policy, and it is deliberately code-blind: it counts the
+ * trailing run of attempts that share {@link intentAttemptFingerprint} and
+ * parks at {@link INTENT_PARK_AFTER_IDENTICAL_ATTEMPTS}. A caller that wanted
+ * "park these known-deterministic codes" would have to pass a code list, and
+ * there is nowhere to pass one — that is the point. The two specimens this was
+ * built for refused with different codes on consecutive nights, and the code
+ * that costs the next outage has not been written yet.
+ *
+ * Attempts whose fingerprints differ reset the count, which is what keeps a
+ * flaky remote or a lost lease retrying instead of being buried.
+ */
+export function intentParkVerdict(
+  intent: Readonly<{ id: string; issue: IssueRef }>,
+  failures: readonly IntentAttemptFailure[],
+): IntentPark | undefined {
+  const latest = failures.at(-1)
+  if (latest === undefined) return undefined
+  const fingerprint = intentAttemptFingerprint(latest)
+  let attempts = 0
+  for (let index = failures.length - 1; index >= 0; index -= 1) {
+    const failure = failures[index]
+    if (failure === undefined || intentAttemptFingerprint(failure) !== fingerprint) break
+    attempts += 1
+  }
+  if (attempts < INTENT_PARK_AFTER_IDENTICAL_ATTEMPTS) return undefined
+  return IntentParkSchema.parse({
+    fingerprint,
+    attempts,
+    failure: latest,
+    ...intentParkRemedy(intent, latest, attempts),
   })
 }

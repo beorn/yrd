@@ -3210,13 +3210,29 @@ describe("Queue command adapters", () => {
     })
 
     const passes: string[] = []
-    for (let pass = 0; pass < 5; pass += 1) {
+    const drain = async (): Promise<void> => {
       const runs = await app.queue.run({}, runtime)
       passes.push(
         runs.map((run) => `${run.prs[0]?.id}:${run.conclusion ?? run.status}:${run.error?.code}`).join(",") || "none",
       )
-      if (app.intents.get(liveIntent.id)?.status === "integrated") break
     }
+
+    // Three turns of the block itself: the head fails, the lane never moves,
+    // and the live intent from the OTHER component never gets a turn.
+    await drain()
+    await drain()
+    await drain()
+    expect(passes.every((pass) => pass.startsWith(`${deadIntent.id}:failure:`)), passes.join(" | ")).toBe(true)
+    expect(app.intents.get(liveIntent.id)).toMatchObject({ status: "open" })
+
+    // The stall is visible to the audit BEFORE the lane clears it, which is the
+    // half of this the paging pipeline had no code for.
+    const stalled = app.queue.audit().findings.filter((finding) => finding.code === "intent-lane-stalled")
+    expect(stalled).toHaveLength(1)
+    expect(stalled[0]?.message).toContain(deadIntent.id)
+    expect(stalled[0]?.count).toBe(3)
+
+    await drain()
 
     expect(
       app.intents.get(liveIntent.id),
@@ -3228,12 +3244,32 @@ describe("Queue command adapters", () => {
       disposition: { code: "intent-attempts-exhausted" },
       parked: {
         attempts: 3,
-        failure: { code: expect.any(String), component: dead.path, target: orphanSha },
+        failure: { code: "carrier-drops-landed", component: dead.path, target: orphanSha, step: "merge" },
         fingerprint: expect.stringMatching(/^[a-z][a-z0-9-]*:[0-9a-f]{16}$/u),
-        remedy: expect.arrayContaining([expect.objectContaining({ argv: expect.arrayContaining(["intent"]) })]),
+        remedy: [
+          { argv: ["yrd", "intent", "show", deadIntent.id], note: expect.any(String) },
+          {
+            argv: ["yrd", "intent", "submit", "--component", dead.path, "--issue", "@yrd/core/dead-head"],
+            note: expect.any(String),
+          },
+        ],
       },
     })
     expect(app.intents.get(deadIntent.id)?.parked?.remedySummary).toContain(dead.path)
+
+    // Parking releases the lane position but not the obligation: the owner is
+    // still named until they resubmit or withdraw.
+    const parkedFindings = app.queue.audit().findings.filter((finding) => finding.code === "intent-lane-stalled")
+    expect(parkedFindings).toHaveLength(1)
+    expect(parkedFindings[0]?.specimen).toBe(
+      `intent:${deadIntent.id}:parked:${app.intents.get(deadIntent.id)?.parked?.fingerprint}`,
+    )
+    await app.intents.withdraw(deadIntent.id, "component line abandoned")
+    expect(app.intents.get(deadIntent.id)).toMatchObject({
+      status: "withdrawn",
+      parked: { attempts: 3 },
+    })
+    expect(app.queue.audit().findings.filter((finding) => finding.code === "intent-lane-stalled")).toEqual([])
   }, 60_000)
 
   it("shares one submission-time FIFO between code PRs and intents", async () => {
