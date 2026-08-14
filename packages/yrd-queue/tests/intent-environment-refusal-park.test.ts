@@ -283,4 +283,24 @@ describe("intent parking — a retryable environment refusal is bounded, not end
     expect(stalled[0]?.since).toMatch(/^\d{4}-\d{2}-\d{2}T/u)
     expect(stalled[0]?.blockedMs).toBeGreaterThanOrEqual(0)
   })
+
+  it("names the owner in both stall shapes, so a finding routes without a second lookup", async () => {
+    // The remedy tells the reader WHAT to do; without the submitter nothing on
+    // the finding says WHO, and `queue audit` is read by whoever is on rotation
+    // rather than by the person who submitted. The parked shape matters most:
+    // it is the one that outlives the drain turn and sits until someone acts.
+    await using app = await createApp(identicalProvisionRefusal)
+    const dead = await submitIntent(app, ALPHA, "env-audit-owner")
+
+    for (let turn = 0; turn < 3; turn += 1) await drain(app)
+    const live = app.queue.audit().findings.filter((finding) => finding.code === "intent-lane-stalled")
+    expect(live).toHaveLength(1)
+    expect(live[0]?.message).toContain("@dev/11")
+
+    await drain(app)
+    expect(app.intents.get(dead.id)).toMatchObject({ status: "parked" })
+    const parked = app.queue.audit().findings.filter((finding) => finding.code === "intent-lane-stalled")
+    expect(parked).toHaveLength(1)
+    expect(parked[0]?.message).toContain("@dev/11")
+  })
 })
