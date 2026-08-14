@@ -6135,9 +6135,21 @@ async function buildQueueListSnapshot(
 ): Promise<QueueListSnapshotBuild> {
   const { state, now, runner, attempts } = observed
   const requestedBase = options.base ?? "main"
-  const target = resolveQueueTargets(state, [], requestedBase, options.pr)
+  const target = resolveQueueTargets(state, [], options.base, options.pr)
+  // An operator who named no base and no PR asked about the REPOSITORY, not
+  // about `main`: every queue with work is in scope, and the view labels them
+  // 1..N (user directive 2026-08-13). `queue log` has always read its targets
+  // this way; the listing and watch surfaces were the outliers, and a queue
+  // nobody named was simply invisible.
+  if (options.base === undefined && options.pr === undefined) {
+    for (const queueBase of queueBases(state)) target.bases.add(queueBase)
+    if (target.bases.size === 0) target.bases.add(baseIdentity(requestedBase))
+  }
   const { results } = await queueStatusSnapshots(app, state, target, io)
-  const base = results[0]?.base ?? baseIdentity(requestedBase)
+  // The primary queue — label 1, and the base the RUNNER/pause facts read from
+  // — stays the requested (or default) one, never "whichever came back first".
+  const primaryBase = baseIdentity(requestedBase)
+  const base = results.some((result) => result.base === primaryBase) ? primaryBase : (results[0]?.base ?? primaryBase)
   const runnerRefusal = runner === null ? queueRunnerRefusal(app) : undefined
   const clock = createQueueTimelineProjectionClock(results, {
     now,
