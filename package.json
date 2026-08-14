@@ -30,6 +30,7 @@
     "postinstall": "bun ./scripts/verify-public-dependencies.ts",
     "prepack": "bun run build",
     "test": "NODE_ENV=test BUN_RUNTIME_TRANSPILER_CACHE_PATH=\"${HOME}/.cache/silvercode/bun-transpiler-yrd-test\" bun --bun x vitest run",
+    "test:slow": "NODE_ENV=test BUN_RUNTIME_TRANSPILER_CACHE_PATH=\"${HOME}/.cache/silvercode/bun-transpiler-yrd-test\" bun --bun x vitest run --config vitest.slow.config.ts",
     "typecheck": "tsc --noEmit",
     "typecheck:hh": "tsc --noEmit -p tsconfig.hh.json",
     "check": "bun run typecheck && bun run test",
