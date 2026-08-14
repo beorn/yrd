@@ -6183,7 +6183,8 @@ function intentLaneAuditFindings(state: DeepReadonly<RuntimeState>): QueueAuditF
       findings.push({
         code: "intent-lane-stalled",
         message:
-          `intent '${head.id}' at the head of the intent lane failed '${stalled.failure.code}' ` +
+          `intent '${head.id}' submitted by '${head.submitter}' at the head of the intent lane ` +
+          `failed '${stalled.failure.code}' ` +
           `${stalled.attempts} consecutive times with an identical failure fingerprint for component ` +
           `'${stalled.failure.component}'; every intent behind it is blocked, including other components'. ` +
           stalled.remedySummary,
@@ -6202,7 +6203,7 @@ function intentLaneAuditFindings(state: DeepReadonly<RuntimeState>): QueueAuditF
     findings.push({
       code: "intent-lane-stalled",
       message:
-        `intent '${record.id}' is parked after ${record.parked.attempts} identical ` +
+        `intent '${record.id}' submitted by '${record.submitter}' is parked after ${record.parked.attempts} identical ` +
         `'${record.parked.failure.code}' failures and nothing has replaced it. ${record.parked.remedySummary}`,
       resolution: [
         ...record.parked.remedy.map(renderRemedyStep),
