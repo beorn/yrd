@@ -181,3 +181,52 @@ describe("merge scratch lives on the repository filesystem, not the temp dir", (
     expect(outcome.error.code).not.toBe("merge-failed")
   })
 })
+
+describe("every scratch consumer classifies ENOSPC, not just the merge step", () => {
+  /** Fail `worktree add` with the outage's own stderr; every other git call is real. */
+  const exhaustingWorktreeAdd = (real: Pick<Process, "run">): Pick<Process, "run"> => ({
+    async run(request: ProcessRequest) {
+      if (request.argv[0] === "git" && isWorktreeAdd(request.argv)) {
+        return {
+          exitCode: 128,
+          signal: null,
+          stdout: "",
+          stderr: [
+            "Preparing worktree (detached HEAD 8f2fc41c6a)",
+            "error: unable to create file hub/silvery/research/cmux.md: No space left on device",
+            "fatal: could not detach HEAD",
+          ].join("\n"),
+          durationMs: 1,
+          timedOut: false,
+        }
+      }
+      return real.run(request)
+    },
+  })
+
+  it("reports a check-step scratch ENOSPC as worktree-storage-exhausted, not check-failed", async () => {
+    const { repo, featureSha } = await remoteRepository()
+    await using real = createProcess()
+
+    // The check step prepares its candidate worktree on the same filesystem the
+    // merge step does, and died on the same 2026-08-14 ENOSPC — but it never
+    // asked the classifier, so the queue told the author their change failed
+    // its checks. Classification now lives at the scratch primitive, so the
+    // consumer cannot forget to ask.
+    const outcome = await gitCheckStep({
+      inject: { process: exhaustingWorktreeAdd(real) },
+      repo,
+      command: ["test", "-f", "feature.txt"],
+    })(checkInputFor(featureSha), { id: "J-check", attempt: 1, runner: "test", signal: new AbortController().signal })
+
+    expect(outcome).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "worktree-storage-exhausted" },
+    })
+    if (outcome.status !== "completed" || outcome.conclusion !== "failure") throw new Error("unreachable")
+    expect(outcome.error.code).not.toBe("check-failed")
+    expect(outcome.error.message).toContain("inodes")
+    expect(outcome.error.message).toContain("No space left on device")
+  })
+})

@@ -1,4 +1,4 @@
-import { statfs } from "node:fs/promises"
+import { lstat, readdir, rm, statfs } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 import type { JobError } from "@yrd/job"
 
@@ -33,10 +33,26 @@ type CommonDirGit = Readonly<{
  * where `.git` is a FILE and the naive join is not a directory at all.
  */
 export async function queueScratchParent(git: CommonDirGit, repo: string): Promise<string> {
+  const key = resolve(repo)
+  const memoized = commonDirs.get(key)
+  if (memoized !== undefined) return join(memoized, "yrd", "scratch")
   const common = (await git.run(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).stdout.trim()
   if (common === "") throw new Error(`yrd: git returned an empty common directory for '${repo}'`)
-  return join(resolve(repo, common), "yrd", "scratch")
+  const root = resolve(repo, common)
+  commonDirs.set(key, root)
+  return join(root, "yrd", "scratch")
 }
+
+/**
+ * A repository's common directory does not move under a running process, and
+ * every scratch preparation asked git for it again — a fork per merge worktree,
+ * per source rebase, per union proof. The CLI already memoizes the same lookup
+ * (`queueGitDir` in `yrd-cli/src/run.ts`), for the sharper reason that forking
+ * on the watch UI's render path stalls it; that memo cannot be shared across
+ * the package boundary, so the queue keeps its own. Only a proven answer is
+ * cached: a failed lookup leaves the memo empty and is raised to the caller.
+ */
+const commonDirs = new Map<string, string>()
 
 /**
  * ENOSPC reaches us two ways: as a Node filesystem error carrying `code`, and
@@ -157,4 +173,140 @@ export async function storageExhaustionError(path: string, cause: unknown): Prom
           },
         }),
   }
+}
+
+const STORAGE_EXHAUSTION_TAG = Symbol.for("yrd.queue.scratch-storage-exhaustion")
+
+/**
+ * Carry the typed failure on the thrown error itself, so classification happens
+ * once — at the scratch primitive, while the directory still exists and its
+ * inode/byte split is still true — and every catch downstream reads the answer
+ * instead of re-deriving it. Re-deriving later is not equivalent:
+ * `readStorageState` walks up to the nearest surviving ancestor, so a catch that
+ * classifies after cleanup can report a different filesystem than the one that
+ * ran out.
+ */
+export function tagStorageExhaustion<E extends Error>(error: E, failure: JobError): E {
+  return Object.assign(error, { [STORAGE_EXHAUSTION_TAG]: failure })
+}
+
+/** The typed failure a scratch primitive already prepared for this cause, if any. */
+export function taggedStorageExhaustion(cause: unknown): JobError | undefined {
+  if (cause === null || typeof cause !== "object") return undefined
+  const tagged = (cause as Readonly<Record<symbol, unknown>>)[STORAGE_EXHAUSTION_TAG]
+  if (tagged !== undefined) return tagged as JobError
+  const nested = (cause as Readonly<{ cause?: unknown }>).cause
+  return nested === undefined || nested === cause ? undefined : taggedStorageExhaustion(nested)
+}
+
+/**
+ * How long an entry under the scratch root may sit before it is treated as
+ * abandoned. Queue jobs are bounded well below this by their own timeouts, so a
+ * full day of no writes cannot describe live work.
+ */
+export const ORPHANED_SCRATCH_MAX_AGE_MS = 24 * 60 * 60 * 1000
+
+/**
+ * Every queue scratch directory is `mkdtemp`-ed with a `yrd-` prefix
+ * (`yrd-queue-`, `yrd-source-`, `yrd-union-proof-`, `yrd-component-main-`). It is
+ * the only thing that identifies an entry as the queue's own to delete.
+ */
+export const SCRATCH_NAME_PREFIX = "yrd-"
+
+export type ScratchReapReport = Readonly<{
+  root: string
+  /** The denominator: every entry directly under the scratch root. */
+  entries: number
+  reaped: number
+  /** Entries left alone because they are younger than the threshold or still live. */
+  kept: number
+  bytes: number
+  /** Removals that failed, kept loud rather than folded into `kept`. */
+  failures: readonly string[]
+}>
+
+async function directorySize(path: string): Promise<number> {
+  let total = 0
+  const walk = async (current: string): Promise<void> => {
+    const entries = await readdir(current, { withFileTypes: true })
+    for (const entry of entries) {
+      const child = join(current, entry.name)
+      if (entry.isDirectory() && !entry.isSymbolicLink()) {
+        await walk(child)
+        continue
+      }
+      total += (await lstat(child)).size
+    }
+  }
+  await walk(path)
+  return total
+}
+
+/**
+ * Remove scratch left behind by a queue process that died between creating a
+ * worktree and its `finally`. `withScratchRoot` cleans up on every ordinary
+ * path, including failures, but a SIGKILL or a host crash has no `finally` — and
+ * this scratch lives on the repository's own disk (`<git-common-dir>/yrd/scratch`,
+ * chosen over a tmpfs after the 2026-08-14 inode outage), so nothing clears it at
+ * reboot either. Each abandoned merge worktree is a materialized tree: tens of
+ * thousands of inodes, on the very filesystem whose exhaustion this module
+ * exists to report.
+ *
+ * Bounded and conservative: one non-recursive listing of the root, and an entry
+ * is removed only when all three hold — its name carries `namePrefix`, it is
+ * older than `olderThanMs`, and it is absent from `keep`, the paths git still
+ * lists as live worktrees, which is the read that separates an abandoned
+ * worktree from a slow one. The name check is not decoration: the scratch parent
+ * is the queue's own state dir by default but a host may point it at a bays
+ * root it shares with other work, and only the `mkdtemp` prefix says an entry is
+ * ours to delete. A missing root is a legitimate absence (nothing has prepared
+ * scratch yet) and reports zero entries; anything else about the root is raised.
+ */
+export async function reapOrphanedScratch(
+  root: string,
+  options: Readonly<{ olderThanMs?: number; now?: number; keep?: ReadonlySet<string>; namePrefix?: string }> = {},
+): Promise<ScratchReapReport> {
+  const olderThanMs = options.olderThanMs ?? ORPHANED_SCRATCH_MAX_AGE_MS
+  const now = options.now ?? Date.now()
+  const keep = options.keep ?? new Set<string>()
+  const namePrefix = options.namePrefix ?? SCRATCH_NAME_PREFIX
+  let entries: string[]
+  try {
+    entries = await readdir(root)
+  } catch (cause) {
+    if ((cause as Readonly<{ code?: unknown }>).code === "ENOENT") {
+      return { root, entries: 0, reaped: 0, kept: 0, bytes: 0, failures: [] }
+    }
+    throw cause
+  }
+  let reaped = 0
+  let kept = 0
+  let bytes = 0
+  const failures: string[] = []
+  for (const name of entries) {
+    const path = join(root, name)
+    try {
+      const stats = await lstat(path)
+      if (!name.startsWith(namePrefix) || keep.has(path) || now - stats.mtimeMs <= olderThanMs) {
+        kept += 1
+        continue
+      }
+      const size = await directorySize(path)
+      await rm(path, { recursive: true, force: true })
+      reaped += 1
+      bytes += size
+    } catch (cause) {
+      failures.push(`${path}: ${cause instanceof Error ? cause.message : String(cause)}`)
+    }
+  }
+  return { root, entries: entries.length, reaped, kept, bytes, failures }
+}
+
+/** One line naming what was reaped against the denominator it was chosen from. */
+export function describeScratchReap(report: ScratchReapReport): string {
+  return (
+    `yrd: reaped ${report.reaped} of ${report.entries} scratch entr${report.entries === 1 ? "y" : "ies"} ` +
+    `under '${report.root}' (${formatBytes(report.bytes)} freed, ${report.kept} kept as live or younger than the ` +
+    `threshold)${report.failures.length === 0 ? "" : `; ${report.failures.length} could not be removed: ${report.failures.join("; ")}`}`
+  )
 }
