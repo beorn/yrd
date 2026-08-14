@@ -14307,6 +14307,66 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       expect(output.stdout()).toContain("a merge record proves a landing, not a PR's existence")
     })
 
+    // Contract 4 / doctor-rebuild-hardening: a wiped journal reads as N identical
+    // "pr-unknown" skips, one per landing, with nothing at the top of the report
+    // naming the actual condition — the journal holds no PR entities at all, so
+    // every skip below is the same fact repeated, not N separate gaps. An operator
+    // reading this after real data loss deserves the ONE sentence that tells them
+    // what happened and what the flag can and cannot do about it.
+    it("names the journal itself as empty, once, instead of repeating pr-unknown per landing", async () => {
+      await using app = await createApp()
+      const output = outputIO()
+      const prIds = ["PR1", "PR2", "PR3"]
+      const records = prIds.map((prId, index) => ({
+        record: {
+          merge: {
+            id: `R-${prId}`,
+            base: "main",
+            baseSha: BASE_SHA,
+            candidate: `C-${prId}`,
+            result: "merged" as const,
+            mergedCommit: MERGED_SHA,
+            startedAt: "2026-08-12T20:00:00.000Z",
+            finishedAt: "2026-08-12T20:01:00.000Z",
+          },
+          changes: [
+            {
+              pr: prId,
+              revision: 1,
+              submittedHead: HEAD_SHA,
+              changeId: `I${String(index)}${"e".repeat(39)}`,
+              generatedCommit: MERGED_SHA,
+            },
+          ],
+          evidence: { jobs: [] },
+          pins: [],
+        },
+        pointer,
+      }))
+
+      expect(
+        await runYrd(app, yrd("doctor", "--rebuild-index-from-repo", "--json"), output.io, servicesFor(records)),
+        output.stderr(),
+      ).toBe(1)
+      expect(JSON.parse(output.stdout())).toMatchObject({
+        indexRebuild: { scanned: { knownPrs: 0 }, rebuilt: [] },
+      })
+
+      const human = outputIO()
+      expect(
+        await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), human.io, servicesFor(records)),
+        human.stderr(),
+      ).toBe(1)
+      expect(human.stdout()).toContain("the journal holds zero PR entities")
+      expect(human.stdout()).toContain("repairs a KNOWN PR's missing index row")
+      expect(human.stdout()).toContain("entity the journal has never seen")
+      // Still every landing named underneath — the aggregate line is in ADDITION
+      // to the per-record detail, never a replacement for it.
+      for (const prId of prIds) {
+        expect(human.stdout()).toContain(`SKIPPED ${prId} revision 1 pr-unknown`)
+      }
+    })
+
     it("leaves an already-indexed landing alone and says so", async () => {
       await using app = await createApp()
       await app.bays.submit({ branch: "issue/index-gap", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })

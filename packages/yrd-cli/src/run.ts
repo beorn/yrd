@@ -7215,7 +7215,11 @@ const HEALTHY_SKIP_REASONS: ReadonlySet<IndexRebuildSkip["reason"]> = new Set<In
 
 type IndexRebuildReport = Readonly<{
   ref: string
-  scanned: Readonly<{ records: number; merged: number; changes: number }>
+  // `knownPrs` is the journal's OWN count, independent of what the repo scan found — the fact
+  // that distinguishes "the journal is missing a few index rows" from "the journal has been
+  // wiped and holds no PR entities at all," which the per-record `pr-unknown` skips below cannot
+  // say on their own: each one only knows about its own PR.
+  scanned: Readonly<{ records: number; merged: number; changes: number; knownPrs: number }>
   rebuilt: readonly Readonly<{ pr: string; revision: number; run: string; commit: string }>[]
   skipped: readonly IndexRebuildSkip[]
   /** Listed notes the bulk scan could not verify at all — they never became a change to consider. */
@@ -7313,6 +7317,10 @@ async function rebuildIndexFromRepo(app: YrdCliApp, services: YrdCliServices): P
   }
   const records = proof.status === "proven" ? proof.records : []
   const merged = records.filter((entry) => entry.record.merge.result === "merged")
+  // The journal's own count, read once, up front — independent of anything the repo scan below
+  // finds. It is the fact that tells a `pr-unknown` skip apart from a wiped journal: one skip says
+  // "this PR", `knownPrs === 0` says "no PR at all, and every skip below is that same fact."
+  const knownPrs = Object.keys(stateOf(app).bays.prs).length
 
   // One PR can appear in several attempts; only its latest merged attempt describes the landing.
   const latest = new Map<string, Readonly<{ record: MergeRecordBody; change: MergeRecordBody["changes"][number] }>>()
@@ -7381,7 +7389,7 @@ async function rebuildIndexFromRepo(app: YrdCliApp, services: YrdCliServices): P
   }
   return {
     ref: MERGE_RECORD_REF,
-    scanned: { records: records.length, merged: merged.length, changes },
+    scanned: { records: records.length, merged: merged.length, changes, knownPrs },
     rebuilt,
     skipped,
     unverifiable: proof.status === "proven" ? proof.unverifiable : [],
@@ -7389,10 +7397,23 @@ async function rebuildIndexFromRepo(app: YrdCliApp, services: YrdCliServices): P
 }
 
 function indexRebuildLines(report: IndexRebuildReport): readonly string[] {
-  const { records, merged, changes } = report.scanned
+  const { records, merged, changes, knownPrs } = report.scanned
   const considered = report.rebuilt.length + report.skipped.length
   const unverified = report.unverifiable.length
+  // `knownPrs === 0` with at least one `pr-unknown` skip is not "this run found a gap or two" —
+  // it is every candidate landing hitting the SAME wall, because there is no PR entity anywhere
+  // in the journal to attach an index row to. Say that once, at the top, before the per-record
+  // detail repeats it N times: the flag repairs a known PR's missing index row, it does not
+  // reconstruct a PR entity the journal has never seen (Remnant 2, @yrd/core/doctor-rebuild-hardening).
+  const journalEmpty = knownPrs === 0 && report.skipped.some((entry) => entry.reason === "pr-unknown")
   const lines = [
+    ...(journalEmpty
+      ? [
+          "the journal holds zero PR entities — every pr-unknown skip below repeats that one fact",
+          "--rebuild-index-from-repo repairs a KNOWN PR's missing index row; it cannot recreate a PR",
+          "entity the journal has never seen (see @yrd/core/doctor-rebuild-hardening Remnant 2)",
+        ]
+      : []),
     `scanned ${String(records)} merge record${records === 1 ? "" : "s"} under ${report.ref} — ${String(merged)} merged, ${String(changes)} change${changes === 1 ? "" : "s"}` +
       // The count of notes that never became a change belongs beside the denominator they are
       // missing from, or "scanned N" reads as N verified.
@@ -9807,7 +9828,8 @@ function buildProgram(
     .option("--rebuild-views", "atomically rebuild registered query views from immutable Journal history")
     .option(
       "--rebuild-index-from-repo",
-      "rebuild missing pr/integrated index rows from every proven merge record in the repository",
+      "rebuild missing pr/integrated index rows for PRs the journal already knows, from every proven " +
+        "merge record in the repository (cannot recreate a PR entity the journal has never seen)",
     )
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await configDoctor(installed(), installedServices(), options, io)))
