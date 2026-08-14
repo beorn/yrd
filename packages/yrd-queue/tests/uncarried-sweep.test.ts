@@ -382,7 +382,9 @@ describe("sweepUncarriedRefs", () => {
     // Collapsed BEFORE the gatherer, so the dead revisions cost no diff, no
     // cherry and no rev-parse — and each ref still lands in exactly one bucket.
     expect(result.examined).toBe(1)
-    expect(result.scanned).toBe(result.carried + result.superseded + result.missingUpdateClocks + result.outsideAgeBound + result.examined)
+    expect(result.scanned).toBe(
+      result.carried + result.superseded + result.missingUpdateClocks + result.outsideAgeBound + result.examined,
+    )
   })
 
   it("lets a carried newest revision suppress its own stranded ancestors", async () => {

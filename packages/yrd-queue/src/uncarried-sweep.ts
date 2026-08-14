@@ -12,7 +12,13 @@
  * before any per-ref git object is read. Gathering facts first would mean
  * thousands of `diff` invocations to discard almost all of them.
  */
-import { classifyPushedRef, compareRevisions, revisionOf, type UncarriedFinding, type UncarriedOptions } from "./uncarried.ts"
+import {
+  classifyPushedRef,
+  compareRevisions,
+  revisionOf,
+  type UncarriedFinding,
+  type UncarriedOptions,
+} from "./uncarried.ts"
 import { gatherPushedRefFact, type RefGit } from "./uncarried-facts.ts"
 
 export type SweepOptions = UncarriedOptions &

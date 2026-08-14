@@ -15,6 +15,7 @@ import { createElement } from "react"
 import { createRenderer } from "silvery/test"
 import { describe, expect, it } from "vitest"
 import { fixturePr, fixtureResult, fixtureRun, fixtureSnapshot } from "../dev/queue-timeline-fixtures.ts"
+import { uncarriedLine, type UncarriedObservation } from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
 /** Width at which the uncarried rail below overflows a full-width queue pane. */
@@ -52,6 +53,16 @@ function boxRows(text: string, title: string): BoxRows {
   return { inner, joined: inner.join(" ").replace(/\s+/gu, " ").trim() }
 }
 
+/** The frame's clock in these fixtures — the rail reads "4m ago" from it. */
+const NOW_MS = Date.parse("2026-07-13T12:00:00.000Z")
+
+const UNCARRIED: UncarriedObservation = {
+  count: 41,
+  scanned: 4784,
+  missingUpdateClocks: 12,
+  observedAt: "2026-07-13T11:56:00.000Z",
+}
+
 function snapshotWithUncarried() {
   const pr = fixturePr("PR1", "submitted", "2026-07-13T11:10:00.000Z", "Prepare release notes")
   const run = fixtureRun("R1", [pr], "passed", "2026-07-13T11:20:00.000Z", { finishedAt: "2026-07-13T11:25:00.000Z" })
@@ -61,7 +72,7 @@ function snapshotWithUncarried() {
       startedAt: "2026-07-13T11:00:00.000Z",
       lastTickAt: "2026-07-13T11:59:58.000Z",
       queueProgress: { state: "healthy", observedAt: "2026-07-13T11:59:58.000Z" },
-      uncarried: { count: 41, scanned: 4784, missingUpdateClocks: 12, observedAt: "2026-07-13T11:56:00.000Z" },
+      uncarried: UNCARRIED,
     },
   })
 }
@@ -78,7 +89,10 @@ describe("RUNNER box wraps rather than overflowing (@yrd/cli/runner-box-overflow
       // Guard: the rail really is wider than the box, so a pass cannot mean
       // "the sentence happened to fit".
       const width = (box.inner[0] ?? "").length
-      const rail = "uncarried 41 of 4784 refs, 12 refs without retained update clocks, as of 4m ago"
+      // Derived from the renderer, never transcribed: this test is about the
+      // BOX, and a copied sentence turns every rewording of the rail into a
+      // spurious wrap failure. It went stale exactly that way once already.
+      const rail = uncarriedLine(UNCARRIED, NOW_MS)
       expect(rail.length, "fixture rail must overflow the box").toBeGreaterThan(width)
 
       // Wrapped, not truncated: the whole sentence survives, tail included.
@@ -86,7 +100,7 @@ describe("RUNNER box wraps rather than overflowing (@yrd/cli/runner-box-overflow
       expect(box.joined).not.toContain("…")
 
       // And it survives as a continuation line, not by widening the box.
-      const started = box.inner.findIndex((row) => row.includes("uncarried 41 of 4784 refs"))
+      const started = box.inner.findIndex((row) => row.includes("of 4784 refs"))
       expect(started, "the uncarried rail must be rendered").toBeGreaterThanOrEqual(0)
       expect(box.inner[started + 1] ?? "", "the tail must land on the next line").toContain("ago")
     } finally {
