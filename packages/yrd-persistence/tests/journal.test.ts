@@ -29,6 +29,7 @@ import {
   type Exclusive,
   type ExclusiveOptions,
   type JournalOptions,
+  type JournalRetention,
   type JournalView,
   type MutableJournal,
 } from "@yrd/persistence"
@@ -48,6 +49,7 @@ type ExpectedJournalOptions = Readonly<{
   writerVersion?: number
   lock?: ExclusiveOptions
   views?: readonly JournalView[]
+  retention?: JournalRetention
   inject?: Readonly<{
     exclusive?: Exclusive
     log?: ConditionalLogger

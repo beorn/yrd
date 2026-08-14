@@ -32,6 +32,8 @@ export type JournalHistoryDiagnostics = Readonly<{
   autoVacuum: "none" | "full" | "incremental"
   historyFrames: number
   tailFrames: number
+  /** Highest cursor the retention window has dropped; frames at or below it are gone. */
+  evictedThrough: number
   archiveFallbacks: number
 }>
 
