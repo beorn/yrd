@@ -149,19 +149,51 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
     }
   }
   const publication = await readPublication(options.process, componentRepo, target)
-  if (!publication.published) {
+  /**
+   * When the fetch failed, ask the remote itself before refusing.
+   *
+   * `ls-remote` writes no refs, so it survives exactly the failures that break
+   * a fetch most often here — another seat holding FETCH_HEAD.lock, a checkout
+   * whose refs were never initialized — and it is the read that turns the
+   * false refusal this whole path exists for back into an admit. It answers a
+   * narrower question than the local read: it proves a target that IS a
+   * published tip, and cannot see an ancestor of one, so a negative from it
+   * disproves nothing.
+   */
+  const remote =
+    publication.published || fetched.ok ? undefined : await remoteContainment(options.process, componentRepo, target)
+  const remoteTips = remote?.ok === true ? remote.refs : []
+  if (!publication.published && remoteTips.length > 0 && publication.reason === "commit-absent") {
+    // Published, and this checkout does not have the object to relate it with.
+    // Advisory admission's own escape hatch: merge-time evaluation re-runs
+    // every gate and is the authority, and the intent record declares the
+    // ancestry preconditions it must enforce there regardless of this verdict.
+    return {
+      admitted: true,
+      currentPin,
+      target,
+      relation: "deferred",
+      disclosure:
+        `Publication was proven by reading the remote directly, not this checkout: the fetch failed ` +
+        `(${fetched.ok ? "" : fetched.detail}), leaving '${componentRepo}' local remote-tracking refs unusable, and ` +
+        `'git ls-remote origin' shows the target as the tip of ${remoteTips.join(", ")}. The checkout does not hold ` +
+        `the commit, so its relation to the pin is deferred to merge-time evaluation, which is the authority.`,
+    }
+  }
+  if (!publication.published && remoteTips.length === 0) {
     return {
       admitted: false,
       code: "intent-target-unpublished",
       message:
         `yrd: target '${target}' is not reachable from any published branch of '${options.component}'; whoever ` +
         `holds it must publish it through that component's own git workflow before it can be admitted. ` +
-        `${PUBLICATION_REASON_CLAUSE[publication.reason]}. ${scopeSentence(scope)}`,
+        `${PUBLICATION_REASON_CLAUSE[publication.reason]}. ${scopeSentence(scope)}${remoteSentence(remote)}`,
       evidence: {
         component: options.component,
         target,
         currentPin,
         ...scopeEvidence(scope),
+        ...remoteEvidence(remote),
         publicationReason: publication.reason,
       },
       remedy: [
@@ -451,6 +483,58 @@ async function lastFetchAt(process: Pick<Process, "run">, componentRepo: string)
     if (code === "ENOENT") return { known: false, why: "never (no FETCH_HEAD in the component checkout)" }
     return { known: false, why: `unknown (FETCH_HEAD unreadable: ${code ?? String(error)})` }
   }
+}
+
+/** What a direct read of the remote could say, when the fetch could not. */
+type RemoteContainment = Readonly<{ ok: true; refs: readonly string[] } | { ok: false; detail: string }>
+
+/**
+ * Ask the remote which of its refs have the target as their tip.
+ *
+ * Deliberately not a containment answer in general: without the objects there
+ * is no ancestry to compute, so this proves publication for a target that is a
+ * tip and stays silent about one that is merely an ancestor of a tip. Saying
+ * more than that would trade a false refusal for a false admit.
+ */
+async function remoteContainment(
+  process: Pick<Process, "run">,
+  componentRepo: string,
+  target: string,
+): Promise<RemoteContainment> {
+  const result = await run(process, componentRepo, ["ls-remote", "origin"])
+  if (result.timedOut) return { ok: false, detail: `timed out after ${GIT_TIMEOUT_MS}ms` }
+  if (result.exitCode !== 0) {
+    const detail = result.stderr.trim() || result.stdout.trim() || `exit ${String(result.exitCode)}`
+    return { ok: false, detail: detail.replaceAll("\n", " ") }
+  }
+  const refs: string[] = []
+  for (const line of result.stdout.split("\n")) {
+    const [sha, ref] = line.trim().split(/\s+/u)
+    if (sha === target && ref !== undefined) refs.push(ref)
+  }
+  return { ok: true, refs }
+}
+
+/** The remote half of the disclosure; empty when no remote read was needed. */
+function remoteSentence(remote: RemoteContainment | undefined): string {
+  if (remote === undefined) return ""
+  if (!remote.ok) {
+    return (
+      `. A direct 'git ls-remote origin' read was attempted because the fetch failed, and it failed too ` +
+      `(${remote.detail}), so neither this checkout nor the remote could answer`
+    )
+  }
+  return (
+    `. A direct 'git ls-remote origin' read did run and does not show the target as the tip of any ref; ` +
+    `it cannot rule out the target being an ancestor of one, because that needs objects this checkout lacks`
+  )
+}
+
+function remoteEvidence(
+  remote: RemoteContainment | undefined,
+): Readonly<{ remoteRead?: "ok" | "failed"; remoteDetail?: string }> {
+  if (remote === undefined) return {}
+  return remote.ok ? { remoteRead: "ok" } : { remoteRead: "failed", remoteDetail: remote.detail }
 }
 
 /** The disclosure every ref-derived refusal carries: where, from what, how old. */
