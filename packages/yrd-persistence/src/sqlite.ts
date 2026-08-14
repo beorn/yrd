@@ -338,7 +338,16 @@ function context(options: JournalOptions): Context {
 
 function resolveRetention(configured: JournalRetention | undefined): ResolvedRetention {
   if (configured === "disabled") return "disabled"
-  if (process.env.YRD_JOURNAL_RETENTION?.trim() === "disabled" && configured === undefined) return "disabled"
+  // Opt-in until the cursor-0 readers are floor-aware: an unconfigured journal
+  // evicts nothing, so landing this cannot break a reader that has not been
+  // taught where history now begins.
+  if (
+    configured === undefined &&
+    process.env.YRD_JOURNAL_KEEP_FRAMES === undefined &&
+    process.env.YRD_JOURNAL_KEEP_DAYS === undefined
+  ) {
+    return "disabled"
+  }
   const keepDays = retentionBound("keepDays", configured?.keepDays, "YRD_JOURNAL_KEEP_DAYS", undefined)
   return {
     keepFrames: retentionBound("keepFrames", configured?.keepFrames, "YRD_JOURNAL_KEEP_FRAMES", DEFAULT_KEEP_FRAMES),
