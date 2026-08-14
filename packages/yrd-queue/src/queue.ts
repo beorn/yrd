@@ -6064,6 +6064,8 @@ function intentLaneAuditFindings(state: DeepReadonly<RuntimeState>): QueueAuditF
         resolution: stalled.remedy.map(renderRemedyStep),
         specimen: `intent:${head.id}:fingerprint:${stalled.fingerprint}`,
         count: stalled.attempts,
+        since: stalled.since,
+        blockedMs: stalled.blockedMs,
       })
     }
   }
@@ -6082,6 +6084,8 @@ function intentLaneAuditFindings(state: DeepReadonly<RuntimeState>): QueueAuditF
       ],
       specimen: `intent:${record.id}:parked:${record.parked.fingerprint}`,
       count: record.parked.attempts,
+      since: record.parked.since,
+      blockedMs: record.parked.blockedMs,
     })
   }
   return findings
@@ -6553,6 +6557,7 @@ function intentAttemptFailures(
         target: snapshot.evaluated.target,
         priorPin: snapshot.evaluated.priorPin,
         reason: failure.message,
+        at: run.finishedAt ?? run.startedAt,
       }),
     )
   }
