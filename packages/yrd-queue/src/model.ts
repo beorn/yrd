@@ -62,11 +62,11 @@ const PRSnapshotRecutProofSchema = PRRecutProofSchema.extend({
 }).strict()
 
 /**
- * NOTE: this union does not discriminate. `PRIdSchema` is `z.string().min(1)`,
- * so it already accepts every intent id and the right arm never decides
- * anything — a queue member id parses as a PR id whatever it looks like.
- * Tightening `PRIdSchema` is out of scope here and tracked separately; the
- * alternation below is written for the reader, not for the parser.
+ * A queue member is a PR or a pin intent, and this union decides which: both
+ * arms are pinned to the shape their mint writes (`PR182` vs `I148` /
+ * `yrdpin#164`), so a mis-kinded id fails at the schema rather than much later.
+ * Positions that hold members of either kind must use THIS schema — a bare
+ * `PRIdSchema` there now refuses every intent id.
  */
 export const QueueMemberIdSchema = z.union([PRIdSchema, IntentRecordIdSchema])
 export const QueueIntentSnapshotSchema = z
@@ -163,7 +163,9 @@ export type CandidateRev = Readonly<{
 export const CandidateChangeSchema = z
   .object({
     changeId: ChangeIdSchema,
-    pr: PRIdSchema,
+    /** A queue member, not necessarily a PR: an intent that lands carries its
+     * own id here (`command.ts` fills this from the member's `id`). */
+    pr: QueueMemberIdSchema,
     revision: z.number().int().positive(),
     submittedHead: GitShaSchema,
     generatedCommit: GitShaSchema,

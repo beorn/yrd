@@ -13,7 +13,17 @@ import { JobErrorSchema, type JobError } from "@yrd/job"
 import type { ChangeId } from "./change-identity.ts"
 
 export const BayIdSchema = z.string().trim().min(1)
-export const PRIdSchema = z.string().trim().min(1)
+/**
+ * The shape the mint actually writes: `nextId("PR", state.prs)` produces `PR`
+ * plus a decimal counter, and all 43,202 PR-id occurrences in the live journal
+ * carry it. Pinning the schema to that shape is what lets `QueueMemberIdSchema`
+ * discriminate — an intent id (`I148`, `yrdpin#164`) no longer parses as a PR
+ * id, so a mis-kinded member fails here instead of much later or never.
+ *
+ * Display forms (`pr#182.1`) and the operator's bare-number selector are NOT
+ * ids and are deliberately refused; {@link parsePRSelector} is their grammar.
+ */
+export const PRIdSchema = z.string().regex(/^PR\d+$/u, "expected a PR id, e.g. PR182")
 export const GitRefSchema = z.string().trim().min(1)
 export const GitShaSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu)
 export const PRTerminalAssociationSchema = z

@@ -1,4 +1,5 @@
-import { ChangeIdSchema, GitShaSchema, PRIdSchema } from "@yrd/bay"
+import { ChangeIdSchema, GitShaSchema } from "@yrd/bay"
+import { QueueMemberIdSchema } from "./model.ts"
 import { JobErrorSchema } from "@yrd/job"
 import canonicalize from "canonicalize"
 import { createHash } from "node:crypto"
@@ -10,7 +11,9 @@ export const MERGE_RECORD_NOTES_NAME = "yrd/merge-records" as const
 export const MergeRecordChangeSchema = z
   .object({
     changeId: ChangeIdSchema.optional(),
-    pr: PRIdSchema,
+    /** A queue member, not necessarily a PR — `mergeRecordBody` fills this from
+     * the member's `id`, so a landed intent records its own id here. */
+    pr: QueueMemberIdSchema,
     revision: z.number().int().positive(),
     submittedHead: GitShaSchema,
     generatedCommit: GitShaSchema.optional(),
