@@ -4774,6 +4774,7 @@ function startRun(
     candidateId: candidate.id,
     prs,
     base: baseIdentity(pr.base),
+    batchSize: queues.batchSize,
     ...(flow === undefined ? {} : { flow }),
     steps: selected.map(descriptor),
     ...(selection === undefined ? {} : { stepSelection: selection }),

@@ -511,6 +511,8 @@ export type QueueRecord = Readonly<{
   prs: readonly PRSnapshot[]
   /** Queue-target receipt; Candidate owns the exact base SHA. */
   base: string
+  /** Effective Queue batch size when this Run started. Absent only on legacy journal records. */
+  batchSize?: number
   flow?: FlowPin
   steps: readonly InstalledStep[]
   stepSelection?: StepSelection
@@ -966,6 +968,7 @@ const queueRecordShape = {
   candidateId: z.string().regex(/^C\d+$/u),
   prs: z.array(PRSnapshotSchema).min(1),
   base: GitRefSchema,
+  batchSize: z.number().int().min(1),
   flow: FlowPinSchema.optional(),
   steps: z.array(InstalledStepSchema).min(1),
   initialIntegration: IntegrationProofSchema.optional(),
@@ -988,6 +991,7 @@ const queueRecordShape = {
 
 const replayQueueRecordShape = {
   ...queueRecordShape,
+  batchSize: queueRecordShape.batchSize.optional(),
   steps: z.array(ReplayInstalledStepSchema).min(1),
   /** Replay-only provenance; fresh child Runs use Candidate membership + Run.parent. */
   isolationPart: z.union([z.literal(0), z.literal(1)]).optional(),
