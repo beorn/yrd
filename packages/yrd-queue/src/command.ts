@@ -1344,13 +1344,18 @@ export type RepositoryMergeRecordSearchResult =
   | Readonly<{ status: "repository-incomplete"; reason: string }>
   | Readonly<{ status: "repository-corrupt"; reason: string }>
 
-/** Query immutable merge attempts without requiring a live Journal projection. */
+/** Query immutable merge attempts without requiring a live Journal projection.
+ *
+ * An absent `selector` returns every verified record on the base — the whole scan already runs
+ * for any selector, so the bulk read is the same verification (attempt anchor, merge ancestry,
+ * Change-Id trailer, pin containment) with nothing filtered out.
+ */
 export async function findRepositoryMergeRecords(
   options: Readonly<{
     inject: Readonly<{ process: Pick<Process, "run"> }>
     repo: string
     baseSha: string
-    selector: string
+    selector?: string
   }>,
 ): Promise<RepositoryMergeRecordSearchResult> {
   const git = createGit(options.inject.process)
@@ -1426,13 +1431,12 @@ export async function findRepositoryMergeRecords(
         }
       }
     }
+    const selector = options.selector
     if (
-      parsed.record.merge.id !== options.selector &&
+      selector !== undefined &&
+      parsed.record.merge.id !== selector &&
       !parsed.record.changes.some(
-        (change) =>
-          change.pr === options.selector ||
-          change.changeId === options.selector ||
-          change.submittedHead === options.selector,
+        (change) => change.pr === selector || change.changeId === selector || change.submittedHead === selector,
       )
     ) {
       continue

@@ -61,10 +61,12 @@ import type { Job, JobError } from "@yrd/job"
 import { createProcess, pathReapFailure, type Process, type ProcessResult } from "@yrd/process"
 import {
   isQueueRunningConflict,
+  MERGE_RECORD_REF,
   Queues,
   resolveSubmoduleOrigin,
   sweepUncarriedRefs,
   synthesizePinIntentCarrier,
+  type MergeRecordBody,
   type PREligibility,
   type RefGit,
   type QueueAuditFinding,
@@ -7095,16 +7097,134 @@ async function queueUncarried(
   return result.findings.length === 0 ? 0 : 1
 }
 
+/** Why one repository-proven landing did not become a journal index row. */
+type IndexRebuildSkip = Readonly<{
+  pr: string
+  revision: number
+  run: string
+  reason: "already-indexed" | "pr-unknown" | "legacy-no-change-id" | "revision-superseded"
+  detail: string
+}>
+
+type IndexRebuildReport = Readonly<{
+  ref: string
+  scanned: Readonly<{ records: number; merged: number; changes: number }>
+  rebuilt: readonly Readonly<{ pr: string; revision: number; run: string; commit: string }>[]
+  skipped: readonly IndexRebuildSkip[]
+}>
+
+/** Rebuild every missing `pr/integrated` index row from repository truth alone.
+ *
+ * The bulk sibling of `yrd why <selector> --repair`, with the same per-change predicate: a row is
+ * only written when the record's change matches the PR's current revision exactly. Repo truth
+ * cannot recreate a PR that the journal has never seen — a merge record proves a landing, not a
+ * PR's existence — so those changes are reported as skipped, never silently dropped.
+ */
+async function rebuildIndexFromRepo(app: YrdCliApp, services: YrdCliServices): Promise<IndexRebuildReport> {
+  const mergeRecords = services.mergeRecords ?? configuration("repository merge-record capability is not installed")
+  const proof = await mergeRecords.all()
+  if (proof.status === "repository-corrupt" || proof.status === "repository-incomplete") {
+    // Same verdict `yrd why` gives the same condition: broken repository truth is not an index gap.
+    configuration(`${MERGE_RECORD_REF} is ${proof.status}: ${proof.reason}`)
+  }
+  const records = proof.status === "proven" ? proof.records : []
+  const merged = records.filter((entry) => entry.record.merge.result === "merged")
+
+  // One PR can appear in several attempts; only its latest merged attempt describes the landing.
+  const latest = new Map<string, Readonly<{ record: MergeRecordBody; change: MergeRecordBody["changes"][number] }>>()
+  let changes = 0
+  for (const entry of merged) {
+    for (const change of entry.record.changes) {
+      changes += 1
+      const known = latest.get(change.pr)
+      if (known !== undefined && known.record.merge.finishedAt >= entry.record.merge.finishedAt) continue
+      latest.set(change.pr, { record: entry.record, change })
+    }
+  }
+
+  const rebuilt: { pr: string; revision: number; run: string; commit: string }[] = []
+  const skipped: IndexRebuildSkip[] = []
+  for (const [prId, { record, change }] of latest) {
+    const run = record.merge.id
+    const skip = (reason: IndexRebuildSkip["reason"], detail: string): void => {
+      skipped.push({ pr: prId, revision: change.revision, run, reason, detail })
+    }
+    const pr = app.bays.pr(prId)
+    if (pr === undefined) {
+      skip("pr-unknown", "no PR in the journal; a merge record proves a landing, not a PR's existence")
+      continue
+    }
+    if (change.changeId === undefined) {
+      skip("legacy-no-change-id", "record predates stable Change-Id identity")
+      continue
+    }
+    const revision = currentPRRev(pr)
+    if (
+      change.revision !== revision.n ||
+      change.submittedHead !== revision.head ||
+      change.changeId !== revision.changeId
+    ) {
+      skip(
+        "revision-superseded",
+        `record covers revision ${String(change.revision)} at ${change.submittedHead}; journal is at revision ${String(revision.n)} at ${revision.head}`,
+      )
+      continue
+    }
+    const commit = record.merge.mergedCommit
+    if (commit === undefined) {
+      refusal(`merge-record '${run}' reports a merged result with no merged commit`)
+    }
+    if (prDeliveryState(pr) === "integrated" && pr.terminalRun === run && pr.integration?.commit === commit) {
+      skip("already-indexed", `pr/integrated already records ${run} at ${commit}`)
+      continue
+    }
+    await app.queue.reconcileLanding({
+      pr: change.pr,
+      revision: change.revision,
+      headSha: change.submittedHead,
+      run,
+      commit,
+      landingSha: commit,
+      baseSha: commit,
+      changeId: change.changeId,
+    })
+    rebuilt.push({ pr: prId, revision: change.revision, run, commit })
+  }
+  return {
+    ref: MERGE_RECORD_REF,
+    scanned: { records: records.length, merged: merged.length, changes },
+    rebuilt,
+    skipped,
+  }
+}
+
+function indexRebuildLines(report: IndexRebuildReport): readonly string[] {
+  const { records, merged, changes } = report.scanned
+  const considered = report.rebuilt.length + report.skipped.length
+  const lines = [
+    `scanned ${String(records)} merge record${records === 1 ? "" : "s"} under ${report.ref} — ${String(merged)} merged, ${String(changes)} change${changes === 1 ? "" : "s"}`,
+    `rebuilt ${String(report.rebuilt.length)} of ${String(considered)} landing${considered === 1 ? "" : "s"}`,
+  ]
+  for (const entry of report.rebuilt) {
+    lines.push(`  REBUILT ${entry.pr} revision ${String(entry.revision)} via ${entry.run} at ${entry.commit}`)
+  }
+  for (const entry of report.skipped) {
+    lines.push(`  SKIPPED ${entry.pr} revision ${String(entry.revision)} ${entry.reason}: ${entry.detail}`)
+  }
+  return lines
+}
+
 async function configDoctor(
   app: YrdCliApp,
   services: YrdCliServices,
-  options: JsonOption & Readonly<{ rebuildViews?: boolean }>,
+  options: JsonOption & Readonly<{ rebuildViews?: boolean; rebuildIndexFromRepo?: boolean }>,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
   const rebuilt =
     options.rebuildViews === true
       ? await (services.journal?.rebuildViews?.() ?? configuration("journal view rebuild capability is not installed"))
       : undefined
+  const indexRebuild = options.rebuildIndexFromRepo === true ? await rebuildIndexFromRepo(app, services) : undefined
   const config = services.config
   if (config === undefined) configuration("config doctor capability is not installed")
   await app.refresh()
@@ -7112,10 +7232,7 @@ async function configDoctor(
   const findings = diagnoseYrdFlows({ prs: Object.values(state.bays.prs), runs: Queues.values(state.queues) }, config)
   const warnings = submoduleTrackingWarnings(io.cwd ?? process.cwd())
   const clean = findings.length === 0 && warnings.length === 0
-  await printResultWithWarnings(
-    io,
-    jsonEnabled(options),
-    { command: "doctor", findings, ...(rebuilt === undefined ? {} : { rebuilt }) },
+  const doctorLine =
     findings.length === 0
       ? clean
         ? rebuilt === undefined
@@ -7124,10 +7241,22 @@ async function configDoctor(
         : `yrd doctor found ${String(warnings.length)} repository warning${warnings.length === 1 ? "" : "s"}`
       : findings
           .map((finding) => `${finding.severity.toUpperCase()} ${finding.code} ${finding.owner}: ${finding.message}`)
-          .join("\n"),
+          .join("\n")
+  await printResultWithWarnings(
+    io,
+    jsonEnabled(options),
+    {
+      command: "doctor",
+      findings,
+      ...(rebuilt === undefined ? {} : { rebuilt }),
+      ...(indexRebuild === undefined ? {} : { indexRebuild }),
+    },
+    indexRebuild === undefined ? doctorLine : [...indexRebuildLines(indexRebuild), doctorLine].join("\n"),
     warnings,
   )
-  return clean ? 0 : 1
+  // A landing repo truth proves but the index still cannot carry is a real gap, not a clean run.
+  const unrebuilt = indexRebuild?.skipped.some((entry) => entry.reason !== "already-indexed") === true
+  return clean && !unrebuilt ? 0 : 1
 }
 
 async function journalImportOrphan(
@@ -9427,6 +9556,10 @@ function buildProgram(
     .command("doctor")
     .description("diagnose Flow drift and repository configuration warnings")
     .option("--rebuild-views", "atomically rebuild registered query views from immutable Journal history")
+    .option(
+      "--rebuild-index-from-repo",
+      "rebuild missing pr/integrated index rows from every proven merge record in the repository",
+    )
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await configDoctor(installed(), installedServices(), options, io)))
   program
