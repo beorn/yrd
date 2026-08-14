@@ -809,6 +809,7 @@ export const YRD_QUEUE_AUDIT_FINDING_CODES = [
   "orphaned-requested-job",
   "unisolable-stale-plan",
   "admission-refusal-loop",
+  "intent-lane-stalled",
   "queue-never-started",
   "queue-progress-stalled",
   "config-drift",

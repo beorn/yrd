@@ -78,8 +78,18 @@ import {
 import { computed, type ReadSignal } from "@silvery/signals"
 import { diagnoseFlowPin, type FlowPin, type StepKind, type YrdConfig } from "@yrd/config"
 import {
+  INTENT_PARK_AFTER_IDENTICAL_ATTEMPTS,
+  IntentAttemptFailureSchema,
+  IntentParkArgsSchema,
+  IntentParkSchema,
   PinIntentEvaluationFactSchema,
   PinIntentRefusalSchema,
+  intentAttemptFingerprint,
+  intentKey,
+  intentParkRemedy,
+  renderRemedyStep,
+  type IntentAttemptFailure,
+  type IntentPark,
   type IntentsState,
   type PinIntent,
   type PinIntentAdmission,
@@ -628,6 +638,7 @@ export type QueueCommands = Readonly<{
     admissionRefused: CommandHandler<AdmissionRefusedArgs, RuntimeState>
     settleAdmissionRefusal: CommandHandler<SettleAdmissionRefusalArgs, RuntimeState>
     recordIntentEvaluation: CommandHandler<z.infer<typeof PinIntentEvaluationFactSchema>, RuntimeState>
+    parkIntent: CommandHandler<z.infer<typeof IntentParkArgsSchema>, RuntimeState>
     reconcileLanding: CommandHandler<z.infer<typeof PRIntegratedSchema>, RuntimeState>
   }>
 }>
@@ -745,7 +756,7 @@ type QueueIntentRunArgs = Readonly<{
 }>
 type QueueIntentRunResult =
   | Readonly<{ outcome: "run"; run: Run }>
-  | Readonly<{ outcome: "noop" | "refused"; intent: PinIntent }>
+  | Readonly<{ outcome: "noop" | "refused" | "parked"; intent: PinIntent }>
 
 export type QuiesceLegacyRootsOptions = Readonly<{
   /** ISO timestamp used to decide whether a legacy root's writer lease is still live. */
@@ -891,6 +902,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               admissionRefused: (args) => yrd.dispatch(commands.queue.admissionRefused, args),
               settleAdmissionRefusal: (args) => yrd.dispatch(commands.queue.settleAdmissionRefusal, args),
               recordIntentEvaluation: (args) => yrd.dispatch(commands.queue.recordIntentEvaluation, args),
+              parkIntent: (args) => yrd.dispatch(commands.queue.parkIntent, args),
               reconcileLanding: (args) => yrd.dispatch(commands.queue.reconcileLanding, args),
               recordAdmission: (args) => yrd.bays.recordAdmission(args),
               requestChecks: (pr, baseSha) =>
@@ -938,6 +950,7 @@ type QueueActions = Readonly<{
   recordAdmission(args: PRAdmissionRecordedFact): Promise<CommandResult>
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
   recordIntentEvaluation(args: z.infer<typeof PinIntentEvaluationFactSchema>): Promise<CommandResult>
+  parkIntent(args: z.infer<typeof IntentParkArgsSchema>): Promise<CommandResult>
   reconcileLanding(args: z.infer<typeof PRIntegratedSchema>): Promise<CommandResult>
 }>
 
@@ -2030,6 +2043,17 @@ function createQueue<Shape extends PRShape>(
       )
     }
     const intent = currentIntent as PinIntent
+    // Before spending another turn on it: has this record already told us, three
+    // times in identical terms, that it cannot land? Parking is checked HERE,
+    // ahead of evaluation, because the specimens both passed evaluation and
+    // died at the landing — a predicate behind the evaluator would never run.
+    const park = deadIntentPark(runtime(), intent)
+    if (park !== undefined) {
+      await actions.parkIntent({ intent: intent.id, park })
+      const parked = runtime().intents?.records[intent.id]
+      if (parked === undefined) throw new Error(`yrd: the parked intent '${intent.id}' disappeared`)
+      return { outcome: "parked", intent: parked as PinIntent }
+    }
     const base = baseIdentity(args.base)
     const baseSha = args.baseSha ?? (resolveBaseSha === undefined ? undefined : await resolveBaseSha(base))
     if (baseSha === undefined) {
@@ -3660,6 +3684,18 @@ function createQueueCommands(
     },
   })
 
+  const parkIntent = command({
+    title: "Park one intent whose attempts repeat a single failure fingerprint",
+    params: IntentParkArgsSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: z.infer<typeof IntentParkArgsSchema>) {
+      const record = state.intents?.records[args.intent]
+      if (record === undefined) {
+        raiseFailure("refusal", "intent-not-found", `yrd: no intent '${args.intent}' to park`)
+      }
+      return { events: [event("intent/parked", args)] }
+    },
+  })
+
   const reconcileLanding = command({
     title: "Reconcile one repository-proven landing into the journal index",
     params: PRIntegratedSchema,
@@ -3732,6 +3768,7 @@ function createQueueCommands(
       admissionRefused,
       settleAdmissionRefusal,
       recordIntentEvaluation,
+      parkIntent,
       reconcileLanding,
     },
   }
@@ -5989,7 +6026,82 @@ function auditQueues(
   findings.push(
     ...queueProgressAuditFindings(state, queueProgressQueue(state, steps), refusalFindings, progress, options),
   )
+  // The refusal ledger above covers PRs only. An intent lane can hold the same
+  // shape with none of the same records — the specimens of 2026-08-14 blocked
+  // eight intents for hours and produced `findings: []`.
+  findings.push(...intentLaneAuditFindings(state))
   return { findings }
+}
+
+/**
+ * The intent lane's own stall and its aftermath, in one code.
+ *
+ * TWO shapes, deliberately not two codes. The first is the live block: an open
+ * intent at the head of the lane whose attempts already repeat one fingerprint,
+ * which is what the specimens looked like for the hours nobody was paged. The
+ * second is the parked record itself — because parking CLEARS the first shape
+ * within one drain turn, and an audit that only reported the live block would
+ * reliably observe nothing at all. A resident draining every 30s and an audit
+ * running every few minutes never overlap.
+ *
+ * The parked shape clears when its (issue, component) key has an open
+ * successor — the owner resubmitted — or when the owner withdraws the parked
+ * record. Those are the two acts that finish the work, and each is one command
+ * printed in the finding's own resolution.
+ */
+function intentLaneAuditFindings(state: DeepReadonly<RuntimeState>): QueueAuditFindingEmission[] {
+  const intents = state.intents
+  if (intents === undefined) return []
+  const findings: QueueAuditFindingEmission[] = []
+  const head = queuedIntents(state)[0]
+  if (head !== undefined) {
+    const stalled = deadIntentPark(state, head)
+    if (stalled !== undefined) {
+      findings.push({
+        code: "intent-lane-stalled",
+        message:
+          `intent '${head.id}' at the head of the intent lane failed '${stalled.failure.code}' ` +
+          `${stalled.attempts} consecutive times with an identical failure fingerprint for component ` +
+          `'${stalled.failure.component}'; every intent behind it is blocked, including other components'. ` +
+          stalled.remedySummary,
+        resolution: stalled.remedy.map(renderRemedyStep),
+        specimen: `intent:${head.id}:fingerprint:${stalled.fingerprint}`,
+        count: stalled.attempts,
+      })
+    }
+  }
+  for (const id of intents.order) {
+    const record = intents.records[id]
+    if (record?.status !== "parked" || record.parked === undefined) continue
+    if (openIntentForKey(intents, record) !== undefined) continue
+    findings.push({
+      code: "intent-lane-stalled",
+      message:
+        `intent '${record.id}' is parked after ${record.parked.attempts} identical ` +
+        `'${record.parked.failure.code}' failures and nothing has replaced it. ${record.parked.remedySummary}`,
+      resolution: [
+        ...record.parked.remedy.map(renderRemedyStep),
+        `yrd intent withdraw ${record.id} --reason "no longer wanted"`,
+      ],
+      specimen: `intent:${record.id}:parked:${record.parked.fingerprint}`,
+      count: record.parked.attempts,
+    })
+  }
+  return findings
+}
+
+/** The open record holding this record's (issue, component) key, if any. */
+function openIntentForKey(
+  intents: DeepReadonly<IntentsState>,
+  record: DeepReadonly<PinIntent>,
+): DeepReadonly<PinIntent> | undefined {
+  const key = intentKey(record.issue as PinIntent["issue"], record.component)
+  for (const id of intents.order) {
+    const candidate = intents.records[id]
+    if (candidate === undefined || candidate.status !== "open") continue
+    if (intentKey(candidate.issue as PinIntent["issue"], candidate.component) === key) return candidate
+  }
+  return undefined
 }
 
 function admissionRefusalAuditFindings(
@@ -6404,6 +6516,81 @@ function intentCheckFailures(state: DeepReadonly<RuntimeState>, intent: string, 
       run.steps.some((step) => step.kind === "check" && step.job !== undefined && jobFailed(step.job))
     )
   }).length
+}
+
+/**
+ * Every failed Queue run that carried one intent, oldest first, reduced to the
+ * facts a fingerprint is computed from.
+ *
+ * DERIVED, never journalled separately. The run records already are the durable
+ * ledger of what was attempted and how it failed, so a parallel attempt log
+ * could only drift from them — and, worse, would start counting at deploy time,
+ * blind to the very journals that hold the specimens this exists for. A replay
+ * of an existing journal parks a record that was already dead.
+ *
+ * `intentCheckFailures` above counts a NARROWER thing (check-step failures, for
+ * the automatic re-check budget) and is not this. The specimens failed at merge
+ * and at candidate composition, which that counter never sees.
+ */
+function intentAttemptFailures(
+  state: DeepReadonly<RuntimeState>,
+  intent: string,
+): readonly IntentAttemptFailure[] {
+  const failures: IntentAttemptFailure[] = []
+  for (const record of Queues.values(state.queues).toSorted((left, right) => compareNatural(left.id, right.id))) {
+    const snapshot = record.prs.find((member) => member.intent?.id === intent)?.intent
+    if (snapshot === undefined) continue
+    const run = materializeRun(record, state.jobs)
+    if (!Queues.failed(run)) continue
+    const step = run.steps.find((candidate) => candidate.job !== undefined && jobFailed(candidate.job))
+    // A run can fail before any step owns the failure (composition, lease
+    // loss). That is still an attempt, and its typed code still fingerprints —
+    // dropping it here is how a whole failure family becomes unparkable.
+    const failure = step?.job === undefined ? run.error : jobFailure(step.job)
+    if (failure === undefined) continue
+    failures.push(
+      IntentAttemptFailureSchema.parse({
+        code: failure.code,
+        ...(step === undefined ? {} : { step: step.name }),
+        component: snapshot.authored.component,
+        target: snapshot.evaluated.target,
+        priorPin: snapshot.evaluated.priorPin,
+        reason: failure.message,
+      }),
+    )
+  }
+  return failures
+}
+
+/**
+ * The park verdict for one open intent, or `undefined` while retrying can still
+ * change the answer.
+ *
+ * The predicate is the FINGERPRINT repeating, never a list of codes known to be
+ * deterministic. Two specimens one night apart refused with different codes
+ * (`carrier-drops-landed`, then a diverged component main); an enumeration
+ * would have caught the first, missed the second, and missed the third by
+ * construction. Attempts with differing fingerprints keep retrying, which is
+ * what makes a genuinely flaky infrastructure failure safe here.
+ */
+function deadIntentPark(state: DeepReadonly<RuntimeState>, intent: DeepReadonly<PinIntent>): IntentPark | undefined {
+  const failures = intentAttemptFailures(state, intent.id)
+  const latest = failures.at(-1)
+  if (latest === undefined) return undefined
+  const fingerprint = intentAttemptFingerprint(latest)
+  let attempts = 0
+  for (let index = failures.length - 1; index >= 0; index -= 1) {
+    const failure = failures[index]
+    if (failure === undefined || intentAttemptFingerprint(failure) !== fingerprint) break
+    attempts += 1
+  }
+  if (attempts < INTENT_PARK_AFTER_IDENTICAL_ATTEMPTS) return undefined
+  return IntentParkSchema.parse({
+    fingerprint,
+    attempts,
+    failure: latest,
+    ...intentParkRemedy({ id: intent.id, issue: intent.issue as PinIntent["issue"] }, latest, attempts),
+  })
 }
 
 function automaticAdmissionAttemptsExhausted(
