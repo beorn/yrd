@@ -33,9 +33,9 @@ function contractResults(): readonly QueueStatusResult[] {
 /** A carrier-free pin-intent member, shaped like the Queue's materialized
  * PRSnapshot for a landed intent (the real R1480/I2 shape). Its id is an
  * intent id, so it can never resolve against the retained PR list. */
-function intentMember(): Member {
+function intentMember(id: string = "I2"): Member {
   return {
-    id: "I2",
+    id,
     branch: "yrd/intent/yrd-e8220247527a",
     base: "main",
     issue: "@i/23-yrd-vocabulary",
@@ -43,7 +43,7 @@ function intentMember(): Member {
     headSha: "e8220247527a9189e42dc7354ecf62712ea38ee4",
     baseSha: PRIOR_PIN,
     intent: {
-      id: "I2",
+      id,
       authored: {
         intentId: "01b3cb0b-c24d-4c38-a578-8434f041fb4a",
         issue: { source: "km", id: "@i/23-yrd-vocabulary" },
@@ -58,12 +58,12 @@ function intentMember(): Member {
 /** Clone the fixture's completed Run into an intent-integrated Run whose only
  * member is the intent snapshot; the retained PR list is left untouched, so
  * the member has no PR to join against. */
-function withIntentRun(results: readonly QueueStatusResult[]): readonly QueueStatusResult[] {
+function withIntentRun(results: readonly QueueStatusResult[], id: string = "I2"): readonly QueueStatusResult[] {
   const first = results[0]
   if (first === undefined) throw new Error("contract-overview has no queue result")
   const seed = first.finished.find((run) => run.status === "completed")
   if (seed === undefined) throw new Error("contract-overview has no completed Run to clone")
-  const run: Run = { ...seed, id: "R1480", prs: [intentMember()] }
+  const run: Run = { ...seed, id: "R1480", prs: [intentMember(id)] }
   return [{ ...first, finished: [...first.finished, run] }, ...results.slice(1)]
 }
 
@@ -104,5 +104,12 @@ describe("intent-integrated runs in the queue read views", () => {
     expect(row).toBeDefined()
     expect(row?.run).toBe("R1480")
     expect(row?.issue).toBe("@i/23-yrd-vocabulary")
+  })
+
+  it("renders a row for a yrdpin# member, the id every new intent is minted under", () => {
+    const projection = project(withIntentRun(contractResults(), "yrdpin#162"))
+    const row = projection.rows.find((candidate) => candidate.pr === "yrdpin#162")
+    expect(row).toBeDefined()
+    expect(row?.run).toBe("R1480")
   })
 })

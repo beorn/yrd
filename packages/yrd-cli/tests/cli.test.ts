@@ -14338,8 +14338,9 @@ describe("yrd intent — declared pin advances (22668 phase 1)", () => {
       intent: { id: "yrdpin#1", status: "open" },
     })
 
-    // The bare number is the spelling an operator can type unquoted: zsh under
-    // `extendedglob` reads an unquoted `#` as the start of a comment.
+    // The bare number is the spelling an operator can type unquoted: under
+    // zsh's `extendedglob` an unquoted `#` is the pattern repeat operator, so
+    // `yrdpin#1` is globbed and fails as "no matches found".
     const byNumber = outputIO()
     expect(await runYrd(app, yrd("intent", "show", "1", "--json"), byNumber.io), byNumber.stderr()).toBe(0)
     expect(JSON.parse(byNumber.stdout())).toMatchObject({

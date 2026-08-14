@@ -415,7 +415,8 @@ describe("PinIntentV1 journal records (22668 phase 1)", () => {
     expect(app.intents.get("I161")?.id).toBe("I161")
     expect(app.intents.get("161")?.id).toBe("I161")
     expect(app.intents.get("yrdpin#162")?.id).toBe(minted.id)
-    // The bare number is the shell-safe spelling — no `#` for zsh to eat.
+    // The bare number is the shell-safe spelling: zsh's `extendedglob` reads an
+    // unquoted `#` as the pattern repeat operator and refuses "no matches found".
     expect(app.intents.get("162")?.id).toBe(minted.id)
     expect(app.intents.get("999")).toBeUndefined()
   })

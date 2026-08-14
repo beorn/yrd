@@ -414,11 +414,13 @@ function ordered(state: IntentsState): readonly PinIntent[] {
  * Resolve operator input to a record.
  *
  * The stored key always resolves. A bare number resolves too — the verb
- * disambiguates (`yrd intent show 162`), and it spares the operator a `#`,
- * which zsh treats as a comment start under `extendedglob` unless quoted. Both
- * forms carry the bare number as an alias, so if a `yrdpin#<n>` and an `I<n>`
- * ever shared a number the core selector refuses as ambiguous rather than
- * picking one — the counter is what prevents that pair from being minted.
+ * disambiguates (`yrd intent show 162`), and it spares the operator a `#`:
+ * under zsh's `extendedglob`, an unquoted `#` is the pattern repeat operator,
+ * so `yrdpin#162` is read as a glob, matches no file, and dies as
+ * "no matches found" before the command runs at all. Both forms carry the bare
+ * number as an alias, so if a `yrdpin#<n>` and an `I<n>` ever shared a number
+ * the core selector refuses as ambiguous rather than picking one — the counter
+ * is what prevents that pair from being minted.
  */
 function bySelector(state: DeepReadonly<IntentsState> | IntentsState, selector: string): PinIntent | undefined {
   return resolveSelector(
