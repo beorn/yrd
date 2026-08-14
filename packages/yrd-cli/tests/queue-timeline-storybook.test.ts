@@ -25,6 +25,7 @@ const STORY_NAMES = [
   "running-spinner",
   "mixed-completed",
   "paused",
+  "runner-departed",
   "honest-cap",
   "non-default-filters",
   "latest-vs-all-lineage",

@@ -80,11 +80,10 @@ describe("queue liveness status render (item 4)", () => {
   })
 
   it("says how long the oldest submission has waited when nothing has ever drained here", async () => {
-    // "no drained run in window" is the same sentence for a quiet queue and for
-    // one where work has been waiting an hour on a driver that does not exist.
-    // On 2026-08-05 it was the second, and the line gave a reader no way to
-    // tell. The wait time is the discriminator and the projection already
-    // carries it.
+    // A queue nobody staffed reads as merely quiet unless the line says work is
+    // waiting on it. On 2026-08-05 an hour of submissions sat behind a driver
+    // that did not exist. The wait time is the discriminator and the projection
+    // already carries it.
     const waiting: QueueTimelineProjection = {
       ...idleProjection(),
       runner: null,
@@ -94,21 +93,53 @@ describe("queue liveness status render (item 4)", () => {
     const app = render(createElement(QueueTimelineView, { projection: waiting, nav: false, columns: 120 }))
     try {
       await app.waitForLayoutStable()
-      expect(app.text).toContain("NO RUNNER - no drained run in window; oldest open 1:02:00")
+      expect(app.text).toContain(
+        "NO RUNNER - no runner has ever drained this queue, oldest open 1:02:00; start one: yrd queue run main",
+      )
     } finally {
       app.unmount()
     }
 
-    // A queue with nothing open keeps the bare line — there is no wait to report.
+    // A queue with nothing open drops the wait clause — there is none to report
+    // — and keeps the remedy, which is the whole point of the line.
     const empty: QueueTimelineProjection = { ...idleProjection(), runner: null, oldestOpenMs: null }
     const quiet = createRenderer({ cols: 120, rows: 40 })
     const quietApp = quiet(createElement(QueueTimelineView, { projection: empty, nav: false, columns: 120 }))
     try {
       await quietApp.waitForLayoutStable()
-      expect(quietApp.text).toContain("NO RUNNER - no drained run in window")
+      expect(quietApp.text).toContain(
+        "NO RUNNER - no runner has ever drained this queue; start one: yrd queue run main",
+      )
       expect(quietApp.text).not.toContain("oldest open")
     } finally {
       quietApp.unmount()
+    }
+  })
+
+  it("names the departed runner's pid and how it went, which absence alone cannot", async () => {
+    // `runner: null` is where display puts a crashed runner, a cleanly stopped
+    // one, and a queue that never had one — three states, one sentence, until
+    // the projection started carrying the reason.
+    const departed: QueueTimelineProjection = {
+      ...idleProjection(),
+      runner: null,
+      runnerAbsence: {
+        kind: "departed",
+        pid: 31_337,
+        clean: false,
+        lastAliveMs: Date.parse(idleProjection().now) - 45_000,
+      },
+    }
+    const render = createRenderer({ cols: 120, rows: 40 })
+    const app = render(createElement(QueueTimelineView, { projection: departed, nav: false, columns: 120 }))
+    try {
+      await app.waitForLayoutStable()
+      expect(app.text).toContain(
+        "NO RUNNER - resident runner [31337] died 0:45 ago, no exit marker; restart it: yrd queue run main",
+      )
+      expect(app.text, "a departed runner is not a queue nobody staffed").not.toContain("has ever drained")
+    } finally {
+      app.unmount()
     }
   })
 })
