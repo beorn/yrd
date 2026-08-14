@@ -419,8 +419,21 @@ export const PRAdmissionStepSchema = z
 const PRAdmissionBaseSchema = z.object({
   baseSha: GitShaSchema,
   /** Exact-revision/base check authorities consumed by this verdict.
-   * Optional only for replaying admission facts written before this counter. */
-  requestCount: z.number().int().positive().optional(),
+   * Optional only for replaying admission facts written before this counter.
+   *
+   * Zero is a real count, not a corrupt one. A request's base is a PARAMETER of
+   * the request rather than part of its identity ({@link checkRequest}), so it
+   * is meant to lag the queue's base, and a verdict reached against the cycle
+   * base can consume no authority recorded against that exact base. Requiring a
+   * positive count made that ordinary state unrepresentable: the drain built a
+   * record its own fact schema refused, and `yrd queue run` died on a raw Zod
+   * dump every pass with the fleet's only landing path shut behind it.
+   *
+   * Zero must also stay distinct from absent. `requestCount ?? 1` reads absent
+   * as one legacy authority, so recording zero by OMITTING the field would
+   * assert an authority nobody granted and suppress the retry that a real,
+   * later request earns. */
+  requestCount: z.number().int().nonnegative().optional(),
   candidate: TextSchema.optional(),
   steps: z.array(PRAdmissionStepSchema),
 })
