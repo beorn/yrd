@@ -5144,7 +5144,7 @@ function RunnerProgressStatus({
   if (progress?.state !== "stalled") return null
   if (headBlock === undefined) {
     return (
-      <Text color="$fg-error" bold wrap="wrap">
+      <Text color="$fg-error" bold wrap="truncate">
         NO PROGRESS — {progress.findings.map((finding) => finding.message).join(" · ")}
       </Text>
     )
@@ -5172,7 +5172,7 @@ function RunnerProgressStatus({
 function RunnerProgressObservation({ progress, now }: { progress: QueueRunnerProgress | undefined; now: number }) {
   if (progress === undefined) {
     return (
-      <Text color="$fg-error" bold wrap="wrap">
+      <Text color="$fg-error" bold wrap="truncate">
         PROGRESS NOT MEASURED — heartbeat proves ticking only
       </Text>
     )
@@ -5180,14 +5180,14 @@ function RunnerProgressObservation({ progress, now }: { progress: QueueRunnerPro
   const ageMs = QueueRunnerProgress.ageMs(progress, now)
   if (ageMs === undefined) {
     return (
-      <Text color="$fg-error" bold wrap="wrap">
+      <Text color="$fg-error" bold wrap="truncate">
         PROGRESS INVALID — measurement time is not readable
       </Text>
     )
   }
   if (ageMs > RUNNER_STALE_MS) {
     return (
-      <Text color="$fg-error" bold wrap="wrap">
+      <Text color="$fg-error" bold wrap="truncate">
         PROGRESS STALE — last measured {mediaDuration(ageMs)} ago
       </Text>
     )
@@ -5285,7 +5285,7 @@ function TimelineRunnerBox({
         )}
       </Box>
       {runner === null ? null : (
-        <Text color={runner.sourceBehind === undefined ? "$fg-muted" : "$fg-warning"} wrap="wrap" minWidth={0}>
+        <Text color={runner.sourceBehind === undefined ? "$fg-muted" : "$fg-warning"} wrap="truncate" minWidth={0}>
           {runnerSourceLine(runner)}
         </Text>
       )}
@@ -5297,19 +5297,19 @@ function TimelineRunnerBox({
       {runner === null ? null : (
         <Text
           color={runner.uncarried !== undefined && runner.uncarried.count > 0 ? "$fg-warning" : "$fg-muted"}
-          wrap="wrap"
+          wrap="truncate"
           minWidth={0}
         >
           {uncarriedLine(runner.uncarried, now)}
         </Text>
       )}
       {runner === null && runnerRefusal !== undefined ? (
-        <Text color="$fg-error" wrap="wrap" minWidth={0}>
+        <Text color="$fg-error" wrap="truncate" minWidth={0}>
           {runnerRefusal.code}: {runnerRefusal.message}
         </Text>
       ) : null}
       {runnerStale && timing !== null ? (
-        <Text color="$fg-error" bold wrap="wrap">
+        <Text color="$fg-error" bold wrap="truncate">
           RUNNER STALE — last tick {mediaDuration(timing.ageMs)} ago
         </Text>
       ) : null}
