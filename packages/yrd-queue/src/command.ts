@@ -30,7 +30,15 @@ import {
   SourceRewriteSchema,
 } from "./model.ts"
 import { componentMainScratchCleanupFailure } from "./component-main-outcome.ts"
-import { isStorageExhaustion, queueScratchParent, storageExhaustionError } from "./scratch-storage.ts"
+import {
+  describeScratchReap,
+  isStorageExhaustion,
+  queueScratchParent,
+  reapOrphanedScratch,
+  storageExhaustionError,
+  tagStorageExhaustion,
+  taggedStorageExhaustion,
+} from "./scratch-storage.ts"
 import type { CandidatePool } from "./candidate-pool.ts"
 import type {
   CandidatePreparationInput,
@@ -2633,8 +2641,47 @@ export async function inspectGitQueueTarget(options: {
  */
 async function scratchIn(git: Git, repo: string, prefix: string, parent?: string): Promise<string> {
   const root = parent ?? (await queueScratchParent(git, repo))
+  await reapOnce(git, repo, root)
   await mkdir(root, { recursive: true })
   return mkdtemp(join(await realpath(root), prefix))
+}
+
+/** Scratch roots this process has already swept, so the reap stays one-shot. */
+const reapedScratchRoots = new Set<string>()
+
+/**
+ * The scratch entries git still lists as live worktrees. A queue worktree lives
+ * at `<entry>/worktree`, so a listed path under the scratch root names its
+ * entry's first segment; that is what separates an abandoned tree from one a
+ * concurrent run is still using.
+ */
+async function liveScratchEntries(git: Git, repo: string, root: string): Promise<Set<string>> {
+  const listed = await git.run(repo, ["worktree", "list", "--porcelain"], true)
+  if (listed.code !== 0) return new Set()
+  const live = new Set<string>()
+  for (const line of listed.stdout.split("\n")) {
+    if (!line.startsWith("worktree ")) continue
+    const path = resolve(line.slice("worktree ".length).trim())
+    const prefix = `${resolve(root)}${sep}`
+    if (!path.startsWith(prefix)) continue
+    const segment = path.slice(prefix.length).split(sep)[0]
+    if (segment !== undefined && segment !== "") live.add(join(resolve(root), segment))
+  }
+  return live
+}
+
+/**
+ * Sweep scratch abandoned by an earlier process, once per root per process.
+ * Placed at creation rather than at queue-run startup so every entry point —
+ * queue run, recut, patch-id, a direct step runner in a test host — pays for the
+ * cleanup it might itself leave behind.
+ */
+async function reapOnce(git: Git, repo: string, root: string): Promise<void> {
+  const key = resolve(root)
+  if (reapedScratchRoots.has(key)) return
+  reapedScratchRoots.add(key)
+  const report = await reapOrphanedScratch(key, { keep: await liveScratchEntries(git, repo, key) })
+  if (report.reaped > 0 || report.failures.length > 0) console.warn(describeScratchReap(report))
 }
 
 /**
@@ -2645,11 +2692,105 @@ async function scratchIn(git: Git, repo: string, prefix: string, parent?: string
  * R2236/R2237 merged untouched minutes later. Reporting that as `merge-failed`
  * sent readers hunting a content conflict that did not exist, so classify it
  * into its own code carrying the filesystem's inode/byte split.
+ *
+ * `withScratchRoot` has normally already classified, and its answer wins: it was
+ * taken while the scratch directory still existed. The re-derivation below is
+ * for the causes no scratch primitive ever sees — `materializeSubmodules`
+ * reports ENOSPC through an exit status, not a throw.
  */
 async function storageExhaustionResult(git: Git, repo: string, cause: unknown): Promise<JobResult<never> | undefined> {
+  const tagged = taggedStorageExhaustion(cause)
+  if (tagged !== undefined) return { status: "completed", conclusion: "failure", error: tagged }
   if (!isStorageExhaustion(cause)) return undefined
-  const parent = await queueScratchParent(git, repo).catch(() => repo)
-  return { status: "completed", conclusion: "failure", error: await storageExhaustionError(parent, cause) }
+  return {
+    status: "completed",
+    conclusion: "failure",
+    error: await storageExhaustionError(await scratchPath(git, repo), cause),
+  }
+}
+
+/**
+ * The infrastructure classification a queue step's outer catch owes a thrown
+ * cause, in ONE place. Returns `undefined` only when the cause is genuinely the
+ * step's own domain failure, which the caller then names.
+ *
+ * Every step used to open its catch with the same three refusal probes and then
+ * decide for itself whether to also ask about storage; `gitCheckStep` did not
+ * ask, so an ENOSPC on its scratch worktree came back as `check-failed`.
+ */
+async function stepInfrastructureFailure(
+  git: Git,
+  repo: string,
+  cause: unknown,
+): Promise<JobResult<never> | undefined> {
+  const refusal =
+    queueAuthorityRefusal(cause) ?? submoduleReachabilityRefusal(cause) ?? submoduleCompositionRefusal(cause)
+  if (refusal !== undefined) {
+    return failedWithEvidence(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
+  }
+  return storageExhaustionResult(git, repo, cause)
+}
+
+/**
+ * `materializeSubmodules` reports ENOSPC through its exit status rather than a
+ * throw, so it never reaches `withScratchRoot`'s classification and must be
+ * asked about here — on the same filesystem, for the same outage.
+ */
+async function candidateSubmodulesFailure(git: Git, repo: string, detail: string): Promise<JobResult<never>> {
+  return (await storageExhaustionResult(git, repo, detail)) ?? failed("candidate-submodules-failed", detail)
+}
+
+/** Where to read the exhausted filesystem from. */
+async function scratchPath(git: Git, repo: string): Promise<string> {
+  // silent-fallback-allow: the scratch parent is only ever a better PATH to
+  // `statfs` than the repo itself — both sit on the filesystem being reported.
+  // A `--git-common-dir` that cannot answer is exactly the case where the repo
+  // root is the honest probe, and the failure being classified is already the
+  // loud one this call decorates.
+  return queueScratchParent(git, repo).catch(() => repo)
+}
+
+/**
+ * Tag `cause` with its typed storage failure when it is an ENOSPC, so the
+ * classification travels with the throw. Anything else is returned untouched.
+ */
+async function classifyScratchFailure(git: Git, repo: string, cause: unknown): Promise<unknown> {
+  if (taggedStorageExhaustion(cause) !== undefined || !isStorageExhaustion(cause)) return cause
+  const failure = await storageExhaustionError(await scratchPath(git, repo), cause)
+  return tagStorageExhaustion(cause instanceof Error ? cause : new Error(String(cause)), failure)
+}
+
+/**
+ * The one way to obtain a queue scratch root: creation AND the whole body run
+ * under storage-exhaustion classification, so a consumer cannot forget it.
+ * Before this seam existed the 2026-08-14 ENOSPC was classified at four merge-step
+ * catches, while `gitCheckStep`, `rebaseSource`, `matchesExpectedUnionMerge` and
+ * `withComponentMainPromotions` prepared scratch on the same filesystem and
+ * reported the identical error as a content or candidate failure the author was
+ * told to go fix.
+ *
+ * Cleanup stays with the body: the consumers differ in what they must tear down
+ * (a worktree before its root, or a root alone) and in how each reports a
+ * cleanup failure, and none of that is scratch classification's business.
+ */
+async function withScratchRoot<Output>(
+  git: Git,
+  repo: string,
+  prefix: string,
+  parent: string | undefined,
+  run: (root: string) => Promise<Output>,
+): Promise<Output> {
+  let root: string
+  try {
+    root = await scratchIn(git, repo, prefix, parent)
+  } catch (cause) {
+    throw await classifyScratchFailure(git, repo, cause)
+  }
+  try {
+    return await run(root)
+  } catch (cause) {
+    throw await classifyScratchFailure(git, repo, cause)
+  }
 }
 
 async function withScratch<Output extends JsonValue>(
@@ -2659,12 +2800,21 @@ async function withScratch<Output extends JsonValue>(
   parent: string | undefined,
   run: (path: string, root: string) => Promise<JobResult<Output>>,
 ): Promise<JobResult<Output>> {
+  return withScratchRoot(git, repo, "yrd-queue-", parent, (root) => runInScratch(git, repo, ref, root, run))
+}
+
+async function runInScratch<Output extends JsonValue>(
+  git: Git,
+  repo: string,
+  ref: string,
+  root: string,
+  run: (path: string, root: string) => Promise<JobResult<Output>>,
+): Promise<JobResult<Output>> {
   const worktrees = createGitWorktreeStore({
     repo,
     git,
     timeouts: { operation: GIT_TIMEOUT_MS, cleanup: GIT_CLEANUP_TIMEOUT_MS },
   })
-  const root = await scratchIn(git, repo, "yrd-queue-", parent)
   const path = join(root, "worktree")
   let added = false
   let outcome: JobResult<Output> | undefined
@@ -3948,12 +4098,23 @@ async function rebaseSource(
   source: NonNullable<StepExecution["prs"][number]["composition"]>["sources"][number],
   currentPin: string,
 ): Promise<Readonly<{ status: "passed"; output: string }> | CandidateFailure> {
+  return withScratchRoot(git, sourceRepo, "yrd-source-", undefined, (root) =>
+    rebaseSourceIn(git, sourceRepo, source, currentPin, root),
+  )
+}
+
+async function rebaseSourceIn(
+  git: Git,
+  sourceRepo: string,
+  source: NonNullable<StepExecution["prs"][number]["composition"]>["sources"][number],
+  currentPin: string,
+  root: string,
+): Promise<Readonly<{ status: "passed"; output: string }> | CandidateFailure> {
   const worktrees = createGitWorktreeStore({
     repo: sourceRepo,
     git,
     timeouts: { operation: GIT_TIMEOUT_MS, cleanup: GIT_CLEANUP_TIMEOUT_MS },
   })
-  const root = await scratchIn(git, sourceRepo, "yrd-source-")
   const path = join(root, "worktree")
   let added = false
   let outcome: Readonly<{ status: "passed"; output: string }> | CandidateFailure | undefined
@@ -4539,33 +4700,34 @@ async function matchesExpectedUnionMerge(
   recutRef: string,
   paths: readonly string[],
 ): Promise<boolean> {
-  const root = await scratchIn(git, repo, "yrd-union-proof-")
-  try {
-    for (const [index, path] of paths.entries()) {
-      const base = await readUnionBlob(git, repo, baseRef, path)
-      const current = await readUnionBlob(git, repo, currentRef, path)
-      const authored = await readUnionBlob(git, repo, authoredRef, path)
-      const recut = await readUnionBlob(git, repo, recutRef, path)
-      if (base === undefined || current === undefined || authored === undefined || recut === undefined) return false
-      const mode = mergedUnionMode(base.mode, current.mode, authored.mode)
-      if (mode === undefined || recut.mode !== mode) return false
-      const currentPath = join(root, `${index}-current`)
-      const basePath = join(root, `${index}-base`)
-      const authoredPath = join(root, `${index}-authored`)
-      await writeFile(currentPath, current.content)
-      await writeFile(basePath, base.content)
-      await writeFile(authoredPath, authored.content)
-      const merged = await git.raw(
-        repo,
-        ["merge-file", "--union", "--stdout", currentPath, basePath, authoredPath],
-        true,
-      )
-      if (merged.code !== 0 || merged.stdout !== recut.content) return false
+  return withScratchRoot(git, repo, "yrd-union-proof-", undefined, async (root) => {
+    try {
+      for (const [index, path] of paths.entries()) {
+        const base = await readUnionBlob(git, repo, baseRef, path)
+        const current = await readUnionBlob(git, repo, currentRef, path)
+        const authored = await readUnionBlob(git, repo, authoredRef, path)
+        const recut = await readUnionBlob(git, repo, recutRef, path)
+        if (base === undefined || current === undefined || authored === undefined || recut === undefined) return false
+        const mode = mergedUnionMode(base.mode, current.mode, authored.mode)
+        if (mode === undefined || recut.mode !== mode) return false
+        const currentPath = join(root, `${index}-current`)
+        const basePath = join(root, `${index}-base`)
+        const authoredPath = join(root, `${index}-authored`)
+        await writeFile(currentPath, current.content)
+        await writeFile(basePath, base.content)
+        await writeFile(authoredPath, authored.content)
+        const merged = await git.raw(
+          repo,
+          ["merge-file", "--union", "--stdout", currentPath, basePath, authoredPath],
+          true,
+        )
+        if (merged.code !== 0 || merged.stdout !== recut.content) return false
+      }
+      return paths.length > 0
+    } finally {
+      await rm(root, { recursive: true, force: true })
     }
-    return paths.length > 0
-  } finally {
-    await rm(root, { recursive: true, force: true })
-  }
+  })
 }
 
 async function stagedPaths(git: Git, repo: string): Promise<string[]> {
@@ -5352,7 +5514,23 @@ async function withComponentMainPromotions(
   ) => Promise<JobResult<IntegrationProof>>,
   options: Readonly<{ settleSafePromotions?: boolean }> = {},
 ): Promise<JobResult<IntegrationProof>> {
-  const root = await scratchIn(git, repo, "yrd-component-main-")
+  return withScratchRoot(git, repo, "yrd-component-main-", undefined, (root) =>
+    componentMainPromotionsIn(git, repo, baseSha, candidateSha, run, options, root),
+  )
+}
+
+async function componentMainPromotionsIn(
+  git: Git,
+  repo: string,
+  baseSha: string | undefined,
+  candidateSha: string,
+  run: (
+    promotions: readonly ComponentMainPromotion[],
+    receipts: readonly ComponentMainReceipt[],
+  ) => Promise<JobResult<IntegrationProof>>,
+  options: Readonly<{ settleSafePromotions?: boolean }>,
+  root: string,
+): Promise<JobResult<IntegrationProof>> {
   let outcome: JobResult<IntegrationProof> | undefined
   let operationFailure: unknown
   try {
@@ -6249,11 +6427,8 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
         },
       )
     } catch (cause) {
-      const refusal =
-        queueAuthorityRefusal(cause) ?? submoduleReachabilityRefusal(cause) ?? submoduleCompositionRefusal(cause)
-      if (refusal !== undefined) {
-        return failedWithEvidence(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
-      }
+      const classified = await stepInfrastructureFailure(git, repo, cause)
+      if (classified !== undefined) return classified
       const detail = messageOf(cause)
       try {
         return failed(
@@ -6768,9 +6943,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
             const submodules = await materializeSubmodules(git, { worktree: path, referenceWorktree: repo })
             if (submodules.code !== 0) {
               const detail = submodules.stderr || submodules.stdout || "could not materialize candidate submodules"
-              const exhausted = await storageExhaustionResult(git, repo, detail)
-              if (exhausted !== undefined) return exhausted
-              return failed("candidate-submodules-failed", detail)
+              return candidateSubmodulesFailure(git, repo, detail)
             }
             if ((await git.commit(path, "HEAD")) !== checked.candidateSha) {
               return failed("invalid-candidate", "candidate checkout does not match its pinned commit")
@@ -6917,9 +7090,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
             }
             await clearLandingAttempts(git, repo, input, checked)
             const detail = aligned.stderr || aligned.stdout || "could not align merged candidate submodules"
-            const exhausted = await storageExhaustionResult(git, repo, detail)
-            if (exhausted !== undefined) return exhausted
-            return failed("candidate-submodules-failed", detail)
+            return candidateSubmodulesFailure(git, repo, detail)
           }
           const sourceRefError = await sourceCandidateRefError(git, repo, checked.sourceRewrites ?? [])
           if (sourceRefError !== undefined) {
@@ -6971,13 +7142,8 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
         )
       })
     } catch (cause) {
-      const refusal =
-        queueAuthorityRefusal(cause) ?? submoduleReachabilityRefusal(cause) ?? submoduleCompositionRefusal(cause)
-      if (refusal !== undefined) {
-        return failedWithEvidence(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
-      }
-      const exhausted = await storageExhaustionResult(git, repo, cause)
-      if (exhausted !== undefined) return exhausted
+      const classified = await stepInfrastructureFailure(git, repo, cause)
+      if (classified !== undefined) return classified
       return failed("merge-failed", messageOf(cause))
     }
   }
@@ -7121,13 +7287,8 @@ export function configuredMergeStep<Shape extends PRShape>(
         },
       )
     } catch (cause) {
-      const refusal =
-        queueAuthorityRefusal(cause) ?? submoduleReachabilityRefusal(cause) ?? submoduleCompositionRefusal(cause)
-      if (refusal !== undefined) {
-        return failedWithEvidence(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
-      }
-      const exhausted = await storageExhaustionResult(git, repo, cause)
-      if (exhausted !== undefined) return exhausted
+      const classified = await stepInfrastructureFailure(git, repo, cause)
+      if (classified !== undefined) return classified
       return failed("merge-failed", messageOf(cause))
     }
   }
