@@ -31,9 +31,9 @@ import {
 import { localRunner, withJobs, type JobResult, type Jobs, type Runner, type RunnerSubmission } from "@yrd/job"
 import { defineConfig, selectFlow, yrd, type YrdConfig } from "@yrd/config"
 import * as z from "zod"
+import * as queueApi from "../src/index.ts"
 import {
   DEFAULT_QUEUE_BATCH_SIZE,
-  effectiveBatchSize,
   withQueue,
   projectQueueStarted,
   withMerge,
@@ -75,15 +75,19 @@ const UPDATED = "3".repeat(40)
 const runtime = { runner: "local", leaseMs: 60_000 }
 
 describe("queue batch policy", () => {
+  it("keeps effective batch normalization out of the public Queue API", () => {
+    expect("effectiveBatchSize" in queueApi).toBe(false)
+  })
+
   it.each([
-    [undefined, 10],
     [false, 1],
     [0, 1],
     [1, 1],
     [2, 2],
     [10, 10],
-  ] as const)("normalizes %s to the effective batch size %s", (configured, expected) => {
-    expect(effectiveBatchSize(configured)).toBe(expected)
+  ] as const)("normalizes %s to the effective batch size %s", async (configured, expected) => {
+    await using app = await createQueueApp({ batch: configured })
+    expect(app.state().queues.batchSize).toBe(expected)
   })
 
   it("keeps the built-in default explicit", () => {

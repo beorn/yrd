@@ -547,6 +547,29 @@ async function queueRepository(check: string): Promise<string> {
 }
 
 describe("host installed baseline", () => {
+  it.each([
+    ["false", 1],
+    ["0", 1],
+    ["1", 1],
+    ["2", 2],
+    ["10", 10],
+  ] as const)("keeps configured batch %s equal to runtime policy %s", async (configured, effective) => {
+    const repo = await queueRepository("true")
+    await writeFile(join(repo, ".yrd.yml"), `base: main\nbatch: ${configured}\nchecks:\n  - {check: {run: "true"}}\n`)
+    if (configured !== "1") {
+      await git(repo, "add", ".yrd.yml")
+      await git(repo, "commit", "-qm", `configure batch ${configured}`)
+    }
+    const host = await createYrdHost({ cwd: repo })
+    try {
+      await host.services.queue?.provision?.("main")
+      expect((await readInstalledBaselines(host.repository.stateDir)).main?.batchSize).toBe(effective)
+      expect(await host.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+    } finally {
+      await host.close()
+    }
+  })
+
   it("round-trips old and current uncarried observations through resident status", async () => {
     const repo = await queueRepository("true")
     const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")

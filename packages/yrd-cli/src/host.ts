@@ -56,7 +56,6 @@ import {
   createCandidatePool,
   createCandidatePoolGit,
   createGitPRRecutter,
-  effectiveBatchSize,
   gitCandidatePreparer,
   gitCheckStep,
   gitMergeStep,
@@ -756,13 +755,21 @@ async function reloadConfiguredQueueDescriptor(
   const mergeCommand =
     loaded.config.definitions.merge?.run === undefined ? undefined : shellCommand(loaded.config.definitions.merge.run)
   return {
-    batchSize: effectiveBatchSize(loaded.config.batch),
+    batchSize: configuredBatchSize(loaded.config.batch),
     steps: configuredStepDescriptors(
       { repo: repository.repo, stateDir: repository.stateDir, baysRoot: repository.baysRoot },
       loaded.config,
       mergeCommand,
     ),
   }
+}
+
+/** Config is already schema-validated at this boundary. Queue independently
+ * normalizes its public construction input; the host-level drift regression
+ * proves these two effective-policy views stay equal without exporting a
+ * tuning helper from `@yrd/queue`. */
+function configuredBatchSize(batch: false | number): number {
+  return batch === false || batch <= 1 ? 1 : batch
 }
 
 function integratedRunner(

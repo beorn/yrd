@@ -558,7 +558,7 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
 export const DEFAULT_QUEUE_BATCH_SIZE = 10
 
 /** Resolve the configured batching vocabulary to the width Queue executes. */
-export function effectiveBatchSize(config: BatchConfig | undefined = DEFAULT_QUEUE_BATCH_SIZE): number {
+function effectiveBatchSize(config: BatchConfig | undefined = DEFAULT_QUEUE_BATCH_SIZE): number {
   if (config === false) return 1
   if (!Number.isInteger(config) || config < 0) {
     throw new Error("yrd: batch size must be false or a non-negative integer")
