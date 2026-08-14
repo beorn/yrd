@@ -4109,6 +4109,69 @@ describe("Queue", () => {
     expect(app.queue.eligibility(pr.id)).toMatchObject({ checks: { status: "passed" } })
   })
 
+  it("records an admission whose base outran its check request", async () => {
+    // @i/10-merge-queue — the live drain wedge (PR943). Every required check
+    // passed, the verdict was never written, and `yrd queue run code --once`
+    // died on a raw Zod dump every pass: the record carried `requestCount: 0`
+    // and the fact schema demanded a positive count. The fleet's only landing
+    // path stayed shut for three consecutive passes.
+    //
+    // HOW ZERO ARISES. The drain admits against the CYCLE base — main as it is
+    // now. `refreshCheckIdentities` is what re-points a carrier's check request
+    // at that base, and it only ever walks the submitted/ready carriers; the
+    // admission queue also holds `pushed` ones. A carrier in that gap is
+    // admitted against a base no request of its own names, so the verdict
+    // consumes zero authorities recorded against its base.
+    //
+    // WHY ZERO MUST BE RECORDABLE rather than coerced away. A request's base is
+    // a PARAMETER of the request, not part of its identity (model.ts
+    // `checkRequest`), so it is MEANT to lag the queue's base — the state is
+    // ordinary, not corrupt. And `requestCount ?? 1` reads a missing count as
+    // one legacy authority, so omitting the field would assert an authority
+    // that was never granted and suppress the retry a real later request earns.
+    const MOVED = "e".repeat(40)
+    await using app = await createQueueApp({
+      // Main advanced under the queue.
+      resolveBaseSha: () => MOVED,
+      check: () => ({ status: "completed", conclusion: "success", output: { checked: true } }),
+    })
+
+    // A submitted carrier, so the drain has something to walk. This one IS
+    // refreshed, and its verdict consumes the authority it was given.
+    const submitted = await submitBranch(app, "issue/refreshed-carrier")
+    await app.bays.requestChecks({ pr: submitted.id, baseSha: BASE })
+
+    // The carrier in the gap: a rebuild left it `pushed`, which keeps it in the
+    // admission queue and out of every list `refreshCheckIdentities` walks.
+    const stranded = await submitBranch(app, "issue/base-outran-request")
+    await app.bays.recut({
+      pr: stranded.id,
+      fromRevision: stranded.revision,
+      headSha: stranded.headSha,
+      baseSha: BASE,
+      treeSha: "c".repeat(40),
+      patchId: "d".repeat(40),
+      reviewCarried: false,
+    })
+    // Its live request matches this revision and this head exactly, so the base
+    // is the only thing that differs — PR943's shape precisely.
+    await app.bays.requestChecks({ pr: stranded.id, baseSha: BASE })
+    expect(prFacts(app.bays.pr(stranded.id))).toMatchObject({ revision: 2, delivery: "pushed" })
+
+    await app.queue.run({}, runtime)
+
+    expect(prAdmission(app.bays.pr(submitted.id)!)).toMatchObject({
+      status: "passed",
+      baseSha: MOVED,
+      requestCount: 1,
+    })
+    expect(prAdmission(app.bays.pr(stranded.id)!)).toMatchObject({
+      status: "passed",
+      baseSha: MOVED,
+      requestCount: 0,
+    })
+  })
+
   it("integrates a checks-passed PR while another admission's check is still in flight", async () => {
     await using app = await createQueueApp({
       check: () => ({ status: "completed", conclusion: "success", output: { checked: true } }),
