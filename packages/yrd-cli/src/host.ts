@@ -2037,6 +2037,14 @@ async function createYrdRuntimeHost(
     }
     if (mode === "active") await drain()
     const checks = configuredChecks(process, repository.stateDir, loaded.config, env)
+    const mergeRecordBaseSha = async (): Promise<string> =>
+      (
+        await resolveGitQueueTarget({
+          inject: { process },
+          repo: repository.repo,
+          branch: baseIdentity(loaded.config.base),
+        })
+      ).sha
     const services = Object.freeze({
       ...(loaded.config.flows === undefined ? {} : { config: defineConfig(...loaded.config.flows) }),
       queue: queueAdministration(
@@ -2051,14 +2059,19 @@ async function createYrdRuntimeHost(
       recut: createGitPRRecutter({ inject: { process }, repo: repository.repo, env }),
       mergeRecords: Object.freeze({
         async find(selector: string) {
-          const baseSha = (
-            await resolveGitQueueTarget({
-              inject: { process },
-              repo: repository.repo,
-              branch: baseIdentity(loaded.config.base),
-            })
-          ).sha
-          return findRepositoryMergeRecords({ inject: { process }, repo: repository.repo, baseSha, selector })
+          return findRepositoryMergeRecords({
+            inject: { process },
+            repo: repository.repo,
+            baseSha: await mergeRecordBaseSha(),
+            selector,
+          })
+        },
+        async all() {
+          return findRepositoryMergeRecords({
+            inject: { process },
+            repo: repository.repo,
+            baseSha: await mergeRecordBaseSha(),
+          })
         },
       }),
       base: loaded.config.base,

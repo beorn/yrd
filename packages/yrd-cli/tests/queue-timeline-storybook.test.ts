@@ -405,7 +405,18 @@ describe("queue timeline storybook", () => {
           height: 48,
           plain: true,
         })
-        expect(rendered, name).toContain(`QUEUE ${projection.base}`)
+        // A single-queue pane names its queue in the tab. A multi-queue pane
+        // must NOT — naming one base while listing several is the lie the
+        // legend replaced (user directive 2026-08-13) — so it says QUEUES and
+        // the legend carries `N base` for every queue.
+        if (projection.queues.length > 1) {
+          expect(rendered, name).toContain("QUEUES")
+          for (const { label, base } of projection.queues) {
+            expect(rendered, `${name} legend for ${base}`).toContain(`${String(label)} ${base}`)
+          }
+        } else {
+          expect(rendered, name).toContain(`QUEUE ${projection.base}`)
+        }
         expect(
           Math.max(...rendered.split("\n").map((row) => row.length)),
           `${name} at ${width} columns`,

@@ -85,6 +85,8 @@ export type YrdCliServices = Readonly<{
   recut?: GitPRRecutter
   mergeRecords?: Readonly<{
     find(selector: string): Promise<RepositoryMergeRecordSearchResult>
+    /** Every verified merge record on the configured base, for bulk index reconstruction. */
+    all(): Promise<RepositoryMergeRecordSearchResult>
   }>
   journal?: YrdCliJournalAdministration
   checks?: YrdCliChecks

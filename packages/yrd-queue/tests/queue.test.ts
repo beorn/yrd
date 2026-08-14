@@ -377,11 +377,16 @@ function staleLegacyBatchFrame(frame: JournalFrame, parent?: string): JournalFra
     run.parent = parent
     run.isolationPart = 0
   }
+  // A second, distinct member of the same run. Its id must be mint-shaped
+  // (`PR<n>`) or QueueMemberIdSchema refuses it, so offset the number instead
+  // of suffixing a word; the branch stays suffixed because it is free text.
+  const firstNumber = /^PR(\d+)$/u.exec(String(first.id))?.[1]
+  if (firstNumber === undefined) throw new Error(`expected a mint-shaped PR id, got '${String(first.id)}'`)
   const prs = [
     first,
     {
       ...first,
-      id: `${String(first.id)}-peer`,
+      id: `PR${String(Number(firstNumber) + 1_000)}`,
       branch: `${String(first.branch)}-peer`,
       headSha: MERGED,
     },

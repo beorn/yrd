@@ -237,6 +237,43 @@ describe("repository aliases supplied by a composition host", () => {
       `unknown Yrd repository '${command}'; expected alpha or beta`,
     )
   })
+
+  it.each([
+    {
+      what: "strips its own repository's prefix from a write selector",
+      args: ["queue", "cancel", "alpha", "alpha:main#7", "--reason", "superseded"],
+      expected: ["--repo", "/srv/alpha", "queue", "cancel", "main#7", "--reason", "superseded"],
+    },
+    {
+      what: "strips its own repository's prefix from a read filter",
+      args: ["queue", "alpha", "alpha:main#7"],
+      expected: ["--repo", "/srv/alpha", "queue", "list", "--base", "main", "main#7"],
+    },
+    {
+      what: "leaves an undeclared prefix alone rather than guessing at it",
+      args: ["queue", "cancel", "alpha", "fixes:issue#12"],
+      expected: ["--repo", "/srv/alpha", "queue", "cancel", "fixes:issue#12"],
+    },
+    {
+      what: "leaves a colon that is not a run reference alone",
+      args: ["queue", "cancel", "alpha", "R7", "--reason", "topic:alpha"],
+      expected: ["--repo", "/srv/alpha", "queue", "cancel", "R7", "--reason", "topic:alpha"],
+    },
+  ])("$what", ({ args, expected }) => {
+    expect(normalizeYrdRepositoryAliasInvocation(args, repositories).args).toEqual(expected)
+  })
+
+  it("refuses another repository's run reference by naming where it lives", () => {
+    // `beta:release#9` cannot resolve against alpha's journal, and alpha may
+    // well have its own release#9 — so stripping the prefix would answer with
+    // the WRONG run. Say where it lives and how to reach it instead.
+    expect(() =>
+      normalizeYrdRepositoryAliasInvocation(["queue", "cancel", "alpha", "beta:release#9"], repositories),
+    ).toThrow("run 'beta:release#9' lives in Yrd repository 'beta', not 'alpha'")
+    expect(() =>
+      normalizeYrdRepositoryAliasInvocation(["queue", "cancel", "alpha", "beta:release#9"], repositories),
+    ).toThrow("yrd queue beta")
+  })
 })
 
 describe("resolveYrdContext", () => {
