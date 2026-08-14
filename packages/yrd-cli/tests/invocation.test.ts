@@ -137,7 +137,7 @@ describe("repository aliases supplied by a composition host", () => {
         kind: "repository-read",
         repository: { name: "alpha", path: "/srv/alpha" },
         queue: { base: "main" },
-        args: ["--repo", "/srv/alpha", "queue", "list", "--base", "main", "--json"],
+        args: ["--repo", "/srv/alpha", "queue", "list", "--json"],
       },
     },
     {
@@ -146,7 +146,18 @@ describe("repository aliases supplied by a composition host", () => {
         kind: "repository-read",
         repository: { name: "alpha", path: "/srv/alpha" },
         queue: { base: "main" },
-        args: ["--repo", "/srv/alpha", "queue", "list", "--base", "main", "--watch"],
+        args: ["--repo", "/srv/alpha", "queue", "list", "--watch"],
+      },
+    },
+    {
+      // An operator who names a base still gets exactly that queue: `--base`
+      // travels in the tail like any other option, unrewritten.
+      args: ["queue", "beta", "--base", "release", "--watch"],
+      expected: {
+        kind: "repository-read",
+        repository: { name: "beta", path: "/srv/beta" },
+        queue: { base: "release" },
+        args: ["--repo", "/srv/beta", "queue", "list", "--base", "release", "--watch"],
       },
     },
     {
@@ -215,13 +226,24 @@ describe("repository aliases supplied by a composition host", () => {
     expect(normalizeYrdRepositoryAliasInvocation(args, repositories)).toEqual(expected)
   })
 
+  it("leaves the composed health probe on the bootstrap-free check path", () => {
+    // `yrd queue <repository> --check --json` is the service health command.
+    // Its rewrite must stay recognizable as a runner check, or the probe loads
+    // the whole journal to answer a question about a lease. An injected
+    // `--base` made it unrecognizable, so every health tick paid for a full
+    // bootstrap.
+    const { args } = normalizeYrdRepositoryAliasInvocation(["queue", "alpha", "--check", "--json"], repositories)
+    expect(args).toEqual(["--repo", "/srv/alpha", "queue", "list", "--check", "--json"])
+    expect(normalizeYrdInvocation(["yrd", ...args])).toMatchObject({ queueRunnerCheck: true, posture: "viewer" })
+  })
+
   it("refuses an undeclared repository alias and names the valid set", () => {
     expect(() => normalizeYrdRepositoryAliasInvocation(["queue", "run", "docs"], repositories)).toThrow(
       "unknown Yrd repository 'docs'; expected alpha or beta",
     )
     for (const args of [["watch"], ["queue", "watch"], ["queue", "list", "--watch"], ["queue", "--watch"]]) {
       expect(() => normalizeYrdRepositoryAliasInvocation(args, repositories)).toThrow(
-        "all-repository queue watch is unsupported; use 'yrd queue alpha --watch' or 'yrd queue beta --watch'",
+        "all-repository queue watch is unsupported; run 'yrd queue alpha --watch' or 'yrd queue beta --watch'",
       )
     }
   })
@@ -247,7 +269,7 @@ describe("repository aliases supplied by a composition host", () => {
     {
       what: "strips its own repository's prefix from a read filter",
       args: ["queue", "alpha", "alpha:main#7"],
-      expected: ["--repo", "/srv/alpha", "queue", "list", "--base", "main", "main#7"],
+      expected: ["--repo", "/srv/alpha", "queue", "list", "main#7"],
     },
     {
       what: "leaves an undeclared prefix alone rather than guessing at it",
@@ -259,8 +281,46 @@ describe("repository aliases supplied by a composition host", () => {
       args: ["queue", "cancel", "alpha", "R7", "--reason", "topic:alpha"],
       expected: ["--repo", "/srv/alpha", "queue", "cancel", "R7", "--reason", "topic:alpha"],
     },
+    {
+      // The reason is prose an operator wrote for a human to read. Rewriting
+      // the whole tail edited it: the reason became "main#7" and the journal
+      // recorded words nobody typed.
+      what: "leaves its OWN prefix alone inside an option value",
+      args: ["queue", "cancel", "alpha", "main#7", "--reason", "superseded by alpha:main#7"],
+      expected: ["--repo", "/srv/alpha", "queue", "cancel", "main#7", "--reason", "superseded by alpha:main#7"],
+    },
+    {
+      what: "leaves a bare own-repository run reference in an option value alone",
+      args: ["queue", "cancel", "alpha", "main#7", "--reason", "alpha:main#7"],
+      expected: ["--repo", "/srv/alpha", "queue", "cancel", "main#7", "--reason", "alpha:main#7"],
+    },
+    {
+      // Same token, different position: as an operand it IS the subject and is
+      // rewritten; the option value beside it is not.
+      what: "rewrites the operand while the option value beside it stays prose",
+      args: ["queue", "finish", "alpha", "alpha:main#7", "--step", "verify", "--ok"],
+      expected: ["--repo", "/srv/alpha", "queue", "finish", "main#7", "--step", "verify", "--ok"],
+    },
+    {
+      what: "leaves a variadic option's values alone",
+      args: ["queue", "pause", "alpha", "--allow", "PR1", "alpha:main#7"],
+      expected: ["--repo", "/srv/alpha", "queue", "pause", "main", "--allow", "PR1", "alpha:main#7"],
+    },
   ])("$what", ({ args, expected }) => {
     expect(normalizeYrdRepositoryAliasInvocation(args, repositories).args).toEqual(expected)
+  })
+
+  it("does not abort a command over a SIBLING's run reference written as an option value", () => {
+    // `--reason "beta:release#9"` is prose about another repository's run, not
+    // a request to reach it. Refusing here aborted a cancel whose subject was
+    // this repository's own run, and the refusal named a run that was never the
+    // subject.
+    expect(
+      normalizeYrdRepositoryAliasInvocation(
+        ["queue", "cancel", "alpha", "main#7", "--reason", "beta:release#9"],
+        repositories,
+      ).args,
+    ).toEqual(["--repo", "/srv/alpha", "queue", "cancel", "main#7", "--reason", "beta:release#9"])
   })
 
   it("refuses another repository's run reference by naming where it lives", () => {
@@ -270,9 +330,15 @@ describe("repository aliases supplied by a composition host", () => {
     expect(() =>
       normalizeYrdRepositoryAliasInvocation(["queue", "cancel", "alpha", "beta:release#9"], repositories),
     ).toThrow("run 'beta:release#9' lives in Yrd repository 'beta', not 'alpha'")
+    // The printed remedy is the command a human would type — and the one
+    // `actionable-error` hands a runner as a machine remedy, so it carries no
+    // `...` for anyone to fill in.
     expect(() =>
       normalizeYrdRepositoryAliasInvocation(["queue", "cancel", "alpha", "beta:release#9"], repositories),
-    ).toThrow("yrd queue beta")
+    ).toThrow("run 'yrd queue cancel beta release#9' to reach it")
+    expect(() => normalizeYrdRepositoryAliasInvocation(["queue", "alpha", "beta:release#9"], repositories)).toThrow(
+      "run 'yrd queue beta release#9' to reach it",
+    )
   })
 })
 

@@ -26,6 +26,11 @@ describe("parseQualifiedRunRef", () => {
     "fixes:issue#12 and more",
     // Already-qualified twice is not a form we mint.
     "code:pm:main#12",
+    // The watch legend's own shorthand: the prefix is a display label, not a
+    // repository, and reading it as one made a pasted watch row resolve (and
+    // fail) against a repository nobody declared.
+    "1:main#2173",
+    "12:release/next#4",
     "",
   ])("does not read %s as a qualified run reference", (token) => {
     expect(parseQualifiedRunRef(token)).toBeUndefined()
@@ -34,17 +39,38 @@ describe("parseQualifiedRunRef", () => {
 
 describe("requireUnqualifiedRunSelector", () => {
   it.each(["main#2172", "R7", "PR9"])("passes a local selector through: %s", (selector) => {
-    expect(requireUnqualifiedRunSelector(selector)).toBe(selector)
+    expect(requireUnqualifiedRunSelector(selector, "cancel")).toBe(selector)
   })
 
   it("refuses a qualified reference loudly, naming the bare form and the host command", () => {
     // A process with no host declarations cannot tell whether `pm:main#2711`
     // means its own main#2711 or another repository's, and both exist. Dropping
     // the prefix would resolve the WRONG run, so it must refuse instead.
-    expect(() => requireUnqualifiedRunSelector("pm:main#2711")).toThrow(
+    expect(() => requireUnqualifiedRunSelector("pm:main#2711", "cancel")).toThrow(
       "qualified run reference 'pm:main#2711' needs the composition host's repository declarations",
     )
-    expect(() => requireUnqualifiedRunSelector("pm:main#2711")).toThrow("use the bare form 'main#2711' here")
-    expect(() => requireUnqualifiedRunSelector("pm:main#2711")).toThrow("yrd queue pm")
+    expect(() => requireUnqualifiedRunSelector("pm:main#2711", "cancel")).toThrow("use the bare form 'main#2711' here")
+    // The remedy names the subcommand the operator was running, so it is the
+    // exact command line to retype — no `...` placeholder for a runner (or a
+    // human) to guess at.
+    expect(() => requireUnqualifiedRunSelector("pm:main#2711", "cancel")).toThrow(
+      "run 'yrd queue cancel pm main#2711' from the composition host",
+    )
+    expect(() => requireUnqualifiedRunSelector("pm:main#2711", "finish")).toThrow(
+      "run 'yrd queue finish pm main#2711' from the composition host",
+    )
+  })
+
+  it("refuses a watch legend label by name instead of hunting for a repository called '1'", () => {
+    // A multi-queue watch prints `1:main#2173`, so operators paste it back. The
+    // label numbers the queues of ONE render; nothing can map it to a base
+    // afterwards, and the token already carries the form that works.
+    expect(() => requireUnqualifiedRunSelector("1:main#2173", "cancel")).toThrow(
+      "run reference '1:main#2173' carries the watch legend's queue label '1'",
+    )
+    expect(() => requireUnqualifiedRunSelector("1:main#2173", "cancel")).toThrow("use the bare form 'main#2173'")
+    expect(() => requireUnqualifiedRunSelector("2:release/next#4", "finish")).toThrow(
+      "use the bare form 'release/next#4'",
+    )
   })
 })

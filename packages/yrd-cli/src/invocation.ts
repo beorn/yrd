@@ -2,7 +2,7 @@ import { basename, resolve } from "node:path"
 import { Command as CliCommand } from "@silvery/commander"
 import { failureFact, raiseFailure, type FailureFact } from "@yrd/core"
 import { resolveYrdObservability, type YrdObservability, type YrdObservabilityFlags } from "./observability.ts"
-import { parseQualifiedRunRef } from "./qualified-run-ref.ts"
+import { parseQualifiedRunRef, type QualifiedRunRef } from "./qualified-run-ref.ts"
 import type { YrdCliExitCode } from "./types.ts"
 
 export type Invocation = Readonly<{
@@ -236,19 +236,35 @@ function namedAlternatives(names: readonly string[]): string {
  * our own run of the same number instead. An undeclared prefix is left alone —
  * it is ordinary text as far as the composition is concerned, and the ordinary
  * not-found refusal already names it.
+ *
+ * Only OPERAND positions are rewritten. An option's value is ordinary text the
+ * operator wrote for a human to read, and rewriting the whole tail edited it:
+ * `--reason "code:main#7"` had its own prefix silently stripped out of the
+ * journalled prose, and `--reason "pm:main#2711"` aborted the command with a
+ * refusal about a run that was never its subject. Every queue spelling puts its
+ * operands before its options, so the rewrite stops at the first option-looking
+ * token and everything from there travels verbatim — including the values of
+ * variadic options such as `--allow` and `--steps`, whose arity this adapter
+ * deliberately does not model. A qualified reference typed AFTER an option is
+ * therefore left alone and refused downstream by
+ * {@link requireUnqualifiedRunSelector}, which names the same remedy.
  */
 function localRunReferences(
   tail: readonly string[],
   ownName: string,
   byName: ReadonlyMap<string, YrdRepositoryAlias>,
+  remedy: (qualified: QualifiedRunRef) => string,
 ): string[] {
-  return tail.map((token) => {
+  const firstOption = tail.findIndex((token) => token.startsWith("-"))
+  const operands = firstOption < 0 ? tail.length : firstOption
+  return tail.map((token, index) => {
+    if (index >= operands) return token
     const qualified = parseQualifiedRunRef(token)
     if (qualified === undefined) return token
     if (qualified.repository === ownName) return qualified.run
     if (!byName.has(qualified.repository)) return token
     usage(
-      `run '${token}' lives in Yrd repository '${qualified.repository}', not '${ownName}'; use 'yrd queue ${qualified.repository} ...' to reach it`,
+      `run '${token}' lives in Yrd repository '${qualified.repository}', not '${ownName}'; run '${remedy(qualified)}' to reach it`,
     )
   })
 }
@@ -280,13 +296,18 @@ export function normalizeYrdRepositoryAliasInvocation(
     const tail = operand === "list" || operand === "_list" ? args.slice(queueIndex + 2) : args.slice(queueIndex + 1)
     if (tail.includes("--watch")) {
       const remedies = namedAlternatives([...byName.keys()].map((name) => `'yrd queue ${name} --watch'`))
-      usage(`all-repository queue watch is unsupported; use ${remedies}`)
+      usage(`all-repository queue watch is unsupported; run ${remedies}`)
     }
     return { kind: "all-repositories-read", args: [...prefix, "queue", "list", ...tail] }
   }
   if (QUEUE_SUBCOMMANDS.has(operand) && READ_ONLY_SUBCOMMANDS.queue?.has(operand) !== true) {
     const declaration = requiredRepository(args[queueIndex + 2])
-    const tail = localRunReferences(args.slice(queueIndex + 3), declaration.repository.name, byName)
+    const tail = localRunReferences(
+      args.slice(queueIndex + 3),
+      declaration.repository.name,
+      byName,
+      (qualified) => `yrd queue ${operand} ${qualified.repository} ${qualified.run}`,
+    )
     const base = operand === "pause" || operand === "resume" ? [declaration.queue.base] : []
     return {
       kind: "repository-write",
@@ -296,6 +317,15 @@ export function normalizeYrdRepositoryAliasInvocation(
   }
   if (QUEUE_SUBCOMMANDS.has(operand)) return { kind: "bypass", args }
   const declaration = requiredRepository(operand)
+  // `yrd queue <repository>` names a REPOSITORY, so it asks the same question
+  // `yrd queue list` asks inside that repository: every queue with work, each
+  // carrying a 1..N label (user directive 2026-08-13). Injecting the declared
+  // base here as `--base` answered a narrower question — one queue, no labels,
+  // no legend, no digit toggles — on every aliased path, which is every path a
+  // composition host has. The base an operator names travels in the tail like
+  // any other option; the declaration's base is not argv, it is the
+  // repository's own configured base, which the CLI reads for the primary
+  // label.
   return {
     kind: "repository-read",
     ...declaration,
@@ -305,9 +335,12 @@ export function normalizeYrdRepositoryAliasInvocation(
       declaration.repository.path,
       "queue",
       "list",
-      "--base",
-      declaration.queue.base,
-      ...localRunReferences(args.slice(queueIndex + 2), declaration.repository.name, byName),
+      ...localRunReferences(
+        args.slice(queueIndex + 2),
+        declaration.repository.name,
+        byName,
+        (qualified) => `yrd queue ${qualified.repository} ${qualified.run}`,
+      ),
     ],
   }
 }

@@ -5507,7 +5507,7 @@ async function cancelQueueRun(
 ): Promise<YrdCliExitCode> {
   if (options.reason?.trim() === "") usage("--reason requires text")
   const run = await app.queue.cancelRun({
-    run: requireUnqualifiedRunSelector(selector),
+    run: requireUnqualifiedRunSelector(selector, "cancel"),
     by: io.runner ?? "operator",
     reason: options.reason ?? "run canceled by operator",
   })
@@ -6135,9 +6135,14 @@ async function buildQueueListSnapshot(
   options: QueueListOptions,
   io: YrdCliIO,
   observed: QueueListObservation,
+  configuredBase: string | undefined,
 ): Promise<QueueListSnapshotBuild> {
   const { state, now, runner, attempts } = observed
-  const requestedBase = options.base ?? "main"
+  // Nobody named a base, so the repository's own configured base is the primary
+  // one — the same `options.base ?? services.base ?? "main"` order every other
+  // base-reading command uses. A repository whose queue is `release` labels
+  // `release` 1, rather than putting a `main` nobody configured at the front.
+  const requestedBase = options.base ?? configuredBase ?? "main"
   const target = resolveQueueTargets(state, [], options.base, options.pr)
   // An operator who named no base and no PR asked about the REPOSITORY, not
   // about `main`: every queue with work is in scope, and the view labels them
@@ -6259,11 +6264,14 @@ export async function queueListSnapshot(
     focus?: QueueWatchFocus
     diffResolver?: QueuePrDiffResolver
     queueReadModel?: QueueReadModel
+    /** The repository's configured base — `services.base` at the CLI seam —
+     * which labels the primary queue when the caller named no base. */
+    configuredBase?: string
   }> = {},
 ): Promise<QueueListSnapshot> {
   const { includeOutputs = false, focus, diffResolver } = details
   const observed = await observeQueueList(app, io, requiredQueueReadModel(details))
-  const built = await buildQueueListSnapshot(app, filters, options, io, observed)
+  const built = await buildQueueListSnapshot(app, filters, options, io, observed, details.configuredBase)
   const snapshot =
     observed.readFailure === undefined ? built.snapshot : { ...built.snapshot, readFailure: observed.readFailure }
   return includeOutputs
@@ -6366,7 +6374,7 @@ export function createQueueListSnapshotLoader(
               },
               reclock: cached.reclock,
             }
-          : await buildQueueListSnapshot(app, filters, options, io, observed)
+          : await buildQueueListSnapshot(app, filters, options, io, observed, services.base)
       const built: QueueListSnapshotBuild =
         observed.readFailure === undefined
           ? baseBuilt
@@ -7467,7 +7475,7 @@ async function finishQueue(
   }
   const attempt = Number(options.attempt)
   if (!Number.isSafeInteger(attempt) || attempt < 1) usage("--attempt must be a positive integer")
-  const run = requireUnqualifiedRunSelector(selector)
+  const run = requireUnqualifiedRunSelector(selector, "finish")
   const revisionAdmission = app.queue.waitingAdmission(run, options.step)
   const waiting = revisionAdmission ?? app.queue.waiting(run, options.step)
   const selectedJob = waiting.step.job
