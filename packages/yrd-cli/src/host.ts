@@ -105,7 +105,8 @@ import {
   sourceRepositoryFor,
   takeImplementationSourceAttestation,
 } from "./implementation-source.ts"
-import { ensureWorkspaceDependencies } from "./workspace-provisioning.ts"
+import { ensureWorkspaceDependencies, type LockfileRegenerationEvidence } from "./workspace-provisioning.ts"
+import { submoduleManifestDrift } from "./submodule-manifest-drift.ts"
 import { withGitIndexLockRetry } from "./git-index-lock-retry.ts"
 import { loadYrdConfig, stepGateMode, type ResolvedYrdProjectConfig, type YrdStepConfig } from "./config.ts"
 import { classifyFailure, resolveInvocation, type RuntimePosture } from "./invocation.ts"
@@ -597,6 +598,35 @@ function stepCommand(name: string, config: YrdStepConfig): string {
   return config.run
 }
 
+/**
+ * Disclose a regenerated lockfile as a run artifact.
+ *
+ * A relaxed install resolves dependencies nobody committed, so the run must be
+ * able to say which submodule manifests forced it and what the lockfile became.
+ * Written next to the step's other artifacts so it travels with the evidence
+ * an operator already reads; a disclosure that cannot be written is itself a
+ * provisioning failure, never a silent success.
+ */
+async function recordLockfileRegeneration(
+  artifactRoot: string,
+  step: string,
+  evidence: LockfileRegenerationEvidence,
+): Promise<void> {
+  const directory = join(artifactRoot, "lockfile-regeneration")
+  const file = join(directory, `${step}-${evidence.after.sha256.slice(0, 12)}.json`)
+  try {
+    mkdirSync(directory, { recursive: true })
+    writeFileSync(file, `${JSON.stringify({ step, ...evidence }, undefined, 2)}\n`)
+  } catch (cause) {
+    raiseFailure(
+      "infrastructure",
+      "candidate-provision-failed",
+      `yrd: required check '${step}' regenerated '${evidence.lockfile}' in ${evidence.path} but could not ` +
+        `disclose it to '${file}': ${cause instanceof Error ? cause.message : String(cause)}`,
+    )
+  }
+}
+
 function candidateStep(
   process: Pick<Process, "run">,
   repo: string,
@@ -622,15 +652,48 @@ function candidateStep(
             `yrd: required check '${name}' has no candidate working directory to provision`,
           )
         }
+        const workspacePath = request.cwd
+        // Annotated, not inferred: control-flow narrowing past a never-returning
+        // call only happens when the callee's type is declared explicitly.
+        const provisionFailure: (message: string) => never = (message) =>
+          raiseFailure("infrastructure", "candidate-provision-failed", `yrd: ${message}`)
         await ensureWorkspaceDependencies(process, {
-          path: request.cwd,
+          path: workspacePath,
           subject: `required check '${name}' workspace`,
           manifestSubject: "candidate",
           ...(request.env === undefined ? {} : { env: request.env }),
           ...(request.signal === undefined ? {} : { signal: request.signal }),
-          fail(message) {
-            raiseFailure("infrastructure", "candidate-provision-failed", `yrd: ${message}`)
+          lockfileRegeneration: {
+            // A pin advance that moves a submodule's dependency specs makes the
+            // superproject lockfile stale the moment it lands, and gitlinks land
+            // alone — so the cure can be committed neither before nor with the
+            // advance. Candidates are the ONE place that deadlock exists, so the
+            // relaxation is authorized here and nowhere else.
+            async changedSubmoduleManifests() {
+              const baseSha = request.env?.YRD_BASE_SHA
+              const candidateSha = request.env?.YRD_CANDIDATE_SHA
+              if (baseSha === undefined || candidateSha === undefined) {
+                provisionFailure(
+                  `required check '${name}' cannot judge lockfile staleness in ${workspacePath}: the candidate ` +
+                    `command environment carries no YRD_BASE_SHA/YRD_CANDIDATE_SHA pair to compare`,
+                )
+              }
+              const drifts = await submoduleManifestDrift(process, {
+                repo,
+                workspace: workspacePath,
+                baseSha,
+                candidateSha,
+                ...(request.env === undefined ? {} : { env: request.env }),
+                ...(request.signal === undefined ? {} : { signal: request.signal }),
+                fail: provisionFailure,
+              })
+              return drifts.flatMap((drift) => drift.manifests)
+            },
+            async record(evidence) {
+              await recordLockfileRegeneration(join(stateDir, "artifacts"), name, evidence)
+            },
           },
+          fail: provisionFailure,
         })
       }
       return process.run(request)
