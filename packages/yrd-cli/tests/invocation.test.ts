@@ -203,6 +203,148 @@ describe("repository aliases supplied by a composition host", () => {
         args: ["--repo", "/srv/beta", "queue", "finish", "PR9", "--step", "verify", "--ok"],
       },
     },
+    // The repository may name itself BEFORE the subcommand. Every spelling
+    // below used to fall through as a positional filter term: `queue alpha
+    // list` searched the timeline for "list" (1,091 rows → 8 on the live
+    // estate) and `queue alpha run` quietly listed instead of running.
+    {
+      args: ["queue", "alpha", "list", "--json"],
+      expected: {
+        kind: "repository-read",
+        repository: { name: "alpha", path: "/srv/alpha" },
+        queue: { base: "main" },
+        args: ["--repo", "/srv/alpha", "queue", "list", "--base", "main", "--json"],
+      },
+    },
+    {
+      args: ["queue", "alpha", "ls"],
+      expected: {
+        kind: "repository-read",
+        repository: { name: "alpha", path: "/srv/alpha" },
+        queue: { base: "main" },
+        args: ["--repo", "/srv/alpha", "queue", "list", "--base", "main"],
+      },
+    },
+    {
+      args: ["queue", "alpha", "status", "--since", "24h"],
+      expected: {
+        kind: "repository-read",
+        repository: { name: "alpha", path: "/srv/alpha" },
+        queue: { base: "main" },
+        args: ["--repo", "/srv/alpha", "queue", "list", "--base", "main", "--since", "24h"],
+      },
+    },
+    {
+      args: ["queue", "alpha", "watch"],
+      expected: {
+        kind: "repository-read",
+        repository: { name: "alpha", path: "/srv/alpha" },
+        queue: { base: "main" },
+        args: ["--repo", "/srv/alpha", "queue", "list", "--base", "main", "--watch"],
+      },
+    },
+    {
+      args: ["queue", "beta", "audit", "--json"],
+      expected: {
+        kind: "repository-read",
+        repository: { name: "beta", path: "/srv/beta" },
+        queue: { base: "release" },
+        args: ["--repo", "/srv/beta", "queue", "audit", "--json"],
+      },
+    },
+    {
+      args: ["queue", "beta", "uncarried"],
+      expected: {
+        kind: "repository-read",
+        repository: { name: "beta", path: "/srv/beta" },
+        queue: { base: "release" },
+        args: ["--repo", "/srv/beta", "queue", "uncarried"],
+      },
+    },
+    {
+      args: ["queue", "beta", "run", "--once"],
+      expected: {
+        kind: "repository-write",
+        repository: { name: "beta", path: "/srv/beta" },
+        queue: { base: "release" },
+        args: ["--repo", "/srv/beta", "queue", "run", "--once"],
+      },
+    },
+    {
+      args: ["queue", "beta", "pause", "--reason", "schema cutover"],
+      expected: {
+        kind: "repository-write",
+        repository: { name: "beta", path: "/srv/beta" },
+        queue: { base: "release" },
+        args: ["--repo", "/srv/beta", "queue", "pause", "release", "--reason", "schema cutover"],
+      },
+    },
+    {
+      args: ["queue", "alpha", "resume"],
+      expected: {
+        kind: "repository-write",
+        repository: { name: "alpha", path: "/srv/alpha" },
+        queue: { base: "main" },
+        args: ["--repo", "/srv/alpha", "queue", "resume", "main"],
+      },
+    },
+    {
+      args: ["queue", "beta", "recover", "--reason", "expired worker"],
+      expected: {
+        kind: "repository-write",
+        repository: { name: "beta", path: "/srv/beta" },
+        queue: { base: "release" },
+        args: ["--repo", "/srv/beta", "queue", "recover", "--reason", "expired worker"],
+      },
+    },
+    {
+      args: ["queue", "alpha", "cancel", "R7", "--reason", "superseded"],
+      expected: {
+        kind: "repository-write",
+        repository: { name: "alpha", path: "/srv/alpha" },
+        queue: { base: "main" },
+        args: ["--repo", "/srv/alpha", "queue", "cancel", "R7", "--reason", "superseded"],
+      },
+    },
+    {
+      args: ["queue", "beta", "finish", "PR9", "--step", "verify", "--ok"],
+      expected: {
+        kind: "repository-write",
+        repository: { name: "beta", path: "/srv/beta" },
+        queue: { base: "release" },
+        args: ["--repo", "/srv/beta", "queue", "finish", "PR9", "--step", "verify", "--ok"],
+      },
+    },
+    // The mirror hole: a DECLARED name after a read verb was searched for as a
+    // filter term across every repository instead of scoping the read to it.
+    {
+      args: ["queue", "list", "alpha", "--latest"],
+      expected: {
+        kind: "repository-read",
+        repository: { name: "alpha", path: "/srv/alpha" },
+        queue: { base: "main" },
+        args: ["--repo", "/srv/alpha", "queue", "list", "--base", "main", "--latest"],
+      },
+    },
+    {
+      args: ["queue", "audit", "beta"],
+      expected: {
+        kind: "repository-read",
+        repository: { name: "beta", path: "/srv/beta" },
+        queue: { base: "release" },
+        args: ["--repo", "/srv/beta", "queue", "audit"],
+      },
+    },
+    // An UNDECLARED operand after a read verb stays what it has always been:
+    // an ordinary filter term over every repository.
+    {
+      args: ["queue", "list", "topic/alpha"],
+      expected: { kind: "all-repositories-read", args: ["queue", "list", "topic/alpha"] },
+    },
+    {
+      args: ["queue", "audit"],
+      expected: { kind: "bypass", args: ["queue", "audit"] },
+    },
     {
       args: ["pr", "view", "PR1"],
       expected: { kind: "bypass", args: ["pr", "view", "PR1"] },
