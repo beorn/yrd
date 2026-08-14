@@ -59,6 +59,7 @@ import {
   type Run,
   type QueueSummary,
   type PREligibility,
+  candidateRefFor,
   withQueue,
   withMerge,
   withStep,
@@ -5894,7 +5895,7 @@ describe("runYrd", () => {
         return {
           ...candidate,
           sha: MERGED_SHA,
-          ref: `refs/yrd/candidates/${input.id}`,
+          ref: candidateRefFor(MERGED_SHA),
           mergeability: "mergeable",
         }
       },
@@ -14162,6 +14163,107 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     } finally {
       await app.close()
     }
+  })
+
+  // 22332 boxes 4 and 5: the Candidate ref namespace had no enumerator, so ~2000
+  // refs accumulated unseen. These prove the two halves against a real repository
+  // — doctor reports a seeded orphan, and the reaper ages out terminal evidence
+  // under the stated seven-day rule while retaining everything it cannot prove.
+  describe("candidate ref retention", () => {
+    const gitIn = (cwd: string, args: readonly string[]) =>
+      execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim()
+
+    /** A repository holding one commit and one Candidate ref pointing at it. The
+     * ref is named `C1` — the pre-22332 shape — because that is exactly what the
+     * accumulated orphans look like. */
+    const seededRepo = (): Readonly<{ repo: string; sha: string; ref: string }> => {
+      const repo = mkdtempSync(join(tmpdir(), "yrd-candidate-refs-"))
+      execFileSync("git", ["init", "-q", "-b", "main", repo], { stdio: "ignore" })
+      gitIn(repo, ["config", "user.name", "Yrd Test"])
+      gitIn(repo, ["config", "user.email", "yrd@example.invalid"])
+      writeFileSync(join(repo, "README.md"), "main\n")
+      gitIn(repo, ["add", "README.md"])
+      gitIn(repo, ["commit", "-qm", "main"])
+      const sha = gitIn(repo, ["rev-parse", "HEAD"])
+      const ref = "refs/yrd/candidates/C1"
+      gitIn(repo, ["update-ref", ref, sha])
+      return { repo, sha, ref }
+    }
+
+    it("reports a seeded orphan Candidate ref through yrd doctor", async () => {
+      const { repo, ref } = seededRepo()
+      const app = await createApp()
+      try {
+        const output = outputIO({ cwd: repo, repositoryRoot: repo })
+
+        await runYrd(app, yrd("doctor", "--json"), output.io, {
+          config: defineConfig(
+            yrdConfig.flow({ name: "main", rev: "1", on: () => true, steps: [yrdConfig.check("check")] }),
+          ),
+        })
+
+        const report = JSON.parse(output.stdout())
+        // The ref is counted, and counted in the bucket that says the journal
+        // cannot explain it — not quietly dropped.
+        expect(report.candidateRefs).toMatchObject({ scanned: 1, unclaimed: 1, reclaimable: 0 })
+        expect(report.candidateRefs.findings).toEqual([
+          expect.objectContaining({ ref, disposition: "unclaimed" }),
+        ])
+        // And the operator is told, with the denominator and the remedy.
+        const said = `${output.stdout()}${output.stderr()}`
+        expect(said).toContain("candidate-ref-orphans")
+        expect(said).toContain("yrd queue candidate-refs")
+      } finally {
+        await app.close()
+        safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
+      }
+    })
+
+    it("inventories the namespace without deleting anything by default", async () => {
+      const { repo, ref } = seededRepo()
+      const app = await createApp()
+      try {
+        const output = outputIO({ cwd: repo, repositoryRoot: repo })
+
+        await expect(
+          runYrd(app, yrd("queue", "candidate-refs", "--json"), output.io),
+        ).resolves.toBe(0)
+
+        expect(JSON.parse(output.stdout())).toMatchObject({
+          command: "queue.candidate-refs",
+          scanned: 1,
+          unclaimed: 1,
+          reclaimable: 0,
+        })
+        // A dry run is a dry run: the ref is still there.
+        expect(gitIn(repo, ["rev-parse", "--verify", ref])).not.toBe("")
+      } finally {
+        await app.close()
+        safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
+      }
+    })
+
+    it("retains an unclaimed ref even under --prune, however old it is", async () => {
+      // The design ruling: unknown, unmatched and unpaired refs stay. An orphan
+      // whose Run the journal has forgotten cannot be PROVEN terminal, so the
+      // reaper must not take it — which is why the ~2000 legacy refs need a
+      // journal-backed decision rather than an age check.
+      const { repo, ref } = seededRepo()
+      const app = await createApp()
+      try {
+        const output = outputIO({ cwd: repo, repositoryRoot: repo })
+
+        await expect(
+          runYrd(app, yrd("queue", "candidate-refs", "--prune", "--retention-days", "0", "--json"), output.io),
+        ).resolves.toBe(0)
+
+        expect(JSON.parse(output.stdout())).toMatchObject({ deleted: [], unclaimed: 1 })
+        expect(gitIn(repo, ["rev-parse", "--verify", ref])).not.toBe("")
+      } finally {
+        await app.close()
+        safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
+      }
+    })
   })
 
   it("rebuilds registered Journal views through the explicit doctor repair path", async () => {

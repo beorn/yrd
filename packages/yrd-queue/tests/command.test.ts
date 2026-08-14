@@ -36,6 +36,8 @@ import {
   createGitPRRecutter,
   findRepositoryChangeLanding,
   findRepositoryMergeRecords,
+  CANDIDATE_REF_NAMESPACE,
+  candidateRefFor,
   gitCandidatePreparer,
   gitCheckStep,
   gitMergeStep,
@@ -977,18 +979,22 @@ describe("Queue command adapters", () => {
     const { repo, feature: featureSha } = await repository("feature")
     const baseSha = await git(repo, ["rev-parse", "main"])
     await using process = createProcess()
+    // Matched by PREFIX: the ref is named after the composed SHA, which this
+    // test cannot know before the preparer computes it.
     const refusingProcess: Pick<Process, "run"> = {
       async run(request) {
+        const target = request.argv[5]
         if (
           request.argv[0] === "git" &&
           request.argv[3] === "update-ref" &&
-          request.argv[5] === "refs/yrd/candidates/C1"
+          target !== undefined &&
+          target.startsWith(`${CANDIDATE_REF_NAMESPACE}/`)
         ) {
           return {
             exitCode: 1,
             signal: null,
             stdout: "",
-            stderr: "fatal: cannot lock ref 'refs/yrd/candidates/C1': transient lock failure",
+            stderr: `fatal: cannot lock ref '${target}': transient lock failure`,
             durationMs: 1,
             timedOut: false,
             verdict: "EXITED",
@@ -1019,12 +1025,12 @@ describe("Queue command adapters", () => {
       failure: {
         kind: "infrastructure",
         code: "candidate-ref-refused",
-        message: expect.stringContaining(
-          "Candidate ref 'refs/yrd/candidates/C1' could not be created: fatal: cannot lock ref",
-        ),
+        message: expect.stringContaining("could not be created: fatal: cannot lock ref"),
       },
     })
-    expect(await git(repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates/C1"])).toBe("")
+    // The whole namespace, so a refused write cannot leave evidence behind under
+    // some other name.
+    expect(await git(repo, ["for-each-ref", "--format=%(refname)", CANDIDATE_REF_NAMESPACE])).toBe("")
   })
 
   it("keeps a genuinely occupied Candidate ref distinct from an absent write refusal", async () => {
@@ -1032,16 +1038,23 @@ describe("Queue command adapters", () => {
     const baseSha = await git(repo, ["rev-parse", "main"])
     await using process = createProcess()
     let raced = false
+    let racedRef = ""
+    // A content-addressed name states its own target, so this models CORRUPTION
+    // rather than a peer run: something parked a different commit at a name that
+    // says it holds the composed evidence.
     const racingProcess: Pick<Process, "run"> = {
       async run(request) {
+        const target = request.argv[5]
         if (
           !raced &&
           request.argv[0] === "git" &&
           request.argv[3] === "update-ref" &&
-          request.argv[5] === "refs/yrd/candidates/C1"
+          target !== undefined &&
+          target.startsWith(`${CANDIDATE_REF_NAMESPACE}/`)
         ) {
           raced = true
-          await git(repo, ["update-ref", "refs/yrd/candidates/C1", baseSha])
+          racedRef = target
+          await git(repo, ["update-ref", target, baseSha])
         }
         return process.run(request)
       },
@@ -1068,12 +1081,92 @@ describe("Queue command adapters", () => {
       failure: {
         kind: "infrastructure",
         code: "candidate-ref-refused",
-        // foreign-holder: stable sentence; self-retry uses a different shape
-        message: "yrd: Candidate ref 'refs/yrd/candidates/C1' is already occupied by different evidence",
+        // Distinct from the "could not be created" sentence above: this one names
+        // the disagreement between the ref's name and what it resolves to.
+        message: expect.stringContaining("which is not the evidence its content-addressed name states"),
       },
     })
     expect(raced).toBe(true)
-    expect(await git(repo, ["rev-parse", "refs/yrd/candidates/C1"])).toBe(baseSha)
+    expect(await git(repo, ["rev-parse", racedRef])).toBe(baseSha)
+  })
+
+  // 22332, against a real repository: the acceptance shape. Two composes of the
+  // SAME Candidate id that produce different trees both publish, because the ref
+  // is derived from the evidence. Under the id-named scheme the second refused
+  // itself with "compose self-retry must allocate a fresh id".
+  it("publishes two different composes of one Candidate id without a self-collision (22332)", async () => {
+    const { repo, alpha, beta } = await repository("alpha", "beta")
+    const baseSha = await git(repo, ["rev-parse", "main"])
+    await using process = createProcess()
+    const preparer = gitCandidatePreparer({ inject: { process }, repo })
+    const snapshot = (branch: string, headSha: string) =>
+      PRSnapshotSchema.parse({ id: "PR1", branch, base: "main", revision: 1, headSha, baseSha })
+
+    // Both prepares are handed the SAME id — this is precisely the case the old
+    // scheme could not survive.
+    const compose = async (branch: string, headSha: string) => {
+      const pr = snapshot(branch, headSha)
+      return preparer({
+        id: "C1",
+        queueId: "main",
+        baseSha,
+        revs: [{ pr: pr.id, n: pr.revision, head: pr.headSha }],
+        prs: [pr],
+      })
+    }
+
+    const first = await compose("issue/alpha", alpha)
+    const second = await compose("issue/beta", beta)
+
+    // Different trees, so different evidence, so different refs — no refusal.
+    expect(first.mergeability).toBe("mergeable")
+    expect(second.mergeability).toBe("mergeable")
+    expect(first.sha).not.toBe(second.sha)
+    expect(first.ref).toBe(candidateRefFor(first.sha ?? ""))
+    expect(second.ref).toBe(candidateRefFor(second.sha ?? ""))
+    expect(first.ref).not.toBe(second.ref)
+
+    // Both are really on disk, and each resolves to the evidence its name states.
+    expect(await git(repo, ["rev-parse", first.ref ?? ""])).toBe(first.sha)
+    expect(await git(repo, ["rev-parse", second.ref ?? ""])).toBe(second.sha)
+    const published = (await git(repo, ["for-each-ref", "--format=%(refname)", CANDIDATE_REF_NAMESPACE]))
+      .split("\n")
+      .filter((line) => line !== "")
+    expect(published.toSorted()).toEqual([first.ref, second.ref].toSorted())
+  })
+
+  // The other half of "by construction": identical evidence is idempotent rather
+  // than a collision, so a retry that recomposes the SAME tree is a no-op.
+  it("republishes an identical compose onto the same ref without refusing (22332)", async () => {
+    const { repo, alpha } = await repository("alpha")
+    const baseSha = await git(repo, ["rev-parse", "main"])
+    await using process = createProcess()
+    const preparer = gitCandidatePreparer({ inject: { process }, repo })
+    const pr = PRSnapshotSchema.parse({
+      id: "PR1",
+      branch: "issue/alpha",
+      base: "main",
+      revision: 1,
+      headSha: alpha,
+      baseSha,
+    })
+    const input = {
+      id: "C1",
+      queueId: "main",
+      baseSha,
+      revs: [{ pr: pr.id, n: pr.revision, head: pr.headSha }],
+      prs: [pr],
+    }
+
+    const first = await preparer(input)
+    const second = await preparer(input)
+
+    expect(second.ref).toBe(first.ref)
+    expect(second.sha).toBe(first.sha)
+    const published = (await git(repo, ["for-each-ref", "--format=%(refname)", CANDIDATE_REF_NAMESPACE]))
+      .split("\n")
+      .filter((line) => line !== "")
+    expect(published).toEqual([first.ref])
   })
 
   it("recuts one direct payload as an exact direct child and refuses overlapping authority", async () => {
@@ -1777,7 +1870,10 @@ describe("Queue command adapters", () => {
       })
       expect(await git(fixture.repo, ["rev-parse", "main"]), candidate.name).toBe(mainBefore)
       expect(
-        await git(fixture.repo, ["for-each-ref", "--format=%(refname)", `refs/yrd/candidates/${id}`]),
+        // The WHOLE namespace, not `refs/yrd/candidates/<id>`. Candidate refs are
+        // content-addressed now, so an id-scoped check could never fail again and
+        // would have gone on passing while a refused prepare published evidence.
+        await git(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates"]),
         candidate.name,
       ).toBe("")
     }

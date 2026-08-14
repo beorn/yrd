@@ -9,7 +9,7 @@ import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
 import { createFailure, createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
-import { withMerge, withStep, withQueue, type CandidatePreparer, type StepExecution } from "@yrd/queue"
+import { candidateRefFor, withMerge, withStep, withQueue, type CandidatePreparer, type StepExecution } from "@yrd/queue"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -129,14 +129,14 @@ describe("compose candidate isolation — one poisoned candidate never aborts th
         throw createFailure({
           kind: "infrastructure",
           code: "candidate-ref-refused",
-          message: `yrd: Candidate ref 'refs/yrd/candidates/${input.id}' could not be created`,
+          message: `yrd: Candidate ref '${candidateRefFor(MERGED)}' could not be created`,
         })
       }
       const { prs: _prs, ...candidate } = input
       return {
         ...candidate,
         sha: MERGED,
-        ref: `refs/yrd/candidates/${input.id}`,
+        ref: candidateRefFor(MERGED),
         mergeability: "mergeable",
       }
     }
@@ -173,11 +173,11 @@ describe("compose candidate isolation — one poisoned candidate never aborts th
   })
 
   it("keeps the same Candidate preparation refusal loud when explicitly targeted", async () => {
-    const prepareCandidate: CandidatePreparer = (input) => {
+    const prepareCandidate: CandidatePreparer = () => {
       throw createFailure({
         kind: "infrastructure",
         code: "candidate-ref-refused",
-        message: `yrd: Candidate ref 'refs/yrd/candidates/${input.id}' could not be created`,
+        message: `yrd: Candidate ref '${candidateRefFor(MERGED)}' could not be created`,
       })
     }
     await using app = await createApp("deploy-v1", createMemoryJournal(), ids(), undefined, undefined, prepareCandidate)
