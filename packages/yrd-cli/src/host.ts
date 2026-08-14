@@ -83,6 +83,7 @@ import {
   removeInstalledBaseline,
   runtimeBaselineDrift,
   writeInstalledBaseline,
+  type InstalledQueueDescriptor,
 } from "./installed-baseline.ts"
 import {
   createExclusive,
@@ -744,20 +745,23 @@ function configuredStepDescriptors(
 
 /** Re-derive the current config's step descriptors from disk. Fails loud on an
  * invalid config so the environment audit never certifies a broken selection. */
-async function reloadConfiguredStepDescriptors(
+async function reloadConfiguredQueueDescriptor(
   repository: YrdRepository,
   process: Pick<Process, "run">,
   configPath?: string,
-): Promise<readonly InstalledStep[]> {
+): Promise<InstalledQueueDescriptor> {
   const loaded = await loadRepositoryConfig(repository, process, configPath)
   validateConfig(loaded.config)
   const mergeCommand =
     loaded.config.definitions.merge?.run === undefined ? undefined : shellCommand(loaded.config.definitions.merge.run)
-  return configuredStepDescriptors(
-    { repo: repository.repo, stateDir: repository.stateDir, baysRoot: repository.baysRoot },
-    loaded.config,
-    mergeCommand,
-  )
+  return {
+    batchSize: loaded.config.batch === false || loaded.config.batch <= 1 ? 1 : loaded.config.batch,
+    steps: configuredStepDescriptors(
+      { repo: repository.repo, stateDir: repository.stateDir, baysRoot: repository.baysRoot },
+      loaded.config,
+      mergeCommand,
+    ),
+  }
 }
 
 function integratedRunner(
@@ -1472,8 +1476,8 @@ function queueAdministration(
   process: Pick<Process, "run">,
   repository: YrdRepository,
   defaultBase: string,
-  deriveConfiguredSteps: () => Promise<readonly InstalledStep[]>,
-  runtimeSteps: (() => readonly InstalledStep[]) | undefined,
+  deriveConfiguredQueue: () => Promise<InstalledQueueDescriptor>,
+  runtimeQueue: (() => InstalledQueueDescriptor) | undefined,
 ): YrdCliQueueAdministration {
   const inspect = async (base = defaultBase) => {
     const baseSha = await resolveCommit(process, repository.repo, base)
@@ -1494,9 +1498,9 @@ function queueAdministration(
       // while it still executes the old steps.
       const [baselines, current] = await Promise.all([
         readInstalledBaselines(repository.stateDir),
-        deriveConfiguredSteps(),
+        deriveConfiguredQueue(),
       ])
-      const runtime = runtimeSteps?.()
+      const runtime = runtimeQueue?.()
       const baselineFindings = Object.values(baselines).flatMap((baseline) => {
         const configDrift = installedBaselineDrift(baseline, current)
         if (configDrift !== undefined) return [configDrift]
@@ -1510,13 +1514,13 @@ function queueAdministration(
       return { findings: baselineFindings }
     },
     async provision(base) {
-      const [inspected, current] = await Promise.all([inspect(base), deriveConfiguredSteps()])
+      const [inspected, current] = await Promise.all([inspect(base), deriveConfiguredQueue()])
       await writeInstalledBaseline(repository.stateDir, {
         ...inspected,
         installedAt: new Date().toISOString(),
-        steps: current,
+        ...current,
       })
-      return { ...inspected, steps: current.map((step) => step.name), persistentResources: false }
+      return { ...inspected, steps: current.steps.map((step) => step.name), persistentResources: false }
     },
     async deprovision(base = defaultBase) {
       // Deinit must clear the stored baseline by key WITHOUT requiring the base
@@ -1851,7 +1855,7 @@ async function runnerHealthProbeServices(options: YrdRuntimeHostOptions): Promis
       process,
       repository,
       loaded.config.base,
-      () => reloadConfiguredStepDescriptors(repository, process, options.configPath),
+      () => reloadConfiguredQueueDescriptor(repository, process, options.configPath),
       undefined,
     )
     if (administration.auditEnvironment === undefined) {
@@ -2051,10 +2055,10 @@ async function createYrdRuntimeHost(
         process,
         repository,
         loaded.config.base,
-        () => reloadConfiguredStepDescriptors(repository, process, options.configPath),
-        // The RUNTIME leg must come from the live runtime object — the steps
-        // this process actually installed — never re-derived from config.
-        () => runtimeApp.queue.steps(),
+        () => reloadConfiguredQueueDescriptor(repository, process, options.configPath),
+        // The RUNTIME leg must come from the live runtime object — the policy
+        // and steps this process actually installed — never re-derived from config.
+        () => ({ batchSize: runtimeApp.queue.state().batchSize, steps: runtimeApp.queue.steps() }),
       ),
       recut: createGitPRRecutter({ inject: { process }, repo: repository.repo, env }),
       mergeRecords: Object.freeze({

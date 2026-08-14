@@ -2828,6 +2828,53 @@ describe("Queue", () => {
     })
   })
 
+  it("preserves an active run while a replayed journal adopts a larger future batch", async () => {
+    const journal = createMemoryJournal()
+    const id = ids()
+    const options = {
+      check: () => ({ status: "completed" as const, conclusion: "success" as const, output: { checked: true } }),
+      merge: () => ({
+        status: "completed" as const,
+        conclusion: "success" as const,
+        output: { commit: MERGED, baseSha: BASE },
+      }),
+    }
+
+    {
+      await using app = await createQueueApp({ ...options, batch: 1 }, journal, undefined, id)
+      const first = await submitBranch(app, "issue/batch-policy-one")
+      await submitBranch(app, "issue/batch-policy-two")
+      await submitBranch(app, "issue/batch-policy-three")
+      await app.dispatch(app.commands.queue.run, { prs: [first.id], steps: ["check", "merge"] })
+
+      expect(app.state().queues.batchSize).toBe(1)
+      expect(app.queue.get("R1")).toMatchObject({
+        status: "queued",
+        prs: [{ id: "PR1" }],
+      })
+    }
+
+    await using replayed = await createQueueApp({ ...options, batch: 2 }, journal, undefined, id)
+    expect(replayed.state().queues.batchSize).toBe(2)
+    expect(replayed.queue.get("R1")).toMatchObject({
+      status: "queued",
+      prs: [{ id: "PR1" }],
+    })
+
+    const runs = await replayed.queue.run({ steps: ["check", "merge"] }, runtime)
+
+    expect(runs).toMatchObject([
+      { id: "R1", status: "completed", conclusion: "success", prs: [{ id: "PR1" }] },
+      {
+        id: "R2",
+        status: "completed",
+        conclusion: "success",
+        prs: [{ id: "PR2" }, { id: "PR3" }],
+      },
+    ])
+    expect(replayed.queue.get("R1")?.prs.map((pr) => pr.id)).toEqual(["PR1"])
+  })
+
   it("refuses to relabel configured replay authority as an explicit selection", async () => {
     const journal = createMemoryJournal()
     const id = ids()
