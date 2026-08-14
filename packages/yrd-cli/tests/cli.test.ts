@@ -11776,8 +11776,8 @@ describe("runYrd", () => {
 
     await runYrd(app, yrd("why", "PR1", "--json"), output.io, {
       mergeRecords: {
-        find: async () => ({ status: "proven" as const, records: [{ record, pointer }] }),
-        all: async () => ({ status: "proven" as const, records: [{ record, pointer }] }),
+        find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [] }),
+        all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [] }),
       },
     } as YrdCliServices)
 
@@ -11821,8 +11821,8 @@ describe("runYrd", () => {
 
     await runYrd(app, yrd("why", "PR1", "--json"), output.io, {
       mergeRecords: {
-        find: async () => ({ status: "proven" as const, records: [{ record, pointer }] }),
-        all: async () => ({ status: "proven" as const, records: [{ record, pointer }] }),
+        find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [] }),
+        all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [] }),
       },
     } as YrdCliServices)
 
@@ -14239,6 +14239,44 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       expect(app.bays.pr("PR1")?.integration).toMatchObject({ commit: MERGED_SHA, changeId: revision.changeId })
     })
 
+    // `finishedAt` is `z.iso.datetime({ offset: true })`, so its text and its
+    // instant can disagree. `R-earlier` reads "2026-08-12T23:00:00.000+05:00" —
+    // later than "2026-08-12T20:00:00.000Z" as text, two hours EARLIER as an
+    // instant (18:00Z). A string compare therefore keeps the stale attempt and
+    // writes its run into the index row; so does `localeCompare` on the
+    // `yrd why` side. Only an instant compare picks `R-later`.
+    it("collapses attempts by instant, not by the text of an offset-bearing timestamp", async () => {
+      await using app = await createApp()
+      await app.bays.submit({ branch: "issue/offsets", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+      const revision = currentPRRev(app.bays.pr("PR1")!)
+      if (revision.changeId === undefined) throw new Error("expected current PR Change-Id")
+      const base = mergedRecord(revision.changeId)
+      const earlier = {
+        ...base,
+        merge: { ...base.merge, id: "R-earlier", finishedAt: "2026-08-12T23:00:00.000+05:00" },
+      }
+      const later = { ...base, merge: { ...base.merge, id: "R-later", finishedAt: "2026-08-12T20:00:00.000Z" } }
+      const output = outputIO()
+
+      expect(
+        await runYrd(
+          app,
+          yrd("doctor", "--rebuild-index-from-repo", "--json"),
+          output.io,
+          // Stale attempt first, so it is the incumbent a text compare refuses to replace.
+          servicesFor([
+            { record: earlier, pointer },
+            { record: later, pointer },
+          ]),
+        ),
+        output.stderr(),
+      ).toBe(0)
+      expect(JSON.parse(output.stdout())).toMatchObject({
+        indexRebuild: { rebuilt: [{ pr: "PR1", run: "R-later" }] },
+      })
+      expect(app.bays.pr("PR1")?.terminalRun).toBe("R-later")
+    })
+
     it("reports a scan that found nothing with its denominator rather than a clean verdict", async () => {
       await using app = await createApp()
       const output = outputIO()
@@ -14248,7 +14286,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
         output.stderr(),
       ).toBe(0)
       expect(output.stdout()).toContain("scanned 0 merge records under refs/notes/yrd/merge-records")
-      expect(output.stdout()).toContain("rebuilt 0 of 0 landings")
+      expect(output.stdout()).toContain("0 changes collapse to 0 distinct landings — rebuilt 0, skipped 0")
     })
 
     it("names the PR it cannot rebuild and refuses to call the run clean", async () => {
@@ -14277,7 +14315,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       expect(await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), second.io, services), second.stderr()).toBe(
         0,
       )
-      expect(second.stdout()).toContain("rebuilt 0 of 1 landing")
+      expect(second.stdout()).toContain("1 change collapses to 1 distinct landing — rebuilt 0, skipped 1")
       expect(second.stdout()).toContain("SKIPPED PR1 revision 1 already-indexed")
     })
 

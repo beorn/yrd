@@ -327,12 +327,69 @@ describe("pinned-submodule warning surface", () => {
     const root = await superproject(TWO_SUBMODULES)
     const app = await appFor(root)
     const out = outputIO({ cwd: root })
-    expect(await runYrd(app, yrd("doctor", "--json"), out.io, { config: doctorConfig }), out.stderr()).toBe(1)
+    // An ambient repository warning is not a defect: `submoduleTrackingWarnings`
+    // fires on ANY unbranched submodule, so a nonzero exit here would be a
+    // constant inside every superproject and would mask the real signals the
+    // exit code carries.
+    expect(await runYrd(app, yrd("doctor", "--json"), out.io, { config: doctorConfig }), out.stderr()).toBe(0)
     const payload = JSON.parse(out.stdout()) as { command: string; findings: unknown[]; warnings?: string[] }
     expect(payload).toMatchObject({ command: "doctor", findings: [] })
     expect(payload.warnings).toEqual([
       "warn: 1 submodule not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/foo — run 'yrd admin submodule init' to set",
     ])
+  })
+
+  // The point of separating warnings from defects: inside a superproject the
+  // ambient warning is always present, so if it decided the exit code, doctor
+  // would report 1 whether or not repository truth proves a landing the index
+  // cannot carry — and the operator would have no way to tell the two apart.
+  it("still fails on an unrebuilt landing that the ambient warning used to mask", async () => {
+    const root = await superproject(TWO_SUBMODULES)
+    const app = await appFor(root)
+    const record = {
+      merge: {
+        id: "R-unrebuildable",
+        base: "main",
+        baseSha: "a".repeat(40),
+        candidate: "C1",
+        result: "merged" as const,
+        mergedCommit: "b".repeat(40),
+        startedAt: "2026-08-12T20:00:00.000Z",
+        finishedAt: "2026-08-12T20:01:00.000Z",
+      },
+      // No such PR in the journal: repo truth proves a landing the index cannot carry.
+      changes: [
+        {
+          pr: "PR404",
+          revision: 1,
+          submittedHead: "1".repeat(40),
+          changeId: `I${"e".repeat(40)}`,
+          generatedCommit: "b".repeat(40),
+        },
+      ],
+      evidence: { jobs: [] },
+      pins: [],
+    }
+    const pointer = {
+      ref: "refs/notes/yrd/merge-records" as const,
+      target: "2".repeat(40),
+      note: "c".repeat(40),
+      checksum: "d".repeat(64),
+    }
+    const proven = { status: "proven" as const, records: [{ record, pointer }], unverifiable: [] }
+    const out = outputIO({ cwd: root })
+
+    expect(
+      await runYrd(app, yrd("doctor", "--rebuild-index-from-repo", "--json"), out.io, {
+        config: doctorConfig,
+        mergeRecords: { find: async () => proven, all: async () => proven },
+      } as Parameters<typeof runYrd>[3]),
+      out.stderr(),
+    ).toBe(1)
+    const payload = JSON.parse(out.stdout()) as { warnings?: string[]; indexRebuild?: { skipped: unknown[] } }
+    expect(payload.indexRebuild?.skipped).toHaveLength(1)
+    // The warning is still reported — it just no longer decides the verdict.
+    expect(payload.warnings).toHaveLength(1)
   })
 
   it("omits the warning from queue list output", async () => {
@@ -381,7 +438,7 @@ describe("pinned-submodule warning surface", () => {
     // throws -> the advisory must degrade to a warning, never take down doctor.
     await writeFile(join(root, ".gitmodules"), '[submodule "x"\n\tpath = x\n')
     const out = outputIO({ cwd: root })
-    expect(await runYrd(app, yrd("doctor", "--json"), out.io, { config: doctorConfig }), out.stderr()).toBe(1)
+    expect(await runYrd(app, yrd("doctor", "--json"), out.io, { config: doctorConfig }), out.stderr()).toBe(0)
     const payload = JSON.parse(out.stdout()) as { warnings?: string[] }
     expect(payload.warnings?.[0]).toContain("could not read .gitmodules")
     // The degraded warning is a single row (no raw multi-row git diagnostic).

@@ -7145,6 +7145,81 @@ type IndexRebuildReport = Readonly<{
   unverifiable: readonly UnverifiableMergeRecord[]
 }>
 
+type JournalPR = NonNullable<ReturnType<YrdCliApp["bays"]["pr"]>>
+type LandingRepairInput = Parameters<YrdCliApp["queue"]["reconcileLanding"]>[0]
+
+type LandingRepair =
+  | Readonly<{ status: "repairable"; input: LandingRepairInput }>
+  | Readonly<{
+      status: "already-indexed" | "legacy-no-change-id" | "revision-superseded" | "no-merged-commit"
+      detail: string
+    }>
+
+/**
+ * `merge.finishedAt` is `z.iso.datetime({ offset: true })`, so two records can
+ * name the same instant with different offsets: `2026-08-12T20:00:00.000Z` and
+ * `2026-08-12T21:30:00.000+02:00` are 30 minutes apart, and neither string order
+ * nor `localeCompare` puts them in that order. Compare the instants.
+ */
+function mergeInstant(record: MergeRecordBody): number {
+  const at = Date.parse(record.merge.finishedAt)
+  if (Number.isNaN(at)) {
+    configuration(`merge-record '${record.merge.id}' has an unparseable finishedAt '${record.merge.finishedAt}'`)
+  }
+  return at
+}
+
+/**
+ * What repository truth can do for one PR's index row, from one merge record.
+ *
+ * `yrd why <selector> --repair` and `yrd doctor --rebuild-index-from-repo` are
+ * the same repair at different breadths, and had drifted into two copies of the
+ * same "does this record cover the PR's CURRENT revision" predicate and the same
+ * eight-field `reconcileLanding` argument. Each caller still owns its own
+ * reporting: the bulk path names every skip, the selector path stays quiet, and
+ * only the bulk path treats a merged record with no merged commit as a refusal.
+ */
+function landingRepair(record: MergeRecordBody, pr: JournalPR): LandingRepair {
+  const revision = currentPRRev(pr)
+  const change = record.changes.find((entry) => entry.pr === pr.id)
+  if (change?.changeId === undefined) {
+    return { status: "legacy-no-change-id", detail: "record predates stable Change-Id identity" }
+  }
+  if (
+    change.revision !== revision.n ||
+    change.submittedHead !== revision.head ||
+    change.changeId !== revision.changeId
+  ) {
+    return {
+      status: "revision-superseded",
+      detail: `record covers revision ${String(change.revision)} at ${change.submittedHead}; journal is at revision ${String(revision.n)} at ${revision.head}`,
+    }
+  }
+  const commit = record.merge.mergedCommit
+  if (commit === undefined) {
+    return {
+      status: "no-merged-commit",
+      detail: `merge-record '${record.merge.id}' reports a merged result with no merged commit`,
+    }
+  }
+  if (prDeliveryState(pr) === "integrated" && pr.terminalRun === record.merge.id && pr.integration?.commit === commit) {
+    return { status: "already-indexed", detail: `pr/integrated already records ${record.merge.id} at ${commit}` }
+  }
+  return {
+    status: "repairable",
+    input: {
+      pr: change.pr,
+      revision: change.revision,
+      headSha: change.submittedHead,
+      run: record.merge.id,
+      commit,
+      landingSha: commit,
+      baseSha: commit,
+      changeId: change.changeId,
+    },
+  }
+}
+
 /** Rebuild every missing `pr/integrated` index row from repository truth alone.
  *
  * The bulk sibling of `yrd why <selector> --repair`, with the same per-change predicate: a row is
@@ -7169,7 +7244,7 @@ async function rebuildIndexFromRepo(app: YrdCliApp, services: YrdCliServices): P
     for (const change of entry.record.changes) {
       changes += 1
       const known = latest.get(change.pr)
-      if (known !== undefined && known.record.merge.finishedAt >= entry.record.merge.finishedAt) continue
+      if (known !== undefined && mergeInstant(known.record) >= mergeInstant(entry.record)) continue
       latest.set(change.pr, { record: entry.record, change })
     }
   }
@@ -7215,41 +7290,14 @@ async function rebuildIndexFromRepo(app: YrdCliApp, services: YrdCliServices): P
         skip("pr-unknown", "no PR in the journal; a merge record proves a landing, not a PR's existence")
         continue
       }
-      if (change.changeId === undefined) {
-        skip("legacy-no-change-id", "record predates stable Change-Id identity")
+      const repair = landingRepair(record, pr)
+      if (repair.status === "no-merged-commit") refusal(repair.detail)
+      if (repair.status !== "repairable") {
+        skip(repair.status, repair.detail)
         continue
       }
-      const revision = currentPRRev(pr)
-      if (
-        change.revision !== revision.n ||
-        change.submittedHead !== revision.head ||
-        change.changeId !== revision.changeId
-      ) {
-        skip(
-          "revision-superseded",
-          `record covers revision ${String(change.revision)} at ${change.submittedHead}; journal is at revision ${String(revision.n)} at ${revision.head}`,
-        )
-        continue
-      }
-      const commit = record.merge.mergedCommit
-      if (commit === undefined) {
-        refusal(`merge-record '${run}' reports a merged result with no merged commit`)
-      }
-      if (prDeliveryState(pr) === "integrated" && pr.terminalRun === run && pr.integration?.commit === commit) {
-        skip("already-indexed", `pr/integrated already records ${run} at ${commit}`)
-        continue
-      }
-      await app.queue.reconcileLanding({
-        pr: change.pr,
-        revision: change.revision,
-        headSha: change.submittedHead,
-        run,
-        commit,
-        landingSha: commit,
-        baseSha: commit,
-        changeId: change.changeId,
-      })
-      rebuilt.push({ pr: prId, revision: change.revision, run, commit })
+      await app.queue.reconcileLanding(repair.input)
+      rebuilt.push({ pr: prId, revision: change.revision, run, commit: repair.input.commit })
     } catch (cause) {
       skip("unverifiable", cause instanceof Error ? cause.message : String(cause))
     }
@@ -7274,7 +7322,11 @@ function indexRebuildLines(report: IndexRebuildReport): readonly string[] {
       (unverified === 0
         ? ""
         : `, ${String(unverified)} record${unverified === 1 ? "" : "s"} the scan could not verify`),
-    `rebuilt ${String(report.rebuilt.length)} of ${String(considered)} landing${considered === 1 ? "" : "s"}`,
+    // `changes` counts every change in every merged attempt; one queue member can
+    // appear in several, and only its latest merged attempt describes the landing.
+    // Naming that collapse is what turns an unexplained shortfall into arithmetic
+    // the reader can check: rebuilt + skipped = the distinct landings considered.
+    `${String(changes)} change${changes === 1 ? " collapses" : "s collapse"} to ${String(considered)} distinct landing${considered === 1 ? "" : "s"} — rebuilt ${String(report.rebuilt.length)}, skipped ${String(report.skipped.length)}`,
   ]
   for (const entry of report.rebuilt) {
     lines.push(`  REBUILT ${entry.pr} revision ${String(entry.revision)} via ${entry.run} at ${entry.commit}`)
@@ -7298,6 +7350,11 @@ async function configDoctor(
     options.rebuildViews === true
       ? await (services.journal?.rebuildViews?.() ?? configuration("journal view rebuild capability is not installed"))
       : undefined
+  // `rebuildIndexFromRepo` reads `app.bays.pr(...)` to decide what repository
+  // truth can repair, and writes through `reconcileLanding`. Both need a current
+  // projection: refresh before it so the read is not stale, and again after so
+  // the findings below see what it repaired.
+  await app.refresh()
   const indexRebuild = options.rebuildIndexFromRepo === true ? await rebuildIndexFromRepo(app, services) : undefined
   const config = services.config
   if (config === undefined) configuration("config doctor capability is not installed")
@@ -7335,7 +7392,15 @@ async function configDoctor(
     indexRebuild !== undefined &&
     (indexRebuild.skipped.some((entry) => !HEALTHY_SKIP_REASONS.has(entry.reason)) ||
       indexRebuild.unverifiable.length > 0)
-  return clean && !unrebuilt ? 0 : 1
+  // The exit code answers "is anything actually wrong", and only refusal-severity
+  // findings and that unrebuilt gap are. `submoduleTrackingWarnings` fires on ANY
+  // unbranched submodule, so every run inside a superproject carried at least one
+  // warning and `clean` was false before doctor had looked at anything — which made
+  // the exit code a constant 1 there, and made the gap above, however precisely it
+  // is now computed, unobservable through it. Warnings are still printed; they just
+  // no longer decide the verdict.
+  const defects = findings.filter((finding) => finding.severity === "refusal")
+  return defects.length === 0 && !unrebuilt ? 0 : 1
 }
 
 async function journalImportOrphan(
@@ -9405,9 +9470,7 @@ async function explainLanding(
       return 2
     }
     if (proof.status === "proven") {
-      const attempts = [...proof.records].sort((left, right) =>
-        left.record.merge.finishedAt.localeCompare(right.record.merge.finishedAt),
-      )
+      const attempts = [...proof.records].sort((left, right) => mergeInstant(left.record) - mergeInstant(right.record))
       const latest = attempts.at(-1)
       if (latest === undefined) configuration("repository merge-record query returned no proven records")
       const verdict = latest.record.merge.result
@@ -9416,30 +9479,9 @@ async function explainLanding(
       let repaired = false
       const pr = app.bays.pr(selector)
       if (verdict === "merged" && options.repair === true && pr !== undefined) {
-        const revision = currentPRRev(pr)
-        const change = latest.record.changes.find(
-          (candidate) =>
-            candidate.pr === pr.id &&
-            candidate.revision === revision.n &&
-            candidate.submittedHead === revision.head &&
-            candidate.changeId === revision.changeId,
-        )
-        const commit = latest.record.merge.mergedCommit
-        const indexed =
-          prDeliveryState(pr) === "integrated" &&
-          pr.terminalRun === latest.record.merge.id &&
-          pr.integration?.commit === commit
-        if (!indexed && change?.changeId !== undefined && commit !== undefined) {
-          await app.queue.reconcileLanding({
-            pr: change.pr,
-            revision: change.revision,
-            headSha: change.submittedHead,
-            run: latest.record.merge.id,
-            commit,
-            landingSha: commit,
-            baseSha: commit,
-            changeId: change.changeId,
-          })
+        const repair = landingRepair(latest.record, pr)
+        if (repair.status === "repairable") {
+          await app.queue.reconcileLanding(repair.input)
           repaired = true
         }
       }
