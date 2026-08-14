@@ -200,7 +200,14 @@ import {
   taskStatusFields,
 } from "./task-status.ts"
 import type { YrdBayProtection, YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState } from "./types.ts"
-import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
+import { formatYrdRuntimeVersion, YRD_VERSION, yrdSourceRoot } from "./version.ts"
+import {
+  decideResidentSource,
+  foldSourceStaleness,
+  RESIDENT_SOURCE_STALE_BEHIND,
+  type ResidentSourceRecycle,
+  type ResidentSourceStall,
+} from "./source-staleness.ts"
 import { ensureWorkspaceDependencies } from "./workspace-provisioning.ts"
 import { retainedWorkspaceNote } from "./workspace-retention.ts"
 import { artifactLocation, directArtifacts, nestedArtifacts, uniqueArtifacts } from "./artifact-reference.ts"
@@ -336,6 +343,36 @@ const RESIDENT_INTERRUPTED_EXIT: YrdCliExitCode = 3
  * against the resident breaker. The distinguishing evidence is the loud
  * `resident-refusal-stall-restart` record, not the code. */
 const RESIDENT_POISONED_EXIT: YrdCliExitCode = RESIDENT_INTERRUPTED_EXIT
+/** A resident that recycles itself onto a source its own checkout has moved past
+ * (@yrd/core/stale-runner-never-recycles box 1) exits with the same UNCLEAN code
+ * as every other "stopped with queue work outstanding" case, so the supervisor's
+ * restart budget counts it and a flapping checkout cannot restart forever.
+ * The distinguishing evidence is the typed `resident-source-stale-restart`
+ * record, never the code — the code is deliberately not a new dialect. */
+const RESIDENT_SOURCE_STALE_EXIT: YrdCliExitCode = RESIDENT_INTERRUPTED_EXIT
+
+/** Overrides {@link RESIDENT_SOURCE_STALE_BEHIND}; `0` disables the recycle and
+ * leaves the staleness visible-only. A runtime knob rather than project config:
+ * it describes how this HOST supervises a resident process, not anything about
+ * the repository being landed. */
+const RESIDENT_SOURCE_STALE_BEHIND_ENV = "YRD_RESIDENT_SOURCE_STALE_BEHIND"
+
+/** Read the recycle threshold. An unparseable value is raised, never defaulted:
+ * an operator who set the knob to disable a recycle and got the default instead
+ * would learn about it from an unexplained restart. */
+function residentSourceStaleThreshold(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[RESIDENT_SOURCE_STALE_BEHIND_ENV]?.trim()
+  if (raw === undefined || raw === "") return RESIDENT_SOURCE_STALE_BEHIND
+  const parsed = Number(raw)
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    raiseFailure(
+      "configuration",
+      "resident-source-stale-threshold-invalid",
+      `yrd: ${RESIDENT_SOURCE_STALE_BEHIND_ENV} must be a non-negative integer (0 disables the recycle), not '${raw}'`,
+    )
+  }
+  return parsed
+}
 
 function residentRunnerStatusPath(cwd: string, stateDir?: string): string | undefined {
   if (stateDir !== undefined) return join(stateDir, "resident-runner", "status.json")
@@ -754,11 +791,56 @@ function gitDistance(cwd: string, baseSha: string, headSha: string): Omit<Runner
   }
 }
 
-/** Cached answer for {@link runnerSourceBehind}, keyed by cwd and the resident
- * sha it was computed against. A stale-runner recycle has not shipped yet
- * (@yrd/core/stale-runner-never-recycles), so the box's only defense is
- * visibility: this powers the inline "(N behind pin)" suffix on the RUNNER
- * box's source line. */
+/** The Yrd source checkout this process is executing from, or undefined when the
+ * runtime is not a Git checkout at all (an installed bundle, a packed release).
+ * This is the repository `implementationSource` was captured from — see
+ * `implementationSourceIdentity` — and therefore the ONLY repository in which
+ * that sha may be compared against anything. */
+function yrdSourceCheckout(): string | undefined {
+  const root = yrdSourceRoot()
+  if (root === undefined) return undefined
+  return existsSync(join(root, ".git")) ? root : undefined
+}
+
+/** How far a source checkout has advanced past the sha a resident booted from,
+ * plus the head it advanced to. Both are needed together: the head is what a
+ * recycle would come back as, and comparing behind-counts across cycles is only
+ * meaningful when they were measured against the same head. */
+type SourceAdvance = Readonly<{ headSha: string; behind: number | undefined }>
+
+/**
+ * Read one straight-line advance, uncached.
+ *
+ * Ancestry is required, not decorative. `rev-list --count a..b` answers for ANY
+ * two commits git can resolve, including two unrelated histories that merely
+ * share an object database — and that is not a hypothetical: the `/hh` queue
+ * repository holds Yrd's own commits, so comparing a `vendor/yrd` sha against
+ * the `/hh` checkout's HEAD returned 37576 for a resident that was exactly
+ * current. A count is only "how far behind am I" when the booted sha is an
+ * ANCESTOR of the head; anything else (diverged, rewound, unrelated) is
+ * unmeasurable and must answer undefined rather than a confident number.
+ */
+function readSourceAdvance(sourceRoot: string, runnerSha: string): SourceAdvance | undefined {
+  try {
+    const headSha = gitSync(sourceRoot, ["rev-parse", "HEAD"]).trim().toLowerCase()
+    if (!/^[0-9a-f]{40,64}$/u.test(headSha)) return undefined
+    if (headSha === runnerSha) return { headSha, behind: undefined }
+    gitSync(sourceRoot, ["merge-base", "--is-ancestor", runnerSha, headSha])
+    const counted = Number(gitSync(sourceRoot, ["rev-list", "--count", `${runnerSha}..${headSha}`]).trim())
+    if (!Number.isSafeInteger(counted) || counted <= 0) return { headSha, behind: undefined }
+    return { headSha, behind: counted }
+  } catch {
+    // silent-fallback-allow: every failure here — not a repository, an unknown
+    // object, a booted sha that is not an ancestor (`merge-base --is-ancestor`
+    // exits non-zero by design) — means the same thing to every caller: the
+    // advance is UNMEASURABLE. Callers render nothing and never recycle on it,
+    // so no state is reported as healthy on the strength of this catch.
+    return undefined
+  }
+}
+
+/** Cached answer for {@link runnerSourceBehind}, keyed by source root and the
+ * resident sha it was computed against. */
 type RunnerSourceBehindEntry = Readonly<{ runnerSha: string; behind: number | undefined; computedAt: number }>
 const runnerSourceBehindCache = new Map<string, RunnerSourceBehindEntry>()
 
@@ -766,25 +848,27 @@ const runnerSourceBehindCache = new Map<string, RunnerSourceBehindEntry>()
  * also runs once per focus/cursor change (see `queueGitDir`'s doc comment on why
  * an uncached git fork there is a bug, not a feature) — this TTL keeps a fresh
  * `rev-parse`+`rev-list` fork off that per-keystroke path while still catching a
- * pin advance within one poll tick. */
+ * pin advance within one poll tick. The resident's own self-check deliberately
+ * does NOT come through here: it needs consecutive observations to be genuinely
+ * consecutive reads, which a cache at the poll cadence would quietly collapse. */
 const RUNNER_SOURCE_BEHIND_TTL_MS = 15_000
 
 /** How many commits the resident runner's booted source (`implementationSource`,
- * captured once at its startup) has fallen behind the checkout `cwd` is on right
- * now. The checkout can advance — a submodule pin bump, a `git pull` — long
- * after a resident starts serving, and nothing today recycles it
- * (@yrd/core/stale-runner-never-recycles): this is the read that lets a watcher
- * see the drift without cross-referencing. `undefined` means "not behind" (or
- * not measurable) and must render nothing, never a confident zero. */
+ * captured once at its startup) has fallen behind the SOURCE checkout it booted
+ * from — never the queue repository, which is a different repo whose HEAD shares
+ * no history with it. The source can advance under a live resident (a submodule
+ * pin bump, a `git pull`), and box 1 of @yrd/core/stale-runner-never-recycles
+ * now recycles on it; this is the same read rendered for a watcher.
+ * `undefined` means "not behind" or "not measurable" and must render nothing,
+ * never a confident zero. */
 export function runnerSourceBehind(
-  cwd: string,
+  sourceRoot: string,
   implementationSource: string | undefined,
   now: number,
 ): number | undefined {
-  const match = implementationSource === undefined ? null : /^git:([0-9a-f]{40,64})$/u.exec(implementationSource)
-  if (match === null) return undefined
-  const runnerSha = (match[1] ?? "").toLowerCase()
-  const cached = runnerSourceBehindCache.get(cwd)
+  const runnerSha = residentBootedSha(implementationSource)
+  if (runnerSha === undefined) return undefined
+  const cached = runnerSourceBehindCache.get(sourceRoot)
   if (
     cached !== undefined &&
     cached.runnerSha === runnerSha &&
@@ -792,19 +876,17 @@ export function runnerSourceBehind(
   ) {
     return cached.behind
   }
-  const gitDir = queueGitDir(cwd)
-  let behind: number | undefined
-  if (gitDir !== undefined) {
-    try {
-      const headSha = gitSync(cwd, ["rev-parse", "HEAD"]).trim().toLowerCase()
-      const distance = headSha === runnerSha ? { ahead: 0 } : gitDistance(cwd, runnerSha, headSha)
-      behind = distance.ahead !== undefined && distance.ahead > 0 ? distance.ahead : undefined
-    } catch {
-      behind = undefined
-    }
-  }
-  runnerSourceBehindCache.set(cwd, { runnerSha, behind, computedAt: now })
+  const behind = readSourceAdvance(sourceRoot, runnerSha)?.behind
+  runnerSourceBehindCache.set(sourceRoot, { runnerSha, behind, computedAt: now })
   return behind
+}
+
+/** The commit a resident booted from, or undefined when its source identity is
+ * not a plain git sha (`dirty:` working-tree builds, an absent identity). A
+ * source that cannot be named cannot be compared, and is never stale. */
+function residentBootedSha(implementationSource: string | undefined): string | undefined {
+  const match = implementationSource === undefined ? null : /^git:([0-9a-f]{40,64})$/u.exec(implementationSource)
+  return match === null ? undefined : (match[1] ?? "").toLowerCase()
 }
 
 async function runnerGitHealth(cwd: string): Promise<RunnerGitHealth> {
@@ -6189,8 +6271,15 @@ async function observeQueueList(
   const cwd = io.cwd ?? process.cwd()
   const now = io.now?.() ?? Date.now()
   const observedRunner = activeResidentRunner(await residentRunnerStatus(cwd, io.stateDir))
+  // Measured in the Yrd SOURCE checkout, not `cwd`: `implementationSource` is a
+  // commit of the Yrd repository, and the queue repository it is serving is a
+  // different repo. Handing `cwd` to this read is what made a current resident
+  // render "(37576 behind pin)".
+  const sourceCheckout = yrdSourceCheckout()
   const sourceBehind =
-    observedRunner === null ? undefined : runnerSourceBehind(cwd, observedRunner.implementationSource, now)
+    observedRunner === null || sourceCheckout === undefined
+      ? undefined
+      : runnerSourceBehind(sourceCheckout, observedRunner.implementationSource, now)
   const runner = observedRunner === null || sourceBehind === undefined ? observedRunner : { ...observedRunner, sourceBehind }
   return {
     state,
@@ -8678,6 +8767,128 @@ function residentRefusalHealth(
   return { stall: next, restart: true }
 }
 
+/** Where a recycle attempt is left for the process that replaces us. It sits
+ * beside `status.json` under the same resident-runner directory, because it has
+ * exactly that lifetime: one queue repository's resident lineage. */
+function residentSourceRecyclePath(cwd: string, stateDir?: string): string | undefined {
+  const status = residentRunnerStatusPath(cwd, stateDir)
+  return status === undefined ? undefined : join(status, "..", "source-recycle.json")
+}
+
+/** Read back the previous process's recycle attempt. Absent is the normal case
+ * (no recycle has ever been attempted here) and reads as "no prior attempt"; a
+ * malformed or unreadable record reads the same way, since the only thing it
+ * gates is ONE extra restart that the supervisor's budget also bounds. */
+async function readResidentSourceRecycle(
+  cwd: string,
+  stateDir: string | undefined,
+): Promise<ResidentSourceRecycle | undefined> {
+  const path = residentSourceRecyclePath(cwd, stateDir)
+  if (path === undefined) return undefined
+  try {
+    const parsed: unknown = JSON.parse(await readFile(path, "utf8"))
+    if (typeof parsed !== "object" || parsed === null) return undefined
+    const record = parsed as Record<string, unknown>
+    const { bootedSha, headSha, attemptedAt } = record
+    if (typeof bootedSha !== "string" || typeof headSha !== "string" || typeof attemptedAt !== "string") {
+      return undefined
+    }
+    return Object.freeze({ bootedSha, headSha, attemptedAt })
+  } catch {
+    // silent-fallback-allow: a missing file is the overwhelmingly common case
+    // and is not an error, and a corrupt one degrades to "no prior attempt" —
+    // which costs at most one extra restart, still inside the supervisor's
+    // restart budget. Raising here would take a healthy queue down over a
+    // bookkeeping file that only ever suppresses work.
+    return undefined
+  }
+}
+
+/** Record the attempt BEFORE exiting, so the process that replaces us can tell a
+ * recycle that worked from one that changed nothing. */
+async function writeResidentSourceRecycle(
+  cwd: string,
+  stateDir: string | undefined,
+  recycle: ResidentSourceRecycle,
+): Promise<void> {
+  const path = residentSourceRecyclePath(cwd, stateDir)
+  if (path === undefined) return
+  await mkdir(join(path, ".."), { recursive: true })
+  await writeFile(path, `${stableJson(recycle)}\n`, "utf8")
+}
+
+/**
+ * Fold one settled cycle into the source-staleness window and say whether this
+ * resident should recycle itself onto the code its own checkout now holds —
+ * box 1 of @yrd/core/stale-runner-never-recycles.
+ *
+ * Gated on `resident`, not merely on the selectorless loop: exiting is only an
+ * actuator when something re-execs us. A one-shot `yrd queue run code --once`
+ * and a bare programmatic follow have no supervisor and must finish their work
+ * on whatever code they started with.
+ *
+ * The read is deliberately uncached — {@link runnerSourceBehind}'s TTL matches
+ * the poll interval, so routing through it would let one git read satisfy both
+ * of the two observations that are supposed to be independent.
+ */
+async function residentSourceHealth(
+  app: YrdCliApp,
+  io: YrdCliIO,
+  stall: ResidentSourceStall | undefined,
+  resident: boolean,
+  threshold: number,
+): Promise<Readonly<{ stall: ResidentSourceStall | undefined; recycle: boolean }>> {
+  if (!resident || threshold === 0) return { stall: undefined, recycle: false }
+  const bootedSha = residentBootedSha(io.implementationSource)
+  const sourceRoot = yrdSourceCheckout()
+  const advance = bootedSha === undefined || sourceRoot === undefined ? undefined : readSourceAdvance(sourceRoot, bootedSha)
+  const next = foldSourceStaleness(
+    stall,
+    { bootedSha, headSha: advance?.headSha, behind: advance?.behind },
+    threshold,
+  )
+  const cwd = io.cwd ?? process.cwd()
+  const action = decideResidentSource(next, await readResidentSourceRecycle(cwd, io.stateDir))
+  if (action.kind === "serve") return { stall: next, recycle: false }
+  if (action.kind === "checkout-behind") {
+    // The one case a recycle cannot fix, and the reason this is not a bare
+    // restart-on-drift: we already restarted for this exact gap and came back
+    // running the same commit. Whatever the resident boots from is not the
+    // checkout that moved — a custody freeze holding the source back, a
+    // launcher attesting a stale identity, a shim resolving another tree — so
+    // name the checkout and the remedy instead of burning the restart budget.
+    app.log.warn?.(
+      `Restarting did not refresh the queue runner's source: it is running git:${action.bootedSha} again while its source checkout '${sourceRoot ?? "unknown"}' is ${String(action.behind)} commits ahead at git:${action.headSha}. Not restarting again — advance the checkout the runner boots from and restart it by hand.`,
+      {
+        action: "resident-source-stale-checkout-behind",
+        bootedSha: action.bootedSha,
+        headSha: action.headSha,
+        behind: action.behind,
+        sourceRoot,
+        previousAttemptAt: action.attemptedAt,
+      },
+    )
+    return { stall: next, recycle: false }
+  }
+  await writeResidentSourceRecycle(cwd, io.stateDir, {
+    bootedSha: action.bootedSha,
+    headSha: action.headSha,
+    attemptedAt: new Date(io.now?.() ?? Date.now()).toISOString(),
+  })
+  app.log.warn?.(
+    `Queue runner source is ${String(action.behind)} commits behind its checkout '${sourceRoot ?? "unknown"}' after ${String(action.observations)} consecutive observations; recycling onto git:${action.headSha}.`,
+    {
+      action: "resident-source-stale-restart",
+      bootedSha: action.bootedSha,
+      headSha: action.headSha,
+      behind: action.behind,
+      observations: action.observations,
+      sourceRoot,
+    },
+  )
+  return { stall: next, recycle: true }
+}
+
 /**
  * D1b — the resident's per-tick unscoped lease-expiry recovery sweep. `recover`
  * with NO runner arg settles any orphaned running Job whose lease has lapsed,
@@ -8809,6 +9020,13 @@ export async function followQueueRuns(
   // Consecutive all-candidate-refusal cycles against an unchanged world (22474
   // specimen 3). Also process-scoped: it is a claim about THIS process.
   let stall: ResidentRefusalStall | undefined
+  // Consecutive cycles observing this process's own source checkout ahead of the
+  // commit it booted from (@yrd/core/stale-runner-never-recycles box 1). Like the
+  // refusal window above it is process-scoped: it is a claim about THIS process,
+  // and the durable half — whether a recycle was already tried for this exact gap
+  // — is the `source-recycle.json` record, not this variable.
+  let sourceStall: ResidentSourceStall | undefined
+  const sourceStaleThreshold = residentSourceStaleThreshold()
   let firstCycle = true
   let lastMaintenanceAt = 0
 
@@ -8892,6 +9110,14 @@ export async function followQueueRuns(
       // operator performed by hand, minus the 2.5h wait. The heartbeat's
       // close(cleanShutdown=false) in the finally releases the lease.
       if (health.restart) return RESIDENT_POISONED_EXIT
+      // Box 1 of @yrd/core/stale-runner-never-recycles. Same boundary and same
+      // reasoning as the poisoned-observer exit above, one step further out: the
+      // in-flight run has just finished, so exiting here drains cleanly rather
+      // than abandoning work, and the unclean code makes the supervisor re-exec
+      // a process that reads the source the checkout has since moved to.
+      const source = await residentSourceHealth(app, io, sourceStall, resident, sourceStaleThreshold)
+      sourceStall = source.stall
+      if (source.recycle) return RESIDENT_SOURCE_STALE_EXIT
       if (drainRequested()) {
         if (runs.every(Queues.terminal)) {
           // Operator drain finished with no in-flight work left — the one clean stop.
