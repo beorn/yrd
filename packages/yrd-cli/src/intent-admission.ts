@@ -72,7 +72,16 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
 
   const componentRepo = resolve(repo, options.component)
   const branch = await componentBranch(options.process, repo, options.component)
-  await tryGit(options.process, componentRepo, ["fetch", "--quiet", "--prune", "origin"])
+  try {
+    await git(options.process, componentRepo, ["fetch", "--quiet", "--prune", "origin"])
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause)
+    throw new Error(
+      `yrd: could not refresh published branches for '${options.component}' in '${componentRepo}'; ` +
+        `local tracking refs were not consulted because their freshness is unknown: ${detail}`,
+      { cause },
+    )
+  }
   /**
    * The component's trunk tip, read from the remote-tracking ref the fetch
    * above just refreshed — the same snapshot the derived target comes from, so
@@ -350,13 +359,13 @@ async function componentBranch(process: Pick<Process, "run">, repo: string, comp
 async function isPublished(process: Pick<Process, "run">, componentRepo: string, target: string): Promise<boolean> {
   const exists = await tryGit(process, componentRepo, ["cat-file", "-e", `${target}^{commit}`])
   if (exists === undefined) return false
-  const refs = await tryGit(process, componentRepo, [
+  const refs = await git(process, componentRepo, [
     "for-each-ref",
     "--format=%(refname)",
     `--contains=${target}`,
     "refs/remotes/origin/",
   ])
-  return refs !== undefined && refs.trim() !== ""
+  return refs.trim() !== ""
 }
 
 async function isAncestor(
