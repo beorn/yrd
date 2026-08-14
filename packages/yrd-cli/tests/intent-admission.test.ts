@@ -12,7 +12,7 @@ import { mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { createProcess } from "@yrd/process"
+import { createProcess, type Process } from "@yrd/process"
 import { admitPinIntent } from "../src/intent-admission.ts"
 
 const process = createProcess()
@@ -26,6 +26,15 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
   })
   if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr || result.stdout}`)
   return result.stdout.trim()
+}
+
+function failGit(command: string, stderr: string): Pick<Process, "run"> {
+  return {
+    async run(request) {
+      if (!request.argv.includes(command)) return process.run(request)
+      return { exitCode: 128, signal: null, stdout: "", stderr, durationMs: 1, timedOut: false }
+    },
+  }
 }
 
 async function commit(cwd: string, message: string): Promise<string> {
@@ -268,6 +277,45 @@ describe("pin-intent admission (22668 phase 1)", () => {
       target,
     })
     expect(retry.admitted).toBe(true)
+  })
+
+  it("fails loud when the publication fetch fails instead of reading stale tracking refs as unpublished", async () => {
+    const { repo, component } = await fixture()
+    const target = await publish(component, "two")
+    const fetchFailure = "ssh: connect to host github.com port 22: Connection reset by peer"
+
+    await expect(
+      admitPinIntent({
+        process: failGit("fetch", fetchFailure),
+        repo,
+        base: "main",
+        component: "components/alpha",
+        issue: ISSUE,
+        target,
+      }),
+    ).rejects.toThrow(
+      new RegExp(
+        `could not refresh published branches for 'components/alpha'.*` +
+          `local tracking refs were not consulted because their freshness is unknown.*${fetchFailure}`,
+      ),
+    )
+  })
+
+  it("fails loud when published-ref enumeration fails instead of treating the error as zero refs", async () => {
+    const { repo, component } = await fixture()
+    const target = await publish(component, "two")
+    const enumerationFailure = "fatal: packed-refs is corrupt"
+
+    await expect(
+      admitPinIntent({
+        process: failGit("for-each-ref", enumerationFailure),
+        repo,
+        base: "main",
+        component: "components/alpha",
+        issue: ISSUE,
+        target,
+      }),
+    ).rejects.toThrow(enumerationFailure)
   })
 
   it("refuses a divergent target whose lineage never met the pin", async () => {
