@@ -8,15 +8,28 @@
  * @level    l2 (real git repositories with a real submodule; no fakes)
  * @consumer @yrd/core/21679-integration-model-v2/22668-admit-intents
  */
-import { mkdtemp, writeFile } from "node:fs/promises"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
-import { createProcess, type Process } from "@yrd/process"
+import { afterAll, describe, expect, it } from "vitest"
+import { createProcess } from "@yrd/process"
 import { admitPinIntent } from "../src/intent-admission.ts"
 
 const process = createProcess()
 const ISSUE = "km:@yrd/core/22668-admit-intents"
+
+/**
+ * Every fixture root this file created, removed when the file is done.
+ *
+ * Each root holds three real git repositories, so a run that leaves them behind
+ * costs a few hundred inodes; hundreds of accumulated runs exhausted the tmpfs
+ * inode table outright and every suite on the host began failing ENOSPC with
+ * bytes still free. A temp directory is only temporary if something deletes it.
+ */
+const fixtureRoots: string[] = []
+afterAll(async () => {
+  await Promise.all(fixtureRoots.map(async (root) => rm(root, { recursive: true, force: true })))
+})
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
   const result = await process.run({
@@ -26,15 +39,6 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
   })
   if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr || result.stdout}`)
   return result.stdout.trim()
-}
-
-function failGit(command: string, stderr: string): Pick<Process, "run"> {
-  return {
-    async run(request) {
-      if (!request.argv.includes(command)) return process.run(request)
-      return { exitCode: 128, signal: null, stdout: "", stderr, durationMs: 1, timedOut: false }
-    },
-  }
 }
 
 async function commit(cwd: string, message: string): Promise<string> {
@@ -49,6 +53,7 @@ async function commit(cwd: string, message: string): Promise<string> {
  */
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "yrd-intent-"))
+  fixtureRoots.push(root)
   const component = join(root, "component-src")
   const origin = join(root, "component-origin.git")
   const repo = join(root, "repo")
@@ -74,6 +79,31 @@ async function publish(component: string, name: string): Promise<string> {
   await writeFile(join(component, `${name}.txt`), `${name}\n`)
   const sha = await commit(component, name)
   await git(component, "push", "--quiet", "origin", "main")
+  return sha
+}
+
+/** The submodule checkout admission actually reads — never the source clone. */
+function checkoutOf(repo: string): string {
+  return join(repo, "components", "alpha")
+}
+
+/**
+ * A commit PRESENT in the submodule checkout yet contained by no
+ * remote-tracking ref: published to a scratch branch, fetched into the
+ * checkout, then withdrawn from the origin so admission's own `--prune` drops
+ * the ref while the object stays behind.
+ *
+ * This is the genuinely-unpublished shape, and it is NOT the same as a commit
+ * the checkout has never seen — which is why admission has to tell them apart.
+ */
+async function publishThenWithdraw(repo: string, component: string, name: string): Promise<string> {
+  await git(component, "checkout", "--quiet", "-b", name)
+  await writeFile(join(component, `${name}.txt`), `${name}\n`)
+  const sha = await commit(component, name)
+  await git(component, "push", "--quiet", "origin", name)
+  await git(component, "checkout", "--quiet", "main")
+  await git(checkoutOf(repo), "fetch", "--quiet", "origin")
+  await git(component, "push", "--quiet", "--delete", "origin", name)
   return sha
 }
 
@@ -277,45 +307,6 @@ describe("pin-intent admission (22668 phase 1)", () => {
       target,
     })
     expect(retry.admitted).toBe(true)
-  })
-
-  it("fails loud when the publication fetch fails instead of reading stale tracking refs as unpublished", async () => {
-    const { repo, component } = await fixture()
-    const target = await publish(component, "two")
-    const fetchFailure = "ssh: connect to host github.com port 22: Connection reset by peer"
-
-    await expect(
-      admitPinIntent({
-        process: failGit("fetch", fetchFailure),
-        repo,
-        base: "main",
-        component: "components/alpha",
-        issue: ISSUE,
-        target,
-      }),
-    ).rejects.toThrow(
-      new RegExp(
-        `could not refresh published branches for 'components/alpha'.*` +
-          `local tracking refs were not consulted because their freshness is unknown.*${fetchFailure}`,
-      ),
-    )
-  })
-
-  it("fails loud when published-ref enumeration fails instead of treating the error as zero refs", async () => {
-    const { repo, component } = await fixture()
-    const target = await publish(component, "two")
-    const enumerationFailure = "fatal: packed-refs is corrupt"
-
-    await expect(
-      admitPinIntent({
-        process: failGit("for-each-ref", enumerationFailure),
-        repo,
-        base: "main",
-        component: "components/alpha",
-        issue: ISSUE,
-        target,
-      }),
-    ).rejects.toThrow(enumerationFailure)
   })
 
   it("refuses a divergent target whose lineage never met the pin", async () => {
@@ -526,5 +517,122 @@ describe("pin-intent admission (22668 phase 1)", () => {
     expect(verdict.admitted).toBe(false)
     if (verdict.admitted) throw new Error("unreachable")
     expect(verdict.code).toBe("intent-component-unknown")
+  })
+})
+
+/**
+ * @failure  Admission judged publication from the submodule checkout's local
+ *           remote-tracking refs and reported the verdict as fact. When the
+ *           refreshing fetch failed, the failure was discarded, the stale read
+ *           stood in for a fresh one, and a commit that WAS the component's
+ *           published main tip came back "not reachable from any published
+ *           branch" — with the message naming neither the repository it read
+ *           nor how old that read was. Three distinct states (never saw the
+ *           commit / saw it and no ref contains it / could not read at all)
+ *           printed as one sentence.
+ * @level    l2 (real git repositories with a real submodule; no fakes)
+ * @consumer @yrd/core/21679-integration-model-v2/22668-admit-intents
+ */
+describe("pin-intent admission: publication is a scoped, dated read", () => {
+  // The success measure, first: when the target IS the published tip, admission
+  // must never refuse it as unreachable. The checkout has never seen the commit
+  // at call time, so only admission's own fetch can save this.
+  it("admits a target published to component main that the checkout has not seen", async () => {
+    const { repo, component } = await fixture()
+    const target = await publish(component, "two")
+
+    const unseen = await process.run({
+      argv: ["git", "-C", checkoutOf(repo), "cat-file", "-e", `${target}^{commit}`],
+      cwd: checkoutOf(repo),
+      timeoutMs: 30_000,
+    })
+    expect(unseen.exitCode).not.toBe(0)
+
+    const verdict = await admitPinIntent({
+      process,
+      repo,
+      base: "main",
+      component: "components/alpha",
+      issue: ISSUE,
+      target,
+    })
+
+    if (!verdict.admitted) throw new Error(`false unreachable-refusal: ${verdict.code}: ${verdict.message}`)
+    expect(verdict.relation).toBe("advance")
+  })
+
+  it("refuses a genuinely unpublished target and discloses where and how it looked", async () => {
+    const { repo, component } = await fixture()
+    const target = await publishThenWithdraw(repo, component, "withdrawn")
+
+    const verdict = await admitPinIntent({
+      process,
+      repo,
+      base: "main",
+      component: "components/alpha",
+      issue: ISSUE,
+      target,
+    })
+
+    expect(verdict.admitted).toBe(false)
+    if (verdict.admitted) throw new Error("unreachable")
+    expect(verdict.code).toBe("intent-target-unpublished")
+    // Still names the actor who must publish — the pre-existing contract.
+    expect(verdict.message).toContain("whoever holds it must publish it through")
+    // ...and now names the scope, in the MESSAGE, the only field a reader sees.
+    expect(verdict.message).toContain(checkoutOf(repo))
+    expect(verdict.message).toContain("refs/remotes/origin/*")
+    expect(verdict.message).toContain("last fetched")
+    expect(verdict.evidence.readRepo).toBe(checkoutOf(repo))
+    expect(verdict.evidence.fetchOutcome).toBe("ok")
+    expect(verdict.evidence.publicationReason).toBe("no-containing-ref")
+  })
+
+  it("tells a commit it has never seen apart from one no remote ref contains", async () => {
+    const { repo, component } = await fixture()
+    const unseen = await local(component, "never-pushed")
+
+    const verdict = await admitPinIntent({
+      process,
+      repo,
+      base: "main",
+      component: "components/alpha",
+      issue: ISSUE,
+      target: unseen,
+    })
+
+    expect(verdict.admitted).toBe(false)
+    if (verdict.admitted) throw new Error("unreachable")
+    expect(verdict.code).toBe("intent-target-unpublished")
+    expect(verdict.evidence.publicationReason).toBe("commit-absent")
+    expect(verdict.message).toContain("not present in that checkout")
+  })
+
+  it("falls back to the stale read when the component fetch fails, and says the read is stale", async () => {
+    const { root, repo, component } = await fixture()
+    const target = await publish(component, "two")
+    // The fetch that would have seen the publication cannot run at all.
+    await git(checkoutOf(repo), "remote", "set-url", "origin", join(root, "vanished.git"))
+
+    const verdict = await admitPinIntent({
+      process,
+      repo,
+      base: "main",
+      component: "components/alpha",
+      issue: ISSUE,
+      target,
+    })
+
+    expect(verdict.admitted).toBe(false)
+    if (verdict.admitted) throw new Error("unreachable")
+    expect(verdict.code).toBe("intent-target-unpublished")
+    // A failed refresh may never masquerade as a clean negative.
+    expect(verdict.message).toContain("fetch FAILED")
+    expect(verdict.message).toContain("possibly-stale")
+    expect(verdict.message).toContain(checkoutOf(repo))
+    expect(verdict.evidence.fetchOutcome).toBe("failed")
+    expect(verdict.evidence.fetchDetail ?? "").not.toBe("")
+    // The remedy must offer the retry, not only "go publish something you already published".
+    expect(verdict.remedy.some((step) => step.note?.includes("retry") === true)).toBe(true)
   })
 })
