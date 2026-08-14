@@ -1150,6 +1150,51 @@ The Queue runs it once more against the exact Candidate before the built-in
 merge. Skipping the hook therefore costs feedback latency but cannot weaken the
 landing gate. Run one configured check explicitly with `yrd check <name>`.
 
+### Guards — the cheap half of the local gate
+
+A check answers "would this land green?" and buys that answer with a
+quarantined checkout, a submodule population and a workspace install. That is
+the right price for a landing gate and the wrong one for an authoring rule: a
+repository whose lint refuses a twelve-character title should not make the
+author wait two minutes and spend a queue slot to hear it.
+
+A `guard` is the other shape. It runs in the invoking working repository, in
+one process spawn, **before the revision is registered** — so a refusal costs no
+queue slot and arrives while the author is still at the terminal:
+
+```yaml
+guards:
+  - bead-hygiene:
+      run: bun tools/lint-bead-hygiene.ts --base "$YRD_BASE_SHA" --candidate "$YRD_CANDIDATE_SHA"
+      paths: ["@*/**/*.md"]
+```
+
+Every guard is given `YRD_REPO`, `YRD_BASE_SHA`, `YRD_CANDIDATE_SHA` and
+`YRD_GUARD` in its environment, and its exit code is the verdict. On a non-zero
+exit the guard's own stderr is surfaced verbatim — Yrd cannot reconstruct which
+file, which measurement or which repair, so it never summarizes them away.
+
+`paths` scopes a guard to the files it is about, matched against
+`git diff --name-only <base>...<candidate>` (three-dot, so commits base gained
+after the fork are never the author's problem). A candidate matching no glob
+**does not spawn the command at all**, which is what keeps a repository-wide
+authoring rule from taxing every code-only carrier. A guard with no `paths`
+always runs. A guard bounds itself with `timeoutMs`, defaulting to 60s.
+
+Guards run ahead of checks in `pr submit`, `pr ready` and the managed
+pre-submit hook, and short-circuit. They are deliberately **not** re-run by the
+Queue: a guard is an authoring rule, not landing evidence. Skipping the hook
+therefore skips guards entirely, which is a feedback loss and never a weakened
+landing gate. Run them on demand with `yrd guard [name...]`.
+
+The command belongs to the repository, so Yrd stays agnostic about what is
+being guarded — it owns only when a guard runs, what it is told, and how a
+refusal surfaces. When the tool lives outside the repository being guarded
+(hh keeps `tools/lint-bead-hygiene.ts` in the code repo while beads are
+authored in the state repo), point `run` at it by absolute path or through a
+wrapper on `PATH`; the guard's cwd is always `YRD_REPO`, so the candidate it
+must read and the tool that reads it need not share a checkout.
+
 `yrd admin init` writes that exact one-liner and the managed pre-submit hook. It
 refuses to overwrite an existing repository config.
 Deleted or unknown repository keys—including unknown keys nested under

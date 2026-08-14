@@ -110,6 +110,58 @@ const ChecksSchema = z
   })
   .default([])
 
+/**
+ * One repository-declared pre-submit guard.
+ *
+ * Deliberately NOT `StepObjectSchema`. A step carries `runner`, `mode`,
+ * `comparison`, `classification` and the rest of the Queue's execution
+ * vocabulary, none of which a guard has any meaning for — a guard never runs in
+ * the Queue, never composes onto base, and never produces landing evidence.
+ * Reusing the step schema would advertise a dozen keys that silently do
+ * nothing, which is a worse duplication than two small schemas.
+ *
+ * `paths` is what keeps a repository-wide authoring rule from taxing every
+ * code-only carrier: declare the subset the guard is about and a candidate
+ * touching none of it never spawns the command at all.
+ */
+const GuardObjectSchema = z
+  .object({
+    run: TextSchema,
+    /** Repository-relative globs; absent means the guard always runs. */
+    paths: z.array(TextSchema).min(1).optional(),
+    /** Declared child values applied over the deterministic base allowlist. */
+    env: z.record(EnvironmentNameSchema, z.string()).optional(),
+    /** Ambient names copied into the guard child beyond the base allowlist — explicit, never implicit. */
+    environmentPassthrough: z
+      .array(EnvironmentNameSchema)
+      .min(1)
+      .superRefine((names, context) => {
+        if (new Set(names).size !== names.length) {
+          context.addIssue({ code: "custom", message: "contains duplicate environment names" })
+        }
+      })
+      .optional(),
+    /** Declarative wall-clock bound; absent = the guard default (never silently unbounded). */
+    timeoutMs: z.number().int().min(1).optional(),
+  })
+  .strict()
+const GuardSchema = z.preprocess((value) => (typeof value === "string" ? { run: value } : value), GuardObjectSchema)
+
+/**
+ * Guards have no built-ins, so — unlike checks — a bare name is not a legal
+ * entry. Every guard names a command the repository owns.
+ */
+const GuardEntrySchema = z
+  .record(StepNameSchema, GuardSchema)
+  .refine((value) => Object.keys(value).length === 1, { message: "must define exactly one named guard" })
+const GuardsSchema = z
+  .array(GuardEntrySchema)
+  .superRefine((guards, context) => {
+    const names = guards.map(guardName)
+    if (new Set(names).size !== names.length) context.addIssue({ code: "custom", message: "contains duplicate guards" })
+  })
+  .default([])
+
 const ProgressSchema = z
   .object({
     noLandingMs: z.number().int().min(1).optional(),
@@ -138,6 +190,7 @@ const ProjectFields = {
   base: TextSchema.optional(),
   batch: z.union([z.literal(false), z.number().int().min(0)]).optional(),
   checks: ChecksSchema,
+  guards: GuardsSchema,
   landing: LandingSchema,
   requires: RequirementsSchema.optional(),
   contest: ContestSchema,
@@ -147,11 +200,13 @@ const ProjectFields = {
 const ProjectSchema = z.object(ProjectFields).strict()
 
 export type YrdStepConfig = Readonly<z.infer<typeof StepObjectSchema>>
+export type YrdGuardConfig = Readonly<z.infer<typeof GuardObjectSchema>>
 export type YrdGateMode = GateMode
 export type YrdProjectConfig = Readonly<{
   base?: string
   batch?: false | number
   checks: readonly z.infer<typeof CheckEntrySchema>[]
+  guards: readonly z.infer<typeof GuardEntrySchema>[]
   landing?: "expected" | "none"
   requires?: readonly "review"[]
   contest: Readonly<z.infer<typeof ContestSchema>>
@@ -163,6 +218,12 @@ export type ResolvedYrdProjectConfig = Readonly<{
   batch: false | number
   /** Public configured predicates. Merge is deliberately absent. */
   checks?: readonly string[]
+  /** Configured pre-submit guard names, in declaration order. Distinct from
+   * `checks`: a guard runs in the invoking working repository before the
+   * revision is registered and is never re-run by the Queue. */
+  guards?: readonly string[]
+  /** Command and scope for each configured guard. */
+  guardDefinitions?: Readonly<Record<string, YrdGuardConfig>>
   /** Internal Queue execution plan: configured checks plus built-in merge. */
   steps: readonly string[]
   /** Declared, never inferred — see LandingSchema. `loadYrdConfig` always sets
@@ -194,11 +255,12 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
   }
   const parsed = ProjectSchema.safeParse(value ?? {})
   if (parsed.success) {
-    const { base, batch, checks, landing, requires, contest, progress } = parsed.data
+    const { base, batch, checks, guards, landing, requires, contest, progress } = parsed.data
     return {
       ...(base === undefined ? {} : { base }),
       ...(batch === undefined ? {} : { batch }),
       checks,
+      guards,
       ...(landing === undefined ? {} : { landing }),
       ...(requires === undefined ? {} : { requires }),
       contest,
@@ -334,6 +396,8 @@ export async function loadYrdConfig(options: {
       base: parsed.base ?? options.defaultBase,
       batch: parsed.batch ?? DEFAULT_QUEUE_BATCH_SIZE,
       checks,
+      guards: parsed.guards.map(guardName),
+      guardDefinitions: Object.fromEntries(parsed.guards.map(resolveGuard)),
       steps,
       landing: parsed.landing ?? "expected",
       requires: parsed.requires ?? [],
@@ -399,6 +463,17 @@ function legacyFlow(steps: readonly string[], definitions: Readonly<Record<strin
 
 function checkName(check: z.infer<typeof CheckEntrySchema>): string {
   return typeof check === "string" ? check : (Object.keys(check)[0] ?? "")
+}
+
+function guardName(guard: z.infer<typeof GuardEntrySchema>): string {
+  return Object.keys(guard)[0] ?? ""
+}
+
+function resolveGuard(guard: z.infer<typeof GuardEntrySchema>): readonly [string, YrdGuardConfig] {
+  const name = guardName(guard)
+  const definition = guard[name]
+  if (definition === undefined) throw new Error(`yrd: configured guard '${name}' lost its definition`)
+  return [name, definition]
 }
 
 function resolveCheck(check: z.infer<typeof CheckEntrySchema>): readonly [string, YrdStepConfig] {

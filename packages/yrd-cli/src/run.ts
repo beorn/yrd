@@ -199,7 +199,15 @@ import {
   projectQueueRunTaskStatus,
   taskStatusFields,
 } from "./task-status.ts"
-import type { YrdBayProtection, YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState } from "./types.ts"
+import type {
+  YrdBayProtection,
+  YrdCliApp,
+  YrdCliExitCode,
+  YrdCliGuardOutcome,
+  YrdCliIO,
+  YrdCliServices,
+  YrdCliState,
+} from "./types.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION, yrdSourceRoot } from "./version.ts"
 import {
   decideResidentSource,
@@ -3873,6 +3881,7 @@ async function readyPr(
   const selected = requiredPr(app, selector)
   const refusalExit = await requireQueueableSubmodulePinsForCommand(selected, services, options, io)
   if (refusalExit !== undefined) return refusalExit
+  await runPreSubmitGuards(services, io)
   await runRequiredChecks(services, io)
   await app.bays.ready({ pr: selector })
   let pr = app.bays.pr(selector)
@@ -4722,6 +4731,9 @@ async function applyPrSelectionVerb(
     const unlandable = await refuseSubmitWithoutLandingAuthority(options, io, services)
     if (unlandable !== undefined) return unlandable
     for (const context of submitRequiredCheckContexts(app, selectors, io)) {
+      // Guards first, and in the same loop, so the cheap verdict on THIS
+      // carrier lands before its expensive one starts.
+      await runPreSubmitGuards(services, { ...io, cwd: context.cwd }, undefined, context.ref)
       await runRequiredChecks(
         services,
         { ...io, cwd: context.cwd },
@@ -7647,6 +7659,46 @@ async function journalImportOrphan(
   )
 }
 
+/**
+ * Every configured pre-submit guard, in declaration order, before anything
+ * expensive and before the revision exists.
+ *
+ * Ordering is the feature. Guards run ahead of {@link runRequiredChecks} so the
+ * one-spawn refusal cannot arrive after the minutes-long one, and ahead of
+ * revision registration so a refusal consumes no queue slot — which is the
+ * whole reason a guard is not simply another check.
+ *
+ * A repository with no guards configured returns immediately and spawns
+ * nothing, so this costs unconfigured repositories exactly zero.
+ */
+async function runPreSubmitGuards(
+  services: YrdCliServices,
+  io: YrdCliIO,
+  selected?: readonly string[],
+  ref?: string,
+): Promise<readonly YrdCliGuardOutcome[]> {
+  const guards = services.guards
+  if (guards === undefined) {
+    // Selecting guards by name proves the caller expected the capability, so
+    // its absence is a loud configuration fault rather than a quiet no-op.
+    if (selected === undefined) return []
+    configuration("pre-submit guard capability is not installed")
+  }
+  const names = selected ?? guards.names
+  if (names.length === 0) return []
+  // `io.cwd` is the tree the caller selected — the invoking tree, or the Bay
+  // worktree `pr submit` chose for this carrier. It is what makes a bare-HEAD
+  // guard judge the commit actually being submitted.
+  const context = { ...(ref === undefined ? {} : { ref }), ...(io.cwd === undefined ? {} : { cwd: io.cwd }) }
+  const outcomes: YrdCliGuardOutcome[] = []
+  for (const name of names) {
+    const outcome = await guards.run(name, Object.keys(context).length === 0 ? undefined : context)
+    if (outcome.stdout !== undefined && outcome.stdout !== "") io.stdout(outcome.stdout)
+    outcomes.push(outcome)
+  }
+  return outcomes
+}
+
 async function runRequiredChecks(
   services: YrdCliServices,
   io: YrdCliIO,
@@ -7695,6 +7747,33 @@ async function runRequiredChecks(
     results.push({ name, exitCode: result.exitCode })
   }
   return results
+}
+
+/**
+ * `yrd guard [names...]` — the same guards submit runs, on demand.
+ *
+ * The managed pre-submit hook shells out to exactly this, so what a seat can
+ * reproduce by hand and what the hook enforces cannot drift into two different
+ * rules. Bare `yrd guard` runs every configured guard; naming one runs only it.
+ */
+async function guardRequired(
+  services: YrdCliServices,
+  names: readonly string[],
+  options: JsonOption,
+  io: YrdCliIO,
+): Promise<void> {
+  const guards = await runPreSubmitGuards(services, io, names.length === 0 ? undefined : names)
+  const ran = guards.filter((guard) => guard.status === "passed")
+  const skipped = guards.filter((guard) => guard.status === "skipped")
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "guard", guards },
+    guards.length === 0
+      ? "no pre-submit guards are configured"
+      : `pre-submit guards passed: ${ran.map(({ name }) => name).join(", ") || "none"}` +
+          (skipped.length === 0 ? "" : `; skipped: ${skipped.map(({ name }) => name).join(", ")}`),
+  )
 }
 
 async function checkRequired(
@@ -10680,6 +10759,12 @@ function buildProgram(
     .description("run configured required checks in the current working tree")
     .option("--json", "emit stable JSON")
     .action(async (names, options) => checkRequired(installedServices(), names, options, io))
+
+  program
+    .command("guard [name...]")
+    .description("run configured pre-submit guards against the current head; omit names for all")
+    .option("--json", "emit stable JSON")
+    .action(async (names, options) => guardRequired(installedServices(), names, options, io))
 
   const admin = program.command("admin").description("perform infrequent repository and state administration")
   admin.helpCommand(false)

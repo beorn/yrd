@@ -62,6 +62,30 @@ export type YrdCliChecks = Readonly<{
   install(cwd: string): Promise<string>
 }>
 
+/**
+ * What one pre-submit guard did. `skipped` is a first-class outcome, not a
+ * quiet pass: it carries the reason so a seat can tell "this guard looked and
+ * found nothing to judge" from "this guard never ran".
+ */
+export type YrdCliGuardOutcome = Readonly<{
+  name: string
+  status: "passed" | "skipped"
+  candidateSha: string
+  reason?: string
+  stdout?: string
+}>
+
+export type YrdCliGuards = Readonly<{
+  names: readonly string[]
+  /**
+   * `cwd` is the working tree holding the candidate — the invoking tree, or a
+   * Bay's own worktree when submit selected one. It is where `HEAD` is resolved
+   * and where the guard command runs; `ref`, when given, names the candidate
+   * explicitly and is resolved in the repository instead.
+   */
+  run(name: string, context?: Readonly<{ cwd?: string; ref?: string }>): Promise<YrdCliGuardOutcome>
+}>
+
 export type YrdCliState = Readonly<{
   jobs: JobsState
   bays: BaysState
@@ -93,6 +117,7 @@ export type YrdCliServices = Readonly<{
   }>
   journal?: YrdCliJournalAdministration
   checks?: YrdCliChecks
+  guards?: YrdCliGuards
   process?: Pick<Process, "run" | "reapPath">
   /** Live base-authority flow config for deterministic doctor diagnostics. */
   config?: YrdConfig

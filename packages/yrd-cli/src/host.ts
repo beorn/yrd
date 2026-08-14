@@ -99,6 +99,7 @@ import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import type { ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
 import { cleanGitEnvironment } from "./git-environment.ts"
+import { guardScopedPaths } from "./pre-submit-guard-scope.ts"
 import { CHECKOUT_TIMEOUT_ENV, resolveCheckoutTimeoutMs } from "./git-timeouts.ts"
 import { observeFreshRemoteBranch, observeOriginBranchAdvertisement, observeOriginRemote } from "./remote-branch.ts"
 import {
@@ -132,6 +133,7 @@ import type {
   YrdCliCheckResult,
   YrdCliChecks,
   YrdCliExitCode,
+  YrdCliGuards,
   YrdCliIO,
   YrdCliQueueAdministration,
   YrdCliServices,
@@ -506,13 +508,194 @@ export function configuredChecks(
           `yrd: will not replace the unmanaged pre-submit hook at '${hook}'`,
         )
       }
+      // Guards run FIRST and short-circuit. The whole point of a guard is that
+      // it refuses in one process spawn, so letting a materializing check run
+      // ahead of it would pay the price the guard exists to avoid. The line is
+      // emitted only when guards are configured, so a repository with none
+      // keeps a byte-identical hook and no reinstall churn.
+      const guard = (config.guards ?? []).length === 0 ? "" : "yrd guard || exit $?\n"
       const command = names.length === 0 ? "exit 0" : `exec yrd check ${names.join(" ")}`
-      const source = `#!/bin/sh\n${MANAGED_PRE_SUBMIT_MARKER}\n${command}\n`
+      const source = `#!/bin/sh\n${MANAGED_PRE_SUBMIT_MARKER}\n${guard}${command}\n`
       if (existing !== source) writeFileSync(hook, source, { encoding: "utf8", mode: 0o755 })
       chmodSync(hook, 0o755)
       return Promise.resolve(hook)
     },
   })
+}
+
+/**
+ * The one wall-clock bound a guard gets when it declares none. Generous for a
+ * lint over a diff and short enough that a wedged guard cannot masquerade as a
+ * slow submit — a guard exists precisely because the author is waiting.
+ */
+const DEFAULT_GUARD_TIMEOUT_MS = 60_000
+
+/**
+ * Pre-submit guards: the cheap, in-lane half of the local gate.
+ *
+ * A required check answers "would this land green?" and pays for that answer
+ * with a quarantined worktree, a submodule population and a workspace install —
+ * minutes, per candidate. That price is right for a landing gate and wrong for
+ * an authoring rule. When the only thing wrong with a carrier is that a bead's
+ * H1 is twelve characters too long, the author learns it two minutes after
+ * submitting, having already consumed a queue slot, and pays the whole round
+ * trip again for a one-word edit.
+ *
+ * A guard is the other shape. It runs in the author's own working repository,
+ * in one process spawn, BEFORE the revision is registered — so a refusal costs
+ * no queue slot and lands while the author is still looking at the terminal. It
+ * is deliberately NOT re-run by the Queue against the Candidate: a guard is an
+ * authoring rule, not landing evidence, and re-running it there would put a
+ * lint in the merge path where a check belongs.
+ *
+ *   check                            guard
+ *   ─────                            ─────
+ *   quarantined checkout of the      the invoking working repository
+ *     exact candidate
+ *   `yrd check`, submit, AND the     submit and ready only
+ *     Queue before merge
+ *   minutes                          one spawn
+ *   the landing gate                 authoring hygiene
+ *
+ * Yrd stays repository-agnostic: it owns WHEN a guard runs, WHAT it is told
+ * (base and candidate SHAs, in the environment) and HOW a refusal surfaces,
+ * while the repository owns the command and the paths it cares about. Nothing
+ * here knows what the guard is checking.
+ *
+ * NO SILENT ERRORS: an unknown guard name, an unresolvable base, an
+ * unresolvable candidate, a diff that could not be computed and a timeout all
+ * raise. Only a computed, empty path intersection skips a guard, and that skip
+ * reports the globs that produced it rather than passing quietly.
+ */
+export function configuredGuards(
+  process: Pick<Process, "run">,
+  stateDir: string,
+  config: ResolvedYrdProjectConfig,
+  environment: NodeJS.ProcessEnv,
+): YrdCliGuards {
+  const repo = resolve(stateDir, "../..")
+  const names = config.guards ?? []
+  return Object.freeze({
+    names: Object.freeze([...names]),
+    async run(name, context) {
+      const definition = config.guardDefinitions?.[name]
+      if (definition === undefined) {
+        raiseFailure(
+          "configuration",
+          "pre-submit-guard-unknown",
+          `yrd: pre-submit guard '${name}' is not configured (configured: ${names.join(", ") || "none"})`,
+        )
+      }
+      const baseSha = await resolveCommit(process, repo, config.base)
+      if (baseSha === undefined) {
+        raiseFailure(
+          "configuration",
+          "pre-submit-guard-base-missing",
+          `yrd: pre-submit guard base '${config.base}' is missing`,
+        )
+      }
+      // Where the candidate actually lives. `pr submit` hands us a Bay's own
+      // worktree with no ref — its HEAD is the candidate, and resolving HEAD in
+      // the main repository instead would silently guard a different commit
+      // than the one being submitted. An explicit ref names a commit the
+      // repository owns, so that one resolves against the repository.
+      const candidateTree = context?.cwd ?? repo
+      const candidateRef = context?.ref ?? "HEAD"
+      const candidateSha = await resolveCommit(process, context?.ref === undefined ? candidateTree : repo, candidateRef)
+      if (candidateSha === undefined) {
+        raiseFailure(
+          "configuration",
+          "pre-submit-guard-candidate-missing",
+          `yrd: pre-submit guard candidate '${candidateRef}' is missing`,
+        )
+      }
+      if (definition.paths !== undefined) {
+        const changed = await changedCandidatePaths(process, candidateTree, baseSha, candidateSha)
+        if (guardScopedPaths(changed, definition.paths).length === 0) {
+          return {
+            name,
+            status: "skipped",
+            candidateSha,
+            reason: `no path changed by ${candidateSha} matches ${definition.paths.join(", ")}`,
+          }
+        }
+      }
+      const timeoutMs = definition.timeoutMs ?? DEFAULT_GUARD_TIMEOUT_MS
+      const result = await process.run({
+        argv: shellCommand(definition.run),
+        cwd: candidateTree,
+        env: {
+          ...cleanGitEnvironment(environment),
+          ...Object.fromEntries(
+            (definition.environmentPassthrough ?? []).flatMap((passed) =>
+              environment[passed] === undefined ? [] : [[passed, environment[passed]]],
+            ),
+          ),
+          ...definition.env,
+          YRD_REPO: repo,
+          YRD_BASE_SHA: baseSha,
+          YRD_CANDIDATE_SHA: candidateSha,
+          YRD_GUARD: name,
+        },
+        timeoutMs,
+      })
+      if (result.timedOut) {
+        raiseFailure(
+          "infrastructure",
+          "pre-submit-guard-timeout",
+          `yrd: pre-submit guard '${name}' exceeded ${timeoutMs}ms before it produced a verdict`,
+        )
+      }
+      // A killed guard never reached a verdict, so it is infrastructure, not a
+      // refusal. Collapsing the two would tell an author to fix their carrier
+      // because the OOM killer arrived — the most expensive wrong direction,
+      // since the carrier is fine and the edit they make in response cannot help.
+      if (result.signal === "SIGKILL" || (result.signal === null && result.exitCode === 137)) {
+        raiseFailure(
+          "infrastructure",
+          "pre-submit-guard-signal",
+          `yrd: pre-submit guard '${name}' ended by SIGKILL (exit ${String(result.exitCode)}) before it produced a verdict`,
+        )
+      }
+      if (result.exitCode !== 0) {
+        // The guard's OWN diagnostic is the entire product here — it is the half
+        // that names the file, the measurement and the minimum repair, and Yrd
+        // cannot reconstruct any of it. Passed through verbatim rather than
+        // summarized into an exit code.
+        const detail = result.stderr.trim() || result.stdout.trim() || `exited ${String(result.exitCode)}`
+        raiseFailure("refusal", "pre-submit-guard-failed", `yrd: pre-submit guard '${name}' refused: ${detail}`)
+      }
+      return { name, status: "passed", candidateSha, stdout: result.stdout }
+    },
+  })
+}
+
+/**
+ * The files the candidate changed relative to where it forked from base.
+ *
+ * Three-dot on purpose. Two-dot would also list everything base gained since
+ * the fork, so a guard would be handed files the author never touched and a
+ * long-lived branch would be refused for somebody else's edit.
+ */
+async function changedCandidatePaths(
+  process: Pick<Process, "run">,
+  repo: string,
+  baseSha: string,
+  candidateSha: string,
+): Promise<readonly string[]> {
+  const result = await process.run({
+    argv: ["git", "diff", "--name-only", `${baseSha}...${candidateSha}`],
+    cwd: repo,
+  })
+  if (result.exitCode !== 0) {
+    raiseFailure(
+      "infrastructure",
+      "pre-submit-guard-scope-failed",
+      `yrd: could not determine what '${candidateSha}' changed against '${baseSha}': ` +
+        (result.stderr.trim() || `git diff exited ${String(result.exitCode)}`),
+    )
+  }
+  return result.stdout.split("\n").filter((line) => line !== "")
 }
 
 function hostToolchainFingerprint(): ToolchainFingerprint {
@@ -2112,6 +2295,7 @@ async function createYrdRuntimeHost(
     }
     if (mode === "active") await drain()
     const checks = configuredChecks(process, repository.stateDir, loaded.config, env)
+    const guards = configuredGuards(process, repository.stateDir, loaded.config, env)
     const mergeRecordBaseSha = async (): Promise<string> =>
       (
         await resolveGitQueueTarget({
@@ -2155,6 +2339,7 @@ async function createYrdRuntimeHost(
       base: loaded.config.base,
       [LandingAuthorityBoundary]: loaded.config.landing ?? "expected",
       checks,
+      guards,
       journal: Object.freeze({
         importOrphan: (sourcePath: string) =>
           importOrphanJournal({
