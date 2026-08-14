@@ -6,6 +6,9 @@ import { defineConfig } from "vitest/config"
 export default defineConfig({
   test: {
     include: ["packages/*/tests/**/*.test.{ts,tsx}", "tests/**/*.test.{ts,tsx}"],
+    // `.slow.` drills sample real elapsed CPU over minute-long windows. They are
+    // a separate suite (`bun run test:slow`) so an ordinary run stays fast.
+    exclude: ["**/node_modules/**", "**/*.slow.*"],
     server: {
       deps: {
         external: [/^bun:/],

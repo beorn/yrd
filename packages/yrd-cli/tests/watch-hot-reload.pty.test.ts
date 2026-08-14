@@ -5,23 +5,28 @@
  * @level l3
  * @consumer @yrd/cli
  *
- * These drills need the full integration environment: a `@termless` PTY, the
- * installed `yrd` binary under `tools/installed/`, and a Silvery build that
- * exports the QueueWatch renderer. They are intentionally kept apart from
- * `watch-hot-reload.test.ts` (pure supervisor logic) so the latter runs in a
- * bare standalone clone. Skip this file when the installed binary is absent.
+ * These drills need the full integration environment: a `@termless` PTY, a
+ * production `yrd` launcher, and a Silvery build that exports the QueueWatch
+ * renderer. They are intentionally kept apart from `watch-hot-reload.test.ts`
+ * (pure supervisor logic) so the latter runs in a bare standalone clone.
  */
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { createTestTerminal } from "@termless/test"
 import { describe, expect, it } from "vitest"
+import { installedYrdLauncher, yrdRoot } from "./support/installed-launcher.ts"
 
-const yrdRoot = resolve(import.meta.dirname, "../../..")
-const installedYrd = resolve(yrdRoot, "../../tools/installed/yrd")
+const installedYrd = installedYrdLauncher()
+
+// Every deadline here separates "happens" from "hangs" on a box that may be
+// running the whole fleet. Unloaded these drills settle in about a second; a
+// bound near that measures load instead. `watch-idle-cpu.slow.test.ts` already
+// waits 30s for the same `QUEUE main` sentinel under a PTY.
+const SETTLE_MS = 30_000
 
 async function waitFor<T>(read: () => T, accept: (value: T) => boolean, detail: string): Promise<T> {
-  const deadline = Date.now() + 10_000
+  const deadline = Date.now() + SETTLE_MS
   let value = read()
   while (!accept(value)) {
     if (Date.now() >= deadline) throw new Error(`timed out waiting for ${detail}`)
@@ -142,7 +147,7 @@ describe("yrd watch hot reload (installed)", () => {
 
     const running = await launchInstalledWatch(repo, { HOME: home, NODE_ENV: "production" })
     try {
-      await running.terminal.waitFor("QUEUE main", 10_000).catch((error: unknown) => {
+      await running.terminal.waitFor("QUEUE main", SETTLE_MS).catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error)
         throw new Error(`${message}; exit=${running.terminal.exitInfo ?? "pending"}\n${running.terminal.getText()}`)
       })
@@ -155,7 +160,7 @@ describe("yrd watch hot reload (installed)", () => {
       rmSync(repo, { recursive: true, force: true })
       rmSync(home, { recursive: true, force: true })
     }
-  }, 20_000)
+  }, 90_000)
 
   it("restores the terminal and reaps installed watch process groups on startup failure, SIGINT, and SIGTERM", async () => {
     const roots: string[] = []
@@ -183,7 +188,7 @@ describe("yrd watch hot reload (installed)", () => {
         try {
           // The 2026-07-15 footer respec removed both the LIVE indicator and
           // keybinding footer; the queue identity is the stable liveness sentinel.
-          await running.terminal.waitFor("QUEUE main", 10_000).catch((error: unknown) => {
+          await running.terminal.waitFor("QUEUE main", SETTLE_MS).catch((error: unknown) => {
             const message = error instanceof Error ? error.message : String(error)
             throw new Error(`${message}; exit=${running.terminal.exitInfo ?? "pending"}\n${running.terminal.getText()}`)
           })
@@ -202,7 +207,7 @@ describe("yrd watch hot reload (installed)", () => {
     } finally {
       for (const root of roots) rmSync(root, { recursive: true, force: true })
     }
-  }, 30_000)
+  }, 120_000)
 
   it("terminates Bun's watch loop when the production QueueWatch command finishes", async () => {
     const child = Bun.spawn([process.execPath, join(yrdRoot, "bin/yrd.ts"), "watch"], {
@@ -211,11 +216,14 @@ describe("yrd watch hot reload (installed)", () => {
       stderr: "ignore",
     })
     try {
-      const outcome = await Promise.race([child.exited, Bun.sleep(1_500).then(() => "timeout" as const)])
+      // The failure is a watch loop that never terminates, so the bound only has
+      // to separate "exits" from "hangs". A cold start is ~0.5s unloaded; bounds
+      // near that measure how busy the box is instead.
+      const outcome = await Promise.race([child.exited, Bun.sleep(SETTLE_MS).then(() => "timeout" as const)])
       expect(outcome).not.toBe("timeout")
     } finally {
       child.kill("SIGKILL")
       await child.exited
     }
-  }, 5_000)
+  }, 45_000)
 })
