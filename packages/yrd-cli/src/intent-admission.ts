@@ -1,6 +1,7 @@
-import { resolve } from "node:path"
+import { stat } from "node:fs/promises"
+import { join, resolve } from "node:path"
 import type { Process, ProcessResult } from "@yrd/process"
-import type { PinIntentAdmission, PinTombstone } from "@yrd/intent"
+import type { PinIntentAdmission, PinTombstone, RemedyStepV1 } from "@yrd/intent"
 import { cleanGitEnvironment } from "./git-environment.ts"
 
 export type { PinIntentAdmission, PinIntentAdmitted, PinIntentRefused, PinIntentRelation } from "@yrd/intent"
@@ -72,7 +73,22 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
 
   const componentRepo = resolve(repo, options.component)
   const branch = await componentBranch(options.process, repo, options.component)
-  await tryGit(options.process, componentRepo, ["fetch", "--quiet", "--prune", "origin"])
+  /**
+   * The refresh, and whether it worked.
+   *
+   * Every publication answer below is read from this checkout's own
+   * remote-tracking refs, so a fetch that failed turns all of them into stale
+   * reads. Discarding the outcome — what this line used to do — let a failed
+   * refresh masquerade as a clean negative and refused commits that were the
+   * component's published tip. The outcome is now carried into the verdict.
+   */
+  const fetched = await fetchComponent(options.process, componentRepo)
+  const scope: PublicationScope = {
+    repo: componentRepo,
+    refs: "refs/remotes/origin/*",
+    fetched,
+    lastFetchAt: await lastFetchAt(options.process, componentRepo),
+  }
   /**
    * The component's trunk tip, read from the remote-tracking ref the fetch
    * above just refreshed — the same snapshot the derived target comes from, so
@@ -96,9 +112,11 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
       code: "intent-target-unpublished",
       message:
         `yrd: component '${options.component}' has no published origin/${branch} tip to derive; whoever holds ` +
-        `the local commit must publish it through that component's own git workflow before an intent can be evaluated`,
-      evidence: { component: options.component, currentPin },
+        `the local commit must publish it through that component's own git workflow before an intent can be evaluated. ` +
+        scopeSentence(scope),
+      evidence: { component: options.component, currentPin, ...scopeEvidence(scope) },
       remedy: [
+        ...(fetched.ok ? [] : [retryStep(options.component, undefined, options.issue)]),
         {
           argv: ["yrd", "intent", "submit", "--component", options.component, "--issue", options.issue],
           note: "resubmit once the component's local commit is published; the queue re-derives the trunk tip at merge time",
@@ -130,15 +148,24 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
       ],
     }
   }
-  if (!(await isPublished(options.process, componentRepo, target))) {
+  const publication = await readPublication(options.process, componentRepo, target)
+  if (!publication.published) {
     return {
       admitted: false,
       code: "intent-target-unpublished",
       message:
         `yrd: target '${target}' is not reachable from any published branch of '${options.component}'; whoever ` +
-        `holds it must publish it through that component's own git workflow before it can be admitted`,
-      evidence: { component: options.component, target, currentPin },
+        `holds it must publish it through that component's own git workflow before it can be admitted. ` +
+        `${PUBLICATION_REASON_CLAUSE[publication.reason]}. ${scopeSentence(scope)}`,
+      evidence: {
+        component: options.component,
+        target,
+        currentPin,
+        ...scopeEvidence(scope),
+        publicationReason: publication.reason,
+      },
       remedy: [
+        ...(fetched.ok ? [] : [retryStep(options.component, target, options.issue)]),
         {
           argv: [
             "yrd",
@@ -198,7 +225,7 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
     // on the line trunk DID take vanishes with no diff for anyone to read. The
     // waiver is declared, never inferred.
     if (options.allowOffTrunk !== true && !(await isTrunkReachable(options.process, componentRepo, trunk, target))) {
-      return offTrunkRefusal(options.component, target, currentPin, trunk, options.issue)
+      return offTrunkRefusal(options.component, target, currentPin, trunk, options.issue, scope)
     }
     return { admitted: true, currentPin, target, relation: "advance" }
   }
@@ -270,6 +297,7 @@ function offTrunkRefusal(
   currentPin: string,
   trunk: string | undefined,
   issue: string,
+  scope: PublicationScope,
 ): PinIntentAdmission {
   const trunkClause =
     trunk === undefined
@@ -278,8 +306,14 @@ function offTrunkRefusal(
   return {
     admitted: false,
     code: "intent-target-off-trunk",
-    message: `yrd: target '${target}' is not on the trunk of '${component}'; ${trunkClause}`,
-    evidence: { component, target, currentPin, ...(trunk === undefined ? {} : { trunk }) },
+    message: `yrd: target '${target}' is not on the trunk of '${component}'; ${trunkClause}. ${scopeSentence(scope)}`,
+    evidence: {
+      component,
+      target,
+      currentPin,
+      ...(trunk === undefined ? {} : { trunk }),
+      ...scopeEvidence(scope),
+    },
     remedy: [
       ...(trunk === undefined
         ? []
@@ -347,16 +381,141 @@ async function componentBranch(process: Pick<Process, "run">, repo: string, comp
   return branch === undefined || branch === "" || branch === "." ? "main" : branch
 }
 
-async function isPublished(process: Pick<Process, "run">, componentRepo: string, target: string): Promise<boolean> {
+/**
+ * Why a target looked unpublished — the three states a boolean used to merge.
+ *
+ * `commit-absent` is the checkout never having seen the commit, which a failed
+ * fetch alone can cause; `no-containing-ref` is the real unpublished shape; and
+ * `read-failed` is admission not knowing. Printing any of them as the second
+ * one is what refused published commits, so they stay apart all the way to the
+ * message.
+ */
+type PublicationRead = Readonly<
+  { published: true } | { published: false; reason: "commit-absent" | "no-containing-ref" | "read-failed" }
+>
+
+const PUBLICATION_REASON_CLAUSE: Readonly<Record<"commit-absent" | "no-containing-ref" | "read-failed", string>> = {
+  "commit-absent": "The target commit is not present in that checkout at all",
+  "no-containing-ref": "The target commit is present in that checkout, but no remote-tracking ref contains it",
+  "read-failed": "The containing-ref read itself failed, so publication is unknown rather than disproved",
+}
+
+/** Did the refreshing fetch run, and if not, why not. */
+type FetchOutcome = Readonly<{ ok: true } | { ok: false; detail: string }>
+
+/** Everything a reader needs to judge the publication answer's authority. */
+type PublicationScope = Readonly<{
+  repo: string
+  refs: string
+  fetched: FetchOutcome
+  lastFetchAt: LastFetch
+}>
+
+type LastFetch = Readonly<{ known: true; at: string } | { known: false; why: string }>
+
+/**
+ * Refresh the component's remote-tracking refs, reporting failure instead of
+ * throwing.
+ *
+ * A fetch that cannot run must not abort admission — the local refs still
+ * support an advisory answer — but it must never pass silently either, so the
+ * failure travels back as a value the refusal is obliged to disclose. A timeout
+ * is a failure like any other here, not an exception.
+ */
+async function fetchComponent(process: Pick<Process, "run">, componentRepo: string): Promise<FetchOutcome> {
+  const result = await run(process, componentRepo, ["fetch", "--quiet", "--prune", "origin"])
+  if (result.timedOut) return { ok: false, detail: `timed out after ${GIT_TIMEOUT_MS}ms` }
+  if (result.exitCode === 0) return { ok: true }
+  const detail = result.stderr.trim() || result.stdout.trim() || `exit ${String(result.exitCode)}`
+  return { ok: false, detail: detail.replaceAll("\n", " ") }
+}
+
+/**
+ * When this checkout last fetched, from FETCH_HEAD's mtime.
+ *
+ * Recency is the half of "as of when" that the fetch outcome cannot supply: a
+ * fetch that just failed leaves the previous timestamp standing, and that
+ * timestamp is how a reader judges the staleness they are being handed. An
+ * unreadable FETCH_HEAD answers with the reason, never with silence.
+ */
+async function lastFetchAt(process: Pick<Process, "run">, componentRepo: string): Promise<LastFetch> {
+  const gitDir = (await tryGit(process, componentRepo, ["rev-parse", "--absolute-git-dir"]))?.trim()
+  if (gitDir === undefined || gitDir === "") {
+    return { known: false, why: "unknown (the component checkout has no readable git dir)" }
+  }
+  try {
+    const stats = await stat(join(gitDir, "FETCH_HEAD"))
+    return { known: true, at: stats.mtime.toISOString() }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === "ENOENT") return { known: false, why: "never (no FETCH_HEAD in the component checkout)" }
+    return { known: false, why: `unknown (FETCH_HEAD unreadable: ${code ?? String(error)})` }
+  }
+}
+
+/** The disclosure every ref-derived refusal carries: where, from what, how old. */
+function scopeSentence(scope: PublicationScope): string {
+  const fetchClause = scope.fetched.ok
+    ? "fetch ok"
+    : `fetch FAILED (${scope.fetched.detail}), so this is a possibly-stale read`
+  const recency = scope.lastFetchAt.known ? scope.lastFetchAt.at : scope.lastFetchAt.why
+  return `Read in '${scope.repo}' from local remote-tracking refs '${scope.refs}'; ${fetchClause}; last fetched ${recency}`
+}
+
+function scopeEvidence(scope: PublicationScope): Readonly<{
+  readRepo: string
+  readRefs: string
+  fetchOutcome: "ok" | "failed"
+  fetchDetail?: string
+  lastFetchAt?: string
+}> {
+  return {
+    readRepo: scope.repo,
+    readRefs: scope.refs,
+    fetchOutcome: scope.fetched.ok ? "ok" : "failed",
+    ...(scope.fetched.ok ? {} : { fetchDetail: scope.fetched.detail }),
+    ...(scope.lastFetchAt.known ? { lastFetchAt: scope.lastFetchAt.at } : {}),
+  }
+}
+
+/**
+ * The retry a failed fetch earns.
+ *
+ * Without it the only remedy offered is "publish the target" — advice that is
+ * actively wrong when the target is already published and only the refresh
+ * broke.
+ */
+function retryStep(component: string, target: string | undefined, issue: string): RemedyStepV1 {
+  return {
+    argv: [
+      "yrd",
+      "intent",
+      "submit",
+      "--component",
+      component,
+      ...(target === undefined ? [] : ["--target", target]),
+      "--issue",
+      issue,
+    ],
+    note: "the component fetch failed, so this verdict read possibly-stale refs; retry once the component's origin is reachable",
+  }
+}
+
+async function readPublication(
+  process: Pick<Process, "run">,
+  componentRepo: string,
+  target: string,
+): Promise<PublicationRead> {
   const exists = await tryGit(process, componentRepo, ["cat-file", "-e", `${target}^{commit}`])
-  if (exists === undefined) return false
+  if (exists === undefined) return { published: false, reason: "commit-absent" }
   const refs = await tryGit(process, componentRepo, [
     "for-each-ref",
     "--format=%(refname)",
     `--contains=${target}`,
     "refs/remotes/origin/",
   ])
-  return refs !== undefined && refs.trim() !== ""
+  if (refs === undefined) return { published: false, reason: "read-failed" }
+  return refs.trim() === "" ? { published: false, reason: "no-containing-ref" } : { published: true }
 }
 
 async function isAncestor(
