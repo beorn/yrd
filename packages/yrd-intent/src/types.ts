@@ -289,6 +289,17 @@ export type PinIntentRefused = Readonly<{
     run?: string
     step?: string
     attempts?: number
+    /** Repository path the publication read actually ran in. */
+    readRepo?: string
+    /** Ref namespace it read — local remote-tracking refs, not the remote. */
+    readRefs?: string
+    /** Whether the refreshing fetch succeeded; `failed` means the read is stale. */
+    fetchOutcome?: "ok" | "failed"
+    fetchDetail?: string
+    /** FETCH_HEAD mtime, when the checkout has one. */
+    lastFetchAt?: string
+    /** Which of the three unpublished-looking states actually held. */
+    publicationReason?: "commit-absent" | "no-containing-ref" | "read-failed"
   }>
   remedy: readonly RemedyStepV1[]
 }>
@@ -319,6 +330,12 @@ export const PinIntentRefusalSchema = z
         run: RunIdSchema.optional(),
         step: TextSchema.optional(),
         attempts: z.number().int().positive().optional(),
+        readRepo: TextSchema.optional(),
+        readRefs: TextSchema.optional(),
+        fetchOutcome: z.enum(["ok", "failed"]).optional(),
+        fetchDetail: TextSchema.optional(),
+        lastFetchAt: TextSchema.optional(),
+        publicationReason: z.enum(["commit-absent", "no-containing-ref", "read-failed"]).optional(),
       })
       .strict(),
     remedy: z.array(RemedyStepSchema).readonly(),
