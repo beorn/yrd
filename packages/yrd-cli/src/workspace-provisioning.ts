@@ -21,6 +21,11 @@ const PACKAGE_MANAGERS = [
     lockfile: "bun.lock",
     manager: "bun",
     install: ["install", "--frozen-lockfile", "--ignore-scripts"],
+    // Relaxing bun means OMITTING the freeze flag, not negating it: 1.3.14
+    // documents no --no-frozen-lockfile counterpart to pnpm's below. A bare
+    // install also stays unfrozen under CI=true (verified on 1.3.14), which is
+    // the load-bearing half — a manager that self-freezes in CI would make this
+    // retry a silent no-op that refuses identically to the frozen attempt.
     relaxed: ["install", "--ignore-scripts"],
     staleLockfile: /lockfile had changes, but lockfile is frozen/iu,
   },
