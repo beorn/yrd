@@ -3,6 +3,7 @@ import { isAbsolute, join, relative, resolve } from "node:path"
 import { defineConfig, withActionStep, withCheckStep, withFlow, withMergeStep, type FlowDef } from "@yrd/config"
 import { asFailure, createFailure } from "@yrd/core"
 import {
+  DEFAULT_QUEUE_BATCH_SIZE,
   DEFAULT_QUEUE_PROGRESS_POLICY,
   DIAGNOSTICS_COMPARISON_READY,
   GateModeSchema,
@@ -331,7 +332,7 @@ export async function loadYrdConfig(options: {
     ...(source === undefined ? {} : { path }),
     config: {
       base: parsed.base ?? options.defaultBase,
-      batch: parsed.batch ?? 1,
+      batch: parsed.batch ?? DEFAULT_QUEUE_BATCH_SIZE,
       checks,
       steps,
       landing: parsed.landing ?? "expected",
