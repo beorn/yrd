@@ -3356,6 +3356,42 @@ describe("runYrd", () => {
     expect(queueRun, "an unchanged idle tick must not traverse and compose the full queue").toHaveBeenCalledTimes(1)
   })
 
+  it("exits non-zero on every resident refusal, so a stopped runner is never mistaken for a drained queue", async () => {
+    // A resident that refuses has stopped serving the queue. If it exited zero,
+    // every supervisor above it — hab, a shell loop, CI — would read the stop as
+    // a completed drain and not restart it, and the queue would sit unattended
+    // behind a green exit. Refusals classify to 1 (invocation.ts
+    // `classifyFailure`); this pins the whole path from the gate to the code.
+    const refuse = (code: "runtime-drift" | "config-drift"): YrdCliServices => ({
+      queue: {
+        auditEnvironment: async () => ({
+          findings: [{ code, message: `queue base 'main' ${code} blocks the resident` }],
+        }),
+      },
+    })
+
+    // Runtime drift: this process's own queue policy diverged, so no baseline
+    // rewrite can save it — the resident must die and be restarted.
+    const runtime = outputIO()
+    const app = await createApp()
+    expect(await runYrd(app, yrd("queue", "run"), runtime.io, refuse("runtime-drift"))).toBe(1)
+    expect(runtime.stderr()).toContain("runtime-drift")
+
+    // Config drift with no provision capability wired: follow mode cannot
+    // re-provision its way out, so this refuses too rather than draining on a
+    // baseline it cannot prove.
+    const config = outputIO()
+    const configApp = await createApp()
+    expect(await runYrd(configApp, yrd("queue", "run"), config.io, refuse("config-drift"))).toBe(1)
+    expect(config.stderr()).toContain("config-drift")
+
+    // The one-shot path shares the gate and must agree: a refusal is a refusal
+    // whether or not a resident is following.
+    const once = outputIO()
+    const onceApp = await createApp()
+    expect(await runYrd(onceApp, yrd("queue", "run", "--once"), once.io, refuse("runtime-drift"))).toBe(1)
+  })
+
   it("expires a hold on an otherwise idle follow tick without exiting the runner", async () => {
     let now = Date.parse("2026-07-09T12:00:00.000Z")
     const app = await createApp()
@@ -7010,20 +7046,62 @@ describe("runYrd", () => {
       // is in fact unattended, and the operator needs the second answer. Live
       // specimen 2026-07-25: pid 20486 gone, `queue list` said STALE, and the
       // outage was found by whoever next ran a command.
-      writeFileSync(statusPath, JSON.stringify({ ...runner, pid: unusedPid() }))
+      // Three runner-absence states, three sentences. They shared one — "NO
+      // RUNNER - no drained run in window" was asserted here verbatim for both
+      // the dead-pid runner and the deleted status file — so the banner
+      // announced that nothing drains the queue without saying whether a runner
+      // had died or none was ever started, and named no remedy for either.
+      const departedPid = unusedPid()
+      writeFileSync(statusPath, JSON.stringify({ ...runner, pid: departedPid }))
       const dead = outputIO({
         cwd: repo,
         now: () => Date.parse("2026-07-13T12:00:20.001Z"),
         resolveQueueTarget,
       })
       expect(await runYrd(app, yrd("queue", "list"), dead.io), dead.stderr()).toBe(0)
-      expect(dead.stdout()).toContain("NO RUNNER - no drained run in window")
+      // Last heartbeat 11:59:55, read at 12:00:20 — a runner gone 25s with no
+      // exit marker of its own.
+      expect(dead.stdout()).toContain(
+        `NO RUNNER - resident runner [${departedPid}] died 0:25 ago, no exit marker; restart it: yrd queue run main`,
+      )
       expect(dead.stdout(), "a departed runner is not a late one").not.toContain("RUNNER STALE")
+
+      // A runner that wrote its own exit marker stopped on purpose; the same
+      // remedy, but nothing to investigate.
+      writeFileSync(
+        statusPath,
+        JSON.stringify({ ...runner, pid: departedPid, exitedAt: "2026-07-13T12:00:00.000Z", clean: true }),
+      )
+      const stopped = outputIO({
+        cwd: repo,
+        now: () => Date.parse("2026-07-13T12:00:20.001Z"),
+        resolveQueueTarget,
+      })
+      expect(await runYrd(app, yrd("queue", "list"), stopped.io), stopped.stderr()).toBe(0)
+      expect(stopped.stdout()).toContain(
+        `NO RUNNER - resident runner [${departedPid}] stopped 0:20 ago; restart it: yrd queue run main`,
+      )
 
       rmSync(statusPath)
       const absent = outputIO({ cwd: repo, resolveQueueTarget })
       expect(await runYrd(app, yrd("queue", "list"), absent.io), absent.stderr()).toBe(0)
-      expect(absent.stdout()).toContain("NO RUNNER - no drained run in window")
+      // This io keeps the ambient clock, so the wait clause between the fact and
+      // the remedy is whatever the open submission has aged to; both halves are
+      // pinned exactly, on a fixed clock, in queue-no-runner-banner.test.ts.
+      expect(absent.stdout()).toContain("NO RUNNER - no runner has ever drained this queue")
+      expect(absent.stdout()).toContain("start one: yrd queue run main")
+      // The pin that matters: no two of the three states may print the same
+      // line, which is exactly what the previous assertions permitted.
+      const banners = [dead, stopped, absent].map(
+        (io) =>
+          io
+            .stdout()
+            .split("\n")
+            .find((line) => line.includes("NO RUNNER"))
+            ?.trim() ?? "",
+      )
+      expect(banners.every((line) => line !== "")).toBe(true)
+      expect(new Set(banners).size, `three absence states must print three sentences: ${banners.join(" | ")}`).toBe(3)
     } finally {
       safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
     }
@@ -8277,7 +8355,8 @@ describe("runYrd", () => {
       expect(frame).toMatch(/POSITION\s+1/u)
       expect(frame).toContain("AGE")
       expect(frame).toContain("QUEUING")
-      expect(frame).toContain("NO RUNNER - no drained run in window")
+      // The remedy tail truncates in this split-pane width; the fact does not.
+      expect(frame).toContain("NO RUNNER - no runner has ever drained this queue")
       // The bottom keybindings footer row was removed entirely (item h).
       expect(frame).not.toContain("q quit")
       expect(frame).not.toContain("LIVE")

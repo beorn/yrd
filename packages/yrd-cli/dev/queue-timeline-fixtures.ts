@@ -8,6 +8,7 @@ import {
   type QueueAttempt,
   type QueueStatusResult,
   type QueueTimelineProjection,
+  type QueueRunnerAbsence,
   type QueueTimelineRunner,
   type QueueTimelineStatus,
   type QueueTimelineStatusFilter,
@@ -404,6 +405,7 @@ type ProjectionOptions = Readonly<{
   retainedSinceMs?: number
   attempts?: readonly QueueAttempt[]
   runner?: QueueTimelineRunner | null
+  runnerAbsence?: QueueRunnerAbsence
   oldestOpenMs?: number | null
 }>
 
@@ -426,6 +428,7 @@ function fixtureProjection(
     ...(options.oldestOpenMs === undefined ? {} : { oldestOpenMs: options.oldestOpenMs }),
     siblingBases: ["release/next"],
     base: "main",
+    ...(options.runnerAbsence === undefined ? {} : { runnerAbsence: options.runnerAbsence }),
     runner:
       options.runner === undefined
         ? {
@@ -1042,6 +1045,7 @@ export const QUEUE_TIMELINE_STORY_NAMES = [
   "running-spinner",
   "mixed-completed",
   "paused",
+  "runner-departed",
   "honest-cap",
   "non-default-filters",
   "latest-vs-all-lineage",
@@ -1125,6 +1129,15 @@ export const queueTimelineStories: Readonly<Record<QueueTimelineStoryName, Queue
   },
   "mixed-completed": { snapshot: fixtureSnapshot(mixedResult), widths: [120] },
   paused: { snapshot: fixtureSnapshot(pausedResult, { runner: null }), widths: [100] },
+  // The longest of the three NO RUNNER sentences, at the widths where its
+  // remedy starts getting truncated away.
+  "runner-departed": {
+    snapshot: fixtureSnapshot(fixtureResult([pendingOne], []), {
+      runner: null,
+      runnerAbsence: { kind: "departed", pid: 84_042, clean: false, lastAliveMs: NOW - 8 * 60_000 },
+    }),
+    widths: [80, 120],
+  },
   "honest-cap": { snapshot: fixtureSnapshot(mixedResult, { rowLimit: 2 }), widths: [100] },
   "non-default-filters": {
     snapshot: fixtureSnapshot(mixedResult, { statuses: ["rejected"], terms: ["typecheck"] }),

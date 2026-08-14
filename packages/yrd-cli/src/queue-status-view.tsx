@@ -514,6 +514,25 @@ export type QueueRunnerRefusal = Readonly<{
 }>
 
 /**
+ * Why no runner is draining this queue, for the surfaces that must say so.
+ *
+ * Display collapses a departed runner to `runner: null` (run.ts
+ * `activeResidentRunner`), and that collapse threw away the one fact the
+ * operator needs: whether the runner that was here is GONE, or whether none was
+ * ever here. Both printed "NO RUNNER - no drained run in window" — cli.test.ts
+ * asserted the identical string for a dead-pid runner and a missing status file
+ * — so the banner could not tell a crash from a queue nobody ever staffed.
+ *
+ * `departed` carries the pid and the last moment the runner was known alive:
+ * `clean` when it wrote its own exit marker (an operator or drain stop), false
+ * when the marker is missing and only a dead pid proves it went (SIGKILL, OOM,
+ * crash).
+ */
+export type QueueRunnerAbsence =
+  | Readonly<{ kind: "departed"; pid: number; clean: boolean; lastAliveMs: number }>
+  | Readonly<{ kind: "never" }>
+
+/**
  * One queue the projection covers, and the short label every surface uses for
  * it: the legend pill, the digit that toggles it, and the `N:` prefix on its
  * run references. Labels are positions in `queues`, so they are stable for a
@@ -534,6 +553,8 @@ export type QueueTimelineProjection = Readonly<{
   siblingBases: readonly string[]
   /** Resident-runner heartbeat status; null renders loudly — nothing drains this queue. */
   runner: QueueTimelineRunner | null
+  /** Why `runner` is null. Present only when it is; the banner needs it to name a remedy. */
+  runnerAbsence?: QueueRunnerAbsence
   pause?: QueueSummary["pause"]
   oldestOpenMs: number | null
   filters: Readonly<{
@@ -578,6 +599,7 @@ export type QueueTimelineProjectionOptions = Readonly<{
   base?: string
   state?: BaysState
   runner?: QueueTimelineRunner | null
+  runnerAbsence?: QueueRunnerAbsence
 }>
 
 export type DurationDistribution = Readonly<{
@@ -2752,6 +2774,7 @@ function buildQueueTimelineProjection(
     queues,
     siblingBases: [...new Set(options.siblingBases ?? [])].filter((candidate) => candidate !== base).toSorted(),
     runner: options.runner ?? null,
+    ...(options.runner != null || options.runnerAbsence === undefined ? {} : { runnerAbsence: options.runnerAbsence }),
     ...(pause === undefined ? {} : { pause }),
     oldestOpenMs,
     filters: { windowMs: options.windowMs, since, statuses, terms, latest: options.latest },
@@ -5196,6 +5219,48 @@ function RunnerProgressObservation({ progress, now }: { progress: QueueRunnerPro
 }
 
 /**
+ * The one line a reader gets when nothing is draining this queue, and the only
+ * place the three runner-absence states are told apart.
+ *
+ * They used to share one sentence. A runner killed by SIGKILL, a runner that
+ * stopped cleanly, and a queue no runner has ever touched all rendered
+ * "NO RUNNER - no drained run in window" (cli.test.ts pinned that identical
+ * string for the dead-pid case and the missing-status-file case), so the banner
+ * announced a problem without saying which one, and never said what to do. Each
+ * state now names its own fact and carries its own remedy inline: this row is
+ * `wrap="truncate"` by design (see the header-row comment below), so a remedy
+ * parked on a separate rail is a remedy a narrow pane hides — the reason the
+ * sentences stay short enough to survive a normal-width frame.
+ */
+export function queueNoRunnerBanner(
+  projection: Pick<QueueTimelineProjection, "base" | "oldestOpenMs" | "runnerAbsence">,
+  drainedMs: number | null,
+  nowMs: number,
+  runnerRefusal?: QueueRunnerRefusal,
+): string {
+  if (runnerRefusal !== undefined) {
+    return `NO RUNNER - runner stopped: stale step contract on ${runnerRefusal.run ?? "unknown run"}`
+  }
+  const start = `yrd queue run ${projection.base}`
+  const absence = projection.runnerAbsence
+  if (absence !== undefined && absence.kind === "departed") {
+    const ago = mediaDuration(Math.max(0, nowMs - absence.lastAliveMs))
+    // A clean exit is a decision someone made; a missing exit marker is a death
+    // nobody recorded, and only the second is a reason to look at why.
+    return absence.clean
+      ? `NO RUNNER - resident runner [${absence.pid}] stopped ${ago} ago; restart it: ${start}`
+      : `NO RUNNER - resident runner [${absence.pid}] died ${ago} ago, no exit marker; restart it: ${start}`
+  }
+  // Nothing has ever drained HERE, and something may be waiting on it — the two
+  // facts a reader needs before deciding this queue is merely quiet.
+  if (drainedMs === null) {
+    const waiting = projection.oldestOpenMs === null ? "" : `, oldest open ${mediaDuration(projection.oldestOpenMs)}`
+    return `NO RUNNER - no runner has ever drained this queue${waiting}; start one: ${start}`
+  }
+  return `NO RUNNER - queue last drained ${mediaDuration(nowMs - drainedMs)} ago, none resident since; start one: ${start}`
+}
+
+/**
  * Resident runner status is always visible in its own RUNNER frame. The
  * queue-pause STATUS line lives INSIDE this frame (user directive 2026-07-21,
  * supersedes the separate STATUS box), the uptime/downtime timer rides the
@@ -5263,20 +5328,7 @@ function TimelineRunnerBox({
         </RunnerActivity>
         {runner === null ? (
           <Text color="$fg-error" bold wrap="truncate" minWidth={0}>
-            {runnerRefusal !== undefined
-              ? `NO RUNNER - runner stopped: stale step contract on ${runnerRefusal.run ?? "unknown run"}`
-              : drained === null
-                ? // "no drained run in window" alone reads as a quiet queue. It is
-                  // the same sentence whether nothing was submitted or work has
-                  // been waiting an hour for a driver that does not exist, and on
-                  // 2026-08-05 it was the second. Naming how long the oldest open
-                  // submission has waited turns one ambiguous line into the two
-                  // facts a reader needs: nothing has ever run HERE, and something
-                  // is waiting for it.
-                  `NO RUNNER - no drained run in window${
-                    projection.oldestOpenMs === null ? "" : `; oldest open ${mediaDuration(projection.oldestOpenMs)}`
-                  }`
-                : `NO RUNNER - queue last drained ${mediaDuration(now - drained)} ago`}
+            {queueNoRunnerBanner(projection, drained, now, runnerRefusal)}
           </Text>
         ) : (
           <Text color={marker.color} wrap="truncate" minWidth={0}>

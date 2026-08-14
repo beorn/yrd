@@ -131,6 +131,7 @@ import {
   runRevisionClock,
   queueShowData,
   type QueueAttempt,
+  type QueueRunnerAbsence,
   type QueueRunnerRefusal,
   QueueRunnerProgress,
   type QueueDriverEpoch,
@@ -690,10 +691,42 @@ function residentRunnerRunning(pid: number): boolean {
  * or a crash leaves the record behind with a plausible pid and a frozen
  * heartbeat, which then displays as STALE — "a runner that is running late" —
  * for an unattended queue (22374). The pid probe is what separates departed from
- * late, so display asks it directly. */
+ * late, so display asks it directly.
+ *
+ * The nulling is lossy, and the banner needs what it loses: "the runner that was
+ * here is gone" and "no runner was ever here" are different states with
+ * different remedies, and collapsing both to null made them one sentence. So the
+ * observation keeps the reason alongside the filtered runner, and asks the pid
+ * ONCE — a second probe could disagree with the first if the pid exits between
+ * them, and report a live runner that is also departed. */
+function observeResidentRunner(
+  runner: QueueTimelineRunner | null,
+): Readonly<{ runner: QueueTimelineRunner | null; absence?: QueueRunnerAbsence }> {
+  if (runner === null) return { runner: null, absence: { kind: "never" } }
+  if (runner.exitedAt !== undefined) {
+    return {
+      runner: null,
+      absence: {
+        kind: "departed",
+        pid: runner.pid,
+        // A marker written without `clean` predates the flag (D1a); it proves the
+        // runner got to write an exit, which is what "clean" claims here.
+        clean: runner.clean ?? true,
+        lastAliveMs: Date.parse(runner.exitedAt),
+      },
+    }
+  }
+  if (residentRunnerRunning(runner.pid)) return { runner }
+  // No exit marker and no process: it died without recording anything, so the
+  // last heartbeat is the last moment it is known to have been alive.
+  return {
+    runner: null,
+    absence: { kind: "departed", pid: runner.pid, clean: false, lastAliveMs: Date.parse(runner.lastTickAt) },
+  }
+}
+
 function activeResidentRunner(runner: QueueTimelineRunner | null): QueueTimelineRunner | null {
-  if (runner === null || runner.exitedAt !== undefined) return null
-  return residentRunnerRunning(runner.pid) ? runner : null
+  return observeResidentRunner(runner).runner
 }
 
 type RunnerGitDistance = Readonly<{
@@ -6197,6 +6230,8 @@ type QueueListObservation = Readonly<{
   generation: number
   attempts: readonly QueueAttempt[]
   runner: QueueTimelineRunner | null
+  /** Why `runner` is null; absent when a runner is live. */
+  runnerAbsence?: QueueRunnerAbsence
   runnerToken: string
   runnerStateToken: string
   runnerProjectionToken: string
@@ -6232,13 +6267,21 @@ function queueRunnerStateToken(runner: QueueTimelineRunner | null): string {
 }
 
 /** Runner facts that change chrome without invalidating durable queue facts.
- * Heartbeat time is deliberately excluded; queueProgress is not. */
-function queueRunnerProjectionToken(runner: QueueTimelineRunner | null): string {
+ * Heartbeat time is deliberately excluded; queueProgress is not.
+ *
+ * The absence belongs here and nowhere else: every absent state tokenizes the
+ * runner as "none", so a departed runner whose status file is then removed would
+ * otherwise leave the banner naming a pid that no longer has a record. */
+function queueRunnerProjectionToken(
+  runner: QueueTimelineRunner | null,
+  absence: QueueRunnerAbsence | undefined,
+): string {
   return JSON.stringify([
     queueRunnerStateToken(runner),
     runner?.queueProgress ?? null,
     runner?.driver ?? null,
     runner?.sourceBehind ?? null,
+    absence ?? null,
   ])
 }
 
@@ -6284,7 +6327,8 @@ async function observeQueueList(
   }
   const cwd = io.cwd ?? process.cwd()
   const now = io.now?.() ?? Date.now()
-  const observedRunner = activeResidentRunner(await residentRunnerStatus(cwd, io.stateDir))
+  const observation = observeResidentRunner(await residentRunnerStatus(cwd, io.stateDir))
+  const observedRunner = observation.runner
   // Measured in the Yrd SOURCE checkout, not `cwd`: `implementationSource` is a
   // commit of the Yrd repository, and the queue repository it is serving is a
   // different repo. Handing `cwd` to this read is what made a current resident
@@ -6303,9 +6347,10 @@ async function observeQueueList(
     generation: read.generation,
     attempts: read.attempts,
     runner,
+    ...(observation.absence === undefined ? {} : { runnerAbsence: observation.absence }),
     runnerToken: queueRunnerToken(runner),
     runnerStateToken: queueRunnerStateToken(runner),
-    runnerProjectionToken: queueRunnerProjectionToken(runner),
+    runnerProjectionToken: queueRunnerProjectionToken(runner, observation.absence),
     now,
     ...(readFailure === undefined ? {} : { readFailure }),
   }
@@ -6336,7 +6381,7 @@ async function buildQueueListSnapshot(
   observed: QueueListObservation,
   configuredBase: string | undefined,
 ): Promise<QueueListSnapshotBuild> {
-  const { state, now, runner, attempts } = observed
+  const { state, now, runner, runnerAbsence, attempts } = observed
   // Nobody named a base, so the repository's own configured base is the primary
   // one — the same `options.base ?? services.base ?? "main"` order every other
   // base-reading command uses. A repository whose queue is `release` labels
@@ -6372,6 +6417,7 @@ async function buildQueueListSnapshot(
     base,
     state: state.bays,
     runner,
+    ...(runnerAbsence === undefined ? {} : { runnerAbsence }),
   })
   const projection = clock.projection
   // `--json` must answer the SAME question the human renderer answers. The
