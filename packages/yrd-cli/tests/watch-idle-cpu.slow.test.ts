@@ -6,15 +6,14 @@
  * @level l3
  * @consumer @yrd/cli
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { join } from "node:path"
 import { createTestTerminal } from "@termless/test"
 import { describe, expect, it } from "vitest"
+import { installedYrdLauncher } from "./support/installed-launcher.ts"
 
-const yrdRoot = resolve(import.meta.dirname, "../../..")
-const hhRoot = resolve(yrdRoot, "../..")
-const installedYrd = resolve(hhRoot, "tools/installed/yrd")
+const installedYrd = installedYrdLauncher()
 const SAMPLE_MS = 60_000
 const MAX_IDLE_CPU_SECONDS = 3
 
@@ -64,7 +63,7 @@ function requireAlive(terminal: ReturnType<typeof createTestTerminal>, pid: numb
   return cpuSeconds(pid)
 }
 
-describe.skipIf(!existsSync(installedYrd))("yrd idle CPU (installed)", () => {
+describe("yrd idle CPU (installed)", () => {
   it("uses at most 5% of one core across a 60-second idle PTY window", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-watch-idle-cpu-"))
     const pidPath = join(root, "watch.pid")
