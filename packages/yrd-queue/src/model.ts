@@ -817,6 +817,12 @@ export const YRD_QUEUE_AUDIT_FINDING_CODES = [
 
 export type QueueAuditFindingCode = (typeof YRD_QUEUE_AUDIT_FINDING_CODES)[number]
 
+/** @deprecated Transition alias for the pre-rename name — /hh and /hh/ag mirrors
+ * still import it. Remove once both mirrors read YRD_QUEUE_AUDIT_FINDING_CODES
+ * (tracked in the I10 landing checklist; the swap gives ag's 5-code PAGED set
+ * the PAGE name). */
+export const YRD_QUEUE_AUDIT_PAGE_FINDING_CODES = YRD_QUEUE_AUDIT_FINDING_CODES
+
 /** A finding AT ITS PRODUCER: a {@link QueueAuditFinding} whose code is closed
  * over {@link YRD_QUEUE_AUDIT_FINDING_CODES}. Readers keep the open
  * `code: string` — a finding parsed back out of another process's JSON status is

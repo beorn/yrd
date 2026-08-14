@@ -11831,7 +11831,7 @@ describe("runYrd", () => {
       },
     } as YrdCliServices)
 
-    const payload = JSON.parse(output.stdout())
+    const payload = JSON.parse(output.stdout()) as { statement?: unknown; statementUnavailable?: string }
     expect(payload.statement).toBeUndefined()
     expect(payload.statementUnavailable).toContain("R-not-in-journal")
   })
