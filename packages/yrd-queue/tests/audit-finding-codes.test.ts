@@ -6,7 +6,7 @@
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
-import { YRD_QUEUE_AUDIT_PAGE_FINDING_CODES } from "@yrd/queue"
+import { YRD_QUEUE_AUDIT_FINDING_CODES, type QueueAuditEmission } from "@yrd/queue"
 
 /** The two producers whose findings `queue audit` concatenates: the core walk
  * in this package, and the environment (installed-baseline) audit in the CLI. */
@@ -41,7 +41,20 @@ function emittedCodes(producer: (typeof PRODUCERS)[number]): Set<string> {
 
 describe("queue audit finding codes", () => {
   it("is one authoritative list with no duplicates", () => {
-    expect(new Set(YRD_QUEUE_AUDIT_PAGE_FINDING_CODES).size).toBe(YRD_QUEUE_AUDIT_PAGE_FINDING_CODES.length)
+    expect(new Set(YRD_QUEUE_AUDIT_FINDING_CODES).size).toBe(YRD_QUEUE_AUDIT_FINDING_CODES.length)
+  })
+
+  it("makes an unlisted code a compile error at the producer BOUNDARY, not just inside it", () => {
+    // The hole this closes: a producer typed with the open reader result gets
+    // its local findings array checked, but a finding written straight into the
+    // returned object literal widens on the way out and type-checks with any
+    // string. Both producers now return QueueAuditEmission, so the closure
+    // survives the return — which is what the two annotations below assert.
+    const listed: QueueAuditEmission = { findings: [{ code: "draft-stranded", message: "listed" }] }
+    expect(listed.findings[0]?.code).toBe("draft-stranded")
+    // @ts-expect-error A code no consumer whitelists cannot be emitted, inline or otherwise.
+    const unlisted: QueueAuditEmission = { findings: [{ code: "invented-code", message: "unlisted" }] }
+    expect(unlisted.findings).toHaveLength(1)
   })
 
   it("covers exactly what the producers emit", () => {
@@ -49,6 +62,6 @@ describe("queue audit finding codes", () => {
     // Both directions: nothing a producer emits is missing from the list (a
     // finding no consumer whitelists), and nothing on the list is unemitted (a
     // whitelist entry kept alive after its producer stopped writing it).
-    expect([...new Set(emitted)].toSorted()).toEqual([...YRD_QUEUE_AUDIT_PAGE_FINDING_CODES].toSorted())
+    expect([...new Set(emitted)].toSorted()).toEqual([...YRD_QUEUE_AUDIT_FINDING_CODES].toSorted())
   })
 })

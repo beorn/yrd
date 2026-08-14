@@ -8,7 +8,7 @@ import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import type { InstalledStep } from "@yrd/queue"
+import type { InstalledStep, QueueAuditEmission } from "@yrd/queue"
 import { failureFact } from "@yrd/core"
 import { createYrdHost } from "../src/host.ts"
 import { uncarriedLine } from "../src/queue-status-view.tsx"
@@ -395,8 +395,15 @@ appendFileSync(marker, "ready\\n")
     })
     expect(lifecycle).toEqual([])
     await requireFreshInstalledBaseline({})
+    // A code THIS build does not know — the finding a foreign or newer producer
+    // wrote. The gate must pass it through, not treat every unrecognized code as
+    // drift. No in-repo producer can write it (QueueAuditFindingEmission forbids
+    // exactly that), so the cast is what makes the foreign case expressible.
     await requireFreshInstalledBaseline({
-      queue: { auditEnvironment: async () => ({ findings: [{ code: "operator-finding", message: "inspect" }] }) },
+      queue: {
+        auditEnvironment: async () =>
+          ({ findings: [{ code: "operator-finding", message: "inspect" }] }) as unknown as QueueAuditEmission,
+      },
     })
   })
 

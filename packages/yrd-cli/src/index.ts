@@ -12,6 +12,7 @@ export type { QueueReadModel } from "./queue-read-model.ts"
 export type { RecutPreflightResult, RecutPreflightVerdict } from "./pr-withdraw.ts"
 export type {
   PruneGitFacts,
+  QueueAuditEmission,
   QueueAuditFinding,
   QueueAuditResult,
   YrdCliApp,

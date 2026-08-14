@@ -793,7 +793,7 @@ export type QueueAuditReviewCertification = (typeof YRD_QUEUE_AUDIT_REVIEW_CERTI
  * from `runnerHealthError` in `@yrd/cli`), a different document than a
  * `QueueAuditFinding` — a consumer may join the two surfaces onto one page, but
  * the queue audit itself never emits them. */
-export const YRD_QUEUE_AUDIT_PAGE_FINDING_CODES = [
+export const YRD_QUEUE_AUDIT_FINDING_CODES = [
   "queue-hold-ttl-missing",
   "queue-hold-expired",
   "draft-stranded",
@@ -815,10 +815,10 @@ export const YRD_QUEUE_AUDIT_PAGE_FINDING_CODES = [
   "runtime-drift",
 ] as const
 
-export type QueueAuditFindingCode = (typeof YRD_QUEUE_AUDIT_PAGE_FINDING_CODES)[number]
+export type QueueAuditFindingCode = (typeof YRD_QUEUE_AUDIT_FINDING_CODES)[number]
 
 /** A finding AT ITS PRODUCER: a {@link QueueAuditFinding} whose code is closed
- * over {@link YRD_QUEUE_AUDIT_PAGE_FINDING_CODES}. Readers keep the open
+ * over {@link YRD_QUEUE_AUDIT_FINDING_CODES}. Readers keep the open
  * `code: string` — a finding parsed back out of another process's JSON status is
  * data from a foreign version, not an emission, and must stay readable. The
  * same split applies to `reviewCertification`. */
@@ -826,6 +826,19 @@ export type QueueAuditFindingEmission = Omit<QueueAuditFinding, "code" | "review
   Readonly<{ code: QueueAuditFindingCode; reviewCertification?: QueueAuditReviewCertification }>
 
 export type QueueAuditResult = Readonly<{ findings: readonly QueueAuditFinding[] }>
+
+/** An audit AT ITS PRODUCER: {@link QueueAuditResult} carrying
+ * {@link QueueAuditFindingEmission}s. Every function that BUILDS findings
+ * returns this — `auditQueues` here and `auditEnvironment` in `@yrd/cli` — so
+ * the closed code union survives the return instead of widening at it. A
+ * producer typed `QueueAuditResult` still gets its local array checked, but a
+ * finding written inline in the returned object literal widens on the way out
+ * and type-checks with any string, which is exactly the unrendered-finding hole
+ * the code list closes. Widen to {@link QueueAuditResult} only where the two
+ * producers' findings are concatenated for DISPLAY (`queueAuditFindings` in
+ * `@yrd/cli`), because from there on a finding may equally be one parsed out of
+ * a foreign version's JSON. */
+export type QueueAuditEmission = Readonly<{ findings: readonly QueueAuditFindingEmission[] }>
 
 export const InstalledStepSchema = z
   .object({
