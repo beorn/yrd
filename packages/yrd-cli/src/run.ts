@@ -91,6 +91,7 @@ import {
   type RuntimePosture,
   type YrdContext,
 } from "./invocation.ts"
+import { requireUnqualifiedRunSelector } from "./qualified-run-ref.ts"
 import { getLiveRenderer } from "./live-renderer.ts"
 import {
   QueueLogView,
@@ -5506,7 +5507,7 @@ async function cancelQueueRun(
 ): Promise<YrdCliExitCode> {
   if (options.reason?.trim() === "") usage("--reason requires text")
   const run = await app.queue.cancelRun({
-    run: selector,
+    run: requireUnqualifiedRunSelector(selector),
     by: io.runner ?? "operator",
     reason: options.reason ?? "run canceled by operator",
   })
@@ -7466,8 +7467,9 @@ async function finishQueue(
   }
   const attempt = Number(options.attempt)
   if (!Number.isSafeInteger(attempt) || attempt < 1) usage("--attempt must be a positive integer")
-  const revisionAdmission = app.queue.waitingAdmission(selector, options.step)
-  const waiting = revisionAdmission ?? app.queue.waiting(selector, options.step)
+  const run = requireUnqualifiedRunSelector(selector)
+  const revisionAdmission = app.queue.waitingAdmission(run, options.step)
+  const waiting = revisionAdmission ?? app.queue.waiting(run, options.step)
   const selectedJob = waiting.step.job
   const recordedArtifacts = artifacts(options.artifact)
   const exitCode = positiveInteger(options.exitCode, "--exit-code")

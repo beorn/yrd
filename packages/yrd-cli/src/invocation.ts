@@ -2,6 +2,7 @@ import { basename, resolve } from "node:path"
 import { Command as CliCommand } from "@silvery/commander"
 import { failureFact, raiseFailure, type FailureFact } from "@yrd/core"
 import { resolveYrdObservability, type YrdObservability, type YrdObservabilityFlags } from "./observability.ts"
+import { parseQualifiedRunRef } from "./qualified-run-ref.ts"
 import type { YrdCliExitCode } from "./types.ts"
 
 export type Invocation = Readonly<{
@@ -227,6 +228,31 @@ function namedAlternatives(names: readonly string[]): string {
   return `${names.slice(0, -1).join(", ")} or ${names.at(-1)}`
 }
 
+/**
+ * Resolve `<repository>:<base>#<number>` against the repository this command
+ * was already routed to. Our own prefix is stripped, leaving the bare form the
+ * resolver accepts; a SIBLING's prefix refuses, because that run lives in a
+ * journal this process will never open and stripping it would silently resolve
+ * our own run of the same number instead. An undeclared prefix is left alone —
+ * it is ordinary text as far as the composition is concerned, and the ordinary
+ * not-found refusal already names it.
+ */
+function localRunReferences(
+  tail: readonly string[],
+  ownName: string,
+  byName: ReadonlyMap<string, YrdRepositoryAlias>,
+): string[] {
+  return tail.map((token) => {
+    const qualified = parseQualifiedRunRef(token)
+    if (qualified === undefined) return token
+    if (qualified.repository === ownName) return qualified.run
+    if (!byName.has(qualified.repository)) return token
+    usage(
+      `run '${token}' lives in Yrd repository '${qualified.repository}', not '${ownName}'; use 'yrd queue ${qualified.repository} ...' to reach it`,
+    )
+  })
+}
+
 /** Optional composition-host adapter for named repositories. Standalone Yrd
  * deliberately never calls this: aliases are injected by the installed host. */
 export function normalizeYrdRepositoryAliasInvocation(
@@ -260,7 +286,7 @@ export function normalizeYrdRepositoryAliasInvocation(
   }
   if (QUEUE_SUBCOMMANDS.has(operand) && READ_ONLY_SUBCOMMANDS.queue?.has(operand) !== true) {
     const declaration = requiredRepository(args[queueIndex + 2])
-    const tail = args.slice(queueIndex + 3)
+    const tail = localRunReferences(args.slice(queueIndex + 3), declaration.repository.name, byName)
     const base = operand === "pause" || operand === "resume" ? [declaration.queue.base] : []
     return {
       kind: "repository-write",
@@ -281,7 +307,7 @@ export function normalizeYrdRepositoryAliasInvocation(
       "list",
       "--base",
       declaration.queue.base,
-      ...args.slice(queueIndex + 2),
+      ...localRunReferences(args.slice(queueIndex + 2), declaration.repository.name, byName),
     ],
   }
 }
