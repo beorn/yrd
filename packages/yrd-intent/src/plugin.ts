@@ -24,10 +24,12 @@ import {
   PinIntentSchema,
   INTENT_ID_PREFIX,
   TERMINAL_INTENT_STATUSES,
+  TOMBSTONE_ID_PREFIX,
   intentFingerprint,
   intentIdNumber,
   intentKey,
   recordFingerprint,
+  tombstoneIdNumber,
   type HasIntents,
   type IntentSubmitArgs,
   type Intents,
@@ -487,10 +489,11 @@ function nextIntentId(records: DeepReadonly<Record<string, PinIntent>> | Record<
 }
 
 function nextTombstoneId(records: DeepReadonly<Record<string, PinTombstone>> | Record<string, PinTombstone>): string {
-  const values = Object.keys(records)
-    .filter((id) => /^T\d+$/u.test(id))
-    .map((id) => Number(id.slice(1)))
-  return `T${Math.max(0, ...values) + 1}`
+  const values = Object.keys(records).flatMap((id) => {
+    const value = tombstoneIdNumber(id)
+    return value === undefined ? [] : [value]
+  })
+  return `${TOMBSTONE_ID_PREFIX}${Math.max(0, ...values) + 1}`
 }
 
 function tombstoneFingerprint(

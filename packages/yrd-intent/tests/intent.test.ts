@@ -406,6 +406,47 @@ describe("PinIntentV1 journal records (22668 phase 1)", () => {
     expect(next.id).toBe("yrdpin#171")
   })
 
+  /**
+   * The counter is `max(taken) + 1` over the record keys, so it only stays
+   * monotonic while a terminal record KEEPS its key. That is not a property of
+   * the counter at all — it belongs to the projection, which marks records
+   * withdrawn and superseded but never deletes them. Tie the two here: if a
+   * reduction ever dropped a terminal row to save space, the next mint would
+   * silently reissue a number the operator has already seen on screen, and
+   * every other counter test (all of which mint forward from LIVE records)
+   * would still pass.
+   */
+  it("never reissues a number a withdrawn or superseded record still holds", async () => {
+    await using app = await createApp()
+    const first = await submit(app, { intentId: uuid(1), target: TARGET })
+    expect(first.id).toBe("yrdpin#1")
+    await app.intents.withdraw(first.id, "dropped")
+
+    // Same (issue, component) key as the withdrawn one: nothing live to
+    // supersede, and the freed key must NOT free the number with it.
+    const second = await submit(app, { intentId: uuid(2), target: TARGET })
+    expect(second.id).toBe("yrdpin#2")
+
+    // The other way a record leaves the live set — superseded, not withdrawn.
+    const third = await submit(app, { intentId: uuid(3), target: OTHER_TARGET })
+    expect(third.id).toBe("yrdpin#3")
+    expect(app.intents.get(second.id)?.status).toBe("superseded")
+
+    await app.intents.withdraw(third.id, "dropped too")
+    const fourth = await submit(app, { intentId: uuid(4), target: TARGET })
+    expect(fourth.id).toBe("yrdpin#4")
+
+    // The non-deletion the counter rests on: only the last record is live, yet
+    // all four keys remain for the next mint to count past.
+    expect(app.intents.queued().map((intent) => intent.id)).toEqual(["yrdpin#4"])
+    expect(app.intents.list().map((intent) => [intent.id, intent.status])).toEqual([
+      ["yrdpin#1", "withdrawn"],
+      ["yrdpin#2", "superseded"],
+      ["yrdpin#3", "withdrawn"],
+      ["yrdpin#4", "open"],
+    ])
+  })
+
   it("selects a record by its stored key and by the bare number, in either form", async () => {
     await using app = await createApp()
     await admitVerbatim(app, "I161", uuid(161))

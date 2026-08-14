@@ -41,6 +41,22 @@ export function intentIdNumber(id: string): number | undefined {
   return match === undefined || match === null ? undefined : Number(match[1])
 }
 
+/** The prefix every newly minted pin tombstone carries. Unlike the intent
+ * counter this has only ever had one form, so there is nothing to alternate
+ * over — but the shape stays the same as {@link intentIdNumber}'s, because the
+ * two counters are read side by side and a lone hand-rolled slice is where the
+ * next off-by-one hides. */
+export const TOMBSTONE_ID_PREFIX = "T"
+
+const TOMBSTONE_ID_NUMBER = /^T(\d+)$/u
+
+/** The counter value inside a pin tombstone id; `undefined` when the string is
+ * not a tombstone id at all. */
+export function tombstoneIdNumber(id: string): number | undefined {
+  const match = TOMBSTONE_ID_NUMBER.exec(id)
+  return match === undefined || match === null ? undefined : Number(match[1])
+}
+
 /**
  * Root-relative gitlink path of the component whose pin advances.
  *
