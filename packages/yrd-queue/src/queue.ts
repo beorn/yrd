@@ -79,15 +79,12 @@ import {
 import { computed, type ReadSignal } from "@silvery/signals"
 import { diagnoseFlowPin, type FlowPin, type StepKind, type YrdConfig } from "@yrd/config"
 import {
-  INTENT_PARK_AFTER_IDENTICAL_ATTEMPTS,
   IntentAttemptFailureSchema,
   IntentParkArgsSchema,
-  IntentParkSchema,
   PinIntentEvaluationFactSchema,
   PinIntentRefusalSchema,
-  intentAttemptFingerprint,
   intentKey,
-  intentParkRemedy,
+  intentParkVerdict,
   renderRemedyStep,
   type IntentAttemptFailure,
   type IntentPark,
@@ -6638,23 +6635,10 @@ function intentAttemptFailures(
  * what makes a genuinely flaky infrastructure failure safe here.
  */
 function deadIntentPark(state: DeepReadonly<RuntimeState>, intent: DeepReadonly<PinIntent>): IntentPark | undefined {
-  const failures = intentAttemptFailures(state, intent.id)
-  const latest = failures.at(-1)
-  if (latest === undefined) return undefined
-  const fingerprint = intentAttemptFingerprint(latest)
-  let attempts = 0
-  for (let index = failures.length - 1; index >= 0; index -= 1) {
-    const failure = failures[index]
-    if (failure === undefined || intentAttemptFingerprint(failure) !== fingerprint) break
-    attempts += 1
-  }
-  if (attempts < INTENT_PARK_AFTER_IDENTICAL_ATTEMPTS) return undefined
-  return IntentParkSchema.parse({
-    fingerprint,
-    attempts,
-    failure: latest,
-    ...intentParkRemedy({ id: intent.id, issue: intent.issue as PinIntent["issue"] }, latest, attempts),
-  })
+  return intentParkVerdict(
+    { id: intent.id, issue: intent.issue as PinIntent["issue"] },
+    intentAttemptFailures(state, intent.id),
+  )
 }
 
 function automaticAdmissionAttemptsExhausted(

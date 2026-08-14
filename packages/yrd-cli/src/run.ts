@@ -9312,6 +9312,18 @@ async function showIntent(
     `submitted  ${intent.submittedAt}`,
     ...(intent.supersededBy === undefined ? [] : [`superseded ${intent.supersededBy}`]),
     ...(intent.disposition === undefined ? [] : [`disposition ${intent.disposition.code}`]),
+    // A parked record's whole value to its owner is the remedy: the lane has
+    // already moved on, so this page is where they find out what to do. The
+    // park's own first remedy step is `yrd intent show`, which would be a dead
+    // end if this printed nothing.
+    ...(intent.parked === undefined
+      ? []
+      : [
+          `parked     ${intent.parked.attempts}x '${intent.parked.failure.code}' (${intent.parked.fingerprint})`,
+          `failure    ${intent.parked.failure.reason}`,
+          `remedy     ${intent.parked.remedySummary}`,
+          ...intent.parked.remedy.map((step) => `           ${renderRemedyStep(step)}`),
+        ]),
   ].join("\n")
   await printResult(io, jsonEnabled(options), { command: "intent.show", intent }, human)
   return 0
