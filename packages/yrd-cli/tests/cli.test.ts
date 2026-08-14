@@ -3246,20 +3246,28 @@ describe("runYrd", () => {
     await app.bays.ready({ pr: "PR1" })
     await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
 
-    const processRun = vi.fn(
-      async (request: ProcessRequest): Promise<ProcessResult> => ({
+    const processRun = vi.fn(async (request: ProcessRequest): Promise<ProcessResult> => {
+      const argv = request.argv
+      const stdout = argv.includes("merge-base")
+        ? `${BASE_SHA}\n`
+        : argv.includes("ls-tree") && argv.includes("-r") && argv.includes(nextHead)
+          ? `160000 commit ${unpublishedPin}\tdep\0`
+          : argv.includes("ls-tree") && argv.includes(nextHead) && argv.includes(".gitmodules")
+            ? `100644 blob ${"5".repeat(40)}\t.gitmodules\n`
+            : argv.includes("config") && argv.includes(`${nextHead}:.gitmodules`)
+              ? "submodule.dep.path\ndep\0"
+              : argv.includes("rev-parse") && argv.includes("--show-toplevel")
+                ? "/repo/dep\n"
+                : ""
+      return {
         exitCode: 0,
         signal: null,
-        stdout: request.argv.includes("merge-base")
-          ? `${BASE_SHA}\n`
-          : request.argv.includes("diff-tree") && request.argv.includes(nextHead)
-            ? `:160000 160000 ${"0".repeat(40)} ${unpublishedPin} M\0dep\0`
-            : "",
+        stdout,
         stderr: "",
         durationMs: 0,
         timedOut: false,
-      }),
-    )
+      }
+    })
     const recut = vi.fn(async () => ({
       headSha: nextHead,
       baseSha: nextBase,
