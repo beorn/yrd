@@ -1227,6 +1227,7 @@ const QUEUE_WATCH_HELP: ReadonlyArray<readonly [key: string, action: string]> = 
   ["g", "action position ↔ absolute top"],
   ["G", "absolute bottom"],
   ["j / k · ↑ / ↓", "move the cursor"],
+  ["1 - 9", "show / hide a queue by its legend label"],
   ["Enter / Esc", "open / close detail"],
   ["?", "close this help"],
 ]
@@ -1305,6 +1306,24 @@ export function QueueWatchFrame({
       ? new Set(QUEUE_TIMELINE_STATUS_BUCKETS)
       : queueTimelineFilterBuckets(snapshot.projection.filters.statuses),
   )
+  // Every queue is shown by default (user directive 2026-08-13); a digit
+  // toggles one off. Held as bases rather than labels so a snapshot that
+  // relabels (a queue appears or drains away) cannot silently move the
+  // operator's choice onto a different queue.
+  const [hiddenQueues, setHiddenQueues] = useState<ReadonlySet<string>>(() => new Set())
+  const queues = snapshot.projection?.queues
+  const visibleQueues = useMemo(
+    () => new Set((queues ?? []).filter(({ base }) => !hiddenQueues.has(base)).map(({ base }) => base)),
+    [queues, hiddenQueues],
+  )
+  const toggleQueue = (base: string): void => {
+    setHiddenQueues((current) => {
+      const next = new Set(current)
+      if (next.has(base)) next.delete(base)
+      else next.add(base)
+      return next
+    })
+  }
   const [expandedStorms, setExpandedStorms] = useState<ReadonlySet<string>>(() => new Set())
   const selectOnlyBucket = (bucket: QueueTimelineStatusBucket): void => {
     setVisibleBuckets(new Set([bucket]))
@@ -1330,8 +1349,8 @@ export function QueueWatchFrame({
     () =>
       snapshot.projection === undefined
         ? undefined
-        : queueTimelineVisibleRows(snapshot.projection, visibleBuckets, true),
-    [snapshot.projection, visibleBuckets],
+        : queueTimelineVisibleRows(snapshot.projection, visibleBuckets, true, visibleQueues),
+    [snapshot.projection, visibleBuckets, visibleQueues],
   )
   const projectedRows = useMemo(
     () =>
@@ -1362,7 +1381,7 @@ export function QueueWatchFrame({
   const defaultCursorKey =
     snapshot.projection === undefined
       ? rows[0]?.key
-      : queueTimelineVisibleDefaultCursorId(snapshot.projection, visibleBuckets, true)
+      : queueTimelineVisibleDefaultCursorId(snapshot.projection, visibleBuckets, true, visibleQueues)
   const cursorController = useQueueWatchCursor({
     rows,
     results: snapshot.results,
@@ -1433,6 +1452,15 @@ export function QueueWatchFrame({
     if (character === "d") selectOnlyBucket("done")
     if (character === "f") selectOnlyBucket("failed")
     if (character === "a") showAllBuckets()
+    // 1..9 toggle a queue by its legend label — the digits the legend bolds,
+    // the same way o/r/d/f are the letters the status pills bold. Only labels
+    // this projection actually has respond, so a stray digit is inert rather
+    // than hiding rows nobody asked about.
+    if (/^[1-9]$/u.test(character)) {
+      const queue = snapshot.projection.queues.find(({ label }) => label === Number(character))
+      if (queue !== undefined) toggleQueue(queue.base)
+      return
+    }
     if (character === "O") toggleBucket("open")
     if (character === "R") toggleBucket("running")
     if (character === "D") toggleBucket("done")
@@ -1529,9 +1557,11 @@ export function QueueWatchFrame({
         fillHeight
         availableRows={timelineRows}
         visibleBuckets={visibleBuckets}
+        visibleQueues={visibleQueues}
         expandedStorms={expandedStorms}
         onSelectBucket={selectOnlyBucket}
         onShowAll={showAllBuckets}
+        onToggleQueue={toggleQueue}
         listRef={timelineListRef}
       />
     )

@@ -160,8 +160,18 @@ function runIdValue(run: string): string {
   return run.replace(/^R(?=\d+$)/u, "")
 }
 
-function RunId({ base, run, ...props }: { base: string; run: string } & QueueNounIdProps) {
-  return <NounId noun={base} value={runIdValue(run)} {...props} />
+function RunId({
+  base,
+  run,
+  queueLabel,
+  ...props
+}: { base: string; run: string; queueLabel?: number } & QueueNounIdProps) {
+  return (
+    <>
+      {queueLabel === undefined ? null : <Text {...props}>{`${String(queueLabel)}:`}</Text>}
+      <NounId noun={base} value={runIdValue(run)} {...props} />
+    </>
+  )
 }
 
 export type QueueStatusResult = QueueSummary &
@@ -259,6 +269,13 @@ export type QueueTimelineRevisionLineage = Readonly<{
 export type QueueTimelineProjectedRow = Readonly<{
   id: string
   base: string
+  /**
+   * This row's queue label (1..N) when the projection spans MORE than one
+   * queue, absent when it spans one. The presence of the field is what turns
+   * the compact `1:main#2173` run reference on, so a single-queue projection
+   * renders byte-identically to a projection that never knew about labels.
+   */
+  queueLabel?: number
   group: QueueTimelineGroup
   status: QueueTimelineStatus
   glyph: string
@@ -450,9 +467,24 @@ export type QueueRunnerRefusal = Readonly<{
   step?: string
 }>
 
+/**
+ * One queue the projection covers, and the short label every surface uses for
+ * it: the legend pill, the digit that toggles it, and the `N:` prefix on its
+ * run references. Labels are positions in `queues`, so they are stable for a
+ * given snapshot and always start at the primary base.
+ */
+export type QueueTimelineQueue = Readonly<{ label: number; base: string }>
+
 export type QueueTimelineProjection = Readonly<{
   now: string
   base: string
+  /**
+   * Every queue with rows in this projection, primary base first, then the
+   * rest by name. A single-queue repository has exactly one entry and no
+   * surface changes; watch shows them all at once and lets the operator toggle
+   * one off by its label (user directive 2026-08-13, superseding queue tabs).
+   */
+  queues: readonly QueueTimelineQueue[]
   siblingBases: readonly string[]
   /** Resident-runner heartbeat status; null renders loudly — nothing drains this queue. */
   runner: QueueTimelineRunner | null
@@ -2541,6 +2573,21 @@ type QueueTimelineProjectionBuild = Readonly<{
   metricFacts: readonly QueueTerminalFact[]
 }>
 
+/**
+ * Label the queues this projection covers: the primary base first (label 1),
+ * then every other base carrying a summary, by name. A base is a queue here
+ * because that is what the journal separates runs by — the label is display
+ * shorthand for it, never a second identity.
+ */
+function queueTimelineQueues(
+  results: readonly QueueStatusResult[],
+  primary: string | undefined,
+): readonly QueueTimelineQueue[] {
+  const base = primary ?? results[0]?.base ?? "main"
+  const others = [...new Set(results.map((result) => result.base))].filter((candidate) => candidate !== base).toSorted()
+  return [base, ...others].map((queueBase, index) => ({ label: index + 1, base: queueBase }))
+}
+
 function buildQueueTimelineProjection(
   results: readonly QueueStatusResult[],
   options: QueueTimelineProjectionOptions,
@@ -2591,7 +2638,16 @@ function buildQueueTimelineProjection(
     return options.latest ? latestTimelineRows(filtered) : filtered
   }
   const displayed = selectRows(sinceMs)
-  const rows = displayed.toSorted(timelineSort)
+  const queues = queueTimelineQueues(results, options.base)
+  const labelsByBase = new Map(queues.map(({ label, base: queueBase }) => [queueBase, label]))
+  // One queue means no labels at all — not label 1 — so nothing about a
+  // single-queue watch changes shape when the feature ships.
+  const rows =
+    queues.length > 1
+      ? displayed
+          .toSorted(timelineSort)
+          .map((row) => ({ ...row, ...(labelsByBase.has(row.base) ? { queueLabel: labelsByBase.get(row.base) } : {}) }))
+      : displayed.toSorted(timelineSort)
   // Terminal facts drive the flow aggregate over the metrics window, which may
   // reach further back than the listing window; reuse the display set when the
   // windows coincide.
@@ -2647,6 +2703,7 @@ function buildQueueTimelineProjection(
   const projection: QueueTimelineProjection = {
     now: nowIso,
     base,
+    queues,
     siblingBases: [...new Set(options.siblingBases ?? [])].filter((candidate) => candidate !== base).toSorted(),
     runner: options.runner ?? null,
     ...(pause === undefined ? {} : { pause }),
@@ -3999,7 +4056,16 @@ type TimelineRunCell = Readonly<{ text: string; color?: string }>
 function timelineRunCell(row: QueueTimelineProjectedRow, compact: boolean): TimelineRunCell {
   void compact
   if (row.run === undefined) return { text: "-", color: "$fg-muted" }
-  return { text: formatNounId(row.base, runIdValue(row.run)) }
+  // `1:main#2173` on a multi-queue watch (user directive 2026-08-13). The
+  // label is a PREFIX, never part of the id: `main#2173` stays the copyable
+  // resolver alias, so a reader can still paste the cell's id half anywhere
+  // yrd accepts a run.
+  return { text: `${queueLabelPrefix(row)}${formatNounId(row.base, runIdValue(row.run))}` }
+}
+
+/** `N:` for a row in a multi-queue projection, empty for a single-queue one. */
+function queueLabelPrefix(row: Pick<QueueTimelineProjectedRow, "queueLabel">): string {
+  return row.queueLabel === undefined ? "" : `${String(row.queueLabel)}:`
 }
 
 function timelineBranchLabel(branch: string): string {
@@ -4724,7 +4790,13 @@ function TimelineProjectedRow({
             {runCell.text}
           </Text>
         ) : (
-          <RunId base={row.base} run={row.run} color={forcedFg ?? runCell.color ?? "$fg-muted"} wrap="truncate" />
+          <RunId
+            base={row.base}
+            run={row.run}
+            {...(row.queueLabel === undefined ? {} : { queueLabel: row.queueLabel })}
+            color={forcedFg ?? runCell.color ?? "$fg-muted"}
+            wrap="truncate"
+          />
         )
       }
       pr={
@@ -4787,11 +4859,25 @@ function TimelineProjectedRow({
 // 2026-07-16, item L). Wide headers keep that tab and the resolved root on one
 // row; narrow viewports may wrap the root to a second row so provenance remains
 // visible without wrapping the Tab text through the TIME/STATUS table header.
-function QueueTabsLine({ base, showLabel = true }: { base: string; showLabel?: boolean }) {
+function QueueTabsLine({
+  base,
+  queueCount = 1,
+  showLabel = true,
+}: {
+  base: string
+  /** How many queues the pane is showing; >1 stops the tab claiming one base. */
+  queueCount?: number
+  showLabel?: boolean
+}) {
+  // Naming ONE base while rows from several are listed below is a lie about
+  // scope, and it is the reading an operator trusts most. Multi-queue panes
+  // say QUEUES and let the legend on the filter row carry the names, which is
+  // where the operator put them (2026-08-13).
+  const label = queueCount > 1 ? "QUEUES" : `QUEUE ${base}`
   return (
     <Tabs value={base} isActive={false}>
       <TabList>
-        <Tab value={base}>{showLabel ? `QUEUE ${base}` : base}</Tab>
+        <Tab value={base}>{showLabel ? label : base}</Tab>
       </TabList>
     </Tabs>
   )
@@ -5250,10 +5336,12 @@ export function queueTimelineVisibleRows(
   projection: Pick<QueueTimelineProjection, "rows" | "display">,
   visibleBuckets?: ReadonlySet<QueueTimelineStatusBucket>,
   fill = false,
+  visibleQueues?: ReadonlySet<string>,
 ): readonly QueueTimelineProjectedRow[] {
   const rows = fill ? projection.rows : projection.rows.slice(0, projection.display.shown)
-  if (visibleBuckets === undefined) return rows
-  return rows.filter((row) => visibleBuckets.has(queueTimelineStatusBucket(row.status)))
+  const byQueue = visibleQueues === undefined ? rows : rows.filter((row) => visibleQueues.has(row.base))
+  if (visibleBuckets === undefined) return byQueue
+  return byQueue.filter((row) => visibleBuckets.has(queueTimelineStatusBucket(row.status)))
 }
 
 function timelineOutcomeKey(row: QueueTimelineProjectedRow): string {
@@ -5320,8 +5408,9 @@ export function queueTimelineVisibleDefaultCursorId(
   projection: Pick<QueueTimelineProjection, "rows" | "display">,
   visibleBuckets?: ReadonlySet<QueueTimelineStatusBucket>,
   fill = false,
+  visibleQueues?: ReadonlySet<string>,
 ): string | undefined {
-  const rows = queueTimelineVisibleRows(projection, visibleBuckets, fill)
+  const rows = queueTimelineVisibleRows(projection, visibleBuckets, fill, visibleQueues)
   return queueTimelineDefaultCursorId(rows) ?? rows[0]?.id
 }
 
@@ -5443,6 +5532,41 @@ function TimelineFilterLine({
 }
 
 /**
+ * The queue legend: one pill per queue, labelled `N base`, on the SAME row as
+ * the status filters and left-aligned against them (user directive
+ * 2026-08-13). Every queue is shown by default and its digit toggles it off —
+ * the bold leading digit doubles as the hotkey hint exactly as the bold first
+ * letter does on the status pills.
+ *
+ * A single-queue projection renders NOTHING here: there is no choice to offer,
+ * and the QUEUE tab above already names it.
+ */
+function TimelineQueueLegend({
+  queues,
+  visibleQueues,
+  onToggleQueue,
+}: {
+  queues: readonly QueueTimelineQueue[]
+  visibleQueues?: ReadonlySet<string>
+  onToggleQueue?: (base: string) => void
+}) {
+  if (queues.length < 2) return null
+  return (
+    <TogglePillGroup flexShrink={1} minWidth={0} overflow="hidden">
+      {queues.map(({ label, base }) => (
+        <TogglePill
+          key={base}
+          label={`${String(label)} ${base}`}
+          boldFirstLetter
+          active={visibleQueues === undefined || visibleQueues.has(base)}
+          onToggle={() => onToggleQueue?.(base)}
+        />
+      ))}
+    </TogglePillGroup>
+  )
+}
+
+/**
  * The one temporal-trust cue, `updated HH:MM:SS`. The snapshot clock is always
  * "now", so day qualification never applies. The QUEUE pane renders it flush
  * against the title border (its `flushTop` drops the top padding) so it reads
@@ -5477,9 +5601,11 @@ function ProjectedQueueTimeline({
   fillHeight = false,
   availableRows,
   visibleBuckets,
+  visibleQueues,
   expandedStorms,
   onSelectBucket,
   onShowAll,
+  onToggleQueue,
   listRef,
 }: {
   repositoryRoot?: string
@@ -5497,16 +5623,19 @@ function ProjectedQueueTimeline({
   /** Actual queue-pane height when hosted in a split; viewport height otherwise. */
   availableRows?: number
   visibleBuckets?: ReadonlySet<QueueTimelineStatusBucket>
+  /** Bases currently shown; undefined means every queue, the default. */
+  visibleQueues?: ReadonlySet<string>
   expandedStorms?: ReadonlySet<string>
   onSelectBucket?: (bucket: QueueTimelineStatusBucket) => void
   onShowAll?: () => void
+  onToggleQueue?: (base: string) => void
   listRef?: React.Ref<ListViewHandle>
 }) {
   // Fold the complete visible set before applying the one-shot row cap. A
   // retry storm must cost one display row everywhere, not `limit` rows plus
   // a misleading raw-row remainder outside the interactive fill pane.
   const displayRows = queueTimelineDisplayRows(
-    queueTimelineVisibleRows(projection, visibleBuckets, true),
+    queueTimelineVisibleRows(projection, visibleBuckets, true, visibleQueues),
     expandedStorms,
   )
   const rows = fillHeight ? displayRows : timelineRetainedRows(displayRows, projection.display.shown)
@@ -5530,7 +5659,7 @@ function ProjectedQueueTimeline({
           // root on that row; narrow viewports wrap it to a second row so the
           // provenance stays visible.
           <Box flexDirection="row" flexWrap="wrap" columnGap={1} minWidth={0}>
-            <QueueTabsLine base={projection.base} />
+            <QueueTabsLine base={projection.base} queueCount={projection.queues.length} />
             <QueueRepositoryRoot root={repositoryRoot} />
             <Box flexGrow={1} flexBasis={0} minWidth={0} />
             {/* The `updated HH:MM:SS` clock is gone from the live pane (user
@@ -5541,7 +5670,7 @@ function ProjectedQueueTimeline({
         ) : (
           <>
             <Box flexDirection="row" flexWrap="wrap" columnGap={1} minWidth={0}>
-              <QueueTabsLine base={projection.base} />
+              <QueueTabsLine base={projection.base} queueCount={projection.queues.length} />
               <QueueRepositoryRoot root={repositoryRoot} />
             </Box>
             <Box height={1} flexDirection="row" justifyContent="flex-end" gap={1} minWidth={0}>
@@ -5639,6 +5768,16 @@ function ProjectedQueueTimeline({
             W1b placed it. */}
         <Box height={1} flexDirection="row" justifyContent="space-between" gap={2} minWidth={0} overflow="hidden">
           <Box flexDirection="row" gap={1} minWidth={0} flexShrink={1}>
+            {/* The queue legend takes the left slot of this row (user
+                directive 2026-08-13) — the same line as the status filters,
+                left-aligned against their right-aligned cluster. In the live
+                fill pane both of that slot's previous occupants are
+                suppressed, so it was empty. */}
+            <TimelineQueueLegend
+              queues={projection.queues}
+              {...(visibleQueues === undefined ? {} : { visibleQueues })}
+              {...(onToggleQueue === undefined ? {} : { onToggleQueue })}
+            />
             {fillHeight || hiddenDisplayRows === 0 ? null : (
               <Text color="$fg-muted" wrap="truncate">
                 ... {hiddenDisplayRows} more
@@ -5689,9 +5828,11 @@ export function QueueTimelineView({
   fillHeight = false,
   availableRows,
   visibleBuckets,
+  visibleQueues,
   expandedStorms,
   onSelectBucket,
   onShowAll,
+  onToggleQueue,
   listRef,
 }: {
   repositoryRoot?: string
@@ -5710,9 +5851,11 @@ export function QueueTimelineView({
   fillHeight?: boolean
   availableRows?: number
   visibleBuckets?: ReadonlySet<QueueTimelineStatusBucket>
+  visibleQueues?: ReadonlySet<string>
   expandedStorms?: ReadonlySet<string>
   onSelectBucket?: (bucket: QueueTimelineStatusBucket) => void
   onShowAll?: () => void
+  onToggleQueue?: (base: string) => void
   listRef?: React.Ref<ListViewHandle>
 }) {
   if (projection !== undefined) {
@@ -5735,9 +5878,11 @@ export function QueueTimelineView({
         fillHeight={fillHeight}
         availableRows={availableRows}
         visibleBuckets={visibleBuckets}
+        visibleQueues={visibleQueues}
         expandedStorms={expandedStorms}
         onSelectBucket={onSelectBucket}
         onShowAll={onShowAll}
+        onToggleQueue={onToggleQueue}
         listRef={listRef}
       />
     )

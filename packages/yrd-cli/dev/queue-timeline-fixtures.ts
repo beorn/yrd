@@ -407,9 +407,13 @@ type ProjectionOptions = Readonly<{
   oldestOpenMs?: number | null
 }>
 
-function fixtureProjection(result: QueueStatusResult, options: ProjectionOptions = {}): QueueTimelineProjection {
-  const submissionTimes = queueTimelineAdmissionTimes([result])
-  return queueTimelineProjection([result], {
+function fixtureProjection(
+  result: QueueStatusResult | readonly QueueStatusResult[],
+  options: ProjectionOptions = {},
+): QueueTimelineProjection {
+  const results = Array.isArray(result) ? (result as readonly QueueStatusResult[]) : [result as QueueStatusResult]
+  const submissionTimes = queueTimelineAdmissionTimes(results)
+  return queueTimelineProjection(results, {
     now: NOW,
     windowMs: 6 * 60 * 60_000,
     statuses: options.statuses ?? ALL_STATUSES,
@@ -444,6 +448,37 @@ export function fixtureSnapshot(
     now: NOW,
     projection: fixtureProjection(result, options),
     ...(outputs === undefined ? {} : { outputs }),
+  }
+}
+
+/**
+ * A snapshot whose projection genuinely spans SEVERAL queues — the shape the
+ * multi-queue watch is about. `fixtureSnapshot` projects one result, which
+ * cannot exercise labels, the legend, or per-queue toggling.
+ */
+export function fixtureMultiQueueSnapshot(
+  results: readonly QueueStatusResult[],
+  options: ProjectionOptions = {},
+): QueueWatchSnapshot & Readonly<{ projection: QueueTimelineProjection }> {
+  return { results: [...results], now: NOW, projection: fixtureProjection(results, options) }
+}
+
+/**
+ * Re-home a queue's PRs and Runs onto another base. Fixture PRs and Runs are
+ * born on `main`, and a projected row takes its base from the PR/Run rather
+ * than from the enclosing summary, so rebasing the summary alone would leave
+ * every row claiming `main`.
+ */
+export function fixtureRebase(base: string, result: QueueStatusResult): QueueStatusResult {
+  const rebasePr = (pr: PR): PR => ({ ...pr, base })
+  const rebaseRun = (run: Run): Run => ({ ...run, base })
+  return {
+    ...result,
+    base,
+    prs: result.prs.map(rebasePr),
+    running: result.running.map(rebaseRun),
+    waiting: result.waiting.map(rebaseRun),
+    finished: result.finished.map(rebaseRun),
   }
 }
 
@@ -969,14 +1004,21 @@ const productionOverviewResult = fixtureResult(
   [batchRun, integratedRun, rejectedRun, environmentRun, canceledRun],
 )
 
-const secondaryQueueResult: QueueStatusResult = {
-  ...fixtureResult([], []),
-  base: "release/next",
-}
-const multipleQueuesSnapshot: QueueWatchSnapshot & Readonly<{ projection: QueueTimelineProjection }> = {
-  ...fixtureSnapshot(productionOverviewResult),
-  results: [productionOverviewResult, secondaryQueueResult],
-}
+// The second queue carries real work. An EMPTY sibling queue cannot show a
+// label, a legend pill, or a row prefix, so it proved nothing about the
+// multi-queue view it was named for.
+const secondaryQueuePr = fixturePr("PR77", "submitted", "2026-07-13T11:22:00.000Z", "Cut the release branch", {
+  submitter: "@ci",
+})
+const secondaryQueueRun = fixtureRun("R77", [secondaryQueuePr], "passed", "2026-07-13T11:30:00.000Z", {
+  finishedAt: "2026-07-13T11:44:00.000Z",
+})
+const secondaryQueueResult: QueueStatusResult = fixtureRebase(
+  "release/next",
+  fixtureResult([secondaryQueuePr], [secondaryQueueRun]),
+)
+const multipleQueuesSnapshot: QueueWatchSnapshot & Readonly<{ projection: QueueTimelineProjection }> =
+  fixtureMultiQueueSnapshot([productionOverviewResult, secondaryQueueResult])
 
 function advanceSnapshotClock(
   snapshot: QueueWatchSnapshot & Readonly<{ projection: QueueTimelineProjection }>,
