@@ -151,6 +151,8 @@ export const IntentAttemptFailureSchema = z
     /** The component pin the attempt was evaluated against. */
     priorPin: CommitShaSchema.optional(),
     reason: TextSchema,
+    /** When the attempt was observed to fail. Never fingerprinted — see below. */
+    at: z.iso.datetime({ offset: true }),
   })
   .strict()
 export type IntentAttemptFailure = z.infer<typeof IntentAttemptFailureSchema>
@@ -171,9 +173,10 @@ export type IntentAttemptFailure = z.infer<typeof IntentAttemptFailureSchema>
  * `.git/yrd/scratch/yrd-queue-8BbPQW/worktree/dep-a`; the next attempt said
  * `yrd-queue-TlDgln`. The evidence tuple is what repeats; the sentence is not.
  *
- * Also deliberately NOT digested: the root base sha. The base moves whenever
- * anything else lands, and a failure that survives a base move is MORE dead,
- * not less.
+ * Also deliberately NOT digested: the root base sha, and `at`. The base moves
+ * whenever anything else lands, and a failure that survives a base move is MORE
+ * dead, not less; `at` differs on every attempt by definition, so including it
+ * would make every fingerprint unique and the whole predicate a no-op.
  */
 export function intentAttemptFingerprint(failure: IntentAttemptFailure): string {
   const digest = createHash("sha256")
@@ -211,6 +214,10 @@ export const IntentParkSchema = z
     fingerprint: TextSchema,
     /** Consecutive attempts that produced {@link fingerprint}. */
     attempts: z.number().int().positive(),
+    /** When the FIRST of those attempts failed — the start of the block. */
+    since: z.iso.datetime({ offset: true }),
+    /** Wall time the fingerprint has held, `failure.at` minus {@link since}. */
+    blockedMs: z.number().int().nonnegative(),
     failure: IntentAttemptFailureSchema,
     /** Machine-executable steps, in the same shape every refusal remedy uses. */
     remedy: z.array(RemedyStepSchema).readonly(),
@@ -615,15 +622,19 @@ export function intentParkVerdict(
   if (latest === undefined) return undefined
   const fingerprint = intentAttemptFingerprint(latest)
   let attempts = 0
+  let since = latest.at
   for (let index = failures.length - 1; index >= 0; index -= 1) {
     const failure = failures[index]
     if (failure === undefined || intentAttemptFingerprint(failure) !== fingerprint) break
     attempts += 1
+    since = failure.at
   }
   if (attempts < INTENT_PARK_AFTER_IDENTICAL_ATTEMPTS) return undefined
   return IntentParkSchema.parse({
     fingerprint,
     attempts,
+    since,
+    blockedMs: Math.max(0, Date.parse(latest.at) - Date.parse(since)),
     failure: latest,
     ...intentParkRemedy(intent, latest, attempts),
   })

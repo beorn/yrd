@@ -3231,6 +3231,11 @@ describe("Queue command adapters", () => {
     expect(stalled).toHaveLength(1)
     expect(stalled[0]?.message).toContain(deadIntent.id)
     expect(stalled[0]?.count).toBe(3)
+    // hh's page rail refuses a finding without a parseable `since` and a
+    // non-negative `blockedMs`, and it refuses the WHOLE audit response, not
+    // the row — a finding missing them pages nothing at all.
+    expect(stalled[0]?.since).toMatch(/^\d{4}-\d{2}-\d{2}T/u)
+    expect(stalled[0]?.blockedMs).toBeGreaterThanOrEqual(0)
 
     await drain()
 
@@ -3261,6 +3266,8 @@ describe("Queue command adapters", () => {
     // still named until they resubmit or withdraw.
     const parkedFindings = app.queue.audit().findings.filter((finding) => finding.code === "intent-lane-stalled")
     expect(parkedFindings).toHaveLength(1)
+    expect(parkedFindings[0]?.since).toMatch(/^\d{4}-\d{2}-\d{2}T/u)
+    expect(parkedFindings[0]?.blockedMs).toBeGreaterThanOrEqual(0)
     expect(parkedFindings[0]?.specimen).toBe(
       `intent:${deadIntent.id}:parked:${app.intents.get(deadIntent.id)?.parked?.fingerprint}`,
     )
