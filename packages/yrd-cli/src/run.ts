@@ -1600,7 +1600,28 @@ function commitSubject(cwd: string, headSha: string): string | undefined {
   }
 }
 
+/** How many of the journal's earliest frames the coverage probe reads before it
+ * gives up and scans the whole journal. One frame answers it in practice —
+ * every dispatched command writes its events into a frame — and eight absorbs a
+ * short eventless prefix without approaching the size of the read it avoids.
+ * The probe trades work, never accuracy: a prefix that cannot answer falls
+ * through to the exact scan below. */
+const COVERAGE_PROBE_FRAMES = 8
+
+/** The timestamp the journal's coverage starts at: its earliest event's `ts`.
+ *
+ * Events come out in cursor order, so the answer sits in the journal's first
+ * frames — but `app.events()` resolves its whole range before it yields, so
+ * asking for one timestamp unbounded decodes every frame the journal holds.
+ * Measured on the live 42,011-frame hh journal: 1,849-2,140 ms of a 3.8-4.3 s
+ * `yrd log`, to read a single string. Bounding the probe makes the cost
+ * independent of how long the journal has been running. */
 async function firstEventTimestamp(app: YrdCliApp): Promise<string> {
+  const head = (await app.journalSnapshot()).asOf.cursor
+  if (head === 0) return "-"
+  const probe = Math.min(COVERAGE_PROBE_FRAMES, head)
+  for await (const event of app.events(0, probe)) return event.ts
+  if (probe === head) return "-"
   for await (const event of app.events()) return event.ts
   return "-"
 }
