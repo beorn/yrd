@@ -2896,6 +2896,7 @@ describe("Queue", () => {
       expect(app.state().queues.batchSize).toBe(1)
       expect(app.queue.get("R1")).toMatchObject({
         status: "queued",
+        batchSize: 1,
         prs: [{ id: "PR1" }],
       })
     }
@@ -2910,21 +2911,23 @@ describe("Queue", () => {
     expect(replayed.state().queues.batchSize).toBe(2)
     expect(replayed.queue.get("R1")).toMatchObject({
       status: "queued",
+      batchSize: 1,
       prs: [{ id: "PR1" }],
     })
 
     const runs = await replayed.queue.run({ steps: ["check", "merge"] }, runtime)
 
     expect(runs).toMatchObject([
-      { id: "R1", status: "completed", conclusion: "success", prs: [{ id: "PR1" }] },
+      { id: "R1", status: "completed", conclusion: "success", batchSize: 1, prs: [{ id: "PR1" }] },
       {
         id: "R2",
         status: "completed",
         conclusion: "success",
+        batchSize: 2,
         prs: [{ id: "PR2" }, { id: "PR3" }],
       },
     ])
-    expect(replayed.queue.get("R1")?.prs.map((pr) => pr.id)).toEqual(["PR1"])
+    expect(replayed.queue.get("R1")).toMatchObject({ batchSize: 1, prs: [{ id: "PR1" }] })
   })
 
   it("refuses to relabel configured replay authority as an explicit selection", async () => {
