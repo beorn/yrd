@@ -231,6 +231,7 @@ function indexedCheckpointJournal(): Readonly<{
         autoVacuum: "incremental",
         historyFrames: 0,
         tailFrames: values.length,
+        evictedThrough: 0,
         archiveFallbacks: 0,
       }),
     },

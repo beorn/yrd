@@ -210,6 +210,7 @@ function indexedJournal(): Journal<unknown> {
           autoVacuum: "incremental" as const,
           historyFrames: 0,
           tailFrames: values.length,
+          evictedThrough: 0,
           archiveFallbacks: 0,
         }
       },

@@ -72,6 +72,16 @@ const SQLITE_CUTOVER_VERSION = 1
 const SCHEMA_VERSION = 2
 const JOURNAL_VIEWS_GENERATION = "journal_views_generation"
 const JOURNAL_VERSION_FLOOR = "journal_version_floor"
+const HISTORY_EVICTED_THROUGH = "history_evicted_through"
+/**
+ * Sized against the live hh journal: ~1.9 KB per frame and ~3.2k frames a day,
+ * so this window holds roughly six days and about 37 MB of history.
+ *
+ * The age window is off unless an operator sets it. It is the wrong default:
+ * on a busy journal the frame cap always binds first, and on a quiet one age
+ * eviction reclaims nothing while still shortening how far a reader can replay.
+ */
+const DEFAULT_KEEP_FRAMES = 20_000
 const LEGACY_PRIVATE_PATH = /^events-v4\.[a-zA-Z0-9._-]+$/u
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
@@ -123,12 +133,28 @@ export type JournalVersionBumpResult = Readonly<{
   restoreDrill: "passed"
 }>
 
+/**
+ * How much already-checkpointed history the journal keeps. A frame is evicted
+ * when it falls outside EITHER window, so both are caps and growth is bounded
+ * by whichever binds first. `"disabled"` keeps every frame forever.
+ */
+export type JournalRetention =
+  | "disabled"
+  | Readonly<{
+      /** Newest frames always kept, counted back from the checkpoint boundary. */
+      keepFrames?: number
+      /** Opt-in second cap: frames older than this many days go even inside the frame window. */
+      keepDays?: number
+    }>
+
 export type JournalOptions = Readonly<{
   dir: string
   /** Version written by this process. Fresh journals are born at this floor. */
   writerVersion?: number
   lock?: ExclusiveOptions
   views?: readonly JournalView[]
+  /** Defaults to the `YRD_JOURNAL_KEEP_FRAMES` / `YRD_JOURNAL_KEEP_DAYS` env pair. */
+  retention?: JournalRetention
   inject?: Readonly<{
     exclusive?: Exclusive
     log?: ConditionalLogger
@@ -153,8 +179,13 @@ type Context = Readonly<{
   platform: string
   sqliteVersion?: string
   views: readonly JournalView[]
+  retention: ResolvedRetention
   phase(phase: string, details?: Readonly<Record<string, unknown>>): Promise<void>
 }>
+
+type ResolvedRetention = Readonly<{ keepFrames: number; keepDays?: number }> | "disabled"
+
+type EvictionOutcome = Readonly<{ frames: number; facts: number; evictedThrough: number; floor: number }>
 
 type PrefixEntry = Readonly<{ cursor: number; value: unknown }>
 type StoredEvent = Readonly<{ cursor: number; value_json: string; sha256: string }>
@@ -298,10 +329,44 @@ function context(options: JournalOptions): Context {
     platform: inject.platform ?? process.platform,
     ...(inject.sqliteVersion === undefined ? {} : { sqliteVersion: inject.sqliteVersion }),
     views,
+    retention: resolveRetention(options.retention),
     async phase(name, details = {}) {
       await inject.phase?.(name, details)
     },
   }
+}
+
+function resolveRetention(configured: JournalRetention | undefined): ResolvedRetention {
+  if (configured === "disabled") return "disabled"
+  if (process.env.YRD_JOURNAL_RETENTION?.trim() === "disabled" && configured === undefined) return "disabled"
+  const keepDays = retentionBound("keepDays", configured?.keepDays, "YRD_JOURNAL_KEEP_DAYS", undefined)
+  return {
+    keepFrames: retentionBound("keepFrames", configured?.keepFrames, "YRD_JOURNAL_KEEP_FRAMES", DEFAULT_KEEP_FRAMES),
+    ...(keepDays === undefined ? {} : { keepDays }),
+  }
+}
+
+function retentionBound<Fallback extends number | undefined>(
+  field: string,
+  configured: number | undefined,
+  variable: string,
+  fallback: Fallback,
+): number | Fallback {
+  if (configured !== undefined) {
+    if (!Number.isSafeInteger(configured) || configured < 1) {
+      throw new RangeError(`yrd: journal retention ${field} must be a positive safe integer, not ${String(configured)}`)
+    }
+    return configured
+  }
+  const raw = process.env[variable]?.trim()
+  if (raw === undefined || raw === "") return fallback
+  const parsed = Number(raw)
+  // A malformed knob must not silently degrade to the default: the operator
+  // would believe a window is in force that never was.
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new RangeError(`yrd: ${variable}='${raw}' must be a positive safe integer`)
+  }
+  return parsed
 }
 
 function journalWriterVersion(value: number | undefined): number {
@@ -492,6 +557,7 @@ async function saveCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): 
       compactedEvents: prepared.compactedEvents,
     })
     return await withMutableDatabase(runtime, (database) => {
+      let evicted: EvictionOutcome | undefined
       const current = readSnapshotHeader(database)
       const head = readHead(database)
       if (
@@ -539,6 +605,7 @@ async function saveCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): 
           return false
         }
         database.query("DELETE FROM journal_events WHERE cursor <= ?").run(checkpoint.cursor)
+        evicted = evictHistory(runtime, database, checkpoint.cursor)
         database.run("COMMIT")
       } catch (error) {
         rollback(database)
@@ -550,6 +617,7 @@ async function saveCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): 
         cursor: checkpoint.cursor,
         compactedEvents: prepared.compactedEvents,
       })
+      if (evicted !== undefined) reportEviction(runtime, evicted)
       incrementalVacuum(runtime, database)
       return true
     })
@@ -630,6 +698,15 @@ async function readBatches(
     const { head, snapshot } = assertComplete(database, runtime.path)
     const end = before ?? head
     validateRange(after, end, head)
+    // Serving this range would mean handing back a history with a hole in it and
+    // no way for the reader to tell. Refuse instead, and name the first cursor
+    // that can still be replayed.
+    const evictedThrough = readEvictedThrough(database)
+    if (after < evictedThrough) {
+      throw new RangeError(
+        `yrd: journal history through cursor ${evictedThrough} was evicted by the retention window; replay from ${evictedThrough} or later, or use the checkpoint`,
+      )
+    }
     if (after === end) return []
 
     const batches: Array<Readonly<{ cursor: number; values: readonly unknown[] }>> = []
@@ -1360,6 +1437,16 @@ function assertComplete(database: Database, path: string): Readonly<{ head: numb
   if (futureHistory !== null) {
     throw new Error(`yrd: SQLite journal history cursor ${futureHistory.cursor} is above snapshot ${snapshot.cursor}`)
   }
+  const evictedThrough = readEvictedThrough(database)
+  if (evictedThrough >= snapshot.cursor && snapshot.cursor > 0) {
+    throw new Error(`yrd: SQLite journal retention floor ${evictedThrough} reaches snapshot ${snapshot.cursor}`)
+  }
+  const survivor = database
+    .query<{ cursor: number }, [number]>("SELECT cursor FROM journal_history WHERE cursor <= ? ORDER BY cursor LIMIT 1")
+    .get(evictedThrough)
+  if (survivor !== null) {
+    throw new Error(`yrd: SQLite journal history cursor ${survivor.cursor} survives retention floor ${evictedThrough}`)
+  }
   const tableOverlap = database
     .query<{ cursor: number }, []>(
       `SELECT cursor FROM (
@@ -1689,6 +1776,7 @@ function historyDiagnostics(runtime: Context, archiveFallbacks: number): Journal
       autoVacuum: "incremental",
       historyFrames: 0,
       tailFrames: 0,
+      evictedThrough: 0,
       archiveFallbacks,
     }
   }
@@ -1713,7 +1801,8 @@ function historyDiagnostics(runtime: Context, archiveFallbacks: number): Journal
     const autoVacuum = autoVacuumValue === 2 ? "incremental" : autoVacuumValue === 1 ? "full" : "none"
     const historyFrames = scalar("SELECT COUNT(*) AS count FROM journal_history", "count")
     const tailFrames = scalar("SELECT COUNT(*) AS count FROM journal_events", "count")
-    return { pageCount, freelistCount, autoVacuum, historyFrames, tailFrames, archiveFallbacks }
+    const evictedThrough = readEvictedThrough(database)
+    return { pageCount, freelistCount, autoVacuum, historyFrames, tailFrames, evictedThrough, archiveFallbacks }
   })
 }
 
@@ -1774,6 +1863,102 @@ function assertJournalFacts(database: Database): void {
   if (JSON.stringify(entities) !== JSON.stringify(expectedEntities)) {
     throw new Error("yrd: journal entity lookup index does not equal immutable frame facts")
   }
+}
+
+function readEvictedThrough(database: Database): number {
+  const row = database
+    .query<{ value: string }, [string]>("SELECT value FROM journal_metadata WHERE key = ?")
+    .get(HISTORY_EVICTED_THROUGH)
+  if (row === null) return 0
+  const value = Number(row.value)
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`yrd: journal retention floor '${row.value}' is invalid`)
+  }
+  return value
+}
+
+/**
+ * The lowest cursor history keeps. Frames below it are already folded into the
+ * checkpoint, so they are audit trail rather than state — but only whole
+ * entities may go, because `history.entity()` rehydrates archived jobs and runs
+ * from their frame slice and a half-evicted slice projects a wrong answer
+ * without ever looking empty.
+ */
+function retentionFloor(
+  database: Database,
+  snapshotCursor: number,
+  retention: Readonly<{ keepFrames: number; keepDays?: number }>,
+): number {
+  const byCount = snapshotCursor - retention.keepFrames + 1
+  const byAge = retention.keepDays === undefined ? 1 : ageFloor(database, retention.keepDays, snapshotCursor)
+  const requested = Math.min(snapshotCursor, Math.max(1, byCount, byAge))
+  return entityAtomicFloor(database, requested)
+}
+
+function ageFloor(database: Database, keepDays: number, snapshotCursor: number): number {
+  const cutoff = new Date(Date.now() - keepDays * 86_400_000).toISOString()
+  const timestamped = database
+    .query<{ n: number }, []>(
+      `SELECT COUNT(*) AS n FROM journal_history WHERE json_extract(value_json, '$.events[0].ts') IS NOT NULL`,
+    )
+    .get()?.n
+  // A journal whose frames carry no event timestamp cannot be judged by age at
+  // all — about a third of live frames are command-only, with an empty event
+  // list — so the age window simply declines to evict rather than guessing.
+  if (timestamped === undefined || timestamped === 0) return 1
+  const youngest = database
+    .query<{ cursor: number | null }, [string]>(
+      `SELECT MIN(cursor) AS cursor FROM journal_history WHERE json_extract(value_json, '$.events[0].ts') >= ?`,
+    )
+    .get(cutoff)?.cursor
+  // Frames are not strictly ordered by wall clock, so the floor is the FIRST
+  // frame still inside the age window, not the last one outside it.
+  return youngest === null || youngest === undefined ? snapshotCursor : youngest
+}
+
+function entityAtomicFloor(database: Database, requested: number): number {
+  const spanning = database.query<{ cursor: number | null }, [number]>(
+    `SELECT MIN(entity.cursor) AS cursor FROM journal_entities entity
+      WHERE EXISTS(
+        SELECT 1 FROM journal_entities live
+         WHERE live.kind = entity.kind AND live.id = entity.id AND live.cursor >= ?)`,
+  )
+  let floor = requested
+  // Lowering the floor can pull in entities that only just reached above it, so
+  // this walks to a fixpoint. Each round strictly lowers the floor, so it ends.
+  for (let round = 0; round < 1024; round += 1) {
+    const earliest = spanning.get(floor)?.cursor
+    if (earliest === null || earliest === undefined || earliest >= floor) return floor
+    floor = earliest
+  }
+  throw new Error(`yrd: journal retention floor did not settle below cursor ${requested}`)
+}
+
+function evictHistory(runtime: Context, database: Database, snapshotCursor: number): EvictionOutcome | undefined {
+  if (runtime.retention === "disabled" || snapshotCursor <= 1) return undefined
+  const evictedThrough = readEvictedThrough(database)
+  const floor = retentionFloor(database, snapshotCursor, runtime.retention)
+  if (floor <= evictedThrough + 1) return undefined
+  const frames = database.query("DELETE FROM journal_history WHERE cursor < ?").run(floor).changes
+  const facts =
+    database.query("DELETE FROM journal_commands WHERE cursor < ?").run(floor).changes +
+    database.query("DELETE FROM journal_event_ids WHERE cursor < ?").run(floor).changes +
+    database.query("DELETE FROM journal_entities WHERE cursor < ?").run(floor).changes
+  writeMetadata(database, HISTORY_EVICTED_THROUGH, String(floor - 1))
+  return { frames, facts, evictedThrough: floor - 1, floor }
+}
+
+function reportEviction(runtime: Context, outcome: EvictionOutcome): void {
+  const window = runtime.retention === "disabled" ? {} : runtime.retention
+  runtime.log.info?.("Trimmed Yrd's saved history to its retention window.", {
+    action: "history-evicted",
+    path: runtime.path,
+    frames: outcome.frames,
+    facts: outcome.facts,
+    evictedThrough: outcome.evictedThrough,
+    historyFloor: outcome.floor,
+    ...window,
+  })
 }
 
 function incrementalVacuum(runtime: Context, database: Database): void {

@@ -1,0 +1,198 @@
+/**
+ * @failure Journal history grows without bound, or an eviction window silently truncates a reader's replay or an entity's frame slice.
+ * @level l1
+ * @consumer @yrd/persistence retention window
+ */
+import { createHash } from "node:crypto"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { Database } from "bun:sqlite"
+import { CauseSchema, Command, EventSchema, type Cause, type Event, type Journal } from "@yrd/core"
+import { createJournal, type JournalOptions } from "@yrd/persistence"
+import { createLogger, type Event as LogEvent } from "loggily"
+import { afterEach, describe, expect, it } from "vitest"
+
+const SAFE_SQLITE = "3.53.0"
+
+const roots: string[] = []
+
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
+})
+
+async function directory(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "yrd-retention-"))
+  roots.push(root)
+  return root
+}
+
+function uuid(label: string): string {
+  const hex = createHash("sha256").update(label).digest("hex")
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-7${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`
+}
+
+/** A frame whose payload is large enough that one frame occupies about one page. */
+function frame(key: string, options: Readonly<{ ts?: string; run?: string; bytes?: number }> = {}) {
+  const command = Command.parse({ id: uuid(`command:${key}`), op: "test.record" })
+  const cause: Cause = CauseSchema.parse({
+    id: uuid(`cause:${key}`),
+    commandId: command.id,
+    op: command.op,
+    commandHash: Command.hash(command),
+  })
+  const applied: Event = EventSchema.parse({
+    id: uuid(`event:${key}`),
+    name: "test/recorded",
+    ts: options.ts ?? "2026-08-14T12:00:00.000Z",
+    data: {
+      text: "x".repeat(options.bytes ?? 3800),
+      ...(options.run === undefined ? {} : { run: options.run }),
+    },
+  })
+  return { cause, command, events: [applied] }
+}
+
+function testJournal(dir: string, options: Partial<JournalOptions> = {}, log?: ReturnType<typeof createLogger>) {
+  return createJournal({
+    dir,
+    ...options,
+    inject: { sqliteVersion: SAFE_SQLITE, ...(log === undefined ? {} : { log }) },
+  } as unknown as Parameters<typeof createJournal>[0])
+}
+
+function stats(dir: string): Readonly<{ pages: number; history: number; evictedThrough: number }> {
+  using database = new Database(join(dir, "journal.sqlite"), { readonly: true, strict: true })
+  const pages = database.query<{ page_count: number }, []>("PRAGMA page_count").get()?.page_count ?? 0
+  const history = database.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM journal_history").get()?.n ?? 0
+  const evicted = database
+    .query<{ value: string }, [string]>("SELECT value FROM journal_metadata WHERE key = ?")
+    .get("history_evicted_through")
+  return { pages, history, evictedThrough: evicted === null ? 0 : Number(evicted.value) }
+}
+
+async function appendAll(journal: Journal<unknown>, frames: readonly ReturnType<typeof frame>[]): Promise<number> {
+  let cursor = 0
+  for (const value of frames) {
+    const appended = await journal.append(value, cursor)
+    expect(appended.appended).toBe(true)
+    cursor = appended.cursor
+  }
+  return cursor
+}
+
+async function drainCursors(journal: Journal<unknown>, after = 0): Promise<number[]> {
+  const cursors: number[] = []
+  for await (const batch of journal.read(after)) cursors.push(batch.cursor)
+  return cursors
+}
+
+/** Runs the identical workload twice so the page-count comparison isolates eviction from checkpoint archiving. */
+async function workload(
+  retention: JournalOptions["retention"],
+  frames: readonly ReturnType<typeof frame>[],
+  rounds = 4,
+): Promise<Readonly<{ dir: string; pages: number; history: number; evictedThrough: number }>> {
+  const dir = await directory()
+  const journal = testJournal(dir, { retention })
+  const head = await appendAll(journal, frames)
+  // Repeated checkpoints at the same head: each one runs the exclusive-lock
+  // maintenance pass, so incremental_vacuum(256) can walk the whole freelist.
+  for (let round = 0; round < rounds; round += 1) {
+    await journal.checkpoint?.save?.({ identity: `identity-${String(round)}`, cursor: head, value: { round } })
+  }
+  return { dir, ...stats(dir) }
+}
+
+describe("journal retention window", () => {
+  it("drops history past the window and gives the pages back", async () => {
+    const frames = Array.from({ length: 300 }, (_, index) => frame(`bounded-${String(index)}`))
+
+    const unbounded = await workload("disabled", frames)
+    const bounded = await workload({ keepFrames: 50 }, frames)
+
+    // Frame count falls: only the window (plus the retained snapshot boundary) survives.
+    expect(unbounded.history).toBe(300)
+    expect(bounded.history).toBeLessThanOrEqual(51)
+    expect(bounded.evictedThrough).toBeGreaterThan(200)
+
+    // Page count falls against the SAME workload without eviction, so the drop
+    // cannot be credited to checkpoint archiving or to the pre-existing vacuum.
+    expect(bounded.pages).toBeLessThan(unbounded.pages)
+  })
+
+  it("evicts by age when the frame window alone would keep everything", async () => {
+    const old = Array.from({ length: 40 }, (_, index) =>
+      frame(`aged-old-${String(index)}`, { ts: "2026-07-01T00:00:00.000Z" }),
+    )
+    const fresh = Array.from({ length: 10 }, (_, index) =>
+      frame(`aged-fresh-${String(index)}`, { ts: new Date().toISOString() }),
+    )
+
+    const bounded = await workload({ keepFrames: 10_000, keepDays: 14 }, [...old, ...fresh])
+
+    expect(bounded.history).toBe(10)
+    expect(bounded.evictedThrough).toBe(40)
+  })
+
+  it("refuses a replay that starts inside the evicted range instead of serving a short history", async () => {
+    const frames = Array.from({ length: 120 }, (_, index) => frame(`refuse-${String(index)}`))
+    const { dir, evictedThrough } = await workload({ keepFrames: 20 }, frames)
+    expect(evictedThrough).toBeGreaterThan(0)
+
+    const reader = testJournal(dir, { retention: { keepFrames: 20 } })
+
+    // A full replay from 0 is exactly the silent-truncation case: it must raise.
+    await expect(drainCursors(reader, 0)).rejects.toThrow(/evicted/iu)
+
+    // Reading from the first retained frame still works.
+    const cursors = await drainCursors(reader, evictedThrough)
+    expect(cursors.at(-1)).toBe(120)
+  })
+
+  it("keeps every frame of an entity that survives the window (never a partial slice)", async () => {
+    // A run touched at the very start and again at the very end: the early
+    // frames sit far past the window, but evicting them would leave
+    // history.entity("queue", …) returning a partial — silently wrong — slice.
+    const frames = [
+      ...Array.from({ length: 5 }, (_, index) => frame(`span-early-${String(index)}`, { run: "R-longlived" })),
+      ...Array.from({ length: 200 }, (_, index) => frame(`span-filler-${String(index)}`)),
+      frame("span-late", { run: "R-longlived" }),
+    ]
+
+    const { dir } = await workload({ keepFrames: 20 }, frames)
+
+    using database = new Database(join(dir, "journal.sqlite"), { readonly: true, strict: true })
+    const slice = database
+      .query<{ n: number }, [string]>("SELECT COUNT(*) AS n FROM journal_entities WHERE kind = 'queue' AND id = ?")
+      .all("R-longlived")
+    expect(slice[0]?.n).toBe(6)
+
+    // And the frames those entity rows point at are all still present.
+    const orphanedFacts = database
+      .query<{ n: number }, []>(
+        `SELECT COUNT(*) AS n FROM journal_entities entity
+          WHERE NOT EXISTS(SELECT 1 FROM journal_history history WHERE history.cursor = entity.cursor)
+            AND NOT EXISTS(SELECT 1 FROM journal_events event WHERE event.cursor = entity.cursor)`,
+      )
+      .get()
+    expect(orphanedFacts?.n).toBe(0)
+  })
+
+  it("says out loud how much it dropped and under which window", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const dir = await directory()
+    const journal = testJournal(dir, { retention: { keepFrames: 20 } }, log)
+    const head = await appendAll(
+      journal,
+      Array.from({ length: 120 }, (_, index) => frame(`loud-${String(index)}`)),
+    )
+    await journal.checkpoint?.save?.({ identity: "loud", cursor: head, value: {} })
+
+    const eviction = events.find((event) => JSON.stringify(event).includes("history-evicted"))
+    expect(eviction).toBeDefined()
+    expect(JSON.stringify(eviction)).toMatch(/"frames":\s*\d+/u)
+    expect(JSON.stringify(eviction)).toMatch(/keepFrames/u)
+  })
+})
