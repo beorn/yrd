@@ -3827,6 +3827,123 @@ describe("Queue command adapters", () => {
     expect(refusedCode).not.toBe("carrier-drops-landed")
   })
 
+  /**
+   * The residual case ancestry cannot reach. Every guard above this one asks
+   * whether the carrier CONTAINS the base; this carrier does, and still erases a
+   * landing. A criss-cross gives the carrier and the base two merge bases, `ort`
+   * resolves against a virtual base built from both, and the deletion it resolves
+   * appears in neither the conflict output nor the carrier's authored diff.
+   */
+  it("refuses a clean merge that deletes a landed path the carrier never authored deleting", async () => {
+    const { repo } = await repository()
+    const originalBase = await git(repo, ["rev-parse", "main"])
+
+    // Two concurrent lines off the same base: one lands a file, one does not.
+    await git(repo, ["switch", "-qc", "issue/sibling", originalBase])
+    await writeFile(join(repo, "sibling.txt"), "sibling\n")
+    await git(repo, ["add", "sibling.txt"])
+    await git(repo, ["commit", "-qm", "sibling work"])
+    const siblingSha = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-qc", "issue/mint", originalBase])
+    await writeFile(join(repo, "landed-mint.md"), "mint\n")
+    await git(repo, ["add", "landed-mint.md"])
+    await git(repo, ["commit", "-qm", "land the mint"])
+    const mintSha = await git(repo, ["rev-parse", "HEAD"])
+
+    // The queue base absorbs both, so the mint is landed work.
+    await git(repo, ["switch", "-q", "main"])
+    await git(repo, ["merge", "-q", "--no-ff", siblingSha, "-m", "land sibling work"])
+    await git(repo, ["merge", "-q", "--no-ff", mintSha, "-m", "land the mint"])
+    const queueBaseHead = await git(repo, ["rev-parse", "HEAD"])
+
+    // The carrier absorbs the same two lines in the other order and resolves by
+    // dropping the mint, then continues linearly so its tip is not a merge tip.
+    await git(repo, ["switch", "-q", "issue/mint"])
+    await git(repo, ["merge", "--no-ff", "--no-commit", siblingSha])
+    await git(repo, ["rm", "-q", "landed-mint.md"])
+    await git(repo, ["commit", "-qm", "recomposed tree drops the mint"])
+    await writeFile(join(repo, "carrier.txt"), "carrier payload\n")
+    await git(repo, ["add", "carrier.txt"])
+    await git(repo, ["commit", "-qm", "carrier payload"])
+    const carrierHead = await git(repo, ["rev-parse", "HEAD"])
+
+    // The three facts that make this the residual case. `git()` throws on a
+    // non-zero exit, so the ancestry call is itself the assertion that every
+    // containment guard above passes this carrier.
+    await git(repo, ["merge-base", "--is-ancestor", mintSha, carrierHead])
+    expect(await git(repo, ["merge-base", "--all", queueBaseHead, carrierHead])).toContain("\n")
+    const authoredBase = await git(repo, ["merge-base", queueBaseHead, carrierHead])
+    expect(
+      await git(repo, ["diff", "--no-renames", "--diff-filter=D", "--name-only", authoredBase, carrierHead, "--"]),
+    ).toBe("")
+
+    await using process = createProcess()
+    const pr = PRSnapshotSchema.parse({
+      id: "PR1",
+      branch: "issue/mint",
+      base: "main",
+      revision: 1,
+      headSha: carrierHead,
+      baseSha: originalBase,
+    })
+
+    await expect(
+      gitCandidatePreparer({ inject: { process }, repo })({
+        id: "C1",
+        queueId: "main",
+        baseSha: queueBaseHead,
+        revs: [{ pr: pr.id, n: pr.revision, head: pr.headSha }],
+        prs: [pr],
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "unauthored-path-deletion",
+        message: expect.stringMatching(/landed-mint\.md.*authored diff.*linear/isu),
+      },
+    })
+  })
+
+  it("lands a carrier that authors its own deletion", async () => {
+    const { repo } = await repository()
+    await writeFile(join(repo, "doomed.txt"), "doomed\n")
+    await git(repo, ["add", "doomed.txt"])
+    await git(repo, ["commit", "-qm", "add the file the carrier will delete"])
+    const queueBaseHead = await git(repo, ["rev-parse", "HEAD"])
+
+    await git(repo, ["switch", "-qc", "issue/deleter", queueBaseHead])
+    await git(repo, ["rm", "-q", "doomed.txt"])
+    await git(repo, ["commit", "-qm", "delete the file on purpose"])
+    const carrierHead = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "main"])
+
+    await using process = createProcess()
+    const pr = PRSnapshotSchema.parse({
+      id: "PR1",
+      branch: "issue/deleter",
+      base: "main",
+      revision: 1,
+      headSha: carrierHead,
+      baseSha: queueBaseHead,
+    })
+
+    const prepared = await gitCandidatePreparer({ inject: { process }, repo })({
+      id: "C1",
+      queueId: "main",
+      baseSha: queueBaseHead,
+      revs: [{ pr: pr.id, n: pr.revision, head: pr.headSha }],
+      prs: [pr],
+    })
+
+    const { sha } = prepared
+    if (sha === undefined) throw new Error("candidate preparation returned no sha")
+    // README.md pins the tree read itself: without it, an empty listing would
+    // satisfy the absence assertion below for the wrong reason.
+    const tree = await git(repo, ["ls-tree", "-r", "--name-only", sha])
+    expect(tree).toContain("README.md")
+    expect(tree).not.toContain("doomed.txt")
+  })
+
   it("refuses a payload touching configured refuse paths and names them with the configured reason", async () => {
     const { repo } = await repository()
     const baseSha = await git(repo, ["rev-parse", "main"])

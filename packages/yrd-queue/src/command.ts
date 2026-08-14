@@ -3117,7 +3117,14 @@ async function prepareCandidate(
     }
     const wrapper = await stabilizeGeneratedRootWrapper(git, path, before, message)
     if (wrapper !== undefined) return wrapper
-    recordChange(pr, await git.commit(path, "HEAD"))
+    const landed = await git.commit(path, "HEAD")
+    // The clean path only. A conflicted merge is already refused above, and the
+    // submodule-composition branch resolves by re-authoring its own tree, so its
+    // deletions are the policy's, not the carrier's, and this comparison would
+    // measure the wrong author.
+    const erased = await unauthoredDeletionFailure(git, path, pr.id, pr.headSha, before, landed)
+    if (erased !== undefined) return erased
+    recordChange(pr, landed)
   }
   return {
     status: "passed",
@@ -3713,6 +3720,56 @@ async function carrierDropsLandedFailure(
   return candidateFailure(
     "carrier-drops-landed",
     `merge request '${pr}' branch '${headSha}' does not contain the merge-queue base '${authoritativeBase}' and would drop merged commits:\n${containment.commits}\nremedy: ${linearRebuildRemedy("the branch", authoritativeBase)}`,
+  )
+}
+
+/** A deletion is the one merge outcome nothing announces. Every guard above this
+ * one asks whether the carrier CONTAINS the base; the residual case is a carrier
+ * that does contain it and erases a landing anyway, cleanly, with no conflict.
+ *
+ * It happens when the carrier and the base have MORE THAN ONE merge base — the
+ * criss-cross any re-merged or hand-resolved carrier can produce. `ort` then
+ * resolves against a VIRTUAL base built from all of them, and that virtual tree
+ * can hold a path the single `git merge-base` answer does not. `authoredDeltaBase`
+ * measures the carrier's authored changes from that single answer, so a deletion
+ * resolved against the virtual base appears in no diff the author ever reviewed:
+ * ancestry says contained, `merge-tree` says mergeable, `git merge` exits 0, and
+ * the landing is gone. Measured on git 2.54 (2026-08-14) with an empty authored
+ * deletion set and the landed file missing from the merge result.
+ *
+ * So compare the two sets. Every path the merge removes from the base must be a
+ * path the carrier's own authored diff removes too; anything extra is a rebuild
+ * artifact, never a decision someone made. Where the two bases coincide — the
+ * single-merge-base case — the check is a tautology and costs two diffs. */
+async function unauthoredDeletionFailure(
+  git: Git,
+  repo: string,
+  pr: string,
+  headSha: string,
+  before: string,
+  landed: string,
+): Promise<CandidateFailure | undefined> {
+  const removed = await deletedPaths(git, repo, before, landed)
+  if (removed.length === 0) return undefined
+  const base = await authoredDeltaBase((cwd, args) => git.run(cwd, args, true), repo, before, headSha)
+  if (base.status === "unreadable") {
+    return candidateFailure(
+      "deletion-inspection",
+      `could not measure the deletions merge request '${pr}' branch '${headSha}' authors against '${before}': ` +
+        `${base.detail}; restore readable history before landing a payload that deletes paths`,
+    )
+  }
+  const authored = new Set(await deletedPaths(git, repo, base.sha, headSha))
+  const unauthored = removed.filter((path) => !authored.has(path))
+  if (unauthored.length === 0) return undefined
+  const shown = unauthored.slice(0, 8).join(", ") + (unauthored.length > 8 ? ", …" : "")
+  return candidateFailure(
+    "unauthored-path-deletion",
+    `merging merge request '${pr}' branch '${headSha}' deletes [${shown}], which its authored diff against ` +
+      `'${base.sha}' never deletes; the merge resolved away landed work the branch never authored removing\n` +
+      `remedy: ${linearRebuildRemedy("the branch", before)}`,
+    ".",
+    unauthored,
   )
 }
 
@@ -4487,6 +4544,24 @@ async function readGitlinkConflictStages(
 
 async function changedPaths(git: Git, repo: string, from: string, to: string): Promise<string[]> {
   const result = await git.run(repo, ["diff", ...CERTIFICATE_DIFF_OPTIONS, "--name-only", "-z", from, to, "--"])
+  return nulPaths(result.stdout)
+}
+
+/** `CERTIFICATE_DIFF_OPTIONS` carries `--no-renames` on purpose here: rename
+ * detection is heuristic and `diff.renameLimit`-dependent, so with it on, the
+ * same tree pair can report a path as renamed in one diff and deleted in the
+ * other, and the comparison would drift with repository size. Path level only. */
+async function deletedPaths(git: Git, repo: string, from: string, to: string): Promise<string[]> {
+  const result = await git.run(repo, [
+    "diff",
+    ...CERTIFICATE_DIFF_OPTIONS,
+    "--diff-filter=D",
+    "--name-only",
+    "-z",
+    from,
+    to,
+    "--",
+  ])
   return nulPaths(result.stdout)
 }
 

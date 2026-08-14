@@ -7403,10 +7403,16 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     // rebuild.
     "carrier-pin-already-landed",
     "composition-invalid",
+    // Both read the branch's authored delta base, and both are cured the same
+    // way `gitlink-inspection` is: the author restores readable history.
+    "deletion-inspection",
     "gitlink-inspection",
     "merge-tip-carrier",
     "refused-path",
     "refused-path-inspection",
+    // The remedy is the same linear rebuild `carrier-drops-landed` prescribes;
+    // only the instrument that caught the lost landing differs.
+    "unauthored-path-deletion",
     "wrapper-mismatch",
     "source-missing",
     "source-lineage",
