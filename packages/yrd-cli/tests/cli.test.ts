@@ -59,6 +59,7 @@ import {
   type Run,
   type QueueSummary,
   type PREligibility,
+  type CandidateRefSweepResult,
   candidateRefFor,
   withQueue,
   withMerge,
@@ -14281,7 +14282,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
           ),
         })
 
-        const report = JSON.parse(output.stdout())
+        const report = JSON.parse(output.stdout()) as Readonly<{ candidateRefs: CandidateRefSweepResult }>
         // The ref is counted, and counted in the bucket that says the journal
         // cannot explain it — not quietly dropped.
         expect(report.candidateRefs).toMatchObject({ scanned: 1, unclaimed: 1, reclaimable: 0 })
