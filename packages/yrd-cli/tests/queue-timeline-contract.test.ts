@@ -671,16 +671,17 @@ describe("queue timeline 21106 contract", () => {
     }
   })
 
-  it("folds the paused STATUS line inside the one RUNNER box with foreground-only styling", async () => {
+  it("folds the paused hold line inside the one RUNNER box with foreground-only styling", async () => {
     const projection = queueTimelineStories.paused.snapshot.projection
     if (projection === undefined) throw new Error("paused story is missing its projection")
     const rows = await renderTimeline(projection, 120)
     const statusLine = rowIndex(rows, "HOLD THE LINE")
-    // The pause STATUS line now lives INSIDE the one RUNNER box (user directive
-    // 2026-07-21): STATUS, the reason, and the allow-list ride the same row, and
-    // there is no separate `╭─ STATUS` border box.
+    // The pause rail lives INSIDE the one RUNNER box (user directive
+    // 2026-07-21): the state, the reason, and the allow-list ride the same row,
+    // and there is no separate `╭─ STATUS` border box. The row no longer
+    // carries the word STATUS at all — that belongs to the column (21479).
     expect(rows.join("\n")).not.toContain("╭─ STATUS ")
-    expect(rows[statusLine]).toContain("STATUS")
+    expect(rows[statusLine]).not.toContain("STATUS")
     expect(rows[statusLine]).toContain("operator freeze")
     expect(rows[statusLine]).toContain("allowed PR2")
     // The RUNNER box frames it: `╭─ RUNNER ` opens above and `╰` closes below.
@@ -707,6 +708,28 @@ describe("queue timeline 21106 contract", () => {
     } finally {
       styled.unmount()
     }
+  })
+
+  it("spends the word STATUS on the row column only, even in the paused state", async () => {
+    // 21479: STATUS names a row COLUMN — one of the object model's fixed cells.
+    // The paused RUNNER box also labelled its pause rail `STATUS`, two lines
+    // above that very column header, so one word named two different things on
+    // one screen. The IA contract forbids exactly this, and it survived in the
+    // one state the contract was written for. The blocking sibling rail never
+    // had the problem — it reads `PAUSE BLOCKING EVERYTHING` — so this branch
+    // joins that family and the column keeps the name to itself.
+    //
+    // The older `not.toContain("╭─ STATUS ")` guards only retired the separate
+    // STATUS BOX; a bare label inside another box slips straight past them.
+    const projection = queueTimelineStories.paused.snapshot.projection
+    if (projection === undefined) throw new Error("paused story is missing its projection")
+    const frame = (await renderTimeline(projection, 120)).join("\n")
+    expect(frame, "the paused frame is the specimen").toContain("HOLD THE LINE")
+    const occurrences = frame.match(/\bSTATUS\b/gu) ?? []
+    expect(occurrences, `STATUS appears ${occurrences.length} time(s):\n${frame}`).toHaveLength(1)
+    // …and the survivor is the column header, not some other rail.
+    const header = frame.split("\n").find((row) => /\bSTATUS\b/u.test(row)) ?? ""
+    expect(header.trim()).toMatch(/^TIME\s+STATUS\s+RUN\s+PR\b/u)
   })
 
   it("advances the one temporal-trust cue when the snapshot advances", async () => {

@@ -5381,7 +5381,11 @@ function TimelineRunnerBox({
                 </>
               ) : (
                 <>
-                  <Text bold>STATUS</Text> HOLD THE LINE — {pause.reason} · allowed {pauseAllowed}
+                  {/* Not `STATUS HOLD THE LINE`: STATUS names the row column
+                      two lines below, and one word cannot name two things on
+                      one screen (21479). The blocking branch above never had
+                      the label; this rail joins it. */}
+                  <Text bold>HOLD THE LINE</Text> — {pause.reason} · allowed {pauseAllowed}
                 </>
               )}
             </Text>
