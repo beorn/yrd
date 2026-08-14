@@ -722,6 +722,51 @@ export type QueueAuditFinding = Readonly<{
   blockedMs?: number
 }>
 
+/** Every finding code `yrd queue audit` can emit, in ONE authoritative place.
+ * It is the union of BOTH producers whose findings that command concatenates:
+ * `auditQueues` in `queue.ts` (the hold, draft, record, refusal and progress
+ * walks) and the environment audit in `@yrd/cli` (`installedBaselineDrift` /
+ * `runtimeBaselineDrift`). Consumers whitelist these codes to decide what
+ * reaches a page, and that whitelist was scattered across repositories — a code
+ * added here but missing there pages nobody. Producers emit
+ * {@link QueueAuditFindingEmission}, so a new code that is not listed here is a
+ * compile error rather than a silently unrendered finding.
+ *
+ * Deliberately NOT listed: `resident-runner-missing` and its `resident-runner-*`
+ * siblings. Those are `hab-service-health/1` errors (`{ code, cause, resolution }`
+ * from `runnerHealthError` in `@yrd/cli`), a different document than a
+ * `QueueAuditFinding` — a consumer may join the two surfaces onto one page, but
+ * the queue audit itself never emits them. */
+export const YRD_QUEUE_AUDIT_PAGE_FINDING_CODES = [
+  "queue-hold-ttl-missing",
+  "queue-hold-expired",
+  "draft-stranded",
+  "missing-pr",
+  "run-without-submit-ancestry",
+  "run-without-check-ancestry",
+  "invalid-run",
+  "orphaned-run",
+  "run-lease-expired",
+  "step-unavailable",
+  "step-revision-drift",
+  "candidate-revision-mismatch",
+  "orphaned-requested-job",
+  "unisolable-stale-plan",
+  "admission-refusal-loop",
+  "queue-never-started",
+  "queue-progress-stalled",
+  "config-drift",
+  "runtime-drift",
+] as const
+
+export type QueueAuditFindingCode = (typeof YRD_QUEUE_AUDIT_PAGE_FINDING_CODES)[number]
+
+/** A finding AT ITS PRODUCER: a {@link QueueAuditFinding} whose code is closed
+ * over {@link YRD_QUEUE_AUDIT_PAGE_FINDING_CODES}. Readers keep the open
+ * `code: string` — a finding parsed back out of another process's JSON status is
+ * data from a foreign version, not an emission, and must stay readable. */
+export type QueueAuditFindingEmission = Omit<QueueAuditFinding, "code"> & Readonly<{ code: QueueAuditFindingCode }>
+
 export type QueueAuditResult = Readonly<{ findings: readonly QueueAuditFinding[] }>
 
 export const InstalledStepSchema = z

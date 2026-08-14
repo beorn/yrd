@@ -104,6 +104,7 @@ import {
   type IntegratedShape,
   type IntegrationProof,
   type QueueAuditFinding,
+  type QueueAuditFindingEmission,
   type QueueAuditResult,
   type QueueAuthorityState,
   type QueueAuthorityToken,
@@ -5749,7 +5750,9 @@ function auditQueues(
   progress: QueueProgressPolicy,
   options: QueueAuditOptions,
 ): QueueAuditResult {
-  const findings: QueueAuditFinding[] = []
+  // Emissions, not readings: every code pushed below must be listed in
+  // YRD_QUEUE_AUDIT_PAGE_FINDING_CODES or this file stops compiling.
+  const findings: QueueAuditFindingEmission[] = []
   const installed = new Map(steps.map((step) => [step.name, step]))
   const auditNowMs = options.now === undefined ? undefined : parseAuditTime(options.now, "now")
   for (const pause of Object.values(state.queues.pauses)) {
@@ -5952,8 +5955,8 @@ function admissionRefusalAuditFindings(
   state: DeepReadonly<RuntimeState>,
   queued: readonly DeepReadonly<PR>[],
   progress: QueueProgressPolicy,
-): QueueAuditFinding[] {
-  const findings: QueueAuditFinding[] = []
+): QueueAuditFindingEmission[] {
+  const findings: QueueAuditFindingEmission[] = []
   const refused = Object.entries(state.queues.admissionRefusals).flatMap(([id, refusal]) => {
     if (refusal.settlement !== undefined) return []
     const pr = state.bays.prs[id]
@@ -5995,9 +5998,9 @@ function queueProgressAuditFindings(
   refusalFindings: readonly QueueAuditFinding[],
   progress: QueueProgressPolicy,
   options: QueueAuditOptions,
-): QueueAuditFinding[] {
+): QueueAuditFindingEmission[] {
   if (options.now === undefined || queued.length === 0) return []
-  const findings: QueueAuditFinding[] = []
+  const findings: QueueAuditFindingEmission[] = []
   const nowMs = parseAuditTime(options.now, "now")
   const byBase = Map.groupBy(queued, (pr) => baseIdentity(pr.base))
   for (const [base, prs] of [...byBase.entries()].sort(([left], [right]) => left.localeCompare(right))) {

@@ -3,7 +3,7 @@ import { join } from "node:path"
 import * as z from "zod"
 import { raiseFailure } from "@yrd/core"
 import { createExclusive } from "@yrd/persistence"
-import { ReplayInstalledStepSchema, type InstalledStep, type QueueAuditFinding } from "@yrd/queue"
+import { ReplayInstalledStepSchema, type InstalledStep, type QueueAuditFindingEmission } from "@yrd/queue"
 
 /** The installed baseline: the queue installation baseline written by `yrd
  * admin queue init` (provision). It pins the check-definition revisions the
@@ -203,7 +203,7 @@ function stepPlanDeltas(
 export function installedBaselineDrift(
   baseline: InstalledBaseline,
   current: readonly InstalledStep[],
-): QueueAuditFinding | undefined {
+): QueueAuditFindingEmission | undefined {
   const deltas = stepPlanDeltas(baseline, current, CONFIG_VOCABULARY)
   if (deltas.length === 0) return undefined
   return {
@@ -220,7 +220,7 @@ export function installedBaselineDrift(
 export function runtimeBaselineDrift(
   baseline: InstalledBaseline,
   runtime: readonly InstalledStep[],
-): QueueAuditFinding | undefined {
+): QueueAuditFindingEmission | undefined {
   const deltas = stepPlanDeltas(baseline, runtime, RUNTIME_VOCABULARY)
   if (deltas.length === 0) return undefined
   return {
