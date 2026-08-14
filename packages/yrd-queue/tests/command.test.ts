@@ -6331,6 +6331,41 @@ describe("Queue command adapters", () => {
     })
   })
 
+  it("marks the synthesized merge commit with a distinct Merge-Change-Id, never a second Change-Id", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"], {
+      prepareCandidate: true,
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = app.state().bays.prs.PR1
+    if (pr === undefined) throw new Error("expected PR1")
+    const changeId = currentPRRev(pr).changeId
+    if (changeId === undefined) throw new Error("expected PR1 Change-Id")
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    if (run === undefined) throw new Error("expected Queue run")
+    const checkJob = run.steps[0]?.job
+    if (checkJob?.status !== "completed" || checkJob.conclusion !== "success") {
+      throw new Error("check did not pass")
+    }
+    const candidateSha = GitCheckEvidenceSchema.parse(checkJob.output).candidateSha
+
+    expect(await git(repo, ["show", "-s", "--format=%(trailers:key=Merge-Change-Id,valueonly)", candidateSha])).toBe(
+      `${changeId}-merge`,
+    )
+    // The distinct trailer must not widen what the Change-Id ancestry proof sees: one value, still.
+    expect(await git(repo, ["show", "-s", "--format=%(trailers:key=Change-Id,valueonly)", candidateSha])).toBe(changeId)
+    await expect(
+      findRepositoryChangeLanding({
+        inject: { process },
+        repo,
+        baseSha: candidateSha,
+        identity: { changeId, submittedHead: featureSha },
+      }),
+    ).resolves.toMatchObject({ status: "proven", fact: { changeId, landingSha: candidateSha } })
+  })
+
   it("persists one failed merge record with the reason, evidence, and fix", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
