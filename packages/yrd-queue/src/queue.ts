@@ -2486,12 +2486,24 @@ function createQueue<Shape extends PRShape>(
           // admission Run before recording a new immutable revision verdict.
           try {
             await refreshCheckIdentities(refreshable, resolveCycleBase)
-            const currentChecked = checked.flatMap((pr) => {
+            // ENTER the drain with the set it admits from, which is the set just
+            // refreshed. Handing it `checked` gated the loop on the SUBMITTED
+            // selection being non-empty, so a cycle whose only work was `pushed`
+            // never entered `drainAdmissions` at all and completed looking
+            // healthy having admitted nothing (@yrd/core/pushed-only-cycle-never-drains).
+            //
+            // The narrow entry set was never load-bearing: a selectorless drain
+            // applies `targets` only to an explicit selection and otherwise
+            // walks `admissionQueue` unfiltered, so this widens WHETHER the loop
+            // runs without changing WHICH carriers it admits once it does. It
+            // also makes the returned set the set actually admitted from, rather
+            // than dropping every pushed carrier the drain took.
+            const entering = refreshable.flatMap((pr) => {
               const current = resolvePR(runtime().bays, pr.id)
               return current === undefined ? [] : [current]
             })
             await drainAdmissions(
-              currentChecked.map((pr) => pr.id),
+              entering.map((pr) => pr.id),
               runOptions,
               resolveCycleBase,
               selection,

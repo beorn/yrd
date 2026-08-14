@@ -4174,6 +4174,53 @@ describe("Queue", () => {
     })
   })
 
+  it("drains a cycle whose only work is a pushed carrier", async () => {
+    // @yrd/core/pushed-only-cycle-never-drains, the entry-side half of the gap
+    // `cbac01da` closed on the refresh side. WHICH carriers get refreshed and
+    // WHETHER the drain runs at all are different questions, and the second
+    // still keyed on `checked` — the submitted/ready selection. A cycle whose
+    // only work is `pushed` therefore had an empty entry set, `drainAdmissions`
+    // never entered its loop, and the cycle completed looking healthy having
+    // admitted nothing. The sibling tests above each had to add a submitted
+    // carrier "so the selectorless drain has a submitted PR to enter on"; this
+    // one is that companion removed.
+    const MOVED = "e".repeat(40)
+    await using app = await createQueueApp({
+      resolveBaseSha: () => MOVED,
+      check: () => ({ status: "completed", conclusion: "success", output: { checked: true } }),
+    })
+
+    // The only carrier in the cycle. A rebuild left it `pushed`, which keeps it
+    // in the admission queue and out of `requestedPRs` — so `checked` is empty
+    // while `admissionQueue` is not.
+    const stranded = await submitBranch(app, "issue/pushed-only-cycle")
+    await app.bays.recut({
+      pr: stranded.id,
+      fromRevision: stranded.revision,
+      headSha: stranded.headSha,
+      baseSha: BASE,
+      treeSha: "c".repeat(40),
+      patchId: "d".repeat(40),
+      reviewCarried: false,
+    })
+    await app.bays.requestChecks({ pr: stranded.id, baseSha: BASE })
+    expect(prFacts(app.bays.pr(stranded.id))).toMatchObject({ revision: 2, delivery: "pushed" })
+
+    await app.queue.run({}, runtime)
+
+    // Reads in this order on purpose: the first assertion is what `cbac01da`
+    // already fixed and passes at the base pin, so a red here is provably the
+    // ENTRY reason and not a refresh one. The carrier's request names the cycle
+    // base — it was refreshed — and yet no verdict exists for it, because the
+    // loop that would write one never ran.
+    expect(checkRequest(app.bays.pr(stranded.id)!)).toMatchObject({ baseSha: MOVED })
+    expect(prAdmission(app.bays.pr(stranded.id)!)).toMatchObject({
+      status: "passed",
+      baseSha: MOVED,
+      requestCount: 1,
+    })
+  })
+
   it("mints no check request for a carrier that never asked for one", async () => {
     // @yrd/core/refresh-coverage-gap, the exclusion the widened refresh keeps.
     // `refreshCheckIdentities` re-points an identity; it never mints one. A
