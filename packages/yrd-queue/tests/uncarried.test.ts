@@ -36,6 +36,7 @@ function fact(overrides: Partial<PushedRefFact> = {}): PushedRefFact {
     equivalentCommits: 0,
     payloadKind: "content",
     pinDirection: "none",
+    absorbedRevisions: 0,
     ...overrides,
   }
 }

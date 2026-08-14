@@ -42,6 +42,7 @@ const OPTIONS = {
   observedAtMs: 1_786_000_000_000,
   carriedBranches: new Set<string>(),
   gitlinkPaths: new Set(["vendor/yrd", "km"]),
+  absorbedRevisions: 0,
 }
 
 describe("gatherPushedRefFact", () => {

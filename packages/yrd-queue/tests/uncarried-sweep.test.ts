@@ -349,4 +349,110 @@ describe("sweepUncarriedRefs", () => {
     expect(result.scanned).toBe(1)
     expect(result.outsideAgeBound).toBe(1)
   })
+
+  it("collapses a revision series to its newest revision and says what it absorbed", async () => {
+    // THE noise case, measured 2026-08-14 on the live fleet: 129 findings, of
+    // which 62 were earlier `-rN` revisions of a series whose newer revision
+    // was flagged too. Every one of these three revisions is uncarried, past
+    // the TTL, inside the age bound and holds unlanded commits — so without the
+    // collapse this sweep reports all three, and an operator pages three times
+    // on one piece of work whose only live revision is `-r3`.
+    const git = fakeGit({
+      "for-each-ref": [
+        refLine("origin/task/thing-dev3-r1", 5 * HOUR),
+        refLine("origin/task/thing-dev3-r2", 4 * HOUR),
+        refLine("origin/task/thing-dev3-r3", 3 * HOUR),
+      ].join("\n"),
+      "ls-tree": "",
+      "rev-parse origin/task/thing-dev3-r1^{commit}": "1".repeat(40),
+      "rev-parse origin/task/thing-dev3-r2^{commit}": "2".repeat(40),
+      "rev-parse origin/task/thing-dev3-r3^{commit}": "3".repeat(40),
+      "diff --name-only": "src/thing.ts",
+      cherry: "+ 1111111111111111111111111111111111111111",
+    })
+
+    const result = await sweepUncarriedRefs(git, OPTIONS)
+
+    expect(result.findings).toHaveLength(1)
+    const [finding] = result.findings
+    expect(finding?.ref).toBe("origin/task/thing-dev3-r3")
+    expect(finding?.absorbedRevisions).toBe(2)
+    expect(finding?.message).toContain("supersedes 2 earlier revisions of the same series")
+    expect(result.superseded).toBe(2)
+    // Collapsed BEFORE the gatherer, so the dead revisions cost no diff, no
+    // cherry and no rev-parse — and each ref still lands in exactly one bucket.
+    expect(result.examined).toBe(1)
+    expect(result.scanned).toBe(result.carried + result.superseded + result.missingUpdateClocks + result.outsideAgeBound + result.examined)
+  })
+
+  it("lets a carried newest revision suppress its own stranded ancestors", async () => {
+    // A merge request on `-r2` is the strongest evidence `-r1` is spent: the
+    // work moved on and something already tracks it. Looking for the superseder
+    // only among UNCARRIED refs would resurrect exactly the row this deletes.
+    const git = fakeGit({
+      "for-each-ref": [
+        refLine("origin/task/thing-dev3-r1", 5 * HOUR),
+        refLine("origin/task/thing-dev3-r2", 3 * HOUR),
+      ].join("\n"),
+    })
+
+    const result = await sweepUncarriedRefs(git, { ...OPTIONS, carriedBranches: new Set(["task/thing-dev3-r2"]) })
+
+    expect(result.findings).toEqual([])
+    expect(result.carried).toBe(1)
+    expect(result.superseded).toBe(1)
+    // A carried sibling is counted as carried, never as something a row
+    // absorbed — one ref, one bucket.
+    expect(result.examined).toBe(0)
+  })
+
+  it("passes a name outside the -rN convention through as its own series", async () => {
+    // `-r12-source` and `-r12-currentpin` both stand on this remote, where the
+    // trailing word names a VARIANT rather than a revision. Reading a revision
+    // out of the middle of a name would collapse two distinct artifacts into
+    // each other and delete a live row — a worse failure than the noise.
+    const git = fakeGit({
+      "for-each-ref": [
+        refLine("origin/task/thing-agent1-r11-source", 5 * HOUR),
+        refLine("origin/task/thing-agent1-r12-source", 4 * HOUR),
+        refLine("origin/task/plain-name", 3 * HOUR),
+      ].join("\n"),
+      "ls-tree": "",
+      "rev-parse origin/task/thing-agent1-r11-source^{commit}": "1".repeat(40),
+      "rev-parse origin/task/thing-agent1-r12-source^{commit}": "2".repeat(40),
+      "rev-parse origin/task/plain-name^{commit}": "3".repeat(40),
+      "diff --name-only": "src/thing.ts",
+      cherry: "+ 1111111111111111111111111111111111111111",
+    })
+
+    const result = await sweepUncarriedRefs(git, OPTIONS)
+
+    expect(result.superseded).toBe(0)
+    expect(result.findings.map((finding) => finding.ref)).toEqual([
+      "origin/task/thing-agent1-r11-source",
+      "origin/task/thing-agent1-r12-source",
+      "origin/task/plain-name",
+    ])
+    expect(result.findings.every((finding) => finding.absorbedRevisions === 0)).toBe(true)
+  })
+
+  it("orders revisions by number rather than by name", async () => {
+    // `"9" > "10"` as strings, so a lexicographic winner keeps r9 and suppresses
+    // the live r10 — the collapse would then delete the only row that mattered.
+    const git = fakeGit({
+      "for-each-ref": [
+        refLine("origin/task/thing-dev3-r9", 5 * HOUR),
+        refLine("origin/task/thing-dev3-r10", 3 * HOUR),
+      ].join("\n"),
+      "ls-tree": "",
+      "rev-parse origin/task/thing-dev3-r10^{commit}": "1".repeat(40),
+      "diff --name-only": "src/thing.ts",
+      cherry: "+ 1111111111111111111111111111111111111111",
+    })
+
+    const result = await sweepUncarriedRefs(git, OPTIONS)
+
+    expect(result.findings.map((finding) => finding.ref)).toEqual(["origin/task/thing-dev3-r10"])
+    expect(result.superseded).toBe(1)
+  })
 })
