@@ -105,6 +105,50 @@ async function workload(
 }
 
 describe("journal retention window", () => {
+  it("evicts nothing until someone asks for a window", async () => {
+    // The opt-in default is what makes this safe to land ahead of the
+    // floor-aware readers: every cursor-0 replay still resolves, because an
+    // unconfigured journal never drops a frame.
+    const keepFrames = process.env.YRD_JOURNAL_KEEP_FRAMES
+    const keepDays = process.env.YRD_JOURNAL_KEEP_DAYS
+    delete process.env.YRD_JOURNAL_KEEP_FRAMES
+    delete process.env.YRD_JOURNAL_KEEP_DAYS
+    try {
+      const frames = Array.from({ length: 120 }, (_, index) => frame(`optin-${String(index)}`))
+      const dir = await directory()
+      const journal = testJournal(dir)
+      const head = await appendAll(journal, frames)
+      await journal.checkpoint?.save?.({ identity: "optin", cursor: head, value: {} })
+
+      expect(stats(dir)).toMatchObject({ history: 120, evictedThrough: 0 })
+      expect((await drainCursors(journal, 0)).at(-1)).toBe(120)
+    } finally {
+      if (keepFrames !== undefined) process.env.YRD_JOURNAL_KEEP_FRAMES = keepFrames
+      if (keepDays !== undefined) process.env.YRD_JOURNAL_KEEP_DAYS = keepDays
+    }
+  })
+
+  it("arms retention from the environment alone, with nothing passed to createJournal", async () => {
+    // The contrast that gives the test above its meaning: same construction,
+    // no retention argument, and the only difference is the env knob.
+    const previous = process.env.YRD_JOURNAL_KEEP_DAYS
+    process.env.YRD_JOURNAL_KEEP_DAYS = "14"
+    try {
+      const frames = Array.from({ length: 50 }, (_, index) =>
+        frame(`env-armed-${String(index)}`, { ts: "2026-07-01T00:00:00.000Z" }),
+      )
+      const dir = await directory()
+      const journal = testJournal(dir)
+      const head = await appendAll(journal, frames)
+      await journal.checkpoint?.save?.({ identity: "env-armed", cursor: head, value: {} })
+
+      expect(stats(dir).evictedThrough).toBe(49)
+    } finally {
+      if (previous === undefined) delete process.env.YRD_JOURNAL_KEEP_DAYS
+      else process.env.YRD_JOURNAL_KEEP_DAYS = previous
+    }
+  })
+
   it("drops history past the window and gives the pages back", async () => {
     const frames = Array.from({ length: 300 }, (_, index) => frame(`bounded-${String(index)}`))
 
