@@ -11735,6 +11735,101 @@ describe("runYrd", () => {
     })
     expect(app.bays.pr("PR1")?.integration).toMatchObject({ commit: MERGED_SHA, changeId: revision.changeId })
   })
+
+  // The in-toto projection is read-time and needs a builder the durable record
+  // deliberately does not carry, so it can only be assembled where the journal's
+  // run is also in hand. Absence is named on the payload rather than dropped:
+  // a missing `statement` key alone cannot distinguish "not attestable" from
+  // "nobody wired the projection".
+  it("projects a landed merge record as an in-toto Statement attributed to its queue", async () => {
+    await using app = await createApp()
+    await app.bays.submit({ branch: "issue/attested", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    const revision = currentPRRev(app.bays.pr("PR1")!)
+    if (revision.changeId === undefined) throw new Error("expected current PR Change-Id")
+    await runYrd(app, yrd("queue", "run", "--once"), outputIO().io)
+    const run = Queues.values(app.state().queues).at(0)
+    if (run === undefined) throw new Error("expected a queue run in the journal")
+    const pointer = {
+      ref: "refs/notes/yrd/merge-records" as const,
+      target: "2".repeat(40),
+      note: "e".repeat(40),
+      checksum: "f".repeat(64),
+    }
+    const record = {
+      merge: {
+        id: run.id,
+        base: "main",
+        baseSha: BASE_SHA,
+        candidate: "C1",
+        result: "merged" as const,
+        mergedCommit: MERGED_SHA,
+        startedAt: "2026-08-12T20:00:00.000Z",
+        finishedAt: "2026-08-12T20:01:00.000Z",
+      },
+      changes: [
+        { pr: "PR1", revision: 1, submittedHead: HEAD_SHA, changeId: revision.changeId, generatedCommit: MERGED_SHA },
+      ],
+      evidence: { jobs: [] },
+      pins: [],
+    }
+    const output = outputIO()
+
+    await runYrd(app, yrd("why", "PR1", "--json"), output.io, {
+      mergeRecords: {
+        find: async () => ({ status: "proven" as const, records: [{ record, pointer }] }),
+        all: async () => ({ status: "proven" as const, records: [{ record, pointer }] }),
+      },
+    } as YrdCliServices)
+
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "why",
+      verdict: "merged",
+      statement: {
+        _type: "https://in-toto.io/Statement/v1",
+        predicateType: "https://yrd.dev/attestation/merge-record/v1",
+        subject: [{ name: "C1", digest: { sha1: MERGED_SHA } }],
+        predicate: { builder: { id: run.queueId } },
+      },
+    })
+  })
+
+  it("names why a Statement is unavailable rather than dropping the key", async () => {
+    await using app = await createApp()
+    await app.bays.submit({ branch: "issue/unattested", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    const pointer = {
+      ref: "refs/notes/yrd/merge-records" as const,
+      target: "2".repeat(40),
+      note: "a".repeat(40),
+      checksum: "b".repeat(64),
+    }
+    const record = {
+      merge: {
+        id: "R-not-in-journal",
+        base: "main",
+        baseSha: BASE_SHA,
+        candidate: "C1",
+        result: "merged" as const,
+        mergedCommit: MERGED_SHA,
+        startedAt: "2026-08-12T20:00:00.000Z",
+        finishedAt: "2026-08-12T20:01:00.000Z",
+      },
+      changes: [{ pr: "PR1", revision: 1, submittedHead: HEAD_SHA, generatedCommit: MERGED_SHA }],
+      evidence: { jobs: [] },
+      pins: [],
+    }
+    const output = outputIO()
+
+    await runYrd(app, yrd("why", "PR1", "--json"), output.io, {
+      mergeRecords: {
+        find: async () => ({ status: "proven" as const, records: [{ record, pointer }] }),
+        all: async () => ({ status: "proven" as const, records: [{ record, pointer }] }),
+      },
+    } as YrdCliServices)
+
+    const payload = JSON.parse(output.stdout())
+    expect(payload.statement).toBeUndefined()
+    expect(payload.statementUnavailable).toContain("R-not-in-journal")
+  })
 })
 
 describe("queue run — follow-by-default mode selection (#62)", () => {
