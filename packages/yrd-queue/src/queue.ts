@@ -6610,10 +6610,7 @@ function intentCheckFailures(state: DeepReadonly<RuntimeState>, intent: string, 
  * the automatic re-check budget) and is not this. The specimens failed at merge
  * and at candidate composition, which that counter never sees.
  */
-function intentAttemptFailures(
-  state: DeepReadonly<RuntimeState>,
-  intent: string,
-): readonly IntentAttemptFailure[] {
+function intentAttemptFailures(state: DeepReadonly<RuntimeState>, intent: string): readonly IntentAttemptFailure[] {
   const failures: IntentAttemptFailure[] = []
   for (const record of Queues.values(state.queues).toSorted((left, right) => compareNatural(left.id, right.id))) {
     const snapshot = record.prs.find((member) => member.intent?.id === intent)?.intent

@@ -762,11 +762,7 @@ export function runnerSourceBehind(
   if (match === null) return undefined
   const runnerSha = (match[1] ?? "").toLowerCase()
   const cached = runnerSourceBehindCache.get(cwd)
-  if (
-    cached !== undefined &&
-    cached.runnerSha === runnerSha &&
-    now - cached.computedAt < RUNNER_SOURCE_BEHIND_TTL_MS
-  ) {
+  if (cached !== undefined && cached.runnerSha === runnerSha && now - cached.computedAt < RUNNER_SOURCE_BEHIND_TTL_MS) {
     return cached.behind
   }
   const gitDir = queueGitDir(cwd)
@@ -6168,7 +6164,8 @@ async function observeQueueList(
   const observedRunner = activeResidentRunner(await residentRunnerStatus(cwd, io.stateDir))
   const sourceBehind =
     observedRunner === null ? undefined : runnerSourceBehind(cwd, observedRunner.implementationSource, now)
-  const runner = observedRunner === null || sourceBehind === undefined ? observedRunner : { ...observedRunner, sourceBehind }
+  const runner =
+    observedRunner === null || sourceBehind === undefined ? observedRunner : { ...observedRunner, sourceBehind }
   return {
     state,
     stateSource,
