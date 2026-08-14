@@ -5809,15 +5809,26 @@ function auditQueues(
   if (auditNowMs !== undefined) {
     for (const pr of Object.values(state.bays.prs)) {
       if (prDeliveryState(pr) !== "pushed") continue
-      const revision = pr.revs.at(-1)
-      if (revision === undefined) continue
+      // The SAME revision the certification is derived from: `reviewState` and
+      // `prDeliveryState` both read `currentPRRev`, so re-picking the tip by
+      // hand here is a second definition of "current" that can only ever drift.
+      const revision = currentPRRev(pr)
       const pushedAtMs = parseAuditTime(revision.pushedAt, "pr pushed clock")
       if (auditNowMs - pushedAtMs <= DRAFT_STRANDED_GRACE_MS) continue
+      const certification = draftReviewCertification(pr)
       findings.push({
         code: "draft-stranded",
+        // Routing facts go in the MESSAGE as well as the fields below. The
+        // structured fields are the honest substrate, but no surface reads
+        // them: the CLI's `formatActionableFailure` prints code/cause/resolution
+        // only, and downstream JSON consumers rebuild findings field by field
+        // and drop keys they do not know. Carried in the message, who owns this
+        // draft and how far it got through review survive as the `cause` line
+        // and route through yrd's own CLI with no downstream change.
         message:
-          `PR '${pr.id}' (${pr.branch}) was pushed at ${revision.pushedAt} and nothing has submitted it; ` +
-          `it is invisible to the queue until someone does`,
+          `PR '${pr.id}' (${pr.branch}) was pushed at ${revision.pushedAt}` +
+          `${revision.submitter === undefined ? "" : ` by ${revision.submitter}`}, review: ${certification}, ` +
+          `and nothing has submitted it; it is invisible to the queue until someone does`,
         pr: pr.id,
         specimen: `pr:${pr.id}`,
         since: revision.pushedAt,
@@ -5828,7 +5839,7 @@ function auditQueues(
         // recorded revision submitter and the review verdicts — never from a
         // seat guess or a live git read the audit cannot make.
         ...(revision.submitter === undefined ? {} : { submitter: revision.submitter }),
-        reviewCertification: draftReviewCertification(pr),
+        reviewCertification: certification,
         resolution: [`yrd pr submit ${pr.branch} --issue <ref>`, `or withdraw it: yrd pr withdraw ${pr.id}`],
       })
     }
