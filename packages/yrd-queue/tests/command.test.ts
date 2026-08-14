@@ -746,6 +746,8 @@ async function checkedQueue(
     env?: NodeJS.ProcessEnv
     environmentOverrides?: Readonly<Record<string, string>>
     environmentPassthrough?: readonly string[]
+    timeoutMs?: number
+    noProgressTimeoutMs?: number
     refuse?: RefusePathsPolicy
     mergeCommand?: readonly string[]
     prepareCandidate?: boolean
@@ -771,6 +773,8 @@ async function checkedQueue(
       ...(options.environmentPassthrough === undefined
         ? {}
         : { environmentPassthrough: options.environmentPassthrough }),
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
       ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
     }),
     {
@@ -5192,6 +5196,77 @@ describe("Queue command adapters", () => {
               message: expect.stringContaining("process tree remained alive"),
             },
             candidateEvidence: { exitCode: 0, sweepFailure: "process tree remained alive" },
+            retryable: true,
+          },
+        },
+      })
+      expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
+    },
+  )
+
+  const incompleteCandidateCases = [
+    {
+      name: "timeout",
+      result: {
+        exitCode: 124,
+        signal: "SIGKILL",
+        stdout: "",
+        stderr: "",
+        durationMs: 1_000,
+        timedOut: true,
+        verdict: "TIMED_OUT",
+      } satisfies ProcessResult,
+      errorCode: "check-timeout",
+      evidence: { timedOut: true, stageVerdict: "TIMED_OUT" },
+    },
+    {
+      name: "stall",
+      result: {
+        exitCode: 137,
+        signal: "SIGKILL",
+        stdout: "",
+        stderr: "",
+        durationMs: 1_000,
+        timedOut: false,
+        stalled: true,
+        verdict: "STALLED",
+        lastProgressAtMs: 500,
+        lastProgressBytes: 0,
+      } satisfies ProcessResult,
+      errorCode: "check-stalled",
+      evidence: { stageVerdict: "STALLED", lastProgressAtMs: 500 },
+    },
+  ] as const
+
+  it.each(incompleteCandidateCases.flatMap((testCase) => [false, true].map((waiting) => ({ ...testCase, waiting }))))(
+    "classifies a candidate $name as retryable infrastructure, never a task verdict (waiting=$waiting)",
+    async ({ waiting, result, errorCode, evidence }) => {
+      const { repo, feature: featureSha } = await repository("feature")
+      await using process = createProcess()
+      const incomplete: Pick<Process, "run"> = {
+        run(request) {
+          if (request.argv[0] !== "sh") return process.run(request)
+          return Promise.resolve(result)
+        },
+      }
+      await using app = await checkedQueue(incomplete, repo, shellCommand("exit 0"), {
+        waiting,
+        timeoutMs: 1_000,
+        noProgressTimeoutMs: 1_000,
+      })
+      await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+      expect(run).toMatchObject({
+        status: "completed",
+        conclusion: "failure",
+        error: {
+          code: "queue-environment-refused",
+          evidence: {
+            kind: "check-execution-refusal",
+            phase: "candidate",
+            error: { code: errorCode },
+            candidateEvidence: evidence,
             retryable: true,
           },
         },

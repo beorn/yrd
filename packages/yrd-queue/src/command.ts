@@ -681,6 +681,15 @@ function isCommandInfrastructureFailure(code: string, purpose: string): boolean 
   return code === `${purpose}-infrastructure-signal` || code === `${purpose}-infrastructure-sweep`
 }
 
+function isCommandIncompleteFailure(code: string, purpose: string): boolean {
+  return (
+    isCommandInfrastructureFailure(code, purpose) ||
+    code === `${purpose}-timeout` ||
+    code === `${purpose}-stalled` ||
+    code === `${purpose}-stalled-escaped-descendant`
+  )
+}
+
 function comparisonOutcomeError(
   outcome: JobResult<CommandEvidence>,
   purpose: string,
@@ -5930,7 +5939,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
                 }),
               }
             }
-            if (isCommandInfrastructureFailure(outcome.error.code, purpose)) {
+            if (isCommandIncompleteFailure(outcome.error.code, purpose)) {
               const refusal = GitCheckExecutionRefusalEvidenceSchema.parse({
                 ...candidate,
                 kind: "check-execution-refusal",
@@ -6008,7 +6017,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             )
           }
 
-          if (isCommandInfrastructureFailure(outcome.error.code, purpose)) {
+          if (isCommandIncompleteFailure(outcome.error.code, purpose)) {
             const refusal = GitCheckExecutionRefusalEvidenceSchema.parse({
               ...candidate,
               kind: "check-execution-refusal",
