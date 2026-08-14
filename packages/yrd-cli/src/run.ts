@@ -62,10 +62,12 @@ import { createProcess, pathReapFailure, type Process, type ProcessResult } from
 import {
   isQueueRunningConflict,
   MERGE_RECORD_REF,
+  mergeRecordToStatement,
   Queues,
   resolveSubmoduleOrigin,
   sweepUncarriedRefs,
   synthesizePinIntentCarrier,
+  type InTotoStatement,
   type MergeRecordBody,
   type PREligibility,
   type UnverifiableMergeRecord,
@@ -9355,6 +9357,35 @@ function maxExit(left: YrdCliExitCode, right: YrdCliExitCode): YrdCliExitCode {
   return Math.max(left, right) as YrdCliExitCode
 }
 
+/**
+ * The in-toto Statement projection over a durable merge record, for `--json`
+ * consumers that want the landing in attestation shape.
+ *
+ * `builderId` is the queue that produced the landing. It is deliberately not a
+ * `MergeRecordBody` field — the record is checksummed and the projection is free
+ * to change — so it comes from the journal's own run. Both ways the projection
+ * can be absent are named rather than dropped from the payload: a refused or
+ * canceled attempt minted no landed commit to be the Statement's subject, and a
+ * record whose run the journal has never seen has no builder to attribute.
+ */
+function landingStatement(
+  app: YrdCliApp,
+  record: MergeRecordBody,
+): Readonly<{ statement: InTotoStatement }> | Readonly<{ statementUnavailable: string }> {
+  const run = Queues.resolve(stateOf(app).queues, record.merge.id)
+  if (run === undefined) {
+    return {
+      statementUnavailable: `run '${record.merge.id}' is not in the journal, so the attesting queue is unknown`,
+    }
+  }
+  const statement = mergeRecordToStatement(record, run.queueId)
+  return statement === undefined
+    ? {
+        statementUnavailable: `merge '${record.merge.id}' is ${record.merge.result}, so it minted no landed commit to attest`,
+      }
+    : { statement }
+}
+
 async function explainLanding(
   app: YrdCliApp,
   services: YrdCliServices,
@@ -9419,7 +9450,16 @@ async function explainLanding(
       await printResult(
         io,
         jsonEnabled(options),
-        { command: "why", selector, verdict, repaired, record: latest.record, pointer: latest.pointer, attempts },
+        {
+          command: "why",
+          selector,
+          verdict,
+          repaired,
+          record: latest.record,
+          pointer: latest.pointer,
+          attempts,
+          ...landingStatement(app, latest.record),
+        },
         human,
       )
       return verdict === "merged" ? 0 : 1
