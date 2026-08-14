@@ -743,7 +743,7 @@ function configuredStepDescriptors(
   })
 }
 
-/** Re-derive the current config's step descriptors from disk. Fails loud on an
+/** Re-derive the current config's queue descriptor from disk. Fails loud on an
  * invalid config so the environment audit never certifies a broken selection. */
 async function reloadConfiguredQueueDescriptor(
   repository: YrdRepository,
@@ -1486,16 +1486,16 @@ function queueAdministration(
   }
   return Object.freeze({
     async auditEnvironment(): Promise<QueueAuditEmission> {
-      // Re-derive the selected config's steps from disk on EVERY audit so a
-      // config change after startup is proven, not masked by a stale snapshot.
+      // Re-derive the selected config's queue descriptor from disk on EVERY
+      // audit so a config change after startup is proven, not masked by a stale snapshot.
       // The audit proves THREE-WAY equality (merge-queue R41b): runtime
-      // installed revisions == persisted baseline == fresh disk derivation.
+      // batch policy/revisions == persisted baseline == fresh disk derivation.
       // Legs form a remedy ladder per base: a baseline-vs-disk delta names the
       // deinit/init migration first (migrating the baseline may make the
       // runtime leg moot or freshly actionable); only when baseline and disk
       // agree is the runtime leg proven, so a resident built before another
       // process's migration fails loud instead of certifying baseline == disk
-      // while it still executes the old steps.
+      // while it still executes the old queue policy.
       const [baselines, current] = await Promise.all([
         readInstalledBaselines(repository.stateDir),
         deriveConfiguredQueue(),
