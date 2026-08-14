@@ -17,6 +17,7 @@ import {
   IntentWithdrawArgsSchema,
   PIN_INTENT_SCHEMA,
   PIN_TOMBSTONE_SCHEMA,
+  IntentParkArgsSchema,
   PinIntentEvaluationFactSchema,
   PinIntentIntegratedFactSchema,
   PinTombstoneArgsSchema,
@@ -26,6 +27,8 @@ import {
   TERMINAL_INTENT_STATUSES,
   TOMBSTONE_ID_PREFIX,
   intentFingerprint,
+  INTENT_PARK_DISPOSITION_CODE,
+  WITHDRAWABLE_TERMINAL_STATUSES,
   intentIdNumber,
   intentKey,
   recordFingerprint,
@@ -35,6 +38,7 @@ import {
   type Intents,
   type IntentsState,
   type PinIntent,
+  type IntentParkArgs,
   type PinTombstone,
   type PinTombstoneArgs,
 } from "./types.ts"
@@ -42,12 +46,14 @@ import {
 const AdmittedSchema = PinIntentSchema.omit({ submittedAt: true, status: true }).strict()
 const SupersededSchema = z.object({ intent: z.string(), by: z.string() }).strict()
 const WithdrawnSchema = z.object({ intent: z.string(), reason: z.string().trim().min(1).optional() }).strict()
+const ParkedSchema = IntentParkArgsSchema
 const TombstonedSchema = PinTombstoneSchema.omit({ recordedAt: true }).strict()
 
 type IntentState = Readonly<{ intents: IntentsState }>
 type IntentRuntimeState = DeepReadonly<IntentState>
 export type IntentCommands = Readonly<{
   intent: Readonly<{
+    park: ReturnType<typeof buildParkCommand>
     submit: ReturnType<typeof buildSubmitCommand>
     tombstone: ReturnType<typeof buildTombstoneCommand>
     withdraw: ReturnType<typeof buildWithdrawCommand>
@@ -77,6 +83,7 @@ export function withIntents() {
         "intent/submitted": journalEvent(1, AdmittedSchema),
         "intent/superseded": journalEvent(1, SupersededSchema),
         "intent/withdrawn": journalEvent(1, WithdrawnSchema),
+        "intent/parked": journalEvent(1, ParkedSchema),
         "intent/pin-tombstoned": journalEvent(1, TombstonedSchema),
         "intent/integrated": journalEvent(1, PinIntentIntegratedFactSchema),
         "intent/evaluation-recorded": journalEvent(1, PinIntentEvaluationFactSchema),
@@ -127,6 +134,17 @@ export function withIntents() {
             }
             return record
           },
+          async park(args) {
+            const parsed = IntentParkArgsSchema.parse(args)
+            const selected = bySelector(state(), parsed.intent)
+            const id = selected?.id ?? parsed.intent
+            await yrd.dispatch(commands.intent.park, { ...parsed, intent: id })
+            const record = state().records[id]
+            if (record === undefined) {
+              raiseFailure("infrastructure", "intent-park-lost", `yrd: intent '${parsed.intent}' was not parked`)
+            }
+            return record
+          },
           get: (intent) => bySelector(state(), intent),
           live: (issue, component) => liveIntent(state(), issue, component),
           list: () => ordered(state()),
@@ -142,6 +160,7 @@ export function withIntents() {
 function createIntentCommands(): IntentCommands {
   return {
     intent: {
+      park: buildParkCommand(),
       submit: buildSubmitCommand(),
       tombstone: buildTombstoneCommand(),
       withdraw: buildWithdrawCommand(),
@@ -245,6 +264,44 @@ function buildTombstoneCommand() {
   })
 }
 
+/**
+ * Park a record whose attempts have exhausted their usefulness.
+ *
+ * The caller (Queue) owns the predicate; this command owns only the write. It
+ * is idempotent on an already-parked record with the same fingerprint so a
+ * replayed drain turn cannot double-write, and loud when the fingerprint
+ * differs — that is a caller bug, not a retry.
+ */
+function buildParkCommand() {
+  return command({
+    title: "Park a pin-advance intent whose attempts cannot succeed",
+    visibility: "internal",
+    params: IntentParkArgsSchema,
+    apply(state: IntentRuntimeState, args: IntentParkArgs) {
+      const record = state.intents.records[args.intent]
+      if (record === undefined) {
+        raiseFailure("refusal", "intent-not-found", `yrd: no intent '${args.intent}' to park`)
+      }
+      if (record.status === "parked") {
+        if (record.parked?.fingerprint === args.park.fingerprint) return { events: [] }
+        raiseFailure(
+          "refusal",
+          "intent-park-fingerprint-conflict",
+          `yrd: intent '${record.id}' is already parked on '${record.parked?.fingerprint}', not '${args.park.fingerprint}'`,
+        )
+      }
+      if (TERMINAL_INTENT_STATUSES.has(record.status)) {
+        raiseFailure(
+          "refusal",
+          "intent-terminal",
+          `yrd: intent '${record.id}' is already ${record.status}; a terminal record holds no queue position to release`,
+        )
+      }
+      return { events: [event("intent/parked", { intent: record.id, park: args.park })] }
+    },
+  })
+}
+
 function buildWithdrawCommand() {
   return command({
     title: "Withdraw a pin-advance intent",
@@ -255,7 +312,7 @@ function buildWithdrawCommand() {
       if (record === undefined) {
         raiseFailure("refusal", "intent-not-found", `yrd: no intent '${args.intent}'`)
       }
-      if (TERMINAL_INTENT_STATUSES.has(record.status)) {
+      if (TERMINAL_INTENT_STATUSES.has(record.status) && !WITHDRAWABLE_TERMINAL_STATUSES.has(record.status)) {
         raiseFailure(
           "refusal",
           "intent-terminal",
@@ -296,10 +353,34 @@ function projectIntents(state: DeepReadonly<IntentState>, applied: Event): Inten
     if (record === undefined || TERMINAL_INTENT_STATUSES.has(record.status)) return state as IntentState
     return replaceIntent(state, { ...(record as PinIntent), status: "superseded", supersededBy: superseded.by })
   }
+  if (applied.name === "intent/parked") {
+    const parked = ParkedSchema.parse(applied.data)
+    const record = state.intents.records[parked.intent]
+    if (record === undefined) throw new Error(`yrd: park names missing intent '${parked.intent}'`)
+    if (TERMINAL_INTENT_STATUSES.has(record.status)) {
+      if (record.status === "parked" && record.parked?.fingerprint === parked.park.fingerprint) {
+        return state as IntentState
+      }
+      throw new Error(`yrd: park names terminal intent '${record.id}' (${record.status})`)
+    }
+    return replaceIntent(state, {
+      ...(record as PinIntent),
+      status: "parked",
+      disposition: {
+        code: INTENT_PARK_DISPOSITION_CODE,
+        at: applied.ts,
+        reason: parked.park.remedySummary,
+      },
+      parked: parked.park,
+    })
+  }
   if (applied.name === "intent/withdrawn") {
     const withdrawn = WithdrawnSchema.parse(applied.data)
     const record = state.intents.records[withdrawn.intent]
-    if (record === undefined || TERMINAL_INTENT_STATUSES.has(record.status)) return state as IntentState
+    if (record === undefined) return state as IntentState
+    if (TERMINAL_INTENT_STATUSES.has(record.status) && !WITHDRAWABLE_TERMINAL_STATUSES.has(record.status)) {
+      return state as IntentState
+    }
     return replaceIntent(state, {
       ...(record as PinIntent),
       status: "withdrawn",

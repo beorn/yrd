@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { IssueRefSchema, type IssueRef } from "@yrd/issue"
 import * as z from "zod"
 
@@ -129,6 +130,95 @@ export const IntentDispositionSchema = z
   .object({ code: TextSchema, reason: TextSchema.optional(), at: TextSchema })
   .strict()
 export type IntentDisposition = z.infer<typeof IntentDispositionSchema>
+
+/**
+ * One failed attempt to land an intent, reduced to the facts that decide
+ * whether retrying can ever help.
+ *
+ * `reason` is the human sentence and is deliberately NOT part of the
+ * fingerprint — see {@link intentAttemptFingerprint}.
+ */
+export const IntentAttemptFailureSchema = z
+  .object({
+    /** The failing job's typed code, e.g. `carrier-drops-landed`. Open, not an
+     * enum: the point of fingerprinting is that the code set is never closed. */
+    code: TextSchema,
+    /** The step that failed, when one did; absent for pre-step failures. */
+    step: TextSchema.optional(),
+    component: ComponentPathSchema,
+    /** The component commit this attempt tried to pin. */
+    target: CommitShaSchema.optional(),
+    /** The component pin the attempt was evaluated against. */
+    priorPin: CommitShaSchema.optional(),
+    reason: TextSchema,
+  })
+  .strict()
+export type IntentAttemptFailure = z.infer<typeof IntentAttemptFailureSchema>
+
+/**
+ * The identity of a failure CAUSE, stable across attempts.
+ *
+ * Digested: the typed code, the failing step, and the component-level terms the
+ * refusal was computed from (component, target, prior pin). Two attempts share
+ * a fingerprint exactly when nothing that could change the answer has changed,
+ * so a third identical one cannot succeed either.
+ *
+ * Deliberately NOT digested: `reason`. A rendered failure message carries the
+ * run id, the attempt's scratch directory and its timestamps, so digesting it
+ * would give every attempt a fresh fingerprint, park nothing, and leave the
+ * lane spinning exactly as before — a silent no-op instead of a loud one. The
+ * observed specimen message contained
+ * `.git/yrd/scratch/yrd-queue-8BbPQW/worktree/dep-a`; the next attempt said
+ * `yrd-queue-TlDgln`. The evidence tuple is what repeats; the sentence is not.
+ *
+ * Also deliberately NOT digested: the root base sha. The base moves whenever
+ * anything else lands, and a failure that survives a base move is MORE dead,
+ * not less.
+ */
+export function intentAttemptFingerprint(failure: IntentAttemptFailure): string {
+  const digest = createHash("sha256")
+    .update(
+      JSON.stringify([failure.code, failure.step ?? null, failure.component, failure.target ?? null, failure.priorPin ?? null]),
+    )
+    .digest("hex")
+    .slice(0, 16)
+  return `${failure.code}:${digest}`
+}
+
+/**
+ * How many consecutive attempts sharing one fingerprint park an intent.
+ *
+ * Three, not two: one repeat proves the failure survived a retry, two prove it
+ * survived the retry of the retry. Below that a genuinely flaky infrastructure
+ * failure would be parked as if it were dead.
+ */
+export const INTENT_PARK_AFTER_IDENTICAL_ATTEMPTS = 3
+
+/** The disposition code every parked record carries. */
+export const INTENT_PARK_DISPOSITION_CODE = "intent-attempts-exhausted"
+
+/**
+ * Why an intent stopped being retried, and what closes it.
+ *
+ * Parking is the QUEUE's verdict on a declared advance it cannot execute — not
+ * a refusal (nothing evaluated it as wrong) and not a withdrawal (nobody asked
+ * for it). It exists so the lane advances past work that can never succeed,
+ * and it carries the remedy because the lane advancing is the moment the
+ * owner stops finding out by watching the queue.
+ */
+export const IntentParkSchema = z
+  .object({
+    fingerprint: TextSchema,
+    /** Consecutive attempts that produced {@link fingerprint}. */
+    attempts: z.number().int().positive(),
+    failure: IntentAttemptFailureSchema,
+    /** Machine-executable steps, in the same shape every refusal remedy uses. */
+    remedy: z.array(RemedyStepSchema).readonly(),
+    /** One sentence naming the fix, for a page or a status row. */
+    remedySummary: TextSchema,
+  })
+  .strict()
+export type IntentPark = z.infer<typeof IntentParkSchema>
 
 /**
  * One self-contained authored-to-landed lineage fact.
@@ -286,16 +376,36 @@ export type PinIntentIntegratedFact = z.infer<typeof PinIntentIntegratedFactSche
  * terminal, which is what makes design 6.1 invariant 1
  * ("a terminal record holds no queue position") mechanical rather than a rule.
  */
-export const IntentStatusSchema = z.enum(["open", "integrated", "noop", "refused", "superseded", "withdrawn"])
+export const IntentStatusSchema = z.enum([
+  "open",
+  "integrated",
+  "noop",
+  "parked",
+  "refused",
+  "superseded",
+  "withdrawn",
+])
 export type IntentStatus = z.infer<typeof IntentStatusSchema>
 
 export const TERMINAL_INTENT_STATUSES: ReadonlySet<IntentStatus> = new Set<IntentStatus>([
   "integrated",
   "noop",
+  "parked",
   "refused",
   "superseded",
   "withdrawn",
 ])
+
+/**
+ * Terminal statuses the owner may still close out by hand.
+ *
+ * A parked record is the queue's disposition, not the owner's: the queue gave
+ * up retrying, and the lane-stall finding it raises keeps naming it until
+ * someone acts. Resubmitting is one act; deciding the advance is no longer
+ * wanted is the other, and without this carve-out that second act has no verb
+ * and the finding has no clearing edge.
+ */
+export const WITHDRAWABLE_TERMINAL_STATUSES: ReadonlySet<IntentStatus> = new Set<IntentStatus>(["parked"])
 
 export const PinIntentSchema = z
   .object({
@@ -323,9 +433,54 @@ export const PinIntentSchema = z
     disposition: IntentDispositionSchema.optional(),
     integration: PinIntentIntegrationSchema.optional(),
     evaluation: PinIntentEvaluationFactSchema.optional(),
+    parked: IntentParkSchema.optional(),
   })
   .strict()
 export type PinIntent = z.infer<typeof PinIntentSchema>
+
+export const IntentParkArgsSchema = z.object({ intent: TextSchema, park: IntentParkSchema }).strict()
+export type IntentParkArgs = z.infer<typeof IntentParkArgsSchema>
+
+/**
+ * The remedy for a parked intent, built from the failure alone.
+ *
+ * There is no per-code table here on purpose: an enumerated list is the exact
+ * mistake the fingerprint exists to avoid, and a remedy keyed on a code set
+ * would go quiet for the next unlisted one. Both steps are literally runnable —
+ * a reader who types them is doing the right thing, which is the standing
+ * obligation on every remedy string in this tool. The resubmit deliberately
+ * omits `--target`: an absent target means "the component's trunk tip at
+ * landing", which is the correct advance for a target that has diverged from
+ * or fallen behind its own component main — the shape of both observed
+ * specimens.
+ */
+export function intentParkRemedy(
+  intent: Readonly<{ id: string; issue: IssueRef }>,
+  failure: IntentAttemptFailure,
+  attempts: number,
+): Readonly<{ remedy: readonly RemedyStepV1[]; remedySummary: string }> {
+  const pinClause =
+    failure.priorPin === undefined
+      ? ""
+      : ` The component was pinned at '${failure.priorPin}' when the attempt was evaluated.`
+  const targetClause = failure.target === undefined ? "" : ` at target '${failure.target}'`
+  return {
+    remedy: [
+      {
+        argv: ["yrd", "intent", "show", intent.id],
+        note: `read the ${attempts} identical '${failure.code}' failures and their evidence`,
+      },
+      {
+        argv: ["yrd", "intent", "submit", "--component", failure.component, "--issue", intent.issue.id],
+        note: "resubmit once the cause is fixed; omitting --target advances to the component's trunk tip at landing",
+      },
+    ],
+    remedySummary:
+      `Intent '${intent.id}' failed '${failure.code}' ${attempts} times in a row for '${failure.component}'` +
+      `${targetClause}; retrying cannot change the outcome.${pinClause} Fix the cause, then resubmit for ` +
+      `'${failure.component}' — or withdraw the intent if the advance is no longer wanted.`,
+  }
+}
 
 export const IntentSubmitArgsSchema = z
   .object({
@@ -377,6 +532,8 @@ export type Intents = Readonly<{
   submit(args: IntentSubmitArgs): Promise<PinIntent>
   tombstone(args: PinTombstoneArgs): Promise<PinTombstone>
   withdraw(intent: string, reason?: string): Promise<PinIntent>
+  /** Retire a record the queue can no longer usefully retry, with its remedy. */
+  park(args: IntentParkArgs): Promise<PinIntent>
   get(intent: string): PinIntent | undefined
   /** The open record for a (issue, component) key, if any. */
   live(issue: IssueRef, component: string): PinIntent | undefined
