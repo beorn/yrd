@@ -458,6 +458,17 @@ export type QueueTimelineRunner = Readonly<{
   /** With `exitedAt`: true = clean operator/drain stop, false = signal-forced or
    * crash exit. Absent while the runner is live. */
   clean?: boolean
+  /**
+   * Commits the checkout has advanced past `implementationSource` since the
+   * resident booted, computed at observation time (never per render — see
+   * `runnerSourceBehind` in run.ts). Nothing recycles a stale resident yet
+   * (@yrd/core/stale-runner-never-recycles), so this is how a watcher sees the
+   * drift without cross-referencing the pin by hand.
+   *
+   * Absent means "not behind" (or not measurable), and must never render as a
+   * confident zero.
+   */
+  sourceBehind?: number
 }>
 
 export type QueueRunnerRefusal = Readonly<{
@@ -5079,6 +5090,15 @@ function runnerMergeTimer(lastMerge: number | null, now: number, uptimeMs: numbe
   return hasRunner ? `no merge for ${runnerClock(uptimeMs)}` : "no merge recorded"
 }
 
+/** The RUNNER box's source rail, staleness flagged inline (@yrd/core/stale-runner-never-recycles
+ * box 2) so a watcher sees a booted-source/checkout gap without cross-referencing the pin
+ * by hand. `sourceBehind` is absent for a current or unmeasurable source and must never
+ * render as a confident "0 behind". */
+function runnerSourceLine(runner: QueueTimelineRunner): string {
+  const source = `source ${runner.implementationSource ?? "unknown"}`
+  return runner.sourceBehind === undefined ? source : `${source} (${String(runner.sourceBehind)} behind pin)`
+}
+
 function RunnerProgressStatus({
   progress,
   headBlock,
@@ -5230,8 +5250,8 @@ function TimelineRunnerBox({
         )}
       </Box>
       {runner === null ? null : (
-        <Text color="$fg-muted" wrap="wrap" minWidth={0}>
-          source {runner.implementationSource ?? "unknown"}
+        <Text color={runner.sourceBehind === undefined ? "$fg-muted" : "$fg-warning"} wrap="wrap" minWidth={0}>
+          {runnerSourceLine(runner)}
         </Text>
       )}
       {/* Its own rail, per acceptance: pushed-and-uncarried is invisible from
