@@ -10,7 +10,7 @@ import { createLogger } from "loggily"
 import { defineConfig, yrd as yrdConfig } from "@yrd/config"
 import { createProcess } from "@yrd/process"
 import { createJournal } from "@yrd/persistence"
-import { resolveSubmoduleOrigin } from "@yrd/queue"
+import { resolveSubmoduleOrigin } from "git-super/submodule-origin"
 import { createDefaultYrdApp, runYrd as runYrdRaw, type YrdCliApp, type YrdCliIO } from "@yrd/cli"
 import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
 import type { ResolvedYrdProjectConfig } from "../src/config.ts"
@@ -204,7 +204,7 @@ describe("unbranchedSubmodules + formatSubmoduleTrackingWarning", () => {
 // yrd admin submodule init resolves submodule URLs through @yrd/queue's shared resolver; these
 // assert the cases yrd-cli relies on (absolute passthrough, ./ and ../ relative
 // resolution against the superproject origin, and the loud no-origin failure).
-describe("resolveSubmoduleOrigin (shared @yrd/queue resolver)", () => {
+describe("resolveSubmoduleOrigin (shared git-super resolver)", () => {
   it("passes absolute https and scp URLs through unchanged", () => {
     expect(resolveSubmoduleOrigin("/repo", undefined, "https://example.com/x.git")).toBe("https://example.com/x.git")
     expect(resolveSubmoduleOrigin("/repo", undefined, "git@github.com:owner/x.git")).toBe("git@github.com:owner/x.git")

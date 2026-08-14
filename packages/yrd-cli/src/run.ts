@@ -59,10 +59,10 @@ import {
 import { isConcurrentSettlementConflict } from "@yrd/job"
 import type { Job, JobError } from "@yrd/job"
 import { createProcess, pathReapFailure, type Process, type ProcessResult } from "@yrd/process"
+import { resolveSubmoduleOrigin } from "git-super/submodule-origin"
 import {
   isQueueRunningConflict,
   Queues,
-  resolveSubmoduleOrigin,
   sweepUncarriedRefs,
   synthesizePinIntentCarrier,
   type PREligibility,

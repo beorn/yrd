@@ -9,7 +9,7 @@
   "dependencies": {
     "@yrd/core": "workspace:*",
     "canonicalize": "^3.0.0",
-    "git-super": "github:beorn/git-super#dd07a8ef53d31cf2c8e59dba48f45db33bad4ae1",
+    "git-super": "github:beorn/git-super#16e2ff8e3b5596e33b75867a2a8c9347cf35094a",
     "loggily": "^0.10.2"
   },
   "devDependencies": {

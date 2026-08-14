@@ -9,7 +9,7 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeF
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { resolveRelativeSubmoduleOrigin } from "../src/submodule-origin.ts"
+import { resolveRelativeSubmoduleOrigin } from "git-super/submodule-origin"
 import {
   createBayJobDefs,
   currentPRRev,
@@ -2794,7 +2794,7 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run.status, run.error?.message).toBe("completed")
-    expect(run.conclusion).toBe("success")
+    expect(run.conclusion, JSON.stringify(run, null, 2)).toBe("success")
     const check = run.steps[0]?.job
     if (check?.status !== "completed" || check.conclusion !== "success") throw new Error("check did not pass")
     const evidence = GitCheckEvidenceSchema.parse(check.output)
@@ -2920,7 +2920,7 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1", "PR2"] }, runtime))[0]!
 
     expect(run.status, run.error?.message).toBe("completed")
-    expect(run.conclusion).toBe("success")
+    expect(run.conclusion, JSON.stringify(run, null, 2)).toBe("success")
     const check = run.steps[0]?.job
     if (check?.status !== "completed" || check.conclusion !== "success") throw new Error("check did not pass")
     const evidence = GitCheckEvidenceSchema.parse(check.output)
@@ -7144,7 +7144,9 @@ describe("Queue command adapters", () => {
     const proof = IntegrationProofSchema.parse(run.integration)
     const rootPush = pushes.find((argv) => argv.includes(`${proof.commit}:refs/heads/main`))
     expect(rootPush).toContain("--recurse-submodules=no")
-    const recordPush = pushes.find((argv) => argv.includes("refs/notes/yrd/merge-records:refs/notes/yrd/merge-records"))
+    const recordPush = pushes.find((argv) =>
+      argv.some((argument) => argument.endsWith(":refs/notes/yrd/merge-records")),
+    )
     expect(recordPush).toEqual(expect.arrayContaining(["--no-verify", "--recurse-submodules=no"]))
     expect(await git(remote, ["ls-tree", "main", "dep"])).toContain(moduleSha)
   })
