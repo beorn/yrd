@@ -11661,7 +11661,10 @@ describe("runYrd", () => {
 
     expect(
       await runYrd(app, yrd("why", "PR1", "--json"), output.io, {
-        mergeRecords: { find: async () => ({ status: "proven" as const, records: [{ record, pointer }] }) },
+        mergeRecords: {
+          find: async () => ({ status: "proven" as const, records: [{ record, pointer }] }),
+          all: async () => ({ status: "proven" as const, records: [{ record, pointer }] }),
+        },
       } as YrdCliServices),
       output.stderr(),
     ).toBe(1)
@@ -11717,7 +11720,10 @@ describe("runYrd", () => {
 
     expect(
       await runYrd(app, yrd("why", "PR1", "--repair", "--json"), output.io, {
-        mergeRecords: { find: async () => ({ status: "proven" as const, records: [{ record, pointer }] }) },
+        mergeRecords: {
+          find: async () => ({ status: "proven" as const, records: [{ record, pointer }] }),
+          all: async () => ({ status: "proven" as const, records: [{ record, pointer }] }),
+        },
       } as YrdCliServices),
       output.stderr(),
     ).toBe(0)
@@ -14005,6 +14011,159 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     } finally {
       await app.close()
     }
+  })
+
+  describe("doctor --rebuild-index-from-repo", () => {
+    const doctorConfig = () =>
+      defineConfig(yrdConfig.flow({ name: "main", rev: "1", on: () => true, steps: [yrdConfig.check("check")] }))
+
+    const mergedRecord = (changeId: string) => ({
+      merge: {
+        id: "R-recovered",
+        base: "main",
+        baseSha: BASE_SHA,
+        candidate: "C1",
+        result: "merged" as const,
+        mergedCommit: MERGED_SHA,
+        startedAt: "2026-08-12T20:00:00.000Z",
+        finishedAt: "2026-08-12T20:01:00.000Z",
+      },
+      changes: [{ pr: "PR1", revision: 1, submittedHead: HEAD_SHA, changeId, generatedCommit: MERGED_SHA }],
+      evidence: { jobs: [] },
+      pins: [],
+    })
+
+    const pointer = {
+      ref: "refs/notes/yrd/merge-records" as const,
+      target: "2".repeat(40),
+      note: "c".repeat(40),
+      checksum: "d".repeat(64),
+    }
+
+    const servicesFor = (records: readonly unknown[]): YrdCliServices =>
+      ({
+        config: doctorConfig(),
+        mergeRecords: {
+          find: async () => ({ status: "proven" as const, records }),
+          all: async () => ({ status: "proven" as const, records }),
+        },
+      }) as YrdCliServices
+
+    it("rebuilds every missing pr/integrated row and denominates what it scanned", async () => {
+      await using app = await createApp()
+      await app.bays.submit({ branch: "issue/index-gap", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+      const revision = currentPRRev(app.bays.pr("PR1")!)
+      if (revision.changeId === undefined) throw new Error("expected current PR Change-Id")
+      const record = mergedRecord(revision.changeId)
+      const output = outputIO()
+
+      expect(
+        await runYrd(
+          app,
+          yrd("doctor", "--rebuild-index-from-repo", "--json"),
+          output.io,
+          servicesFor([{ record, pointer }]),
+        ),
+        output.stderr(),
+      ).toBe(0)
+      expect(JSON.parse(output.stdout())).toMatchObject({
+        command: "doctor",
+        indexRebuild: {
+          ref: "refs/notes/yrd/merge-records",
+          scanned: { records: 1, merged: 1, changes: 1 },
+          rebuilt: [{ pr: "PR1", revision: 1, run: "R-recovered", commit: MERGED_SHA }],
+          skipped: [],
+        },
+      })
+      expect(app.bays.pr("PR1")?.integration).toMatchObject({ commit: MERGED_SHA, changeId: revision.changeId })
+    })
+
+    it("reports a scan that found nothing with its denominator rather than a clean verdict", async () => {
+      await using app = await createApp()
+      const output = outputIO()
+
+      expect(
+        await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), output.io, servicesFor([])),
+        output.stderr(),
+      ).toBe(0)
+      expect(output.stdout()).toContain("scanned 0 merge records under refs/notes/yrd/merge-records")
+      expect(output.stdout()).toContain("rebuilt 0 of 0 landings")
+    })
+
+    it("names the PR it cannot rebuild and refuses to call the run clean", async () => {
+      await using app = await createApp()
+      const record = mergedRecord(`I${"e".repeat(40)}`)
+      const output = outputIO()
+
+      expect(
+        await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), output.io, servicesFor([{ record, pointer }])),
+        output.stderr(),
+      ).toBe(1)
+      expect(output.stdout()).toContain("SKIPPED PR1 revision 1 pr-unknown")
+      expect(output.stdout()).toContain("a merge record proves a landing, not a PR's existence")
+    })
+
+    it("leaves an already-indexed landing alone and says so", async () => {
+      await using app = await createApp()
+      await app.bays.submit({ branch: "issue/index-gap", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+      const revision = currentPRRev(app.bays.pr("PR1")!)
+      if (revision.changeId === undefined) throw new Error("expected current PR Change-Id")
+      const services = servicesFor([{ record: mergedRecord(revision.changeId), pointer }])
+
+      const first = outputIO()
+      expect(await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), first.io, services), first.stderr()).toBe(0)
+      const second = outputIO()
+      expect(await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), second.io, services), second.stderr()).toBe(
+        0,
+      )
+      expect(second.stdout()).toContain("rebuilt 0 of 1 landing")
+      expect(second.stdout()).toContain("SKIPPED PR1 revision 1 already-indexed")
+    })
+
+    it("skips a record whose revision the journal has already superseded", async () => {
+      await using app = await createApp()
+      await app.bays.submit({ branch: "issue/index-gap", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+      const revision = currentPRRev(app.bays.pr("PR1")!)
+      if (revision.changeId === undefined) throw new Error("expected current PR Change-Id")
+      const stale = mergedRecord(revision.changeId)
+      const record = { ...stale, changes: [{ ...stale.changes[0]!, submittedHead: "9".repeat(40) }] }
+      const output = outputIO()
+
+      expect(
+        await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), output.io, servicesFor([{ record, pointer }])),
+        output.stderr(),
+      ).toBe(1)
+      expect(output.stdout()).toContain("SKIPPED PR1 revision 1 revision-superseded")
+      expect(app.bays.pr("PR1")?.integration).toBeUndefined()
+    })
+
+    it("refuses loudly when the merge-record ref itself is unreadable", async () => {
+      await using app = await createApp()
+      const output = outputIO()
+
+      expect(
+        await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), output.io, {
+          config: doctorConfig(),
+          mergeRecords: {
+            find: async () => ({ status: "repository-corrupt" as const, reason: "merge-record ref unreadable" }),
+            all: async () => ({ status: "repository-corrupt" as const, reason: "merge-record ref unreadable" }),
+          },
+        } as YrdCliServices),
+      ).toBe(2)
+      expect(output.stderr()).toContain("merge-record ref unreadable")
+    })
+
+    it("refuses when no repository merge-record capability is installed", async () => {
+      await using app = await createApp()
+      const output = outputIO()
+
+      expect(
+        await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), output.io, {
+          config: doctorConfig(),
+        } as YrdCliServices),
+      ).toBe(2)
+      expect(output.stderr()).toContain("repository merge-record capability is not installed")
+    })
   })
 
   it("queueListSnapshot tails out-of-process journal appends instead of serving the mount-time projection", async () => {
