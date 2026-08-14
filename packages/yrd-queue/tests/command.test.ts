@@ -3217,13 +3217,24 @@ describe("Queue command adapters", () => {
       )
     }
 
-    // Three turns of the block itself: the head fails, the lane never moves,
-    // and the live intent from the OTHER component never gets a turn.
+    // The head fails, and the OTHER component's intent lands in the SAME turn:
+    // head-of-line release is keyed by component, so a dead head costs nobody
+    // but its own lane. Parking still bounds how long that lane burns.
     await drain()
+    expect(app.intents.get(liveIntent.id), `drain passes were ${JSON.stringify(passes)}`).toMatchObject({
+      status: "integrated",
+    })
+    expect(await git(live.remote, ["rev-parse", "main"])).toBe(live.pinSha)
+
+    // Three turns of the dead lane itself, one attempt per turn — releasing its
+    // position must not let the same component burn a second attempt in a turn.
     await drain()
     await drain()
     expect(passes.every((pass) => pass.startsWith(`${deadIntent.id}:failure:`)), passes.join(" | ")).toBe(true)
-    expect(app.intents.get(liveIntent.id)).toMatchObject({ status: "open" })
+    expect(
+      passes.filter((pass) => pass.includes(`${deadIntent.id}:failure:`)),
+      passes.join(" | "),
+    ).toHaveLength(3)
 
     // The stall is visible to the audit BEFORE the lane clears it, which is the
     // half of this the paging pipeline had no code for.
@@ -3239,12 +3250,7 @@ describe("Queue command adapters", () => {
 
     await drain()
 
-    expect(
-      app.intents.get(liveIntent.id),
-      `the live intent never landed; drain passes were ${JSON.stringify(passes)}`,
-    ).toMatchObject({ status: "integrated" })
-    expect(await git(live.remote, ["rev-parse", "main"])).toBe(live.pinSha)
-    expect(app.intents.get(deadIntent.id)).toMatchObject({
+    expect(app.intents.get(deadIntent.id), `drain passes were ${JSON.stringify(passes)}`).toMatchObject({
       status: "parked",
       disposition: { code: "intent-attempts-exhausted" },
       parked: {

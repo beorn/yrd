@@ -386,8 +386,44 @@ export type UncarriedObservation = Readonly<{
   /** Legacy refs whose reflog clock was not retained. Optional for status
    * written by older residents; absence is unknown coverage, never zero. */
   missingUpdateClocks?: number
+  /**
+   * Uncarried refs whose update clock WAS retained, so the sweep could judge
+   * them. With `missingUpdateClocks` this gives the coverage fraction, which
+   * `scanned` alone cannot: `scanned` counts carried and superseded refs the
+   * rail never had to measure. Optional for status written by older residents;
+   * absence is unknown coverage, never full coverage.
+   */
+  measurable?: number
   observedAt: string
 }>
+
+/**
+ * How much of the candidate population this sweep could actually judge.
+ *
+ * The rail is required to say this next to its count, because the count is a
+ * FLOOR and reads exactly like a total. Measured 2026-08-14: 2,442 of 2,786
+ * uncarried refs had no retained reflog clock, so the rail saw 12% of its
+ * population — and a zero from a 12% reading is not a clean fleet, it is an
+ * unmeasured one. One function, shared by the rail and the `queue uncarried`
+ * command, so the two surfaces cannot phrase the same gap differently.
+ */
+export function uncarriedCoverageFloor(
+  measurable: number | undefined,
+  missingUpdateClocks: number | undefined,
+): string {
+  // An absent clock count is unknown coverage, never full coverage — the
+  // distinction an older resident's status cannot make for itself.
+  if (missingUpdateClocks === undefined) return "push-clock coverage unknown, so a floor"
+  const gap = `${String(missingUpdateClocks)} refs without retained update clocks`
+  if (missingUpdateClocks === 0) return "every candidate had a retained update clock"
+  if (measurable === undefined) return `a floor — ${gap}, against an unknown candidate population`
+  const candidates = measurable + missingUpdateClocks
+  const percent = Math.round((measurable / candidates) * 100)
+  // A rail that rounds a real 0.4% down to a flat "0% measurable" says the
+  // sweep saw nothing, which is a different fact from seeing almost nothing.
+  const share = measurable > 0 && percent === 0 ? "<1%" : `${String(percent)}%`
+  return `a floor — ${share} of ${String(candidates)} candidates measurable, ${gap}`
+}
 
 /**
  * How a rail must say what it measured, or that it did not measure.
@@ -400,14 +436,13 @@ export type UncarriedObservation = Readonly<{
 export function uncarriedLine(observation: UncarriedObservation | undefined, nowMs: number): string {
   if (observation === undefined) return "uncarried not swept"
   const ageMs = Math.max(0, nowMs - Date.parse(observation.observedAt))
-  const clocks =
-    observation.missingUpdateClocks === undefined
-      ? ", push-clock coverage unknown"
-      : observation.missingUpdateClocks === 0
-        ? ""
-        : `, ${String(observation.missingUpdateClocks)} refs without retained update clocks`
+  const floor = uncarriedCoverageFloor(observation.measurable, observation.missingUpdateClocks)
+  // `≥` is not decoration: the count is a floor whenever any candidate went
+  // unmeasured, and an operator scanning the rail reads a bare number as a
+  // total long before they read the parenthetical that says otherwise.
+  const bound = observation.missingUpdateClocks === undefined || observation.missingUpdateClocks > 0 ? "≥" : ""
   return (
-    `uncarried ${String(observation.count)} of ${String(observation.scanned)} refs${clocks}, ` +
+    `uncarried ${bound}${String(observation.count)} of ${String(observation.scanned)} refs (${floor}), ` +
     `as of ${humanAge(ageMs)} ago`
   )
 }
@@ -5109,7 +5144,7 @@ function RunnerProgressStatus({
   if (progress?.state !== "stalled") return null
   if (headBlock === undefined) {
     return (
-      <Text color="$fg-error" bold wrap="wrap">
+      <Text color="$fg-error" bold wrap="truncate">
         NO PROGRESS — {progress.findings.map((finding) => finding.message).join(" · ")}
       </Text>
     )
@@ -5137,7 +5172,7 @@ function RunnerProgressStatus({
 function RunnerProgressObservation({ progress, now }: { progress: QueueRunnerProgress | undefined; now: number }) {
   if (progress === undefined) {
     return (
-      <Text color="$fg-error" bold wrap="wrap">
+      <Text color="$fg-error" bold wrap="truncate">
         PROGRESS NOT MEASURED — heartbeat proves ticking only
       </Text>
     )
@@ -5145,14 +5180,14 @@ function RunnerProgressObservation({ progress, now }: { progress: QueueRunnerPro
   const ageMs = QueueRunnerProgress.ageMs(progress, now)
   if (ageMs === undefined) {
     return (
-      <Text color="$fg-error" bold wrap="wrap">
+      <Text color="$fg-error" bold wrap="truncate">
         PROGRESS INVALID — measurement time is not readable
       </Text>
     )
   }
   if (ageMs > RUNNER_STALE_MS) {
     return (
-      <Text color="$fg-error" bold wrap="wrap">
+      <Text color="$fg-error" bold wrap="truncate">
         PROGRESS STALE — last measured {mediaDuration(ageMs)} ago
       </Text>
     )
@@ -5250,7 +5285,7 @@ function TimelineRunnerBox({
         )}
       </Box>
       {runner === null ? null : (
-        <Text color={runner.sourceBehind === undefined ? "$fg-muted" : "$fg-warning"} wrap="wrap" minWidth={0}>
+        <Text color={runner.sourceBehind === undefined ? "$fg-muted" : "$fg-warning"} wrap="truncate" minWidth={0}>
           {runnerSourceLine(runner)}
         </Text>
       )}
@@ -5262,19 +5297,19 @@ function TimelineRunnerBox({
       {runner === null ? null : (
         <Text
           color={runner.uncarried !== undefined && runner.uncarried.count > 0 ? "$fg-warning" : "$fg-muted"}
-          wrap="wrap"
+          wrap="truncate"
           minWidth={0}
         >
           {uncarriedLine(runner.uncarried, now)}
         </Text>
       )}
       {runner === null && runnerRefusal !== undefined ? (
-        <Text color="$fg-error" wrap="wrap" minWidth={0}>
+        <Text color="$fg-error" wrap="truncate" minWidth={0}>
           {runnerRefusal.code}: {runnerRefusal.message}
         </Text>
       ) : null}
       {runnerStale && timing !== null ? (
-        <Text color="$fg-error" bold wrap="wrap">
+        <Text color="$fg-error" bold wrap="truncate">
           RUNNER STALE — last tick {mediaDuration(timing.ageMs)} ago
         </Text>
       ) : null}

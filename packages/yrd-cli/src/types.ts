@@ -173,6 +173,14 @@ export type YrdCliIO = {
   driver?: Readonly<{ queueId: string; epoch: string }>
   /** Host-owned implementation identity captured before a resident starts serving. */
   implementationSource?: string
+  /**
+   * The Yrd source checkout {@link implementationSource} was captured from —
+   * the only repository that sha may be compared against. Absent means "resolve
+   * it from the running module", which is what the host does; naming it keeps
+   * the sha and the repository it came from a matched pair rather than two
+   * independent derivations that can drift apart.
+   */
+  sourceCheckout?: string
   leaseMs?: number
   concurrency?: number
   now?: () => number

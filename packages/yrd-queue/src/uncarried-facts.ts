@@ -27,6 +27,9 @@ export type GatherOptions = Readonly<{
   /** Gitlink paths standing on the base, discovered from tree mode 160000 —
    * never guessed from a path shape. */
   gitlinkPaths: ReadonlySet<string>
+  /** Earlier revisions of this ref's series the sweep collapsed into it. Only
+   * the enumerator can know this; it is carried through rather than derived. */
+  absorbedRevisions: number
 }>
 
 /**
@@ -67,7 +70,7 @@ async function pinDirection(
  * bound before any git object is read.
  */
 export async function gatherPushedRefFact(git: RefGit, ref: string, options: GatherOptions): Promise<PushedRefFact> {
-  const { repo, base, observedAtMs, carriedBranches, gitlinkPaths } = options
+  const { repo, base, observedAtMs, carriedBranches, gitlinkPaths, absorbedRevisions } = options
   const tipSha = await git.run(repo, ["rev-parse", `${ref}^{commit}`])
 
   // Three-dot: what this ref CHANGED relative to the merge base. Two-dot would
@@ -117,5 +120,6 @@ export async function gatherPushedRefFact(git: RefGit, ref: string, options: Gat
     equivalentCommits: lines.filter((line) => line.startsWith("-")).length,
     payloadKind,
     pinDirection: direction,
+    absorbedRevisions,
   }
 }

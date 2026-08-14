@@ -125,6 +125,37 @@ describe("runnerSourceBehind (@yrd/core/stale-runner-never-recycles box 2)", () 
     }
   })
 
+  it("is undefined when the booted sha is not an ANCESTOR of HEAD, even though both resolve", () => {
+    // The live specimen, reduced. `implementationSource` names a commit of the
+    // YRD repository; the queue repository `/hh` it is serving happens to hold
+    // Yrd's objects too, so `rev-list --count` answered across two unrelated
+    // histories instead of failing: a resident sitting exactly on its checkout's
+    // HEAD measured 37576 behind, and the box rendered that as a warning. A
+    // count is only a distance when one commit descends from the other.
+    const repo = initRepo()
+    const unrelated = commit(repo, "history A")
+    execFileSync("git", ["-C", repo, "checkout", "-q", "--orphan", "history-b"])
+    commit(repo, "history B first")
+    commit(repo, "history B second")
+    commit(repo, "history B third")
+
+    // Both shas are resolvable in this one repository — the precondition that
+    // made the bug silent rather than loud.
+    expect(() => execFileSync("git", ["-C", repo, "cat-file", "-t", unrelated])).not.toThrow()
+    expect(runnerSourceBehind(repo, `git:${unrelated}`, Date.now())).toBeUndefined()
+  })
+
+  it("is undefined when the checkout REWOUND past the resident — behind is not the same as different", () => {
+    // The 2026-08-14 staged-rewind incident: the checkout sat 18 commits behind
+    // its own pin. The resident is then AHEAD of its source, which no restart
+    // improves, so it must not read as a recycle-worthy gap.
+    const repo = initRepo()
+    const base = commit(repo, "first")
+    const ahead = commit(repo, "second")
+    execFileSync("git", ["-C", repo, "checkout", "-q", "--detach", base])
+    expect(runnerSourceBehind(repo, `git:${ahead}`, Date.now())).toBeUndefined()
+  })
+
   it("recomputes once the TTL has elapsed, picking up a newly landed pin", () => {
     const repo = initRepo()
     const bootedSha = commit(repo, "first")

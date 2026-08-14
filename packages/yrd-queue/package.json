@@ -7,7 +7,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@silvery/signals": "^0.23.2",
+    "@silvery/signals": "^0.24.0",
     "@yrd/bay": "workspace:*",
     "@yrd/config": "workspace:*",
     "@yrd/core": "workspace:*",

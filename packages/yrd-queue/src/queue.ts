@@ -2358,12 +2358,39 @@ function createQueue<Shape extends PRShape>(
           if (args.steps?.length === 0) return []
           let intentCutoff: QueuePosition | undefined
           if (selectorless) {
+            // Head-of-line release, keyed by component. An attempt that ends
+            // WITHOUT resolving its intent leaves that intent open, so the same
+            // head would be selected forever; release its component for the rest
+            // of this turn and walk on to the next component's head instead.
+            // Serialization within a component is untouched — a component's
+            // second intent is never tried while its own head is still open.
+            //
+            // Termination mirrors the admission drain's release at
+            // `dispatchAdmissions` above: every iteration either resolves an open
+            // intent (the open set strictly shrinks) or adds a component to
+            // `released` (bounded by the components of the open intents, and
+            // never removed from within the turn). Neither branch can repeat
+            // without consuming one of those two finite budgets.
+            const released = new Set<string>()
+            const intentRuns: Run[] = []
             while (true) {
-              const intent = queuedIntents(runtime())[0]
-              if (intent === undefined) break
-              const intentPosition = intentQueuePosition(intent)
+              const heads = queuedIntentHeads(queuedIntents(runtime()))
+              if (heads.length === 0) break
+              // The lane's queue position is its EARLIEST live head, released or
+              // not: a PR submitted after that head must never jump it. With a
+              // single component this is the lane head itself, as before.
+              const intentPosition = heads
+                .map(intentQueuePosition)
+                .reduce((earliest, position) => (compareQueuePosition(position, earliest) < 0 ? position : earliest))
               const queuedPR = requestedPRs(runtime().bays, args)[0]
               if (queuedPR !== undefined && compareQueuePosition(prQueuePosition(queuedPR), intentPosition) <= 0) {
+                intentCutoff = intentPosition
+                break
+              }
+              const intent = heads.find((head) => !released.has(head.component))
+              if (intent === undefined) {
+                // Every live component has had its turn. The lane still holds its
+                // position, so PRs behind it stay behind it.
                 intentCutoff = intentPosition
                 break
               }
@@ -2378,11 +2405,21 @@ function createQueue<Shape extends PRShape>(
                 },
                 runOptions,
               )
-              // One synthesized landing is one serial-head turn. Terminal
-              // noops/refusals release their position in the same frame, so the
-              // same turn keeps walking until it reaches live work.
-              if (outcome.outcome === "run") return [outcome.run]
+              // Terminal noops/refusals release their position in the same frame,
+              // so the same turn keeps walking until it reaches live work.
+              if (outcome.outcome === "run") {
+                intentRuns.push(outcome.run)
+                // One synthesized landing is one serial-head turn, and a run that
+                // is still live owns the base until it settles. Either way the
+                // turn ends here: two intent runs never overlap, which is what
+                // keeps the unconditional per-base `runningQueue` conflict from
+                // firing out of this drain.
+                const attempted = runtime().intents?.records[intent.id]
+                if (attempted?.status !== "open" || !Queues.terminal(outcome.run)) return intentRuns
+                released.add(intent.component)
+              }
             }
+            if (intentRuns.length > 0) return intentRuns
           }
           let snapshot = runtime()
           const resumable = resumableQueueRoots(snapshot, args, steps)
@@ -2498,12 +2535,24 @@ function createQueue<Shape extends PRShape>(
           // admission Run before recording a new immutable revision verdict.
           try {
             await refreshCheckIdentities(refreshable, resolveCycleBase)
-            const currentChecked = checked.flatMap((pr) => {
+            // ENTER the drain with the set it admits from, which is the set just
+            // refreshed. Handing it `checked` gated the loop on the SUBMITTED
+            // selection being non-empty, so a cycle whose only work was `pushed`
+            // never entered `drainAdmissions` at all and completed looking
+            // healthy having admitted nothing (@yrd/core/pushed-only-cycle-never-drains).
+            //
+            // The narrow entry set was never load-bearing: a selectorless drain
+            // applies `targets` only to an explicit selection and otherwise
+            // walks `admissionQueue` unfiltered, so this widens WHETHER the loop
+            // runs without changing WHICH carriers it admits once it does. It
+            // also makes the returned set the set actually admitted from, rather
+            // than dropping every pushed carrier the drain took.
+            const entering = refreshable.flatMap((pr) => {
               const current = resolvePR(runtime().bays, pr.id)
               return current === undefined ? [] : [current]
             })
             await drainAdmissions(
-              currentChecked.map((pr) => pr.id),
+              entering.map((pr) => pr.id),
               runOptions,
               resolveCycleBase,
               selection,
@@ -6426,6 +6475,18 @@ function queuedIntents(state: DeepReadonly<RuntimeState>): PinIntent[] {
     const intent = intents.records[id]
     return intent?.status === "open" ? [intent as PinIntent] : []
   })
+}
+
+/**
+ * One head per component instead of one head for the whole lane: the first open
+ * intent of each component, in lane order. Pure derivation from the same walk —
+ * `intents.order` remains the lane's total order, and no reducer consults it, so
+ * this changes selection only and never what a replay produces.
+ */
+function queuedIntentHeads(intents: readonly PinIntent[]): PinIntent[] {
+  const heads = new Map<string, PinIntent>()
+  for (const intent of intents) if (!heads.has(intent.component)) heads.set(intent.component, intent)
+  return [...heads.values()]
 }
 
 function requestedPRs(

@@ -7,9 +7,9 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@silvery/ansi": "^0.23.2",
-    "@silvery/commander": "^0.23.2",
-    "@silvery/scope": "^0.23.2",
+    "@silvery/ansi": "^0.24.0",
+    "@silvery/commander": "^0.24.0",
+    "@silvery/scope": "^0.24.0",
     "@yrd/bay": "workspace:*",
     "@yrd/config": "workspace:*",
     "@yrd/contest": "workspace:*",
@@ -23,7 +23,7 @@
     "git-super": "github:beorn/git-super#176fdb64d31a1303389b0306b1f7dbfc713d35ba",
     "loggily": "^0.10.2",
     "react": "^19.2.0",
-    "silvery": "^0.23.2",
+    "silvery": "^0.24.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

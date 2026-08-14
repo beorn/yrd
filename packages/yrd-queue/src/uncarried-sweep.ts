@@ -12,7 +12,13 @@
  * before any per-ref git object is read. Gathering facts first would mean
  * thousands of `diff` invocations to discard almost all of them.
  */
-import { classifyPushedRef, type UncarriedFinding, type UncarriedOptions } from "./uncarried.ts"
+import {
+  classifyPushedRef,
+  compareRevisions,
+  revisionOf,
+  type UncarriedFinding,
+  type UncarriedOptions,
+} from "./uncarried.ts"
 import { gatherPushedRefFact, type RefGit } from "./uncarried-facts.ts"
 
 export type SweepOptions = UncarriedOptions &
@@ -47,6 +53,14 @@ export type SweepResult = Readonly<{
   scanned: number
   /** Disqualified by the carried set, before any per-ref git work. */
   carried: number
+  /**
+   * Uncarried refs dropped because a strictly higher revision of the same
+   * `-rN` series stands in the population. Counted separately from `carried`
+   * and `outsideAgeBound` so every ref lands in exactly one bucket and the
+   * denominators still add up: scanned = carried + superseded +
+   * missingUpdateClocks + outsideAgeBound + examined.
+   */
+  superseded: number
   /** Disqualified by the age bound, before any per-ref git work. */
   outsideAgeBound: number
   /** Facts gathered — the refs that actually cost git object reads. */
@@ -148,6 +162,72 @@ async function latestRefUpdates(
   return updates
 }
 
+/** One uncarried candidate that survived the revision collapse, carrying the
+ * count of earlier revisions it now stands for. */
+type SeriesSurvivor = Readonly<{ candidate: EnumeratedRef; absorbedRevisions: number }>
+
+/**
+ * Collapse each `-rN` series to its highest revision.
+ *
+ * This runs BEFORE the clocks and the age bound, and long before any per-ref
+ * git object is read — a superseded revision is dead work whatever its reflog
+ * says, and reading diffs for 62 rows that will never be reported is the same
+ * waste the module's ordering exists to avoid.
+ *
+ * The SUPERSEDER is looked for in the whole enumerated population, not just
+ * among the uncarried candidates. A carried `-r20` is the strongest possible
+ * proof that `-r6` is spent: the work moved on and something already tracks
+ * it. Restricting the search to uncarried refs would resurrect exactly the
+ * rows this fix deletes.
+ *
+ * What a survivor ABSORBS is narrower, and deliberately: the earlier revisions
+ * this row stands in for are the uncarried ones it suppressed. A carried
+ * sibling is not absorbed by this row — it is counted as `carried` and has its
+ * own merge request. That keeps each ref in one bucket and makes the absorbed
+ * counts sum to `superseded`.
+ */
+function collapseSupersededRevisions(
+  population: readonly EnumeratedRef[],
+  candidates: readonly EnumeratedRef[],
+  namespace: string,
+): Readonly<{ survivors: readonly SeriesSurvivor[]; superseded: number }> {
+  const highest = new Map<string, string>()
+  for (const ref of population) {
+    const marker = revisionOf(branchOf(ref.ref, namespace))
+    if (marker === undefined) continue
+    const standing = highest.get(marker.stem)
+    if (standing === undefined || compareRevisions(marker.revision, standing) > 0) {
+      highest.set(marker.stem, marker.revision)
+    }
+  }
+
+  const candidatesPerStem = new Map<string, number>()
+  for (const candidate of candidates) {
+    const marker = revisionOf(branchOf(candidate.ref, namespace))
+    if (marker === undefined) continue
+    candidatesPerStem.set(marker.stem, (candidatesPerStem.get(marker.stem) ?? 0) + 1)
+  }
+
+  const survivors: SeriesSurvivor[] = []
+  let superseded = 0
+  for (const candidate of candidates) {
+    const marker = revisionOf(branchOf(candidate.ref, namespace))
+    // A name outside the convention is its own series of one. It is never
+    // suppressed and never absorbs anything.
+    if (marker === undefined) {
+      survivors.push({ candidate, absorbedRevisions: 0 })
+      continue
+    }
+    const top = highest.get(marker.stem)
+    if (top !== undefined && compareRevisions(marker.revision, top) < 0) {
+      superseded += 1
+      continue
+    }
+    survivors.push({ candidate, absorbedRevisions: (candidatesPerStem.get(marker.stem) ?? 1) - 1 })
+  }
+  return { survivors, superseded }
+}
+
 function isAuthoredRef(candidate: EnumeratedRef, namespace: string, base: string): boolean {
   if (candidate.symbolic) return false
   const branch = branchOf(candidate.ref, namespace)
@@ -185,12 +265,14 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
     uncarried.push(candidate)
   }
 
+  const collapsed = collapseSupersededRevisions(refs, uncarried, namespace)
+
   const refUpdates =
-    uncarried.length === 0
+    collapsed.survivors.length === 0
       ? new Map<string, number>()
-      : await latestRefUpdates(git, repo, new Set(uncarried.map(({ fullRef }) => fullRef)))
-  const survivors: Array<Readonly<{ ref: string; observedAtMs: number }>> = []
-  for (const candidate of uncarried) {
+      : await latestRefUpdates(git, repo, new Set(collapsed.survivors.map(({ candidate }) => candidate.fullRef)))
+  const survivors: Array<Readonly<{ ref: string; observedAtMs: number; absorbedRevisions: number }>> = []
+  for (const { candidate, absorbedRevisions } of collapsed.survivors) {
     const updatedAtMs = refUpdates.get(candidate.fullRef)
     if (updatedAtMs === undefined) {
       // A commit timestamp cannot prove when this clone observed the ref. Keep
@@ -204,7 +286,7 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
       outsideAgeBound += 1
       continue
     }
-    survivors.push({ ref: candidate.ref, observedAtMs: updatedAtMs })
+    survivors.push({ ref: candidate.ref, observedAtMs: updatedAtMs, absorbedRevisions })
   }
 
   const gitlinkPaths = survivors.length === 0 ? new Set<string>() : await gitlinkPathsOf(git, repo, base)
@@ -216,6 +298,7 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
       observedAtMs: survivor.observedAtMs,
       carriedBranches,
       gitlinkPaths,
+      absorbedRevisions: survivor.absorbedRevisions,
     })
     const finding = classifyPushedRef(fact, options)
     if (finding !== undefined) findings.push(finding)
@@ -225,6 +308,7 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
     findings: findings.toSorted((left, right) => right.ageMs - left.ageMs),
     scanned: refs.length,
     carried,
+    superseded: collapsed.superseded,
     outsideAgeBound,
     examined: survivors.length,
     missingUpdateClocks,
