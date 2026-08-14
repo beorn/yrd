@@ -19,7 +19,7 @@
  * window it cares about.
  */
 import { describe, expect, it } from "vitest"
-import { classifyPushedRef, type PushedRefFact } from "../src/uncarried.ts"
+import { classifyPushedRef, compareRevisions, revisionOf, type PushedRefFact } from "../src/uncarried.ts"
 
 const HOUR = 60 * 60 * 1000
 const NOW = Date.parse("2026-08-10T12:00:00.000Z")
@@ -41,12 +41,69 @@ function fact(overrides: Partial<PushedRefFact> = {}): PushedRefFact {
   }
 }
 
+describe("revisionOf", () => {
+  it("reads the fleet's trailing -rN convention", () => {
+    expect(revisionOf("task/thing-dev3-r20")).toEqual({ stem: "task/thing-dev3", revision: "20" })
+    expect(revisionOf("task/maddoc-top-bar-r2")).toEqual({ stem: "task/maddoc-top-bar", revision: "2" })
+  })
+
+  it("refuses a revision marker that is not at the end of the name", () => {
+    // Live on this remote: `task/21023-auto-restack-agent1-r12-source` and
+    // `-r12-currentpin`. The trailing word names a VARIANT, so two refs share
+    // `-r12` and mean different artifacts. Reading a revision from mid-name
+    // would collapse them and delete a live row — worse than the noise.
+    expect(revisionOf("task/21023-auto-restack-agent1-r12-source")).toBeUndefined()
+    expect(revisionOf("task/plain-name")).toBeUndefined()
+    expect(revisionOf("feat/telegram-channel")).toBeUndefined()
+  })
+
+  it("refuses leading zeros, which would put two refs at one revision", () => {
+    // `-r7` and `-r007` would share a stem and a revision number with no
+    // defined winner, so one of them would be suppressed arbitrarily.
+    expect(revisionOf("task/thing-r007")).toBeUndefined()
+    expect(revisionOf("task/thing-r0")).toBeUndefined()
+  })
+
+  it("has nothing to take a stem from when the name is only a marker", () => {
+    expect(revisionOf("-r3")).toBeUndefined()
+  })
+})
+
+describe("compareRevisions", () => {
+  it("orders by number, not by name", () => {
+    // "9" > "10" lexicographically, and a collapse that believed it would keep
+    // r9 and suppress the live r10.
+    expect(compareRevisions("10", "9")).toBeGreaterThan(0)
+    expect(compareRevisions("2", "20")).toBeLessThan(0)
+    expect(compareRevisions("7", "7")).toBe(0)
+  })
+
+  it("stays exact past what a JS number can hold", () => {
+    // Parsing these would tie two distinct revisions and silently suppress the
+    // live one; digit-string comparison has no such ceiling.
+    expect(compareRevisions("90071992547409912", "90071992547409911")).toBeGreaterThan(0)
+  })
+})
+
 describe("classifyPushedRef", () => {
   it("reports a pushed ref with unlanded commits and no carrier", () => {
     const finding = classifyPushedRef(fact(), OPTIONS)
     expect(finding?.code).toBe("pushed-not-submitted")
     expect(finding?.ref).toBe("task/example")
     expect(finding?.ageMs).toBe(HOUR)
+  })
+
+  it("names the earlier revisions a surviving row stands for, and stays quiet when there are none", () => {
+    // Said on the ROW, not only in the sweep's denominator: an operator
+    // reading one finding otherwise goes hunting for the older revisions to
+    // check whether those were missed too, which is the paging this deletes.
+    expect(classifyPushedRef(fact({ absorbedRevisions: 1 }), OPTIONS)?.message).toContain(
+      "supersedes 1 earlier revision of the same series",
+    )
+    expect(classifyPushedRef(fact({ absorbedRevisions: 12 }), OPTIONS)?.message).toContain(
+      "supersedes 12 earlier revisions of the same series",
+    )
+    expect(classifyPushedRef(fact(), OPTIONS)?.message).not.toContain("supersedes")
   })
 
   it("says nothing about a ref that already has a carrier", () => {
@@ -255,6 +312,7 @@ describe("union validation gate — every specimen any seat measured", () => {
           equivalentCommits,
           payloadKind,
           pinDirection,
+          absorbedRevisions: 0,
         },
         OPTIONS,
       )

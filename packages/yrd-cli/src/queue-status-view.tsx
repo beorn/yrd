@@ -407,7 +407,10 @@ export type UncarriedObservation = Readonly<{
  * unmeasured one. One function, shared by the rail and the `queue uncarried`
  * command, so the two surfaces cannot phrase the same gap differently.
  */
-export function uncarriedCoverageFloor(measurable: number | undefined, missingUpdateClocks: number | undefined): string {
+export function uncarriedCoverageFloor(
+  measurable: number | undefined,
+  missingUpdateClocks: number | undefined,
+): string {
   // An absent clock count is unknown coverage, never full coverage — the
   // distinction an older resident's status cannot make for itself.
   if (missingUpdateClocks === undefined) return "push-clock coverage unknown, so a floor"
