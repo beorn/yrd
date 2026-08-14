@@ -9,7 +9,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Database } from "bun:sqlite"
 import { CauseSchema, Command, EventSchema, type Cause, type Event, type Journal } from "@yrd/core"
-import { createJournal, type JournalOptions } from "@yrd/persistence"
+import { createJournal, resolveRetention, type JournalOptions } from "@yrd/persistence"
 import { createLogger, type Event as LogEvent } from "loggily"
 import { afterEach, describe, expect, it } from "vitest"
 
@@ -103,6 +103,67 @@ async function workload(
   }
   return { dir, ...stats(dir) }
 }
+
+/**
+ * Pins the arming contract directly. The journal-level tests below cannot reach
+ * it: proving the DEFAULT window on or off needs a fixture past 20,000 frames,
+ * so a small-journal test of the default reads as a guard and guards nothing.
+ */
+describe("retention arming contract", () => {
+  const saved = { frames: process.env.YRD_JOURNAL_KEEP_FRAMES, days: process.env.YRD_JOURNAL_KEEP_DAYS }
+
+  function withEnv<Result>(env: Readonly<{ frames?: string; days?: string }>, operation: () => Result): Result {
+    if (env.frames === undefined) delete process.env.YRD_JOURNAL_KEEP_FRAMES
+    else process.env.YRD_JOURNAL_KEEP_FRAMES = env.frames
+    if (env.days === undefined) delete process.env.YRD_JOURNAL_KEEP_DAYS
+    else process.env.YRD_JOURNAL_KEEP_DAYS = env.days
+    try {
+      return operation()
+    } finally {
+      if (saved.frames === undefined) delete process.env.YRD_JOURNAL_KEEP_FRAMES
+      else process.env.YRD_JOURNAL_KEEP_FRAMES = saved.frames
+      if (saved.days === undefined) delete process.env.YRD_JOURNAL_KEEP_DAYS
+      else process.env.YRD_JOURNAL_KEEP_DAYS = saved.days
+    }
+  }
+
+  it("stays disabled when nothing asks for it", () => {
+    expect(withEnv({}, () => resolveRetention(undefined))).toBe("disabled")
+  })
+
+  it("stays disabled when a caller asks for it explicitly", () => {
+    expect(withEnv({ frames: "500" }, () => resolveRetention("disabled"))).toBe("disabled")
+  })
+
+  it("arms on an explicit config, and keeps the age window off unless asked", () => {
+    expect(withEnv({}, () => resolveRetention({ keepFrames: 500 }))).toEqual({ keepFrames: 500 })
+    expect(withEnv({}, () => resolveRetention({ keepFrames: 500, keepDays: 7 }))).toEqual({
+      keepFrames: 500,
+      keepDays: 7,
+    })
+  })
+
+  it("arms on either environment knob alone, defaulting the one left unset", () => {
+    expect(withEnv({ frames: "500" }, () => resolveRetention(undefined))).toEqual({ keepFrames: 500 })
+    // keepDays alone still arms, and keepFrames falls back to its default.
+    expect(withEnv({ days: "7" }, () => resolveRetention(undefined))).toEqual({ keepFrames: 20_000, keepDays: 7 })
+  })
+
+  it("prefers an explicit config over the environment", () => {
+    expect(withEnv({ frames: "500" }, () => resolveRetention({ keepFrames: 9 }))).toEqual({ keepFrames: 9 })
+  })
+
+  it("raises on a malformed value instead of quietly using the default", () => {
+    // The silent-default failure this prevents: an operator reads a window into
+    // force that was never in force.
+    expect(() => withEnv({ frames: "lots" }, () => resolveRetention(undefined))).toThrow(/YRD_JOURNAL_KEEP_FRAMES/u)
+    expect(() => withEnv({ frames: "0" }, () => resolveRetention(undefined))).toThrow(/positive safe integer/u)
+    expect(() => withEnv({ frames: "-5" }, () => resolveRetention(undefined))).toThrow(/positive safe integer/u)
+    expect(() => withEnv({ frames: "1.5" }, () => resolveRetention(undefined))).toThrow(/positive safe integer/u)
+    expect(() => withEnv({ days: "soon" }, () => resolveRetention(undefined))).toThrow(/YRD_JOURNAL_KEEP_DAYS/u)
+    expect(() => withEnv({}, () => resolveRetention({ keepFrames: 0 }))).toThrow(/keepFrames/u)
+  })
+})
 
 describe("journal retention window", () => {
   it("evicts nothing until someone asks for a window", async () => {

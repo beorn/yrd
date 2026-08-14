@@ -183,7 +183,7 @@ type Context = Readonly<{
   phase(phase: string, details?: Readonly<Record<string, unknown>>): Promise<void>
 }>
 
-type ResolvedRetention = Readonly<{ keepFrames: number; keepDays?: number }> | "disabled"
+export type ResolvedRetention = Readonly<{ keepFrames: number; keepDays?: number }> | "disabled"
 
 type EvictionOutcome = Readonly<{ frames: number; facts: number; evictedThrough: number; floor: number }>
 
@@ -336,7 +336,12 @@ function context(options: JournalOptions): Context {
   }
 }
 
-function resolveRetention(configured: JournalRetention | undefined): ResolvedRetention {
+/**
+ * Exported for tests: the opt-in default is what lets this land ahead of the
+ * floor-aware readers, and the window that would prove it through a journal is
+ * larger than any fixture worth writing, so the contract is pinned here.
+ */
+export function resolveRetention(configured: JournalRetention | undefined): ResolvedRetention {
   if (configured === "disabled") return "disabled"
   // Opt-in until the cursor-0 readers are floor-aware: an unconfigured journal
   // evicts nothing, so landing this cannot break a reader that has not been
