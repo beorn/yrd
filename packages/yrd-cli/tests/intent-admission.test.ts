@@ -8,7 +8,7 @@
  * @level    l2 (real git repositories with a real submodule; no fakes)
  * @consumer @yrd/core/21679-integration-model-v2/22668-admit-intents
  */
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -85,6 +85,22 @@ async function publish(component: string, name: string): Promise<string> {
 /** The submodule checkout admission actually reads — never the source clone. */
 function checkoutOf(repo: string): string {
   return join(repo, "components", "alpha")
+}
+
+/**
+ * Break `git fetch` in the component checkout while leaving `git ls-remote`
+ * working.
+ *
+ * FETCH_HEAD becomes a directory, so the fetch cannot open it, exits non-zero,
+ * and leaves the remote-tracking refs exactly as stale as it found them.
+ * `ls-remote` never writes FETCH_HEAD, so it still answers — which is the
+ * asymmetry the remote fallback exists to exploit, and the shape of a checkout
+ * that cannot refresh itself while the remote is perfectly reachable.
+ */
+async function breakFetchRefs(repo: string): Promise<void> {
+  const gitDir = await git(checkoutOf(repo), "rev-parse", "--absolute-git-dir")
+  await rm(join(gitDir, "FETCH_HEAD"), { force: true })
+  await mkdir(join(gitDir, "FETCH_HEAD"))
 }
 
 /**
@@ -610,8 +626,8 @@ describe("pin-intent admission: publication is a scoped, dated read", () => {
 
   it("falls back to the stale read when the component fetch fails, and says the read is stale", async () => {
     const { root, repo, component } = await fixture()
-    const target = await publish(component, "two")
-    // The fetch that would have seen the publication cannot run at all.
+    const target = await local(component, "never-pushed")
+    // Neither the fetch nor a direct remote read can reach the origin.
     await git(checkoutOf(repo), "remote", "set-url", "origin", join(root, "vanished.git"))
 
     const verdict = await admitPinIntent({
@@ -632,7 +648,60 @@ describe("pin-intent admission: publication is a scoped, dated read", () => {
     expect(verdict.message).toContain(checkoutOf(repo))
     expect(verdict.evidence.fetchOutcome).toBe("failed")
     expect(verdict.evidence.fetchDetail ?? "").not.toBe("")
+    // Both failures are disclosed, not just the first one.
+    expect(verdict.message).toContain("ls-remote")
+    expect(verdict.message).toContain("neither this checkout nor the remote could answer")
+    expect(verdict.evidence.remoteRead).toBe("failed")
     // The remedy must offer the retry, not only "go publish something you already published".
     expect(verdict.remedy.some((step) => step.note?.includes("retry") === true)).toBe(true)
+  })
+
+  // THIS MORNING'S REFUSAL, end to end: the commit really is the component's
+  // published main tip, `ls-remote` really does say so, and only the local
+  // fetch is broken. The verdict must be an admit.
+  it("admits a published tip the fetch could not see, crediting the remote read", async () => {
+    const { repo, component } = await fixture()
+    const target = await publish(component, "two")
+    await breakFetchRefs(repo)
+
+    const verdict = await admitPinIntent({
+      process,
+      repo,
+      base: "main",
+      component: "components/alpha",
+      issue: ISSUE,
+      target,
+    })
+
+    if (!verdict.admitted) throw new Error(`false unreachable-refusal: ${verdict.code}: ${verdict.message}`)
+    expect(verdict.relation).toBe("deferred")
+    expect(verdict.disclosure ?? "").toContain("ls-remote")
+    expect(verdict.disclosure ?? "").toContain("refs/heads/main")
+    // The admit says plainly that it knows less than usual.
+    expect(verdict.disclosure ?? "").toContain("deferred to merge-time evaluation")
+  })
+
+  it("keeps refusing when the remote read runs and does not show the target as a tip", async () => {
+    const { repo, component } = await fixture()
+    const target = await local(component, "never-pushed")
+    // The fetch cannot refresh, but ls-remote still answers from the origin.
+    await breakFetchRefs(repo)
+
+    const verdict = await admitPinIntent({
+      process,
+      repo,
+      base: "main",
+      component: "components/alpha",
+      issue: ISSUE,
+      target,
+    })
+
+    expect(verdict.admitted).toBe(false)
+    if (verdict.admitted) throw new Error("unreachable")
+    expect(verdict.code).toBe("intent-target-unpublished")
+    expect(verdict.evidence.remoteRead).toBe("ok")
+    expect(verdict.message).toContain("does not show the target as the tip of any ref")
+    // The honest limit of an ls-remote answer is stated, not glossed.
+    expect(verdict.message).toContain("cannot rule out the target being an ancestor")
   })
 })

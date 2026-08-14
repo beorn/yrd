@@ -9518,7 +9518,10 @@ async function submitIntent(
     io,
     jsonEnabled(options),
     { command: "intent.submit", intent, admission },
-    `${intent.id} ${intent.component} ${intent.target ?? "<component main tip at landing>"} (${admission.relation}; pin ${admission.currentPin})`,
+    [
+      `${intent.id} ${intent.component} ${intent.target ?? "<component main tip at landing>"} (${admission.relation}; pin ${admission.currentPin})`,
+      ...(admission.disclosure === undefined ? [] : [admission.disclosure]),
+    ].join("\n"),
   )
   return 0
 }
