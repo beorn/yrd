@@ -6,9 +6,9 @@ import { createExclusive } from "@yrd/persistence"
 import { ReplayInstalledStepSchema, type InstalledStep, type QueueAuditFindingEmission } from "@yrd/queue"
 
 /** The installed baseline: the queue installation baseline written by `yrd
- * admin queue init` (provision). It pins the check-definition revisions the
- * operator installed so `yrd queue audit` can detect that the selected current
- * repository config drifted before any expensive Run starts. */
+ * admin queue init` (provision). It pins the effective batch policy and ordered
+ * step descriptors the operator installed so `yrd queue audit` can detect that
+ * the selected repository config drifted before any expensive Run starts. */
 const InstalledBaselineSchema = z
   .object({
     base: z.string().trim().min(1),
@@ -116,7 +116,7 @@ async function replaceBaselineFile(
 
 export async function writeInstalledBaseline(
   stateDir: string,
-  baseline: InstalledBaseline,
+  baseline: InstalledBaseline & Readonly<{ batchSize: number }>,
   fs: BaselineFsOps = {},
 ): Promise<void> {
   await withBaselineWriteLock(stateDir, async () => {
@@ -226,11 +226,11 @@ export function installedBaselineDrift(
   }
 }
 
-/** Compare the persisted installed baseline against the RUNTIME's actually
- * installed steps — the third audit leg (merge-queue R41b). A resident built
- * before a deinit/init migration keeps executing its construction-time steps,
- * so baseline == disk alone would certify a lie; the remedy is restarting the
- * process, not another baseline migration. */
+/** Compare the persisted installed baseline against the RUNTIME's actual batch
+ * policy and installed steps — the third audit leg (merge-queue R41b). A
+ * resident built before a deinit/init migration keeps executing its
+ * construction-time queue policy, so baseline == disk alone would certify a
+ * lie; the remedy is restarting the process, not another baseline migration. */
 export function runtimeBaselineDrift(
   baseline: InstalledBaseline,
   runtime: InstalledQueueDescriptor,

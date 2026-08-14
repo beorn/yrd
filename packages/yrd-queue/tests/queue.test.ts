@@ -24,6 +24,7 @@ import {
   parseJournalFrame,
   pipe,
   type Journal,
+  type JournalCheckpoint,
   type JournalEntityKind,
   type JournalFrame,
 } from "@yrd/core"
@@ -255,6 +256,30 @@ function indexedJournal(initial: readonly JournalFrame[] = []): Journal<unknown>
       },
     },
   }
+}
+
+function checkpointJournal(base: Journal<unknown>) {
+  const reads: number[] = []
+  const loads: string[] = []
+  let stored: JournalCheckpoint | undefined
+  const journal: Journal<unknown> = {
+    read(after = 0, before?: number) {
+      reads.push(after)
+      return base.read(after, before)
+    },
+    append: (value, expectedCursor) => base.append(value, expectedCursor),
+    checkpoint: {
+      load(identity) {
+        loads.push(identity)
+        return Promise.resolve(stored?.identity === identity ? structuredClone(stored) : undefined)
+      },
+      save(checkpoint) {
+        stored = structuredClone(checkpoint)
+        return Promise.resolve(true)
+      },
+    },
+  }
+  return { journal, reads, loads, stored: () => stored }
 }
 
 function queueHistoryFrames(count: number, failedRun?: number, nextId: () => string = ids()): readonly JournalFrame[] {
@@ -2829,7 +2854,8 @@ describe("Queue", () => {
   })
 
   it("preserves an active run while a replayed journal adopts a larger future batch", async () => {
-    const journal = createMemoryJournal()
+    const cache = checkpointJournal(createMemoryJournal())
+    const journal = cache.journal
     const id = ids()
     const options = {
       check: () => ({ status: "completed" as const, conclusion: "success" as const, output: { checked: true } }),
@@ -2854,7 +2880,13 @@ describe("Queue", () => {
       })
     }
 
+    const batchOneIdentity = cache.stored()?.identity
+    expect(batchOneIdentity).toBeDefined()
+    cache.reads.length = 0
+
     await using replayed = await createQueueApp({ ...options, batch: 2 }, journal, undefined, id)
+    expect(cache.loads.at(-1)).not.toBe(batchOneIdentity)
+    expect(cache.reads[0]).toBe(0)
     expect(replayed.state().queues.batchSize).toBe(2)
     expect(replayed.queue.get("R1")).toMatchObject({
       status: "queued",

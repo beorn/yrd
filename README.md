@@ -858,7 +858,7 @@ yrd admin journal bump <version> [--json]
 | `resume`             | Optional base                                      | Removes the queue pause                                                                                               |
 | `recover`            | Optional reason or known-dead runner id            | Reconciles abandoned work and releases queued runs whose installed step definition changed                            |
 | `finish`             | One waiting PR/step plus job/runner/attempt/token  | Records external-runner evidence and resumes that exact durable run                                                   |
-| `audit`              | Repository                                         | Journal, projection, pinned-plan, installed-step, and queue-progress findings; no state change                        |
+| `audit`              | Repository                                         | Journal, projection, pinned-plan, installed-policy, and queue-progress findings; no state change                      |
 | `admin queue init`   | Optional base                                      | Resolves queue resources and installs the managed pre-submit hook                                                     |
 | `admin queue deinit` | Optional base                                      | Releases resources owned by the installed queue adapter                                                               |
 
