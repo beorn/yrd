@@ -720,7 +720,55 @@ export type QueueAuditFinding = Readonly<{
   since?: string
   /** Observed block span — last occurrence minus first, in milliseconds. */
   blockedMs?: number
+  /** Who to route the finding to, as RECORDED on the carrier's own revision —
+   * never a seat, a branch owner or a git author guessed at read time. Absent
+   * when the revision carries no submitter (journals written before submitter
+   * identity existed): a finding with no recorded identity says nothing rather
+   * than naming a plausible owner. */
+  submitter?: string
+  /** How far the carrier got through handoff before it stranded. Readers keep
+   * the open `string` for the same reason `code` stays open — a value parsed
+   * out of a foreign version's JSON must remain readable. Producers emit the
+   * closed {@link QueueAuditHandoffCertification}. */
+  handoffCertification?: string
 }>
+
+/** How far a carrier got through handoff, derived ONLY from review facts the
+ * PR already carries — a certification that can lie is worse than none.
+ *
+ * Every member is decided by the SAME two inputs at the derivation point: the
+ * verdict on the current revision (`reviewState(pr).current`) and the requested
+ * reviewer set. Precedence runs left to right below: an explicit verdict on
+ * this exact revision outranks an outstanding request, because the verdict is
+ * about the content that actually stranded.
+ *
+ * Deliberately NOT members, because the discriminating data does not exist
+ * where the finding is derived:
+ * - `stale-base` would need the live base tip. The audit's state is
+ *   `{ bays, jobs, intents, queues }`; no base branch head lives there, and the
+ *   revision's own `baseSha` is only the base it was cut against. Deriving
+ *   staleness would mean inventing a comparison.
+ * - `unrecoverable` would need `rejectedAt` / `terminalRun`. Both are cleared
+ *   by EVERY revision-appending reduction (`pr/pushed` and `pr/recut` both
+ *   patch them to `undefined`), so a PR in the `pushed` delivery state that
+ *   this finding fires on can never carry either. The field would be a
+ *   constant, not a discriminator. */
+export const YRD_QUEUE_AUDIT_HANDOFF_CERTIFICATIONS = [
+  /** A verdict of `approve` stands on this exact revision (including one a
+   * rebuild carried forward): the change is certified and only the submit is
+   * missing. */
+  "approved",
+  /** A verdict of `reject` stands on this exact revision: the draft is stranded
+   * waiting on its author, not on a reviewer. */
+  "changes-requested",
+  /** Reviewers are requested and none has ruled on this revision. */
+  "review-requested",
+  /** No verdict on this revision and no outstanding request — the carrier never
+   * entered review at all. */
+  "unreviewed",
+] as const
+
+export type QueueAuditHandoffCertification = (typeof YRD_QUEUE_AUDIT_HANDOFF_CERTIFICATIONS)[number]
 
 /** Every finding code `yrd queue audit` can emit, in ONE authoritative place.
  * It is the union of BOTH producers whose findings that command concatenates:
@@ -764,8 +812,10 @@ export type QueueAuditFindingCode = (typeof YRD_QUEUE_AUDIT_PAGE_FINDING_CODES)[
 /** A finding AT ITS PRODUCER: a {@link QueueAuditFinding} whose code is closed
  * over {@link YRD_QUEUE_AUDIT_PAGE_FINDING_CODES}. Readers keep the open
  * `code: string` — a finding parsed back out of another process's JSON status is
- * data from a foreign version, not an emission, and must stay readable. */
-export type QueueAuditFindingEmission = Omit<QueueAuditFinding, "code"> & Readonly<{ code: QueueAuditFindingCode }>
+ * data from a foreign version, not an emission, and must stay readable. The
+ * same split applies to `handoffCertification`. */
+export type QueueAuditFindingEmission = Omit<QueueAuditFinding, "code" | "handoffCertification"> &
+  Readonly<{ code: QueueAuditFindingCode; handoffCertification?: QueueAuditHandoffCertification }>
 
 export type QueueAuditResult = Readonly<{ findings: readonly QueueAuditFinding[] }>
 

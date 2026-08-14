@@ -75,7 +75,8 @@ async function submitBranch(app: Awaited<ReturnType<typeof createApp>>, branch: 
   return pr
 }
 
-type Frame = Readonly<{ events?: readonly Readonly<{ name: string }>[] }>
+type Fact = Readonly<{ name: string; data?: unknown }>
+type Frame = Readonly<{ events?: readonly Fact[] }>
 
 async function frames(journal: Journal<unknown>): Promise<unknown[]> {
   const collected: unknown[] = []
@@ -94,6 +95,26 @@ async function withoutJobEvents(journal: Journal<unknown>): Promise<Journal<unkn
     const frame = value as Frame
     if (frame.events === undefined) return value
     return { ...frame, events: frame.events.filter((event) => !event.name.startsWith("job/")) }
+  })
+  return createMemoryJournal(kept)
+}
+
+/** Reproduce a `pr/pushed` fact as journals wrote it before revision identity
+ * existed: no `submitter` and no `changeId`. Those are ONE era, not two — the
+ * legacy replay schema is strict, so a fact carrying `changeId` but no
+ * `submitter` matches no schema at all and is not a shape any journal holds. */
+async function withoutPushedIdentity(journal: Journal<unknown>): Promise<Journal<unknown>> {
+  const kept = (await frames(journal)).map((value) => {
+    const frame = value as Frame
+    if (frame.events === undefined) return value
+    return {
+      ...frame,
+      events: frame.events.map((event) => {
+        if (event.name !== "pr/pushed") return event
+        const { submitter: _submitter, changeId: _changeId, ...data } = event.data as Record<string, unknown>
+        return { ...event, data }
+      }),
+    }
   })
   return createMemoryJournal(kept)
 }
@@ -219,24 +240,34 @@ describe("a finished run stays terminal after its Jobs are pruned", () => {
  * discovered by a pager CRITICAL rather than by the audit.
  */
 describe("draft stranded — a pushed PR that nobody submitted must age loudly, not silently", () => {
-  async function pushedDraft() {
-    const app = await createApp()
+  async function pushedDraft(options: Readonly<{ submitter?: string; journal?: Journal<unknown> }> = {}) {
+    const app = await createApp(options.journal ?? createMemoryJournal())
     // bays.intake without `submit: true` records pr/pushed ONLY — no
     // pr/submitted follows, so delivery stays "pushed". That IS the specimen
     // shape. (submitBranch would be wrong here: its {branch} submit path
     // emits pr/submitted immediately — this fixture's first draft proved it
     // by flagging nothing.)
-    await app.bays.intake({ branch: "issue/stranded-draft", headSha: "3".repeat(40), base: "main", baseSha: BASE })
+    await app.bays.intake({
+      branch: "issue/stranded-draft",
+      headSha: "3".repeat(40),
+      base: "main",
+      baseSha: BASE,
+      ...(options.submitter === undefined ? {} : { submitter: options.submitter }),
+    })
     const pr = Object.values(app.state().bays.prs).find((item) => item.branch === "issue/stranded-draft")
     if (pr === undefined) throw new Error("intake did not record the PR")
     expect(app.state().bays.prs[pr.id]?.revs.at(-1)?.submittedAt, "the fixture must be a true draft").toBeUndefined()
     return { app, pr }
   }
 
+  function strandedFinding(app: Awaited<ReturnType<typeof createApp>>) {
+    return app.queue.audit({ now: STALE }).findings.find((item) => item.code === "draft-stranded")
+  }
+
   it("flags a draft past the threshold with its age", async () => {
     const { app, pr } = await pushedDraft()
     try {
-      const finding = app.queue.audit({ now: STALE }).findings.find((item) => item.code === "draft-stranded")
+      const finding = strandedFinding(app)
       expect(finding, "a draft stranded for an hour must not read as a clean queue").toBeDefined()
       expect(finding?.pr).toBe(pr.id)
       expect(finding?.since).toBe(START)
@@ -246,6 +277,105 @@ describe("draft stranded — a pushed PR that nobody submitted must age loudly, 
     } finally {
       await app[Symbol.asyncDispose]()
     }
+  })
+
+  /**
+   * The age alone says a draft stranded; it never says WHO it stranded against
+   * or HOW FAR it got. Both live on the PR already — the submitter recorded on
+   * the revision, and the review verdicts — so a consumer that has the finding
+   * must not have to re-open the PR (or guess an owner from the branch name) to
+   * route it.
+   */
+  describe("routing facts — the finding carries who it stranded against and how far it got", () => {
+    it("names the submitter RECORDED on the revision", async () => {
+      const { app, pr } = await pushedDraft({ submitter: "@dev/11" })
+      try {
+        expect(
+          app.state().bays.prs[pr.id]?.revs.at(-1)?.submitter,
+          "the fixture must record the submitter the finding is expected to echo",
+        ).toBe("@dev/11")
+        expect(strandedFinding(app)?.submitter, "the finding must route to the recorded pusher").toBe("@dev/11")
+      } finally {
+        await app[Symbol.asyncDispose]()
+      }
+    })
+
+    it("omits the submitter rather than inventing one when the revision records none", async () => {
+      // A journal written before submitter identity existed replays through
+      // LegacyPRPushedSchema, which has no `submitter` — the same surgery shape
+      // as `withoutJobEvents` above. There is no honest fallback here: the
+      // default submitter would name "operator" for a push nobody attributed.
+      const seeded = createMemoryJournal()
+      {
+        const { app } = await pushedDraft({ journal: seeded })
+        await app[Symbol.asyncDispose]()
+      }
+      await using app = await createApp(await withoutPushedIdentity(seeded), ids(100))
+      const revision = Object.values(app.state().bays.prs)[0]?.revs.at(-1)
+      expect(revision?.submitter, "the surgery must leave a genuinely unattributed revision").toBeUndefined()
+      const finding = strandedFinding(app)
+      expect(finding, "an unattributed draft still strands and must still flag").toBeDefined()
+      expect(finding?.submitter, "no recorded identity means no field, never a plausible-looking owner").toBeUndefined()
+    })
+
+    it("certifies a draft nobody has looked at as unreviewed", async () => {
+      const { app } = await pushedDraft()
+      try {
+        expect(strandedFinding(app)?.handoffCertification).toBe("unreviewed")
+      } finally {
+        await app[Symbol.asyncDispose]()
+      }
+    })
+
+    it("certifies a draft with reviewers requested and no verdict as review-requested", async () => {
+      const { app, pr } = await pushedDraft()
+      try {
+        await app.bays.requestReview({ pr: pr.id, reviewers: ["@cto"] })
+        expect(strandedFinding(app)?.handoffCertification).toBe("review-requested")
+      } finally {
+        await app[Symbol.asyncDispose]()
+      }
+    })
+
+    it("certifies a draft its reviewer rejected as changes-requested", async () => {
+      const { app, pr } = await pushedDraft()
+      try {
+        await app.bays.requestReview({ pr: pr.id, reviewers: ["@cto"] })
+        await app.bays.review({ pr: pr.id, by: "@cto", decision: "reject" })
+        // The verdict outranks the standing request: this draft waits on its
+        // author, and calling it review-requested would page the wrong person.
+        expect(strandedFinding(app)?.handoffCertification).toBe("changes-requested")
+      } finally {
+        await app[Symbol.asyncDispose]()
+      }
+    })
+
+    it("certifies an approved-but-unsubmitted draft as approved", async () => {
+      const { app, pr } = await pushedDraft()
+      try {
+        await app.bays.review({ pr: pr.id, by: "@cto", decision: "approve" })
+        // The worst specimen in the class: certified work, one command from the
+        // queue, aging where nothing looks.
+        expect(strandedFinding(app)?.handoffCertification).toBe("approved")
+      } finally {
+        await app[Symbol.asyncDispose]()
+      }
+    })
+
+    it("re-opens certification when a new revision leaves the verdict behind", async () => {
+      const { app, pr } = await pushedDraft()
+      try {
+        await app.bays.review({ pr: pr.id, by: "@cto", decision: "approve" })
+        expect(strandedFinding(app)?.handoffCertification).toBe("approved")
+        // A verdict is revision-bound. Pushing again strands NEW content, and a
+        // certification that carried the old approval forward would lie about
+        // what is uncertified.
+        await app.bays.intake({ branch: "issue/stranded-draft", headSha: "4".repeat(40), base: "main", baseSha: BASE })
+        expect(strandedFinding(app)?.handoffCertification).toBe("unreviewed")
+      } finally {
+        await app[Symbol.asyncDispose]()
+      }
+    })
   })
 
   it("stays silent inside the grace window", async () => {
