@@ -7975,6 +7975,7 @@ function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefine
       fact.code === "command-refused" ||
       fact.code === "candidate-ref-refused" ||
       fact.code === "recut-certificate" ||
+      fact.code === "recut-base-diverged" ||
       fact.code === "authored-gitlink" ||
       fact.code === "composition-invalid" ||
       fact.code === "merge-tip-carrier" ||
