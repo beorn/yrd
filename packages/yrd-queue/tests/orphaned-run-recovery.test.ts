@@ -300,6 +300,45 @@ describe("draft stranded — a pushed PR that nobody submitted must age loudly, 
       }
     })
 
+    it("carries both routing facts in the MESSAGE, the only field every surface prints", async () => {
+      // The structured fields above are the honest substrate, but nothing
+      // renders them: the CLI's formatActionableFailure prints code/cause/
+      // resolution only, and downstream JSON consumers rebuild findings field
+      // by field and drop keys they do not know. Carried in the message, both
+      // facts survive as the `cause` line — which is what actually reaches an
+      // operator. Assert the message, not just the fields, or this finding
+      // routes itself in a struct nobody reads.
+      const { app, pr } = await pushedDraft({ submitter: "@dev/11" })
+      try {
+        await app.bays.review({ pr: pr.id, by: "@cto", decision: "approve" })
+        const finding = strandedFinding(app)
+        expect(finding?.message).toContain("@dev/11")
+        expect(finding?.message).toContain("review: approved")
+        // The fields stay too — a consumer that DOES read them keeps its
+        // machine-readable route, and the two must agree.
+        expect(finding?.submitter).toBe("@dev/11")
+        expect(finding?.reviewCertification).toBe("approved")
+      } finally {
+        await app[Symbol.asyncDispose]()
+      }
+    })
+
+    it("keeps the message honest when the revision records no submitter", async () => {
+      // No recorded identity means no name in the message either — a stranded
+      // draft with an invented owner routes to the wrong person, which is worse
+      // than routing to nobody. The certification is always derivable, so it
+      // stays.
+      const seeded = createMemoryJournal()
+      {
+        const { app } = await pushedDraft({ journal: seeded })
+        await app[Symbol.asyncDispose]()
+      }
+      await using app = await createApp(await withoutPushedIdentity(seeded), ids(100))
+      const finding = strandedFinding(app)
+      expect(finding?.message).toContain("review: unreviewed")
+      expect(finding?.message, "no submitter means no ' by …' clause, never an empty one").not.toContain(" by ")
+    })
+
     it("omits the submitter rather than inventing one when the revision records none", async () => {
       // A journal written before submitter identity existed replays through
       // LegacyPRPushedSchema, which has no `submitter` — the same surgery shape
