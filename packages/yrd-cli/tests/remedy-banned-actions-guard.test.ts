@@ -48,28 +48,11 @@ type Allowed = Readonly<{ file: string; reason: string }>
  * sweep — re-derive, never assume, before adding to this list. */
 const ALLOWLIST: readonly Allowed[] = [
   {
-    file: "yrd-queue/src/command.ts",
-    reason:
-      "applyComponentMainPromotions pushes an admitted root-PR gitlink change to component refs/heads/main as " +
-      "the queue's OWN write; rollbackQueueBase force-with-lease-rolls-back the queue's OWN base ref on its own " +
-      "failure path. Neither is printed to an operator.",
-  },
-  {
-    file: "yrd-queue/src/git-transport-internal.ts",
-    reason: "publishImmutableRemoteRef: the pipeline's own create-only CAS ref publish, never printed advice.",
-  },
-  {
     file: "yrd-queue/src/candidate-pool.ts",
     reason:
       "reset --hard / clean -fdx run only against the pipeline's own ephemeral candidate-pool worktree to prove " +
       "it residue-free before reuse — never a component's canonical checkout, never shared main, never printed " +
       "to a human.",
-  },
-  {
-    file: "yrd-cli/src/pr-publication.ts",
-    reason:
-      "publishRef is the credential-bearing Job's own actuation behind `yrd pr publish` — the pipeline-routed " +
-      "verb every remedy in this sweep is supposed to point AT, not a remedy string itself.",
   },
   {
     file: "yrd-bay/src/git.ts",

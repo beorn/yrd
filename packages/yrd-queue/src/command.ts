@@ -5,7 +5,11 @@ import { authoredDeltaBase } from "@yrd/bay"
 import { createFailure, failureFact, type JsonValue, type YrdFailure } from "@yrd/core"
 import { JobErrorSchema, parseJobLaunch, type Job, type JobContext, type JobError, type JobResult } from "@yrd/job"
 import { ComponentPathSchema } from "@yrd/intent"
-import type { Process, ProcessResult } from "@yrd/process"
+import { adaptProcessGit, gitSuperFailureDetail, type Process, type ProcessResult } from "@yrd/process"
+import { readCommitSubmodules } from "git-super/commit-graph"
+import { ensureCommitObject } from "git-super/objects"
+import { pushRefUpdates } from "git-super/push"
+import { resolveSubmoduleOrigin } from "git-super/submodule-origin"
 import * as z from "zod"
 import type {
   AlreadyLandedEvidence,
@@ -47,14 +51,12 @@ import type {
   StepExecution,
   StepRunner,
 } from "./queue.ts"
-import { resolveRelativeSubmoduleOrigin } from "./submodule-origin.ts"
 import {
   executeQueueSubmoduleComposition,
   planQueueSubmoduleComposition,
   type QueueConflictStage,
   type QueueTreeConflict,
 } from "./submodule-composition-policy.ts"
-import { publishImmutableRemoteRef } from "./git-transport-internal.ts"
 import { materializeSubmodules } from "git-super/submodules"
 import { createGitWorktreeStore } from "git-super/worktree"
 import {
@@ -1288,25 +1290,27 @@ async function publishMergeRecordRef(
 ): Promise<void> {
   if (remote === undefined) return
   const localTip = await git.commit(repo, MERGE_RECORD_REF)
-  const pushed = await git.run(
-    repo,
-    [
-      "push",
-      "--porcelain",
-      "--no-verify",
-      "--recurse-submodules=no",
-      remote.remote,
-      `${MERGE_RECORD_REF}:${MERGE_RECORD_REF}`,
+  const pushed = await pushRefUpdates({
+    root: repo,
+    git: adaptProcessGit(git.process, { env: git.env, timeoutMs: GIT_TIMEOUT_MS }),
+    timeoutMs: GIT_TIMEOUT_MS,
+    verify: false,
+    updates: [
+      {
+        repository: repo,
+        remote: remote.remote,
+        source: localTip,
+        destination: MERGE_RECORD_REF,
+        expectedDestination: remote.tip === undefined ? { state: "missing" } : { state: "oid", oid: remote.tip },
+      },
     ],
-    true,
-  )
-  if (pushed.code !== 0) {
-    throw new Error(`yrd: merge '${run}' could not publish merge-record ref: ${pushed.stderr || pushed.stdout}`)
-  }
-  const advertised = await git.run(repo, ["ls-remote", "--refs", remote.remote, MERGE_RECORD_REF], true)
-  const [publishedTip, publishedRef, extra] = advertised.stdout.split(/\s+/u)
-  if (advertised.code !== 0 || publishedTip !== localTip || publishedRef !== MERGE_RECORD_REF || extra !== undefined) {
-    throw new Error(`yrd: remote merge-record ref did not confirm local '${localTip}'`)
+  })
+  if (pushed.state !== "updated" && pushed.state !== "unchanged") {
+    throw new Error(
+      `yrd: merge '${run}' could not publish merge-record ref: ${
+        gitSuperFailureDetail(pushed)?.message ?? pushed.state
+      }`,
+    )
   }
 }
 
@@ -2517,12 +2521,19 @@ async function recutDirectPR(
     }
     const remote = await git.run(repo, ["config", "--get", "remote.origin.url"], true)
     if (remote.code === 0 && remote.stdout !== "") {
-      const published = await git.run(repo, ["push", "--porcelain", "origin", `${headSha}:${ref}`], true)
-      if (published.code !== 0) {
+      const published = await pushRefUpdates({
+        root: repo,
+        git: adaptProcessGit(git.process, { env: git.env, timeoutMs: GIT_TIMEOUT_MS }),
+        timeoutMs: GIT_TIMEOUT_MS,
+        updates: [{ repository: repo, remote: "origin", source: headSha, destination: ref }],
+      })
+      if (published.state !== "updated" && published.state !== "unchanged") {
         throw createFailure({
           kind: "infrastructure",
           code: "recut-publish",
-          message: `yrd: PR '${input.id}' recut ref could not be published: ${published.stderr || published.stdout}`,
+          message: `yrd: PR '${input.id}' recut ref could not be published: ${
+            gitSuperFailureDetail(published)?.message ?? published.state
+          }`,
         })
       }
     }
@@ -4074,15 +4085,24 @@ async function publishSourceCandidate(
     )
   }
   try {
-    await publishImmutableRemoteRef({
-      inject: { process: git.process },
-      repo: sourceRepo,
-      origin: "origin",
-      ref: candidateRef,
-      sha: tipSha,
-      env: git.env,
+    const published = await pushRefUpdates({
+      root: sourceRepo,
+      git: adaptProcessGit(git.process, { env: git.env, timeoutMs: GIT_TIMEOUT_MS }),
       timeoutMs: GIT_TIMEOUT_MS,
+      verify: false,
+      updates: [
+        {
+          repository: sourceRepo,
+          remote: "origin",
+          source: tipSha,
+          destination: candidateRef,
+          expectedDestination: { state: "missing" },
+        },
+      ],
     })
+    if (published.state !== "updated" && published.state !== "unchanged") {
+      throw new Error(gitSuperFailureDetail(published)?.message ?? `publication ended as ${published.state}`)
+    }
   } catch (cause) {
     return candidateFailure(
       "source-publish",
@@ -4845,7 +4865,6 @@ async function refusedPayloadPaths(
 }
 
 type CandidateSubmodulePin = Readonly<{ path: string; sha: string; origin: string }>
-type MutableSubmoduleConfig = { path?: string; url?: string }
 type ComponentMainPromotion = Readonly<{
   origin: string
   repository: string
@@ -4873,54 +4892,9 @@ type ComponentMainPromotionPlan =
       receipts: readonly ComponentMainReceipt[]
     }>
 
-const REMOTE_SCHEME = /^[a-z][a-z0-9+.-]*:/iu
 const FILTER_UNSUPPORTED =
   /filtering not recognized by server|server does not support filter|filter(?:ing)? (?:is )?not supported|unsupported[^\n]*filter/iu
 const DEFINITIVE_EXACT_SHA_ABSENCE = /not our ref/iu
-
-function scpRemote(value: string): RegExpExecArray | null {
-  return /^((?:[^/@:]+@)?[^/:]+:)(.+)$/u.exec(value)
-}
-
-function canonicalRemote(repo: string, value: string): string {
-  if (isAbsolute(value) || REMOTE_SCHEME.test(value) || scpRemote(value) !== null) return value
-  return resolve(repo, value)
-}
-
-function resolveSubmoduleOrigin(repo: string, superOrigin: string | undefined, value: string): string {
-  if (!value.startsWith("./") && !value.startsWith("../")) return canonicalRemote(repo, value)
-  if (superOrigin === undefined) {
-    throw new Error(`yrd: relative submodule URL '${value}' has no superproject origin`)
-  }
-  const base = canonicalRemote(repo, superOrigin)
-  try {
-    return resolveRelativeSubmoduleOrigin(base, value)
-  } catch (cause) {
-    throw new Error(`yrd: could not resolve submodule URL '${value}' against '${base}': ${messageOf(cause)}`)
-  }
-}
-
-function parseSubmoduleConfig(output: string): Map<string, MutableSubmoduleConfig> {
-  const modules = new Map<string, MutableSubmoduleConfig>()
-  for (const entry of output.split("\0")) {
-    if (entry === "") continue
-    const separator = entry.indexOf("\n")
-    if (separator < 1) throw new Error("yrd: candidate .gitmodules emitted an invalid NUL record")
-    const key = entry.slice(0, separator)
-    const value = entry.slice(separator + 1)
-    const match = /^submodule\.(.+)\.(path|url)$/iu.exec(key)
-    if (match?.[1] === undefined) continue
-    const property = match[2]
-    if (property !== "path" && property !== "url") continue
-    const current = modules.get(match[1]) ?? {}
-    if (current[property] !== undefined && current[property] !== value) {
-      throw new Error(`yrd: candidate .gitmodules defines conflicting ${property} values for '${match[1]}'`)
-    }
-    current[property] = value
-    modules.set(match[1], current)
-  }
-  return modules
-}
 
 async function candidateSubmodulePins(
   git: Git,
@@ -4928,59 +4902,56 @@ async function candidateSubmodulePins(
   path: string,
   candidateSha: string,
 ): Promise<CandidateSubmodulePin[]> {
-  const treeContext = { operation: "read-tree", repository: path } as const
-  const tree = await runSubmoduleProbe(
-    git,
-    path,
-    ["ls-tree", "-r", "-z", "--full-tree", candidateSha],
-    treeContext,
-    true,
-  )
-  if (tree.code !== 0) throw createSubmoduleReachabilityRefusal(treeContext, tree)
-  const gitlinks: ReadonlyArray<Readonly<{ path: string; sha: string }>> = tree.stdout
-    .split("\0")
-    .filter((entry) => entry !== "")
-    .flatMap((entry) => {
-      const separator = entry.indexOf("\t")
-      if (separator < 1) throw new Error("yrd: candidate tree emitted an invalid NUL record")
-      const [mode, type, sha] = entry.slice(0, separator).split(" ")
-      if (mode !== "160000") return []
-      if (type !== "commit" || sha === undefined || !/^[0-9a-f]{40,64}$/iu.test(sha)) {
-        throw new Error(`yrd: candidate gitlink '${entry.slice(separator + 1)}' has an invalid object identity`)
+  let failedRead: GitResult | undefined
+  const observedProcess: Pick<Process, "run"> = {
+    async run(request) {
+      const result = await git.process.run(request)
+      if (result.exitCode !== 0 || result.timedOut || result.stalled === true || result.sweepFailure !== undefined) {
+        failedRead = {
+          code: result.exitCode,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          durationMs: result.durationMs,
+          signal: result.signal,
+          timedOut: result.timedOut,
+          ...(result.stalled === undefined ? {} : { stalled: result.stalled }),
+          ...(result.verdict === undefined ? {} : { verdict: result.verdict }),
+          ...(result.sweepFailure === undefined ? {} : { sweepFailure: result.sweepFailure }),
+        }
       }
-      return [{ path: entry.slice(separator + 1), sha }]
-    })
-  if (gitlinks.length === 0) return []
-
-  const configuredContext = { operation: "read-gitmodules", repository: path } as const
-  const configured = await runSubmoduleProbe(
-    git,
-    path,
-    ["config", "--null", "--blob", `${candidateSha}:.gitmodules`, "--get-regexp", "^submodule\\..*\\.(path|url)$"],
-    configuredContext,
-    true,
-  )
-  if (configured.code !== 0) {
-    if (definitiveCandidateMetadataFailure(configured)) {
-      throw new Error(
-        `yrd: candidate contains gitlinks but .gitmodules is missing or invalid: ${configured.stderr.trim() || configured.stdout.trim() || "no submodule metadata"}`,
-      )
-    }
-    throw createSubmoduleReachabilityRefusal(configuredContext, configured)
+      return result
+    },
   }
-  const modules = parseSubmoduleConfig(configured.stdout)
-  const urlsByPath = new Map<string, string>()
-  for (const [name, module] of modules) {
-    if (module.path === undefined) continue
-    if (module.url === undefined) {
-      throw new Error(`yrd: candidate submodule '${module.path}' has no URL (section '${name}')`)
+  let modules: Awaited<ReturnType<typeof readCommitSubmodules>>
+  try {
+    modules = await readCommitSubmodules(
+      adaptProcessGit(observedProcess, { env: git.env, timeoutMs: GIT_TIMEOUT_MS }),
+      path,
+      candidateSha,
+    )
+  } catch (cause) {
+    const phase =
+      typeof cause === "object" &&
+      cause !== null &&
+      "resultDetail" in cause &&
+      typeof cause.resultDetail === "object" &&
+      cause.resultDetail !== null &&
+      "phase" in cause.resultDetail &&
+      typeof cause.resultDetail.phase === "string"
+        ? cause.resultDetail.phase
+        : undefined
+    const operation =
+      phase === "read-target-tree"
+        ? "read-tree"
+        : phase === "read-target-manifest" || phase === "read-target-submodules"
+          ? "read-gitmodules"
+          : undefined
+    if (operation !== undefined && failedRead !== undefined) {
+      throw createSubmoduleReachabilityRefusal({ operation, repository: path }, failedRead)
     }
-    const previous = urlsByPath.get(module.path)
-    if (previous !== undefined && previous !== module.url) {
-      throw new Error(`yrd: candidate submodule path '${module.path}' resolves to conflicting URLs`)
-    }
-    urlsByPath.set(module.path, module.url)
+    throw cause
   }
+  if (modules.length === 0) return []
   const remoteContext = { operation: "read-superproject-origin", repository: repo } as const
   const remote = await runSubmoduleProbe(git, repo, ["config", "--get", "remote.origin.url"], remoteContext)
   const originNotConfigured = remote.code === 1 && remote.stdout === "" && remote.stderr === ""
@@ -4988,17 +4959,17 @@ async function candidateSubmodulePins(
     throw createSubmoduleReachabilityRefusal(remoteContext, remote)
   }
   const superOrigin = remote.code === 0 && remote.stdout !== "" ? remote.stdout : undefined
-  return gitlinks.map((gitlink) => {
-    const url = urlsByPath.get(gitlink.path)
-    if (url === undefined) throw new Error(`yrd: candidate submodule '${gitlink.path}' has no URL`)
+  return modules.map((module) => {
+    const url = module.url
+    if (url === undefined) throw new Error(`yrd: candidate submodule '${module.path}' has no URL`)
     if (superOrigin === undefined && (url.startsWith("./") || url.startsWith("../"))) {
       throw createSubmoduleReachabilityRefusal(
         remoteContext,
         remote,
-        `candidate submodule '${gitlink.path}' uses relative URL '${url}' but the superproject origin is not configured`,
+        `candidate submodule '${module.path}' uses relative URL '${url}' but the superproject origin is not configured`,
       )
     }
-    return { ...gitlink, origin: resolveSubmoduleOrigin(repo, superOrigin, url) }
+    return { path: module.path, sha: module.target, origin: resolveSubmoduleOrigin(repo, superOrigin, url) }
   })
 }
 
@@ -5074,19 +5045,21 @@ async function fetchComponentPin(
   repository: string,
   pin: CandidateSubmodulePin,
 ): Promise<ComponentMainPromotionFailure | undefined> {
-  if ((await git.optionalCommit(repository, pin.sha)) === pin.sha) return undefined
-  const fetched = await git.run(
-    repository,
-    ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", pin.origin, pin.sha],
-    true,
-  )
-  if (fetched.code === 0 && (await git.optionalCommit(repository, pin.sha)) === pin.sha) return undefined
-  return componentMainFailure(
-    "component-main-inspection-failed",
-    `could not load merged pin '${pin.sha}' for '${pin.path}' from '${pin.origin}': ${
-      fetched.stderr || fetched.stdout || "git fetch failed"
-    }`,
-  )
+  try {
+    await ensureCommitObject({
+      repository,
+      remote: pin.origin,
+      commit: pin.sha,
+      timeoutMs: GIT_TIMEOUT_MS,
+      git: adaptProcessGit(git.process, { env: git.env, timeoutMs: GIT_TIMEOUT_MS }),
+    })
+    return undefined
+  } catch (cause) {
+    return componentMainFailure(
+      "component-main-inspection-failed",
+      `could not load merged pin '${pin.sha}' for '${pin.path}' from '${pin.origin}': ${messageOf(cause)}`,
+    )
+  }
 }
 
 async function planComponentMainPromotionGroup(
@@ -5358,37 +5331,61 @@ async function applyComponentMainPromotions(
   const receipts = [...initialReceipts]
   const refusals: ComponentMainRefusal[] = []
   let failure: ComponentMainPromotionFailure | undefined
+  const transport = adaptProcessGit(git.process, { env: git.env, timeoutMs: GIT_TIMEOUT_MS })
   for (const promotion of promotions) {
-    let pushed = await git.run(
-      promotion.repository,
-      ["push", "--porcelain", promotion.origin, `${promotion.targetSha}:refs/heads/main`],
-      true,
-    )
+    const update = {
+      repository: promotion.repository,
+      remote: promotion.origin,
+      source: promotion.targetSha,
+      destination: "refs/heads/main",
+      expectedDestination: { state: "oid", oid: promotion.mainSha } as const,
+    }
+    let pushed = await pushRefUpdates({
+      root: promotion.repository,
+      git: transport,
+      timeoutMs: GIT_TIMEOUT_MS,
+      updates: [update],
+    })
+    let pushDetail = gitSuperFailureDetail(pushed)?.message ?? `git-super push ended as ${pushed.state}`
     if (
-      pushed.code !== 0 &&
+      pushed.state !== "updated" &&
+      pushed.state !== "unchanged" &&
       (isAbsolute(promotion.origin) || promotion.origin.startsWith("file://")) &&
-      /refusing to update checked out branch/iu.test(`${pushed.stderr}\n${pushed.stdout}`)
+      /refusing to update checked out branch/iu.test(pushDetail)
     ) {
       // Local integration fixtures and single-user repositories can use a
       // non-bare component origin. updateInstead is the receiver's safe mode:
       // it updates a clean checked-out branch atomically and refuses dirt.
-      pushed = await git.run(
-        promotion.repository,
-        [
-          "push",
-          "--porcelain",
-          "--receive-pack=git -c receive.denyCurrentBranch=updateInstead receive-pack",
-          promotion.origin,
-          `${promotion.targetSha}:refs/heads/main`,
-        ],
-        true,
+      pushed = await pushRefUpdates({
+        root: promotion.repository,
+        git: transport,
+        timeoutMs: GIT_TIMEOUT_MS,
+        receivePack: "git -c receive.denyCurrentBranch=updateInstead receive-pack",
+        updates: [update],
+      })
+      pushDetail = gitSuperFailureDetail(pushed)?.message ?? `git-super push ended as ${pushed.state}`
+    }
+
+    if (pushed.state === "updated" || pushed.state === "unchanged") {
+      receipts.push(
+        ...promotion.pins.map(
+          (pin): ComponentMainReceipt => ({
+            path: pin.path,
+            origin: pin.origin,
+            pinSha: pin.sha,
+            mainBeforeSha: promotion.mainSha,
+            mainAfterSha: promotion.targetSha,
+            action: "fast-forwarded",
+          }),
+        ),
       )
+      continue
     }
 
     const refreshed = await fetchComponentMain(git, promotion.repository, promotion.origin)
     if (refreshed.status === "failed") {
       const message = `component main promotion for [${promotion.pins.map((pin) => pin.path).join(", ")}] ${
-        pushed.code === 0 ? "completed" : "failed"
+        pushed.state
       } but its result could not be verified: ${refreshed.error.message}`
       failure ??= componentMainFailure("component-main-promotion-failed", message)
       refusals.push(
@@ -5445,7 +5442,7 @@ async function applyComponentMainPromotions(
       stillFastForward.code === 0
         ? `could not fast-forward component main from '${promotion.mainSha}' to '${promotion.targetSha}' for [${promotion.pins
             .map((pin) => pin.path)
-            .join(", ")}]: ${pushed.stderr || pushed.stdout || "git push failed"}`
+            .join(", ")}]: ${pushDetail}`
         : `could not compare refreshed component main '${refreshed.sha}' with '${promotion.targetSha}' for [${promotion.pins
             .map((pin) => pin.path)
             .join(", ")}]: ${stillFastForward.stderr || stillFastForward.stdout || "git merge-base failed"}`
@@ -5782,12 +5779,6 @@ function probeSettled(result: GitResult): boolean {
 
 function definitiveProbeFailure(result: GitResult, pattern: RegExp): boolean {
   return probeSettled(result) && pattern.test(`${result.stderr}\n${result.stdout}`)
-}
-
-function definitiveCandidateMetadataFailure(result: GitResult): boolean {
-  if (!probeSettled(result)) return false
-  const detail = `${result.stderr}\n${result.stdout}`.trim()
-  return /\.gitmodules.*does not exist|bad config (?:l)ine|invalid config|invalid key/iu.test(detail)
 }
 
 function throwFetchProbeFailure(context: SubmoduleProbeContext, result: GitResult): never {
@@ -6852,21 +6843,25 @@ async function rollbackQueueBase(
 ): Promise<string | undefined> {
   try {
     if (base.remote !== undefined) {
-      const rolledBack = await git.run(
-        repo,
-        [
-          "push",
-          "--porcelain",
-          `--force-with-lease=${base.branchRef}:${landing.sha}`,
-          base.remote,
-          `${base.sha}:${base.branchRef}`,
+      const rolledBack = await pushRefUpdates({
+        root: repo,
+        git: adaptProcessGit(git.process, { env: git.env, timeoutMs: GIT_TIMEOUT_MS }),
+        timeoutMs: GIT_TIMEOUT_MS,
+        updates: [
+          {
+            repository: repo,
+            remote: base.remote,
+            source: base.sha,
+            destination: base.branchRef,
+            expectedDestination: { state: "oid", oid: landing.sha },
+            allowNonFastForward: true,
+          },
         ],
-        true,
-      )
+      })
       const restored = await authoritativeQueueBase(git, repo, base.branch)
-      return rolledBack.code === 0 && restored.sha === base.sha
+      return (rolledBack.state === "updated" || rolledBack.state === "unchanged") && restored.sha === base.sha
         ? undefined
-        : rolledBack.stderr || rolledBack.stdout || `could not restore '${base.branch}' after source ref loss`
+        : (gitSuperFailureDetail(rolledBack)?.message ?? `could not restore '${base.branch}' after source ref loss`)
     }
 
     const checkedOut = await checkedOutWorktree(git, repo, base.branchRef)
@@ -6956,15 +6951,24 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
             return withComponentMainPromotions(git, repo, checked.baseSha, checked.candidateSha, async () => {
               // Component mains are promoted explicitly around this root push.
               // A caller's recursive-push config would replay the root-only SHA refspec inside each component.
-              const pushed = await git.run(
-                path,
-                ["push", "--porcelain", "--recurse-submodules=no", remote, `${checked.candidateSha}:${branchRef}`],
-                true,
-              )
-              if (pushed.code !== 0) {
+              const pushed = await pushRefUpdates({
+                root: path,
+                git: adaptProcessGit(git.process, { env: git.env, timeoutMs: GIT_TIMEOUT_MS }),
+                timeoutMs: GIT_TIMEOUT_MS,
+                updates: [
+                  {
+                    repository: path,
+                    remote,
+                    source: checked.candidateSha,
+                    destination: branchRef,
+                    expectedDestination: { state: "oid", oid: baseSha },
+                  },
+                ],
+              })
+              if (pushed.state !== "updated" && pushed.state !== "unchanged") {
                 return failedWithEvidence(
                   "merge-push-failed",
-                  pushed.stderr || pushed.stdout || `could not update '${branch}'`,
+                  gitSuperFailureDetail(pushed)?.message ?? `could not update '${branch}': ${pushed.state}`,
                   NativeRootPushFailureEvidenceSchema.parse({
                     kind: "native-root-push-failure",
                     branchRef,

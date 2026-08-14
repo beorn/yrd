@@ -9,7 +9,7 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeF
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { resolveRelativeSubmoduleOrigin } from "../src/submodule-origin.ts"
+import { resolveRelativeSubmoduleOrigin } from "git-super/submodule-origin"
 import {
   createBayJobDefs,
   currentPRRev,
@@ -2794,7 +2794,7 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run.status, run.error?.message).toBe("completed")
-    expect(run.conclusion).toBe("success")
+    expect(run.conclusion, JSON.stringify(run, null, 2)).toBe("success")
     const check = run.steps[0]?.job
     if (check?.status !== "completed" || check.conclusion !== "success") throw new Error("check did not pass")
     const evidence = GitCheckEvidenceSchema.parse(check.output)
@@ -2920,7 +2920,7 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1", "PR2"] }, runtime))[0]!
 
     expect(run.status, run.error?.message).toBe("completed")
-    expect(run.conclusion).toBe("success")
+    expect(run.conclusion, JSON.stringify(run, null, 2)).toBe("success")
     const check = run.steps[0]?.job
     if (check?.status !== "completed" || check.conclusion !== "success") throw new Error("check did not pass")
     const evidence = GitCheckEvidenceSchema.parse(check.output)
@@ -6586,7 +6586,11 @@ describe("Queue command adapters", () => {
     ])
     // Union behavior: queue Git operations lock the shared repository, so the
     // timeout-robustness lineage owns the 120s default across the whole proof.
-    expect(requests.filter(({ argv }) => argv[0] === "git").every(({ timeoutMs }) => timeoutMs === 120_000)).toBe(true)
+    expect(
+      requests
+        .filter(({ argv, timeoutMs }) => argv[0] === "git" && argv.length > 1 && timeoutMs !== 120_000)
+        .map(({ argv, timeoutMs }) => ({ argv, timeoutMs })),
+    ).toEqual([])
     const initializations = requests.filter(
       ({ argv }) => argv[0] === "git" && argv.includes("init") && argv.includes("--bare") && argv.includes("--quiet"),
     )
@@ -6845,10 +6849,13 @@ describe("Queue command adapters", () => {
       })
       await using process = createProcess()
       let configuredCheckRan = false
+      let injectedFailure = false
       const unavailable: Pick<Process, "run"> = {
         run(request) {
           if (request.argv[0] === "true") configuredCheckRan = true
-          if (failure.matches(request.argv)) {
+          const shouldInject = failure.matches(request.argv) && (failure.operation !== "verify" || !injectedFailure)
+          if (shouldInject) {
+            injectedFailure = true
             const base = {
               exitCode: failure.exitCode,
               signal: failure.signal,
@@ -6886,6 +6893,7 @@ describe("Queue command adapters", () => {
         },
       })
       expect(configuredCheckRan).toBe(false)
+      expect(injectedFailure).toBe(true)
       expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
         status: "submitted",
         headSha: fixture.featureSha,
@@ -7179,7 +7187,9 @@ describe("Queue command adapters", () => {
     const proof = IntegrationProofSchema.parse(run.integration)
     const rootPush = pushes.find((argv) => argv.includes(`${proof.commit}:refs/heads/main`))
     expect(rootPush).toContain("--recurse-submodules=no")
-    const recordPush = pushes.find((argv) => argv.includes("refs/notes/yrd/merge-records:refs/notes/yrd/merge-records"))
+    const recordPush = pushes.find((argv) =>
+      argv.some((argument) => argument.endsWith(":refs/notes/yrd/merge-records")),
+    )
     expect(recordPush).toEqual(expect.arrayContaining(["--no-verify", "--recurse-submodules=no"]))
     expect(await git(remote, ["ls-tree", "main", "dep"])).toContain(moduleSha)
   })

@@ -2,7 +2,8 @@ import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 import type { JobResult } from "@yrd/job"
-import type { Process } from "@yrd/process"
+import { adaptProcessGit, gitSuperFailureDetail, type Process } from "@yrd/process"
+import { pushRefUpdates } from "git-super/push"
 import { createGitWorktreeStore, type Git } from "git-super/worktree"
 import type { BayWorkspace } from "./plugin.ts"
 import type {
@@ -31,6 +32,8 @@ export type GitWorkspaceOptions = Readonly<{
   env?: NodeJS.ProcessEnv
 }> &
   GitWorkspaceLifecycleHooks
+
+const GIT_TIMEOUT_MS = 30_000
 
 function failure(code: string, cause: unknown): JobResult<never> {
   return {
@@ -182,6 +185,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
   const baysRoot = resolve(options.baysRoot ?? `${repo}/.bays`)
   const worktrees = createGitWorktreeStore(options)
   const { git } = worktrees
+  const transport = adaptProcessGit(options.process, { env: options.env, timeoutMs: GIT_TIMEOUT_MS })
   if (options.intakeRemote !== undefined) {
     // Older Yrd versions set this in shared config, making plain `git push` target the Bay receiver.
     await worktrees.removeLegacySharedPushDefault()
@@ -457,12 +461,26 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
               `fetch origin '${input.branch}' and reconcile it before checkpointing again`,
           )
         }
-        await git.run(input.path, [
-          "push",
-          ...(posture === "branch" ? ["--set-upstream"] : []),
-          "origin",
-          `HEAD:refs/heads/${input.branch}`,
-        ])
+        const pushed = await pushRefUpdates({
+          root: input.path,
+          updates: [
+            {
+              repository: input.path,
+              remote: "origin",
+              source: headSha,
+              destination: `refs/heads/${input.branch}`,
+              expectedDestination: remoteHead === undefined ? { state: "missing" } : { state: "oid", oid: remoteHead },
+            },
+          ],
+          timeoutMs: GIT_TIMEOUT_MS,
+          git: transport,
+        })
+        if (pushed.state !== "updated" && pushed.state !== "unchanged") {
+          throw new Error(gitSuperFailureDetail(pushed)?.message ?? `git-super push ended as ${pushed.state}`)
+        }
+        if (posture === "branch") {
+          await git.run(input.path, ["branch", "--set-upstream-to", `origin/${input.branch}`, input.branch])
+        }
         return { status: "completed", conclusion: "success", output: { headSha, pushed: true, wip } }
       } catch (cause) {
         return failure("checkpoint-failed", cause)

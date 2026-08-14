@@ -1,16 +1,12 @@
-import { mkdtemp } from "node:fs/promises"
-import { realpathSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { isAbsolute, join, relative, resolve, sep } from "node:path"
+import { isAbsolute, relative, resolve, sep } from "node:path"
 import type { JobResult } from "@yrd/job"
 import type { PrPublicationInput, PrPublicationOutput, PrPublicationService } from "@yrd/bay"
-import type { Process, ProcessResult } from "@yrd/process"
+import { adaptProcessGit, gitSuperFailureDetail, type Process, type ProcessResult } from "@yrd/process"
+import { pushRefUpdates } from "git-super/push"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import { changedSubmodulePins } from "./pr-submodule-publication.ts"
-import { safeRemove } from "removely"
 
 const GIT_TIMEOUT_MS = 30_000
-const TEST_ROOT = realpathSync(tmpdir())
 
 function gitFailure(result: ProcessResult): string {
   if (result.timedOut) return `timed out after ${GIT_TIMEOUT_MS}ms`
@@ -47,13 +43,25 @@ async function publishRef(
   branch: string,
 ): Promise<void> {
   const destination = await runGit(process, destinationRepository, ["remote", "get-url", "--push", "origin"])
-  const staging = await mkdtemp(join(tmpdir(), "yrd-publication-"))
-  try {
-    await runGit(process, staging, ["init", "--bare", "--quiet"])
-    await runGit(process, staging, ["fetch", "--quiet", "--no-tags", source, sha])
-    await runGit(process, staging, ["push", "--porcelain", destination, `FETCH_HEAD:refs/heads/${branch}`])
-  } finally {
-    await safeRemove(staging, { within: TEST_ROOT, allowMissing: true })
+  const result = await pushRefUpdates({
+    root: source,
+    git: adaptProcessGit(process, {
+      env: cleanGitEnvironment(globalThis.process.env),
+      timeoutMs: GIT_TIMEOUT_MS,
+    }),
+    timeoutMs: GIT_TIMEOUT_MS,
+    verify: false,
+    updates: [
+      {
+        repository: source,
+        remote: destination,
+        source: sha,
+        destination: `refs/heads/${branch}`,
+      },
+    ],
+  })
+  if (result.state !== "updated" && result.state !== "unchanged") {
+    throw new Error(gitSuperFailureDetail(result)?.message ?? `publication ended as ${result.state}`)
   }
 }
 

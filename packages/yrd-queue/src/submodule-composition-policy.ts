@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import type { Process } from "@yrd/process"
+import { adaptProcessGit, gitSuperFailureDetail, type Process } from "@yrd/process"
 import {
   composeSubmoduleCommits,
   planSubmoduleComposition,
@@ -10,7 +10,8 @@ import {
   type SubmoduleReviewedBlob,
   type SubmoduleTreeConflict,
 } from "git-super/composition"
-import { adaptProcessGit, publishImmutableRemoteRef } from "./git-transport-internal.ts"
+import { pushRefUpdates } from "git-super/push"
+import type { GitSuperResult } from "git-super/result"
 
 export type QueueConflictStage = SubmoduleConflictStage
 export type QueueTreeConflict = SubmoduleTreeConflict
@@ -77,7 +78,11 @@ export async function executeQueueSubmoduleComposition(
   plan: Extract<QueueSubmoduleCompositionPlan, { status: "planned" }>,
   options: QueueSubmoduleCompositionExecutionOptions,
 ): Promise<QueueSubmoduleCompositionExecution> {
-  const git = adaptProcessGit(options.inject.process)
+  const git = adaptProcessGit(options.inject.process, {
+    ...(options.env === undefined ? {} : { env: options.env }),
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+    ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+  })
   const executed = await composeSubmoduleCommits(
     plan satisfies Extract<SubmoduleCompositionPlan, { status: "planned" }>,
     {
@@ -103,16 +108,23 @@ export async function executeQueueSubmoduleComposition(
     const planned = { ...resolution, ref: compositionRef(resolution), message: compositionMessage(resolution) }
     try {
       const store = options.inject.storeForOrigin(planned.origin)
-      await publishImmutableRemoteRef({
-        inject: { process: options.inject.process },
-        repo: store,
-        origin: planned.origin,
-        ref: planned.ref,
-        sha: resolution.sha,
-        ...(options.env === undefined ? {} : { env: options.env }),
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
-        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      const published = await pushRefUpdates({
+        root: store,
+        git,
+        timeoutMs: options.timeoutMs,
+        verify: false,
+        updates: [
+          {
+            repository: store,
+            remote: planned.origin,
+            source: resolution.sha,
+            destination: planned.ref,
+            expectedDestination: { state: "missing" },
+          },
+        ],
       })
+      const failure = immutablePublicationFailure(published, planned.ref)
+      if (failure !== undefined) throw new Error(failure)
     } catch (cause) {
       return unavailable(
         resolution.path,
@@ -123,6 +135,15 @@ export async function executeQueueSubmoduleComposition(
     resolutions.push({ ...resolution, ref: planned.ref })
   }
   return { status: "composed", resolutions }
+}
+
+function immutablePublicationFailure(result: GitSuperResult, ref: string): string | undefined {
+  if (result.state === "updated" || result.state === "unchanged") return undefined
+  const failure = gitSuperFailureDetail(result)
+  if (failure?.code === "destination-changed") {
+    return `remote immutable ref '${ref}' already exists and will not be moved: ${failure.message}`
+  }
+  return failure?.message ?? `remote immutable ref '${ref}' publication ended as ${result.state}`
 }
 
 function queueRefusal(
