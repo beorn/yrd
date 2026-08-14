@@ -48,7 +48,7 @@ function step(name: string, revision: string, overrides: Partial<InstalledStep> 
   return { name, title: name, revision, kind: "check", ...overrides }
 }
 
-function baseline(steps: readonly InstalledStep[], base = "main"): InstalledBaseline {
+function baseline(steps: readonly InstalledStep[], base = "main"): InstalledBaseline & Readonly<{ batchSize: number }> {
   return {
     base,
     baseSha: "0123456789abcdef0123456789abcdef01234567",
@@ -605,9 +605,10 @@ describe("host installed baseline", () => {
     try {
       await resident.services.queue?.provision?.("main")
       const current = (await readInstalledBaselines(resident.repository.stateDir)).main
-      if (current === undefined) throw new Error("expected provisioned main baseline")
+      if (current?.batchSize === undefined) throw new Error("expected current provisioned main baseline")
       const foreign = {
         ...current,
+        batchSize: current.batchSize,
         installedAt: "2026-07-24T00:00:00.000Z",
         steps: current.steps.map((installed, index) => ({
           ...installed,
@@ -630,15 +631,51 @@ describe("host installed baseline", () => {
     }
   })
 
+  it("re-provisions a batch-only config drift and requests an in-place runtime reload", async () => {
+    const repo = await queueRepository("true")
+    const resident = await createYrdHost({ cwd: repo })
+    const reloadRequested = new Error("reload requested")
+    try {
+      await resident.services.queue?.provision?.("main")
+      expect(await resident.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+
+      await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 2\nchecks:\n  - {check: {run: "true"}}\n')
+      await git(repo, "add", ".yrd.yml")
+      await git(repo, "commit", "-qm", "change only batch policy")
+
+      const configLeg = await resident.services.queue?.auditEnvironment?.()
+      expect(configLeg?.findings).toMatchObject([{ code: "config-drift" }])
+      expect(configLeg?.findings[0]?.message).toContain("batch size 1 installed, current 2")
+
+      await expect(
+        requireFreshInstalledBaseline(resident.services, {
+          reloadInPlace: {
+            base: "main",
+            request(finding) {
+              expect(finding).toMatchObject({ code: "runtime-drift" })
+              expect(finding.message).toContain("batch size 2 installed, runtime 1")
+              throw reloadRequested
+            },
+          },
+        }),
+      ).rejects.toBe(reloadRequested)
+
+      expect((await readInstalledBaselines(resident.repository.stateDir)).main?.batchSize).toBe(2)
+    } finally {
+      await resident.close()
+    }
+  })
+
   it("one-shot leaves foreign baseline untouched until explicit queue init (22334)", async () => {
     const repo = await queueRepository("true")
     const host = await createYrdHost({ cwd: repo })
     try {
       await host.services.queue?.provision?.("main")
       const current = (await readInstalledBaselines(host.repository.stateDir)).main
-      if (current === undefined) throw new Error("expected provisioned main baseline")
+      if (current?.batchSize === undefined) throw new Error("expected current provisioned main baseline")
       const foreign = {
         ...current,
+        batchSize: current.batchSize,
         installedAt: "2026-07-24T00:00:00.000Z",
         steps: current.steps.map((installed, index) => ({
           ...installed,

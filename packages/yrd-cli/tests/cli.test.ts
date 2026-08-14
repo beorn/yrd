@@ -7029,6 +7029,7 @@ describe("runYrd", () => {
       base: "main",
       baseSha,
       installedAt: "2026-07-09T11:00:00.000Z",
+      batchSize: 1,
       steps: [{ name: "check", title: "check", revision: "check-v1", kind: "check" }],
     })
     writeFileSync(join(repo, "distance.txt"), "ahead\n")

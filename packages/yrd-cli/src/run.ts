@@ -6876,8 +6876,8 @@ async function logRuns(
 /** Refuse to start expensive queue Runs while the installed baseline is stale.
  * Non-drift environment findings stay audit-only; drift on EITHER audited leg
  * blocks the run — config drift with the migration remedy, runtime drift
- * (merge-queue R41b: this process's installed steps diverge from the migrated
- * baseline) with the restart remedy. */
+ * (merge-queue R41b: this process's batch policy or installed steps diverge
+ * from the migrated baseline) with the restart remedy. */
 export async function requireFreshInstalledBaseline(
   services: YrdCliServices,
   options: Readonly<{
@@ -6911,7 +6911,7 @@ export async function requireFreshInstalledBaseline(
   // recipe, not a second revision family. That converts "landing advanced the
   // base / another seat wrote a foreign baseline" into a hiccup, not a fatal
   // resident exit. One-shot stays fail-loud (no accidental baseline rewrite).
-  // Runtime-drift still fails: this process's construction-time step set is
+  // Runtime-drift still fails: this process's construction-time queue policy is
   // wrong and needs a restart, not another baseline write.
   const reload = options.reloadInPlace
   if (
