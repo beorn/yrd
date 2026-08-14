@@ -19,7 +19,7 @@ import {
   type BayWorkspace,
   type PR,
 } from "@yrd/bay"
-import { createMemoryJournal, createYrd, createYrdDef, failureFact, pipe } from "@yrd/core"
+import { createFailure, createMemoryJournal, createYrd, createYrdDef, failureFact, pipe } from "@yrd/core"
 import { withJobs } from "@yrd/job"
 import { withIntents } from "@yrd/intent"
 import { createProcess, shellCommand, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
@@ -4314,6 +4314,90 @@ describe("Queue command adapters", () => {
     expect(artifacts.every(({ path }) => existsSync(path))).toBe(true)
     const artifactContents = await Promise.all(artifacts.map(({ path }) => readFile(path, "utf8")))
     expect(artifactContents.some((contents) => contents.includes("CONFLICT"))).toBe(true)
+  })
+
+  it("discloses an environment refusal in the attempt directory instead of leaving it empty", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const artifactRoot = join(repo, ".git", "yrd", "artifacts")
+    const provisionDetail =
+      "yrd: required check 'typecheck' workspace could not install its dependencies in /bays/warm/worktree; " +
+      "bun install --frozen-lockfile --ignore-scripts child exited 1\n" +
+      "error: lockfile had changes, but lockfile is frozen"
+    await using process = createProcess()
+    const refusingProcess: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "test") {
+          throw createFailure({
+            kind: "infrastructure",
+            code: "candidate-provision-failed",
+            message: provisionDetail,
+          })
+        }
+        return process.run(request)
+      },
+    }
+
+    const outcome = await gitCheckStep({
+      inject: { process: refusingProcess },
+      repo,
+      command: ["test", "-f", "feature.txt"],
+      artifactRoot,
+      purpose: "typecheck",
+    })(
+      {
+        run: "R-refused",
+        step: "typecheck",
+        index: 0,
+        prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
+        shape: { results: {} },
+      },
+      { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
+    )
+
+    expect(outcome).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "queue-environment-refused" },
+    })
+    if (outcome.status !== "completed" || outcome.conclusion !== "failure") return
+    const dir = join(artifactRoot, "R-refused", "0-typecheck", "attempt-1")
+    expect((await readdir(dir)).toSorted()).toEqual(["error.json", "output.log"])
+    expect(JSON.parse(await readFile(join(dir, "error.json"), "utf8"))).toEqual(outcome.error)
+    const disclosure = await readFile(join(dir, "output.log"), "utf8")
+    expect(disclosure).toContain("queue-environment-refused")
+    expect(disclosure).toContain("candidate-provision-failed")
+    expect(disclosure).toContain("lockfile had changes, but lockfile is frozen")
+  })
+
+  it("adds the typed error to a failing check without clobbering its command streams", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const artifactRoot = join(repo, ".git", "yrd", "artifacts")
+    await using process = createProcess()
+
+    const outcome = await gitCheckStep({
+      inject: { process },
+      repo,
+      command: shellCommand("echo checked-output; echo checked-diagnostic >&2; exit 1"),
+      artifactRoot,
+      purpose: "typecheck",
+    })(
+      {
+        run: "R-red",
+        step: "typecheck",
+        index: 0,
+        prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
+        shape: { results: {} },
+      },
+      { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
+    )
+
+    expect(outcome).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "typecheck-failed" } })
+    if (outcome.status !== "completed" || outcome.conclusion !== "failure") return
+    const dir = join(artifactRoot, "R-red", "0-typecheck", "attempt-1")
+    expect((await readdir(dir)).toSorted()).toEqual(["error.json", "output.log", "stderr.log", "stdout.log"])
+    expect(JSON.parse(await readFile(join(dir, "error.json"), "utf8"))).toEqual(outcome.error)
+    expect(await readFile(join(dir, "stdout.log"), "utf8")).toContain("checked-output")
+    expect(await readFile(join(dir, "output.log"), "utf8")).toContain("checked-diagnostic")
   })
 
   it("checks the immutable Candidate already materialized by the Runner Context", async () => {
