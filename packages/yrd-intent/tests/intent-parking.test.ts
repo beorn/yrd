@@ -34,6 +34,7 @@ function failure(overrides: Partial<IntentAttemptFailure> = {}): IntentAttemptFa
     target: TARGET,
     priorPin: PRIOR_PIN,
     reason: "the merged pin does not contain the planned component target",
+    at: "2026-08-14T22:00:00.000Z",
     ...overrides,
   }
 }
@@ -45,6 +46,7 @@ function repeat(count: number, template: IntentAttemptFailure): IntentAttemptFai
   return Array.from({ length: count }, (_unused, index) => ({
     ...template,
     reason: `${template.reason} (run R${2247 + index}, scratch .git/yrd/scratch/yrd-queue-${index}xKq)`,
+    at: new Date(Date.parse(template.at) + index * 60_000).toISOString(),
   }))
 }
 
@@ -61,6 +63,10 @@ describe("dead-intent parking", () => {
       attempts: INTENT_PARK_AFTER_IDENTICAL_ATTEMPTS,
       failure: { code: "quantum-oracle-desynchronized" },
       fingerprint: expect.stringMatching(/^quantum-oracle-desynchronized:[0-9a-f]{16}$/u),
+      // The page rail refuses a finding without these two, so the verdict has
+      // to carry the block span, not just its length.
+      since: "2026-08-14T22:00:00.000Z",
+      blockedMs: (INTENT_PARK_AFTER_IDENTICAL_ATTEMPTS - 1) * 60_000,
     })
   })
 
@@ -109,6 +115,11 @@ describe("dead-intent parking", () => {
     const second = failure({ reason: "failed in run R2248 under scratch yrd-queue-TlDgln" })
 
     expect(intentAttemptFingerprint(first)).toBe(intentAttemptFingerprint(second))
+    // Nor the clock: every attempt has a distinct `at` by construction, so a
+    // fingerprint that read it would never repeat and would park nothing.
+    expect(intentAttemptFingerprint(failure())).toBe(
+      intentAttemptFingerprint(failure({ at: "2027-01-01T00:00:00.000Z" })),
+    )
     expect(intentAttemptFingerprint(failure())).not.toBe(intentAttemptFingerprint(failure({ step: "check" })))
     expect(intentAttemptFingerprint(failure())).not.toBe(intentAttemptFingerprint(failure({ priorPin: TARGET })))
     expect(intentAttemptFingerprint(failure())).not.toBe(
