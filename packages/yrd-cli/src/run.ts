@@ -731,6 +731,59 @@ function gitDistance(cwd: string, baseSha: string, headSha: string): Omit<Runner
   }
 }
 
+/** Cached answer for {@link runnerSourceBehind}, keyed by cwd and the resident
+ * sha it was computed against. A stale-runner recycle has not shipped yet
+ * (@yrd/core/stale-runner-never-recycles), so the box's only defense is
+ * visibility: this powers the inline "(N behind pin)" suffix on the RUNNER
+ * box's source line. */
+type RunnerSourceBehindEntry = Readonly<{ runnerSha: string; behind: number | undefined; computedAt: number }>
+const runnerSourceBehindCache = new Map<string, RunnerSourceBehindEntry>()
+
+/** Matches the watch poll cadence (`watchQueue`'s `interval`). `observeQueueList`
+ * also runs once per focus/cursor change (see `queueGitDir`'s doc comment on why
+ * an uncached git fork there is a bug, not a feature) — this TTL keeps a fresh
+ * `rev-parse`+`rev-list` fork off that per-keystroke path while still catching a
+ * pin advance within one poll tick. */
+const RUNNER_SOURCE_BEHIND_TTL_MS = 15_000
+
+/** How many commits the resident runner's booted source (`implementationSource`,
+ * captured once at its startup) has fallen behind the checkout `cwd` is on right
+ * now. The checkout can advance — a submodule pin bump, a `git pull` — long
+ * after a resident starts serving, and nothing today recycles it
+ * (@yrd/core/stale-runner-never-recycles): this is the read that lets a watcher
+ * see the drift without cross-referencing. `undefined` means "not behind" (or
+ * not measurable) and must render nothing, never a confident zero. */
+export function runnerSourceBehind(
+  cwd: string,
+  implementationSource: string | undefined,
+  now: number,
+): number | undefined {
+  const match = implementationSource === undefined ? null : /^git:([0-9a-f]{40,64})$/u.exec(implementationSource)
+  if (match === null) return undefined
+  const runnerSha = (match[1] ?? "").toLowerCase()
+  const cached = runnerSourceBehindCache.get(cwd)
+  if (
+    cached !== undefined &&
+    cached.runnerSha === runnerSha &&
+    now - cached.computedAt < RUNNER_SOURCE_BEHIND_TTL_MS
+  ) {
+    return cached.behind
+  }
+  const gitDir = queueGitDir(cwd)
+  let behind: number | undefined
+  if (gitDir !== undefined) {
+    try {
+      const headSha = gitSync(cwd, ["rev-parse", "HEAD"]).trim().toLowerCase()
+      const distance = headSha === runnerSha ? { ahead: 0 } : gitDistance(cwd, runnerSha, headSha)
+      behind = distance.ahead !== undefined && distance.ahead > 0 ? distance.ahead : undefined
+    } catch {
+      behind = undefined
+    }
+  }
+  runnerSourceBehindCache.set(cwd, { runnerSha, behind, computedAt: now })
+  return behind
+}
+
 async function runnerGitHealth(cwd: string): Promise<RunnerGitHealth> {
   const gitDir = queueGitDir(cwd)
   if (gitDir === undefined) {
@@ -6062,7 +6115,12 @@ function queueRunnerStateToken(runner: QueueTimelineRunner | null): string {
 /** Runner facts that change chrome without invalidating durable queue facts.
  * Heartbeat time is deliberately excluded; queueProgress is not. */
 function queueRunnerProjectionToken(runner: QueueTimelineRunner | null): string {
-  return JSON.stringify([queueRunnerStateToken(runner), runner?.queueProgress ?? null, runner?.driver ?? null])
+  return JSON.stringify([
+    queueRunnerStateToken(runner),
+    runner?.queueProgress ?? null,
+    runner?.driver ?? null,
+    runner?.sourceBehind ?? null,
+  ])
 }
 
 async function observeQueueList(
@@ -6105,7 +6163,12 @@ async function observeQueueList(
   if (state === undefined || stateSource === undefined) {
     throw new Error("yrd: queue read boundary produced no observation")
   }
-  const runner = activeResidentRunner(await residentRunnerStatus(io.cwd ?? process.cwd(), io.stateDir))
+  const cwd = io.cwd ?? process.cwd()
+  const now = io.now?.() ?? Date.now()
+  const observedRunner = activeResidentRunner(await residentRunnerStatus(cwd, io.stateDir))
+  const sourceBehind =
+    observedRunner === null ? undefined : runnerSourceBehind(cwd, observedRunner.implementationSource, now)
+  const runner = observedRunner === null || sourceBehind === undefined ? observedRunner : { ...observedRunner, sourceBehind }
   return {
     state,
     stateSource,
@@ -6116,7 +6179,7 @@ async function observeQueueList(
     runnerToken: queueRunnerToken(runner),
     runnerStateToken: queueRunnerStateToken(runner),
     runnerProjectionToken: queueRunnerProjectionToken(runner),
-    now: io.now?.() ?? Date.now(),
+    now,
     ...(readFailure === undefined ? {} : { readFailure }),
   }
 }
