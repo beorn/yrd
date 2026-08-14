@@ -4665,11 +4665,55 @@ async function candidateSubmodulePins(
   path: string,
   candidateSha: string,
 ): Promise<CandidateSubmodulePin[]> {
-  const modules = await readCommitSubmodules(
-    adaptProcessGit(git.process, { env: git.env, timeoutMs: GIT_TIMEOUT_MS }),
-    path,
-    candidateSha,
-  )
+  let failedRead: GitResult | undefined
+  const observedProcess: Pick<Process, "run"> = {
+    async run(request) {
+      const result = await git.process.run(request)
+      if (result.exitCode !== 0 || result.timedOut || result.stalled === true || result.sweepFailure !== undefined) {
+        failedRead = {
+          code: result.exitCode,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          durationMs: result.durationMs,
+          signal: result.signal,
+          timedOut: result.timedOut,
+          ...(result.stalled === undefined ? {} : { stalled: result.stalled }),
+          ...(result.verdict === undefined ? {} : { verdict: result.verdict }),
+          ...(result.sweepFailure === undefined ? {} : { sweepFailure: result.sweepFailure }),
+        }
+      }
+      return result
+    },
+  }
+  let modules: Awaited<ReturnType<typeof readCommitSubmodules>>
+  try {
+    modules = await readCommitSubmodules(
+      adaptProcessGit(observedProcess, { env: git.env, timeoutMs: GIT_TIMEOUT_MS }),
+      path,
+      candidateSha,
+    )
+  } catch (cause) {
+    const phase =
+      typeof cause === "object" &&
+      cause !== null &&
+      "resultDetail" in cause &&
+      typeof cause.resultDetail === "object" &&
+      cause.resultDetail !== null &&
+      "phase" in cause.resultDetail &&
+      typeof cause.resultDetail.phase === "string"
+        ? cause.resultDetail.phase
+        : undefined
+    const operation =
+      phase === "read-target-tree"
+        ? "read-tree"
+        : phase === "read-target-manifest" || phase === "read-target-submodules"
+          ? "read-gitmodules"
+          : undefined
+    if (operation !== undefined && failedRead !== undefined) {
+      throw createSubmoduleReachabilityRefusal({ operation, repository: path }, failedRead)
+    }
+    throw cause
+  }
   if (modules.length === 0) return []
   const remoteContext = { operation: "read-superproject-origin", repository: repo } as const
   const remote = await runSubmoduleProbe(git, repo, ["config", "--get", "remote.origin.url"], remoteContext)

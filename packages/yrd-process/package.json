@@ -8,7 +8,7 @@
   },
   "dependencies": {
     "@silvery/scope": "^0.23.2",
-    "git-super": "github:beorn/git-super#09e4828f0bb205df7e717f41254af06319ca3f7a",
+    "git-super": "github:beorn/git-super#176fdb64d31a1303389b0306b1f7dbfc713d35ba",
     "loggily": "^0.10.2"
   }
 }
