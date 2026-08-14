@@ -2,7 +2,7 @@ import { basename, resolve } from "node:path"
 import { Command as CliCommand } from "@silvery/commander"
 import { failureFact, raiseFailure, type FailureFact } from "@yrd/core"
 import { resolveYrdObservability, type YrdObservability, type YrdObservabilityFlags } from "./observability.ts"
-import { parseQualifiedRunRef } from "./qualified-run-ref.ts"
+import { parseQualifiedRunRef, type QualifiedRunRef } from "./qualified-run-ref.ts"
 import type { YrdCliExitCode } from "./types.ts"
 
 export type Invocation = Readonly<{
@@ -275,19 +275,35 @@ function namedAlternatives(names: readonly string[]): string {
  * our own run of the same number instead. An undeclared prefix is left alone —
  * it is ordinary text as far as the composition is concerned, and the ordinary
  * not-found refusal already names it.
+ *
+ * Only OPERAND positions are rewritten. An option's value is ordinary text the
+ * operator wrote for a human to read, and rewriting the whole tail edited it:
+ * `--reason "code:main#7"` had its own prefix silently stripped out of the
+ * journalled prose, and `--reason "pm:main#2711"` aborted the command with a
+ * refusal about a run that was never its subject. Every queue spelling puts its
+ * operands before its options, so the rewrite stops at the first option-looking
+ * token and everything from there travels verbatim — including the values of
+ * variadic options such as `--allow` and `--steps`, whose arity this adapter
+ * deliberately does not model. A qualified reference typed AFTER an option is
+ * therefore left alone and refused downstream by
+ * {@link requireUnqualifiedRunSelector}, which names the same remedy.
  */
 function localRunReferences(
   tail: readonly string[],
   ownName: string,
   byName: ReadonlyMap<string, YrdRepositoryAlias>,
+  remedy: (qualified: QualifiedRunRef) => string,
 ): string[] {
-  return tail.map((token) => {
+  const firstOption = tail.findIndex((token) => token.startsWith("-"))
+  const operands = firstOption < 0 ? tail.length : firstOption
+  return tail.map((token, index) => {
+    if (index >= operands) return token
     const qualified = parseQualifiedRunRef(token)
     if (qualified === undefined) return token
     if (qualified.repository === ownName) return qualified.run
     if (!byName.has(qualified.repository)) return token
     usage(
-      `run '${token}' lives in Yrd repository '${qualified.repository}', not '${ownName}'; use 'yrd queue ${qualified.repository} ...' to reach it`,
+      `run '${token}' lives in Yrd repository '${qualified.repository}', not '${ownName}'; run '${remedy(qualified)}' to reach it`,
     )
   })
 }
@@ -324,17 +340,22 @@ export function normalizeYrdRepositoryAliasInvocation(
     const tail = [...commandFlags, ...resolved.tail]
     if (tail.includes("--watch")) {
       const remedies = namedAlternatives([...byName.keys()].map((name) => `'yrd queue ${name} --watch'`))
-      usage(`all-repository queue watch is unsupported; use ${remedies}`)
+      usage(`all-repository queue watch is unsupported; run ${remedies}`)
     }
     return { kind: "all-repositories-read", args: [...prefix, "queue", "list", ...tail] }
   }
   const declaration = resolved.declaration
-  const scope =
-    command === "list" || command === "_list"
-      ? ["--base", declaration.queue.base]
-      : command === "pause" || command === "resume"
-        ? [declaration.queue.base]
-        : []
+  // `yrd queue <repository>` names a REPOSITORY, so it asks the same question
+  // `yrd queue list` asks inside that repository: every queue with work, each
+  // carrying a 1..N label (user directive 2026-08-13). Injecting the declared
+  // base here as `--base` answered a narrower question — one queue, no labels,
+  // no legend, no digit toggles — on every aliased path, which is every path a
+  // composition host has. The base an operator names travels in the tail like
+  // any other option; the declaration's base is not argv, it is the
+  // repository's own configured base, which the CLI reads for the primary
+  // label. `pause` and `resume` are the exception because their base is an
+  // OPERAND they cannot run without, not a scope filter over a listing.
+  const scope = command === "pause" || command === "resume" ? [declaration.queue.base] : []
   return {
     kind: readOnly(command) ? "repository-read" : "repository-write",
     ...declaration,
@@ -346,7 +367,15 @@ export function normalizeYrdRepositoryAliasInvocation(
       command,
       ...scope,
       ...commandFlags,
-      ...localRunReferences(resolved.tail, declaration.repository.name, byName),
+      ...localRunReferences(resolved.tail, declaration.repository.name, byName, (qualified) =>
+        [
+          "yrd",
+          "queue",
+          ...(resolved.typed === undefined ? [] : [resolved.typed]),
+          qualified.repository,
+          qualified.run,
+        ].join(" "),
+      ),
     ],
   }
 }
@@ -355,6 +384,10 @@ type ResolvedQueueOperands = Readonly<{
   command: readonly string[]
   declaration?: YrdRepositoryAlias
   tail: string[]
+  /** The subcommand as the operator spelled it, absent when they named only a repository. A
+   * remedy echoes this rather than the canonical argv so the command it prints is the one they
+   * typed — `yrd queue watch beta ...`, never the `list --watch` it expands to. */
+  typed?: string
 }>
 
 /**
@@ -383,21 +416,23 @@ function resolveQueueOperands(
   const spelling = queueSubcommandSpelling(first)
   if (spelling === undefined) {
     const declaration = requiredRepository(first)
-    const next = queueSubcommandSpelling(args[queueIndex + 2])
+    const typed = args[queueIndex + 2]
+    const next = queueSubcommandSpelling(typed)
     if (next === undefined) return { command: ["list"], declaration, tail: args.slice(queueIndex + 2) }
-    return { command: next, declaration, tail: args.slice(queueIndex + 3) }
+    return { command: next, declaration, tail: args.slice(queueIndex + 3), typed }
   }
   if (!readOnly(spelling[0] ?? "list")) {
     return {
       command: spelling,
       declaration: requiredRepository(args[queueIndex + 2]),
       tail: args.slice(queueIndex + 3),
+      typed: first,
     }
   }
   const named = args[queueIndex + 2]
   const declaration = named === undefined ? undefined : byName.get(named)
-  if (declaration === undefined) return { command: spelling, tail: args.slice(queueIndex + 2) }
-  return { command: spelling, declaration, tail: args.slice(queueIndex + 3) }
+  if (declaration === undefined) return { command: spelling, tail: args.slice(queueIndex + 2), typed: first }
+  return { command: spelling, declaration, tail: args.slice(queueIndex + 3), typed: first }
 }
 
 /** Resolve the command operand with Commander's canonical global-option rules. */

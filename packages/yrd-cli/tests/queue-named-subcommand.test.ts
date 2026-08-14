@@ -223,7 +223,7 @@ describe("a queue subcommand after the repository name is the command, not a fil
       kind: "repository-read",
       repository: { name: "code", path: "." },
       queue: { base: "main" },
-      args: ["--repo", ".", "queue", "list", "--base", "main"],
+      args: ["--repo", ".", "queue", "list"],
     })
   })
 })
