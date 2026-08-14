@@ -3230,7 +3230,10 @@ describe("Queue command adapters", () => {
     // position must not let the same component burn a second attempt in a turn.
     await drain()
     await drain()
-    expect(passes.every((pass) => pass.startsWith(`${deadIntent.id}:failure:`)), passes.join(" | ")).toBe(true)
+    expect(
+      passes.every((pass) => pass.startsWith(`${deadIntent.id}:failure:`)),
+      passes.join(" | "),
+    ).toBe(true)
     expect(
       passes.filter((pass) => pass.includes(`${deadIntent.id}:failure:`)),
       passes.join(" | "),
