@@ -68,6 +68,7 @@ import {
   synthesizePinIntentCarrier,
   type MergeRecordBody,
   type PREligibility,
+  type UnverifiableMergeRecord,
   type RefGit,
   type QueueAuditFinding,
   type QueueSummary,
@@ -200,7 +201,7 @@ import { ensureWorkspaceDependencies } from "./workspace-provisioning.ts"
 import { retainedWorkspaceNote } from "./workspace-retention.ts"
 import { artifactLocation, directArtifacts, nestedArtifacts, uniqueArtifacts } from "./artifact-reference.ts"
 import { readInstalledBaselines } from "./installed-baseline.ts"
-import { renderRemedyStep } from "@yrd/intent"
+import { IntentRecordIdSchema, renderRemedyStep } from "@yrd/intent"
 import { admitPinIntent } from "./intent-admission.ts"
 import { authoredSubmodulePinBase, changedSubmodulePins, unpublishedSubmodulePins } from "./pr-submodule-publication.ts"
 import { landingAuthorityBoundary } from "./landing-authority-boundary.ts"
@@ -7110,20 +7111,36 @@ async function queueUncarried(
   return result.findings.length === 0 ? 0 : 1
 }
 
-/** Why one repository-proven landing did not become a journal index row. */
+/** Why one repository-proven landing did not become a journal index row.
+ *
+ * `already-indexed` and `intent-carrier` are the two that describe a healthy estate: the row is
+ * there, or the landing was never a PR and has no `pr/integrated` row to rebuild. Every other
+ * reason is a gap the operator still owns. */
 type IndexRebuildSkip = Readonly<{
   pr: string
   revision: number
   run: string
-  reason: "already-indexed" | "pr-unknown" | "legacy-no-change-id" | "revision-superseded"
+  reason:
+    | "already-indexed"
+    | "intent-carrier"
+    | "intent-unknown"
+    | "pr-unknown"
+    | "legacy-no-change-id"
+    | "revision-superseded"
+    | "unverifiable"
   detail: string
 }>
+
+/** Skips that leave nothing for the operator to do. */
+const HEALTHY_SKIP_REASONS: ReadonlySet<IndexRebuildSkip["reason"]> = new Set(["already-indexed", "intent-carrier"])
 
 type IndexRebuildReport = Readonly<{
   ref: string
   scanned: Readonly<{ records: number; merged: number; changes: number }>
   rebuilt: readonly Readonly<{ pr: string; revision: number; run: string; commit: string }>[]
   skipped: readonly IndexRebuildSkip[]
+  /** Listed notes the bulk scan could not verify at all — they never became a change to consider. */
+  unverifiable: readonly UnverifiableMergeRecord[]
 }>
 
 /** Rebuild every missing `pr/integrated` index row from repository truth alone.
@@ -7155,6 +7172,17 @@ async function rebuildIndexFromRepo(app: YrdCliApp, services: YrdCliServices): P
     }
   }
 
+  // A landed pin intent is not a PR and never had a `pr/integrated` row: `mergeRecordBody` fills
+  // `changes[].pr` from the queue MEMBER's own id, and that field is `QueueMemberIdSchema` — a
+  // union whose arms are pinned to the shapes their mints write, so the record itself says which
+  // kind of member landed. Asking the journal for a PR under an intent id can only ever answer
+  // "unknown", which is why most of this repository's landings reported a PR gap that was never a
+  // PR — 58 of the 115 merged records under the live merge-record ref carry an intent id
+  // (`I102`…`yrdpin#181`), 57 a PR id, none anything else (read 2026-08-14). The intent index is a
+  // different index; whether the journal still holds the intent RECORD is the second, separate
+  // fact, and it decides gap from no-gap.
+  const intentComponents = new Map(app.intents.list().map((intent) => [intent.id, intent.component]))
+
   const rebuilt: { pr: string; revision: number; run: string; commit: string }[] = []
   const skipped: IndexRebuildSkip[] = []
   for (const [prId, { record, change }] of latest) {
@@ -7162,60 +7190,88 @@ async function rebuildIndexFromRepo(app: YrdCliApp, services: YrdCliServices): P
     const skip = (reason: IndexRebuildSkip["reason"], detail: string): void => {
       skipped.push({ pr: prId, revision: change.revision, run, reason, detail })
     }
-    const pr = app.bays.pr(prId)
-    if (pr === undefined) {
-      skip("pr-unknown", "no PR in the journal; a merge record proves a landing, not a PR's existence")
-      continue
+    // One record's contradictions belong to that record. A recovery scan that dies on the first
+    // one hides every landing behind it, and the estate it runs on is damaged by definition.
+    try {
+      if (IntentRecordIdSchema.safeParse(prId).success) {
+        const component = intentComponents.get(prId)
+        if (component !== undefined) {
+          skip(
+            "intent-carrier",
+            `queue member is pin intent '${prId}' for component '${component}'; a pin landing carries no pr/integrated row`,
+          )
+        } else {
+          skip(
+            "intent-unknown",
+            `record carries intent id '${prId}', but the journal holds no intent record for it; repo truth cannot recreate one`,
+          )
+        }
+        continue
+      }
+      const pr = app.bays.pr(prId)
+      if (pr === undefined) {
+        skip("pr-unknown", "no PR in the journal; a merge record proves a landing, not a PR's existence")
+        continue
+      }
+      if (change.changeId === undefined) {
+        skip("legacy-no-change-id", "record predates stable Change-Id identity")
+        continue
+      }
+      const revision = currentPRRev(pr)
+      if (
+        change.revision !== revision.n ||
+        change.submittedHead !== revision.head ||
+        change.changeId !== revision.changeId
+      ) {
+        skip(
+          "revision-superseded",
+          `record covers revision ${String(change.revision)} at ${change.submittedHead}; journal is at revision ${String(revision.n)} at ${revision.head}`,
+        )
+        continue
+      }
+      const commit = record.merge.mergedCommit
+      if (commit === undefined) {
+        refusal(`merge-record '${run}' reports a merged result with no merged commit`)
+      }
+      if (prDeliveryState(pr) === "integrated" && pr.terminalRun === run && pr.integration?.commit === commit) {
+        skip("already-indexed", `pr/integrated already records ${run} at ${commit}`)
+        continue
+      }
+      await app.queue.reconcileLanding({
+        pr: change.pr,
+        revision: change.revision,
+        headSha: change.submittedHead,
+        run,
+        commit,
+        landingSha: commit,
+        baseSha: commit,
+        changeId: change.changeId,
+      })
+      rebuilt.push({ pr: prId, revision: change.revision, run, commit })
+    } catch (cause) {
+      skip("unverifiable", cause instanceof Error ? cause.message : String(cause))
     }
-    if (change.changeId === undefined) {
-      skip("legacy-no-change-id", "record predates stable Change-Id identity")
-      continue
-    }
-    const revision = currentPRRev(pr)
-    if (
-      change.revision !== revision.n ||
-      change.submittedHead !== revision.head ||
-      change.changeId !== revision.changeId
-    ) {
-      skip(
-        "revision-superseded",
-        `record covers revision ${String(change.revision)} at ${change.submittedHead}; journal is at revision ${String(revision.n)} at ${revision.head}`,
-      )
-      continue
-    }
-    const commit = record.merge.mergedCommit
-    if (commit === undefined) {
-      refusal(`merge-record '${run}' reports a merged result with no merged commit`)
-    }
-    if (prDeliveryState(pr) === "integrated" && pr.terminalRun === run && pr.integration?.commit === commit) {
-      skip("already-indexed", `pr/integrated already records ${run} at ${commit}`)
-      continue
-    }
-    await app.queue.reconcileLanding({
-      pr: change.pr,
-      revision: change.revision,
-      headSha: change.submittedHead,
-      run,
-      commit,
-      landingSha: commit,
-      baseSha: commit,
-      changeId: change.changeId,
-    })
-    rebuilt.push({ pr: prId, revision: change.revision, run, commit })
   }
   return {
     ref: MERGE_RECORD_REF,
     scanned: { records: records.length, merged: merged.length, changes },
     rebuilt,
     skipped,
+    unverifiable: proof.status === "proven" ? proof.unverifiable : [],
   }
 }
 
 function indexRebuildLines(report: IndexRebuildReport): readonly string[] {
   const { records, merged, changes } = report.scanned
   const considered = report.rebuilt.length + report.skipped.length
+  const unverified = report.unverifiable.length
   const lines = [
-    `scanned ${String(records)} merge record${records === 1 ? "" : "s"} under ${report.ref} — ${String(merged)} merged, ${String(changes)} change${changes === 1 ? "" : "s"}`,
+    `scanned ${String(records)} merge record${records === 1 ? "" : "s"} under ${report.ref} — ${String(merged)} merged, ${String(changes)} change${changes === 1 ? "" : "s"}` +
+      // The count of notes that never became a change belongs beside the denominator they are
+      // missing from, or "scanned N" reads as N verified.
+      (unverified === 0
+        ? ""
+        : `, ${String(unverified)} record${unverified === 1 ? "" : "s"} the scan could not verify`),
     `rebuilt ${String(report.rebuilt.length)} of ${String(considered)} landing${considered === 1 ? "" : "s"}`,
   ]
   for (const entry of report.rebuilt) {
@@ -7223,6 +7279,9 @@ function indexRebuildLines(report: IndexRebuildReport): readonly string[] {
   }
   for (const entry of report.skipped) {
     lines.push(`  SKIPPED ${entry.pr} revision ${String(entry.revision)} ${entry.reason}: ${entry.detail}`)
+  }
+  for (const entry of report.unverifiable) {
+    lines.push(`  UNVERIFIABLE ${entry.note} ${entry.status}: ${entry.reason}`)
   }
   return lines
 }
@@ -7267,8 +7326,13 @@ async function configDoctor(
     indexRebuild === undefined ? doctorLine : [...indexRebuildLines(indexRebuild), doctorLine].join("\n"),
     warnings,
   )
-  // A landing repo truth proves but the index still cannot carry is a real gap, not a clean run.
-  const unrebuilt = indexRebuild?.skipped.some((entry) => entry.reason !== "already-indexed") === true
+  // A landing repo truth proves but the index still cannot carry is a real gap, not a clean run —
+  // and so is a note the scan could not verify at all. A pin landing is neither: it has no
+  // pr/integrated row to be missing.
+  const unrebuilt =
+    indexRebuild !== undefined &&
+    (indexRebuild.skipped.some((entry) => !HEALTHY_SKIP_REASONS.has(entry.reason)) ||
+      indexRebuild.unverifiable.length > 0)
   return clean && !unrebuilt ? 0 : 1
 }
 

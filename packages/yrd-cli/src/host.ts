@@ -2071,6 +2071,9 @@ async function createYrdRuntimeHost(
             inject: { process },
             repo: repository.repo,
             baseSha: await mergeRecordBaseSha(),
+            // The bulk read exists for index reconstruction over an estate that may already be
+            // damaged; one unverifiable note must cost that note, not the whole scan.
+            isolateUnverifiable: true,
           })
         },
       }),

@@ -921,6 +921,10 @@ const GIT_TIMEOUT_MS = 120_000
  * Now equal to GIT_TIMEOUT_MS, but kept as a named constant so the cleanup call
  * sites (worktree remove) stay self-documenting and independently tunable. */
 const GIT_CLEANUP_TIMEOUT_MS = 120_000
+/** Shell convention for "the command could not be executed" (126), reused so a tolerant caller
+ * reading only `code !== 0` treats an unstartable git exactly as it treats a git that ran and
+ * failed. 124 is already spoken for by the timeout path. */
+const GIT_UNSTARTABLE_CODE = 126
 
 function createGit(
   process: Pick<Process, "run">,
@@ -942,19 +946,42 @@ function createGit(
     preserveProcessFailure = false,
     timeoutMs = GIT_TIMEOUT_MS,
   ): Promise<GitResult> => {
-    const result = await process.run({
-      argv: ["git", "-C", repo, ...args],
-      cwd: repo,
-      env,
-      timeoutMs,
-      ...(stdoutChunks === undefined
-        ? {}
-        : {
-            onOutput: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => {
-              if (output.stream === "stdout") stdoutChunks.push(output.chunk.slice())
-            },
-          }),
-    })
+    const startedAtMs = Date.now()
+    let result
+    try {
+      result = await process.run({
+        argv: ["git", "-C", repo, ...args],
+        cwd: repo,
+        env,
+        timeoutMs,
+        ...(stdoutChunks === undefined
+          ? {}
+          : {
+              onOutput: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => {
+                if (output.stream === "stdout") stdoutChunks.push(output.chunk.slice())
+              },
+            }),
+      })
+    } catch (cause) {
+      // Failing to START git is not the same event as git failing, and until now only the second
+      // one was survivable: every call passes `cwd: repo` as well as `git -C repo`, so a directory
+      // that does not exist makes posix_spawn throw ENOENT before git runs. `allowFailure` promises
+      // its callers a RESULT to classify — a tolerant probe of an unmaterialized component checkout
+      // was instead killing the whole process (the recovery scan that meets exactly that estate).
+      // Same treatment as the timeout below: a failed result for tolerant callers, a named throw
+      // for the rest.
+      const detail = cause instanceof Error ? cause.message : String(cause)
+      const message = `yrd: git ${args.join(" ")} could not be started in '${repo}': ${detail}`
+      if (!allowFailure) throw new Error(message, { cause })
+      return {
+        code: GIT_UNSTARTABLE_CODE,
+        stdout: "",
+        stderr: message,
+        durationMs: Math.max(0, Date.now() - startedAtMs),
+        signal: null,
+        timedOut: false,
+      }
+    }
     const progress = result as typeof result & ProgressResult
     const completed = {
       code: result.exitCode,
@@ -1340,17 +1367,39 @@ export function gitMergeRecorder(options: {
 }
 
 export type RepositoryMergeRecord = Readonly<{ record: MergeRecordBody; pointer: MergeRecordPointer }>
+/** One listed note the scan could not turn into verified truth, kept per record so a damaged
+ * estate reports what it lost instead of losing the whole scan. */
+export type UnverifiableMergeRecord = Readonly<{
+  note: string
+  status: "repository-incomplete" | "repository-corrupt"
+  reason: string
+}>
 export type RepositoryMergeRecordSearchResult =
-  | Readonly<{ status: "proven"; records: readonly RepositoryMergeRecord[] }>
+  | Readonly<{
+      status: "proven"
+      records: readonly RepositoryMergeRecord[]
+      /** Always empty unless the caller asked for per-record isolation. */
+      unverifiable: readonly UnverifiableMergeRecord[]
+    }>
   | Readonly<{ status: "not-proven"; reason: "merge-record-missing" }>
   | Readonly<{ status: "repository-incomplete"; reason: string }>
   | Readonly<{ status: "repository-corrupt"; reason: string }>
+
+type VerifiedListing =
+  | Readonly<{ outcome: "verified"; record: RepositoryMergeRecord }>
+  | Readonly<{ outcome: "filtered" }>
+  | (UnverifiableMergeRecord & Readonly<{ outcome: "unverifiable" }>)
 
 /** Query immutable merge attempts without requiring a live Journal projection.
  *
  * An absent `selector` returns every verified record on the base — the whole scan already runs
  * for any selector, so the bulk read is the same verification (attempt anchor, merge ancestry,
  * Change-Id trailer, pin containment) with nothing filtered out.
+ *
+ * `isolateUnverifiable` trades the all-or-nothing verdict for per-record reporting, and only the
+ * bulk recovery scan wants that trade: answering ONE question (`yrd why <selector>`) from a
+ * partially verified estate would be answering it from unproven truth, while a scan rebuilding a
+ * lost index over a damaged estate must not let one bad note hide every good one behind it.
  */
 export async function findRepositoryMergeRecords(
   options: Readonly<{
@@ -1358,6 +1407,7 @@ export async function findRepositoryMergeRecords(
     repo: string
     baseSha: string
     selector?: string
+    isolateUnverifiable?: boolean
   }>,
 ): Promise<RepositoryMergeRecordSearchResult> {
   const git = createGit(options.inject.process)
@@ -1365,28 +1415,32 @@ export async function findRepositoryMergeRecords(
   if (listed.code !== 0) {
     return { status: "repository-corrupt", reason: listed.stderr || listed.stdout || "merge-record ref unreadable" }
   }
-  const records: RepositoryMergeRecord[] = []
-  for (const line of listed.stdout === "" ? [] : listed.stdout.split("\n")) {
+
+  const verifyListing = async (line: string): Promise<VerifiedListing> => {
     const [note, target, extra] = line.split(/\s+/u)
+    const corrupt = (reason: string): VerifiedListing =>
+      ({ outcome: "unverifiable", note: note ?? line, status: "repository-corrupt", reason }) as const
     if (note === undefined || target === undefined || extra !== undefined) {
-      return { status: "repository-corrupt", reason: `malformed merge-record listing: ${line}` }
+      return {
+        outcome: "unverifiable",
+        note: line,
+        status: "repository-corrupt",
+        reason: `malformed merge-record listing: ${line}`,
+      }
     }
     const shown = await git.run(options.repo, ["notes", `--ref=${MERGE_RECORD_NOTES_NAME}`, "show", target], true)
-    if (shown.code !== 0) return { status: "repository-corrupt", reason: `merge-record '${note}' is unreadable` }
+    if (shown.code !== 0) return corrupt(`merge-record '${note}' is unreadable`)
     let parsed
     try {
       parsed = parseMergeRecord(shown.stdout)
     } catch (cause) {
-      return {
-        status: "repository-corrupt",
-        reason: `merge-record '${note}' is invalid: ${cause instanceof Error ? cause.message : String(cause)}`,
-      }
+      return corrupt(`merge-record '${note}' is invalid: ${cause instanceof Error ? cause.message : String(cause)}`)
     }
     const expectedTarget = (
       await git.input(options.repo, ["hash-object", "--stdin"], `yrd merge ${parsed.record.merge.id}\n`)
     ).stdout
     if (target !== expectedTarget) {
-      return { status: "repository-corrupt", reason: `merge-record '${note}' has the wrong attempt anchor '${target}'` }
+      return corrupt(`merge-record '${note}' has the wrong attempt anchor '${target}'`)
     }
     if (parsed.record.merge.result === "merged") {
       const merged = parsed.record.merge.mergedCommit
@@ -1394,7 +1448,7 @@ export async function findRepositoryMergeRecords(
         merged === undefined ||
         (await git.run(options.repo, ["merge-base", "--is-ancestor", merged, options.baseSha], true)).code !== 0
       ) {
-        return { status: "repository-corrupt", reason: `merge-record '${note}' does not prove a merge on base` }
+        return corrupt(`merge-record '${note}' does not prove a merge on base`)
       }
       for (const change of parsed.record.changes) {
         if (change.generatedCommit === undefined || change.changeId === undefined) continue
@@ -1409,27 +1463,26 @@ export async function findRepositoryMergeRecords(
           true,
         )
         if (reachable.code !== 0 || trailers.code !== 0 || trailers.stdout !== change.changeId) {
-          return { status: "repository-corrupt", reason: `merge-record '${note}' cannot prove ${change.changeId}` }
+          return corrupt(`merge-record '${note}' cannot prove ${change.changeId}`)
         }
       }
       for (const pin of parsed.record.pins) {
         const current = await readGitlink(git, options.repo, options.baseSha, pin.path)
         if (current === undefined) {
-          return { status: "repository-corrupt", reason: `merge-record '${note}' lost gitlink '${pin.path}'` }
+          return corrupt(`merge-record '${note}' lost gitlink '${pin.path}'`)
         }
         if (current === pin.after) continue
         const component = await componentCheckout(git, options.repo, pin.path)
         if (component === undefined) {
           return {
+            outcome: "unverifiable",
+            note,
             status: "repository-incomplete",
             reason: `merge-record '${note}' cannot inspect component checkout '${pin.path}'`,
           }
         }
         if (!(await isAncestor(git, component, pin.after, current))) {
-          return {
-            status: "repository-corrupt",
-            reason: `merge-record '${note}' pin '${pin.after}' is not contained by '${pin.path}' at '${current}'`,
-          }
+          return corrupt(`merge-record '${note}' pin '${pin.after}' is not contained by '${pin.path}' at '${current}'`)
         }
       }
     }
@@ -1441,14 +1494,36 @@ export async function findRepositoryMergeRecords(
         (change) => change.pr === selector || change.changeId === selector || change.submittedHead === selector,
       )
     ) {
+      return { outcome: "filtered" }
+    }
+    return {
+      outcome: "verified",
+      record: {
+        record: parsed.record,
+        pointer: { ref: MERGE_RECORD_REF, target, note, checksum: parsed.checksum },
+      },
+    }
+  }
+
+  const records: RepositoryMergeRecord[] = []
+  const unverifiable: UnverifiableMergeRecord[] = []
+  for (const line of listed.stdout === "" ? [] : listed.stdout.split("\n")) {
+    const listing = await verifyListing(line)
+    if (listing.outcome === "verified") {
+      records.push(listing.record)
       continue
     }
-    records.push({
-      record: parsed.record,
-      pointer: { ref: MERGE_RECORD_REF, target, note, checksum: parsed.checksum },
-    })
+    if (listing.outcome === "filtered") continue
+    if (options.isolateUnverifiable !== true) return { status: listing.status, reason: listing.reason }
+    unverifiable.push({ note: listing.note, status: listing.status, reason: listing.reason })
   }
-  return records.length === 0 ? { status: "not-proven", reason: "merge-record-missing" } : { status: "proven", records }
+  // Records that exist but could not be verified are never "missing": reporting them as an empty
+  // estate would hand the caller a clean-looking zero for a repository that just failed to prove
+  // itself.
+  if (records.length === 0 && unverifiable.length === 0) {
+    return { status: "not-proven", reason: "merge-record-missing" }
+  }
+  return { status: "proven", records, unverifiable }
 }
 
 export const RepositoryChangeIdentitySchema = z

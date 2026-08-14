@@ -11662,8 +11662,8 @@ describe("runYrd", () => {
     expect(
       await runYrd(app, yrd("why", "PR1", "--json"), output.io, {
         mergeRecords: {
-          find: async () => ({ status: "proven" as const, records: [{ record, pointer }] }),
-          all: async () => ({ status: "proven" as const, records: [{ record, pointer }] }),
+          find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [] }),
+          all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [] }),
         },
       } as YrdCliServices),
       output.stderr(),
@@ -11721,8 +11721,8 @@ describe("runYrd", () => {
     expect(
       await runYrd(app, yrd("why", "PR1", "--repair", "--json"), output.io, {
         mergeRecords: {
-          find: async () => ({ status: "proven" as const, records: [{ record, pointer }] }),
-          all: async () => ({ status: "proven" as const, records: [{ record, pointer }] }),
+          find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [] }),
+          all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [] }),
         },
       } as YrdCliServices),
       output.stderr(),
@@ -14110,8 +14110,8 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       ({
         config: doctorConfig(),
         mergeRecords: {
-          find: async () => ({ status: "proven" as const, records }),
-          all: async () => ({ status: "proven" as const, records }),
+          find: async () => ({ status: "proven" as const, records, unverifiable: [] }),
+          all: async () => ({ status: "proven" as const, records, unverifiable: [] }),
         },
       }) as YrdCliServices
 
@@ -14229,6 +14229,157 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
         } as YrdCliServices),
       ).toBe(2)
       expect(output.stderr()).toContain("repository merge-record capability is not installed")
+    })
+
+    /** A landed pin intent records its OWN id in `changes[].pr` — `mergeRecordBody` fills that
+     * field from the queue member's id, and `MergeRecordChange.pr` is `QueueMemberIdSchema`, a
+     * union that discriminates PR ids from intent ids. So the record itself says which kind of
+     * member landed; `app.bays.pr()` returning undefined for an intent id is the expected answer,
+     * never evidence of a missing PR. */
+    const intentRecord = (member: string) => ({
+      merge: {
+        id: "R-pin",
+        base: "main",
+        baseSha: BASE_SHA,
+        candidate: "C-pin",
+        result: "merged" as const,
+        mergedCommit: MERGED_SHA,
+        startedAt: "2026-08-14T20:00:00.000Z",
+        finishedAt: "2026-08-14T20:01:00.000Z",
+      },
+      changes: [{ pr: member, revision: 1, submittedHead: HEAD_SHA }],
+      evidence: { jobs: [] },
+      pins: [{ path: COMPONENT, before: CURRENT_PIN, after: TARGET_SHA }],
+    })
+
+    it("buckets a landed intent carrier as an intent landing and calls the estate clean", async () => {
+      await using app = await createApp()
+      const submitted = outputIO()
+      expect(
+        await runYrd(
+          app,
+          yrd("intent", "submit", "--component", COMPONENT, "--target", TARGET_SHA, "--issue", "one"),
+          submitted.io,
+          { process: intentGit() },
+        ),
+        submitted.stderr(),
+      ).toBe(0)
+      const output = outputIO()
+
+      expect(
+        await runYrd(
+          app,
+          yrd("doctor", "--rebuild-index-from-repo"),
+          output.io,
+          servicesFor([{ record: intentRecord("yrdpin#1"), pointer }]),
+        ),
+        output.stderr(),
+      ).toBe(0)
+      expect(output.stdout()).toContain("SKIPPED yrdpin#1 revision 1 intent-carrier")
+      expect(output.stdout()).toContain(COMPONENT)
+      expect(output.stdout()).not.toContain("pr-unknown")
+    })
+
+    it("separates an intent the journal has never seen from a missing PR", async () => {
+      await using app = await createApp()
+      const output = outputIO()
+
+      expect(
+        await runYrd(
+          app,
+          yrd("doctor", "--rebuild-index-from-repo"),
+          output.io,
+          servicesFor([{ record: intentRecord("yrdpin#164"), pointer }]),
+        ),
+        output.stderr(),
+      ).toBe(1)
+      expect(output.stdout()).toContain("SKIPPED yrdpin#164 revision 1 intent-unknown")
+      expect(output.stdout()).not.toContain("pr-unknown")
+    })
+
+    it("reports a record it cannot verify and keeps rebuilding the rest of the estate", async () => {
+      const poisonedHead = "7".repeat(40)
+      await using app = await createApp()
+      await app.bays.submit({ branch: "issue/index-gap", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+      await app.bays.submit({ branch: "issue/poisoned", headSha: poisonedHead, base: "main", baseSha: BASE_SHA })
+      const revision = currentPRRev(app.bays.pr("PR1")!)
+      const poisonedRevision = currentPRRev(app.bays.pr("PR2")!)
+      if (revision.changeId === undefined || poisonedRevision.changeId === undefined) {
+        throw new Error("expected current PR Change-Ids")
+      }
+      // A merged record with no merged commit: repository truth that contradicts itself, for a PR
+      // the journal knows, so the scan reaches the contradiction rather than an earlier skip. It
+      // comes FIRST so a scan that aborts on it never reaches the landing it could still rebuild.
+      const contradictory = {
+        merge: {
+          id: "R-poisoned",
+          base: "main",
+          baseSha: BASE_SHA,
+          candidate: "C-poisoned",
+          result: "merged" as const,
+          mergedCommit: undefined,
+          startedAt: "2026-08-14T20:00:00.000Z",
+          finishedAt: "2026-08-14T20:01:00.000Z",
+        },
+        changes: [
+          {
+            pr: "PR2",
+            revision: 1,
+            submittedHead: poisonedHead,
+            changeId: poisonedRevision.changeId,
+            generatedCommit: MERGED_SHA,
+          },
+        ],
+        evidence: { jobs: [] },
+        pins: [],
+      }
+      const output = outputIO()
+
+      expect(
+        await runYrd(
+          app,
+          yrd("doctor", "--rebuild-index-from-repo"),
+          output.io,
+          servicesFor([
+            { record: contradictory, pointer },
+            { record: mergedRecord(revision.changeId), pointer },
+          ]),
+        ),
+        output.stderr(),
+      ).toBe(1)
+      expect(output.stdout()).toContain("SKIPPED PR2 revision 1 unverifiable")
+      expect(output.stdout()).toContain("REBUILT PR1 revision 1 via R-recovered")
+      expect(app.bays.pr("PR1")?.integration).toMatchObject({ commit: MERGED_SHA })
+    })
+
+    it("counts the records the bulk scan itself could not verify", async () => {
+      const unverifiable = [
+        {
+          note: "f".repeat(40),
+          status: "repository-corrupt" as const,
+          reason: "merge-record is invalid: unexpected token",
+        },
+      ]
+      const services = {
+        config: doctorConfig(),
+        mergeRecords: {
+          find: async () => ({ status: "proven" as const, records: [], unverifiable: [] }),
+          all: async () => ({ status: "proven" as const, records: [], unverifiable }),
+        },
+      } as YrdCliServices
+
+      await using app = await createApp()
+      const json = outputIO()
+      expect(
+        await runYrd(app, yrd("doctor", "--rebuild-index-from-repo", "--json"), json.io, services),
+        json.stderr(),
+      ).toBe(1)
+      expect(JSON.parse(json.stdout())).toMatchObject({ indexRebuild: { unverifiable } })
+
+      const human = outputIO()
+      expect(await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), human.io, services), human.stderr()).toBe(1)
+      expect(human.stdout()).toContain("1 record the scan could not verify")
+      expect(human.stdout()).toContain("UNVERIFIABLE")
     })
   })
 
