@@ -3172,6 +3172,70 @@ describe("Queue command adapters", () => {
     expect(app.intents.get(successor.id)).toMatchObject({ status: "integrated" })
   }, 30_000)
 
+  it("parks a dead intent on a repeated failure fingerprint so another component's intent lands", async () => {
+    const fixture = await multiComponentMainLandingRepository()
+    const [dead, live] = fixture.components
+    if (dead === undefined || live === undefined) throw new Error("missing multi-component fixture")
+
+    // A published target that is neither ancestor nor descendant of its own
+    // component main. Merge-time evaluation admits it; the LANDING refuses it,
+    // identically, on every attempt — the shape of both 2026-08-14 specimens.
+    const orphanWorktree = join(fixture.repo, "..", "orphan-component")
+    await git(join(fixture.repo, ".."), ["clone", "-q", dead.remote, orphanWorktree])
+    await git(orphanWorktree, ["config", "user.name", "Yrd Test"])
+    await git(orphanWorktree, ["config", "user.email", "yrd@example.invalid"])
+    await git(orphanWorktree, ["checkout", "-q", "--orphan", "task/orphan"])
+    await writeFile(join(orphanWorktree, "orphan.txt"), "orphan\n")
+    await git(orphanWorktree, ["add", "orphan.txt"])
+    await git(orphanWorktree, ["commit", "-qm", "orphan"])
+    const orphanSha = await git(orphanWorktree, ["rev-parse", "HEAD"])
+    await git(orphanWorktree, ["push", "-q", "origin", "task/orphan"])
+    await git(join(fixture.repo, dead.path), ["fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+
+    await using process = createProcess()
+    await using app = await checkedQueue(process, fixture.repo, ["true"], { prepareCandidate: true })
+    const deadIntent = await app.intents.submit({
+      intentId: "00000000-0000-7000-8000-000000000021",
+      issue: { source: "km", id: "@yrd/core/dead-head" },
+      component: dead.path,
+      target: orphanSha,
+      submitter: "@dev/5",
+    })
+    const liveIntent = await app.intents.submit({
+      intentId: "00000000-0000-7000-8000-000000000022",
+      issue: { source: "km", id: "@yrd/core/live-behind" },
+      component: live.path,
+      target: live.pinSha,
+      submitter: "@dev/9",
+    })
+
+    const passes: string[] = []
+    for (let pass = 0; pass < 5; pass += 1) {
+      const runs = await app.queue.run({}, runtime)
+      passes.push(
+        runs.map((run) => `${run.prs[0]?.id}:${run.conclusion ?? run.status}:${run.error?.code}`).join(",") || "none",
+      )
+      if (app.intents.get(liveIntent.id)?.status === "integrated") break
+    }
+
+    expect(
+      app.intents.get(liveIntent.id),
+      `the live intent never landed; drain passes were ${JSON.stringify(passes)}`,
+    ).toMatchObject({ status: "integrated" })
+    expect(await git(live.remote, ["rev-parse", "main"])).toBe(live.pinSha)
+    expect(app.intents.get(deadIntent.id)).toMatchObject({
+      status: "parked",
+      disposition: { code: "intent-attempts-exhausted" },
+      parked: {
+        attempts: 3,
+        failure: { code: expect.any(String), component: dead.path, target: orphanSha },
+        fingerprint: expect.stringMatching(/^[a-z][a-z0-9-]*:[0-9a-f]{16}$/u),
+        remedy: expect.arrayContaining([expect.objectContaining({ argv: expect.arrayContaining(["intent"]) })]),
+      },
+    })
+    expect(app.intents.get(deadIntent.id)?.parked?.remedySummary).toContain(dead.path)
+  }, 60_000)
+
   it("shares one submission-time FIFO between code PRs and intents", async () => {
     const fixture = await hookedSubmoduleRepository({
       baseVersion: "base",
