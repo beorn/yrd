@@ -56,6 +56,7 @@ import {
   createCandidatePool,
   createCandidatePoolGit,
   createGitPRRecutter,
+  effectiveBatchSize,
   gitCandidatePreparer,
   gitCheckStep,
   gitMergeStep,
@@ -755,7 +756,7 @@ async function reloadConfiguredQueueDescriptor(
   const mergeCommand =
     loaded.config.definitions.merge?.run === undefined ? undefined : shellCommand(loaded.config.definitions.merge.run)
   return {
-    batchSize: loaded.config.batch === false || loaded.config.batch <= 1 ? 1 : loaded.config.batch,
+    batchSize: effectiveBatchSize(loaded.config.batch),
     steps: configuredStepDescriptors(
       { repo: repository.repo, stateDir: repository.stateDir, baysRoot: repository.baysRoot },
       loaded.config,
