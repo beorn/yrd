@@ -132,6 +132,7 @@ import {
   type QueueTimelineRunner,
   type QueueTimelineStatusFilter,
   type UncarriedObservation,
+  uncarriedCoverageFloor,
   type QueueStatusResult,
 } from "./queue-status-view.tsx"
 import type { QueueReadModel } from "./queue-read-model.ts"
@@ -498,9 +499,20 @@ function parseUncarriedObservation(value: unknown): UncarriedObservation | undef
       "yrd: resident runner uncarried missing update-clock count is invalid",
     )
   }
+  if (
+    observation.measurable !== undefined &&
+    (!Number.isSafeInteger(observation.measurable) || (observation.measurable as number) < 0)
+  ) {
+    raiseFailure(
+      "infrastructure",
+      "resident-runner-status-invalid",
+      "yrd: resident runner uncarried measurable count is invalid",
+    )
+  }
   const count = observation.count as number
   const scanned = observation.scanned as number
   const missingUpdateClocks = observation.missingUpdateClocks as number | undefined
+  const measurable = observation.measurable as number | undefined
   if (count > scanned || (missingUpdateClocks !== undefined && count + missingUpdateClocks > scanned)) {
     raiseFailure(
       "infrastructure",
@@ -508,11 +520,22 @@ function parseUncarriedObservation(value: unknown): UncarriedObservation | undef
       "yrd: resident runner uncarried counts exceed its scanned population",
     )
   }
+  // Every finding comes from a ref the sweep could measure, so a count above
+  // the measurable population is a corrupt record, not a busier fleet — and
+  // silently rendering it would put a coverage percentage above 100 on the rail.
+  if (measurable !== undefined && (count > measurable || measurable + (missingUpdateClocks ?? 0) > scanned)) {
+    raiseFailure(
+      "infrastructure",
+      "resident-runner-status-invalid",
+      "yrd: resident runner uncarried measurable count disagrees with its own population",
+    )
+  }
   const observedAt = residentRunnerTimestamp(observation.observedAt, "uncarried observedAt")
   return {
     count,
     scanned,
     ...(missingUpdateClocks === undefined ? {} : { missingUpdateClocks }),
+    ...(measurable === undefined ? {} : { measurable }),
     observedAt,
   }
 }
@@ -7125,6 +7148,10 @@ function createUncarriedSweeper(
       count: result.findings.length,
       scanned: result.scanned,
       missingUpdateClocks: result.missingUpdateClocks,
+      // Everything that reached the TTL judgement: aged out or examined. The
+      // refs excluded as carried or superseded were never the rail's to
+      // measure, so counting them here would flatter the coverage.
+      measurable: result.outsideAgeBound + result.examined,
       // Stamped when the sweep STARTED. Stamping on completion would make a
       // slow sweep look fresher than the facts it read.
       observedAt: new Date(startedMs).toISOString(),
@@ -7178,14 +7205,20 @@ async function queueUncarried(
   // rail's whole job is to be believable when it reads zero.
   const denominator =
     `scanned ${String(result.scanned)} · ${String(result.carried)} carried · ` +
+    `${String(result.superseded)} superseded revisions collapsed · ` +
     `${String(result.outsideAgeBound)} outside the age bound · ${String(result.examined)} examined · ` +
     `${String(result.missingUpdateClocks)} refs without retained update clocks`
+  // The same sentence the rail shows, from the same function: a reader must not
+  // have to work out from the raw ledger that the count is a floor.
+  const floor = uncarriedCoverageFloor(result.outsideAgeBound + result.examined, result.missingUpdateClocks)
   const lines = result.findings.map((finding) => `${finding.ref}  ${finding.message}`)
   await printResult(
     io,
     jsonEnabled(options),
     { command: "queue.uncarried", ...result },
-    result.findings.length === 0 ? `no uncarried refs — ${denominator}` : [...lines, "", denominator].join("\n"),
+    result.findings.length === 0
+      ? `no uncarried refs (${floor}) — ${denominator}`
+      : [...lines, "", `${String(result.findings.length)} findings (${floor})`, denominator].join("\n"),
   )
   return result.findings.length === 0 ? 0 : 1
 }

@@ -36,6 +36,12 @@ export type PushedRefFact = Readonly<{
   equivalentCommits: number
   payloadKind: PayloadKind
   pinDirection: PinDirection
+  /**
+   * Earlier revisions of this ref's series that the sweep collapsed into it —
+   * a POPULATION fact, which is why it arrives gathered rather than derived
+   * here: one ref name cannot know what else was pushed beside it.
+   */
+  absorbedRevisions: number
 }>
 
 /**
@@ -47,6 +53,49 @@ export type PushedRefFact = Readonly<{
  * older than trunk's. Cherry counts pointers, not payload.
  */
 export type PayloadKind = "content" | "gitlink-only"
+
+/** A ref name split at the fleet's revision marker: everything before `-rN`,
+ * and the digits themselves kept as written. */
+export type RefRevision = Readonly<{ stem: string; revision: string }>
+
+/**
+ * The revision a ref name DECLARES, under the convention the fleet already
+ * writes: `task/<slug>-<seat>-rN`. `-r6` is dead the moment `-r20` exists, and
+ * the naming already says so — this rail simply did not read it. Measured
+ * 2026-08-14 on the live flagged set: 62 of 129 rows were earlier revisions of
+ * a series whose newer revision was flagged too, so half the rail was noise.
+ *
+ * ANCHORED AT THE END, and deliberately so. `task/21023-auto-restack-agent1-r11-source`
+ * and `-r12-currentpin` exist on this remote, where the trailing word names a
+ * VARIANT rather than a revision: two refs can share `-r12` and mean different
+ * artifacts. Reading a revision out of the middle of a name would collapse
+ * those into each other and delete a real row, which is a worse failure than
+ * the noise being fixed. Names that do not end in `-rN` are their own series
+ * of one and pass through unchanged.
+ *
+ * No leading zeros: `-r007` is not the convention, and admitting it would put
+ * two refs (`-r7`, `-r007`) at the same revision of the same stem with no
+ * defined winner. It is a singleton instead.
+ */
+export function revisionOf(branch: string): RefRevision | undefined {
+  const marker = /^(.+)-r([1-9][0-9]*)$/.exec(branch)
+  if (marker === null) return undefined
+  const [, stem, revision] = marker
+  if (stem === undefined || revision === undefined) return undefined
+  return { stem, revision }
+}
+
+/**
+ * Order two revision markers. Compared as digit STRINGS by length then
+ * lexicographically, never through `Number`: a ref name may carry an
+ * arbitrarily long digit run, and parsing one past 2^53 would silently tie two
+ * distinct revisions and suppress the live one. Leading zeros are excluded by
+ * `revisionOf`, which is what makes length-first exact.
+ */
+export function compareRevisions(left: string, right: string): number {
+  if (left.length !== right.length) return left.length - right.length
+  return left < right ? -1 : left > right ? 1 : 0
+}
 
 /**
  * Which way this ref's submodule pins move relative to the base.
@@ -96,6 +145,8 @@ export type UncarriedFinding = Readonly<{
   uniqueCommits: number
   equivalentCommits: number
   pinDirection: PinDirection
+  /** How many earlier revisions of the same series this one row stands for. */
+  absorbedRevisions: number
   message: string
 }>
 
@@ -145,6 +196,14 @@ export function classifyPushedRef(fact: PushedRefFact, options: UncarriedOptions
   if (ageMs < options.ttlMs) return undefined
   if (ageMs > options.ageBoundMs) return undefined
 
+  // Said on the row, not only in the denominator: an operator reading one
+  // finding needs to know it already covers the series, or they go looking for
+  // the older revisions to check whether those were missed too.
+  const absorbed =
+    fact.absorbedRevisions === 0
+      ? ""
+      : ` — it supersedes ${fact.absorbedRevisions} earlier ${fact.absorbedRevisions === 1 ? "revision" : "revisions"} of the same series, which mint no rows of their own`
+
   const build = (verdict: UncarriedVerdict, detail: string): UncarriedFinding => ({
     code: "pushed-not-submitted",
     verdict,
@@ -154,7 +213,8 @@ export function classifyPushedRef(fact: PushedRefFact, options: UncarriedOptions
     uniqueCommits: fact.uniqueCommits,
     equivalentCommits: fact.equivalentCommits,
     pinDirection: fact.pinDirection,
-    message: `ref '${fact.ref}' was observed locally ${formatAge(ageMs)} ago and no merge request carries it; ${detail}`,
+    absorbedRevisions: fact.absorbedRevisions,
+    message: `ref '${fact.ref}' was observed locally ${formatAge(ageMs)} ago and no merge request carries it; ${detail}${absorbed}`,
   })
 
   // DIVERGED outranks every commit count. Each side holds something the other
