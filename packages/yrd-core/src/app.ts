@@ -132,7 +132,7 @@ export type Yrd<State extends object, Commands extends CommandTree> = Readonly<{
     journal?: JournalHistoryDiagnostics
   }>
   dispatch: Dispatch
-  events(): AsyncIterable<Event>
+  events(after?: Cursor, before?: Cursor): AsyncIterable<Event>
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
 }>
@@ -645,6 +645,20 @@ export async function createYrd<State extends object, Commands extends CommandTr
     }) as JournalSnapshot<State>
   }
 
+  /**
+   * The state every event ever appended projects to, with nothing compacted
+   * away — what `journalSnapshot` would have returned if `definition.compact`
+   * had never run.
+   *
+   * This one genuinely reads from cursor 0, and cannot be pointed at the
+   * checkpoint the way `fold` is. The checkpoint holds the COMPACTED
+   * projection, so restoring from it would reproduce `journalSnapshot`'s answer
+   * and collapse the two methods into one. Callers reach for this method
+   * precisely to see the records compaction dropped — `queue.history()`, behind
+   * `yrd log --all`. Reading every frame IS the contract here, so its cost
+   * belongs to journal retention (`@yrd/core/21584-yrd-performance/22245`),
+   * not to this call site.
+   */
   const historySnapshot = async (): Promise<JournalSnapshot<State>> => {
     assertOpen()
     if (history === undefined) return journalSnapshot()
@@ -842,9 +856,19 @@ export async function createYrd<State extends object, Commands extends CommandTr
       ...(history === undefined ? {} : { journal: history.diagnostics() }),
     }),
     dispatch,
-    async *events() {
+    /**
+     * Yield the journal's events in cursor order, `after` through `before`.
+     *
+     * The range exists because `Journal.read` resolves its whole range before
+     * it yields anything — the SQLite journal SELECTs and `decodeStoredEvent`s
+     * every row in one transaction — so a caller that breaks out of this
+     * generator after one event still pays for the entire journal. Bounding at
+     * the read is the only thing that makes an early-stopping caller cheap.
+     * Both arguments carry `Journal.read`'s own defaults: the whole journal.
+     */
+    async *events(after?: Cursor, before?: Cursor) {
       await refresh()
-      for await (const batch of journal.read()) {
+      for await (const batch of journal.read(after, before)) {
         for (const value of batch.values) {
           assertJournalReaderCompatibility(value)
           for (const applied of journalFrameEvents(value)) yield canonicalEvent(applied, "replay")
