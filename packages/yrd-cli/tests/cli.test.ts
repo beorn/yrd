@@ -2887,18 +2887,29 @@ describe("runYrd", () => {
     expect(currentPRRev(app.bays.pr("PR5")!).n).toBe(3)
   })
 
-  it("settles an admitted revision whose payload current main already contains, then drains the next PR (22528)", async () => {
+  it("settles an absorbed front candidate and refreshes the next PR in the same cycle (22528)", async () => {
     const absorbedHead = "2".repeat(40)
     const nextHead = "3".repeat(40)
+    const refreshedNextHead = "4".repeat(40)
     const nextBase = "b".repeat(40)
     const baseTree = "c".repeat(40)
     const patchId = "d".repeat(40)
-    const recutInputs: unknown[] = []
+    const recutInputs: Array<{ id: string }> = []
     const app = await createApp({ waitingCheck: (input) => input.prs.some((pr) => pr.id === "PR1") })
     const services = {
       recut: {
         recut(input: unknown) {
-          recutInputs.push(input)
+          const recut = input as { id: string }
+          recutInputs.push(recut)
+          if (recut.id === "PR2") {
+            return Promise.resolve({
+              headSha: refreshedNextHead,
+              baseSha: nextBase,
+              treeSha: "f".repeat(40),
+              patchId,
+              unchanged: false,
+            })
+          }
           return Promise.resolve({
             // The recutter has proven that the resolved Queue base already
             // contains every authored path. Nothing remains to admit or merge.
@@ -2930,12 +2941,16 @@ describe("runYrd", () => {
     const admissionJob = revisionAdmissionJob(app, "PR1")
     expect(admissionJob).toMatchObject({ status: "waiting" })
 
+    await app.bays.submit({ branch: "issue/next", headSha: nextHead, baseSha: BASE_SHA })
+    await app.bays.requestChecks({ pr: "PR2", baseSha: BASE_SHA })
+
     const before = await Array.fromAsync(app.events()).then((events) => events.length)
     await expect(refresh(app, services, io)).resolves.toEqual([
       expect.objectContaining({ status: "settled", pr: "PR1", proof: "payload-already-contained" }),
+      expect.objectContaining({ status: "refreshed", pr: "PR2", headSha: refreshedNextHead }),
     ])
 
-    expect(recutInputs).toHaveLength(1)
+    expect(recutInputs.map(({ id }) => id)).toEqual(["PR1", "PR2"])
     expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("already-landed")
     expect(app.jobs.get(admissionJob!.id)).toMatchObject({ status: "completed", conclusion: "cancelled" })
     expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: absorbedHead })
@@ -2961,17 +2976,15 @@ describe("runYrd", () => {
 
     const afterSettlement = await Array.fromAsync(app.events()).then((events) => events.length)
     await expect(refresh(app, services, io)).resolves.toEqual([])
-    expect(recutInputs).toHaveLength(1)
+    expect(recutInputs.map(({ id }) => id)).toEqual(["PR1", "PR2"])
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(afterSettlement)
 
-    // A fresh PR proves that terminal settlement releases the selector instead
-    // of merely hiding PR1 for one resident tick. The in-memory app's canonical
-    // base resolver is intentionally fixed at BASE_SHA, independent of the
-    // refresh seam's injected next-base oracle above.
-    await app.bays.submit({ branch: "issue/next", headSha: nextHead, baseSha: BASE_SHA })
-    await app.bays.requestChecks({ pr: "PR2", baseSha: BASE_SHA })
+    // The same-cycle refresh proves that terminal settlement releases the
+    // selector immediately instead of merely hiding PR1 for one resident tick.
+    // The in-memory app's canonical base resolver is intentionally fixed at
+    // BASE_SHA, independent of the refresh seam's injected next-base oracle.
     const runs = await app.queue.run({}, { runner: "yrd-cli", leaseMs: 60_000 })
-    expect(runs).toMatchObject([{ prs: [{ id: "PR2", revision: 1, headSha: nextHead }] }])
+    expect(runs).toMatchObject([{ prs: [{ id: "PR2", revision: 2, headSha: refreshedNextHead }] }])
     expect(prDeliveryState(app.bays.pr("PR2")!)).toBe("integrated")
   })
 
