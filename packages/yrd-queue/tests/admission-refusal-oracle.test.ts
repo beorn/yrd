@@ -10,6 +10,7 @@ import { createFailure, createMemoryJournal, createYrd, createYrdDef, pipe, type
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
 import {
+  candidateRefFor,
   withMerge,
   withStep,
   withQueue,
@@ -180,7 +181,7 @@ function refuseForever(blocked: () => string): CandidatePreparer {
       })
     }
     const { prs: _prs, ...candidate } = input
-    return { ...candidate, sha: MERGED, ref: `refs/yrd/candidates/${input.id}`, mergeability: "mergeable" }
+    return { ...candidate, sha: MERGED, ref: candidateRefFor(MERGED), mergeability: "mergeable" }
   }
 }
 

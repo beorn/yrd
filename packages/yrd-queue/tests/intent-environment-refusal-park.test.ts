@@ -31,7 +31,7 @@ import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withIntents } from "@yrd/intent"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
-import { withMerge, withQueue, withStep } from "@yrd/queue"
+import { candidateRefFor, withMerge, withQueue, withStep } from "@yrd/queue"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -132,7 +132,7 @@ function intentPlugin(refusals: (component: string, attempt: number) => Refusal,
         ...candidate,
         sha: MERGED,
         treeSha: pin("e"),
-        ref: `refs/yrd/candidates/${input.id}`,
+        ref: candidateRefFor(MERGED),
         mergeability: "mergeable",
       }
     },

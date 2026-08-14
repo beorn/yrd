@@ -62,11 +62,17 @@ import { createProcess, pathReapFailure, type Process, type ProcessResult } from
 import { resolveSubmoduleOrigin } from "git-super/submodule-origin"
 import {
   isQueueRunningConflict,
+  CANDIDATE_REF_RETENTION_MS,
+  candidateRefDenominator,
   MERGE_RECORD_REF,
   mergeRecordToStatement,
   Queues,
+  pruneCandidateRefs,
+  sweepCandidateRefs,
   sweepUncarriedRefs,
   synthesizePinIntentCarrier,
+  type CandidateRefSweepResult,
+  type QueuesState,
   type InTotoStatement,
   type MergeRecordBody,
   type PREligibility,
@@ -7309,6 +7315,70 @@ async function queueUncarried(
   return result.findings.length === 0 ? 0 : 1
 }
 
+/**
+ * The root Candidate ref sweep, as an operator command.
+ *
+ * Read-only unless `--prune` is passed, and even then it deletes only what the
+ * SAME inventory pass just proved reclaimable: a journaled Candidate owns the
+ * ref, no live Run names it, the retention window has passed, and the ref still
+ * resolves to the SHA the sweep read. Anything unknown, unclaimed or unclocked is
+ * reported and kept — `docs/design.md` states that retaining beats guessing here,
+ * because this namespace is the only evidence a landed composition ever existed.
+ */
+async function queueCandidateRefs(
+  app: YrdCliApp,
+  options: JsonOption & Readonly<{ prune?: boolean; retentionDays?: string }>,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
+  const cwd = io.repositoryRoot ?? io.cwd ?? globalThis.process.cwd()
+  const retentionMs =
+    options.retentionDays === undefined
+      ? CANDIDATE_REF_RETENTION_MS
+      : Number(options.retentionDays) * 24 * 60 * 60 * 1000
+  if (!Number.isFinite(retentionMs) || retentionMs < 0) {
+    usage(`--retention-days must be a non-negative number, not '${String(options.retentionDays)}'`)
+  }
+  await app.refresh()
+  await using process = createProcess()
+  const git = sweepGit(process)
+  const result = await sweepCandidateRefs(git, {
+    repo: cwd,
+    queues: stateOf(app).queues,
+    nowMs: new Date(io.now?.() ?? Date.now()).getTime(),
+    retentionMs,
+  })
+
+  const reclaimable = result.findings.filter((finding) => finding.disposition === "reclaimable")
+  const pruned =
+    options.prune === true ? await pruneCandidateRefs(git, { repo: cwd, findings: result.findings }) : undefined
+  const deleted = pruned?.deleted ?? []
+  const kept = pruned?.kept ?? []
+
+  const denominator = candidateRefDenominator(result)
+  const headline =
+    options.prune === true
+      ? `deleted ${String(deleted.length)} of ${String(reclaimable.length)} reclaimable Candidate refs`
+      : reclaimable.length === 0
+        ? "no reclaimable Candidate refs"
+        : `${String(reclaimable.length)} Candidate refs are reclaimable (re-run with --prune to delete them)`
+  const lines = result.findings.map((finding) => `${finding.ref}  ${finding.disposition}  ${finding.message}`)
+  const keptLines = kept.map((entry) => `${entry.ref}  retained: ${entry.reason}`)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    {
+      command: "queue.candidate-refs",
+      ...result,
+      retentionMs,
+      ...(options.prune === true ? { deleted, kept } : {}),
+    },
+    [...lines, ...keptLines, ...(lines.length === 0 && keptLines.length === 0 ? [] : [""]), headline, denominator].join(
+      "\n",
+    ),
+  )
+  return 0
+}
+
 /** Why one repository-proven landing did not become a journal index row.
  *
  * `already-indexed` and `intent-carrier` are the two that describe a healthy estate: the row is
@@ -7560,6 +7630,56 @@ function indexRebuildLines(report: IndexRebuildReport): readonly string[] {
   return lines
 }
 
+/**
+ * The Candidate-ref half of `yrd doctor`.
+ *
+ * This namespace had no enumerator at all, which is how it reached ~2000 refs
+ * without anyone seeing it: `compactQueuesState` bounds terminal run trees to a
+ * 512-root window, so a ref routinely outlives the run that explains it. That
+ * makes an aged ref the normal end state rather than a defect, so this reports a
+ * population and a remedy at WARNING severity — it must not fail `yrd doctor`'s
+ * exit code over ordinary accumulated history.
+ *
+ * A sweep that cannot run reports that it could not run. It never degrades into
+ * a clean-looking zero, which for a hygiene rail would be the worst of both: no
+ * signal and no way to tell that there is no signal.
+ */
+type CandidateRefDoctorNote = Readonly<{ sweep?: CandidateRefSweepResult; warning?: string }>
+
+async function candidateRefDoctorFinding(
+  queues: DeepReadonly<QueuesState>,
+  io: YrdCliIO,
+): Promise<CandidateRefDoctorNote> {
+  const cwd = io.repositoryRoot ?? io.cwd ?? globalThis.process.cwd()
+  try {
+    await using process = createProcess()
+    const sweep = await sweepCandidateRefs(sweepGit(process), {
+      repo: cwd,
+      queues,
+      nowMs: new Date(io.now?.() ?? Date.now()).getTime(),
+    })
+    const reclaimable = sweep.findings.filter((finding) => finding.disposition === "reclaimable").length
+    const unclaimed = sweep.findings.filter((finding) => finding.disposition === "unclaimed").length
+    if (reclaimable === 0 && unclaimed === 0) return { sweep }
+    const parts = [
+      ...(reclaimable === 0 ? [] : [`${String(reclaimable)} past the retention window`]),
+      ...(unclaimed === 0 ? [] : [`${String(unclaimed)} claimed by no journaled Candidate`]),
+    ]
+    return {
+      sweep,
+      warning:
+        `WARNING candidate-ref-orphans: ${parts.join(", ")} — ${candidateRefDenominator(sweep)}. ` +
+        `Run 'yrd queue candidate-refs' to inventory them, '--prune' to delete the reclaimable ones.`,
+    }
+  } catch (error) {
+    return {
+      warning:
+        `WARNING candidate-ref-sweep-unavailable: the Candidate ref namespace could not be enumerated in ` +
+        `'${cwd}' (${error instanceof Error ? error.message : String(error)}); this run proves nothing about it.`,
+    }
+  }
+}
+
 async function configDoctor(
   app: YrdCliApp,
   services: YrdCliServices,
@@ -7581,7 +7701,11 @@ async function configDoctor(
   await app.refresh()
   const state = stateOf(app)
   const findings = diagnoseYrdFlows({ prs: Object.values(state.bays.prs), runs: Queues.values(state.queues) }, config)
-  const warnings = submoduleTrackingWarnings(io.cwd ?? process.cwd())
+  const candidateRefs = await candidateRefDoctorFinding(state.queues, io)
+  const warnings = [
+    ...submoduleTrackingWarnings(io.cwd ?? process.cwd()),
+    ...(candidateRefs.warning === undefined ? [] : [candidateRefs.warning]),
+  ]
   const clean = findings.length === 0 && warnings.length === 0
   const doctorLine =
     findings.length === 0
@@ -7599,6 +7723,7 @@ async function configDoctor(
     {
       command: "doctor",
       findings,
+      ...(candidateRefs.sweep === undefined ? {} : { candidateRefs: candidateRefs.sweep }),
       ...(rebuilt === undefined ? {} : { rebuilt }),
       ...(indexRebuild === undefined ? {} : { indexRebuild }),
     },
@@ -10352,6 +10477,13 @@ function buildProgram(
     .description("check queue state")
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await queueAudit(installed(), installedServices(), options, io)))
+  queue
+    .command("candidate-refs")
+    .description("inventory the synthetic Candidate ref namespace and age out terminal evidence")
+    .option("--prune", "delete the refs this same pass proved reclaimable")
+    .option("--retention-days <days>", "override the retention window (default 7)")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => setExit(await queueCandidateRefs(installed(), options, io)))
   queue
     .command("uncarried")
     .description("find refs pushed to the remote that no merge request carries")

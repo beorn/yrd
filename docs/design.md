@@ -161,13 +161,32 @@ type SourceRewrite = Readonly<{
   artifact SHA.
 - Mergeability is computed via `git merge-tree` — no checkout, no Context
   lease — before any expensive required check starts.
-- The synthetic root commit is published at `refs/yrd/candidates/<id>`. Each
-  rewritten source tip is first published under the content-addressed
-  `refs/heads/yrd/candidates/<newTipSha>` namespace in that source repository.
-  The Queue verifies those immutable refs immediately before and after the root
-  compare-and-push; if one disappears during landing, it rolls the root branch
-  back and reports `invalid-candidate`. Production remotes protect this
-  namespace from deletion and non-fast-forward updates.
+- The synthetic root commit is published at the **content-addressed**
+  `refs/yrd/candidates/<syntheticSha>`, matching the source side, where each
+  rewritten source tip is published under `refs/heads/yrd/candidates/<newTipSha>`
+  in its own repository. The name is derived at publish time from the composed
+  evidence, never from the Candidate's `C<n>` journal id: that id is allocated
+  before the tree exists, so naming the ref after it made a compose retry that
+  produced a different tree collide with its own earlier pin. Different evidence
+  now takes a different ref by construction, and identical evidence is an
+  idempotent republish. The Queue verifies those immutable refs immediately
+  before and after the root compare-and-push; if one disappears during landing,
+  it rolls the root branch back and reports `invalid-candidate`. Production
+  remotes protect this namespace from deletion and non-fast-forward updates.
+- Root Candidate refs carry the **same minimum seven-day retention window after
+  the owning Run reaches a terminal journal state** as the source-candidate refs
+  below — one number for "how long is Candidate evidence kept", not two. The
+  namespace is bounded by a Yrd-owned collector (`yrd queue candidate-refs`,
+  deleting only under `--prune`), never by generic branch cleanup, and deletion
+  requires POSITIVE proof from one fresh complete inventory: a journaled
+  Candidate owns the ref, no live PR or Run names it or its SHA, the window has
+  passed, and the ref still resolves to the exact SHA that inventory read.
+  Anything else is retained and reported. In particular, an unclaimed ref is
+  never collected: `compactQueuesState` bounds terminal Run trees to a 512-root
+  window, so a ref routinely outlives the Run that explains it, and age alone
+  cannot prove that a Run the journal has forgotten ever reached a terminal
+  state. `yrd doctor` reports the population as a warning, because ordinary
+  accumulated history is not a defect.
 - Content-addressed source-candidate refs have a **minimum seven-day retention
   window after the owning revision reaches a terminal journal state**. They are
   never delete-on-integration refs, and generic branch cleanup must treat them

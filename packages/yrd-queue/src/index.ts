@@ -1,6 +1,7 @@
 export * from "./model.ts"
 export * from "./queue.ts"
 export * from "./candidate-pool.ts"
+export * from "./candidate-refs.ts"
 export * from "./command.ts"
 export * from "./merge-record.ts"
 export * from "./merge-record-statement.ts"

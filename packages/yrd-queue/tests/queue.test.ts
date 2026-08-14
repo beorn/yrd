@@ -34,6 +34,7 @@ import * as z from "zod"
 import * as queueApi from "../src/index.ts"
 import {
   DEFAULT_QUEUE_BATCH_SIZE,
+  candidateRefFor,
   withQueue,
   projectQueueStarted,
   withMerge,
@@ -710,7 +711,7 @@ async function replaySameHeadCandidateRecut() {
     return {
       ...candidate,
       sha: MERGED,
-      ref: `refs/yrd/candidates/${input.id}`,
+      ref: candidateRefFor(MERGED),
       mergeability: "mergeable",
     }
   }
@@ -748,7 +749,7 @@ describe("Queue", () => {
         return {
           ...candidate,
           sha: MERGED,
-          ref: `refs/yrd/candidates/${input.id}`,
+          ref: candidateRefFor(MERGED),
           mergeability: "mergeable",
         }
       },
@@ -761,7 +762,7 @@ describe("Queue", () => {
     expect(app.state().queues.candidates[run!.candidateId]).toMatchObject({
       id: "C1",
       sha: MERGED,
-      ref: "refs/yrd/candidates/C1",
+      ref: candidateRefFor(MERGED),
       mergeability: "mergeable",
       revs: [{ pr: pr.id, n: 1, head: HEAD }],
     })
@@ -887,21 +888,53 @@ describe("Queue", () => {
     ).toBe(true)
   })
 
-  // 22332 C2465 shape: one run, two compose prepares that would produce different
-  // trees for the SAME candidate id must not refuse the run — allocate a fresh id.
-  it("retries candidate allocation when prepare refuses a self-colliding id (22332)", async () => {
+  // 22332, the C2465 shape: two composes that produce DIFFERENT trees are
+  // published without either refusing the other. There is no retry here to make
+  // that work — the ref is derived from the evidence, so the second compose
+  // simply lands somewhere else. The old id-named scheme sent both to
+  // refs/yrd/candidates/C<n> and the second refused itself.
+  it("publishes two composes with different trees to different refs, without a refusal (22332)", async () => {
+    const trees = [`${"a".repeat(39)}1`, `${"b".repeat(39)}2`]
     const prepared: string[] = []
     await using app = await createQueueApp({
       prepareCandidate: (input) => {
+        // Each compose produces a different tree, exactly as a recompose over a
+        // moved base does.
+        const sha = trees[prepared.length] ?? trees[trees.length - 1]
+        if (sha === undefined) throw new Error("test fixture exhausted its trees")
         prepared.push(input.id)
-        // First allocation C1 collides like an orphan/self-retry pin with different evidence.
-        if (input.id === "C1") {
-          throw createFailure({
-            kind: "infrastructure",
-            code: "candidate-ref-refused",
-            message: `yrd: Candidate ref 'refs/yrd/candidates/${input.id}' — you already wrote this id at ${"a".repeat(40)}; this prepare produced different evidence ${"b".repeat(40)} (compose self-retry must allocate a fresh id)`,
-          })
-        }
+        const { prs: _prs, ...candidate } = input
+        return { ...candidate, sha, ref: candidateRefFor(sha), mergeability: "mergeable" as const }
+      },
+    })
+
+    const first = await submitBranch(app, "topic/self-collision-a")
+    const [firstRun] = await app.queue.run({ prs: [first.id], steps: ["check"] }, runtime)
+    const second = await submitBranch(app, "topic/self-collision-b")
+    const [secondRun] = await app.queue.run({ prs: [second.id], steps: ["check"] }, runtime)
+
+    // Neither run was refused, and both steps actually ran.
+    expect(firstRun?.steps[0]?.job).toMatchObject({ status: "completed", conclusion: "success" })
+    expect(secondRun?.steps[0]?.job).toMatchObject({ status: "completed", conclusion: "success" })
+
+    // The refs differ because the evidence differs — that is the whole fix.
+    const candidates = app.state().queues.candidates
+    const firstCandidate = candidates[firstRun?.candidateId ?? ""]
+    const secondCandidate = candidates[secondRun?.candidateId ?? ""]
+    expect(firstCandidate?.ref).toBe(candidateRefFor(trees[0] ?? ""))
+    expect(secondCandidate?.ref).toBe(candidateRefFor(trees[1] ?? ""))
+    expect(firstCandidate?.ref).not.toBe(secondCandidate?.ref)
+    // And the ref states its own evidence, so a reader never has to consult the
+    // journal to know what a ref holds.
+    expect(firstCandidate?.ref).toBe(candidateRefFor(firstCandidate?.sha ?? ""))
+    expect(secondCandidate?.ref).toBe(candidateRefFor(secondCandidate?.sha ?? ""))
+  })
+
+  // The invariant is a real gate, not decoration: a preparer that publishes an
+  // id-named ref (the pre-22332 shape) is refused rather than journaled.
+  it("refuses a Candidate published at a ref that does not state its evidence (22332)", async () => {
+    await using app = await createQueueApp({
+      prepareCandidate: (input) => {
         const { prs: _prs, ...candidate } = input
         return {
           ...candidate,
@@ -911,19 +944,11 @@ describe("Queue", () => {
         }
       },
     })
-    const pr = await submitBranch(app, "topic/self-collision-retry")
+    const pr = await submitBranch(app, "topic/legacy-ref-shape")
 
-    const [run] = await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
-
-    expect(prepared).toEqual(["C1", "C2"])
-    expect(run?.candidateId).toBe("C2")
-    expect(app.state().queues.candidates.C2).toMatchObject({
-      id: "C2",
-      sha: MERGED,
-      ref: "refs/yrd/candidates/C2",
-      mergeability: "mergeable",
-    })
-    expect(run?.steps[0]?.job).toMatchObject({ status: "completed", conclusion: "success" })
+    await expect(app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)).rejects.toThrow(
+      /must publish refs\/yrd\/candidates\//u,
+    )
   })
 
   it("records a conflicting Candidate without admitting an expensive Job", async () => {
@@ -1006,7 +1031,7 @@ describe("Queue", () => {
         const conflicting = input.revs.length === 1 && input.revs[0]?.pr === "PR1"
         return {
           ...candidate,
-          ...(conflicting ? {} : { sha: MERGED, ref: `refs/yrd/candidates/${input.id}` }),
+          ...(conflicting ? {} : { sha: MERGED, ref: candidateRefFor(MERGED) }),
           mergeability: conflicting ? "conflicting" : "mergeable",
         }
       },
@@ -1046,7 +1071,7 @@ describe("Queue", () => {
         return {
           ...candidate,
           sha: MERGED,
-          ref: `refs/yrd/candidates/${input.id}`,
+          ref: candidateRefFor(MERGED),
           mergeability: "mergeable",
         }
       },
@@ -1068,7 +1093,7 @@ describe("Queue", () => {
     expect(submissions).toEqual([
       {
         job: run?.steps[0]?.job?.id,
-        candidateRef: "refs/yrd/candidates/C1",
+        candidateRef: candidateRefFor(MERGED),
         context: { scope: "job", candidate: "rw", capabilities: ["git"] },
       },
     ])
@@ -6141,10 +6166,13 @@ describe("Queue", () => {
       prepareCandidate: (input) => {
         const { prs: _prs, ...candidate } = input
         const digit = input.id.slice(1)
+        // One expression feeds both the SHA and the ref, so the fixture cannot
+        // drift out of the content-addressed contract the Queue enforces.
+        const sha = digit.repeat(40).slice(0, 40)
         return {
           ...candidate,
-          sha: digit.repeat(40).slice(0, 40),
-          ref: `refs/yrd/candidates/${input.id}`,
+          sha,
+          ref: candidateRefFor(sha),
           mergeability: "mergeable",
         }
       },
@@ -6184,35 +6212,35 @@ describe("Queue", () => {
         id: "C1",
         revs: ["PR1", "PR2", "PR3", "PR4"],
         sha: "1".repeat(40),
-        ref: "refs/yrd/candidates/C1",
+        ref: candidateRefFor("1".repeat(40)),
         mergeability: "mergeable",
       },
       {
         id: "C2",
         revs: ["PR1", "PR2"],
         sha: "2".repeat(40),
-        ref: "refs/yrd/candidates/C2",
+        ref: candidateRefFor("2".repeat(40)),
         mergeability: "mergeable",
       },
       {
         id: "C3",
         revs: ["PR3", "PR4"],
         sha: "3".repeat(40),
-        ref: "refs/yrd/candidates/C3",
+        ref: candidateRefFor("3".repeat(40)),
         mergeability: "mergeable",
       },
       {
         id: "C4",
         revs: ["PR3"],
         sha: "4".repeat(40),
-        ref: "refs/yrd/candidates/C4",
+        ref: candidateRefFor("4".repeat(40)),
         mergeability: "mergeable",
       },
       {
         id: "C5",
         revs: ["PR4"],
         sha: "5".repeat(40),
-        ref: "refs/yrd/candidates/C5",
+        ref: candidateRefFor("5".repeat(40)),
         mergeability: "mergeable",
       },
     ])

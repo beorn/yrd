@@ -9,7 +9,7 @@ import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
 import { createFailure, createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
-import { withMerge, withQueue, withStep, type CandidatePreparer } from "@yrd/queue"
+import { candidateRefFor, withMerge, withQueue, withStep, type CandidatePreparer } from "@yrd/queue"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -117,7 +117,7 @@ function refuseAuthoredGitlink(
       })
     }
     const { prs: _prs, ...candidate } = input
-    return { ...candidate, sha: MERGED, ref: `refs/yrd/candidates/${input.id}`, mergeability: "mergeable" }
+    return { ...candidate, sha: MERGED, ref: candidateRefFor(MERGED), mergeability: "mergeable" }
   }
 }
 

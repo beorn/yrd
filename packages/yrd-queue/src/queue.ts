@@ -152,6 +152,7 @@ import {
   recordReleasedAdmissionFailure,
   releasedAdmissionFailures,
 } from "./projection-index.ts"
+import { candidateRefFor } from "./candidate-refs.ts"
 import { compactQueuesState, queueRetentionRoot } from "./retention.ts"
 
 /**
@@ -1498,9 +1499,11 @@ function createQueue<Shape extends PRShape>(
     return requiredCandidateBaseSha(prs.map(Queues.snapshot))
   }
 
-  // 22332: ids reserved by in-flight prepares (pin may land on disk before
-  // queue/candidate/created is journaled). Without this set, a compose retry
-  // reuses nextCandidateId's journal-only max and self-collides on its own ref.
+  // 22332: ids reserved by in-flight prepares. `nextCandidateId` reads the
+  // journal-only max, and the journal row lands after the prepare, so two
+  // concurrent prepares would otherwise both be handed the same `C<n>`. The ref
+  // no longer depends on this id — it is content-addressed — but the JOURNAL
+  // identity still has to be unique, which is what this set protects.
   const reservedCandidateIds = new Set<string>()
   const allocateCandidateId = (): string => {
     const journaled = Object.keys(runtime().queues.candidates)
@@ -1509,7 +1512,6 @@ function createQueue<Shape extends PRShape>(
     const reserved = [...reservedCandidateIds].filter((id) => /^C\d+$/u.test(id)).map((id) => Number(id.slice(1)))
     return `C${Math.max(0, ...journaled, ...reserved) + 1}`
   }
-  const CANDIDATE_REF_COLLISION_LIMIT = 32
 
   const candidateFactsForSnapshots = async (
     snapshots: readonly DeepReadonly<PRSnapshot>[],
@@ -1526,61 +1528,57 @@ function createQueue<Shape extends PRShape>(
     if (first === undefined) throw new Error("yrd: a Candidate requires at least one PR")
     const queueId = queueIdentity(first)
     const revs = pinned.map((member) => ({ pr: member.id, n: member.revision, head: member.headSha }))
-    let lastRefused: unknown
-    for (let collision = 0; collision < CANDIDATE_REF_COLLISION_LIMIT; collision += 1) {
-      const id = allocateCandidateId()
-      reservedCandidateIds.add(id)
-      const input: CandidatePreparationInput = {
-        id,
-        queueId,
-        baseSha,
-        revs,
-        prs: pinned,
-      }
-      let prepared: z.infer<typeof CandidateCreatedSchema>
-      try {
-        prepared = CandidateCreatedSchema.parse(await prepareCandidate(input))
-      } catch (error) {
-        // Self-collision / orphan ref / foreign holder: bump id and retry.
-        // Self-collision becomes structurally impossible rather than fatal.
-        if (failureFact(error)?.code === "candidate-ref-refused") {
-          lastRefused = error
-          continue
-        }
-        throw error
-      }
-      if (
-        prepared.id !== input.id ||
-        prepared.queueId !== input.queueId ||
-        prepared.baseSha !== input.baseSha ||
-        prepared.revs.length !== input.revs.length ||
-        prepared.revs.some((revision, index) => {
-          const expected = input.revs[index]
-          return (
-            expected === undefined ||
-            revision.pr !== expected.pr ||
-            revision.n !== expected.n ||
-            revision.head !== expected.head
-          )
-        })
-      ) {
-        throw new Error(`yrd: Candidate preparer changed immutable content identity for '${input.id}'`)
-      }
-      if (prepared.mergeability === "unknown") {
-        throw new Error(`yrd: Candidate preparer left mergeability unknown for '${input.id}'`)
-      }
-      if (prepared.mergeability === "mergeable") {
-        if (prepared.sha === undefined || prepared.ref === undefined) {
-          throw new Error(`yrd: mergeable Candidate '${input.id}' requires a synthetic SHA and ref`)
-        }
-        if (prepared.ref !== `refs/yrd/candidates/${input.id}`) {
-          throw new Error(`yrd: Candidate '${input.id}' must publish refs/yrd/candidates/${input.id}`)
-        }
-      }
-      return prepared
+    const id = allocateCandidateId()
+    reservedCandidateIds.add(id)
+    const input: CandidatePreparationInput = {
+      id,
+      queueId,
+      baseSha,
+      revs,
+      prs: pinned,
     }
-    if (lastRefused !== undefined) throw lastRefused
-    throw new Error(`yrd: Candidate id allocation exhausted ${CANDIDATE_REF_COLLISION_LIMIT} collision identities`)
+    // 22332: there is no retry-on-`candidate-ref-refused` here any more, and its
+    // absence is the point. While the ref was named after this id, bumping the id
+    // genuinely moved the prepare to a free ref. Now the ref is derived from the
+    // composed evidence, so a fresh id re-runs the identical compose and targets
+    // the identical ref: a retry could not have succeeded, it could only have
+    // paid for 32 more composes before surfacing the same fault. The remaining
+    // refusals are real infrastructure faults, and they surface at once.
+    const prepared = CandidateCreatedSchema.parse(await prepareCandidate(input))
+    if (
+      prepared.id !== input.id ||
+      prepared.queueId !== input.queueId ||
+      prepared.baseSha !== input.baseSha ||
+      prepared.revs.length !== input.revs.length ||
+      prepared.revs.some((revision, index) => {
+        const expected = input.revs[index]
+        return (
+          expected === undefined ||
+          revision.pr !== expected.pr ||
+          revision.n !== expected.n ||
+          revision.head !== expected.head
+        )
+      })
+    ) {
+      throw new Error(`yrd: Candidate preparer changed immutable content identity for '${input.id}'`)
+    }
+    if (prepared.mergeability === "unknown") {
+      throw new Error(`yrd: Candidate preparer left mergeability unknown for '${input.id}'`)
+    }
+    if (prepared.mergeability === "mergeable") {
+      if (prepared.sha === undefined || prepared.ref === undefined) {
+        throw new Error(`yrd: mergeable Candidate '${input.id}' requires a synthetic SHA and ref`)
+      }
+        // 22332: the ref is content-addressed, so this checks that the published
+        // name states the evidence it carries — not that it matches an id chosen
+        // before the evidence existed.
+        if (prepared.ref !== candidateRefFor(prepared.sha)) {
+          throw new Error(
+            `yrd: Candidate '${input.id}' must publish ${candidateRefFor(prepared.sha)}, not '${prepared.ref}'`,
+          )
+      }
+    }
+    return prepared
   }
 
   const candidateFacts = (

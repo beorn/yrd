@@ -85,6 +85,7 @@ const QUEUE_SUBCOMMANDS = new Set([
   "_list",
   "list",
   "audit",
+  "candidate-refs",
   "uncarried",
   "pause",
   "resume",
