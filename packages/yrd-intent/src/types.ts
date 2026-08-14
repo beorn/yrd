@@ -266,6 +266,16 @@ export type PinIntentAdmitted = Readonly<{
   currentPin: string
   target?: string
   relation: PinIntentRelation
+  /**
+   * Why this admission is weaker than the usual one, when it is.
+   *
+   * Set only where the verdict rests on something other than a clean local
+   * read — today, publication proven by a direct remote read after the fetch
+   * failed. An admit that quietly knows less than it normally would is the
+   * silent-error shape in the admitting direction, so it says so, and callers
+   * that print the verdict print this with it.
+   */
+  disclosure?: string
 }>
 export type PinIntentRefused = Readonly<{
   admitted: false
@@ -300,6 +310,9 @@ export type PinIntentRefused = Readonly<{
     lastFetchAt?: string
     /** Which of the three unpublished-looking states actually held. */
     publicationReason?: "commit-absent" | "no-containing-ref" | "read-failed"
+    /** Whether the direct remote read ran, when the failed fetch forced one. */
+    remoteRead?: "ok" | "failed"
+    remoteDetail?: string
   }>
   remedy: readonly RemedyStepV1[]
 }>
@@ -332,6 +345,8 @@ export const PinIntentRefusalSchema = z
         attempts: z.number().int().positive().optional(),
         readRepo: TextSchema.optional(),
         readRefs: TextSchema.optional(),
+        remoteRead: z.enum(["ok", "failed"]).optional(),
+        remoteDetail: TextSchema.optional(),
         fetchOutcome: z.enum(["ok", "failed"]).optional(),
         fetchDetail: TextSchema.optional(),
         lastFetchAt: TextSchema.optional(),
