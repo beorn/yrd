@@ -24,13 +24,16 @@ import {
   parseJournalFrame,
   pipe,
   type Journal,
+  type JournalCheckpoint,
   type JournalEntityKind,
   type JournalFrame,
 } from "@yrd/core"
 import { localRunner, withJobs, type JobResult, type Jobs, type Runner, type RunnerSubmission } from "@yrd/job"
 import { defineConfig, selectFlow, yrd, type YrdConfig } from "@yrd/config"
 import * as z from "zod"
+import * as queueApi from "../src/index.ts"
 import {
+  DEFAULT_QUEUE_BATCH_SIZE,
   withQueue,
   projectQueueStarted,
   withMerge,
@@ -70,6 +73,28 @@ const BASE = "a".repeat(40)
 const MERGED = "b".repeat(40)
 const UPDATED = "3".repeat(40)
 const runtime = { runner: "local", leaseMs: 60_000 }
+
+describe("queue batch policy", () => {
+  it("keeps effective batch normalization out of the public Queue API", () => {
+    expect("effectiveBatchSize" in queueApi).toBe(false)
+  })
+
+  it.each([
+    [false, 1],
+    [0, 1],
+    [1, 1],
+    [2, 2],
+    [10, 10],
+  ] as const)("normalizes %s to the effective batch size %s", async (configured, expected) => {
+    await using app = await createQueueApp({ batch: configured })
+    expect(app.state().queues.batchSize).toBe(expected)
+  })
+
+  it("keeps the built-in default explicit", () => {
+    expect(DEFAULT_QUEUE_BATCH_SIZE).toBe(10)
+  })
+})
+
 const CheckResultSchema = z.object({ checked: z.boolean() }).strict()
 const ReviewResultSchema = z.object({ approved: z.boolean() }).strict()
 const DeployResultSchema = z.object({ environment: z.string() }).strict()
@@ -255,6 +280,30 @@ function indexedJournal(initial: readonly JournalFrame[] = []): Journal<unknown>
       },
     },
   }
+}
+
+function checkpointJournal(base: Journal<unknown>) {
+  const reads: number[] = []
+  const loads: string[] = []
+  let stored: JournalCheckpoint | undefined
+  const journal: Journal<unknown> = {
+    read(after = 0, before?: number) {
+      reads.push(after)
+      return base.read(after, before)
+    },
+    append: (value, expectedCursor) => base.append(value, expectedCursor),
+    checkpoint: {
+      load(identity) {
+        loads.push(identity)
+        return Promise.resolve(stored?.identity === identity ? structuredClone(stored) : undefined)
+      },
+      save(checkpoint) {
+        stored = structuredClone(checkpoint)
+        return Promise.resolve(true)
+      },
+    },
+  }
+  return { journal, reads, loads, stored: () => stored }
 }
 
 function queueHistoryFrames(count: number, failedRun?: number, nextId: () => string = ids()): readonly JournalFrame[] {
@@ -2826,6 +2875,63 @@ describe("Queue", () => {
       prs: [{ id: "PR1" }, { id: "PR2" }],
       steps: [{ name: "check", job: { status: "queued" } }, { name: "merge" }],
     })
+  })
+
+  it("preserves an active run while a replayed journal adopts a larger future batch", async () => {
+    const cache = checkpointJournal(createMemoryJournal())
+    const journal = cache.journal
+    const id = ids()
+    const options = {
+      check: () => ({ status: "completed" as const, conclusion: "success" as const, output: { checked: true } }),
+      merge: () => ({
+        status: "completed" as const,
+        conclusion: "success" as const,
+        output: { commit: MERGED, baseSha: BASE },
+      }),
+    }
+
+    {
+      await using app = await createQueueApp({ ...options, batch: 1 }, journal, undefined, id)
+      const first = await submitBranch(app, "issue/batch-policy-one")
+      await submitBranch(app, "issue/batch-policy-two")
+      await submitBranch(app, "issue/batch-policy-three")
+      await app.dispatch(app.commands.queue.run, { prs: [first.id], steps: ["check", "merge"] })
+
+      expect(app.state().queues.batchSize).toBe(1)
+      expect(app.queue.get("R1")).toMatchObject({
+        status: "queued",
+        batchSize: 1,
+        prs: [{ id: "PR1" }],
+      })
+    }
+
+    const batchOneIdentity = cache.stored()?.identity
+    expect(batchOneIdentity).toBeDefined()
+    cache.reads.length = 0
+
+    await using replayed = await createQueueApp({ ...options, batch: 2 }, journal, undefined, id)
+    expect(cache.loads.at(-1)).not.toBe(batchOneIdentity)
+    expect(cache.reads[0]).toBe(0)
+    expect(replayed.state().queues.batchSize).toBe(2)
+    expect(replayed.queue.get("R1")).toMatchObject({
+      status: "queued",
+      batchSize: 1,
+      prs: [{ id: "PR1" }],
+    })
+
+    const runs = await replayed.queue.run({ steps: ["check", "merge"] }, runtime)
+
+    expect(runs).toMatchObject([
+      { id: "R1", status: "completed", conclusion: "success", batchSize: 1, prs: [{ id: "PR1" }] },
+      {
+        id: "R2",
+        status: "completed",
+        conclusion: "success",
+        batchSize: 2,
+        prs: [{ id: "PR2" }, { id: "PR3" }],
+      },
+    ])
+    expect(replayed.queue.get("R1")).toMatchObject({ batchSize: 1, prs: [{ id: "PR1" }] })
   })
 
   it("refuses to relabel configured replay authority as an explicit selection", async () => {

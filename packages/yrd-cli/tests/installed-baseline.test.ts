@@ -48,14 +48,17 @@ function step(name: string, revision: string, overrides: Partial<InstalledStep> 
   return { name, title: name, revision, kind: "check", ...overrides }
 }
 
-function baseline(steps: readonly InstalledStep[], base = "main"): InstalledBaseline {
+function baseline(steps: readonly InstalledStep[], base = "main"): InstalledBaseline & Readonly<{ batchSize: number }> {
   return {
     base,
     baseSha: "0123456789abcdef0123456789abcdef01234567",
     installedAt: "2026-07-15T00:00:00.000Z",
+    batchSize: 1,
     steps,
   }
 }
+
+const queueDescriptor = (steps: readonly InstalledStep[], batchSize = 1) => ({ batchSize, steps })
 
 function historicalV3NativeMergeRevision(env?: Readonly<Record<string, string>>): string {
   return createHash("sha256")
@@ -78,9 +81,36 @@ function historicalV3NativeMergeRevision(env?: Readonly<Record<string, string>>)
 }
 
 describe("installed baseline drift", () => {
+  it("treats effective batch policy as part of both config and runtime drift", () => {
+    const steps = [step("check", "check-v1"), step("merge", "merge-v1", { kind: "merge" })]
+    const installed = { ...baseline(steps), batchSize: 5 }
+
+    const configDrift = installedBaselineDrift(installed, queueDescriptor(steps, 10))
+    expect(configDrift).toMatchObject({ code: "config-drift" })
+    expect(configDrift?.message).toContain("batch size 5 installed, current 10")
+
+    const runtimeDrift = runtimeBaselineDrift(installed, queueDescriptor(steps, 1))
+    expect(runtimeDrift).toMatchObject({ code: "runtime-drift" })
+    expect(runtimeDrift?.message).toContain("batch size 5 installed, runtime 1")
+
+    expect(installedBaselineDrift(installed, queueDescriptor(steps, 5))).toBeUndefined()
+    expect(runtimeBaselineDrift(installed, queueDescriptor(steps, 5))).toBeUndefined()
+  })
+
+  it("fails loud when a legacy baseline has no recorded batch policy", () => {
+    const steps = [step("check", "check-v1"), step("merge", "merge-v1", { kind: "merge" })]
+    const { batchSize: _batchSize, ...legacy } = baseline(steps)
+
+    const finding = installedBaselineDrift(legacy, queueDescriptor(steps))
+
+    expect(finding).toMatchObject({ code: "config-drift" })
+    expect(finding?.message).toContain("batch size is absent from the installed baseline, current 1")
+    expect(finding?.message).toContain("Run 'yrd admin queue deinit main' then 'yrd admin queue init main'")
+  })
+
   it("reports no drift when the current steps match the installed baseline", () => {
     const steps = [step("check", "check-v1"), step("merge", "merge-v1", { kind: "merge" })]
-    expect(installedBaselineDrift(baseline(steps), steps)).toBeUndefined()
+    expect(installedBaselineDrift(baseline(steps), queueDescriptor(steps))).toBeUndefined()
   })
 
   it("collapses every delta into one config-drift finding with the migration remedy", () => {
@@ -90,7 +120,7 @@ describe("installed baseline drift", () => {
       step("merge", "merge-v1"),
     ]
     const current = [step("check", "e5f6a7b8".padEnd(64, "0")), step("merge", "merge-v1"), step("deploy", "deploy-v1")]
-    const finding = installedBaselineDrift(baseline(installed), current)
+    const finding = installedBaselineDrift(baseline(installed), queueDescriptor(current))
     expect(finding).toMatchObject({ code: "config-drift" })
     expect(finding?.message).toContain("step 'check' revision '22adf838' installed, current 'e5f6a7b8'")
     expect(finding?.message).toContain("step 'review' (installed revision 'review-v1') is no longer configured")
@@ -101,18 +131,18 @@ describe("installed baseline drift", () => {
   it("flags an integration-contract change even when the revision is unchanged", () => {
     const installed = [step("merge", "merge-v1", { kind: "merge" })]
     const current = [step("merge", "merge-v1", { kind: "action" })]
-    expect(installedBaselineDrift(baseline(installed), current)?.message).toContain(
+    expect(installedBaselineDrift(baseline(installed), queueDescriptor(current))?.message).toContain(
       "step 'merge' integration contract changed",
     )
   })
 
   it("names the runtime leg with the restart remedy when the running process diverges from the baseline (merge-queue R41b)", () => {
     const installed = [step("check", "v2"), step("merge", "v2", { kind: "merge" })]
-    expect(runtimeBaselineDrift(baseline(installed), installed)).toBeUndefined()
-    const finding = runtimeBaselineDrift(baseline(installed), [
-      step("check", "v1"),
-      step("merge", "v2", { kind: "merge" }),
-    ])
+    expect(runtimeBaselineDrift(baseline(installed), queueDescriptor(installed))).toBeUndefined()
+    const finding = runtimeBaselineDrift(
+      baseline(installed),
+      queueDescriptor([step("check", "v1"), step("merge", "v2", { kind: "merge" })]),
+    )
     expect(finding).toMatchObject({ code: "runtime-drift" })
     expect(finding?.message).toContain("resident runtime diverges from the installed baseline")
     expect(finding?.message).toContain("step 'check' revision 'v2' installed, runtime 'v1'")
@@ -135,8 +165,8 @@ describe("installed baseline drift", () => {
     const installed = [step("merge", revision, { kind: "merge", implementationSource: pinnedSource })]
     const staleRuntime = [step("merge", revision, { kind: "merge", implementationSource: loadedSource })]
 
-    expect(installedBaselineDrift(baseline(staleRuntime), installed)).toBeUndefined()
-    expect(runtimeBaselineDrift(baseline(installed), staleRuntime)).toBeUndefined()
+    expect(installedBaselineDrift(baseline(staleRuntime), queueDescriptor(installed))).toBeUndefined()
+    expect(runtimeBaselineDrift(baseline(installed), queueDescriptor(staleRuntime))).toBeUndefined()
   })
 
   it("keeps the native merge generation transition observable to older residents", () => {
@@ -155,7 +185,7 @@ describe("installed baseline drift", () => {
       ),
     ]
 
-    expect(runtimeBaselineDrift(baseline(migrated), staleRuntime)).toMatchObject({
+    expect(runtimeBaselineDrift(baseline(migrated), queueDescriptor(staleRuntime))).toMatchObject({
       code: "runtime-drift",
       message: expect.stringContaining("Restart this queue runner process"),
     })
@@ -164,7 +194,7 @@ describe("installed baseline drift", () => {
   it("reports drift when the same steps are reordered (revisions exclude order)", () => {
     const installed = [step("check", "check-v1"), step("merge", "merge-v1", { kind: "merge" })]
     const current = [step("merge", "merge-v1", { kind: "merge" }), step("check", "check-v1")]
-    const finding = installedBaselineDrift(baseline(installed), current)
+    const finding = installedBaselineDrift(baseline(installed), queueDescriptor(current))
     expect(finding).toMatchObject({ code: "config-drift" })
     expect(finding?.message).toContain("step order changed: installed check→merge, current merge→check")
   })
@@ -517,6 +547,29 @@ async function queueRepository(check: string): Promise<string> {
 }
 
 describe("host installed baseline", () => {
+  it.each([
+    ["false", 1],
+    ["0", 1],
+    ["1", 1],
+    ["2", 2],
+    ["10", 10],
+  ] as const)("keeps configured batch %s equal to runtime policy %s", async (configured, effective) => {
+    const repo = await queueRepository("true")
+    await writeFile(join(repo, ".yrd.yml"), `base: main\nbatch: ${configured}\nchecks:\n  - {check: {run: "true"}}\n`)
+    if (configured !== "1") {
+      await git(repo, "add", ".yrd.yml")
+      await git(repo, "commit", "-qm", `configure batch ${configured}`)
+    }
+    const host = await createYrdHost({ cwd: repo })
+    try {
+      await host.services.queue?.provision?.("main")
+      expect((await readInstalledBaselines(host.repository.stateDir)).main?.batchSize).toBe(effective)
+      expect(await host.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+    } finally {
+      await host.close()
+    }
+  })
+
   it("round-trips old and current uncarried observations through resident status", async () => {
     const repo = await queueRepository("true")
     const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
@@ -575,9 +628,10 @@ describe("host installed baseline", () => {
     try {
       await resident.services.queue?.provision?.("main")
       const current = (await readInstalledBaselines(resident.repository.stateDir)).main
-      if (current === undefined) throw new Error("expected provisioned main baseline")
+      if (current?.batchSize === undefined) throw new Error("expected current provisioned main baseline")
       const foreign = {
         ...current,
+        batchSize: current.batchSize,
         installedAt: "2026-07-24T00:00:00.000Z",
         steps: current.steps.map((installed, index) => ({
           ...installed,
@@ -600,15 +654,51 @@ describe("host installed baseline", () => {
     }
   })
 
+  it("re-provisions a batch-only config drift and requests an in-place runtime reload", async () => {
+    const repo = await queueRepository("true")
+    const resident = await createYrdHost({ cwd: repo })
+    const reloadRequested = new Error("reload requested")
+    try {
+      await resident.services.queue?.provision?.("main")
+      expect(await resident.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+
+      await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 2\nchecks:\n  - {check: {run: "true"}}\n')
+      await git(repo, "add", ".yrd.yml")
+      await git(repo, "commit", "-qm", "change only batch policy")
+
+      const configLeg = await resident.services.queue?.auditEnvironment?.()
+      expect(configLeg?.findings).toMatchObject([{ code: "config-drift" }])
+      expect(configLeg?.findings[0]?.message).toContain("batch size 1 installed, current 2")
+
+      await expect(
+        requireFreshInstalledBaseline(resident.services, {
+          reloadInPlace: {
+            base: "main",
+            request(finding) {
+              expect(finding).toMatchObject({ code: "runtime-drift" })
+              expect(finding.message).toContain("batch size 2 installed, runtime 1")
+              throw reloadRequested
+            },
+          },
+        }),
+      ).rejects.toBe(reloadRequested)
+
+      expect((await readInstalledBaselines(resident.repository.stateDir)).main?.batchSize).toBe(2)
+    } finally {
+      await resident.close()
+    }
+  })
+
   it("one-shot leaves foreign baseline untouched until explicit queue init (22334)", async () => {
     const repo = await queueRepository("true")
     const host = await createYrdHost({ cwd: repo })
     try {
       await host.services.queue?.provision?.("main")
       const current = (await readInstalledBaselines(host.repository.stateDir)).main
-      if (current === undefined) throw new Error("expected provisioned main baseline")
+      if (current?.batchSize === undefined) throw new Error("expected current provisioned main baseline")
       const foreign = {
         ...current,
+        batchSize: current.batchSize,
         installedAt: "2026-07-24T00:00:00.000Z",
         steps: current.steps.map((installed, index) => ({
           ...installed,

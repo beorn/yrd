@@ -554,6 +554,18 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
   progress?: QueueProgressPolicy
 }>
 
+/** Built-in candidate width when a repository does not declare `batch`. */
+export const DEFAULT_QUEUE_BATCH_SIZE = 10
+
+/** Resolve the configured batching vocabulary to the width Queue executes. */
+function effectiveBatchSize(config: BatchConfig | undefined = DEFAULT_QUEUE_BATCH_SIZE): number {
+  if (config === false) return 1
+  if (!Number.isInteger(config) || config < 0) {
+    throw new Error("yrd: batch size must be false or a non-negative integer")
+  }
+  return config <= 1 ? 1 : config
+}
+
 export type QueueProgressPolicy = Readonly<{
   noLandingMs: number
   refusalCount: number
@@ -814,7 +826,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
   const steps = installSteps(options.steps)
   const progress = validateQueueProgressPolicy(options.progress ?? DEFAULT_QUEUE_PROGRESS_POLICY)
   const byName = new Map(steps.map((step) => [step.name, step] as const))
-  const batchSize = normalizeBatch(options.batch ?? 1)
+  const batchSize = effectiveBatchSize(options.batch)
   const defaults = options.defaultSteps === undefined ? undefined : selectSteps(steps, options.defaultSteps)
   validateSequence(defaults ?? steps, false)
   const initial = Queues.empty({
@@ -4909,6 +4921,7 @@ function startRun(
     candidateId: candidate.id,
     prs,
     base: baseIdentity(pr.base),
+    batchSize: queues.batchSize,
     ...(flow === undefined ? {} : { flow }),
     steps: selected.map(descriptor),
     ...(selection === undefined ? {} : { stepSelection: selection }),
@@ -6658,10 +6671,7 @@ function intentCheckFailures(state: DeepReadonly<RuntimeState>, intent: string, 
  * the automatic re-check budget) and is not this. The specimens failed at merge
  * and at candidate composition, which that counter never sees.
  */
-function intentAttemptFailures(
-  state: DeepReadonly<RuntimeState>,
-  intent: string,
-): readonly IntentAttemptFailure[] {
+function intentAttemptFailures(state: DeepReadonly<RuntimeState>, intent: string): readonly IntentAttemptFailure[] {
   const failures: IntentAttemptFailure[] = []
   for (const record of Queues.values(state.queues).toSorted((left, right) => compareNatural(left.id, right.id))) {
     const snapshot = record.prs.find((member) => member.intent?.id === intent)?.intent
@@ -7793,14 +7803,6 @@ function pinnedPRError(
     }
   }
   return undefined
-}
-
-function normalizeBatch(config: BatchConfig): number {
-  if (config === false) return 1
-  if (!Number.isInteger(config) || config < 0) {
-    throw new Error("yrd: batch size must be false or a non-negative integer")
-  }
-  return config <= 1 ? 1 : config
 }
 
 function bisectable(run: Run): boolean {
