@@ -546,6 +546,18 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
   progress?: QueueProgressPolicy
 }>
 
+/** Built-in candidate width when a repository does not declare `batch`. */
+export const DEFAULT_QUEUE_BATCH_SIZE = 10
+
+/** Resolve the configured batching vocabulary to the width Queue executes. */
+export function effectiveBatchSize(config: BatchConfig | undefined = DEFAULT_QUEUE_BATCH_SIZE): number {
+  if (config === false) return 1
+  if (!Number.isInteger(config) || config < 0) {
+    throw new Error("yrd: batch size must be false or a non-negative integer")
+  }
+  return config <= 1 ? 1 : config
+}
+
 export type QueueProgressPolicy = Readonly<{
   noLandingMs: number
   refusalCount: number
@@ -805,7 +817,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
   const steps = installSteps(options.steps)
   const progress = validateQueueProgressPolicy(options.progress ?? DEFAULT_QUEUE_PROGRESS_POLICY)
   const byName = new Map(steps.map((step) => [step.name, step] as const))
-  const batchSize = normalizeBatch(options.batch ?? 1)
+  const batchSize = effectiveBatchSize(options.batch)
   const defaults = options.defaultSteps === undefined ? undefined : selectSteps(steps, options.defaultSteps)
   validateSequence(defaults ?? steps, false)
   const initial = Queues.empty({
@@ -7435,14 +7447,6 @@ function pinnedPRError(
     }
   }
   return undefined
-}
-
-function normalizeBatch(config: BatchConfig): number {
-  if (config === false) return 1
-  if (!Number.isInteger(config) || config < 0) {
-    throw new Error("yrd: batch size must be false or a non-negative integer")
-  }
-  return config <= 1 ? 1 : config
 }
 
 function bisectable(run: Run): boolean {
