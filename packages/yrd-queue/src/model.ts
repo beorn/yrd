@@ -726,15 +726,21 @@ export type QueueAuditFinding = Readonly<{
    * identity existed): a finding with no recorded identity says nothing rather
    * than naming a plausible owner. */
   submitter?: string
-  /** How far the carrier got through handoff before it stranded. Readers keep
+  /** How far the carrier got through REVIEW before it stranded. Readers keep
    * the open `string` for the same reason `code` stays open — a value parsed
    * out of a foreign version's JSON must remain readable. Producers emit the
-   * closed {@link QueueAuditHandoffCertification}. */
-  handoffCertification?: string
+   * closed {@link QueueAuditReviewCertification}. */
+  reviewCertification?: string
 }>
 
-/** How far a carrier got through handoff, derived ONLY from review facts the
+/** How far a carrier got through review, derived ONLY from review facts the
  * PR already carries — a certification that can lie is worse than none.
+ *
+ * Named for REVIEW, not handoff: `BayHandoff` already certifies a workspace
+ * head in this codebase, and one word carrying two certifications is the
+ * ambiguity that costs a reader a wrong assumption. A bay's handoff readiness
+ * (`bays.byId[pr.bay].handoff`) is reachable where this is derived and could
+ * become a separate signal — it must never be folded into this one.
  *
  * Every member is decided by the SAME two inputs at the derivation point: the
  * verdict on the current revision (`reviewState(pr).current`) and the requested
@@ -753,7 +759,7 @@ export type QueueAuditFinding = Readonly<{
  *   patch them to `undefined`), so a PR in the `pushed` delivery state that
  *   this finding fires on can never carry either. The field would be a
  *   constant, not a discriminator. */
-export const YRD_QUEUE_AUDIT_HANDOFF_CERTIFICATIONS = [
+export const YRD_QUEUE_AUDIT_REVIEW_CERTIFICATIONS = [
   /** A verdict of `approve` stands on this exact revision (including one a
    * rebuild carried forward): the change is certified and only the submit is
    * missing. */
@@ -768,7 +774,7 @@ export const YRD_QUEUE_AUDIT_HANDOFF_CERTIFICATIONS = [
   "unreviewed",
 ] as const
 
-export type QueueAuditHandoffCertification = (typeof YRD_QUEUE_AUDIT_HANDOFF_CERTIFICATIONS)[number]
+export type QueueAuditReviewCertification = (typeof YRD_QUEUE_AUDIT_REVIEW_CERTIFICATIONS)[number]
 
 /** Every finding code `yrd queue audit` can emit, in ONE authoritative place.
  * It is the union of BOTH producers whose findings that command concatenates:
@@ -813,9 +819,9 @@ export type QueueAuditFindingCode = (typeof YRD_QUEUE_AUDIT_PAGE_FINDING_CODES)[
  * over {@link YRD_QUEUE_AUDIT_PAGE_FINDING_CODES}. Readers keep the open
  * `code: string` — a finding parsed back out of another process's JSON status is
  * data from a foreign version, not an emission, and must stay readable. The
- * same split applies to `handoffCertification`. */
-export type QueueAuditFindingEmission = Omit<QueueAuditFinding, "code" | "handoffCertification"> &
-  Readonly<{ code: QueueAuditFindingCode; handoffCertification?: QueueAuditHandoffCertification }>
+ * same split applies to `reviewCertification`. */
+export type QueueAuditFindingEmission = Omit<QueueAuditFinding, "code" | "reviewCertification"> &
+  Readonly<{ code: QueueAuditFindingCode; reviewCertification?: QueueAuditReviewCertification }>
 
 export type QueueAuditResult = Readonly<{ findings: readonly QueueAuditFinding[] }>
 

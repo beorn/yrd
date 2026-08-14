@@ -321,7 +321,7 @@ describe("draft stranded — a pushed PR that nobody submitted must age loudly, 
     it("certifies a draft nobody has looked at as unreviewed", async () => {
       const { app } = await pushedDraft()
       try {
-        expect(strandedFinding(app)?.handoffCertification).toBe("unreviewed")
+        expect(strandedFinding(app)?.reviewCertification).toBe("unreviewed")
       } finally {
         await app[Symbol.asyncDispose]()
       }
@@ -331,7 +331,7 @@ describe("draft stranded — a pushed PR that nobody submitted must age loudly, 
       const { app, pr } = await pushedDraft()
       try {
         await app.bays.requestReview({ pr: pr.id, reviewers: ["@cto"] })
-        expect(strandedFinding(app)?.handoffCertification).toBe("review-requested")
+        expect(strandedFinding(app)?.reviewCertification).toBe("review-requested")
       } finally {
         await app[Symbol.asyncDispose]()
       }
@@ -344,7 +344,7 @@ describe("draft stranded — a pushed PR that nobody submitted must age loudly, 
         await app.bays.review({ pr: pr.id, by: "@cto", decision: "reject" })
         // The verdict outranks the standing request: this draft waits on its
         // author, and calling it review-requested would page the wrong person.
-        expect(strandedFinding(app)?.handoffCertification).toBe("changes-requested")
+        expect(strandedFinding(app)?.reviewCertification).toBe("changes-requested")
       } finally {
         await app[Symbol.asyncDispose]()
       }
@@ -356,7 +356,7 @@ describe("draft stranded — a pushed PR that nobody submitted must age loudly, 
         await app.bays.review({ pr: pr.id, by: "@cto", decision: "approve" })
         // The worst specimen in the class: certified work, one command from the
         // queue, aging where nothing looks.
-        expect(strandedFinding(app)?.handoffCertification).toBe("approved")
+        expect(strandedFinding(app)?.reviewCertification).toBe("approved")
       } finally {
         await app[Symbol.asyncDispose]()
       }
@@ -366,12 +366,12 @@ describe("draft stranded — a pushed PR that nobody submitted must age loudly, 
       const { app, pr } = await pushedDraft()
       try {
         await app.bays.review({ pr: pr.id, by: "@cto", decision: "approve" })
-        expect(strandedFinding(app)?.handoffCertification).toBe("approved")
+        expect(strandedFinding(app)?.reviewCertification).toBe("approved")
         // A verdict is revision-bound. Pushing again strands NEW content, and a
         // certification that carried the old approval forward would lie about
         // what is uncertified.
         await app.bays.intake({ branch: "issue/stranded-draft", headSha: "4".repeat(40), base: "main", baseSha: BASE })
-        expect(strandedFinding(app)?.handoffCertification).toBe("unreviewed")
+        expect(strandedFinding(app)?.reviewCertification).toBe("unreviewed")
       } finally {
         await app[Symbol.asyncDispose]()
       }

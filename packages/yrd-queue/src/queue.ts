@@ -105,7 +105,7 @@ import {
   type IntegrationProof,
   type QueueAuditFinding,
   type QueueAuditFindingEmission,
-  type QueueAuditHandoffCertification,
+  type QueueAuditReviewCertification,
   type QueueAuditResult,
   type QueueAuthorityState,
   type QueueAuthorityToken,
@@ -5745,7 +5745,7 @@ function candidateRevisionMismatches(state: DeepReadonly<RuntimeState>): readonl
   return mismatches
 }
 
-/** How far a stranded draft got through handoff, from the PR's own review facts.
+/** How far a stranded draft got through review, from the PR's own review facts.
  *
  * `reviewState` already decides which verdict is CURRENT (same revision, same
  * head) and carries a rebuild's approval forward, so this reads that projection
@@ -5755,9 +5755,9 @@ function candidateRevisionMismatches(state: DeepReadonly<RuntimeState>): readonl
  *
  * Every branch here is decided by data the audit holds. The two states with no
  * such data — a stale base and an unrecoverable draft — are absent by
- * construction, not by omission; {@link YRD_QUEUE_AUDIT_HANDOFF_CERTIFICATIONS}
+ * construction, not by omission; {@link YRD_QUEUE_AUDIT_REVIEW_CERTIFICATIONS}
  * records why. */
-function draftHandoffCertification(pr: DeepReadonly<PR>): QueueAuditHandoffCertification {
+function draftReviewCertification(pr: DeepReadonly<PR>): QueueAuditReviewCertification {
   const decision = reviewState(pr).current?.decision
   if (decision === "approve") return "approved"
   if (decision === "reject") return "changes-requested"
@@ -5825,7 +5825,7 @@ function auditQueues(
         // recorded revision submitter and the review verdicts — never from a
         // seat guess or a live git read the audit cannot make.
         ...(revision.submitter === undefined ? {} : { submitter: revision.submitter }),
-        handoffCertification: draftHandoffCertification(pr),
+        reviewCertification: draftReviewCertification(pr),
         resolution: [`yrd pr submit ${pr.branch} --issue <ref>`, `or withdraw it: yrd pr withdraw ${pr.id}`],
       })
     }
