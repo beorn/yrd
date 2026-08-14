@@ -6,6 +6,7 @@
 import { describe, expect, expectTypeOf, it, vi } from "vitest"
 import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
 import {
+  checkRequest,
   createBayJobDefs,
   currentPRRev,
   prAdmission,
@@ -4109,26 +4110,20 @@ describe("Queue", () => {
     expect(app.queue.eligibility(pr.id)).toMatchObject({ checks: { status: "passed" } })
   })
 
-  it("records an admission whose base outran its check request", async () => {
-    // @i/10-merge-queue — the live drain wedge (PR943). Every required check
-    // passed, the verdict was never written, and `yrd queue run code --once`
-    // died on a raw Zod dump every pass: the record carried `requestCount: 0`
-    // and the fact schema demanded a positive count. The fleet's only landing
-    // path stayed shut for three consecutive passes.
+  it("refreshes the check identity of a pushed carrier the drain will admit", async () => {
+    // @yrd/core/refresh-coverage-gap, from the live drain wedge (PR943). Every
+    // required check passed, the verdict was never written, and `yrd queue run
+    // code --once` died on a raw Zod dump every pass with the fleet's only
+    // landing path shut behind it.
     //
-    // HOW ZERO ARISES. The drain admits against the CYCLE base — main as it is
-    // now. `refreshCheckIdentities` is what re-points a carrier's check request
-    // at that base, and it only ever walks the submitted/ready carriers; the
-    // admission queue also holds `pushed` ones. A carrier in that gap is
-    // admitted against a base no request of its own names, so the verdict
-    // consumes zero authorities recorded against its base.
-    //
-    // WHY ZERO MUST BE RECORDABLE rather than coerced away. A request's base is
-    // a PARAMETER of the request, not part of its identity (model.ts
-    // `checkRequest`), so it is MEANT to lag the queue's base — the state is
-    // ordinary, not corrupt. And `requestCount ?? 1` reads a missing count as
-    // one legacy authority, so omitting the field would assert an authority
-    // that was never granted and suppress the retry a real later request earns.
+    // THE GAP. The drain admits against the CYCLE base — main as it is now.
+    // `refreshCheckIdentities` is what re-points a carrier's check request at
+    // that base, and it was handed only the submitted/ready selection plus the
+    // refused ones; `drainAdmissions` admits from `admissionQueue`, which also
+    // holds `pushed` carriers. A carrier in that gap was admitted against a
+    // base no request of its own named, so its authority count resolved against
+    // the wrong triple and the verdict decided on evidence nobody had refreshed
+    // for it. The two sets are now the same set.
     const MOVED = "e".repeat(40)
     await using app = await createQueueApp({
       // Main advanced under the queue.
@@ -4136,13 +4131,13 @@ describe("Queue", () => {
       check: () => ({ status: "completed", conclusion: "success", output: { checked: true } }),
     })
 
-    // A submitted carrier, so the drain has something to walk. This one IS
-    // refreshed, and its verdict consumes the authority it was given.
+    // A submitted carrier, so the drain has something to walk. This one was
+    // always refreshed, and its verdict consumes the authority it was given.
     const submitted = await submitBranch(app, "issue/refreshed-carrier")
     await app.bays.requestChecks({ pr: submitted.id, baseSha: BASE })
 
     // The carrier in the gap: a rebuild left it `pushed`, which keeps it in the
-    // admission queue and out of every list `refreshCheckIdentities` walks.
+    // admission queue and out of every list the refresh used to walk.
     const stranded = await submitBranch(app, "issue/base-outran-request")
     await app.bays.recut({
       pr: stranded.id,
@@ -4160,6 +4155,13 @@ describe("Queue", () => {
 
     await app.queue.run({}, runtime)
 
+    // The claim: the carrier the drain admitted names the base it was admitted
+    // against. Not a count — a count of zero is a legal fact here and always
+    // was; what was wrong is that the identity behind it had never been
+    // re-pointed for this carrier at all.
+    expect(checkRequest(app.bays.pr(stranded.id)!)).toMatchObject({ baseSha: MOVED })
+    expect(checkRequest(app.bays.pr(submitted.id)!)).toMatchObject({ baseSha: MOVED })
+
     expect(prAdmission(app.bays.pr(submitted.id)!)).toMatchObject({
       status: "passed",
       baseSha: MOVED,
@@ -4168,8 +4170,31 @@ describe("Queue", () => {
     expect(prAdmission(app.bays.pr(stranded.id)!)).toMatchObject({
       status: "passed",
       baseSha: MOVED,
-      requestCount: 0,
+      requestCount: 1,
     })
+  })
+
+  it("mints no check request for a carrier that never asked for one", async () => {
+    // @yrd/core/refresh-coverage-gap, the exclusion the widened refresh keeps.
+    // `refreshCheckIdentities` re-points an identity; it never mints one. A
+    // carrier with no live check request has nothing to re-point, and granting
+    // it a request would push it into the admission queue on the strength of a
+    // housekeeping pass rather than anything its author asked for.
+    const MOVED = "e".repeat(40)
+    await using app = await createQueueApp({
+      resolveBaseSha: () => MOVED,
+      check: () => ({ status: "completed", conclusion: "success", output: { checked: true } }),
+    })
+
+    const asked = await submitBranch(app, "issue/asked-for-checks")
+    await app.bays.requestChecks({ pr: asked.id, baseSha: BASE })
+    const silent = await submitBranch(app, "issue/never-asked-for-checks")
+
+    await app.queue.run({}, runtime)
+
+    expect(checkRequest(app.bays.pr(asked.id)!)).toMatchObject({ baseSha: MOVED })
+    expect(app.bays.pr(silent.id)!.checkRequests).toEqual([])
+    expect(prAdmission(app.bays.pr(silent.id)!)).toBeUndefined()
   })
 
   it("counts the check requests a byte-identical rebuild carried into a new ordinal", async () => {

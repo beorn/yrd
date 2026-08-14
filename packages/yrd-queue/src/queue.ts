@@ -1432,6 +1432,22 @@ function createQueue<Shape extends PRShape>(
     return result
   }
 
+  /**
+   * Re-point each carrier's check request at this cycle's base.
+   *
+   * THE SET PASSED IN MUST BE THE SET THE DRAIN ADMITS FROM. A carrier admitted
+   * against a base that no check request of its own names has its authority
+   * counted against the wrong triple, so the verdict decides on evidence nobody
+   * refreshed for it — the shape that shut the fleet's only landing path
+   * (@yrd/core/refresh-coverage-gap). Callers get that set from
+   * {@link admissionQueue} when the drain is selectorless and from their own
+   * explicit targets when it is not; see the compose path below.
+   *
+   * DELIBERATELY EXCLUDED: a carrier with no live check request. This re-points
+   * an identity, it never mints one — granting a request to a carrier that
+   * never asked for checks would push it into the admission queue on the
+   * strength of a housekeeping pass.
+   */
   const refreshCheckIdentities = async (
     prs: readonly DeepReadonly<PR>[],
     resolveCycleBase: CycleBaseResolver | undefined,
@@ -2420,12 +2436,35 @@ function createQueue<Shape extends PRShape>(
             ? []
             : [...requested, ...refusedAdmissions].filter((pr) => !authorityGapIds.has(pr.id) && checksRequested(pr))
           const before = new Map(checked.map((pr) => [pr.id, checkEligibility(snapshot, pr, steps).status]))
+          // Every carrier this drain can ADMIT, which is strictly more than the
+          // ones it selected for landing. A selectorless `drainAdmissions` walks
+          // `admissionQueue` unfiltered — it applies `targets` only for an
+          // explicit selection — and that queue also holds `pushed` carriers,
+          // which `requestedPRs` never returns and `refusedRevisionAdmissions`
+          // does not reach either. Refreshing only `checked` therefore admitted
+          // a carrier in that gap against a base no check request of its own
+          // named, so its authority count resolved against the wrong triple
+          // (@yrd/core/refresh-coverage-gap).
+          //
+          // DELIBERATELY EXCLUDED: carriers this cycle already ejected for an
+          // authority gap. The cycle has decided they do not run and handed
+          // them back to their author; re-pointing one would mint a check
+          // request for work just refused. That is the same exclusion `checked`
+          // has always applied, extended to the wider set rather than a second
+          // policy. Carriers a live run holds need no exclusion of their own:
+          // their admission still matches their request, so `admissionQueue`
+          // drops them structurally.
+          const admissible = selectorless
+            ? admissionQueue(snapshot, steps).filter((pr) => !authorityGapIds.has(pr.id))
+            : []
+          const checkedIds = new Set(checked.map((pr) => pr.id))
+          const refreshable = [...checked, ...admissible.filter((pr) => !checkedIds.has(pr.id))]
           // Admission is revision-owned evidence, not a Queue Run. Revalidate
           // each requested revision against this cycle's base before selecting
           // landing work. The driver still settles any historical active
           // admission Run before recording a new immutable revision verdict.
           try {
-            await refreshCheckIdentities(checked, resolveCycleBase)
+            await refreshCheckIdentities(refreshable, resolveCycleBase)
             const currentChecked = checked.flatMap((pr) => {
               const current = resolvePR(runtime().bays, pr.id)
               return current === undefined ? [] : [current]
