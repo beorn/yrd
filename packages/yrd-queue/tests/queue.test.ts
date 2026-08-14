@@ -31,6 +31,8 @@ import { localRunner, withJobs, type JobResult, type Jobs, type Runner, type Run
 import { defineConfig, selectFlow, yrd, type YrdConfig } from "@yrd/config"
 import * as z from "zod"
 import {
+  DEFAULT_QUEUE_BATCH_SIZE,
+  effectiveBatchSize,
   withQueue,
   projectQueueStarted,
   withMerge,
@@ -70,6 +72,24 @@ const BASE = "a".repeat(40)
 const MERGED = "b".repeat(40)
 const UPDATED = "3".repeat(40)
 const runtime = { runner: "local", leaseMs: 60_000 }
+
+describe("queue batch policy", () => {
+  it.each([
+    [undefined, 10],
+    [false, 1],
+    [0, 1],
+    [1, 1],
+    [2, 2],
+    [10, 10],
+  ] as const)("normalizes %s to the effective batch size %s", (configured, expected) => {
+    expect(effectiveBatchSize(configured)).toBe(expected)
+  })
+
+  it("keeps the built-in default explicit", () => {
+    expect(DEFAULT_QUEUE_BATCH_SIZE).toBe(10)
+  })
+})
+
 const CheckResultSchema = z.object({ checked: z.boolean() }).strict()
 const ReviewResultSchema = z.object({ approved: z.boolean() }).strict()
 const DeployResultSchema = z.object({ environment: z.string() }).strict()

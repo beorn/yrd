@@ -5,7 +5,7 @@
  * @consumer @yrd/cli configuration
  */
 import { describe, expect, it } from "vitest"
-import { DEFAULT_QUEUE_PROGRESS_POLICY } from "@yrd/queue"
+import { DEFAULT_QUEUE_BATCH_SIZE, DEFAULT_QUEUE_PROGRESS_POLICY } from "@yrd/queue"
 import { loadYrdConfig, parseYrdConfig, renderYrdConfigScaffold, stepGateMode } from "../src/config.ts"
 
 describe("Yrd v4 config", () => {
@@ -18,6 +18,7 @@ describe("Yrd v4 config", () => {
 
     expect(loaded.config).toMatchObject({
       base: "main",
+      batch: DEFAULT_QUEUE_BATCH_SIZE,
       checks: ["typecheck"],
       steps: ["typecheck", "merge"],
       definitions: {

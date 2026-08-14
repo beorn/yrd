@@ -1289,7 +1289,7 @@ the branch, and pushes.
 
 ### Batching
 
-Top-level `batch` in `.yrd.yml` is the maximum batch size and defaults to `1`. `false`, `0`, and
+Top-level `batch` in `.yrd.yml` is the maximum batch size and defaults to `10`. `false`, `0`, and
 `1` disable batching. A value above one tests candidates together. A failing batch is recursively
 bisected until Yrd identifies the failing PRs, while passing subsets continue.
 Bisection is the queue plugin's fixed isolation policy, not another config axis.
