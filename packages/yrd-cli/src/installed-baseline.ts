@@ -14,6 +14,7 @@ const InstalledBaselineSchema = z
     base: z.string().trim().min(1),
     baseSha: z.string().regex(/^[0-9a-f]{40}$/u),
     installedAt: z.iso.datetime({ offset: true }),
+    batchSize: z.number().int().min(1).optional(),
     steps: z.array(ReplayInstalledStepSchema).min(1),
   })
   .strict()
@@ -29,6 +30,14 @@ export type InstalledBaseline = Readonly<{
   base: string
   baseSha: string
   installedAt: string
+  /** Absent only on a pre-batch-descriptor v1 file; audit routes it through
+   * the ordinary deinit/init migration instead of guessing a default. */
+  batchSize?: number
+  steps: readonly InstalledStep[]
+}>
+
+export type InstalledQueueDescriptor = Readonly<{
+  batchSize: number
   steps: readonly InstalledStep[]
 }>
 
@@ -155,11 +164,16 @@ const RUNTIME_VOCABULARY: StepPlanVocabulary = {
 
 function stepPlanDeltas(
   baseline: InstalledBaseline,
-  live: readonly InstalledStep[],
+  live: InstalledQueueDescriptor,
   vocabulary: StepPlanVocabulary,
 ): string[] {
-  const liveByName = new Map(live.map((step) => [step.name, step] as const))
   const deltas: string[] = []
+  if (baseline.batchSize === undefined) {
+    deltas.push(`batch size is absent from the installed baseline, ${vocabulary.live} ${String(live.batchSize)}`)
+  } else if (baseline.batchSize !== live.batchSize) {
+    deltas.push(`batch size ${String(baseline.batchSize)} installed, ${vocabulary.live} ${String(live.batchSize)}`)
+  }
+  const liveByName = new Map(live.steps.map((step) => [step.name, step] as const))
   for (const installed of baseline.steps) {
     const liveStep = liveByName.get(installed.name)
     if (liveStep === undefined) {
@@ -177,7 +191,7 @@ function stepPlanDeltas(
     }
   }
   const installedNames = new Set(baseline.steps.map((step) => step.name))
-  for (const liveStep of live) {
+  for (const liveStep of live.steps) {
     if (!installedNames.has(liveStep.name)) {
       deltas.push(
         `step '${liveStep.name}' (${vocabulary.live} revision '${shortRevision(liveStep.revision)}') is not in the installed baseline`,
@@ -188,7 +202,7 @@ function stepPlanDeltas(
   // steps leaves every per-step delta empty. Compare the ORDERED plan (restricted
   // to steps present on both sides) so a reorder is still caught as drift.
   const installedSequence = baseline.steps.map((step) => step.name).filter((name) => liveByName.has(name))
-  const liveSequence = live.map((step) => step.name).filter((name) => installedNames.has(name))
+  const liveSequence = live.steps.map((step) => step.name).filter((name) => installedNames.has(name))
   if (installedSequence.length > 0 && installedSequence.join(">") !== liveSequence.join(">")) {
     deltas.push(
       `step order changed: installed ${installedSequence.join("→")}, ${vocabulary.live} ${liveSequence.join("→")}`,
@@ -202,7 +216,7 @@ function stepPlanDeltas(
  * operator gets exactly one deinit/init migration remedy per base. */
 export function installedBaselineDrift(
   baseline: InstalledBaseline,
-  current: readonly InstalledStep[],
+  current: InstalledQueueDescriptor,
 ): QueueAuditFindingEmission | undefined {
   const deltas = stepPlanDeltas(baseline, current, CONFIG_VOCABULARY)
   if (deltas.length === 0) return undefined
@@ -219,7 +233,7 @@ export function installedBaselineDrift(
  * process, not another baseline migration. */
 export function runtimeBaselineDrift(
   baseline: InstalledBaseline,
-  runtime: readonly InstalledStep[],
+  runtime: InstalledQueueDescriptor,
 ): QueueAuditFindingEmission | undefined {
   const deltas = stepPlanDeltas(baseline, runtime, RUNTIME_VOCABULARY)
   if (deltas.length === 0) return undefined
