@@ -3573,9 +3573,20 @@ function pinIntentCommitMessage(component: string, target: string, issue: string
   return `chore(${component.split("/").at(-1) ?? component}): advance pin to ${target.slice(0, 12)} [${issue}]`
 }
 
+/** Marks a queue-synthesized wrapper commit as the synthesis act rather than the change itself.
+ *
+ * Derived from the change identity, so it needs no second minting function and stays
+ * reconstructable from the Change-Id alone. Git matches a trailer key whole, so this never
+ * widens what `%(trailers:key=Change-Id)` returns to the ancestry proof.
+ */
+function mergeChangeIdFor(operation: "compose" | "merge", changeId: string): string {
+  return `${changeId}-${operation}`
+}
+
 function candidateChangeCommitMessage(operation: "compose" | "merge", pr: StepExecution["prs"][number]): string {
   const subject = `yrd: ${operation} ${pr.id} revision ${String(pr.revision)}`
-  return pr.changeId === undefined ? subject : `${subject}\n\nChange-Id: ${pr.changeId}`
+  if (pr.changeId === undefined) return subject
+  return `${subject}\n\nChange-Id: ${pr.changeId}\nMerge-Change-Id: ${mergeChangeIdFor(operation, pr.changeId)}`
 }
 
 async function composePR(
