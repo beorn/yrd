@@ -6,15 +6,19 @@
  * @level l2
  * @consumer @yrd/queue scratch storage
  */
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { existsSync } from "node:fs"
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import {
+  describeScratchReap,
   describeStorageState,
   isStorageExhaustion,
+  ORPHANED_SCRATCH_MAX_AGE_MS,
   queueScratchParent,
   readStorageState,
+  reapOrphanedScratch,
   storageExhaustionError,
   WORKTREE_STORAGE_EXHAUSTED,
 } from "../src/scratch-storage.ts"
@@ -210,5 +214,72 @@ describe("storageExhaustionError — the typed failure", () => {
     expect(evidence.kind).toBe("storage-exhaustion")
     expect(evidence.inodesTotal).toBeGreaterThan(0)
     expect(evidence.bytesTotal).toBeGreaterThan(0)
+  })
+})
+
+describe("reapOrphanedScratch — scratch a killed process could not clean up", () => {
+  async function scratchRoot(): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), "yrd-scratch-reap-"))
+    roots.push(root)
+    return root
+  }
+
+  /** A scratch entry as `withScratchRoot` leaves it: a directory holding a worktree. */
+  async function entry(root: string, name: string, ageMs: number): Promise<string> {
+    const path = join(root, name)
+    await mkdir(join(path, "worktree"), { recursive: true })
+    await writeFile(join(path, "worktree", "file.txt"), "x".repeat(64))
+    const at = new Date(Date.now() - ageMs)
+    await utimes(join(path, "worktree", "file.txt"), at, at)
+    await utimes(path, at, at)
+    return path
+  }
+
+  it("removes only entries past the threshold, and reports the denominator it chose from", async () => {
+    const root = await scratchRoot()
+    const abandoned = await entry(root, "yrd-queue-abandoned", 48 * 60 * 60 * 1000)
+    const fresh = await entry(root, "yrd-queue-fresh", 60 * 1000)
+
+    const report = await reapOrphanedScratch(root)
+
+    expect(report).toMatchObject({ root, entries: 2, reaped: 1, kept: 1, failures: [] })
+    expect(report.bytes).toBeGreaterThan(0)
+    expect(existsSync(abandoned)).toBe(false)
+    expect(existsSync(fresh)).toBe(true)
+    // The count is worthless without what it was drawn from: "reaped 1" alone
+    // cannot distinguish a healthy sweep from one that missed 400 entries.
+    expect(describeScratchReap(report)).toContain("1 of 2")
+  })
+
+  it("never reaps an entry git still lists as a live worktree, however old", async () => {
+    const root = await scratchRoot()
+    const live = await entry(root, "yrd-queue-live", 48 * 60 * 60 * 1000)
+
+    const report = await reapOrphanedScratch(root, { keep: new Set([live]) })
+
+    expect(report).toMatchObject({ entries: 1, reaped: 0, kept: 1 })
+    expect(existsSync(live)).toBe(true)
+  })
+
+  it("never reaps an entry it did not create, however old — a shared parent holds other work", async () => {
+    const root = await scratchRoot()
+    const foreign = await entry(root, "someone-elses-checkout", 48 * 60 * 60 * 1000)
+
+    const report = await reapOrphanedScratch(root)
+
+    expect(report).toMatchObject({ entries: 1, reaped: 0, kept: 1 })
+    expect(existsSync(foreign)).toBe(true)
+  })
+
+  it("treats an absent scratch root as nothing-prepared-yet, not a failure", async () => {
+    const root = join(await scratchRoot(), "never-created")
+
+    const report = await reapOrphanedScratch(root)
+
+    expect(report).toMatchObject({ root, entries: 0, reaped: 0, kept: 0, bytes: 0, failures: [] })
+  })
+
+  it("defaults to a full day, so a job running under its own timeout is never swept", () => {
+    expect(ORPHANED_SCRATCH_MAX_AGE_MS).toBe(24 * 60 * 60 * 1000)
   })
 })
