@@ -23,7 +23,7 @@ import {
 import { compareNatural, JsonSchema, resolveSelector, type JsonValue } from "@yrd/core"
 import type { FlowPin, StepKind } from "@yrd/config"
 import { JobErrorSchema, type Job, type JobError } from "@yrd/job"
-import { PinIntentAuthoredSchema, PinIntentEvaluationSchema } from "@yrd/intent"
+import { IntentRecordIdSchema, PinIntentAuthoredSchema, PinIntentEvaluationSchema } from "@yrd/intent"
 import * as z from "zod"
 import {
   projectionLookupGet,
@@ -61,11 +61,17 @@ const PRSnapshotRecutProofSchema = PRRecutProofSchema.extend({
   sourceHeadSha: GitShaSchema.optional(),
 }).strict()
 
-const IntentMemberIdSchema = z.string().regex(/^I\d+$/u)
-export const QueueMemberIdSchema = z.union([PRIdSchema, IntentMemberIdSchema])
+/**
+ * NOTE: this union does not discriminate. `PRIdSchema` is `z.string().min(1)`,
+ * so it already accepts every intent id and the right arm never decides
+ * anything — a queue member id parses as a PR id whatever it looks like.
+ * Tightening `PRIdSchema` is out of scope here and tracked separately; the
+ * alternation below is written for the reader, not for the parser.
+ */
+export const QueueMemberIdSchema = z.union([PRIdSchema, IntentRecordIdSchema])
 export const QueueIntentSnapshotSchema = z
   .object({
-    id: IntentMemberIdSchema,
+    id: IntentRecordIdSchema,
     authored: PinIntentAuthoredSchema,
     evaluated: PinIntentEvaluationSchema,
   })

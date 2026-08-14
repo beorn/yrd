@@ -14266,7 +14266,7 @@ describe("yrd intent — declared pin advances (22668 phase 1)", () => {
       admission: { relation: string; currentPin: string }
     }
     expect(result.command).toBe("intent.submit")
-    expect(result.intent).toMatchObject({ id: "I1", component: COMPONENT, target: TARGET_SHA, status: "open" })
+    expect(result.intent).toMatchObject({ id: "yrdpin#1", component: COMPONENT, target: TARGET_SHA, status: "open" })
     expect(result.admission).toMatchObject({ relation: "advance", currentPin: CURRENT_PIN })
   })
 
@@ -14329,20 +14329,32 @@ describe("yrd intent — declared pin advances (22668 phase 1)", () => {
 
     const listed = outputIO()
     expect(await runYrd(app, yrd("intent", "list", "--json"), listed.io), listed.stderr()).toBe(0)
-    expect(JSON.parse(listed.stdout())).toMatchObject({ command: "intent.list", intents: [{ id: "I1" }] })
+    expect(JSON.parse(listed.stdout())).toMatchObject({ command: "intent.list", intents: [{ id: "yrdpin#1" }] })
 
     const shown = outputIO()
-    expect(await runYrd(app, yrd("intent", "show", "I1", "--json"), shown.io), shown.stderr()).toBe(0)
-    expect(JSON.parse(shown.stdout())).toMatchObject({ command: "intent.show", intent: { id: "I1", status: "open" } })
+    expect(await runYrd(app, yrd("intent", "show", "yrdpin#1", "--json"), shown.io), shown.stderr()).toBe(0)
+    expect(JSON.parse(shown.stdout())).toMatchObject({
+      command: "intent.show",
+      intent: { id: "yrdpin#1", status: "open" },
+    })
+
+    // The bare number is the spelling an operator can type unquoted: zsh under
+    // `extendedglob` reads an unquoted `#` as the start of a comment.
+    const byNumber = outputIO()
+    expect(await runYrd(app, yrd("intent", "show", "1", "--json"), byNumber.io), byNumber.stderr()).toBe(0)
+    expect(JSON.parse(byNumber.stdout())).toMatchObject({
+      command: "intent.show",
+      intent: { id: "yrdpin#1", status: "open" },
+    })
 
     const withdrawn = outputIO()
     expect(
-      await runYrd(app, yrd("intent", "withdraw", "I1", "--reason", "not needed", "--json"), withdrawn.io),
+      await runYrd(app, yrd("intent", "withdraw", "yrdpin#1", "--reason", "not needed", "--json"), withdrawn.io),
       withdrawn.stderr(),
     ).toBe(0)
     expect(JSON.parse(withdrawn.stdout())).toMatchObject({
       command: "intent.withdraw",
-      intent: { id: "I1", status: "withdrawn", disposition: { code: "intent-withdrawn", reason: "not needed" } },
+      intent: { id: "yrdpin#1", status: "withdrawn", disposition: { code: "intent-withdrawn", reason: "not needed" } },
     })
   })
 
@@ -14377,12 +14389,12 @@ describe("yrd intent — declared pin advances (22668 phase 1)", () => {
 
     const closed = outputIO()
     expect(
-      await runYrd(app, yrd("intent", "close", "I1", "--reason", "superseded", "--json"), closed.io),
+      await runYrd(app, yrd("intent", "close", "yrdpin#1", "--reason", "superseded", "--json"), closed.io),
       closed.stderr(),
     ).toBe(0)
     expect(JSON.parse(closed.stdout())).toMatchObject({
       command: "intent.withdraw",
-      intent: { id: "I1", status: "withdrawn", disposition: { code: "intent-withdrawn", reason: "superseded" } },
+      intent: { id: "yrdpin#1", status: "withdrawn", disposition: { code: "intent-withdrawn", reason: "superseded" } },
     })
   })
 
@@ -14522,7 +14534,7 @@ describe("yrd intent — declared pin advances (22668 phase 1)", () => {
       forced.stderr(),
     ).toBe(0)
     expect(JSON.parse(forced.stdout())).toMatchObject({
-      intent: { supersedeConsent: "forced", supersededIntent: "I1" },
+      intent: { supersedeConsent: "forced", supersededIntent: "yrdpin#1" },
     })
   })
 })

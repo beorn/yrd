@@ -12,7 +12,7 @@ import { command, createMemoryJournal, createYrd, createYrdDef, event, failureFa
 import { withIssues } from "@yrd/issue"
 import { describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
-import { PIN_INTENT_SCHEMA, PinIntentIntegratedFactSchema, withIntents } from "../src/index.ts"
+import { PIN_INTENT_SCHEMA, PinIntentIntegratedFactSchema, PinIntentSchema, withIntents } from "../src/index.ts"
 
 const SILVERY = "components/alpha"
 const FLEXILY = "components/beta"
@@ -47,13 +47,20 @@ async function createApp(journal: ReturnType<typeof createMemoryJournal> = creat
     params: PinIntentIntegratedFactSchema,
     apply: (_state, args) => ({ events: [event("intent/integrated", args)] }),
   })
+  /** Writes a record under a caller-chosen id, so a test can stand up the
+   * `I<n>` rows a live journal still holds without re-minting them. */
+  const admitVerbatim = command({
+    title: "Emit an intent record fixture under a given id",
+    params: PinIntentSchema.omit({ submittedAt: true, status: true }).strict(),
+    apply: (_state, args) => ({ events: [event("intent/submitted", args)] }),
+  })
   const definition = pipe(
     createYrdDef(),
     withIssues({
       sources: [{ id: "km", resolve: (ref) => (ref.id.startsWith("@") ? { ref, title: "Bump" } : undefined) }],
     }),
     withIntents(),
-  ).extend({ commands: { fixture: { integrate } } })
+  ).extend({ commands: { fixture: { integrate, admitVerbatim } } })
   return createYrd(definition, {
     inject: { journal, clock: () => "2026-07-31T12:00:00.000Z", log: createLogger("test", [{ level: "silent" }]) },
   })
@@ -87,12 +94,28 @@ async function submit(
   })
 }
 
+/** Admit a record under an exact id, standing up the pre-rename `I<n>` rows a
+ * live journal still carries. */
+async function admitVerbatim(app: App, id: string, intentId: string, component: string = SILVERY) {
+  const issue = await app.issues.resolve(app.issues.ref("@yrd/core/22668-admit-intents"))
+  await app.dispatch(app.commands.fixture.admitVerbatim, {
+    schema: PIN_INTENT_SCHEMA,
+    id,
+    intentId,
+    issue: issue.ref,
+    component,
+    target: TARGET,
+    preconditions: { targetPublished: true, targetDescendsFromCurrentPin: true },
+    submitter: "@dev/8",
+  })
+}
+
 describe("PinIntentV1 journal records (22668 phase 1)", () => {
   it("admits an intent as an open record with a human counter id", async () => {
     await using app = await createApp()
     const record = await submit(app, { intentId: uuid(1), target: TARGET })
 
-    expect(record.id).toBe("I1")
+    expect(record.id).toBe("yrdpin#1")
     expect(record.schema).toBe(PIN_INTENT_SCHEMA)
     expect(record.intentId).toBe(uuid(1))
     expect(record.component).toBe(SILVERY)
@@ -163,7 +186,7 @@ describe("PinIntentV1 journal records (22668 phase 1)", () => {
     const first = await submit(app, { intentId: uuid(1), target: TARGET })
     const second = await submit(app, { intentId: uuid(2), target: OTHER_TARGET })
 
-    expect(second.id).toBe("I2")
+    expect(second.id).toBe("yrdpin#2")
     expect(app.intents.get(first.id)?.status).toBe("superseded")
     expect(app.intents.get(first.id)?.supersededBy).toBe(second.id)
     expect(app.intents.get(second.id)?.status).toBe("open")
@@ -244,7 +267,7 @@ describe("PinIntentV1 journal records (22668 phase 1)", () => {
 
   it("refuses withdrawing an unknown intent", async () => {
     await using app = await createApp()
-    expect(await refusalCode(app.intents.withdraw("I9", "nope"))).toBe("intent-not-found")
+    expect(await refusalCode(app.intents.withdraw("yrdpin#9", "nope"))).toBe("intent-not-found")
   })
 
   it("terminal records hold NO queue position (design 6.1 invariant 1)", async () => {
@@ -302,7 +325,7 @@ describe("PinIntentV1 journal records (22668 phase 1)", () => {
     }
 
     await using replayed = await createApp(journal)
-    expect(replayed.intents.get("I1")?.integration?.landing.commit).toBe(LANDING)
+    expect(replayed.intents.get("yrdpin#1")?.integration?.landing.commit).toBe(LANDING)
     expect(replayed.intents.queued()).toEqual([])
   })
 
@@ -349,12 +372,70 @@ describe("PinIntentV1 journal records (22668 phase 1)", () => {
     await using replayed = await createApp(journal)
 
     expect(replayed.intents.list().map((intent) => [intent.id, intent.status])).toEqual([
-      ["I1", "withdrawn"],
-      ["I2", "superseded"],
-      ["I3", "open"],
+      ["yrdpin#1", "withdrawn"],
+      ["yrdpin#2", "superseded"],
+      ["yrdpin#3", "open"],
     ])
-    expect(replayed.intents.queued().map((intent) => intent.id)).toEqual(["I3"])
-    expect(replayed.intents.get("I2")?.supersededBy).toBe("I3")
+    expect(replayed.intents.queued().map((intent) => intent.id)).toEqual(["yrdpin#3"])
+    expect(replayed.intents.get("yrdpin#2")?.supersededBy).toBe("yrdpin#3")
+  })
+
+  /**
+   * The counter reads BOTH minted forms. A counter that scanned only
+   * `yrdpin#<n>` would see an empty set beside a live `I161`, restart at 1, and
+   * put a second record on screen wearing a number the operator already knows.
+   * Live journals hold `I1`..`I161`, so this is the state the next mint meets.
+   */
+  it("mints past the highest number in either id form, never restarting at 1", async () => {
+    await using app = await createApp()
+    await admitVerbatim(app, "I161", uuid(161))
+
+    const next = await submit(app, { intentId: uuid(162), target: TARGET })
+
+    expect(next.id).toBe("yrdpin#162")
+    expect(next.id).not.toBe("yrdpin#1")
+  })
+
+  it("keeps minting forward when both id forms are already present", async () => {
+    await using app = await createApp()
+    await admitVerbatim(app, "I161", uuid(161))
+    await admitVerbatim(app, "yrdpin#170", uuid(170), FLEXILY)
+
+    const next = await submit(app, { intentId: uuid(171), component: "components/gamma", target: TARGET })
+
+    expect(next.id).toBe("yrdpin#171")
+  })
+
+  it("selects a record by its stored key and by the bare number, in either form", async () => {
+    await using app = await createApp()
+    await admitVerbatim(app, "I161", uuid(161))
+    const minted = await submit(app, { intentId: uuid(162), component: FLEXILY, target: TARGET })
+
+    // A record named `I161` IS `I161`: the stored key is what resolves.
+    expect(app.intents.get("I161")?.id).toBe("I161")
+    expect(app.intents.get("161")?.id).toBe("I161")
+    expect(app.intents.get("yrdpin#162")?.id).toBe(minted.id)
+    // The bare number is the shell-safe spelling — no `#` for zsh to eat.
+    expect(app.intents.get("162")?.id).toBe(minted.id)
+    expect(app.intents.get("999")).toBeUndefined()
+  })
+
+  it("closes an intent selected by its bare number", async () => {
+    await using app = await createApp()
+    const record = await submit(app, { intentId: uuid(1), target: TARGET })
+
+    const closed = await app.intents.withdraw("1", "picked by number")
+
+    expect(closed.id).toBe(record.id)
+    expect(closed.status).toBe("withdrawn")
+  })
+
+  it("refuses a bare number that both id forms answer to, rather than picking one", async () => {
+    await using app = await createApp()
+    await admitVerbatim(app, "I7", uuid(7))
+    await admitVerbatim(app, "yrdpin#7", uuid(8), FLEXILY)
+
+    expect(() => app.intents.get("7")).toThrow(/ambiguous/u)
   })
 
   it("journals and replays the pin tombstone that invalidates stale desired state", async () => {

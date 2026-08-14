@@ -3,6 +3,7 @@ import {
   event,
   journalEvent,
   raiseFailure,
+  resolveSelector,
   type CommandTree,
   type DeepReadonly,
   type Event,
@@ -21,8 +22,10 @@ import {
   PinTombstoneArgsSchema,
   PinTombstoneSchema,
   PinIntentSchema,
+  INTENT_ID_PREFIX,
   TERMINAL_INTENT_STATUSES,
   intentFingerprint,
+  intentIdNumber,
   intentKey,
   recordFingerprint,
   type HasIntents,
@@ -108,17 +111,21 @@ export function withIntents() {
             return record
           },
           async withdraw(intent, reason) {
+            // Resolve before dispatch: the command applies against the stored
+            // key, so a bare-number selector must become one here.
+            const selected = bySelector(state(), intent)
+            const id = selected?.id ?? intent
             await yrd.dispatch(commands.intent.withdraw, {
-              intent,
+              intent: id,
               ...(reason === undefined ? {} : { reason }),
             })
-            const record = state().records[intent]
+            const record = state().records[id]
             if (record === undefined) {
               raiseFailure("infrastructure", "intent-withdrawal-lost", `yrd: intent '${intent}' was not closed`)
             }
             return record
           },
-          get: (intent) => state().records[intent],
+          get: (intent) => bySelector(state(), intent),
           live: (issue, component) => liveIntent(state(), issue, component),
           list: () => ordered(state()),
           queued: () => ordered(state()).filter((record) => !TERMINAL_INTENT_STATUSES.has(record.status)),
@@ -403,6 +410,31 @@ function ordered(state: IntentsState): readonly PinIntent[] {
   })
 }
 
+/**
+ * Resolve operator input to a record.
+ *
+ * The stored key always resolves. A bare number resolves too — the verb
+ * disambiguates (`yrd intent show 162`), and it spares the operator a `#`,
+ * which zsh treats as a comment start under `extendedglob` unless quoted. Both
+ * forms carry the bare number as an alias, so if a `yrdpin#<n>` and an `I<n>`
+ * ever shared a number the core selector refuses as ambiguous rather than
+ * picking one — the counter is what prevents that pair from being minted.
+ */
+function bySelector(state: DeepReadonly<IntentsState> | IntentsState, selector: string): PinIntent | undefined {
+  return resolveSelector(
+    selector,
+    Object.values(state.records).map((record) => {
+      const number = intentIdNumber((record as PinIntent).id)
+      return {
+        canonical: (record as PinIntent).id,
+        aliases: number === undefined ? [] : [String(number)],
+        value: record as PinIntent,
+      }
+    }),
+    { kind: "intent" },
+  )
+}
+
 function byIntentId(state: DeepReadonly<IntentsState> | IntentsState, intentId: string): PinIntent | undefined {
   for (const record of Object.values(state.records)) {
     if (record.intentId === intentId) return record as PinIntent
@@ -434,11 +466,22 @@ function liveIntent(
   return undefined
 }
 
+/**
+ * The next record id, always minted `yrdpin#<n>`.
+ *
+ * The scan reads BOTH id forms, permanently. Records minted before the rename
+ * hold the low numbers under `I<n>` keys, so a counter blind to them would find
+ * an empty set, restart at 1, and mint `yrdpin#1` alongside a live `I1` — two
+ * records wearing one number on the same screen. There is no point at which the
+ * old form stops mattering: as long as a journal holds an `I<n>` record, that
+ * number is taken.
+ */
 function nextIntentId(records: DeepReadonly<Record<string, PinIntent>> | Record<string, PinIntent>): string {
-  const values = Object.keys(records)
-    .filter((id) => /^I\d+$/u.test(id))
-    .map((id) => Number(id.slice(1)))
-  return `I${Math.max(0, ...values) + 1}`
+  const values = Object.keys(records).flatMap((id) => {
+    const value = intentIdNumber(id)
+    return value === undefined ? [] : [value]
+  })
+  return `${INTENT_ID_PREFIX}${Math.max(0, ...values) + 1}`
 }
 
 function nextTombstoneId(records: DeepReadonly<Record<string, PinTombstone>> | Record<string, PinTombstone>): string {

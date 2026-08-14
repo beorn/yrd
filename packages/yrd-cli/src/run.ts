@@ -10170,7 +10170,7 @@ function buildProgram(
     .action(async (options) => listIntents(installed(), options, io))
   intent
     .command("show <intent>")
-    .description("record, preconditions, and disposition")
+    .description("record, preconditions, and disposition; <intent> is yrdpin#162 or just 162")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => setExit(await showIntent(installed(), selector, options, io)))
   intent
@@ -10178,7 +10178,7 @@ function buildProgram(
     // learned it, the same way the retired status words still parse.
     .command("close <intent>")
     .silentAlias("withdraw")
-    .description("close an open intent")
+    .description("close an open intent; <intent> is yrdpin#162 or just 162")
     .option("--reason <text>", "why the intent is closed")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => withdrawIntent(installed(), selector, options, io))

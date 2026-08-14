@@ -13,6 +13,34 @@ const IntentIdSchema = z
 const CandidateIdSchema = z.string().regex(/^C\d+$/u, "expected a Candidate id")
 const RunIdSchema = z.string().regex(/^R\d+$/u, "expected a Run id")
 
+/** The prefix every newly minted intent record carries. */
+export const INTENT_ID_PREFIX = "yrdpin#"
+
+/**
+ * An intent record id, in either minted form.
+ *
+ * `yrdpin#<n>` is what {@link INTENT_ID_PREFIX} mints. `I<n>` is what the
+ * counter minted before it, and live journals still carry records under those
+ * keys — this alternation is the shape of the real data, not a compatibility
+ * allowance. A replay parses every historical `intent/submitted` event, so a
+ * schema that accepted only the new form would refuse to load journals that
+ * already exist. Nothing renders one form as the other: a record named `I148`
+ * IS `I148`, and only new records are born `yrdpin#`.
+ *
+ * `I<n>` also collided with `ChangeIdSchema` (`I` + 40 hex) on its prefix;
+ * retiring it from the mint is what closes that collision going forward.
+ */
+export const IntentRecordIdSchema = z.string().regex(/^(?:I|yrdpin#)\d+$/u, "expected an intent id, e.g. yrdpin#162")
+
+const INTENT_ID_NUMBER = /^(?:I|yrdpin#)(\d+)$/u
+
+/** The counter value inside an intent id, in either form; `undefined` when the
+ * string is not an intent id at all. */
+export function intentIdNumber(id: string): number | undefined {
+  const match = INTENT_ID_NUMBER.exec(id)
+  return match === undefined || match === null ? undefined : Number(match[1])
+}
+
 /**
  * Root-relative gitlink path of the component whose pin advances.
  *
@@ -256,8 +284,8 @@ export const TERMINAL_INTENT_STATUSES: ReadonlySet<IntentStatus> = new Set<Inten
 export const PinIntentSchema = z
   .object({
     schema: z.literal(PIN_INTENT_SCHEMA),
-    /** Human counter (`I1`, `I2`, …) — the operator-facing handle. */
-    id: TextSchema,
+    /** Human counter (`yrdpin#162`, …) — the operator-facing handle. */
+    id: IntentRecordIdSchema,
     /** UUIDv7 idempotency identity — the same id replays, never re-opens. */
     intentId: IntentIdSchema,
     issue: IssueRefSchema,
@@ -273,8 +301,8 @@ export const PinIntentSchema = z
     submitter: TextSchema,
     submittedAt: TextSchema,
     status: IntentStatusSchema,
-    supersededBy: TextSchema.optional(),
-    supersededIntent: TextSchema.optional(),
+    supersededBy: IntentRecordIdSchema.optional(),
+    supersededIntent: IntentRecordIdSchema.optional(),
     supersedeConsent: z.enum(["same-submitter", "forced"]).optional(),
     disposition: IntentDispositionSchema.optional(),
     integration: PinIntentIntegrationSchema.optional(),
