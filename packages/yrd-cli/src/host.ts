@@ -72,7 +72,7 @@ import {
   type InstalledStep,
   type IntegratedShape,
   type PRShape,
-  type QueueAuditResult,
+  type QueueAuditEmission,
   type StepDef,
   type StepExecution,
   type StepRunner,
@@ -1481,7 +1481,7 @@ function queueAdministration(
     return { base, baseSha }
   }
   return Object.freeze({
-    async auditEnvironment(): Promise<QueueAuditResult> {
+    async auditEnvironment(): Promise<QueueAuditEmission> {
       // Re-derive the selected config's steps from disk on EVERY audit so a
       // config change after startup is proven, not masked by a stale snapshot.
       // The audit proves THREE-WAY equality (merge-queue R41b): runtime

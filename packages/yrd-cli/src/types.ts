@@ -5,7 +5,7 @@ import type { HasJobs, HasRunner, JobCommands, JobsState } from "@yrd/job"
 import type {
   GitPRRecutter,
   HasQueue,
-  QueueAuditResult,
+  QueueAuditEmission,
   QueueCommands,
   QueuesState,
   RepositoryMergeRecordSearchResult,
@@ -22,7 +22,7 @@ import type { YrdConfig } from "@yrd/config"
 
 export type YrdCliExitCode = 0 | 1 | 2 | 3
 
-export type { QueueAuditFinding, QueueAuditResult } from "@yrd/queue"
+export type { QueueAuditEmission, QueueAuditFinding, QueueAuditResult } from "@yrd/queue"
 
 /** Opaque host-owned reason a Bay must not be destroyed. The host resolves its
  * own consumers; Yrd only matches the Bay identity/path and reports evidence. */
@@ -36,7 +36,10 @@ export type YrdBayProtection = Readonly<{
 /** Optional operator capabilities supplied by a queue-environment plugin. The
  * CLI never simulates these lifecycle operations when no plugin owns them. */
 export type YrdCliQueueAdministration = Readonly<{
-  auditEnvironment?(): Promise<QueueAuditResult>
+  /** A PRODUCER: findings are built here, so the closed emission type applies —
+   * a plugin cannot invent a code no consumer whitelists. Readers of the
+   * concatenated audit keep the open {@link QueueAuditResult}. */
+  auditEnvironment?(): Promise<QueueAuditEmission>
   provision?(base?: string): Promise<unknown>
   deprovision?(base?: string): Promise<unknown>
 }>

@@ -36,7 +36,7 @@ import {
   type PRDeliveryState,
   type PRRev,
 } from "@yrd/bay"
-import { runYrd as runYrdRaw, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
+import { runYrd as runYrdRaw, type QueueAuditEmission, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
 import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
 import {
   Command,
@@ -7034,7 +7034,7 @@ describe("runYrd", () => {
       epoch: "11111111-1111-4111-8111-111111111111",
       lastLanded: null,
     }
-    let findings: Array<{ code: string; message: string }> = []
+    let findings: QueueAuditEmission["findings"] = []
     const services: YrdCliServices = { queue: { auditEnvironment: async () => ({ findings }) } }
     const lockRelease = Promise.withResolvers<void>()
     const lockAcquired = Promise.withResolvers<void>()
@@ -11460,7 +11460,12 @@ describe("runYrd", () => {
 
     const services: YrdCliServices = {
       queue: {
-        auditEnvironment: async () => ({ findings: [{ code: "operator-finding", message: "inspect runner" }] }),
+        // A code THIS build does not know — the finding a foreign or newer
+        // producer wrote, which the CLI must carry rather than refuse. No
+        // in-repo producer can write it (QueueAuditFindingEmission forbids
+        // exactly that), so the cast is what makes the foreign case expressible.
+        auditEnvironment: async () =>
+          ({ findings: [{ code: "operator-finding", message: "inspect runner" }] }) as unknown as QueueAuditEmission,
         provision: async (base?: string) => ({ base: base ?? "main", ready: true }),
         deprovision: async (base?: string) => ({ base: base ?? "main", released: true }),
       },

@@ -103,10 +103,10 @@ import {
   type InstalledStep,
   type IntegratedShape,
   type IntegrationProof,
+  type QueueAuditEmission,
   type QueueAuditFinding,
   type QueueAuditFindingEmission,
   type QueueAuditReviewCertification,
-  type QueueAuditResult,
   type QueueAuthorityState,
   type QueueAuthorityToken,
   type QueueFailure,
@@ -704,7 +704,7 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   cancelAdmissionJobs(args: CancelAdmissionJobsArgs): Promise<readonly string[]>
   cancelRun(args: CancelRunArgs): Promise<Run>
   recover(options: RecoverQueueOptions): Promise<readonly Run[]>
-  audit(options?: QueueAuditOptions): QueueAuditResult
+  audit(options?: QueueAuditOptions): QueueAuditEmission
   eligibility(selector: string, snapshot?: DeepReadonly<QueueRuntimeState>): PREligibility
   eligibilities(snapshot?: DeepReadonly<QueueRuntimeState>): readonly PREligibility[]
   /** PR batches whose revisions may be refreshed before the next selectorless drain.
@@ -5769,9 +5769,12 @@ function auditQueues(
   steps: readonly RuntimeStep[],
   progress: QueueProgressPolicy,
   options: QueueAuditOptions,
-): QueueAuditResult {
-  // Emissions, not readings: every code pushed below must be listed in
-  // YRD_QUEUE_AUDIT_PAGE_FINDING_CODES or this file stops compiling.
+): QueueAuditEmission {
+  // Emissions, not readings: every code pushed below — or written inline into
+  // the returned object — must be listed in YRD_QUEUE_AUDIT_FINDING_CODES or
+  // this file stops compiling. The return type carries that closure outward;
+  // returning the open reader type would let an inline finding widen at the
+  // boundary and type-check with any string.
   const findings: QueueAuditFindingEmission[] = []
   const installed = new Map(steps.map((step) => [step.name, step]))
   const auditNowMs = options.now === undefined ? undefined : parseAuditTime(options.now, "now")

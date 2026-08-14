@@ -5590,6 +5590,10 @@ async function queueAuditFindings(
   services: YrdCliServices,
   now?: string,
 ): Promise<readonly QueueAuditFinding[]> {
+  // The widening boundary: both inputs are QueueAuditEmission, so every code
+  // above this line is closed over YRD_QUEUE_AUDIT_FINDING_CODES. Downstream is
+  // display and JSON, where a finding may equally be one a foreign version
+  // wrote, so the open QueueAuditFinding is the honest type from here on.
   const core = app.queue.audit(now === undefined ? undefined : { now })
   const environment = await services.queue?.auditEnvironment?.()
   return [...core.findings, ...(environment?.findings ?? [])]
