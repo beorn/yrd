@@ -439,7 +439,11 @@ describe("pr withdraw", () => {
 
     const output = outputIO()
     expect(
-      await runYrd(app, yrd("pr", "withdraw", "PR1", "--reason", "superseded by rework", "--burn-payload", "--json"), output.io),
+      await runYrd(
+        app,
+        yrd("pr", "withdraw", "PR1", "--reason", "superseded by rework", "--burn-payload", "--json"),
+        output.io,
+      ),
       output.stderr(),
     ).toBe(0)
     const result = JSON.parse(output.stdout()) as RecutPreflightResult
@@ -486,7 +490,9 @@ describe("pr withdraw", () => {
       expect.arrayContaining([expect.objectContaining({ pr: "PR1", run: "R1", outcome: "stale" })]),
     )
     await app.bays.submit({ branch: "topic/stale-norun", headSha: HEAD2_SHA, base: "main", baseSha: BASE_SHA })
-    expect(await runYrd(app, yrd("pr", "withdraw", "PR2", "--reason", "never queued", "--burn-payload"), outputIO().io)).toBe(0)
+    expect(
+      await runYrd(app, yrd("pr", "withdraw", "PR2", "--reason", "never queued", "--burn-payload"), outputIO().io),
+    ).toBe(0)
     const retired = outputIO()
     expect(await runYrd(app, yrd("log", "--pr", "PR2", "--json"), retired.io), retired.stderr()).toBe(0)
     expect((JSON.parse(retired.stdout()) as { rows: Record<string, unknown>[] }).rows).toEqual([
@@ -527,7 +533,11 @@ describe("I23 close merger + root cancel (chief ruling b9bf30f2)", () => {
 
     const output = outputIO()
     expect(
-      await runYrd(app, yrd("mr", "close", "PR1", "--reason", "superseded by rework", "--burn-payload", "--json"), output.io),
+      await runYrd(
+        app,
+        yrd("mr", "close", "PR1", "--reason", "superseded by rework", "--burn-payload", "--json"),
+        output.io,
+      ),
       output.stderr(),
     ).toBe(0)
     expect(JSON.parse(output.stdout())).toMatchObject({
@@ -552,7 +562,13 @@ describe("I23 close merger + root cancel (chief ruling b9bf30f2)", () => {
     expect(help.stdout()).toMatch(/^\s{2}close.*--reason|close \[options\]/mu)
 
     const output = outputIO()
-    expect(await runYrd(app, yrd("pr", "withdraw", "PR1", "--reason", "old spelling", "--burn-payload", "--json"), output.io)).toBe(0)
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "withdraw", "PR1", "--reason", "old spelling", "--burn-payload", "--json"),
+        output.io,
+      ),
+    ).toBe(0)
     expect(JSON.parse(output.stdout())).toMatchObject({ command: "pr.withdraw", reason: "old spelling" })
     expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
   })
@@ -643,10 +659,7 @@ describe("pre-spend disclosure on mr close", () => {
     await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
 
     const output = outputIO()
-    expect(
-      await runYrd(app, yrd("mr", "close", "PR1", "--burn-payload", "--json"), output.io),
-      output.stderr(),
-    ).toBe(0)
+    expect(await runYrd(app, yrd("mr", "close", "PR1", "--burn-payload", "--json"), output.io), output.stderr()).toBe(0)
     expect(JSON.parse(output.stdout())).toMatchObject({
       command: "pr.close",
       spent: [{ pr: "PR1", revision: 1, headSha: HEAD_SHA, branch: "topic/one", reopen: "yrd pr submit topic/one" }],
@@ -692,7 +705,11 @@ describe("pr withdraw journal replay", () => {
       await first.bays.submit({ branch: "topic/reasonless", headSha: HEAD2_SHA, base: "main", baseSha: BASE_SHA })
       const withdraw = outputIO()
       expect(
-        await runYrd(first, yrd("pr", "withdraw", "PR1", "--reason", "superseded by rework", "--burn-payload"), withdraw.io),
+        await runYrd(
+          first,
+          yrd("pr", "withdraw", "PR1", "--reason", "superseded by rework", "--burn-payload"),
+          withdraw.io,
+        ),
         withdraw.stderr(),
       ).toBe(0)
       expect(await runYrd(first, yrd("pr", "close", "PR2", "--burn-payload"), outputIO().io)).toBe(0)
