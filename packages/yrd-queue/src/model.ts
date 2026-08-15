@@ -351,6 +351,41 @@ export const ComponentMainOutcomesSchema = z
   })
   .strict() as z.ZodType<ComponentMainOutcomes>
 
+/**
+ * A verdict reused across the queue's own base motion rather than re-proven.
+ *
+ * Present exactly when the merge carried a check forward: the check ran at
+ * {@link fromBaseSha} against {@link checkedCandidateSha}, the base then moved
+ * to {@link toBaseSha}, and the conservative predicate found the motion narrow
+ * enough that the old verdict still answers. The candidate that actually
+ * landed was re-integrated at the new base — only the VERDICT is carried, so
+ * both bases are recorded and neither is implied by the other.
+ */
+export type CarriedForwardCheck = Readonly<{
+  fromBaseSha: string
+  toBaseSha: string
+  checkedCandidateSha: string
+  configHash: string
+  environmentHash?: string
+}>
+
+export const CarriedForwardCheckSchema = z
+  .object({
+    fromBaseSha: GitShaSchema,
+    toBaseSha: GitShaSchema,
+    checkedCandidateSha: GitShaSchema,
+    configHash: z.string().regex(/^[0-9a-f]{64}$/u),
+    environmentHash: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/u)
+      .optional(),
+  })
+  .strict()
+  .refine(({ fromBaseSha, toBaseSha }) => fromBaseSha !== toBaseSha, {
+    message: "a carried check must name two different bases",
+    path: ["toBaseSha"],
+  }) as z.ZodType<CarriedForwardCheck>
+
 export type IntegrationProof = Readonly<{
   commit: string
   baseSha: string
@@ -358,6 +393,7 @@ export type IntegrationProof = Readonly<{
   sourceRewrites?: readonly SourceRewrite[]
   submoduleResolutions?: readonly QueueSubmoduleResolutionEvidence[]
   componentMains?: readonly ComponentMainReceipt[]
+  carriedForward?: CarriedForwardCheck
 }>
 
 export const IntegrationProofSchema = z
@@ -369,6 +405,7 @@ export const IntegrationProofSchema = z
     sourceRewrites: z.array(SourceRewriteSchema).optional(),
     submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),
     componentMains: z.array(ComponentMainReceiptSchema).min(1).optional(),
+    carriedForward: CarriedForwardCheckSchema.optional(),
   })
   .strict() as z.ZodType<IntegrationProof>
 

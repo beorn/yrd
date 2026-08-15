@@ -8947,7 +8947,9 @@ describe("Queue command adapters", () => {
     await expectLanded(repo, checkpoint)
   })
 
-  it("refuses merge when the base moves after the checked candidate", async () => {
+  // A base motion that OVERLAPS the candidate payload. A disjoint motion is
+  // carried forward instead of refused — see tests/carry-forward.test.ts.
+  it("refuses merge when the base moves under the checked candidate and overlaps it", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
     const bayJobs = createBayJobDefs(unusedWorkspace)
@@ -8964,8 +8966,8 @@ describe("Queue command adapters", () => {
     const move = withStep(
       "move-base",
       async (_input: StepExecution<Checked>) => {
-        await writeFile(join(repo, "base-moved.txt"), "moved after check\n")
-        await git(repo, ["add", "base-moved.txt"])
+        await writeFile(join(repo, "feature.txt"), "moved after check\n")
+        await git(repo, ["add", "feature.txt"])
         await git(repo, ["commit", "-qm", "move base after check"])
         return { status: "completed", conclusion: "success" as const, output: { moved: true as const } }
       },
@@ -8985,8 +8987,9 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "stale-check" } })
-    expect(existsSync(join(repo, "feature.txt"))).toBe(false)
-    expect(existsSync(join(repo, "base-moved.txt"))).toBe(true)
+    // The base's own version of the contested path survives: the checked
+    // candidate never landed over it.
+    expect(await readFile(join(repo, "feature.txt"), "utf8")).toBe("moved after check\n")
   })
 
   it.each(["native-worktree", "native-ref", "native-remote", "configured"] as const)(
