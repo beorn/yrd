@@ -28,6 +28,11 @@ exports[`bay journal vocabulary > pins every bay event's fields to the reader ve
       "issue": 1,
       "name": 1,
     },
+    "grandfathered": {
+      "by": {
+        "introducedAt": "53f67709",
+      },
+    },
     "reader": 1,
   },
   "bay/orphaned": {
