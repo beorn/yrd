@@ -10786,7 +10786,7 @@ function buildProgram(
       "taskStatus — answers: how does this delivery map to the shared work-state vocabulary? tense: current",
       "eligibility.reason.code — answers: why can the current revision not run now? tense: current",
       "landedOnBase.code — answers: why did repository proof override nativeStatus? tense: current",
-      "--state needs-author — answers: has this PR ever needed author action? tense: historical",
+      "--state needs-author — answers: does this PR currently need author action? tense: current",
     ].join("\n"),
   )
   const create = pr

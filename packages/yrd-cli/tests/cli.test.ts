@@ -975,7 +975,7 @@ describe("runYrd", () => {
       "landedOnBase.code — answers: why did repository proof override nativeStatus? tense: current",
     )
     expect(help.stdout()).toContain(
-      "--state needs-author — answers: has this PR ever needed author action? tense: historical",
+      "--state needs-author — answers: does this PR currently need author action? tense: current",
     )
   })
 
