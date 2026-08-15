@@ -303,4 +303,22 @@ describe("intent parking — a retryable environment refusal is bounded, not end
     expect(parked).toHaveLength(1)
     expect(parked[0]?.message).toContain("@dev/11")
   })
+
+  it("does not resurrect a parked finding after its same-key successor integrates", async () => {
+    let environmentRefuses = true
+    await using app = await createApp((_component, attempt) =>
+      environmentRefuses ? identicalProvisionRefusal(_component, attempt) : undefined,
+    )
+    const dead = await submitIntent(app, ALPHA, "same-key-successor")
+    for (let turn = 0; turn < 4; turn += 1) await drain(app)
+    expect(app.intents.get(dead.id)).toMatchObject({ status: "parked" })
+
+    environmentRefuses = false
+    const successor = await submitIntent(app, ALPHA, "same-key-successor")
+    expect(app.queue.audit().findings.filter((finding) => finding.code === "intent-lane-stalled")).toEqual([])
+
+    expect(await drain(app)).toEqual([`${successor.id}:success:undefined`])
+    expect(app.intents.get(successor.id)).toMatchObject({ status: "integrated" })
+    expect(app.queue.audit().findings.filter((finding) => finding.code === "intent-lane-stalled")).toEqual([])
+  })
 })
