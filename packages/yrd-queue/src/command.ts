@@ -3085,7 +3085,8 @@ async function prepareCandidate(
     }
     const before = await git.commit(path, "HEAD")
     const message = candidateChangeCommitMessage("merge", pr)
-    const merged = await git.run(path, ["merge", "--no-ff", "-m", message, pr.headSha], true)
+    const mergeArgs = ["merge", "--no-verify", "--no-ff", "-m", message, pr.headSha]
+    const merged = await git.run(path, mergeArgs, true)
     if (merged.code !== 0) {
       const resolved = await resolveCandidateSubmoduleConflict(git, repo, path)
       if (resolved.status === "composed") {
@@ -3097,7 +3098,8 @@ async function prepareCandidate(
       }
       const artifacts = await writeTerminalArtifacts(artifactRoot, input, attempt, merged.stdout, merged.stderr)
       await git.run(path, ["merge", "--abort"], true)
-      const detail = `PR '${pr.id}' could not be applied: ${resolved.message}`
+      const terminalDetail = [merged.stdout.trim(), merged.stderr.trim()].filter((part) => part !== "").join("\n")
+      const detail = `PR '${pr.id}' could not be applied: ${resolved.message}\n${terminalDetail || fetchDetail(merged)}`
       return {
         status: "failed",
         error: {
@@ -3105,7 +3107,7 @@ async function prepareCandidate(
           message: detail,
         },
         output: await failureEvidence({
-          command: ["git", "-C", path, "merge", "--no-ff", "--no-edit", pr.headSha],
+          command: ["git", "-C", path, ...mergeArgs],
           detail,
           classification: "carrier",
           artifactRoot,
