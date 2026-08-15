@@ -3,6 +3,7 @@ import { isAbsolute, join, relative, resolve } from "node:path"
 import { defineConfig, withActionStep, withCheckStep, withFlow, withMergeStep, type FlowDef } from "@yrd/config"
 import { asFailure, createFailure } from "@yrd/core"
 import {
+  DEFAULT_CARRY_FORWARD_POLICY,
   DEFAULT_QUEUE_BATCH_SIZE,
   DEFAULT_QUEUE_PROGRESS_POLICY,
   DIAGNOSTICS_COMPARISON_READY,
@@ -186,8 +187,23 @@ const ProgressSchema = z
  */
 const LandingSchema = z.enum(["expected", "none"]).optional()
 
+/**
+ * Carry-forward: reuse a check verdict across the queue's own base motion
+ * instead of recutting. Default ON — the conservative predicate is the safety,
+ * not the switch — with a sampled fraction declining the carry so a fresh
+ * check re-proves the payload. Set `enabled: false` to turn it off entirely.
+ */
+const CarryForwardSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    shadowSampleRate: z.number().min(0).max(1).optional(),
+  })
+  .strict()
+  .default({})
+
 const ProjectFields = {
   base: TextSchema.optional(),
+  carryForward: CarryForwardSchema,
   batch: z.union([z.literal(false), z.number().int().min(0)]).optional(),
   checks: ChecksSchema,
   guards: GuardsSchema,
@@ -211,6 +227,7 @@ export type YrdProjectConfig = Readonly<{
   requires?: readonly "review"[]
   contest: Readonly<z.infer<typeof ContestSchema>>
   progress: Readonly<z.infer<typeof ProgressSchema>>
+  carryForward: Readonly<{ enabled: boolean; shadowSampleRate: number }>
 }>
 
 export type ResolvedYrdProjectConfig = Readonly<{
@@ -233,6 +250,9 @@ export type ResolvedYrdProjectConfig = Readonly<{
   definitions: Readonly<Record<string, YrdStepConfig>>
   contest: Readonly<{ concurrency: number; timeoutMs: number; evaluators: readonly string[] }>
   progress?: QueueProgressPolicy
+  /** Carry-forward policy in effect for this repository. Optional only for
+   * direct legacy test/app construction, where the module default applies. */
+  carryForward?: Readonly<{ enabled: boolean; shadowSampleRate: number }>
   /** Programmatic flow authority. Optional only for direct legacy test/app construction. */
   flows?: readonly FlowDef[]
 }>
@@ -255,7 +275,7 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
   }
   const parsed = ProjectSchema.safeParse(value ?? {})
   if (parsed.success) {
-    const { base, batch, checks, guards, landing, requires, contest, progress } = parsed.data
+    const { base, batch, checks, guards, landing, requires, contest, progress, carryForward } = parsed.data
     return {
       ...(base === undefined ? {} : { base }),
       ...(batch === undefined ? {} : { batch }),
@@ -265,6 +285,10 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
       ...(requires === undefined ? {} : { requires }),
       contest,
       progress,
+      carryForward: {
+        enabled: carryForward.enabled ?? DEFAULT_CARRY_FORWARD_POLICY.enabled,
+        shadowSampleRate: carryForward.shadowSampleRate ?? DEFAULT_CARRY_FORWARD_POLICY.shadowSampleRate,
+      },
     }
   }
   const issue = mostSpecificConfigIssue(parsed.error.issues[0])
@@ -406,6 +430,10 @@ export async function loadYrdConfig(options: {
         concurrency: parsed.contest.concurrency ?? 2,
         timeoutMs: parsed.contest.timeoutMs ?? 30 * 60_000,
         evaluators: parsed.contest.evaluators ?? checks.slice(0, 1),
+      },
+      carryForward: {
+        enabled: parsed.carryForward.enabled ?? DEFAULT_CARRY_FORWARD_POLICY.enabled,
+        shadowSampleRate: parsed.carryForward.shadowSampleRate ?? DEFAULT_CARRY_FORWARD_POLICY.shadowSampleRate,
       },
       progress: {
         noLandingMs: parsed.progress.noLandingMs ?? DEFAULT_QUEUE_PROGRESS_POLICY.noLandingMs,

@@ -15,6 +15,7 @@ import { createProcess } from "@yrd/process"
 import { createLogger } from "loggily"
 import * as z from "zod"
 import {
+  DEFAULT_CARRY_FORWARD_POLICY,
   GitCheckResultEvidenceSchema,
   gitCheckStep,
   gitMergeStep,
@@ -22,6 +23,7 @@ import {
   withMerge,
   withStep,
   type AddStepResult,
+  type CarryForwardPolicy,
   type PRShape,
   type StepExecution,
 } from "@yrd/queue"
@@ -90,7 +92,11 @@ type Moved = AddStepResult<Checked, "move-base", z.infer<typeof MovedSchema>>
  * exact shape of the queue's own landings voiding a peer's still-good verdict.
  * `motionPath` is what the base motion touches — disjoint from the candidate's
  * `feature.txt` payload, or overlapping it. */
-async function runWithBaseMotion(motionPath: string) {
+async function runWithBaseMotion(
+  motionPath: string,
+  policy: Partial<CarryForwardPolicy> = {},
+  random: () => number = () => 0.99,
+) {
   const { repo, feature: featureSha } = await repository("feature")
   const process = createProcess()
   const bayJobs = createBayJobDefs(unusedWorkspace)
@@ -109,7 +115,15 @@ async function runWithBaseMotion(motionPath: string) {
     },
     { revision: "move-base-v1", output: MovedSchema },
   )
-  const merge = withMerge(gitMergeStep<Moved>({ inject: { process }, repo }), { revision: "git-merge-v1" })
+  const merge = withMerge(
+    gitMergeStep<Moved>({
+      inject: { process },
+      repo,
+      carryForward: { ...DEFAULT_CARRY_FORWARD_POLICY, shadowSampleRate: 0, ...policy },
+      random,
+    }),
+    { revision: "git-merge-v1" },
+  )
   const queue = withQueue({
     steps: [check, move, merge] as const,
     resolveBaseSha: (base) => queueBaseSha(repo, base),
@@ -149,5 +163,44 @@ describe("carry-forward", () => {
     expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "stale-check" } })
     expect(run.error?.message).toContain("feature.txt")
     expect(existsSync(join(repo, "feature.txt"))).toBe(true)
+  })
+
+  it("names the leg that refused, never a bare staleness", async () => {
+    const { app, process, run } = await runWithBaseMotion("bun.lock")
+    await using _process = process
+    await using _app = app
+
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "stale-check" } })
+    expect(run.error?.message).toContain("carry-forward refused (build-affecting-motion)")
+    expect(run.error?.message).toContain("bun.lock")
+  })
+
+  it("declines the carry on a shadow-recut sample so a fresh check re-proves the payload", async () => {
+    const { app, process, run } = await runWithBaseMotion("base-moved.txt", { shadowSampleRate: 1 }, () => 0)
+    await using _process = process
+    await using _app = app
+
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "stale-check" } })
+    expect(run.error?.message).toContain("shadow-recut sample")
+  })
+
+  it("refuses through the persisted kill switch even on a disjoint motion", async () => {
+    const { app, process, run } = await runWithBaseMotion("base-moved.txt", {
+      disabledBy: { reason: "a shadow recut diverged", at: "2026-08-14T00:00:00.000Z" },
+    })
+    await using _process = process
+    await using _app = app
+
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "stale-check" } })
+    expect(run.error?.message).toContain("carry-forward refused (kill-switch)")
+  })
+
+  it("refuses when carry-forward is disabled by configuration", async () => {
+    const { app, process, run } = await runWithBaseMotion("base-moved.txt", { enabled: false })
+    await using _process = process
+    await using _app = app
+
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "stale-check" } })
+    expect(run.error?.message).toContain("carry-forward refused (disabled)")
   })
 })

@@ -1093,11 +1093,13 @@ function configuredQueueSteps(
             ? gitMergeStep({
                 inject: { process: options.process },
                 repo: options.repo,
+                ...(options.config.carryForward === undefined ? {} : { carryForward: options.config.carryForward }),
               })
             : configuredMergeStep({
                 inject: { process: options.process },
                 repo: options.repo,
                 command: mergeCommand,
+                ...(options.config.carryForward === undefined ? {} : { carryForward: options.config.carryForward }),
                 artifactRoot: join(options.stateDir, "artifacts"),
                 timeoutMs: stepTimeoutMs(config),
                 ...(config.environment === undefined ? {} : { environment: config.environment }),
