@@ -16,6 +16,8 @@ export type RuntimePosture =
   | "active"
   | "viewer"
   | "journal-view-repair"
+  /** Recovery: assembles its own app because the ordinary boot is the failure. */
+  | "saved-state-rebuild"
   | "bracketed-bay-open"
   | "one-shot-queue-run"
   | "resident-queue-run"
@@ -231,6 +233,9 @@ function invocationPosture(args: readonly string[], commandIndex: number | undef
   ) {
     return "bracketed-bay-open"
   }
+  // Checked before the view-repair row: this posture must not load the runtime
+  // at all, because loading it is exactly what fails.
+  if (command === "doctor" && subcommand === "rebuild-saved-state") return "saved-state-rebuild"
   if (command === "doctor" && args.includes("--rebuild-views")) return "journal-view-repair"
   if (command === "queue" && subcommand === "run") {
     return queueRunMode(args, commandIndex) === "follow" ? "resident-queue-run" : "one-shot-queue-run"

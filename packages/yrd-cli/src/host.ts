@@ -93,7 +93,9 @@ import {
   createJournal,
   createReadOnlyJournal,
   importOrphanJournal,
+  rebuildSavedState,
   type MutableJournal,
+  type SavedStateRebuildReport,
 } from "@yrd/persistence"
 import { adaptProcessGit, createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
 import { withIntents } from "@yrd/intent"
@@ -2249,6 +2251,85 @@ async function createViewerReceiver(repository: YrdRepository, process: Process)
   })
 }
 
+export type YrdSavedStateRebuildOutcome = SavedStateRebuildReport<Readonly<{ foldMs: number; prs: number }>>
+
+/**
+ * Rebuild this repository's saved state from its complete frame history.
+ *
+ * The ordinary boot cannot do this job, because the ordinary boot is what is
+ * broken: once a projection identity changes, the checkpoint that authorized
+ * retention's eviction can no longer be read, and `foldFromEmpty` refuses
+ * rather than replay a history with a hole in it. This assembles the SAME app
+ * definition the runner assembles — same config, same receiver, same job and
+ * queue contributions, so the checkpoint identity is the runner's by
+ * construction — and folds it over a stream spliced from the pre-eviction
+ * snapshot plus the surviving live frames.
+ *
+ * It deliberately skips the two things an active boot does that WRITE: the
+ * legacy-root quiesce and the receiver drain both dispatch commands, and a
+ * rebuild must append nothing.
+ */
+export async function rebuildYrdSavedState(
+  options: YrdRuntimeHostOptions & Readonly<{ snapshot?: string; journalDir?: string; dryRun?: boolean }>,
+): Promise<YrdSavedStateRebuildOutcome> {
+  const scope = createScope("yrd-saved-state-rebuild")
+  const ownsLog = options.log === undefined
+  const log =
+    options.log ??
+    createYrdLogger(resolveYrdObservability({}, options.env ?? globalThis.process.env), (text) =>
+      globalThis.process.stderr.write(text),
+    )
+  const env = cleanGitEnvironment(options.env ?? globalThis.process.env)
+  const process = withGitIndexLockRetry(createProcess({ cwd: options.cwd, env, inject: { scope, log } }))
+  try {
+    const repository = await discoverYrdRepository({ cwd: options.cwd, env, process })
+    const loaded = await loadRepositoryConfig(repository, process, options.configPath)
+    const receiver = await createGitPushReceiver({
+      mainRepo: repository.repo,
+      stateDir: repository.stateDir,
+      process,
+    })
+    // `--journal` points the rebuild at a COPY, so a recovery can be rehearsed
+    // before it is run against the journal a fleet depends on.
+    const dir = options.journalDir ?? repository.stateDir
+    const queueReadModel = createQueueReadModel({ dir })
+    return await rebuildSavedState(
+      {
+        dir,
+        ...(options.snapshot === undefined ? {} : { snapshot: options.snapshot }),
+        ...(options.dryRun === true ? { dryRun: true } : {}),
+        views: [queueReadModel.view],
+        writerVersion: CURRENT_JOURNAL_COMPATIBILITY.version,
+        lock: { timeoutMs: 0 },
+        inject: { log },
+      },
+      async (journal) => {
+        const started = performance.now()
+        const app = await createDefaultYrdRuntimeApp({
+          repo: repository.repo,
+          stateDir: repository.stateDir,
+          baysRoot: repository.baysRoot,
+          receiverPath: receiver.receiverPath,
+          journal,
+          process,
+          config: loaded.config,
+          scope,
+          log,
+          runnerId: `yrd-doctor:${globalThis.process.pid}`,
+        })
+        const foldMs = Math.round(performance.now() - started)
+        const state = app.state()
+        const prs = Object.keys(state.bays.prs).length
+        await app.close()
+        return { foldMs, prs }
+      },
+    )
+  } finally {
+    await scope[Symbol.asyncDispose]()
+    if (ownsLog) log.end()
+  }
+}
+
 async function createYrdRuntimeHost(
   options: YrdRuntimeHostOptions,
   residentSeed: ResidentRunnerSeed | undefined,
@@ -2656,6 +2737,14 @@ async function runYrdProcessHost(
             },
           }
         : {}),
+      async rebuildSavedState(context, rebuild) {
+        return rebuildYrdSavedState({
+          cwd: context.repo,
+          env,
+          ...(context.configPath === undefined ? {} : { configPath: context.configPath }),
+          ...rebuild,
+        })
+      },
       async load(context, posture) {
         const runner =
           posture === "resident-queue-run" || posture === "one-shot-queue-run" ? residentRunnerSeed(env) : undefined

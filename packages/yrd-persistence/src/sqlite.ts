@@ -415,6 +415,435 @@ export function createReadOnlyJournal(options: JournalOptions): Journal<unknown>
   return createJournalWithMode(options, "read-only")
 }
 
+/** One contiguous run of frames the rebuild read, and where it read them. */
+export type SavedStateSource = Readonly<{
+  path: string
+  frames: number
+  from: number
+  to: number
+}>
+
+export type SavedStateRebuildReport<Result = unknown> = Readonly<{
+  /** Absent when nothing was evicted and the live journal covered cursor 1. */
+  snapshot?: SavedStateSource
+  live: SavedStateSource
+  /** Cursors present in BOTH sources and proved byte-identical before serving. */
+  overlapVerified: number
+  head: number
+  evictedThrough: number
+  /** Set even under `dryRun`, where it names the identity that WOULD be written. */
+  identity?: string
+  cursor?: number
+  written: boolean
+  dryRun: boolean
+  /** Names a `--snapshot` that was not needed, so an unused one is never silent. */
+  snapshotIgnored?: string
+  durationMs: number
+  result: Result
+}>
+
+export type SavedStateRebuildOptions = JournalOptions &
+  Readonly<{
+    /** Pre-eviction journal holding the prefix retention deleted. */
+    snapshot?: string
+    /** Fold and report, but write no checkpoint. */
+    dryRun?: boolean
+    /** Frames per read batch; bounds peak memory over a long stream. */
+    batchFrames?: number
+  }>
+
+const REBUILD_BATCH_FRAMES = 2000
+
+/**
+ * Rebuild a journal's saved state by folding its COMPLETE frame history through
+ * the caller's current app definition, and save the result as a checkpoint.
+ *
+ * This exists for one state that healthy operation cannot reach: retention only
+ * evicts frames a checkpoint already folded in, so an evicted prefix and a
+ * rebuild from cursor 0 are mutually exclusive — until the checkpoint that
+ * authorized the eviction becomes unreadable, which a changed projection
+ * identity does. `foldFromEmpty` then refuses with `saved-state-unrebuildable`
+ * and every command stops. Splicing the evicted prefix back in from a pre-bump
+ * snapshot restores exactly the stream the fold needs.
+ *
+ * The caller supplies the fold: it receives a journal whose `read` serves the
+ * stitched stream and whose `checkpoint` is the LIVE journal's, so booting an
+ * app against it writes through the ordinary `saveCheckpoint` path under the
+ * ordinary identity. Nothing about replay or checkpoint writing is duplicated
+ * here; this only decides which frames the reader sees.
+ *
+ * Every source is proved before a single frame is served: schema version, cursor
+ * contiguity within and across the seam, each row against its recorded sha256,
+ * and every overlapping cursor byte-identical between the two sources. The whole
+ * operation holds the writer lock, so no resident can append underneath it.
+ */
+export async function rebuildSavedState<Result>(
+  options: SavedStateRebuildOptions,
+  fold: (journal: Journal<unknown>) => Promise<Result>,
+): Promise<SavedStateRebuildReport<Result>> {
+  const started = performance.now()
+  const runtime = context(options)
+  const batch = options.batchFrames ?? REBUILD_BATCH_FRAMES
+  if (!Number.isSafeInteger(batch) || batch < 1) {
+    throw new RangeError(`yrd: saved-state rebuild batch must be a positive safe integer, not ${String(batch)}`)
+  }
+  // Refuse rather than queue behind a live writer: a resident appending
+  // underneath would move head after the plan was proved.
+  const guard = createExclusive(options.dir, options.lock ?? { timeoutMs: 0 }, { log: runtime.log })
+  return guard.run(async () => rebuildSavedStateLocked(runtime, options, batch, started, fold), {
+    holder: "doctor rebuild-saved-state",
+  })
+}
+
+async function rebuildSavedStateLocked<Result>(
+  runtime: Context,
+  options: SavedStateRebuildOptions,
+  batch: number,
+  started: number,
+  fold: (journal: Journal<unknown>) => Promise<Result>,
+): Promise<SavedStateRebuildReport<Result>> {
+  if (!(await exists(runtime.path))) {
+    raiseFailure(
+      "refusal",
+      "saved-state-rebuild-journal-missing",
+      `yrd: no journal to rebuild at ${runtime.path}; nothing was read`,
+    )
+  }
+  const live = inspectRebuildSource(runtime.path)
+  const { head, evictedThrough } = live
+  if (head === 0) {
+    raiseFailure(
+      "refusal",
+      "saved-state-rebuild-journal-empty",
+      `yrd: journal ${runtime.path} is at cursor 0; there is no history to rebuild from`,
+    )
+  }
+  const seam = evictedThrough
+  let snapshot: SavedStateSource | undefined
+  let snapshotIgnored: string | undefined
+  let overlapVerified = 0
+
+  if (seam > 0) {
+    const path = options.snapshot
+    if (path === undefined) {
+      raiseFailure(
+        "refusal",
+        "saved-state-rebuild-snapshot-required",
+        `yrd: journal ${runtime.path} lost history through cursor ${seam} to the retention window, so cursors 1..${seam} ` +
+          `exist in no live table; pass --snapshot <pre-eviction journal> (look under ${join(runtime.dir, "journal-snapshots")})`,
+      )
+    }
+    if (!(await exists(path))) {
+      raiseFailure("refusal", "saved-state-rebuild-snapshot-missing", `yrd: no snapshot journal at ${path}`)
+    }
+    const source = inspectRebuildSource(path, "snapshot")
+    if (source.evictedThrough > 0) {
+      raiseFailure(
+        "refusal",
+        "saved-state-rebuild-snapshot-evicted",
+        `yrd: snapshot ${path} lost its own history through cursor ${source.evictedThrough}, so it cannot supply ` +
+          `cursor 1; it covers ${source.lowest}..${source.head}`,
+      )
+    }
+    if (source.head < seam) {
+      raiseFailure(
+        "refusal",
+        "saved-state-rebuild-snapshot-short",
+        `yrd: snapshot ${path} ends at cursor ${source.head} but the live journal needs cursors 1..${seam}; ` +
+          `cursors ${source.head + 1}..${seam} exist in neither source`,
+      )
+    }
+    verifyRebuildRange(path, "snapshot", 1, seam, batch)
+    // Overlap is what proves the two sources are the same history rather than
+    // two divergent ones that happen to abut. Serving comes from live; this
+    // only decides whether the snapshot may be trusted for the prefix below.
+    overlapVerified = verifyRebuildOverlap(path, runtime.path, seam + 1, Math.min(source.head, head), batch)
+    snapshot = { path, frames: seam, from: 1, to: seam }
+  } else if (options.snapshot !== undefined) {
+    snapshotIgnored = options.snapshot
+    runtime.log.info?.("Snapshot not needed; the live journal still holds every frame from cursor 1.", {
+      action: "saved-state-rebuild-snapshot-unused",
+      snapshot: options.snapshot,
+    })
+  }
+
+  if (live.lowest !== seam + 1) {
+    raiseFailure(
+      "refusal",
+      "saved-state-rebuild-live-gap",
+      `yrd: journal ${runtime.path} reports history evicted through cursor ${seam} but its lowest surviving cursor is ` +
+        `${live.lowest}; cursors ${seam + 1}..${live.lowest - 1} exist in neither source`,
+    )
+  }
+  verifyRebuildRange(runtime.path, "live", seam + 1, head, batch)
+
+  // The inner journal already runs under the lock this call holds, and a flock
+  // does not re-enter across open descriptions — so its own acquisitions must
+  // pass through rather than deadlock against us.
+  const passthrough: Exclusive = { run: async (operation) => operation() }
+  const inner = createJournalWithMode(
+    { ...options, inject: { ...(options.inject ?? {}), exclusive: passthrough } },
+    "mutable",
+  )
+  const written = { identity: undefined as string | undefined, cursor: undefined as number | undefined, saved: false }
+  const dryRun = options.dryRun === true
+  const stitched = stitchedRebuildJournal({
+    runtime,
+    inner,
+    seam,
+    head,
+    batch,
+    dryRun,
+    snapshotPath: snapshot?.path,
+    written,
+  })
+  const result = await fold(stitched)
+
+  return Object.freeze({
+    ...(snapshot === undefined ? {} : { snapshot }),
+    live: { path: runtime.path, frames: head - seam, from: seam + 1, to: head },
+    overlapVerified,
+    head,
+    evictedThrough: seam,
+    ...(written.identity === undefined ? {} : { identity: written.identity }),
+    ...(written.cursor === undefined ? {} : { cursor: written.cursor }),
+    written: written.saved,
+    dryRun,
+    ...(snapshotIgnored === undefined ? {} : { snapshotIgnored }),
+    durationMs: performance.now() - started,
+    result,
+  })
+}
+
+type RebuildSourceFacts = Readonly<{ head: number; evictedThrough: number; lowest: number }>
+
+function inspectRebuildSource(path: string, label: "live" | "snapshot" = "live"): RebuildSourceFacts {
+  using database = openReadOnly(path)
+  const userVersion = database.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version
+  if (userVersion !== SCHEMA_VERSION) {
+    raiseFailure(
+      "refusal",
+      "saved-state-rebuild-schema-unsupported",
+      `yrd: ${label} journal ${path} is schema v${userVersion ?? "missing"}; this build rebuilds only v${SCHEMA_VERSION}`,
+    )
+  }
+  return readTransaction(database, () => {
+    const { head } = assertComplete(database, path)
+    const lowest =
+      database
+        .query<{ cursor: number | null }, []>(
+          `SELECT MIN(cursor) AS cursor FROM (
+             SELECT cursor FROM journal_history
+             UNION ALL SELECT cursor FROM journal_events
+             UNION ALL SELECT cursor FROM journal_orphans
+           )`,
+        )
+        .get()?.cursor ?? 0
+    return { head, evictedThrough: readEvictedThrough(database), lowest }
+  })
+}
+
+type RebuildRow = Readonly<{ cursor: number; value_json: string | null; sha256: string | null }>
+
+/**
+ * Frames and orphan markers in one cursor-ordered stream. An orphan occupies a
+ * cursor without carrying a frame, so contiguity must count it and serving must
+ * skip it — exactly as `readBatches` does for the ordinary read path.
+ */
+function readRebuildRows(database: Database, from: number, to: number, limit: number): readonly RebuildRow[] {
+  return database
+    .query<RebuildRow, [number, number, number, number, number, number, number]>(
+      `SELECT cursor, value_json, sha256 FROM journal_history WHERE cursor >= ? AND cursor <= ?
+       UNION ALL
+       SELECT cursor, value_json, sha256 FROM journal_events WHERE cursor >= ? AND cursor <= ?
+       UNION ALL
+       SELECT cursor, NULL AS value_json, NULL AS sha256 FROM journal_orphans WHERE cursor >= ? AND cursor <= ?
+       ORDER BY cursor LIMIT ?`,
+    )
+    .all(from, to, from, to, from, to, limit)
+}
+
+/** Streams the range in batches, proving contiguity and per-row integrity. */
+function verifyRebuildRange(path: string, label: "live" | "snapshot", from: number, to: number, batch: number): number {
+  if (to < from) return 0
+  using database = openReadOnly(path)
+  return readTransaction(database, () => {
+    let expected = from
+    let frames = 0
+    while (expected <= to) {
+      const rows = readRebuildRows(database, expected, to, batch)
+      if (rows.length === 0) {
+        raiseFailure(
+          "refusal",
+          "saved-state-rebuild-gap",
+          `yrd: ${label} journal ${path} has no frame at cursor ${expected}; it was asked for ${from}..${to}`,
+        )
+      }
+      for (const row of rows) {
+        if (row.cursor !== expected) {
+          raiseFailure(
+            "refusal",
+            "saved-state-rebuild-gap",
+            `yrd: ${label} journal ${path} jumps from cursor ${expected - 1} to ${row.cursor}; ` +
+              `cursor ${expected} is missing from its history, event and orphan tables`,
+          )
+        }
+        if (row.value_json !== null) {
+          if (digestText(row.value_json) !== row.sha256) {
+            raiseFailure(
+              "refusal",
+              "saved-state-rebuild-frame-damaged",
+              `yrd: ${label} journal ${path} frame at cursor ${row.cursor} does not match its recorded sha256; ` +
+                `it was modified after it was written`,
+            )
+          }
+          frames += 1
+        }
+        expected += 1
+      }
+    }
+    return frames
+  })
+}
+
+/**
+ * Every cursor both sources hold must be byte-identical. Two journals that
+ * abut at the seam but disagree above it are two different histories, and
+ * splicing them would produce a state neither one ever had.
+ */
+function verifyRebuildOverlap(snapshotPath: string, livePath: string, from: number, to: number, batch: number): number {
+  if (to < from) return 0
+  using snapshot = openReadOnly(snapshotPath)
+  using live = openReadOnly(livePath)
+  return readTransaction(snapshot, () =>
+    readTransaction(live, () => {
+      let cursor = from
+      let verified = 0
+      while (cursor <= to) {
+        const left = readRebuildRows(snapshot, cursor, to, batch)
+        if (left.length === 0) break
+        const right = new Map(
+          readRebuildRows(live, cursor, left.at(-1)?.cursor ?? to, batch).map((row) => [row.cursor, row]),
+        )
+        for (const row of left) {
+          const other = right.get(row.cursor)
+          if (other === undefined) continue
+          if (row.value_json !== other.value_json || row.sha256 !== other.sha256) {
+            raiseFailure(
+              "refusal",
+              "saved-state-rebuild-overlap-divergence",
+              `yrd: snapshot ${snapshotPath} and journal ${livePath} both hold cursor ${row.cursor} but their frames ` +
+                `differ; these are two different histories and cannot be spliced`,
+            )
+          }
+          verified += 1
+        }
+        cursor = (left.at(-1)?.cursor ?? to) + 1
+      }
+      return verified
+    }),
+  )
+}
+
+/**
+ * A read-only view of the stitched stream that writes through the LIVE
+ * journal's checkpoint store, so the fold's ordinary boot-time save lands in
+ * the real journal under the real identity.
+ */
+function stitchedRebuildJournal(
+  options: Readonly<{
+    runtime: Context
+    inner: Journal<unknown>
+    seam: number
+    head: number
+    batch: number
+    dryRun: boolean
+    snapshotPath?: string
+    written: { identity?: string; cursor?: number; saved: boolean }
+  }>,
+): Journal<unknown> {
+  const { runtime, inner, seam, head, batch, dryRun, snapshotPath, written } = options
+  const save = inner.checkpoint?.save
+  const journal: Journal<unknown> = {
+    async *read(after = 0, before) {
+      assertCursor(after)
+      if (before !== undefined) assertCursor(before)
+      const end = before ?? head
+      validateRange(after, end, head)
+      let served = after
+      if (served < Math.min(end, seam)) {
+        if (snapshotPath === undefined) throw new Error("yrd: saved-state rebuild lost its snapshot source")
+        yield* rebuildBatches(snapshotPath, served, Math.min(end, seam), batch)
+        served = Math.min(end, seam)
+      }
+      if (served < end) yield* rebuildBatches(runtime.path, served, end, batch)
+    },
+    append: () => Promise.reject(new Error("yrd: saved-state rebuild journal cannot append")),
+  }
+  Object.defineProperty(journal, "checkpoint", {
+    value: Object.freeze({
+      // The identity the app asks to load is the identity it would write, so
+      // capturing it here is what lets a dry run name a real answer.
+      load: (identity: string) => {
+        written.identity = identity
+        return Promise.resolve(undefined)
+      },
+      ...(save === undefined || dryRun
+        ? {}
+        : {
+            save: async (checkpoint: JournalCheckpoint) => {
+              const saved = await save(checkpoint)
+              if (saved) {
+                written.identity = checkpoint.identity
+                written.cursor = checkpoint.cursor
+                written.saved = true
+              }
+              return saved
+            },
+          }),
+    }),
+    enumerable: false,
+  })
+  if (dryRun) written.cursor = head
+  const history = inner.history
+  if (history !== undefined) {
+    Object.defineProperty(journal, "history", {
+      // Coverage begins at cursor 1 for THIS journal, whatever the live one
+      // lost — otherwise `foldFromEmpty` refuses the very stream we just built.
+      value: Object.freeze({
+        command: (query: Parameters<JournalHistory<unknown>["command"]>[0]) => history.command(query),
+        hasIdentity: (kind: JournalIdentityKind, id: string) => history.hasIdentity(kind, id),
+        entity: (kind: JournalEntityKind, id: string) => history.entity(kind, id),
+        diagnostics: () => ({ ...history.diagnostics(), evictedThrough: 0 }),
+      }),
+      enumerable: false,
+    })
+  }
+  return journal
+}
+
+async function* rebuildBatches(
+  path: string,
+  after: number,
+  end: number,
+  batch: number,
+): AsyncGenerator<Readonly<{ cursor: number; values: readonly unknown[] }>> {
+  let served = after
+  while (served < end) {
+    const rows = (() => {
+      using database = openReadOnly(path)
+      return readTransaction(database, () => readRebuildRows(database, served + 1, end, batch))
+    })()
+    if (rows.length === 0) throw new Error(`yrd: saved-state rebuild found no frame after cursor ${served} in ${path}`)
+    const last = rows.at(-1)?.cursor ?? end
+    const values = rows
+      .filter((row): row is RebuildRow & { value_json: string } => row.value_json !== null)
+      .map((row) => parseJournalFrame(JSON.parse(row.value_json)))
+    served = last
+    yield { cursor: last, values }
+  }
+}
+
 function createJournalWithMode(options: JournalOptions, mode: JournalMode): Journal<unknown> {
   const runtime = context(options)
   let archiveFallbacks = 0

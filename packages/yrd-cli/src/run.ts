@@ -82,7 +82,7 @@ import {
   type QueueSummary,
   type Run,
 } from "@yrd/queue"
-import { createExclusive } from "@yrd/persistence"
+import { createExclusive, type SavedStateRebuildReport } from "@yrd/persistence"
 import { loadYrdConfig, renderYrdConfigScaffold } from "./config.ts"
 import { diagnoseYrdFlows } from "./config-doctor.ts"
 import { cleanGitEnvironment } from "./git-environment.ts"
@@ -2074,7 +2074,15 @@ type RuntimeBootstrap = Readonly<{
       io?: Partial<YrdCliIO>
     }>
   >
+  /** Recovery entry; assembles its own app because `load` is what is failing. */
+  rebuildSavedState?(
+    context: YrdContext,
+    options: Readonly<{ snapshot?: string; journalDir?: string; dryRun?: boolean }>,
+  ): Promise<SavedStateRebuildOutcome>
 }>
+
+/** What a saved-state rebuild folded, and what it wrote. */
+export type SavedStateRebuildOutcome = SavedStateRebuildReport<Readonly<{ foldMs: number; prs: number }>>
 
 function runtimeOptions(io: YrdCliIO): RuntimeOptions {
   const drainSignal = io.drainSignal
@@ -7841,6 +7849,51 @@ async function configDoctor(
   return defects.length === 0 && !unrebuilt ? 0 : 1
 }
 
+/**
+ * The recovery half of `yrd doctor`.
+ *
+ * Reports fully denominated numbers on purpose: which cursors came from where,
+ * how many overlapping frames were proved identical, and the identity written.
+ * A rebuild that says only "done" would be indistinguishable from one that
+ * silently folded a shorter history than the operator believes it did.
+ */
+async function rebuildSavedStateCommand(
+  recovery: Readonly<{ context: YrdContext; bootstrap: RuntimeBootstrap }>,
+  options: JsonOption & Readonly<{ snapshot?: string; journal?: string; dryRun?: boolean }>,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
+  const rebuild = recovery.bootstrap.rebuildSavedState
+  if (rebuild === undefined) configuration("saved-state rebuild capability is not installed")
+  const cwd = io.cwd ?? process.cwd()
+  const report = await rebuild(recovery.context, {
+    ...(options.snapshot === undefined ? {} : { snapshot: resolve(cwd, options.snapshot) }),
+    ...(options.journal === undefined ? {} : { journalDir: resolve(cwd, options.journal) }),
+    ...(options.dryRun === true ? { dryRun: true } : {}),
+  })
+  const seconds = (report.durationMs / 1000).toFixed(1)
+  const lines = [
+    report.snapshot === undefined
+      ? `frames from snapshot 0 (nothing was evicted; the live journal covered cursor 1)`
+      : `frames from snapshot ${String(report.snapshot.frames)} (cursors ${String(report.snapshot.from)}..${String(report.snapshot.to)}, ${report.snapshot.path})`,
+    `frames from live ${String(report.live.frames)} (cursors ${String(report.live.from)}..${String(report.live.to)})`,
+    `overlap verified ${String(report.overlapVerified)} cursor${report.overlapVerified === 1 ? "" : "s"} byte-identical across both sources`,
+    `final cursor ${String(report.head)} of ${String(report.head)} folded, ${String(report.result.prs)} PRs projected`,
+    report.written
+      ? `identity written ${report.identity ?? "(unknown)"}`
+      : `identity ${report.dryRun ? "that WOULD be written" : "not written"} ${report.identity ?? "(unknown)"}`,
+    `duration ${seconds}s (fold ${String(report.result.foldMs)}ms)`,
+    ...(report.snapshotIgnored === undefined ? [] : [`snapshot ignored (not needed): ${report.snapshotIgnored}`]),
+    report.dryRun
+      ? "dry run: no checkpoint was written"
+      : report.written
+        ? "saved state rebuilt; the next command boots from it"
+        : "saved state was NOT written; the journal is unchanged",
+  ]
+  await printResult(io, jsonEnabled(options), { command: "doctor rebuild-saved-state", ...report }, lines.join("\n"))
+  // A rebuild that folded but could not write is a failed recovery, not a note.
+  return report.dryRun || report.written ? 0 : 1
+}
+
 async function journalImportOrphan(
   services: YrdCliServices,
   sourcePath: string,
@@ -10312,8 +10365,15 @@ function buildProgram(
 ): CliCommand {
   let runtimeApp = app
   let runtimeServices = services
+  let recoveryContext: YrdContext | undefined
   const installed = (): YrdCliApp => runtimeApp ?? configuration("command runtime is not initialized")
   const installedServices = (): YrdCliServices => runtimeServices
+  const recovery = (): Readonly<{ context: YrdContext; bootstrap: RuntimeBootstrap }> => {
+    if (recoveryContext === undefined || bootstrap === undefined) {
+      configuration("saved-state recovery context is not initialized")
+    }
+    return { context: recoveryContext, bootstrap }
+  }
   const program = new CliCommand(name)
     .description("yrd (shipyard) — agentic software delivery")
     .showSuggestionAfterError()
@@ -10334,6 +10394,13 @@ function buildProgram(
         runtimeServices = probed.services
         runtimeIO[RuntimeInvocationCwd] = bootstrap.ambientCwd
         Object.assign(io, probed.io)
+        return
+      }
+      // The recovery command must not load the runtime: replaying the journal
+      // is the very thing that is failing, so it assembles its own app instead.
+      if (invocation.posture === "saved-state-rebuild") {
+        recoveryContext = selected
+        runtimeIO[RuntimeInvocationCwd] = bootstrap.ambientCwd
         return
       }
       const loaded = await bootstrap.load(selected, invocation.posture)
@@ -10367,7 +10434,7 @@ function buildProgram(
     .option("--base <branch>", "scope the dashboard to one base")
     .option("--json", "emit stable JSON")
     .action(async (options) => dashboard(installed(), options, io))
-  program
+  const doctor = program
     .command("doctor")
     .description("diagnose Flow drift and repository configuration warnings")
     .option("--rebuild-views", "atomically rebuild registered query views from immutable Journal history")
@@ -10378,6 +10445,14 @@ function buildProgram(
     )
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await configDoctor(installed(), installedServices(), options, io)))
+  doctor
+    .command("rebuild-saved-state")
+    .description("rebuild saved state from complete Journal history when a changed projection cannot load it")
+    .option("--snapshot <path>", "pre-eviction journal supplying the prefix the retention window deleted")
+    .option("--journal <path>", "state directory to rebuild; defaults to this repository's own")
+    .option("--dry-run", "fold and report, but write no checkpoint")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => setExit(await rebuildSavedStateCommand(recovery(), options, io)))
   program
     .command("why <selector>")
     .description("prove one PR landing from repository truth and its journal index")
