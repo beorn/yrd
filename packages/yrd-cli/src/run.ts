@@ -5733,7 +5733,7 @@ async function cancelAttempt(
       raiseFailure(
         "refusal",
         "no-active-attempt",
-        `yrd: merge request '${pr.id}' has no running or waiting attempt to cancel; to stop delivering it, use 'yrd mr close --reason'`,
+        `yrd: merge request '${pr.id}' has no running or waiting attempt to cancel; to stop delivering it, use 'yrd mr close --reason <text> --burn-payload'`,
       )
     }
     return cancelQueueRun(app, active.id, options, io)
@@ -10539,7 +10539,7 @@ function buildProgram(
   program
     .command("cancel <selector>")
     .description(
-      "stop the current attempt for a merge request or run — members re-queue and the merge request stays open; to stop delivering it, use `yrd mr close --reason` (run both for both effects)",
+      "stop the current attempt for a merge request or run — members re-queue and the merge request stays open; to stop delivering it, use `yrd mr close --reason <text> --burn-payload` (run both for both effects)",
     )
     .option("--reason <text>", "human-readable cancellation reason")
     .option("--json", "emit stable JSON")
@@ -10942,6 +10942,7 @@ function buildProgram(
   pr.command("close [selector...]")
     .description("close a live merge request without merging — records why, leaves the queue")
     .option("--reason <text>", "close rationale recorded on each pr/withdrawn event")
+    .option("--burn-payload", "acknowledge that closing spends the payload identity permanently")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => withdrawPrs(installed(), selectors, options, io, "pr.close"))
   // Hidden ruled alias of `close` — one act, two spellings (I23); the envelope
@@ -10949,6 +10950,7 @@ function buildProgram(
   pr.command("withdraw <selector...>", { hidden: true })
     .description("withdraw live PRs from delivery, recording the reason")
     .option("--reason <text>", "withdrawal rationale recorded on each pr/withdrawn event")
+    .option("--burn-payload", "acknowledge that withdrawing spends the payload identity permanently")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => withdrawPrs(installed(), selectors, options, io))
   pr.command("merge <selector>")

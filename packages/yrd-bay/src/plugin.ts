@@ -2615,6 +2615,23 @@ function reviewFact(
   return { events: [event(kind === "review" ? "pr/reviewed" : "pr/commented", fact)] }
 }
 
+/** A withdrawn/canceled PR still holds its payload, so no OTHER branch may
+ * carry that commit — but its OWN branch reopens it in place (D2), which is the
+ * whole remedy. Naming it here is the difference between a one-line rebuild and
+ * forging a tree-identical commit whose only purpose is to change a hash. A
+ * live or landed duplicate has no such door, so it keeps the bare refusal
+ * rather than a remedy its state would refuse. */
+function duplicatePayloadRemedy(duplicate: DeepReadonly<PR>): string {
+  const delivery = prDeliveryState(duplicate)
+  if (delivery !== "withdrawn" && delivery !== "canceled") return ""
+  const at = delivery === "withdrawn" ? duplicate.withdrawnAt : duplicate.canceledAt
+  return (
+    `; ${duplicate.id} is ${delivery}${at === undefined ? "" : ` (${at})`} and still holds this payload, ` +
+    "so no other branch can carry it — resubmitting its own branch reopens it in place, " +
+    `no rebuilt commit needed; run 'yrd pr submit ${duplicate.branch}'`
+  )
+}
+
 function refuseDuplicatePayload(
   state: DeepReadonly<BaysState>,
   headSha: string,
@@ -2631,7 +2648,10 @@ function refuseDuplicatePayload(
       sameComposition(prComposition(pr), composition),
   )
   if (duplicate !== undefined) {
-    throw new Error(`yrd: payload already recorded as PR '${duplicate.id}' on queue '${identity}'`)
+    throw new Error(
+      `yrd: payload already recorded as PR '${duplicate.id}' on queue '${identity}'` +
+        duplicatePayloadRemedy(duplicate),
+    )
   }
 }
 
