@@ -366,6 +366,30 @@ export async function createYrd<State extends object, Commands extends CommandTr
     return next
   }
 
+  /**
+   * Replay from the beginning, for a session with no usable checkpoint.
+   *
+   * Retention only ever evicts frames a checkpoint already folded in, so an
+   * evicted prefix and a rebuild from cursor 0 are mutually exclusive in
+   * healthy operation. They meet in exactly one state: the checkpoint that
+   * authorized the eviction is itself missing or unreadable, and then the
+   * journal genuinely cannot be rebuilt from what survives. Name that, instead
+   * of letting the journal's replay refusal open the app with a bare
+   * RangeError.
+   */
+  const foldFromEmpty = async (): Promise<Projection> => {
+    const evictedThrough = history?.diagnostics().evictedThrough ?? 0
+    if (evictedThrough > 0) {
+      raiseFailure(
+        "infrastructure",
+        "saved-state-unrebuildable",
+        `yrd: Yrd's saved state must be rebuilt from the journal, but history below cursor ${evictedThrough + 1} ` +
+          `was evicted by the retention window, so it cannot be replayed from the beginning`,
+      )
+    }
+    return await fold(emptyProjection())
+  }
+
   const projectFrame = (base: Projection, frame: JournalFrame, source: "append" | "replay"): Projection => {
     if (base.receiptsById.has(frame.command.id)) {
       throw new Error(`yrd: journal contains duplicate command id '${frame.cause.commandId}'`)
@@ -662,6 +686,23 @@ export async function createYrd<State extends object, Commands extends CommandTr
   const historySnapshot = async (): Promise<JournalSnapshot<State>> => {
     assertOpen()
     if (history === undefined) return journalSnapshot()
+    // Reading every frame IS this method's contract, so an evicted prefix
+    // cannot be papered over. The checkpoint is not a substitute: it holds the
+    // COMPACTED projection, so seeding from it would return `journalSnapshot`'s
+    // answer under this method's name — precisely the collapse the comment
+    // above refuses. Say instead where coverage begins, in the product's own
+    // failure vocabulary, rather than let the journal's replay refusal reach a
+    // caller as an unclassified RangeError.
+    const evictedThrough = history.diagnostics().evictedThrough
+    if (evictedThrough > 0) {
+      raiseFailure(
+        "refusal",
+        "history-evicted",
+        `yrd: history coverage begins at cursor ${evictedThrough + 1} ` +
+          `(${evictedThrough} frames evicted by the retention window), so the complete history is no longer replayable; ` +
+          `run 'yrd log' for the live state, which the checkpoint still holds in full`,
+      )
+    }
     let historical = cloneFrozen(definition.initialState) as DeepReadonly<State>
     let cursor = 0
     let at: string | undefined
@@ -882,14 +923,14 @@ export async function createYrd<State extends object, Commands extends CommandTr
   try {
     const restored = await loadProjection()
     if (restored === undefined) {
-      projection = await fold(emptyProjection())
+      projection = await foldFromEmpty()
     } else {
       try {
         projection = await fold(restored)
       } catch {
         checkpointCursor = undefined
         reportSavedStateRebuild("Saved state is inconsistent; rebuilding it.")
-        projection = await fold(emptyProjection())
+        projection = await foldFromEmpty()
       }
     }
     state(projection.state)

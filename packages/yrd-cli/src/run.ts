@@ -1608,21 +1608,32 @@ function commitSubject(cwd: string, headSha: string): string | undefined {
  * through to the exact scan below. */
 const COVERAGE_PROBE_FRAMES = 8
 
-/** The timestamp the journal's coverage starts at: its earliest event's `ts`.
+/** The timestamp the journal's coverage starts at: its earliest still-replayable
+ * event's `ts`.
  *
  * Events come out in cursor order, so the answer sits in the journal's first
  * frames — but `app.events()` resolves its whole range before it yields, so
  * asking for one timestamp unbounded decodes every frame the journal holds.
  * Measured on the live 42,011-frame hh journal: 1,849-2,140 ms of a 3.8-4.3 s
  * `yrd log`, to read a single string. Bounding the probe makes the cost
- * independent of how long the journal has been running. */
+ * independent of how long the journal has been running.
+ *
+ * Both reads start at the retention floor rather than at cursor 0. The journal
+ * evicts a prefix of already-checkpointed frames and then REFUSES a replay
+ * that begins below the floor, rather than return a history with a hole in it
+ * — and the refusal turns on `after`, so bounding the probe with `before` does
+ * not escape it and the unbounded fallback would throw as well. Reading from
+ * the floor is also the honest answer to the question asked: coverage genuinely
+ * begins at the first frame that still exists. */
 async function firstEventTimestamp(app: YrdCliApp): Promise<string> {
   const head = (await app.journalSnapshot()).asOf.cursor
   if (head === 0) return "-"
-  const probe = Math.min(COVERAGE_PROBE_FRAMES, head)
-  for await (const event of app.events(0, probe)) return event.ts
+  const floor = app.retentionDiagnostics().journal?.evictedThrough ?? 0
+  if (floor >= head) return "-"
+  const probe = Math.min(floor + COVERAGE_PROBE_FRAMES, head)
+  for await (const event of app.events(floor, probe)) return event.ts
   if (probe === head) return "-"
-  for await (const event of app.events()) return event.ts
+  for await (const event of app.events(floor)) return event.ts
   return "-"
 }
 
