@@ -170,6 +170,22 @@ writer version refuses before append. Reader support and writer activation
 therefore land as separate commits: first raise `JOURNAL_READER_VERSION`, then
 activate that version with the first commit's full reader pin.
 
+That binding is per FIELD, not only per event name, because an event usually
+grows rather than appears: a payload that gains a key keeps its event name and
+its `reader`, so nothing about the event says the key is new. Pass the versions
+of fields a later version introduced — `journalEvent(1, schema, { by: 2 })` —
+and a writer below v2 refuses to emit `by` instead of appending a row every v1
+reader rejects. Refusing at the writer is the only move available: frame and
+payload schemas are `.strict()`, so a reader cannot skip an unknown key, and one
+such row strands every pinned reader in the fleet with no way back.
+
+`journalEventVocabulary(events)` reports each event's reader version and every
+field's. Pin a snapshot of it per package: growing a shipped payload then cannot
+land without saying which version reads the new field. Fields are read from the
+schema's JSON Schema form, so a payload shape that has no introspectable object
+fields reports an empty map — that is disclosure, not a guarantee, and only the
+event-level `reader` guards it.
+
 History is still Journal authority, not a projection database. Its facts must
 be derived transactionally from frames and fail loud if a lookup disagrees with
 the checksummed frame. Plugins may register a pure private `compact` projection

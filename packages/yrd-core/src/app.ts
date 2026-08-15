@@ -79,7 +79,19 @@ export type CommandDef<State extends object, Args extends JsonValue | undefined>
 
 type EventSchema = z.ZodType<JsonValue>
 type EventSchemas = Readonly<Record<string, EventSchema>>
-export type JournalEventDef = Readonly<{ reader: number; schema: EventSchema }>
+export type JournalEventDef = Readonly<{
+  reader: number
+  schema: EventSchema
+  /**
+   * Minimum reader version per top-level payload field, which is what makes the
+   * event's reader version survive a growing payload: an event keeps its own
+   * `reader` while a field added later carries the higher version that can read
+   * it. Empty when the payload shape is not introspectable as an object, and
+   * then only the event-level `reader` applies — `journalEventVocabulary()`
+   * reports that as an empty map rather than an implied guarantee.
+   */
+  fields: Readonly<Record<string, number>>
+}>
 type JournalEvents = Readonly<Record<string, JournalEventDef>>
 type Project<State extends object> = (state: DeepReadonly<State>, event: Event, cause: Cause) => State
 type Empty = Readonly<Record<never, never>>
@@ -228,7 +240,45 @@ export function createYrdDef(): YrdDef {
   })
 }
 
-export function journalEvent(reader: number, schema: EventSchema): JournalEventDef {
+/** Top-level payload field names a schema can produce, across union branches. */
+function schemaFieldNames(schema: EventSchema): readonly string[] {
+  let json: unknown
+  try {
+    json = z.toJSONSchema(schema, { io: "input" })
+  } catch {
+    // A payload shape JSON Schema cannot express carries no field vocabulary.
+    // Callers see that as an empty map, never as a silent guarantee.
+    return []
+  }
+  const names = new Set<string>()
+  const visit = (node: unknown): void => {
+    if (typeof node !== "object" || node === null) return
+    const record = node as Record<string, unknown>
+    const properties = record.properties
+    if (typeof properties === "object" && properties !== null) {
+      for (const name of Object.keys(properties)) names.add(name)
+    }
+    for (const key of ["anyOf", "oneOf", "allOf"]) {
+      const branches = record[key]
+      if (Array.isArray(branches)) for (const branch of branches) visit(branch)
+    }
+  }
+  visit(json)
+  return [...names].sort()
+}
+
+/**
+ * One event's minimum reader version and payload schema, inseparably. Pass
+ * `fieldReaders` for fields a later version introduced: a v1 event that grows a
+ * `by` field readable only from v2 is `journalEvent(1, schema, { by: 2 })`, and
+ * a writer pinned below v2 then refuses to emit `by` instead of writing a row
+ * every v1 reader rejects.
+ */
+export function journalEvent(
+  reader: number,
+  schema: EventSchema,
+  fieldReaders: Readonly<Record<string, number>> = {},
+): JournalEventDef {
   if (!Number.isSafeInteger(reader) || reader < 0) {
     raiseFailure(
       "configuration",
@@ -236,7 +286,77 @@ export function journalEvent(reader: number, schema: EventSchema): JournalEventD
       `yrd: journal event has invalid minimum reader version '${reader}'`,
     )
   }
-  return Object.freeze({ reader, schema })
+  const names = schemaFieldNames(schema)
+  const fields: Record<string, number> = Object.fromEntries(names.map((name) => [name, reader]))
+  for (const [name, version] of Object.entries(fieldReaders)) {
+    if (!Number.isSafeInteger(version) || version < reader) {
+      raiseFailure(
+        "configuration",
+        "journal-field-version-invalid",
+        `yrd: journal event field '${name}' has minimum reader version '${version}', below its event's v${reader}`,
+      )
+    }
+    if (!Object.hasOwn(fields, name)) {
+      // A declaration that guards nothing is worse than none: it reads as
+      // protection while the field it names is emitted unchecked.
+      raiseFailure(
+        "configuration",
+        "journal-field-not-in-schema",
+        `yrd: journal event declares a minimum reader for field '${name}', which its payload schema does not have`,
+      )
+    }
+    fields[name] = version
+  }
+  return Object.freeze({ reader, schema, fields: Object.freeze(fields) })
+}
+
+export type JournalEventVocabulary = Readonly<
+  Record<string, Readonly<{ reader: number; fields: Readonly<Record<string, number>> }>>
+>
+
+/**
+ * Every event's reader version and the minimum reader each of its fields needs.
+ * Pin a snapshot of this per package: growing a shipped event's payload then
+ * cannot land without declaring which version can read the new field.
+ */
+export function journalEventVocabulary(events: JournalEvents): JournalEventVocabulary {
+  return Object.freeze(
+    Object.fromEntries(
+      Object.entries(events)
+        .toSorted(([left], [right]) => left.localeCompare(right))
+        .map(([name, definition]) => [name, { reader: definition.reader, fields: definition.fields }]),
+    ),
+  )
+}
+
+/**
+ * The write-side half of journal compatibility. A reader pinned below a field's
+ * version cannot skip that field — every frame schema is `.strict()`, so one
+ * unknown key refuses the whole row and strands that reader for good. The only
+ * place the skew can still be stopped is where it is authored.
+ */
+function assertEmittedFieldVocabulary(
+  name: string,
+  definition: JournalEventDef,
+  data: JsonValue,
+  compatibility: JournalCompatibility | undefined,
+): void {
+  if (compatibility === undefined) return
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return
+  for (const field of Object.keys(data)) {
+    // Own keys only: a field named `constructor` must not read a function off
+    // the prototype and compare as though it carried a version.
+    const declared = Object.hasOwn(definition.fields, field) ? definition.fields[field] : undefined
+    const required = declared ?? definition.reader
+    if (required > compatibility.version) {
+      raiseFailure(
+        "configuration",
+        "journal-field-version-skew",
+        `yrd: event '${name}' field '${field}' requires journal reader v${required}; ` +
+          `this writer supports v${compatibility.version}`,
+      )
+    }
+  }
 }
 
 function validateJournalEvents(events: JournalEvents): void {
@@ -254,6 +374,16 @@ function validateJournalEvents(events: JournalEvents): void {
         "journal-event-reader-unsupported",
         `yrd: event '${name}' requires journal reader v${definition.reader}; this reader supports through v${JOURNAL_READER_VERSION}`,
       )
+    }
+    for (const [field, version] of Object.entries(definition.fields)) {
+      if (version > JOURNAL_READER_VERSION) {
+        raiseFailure(
+          "configuration",
+          "journal-field-reader-unsupported",
+          `yrd: event '${name}' field '${field}' requires journal reader v${version}; ` +
+            `this reader supports through v${JOURNAL_READER_VERSION}`,
+        )
+      }
     }
   }
 }
@@ -816,7 +946,9 @@ export async function createYrd<State extends object, Commands extends CommandTr
             `yrd: event '${draft.name}' requires journal reader v${installed.reader}; this writer supports v${options.inject.compatibility.version}`,
           )
         }
-        return EventSchema.parse({ id: id(), name: draft.name, ts: clock(), data: installed.schema.parse(draft.data) })
+        const data = installed.schema.parse(draft.data)
+        assertEmittedFieldVocabulary(draft.name, installed, data, options.inject.compatibility)
+        return EventSchema.parse({ id: id(), name: draft.name, ts: clock(), data })
       })
       const value = result.value === undefined ? undefined : JsonSchema.parse(result.value)
       const frame = parseJournalFrame({
