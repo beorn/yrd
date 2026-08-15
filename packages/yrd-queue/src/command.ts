@@ -3125,6 +3125,12 @@ async function prepareCandidate(
     // measure the wrong author.
     const erased = await unauthoredDeletionFailure(git, path, pr.id, pr.headSha, before, landed)
     if (erased !== undefined) return erased
+    // Deletions first, then what survives: the deletion guard rules on paths the
+    // merge removed, so by here every remaining path is one this witness can
+    // read, and the only question left is whether its content still says what
+    // both parents said.
+    const unwitnessed = await droppedContributionFailure(git, path, pr.id, pr.headSha, before, landed)
+    if (unwitnessed !== undefined) return unwitnessed
     recordChange(pr, landed)
   }
   return {
@@ -3789,6 +3795,203 @@ async function unauthoredDeletionFailure(
       `remedy: ${linearRebuildRemedy("the branch", before)}`,
     ".",
     unauthored,
+  )
+}
+
+type WitnessLines =
+  | Readonly<{ status: "lines"; lines: ReadonlySet<string> }>
+  | Readonly<{ status: "absent" }>
+  | Readonly<{ status: "opaque" }>
+  | Readonly<{ status: "unreadable"; detail: string }>
+
+/** One file's content as a SET of its non-blank lines — never diff hunks. A hunk
+ * is a claim about position, and a resolution that merely moves a line would
+ * read as a loss; membership asks the only question a landing cares about, which
+ * is whether the content is still in the file at all. Being generous about where
+ * a line may appear is deliberate: it can only make this guard miss, never make
+ * it refuse honest work. */
+async function witnessLines(git: Git, repo: string, rev: string, path: string): Promise<WitnessLines> {
+  const tree = await git.raw(repo, ["ls-tree", "-z", rev, "--", path], true)
+  if (tree.code !== 0 || tree.stdout === "") return { status: "absent" }
+  const tab = tree.stdout.indexOf("\t")
+  if (tab === -1) return { status: "absent" }
+  const oid = /^\d{6} blob ([0-9a-f]{40,64})$/u.exec(tree.stdout.slice(0, tab))?.[1]
+  const end = tree.stdout.indexOf("\0", tab + 1)
+  if (tree.stdout.slice(tab + 1, end === -1 ? undefined : end) !== path) return { status: "absent" }
+  // A gitlink or a subtree is not line-comparable content, and who authored a
+  // pin is the containment guards' subject, never this one's.
+  if (oid === undefined) return { status: "opaque" }
+  const blob = await git.raw(repo, ["cat-file", "blob", oid], true)
+  if (blob.code !== 0) {
+    return { status: "unreadable", detail: blob.stderr || blob.stdout || `git cat-file blob ${oid} produced nothing` }
+  }
+  // Bytes that do not survive the decode to text have no lines to compare: NUL
+  // is git's own binary marker, and U+FFFD means the decoder already replaced
+  // bytes, so the "lines" would be a fiction no refusal may rest on.
+  if (blob.stdout.includes("\0") || blob.stdout.includes("\uFFFD")) return { status: "opaque" }
+  return { status: "lines", lines: new Set(blob.stdout.split(/\r?\n/u).filter((line) => line.trim() !== "")) }
+}
+
+/** The paths both parents changed, measured against EVERY merge base and
+ * unioned. Against a single base this is the plain "both sides touched it" set.
+ * Against a criss-cross it must be the union, because the shape this guard
+ * exists for is invisible from one of the bases: the carrier that resolved a
+ * landed marker away looks unchanged when measured from the base whose branch it
+ * sits on, and changed only when measured from the other. Picking one base is
+ * how the loss stays unseen. */
+async function contestedPaths(
+  git: Git,
+  repo: string,
+  bases: readonly string[],
+  before: string,
+  headSha: string,
+): Promise<string[]> {
+  const contested = new Set<string>()
+  for (const base of bases) {
+    const ours = new Set(await changedPaths(git, repo, base, before))
+    for (const path of await changedPaths(git, repo, base, headSha)) {
+      if (ours.has(path)) contested.add(path)
+    }
+  }
+  return [...contested].toSorted()
+}
+
+type ContributionDrop = Readonly<{ path: string; side: "base" | "carrier"; lines: readonly string[] }>
+
+/** A clean merge can be worse than a conflict. A conflict stops and asks; a
+ * resolution that drops one parent's contribution lands with full ancestry and
+ * no signal at all — which is how `d416a3179e` erased three shipped features.
+ *
+ * Every guard above this one rules on PATHS: does the carrier contain the base,
+ * does the merge delete a landing. None of them reads what the merge result
+ * SAYS, so a file that survives with one parent's content resolved out of it
+ * passes all of them. The mechanism is the criss-cross its deletion sibling
+ * documents: two merge bases, `ort` resolves against a virtual base built from
+ * both, and a removal resolved there appears in no diff anyone reviewed.
+ *
+ * So ask the question directly, per contested file: is there a line one parent
+ * carries that the RESULT does not, and that the other parent never authored
+ * removing? "Authored removing" is measured against every merge base and
+ * INTERSECTED — a removal only counts as the other parent's decision if it holds
+ * from all of them. That intersection is the whole discrimination: a line the
+ * carrier deliberately deleted on its own branch is absent from every base's
+ * comparison and is never flagged, while the marker resolved away against a
+ * virtual base is authored from no base at all and is.
+ *
+ * Declared limits, because a guard that hides its blind spots is worse than one
+ * that has none. Content with no comparable lines — gitlinks, subtrees, binary
+ * and anything the decoder had to replace bytes in — is excluded and NAMED in
+ * the refusal. Paths the merge deletes outright belong to
+ * `unauthoredDeletionFailure`, which runs first. And a parent's contribution
+ * that consists only of removals leaves no line to look for, so it is not
+ * witnessed here. Where the parents share a single merge base the check is very
+ * nearly a tautology, as it should be. */
+async function droppedContributionFailure(
+  git: Git,
+  repo: string,
+  pr: string,
+  headSha: string,
+  before: string,
+  landed: string,
+): Promise<CandidateFailure | undefined> {
+  const unreadable = (path: string, detail: string): CandidateFailure =>
+    candidateFailure(
+      "contribution-inspection",
+      `could not read '${path}' while witnessing what merging merge request '${pr}' branch '${headSha}' kept: ` +
+        `${detail}; restore readable history before landing a merge whose result cannot be compared with its parents`,
+    )
+
+  const found = await git.run(repo, ["merge-base", "--all", before, headSha], true)
+  if (found.code !== 0 || found.stdout === "") {
+    return unreadable(".", found.stderr || found.stdout || `no merge base between '${before}' and '${headSha}'`)
+  }
+  const bases = found.stdout.split(/\r?\n/u).filter((sha) => sha !== "")
+  const contested = await contestedPaths(git, repo, bases, before, headSha)
+  if (contested.length === 0) return undefined
+
+  const drops: ContributionDrop[] = []
+  const excluded: string[] = []
+  for (const path of contested) {
+    const result = await witnessLines(git, repo, landed, path)
+    if (result.status === "unreadable") return unreadable(path, result.detail)
+    if (result.status === "absent") continue
+    if (result.status === "opaque") {
+      excluded.push(path)
+      continue
+    }
+    const ours = await witnessLines(git, repo, before, path)
+    const theirs = await witnessLines(git, repo, headSha, path)
+    if (ours.status === "unreadable") return unreadable(path, ours.detail)
+    if (theirs.status === "unreadable") return unreadable(path, theirs.detail)
+    if (ours.status === "opaque" || theirs.status === "opaque") {
+      excluded.push(path)
+      continue
+    }
+    const baseParent = ours.status === "lines" ? ours.lines : new Set<string>()
+    const carrierParent = theirs.status === "lines" ? theirs.lines : new Set<string>()
+    const lostFromBase = [...baseParent].filter((line) => !result.lines.has(line))
+    const lostFromCarrier = [...carrierParent].filter((line) => !result.lines.has(line))
+    if (lostFromBase.length === 0 && lostFromCarrier.length === 0) continue
+
+    // Only a base that CARRIES the path can speak to who removed a line from it;
+    // one that never had the file would answer "nobody authored anything", which
+    // would turn every ordinary new-file merge into a refusal.
+    const attested: Array<ReadonlySet<string>> = []
+    let unwitnessable = false
+    for (const base of bases) {
+      const at = await witnessLines(git, repo, base, path)
+      if (at.status === "unreadable") return unreadable(path, at.detail)
+      if (at.status === "opaque") {
+        unwitnessable = true
+        break
+      }
+      if (at.status === "lines") attested.push(at.lines)
+    }
+    if (unwitnessable || attested.length === 0) {
+      excluded.push(path)
+      continue
+    }
+    const authoredRemovals = (parent: ReadonlySet<string>): ReadonlySet<string> =>
+      attested
+        .map((base) => new Set([...base].filter((line) => !parent.has(line))))
+        .reduce((left, right) => new Set([...left].filter((line) => right.has(line))))
+    const byCarrier = authoredRemovals(carrierParent)
+    const byBase = authoredRemovals(baseParent)
+    const droppedFromBase = lostFromBase.filter((line) => !byCarrier.has(line))
+    const droppedFromCarrier = lostFromCarrier.filter((line) => !byBase.has(line))
+    if (droppedFromBase.length > 0) drops.push({ path, side: "base", lines: droppedFromBase })
+    if (droppedFromCarrier.length > 0) drops.push({ path, side: "carrier", lines: droppedFromCarrier })
+  }
+  if (drops.length === 0) return undefined
+
+  const clip = (line: string): string => (line.length > 120 ? `${line.slice(0, 119)}…` : line)
+  const list = (values: readonly string[]): string =>
+    `${values.slice(0, 8).join(", ")}${values.length > 8 ? ", …" : ""}`
+  const shown = drops
+    .slice(0, 4)
+    .map(
+      (drop) =>
+        `'${drop.path}' loses ${drop.lines.length} line(s) carried by ` +
+        `${drop.side === "base" ? "the merge-queue base" : `branch '${headSha}'`}: ` +
+        `${drop.lines.slice(0, 3).map(clip).join(" | ")}`,
+    )
+    .join("; ")
+  // What was compared and what was not, in the refusal itself: a witness that
+  // reports only its findings leaves the reader unable to tell a clean bill of
+  // health from a check that quietly looked at nothing.
+  const scope =
+    `compared ${contested.length} path(s) both parents changed, against merge base(s) [${bases.join(", ")}]` +
+    (excluded.length === 0
+      ? ""
+      : `; excluded ${excluded.length} path(s) with no comparable lines [${list(excluded)}]`) +
+    "; paths the merge deletes outright are unauthored-path-deletion's subject"
+  return candidateFailure(
+    "dropped-parent-contribution",
+    `merging merge request '${pr}' branch '${headSha}' produced a result that drops content neither parent ` +
+      `authored removing: ${shown}${drops.length > 4 ? ", …" : ""}\n${scope}\n` +
+      `remedy: ${linearRebuildRemedy("the branch", before)}`,
+    ".",
+    [...new Set(drops.map((drop) => drop.path))],
   )
 }
 

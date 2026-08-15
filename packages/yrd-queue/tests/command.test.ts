@@ -4040,6 +4040,216 @@ describe("Queue command adapters", () => {
     expect(tree).not.toContain("doomed.txt")
   })
 
+  /**
+   * The content residual, and the shape `d416a3179e` rode: both parents carry a
+   * distinct feature marker in the SAME file, the carrier's own resolution keeps
+   * only its own marker, and the criss-cross makes the merge apply that
+   * resolution against the virtual base. No path is deleted, so the deletion
+   * guard cannot see it; nothing conflicts, so nobody is asked; a landed feature
+   * is simply gone from a merge with full ancestry.
+   */
+  const NEUTRAL_LINES = Array.from({ length: 40 }, (_, index) => `export const line${index + 1} = ${index + 1}`)
+  const FEATURE_ALPHA = 'export const FEATURE_ALPHA = "alpha"'
+  const FEATURE_BETA = 'export const FEATURE_BETA = "beta"'
+  /** Alpha at the top and beta at the bottom of forty neutral lines: far enough
+   * apart that every merge below is a genuine clean auto-merge, never a conflict
+   * this test resolved into the shape it wanted. */
+  const featuresFile = (markers: Readonly<{ alpha?: boolean; beta?: boolean; doomed?: boolean }>): string =>
+    [
+      ...(markers.alpha === true ? [FEATURE_ALPHA] : []),
+      ...NEUTRAL_LINES,
+      ...(markers.doomed === true ? ['export const DOOMED = "doomed"'] : []),
+      ...(markers.beta === true ? [FEATURE_BETA] : []),
+    ].join("\n") + "\n"
+
+  it("refuses a clean merge whose result drops a landed feature marker neither parent authored removing", async () => {
+    const { repo } = await repository()
+    await writeFile(join(repo, "features.ts"), featuresFile({}))
+    await git(repo, ["add", "features.ts"])
+    await git(repo, ["commit", "-qm", "the file both features land in"])
+    const originalBase = await git(repo, ["rev-parse", "HEAD"])
+
+    // Two concurrent lines off the same base, each landing its own marker.
+    await git(repo, ["switch", "-qc", "issue/alpha", originalBase])
+    await writeFile(join(repo, "features.ts"), featuresFile({ alpha: true }))
+    await git(repo, ["commit", "-qam", "land the alpha feature"])
+    const alphaSha = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-qc", "issue/beta", originalBase])
+    await writeFile(join(repo, "features.ts"), featuresFile({ beta: true }))
+    await git(repo, ["commit", "-qam", "land the beta feature"])
+    const betaSha = await git(repo, ["rev-parse", "HEAD"])
+
+    // The queue base absorbs both, so BOTH markers are landed work.
+    await git(repo, ["switch", "-q", "main"])
+    await git(repo, ["merge", "-q", "--no-ff", alphaSha, "-m", "land alpha"])
+    await git(repo, ["merge", "-q", "--no-ff", betaSha, "-m", "land beta"])
+    const queueBaseHead = await git(repo, ["rev-parse", "HEAD"])
+
+    // The carrier absorbs the same two lines in the other order and resolves by
+    // keeping only its own marker, then continues linearly so its tip is not a
+    // merge tip.
+    await git(repo, ["switch", "-q", "issue/beta"])
+    await git(repo, ["merge", "--no-ff", "--no-commit", alphaSha])
+    await writeFile(join(repo, "features.ts"), featuresFile({ beta: true }))
+    await git(repo, ["commit", "-qam", "recomposed tree keeps only beta"])
+    await writeFile(join(repo, "carrier.txt"), "carrier payload\n")
+    await git(repo, ["add", "carrier.txt"])
+    await git(repo, ["commit", "-qm", "carrier payload"])
+    const carrierHead = await git(repo, ["rev-parse", "HEAD"])
+
+    // The facts that make this the residual case rather than any guard above it.
+    // `git()` throws on a non-zero exit, so the ancestry call is itself the
+    // assertion that the carrier contains the landed alpha commit.
+    await git(repo, ["merge-base", "--is-ancestor", alphaSha, carrierHead])
+    expect(await git(repo, ["merge-base", "--all", queueBaseHead, carrierHead])).toContain("\n")
+    expect(await git(repo, ["show", `${queueBaseHead}:features.ts`])).toContain(FEATURE_ALPHA)
+    expect(await git(repo, ["show", `${carrierHead}:features.ts`])).not.toContain(FEATURE_ALPHA)
+    // Nothing is deleted and nothing conflicts, so neither residual guard that
+    // exists today can witness the loss.
+    expect(
+      await git(repo, ["diff", "--no-renames", "--diff-filter=D", "--name-only", queueBaseHead, carrierHead, "--"]),
+    ).toBe("")
+
+    await using process = createProcess()
+    const pr = PRSnapshotSchema.parse({
+      id: "PR1",
+      branch: "issue/beta",
+      base: "main",
+      revision: 1,
+      headSha: carrierHead,
+      baseSha: originalBase,
+    })
+
+    await expect(
+      gitCandidatePreparer({ inject: { process }, repo })({
+        id: "C1",
+        queueId: "main",
+        baseSha: queueBaseHead,
+        revs: [{ pr: pr.id, n: pr.revision, head: pr.headSha }],
+        prs: [pr],
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "dropped-parent-contribution",
+        // Order-independent on purpose: the refusal must name the file, the
+        // exact line it lost, WHICH parent contributed it, and the remedy —
+        // but which of those it says first is prose, not contract.
+        message: expect.stringMatching(
+          /(?=.*features\.ts)(?=.*FEATURE_ALPHA)(?=.*merge-queue base)(?=.*linear rebuild)/isu,
+        ),
+      },
+    })
+  })
+
+  /**
+   * The control that keeps the witness from refusing honest work: the same
+   * criss-cross, but the line the merge removes is one the carrier itself
+   * removed on its own branch, against every merge base. Authorship, not
+   * criss-cross-ness, is what the witness rules on.
+   */
+  it("lands a criss-cross merge whose removal the carrier itself authored, with both features intact", async () => {
+    const { repo } = await repository()
+    await writeFile(join(repo, "features.ts"), featuresFile({ doomed: true }))
+    await git(repo, ["add", "features.ts"])
+    await git(repo, ["commit", "-qm", "the file both features land in"])
+    const originalBase = await git(repo, ["rev-parse", "HEAD"])
+
+    await git(repo, ["switch", "-qc", "issue/alpha", originalBase])
+    await writeFile(join(repo, "features.ts"), featuresFile({ alpha: true, doomed: true }))
+    await git(repo, ["commit", "-qam", "land the alpha feature"])
+    const alphaSha = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-qc", "issue/beta", originalBase])
+    await writeFile(join(repo, "features.ts"), featuresFile({ beta: true, doomed: true }))
+    await git(repo, ["commit", "-qam", "land the beta feature"])
+    const betaSha = await git(repo, ["rev-parse", "HEAD"])
+
+    await git(repo, ["switch", "-q", "main"])
+    await git(repo, ["merge", "-q", "--no-ff", alphaSha, "-m", "land alpha"])
+    await git(repo, ["merge", "-q", "--no-ff", betaSha, "-m", "land beta"])
+    const queueBaseHead = await git(repo, ["rev-parse", "HEAD"])
+
+    // Same criss-cross; the resolution keeps both markers, and a separate,
+    // ordinary commit removes the doomed line on purpose.
+    await git(repo, ["switch", "-q", "issue/beta"])
+    await git(repo, ["merge", "--no-ff", "--no-commit", alphaSha])
+    await git(repo, ["commit", "-qm", "merge alpha into beta"])
+    await writeFile(join(repo, "features.ts"), featuresFile({ alpha: true, beta: true }))
+    await git(repo, ["commit", "-qam", "remove the doomed line on purpose"])
+    const carrierHead = await git(repo, ["rev-parse", "HEAD"])
+    expect(await git(repo, ["merge-base", "--all", queueBaseHead, carrierHead])).toContain("\n")
+
+    await using process = createProcess()
+    const pr = PRSnapshotSchema.parse({
+      id: "PR1",
+      branch: "issue/beta",
+      base: "main",
+      revision: 1,
+      headSha: carrierHead,
+      baseSha: originalBase,
+    })
+
+    const prepared = await gitCandidatePreparer({ inject: { process }, repo })({
+      id: "C1",
+      queueId: "main",
+      baseSha: queueBaseHead,
+      revs: [{ pr: pr.id, n: pr.revision, head: pr.headSha }],
+      prs: [pr],
+    })
+
+    const { sha } = prepared
+    if (sha === undefined) throw new Error("candidate preparation returned no sha")
+    const landedFeatures = await git(repo, ["show", `${sha}:features.ts`])
+    expect(landedFeatures).toContain(FEATURE_ALPHA)
+    expect(landedFeatures).toContain(FEATURE_BETA)
+    expect(landedFeatures).not.toContain("DOOMED")
+  })
+
+  it("lands an ordinary merge that carries both parents' markers into the same file", async () => {
+    const { repo } = await repository()
+    await writeFile(join(repo, "features.ts"), featuresFile({}))
+    await git(repo, ["add", "features.ts"])
+    await git(repo, ["commit", "-qm", "the file both features land in"])
+    const originalBase = await git(repo, ["rev-parse", "HEAD"])
+
+    await git(repo, ["switch", "-qc", "issue/alpha", originalBase])
+    await writeFile(join(repo, "features.ts"), featuresFile({ alpha: true }))
+    await git(repo, ["commit", "-qam", "land the alpha feature"])
+    await git(repo, ["switch", "-q", "main"])
+    await git(repo, ["merge", "-q", "--no-ff", "issue/alpha", "-m", "land alpha"])
+    const queueBaseHead = await git(repo, ["rev-parse", "HEAD"])
+
+    await git(repo, ["switch", "-qc", "issue/beta", originalBase])
+    await writeFile(join(repo, "features.ts"), featuresFile({ beta: true }))
+    await git(repo, ["commit", "-qam", "land the beta feature"])
+    const carrierHead = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "main"])
+
+    await using process = createProcess()
+    const pr = PRSnapshotSchema.parse({
+      id: "PR1",
+      branch: "issue/beta",
+      base: "main",
+      revision: 1,
+      headSha: carrierHead,
+      baseSha: originalBase,
+    })
+
+    const prepared = await gitCandidatePreparer({ inject: { process }, repo })({
+      id: "C1",
+      queueId: "main",
+      baseSha: queueBaseHead,
+      revs: [{ pr: pr.id, n: pr.revision, head: pr.headSha }],
+      prs: [pr],
+    })
+
+    const { sha } = prepared
+    if (sha === undefined) throw new Error("candidate preparation returned no sha")
+    const landedFeatures = await git(repo, ["show", `${sha}:features.ts`])
+    expect(landedFeatures).toContain(FEATURE_ALPHA)
+    expect(landedFeatures).toContain(FEATURE_BETA)
+  })
+
   it("refuses a payload touching configured refuse paths and names them with the configured reason", async () => {
     const { repo } = await repository()
     const baseSha = await git(repo, ["rev-parse", "main"])
