@@ -23,7 +23,11 @@
 /** The single git surface this predicate needs. Structural on purpose: the
  * module stays unit-testable against a fake and never owns a process. */
 export type CarryForwardGit = Readonly<{
-  run: (repo: string, args: readonly string[], allowFailure?: boolean) => Promise<Readonly<{ code: number; stdout: string }>>
+  run: (
+    repo: string,
+    args: readonly string[],
+    allowFailure?: boolean,
+  ) => Promise<Readonly<{ code: number; stdout: string }>>
 }>
 
 /** Which leg of the predicate refused. Each is a distinct fact about the base
@@ -149,7 +153,15 @@ export function parseNameStatus(stdout: string): NameStatus {
 }
 
 async function nameStatus(git: CarryForwardGit, repo: string, from: string, to: string): Promise<NameStatus> {
-  const diff = await git.run(repo, ["diff", "--name-status", "-M", "--no-ext-diff", "--ignore-submodules=none", from, to])
+  const diff = await git.run(repo, [
+    "diff",
+    "--name-status",
+    "-M",
+    "--no-ext-diff",
+    "--ignore-submodules=none",
+    from,
+    to,
+  ])
   return parseNameStatus(diff.stdout)
 }
 
@@ -249,9 +261,7 @@ export async function carryForwardVerdict(
   if (request.evidence.configHash === undefined) {
     return refuse("env-fingerprint", "checked evidence records no configHash; its check identity cannot be compared")
   }
-  const pins = request.flows.map((flow) =>
-    flow === undefined ? "" : `${flow.name}\0${flow.rev}\0${flow.fingerprint}`,
-  )
+  const pins = request.flows.map((flow) => (flow === undefined ? "" : `${flow.name}\0${flow.rev}\0${flow.fingerprint}`))
   const distinct = [...new Set(pins)]
   if (distinct.length > 1) {
     return refuse(

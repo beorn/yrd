@@ -100,11 +100,10 @@ async function runWithBaseMotion(
   const { repo, feature: featureSha } = await repository("feature")
   const process = createProcess()
   const bayJobs = createBayJobDefs(unusedWorkspace)
-  const check = withStep(
-    "check",
-    gitCheckStep({ inject: { process }, repo, command: ["test", "-f", "feature.txt"] }),
-    { revision: "check-v1", output: GitCheckResultEvidenceSchema },
-  )
+  const check = withStep("check", gitCheckStep({ inject: { process }, repo, command: ["test", "-f", "feature.txt"] }), {
+    revision: "check-v1",
+    output: GitCheckResultEvidenceSchema,
+  })
   const move = withStep(
     "move-base",
     async (_input: StepExecution<Checked>) => {

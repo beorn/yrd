@@ -5805,16 +5805,14 @@ async function applyComponentMainPromotions(
 
     if (pushed.state === "updated" || pushed.state === "unchanged") {
       receipts.push(
-        ...promotion.pins.map(
-          (pin): ComponentMainReceipt => ({
-            path: pin.path,
-            origin: pin.origin,
-            pinSha: pin.sha,
-            mainBeforeSha: promotion.mainSha,
-            mainAfterSha: promotion.targetSha,
-            action: "fast-forwarded",
-          }),
-        ),
+        ...promotion.pins.map((pin): ComponentMainReceipt => ({
+          path: pin.path,
+          origin: pin.origin,
+          pinSha: pin.sha,
+          mainBeforeSha: promotion.mainSha,
+          mainAfterSha: promotion.targetSha,
+          action: "fast-forwarded",
+        })),
       )
       continue
     }
@@ -5837,16 +5835,14 @@ async function applyComponentMainPromotions(
     )
     if (reached.code === 0) {
       receipts.push(
-        ...promotion.pins.map(
-          (pin): ComponentMainReceipt => ({
-            path: pin.path,
-            origin: pin.origin,
-            pinSha: pin.sha,
-            mainBeforeSha: promotion.mainSha,
-            mainAfterSha: refreshed.sha,
-            action: "fast-forwarded",
-          }),
-        ),
+        ...promotion.pins.map((pin): ComponentMainReceipt => ({
+          path: pin.path,
+          origin: pin.origin,
+          pinSha: pin.sha,
+          mainBeforeSha: promotion.mainSha,
+          mainAfterSha: refreshed.sha,
+          action: "fast-forwarded",
+        })),
       )
       continue
     }
@@ -7083,7 +7079,10 @@ async function mergeCandidate(
       fromBaseSha: prior.baseSha,
       toBaseSha: base.sha,
       candidateSha: prior.candidateSha,
-      evidence: { configHash: prior.configHash, ...(prior.environmentHash === undefined ? {} : { environmentHash: prior.environmentHash }) },
+      evidence: {
+        configHash: prior.configHash,
+        ...(prior.environmentHash === undefined ? {} : { environmentHash: prior.environmentHash }),
+      },
       flows: input.prs.map((pr) => pr.flow),
       pins: (prior.submoduleResolutions ?? []).map((resolution) => ({
         path: resolution.path,
@@ -7459,7 +7458,16 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
               status: "completed",
               conclusion: "success",
               output: recovering
-                ? await physicalIntegrationProof(git, repo, input, context, baseSha, checked, settlement.receipts, carriedForward)
+                ? await physicalIntegrationProof(
+                    git,
+                    repo,
+                    input,
+                    context,
+                    baseSha,
+                    checked,
+                    settlement.receipts,
+                    carriedForward,
+                  )
                 : integrationProof(baseSha, checked, alreadyLanded, settlement.receipts, carriedForward),
             }
           },
@@ -7538,7 +7546,8 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
                       context,
                       checked.candidateSha,
                       checked,
-                      settlement.receipts,                      carriedForward,
+                      settlement.receipts,
+                      carriedForward,
                     ),
                   }
                 },
@@ -7586,7 +7595,8 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
                         context,
                         landing.sha,
                         checked,
-                        settlement.receipts,                        carriedForward,
+                        settlement.receipts,
+                        carriedForward,
                       ),
                     }
                   : componentMainFailureResult(settlement.error)
@@ -7678,7 +7688,8 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
                 context,
                 checked.candidateSha,
                 checked,
-                settlement.receipts,                carriedForward,
+                settlement.receipts,
+                carriedForward,
               ),
             }
           },
@@ -7732,7 +7743,8 @@ export function configuredMergeStep<Shape extends PRShape>(
                     context,
                     candidate.base.sha,
                     candidate.checked,
-                    settlement.receipts,                    candidate.carriedForward,
+                    settlement.receipts,
+                    candidate.carriedForward,
                   )
                 : integrationProof(
                     candidate.base.sha,
@@ -7818,7 +7830,8 @@ export function configuredMergeStep<Shape extends PRShape>(
                     context,
                     landing.sha,
                     candidate.checked,
-                    settlement.receipts,                    candidate.carriedForward,
+                    settlement.receipts,
+                    candidate.carriedForward,
                   ),
                 }
               },
