@@ -351,41 +351,6 @@ export const ComponentMainOutcomesSchema = z
   })
   .strict() as z.ZodType<ComponentMainOutcomes>
 
-/**
- * A verdict reused across the queue's own base motion rather than re-proven.
- *
- * Present exactly when the merge carried a check forward: the check ran at
- * {@link fromBaseSha} against {@link checkedCandidateSha}, the base then moved
- * to {@link toBaseSha}, and the conservative predicate found the motion narrow
- * enough that the old verdict still answers. The candidate that actually
- * landed was re-integrated at the new base — only the VERDICT is carried, so
- * both bases are recorded and neither is implied by the other.
- */
-export type CarriedForwardCheck = Readonly<{
-  fromBaseSha: string
-  toBaseSha: string
-  checkedCandidateSha: string
-  configHash: string
-  environmentHash?: string
-}>
-
-export const CarriedForwardCheckSchema = z
-  .object({
-    fromBaseSha: GitShaSchema,
-    toBaseSha: GitShaSchema,
-    checkedCandidateSha: GitShaSchema,
-    configHash: z.string().regex(/^[0-9a-f]{64}$/u),
-    environmentHash: z
-      .string()
-      .regex(/^[0-9a-f]{64}$/u)
-      .optional(),
-  })
-  .strict()
-  .refine(({ fromBaseSha, toBaseSha }) => fromBaseSha !== toBaseSha, {
-    message: "a carried check must name two different bases",
-    path: ["toBaseSha"],
-  }) as z.ZodType<CarriedForwardCheck>
-
 export type IntegrationProof = Readonly<{
   commit: string
   baseSha: string
@@ -393,7 +358,6 @@ export type IntegrationProof = Readonly<{
   sourceRewrites?: readonly SourceRewrite[]
   submoduleResolutions?: readonly QueueSubmoduleResolutionEvidence[]
   componentMains?: readonly ComponentMainReceipt[]
-  carriedForward?: CarriedForwardCheck
 }>
 
 export const IntegrationProofSchema = z
@@ -405,7 +369,6 @@ export const IntegrationProofSchema = z
     sourceRewrites: z.array(SourceRewriteSchema).optional(),
     submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),
     componentMains: z.array(ComponentMainReceiptSchema).min(1).optional(),
-    carriedForward: CarriedForwardCheckSchema.optional(),
   })
   .strict() as z.ZodType<IntegrationProof>
 
@@ -670,22 +633,6 @@ export type QueuesState = Readonly<{
   terminalAssociations: QueueTerminalAssociations
   admissionRefusals: Readonly<Record<PRId, QueueAdmissionRefusal>>
   retention: Readonly<{ terminalOrder: Readonly<Record<RunId, number>> }>
-  /** Set once a shadow recut proved a carried verdict wrong. Persisted rather
-   * than held in memory: a divergence means the predicate was wrong about
-   * something, and an in-process flag would silently re-arm on restart. Only an
-   * operator clears it. */
-  carryForwardDisabledBy?: QueueCarryForwardDisabled
-}>
-
-export type QueueCarryForwardDisabled = Readonly<{
-  reason: string
-  at: string
-  run: RunId
-  pr: string
-  fromBaseSha: string
-  toBaseSha: string
-  carriedVerdict: "passed"
-  freshVerdict: "failed"
 }>
 
 export type PREligibilityReason = Readonly<{
@@ -869,7 +816,6 @@ export const YRD_QUEUE_AUDIT_FINDING_CODES = [
   "queue-progress-stalled",
   "config-drift",
   "runtime-drift",
-  "carry-forward-disabled",
 ] as const
 
 export type QueueAuditFindingCode = (typeof YRD_QUEUE_AUDIT_FINDING_CODES)[number]

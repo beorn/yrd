@@ -14,7 +14,6 @@ import * as z from "zod"
 import type {
   AlreadyLandedEvidence,
   Candidate,
-  CarriedForwardCheck,
   ComponentMainOutcomes,
   ComponentMainReceipt,
   ComponentMainRefusal,
@@ -35,15 +34,6 @@ import {
   SourceRewriteSchema,
 } from "./model.ts"
 import { candidateRefFor } from "./candidate-refs.ts"
-import {
-  CarryForwardSampleEvidenceSchema,
-  DEFAULT_CARRY_FORWARD_POLICY,
-  carryForwardVerdict,
-  shouldShadowRecut,
-  type CarryForwardPolicy,
-  type CarryForwardRefusal,
-  type CarryForwardSampleEvidence,
-} from "./carry-forward.ts"
 import { componentMainScratchCleanupFailure } from "./component-main-outcome.ts"
 import {
   describeScratchReap,
@@ -1277,9 +1267,6 @@ function mergeRecordBody(run: Run, candidate: Candidate, pins: MergeRecordBody["
       candidate: run.candidateId,
       result,
       ...(run.integration?.commit === undefined ? {} : { mergedCommit: run.integration.commit }),
-      ...(run.integration?.carriedForward === undefined
-        ? {}
-        : { transplantedFromBase: run.integration.carriedForward.fromBaseSha }),
       startedAt: run.startedAt,
       finishedAt: run.finishedAt,
     },
@@ -5807,14 +5794,16 @@ async function applyComponentMainPromotions(
 
     if (pushed.state === "updated" || pushed.state === "unchanged") {
       receipts.push(
-        ...promotion.pins.map((pin): ComponentMainReceipt => ({
-          path: pin.path,
-          origin: pin.origin,
-          pinSha: pin.sha,
-          mainBeforeSha: promotion.mainSha,
-          mainAfterSha: promotion.targetSha,
-          action: "fast-forwarded",
-        })),
+        ...promotion.pins.map(
+          (pin): ComponentMainReceipt => ({
+            path: pin.path,
+            origin: pin.origin,
+            pinSha: pin.sha,
+            mainBeforeSha: promotion.mainSha,
+            mainAfterSha: promotion.targetSha,
+            action: "fast-forwarded",
+          }),
+        ),
       )
       continue
     }
@@ -5837,14 +5826,16 @@ async function applyComponentMainPromotions(
     )
     if (reached.code === 0) {
       receipts.push(
-        ...promotion.pins.map((pin): ComponentMainReceipt => ({
-          path: pin.path,
-          origin: pin.origin,
-          pinSha: pin.sha,
-          mainBeforeSha: promotion.mainSha,
-          mainAfterSha: refreshed.sha,
-          action: "fast-forwarded",
-        })),
+        ...promotion.pins.map(
+          (pin): ComponentMainReceipt => ({
+            path: pin.path,
+            origin: pin.origin,
+            pinSha: pin.sha,
+            mainBeforeSha: promotion.mainSha,
+            mainAfterSha: refreshed.sha,
+            action: "fast-forwarded",
+          }),
+        ),
       )
       continue
     }
@@ -6883,21 +6874,10 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
     )
 }
 
-/** Carry-forward controls every merge step accepts. `random` exists so the
- * shadow sample is deterministic under test; hosts leave it unset. */
-type CarryForwardOptions = Readonly<{
-  /** A function is read at RUN time so a kill switch written mid-process takes
-   * effect immediately; a plain value is for tests and static hosts. */
-  carryForward?: CarryForwardPolicy | (() => CarryForwardPolicy)
-  random?: () => number
-}>
-
 export type GitMergeOptions = ProcessDependency &
-  CarryForwardOptions &
   Readonly<{ repo: string; env?: NodeJS.ProcessEnv; refuse?: RefusePathsPolicy }>
 
 export type ConfiguredMergeOptions = ProcessDependency &
-  CarryForwardOptions &
   Readonly<{
     repo: string
     command: readonly string[]
@@ -7023,14 +7003,11 @@ type MergeCandidateResult =
       conclusion: "success"
       base: GitQueueTarget
       checked: PinnedCandidate
-      /** Set when this merge reused a verdict across the base motion rather
-       * than re-proving it. See {@link CarriedForwardCheck}. */
-      carriedForward?: CarriedForwardCheck
     }>
   | Readonly<{
       status: "completed"
       conclusion: "failure"
-      error: Readonly<{ code: string; message: string; evidence?: JsonValue }>
+      error: Readonly<{ code: string; message: string }>
     }>
   | Readonly<{ status: "waiting"; token: string; detail?: string }>
 type FailedJobResult = Extract<JobResult<never>, { status: "completed"; conclusion: "failure" }>
@@ -7040,12 +7017,7 @@ async function mergeCandidate(
   repo: string,
   input: StepExecution,
   context: Readonly<{ id: string; attempt: number }>,
-  options: Readonly<{
-    artifactRoot?: string
-    refuse?: RefusePathsPolicy
-    carryForward?: CarryForwardPolicy | (() => CarryForwardPolicy)
-    random?: () => number
-  }>,
+  options: Readonly<{ artifactRoot?: string; refuse?: RefusePathsPolicy }>,
 ): Promise<MergeCandidateResult> {
   const prior = checkedCandidate(input.shape)
   const prepared =
@@ -7070,118 +7042,10 @@ async function mergeCandidate(
     prior ?? (prepared?.status === "completed" && prepared.conclusion === "success" ? prepared.output : undefined)
   if (checked === undefined) throw new Error("yrd: merge candidate preparation produced no candidate")
   const base = await authoritativeQueueBase(git, repo, primaryPR(input).base)
-
-  // The base moved out from under a check that already passed. Before refusing
-  // into a recut — which re-runs the whole check pipeline for a payload the
-  // motion never touched — ask whether the motion was narrow enough that the
-  // old verdict still answers. Only the verdict is carried: the candidate that
-  // lands is re-integrated at the new base, exactly as a recut would build it,
-  // minus the checks.
-  let carriedForward: CarriedForwardCheck | undefined
-  let carryRefusal: CarryForwardRefusal | undefined
-  let sampleEvidence: CarryForwardSampleEvidence | undefined
-  let effective = checked
-  // Read the policy at RUN time, never at step-construction time: the kill
-  // switch is written while this process is live, and a policy captured in a
-  // closure would keep carrying verdicts after a divergence retired the path.
-  const resolvedPolicy =
-    typeof options.carryForward === "function"
-      ? options.carryForward()
-      : (options.carryForward ?? DEFAULT_CARRY_FORWARD_POLICY)
-  if (prior !== undefined && prior.baseSha !== base.sha) {
-    const decision = await carryForwardVerdict(git, {
-      repo,
-      fromBaseSha: prior.baseSha,
-      toBaseSha: base.sha,
-      candidateSha: prior.candidateSha,
-      evidence: {
-        configHash: prior.configHash,
-        ...(prior.environmentHash === undefined ? {} : { environmentHash: prior.environmentHash }),
-      },
-      flows: input.prs.map((pr) => pr.flow),
-      pins: (prior.submoduleResolutions ?? []).map((resolution) => ({
-        path: resolution.path,
-        sha: resolution.sha,
-      })),
-      policy: resolvedPolicy,
-      readGitlink: (target, commit, path) => readGitlink(git, target, commit, path),
-    })
-    if (decision.carried) {
-      // A sampled fraction declines the carry and takes the full recut, so the
-      // fresh verdict is observable next to the one we would have carried.
-      // That comparison is the kill switch's input; until it exists this is
-      // the conservative half of the shadow — it costs a recut and never
-      // carries on the sample.
-      const policy = resolvedPolicy
-      if (shouldShadowRecut(policy, options.random ?? Math.random)) {
-        carryRefusal = {
-          leg: "disabled",
-          reason: `shadow-recut sample (rate ${policy.shadowSampleRate}) declined this carry-forward so a fresh check re-proves the payload`,
-        }
-        // The comparator runs a run LATER, when the re-queued member is
-        // re-checked at the new base. This is how that run recognizes what it
-        // stands in for. See CarryForwardSampleEvidenceSchema.
-        sampleEvidence = CarryForwardSampleEvidenceSchema.parse({
-          kind: "carry-forward-shadow-sample",
-          fromBaseSha: prior.baseSha,
-          toBaseSha: base.sha,
-          checkedCandidateSha: prior.candidateSha,
-          carriedVerdict: "passed",
-          configHash: prior.configHash,
-          ...(prior.environmentHash === undefined ? {} : { environmentHash: prior.environmentHash }),
-        })
-      } else {
-        const rebuilt = await withPinnedCandidate<PinnedCandidate>(
-          git,
-          repo,
-          input,
-          context,
-          {
-            artifactRoot: options.artifactRoot,
-            ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
-          },
-          (failure) => failedWithEvidence(failure.error.code, failure.error.message, failure.output),
-          (_path, candidate) =>
-            Promise.resolve({ status: "completed" as const, conclusion: "success" as const, output: candidate }),
-        )
-        if (rebuilt.status === "waiting") return rebuilt
-        if (rebuilt.conclusion === "failure") return rebuilt
-        effective = rebuilt.output
-        carriedForward = {
-          fromBaseSha: prior.baseSha,
-          toBaseSha: base.sha,
-          checkedCandidateSha: prior.candidateSha,
-          configHash: prior.configHash,
-          ...(prior.environmentHash === undefined ? {} : { environmentHash: prior.environmentHash }),
-        }
-      }
-    } else {
-      carryRefusal = decision.refusal
-    }
-  }
-
-  const validated = await validatePinnedCandidate(git, repo, input, base.sha, effective)
-  if ("error" in validated) {
-    // NO SILENT ERRORS: a staleness refusal must say which leg of the
-    // carry-forward predicate declined to rescue it, not merely that the base
-    // moved.
-    const error =
-      carryRefusal === undefined
-        ? validated.error
-        : {
-            ...validated.error,
-            message: `${validated.error.message}; carry-forward refused (${carryRefusal.leg}): ${carryRefusal.reason}`,
-            ...(sampleEvidence === undefined ? {} : { evidence: sampleEvidence }),
-          }
-    return { status: "completed", conclusion: "failure", error }
-  }
-  return {
-    status: "completed",
-    conclusion: "success",
-    base,
-    checked: validated.checked,
-    ...(carriedForward === undefined ? {} : { carriedForward }),
-  }
+  const validated = await validatePinnedCandidate(git, repo, input, base.sha, checked)
+  return "error" in validated
+    ? { status: "completed", conclusion: "failure", error: validated.error }
+    : { status: "completed", conclusion: "success", base, checked }
 }
 
 async function alreadyLandedEvidence(
@@ -7461,13 +7325,15 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
   return async (input, context): Promise<JobResult<IntegrationProof>> => {
     try {
       const branch = primaryPR(input).base
-      const candidate = await mergeCandidate(git, repo, input, context, {
-        ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
-        ...(options.carryForward === undefined ? {} : { carryForward: options.carryForward }),
-        ...(options.random === undefined ? {} : { random: options.random }),
-      })
+      const candidate = await mergeCandidate(
+        git,
+        repo,
+        input,
+        context,
+        options.refuse === undefined ? {} : { refuse: options.refuse },
+      )
       if (candidate.status !== "completed" || candidate.conclusion !== "success") return candidate
-      const { base, checked, carriedForward } = candidate
+      const { base, checked } = candidate
       const baseSha = base.sha
       const alreadyLanded = await alreadyLandedEvidence(git, repo, baseSha, checked)
       if (alreadyLanded !== undefined) {
@@ -7486,17 +7352,8 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
               status: "completed",
               conclusion: "success",
               output: recovering
-                ? await physicalIntegrationProof(
-                    git,
-                    repo,
-                    input,
-                    context,
-                    baseSha,
-                    checked,
-                    settlement.receipts,
-                    carriedForward,
-                  )
-                : integrationProof(baseSha, checked, alreadyLanded, settlement.receipts, carriedForward),
+                ? await physicalIntegrationProof(git, repo, input, context, baseSha, checked, settlement.receipts)
+                : integrationProof(baseSha, checked, alreadyLanded, settlement.receipts),
             }
           },
           { settleSafePromotions: true },
@@ -7575,7 +7432,6 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
                       checked.candidateSha,
                       checked,
                       settlement.receipts,
-                      carriedForward,
                     ),
                   }
                 },
@@ -7624,7 +7480,6 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
                         landing.sha,
                         checked,
                         settlement.receipts,
-                        carriedForward,
                       ),
                     }
                   : componentMainFailureResult(settlement.error)
@@ -7717,7 +7572,6 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
                 checked.candidateSha,
                 checked,
                 settlement.receipts,
-                carriedForward,
               ),
             }
           },
@@ -7743,8 +7597,6 @@ export function configuredMergeStep<Shape extends PRShape>(
       const candidate = await mergeCandidate(git, repo, input, context, {
         artifactRoot: options.artifactRoot,
         ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
-        ...(options.carryForward === undefined ? {} : { carryForward: options.carryForward }),
-        ...(options.random === undefined ? {} : { random: options.random }),
       })
       if (candidate.status !== "completed" || candidate.conclusion !== "success") return candidate
       const alreadyLanded = await alreadyLandedEvidence(git, repo, candidate.base.sha, candidate.checked)
@@ -7772,15 +7624,8 @@ export function configuredMergeStep<Shape extends PRShape>(
                     candidate.base.sha,
                     candidate.checked,
                     settlement.receipts,
-                    candidate.carriedForward,
                   )
-                : integrationProof(
-                    candidate.base.sha,
-                    candidate.checked,
-                    alreadyLanded,
-                    settlement.receipts,
-                    candidate.carriedForward,
-                  ),
+                : integrationProof(candidate.base.sha, candidate.checked, alreadyLanded, settlement.receipts),
             }
           },
           { settleSafePromotions: true },
@@ -7859,7 +7704,6 @@ export function configuredMergeStep<Shape extends PRShape>(
                     landing.sha,
                     candidate.checked,
                     settlement.receipts,
-                    candidate.carriedForward,
                   ),
                 }
               },
@@ -8005,10 +7849,9 @@ async function physicalIntegrationProof(
   commit: string,
   checked: PinnedCandidate,
   componentMains: readonly ComponentMainReceipt[] = [],
-  carriedForward?: CarriedForwardCheck,
 ): Promise<IntegrationProof> {
   await clearLandingAttempts(git, repo, input, checked)
-  return integrationProof(commit, checked, undefined, componentMains, carriedForward)
+  return integrationProof(commit, checked, undefined, componentMains)
 }
 
 function integrationProof(
@@ -8016,7 +7859,6 @@ function integrationProof(
   checked: PinnedCandidate,
   alreadyLanded?: AlreadyLandedEvidence,
   componentMains: readonly ComponentMainReceipt[] = [],
-  carriedForward?: CarriedForwardCheck,
 ): IntegrationProof {
   return IntegrationProofSchema.parse({
     commit,
@@ -8025,7 +7867,6 @@ function integrationProof(
     ...(checked.sourceRewrites === undefined ? {} : { sourceRewrites: checked.sourceRewrites }),
     ...(checked.submoduleResolutions === undefined ? {} : { submoduleResolutions: checked.submoduleResolutions }),
     ...(componentMains.length === 0 ? {} : { componentMains }),
-    ...(carriedForward === undefined ? {} : { carriedForward }),
   })
 }
 

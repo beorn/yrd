@@ -53,11 +53,6 @@ export const MergeRecordBodySchema = z
         candidate: z.string().trim().min(1),
         result: z.enum(["merged", "failed", "canceled"]),
         mergedCommit: GitShaSchema.optional(),
-        /** Set when this merge reused a check verdict across the queue's own
-         * base motion instead of re-proving it: the base the carried verdict
-         * was minted at. `baseSha` above is the base it landed on, so the two
-         * together are the whole claim. Absent on an ordinary merge. */
-        transplantedFromBase: GitShaSchema.optional(),
         startedAt: z.iso.datetime({ offset: true }),
         finishedAt: z.iso.datetime({ offset: true }),
       })

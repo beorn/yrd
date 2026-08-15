@@ -59,8 +59,6 @@ import {
   gitCandidatePreparer,
   gitCheckStep,
   gitMergeStep,
-  type CarryForwardPolicy,
-  type QueueCarryForwardDisabled,
   gitMergeRecorder,
   findRepositoryMergeRecords,
   inspectGitQueueTarget,
@@ -1074,38 +1072,9 @@ function integratedRunner(
   return config.runner === "waiting" ? configuredWaitingCommandStep(options) : configuredCommandStep(options)
 }
 
-/**
- * Live view of the persisted carry-forward kill switch.
- *
- * Steps are built before the app exists, but the switch is written while the
- * process runs — so the merge step must read it at RUN time, not capture it.
- * The host fills `read` once `yrd.state()` is reachable; until then the
- * configured policy stands on its own.
- */
-type CarryForwardGate = { read?: () => QueueCarryForwardDisabled | undefined }
-
-function carryForwardPolicyFor(
-  config: ResolvedYrdProjectConfig,
-  gate: CarryForwardGate,
-): (() => CarryForwardPolicy) | undefined {
-  const configured = config.carryForward
-  if (configured === undefined) return undefined
-  return () => {
-    const disabledBy = gate.read?.()
-    return {
-      enabled: configured.enabled,
-      shadowSampleRate: configured.shadowSampleRate,
-      ...(disabledBy === undefined
-        ? {}
-        : { disabledBy: { reason: disabledBy.reason, at: disabledBy.at, run: disabledBy.run } }),
-    }
-  }
-}
-
 function configuredQueueSteps(
   options: DefaultYrdRuntimeAppOptions,
   mergeCommand: readonly string[] | undefined,
-  gate: CarryForwardGate,
 ): readonly RuntimeStep[] {
   const descriptors = configuredStepDescriptors(
     { repo: options.repo, stateDir: options.stateDir, baysRoot: options.baysRoot },
@@ -1124,17 +1093,11 @@ function configuredQueueSteps(
             ? gitMergeStep({
                 inject: { process: options.process },
                 repo: options.repo,
-                ...((policy) => (policy === undefined ? {} : { carryForward: policy }))(
-                  carryForwardPolicyFor(options.config, gate),
-                ),
               })
             : configuredMergeStep({
                 inject: { process: options.process },
                 repo: options.repo,
                 command: mergeCommand,
-                ...((policy) => (policy === undefined ? {} : { carryForward: policy }))(
-                  carryForwardPolicyFor(options.config, gate),
-                ),
                 artifactRoot: join(options.stateDir, "artifacts"),
                 timeoutMs: stepTimeoutMs(config),
                 ...(config.environment === undefined ? {} : { environment: config.environment }),
@@ -1493,9 +1456,8 @@ async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions):
     release: async (input) => (await deploymentStore()).release(input),
   }
   const deploymentJobs = createDeploymentJobDefs(lazyDeploymentStore)
-  const carryForwardGate: CarryForwardGate = {}
   const queue = withQueue({
-    steps: configuredQueueSteps(options, mergeCommand, carryForwardGate),
+    steps: configuredQueueSteps(options, mergeCommand),
     batch: options.config.batch,
     defaultSteps: options.config.steps,
     defaultBase: options.config.base,
@@ -1591,7 +1553,7 @@ async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions):
         : { selectFlow: (submission: Parameters<typeof selectFlow>[1]) => selectFlow(flowConfig, submission).pin }),
     }),
   )
-  const app = await createYrd(contests(queue(base)), {
+  return createYrd(contests(queue(base)), {
     inject: {
       journal: options.journal,
       compatibility: CURRENT_JOURNAL_COMPATIBILITY,
@@ -1599,10 +1561,6 @@ async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions):
       ...(options.log === undefined ? {} : { log: options.log }),
     },
   })
-  // Close the kill-switch loop: the merge step now reads the persisted
-  // divergence through live state instead of a policy captured at construction.
-  carryForwardGate.read = () => app.state().queues.carryForwardDisabledBy
-  return app
 }
 
 export function createDefaultYrdApp(options: DefaultYrdAppOptions): Promise<YrdCliApp> {
