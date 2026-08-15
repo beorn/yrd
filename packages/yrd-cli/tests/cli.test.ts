@@ -4249,6 +4249,44 @@ describe("runYrd", () => {
     expect(checkRuns).toEqual(["check"])
   })
 
+  it("refreshes PR-id submit output after its writes commit through another live app", async () => {
+    const journal = createMemoryJournal()
+    const writer = await createApp({ journal })
+    await writer.bays.submit({
+      branch: "topic/external-writer",
+      headSha: HEAD_SHA,
+      base: "main",
+      draft: true,
+    })
+    const reader = await createApp({ journal })
+    const routedBays = Object.create(reader.bays) as typeof reader.bays
+    Object.defineProperties(routedBays, {
+      submitSelection: { value: writer.bays.submitSelection },
+      requestChecks: { value: writer.bays.requestChecks },
+    })
+    const app = Object.create(reader) as typeof reader
+    Object.defineProperty(app, "bays", { value: routedBays })
+
+    const output = outputIO({ resolveRevision: async () => HEAD_SHA })
+    expect(await runYrd(app, yrd("pr", "submit", "PR1", "--json"), output.io), output.stderr()).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "pr.submit",
+      prs: [{ id: "PR1", status: "submitted", checkRequests: [expect.any(Object)] }],
+    })
+
+    const events = await Array.fromAsync(reader.events())
+    expect(events.filter((event) => event.name === "pr/submitted")).toHaveLength(1)
+    expect(events.filter((event) => event.name === "pr/checks-requested")).toHaveLength(1)
+    const view = outputIO()
+    expect(await runYrd(reader, yrd("pr", "view", "PR1", "--json"), view.io), view.stderr()).toBe(0)
+    expect(JSON.parse(view.stdout())).toMatchObject({
+      command: "pr.view",
+      pr: { id: "PR1", status: "submitted", checkRequests: [expect.any(Object)] },
+      landing: { status: "submitted" },
+    })
+    expect(await Array.fromAsync(reader.events())).toHaveLength(events.length)
+  })
+
   it("runs configured client-side checks while leaving authoritative checks and integration to queue run", async () => {
     const localChecks: string[] = []
     const checkRuns: string[] = []

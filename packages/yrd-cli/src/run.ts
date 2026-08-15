@@ -4864,6 +4864,9 @@ async function applyPrSelectionVerb(
     )
     return 0
   }
+  // A selection action may commit through another live writer. Fold those
+  // durable transitions before exit 0 so the result cannot trail `pr view`.
+  await app.refresh()
   const currentPrs = selected.map((selector) => requiredPr(app, selector))
   const current = currentPrs.map((pr) => ({ pr, eligibility: app.queue.eligibility(pr.id) }))
   await printResult(
