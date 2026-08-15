@@ -45,6 +45,21 @@ describe("bay journal vocabulary", () => {
     expect(journalEventVocabulary(definition.events)).toMatchSnapshot()
   })
 
+  it("names every field that sits at its event's version for a reason other than its own age", () => {
+    // `bay/opened.by` is the one field older than field-versioning itself, so
+    // v1 rows in the field already carry it. Every other field is at its
+    // version because that version introduced it, and a second entry here means
+    // someone declared an exception that has to be argued rather than inherited.
+    const bayJobs = createBayJobDefs(workspaceAdapter())
+    const definition = pipe(createYrdDef(), withJobs({ definitions: [bayJobs] }), withBays({ jobs: bayJobs }))
+
+    const asterisks = Object.entries(journalEventVocabulary(definition.events)).flatMap(([name, entry]) =>
+      Object.entries(entry.grandfathered ?? {}).map(([field, mark]) => [`${name}.${field}`, mark.introducedAt]),
+    )
+
+    expect(asterisks).toEqual([["bay/opened.by", "53f67709"]])
+  })
+
   it("gives every field a version no lower than its own event's", () => {
     const bayJobs = createBayJobDefs(workspaceAdapter())
     const definition = pipe(createYrdDef(), withJobs({ definitions: [bayJobs] }), withBays({ jobs: bayJobs }))

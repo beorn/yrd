@@ -91,7 +91,17 @@ export type JournalEventDef = Readonly<{
    * reports that as an empty map rather than an implied guarantee.
    */
   fields: Readonly<Record<string, number>>
+  /**
+   * Fields that predate field-versioning, keyed by field name. A field this map
+   * names sits at its event's own `reader` not because that version introduced
+   * it, but because live journals already hold rows stamped that version and
+   * carrying it — the declaration describes what was written, and raising it
+   * would make those rows lie. Empty for everything else: an asterisk is only
+   * an asterisk while it is rare, so only genuine grandfathers carry one.
+   */
+  grandfathered: Readonly<Record<string, GrandfatheredField>>
 }>
+export type GrandfatheredField = Readonly<{ introducedAt: string }>
 type JournalEvents = Readonly<Record<string, JournalEventDef>>
 type Project<State extends object> = (state: DeepReadonly<State>, event: Event, cause: Cause) => State
 type Empty = Readonly<Record<never, never>>
@@ -273,11 +283,17 @@ function schemaFieldNames(schema: EventSchema): readonly string[] {
  * `by` field readable only from v2 is `journalEvent(1, schema, { by: 2 })`, and
  * a writer pinned below v2 then refuses to emit `by` instead of writing a row
  * every v1 reader rejects.
+ *
+ * Pass `grandfathered` for a field that shipped before field-versioning existed.
+ * It keeps the event's own version — journals already hold rows stamped that
+ * version and carrying it — and records the commit that introduced it, so the
+ * exception can be enumerated later instead of remembered.
  */
 export function journalEvent(
   reader: number,
   schema: EventSchema,
   fieldReaders: Readonly<Record<string, number>> = {},
+  grandfathered: Readonly<Record<string, GrandfatheredField>> = {},
 ): JournalEventDef {
   if (!Number.isSafeInteger(reader) || reader < 0) {
     raiseFailure(
@@ -307,24 +323,79 @@ export function journalEvent(
     }
     fields[name] = version
   }
-  return Object.freeze({ reader, schema, fields: Object.freeze(fields) })
+  const marks: Record<string, GrandfatheredField> = {}
+  for (const [name, mark] of Object.entries(grandfathered)) {
+    if (!Object.hasOwn(fields, name)) {
+      raiseFailure(
+        "configuration",
+        "journal-grandfather-not-in-schema",
+        `yrd: journal event grandfathers field '${name}', which its payload schema does not have`,
+      )
+    }
+    if (fields[name] !== reader) {
+      // Grandfathering says "v${reader} rows already carry this"; a raised
+      // version says "no row below v${fields[name]} carries it". Both cannot be
+      // true, and shipping the pair would leave readers no answer at all.
+      raiseFailure(
+        "configuration",
+        "journal-grandfather-field-versioned",
+        `yrd: journal event grandfathers field '${name}' at v${reader} while also declaring it needs v${fields[name]}`,
+      )
+    }
+    if (!/^[0-9a-f]{7,40}$/u.test(mark.introducedAt)) {
+      // The commit is the whole value of the record: an audit that cannot walk
+      // back to the change has only been told an asterisk exists.
+      raiseFailure(
+        "configuration",
+        "journal-grandfather-ref-invalid",
+        `yrd: journal event grandfathers field '${name}' at '${mark.introducedAt}', which is not a commit id`,
+      )
+    }
+    marks[name] = Object.freeze({ introducedAt: mark.introducedAt })
+  }
+  return Object.freeze({
+    reader,
+    schema,
+    fields: Object.freeze(fields),
+    grandfathered: Object.freeze(marks),
+  })
 }
 
 export type JournalEventVocabulary = Readonly<
-  Record<string, Readonly<{ reader: number; fields: Readonly<Record<string, number>> }>>
+  Record<
+    string,
+    Readonly<{
+      reader: number
+      fields: Readonly<Record<string, number>>
+      grandfathered?: Readonly<Record<string, GrandfatheredField>>
+    }>
+  >
 >
 
 /**
  * Every event's reader version and the minimum reader each of its fields needs.
  * Pin a snapshot of this per package: growing a shipped event's payload then
  * cannot land without declaring which version can read the new field.
+ *
+ * `grandfathered` appears only where an event actually carries one, so the
+ * unmarked default stays the shape it has always been and an audit can count
+ * the exceptions by looking for the key.
  */
 export function journalEventVocabulary(events: JournalEvents): JournalEventVocabulary {
   return Object.freeze(
     Object.fromEntries(
       Object.entries(events)
         .toSorted(([left], [right]) => left.localeCompare(right))
-        .map(([name, definition]) => [name, { reader: definition.reader, fields: definition.fields }]),
+        .map(([name, definition]) => [
+          name,
+          Object.keys(definition.grandfathered).length === 0
+            ? { reader: definition.reader, fields: definition.fields }
+            : {
+                reader: definition.reader,
+                fields: definition.fields,
+                grandfathered: definition.grandfathered,
+              },
+        ]),
     ),
   )
 }

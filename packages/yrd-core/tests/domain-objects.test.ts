@@ -234,6 +234,11 @@ describe("Yrd domain objects", () => {
       reader: 2,
       schema,
       fields: {},
+      // Uniform on the definition the way `fields` is, and empty for everything
+      // that inherited its version honestly. `journalEventVocabulary()` is where
+      // the empty map drops out, because there an absent key is what makes a
+      // present one worth reading.
+      grandfathered: {},
     })
     expect(Object.isFrozen(definition)).toBe(true)
   })

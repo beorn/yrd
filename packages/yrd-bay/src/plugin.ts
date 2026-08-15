@@ -1350,7 +1350,11 @@ export function withBays(options: WithBaysOptions) {
       initialState: { bays: emptyBaysState() },
       commands,
       events: {
-        "bay/opened": journalEvent(1, BayOpenedSchema),
+        // `by` arrived before field-versioning did, so v1 journals in the field
+        // already hold rows carrying it. Declaring it at v1 records what was
+        // written; the annotation is what keeps that from reading as an
+        // oversight.
+        "bay/opened": journalEvent(1, BayOpenedSchema, {}, { by: { introducedAt: "53f67709" } }),
         "bay/closing": journalEvent(1, BayClosingSchema),
         "bay/orphaned": journalEvent(1, BayOrphanedSchema),
         "bay/handoff-certified": journalEvent(1, BayHandoffCertifiedSchema),

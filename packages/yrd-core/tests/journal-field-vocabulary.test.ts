@@ -106,4 +106,54 @@ describe("journal field vocabulary", () => {
   it("refuses a field version below its own event's minimum reader", () => {
     expect(() => journalEvent(2, OpenedSchema, { by: 1 })).toThrowError(/'by'/u)
   })
+
+  it("leaves an event with nothing grandfathered at the unmarked default", () => {
+    // The asterisk only means anything while it is rare, so an event that
+    // carries none must publish the shape it published before the annotation
+    // existed rather than an empty map that reads as a considered exemption.
+    const vocabulary = journalEventVocabulary({ [OPENED]: journalEvent(1, OpenedSchema, { by: 2 }) })
+
+    expect(vocabulary[OPENED]).not.toHaveProperty("grandfathered")
+  })
+
+  it("publishes a grandfathered field's introducing commit so the exception can be enumerated", () => {
+    const vocabulary = journalEventVocabulary({
+      [OPENED]: journalEvent(1, OpenedSchema, {}, { by: { introducedAt: "53f67709" } }),
+    })
+
+    expect(vocabulary).toEqual({
+      [OPENED]: {
+        reader: 1,
+        fields: { actor: 1, by: 1 },
+        grandfathered: { by: { introducedAt: "53f67709" } },
+      },
+    })
+    // The point of the shape: an audit reaches every asterisk in the fleet
+    // without knowing which events have one.
+    expect(
+      Object.entries(vocabulary).flatMap(([name, entry]) =>
+        Object.keys(entry.grandfathered ?? {}).map((field) => `${name}.${field}`),
+      ),
+    ).toEqual([`${OPENED}.by`])
+  })
+
+  it("refuses grandfathering a field the schema does not have", () => {
+    expect(() =>
+      journalEvent(1, z.object({ actor: z.string() }).strict(), {}, { by: { introducedAt: "53f67709" } }),
+    ).toThrowError(/'by'/u)
+  })
+
+  it("refuses grandfathering a field that also declares a newer reader", () => {
+    // "v1 rows already carry it" and "no row below v2 carries it" cannot both
+    // be true, and shipping the pair leaves a reader no answer at all.
+    expect(() => journalEvent(1, OpenedSchema, { by: 2 }, { by: { introducedAt: "53f67709" } })).toThrowError(/'by'/u)
+  })
+
+  it("refuses a grandfather record that does not name a commit", () => {
+    // Without the commit the record says only that an asterisk exists, which is
+    // the state it was added to end.
+    expect(() => journalEvent(1, OpenedSchema, {}, { by: { introducedAt: "the identity rename" } })).toThrowError(
+      /'by'/u,
+    )
+  })
 })
