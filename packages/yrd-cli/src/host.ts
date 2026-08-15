@@ -71,6 +71,7 @@ import {
   type CommandEvidence,
   type InstalledStep,
   type IntegratedShape,
+  type PinIntentProvisioner,
   type PRShape,
   type QueueAuditEmission,
   type StepDef,
@@ -92,7 +93,7 @@ import {
   importOrphanJournal,
   type MutableJournal,
 } from "@yrd/persistence"
-import { createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
+import { adaptProcessGit, createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
 import { withIntents } from "@yrd/intent"
 import { admitPinIntent } from "./intent-admission.ts"
 import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
@@ -791,11 +792,7 @@ function stepCommand(name: string, config: YrdStepConfig): string {
  * an operator already reads; a disclosure that cannot be written is itself a
  * provisioning failure, never a silent success.
  */
-async function recordLockfileRegeneration(
-  artifactRoot: string,
-  step: string,
-  evidence: LockfileRegenerationEvidence,
-): Promise<void> {
+function recordLockfileRegeneration(artifactRoot: string, step: string, evidence: LockfileRegenerationEvidence): void {
   const directory = join(artifactRoot, "lockfile-regeneration")
   const file = join(directory, `${step}-${evidence.after.sha256.slice(0, 12)}.json`)
   try {
@@ -805,9 +802,70 @@ async function recordLockfileRegeneration(
     raiseFailure(
       "infrastructure",
       "candidate-provision-failed",
-      `yrd: required check '${step}' regenerated '${evidence.lockfile}' in ${evidence.path} but could not ` +
+      `yrd: candidate provisioning '${step}' regenerated '${evidence.lockfile}' in ${evidence.path} but could not ` +
         `disclose it to '${file}': ${cause instanceof Error ? cause.message : String(cause)}`,
     )
+  }
+}
+
+/** Provision a manifest-changing pin before Queue fixes the Candidate identity.
+ * The callback may generate exactly bun.lock; @yrd/queue owns staging and the
+ * final samePaths proof so checked bytes and landed bytes cannot diverge. */
+export function createPinIntentProvisioner(
+  options: Readonly<{
+    process: Pick<Process, "run">
+    repo: string
+    artifactRoot: string
+    materializeSubmodules?: (path: string) => Promise<void>
+  }>,
+): PinIntentProvisioner {
+  return async ({ path, baseSha, provisionalCandidateSha }) => {
+    const provisionFailure: (message: string) => never = (message) =>
+      raiseFailure("infrastructure", "candidate-provision-failed", `yrd: ${message}`)
+    if (options.materializeSubmodules === undefined) {
+      const worktrees = createGitWorktreeStore({
+        repo: options.repo,
+        gitProcess: adaptProcessGit(options.process),
+      })
+      await worktrees.materializeSubmodules(path, { hooks: "quarantine" })
+    } else {
+      await options.materializeSubmodules(path)
+    }
+    const drifts = await submoduleManifestDrift(options.process, {
+      repo: options.repo,
+      workspace: path,
+      baseSha,
+      candidateSha: provisionalCandidateSha,
+      fail: provisionFailure,
+    })
+    const manifests = drifts.flatMap((drift) => drift.manifests)
+    if (manifests.length === 0) return { generatedPaths: [] }
+
+    let regeneration: LockfileRegenerationEvidence | undefined
+    await ensureWorkspaceDependencies(options.process, {
+      path,
+      subject: "pin-intent candidate workspace",
+      manifestSubject: "candidate",
+      lockfileRegeneration: {
+        changedSubmoduleManifests: () => Promise.resolve(manifests),
+        record(evidence) {
+          regeneration = evidence
+          recordLockfileRegeneration(
+            options.artifactRoot,
+            `candidate-${provisionalCandidateSha.slice(0, 12)}`,
+            evidence,
+          )
+        },
+      },
+      fail: provisionFailure,
+    })
+    if (regeneration === undefined || !regeneration.lockfileChanged) return { generatedPaths: [] }
+    if (regeneration.lockfile !== "bun.lock") {
+      provisionFailure(
+        `pin-intent provisioning generated unsupported lockfile '${regeneration.lockfile}'; allowed [bun.lock]`,
+      )
+    }
+    return { generatedPaths: [regeneration.lockfile] }
   }
 }
 
@@ -847,36 +905,6 @@ function candidateStep(
           manifestSubject: "candidate",
           ...(request.env === undefined ? {} : { env: request.env }),
           ...(request.signal === undefined ? {} : { signal: request.signal }),
-          lockfileRegeneration: {
-            // A pin advance that moves a submodule's dependency specs makes the
-            // superproject lockfile stale the moment it lands, and gitlinks land
-            // alone — so the cure can be committed neither before nor with the
-            // advance. Candidates are the ONE place that deadlock exists, so the
-            // relaxation is authorized here and nowhere else.
-            async changedSubmoduleManifests() {
-              const baseSha = request.env?.YRD_BASE_SHA
-              const candidateSha = request.env?.YRD_CANDIDATE_SHA
-              if (baseSha === undefined || candidateSha === undefined) {
-                provisionFailure(
-                  `required check '${name}' cannot judge lockfile staleness in ${workspacePath}: the candidate ` +
-                    `command environment carries no YRD_BASE_SHA/YRD_CANDIDATE_SHA pair to compare`,
-                )
-              }
-              const drifts = await submoduleManifestDrift(process, {
-                repo,
-                workspace: workspacePath,
-                baseSha,
-                candidateSha,
-                ...(request.env === undefined ? {} : { env: request.env }),
-                ...(request.signal === undefined ? {} : { signal: request.signal }),
-                fail: provisionFailure,
-              })
-              return drifts.flatMap((drift) => drift.manifests)
-            },
-            async record(evidence) {
-              await recordLockfileRegeneration(join(stateDir, "artifacts"), name, evidence)
-            },
-          },
           fail: provisionFailure,
         })
       }
@@ -1449,6 +1477,11 @@ async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions):
       repo: options.repo,
       checkoutParent: options.baysRoot,
       artifactRoot: join(options.stateDir, "artifacts"),
+      provisionPinIntent: createPinIntentProvisioner({
+        process: options.process,
+        repo: options.repo,
+        artifactRoot: join(options.stateDir, "artifacts"),
+      }),
       ...(options.candidatePool === undefined ? {} : { candidatePool: options.candidatePool }),
     }),
     recordMerge: gitMergeRecorder({ inject: { process: options.process }, repo: options.repo }),
