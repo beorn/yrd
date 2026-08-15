@@ -231,6 +231,12 @@ export const CheckpointMigrationManifestSchema = z
   .readonly()
 export type CheckpointMigrationManifest = z.infer<typeof CheckpointMigrationManifestSchema>
 
+/** Full, deterministic content identity used by Candidate certificates. */
+export function checkpointMigrationManifestHash(manifest: CheckpointMigrationManifest): string {
+  const parsed = CheckpointMigrationManifestSchema.parse(manifest)
+  return createHash("sha256").update(JSON.stringify(parsed)).digest("hex")
+}
+
 export function withCheckpointMigrations<State extends object, Commands extends CommandTree, Features extends object>(
   definition: YrdDef<State, Commands, Features>,
   migrations: readonly CheckpointMigration<State>[],

@@ -2,7 +2,14 @@ import { createHash } from "node:crypto"
 import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { isAbsolute, join, resolve, sep } from "node:path"
 import { authoredDeltaBase } from "@yrd/bay"
-import { createFailure, failureFact, type JsonValue, type YrdFailure } from "@yrd/core"
+import {
+  CheckpointMigrationManifestSchema,
+  checkpointMigrationManifestHash,
+  createFailure,
+  failureFact,
+  type JsonValue,
+  type YrdFailure,
+} from "@yrd/core"
 import { JobErrorSchema, parseJobLaunch, type Job, type JobContext, type JobError, type JobResult } from "@yrd/job"
 import { ComponentPathSchema } from "@yrd/intent"
 import { adaptProcessGit, gitSuperFailureDetail, type Process, type ProcessResult } from "@yrd/process"
@@ -104,6 +111,20 @@ export const GateReportSchema = z
   .strict()
 export type GateReport = Readonly<z.infer<typeof GateReportSchema>>
 
+export const CheckpointMigrationAttestationSchema = z
+  .object({
+    version: z.literal(1),
+    manifest: CheckpointMigrationManifestSchema,
+    hash: z.string().regex(/^[0-9a-f]{64}$/u),
+  })
+  .strict()
+  .superRefine((attestation, context) => {
+    if (attestation.hash !== checkpointMigrationManifestHash(attestation.manifest)) {
+      context.addIssue({ code: "custom", message: "checkpoint migration manifest hash does not match its data" })
+    }
+  })
+export type CheckpointMigrationAttestation = Readonly<z.infer<typeof CheckpointMigrationAttestationSchema>>
+
 export const GateCertificateSchema = z
   .object({
     version: z.literal(1),
@@ -111,11 +132,13 @@ export const GateCertificateSchema = z
     baseSha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
     candidateSha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
     reports: z.array(GateReportSchema).min(1),
+    checkpointMigration: CheckpointMigrationAttestationSchema.optional(),
   })
   .strict()
 export type GateCertificate = Readonly<z.infer<typeof GateCertificateSchema>>
 
 export const GATE_REPORT_TRAILER = "YRD-GATE-REPORT "
+export const CHECKPOINT_MIGRATION_TRAILER = "YRD-CHECKPOINT-MIGRATION "
 export const DIAGNOSTICS_COMPARISON_READY = "diagnostics-comparison-ready"
 
 /** Create the content-addressed, multiplicity-preserving residual report a
@@ -156,6 +179,7 @@ export const CommandEvidenceSchema = z
     classification: z.enum(["base", "carrier"]).optional(),
     mode: GateModeSchema.optional(),
     gateReports: z.array(GateReportSchema).min(1).optional(),
+    checkpointMigration: CheckpointMigrationAttestationSchema.optional(),
     detail: z.string().optional(),
     diagnostics: z.array(CommandDiagnosticSchema).optional(),
     diagnosticsTruncated: z.literal(true).optional(),
@@ -210,6 +234,7 @@ const PinnedCandidateSchema = GitCheckEvidenceSchema.pick({
   changes: true,
   sourceRewrites: true,
   submoduleResolutions: true,
+  certificate: true,
 }).strict()
 type PinnedCandidate = Readonly<z.infer<typeof PinnedCandidateSchema>>
 
@@ -427,6 +452,7 @@ function configuredCommand<Shape extends PRShape>(
     const detail = commandDetail(message)
     const diagnostics = commandDiagnostics(message)
     const gateReports = commandGateReports(message)
+    const checkpointMigration = commandCheckpointMigration(message)
     const progress = result as typeof result & ProgressResult
     const evidence = CommandEvidenceSchema.parse({
       command: argv,
@@ -438,6 +464,7 @@ function configuredCommand<Shape extends PRShape>(
       classification: options.classification ?? "carrier",
       mode,
       ...(gateReports.values.length === 0 ? {} : { gateReports: gateReports.values }),
+      ...(checkpointMigration.value === undefined ? {} : { checkpointMigration: checkpointMigration.value }),
       ...(detail === "" ? {} : { detail }),
       ...(diagnostics.values.length === 0 ? {} : { diagnostics: diagnostics.values }),
       ...(diagnostics.truncated ? { diagnosticsTruncated: true as const } : {}),
@@ -495,6 +522,9 @@ function configuredCommand<Shape extends PRShape>(
     if (gateReports.error !== undefined) {
       return failed(`${options.purpose}-gate-report-invalid`, gateReports.error, evidence)
     }
+    if (checkpointMigration.error !== undefined) {
+      return failed(`${options.purpose}-checkpoint-migration-invalid`, checkpointMigration.error, evidence)
+    }
     if (result.exitCode !== 0) {
       const action = waiting ? "launcher" : "command"
       return failed(
@@ -541,6 +571,25 @@ function commandGateReports(output: string): Readonly<{ values: readonly GateRep
     }
   }
   return { values: reports }
+}
+
+function commandCheckpointMigration(
+  output: string,
+): Readonly<{ value?: CheckpointMigrationAttestation; error?: string }> {
+  let value: CheckpointMigrationAttestation | undefined
+  for (const row of output.split(/\r?\n/u)) {
+    const text = row.trim()
+    if (!text.startsWith(CHECKPOINT_MIGRATION_TRAILER)) continue
+    if (value !== undefined) {
+      return { value, error: "configured command emitted more than one YRD-CHECKPOINT-MIGRATION trailer" }
+    }
+    try {
+      value = CheckpointMigrationAttestationSchema.parse(JSON.parse(text.slice(CHECKPOINT_MIGRATION_TRAILER.length)))
+    } catch {
+      return { error: "configured command emitted a malformed YRD-CHECKPOINT-MIGRATION trailer" }
+    }
+  }
+  return value === undefined ? {} : { value }
 }
 
 function commandDiagnostics(output: string): Readonly<{
@@ -2892,7 +2941,7 @@ async function runInScratch<Output extends JsonValue>(
 ): Promise<JobResult<Output>> {
   const worktrees = createGitWorktreeStore({
     repo,
-    git,
+    gitProcess: adaptProcessGit(git.process, { env: git.env, timeoutMs: GIT_TIMEOUT_MS }),
     timeouts: { operation: GIT_TIMEOUT_MS, cleanup: GIT_CLEANUP_TIMEOUT_MS },
   })
   const path = join(root, "worktree")
@@ -4540,7 +4589,7 @@ async function rebaseSourceIn(
 ): Promise<Readonly<{ status: "passed"; output: string }> | CandidateFailure> {
   const worktrees = createGitWorktreeStore({
     repo: sourceRepo,
-    git,
+    gitProcess: adaptProcessGit(git.process, { env: git.env, timeoutMs: GIT_TIMEOUT_MS }),
     timeouts: { operation: GIT_TIMEOUT_MS, cleanup: GIT_CLEANUP_TIMEOUT_MS },
   })
   const path = join(root, "worktree")
@@ -6348,6 +6397,7 @@ function gateCertificate(
   candidate: Pick<PinnedCandidate, "baseSha" | "candidateSha">,
   mode: GateMode,
   reports: readonly GateReport[],
+  checkpointMigration?: CheckpointMigrationAttestation,
 ): GateCertificate {
   return GateCertificateSchema.parse({
     version: 1,
@@ -6355,6 +6405,7 @@ function gateCertificate(
     baseSha: candidate.baseSha,
     candidateSha: candidate.candidateSha,
     reports,
+    ...(checkpointMigration === undefined ? {} : { checkpointMigration }),
   })
 }
 
@@ -6396,7 +6447,7 @@ function certifyPassingCommand(
     conclusion: "success",
     output: GitCheckEvidenceSchema.parse({
       ...evidence,
-      certificate: gateCertificate(candidate, mode, reports),
+      certificate: gateCertificate(candidate, mode, reports, outcome.output.checkpointMigration),
     }),
   }
 }
@@ -6829,13 +6880,18 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             ...candidateEvidence,
             ...candidateMetadata,
             comparison,
-            certificate: gateCertificate(candidate, mode, [
-              ...(candidateEvidence.gateReports ?? []),
-              createGateReport(
-                "diagnostics",
-                uniqueComparisonDiagnostics(candidateEvidence, path).map(diagnosticIdentity),
-              ),
-            ]),
+            certificate: gateCertificate(
+              candidate,
+              mode,
+              [
+                ...(candidateEvidence.gateReports ?? []),
+                createGateReport(
+                  "diagnostics",
+                  uniqueComparisonDiagnostics(candidateEvidence, path).map(diagnosticIdentity),
+                ),
+              ],
+              candidateEvidence.checkpointMigration,
+            ),
           })
           if (comparison.netNewDiagnostics.length === 0) {
             return { status: "completed", conclusion: "success", output: evidence }
@@ -6875,7 +6931,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
 }
 
 export type GitMergeOptions = ProcessDependency &
-  Readonly<{ repo: string; env?: NodeJS.ProcessEnv; refuse?: RefusePathsPolicy }>
+  Readonly<{ repo: string; env?: NodeJS.ProcessEnv; refuse?: RefusePathsPolicy; checkpointIdentity?: string }>
 
 export type ConfiguredMergeOptions = ProcessDependency &
   Readonly<{
@@ -6888,6 +6944,7 @@ export type ConfiguredMergeOptions = ProcessDependency &
     environmentPassthrough?: readonly string[]
     timeoutMs?: number
     refuse?: RefusePathsPolicy
+    checkpointIdentity?: string
   }>
 
 function checkedCandidate(shape: PRShape): GitCheckEvidence | undefined {
@@ -6913,12 +6970,68 @@ type PinnedCandidateResult =
   | Readonly<{ checked: PinnedCandidate }>
   | Readonly<{ error: Readonly<{ code: string; message: string }> }>
 
+function checkpointMigrationAdmissionRefusal(
+  candidate: PinnedCandidate,
+  currentIdentity: string,
+): Readonly<{ code: string; message: string }> | undefined {
+  const certificate = candidate.certificate
+  const attestation = certificate?.checkpointMigration
+  if (certificate === undefined || attestation === undefined) {
+    return {
+      code: "checkpoint-migration-certificate-missing",
+      message: `Candidate '${candidate.candidateSha}' has no certified checkpoint migration manifest`,
+    }
+  }
+  if (certificate.baseSha !== candidate.baseSha || certificate.candidateSha !== candidate.candidateSha) {
+    return {
+      code: "checkpoint-migration-certificate-stale",
+      message: `checkpoint migration certificate does not bind Candidate '${candidate.candidateSha}' on base '${candidate.baseSha}'`,
+    }
+  }
+
+  const target = attestation.manifest.targetIdentity
+  if (currentIdentity === target) return undefined
+  const edgesBySource = new Map<string, { from: string; to: string }[]>()
+  for (const edge of attestation.manifest.edges) {
+    const existing = edgesBySource.get(edge.from) ?? []
+    existing.push(edge)
+    edgesBySource.set(edge.from, existing)
+  }
+  const visited = new Set<string>()
+  let identity = currentIdentity
+  while (identity !== target) {
+    if (visited.has(identity)) {
+      return {
+        code: "checkpoint-migration-path-cyclic",
+        message: `checkpoint migration path from '${currentIdentity}' cycles before target '${target}'`,
+      }
+    }
+    visited.add(identity)
+    const next = edgesBySource.get(identity) ?? []
+    if (next.length === 0) {
+      return {
+        code: "checkpoint-migration-path-missing",
+        message: `checkpoint migration manifest has no path from stored identity '${currentIdentity}' to target '${target}'`,
+      }
+    }
+    if (next.length > 1) {
+      return {
+        code: "checkpoint-migration-path-ambiguous",
+        message: `checkpoint migration manifest has ${next.length} edges from identity '${identity}'`,
+      }
+    }
+    identity = next[0]?.to ?? identity
+  }
+  return undefined
+}
+
 async function validatePinnedCandidate(
   git: Git,
   repo: string,
   input: StepExecution,
   baseSha: string,
   checked: PinnedCandidate,
+  checkpointIdentity?: string,
 ): Promise<PinnedCandidateResult> {
   let pinned = checked
   if (checked.baseSha !== baseSha) {
@@ -6959,6 +7072,10 @@ async function validatePinnedCandidate(
         ...(current.submoduleResolutions === undefined ? {} : { submoduleResolutions: current.submoduleResolutions }),
       })
     }
+  }
+  if (checkpointIdentity !== undefined) {
+    const refused = checkpointMigrationAdmissionRefusal(pinned, checkpointIdentity)
+    if (refused !== undefined) return { error: refused }
   }
   if ((await git.commit(repo, pinned.candidateRef)) !== pinned.candidateSha) {
     return { error: { code: "stale-check", message: "checked candidate ref moved" } }
@@ -7017,7 +7134,7 @@ async function mergeCandidate(
   repo: string,
   input: StepExecution,
   context: Readonly<{ id: string; attempt: number }>,
-  options: Readonly<{ artifactRoot?: string; refuse?: RefusePathsPolicy }>,
+  options: Readonly<{ artifactRoot?: string; refuse?: RefusePathsPolicy; checkpointIdentity?: string }>,
 ): Promise<MergeCandidateResult> {
   const prior = checkedCandidate(input.shape)
   const prepared =
@@ -7042,7 +7159,7 @@ async function mergeCandidate(
     prior ?? (prepared?.status === "completed" && prepared.conclusion === "success" ? prepared.output : undefined)
   if (checked === undefined) throw new Error("yrd: merge candidate preparation produced no candidate")
   const base = await authoritativeQueueBase(git, repo, primaryPR(input).base)
-  const validated = await validatePinnedCandidate(git, repo, input, base.sha, checked)
+  const validated = await validatePinnedCandidate(git, repo, input, base.sha, checked, options.checkpointIdentity)
   return "error" in validated
     ? { status: "completed", conclusion: "failure", error: validated.error }
     : { status: "completed", conclusion: "success", base, checked }
@@ -7325,13 +7442,10 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
   return async (input, context): Promise<JobResult<IntegrationProof>> => {
     try {
       const branch = primaryPR(input).base
-      const candidate = await mergeCandidate(
-        git,
-        repo,
-        input,
-        context,
-        options.refuse === undefined ? {} : { refuse: options.refuse },
-      )
+      const candidate = await mergeCandidate(git, repo, input, context, {
+        ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
+        ...(options.checkpointIdentity === undefined ? {} : { checkpointIdentity: options.checkpointIdentity }),
+      })
       if (candidate.status !== "completed" || candidate.conclusion !== "success") return candidate
       const { base, checked } = candidate
       const baseSha = base.sha
@@ -7597,6 +7711,7 @@ export function configuredMergeStep<Shape extends PRShape>(
       const candidate = await mergeCandidate(git, repo, input, context, {
         artifactRoot: options.artifactRoot,
         ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
+        ...(options.checkpointIdentity === undefined ? {} : { checkpointIdentity: options.checkpointIdentity }),
       })
       if (candidate.status !== "completed" || candidate.conclusion !== "success") return candidate
       const alreadyLanded = await alreadyLandedEvidence(git, repo, candidate.base.sha, candidate.checked)
