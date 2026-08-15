@@ -4837,7 +4837,11 @@ describe("Queue command adapters", () => {
       { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
     )
 
-    expect(outcome).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "candidate-conflict" } })
+    expect(outcome).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "candidate-conflict", message: expect.stringContaining("CONFLICT") },
+    })
     if (outcome.status !== "completed" || outcome.conclusion !== "failure") return
     const artifacts = (outcome.output as { artifacts?: readonly { name: string; path: string }[] } | undefined)
       ?.artifacts
@@ -4852,6 +4856,48 @@ describe("Queue command adapters", () => {
     expect(artifacts.every(({ path }) => existsSync(path))).toBe(true)
     const artifactContents = await Promise.all(artifacts.map(({ path }) => readFile(path, "utf8")))
     expect(artifactContents.some((contents) => contents.includes("CONFLICT"))).toBe(true)
+  })
+
+  it("bypasses authored commit hooks only for queue-synthesized candidate commits", async () => {
+    const { repo } = await repository()
+    await git(repo, ["switch", "-qc", "issue/hooked"])
+    await mkdir(join(repo, ".githooks"), { recursive: true })
+    const hook = join(repo, ".githooks", "commit-msg")
+    await writeFile(hook, '#!/bin/sh\necho "authored hook rejected generated merge" >&2\nexit 1\n')
+    await chmod(hook, 0o755)
+    await writeFile(join(repo, "feature.txt"), "feature\n")
+    await git(repo, ["add", ".githooks/commit-msg", "feature.txt"])
+    await git(repo, ["commit", "-qm", "feature with authored policy"])
+    const featureSha = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["config", "core.hooksPath", ".githooks"])
+
+    const authored = Bun.spawn(["git", "-C", repo, "commit", "--allow-empty", "-m", "authored commit"], {
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [authoredCode, authoredStderr] = await Promise.all([authored.exited, new Response(authored.stderr).text()])
+    expect(authoredCode).not.toBe(0)
+    expect(authoredStderr).toContain("authored hook rejected generated merge")
+    await git(repo, ["switch", "-q", "main"])
+
+    await using process = createProcess()
+    const outcome = await gitCheckStep({
+      inject: { process },
+      repo,
+      command: ["true"],
+      artifactRoot: join(repo, ".git", "yrd", "artifacts"),
+    })(
+      {
+        run: "R-hook",
+        step: "check",
+        index: 0,
+        prs: [{ id: "PR-hook", branch: "issue/hooked", base: "main", revision: 1, headSha: featureSha }],
+        shape: { results: {} },
+      },
+      { id: "J-hook", attempt: 1, runner: "test", signal: new AbortController().signal },
+    )
+
+    expect(outcome).toMatchObject({ status: "completed", conclusion: "success" })
   })
 
   it("discloses an environment refusal in the attempt directory instead of leaving it empty", async () => {
