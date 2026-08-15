@@ -5436,7 +5436,8 @@ describe("Queue command adapters", () => {
       process,
       repo,
       shellCommand(
-        "printf 'src/base.ts:1:1 - baseline\\n'; " +
+        "i=1; while test $i -le 55; do " +
+          'printf \'src/base-%s.ts:1:1 - inherited-%s\\n\' "$i" "$i"; i=$((i + 1)); done; ' +
           "if test -f feature.txt; then printf 'src/feature.ts:2:1 - net-new\\n'; fi; " +
           "printf 'check stderr\\n' >&2; exit 17",
       ),
@@ -5459,6 +5460,7 @@ describe("Queue command adapters", () => {
         parent: { exitCode: 17 },
         netNewDiagnostics: [{ file: "src/feature.ts", [sourceRowKey]: 2, column: 1, message: "net-new" }],
         resolvedDiagnostics: [],
+        unchangedDiagnosticCount: 55,
       },
     })
     expect(evidence.candidateSha).toHaveLength(40)
@@ -5477,6 +5479,7 @@ describe("Queue command adapters", () => {
         },
       },
     })
+    expect(app.queue.eligibility("PR1").reason?.message).toContain("55 baseline errors unchanged")
     expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
       status: "needs-author",
       needsAuthor: { receipt: { code: "check-failed" } },
@@ -5488,8 +5491,22 @@ describe("Queue command adapters", () => {
     const stdoutArtifact = artifacts.get("stdout")
     const stderrArtifact = artifacts.get("stderr")
     if (stdoutArtifact === undefined || stderrArtifact === undefined) throw new Error("missing command artifacts")
-    expect(await readFile(stdoutArtifact, "utf8")).toBe("src/base.ts:1:1 - baseline\nsrc/feature.ts:2:1 - net-new\n")
+    const candidateStdout = await readFile(stdoutArtifact, "utf8")
+    expect(candidateStdout.split("\n").filter((row) => row.includes("inherited-"))).toHaveLength(55)
+    expect(candidateStdout).toContain("src/feature.ts:2:1 - net-new\n")
     expect(await readFile(stderrArtifact, "utf8")).toBe("check stderr\n")
+    const parentArtifacts = new Map(
+      evidence.comparison?.parent.artifacts.map((artifact) => [artifact.name, artifact.path]),
+    )
+    const parentStdoutArtifact = parentArtifacts.get("stdout")
+    const parentStderrArtifact = parentArtifacts.get("stderr")
+    if (parentStdoutArtifact === undefined || parentStderrArtifact === undefined) {
+      throw new Error("missing parent command artifacts")
+    }
+    const parentStdout = await readFile(parentStdoutArtifact, "utf8")
+    expect(parentStdout.split("\n").filter((row) => row.includes("inherited-"))).toHaveLength(55)
+    expect(parentStdout).not.toContain("net-new")
+    expect(await readFile(parentStderrArtifact, "utf8")).toBe("check stderr\n")
   })
 
   it("does not run parent diagnostics comparison unless the step declares it", async () => {
