@@ -33,6 +33,26 @@ export type GitWorkspaceOptions = Readonly<{
 }> &
   GitWorkspaceLifecycleHooks
 
+export type GitWorkspaceRevisionOptions = Omit<GitWorkspaceOptions, "process" | "env">
+
+/** Derive the adapter identity without preparing worktrees, refs, or config. */
+export function gitWorkspaceRevision(options: GitWorkspaceRevisionOptions): string {
+  const repo = resolve(options.repo)
+  const baysRoot = resolve(options.baysRoot ?? `${repo}/.bays`)
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        implementation: "yrd-git-workspace-v6",
+        repo,
+        baysRoot,
+        intakeRemote: options.intakeRemote,
+        postProvision: options.postProvision !== undefined,
+        postDeprovision: options.postDeprovision !== undefined,
+      }),
+    )
+    .digest("hex")
+}
+
 const GIT_TIMEOUT_MS = 30_000
 
 function failure(code: string, cause: unknown): JobResult<never> {
@@ -192,18 +212,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
   }
   await worktrees.ready()
   return {
-    revision: createHash("sha256")
-      .update(
-        JSON.stringify({
-          implementation: "yrd-git-workspace-v6",
-          repo,
-          baysRoot,
-          intakeRemote: options.intakeRemote,
-          postProvision: options.postProvision !== undefined,
-          postDeprovision: options.postDeprovision !== undefined,
-        }),
-      )
-      .digest("hex"),
+    revision: gitWorkspaceRevision(options),
 
     async provision(input: ProvisionBayInput): Promise<JobResult<ProvisionedBay>> {
       const path = safeBayPath(baysRoot, input.bay)

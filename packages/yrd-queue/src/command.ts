@@ -6357,6 +6357,12 @@ export type GitCheckOptions = ProcessDependency &
     timeoutMs?: number
     noProgressTimeoutMs?: number
     refuse?: RefusePathsPolicy
+    /** Generate data-only checkpoint migration evidence from the exact target
+     * Candidate checkout inside this certified check invocation. */
+    checkpointMigration?: (input: {
+      path: string
+      candidate: Pick<PinnedCandidate, "baseSha" | "candidateSha">
+    }) => Promise<CheckpointMigrationAttestation>
   }>
 
 type CandidatePin =
@@ -6449,6 +6455,42 @@ function certifyPassingCommand(
       ...evidence,
       certificate: gateCertificate(candidate, mode, reports, outcome.output.checkpointMigration),
     }),
+  }
+}
+
+function attachCheckpointMigrationAttestation(
+  outcome: JobResult<CommandEvidence>,
+  attestation: CheckpointMigrationAttestation | undefined,
+  purpose: string,
+): JobResult<CommandEvidence> {
+  if (attestation === undefined) return outcome
+  if (outcome.status === "waiting") {
+    const checkpoint = outcome.checkpoint as CommandEvidence
+    const existing = checkpoint.checkpointMigration
+    if (existing !== undefined && existing.hash !== attestation.hash) {
+      return failed(
+        `${purpose}-checkpoint-migration-surface-disagreement`,
+        "configured command and target Candidate assembly derived different checkpoint migration manifests",
+        checkpoint,
+      )
+    }
+    return {
+      ...outcome,
+      checkpoint: CommandEvidenceSchema.parse({ ...checkpoint, checkpointMigration: attestation }),
+    }
+  }
+  if (outcome.output === undefined) return outcome
+  const existing = outcome.output.checkpointMigration
+  if (existing !== undefined && existing.hash !== attestation.hash) {
+    return failed(
+      `${purpose}-checkpoint-migration-surface-disagreement`,
+      "configured command and target Candidate assembly derived different checkpoint migration manifests",
+      outcome.output,
+    )
+  }
+  return {
+    ...outcome,
+    output: CommandEvidenceSchema.parse({ ...outcome.output, checkpointMigration: attestation }),
   }
 }
 
@@ -6639,11 +6681,19 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             classification,
             attempt: context.attempt,
           }
+          const checkpointMigration = async (): Promise<CheckpointMigrationAttestation | undefined> =>
+            options.checkpointMigration === undefined
+              ? undefined
+              : CheckpointMigrationAttestationSchema.parse(await options.checkpointMigration({ path, candidate }))
 
           if (options.runner === "waiting") {
-            const outcome = await configuredWaitingCommandStep(candidateConfig)(
-              { ...input, targetSha: candidate.candidateSha },
-              context,
+            const outcome = attachCheckpointMigrationAttestation(
+              await configuredWaitingCommandStep(candidateConfig)(
+                { ...input, targetSha: candidate.candidateSha },
+                context,
+              ),
+              await checkpointMigration(),
+              purpose,
             )
             if (outcome.status === "completed" && outcome.conclusion === "success") {
               return certifyPassingCommand(
@@ -6692,9 +6742,10 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
 
           let outcome: JobResult<CommandEvidence>
           try {
-            outcome = await configuredCommandStep(candidateConfig)(
-              { ...input, targetSha: candidate.candidateSha },
-              context,
+            outcome = attachCheckpointMigrationAttestation(
+              await configuredCommandStep(candidateConfig)({ ...input, targetSha: candidate.candidateSha }, context),
+              await checkpointMigration(),
+              purpose,
             )
           } catch (cause) {
             const fact = failureFact(cause)
@@ -6931,7 +6982,12 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
 }
 
 export type GitMergeOptions = ProcessDependency &
-  Readonly<{ repo: string; env?: NodeJS.ProcessEnv; refuse?: RefusePathsPolicy; checkpointIdentity?: string }>
+  Readonly<{
+    repo: string
+    env?: NodeJS.ProcessEnv
+    refuse?: RefusePathsPolicy
+    checkpointIdentity?: string | (() => string)
+  }>
 
 export type ConfiguredMergeOptions = ProcessDependency &
   Readonly<{
@@ -6944,7 +7000,7 @@ export type ConfiguredMergeOptions = ProcessDependency &
     environmentPassthrough?: readonly string[]
     timeoutMs?: number
     refuse?: RefusePathsPolicy
-    checkpointIdentity?: string
+    checkpointIdentity?: string | (() => string)
   }>
 
 function checkedCandidate(shape: PRShape): GitCheckEvidence | undefined {
@@ -7134,7 +7190,11 @@ async function mergeCandidate(
   repo: string,
   input: StepExecution,
   context: Readonly<{ id: string; attempt: number }>,
-  options: Readonly<{ artifactRoot?: string; refuse?: RefusePathsPolicy; checkpointIdentity?: string }>,
+  options: Readonly<{
+    artifactRoot?: string
+    refuse?: RefusePathsPolicy
+    checkpointIdentity?: string | (() => string)
+  }>,
 ): Promise<MergeCandidateResult> {
   const prior = checkedCandidate(input.shape)
   const prepared =
@@ -7159,7 +7219,9 @@ async function mergeCandidate(
     prior ?? (prepared?.status === "completed" && prepared.conclusion === "success" ? prepared.output : undefined)
   if (checked === undefined) throw new Error("yrd: merge candidate preparation produced no candidate")
   const base = await authoritativeQueueBase(git, repo, primaryPR(input).base)
-  const validated = await validatePinnedCandidate(git, repo, input, base.sha, checked, options.checkpointIdentity)
+  const checkpointIdentity =
+    typeof options.checkpointIdentity === "function" ? options.checkpointIdentity() : options.checkpointIdentity
+  const validated = await validatePinnedCandidate(git, repo, input, base.sha, checked, checkpointIdentity)
   return "error" in validated
     ? { status: "completed", conclusion: "failure", error: validated.error }
     : { status: "completed", conclusion: "success", base, checked }

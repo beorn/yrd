@@ -753,7 +753,12 @@ async function checkedQueue(
     prepareCandidate?: boolean
     intentEvaluation?: "advance" | "noop" | "refused"
     refusedIntentIssues?: readonly string[]
-    checkpointIdentity?: string
+    checkpointIdentity?: string | (() => string)
+    checkpointMigration?: (input: { path: string; candidate: { baseSha: string; candidateSha: string } }) => Promise<{
+      version: 1
+      manifest: { version: 1; targetIdentity: string; edges: readonly { from: string; to: string }[] }
+      hash: string
+    }>
   }> = {},
 ) {
   const bayJobs = createBayJobDefs(unusedWorkspace)
@@ -775,6 +780,7 @@ async function checkedQueue(
         ? {}
         : { environmentPassthrough: options.environmentPassthrough }),
       ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
+      ...(options.checkpointMigration === undefined ? {} : { checkpointMigration: options.checkpointMigration }),
     }),
     {
       revision: `check:${JSON.stringify(command)}:${options.waiting === true}`,
@@ -5647,6 +5653,149 @@ describe("Queue command adapters", () => {
       baseSha,
       candidateSha: evidence.candidateSha,
       checkpointMigration: attestation,
+    })
+  })
+
+  it("reads the stored checkpoint identity at merge authority instead of queue construction", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    let storedIdentity = "c".repeat(64)
+    const manifest = {
+      version: 1,
+      targetIdentity: "b".repeat(64),
+      edges: [{ from: "a".repeat(64), to: "b".repeat(64) }],
+    }
+    const trailer = `YRD-CHECKPOINT-MIGRATION ${JSON.stringify({
+      version: 1,
+      manifest,
+      hash: createHash("sha256").update(JSON.stringify(manifest)).digest("hex"),
+    })}`
+    await using app = await checkedQueue(process, repo, shellCommand(`printf '%s\n' '${trailer}'`), {
+      checkpointIdentity: () => storedIdentity,
+    })
+    storedIdentity = "a".repeat(64)
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+
+    expect(run).toMatchObject({ status: "completed", conclusion: "success" })
+  })
+
+  it("refuses a checkpoint migration certificate whose Candidate binding is stale", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const baseSha = await git(repo, ["rev-parse", "main"])
+    await using process = createProcess()
+    const manifest = {
+      version: 1,
+      targetIdentity: "b".repeat(64),
+      edges: [{ from: "a".repeat(64), to: "b".repeat(64) }],
+    }
+    const trailer = `YRD-CHECKPOINT-MIGRATION ${JSON.stringify({
+      version: 1,
+      manifest,
+      hash: createHash("sha256").update(JSON.stringify(manifest)).digest("hex"),
+    })}`
+    const input = {
+      run: "R1",
+      step: "check",
+      index: 0,
+      prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
+      shape: { results: {} },
+    } satisfies StepExecution<PRShape>
+    const checked = await gitCheckStep({
+      inject: { process },
+      repo,
+      command: shellCommand(`printf '%s\n' '${trailer}'`),
+    })(input, { id: "J-check", attempt: 1, runner: "test", signal: new AbortController().signal })
+    if (checked.status !== "completed" || checked.conclusion !== "success") {
+      throw new Error("checkpoint migration check did not pass")
+    }
+    const evidence = GitCheckEvidenceSchema.parse(checked.output)
+    if (evidence.certificate === undefined) throw new Error("checkpoint migration check did not certify")
+    const stale = GitCheckEvidenceSchema.parse({
+      ...evidence,
+      certificate: { ...evidence.certificate, candidateSha: baseSha },
+    })
+
+    const outcome = await gitMergeStep<Checked>({
+      inject: { process },
+      repo,
+      checkpointIdentity: "a".repeat(64),
+    })(
+      { ...input, step: "merge", index: 1, shape: { results: { check: stale } } },
+      { id: "J-merge", attempt: 1, runner: "test", signal: new AbortController().signal },
+    )
+
+    expect(outcome).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "checkpoint-migration-certificate-stale" },
+    })
+  })
+
+  it("binds the target-checkout checkpoint migration attestation to the Candidate certificate", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    const manifest = {
+      version: 1 as const,
+      targetIdentity: "b".repeat(64),
+      edges: [{ from: "a".repeat(64), to: "b".repeat(64) }],
+    }
+    const observed: { path?: string; candidateSha?: string } = {}
+    await using app = await checkedQueue(process, repo, shellCommand("true"), {
+      checkpointIdentity: "a".repeat(64),
+      async checkpointMigration({ path, candidate }) {
+        observed.path = path
+        observed.candidateSha = candidate.candidateSha
+        return {
+          version: 1,
+          manifest,
+          hash: createHash("sha256").update(JSON.stringify(manifest)).digest("hex"),
+        }
+      },
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ status: "completed", conclusion: "success" })
+    const job = run?.steps[0]?.job
+    if (job?.status !== "completed" || job.conclusion !== "success") throw new Error("target attestation did not pass")
+    const evidence = GitCheckEvidenceSchema.parse(job.output)
+
+    expect(observed.path).toContain("worktree")
+    expect(observed.candidateSha).toBe(evidence.candidateSha)
+    expect(evidence.certificate?.checkpointMigration?.manifest).toEqual(manifest)
+  })
+
+  it("refuses when the configured command and target assembly disagree on checkpoint identity", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    const emittedManifest = { version: 1 as const, targetIdentity: "b".repeat(64), edges: [] }
+    const generatedManifest = { version: 1 as const, targetIdentity: "c".repeat(64), edges: [] }
+    const emitted = {
+      version: 1 as const,
+      manifest: emittedManifest,
+      hash: createHash("sha256").update(JSON.stringify(emittedManifest)).digest("hex"),
+    }
+    const generated = {
+      version: 1 as const,
+      manifest: generatedManifest,
+      hash: createHash("sha256").update(JSON.stringify(generatedManifest)).digest("hex"),
+    }
+    await using app = await checkedQueue(
+      process,
+      repo,
+      shellCommand(`printf '%s\n' 'YRD-CHECKPOINT-MIGRATION ${JSON.stringify(emitted)}'`),
+      { checkpointMigration: () => Promise.resolve(generated) },
+    )
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+
+    expect(run).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "check-checkpoint-migration-surface-disagreement" },
     })
   })
 

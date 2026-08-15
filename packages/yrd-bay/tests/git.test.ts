@@ -12,7 +12,7 @@ import { createMemoryJournal, createYrd, createYrdDef, pipe, type CommandResult 
 import { withJobs } from "@yrd/job"
 import { createProcess, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createLogger } from "loggily"
-import { createGitWorkspace, type GitWorkspaceOptions } from "../src/git.ts"
+import { createGitWorkspace, gitWorkspaceRevision, type GitWorkspaceOptions } from "../src/git.ts"
 import type { RemoteBranchSnapshot } from "../src/model.ts"
 import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
 
@@ -87,6 +87,16 @@ function processResult(exitCode: number, stderr = ""): ProcessResult {
 }
 
 describe("createGitWorkspace", () => {
+  it("derives the production workspace revision without preparing the repository", async () => {
+    const { root, repo, intake } = await repository()
+    const baysRoot = join(root, "bays")
+    const postProvision = () => undefined
+    await using process = createProcess()
+    const adapter = await createGitWorkspace({ repo, baysRoot, intakeRemote: intake, postProvision, process })
+
+    expect(gitWorkspaceRevision({ repo, baysRoot, intakeRemote: intake, postProvision })).toBe(adapter.revision)
+  })
+
   it("bounds and names a blackholed Git process during workspace discovery", async () => {
     let request: ProcessRequest | undefined
     const process: Pick<Process, "run"> = {

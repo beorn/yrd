@@ -12,6 +12,7 @@ import {
   createGitDeploymentStore,
   createGitPushReceiver,
   createGitWorkspace,
+  gitWorkspaceRevision,
   baseIdentity,
   defaultBayBranch,
   loadGitPushReceiver,
@@ -37,6 +38,8 @@ import {
 } from "@yrd/contest"
 import {
   createFailure,
+  checkpointMigrationManifest,
+  checkpointMigrationManifestHash,
   createYrd,
   createYrdDef,
   failureFact,
@@ -44,8 +47,10 @@ import {
   raiseFailure,
   SUPPORTED_VERSIONS,
   stageReport,
+  withCheckpointMigrations,
   type Journal,
   type JournalCompatibility,
+  type CheckpointMigrationManifest,
 } from "@yrd/core"
 import { defineConfig, selectFlow } from "@yrd/config"
 import { localRunner, withJobs } from "@yrd/job"
@@ -68,7 +73,11 @@ import {
   withMerge,
   withStep,
   type CandidatePool,
+  CheckpointMigrationAttestationSchema,
+  CHECKPOINT_MIGRATION_TRAILER,
+  type CheckpointMigrationAttestation,
   type CommandEvidence,
+  type GitCheckOptions,
   type InstalledStep,
   type IntegratedShape,
   type PinIntentProvisioner,
@@ -172,6 +181,8 @@ export function createPostureQueueTargetResolver(
 type RuntimeStep = StepDef<PRShape, PRShape>
 
 const RawGitPushPattern = /(?:^|[\n;&|])\s*git\s+push(?:\s|$)/u
+const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITY = "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8"
+const CHECKPOINT_MIGRATION_DERIVATION_TIMEOUT_MS = 60_000
 
 export const CURRENT_JOURNAL_COMPATIBILITY = Object.freeze({
   version: SUPPORTED_VERSIONS.at(-1) ?? 0,
@@ -204,7 +215,17 @@ type DefaultYrdRuntimeAppOptions = DefaultYrdAppOptions &
   Readonly<{
     /** Git identity of the native implementation actually loaded by this host. */
     implementationSource?: string
+    /** Source root used to derive manifests from the exact target Candidate. */
+    implementationRoot?: string
   }>
+
+type CheckpointMigrationCertification = Readonly<{
+  currentIdentity(): string
+  attestCandidate: NonNullable<GitCheckOptions["checkpointMigration"]>
+}>
+
+export type DefaultYrdDefinitionOptions = Omit<DefaultYrdRuntimeAppOptions, "journal"> &
+  Readonly<{ checkpointMigrationCertification?: CheckpointMigrationCertification }>
 
 function validateConfig(config: ResolvedYrdProjectConfig): void {
   for (const name of config.steps) {
@@ -341,7 +362,7 @@ export function configuredChecks(
     try {
       worktrees = createGitWorktreeStore({
         repo,
-        process,
+        gitProcess: adaptProcessGit(process),
         env: inherited,
         timeouts: { operation: checkoutTimeoutMs, cleanup: checkoutTimeoutMs },
       })
@@ -879,6 +900,7 @@ function candidateStep(
   revision: string,
   candidatePool: CandidatePool | undefined,
   kind: "check" | "action",
+  checkpointMigration?: NonNullable<GitCheckOptions["checkpointMigration"]>,
 ): RuntimeStep {
   const command = shellCommand(stepCommand(name, config))
   const checkProcess: Pick<Process, "run"> = {
@@ -934,6 +956,7 @@ function candidateStep(
           ? {}
           : { environmentPassthrough: config.environmentPassthrough }),
         ...(candidatePool === undefined ? {} : { candidatePool }),
+        ...(checkpointMigration === undefined ? {} : { checkpointMigration }),
       }),
       {
         revision,
@@ -1073,13 +1096,17 @@ function integratedRunner(
 }
 
 function configuredQueueSteps(
-  options: DefaultYrdRuntimeAppOptions,
+  options: DefaultYrdDefinitionOptions,
   mergeCommand: readonly string[] | undefined,
 ): readonly RuntimeStep[] {
   const descriptors = configuredStepDescriptors(
     { repo: options.repo, stateDir: options.stateDir, baysRoot: options.baysRoot },
     options.config,
     mergeCommand,
+  )
+  const mergeIndex = descriptors.findIndex((descriptor) => descriptor.kind === "merge")
+  const certificationIndex = descriptors.findLastIndex(
+    (descriptor, index) => descriptor.kind === "check" && (mergeIndex === -1 || index < mergeIndex),
   )
   return options.config.steps.map((name, index) => {
     const config = options.config.definitions[name] ?? { runner: "local" as const }
@@ -1093,6 +1120,9 @@ function configuredQueueSteps(
             ? gitMergeStep({
                 inject: { process: options.process },
                 repo: options.repo,
+                ...(options.checkpointMigrationCertification === undefined
+                  ? {}
+                  : { checkpointIdentity: options.checkpointMigrationCertification.currentIdentity }),
               })
             : configuredMergeStep({
                 inject: { process: options.process },
@@ -1105,6 +1135,9 @@ function configuredQueueSteps(
                 ...(config.environmentPassthrough === undefined
                   ? {}
                   : { environmentPassthrough: config.environmentPassthrough }),
+                ...(options.checkpointMigrationCertification === undefined
+                  ? {}
+                  : { checkpointIdentity: options.checkpointMigrationCertification.currentIdentity }),
               }),
           {
             revision,
@@ -1123,6 +1156,7 @@ function configuredQueueSteps(
         revision,
         options.candidatePool,
         descriptor.kind,
+        index === certificationIndex ? options.checkpointMigrationCertification?.attestCandidate : undefined,
       )
     }
     return eraseStep(
@@ -1378,7 +1412,7 @@ function bayPath(root: string, bay: string): string {
   return path
 }
 
-function contestAdapters(options: DefaultYrdAppOptions): {
+function contestAdapters(options: DefaultYrdDefinitionOptions): {
   runners: readonly ContestRunnerDef[]
   evaluators: readonly ContestEvaluatorDef[]
   git: ContestGit
@@ -1413,7 +1447,7 @@ function contestAdapters(options: DefaultYrdAppOptions): {
 }
 
 /** Compose the built-in workflow from immutable plugins and injected resources. */
-async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions): Promise<YrdCliApp> {
+async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) {
   validateConfig(options.config)
   const flowConfig = options.config.flows === undefined ? undefined : defineConfig(...options.config.flows)
   const mergeCommand =
@@ -1553,7 +1587,138 @@ async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions):
         : { selectFlow: (submission: Parameters<typeof selectFlow>[1]) => selectFlow(flowConfig, submission).pin }),
     }),
   )
-  return createYrd(contests(queue(base)), {
+  const definition = contests(queue(base))
+  return withCheckpointMigrations(definition, [
+    {
+      from: RETAINED_PREDECESSOR_CHECKPOINT_IDENTITY,
+      migrate: (state) => definition.compact(state),
+    },
+  ])
+}
+
+/** Derive the data-only projection contract from the exact production
+ * definition builder; certification never maintains a second assembly path. */
+export async function createDefaultYrdCheckpointMigrationAttestation(
+  options: DefaultYrdDefinitionOptions,
+): Promise<CheckpointMigrationAttestation> {
+  const refuse = () => ({
+    status: "completed" as const,
+    conclusion: "failure" as const,
+    error: { code: "definition-read-only", message: "yrd: definition derivation cannot mutate bay workspaces" },
+  })
+  const workspace =
+    options.workspace ??
+    Object.freeze({
+      revision: gitWorkspaceRevision({
+        repo: options.repo,
+        baysRoot: options.baysRoot,
+        ...(options.receiverPath === undefined ? {} : { intakeRemote: options.receiverPath }),
+        ...options.workspaceLifecycle,
+      }),
+      provision: refuse,
+      refresh: refuse,
+      checkpoint: refuse,
+      deprovision: refuse,
+    })
+  const manifest: CheckpointMigrationManifest = checkpointMigrationManifest(
+    await createDefaultYrdDefinition({ ...options, workspace }),
+  )
+  return CheckpointMigrationAttestationSchema.parse({
+    version: 1,
+    manifest,
+    hash: checkpointMigrationManifestHash(manifest),
+  })
+}
+
+function targetImplementationEntrypoint(
+  assemblyRoot: string,
+  implementationRoot: string,
+  candidateRoot: string,
+): string {
+  const implementationPath = relative(resolve(assemblyRoot), resolve(implementationRoot))
+  if (implementationPath === ".." || implementationPath.startsWith(`..${sep}`)) {
+    // Standalone consumers install Yrd outside the repository being admitted.
+    // That implementation is fixed across this Candidate; only its config is
+    // target-owned. Composed roots resolve Yrd inside the Candidate instead.
+    return join(implementationRoot, "bin", "yrd.ts")
+  }
+  return join(candidateRoot, implementationPath, "bin", "yrd.ts")
+}
+
+function targetCheckpointMigrationAttestor(
+  options: Pick<DefaultYrdRuntimeAppOptions, "repo" | "process" | "implementationRoot">,
+): NonNullable<GitCheckOptions["checkpointMigration"]> | undefined {
+  const implementationRoot = options.implementationRoot
+  if (implementationRoot === undefined) return undefined
+  return async ({ path }) => {
+    const entrypoint = targetImplementationEntrypoint(options.repo, implementationRoot, path)
+    const result = await options.process.run({
+      argv: [
+        globalThis.process.execPath,
+        entrypoint,
+        "_checkpoint-migration-manifest",
+        "--assembly-root",
+        options.repo,
+      ],
+      cwd: path,
+      env: cleanGitEnvironment(globalThis.process.env),
+      timeoutMs: CHECKPOINT_MIGRATION_DERIVATION_TIMEOUT_MS,
+    })
+    if (result.timedOut || result.exitCode !== 0) {
+      const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.exitCode}`
+      raiseFailure(
+        "infrastructure",
+        "checkpoint-migration-target-derivation-failed",
+        `yrd: target Candidate checkpoint migration derivation failed: ${detail}`,
+      )
+    }
+    const records = result.stdout.split(/\r?\n/u).filter((line) => line.startsWith(CHECKPOINT_MIGRATION_TRAILER))
+    if (records.length !== 1) {
+      raiseFailure(
+        "infrastructure",
+        "checkpoint-migration-target-output-invalid",
+        `yrd: target Candidate emitted ${records.length} checkpoint migration records; expected exactly one`,
+      )
+    }
+    try {
+      return CheckpointMigrationAttestationSchema.parse(
+        JSON.parse((records[0] as string).slice(CHECKPOINT_MIGRATION_TRAILER.length)),
+      )
+    } catch (cause) {
+      raiseFailure(
+        "infrastructure",
+        "checkpoint-migration-target-output-invalid",
+        `yrd: target Candidate emitted an invalid checkpoint migration record: ${cause instanceof Error ? cause.message : String(cause)}`,
+      )
+    }
+  }
+}
+
+async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions): Promise<YrdCliApp> {
+  const checkpoint = { identity: undefined as string | undefined }
+  const attestCandidate = targetCheckpointMigrationAttestor(options)
+  const checkpointMigrationCertification =
+    attestCandidate === undefined
+      ? undefined
+      : Object.freeze({
+          currentIdentity() {
+            if (checkpoint.identity === undefined) {
+              raiseFailure(
+                "infrastructure",
+                "checkpoint-migration-current-identity-unavailable",
+                "yrd: stored checkpoint identity is unavailable at merge authority",
+              )
+            }
+            return checkpoint.identity
+          },
+          attestCandidate,
+        })
+  const definition = await createDefaultYrdDefinition({
+    ...options,
+    ...(checkpointMigrationCertification === undefined ? {} : { checkpointMigrationCertification }),
+  })
+  const targetIdentity = checkpointMigrationManifest(definition).targetIdentity
+  const app = await createYrd(definition, {
     inject: {
       journal: options.journal,
       compatibility: CURRENT_JOURNAL_COMPATIBILITY,
@@ -1561,6 +1726,8 @@ async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions):
       ...(options.log === undefined ? {} : { log: options.log }),
     },
   })
+  checkpoint.identity = (await options.journal.checkpoint?.inspect?.())?.identity ?? targetIdentity
+  return app
 }
 
 export function createDefaultYrdApp(options: DefaultYrdAppOptions): Promise<YrdCliApp> {
@@ -2300,6 +2467,9 @@ async function createYrdRuntimeHost(
       candidatePool,
       runnerId: resident?.id ?? `yrd-cli:${globalThis.process.pid}`,
       ...(implementationSource === undefined ? {} : { implementationSource }),
+      ...(discoveredImplementationSource === undefined
+        ? {}
+        : { implementationRoot: discoveredImplementationSource.root }),
     })
     if (mode === "active") {
       // Cutover migration: a pre-settlement (v1) journal can leave non-terminal
@@ -2439,10 +2609,8 @@ async function runReceiverHook(
     const receiver = await loadGitPushReceiver(resolve(globalThis.process.cwd(), gitDir), runtimeProcess)
     const repository = await discoverYrdRepository({ cwd: receiver.mainRepo, env, process: runtimeProcess })
     const loaded = await loadRepositoryConfig(repository, runtimeProcess)
-    const implementationSource = await implementationSourceIdentity(
-      runtimeProcess,
-      sourceRepositoryFor(import.meta.url),
-    )
+    const implementationRepository = sourceRepositoryFor(import.meta.url)
+    const implementationSource = await implementationSourceIdentity(runtimeProcess, implementationRepository)
     app = await createDefaultYrdRuntimeApp({
       repo: repository.repo,
       stateDir: repository.stateDir,
@@ -2460,6 +2628,7 @@ async function runReceiverHook(
       scope,
       log,
       ...(implementationSource === undefined ? {} : { implementationSource }),
+      ...(implementationRepository === undefined ? {} : { implementationRoot: implementationRepository.root }),
     })
     const runtimeApp = app
     await runReceiverHookFromEnvironment(mode, {
@@ -2558,6 +2727,57 @@ async function runYrdProcessHost(
     } catch (error) {
       await diagnostic(io, error, { json })
       return classifyFailure(error).exitCode
+    }
+  }
+  if (invocation.args[0] === "_checkpoint-migration-manifest") {
+    const assemblyFlag = invocation.args.indexOf("--assembly-root")
+    const assemblyRoot = assemblyFlag === -1 ? undefined : invocation.args[assemblyFlag + 1]
+    const extra = invocation.args.filter(
+      (argument, index) => index !== 0 && index !== assemblyFlag && index !== assemblyFlag + 1,
+    )
+    if (assemblyRoot === undefined || extra.length > 0) {
+      await diagnostic(
+        io,
+        createFailure({
+          kind: "usage",
+          code: "invalid-arguments",
+          message: "yrd: _checkpoint-migration-manifest requires exactly --assembly-root <path>",
+        }),
+        { json: false },
+      )
+      return 2
+    }
+    const scope = createScope("yrd-checkpoint-migration-manifest")
+    await using runtimeProcess = createProcess({
+      cwd: io.cwd ?? globalThis.process.cwd(),
+      env,
+      inject: { scope },
+    })
+    try {
+      const candidate = await discoverYrdRepository({
+        cwd: io.cwd ?? globalThis.process.cwd(),
+        env,
+        process: runtimeProcess,
+      })
+      const assembly = await discoverYrdRepository({ cwd: assemblyRoot, env, process: runtimeProcess })
+      const loaded = await loadRepositoryConfig(candidate, runtimeProcess)
+      const attestation = await createDefaultYrdCheckpointMigrationAttestation({
+        repo: assembly.repo,
+        stateDir: assembly.stateDir,
+        baysRoot: assembly.baysRoot,
+        receiverPath: join(assembly.stateDir, "prs.git"),
+        process: runtimeProcess,
+        config: loaded.config,
+        defaultSubmitter: "operator",
+        scope,
+      })
+      io.stdout(`${CHECKPOINT_MIGRATION_TRAILER}${JSON.stringify(attestation)}\n`)
+      return 0
+    } catch (error) {
+      await diagnostic(io, error, { json: false })
+      return classifyFailure(error).exitCode
+    } finally {
+      await scope[Symbol.asyncDispose]()
     }
   }
 

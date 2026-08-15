@@ -22,6 +22,7 @@ import {
   CURRENT_JOURNAL_COMPATIBILITY,
   configuredChecks,
   createDefaultYrdApp as createDefaultYrdAppRaw,
+  createDefaultYrdCheckpointMigrationAttestation,
   createPinIntentProvisioner,
   createPostureQueueTargetResolver,
   createYrdHost as createYrdHostRaw,
@@ -482,6 +483,46 @@ checks: [{check: {run: "true"}}]
 }
 
 describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
+  it("derives a deterministic config-sensitive checkpoint manifest from the production definition builder", async () => {
+    const { repo } = await repository()
+    await using runtimeProcess = createProcess({ cwd: repo })
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      requires: [],
+      definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    const options = {
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      process: runtimeProcess,
+      config,
+    }
+
+    const first = await createDefaultYrdCheckpointMigrationAttestation(options)
+    const repeated = await createDefaultYrdCheckpointMigrationAttestation(options)
+    const changed = await createDefaultYrdCheckpointMigrationAttestation({
+      ...options,
+      config: {
+        ...config,
+        steps: ["check", "other", "merge"],
+        definitions: { ...config.definitions, other: { run: "true", runner: "local" } },
+      },
+    })
+
+    expect(repeated).toEqual(first)
+    expect(first.hash).toMatch(/^[0-9a-f]{64}$/u)
+    expect(first.manifest.targetIdentity).toMatch(/^[0-9a-f]{64}$/u)
+    expect(first.manifest.edges).toContainEqual({
+      from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
+      to: first.manifest.targetIdentity,
+    })
+    expect(changed.manifest.targetIdentity).not.toBe(first.manifest.targetIdentity)
+  })
+
   it("binds installed-step revisions to the host axes, not to the launcher's own version", () => {
     const toolchain = { bun: "1.3.0", node: "24.0.0", platform: "darwin", arch: "arm64" }
     const input = {
@@ -2194,6 +2235,34 @@ checks: [{check: {run: "true"}}]
     })
   })
 
+  it("derives the target checkpoint manifest before opening a Journal host", async () => {
+    const { repo } = await repository()
+    let stdout = ""
+    let stderr = ""
+
+    const exitCode = await runYrdProcess(
+      ["/usr/bin/bun", "/usr/local/bin/yrd", "_checkpoint-migration-manifest", "--assembly-root", repo],
+      {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      },
+    )
+
+    expect(exitCode, stderr).toBe(0)
+    expect(stdout).toMatch(/^YRD-CHECKPOINT-MIGRATION /u)
+    expect(JSON.parse(stdout.slice("YRD-CHECKPOINT-MIGRATION ".length))).toMatchObject({
+      version: 1,
+      manifest: { version: 1, targetIdentity: expect.stringMatching(/^[0-9a-f]{64}$/u) },
+      hash: expect.stringMatching(/^[0-9a-f]{64}$/u),
+    })
+    expect(existsSync(join(repo, ".git", "yrd"))).toBe(false)
+  })
+
   it("prints namespace help without initializing a repository host", async () => {
     const root = await mkdtemp(join(tmpdir(), "yrd-queue-help-"))
     roots.push(root)
@@ -2380,7 +2449,7 @@ checks: [{check: {run: "true"}}]
     expect((await statusFrom(nested, ["--repo", repo])).split("\n", 1)[0]).toContain(`ROOT ${repo}`)
   })
 
-  it("runs the literal --steps merge CLI without starting the configured check process", async () => {
+  it("refuses literal --steps merge without starting the certifying check process", async () => {
     const { repo, featureSha } = await repository()
     const checkMarker = join(repo, "configured-check-started.marker")
     await writeFile(
@@ -2411,6 +2480,7 @@ checks: [{check: {run: "true"}}]
       submitError,
     ).toBe(0)
 
+    const mainBefore = await git(repo, "rev-parse", "main")
     let stdout = ""
     let stderr = ""
     const exitCode = await runYrdProcess(
@@ -2426,14 +2496,15 @@ checks: [{check: {run: "true"}}]
       },
     )
     expect(await Bun.file(checkMarker).exists(), JSON.stringify({ exitCode, stdout, stderr })).toBe(false)
-    expect(exitCode, stderr).toBe(0)
+    expect(exitCode, stderr).toBe(1)
     const result = JSON.parse(stdout) as { results: Array<{ id: string }> }
     expect(result).toMatchObject({
       command: "queue.run",
       results: [
         {
           status: "completed",
-          conclusion: "success",
+          conclusion: "failure",
+          error: { code: "checkpoint-migration-certificate-missing" },
           stepSelection: {
             authority: "explicit",
             steps: ["merge"],
@@ -2444,7 +2515,7 @@ checks: [{check: {run: "true"}}]
         },
       ],
     })
-    expect(await git(repo, "merge-base", "--is-ancestor", featureSha, "main")).toBe("")
+    expect(await git(repo, "rev-parse", "main")).toBe(mainBefore)
     const runId = result.results[0]?.id
     if (runId === undefined) throw new Error("merge-only CLI produced no durable run")
     await using reopened = await createYrdHost({ cwd: repo })
@@ -2457,7 +2528,7 @@ checks: [{check: {run: "true"}}]
     })
   })
 
-  it("runs a literal merge-only batch without starting either configured check", async () => {
+  it("refuses a literal merge-only batch without starting either certifying check", async () => {
     const { repo, featureSha } = await repository()
     await git(repo, "switch", "-qc", "issue/second")
     await writeFile(join(repo, "second.txt"), "second\n")
@@ -2496,6 +2567,7 @@ checks: [{check: {run: "true"}}]
       ).toBe(0)
     }
 
+    const mainBefore = await git(repo, "rev-parse", "main")
     let stdout = ""
     let stderr = ""
     const exitCode = await runYrdProcess(
@@ -2511,32 +2583,36 @@ checks: [{check: {run: "true"}}]
       },
     )
     expect(await Bun.file(checkMarker).exists(), JSON.stringify({ exitCode, stdout, stderr })).toBe(false)
-    expect(exitCode, stderr).toBe(0)
-    const result = JSON.parse(stdout) as { results: Record<string, unknown>[] }
-    expect(result).toMatchObject({
-      command: "queue.run",
-      results: [
-        {
-          status: "completed",
-          conclusion: "success",
-          stepSelection: {
-            authority: "explicit",
-            steps: ["merge"],
-            omittedSteps: [{ name: "check", index: 0, status: "skipped", reason: "not-selected" }],
-          },
-          steps: [{ name: "merge" }],
-          prs: [
-            { id: "PR1", headSha: featureSha },
-            { id: "PR2", headSha: secondSha },
-          ],
-        },
+    expect(exitCode, stderr).toBe(1)
+    const result = JSON.parse(stdout) as { command: string; results: Record<string, unknown>[] }
+    expect(result.command).toBe("queue.run")
+    expect(result.results).toHaveLength(3)
+    expect(result.results[0]).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "checkpoint-migration-certificate-missing" },
+      stepSelection: {
+        authority: "explicit",
+        steps: ["merge"],
+        omittedSteps: [{ name: "check", index: 0, status: "skipped", reason: "not-selected" }],
+      },
+      steps: [{ name: "merge" }],
+      prs: [
+        { id: "PR1", headSha: featureSha },
+        { id: "PR2", headSha: secondSha },
       ],
     })
-    expect(await git(repo, "merge-base", "--is-ancestor", featureSha, "main")).toBe("")
-    expect(await git(repo, "merge-base", "--is-ancestor", secondSha, "main")).toBe("")
+    for (const run of result.results) {
+      expect(run).toMatchObject({
+        status: "completed",
+        conclusion: "failure",
+        error: { code: "checkpoint-migration-certificate-missing" },
+      })
+    }
+    expect(await git(repo, "rev-parse", "main")).toBe(mainBefore)
   })
 
-  it("does not reuse a prior configured check as merge-only authority", async () => {
+  it("does not reuse a prior configured check as merge-only certificate authority", async () => {
     const { repo } = await repository()
     const checkMarker = join(repo, "..", "configured-check-runs.log")
     await writeFile(
@@ -2583,13 +2659,14 @@ checks: [{check: {run: "true"}}]
       },
     )
     expect(await readFile(checkMarker, "utf8")).toBe("check")
-    expect(exitCode, JSON.stringify({ stdout, stderr })).toBe(0)
+    expect(exitCode, JSON.stringify({ stdout, stderr })).toBe(1)
     const result = JSON.parse(stdout) as { results: Record<string, unknown>[] }
     expect(result).toMatchObject({
       results: [
         {
           status: "completed",
-          conclusion: "success",
+          conclusion: "failure",
+          error: { code: "checkpoint-migration-certificate-missing" },
           stepSelection: {
             authority: "explicit",
             steps: ["merge"],
