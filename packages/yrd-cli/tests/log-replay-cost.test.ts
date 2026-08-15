@@ -43,30 +43,38 @@ function countingJournal() {
   return { journal, framesRead: () => frames, reset: () => void (frames = 0) }
 }
 
-/** Run `log --json` and report what the journal handed the invocation. */
-async function logInvocation(
+/** Run one CLI invocation and report what the journal handed it. */
+async function invocation(
   app: Awaited<ReturnType<typeof createCliApp>>,
   meter: ReturnType<typeof countingJournal>,
+  ...args: string[]
 ): Promise<number> {
   meter.reset()
   const output = outputIO()
-  const code = await runYrdRaw(app, yrd("log", "--json"), output.io, { queueReadModel: stubReadModel(app) })
+  const code = await runYrdRaw(app, yrd(...args), output.io, { queueReadModel: stubReadModel(app) })
   expect(code, output.stderr()).toBe(0)
   return meter.framesRead()
 }
 
-describe("yrd log cold-replay cost", () => {
+describe.each([
+  { command: "log", args: ["log", "--json"] },
+  // `queue list` is the shape the user actually runs and the one `yrd watch`
+  // is built out of — `watch` IS `queue list --watch`. It reached the same
+  // journal from a different chain than `log` did, so pinning `log` alone left
+  // the reported command unpinned.
+  { command: "queue list", args: ["queue", "list", "--json"] },
+])("yrd $command cold-replay cost", ({ args }) => {
   it("reads the same number of frames however much history the journal holds", async () => {
     const meter = countingJournal()
     await using app = await createCliApp(meter.journal)
 
     await appendHistory(app, "early", 12)
     const smallCursor = (await app.journalSnapshot()).asOf.cursor
-    const smallFrames = await logInvocation(app, meter)
+    const smallFrames = await invocation(app, meter, ...args)
 
     await appendHistory(app, "later", 12)
     const grownCursor = (await app.journalSnapshot()).asOf.cursor
-    const grownFrames = await logInvocation(app, meter)
+    const grownFrames = await invocation(app, meter, ...args)
 
     // The fixture has to actually grow, or the invariant below proves nothing.
     expect(grownCursor).toBeGreaterThan(smallCursor)
