@@ -2938,6 +2938,17 @@ async function runInScratch<Output extends JsonValue>(
   return failed("scratch-cleanup-failed", cleanupFailure)
 }
 
+export type PinIntentProvisionInput = Readonly<{
+  path: string
+  baseSha: string
+  provisionalCandidateSha: string
+  component: string
+}>
+
+export type PinIntentProvisioner = (
+  input: PinIntentProvisionInput,
+) => Promise<Readonly<{ generatedPaths: readonly string[] }>>
+
 async function prepareCandidate(
   git: Git,
   repo: string,
@@ -2947,6 +2958,7 @@ async function prepareCandidate(
   attempt: number,
   artifactRoot: string,
   refuse?: RefusePathsPolicy,
+  provisionPinIntent?: PinIntentProvisioner,
 ): Promise<
   | Readonly<{
       status: "passed"
@@ -3008,6 +3020,7 @@ async function prepareCandidate(
           ? []
           : [{ path: pr.intent.authored.component, sha: pr.intent.evaluated.target }],
         pinIntentCommitMessage(pr.intent.authored.component, pr.intent.evaluated.target, pr.intent.authored.issue.id),
+        provisionPinIntent,
       )
       if (synthesized.status === "failed") return synthesized
       submoduleResolutions.push({
@@ -3173,6 +3186,7 @@ export type GitCandidatePreparerOptions = Readonly<{
   artifactRoot?: string
   env?: NodeJS.ProcessEnv
   candidatePool?: CandidatePool
+  provisionPinIntent?: PinIntentProvisioner
 }>
 
 /** Construct and publish the ONE immutable Candidate before Runner admission.
@@ -3210,6 +3224,8 @@ export function gitCandidatePreparer(options: GitCandidatePreparerOptions): Cand
         execution,
         1,
         resolve(options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")),
+        undefined,
+        options.provisionPinIntent,
       )
       if (candidate.status === "failed") {
         throw createFailure({
@@ -3863,6 +3879,7 @@ async function synthesizeGitlinkWrapper(
   parent: string,
   updates: readonly GitlinkUpdate[],
   message: string,
+  provisionPinIntent?: PinIntentProvisioner,
 ): Promise<Readonly<{ status: "passed"; output: SynthesizedGitlinkWrapper }> | CandidateFailure> {
   const expectedPaths = updates.map((update) => update.path)
   for (const update of updates) {
@@ -3875,6 +3892,48 @@ async function synthesizeGitlinkWrapper(
         [update.path],
       )
     }
+  }
+  if (provisionPinIntent !== undefined && updates.length > 0) {
+    if (updates.length !== 1) {
+      return candidateFailure(
+        "wrapper-mismatch",
+        `pin-intent provisioning expected one gitlink update, got [${expectedPaths.join(", ")}]`,
+        ".",
+        expectedPaths,
+      )
+    }
+    const update = updates[0]
+    if (update === undefined) throw new Error("pin-intent provisioning lost its sole gitlink update")
+    const provisionalTreeSha = (await git.run(path, ["write-tree"])).stdout
+    const provisionalCandidateSha = await git.commitTree(path, provisionalTreeSha, [parent], message)
+    const provisioned = await provisionPinIntent({
+      path,
+      baseSha: parent,
+      provisionalCandidateSha,
+      component: update.path,
+    })
+    const generatedPaths = [...new Set(provisioned.generatedPaths)].toSorted()
+    const forbidden = generatedPaths.filter((generatedPath) => generatedPath !== "bun.lock")
+    if (forbidden.length > 0) {
+      return candidateFailure(
+        "wrapper-mismatch",
+        `pin-intent provisioning generated forbidden path(s) [${forbidden.join(", ")}]; allowed [bun.lock]`,
+        ".",
+        forbidden,
+      )
+    }
+    for (const generatedPath of generatedPaths) {
+      const staged = await git.run(path, ["add", "--", generatedPath], true)
+      if (staged.code !== 0) {
+        return candidateFailure(
+          "wrapper-mismatch",
+          `generated wrapper could not stage provisioned '${generatedPath}': ${staged.stderr || staged.stdout}`,
+          generatedPath,
+          [generatedPath],
+        )
+      }
+    }
+    expectedPaths.push(...generatedPaths)
   }
   const materialized = await stagedPaths(git, path)
   if (!samePaths(materialized, expectedPaths)) {

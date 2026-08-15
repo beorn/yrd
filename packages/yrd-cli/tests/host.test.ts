@@ -22,6 +22,7 @@ import {
   CURRENT_JOURNAL_COMPATIBILITY,
   configuredChecks,
   createDefaultYrdApp as createDefaultYrdAppRaw,
+  createPinIntentProvisioner,
   createPostureQueueTargetResolver,
   createYrdHost as createYrdHostRaw,
   runYrdProcess,
@@ -210,6 +211,58 @@ async function candidatePackageRepository(
   const featureSha = await git(repo, "rev-parse", "HEAD")
   await git(repo, "switch", "-q", "main")
   return { repo, featureSha }
+}
+
+async function manifestChangingPinRepository(options: Readonly<{ manifestChange?: boolean }> = {}): Promise<{
+  repo: string
+  baseSha: string
+  provisionalCandidateSha: string
+}> {
+  const { repo } = await repository()
+  const module = join(repo, "..", "manifest-module")
+  await git(repo, "switch", "-q", "main")
+  await git(repo, "config", "protocol.file.allow", "always")
+  await git(repo, "init", "-q", "-b", "main", module)
+  await git(module, "config", "user.name", "Yrd Test")
+  await git(module, "config", "user.email", "yrd@example.invalid")
+  await writeFile(join(module, "package.json"), `${JSON.stringify({ dependencies: { fixture: "1.0.0" } })}\n`)
+  await git(module, "add", "package.json")
+  await git(module, "commit", "-qm", "base dependency spec")
+
+  await git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "dep")
+  await writeFile(
+    join(repo, "package.json"),
+    `${JSON.stringify({ private: true, dependencies: { fixture: "1.0.0" } })}\n`,
+  )
+  await writeFile(join(repo, "bun.lock"), '{"fixture":"1.0.0"}\n')
+  await git(repo, "add", ".gitmodules", "dep", "package.json", "bun.lock")
+  await git(repo, "commit", "-qm", "pin dependency base")
+  const baseSha = await git(repo, "rev-parse", "HEAD")
+
+  if (options.manifestChange === false) {
+    await writeFile(join(module, "README.md"), "documentation only\n")
+    await git(module, "add", "README.md")
+    await git(module, "commit", "-qm", "change documentation only")
+  } else {
+    await writeFile(join(module, "package.json"), `${JSON.stringify({ dependencies: { fixture: "2.0.0" } })}\n`)
+    await git(module, "add", "package.json")
+    await git(module, "commit", "-qm", "change dependency spec")
+  }
+  const targetSha = await git(module, "rev-parse", "HEAD")
+  await git(join(repo, "dep"), "fetch", "-q", "origin")
+  await git(join(repo, "dep"), "checkout", "-q", targetSha)
+  await git(repo, "add", "dep")
+  const treeSha = await git(repo, "write-tree")
+  const provisionalCandidateSha = await git(
+    repo,
+    "commit-tree",
+    treeSha,
+    "-p",
+    baseSha,
+    "-m",
+    "provisional pin candidate",
+  )
+  return { repo, baseSha, provisionalCandidateSha }
 }
 
 async function fixtureBun(
@@ -752,6 +805,84 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(provisioned).toHaveLength(2)
     expect(run).toMatchObject({ status: "completed", conclusion: "success" })
     expect(new Set(provisioned)).toHaveLength(1)
+  })
+
+  it("regenerates a manifest-changing pin lockfile before the candidate identity is fixed", async () => {
+    const { repo, baseSha, provisionalCandidateSha } = await manifestChangingPinRepository()
+    const requests: string[][] = []
+    await using runtimeProcess = createProcess({ cwd: repo })
+    const process = {
+      async run(request: ProcessRequest): Promise<ProcessResult> {
+        requests.push([...request.argv])
+        if (request.argv[0] !== "bun") return runtimeProcess.run(request)
+        if (request.argv.includes("--frozen-lockfile")) {
+          return {
+            exitCode: 1,
+            signal: null,
+            stdout: "",
+            stderr: "error: lockfile had changes, but lockfile is frozen",
+            durationMs: 1,
+            timedOut: false,
+          }
+        }
+        if (request.cwd === undefined) throw new Error("pin provisioning has no candidate workspace")
+        await writeFile(join(request.cwd, "bun.lock"), '{"fixture":"2.0.0"}\n')
+        return { exitCode: 0, signal: null, stdout: "", stderr: "", durationMs: 1, timedOut: false }
+      },
+    } satisfies Pick<Process, "run">
+    const artifactRoot = join(repo, ".git", "yrd", "artifacts")
+    const materialized: string[] = []
+    const provision = createPinIntentProvisioner({
+      process,
+      repo,
+      artifactRoot,
+      materializeSubmodules(path) {
+        materialized.push(path)
+        return Promise.resolve()
+      },
+    })
+
+    const result = await provision({
+      path: repo,
+      baseSha,
+      provisionalCandidateSha,
+      component: "dep",
+    })
+
+    expect(result).toEqual({ generatedPaths: ["bun.lock"] })
+    expect(materialized).toEqual([repo])
+    expect(requests.filter((argv) => argv[0] === "bun")).toEqual([
+      ["bun", "install", "--frozen-lockfile", "--ignore-scripts"],
+      ["bun", "install", "--ignore-scripts"],
+    ])
+    expect(await readFile(join(repo, "bun.lock"), "utf8")).toBe('{"fixture":"2.0.0"}\n')
+    const disclosures = await readdir(join(artifactRoot, "lockfile-regeneration"))
+    expect(disclosures).toHaveLength(1)
+    const disclosure = JSON.parse(
+      await readFile(join(artifactRoot, "lockfile-regeneration", disclosures[0]!), "utf8"),
+    ) as { changedSubmoduleManifests: string[]; lockfileChanged: boolean }
+    expect(disclosure).toMatchObject({
+      changedSubmoduleManifests: ["dep/package.json"],
+      lockfileChanged: true,
+    })
+  })
+
+  it("leaves the lockfile untouched when a pin changes no dependency manifest", async () => {
+    const { repo, baseSha, provisionalCandidateSha } = await manifestChangingPinRepository({
+      manifestChange: false,
+    })
+    await using process = createProcess({ cwd: repo })
+    const provision = createPinIntentProvisioner({
+      process,
+      repo,
+      artifactRoot: join(repo, ".git", "yrd", "artifacts"),
+      materializeSubmodules: () => Promise.resolve(),
+    })
+
+    await expect(provision({ path: repo, baseSha, provisionalCandidateSha, component: "dep" })).resolves.toEqual({
+      generatedPaths: [],
+    })
+    await expect(readFile(join(repo, "bun.lock"), "utf8")).resolves.toBe('{"fixture":"1.0.0"}\n')
   })
 
   it("inspects submodules in the quarantined pre-submit checkout before provisioning (22755)", async () => {
