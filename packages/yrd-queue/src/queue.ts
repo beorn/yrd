@@ -6010,7 +6010,10 @@ function auditQueues(
         // seat guess or a live git read the audit cannot make.
         ...(revision.submitter === undefined ? {} : { submitter: revision.submitter }),
         reviewCertification: certification,
-        resolution: [`yrd pr submit ${pr.branch} --issue <ref>`, `or withdraw it: yrd pr withdraw ${pr.id}`],
+        resolution: [
+          `yrd pr submit ${pr.branch} --issue <ref>`,
+          `or withdraw it: yrd pr withdraw ${pr.id} --burn-payload`,
+        ],
       })
     }
   }
