@@ -36,11 +36,13 @@ import {
 } from "./model.ts"
 import { candidateRefFor } from "./candidate-refs.ts"
 import {
+  CarryForwardSampleEvidenceSchema,
   DEFAULT_CARRY_FORWARD_POLICY,
   carryForwardVerdict,
   shouldShadowRecut,
   type CarryForwardPolicy,
   type CarryForwardRefusal,
+  type CarryForwardSampleEvidence,
 } from "./carry-forward.ts"
 import { componentMainScratchCleanupFailure } from "./component-main-outcome.ts"
 import {
@@ -6883,7 +6885,12 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
 
 /** Carry-forward controls every merge step accepts. `random` exists so the
  * shadow sample is deterministic under test; hosts leave it unset. */
-type CarryForwardOptions = Readonly<{ carryForward?: CarryForwardPolicy; random?: () => number }>
+type CarryForwardOptions = Readonly<{
+  /** A function is read at RUN time so a kill switch written mid-process takes
+   * effect immediately; a plain value is for tests and static hosts. */
+  carryForward?: CarryForwardPolicy | (() => CarryForwardPolicy)
+  random?: () => number
+}>
 
 export type GitMergeOptions = ProcessDependency &
   CarryForwardOptions &
@@ -7023,7 +7030,7 @@ type MergeCandidateResult =
   | Readonly<{
       status: "completed"
       conclusion: "failure"
-      error: Readonly<{ code: string; message: string }>
+      error: Readonly<{ code: string; message: string; evidence?: JsonValue }>
     }>
   | Readonly<{ status: "waiting"; token: string; detail?: string }>
 type FailedJobResult = Extract<JobResult<never>, { status: "completed"; conclusion: "failure" }>
@@ -7036,7 +7043,7 @@ async function mergeCandidate(
   options: Readonly<{
     artifactRoot?: string
     refuse?: RefusePathsPolicy
-    carryForward?: CarryForwardPolicy
+    carryForward?: CarryForwardPolicy | (() => CarryForwardPolicy)
     random?: () => number
   }>,
 ): Promise<MergeCandidateResult> {
@@ -7072,7 +7079,15 @@ async function mergeCandidate(
   // minus the checks.
   let carriedForward: CarriedForwardCheck | undefined
   let carryRefusal: CarryForwardRefusal | undefined
+  let sampleEvidence: CarryForwardSampleEvidence | undefined
   let effective = checked
+  // Read the policy at RUN time, never at step-construction time: the kill
+  // switch is written while this process is live, and a policy captured in a
+  // closure would keep carrying verdicts after a divergence retired the path.
+  const resolvedPolicy =
+    typeof options.carryForward === "function"
+      ? options.carryForward()
+      : (options.carryForward ?? DEFAULT_CARRY_FORWARD_POLICY)
   if (prior !== undefined && prior.baseSha !== base.sha) {
     const decision = await carryForwardVerdict(git, {
       repo,
@@ -7088,7 +7103,7 @@ async function mergeCandidate(
         path: resolution.path,
         sha: resolution.sha,
       })),
-      policy: options.carryForward ?? DEFAULT_CARRY_FORWARD_POLICY,
+      policy: resolvedPolicy,
       readGitlink: (target, commit, path) => readGitlink(git, target, commit, path),
     })
     if (decision.carried) {
@@ -7097,12 +7112,24 @@ async function mergeCandidate(
       // That comparison is the kill switch's input; until it exists this is
       // the conservative half of the shadow — it costs a recut and never
       // carries on the sample.
-      const policy = options.carryForward ?? DEFAULT_CARRY_FORWARD_POLICY
+      const policy = resolvedPolicy
       if (shouldShadowRecut(policy, options.random ?? Math.random)) {
         carryRefusal = {
           leg: "disabled",
           reason: `shadow-recut sample (rate ${policy.shadowSampleRate}) declined this carry-forward so a fresh check re-proves the payload`,
         }
+        // The comparator runs a run LATER, when the re-queued member is
+        // re-checked at the new base. This is how that run recognizes what it
+        // stands in for. See CarryForwardSampleEvidenceSchema.
+        sampleEvidence = CarryForwardSampleEvidenceSchema.parse({
+          kind: "carry-forward-shadow-sample",
+          fromBaseSha: prior.baseSha,
+          toBaseSha: base.sha,
+          checkedCandidateSha: prior.candidateSha,
+          carriedVerdict: "passed",
+          configHash: prior.configHash,
+          ...(prior.environmentHash === undefined ? {} : { environmentHash: prior.environmentHash }),
+        })
       } else {
         const rebuilt = await withPinnedCandidate<PinnedCandidate>(
           git,
@@ -7144,6 +7171,7 @@ async function mergeCandidate(
         : {
             ...validated.error,
             message: `${validated.error.message}; carry-forward refused (${carryRefusal.leg}): ${carryRefusal.reason}`,
+            ...(sampleEvidence === undefined ? {} : { evidence: sampleEvidence }),
           }
     return { status: "completed", conclusion: "failure", error }
   }
