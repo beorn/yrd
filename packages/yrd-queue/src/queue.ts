@@ -7413,9 +7413,14 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     // rebuild.
     "carrier-pin-already-landed",
     "composition-invalid",
-    // Both read the branch's authored delta base, and both are cured the same
-    // way `gitlink-inspection` is: the author restores readable history.
+    // All three read the branch's authored delta base, and all are cured the
+    // same way `gitlink-inspection` is: the author restores readable history.
+    "contribution-inspection",
     "deletion-inspection",
+    // The merge kept only one parent's version of a contested file. The remedy
+    // is `carrier-drops-landed`'s linear rebuild, which makes the resolution a
+    // reviewable diff instead of one resolved against a virtual base.
+    "dropped-parent-contribution",
     "gitlink-inspection",
     "merge-tip-carrier",
     "refused-path",
