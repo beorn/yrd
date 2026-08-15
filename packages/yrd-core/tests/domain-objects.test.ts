@@ -227,12 +227,13 @@ describe("Yrd domain objects", () => {
     throw new Error("expected invalid journal event reader to fail")
   })
 
-  it("freezes the event schema and minimum reader as one definition", () => {
+  it("freezes the event schema, minimum reader, and field vocabulary as one definition", () => {
     const schema = z.object({}).strict()
     const definition = journalEvent(2, schema)
     expect(definition).toEqual({
       reader: 2,
       schema,
+      fields: {},
     })
     expect(Object.isFrozen(definition)).toBe(true)
   })

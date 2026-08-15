@@ -2191,7 +2191,7 @@ function createQueue<Shape extends PRShape>(
   return Object.freeze({
     state,
     steps: () => steps.map(descriptor),
-    admissionOrder: () => requestedPRs(runtime().bays, {}).map((pr) => pr.id),
+    admissionOrder: () => admissionOrderPRs(runtime().bays).map((pr) => pr.id),
     async reconcileLanding(args) {
       await actions.reconcileLanding(args)
     },
@@ -6829,6 +6829,31 @@ function queueProgressTime(pr: DeepReadonly<PR>): string {
   return checkRequest(pr)?.at ?? prSourceReadyAt(pr)
 }
 
+/**
+ * The one published queue order, and the only thing `position` may be derived
+ * from. It ranks by check-request time exactly as `admissionQueue` does, so the
+ * number a PR reads predicts the order admission actually runs in rather than
+ * restating submit order, which admission has not followed since check requests
+ * became the thing it consumes.
+ *
+ * Membership stays broader than `admissionQueue`: every PR the queue holds gets
+ * a position, including the ones a pause or a settled admission currently keeps
+ * out of the next pass. A position is where you stand in the queue, not a claim
+ * that the next pass will take you.
+ */
+function admissionOrderPRs(bays: DeepReadonly<BaysState>): PR[] {
+  return requestedPRs(bays, {}).toSorted(
+    (left, right) =>
+      queueProgressTime(left).localeCompare(queueProgressTime(right)) || compareNatural(left.id, right.id),
+  )
+}
+
+/** This PR's one-based place in the published queue order; absent when it holds none. */
+function admissionPosition(bays: DeepReadonly<BaysState>, pr: string): number | undefined {
+  const index = admissionOrderPRs(bays).findIndex((candidate) => candidate.id === pr)
+  return index < 0 ? undefined : index + 1
+}
+
 function refusedRevisionAdmissions(state: DeepReadonly<RuntimeState>): PR[] {
   return Object.values(state.bays.prs)
     .filter((pr) => prDeliveryState(pr) === "needs-author" && prAdmission(pr)?.status === "refused")
@@ -7017,9 +7042,11 @@ function checkEligibility(
   if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready") {
     return { status: "not-requested", ...timing }
   }
-  const queued = admissionQueue(state, steps)
-  const position = queued.findIndex((candidate) => candidate.id === pr.id)
-  return { status: "queued", ...timing, ...(position < 0 ? {} : { position: position + 1 }) }
+  // One derivation, shared with `admissionOrder()`. Ranking the admission queue
+  // separately here is what let a single response report two positions for one
+  // PR — the two lists neither hold the same members nor rank them the same way.
+  const position = admissionPosition(state.bays, pr.id)
+  return { status: "queued", ...timing, ...(position === undefined ? {} : { position }) }
 }
 
 function objectValue(value: unknown): Record<string, unknown> | undefined {
