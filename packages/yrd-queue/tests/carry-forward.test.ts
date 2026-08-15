@@ -251,10 +251,27 @@ describe("carry-forward", () => {
     expect(disabled?.reason).toContain("failed")
     expect(disabled?.fromBaseSha).not.toBe(disabled?.toBaseSha)
 
-    // The loop is closed: what the merge step reads at RUN time now carries the
-    // persisted switch, which is what makes every later attempt refuse with
-    // leg "kill-switch" (proved directly in the kill-switch test below).
+    // The loop is closed end to end: what the merge step reads at RUN time now
+    // carries the persisted switch...
     expect(readPolicy().disabledBy).toMatchObject({ run: "R2" })
+
+    // ...and the next carry-forward attempt refuses naming it. Getting there
+    // needs the poison gone (so a check can pass again) and a new revision (a
+    // failed required check blocks the member until one is pushed).
+    await rm(join(repo, "poison.txt"))
+    await git(repo, ["add", "poison.txt"])
+    await git(repo, ["commit", "-qm", "remove the poison"])
+    await git(repo, ["switch", "-q", "issue/feature"])
+    await writeFile(join(repo, "feature.txt"), "feature v2\n")
+    await git(repo, ["commit", "-qam", "feature v2"])
+    const nextHead = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "main"])
+    await app.bays.intake({ branch: "issue/feature", headSha: nextHead, base: "main" })
+    await app.bays.submit({ pr: "PR1" })
+
+    const third = (await again())[0]!
+    expect(third).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "stale-check" } })
+    expect(third.error?.message).toContain("carry-forward refused (kill-switch)")
 
     // And it is LOUD on the audit banner an operator actually reads.
     const finding = app.queue.audit().findings.find((entry) => entry.code === "carry-forward-disabled")
