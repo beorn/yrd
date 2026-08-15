@@ -213,7 +213,9 @@ async function candidatePackageRepository(
   return { repo, featureSha }
 }
 
-async function manifestChangingPinRepository(options: Readonly<{ manifestChange?: boolean }> = {}): Promise<{
+async function manifestChangingPinRepository(
+  options: Readonly<{ lockVersion?: "1.0.0" | "2.0.0"; manifestChange?: boolean }> = {},
+): Promise<{
   repo: string
   baseSha: string
   provisionalCandidateSha: string
@@ -234,7 +236,7 @@ async function manifestChangingPinRepository(options: Readonly<{ manifestChange?
     join(repo, "package.json"),
     `${JSON.stringify({ private: true, dependencies: { fixture: "1.0.0" } })}\n`,
   )
-  await writeFile(join(repo, "bun.lock"), '{"fixture":"1.0.0"}\n')
+  await writeFile(join(repo, "bun.lock"), `${JSON.stringify({ fixture: options.lockVersion ?? "1.0.0" })}\n`)
   await git(repo, "add", ".gitmodules", "dep", "package.json", "bun.lock")
   await git(repo, "commit", "-qm", "pin dependency base")
   const baseSha = await git(repo, "rev-parse", "HEAD")
@@ -865,6 +867,43 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       changedSubmoduleManifests: ["dep/package.json"],
       lockfileChanged: true,
     })
+  })
+
+  it("keeps a manifest-changing pin gitlink-only when the existing lockfile is already truthful", async () => {
+    const { repo, baseSha, provisionalCandidateSha } = await manifestChangingPinRepository({
+      lockVersion: "2.0.0",
+    })
+    const requests: string[][] = []
+    await using runtimeProcess = createProcess({ cwd: repo })
+    const process = {
+      run(request: ProcessRequest): Promise<ProcessResult> {
+        requests.push([...request.argv])
+        if (request.argv[0] !== "bun") return runtimeProcess.run(request)
+        return Promise.resolve({
+          exitCode: 0,
+          signal: null,
+          stdout: "",
+          stderr: "",
+          durationMs: 1,
+          timedOut: false,
+        })
+      },
+    } satisfies Pick<Process, "run">
+    const before = await readFile(join(repo, "bun.lock"), "utf8")
+    const provision = createPinIntentProvisioner({
+      process,
+      repo,
+      artifactRoot: join(repo, ".git", "yrd", "artifacts"),
+      materializeSubmodules: () => Promise.resolve(),
+    })
+
+    await expect(provision({ path: repo, baseSha, provisionalCandidateSha, component: "dep" })).resolves.toEqual({
+      generatedPaths: [],
+    })
+    expect(requests.filter((argv) => argv[0] === "bun")).toEqual([
+      ["bun", "install", "--frozen-lockfile", "--ignore-scripts"],
+    ])
+    await expect(readFile(join(repo, "bun.lock"), "utf8")).resolves.toBe(before)
   })
 
   it("leaves the lockfile untouched when a pin changes no dependency manifest", async () => {
