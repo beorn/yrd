@@ -496,6 +496,33 @@ describe("pin-intent admission (22668 phase 1)", () => {
     expect(verdict.relation).toBe("advance")
   })
 
+  it("refuses merge-time target derivation when its publication refresh failed", async () => {
+    const { repo, component } = await fixture()
+    const staleTip = await publish(component, "stale-trunk-line")
+    await git(checkoutOf(repo), "fetch", "--quiet", "origin")
+    expect(await git(checkoutOf(repo), "rev-parse", "refs/remotes/origin/main")).toBe(staleTip)
+
+    const currentTip = await publish(component, "current-trunk-line")
+    await breakFetchRefs(repo)
+
+    const verdict = await admitPinIntent({
+      process,
+      repo,
+      base: "main",
+      component: "components/alpha",
+      issue: ISSUE,
+      deriveTarget: true,
+    })
+
+    expect(currentTip).not.toBe(staleTip)
+    expect(verdict.admitted).toBe(false)
+    if (verdict.admitted) throw new Error(`stale merge-time target was admitted: ${verdict.target}`)
+    expect(verdict.code).toBe("intent-target-unpublished")
+    expect(verdict.message).toContain("merge-time target")
+    expect(verdict.message).toContain("fetch FAILED")
+    expect(verdict.message).toContain("stale local remote-tracking refs were not used")
+  })
+
   it("refuses an off-trunk target at merge time, where evaluation is the authority", async () => {
     const { repo, component, basePin } = await fixture()
     const target = await publishSideline(component, "sideline", basePin)

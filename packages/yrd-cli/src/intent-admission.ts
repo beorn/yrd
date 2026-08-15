@@ -89,6 +89,22 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
     fetched,
     lastFetchAt: await lastFetchAt(options.process, componentRepo),
   }
+  if (options.deriveTarget === true && !fetched.ok) {
+    return {
+      admitted: false,
+      code: "intent-target-unpublished",
+      message:
+        `yrd: could not evaluate the merge-time target for '${options.component}' because its published-branch ` +
+        `refresh failed; stale local remote-tracking refs were not used. ${scopeSentence(scope)}`,
+      evidence: {
+        component: options.component,
+        currentPin,
+        ...(options.target === undefined ? {} : { target: options.target }),
+        ...scopeEvidence(scope),
+      },
+      remedy: [retryStep(options.component, options.target, options.issue)],
+    }
+  }
   /**
    * The component's trunk tip, read from the remote-tracking ref the fetch
    * above just refreshed — the same snapshot the derived target comes from, so
