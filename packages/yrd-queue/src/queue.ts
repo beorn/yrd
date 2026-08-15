@@ -1581,13 +1581,13 @@ function createQueue<Shape extends PRShape>(
       if (prepared.sha === undefined || prepared.ref === undefined) {
         throw new Error(`yrd: mergeable Candidate '${input.id}' requires a synthetic SHA and ref`)
       }
-        // 22332: the ref is content-addressed, so this checks that the published
-        // name states the evidence it carries — not that it matches an id chosen
-        // before the evidence existed.
-        if (prepared.ref !== candidateRefFor(prepared.sha)) {
-          throw new Error(
-            `yrd: Candidate '${input.id}' must publish ${candidateRefFor(prepared.sha)}, not '${prepared.ref}'`,
-          )
+      // 22332: the ref is content-addressed, so this checks that the published
+      // name states the evidence it carries — not that it matches an id chosen
+      // before the evidence existed.
+      if (prepared.ref !== candidateRefFor(prepared.sha)) {
+        throw new Error(
+          `yrd: Candidate '${input.id}' must publish ${candidateRefFor(prepared.sha)}, not '${prepared.ref}'`,
+        )
       }
     }
     return prepared
@@ -6177,10 +6177,11 @@ function auditQueues(
  * reliably observe nothing at all. A resident draining every 30s and an audit
  * running every few minutes never overlap.
  *
- * The parked shape clears when its (issue, component) key has an open
- * successor — the owner resubmitted — or when the owner withdraws the parked
- * record. Those are the two acts that finish the work, and each is one command
- * printed in the finding's own resolution.
+ * The parked shape clears when its (issue, component) key has a later open or
+ * successful successor — the owner resubmitted and that replacement may
+ * already have integrated — or when the owner withdraws the parked record.
+ * Those are the two acts that finish the work, and each is one command printed
+ * in the finding's own resolution.
  */
 function intentLaneAuditFindings(state: DeepReadonly<RuntimeState>): QueueAuditFindingEmission[] {
   const intents = state.intents
@@ -6209,7 +6210,7 @@ function intentLaneAuditFindings(state: DeepReadonly<RuntimeState>): QueueAuditF
   for (const id of intents.order) {
     const record = intents.records[id]
     if (record?.status !== "parked" || record.parked === undefined) continue
-    if (openIntentForKey(intents, record) !== undefined) continue
+    if (replacementIntentForKey(intents, record) !== undefined) continue
     findings.push({
       code: "intent-lane-stalled",
       message:
@@ -6228,15 +6229,26 @@ function intentLaneAuditFindings(state: DeepReadonly<RuntimeState>): QueueAuditF
   return findings
 }
 
-/** The open record holding this record's (issue, component) key, if any. */
-function openIntentForKey(
+/** A later open or successful record holding this record's key, if any. */
+function replacementIntentForKey(
   intents: DeepReadonly<IntentsState>,
   record: DeepReadonly<PinIntent>,
 ): DeepReadonly<PinIntent> | undefined {
   const key = intentKey(record.issue as PinIntent["issue"], record.component)
+  let afterRecord = false
   for (const id of intents.order) {
+    if (id === record.id) {
+      afterRecord = true
+      continue
+    }
+    if (!afterRecord) continue
     const candidate = intents.records[id]
-    if (candidate === undefined || candidate.status !== "open") continue
+    if (
+      candidate === undefined ||
+      (candidate.status !== "open" && candidate.status !== "integrated" && candidate.status !== "noop")
+    ) {
+      continue
+    }
     if (intentKey(candidate.issue as PinIntent["issue"], candidate.component) === key) return candidate
   }
   return undefined
