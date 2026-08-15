@@ -92,7 +92,7 @@ describe("queue batch policy", () => {
   })
 
   it("keeps the built-in default explicit", () => {
-    expect(DEFAULT_QUEUE_BATCH_SIZE).toBe(10)
+    expect(DEFAULT_QUEUE_BATCH_SIZE).toBe(1)
   })
 })
 

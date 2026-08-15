@@ -568,7 +568,7 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
 }>
 
 /** Built-in candidate width when a repository does not declare `batch`. */
-export const DEFAULT_QUEUE_BATCH_SIZE = 10
+export const DEFAULT_QUEUE_BATCH_SIZE = 1
 
 /** Resolve the configured batching vocabulary to the width Queue executes. */
 function effectiveBatchSize(config: BatchConfig | undefined = DEFAULT_QUEUE_BATCH_SIZE): number {
