@@ -5614,6 +5614,39 @@ function activeQueueFailure(
   return current.attempt > failure.job.attempt || !jobFailed(current) ? undefined : failure
 }
 
+/**
+ * Where a step Job says it sits: the three `StepExecution` fields `queueJobs`
+ * cross-checks against the run's own step plan.
+ *
+ * The Job layer owns validating `job.input`. `withStep` and `withMerge` declare
+ * `input: StepExecutionSchema` on the Job definition, and `yrd-job` parses the
+ * input against that schema when the request is recorded and again when it is
+ * replayed — so by the time a projection reader sees `job.input`, the schema has
+ * already had its say. Re-parsing it here validated nothing new and cost the
+ * most: the strict parse walks `prs` and the arbitrarily deep `shape` blob for
+ * every job, and `queueJobs` runs once per CALLER per run rather than once per
+ * run. Measured on the live hh projection (1,192 retained runs), one
+ * `yrd queue list` paid 16,478 of these parses.
+ *
+ * Reading only the placement fields keeps the cross-check below exact while
+ * making its cost independent of how large a shape the step carries. A
+ * malformed input still fails loud here rather than reaching the comparison as
+ * `undefined` and quietly matching nothing.
+ */
+function stepExecutionPlacement(input: unknown, job: string): Pick<StepExecution, "run" | "index" | "step"> {
+  if (
+    input === null ||
+    typeof input !== "object" ||
+    Array.isArray(input) ||
+    typeof (input as Record<string, unknown>).run !== "string" ||
+    typeof (input as Record<string, unknown>).step !== "string" ||
+    typeof (input as Record<string, unknown>).index !== "number"
+  ) {
+    throw new Error(`yrd: job '${job}' input is not a step execution`)
+  }
+  return input as Pick<StepExecution, "run" | "index" | "step">
+}
+
 function queueJobs(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<JobsState>): Job[] {
   const result: Job[] = []
   let missing = false
@@ -5626,7 +5659,7 @@ function queueJobs(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<JobsSta
     if (missing) throw new Error(`yrd: queue run '${record.id}' requested steps out of order`)
     const job = jobs.byId[id]
     if (job === undefined) throw new Error(`yrd: queue run '${record.id}' lost job '${id}'`)
-    const input = StepExecutionSchema.parse(job.input)
+    const input = stepExecutionPlacement(job.input, job.id)
     if (
       input.run !== record.id ||
       input.index !== index ||
