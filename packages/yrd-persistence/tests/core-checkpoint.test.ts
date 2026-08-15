@@ -14,6 +14,7 @@ import {
   createYrd,
   createYrdDef,
   event,
+  failureFact,
   journalEvent,
   parseJournalFrame,
   type CommandTree,
@@ -187,9 +188,11 @@ function nestedDefinition() {
 function indexedCheckpointJournal(): Readonly<{
   journal: Journal<unknown>
   checkpoint(): JournalCheckpoint | undefined
+  setEvictedThrough(cursor: number): void
 }> {
   const values: JournalFrame[] = []
   let stored: JournalCheckpoint | undefined
+  let evictedThrough = 0
   const journal: Journal<unknown> = {
     async *read(after = 0, before = values.length) {
       const end = Math.min(before, values.length)
@@ -203,6 +206,9 @@ function indexedCheckpointJournal(): Readonly<{
     checkpoint: {
       load(identity) {
         return Promise.resolve(stored?.identity === identity ? structuredClone(stored) : undefined)
+      },
+      inspect() {
+        return Promise.resolve(stored === undefined ? undefined : structuredClone(stored))
       },
       save(checkpoint) {
         stored = structuredClone(checkpoint)
@@ -231,12 +237,18 @@ function indexedCheckpointJournal(): Readonly<{
         autoVacuum: "incremental",
         historyFrames: 0,
         tailFrames: values.length,
-        evictedThrough: 0,
+        evictedThrough,
         archiveFallbacks: 0,
       }),
     },
   }
-  return { journal, checkpoint: () => (stored === undefined ? undefined : structuredClone(stored)) }
+  return {
+    journal,
+    checkpoint: () => (stored === undefined ? undefined : structuredClone(stored)),
+    setEvictedThrough: (cursor) => {
+      evictedThrough = cursor
+    },
+  }
 }
 
 describe("persistent Core projection checkpoint", () => {
@@ -253,6 +265,40 @@ describe("persistent Core projection checkpoint", () => {
     await expect(journal.checkpoint?.load("0".repeat(64))).resolves.toBeUndefined()
     expect(journal.checkpoint?.inspect).toBeTypeOf("function")
     await expect(journal.checkpoint?.inspect?.()).resolves.toEqual(expected)
+  })
+
+  it("names both checkpoint identities before an evicted prefix makes cold replay impossible", async () => {
+    const retained = indexedCheckpointJournal()
+    const writer = await createYrd(counterDefinition(), { inject: { journal: retained.journal, id: ids() } })
+    await writer.dispatch({ op: "counter.add", args: { by: 2 } })
+    await writer.close()
+    const stored = retained.checkpoint()
+    if (stored === undefined) throw new Error("expected the stored checkpoint")
+    retained.setEvictedThrough(49)
+
+    const target = indexedCheckpointJournal()
+    const targetWriter = await createYrd(counterDefinition(1), { inject: { journal: target.journal, id: ids() } })
+    await targetWriter.dispatch({ op: "counter.add", args: { by: 2 } })
+    await targetWriter.close()
+    const computed = target.checkpoint()
+    if (computed === undefined) throw new Error("expected the computed checkpoint")
+    await expect(retained.journal.checkpoint?.inspect?.()).resolves.toEqual(stored)
+    expect(retained.journal.history?.diagnostics().evictedThrough).toBe(49)
+
+    let caught: unknown
+    try {
+      await createYrd(counterDefinition(1), { inject: { journal: retained.journal, id: ids() } })
+    } catch (error) {
+      caught = error
+    }
+
+    expect(failureFact(caught)).toEqual({
+      kind: "configuration",
+      code: "checkpoint-identity-mismatch",
+      message:
+        `yrd: stored checkpoint identity '${stored.identity}' does not match computed projection identity ` +
+        `'${computed.identity}'; history through cursor 49 was evicted under the stored checkpoint's authority`,
+    })
   })
 
   it("disables contribution eviction when a custom Journal has no history capability", async () => {

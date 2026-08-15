@@ -805,15 +805,24 @@ export async function createYrd<State extends object, Commands extends CommandTr
     let migrationSource = false
     try {
       checkpoint = await checkpointStore.load(checkpointIdentity)
-      if (
-        checkpoint === undefined &&
-        checkpointStore.inspect !== undefined &&
-        definition[checkpointMigrations].length > 0
-      ) {
+      if (checkpoint === undefined && checkpointStore.inspect !== undefined) {
         const predecessor = await checkpointStore.inspect()
         if (predecessor !== undefined && predecessor.identity !== checkpointIdentity) {
-          migrationSource = true
-          checkpoint = migrateProjectionCheckpoint(definition, predecessor, checkpointIdentity)
+          if (definition[checkpointMigrations].length > 0) {
+            migrationSource = true
+            checkpoint = migrateProjectionCheckpoint(definition, predecessor, checkpointIdentity)
+          } else {
+            const evictedThrough = history?.diagnostics().evictedThrough ?? 0
+            if (evictedThrough > 0) {
+              raiseFailure(
+                "configuration",
+                "checkpoint-identity-mismatch",
+                `yrd: stored checkpoint identity '${predecessor.identity}' does not match computed projection identity ` +
+                  `'${checkpointIdentity}'; history through cursor ${evictedThrough} was evicted under the stored ` +
+                  "checkpoint's authority",
+              )
+            }
+          }
         }
       }
       if (checkpoint === undefined) return undefined
@@ -824,6 +833,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
       checkpointCursor = migrationSource ? undefined : checkpoint.cursor
       return restored
     } catch (error) {
+      if (failureFact(error)?.code === "checkpoint-identity-mismatch") throw error
       if (migrationSource) {
         if (failureFact(error) !== undefined) throw error
         raiseFailure(
