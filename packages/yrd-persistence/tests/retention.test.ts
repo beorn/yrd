@@ -110,13 +110,22 @@ async function workload(
  * so a small-journal test of the default reads as a guard and guards nothing.
  */
 describe("retention arming contract", () => {
-  const saved = { frames: process.env.YRD_JOURNAL_KEEP_FRAMES, days: process.env.YRD_JOURNAL_KEEP_DAYS }
+  const saved = {
+    frames: process.env.YRD_JOURNAL_KEEP_FRAMES,
+    days: process.env.YRD_JOURNAL_KEEP_DAYS,
+    retention: process.env.YRD_JOURNAL_RETENTION,
+  }
 
-  function withEnv<Result>(env: Readonly<{ frames?: string; days?: string }>, operation: () => Result): Result {
+  function withEnv<Result>(
+    env: Readonly<{ frames?: string; days?: string; retention?: string }>,
+    operation: () => Result,
+  ): Result {
     if (env.frames === undefined) delete process.env.YRD_JOURNAL_KEEP_FRAMES
     else process.env.YRD_JOURNAL_KEEP_FRAMES = env.frames
     if (env.days === undefined) delete process.env.YRD_JOURNAL_KEEP_DAYS
     else process.env.YRD_JOURNAL_KEEP_DAYS = env.days
+    if (env.retention === undefined) delete process.env.YRD_JOURNAL_RETENTION
+    else process.env.YRD_JOURNAL_RETENTION = env.retention
     try {
       return operation()
     } finally {
@@ -124,15 +133,27 @@ describe("retention arming contract", () => {
       else process.env.YRD_JOURNAL_KEEP_FRAMES = saved.frames
       if (saved.days === undefined) delete process.env.YRD_JOURNAL_KEEP_DAYS
       else process.env.YRD_JOURNAL_KEEP_DAYS = saved.days
+      if (saved.retention === undefined) delete process.env.YRD_JOURNAL_RETENTION
+      else process.env.YRD_JOURNAL_RETENTION = saved.retention
     }
   }
 
-  it("stays disabled when nothing asks for it", () => {
-    expect(withEnv({}, () => resolveRetention(undefined))).toBe("disabled")
+  it("arms the default frame window when nothing configures it", () => {
+    // The contract the readers were taught for. An unconfigured journal is the
+    // live one, so a default of "disabled" here means the bead's defect stays
+    // open in production no matter what the window can do.
+    expect(withEnv({}, () => resolveRetention(undefined))).toEqual({ keepFrames: 20_000 })
   })
 
   it("stays disabled when a caller asks for it explicitly", () => {
     expect(withEnv({ frames: "500" }, () => resolveRetention("disabled"))).toBe("disabled")
+  })
+
+  it("stays disabled when the operator turns it off from the environment", () => {
+    // The off switch a default-on window needs: an explicit config still wins,
+    // so one journal can keep its window while the fleet's default is off.
+    expect(withEnv({ retention: "disabled" }, () => resolveRetention(undefined))).toBe("disabled")
+    expect(withEnv({ retention: "disabled" }, () => resolveRetention({ keepFrames: 500 }))).toEqual({ keepFrames: 500 })
   })
 
   it("arms on an explicit config, and keeps the age window off unless asked", () => {
@@ -166,26 +187,33 @@ describe("retention arming contract", () => {
 })
 
 describe("journal retention window", () => {
-  it("evicts nothing until someone asks for a window", async () => {
-    // The opt-in default is what makes this safe to land ahead of the
-    // floor-aware readers: every cursor-0 replay still resolves, because an
-    // unconfigured journal never drops a frame.
+  it("leaves a journal smaller than the default window entirely alone", async () => {
+    // The default window is armed (`retention arming contract` pins that), so
+    // what this shows is its SIZE: 20,000 frames is far above any journal a
+    // reader could replay quickly anyway, so ordinary use never meets an
+    // eviction floor at all. A default that quietly shrank would evict from
+    // journals this small and be caught here.
     const keepFrames = process.env.YRD_JOURNAL_KEEP_FRAMES
     const keepDays = process.env.YRD_JOURNAL_KEEP_DAYS
+    // The off switch has to go too, or an ambient one would make this pass by
+    // disarming retention rather than by out-sizing it.
+    const off = process.env.YRD_JOURNAL_RETENTION
     delete process.env.YRD_JOURNAL_KEEP_FRAMES
     delete process.env.YRD_JOURNAL_KEEP_DAYS
+    delete process.env.YRD_JOURNAL_RETENTION
     try {
-      const frames = Array.from({ length: 120 }, (_, index) => frame(`optin-${String(index)}`))
+      const frames = Array.from({ length: 120 }, (_, index) => frame(`default-window-${String(index)}`))
       const dir = await directory()
       const journal = testJournal(dir)
       const head = await appendAll(journal, frames)
-      await journal.checkpoint?.save?.({ identity: "optin", cursor: head, value: {} })
+      await journal.checkpoint?.save?.({ identity: "default-window", cursor: head, value: {} })
 
       expect(stats(dir)).toMatchObject({ history: 120, evictedThrough: 0 })
       expect((await drainCursors(journal, 0)).at(-1)).toBe(120)
     } finally {
       if (keepFrames !== undefined) process.env.YRD_JOURNAL_KEEP_FRAMES = keepFrames
       if (keepDays !== undefined) process.env.YRD_JOURNAL_KEEP_DAYS = keepDays
+      if (off !== undefined) process.env.YRD_JOURNAL_RETENTION = off
     }
   })
 

@@ -337,22 +337,16 @@ function context(options: JournalOptions): Context {
 }
 
 /**
- * Exported for tests: the opt-in default is what lets this land ahead of the
- * floor-aware readers, and the window that would prove it through a journal is
- * larger than any fixture worth writing, so the contract is pinned here.
+ * Exported for tests: the default window is 20,000 frames, and proving that
+ * through a journal would need a fixture larger than any worth writing, so the
+ * contract is pinned here instead.
  */
 export function resolveRetention(configured: JournalRetention | undefined): ResolvedRetention {
   if (configured === "disabled") return "disabled"
-  // Opt-in until the cursor-0 readers are floor-aware: an unconfigured journal
-  // evicts nothing, so landing this cannot break a reader that has not been
-  // taught where history now begins.
-  if (
-    configured === undefined &&
-    process.env.YRD_JOURNAL_KEEP_FRAMES === undefined &&
-    process.env.YRD_JOURNAL_KEEP_DAYS === undefined
-  ) {
-    return "disabled"
-  }
+  // The operator's off switch. It matters because the window is on by default:
+  // turning retention off must not require editing a config a running fleet
+  // shares.
+  if (process.env.YRD_JOURNAL_RETENTION?.trim() === "disabled" && configured === undefined) return "disabled"
   const keepDays = retentionBound("keepDays", configured?.keepDays, "YRD_JOURNAL_KEEP_DAYS", undefined)
   return {
     keepFrames: retentionBound("keepFrames", configured?.keepFrames, "YRD_JOURNAL_KEEP_FRAMES", DEFAULT_KEEP_FRAMES),
