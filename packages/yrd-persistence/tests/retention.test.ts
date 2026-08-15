@@ -1,5 +1,5 @@
 /**
- * @failure Journal history grows without bound, or an eviction window silently truncates a reader's replay or an entity's frame slice.
+ * @failure An unconfigured journal deletes history nobody asked it to delete, or a configured window silently truncates a reader's replay or an entity's frame slice.
  * @level l1
  * @consumer @yrd/persistence retention window
  */
@@ -61,14 +61,30 @@ function testJournal(dir: string, options: Partial<JournalOptions> = {}, log?: R
   } as unknown as Parameters<typeof createJournal>[0])
 }
 
-function stats(dir: string): Readonly<{ pages: number; history: number; evictedThrough: number }> {
+function stats(
+  dir: string,
+): Readonly<{ pages: number; history: number; evictedThrough: number; evictedThroughRow: string | null }> {
   using database = new Database(join(dir, "journal.sqlite"), { readonly: true, strict: true })
   const pages = database.query<{ page_count: number }, []>("PRAGMA page_count").get()?.page_count ?? 0
   const history = database.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM journal_history").get()?.n ?? 0
   const evicted = database
     .query<{ value: string }, [string]>("SELECT value FROM journal_metadata WHERE key = ?")
     .get("history_evicted_through")
-  return { pages, history, evictedThrough: evicted === null ? 0 : Number(evicted.value) }
+  return {
+    pages,
+    history,
+    evictedThrough: evicted === null ? 0 : Number(evicted.value),
+    evictedThroughRow: evicted === null ? null : evicted.value,
+  }
+}
+
+/** Every cursor history holds, so "nothing was deleted" can be checked as a span rather than a count. */
+function historyCursors(dir: string): number[] {
+  using database = new Database(join(dir, "journal.sqlite"), { readonly: true, strict: true })
+  return database
+    .query<{ cursor: number }, []>("SELECT cursor FROM journal_history ORDER BY cursor")
+    .all()
+    .map((row) => row.cursor)
 }
 
 async function appendAll(journal: Journal<unknown>, frames: readonly ReturnType<typeof frame>[]): Promise<number> {
@@ -106,8 +122,8 @@ async function workload(
 
 /**
  * Pins the arming contract directly. The journal-level tests below cannot reach
- * it: proving the DEFAULT window on or off needs a fixture past 20,000 frames,
- * so a small-journal test of the default reads as a guard and guards nothing.
+ * every case: proving what an ARMED default-sized window does needs a fixture
+ * past 20,000 frames, which lives in `retention-unconfigured.slow.test.ts`.
  */
 describe("retention arming contract", () => {
   const saved = {
@@ -138,11 +154,23 @@ describe("retention arming contract", () => {
     }
   }
 
-  it("arms the default frame window when nothing configures it", () => {
-    // The contract the readers were taught for. An unconfigured journal is the
-    // live one, so a default of "disabled" here means the bead's defect stays
-    // open in production no matter what the window can do.
-    expect(withEnv({}, () => resolveRetention(undefined))).toEqual({ keepFrames: 20_000 })
+  it("stays disabled when nothing configures it", () => {
+    // The fail-safe, and the whole point of the knob. An unconfigured journal is
+    // the live one, so anything but "disabled" here means the fleet is evicting
+    // its own replay prefix again — which is how delivery stopped once already,
+    // when an identity change demanded a replay from 0 and the prefix was gone.
+    expect(withEnv({}, () => resolveRetention(undefined))).toBe("disabled")
+  })
+
+  it("stays disabled for a retention object that names no window", () => {
+    // `{}` asks for retention without asking for a bound. Reading that as the
+    // companion frame cap would arm eviction on a caller who named nothing.
+    expect(withEnv({}, () => resolveRetention({}))).toBe("disabled")
+  })
+
+  it("stays disabled when an environment knob is present but empty", () => {
+    expect(withEnv({ frames: "" }, () => resolveRetention(undefined))).toBe("disabled")
+    expect(withEnv({ days: "  " }, () => resolveRetention(undefined))).toBe("disabled")
   })
 
   it("stays disabled when a caller asks for it explicitly", () => {
@@ -150,9 +178,11 @@ describe("retention arming contract", () => {
   })
 
   it("stays disabled when the operator turns it off from the environment", () => {
-    // The off switch a default-on window needs: an explicit config still wins,
-    // so one journal can keep its window while the fleet's default is off.
     expect(withEnv({ retention: "disabled" }, () => resolveRetention(undefined))).toBe("disabled")
+    // Its remaining job now that unset already means off: disarming a window
+    // the environment armed, without editing the environment a fleet shares.
+    expect(withEnv({ retention: "disabled", frames: "500" }, () => resolveRetention(undefined))).toBe("disabled")
+    // An explicit config still wins, so one journal can keep its window.
     expect(withEnv({ retention: "disabled" }, () => resolveRetention({ keepFrames: 500 }))).toEqual({ keepFrames: 500 })
   })
 
@@ -164,10 +194,12 @@ describe("retention arming contract", () => {
     })
   })
 
-  it("arms on either environment knob alone, defaulting the one left unset", () => {
+  it("arms on either environment knob alone, filling in the axis left unset", () => {
     expect(withEnv({ frames: "500" }, () => resolveRetention(undefined))).toEqual({ keepFrames: 500 })
-    // keepDays alone still arms, and keepFrames falls back to its default.
+    // keepDays alone still arms; the frame axis takes the companion cap, since
+    // naming one window means the operator asked for a bounded journal.
     expect(withEnv({ days: "7" }, () => resolveRetention(undefined))).toEqual({ keepFrames: 20_000, keepDays: 7 })
+    expect(withEnv({}, () => resolveRetention({ keepDays: 7 }))).toEqual({ keepFrames: 20_000, keepDays: 7 })
   })
 
   it("prefers an explicit config over the environment", () => {
@@ -187,28 +219,35 @@ describe("retention arming contract", () => {
 })
 
 describe("journal retention window", () => {
-  it("leaves a journal smaller than the default window entirely alone", async () => {
-    // The default window is armed (`retention arming contract` pins that), so
-    // what this shows is its SIZE: 20,000 frames is far above any journal a
-    // reader could replay quickly anyway, so ordinary use never meets an
-    // eviction floor at all. A default that quietly shrank would evict from
-    // journals this small and be caught here.
+  it("deletes nothing from an unconfigured journal, and never records an eviction floor", async () => {
+    // Retention is off unless armed, so repeated checkpoints leave the whole
+    // 1..head span intact and `history_evicted_through` is never written at all
+    // — absent, not merely zero, which is what a full replay from 0 needs.
+    //
+    // This size is affordable for the fast suite but cannot discriminate the
+    // default's VALUE on its own: 120 frames also survive a 20,000-frame
+    // window. `retention-unconfigured.slow.test.ts` carries the fixture past
+    // 20,000 that does discriminate it; the arming contract above pins it
+    // directly and cheaply.
     const keepFrames = process.env.YRD_JOURNAL_KEEP_FRAMES
     const keepDays = process.env.YRD_JOURNAL_KEEP_DAYS
     // The off switch has to go too, or an ambient one would make this pass by
-    // disarming retention rather than by out-sizing it.
+    // disarming retention explicitly rather than by leaving it unarmed.
     const off = process.env.YRD_JOURNAL_RETENTION
     delete process.env.YRD_JOURNAL_KEEP_FRAMES
     delete process.env.YRD_JOURNAL_KEEP_DAYS
     delete process.env.YRD_JOURNAL_RETENTION
     try {
-      const frames = Array.from({ length: 120 }, (_, index) => frame(`default-window-${String(index)}`))
+      const frames = Array.from({ length: 120 }, (_, index) => frame(`unconfigured-${String(index)}`))
       const dir = await directory()
       const journal = testJournal(dir)
       const head = await appendAll(journal, frames)
-      await journal.checkpoint?.save?.({ identity: "default-window", cursor: head, value: {} })
+      for (let round = 0; round < 4; round += 1) {
+        await journal.checkpoint?.save?.({ identity: `unconfigured-${String(round)}`, cursor: head, value: { round } })
+      }
 
-      expect(stats(dir)).toMatchObject({ history: 120, evictedThrough: 0 })
+      expect(stats(dir)).toMatchObject({ history: 120, evictedThroughRow: null })
+      expect(historyCursors(dir)).toEqual(Array.from({ length: head }, (_, index) => index + 1))
       expect((await drainCursors(journal, 0)).at(-1)).toBe(120)
     } finally {
       if (keepFrames !== undefined) process.env.YRD_JOURNAL_KEEP_FRAMES = keepFrames

@@ -74,14 +74,16 @@ const JOURNAL_VIEWS_GENERATION = "journal_views_generation"
 const JOURNAL_VERSION_FLOOR = "journal_version_floor"
 const HISTORY_EVICTED_THROUGH = "history_evicted_through"
 /**
- * Sized against the live hh journal: ~1.9 KB per frame and ~3.2k frames a day,
- * so this window holds roughly six days and about 37 MB of history.
+ * The frame cap used when retention is armed by `keepDays` alone. Sized against
+ * the live hh journal: ~1.9 KB per frame and ~3.2k frames a day, so it holds
+ * roughly six days and about 37 MB of history.
  *
- * The age window is off unless an operator sets it. It is the wrong default:
- * on a busy journal the frame cap always binds first, and on a quiet one age
- * eviction reclaims nothing while still shortening how far a reader can replay.
+ * It is NOT a default: an unconfigured journal evicts nothing at all
+ * (`resolveRetention`). Naming an age window still leaves the frame axis
+ * unspecified, and one armed axis means the operator asked for a bounded
+ * journal, so this is what that axis resolves to.
  */
-const DEFAULT_KEEP_FRAMES = 20_000
+const RETENTION_COMPANION_KEEP_FRAMES = 20_000
 const LEGACY_PRIVATE_PATH = /^events-v4\.[a-zA-Z0-9._-]+$/u
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
@@ -136,7 +138,10 @@ export type JournalVersionBumpResult = Readonly<{
 /**
  * How much already-checkpointed history the journal keeps. A frame is evicted
  * when it falls outside EITHER window, so both are caps and growth is bounded
- * by whichever binds first. `"disabled"` keeps every frame forever.
+ * by whichever binds first.
+ *
+ * `"disabled"` keeps every frame forever, and so does leaving this unset: no
+ * window binds until one is named, here or through the env pair.
  */
 export type JournalRetention =
   | "disabled"
@@ -153,7 +158,7 @@ export type JournalOptions = Readonly<{
   writerVersion?: number
   lock?: ExclusiveOptions
   views?: readonly JournalView[]
-  /** Defaults to the `YRD_JOURNAL_KEEP_FRAMES` / `YRD_JOURNAL_KEEP_DAYS` env pair. */
+  /** Falls back to the `YRD_JOURNAL_KEEP_FRAMES` / `YRD_JOURNAL_KEEP_DAYS` env pair, then to disabled. */
   retention?: JournalRetention
   inject?: Readonly<{
     exclusive?: Exclusive
@@ -337,21 +342,50 @@ function context(options: JournalOptions): Context {
 }
 
 /**
- * Exported for tests: the default window is 20,000 frames, and proving that
- * through a journal would need a fixture larger than any worth writing, so the
- * contract is pinned here instead.
+ * Retention is OPT-IN: an unconfigured journal keeps every frame forever.
+ *
+ * Eviction is destructive and irreversible, and the journal prefix is the only
+ * thing a full replay can read. When a writer identity changed and forced a
+ * replay from cursor 0, a default window had already deleted the prefix, and
+ * delivery stopped fleet-wide until the frames were restored from a backup.
+ * Bounding growth is worth much less than that, so a window now binds only when
+ * an operator names one — and then it behaves exactly as it always did.
+ *
+ * Exported for tests: proving the armed window's SIZE through a journal needs a
+ * fixture past 20,000 frames, so that lives in the `.slow.` suite and the
+ * arming contract itself is pinned here.
  */
 export function resolveRetention(configured: JournalRetention | undefined): ResolvedRetention {
   if (configured === "disabled") return "disabled"
-  // The operator's off switch. It matters because the window is on by default:
-  // turning retention off must not require editing a config a running fleet
-  // shares.
   if (process.env.YRD_JOURNAL_RETENTION?.trim() === "disabled" && configured === undefined) return "disabled"
+  if (!retentionArmed(configured)) return "disabled"
   const keepDays = retentionBound("keepDays", configured?.keepDays, "YRD_JOURNAL_KEEP_DAYS", undefined)
   return {
-    keepFrames: retentionBound("keepFrames", configured?.keepFrames, "YRD_JOURNAL_KEEP_FRAMES", DEFAULT_KEEP_FRAMES),
+    keepFrames: retentionBound(
+      "keepFrames",
+      configured?.keepFrames,
+      "YRD_JOURNAL_KEEP_FRAMES",
+      RETENTION_COMPANION_KEEP_FRAMES,
+    ),
     ...(keepDays === undefined ? {} : { keepDays }),
   }
+}
+
+/**
+ * Whether anyone named a window at all, on either axis, from either source.
+ *
+ * A malformed value counts as naming one, so `retentionBound` still raises on
+ * it below rather than being skipped past into a silent "retention off" — the
+ * operator would read a window into force that was never in force.
+ */
+function retentionArmed(configured: Exclude<JournalRetention, "disabled"> | undefined): boolean {
+  if (configured?.keepFrames !== undefined || configured?.keepDays !== undefined) return true
+  return retentionEnvironmentSet("YRD_JOURNAL_KEEP_FRAMES") || retentionEnvironmentSet("YRD_JOURNAL_KEEP_DAYS")
+}
+
+function retentionEnvironmentSet(variable: string): boolean {
+  const raw = process.env[variable]?.trim()
+  return raw !== undefined && raw !== ""
 }
 
 function retentionBound<Fallback extends number | undefined>(
