@@ -439,7 +439,7 @@ describe("pr withdraw", () => {
 
     const output = outputIO()
     expect(
-      await runYrd(app, yrd("pr", "withdraw", "PR1", "--reason", "superseded by rework", "--json"), output.io),
+      await runYrd(app, yrd("pr", "withdraw", "PR1", "--reason", "superseded by rework", "--burn-payload", "--json"), output.io),
       output.stderr(),
     ).toBe(0)
     const result = JSON.parse(output.stdout()) as RecutPreflightResult
@@ -486,7 +486,7 @@ describe("pr withdraw", () => {
       expect.arrayContaining([expect.objectContaining({ pr: "PR1", run: "R1", outcome: "stale" })]),
     )
     await app.bays.submit({ branch: "topic/stale-norun", headSha: HEAD2_SHA, base: "main", baseSha: BASE_SHA })
-    expect(await runYrd(app, yrd("pr", "withdraw", "PR2", "--reason", "never queued"), outputIO().io)).toBe(0)
+    expect(await runYrd(app, yrd("pr", "withdraw", "PR2", "--reason", "never queued", "--burn-payload"), outputIO().io)).toBe(0)
     const retired = outputIO()
     expect(await runYrd(app, yrd("log", "--pr", "PR2", "--json"), retired.io), retired.stderr()).toBe(0)
     expect((JSON.parse(retired.stdout()) as { rows: Record<string, unknown>[] }).rows).toEqual([
@@ -505,7 +505,7 @@ describe("pr withdraw", () => {
     // still did not match — the discrimination an empty answer cannot make.
     expect(unknown.stderr()).toBe("error: no PR 'nope' — searched 2 pull request(s)\n")
 
-    expect(await runYrd(app, yrd("pr", "withdraw", "PR2"), outputIO().io)).toBe(0)
+    expect(await runYrd(app, yrd("pr", "withdraw", "PR2", "--burn-payload"), outputIO().io)).toBe(0)
     const terminal = outputIO()
     expect(await runYrd(app, yrd("pr", "withdraw", "PR2"), terminal.io)).toBe(1)
     expect(terminal.stderr()).toBe("error: PR 'PR2' is withdrawn; a terminal PR cannot be withdrawn\n")
@@ -527,7 +527,7 @@ describe("I23 close merger + root cancel (chief ruling b9bf30f2)", () => {
 
     const output = outputIO()
     expect(
-      await runYrd(app, yrd("mr", "close", "PR1", "--reason", "superseded by rework", "--json"), output.io),
+      await runYrd(app, yrd("mr", "close", "PR1", "--reason", "superseded by rework", "--burn-payload", "--json"), output.io),
       output.stderr(),
     ).toBe(0)
     expect(JSON.parse(output.stdout())).toMatchObject({
@@ -552,7 +552,7 @@ describe("I23 close merger + root cancel (chief ruling b9bf30f2)", () => {
     expect(help.stdout()).toMatch(/^\s{2}close.*--reason|close \[options\]/mu)
 
     const output = outputIO()
-    expect(await runYrd(app, yrd("pr", "withdraw", "PR1", "--reason", "old spelling", "--json"), output.io)).toBe(0)
+    expect(await runYrd(app, yrd("pr", "withdraw", "PR1", "--reason", "old spelling", "--burn-payload", "--json"), output.io)).toBe(0)
     expect(JSON.parse(output.stdout())).toMatchObject({ command: "pr.withdraw", reason: "old spelling" })
     expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
   })
@@ -584,6 +584,101 @@ describe("I23 close merger + root cancel (chief ruling b9bf30f2)", () => {
   })
 })
 
+/**
+ * Closing an unlanded merge request spends its payload identity: the commit can
+ * never be offered again on another branch. The verb reads like housekeeping,
+ * so the spend is disclosed and acknowledged BEFORE any event is emitted.
+ */
+describe("pre-spend disclosure on mr close", () => {
+  it("refuses without --burn-payload, naming the revision and head it would spend", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+
+    const output = outputIO()
+    expect(await runYrd(app, yrd("mr", "close", "PR1", "--reason", "looked stale"), output.io)).toBe(1)
+    // The exact revision, so an operator acting on a STALE read sees the
+    // mismatch here rather than after the spend (the PR78 specimen).
+    expect(output.stderr()).toContain("PR1 r1")
+    expect(output.stderr()).toContain(HEAD_SHA)
+    expect(output.stderr()).toContain("topic/one")
+    expect(output.stderr()).toContain("--burn-payload")
+    // Nothing was spent.
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    expect(await journaledEvents(app, "pr/withdrawn")).toHaveLength(0)
+  })
+
+  it("--burn-payload discloses the spend, then withdraws", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+
+    const output = outputIO()
+    expect(
+      await runYrd(app, yrd("mr", "close", "PR1", "--reason", "superseded", "--burn-payload"), output.io),
+      output.stderr(),
+    ).toBe(0)
+    expect(output.stderr()).toContain("PR1 r1")
+    expect(output.stderr()).toContain(HEAD_SHA)
+    // The one door that stays open, named at the moment it is being shut.
+    expect(output.stderr()).toContain("yrd pr submit topic/one")
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
+    expect(await journaledEvents(app, "pr/withdrawn")).toHaveLength(1)
+  })
+
+  it("names every revision in a batch and emits nothing when unacknowledged", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.submit({ branch: "topic/two", headSha: HEAD2_SHA, base: "main", baseSha: BASE_SHA })
+
+    const output = outputIO()
+    expect(await runYrd(app, yrd("mr", "close", "PR1", "PR2"), output.io)).toBe(1)
+    expect(output.stderr()).toContain("PR1 r1")
+    expect(output.stderr()).toContain("PR2 r1")
+    expect(output.stderr()).toContain(HEAD_SHA)
+    expect(output.stderr()).toContain(HEAD2_SHA)
+    expect(await journaledEvents(app, "pr/withdrawn")).toHaveLength(0)
+  })
+
+  it("carries the spent revisions in the --json envelope", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+
+    const output = outputIO()
+    expect(
+      await runYrd(app, yrd("mr", "close", "PR1", "--burn-payload", "--json"), output.io),
+      output.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "pr.close",
+      spent: [{ pr: "PR1", revision: 1, headSha: HEAD_SHA, branch: "topic/one", reopen: "yrd pr submit topic/one" }],
+    })
+  })
+
+  it("the hidden withdraw alias spends under the same acknowledgement", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+
+    const refused = outputIO()
+    expect(await runYrd(app, yrd("pr", "withdraw", "PR1"), refused.io)).toBe(1)
+    expect(refused.stderr()).toContain("--burn-payload")
+    expect(await journaledEvents(app, "pr/withdrawn")).toHaveLength(0)
+
+    const spent = outputIO()
+    expect(await runYrd(app, yrd("pr", "withdraw", "PR1", "--burn-payload"), spent.io), spent.stderr()).toBe(0)
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
+  })
+
+  it("admin pr prune keeps spending on its own content proof, with no acknowledgement", async () => {
+    // Prune proves the content already landed before it withdraws; that proof
+    // IS the acknowledgement, so the interactive gate must not block it.
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+
+    const output = outputIO({ pruneGit: () => pruneGit({ isAncestor: () => true }) })
+    expect(await runYrd(app, yrd("admin", "pr", "prune"), output.io), output.stderr()).toBe(0)
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
+  })
+})
+
 describe("pr withdraw journal replay", () => {
   it("replays reason-bearing and reason-less withdrawals through a fresh session", async () => {
     // A second yrd invocation in a real repository is a FRESH app replaying the
@@ -597,10 +692,10 @@ describe("pr withdraw journal replay", () => {
       await first.bays.submit({ branch: "topic/reasonless", headSha: HEAD2_SHA, base: "main", baseSha: BASE_SHA })
       const withdraw = outputIO()
       expect(
-        await runYrd(first, yrd("pr", "withdraw", "PR1", "--reason", "superseded by rework"), withdraw.io),
+        await runYrd(first, yrd("pr", "withdraw", "PR1", "--reason", "superseded by rework", "--burn-payload"), withdraw.io),
         withdraw.stderr(),
       ).toBe(0)
-      expect(await runYrd(first, yrd("pr", "close", "PR2"), outputIO().io)).toBe(0)
+      expect(await runYrd(first, yrd("pr", "close", "PR2", "--burn-payload"), outputIO().io)).toBe(0)
       await first.close()
 
       const second = await createCliApp({ journal: testJournal(dir) })
@@ -655,7 +750,7 @@ describe("pr recut --preflight", () => {
       failure: {
         cause:
           `PR 'PR1' preflight verdict SUBSUMED-WITHDRAW is an operator decision; ` +
-          `run: yrd pr withdraw PR1 --reason "superseded: content already in ${TARGET_BASE_SHA}"`,
+          `run: yrd pr withdraw PR1 --burn-payload --reason "superseded: content already in ${TARGET_BASE_SHA}"`,
       },
     })
     expect((await Array.fromAsync(app.events())).length).toBe(before)

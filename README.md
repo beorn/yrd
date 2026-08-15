@@ -528,7 +528,7 @@ yrd pr review <selector> (--approve | --reject)
   [--by <identity>] [--ref <id>] [--note <text>] [--json]
 yrd pr comment <selector> --note <text> [--by <identity>] [--ref <id>] [--json]
 yrd pr checks <selector...> [--follow] [--json]
-yrd pr close [selector...] [--json]
+yrd pr close [selector...] [--reason <text>] --burn-payload [--json]
 ```
 
 An unfiltered human `pr list` shows the 20 most recent PRs in numeric id order.

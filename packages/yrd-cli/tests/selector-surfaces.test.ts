@@ -212,7 +212,7 @@ describe("case-insensitive CLI selector surfaces", () => {
     },
     {
       surface: "pr close",
-      args: ["pr", "close", "pr1", "--json"],
+      args: ["pr", "close", "pr1", "--burn-payload", "--json"],
       expected: { command: "pr.close", prs: [{ id: "PR1" }] },
     },
     {

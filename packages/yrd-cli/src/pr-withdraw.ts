@@ -56,11 +56,49 @@ async function withdrawOne(app: YrdCliApp, id: string, reason: string | undefine
   return withdrawn as PR
 }
 
-export type WithdrawPrsOptions = JsonOption & Readonly<{ reason?: string }>
+/** What closing this revision spends, in the operator's own terms: the exact
+ * revision leaving delivery — so an operator acting on a STALE read sees the
+ * mismatch here, before the spend, not after it (the PR78 specimen) — and the
+ * one command that brings the payload back. */
+type PayloadSpend = Readonly<{ pr: string; revision: number; headSha: string; branch: string; reopen: string }>
 
-/** `yrd pr withdraw <selector...> [--reason <text>]` — withdraw live PRs,
- * recording the operator's reason on each pr/withdrawn event. Every selector is
- * validated before the first event is emitted so a mixed batch refuses whole.
+function payloadSpend(pr: PR): PayloadSpend {
+  const revision = currentPRRev(pr)
+  return {
+    pr: pr.id,
+    revision: revision.n,
+    headSha: revision.head,
+    branch: pr.branch,
+    reopen: `yrd pr submit ${pr.branch}`,
+  }
+}
+
+function spendLine(spend: PayloadSpend): string {
+  return `${spend.pr} r${spend.revision} head ${spend.headSha} on '${spend.branch}'`
+}
+
+/** Closing an unlanded merge request is not housekeeping: it spends the
+ * payload identity, and every other branch is barred from that commit
+ * afterwards. The verb reads reversible, so the spend is stated and
+ * acknowledged BEFORE the first event — never a silent success. The
+ * acknowledgement is an explicit flag, not a prompt, so a non-TTY caller gets
+ * the same typed refusal instead of hanging. */
+function refuseUnacknowledgedSpend(verb: string, spends: readonly PayloadSpend[]): never {
+  raiseFailure(
+    "refusal",
+    "withdraw-unacknowledged",
+    `yrd: ${verb} spends payload identity permanently — ${spends.map(spendLine).join("; ")}; ` +
+      "a closed commit can never be resubmitted as-is on any other branch, and only its own branch reopens it. " +
+      "Re-read each revision above, then pass --burn-payload to acknowledge the spend.",
+  )
+}
+
+export type WithdrawPrsOptions = JsonOption & Readonly<{ reason?: string; burnPayload?: boolean }>
+
+/** `yrd pr withdraw <selector...> --burn-payload [--reason <text>]` — withdraw
+ * live PRs, recording the operator's reason on each pr/withdrawn event. Every
+ * selector is validated, and the whole spend disclosed and acknowledged, before
+ * the first event is emitted, so a mixed batch refuses whole.
  *
  * `mr close` and the hidden `withdraw` alias are ONE act (I23: two words, one
  * act): the withdrawn record with its reason is written FIRST, then queue work
@@ -87,6 +125,13 @@ export async function withdrawPrs(
     seen.add(pr.id)
     targets.push(pr)
   }
+  const spends = targets.map(payloadSpend)
+  if (options.burnPayload !== true) refuseUnacknowledgedSpend(verb, spends)
+  // Disclosed BEFORE the first event, so a spend that fails partway has still
+  // told the operator exactly which revision it was about to burn.
+  for (const spend of spends) {
+    io.stderr(`yrd: spending payload identity: ${spendLine(spend)} — reopen only with '${spend.reopen}'\n`)
+  }
   const withdrawn: PR[] = []
   for (const target of targets) {
     withdrawn.push(await withdrawOne(app, target.id, reason, io))
@@ -97,6 +142,7 @@ export async function withdrawPrs(
     {
       command,
       ...(reason === undefined ? {} : { reason }),
+      spent: spends,
       prs: withdrawn.map(projectPRTaskStatus),
     },
     createElement(PRResultView, { prs: withdrawn, runs: [] }),
@@ -416,7 +462,11 @@ export async function preflightRecut(
   const recutCommand = `yrd pr recut ${pr.id}${revisionFlag}${candidateFlag}${queueFlag}`
   const next =
     verdict === "SUBSUMED-WITHDRAW"
-      ? `yrd pr withdraw ${pr.id} --reason "superseded: content already in ${targetBaseSha}"`
+      ? // The subsumed proof (head reachable from the base, or merging it reproduces
+        // the base tree exactly) IS the payload-spend acknowledgement: content that
+        // already landed has nothing left to resubmit. Printed WITH the flag so the
+        // command runs as written rather than refusing whoever pastes it.
+        `yrd pr withdraw ${pr.id} --burn-payload --reason "superseded: content already in ${targetBaseSha}"`
       : verdict === "RECUT-FORCE"
         ? `${recutCommand} --force`
         : verdict === "RECUT"

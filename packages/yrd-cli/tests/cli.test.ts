@@ -1450,7 +1450,7 @@ describe("runYrd", () => {
     },
     {
       surface: "pr close",
-      args: ["pr", "close", "pr1", "--json"],
+      args: ["pr", "close", "pr1", "--burn-payload", "--json"],
       expected: { command: "pr.close", prs: [{ id: "PR1" }] },
     },
     {
@@ -5619,7 +5619,7 @@ describe("runYrd", () => {
     })
 
     const close = outputIO()
-    expect(await runYrd(app, yrd("pr", "close", "PR1", "--json"), close.io), close.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("pr", "close", "PR1", "--burn-payload", "--json"), close.io), close.stderr()).toBe(0)
     const closed = JSON.parse(close.stdout()) as { prs: Record<string, unknown>[] }
     expect(closed).toMatchObject({
       command: "pr.close",
@@ -5660,7 +5660,8 @@ describe("runYrd", () => {
 
     // A terminal PR refuses re-close with a nonzero exit — never a silent no-op.
     const again = outputIO()
-    expect(await runYrd(app, yrd("pr", "close", "PR1"), again.io)).not.toBe(0)
+    expect(await runYrd(app, yrd("pr", "close", "PR1", "--burn-payload"), again.io)).not.toBe(0)
+    expect(again.stderr()).toContain("is withdrawn; a terminal PR cannot be withdrawn")
   })
 
   it("terminalizes unclaimed Queue work when `bay close --withdraw` closes its PR", async () => {

@@ -2879,6 +2879,75 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
       app.bays.submitSelection("topic/ghost", { base: "main", resolveRevision: async () => undefined, run: runtime }),
     ).rejects.toMatchObject({ failure: { kind: "refusal", code: "git-commit-missing" } })
   })
+
+  // The withdrawn payload's only door back. A withdrawal spends the payload
+  // identity: no OTHER branch may carry that commit again. The door that stays
+  // open is the withdrawn PR's OWN branch, which reopens it in place. These
+  // tests hold both halves together — the refusal must name a remedy that the
+  // very next test proves actually works, or it prints a wrong instruction.
+  describe("withdrawn payload keeps its own door open", () => {
+    it("names the withdrawn PR, when it was withdrawn, and the exact reopen command", async () => {
+      await using app = (await createHarness()).app
+      await app.bays.submitSelection("topic/burned", directOptions(HEAD_1))
+      await app.bays.closePr({ pr: "PR1", reason: "withdrawn by mistake" })
+      expect(prFacts(app.bays.pr("PR1"))).toMatchObject({ delivery: "withdrawn" })
+      const withdrawnAt = app.bays.pr("PR1")?.withdrawnAt
+      expect(withdrawnAt).toBeTypeOf("string")
+
+      // The bead's specimen: the identical head, offered on a NEW branch.
+      const refused = await app.bays
+        .submitSelection("topic/rebuilt", directOptions(HEAD_1))
+        .then(() => undefined)
+        .catch((error: unknown) => (error as Error).message)
+
+      expect(refused).toContain("payload already recorded as PR 'PR1'")
+      // …and, unlike the bare refusal, says WHY the door is shut and where the
+      // open one is: the state, its timestamp, and the branch to resubmit.
+      expect(refused).toContain("withdrawn")
+      expect(refused).toContain(withdrawnAt)
+      expect(refused).toContain("yrd pr submit topic/burned")
+    })
+
+    it("the named remedy is real: resubmitting the withdrawn branch at the SAME head reopens the PR", async () => {
+      await using app = (await createHarness()).app
+      await app.bays.submitSelection("topic/burned", directOptions(HEAD_1))
+      await app.bays.closePr({ pr: "PR1", reason: "withdrawn by mistake" })
+
+      // Exactly the command the refusal prints — same branch, same head, no
+      // rebuilt commit invented purely to change a hash.
+      const reopened = await app.bays.submitSelection("topic/burned", directOptions(HEAD_1))
+
+      expect(prFacts(reopened)).toMatchObject({
+        id: "PR1",
+        branch: "topic/burned",
+        delivery: "submitted",
+        current: { n: 2, head: HEAD_1 },
+      })
+      expect(reopened.withdrawnAt).toBeUndefined()
+      expect(Object.keys(app.bays.state().prs)).toEqual(["PR1"])
+    })
+
+    it("keeps the bare refusal for a LIVE collision, which no reopen can cure", async () => {
+      await using app = (await createHarness()).app
+      await app.bays.submitSelection("topic/live", directOptions(HEAD_1))
+      expect(prFacts(app.bays.pr("PR1"))).toMatchObject({ delivery: "submitted" })
+
+      // The direct `submit` command, not `submitSelection`: a LIVE payload
+      // offered on another branch is short-circuited by submitSelection into an
+      // idempotent return of the live PR, so the dedupe refusal is only
+      // reachable here.
+      const refused = await app.bays
+        .submit({ branch: "topic/other", headSha: HEAD_1, base: "main", baseSha: BASE })
+        .then(() => undefined)
+        .catch((error: unknown) => (error as Error).message)
+
+      expect(refused).toContain("payload already recorded as PR 'PR1'")
+      // A live PR is not reopenable; printing a reopen command here would be a
+      // wrong instruction, so the refusal carries none.
+      expect(refused).not.toContain("yrd pr submit")
+      expect(refused).not.toContain("withdrawn")
+    })
+  })
 })
 
 describe("admission request-count fact", () => {
