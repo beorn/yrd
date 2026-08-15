@@ -3206,6 +3206,121 @@ describe("Queue command adapters", () => {
     expect(await git(fixture.remote, ["ls-tree", "main", "dep"])).toContain(fixture.moduleSha)
   }, 30_000)
 
+  it("puts a provisioned lockfile in the immutable pin candidate before checks run", async () => {
+    const fixture = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    await using process = createProcess()
+    const issue = "@hh/tooling/manifest-gate-blind-to-pins"
+    const priorPin = (await git(fixture.repo, ["ls-tree", fixture.baseSha, "dep"])).split(/\s+/u)[2]
+    if (priorPin === undefined) throw new Error("fixture has no prior gitlink pin")
+    const provisionalCandidates: string[] = []
+    const prepare = gitCandidatePreparer({
+      inject: { process },
+      repo: fixture.repo,
+      async provisionPinIntent({ path, provisionalCandidateSha }) {
+        provisionalCandidates.push(provisionalCandidateSha)
+        await writeFile(join(path, "bun.lock"), "generated for target manifest\n")
+        return { generatedPaths: ["bun.lock"] }
+      },
+    })
+    const pr = PRSnapshotSchema.parse({
+      id: "yrdpin#1",
+      branch: "intent/yrdpin#1",
+      base: "main",
+      issue,
+      revision: 1,
+      headSha: fixture.baseSha,
+      baseSha: fixture.baseSha,
+      intent: {
+        id: "yrdpin#1",
+        authored: {
+          intentId: "00000000-0000-7000-8000-000000000021",
+          issue: { source: "hh", id: issue },
+          component: "dep",
+          target: fixture.moduleSha,
+        },
+        evaluated: { priorPin, target: fixture.moduleSha },
+      },
+    })
+    const prepared = await prepare({
+      id: "C1",
+      queueId: "main",
+      baseSha: fixture.baseSha,
+      revs: [{ pr: pr.id, n: pr.revision, head: pr.headSha }],
+      prs: [pr],
+    })
+    if (prepared.sha === undefined || prepared.ref === undefined) {
+      throw new Error("candidate preparation returned no immutable identity")
+    }
+
+    expect(provisionalCandidates).toHaveLength(1)
+    expect(prepared.sha).not.toBe(provisionalCandidates[0])
+    expect(await git(fixture.repo, ["rev-parse", prepared.ref])).toBe(prepared.sha)
+    expect(await git(fixture.repo, ["rev-parse", `${prepared.sha}^`])).toBe(fixture.baseSha)
+    expect(await git(fixture.repo, ["diff-tree", "--no-commit-id", "--name-only", "-r", prepared.sha])).toBe(
+      "bun.lock\ndep",
+    )
+    expect(await git(fixture.repo, ["show", `${prepared.sha}:bun.lock`])).toBe("generated for target manifest")
+    expect(await git(fixture.repo, ["ls-tree", prepared.sha, "dep"])).toContain(fixture.moduleSha)
+  }, 30_000)
+
+  it("refuses every provisioned path except the enumerated bun.lock", async () => {
+    const fixture = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    await using process = createProcess()
+    const issue = "@hh/tooling/manifest-gate-blind-to-pins"
+    const priorPin = (await git(fixture.repo, ["ls-tree", fixture.baseSha, "dep"])).split(/\s+/u)[2]
+    if (priorPin === undefined) throw new Error("fixture has no prior gitlink pin")
+    const pr = PRSnapshotSchema.parse({
+      id: "yrdpin#2",
+      branch: "intent/yrdpin#2",
+      base: "main",
+      issue,
+      revision: 1,
+      headSha: fixture.baseSha,
+      baseSha: fixture.baseSha,
+      intent: {
+        id: "yrdpin#2",
+        authored: {
+          intentId: "00000000-0000-7000-8000-000000000024",
+          issue: { source: "hh", id: issue },
+          component: "dep",
+          target: fixture.moduleSha,
+        },
+        evaluated: { priorPin, target: fixture.moduleSha },
+      },
+    })
+
+    await expect(
+      gitCandidatePreparer({
+        inject: { process },
+        repo: fixture.repo,
+        async provisionPinIntent({ path }) {
+          await writeFile(join(path, "generated.txt"), "must not enter the candidate\n")
+          return { generatedPaths: ["generated.txt"] }
+        },
+      })({
+        id: "C-forbidden",
+        queueId: "main",
+        baseSha: fixture.baseSha,
+        revs: [{ pr: pr.id, n: pr.revision, head: pr.headSha }],
+        prs: [pr],
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "wrapper-mismatch",
+        message: expect.stringContaining("forbidden path(s) [generated.txt]; allowed [bun.lock]"),
+      },
+    })
+  }, 30_000)
+
   it("drains an open intent through the selectorless Queue surface used by the resident", async () => {
     const fixture = await hookedSubmoduleRepository({
       baseVersion: "base",
