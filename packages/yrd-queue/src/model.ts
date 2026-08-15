@@ -670,6 +670,22 @@ export type QueuesState = Readonly<{
   terminalAssociations: QueueTerminalAssociations
   admissionRefusals: Readonly<Record<PRId, QueueAdmissionRefusal>>
   retention: Readonly<{ terminalOrder: Readonly<Record<RunId, number>> }>
+  /** Set once a shadow recut proved a carried verdict wrong. Persisted rather
+   * than held in memory: a divergence means the predicate was wrong about
+   * something, and an in-process flag would silently re-arm on restart. Only an
+   * operator clears it. */
+  carryForwardDisabledBy?: QueueCarryForwardDisabled
+}>
+
+export type QueueCarryForwardDisabled = Readonly<{
+  reason: string
+  at: string
+  run: RunId
+  pr: string
+  fromBaseSha: string
+  toBaseSha: string
+  carriedVerdict: "passed"
+  freshVerdict: "failed"
 }>
 
 export type PREligibilityReason = Readonly<{
@@ -853,6 +869,7 @@ export const YRD_QUEUE_AUDIT_FINDING_CODES = [
   "queue-progress-stalled",
   "config-drift",
   "runtime-drift",
+  "carry-forward-disabled",
 ] as const
 
 export type QueueAuditFindingCode = (typeof YRD_QUEUE_AUDIT_FINDING_CODES)[number]

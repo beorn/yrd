@@ -153,6 +153,7 @@ import {
   releasedAdmissionFailures,
 } from "./projection-index.ts"
 import { candidateRefFor } from "./candidate-refs.ts"
+import { carryForwardSampleEvidence, shadowDivergence, type CarryForwardSampleEvidence } from "./carry-forward.ts"
 import { compactQueuesState, queueRetentionRoot } from "./retention.ts"
 
 /**
@@ -370,6 +371,21 @@ const QueueFailedPRSchema = z.preprocess(
     .strict(),
 )
 const LegacyQueueFailedSchema = z.object({ run: RunIdSchema, error: JobErrorSchema }).strict()
+/** A shadow recut proved a carried verdict wrong. One fact, one write, and the
+ * carry-forward path stays retired until an operator clears it. */
+const CarryForwardDisabledFactSchema = z
+  .object({
+    reason: z.string().trim().min(1),
+    at: z.iso.datetime({ offset: true }),
+    run: RunIdSchema,
+    pr: z.string().trim().min(1),
+    fromBaseSha: GitShaSchema,
+    toBaseSha: GitShaSchema,
+    carriedVerdict: z.literal("passed"),
+    freshVerdict: z.literal("failed"),
+  })
+  .strict()
+
 const QueueFailedSchema = LegacyQueueFailedSchema.extend({
   prs: z.array(QueueFailedPRSchema).min(1),
   job: z
@@ -868,6 +884,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/batch/isolated": journalEvent(1, BatchIsolatedSchema),
         "queue/admission/refused": journalEvent(1, AdmissionRefusedFactSchema),
         "queue/admission/settled": journalEvent(1, SettleAdmissionRefusalSchema),
+        "queue/carry-forward/disabled": journalEvent(1, CarryForwardDisabledFactSchema),
       },
       replayEvents: {
         "queue/paused": ReplayPauseQueueArgsSchema,
@@ -876,8 +893,9 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/run/failed": ReplayQueueFailedSchema,
         "queue/run/canceled": QueueRunCanceledFactSchema,
         "queue/run/settled": SettledEventSchema,
+        "queue/carry-forward/disabled": CarryForwardDisabledFactSchema,
       },
-      projectionVersion: "queues-v10-ttl-holds",
+      projectionVersion: "queues-v11-carry-forward",
       project: projectQueues,
       compact: (state, complete) => {
         const runtime = complete as unknown as DeepReadonly<RuntimeState>
@@ -1058,21 +1076,19 @@ function terminalAssociationPlan(state: DeepReadonly<RuntimeState>, appended = 0
         )
         .map((record) => materializeRun(record, state.jobs))
         .toSorted((left, right) => left.startedAt.localeCompare(right.startedAt) || compareNatural(left.id, right.id))
-      const candidates = runs.map(
-        (run): TerminalAssociationCandidate => ({
-          run: run.id,
-          status: run.status,
-          ...(run.conclusion === undefined ? {} : { conclusion: run.conclusion }),
-          startedAt: run.startedAt,
-          ...(run.finishedAt === undefined ? {} : { finishedAt: run.finishedAt }),
-          eligible:
-            Queues.failed(run) &&
-            run.finishedAt !== undefined &&
-            run.startedAt <= run.finishedAt &&
-            run.finishedAt <= terminal.at,
-          ...(run.error === undefined ? {} : { error: { ...run.error } }),
-        }),
-      )
+      const candidates = runs.map((run): TerminalAssociationCandidate => ({
+        run: run.id,
+        status: run.status,
+        ...(run.conclusion === undefined ? {} : { conclusion: run.conclusion }),
+        startedAt: run.startedAt,
+        ...(run.finishedAt === undefined ? {} : { finishedAt: run.finishedAt }),
+        eligible:
+          Queues.failed(run) &&
+          run.finishedAt !== undefined &&
+          run.startedAt <= run.finishedAt &&
+          run.finishedAt <= terminal.at,
+        ...(run.error === undefined ? {} : { error: { ...run.error } }),
+      }))
       const eligible = candidates.filter((candidate) => candidate.eligible)
       if (eligible.length === 0) {
         const failed = candidates.filter(({ status, conclusion }) => status === "completed" && conclusion === "failure")
@@ -3224,6 +3240,71 @@ function composeSettlementLabel(runs: readonly DeepReadonly<Run>[]): string | un
   return `settled: ${parts.join(", ")}`
 }
 
+/**
+ * The shadow-recut comparator.
+ *
+ * A carried verdict is ALWAYS "passed" — a failed check never reaches the merge
+ * step — so the only divergence that can exist is: a sample declined the carry,
+ * the member was re-queued and re-checked at the new base, and that fresh check
+ * FAILED. That is precisely the case where carrying would have landed a payload
+ * the new base rejects, which is why it retires the path.
+ *
+ * The prior sample is recovered from the recorded failure of an earlier run for
+ * the same member; nothing new is persisted to detect it.
+ */
+function carryForwardDivergenceEvents(
+  state: DeepReadonly<RuntimeState>,
+  record: DeepReadonly<Pick<QueueRecord, "id" | "prs">>,
+  failure: DeepReadonly<JobError>,
+): readonly EventDraft[] {
+  if (state.queues.carryForwardDisabledBy !== undefined) return []
+  for (const member of record.prs) {
+    const sample = priorCarryForwardSample(state, member.id, record.id)
+    if (sample === undefined) continue
+    const divergence = shadowDivergence("passed", "failed", {
+      fromBaseSha: sample.fromBaseSha,
+      toBaseSha: sample.toBaseSha,
+      candidateSha: sample.checkedCandidateSha,
+    })
+    if (divergence === undefined) continue
+    const reason = `${divergence.detail}; the failing check reported: ${failure.message}`
+    // The LOUD surface is the audit banner, derived from the state this event
+    // writes (see auditQueues 'carry-forward-disabled'). A banner outlives the
+    // process; a log line scrolls away, and this must stay visible until an
+    // operator clears it.
+    return [
+      event("queue/carry-forward/disabled", {
+        reason,
+        at: new Date().toISOString(),
+        run: record.id,
+        pr: member.id,
+        fromBaseSha: sample.fromBaseSha,
+        toBaseSha: sample.toBaseSha,
+        carriedVerdict: divergence.carried,
+        freshVerdict: divergence.fresh,
+      }),
+    ]
+  }
+  return []
+}
+
+/** The most recent earlier run for this member whose failure recorded a
+ * shadow-sample decline. */
+function priorCarryForwardSample(
+  state: DeepReadonly<RuntimeState>,
+  pr: string,
+  exclude: RunId,
+): CarryForwardSampleEvidence | undefined {
+  const runs = orderedQueues(state.queues, state.jobs)
+    .filter((run) => run.id !== exclude && run.prs.some((member) => member.id === pr))
+    .toReversed()
+  for (const run of runs) {
+    const evidence = carryForwardSampleEvidence(run.error?.evidence)
+    if (evidence !== undefined) return evidence
+  }
+  return undefined
+}
+
 function queueFailedEvent(
   state: DeepReadonly<RuntimeState>,
   run: DeepReadonly<Pick<QueueRecord, "id" | "prs">>,
@@ -4376,6 +4457,13 @@ function validateRunCandidateReceipt(queues: DeepReadonly<QueuesState>, record: 
 }
 
 function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueState {
+  if (applied.name === "queue/carry-forward/disabled") {
+    const fact = CarryForwardDisabledFactSchema.parse(applied.data)
+    // First divergence wins. A later one describes the same retired path and
+    // must not overwrite the evidence an operator is about to read.
+    if (state.queues.carryForwardDisabledBy !== undefined) return state as QueueState
+    return { queues: { ...state.queues, carryForwardDisabledBy: fact } } as QueueState
+  }
   if (applied.name === "pr/pushed" || applied.name === "pr/recut") {
     const token =
       applied.name === "pr/pushed"
@@ -5195,6 +5283,10 @@ function advanceQueue(
       return { events: [queueFailedEvent(state, record, failure)] }
     }
     const failed = queueFailedEvent(state, record, failure, job)
+    // A required check just failed. If an earlier shadow sample declined a
+    // carry-forward for this member, the recut it forced has now disagreed with
+    // the verdict that would have been carried — retire the path.
+    const diverged = planned.kind === "check" ? carryForwardDivergenceEvents(state, record, failure) : []
     const pr = record.prs.length === 1 ? record.prs[0] : undefined
     const intent = pr?.intent
     if (intent !== undefined && planned.kind === "check" && !isIntegrated(before)) {
@@ -5208,6 +5300,7 @@ function advanceQueue(
         return {
           events: [
             failed,
+            ...diverged,
             event(
               "intent/evaluation-recorded",
               PinIntentEvaluationFactSchema.parse({
@@ -5267,7 +5360,7 @@ function advanceQueue(
       current === undefined ||
       (prDeliveryState(current) !== "submitted" && prDeliveryState(current) !== "ready")
     ) {
-      return { events: [failed] }
+      return { events: [failed, ...diverged] }
     }
     const refusal = {
       pr: pr.id,
@@ -5282,7 +5375,7 @@ function advanceQueue(
       detail: failure.message,
     }
     return {
-      events: [failed, event("pr/needs-author", { ...refusal, receipt: authorReceipt })],
+      events: [failed, ...diverged, event("pr/needs-author", { ...refusal, receipt: authorReceipt })],
     }
   }
 
@@ -5521,12 +5614,10 @@ function materializeArchivedRun(
 
 function materializeRun(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<JobsState>): Run {
   const jobList = queueJobs(record, jobs)
-  const steps = record.steps.map(
-    (step, index): QueueStep => ({
-      ...step,
-      ...(jobList[index] === undefined ? {} : { job: jobList[index] }),
-    }),
-  )
+  const steps = record.steps.map((step, index): QueueStep => ({
+    ...step,
+    ...(jobList[index] === undefined ? {} : { job: jobList[index] }),
+  }))
   const cursor = steps.findIndex((step) => step.job === undefined || !Job.terminal(step.job))
   const failed = steps.find((step) => step.job !== undefined && jobFailed(step.job))?.job
   const waiting = steps.some((step) => step.job?.status === "waiting")
@@ -5981,6 +6072,19 @@ function auditQueues(
   const findings: QueueAuditFindingEmission[] = []
   const installed = new Map(steps.map((step) => [step.name, step]))
   const auditNowMs = options.now === undefined ? undefined : parseAuditTime(options.now, "now")
+  const retired = state.queues.carryForwardDisabledBy
+  if (retired !== undefined) {
+    findings.push({
+      code: "carry-forward-disabled",
+      message:
+        `Carry-forward is disabled: a shadow recut of '${retired.pr}' in run '${retired.run}' produced ` +
+        `'${retired.freshVerdict}' where the carried verdict was '${retired.carriedVerdict}' ` +
+        `(base '${retired.fromBaseSha}' -> '${retired.toBaseSha}'). Every check now recuts. ` +
+        `Understand the divergence before re-enabling.`,
+      specimen: `carry-forward:${retired.pr}`,
+      since: retired.at,
+    })
+  }
   for (const pause of Object.values(state.queues.pauses)) {
     const specimen = `queue:${baseIdentity(pause.base)}`
     if (pause.expiresAt === undefined) {

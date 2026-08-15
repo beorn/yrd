@@ -15,10 +15,12 @@
  * is treated as overlapping and sent down the ordinary recut path.
  *
  * The safety net is not this predicate. It is the shadow recut in
- * {@link shouldShadowRecut}: a sampled fraction of carry-forwards ALSO runs the
- * full check, and a single divergence disables the path until an operator
- * re-enables it.
+ * {@link shouldShadowRecut}: a sampled fraction of carry-forwards declines the
+ * carry and takes the full recut instead, and a single divergence between the
+ * verdict that would have been carried and the one the recut actually produced
+ * disables the path until an operator re-enables it.
  */
+import * as z from "zod"
 
 /** The single git surface this predicate needs. Structural on purpose: the
  * module stays unit-testable against a fake and never owns a process. */
@@ -312,6 +314,40 @@ export function shouldShadowRecut(policy: CarryForwardPolicy, random: () => numb
   if (policy.shadowSampleRate <= 0) return false
   if (policy.shadowSampleRate >= 1) return true
   return random() < policy.shadowSampleRate
+}
+
+/**
+ * Evidence a merge attaches when a shadow sample DECLINED the carry.
+ *
+ * The decline fails the run with `stale-check`, which re-queues the member, so
+ * the next run re-checks the payload at the new base for real. This row is how
+ * that later run recognizes what it is standing in for: it names the verdict
+ * that WOULD have been carried and the two bases involved.
+ */
+export const CarryForwardSampleEvidenceSchema = z
+  .object({
+    kind: z.literal("carry-forward-shadow-sample"),
+    fromBaseSha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
+    toBaseSha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
+    checkedCandidateSha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
+    /** Always "passed": a failed check never reaches the merge step, so the
+     * only verdict that can ever be carried is a passing one. Recorded
+     * explicitly so the comparator states what it compared. */
+    carriedVerdict: z.literal("passed"),
+    configHash: z.string().regex(/^[0-9a-f]{64}$/u),
+    environmentHash: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/u)
+      .optional(),
+  })
+  .strict()
+export type CarryForwardSampleEvidence = Readonly<z.infer<typeof CarryForwardSampleEvidenceSchema>>
+
+/** Read shadow-sample evidence off a recorded job error, or undefined when the
+ * failure was anything else. Never throws on foreign evidence. */
+export function carryForwardSampleEvidence(value: unknown): CarryForwardSampleEvidence | undefined {
+  const parsed = CarryForwardSampleEvidenceSchema.safeParse(value)
+  return parsed.success ? parsed.data : undefined
 }
 
 export type ShadowDivergence = Readonly<{ carried: "passed" | "failed"; fresh: "passed" | "failed"; detail: string }>
