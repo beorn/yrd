@@ -15,6 +15,7 @@ import {
   createYrdDef,
   event,
   journalEvent,
+  withCheckpointMigrations,
   type CommandTree,
   type Journal,
   type YrdDef,
@@ -29,7 +30,7 @@ function ids(..._labels: string[]) {
   return () => `00000000-0000-7000-8000-${(++idSequence).toString(16).padStart(12, "0")}`
 }
 
-function withCounter() {
+function withCounter(projectionVersion = "counter-v1") {
   const add = command({
     title: "Add to counter",
     visibility: "public",
@@ -49,7 +50,7 @@ function withCounter() {
       events: {
         "counter/changed": journalEvent(1, z.object({ from: z.number().int(), by: z.number().int() })),
       },
-      projectionVersion: "counter-v1",
+      projectionVersion,
       project(state, applied) {
         if (applied.name !== "counter/changed") return { counter: state.counter }
         const { by } = applied.data as { by: number }
@@ -79,6 +80,9 @@ function createCheckpointJournal(base: Journal<unknown>) {
     checkpoint: {
       load(identity: string) {
         return Promise.resolve(stored?.identity === identity ? structuredClone(stored) : undefined)
+      },
+      inspect() {
+        return Promise.resolve(stored === undefined ? undefined : structuredClone(stored))
       },
       save(checkpoint: StoredCheckpoint) {
         stored = structuredClone(checkpoint)
@@ -427,6 +431,99 @@ describe("Yrd domain objects", () => {
       recovered.dispatch({ op: "counter.add", args: { by: 4 } }, { key: "preserved-retry" }),
     ).resolves.toMatchObject({ events: [{ name: "counter/changed" }] })
     expect(recovered.state().counter.value).toBe(4)
+  })
+
+  it("migrates an inspected predecessor checkpoint when retention makes replay from zero impossible", async () => {
+    const backing = createMemoryJournal<unknown>()
+    const cache = createCheckpointJournal(backing)
+    const predecessor = withCounter("counter-v1")(createYrdDef())
+    const writer = await createYrd(predecessor, {
+      inject: { journal: cache.journal, id: ids("predecessor-command", "predecessor-event") },
+    })
+    const receipt = await writer.dispatch({ op: "counter.add", args: { by: 4 } }, { key: "migrated-retry" })
+    await writer.close()
+    const stored = cache.stored()
+    if (stored === undefined) throw new Error("expected predecessor checkpoint")
+
+    const reads: number[] = []
+    const retained = {
+      ...cache.journal,
+      read(after = 0, before?: number) {
+        reads.push(after)
+        if (after === 0) throw new RangeError("history below cursor 1 was evicted")
+        return backing.read(after, before)
+      },
+    } satisfies Journal<unknown>
+    const current = withCheckpointMigrations(withCounter("counter-v2")(createYrdDef()), [
+      {
+        from: stored.identity,
+        migrate: (state) => state,
+      },
+    ])
+
+    await using migrated = await createYrd(current, { inject: { journal: retained } })
+
+    expect(migrated.state().counter.value).toBe(4)
+    expect(reads).toEqual([stored.cursor])
+    await expect(migrated.dispatch({ op: "counter.add", args: { by: 4 } }, { key: "migrated-retry" })).resolves.toEqual(
+      receipt,
+    )
+    expect(cache.stored()).toMatchObject({ cursor: stored.cursor })
+    expect(cache.stored()?.identity).not.toBe(stored.identity)
+  })
+
+  it("fails closed on missing, ambiguous, cyclic, or malformed checkpoint migration declarations", async () => {
+    const backing = createMemoryJournal<unknown>()
+    const cache = createCheckpointJournal(backing)
+    const predecessor = withCounter("counter-v1")(createYrdDef())
+    const writer = await createYrd(predecessor, {
+      inject: { journal: cache.journal, id: ids("graph-command", "graph-event") },
+    })
+    await writer.dispatch({ op: "counter.add", args: { by: 1 } })
+    await writer.close()
+    const stored = cache.stored()
+    if (stored === undefined) throw new Error("expected predecessor checkpoint")
+    const other = "1".repeat(64)
+    const retained = {
+      ...cache.journal,
+      read(after = 0, before?: number) {
+        if (after === 0) throw new RangeError("history below cursor 1 was evicted")
+        return backing.read(after, before)
+      },
+    } satisfies Journal<unknown>
+    const identity = (state: CounterState) => state
+    const cases = [
+      {
+        code: "checkpoint-migration-missing",
+        migrations: [{ from: other, migrate: identity }],
+      },
+      {
+        code: "checkpoint-migration-ambiguous",
+        migrations: [
+          { from: stored.identity, migrate: identity },
+          { from: stored.identity, migrate: identity },
+        ],
+      },
+      {
+        code: "checkpoint-migration-cyclic",
+        migrations: [
+          { from: stored.identity, to: other, migrate: identity },
+          { from: other, to: stored.identity, migrate: identity },
+        ],
+      },
+    ] as const
+
+    for (const testCase of cases) {
+      const definition = withCheckpointMigrations(withCounter("counter-v2")(createYrdDef()), testCase.migrations)
+      await expect(createYrd(definition, { inject: { journal: retained } })).rejects.toMatchObject({
+        failure: { code: testCase.code },
+      })
+    }
+    expect(() =>
+      withCheckpointMigrations(withCounter("counter-v2")(createYrdDef()), [
+        { from: "not-a-checkpoint-identity", migrate: identity },
+      ]),
+    ).toThrow(/not a SHA-256 identity/iu)
   })
 
   it("restores versioned receipt frames from a projection checkpoint", async () => {

@@ -454,6 +454,7 @@ function createJournalWithMode(options: JournalOptions, mode: JournalMode): Jour
   let archiveFallbacks = 0
   const checkpoint = {
     load: (identity: string) => loadCheckpoint(runtime, mode, identity),
+    inspect: () => inspectCheckpoint(runtime, mode),
     ...(mode === "mutable" ? { save: (value: JournalCheckpoint) => saveCheckpoint(runtime, value) } : {}),
   }
   const journal: Journal<unknown> = {
@@ -553,6 +554,16 @@ async function loadCheckpoint(
   mode: JournalMode,
   identity: string,
 ): Promise<JournalCheckpoint | undefined> {
+  const checkpoint = await inspectCheckpoint(runtime, mode)
+  if (checkpoint === undefined) return undefined
+  if (checkpoint.identity !== identity) {
+    runtime.log.info?.("Saved state is outdated; rebuilding it.")
+    return undefined
+  }
+  return checkpoint
+}
+
+async function inspectCheckpoint(runtime: Context, mode: JournalMode): Promise<JournalCheckpoint | undefined> {
   const load = async (): Promise<JournalCheckpoint | undefined> => {
     if (!(await exists(runtime.path))) return undefined
     using database = openReadOnly(runtime.path)
@@ -568,12 +579,8 @@ async function loadCheckpoint(
         runtime.log.warn?.("Saved state is damaged; rebuilding it.")
         return undefined
       }
-      if (snapshot.checkpoint_identity !== identity) {
-        runtime.log.info?.("Saved state is outdated; rebuilding it.")
-        return undefined
-      }
       const checkpoint = JSON.parse(checkpointJson) as JournalCheckpoint
-      if (checkpoint.identity !== identity || checkpoint.cursor !== snapshot.cursor) {
+      if (checkpoint.identity !== snapshot.checkpoint_identity || checkpoint.cursor !== snapshot.cursor) {
         runtime.log.warn?.("Saved state is inconsistent; rebuilding it.")
         return undefined
       }

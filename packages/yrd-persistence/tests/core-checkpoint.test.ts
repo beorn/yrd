@@ -240,6 +240,21 @@ function indexedCheckpointJournal(): Readonly<{
 }
 
 describe("persistent Core projection checkpoint", () => {
+  it("inspects a checksum-valid predecessor without pretending it matches the requested identity", async () => {
+    const dir = await stateDir()
+    const definition = counterDefinition()
+    const writer = await createYrd(definition, { inject: { journal: createJournal({ dir }), id: ids() } })
+    await writer.dispatch({ op: "counter.add", args: { by: 2 } })
+    await writer.close()
+    const expected = storedCheckpoint(dir)
+    if (expected === undefined) throw new Error("expected persisted checkpoint")
+
+    const journal = createJournal({ dir })
+    await expect(journal.checkpoint?.load("0".repeat(64))).resolves.toBeUndefined()
+    expect(journal.checkpoint?.inspect).toBeTypeOf("function")
+    await expect(journal.checkpoint?.inspect?.()).resolves.toEqual(expected)
+  })
+
   it("disables contribution eviction when a custom Journal has no history capability", async () => {
     const add = command({
       title: "Add retained item",

@@ -15,6 +15,9 @@ export type JournalCheckpoint = Readonly<{
 
 export type JournalCheckpointStore = Readonly<{
   load(identity: string): Promise<JournalCheckpoint | undefined>
+  /** Return the checksum-validated stored checkpoint regardless of identity.
+   * Core alone decides whether a declared migration may consume it. */
+  inspect?(): Promise<JournalCheckpoint | undefined>
   save?(checkpoint: JournalCheckpoint): Promise<boolean>
 }>
 

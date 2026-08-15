@@ -28,7 +28,7 @@ import {
   type EventDraft,
   type JsonValue,
 } from "./domain.ts"
-import { asFailure, raiseFailure } from "./failure.ts"
+import { asFailure, failureFact, raiseFailure } from "./failure.ts"
 import {
   assertJournalReaderCompatibility,
   JOURNAL_READER_VERSION,
@@ -106,6 +106,7 @@ type JournalEvents = Readonly<Record<string, JournalEventDef>>
 type Project<State extends object> = (state: DeepReadonly<State>, event: Event, cause: Cause) => State
 type Empty = Readonly<Record<never, never>>
 const projectionVersions = Symbol("yrd.projectionVersions")
+const checkpointMigrations = Symbol("yrd.checkpointMigrations")
 const PROJECTION_CHECKPOINT_VERSION = 1
 const PROJECTION_CHECKPOINT_REFRESH_FRAMES = 256
 const PROJECTION_CHECKPOINT_HIGH_WATER_FRAMES = 512
@@ -191,6 +192,7 @@ export type YrdDef<
   validate(state: DeepReadonly<State>): void
   compact(state: DeepReadonly<State>): State
   readonly [projectionVersions]: readonly (string | undefined)[]
+  readonly [checkpointMigrations]: readonly CheckpointMigration<State>[]
   create(yrd: Yrd<State, Commands>): Features
   extend<
     AddedState extends object = Empty,
@@ -200,6 +202,41 @@ export type YrdDef<
     contribution: Contribution<State, Commands, Features, AddedState, AddedCommands, AddedFeatures>,
   ): YrdDef<State & AddedState, Commands & AddedCommands, Features & AddedFeatures>
 }>
+
+export type CheckpointMigration<State extends object> = Readonly<{
+  /** Exact predecessor projection identity this edge accepts. */
+  from: string
+  /** Exact successor identity. Omit only for the current definition. */
+  to?: string
+  /** Pure projection-state transform. Journal frames and receipt registries are preserved by Core. */
+  migrate(state: DeepReadonly<State>): State
+}>
+
+export function withCheckpointMigrations<State extends object, Commands extends CommandTree, Features extends object>(
+  definition: YrdDef<State, Commands, Features>,
+  migrations: readonly CheckpointMigration<State>[],
+): YrdDef<State, Commands, Features> {
+  for (const migration of migrations) {
+    if (!SHA256_PATTERN.test(migration.from)) {
+      throw new TypeError(`yrd: checkpoint migration predecessor '${migration.from}' is not a SHA-256 identity`)
+    }
+    if (migration.to !== undefined && !SHA256_PATTERN.test(migration.to)) {
+      throw new TypeError(`yrd: checkpoint migration successor '${migration.to}' is not a SHA-256 identity`)
+    }
+  }
+  return buildDef({
+    initialState: definition.initialState,
+    commands: definition.commands,
+    events: definition.events,
+    replayEvents: definition.replayEvents,
+    project: definition.project,
+    validate: definition.validate,
+    compact: (state) => definition.compact(state),
+    [projectionVersions]: definition[projectionVersions],
+    [checkpointMigrations]: [...definition[checkpointMigrations], ...migrations],
+    create: definition.create,
+  })
+}
 
 export type StateOf<Def> = Def extends YrdDef<infer State, infer _Commands, infer _Features> ? State : never
 export type CommandsOf<Def> = Def extends YrdDef<infer _State, infer Commands, infer _Features> ? Commands : never
@@ -246,6 +283,7 @@ export function createYrdDef(): YrdDef {
     validate: () => {},
     compact: (state) => state,
     [projectionVersions]: [],
+    [checkpointMigrations]: [],
     create: () => ({}),
   })
 }
@@ -588,7 +626,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
           `was evicted by the retention window, so it cannot be replayed from the beginning`,
       )
     }
-    return await fold(emptyProjection())
+    return fold(emptyProjection())
   }
 
   const projectFrame = (base: Projection, frame: JournalFrame, source: "append" | "replay"): Projection => {
@@ -724,16 +762,36 @@ export async function createYrd<State extends object, Commands extends CommandTr
   const loadProjection = async (): Promise<Projection | undefined> => {
     if (checkpointStore === undefined || checkpointIdentity === undefined) return undefined
     let checkpoint: JournalCheckpoint | undefined
+    let migrationSource = false
     try {
       checkpoint = await checkpointStore.load(checkpointIdentity)
+      if (
+        checkpoint === undefined &&
+        checkpointStore.inspect !== undefined &&
+        definition[checkpointMigrations].length > 0
+      ) {
+        const predecessor = await checkpointStore.inspect()
+        if (predecessor !== undefined && predecessor.identity !== checkpointIdentity) {
+          migrationSource = true
+          checkpoint = migrateProjectionCheckpoint(definition, predecessor, checkpointIdentity)
+        }
+      }
       if (checkpoint === undefined) return undefined
       // Wrapped at the CALL so the stage covers the whole restore including the
       // deep `freeze(state)` in its return — the existing `totalMs` inside
       // restoreProjection stops before that freeze and so under-reports itself.
       const restored = stage("checkpoint-restore", () => restoreProjection(checkpoint as JournalCheckpoint))
-      checkpointCursor = checkpoint.cursor
+      checkpointCursor = migrationSource ? undefined : checkpoint.cursor
       return restored
-    } catch {
+    } catch (error) {
+      if (migrationSource) {
+        if (failureFact(error) !== undefined) throw error
+        raiseFailure(
+          "configuration",
+          "checkpoint-migration-invalid",
+          `yrd: migrated checkpoint failed current validation: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
       // silent-fallback-allow: the report below surfaces corruption before the documented rebuild path.
       reportSavedStateRebuild("Saved state is inconsistent; rebuilding it.")
       return undefined
@@ -1156,6 +1214,7 @@ function buildDef<State extends object, Commands extends CommandTree, Features e
   validate(state: DeepReadonly<State>): void
   compact(state: DeepReadonly<State>, complete: DeepReadonly<State>): State
   readonly [projectionVersions]: readonly (string | undefined)[]
+  readonly [checkpointMigrations]: readonly CheckpointMigration<State>[]
   create(yrd: Yrd<State, Commands>): Features
 }): YrdDef<State, Commands, Features> {
   const definition: YrdDef<State, Commands, Features> = {
@@ -1169,6 +1228,9 @@ function buildDef<State extends object, Commands extends CommandTree, Features e
     >(
       contribution: Contribution<State, Commands, Features, AddedState, AddedCommands, AddedFeatures>,
     ): YrdDef<State & AddedState, Commands & AddedCommands, Features & AddedFeatures> {
+      if (values[checkpointMigrations].length > 0) {
+        throw new TypeError("yrd: declare checkpoint migrations only after the Yrd definition is fully composed")
+      }
       const addedState = contribution.initialState ?? ({} as AddedState)
       const addedCommands = contribution.commands ?? ({} as AddedCommands)
       const initialState = mergeState(values.initialState, addedState)
@@ -1189,6 +1251,7 @@ function buildDef<State extends object, Commands extends CommandTree, Features e
           contribution.project === undefined
             ? values[projectionVersions]
             : [...values[projectionVersions], contribution.projectionVersion],
+        [checkpointMigrations]: [],
         project(state, applied, cause) {
           const previousState = selectFields(state, previousFields) as DeepReadonly<State>
           const projected = {
@@ -1259,6 +1322,94 @@ function projectionCheckpointIdentity<State extends object, Commands extends Com
   })
   if (encoded === undefined) throw new TypeError("yrd: projection checkpoint identity must be canonical JSON")
   return createHash("sha256").update(encoded).digest("hex")
+}
+
+type ResolvedCheckpointMigration<State extends object> = Readonly<{
+  from: string
+  to: string
+  migrate(state: DeepReadonly<State>): State
+}>
+
+function checkpointMigrationPath<State extends object, Commands extends CommandTree, Features extends object>(
+  definition: YrdDef<State, Commands, Features>,
+  from: string,
+  target: string,
+): readonly ResolvedCheckpointMigration<State>[] {
+  const edges = definition[checkpointMigrations].map((migration) => ({
+    ...migration,
+    to: migration.to ?? target,
+  }))
+  const paths: ResolvedCheckpointMigration<State>[][] = []
+  let cycle = false
+  const visit = (
+    identity: string,
+    path: readonly ResolvedCheckpointMigration<State>[],
+    seen: ReadonlySet<string>,
+  ): void => {
+    if (identity === target) {
+      paths.push([...path])
+      return
+    }
+    for (const edge of edges.filter((candidate) => candidate.from === identity)) {
+      if (seen.has(edge.to)) {
+        cycle = true
+        continue
+      }
+      visit(edge.to, [...path, edge], new Set([...seen, edge.to]))
+    }
+  }
+  visit(from, [], new Set([from]))
+  if (cycle) {
+    raiseFailure(
+      "configuration",
+      "checkpoint-migration-cyclic",
+      `yrd: checkpoint migration graph reachable from '${from}' contains a cycle`,
+    )
+  }
+  if (paths.length === 0) {
+    raiseFailure(
+      "configuration",
+      "checkpoint-migration-missing",
+      `yrd: no checkpoint migration path exists from '${from}' to '${target}'`,
+    )
+  }
+  if (paths.length > 1) {
+    raiseFailure(
+      "configuration",
+      "checkpoint-migration-ambiguous",
+      `yrd: ${paths.length} checkpoint migration paths exist from '${from}' to '${target}'`,
+    )
+  }
+  return paths[0] ?? []
+}
+
+function migrateProjectionCheckpoint<State extends object, Commands extends CommandTree, Features extends object>(
+  definition: YrdDef<State, Commands, Features>,
+  checkpoint: JournalCheckpoint,
+  target: string,
+): JournalCheckpoint {
+  const parsed = ProjectionCheckpointSchema.parse(checkpoint.value)
+  let state = globalThis.structuredClone(parsed.state) as DeepReadonly<State>
+  for (const migration of checkpointMigrationPath(definition, checkpoint.identity, target)) {
+    try {
+      state = migration.migrate(freeze(state as State)) as DeepReadonly<State>
+      assertCheckpointState(state)
+    } catch (error) {
+      raiseFailure(
+        "configuration",
+        "checkpoint-migration-failed",
+        `yrd: checkpoint migration '${migration.from}' -> '${migration.to}' failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+    }
+  }
+  definition.validate(state)
+  return {
+    identity: target,
+    cursor: checkpoint.cursor,
+    value: { ...parsed, state },
+  }
 }
 
 function projectionCheckpointState(value: unknown, path = "$state"): JsonValue {
