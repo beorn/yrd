@@ -10,6 +10,7 @@ import { createLogger, type Event as LogEvent } from "loggily"
 import * as Core from "@yrd/core"
 import {
   command,
+  checkpointMigrationManifest,
   createMemoryJournal,
   createYrd,
   createYrdDef,
@@ -460,6 +461,14 @@ describe("Yrd domain objects", () => {
         migrate: (state) => state,
       },
     ])
+    const manifest = checkpointMigrationManifest(current)
+
+    expect(manifest).toEqual({
+      version: 1,
+      targetIdentity: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      edges: [{ from: stored.identity, to: expect.stringMatching(/^[0-9a-f]{64}$/u) }],
+    })
+    expect(manifest.edges[0]?.to).toBe(manifest.targetIdentity)
 
     await using migrated = await createYrd(current, { inject: { journal: retained } })
 

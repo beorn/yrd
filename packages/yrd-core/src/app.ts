@@ -212,6 +212,25 @@ export type CheckpointMigration<State extends object> = Readonly<{
   migrate(state: DeepReadonly<State>): State
 }>
 
+export const CheckpointMigrationManifestSchema = z
+  .object({
+    version: z.literal(1),
+    targetIdentity: z.string().regex(SHA256_PATTERN),
+    edges: z
+      .array(
+        z
+          .object({
+            from: z.string().regex(SHA256_PATTERN),
+            to: z.string().regex(SHA256_PATTERN),
+          })
+          .strict(),
+      )
+      .readonly(),
+  })
+  .strict()
+  .readonly()
+export type CheckpointMigrationManifest = z.infer<typeof CheckpointMigrationManifestSchema>
+
 export function withCheckpointMigrations<State extends object, Commands extends CommandTree, Features extends object>(
   definition: YrdDef<State, Commands, Features>,
   migrations: readonly CheckpointMigration<State>[],
@@ -235,6 +254,21 @@ export function withCheckpointMigrations<State extends object, Commands extends 
     [projectionVersions]: definition[projectionVersions],
     [checkpointMigrations]: [...definition[checkpointMigrations], ...migrations],
     create: definition.create,
+  })
+}
+
+export function checkpointMigrationManifest<
+  State extends object,
+  Commands extends CommandTree,
+  Features extends object,
+>(definition: YrdDef<State, Commands, Features>): CheckpointMigrationManifest {
+  const targetIdentity = projectionCheckpointIdentity(definition)
+  return CheckpointMigrationManifestSchema.parse({
+    version: 1,
+    targetIdentity,
+    edges: definition[checkpointMigrations]
+      .map(({ from, to }) => ({ from, to: to ?? targetIdentity }))
+      .toSorted((left, right) => left.from.localeCompare(right.from) || left.to.localeCompare(right.to)),
   })
 }
 
