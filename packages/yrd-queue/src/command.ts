@@ -202,6 +202,9 @@ export const GitCheckComparisonEvidenceSchema = z
     parent: CommandEvidenceSchema,
     netNewDiagnostics: z.array(CommandDiagnosticSchema),
     resolvedDiagnostics: z.array(CommandDiagnosticSchema),
+    /** Exact parent/candidate intersection. Optional so journals written by
+     * earlier Yrd revisions remain readable. */
+    unchangedDiagnosticCount: z.number().int().nonnegative().optional(),
   })
   .strict()
 export type GitCheckComparisonEvidence = Readonly<z.infer<typeof GitCheckComparisonEvidenceSchema>>
@@ -592,7 +595,10 @@ function commandCheckpointMigration(
   return value === undefined ? {} : { value }
 }
 
-function commandDiagnostics(output: string): Readonly<{
+function commandDiagnostics(
+  output: string,
+  limit = 20,
+): Readonly<{
   values: readonly CommandDiagnostic[]
   truncated: boolean
 }> {
@@ -601,7 +607,7 @@ function commandDiagnostics(output: string): Readonly<{
     const text = row.trim()
     const changed = /^[ MADRCU?!]{2}\s+(.+)$/u.exec(row)
     if (changed?.[1] !== undefined) {
-      if (diagnostics.length >= 20) return { values: diagnostics, truncated: true }
+      if (diagnostics.length >= limit) return { values: diagnostics, truncated: true }
       diagnostics.push({ file: changed[1], [sourceRowKey]: 1, message: "working tree changed during check" })
       continue
     }
@@ -611,7 +617,7 @@ function commandDiagnostics(output: string): Readonly<{
     const rowNumber = Number(match[2])
     const column = match[3] === undefined ? undefined : Number(match[3])
     if (rowNumber < 1 || (column !== undefined && column < 1)) continue
-    if (diagnostics.length >= 20) return { values: diagnostics, truncated: true }
+    if (diagnostics.length >= limit) return { values: diagnostics, truncated: true }
     diagnostics.push({
       file: match[1],
       [sourceRowKey]: rowNumber,
@@ -638,10 +644,10 @@ function diagnosticIdentity(diagnostic: CommandDiagnostic): string {
   return JSON.stringify([diagnostic.file, diagnostic[sourceRowKey], diagnostic.column ?? null, diagnostic.message])
 }
 
-function uniqueComparisonDiagnostics(evidence: CommandEvidence, cwd: string): readonly CommandDiagnostic[] {
+function uniqueComparisonDiagnostics(values: readonly CommandDiagnostic[], cwd: string): readonly CommandDiagnostic[] {
   const seen = new Set<string>()
   const diagnostics: CommandDiagnostic[] = []
-  for (const raw of evidence.diagnostics ?? []) {
+  for (const raw of values) {
     const diagnostic = comparisonDiagnostic(raw, cwd)
     const identity = diagnosticIdentity(diagnostic)
     if (seen.has(identity)) continue
@@ -690,14 +696,30 @@ function validateEnvironmentDeclaration(
   })
 }
 
+async function completeComparisonDiagnostics(
+  evidence: CommandEvidence,
+  cwd: string,
+): Promise<readonly CommandDiagnostic[]> {
+  if (evidence.diagnosticsTruncated !== true) {
+    return uniqueComparisonDiagnostics(evidence.diagnostics ?? [], cwd)
+  }
+  const streams = evidence.artifacts.filter(({ name }) => name === "stdout" || name === "stderr")
+  if (streams.length === 0) throw new Error("truncated diagnostics have no retained stdout/stderr artifact")
+  const values = (
+    await Promise.all(
+      streams.map(async ({ path }) => commandDiagnostics(await readFile(path, "utf8"), Infinity).values),
+    )
+  ).flat()
+  if (values.length === 0) throw new Error("retained stdout/stderr artifacts contain no comparable diagnostics")
+  return uniqueComparisonDiagnostics(values, cwd)
+}
+
 function compareCommandEvidence(
   parent: CommandEvidence,
-  parentCwd: string,
+  parentDiagnostics: readonly CommandDiagnostic[],
   candidate: CommandEvidence,
-  candidateCwd: string,
+  candidateDiagnostics: readonly CommandDiagnostic[],
 ): GitCheckComparisonEvidence {
-  const parentDiagnostics = uniqueComparisonDiagnostics(parent, parentCwd)
-  const candidateDiagnostics = uniqueComparisonDiagnostics(candidate, candidateCwd)
   const parentIdentities = new Set(parentDiagnostics.map(diagnosticIdentity))
   const candidateIdentities = new Set(candidateDiagnostics.map(diagnosticIdentity))
   return GitCheckComparisonEvidenceSchema.parse({
@@ -708,6 +730,9 @@ function compareCommandEvidence(
     resolvedDiagnostics: parentDiagnostics.filter(
       (diagnostic) => !candidateIdentities.has(diagnosticIdentity(diagnostic)),
     ),
+    unchangedDiagnosticCount: parentDiagnostics.filter((diagnostic) =>
+      candidateIdentities.has(diagnosticIdentity(diagnostic)),
+    ).length,
   })
 }
 
@@ -718,8 +743,7 @@ function comparableCommandEvidence(outcome: JobResult<CommandEvidence>, purpose:
     outcome.conclusion === "failure" &&
     outcome.error.code === `${purpose}-failed` &&
     outcome.output?.diagnostics !== undefined &&
-    outcome.output.diagnostics.length > 0 &&
-    outcome.output.diagnosticsTruncated !== true
+    outcome.output.diagnostics.length > 0
   ) {
     return outcome.output
   }
@@ -6929,7 +6953,47 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             )
           }
 
-          const comparison = compareCommandEvidence(parentEvidence, parentPath, candidateEvidence, path)
+          const comparisonArtifactsUnavailable = (
+            phase: "parent" | "candidate",
+            cause: unknown,
+          ): JobResult<GitCheckResultEvidence> => {
+            const error = JobErrorSchema.parse({
+              code: `${purpose}-${phase}-diagnostics-artifact-unavailable`,
+              message: `${purpose} ${phase} diagnostics artifact could not be read: ${messageOf(cause)}`,
+            })
+            const refusal = GitCheckComparisonRefusalEvidenceSchema.parse({
+              ...candidate,
+              kind: "check-comparison-refusal",
+              phase,
+              error,
+              parent: parentEvidence,
+              candidateEvidence,
+              retryable: true,
+            })
+            return failedWithEvidence(
+              "queue-environment-refused",
+              `${purpose} ${phase} diagnostics artifact could not be compared: ${error.message}`,
+              refusal,
+            )
+          }
+          let candidateDiagnostics: readonly CommandDiagnostic[]
+          try {
+            candidateDiagnostics = await completeComparisonDiagnostics(candidateEvidence, path)
+          } catch (cause) {
+            return comparisonArtifactsUnavailable("candidate", cause)
+          }
+          let parentDiagnostics: readonly CommandDiagnostic[]
+          try {
+            parentDiagnostics = await completeComparisonDiagnostics(parentEvidence, parentPath)
+          } catch (cause) {
+            return comparisonArtifactsUnavailable("parent", cause)
+          }
+          const comparison = compareCommandEvidence(
+            parentEvidence,
+            parentDiagnostics,
+            candidateEvidence,
+            candidateDiagnostics,
+          )
           const evidence = GitCheckEvidenceSchema.parse({
             ...candidateEvidence,
             ...candidateMetadata,
@@ -6939,10 +7003,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
               mode,
               [
                 ...(candidateEvidence.gateReports ?? []),
-                createGateReport(
-                  "diagnostics",
-                  uniqueComparisonDiagnostics(candidateEvidence, path).map(diagnosticIdentity),
-                ),
+                createGateReport("diagnostics", candidateDiagnostics.map(diagnosticIdentity)),
               ],
               candidateEvidence.checkpointMigration,
             ),

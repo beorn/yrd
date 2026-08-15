@@ -21,6 +21,7 @@ export const CandidateFailureReceiptEvidenceSchema = z
     baseSha: GitShaSchema,
     candidateSha: GitShaSchema,
     failures: z.array(CommandDiagnosticSchema).min(1),
+    unchangedBaselineCount: z.number().int().nonnegative().optional(),
   })
   .strict()
 export type CandidateFailureReceiptEvidence = Readonly<z.infer<typeof CandidateFailureReceiptEvidenceSchema>>
@@ -34,6 +35,7 @@ const DeltaComparisonEvidenceSchema = z
     comparison: z
       .object({
         netNewDiagnostics: z.array(CommandDiagnosticSchema).min(1),
+        unchangedDiagnosticCount: z.number().int().nonnegative().optional(),
       })
       .passthrough(),
     certificate: z
@@ -62,5 +64,8 @@ export function candidateFailureReceiptEvidence(value: unknown): CandidateFailur
     baseSha,
     candidateSha,
     failures: comparison.netNewDiagnostics,
+    ...(comparison.unchangedDiagnosticCount === undefined
+      ? {}
+      : { unchangedBaselineCount: comparison.unchangedDiagnosticCount }),
   })
 }
