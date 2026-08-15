@@ -4,6 +4,7 @@ import type { Process } from "@yrd/process"
 
 /** Git reports an absent side of a gitlink change as an all-zero id. */
 const ABSENT_PIN = /^0+$/u
+const DEPENDENCY_SPEC_FIELDS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"] as const
 const GITLINK_MODE = "160000"
 const MANIFEST = "package.json"
 
@@ -16,7 +17,7 @@ export type SubmoduleManifestDrift = Readonly<{
   submodule: string
   basePin: string
   candidatePin: string
-  /** Superproject-relative manifest paths whose content differs across the pins. */
+  /** Superproject-relative manifests whose dependency specs moved, or which were added/removed. */
   manifests: readonly string[]
 }>
 
@@ -92,8 +93,8 @@ function gitlinkChanges(raw: string, options: Options): readonly GitlinkChange[]
   return changes
 }
 
-/** Map every tracked `package.json` in a pin to its blob id. Blob identity is
- * exact content equality, so no manifest bytes need to be read or parsed. */
+/** Map every tracked `package.json` in a pin to its blob id. Blob identity lets
+ * the semantic comparison avoid reading manifests that are byte-for-byte equal. */
 async function manifestBlobs(
   processService: Pick<Process, "run">,
   options: Options,
@@ -115,6 +116,49 @@ async function manifestBlobs(
     if (path === MANIFEST || path.endsWith(`/${MANIFEST}`)) blobs.set(path, blob)
   }
   return blobs
+}
+
+function dependencySpecs(manifest: string, subject: string, options: Options): string {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(manifest)
+  } catch (error) {
+    options.fail(
+      `could not read submodule manifest drift: ${subject} is not valid JSON: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    options.fail(`could not read submodule manifest drift: ${subject} is not a JSON object`)
+  }
+
+  const record = parsed as Record<string, unknown>
+  const specs: Record<string, Record<string, unknown>> = {}
+  for (const field of DEPENDENCY_SPEC_FIELDS) {
+    const value = record[field]
+    if (value === undefined) {
+      specs[field] = {}
+      continue
+    }
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      options.fail(`could not read submodule manifest drift: ${subject} field '${field}' is not an object`)
+    }
+    specs[field] = Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right)),
+    )
+  }
+  return JSON.stringify(specs)
+}
+
+async function manifestDependencySpecs(
+  processService: Pick<Process, "run">,
+  options: Options,
+  submoduleWorkdir: string,
+  pin: string,
+  path: string,
+): Promise<string> {
+  const manifest = await git(processService, options, submoduleWorkdir, ["show", `${pin}:${path}`])
+  return dependencySpecs(manifest, `'${path}' at ${pin}`, options)
 }
 
 /**
@@ -150,9 +194,23 @@ export async function submoduleManifestDrift(
     }
     const base = await manifestBlobs(processService, options, submoduleWorkdir, change.basePin)
     const candidate = await manifestBlobs(processService, options, submoduleWorkdir, change.candidatePin)
-    const manifests = [...new Set([...base.keys(), ...candidate.keys()])]
-      .filter((path) => base.get(path) !== candidate.get(path))
-      .sort()
+    const manifests: string[] = []
+    for (const path of [...new Set([...base.keys(), ...candidate.keys()])].sort()) {
+      const baseBlob = base.get(path)
+      const candidateBlob = candidate.get(path)
+      if (baseBlob === candidateBlob) continue
+      // A manifest appearing or disappearing changes workspace membership even
+      // when it has no dependencies, so it remains lockfile-relevant.
+      if (baseBlob === undefined || candidateBlob === undefined) {
+        manifests.push(path)
+        continue
+      }
+      const [baseSpecs, candidateSpecs] = await Promise.all([
+        manifestDependencySpecs(processService, options, submoduleWorkdir, change.basePin, path),
+        manifestDependencySpecs(processService, options, submoduleWorkdir, change.candidatePin, path),
+      ])
+      if (baseSpecs !== candidateSpecs) manifests.push(path)
+    }
     if (manifests.length === 0) continue
     drifts.push({
       submodule: change.submodule,

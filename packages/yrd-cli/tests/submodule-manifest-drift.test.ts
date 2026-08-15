@@ -37,6 +37,20 @@ function manifest(silvery: string): string {
   return `${JSON.stringify({ name: "dep", private: true, dependencies: { silvery } }, undefined, 2)}\n`
 }
 
+function manifestWithExports(silvery: string): string {
+  return `${JSON.stringify(
+    {
+      name: "dep",
+      private: true,
+      dependencies: { silvery },
+      exports: { ".": "./src/index.ts", "./self-mailbox-authority": "./src/self-mailbox-authority.ts" },
+      files: ["src"],
+    },
+    undefined,
+    2,
+  )}\n`
+}
+
 /**
  * A superproject pinning one submodule, plus two candidate advances of that pin:
  * one that moves the submodule's dependency specs and one that does not. This is
@@ -47,6 +61,7 @@ async function pinnedSuperproject(): Promise<{
   repo: string
   baseSha: string
   specChangeSha: string
+  metadataChangeSha: string
   unrelatedChangeSha: string
 }> {
   const root = await mkdtemp(join(tmpdir(), "yrd-manifest-drift-"))
@@ -87,6 +102,13 @@ async function pinnedSuperproject(): Promise<{
   await git(module, "commit", "-qm", "docs only")
   const unrelatedPin = await git(module, "rev-parse", "HEAD")
 
+  await git(module, "switch", "-q", "main")
+  await git(module, "switch", "-qc", "metadata")
+  await writeFile(join(module, "package.json"), manifestWithExports("^0.23.2"))
+  await git(module, "add", "package.json")
+  await git(module, "commit", "-qm", "export mailbox authority")
+  const metadataPin = await git(module, "rev-parse", "HEAD")
+
   await git(join(repo, "dep"), "fetch", "-q", "origin")
   await git(join(repo, "dep"), "checkout", "-q", specPin)
   await git(repo, "add", "dep")
@@ -99,7 +121,13 @@ async function pinnedSuperproject(): Promise<{
   await git(repo, "commit", "-qm", "advance dep to docs only")
   const unrelatedChangeSha = await git(repo, "rev-parse", "HEAD")
 
-  return { repo, baseSha, specChangeSha, unrelatedChangeSha }
+  await git(repo, "reset", "-q", "--soft", baseSha)
+  await git(join(repo, "dep"), "checkout", "-q", metadataPin)
+  await git(repo, "add", "dep")
+  await git(repo, "commit", "-qm", "advance dep to metadata change")
+  const metadataChangeSha = await git(repo, "rev-parse", "HEAD")
+
+  return { repo, baseSha, specChangeSha, metadataChangeSha, unrelatedChangeSha }
 }
 
 function refuse(message: string): never {
@@ -136,6 +164,21 @@ describe("submoduleManifestDrift", () => {
         workspace: repo,
         baseSha,
         candidateSha: unrelatedChangeSha,
+        fail: refuse,
+      }),
+    ).toEqual([])
+  })
+
+  it("withholds authorization when a manifest changed outside its dependency specs", async () => {
+    const { repo, baseSha, metadataChangeSha } = await pinnedSuperproject()
+    await using process = createProcess({ cwd: repo })
+
+    expect(
+      await submoduleManifestDrift(process, {
+        repo,
+        workspace: repo,
+        baseSha,
+        candidateSha: metadataChangeSha,
         fail: refuse,
       }),
     ).toEqual([])
