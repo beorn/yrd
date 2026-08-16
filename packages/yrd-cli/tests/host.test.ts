@@ -1306,7 +1306,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       )
       .get()
     if (checkpoint === null) throw new Error("expected predecessor projection checkpoint")
-    const checkpointValue = JSON.parse(checkpoint.checkpoint_json)
+    const checkpointValue = z.record(z.string(), z.unknown()).parse(JSON.parse(checkpoint.checkpoint_json))
     expect(checkpointValue).toMatchObject({ value: { state: { queues: { batchSize: 10 } } } })
     const retainedIdentity = "0a3476ef91823d46f19770047a4e6462c970c5afc250cba9dd82eb31c5febc25"
     const retainedCheckpoint = JSON.stringify({ ...checkpointValue, identity: retainedIdentity })
