@@ -45,6 +45,41 @@ function scannedFiles(path: string): string[] {
 }
 
 describe("noun cutover ratchet", () => {
+  it("refuses the hh-only typecheck entrypoint from a standalone checkout and names the root command", () => {
+    const script = join(root, "scripts", "typecheck-hh.ts")
+    expect(
+      existsSync(script),
+      "the component entrypoint must be executable rather than a package-script incantation",
+    ).toBe(true)
+    const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
+      scripts?: Record<string, string>
+    }
+    expect(manifest.scripts?.["typecheck:hh"]).toBe("bun scripts/typecheck-hh.ts")
+
+    const standalone = mkdtempSync(join(tmpdir(), "yrd-typecheck-hh-standalone-"))
+    try {
+      mkdirSync(join(standalone, "scripts"))
+      copyFileSync(script, join(standalone, "scripts", "typecheck-hh.ts"))
+      const git = Bun.spawnSync({ cmd: ["git", "init", "-q"], cwd: standalone, stdout: "pipe", stderr: "pipe" })
+      expect(git.exitCode, git.stderr.toString()).toBe(0)
+
+      const result = Bun.spawnSync({
+        cmd: [process.execPath, "scripts/typecheck-hh.ts", "--probe"],
+        cwd: standalone,
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const stderr = result.stderr.toString()
+      expect(result.exitCode, stderr).toBe(2)
+      expect(stderr).toContain("unsupported standalone topology")
+      expect(stderr).toContain(
+        'cd "$(git rev-parse --show-superproject-working-tree --show-toplevel | head -1)" && bun run typecheck',
+      )
+    } finally {
+      rmSync(standalone, { recursive: true, force: true })
+    }
+  })
+
   it("keeps managed agent orchestration out of Yrd product code and docs", () => {
     const violations = [
       join(root, "README.md"),

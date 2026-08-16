@@ -7618,7 +7618,9 @@ function needsAuthorMessage(pr: DeepReadonly<PR>, receipt: JobError): string {
         `${failure.file}:${failure.line}${failure.column === undefined ? "" : `:${failure.column}`} ${failure.message}`,
     )
     .join("; ")
-  return `PR '${pr.id}' introduced ${attributed.data.failures.length} check failure(s): ${failures}`
+  const unchanged = attributed.data.unchangedBaselineCount
+  const footer = unchanged === undefined ? "" : `; ${unchanged} baseline error${unchanged === 1 ? "" : "s"} unchanged`
+  return `PR '${pr.id}' introduced ${attributed.data.failures.length} check failure(s): ${failures}${footer}`
 }
 
 function prEligibility(
