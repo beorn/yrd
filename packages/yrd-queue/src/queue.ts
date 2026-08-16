@@ -2438,7 +2438,7 @@ function createQueue<Shape extends PRShape>(
               const intentPosition = heads
                 .map(intentQueuePosition)
                 .reduce((earliest, position) => (compareQueuePosition(position, earliest) < 0 ? position : earliest))
-              const queuedPR = requestedPRs(runtime().bays, args)[0]
+              const queuedPR = runnablePRs(runtime(), args, steps, new Set(), { explicitStepAuthority })[0]
               if (queuedPR !== undefined && compareQueuePosition(prQueuePosition(queuedPR), intentPosition) <= 0) {
                 intentCutoff = intentPosition
                 break
