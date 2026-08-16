@@ -5733,6 +5733,72 @@ describe("Queue", () => {
     expect(Queues.ids(app.state().queues)).toEqual([])
   })
 
+  it("names every rejected PR when selectorless selection emits no run events", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    await using app = await createQueueApp({}, createMemoryJournal(), undefined, ids(), log)
+    const first = await submitBranch(app, "issue/paused-selectorless-first")
+    const second = await submitBranch(app, "issue/paused-selectorless-second")
+    await app.queue.pause({
+      base: "main",
+      reason: "operator freeze",
+      allowedPRs: [],
+      expiresAt: "2026-01-01T01:00:00.000Z",
+    })
+
+    const direct = await app.dispatch(app.commands.queue.run, {})
+    expect(direct.events).toEqual([])
+    expect(direct.value).toEqual({
+      kind: "no-runnable-prs",
+      considered: [
+        {
+          code: "queue-paused",
+          pr: first.id,
+          reason: "queue 'main' is paused: operator freeze; PR 'PR1' is not in the allowed set",
+          revision: 1,
+        },
+        {
+          code: "queue-paused",
+          pr: second.id,
+          reason: "queue 'main' is paused: operator freeze; PR 'PR2' is not in the allowed set",
+          revision: 1,
+        },
+      ],
+      reason: "every considered PR was ineligible for the selected plan",
+      selectedSteps: ["check", "review", "merge", "deploy"],
+    })
+
+    await expect(app.queue.run({}, runtime)).resolves.toEqual([])
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "log",
+        level: "warn",
+        message: "queue run emitted zero events because every considered PR was ineligible",
+        props: expect.objectContaining({
+          action: "queue-run-no-runnable-prs",
+          considered: [
+            {
+              code: "queue-paused",
+              pr: first.id,
+              reason: "queue 'main' is paused: operator freeze; PR 'PR1' is not in the allowed set",
+              revision: 1,
+            },
+            {
+              code: "queue-paused",
+              pr: second.id,
+              reason: "queue 'main' is paused: operator freeze; PR 'PR2' is not in the allowed set",
+              revision: 1,
+            },
+          ],
+          reason: "every considered PR was ineligible for the selected plan",
+          selectedSteps: ["check", "review", "merge", "deploy"],
+        }),
+      }),
+    )
+    log.end()
+  })
+
   it("treats base aliases as one active queue before a second run starts", async () => {
     const firstEntered = Promise.withResolvers<void>()
     const releaseFirst = Promise.withResolvers<void>()
