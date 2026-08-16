@@ -2866,11 +2866,15 @@ checks: [{check: {run: "true"}}]
     }
   })
 
-  it("binds an explicit local check to the invoking linked-worktree candidate", async () => {
+  it("binds current-branch pr submit to the invoking linked-worktree candidate", async () => {
     const { repo } = await repository()
     await writeFile(
       join(repo, ".yrd.yml"),
-      'checks: [{candidate: {run: \'test "$YRD_BASE_SHA" != "$YRD_CANDIDATE_SHA" && test "$YRD_CANDIDATE_SHA" = "$(git rev-parse HEAD)"\'}}]\n',
+      [
+        journalCompatibilityYaml().trimEnd(),
+        'checks: [{candidate: {run: \'test "$YRD_BASE_SHA" != "$YRD_CANDIDATE_SHA" && test "$YRD_CANDIDATE_SHA" = "$(git rev-parse HEAD)"\'}}]',
+        "",
+      ].join("\n"),
     )
     await git(repo, "add", ".yrd.yml")
     await git(repo, "commit", "-qm", "require the named candidate")
@@ -2886,7 +2890,7 @@ checks: [{check: {run: "true"}}]
     let stdout = ""
     let stderr = ""
     const exitCode = await runYrdProcess(
-      ["/usr/bin/bun", "/usr/local/bin/yrd", "check", "candidate", "--json"],
+      ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "--base", "main", "--track", "--json"],
       {
         cwd: linked,
         stdout: (text) => {
@@ -2900,8 +2904,8 @@ checks: [{check: {run: "true"}}]
 
     expect(exitCode, stderr).toBe(0)
     expect(JSON.parse(stdout)).toMatchObject({
-      command: "check",
-      checks: [{ name: "candidate", exitCode: 0 }],
+      command: "pr.submit",
+      prs: [{ branch: "issue/linked-check", status: "submitted" }],
     })
   })
 
