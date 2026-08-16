@@ -150,6 +150,30 @@ contest: {concurrency: 3, timeoutMs: 60000, evaluators: [lint]}
     expect(() => parseYrdConfig({ checks: [{ lint: { run: "true", env: { YRD_PRIVATE: "x" } } }] })).toThrow(
       "uses a reserved prefix",
     )
+    expect(
+      parseYrdConfig({ checks: [{ test: { run: "bun run test:fast", comparison: "gate-residuals" } }] }).checks,
+    ).toEqual([
+      {
+        test: {
+          run: "bun run test:fast",
+          runner: "local",
+          comparison: "gate-residuals",
+        },
+      },
+    ])
+    expect(() =>
+      parseYrdConfig({
+        checks: [
+          {
+            test: {
+              run: "bun run test:fast",
+              comparison: "gate-residuals",
+              comparisonReady: "diagnostics-comparison-ready",
+            },
+          },
+        ],
+      }),
+    ).toThrow("requires comparison: diagnostics")
   })
 
   it("uses delta until a check explicitly selects strict", () => {

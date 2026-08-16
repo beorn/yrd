@@ -138,8 +138,22 @@ export const GateCertificateSchema = z
 export type GateCertificate = Readonly<z.infer<typeof GateCertificateSchema>>
 
 export const GATE_REPORT_TRAILER = "YRD-GATE-REPORT "
+export const GATE_RESIDUAL_TRAILER = "YRD-GATE-RESIDUAL "
 export const CHECKPOINT_MIGRATION_TRAILER = "YRD-CHECKPOINT-MIGRATION "
 export const DIAGNOSTICS_COMPARISON_READY = "diagnostics-comparison-ready"
+
+const GateResidualArtifactSchema = z
+  .object({
+    version: z.literal(1),
+    comparator: GateReportSchema.shape.comparator,
+    identities: z.array(z.string().min(1)),
+  })
+  .strict()
+  .superRefine(({ identities }, context) => {
+    if (new Set(identities).size !== identities.length) {
+      context.addIssue({ code: "custom", path: ["identities"], message: "contains duplicates" })
+    }
+  })
 
 /** Create the content-addressed, multiplicity-preserving residual report a
  * structured child emits for the host's admission certificate. */
@@ -197,13 +211,36 @@ export const CommandEvidenceSchema = z
   .strict()
 export type CommandEvidence = Readonly<z.infer<typeof CommandEvidenceSchema>>
 
-export const GitCheckComparisonEvidenceSchema = z
+const DiagnosticsComparisonEvidenceSchema = z
   .object({
     parent: CommandEvidenceSchema,
     netNewDiagnostics: z.array(CommandDiagnosticSchema),
     resolvedDiagnostics: z.array(CommandDiagnosticSchema),
   })
   .strict()
+
+const GateResidualDeltaSchema = z
+  .object({
+    comparator: GateReportSchema.shape.comparator,
+    count: z.number().int().nonnegative(),
+    hash: z.string().regex(/^[0-9a-f]{64}$/u),
+  })
+  .strict()
+
+const GateResidualComparisonEvidenceSchema = z
+  .object({
+    kind: z.literal("gate-residuals"),
+    parentReports: z.array(GateReportSchema),
+    candidateReports: z.array(GateReportSchema),
+    netNew: z.array(GateResidualDeltaSchema),
+    resolved: z.array(GateResidualDeltaSchema),
+  })
+  .strict()
+
+export const GitCheckComparisonEvidenceSchema = z.union([
+  DiagnosticsComparisonEvidenceSchema,
+  GateResidualComparisonEvidenceSchema,
+])
 export type GitCheckComparisonEvidence = Readonly<z.infer<typeof GitCheckComparisonEvidenceSchema>>
 
 export const GitCheckEvidenceSchema = CommandEvidenceSchema.extend({
@@ -695,12 +732,12 @@ function compareCommandEvidence(
   parentCwd: string,
   candidate: CommandEvidence,
   candidateCwd: string,
-): GitCheckComparisonEvidence {
+): z.infer<typeof DiagnosticsComparisonEvidenceSchema> {
   const parentDiagnostics = uniqueComparisonDiagnostics(parent, parentCwd)
   const candidateDiagnostics = uniqueComparisonDiagnostics(candidate, candidateCwd)
   const parentIdentities = new Set(parentDiagnostics.map(diagnosticIdentity))
   const candidateIdentities = new Set(candidateDiagnostics.map(diagnosticIdentity))
-  return GitCheckComparisonEvidenceSchema.parse({
+  return DiagnosticsComparisonEvidenceSchema.parse({
     parent,
     netNewDiagnostics: candidateDiagnostics.filter(
       (diagnostic) => !parentIdentities.has(diagnosticIdentity(diagnostic)),
@@ -711,15 +748,104 @@ function compareCommandEvidence(
   })
 }
 
-function comparableCommandEvidence(outcome: JobResult<CommandEvidence>, purpose: string): CommandEvidence | undefined {
+async function gateResidualSets(evidence: CommandEvidence): Promise<ReadonlyMap<string, readonly string[]>> {
+  const reports = new Map<string, GateReport>()
+  for (const report of evidence.gateReports ?? []) {
+    const id = report.comparator.id
+    if (reports.has(id)) throw new Error(`gate residual evidence contains duplicate report '${id}'`)
+    reports.set(id, report)
+  }
+  if (reports.size === 0) throw new Error("gate residual evidence contains no reports")
+
+  const residuals = new Map<string, readonly string[]>()
+  for (const artifact of evidence.artifacts) {
+    const output = await readFile(artifact.path, "utf8")
+    for (const row of output.split(/\r?\n/u)) {
+      const text = row.trim()
+      if (!text.startsWith(GATE_RESIDUAL_TRAILER)) continue
+      const payload = GateResidualArtifactSchema.parse(JSON.parse(text.slice(GATE_RESIDUAL_TRAILER.length)))
+      const id = payload.comparator.id
+      if (residuals.has(id)) throw new Error(`gate residual evidence contains duplicate artifact '${id}'`)
+      const report = reports.get(id)
+      if (report === undefined) throw new Error(`gate residual artifact '${id}' has no matching report`)
+      const derived = createGateReport(id, payload.identities)
+      if (derived.residual.count !== report.residual.count || derived.residual.hash !== report.residual.hash) {
+        throw new Error(`gate residual artifact '${id}' does not match its report`)
+      }
+      residuals.set(id, payload.identities)
+    }
+  }
+  for (const id of reports.keys()) {
+    if (!residuals.has(id)) throw new Error(`gate residual report '${id}' has no matching artifact`)
+  }
+  return residuals
+}
+
+function gateResidualDelta(comparatorId: string, identities: readonly string[]) {
+  const report = createGateReport(comparatorId, identities)
+  return {
+    comparator: report.comparator,
+    count: report.residual.count,
+    hash: report.residual.hash,
+  }
+}
+
+async function compareGateResidualEvidence(
+  parent: CommandEvidence,
+  candidate: CommandEvidence,
+): Promise<z.infer<typeof GateResidualComparisonEvidenceSchema>> {
+  const parentSets = await gateResidualSets(parent)
+  const candidateSets = await gateResidualSets(candidate)
+  const parentIds = [...parentSets.keys()].sort()
+  const candidateIds = [...candidateSets.keys()].sort()
+  if (JSON.stringify(parentIds) !== JSON.stringify(candidateIds)) {
+    throw new Error(
+      `gate residual comparators differ between parent (${parentIds.join(", ")}) and candidate (${candidateIds.join(", ")})`,
+    )
+  }
+
+  const netNew = []
+  const resolved = []
+  for (const comparatorId of candidateIds) {
+    const parentSet = new Set(parentSets.get(comparatorId) ?? [])
+    const candidateSet = new Set(candidateSets.get(comparatorId) ?? [])
+    netNew.push(
+      gateResidualDelta(
+        comparatorId,
+        [...candidateSet].filter((identity) => !parentSet.has(identity)),
+      ),
+    )
+    resolved.push(
+      gateResidualDelta(
+        comparatorId,
+        [...parentSet].filter((identity) => !candidateSet.has(identity)),
+      ),
+    )
+  }
+  return GateResidualComparisonEvidenceSchema.parse({
+    kind: "gate-residuals",
+    parentReports: parent.gateReports ?? [],
+    candidateReports: candidate.gateReports ?? [],
+    netNew,
+    resolved,
+  })
+}
+
+function comparableCommandEvidence(
+  outcome: JobResult<CommandEvidence>,
+  purpose: string,
+  comparison: "diagnostics" | "gate-residuals",
+): CommandEvidence | undefined {
   if (outcome.status === "completed" && outcome.conclusion === "success") return outcome.output
   if (
     outcome.status === "completed" &&
     outcome.conclusion === "failure" &&
     outcome.error.code === `${purpose}-failed` &&
-    outcome.output?.diagnostics !== undefined &&
-    outcome.output.diagnostics.length > 0 &&
-    outcome.output.diagnosticsTruncated !== true
+    ((comparison === "diagnostics" &&
+      outcome.output?.diagnostics !== undefined &&
+      outcome.output.diagnostics.length > 0 &&
+      outcome.output.diagnosticsTruncated !== true) ||
+      (comparison === "gate-residuals" && outcome.output?.gateReports !== undefined))
   ) {
     return outcome.output
   }
@@ -6341,9 +6467,10 @@ export type GitCheckOptions = ProcessDependency &
     purpose?: string
     runner?: "local" | "waiting"
     classification?: "base" | "carrier"
-    /** Opt into parent-versus-candidate comparison for diagnostics-shaped
-     * lint/typecheck output. Ordinary commands use their exit code directly. */
-    comparison?: "diagnostics"
+    /** Opt into parent-versus-candidate comparison for bounded diagnostics or
+     * named residual sets kept in the command's immutable artifacts. Ordinary
+     * commands use their exit code directly. */
+    comparison?: "diagnostics" | "gate-residuals"
     /** Delta admits only certified inherited residuals; strict requires the
      * candidate to be absolutely green and never evaluates the parent. */
     mode?: GateMode
@@ -6819,20 +6946,23 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
               : { output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...candidateMetadata }) }),
           }
           if (mode === "strict") return candidateFailure
-          if (options.comparison !== "diagnostics") return candidateFailure
+          if (options.comparison === undefined) return candidateFailure
           // A structured child failure is terminal. A compound command may
           // continue past successful structured children and compare a final
           // diagnostics-only failure, but it must prove every earlier child
           // reached green by emitting the readiness report last.
-          const comparisonReady =
-            options.comparisonReady === undefined
-              ? outcome.output?.gateReports === undefined
-              : outcome.output?.gateReports?.some((report) => report.comparator.id === options.comparisonReady) === true
-          if (!comparisonReady) {
-            return candidateFailure
+          if (options.comparison === "diagnostics") {
+            const comparisonReady =
+              options.comparisonReady === undefined
+                ? outcome.output?.gateReports === undefined
+                : outcome.output?.gateReports?.some((report) => report.comparator.id === options.comparisonReady) ===
+                  true
+            if (!comparisonReady) {
+              return candidateFailure
+            }
           }
 
-          const candidateEvidence = comparableCommandEvidence(outcome, purpose)
+          const candidateEvidence = comparableCommandEvidence(outcome, purpose, options.comparison)
           // A command that returned a nonzero exit genuinely ran. Missing or
           // truncated diagnostics cannot turn that terminal result into an
           // infrastructure refusal: the candidate remains red by exit code.
@@ -6874,7 +7004,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             )
           }
 
-          const parentEvidence = comparableCommandEvidence(parentOutcome, purpose)
+          const parentEvidence = comparableCommandEvidence(parentOutcome, purpose, options.comparison)
           if (
             parentOutcome.status === "completed" &&
             parentOutcome.conclusion === "failure" &&
@@ -6924,6 +7054,47 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
               `${purpose} parent evidence could not be evaluated: ${error.message}`,
               refusal,
             )
+          }
+
+          if (options.comparison === "gate-residuals") {
+            let comparison: z.infer<typeof GateResidualComparisonEvidenceSchema>
+            try {
+              comparison = await compareGateResidualEvidence(parentEvidence, candidateEvidence)
+            } catch (cause) {
+              const error = JobErrorSchema.parse({
+                code: `${purpose}-gate-residuals-invalid`,
+                message: messageOf(cause),
+              })
+              const refusal = GitCheckComparisonRefusalEvidenceSchema.parse({
+                ...candidate,
+                kind: "check-comparison-refusal",
+                phase: "candidate",
+                error,
+                parent: parentEvidence,
+                candidateEvidence,
+                retryable: true,
+              })
+              return failedWithEvidence(
+                "queue-environment-refused",
+                `${purpose} gate residuals could not be compared: ${error.message}`,
+                refusal,
+              )
+            }
+            const evidence = GitCheckEvidenceSchema.parse({
+              ...candidateEvidence,
+              ...candidateMetadata,
+              comparison,
+              certificate: gateCertificate(
+                candidate,
+                mode,
+                candidateEvidence.gateReports ?? [],
+                candidateEvidence.checkpointMigration,
+              ),
+            })
+            if (comparison.netNew.every(({ count }) => count === 0)) {
+              return { status: "completed", conclusion: "success", output: evidence }
+            }
+            return { status: "completed", conclusion: "failure", error: outcome.error, output: evidence }
           }
 
           const comparison = compareCommandEvidence(parentEvidence, parentPath, candidateEvidence, path)
