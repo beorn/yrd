@@ -37,6 +37,8 @@ export type JournalHistoryDiagnostics = Readonly<{
   tailFrames: number
   /** Highest cursor the retention window has dropped; frames at or below it are gone. */
   evictedThrough: number
+  /** Lowest cursor still present in history or the live tail. Null when the journal has no retained frames. */
+  oldestRetainedCursor: Cursor | null
   archiveFallbacks: number
 }>
 

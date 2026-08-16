@@ -120,6 +120,8 @@ export type JournalViewRebuildResult = Readonly<{
 
 export type MutableJournal = Journal<unknown> &
   Readonly<{
+    /** Exact policy resolved once for this writer. Read-only journals never expose writer policy. */
+    retention: ResolvedRetention
     views: Readonly<{
       rebuild(): Promise<JournalViewRebuildResult>
     }>
@@ -360,7 +362,7 @@ export function resolveRetention(configured: JournalRetention | undefined): Reso
   if (process.env.YRD_JOURNAL_RETENTION?.trim() === "disabled" && configured === undefined) return "disabled"
   if (!retentionArmed(configured)) return "disabled"
   const keepDays = retentionBound("keepDays", configured?.keepDays, "YRD_JOURNAL_KEEP_DAYS", undefined)
-  return {
+  return Object.freeze({
     keepFrames: retentionBound(
       "keepFrames",
       configured?.keepFrames,
@@ -368,7 +370,7 @@ export function resolveRetention(configured: JournalRetention | undefined): Reso
       RETENTION_COMPANION_KEEP_FRAMES,
     ),
     ...(keepDays === undefined ? {} : { keepDays }),
-  }
+  })
 }
 
 /**
@@ -537,6 +539,10 @@ function createJournalWithMode(options: JournalOptions, mode: JournalMode): Jour
   })
   Object.defineProperty(journal, "history", { value: history, enumerable: false })
   if (mode === "mutable") {
+    Object.defineProperty(journal, "retention", {
+      value: runtime.retention,
+      enumerable: false,
+    })
     Object.defineProperty(journal, "views", {
       value: Object.freeze({ rebuild: () => rebuildJournalViews(runtime) }),
       enumerable: false,
@@ -1826,6 +1832,7 @@ function historyDiagnostics(runtime: Context, archiveFallbacks: number): Journal
       historyFrames: 0,
       tailFrames: 0,
       evictedThrough: 0,
+      oldestRetainedCursor: null,
       archiveFallbacks,
     }
   }
@@ -1851,7 +1858,36 @@ function historyDiagnostics(runtime: Context, archiveFallbacks: number): Journal
     const historyFrames = scalar("SELECT COUNT(*) AS count FROM journal_history", "count")
     const tailFrames = scalar("SELECT COUNT(*) AS count FROM journal_events", "count")
     const evictedThrough = readEvictedThrough(database)
-    return { pageCount, freelistCount, autoVacuum, historyFrames, tailFrames, evictedThrough, archiveFallbacks }
+    const oldestStatement = database.prepare<{ cursor: number | null }, []>(
+      `SELECT MIN(cursor) AS cursor FROM (
+         SELECT cursor FROM journal_history
+         UNION ALL
+         SELECT cursor FROM journal_events
+       )`,
+    )
+    let oldestRetainedCursor: number | null
+    try {
+      oldestRetainedCursor = oldestStatement.get()?.cursor ?? null
+    } finally {
+      oldestStatement.finalize()
+    }
+    if (oldestRetainedCursor !== null && oldestRetainedCursor <= evictedThrough) {
+      raiseFailure(
+        "infrastructure",
+        "journal-retention-floor-invalid",
+        `yrd: oldest retained cursor ${oldestRetainedCursor} does not follow eviction floor ${evictedThrough}`,
+      )
+    }
+    return {
+      pageCount,
+      freelistCount,
+      autoVacuum,
+      historyFrames,
+      tailFrames,
+      evictedThrough,
+      oldestRetainedCursor,
+      archiveFallbacks,
+    }
   })
 }
 
@@ -1921,7 +1957,11 @@ function readEvictedThrough(database: Database): number {
   if (row === null) return 0
   const value = Number(row.value)
   if (!Number.isSafeInteger(value) || value < 0) {
-    throw new Error(`yrd: journal retention floor '${row.value}' is invalid`)
+    raiseFailure(
+      "infrastructure",
+      "journal-retention-floor-invalid",
+      `yrd: journal retention floor '${row.value}' is invalid`,
+    )
   }
   return value
 }
