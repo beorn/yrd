@@ -2866,6 +2866,45 @@ checks: [{check: {run: "true"}}]
     }
   })
 
+  it("binds an explicit local check to the invoking linked-worktree candidate", async () => {
+    const { repo } = await repository()
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      'checks: [{candidate: {run: \'test "$YRD_BASE_SHA" != "$YRD_CANDIDATE_SHA" && test "$YRD_CANDIDATE_SHA" = "$(git rev-parse HEAD)"\'}}]\n',
+    )
+    await git(repo, "add", ".yrd.yml")
+    await git(repo, "commit", "-qm", "require the named candidate")
+    const baseSha = await git(repo, "rev-parse", "HEAD")
+    await git(repo, "update-ref", "refs/remotes/origin/main", baseSha)
+    await git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+    const linked = join(dirname(repo), "linked-check")
+    await git(repo, "worktree", "add", "-qb", "issue/linked-check", linked)
+    await writeFile(join(linked, "candidate.txt"), "candidate\n")
+    await git(linked, "add", "candidate.txt")
+    await git(linked, "commit", "-qm", "candidate")
+
+    let stdout = ""
+    let stderr = ""
+    const exitCode = await runYrdProcess(
+      ["/usr/bin/bun", "/usr/local/bin/yrd", "check", "candidate", "--json"],
+      {
+        cwd: linked,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      },
+    )
+
+    expect(exitCode, stderr).toBe(0)
+    expect(JSON.parse(stdout)).toMatchObject({
+      command: "check",
+      checks: [{ name: "candidate", exitCode: 0 }],
+    })
+  })
+
   it("reports a SIGKILLed explicit required check as infrastructure", async () => {
     const { repo } = await repository()
     await writeFile(join(repo, ".yrd.yml"), 'checks: [{check: {run: "kill -9 $$"}}]\n')
