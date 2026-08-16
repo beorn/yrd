@@ -713,6 +713,37 @@ export function parsePRSelector(selector: string): ParsedPRSelector | undefined 
   return { pr: `PR${id}`, ...(revision === undefined ? {} : { revision }) }
 }
 
+/**
+ * Strip a remote qualifier from a branch selector so exactly ONE form is ever
+ * stored.
+ *
+ * `pr submit origin/<branch>` succeeds and lands, and the `origin/` prefix is
+ * kept verbatim as the branch name. The refresh path then builds
+ * `refs/heads/${branch}` from it and asks the remote for
+ * `refs/heads/origin/<branch>`, which cannot exist. So the defect only bites on
+ * the RECOVERY path: a PR submitted this way and later needing a recut cannot be
+ * recut at all, exactly when recut is the remedy.
+ *
+ * `remotes` is the caller's configured remote list, not a hardcoded "origin".
+ * A branch legitimately named `origin/...` under a remote called something else
+ * must survive, and stripping by literal prefix would silently corrupt it.
+ *
+ * Only a leading qualifier is removed, and only when a non-empty branch remains:
+ * `origin/` alone is not a branch, and returning "" would turn a bad selector
+ * into a confident wrong answer.
+ */
+export function normalizeBranchSelector(selector: string, remotes: readonly string[]): string {
+  const trimmed = selector.trim()
+  for (const remote of remotes) {
+    if (remote === "") continue
+    const prefix = `${remote}/`
+    if (!trimmed.startsWith(prefix)) continue
+    const bare = trimmed.slice(prefix.length)
+    if (bare !== "") return bare
+  }
+  return trimmed
+}
+
 /** Canonical copy-pasteable PR revision identity used by every text renderer. */
 export function formatPRRevisionSelector(pr: PRId, revision: number | Pick<PRRev, "n">): string {
   const parsed = parsePRSelector(pr)

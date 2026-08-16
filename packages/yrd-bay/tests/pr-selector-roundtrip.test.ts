@@ -8,6 +8,7 @@
 import { describe, expect, it } from "vitest"
 import {
   formatPRRevisionSelector,
+  normalizeBranchSelector,
   parsePRSelector,
   requireLivePR,
   resolvePRMatch,
@@ -46,6 +47,33 @@ describe("displayed PR selector round trip", () => {
     ["1410.16", { pr: "PR1410", revision: 16 }],
   ] as const)("parses %s without guessing", (selector, expected) => {
     expect(parsePRSelector(selector)).toEqual(expected)
+  })
+
+  // A remote-qualified selector submits and lands fine, then cannot be recut,
+  // because the stored branch is re-prefixed into refs/heads/origin/<branch>.
+  // The defect surfaces only on the recovery path, which is why seven cases
+  // above never caught it: none of them names a remote.
+  it.each([
+    ["origin/task/thing", "task/thing"],
+    ["task/thing", "task/thing"],
+    // Deeply nested branch names keep every segment after the qualifier.
+    ["origin/task/@tent/tooling/22660-rail", "task/@tent/tooling/22660-rail"],
+    // A non-origin remote is stripped by NAME, not by a hardcoded literal.
+    ["upstream/topic/x", "topic/x"],
+    // Only the LEADING qualifier goes; an inner segment is part of the branch.
+    ["task/origin/x", "task/origin/x"],
+    // A branch genuinely named after a remote that is not configured survives.
+    ["fork/topic/y", "fork/topic/y"],
+    // A bare qualifier is not a branch; returning "" would be a confident wrong
+    // answer, so the selector is left alone for the caller to reject.
+    ["origin/", "origin/"],
+  ] as const)("normalizes %s to a single stored form", (selector, expected) => {
+    expect(normalizeBranchSelector(selector, ["origin", "upstream"])).toBe(expected)
+  })
+
+  it("stores the same branch whether or not the operator qualified it", () => {
+    const remotes = ["origin"]
+    expect(normalizeBranchSelector("origin/task/thing", remotes)).toBe(normalizeBranchSelector("task/thing", remotes))
   })
 
   it("keeps a bare non-numeric token out of the PR grammar (branch/name aliases stay reachable)", () => {
