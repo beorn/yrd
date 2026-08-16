@@ -67,6 +67,7 @@ import {
   normalizeV2Submitter,
   prBaseSha,
   prComposition,
+  baseIdentity,
   prCorrelation,
   prDeliveryState,
   prForBay,
@@ -1222,10 +1223,22 @@ export function createBays(
     }
 
     if (bay === undefined) {
+      // Resolution keeps the RAW selector on purpose: `origin/<branch>` may be
+      // the only form that resolves when the branch is not checked out locally,
+      // so normalizing before this line would break the very invocation this
+      // fix is about.
       const headSha = await options.resolveRevision(selector)
       if (headSha === undefined) {
         raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${selector}'`)
       }
+      // Storage and lookup take the normalized form, so exactly ONE shape is
+      // ever persisted. Storing `origin/<branch>` verbatim let the refresh path
+      // rebuild it as `refs/heads/origin/<branch>`, which cannot exist — a PR
+      // submitted that way landed fine and then could never be recut, precisely
+      // when recut was the remedy (@yrd/submit-origin-prefix-breaks-recut).
+      // `baseIdentity` is the normalizer this repo already uses for base refs;
+      // a branch selector wants the same collapse, not a second one.
+      const storedBranch = baseIdentity(selector)
       const resolved = await target(options.base, undefined)
       const live = Object.values(snapshot.prs).find(
         (candidate) =>
@@ -1251,7 +1264,7 @@ export function createBays(
         return submitted
       }
       await submitOperation({
-        branch: selector,
+        branch: storedBranch,
         headSha,
         ...resolved,
         ...(options.issue === undefined ? {} : { issue: options.issue }),
@@ -1259,7 +1272,9 @@ export function createBays(
         ...(options.correlation === undefined ? {} : { correlation: options.correlation }),
         ...(requestedComposition === undefined ? {} : { composition: requestedComposition }),
       })
-      const submitted = resolvePR(state(), selector)
+      // Look up by what was STORED, not by what was typed, or a qualified
+      // selector creates a PR and then fails to find the PR it just created.
+      const submitted = resolvePR(state(), storedBranch)
       if (submitted === undefined) {
         raiseFailure(
           "infrastructure",
