@@ -6021,13 +6021,11 @@ function auditQueues(
       const certification = draftReviewCertification(pr)
       findings.push({
         code: "draft-stranded",
-        // Routing facts go in the MESSAGE as well as the fields below. The
-        // structured fields are the honest substrate, but no surface reads
-        // them: the CLI's `formatActionableFailure` prints code/cause/resolution
-        // only, and downstream JSON consumers rebuild findings field by field
-        // and drop keys they do not know. Carried in the message, who owns this
-        // draft and how far it got through review survive as the `cause` line
-        // and route through yrd's own CLI with no downstream change.
+        // Routing facts go in the MESSAGE as well as the fields below. The CLI's
+        // `formatActionableFailure` still prints code/cause/resolution only, so
+        // who owns this draft and how far it got through review must survive in
+        // the human cause line as well as the structured facts consumed by the
+        // coordination watcher.
         message:
           `PR '${pr.id}' (${pr.branch}) was pushed at ${revision.pushedAt}` +
           `${revision.submitter === undefined ? "" : ` by ${revision.submitter}`}, review: ${certification}, ` +
