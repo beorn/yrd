@@ -33,6 +33,7 @@ import {
   IntegrationProofSchema,
   configuredCommandStep,
   configuredMergeStep,
+  createGateReport,
   createGitPRRecutter,
   findRepositoryChangeLanding,
   findRepositoryMergeRecords,
@@ -742,7 +743,7 @@ async function checkedQueue(
     waiting?: boolean
     checkoutParent?: string
     classification?: "base" | "carrier"
-    comparison?: "diagnostics"
+    comparison?: "diagnostics" | "gate-residuals"
     comparisonReady?: string
     mode?: "delta" | "strict"
     env?: NodeJS.ProcessEnv
@@ -5570,6 +5571,61 @@ describe("Queue command adapters", () => {
         },
       ],
     })
+  })
+
+  it("compares named gate residuals from artifacts without journaling the full set", async () => {
+    const residual = (identities: readonly string[]) =>
+      `YRD-GATE-RESIDUAL ${JSON.stringify({
+        version: 1,
+        comparator: { id: "vitest-failures", version: 1 },
+        identities,
+      })}`
+    const report = (identities: readonly string[]) =>
+      `YRD-GATE-REPORT ${JSON.stringify(createGateReport("vitest-failures", identities))}`
+    const inherited = Array.from({ length: 25 }, (_, index) => `inherited-${String(index).padStart(2, "0")}`)
+    const output = (identities: readonly string[]) =>
+      [residual(identities), report(identities)].map((row) => `'${row}'`).join(" ")
+
+    const inheritedRepo = await repository("feature")
+    await using inheritedProcess = createProcess()
+    await using inheritedApp = await checkedQueue(
+      inheritedProcess,
+      inheritedRepo.repo,
+      shellCommand(`printf '%s\\n' ${output(inherited)}; exit 17`),
+      { comparison: "gate-residuals" },
+    )
+    await inheritedApp.bays.submit({ branch: "issue/feature", headSha: inheritedRepo.feature, base: "main" })
+
+    const inheritedRun = (await inheritedApp.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(inheritedRun, JSON.stringify(inheritedRun, null, 2)).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+    })
+    const inheritedJob = inheritedRun?.steps[0]?.job
+    if (inheritedJob?.status !== "completed" || inheritedJob.conclusion !== "success") {
+      throw new Error("inherited gate residuals did not pass")
+    }
+    expect(GitCheckEvidenceSchema.parse(inheritedJob.output).comparison).toMatchObject({
+      kind: "gate-residuals",
+      netNew: [{ comparator: { id: "vitest-failures" }, count: 0 }],
+    })
+
+    const changedRepo = await repository("feature")
+    await using changedProcess = createProcess()
+    const candidate = [...inherited, "candidate-only"]
+    await using changedApp = await checkedQueue(
+      changedProcess,
+      changedRepo.repo,
+      shellCommand(
+        `if test -f feature.txt; then printf '%s\\n' ${output(candidate)}; ` +
+          `else printf '%s\\n' ${output(inherited)}; fi; exit 17`,
+      ),
+      { comparison: "gate-residuals" },
+    )
+    await changedApp.bays.submit({ branch: "issue/feature", headSha: changedRepo.feature, base: "main" })
+
+    const changedRun = (await changedApp.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(changedRun).toMatchObject({ status: "completed", conclusion: "failure" })
   })
 
   it("aggregates structured child residual reports into one auditable delta certificate", async () => {

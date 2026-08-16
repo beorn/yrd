@@ -33,9 +33,10 @@ const StepObjectSchema = z
     run: TextSchema.optional(),
     runner: RunnerSchema.default("local"),
     classification: z.enum(["base", "carrier"]).optional(),
-    /** Explicit parent-versus-candidate comparison for diagnostics-shaped
-     * lint/typecheck output. Absent means the command's exit code is final. */
-    comparison: z.literal("diagnostics").optional(),
+    /** Explicit parent-versus-candidate comparison for bounded diagnostics or
+     * named residual sets retained in Yrd-owned command artifacts. Absent means
+     * the command's exit code is final. */
+    comparison: z.enum(["diagnostics", "gate-residuals"]).optional(),
     /** Report id that must be present before a compound diagnostics comparison
      * may run, proving every earlier structured child completed. */
     comparisonReady: z.literal(DIAGNOSTICS_COMPARISON_READY).optional(),
@@ -64,7 +65,7 @@ const StepObjectSchema = z
   })
   .strict()
   .superRefine((step, context) => {
-    if (step.comparisonReady !== undefined && step.comparison === undefined) {
+    if (step.comparisonReady !== undefined && step.comparison !== "diagnostics") {
       context.addIssue({
         code: "custom",
         path: ["comparisonReady"],
