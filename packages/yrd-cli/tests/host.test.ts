@@ -520,6 +520,10 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
       to: first.manifest.targetIdentity,
     })
+    expect(first.manifest.edges).toContainEqual({
+      from: "0a3476ef91823d46f19770047a4e6462c970c5afc250cba9dd82eb31c5febc25",
+      to: first.manifest.targetIdentity,
+    })
     expect(changed.manifest.targetIdentity).not.toBe(first.manifest.targetIdentity)
   })
 

@@ -181,7 +181,12 @@ export function createPostureQueueTargetResolver(
 type RuntimeStep = StepDef<PRShape, PRShape>
 
 const RawGitPushPattern = /(?:^|[\n;&|])\s*git\s+push(?:\s|$)/u
-const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITY = "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8"
+/** Durable production predecessors: the pre-restore two-check checkpoint and
+ * the three-check checkpoint rewritten by the recovery before this protocol shipped. */
+const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
+  "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
+  "0a3476ef91823d46f19770047a4e6462c970c5afc250cba9dd82eb31c5febc25",
+])
 const CHECKPOINT_MIGRATION_DERIVATION_TIMEOUT_MS = 60_000
 
 export const CURRENT_JOURNAL_COMPATIBILITY = Object.freeze({
@@ -1588,12 +1593,13 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     }),
   )
   const definition = contests(queue(base))
-  return withCheckpointMigrations(definition, [
-    {
-      from: RETAINED_PREDECESSOR_CHECKPOINT_IDENTITY,
+  return withCheckpointMigrations(
+    definition,
+    RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES.map((from) => ({
+      from,
       migrate: (state) => definition.compact(state),
-    },
-  ])
+    })),
+  )
 }
 
 /** Derive the data-only projection contract from the exact production
