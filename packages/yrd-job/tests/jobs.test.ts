@@ -211,6 +211,7 @@ function indexedJournal(): Journal<unknown> {
           historyFrames: 0,
           tailFrames: values.length,
           evictedThrough: 0,
+          oldestRetainedCursor: values.length === 0 ? null : 1,
           archiveFallbacks: 0,
         }
       },
