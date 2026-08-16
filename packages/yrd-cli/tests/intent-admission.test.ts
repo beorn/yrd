@@ -216,6 +216,24 @@ describe("pin-intent admission (22668 phase 1)", () => {
     expect(verdict.relation).toBe("noop")
   })
 
+  it("calls an intent targeting the exact current pin a noop", async () => {
+    const { repo, basePin } = await fixture()
+
+    const verdict = await admitPinIntent({
+      process,
+      repo,
+      base: "main",
+      component: "components/alpha",
+      issue: ISSUE,
+      target: basePin,
+    })
+
+    if (!verdict.admitted) throw new Error(`unexpected refusal: ${verdict.code}`)
+    expect(verdict.currentPin).toBe(basePin)
+    expect(verdict.target).toBe(basePin)
+    expect(verdict.relation).toBe("noop")
+  })
+
   it("refuses when the merge-time pin no longer matches the authored CAS guard", async () => {
     const { repo, component, basePin } = await fixture()
     const target = await publish(component, "two")

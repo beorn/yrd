@@ -250,6 +250,12 @@ export async function admitPinIntent(options: PinIntentAdmissionOptions): Promis
     }
   }
 
+  // Equality is already contained, not an advance. Git considers a commit an
+  // ancestor of itself, so this must precede the ancestry checks or an intent
+  // submitted before an out-of-band pin move synthesizes an empty carrier.
+  if (currentPin === target) {
+    return { admitted: true, currentPin, target, relation: "noop" }
+  }
   if (await isAncestor(options.process, componentRepo, currentPin, target)) {
     // Descending from the pin is not the same as being on the component's own
     // line. A target can descend, be published, and still sit on a branch trunk
