@@ -3550,6 +3550,62 @@ describe("Queue command adapters", () => {
     expect(app.intents.get(intent.id)).toMatchObject({ status: "integrated" })
   }, 30_000)
 
+  it("does not let an older ineligible PR hide an intent and a later ready PR", async () => {
+    const fixture = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    await writeFile(join(fixture.repo, ".git", "hooks", "pre-push"), "#!/bin/sh\nexit 0\n")
+    await git(fixture.repo, ["switch", "-qc", "issue/ineligible", "main"])
+    await writeFile(join(fixture.repo, "ineligible.txt"), "ineligible\n")
+    await git(fixture.repo, ["add", "ineligible.txt"])
+    await git(fixture.repo, ["commit", "-qm", "older ineligible carrier"])
+    const ineligibleHead = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+    await using process = createProcess()
+    await using app = await checkedQueue(process, fixture.repo, ["true"], { prepareCandidate: true })
+    const ineligible = await submitCertifiedCarrier(app, fixture.repo, {
+      branch: "issue/ineligible",
+      headSha: ineligibleHead,
+      baseSha: fixture.baseSha,
+    })
+    await app.bays.requestChecks({ pr: ineligible.id, baseSha: fixture.baseSha })
+    expect(app.queue.eligibility(ineligible.id)).toMatchObject({
+      runnable: false,
+      reason: { code: "checks-pending" },
+    })
+    const intent = await app.intents.submit({
+      intentId: "00000000-0000-7000-8000-000000000020",
+      issue: { source: "km", id: "@yrd/core/after-ineligible" },
+      component: "dep",
+      target: fixture.moduleSha,
+      submitter: "@dev/5",
+    })
+    await git(fixture.repo, ["switch", "-qc", "issue/later-ready", "main"])
+    await writeFile(join(fixture.repo, "later.txt"), "later\n")
+    await git(fixture.repo, ["add", "later.txt"])
+    await git(fixture.repo, ["commit", "-qm", "later ready carrier"])
+    const laterHead = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+    const later = await submitCertifiedCarrier(app, fixture.repo, {
+      branch: "issue/later-ready",
+      headSha: laterHead,
+      baseSha: fixture.baseSha,
+    })
+
+    const first = await app.queue.run({}, runtime)
+
+    expect(first).toHaveLength(1)
+    expect(first[0]).toMatchObject({ conclusion: "success", prs: [{ id: intent.id }] })
+    expect(app.intents.get(intent.id)).toMatchObject({ status: "integrated" })
+    expect(app.queue.eligibility(ineligible.id)).toMatchObject({
+      runnable: false,
+      reason: { code: "checks-pending" },
+    })
+    expect(app.queue.eligibility(later.id)).toMatchObject({ runnable: true })
+  }, 30_000)
+
   it("names the fully reused queue-run prefix when an intent emits no run events", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
