@@ -153,6 +153,8 @@ export type Yrd<State extends object, Commands extends CommandTree> = Readonly<{
     causeIds: number
     eventIds: number
     journal?: JournalHistoryDiagnostics
+    /** Checkpoint Core successfully restored or saved under the current projection definition. */
+    checkpoint?: Readonly<{ identity: string; cursor: Cursor }>
   }>
   dispatch: Dispatch
   events(after?: Cursor, before?: Cursor): AsyncIterable<Event>
@@ -1206,6 +1208,9 @@ export async function createYrd<State extends object, Commands extends CommandTr
       causeIds: projection.causeIds.size,
       eventIds: projection.eventIds.size,
       ...(history === undefined ? {} : { journal: history.diagnostics() }),
+      ...(checkpointIdentity === undefined || checkpointCursor === undefined
+        ? {}
+        : { checkpoint: { identity: checkpointIdentity, cursor: checkpointCursor } }),
     }),
     dispatch,
     /**
