@@ -5,6 +5,7 @@
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { extname, join, resolve } from "node:path"
+import { safeRemoveSync } from "removely"
 import { describe, expect, it } from "vitest"
 import { publicDependencyRefusal } from "../../../scripts/verify-public-dependencies"
 
@@ -55,6 +56,9 @@ describe("noun cutover ratchet", () => {
       scripts?: Record<string, string>
     }
     expect(manifest.scripts?.["typecheck:hh"]).toBe("bun scripts/typecheck-hh.ts")
+    const implementation = readFileSync(script, "utf8")
+    expect(implementation).toContain('spawnSync("bun", ["run", "typecheck"]')
+    expect(implementation).not.toContain("tsconfig.hh.json")
 
     const standalone = mkdtempSync(join(tmpdir(), "yrd-typecheck-hh-standalone-"))
     try {
@@ -76,7 +80,7 @@ describe("noun cutover ratchet", () => {
         'cd "$(git rev-parse --show-superproject-working-tree --show-toplevel | head -1)" && bun run typecheck',
       )
     } finally {
-      rmSync(standalone, { recursive: true, force: true })
+      safeRemoveSync(standalone, { within: tmpdir(), allowMissing: true })
     }
   })
 

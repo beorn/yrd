@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process"
-import { join, resolve } from "node:path"
+import { resolve } from "node:path"
 
 const componentRoot = resolve(import.meta.dirname, "..")
 const rootCommand =
@@ -21,12 +21,12 @@ if (process.argv.includes("--probe")) {
   process.exit(0)
 }
 
-const result = spawnSync("tsc", ["--noEmit", "-p", join(componentRoot, "tsconfig.hh.json")], {
-  cwd: componentRoot,
+const result = spawnSync("bun", ["run", "typecheck"], {
+  cwd: superprojectRoot,
   stdio: "inherit",
 })
 if (result.error !== undefined) {
-  console.error(`yrd typecheck:hh: could not start tsc: ${result.error.message}`)
+  console.error(`yrd typecheck:hh: could not start hh-root typecheck: ${result.error.message}`)
   process.exit(126)
 }
 process.exit(result.status ?? 1)
