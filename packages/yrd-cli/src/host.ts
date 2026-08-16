@@ -1135,7 +1135,11 @@ function configuredQueueSteps(
 }
 
 async function resolveCommit(process: Pick<Process, "run">, repo: string, ref: string): Promise<string | undefined> {
-  const candidates = ref.startsWith("refs/") ? [ref] : [`refs/remotes/origin/${ref}`, ref]
+  // HEAD names the selected checkout, never the remote's default branch.
+  // Trying refs/remotes/origin/HEAD first silently replaced a linked-worktree
+  // candidate with main, so required checks compared the base to itself.
+  // Named branches remain remote-first because submit validates pushed bytes.
+  const candidates = ref === "HEAD" || ref.startsWith("refs/") ? [ref] : [`refs/remotes/origin/${ref}`, ref]
   for (const candidate of candidates) {
     const args = ["rev-parse", "--verify", "--end-of-options", `${candidate}^{commit}`]
     const result = await process.run({
