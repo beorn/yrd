@@ -55,6 +55,9 @@ describe("noun cutover ratchet", () => {
       scripts?: Record<string, string>
     }
     expect(manifest.scripts?.["typecheck:hh"]).toBe("bun scripts/typecheck-hh.ts")
+    const implementation = readFileSync(script, "utf8")
+    expect(implementation).toContain('spawnSync("bun", ["run", "typecheck"]')
+    expect(implementation).not.toContain("tsconfig.hh.json")
 
     const standalone = mkdtempSync(join(tmpdir(), "yrd-typecheck-hh-standalone-"))
     try {
