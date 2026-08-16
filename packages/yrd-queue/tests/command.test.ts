@@ -3606,6 +3606,91 @@ describe("Queue command adapters", () => {
     expect(app.queue.eligibility(later.id)).toMatchObject({ runnable: true })
   }, 30_000)
 
+  it("does not let an older recorded check failure hide an intent and a later ready PR", async () => {
+    const fixture = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    await writeFile(join(fixture.repo, ".git", "hooks", "pre-push"), "#!/bin/sh\nexit 0\n")
+    await git(fixture.repo, ["switch", "-qc", "issue/recorded-failure", "main"])
+    await writeFile(join(fixture.repo, "failing.txt"), "fails recertification\n")
+    await git(fixture.repo, ["add", "failing.txt"])
+    await git(fixture.repo, ["commit", "-qm", "older failed recertification"])
+    const failedHead = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+    await using process = createProcess()
+    const checkCommand = shellCommand("test ! -f failing.txt")
+    await using app = await checkedQueue(process, fixture.repo, checkCommand, {
+      prepareCandidate: true,
+    })
+    const failed = await submitCertifiedCarrier(app, fixture.repo, {
+      branch: "issue/recorded-failure",
+      headSha: failedHead,
+      baseSha: fixture.baseSha,
+    })
+    await app.bays.requestChecks({ pr: failed.id, baseSha: fixture.baseSha })
+    const failedRevision = currentPRRev(failed)
+    const receipt = { code: "substrate-pair-failed", message: "recorded substrate-pair refusal" }
+    await app.bays.recordAdmission({
+      pr: failed.id,
+      revision: failedRevision.n,
+      headSha: failedRevision.head,
+      admission: {
+        status: "refused",
+        kind: "failure",
+        baseSha: fixture.baseSha,
+        requestCount: 1,
+        steps: [
+          {
+            name: "check",
+            revision: `check:${JSON.stringify(checkCommand)}:false`,
+            job: "J-recorded-failure",
+            status: "refused",
+            receipt,
+          },
+        ],
+        step: "check",
+        receipt,
+      },
+    })
+    expect(prFacts(app.state().bays.prs[failed.id])).toMatchObject({ status: "submitted" })
+    expect(app.queue.eligibility(failed.id)).toMatchObject({
+      runnable: false,
+      reason: { code: "required-check-failed" },
+      checks: { status: "failed" },
+    })
+    const intent = await app.intents.submit({
+      intentId: "00000000-0000-7000-8000-000000000023",
+      issue: { source: "km", id: "@yrd/core/after-recorded-failure" },
+      component: "dep",
+      target: fixture.moduleSha,
+      submitter: "@dev/5",
+    })
+    await git(fixture.repo, ["switch", "-qc", "issue/after-recorded-failure", "main"])
+    await writeFile(join(fixture.repo, "later-recorded.txt"), "later\n")
+    await git(fixture.repo, ["add", "later-recorded.txt"])
+    await git(fixture.repo, ["commit", "-qm", "later carrier after recorded failure"])
+    const laterHead = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+    const later = await submitCertifiedCarrier(app, fixture.repo, {
+      branch: "issue/after-recorded-failure",
+      headSha: laterHead,
+      baseSha: fixture.baseSha,
+    })
+
+    const runs = await app.queue.run({}, runtime)
+
+    expect(runs).toHaveLength(1)
+    expect(runs[0]).toMatchObject({ conclusion: "success", prs: [{ id: intent.id }] })
+    expect(app.intents.get(intent.id)).toMatchObject({ status: "integrated" })
+    expect(app.queue.eligibility(failed.id)).toMatchObject({
+      runnable: false,
+      reason: { code: "required-check-failed" },
+    })
+    expect(app.queue.eligibility(later.id)).toMatchObject({ runnable: true })
+  }, 30_000)
+
   it("names the fully reused queue-run prefix when an intent emits no run events", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
