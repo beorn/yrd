@@ -7710,6 +7710,7 @@ describe("runYrd", () => {
         {
           intervalMs: 5,
           queueProgress: (observedAt) => ({ state: "healthy", observedAt }),
+          retention: "disabled",
           driver: { queueId: `${repo}#main`, lastLanded: () => landed },
         },
       )
@@ -7723,6 +7724,12 @@ describe("runYrd", () => {
           command: expect.any(String),
           implementationSource,
           queueProgress: { state: "healthy", observedAt: "2026-07-13T12:00:00.000Z" },
+          retention: {
+            policy: "disabled",
+            source: "mutable-journal",
+            observedAt: "2026-07-13T12:00:00.000Z",
+            generation: expect.stringMatching(/^[0-9a-f-]{36}$/u),
+          },
           driver: {
             queueId: `${repo}#main`,
             epoch: expect.stringMatching(/^[0-9a-f-]{36}$/u),
@@ -14325,9 +14332,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
         // The ref is counted, and counted in the bucket that says the journal
         // cannot explain it — not quietly dropped.
         expect(report.candidateRefs).toMatchObject({ scanned: 1, unclaimed: 1, reclaimable: 0 })
-        expect(report.candidateRefs.findings).toEqual([
-          expect.objectContaining({ ref, disposition: "unclaimed" }),
-        ])
+        expect(report.candidateRefs.findings).toEqual([expect.objectContaining({ ref, disposition: "unclaimed" })])
         // And the operator is told, with the denominator and the remedy.
         const said = `${output.stdout()}${output.stderr()}`
         expect(said).toContain("candidate-ref-orphans")
@@ -14344,9 +14349,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       try {
         const output = outputIO({ cwd: repo, repositoryRoot: repo })
 
-        await expect(
-          runYrd(app, yrd("queue", "candidate-refs", "--json"), output.io),
-        ).resolves.toBe(0)
+        await expect(runYrd(app, yrd("queue", "candidate-refs", "--json"), output.io)).resolves.toBe(0)
 
         expect(JSON.parse(output.stdout())).toMatchObject({
           command: "queue.candidate-refs",
@@ -14378,6 +14381,347 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
 
         expect(JSON.parse(output.stdout())).toMatchObject({ deleted: [], unclaimed: 1 })
         expect(gitIn(repo, ["rev-parse", "--verify", ref])).not.toBe("")
+      } finally {
+        await app.close()
+        safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
+      }
+    })
+  })
+
+  describe("doctor retention observability", () => {
+    const doctorConfig = defineConfig(
+      yrdConfig.flow({ name: "main", rev: "1", on: () => true, steps: [yrdConfig.check("check")] }),
+    )
+
+    async function retentionDoctorFixture() {
+      const repo = mkdtempSync(join(tmpdir(), "yrd-doctor-retention-"))
+      execFileSync("git", ["init", "-q", "-b", "main", repo])
+      const stateDir = join(repo, ".git", "yrd")
+      const journal = createJournal({
+        dir: stateDir,
+        inject: { sqliteVersion: "3.53.0" },
+      } as unknown as Parameters<typeof createJournal>[0])
+      const app = await createApp({ journal })
+      return { repo, stateDir, app }
+    }
+
+    async function withHeldResident<T>(
+      stateDir: string,
+      driver: Readonly<{ queueId: string; epoch: string }>,
+      status: Readonly<Record<string, unknown>>,
+      action: () => Promise<T>,
+    ): Promise<T> {
+      const lockRelease = Promise.withResolvers<void>()
+      const lockAcquired = Promise.withResolvers<void>()
+      const lock = createExclusive(join(stateDir, "resident-runner"), { timeoutMs: 0 }).run(
+        async () => {
+          lockAcquired.resolve()
+          await lockRelease.promise
+        },
+        { holder: `queue=${driver.queueId} epoch=${driver.epoch}` },
+      )
+      try {
+        await lockAcquired.promise
+        mkdirSync(join(stateDir, "resident-runner"), { recursive: true })
+        writeFileSync(
+          join(stateDir, "resident-runner", "status.json"),
+          JSON.stringify({
+            pid: process.pid,
+            startedAt: "2026-07-09T12:00:00.000Z",
+            lastTickAt: "2026-07-09T12:00:58.000Z",
+            driver: { ...driver, lastLanded: null },
+            ...status,
+          }),
+        )
+        return await action()
+      } finally {
+        lockRelease.resolve()
+        await lock
+      }
+    }
+
+    it("reports a complete advisory observation when lease and status agree there is no resident", async () => {
+      const { repo, stateDir, app } = await retentionDoctorFixture()
+      try {
+        const output = outputIO({ cwd: repo, stateDir })
+        expect(await runYrd(app, yrd("doctor", "--json"), output.io, { config: doctorConfig })).toBe(0)
+        expect(JSON.parse(output.stdout())).toMatchObject({
+          retention: {
+            advisory: true,
+            floor: {
+              evictedThrough: 0,
+              oldestRetainedCursor: null,
+              source: expect.stringContaining("journal.sqlite"),
+              observedAt: "2026-07-09T12:01:00.000Z",
+            },
+            writer: {
+              active: false,
+              armed: false,
+              policy: "not-applicable",
+              observedAt: "2026-07-09T12:01:00.000Z",
+            },
+            checkpoint: { status: "covering", cursor: 0, cursorHeadroom: 0 },
+          },
+        })
+      } finally {
+        await app.close()
+        safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
+      }
+    })
+
+    it("refuses a live resident whose heartbeat lacks the writer-policy observation", async () => {
+      const { repo, stateDir, app } = await retentionDoctorFixture()
+      const driver = { queueId: `${repo}#main`, epoch: "11111111-1111-4111-8111-111111111111" }
+      const lockRelease = Promise.withResolvers<void>()
+      const lockAcquired = Promise.withResolvers<void>()
+      const lock = createExclusive(join(stateDir, "resident-runner"), { timeoutMs: 0 }).run(
+        async () => {
+          lockAcquired.resolve()
+          await lockRelease.promise
+        },
+        { holder: `queue=${driver.queueId} epoch=${driver.epoch}` },
+      )
+      try {
+        await lockAcquired.promise
+        mkdirSync(join(stateDir, "resident-runner"), { recursive: true })
+        writeFileSync(
+          join(stateDir, "resident-runner", "status.json"),
+          JSON.stringify({
+            pid: process.pid,
+            startedAt: "2026-07-09T12:00:00.000Z",
+            lastTickAt: "2026-07-09T12:00:58.000Z",
+            driver: { ...driver, lastLanded: null },
+          }),
+        )
+        const output = outputIO({ cwd: repo, stateDir })
+        expect(await runYrd(app, yrd("doctor", "--json"), output.io, { config: doctorConfig })).toBe(3)
+        expect(JSON.parse(output.stderr())).toMatchObject({
+          failure: { kind: "infrastructure", code: "resident-retention-observation-missing" },
+        })
+      } finally {
+        lockRelease.resolve()
+        await lock
+        await app.close()
+        safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
+      }
+    })
+
+    it("refuses an evicted prefix without a Core-usable checkpoint", async () => {
+      const { repo, stateDir, app } = await retentionDoctorFixture()
+      try {
+        const uncovered = {
+          ...app,
+          retentionDiagnostics: () => ({
+            receiptFrames: 0,
+            causeIds: 0,
+            eventIds: 0,
+            journal: {
+              pageCount: 1,
+              freelistCount: 0,
+              autoVacuum: "incremental" as const,
+              historyFrames: 1,
+              tailFrames: 0,
+              evictedThrough: 5,
+              oldestRetainedCursor: 6,
+              archiveFallbacks: 0,
+            },
+          }),
+        }
+        const output = outputIO({ cwd: repo, stateDir })
+        expect(await runYrd(uncovered, yrd("doctor", "--json"), output.io, { config: doctorConfig })).toBe(3)
+        expect(JSON.parse(output.stderr())).toMatchObject({
+          failure: { kind: "infrastructure", code: "journal-recovery-coverage-unavailable" },
+        })
+      } finally {
+        await app.close()
+        safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
+      }
+    })
+
+    it("refuses a Core checkpoint below the durable eviction floor", async () => {
+      const { repo, stateDir, app } = await retentionDoctorFixture()
+      try {
+        const uncovered = {
+          ...app,
+          retentionDiagnostics: () => ({
+            receiptFrames: 0,
+            causeIds: 0,
+            eventIds: 0,
+            journal: {
+              pageCount: 1,
+              freelistCount: 0,
+              autoVacuum: "incremental" as const,
+              historyFrames: 1,
+              tailFrames: 0,
+              evictedThrough: 5,
+              oldestRetainedCursor: 6,
+              archiveFallbacks: 0,
+            },
+            checkpoint: { identity: "below-floor", cursor: 4 },
+          }),
+        }
+        const output = outputIO({ cwd: repo, stateDir })
+        expect(await runYrd(uncovered, yrd("doctor", "--json"), output.io, { config: doctorConfig })).toBe(3)
+        expect(JSON.parse(output.stderr())).toMatchObject({
+          failure: { kind: "infrastructure", code: "journal-recovery-coverage-invalid" },
+        })
+      } finally {
+        await app.close()
+        safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
+      }
+    })
+
+    it("refuses when a live status record disagrees with a free writer lease", async () => {
+      const { repo, stateDir, app } = await retentionDoctorFixture()
+      try {
+        mkdirSync(join(stateDir, "resident-runner"), { recursive: true })
+        writeFileSync(
+          join(stateDir, "resident-runner", "status.json"),
+          JSON.stringify({
+            pid: process.pid,
+            startedAt: "2026-07-09T12:00:00.000Z",
+            lastTickAt: "2026-07-09T12:00:58.000Z",
+          }),
+        )
+        const output = outputIO({ cwd: repo, stateDir })
+        expect(await runYrd(app, yrd("doctor", "--json"), output.io, { config: doctorConfig })).toBe(3)
+        expect(JSON.parse(output.stderr())).toMatchObject({
+          failure: { kind: "infrastructure", code: "resident-retention-source-disagreement" },
+        })
+      } finally {
+        await app.close()
+        safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
+      }
+    })
+
+    it("refuses a stale writer-policy observation", async () => {
+      const { repo, stateDir, app } = await retentionDoctorFixture()
+      const driver = { queueId: `${repo}#main`, epoch: "11111111-1111-4111-8111-111111111111" }
+      try {
+        await withHeldResident(
+          stateDir,
+          driver,
+          {
+            startedAt: "2026-07-09T11:57:00.000Z",
+            lastTickAt: "2026-07-09T11:58:00.000Z",
+            retention: {
+              policy: "disabled",
+              source: "mutable-journal",
+              observedAt: "2026-07-09T11:58:00.000Z",
+              generation: driver.epoch,
+            },
+          },
+          async () => {
+            const output = outputIO({ cwd: repo, stateDir })
+            expect(await runYrd(app, yrd("doctor", "--json"), output.io, { config: doctorConfig })).toBe(3)
+            expect(JSON.parse(output.stderr())).toMatchObject({
+              failure: { kind: "infrastructure", code: "resident-retention-observation-stale" },
+            })
+          },
+        )
+      } finally {
+        await app.close()
+        safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
+      }
+    })
+
+    it("refuses a writer-policy observation from another resident generation", async () => {
+      const { repo, stateDir, app } = await retentionDoctorFixture()
+      const driver = { queueId: `${repo}#main`, epoch: "11111111-1111-4111-8111-111111111111" }
+      try {
+        await withHeldResident(
+          stateDir,
+          driver,
+          {
+            retention: {
+              policy: "disabled",
+              source: "mutable-journal",
+              observedAt: "2026-07-09T12:00:58.000Z",
+              generation: "22222222-2222-4222-8222-222222222222",
+            },
+          },
+          async () => {
+            const output = outputIO({ cwd: repo, stateDir })
+            expect(await runYrd(app, yrd("doctor", "--json"), output.io, { config: doctorConfig })).toBe(3)
+            expect(JSON.parse(output.stderr())).toMatchObject({
+              failure: { kind: "infrastructure", code: "resident-retention-observation-mismatch" },
+            })
+          },
+        )
+      } finally {
+        await app.close()
+        safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
+      }
+    })
+
+    it("refuses when the writer lease and status identify different generations", async () => {
+      const { repo, stateDir, app } = await retentionDoctorFixture()
+      const leaseDriver = { queueId: `${repo}#main`, epoch: "11111111-1111-4111-8111-111111111111" }
+      const statusEpoch = "22222222-2222-4222-8222-222222222222"
+      try {
+        await withHeldResident(
+          stateDir,
+          leaseDriver,
+          {
+            driver: { queueId: leaseDriver.queueId, epoch: statusEpoch, lastLanded: null },
+            retention: {
+              policy: "disabled",
+              source: "mutable-journal",
+              observedAt: "2026-07-09T12:00:58.000Z",
+              generation: statusEpoch,
+            },
+          },
+          async () => {
+            const output = outputIO({ cwd: repo, stateDir })
+            expect(await runYrd(app, yrd("doctor", "--json"), output.io, { config: doctorConfig })).toBe(3)
+            expect(JSON.parse(output.stderr())).toMatchObject({
+              failure: { kind: "infrastructure", code: "resident-retention-source-disagreement" },
+            })
+          },
+        )
+      } finally {
+        await app.close()
+        safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
+      }
+    })
+
+    it("refuses malformed writer-policy evidence instead of treating retention as disabled", async () => {
+      const { repo, stateDir, app } = await retentionDoctorFixture()
+      const driver = { queueId: `${repo}#main`, epoch: "11111111-1111-4111-8111-111111111111" }
+      try {
+        await withHeldResident(
+          stateDir,
+          driver,
+          {
+            retention: {
+              policy: { keepFrames: 0 },
+              source: "mutable-journal",
+              observedAt: "2026-07-09T12:00:58.000Z",
+              generation: driver.epoch,
+            },
+          },
+          async () => {
+            const output = outputIO({ cwd: repo, stateDir })
+            expect(await runYrd(app, yrd("doctor", "--json"), output.io, { config: doctorConfig })).toBe(3)
+            expect(JSON.parse(output.stderr())).toMatchObject({
+              failure: { kind: "infrastructure", code: "resident-runner-status-invalid" },
+            })
+          },
+        )
+      } finally {
+        await app.close()
+        safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
+      }
+    })
+
+    it("refuses an invalid observation clock", async () => {
+      const { repo, stateDir, app } = await retentionDoctorFixture()
+      try {
+        const output = outputIO({ cwd: repo, stateDir, now: () => Number.NaN })
+        expect(await runYrd(app, yrd("doctor", "--json"), output.io, { config: doctorConfig })).toBe(3)
+        expect(JSON.parse(output.stderr())).toMatchObject({
+          failure: { kind: "infrastructure", code: "doctor-clock-invalid" },
+        })
       } finally {
         await app.close()
         safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })

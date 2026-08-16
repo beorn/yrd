@@ -110,6 +110,7 @@ import {
   type QueueTerminalOutcome,
 } from "./queue-terminal-facts.ts"
 import { TitledBox } from "./queue-view-primitives.tsx"
+import type { JournalRetentionObservation } from "./types.ts"
 
 export type { QueueTerminalFact, QueueTerminalMemberFact, QueueTerminalOutcome } from "./queue-terminal-facts.ts"
 export { TitledBox, timelineMetric } from "./queue-view-primitives.tsx"
@@ -469,6 +470,8 @@ export type QueueTimelineRunner = Readonly<{
   implementationSource?: string
   /** Compiled-in journal versions this resident can read. */
   journalVersions?: readonly number[]
+  /** Exact writer policy observed from the mutable journal this resident serves. */
+  retention?: JournalRetentionObservation
   /** Content of the driver lease. Probes assert this, never a process/service suffix. */
   driver?: QueueDriverEpoch
   /**
