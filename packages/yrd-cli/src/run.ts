@@ -7945,6 +7945,20 @@ async function retentionDoctor(app: YrdCliApp, io: YrdCliIO): Promise<RetentionD
       observedAt,
     }
   }
+  if (
+    !Number.isSafeInteger(journal.evictedThrough) ||
+    journal.evictedThrough < 0 ||
+    (journal.oldestRetainedCursor !== null &&
+      (!Number.isSafeInteger(journal.oldestRetainedCursor) ||
+        journal.oldestRetainedCursor < 1 ||
+        journal.oldestRetainedCursor <= journal.evictedThrough))
+  ) {
+    raiseFailure(
+      "infrastructure",
+      "journal-retention-floor-invalid",
+      `yrd: retention diagnostics report eviction floor ${String(journal.evictedThrough)} and oldest retained cursor ${String(journal.oldestRetainedCursor)}`,
+    )
+  }
 
   const floorSource = io.stateDir === undefined ? "journal.sqlite" : join(io.stateDir, "journal.sqlite")
   const floor = {

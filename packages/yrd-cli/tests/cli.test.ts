@@ -14571,6 +14571,39 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       }
     })
 
+    it("refuses an internally inconsistent Journal floor", async () => {
+      const { repo, stateDir, app } = await retentionDoctorFixture()
+      try {
+        const inconsistent = {
+          ...app,
+          retentionDiagnostics: () => ({
+            receiptFrames: 0,
+            causeIds: 0,
+            eventIds: 0,
+            journal: {
+              pageCount: 1,
+              freelistCount: 0,
+              autoVacuum: "incremental" as const,
+              historyFrames: 1,
+              tailFrames: 0,
+              evictedThrough: 5,
+              oldestRetainedCursor: 5,
+              archiveFallbacks: 0,
+            },
+            checkpoint: { identity: "covering", cursor: 5 },
+          }),
+        }
+        const output = outputIO({ cwd: repo, stateDir })
+        expect(await runYrd(inconsistent, yrd("doctor", "--json"), output.io, { config: doctorConfig })).toBe(3)
+        expect(JSON.parse(output.stderr())).toMatchObject({
+          failure: { kind: "infrastructure", code: "journal-retention-floor-invalid" },
+        })
+      } finally {
+        await app.close()
+        safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
+      }
+    })
+
     it("refuses when a live status record disagrees with a free writer lease", async () => {
       const { repo, stateDir, app } = await retentionDoctorFixture()
       try {
