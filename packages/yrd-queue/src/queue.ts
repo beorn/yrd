@@ -252,6 +252,27 @@ const QueueRunReuseCoveredSchema = z
   .strict()
 type QueueRunReuseCovered = Readonly<z.infer<typeof QueueRunReuseCoveredSchema>>
 
+const QueueRunNoRunnablePRsSchema = z
+  .object({
+    kind: z.literal("no-runnable-prs"),
+    considered: z
+      .array(
+        z
+          .object({
+            pr: z.string().trim().min(1),
+            revision: z.number().int().positive(),
+            code: z.string().trim().min(1),
+            reason: z.string().trim().min(1),
+          })
+          .strict(),
+      )
+      .min(1),
+    selectedSteps: z.array(StepNameSchema).min(1),
+    reason: z.literal("every considered PR was ineligible for the selected plan"),
+  })
+  .strict()
+type QueueRunNoRunnablePRs = Readonly<z.infer<typeof QueueRunNoRunnablePRsSchema>>
+
 function queueRunReuseCovered(
   members: readonly string[],
   selected: readonly RuntimeStep[],
@@ -268,6 +289,29 @@ function queueRunReuseCovered(
     coveredCount: coveredSteps.length,
     reason: "reusable prefix fully covered the selected plan",
     ...(reusedFrom === undefined ? {} : { reusedFrom }),
+  })
+}
+
+function queueRunNoRunnablePRs(
+  decisions: readonly RunnablePRDecision[],
+  selected: readonly RuntimeStep[],
+): QueueRunNoRunnablePRs {
+  const considered = decisions.map(({ pr, eligibility }) => {
+    if (eligibility.runnable || eligibility.reason === undefined) {
+      throw new Error(`yrd: PR '${pr.id}' was reported as rejected without an eligibility reason`)
+    }
+    return {
+      pr: pr.id,
+      revision: prRevisionNumber(pr),
+      code: eligibility.reason.code,
+      reason: eligibility.reason.message,
+    }
+  })
+  return QueueRunNoRunnablePRsSchema.parse({
+    kind: "no-runnable-prs",
+    considered,
+    selectedSteps: selected.map((step) => step.name),
+    reason: "every considered PR was ineligible for the selected plan",
   })
 }
 
@@ -1201,15 +1245,24 @@ function createQueue<Shape extends PRShape>(
 ): Queue<Shape> {
   const current = (id: RunId): Run => materializeRun(Queues.record(state(), id), runtime().jobs)
   const byName = new Map(steps.map((step) => [step.name, step] as const))
-  const reportFullyReusedPlan = (value: JsonValue | undefined): boolean => {
-    const parsed = QueueRunReuseCoveredSchema.safeParse(value)
-    if (!parsed.success) return false
-    const covered = parsed.data
-    log.warn?.("queue run emitted zero events because a reusable prefix covered every selected step", {
-      action: "queue-run-reuse-covered",
-      ...covered,
-    })
-    return true
+  const reportZeroEventRun = (value: JsonValue | undefined): boolean => {
+    const covered = QueueRunReuseCoveredSchema.safeParse(value)
+    if (covered.success) {
+      log.warn?.("queue run emitted zero events because a reusable prefix covered every selected step", {
+        action: "queue-run-reuse-covered",
+        ...covered.data,
+      })
+      return true
+    }
+    const rejected = QueueRunNoRunnablePRsSchema.safeParse(value)
+    if (rejected.success) {
+      log.warn?.("queue run emitted zero events because every considered PR was ineligible", {
+        action: "queue-run-no-runnable-prs",
+        ...rejected.data,
+      })
+      return true
+    }
+    return false
   }
 
   const persistMergeRecord = async (run: Run): Promise<void> => {
@@ -2227,7 +2280,7 @@ function createQueue<Shape extends PRShape>(
     })
     const startedEvent = started.events.find((applied) => applied.name === "queue/run/started")
     if (startedEvent === undefined) {
-      reportFullyReusedPlan(started.value)
+      reportZeroEventRun(started.value)
       throw new Error(`yrd: intent '${intent.id}' did not start a Queue run`)
     }
     const id = QueueStartSchema.parse((startedEvent.data as { run?: unknown }).run).id
@@ -2654,10 +2707,23 @@ function createQueue<Shape extends PRShape>(
           // so unrelated ready PRs can integrate while targeted one-PR drains
           // return their admission receipt instead of a checks-running refusal.
           const unavailable = new Set([...consumed, ...pendingIds, ...authorityGaps.map((gap) => gap.pr)])
-          const prs = runnablePRs(snapshot, args, steps, unavailable, {
+          const runnable = runnablePRSelection(snapshot, args, steps, unavailable, {
             explicitStepAuthority,
             ...(intentCutoff === undefined ? {} : { implicitBefore: intentCutoff }),
-          }).filter((pr) => !activeBases.has(baseIdentity(pr.base)))
+          })
+          const prs = runnable.prs.filter((pr) => !activeBases.has(baseIdentity(pr.base)))
+          if (selectorless && prs.length === 0) {
+            // Re-evaluate the whole FIFO-visible set for diagnostics, before the
+            // admission phase's temporary exclusions hide the reason it emitted
+            // no candidate. This uses the SAME eligibility helper as selection;
+            // it broadens evidence only, never what may run.
+            const diagnostic = runnablePRSelection(snapshot, args, steps, consumed, {
+              explicitStepAuthority,
+              ...(intentCutoff === undefined ? {} : { implicitBefore: intentCutoff }),
+            })
+            const rejected = diagnostic.decisions.filter(({ eligibility }) => !eligibility.runnable)
+            if (rejected.length > 0) reportZeroEventRun(queueRunNoRunnablePRs(rejected, authoritySteps))
+          }
           for (const candidate of partitionCandidates(prs, snapshot.queues.batchSize)) {
             if (runOptions.continueAdmissions?.() === false) break
             // 22306 residual: wrap the FULL per-candidate admission (base resolve,
@@ -2720,7 +2786,7 @@ function createQueue<Shape extends PRShape>(
                 startedEvent === undefined &&
                 started.events.every((event) => event.name === "queue/candidate/created")
               ) {
-                reportFullyReusedPlan(started.value)
+                reportZeroEventRun(started.value)
                 continue
               }
               if (startedEvent === undefined) throw new Error("yrd: queue run did not start a run")
@@ -3455,8 +3521,15 @@ function createQueueCommands(
           reuse === undefined ? undefined : { run: reuse.run, results: reuse.shape.results },
         )
       }
-      const prs = runnablePRs(state, args, steps, new Set(), { explicitStepAuthority })
-      if (prs.length === 0) return { events: [] }
+      const selectionResult = runnablePRSelection(state, args, steps, new Set(), { explicitStepAuthority })
+      const prs = selectionResult.prs
+      if (prs.length === 0) {
+        const rejected = selectionResult.decisions.filter(({ eligibility }) => !eligibility.runnable)
+        return {
+          events: [],
+          ...(rejected.length === 0 ? {} : { value: queueRunNoRunnablePRs(rejected, selected) }),
+        }
+      }
       for (const pr of prs) assertCurrentFlow(pr.flow, flows)
       const base = prs[0] === undefined ? undefined : baseIdentity(prs[0].base)
       if (base === undefined) throw new Error("yrd: a queue run requires at least one PR")
@@ -7493,13 +7566,15 @@ function reusableIntentPrefix(
   return { run: record.id, count: prefix.length, shape: shapeThrough(record, state.jobs, prefix.length) }
 }
 
-function runnablePRs(
+type RunnablePRDecision = Readonly<{ pr: PR; eligibility: PREligibility }>
+
+function runnablePRSelection(
   state: DeepReadonly<RuntimeState>,
   args: QueueRunArgs,
   steps: readonly RuntimeStep[],
   excluded: ReadonlySet<string> = new Set(),
   options: Readonly<{ explicitStepAuthority?: boolean; implicitBefore?: QueuePosition }> = {},
-): PR[] {
+): Readonly<{ prs: PR[]; decisions: RunnablePRDecision[] }> {
   const requested = requestedPRs(state.bays, args, excluded, options.implicitBefore)
   const implicitQueue = args.prs === undefined || args.prs.length === 0
   const ignoredClaims = new Set(
@@ -7509,19 +7584,33 @@ function runnablePRs(
           .map((run) => run.id)
       : [],
   )
-  return requested.filter((pr) => {
-    const eligibility = prEligibility(state, pr, steps, {
+  const decisions = requested.map((pr) => ({
+    pr,
+    eligibility: prEligibility(state, pr, steps, {
       resumeIntegrated: true,
       ignoreChecks: options.explicitStepAuthority,
       ignoredClaims,
-    })
-    if (eligibility.runnable) return true
+    }),
+  }))
+  const prs = decisions.flatMap(({ pr, eligibility }) => {
+    if (eligibility.runnable) return [pr]
     if (implicitQueue || (eligibility.reason?.code === "claimed" && options.explicitStepAuthority !== true)) {
-      return false
+      return []
     }
     const reason = eligibility.reason
     raiseFailure("refusal", reason?.code ?? "pr-not-ready", `yrd: ${reason?.message ?? `PR '${pr.id}' is not ready`}`)
   })
+  return { prs, decisions }
+}
+
+function runnablePRs(
+  state: DeepReadonly<RuntimeState>,
+  args: QueueRunArgs,
+  steps: readonly RuntimeStep[],
+  excluded: ReadonlySet<string> = new Set(),
+  options: Readonly<{ explicitStepAuthority?: boolean; implicitBefore?: QueuePosition }> = {},
+): PR[] {
+  return runnablePRSelection(state, args, steps, excluded, options).prs
 }
 
 /**
