@@ -101,6 +101,7 @@ import {
   createReadOnlyJournal,
   importOrphanJournal,
   type MutableJournal,
+  type ResolvedRetention,
 } from "@yrd/persistence"
 import { adaptProcessGit, createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
 import { withIntents } from "@yrd/intent"
@@ -1764,6 +1765,8 @@ export type YrdHost = Readonly<{
   process: Process
   /** Native implementation identity captured exactly once during host startup. */
   implementationSource?: string
+  /** Exact policy resolved once by this active host's mutable journal. */
+  journalRetention?: ResolvedRetention
   services: YrdCliServices
   drain(): Promise<void>
   /** Releases the owned app, process, and scope. Idempotent with async disposal. */
@@ -2601,6 +2604,7 @@ async function createYrdRuntimeHost(
       process,
       ...(resident === undefined ? {} : { resident }),
       ...(implementationSource === undefined ? {} : { implementationSource }),
+      ...(mode === "active" ? { journalRetention: (journal as MutableJournal).retention } : {}),
       services,
       drain,
       close,
@@ -2949,6 +2953,9 @@ async function runYrdProcessHost(
             ...(runner === undefined || activeHost.implementationSource === undefined
               ? {}
               : { implementationSource: activeHost.implementationSource }),
+            ...(resident === undefined || activeHost.journalRetention === undefined
+              ? {}
+              : { journalRetentionPolicy: activeHost.journalRetention }),
             concurrency: io.concurrency ?? activeHost.config.contest.concurrency,
             resolveRevision: (ref, cwd) =>
               io.resolveRevision === undefined

@@ -12,7 +12,12 @@ import type {
 } from "@yrd/queue"
 import type { HasIntents, IntentCommands, IntentsState } from "@yrd/intent"
 import type { HasIssues } from "@yrd/issue"
-import type { JournalVersionBumpResult, JournalViewRebuildResult, OrphanJournalImportResult } from "@yrd/persistence"
+import type {
+  JournalVersionBumpResult,
+  JournalViewRebuildResult,
+  OrphanJournalImportResult,
+  ResolvedRetention,
+} from "@yrd/persistence"
 import type { Process, ProcessResult } from "@yrd/process"
 import type { Scope } from "@silvery/scope"
 import type { QueueReadModel } from "./queue-read-model.ts"
@@ -21,6 +26,16 @@ import type { RetainedWorkspace } from "./workspace-retention.ts"
 import type { YrdConfig } from "@yrd/config"
 
 export type YrdCliExitCode = 0 | 1 | 2 | 3
+
+export type JournalRetentionPolicy = ResolvedRetention
+
+export type JournalRetentionObservation = Readonly<{
+  policy: JournalRetentionPolicy
+  source: "mutable-journal"
+  observedAt: string
+  /** Resident driver epoch that produced this observation. */
+  generation: string
+}>
 
 export type { QueueAuditEmission, QueueAuditFinding, QueueAuditResult } from "@yrd/queue"
 
@@ -198,6 +213,8 @@ export type YrdCliIO = {
   driver?: Readonly<{ queueId: string; epoch: string }>
   /** Host-owned implementation identity captured before a resident starts serving. */
   implementationSource?: string
+  /** Exact policy resolved by the mutable journal this resident serves. */
+  journalRetentionPolicy?: JournalRetentionPolicy
   /**
    * The Yrd source checkout {@link implementationSource} was captured from —
    * the only repository that sha may be compared against. Absent means "resolve
