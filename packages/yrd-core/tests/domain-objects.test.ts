@@ -103,6 +103,24 @@ function createCheckpointJournal(base: Journal<unknown>) {
   }
 }
 
+function journalHistory(evictedThrough: number): NonNullable<Journal<unknown>["history"]> {
+  return {
+    command: () => undefined,
+    hasIdentity: () => false,
+    entity: () => [],
+    diagnostics: () => ({
+      pageCount: 0,
+      freelistCount: 0,
+      autoVacuum: "none",
+      historyFrames: 1,
+      tailFrames: 0,
+      evictedThrough,
+      oldestRetainedCursor: evictedThrough + 1,
+      archiveFallbacks: 0,
+    }),
+  }
+}
+
 describe("Yrd domain objects", () => {
   it("exposes one dispatch surface and returns commands instead of storage frames", async () => {
     const app = await createYrd(withCounter()(createYrdDef()), {
@@ -434,6 +452,38 @@ describe("Yrd domain objects", () => {
     expect(recovered.state().counter.value).toBe(4)
   })
 
+  it("full-replays and rewrites an unmatched predecessor while complete history remains", async () => {
+    const backing = createMemoryJournal<unknown>()
+    const cache = createCheckpointJournal(backing)
+    const predecessor = withCounter("counter-v1")(createYrdDef())
+    const writer = await createYrd(predecessor, {
+      inject: { journal: cache.journal, id: ids("predecessor-command", "predecessor-event") },
+    })
+    await writer.dispatch({ op: "counter.add", args: { by: 4 } })
+    await writer.close()
+    const stored = cache.stored()
+    if (stored === undefined) throw new Error("expected predecessor checkpoint")
+    cache.reads.length = 0
+
+    const current = withCheckpointMigrations(withCounter("counter-v2")(createYrdDef()), [
+      {
+        from: "1".repeat(64),
+        migrate: (state) => state,
+      },
+    ])
+    const targetIdentity = checkpointMigrationManifest(current).targetIdentity
+    const completeHistory = {
+      ...cache.journal,
+      history: journalHistory(0),
+    } satisfies Journal<unknown>
+
+    await using rebuilt = await createYrd(current, { inject: { journal: completeHistory } })
+
+    expect(cache.reads).toEqual([0])
+    expect(rebuilt.state().counter.value).toBe(4)
+    expect(cache.stored()).toMatchObject({ identity: targetIdentity, cursor: stored.cursor })
+  })
+
   it("migrates an inspected predecessor checkpoint when retention makes replay from zero impossible", async () => {
     const backing = createMemoryJournal<unknown>()
     const cache = createCheckpointJournal(backing)
@@ -495,6 +545,7 @@ describe("Yrd domain objects", () => {
     const other = "1".repeat(64)
     const retained = {
       ...cache.journal,
+      history: journalHistory(1),
       read(after = 0, before?: number) {
         if (after === 0) throw new RangeError("history below cursor 1 was evicted")
         return backing.read(after, before)

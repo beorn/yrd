@@ -812,7 +812,18 @@ export async function createYrd<State extends object, Commands extends CommandTr
         if (predecessor !== undefined && predecessor.identity !== checkpointIdentity) {
           if (definition[checkpointMigrations].length > 0) {
             migrationSource = true
-            checkpoint = migrateProjectionCheckpoint(definition, predecessor, checkpointIdentity)
+            try {
+              checkpoint = migrateProjectionCheckpoint(definition, predecessor, checkpointIdentity)
+            } catch (error) {
+              if (
+                failureFact(error)?.code === "checkpoint-migration-missing" &&
+                history?.diagnostics().evictedThrough === 0
+              ) {
+                reportSavedStateRebuild("Saved state has no migration path; rebuilding it from complete history.")
+                return undefined
+              }
+              throw error
+            }
           } else {
             const evictedThrough = history?.diagnostics().evictedThrough ?? 0
             if (evictedThrough > 0) {
