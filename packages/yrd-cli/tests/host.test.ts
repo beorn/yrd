@@ -1271,6 +1271,66 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     }
   })
 
+  it("adopts current batch policy while migrating a retained checkpoint", async () => {
+    const { repo, featureSha } = await repository()
+    const stateDir = join(repo, ".git", "yrd")
+    const config = (batch: number): ResolvedYrdProjectConfig => ({
+      base: "main",
+      batch,
+      steps: ["check", "merge"],
+      requires: [],
+      definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    })
+    await using runtimeProcess = createProcess({ cwd: repo })
+
+    const predecessor = await createDefaultYrdApp({
+      repo,
+      stateDir,
+      baysRoot: join(repo, ".bays"),
+      journal: testJournal(stateDir),
+      process: runtimeProcess,
+      config: config(10),
+    })
+    await predecessor.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await predecessor.queue.run({ prs: ["PR1"], steps: ["check"] }, { runner: "test", leaseMs: 60_000 })
+    expect(predecessor.state().queues.batchSize).toBe(10)
+    const historicalRun = Queues.values(predecessor.state().queues)[0]
+    expect(historicalRun?.batchSize).toBe(10)
+    await predecessor.close()
+
+    using database = new Database(join(stateDir, "journal.sqlite"), { strict: true })
+    const checkpoint = database
+      .query<{ checkpoint_json: string; cursor: number }, []>(
+        "SELECT checkpoint_json, cursor FROM journal_snapshot WHERE singleton = 1",
+      )
+      .get()
+    if (checkpoint === null) throw new Error("expected predecessor projection checkpoint")
+    const checkpointValue = JSON.parse(checkpoint.checkpoint_json)
+    expect(checkpointValue).toMatchObject({ value: { state: { queues: { batchSize: 10 } } } })
+    const retainedIdentity = "0a3476ef91823d46f19770047a4e6462c970c5afc250cba9dd82eb31c5febc25"
+    const retainedCheckpoint = JSON.stringify({ ...checkpointValue, identity: retainedIdentity })
+    database
+      .query(
+        "UPDATE journal_snapshot SET checkpoint_identity = ?, checkpoint_json = ?, checkpoint_sha256 = ? WHERE singleton = 1",
+      )
+      .run(retainedIdentity, retainedCheckpoint, createHash("sha256").update(retainedCheckpoint).digest("hex"))
+    database.close()
+
+    await using restored = await createDefaultYrdApp({
+      repo,
+      stateDir,
+      baysRoot: join(repo, ".bays"),
+      journal: testJournal(stateDir),
+      process: runtimeProcess,
+      config: config(1),
+    })
+
+    expect(restored.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature" })
+    expect(restored.state().queues.batchSize).toBe(1)
+    expect(historicalRun === undefined ? undefined : restored.queue.get(historicalRun.id)?.batchSize).toBe(10)
+  })
+
   it("composes the final plugin stack and integrates through configured typed steps", async () => {
     const { repo, featureSha } = await repository()
     const config: ResolvedYrdProjectConfig = {

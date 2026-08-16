@@ -1601,7 +1601,19 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     definition,
     RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES.map((from) => ({
       from,
-      migrate: (state) => definition.compact(state),
+      migrate: (state) => {
+        const compacted = definition.compact(state)
+        return {
+          ...compacted,
+          queues: {
+            ...compacted.queues,
+            // Construction policy is not a journal fact. A retained checkpoint
+            // keeps historical Run widths, but future candidates must use the
+            // current config/default selected by this process.
+            batchSize: definition.initialState.queues.batchSize,
+          },
+        }
+      },
     })),
   )
 }
