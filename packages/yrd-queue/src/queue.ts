@@ -238,6 +238,39 @@ const QueueRunArgsSchema = z
   })
 export type QueueRunArgs = Readonly<z.infer<typeof QueueRunArgsSchema>>
 
+const QueueRunReuseCoveredSchema = z
+  .object({
+    kind: z.literal("reusable-prefix-covered"),
+    members: z.array(z.string().trim().min(1)).min(1),
+    source: z.enum(["queue-run", "revision-admission"]),
+    selectedSteps: z.array(StepNameSchema).min(1),
+    coveredSteps: z.array(StepNameSchema).min(1),
+    coveredCount: z.number().int().positive(),
+    reason: z.literal("reusable prefix fully covered the selected plan"),
+    reusedFrom: RunIdSchema.optional(),
+  })
+  .strict()
+type QueueRunReuseCovered = Readonly<z.infer<typeof QueueRunReuseCoveredSchema>>
+
+function queueRunReuseCovered(
+  members: readonly string[],
+  selected: readonly RuntimeStep[],
+  source: QueueRunReuseCovered["source"],
+  reusedFrom?: RunId,
+): QueueRunReuseCovered {
+  const coveredSteps = selected.map((step) => step.name)
+  return QueueRunReuseCoveredSchema.parse({
+    kind: "reusable-prefix-covered",
+    members,
+    source,
+    selectedSteps: coveredSteps,
+    coveredSteps,
+    coveredCount: coveredSteps.length,
+    reason: "reusable prefix fully covered the selected plan",
+    ...(reusedFrom === undefined ? {} : { reusedFrom }),
+  })
+}
+
 export type AdmitSelection = Readonly<{ prs?: readonly string[] }>
 
 const AdvanceArgsSchema = z.object({ run: RunIdSchema }).strict()
@@ -1168,6 +1201,16 @@ function createQueue<Shape extends PRShape>(
 ): Queue<Shape> {
   const current = (id: RunId): Run => materializeRun(Queues.record(state(), id), runtime().jobs)
   const byName = new Map(steps.map((step) => [step.name, step] as const))
+  const reportFullyReusedPlan = (value: JsonValue | undefined): boolean => {
+    const parsed = QueueRunReuseCoveredSchema.safeParse(value)
+    if (!parsed.success) return false
+    const covered = parsed.data
+    log.warn?.("queue run emitted zero events because a reusable prefix covered every selected step", {
+      action: "queue-run-reuse-covered",
+      ...covered,
+    })
+    return true
+  }
 
   const persistMergeRecord = async (run: Run): Promise<void> => {
     if (recordMerge === undefined || !Queues.terminal(run)) return
@@ -2183,7 +2226,10 @@ function createQueue<Shape extends PRShape>(
       ...(candidate === undefined ? {} : { candidate }),
     })
     const startedEvent = started.events.find((applied) => applied.name === "queue/run/started")
-    if (startedEvent === undefined) throw new Error(`yrd: intent '${intent.id}' did not start a Queue run`)
+    if (startedEvent === undefined) {
+      reportFullyReusedPlan(started.value)
+      throw new Error(`yrd: intent '${intent.id}' did not start a Queue run`)
+    }
     const id = QueueStartSchema.parse((startedEvent.data as { run?: unknown }).run).id
     return { outcome: "run", run: await settle(id, runOptions) }
   }
@@ -2674,6 +2720,7 @@ function createQueue<Shape extends PRShape>(
                 startedEvent === undefined &&
                 started.events.every((event) => event.name === "queue/candidate/created")
               ) {
+                reportFullyReusedPlan(started.value)
                 continue
               }
               if (startedEvent === undefined) throw new Error("yrd: queue run did not start a run")
@@ -3388,7 +3435,12 @@ function createQueueCommands(
           ? undefined
           : reusableIntentPrefix(state, candidateSnapshots, args.candidate?.treeSha, selected)
         const remaining = reuse === undefined ? selected : selected.slice(reuse.count)
-        if (remaining.length === 0) return { events: [] }
+        if (remaining.length === 0 && reuse !== undefined) {
+          return {
+            events: [],
+            value: queueRunReuseCovered([snapshot.id], selected, "queue-run", reuse.run),
+          }
+        }
         return startRun(
           state.queues,
           Queues.nextId(state.queues),
@@ -3442,15 +3494,29 @@ function createQueueCommands(
       const snapshots = prs.map(Queues.snapshot)
       const candidateBaseSha = args.baseSha ?? requiredCandidateBaseSha(snapshots)
       const candidateSnapshots = pinCandidateBaseSha(snapshots, candidateBaseSha)
-      const reuse =
+      const admissionReuse =
         integrated === undefined && !explicitStepAuthority
-          ? (reusableRevisionAdmission(state, candidateSnapshots, selected) ??
-            reusablePrefix(state, candidateSnapshots, selected))
+          ? reusableRevisionAdmission(state, candidateSnapshots, selected)
           : undefined
+      const runReuse =
+        integrated === undefined && !explicitStepAuthority && admissionReuse === undefined
+          ? reusablePrefix(state, candidateSnapshots, selected)
+          : undefined
+      const reuse = admissionReuse ?? runReuse
       const remaining = reuse === undefined ? selected : selected.slice(reuse.count)
       const reusedRun: RunId | undefined =
         reuse !== undefined && "run" in reuse && typeof reuse.run === "string" ? reuse.run : undefined
-      if (remaining.length === 0) return { events: [] }
+      if (remaining.length === 0 && reuse !== undefined) {
+        return {
+          events: [],
+          value: queueRunReuseCovered(
+            candidateSnapshots.map((snapshot) => snapshot.id),
+            selected,
+            admissionReuse === undefined ? "queue-run" : "revision-admission",
+            runReuse?.run,
+          ),
+        }
+      }
       const authorityGap = queueAuthorityGaps(
         state.queues.authority,
         candidateSnapshots,

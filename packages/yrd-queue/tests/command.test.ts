@@ -23,7 +23,7 @@ import { createFailure, createMemoryJournal, createYrd, createYrdDef, failureFac
 import { withJobs } from "@yrd/job"
 import { withIntents } from "@yrd/intent"
 import { createProcess, shellCommand, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
-import { createLogger } from "loggily"
+import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
 import * as z from "zod"
 import {
   CommandEvidenceSchema,
@@ -754,6 +754,8 @@ async function checkedQueue(
     intentEvaluation?: "advance" | "noop" | "refused"
     refusedIntentIssues?: readonly string[]
     checkpointIdentity?: string | (() => string)
+    defaultSteps?: readonly ("check" | "merge")[]
+    log?: ConditionalLogger
     checkpointMigration?: (input: { path: string; candidate: { baseSha: string; candidateSha: string } }) => Promise<{
       version: 1
       manifest: { version: 1; targetIdentity: string; edges: readonly { from: string; to: string }[] }
@@ -811,6 +813,7 @@ async function checkedQueue(
     steps: [check, merge] as const,
     batch: options.batch ?? 1,
     defaultBase: "main",
+    ...(options.defaultSteps === undefined ? {} : { defaultSteps: options.defaultSteps }),
     resolveBaseSha: (base) => queueBaseSha(repo, base),
     ...(options.prepareCandidate === true
       ? { prepareCandidate: gitCandidatePreparer({ inject: { process }, repo }) }
@@ -853,7 +856,7 @@ async function checkedQueue(
     withBays({ jobs: bayJobs }),
   )
   return createYrd(queue(base), {
-    inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
+    inject: { journal: createMemoryJournal(), log: options.log ?? createLogger("test", [{ level: "silent" }]) },
   })
 }
 
@@ -3545,6 +3548,50 @@ describe("Queue command adapters", () => {
     expect(second).toHaveLength(1)
     expect(second[0]).toMatchObject({ conclusion: "success", prs: [{ id: intent.id }] })
     expect(app.intents.get(intent.id)).toMatchObject({ status: "integrated" })
+  }, 30_000)
+
+  it("names the fully reused queue-run prefix when an intent emits no run events", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const fixture = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    await using process = createProcess()
+    await using app = await checkedQueue(process, fixture.repo, ["true"], {
+      defaultSteps: ["check"],
+      log,
+      prepareCandidate: true,
+    })
+    const intent = await app.intents.submit({
+      intentId: "00000000-0000-7000-8000-000000000019",
+      issue: { source: "km", id: "@yrd/core/covered-intent" },
+      component: "dep",
+      target: fixture.moduleSha,
+      submitter: "@dev/5",
+    })
+    expect(await app.queue.run({}, runtime)).toHaveLength(1)
+
+    await expect(app.queue.run({}, runtime)).rejects.toThrow(`intent '${intent.id}' did not start a Queue run`)
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "log",
+        level: "warn",
+        message: "queue run emitted zero events because a reusable prefix covered every selected step",
+        props: expect.objectContaining({
+          action: "queue-run-reuse-covered",
+          coveredSteps: ["check"],
+          members: [intent.id],
+          reason: "reusable prefix fully covered the selected plan",
+          reusedFrom: "R1",
+          selectedSteps: ["check"],
+          source: "queue-run",
+        }),
+      }),
+    )
+    log.end()
   }, 30_000)
 
   it("refuses a claimed intent that is superseded before its merge step starts", async () => {

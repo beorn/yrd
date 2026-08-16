@@ -4060,6 +4060,27 @@ describe("Queue", () => {
     expect(checks).toBe(1)
   })
 
+  it("names the fully reused admission prefix when a PR emits no run events", async () => {
+    await using app = await createQueueApp({ defaultSteps: ["check"] })
+    const pr = await submitBranch(app, "issue/covered-pr")
+    await app.bays.requestChecks({ pr: pr.id })
+    expect(await app.queue.admit({ prs: [pr.id] }, runtime)).toEqual([pr.id])
+    expect(prAdmission(app.bays.pr(pr.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
+
+    const result = await app.dispatch(app.commands.queue.run, { prs: [pr.id], baseSha: BASE })
+
+    expect(result.events).toEqual([])
+    expect(result.value).toEqual({
+      kind: "reusable-prefix-covered",
+      coveredCount: 1,
+      coveredSteps: ["check"],
+      members: [pr.id],
+      reason: "reusable prefix fully covered the selected plan",
+      selectedSteps: ["check"],
+      source: "revision-admission",
+    })
+  })
+
   it("owns the admission drain inside Queue before integrating the same cached proof", async () => {
     let checks = 0
     await using app = await createQueueApp({
