@@ -4264,6 +4264,7 @@ checks: [{check: {run: "true"}}]
         env: {
           ...process.env,
           HERDR_PANE_ID: "w1:attested",
+          YRD_JOURNAL_KEEP_FRAMES: "500",
           YRD_WRAPPER_IMPLEMENTATION_SOURCE: implementationSource,
         },
         stdout: "pipe",
@@ -4283,9 +4284,36 @@ checks: [{check: {run: "true"}}]
               epoch: expect.stringMatching(/^[0-9a-f-]{36}$/u),
               lastLanded: null,
             },
+            retention: {
+              policy: { keepFrames: 500 },
+              source: "mutable-journal",
+              observedAt: expect.any(String),
+              generation: expect.stringMatching(/^[0-9a-f-]{36}$/u),
+            },
           }),
         { timeout: 10_000 },
       )
+      const doctor = Bun.spawn(
+        [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "doctor", "--json"],
+        {
+          cwd: repo,
+          env: { ...process.env, YRD_JOURNAL_RETENTION: "disabled" },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      )
+      const [doctorStdout, doctorStderr, doctorExit] = await Promise.all([
+        new Response(doctor.stdout).text(),
+        new Response(doctor.stderr).text(),
+        doctor.exited,
+      ])
+      expect(doctorExit, `${doctorStderr}\n${doctorStdout}`).toBe(0)
+      expect(JSON.parse(doctorStdout)).toMatchObject({
+        retention: {
+          advisory: true,
+          writer: { active: true, armed: true, policy: { keepFrames: 500 } },
+        },
+      })
       cli.kill("SIGTERM")
       await expect(cli.exited).resolves.toBe(0)
     } finally {

@@ -207,6 +207,8 @@ import {
   taskStatusFields,
 } from "./task-status.ts"
 import type {
+  JournalRetentionObservation,
+  JournalRetentionPolicy,
   YrdBayProtection,
   YrdCliApp,
   YrdCliExitCode,
@@ -592,6 +594,62 @@ function parseUncarriedObservation(value: unknown): UncarriedObservation | undef
   }
 }
 
+function parseJournalRetentionPolicy(value: unknown): JournalRetentionPolicy {
+  if (value === "disabled") return value
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner retention policy is invalid")
+  }
+  const policy = value as Record<string, unknown>
+  const keys = Object.keys(policy).toSorted()
+  if (
+    !Number.isSafeInteger(policy.keepFrames) ||
+    (policy.keepFrames as number) < 1 ||
+    (policy.keepDays !== undefined && (!Number.isSafeInteger(policy.keepDays) || (policy.keepDays as number) < 1)) ||
+    keys.some((key) => key !== "keepFrames" && key !== "keepDays")
+  ) {
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner retention policy is invalid")
+  }
+  return {
+    keepFrames: policy.keepFrames as number,
+    ...(policy.keepDays === undefined ? {} : { keepDays: policy.keepDays as number }),
+  }
+}
+
+function parseJournalRetentionObservation(value: unknown): JournalRetentionObservation | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    raiseFailure(
+      "infrastructure",
+      "resident-runner-status-invalid",
+      "yrd: resident runner retention observation is invalid",
+    )
+  }
+  const observation = value as Record<string, unknown>
+  if (observation.source !== "mutable-journal") {
+    raiseFailure(
+      "infrastructure",
+      "resident-runner-status-invalid",
+      "yrd: resident runner retention observation source is invalid",
+    )
+  }
+  if (
+    typeof observation.generation !== "string" ||
+    !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu.test(observation.generation)
+  ) {
+    raiseFailure(
+      "infrastructure",
+      "resident-runner-status-invalid",
+      "yrd: resident runner retention observation generation is invalid",
+    )
+  }
+  return {
+    policy: parseJournalRetentionPolicy(observation.policy),
+    source: "mutable-journal",
+    observedAt: residentRunnerTimestamp(observation.observedAt, "retention observedAt"),
+    generation: observation.generation,
+  }
+}
+
 function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
   let value: unknown
   try {
@@ -611,6 +669,7 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
   const queueProgress = parseResidentRunnerProgress(record.queueProgress)
   const driver = parseQueueDriverEpoch(record.driver)
   const uncarried = parseUncarriedObservation(record.uncarried)
+  const retention = parseJournalRetentionObservation(record.retention)
   if (Date.parse(lastTickAt) < Date.parse(startedAt)) {
     raiseFailure(
       "infrastructure",
@@ -649,6 +708,7 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
     ...(queueProgress === undefined ? {} : { queueProgress }),
     ...(driver === undefined ? {} : { driver }),
     ...(uncarried === undefined ? {} : { uncarried }),
+    ...(retention === undefined ? {} : { retention }),
     ...(record.command === undefined ? {} : { command: record.command as string }),
     ...(record.exitedAt === undefined ? {} : { exitedAt: residentRunnerTimestamp(record.exitedAt, "exitedAt") }),
     ...(record.clean === undefined ? {} : { clean: record.clean }),
@@ -1470,6 +1530,8 @@ export async function startResidentRunnerHeartbeat(
   options: Readonly<{
     intervalMs?: number
     queueProgress?: (now: string) => QueueRunnerProgress
+    /** Exact policy already resolved by the mutable journal; never re-derived here. */
+    retention?: JournalRetentionPolicy
     /** Last uncarried sweep, if one has completed. Returning undefined is a
      * real answer — the rail says "not swept" rather than 0. */
     uncarried?: () => UncarriedObservation | undefined
@@ -1511,6 +1573,13 @@ export async function startResidentRunnerHeartbeat(
   const startedAt = nowIso()
   let recordedProgress: QueueRunnerProgress | undefined
   const driverEpoch = options.driver === undefined ? undefined : (options.driver.epoch ?? randomUUID())
+  if (options.retention !== undefined && driverEpoch === undefined) {
+    raiseFailure(
+      "configuration",
+      "resident-retention-generation-unavailable",
+      "yrd: resident retention policy cannot be attested without a driver generation",
+    )
+  }
   // The dedicated RUNNER box renders this verbatim: `[pid] <command>`.
   const command = [basename(process.argv[0] ?? "bun"), ...process.argv.slice(1)].join(" ")
   const writeStatus = async (exit?: Readonly<{ exitedAt: string; clean: boolean }>): Promise<void> => {
@@ -1526,6 +1595,16 @@ export async function startResidentRunnerHeartbeat(
       // Omitted, never zeroed: absent means not measured, and the rail must be
       // able to tell that from a swept-and-clean queue.
       ...(uncarried === undefined ? {} : { uncarried }),
+      ...(options.retention === undefined || driverEpoch === undefined
+        ? {}
+        : {
+            retention: {
+              policy: options.retention,
+              source: "mutable-journal",
+              observedAt: lastTickAt,
+              generation: driverEpoch,
+            },
+          }),
       ...(options.driver === undefined || driverEpoch === undefined
         ? {}
         : {
@@ -7773,6 +7852,220 @@ async function candidateRefDoctorFinding(
   }
 }
 
+type RetentionDoctorReport =
+  | Readonly<{
+      advisory: true
+      status: "not-applicable"
+      reason: string
+      source: string
+      observedAt: string
+    }>
+  | Readonly<{
+      advisory: true
+      floor: Readonly<{
+        evictedThrough: number
+        oldestRetainedCursor: number | null
+        source: string
+        observedAt: string
+      }>
+      writer:
+        | Readonly<{
+            active: false
+            armed: false
+            policy: "not-applicable"
+            source: string
+            observedAt: string
+          }>
+        | Readonly<{
+            active: true
+            armed: boolean
+            policy: JournalRetentionPolicy
+            pid: number
+            generation: string
+            source: string
+            observedAt: string
+          }>
+      checkpoint:
+        | Readonly<{
+            status: "not-required"
+            source: string
+            observedAt: string
+          }>
+        | Readonly<{
+            status: "covering"
+            identity: string
+            cursor: number
+            cursorHeadroom: number
+            source: string
+            observedAt: string
+          }>
+    }>
+
+function doctorObservationTime(io: YrdCliIO): Readonly<{ nowMs: number; observedAt: string }> {
+  const nowMs = io.now?.() ?? Date.now()
+  if (!Number.isFinite(nowMs) || nowMs < 0) {
+    raiseFailure("infrastructure", "doctor-clock-invalid", "yrd: doctor observation clock is invalid")
+  }
+  return { nowMs, observedAt: new Date(nowMs).toISOString() }
+}
+
+function retentionPolicyLabel(policy: JournalRetentionPolicy): string {
+  if (policy === "disabled") return "disabled"
+  return `armed keepFrames=${String(policy.keepFrames)}${
+    policy.keepDays === undefined ? "" : ` keepDays=${String(policy.keepDays)}`
+  }`
+}
+
+function retentionDoctorLine(report: RetentionDoctorReport): string {
+  if ("status" in report) {
+    return `ADVISORY retention not applicable: ${report.reason} (source=${report.source}, observed=${report.observedAt})`
+  }
+  const oldest = report.floor.oldestRetainedCursor === null ? "none" : String(report.floor.oldestRetainedCursor)
+  const writer = report.writer.active ? retentionPolicyLabel(report.writer.policy) : "inactive"
+  const checkpoint =
+    report.checkpoint.status === "covering"
+      ? `checkpoint cursor ${String(report.checkpoint.cursor)}, cursor headroom ${String(report.checkpoint.cursorHeadroom)}`
+      : "checkpoint not required"
+  return (
+    `ADVISORY retention: evicted-through cursor ${String(report.floor.evictedThrough)}, ` +
+    `oldest retained cursor ${oldest}, writer ${writer}, ${checkpoint}`
+  )
+}
+
+async function retentionDoctor(app: YrdCliApp, io: YrdCliIO): Promise<RetentionDoctorReport> {
+  const { nowMs, observedAt } = doctorObservationTime(io)
+  const diagnostics = app.retentionDiagnostics()
+  const journal = diagnostics.journal
+  if (journal === undefined) {
+    return {
+      advisory: true,
+      status: "not-applicable",
+      reason: "this Journal has no history or destructive-retention capability",
+      source: "yrd-core retention diagnostics",
+      observedAt,
+    }
+  }
+
+  const floorSource = io.stateDir === undefined ? "journal.sqlite" : join(io.stateDir, "journal.sqlite")
+  const floor = {
+    evictedThrough: journal.evictedThrough,
+    oldestRetainedCursor: journal.oldestRetainedCursor,
+    source: floorSource,
+    observedAt,
+  }
+  const checkpointSource = "yrd-core current projection checkpoint"
+  const checkpoint = diagnostics.checkpoint
+  let checkpointReport: Extract<RetentionDoctorReport, { floor: unknown }>["checkpoint"]
+  if (checkpoint === undefined) {
+    if (journal.evictedThrough > 0) {
+      raiseFailure(
+        "infrastructure",
+        "journal-recovery-coverage-unavailable",
+        `yrd: ${checkpointSource} is missing while ${floorSource} says history through cursor ${String(
+          journal.evictedThrough,
+        )} was evicted`,
+      )
+    }
+    checkpointReport = { status: "not-required", source: checkpointSource, observedAt }
+  } else {
+    const cursorHeadroom = checkpoint.cursor - journal.evictedThrough
+    if (cursorHeadroom < 0) {
+      raiseFailure(
+        "infrastructure",
+        "journal-recovery-coverage-invalid",
+        `yrd: ${checkpointSource} cursor ${String(checkpoint.cursor)} is below eviction floor ${String(
+          journal.evictedThrough,
+        )} from ${floorSource}`,
+      )
+    }
+    checkpointReport = {
+      status: "covering",
+      identity: checkpoint.identity,
+      cursor: checkpoint.cursor,
+      cursorHeadroom,
+      source: checkpointSource,
+      observedAt,
+    }
+  }
+
+  const cwd = io.cwd ?? process.cwd()
+  const statusSource = residentRunnerStatusPath(cwd, io.stateDir) ?? "resident-runner/status.json"
+  const lease = await residentRunnerLeaseObservation(cwd)
+  const resident = observeResidentRunner(await residentRunnerStatus(cwd, io.stateDir)).runner
+  if (lease.held !== (resident !== null)) {
+    raiseFailure(
+      "infrastructure",
+      "resident-retention-source-disagreement",
+      `yrd: resident runner lease and ${statusSource} disagree about whether a writer is active`,
+    )
+  }
+  if (resident === null) {
+    return {
+      advisory: true,
+      floor,
+      writer: {
+        active: false,
+        armed: false,
+        policy: "not-applicable",
+        source: `resident runner lease + ${statusSource}`,
+        observedAt,
+      },
+      checkpoint: checkpointReport,
+    }
+  }
+
+  const ageMs = Math.max(0, nowMs - Date.parse(resident.lastTickAt))
+  if (ageMs > RUNNER_STALE_MS) {
+    raiseFailure(
+      "infrastructure",
+      "resident-retention-observation-stale",
+      `yrd: retention observation source ${statusSource} is stale by ${String(ageMs)}ms`,
+    )
+  }
+  if (
+    lease.driver === undefined ||
+    resident.driver === undefined ||
+    lease.driver.queueId !== resident.driver.queueId ||
+    lease.driver.epoch !== resident.driver.epoch
+  ) {
+    raiseFailure(
+      "infrastructure",
+      "resident-retention-source-disagreement",
+      `yrd: resident runner lease driver does not match ${statusSource}`,
+    )
+  }
+  const retention = resident.retention
+  if (retention === undefined) {
+    raiseFailure(
+      "infrastructure",
+      "resident-retention-observation-missing",
+      `yrd: active resident ${String(resident.pid)} has no retention observation in ${statusSource}`,
+    )
+  }
+  if (retention.generation !== resident.driver.epoch || retention.observedAt !== resident.lastTickAt) {
+    raiseFailure(
+      "infrastructure",
+      "resident-retention-observation-mismatch",
+      `yrd: retention observation in ${statusSource} does not match its resident generation and source-read time`,
+    )
+  }
+
+  return {
+    advisory: true,
+    floor,
+    writer: {
+      active: true,
+      armed: retention.policy !== "disabled",
+      policy: retention.policy,
+      pid: resident.pid,
+      generation: retention.generation,
+      source: statusSource,
+      observedAt: retention.observedAt,
+    },
+    checkpoint: checkpointReport,
+  }
+}
+
 async function configDoctor(
   app: YrdCliApp,
   services: YrdCliServices,
@@ -7794,6 +8087,7 @@ async function configDoctor(
   await app.refresh()
   const state = stateOf(app)
   const findings = diagnoseYrdFlows({ prs: Object.values(state.bays.prs), runs: Queues.values(state.queues) }, config)
+  const retention = await retentionDoctor(app, io)
   const candidateRefs = await candidateRefDoctorFinding(state.queues, io)
   const warnings = [
     ...submoduleTrackingWarnings(io.cwd ?? process.cwd()),
@@ -7816,11 +8110,14 @@ async function configDoctor(
     {
       command: "doctor",
       findings,
+      retention,
       ...(candidateRefs.sweep === undefined ? {} : { candidateRefs: candidateRefs.sweep }),
       ...(rebuilt === undefined ? {} : { rebuilt }),
       ...(indexRebuild === undefined ? {} : { indexRebuild }),
     },
-    indexRebuild === undefined ? doctorLine : [...indexRebuildLines(indexRebuild), doctorLine].join("\n"),
+    indexRebuild === undefined
+      ? [doctorLine, retentionDoctorLine(retention)].join("\n")
+      : [...indexRebuildLines(indexRebuild), doctorLine, retentionDoctorLine(retention)].join("\n"),
     warnings,
   )
   // A landing repo truth proves but the index still cannot carry is a real gap, not a clean run —
@@ -9280,6 +9577,7 @@ export async function followQueueRuns(
     ? await startResidentRunnerHeartbeat(io, {
         queueProgress: (now) => residentQueueProgress(app, now),
         uncarried: createUncarriedSweeper(app, io, base, app.log).observe,
+        ...(io.journalRetentionPolicy === undefined ? {} : { retention: io.journalRetentionPolicy }),
         driver: {
           queueId: io.driver?.queueId ?? `${resolve(io.repositoryRoot ?? io.cwd ?? process.cwd())}#${base}`,
           ...(io.driver === undefined ? {} : { epoch: io.driver.epoch }),
