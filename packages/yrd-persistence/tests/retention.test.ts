@@ -8,8 +8,14 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Database } from "bun:sqlite"
-import { CauseSchema, Command, EventSchema, type Cause, type Event, type Journal } from "@yrd/core"
-import { createJournal, resolveRetention, type JournalOptions } from "@yrd/persistence"
+import { CauseSchema, Command, EventSchema, failureFact, type Cause, type Event, type Journal } from "@yrd/core"
+import {
+  createJournal,
+  createReadOnlyJournal,
+  resolveRetention,
+  type JournalOptions,
+  type MutableJournal,
+} from "@yrd/persistence"
 import { createLogger, type Event as LogEvent } from "loggily"
 import { afterEach, describe, expect, it } from "vitest"
 
@@ -216,9 +222,55 @@ describe("retention arming contract", () => {
     expect(() => withEnv({ days: "soon" }, () => resolveRetention(undefined))).toThrow(/YRD_JOURNAL_KEEP_DAYS/u)
     expect(() => withEnv({}, () => resolveRetention({ keepFrames: 0 }))).toThrow(/keepFrames/u)
   })
+
+  it("exposes the exact resolved policy only from the mutable journal that owns it", async () => {
+    const dir = await directory()
+    withEnv({ frames: "500" }, () => {
+      const mutable = testJournal(dir) as MutableJournal
+
+      expect(mutable.retention).toEqual({ keepFrames: 500 })
+      expect(createReadOnlyJournal({ dir })).not.toHaveProperty("retention")
+    })
+  })
 })
 
 describe("journal retention window", () => {
+  it("reports the durable floor and actual oldest retained cursor without inventing density", async () => {
+    const dir = await directory()
+    const journal = testJournal(dir, { retention: { keepFrames: 1 } })
+    const head = await appendAll(journal, [frame("floor-1"), frame("floor-2"), frame("floor-3")])
+    await journal.checkpoint?.save?.({ identity: "floor", cursor: head, value: {} })
+
+    expect(journal.history?.diagnostics()).toMatchObject({
+      evictedThrough: 2,
+      oldestRetainedCursor: 3,
+      historyFrames: 1,
+      tailFrames: 0,
+    })
+  })
+
+  it("raises a typed refusal when the retained floor metadata is malformed", async () => {
+    const dir = await directory()
+    const journal = testJournal(dir)
+    const head = await appendAll(journal, [frame("malformed-floor")])
+    await journal.checkpoint?.save?.({ identity: "floor", cursor: head, value: {} })
+    using database = new Database(join(dir, "journal.sqlite"), { strict: true })
+    database
+      .query("INSERT OR REPLACE INTO journal_metadata(key, value) VALUES (?, ?)")
+      .run("history_evicted_through", "not-a-cursor")
+
+    let caught: unknown
+    try {
+      journal.history?.diagnostics()
+    } catch (error) {
+      caught = error
+    }
+    expect(failureFact(caught)).toMatchObject({
+      kind: "infrastructure",
+      code: "journal-retention-floor-invalid",
+    })
+  })
+
   it("deletes nothing from an unconfigured journal, and never records an eviction floor", async () => {
     // Retention is off unless armed, so repeated checkpoints leave the whole
     // 1..head span intact and `history_evicted_through` is never written at all

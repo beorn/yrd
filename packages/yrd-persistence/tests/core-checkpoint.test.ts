@@ -238,6 +238,7 @@ function indexedCheckpointJournal(): Readonly<{
         historyFrames: 0,
         tailFrames: values.length,
         evictedThrough,
+        oldestRetainedCursor: values.length === 0 ? null : evictedThrough + 1,
         archiveFallbacks: 0,
       }),
     },
@@ -252,6 +253,18 @@ function indexedCheckpointJournal(): Readonly<{
 }
 
 describe("persistent Core projection checkpoint", () => {
+  it("exposes only the checkpoint cursor Core successfully loaded and saved", async () => {
+    const retained = indexedCheckpointJournal()
+    await using app = await createYrd(counterDefinition(), { inject: { journal: retained.journal, id: ids() } })
+    await app.dispatch({ op: "counter.add", args: { by: 2 } })
+    const checkpoint = retained.checkpoint()
+    if (checkpoint === undefined) throw new Error("expected persisted checkpoint")
+
+    expect(app.retentionDiagnostics()).toMatchObject({
+      checkpoint: { identity: checkpoint.identity, cursor: checkpoint.cursor },
+    })
+  })
+
   it("inspects a checksum-valid predecessor without pretending it matches the requested identity", async () => {
     const dir = await stateDir()
     const definition = counterDefinition()
