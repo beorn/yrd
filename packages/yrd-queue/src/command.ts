@@ -4296,7 +4296,10 @@ export async function synthesizePinIntentCarrier(options: {
 }
 
 function pinIntentCommitMessage(component: string, target: string, issue: string): string {
-  return `chore(${component.split("/").at(-1) ?? component}): advance pin to ${target.slice(0, 12)} [${issue}]`
+  return (
+    `chore(${component.split("/").at(-1) ?? component}): advance pin to ${target.slice(0, 12)} [${issue}]\n\n` +
+    `Substrate-Pair: [[${issue}]]`
+  )
 }
 
 /** Marks a queue-synthesized wrapper commit as the synthesis act rather than the change itself.

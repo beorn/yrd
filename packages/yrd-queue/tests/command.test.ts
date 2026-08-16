@@ -3160,6 +3160,10 @@ describe("Queue command adapters", () => {
     })
     expect(await git(fixture.repo, ["rev-parse", `${utc.commit}^`])).toBe(fixture.baseSha)
     expect(await git(fixture.repo, ["ls-tree", utc.commit, "dep"])).toContain(fixture.moduleSha)
+    expect(await git(fixture.repo, ["show", "-s", "--format=%B", utc.commit])).toBe(
+      `chore(dep): advance pin to ${fixture.moduleSha.slice(0, 12)} [${input.issue}]\n\n` +
+        `Substrate-Pair: [[${input.issue}]]`,
+    )
     expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.baseSha)
   })
 
