@@ -7,8 +7,8 @@
  */
 import { describe, expect, it } from "vitest"
 import {
+  baseIdentity,
   formatPRRevisionSelector,
-  normalizeBranchSelector,
   parsePRSelector,
   requireLivePR,
   resolvePRMatch,
@@ -49,31 +49,31 @@ describe("displayed PR selector round trip", () => {
     expect(parsePRSelector(selector)).toEqual(expected)
   })
 
-  // A remote-qualified selector submits and lands fine, then cannot be recut,
-  // because the stored branch is re-prefixed into refs/heads/origin/<branch>.
-  // The defect surfaces only on the recovery path, which is why seven cases
-  // above never caught it: none of them names a remote.
+  // `pr submit origin/<branch>` stores the qualifier verbatim, and the refresh
+  // path re-prefixes it into refs/heads/origin/<branch>, which cannot exist. So
+  // the defect only bites on the RECOVERY path, exactly when recut is the
+  // remedy. The seven cases above never caught it because none names a remote.
+  //
+  // The normalizer for this is `baseIdentity`, which ALREADY exists and is
+  // already applied to base refs in eight places. These cases pin that it is
+  // equally the answer for a BRANCH selector, so the submit path can reuse it
+  // instead of growing a second one.
   it.each([
     ["origin/task/thing", "task/thing"],
     ["task/thing", "task/thing"],
     // Deeply nested branch names keep every segment after the qualifier.
     ["origin/task/@tent/tooling/22660-rail", "task/@tent/tooling/22660-rail"],
-    // A non-origin remote is stripped by NAME, not by a hardcoded literal.
-    ["upstream/topic/x", "topic/x"],
+    // The fully-qualified forms collapse to the same key.
+    ["refs/heads/task/thing", "task/thing"],
+    ["refs/remotes/origin/task/thing", "task/thing"],
     // Only the LEADING qualifier goes; an inner segment is part of the branch.
     ["task/origin/x", "task/origin/x"],
-    // A branch genuinely named after a remote that is not configured survives.
-    ["fork/topic/y", "fork/topic/y"],
-    // A bare qualifier is not a branch; returning "" would be a confident wrong
-    // answer, so the selector is left alone for the caller to reject.
-    ["origin/", "origin/"],
-  ] as const)("normalizes %s to a single stored form", (selector, expected) => {
-    expect(normalizeBranchSelector(selector, ["origin", "upstream"])).toBe(expected)
+  ] as const)("collapses %s to one stored form", (selector, expected) => {
+    expect(baseIdentity(selector)).toBe(expected)
   })
 
   it("stores the same branch whether or not the operator qualified it", () => {
-    const remotes = ["origin"]
-    expect(normalizeBranchSelector("origin/task/thing", remotes)).toBe(normalizeBranchSelector("task/thing", remotes))
+    expect(baseIdentity("origin/task/thing")).toBe(baseIdentity("task/thing"))
   })
 
   it("keeps a bare non-numeric token out of the PR grammar (branch/name aliases stay reachable)", () => {
