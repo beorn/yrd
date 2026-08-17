@@ -130,6 +130,7 @@ import { diagnostic } from "./output.tsx"
 import { createPrPublicationService } from "./pr-publication.ts"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
 import {
+  canonicalQueueId,
   isYrdRuntimeReloadRequest,
   residentRunnerLeaseHeld,
   runYrdHelp,
@@ -2424,7 +2425,10 @@ async function createYrdRuntimeHost(
         ? undefined
         : Object.freeze({
             ...residentSeed,
-            queueId: `${resolve(repository.repo)}#${baseIdentity(loaded.config.base)}`,
+            // The canonical id and the historical `resolve(repo)#base` agree
+            // for a resident started in the main worktree — which every
+            // production resident is — so recorded heartbeats stay comparable.
+            queueId: canonicalQueueId(repository.repo, baseIdentity(loaded.config.base)),
           })
     if (resident !== undefined) {
       residentLease = await acquireResidentRunner(

@@ -6439,7 +6439,7 @@ function admissionRefusalAuditFindings(
     return pr === undefined ? [] : [pr]
   })
   const head = [...new Map([...queued, ...refused].map((pr) => [pr.id, pr])).values()].toSorted(
-    (left, right) => checkQueueTime(left).localeCompare(checkQueueTime(right)) || compareNatural(left.id, right.id),
+    (left, right) => queueProgressTime(left).localeCompare(queueProgressTime(right)) || compareNatural(left.id, right.id),
   )[0]
   for (const refusal of Object.values(state.queues.admissionRefusals).toSorted((left, right) =>
     compareNatural(left.pr, right.pr),
@@ -6511,7 +6511,9 @@ function queueProgressAuditFindings(
     const started = prs.filter((pr) => checksRequested(pr))
     if (started.length === 0) continue
     const latestLandingMs = latestQueueLandingMs(state, base)
-    const queuedAtMs = Math.min(...started.map((pr) => parseAuditTime(checkQueueTime(pr), `queue time for ${pr.id}`)))
+    const queuedAtMs = Math.min(
+      ...started.map((pr) => parseAuditTime(queueProgressTime(pr), `queue time for ${pr.id}`)),
+    )
     const sinceMs = Math.max(queuedAtMs, latestLandingMs ?? queuedAtMs)
     const blockedMs = Math.max(0, nowMs - sinceMs)
     const first = started[0]
@@ -6981,8 +6983,8 @@ function admissionQueue(
       )
     })
     .toSorted((left, right) => {
-      const leftAt = checkQueueTime(left)
-      const rightAt = checkQueueTime(right)
+      const leftAt = queueProgressTime(left)
+      const rightAt = queueProgressTime(right)
       return leftAt.localeCompare(rightAt) || compareNatural(left.id, right.id)
     })
 }
@@ -7010,6 +7012,15 @@ function queueProgressQueue(state: DeepReadonly<RuntimeState>, steps: readonly R
     )
 }
 
+/** The one queue ordering clock, and it is TOTAL: check-request time when the
+ * current revision has one, first source-ready time otherwise. Every sort over
+ * a queue population uses this. Its throwing sibling (`checkQueueTime`) treated
+ * "queued with no current check request" as impossible, but the writers can
+ * legitimately leave that state behind — a refused `bay submit` did on
+ * 2026-08-16 (PR1128), and the throw then took down every command that loads
+ * queue state, including `queue recover`, the tool that repairs exactly this
+ * shape. A comparator is never the place to assert an invariant: the audit
+ * names the state (`queue-never-started`) instead. */
 function queueProgressTime(pr: DeepReadonly<PR>): string {
   return checkRequest(pr)?.at ?? prSourceReadyAt(pr)
 }
@@ -7043,7 +7054,8 @@ function refusedRevisionAdmissions(state: DeepReadonly<RuntimeState>): PR[] {
   return Object.values(state.bays.prs)
     .filter((pr) => prDeliveryState(pr) === "needs-author" && prAdmission(pr)?.status === "refused")
     .toSorted(
-      (left, right) => checkQueueTime(left).localeCompare(checkQueueTime(right)) || compareNatural(left.id, right.id),
+      (left, right) =>
+        queueProgressTime(left).localeCompare(queueProgressTime(right)) || compareNatural(left.id, right.id),
     )
 }
 
@@ -7081,12 +7093,6 @@ function blockingQueuePause(
 ): DeepReadonly<QueuePause> | undefined {
   const pause = state.queues.pauses[baseIdentity(pr.base)]
   return pause === undefined || pause.allowedPRs.includes(pr.id) ? undefined : pause
-}
-
-function checkQueueTime(pr: DeepReadonly<PR>): string {
-  const request = checkRequest(pr)
-  if (request === undefined) throw new Error(`yrd: queued PR '${pr.id}' has no current check request`)
-  return request.at
 }
 
 function hasFreshRevisionCheckAuthority(

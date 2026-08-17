@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises"
-import { basename, isAbsolute, join, relative, resolve } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import { Fragment, createElement } from "react"
 import {
@@ -316,6 +316,22 @@ function queueGitDir(cwd: string): string | undefined {
   const gitDir = readQueueGitDir(cwd)
   queueGitDirs.set(cwd, gitDir)
   return gitDir
+}
+
+/** One identity per queue. The journal lives under the git COMMON directory,
+ * so every linked worktree of a repository reads and writes the SAME queue —
+ * an identity derived from the invocation cwd made a worktree's yrd report the
+ * resident runner as owning a foreign queue (`/hh#main` vs
+ * `/hh/.worktrees/hh-wt4#main`, 2026-08-16) while both were the one journal.
+ * The path half is therefore the common dir's owning worktree, which is also
+ * exactly what a resident started in the main worktree has always recorded, so
+ * existing heartbeats compare equal. Outside a repository the resolved path
+ * stands in; the callers that reach that case already raise
+ * `runner-health-unavailable` on the missing git dir. */
+export function canonicalQueueId(path: string, base: string): string {
+  const gitDir = queueGitDir(path)
+  const owner = gitDir === undefined || basename(gitDir) !== ".git" ? resolve(path) : dirname(gitDir)
+  return `${owner}#${base}`
 }
 
 function readQueueGitDir(cwd: string): string | undefined {
@@ -1219,7 +1235,7 @@ async function queueRunnerHealth(
     const base = baseIdentity(services.base ?? "main")
     const expectedLastLanded = app === undefined ? undefined : residentDriverLastLanded(app, base)
     const driverError =
-      runner === null ? undefined : runnerDriverHealthError(runner, `${resolve(cwd)}#${base}`, expectedLastLanded)
+      runner === null ? undefined : runnerDriverHealthError(runner, canonicalQueueId(cwd, base), expectedLastLanded)
     if (driverError !== undefined) {
       return {
         exitCode: 2,
@@ -1419,7 +1435,7 @@ async function runClientDeadMan(
         ? runnerHealthError("resident-runner-unhealthy", `resident runner heartbeat is stale by ${runnerAgeMs}ms`, [
             "Inspect the resident runner log, then restart it.",
           ])
-        : runnerDriverHealthError(runner, `${resolve(cwd)}#${base}`, residentDriverLastLanded(app, base))
+        : runnerDriverHealthError(runner, canonicalQueueId(cwd, base), residentDriverLastLanded(app, base))
   const observations = [
     ...(queueProgress.state === "stalled"
       ? queueProgress.findings.map((finding) => ({ code: finding.code, cause: finding.message }))
@@ -4892,6 +4908,14 @@ async function applyPrSelectionVerb(
         options.keepOnFailure === true,
       )
     }
+  }
+  if (command === "pr.submit" || command === "bay.submit") {
+    // Stage as a draft and refuse BEFORE the real submit, so a refusal has
+    // nothing queued to leave behind. `bay.submit` used to run this check only
+    // after the submit: an authored-gitlink refusal then stranded a SUBMITTED
+    // PR with no check request (PR1128, 2026-08-16), a state the queue loader
+    // tripped over fleet-wide. A refused staging leaves only a draft — the
+    // known, benign `draft-stranded` shape the pager already names.
     const staged = await applyPrSelection(app, selectors, options, io, command, true)
     for (const pr of staged.prs) {
       const refusalExit = await requireQueueableSubmodulePinsForCommand(pr, services, options, io)

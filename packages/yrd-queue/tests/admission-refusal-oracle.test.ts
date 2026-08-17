@@ -859,3 +859,70 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(replayed.state().queues.admissionRefusals).toEqual({})
   })
 })
+
+describe("a submitted PR with no check request and a ledgered refusal never wedges queue reads", () => {
+  // The PR1128 incident (2026-08-17, @i/10-merge-queue): `bay submit` queued a
+  // carrier, then the authored-gitlink refusal was ledgered against it BEFORE
+  // any check request existed. The audit's head-of-line sort compared that PR
+  // with a comparator that THREW on a missing current check request, so every
+  // surface that computes audit findings died — pr list, queue audit, bay
+  // status, the resident runner's own progress probe (which crashlooped it into
+  // restart suppression), and `queue recover`, the tool whose job is settling
+  // exactly this shape. A comparator asserts nothing: the ordering is total
+  // (check-request time, else source-ready time) and the state is PRONOUNCED
+  // by findings instead.
+  it("audits the PR1128 shape as findings instead of throwing", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    // The delivery app: progress findings require a merge step in the plan,
+    // exactly like the production queue that wedged.
+    await using app = await createDeliveryApp(clock.read)
+    // The PR1127 analog: properly submitted WITH a check request, carrying its
+    // own refusal row — the incident journal held refusal rows for both PRs,
+    // and the head sort only ever runs its comparator with two entries.
+    const ahead = await submitAndRequestChecks(app, "task/pr1127-shape")
+    await app.queue.recordAdmissionRefusal({
+      pr: ahead.id,
+      code: "carrier-drops-landed",
+      kind: "refusal",
+      reason: "the branch does not contain the merge-queue base",
+    })
+    // Submitted, deliberately WITHOUT a check request — half the incident state.
+    await app.bays.submit({ branch: "task/pr1128-shape", headSha: "9".repeat(40), base: "main", baseSha: BASE })
+    const pr = app.bays.prs().find((item) => item.branch === "task/pr1128-shape")
+    if (pr === undefined) throw new Error("PR was not recorded")
+    expect(pr.checkRequests).toEqual([])
+    // The ledgered, unsettled refusal — the other half (the incident's exact
+    // journal event, op queue.admissionRefused).
+    await app.queue.recordAdmissionRefusal({
+      pr: pr.id,
+      code: "authored-gitlink",
+      kind: "refusal",
+      reason: `PR '${pr.id}' changes generated-only gitlinks [ag]; submit pin work as 'yrd intent submit …'`,
+    })
+    expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({ code: "authored-gitlink" })
+
+    // Pre-fix both of these threw "queued PR '<id>' has no current check
+    // request" out of the head sort. Post-fix the state is a finding: the
+    // never-started window names the PR the moment it exceeds the policy.
+    expect(app.queue.audit().findings).toEqual([])
+    expect(app.queue.audit({ now: "2026-01-01T06:00:00.000Z" }).findings).toContainEqual(
+      expect.objectContaining({ code: "queue-never-started", pr: pr.id }),
+    )
+
+    // And the settlement the remedy loop applies to this disposition still
+    // lands — the repair path itself must stay reachable over this state.
+    await app.queue.settleAdmissionRefusal({
+      pr: pr.id,
+      revision: 1,
+      headSha: "9".repeat(40),
+      disposition: "needs-person",
+      reason: "authored gitlink: pin work belongs to an intent, not this carrier",
+    })
+    expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({
+      settlement: expect.objectContaining({ disposition: "needs-person" }),
+    })
+    expect(app.queue.audit({ now: "2026-01-01T06:00:00.000Z" }).findings).toContainEqual(
+      expect.objectContaining({ code: "queue-never-started", pr: pr.id }),
+    )
+  })
+})

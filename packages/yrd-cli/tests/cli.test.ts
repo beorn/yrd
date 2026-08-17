@@ -903,6 +903,34 @@ describe("runYrd", () => {
     expect(app.bays.prs()).toEqual([])
   })
 
+  it("bay submit refuses BEFORE the real submit, leaving a draft instead of a queued PR (PR1128)", async () => {
+    const app = await createApp()
+    // A process layer whose git always fails: the pre-admission pin gate cannot
+    // resolve the branch's delta base and refuses. Before bay submit staged its
+    // pin check, that refusal fired AFTER the real submit — leaving a SUBMITTED
+    // PR with no check request, the state that wedged every queue read on
+    // 2026-08-17 (@i/10-merge-queue, PR1128).
+    const services = {
+      process: {
+        run: async () => ({ stdout: "", stderr: "", exitCode: 1, signal: null, durationMs: 0, timedOut: false }),
+        reapPath: async () => ({ targetedPids: [], survivorPids: [], forcedKill: false, signalFailures: [] }),
+      },
+    } as unknown as YrdCliServices
+    const output = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+
+    expect(await runYrd(app, yrd("bay", "submit", "topic/wedge", "--json"), output.io, services)).toBe(1)
+    const pr = app.bays.prs().find((item) => item.branch === "topic/wedge")
+    expect(pr).toBeDefined()
+    // The refusal left a DRAFT: pushed, never submitted, no check request, no
+    // refusal ledger row — the benign draft-stranded shape, not the wedge.
+    expect(prDeliveryState(pr!)).toBe("pushed")
+    expect(pr!.checkRequests).toEqual([])
+    expect(app.state().queues.admissionRefusals).toEqual({})
+    // And the queue still reads clean end to end.
+    const audit = outputIO()
+    expect(await runYrd(app, yrd("queue", "audit", "--json"), audit.io), audit.stderr()).toBe(0)
+  })
+
   it("derives the deleted --draft remedy from the failing command instead of raw argv", async () => {
     const app = await createApp()
     const prefixed = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
@@ -5089,7 +5117,10 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("bay", "submit", "topic/direct", "--base", "release/2.0", "--json"), submit.io)).toBe(
       0,
     )
-    expect(resolved).toEqual(["topic/direct"])
+    // Two resolutions per submit: the staged draft pass (where refusals land
+    // before anything is queued — the PR1128 ordering) and the real submit,
+    // the same shape pr.submit has always had.
+    expect(resolved).toEqual(["topic/direct", "topic/direct"])
     expect(JSON.parse(submit.stdout())).toMatchObject({
       prs: [
         {
@@ -5106,7 +5137,7 @@ describe("runYrd", () => {
     expect(
       await runYrd(app, yrd("bay", "submit", "topic/direct", "--base", "release/2.0", "--json"), revision.io),
     ).toBe(0)
-    expect(resolved).toEqual(["topic/direct", "topic/direct"])
+    expect(resolved).toEqual(["topic/direct", "topic/direct", "topic/direct", "topic/direct"])
     expect(JSON.parse(revision.stdout())).toMatchObject({
       prs: [
         {
