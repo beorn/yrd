@@ -442,6 +442,7 @@ export type RunAuthority = Readonly<{
       | "component-main-promotion-failed"
       | "component-main-inspection-failed"
       | "carrier-inspection"
+      | "landing-unauthored-deletion"
       | "source-publish"
       | "scratch-cleanup-failed"
       | "wrapper-generation"

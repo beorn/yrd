@@ -7780,9 +7780,11 @@ function runnablePRs(
  * - needs-author: the queue cannot build the candidate from what the author
  *   submitted; the author must re-author (fix the composition, push a
  *   gitlink-free root, correct a declared source range or payload).
- * - infra-retry: transient infrastructure — a git push / update-ref that can
- *   fail on a network/remote blip, or scratch cleanup. Retried with backoff by
- *   the env-storm path (21622 condition 4); never routed to the author.
+ * - infra-retry: the queue's own machinery, never the submitted branch — a git
+ *   push / update-ref that can fail on a network/remote blip, scratch cleanup,
+ *   or a composition that built a candidate the landing floor refuses. Retried
+ *   with backoff by the env-storm path (21622 condition 4); never routed to the
+ *   author. The cure is always another composition, so the retry is the remedy.
  * - recut-lineage: owned by the auto-recut slice, which classifies these on its
  *   own path — not surfaced as needs-author here.
  * - plain-rejected: an ordinary failure with no composition meaning — no
@@ -7824,6 +7826,11 @@ export const COMPOSITION_FAILURE_BUCKETS = {
   ]),
   "infra-retry": new Set<string>([
     "carrier-inspection",
+    // The landing floor caught a candidate whose tree predates work already on
+    // the base. The submitted branches are blameless — nothing they authored
+    // deletes those paths — so this must never present as needs-author; a fresh
+    // composition against the current base is the whole remedy.
+    "landing-unauthored-deletion",
     "source-publish",
     "scratch-cleanup-failed",
     "wrapper-generation",
@@ -7844,6 +7851,7 @@ function admissionFailureKind(
 
 type InfraRetryCompositionFailure =
   | "carrier-inspection"
+  | "landing-unauthored-deletion"
   | "source-publish"
   | "scratch-cleanup-failed"
   | "wrapper-generation"

@@ -7286,9 +7286,69 @@ async function mergeCandidate(
   const checkpointIdentity =
     typeof options.checkpointIdentity === "function" ? options.checkpointIdentity() : options.checkpointIdentity
   const validated = await validatePinnedCandidate(git, repo, input, base.sha, checked, checkpointIdentity)
-  return "error" in validated
-    ? { status: "completed", conclusion: "failure", error: validated.error }
-    : { status: "completed", conclusion: "success", base, checked }
+  if ("error" in validated) return { status: "completed", conclusion: "failure", error: validated.error }
+  // Last comparison before either merge step publishes: `checked` is the pin
+  // both of them land, and `base.sha` is what they land it onto.
+  const erased = await landingDeletionFloor(git, repo, input, base.sha, checked)
+  if (erased !== undefined) return { status: "completed", conclusion: "failure", error: erased.error }
+  return { status: "completed", conclusion: "success", base, checked }
+}
+
+/** The floor under every route into a landing. `unauthoredDeletionFailure` rules
+ * on ONE carrier at the moment its merge is composed, and four routes reach the
+ * merge step past it: a candidate reused from an earlier step, the
+ * submodule-composition branch that re-authors its own tree and `continue`s, a
+ * conflicted merge settled by that branch, and `configuredMergeStep`'s external
+ * merge command, which is never inspected at all. Each can hand publication a
+ * tree that predates work already sitting on the base branch, and a tree is the
+ * one thing a containment check cannot see: ancestry says the candidate holds
+ * every submitted head and the base, `merge-tree` says mergeable, the push
+ * succeeds, and the landing is gone.
+ *
+ * So ask the question once more, where nothing can route around it: of every
+ * path this candidate removes from the base branch, is each one a path some
+ * submitted branch actually authors removing? Whatever is left over was composed
+ * away, not decided away.
+ *
+ * Every such path is named IN FULL, unlike its composition-time sibling: whoever
+ * reads this refusal is reconstructing what a landing would have erased, and a
+ * truncated list is a search they have to redo by hand. */
+async function landingDeletionFloor(
+  git: Git,
+  repo: string,
+  input: StepExecution,
+  baseSha: string,
+  checked: PinnedCandidate,
+): Promise<CandidateFailure | undefined> {
+  const removed = await deletedPaths(git, repo, baseSha, checked.candidateSha)
+  if (removed.length === 0) return undefined
+  const authored = new Set<string>()
+  for (const pr of input.prs) {
+    const base = await authoredDeltaBase((cwd, args) => git.run(cwd, args, true), repo, baseSha, pr.headSha)
+    if (base.status === "unreadable") {
+      return candidateFailure(
+        "carrier-inspection",
+        `could not measure the deletions merge request '${pr.id}' branch '${pr.headSha}' authors against ` +
+          `'${baseSha}': ${base.detail}; a Candidate whose history cannot be read cannot be cleared to land`,
+      )
+    }
+    for (const path of await deletedPaths(git, repo, base.sha, pr.headSha)) authored.add(path)
+  }
+  const unauthored = removed.filter((path) => !authored.has(path))
+  if (unauthored.length === 0) return undefined
+  const branch = primaryPR(input).base
+  const submitted = input.prs.map((pr) => `'${pr.id}' branch '${pr.headSha}'`).join(", ")
+  return candidateFailure(
+    "landing-unauthored-deletion",
+    `landing Candidate '${checked.candidateSha}' on '${branch}' at '${baseSha}' would delete ${unauthored.length} ` +
+      `path(s) that no submitted branch authors deleting: [${unauthored.join(", ")}]\n` +
+      `compared every path the Candidate removes from '${baseSha}' against the deletions authored by ${submitted}\n` +
+      `cause: the Candidate's tree predates work already on '${branch}', so these removals are an artifact of how ` +
+      `this Candidate was composed, not a change any author made\n` +
+      `remedy: recompose the Candidate against '${baseSha}'; the submitted branches are unaffected and need no rework`,
+    ".",
+    unauthored,
+  )
 }
 
 async function alreadyLandedEvidence(
