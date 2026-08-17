@@ -10738,7 +10738,9 @@ function buildProgram(
       setExit(await explainLanding(installed(), installedServices(), selector, options, io)),
     )
 
-  const bay = program.command("bay").description("manage isolated Git work bays")
+  const bay = program
+    .command("bay")
+    .description("manage work bays — a Git worktree plus a lease, an issue, and a managed lifecycle")
   bay.helpCommand(false)
   bay
     .command("_list", { isDefault: true, hidden: true })

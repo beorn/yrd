@@ -49,8 +49,14 @@ issue -> workspace -> pr -> queue -> merged
 
 - **issue** — what you deliver. It lives in your tracker; yrd stores only the
   reference. The tracker holds the pen; yrd owns the lens.
-- **workspace** — where you work: an isolated Git workspace reached through the
-  `yrd bay` subtree. Workspace lifecycle is not a standalone product surface.
+- **workspace** — where you work: a Git worktree that something owns the
+  lifecycle of. That last part is the whole difference from a worktree you make
+  by hand. A workspace carries a **lease** (who holds it, when it was opened,
+  and a heartbeat that says it is still alive), the **issue** it is working, and
+  a **lifecycle** — opening, active, closing, closed, failed — so an abandoned
+  one can be recognised as abandoned instead of accumulating forever. Reached
+  through the `yrd bay` subtree; its lifecycle is not a standalone product
+  surface.
 - **pr** — the submitted change: a branch@head with numbered revisions. Review
   happens upstream; a yrd PR is the queue's unit.
 - **queue** — one per base branch. It verifies and merges PRs serially and can
