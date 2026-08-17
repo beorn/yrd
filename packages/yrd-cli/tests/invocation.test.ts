@@ -1,7 +1,8 @@
+import { mkdirSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { Command } from "@silvery/commander"
-import { describe, expect, it } from "vitest"
+import { beforeAll, describe, expect, it } from "vitest"
 import {
   canonicalizeYrdCommandAliases,
   configureYrdGlobalOptions,
@@ -486,6 +487,13 @@ describe("repository aliases supplied by a composition host", () => {
 
 describe("resolveYrdContext", () => {
   const ambient = join(tmpdir(), "yrd-context", "caller")
+  beforeAll(() => {
+    // Explicit selectors are stat-checked at resolution (the ENOENT-
+    // misattribution fix below), so the table's selector fixtures must exist.
+    // The ambient directory itself stays absent: ambient discovery is exempt.
+    mkdirSync(join(tmpdir(), "yrd-context", "cli-repo"), { recursive: true })
+    mkdirSync(join(tmpdir(), "yrd-context", "env-repo"), { recursive: true })
+  })
 
   it.each([
     {
@@ -534,6 +542,26 @@ describe("resolveYrdContext", () => {
     },
   ])("resolves $name against one captured ambient cwd", ({ options, env, context }) => {
     expect(resolveYrdContext(options, env, ambient)).toEqual(context)
+  })
+
+  it("refuses an explicit selector whose resolved path does not exist, naming both spellings", () => {
+    // 2026-08-16: `--repo code` (an alias spelling, not a path) resolved to a
+    // nonexistent directory, became the first spawned process's cwd, and Bun
+    // misattributed the chdir failure to the program — "ENOENT posix_spawn
+    // .../git" with git demonstrably on PATH. The selector is checked at the
+    // one chokepoint every rail flows through, and the refusal names the raw
+    // value, the resolved path, and the literal-path contract.
+    expect(() => resolveYrdContext({ repo: "code" }, {}, ambient)).toThrow(
+      /repository selector 'code'.*resolves to '.*yrd-context.*code'.*does not exist.*literal path/su,
+    )
+    expect(() => resolveYrdContext({}, { YRD_REPO: "../missing-env-repo" }, ambient)).toThrow(
+      /repository selector '\.\.\/missing-env-repo'/u,
+    )
+    // Ambient discovery stays exempt even when the ambient directory is absent
+    // (this suite's `ambient` is never created): the invocation directory
+    // exists by construction in production, and repository discovery reports
+    // its own absence loudly.
+    expect(() => resolveYrdContext({}, {}, ambient)).not.toThrow()
   })
 
   it("exposes only product-level global selectors", () => {

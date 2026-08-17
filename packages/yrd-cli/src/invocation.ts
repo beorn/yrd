@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs"
 import { basename, resolve } from "node:path"
 import { Command as CliCommand } from "@silvery/commander"
 import { failureFact, raiseFailure, type FailureFact } from "@yrd/core"
@@ -450,8 +451,24 @@ export function resolveYrdContext(
   ambientCwd: string,
 ): YrdContext {
   const ambient = resolve(ambientCwd)
+  const explicitSelector = options.repo ?? env.YRD_REPO
+  const repo = resolve(ambient, explicitSelector ?? ".")
+  // An explicit selector is a filesystem PATH, resolved right here — the one
+  // chokepoint every rail flows through. Without this check, a wrong selector
+  // (an alias spelling like 'code', a typo) became the cwd of the first
+  // spawned process, and Bun misattributed the chdir failure to the program:
+  // "ENOENT posix_spawn .../git" with git demonstrably on PATH (2026-08-16).
+  // Ambient discovery stays exempt: the invocation directory exists by
+  // construction, and repository discovery reports its own absence loudly.
+  if (explicitSelector !== undefined && !existsSync(repo)) {
+    throw new Error(
+      `yrd: repository selector '${explicitSelector}' (--repo/YRD_REPO) resolves to '${repo}', ` +
+        `which does not exist. The selector is a literal path resolved against the invocation ` +
+        `directory, never an alias — run from inside the repository, or pass its real directory.`,
+    )
+  }
   return Object.freeze({
-    repo: resolve(ambient, options.repo ?? env.YRD_REPO ?? "."),
+    repo,
     ...(options.config === undefined ? {} : { configPath: options.config }),
     observability: resolveYrdObservability(options, env),
   })
