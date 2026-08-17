@@ -7,8 +7,7 @@ import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 
-const src = (relative: string): string =>
-  readFileSync(resolve(import.meta.dirname, "..", relative), "utf8")
+const src = (relative: string): string => readFileSync(resolve(import.meta.dirname, "..", relative), "utf8")
 
 describe("watch UI lazy-load contract", () => {
   const run = src("src/run.ts")

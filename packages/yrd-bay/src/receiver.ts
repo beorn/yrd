@@ -749,11 +749,11 @@ async function validateSubmitCarrier(
   env?: Environment,
 ): Promise<void> {
   const exact = `refs/heads/${branch}`
-  const output = await mainGit(
-    receiver.process,
-    receiver.mainRepo,
-    ["for-each-ref", "--format=%(refname)%00%(objectname)", exact],
-  )
+  const output = await mainGit(receiver.process, receiver.mainRepo, [
+    "for-each-ref",
+    "--format=%(refname)%00%(objectname)",
+    exact,
+  ])
   const current = output.stdout
     .split("\n")
     .map((line) => line.split("\0"))
