@@ -1352,12 +1352,16 @@ function createQueue<Shape extends PRShape>(
     return materializeArchivedRun(history, jobs, state(), canonical)
   }
 
-  const cleanupSettledRoots = async (): Promise<readonly RunId[]> => {
+  /** Recovery passes its tolerant reader; the ordinary drain paths pass nothing
+   * and keep failing loud, because a drain is about to WRITE over this state
+   * while recovery is the one caller whose whole job is meeting it broken. */
+  const cleanupSettledRoots = async (reader?: TolerantQueueReader): Promise<readonly RunId[]> => {
     const cleaned: RunId[] = []
     for (const id of activeQueueRootIds(runtime().queues.authority)) {
       const snapshot = runtime()
       const record = Queues.record(snapshot.queues, id)
-      const run = materializeRun(record, snapshot.jobs)
+      const run = reader === undefined ? materializeRun(record, snapshot.jobs) : reader.read(record, snapshot.jobs)
+      if (run === undefined) continue
       if (record.parent !== undefined || needsSettlement(snapshot, run)) continue
       const result = await actions.settled(id)
       if (result.events.length > 0) cleaned.push(id)
@@ -2956,9 +2960,13 @@ function createQueue<Shape extends PRShape>(
             })
           }
           const affected = new Set<RunId>()
+          // Recovery's OWN reader, held across every enumeration below so one
+          // unreadable record is quarantined once and cannot veto the repair of
+          // any other. {@link createTolerantQueueReader} carries the incident.
+          const reader = createTolerantQueueReader()
           let snapshot = runtime()
           const recoveryRoots = new Set([...rootsBeforeRecovery, ...activeQueueRootIds(snapshot.queues.authority)])
-          const candidates = [...recoveryRoots].flatMap((root) => queueTree(snapshot.queues, snapshot.jobs, root))
+          const candidates = [...recoveryRoots].flatMap((root) => reader.tree(snapshot, root))
           const staleQueued: Array<{ run: RunId; step: StepName; drift: string }> = []
           for (const candidate of candidates) {
             const active = candidate.steps[candidate.cursor]
@@ -2999,7 +3007,7 @@ function createQueue<Shape extends PRShape>(
           // naming every settled Job + run; a terminal-run orphan's record is
           // re-materialized into the return, an absent-run orphan has no record to
           // return so the receipt is its report.
-          const settledOrphans = orphanedRequestedQueueJobs(runtime())
+          const settledOrphans = orphanedRequestedQueueJobs(runtime(), reader)
           for (const orphan of settledOrphans) {
             await jobs.cancel({
               id: orphan.job.id,
@@ -3022,7 +3030,7 @@ function createQueue<Shape extends PRShape>(
           // `advance` no-ops without one, so a jobless run is projected `running`
           // forever (R1582 ticked for 45h over an already-integrated PR). Loud
           // structured receipt naming every settled run and the step it stalled on.
-          const orphanedRuns = orphanedJoblessRuns(runtime(), recoverOptions.recoveryTime)
+          const orphanedRuns = orphanedJoblessRuns(runtime(), recoverOptions.recoveryTime, reader)
           for (const orphan of orphanedRuns) {
             await actions.settleOrphanedRun({
               run: orphan.run,
@@ -3041,7 +3049,7 @@ function createQueue<Shape extends PRShape>(
           // Retire every FAILED batch whose recorded plan drifted so it can never
           // isolate — otherwise it re-refuses isolation every compose cycle forever
           // (the isolate-path zombie). Typed stale-plan release; loud receipt.
-          const plannedRetirements = unisolableStalePlanBatches(runtime(), byName)
+          const plannedRetirements = unisolableStalePlanBatches(runtime(), byName, reader)
           const retiredBatches: UnisolableStalePlanBatch[] = []
           for (const planned of plannedRetirements) {
             // Each retirement appends and re-compacts the live projection. That
@@ -3052,7 +3060,8 @@ function createQueue<Shape extends PRShape>(
             const snapshot = runtime()
             const record = Queues.get(snapshot.queues, planned.run)
             if (record === undefined) continue
-            const run = materializeRun(record, snapshot.jobs)
+            const run = reader.read(record, snapshot.jobs)
+            if (run === undefined) continue
             if (!bisectable(run) || recordedPlanDrift(run.steps, byName) === undefined) continue
             const result = await actions.retireStalePlan(planned.run)
             if (result.events.length === 0) continue
@@ -3066,13 +3075,34 @@ function createQueue<Shape extends PRShape>(
               runs: retiredBatches.map((batch) => batch.run),
             })
           }
-          for (const id of await cleanupSettledRoots()) affected.add(id)
+          for (const id of await cleanupSettledRoots(reader)) affected.add(id)
+          // The disclosure half of the quarantine, and the reason this reader is
+          // not a silent fallback: every record recovery could not read is named
+          // here with WHAT (the run), WHERE (this recovery pass) and WHY (the
+          // reader's exact refusal), at the moment recovery worked around it.
+          // `queue audit` reports the same rows as `invalid-run` for as long as
+          // they stand — recovery repairs what it can and hides nothing.
+          const unreadable = reader.quarantined()
+          if (unreadable.length > 0) {
+            log.warn?.("Skipped queue runs whose records could not be read; recovery repaired the rest.", {
+              action: "recover-unreadable-run-quarantine",
+              reason: "unreadable-run",
+              runs: unreadable.map((row) => row.run),
+              details: unreadable.map((row) => row.reason),
+            })
+          }
           const final = runtime()
-          return [...affected].map((id) => {
+          return [...affected].flatMap((id) => {
             const record = Queues.get(final.queues, id)
-            if (record !== undefined) return materializeRun(record, final.jobs)
+            const run = record === undefined ? undefined : reader.read(record, final.jobs)
+            if (run !== undefined) return [run]
             const historical = archived(id)
-            if (historical !== undefined) return historical
+            if (historical !== undefined) return [historical]
+            // Quarantined above and already reported: recovery acted on it, and
+            // dropping it from the evidence list is not silence. A run absent
+            // from projection AND history with no read failure is a different
+            // animal — nothing acted on it — so that still fails loud.
+            if (reader.isQuarantined(id)) return []
             throw new Error(`yrd: recovered queue run '${id}' is absent from live projection and journal history`)
           })
         },
@@ -5885,6 +5915,95 @@ function childQueue(
   return record === undefined ? undefined : materializeRun(record, jobs)
 }
 
+/** A run record no reader can materialize, and the exact refusal that says why.
+ *
+ * Both fields are load-bearing: `run` is WHERE and `reason` is WHY, because a
+ * quarantined row that reports only its own existence tells an operator nothing
+ * they can act on. */
+export type UnreadableQueueRun = Readonly<{ run: RunId; reason: string }>
+
+/** A queue population read one record at a time, plus the quarantine. */
+type TolerantQueueReader = Readonly<{
+  /** The materialized run, or `undefined` once this record is quarantined. */
+  read(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<JobsState>): Run | undefined
+  /** Every readable record in the whole population; quarantines the rest. */
+  population(state: DeepReadonly<RuntimeState>): readonly Run[]
+  /** Every readable record in one root's tree; quarantines the rest. */
+  tree(state: DeepReadonly<RuntimeState>, root: RunId): readonly Run[]
+  /** Whether this exact record has already been quarantined. */
+  isQuarantined(run: RunId): boolean
+  /** Everything quarantined so far, one entry per record, in encounter order. */
+  quarantined(): readonly UnreadableQueueRun[]
+}>
+
+/**
+ * The reader recovery owns, and the only one that survives its own worst row.
+ *
+ * {@link materializeRun} is total over a VALID record and throws over an invalid
+ * one, and every enumeration in this file maps it across a whole population. One
+ * unreadable record is therefore a veto over every other — the exact structure
+ * that took the merge queue down for 2h22m on 2026-08-17, where a comparator
+ * that threw inside `toSorted` removed `pr list`, `queue audit`, `bay status`,
+ * the resident's own progress probe and `queue recover` — the tool that repairs
+ * precisely that state — from a fleet with no other way back.
+ *
+ * That comparator is deleted, but its SHAPE is not: recovery still shared its
+ * eager reader with every ordinary path, so any state the reader rejected was
+ * unrecoverable by construction. A repair tool cannot require the state it
+ * repairs to be already well-formed.
+ *
+ * So recovery reads one record at a time and quarantines what it cannot
+ * materialize. This is not a silent fallback and must never become one: the
+ * reader keeps every refusal verbatim and the CALLER is obliged to report each
+ * one (what, where, why) — `recover` as a structured receipt, `auditQueues` as
+ * an `invalid-run` finding. What this removes is the veto, never the disclosure.
+ *
+ * A record is quarantined once however many enumerations meet it, so one bad row
+ * reads to an operator as one incident rather than as five.
+ */
+function createTolerantQueueReader(): TolerantQueueReader {
+  const quarantined = new Map<RunId, UnreadableQueueRun>()
+  const read = (record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<JobsState>): Run | undefined => {
+    try {
+      return materializeRun(record, jobs)
+    } catch (error) {
+      // silent-fallback-allow: the quarantine below preserves the exact refusal, and every
+      // caller reports it — this replaces a whole-population veto with a named row, not with silence.
+      const reason = error instanceof Error ? error.message : String(error)
+      if (!quarantined.has(record.id)) quarantined.set(record.id, { run: record.id, reason })
+      return undefined
+    }
+  }
+  return {
+    read,
+    population: (state) =>
+      Queues.values(state.queues).flatMap((record) => {
+        const run = read(record, state.jobs)
+        return run === undefined ? [] : [run]
+      }),
+    tree: (state, root) => {
+      const runs: Run[] = []
+      const visit = (id: RunId): void => {
+        const record = Queues.get(state.queues, id)
+        if (record === undefined) return
+        const run = read(record, state.jobs)
+        if (run !== undefined) runs.push(run)
+        // Children are visited even under an unreadable parent: a child's
+        // readability is its own property, and abandoning the subtree would
+        // reintroduce the same veto one level down.
+        for (const part of [0, 1] as const) {
+          const child = childRunId(state.queues.index, id, part)
+          if (child !== undefined) visit(child)
+        }
+      }
+      visit(root)
+      return runs
+    },
+    isQuarantined: (run) => quarantined.has(run),
+    quarantined: () => [...quarantined.values()],
+  }
+}
+
 function queueTree(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<JobsState>, root: RunId): Run[] {
   const result: Run[] = []
   const visit = (id: RunId): void => {
@@ -5932,7 +6051,10 @@ type OrphanedRequestedJob = Readonly<{
  * {@link auditQueues}'s record walk skips terminal runs, so this class is exactly
  * the audit blind spot that let "queue audit clean" print over poison.
  */
-function orphanedRequestedQueueJobs(state: DeepReadonly<RuntimeState>): readonly OrphanedRequestedJob[] {
+function orphanedRequestedQueueJobs(
+  state: DeepReadonly<RuntimeState>,
+  reader: TolerantQueueReader,
+): readonly OrphanedRequestedJob[] {
   const orphans: OrphanedRequestedJob[] = []
   for (const job of Object.values(state.jobs.byId)) {
     if (job.status !== "queued" || job.key === undefined) continue
@@ -5943,7 +6065,13 @@ function orphanedRequestedQueueJobs(state: DeepReadonly<RuntimeState>): readonly
       orphans.push({ job, run, reason: "run-absent" })
       continue
     }
-    if (Queues.terminal(materializeRun(record, state.jobs))) {
+    const parent = reader.read(record, state.jobs)
+    // An unreadable parent is quarantined, never judged. "Absent" and
+    // "terminal" are both claims about a record that was READ; cancelling live
+    // work under a record no reader can read would be a repair invented from no
+    // evidence. The caller's quarantine receipt is what says so out loud.
+    if (parent === undefined) continue
+    if (Queues.terminal(parent)) {
       orphans.push({ job, run, reason: "run-terminal" })
     }
   }
@@ -5990,11 +6118,18 @@ function lastDriven(record: DeepReadonly<QueueRecord>, run: Run): string {
   return latest
 }
 
-function orphanedJoblessRuns(state: DeepReadonly<RuntimeState>, recoveryTime: string): readonly OrphanedRun[] {
+function orphanedJoblessRuns(
+  state: DeepReadonly<RuntimeState>,
+  recoveryTime: string,
+  reader: TolerantQueueReader,
+): readonly OrphanedRun[] {
   const cutoff = Date.parse(recoveryTime) - ORPHANED_RUN_GRACE_MS
   const orphans: OrphanedRun[] = []
   for (const record of Queues.values(state.queues)) {
-    const run = materializeRun(record, state.jobs)
+    const run = reader.read(record, state.jobs)
+    // Quarantined: its cursor and its step Jobs are exactly what could not be
+    // read, so there is no honest orphan judgment to make about it.
+    if (run === undefined) continue
     if (Queues.terminal(run)) continue
     const step = run.steps[run.cursor]
     if (step === undefined || step.job !== undefined) continue
@@ -6008,10 +6143,14 @@ function orphanedJoblessRuns(state: DeepReadonly<RuntimeState>, recoveryTime: st
 function unisolableStalePlanBatches(
   state: DeepReadonly<RuntimeState>,
   byName: ReadonlyMap<string, RuntimeStep>,
+  reader: TolerantQueueReader,
 ): readonly UnisolableStalePlanBatch[] {
   const batches: UnisolableStalePlanBatch[] = []
   for (const record of Queues.values(state.queues)) {
-    const run = materializeRun(record, state.jobs)
+    const run = reader.read(record, state.jobs)
+    // Quarantined: `bisectable` and the plan-drift comparison both read the
+    // materialized steps, which is the read that failed.
+    if (run === undefined) continue
     if (!bisectable(run)) continue
     const drift = recordedPlanDrift(run.steps, byName)
     if (drift !== undefined) batches.push({ run: record.id, drift })
@@ -6119,6 +6258,13 @@ function auditQueues(
   // boundary and type-check with any string.
   const findings: QueueAuditFindingEmission[] = []
   const installed = new Map(steps.map((step) => [step.name, step]))
+  // ONE reader for the whole walk. The record walk below used to carry its own
+  // local try/catch, which made `invalid-run` look covered while three later
+  // population walks in this same function still called the eager reader
+  // directly — so an unreadable record threw straight out of `queue audit` past
+  // the very finding written to report it. A reader shared by every walk is what
+  // makes that finding reachable; a second private catch is how it stopped being.
+  const reader = createTolerantQueueReader()
   const auditNowMs = options.now === undefined ? undefined : parseAuditTime(options.now, "now")
   for (const pause of Object.values(state.queues.pauses)) {
     const specimen = `queue:${baseIdentity(pause.base)}`
@@ -6219,17 +6365,10 @@ function auditQueues(
         })
       }
     }
-    let run: Run
-    try {
-      run = materializeRun(record, state.jobs)
-    } catch (error) {
-      findings.push({
-        code: "invalid-run",
-        message: error instanceof Error ? error.message : String(error),
-        run: record.id,
-      })
-      continue
-    }
+    // Quarantined rows become `invalid-run` findings once, after every walk has
+    // had its say, so a record several walks meet is reported once.
+    const run = reader.read(record, state.jobs)
+    if (run === undefined) continue
     if (Queues.terminal(run)) continue
     // Step 0's Job is requested in the same event batch as `queue/run/started`,
     // so a non-terminal run with NO Job at all never started and never can:
@@ -6304,7 +6443,7 @@ function auditQueues(
   // The record walk above `continue`s past terminal runs and never inspects Jobs
   // whose run record is gone — so a requested Job stranded under a terminal or
   // absent run was invisible ("queue audit clean" printed over it). Surface it.
-  for (const orphan of orphanedRequestedQueueJobs(state)) {
+  for (const orphan of orphanedRequestedQueueJobs(state, reader)) {
     findings.push({
       code: "orphaned-requested-job",
       message: `requested job '${orphan.job.id}' (${orphan.job.key}) is stranded: its parent queue run '${orphan.run}' is ${orphan.reason === "run-absent" ? "absent" : "terminal"}`,
@@ -6314,11 +6453,23 @@ function auditQueues(
   // A FAILED batch is terminal, so the record walk above skipped its step drift.
   // An un-isolable stale-plan batch would otherwise re-refuse isolation every
   // cycle unseen — surface it so "audit clean" stops lying about a live zombie.
-  for (const batch of unisolableStalePlanBatches(state, installed)) {
+  for (const batch of unisolableStalePlanBatches(state, installed, reader)) {
     findings.push({
       code: "unisolable-stale-plan",
       message: `failed batch '${batch.run}' can never isolate under the installed catalog: ${batch.drift}`,
       run: batch.run,
+    })
+  }
+  // Every walk that reads run records is above this line, so the quarantine is
+  // now complete: one finding per record no reader could materialize, carrying
+  // the reader's exact refusal. This is the standing operator surface for the
+  // class — `recover` reports the same rows as a receipt at the moment it works
+  // around them, and this reports them for as long as they stand.
+  for (const unreadable of reader.quarantined()) {
+    findings.push({
+      code: "invalid-run",
+      message: unreadable.reason,
+      run: unreadable.run,
     })
   }
   // Every code above walks RUN RECORDS. A PR refused during required checks
@@ -6439,7 +6590,8 @@ function admissionRefusalAuditFindings(
     return pr === undefined ? [] : [pr]
   })
   const head = [...new Map([...queued, ...refused].map((pr) => [pr.id, pr])).values()].toSorted(
-    (left, right) => queueProgressTime(left).localeCompare(queueProgressTime(right)) || compareNatural(left.id, right.id),
+    (left, right) =>
+      queueProgressTime(left).localeCompare(queueProgressTime(right)) || compareNatural(left.id, right.id),
   )[0]
   for (const refusal of Object.values(state.queues.admissionRefusals).toSorted((left, right) =>
     compareNatural(left.pr, right.pr),
