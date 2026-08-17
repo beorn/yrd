@@ -278,7 +278,7 @@ checkpointing, closing, or otherwise taking ownership of the workspace lifecycle
 `bay open` takes no command; `bay run` and `bay in` default to `$SHELL`.
 Top-level `yrd run` acts on queue-run records, while `yrd sh` selects `$SHELL`.
 `in` defaults to `$SHELL`; any child command is opaque argv and must follow
-`--`. Guests receive no Hab or Tent identity from Yrd. Guests never close the
+`--`. Guests receive no host or fleet identity from Yrd. Guests never close the
 owner; the inverse remains strict too—owner close reaps every guest still
 holding the workspace.
 
@@ -945,7 +945,7 @@ A resident acquires one OS-held lease in the repository's common Yrd state
 before receiver intake or required-check execution. A second resident exits with the
 typed `resident-runner-active` refusal and identifies the active
 `yrd-cli:<pid>` runner. Job events retain that runner id; trace logs add
-host and available Herdr/cmux pane provenance. Normal exit and graceful
+host and, where a terminal multiplexer exposes it, pane provenance. Normal exit and graceful
 shutdown release the lease, while the OS releases it if the owner dies.
 
 A resident never deletes its heartbeat status on exit — it overwrites it with an
@@ -1516,7 +1516,8 @@ report as bare and become unusable.
   their results without owning how competitors are produced.
 - **Hab** may host Yrd as a service; Yrd does not import habitat policy.
 - **GitHub** can adapt issues to issues and checks/reviews/merge to queue steps.
-- **Tent** may configure Yrd for a fleet, but fleet policy stays outside Yrd.
+- **A fleet coordinator** may configure Yrd for many agents at once, but fleet
+  policy stays outside Yrd.
 
 The low-level packages remain usable by a single developer with no agent fleet.
 
