@@ -590,11 +590,17 @@ describe("host installed baseline", () => {
       "utf8",
     )
     const current = await residentRunnerStatus(repo)
+    // The stored record carries the raw counts; the READ re-mints its coverage,
+    // so a status.json written before coverage existed still cannot reach a
+    // renderer — or a JSON consumer — as a bare count
+    // (@i/10-merge-queue/22925-watch-shows-every-pr).
     expect(current?.uncarried).toEqual({
       count: 2,
       scanned: 50,
       missingUpdateClocks: 7,
       observedAt: "2026-08-13T20:00:30.000Z",
+      bounded: "≥2",
+      floor: "a floor — 7 refs without retained update clocks, against an unknown candidate population",
     })
     expect(uncarriedLine(current?.uncarried, Date.parse(baseStatus.lastTickAt))).toContain(
       "7 refs without retained update clocks",

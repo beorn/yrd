@@ -713,12 +713,37 @@ export function parsePRSelector(selector: string): ParsedPRSelector | undefined 
   return { pr: `PR${id}`, ...(revision === undefined ? {} : { revision }) }
 }
 
-/** Canonical copy-pasteable PR revision identity used by every text renderer. */
+/**
+ * Canonical copy-pasteable PR revision identity used by every text renderer.
+ *
+ * The `pr#` prefix is an assertion about the record's KIND, so it is spent only
+ * on an id `PRIdSchema` actually claims. `PRId` is a bare `string` alias
+ * (`type PRId = string`), and `QueueMemberId` is string-derived too, so no call
+ * site can be made type-safe against passing a pin-advance id here — the
+ * discrimination exists only at runtime, and this is the one place that asks.
+ * Without the ask, `yrdpin#357` printed as `pr#yrdpin#357`: a false kind that
+ * also stutters, on all three renderer call sites at once
+ * (@i/10-merge-queue/22924-pr-prefix-on-non-pr). A record that is not a PR
+ * renders under its own id, which is what its kind rename will then change.
+ */
 export function formatPRRevisionSelector(pr: PRId, revision: number | Pick<PRRev, "n">): string {
-  const parsed = parsePRSelector(pr)
-  const value = (parsed?.pr ?? pr).replace(/^PR/iu, "")
   const number = typeof revision === "number" ? revision : revision.n
-  return `pr#${value}.${number}`
+  if (!isPRRevisionSelector(pr)) return `${pr}.${number}`
+  const canonical = parsePRSelector(pr)?.pr ?? pr
+  return `pr#${canonical.replace(/^PR/iu, "")}.${number}`
+}
+
+/**
+ * Whether an id resolves to a real PR — the one question
+ * {@link formatPRRevisionSelector} asks before spending the `pr#` prefix.
+ *
+ * Exported so a JSX renderer asks the SAME question instead of deriving kind
+ * from the string a second way. The selector grammar is resolved first (`182`
+ * and `pr#182` both name PR182), then the RESOLVED id is judged by the schema —
+ * never the raw spelling.
+ */
+export function isPRRevisionSelector(pr: string): boolean {
+  return PRIdSchema.safeParse(parsePRSelector(pr)?.pr ?? pr).success
 }
 
 /**

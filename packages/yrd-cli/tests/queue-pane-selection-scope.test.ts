@@ -66,11 +66,11 @@ function nestedWithin(a: Boundary, b: Boundary): boolean {
 
 function twoPaneSnapshot() {
   const prs = [
-    fixturePr("PRA", "submitted", "2026-07-13T11:10:00.000Z", "Alpha"),
-    fixturePr("PRB", "submitted", "2026-07-13T11:12:00.000Z", "Beta"),
-    fixturePr("PRC", "submitted", "2026-07-13T11:14:00.000Z", "Gamma"),
+    fixturePr("PR11", "submitted", "2026-07-13T11:10:00.000Z", "Alpha"),
+    fixturePr("PR12", "submitted", "2026-07-13T11:12:00.000Z", "Beta"),
+    fixturePr("PR13", "submitted", "2026-07-13T11:14:00.000Z", "Gamma"),
   ]
-  const runningPr = fixturePr("PRR", "submitted", "2026-07-13T11:25:00.000Z", "Running")
+  const runningPr = fixturePr("PR19", "submitted", "2026-07-13T11:25:00.000Z", "Running")
   const runningRun = fixtureRun("RR", [runningPr], "running", "2026-07-13T11:40:00.000Z", {
     steps: [fixtureStep("check", fixtureJob("JRR-check", "running"))],
   })
@@ -98,9 +98,9 @@ describe("queue watch per-pane selection scopes (item 4a)", () => {
 
       // Three consecutive rows in the QUEUE list — all selectable, all resolving
       // to ONE shared scope: an in-pane drag between them selects and stays put.
-      const rowA = pointOf(text, "pr#A.1", 0, LEFT_MAX)
-      const rowB = pointOf(text, "pr#B.1", 0, LEFT_MAX)
-      const rowC = pointOf(text, "pr#C.1", 0, LEFT_MAX)
+      const rowA = pointOf(text, "pr#11.1", 0, LEFT_MAX)
+      const rowB = pointOf(text, "pr#12.1", 0, LEFT_MAX)
+      const rowC = pointOf(text, "pr#13.1", 0, LEFT_MAX)
       for (const point of [rowA, rowB, rowC]) {
         expect(resolveUserSelect(nodeAt(app, point)), "queue row stays selectable").not.toBe("none")
       }

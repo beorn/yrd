@@ -69,6 +69,25 @@ const PRSnapshotRecutProofSchema = PRRecutProofSchema.extend({
  * `PRIdSchema` there now refuses every intent id.
  */
 export const QueueMemberIdSchema = z.union([PRIdSchema, IntentRecordIdSchema])
+
+/** What kind of record a queue member id names. */
+export type QueueMemberKind = "pr" | "gitlink"
+
+/**
+ * The ONE discrimination of member kind, decided by the same two schemas the
+ * mints write through — so a renderer asks this instead of re-parsing the id,
+ * and every surface agrees by construction rather than by parallel guards.
+ *
+ * Returns `undefined` for an id neither schema claims. That is deliberate: a
+ * default of `"pr"` is precisely the failure this closes, a surface asserting a
+ * kind nothing ever established (@i/10-merge-queue/22924-pr-prefix-on-non-pr).
+ * Callers must decide what an unknown id means for them; none may assume.
+ */
+export function queueMemberKind(id: string): QueueMemberKind | undefined {
+  if (PRIdSchema.safeParse(id).success) return "pr"
+  if (IntentRecordIdSchema.safeParse(id).success) return "gitlink"
+  return undefined
+}
 export const QueueIntentSnapshotSchema = z
   .object({
     id: IntentRecordIdSchema,

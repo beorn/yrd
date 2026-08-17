@@ -18,12 +18,12 @@ import { QueueTimelineView, type QueueTimelineProjection } from "../src/queue-st
 // Runner liveness is always explicit; job activity remains on the queue row.
 
 function idleProjection(): QueueTimelineProjection {
-  const pending = fixturePr("PRA", "submitted", "2026-07-13T11:10:00.000Z", "Alpha")
+  const pending = fixturePr("PR11", "submitted", "2026-07-13T11:10:00.000Z", "Alpha")
   return fixtureSnapshot(fixtureResult([pending], [])).projection
 }
 
 function processingProjection(): QueueTimelineProjection {
-  const runningPr = fixturePr("PRR", "submitted", "2026-07-13T11:25:00.000Z", "Running")
+  const runningPr = fixturePr("PR19", "submitted", "2026-07-13T11:25:00.000Z", "Running")
   const runningRun = fixtureRun("RR", [runningPr], "running", "2026-07-13T11:40:00.000Z", {
     steps: [fixtureStep("check", fixtureJob("JRR-check", "running"))],
   })
@@ -52,7 +52,7 @@ describe("queue liveness status render (item 4)", () => {
       expect(app.text).toContain("╭─ RUNNER ")
       expect(app.text).not.toContain("╭─ STATUS ")
       expect(app.text).toContain("[84042]")
-      const statusAt = markerPointOnRow(app.text, "pr#R.1")
+      const statusAt = markerPointOnRow(app.text, "pr#19.1")
       expect(app.cell(statusAt[0], statusAt[1]).fg).not.toBeNull()
     } finally {
       app.unmount()

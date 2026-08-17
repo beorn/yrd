@@ -140,6 +140,8 @@ import {
   type QueueTimelineStatusFilter,
   type UncarriedObservation,
   uncarriedCoverageFloor,
+  uncarriedFloorCount,
+  uncarriedObservation,
   type QueueStatusResult,
 } from "./queue-status-view.tsx"
 import type { QueueReadModel } from "./queue-read-model.ts"
@@ -601,13 +603,16 @@ function parseUncarriedObservation(value: unknown): UncarriedObservation | undef
     )
   }
   const observedAt = residentRunnerTimestamp(observation.observedAt, "uncarried observedAt")
-  return {
+  // Minted, never spread: a `status.json` written by an older resident carries
+  // no coverage fields, and re-deriving them HERE is what keeps a stale record
+  // honest rather than letting it reach a renderer as a bare count.
+  return uncarriedObservation({
     count,
     scanned,
     ...(missingUpdateClocks === undefined ? {} : { missingUpdateClocks }),
     ...(measurable === undefined ? {} : { measurable }),
     observedAt,
-  }
+  })
 }
 
 function parseJournalRetentionPolicy(value: unknown): JournalRetentionPolicy {
@@ -992,7 +997,7 @@ export function runnerSourceBehind(
   const runnerSha = residentBootedSha(implementationSource)
   if (runnerSha === undefined) return undefined
   const cached = runnerSourceBehindCache.get(sourceRoot)
-  if (cached !== undefined && cached.runnerSha === runnerSha && now - cached.computedAt < RUNNER_SOURCE_BEHIND_TTL_MS) {
+  if (cached?.runnerSha === runnerSha && now - cached.computedAt < RUNNER_SOURCE_BEHIND_TTL_MS) {
     return cached.behind
   }
   const behind = readSourceAdvance(sourceRoot, runnerSha)?.behind
@@ -7432,18 +7437,18 @@ function createUncarriedSweeper(
       ttlMs: UNCARRIED_TTL_MS,
       ageBoundMs: UNCARRIED_AGE_BOUND_MS,
     })
-    latest = {
+    latest = uncarriedObservation({
       count: result.findings.length,
       scanned: result.scanned,
       missingUpdateClocks: result.missingUpdateClocks,
-      // Everything that reached the TTL judgement: aged out or examined. The
-      // refs excluded as carried or superseded were never the rail's to
-      // measure, so counting them here would flatter the coverage.
-      measurable: result.outsideAgeBound + result.examined,
+      // The sweep reports its own measurable population now — this used to be
+      // re-added here AND in the `queue uncarried` command, two copies of one
+      // sum that only had to disagree once.
+      measurable: result.measurable,
       // Stamped when the sweep STARTED. Stamping on completion would make a
       // slow sweep look fresher than the facts it read.
       observedAt: new Date(startedMs).toISOString(),
-    }
+    })
   }
 
   return {
@@ -7498,15 +7503,25 @@ async function queueUncarried(
     `${String(result.missingUpdateClocks)} refs without retained update clocks`
   // The same sentence the rail shows, from the same function: a reader must not
   // have to work out from the raw ledger that the count is a floor.
-  const floor = uncarriedCoverageFloor(result.outsideAgeBound + result.examined, result.missingUpdateClocks)
+  const floor = uncarriedCoverageFloor(result.measurable, result.missingUpdateClocks)
+  // The findings count is bounded by the SAME helper the rail uses. It used to
+  // print bare, so the command contradicted the rail's own reasoning about the
+  // very number it was reporting — and a bare "0 uncarried refs" from a 15%
+  // reading is the exact "clean fleet" claim the floor exists to refuse.
+  const bounded = uncarriedFloorCount(result.findings.length, result.missingUpdateClocks)
   const lines = result.findings.map((finding) => `${finding.ref}  ${finding.message}`)
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "queue.uncarried", ...result },
+    // `floor`/`bounded` ride the MACHINE payload too. They were computed one
+    // line above and spent only on the human branch, so a `--json` consumer got
+    // a bare `findings` array and had to rediscover from the raw ledger that the
+    // count is a floor — the same misreading the human branch already refuses
+    // (@i/10-merge-queue/22925-watch-shows-every-pr).
+    { command: "queue.uncarried", ...result, floor, bounded },
     result.findings.length === 0
-      ? `no uncarried refs (${floor}) — ${denominator}`
-      : [...lines, "", `${String(result.findings.length)} findings (${floor})`, denominator].join("\n"),
+      ? `${bounded} uncarried refs (${floor}) — ${denominator}`
+      : [...lines, "", `${bounded} findings (${floor})`, denominator].join("\n"),
   )
   return result.findings.length === 0 ? 0 : 1
 }

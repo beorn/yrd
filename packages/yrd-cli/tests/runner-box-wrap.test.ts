@@ -22,7 +22,7 @@ import { createElement } from "react"
 import { createRenderer } from "silvery/test"
 import { describe, expect, it } from "vitest"
 import { fixturePr, fixtureResult, fixtureRun, fixtureSnapshot } from "../dev/queue-timeline-fixtures.ts"
-import { uncarriedLine, type UncarriedObservation } from "../src/queue-status-view.tsx"
+import { uncarriedLine, uncarriedObservation, type UncarriedObservation } from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
 /** Width at which the uncarried rail below overflows a full-width queue pane. */
@@ -63,12 +63,12 @@ function boxRows(text: string, title: string): BoxRows {
 /** The frame's clock in these fixtures — the rail reads "4m ago" from it. */
 const NOW_MS = Date.parse("2026-07-13T12:00:00.000Z")
 
-const UNCARRIED: UncarriedObservation = {
+const UNCARRIED: UncarriedObservation = uncarriedObservation({
   count: 41,
   scanned: 4784,
   missingUpdateClocks: 12,
   observedAt: "2026-07-13T11:56:00.000Z",
-}
+})
 
 function snapshotWithUncarried() {
   const pr = fixturePr("PR1", "submitted", "2026-07-13T11:10:00.000Z", "Prepare release notes")

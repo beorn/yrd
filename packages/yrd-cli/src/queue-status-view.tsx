@@ -6,6 +6,7 @@ import {
   currentPRRev,
   formatPRRevisionSelector,
   isNonCheckablePRState,
+  isPRRevisionSelector,
   parsePRSelector,
   prDeliveryState,
   prCorrelation,
@@ -30,11 +31,12 @@ import type {
   PRCheckRecord,
   PREligibility,
   QueueAuditFinding,
+  QueueMemberKind,
   Run,
   QueueStep,
   QueueSummary,
 } from "@yrd/queue"
-import { GateCertificateSchema } from "@yrd/queue"
+import { GateCertificateSchema, queueMemberKind } from "@yrd/queue"
 import {
   Box,
   formatNounId,
@@ -142,6 +144,13 @@ export function formatQueuePrId(pr: string, revision: number | string, times?: n
 
 type QueueNounIdProps = Omit<React.ComponentProps<typeof NounId>, "noun" | "value" | "revision">
 
+/**
+ * The JSX half of the identity render. `noun="pr"` is an assertion about KIND,
+ * so it is spent only on an id the schema claims — otherwise a pin-advance
+ * record printed `pr#yrdpin#357` here exactly as it did in the text path
+ * (@i/10-merge-queue/22924-pr-prefix-on-non-pr). Both halves ask the same
+ * exported question, so they cannot disagree about what a record is.
+ */
 function QueuePrId({
   pr,
   revision,
@@ -149,9 +158,14 @@ function QueuePrId({
   ...props
 }: { pr: string; revision: number | string; times?: number } & QueueNounIdProps) {
   const suffix = retrySuffix(times)
+  const number = typeof revision === "number" ? revision : Number(revision)
   return (
     <>
-      <NounId noun="pr" value={prIdValue(pr)} revision={revision} {...props} />
+      {isPRRevisionSelector(pr) ? (
+        <NounId noun="pr" value={prIdValue(pr)} revision={revision} {...props} />
+      ) : (
+        <Text {...props}>{formatPRRevisionSelector(pr, number)}</Text>
+      )}
       {suffix === "" ? null : <Text {...props}>{suffix}</Text>}
     </>
   )
@@ -286,6 +300,12 @@ export type QueueTimelineProjectedRow = Readonly<{
   candidateId?: string
   run?: string
   pr: string
+  /** What kind of record `pr` names, decided ONCE from the schemas the mints
+   * write through. Renderers read this instead of re-parsing the id, which is
+   * how a pin-advance record came to print as `pr#yrdpin#357`
+   * (@i/10-merge-queue/22924-pr-prefix-on-non-pr). `undefined` means neither
+   * schema claimed it — a renderer must not then assume `pr`. */
+  kind?: QueueMemberKind
   revision: number
   headSha: string
   branch: string
@@ -396,7 +416,66 @@ export type UncarriedObservation = Readonly<{
    */
   measurable?: number
   observedAt: string
+  /**
+   * The coverage sentence, and the count already bounded — carried as FIELDS so
+   * that no consumer can serialize this record without them.
+   *
+   * Five machine surfaces emit this object (`queue.uncarried --json`,
+   * `queue.list`, the watch stream, `RunnerHealthFacts`, the resident
+   * heartbeat's `status.json`), and every one of them used to ship a bare
+   * `count` while the coverage stayed behind at the one call site that
+   * remembered to compute it. Making the derived half part of the record turns
+   * "remember to say it is a floor" from a rule into a type: they are minted
+   * once by {@link uncarriedObservation} and travel wherever the count goes.
+   */
+  floor: string
+  bounded: string
 }>
+
+/**
+ * Mint an observation with its coverage attached. The ONLY constructor — both
+ * the resident's sweeper and the tolerant reader of an older `status.json` go
+ * through here, so a record that reaches a renderer always knows how much of
+ * its own population it managed to measure.
+ */
+export function uncarriedObservation(
+  input: Readonly<{
+    count: number
+    scanned: number
+    measurable?: number
+    missingUpdateClocks?: number
+    observedAt: string
+  }>,
+): UncarriedObservation {
+  return {
+    count: input.count,
+    scanned: input.scanned,
+    ...(input.measurable === undefined ? {} : { measurable: input.measurable }),
+    ...(input.missingUpdateClocks === undefined ? {} : { missingUpdateClocks: input.missingUpdateClocks }),
+    observedAt: input.observedAt,
+    floor: uncarriedCoverageFloor(input.measurable, input.missingUpdateClocks),
+    bounded: uncarriedFloorCount(input.count, input.missingUpdateClocks),
+  }
+}
+
+/**
+ * What the rail's COLOUR claims: that an action exists. Warning only when the
+ * sweep actually found stranded work; muted otherwise, INCLUDING a zero drawn
+ * from partial coverage.
+ *
+ * That last clause is a deliberate ruling (@chief, 2026-08-17), not an
+ * oversight, and it is written down here because it looks like a bug to anyone
+ * who has just read {@link uncarriedCoverageFloor}: a zero at 15% coverage
+ * really is an unmeasured fleet rather than a clean one. The epistemics belong
+ * in the rail TEXT, which now always carries `≥` and its coverage sentence.
+ * Colouring partial coverage would leave the rail permanently lit on a real
+ * fleet — 2211 of 2602 refs lack retained clocks — and a rail that is always
+ * warning becomes noise and gets ignored, which is precisely how the previous
+ * one died. Do not add a third colour here; strengthen the sentence instead.
+ */
+export function uncarriedRailColor(observation: UncarriedObservation | undefined): string {
+  return observation !== undefined && observation.count > 0 ? "$fg-warning" : "$fg-muted"
+}
 
 /**
  * How much of the candidate population this sweep could actually judge.
@@ -427,6 +506,23 @@ export function uncarriedCoverageFloor(
 }
 
 /**
+ * A sweep count printed with its floor bound: `≥N` whenever any candidate went
+ * unmeasured, a bare `N` only when coverage was provably complete.
+ *
+ * Exported and shared by EVERY surface that prints one of these counts — the
+ * runner-box rail and the `queue uncarried` command — because the bound is the
+ * half a reader acts on: "33 uncarried" is a work item, "≥33 of a population
+ * 15% of which we could measure" is an unknown, and the two were being phrased
+ * differently on the two surfaces (@i/10-merge-queue/22925-watch-shows-every-pr).
+ * Unknown coverage counts as partial: an older resident that cannot report its
+ * clock gap has not proven it had none.
+ */
+export function uncarriedFloorCount(count: number, missingUpdateClocks: number | undefined): string {
+  const partial = missingUpdateClocks === undefined || missingUpdateClocks > 0
+  return `${partial ? "≥" : ""}${String(count)}`
+}
+
+/**
  * How a rail must say what it measured, or that it did not measure.
  *
  * Exported and used by the renderer so the rule is one function rather than a
@@ -437,13 +533,12 @@ export function uncarriedCoverageFloor(
 export function uncarriedLine(observation: UncarriedObservation | undefined, nowMs: number): string {
   if (observation === undefined) return "uncarried not swept"
   const ageMs = Math.max(0, nowMs - Date.parse(observation.observedAt))
-  const floor = uncarriedCoverageFloor(observation.measurable, observation.missingUpdateClocks)
-  // `≥` is not decoration: the count is a floor whenever any candidate went
-  // unmeasured, and an operator scanning the rail reads a bare number as a
-  // total long before they read the parenthetical that says otherwise.
-  const bound = observation.missingUpdateClocks === undefined || observation.missingUpdateClocks > 0 ? "≥" : ""
+  // Both halves are read off the record, not recomputed here: `≥` is not
+  // decoration — the count is a floor whenever any candidate went unmeasured,
+  // and an operator scanning the rail reads a bare number as a total long
+  // before they read the parenthetical that says otherwise.
   return (
-    `uncarried ${bound}${String(observation.count)} of ${String(observation.scanned)} refs (${floor}), ` +
+    `uncarried ${observation.bounded} of ${String(observation.scanned)} refs (${observation.floor}), ` +
     `as of ${humanAge(ageMs)} ago`
   )
 }
@@ -1730,17 +1825,95 @@ function queueState(pr: PR, run: Run | undefined): string {
   return projectedPrStatus(pr)
 }
 
+/**
+ * Everything the queue surfaces need to know about ONE record's display, from
+ * ONE walk of it: which kind it is, whether it is settled, its delivery state,
+ * and its pre-run band.
+ *
+ * There used to be three derivations of this. `prDeliveryState` (the model-side
+ * primitive, which stays and which this consumes), `projectedPrStatus`, and
+ * `preRunTimelineStatus` each walked the same record toward the same question
+ * and disagreed at the edges, because the closed-record guard existed in
+ * exactly ONE of them: a withdrawn PR whose stale `needsAuthor` outlived its
+ * close rendered `rev` on the timeline forever while the sibling surface
+ * correctly said `withdrawn`. That is the shape docs/lessons/no-parallel-
+ * derivation.md names — two systems computing the same derived quantity diverge
+ * on the inputs nobody thought to test, and every new surface is one more edge
+ * to keep in sync by hand.
+ *
+ * So the guard lives here, once. The former derivers select a field off this
+ * one computation, and the word/colour/filter re-mappers downstream consume the
+ * result rather than deriving it again.
+ */
+export type QueueDisplayState = Readonly<{
+  /** Which kind of record this is. Carried so no renderer re-parses the id
+   * string — the mechanism of @i/10-merge-queue/22924-pr-prefix-on-non-pr.
+   * `undefined` means neither schema claimed the id; nobody may assume `pr`. */
+  kind: QueueMemberKind | undefined
+  /** Settled by intent: closed, so integrated / already-landed / canceled /
+   * withdrawn and nothing open-only can still be true of it. */
+  terminal: boolean
+  /** The record's own delivery state, before any eligibility overlay. */
+  native: PRDeliveryState
+  /** The delivery state a surface shows, `needs-author` included. */
+  delivery: PRDeliveryState | "needs-author"
+  /** The pre-run timeline band, or undefined when the record is settled or
+   * belongs to no pre-run band at all. */
+  preRun: "draft" | "rev" | "ready" | undefined
+}>
+
+export function queueDisplayState(
+  pr: PR,
+  options: Readonly<{ eligibility?: PREligibility; runs?: readonly Run[] }> = {},
+): QueueDisplayState {
+  const kind = queueMemberKind(pr.id)
+  const native = prDeliveryState(pr)
+  // `needs-author` is an OPEN-only value, and `PR.needsAuthor` is cleared by
+  // recut, submitted, admission-recorded and already-landed but never by
+  // withdrawn, integrated or canceled — so a stored refusal outlives every
+  // closing path. Terminality is therefore read first, everywhere, by everyone.
+  //
+  // A closed record keeps its FULL truth in `delivery` (withdrawn / canceled /
+  // integrated / already-landed) and takes `preRun: undefined`. That is the one
+  // place closed maps to absent-from-the-timeline, and it is a property of the
+  // timeline's vocabulary rather than of the record: `QueueTimelineStatus` has
+  // no `withdrawn` member, and the sibling PR projection independently drops
+  // the same three states from its list (see `projectedPRRows` consumers
+  // filtering `nativeStatus` integrated/already-landed/withdrawn, ~:3862).
+  // Callers that DO have a word for a closed record read `delivery`.
+  if (pr.state === "closed") return { kind, terminal: true, native, delivery: native, preRun: undefined }
+  const delivery = options.eligibility?.reason?.code === "needs-author" ? "needs-author" : native
+  return { kind, terminal: false, native, delivery, preRun: preRunBand(pr, native, options.runs ?? []) }
+}
+
+/**
+ * The pre-run band of an OPEN record: `draft`/`rev` for a registered-but-
+ * unsubmitted PR (delivery `pushed`) and `ready` for one awaiting its run.
+ * `rev` is a draft carrying failed-submission history — the user's "a failed
+ * submission returns the PR to an editable state" — and stores no new PRStatus.
+ * A `rejected` PR resurfaces as `rev` IMMEDIATELY (21707: rejection is a
+ * submission fact, not a PR resting state), scope-limited to PRs whose failed
+ * run the result still retains, so the pre-cutover backlog of ancient rejected
+ * PRs cannot flood the band; once the run ages out, the corpse stays hidden.
+ *
+ * Terminal records never reach here — {@link queueDisplayState} returns before
+ * calling it — which is the whole point of the guard living in one place.
+ */
+function preRunBand(pr: PR, native: PRDeliveryState, runs: readonly Run[]): "draft" | "rev" | "ready" | undefined {
+  if (native === "needs-author") return "rev"
+  if (native === "submitted" || native === "ready") return "ready"
+  if (native === "pushed") return lastFailedSubmission(pr) === undefined ? "draft" : "rev"
+  if (native === "rejected") {
+    const runId = lastFailedSubmission(pr)?.terminal?.run
+    if (runId !== undefined && runs.some((run) => run.id === runId)) return "rev"
+  }
+  return undefined
+}
+
+/** Thin consumer of {@link queueDisplayState} — kept as the named surface every
+ * status caller already reads, but no longer a second derivation of it. */
 export function projectedPrStatus(pr: PR, eligibility?: PREligibility): PRDeliveryState | "needs-author" {
-  // A closed record's delivery state is settled, and `needs-author` is an
-  // open-only value — `prDeliveryState` maps closed to exactly integrated /
-  // already-landed / canceled / withdrawn. `PR.needsAuthor` is cleared by recut,
-  // submitted, admission-recorded and already-landed, but never by withdrawn,
-  // integrated or canceled, so the stored refusal outlives every closing path.
-  // Consulting it first therefore reported a value the model calls impossible.
-  if (pr.state === "closed") return prDeliveryState(pr)
-  return prNeedsAuthor(pr) !== undefined || eligibility?.reason?.code === "needs-author"
-    ? "needs-author"
-    : prDeliveryState(pr)
+  return queueDisplayState(pr, eligibility === undefined ? {} : { eligibility }).delivery
 }
 
 function stepError(step: QueueStep): string {
@@ -2220,6 +2393,9 @@ function timelineRunMemberRows(
       candidateId: run.candidateId,
       run: run.id,
       pr: member.id,
+      // A run member is a PR *or* a pin intent — this is the row where a
+      // gitlink id actually reaches the renderer.
+      ...(queueMemberKind(member.id) === undefined ? {} : { kind: queueMemberKind(member.id) }),
       revision: member.revision,
       headSha: member.headSha,
       branch: member.branch,
@@ -2251,30 +2427,6 @@ function lastFailedSubmission(pr: PR): PR["revs"][number] | undefined {
   return pr.revs.filter((revision) => revision.terminal?.kind === "rejected").at(-1)
 }
 
-/**
- * Map a non-integrated PR to its display-only pre-run timeline status, or
- * undefined when the PR is terminal by intent (integrated/withdrawn/canceled).
- * `rev` is a `draft` (bay status `pushed`) that carries failed-submission
- * history — the user's "a failed submission returns the PR to an editable
- * state" — and stores no new PRStatus. A `rejected` PR resurfaces as `rev`
- * IMMEDIATELY (21707: rejection is a submission fact, not a PR resting state):
- * the failed run row stays as history while the PR re-enters the editable band
- * carrying its blocker. Scope-limited to PRs whose failed run the result still
- * retains, so the pre-cutover backlog of ancient rejected PRs cannot flood the
- * band; once the run ages out of retention, the corpse stays hidden.
- */
-function preRunTimelineStatus(pr: PR, runs: readonly Run[]): "draft" | "rev" | "ready" | undefined {
-  const delivery = prDeliveryState(pr)
-  if (prNeedsAuthor(pr) !== undefined) return "rev"
-  if (delivery === "submitted" || delivery === "ready") return "ready"
-  if (delivery === "pushed") return lastFailedSubmission(pr) === undefined ? "draft" : "rev"
-  if (delivery === "rejected") {
-    const runId = lastFailedSubmission(pr)?.terminal?.run
-    if (runId !== undefined && runs.some((run) => run.id === runId)) return "rev"
-  }
-  return undefined
-}
-
 /** `rev · <slug>` annotated with the code of the most recent failed
  * submission when that run is still retained; bare `rev` otherwise. */
 function revisionDetail(pr: PR, runs: readonly Run[]): string {
@@ -2286,7 +2438,7 @@ function revisionDetail(pr: PR, runs: readonly Run[]): string {
 
 /**
  * One row per non-integrated PR that is not currently a run member, each carrying
- * a derived, display-only status (`preRunTimelineStatus`): `draft`/`rev` for
+ * a derived, display-only status (`queueDisplayState().preRun`): `draft`/`rev` for
  * a registered-but-unsubmitted PR (bay status `pushed`) and `ready` for one
  * awaiting its run. These never distort queue mechanics — the `draft` group
  * (draft + rev) is excluded from every terminal FLOW fact and the
@@ -2309,7 +2461,8 @@ function timelineNonIntegratedRows(
   return result.prs.flatMap((pr): QueueTimelineProjectedRow[] => {
     const revision = currentPRRev(pr)
     const revisionKey = queueRevisionKey({ id: pr.id, revision: revision.n, headSha: revision.head })
-    const status = preRunTimelineStatus(pr, runs)
+    const display = queueDisplayState(pr, { runs })
+    const status = display.preRun
     if (status === undefined) return []
     if (status === "ready" && activeRevisions.has(revisionKey)) return []
     const timestamp = submissionTimes.get(revisionKey) ?? revision.submittedAt ?? pr.submittedAt ?? null
@@ -2341,6 +2494,7 @@ function timelineNonIntegratedRows(
           timestampMs,
           ...(candidate === undefined ? {} : { candidateId: candidate.id }),
           pr: pr.id,
+          ...(display.kind === undefined ? {} : { kind: display.kind }),
           revision: revision.n,
           headSha: revision.head,
           branch: pr.branch,
@@ -2374,6 +2528,7 @@ function timelineNonIntegratedRows(
         timestampMs: parsedTimelineTimestamp(registeredAt, `PR '${pr.id}' registration`),
         ...(candidate === undefined ? {} : { candidateId: candidate.id }),
         pr: pr.id,
+        ...(display.kind === undefined ? {} : { kind: display.kind }),
         revision: revision.n,
         headSha: revision.head,
         branch: pr.branch,
@@ -4789,22 +4944,34 @@ function TimelineHeader({ layout }: { layout: TimelineCellLayout }) {
   )
 }
 
+/**
+ * EVERY row renders its own TIME, STATUS and RUN, including the second and
+ * third member of a convoy that landed together.
+ *
+ * Until 2026-08-17 an adjacent member sharing the leader's base+run rendered
+ * those three cells as `-` (the "Round 8 continuation placeholder"). That made
+ * a landed PR and a never-attempted one print the SAME row of dashes, so the
+ * one question a human asks this list — did my work land — had no answer for
+ * two thirds of a convoy: R2649 landed PR1151/1152/1153 and only PR1151 showed
+ * a status. Operator directive, superseding Round 8: "make sure all PRs show in
+ * the watch/list - i always assumed that they would show"
+ * (@i/10-merge-queue/22925-watch-shows-every-pr). De-duplicating the run label
+ * is not worth a row that cannot distinguish success from nothing-ever-happened.
+ */
 function TimelineProjectedRow({
   row,
-  continuation,
   cursor,
   hovered,
   layout,
   live,
 }: {
   row: QueueTimelineDisplayRow
-  continuation: boolean
   cursor: boolean
   hovered: boolean
   layout: TimelineCellLayout
   live: boolean
 }) {
-  const active = !continuation && row.status === "running"
+  const active = row.status === "running"
   const status = timelineStatusCell(row)
   const runCell = timelineRunCell(row, layout.compact)
   const step = timelineStepCell(row)
@@ -4823,41 +4990,35 @@ function TimelineProjectedRow({
       backgroundColor={rowBackground}
       time={
         <Text color={forcedFg ?? "$fg-muted"} wrap="truncate">
-          {continuation ? "-" : timelineClockCell(row, layout)}
+          {timelineClockCell(row, layout)}
         </Text>
       }
       status={
-        continuation ? (
-          <Text color={forcedFg ?? "$fg-muted"}>-</Text>
-        ) : (
-          <>
-            <Box width={1} flexShrink={0}>
-              {/* A running row's glyph keeps its km warning pulse even under
-                selection; other statuses take the selection fg. */}
-              {active || !cursor ? <TimelineMarker row={row} live={live} /> : <Text color={forcedFg}>{row.glyph}</Text>}
-            </Box>
-            <Box paddingLeft={1} minWidth={0} overflow="hidden">
-              {/* The running status word pulses blue in the shared phase (item 12)
-                and stays blue when the row is selected (item 13). */}
-              {active ? (
-                <ActivityPulse live={live} wrap="truncate">
-                  {status.word}
-                </ActivityPulse>
-              ) : (
-                <Text color={forcedFg ?? status.color} wrap="truncate">
-                  {status.word}
-                </Text>
-              )}
-            </Box>
-          </>
-        )
+        <>
+          <Box width={1} flexShrink={0}>
+            {/* A running row's glyph keeps its km warning pulse even under
+              selection; other statuses take the selection fg. */}
+            {active || !cursor ? <TimelineMarker row={row} live={live} /> : <Text color={forcedFg}>{row.glyph}</Text>}
+          </Box>
+          <Box paddingLeft={1} minWidth={0} overflow="hidden">
+            {/* The running status word pulses blue in the shared phase (item 12)
+              and stays blue when the row is selected (item 13). */}
+            {active ? (
+              <ActivityPulse live={live} wrap="truncate">
+                {status.word}
+              </ActivityPulse>
+            ) : (
+              <Text color={forcedFg ?? status.color} wrap="truncate">
+                {status.word}
+              </Text>
+            )}
+          </Box>
+        </>
       }
       run={
         // Real run ids share TIME's muted treatment (user respec 2026-07-15);
         // run-less pending rows keep their info-colored `pending`.
-        continuation ? (
-          <Text color={forcedFg ?? "$fg-muted"}>-</Text>
-        ) : row.run === undefined ? (
+        row.run === undefined ? (
           <Text color={forcedFg ?? runCell.color ?? "$fg-muted"} wrap="truncate">
             {runCell.text}
           </Text>
@@ -4892,7 +5053,7 @@ function TimelineProjectedRow({
                 {" "}
                 {timelineBranchLabel(row.branch)}
               </Text>
-              {continuation || step.text === "" ? null : (
+              {step.text === "" ? null : (
                 <Text color={forcedFg ?? (active ? "$fg-info" : step.color)} flexShrink={0} wrap="truncate">
                   {" "}
                   ({step.text})
@@ -4915,13 +5076,7 @@ function TimelineProjectedRow({
       runDuration={
         // Run duration: no clock glyph, just the dimmed time (user directive
         // 2026-07-16, supersedes the 15c `◷`-carries-onto-RUN clause).
-        continuation ? (
-          <Text color={forcedFg ?? "$fg-muted"}>-</Text>
-        ) : runDuration === "" ? (
-          <Text> </Text>
-        ) : (
-          <Text color={forcedFg ?? "$fg-muted"}>{runDuration}</Text>
-        )
+        runDuration === "" ? <Text> </Text> : <Text color={forcedFg ?? "$fg-muted"}>{runDuration}</Text>
       }
     />
   )
@@ -5246,7 +5401,7 @@ export function queueNoRunnerBanner(
   }
   const start = `yrd queue run ${projection.base}`
   const absence = projection.runnerAbsence
-  if (absence !== undefined && absence.kind === "departed") {
+  if (absence?.kind === "departed") {
     const ago = mediaDuration(Math.max(0, nowMs - absence.lastAliveMs))
     // A clean exit is a decision someone made; a missing exit marker is a death
     // nobody recorded, and only the second is a reason to look at why.
@@ -5346,15 +5501,12 @@ function TimelineRunnerBox({
       )}
       {/* Its own rail, per acceptance: pushed-and-uncarried is invisible from
           every other surface here, because a ref with no merge request has no
-          candidate and so appears in no row. Muted when it is clean or unswept
-          — only genuine stranded work earns attention, or the rail becomes
-          noise and gets ignored, which is how the last one died. */}
+          candidate and so appears in no row. Colour rules live in
+          `uncarriedRailColor` — only genuine stranded work earns attention, or
+          the rail becomes noise and gets ignored, which is how the last one
+          died. Coverage is carried by the TEXT, never by the colour. */}
       {runner === null ? null : (
-        <Text
-          color={runner.uncarried !== undefined && runner.uncarried.count > 0 ? "$fg-warning" : "$fg-muted"}
-          wrap="truncate"
-          minWidth={0}
-        >
+        <Text color={uncarriedRailColor(runner.uncarried)} wrap="truncate" minWidth={0}>
           {uncarriedLine(runner.uncarried, now)}
         </Text>
       )}
@@ -5845,12 +5997,6 @@ function ProjectedQueueTimeline({
                 const entry = (
                   <TimelineProjectedRow
                     row={row}
-                    continuation={
-                      index > 0 &&
-                      row.run !== undefined &&
-                      rows[index - 1]?.base === row.base &&
-                      rows[index - 1]?.run === row.run
-                    }
                     cursor={meta.isCursor}
                     hovered={meta.isHovered}
                     layout={layout}

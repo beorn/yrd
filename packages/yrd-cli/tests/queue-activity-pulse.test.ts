@@ -21,7 +21,7 @@ import { QueueWatchFrame } from "../src/watch-pane.tsx"
 // the shared app-scope phase and survive row selection.
 
 function processingSnapshot() {
-  const runningPr = fixturePr("PRR", "submitted", "2026-07-13T11:25:00.000Z", "Running")
+  const runningPr = fixturePr("PR19", "submitted", "2026-07-13T11:25:00.000Z", "Running")
   const runningRun = fixtureRun("RR", [runningPr], "running", "2026-07-13T11:40:00.000Z", {
     steps: [fixtureStep("check", fixtureJob("JRR-check", "running"))],
   })
@@ -78,8 +78,8 @@ describe("synchronized activity pulse (items 12-13)", () => {
       await app.waitForLayoutStable()
       expect(app.text).toContain("╭─ RUNNER ")
       expect(app.text).not.toContain("╭─ STATUS ")
-      const glyph = cellOf(app, "◉", "pr#R.1")
-      const word = cellOf(app, "checking", "pr#R.1")
+      const glyph = cellOf(app, "◉", "pr#19.1")
+      const word = cellOf(app, "checking", "pr#19.1")
       expect(word.fg, "running marker and word share the activity phase").toEqual(glyph.fg)
     } finally {
       app.unmount()
@@ -93,7 +93,7 @@ describe("synchronized activity pulse (items 12-13)", () => {
     try {
       await app.waitForLayoutStable()
       const rows = app.text.split("\n")
-      // The default cursor is the first running row (PRR) — it is selected.
+      // The default cursor is the first running row (PR19) — it is selected.
       const runY = rows.findIndex((row) => /^\s*\d{2}:\d{2}:\d{2}.*\bchecking\b/u.test(row))
       expect(runY, "selected running row renders").toBeGreaterThan(0)
       const runRow = rows[runY]!

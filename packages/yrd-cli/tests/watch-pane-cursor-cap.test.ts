@@ -27,9 +27,9 @@ import { QueueWatchFrame } from "../src/watch-pane.tsx"
 // row the capped pane hid.
 describe("QueueWatchFrame fill-timeline cursor", () => {
   function pendingAheadOfRunning() {
-    const pendingA = fixturePr("PRA", "submitted", "2026-07-13T11:10:00.000Z", "Pending alpha subject")
-    const pendingB = fixturePr("PRB", "submitted", "2026-07-13T11:20:00.000Z", "Pending beta subject")
-    const runningPr = fixturePr("PRR", "submitted", "2026-07-13T11:25:00.000Z", "Running gamma subject")
+    const pendingA = fixturePr("PR11", "submitted", "2026-07-13T11:10:00.000Z", "Pending alpha subject")
+    const pendingB = fixturePr("PR12", "submitted", "2026-07-13T11:20:00.000Z", "Pending beta subject")
+    const runningPr = fixturePr("PR19", "submitted", "2026-07-13T11:25:00.000Z", "Running gamma subject")
     const runningRun = fixtureRun("RR", [runningPr], "running", "2026-07-13T11:40:00.000Z", {
       steps: [fixtureStep("check", fixtureJob("JRR-check", "running"))],
     })
@@ -53,16 +53,16 @@ describe("QueueWatchFrame fill-timeline cursor", () => {
 
       // Fill renders every row — the two pending rows AND the running row the
       // pre-slice would have hidden. No `... N more` residue in fill mode.
-      expect(app.text, "first pending row renders").toContain("pr#A.1")
-      expect(app.text, "second pending row renders").toContain("pr#B.1")
-      expect(app.text, "the running row the cap hid now renders").toContain("pr#R.1")
+      expect(app.text, "first pending row renders").toContain("pr#11.1")
+      expect(app.text, "second pending row renders").toContain("pr#12.1")
+      expect(app.text, "the running row the cap hid now renders").toContain("pr#19.1")
       expect(app.text, "fill suppresses the pre-slice residue").not.toContain("... 1 more")
 
       // The mandated default cursor is the first RUNNING row. The detail title
       // is PR-scoped now (user directive 2026-07-21), so the running run's PR
       // identity heads the pane; the JOB body resolves the same run below,
       // without PR-list or log-accordion chrome.
-      expect(app.text.split("\n")[0], "detail resolves the running run").toContain("pr#R.1")
+      expect(app.text.split("\n")[0], "detail resolves the running run").toContain("pr#19.1")
       expect(app.text, "detail resolves the running run's job").toContain("JOB yrd#JRR-check")
       expect(app.text).not.toContain("RUN LOGS")
       expect(app.text).not.toMatch(/(?:^|\s)(?:▸|•)\s+PRS\b/gmu)

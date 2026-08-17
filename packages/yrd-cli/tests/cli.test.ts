@@ -7027,10 +7027,12 @@ describe("runYrd", () => {
     const second = rows.find((row) => row.includes("pr#2.1"))
     expect(first).toContain("main#1")
     expect(first).toContain("@cto")
-    // Adjacent members retain their own PR facts while Run-level cells become
-    // continuation placeholders (Round 8 presentation contract).
-    expect(second?.trimStart()).toMatch(/^-\s+-\s+-\s+pr#2\.1\b/u)
-    expect(second).not.toContain("main#1")
+    // An adjacent member of the SAME run renders its own Run-level cells, not
+    // continuation placeholders: Round 8 blanked TIME/STATUS/RUN here, which
+    // made a co-landed PR print exactly like one that was never attempted
+    // (@i/10-merge-queue/22925-watch-shows-every-pr, operator 2026-08-17).
+    expect(second?.trimStart()).not.toMatch(/^-\s+-\s+-\s+pr#2\.1\b/u)
+    expect(second).toContain("main#1")
     expect(second).toContain("@agent/3")
     expect(rendered).not.toContain("R1·PR1,PR2")
     expect(rendered).not.toContain("siblings none")
@@ -8315,8 +8317,9 @@ describe("runYrd", () => {
         ["◉", "pr#5.1"],
         ["−", "pr#7.1"],
         ["×", "pr#3.1"],
-        // PR2 is the adjacent continuation member of PR1's Run, so its
-        // Run-level status marker is intentionally suppressed.
+        // PR2 is the adjacent member of PR1's Run and carries the SAME marker,
+        // so anchoring on pr#1.1 asserts the run's glyph once (22925 gave
+        // co-landed members their own marker rather than suppressing it).
         ["✓", "pr#1.1"],
       ] as const) {
         const row = styled.lines.findIndex((row) => row.includes(anchor))

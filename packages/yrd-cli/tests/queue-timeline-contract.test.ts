@@ -354,7 +354,15 @@ describe("queue timeline 21106 contract", () => {
     expect(lead?.trim()).toMatch(
       /^17:10:00 ◉ checking\s+main#42 pr#42\.1 @hab\/super\/21135-herdr-keybindings\s+@agent\/3\s+36:00 20:00$/u,
     )
-    expect(partner?.trim()).toMatch(/^-\s+-\s+-\s+pr#43\.1 @si\/ui\/21119-split-pane\s+@agent\/5\s+34:00\s+-$/u)
+    // The convoy PARTNER renders its own TIME/STATUS/RUN, identical to its
+    // lead's because they share a run. It used to render `-  -  -` as a
+    // "continuation" of the lead; that made a landed member and a
+    // never-attempted PR print the same row of dashes
+    // (@i/10-merge-queue/22925-watch-shows-every-pr, operator 2026-08-17,
+    // superseding the Round 8 continuation-placeholder contract).
+    expect(partner?.trim()).toMatch(
+      /^17:10:00 ◉ checking\s+main#42 pr#43\.1 @si\/ui\/21119-split-pane\s+@agent\/5\s+34:00 20:00$/u,
+    )
     expect(revised?.trim()).toMatch(/^16:15:00 × rev\s+-\s+pr#5\.1\s+\S topic\/pr5\s+@agent\/2\s+1:15:00$/u)
     expect(rejected?.trim()).toMatch(
       /^16:42:00 × failed\s+main#5\s+pr#5\.1\s+\S topic\/pr5 \(err=typecheck-failed\)\s+@agent\/2\s+27:00 12:00$/u,
@@ -380,7 +388,7 @@ describe("queue timeline 21106 contract", () => {
     expect(running).not.toContain(" for ")
   })
 
-  it("keys continuation rows by base and run, and keeps the selected issue blue", async () => {
+  it("keys the RUN label by base as well as run id, and keeps the selected issue blue", async () => {
     const source = contractProjection()
     const lead = source.rows.find((row) => row.pr === "PR42")
     const partner = source.rows.find((row) => row.pr === "PR43")
@@ -952,8 +960,11 @@ describe("queue timeline 21106 contract", () => {
     expect(frame).toContain("╭─ RUNNER ")
     expect(frame).not.toContain("╭─ STATUS ")
 
-    for (const [index, row] of projection.rows.entries()) {
-      const continuation = index > 0 && row.run !== undefined && projection.rows[index - 1]?.run === row.run
+    // Unconditional: every row carries its OWN time, run, step and duration,
+    // convoy members included. These assertions used to be skipped for a row
+    // sharing its predecessor's run, which is precisely the blindness 22925
+    // removed \u2014 the skipped rows were the ones rendering as dashes.
+    for (const row of projection.rows) {
       const pr = formatQueuePrId(row.pr, row.revision)
       expect(parsePRSelector(pr), `rendered identity ${pr}`).toEqual({
         pr: row.pr,
@@ -961,18 +972,16 @@ describe("queue timeline 21106 contract", () => {
       })
       const run = row.run === undefined ? undefined : `${row.base}#${row.run.replace(/^R/u, "")}`
       const rendered = rows.find(
-        (candidate) =>
-          candidate.includes(pr) &&
-          (row.run === undefined || continuation || (run !== undefined && candidate.includes(run))),
+        (candidate) => candidate.includes(pr) && (run === undefined || candidate.includes(run)),
       )
       if (rendered === undefined) throw new Error(`missing rendered row for ${row.id}`)
-      if (row.timestamp !== null && !continuation) expect(rendered, row.id).toContain(wallClock(row.timestamp))
+      if (row.timestamp !== null) expect(rendered, row.id).toContain(wallClock(row.timestamp))
       if (row.submitter !== undefined) expect(rendered, row.id).toContain(row.submitter)
       if (row.issue !== undefined) expect(rendered, row.id).toContain(row.issue)
-      else if (row.step !== undefined && !continuation) expect(rendered, row.id).toContain(row.step)
+      else if (row.step !== undefined) expect(rendered, row.id).toContain(row.step)
       if (row.ageMs !== null) expect(rendered, row.id).toContain(duration(row.ageMs))
       // Run duration is a bare dimmed time now \u2014 no `\u25f7` glyph (item S).
-      if (row.totalMs !== null && !continuation) expect(rendered, row.id).toContain(duration(row.totalMs))
+      if (row.totalMs !== null) expect(rendered, row.id).toContain(duration(row.totalMs))
     }
   })
 

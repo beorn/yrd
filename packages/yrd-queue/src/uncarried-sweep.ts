@@ -68,6 +68,18 @@ export type SweepResult = Readonly<{
   /** Legacy refs whose local update reflog is no longer retained. They cannot
    * mint TTL findings, and the coverage gap is always surfaced to operators. */
   missingUpdateClocks: number
+  /**
+   * The population this sweep could actually judge: aged out, or examined.
+   * Refs excluded as carried or superseded were never the rail's to measure, so
+   * counting them would flatter the coverage; refs with no retained update
+   * clock could not be judged at all, so they are the gap, not the coverage.
+   *
+   * Reported BY the sweep rather than re-added by each consumer. The identical
+   * `outsideAgeBound + examined` sum was being recomputed at two call sites,
+   * which is one edit away from two surfaces disagreeing about what fraction of
+   * the fleet was measured (@i/10-merge-queue/22925-watch-shows-every-pr).
+   */
+  measurable: number
 }>
 
 /** Gitlink paths standing on the base, read from tree mode 160000. Never
@@ -312,5 +324,6 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
     outsideAgeBound,
     examined: survivors.length,
     missingUpdateClocks,
+    measurable: outsideAgeBound + survivors.length,
   }
 }
