@@ -1,4 +1,11 @@
 #!/usr/bin/env bun
+
+// This is the whole entry: no launcher runs before it, and nothing here checks
+// whether the source it was started from is current. A freshness guard placed
+// in this file could only ever be run BY the source under suspicion, which
+// passes itself; the check belongs at the journal every source writes to, and
+// is tracked upstream as @yrd/core/shim-source-guard.
+
 import { runYrdExecutable } from "../packages/yrd-cli/src/host.ts"
 import { superviseYrdWatch } from "../packages/yrd-cli/src/watch-hot-reload.ts"
 

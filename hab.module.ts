@@ -40,6 +40,25 @@ export const yrdQueueRunnerDeclarations = defineYrdQueueRunnerDeclarations([
   { serviceName: "yrd-runner-pm", repository: { name: "pm", path: "pm" }, queue: { base: "main" } },
 ] as const)
 
+/**
+ * The same declarations, in the form the CLI reads them.
+ *
+ * `yrd queue <repository>` is a composition spelling: Yrd resolves it only when
+ * a host says which repositories exist. Passing the declarations to the service
+ * makes this registry the ONE source — a launcher that carried its own copy is
+ * how a repository ends up declared on only one side of the contract. No root
+ * is declared, so the paths stay relative to the service's own directory,
+ * exactly as they are here.
+ */
+export const YRD_REPOSITORY_ALIASES = JSON.stringify({
+  schema: "yrd-repository-aliases/1",
+  repositories: yrdQueueRunnerDeclarations.map(({ repository, queue }) => ({
+    name: repository.name,
+    path: repository.path,
+    base: queue.base,
+  })),
+})
+
 export default {
   name: "yrd",
   services: Object.fromEntries(
@@ -47,7 +66,7 @@ export default {
       serviceName,
       {
         command: `tools/installed/yrd queue run ${repository.name}`,
-        env: { TRIBE_NAME: "@yrd" },
+        env: { TRIBE_NAME: "@yrd", YRD_REPOSITORY_ALIASES },
         health: { command: `tools/installed/yrd queue ${repository.name} --check --json` },
       },
     ]),

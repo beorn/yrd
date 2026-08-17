@@ -129,6 +129,20 @@ import { formatResidentLogLine, residentArtifactHome } from "./runner-timeline.t
 import { diagnostic } from "./output.tsx"
 import { createPrPublicationService } from "./pr-publication.ts"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
+import { repositoryGitDir } from "./repository-authority.ts"
+import {
+  composeYrdArgv,
+  planYrdComposition,
+  takeYrdComposition,
+  yrdCompositionQueueHelp,
+  type YrdCompositionPlan,
+} from "./repository-composition.ts"
+import {
+  YRD_SETTLEMENT_COMMAND,
+  prepareYrdSettlementLaunch,
+  runYrdSettlementWorker,
+  type YrdSettlementLaunch,
+} from "./settlement.ts"
 import {
   canonicalQueueId,
   isYrdRuntimeReloadRequest,
@@ -2306,9 +2320,15 @@ export type YrdHostOptions = Readonly<{
   workspaceLifecycle?: GitWorkspaceLifecycleHooks
   /** Opaque logical submitter supplied by an embedding host; standalone Yrd defaults to operator. */
   defaultSubmitter?: string
+  /**
+   * Runs once after the host is fully closed and before the executable
+   * boundary terminates. Detached background work belongs here rather than
+   * after the call: past this point the process may exit without returning.
+   */
+  afterCommand?: () => void
 }>
 
-export type YrdProcessHostOptions = Pick<YrdHostOptions, "workspaceLifecycle" | "defaultSubmitter">
+export type YrdProcessHostOptions = Pick<YrdHostOptions, "workspaceLifecycle" | "defaultSubmitter" | "afterCommand">
 
 type YrdRuntimeHostOptions = YrdHostOptions &
   Readonly<{
@@ -3026,6 +3046,7 @@ async function runYrdProcessHost(
       // logger. The executable boundary already owns termination; the writer's
       // process-exit hook flushes its buffer after host cleanup, preserving the
       // classified code instead of losing it to a hang or SIGILL.
+      options.afterCommand?.()
       if (processExit !== undefined && terminateAfterCleanup) globalThis.process.exit(processExit)
       log?.child("perf").debug?.("command stage breakdown", stageReport())
       log?.end()
@@ -3042,10 +3063,124 @@ export function runYrdProcess(
   return runYrdProcessHost(argv, io, false, options)
 }
 
-/** Real executable boundary: fully close the host, then terminate even when a
+export const YRD_DEFAULT_SUBMITTER_ENV = "YRD_DEFAULT_SUBMITTER" as const
+
+function helpOrVersionOnly(args: readonly string[]): boolean {
+  return args.some((arg) => arg === "--help" || arg === "-h" || arg === "--version" || arg === "-V")
+}
+
+function errorDetail(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/** Every declared repository, read in turn, each answer labelled with the
+ * repository it came from. A failure in one repository is reported and the
+ * remaining repositories are still read: a composition-wide question that
+ * stops at the first broken member answers about a subset without saying so. */
+async function runEveryComposedRepository(
+  argv: readonly string[],
+  io: YrdCliIO,
+  options: YrdProcessHostOptions,
+  plan: Extract<YrdCompositionPlan, { kind: "all-repositories" }>,
+): Promise<YrdCliExitCode> {
+  let exitCode: YrdCliExitCode = 0
+  for (const repository of plan.repositories) {
+    io.stdout(`=== ${repository.name} (${repository.path}) ===\n`)
+    try {
+      const composed = composeYrdArgv(argv, ["--repo", repository.path, ...plan.args])
+      const targetExit = await runYrdProcessHost(composed, io, false, options)
+      if (targetExit !== 0) exitCode = targetExit
+    } catch (error) {
+      io.stderr(`yrd: repository ${repository.name} failed: ${errorDetail(error)}\n`)
+      exitCode = 3
+    }
+  }
+  return exitCode
+}
+
+/**
+ * Real executable boundary: fully close the host, then terminate even when a
  * file-backed logger would otherwise retain or fault Bun resources. Kept out of
- * the package index; only bin/yrd.ts owns process lifetime. */
+ * the package index; only bin/yrd.ts owns process lifetime.
+ *
+ * This is also where an embedding host's composition is applied — named
+ * repositories, and background settlement of the terminal facts a command
+ * commits. Both are declared entirely in the environment, so a standalone Yrd
+ * reaches the same `runYrdProcessHost` call it always did.
+ *
+ * There is deliberately NO source-freshness guard here, and adding one is not
+ * an oversight to correct. A guard that lives inside the source it guards
+ * cannot refuse a stale copy of itself: the stale tree runs its own stale
+ * guard and passes. The sound replacement is receiver-side, at the journal
+ * every source writes to — tracked upstream as @yrd/core/shim-source-guard.
+ */
 export async function runYrdExecutable(): Promise<never> {
-  const exitCode = await runYrdProcessHost(globalThis.process.argv, defaultIO(), true, {})
+  const io = defaultIO()
+  const env = globalThis.process.env
+  const argv = globalThis.process.argv
+  const invocation = resolveInvocation(argv)
+
+  if (invocation.args[0] === YRD_SETTLEMENT_COMMAND) {
+    await runYrdSettlementWorker(env, { stderr: (text) => io.stderr(text) })
+    globalThis.process.exit(0)
+  }
+
+  const submitter = env[YRD_DEFAULT_SUBMITTER_ENV]?.trim()
+  const options: YrdProcessHostOptions =
+    submitter === undefined || submitter === "" ? {} : { defaultSubmitter: submitter }
+
+  let plan: YrdCompositionPlan | undefined
+  let settlement: YrdSettlementLaunch | undefined
+  try {
+    const composition = takeYrdComposition(env)
+    if (composition !== undefined) {
+      if (helpOrVersionOnly(invocation.args) && invocation.args.includes("queue")) {
+        io.stdout(yrdCompositionQueueHelp(invocation.name, composition))
+      }
+      plan = planYrdComposition(invocation.args, composition, { env })
+    }
+    const selected = plan?.kind === "repository" ? plan.repository : undefined
+    // Help and version describe the command rather than run it, and they are
+    // the one thing that must answer from anywhere — including outside any
+    // repository, where settlement has no state directory to resolve.
+    settlement = helpOrVersionOnly(invocation.args)
+      ? undefined
+      : prepareYrdSettlementLaunch({
+          env,
+          args: plan?.args ?? invocation.args,
+          execPath: globalThis.process.execPath,
+          scriptPath: argv[1] ?? import.meta.path,
+          cwd: globalThis.process.cwd(),
+          ...(selected === undefined ? {} : { operationRepository: selected.path, repositoryName: selected.name }),
+          gitDir: (chosen) =>
+            repositoryGitDir({
+              env,
+              cwd: globalThis.process.cwd(),
+              ...(chosen === undefined ? {} : { selected: chosen }),
+            }),
+          stderr: globalThis.process.stderr,
+          write: (text) => io.stderr(text),
+        })
+  } catch (error) {
+    await diagnostic(io, error, { json: false })
+    globalThis.process.exit(classifyFailure(error).exitCode)
+  }
+
+  settlement?.drainNotices()
+
+  if (plan?.kind === "all-repositories") {
+    const exitCode = await runEveryComposedRepository(argv, io, options, plan)
+    settlement?.spawn(false)
+    globalThis.process.exit(exitCode)
+  }
+
+  // The runner's worker starts BEFORE the runner does and lives beside it; a
+  // one-shot command's worker starts after the command committed its facts.
+  const resident = settlement?.resident === true
+  if (resident) settlement?.spawn(true)
+  const exitCode = await runYrdProcessHost(plan === undefined ? argv : composeYrdArgv(argv, plan.args), io, true, {
+    ...options,
+    ...(settlement === undefined || resident ? {} : { afterCommand: () => settlement?.spawn(false) }),
+  })
   globalThis.process.exit(exitCode)
 }
