@@ -18,6 +18,20 @@
  * matter of course — an unowned ref here is the normal end state, not a defect.
  * The sweep therefore reports an aggregate reclaimable population rather than
  * crying wolf per ref, and carries its denominators so a zero is believable.
+ *
+ * THE SOURCE-SIDE MIRROR GOT THE SAME BUG. `refs/heads/yrd/candidates/<sha>` was
+ * described above as symmetric with this namespace but never given an enumerator
+ * of its own, and reached 1,613 unswept refs before this fix. `sweepCandidateRefs`
+ * now reads both namespaces in one `for-each-ref` and judges them by the same
+ * rule — one retention window, one command, not two sweepers to keep in sync. A
+ * source-tip ref is claimed through `Candidate.sourceRewrites` (the submodule-
+ * wrapper case) or `Candidate.revs[].head` (the direct-recut case: `recutDirectPR`
+ * publishes the ref straight from a PR's certified head, with no per-source
+ * record). KNOWN GAP: refs `publishSourceCandidate` pushes into a SUBMODULE's own
+ * origin (`source.repo !== "."`, e.g. `vendor/silvery`) live in that submodule's
+ * remote, not this one's, and are out of reach of a sweep scoped to a single
+ * `repo` — this call would need to run once per submodule path to close that.
+ * Not measured, not fixed here; flag it before assuming this sweep is complete.
  */
 import type { DeepReadonly } from "@yrd/core"
 import { Queues, type QueueRecord, type QueuesState } from "./model.ts"
@@ -29,6 +43,19 @@ export const CANDIDATE_REF_NAMESPACE = "refs/yrd/candidates"
  * the Queue's publish invariant call it, so the two cannot drift apart. */
 export function candidateRefFor(sha: string): string {
   return `${CANDIDATE_REF_NAMESPACE}/${sha}`
+}
+
+/** The source-tip mirror of `CANDIDATE_REF_NAMESPACE` — a branch-shaped ref
+ * (`refs/heads/...`) because `git fetch <ref>` on the reader side
+ * (`sourceCandidateRefError`) needs a fetchable branch, not a bare namespace. */
+export const SOURCE_CANDIDATE_REF_NAMESPACE = "refs/heads/yrd/candidates"
+
+/** The one place the source-tip ref name is formed — the mirror of
+ * `candidateRefFor` for `recutDirectPR` and `publishSourceCandidate`. Both used to
+ * spell `refs/heads/yrd/candidates/${sha}` independently; one authored function
+ * is what makes the writer and this sweep unable to drift apart. */
+export function sourceCandidateRefFor(sha: string): string {
+  return `${SOURCE_CANDIDATE_REF_NAMESPACE}/${sha}`
 }
 
 /**
@@ -95,7 +122,9 @@ export type CandidateRefSweepOptions = Readonly<{
 type EnumeratedCandidateRef = Readonly<{ ref: string; sha: string; clockMs?: number }>
 
 /**
- * One `for-each-ref` for the whole namespace.
+ * One `for-each-ref` for both namespaces — the root Candidate refs and their
+ * source-tip mirror. `for-each-ref` accepts multiple patterns and unions the
+ * matches, so this stays one round-trip and one enumerator rather than two.
  *
  * `committerdate` is the composed commit's own clock rather than a reflog read:
  * the synthetic commit is created by the same prepare that publishes the ref, so
@@ -108,6 +137,7 @@ async function enumerateCandidateRefs(git: RefGit, repo: string): Promise<readon
     "for-each-ref",
     "--format=%(refname)%00%(objectname)%00%(committerdate:unix)",
     CANDIDATE_REF_NAMESPACE,
+    SOURCE_CANDIDATE_REF_NAMESPACE,
   ])
   return listing
     .split("\n")
@@ -136,8 +166,16 @@ function recordIsTerminal(record: DeepReadonly<QueueRecord>): boolean {
   return record.failure !== undefined || record.canceledAt !== undefined || record.passedAt !== undefined
 }
 
-/** Every SHA and ref a live Run still names, so the sweep can never propose
- * deleting evidence something in flight still points at. */
+/**
+ * Every SHA and ref a live Run still names, so the sweep can never propose
+ * deleting evidence something in flight still points at.
+ *
+ * A live Candidate can hold ownership four ways: its own root ref/sha
+ * (`candidate.ref`/`candidate.sha`), a source-tip ref per rewritten submodule
+ * (`sourceRewrites[]`), and — for a direct PR recut that never went through a
+ * submodule wrapper — the revision head itself (`revs[].head`), which is exactly
+ * the sha `recutDirectPR` published the source-tip ref under.
+ */
 function liveCandidateOwners(
   queues: DeepReadonly<QueuesState>,
 ): Readonly<{ liveShas: ReadonlySet<string>; liveRefs: ReadonlySet<string> }> {
@@ -148,12 +186,18 @@ function liveCandidateOwners(
     const candidate = queues.candidates[record.candidateId]
     if (candidate?.sha !== undefined) liveShas.add(candidate.sha)
     if (candidate?.ref !== undefined) liveRefs.add(candidate.ref)
+    for (const rev of candidate?.revs ?? []) liveShas.add(rev.head)
+    for (const rewrite of candidate?.sourceRewrites ?? []) {
+      liveShas.add(rewrite.newTipSha)
+      liveRefs.add(rewrite.candidateRef)
+    }
   }
   return { liveShas, liveRefs }
 }
 
 /**
- * Judge the whole `refs/yrd/candidates` namespace against the journal.
+ * Judge `refs/yrd/candidates` and its source-tip mirror `refs/heads/yrd/candidates`
+ * against the journal, together.
  *
  * Read-only by construction — it proposes, and `yrd queue candidate-refs
  * --prune` disposes. Deletion eligibility requires POSITIVE proof: a journaled
@@ -171,12 +215,21 @@ export async function sweepCandidateRefs(
   const { liveShas, liveRefs } = liveCandidateOwners(options.queues)
 
   // Both keys, because the ~2000 legacy refs are `C<n>`-named while everything
-  // published after 22332 is SHA-named. One index answers for both eras.
+  // published after 22332 is SHA-named. One index answers for both eras, and for
+  // both namespaces: a source-tip ref is claimed via `sourceRewrites[]` or, for a
+  // direct recut with no submodule wrapper, via `revs[].head` (see
+  // `liveCandidateOwners`) — claimed by ANY candidate, terminal or not, same as
+  // the root ref/sha keys below.
   const byRef = new Map<string, string>()
   const bySha = new Map<string, string>()
   for (const candidate of Object.values(options.queues.candidates)) {
     if (candidate.ref !== undefined) byRef.set(candidate.ref, candidate.id)
     if (candidate.sha !== undefined) bySha.set(candidate.sha, candidate.id)
+    for (const rev of candidate.revs) bySha.set(rev.head, candidate.id)
+    for (const rewrite of candidate.sourceRewrites ?? []) {
+      byRef.set(rewrite.candidateRef, candidate.id)
+      bySha.set(rewrite.newTipSha, candidate.id)
+    }
   }
 
   const findings: CandidateRefFinding[] = []

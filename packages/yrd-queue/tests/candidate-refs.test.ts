@@ -1,5 +1,6 @@
 /**
- * The root Candidate ref namespace: naming, and the retention sweep.
+ * The root Candidate ref namespace and its source-tip mirror: naming, and the
+ * one retention sweep that judges both.
  *
  * The sweep is judged against a FAKE `for-each-ref`, because the classification
  * is the part that decides whether evidence gets deleted and it must be readable
@@ -10,12 +11,16 @@ import { describe, expect, it } from "vitest"
 import {
   CANDIDATE_REF_NAMESPACE,
   CANDIDATE_REF_RETENTION_MS,
+  SOURCE_CANDIDATE_REF_NAMESPACE,
   candidateRefFor,
+  sourceCandidateRefFor,
   Queues,
   pruneCandidateRefs,
   sweepCandidateRefs,
   type CandidateRefSweepResult,
+  type CandidateRev,
   type QueuesState,
+  type SourceRewrite,
 } from "@yrd/queue"
 import { projectionLookupFromEntries } from "../src/projection-index.ts"
 import type { RefGit } from "../src/uncarried-facts.ts"
@@ -24,13 +29,37 @@ const DAY_MS = 24 * 60 * 60 * 1000
 const NOW_MS = Date.UTC(2026, 7, 14, 12, 0, 0)
 const sha = (seed: string) => seed.repeat(40).slice(0, 40)
 
+/** A `SourceRewrite` fixture. Only `newTipSha` and `candidateRef` are load-bearing
+ * for the sweep; the rest exist to satisfy the type the way a real compose would. */
+function sourceRewriteFixture(
+  newTipSha: string,
+  candidateRef: string = sourceCandidateRefFor(newTipSha),
+): SourceRewrite {
+  return {
+    repo: "vendor/silvery",
+    branch: "candidates/fixture",
+    oldBaseSha: sha("e"),
+    oldTipSha: sha("f"),
+    newBaseSha: sha("e"),
+    newTipSha,
+    candidateRef,
+    patchId: sha("1"),
+    rangeDiff: "=",
+    payload: ["src/fixture.ts"],
+  }
+}
+
 /** A `for-each-ref` that answers from a fixture table. Anything else is a fault:
  * a sweep that quietly reads something this test did not describe is exactly the
  * bug the denominators exist to catch. */
 function fakeGit(rows: readonly Readonly<{ ref: string; sha: string; ageMs?: number }>[]): RefGit {
   return {
     async run(_repo, args) {
-      if (args[0] !== "for-each-ref" || args[2] !== CANDIDATE_REF_NAMESPACE) {
+      if (
+        args[0] !== "for-each-ref" ||
+        args[2] !== CANDIDATE_REF_NAMESPACE ||
+        args[3] !== SOURCE_CANDIDATE_REF_NAMESPACE
+      ) {
         throw new Error(`unexpected git read in this fixture: ${args.join(" ")}`)
       }
       return rows
@@ -54,7 +83,13 @@ function fakeGit(rows: readonly Readonly<{ ref: string; sha: string; ageMs?: num
  * invisible rather than terminal.
  */
 function queuesWith(
-  candidates: readonly Readonly<{ id: string; sha: string; ref?: string }>[],
+  candidates: readonly Readonly<{
+    id: string
+    sha: string
+    ref?: string
+    revs?: readonly CandidateRev[]
+    sourceRewrites?: readonly SourceRewrite[]
+  }>[],
   runs: readonly Readonly<{ id: string; candidateId: string; terminal: boolean }>[],
 ): QueuesState {
   const base = Queues.empty({ batchSize: 1 })
@@ -67,9 +102,10 @@ function queuesWith(
           id: candidate.id,
           queueId: "main",
           baseSha: sha("0"),
-          revs: [],
+          revs: candidate.revs ?? [],
           sha: candidate.sha,
           ref: candidate.ref ?? candidateRefFor(candidate.sha),
+          ...(candidate.sourceRewrites === undefined ? {} : { sourceRewrites: candidate.sourceRewrites }),
           mergeability: "mergeable" as const,
           createdAt: new Date(NOW_MS).toISOString(),
         },
@@ -198,7 +234,10 @@ describe("candidate refs", () => {
     const legacyRef = `${CANDIDATE_REF_NAMESPACE}/C9`
     const result = await sweepCandidateRefs(fakeGit([{ ref: legacyRef, sha: legacy, ageMs: 30 * DAY_MS }]), {
       repo: "/repo",
-      queues: queuesWith([{ id: "C9", sha: legacy, ref: legacyRef }], [{ id: "R9", candidateId: "C9", terminal: true }]),
+      queues: queuesWith(
+        [{ id: "C9", sha: legacy, ref: legacyRef }],
+        [{ id: "R9", candidateId: "C9", terminal: true }],
+      ),
       nowMs: NOW_MS,
     })
 
@@ -232,6 +271,203 @@ describe("candidate refs", () => {
       reclaimable: 0,
       unclaimed: 0,
       noClock: 0,
+    })
+  })
+
+  describe("source-tip mirror (refs/heads/yrd/candidates)", () => {
+    it("names a source-tip ref in the branch-shaped namespace", () => {
+      expect(sourceCandidateRefFor(sha("a"))).toBe(`${SOURCE_CANDIDATE_REF_NAMESPACE}/${sha("a")}`)
+      expect(SOURCE_CANDIDATE_REF_NAMESPACE).toBe("refs/heads/yrd/candidates")
+    })
+
+    it("retains a source-tip ref a live Candidate's sourceRewrites still names, however old it is", async () => {
+      const tip = sha("11")
+      const ref = sourceCandidateRefFor(tip)
+      const queues = queuesWith(
+        [{ id: "C1", sha: sha("10"), sourceRewrites: [sourceRewriteFixture(tip, ref)] }],
+        [{ id: "R1", candidateId: "C1", terminal: false }],
+      )
+      expectRunsAreVisible(queues, 1)
+
+      const result = await sweepCandidateRefs(fakeGit([{ ref, sha: tip, ageMs: 400 * DAY_MS }]), {
+        repo: "/repo",
+        queues,
+        nowMs: NOW_MS,
+      })
+
+      expect(result.live).toBe(1)
+      expect(result.reclaimable).toBe(0)
+      expect(result.findings).toEqual([])
+      expectBucketsSumToScanned(result)
+    })
+
+    it("reclaims a source-tip ref once its owning Candidate is terminal and past the window", async () => {
+      const tip = sha("12")
+      const ref = sourceCandidateRefFor(tip)
+      const queues = queuesWith(
+        [{ id: "C2", sha: sha("13"), sourceRewrites: [sourceRewriteFixture(tip, ref)] }],
+        [{ id: "R2", candidateId: "C2", terminal: true }],
+      )
+      expectRunsAreVisible(queues, 1)
+
+      const result = await sweepCandidateRefs(fakeGit([{ ref, sha: tip, ageMs: 8 * DAY_MS }]), {
+        repo: "/repo",
+        queues,
+        nowMs: NOW_MS,
+      })
+
+      expect(result.reclaimable).toBe(1)
+      expect(result.findings).toEqual([
+        expect.objectContaining({ ref, sha: tip, disposition: "reclaimable", candidateId: "C2" }),
+      ])
+      expectBucketsSumToScanned(result)
+    })
+
+    it("retains a terminal source-tip ref inside the window", async () => {
+      const tip = sha("14")
+      const ref = sourceCandidateRefFor(tip)
+      const queues = queuesWith(
+        [{ id: "C3", sha: sha("15"), sourceRewrites: [sourceRewriteFixture(tip, ref)] }],
+        [{ id: "R3", candidateId: "C3", terminal: true }],
+      )
+
+      const result = await sweepCandidateRefs(fakeGit([{ ref, sha: tip, ageMs: 6 * DAY_MS }]), {
+        repo: "/repo",
+        queues,
+        nowMs: NOW_MS,
+      })
+
+      expect(result.withinRetention).toBe(1)
+      expect(result.reclaimable).toBe(0)
+      expectBucketsSumToScanned(result)
+    })
+
+    it("retains a direct-recut source-tip ref through revs[].head, with no sourceRewrites record", async () => {
+      // recutDirectPR publishes this ref straight from a PR's certified head — no
+      // per-source record exists for it, only the Candidate's own composed revs.
+      const head = sha("16")
+      const ref = sourceCandidateRefFor(head)
+      const queues = queuesWith(
+        [{ id: "C4", sha: sha("17"), revs: [{ pr: "PR1", n: 1, head }] }],
+        [{ id: "R4", candidateId: "C4", terminal: false }],
+      )
+      expectRunsAreVisible(queues, 1)
+
+      const result = await sweepCandidateRefs(fakeGit([{ ref, sha: head, ageMs: 400 * DAY_MS }]), {
+        repo: "/repo",
+        queues,
+        nowMs: NOW_MS,
+      })
+
+      expect(result.live).toBe(1)
+      expect(result.reclaimable).toBe(0)
+      expectBucketsSumToScanned(result)
+    })
+
+    it("reclaims a direct-recut source-tip ref once terminal and past the window", async () => {
+      const head = sha("18")
+      const ref = sourceCandidateRefFor(head)
+      const queues = queuesWith(
+        [{ id: "C5", sha: sha("19"), revs: [{ pr: "PR2", n: 1, head }] }],
+        [{ id: "R5", candidateId: "C5", terminal: true }],
+      )
+
+      const result = await sweepCandidateRefs(fakeGit([{ ref, sha: head, ageMs: 8 * DAY_MS }]), {
+        repo: "/repo",
+        queues,
+        nowMs: NOW_MS,
+      })
+
+      expect(result.reclaimable).toBe(1)
+      expect(result.findings).toEqual([
+        expect.objectContaining({ ref, sha: head, disposition: "reclaimable", candidateId: "C5" }),
+      ])
+      expectBucketsSumToScanned(result)
+    })
+
+    it("reports an unclaimed source-tip ref and never calls it reclaimable", async () => {
+      const orphan = sha("1a")
+      const ref = sourceCandidateRefFor(orphan)
+      const result = await sweepCandidateRefs(fakeGit([{ ref, sha: orphan, ageMs: 900 * DAY_MS }]), {
+        repo: "/repo",
+        queues: queuesWith([], []),
+        nowMs: NOW_MS,
+      })
+
+      expect(result.unclaimed).toBe(1)
+      expect(result.reclaimable).toBe(0)
+      expect(result.findings).toEqual([expect.objectContaining({ ref, disposition: "unclaimed" })])
+      expectBucketsSumToScanned(result)
+    })
+
+    it("scans both namespaces in one pass and keeps their dispositions independent", async () => {
+      // One `for-each-ref` call, two namespaces, each ref judged on its own
+      // Candidate — a regression guard for the combined enumerator.
+      const rootTip = sha("1b")
+      const sourceTip = sha("1c")
+      const rootRef = candidateRefFor(rootTip)
+      const sourceRef = sourceCandidateRefFor(sourceTip)
+      const queues = queuesWith(
+        [
+          { id: "C6", sha: rootTip },
+          { id: "C7", sha: sha("1d"), sourceRewrites: [sourceRewriteFixture(sourceTip, sourceRef)] },
+        ],
+        [
+          { id: "R6", candidateId: "C6", terminal: true },
+          { id: "R7", candidateId: "C7", terminal: false },
+        ],
+      )
+
+      const result = await sweepCandidateRefs(
+        fakeGit([
+          { ref: rootRef, sha: rootTip, ageMs: 8 * DAY_MS },
+          { ref: sourceRef, sha: sourceTip, ageMs: 8 * DAY_MS },
+        ]),
+        { repo: "/repo", queues, nowMs: NOW_MS },
+      )
+
+      expect(result.scanned).toBe(2)
+      expect(result.reclaimable).toBe(1)
+      expect(result.live).toBe(1)
+      expect(result.findings).toEqual([
+        expect.objectContaining({ ref: rootRef, disposition: "reclaimable", candidateId: "C6" }),
+      ])
+      expectBucketsSumToScanned(result)
+    })
+
+    it("prunes a reclaimable source-tip ref the same way as a root ref", async () => {
+      const tip = sha("1e")
+      const ref = sourceCandidateRefFor(tip)
+      const findings = [
+        { ref, sha: tip, disposition: "reclaimable" as const, candidateId: "C8", message: "past the window" },
+      ]
+      const refs = new Map([[ref, tip]])
+      const deletes: string[] = []
+      const git: RefGit = {
+        async run() {
+          throw new Error("prune must only use optional reads")
+        },
+        async optional(_repo, args) {
+          if (args[0] === "rev-parse") {
+            const key = (args[2] ?? "").replace(/\^\{commit\}$/u, "")
+            return refs.get(key)
+          }
+          if (args[0] === "update-ref" && args[1] === "-d") {
+            const [, , key, expected] = args
+            if (key === undefined || refs.get(key) !== expected) return undefined
+            refs.delete(key)
+            deletes.push(key)
+            return ""
+          }
+          throw new Error(`unexpected git call: ${args.join(" ")}`)
+        },
+      }
+
+      const result = await pruneCandidateRefs(git, { repo: "/repo", findings })
+
+      expect(result.deleted).toEqual([ref])
+      expect(deletes).toEqual([ref])
+      expect(refs.has(ref)).toBe(false)
     })
   })
 

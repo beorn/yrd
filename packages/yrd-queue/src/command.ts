@@ -40,7 +40,7 @@ import {
   QueueSubmoduleResolutionEvidenceSchema,
   SourceRewriteSchema,
 } from "./model.ts"
-import { candidateRefFor } from "./candidate-refs.ts"
+import { candidateRefFor, sourceCandidateRefFor } from "./candidate-refs.ts"
 import { componentMainScratchCleanupFailure } from "./component-main-outcome.ts"
 import {
   describeScratchReap,
@@ -2158,7 +2158,7 @@ async function sourceOnlyCarrierComposition(
     }
     sources.push({
       repo: path,
-      branch: sourceCandidateRef(authoredPin),
+      branch: sourceCandidateRefFor(authoredPin),
       baseSha: basePin,
       tipSha: authoredPin,
       payload,
@@ -2648,7 +2648,7 @@ async function recutDirectPR(
         })
       }
     }
-    const ref = sourceCandidateRef(headSha)
+    const ref = sourceCandidateRefFor(headSha)
     const pinned = await git.run(
       repo,
       ["update-ref", "--create-reflog", ref, headSha, "0".repeat(headSha.length)],
@@ -4556,7 +4556,7 @@ async function publishSourceCandidate(
   repoPath: string,
   tipSha: string,
 ): Promise<Readonly<{ status: "passed"; output: string }> | CandidateFailure> {
-  const candidateRef = sourceCandidateRef(tipSha)
+  const candidateRef = sourceCandidateRefFor(tipSha)
   const pinned = await git.run(
     sourceRepo,
     ["update-ref", "--create-reflog", candidateRef, tipSha, "0".repeat(tipSha.length)],
@@ -5305,10 +5305,6 @@ function symmetricDifference(left: readonly string[], right: readonly string[]):
   const leftSet = new Set(left)
   const rightSet = new Set(right)
   return [...left.filter((path) => !rightSet.has(path)), ...right.filter((path) => !leftSet.has(path))].toSorted()
-}
-
-function sourceCandidateRef(newTipSha: string): string {
-  return `refs/heads/yrd/candidates/${newTipSha}`
 }
 
 async function authoredGitlinkPaths(
