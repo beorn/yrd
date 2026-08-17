@@ -7,6 +7,7 @@ import {
   PRIdSchema,
   PRRecutCertificateSchema,
   PRRecutProofSchema,
+  type PRDeliveryState,
   type PRTerminalAssociation,
   baseIdentity,
   checkRequest,
@@ -485,20 +486,9 @@ export type QueueTerminalAssociations = Readonly<{
 }>
 
 export type QueueAuthorityState = Readonly<{
-  statuses: Readonly<
-    Record<
-      string,
-      | "pushed"
-      | "submitted"
-      | "ready"
-      | "needs-author"
-      | "rejected"
-      | "withdrawn"
-      | "integrated"
-      | "already-landed"
-      | "canceled"
-    >
-  >
+  // Same nine values as PRDeliveryState (@yrd/bay); imported rather than
+  // re-spelled so the two authorities cannot drift apart silently.
+  statuses: Readonly<Record<string, PRDeliveryState>>
   current: Readonly<Record<string, QueueAuthorityToken>>
   submits: Readonly<Record<string, QueueAuthorityToken>>
   checks: Readonly<Record<string, QueueAuthorityToken>>
