@@ -26,7 +26,7 @@ The **yard** — hence the name — is the **queue runner** that builds and inte
 
 ## Superprojects
 
-A Git superproject is built on plain Git submodules — which in theory lets you treat a set of repos as one big virtual monorepo. In practice the tooling was missing. Yrd ships it — `git super` takes all the pain out:
+A Git superproject is built on plain Git submodules — which in theory lets you treat a set of repos as one big virtual monorepo. In practice the tooling was missing. Yrd ships it — [`git super`](https://github.com/beorn/git-super) takes all the pain out:
 
 - **Super PRs** group one feature's branches across repos.
 - **Super worktrees** check out the whole product, every submodule at its exact commit.
@@ -42,15 +42,15 @@ A submodule with `branch = <name>` in `.gitmodules` is **tracked**: as the upstr
 ## The model — five objects, one pipeline
 
 ```text
-issue -> bay -> pr -> queue -> merged
+issue -> workspace -> pr -> queue -> merged
           ^      ^
           +-- contest (competing implementations; winner promotes to a PR)
 ```
 
 - **issue** — what you deliver. It lives in your tracker; yrd stores only the
   reference. The tracker holds the pen; yrd owns the lens.
-- **bay** — where you work: an isolated Git workspace reached through the
-  `yrd bay` subtree. Bay lifecycle is not a standalone product surface.
+- **workspace** — where you work: an isolated Git workspace reached through the
+  `yrd bay` subtree. Workspace lifecycle is not a standalone product surface.
 - **pr** — the submitted change: a branch@head with numbered revisions. Review
   happens upstream; a yrd PR is the queue's unit.
 - **queue** — one per base branch. It verifies and merges PRs serially and can
@@ -63,8 +63,8 @@ inside PRs and the log, not top-level objects to manage.
 
 yrd is gh-shaped, not gh-scoped: its noun and aspect-verb grammar makes `gh`
 muscle memory transfer, while its scope is deliberately one slice of the forge:
-delivery. It composes reusable `git-super` mechanics with the merge queue while
-Hab owns bay lifecycle. Two deliberate absences define the boundary: `yrd pr
+delivery. It composes reusable [`git-super`](https://github.com/beorn/git-super) mechanics with the merge queue while
+Hab owns workspace lifecycle. Two deliberate absences define the boundary: `yrd pr
 merge` never merges because the queue is the only merger, and yrd never creates
 or edits issues because the tracker remains authoritative.
 
@@ -86,7 +86,7 @@ repository:
 - a selected contest result can drift before it is promoted
 
 Yrd gives every unit of work an explicit place and state. Active work is in a
-bay. Work offered for integration is a PR. Checks, reviews, merges, deployments,
+workspace. Work offered for integration is a PR. Checks, reviews, merges, deployments,
 logs, and artifacts belong to a queue run. Competing implementations belong to
 a contest whose winner is an immutable Git commit.
 
@@ -94,16 +94,16 @@ That replaces ambiguous `wip-preserved-*` branches with inspectable state:
 
 | Unmanaged state           | Yrd state                                        |
 | ------------------------- | ------------------------------------------------ |
-| dirty worktree            | active bay, not submit-ready                     |
+| dirty worktree            | active worktree, not submit-ready                |
 | ahead branch              | pushed, submitted, or ready PR                   |
 | branch needing repair     | draft PR plus `bay open --pr <PR>`               |
 | external CI still running | waiting queue step with URL and token            |
 | author-owned failure      | needs-author PR with typed receipt               |
 | unattributed rejection    | rejected PR with evidence                        |
-| completed work            | integrated or already-landed PR and closable bay |
+| completed work            | integrated or already-landed PR and closable worktree |
 
 Yrd does not invent commits or silently discard work. It prevents ambiguous WIP
-by making the normal workflow create named bays and durable PRs from the start.
+by making the normal workflow create named workspaces and durable PRs from the start.
 
 ## Prior art
 
@@ -142,7 +142,7 @@ repository-independent and never creates Yrd state.
 
 Every command accepts one global repository selector. `--repo <path>` (or
 `YRD_REPO`) selects the Git repository, durable Yrd state, and operation root.
-Selecting a linked worktree preserves its current-bay and current-branch
+Selecting a linked worktree preserves its current-workspace and current-branch
 behavior while config and state still resolve through the shared repository
 authority. The CLI value overrides the environment value, which overrides
 discovery from the caller's directory. Relative values resolve against that one
@@ -168,11 +168,11 @@ $ yrd pr ready PR1
 $ yrd pr checks PR1 --follow
 ```
 
-`bay open` creates a persistent Bay and returns. `bay run` owns the scoped
+`bay open` creates a persistent workspace and returns. `bay run` owns the scoped
 foreground lifecycle: provision, run the exact child argv (or `$SHELL` by
 default), checkpoint, push, and close. `--keep` leaves a successful run open.
-A failed or interrupted child preserves the Bay as an orphan for diagnosis.
-Use `yrd in` for a guest process in an already-open Bay.
+A failed or interrupted child preserves the workspace as an orphan for diagnosis.
+Use `yrd in` for a guest process in an already-open workspace.
 
 Plain PR submit first runs the configured checks in the submitting working tree,
 then records the authoritative check request and returns. The resident Queue
@@ -193,8 +193,8 @@ For a review-gated repository, `pr ready` records the authoritative check
 request after review approves the current revision:
 
 ```console
-$ yrd pr create issue/another-fix --correlation tribe-request:review-42
-$ yrd pr review PR2 --approve --by @cto --ref verdict-42
+$ yrd pr create issue/another-fix --correlation team-request:review-42
+$ yrd pr review PR2 --approve --by @alice --ref verdict-42
 $ yrd pr ready PR2
 $ yrd pr checks PR2 --follow
 ```
@@ -204,7 +204,7 @@ or Queue work is started until `pr ready` (ordinary reviewed work)
 or `pr recut --queue` (authored-root carriers). `pr create` does not push a Git
 branch; callers push first, then create the draft from that exact resolvable
 commit. `issue ensure` is the issue-first composition of those Git-side facts:
-it creates or reuses one clean issue-owned Bay and one tracked draft PR.
+it creates or reuses one clean issue-owned workspace and one tracked draft PR.
 `bay open` and `bay run` otherwise create or reuse `task/<issue-slug>`, but
 never create or recut a PR implicitly. `bay run` and explicit `bay close` push
 recoverable checkpoints. Review and comment facts pin the current revision and
@@ -231,7 +231,7 @@ bun yrd --help
 bun yrd
 bun yrd pr runs PR1
 
-# Open a persistent Bay, enter it, then close it explicitly:
+# Open a persistent workspace, enter it, then close it explicitly:
 yrd bay open --bay example
 cd "$(yrd bay path example)"
 yrd bay close example
@@ -242,69 +242,69 @@ yrd bay run @tracker/fix-release -- vi README.md
 # Continue an existing delivery branch without implicitly recutting its PR:
 yrd bay run --pr task/fix-release -- vi README.md
 
-# One guest in the owner's existing Bay; from inside that Bay, omit the selector:
+# One guest in the owner's existing workspace; from inside that workspace, omit the selector:
 yrd in fix-release -- make test
 yrd in
 
 # Ensure the durable Git-side workspace and tracked draft without launching a process:
 yrd issue ensure @tracker/fix-release
 
-# Run $SHELL in a scoped scratch Bay:
+# Run $SHELL in a scoped scratch workspace:
 yrd sh --bay scratch
 ```
 
-Installed binaries are `yrd` and `git-yrd`. Bay commands live under `yrd bay`.
+Installed binaries are `yrd` and `git-yrd`. Workspace commands live under `yrd bay`.
 
 On a clean child exit, `bay run` commits root-worktree changes as
-`wip: <issue-or-bay>`, pushes the same task branch, and removes the Bay before
-returning. `bay open` instead leaves the Bay active until `bay close`. Neither
+`wip: <issue-or-bay>`, pushes the same task branch, and removes the workspace before
+returning. `bay open` instead leaves the workspace active until `bay close`. Neither
 path creates a PR or Queue record; use `pr create` explicitly, or `--pr
 <selector>` to continue an existing PR's branch without recutting it. A
 non-zero or abnormal `bay run` child leaves the workspace open and records a
 durable `orphan` fact visible through `yrd bay list --json`. Dirty submodules
 are never guessed into a publication: checkpointing fails loudly and preserves
-the Bay.
+the workspace.
 
 A provision failure that never records a workspace path ends immediately as
 `closed-degenerate`: there is no workspace to deprovision, and the branch name
 is reusable. `yrd admin bay prune` is dry-run by default; `--apply` closes only
-the `PRUNE` set. Its JSON conservation report puts every examined Bay in
+the `PRUNE` set. Its JSON conservation report puts every examined workspace in
 exactly one of `outcomes.pruned`, `outcomes.kept`, or `outcomes.paged` and
-counts the same population in `histogram`. An apply that examines Bays but
+counts the same population in `histogram`. An apply that examines workspaces but
 prunes none exits non-zero, as does any report with missing-evidence pages.
 
 `bay in` (also spelled root `yrd in`) attaches a guest process without opening,
-checkpointing, closing, or otherwise taking ownership of the Bay lifecycle.
+checkpointing, closing, or otherwise taking ownership of the workspace lifecycle.
 `bay open` takes no command; `bay run` and `bay in` default to `$SHELL`.
 Top-level `yrd run` acts on queue-run records, while `yrd sh` selects `$SHELL`.
 `in` defaults to `$SHELL`; any child command is opaque argv and must follow
-`--`. Guests receive no Hab or Tribe identity from Yrd. Guests never close the
+`--`. Guests receive no Hab or Tent identity from Yrd. Guests never close the
 owner; the inverse remains strict too—owner close reaps every guest still
-holding the Bay.
+holding the workspace.
 
 An open config is explicit and deterministic. A positional config is always an
 issue reference; `--issue` is its named alias and the two cannot be combined.
-Use `--bay` for an issue-less friendly Bay name and `--pr` only to continue an
+Use `--bay` for an issue-less friendly workspace name and `--pr` only to continue an
 existing PR branch. Resolution has three product nouns:
 
 | Noun  | Resolution order                                          |
 | ----- | --------------------------------------------------------- |
 | issue | `--issue`, then the positional config                     |
 | PR    | `--pr`, then the issue's live PR, then a generated branch |
-| Bay   | `--bay`, then the positional config, then the PR          |
+| workspace | `--bay`, then the positional config, then the PR      |
 
 ## Execution records
 
 | Concept            | Meaning                                                             |
 | ------------------ | ------------------------------------------------------------------- |
 | **Issue**          | Unit of intent from km, GitHub, another tracker, or a direct caller |
-| **Work Bay**       | Named isolated Git worktree for one implementation attempt          |
+| **Workspace**      | Named isolated Git worktree for one implementation attempt          |
 | **PR**             | Local pull request containing one immutable submitted revision      |
 | **Queue**          | Ordered integration process attached to a base branch               |
 | **Step**           | Typed queue transition such as check, review, merge, or deploy      |
 | **Job**            | Durable executable work; retries are attempts on the same Job       |
-| **Contest**        | Multiple bays implementing the same issue for real selection        |
-| **Attempt**        | One competitor's bay, Git pin, metrics, and evaluation evidence     |
+| **Contest**        | Multiple worktrees implementing the same issue for real selection   |
+| **Attempt**        | One competitor's worktree, Git pin, metrics, and evaluation evidence |
 | **Evaluation run** | One evaluator Job against an immutable attempt pin                  |
 | **Base branch**    | Branch a queue merges into, such as `main` or `release/2.0`         |
 
@@ -320,10 +320,10 @@ branch directly.
 ## Command Model
 
 Commands that accept `[selector...]` accept zero, one, or many selectors.
-Inside a bay, zero selectors means the current bay. Outside a bay, zero
+Inside a workspace, zero selectors means the current workspace. Outside a workspace, zero
 selectors means all eligible work for that operation.
 
-Selectors resolve PR ids, bay ids, bay names, source branches, and—where the
+Selectors resolve PR ids, workspace ids, workspace names, source branches, and—where the
 command acts on a queue—base branches.
 
 State-oriented public verbs accept `--json` and return an invoked-command
@@ -381,7 +381,7 @@ yrd watch                   thin alias for yrd queue list --watch
 yrd prime                   delivery briefing plus current context
 ```
 
-### Bay Operations
+### Workspace Operations
 
 ```text
 yrd bay list [--closed | --all] [--json]
@@ -399,10 +399,10 @@ yrd bay submit [selector...] [--base <branch>]
 yrd bay close [selector...] [--withdraw] [--json]
 ```
 
-`yrd bay list` shows open and in-progress Bays by default. Use `--closed` for
+`yrd bay list` shows open and in-progress workspaces by default. Use `--closed` for
 terminal history or `--all` for both. List status uses the shared lifecycle
 projection: `open` (blue), `working`, `done`, or `fail`; JSON preserves the
-persisted Bay value in `nativeStatus`.
+persisted workspace value in `nativeStatus`.
 
 Queue-run records remain a separate object:
 
@@ -417,24 +417,24 @@ callers use the PR-native required-check surface below.
 | Command   | Input                                        | Output and state                                                                                                                                                      |
 | --------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `list`    | None                                         | Lists `BAY STATUS ISSUE BY BASE BRANCH`, including durable failure and orphan facts                                                                                   |
-| `open`    | Issue, `--issue`, `--pr`, or `--bay`         | Provisions a persistent Bay and returns; never runs a command or creates a PR                                                                                         |
+| `open`    | Issue, `--issue`, `--pr`, or `--bay`         | Provisions a persistent workspace and returns; never runs a command or creates a PR                                                                                   |
 | `run`     | Opener configuration plus exact argv         | Owns the scoped bracket, checkpoints, and closes; `--keep` preserves a clean success                                                                                  |
-| `in`      | Bay selector; optional exact argv after `--` | Attaches a PID-addressed lifecycle guest; never owns configuration or closure                                                                                         |
-| `path`    | One Bay ID, name, or branch selector         | Prints the exact absolute path of one active Bay; read-only and never refreshes it                                                                                    |
-| `refresh` | Zero or more bays                            | Re-reads Git head, base, dirty, path, and workspace status                                                                                                            |
-| `submit`  | Bays, PRs, or source branches                | Creates or advances PRs to `submitted`; never executes Queue work                                                                                                     |
-| `close`   | Zero or more bays                            | Reaps and verifies processes holding each Bay, then checkpoints and deprovisions it; survivor PIDs fail loudly. `--withdraw` explicitly cancels an associated live PR |
+| `in`      | Workspace selector; optional exact argv after `--` | Attaches a PID-addressed lifecycle guest; never owns configuration or closure                                                                                   |
+| `path`    | One workspace ID, name, or branch selector   | Prints the exact absolute path of one active workspace; read-only and never refreshes it                                                                              |
+| `refresh` | Zero or more workspaces                      | Re-reads Git head, base, dirty, path, and workspace status                                                                                                            |
+| `submit`  | Workspaces, PRs, or source branches          | Creates or advances PRs to `submitted`; never executes Queue work                                                                                                     |
+| `close`   | Zero or more workspaces                      | Reaps and verifies processes holding each workspace, then checkpoints and deprovisions it; survivor PIDs fail loudly. `--withdraw` explicitly cancels an associated live PR |
 
 #### Process launch boundary
 
-Yrd owns Git-side delivery: issue resolution, Bays, draft PR identity, recuts, and
+Yrd owns Git-side delivery: issue resolution, workspaces, draft PR identity, recuts, and
 serialized landing. Agent selection, launch, supervision, and retry belong to the
 launcher. A launcher can compose `hab run` with `yrd issue ensure` and the
 ordinary PR/Queue verbs without putting agent policy in Yrd or `.yrd.yml`.
 
 Submodule repositories are ready when `bay open` returns and before a `bay run`
 child starts. Yrd
-recursively materializes the recorded gitlinks while keeping each Bay's refs,
+recursively materializes the recorded gitlinks while keeping each workspace's refs,
 config, and working tree isolated. For every initial clone whose exact commit
 already exists in the source repository, Git borrows that matching local object
 store with `--reference`; only a genuinely new pin falls back to the configured
@@ -443,7 +443,7 @@ remote. Yrd records that fallback boundary in repository-local Git config as
 `submodule.alternateErrorStrategy=info`. There is no Yrd-specific cache knob.
 
 The Queue uses the same materializer for warm candidates and landing scratch
-worktrees. This makes Bay startup and repeated checks faster, avoids redundant
+worktrees. This makes workspace startup and repeated checks faster, avoids redundant
 network transfer and private pack copies, and still checks out the exact
 candidate gitlinks. Fresh standalone clones without a local source store fall
 back normally. Exact-SHA reachability proofs intentionally remain backed by
@@ -451,14 +451,14 @@ fresh remote stores, so local borrowing cannot turn an unpushed pin into a
 passing delivery proof.
 
 `bay path` resolves through the same canonical ID/name/branch selector as the
-other Bay operations. It refuses unknown, ambiguous, inactive, or pathless
-Bays. Plain output is the absolute path plus one newline; JSON is the stable
+other workspace operations. It refuses unknown, ambiguous, inactive, or pathless
+workspaces. Plain output is the absolute path plus one newline; JSON is the stable
 `{"bay":"B1","command":"bay.path","path":"/absolute/path"}` projection.
 
 `--issue` resolves and stores an opaque tracker-neutral reference such as
 `km:@yrd/core/42` or `github:beorn/yrd#42`. Yrd preserves that link but does not
 import tracker lifecycle or fleet policy. The explicit child argv runs in the
-Bay; Yrd does not assign, lease, or resume workers.
+workspace; Yrd does not assign, lease, or resume workers.
 
 A submitted PR also carries a `--title` (its subject) and a `--description`
 (its body). When either flag is omitted, `pr submit` seeds it from the head
@@ -488,7 +488,7 @@ worktree:
 git push -u origin fix/release
 yrd pr create fix/release --base release/2.0
 yrd sh --pr fix/release
-yrd pr ready fix/release --correlation tribe-request:req-42
+yrd pr ready fix/release --correlation team-request:req-42
 ```
 
 Both submission surfaces accept `--correlation <namespace:id>`. The namespace
@@ -545,13 +545,13 @@ diagnostics, base-versus-carrier classification, and artifact paths.
 
 A push to the managed receiver at `refs/for/<base>/<issue>` is the submit act:
 the receiver refuses an inadmissible change before accepting the ref, then one
-Bay transaction records the pushed revision, submission, and check request.
+workspace transaction records the pushed revision, submission, and check request.
 Ordinary `refs/heads/*` pushes remain draft intake.
 
-Submission has two deliberately different head questions. An active Bay asks
+Submission has two deliberately different head questions. An active workspace asks
 which commit is checked out in its managed workspace after refresh, because
 that workspace is the authored source being submitted. A direct branch or a PR
-without an active Bay first asks whether `origin` advertises that branch. If it
+without an active workspace first asks whether `origin` advertises that branch. If it
 does, Yrd fetches that exact branch and records its live tip; if it does not,
 the branch is still local authored work. Failure to establish either remote
 fact is typed and never falls back to a possibly stale ref. A repository with
@@ -587,23 +587,23 @@ immediately. Direct `pr create` / `pr submit` tracking is opt-in; the flag
 introduces no project-wide default.
 
 `pr checkout` is immutable inspection: it provisions the recorded revision
-head in detached HEAD and asserts the resulting Bay head before reporting
+head in detached HEAD and asserts the resulting workspace head before reporting
 success. The PR author's live branch may remain checked out elsewhere. Use
 `bay open --pr <selector>` instead when continuing authored branch work that
 needs refresh or checkpoint operations.
 
 `bay open --pr` also starts from the PR's exact recorded revision. If another
 worktree owns the authored branch, Yrd materializes that revision in detached
-HEAD while retaining the Bay's declared target branch and source head. Refresh
+HEAD while retaining the workspace's declared target branch and source head. Refresh
 and checkpoint operations accept only descendants of that source, and
 checkpoint pushes still target the PR branch. The operator never needs an
 internal `--from` flag.
 
-If provisioning fails before a workspace path exists, the durable Bay record
+If provisioning fails before a workspace path exists, the durable workspace record
 remains explicitly reapable: `yrd bay close --force <bay>` has no path-owned
 process tree to certify, and it atomically creates or verifies a preservation
 ref for any recorded head before closing. This is the terminal recovery for a
-pathless Bay; creating an extra anonymous Bay is not required.
+pathless workspace; creating an extra anonymous workspace is not required.
 
 `pr recut --ref <candidate>` is certification, not replay. The CLI resolves the
 ref once, passes only that immutable SHA to Queue, and records it directly as
@@ -812,7 +812,7 @@ as guidance for that human. Nothing should execute it unattended.
 The composition commit must be published before the root carrier is submitted;
 otherwise the Queue cannot prove the gitlink object is remotely reachable.
 
-#### Running an Ordinary Bay
+#### Running an Ordinary Workspace
 
 The caller owns assignment policy. A human or another application composes the
 workflow explicitly from Yrd's delivery operations:
@@ -825,7 +825,7 @@ yrd pr create task/42 --issue github:beorn/yrd#42
 yrd pr ready task/42
 ```
 
-The optional Contest extension creates one bay per competitor and delegates
+The optional Contest extension creates one workspace per competitor and delegates
 execution to a runner port installed by its embedding host. Yrd ships no
 default competitor launcher and does not interpret a competitor's opaque
 configuration. Assignment and process policy remain outside Yrd.
@@ -1007,7 +1007,7 @@ no provider, model, process, or retry policy. The stock host installs no
 Contest runner; a host that exposes `contest open` must inject its runner and
 evaluator definitions explicitly.
 
-Each competitor receives the same issue snapshot and base commit in its own bay.
+Each competitor receives the same issue snapshot and base commit in its own workspace.
 Yrd records wall time, token counts, reported USD cost, stdout/stderr,
 artifacts, the write-once attempt ref, and evaluator results. Missing metrics
 remain missing; Yrd does not guess cost.
@@ -1015,7 +1015,7 @@ remain missing; Yrd does not guess cost.
 The issue list/view lens is read-only and joins delivery facts to tracker
 references; issue creation and editing remain in the tracker. `issue ensure`
 is the sole mutating issue subcommand: it idempotently ensures one clean
-issue-owned Bay and one `track: true` draft PR. It does not assign a worker,
+issue-owned workspace and one `track: true` draft PR. It does not assign a worker,
 choose a seat, launch a process, submit the PR, or execute Queue work; launchers
 compose those responsibilities outside this Git-side verb.
 
@@ -1168,9 +1168,9 @@ queue slot and arrives while the author is still at the terminal:
 
 ```yaml
 guards:
-  - bead-hygiene:
-      run: bun tools/lint-bead-hygiene.ts --base "$YRD_BASE_SHA" --candidate "$YRD_CANDIDATE_SHA"
-      paths: ["@*/**/*.md"]
+  - doc-hygiene:
+      run: bun tools/lint-doc-hygiene.ts --base "$YRD_BASE_SHA" --candidate "$YRD_CANDIDATE_SHA"
+      paths: ["docs/**/*.md"]
 ```
 
 Every guard is given `YRD_REPO`, `YRD_BASE_SHA`, `YRD_CANDIDATE_SHA` and
@@ -1194,10 +1194,11 @@ landing gate. Run them on demand with `yrd guard [name...]`.
 The command belongs to the repository, so Yrd stays agnostic about what is
 being guarded — it owns only when a guard runs, what it is told, and how a
 refusal surfaces. When the tool lives outside the repository being guarded
-(hh keeps `tools/lint-bead-hygiene.ts` in the code repo while beads are
-authored in the state repo), point `run` at it by absolute path or through a
-wrapper on `PATH`; the guard's cwd is always `YRD_REPO`, so the candidate it
-must read and the tool that reads it need not share a checkout.
+(a monorepo might keep its lint tooling in the code repo while the tracked
+work items it checks live in a separate state repo), point `run` at it by
+absolute path or through a wrapper on `PATH`; the guard's cwd is always
+`YRD_REPO`, so the candidate it must read and the tool that reads it need not
+share a checkout.
 
 `yrd admin init` writes that exact one-liner and the managed pre-submit hook. It
 refuses to overwrite an existing repository config.
@@ -1218,7 +1219,7 @@ isolation child otherwise co-retain and co-evict with their Queue-owned Jobs.
 Exact selectors and `queue.history()` materialize older runs from journal-owned
 entity slices; `yrd log --all` uses that lossless path, while default status
 remains bounded. Bare `log --all` discovers bases from that history too, so a
-fully retired base is not hidden merely because no live Bay or Queue names it.
+fully retired base is not hidden merely because no live workspace or Queue names it.
 
 Object-form checks may declare `classification: base` when their evidence is
 about the resolved base rather than the submitted carrier; all other steps
@@ -1277,14 +1278,14 @@ branch's tracked config is the single command authority; submitted revisions
 cannot replace it.
 
 Local pre-merge checks and held-out evaluators use detached scratch worktrees
-under the configured bays root. Before a built-in or inline check runs, Yrd
+under the configured worktrees root. Before a built-in or inline check runs, Yrd
 provisions that worktree from the Candidate's committed Bun, pnpm, or npm
 lockfile instead of borrowing mutable host packages. Frozen installs disable
 all lifecycle scripts, including a Candidate's `postinstall`. Owner-controlled
-Work Bays may opt into the repository's `postinstall` for first-party code
+workspaces may opt into the repository's `postinstall` for first-party code
 generation. A missing lockfile or failed install is a
 retryable `queue-environment-refused` with `candidate-provision-failed`
-evidence, never a false failed-check verdict. Work Bays use the same
+evidence, never a false failed-check verdict. Workspaces use the same
 provisioner. Local execution is not a security sandbox: candidate code still
 runs with the operator-configured process privileges; use a remote or isolated
 Process adapter for a stronger trust boundary.
@@ -1349,7 +1350,7 @@ event journal, receiver, artifacts, and configured plugins:
 ```bash
 yrd sh --bay release-fix --keep
 yrd pr create task/release-fix --base release/2.0
-yrd pr ready task/release-fix --correlation tribe-request:release-2.0
+yrd pr ready task/release-fix --correlation team-request:release-2.0
 yrd queue --base release/2.0
 ```
 
@@ -1385,7 +1386,7 @@ value, and Job requests. Landing and refusal rows are rebuildable query indexes.
 `journal_events` is the bounded append tail;
 `journal_history` keeps every covered frame as immutable, cursor-addressable
 rows. Startup restores the validated Core checkpoint and folds only the tail
-into Bay, PR, Queue, Job, and Contest state. Snapshot publication moves covered
+into workspace, PR, Queue, Job, and Contest state. Snapshot publication moves covered
 rows into history and binds the bounded checkpoint in one transaction, keeping
 older frames cursor-addressable without duplicating the full prefix inside the
 checkpoint. Transactionally coupled, rebuildable query views may share this same
@@ -1498,10 +1499,10 @@ documents Job states, leases, waiting work, retries, and backend idempotency.
 `prs.git` is a Git object/ref receiver, not the state store. Its pre-receive
 hook validates updates; its post-receive hook leaves an atomic receipt that is
 deduplicated with the PR intake event. The inbox exists only for crash recovery.
-The `bay` receiver is a push default only inside provisioned Work Bays. Host
+The `bay` receiver is a push default only inside provisioned workspaces. Host
 startup removes the legacy shared `remote.pushDefault=bay` setting if present,
 so plain `git push` in the primary worktree continues to use its normal remote.
-Because Yrd enables the `worktreeConfig` extension to scope those Bay push
+Because Yrd enables the `worktreeConfig` extension to scope those workspace push
 defaults, host startup also relocates any stray `core.bare=true` (and
 `core.worktree`) out of the shared config into the primary worktree's
 `config.worktree`, per git-worktree(1): once `worktreeConfig` is enabled a shared
@@ -1528,7 +1529,7 @@ The low-level packages remain usable by a single developer with no agent fleet.
 | `@yrd/process`     | Scope-owned subprocess execution, bounds, cancellation, evidence |
 | `@yrd/job`         | Durable executable lifecycle, leases, waiting work, recovery     |
 | `@yrd/issue`       | Issue references, snapshots, and source adapters                 |
-| `@yrd/bay`         | Work bays, PR intake, Git workspace, and receive hooks           |
+| `@yrd/bay`         | Worktrees, PR intake, Git workspace, and receive hooks           |
 | `@yrd/queue`       | Typed steps, merge proof, waiting jobs, batching, and status     |
 | `@yrd/contest`     | Competitors, evaluators, selection, metrics, exact promotion     |
 | `@yrd/cli`         | `yrd` and `git-yrd` command projections                          |
@@ -1548,9 +1549,9 @@ bun run build
 `bun yrd` always runs `./bin/yrd`, so it exercises the development version.
 `bun run build` emits one bundled CLI implementation plus the three tiny argv
 projection bins under `dist/`. The `git-yrd` package includes only that built
-distribution and public docs; local bays, tests, and repository work state are
+distribution and public docs; local workspaces, tests, and repository work state are
 excluded from its tarball.
-When Yrd is source-linked under the hh vendor workspace, use `bun check:hh`;
+When Yrd is source-linked as a submodule inside a larger monorepo, use `bun check:hh`;
 that explicit config supplies sibling source declarations without leaking them
 into standalone package resolution.
 The focused Vitest files under each package are executable contracts for the
