@@ -1654,28 +1654,37 @@ export async function createDefaultYrdCheckpointMigrationAttestation(
   })
 }
 
-function targetImplementationEntrypoint(
+export function targetImplementationEntrypoint(
   assemblyRoot: string,
   implementationRoot: string,
   candidateRoot: string,
+  baysRoot?: string,
 ): string {
   const implementationPath = relative(resolve(assemblyRoot), resolve(implementationRoot))
-  if (implementationPath === ".." || implementationPath.startsWith(`..${sep}`)) {
-    // Standalone consumers install Yrd outside the repository being admitted.
-    // That implementation is fixed across this Candidate; only its config is
-    // target-owned. Composed roots resolve Yrd inside the Candidate instead.
+  const outsideAssembly = implementationPath === ".." || implementationPath.startsWith(`..${sep}`)
+  const bayPath = baysRoot === undefined ? undefined : relative(resolve(baysRoot), resolve(implementationRoot))
+  const insideBays = bayPath !== undefined && bayPath !== ".." && !bayPath.startsWith(`..${sep}`)
+  if (outsideAssembly || insideBays) {
+    // Standalone consumers install Yrd outside the repository being admitted,
+    // and a resident runner executes Yrd from a bay INSIDE the repository's
+    // bays root — untracked, so no Candidate tree can contain it. Both are
+    // fixed implementations across this Candidate; only config is
+    // target-owned. Mapping a bay path into the Candidate composes a phantom
+    // path (2026-08-17: every resident substrate-pair refused with Module
+    // not found <warm-bay>/.bays/<runner-bay>/vendor/yrd/bin/yrd.ts).
+    // Composed roots resolve Yrd inside the Candidate instead.
     return join(implementationRoot, "bin", "yrd.ts")
   }
   return join(candidateRoot, implementationPath, "bin", "yrd.ts")
 }
 
 function targetCheckpointMigrationAttestor(
-  options: Pick<DefaultYrdRuntimeAppOptions, "repo" | "process" | "implementationRoot">,
+  options: Pick<DefaultYrdRuntimeAppOptions, "repo" | "process" | "implementationRoot" | "baysRoot">,
 ): NonNullable<GitCheckOptions["checkpointMigration"]> | undefined {
   const implementationRoot = options.implementationRoot
   if (implementationRoot === undefined) return undefined
   return async ({ path }) => {
-    const entrypoint = targetImplementationEntrypoint(options.repo, implementationRoot, path)
+    const entrypoint = targetImplementationEntrypoint(options.repo, implementationRoot, path, options.baysRoot)
     const result = await options.process.run({
       argv: [
         globalThis.process.execPath,

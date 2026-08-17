@@ -5413,3 +5413,37 @@ describe("pre-submit checkout isolation and timeout policy (22648)", () => {
     expect(() => resolveCheckoutTimeoutMs({ YRD_CHECKOUT_TIMEOUT_MS: "-5" })).toThrow(/YRD_CHECKOUT_TIMEOUT_MS/u)
   })
 })
+
+describe("targetImplementationEntrypoint", () => {
+  const repo = join(sep, "repo")
+  const baysRoot = join(repo, ".bays")
+  const candidate = join(sep, "elsewhere", "warm", "worktree")
+
+  it("resolves a composed implementation inside the Candidate tree", async () => {
+    const { targetImplementationEntrypoint } = await import("../src/host.ts")
+    expect(targetImplementationEntrypoint(repo, join(repo, "vendor", "yrd"), candidate, baysRoot)).toBe(
+      join(candidate, "vendor", "yrd", "bin", "yrd.ts"),
+    )
+  })
+
+  it("keeps a standalone implementation outside the repository fixed", async () => {
+    const { targetImplementationEntrypoint } = await import("../src/host.ts")
+    const standalone = join(sep, "opt", "yrd")
+    expect(targetImplementationEntrypoint(repo, standalone, candidate, baysRoot)).toBe(
+      join(standalone, "bin", "yrd.ts"),
+    )
+  })
+
+  it("keeps a bay-installed implementation fixed instead of composing a phantom Candidate path", async () => {
+    // 2026-08-17: the resident runner executed Yrd from its own bay under the
+    // repository's bays root. Mapping that root into the Candidate composed
+    // <warm-bay>/.bays/<runner-bay>/vendor/yrd/bin/yrd.ts — a path no
+    // Candidate tree can contain (bays are untracked) — and substrate-pair
+    // refused the derivation with Module not found on every such cycle.
+    const { targetImplementationEntrypoint } = await import("../src/host.ts")
+    const bayImplementation = join(baysRoot, "B65", "vendor", "yrd")
+    expect(targetImplementationEntrypoint(repo, bayImplementation, candidate, baysRoot)).toBe(
+      join(bayImplementation, "bin", "yrd.ts"),
+    )
+  })
+})
